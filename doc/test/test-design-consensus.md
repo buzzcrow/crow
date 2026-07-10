@@ -1,6 +1,6 @@
 # CrowKV - Test Design: Consensus Core
 
-Depends on: [`test-design.md`](test-design.md), [`design.md`](design.md) §3–5, [`design-leader-election.md`](design-leader-election.md), [`design-parallel-slots.md`](design-parallel-slots.md)
+Depends on: [`test-design.md`](test/test-design.md), [`design.md`](design.md) §3–5, [`design-leader-election.md`](design-leader-election.md), [`design-parallel-slots.md`](design-parallel-slots.md)
 Satisfies: [requirement.md §14.1](requirement.md#141-correctness-criteria-for-crowbench), [requirement.md §14.2](requirement.md#142-failure-scenarios-must-be-covered-in-test-designmd)
 
 Enumerates invariants, unit tests, and integration scenarios for the Phase 1 consensus core.
@@ -50,7 +50,7 @@ Enumerates invariants, unit tests, and integration scenarios for the Phase 1 con
 | `engine` | `compare_equal` | Identical ops on two engines | Empty diff |
 | `engine` | `compare_divergent` | One missed slot 3 | Reports mismatch |
 
-Note: `engine.compare_equal` / `compare_divergent` overlap with [`test-design-storage.md`](test-design-storage.md) §2. Owned by consensus (P1) for the in-memory engine; storage (P3) extends to ordered-file. Avoid duplication when implementing — share test fixtures.
+Note: `engine.compare_equal` / `compare_divergent` overlap with [`test-design-storage.md`](test/test-design-storage.md) §2. Owned by consensus (P1) for the in-memory engine; storage (P3) extends to ordered-file. Avoid duplication when implementing — share test fixtures.
 
 ## 3. Integration Scenarios
 

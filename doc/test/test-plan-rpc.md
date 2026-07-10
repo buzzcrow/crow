@@ -1,6 +1,6 @@
 # CrowKV - Test Plan: RPC and Client
 
-Depends on: [`test-plan.md`](test-plan.md), [`test-design-rpc.md`](test-design-rpc.md), [`plan-rpc.md`](plan-rpc.md)
+Depends on: [`test-plan.md`](test/test-plan.md), [`test-design-rpc.md`](test/test-design-rpc.md), [`plan-rpc.md`](plan/plan-rpc.md)
 Satisfies: [requirement.md §10](requirement.md#10-client-interaction)
 
 Execution plan for Phase 4 RPC tests.

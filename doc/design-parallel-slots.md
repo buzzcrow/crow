@@ -181,7 +181,7 @@ A "gap" is a slot N < max-chosen-slot for which the leader has no `Chosen` decis
 3. Manual: admin RPC.
 4. On leader change: the new leader runs a single Phase-1 round over the entire `[contiguous_chosen+1, max_chosen]` interval; this is one bulk repair, not many small ones.
 
-The repair task (a single async loop, see [`plan.md`](plan.md) §7) runs at a configurable cadence (default 50 ms tick) and respects a `max_concurrent_repairs` cap (default 4) so it does not contend with the hot path.
+The repair task (a single async loop, see [`plan.md`](plan/plan.md) §7) runs at a configurable cadence (default 50 ms tick) and respects a `max_concurrent_repairs` cap (default 4) so it does not contend with the hot path.
 
 ---
 

@@ -1,6 +1,6 @@
 # CrowKV - Test Design: Reconfiguration
 
-Depends on: [`test-design.md`](test-design.md), [`design-reconfiguration.md`](design-reconfiguration.md)
+Depends on: [`test-design.md`](test/test-design.md), [`design-reconfiguration.md`](design-reconfiguration.md)
 Satisfies: [requirement.md §9.1](requirement.md#91-reconfiguration), [requirement.md §9.2](requirement.md#92-rolling-upgrade)
 
 Invariants for membership change and rolling upgrade.

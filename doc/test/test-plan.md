@@ -1,6 +1,6 @@
 # CrowKV - Test Plan: Master Integration Schedule
 
-Depends on: [`plan.md`](plan.md), [`test-design.md`](test-design.md)
+Depends on: [`plan.md`](plan/plan.md), [`test-design.md`](test/test-design.md)
 Satisfies: [requirement.md §14 Testing Requirements](requirement.md#14-testing-requirements)
 
 This document maps test execution to plan milestones and defines regression suites. Deep dives per workstream live in sibling sub-topic docs (`test-plan-consensus.md`, `test-plan-wal.md`, `test-plan-storage.md`, `test-plan-rpc.md`, `test-plan-reconfig.md`).

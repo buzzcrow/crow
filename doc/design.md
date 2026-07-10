@@ -197,7 +197,7 @@ This is the hot path that the design optimizes. Multiple writes are in flight at
 
 Key properties:
 
-- **Slot assignment is the linearization point** ([requirement.md §6.1](requirement.md#61-write-guarantee)). The counter is owned by a single async task on the leader (serial assignment, no shared mutex); assignment happens before any I/O. See [`plan.md`](plan.md) §7 for the project-wide concurrency model.
+- **Slot assignment is the linearization point** ([requirement.md §6.1](requirement.md#61-write-guarantee)). The counter is owned by a single async task on the leader (serial assignment, no shared mutex); assignment happens before any I/O. See [`plan.md`](plan/plan.md) §7 for the project-wide concurrency model.
 - **Ack contract**: the leader ack to the client requires (a) leader's own WAL fsync completed and (b) a quorum of acceptors have responded `Accepted` after their fsync. Until both, the leader does not respond.
 - **Parallelism**: slots N, N+1, N+2 may be in any of `Proposed` / `Accepted` / `Chosen` / `Applied` independently. The leader does not wait for slot N to apply before assigning N+1.
 - **Backpressure**: if the in-flight window is full, the leader admits to a bounded queue and beyond that returns `Busy` ([requirement.md §7.3](requirement.md#73-parallel-slot-processing)). The leader never blocks indefinitely.

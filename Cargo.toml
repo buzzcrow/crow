@@ -17,7 +17,7 @@ repository = "https://github.com/buzzcrow/crowkv"
 tokio = { version = "1.40", default-features = false }
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 unused_must_use = "deny"
 
 [workspace.lints.clippy]

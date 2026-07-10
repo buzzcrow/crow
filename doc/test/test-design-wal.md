@@ -1,6 +1,6 @@
 # CrowKV - Test Design: WAL
 
-Depends on: [`test-design.md`](test-design.md), [`design-wal.md`](design-wal.md)
+Depends on: [`test-design.md`](test/test-design.md), [`design-wal.md`](design-wal.md)
 Satisfies: [requirement.md §8.1](requirement.md#81-wal-write-ahead-log), [requirement.md §8.2](requirement.md#82-acceptor)
 
 Invariants and test strategy for the write-ahead log.

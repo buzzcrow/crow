@@ -1,6 +1,6 @@
 # CrowKV - Plan: Reconfiguration and Snapshots
 
-Depends on: [`plan.md`](plan.md), [`design-reconfiguration.md`](design-reconfiguration.md), [`plan-rpc.md`](plan-rpc.md), [`plan-wal.md`](plan-wal.md), [`plan-storage.md`](plan-storage.md)
+Depends on: [`plan.md`](plan/plan.md), [`design-reconfiguration.md`](design-reconfiguration.md), [`plan-rpc.md`](plan/plan-rpc.md), [`plan-wal.md`](plan/plan-wal.md), [`plan-storage.md`](plan/plan-storage.md)
 Satisfies: [requirement.md §9.1](requirement.md#91-reconfiguration), [requirement.md §9.2](requirement.md#92-rolling-upgrade)
 
 Phase 5: joint consensus, snapshot install, rolling upgrade. Builds on the snapshot streaming protocol frozen in P4 M2 and the engine snapshot export/import from P3 M3.

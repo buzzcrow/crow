@@ -1,6 +1,6 @@
 # CrowKV - Plan: RPC and Client Implementation
 
-Depends on: [`plan.md`](plan.md), [`design.md`](design.md) §2, §7, [`plan-consensus.md`](plan-consensus.md), [`plan-wal.md`](plan-wal.md), [`plan-storage.md`](plan-storage.md)
+Depends on: [`plan.md`](plan/plan.md), [`design.md`](design.md) §2, §7, [`plan-consensus.md`](plan/plan-consensus.md), [`plan-wal.md`](plan/plan-wal.md), [`plan-storage.md`](plan/plan-storage.md)
 Satisfies: [requirement.md §10](requirement.md#10-client-interaction), [requirement.md §3 RPC framework assumption](requirement.md#3-dependencies-and-assumptions)
 
 Phase 4: gRPC wire protocol, node-to-node transport, client library. P4 replaces the in-process channels from P1's `test_harness` with a real network transport. P2 WAL and P3 storage are integrated here for the first real-restart tests.

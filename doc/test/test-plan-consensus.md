@@ -1,6 +1,6 @@
 # CrowKV - Test Plan: Consensus Core
 
-Depends on: [`test-plan.md`](test-plan.md), [`test-design-consensus.md`](test-design-consensus.md), [`plan-consensus.md`](plan-consensus.md)
+Depends on: [`test-plan.md`](test/test-plan.md), [`test-design-consensus.md`](test/test-design-consensus.md), [`plan-consensus.md`](plan/plan-consensus.md)
 Satisfies: [requirement.md §14.1](requirement.md#141-correctness-criteria-for-crowbench), [requirement.md §14.2](requirement.md#142-failure-scenarios-must-be-covered-in-test-designmd)
 
 Execution plan for Phase 1 consensus core tests. All tests run in-process via `test_harness`, no gRPC, no real timers.

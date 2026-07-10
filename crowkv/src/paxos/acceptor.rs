@@ -1,121 +1,147 @@
 //! Acceptor state machine for one consensus group.
 //!
-//! Implements P1 M1 of `doc/plan-consensus.md`. Holds per-slot promised and accepted
-//! state in memory; persistence is added in P2 (WAL). All public handlers are `async fn`
-//! per the project concurrency model (`doc/plan.md` §7), even when they have no `await`
-//! points yet, so the API surface is stable across phases.
+//! Implements P1 M1 of `doc/plan/plan-consensus.md`. Holds per-slot promised and accepted
+//! state in a lock-free `SlotList`; persistence is added in P2 (WAL).
 //!
-//! Invariants enforced here (cross-ref `doc/test-design-consensus.md` §1):
+//! Invariants enforced here (cross-ref `doc/test/test-design-consensus.md` §1):
 //! - **C2 — Ballot monotonic per slot.** `prepare`/`accept` reject any ballot strictly
 //!   lower than the slot's current promise; equal-ballot accepts are idempotent.
 
-use std::collections::BTreeMap;
+#![allow(unsafe_code)]
 
-use crate::kv::types::PxLogEntry;
-use crate::paxos::types::{PxBallot, PxSlot};
+use std::sync::atomic::Ordering;
 
-/// Reply to a Phase-1 `Prepare`.
+use crate::paxos::protocol::{PxAcceptReply, PxPrepareReply};
+use crate::paxos::slot_list::{SlotIndex, SlotList};
+use crate::paxos::slot_node::{
+    PxBallot,
+    PxLogEntry,
+    PxSlotNode,
+    get_or_prepare_slot,
+};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PrepareReply {
-    /// Promise accepted. If the acceptor previously accepted a value at this slot,
-    /// the proposer must adopt it (classic Paxos value-recovery rule).
-    Promised {
-        slot: PxSlot,
-        accepted: Option<PxLogEntry>,
-    },
-    /// Promise rejected because the slot already promised at a higher-or-equal ballot.
-    /// The proposer should retry with a strictly higher ballot.
-    Rejected {
-        slot: PxSlot,
-        current_promised: PxBallot,
-    },
+pub enum PrepareResult {
+    Promised { accepted: Option<PxLogEntry> },
+    Rejected(PxBallot),
 }
 
-/// Reply to a Phase-2 `Accept`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum AcceptReply {
-    /// Value accepted at the entry's `(slot, ballot)`.
-    Accepted { slot: PxSlot, ballot: PxBallot },
-    /// Rejected because the slot promised a higher ballot.
-    Rejected {
-        slot: PxSlot,
-        current_promised: PxBallot,
-    },
+pub enum AcceptResult {
+    Accepted { slot: SlotIndex, ballot: PxBallot },
+    Rejected(PxBallot),
 }
 
-#[derive(Default, Debug)]
-pub struct Acceptor {
-    /// Per-slot highest ballot promised. Persisted in P2.
-    promised: BTreeMap<PxSlot, PxBallot>,
-    /// Per-slot highest accepted (ballot, value). Persisted in P2.
-    accepted: BTreeMap<PxSlot, PxLogEntry>,
+#[derive(Default)]
+pub struct PxAcceptor {
+    log: SlotList<PxSlotNode>,
 }
 
-impl Acceptor {
+impl PxAcceptor {
+    pub fn accepted_at(&self, slot: SlotIndex) -> Option<PxLogEntry> {
+        self.log.get(slot)?.accepted_cloned()
+    }
+
+    #[allow(clippy::unused_async)]
+    pub async fn accept(&mut self, entry: PxLogEntry) -> PxAcceptReply {
+        let slot = entry.slot;
+        match self.inner_accept(entry) {
+            Some(AcceptResult::Accepted { slot: s, ballot: b }) => PxAcceptReply::Accepted {
+                slot: s,
+                ballot: b,
+            },
+            Some(AcceptResult::Rejected(current)) => PxAcceptReply::Rejected {
+                slot,
+                current_promised: current,
+            },
+            None => PxAcceptReply::Rejected {
+                slot,
+                current_promised: PxBallot::new(0, 0),
+            },
+        }
+    }
+
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Phase 1 of Paxos.
-    ///
-    /// Promises not to accept any future proposal with a ballot strictly less than
-    /// `ballot` at `slot`. If the promise is granted and a value was previously
-    /// accepted at `slot`, returns it so the proposer can re-propose it (Paxos
-    /// safety: no chosen value is ever overwritten).
-    //
-    // NOTE: `async fn` with no `await` points is intentional in P1 M1. Per
-    // `doc/plan.md` §7 (async-everywhere policy), the public Acceptor API surface
-    // must be `async` so P2 (WAL) can add awaits for fsync without breaking call
-    // sites. The lint is suppressed locally rather than globally so accidental
-    // unused-async elsewhere is still caught.
     #[allow(clippy::unused_async)]
-    pub async fn prepare(&mut self, slot: PxSlot, ballot: PxBallot) -> PrepareReply {
-        match self.promised.get(&slot).copied() {
-            Some(current) if ballot < current => PrepareReply::Rejected {
+    pub async fn prepare(&mut self, slot: SlotIndex, ballot: PxBallot) -> PxPrepareReply {
+        match self.inner_prepare(slot, ballot) {
+            Some(PrepareResult::Promised { accepted }) => PxPrepareReply::Promised { slot, accepted },
+            Some(PrepareResult::Rejected(current)) => PxPrepareReply::Rejected {
                 slot,
                 current_promised: current,
             },
-            _ => {
-                self.promised.insert(slot, ballot);
-                PrepareReply::Promised {
-                    slot,
-                    accepted: self.accepted.get(&slot).cloned(),
+            None => PxPrepareReply::Rejected {
+                slot,
+                current_promised: PxBallot::new(0, 0),
+            },
+        }
+    }
+
+    pub fn promised_at(&self, slot: SlotIndex) -> Option<PxBallot> {
+        self.log.get(slot)?.promised_cloned()
+    }
+
+    pub fn reclaim(&self) -> usize {
+        self.log.reclaim()
+    }
+
+    pub fn trim(&self, before_slot: SlotIndex) {
+        self.log.trim(before_slot);
+    }
+
+    pub fn trim_slot(&self) -> SlotIndex {
+        self.log.trim_slot()
+    }
+
+    // ---------- internals ----------
+
+    fn inner_prepare(&self, slot: SlotIndex, ballot: PxBallot) -> Option<PrepareResult> {
+        let node = get_or_prepare_slot(&self.log, slot)?;
+        loop {
+            let current_ptr = node.promised.load(Ordering::Acquire);
+            if !current_ptr.is_null() {
+                let current = unsafe { &*current_ptr };
+                if ballot < *current {
+                    return Some(PrepareResult::Rejected(*current));
                 }
             }
-        }
-    }
-
-    /// Phase 2 of Paxos.
-    ///
-    /// Accepts `entry` at `entry.slot, entry.ballot` iff the ballot is at least the
-    /// current per-slot promise. On accept, the slot's promised ballot is also
-    /// raised to the accept ballot (matching the standard Paxos formulation).
-    //
-    // NOTE: `async fn` with no `await` points is intentional. See `prepare` above.
-    #[allow(clippy::unused_async)]
-    pub async fn accept(&mut self, entry: PxLogEntry) -> AcceptReply {
-        let slot = entry.slot;
-        let ballot = entry.ballot;
-        if let Some(&current) = self.promised.get(&slot) {
-            if ballot < current {
-                return AcceptReply::Rejected {
-                    slot,
-                    current_promised: current,
-                };
+            match node.cas_promised(current_ptr, ballot) {
+                Ok(_) => {
+                    return Some(PrepareResult::Promised {
+                        accepted: node.accepted_cloned(),
+                    });
+                }
+                Err(_) => continue, // another writer raced, retry
             }
         }
-        self.promised.insert(slot, ballot);
-        self.accepted.insert(slot, entry);
-        AcceptReply::Accepted { slot, ballot }
     }
 
-    /// Read-only accessor used by tests and (later) by replay/repair logic.
-    pub fn accepted_at(&self, slot: PxSlot) -> Option<&PxLogEntry> {
-        self.accepted.get(&slot)
-    }
-
-    /// Read-only accessor used by tests and (later) by replay logic.
-    pub fn promised_at(&self, slot: PxSlot) -> Option<PxBallot> {
-        self.promised.get(&slot).copied()
+    fn inner_accept(&self, entry: PxLogEntry) -> Option<AcceptResult> {
+        let slot = entry.slot;
+        let ballot = entry.ballot;
+        let node = get_or_prepare_slot(&self.log, slot)?;
+        loop {
+            let promised_ptr = node.promised.load(Ordering::Acquire);
+            if !promised_ptr.is_null() {
+                let promised = unsafe { &*promised_ptr };
+                if ballot < *promised {
+                    return Some(AcceptResult::Rejected(*promised));
+                }
+            }
+            // Ensure promised is at least the accept ballot (Paxos formulation).
+            if ballot > node.promised_cloned().unwrap_or(ballot) {
+                match node.cas_promised(promised_ptr, ballot) {
+                    Ok(_) | Err(_) => {} // either way, continue to accepted CAS
+                }
+            }
+            let accepted_ptr = node.accepted.load(Ordering::Acquire);
+            match node.cas_accepted(accepted_ptr, entry.clone()) {
+                Ok(_) => return Some(AcceptResult::Accepted { slot, ballot }),
+                Err(_) => continue, // another writer raced, retry
+            }
+        }
     }
 }

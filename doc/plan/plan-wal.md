@@ -1,6 +1,6 @@
 # CrowKV - Plan: WAL Implementation
 
-Depends on: [`plan.md`](plan.md), [`design-wal.md`](design-wal.md), [`plan-consensus.md`](plan-consensus.md)
+Depends on: [`plan.md`](plan/plan.md), [`design-wal.md`](design-wal.md), [`plan-consensus.md`](plan/plan-consensus.md)
 Satisfies: [requirement.md §8.1](requirement.md#81-wal-write-ahead-log), [requirement.md §8.2](requirement.md#82-acceptor)
 
 Phase 2 implementation: multi-disk write-ahead log for acceptor persistence.

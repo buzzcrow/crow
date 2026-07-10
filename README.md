@@ -20,4 +20,4 @@ Dependency rule: `crowkv-server` and `crowkv-bench` depend on `crowkv`. Full des
 
 ## Documentation
 
-See [`doc/requirement.md`](doc/requirement.md) for product requirements, [`doc/design.md`](doc/design.md) for the system design, and [`doc/plan.md`](doc/plan.md) for the implementation phasing.
+See [`doc/requirement.md`](doc/requirement.md) for product requirements, [`doc/design.md`](doc/design.md) for the system design, and [`doc/plan/plan.md`](doc/plan/plan.md) for the implementation phasing.

@@ -1,6 +1,6 @@
 # CrowKV - Test Design: Storage Engine
 
-Depends on: [`test-design.md`](test-design.md), [`design-storage-engine.md`](design-storage-engine.md)
+Depends on: [`test-design.md`](test/test-design.md), [`design-storage-engine.md`](design-storage-engine.md)
 Satisfies: [requirement.md §8.3](requirement.md#83-learner-storage), [requirement.md §8.4](requirement.md#84-snapshot-and-install)
 
 Invariants for the engine trait and backends.

@@ -1,6 +1,6 @@
 # CrowKV - Test Plan: Storage Engine
 
-Depends on: [`test-plan.md`](test-plan.md), [`test-design-storage.md`](test-design-storage.md), [`plan-storage.md`](plan-storage.md)
+Depends on: [`test-plan.md`](test/test-plan.md), [`test-design-storage.md`](test/test-design-storage.md), [`plan-storage.md`](plan/plan-storage.md)
 Satisfies: [requirement.md §8.3](requirement.md#83-learner-storage)
 
 Execution plan for Phase 3 storage engine tests.

@@ -2,4 +2,4 @@
 
 pub mod types;
 
-pub use types::{PxGroupConfig, PxGroupMember};
+pub use types::{PxGroupConfig, PxGroupId, PxGroupMember, PxNodeId};

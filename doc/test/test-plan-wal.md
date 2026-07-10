@@ -1,6 +1,6 @@
 # CrowKV - Test Plan: WAL
 
-Depends on: [`test-plan.md`](test-plan.md), [`test-design-wal.md`](test-design-wal.md), [`plan-wal.md`](plan-wal.md)
+Depends on: [`test-plan.md`](test/test-plan.md), [`test-design-wal.md`](test/test-design-wal.md), [`plan-wal.md`](plan/plan-wal.md)
 Satisfies: [requirement.md §8.1](requirement.md#81-wal-write-ahead-log)
 
 Execution plan for Phase 2 WAL tests.

@@ -1,6 +1,6 @@
 # CrowKV - Plan: Consensus Core Implementation
 
-Depends on: [`plan.md`](plan.md), [`design.md`](design.md) §3–5, [`design-leader-election.md`](design-leader-election.md), [`design-parallel-slots.md`](design-parallel-slots.md), [`test-design-consensus.md`](test-design-consensus.md)
+Depends on: [`plan.md`](plan/plan.md), [`design.md`](design.md) §3–5, [`design-leader-election.md`](design-leader-election.md), [`design-parallel-slots.md`](design-parallel-slots.md), [`test-design-consensus.md`](test/test-design-consensus.md)
 Satisfies: [requirement.md §6.1](requirement.md#61-write-guarantee), [requirement.md §6.2](requirement.md#62-leader-read-fencing), [requirement.md §6.5](requirement.md#65-parallel-slot-linearizability-analysis), [requirement.md §7.2](requirement.md#72-leader-election-and-terms), [requirement.md §7.3](requirement.md#73-parallel-slot-processing)
 
 This document specifies Phase 1: in-memory consensus core with no persistence and no networking.
@@ -22,7 +22,7 @@ This document specifies Phase 1: in-memory consensus core with no persistence an
 - **Workspace bootstrap** (greenfield repo): cargo workspace at repo root, `crowkv` crate created. Edition `2021`, MSRV `1.75`. `rustfmt.toml` and `clippy.toml` minimal configs. No production dependencies in M1; dev-dep `tokio` with `macros, rt, test-util` for `start_paused = true`.
 - `PxTerm`, `PxBallot`, `PxSlot`, `PxLogEntry`, `PxGroupConfig`, `PxNodeId`
 - Acceptor in-memory state: `promised_ballot[slot]`, `accepted[slot] → (ballot, value)`
-- Acceptor handlers: `Prepare`, `Accept` (both `async fn`, per [`plan.md`](plan.md) §7)
+- Acceptor handlers: `Prepare`, `Accept` (both `async fn`, per [`plan.md`](plan/plan.md) §7)
 - Unit tests: prepare/accept basic Paxos rounds, ballot ordering, term fencing
 
 **Acceptance:** unit test shows a single-slot classic Paxos round succeeds and rejects stale ballots.

@@ -1,6 +1,6 @@
 # CrowKV - Test Design: RPC and Client
 
-Depends on: [`test-design.md`](test-design.md), [`design.md`](design.md) §2, §7, §10
+Depends on: [`test-design.md`](test/test-design.md), [`design.md`](design.md) §2, §7, §10
 Satisfies: [requirement.md §10.1](requirement.md#101-client-discovery), [requirement.md §10.2](requirement.md#102-retry-and-idempotency)
 
 Invariants for wire protocol and client behavior.

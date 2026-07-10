@@ -1,6 +1,6 @@
 # CrowKV - Test Plan: Reconfiguration
 
-Depends on: [`test-plan.md`](test-plan.md), [`test-design-reconfig.md`](test-design-reconfig.md), [`plan-reconfig.md`](plan-reconfig.md)
+Depends on: [`test-plan.md`](test/test-plan.md), [`test-design-reconfig.md`](test/test-design-reconfig.md), [`plan-reconfig.md`](plan/plan-reconfig.md)
 Satisfies: [requirement.md §9.1](requirement.md#91-reconfiguration), [requirement.md §9.2](requirement.md#92-rolling-upgrade)
 
 Execution plan for Phase 5 reconfiguration tests.
