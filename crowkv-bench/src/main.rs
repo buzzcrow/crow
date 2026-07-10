@@ -5,6 +5,10 @@
 //! `doc/test/test-design.md` §14.1 (crowbench architecture).
 
 fn main() {
-    eprintln!("crowkv-bench: not yet implemented (lands in P4)");
+    let _guards = crowkv::common::logging::init_file_logging("log", "crowkv-bench")
+        .expect("failed to initialize crowkv-bench logging");
+    tracing::warn!(
+        "crowkv-bench is not yet implemented; next step: implement P4 benchmark/load-test wiring"
+    );
     std::process::exit(1);
 }

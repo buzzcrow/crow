@@ -5,7 +5,7 @@ use std::ops::Deref;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
-pub type SlotIndex = u64;
+use crate::paxos::roles::SlotIndex;
 
 /// A chunked, reader-pinned concurrent sparse list.
 pub struct SlotList<T> {

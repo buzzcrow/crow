@@ -4,14 +4,14 @@
 //!
 //! Covers general-value tests and `PxSlotNode` integration scenarios.
 
+use crowkv::paxos::roles::{Ballot as PxBallot, LogEntry, LogEntryKind};
 use crowkv::paxos::slot_list::SlotList;
+use crowkv::paxos::slot_node::PxSlotNode;
 
 const SLOT_CHUNK_SIZE: usize = 1024;
-use crowkv::paxos::slot_node::{LogEntryKind, PxBallot, PxLogEntry, PxSlotNode};
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-
 // ---------- general value tests ----------
 
 #[test]
@@ -239,8 +239,8 @@ fn guard_ref_counts_chunk() {
 
 // ---------- slot_node integration tests ----------
 
-fn make_entry(slot: u64, ballot: PxBallot) -> PxLogEntry {
-    PxLogEntry {
+fn make_entry(slot: u64, ballot: PxBallot) -> LogEntry {
+    LogEntry {
         slot,
         ballot,
         term: ballot.round,

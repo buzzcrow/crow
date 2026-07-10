@@ -9,22 +9,21 @@
 
 #![allow(unsafe_code)]
 
+use crate::paxos::roles::{AcceptReply, Acceptor, Ballot, LogEntry, PrepareReply, SlotIndex};
+use crate::paxos::slot_list::SlotList;
+use crate::paxos::slot_node::{get_or_prepare_slot, PxSlotNode};
 use std::sync::atomic::Ordering;
-
-use crate::paxos::protocol::{PxAcceptReply, PxPrepareReply};
-use crate::paxos::slot_list::{SlotIndex, SlotList};
-use crate::paxos::slot_node::{get_or_prepare_slot, PxBallot, PxLogEntry, PxSlotNode};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PrepareResult {
-    Promised { accepted: Option<PxLogEntry> },
-    Rejected(PxBallot),
+    Promised { accepted: Option<LogEntry> },
+    Rejected(Ballot),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AcceptResult {
-    Accepted { slot: SlotIndex, ballot: PxBallot },
-    Rejected(PxBallot),
+    Accepted { slot: SlotIndex, ballot: Ballot },
+    Rejected(Ballot),
 }
 
 #[derive(Default)]
@@ -33,68 +32,13 @@ pub struct PxAcceptor {
 }
 
 impl PxAcceptor {
-    pub fn accepted_at(&self, slot: SlotIndex) -> Option<PxLogEntry> {
-        self.log.get(slot)?.accepted_cloned()
-    }
-
-    #[allow(clippy::unused_async)]
-    pub async fn accept(&mut self, entry: PxLogEntry) -> PxAcceptReply {
-        let slot = entry.slot;
-        match self.inner_accept(entry) {
-            Some(AcceptResult::Accepted { slot: s, ballot: b }) => {
-                PxAcceptReply::Accepted { slot: s, ballot: b }
-            }
-            Some(AcceptResult::Rejected(current)) => PxAcceptReply::Rejected {
-                slot,
-                current_promised: current,
-            },
-            None => PxAcceptReply::Rejected {
-                slot,
-                current_promised: PxBallot::new(0, 0),
-            },
-        }
-    }
-
     pub fn new() -> Self {
         Self::default()
     }
 
-    #[allow(clippy::unused_async)]
-    pub async fn prepare(&mut self, slot: SlotIndex, ballot: PxBallot) -> PxPrepareReply {
-        match self.inner_prepare(slot, ballot) {
-            Some(PrepareResult::Promised { accepted }) => {
-                PxPrepareReply::Promised { slot, accepted }
-            }
-            Some(PrepareResult::Rejected(current)) => PxPrepareReply::Rejected {
-                slot,
-                current_promised: current,
-            },
-            None => PxPrepareReply::Rejected {
-                slot,
-                current_promised: PxBallot::new(0, 0),
-            },
-        }
-    }
-
-    pub fn promised_at(&self, slot: SlotIndex) -> Option<PxBallot> {
-        self.log.get(slot)?.promised_cloned()
-    }
-
-    pub fn reclaim(&self) -> usize {
-        self.log.reclaim()
-    }
-
-    pub fn trim(&self, before_slot: SlotIndex) {
-        self.log.trim(before_slot);
-    }
-
-    pub fn trim_slot(&self) -> SlotIndex {
-        self.log.trim_slot()
-    }
-
     // ---------- internals ----------
 
-    fn inner_prepare(&self, slot: SlotIndex, ballot: PxBallot) -> Option<PrepareResult> {
+    fn inner_prepare(&self, slot: SlotIndex, ballot: Ballot) -> Option<PrepareResult> {
         let node = get_or_prepare_slot(&self.log, slot)?;
         loop {
             let current_ptr = node.promised.load(Ordering::Acquire);
@@ -115,7 +59,7 @@ impl PxAcceptor {
         }
     }
 
-    fn inner_accept(&self, entry: PxLogEntry) -> Option<AcceptResult> {
+    fn inner_accept(&self, entry: LogEntry) -> Option<AcceptResult> {
         let slot = entry.slot;
         let ballot = entry.ballot;
         let node = get_or_prepare_slot(&self.log, slot)?;
@@ -139,5 +83,54 @@ impl PxAcceptor {
                 Err(_) => continue, // another writer raced, retry
             }
         }
+    }
+}
+
+impl Acceptor for PxAcceptor {
+    #[allow(clippy::unused_async)]
+    async fn accept(&mut self, entry: LogEntry) -> AcceptReply {
+        let slot = entry.slot;
+        match self.inner_accept(entry) {
+            Some(AcceptResult::Accepted { slot: s, ballot: b }) => {
+                AcceptReply::Accepted { slot: s, ballot: b }
+            }
+            Some(AcceptResult::Rejected(current)) => AcceptReply::Rejected {
+                slot,
+                current_promised: current,
+            },
+            None => AcceptReply::Rejected {
+                slot,
+                current_promised: Ballot::new(0, 0),
+            },
+        }
+    }
+    #[allow(clippy::unused_async)]
+    async fn prepare(&mut self, slot: SlotIndex, ballot: Ballot) -> PrepareReply {
+        match self.inner_prepare(slot, ballot) {
+            Some(PrepareResult::Promised { accepted }) => PrepareReply::Promised { slot, accepted },
+            Some(PrepareResult::Rejected(current)) => PrepareReply::Rejected {
+                slot,
+                current_promised: current,
+            },
+            None => PrepareReply::Rejected {
+                slot,
+                current_promised: Ballot::new(0, 0),
+            },
+        }
+    }
+    fn accepted_at(&self, slot: SlotIndex) -> Option<LogEntry> {
+        self.log.get(slot)?.accepted_cloned()
+    }
+    fn promised_at(&self, slot: SlotIndex) -> Option<Ballot> {
+        self.log.get(slot)?.promised_cloned()
+    }
+    fn reclaim(&self) -> usize {
+        self.log.reclaim()
+    }
+    fn trim(&self, before_slot: SlotIndex) {
+        self.log.trim(before_slot);
+    }
+    fn trim_slot(&self) -> SlotIndex {
+        self.log.trim_slot()
     }
 }

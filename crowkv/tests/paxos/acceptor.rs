@@ -5,12 +5,13 @@
 mod testkit;
 
 use crowkv::paxos::acceptor::PxAcceptor;
-use crowkv::paxos::protocol::{PxAcceptReply, PxPrepareReply};
-use crowkv::paxos::slot_list::SlotIndex;
-use crowkv::paxos::slot_node::{LogEntryKind, PxBallot, PxLogEntry};
+use crowkv::paxos::roles::{
+    AcceptReply as PxAcceptReply, Acceptor, Ballot as PxBallot, LogEntry, LogEntryKind,
+    PrepareReply as PxPrepareReply, SlotIndex,
+};
 
-fn entry(slot: SlotIndex, ballot: PxBallot, payload: &[u8]) -> PxLogEntry {
-    PxLogEntry {
+fn entry(slot: SlotIndex, ballot: PxBallot, payload: &[u8]) -> LogEntry {
+    LogEntry {
         slot,
         ballot,
         term: ballot.round,

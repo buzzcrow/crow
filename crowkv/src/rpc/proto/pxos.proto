@@ -13,6 +13,8 @@ message PrepareRequest {
   uint64 slot    = 2;
   uint64 round   = 3;
   uint64 leader_id = 4;
+  uint64 request_id = 5;
+  uint64 request_create_ms = 6;
 }
 
 message AcceptedValue {
@@ -32,6 +34,8 @@ message PromiseResponse {
   bool   rejected = 6;
   uint64 rejected_round   = 7;
   uint64 rejected_leader_id = 8;
+  uint64 request_id = 9;
+  uint64 request_create_ms = 10;
 }
 
 message AcceptRequest {
@@ -41,6 +45,10 @@ message AcceptRequest {
   uint64 leader_id = 4;
   uint64 term    = 5;
   AcceptedValue value = 6;
+  uint64 request_id = 7;
+  uint64 request_create_ms = 8;
+  uint64 client_id = 9;
+  uint64 seq = 10;
 }
 
 message AcceptedResponse {
@@ -51,9 +59,11 @@ message AcceptedResponse {
   bool   rejected = 5;
   uint64 rejected_round   = 6;
   uint64 rejected_leader_id = 7;
+  uint64 request_id = 8;
+  uint64 request_create_ms = 9;
 }
 
-service PeerService {
+service PxService {
   rpc Prepare(PrepareRequest) returns (PromiseResponse);
   rpc Accept(AcceptRequest) returns (AcceptedResponse);
 }

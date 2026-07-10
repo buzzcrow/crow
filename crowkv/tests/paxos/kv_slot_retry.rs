@@ -1,0 +1,88 @@
+use crate::common::cluster::start_cluster;
+use crowkv::node::PxPaxosMode;
+use crowkv::rpc::{AcceptRequest, AcceptedValue, KvSetRequest};
+
+fn encode_put_payload(key: &[u8], value: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.push(1);
+    payload.push(0);
+    payload.extend_from_slice(&(key.len() as u32).to_le_bytes());
+    payload.extend_from_slice(key);
+    payload.extend_from_slice(&(value.len() as u32).to_le_bytes());
+    payload.extend_from_slice(value);
+    payload
+}
+
+#[tokio::test]
+async fn kv_put_retries_next_slot_when_slot_has_prior_accepted_value() {
+    let cluster = start_cluster(&[0, 1, 2], 0, PxPaxosMode::Classic, true).await;
+
+    let stale_payload = encode_put_payload(b"stale", b"value");
+    let follower = cluster.follower().expect("follower present");
+    let mut px = follower.px_client().await;
+    let accept_resp = px
+        .accept(AcceptRequest {
+            version: 1,
+            slot: 1,
+            round: 10,
+            leader_id: 99,
+            term: 0,
+            value: Some(AcceptedValue {
+                slot: 1,
+                round: 10,
+                leader_id: 99,
+                term: 0,
+                payload: stale_payload.clone(),
+            }),
+            request_id: 0,
+            request_create_ms: 0,
+            client_id: 0,
+            seq: 0,
+        })
+        .await
+        .expect("preload accept")
+        .into_inner();
+    assert!(!accept_resp.rejected);
+
+    let leader = cluster.leader();
+    let mut kv = leader.kv_client().await;
+    let put_resp = kv
+        .put(KvSetRequest {
+            version: 1,
+            key: b"my-key".to_vec(),
+            value: b"my-value".to_vec(),
+            seq: 1,
+            ttl_ms: 0,
+            client_id: 12,
+            request_id: 201,
+            request_create_ms: 2001,
+        })
+        .await
+        .expect("kv put")
+        .into_inner();
+    assert!(put_resp.ok, "put should succeed after slot retry");
+    assert!(
+        put_resp.revision >= 2,
+        "client value should be retried on a later slot"
+    );
+
+    for node in cluster.nodes() {
+        let slot1 = node.node.accepted_at(1).await.expect("slot 1 accepted");
+        assert_eq!(
+            slot1.payload, stale_payload,
+            "slot 1 must preserve pre-existing accepted value"
+        );
+    }
+    for node in cluster.nodes() {
+        let value = node
+            .node
+            .learner
+            .store()
+            .get(b"my-key".as_slice())
+            .map(|v| v.clone());
+        assert_eq!(value.as_deref(), Some(b"my-value".as_slice()));
+    }
+
+    drop(kv);
+    cluster.shutdown().await;
+}

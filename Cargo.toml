@@ -17,6 +17,9 @@ repository = "https://github.com/buzzcrow/crowkv"
 tokio = { version = "1.40", default-features = false }
 tonic = "0.12"
 prost = { version = "0.13", features = ["derive"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

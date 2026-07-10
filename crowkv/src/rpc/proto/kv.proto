@@ -1,0 +1,61 @@
+// KV mutation messages for P4.
+//
+// Separated from pxos.proto so the Paxos wire contract can freeze
+// independently while KV ops evolve.
+
+syntax = "proto3";
+
+package crowkv.rpc;
+
+message KvSetRequest {
+  uint32 version = 1;
+  bytes  key     = 2;
+  bytes  value   = 3;
+  uint64 seq     = 4;  // client sequence for idempotency
+  uint64 ttl_ms  = 5;  // 0 = no expiration
+  uint64 client_id = 6;
+  uint64 request_id = 7;
+  uint64 request_create_ms = 8;
+}
+
+message KvDeleteRequest {
+  uint32 version = 1;
+  bytes  key     = 2;
+  uint64 seq     = 3;
+  uint64 client_id = 4;
+  uint64 request_id = 5;
+  uint64 request_create_ms = 6;
+}
+
+message KvBatchItem {
+  bytes  key       = 1;
+  bytes  value     = 2;
+  bool   is_delete = 3;
+}
+
+message KvBatchWriteRequest {
+  uint32 version      = 1;
+  repeated KvBatchItem items = 2;
+  uint64 seq          = 3;
+  uint64 client_id = 4;
+  uint64 request_id = 5;
+  uint64 request_create_ms = 6;
+}
+
+// Unified mutation response.
+message KvResponse {
+  uint32 version  = 1;
+  bool   ok         = 2;
+  uint64 revision   = 3;  // logical version / LSN
+  string error      = 4;  // empty if ok
+  bool   not_found  = 5;  // true when delete targets a missing key
+  string not_leader_hint = 6;  // leader endpoint when this node is not the leader
+  uint64 request_id = 7;
+  uint64 request_create_ms = 8;
+}
+
+service KvService {
+  rpc Put(KvSetRequest) returns (KvResponse);
+  rpc Delete(KvDeleteRequest) returns (KvResponse);
+  rpc BatchWrite(KvBatchWriteRequest) returns (KvResponse);
+}

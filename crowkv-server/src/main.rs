@@ -10,6 +10,8 @@
 //! from `crowkv::engine` into a runnable process. See `doc/plan/plan-rpc.md`.
 
 fn main() {
-    eprintln!("crowkv-server: not yet implemented (lands in P4)");
+    let _guards = crowkv::common::logging::init_file_logging("log", "crowkv-server")
+        .expect("failed to initialize crowkv-server logging");
+    tracing::warn!("crowkv-server is not yet implemented; next step: implement P4 server wiring");
     std::process::exit(1);
 }

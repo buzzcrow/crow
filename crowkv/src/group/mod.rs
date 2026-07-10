@@ -1,5 +1,8 @@
 //! Cluster group management: membership, topology, and reconfiguration support.
 
-pub mod types;
+pub mod group;
 
-pub use types::{PxGroupConfig, PxGroupId, PxGroupMember, PxNodeId};
+pub use group::PxGroupConfig;
+pub use group::PxGroupId;
+pub use group::PxGroupMember;
+pub use group::PxNodeId;

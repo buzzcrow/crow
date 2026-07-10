@@ -13,3 +13,4 @@ workspace = true
 [dependencies]
 crowkv = { path = "../crowkv" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal"] }
+tracing = { workspace = true }

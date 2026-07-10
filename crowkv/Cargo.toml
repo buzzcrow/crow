@@ -15,14 +15,18 @@ tokio = { workspace = true, features = ["rt", "macros", "time", "net"] }
 tokio-stream = "0.1"
 tonic = { workspace = true }
 prost = { workspace = true }
+serde = { version = "1.0.228", features = ["derive"] }
+dashmap = "6"
+tracing = { workspace = true }
+tracing-appender = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [build-dependencies]
 tonic-build = "0.12"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
-criterion = { version = "0.5", features = ["html_reports"] }
-dashmap = "6"
+criterion = { version = "0.8", features = ["html_reports"] }
 crossbeam-skiplist = "0.1"
 
 [[bench]]

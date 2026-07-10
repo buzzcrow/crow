@@ -2,15 +2,15 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use crossbeam_skiplist::SkipMap;
+use crowkv::paxos::roles::{Ballot as PxBallot, LogEntry, LogEntryKind};
 use crowkv::paxos::slot_list::SlotList;
-use crowkv::paxos::slot_node::{LogEntryKind, PxBallot, PxLogEntry, PxSlotNode};
+use crowkv::paxos::slot_node::PxSlotNode;
 use dashmap::DashMap;
 use std::collections::BTreeMap;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
-
 // ---------- sequential tail insert ----------
 
 // ---------- helpers ----------
@@ -40,10 +40,10 @@ macro_rules! define_slot_node_churn_bench {
                             let mut promised_ptr = null_mut();
                             let mut accepted_ptr = null_mut();
                             for i in 0..replacements {
-                                let ballot = PxBallot::new(i + 1, 1);
+                                let ballot = Ballot::new(i + 1, 1);
                                 promised_ptr = node.cas_promised(promised_ptr, ballot).unwrap();
 
-                                let entry = PxLogEntry {
+                                let entry = LogEntry {
                                     slot: 7,
                                     ballot,
                                     term: ballot.round,

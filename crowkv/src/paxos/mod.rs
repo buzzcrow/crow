@@ -2,11 +2,11 @@
 //! full proposer / replicator / repair (P1 M4).
 
 pub mod acceptor;
-pub mod leader;
-pub mod protocol;
+pub mod error;
 pub mod slot_list;
 pub mod slot_node;
 
-pub use leader::PxTerm;
-pub use slot_list::SlotIndex;
-pub use slot_node::{PxBallot, PxLogEntry};
+pub mod learner;
+pub mod roles;
+
+pub use roles::LogEntry;

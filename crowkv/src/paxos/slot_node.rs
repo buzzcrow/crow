@@ -1,72 +1,9 @@
 #![allow(unsafe_code)]
 
+use crate::paxos::roles::{Ballot, LogEntry, SlotIndex};
+use crate::paxos::slot_list::SlotList;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, Ordering};
-
-use crate::group::types::PxNodeId;
-use crate::paxos::slot_list::{SlotIndex, SlotList};
-
-// ------------------------------------------------------------------
-// Paxos core types that belong logically with the slot node
-// ------------------------------------------------------------------
-
-/// Classification of a log entry's payload.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LogEntryKind {
-    Write,
-    NoOp,
-    ConfigChange,
-    DedupCheckpoint,
-}
-
-/// Single key-value operation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum OpKind {
-    Put,
-    Delete,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Operation {
-    pub key: Vec<u8>,
-    pub op: OpKind,
-    pub value: Option<Vec<u8>>,
-}
-
-/// Paxos proposal number, ordered first by `round`, then by `leader_id`.
-///
-/// In steady state a leader uses `(0, leader_id)` for Phase-2-only writes.
-/// `round` is bumped only by classic-Paxos repair at a single slot, or by a
-/// new leader's bulk Phase-1 round (where `round = term`).
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
-pub struct PxBallot {
-    pub round: u64,
-    pub leader_id: PxNodeId,
-}
-
-impl PxBallot {
-    pub const fn new(round: u64, leader_id: PxNodeId) -> Self {
-        Self { round, leader_id }
-    }
-}
-
-/// One durable consensus log record.
-///
-/// `payload` semantics depend on `kind`:
-/// - `Write`     — a serialized batch of `Operation` tuples.
-/// - `NoOp`      — empty (used to fill repair gaps).
-/// - `ConfigChange`     — serialized `crate::group::types::PxGroupConfig`.
-/// - `DedupCheckpoint`  — serialized dedup-cache snapshot.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PxLogEntry {
-    pub slot: SlotIndex,
-    pub ballot: PxBallot,
-    pub term: u64,
-    pub kind: LogEntryKind,
-    pub payload: Vec<u8>,
-    pub client_id: Option<u64>,
-    pub seq: Option<u64>,
-}
 
 // ------------------------------------------------------------------
 // Slot node
@@ -80,14 +17,14 @@ pub struct PxLogEntry {
 #[derive(Default)]
 pub struct PxSlotNode {
     /// Highest ballot promised. Null until first `prepare`.
-    pub(crate) promised: AtomicPtr<PxBallot>,
+    pub(crate) promised: AtomicPtr<Ballot>,
     /// Accepted entry. Null until first `accept`.
-    pub(crate) accepted: AtomicPtr<PxLogEntry>,
+    pub(crate) accepted: AtomicPtr<LogEntry>,
 
     // ---------- deferred reclamation state (correctness-critical) ----------
     // Replaced field pointers are pushed here and reclaimed when node drops.
-    retired_promised: AtomicPtr<RetiredPtr<PxBallot>>,
-    retired_accepted: AtomicPtr<RetiredPtr<PxLogEntry>>,
+    retired_promised: AtomicPtr<RetiredPtr<Ballot>>,
+    retired_accepted: AtomicPtr<RetiredPtr<LogEntry>>,
 }
 
 impl Drop for PxSlotNode {
@@ -152,7 +89,7 @@ impl PxSlotNode {
     }
 
     /// Load the current promised ballot (may be null).
-    pub fn promised(&self) -> Option<&PxBallot> {
+    pub fn promised(&self) -> Option<&Ballot> {
         let p = self.promised.load(Ordering::Acquire);
         if p.is_null() {
             None
@@ -161,7 +98,7 @@ impl PxSlotNode {
         }
     }
 
-    pub fn promised_cloned(&self) -> Option<PxBallot> {
+    pub fn promised_cloned(&self) -> Option<Ballot> {
         self.promised().copied()
     }
 
@@ -170,9 +107,9 @@ impl PxSlotNode {
     /// Returns `Ok(_)` on success, `Err(actual)` on failure.
     pub fn cas_promised(
         &self,
-        expected: *mut PxBallot,
-        new: PxBallot,
-    ) -> Result<*mut PxBallot, *mut PxBallot> {
+        expected: *mut Ballot,
+        new: Ballot,
+    ) -> Result<*mut Ballot, *mut Ballot> {
         let new_ptr = Box::into_raw(Box::new(new));
         match self
             .promised
@@ -192,7 +129,7 @@ impl PxSlotNode {
     }
 
     /// Load the current accepted entry (may be null).
-    pub fn accepted(&self) -> Option<&PxLogEntry> {
+    pub fn accepted(&self) -> Option<&LogEntry> {
         let p = self.accepted.load(Ordering::Acquire);
         if p.is_null() {
             None
@@ -201,7 +138,7 @@ impl PxSlotNode {
         }
     }
 
-    pub fn accepted_cloned(&self) -> Option<PxLogEntry> {
+    pub fn accepted_cloned(&self) -> Option<LogEntry> {
         self.accepted().cloned()
     }
 
@@ -210,9 +147,9 @@ impl PxSlotNode {
     /// Returns `Ok(_)` on success, `Err(actual)` on failure.
     pub fn cas_accepted(
         &self,
-        expected: *mut PxLogEntry,
-        new: PxLogEntry,
-    ) -> Result<*mut PxLogEntry, *mut PxLogEntry> {
+        expected: *mut LogEntry,
+        new: LogEntry,
+    ) -> Result<*mut LogEntry, *mut LogEntry> {
         let new_ptr = Box::into_raw(Box::new(new));
         match self
             .accepted
