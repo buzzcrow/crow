@@ -1,6 +1,6 @@
 # CrowKV - Design: RPC Wire Protocol
 
-Depends on: [`requirement.md`](requirement.md) §3, §9.2, §10, [`design.md`](design.md) §2, §3, [`plan-consensus.md`](plan/plan-consensus.md) §1 M2
+Depends on: [`requirement.md`](requirement.md) §3, §9.2, §10, [`design.md`](design.md) §2, §3, [`plan.md`](plan.md) §1 M2
 Satisfies: [requirement.md §3](requirement.md#3-dependencies-and-assumptions), [requirement.md §9.2](requirement.md#92-rolling-upgrade), [requirement.md §10.1](requirement.md#101-client-discovery)
 
 This document defines the wire-serialization contract for all node-to-node and client-to-node RPC communication. The implementation uses **gRPC with protobuf** (tonic + prost). Every message carries a `version: u32` field at fixed protobuf tag 1 for forward/backward compatibility; no `required` fields; field numbers are append-only.
@@ -175,7 +175,7 @@ The P4 `Stream` method must still be able to carry the four classic-Paxos messag
 
 ### 4.2 AdminService (client / operator)
 
-Not needed in P1 M2. Defined in P4 per [`plan-rpc.md`](plan/plan-rpc.md) §1 M3/M4:
+Not needed in P1 M2. Defined in P4 per [`plan.md`](plan.md) §1 P4 M3/M4:
 
 ```protobuf
 service AdminService {
@@ -194,7 +194,7 @@ service AdminService {
 | `Accept` | `rpc::proto::Accept` | `paxos::protocol::AcceptRequest` (hand-coded struct, same fields) |
 | `Accepted` | `rpc::proto::Accepted` | `paxos::protocol::PxAcceptReply` (existing enum, extended with `rejected` info) |
 
-**P1 M2 strategy:** because `.proto` generation via `tonic-build` in a `build.rs` is a P4 milestone (`plan-rpc.md` M1), P1 M2 uses **hand-coded Rust structs** that mirror the protobuf shape above, **including the `version: u32 = 1` field on every message**. This ensures P4 can decode M2 wire bytes without ambiguity.
+**P1 M2 strategy:** because `.proto` generation via `tonic-build` in a `build.rs` is a P4 milestone ([`plan.md`](plan.md) §1 P4 M1), P1 M2 uses **hand-coded Rust structs** that mirror the protobuf shape above, **including the `version: u32 = 1` field on every message**. This ensures P4 can decode M2 wire bytes without ambiguity.
 
 The structs are annotated with `#[derive(prost::Message)]` (or an equivalent lightweight encode/decode impl) so that P4's `.proto` generation produces byte-identical output. This avoids:
 - Adding a `build.rs` dependency to the `crowkv` crate in P1.
@@ -227,5 +227,5 @@ If `prost` derive is unavailable, a manual `Encoder`/`Decoder` trait impl target
 - [Protocol Buffers Language Guide](https://developers.google.com/protocol-buffers/docs/proto3)
 - [Tonic gRPC framework](https://github.com/hyperium/tonic)
 - [prost — Protocol Buffers implementation for the Rust Language](https://github.com/tokio-rs/prost)
-- [`plan-rpc.md`](plan/plan-rpc.md) §1 — full RPC phase plan (P4)
-- [`plan-consensus.md`](plan/plan-consensus.md) §1 M2 — minimal RPC milestone that introduces this subset
+- [`plan.md`](plan.md) §1 P4 — full RPC phase plan
+- [`plan.md`](plan.md) §1 P1 M2 — minimal RPC milestone that introduces this subset

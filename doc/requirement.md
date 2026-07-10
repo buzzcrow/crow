@@ -1,6 +1,6 @@
 # CrowKV - Requirements
 
-This is the authoritative requirements document. All other documents (`design.md`, `plan.md`, `test-design.md`, `test-plan.md`) must follow definitions and conclusions from this document.
+This is the authoritative requirements document. All other documents (`design.md`, `plan.md`, `test.md`) must follow definitions and conclusions from this document.
 
 Conventions:
 - **Decision record** callouts (`> **Decision record:** ...`) capture the `Suggest → Confirm` resolution for traceability. They are informational; the surrounding prose is normative.
@@ -504,7 +504,7 @@ Two test modes depending on client behavior:
 
 Full Jepsen-style linearizability checking is deferred and will be specified in a separate test-design document when introduced.
 
-### 14.2 Failure Scenarios (must be covered in `test-design.md`)
+### 14.2 Failure Scenarios (must be covered in `test.md`)
 
 **Network / RPC failures:**
 - Network partition (majority/minority split).

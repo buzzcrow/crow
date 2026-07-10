@@ -1,6 +1,6 @@
 # CrowKV - Design: Async Local Disk I/O
 
-Depends on: [`design.md`](design.md), [`requirement.md`](requirement.md), [`plan.md`](plan/plan.md) §7 (Concurrency Model)
+Depends on: [`design.md`](design.md), [`requirement.md`](requirement.md), [`plan.md`](plan.md) §5 (Concurrency Model)
 Satisfies: [requirement.md §8.1](requirement.md#81-wal-write-ahead-log) (durability contract), and underpins [`design-wal.md`](design/design-wal.md), [`design-storage-engine.md`](design/design-storage-engine.md)
 
 This document specifies the project-wide async local disk I/O abstraction. It is shared infrastructure: WAL fsync, ordered-file engine writes, snapshot file I/O, and any future on-disk subsystem all use it.
@@ -26,7 +26,7 @@ This document specifies the project-wide async local disk I/O abstraction. It is
 **Goals:**
 
 - Provide a single async I/O facade for all local disk operations: `open`, `read_at`, `write_at`, `fsync`/`fdatasync`, `close`.
-- Avoid blocking the consensus async tasks on disk syscalls, in line with [`plan.md`](plan/plan.md) §7 rule 1.
+- Avoid blocking the consensus async tasks on disk syscalls, in line with [`plan.md`](plan.md) §5 rule 1.
 - On Linux ≥ 5.11, exploit io_uring for true async syscalls (kernel-side completion).
 - Run on any environment with a working POSIX filesystem (CI, dev laptops, older kernels) via a transparent fallback.
 - Single common API surface — callers do not branch on backend.
@@ -42,7 +42,7 @@ This document specifies the project-wide async local disk I/O abstraction. It is
 
 ## 2. Why a Dedicated Abstraction
 
-Per [`plan.md`](plan/plan.md) §7, every business-logic path in CrowKV is `async`. Disk syscalls (`fdatasync`, `pwrite`, `pread`) are blocking. Two options to bridge:
+Per [`plan.md`](plan.md) §5, every business-logic path in CrowKV is `async`. Disk syscalls (`fdatasync`, `pwrite`, `pread`) are blocking. Two options to bridge:
 
 1. **`tokio::task::spawn_blocking` everywhere.** Simple. Pays one thread-pool hop per syscall (typically 5–20 μs on a healthy host). Tail latency under load suffers because the blocking pool is a shared resource and one slow disk can stall others.
 2. **io_uring.** Kernel-side completion queue. No per-syscall thread hop. Lower tail latency under contention. Requires Linux ≥ 5.6 (basic) / 5.11 (mature feature set). Single ring per thread.
@@ -51,7 +51,7 @@ For CrowKV, the WAL fsync is on every write's critical path; the engine snapshot
 
 A thin abstraction lets us:
 - Swap backends behind a `cfg` flag without touching call sites.
-- Inject a deterministic in-memory backend for `test_harness`-driven unit tests (per [`test-design-wal.md`](test/test-design-wal.md) §5).
+- Inject a deterministic in-memory backend for `test_harness`-driven unit tests (per [`test.md`](test.md) §8.2).
 - Keep the WAL and engine code free of `cfg(target_os = "linux")` branches.
 
 ---
@@ -179,10 +179,10 @@ Specific cases:
 | Layer | Backend | Where |
 |---|---|---|
 | Unit tests for the I/O layer | Real `tokio-uring` on Linux CI; fallback elsewhere | `cargo test` |
-| Unit tests for WAL, engine | A third **simulated** backend (`SimDisk`) that holds an in-memory `BTreeMap<u64, Vec<u8>>` and exposes the same `AsyncFile` API | `test_harness` (per [`test-design-wal.md`](test/test-design-wal.md) §5) |
+| Unit tests for WAL, engine | A third **simulated** backend (`SimDisk`) that holds an in-memory `BTreeMap<u64, Vec<u8>>` and exposes the same `AsyncFile` API | `test_harness` (per [`test.md`](test.md) §8.2) |
 | Integration tests | Real backend on a `tempfile`-managed directory | `cargo test --test wal_integration` |
 
-The simulated backend supports failure injection: `SimDisk::set_full()`, `SimDisk::inject_io_error()`, `SimDisk::corrupt_at_offset()` — these are the same hooks listed in [`test-design.md`](test/test-design.md) §4 and [`test-design-wal.md`](test/test-design-wal.md) §3.
+The simulated backend supports failure injection: `SimDisk::set_full()`, `SimDisk::inject_io_error()`, `SimDisk::corrupt_at_offset()` — these are the same hooks listed in [`test.md`](test.md) §3.
 
 **Determinism.** The simulated backend completes immediately (no `await` yield) so test scheduling stays deterministic under `start_paused = true`. The real io_uring backend is non-deterministic and is only used in non-unit tests.
 
@@ -193,4 +193,4 @@ The simulated backend supports failure injection: `SimDisk::set_full()`, `SimDis
 - **Fixed buffer registration**: defer to V2 unless WAL p99 fsync latency benchmark shows submission-side overhead.
 - **Direct I/O (O_DIRECT)**: not pursued; the kernel page cache is acceptable for WAL given we always `fdatasync` before ack.
 - **Submission batching (SQE link chains)**: io_uring supports linking multiple SQEs (e.g. `write` then `fsync`) into one submission. Could shave a hop on the WAL hot path. Defer to V2; measure first.
-- **Per-disk topology B**: revisit once we have multi-disk benchmark numbers from [`plan-wal.md`](plan/plan-wal.md) M3.
+- **Per-disk topology B**: revisit once we have multi-disk benchmark numbers from [`plan.md`](plan.md) §1 P2 M3.

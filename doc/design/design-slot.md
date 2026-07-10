@@ -1,7 +1,7 @@
 # CrowKV - Design: Concurrent Sparse Slot List
 
-Depends on: [`design.md`](../design.md), [`plan/plan.md`](../plan/plan.md)
-Satisfies: [`requirement.md`](../requirement.md) §5.1 (high-concurrency log), [`plan/plan-consensus.md`](../plan/plan-consensus.md) P1 M1 / P2 M3
+Depends on: [`design.md`](../design.md), [`plan.md`](../plan.md)
+Satisfies: [`requirement.md`](../requirement.md) §5.1 (high-concurrency log), [`plan.md`](../plan.md) §1 P1 M1 / P2 M3
 
 ## 1. Problem Statement
 
