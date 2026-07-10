@@ -1,0 +1,15 @@
+[package]
+name = "crowkv-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CrowKV server binary: single-group, multi-group, and cluster modes."
+
+[lints]
+workspace = true
+
+[dependencies]
+crowkv = { path = "../crowkv" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal"] }

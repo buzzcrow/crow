@@ -40,15 +40,32 @@ Phasing is dependency-ordered, not waterfall. WAL (P2) and Storage (P3) can proc
 
 ## 3. Cross-Stream Dependencies
 
+### Phase order
+
 ```
-P1 Consensus Core ───────────────────┐
+P1 Consensus Core ───────────────────────────┐
     ├─frozen PxLogEntry shape────────┼──► P2 WAL (parallel with P3)
     ├─frozen engine trait boundary────┼──► P3 Storage (parallel with P2)
     └─message types frozen────────────┼──► P4 RPC
 
-P2 WAL + P3 Storage ───────────────────► P4 RPC (needs persistence for real restart)
-P4 RPC ────────────────────────────────► P5 Reconfig (needs transport + snapshot stream)
+P2 WAL + P3 Storage ─────────────────────► P4 RPC (needs persistence for real restart)
+P4 RPC ──────────────────────────────────► P5 Reconfig (needs transport + snapshot stream)
 ```
+
+### Crate layout
+
+The workspace at the repo root holds one library crate (`crowkv`) containing all core logic as modules, plus two binary crates (`crowkv-server`, `crowkv-bench`) and a shared dev-dependency crate (`crowkv::testkit`).
+
+```
+crowkv    (all core logic: consensus, engine, wal, io, rpc, reconfig)
+  └─ crowkv-server                                 [P4] (binary, top-level integration tests)
+  └─ crowkv-bench                                  [P4] (benchmark / load test binary)
+
+crowkv::testkit  (dev-dep only; consumed by `crowkv` tests for TestTimer, TestRouter, TestNode, SimDisk)
+  └─ crowkv::io (re-exports SimDisk)
+```
+
+Dependency rule: a crate may depend only on crates **above** it in this list. `crowkv::testkit` is reachable only as a `dev-dependency`, never a regular `dependency`.
 
 **Freeze points** (must complete and be reviewed before downstream starts):
 - `PxLogEntry` shape + `PxBallot`/`PxTerm` definitions — end of P1 M1

@@ -12,7 +12,7 @@ Phase 3 implementation: engine trait formalization, ordered-file backend, snapsh
 The trait was introduced in P1 M4 with `InMemoryEngine`. P3 M1 freezes the surface and removes any P1 placeholder methods.
 
 - Final trait surface (all methods `async`, per [`plan.md`](plan.md) §7): `apply(slot, batch)`, `get(k) → Option<(slot, value)>`, `scan(range, limit) → impl Stream<Item=(K,V)>`, `snapshot_export() → impl Stream<Item=Chunk>`, `snapshot_import(stream)`, `compare(other) → Diff`, `iter_all()` (for `compare` two-cursor merge per [`design-storage-engine.md`](design-storage-engine.md) §8.3).
-- Trait lives in `engine.rs`; consensus code generic over `E: Engine`. Use `async_trait` (or RPITIT once stable on toolchain) to express async methods on the trait.
+- Trait lives in `crowkv::engine`; `crowkv::consensus` code is generic over `E: Engine`. Use `async_trait` (or RPITIT once stable on toolchain) to express async methods on the trait.
 - Disk-touching backends (ordered-file, future crowtree) use the project async I/O facade ([`design-async-io.md`](design-async-io.md)) — same one as the WAL. No direct syscalls in engine code.
 
 **Acceptance:** compile-time check that `InMemoryEngine`, `OrderedFileEngine`, and `CrowtreeEngine` (placeholder) all implement trait without warnings.
@@ -43,13 +43,17 @@ The trait was introduced in P1 M4 with `InMemoryEngine`. P3 M1 freezes the surfa
 
 ## 2. Module Breakdown
 
-| Module | Responsibility |
-|---|---|
-| `engine.rs` | Trait definition |
-| `engine/in_memory.rs` | In-memory btree (from P1) |
-| `engine/ordered_file.rs` | Sorted file backend |
-| `engine/snapshot.rs` | Portable snapshot format, chunk framing |
-| `engine/crowtree.rs` | Placeholder delegating to in-memory |
+Module: **`engine`** inside `crowkv` (introduced in P1 M4 with `Engine` trait + `InMemoryEngine`; P3 adds the rest).
+
+| Rust path (in `crowkv/src/engine`) | Responsibility | Phase |
+|---|---|---|
+| `mod.rs` | `Engine` trait definition (FROZEN end of P1 M4 / P3 M1) | P1 M4 |
+| `memory.rs` | `InMemoryEngine` (btree-based) | P1 M4 |
+| `ordered_file.rs` | `OrderedFileEngine` (sorted file + small index) | P3 M2 |
+| `snapshot.rs` | Portable snapshot format, chunk framing | P3 M3 |
+| `crowtree.rs` | `CrowtreeEngine` placeholder delegating to in-memory | P3 M4 |
+
+`crowkv::engine` depends on `crowkv::io` for disk-touching backends (`ordered_file`, future `crowtree`). `crowkv::consensus` depends on `crowkv::engine`.
 
 ## 3. Freeze Checklist
 

@@ -19,9 +19,10 @@ This document specifies Phase 1: in-memory consensus core with no persistence an
 
 ### M1 — Core data types + Acceptor state machine
 
-- `PxTerm`, `PxBallot`, `PxSlot`, `PxLogEntry`, `PxGroupConfig`
+- **Workspace bootstrap** (greenfield repo): cargo workspace at repo root, `crowkv` crate created. Edition `2021`, MSRV `1.75`. `rustfmt.toml` and `clippy.toml` minimal configs. No production dependencies in M1; dev-dep `tokio` with `macros, rt, test-util` for `start_paused = true`.
+- `PxTerm`, `PxBallot`, `PxSlot`, `PxLogEntry`, `PxGroupConfig`, `PxNodeId`
 - Acceptor in-memory state: `promised_ballot[slot]`, `accepted[slot] → (ballot, value)`
-- Acceptor handlers: `Prepare`, `Accept`
+- Acceptor handlers: `Prepare`, `Accept` (both `async fn`, per [`plan.md`](plan.md) §7)
 - Unit tests: prepare/accept basic Paxos rounds, ballot ordering, term fencing
 
 **Acceptance:** unit test shows a single-slot classic Paxos round succeeds and rejects stale ballots.
@@ -69,21 +70,27 @@ This document specifies Phase 1: in-memory consensus core with no persistence an
 
 ## 2. Module Breakdown
 
-| Rust module | Responsibility | Lines (est) | Tests (est) |
+Module: **`consensus`** inside `crowkv`. Engine trait + `InMemoryEngine` live in the sibling module **`engine`** (P1 M4 introduces them; P3 adds backends). Test harness lives in **`crowkv::testkit`** (dev-dep, shared with WAL and other crates).
+
+| Rust path (in `crowkv/src/consensus`) | Responsibility | Lines (est) | Tests (est) |
 |---|---|---|---|
-| `types.rs` | `PxTerm`, `PxBallot`, `PxSlot`, `PxLogEntry`, `Operation`, `PxGroupConfig` | 100 | — |
-| `messages.rs` | Consensus message enums (`Prepare`, `Promise`, `Accept`, `Accepted`, `Chosen`, `Heartbeat`, `RequestVote`, `Vote`) | 100 | — |
-| `acceptor.rs` | In-memory acceptor state, `Prepare`/`Accept` handlers | 150 | 20 |
-| `election.rs` | Raft-style election, `RequestVote`, heartbeat, term tracking | 200 | 25 |
-| `proposer.rs` | Slot counter, window, admission queue, quorum bitmap | 250 | 30 |
-| `replicator.rs` | Per-peer Accept fan-out + flow control (in-process channels in P1) | 100 | 15 |
-| `repair.rs` | Gap detection, classic Paxos repair task | 150 | 20 |
+| `types.rs` | `PxTerm`, `PxBallot`, `PxSlot`, `PxLogEntry`, `Operation`, `PxGroupConfig` (FROZEN end of P1 M1) | 100 | — |
+| `messages.rs` | Consensus message enums (`Prepare`, `Promise`, `Accept`, `Accepted`, `Chosen`, `Heartbeat`, `RequestVote`, `Vote`) (FROZEN end of P1 M3) | 100 | — |
+| `error.rs` | Typed `Error` enum used across the crate | 30 | — |
+| `paxos/acceptor.rs` | In-memory acceptor state, `Prepare`/`Accept` handlers | 150 | 20 |
+| `paxos/proposer.rs` | Slot counter, window, admission queue, quorum bitmap | 250 | 30 |
+| `paxos/replicator.rs` | Per-peer Accept fan-out + flow control (in-process channels in P1) | 100 | 15 |
+| `paxos/repair.rs` | Gap detection, classic Paxos repair task | 150 | 20 |
+| `election/elector.rs` | Raft-style election, `RequestVote`, heartbeat, term tracking | 200 | 25 |
+| `election/lease.rs` | Leader lease state machine, ReadIndex fallback, step-down trigger (driven by `TestTimer` in P1; same code path used by P4 with real clock) | 120 | 12 |
 | `learner.rs` | Apply to engine, resolved-slot, safe-slot aggregation | 150 | 20 |
-| `engine.rs` | Trait definition + `InMemoryEngine` | 200 | 25 |
-| `lease.rs` | Leader lease state machine, ReadIndex fallback, step-down trigger (driven by `TestTimer` in P1; same code path used by P4 with real clock) | 120 | 12 |
 | `dedup.rs` | Per-client dedup cache | 80 | 15 |
 | `group.rs` | Per-group controller wiring all modules; single-group in P1 | 150 | 10 |
-| `test_harness.rs` | In-process node, message router, deterministic timer, fault injection | 200 | — |
+
+| Crate (sibling) | Responsibility |
+|---|---|
+| `crowkv::engine` | `Engine` trait (FROZEN end of P1 M4) + `InMemoryEngine`. P3 adds `OrderedFileEngine`, snapshot format, `CrowtreeEngine` placeholder. |
+| `crowkv::testkit` | `TestTimer`, `TestRouter`, `TestNode`, fault injection. Dev-dep for every crate. |
 
 ## 3. Data Types to Implement
 
@@ -92,11 +99,13 @@ Exact Rust types to be defined in `types.rs` (shape frozen at M1 end):
 ```rust
 pub type PxTerm = u64;
 pub type PxSlot = u64;
+pub type PxNodeId = u64;
+pub type PxGroupId = u64;
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub struct PxBallot { pub round: u64, pub leader_id: u64 }
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+pub struct PxBallot { pub round: u64, pub leader_id: PxNodeId }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PxLogEntry {
     pub slot: PxSlot,
     pub ballot: PxBallot,
@@ -110,20 +119,37 @@ pub struct PxLogEntry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LogEntryKind { Write, NoOp, ConfigChange, DedupCheckpoint }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Operation { pub key: Vec<u8>, pub op: OpKind, pub value: Option<Vec<u8>> }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OpKind { Put, Delete }
+
+// PxGroupConfig per design.md §4.4
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PxGroupMember {
+    pub node_id: PxNodeId,
+    pub endpoint: String,
+    pub voting: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PxGroupConfig {
+    pub group_id: PxGroupId,
+    pub members: Vec<PxGroupMember>,
+    pub quorum_size: usize,
+    pub config_version: u64,
+}
 ```
 
 ## 4. In-Process Test Harness
 
-`test_harness.rs` provides a deterministic async message router for unit tests. The exact API is shared with `test-design.md` §4 (failure injection taxonomy) and must be kept in sync.
+Lives in the **`crowkv::testkit`** crate (not `#[cfg(test)]`-gated; consumed as a `dev-dependency` by every crate). The exact API is shared with `test-design.md` §4 (failure injection taxonomy) and must be kept in sync.
 
 - `TestRouter`: holds `Vec<TestNode>`. Methods (all `async`): `deliver_pending()`, `partition(set_a, set_b)`, `heal()`, `delay(from, to, ms)`, `drop(from, to, pct)`.
 - `TestTimer`: deterministic monotonic clock. Methods: `now()`, `advance(ms)`, `skew(node, ms)`. Replaces `tokio::time` for fully deterministic time control.
 - `TestNode`: wraps all modules for one group member. Methods (all `async`): `propose(req).await`, `tick().await`, `deliver(msg).await`, `crash()`, `restart().await`, `force_step_down()`.
+- `SimDisk`: re-exported from `crowkv::io::backend::sim` so WAL tests share the same surface.
 
 No gRPC, no real timers in Phase 1. All concurrency runs on a single-threaded `tokio` runtime + `LocalSet`:
 ```rust

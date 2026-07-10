@@ -1,0 +1,15 @@
+[package]
+name = "crowkv-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CrowKV benchmark/load test tool."
+
+[lints]
+workspace = true
+
+[dependencies]
+crowkv = { path = "../crowkv" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

@@ -47,16 +47,21 @@ Phase 4: gRPC wire protocol, node-to-node transport, client library. P4 replaces
 
 ## 2. Module Breakdown
 
-| Rust module | Responsibility |
+Module: **`rpc`** inside `crowkv`. Hosts both the gRPC server side (used by `crowkv-server` binary) and the gRPC client library (used by external clients and by `crowkv::reconfig`).
+
+| Path (in `crowkv/src/rpc`) | Responsibility |
 |---|---|
-| `rpc/proto/*.proto` | Protobuf schema source files |
-| `rpc/peer.rs` | `PeerService` server + client (bidirectional stream per peer) |
-| `rpc/vote.rs` | `VoteService` server + client (unary) |
-| `rpc/snapshot.rs` | `SnapshotService` server + client (server-streaming) |
-| `rpc/server.rs` | gRPC server bootstrap, wires services into the Group Manager |
-| `rpc/client.rs` | Client library: seed list, topology cache, routing, retry |
-| (no new lease module) | `lease.rs` from P1 M4 reused as-is; only the clock source changes from `TestTimer` to system monotonic clock |
-| `rpc/topology.rs` | Topology refresh, `NotLeaderHint` handling, `config_version` tracking |
+| `proto/*.proto` | Protobuf schema source files |
+| `build.rs` | `tonic-build` invocation that generates Rust types from `.proto` |
+| `peer.rs` | `PeerService` server + client (bidirectional stream per peer) |
+| `vote.rs` | `VoteService` server + client (unary) |
+| `snapshot.rs` | `SnapshotService` server + client (server-streaming) |
+| `server.rs` | gRPC server bootstrap, wires services into the Group Manager |
+| `client.rs` | Client library: seed list, topology cache, routing, retry |
+| (no new lease module) | `election::lease` from `crowkv::consensus` (P1 M4) reused as-is; only the clock source changes from `TestTimer` to system monotonic clock |
+| `topology.rs` | Topology refresh, `NotLeaderHint` handling, `config_version` tracking |
+
+`crowkv::rpc` depends on `crowkv::consensus`, `crowkv::engine`, and `crowkv::wal`. `crowkv::reconfig` (P5) depends on `crowkv::rpc`.
 
 ## 3. Group-0
 

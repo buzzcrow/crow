@@ -62,14 +62,19 @@ Phase 2 implementation: multi-disk write-ahead log for acceptor persistence.
 
 ## 2. Module Breakdown
 
-| Module | Responsibility |
+Modules in `crowkv`: **`io`** (P2 M0, async I/O facade) and **`wal`** (P2 M1+).
+
+| Module path (in `crowkv`) | Responsibility |
 |---|---|
-| `io/` | Project async I/O facade ([`design-async-io.md`](design-async-io.md)). **Built first as P2 M0** so M1+ can use it. |
-| `wal/segment.rs` | File format, record encoding/decoding, CRC |
-| `wal/index.rs` | In-memory slot-to-segment index |
-| `wal/fsync_worker.rs` | Per-disk batch fsync, async completion |
-| `wal/manager.rs` | Multi-disk routing, segment rotation, GC |
-| `wal/replay.rs` | Startup segment discovery, validation, truncation |
+| `io` (whole module) | Project async I/O facade ([`design-async-io.md`](design-async-io.md)). **Built first as P2 M0** so WAL M1+ and the engine module can both use it. |
+| `wal::record` | `WALRecord` shape, CRC32C (P2 M1) |
+| `wal::segment` | File format, record encoding/decoding (P2 M1) |
+| `wal::index` | In-memory slot-to-segment index (P2 M1) |
+| `wal::fsync_worker` | Per-disk batch fsync, async completion (P2 M2) |
+| `wal::manager` | Multi-disk routing, segment rotation, GC (P2 M3, M5) |
+| `wal::replay` | Startup segment discovery, validation, truncation (P2 M4) |
+
+`crowkv::wal` depends on `crowkv::io` and `crowkv::consensus` (for `PxLogEntry` shape).
 
 ## 3. Freeze Checklist
 

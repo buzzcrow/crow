@@ -44,14 +44,16 @@ Phase 5: joint consensus, snapshot install, rolling upgrade. Builds on the snaps
 
 ## 2. Module Breakdown
 
-| Rust module | Responsibility |
+Module: **`reconfig`** inside `crowkv`. Depends on `crowkv::rpc` (for `TimeoutNow`, `SnapshotChunk` RPCs), `crowkv::engine` (for snapshot export/import), `crowkv::wal` (for log streaming), `crowkv::consensus` (for `PxGroupConfig`).
+
+| Path (in `crowkv/src/reconfig`) | Responsibility |
 |---|---|
-| `reconfig/joint.rs` | Joint-consensus state machine, both-quorum evaluator |
-| `reconfig/transfer.rs` | Leader transfer (`TimeoutNow`) |
-| `reconfig/membership.rs` | `PxGroupConfig` mutation, voting/non-voting flags |
-| `snapshot/install.rs` | Snapshot install state machine (chunked, resumable, throttled) |
-| `snapshot/store.rs` | On-disk snapshot file management, atomic swap |
-| `upgrade/version.rs` | Version negotiation, format compatibility checks |
+| `joint.rs` | Joint-consensus state machine, both-quorum evaluator |
+| `transfer.rs` | Leader transfer (`TimeoutNow`) |
+| `membership.rs` | `PxGroupConfig` mutation, voting/non-voting flags |
+| `snapshot_install.rs` | Snapshot install state machine (chunked, resumable, throttled) |
+| `snapshot_store.rs` | On-disk snapshot file management, atomic swap |
+| `version.rs` | Version negotiation, format compatibility checks |
 
 ## 3. Freeze Checklist
 

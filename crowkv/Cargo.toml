@@ -1,0 +1,17 @@
+[package]
+name = "crowkv"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CrowKV core library: consensus, engine, WAL, I/O, RPC, reconfiguration."
+
+[lints]
+workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
