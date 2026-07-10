@@ -1,0 +1,60 @@
+# CrowKV - Plan: Storage Engine Implementation
+
+Depends on: [`plan.md`](plan.md), [`design-storage-engine.md`](design-storage-engine.md), [`plan-consensus.md`](plan-consensus.md)
+Satisfies: [requirement.md §8.3](requirement.md#83-learner-storage), [requirement.md §8.4](requirement.md#84-snapshot-and-install)
+
+Phase 3 implementation: engine trait formalization, ordered-file backend, snapshot skeleton.
+
+## 1. Milestones
+
+### M1 — Engine trait freeze
+
+The trait was introduced in P1 M4 with `InMemoryEngine`. P3 M1 freezes the surface and removes any P1 placeholder methods.
+
+- Final trait surface (all methods `async`, per [`plan.md`](plan.md) §7): `apply(slot, batch)`, `get(k) → Option<(slot, value)>`, `scan(range, limit) → impl Stream<Item=(K,V)>`, `snapshot_export() → impl Stream<Item=Chunk>`, `snapshot_import(stream)`, `compare(other) → Diff`, `iter_all()` (for `compare` two-cursor merge per [`design-storage-engine.md`](design-storage-engine.md) §8.3).
+- Trait lives in `engine.rs`; consensus code generic over `E: Engine`. Use `async_trait` (or RPITIT once stable on toolchain) to express async methods on the trait.
+- Disk-touching backends (ordered-file, future crowtree) use the project async I/O facade ([`design-async-io.md`](design-async-io.md)) — same one as the WAL. No direct syscalls in engine code.
+
+**Acceptance:** compile-time check that `InMemoryEngine`, `OrderedFileEngine`, and `CrowtreeEngine` (placeholder) all implement trait without warnings.
+
+### M2 — Ordered-file backend
+
+- Single sorted key-value file with small index
+- `apply` writes to staging area, fsync, atomic swap into active file
+- `scan` via btree cursor over sorted file
+
+**Acceptance:** `compare()` between in-memory and ordered-file engines after identical ops returns empty diff.
+
+### M3 — Snapshot export/import skeleton
+
+- `snapshot_export` serializes `(key, slot, value_or_tombstone)` tuples in key order with a versioned header
+- `snapshot_import` consumes same format, builds engine state atomically (no partial-state visibility per [`design-storage-engine.md`](design-storage-engine.md) §6.5)
+- Resumable chunk boundaries marked in stream; default chunk size 1 MiB ([`design-storage-engine.md`](design-storage-engine.md) §6.2)
+- Snapshot format: portable interchange format in P3 (engine-agnostic, used for cross-engine testing). Native engine-specific formats may be added per-engine later if performance requires.
+
+**Acceptance:** export → import round-trip produces engine `compare()` equal to original; resume-from-offset reproduces same final state.
+
+### M4 — crowtree placeholder
+
+- `CrowtreeEngine` struct implements trait, delegates all methods to `InMemoryEngine`
+- `snapshot_export` contains `todo!("crowtree integration")`
+
+**Acceptance:** compiles, all crowtree tests skipped with `#[ignore]`.
+
+## 2. Module Breakdown
+
+| Module | Responsibility |
+|---|---|
+| `engine.rs` | Trait definition |
+| `engine/in_memory.rs` | In-memory btree (from P1) |
+| `engine/ordered_file.rs` | Sorted file backend |
+| `engine/snapshot.rs` | Portable snapshot format, chunk framing |
+| `engine/crowtree.rs` | Placeholder delegating to in-memory |
+
+## 3. Freeze Checklist
+
+Before P4 (RPC) starts (P2 WAL proceeds independently):
+- [ ] Engine trait surface frozen (no method additions in P4 without explicit version bump)
+- [ ] `compare()` deterministic and cross-engine (in-memory vs ordered-file equivalence)
+- [ ] Snapshot format versioned and self-describing (`magic`, `version` header)
+- [ ] G3 milestone passes: engine swap-in without consensus changes

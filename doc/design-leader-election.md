@@ -1,0 +1,327 @@
+# CrowKV - Design: Leader Election, Term, and Lease
+
+Depends on: [`requirement.md`](requirement.md), [`design.md`](design.md)
+Satisfies: [requirement.md §3 Dependencies](requirement.md#3-dependencies-and-assumptions), [requirement.md §4.2](requirement.md#42-paxos-core), [requirement.md §6.2](requirement.md#62-leader-read-fencing), implicit prerequisites of [requirement.md §7](requirement.md#7-consensus-architecture)
+
+This document specifies leader election, term management, the `PxBallot`/`PxTerm` separation, and the leader lease used for fast linearizable reads. The design follows Raft very closely; only the per-slot Paxos parts differ.
+
+## Table of Contents
+
+- [1. Why Raft-Style Election on a Paxos Log](#1-why-raft-style-election-on-a-paxos-log)
+- [2. PxTerm vs PxBallot](#2-pxterm-vs-pxballot)
+- [3. Election Protocol](#3-election-protocol)
+- [4. New-Leader Bulk Phase 1](#4-new-leader-bulk-phase-1)
+- [5. Heartbeats and Liveness](#5-heartbeats-and-liveness)
+- [6. Leader Lease](#6-leader-lease)
+- [7. ReadIndex Fallback](#7-readindex-fallback)
+- [8. Step-Down Triggers](#8-step-down-triggers)
+- [9. Safety Argument](#9-safety-argument)
+- [10. Tunables and Defaults](#10-tunables-and-defaults)
+
+---
+
+## 1. Why Raft-Style Election on a Paxos Log
+
+Classical Multi-Paxos elects a "distinguished proposer" through Paxos itself: an aspiring leader runs Phase 1 over the entire log. This works but conflates election with proposal and complicates clean step-down, lease management, and observability.
+
+Raft's contribution was to factor election out of the log — a separate election RPC, a per-term vote, randomized timeouts. CrowKV adopts that factoring exactly, and lets per-slot Paxos handle just the per-slot work. The separation maps onto two distinct identifiers: `PxTerm` for elections, `PxBallot` for slot proposals.
+
+This design choice is consistent with *How to Build a Highly Available System Using Consensus* (Lampson, 1996) and is the same pattern used in Spinnaker, Spanner's Paxos groups, and TiKV's region leadership.
+
+---
+
+## 2. PxTerm vs PxBallot
+
+The two identifiers serve disjoint purposes; conflating them is a common bug source.
+
+### 2.1 `PxTerm`
+
+- Type: monotonic non-negative integer per group.
+- Persistence: durable. Every term increment is fsynced before being acted on.
+- Scope: one term covers all writes by a single leader, across many slots.
+- Used by:
+  - Election RPCs (`RequestVote`, `Vote`).
+  - Heartbeats and `Accept` messages (carried for fencing).
+  - Lease validity (a lease is associated with a term).
+
+### 2.2 `PxBallot`
+
+- Type: lexicographically ordered pair `(round, leader_id)`.
+- Persistence: durable on every acceptor (in WAL with the `PxLogEntry`).
+- Scope: one ballot covers proposals at a single slot. Different slots may simultaneously be at different ballots.
+- Used by:
+  - Phase 1 (`Prepare`) and Phase 2 (`Accept`) messages of classical Paxos.
+  - Repair: a higher round at the same leader_id supersedes a lower round at that slot.
+
+### 2.3 The bridge
+
+A new leader at term `T` proposes new slots with ballot `(round=0, leader_id=me)`. The implicit ordering is "this leader's ballots are 'newer' than any leader before it" because acceptors fence on `term` first: an `Accept` carrying `term=T` is rejected by any acceptor whose `current_term > T` regardless of ballot. Conversely a same-term `Accept` is compared by ballot rules.
+
+This means:
+
+- Acceptors keep `(current_term, slot_state[slot])` where `slot_state` records `(promised_ballot, accepted_ballot, accepted_value)`.
+- Election bumps `current_term`, invalidating any in-flight `Accept` from older terms.
+- Repair within a term bumps `round` for a single slot, invalidating any in-flight `Accept` for that slot only.
+
+Both fences are necessary, and they are independent.
+
+---
+
+## 3. Election Protocol
+
+The protocol matches Raft's leader election with adaptations for the bulk Phase-1 step (§4).
+
+### 3.1 Roles
+
+Each member is exactly one of:
+
+- **Follower** — accepts heartbeats and `Accept`s from a leader.
+- **Candidate** — has timed out and is collecting votes.
+- **Leader** — won the latest election; serves writes.
+
+### 3.2 Election trigger
+
+A follower starts an election when its **election timer** expires. The timer is reset on every legitimate heartbeat or `Accept` from the current leader. The timeout is randomized in `[election_min, election_max]` (defaults 800 ms – 1500 ms), avoiding split votes.
+
+When the timer fires:
+
+1. Follower transitions to candidate.
+2. Increments `current_term`, persists.
+3. Votes for itself.
+4. Sends `RequestVote(term, candidate_id, last_chosen_slot, last_chosen_term)` to all peers.
+
+### 3.3 Vote rules (matching Raft)
+
+A peer grants its vote iff:
+
+- The request's `term` is ≥ peer's `current_term`. If higher, peer adopts the new term and reverts to follower first.
+- The peer has not already voted in this term, or already voted for the same candidate.
+- The candidate's log is **at least as up-to-date** as the peer's, where up-to-date is the lexicographic comparison `(last_chosen_term, last_chosen_slot)`.
+
+The "log up-to-date" check is the safety property that prevents a stale leader from being elected.
+
+### 3.4 Outcome
+
+- **Win:** received votes from a quorum within the election timeout. Becomes leader; immediately runs the bulk Phase 1 (§4) and then sends initial heartbeats.
+- **Loss / split:** sees a higher term, or election timer fires again with no quorum. Reverts to follower and waits for a new randomized timer.
+- **Conversion:** if the candidate sees a `Heartbeat` or `Accept` with `term ≥ current_term`, it accepts that node as leader and reverts to follower.
+
+---
+
+## 4. New-Leader Bulk Phase 1
+
+A freshly elected leader does not immediately serve client writes. It first runs **one** Phase 1 over the open slot prefix to discover any in-flight values from the previous leader.
+
+### 4.1 What is the open prefix?
+
+When the leader takes office, it computes:
+
+- `floor = max(its own contiguous_chosen, peers' contiguous_chosen seen during election)`.
+- `ceiling = max(slot ever seen in any state on this leader's persistent state)`.
+
+The open prefix is `[floor + 1, ceiling]`. If a previous leader had assigned slots beyond what any current acceptor knows about, those slots are simply not in this set; their values are unrecoverable but also un-acked, so no client expects them to exist.
+
+### 4.2 Bulk Prepare
+
+The leader sends a single `Prepare(ballot=(0, me), term=T, range=[floor+1, ceiling])` to all peers. Each acceptor responds with `Promise` carrying, for every slot in the range that has any state, the highest `(accepted_ballot, accepted_value)` if any.
+
+The ballot used here is `(0, me)`. Because acceptors fence on `term` first, this ballot is "fresh" for the new term; we don't need a higher round.
+
+### 4.3 Adopt and re-Accept
+
+For each slot in the range:
+
+- If any peer's `Promise` returned an accepted value, choose the value with the highest `accepted_ballot` and re-Accept it at `(0, me)` under term T.
+- If no peer returned a value, propose `NoOp` and re-Accept at `(0, me)` under term T.
+
+These re-Accepts are pipelined; the new leader does not wait for any one to be chosen before proposing the next.
+
+### 4.4 Steady state begins
+
+Once the bulk Phase 1 has been *issued* (not necessarily completed), the leader is free to start assigning new slots starting at `ceiling + 1`. The repair work for `[floor+1, ceiling]` proceeds in parallel and reuses the same machinery as routine gap repair (see [`design-parallel-slots.md`](design-parallel-slots.md) §9).
+
+---
+
+## 5. Heartbeats and Liveness
+
+Heartbeats serve two purposes: liveness signaling (reset followers' election timers) and lease maintenance (extend the leader's lease).
+
+### 5.1 Heartbeat content
+
+Every heartbeat carries:
+
+- `term`, `leader_id`.
+- `committed_safe_slot` (latest known safe-slot).
+- `lease_grant_until` (monotonic-time deadline; see §6).
+- `prev_log_slot, prev_log_term` (Raft-style consistency check, used to detect a stale follower).
+- Optional: piggy-backed `Chosen(slot)` notifications and `Accept`s if any are pending for that peer.
+
+### 5.2 Heartbeat cadence
+
+- Default `heartbeat_interval = 100 ms`.
+- A follower's election timer must be ≫ `heartbeat_interval` to allow for occasional jitter; with defaults, election timeouts are 8–15× the heartbeat interval.
+
+### 5.3 Heartbeat response
+
+Followers respond with their own `term`, `contiguous_chosen`, and `contiguous_applied`. The leader uses these to:
+
+- Detect a stale leader's continued existence (if any response carries a higher term, the leader steps down — §8).
+- Maintain peer state (used by replicator and gap detection).
+- Refresh the safe-slot computation.
+
+---
+
+## 6. Leader Lease
+
+A lease lets the leader serve `Get(mode=Linearizable)` without a per-read quorum round-trip ([§6.1 of design.md](design.md#61-linearizable-leader-read)). The lease is the standard Raft-style approach with a clock-skew bound.
+
+### 6.1 What the lease grants
+
+While its lease is valid, a leader may serve linearizable reads from local state under two assumptions:
+
+- No other node was elected leader during the lease window.
+- The leader's `contiguous_applied` slot reflects all writes acked through this leader (which is true by Invariant I3 from [`design-parallel-slots.md`](design-parallel-slots.md) §2).
+
+The first assumption is enforced by:
+
+- Acceptors **promise not to vote for any other candidate** for at least `lease_duration` after granting a heartbeat (this is the Raft "PreVote + lease" pattern).
+- The leader treats its lease as expired at `lease_grant_time + lease_duration - max_clock_skew` for safety (see §6.3).
+
+### 6.2 Lease grant and renewal
+
+Each heartbeat round-trip is also a lease grant:
+
+1. Leader sends heartbeat at monotonic time `T_send`.
+2. Follower receives, records "I will not vote for any candidate before `T_recv + lease_duration`", and replies.
+3. Leader receives the response at `T_recv_reply`. The lease is valid through `T_send + lease_duration` on the leader's clock — the leader uses `T_send` (not `T_recv_reply`) as the start so that any clock skew works in its favor.
+4. The leader treats the lease as effective until `T_send + lease_duration - max_clock_skew`. This is conservative; it gives a safety margin equal to the assumed skew bound.
+
+Because heartbeats run every `heartbeat_interval = 100 ms` and lease durations are around `lease_duration = 9 × heartbeat_interval = 900 ms`, the leader is essentially always within an active lease in steady state. A short network blip costs the leader its fast-read privilege but not its leadership.
+
+### 6.3 Clock-skew assumption
+
+[requirement.md §3](requirement.md#3-dependencies-and-assumptions) caps clock skew at `max_clock_skew = 100 ms` per heartbeat interval. The lease formula is:
+
+```
+  effective_lease = lease_duration - max_clock_skew
+```
+
+Concretely with defaults: `900 ms - 100 ms = 800 ms` of "fast-read" coverage between successful heartbeat round-trips. If the round-trip exceeds 800 ms, the lease has *technically* expired and the leader downgrades to ReadIndex for the next linearizable read until the next successful heartbeat refreshes the lease.
+
+### 6.4 Why monotonic-only
+
+All lease math uses the **monotonic clock**, not wall-clock. Wall-clock can jump (NTP step, manual operator change); monotonic cannot. This is the same discipline as Raft's reference implementation.
+
+### 6.5 What goes wrong if lease misuse occurs
+
+If a leader serves a linearizable read after its lease has *truly* expired and a new leader has been elected, the read can return stale data. The read would not have observed a write committed by the new leader. This is the precise correctness reason for the conservative `effective_lease`.
+
+The fallback is ReadIndex, which gives the same correctness guarantee without the clock assumption.
+
+---
+
+## 7. ReadIndex Fallback
+
+ReadIndex is the lease-free path for linearizable reads. Always available; used automatically when the lease is not effective; available to clients on a per-read basis.
+
+### 7.1 Procedure
+
+1. The leader records its current `contiguous_applied` slot, call it `R`.
+2. The leader broadcasts a heartbeat to a quorum, awaits responses.
+3. As soon as a quorum has responded *with the leader's own term*, the leader is confirmed to still be leader at this point in time.
+4. The leader serves the read from local state, ensuring the engine's `contiguous_applied >= R`.
+
+The cost is one network round-trip per ReadIndex (or per batch of reads). No fsync, no extra log records.
+
+### 7.2 Batching
+
+Multiple linearizable reads arriving in a window can share one ReadIndex round-trip:
+
+- Reads accumulate into a batch.
+- A single heartbeat-quorum is performed.
+- All reads in the batch are served once the quorum responds.
+
+Default batch window: 1 ms. Too long → latency. Too short → wasted heartbeats.
+
+### 7.3 When to choose ReadIndex over lease
+
+Per-read settings:
+
+- **Default:** lease if effective, ReadIndex if not.
+- **Force ReadIndex:** for environments without a clock-skew guarantee, or for workloads requiring belt-and-suspenders correctness. Higher latency but no clock dependence.
+
+The choice is exposed as a per-request option in the read RPC and as a default at the server config.
+
+---
+
+## 8. Step-Down Triggers
+
+A leader steps down (transitions to follower) on any of:
+
+- **Higher term seen.** Any RPC response carrying `term > current_term` causes the leader to adopt the new term and revert to follower.
+- **Lease unrenewable.** The leader has been unable to obtain a heartbeat-quorum response for longer than `lease_duration`. It cannot refresh its lease and assumes a partition or majority loss.
+- **Admin step-down RPC.** Operator forces it for testing, planned maintenance, or rolling upgrade.
+- **Removed from group.** A `ConfigChange` that removes this leader from the group commits; it steps down before the change takes effect on it.
+
+On step-down:
+
+1. Stop accepting new client writes; respond `NotLeader` to in-flight client requests.
+2. Stop heartbeats.
+3. Persist `current_term`.
+4. Notify the lease module to mark its grant as expired.
+5. Cancel any in-flight bulk Phase-1 repair (the next leader will redo it).
+6. Drain its replicator queues but do not send `Accept`s for slots where it has not received a quorum yet (those must be reconsidered by the next leader's bulk Phase-1).
+
+---
+
+## 9. Safety Argument
+
+The election + bulk-Phase-1 + lease design must satisfy three properties.
+
+### 9.1 At most one leader per term per group
+
+Standard Raft argument:
+
+- A candidate needs majority votes within a term.
+- A peer votes at most once per term.
+- Two majorities over the same membership intersect (by quorum overlap).
+- Therefore at most one candidate can collect a majority in any one term.
+
+CrowKV inherits this directly.
+
+### 9.2 No chosen value is lost across leader change
+
+By Paxos's classical safety: if a value `v` was *chosen* at slot `s` (≥ majority of acceptors `Accepted` it), then any future Phase-1 over slot `s` will see `v` from at least one acceptor and re-propose it.
+
+The new-leader bulk Phase-1 (§4) executes this exact procedure over the open prefix, so any chosen value is preserved.
+
+A value that was `Accepted` by some but not a majority of acceptors may be either re-chosen or lost, but it was never acknowledged to the client (Invariant I3); the client knows its outcome is unknown and retries.
+
+### 9.3 No stale leader serves a stale linearizable read
+
+Two enforcement mechanisms run in series:
+
+- **Term fencing:** every RPC carries `term`. Any acceptor with a higher term refuses the request and informs the sender, which steps down.
+- **Lease conservatism:** even when no fencing has happened, the leader self-expires its lease at `effective_lease = lease_duration - max_clock_skew`. If the clock-skew assumption holds, no other leader can have been elected within this window (because acceptors won't vote against the lease).
+
+If the clock-skew assumption is *violated*, lease-based reads can return stale data — this is documented and the operator can force ReadIndex for stronger guarantees.
+
+---
+
+## 10. Tunables and Defaults
+
+| Parameter | Default | Range | Notes |
+| --- | --- | --- | --- |
+| `heartbeat_interval` | 100 ms | 10 ms – 1 s | Should be ≪ `lease_duration` |
+| `lease_duration` | 900 ms | 100 ms – 30 s | Should be ≫ `heartbeat_interval` + `max_clock_skew` |
+| `effective_lease` | derived | — | `= lease_duration - max_clock_skew` |
+| `max_clock_skew` | 100 ms | 1 ms – 1 s | Architectural bound from [requirement.md §3](requirement.md#3-dependencies-and-assumptions) |
+| `election_min` | 800 ms | ≥ 8 × `heartbeat_interval` | Avoid spurious elections |
+| `election_max` | 1500 ms | ≤ 30 s | Bounds time to elect after leader loss |
+| `readindex_batch_window` | 1 ms | 0 – 100 ms | Latency vs network amortization |
+| `prevote_enabled` | true | bool | Reduces disruption from rejoining nodes |
+
+Notes:
+
+- **PreVote** (Raft optimization, ON by default): a candidate first asks "would you vote for me?" without bumping the term. This avoids spurious term increments from a partitioned-and-rejoined node.
+- **Pre-emptive step-down on heartbeat loss** is governed by `lease_duration`, not `election_min`. A leader that loses contact with quorum gives up its lease at `lease_duration` and stops serving fast reads even before any follower starts an election.
