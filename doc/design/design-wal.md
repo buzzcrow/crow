@@ -219,7 +219,7 @@ The watermark for a group's WAL GC is:
    gc_slot = min(safe_slot, snapshot_slot)
 ```
 
-Records with `slot < gc_slot` are eligible for GC. The two-watermark rule is justified in [`design-parallel-slots.md`](design-parallel-slots.md) §11.
+Records with `slot < gc_slot` are eligible for GC. The two-watermark rule is justified in [`design-parallel-slots.md`](design/design-parallel-slots.md) §11.
 
 ### 7.2 GC granularity
 

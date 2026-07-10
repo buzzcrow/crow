@@ -33,7 +33,7 @@ Every testable claim is stated as an **invariant** with:
 - **Ref:** upstream design doc section
 
 Example (consensus):
-> **Invariant C1:** At most one leader per term. Checked after every `RequestVote` response. Precondition: quorum exists. Assertion: no two nodes report `is_leader && same_term`. Ref: [`design-leader-election.md`](design-leader-election.md) §9.1.
+> **Invariant C1:** At most one leader per term. Checked after every `RequestVote` response. Precondition: quorum exists. Assertion: no two nodes report `is_leader && same_term`. Ref: [`design-leader-election.md`](design/design-leader-election.md) §9.1.
 
 Concrete invariants are listed in sub-topic `test-design-*.md` files.
 

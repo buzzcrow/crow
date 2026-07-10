@@ -1,4 +1,5 @@
-//! Per-slot Paxos machinery: acceptor (P1 M1), proposer / replicator / repair (P1 M3).
+//! Per-slot Paxos machinery: acceptor (P1 M1), minimal proposer + RPC integration (P1 M2),
+//! full proposer / replicator / repair (P1 M4).
 
 pub mod acceptor;
 pub mod leader;

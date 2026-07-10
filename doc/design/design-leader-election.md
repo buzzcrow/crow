@@ -138,7 +138,7 @@ These re-Accepts are pipelined; the new leader does not wait for any one to be c
 
 ### 4.4 Steady state begins
 
-Once the bulk Phase 1 has been *issued* (not necessarily completed), the leader is free to start assigning new slots starting at `ceiling + 1`. The repair work for `[floor+1, ceiling]` proceeds in parallel and reuses the same machinery as routine gap repair (see [`design-parallel-slots.md`](design-parallel-slots.md) §9).
+Once the bulk Phase 1 has been *issued* (not necessarily completed), the leader is free to start assigning new slots starting at `ceiling + 1`. The repair work for `[floor+1, ceiling]` proceeds in parallel and reuses the same machinery as routine gap repair (see [`design-parallel-slots.md`](design/design-parallel-slots.md) §9).
 
 ---
 
@@ -180,7 +180,7 @@ A lease lets the leader serve `Get(mode=Linearizable)` without a per-read quorum
 While its lease is valid, a leader may serve linearizable reads from local state under two assumptions:
 
 - No other node was elected leader during the lease window.
-- The leader's `contiguous_applied` slot reflects all writes acked through this leader (which is true by Invariant I3 from [`design-parallel-slots.md`](design-parallel-slots.md) §2).
+- The leader's `contiguous_applied` slot reflects all writes acked through this leader (which is true by Invariant I3 from [`design-parallel-slots.md`](design/design-parallel-slots.md) §2).
 
 The first assumption is enforced by:
 

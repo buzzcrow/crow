@@ -1,6 +1,6 @@
 # CrowKV - Plan: Reconfiguration and Snapshots
 
-Depends on: [`plan.md`](plan/plan.md), [`design-reconfiguration.md`](design-reconfiguration.md), [`plan-rpc.md`](plan/plan-rpc.md), [`plan-wal.md`](plan/plan-wal.md), [`plan-storage.md`](plan/plan-storage.md)
+Depends on: [`plan.md`](plan/plan.md), [`design-reconfiguration.md`](design/design-reconfiguration.md), [`plan-rpc.md`](plan/plan-rpc.md), [`plan-wal.md`](plan/plan-wal.md), [`plan-storage.md`](plan/plan-storage.md)
 Satisfies: [requirement.md §9.1](requirement.md#91-reconfiguration), [requirement.md §9.2](requirement.md#92-rolling-upgrade)
 
 Phase 5: joint consensus, snapshot install, rolling upgrade. Builds on the snapshot streaming protocol frozen in P4 M2 and the engine snapshot export/import from P3 M3.
@@ -10,7 +10,7 @@ Phase 5: joint consensus, snapshot install, rolling upgrade. Builds on the snaps
 ### M1 — Snapshot install protocol
 
 - Wire the P4 `SnapshotService` to `Engine::snapshot_export` / `snapshot_import`.
-- Resumable chunked transfer with `(snapshot_id, chunk_offset)` checkpointing on the receiver; restart-after-failure picks up at last successful offset ([`design-storage-engine.md`](design-storage-engine.md) §6.3).
+- Resumable chunked transfer with `(snapshot_id, chunk_offset)` checkpointing on the receiver; restart-after-failure picks up at last successful offset ([`design-storage-engine.md`](design/design-storage-engine.md) §6.3).
 - End-to-end CRC verified before activation; throttleable via `chunk_rate_bytes_per_sec` config.
 - New-node bootstrap path: receive snapshot at slot S, then catch up via WAL streaming for `[S+1, current_max_chosen]`.
 
@@ -20,7 +20,7 @@ Phase 5: joint consensus, snapshot install, rolling upgrade. Builds on the snaps
 
 - Implement `ConfigChange(joint = C_old ∪ C_new)` and `ConfigChange(C_new)` log entries.
 - Both-quorum decision rule active while joint config is *applied* (not merely chosen).
-- New members join as non-voting catch-up readers during joint phase ([`design-reconfiguration.md`](design-reconfiguration.md) §3, §4).
+- New members join as non-voting catch-up readers during joint phase ([`design-reconfiguration.md`](design/design-reconfiguration.md) §3, §4).
 - Failure recovery: roll back to `C_old` if catch-up exceeds `catchup_timeout`.
 
 **Acceptance:** 3 → 5 single-member add succeeds online; failed catch-up rolls back cleanly to 3.

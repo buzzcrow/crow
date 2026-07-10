@@ -13,12 +13,7 @@ use std::sync::atomic::Ordering;
 
 use crate::paxos::protocol::{PxAcceptReply, PxPrepareReply};
 use crate::paxos::slot_list::{SlotIndex, SlotList};
-use crate::paxos::slot_node::{
-    PxBallot,
-    PxLogEntry,
-    PxSlotNode,
-    get_or_prepare_slot,
-};
+use crate::paxos::slot_node::{get_or_prepare_slot, PxBallot, PxLogEntry, PxSlotNode};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PrepareResult {
@@ -46,10 +41,9 @@ impl PxAcceptor {
     pub async fn accept(&mut self, entry: PxLogEntry) -> PxAcceptReply {
         let slot = entry.slot;
         match self.inner_accept(entry) {
-            Some(AcceptResult::Accepted { slot: s, ballot: b }) => PxAcceptReply::Accepted {
-                slot: s,
-                ballot: b,
-            },
+            Some(AcceptResult::Accepted { slot: s, ballot: b }) => {
+                PxAcceptReply::Accepted { slot: s, ballot: b }
+            }
             Some(AcceptResult::Rejected(current)) => PxAcceptReply::Rejected {
                 slot,
                 current_promised: current,
@@ -68,7 +62,9 @@ impl PxAcceptor {
     #[allow(clippy::unused_async)]
     pub async fn prepare(&mut self, slot: SlotIndex, ballot: PxBallot) -> PxPrepareReply {
         match self.inner_prepare(slot, ballot) {
-            Some(PrepareResult::Promised { accepted }) => PxPrepareReply::Promised { slot, accepted },
+            Some(PrepareResult::Promised { accepted }) => {
+                PxPrepareReply::Promised { slot, accepted }
+            }
             Some(PrepareResult::Rejected(current)) => PxPrepareReply::Rejected {
                 slot,
                 current_promised: current,

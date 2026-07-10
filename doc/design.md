@@ -3,7 +3,7 @@
 Depends on: [`requirement.md`](requirement.md)
 Satisfies: all of [`requirement.md`](requirement.md) (this is the root design doc)
 
-This is the master design document. It establishes the conceptual model, module decomposition, and cross-cutting flows. Deep dives for the heavy areas live in sibling sub-topic docs (`design-parallel-slots.md`, `design-leader-election.md`, `design-wal.md`, `design-reconfiguration.md`, `design-storage-engine.md`, `design-async-io.md`).
+This is the master design document. It establishes the conceptual model, module decomposition, and cross-cutting flows. Deep dives for the heavy areas live in sibling sub-topic docs (`design-parallel-slots.md`, `design-leader-election.md`, `design-wal.md`, `design-reconfiguration.md`, `design-storage-engine.md`, `design-async-io.md`, `design-rpc.md`).
 
 The doc explains **what the system is** and **how it behaves**. It does not prescribe an implementation phasing (that lives in `plan.md`) and does not enumerate test scenarios (those live in `test-design.md`).
 
@@ -202,7 +202,7 @@ Key properties:
 - **Parallelism**: slots N, N+1, N+2 may be in any of `Proposed` / `Accepted` / `Chosen` / `Applied` independently. The leader does not wait for slot N to apply before assigning N+1.
 - **Backpressure**: if the in-flight window is full, the leader admits to a bounded queue and beyond that returns `Busy` ([requirement.md §7.3](requirement.md#73-parallel-slot-processing)). The leader never blocks indefinitely.
 
-The mechanics — sliding window, fanout, gap detection — are detailed in [`design-parallel-slots.md`](design-parallel-slots.md).
+The mechanics — sliding window, fanout, gap detection — are detailed in [`design-parallel-slots.md`](design/design-parallel-slots.md).
 
 ### 5.2 Cold-Start / New-Leader Write
 
@@ -250,7 +250,7 @@ Batching is preferred for high-throughput clients; per-op overhead drops to a fr
 
 The lease check is constant-time when valid. ReadIndex adds one round-trip but no fsync. The leader's learner already reflects every chosen slot on the leader (the leader applies before acking writes), so the returned value is the latest in the linearization order.
 
-Details of lease and ReadIndex live in [`design-leader-election.md`](design-leader-election.md).
+Details of lease and ReadIndex live in [`design-leader-election.md`](design/design-leader-election.md).
 
 ### 6.2 Read-Your-Writes Follower Read
 
@@ -326,7 +326,7 @@ The leader holds a **lease** for fast linearizable reads. Lease duration must be
 
 Step-down triggers: lease unrenewable (lost contact with quorum), seeing a higher term in any RPC response, admin-forced step-down, or being removed from the group via reconfiguration.
 
-→ Full design: [`design-leader-election.md`](design-leader-election.md).
+→ Full design: [`design-leader-election.md`](design/design-leader-election.md).
 
 ### 8.2 Parallel Slot Pipelining
 
@@ -340,7 +340,7 @@ The defining feature of CrowKV. Within a group:
 
 Correctness rests on the blind-ops premise: out-of-order apply is safe when no operation reads before writing.
 
-→ Full design: [`design-parallel-slots.md`](design-parallel-slots.md).
+→ Full design: [`design-parallel-slots.md`](design/design-parallel-slots.md).
 
 ### 8.3 Durability and WAL
 
@@ -352,7 +352,7 @@ The Acceptor's WAL is the only persistent log. Properties:
 - **Ack contract**: an `Accepted` is sent only after that record's fsync completes. A client write is acked only after a quorum of `Accepted`s ([requirement.md §8.1](requirement.md#81-wal-write-ahead-log)).
 - **Disk loss** → the node fails itself out of that group and rebuilds from peers via snapshot install.
 
-→ Full design: [`design-wal.md`](design-wal.md). The async disk-I/O substrate (io_uring + fallback) is specified in [`design-async-io.md`](design-async-io.md).
+→ Full design: [`design-wal.md`](design/design-wal.md). The async disk-I/O substrate (io_uring + fallback) is specified in [`design-async-io.md`](design/design-async-io.md).
 
 ### 8.4 Snapshot and Install
 
@@ -363,7 +363,7 @@ Each group takes per-group snapshots when its WAL exceeds a configured size or s
 - **Install protocol**: chunked, byte-offset based (resumable), end-to-end CRC, throttleable. A new node or one whose WAL is older than the leader's earliest retained slot must receive a snapshot before resuming WAL-based catch-up.
 - **Source**: leader or any caught-up learner.
 
-The snapshot file format and engine-specific export/import mechanics live in [`design-storage-engine.md`](design-storage-engine.md).
+The snapshot file format and engine-specific export/import mechanics live in [`design-storage-engine.md`](design/design-storage-engine.md).
 
 ### 8.5 Reconfiguration
 
@@ -376,7 +376,7 @@ Membership changes use Raft-style **joint consensus** adapted to Paxos:
 
 Supported transitions: 3 ↔ 5 ↔ 7. Larger or smaller groups are not in scope.
 
-→ Full design: [`design-reconfiguration.md`](design-reconfiguration.md).
+→ Full design: [`design-reconfiguration.md`](design/design-reconfiguration.md).
 
 ### 8.6 Idempotency / Dedup Cache
 
@@ -399,7 +399,7 @@ The Learner talks to a single engine trait. Three engines satisfy it: in-memory 
 - `snapshot_export()` / `snapshot_import()` — for snapshot install.
 - Per-key MVCC of one version: tombstones with slots; compacted only after both the snapshot watermark and the safe-slot watermark have passed.
 
-→ Full design: [`design-storage-engine.md`](design-storage-engine.md).
+→ Full design: [`design-storage-engine.md`](design/design-storage-engine.md).
 
 ---
 
@@ -457,11 +457,11 @@ The metric and log signals required by [requirement.md §13.2](requirement.md#13
 
 These are intentional gaps left for sub-topic docs or for a future iteration. They are not requirement gaps.
 
-- **Exact lease duration formula.** Should be a function of heartbeat interval, observed skew, and a safety margin. To be specified in [`design-leader-election.md`](design-leader-election.md).
-- **Repair-task cadence and trigger heuristics.** Default scan period, gap-age threshold, batch size. To be specified in [`design-parallel-slots.md`](design-parallel-slots.md).
-- **WAL segment rotation policy.** Size threshold, retention, multi-disk allocation algorithm (round-robin vs load-aware). To be specified in [`design-wal.md`](design-wal.md).
-- **Joint-consensus quorum overlap proof for asymmetric transitions.** E.g. when going 3 → 5 with the new two members not yet caught up, what is the safe ordering of catch-up vs vote-eligibility? To be specified in [`design-reconfiguration.md`](design-reconfiguration.md).
-- **Compaction policy for the storage engine.** When are tombstones safe to drop? Two watermarks (snapshot-slot and safe-slot) must both pass. Exact policy to be specified in [`design-storage-engine.md`](design-storage-engine.md).
+- **Exact lease duration formula.** Should be a function of heartbeat interval, observed skew, and a safety margin. To be specified in [`design-leader-election.md`](design/design-leader-election.md).
+- **Repair-task cadence and trigger heuristics.** Default scan period, gap-age threshold, batch size. To be specified in [`design-parallel-slots.md`](design/design-parallel-slots.md).
+- **WAL segment rotation policy.** Size threshold, retention, multi-disk allocation algorithm (round-robin vs load-aware). To be specified in [`design-wal.md`](design/design-wal.md).
+- **Joint-consensus quorum overlap proof for asymmetric transitions.** E.g. when going 3 → 5 with the new two members not yet caught up, what is the safe ordering of catch-up vs vote-eligibility? To be specified in [`design-reconfiguration.md`](design/design-reconfiguration.md).
+- **Compaction policy for the storage engine.** When are tombstones safe to drop? Two watermarks (snapshot-slot and safe-slot) must both pass. Exact policy to be specified in [`design-storage-engine.md`](design/design-storage-engine.md).
 - **Snapshot transfer chunk size and throttling defaults.** Network-friendly defaults; pluggable.
 - **Group-0 special handling during simultaneous topology + Group-0 membership change.** Likely serialized by holding a Group-0 leader lease, but the sequencing must be made explicit.
 

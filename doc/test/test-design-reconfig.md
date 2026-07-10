@@ -1,6 +1,6 @@
 # CrowKV - Test Design: Reconfiguration
 
-Depends on: [`test-design.md`](test/test-design.md), [`design-reconfiguration.md`](design-reconfiguration.md)
+Depends on: [`test-design.md`](test/test-design.md), [`design-reconfiguration.md`](design/design-reconfiguration.md)
 Satisfies: [requirement.md §9.1](requirement.md#91-reconfiguration), [requirement.md §9.2](requirement.md#92-rolling-upgrade)
 
 Invariants for membership change and rolling upgrade.
@@ -9,9 +9,9 @@ Invariants for membership change and rolling upgrade.
 
 | ID | Claim | Trigger | Ref |
 |---|---|---|---|
-| RC1 | Joint config both-quorum | Every decision during joint | [`design-reconfiguration.md`](design-reconfiguration.md) §2 |
-| RC2 | New member catch-up before voting | `ConfigChange(C_new)` proposed | [`design-reconfiguration.md`](design-reconfiguration.md) §4 |
-| RC3 | No split-brain during transition | Any two quorums intersect | [`design-reconfiguration.md`](design-reconfiguration.md) §8 |
+| RC1 | Joint config both-quorum | Every decision during joint | [`design-reconfiguration.md`](design/design-reconfiguration.md) §2 |
+| RC2 | New member catch-up before voting | `ConfigChange(C_new)` proposed | [`design-reconfiguration.md`](design/design-reconfiguration.md) §4 |
+| RC3 | No split-brain during transition | Any two quorums intersect | [`design-reconfiguration.md`](design/design-reconfiguration.md) §8 |
 | RC4 | Rolling upgrade one version step | Mixed-version cluster | [`requirement.md`](requirement.md) §9.2 |
 
 ## 2. Unit Tests

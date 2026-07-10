@@ -1,6 +1,6 @@
 # CrowKV - Plan: WAL Implementation
 
-Depends on: [`plan.md`](plan/plan.md), [`design-wal.md`](design-wal.md), [`plan-consensus.md`](plan/plan-consensus.md)
+Depends on: [`plan.md`](plan/plan.md), [`design-wal.md`](design/design-wal.md), [`plan-consensus.md`](plan/plan-consensus.md)
 Satisfies: [requirement.md §8.1](requirement.md#81-wal-write-ahead-log), [requirement.md §8.2](requirement.md#82-acceptor)
 
 Phase 2 implementation: multi-disk write-ahead log for acceptor persistence.
@@ -9,7 +9,7 @@ Phase 2 implementation: multi-disk write-ahead log for acceptor persistence.
 
 ### M0 — Async I/O facade
 
-- Implement `io::AsyncFile` per [`design-async-io.md`](design-async-io.md) §5.
+- Implement `io::AsyncFile` per [`design-async-io.md`](design/design-async-io.md) §5.
 - io_uring backend via `tokio-uring` (gated by capability probe, §7 of that doc).
 - Fallback backend via `tokio::fs` + `spawn_blocking`.
 - Simulated `SimDisk` backend for unit tests.
@@ -27,8 +27,8 @@ Phase 2 implementation: multi-disk write-ahead log for acceptor persistence.
 
 ### M2 — Batched fsync per disk
 
-- `FsyncWorker` per disk: a long-running async task driving an `mpsc` queue of pending records; batch by bytes/time/watchdog (defaults from [`design-wal.md`](design-wal.md) §9).
-- All disk I/O goes through the project async I/O facade (`AsyncFile` in [`design-async-io.md`](design-async-io.md)). The worker calls `file.write_at(buf, off).await` then `file.fdatasync().await`; on Linux ≥ 5.11 these map to io_uring SQEs, otherwise to `spawn_blocking`. No call site changes needed across backends.
+- `FsyncWorker` per disk: a long-running async task driving an `mpsc` queue of pending records; batch by bytes/time/watchdog (defaults from [`design-wal.md`](design/design-wal.md) §9).
+- All disk I/O goes through the project async I/O facade (`AsyncFile` in [`design-async-io.md`](design/design-async-io.md)). The worker calls `file.write_at(buf, off).await` then `file.fdatasync().await`; on Linux ≥ 5.11 these map to io_uring SQEs, otherwise to `spawn_blocking`. No call site changes needed across backends.
 - Async completion future per `Accept` (returned by `WalManager::append(record).await`); `Accepted` response gated on future `Ok`.
 - Single-disk throughput benchmark using `criterion`.
 
@@ -66,7 +66,7 @@ Modules in `crowkv`: **`io`** (P2 M0, async I/O facade) and **`wal`** (P2 M1+).
 
 | Module path (in `crowkv`) | Responsibility |
 |---|---|
-| `io` (whole module) | Project async I/O facade ([`design-async-io.md`](design-async-io.md)). **Built first as P2 M0** so WAL M1+ and the engine module can both use it. |
+| `io` (whole module) | Project async I/O facade ([`design-async-io.md`](design/design-async-io.md)). **Built first as P2 M0** so WAL M1+ and the engine module can both use it. |
 | `wal::record` | `WALRecord` shape, CRC32C (P2 M1) |
 | `wal::segment` | File format, record encoding/decoding (P2 M1) |
 | `wal::index` | In-memory slot-to-segment index (P2 M1) |

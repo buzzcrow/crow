@@ -1,0 +1,59 @@
+// Minimal classic-Paxos message set for P1 M2.
+// Wire shapes frozen at end of P1 M2; P4 extends with heartbeat, vote,
+// chosen, snapshot, and client messages using append-only field numbers.
+//
+// See doc/design/design-rpc.md §2 for field-number rules.
+
+syntax = "proto3";
+
+package crowkv.rpc;
+
+message PrepareRequest {
+  uint32 version = 1;
+  uint64 slot    = 2;
+  uint64 round   = 3;
+  uint64 leader_id = 4;
+}
+
+message AcceptedValue {
+  uint64 slot  = 1;
+  uint64 round = 2;
+  uint64 leader_id = 3;
+  uint64 term  = 4;
+  bytes  payload = 5;
+}
+
+message PromiseResponse {
+  uint32 version = 1;
+  uint64 slot    = 2;
+  uint64 round   = 3;
+  uint64 leader_id = 4;
+  AcceptedValue previously_accepted = 5;
+  bool   rejected = 6;
+  uint64 rejected_round   = 7;
+  uint64 rejected_leader_id = 8;
+}
+
+message AcceptRequest {
+  uint32 version = 1;
+  uint64 slot    = 2;
+  uint64 round   = 3;
+  uint64 leader_id = 4;
+  uint64 term    = 5;
+  AcceptedValue value = 6;
+}
+
+message AcceptedResponse {
+  uint32 version = 1;
+  uint64 slot    = 2;
+  uint64 round   = 3;
+  uint64 leader_id = 4;
+  bool   rejected = 5;
+  uint64 rejected_round   = 6;
+  uint64 rejected_leader_id = 7;
+}
+
+service PeerService {
+  rpc Prepare(PrepareRequest) returns (PromiseResponse);
+  rpc Accept(AcceptRequest) returns (AcceptedResponse);
+}

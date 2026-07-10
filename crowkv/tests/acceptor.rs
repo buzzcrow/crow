@@ -7,11 +7,7 @@ mod testkit;
 use crowkv::paxos::acceptor::PxAcceptor;
 use crowkv::paxos::protocol::{PxAcceptReply, PxPrepareReply};
 use crowkv::paxos::slot_list::SlotIndex;
-use crowkv::paxos::slot_node::{
-    LogEntryKind,
-    PxBallot,
-    PxLogEntry,
-};
+use crowkv::paxos::slot_node::{LogEntryKind, PxBallot, PxLogEntry};
 
 fn entry(slot: SlotIndex, ballot: PxBallot, payload: &[u8]) -> PxLogEntry {
     PxLogEntry {
@@ -108,4 +104,3 @@ async fn ballot_ordering_is_total() {
     assert!(PxBallot::new(2, 1) < PxBallot::new(2, 2));
     assert_eq!(PxBallot::new(3, 7), PxBallot::new(3, 7));
 }
-

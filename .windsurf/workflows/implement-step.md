@@ -10,7 +10,7 @@ Use this workflow when starting work on a single milestone (e.g. `P1 M1`, `P2 M0
 
 - Phase + milestone identifier (e.g. `P2 M0` = WAL Phase 2, Milestone 0).
 - Relevant plan doc (e.g. `doc/plan/plan-wal.md`).
-- Relevant design doc(s) (e.g. `doc/design-wal.md`, `doc/design-async-io.md`).
+- Relevant design doc(s) (e.g. `doc/design/design-wal.md`, `doc/design/design-async-io.md`).
 - Relevant test-design doc (e.g. `doc/test/test-design-wal.md`).
 
 **Hard rule:** never skip a checkpoint. Stop and wait for the user after every step that ends with `**[CHECKPOINT]**`.

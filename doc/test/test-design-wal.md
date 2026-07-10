@@ -1,6 +1,6 @@
 # CrowKV - Test Design: WAL
 
-Depends on: [`test-design.md`](test/test-design.md), [`design-wal.md`](design-wal.md)
+Depends on: [`test-design.md`](test/test-design.md), [`design-wal.md`](design/design-wal.md)
 Satisfies: [requirement.md §8.1](requirement.md#81-wal-write-ahead-log), [requirement.md §8.2](requirement.md#82-acceptor)
 
 Invariants and test strategy for the write-ahead log.
@@ -9,12 +9,12 @@ Invariants and test strategy for the write-ahead log.
 
 | ID | Claim | Trigger | Ref |
 |---|---|---|---|
-| W1 | Ack only after fsync | `Accepted` response sent | [`design-wal.md`](design-wal.md) §5.1 |
-| W2 | Replay deterministic | Startup segment walk | [`design-wal.md`](design-wal.md) §6 |
-| W3 | CRC failure truncates local | Bad CRC during replay | [`design-wal.md`](design-wal.md) §6.2 |
-| W4 | GC only below both watermarks | Segment unlink | [`design-wal.md`](design-wal.md) §7 |
-| W5 | Multi-disk parallel fsync | Aggregate IOPS measurement | [`design-wal.md`](design-wal.md) §3 |
-| W6 | Disk loss → fail-out, not partial | fsync error | [`design-wal.md`](design-wal.md) §8.1 |
+| W1 | Ack only after fsync | `Accepted` response sent | [`design-wal.md`](design/design-wal.md) §5.1 |
+| W2 | Replay deterministic | Startup segment walk | [`design-wal.md`](design/design-wal.md) §6 |
+| W3 | CRC failure truncates local | Bad CRC during replay | [`design-wal.md`](design/design-wal.md) §6.2 |
+| W4 | GC only below both watermarks | Segment unlink | [`design-wal.md`](design/design-wal.md) §7 |
+| W5 | Multi-disk parallel fsync | Aggregate IOPS measurement | [`design-wal.md`](design/design-wal.md) §3 |
+| W6 | Disk loss → fail-out, not partial | fsync error | [`design-wal.md`](design/design-wal.md) §8.1 |
 
 ## 2. Unit Tests
 
@@ -53,5 +53,5 @@ Invariants and test strategy for the write-ahead log.
 
 ## 5. Resolved Decisions
 
-- **Test directories:** per-test `tempfile`-managed directories for integration tests against the real `tokio-uring` / fallback backend; the simulated `SimDisk` backend is used for unit tests (per [`design-async-io.md`](design-async-io.md) §10).
+- **Test directories:** per-test `tempfile`-managed directories for integration tests against the real `tokio-uring` / fallback backend; the simulated `SimDisk` backend is used for unit tests (per [`design-async-io.md`](design/design-async-io.md) §10).
 - **Disk error injection:** `LD_PRELOAD` (libfiu-style) for end-to-end fault tests against the real backend; `SimDisk::inject_io_error()` for unit tests.

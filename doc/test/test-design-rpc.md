@@ -12,8 +12,8 @@ Invariants for wire protocol and client behavior.
 | R1 | Protobuf forward compat | Message decode with unknown fields | [`requirement.md`](requirement.md) §9.2 |
 | R2 | `NotLeader` hint routing | Client receives `NotLeaderHint` | [`design.md`](design.md) §7 |
 | R3 | Retry idempotency | Duplicate `(client_id, seq)` | [`design.md`](design.md) §8.6 |
-| R4 | Lease check before linearizable read | Leader read path | [`design-leader-election.md`](design-leader-election.md) §6 |
-| R5 | ReadIndex fallback when lease invalid | Lease expired | [`design-leader-election.md`](design-leader-election.md) §7 |
+| R4 | Lease check before linearizable read | Leader read path | [`design-leader-election.md`](design/design-leader-election.md) §6 |
+| R5 | ReadIndex fallback when lease invalid | Lease expired | [`design-leader-election.md`](design/design-leader-election.md) §7 |
 | R6 | Bidirectional stream survives reconnect | Transient network drop | [`design.md`](design.md) §3 |
 
 ## 2. Unit Tests

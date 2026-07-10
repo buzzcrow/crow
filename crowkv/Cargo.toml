@@ -11,7 +11,13 @@ description = "CrowKV core library: consensus, engine, WAL, I/O, RPC, reconfigur
 workspace = true
 
 [dependencies]
-tokio = { workspace = true, features = ["rt", "macros", "time"] }
+tokio = { workspace = true, features = ["rt", "macros", "time", "net"] }
+tokio-stream = "0.1"
+tonic = { workspace = true }
+prost = { workspace = true }
+
+[build-dependencies]
+tonic-build = "0.12"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }

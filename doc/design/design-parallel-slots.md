@@ -294,7 +294,7 @@ Parallel slots interact with WAL GC through two watermarks:
 
 **Repair-time safety:** repair never needs to read GC'd slots, because by definition every slot ≤ safe_slot is *already chosen* on every learner, so it cannot be a gap.
 
-This is detailed further in [`design-wal.md`](design-wal.md) §4.
+This is detailed further in [`design-wal.md`](design/design-wal.md) §4.
 
 ---
 

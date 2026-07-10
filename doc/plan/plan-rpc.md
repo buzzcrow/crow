@@ -1,16 +1,18 @@
 # CrowKV - Plan: RPC and Client Implementation
 
-Depends on: [`plan.md`](plan/plan.md), [`design.md`](design.md) §2, §7, [`plan-consensus.md`](plan/plan-consensus.md), [`plan-wal.md`](plan/plan-wal.md), [`plan-storage.md`](plan/plan-storage.md)
+Depends on: [`plan.md`](plan/plan.md), [`design.md`](design.md) §2, §7, [`design-rpc.md`](design/design-rpc.md), [`plan-consensus.md`](plan/plan-consensus.md), [`plan-wal.md`](plan/plan-wal.md), [`plan-storage.md`](plan/plan-storage.md)
 Satisfies: [requirement.md §10](requirement.md#10-client-interaction), [requirement.md §3 RPC framework assumption](requirement.md#3-dependencies-and-assumptions)
 
 Phase 4: gRPC wire protocol, node-to-node transport, client library. P4 replaces the in-process channels from P1's `test_harness` with a real network transport. P2 WAL and P3 storage are integrated here for the first real-restart tests.
 
+**Note on early RPC subset:** P1 M2 (see [`plan-consensus.md`](plan/plan-consensus.md) §1) introduces a minimal RPC service for classic Paxos (`Prepare`/`Promise`/`Accept`/`Accepted`) using hand-coded Rust structs with `prost`-style encode/decode, so that classic Paxos can be exercised over a real loopback wire before leader election lands. Tests use `TestNodeHarness` (in-process threads with real `TcpListener`) rather than the `crowkv-server` binary. P4 builds on that foundation: it formalizes the `.proto` schema, adds the remaining message types (`Chosen`, `Heartbeat`, `RequestVote`, `Vote`, `SnapshotChunk`, client RPCs), and introduces the `version` field. Field numbers used in P1 M2 are append-only — P4 must not mutate them.
+
 ## 1. Milestones
 
-### M1 — Protobuf schema
+### M1 — Protobuf schema (extends P1 M2 wire shapes)
 
-- Define `.proto` files in `rpc/proto/` for: `Prepare`, `Promise`, `Accept`, `Accepted`, `Chosen`, `Heartbeat`, `RequestVote`, `Vote`, `SnapshotChunk`, `ClientRequest`, `ClientResponse`, `DescribeCluster`, `NotLeaderHint`.
-- All messages carry a `version: u32` field at fixed tag 1 for rolling-upgrade compatibility.
+- Formalize `.proto` files in `rpc/proto/` for the full message set: `Prepare`, `Promise`, `Accept`, `Accepted` (inherited from P1 M2 [`design-rpc.md`](design/design-rpc.md) §2, field numbers must match); plus `Chosen`, `Heartbeat`, `RequestVote`, `Vote`, `SnapshotChunk`, `ClientRequest`, `ClientResponse`, `DescribeCluster`, `NotLeaderHint`.
+- Add `version: u32` at fixed tag 1 to every message (P1 M2 used hand-coded structs without explicit versioning; this milestone retrofits it).
 - Append-only field numbers; document forbidden-mutation rules in a header comment.
 - `build.rs` invokes `tonic-build` (or equivalent) to generate Rust types.
 - **Freeze:** `.proto` schema after this milestone — no field-number changes without version bump.
@@ -41,7 +43,7 @@ Phase 4: gRPC wire protocol, node-to-node transport, client library. P4 replaces
 - `Linearizable` → leader only, lease check enforced. The lease state machine itself is unchanged from P1 M4 (`lease.rs`); P4 only swaps `TestTimer` for the real monotonic clock and wires in real heartbeat round-trip times.
 - `SafeSlot` / `AtSlot(N)` → any replica with sufficient resolved-slot.
 - `BestEffortStale` → any replica.
-- Lease fallback: ReadIndex implemented as quorum heartbeat round-trip ([`design-leader-election.md`](design-leader-election.md) §7).
+- Lease fallback: ReadIndex implemented as quorum heartbeat round-trip ([`design-leader-election.md`](design/design-leader-election.md) §7).
 
 **Acceptance:** mixed crowbench workload (50% leader reads, 50% follower reads) returns zero divergence; ReadIndex fallback exercised by deliberately disabling lease in test config.
 

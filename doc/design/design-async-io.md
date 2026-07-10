@@ -1,7 +1,7 @@
 # CrowKV - Design: Async Local Disk I/O
 
 Depends on: [`design.md`](design.md), [`requirement.md`](requirement.md), [`plan.md`](plan/plan.md) §7 (Concurrency Model)
-Satisfies: [requirement.md §8.1](requirement.md#81-wal-write-ahead-log) (durability contract), and underpins [`design-wal.md`](design-wal.md), [`design-storage-engine.md`](design-storage-engine.md)
+Satisfies: [requirement.md §8.1](requirement.md#81-wal-write-ahead-log) (durability contract), and underpins [`design-wal.md`](design/design-wal.md), [`design-storage-engine.md`](design/design-storage-engine.md)
 
 This document specifies the project-wide async local disk I/O abstraction. It is shared infrastructure: WAL fsync, ordered-file engine writes, snapshot file I/O, and any future on-disk subsystem all use it.
 
@@ -129,7 +129,7 @@ pub async fn read_dir(path: &Path) -> io::Result<impl Stream<Item = io::Result<D
 
 - One io_uring thread per WAL disk plus one for the engine.
 - Eliminates contention between disks at the kernel level.
-- Pros: matches the parallelism story of [`design-wal.md`](design-wal.md) §3.
+- Pros: matches the parallelism story of [`design-wal.md`](design/design-wal.md) §3.
 - Cons: more threads; more complexity in routing operations.
 
 **Selected: Topology A for V1; revisit Topology B if benchmarks show single-thread io_uring becomes the bottleneck.** Topology A still gets per-disk parallelism *inside* the ring (multiple SQEs in flight to different fds in parallel).
@@ -157,7 +157,7 @@ io_uring's safety contract: while a SQE is in flight, the buffer must not be rea
 
 **Project rule:** all callers use the same owned-buffer pattern even on the fallback backend. This means the WAL `Segment::write` accepts `Vec<u8>` and gets it back; no `&[u8]` passed across an `await` boundary.
 
-**Pool reuse.** A small per-disk free-list of fixed-size 64 KiB buffers is sufficient for WAL fsync coalescing (matches `wal_fsync_batch_bytes` default in [`design-wal.md`](design-wal.md) §4.3). The engine snapshot path uses 1 MiB buffers (matches snapshot chunk size). No global pool — each subsystem owns its own.
+**Pool reuse.** A small per-disk free-list of fixed-size 64 KiB buffers is sufficient for WAL fsync coalescing (matches `wal_fsync_batch_bytes` default in [`design-wal.md`](design/design-wal.md) §4.3). The engine snapshot path uses 1 MiB buffers (matches snapshot chunk size). No global pool — each subsystem owns its own.
 
 **Fixed buffers (registered).** `IORING_REGISTER_BUFFERS` lets us pre-register buffers for zero-copy submission. **Deferred to V2** unless profiling shows submission overhead is a bottleneck.
 
@@ -168,7 +168,7 @@ io_uring's safety contract: while a SQE is in flight, the buffer must not be rea
 All `AsyncFile` operations return `std::io::Result<T>`. io_uring CQE error codes are mapped to `io::Error` with the same `ErrorKind` as the equivalent blocking syscall. Callers (WAL, engine) cannot distinguish backend from the error.
 
 Specific cases:
-- **EIO from fdatasync.** Bubbles up. WAL fsync worker treats this as "disk failed" per [`design-wal.md`](design-wal.md) §8.1.
+- **EIO from fdatasync.** Bubbles up. WAL fsync worker treats this as "disk failed" per [`design-wal.md`](design/design-wal.md) §8.1.
 - **ENOSPC.** Treated as "disk full"; WAL acceptor stops fsync; same recovery path as EIO.
 - **Cancellation.** If the future is dropped before completion on the io_uring backend, `tokio-uring` issues an `IORING_OP_ASYNC_CANCEL`. The buffer is held until the cancel completes (no premature drop).
 

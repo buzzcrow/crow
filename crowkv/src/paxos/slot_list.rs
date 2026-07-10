@@ -2,11 +2,10 @@
 
 use std::marker::PhantomData;
 use std::ops::Deref;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::ptr::null_mut;
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 pub type SlotIndex = u64;
-
 
 /// A chunked, reader-pinned concurrent sparse list.
 pub struct SlotList<T> {
@@ -54,7 +53,11 @@ impl<T> SlotList<T> {
     ///
     /// This iterator is lock-free and safe under concurrent readers/writers.
     /// Each yielded item holds its own `SlotReadGuard`.
-    pub fn iter_range(&self, start_slot: SlotIndex, end_slot_exclusive: SlotIndex) -> SlotIter<'_, T> {
+    pub fn iter_range(
+        &self,
+        start_slot: SlotIndex,
+        end_slot_exclusive: SlotIndex,
+    ) -> SlotIter<'_, T> {
         SlotIter {
             list: self,
             next_slot: start_slot.max(self.trim_slot.load(Ordering::Acquire)),
@@ -238,7 +241,9 @@ impl<T> SlotList<T> {
                     };
                 }
                 Err(existing) => {
-                    unsafe { drop(Box::from_raw(new_ptr)); }
+                    unsafe {
+                        drop(Box::from_raw(new_ptr));
+                    }
                     return SlotReadGuard {
                         chunk,
                         ptr: existing,
@@ -281,12 +286,10 @@ impl<T> SlotList<T> {
             }
             let next = chunk.next.load(Ordering::Acquire);
             chunk.retired.store(true, Ordering::Release);
-            match self.head.compare_exchange(
-                chunk_ptr,
-                next,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
+            match self
+                .head
+                .compare_exchange(chunk_ptr, next, Ordering::AcqRel, Ordering::Acquire)
+            {
                 Ok(_) => {
                     if !next.is_null() {
                         unsafe { &*next }.prev.store(null_mut(), Ordering::Release);
@@ -350,7 +353,9 @@ impl<T> SlotList<T> {
                         .next
                         .store(next_ptr, Ordering::Release);
                 }
-                unsafe { Self::drop_chunk(curr_ptr); }
+                unsafe {
+                    Self::drop_chunk(curr_ptr);
+                }
                 freed += 1;
                 curr_ptr = next_ptr;
             } else {
@@ -392,7 +397,9 @@ impl<T> SlotList<T> {
                 }
                 return unsafe { &*new_chunk };
             }
-            unsafe { drop(Box::from_raw(new_chunk)); }
+            unsafe {
+                drop(Box::from_raw(new_chunk));
+            }
         }
     }
 
@@ -420,12 +427,10 @@ impl<T> SlotList<T> {
     ) -> Result<(), ()> {
         if pred.is_null() {
             // Insert at head.
-            match self.head.compare_exchange(
-                succ,
-                new_chunk,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
+            match self
+                .head
+                .compare_exchange(succ, new_chunk, Ordering::AcqRel, Ordering::Acquire)
+            {
                 Ok(_) => Ok(()),
                 Err(_) => Err(()),
             }
@@ -462,10 +467,14 @@ impl<T> SlotList<T> {
         for entry in &chunk.entries {
             let value_ptr = entry.load(Ordering::Acquire);
             if !value_ptr.is_null() {
-                unsafe { drop(Box::from_raw(value_ptr)); }
+                unsafe {
+                    drop(Box::from_raw(value_ptr));
+                }
             }
         }
-        unsafe { drop(Box::from_raw(chunk_ptr)); }
+        unsafe {
+            drop(Box::from_raw(chunk_ptr));
+        }
     }
 }
 
@@ -475,7 +484,9 @@ impl<T> Drop for SlotList<T> {
         while !chunk_ptr.is_null() {
             let chunk = unsafe { &*chunk_ptr };
             let next = chunk.next.load(Ordering::Acquire);
-            unsafe { Self::drop_chunk(chunk_ptr); }
+            unsafe {
+                Self::drop_chunk(chunk_ptr);
+            }
             chunk_ptr = next;
         }
 
@@ -483,7 +494,9 @@ impl<T> Drop for SlotList<T> {
         while !chunk_ptr.is_null() {
             let chunk = unsafe { &*chunk_ptr };
             let next = chunk.next.load(Ordering::Acquire);
-            unsafe { Self::drop_chunk(chunk_ptr); }
+            unsafe {
+                Self::drop_chunk(chunk_ptr);
+            }
             chunk_ptr = next;
         }
     }

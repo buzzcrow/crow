@@ -7,12 +7,7 @@
 use crowkv::paxos::slot_list::SlotList;
 
 const SLOT_CHUNK_SIZE: usize = 1024;
-use crowkv::paxos::slot_node::{
-    LogEntryKind,
-    PxBallot,
-    PxLogEntry,
-    PxSlotNode,
-};
+use crowkv::paxos::slot_node::{LogEntryKind, PxBallot, PxLogEntry, PxSlotNode};
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -341,4 +336,3 @@ fn slot_node_trim_and_reclaim_with_live_refs() {
     let freed2 = list.reclaim();
     assert_eq!(freed2, 1);
 }
-

@@ -85,7 +85,7 @@ If true historical snapshots are ever required, MVCC is a future extension. The 
 
 ### 3.3 Resolved-slot is monotone per key
 
-The engine never accepts a write at slot `s` for key `k` if `s ≤ resolved_slot(k)`. This is the runtime expression of [Invariant I5 in `design-parallel-slots.md`](design-parallel-slots.md#2-concepts-and-invariants).
+The engine never accepts a write at slot `s` for key `k` if `s ≤ resolved_slot(k)`. This is the runtime expression of [Invariant I5 in `design-parallel-slots.md`](design/design-parallel-slots.md#2-concepts-and-invariants).
 
 Implication: replays and out-of-order applies are naturally idempotent. If WAL replay tries to apply slot 7 for key `k` and `resolved_slot(k)` is already 9, the apply is a no-op for `k` — consistent with the parallel-slot semantics.
 

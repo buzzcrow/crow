@@ -1,6 +1,6 @@
 # CrowKV - Plan: Implementation Master Schedule
 
-Depends on: [`requirement.md`](requirement.md), [`design.md`](design.md), [`design-leader-election.md`](design-leader-election.md), [`design-parallel-slots.md`](design-parallel-slots.md), [`design-wal.md`](design-wal.md), [`design-storage-engine.md`](design-storage-engine.md), [`design-reconfiguration.md`](design-reconfiguration.md)
+Depends on: [`requirement.md`](requirement.md), [`design.md`](design.md), [`design-leader-election.md`](design/design-leader-election.md), [`design-parallel-slots.md`](design/design-parallel-slots.md), [`design-wal.md`](design/design-wal.md), [`design-storage-engine.md`](design/design-storage-engine.md), [`design-reconfiguration.md`](design/design-reconfiguration.md)
 Satisfies: all of [`requirement.md`](requirement.md) (phased implementation)
 
 This document defines the phased implementation schedule and cross-stream dependencies. Deep dives for each workstream live in sibling sub-topic docs (`plan-consensus.md`, `plan-wal.md`, `plan-storage.md`, `plan-rpc.md`, `plan-reconfig.md`).
@@ -103,7 +103,7 @@ All public and inter-module APIs in CrowKV are `async`. The runtime is `tokio` (
 **Rules:**
 
 1. **No blocking calls** in any business-logic path (consensus, learner, dedup, lease, replicator, etc.).
-2. **Blocking syscalls** (`fdatasync`, blocking file I/O, blocking client libs) are exposed as `async fn` via the project I/O layer ([`design-async-io.md`](design-async-io.md)). On Linux ≥ 5.11 this layer uses `tokio-uring`; otherwise it falls back to `tokio::task::spawn_blocking`. Callers do not branch on backend.
+2. **Blocking syscalls** (`fdatasync`, blocking file I/O, blocking client libs) are exposed as `async fn` via the project I/O layer ([`design-async-io.md`](design/design-async-io.md)). On Linux ≥ 5.11 this layer uses `tokio-uring`; otherwise it falls back to `tokio::task::spawn_blocking`. Callers do not branch on backend.
 3. **No `std::sync::Mutex`** in async paths; use `tokio::sync::{Mutex, RwLock, Notify, mpsc, oneshot}` or, where logic is naturally serial, run inside a single owning task that receives commands via `mpsc`.
 4. **No `std::thread::sleep`**; use `tokio::time::sleep` (or `TestTimer::advance` in P1 tests).
 5. **Tests** run with `#[tokio::test(flavor = "current_thread", start_paused = true)]` for full determinism.

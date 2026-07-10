@@ -1,11 +1,11 @@
 #![allow(unsafe_code)]
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use crossbeam_skiplist::SkipMap;
 use crowkv::paxos::slot_list::SlotList;
 use crowkv::paxos::slot_node::{LogEntryKind, PxBallot, PxLogEntry, PxSlotNode};
-use crossbeam_skiplist::SkipMap;
 use dashmap::DashMap;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -215,17 +215,6 @@ define_tail_insert_bench!(
 );
 
 define_tail_insert_bench!(
-    bench_hashmap_insert_u64_tail,
-    "hashmap_insert_u64_tail",
-    HashMap::<u64, u64>::new(),
-    map,
-    slot,
-    {
-        black_box(map.insert(slot, slot));
-    }
-);
-
-define_tail_insert_bench!(
     bench_btreemap_insert_u64_tail,
     "btreemap_insert_u64_tail",
     BTreeMap::<u64, u64>::new(),
@@ -244,17 +233,6 @@ define_concurrent_insert_bench!(
     slot,
     {
         list.insert_if_empty(slot, slot);
-    }
-);
-
-define_concurrent_insert_bench!(
-    bench_hashmap_insert_concurrent,
-    "hashmap_insert_concurrent",
-    Mutex::new(HashMap::<u64, u64>::new()),
-    map,
-    slot,
-    {
-        map.lock().unwrap().insert(slot, slot);
     }
 );
 
@@ -355,30 +333,6 @@ define_concurrent_get_bench!(
 );
 
 define_concurrent_get_bench!(
-    bench_hashmap_get_concurrent,
-    "hashmap_get_concurrent",
-    RwLock::new(HashMap::<u64, u64>::new()),
-    map,
-    slot,
-    {
-        map.write().unwrap().insert(slot, slot);
-    },
-    map,
-    slot,
-    {
-        let guard = map.read().unwrap();
-        let r = guard.get(&slot);
-        black_box(r);
-        drop(guard);
-    },
-    _map,
-    window_start,
-    {
-        window_start.fetch_add(100, Ordering::Relaxed);
-    }
-);
-
-define_concurrent_get_bench!(
     bench_btreemap_get_concurrent,
     "btreemap_get_concurrent",
     RwLock::new(BTreeMap::<u64, u64>::new()),
@@ -402,23 +356,17 @@ define_concurrent_get_bench!(
     }
 );
 
-define_slot_node_churn_bench!(
-    bench_slot_node_reclaim_churn,
-    "slot_node_reclaim_churn"
-);
+define_slot_node_churn_bench!(bench_slot_node_reclaim_churn, "slot_node_reclaim_churn");
 
 criterion_group!(
     benches,
     bench_insert_u64_tail,
-    bench_hashmap_insert_u64_tail,
     bench_btreemap_insert_u64_tail,
     bench_insert_u64_concurrent,
-    bench_hashmap_insert_concurrent,
     bench_btreemap_insert_concurrent,
     bench_dashmap_insert_concurrent,
     bench_skipmap_insert_concurrent,
     bench_get_u64_concurrent,
-    bench_hashmap_get_concurrent,
     bench_btreemap_get_concurrent,
     bench_dashmap_get_concurrent,
     bench_skipmap_get_concurrent,

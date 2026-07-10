@@ -1,6 +1,6 @@
 # CrowKV - Design: Reconfiguration
 
-Depends on: [`requirement.md`](requirement.md), [`design.md`](design.md), [`design-leader-election.md`](design-leader-election.md)
+Depends on: [`requirement.md`](requirement.md), [`design.md`](design.md), [`design-leader-election.md`](design/design-leader-election.md)
 Satisfies: [requirement.md §9.1](requirement.md#91-reconfiguration), prerequisites of [requirement.md §9.2](requirement.md#92-rolling-upgrade)
 
 This document specifies how a CrowKV group safely changes its membership while preserving consensus safety. The design is Raft-style joint consensus, adapted to CrowKV's Multi-Paxos log.
@@ -163,7 +163,7 @@ Transferring leadership is needed in two scenarios:
 2. Leader sends a special `TimeoutNow` RPC to `T`. This tells `T` to start an election immediately at `term + 1`.
 3. Old leader stops accepting new client writes; responds `NotLeader { hint = T }` for in-flight requests.
 4. `T` runs election, wins (since it is up-to-date and others see its higher term), runs bulk Phase-1, becomes leader.
-5. Old leader, on observing the new term in any RPC response, steps down ([§8 of design-leader-election.md](design-leader-election.md#8-step-down-triggers)).
+5. Old leader, on observing the new term in any RPC response, steps down ([§8 of design-leader-election.md](design/design-leader-election.md#8-step-down-triggers)).
 
 This is the same `TransferLeadership` pattern as in Raft. It avoids the latency of a normal randomized-timeout election.
 

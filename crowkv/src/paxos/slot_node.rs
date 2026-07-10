@@ -1,9 +1,9 @@
 #![allow(unsafe_code)]
 
-use std::sync::atomic::{AtomicPtr, Ordering};
 use std::ptr::null_mut;
+use std::sync::atomic::{AtomicPtr, Ordering};
 
-use crate::group::types::{PxNodeId};
+use crate::group::types::PxNodeId;
 use crate::paxos::slot_list::{SlotIndex, SlotList};
 
 // ------------------------------------------------------------------
@@ -94,12 +94,16 @@ impl Drop for PxSlotNode {
     fn drop(&mut self) {
         let promised = self.promised.load(Ordering::Acquire);
         if !promised.is_null() {
-            unsafe { drop(Box::from_raw(promised)); }
+            unsafe {
+                drop(Box::from_raw(promised));
+            }
         }
 
         let accepted = self.accepted.load(Ordering::Acquire);
         if !accepted.is_null() {
-            unsafe { drop(Box::from_raw(accepted)); }
+            unsafe {
+                drop(Box::from_raw(accepted));
+            }
         }
 
         Self::drain_retired(&self.retired_promised);
@@ -118,7 +122,9 @@ impl PxSlotNode {
         }));
         loop {
             let old = head.load(Ordering::Acquire);
-            unsafe { (*node).next = old; }
+            unsafe {
+                (*node).next = old;
+            }
             if head
                 .compare_exchange(old, node, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
@@ -134,9 +140,13 @@ impl PxSlotNode {
             let next = unsafe { (*node).next };
             let ptr = unsafe { (*node).ptr };
             if !ptr.is_null() {
-                unsafe { drop(Box::from_raw(ptr)); }
+                unsafe {
+                    drop(Box::from_raw(ptr));
+                }
             }
-            unsafe { drop(Box::from_raw(node)); }
+            unsafe {
+                drop(Box::from_raw(node));
+            }
             node = next;
         }
     }
@@ -164,18 +174,18 @@ impl PxSlotNode {
         new: PxBallot,
     ) -> Result<*mut PxBallot, *mut PxBallot> {
         let new_ptr = Box::into_raw(Box::new(new));
-        match self.promised.compare_exchange(
-            expected,
-            new_ptr,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
+        match self
+            .promised
+            .compare_exchange(expected, new_ptr, Ordering::AcqRel, Ordering::Acquire)
+        {
             Ok(old) => {
                 Self::push_retired(&self.retired_promised, old);
                 Ok(new_ptr)
             }
             Err(actual) => {
-                unsafe { drop(Box::from_raw(new_ptr)); }
+                unsafe {
+                    drop(Box::from_raw(new_ptr));
+                }
                 Err(actual)
             }
         }
@@ -204,18 +214,18 @@ impl PxSlotNode {
         new: PxLogEntry,
     ) -> Result<*mut PxLogEntry, *mut PxLogEntry> {
         let new_ptr = Box::into_raw(Box::new(new));
-        match self.accepted.compare_exchange(
-            expected,
-            new_ptr,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
+        match self
+            .accepted
+            .compare_exchange(expected, new_ptr, Ordering::AcqRel, Ordering::Acquire)
+        {
             Ok(old) => {
                 Self::push_retired(&self.retired_accepted, old);
                 Ok(new_ptr)
             }
             Err(actual) => {
-                unsafe { drop(Box::from_raw(new_ptr)); }
+                unsafe {
+                    drop(Box::from_raw(new_ptr));
+                }
                 Err(actual)
             }
         }
@@ -224,10 +234,7 @@ impl PxSlotNode {
 
 /// Fast path: tail-first lookup for already-created slots.
 /// Slow path: `insert_if_empty` to create the chunk and slot node.
-pub fn get_or_prepare_slot(
-    list: &SlotList<PxSlotNode>,
-    slot: SlotIndex,
-) -> Option<&PxSlotNode> {
+pub fn get_or_prepare_slot(list: &SlotList<PxSlotNode>, slot: SlotIndex) -> Option<&PxSlotNode> {
     if let Some(ptr_guard) = list.get_tail_ptr(slot) {
         let slot_atomic = &*ptr_guard;
         let node_ptr = slot_atomic.load(Ordering::Acquire);
@@ -236,15 +243,12 @@ pub fn get_or_prepare_slot(
         }
         // Chunk exists but slot is empty → CAS-install default node.
         let new = Box::into_raw(Box::new(PxSlotNode::default()));
-        match slot_atomic.compare_exchange(
-            null_mut(),
-            new,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
+        match slot_atomic.compare_exchange(null_mut(), new, Ordering::AcqRel, Ordering::Acquire) {
             Ok(_) => return Some(unsafe { &*new }),
             Err(p) => {
-                unsafe { drop(Box::from_raw(new)); }
+                unsafe {
+                    drop(Box::from_raw(new));
+                }
                 return Some(unsafe { &*p });
             }
         }

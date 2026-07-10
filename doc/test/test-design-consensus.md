@@ -1,6 +1,6 @@
 # CrowKV - Test Design: Consensus Core
 
-Depends on: [`test-design.md`](test/test-design.md), [`design.md`](design.md) §3–5, [`design-leader-election.md`](design-leader-election.md), [`design-parallel-slots.md`](design-parallel-slots.md)
+Depends on: [`test-design.md`](test/test-design.md), [`design.md`](design.md) §3–5, [`design-rpc.md`](design/design-rpc.md), [`design-leader-election.md`](design/design-leader-election.md), [`design-parallel-slots.md`](design/design-parallel-slots.md)
 Satisfies: [requirement.md §14.1](requirement.md#141-correctness-criteria-for-crowbench), [requirement.md §14.2](requirement.md#142-failure-scenarios-must-be-covered-in-test-designmd)
 
 Enumerates invariants, unit tests, and integration scenarios for the Phase 1 consensus core.
@@ -9,18 +9,18 @@ Enumerates invariants, unit tests, and integration scenarios for the Phase 1 con
 
 | ID | Claim | Trigger | Ref |
 |---|---|---|---|
-| C1 | At most one leader per term | After every `RequestVote` / heartbeat | [`design-leader-election.md`](design-leader-election.md) §9.1 |
+| C1 | At most one leader per term | After every `RequestVote` / heartbeat | [`design-leader-election.md`](design/design-leader-election.md) §9.1 |
 | C2 | Ballot monotonic per slot | Every `Prepare`/`Accept` handler | [`design.md`](design.md) §4.2 |
-| C3 | Chosen value immutable | Slot transitions to `Chosen` | [`design-leader-election.md`](design-leader-election.md) §9.2 |
-| C4 | Slot order = real-time ack order | Every client write ack | [`design-parallel-slots.md`](design-parallel-slots.md) §2 I1 |
-| C5 | Safe-slot contiguous | Every heartbeat aggregation | [`design-parallel-slots.md`](design-parallel-slots.md) §7 |
-| C6 | Per-key resolved-slot monotone | Every `apply` | [`design-parallel-slots.md`](design-parallel-slots.md) §6 |
+| C3 | Chosen value immutable | Slot transitions to `Chosen` | [`design-leader-election.md`](design/design-leader-election.md) §9.2 |
+| C4 | Slot order = real-time ack order | Every client write ack | [`design-parallel-slots.md`](design/design-parallel-slots.md) §2 I1 |
+| C5 | Safe-slot contiguous | Every heartbeat aggregation | [`design-parallel-slots.md`](design/design-parallel-slots.md) §7 |
+| C6 | Per-key resolved-slot monotone | Every `apply` | [`design-parallel-slots.md`](design/design-parallel-slots.md) §6 |
 | C7 | Dedup cache idempotent | Every write request | [`design.md`](design.md) §8.6 |
-| C8 | Liveness under quorum | Heartbeats + write attempts | [`design-leader-election.md`](design-leader-election.md) §3 |
-| C9 | Window backpressure bounded | Every admission decision | [`design-parallel-slots.md`](design-parallel-slots.md) §4 |
-| C10 | Lease never overlaps | Two leaders coexist in time | [`design-leader-election.md`](design-leader-election.md) §6 |
-| C11 | Lease-invalid → ReadIndex fallback | Linearizable read on leader without valid lease | [`design-leader-election.md`](design-leader-election.md) §7 |
-| C12 | Lease-unrenewable → step-down | Leader cannot reach quorum to renew | [`design-leader-election.md`](design-leader-election.md) §8 |
+| C8 | Liveness under quorum | Heartbeats + write attempts | [`design-leader-election.md`](design/design-leader-election.md) §3 |
+| C9 | Window backpressure bounded | Every admission decision | [`design-parallel-slots.md`](design/design-parallel-slots.md) §4 |
+| C10 | Lease never overlaps | Two leaders coexist in time | [`design-leader-election.md`](design/design-leader-election.md) §6 |
+| C11 | Lease-invalid → ReadIndex fallback | Linearizable read on leader without valid lease | [`design-leader-election.md`](design/design-leader-election.md) §7 |
+| C12 | Lease-unrenewable → step-down | Leader cannot reach quorum to renew | [`design-leader-election.md`](design/design-leader-election.md) §8 |
 
 **Liveness (C8):** with a stable quorum and bounded message delay, every admitted client write reaches `Chosen` within bounded time. Tested by injecting bounded delays and asserting completion within `delay + window × RTT + repair_tick`.
 
@@ -33,6 +33,11 @@ Enumerates invariants, unit tests, and integration scenarios for the Phase 1 con
 | `acceptor` | `prepare_promise` | Fresh, `Prepare(b=1)` | Records promise, returns `None` |
 | `acceptor` | `reject_lower_ballot` | Promised b=2, `Prepare(b=1)` | Rejected |
 | `acceptor` | `accept_after_promise` | Promised b=1, `Accept(b=1, v=X)` | Records accepted |
+| `rpc` | `classic_paxos_single_slot` | 3-node `TestNodeHarness`, hard-coded leader, full Phase 1+2 | All 3 acceptors record same chosen value |
+| `rpc` | `optimized_paxos_skip_phase1` | 3-node `TestNodeHarness`, hard-coded leader, skip Phase 1 | `Accept` reaches quorum directly; chosen value visible on all nodes |
+| `rpc` | `multi_paxos_reuse_ballot` | 5-node `TestNodeHarness`, hard-coded leader, Phase 1 once for slots 1..10 | All 10 slots chosen with single ballot; correct value per slot on all nodes |
+| `rpc` | `quorum_with_rejection` | 5 nodes, pre-promise 2 followers at higher ballot | Leader's `Accept` still reaches quorum (3/5); chosen value confirmed |
+| `rpc` | `wire_decode_classic_paxos` | Encode/decode `Prepare`/`Promise`/`Accept`/`Accepted` round-trip | Bytes equal after round-trip |
 | `election` | `elect_single_leader` | 3 nodes, randomized timeouts | Exactly 1 leader |
 | `election` | `step_down_higher_term` | Leader term=2, hb term=3 | Reverts to follower |
 | `election` | `bulk_phase1_adopts` | Crash after 1 `Accept` | New leader re-Accepts same value |
@@ -53,6 +58,16 @@ Enumerates invariants, unit tests, and integration scenarios for the Phase 1 con
 Note: `engine.compare_equal` / `compare_divergent` overlap with [`test-design-storage.md`](test/test-design-storage.md) §2. Owned by consensus (P1) for the in-memory engine; storage (P3) extends to ordered-file. Avoid duplication when implementing — share test fixtures.
 
 ## 3. Integration Scenarios
+
+**S0 — Loopback Paxos flows (P1 M2):**
+1. Test constructs 3-node or 5-node cluster via `TestNodeHarness::spawn`: each spawns a `tokio` runtime thread, constructs a `Node` from `crowkv` lib, and binds a real `TcpListener` on `127.0.0.1:0` (OS-assigned port).
+2. Test resolves the bound addresses, injects the peer list into each node, and marks node 0 as hard-coded leader.
+3. **S0-A — Classic Paxos:** leader proposes value `v` for slot 1: drives full Phase 1 → quorum `Promise` → Phase 2 → quorum `Accepted` over loopback gRPC. Test queries each acceptor via RPC and asserts all report `accepted = (b, v)` for slot 1.
+4. **S0-B — Optimized Paxos:** leader skips Phase 1, drives `Accept` directly for slot 2; quorum `Accepted` confirms chosen value on all nodes.
+5. **S0-C — Multi-Paxos (5-node):** leader runs Phase 1 once for ballot `b`, then drives `Accept` for slots 1..10 reusing `b`; all 10 slots chosen; each acceptor queried per slot returns the correct `(b, v_i)`.
+6. **S0-D — Quorum with rejection (5-node):** pre-promise followers 1 and 2 at a higher ballot; leader's `Accept` still reaches quorum (3/5 including self); chosen value confirmed.
+
+This scenario does not involve the `crowkv-server` binary; tests construct `Node`s in-process for full lifecycle control.
 
 **S1 — Leader change mid-write:**
 1. L1 assigns N, sends `Accept`, only 1 acceptor receives it, L1 crashes.
