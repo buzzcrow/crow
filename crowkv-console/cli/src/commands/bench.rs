@@ -134,7 +134,6 @@ struct BenchRunArgs {
 
 async fn bench_run(cli: &Cli, args: BenchRunArgs, json: bool) -> ExitCode {
     use crate::bench::{run_bench, BenchConfig, WorkloadKind};
-    use crate::commands::kv::resolve_kv_endpoint;
     use std::time::Duration;
 
     let kind = match WorkloadKind::parse(&args.workload) {
@@ -144,7 +143,7 @@ async fn bench_run(cli: &Cli, args: BenchRunArgs, json: bool) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let endpoint = match resolve_kv_endpoint(cli, args.store_id).await {
+    let endpoint = match resolve_bench_endpoint(cli, args.store_id, args.group_id).await {
         Ok(e) => e,
         Err(c) => return c,
     };
@@ -186,10 +185,9 @@ async fn bench_stress(
     json: bool,
 ) -> ExitCode {
     use crate::bench::{resolve_stress_scenario, run_bench, stress_scenario_names};
-    use crate::commands::kv::resolve_kv_endpoint;
     use std::time::Duration;
 
-    let endpoint = match resolve_kv_endpoint(cli, store_id).await {
+    let endpoint = match resolve_bench_endpoint(cli, store_id, group_id).await {
         Ok(e) => e,
         Err(c) => return c,
     };
@@ -224,6 +222,21 @@ async fn bench_stress(
             ExitCode::from(2)
         }
     }
+}
+
+/// Resolve the leader's gRPC endpoint for `(store, group)` through the
+/// console. Bench dials gRPC directly for throughput, but the target is
+/// looked up via `crowkv-web` so no `crowkv-server` registry is needed.
+async fn resolve_bench_endpoint(cli: &Cli, store_id: u64, group_id: u64) -> Result<String, ExitCode> {
+    let client = crate::utils::client::console_client(cli)?;
+    client
+        .resolve_endpoint(store_id, group_id)
+        .await
+        .map(|info| info.grpc_url)
+        .map_err(|e| {
+            eprintln!("error: resolve endpoint for store {store_id} group {group_id}: {e}");
+            ExitCode::from(2)
+        })
 }
 
 fn bench_report(run_id: &str, json: bool) -> ExitCode {

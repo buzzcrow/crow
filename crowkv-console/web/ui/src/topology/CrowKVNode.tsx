@@ -1,41 +1,54 @@
 import { memo } from 'react';
 import { Handle, NodeProps, Position } from 'reactflow';
-import { Server, HardDrive, Database, Users, Cpu, Network } from 'lucide-react';
+import { FolderTree, Monitor, Database, Boxes, HardDrive, RadioTower, Cog, Crown, AlertTriangle } from 'lucide-react';
 import { cn } from '../utils/cn';
+import { toUiHealth } from '../utils/entityDisplay';
 
 interface CrowKVNodeData {
   kind: 'Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Replica' | 'LocalReplica' | 'RemoteReplica';
   label: string;
   sublabel?: string;
   health?: string;
-  /** Set by the canvas when the search query matches this node. */
-  isHighlighted?: boolean;
-  /** Set by the canvas when focus mode dims unrelated nodes. */
-  isDimmed?: boolean;
+  role?: string;
+  /** Remote-replica reachability; false renders a warning glyph. */
+  reachable?: boolean;
+  /** Whether this replica is the group leader (crown badge). */
+  leader?: boolean;
   /** Set when the node is the current selection. */
   isSelected?: boolean;
 }
 
-const iconForKind: Record<CrowKVNodeData['kind'], typeof Server> = {
-  Rack: Server,
-  Node: HardDrive,
-  Server: Cpu,
+const iconForKind: Record<CrowKVNodeData['kind'], typeof FolderTree> = {
+  Rack: FolderTree,
+  Node: Monitor,
+  Server: Cog,
   Store: Database,
-  Group: Users,
-  Replica: Network,
-  LocalReplica: Network,
-  RemoteReplica: Network,
+  Group: Boxes,
+  Replica: HardDrive,
+  LocalReplica: HardDrive,
+  RemoteReplica: RadioTower,
 };
 
 const accentForKind: Record<CrowKVNodeData['kind'], string> = {
   Rack: 'tw-text-accent',
   Node: 'tw-text-accent2',
-  Server: 'tw-text-accent2',
+  Server: 'tw-text-accent',
   Store: 'tw-text-accent',
   Group: 'tw-text-healthy',
   Replica: 'tw-text-healthy',
   LocalReplica: 'tw-text-healthy',
   RemoteReplica: 'tw-text-remote',
+};
+
+const surfaceForKind: Record<CrowKVNodeData['kind'], string> = {
+  Rack: 'tw-bg-panel tw-border-border',
+  Node: 'tw-bg-panel tw-border-border',
+  Server: 'tw-bg-accent2/10 tw-border-accent2/30',
+  Store: 'tw-bg-accent/10 tw-border-accent/30',
+  Group: 'tw-bg-healthy/10 tw-border-healthy/30',
+  Replica: 'tw-bg-healthy/10 tw-border-healthy/30',
+  LocalReplica: 'tw-bg-healthy/10 tw-border-healthy/30',
+  RemoteReplica: 'tw-bg-remote/10 tw-border-remote/30',
 };
 
 /**
@@ -44,38 +57,50 @@ const accentForKind: Record<CrowKVNodeData['kind'], string> = {
  * (highlighted/dimmed/selected) is set imperatively by TopologyCanvas.
  */
 function CrowKVNodeBase({ data }: NodeProps<CrowKVNodeData>) {
-  const Icon = iconForKind[data.kind] || Server;
+  const Icon = iconForKind[data.kind] || FolderTree;
   const accent = accentForKind[data.kind] || 'tw-text-text';
+  const surface = surfaceForKind[data.kind] || 'tw-bg-panel tw-border-border';
+  const isRemote = data.kind === 'RemoteReplica';
+  const unreachable = isRemote && data.reachable === false;
+  const uiHealth = toUiHealth(data.health);
 
   return (
     <div
       className={cn(
-        'tw-bg-panel tw-border tw-rounded-lg tw-px-3 tw-py-2 tw-min-w-[160px] tw-shadow-sm tw-transition-all',
-        data.isSelected
-          ? 'tw-border-accent tw-shadow-accent/30'
-          : 'tw-border-border',
-        data.isHighlighted && 'tw-animate-pulse-slow tw-ring-2 tw-ring-brand-accent',
-        data.isDimmed && 'tw-opacity-30',
+        'tw-border tw-rounded-lg tw-px-3 tw-py-2 tw-min-w-[160px] tw-shadow-sm tw-transition-all',
+        surface,
+        data.isSelected ? 'tw-ring-2 tw-ring-accent/50 tw-shadow-accent/30' : '',
+        isRemote && 'tw-border-dashed tw-border-remote',
+        data.leader && 'tw-ring-2 tw-ring-yellow-400/70',
+        unreachable && 'tw-border-failed',
       )}
     >
       <Handle type="target" position={Position.Top} className="tw-opacity-0" />
       <div className="tw-flex tw-items-center tw-gap-2">
         <Icon className={cn('tw-h-4 tw-w-4 tw-flex-shrink-0', accent)} />
         <div className="tw-flex-1 tw-min-w-0">
-          <div className="tw-text-sm tw-font-medium tw-text-text tw-truncate">{data.label}</div>
+          <div className="tw-flex tw-items-center tw-gap-1">
+            <span className="tw-text-sm tw-font-medium tw-text-text tw-truncate">{data.label}</span>
+            {data.leader && <Crown className="tw-h-3.5 tw-w-3.5 tw-text-yellow-400 tw-flex-shrink-0" />}
+          </div>
           {data.sublabel && (
             <div className="tw-text-[10px] tw-text-muted tw-truncate">{data.sublabel}</div>
           )}
         </div>
+        {unreachable && (
+          <AlertTriangle className="tw-h-3.5 tw-w-3.5 tw-text-failed tw-flex-shrink-0" aria-label="unreachable" />
+        )}
         {data.health && (
           <span
             className={cn(
               'tw-h-2 tw-w-2 tw-rounded-full tw-flex-shrink-0',
-              data.health.toLowerCase().includes('heal') || data.health.toLowerCase() === 'up'
+              uiHealth === 'Healthy'
                 ? 'tw-bg-healthy'
-                : data.health.toLowerCase().includes('unheal') || data.health.toLowerCase() === 'down'
-                  ? 'tw-bg-failed'
-                  : 'tw-bg-unknown',
+                : uiHealth === 'Degraded'
+                  ? 'tw-bg-yellow-400'
+                  : uiHealth === 'Failed'
+                    ? 'tw-bg-failed'
+                    : 'tw-bg-unknown',
             )}
             title={`Health: ${data.health}`}
           />

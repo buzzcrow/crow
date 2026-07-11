@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Dialog } from '../Dialog';
 import { Input, Select } from '../ui/Input';
 import { useToast } from '../../contexts/ToastContext';
@@ -11,22 +11,52 @@ export interface AddReplicaDialogProps {
   storeId: string;
   groupId: string;
   nodes: Node[];
+  defaultNodeId?: string;
+  defaultReplicaId?: string;
   onSuccess?: () => void | Promise<void>;
 }
 
 /**
  * Dialog for adding a new replica to a group.
  */
-export function AddReplicaDialog({ isOpen, onClose, storeId, groupId, nodes, onSuccess }: AddReplicaDialogProps) {
-  const [nodeId, setNodeId] = useState('');
-  const [replicaId, setReplicaId] = useState('');
+export function AddReplicaDialog({
+  isOpen,
+  onClose,
+  storeId,
+  groupId,
+  nodes,
+  defaultNodeId = '',
+  defaultReplicaId = '',
+  onSuccess,
+}: AddReplicaDialogProps) {
+  const [nodeId, setNodeId] = useState(defaultNodeId);
+  const [replicaId, setReplicaId] = useState(defaultReplicaId);
   const [isLoading, setIsLoading] = useState(false);
+  const wasOpenRef = useRef(false);
   const { success, error } = useToast();
 
   const replicaIdValid = replicaId.trim() === '' || /^\d+$/.test(replicaId.trim());
+  const hasAvailableNodes = nodes.length > 0;
+  const resolvedDefaultNodeId = defaultNodeId && nodes.some((node) => node.id === defaultNodeId)
+    ? defaultNodeId
+    : (nodes[0]?.id || '');
+
+  useEffect(() => {
+    if (isOpen && !wasOpenRef.current) {
+      setNodeId(resolvedDefaultNodeId);
+      setReplicaId(defaultReplicaId);
+    }
+    wasOpenRef.current = isOpen;
+  }, [defaultReplicaId, isOpen, resolvedDefaultNodeId]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    if (nodeId && nodes.some((node) => node.id === nodeId)) return;
+    setNodeId(resolvedDefaultNodeId);
+  }, [isOpen, nodeId, nodes, resolvedDefaultNodeId]);
 
   const handleSubmit = async () => {
-    if (!nodeId || !replicaIdValid) return;
+    if (!hasAvailableNodes || !nodeId || !replicaIdValid) return;
 
     setIsLoading(true);
     try {
@@ -36,8 +66,8 @@ export function AddReplicaDialog({ isOpen, onClose, storeId, groupId, nodes, onS
       });
 
       success(`Replica added to node "${nodeId}" successfully`);
-      setNodeId('');
-      setReplicaId('');
+      setNodeId(resolvedDefaultNodeId);
+      setReplicaId(defaultReplicaId);
       onClose();
       await onSuccess?.();
     } catch (err) {
@@ -49,8 +79,8 @@ export function AddReplicaDialog({ isOpen, onClose, storeId, groupId, nodes, onS
   };
 
   const handleClose = () => {
-    setNodeId('');
-    setReplicaId('');
+    setNodeId(resolvedDefaultNodeId);
+    setReplicaId(defaultReplicaId);
     onClose();
   };
 
@@ -62,11 +92,11 @@ export function AddReplicaDialog({ isOpen, onClose, storeId, groupId, nodes, onS
       description={`Add a new replica to group "${groupId}" in store "${storeId}"`}
       confirmLabel="Add Replica"
       onConfirm={handleSubmit}
-      confirmDisabled={!nodeId || !replicaIdValid || isLoading}
+      confirmDisabled={!hasAvailableNodes || !nodeId || !replicaIdValid || isLoading}
       confirmLoading={isLoading}
     >
       <div className="tw-space-y-4">
-        {nodes.length > 0 ? (
+        {hasAvailableNodes ? (
           <Select
             label="Node"
             value={nodeId}
@@ -82,7 +112,7 @@ export function AddReplicaDialog({ isOpen, onClose, storeId, groupId, nodes, onS
           </Select>
         ) : (
           <div className="tw-text-sm tw-text-muted">
-            No nodes available.
+            No available node. Every node already has a replica in this group.
           </div>
         )}
         <Input

@@ -1,8 +1,5 @@
-import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { createContext, useContext, useState, ReactNode } from 'react';
 import { ViewMode } from '../types';
-import { localStorage } from '../utils/localStorage';
-
-const STORAGE_KEY = 'viewMode' as const;
 
 interface ViewModeContextType {
   viewMode: ViewMode;
@@ -18,16 +15,7 @@ interface ViewModeProviderProps {
 }
 
 export function ViewModeProvider({ children, initialViewMode }: ViewModeProviderProps) {
-  const [viewMode, setViewMode] = useState<ViewMode>(() => {
-    // Use initial prop if provided, otherwise load from storage or default to Logical
-    if (initialViewMode) return initialViewMode;
-    return localStorage.get<ViewMode>(STORAGE_KEY, ViewMode.Logical);
-  });
-
-  // Persist view mode changes to localStorage
-  useEffect(() => {
-    localStorage.set(STORAGE_KEY, viewMode);
-  }, [viewMode]);
+  const [viewMode, setViewMode] = useState<ViewMode>(initialViewMode ?? ViewMode.Physical);
 
   const toggleViewMode = () => {
     setViewMode(prev => prev === ViewMode.Physical ? ViewMode.Logical : ViewMode.Physical);

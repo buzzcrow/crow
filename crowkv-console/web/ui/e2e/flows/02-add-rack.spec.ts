@@ -5,8 +5,8 @@ test.describe('E2E-02 add rack', () => {
   test('creates a rack through the UI and verifies the real backend', async ({ page, baseURL }) => {
     await page.goto('/');
 
-    await page.getByRole('button', { name: 'Infrastructure' }).click();
-    await page.locator('aside').getByRole('button').last().click();
+    await page.getByRole('button', { name: 'Physical' }).click();
+    await page.getByRole('button', { name: 'Add Rack' }).click();
 
     await expect(page.getByRole('dialog', { name: 'Add Rack' })).toBeVisible();
     await page.getByLabel('Rack ID').fill('r1');

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Dialog } from '../Dialog';
 import { Input } from '../ui/Input';
 import { useToast } from '../../contexts/ToastContext';
@@ -8,7 +8,9 @@ export interface DeployServerDialogProps {
   isOpen: boolean;
   onClose: () => void;
   nodeId: string;
-  onSuccess?: () => void | Promise<void>;
+  defaultMgmtPort?: string;
+  defaultGrpcPort?: string;
+  onSuccess?: (ports: { mgmtPort: number; grpcPort: number }) => void | Promise<void>;
 }
 
 /**
@@ -16,12 +18,29 @@ export interface DeployServerDialogProps {
  * node can host any store / group / replica. Backend contract:
  * `crowkv-console/web/src/lifecycle.rs::DeployNodeServerBody`.
  */
-export function DeployServerDialog({ isOpen, onClose, nodeId, onSuccess }: DeployServerDialogProps) {
-  const [mgmtPort, setMgmtPort] = useState('9910');
-  const [grpcPort, setGrpcPort] = useState('9920');
+export function DeployServerDialog({
+  isOpen,
+  onClose,
+  nodeId,
+  defaultMgmtPort = '19910',
+  defaultGrpcPort = '19920',
+  onSuccess,
+}: DeployServerDialogProps) {
+  const [mgmtPort, setMgmtPort] = useState(defaultMgmtPort);
+  const [grpcPort, setGrpcPort] = useState(defaultGrpcPort);
   const [binary, setBinary] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const wasOpenRef = useRef(false);
   const { success, error } = useToast();
+
+  useEffect(() => {
+    if (isOpen && !wasOpenRef.current) {
+      setMgmtPort(defaultMgmtPort);
+      setGrpcPort(defaultGrpcPort);
+      setBinary('');
+    }
+    wasOpenRef.current = isOpen;
+  }, [defaultGrpcPort, defaultMgmtPort, isOpen, nodeId]);
 
   const isPort = (v: string) => /^\d+$/.test(v) && Number(v) > 0 && Number(v) < 65536;
   const valid = isPort(mgmtPort) && isPort(grpcPort) && mgmtPort !== grpcPort;
@@ -30,16 +49,20 @@ export function DeployServerDialog({ isOpen, onClose, nodeId, onSuccess }: Deplo
     if (!valid) return;
     setIsLoading(true);
     try {
+      const deployedPorts = {
+        mgmtPort: Number(mgmtPort),
+        grpcPort: Number(grpcPort),
+      };
       await deployServer(nodeId, {
-        mgmt_port: Number(mgmtPort),
-        grpc_port: Number(grpcPort),
+        mgmt_port: deployedPorts.mgmtPort,
+        grpc_port: deployedPorts.grpcPort,
         ...(binary.trim() ? { binary: binary.trim() } : {}),
       });
-      success(`Server deployed on ${nodeId}`);
+      success(`CrowKV deployed on ${nodeId}`);
       onClose();
-      await onSuccess?.();
+      await onSuccess?.(deployedPorts);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to deploy server';
+      const message = err instanceof Error ? err.message : 'Failed to deploy CrowKV';
       error(message);
     } finally {
       setIsLoading(false);
@@ -50,8 +73,8 @@ export function DeployServerDialog({ isOpen, onClose, nodeId, onSuccess }: Deplo
     <Dialog
       isOpen={isOpen}
       onClose={onClose}
-      title={`Deploy Server on ${nodeId}`}
-      description="Spawn a crowkv-server instance on this node. Required before stores or replicas can be created."
+      title={`Deploy CrowKV on ${nodeId}`}
+      description="Spawn a CrowKV instance on this node. Required before stores or replicas can be created."
       confirmLabel="Deploy"
       onConfirm={handleSubmit}
       confirmDisabled={!valid || isLoading}

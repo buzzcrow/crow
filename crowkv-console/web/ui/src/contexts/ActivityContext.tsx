@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useCallback, ReactNode } from 'react';
-import { v4 as uuidv4 } from 'uuid';
+import { nextId } from '../utils/ids';
 import { ActivityLogEntry } from '../types';
 
 interface ActivityContextType {
@@ -23,7 +23,7 @@ export function ActivityProvider({ children }: { children: ReactNode }) {
 
   const log = useCallback(
     (entry: Omit<ActivityLogEntry, 'id' | 'timestamp'> & { timestamp?: number }): string => {
-      const id = uuidv4();
+      const id = nextId('act');
       const fullEntry: ActivityLogEntry = {
         id,
         timestamp: entry.timestamp ?? Date.now(),

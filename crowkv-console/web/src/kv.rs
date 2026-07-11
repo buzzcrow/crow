@@ -98,13 +98,73 @@ pub async fn resolve_kv_endpoint(
             }),
         )
     })?;
+
+    // Each `PxKvStore` listens on its own gRPC port (ephemeral when created
+    // via the management API with `port: None`), reported as the store's
+    // `listen_addr`. KV requests must target that per-store endpoint — the
+    // node's configured `grpc_url` is a different listener and does not host
+    // this store's groups. Combine the node host (from `grpc_url`) with the
+    // store's listen port; fall back to `grpc_url` if the cache has no
+    // `listen_addr` yet.
+    let store_port = {
+        let snap = state.monitor_cache.snapshot().await;
+        snap.get(&node_id)
+            .and_then(|rec| rec.stores.get(&sid))
+            .and_then(|ns| ns.listen_addr.as_ref())
+            .and_then(|addr| port_of(addr))
+            .filter(|p| *p != 0)
+    };
+
     let cfg = state.config.read().unwrap();
     let grpc_url = cfg
         .server_for_node(&node_id)
         .and_then(|s| s.grpc_url.clone())
         .ok_or_else(|| err_502(format!("leader node {node_id} has no gRPC endpoint configured")))?;
-    // KvClient::connect expects "http://host:port" or "host:port".
-    Ok(grpc_url)
+
+    match store_port {
+        Some(port) => Ok(format!("http://{}:{port}", host_of(&grpc_url))),
+        None => Ok(grpc_url),
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct EndpointResponse {
+    /// gRPC URL of the group's current leader (`http://host:port`),
+    /// ready to hand to `KvClient::connect`.
+    grpc_url: String,
+}
+
+/// `GET /api/stores/:sid/groups/:gid/endpoint`. Resolve the gRPC
+/// endpoint of the group's leader via the monitor cache, so a direct
+/// gRPC client (the CLI bench engine) can dial it without touching any
+/// registry. Same resolution as the KV data plane uses internally.
+///
+/// # Errors
+/// `404` if the group is unknown / has no replicas; `502` if the
+/// leader's node has no gRPC endpoint configured.
+pub async fn http_kv_endpoint(
+    State(state): State<AppState>,
+    Path((sid, gid)): Path<(u64, u64)>,
+) -> Result<Json<EndpointResponse>, (StatusCode, Json<ErrorBody>)> {
+    let grpc_url = resolve_kv_endpoint(&state, sid, gid).await?;
+    Ok(Json(EndpointResponse { grpc_url }))
+}
+
+/// Extract the port from a `host:port` (or `scheme://host:port`) string.
+fn port_of(addr: &str) -> Option<u16> {
+    addr.rsplit(':').next()?.trim().parse::<u16>().ok()
+}
+
+/// Extract the host from a `scheme://host:port` or `host:port` string,
+/// defaulting to `127.0.0.1` when it cannot be parsed.
+fn host_of(grpc_url: &str) -> String {
+    let without_scheme = grpc_url.split_once("://").map_or(grpc_url, |(_, rest)| rest);
+    let host = without_scheme.split(':').next().unwrap_or("").trim();
+    if host.is_empty() || host == "0.0.0.0" {
+        "127.0.0.1".to_string()
+    } else {
+        host.to_string()
+    }
 }
 
 /// Refresh the monitor cache for every node currently hosting a

@@ -29,7 +29,8 @@ pub enum NodeVerb {
         id: String,
     },
     List,
-    /// Validate ssh + http reachability (stub until C4 SSH transport).
+    /// Validate node reachability via the console: an SSH handshake for
+    /// SSH-enabled nodes, or a no-op success for local-fork nodes.
     Ping {
         node: String,
     },

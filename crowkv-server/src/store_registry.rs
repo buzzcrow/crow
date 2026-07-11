@@ -1,4 +1,5 @@
 use crowkv::cluster::px_kv_store::PxKvStore;
+use crowkv::common::config::PxElectionConfig;
 use dashmap::DashMap;
 use std::sync::Arc;
 
@@ -8,6 +9,7 @@ use std::sync::Arc;
 /// in `Arc` by callers and accessed via `axum::extract::State`.
 pub struct KvStoreRegistry {
     pub stores: DashMap<u64, Arc<PxKvStore>>,
+    pub election_cfg: PxElectionConfig,
 }
 
 impl Default for KvStoreRegistry {
@@ -19,8 +21,14 @@ impl Default for KvStoreRegistry {
 impl KvStoreRegistry {
     #[must_use]
     pub fn new() -> Self {
+        Self::with_election_config(PxElectionConfig::DEFAULT)
+    }
+
+    #[must_use]
+    pub fn with_election_config(election_cfg: PxElectionConfig) -> Self {
         Self {
             stores: DashMap::new(),
+            election_cfg,
         }
     }
 

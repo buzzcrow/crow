@@ -13,16 +13,17 @@ export type SshCreds =
 
 // Server Process State
 export enum ProcState {
-  Stopped = 'Stopped',
-  Starting = 'Starting',
-  Running = 'Running',
-  Failed = 'Failed'
+  Unknown = 'unknown',
+  Stopped = 'stopped',
+  Starting = 'starting',
+  Running = 'running',
+  Failed = 'failed'
 }
 
 export enum NodeHealth {
-  Up = 'Up',
-  Down = 'Down',
-  Unknown = 'Unknown'
+  Up = 'up',
+  Down = 'down',
+  Unknown = 'unknown'
 }
 
 export interface ServerProcess {
@@ -47,6 +48,16 @@ export interface Node {
   host: string;
   ssh: SshCreds;
   server?: ServerProcess;
+}
+
+export interface CrowKVServerView {
+  id: string;
+  node_id: NodeId;
+  rack_id: RackId;
+  host: string;
+  process: ServerProcess;
+  mgmt_port: number | null;
+  grpc_port: number | null;
 }
 
 export interface NodeStore {
@@ -110,20 +121,23 @@ export interface ReplicaView {
 
 // Common Enums
 export enum ReplicaRole {
-  Leader = 'Leader',
-  Follower = 'Follower'
+  Leader = 'leader',
+  Follower = 'follower'
 }
 
 export enum ReplicaState {
-  Up = 'Up',
-  Down = 'Down',
-  Unknown = 'Unknown'
+  Unknown = 'unknown',
+  Initializing = 'initializing',
+  Running = 'running',
+  Draining = 'draining',
+  Failed = 'failed'
 }
 
 export enum GroupHealth {
-  Healthy = 'Healthy',
-  Unhealthy = 'Unhealthy',
-  Unknown = 'Unknown'
+  Healthy = 'healthy',
+  Degraded = 'degraded',
+  Unavailable = 'unavailable',
+  Unknown = 'unknown'
 }
 
 export enum ViewMode {
@@ -145,29 +159,6 @@ export interface ActivityLogEntry {
   target: string;
   status: 'Success' | 'Failed' | 'Pending';
   message?: string;
-}
-
-// Custom Action/Panel Types for Embedding
-export interface CustomAction {
-  id: string;
-  label: string;
-  icon?: React.ReactNode;
-  appliesTo: ('Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Replica')[];
-  viewModes?: ViewMode[];
-  placement?: ('contextMenu' | 'inspector' | 'both')[];
-  isDisabled?: (entity: any) => boolean;
-}
-
-export interface CustomPanel {
-  id: string;
-  label: string;
-  appliesTo: ('Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Replica')[];
-  component: React.ComponentType<{
-    entity: any;
-    viewMode: ViewMode;
-    apiPrefix: string;
-    pollingData: any;
-  }>;
 }
 
 // API Error Types

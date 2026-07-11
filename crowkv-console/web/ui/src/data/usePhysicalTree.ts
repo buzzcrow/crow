@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { listRacks, listNodes } from '../api';
-import type { Rack, Node } from '../types';
+import { listRacks, listNodes, listNodeStores, pingNode } from '../api';
+import { NodeHealth } from '../types';
+import type { Rack, Node, NodeStore } from '../types';
 
 interface UsePhysicalTreeOptions {
   /** Polling interval in milliseconds when active (view is visible) */
@@ -18,6 +19,9 @@ interface UsePhysicalTreeResult {
   racks: Rack[];
   /** Flat list of all nodes across all racks */
   nodes: Node[];
+  /** Per-node store/group detail (local + remotes), keyed by node id. */
+  nodeStores: Record<string, NodeStore[]>;
+  nodeHealthById: Record<string, NodeHealth>;
   /** Whether data is currently loading */
   loading: boolean;
   /** Error if fetch failed */
@@ -39,6 +43,8 @@ export function usePhysicalTree({
 }: UsePhysicalTreeOptions = {}): UsePhysicalTreeResult {
   const [racks, setRacks] = useState<Rack[]>([]);
   const [nodes, setNodes] = useState<Node[]>([]);
+  const [nodeStores, setNodeStores] = useState<Record<string, NodeStore[]>>({});
+  const [nodeHealthById, setNodeHealthById] = useState<Record<string, NodeHealth>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
   const isActiveRef = useRef(true);
@@ -58,7 +64,49 @@ export function usePhysicalTree({
 
       // Fetch flat list of nodes
       const nodesData = await listNodes(undefined, recursive);
-      setNodes(Array.isArray(nodesData) ? nodesData : []);
+      const nodeList = Array.isArray(nodesData) ? nodesData : [];
+      setNodes(nodeList);
+
+      const reachability = await Promise.all(
+        nodeList.map(async (node) => {
+          try {
+            const result = await pingNode(node.id);
+            return [node.id, result.ok ? NodeHealth.Up : NodeHealth.Down] as const;
+          } catch {
+            return [node.id, NodeHealth.Unknown] as const;
+          }
+        }),
+      );
+      setNodeHealthById(Object.fromEntries(reachability));
+
+      // Only nodes with a running server are in the monitor cache; querying
+      // a serverless node returns 404 (noisy console errors). Determine
+      // which nodes host a server from the flat list and the recursive rack
+      // view (`has_server`), and fetch per-node store detail only for those.
+      const serverNodeIds = new Set<string>();
+      for (const n of nodeList) if (n.server) serverNodeIds.add(n.id);
+      for (const rack of Array.isArray(racksData) ? racksData : []) {
+        for (const entry of ((rack as any).nodes as any[]) || []) {
+          if (typeof entry === 'object' && (entry.has_server || entry.server)) {
+            serverNodeIds.add(entry.id);
+          }
+        }
+      }
+
+      // Fetch per-node store/group detail (local + remotes) in parallel.
+      // This is the physical/debugging view's source of peer wiring; the
+      // recursive racks tree only inlines the local replica per group.
+      const storeEntries = await Promise.all(
+        [...serverNodeIds].map(async (id) => {
+          try {
+            const ns = await listNodeStores(id);
+            return [id, Array.isArray(ns) ? ns : []] as const;
+          } catch {
+            return [id, [] as NodeStore[]] as const;
+          }
+        }),
+      );
+      setNodeStores(Object.fromEntries(storeEntries));
     } catch (err) {
       console.error('Failed to fetch physical tree:', err);
       setError(err instanceof Error ? err : new Error('Unknown error fetching physical tree'));
@@ -120,6 +168,8 @@ export function usePhysicalTree({
   return {
     racks,
     nodes,
+    nodeStores,
+    nodeHealthById,
     loading,
     error,
     refresh: fetchData,

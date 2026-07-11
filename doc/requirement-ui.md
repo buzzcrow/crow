@@ -87,21 +87,13 @@ The UI must:
 - Keep a **cluster health summary** visible at all times (header /
   banner), independent of view-mode: an at-a-glance answer to "is
   anything wrong?".
-- **Health history**: The cluster health summary includes an optional
-  timeline view showing health trends over the last 1 hour / 1 day
-  (configurable). The inspector's Metrics tab includes per-entity health
-  history for the same window.
-- **Topology enhancements**:
-  - Search/highlight functionality in the topology canvas: users can search
-    for an entity to have it centered and highlighted in the viewport
-  - Multiple layout options for the topology canvas: force-directed
-    (default), hierarchical, grid, with user selection persisted in
-    `localStorage`
-  - Focus mode: toggles visibility of all entities except the selected one
-    and its direct peers, for simplified debugging of specific groups
-  - Edge labels: replication edges between replicas show optional metrics
-    (replication lag, throughput) at a glance, toggleable via a canvas
-    control
+- Provide an interactive **topology canvas** for the active view with
+  basic mouse control (drag to pan, click to select/focus a node). The
+  canvas reflects the same hierarchy and status as the sidebar tree.
+
+Health-history timelines, per-entity metric charts, canvas search,
+selectable layouts, focus mode, and edge-metric labels are **deferred to
+V2** — see §9.
 
 ### 3.2 Hardware Lifecycle (Physical-tree operations)
 This section is the SPA's surface onto the **physical view** (§3.1).
@@ -219,52 +211,27 @@ Concretely:
 - **Inline form validation**: All form inputs validate in real-time as the
   user types, with clear error messages shown inline before the form is
   submitted.
-- **Bulk operations**: The UI supports multi-selection of entities in the
-  sidebar tree and topology canvas, with bulk actions applicable to all
-  selected items (start/stop servers, delete replicas, add nodes to stores).
-  Bulk operations show a summary confirmation dialog before execution, and
-  report per-item success/failure in the activity log.
+- **Activity visibility**: a recent-operations view (timestamp, action,
+  target, outcome), backed by client-side state, is reachable from the SPA.
+
+Bulk / multi-select operations are **deferred to V2** — see §9.
 
 ### 3.8 Navigation & Productivity
-The UI must include productivity features to speed up common workflows for
-both new and power users:
-- **Command palette**: Accessible via `Cmd/Ctrl+K` global shortcut, allowing:
-  - Fuzzy search across all cluster entities (racks, nodes, stores, groups,
-    replicas) by ID or name
-  - Quick execution of common actions (deploy server, create store, add
-    replica) without navigating through menus
-  - One-click switching between view modes (Physical/Logical) and feature
-    panels
-  - Jump directly to KV operations for a specific group
-- **Breadcrumb navigation**: A persistent breadcrumb trail in the header
-  showing the full hierarchy path of the current selection, allowing
-  one-click navigation to any parent entity.
-- **Favorites & recent items**:
-  - Users can pin frequently accessed entities to a "Favorites" section at
-    the top of the sidebar
-  - A "Recently viewed" section shows the last 10 accessed entities for
-    quick navigation
-  - Favorites and recent items are persisted across sessions in
-    `localStorage`
-- **Filter & sort controls**:
-  - All entity lists (sidebar tree, replica lists, KV scan results) support
-    filtering by status (healthy/degraded/failed), role (leader/follower),
-    or ID/name
-  - All entity lists support sorting by ID, name, status, or health score
-  - Custom filter/sort presets can be saved and reused for frequent
-    workflows
+The UI must keep common workflows reachable with basic mouse interaction:
+- **Sidebar tree navigation**: clicking a tree row selects the entity and
+  drives the canvas + inspector. Expand/collapse via the disclosure arrow.
+- **Context-menu actions**: right-clicking a tree row (or canvas node)
+  exposes the per-layer mutations from §3.2 / §3.3.
+- **Tree filter**: a single text filter at the top of the sidebar narrows
+  the tree by id/name.
+
+Advanced productivity features (command palette, breadcrumbs, favorites,
+recent items, saved filter/sort presets) are **deferred to V2** — see §9.
 
 ### 3.9 Export & Sharing
-The UI must support exporting cluster state and operation data for
-documentation, demos, and audit purposes:
-- **Topology export**: Export the current topology canvas view as SVG or
-  PNG, including all status indicators and labels
-- **Data export**: Export KV scan results, replica lists, or node lists as
-  JSON or CSV
-- **Activity log export**: Export the full activity log as CSV, including
-  timestamps, actions, targets, and outcomes
-- **Health report export**: Generate and export a PDF cluster health report
-  including summary status, entity health breakdown, and recent metrics
+Export/sharing of topology, data, activity, and health reports is
+**deferred to V2** — see §9. v1 relies on the embedded Swagger panel and
+copy-to-clipboard on inspector fields for ad-hoc extraction.
 
 ## 4. Embeddability Requirements
 
@@ -295,19 +262,9 @@ larger product that already uses CrowKV. To make that practical:
 The UI must also be runnable standalone — i.e. served directly by
 `crowkv-web` without a host system — for development and customer demos.
 
-Additional embeddability features:
-- **Custom branding**: Embedding hosts can supply a custom logo and brand
-  color via the mount props, which replaces the default CrowKV logo in the
-  header and adjusts the accent color palette.
-- **Custom actions**: Embedding hosts can inject custom context menu items
-  and inspector actions via the mount props, which are passed to the
-  `onEvent` callback when triggered.
-- **Custom metrics panels**: Embedding hosts can inject custom metrics chart
-  components into the inspector, which receive the current selection and
-  polling data as props.
-- **System theme detection**: The UI automatically switches between light
-  and dark themes based on the user's OS preference, unless explicitly
-  overridden by the user or host theme prop.
+v1 ships a single built-in (dark) theme. Custom branding, host-injected
+custom actions / metrics panels, and light/system theme switching are
+**deferred to V2** — see §9.
 
 ## 5. Scope of Resources Managed
 
@@ -373,3 +330,27 @@ Constraints:
 - Live log tails of `crowkv-server` processes (covered separately by the
   SSH lifecycle plan).
 - `--prefix` KV browsing beyond what `crowkv-server` natively supports.
+
+## 9. Deferred to V2
+
+The v1 console is deliberately lean: two hierarchy views, an interactive
+but minimally-chromed topology canvas, the full CRUD/lifecycle/KV surface,
+an embedded Swagger panel, toasts, and a client-side activity log. The
+following were specified in earlier drafts and are explicitly postponed so
+the v1 surface stays usable and maintainable:
+
+- **Productivity**: command palette (`Cmd/Ctrl+K`), header breadcrumbs,
+  favorites / recent items, saved filter & sort presets.
+- **Canvas chrome**: minimap, zoom controls, selectable layout algorithms
+  (force/hierarchical/grid), focus mode, edge-metric labels, in-canvas
+  search/highlight.
+- **Metrics & history**: per-entity Recharts panels, cluster health
+  timeline.
+- **Export & sharing**: topology SVG/PNG, data JSON/CSV, activity CSV,
+  PDF health report.
+- **Bulk ops**: multi-select in tree/canvas and batched mutations.
+- **Advanced embedding**: custom branding/logo, host-injected custom
+  actions and metrics panels, light/system theme switching.
+
+v1 keeps the embedding seam minimal: `apiPrefix`, `basePath`, `readonly`,
+and `modules` opt-out remain supported (§4).

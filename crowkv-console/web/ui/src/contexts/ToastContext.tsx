@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useCallback, ReactNode } from 'react';
-import { v4 as uuidv4 } from 'uuid';
+import { nextId } from '../utils/ids';
 
 export type ToastType = 'success' | 'error' | 'warning' | 'info';
 
@@ -41,7 +41,7 @@ export function ToastProvider({ children, defaultDuration = 4000 }: ToastProvide
 
   const addToast = useCallback(
     (toast: Omit<Toast, 'id'>): string => {
-      const id = uuidv4();
+      const id = nextId('toast');
       const newToast: Toast = {
         id,
         duration: defaultDuration,

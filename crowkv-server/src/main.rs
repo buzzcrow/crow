@@ -50,7 +50,13 @@ async fn main() {
 
     let bootstrap = parse_and_validate_cli_args(&args);
 
-    let registry = Arc::new(KvStoreRegistry::new());
+    let election_cfg = if args.election_profile == "test" {
+        PxElectionConfig::for_tests()
+    } else {
+        PxElectionConfig::DEFAULT
+    };
+
+    let registry = Arc::new(KvStoreRegistry::with_election_config(election_cfg));
 
     // Start HTTP management server first
     let mgmt_addr: SocketAddr = format!("{}:{}", args.management_addr, args.management_port)

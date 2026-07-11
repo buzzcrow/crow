@@ -77,6 +77,9 @@ pub fn router(state: AppState) -> axum::Router {
             "/api/nodes/:id/server/stop",
             post(lifecycle::http_stop_node_server),
         )
+        // Cluster-wide server list (CLI `server list`), composed from the
+        // config + monitor cache.
+        .route("/api/servers", get(lifecycle::http_list_servers))
         .route(
             "/api/nodes/:id/openapi.json",
             get(lifecycle::http_node_openapi_proxy),
@@ -131,6 +134,11 @@ pub fn router(state: AppState) -> axum::Router {
         .route(
             "/api/stores/:sid/groups/:gid/replicas/:rid",
             get(mgmt::http_get_replica).delete(mgmt::http_remove_replica),
+        )
+        // Leader gRPC endpoint resolver (CLI bench dials gRPC directly).
+        .route(
+            "/api/stores/:sid/groups/:gid/endpoint",
+            get(kv::http_kv_endpoint),
         )
         // KV data plane: leader resolved via the monitor cache; NotLeader triggers one retry (A8).
         .route("/api/stores/:sid/groups/:gid/kv/get", get(kv::http_kv_get))

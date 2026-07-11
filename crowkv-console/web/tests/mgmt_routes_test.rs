@@ -78,7 +78,12 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
         url: upstream.mgmt_url.clone(),
         node_id: Some("n1".into()),
         grpc_url: Some(upstream.grpc_url.clone()),
-        pid: Some(upstream.pid),
+        mgmt_port: None,
+        grpc_port: None,
+        auto_start: true,
+        binary: None,
+        election_profile: None,
+        pid: None,
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);
@@ -90,6 +95,7 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn full_mgmt_cycle_through_web_routes() {
     let Some(upstream) = spawn_upstream().await else {
         eprintln!("skipping: crowkv-server binary not built");
@@ -101,11 +107,9 @@ async fn full_mgmt_cycle_through_web_routes() {
 
     // 1. POST /api/stores → 201 (orchestrated create on node n1).
     let store_id: u64 = 7;
-    let group_id: u64 = 70;
-    let replica_id: u64 = 700;
     let resp = http
         .post(format!("{base}/api/stores"))
-        .json(&json!({"store_id": store_id, "group_id": group_id, "replica_id": replica_id, "nodes": ["n1"]}))
+        .json(&json!({"store_id": store_id, "nodes": ["n1"]}))
         .send()
         .await
         .expect("POST /api/stores");
@@ -136,8 +140,24 @@ async fn full_mgmt_cycle_through_web_routes() {
     assert!(resp.status().is_success());
     let detail: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(detail["store_id"], store_id);
+    let groups_before = detail["groups"].as_array().expect("groups array");
+    assert!(
+        groups_before.is_empty(),
+        "new store should start empty: {detail:?}"
+    );
 
     // 4. POST /api/stores/:sid/groups → 201 (orchestrated group create).
+    let group_id: u64 = 70;
+    let replica_id: u64 = 700;
+    let resp = http
+        .post(format!("{base}/api/stores/{store_id}/groups"))
+        .json(&json!({"group_id": group_id, "replica_id": replica_id, "nodes": ["n1"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "{:?}", resp.text().await.ok());
+
+    // 5. POST /api/stores/:sid/groups → 201 (second group).
     let group_id_2: u64 = 80;
     let replica_id_2: u64 = 800;
     let resp = http
@@ -148,7 +168,7 @@ async fn full_mgmt_cycle_through_web_routes() {
         .unwrap();
     assert_eq!(resp.status(), 201, "{:?}", resp.text().await.ok());
 
-    // 5. GET /api/stores/:sid/groups → 2 groups (initial + new).
+    // 6. GET /api/stores/:sid/groups → 2 explicitly created groups.
     let groups: Vec<serde_json::Value> = http
         .get(format!("{base}/api/stores/{store_id}/groups"))
         .send()
@@ -159,7 +179,7 @@ async fn full_mgmt_cycle_through_web_routes() {
         .unwrap();
     assert_eq!(groups.len(), 2, "expected 2 groups, got {groups:?}");
 
-    // 6. GET /api/stores/:sid/groups/:gid → group detail.
+    // 7. GET /api/stores/:sid/groups/:gid → group detail.
     let resp = http
         .get(format!("{base}/api/stores/{store_id}/groups/{group_id_2}"))
         .send()
@@ -169,7 +189,7 @@ async fn full_mgmt_cycle_through_web_routes() {
     let gv: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(gv["group_id"], group_id_2);
 
-    // 7. DELETE /api/stores/:sid/groups/:gid → removes the second group.
+    // 8. DELETE /api/stores/:sid/groups/:gid → removes the second group.
     let resp = http
         .delete(format!("{base}/api/stores/{store_id}/groups/{group_id_2}"))
         .send()
@@ -177,7 +197,7 @@ async fn full_mgmt_cycle_through_web_routes() {
         .unwrap();
     assert_eq!(resp.status(), 204);
 
-    // 8. DELETE /api/stores/:sid → removes the store.
+    // 9. DELETE /api/stores/:sid → removes the store.
     let resp = http
         .delete(format!("{base}/api/stores/{store_id}"))
         .send()
@@ -185,7 +205,7 @@ async fn full_mgmt_cycle_through_web_routes() {
         .unwrap();
     assert_eq!(resp.status(), 204);
 
-    // 9. GET /api/stores → store 7 should be gone (default store 1 may
+    // 10. GET /api/stores → store 7 should be gone (default store 1 may
     //    remain because crowkv-server creates it on startup).
     let stores: Vec<serde_json::Value> = http
         .get(format!("{base}/api/stores"))

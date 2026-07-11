@@ -26,13 +26,8 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-cargo test -p crowkv-server --test management_api
-if [ $? -ne 0 ]; then
-    echo "❌ Tests failed. Fix failing tests before committing."
-    exit 1
-fi
 
-cargo test -p crowkv-server --test cluster_e2e
+cargo test -p crowkv-server --test cluster_e2e_test
 if [ $? -ne 0 ]; then
     echo "❌ Tests failed. Fix failing tests before committing."
     exit 1

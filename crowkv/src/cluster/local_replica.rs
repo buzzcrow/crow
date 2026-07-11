@@ -478,6 +478,14 @@ impl PxLocalReplica {
         self.election_state.lock().leader_id = Some(leader_id);
     }
 
+    pub fn clear_believed_leader(&self) {
+        self.election_state.lock().leader_id = None;
+    }
+
+    pub fn clear_vote_lockout(&self) {
+        self.election_state.lock().vote_lockout_until = Instant::now();
+    }
+
     /// Lock-free snapshot of [`LeaseState`].
     #[must_use]
     pub fn lease_state_snapshot(&self) -> LeaseState {
@@ -657,10 +665,18 @@ impl PxLocalReplica {
     /// Caller is responsible for fanning out `RequestVote` to peers.
     #[tracing::instrument(level = "info", skip_all, fields(replica_l_id = self.id, new_term = new_term))]
     pub fn become_candidate(&self, new_term: PxTerm) {
+        let lease = Duration::from_millis(self.lease_duration_ms());
+        let now = Instant::now();
         self.with_election_state(|s| {
             s.current_term = new_term;
             s.voted_for = Some(self.id);
             s.role = PxLocalReplicaRole::Candidate;
+            // Extend vote lockout on self-vote, consistent with
+            // handle_request_vote which extends it on external grants.
+            // Without this a leader that just won could immediately
+            // grant PreVote/RequestVote to a challenger before it has
+            // sent its first heartbeat round.
+            s.vote_lockout_until = now + lease;
         });
         self.role_atomic
             .store(PxLocalReplicaRole::Candidate.as_u8(), Ordering::Release);

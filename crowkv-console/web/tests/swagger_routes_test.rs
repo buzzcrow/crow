@@ -77,7 +77,12 @@ async fn spawn_web_with_node(upstream: &Upstream) -> SocketAddr {
         url: upstream.mgmt_url.clone(),
         node_id: Some("n1".into()),
         grpc_url: Some(upstream.grpc_url.clone()),
-        pid: Some(upstream.pid),
+        mgmt_port: None,
+        grpc_port: None,
+        auto_start: true,
+        binary: None,
+        election_profile: None,
+        pid: None,
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);
@@ -259,6 +264,11 @@ async fn openapi_proxy_cache_is_per_node() {
         url: format!("http://{n1}"),
         node_id: Some("n1".into()),
         grpc_url: None,
+        mgmt_port: None,
+        grpc_port: None,
+        auto_start: false,
+        binary: None,
+        election_profile: None,
         pid: None,
     })
     .unwrap();
@@ -267,6 +277,11 @@ async fn openapi_proxy_cache_is_per_node() {
         url: format!("http://{n2}"),
         node_id: Some("n2".into()),
         grpc_url: None,
+        mgmt_port: None,
+        grpc_port: None,
+        auto_start: false,
+        binary: None,
+        election_profile: None,
         pid: None,
     })
     .unwrap();

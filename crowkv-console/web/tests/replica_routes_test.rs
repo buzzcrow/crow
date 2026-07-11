@@ -5,8 +5,9 @@
 //!   1. Spawn two `crowkv-server` processes (n1, n2).
 //!   2. Boot `crowkv-web` with both nodes in the config; seed the
 //!      monitor cache from each node's topology.
-//!   3. POST /api/stores to create store 7 on n1 with replica 1.
-//!   4. POST /api/stores/7/groups/70/replicas to add replica 2 on n2.
+//!   3. POST /api/stores to create empty store 7 on n1.
+//!   4. POST /api/stores/7/groups to create group 70 with replica 1 on n1.
+//!   5. POST /api/stores/7/groups/70/replicas to add replica 2 on n2.
 //!      - List replicas → 2 entries, one per node.
 //!      - Physical detail on n1 lists n2's replica as a remote and
 //!        vice versa (round-trip proves bidirectional wiring).
@@ -98,6 +99,11 @@ async fn spawn_web(upstreams: &[Upstream]) -> SocketAddr {
             url: u.mgmt_url.clone(),
             node_id: Some(u.node_id.clone()),
             grpc_url: Some(u.grpc_url.clone()),
+            mgmt_port: None,
+            grpc_port: None,
+            auto_start: true,
+            binary: None,
+            election_profile: None,
             pid: Some(u.pid),
         })
         .unwrap();
@@ -152,16 +158,25 @@ async fn replica_add_remove_wires_peers_bidirectionally() {
     let rid1: u64 = 1;
     let rid2: u64 = 2;
 
-    // 1. Create store + group on n1 with replica 1.
+    // 1. Create an empty store on n1.
     let resp = http
         .post(format!("{base}/api/stores"))
-        .json(&json!({"store_id": sid, "group_id": gid, "replica_id": rid1, "nodes": ["n1"]}))
+        .json(&json!({"store_id": sid, "nodes": ["n1"]}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 201, "create store: {:?}", resp.text().await.ok());
 
-    // 2. Initial replica list has exactly one entry on n1.
+    // 2. Create the initial group on n1 with replica 1.
+    let resp = http
+        .post(format!("{base}/api/stores/{sid}/groups"))
+        .json(&json!({"group_id": gid, "replica_id": rid1, "nodes": ["n1"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "create group: {:?}", resp.text().await.ok());
+
+    // 3. Initial replica list has exactly one entry on n1.
     let list: Vec<serde_json::Value> = http
         .get(format!("{base}/api/stores/{sid}/groups/{gid}/replicas"))
         .send()
@@ -174,7 +189,7 @@ async fn replica_add_remove_wires_peers_bidirectionally() {
     assert_eq!(list[0]["replica_id"], rid1);
     assert_eq!(list[0]["node_id"], "n1");
 
-    // 3. Add replica 2 on n2 → orchestrated bidirectional wiring.
+    // 4. Add replica 2 on n2 → orchestrated bidirectional wiring.
     let resp = http
         .post(format!("{base}/api/stores/{sid}/groups/{gid}/replicas"))
         .json(&json!({"node_id": "n2", "replica_id": rid2}))
@@ -183,7 +198,7 @@ async fn replica_add_remove_wires_peers_bidirectionally() {
         .unwrap();
     assert_eq!(resp.status(), 201, "add replica: {:?}", resp.text().await.ok());
 
-    // 4. List now shows both replicas.
+    // 5. List now shows both replicas.
     let list: Vec<serde_json::Value> = http
         .get(format!("{base}/api/stores/{sid}/groups/{gid}/replicas"))
         .send()
@@ -196,7 +211,7 @@ async fn replica_add_remove_wires_peers_bidirectionally() {
     let nodes: Vec<&str> = list.iter().map(|r| r["node_id"].as_str().unwrap()).collect();
     assert!(nodes.contains(&"n1") && nodes.contains(&"n2"), "{nodes:?}");
 
-    // 5. Physical tree must show bidirectional remotes:
+    // 6. Physical tree must show bidirectional remotes:
     //    n1's group has r2 as a remote, n2's group has r1 as a remote.
     //    Query the upstreams directly to prove the orchestration wired
     //    them, not just the console cache.
@@ -213,7 +228,7 @@ async fn replica_add_remove_wires_peers_bidirectionally() {
         "n2 should list r1 as remote: {r2_remotes:?}"
     );
 
-    // 6. GET single replica detail.
+    // 7. GET single replica detail.
     let resp = http
         .get(format!("{base}/api/stores/{sid}/groups/{gid}/replicas/{rid2}"))
         .send()
@@ -223,8 +238,28 @@ async fn replica_add_remove_wires_peers_bidirectionally() {
     let detail: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(detail["replica_id"], rid2);
     assert_eq!(detail["node_id"], "n2");
+    assert!(
+        matches!(detail["role"].as_str(), Some("leader" | "follower")),
+        "new replica should report a valid role: {detail}"
+    );
 
-    // 7. DELETE of a non-existent replica → 404.
+    let group_before_remove: serde_json::Value = http
+        .get(format!("{base}/api/stores/{sid}/groups/{gid}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let leader_rid = group_before_remove["replicas"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["role"] == "leader")
+        .and_then(|r| r["replica_id"].as_u64())
+        .expect("group should have a leader before deletion");
+
+    // 8. DELETE of a non-existent replica → 404.
     let resp = http
         .delete(format!("{base}/api/stores/{sid}/groups/{gid}/replicas/999"))
         .send()
@@ -232,16 +267,17 @@ async fn replica_add_remove_wires_peers_bidirectionally() {
         .unwrap();
     assert_eq!(resp.status(), 404);
 
-    // 8. DELETE replica 2 → orchestrated remove (deregister from n1,
-    //    delete local on n2).
+    // 9. DELETE the current leader replica.
     let resp = http
-        .delete(format!("{base}/api/stores/{sid}/groups/{gid}/replicas/{rid2}"))
+        .delete(format!(
+            "{base}/api/stores/{sid}/groups/{gid}/replicas/{leader_rid}"
+        ))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 204);
 
-    // 9. List drops back to 1 entry; n1's remotes list is empty again.
+    // 10. List drops back to 1 entry.
     let list: Vec<serde_json::Value> = http
         .get(format!("{base}/api/stores/{sid}/groups/{gid}/replicas"))
         .send()
@@ -251,12 +287,40 @@ async fn replica_add_remove_wires_peers_bidirectionally() {
         .await
         .unwrap();
     assert_eq!(list.len(), 1, "expected 1 replica after remove, got {list:?}");
-    assert_eq!(list[0]["replica_id"], rid1);
+    let surviving_rid = list[0]["replica_id"].as_u64().unwrap();
+    let surviving_node = list[0]["node_id"].as_str().unwrap();
 
-    let r1_remotes_after = c1.list_remote_replicas(sid, gid).await.unwrap();
+    let surviving_client = if surviving_node == "n1" { &c1 } else { &c2 };
+    let r1_remotes_after = surviving_client.list_remote_replicas(sid, gid).await.unwrap();
     assert!(
-        !r1_remotes_after.iter().any(|r| r.replica_id == rid2),
-        "n1 should no longer list r2 as remote: {r1_remotes_after:?}"
+        !r1_remotes_after.iter().any(|r| r.replica_id == leader_rid),
+        "n1 should no longer list removed leader as remote: {r1_remotes_after:?}"
+    );
+
+    // After the leader is removed, the surviving replica is the lone
+    // voter (quorum recomputes to 1), so it must re-elect itself. The
+    // election walks Follower -> PreCandidate -> Candidate -> Leader, and
+    // `topology()` reports the *raw* role string (including the transient
+    // "pre_candidate" / "candidate" states). Poll until the re-election
+    // converges to "leader" rather than racing a single snapshot.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let final_role = loop {
+        let surviving_topology = surviving_client.topology().await.unwrap();
+        let surviving_group = surviving_topology
+            .iter()
+            .find(|store| store.store_id == sid)
+            .and_then(|store| store.groups.iter().find(|group| group.group_id == gid))
+            .expect("surviving node should still host the group after replica removal");
+        assert_eq!(surviving_group.local_replica_id, surviving_rid);
+        let role = surviving_group.local_replica.role.clone();
+        if role == "leader" || std::time::Instant::now() >= deadline {
+            break role;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    assert_eq!(
+        final_role, "leader",
+        "lone surviving replica should re-elect itself as leader after the leader was removed"
     );
 
     // Cleanup.

@@ -614,8 +614,41 @@ embedding contract, panel layout, polling model) lives in
 - Binary: `crowkv` (the noun-verb command structure is self-explanatory).
 - Parser: `clap` derive; one module per top-level group, each verb a subcommand struct.
 - Output: pretty table (`comfy-table`) by default; `--json` global flag for scripting.
-- Global flags: `--config <path>`, `--json`, `-v` / `-vv`.
-- Command hierarchy as defined in `requirement.md` §15.5 ("CLI Command Hierarchy").
+- Global flags: `--console <url>` (default `http://127.0.0.1:9920`),
+  `--config <path>`, `--json`, `-v` / `-vv`.
+- Command hierarchy as defined in `requirement.md` §15.4.5 ("CLI Command Hierarchy").
+- **One call path.** Every verb — including cluster observation
+  (`cluster status/topology/inspect`) and `bench` — routes through
+  `ConsoleClient` against `crowkv-web`. The CLI never talks to a
+  `crowkv-server` mgmt API or registry directly; there is no
+  `--server` flag.
+
+### 7.0 Cluster observation (`cluster status/topology/inspect`)
+- `cluster status` and `cluster topology` build their snapshot purely
+  from console reads: `list_stores` (logical tree), `list_nodes` +
+  `list_servers` (physical tree). This works against a web-managed /
+  `--test-mode` cluster that has no persisted registry.
+- `cluster inspect <id>` resolves a single entity. **Id grammar:**
+  - `s<store_id>` → store detail (`get_store`).
+  - `s<store_id>/g<group_id>` → group detail (`get_group`).
+  - `s<store_id>/g<group_id>/r<replica_id>` → replica detail
+    (`get_replica`).
+  - any other bare token → a node id (string), resolved via
+    `get_node_server` (404 ⇒ "no server deployed").
+  - `s…`/`g…`/`r…` ids are decimal. A token that is not a valid
+    `s<digits>[…]` logical path is treated as a node id, so node ids
+    that happen to look like `s7` are addressable only as nodes — keep
+    node ids out of the `s\d+` shape.
+
+### 7.0.1 `server list` and the bench endpoint
+- `server list` is served by a console aggregate `GET /api/servers`
+  (`ConsoleClient::list_servers`) returning, per deployed server,
+  `{node_id, mgmt_url, grpc_url, pid, health}` from the config plus the
+  monitor cache.
+- `bench` dials gRPC directly for throughput, but resolves its target
+  endpoint through the console (`GET /api/stores/:s/groups/:g/endpoint`
+  → `ConsoleClient::resolve_endpoint`), so it needs no registry and no
+  `--server`.
 
 ### 7.1 Bench subcommand internals
 - `shared` exposes a `Workload` trait with built-in implementations for read / write / list / mix.

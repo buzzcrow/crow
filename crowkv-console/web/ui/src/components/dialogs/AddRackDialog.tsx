@@ -1,23 +1,35 @@
-import { useState } from 'react';
+import { useMemo, useRef, useState, useEffect } from 'react';
 import { Dialog } from '../Dialog';
 import { Input } from '../ui/Input';
 import { useToast } from '../../contexts/ToastContext';
 import { addRack } from '../../api';
+import { nextIdFromSuffix } from './defaults';
 
 export interface AddRackDialogProps {
   isOpen: boolean;
   onClose: () => void;
+  existingRackIds?: string[];
   onSuccess?: () => void | Promise<void>;
 }
 
 /**
  * Dialog for adding a new rack.
  */
-export function AddRackDialog({ isOpen, onClose, onSuccess }: AddRackDialogProps) {
-  const [rackId, setRackId] = useState('');
+export function AddRackDialog({ isOpen, onClose, existingRackIds = [], onSuccess }: AddRackDialogProps) {
+  const defaultRackId = useMemo(() => nextIdFromSuffix(existingRackIds, 1), [existingRackIds]);
+  const [rackId, setRackId] = useState(defaultRackId);
   const [name, setName] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const wasOpenRef = useRef(false);
   const { success, error } = useToast();
+
+  useEffect(() => {
+    if (isOpen && !wasOpenRef.current) {
+      setRackId(defaultRackId);
+      setName('');
+    }
+    wasOpenRef.current = isOpen;
+  }, [isOpen, defaultRackId]);
 
   const handleSubmit = async () => {
     if (!rackId.trim()) return;
@@ -30,7 +42,7 @@ export function AddRackDialog({ isOpen, onClose, onSuccess }: AddRackDialogProps
       });
 
       success(`Rack "${rackId}" created successfully`);
-      setRackId('');
+      setRackId(defaultRackId);
       setName('');
       onClose();
       await onSuccess?.();
@@ -43,7 +55,7 @@ export function AddRackDialog({ isOpen, onClose, onSuccess }: AddRackDialogProps
   };
 
   const handleClose = () => {
-    setRackId('');
+    setRackId(defaultRackId);
     setName('');
     onClose();
   };
@@ -62,7 +74,7 @@ export function AddRackDialog({ isOpen, onClose, onSuccess }: AddRackDialogProps
       <div className="tw-space-y-4">
         <Input
           label="Rack ID"
-          placeholder="rack-01"
+          placeholder="R-01"
           value={rackId}
           onChange={(e) => setRackId(e.target.value)}
           autoFocus

@@ -90,16 +90,23 @@ struct GroupSummary {
 #[derive(ToSchema, Deserialize)]
 struct AddStoreRequest {
     store_id: u64,
-    group_id: u64,
-    replica_id: u64,
     #[serde(default)]
     port: Option<u16>,
+}
+
+#[derive(ToSchema, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AddGroupInitialRole {
+    Leader,
+    Follower,
 }
 
 #[derive(ToSchema, Deserialize)]
 struct AddGroupRequest {
     group_id: u64,
     replica_id: u64,
+    #[serde(default)]
+    initial_role: Option<AddGroupInitialRole>,
 }
 
 #[derive(ToSchema, Serialize, Deserialize, Clone)]
@@ -326,16 +333,6 @@ async fn add_store(
     );
     let store = Arc::new(PxKvStore::new(req.store_id, addr));
 
-    info!(
-        store_id = req.store_id,
-        group_id = req.group_id,
-        replica_id = req.replica_id,
-        "creating PxGroup with local replica via management API"
-    );
-    let local_replica = PxLocalReplica::new(req.replica_id, PxLocalReplicaRole::Follower);
-    let group = PxGroup::new(req.group_id, local_replica);
-    store.add_group(group);
-
     if let Err(e) = store.start().await {
         return Err(err_json(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -352,7 +349,7 @@ async fn add_store(
     let summary = StoreSummary {
         store_id: req.store_id,
         listen_addr: store.listen_addr().map(|a| a.to_string()),
-        group_count: 1,
+        group_count: 0,
     };
 
     state.add_store(req.store_id, store);
@@ -463,8 +460,13 @@ async fn add_group(
         replica_id = req.replica_id,
         "creating PxGroup with local replica via management API"
     );
-    let local_replica = PxLocalReplica::new(req.replica_id, PxLocalReplicaRole::Follower);
-    let group = PxGroup::new(req.group_id, local_replica);
+    let initial_role = match req.initial_role.unwrap_or(AddGroupInitialRole::Leader) {
+        AddGroupInitialRole::Leader => PxLocalReplicaRole::Leader,
+        AddGroupInitialRole::Follower => PxLocalReplicaRole::Follower,
+    };
+    let local_replica = PxLocalReplica::new(req.replica_id, initial_role);
+    let mut group = PxGroup::new(req.group_id, local_replica);
+    group.set_election_config(state.election_cfg);
     store.add_group(group);
 
     info!(
@@ -694,6 +696,14 @@ async fn remove_remote_replica(
             new_group.add_remote_replica(PxRemoteReplica::new(id, endpoint.to_string()));
         }
     }
+    let current_term = group.local_replica().current_term_snapshot();
+    if new_group.quorum() == 1 {
+        new_group.local_replica().become_leader();
+        new_group.stamp_proposing_term(current_term);
+    } else if group.leader_id() == rid {
+        new_group.local_replica().become_follower(current_term);
+        new_group.local_replica().clear_vote_lockout();
+    }
     store.add_group(new_group);
 
     info!(
@@ -807,7 +817,7 @@ async fn export_topology(State(state): State<RegistryArc>) -> impl IntoResponse 
 }
 
 /// Rebuild a `PxGroup` with the same config (`group_id`, `local_replica`,
-/// `leader_id`, `force_classic`) but no remote replicas. Caller is
+/// `leader_id`, `force_classic`, `election_cfg`) but no remote replicas. Caller is
 /// responsible for re-adding remote replicas.
 ///
 /// **Important:** the new `PxLocalReplica` inherits the prior replica's
@@ -827,6 +837,7 @@ fn rebuild_group_with_same_config(group: &PxGroup) -> PxGroup {
     // (role, leader_id) snapshot from the prior replica under the mutex,
     // so `set_leader_id` is redundant here. The `role_atomic` and
     // `believed_leader_id` on the new replica already match.
+    new_group.set_election_config(group.election_config());
     // Preserve `proposing_term` so the new group's leadership gate
     // (`role == Leader && current_term == proposing_term`) passes for
     // an already-elected leader that didn't have to re-stamp the term

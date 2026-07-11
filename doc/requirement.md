@@ -733,7 +733,7 @@ crowkv
 │   └── list
 │
 ├── group                # paxos group mgmt
-│   ├── add --store-id <s> --group-id <id> --nodes <n1,n2,...> [--leader <n>]
+│   ├── add --store-id <s> --group-id <id> --replica-id <r> --nodes <n1,n2,...>
 │   ├── remove --store-id <s> --group-id <id>
 │   ├── list --store-id <s>
 │   └── inspect --store-id <s> --group-id <id>
@@ -767,6 +767,10 @@ Design rules:
   `--store-id` / `--group-id` (cluster-wide logical ids); the backend
   resolves placement from topology. Server lifecycle uses `--node-id`
   (one server per node).
+- **Leaders are elected, not assigned.** `group add` takes no `--leader`
+  flag: group leadership is decided by Paxos election among the replicas,
+  and the console exposes no forced-leadership control. Operators observe
+  the elected leader via `group inspect` / `cluster inspect`.
 
 ### 15.5 RPC and Communication
 

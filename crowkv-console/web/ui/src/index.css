@@ -20,14 +20,14 @@
   }
 
   :root {
-    /* Light theme */
-    --color-bg: #ffffff;
-    --color-panel: #f8fafc;
-    --color-accent: #3b82f6;
-    --color-accent2: #2563eb;
-    --color-muted: #64748b;
-    --color-text: #1e293b;
-    --color-border: #e2e8f0;
+    /* Single dark theme (v1 ships dark only). */
+    --color-bg: #0b0d10;
+    --color-panel: #161a1f;
+    --color-accent: #88c0d0;
+    --color-accent2: #81a1c1;
+    --color-muted: #a0a9bd;
+    --color-text: #d8dee9;
+    --color-border: #2e3440;
 
     /* Radix UI color system for backward compatibility */
     --background: 0 0% 100%;

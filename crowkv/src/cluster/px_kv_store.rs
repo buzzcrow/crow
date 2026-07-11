@@ -409,7 +409,21 @@ impl PxKvStore {
     }
 
     pub fn remove_group(&self, group_id: u64) -> bool {
-        self.groups.remove(&group_id).is_some()
+        // Cancel the removed group's per-tenure token so its election
+        // driver (and, if it is the leader, its heartbeat loop) stops.
+        // Dropping the `DashMap` entry alone is not enough: the running
+        // `run_leader_state` / `run_election_driver` task holds its own
+        // strong `Arc<PxGroup>` for the duration of the tenure, so the
+        // group is not dropped and a removed leader would keep sending
+        // heartbeats forever — starving the surviving replicas' election
+        // deadline so they can never re-elect. Mirror `add_group`'s
+        // synchronous cancel on replacement.
+        if let Some((_, group)) = self.groups.remove(&group_id) {
+            group.tenure_cancel().cancel();
+            true
+        } else {
+            false
+        }
     }
 
     pub fn group_count(&self) -> usize {

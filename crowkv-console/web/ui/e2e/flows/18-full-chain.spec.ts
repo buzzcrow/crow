@@ -6,9 +6,10 @@ test.describe('E2E-18 full chain', () => {
     const api = await apiContext(baseURL!);
     try {
       await page.goto('/');
-      await expect(page.getByRole('button', { name: 'Infrastructure' })).toBeVisible({ timeout: 15_000 });
-      await page.getByRole('button', { name: 'Infrastructure' }).click();
+      await expect(page.getByRole('button', { name: 'Physical' })).toBeVisible({ timeout: 15_000 });
+      await page.getByRole('button', { name: 'Physical' }).click();
       await expect(page.getByRole('heading', { name: 'Infrastructure' })).toBeVisible({ timeout: 15_000 });
+      const aside = page.locator('aside').first();
 
       // 1. Add rack r18.
       await page.locator('aside').getByRole('button', { name: 'Add Rack' }).click();
@@ -25,6 +26,7 @@ test.describe('E2E-18 full chain', () => {
       await page.getByLabel('Rack', { exact: true }).selectOption('r18');
       await page.getByLabel('Node ID').fill('n18a');
       await page.getByLabel('Host').fill('127.0.0.1');
+      await page.getByLabel('Enable CrowKV on this node').uncheck();
       await page.getByRole('button', { name: /create node/i }).click();
       await expect(page.getByText(/Node "n18a" created successfully/)).toBeVisible({ timeout: 15_000 });
 
@@ -35,60 +37,79 @@ test.describe('E2E-18 full chain', () => {
       await page.getByLabel('Rack', { exact: true }).selectOption('r18');
       await page.getByLabel('Node ID').fill('n18b');
       await page.getByLabel('Host').fill('127.0.0.1');
+      await page.getByLabel('Enable CrowKV on this node').uncheck();
       await page.getByRole('button', { name: /create node/i }).click();
       await expect(page.getByText(/Node "n18b" created successfully/)).toBeVisible({ timeout: 15_000 });
 
-      // 4. Deploy server on n18a.
-      await page.getByRole('treeitem').filter({ hasText: 'n18a' }).click({ button: 'right' });
-      await page.getByRole('menuitem', { name: /deploy server/i }).click();
-      await expect(page.getByRole('dialog', { name: /deploy server on n18a/i })).toBeVisible();
+      // Ensure rack r18 is expanded so its nodes are visible. The tree may
+      // have mounted with racks from earlier specs (shared test-mode backend),
+      // leaving the freshly-added r18 collapsed.
+      const rack18 = page.getByRole('treeitem', { name: /R-r18 \(Rack Eighteen\)/ });
+      const expandRack18 = rack18.getByRole('button', { name: 'Expand' });
+      if (await expandRack18.count()) await expandRack18.click();
+
+      // 4. Deploy CrowKV Server on n18a.
+      await page.getByRole('treeitem').filter({ hasText: 'N-n18a' }).click({ button: 'right' });
+      await page.getByRole('menuitem', { name: /deploy crowkv/i }).click();
+      await expect(page.getByRole('dialog', { name: /deploy crowkv on n18a/i })).toBeVisible();
       await page.getByLabel('Management Port').fill('9933');
       await page.getByLabel('gRPC Port').fill('9943');
       await page.getByLabel('Binary Path (optional)').fill(DEFAULT_SERVER_BINARY);
       await page.getByRole('button', { name: 'Deploy' }).click();
-      await expect(page.getByText(/Server deployed on n18a/)).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByText(/CrowKV deployed on n18a/)).toBeVisible({ timeout: 30_000 });
 
-      // 5. Deploy server on n18b.
-      await page.getByRole('treeitem').filter({ hasText: 'n18b' }).click({ button: 'right' });
-      await page.getByRole('menuitem', { name: /deploy server/i }).click();
-      await expect(page.getByRole('dialog', { name: /deploy server on n18b/i })).toBeVisible();
+      // 5. Deploy CrowKV Server on n18b.
+      await page.getByRole('treeitem').filter({ hasText: 'N-n18b' }).click({ button: 'right' });
+      await page.getByRole('menuitem', { name: /deploy crowkv/i }).click();
+      await expect(page.getByRole('dialog', { name: /deploy crowkv on n18b/i })).toBeVisible();
       await page.getByLabel('Management Port').fill('9934');
       await page.getByLabel('gRPC Port').fill('9944');
       await page.getByLabel('Binary Path (optional)').fill(DEFAULT_SERVER_BINARY);
       await page.getByRole('button', { name: 'Deploy' }).click();
-      await expect(page.getByText(/Server deployed on n18b/)).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByText(/CrowKV deployed on n18b/)).toBeVisible({ timeout: 30_000 });
 
-      // Switch to Cluster view.
-      if (await page.getByRole('heading', { name: 'Infrastructure' }).isVisible()) {
-        await page.getByRole('button', { name: 'Cluster' }).click();
-      }
+      // Switch to Cluster (Logical) view.
+      await page.getByRole('button', { name: 'Logical' }).click();
       await expect(page.getByRole('heading', { name: 'Cluster' })).toBeVisible({ timeout: 15_000 });
 
-      // 6. Create store 188 with initial group 1880 on n18a.
+      // 6. Create empty store 188 on n18a.
       await page.locator('aside').getByRole('button', { name: 'Add Store' }).click();
-      await expect(page.getByRole('dialog', { name: 'Add Store' })).toBeVisible();
-      await page.getByLabel('Store ID (numeric)').fill('188');
-      await page.getByLabel('Initial Group ID (numeric)').fill('1880');
-      await page.getByLabel('First Replica ID (numeric)').fill('18800');
+      await expect(page.getByRole('dialog', { name: 'Add KV Store' })).toBeVisible();
+      await page.getByLabel('KV Store ID (numeric)').fill('188');
       await page.getByLabel(/^n18a/).check();
-      await page.getByRole('button', { name: /create store/i }).click();
-      await expect(page.getByText(/Store 188 created successfully/)).toBeVisible({ timeout: 30_000 });
-      await expect(page.getByRole('treeitem', { name: /Collapse 188 Healthy Open/ })).toBeVisible({ timeout: 15_000 });
+      await page.getByRole('button', { name: /create kv store/i }).click();
+      await expect(page.getByText(/KV Store 188 created successfully/)).toBeVisible({ timeout: 30_000 });
+      await expect(aside.getByText('S-188')).toBeVisible({ timeout: 15_000 });
+
+      await aside.getByText('S-188').click({ button: 'right' });
+      await page.getByRole('menuitem', { name: /add group/i }).click();
+      await expect(page.getByRole('dialog', { name: 'Add Group' })).toBeVisible();
+      await page.getByLabel('Group ID (numeric)').fill('1880');
+      await page.getByLabel('Starting Replica ID (numeric)').fill('18800');
+      await page.getByLabel(/^n18a/).check();
+      await page.getByRole('button', { name: /create group/i }).click();
+      await expect(page.getByText(/Group 1880 created successfully/)).toBeVisible({ timeout: 30_000 });
+
+      // Store created after tree mount -> expand it to reveal its group.
+      const store188 = page.getByRole('treeitem').filter({ hasText: 'S-188' });
+      const expandStore188 = store188.getByRole('button', { name: 'Expand' });
+      if (await expandStore188.count()) await expandStore188.click();
 
       // 7. Add replica to group 1880 on n18b via UI.
-      const group = page.getByRole('treeitem', { name: /Collapse 1880/ });
-      await expect(group).toBeVisible({ timeout: 15_000 });
-      await group.click();
-      await group.click({ button: 'right' });
+      await expect(aside.getByText('G-1880')).toBeVisible({ timeout: 15_000 });
+      const group1880 = page.getByRole('treeitem').filter({ hasText: 'G-1880' });
+      const expandGroup1880 = group1880.getByRole('button', { name: 'Expand' });
+      if (await expandGroup1880.count()) await expandGroup1880.click();
+      await aside.getByText('G-1880').click({ button: 'right' });
       await page.getByRole('menuitem', { name: /add replica/i }).click();
       await expect(page.getByRole('dialog', { name: 'Add Replica' })).toBeVisible();
       await page.getByLabel('Node', { exact: true }).selectOption('n18b');
       await page.getByRole('button', { name: /add replica/i }).click();
       await expect(page.getByText(/Replica added to node "n18b" successfully/)).toBeVisible({ timeout: 30_000 });
 
-      // Verify both replicas exist.
-      await expect(page.getByRole('treeitem', { name: /18800/ }).first()).toBeVisible({ timeout: 15_000 });
-      await expect(page.getByRole('treeitem', { name: /18801/ }).first()).toBeVisible({ timeout: 15_000 });
+      // Verify both replicas exist in the tree.
+      await expect(aside.getByText('LR-18800')).toBeVisible({ timeout: 15_000 });
+      await expect(aside.getByText('LR-18801')).toBeVisible({ timeout: 15_000 });
 
       const response = await api.get('/api/stores/188/groups/1880/replicas');
       expect(response.ok(), await response.text()).toBeTruthy();

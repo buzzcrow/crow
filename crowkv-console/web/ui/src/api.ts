@@ -28,6 +28,33 @@ export interface AddNodeRequest {
 }
 
 /**
+ * Configurable API base. Every wrapper builds its URL with a literal
+ * `/api` prefix; `setApiBase` lets an embedding host (see `App` /
+ * `CrowkvConsoleProps.apiPrefix`) re-root all data-plane traffic under a
+ * different path (e.g. behind a reverse proxy). Default `/api` is a no-op.
+ */
+let apiBase = '/api';
+
+export function setApiBase(prefix?: string): void {
+  const trimmed = (prefix ?? '').trim().replace(/\/+$/, '');
+  apiBase = trimmed || '/api';
+}
+
+export function getApiBase(): string {
+  return apiBase;
+}
+
+/** Rewrite a literal `/api`-rooted path onto the configured `apiBase`. */
+function resolveUrl(url: string): string {
+  if (apiBase === '/api') return url;
+  if (url === '/api') return apiBase;
+  if (url.startsWith('/api/') || url.startsWith('/api?')) {
+    return apiBase + url.slice('/api'.length);
+  }
+  return url;
+}
+
+/**
  * Helper function to build query strings
  */
 function qs(params?: Record<string, string | number | boolean | undefined>): string {
@@ -166,7 +193,7 @@ async function fetchWithOptions(
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const response = await fetch(url, {
+      const response = await fetch(resolveUrl(url), {
         ...fetchInit,
         signal: controller.signal,
       });
@@ -475,14 +502,11 @@ export async function getStore(storeId: string, recursive?: number, options?: Re
 
 /**
  * Body accepted by `POST /api/stores` (`crowkv_web::mgmt::CreateStoreBody`).
- * `store_id`, `group_id` and `replica_id` are u64 on the wire; the SPA
- * keeps them as strings of decimal digits to round-trip cleanly through
- * URL params and React state.
+ * `store_id` is a u64 on the wire; the SPA keeps it as a string of decimal
+ * digits to round-trip cleanly through URL params and React state.
  */
 export interface AddStoreRequest {
   store_id: number | string;
-  group_id: number | string;
-  replica_id: number | string;
   nodes: string[];
 }
 
@@ -496,8 +520,6 @@ export async function addStore(
 ): Promise<StoreView> {
   const body = JSON.stringify({
     store_id: Number(req.store_id),
-    group_id: Number(req.group_id),
-    replica_id: Number(req.replica_id),
     nodes: req.nodes,
   });
   const url = `/api/stores`;

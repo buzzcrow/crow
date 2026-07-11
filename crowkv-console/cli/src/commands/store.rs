@@ -12,10 +12,6 @@ pub enum StoreVerb {
     Add {
         #[arg(long)]
         store_id: u64,
-        #[arg(long)]
-        group_id: u64,
-        #[arg(long)]
-        replica_id: u64,
         /// Comma-separated node ids that should host the store. If
         /// empty, the console picks the first node with a running
         /// `crowkv-server`.
@@ -42,16 +38,9 @@ pub async fn run_store_verb(cli: &Cli, verb: StoreVerb) -> ExitCode {
         Err(c) => return c,
     };
     match verb {
-        StoreVerb::Add {
-            store_id,
-            group_id,
-            replica_id,
-            nodes,
-        } => {
+        StoreVerb::Add { store_id, nodes } => {
             let body = CreateStoreBody {
                 store_id,
-                group_id,
-                replica_id,
                 nodes: nodes.into_iter().filter(|n| !n.is_empty()).collect(),
             };
             match client.add_store(&body).await {
@@ -59,10 +48,7 @@ pub async fn run_store_verb(cli: &Cli, verb: StoreVerb) -> ExitCode {
                     if cli.json {
                         return print_json(&v);
                     }
-                    println!(
-                        "added store {store_id} (group {group_id}, replica {replica_id}) on nodes {}",
-                        v["nodes"]
-                    );
+                    println!("added store {store_id} on nodes {}", v["nodes"]);
                     ExitCode::SUCCESS
                 }
                 Err(e) => {

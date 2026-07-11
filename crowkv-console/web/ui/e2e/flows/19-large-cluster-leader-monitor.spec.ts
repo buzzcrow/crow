@@ -21,6 +21,7 @@ test.describe('E2E-19 large cluster leader monitor', () => {
     // wire remotes, so we extend the group via addReplica below which
     // auto-creates the store on each peer node and wires remotes.
     await createStore(baseURL!, 199, 1990, 19900, ['n19a']);
+    await addGroup(baseURL!, 199, 1990, 19900, ['n19a']);
     // addReplica adds a remote replica to an existing group on a new node;
     // it ensures the target node hosts the store (creating it if needed)
     // and wires remotes on every existing peer.
@@ -36,12 +37,11 @@ test.describe('E2E-19 large cluster leader monitor', () => {
     try {
       // Navigate to Cluster view and verify all groups appear in UI.
       await page.goto('/');
-      await expect(page.getByRole('heading', { name: 'Cluster' })).toBeVisible({ timeout: 15_000 });
+      await page.getByRole('button', { name: 'Logical' }).click();
+      const aside = page.locator('aside').first();
 
       for (const gid of [1990, 1991, 1992]) {
-        await expect(
-          page.getByRole('treeitem', { name: new RegExp(`Collapse ${gid}`) }),
-        ).toBeVisible({ timeout: 15_000 });
+        await expect(aside.getByText(`G-${gid}`)).toBeVisible({ timeout: 15_000 });
       }
 
       // Monitor leader election via API polling (max 30 s).

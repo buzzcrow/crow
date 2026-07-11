@@ -1,287 +1,220 @@
-import React, { useState, useMemo } from 'react';
-import { Search, Star, Clock, ChevronDown, ChevronRight, Server, Database, HardDrive, Users, Plus } from 'lucide-react';
+import { useState, useMemo } from 'react';
+import { Search, FolderTree, Monitor, Database, Boxes, HardDrive, RadioTower, Cog, Plus } from 'lucide-react';
 import { useViewMode } from '../contexts/ViewModeContext';
-import { useSelection } from '../contexts/SelectionContext';
 import { Tree, TreeNode } from '../components/Tree';
 import { Button } from '../components/ui/Button';
-import { ViewMode, Rack, StoreView } from '../types';
+import { ViewMode, Rack, StoreView, NodeStore, CrowKVServerView, NodeHealth } from '../types';
+import { crowkvServerByNodeId } from '../data/crowkvServers';
+import { groupLabel, localReplicaLabel, nodeLabel, rackLabel, remoteReplicaLabel, serverLabel, storeLabel, toUiHealth, toUiReplicaRole, toUiRole } from '../utils/entityDisplay';
 
 interface SidebarProps {
-  /** Physical view data: Racks with nested nodes */
   racks?: Rack[];
-  /** Logical view data: Stores with nested groups */
+  servers?: CrowKVServerView[];
   stores?: StoreView[];
-  /** Whether data is loading */
+  nodeStores?: Record<string, NodeStore[]>;
+  nodeHealthById?: Record<string, NodeHealth>;
   loading?: boolean;
-  /** Callback when a node is clicked */
+  readonly?: boolean;
+  width?: number;
   onNodeClick?: (node: TreeNode) => void;
-  /** Callback when a context menu is invoked on a node */
   onNodeContextMenu?: (node: TreeNode, event: React.MouseEvent) => void;
-  /** Callback when add button is clicked */
   onAdd?: () => void;
 }
 
-export function Sidebar({ racks = [], stores = [], loading, onNodeClick, onNodeContextMenu, onAdd }: SidebarProps) {
+export function Sidebar({
+  racks = [],
+  servers = [],
+  stores = [],
+  nodeStores = {},
+  nodeHealthById = {},
+  loading,
+  readonly,
+  width = 350,
+  onNodeClick,
+  onNodeContextMenu,
+  onAdd,
+}: SidebarProps) {
   const { viewMode } = useViewMode();
-  const { favorites, recentItems, removeFromFavorites } = useSelection();
   const [filterQuery, setFilterQuery] = useState('');
-  const [showFavorites, setShowFavorites] = useState(true);
-  const [showRecent, setShowRecent] = useState(true);
+  const serverByNodeId = useMemo(() => crowkvServerByNodeId(servers), [servers]);
 
-  // Build tree nodes based on current view mode
+  const physicalGroupHealth = (group: NodeStore['groups'][number]) => {
+    const state = String(group.local.state || '').toLowerCase();
+    if (state === 'failed' || state === 'draining') return 'Failed' as const;
+    if (group.leader_hint == null) return 'Degraded' as const;
+    if (state === 'running') return 'Healthy' as const;
+    return 'Unknown' as const;
+  };
+
   const treeNodes = useMemo<TreeNode[]>(() => {
     if (viewMode === ViewMode.Physical) {
-      // Build physical tree: Rack → Node → Server → Store → Group
-      return racks.map(rack => ({
-        id: `rack-${rack.id}`,
+      return racks.map((rack) => ({
+        id: `R-${rack.id}`,
         rawId: rack.id,
-        label: rack.name || rack.id,
-        type: 'Rack',
-        icon: <Server className="tw-h-4 tw-w-4 tw-text-muted" />,
-        health: 'Healthy', // TODO: Calculate aggregate health
-        // `rack.nodes` is `NodeId[]` at recursive=0 but switches to
-        // `NodeView[]` (object with `id`, `host`, `has_server`, …) at
-        // recursive>=1. Normalize to the id string before rendering —
-        // otherwise React error #31 fires when a `NodeView` ends up as
-        // a `label` (see doc/todo_ui2.md §5.6).
-        children: rack.nodes?.map((entry: any) => {
+        label: rack.name ? `${rackLabel(rack.id)} (${rack.name})` : rackLabel(rack.id),
+        type: 'Rack' as const,
+        icon: <FolderTree className="tw-h-4 tw-w-4 tw-text-muted" />,
+        children: (rack.nodes || []).map((entry: any) => {
           const nodeId: string = typeof entry === 'string' ? entry : entry.id;
+          const server = serverByNodeId.get(nodeId);
+          const stores = nodeStores[nodeId] || [];
+          const hasServer = !!server || stores.length > 0;
+          const children: TreeNode[] = [];
+          if (hasServer) {
+            children.push({
+              id: `KV-${nodeId}`,
+              rawId: server?.id || `${nodeId}-kv`,
+              label: serverLabel(nodeId),
+              type: 'Server',
+              icon: <Cog className="tw-h-4 tw-w-4 tw-text-muted" />,
+              health: toUiHealth(server?.process.health),
+              parentIds: { rack_id: rack.id, node_id: nodeId },
+              children: stores.map((ns) => {
+                const sid = String(ns.store_id);
+                return {
+                  id: `S-${nodeId}-${sid}`,
+                  rawId: sid,
+                  label: storeLabel(sid),
+                  type: 'Store' as const,
+                  icon: <Database className="tw-h-4 tw-w-4 tw-text-muted" />,
+                  parentIds: { rack_id: rack.id, node_id: nodeId },
+                  children: (ns.groups || []).map((g) => {
+                    const gid = String(g.group_id);
+                    const replicaRows: TreeNode[] = [
+                      {
+                        id: `LR-${nodeId}-${sid}-${gid}-${g.local.replica_id}`,
+                        rawId: String(g.local.replica_id),
+                        label: localReplicaLabel(g.local.replica_id),
+                        type: 'Replica' as const,
+                        icon: <HardDrive className="tw-h-4 tw-w-4 tw-text-muted" />,
+                        role: toUiRole(String(g.local.role)),
+                        parentIds: { rack_id: rack.id, node_id: nodeId, store_id: sid, group_id: gid, role: g.local.role },
+                      },
+                      ...(g.remotes || []).map((r) => ({
+                        id: `RR-${nodeId}-${sid}-${gid}-${r.replica_id}`,
+                        rawId: String(r.replica_id),
+                        label: remoteReplicaLabel(r.replica_id),
+                        type: 'Replica' as const,
+                        icon: <RadioTower className="tw-h-4 tw-w-4 tw-text-remote" />,
+                        health: r.reachable ? ('Healthy' as const) : ('Failed' as const),
+                        parentIds: {
+                          rack_id: rack.id,
+                          node_id: String(r.node_id),
+                          store_id: sid,
+                          group_id: gid,
+                          remote_on: nodeId,
+                          reachable: String(r.reachable),
+                        },
+                      })),
+                    ];
+                    return {
+                      id: `G-${nodeId}-${sid}-${gid}`,
+                      rawId: gid,
+                      label: groupLabel(gid),
+                      type: 'Group' as const,
+                      icon: <Boxes className="tw-h-4 tw-w-4 tw-text-muted" />,
+                      health: physicalGroupHealth(g),
+                      parentIds: { rack_id: rack.id, node_id: nodeId, store_id: sid },
+                      children: replicaRows,
+                    };
+                  }),
+                };
+              }),
+            });
+          }
           return {
-            id: `node-${nodeId}`,
+            id: `N-${nodeId}`,
             rawId: nodeId,
-            label: nodeId,
-            type: 'Node',
-            icon: <HardDrive className="tw-h-4 tw-w-4 tw-text-muted" />,
-            health: 'Unknown' as const,
-            parentIds: { rackId: rack.id },
-            // TODO: Add server, stores and groups once we have the data
+            label: nodeLabel(nodeId),
+            type: 'Node' as const,
+            icon: <Monitor className="tw-h-4 tw-w-4 tw-text-muted" />,
+            health: toUiHealth(nodeHealthById[nodeId]),
+            parentIds: { rack_id: rack.id },
+            children: children.length ? children : undefined,
           };
         }),
       }));
-    } else {
-      // Build logical tree: Store → Group → Replica
-      return stores.map(store => ({
-        id: `store-${store.store_id}`,
-        rawId: String(store.store_id),
-        label: store.name || String(store.store_id),
+    }
+
+    return stores.map((store) => {
+      const sid = String(store.store_id);
+      return {
+        id: `S-${sid}`,
+        rawId: sid,
+        label: store.name ? `${storeLabel(sid)} (${store.name})` : storeLabel(sid),
         type: 'Store',
         icon: <Database className="tw-h-4 tw-w-4 tw-text-muted" />,
-        health: 'Healthy', // TODO: Calculate aggregate health
-        children: store.groups?.map(group => {
-          const replicas = 'replicas' in group && Array.isArray((group as any).replicas) ? (group as any).replicas : [];
+        children: (store.groups || []).map((group: any) => {
+          const gid = String(group.group_id);
+          const replicas: any[] = Array.isArray(group.replicas) ? group.replicas : [];
           return {
-            id: `group-${group.group_id}`,
-            rawId: String(group.group_id),
-            label: String(group.group_id),
-            type: 'Group',
-            icon: <Users className="tw-h-4 tw-w-4 tw-text-muted" />,
-            health: (group.health || (group as any).state || 'Unknown') as 'Healthy' | 'Degraded' | 'Failed' | 'Unknown',
-            parentIds: { store_id: String(store.store_id) },
-            children: replicas.map((replica: any) => ({
-              id: `replica-${replica.replica_id}`,
-              rawId: String(replica.replica_id),
-              label: String(replica.replica_id),
+            id: `G-${sid}-${gid}`,
+            rawId: gid,
+            label: groupLabel(gid),
+            type: 'Group' as const,
+            icon: <Boxes className="tw-h-4 tw-w-4 tw-text-muted" />,
+            health: toUiHealth(group.health || group.state),
+            parentIds: { store_id: sid },
+            children: replicas.map((r) => ({
+              id: `LR-${sid}-${gid}-${r.replica_id}`,
+              rawId: String(r.replica_id),
+              label: localReplicaLabel(r.replica_id),
               type: 'Replica' as const,
               icon: <HardDrive className="tw-h-4 tw-w-4 tw-text-muted" />,
-              health: (replica.state || 'Unknown') as 'Healthy' | 'Degraded' | 'Failed' | 'Unknown',
-              role: replica.role,
-              parentIds: { store_id: String(store.store_id), group_id: String(group.group_id), node_id: String(replica.node_id) },
+              role: toUiReplicaRole(String(r.role), String(r.state)),
+              health: toUiHealth(String(r.state)),
+              parentIds: { store_id: sid, group_id: gid, node_id: String(r.node_id ?? '') },
             })),
           };
         }),
-      }));
-    }
-  }, [viewMode, racks, stores]);
+      };
+    });
+  }, [nodeHealthById, nodeStores, serverByNodeId, stores, viewMode, racks]);
 
-  // Filter tree nodes based on search query
-  const filteredTreeNodes = useMemo(() => {
+  const filtered = useMemo(() => {
     if (!filterQuery.trim()) return treeNodes;
-
-    const query = filterQuery.toLowerCase();
-
-    function filterNode(node: TreeNode): TreeNode | null {
-      // Check if current node matches
-      const nodeMatches = node.label.toLowerCase().includes(query) || node.id.toLowerCase().includes(query);
-
-      // Filter children first
-      const filteredChildren = node.children?.map(filterNode).filter(Boolean) as TreeNode[];
-
-      // If node matches or has matching children, include it
-      if (nodeMatches || (filteredChildren && filteredChildren.length > 0)) {
-        return {
-          ...node,
-          children: filteredChildren,
-        };
-      }
-
+    const q = filterQuery.toLowerCase();
+    const filterNode = (node: TreeNode): TreeNode | null => {
+      const matches = node.label.toLowerCase().includes(q) || node.id.toLowerCase().includes(q);
+      const kids = node.children?.map(filterNode).filter(Boolean) as TreeNode[] | undefined;
+      if (matches || (kids && kids.length > 0)) return { ...node, children: kids };
       return null;
-    }
-
+    };
     return treeNodes.map(filterNode).filter(Boolean) as TreeNode[];
   }, [treeNodes, filterQuery]);
 
-  const expandedTreeNodeIds = useMemo(() => {
+  const expandedIds = useMemo(() => {
     const ids: string[] = [];
-    const collect = (nodes: TreeNode[]) => {
-      for (const node of nodes) {
-        ids.push(node.id);
-        if (node.children) collect(node.children);
+    const collect = (ns: TreeNode[]) => {
+      for (const n of ns) {
+        ids.push(n.id);
+        if (n.children) collect(n.children);
       }
     };
-    collect(filteredTreeNodes);
+    collect(filtered);
     return ids;
-  }, [filteredTreeNodes]);
-
-  // Convert favorites/recent items to tree nodes for display
-  const favoriteNodes = useMemo<TreeNode[]>(() => {
-    return favorites.map(item => ({
-      id: `fav-${item.id}`,
-      label: item.name || item.id,
-      type: item.type,
-      isFavorite: true,
-      parentIds: item.parentIds,
-    }));
-  }, [favorites]);
-
-  const recentNodes = useMemo<TreeNode[]>(() => {
-    return recentItems.map(item => ({
-      id: `recent-${item.id}`,
-      label: item.name || item.id,
-      type: item.type,
-      parentIds: item.parentIds,
-    }));
-  }, [recentItems]);
-
-  if (loading) {
-    return (
-      <aside className="tw-w-64 tw-h-[calc(100vh-3.5rem)] tw-mt-14 tw-border-r tw-border-border tw-bg-bg tw-flex tw-flex-col">
-        <div className="tw-p-4 tw-animate-pulse">
-          <div className="tw-h-8 tw-bg-panel tw-rounded-md tw-mb-4" />
-          <div className="tw-space-y-2">
-            <div className="tw-h-6 tw-bg-panel tw-rounded-md" />
-            <div className="tw-h-6 tw-bg-panel tw-rounded-md tw-w-3/4" />
-            <div className="tw-h-6 tw-bg-panel tw-rounded-md tw-w-1/2" />
-          </div>
-        </div>
-      </aside>
-    );
-  }
+  }, [filtered]);
 
   return (
-    <aside className="tw-w-64 tw-h-[calc(100vh-3.5rem)] tw-mt-14 tw-border-r tw-border-border tw-bg-bg tw-flex tw-flex-col tw-overflow-hidden">
-      {/* Search input */}
+    <aside className="tw-h-[calc(100vh-3.5rem)] tw-mt-14 tw-border-r tw-border-border tw-bg-bg tw-flex tw-flex-col tw-overflow-hidden tw-fixed tw-left-0 tw-top-0" style={{ width }}>
       <div className="tw-p-3 tw-border-b tw-border-border">
         <div className="tw-relative">
           <Search className="tw-absolute tw-left-3 tw-top-1/2 tw--translate-y-1/2 tw-h-4 tw-w-4 tw-text-muted" />
           <input
             type="text"
-            placeholder="Search..."
+            placeholder="Filter..."
             value={filterQuery}
-            onChange={e => setFilterQuery(e.target.value)}
-            className="tw-w-full tw-pl-9 tw-pr-3 tw-py-2 tw-bg-panel tw-border tw-border-border tw-rounded-md tw-text-sm tw-text-text tw-placeholder:text-muted tw-focus:outline-none tw-focus:ring-2 tw-focus:ring-accent"
+            onChange={(e) => setFilterQuery(e.target.value)}
+            className="tw-w-full tw-pl-9 tw-pr-3 tw-py-2 tw-bg-panel tw-border tw-border-border tw-rounded-md tw-text-sm tw-text-text focus:tw-outline-none focus:tw-ring-2 focus:tw-ring-accent"
           />
         </div>
       </div>
 
-      {/* Favorites section */}
-      <div className="tw-border-b tw-border-border">
-        <div
-          className="tw-flex tw-items-center tw-justify-between tw-px-3 tw-py-2 tw-cursor-pointer hover:tw-bg-panel"
-          onClick={() => setShowFavorites(!showFavorites)}
-        >
-          <div className="tw-flex tw-items-center tw-gap-2 tw-text-sm tw-font-medium tw-text-text">
-            <Star className="tw-h-4 tw-w-4 tw-text-yellow-400" />
-            Favorites
-            {favorites.length > 0 && (
-              <span className="tw-text-xs tw-text-muted tw-ml-1">({favorites.length})</span>
-            )}
-          </div>
-          {showFavorites ? (
-            <ChevronDown className="tw-h-4 tw-w-4 tw-text-muted" />
-          ) : (
-            <ChevronRight className="tw-h-4 tw-w-4 tw-text-muted" />
-          )}
-        </div>
-
-        {showFavorites && favoriteNodes.length > 0 && (
-          <div className="tw-pb-1">
-            {favoriteNodes.map(node => (
-              <div
-                key={node.id}
-                onClick={() => onNodeClick?.(node)}
-                className="tw-flex tw-items-center tw-gap-2 tw-px-3 tw-py-1.5 tw-text-sm tw-cursor-pointer hover:tw-bg-panel"
-              >
-                <Star className="tw-h-3.5 tw-w-3.5 tw-text-yellow-400" />
-                <span className="tw-flex-1 tw-truncate">{node.label}</span>
-                <button
-                  onClick={e => {
-                    e.stopPropagation();
-                    removeFromFavorites(node.id.replace('fav-', ''));
-                  }}
-                  className="tw-opacity-0 hover:tw-opacity-100 tw-text-muted hover:tw-text-text"
-                  aria-label="Remove from favorites"
-                >
-                  ✕
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {showFavorites && favoriteNodes.length === 0 && (
-          <div className="tw-px-3 tw-py-4 tw-text-sm tw-text-muted tw-text-center">
-            No favorites yet
-            <br />
-            Right-click items to add
-          </div>
-        )}
-      </div>
-
-      {/* Recent items section */}
-      <div className="tw-border-b tw-border-border">
-        <div
-          className="tw-flex tw-items-center tw-justify-between tw-px-3 tw-py-2 tw-cursor-pointer hover:tw-bg-panel"
-          onClick={() => setShowRecent(!showRecent)}
-        >
-          <div className="tw-flex tw-items-center tw-gap-2 tw-text-sm tw-font-medium tw-text-text">
-            <Clock className="tw-h-4 tw-w-4 tw-text-blue-400" />
-            Recent
-          </div>
-          {showRecent ? (
-            <ChevronDown className="tw-h-4 tw-w-4 tw-text-muted" />
-          ) : (
-            <ChevronRight className="tw-h-4 tw-w-4 tw-text-muted" />
-          )}
-        </div>
-
-        {showRecent && recentNodes.length > 0 && (
-          <div className="tw-pb-1">
-            {recentNodes.map(node => (
-              <div
-                key={node.id}
-                onClick={() => onNodeClick?.(node)}
-                className="tw-flex tw-items-center tw-gap-2 tw-px-3 tw-py-1.5 tw-text-sm tw-cursor-pointer hover:tw-bg-panel"
-              >
-                <Clock className="tw-h-3.5 tw-w-3.5 tw-text-muted" />
-                <span className="tw-flex-1 tw-truncate">{node.label}</span>
-              </div>
-            ))}
-          </div>
-        )}
-
-        {showRecent && recentNodes.length === 0 && (
-          <div className="tw-px-3 tw-py-4 tw-text-sm tw-text-muted tw-text-center">
-            No recent items
-          </div>
-        )}
-      </div>
-
-      {/* Tree view header */}
       <div className="tw-flex tw-items-center tw-justify-between tw-px-3 tw-py-2 tw-border-b tw-border-border">
         <h3 className="tw-text-xs tw-font-semibold tw-text-muted tw-uppercase tw-tracking-wider">
           {viewMode === ViewMode.Physical ? 'Infrastructure' : 'Cluster'}
         </h3>
-        {onAdd && (
+        {!readonly && onAdd && (
           <Button
             variant="ghost"
             size="sm"
@@ -294,21 +227,29 @@ export function Sidebar({ racks = [], stores = [], loading, onNodeClick, onNodeC
         )}
       </div>
 
-      {/* Tree view */}
-      <div className="tw-flex-1 tw-overflow-hidden">
-        {filteredTreeNodes.length > 0 ? (
-          <Tree
-            nodes={filteredTreeNodes}
-            defaultExpandedIds={expandedTreeNodeIds}
-            onNodeClick={onNodeClick}
-            onNodeContextMenu={onNodeContextMenu}
-          />
-        ) : (
-          <div className="tw-flex tw-items-center tw-justify-center tw-h-full tw-text-sm tw-text-muted">
-            {filterQuery ? 'No matching items' : 'No items available'}
-          </div>
-        )}
-      </div>
+      {loading && filtered.length === 0 ? (
+        <div className="tw-p-4 tw-animate-pulse tw-space-y-2">
+          <div className="tw-h-6 tw-bg-panel tw-rounded-md" />
+          <div className="tw-h-6 tw-bg-panel tw-rounded-md tw-w-3/4" />
+          <div className="tw-h-6 tw-bg-panel tw-rounded-md tw-w-1/2" />
+        </div>
+      ) : filtered.length > 0 ? (
+        <Tree
+          key={viewMode}
+          nodes={filtered}
+          defaultExpandedIds={expandedIds}
+          onNodeClick={onNodeClick}
+          onNodeContextMenu={onNodeContextMenu}
+        />
+      ) : (
+        <div className="tw-flex tw-items-center tw-justify-center tw-flex-1 tw-text-sm tw-text-muted tw-px-4 tw-text-center">
+          {filterQuery
+            ? 'No matching items'
+            : viewMode === ViewMode.Physical
+              ? 'No racks registered'
+              : 'No stores yet'}
+        </div>
+      )}
     </aside>
   );
 }

@@ -2,10 +2,7 @@ use clap::Subcommand;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use crate::utils::{
-    client::{console_client, resolve_single_target},
-    print_json,
-};
+use crate::utils::{client::console_client, print_json};
 use crate::Cli;
 
 #[derive(Subcommand, Debug)]
@@ -55,8 +52,9 @@ pub enum KvVerb {
         #[arg(long, default_value_t = 0)]
         seq: u64,
     },
-    /// Prefix list. C6: server-side scan is not implemented yet — this
-    /// verb returns an explanatory error.
+    /// Prefix scan. Prints up to `--limit` matching key/value rows; when
+    /// more keys exist past the limit a `(truncated: ...)` note is written
+    /// to stderr (raise `--limit` to see them).
     List {
         #[arg(long)]
         store_id: u64,
@@ -67,7 +65,7 @@ pub enum KvVerb {
         #[arg(long, default_value_t = 100)]
         limit: u32,
     },
-    /// Alias for `list` with the same caveats.
+    /// Alias for `list` (same `--limit` truncation contract).
     Scan {
         #[arg(long)]
         store_id: u64,
@@ -255,45 +253,6 @@ async fn kv_delete(cli: &Cli, store_id: u64, group_id: u64, key: &str, client_id
             ExitCode::from(2)
         }
     }
-}
-
-/// Resolve a store's gRPC `host:port` from the legacy single-server
-/// management API. The store's `listen_addr` is `0.0.0.0:N`; we
-/// replace the host with the management URL's host so the operator
-/// dialing remotely picks up the right interface.
-///
-/// **Migration note:** the four KV verbs no longer call this — they
-/// route through `ConsoleClient` against `crowkv-web`. The bench
-/// engine still talks gRPC directly to a single `crowkv-server` for
-/// throughput reasons, so it keeps using this helper (and `--server`)
-/// until a dedicated `ConsoleClient` bench path lands.
-///
-/// # Errors
-/// Returns a non-zero exit code on transport or decode failure.
-pub async fn resolve_kv_endpoint(cli: &Cli, store_id: u64) -> Result<String, ExitCode> {
-    use crowkv_console_shared::clients::http::ServerClient;
-
-    let mgmt_url = resolve_single_target(cli)?;
-    let mgmt = ServerClient::new(mgmt_url.clone()).map_err(|e| {
-        eprintln!("error: build client: {e}");
-        ExitCode::from(2)
-    })?;
-    let detail = mgmt.get_store(store_id).await.map_err(|e| {
-        eprintln!("error: lookup store {store_id}: {e}");
-        ExitCode::from(2)
-    })?;
-    let listen = detail.listen_addr.ok_or_else(|| {
-        eprintln!("error: store {store_id} has no listen_addr (server still starting?)");
-        ExitCode::from(2)
-    })?;
-    let port = listen.rsplit(':').next().unwrap_or("");
-    let host = mgmt_url
-        .trim_start_matches("http://")
-        .trim_start_matches("https://")
-        .split(':')
-        .next()
-        .unwrap_or("127.0.0.1");
-    Ok(format!("{host}:{port}"))
 }
 
 async fn kv_scan(cli: &Cli, store_id: u64, group_id: u64, prefix: &str, limit: u32) -> ExitCode {

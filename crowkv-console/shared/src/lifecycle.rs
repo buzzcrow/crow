@@ -51,6 +51,28 @@ pub struct DeployedServer {
 /// Returns `Error::Validation` for bad inputs and `Error::Io` for spawn
 /// or readiness failures.
 pub async fn deploy_local(req: &DeployRequest, node: &NodeEntry) -> Result<DeployedServer> {
+    deploy_local_in_workspace(req, node, None).await
+}
+
+/// Deploys a server in a specific workspace directory.
+///
+/// # Errors
+///
+/// Returns `Error::Validation` for bad inputs and `Error::Io` for spawn
+/// or readiness failures.
+pub async fn deploy_local_in_dir(
+    req: &DeployRequest,
+    node: &NodeEntry,
+    workspace_dir: &std::path::Path,
+) -> Result<DeployedServer> {
+    deploy_local_in_workspace(req, node, Some(workspace_dir)).await
+}
+
+async fn deploy_local_in_workspace(
+    req: &DeployRequest,
+    node: &NodeEntry,
+    workspace_dir: Option<&std::path::Path>,
+) -> Result<DeployedServer> {
     if req.mgmt_port == 0 || req.grpc_port == 0 {
         return Err(Error::Validation {
             field: "port".into(),
@@ -71,23 +93,20 @@ pub async fn deploy_local(req: &DeployRequest, node: &NodeEntry) -> Result<Deplo
             message: "could not locate crowkv-server binary; set $CROWKV_SERVER_BIN".into(),
         })?,
     };
+    let launch_binary = if let Some(dir) = workspace_dir {
+        stage_server_binary(&binary, dir)?
+    } else {
+        binary.clone()
+    };
 
     let mgmt_url = format!("http://{}:{}", node.host, req.mgmt_port);
     let grpc_url = format!("http://{}:{}", node.host, req.grpc_port);
 
-    let mut child = Command::new(&binary)
-        .arg("--management-addr")
+    let mut cmd = Command::new(&launch_binary);
+    cmd.arg("--management-addr")
         .arg("127.0.0.1")
         .arg("--management-port")
         .arg(req.mgmt_port.to_string())
-        .arg("--stores")
-        .arg("1")
-        .arg("--groups")
-        .arg("1")
-        .arg("--replica")
-        .arg("1")
-        .arg("--ports")
-        .arg(req.grpc_port.to_string())
         .arg("--election-profile")
         .arg(
             req.election_profile
@@ -96,11 +115,26 @@ pub async fn deploy_local(req: &DeployRequest, node: &NodeEntry) -> Result<Deplo
                 .or_else(|| std::env::var("CROWKV_SERVER_ELECTION_PROFILE").ok())
                 .unwrap_or_else(|| "default".into()),
         )
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(false)
-        .spawn()
-        .map_err(Error::Io)?;
+        .kill_on_drop(false);
+    if let Some(dir) = workspace_dir {
+        let stdout = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("log").join("crowkv-server.stdout.log"))
+            .map_err(Error::Io)?;
+        let stderr = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("log").join("crowkv-server.stderr.log"))
+            .map_err(Error::Io)?;
+        cmd.current_dir(dir);
+        cmd.stdout(Stdio::from(stdout));
+        cmd.stderr(Stdio::from(stderr));
+    } else {
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+    }
+    let mut child = cmd.spawn().map_err(Error::Io)?;
 
     let pid = child.id().ok_or_else(|| Error::Validation {
         field: "pid".into(),
@@ -111,11 +145,13 @@ pub async fn deploy_local(req: &DeployRequest, node: &NodeEntry) -> Result<Deplo
     // a full pipe. We deliberately don't wait for "management_addr=" here:
     // the user supplied the port, so we know mgmt_url; readiness is
     // confirmed by polling /health.
-    if let Some(stdout) = child.stdout.take() {
-        spawn_log_pipe(stdout, "crowkv-server stdout");
-    }
-    if let Some(stderr) = child.stderr.take() {
-        spawn_log_pipe(stderr, "crowkv-server stderr");
+    if workspace_dir.is_none() {
+        if let Some(stdout) = child.stdout.take() {
+            spawn_log_pipe(stdout, "crowkv-server stdout");
+        }
+        if let Some(stderr) = child.stderr.take() {
+            spawn_log_pipe(stderr, "crowkv-server stderr");
+        }
     }
 
     // Detach: drop the Child handle so the process is not killed when
@@ -123,17 +159,6 @@ pub async fn deploy_local(req: &DeployRequest, node: &NodeEntry) -> Result<Deplo
     std::mem::forget(child);
 
     wait_for_ready(&mgmt_url, Duration::from_secs(10)).await?;
-
-    // Leader selection is fully automatic via Paxos election (see
-    // `cluster::election::spawn`); the per-group election driver is
-    // started in `PxKvStore::add_group` and converges to a single leader
-    // for 1-, 2-, or N-replica groups. We block here until the bootstrap
-    // group (store 1 / group 1) has elected its initial leader so the
-    // returned `DeployedServer` is immediately writable. Without this
-    // wait, callers that issue a KV write right after deploy will see a
-    // transient `NotLeader` response during the 4-8 s election deadline
-    // window.
-    wait_for_leader(&mgmt_url, 1, 1, Duration::from_secs(15)).await?;
 
     Ok(DeployedServer {
         server_id: req.server_id.clone(),
@@ -198,8 +223,7 @@ async fn wait_for_ready(mgmt_url: &str, timeout: Duration) -> Result<()> {
 
 /// Poll a server's `/topology` until `(store_id, group_id)` reports a
 /// non-zero `leader_id`, meaning the per-group Paxos election driver has
-/// elected a leader. Used by [`deploy_local`] to gate the deploy on the
-/// bootstrap group's election so callers see a write-ready server.
+/// elected a leader.
 ///
 /// # Errors
 /// Returns `Error::UpstreamRpc` if the timeout elapses without seeing a
@@ -238,6 +262,46 @@ where
     });
 }
 
+fn stage_server_binary(binary: &std::path::Path, workspace_dir: &std::path::Path) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let source = resolve_binary_path(binary).ok_or_else(|| Error::Validation {
+        field: "binary".into(),
+        message: format!("could not resolve server binary path: {}", binary.display()),
+    })?;
+    let staged = workspace_dir.join("bin").join(
+        source
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("crowkv-server")),
+    );
+    if staged.exists() {
+        std::fs::remove_file(&staged).map_err(Error::Io)?;
+    }
+    if let Ok(()) = std::os::unix::fs::symlink(&source, &staged) {
+        Ok(staged)
+    } else {
+        std::fs::copy(&source, &staged).map_err(Error::Io)?;
+        let mut perms = std::fs::metadata(&staged).map_err(Error::Io)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&staged, perms).map_err(Error::Io)?;
+        Ok(staged)
+    }
+}
+
+fn resolve_binary_path(binary: &std::path::Path) -> Option<PathBuf> {
+    if binary.is_absolute() {
+        return binary.exists().then(|| binary.to_path_buf());
+    }
+    if binary.components().count() > 1 {
+        return std::fs::canonicalize(binary).ok().or_else(|| {
+            std::env::current_dir().ok().and_then(|cwd| {
+                let candidate = cwd.join(binary);
+                candidate.exists().then_some(candidate)
+            })
+        });
+    }
+    find_in_path(binary.as_os_str())
+}
+
 /// Resolve the path to the `crowkv-server` binary.
 ///
 /// Search order:
@@ -267,20 +331,21 @@ pub fn crowkv_server_bin() -> Option<PathBuf> {
         }
     }
     // Fall back to PATH.
-    if which_in_path("crowkv-server") {
-        return Some(PathBuf::from("crowkv-server"));
+    if let Some(path) = find_in_path(std::ffi::OsStr::new("crowkv-server")) {
+        return Some(path);
     }
     warn!("crowkv-server binary not found via env, sibling, or $PATH");
     None
 }
 
-fn which_in_path(name: &str) -> bool {
+fn find_in_path(name: &std::ffi::OsStr) -> Option<PathBuf> {
     if let Ok(path) = std::env::var("PATH") {
         for dir in std::env::split_paths(&path) {
-            if dir.join(name).is_file() {
-                return true;
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
             }
         }
     }
-    false
+    None
 }

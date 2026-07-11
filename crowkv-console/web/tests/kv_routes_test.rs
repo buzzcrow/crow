@@ -80,7 +80,12 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
         url: upstream.mgmt_url.clone(),
         node_id: Some("n1".into()),
         grpc_url: Some(upstream.grpc_url.clone()),
-        pid: Some(upstream.pid),
+        mgmt_port: None,
+        grpc_port: None,
+        auto_start: true,
+        binary: None,
+        election_profile: None,
+        pid: None,
     })
     .unwrap();
     let state = AppState::with_config(cfg, None);
@@ -114,7 +119,22 @@ async fn kv_put_get_delete_through_web_routes() {
     let base = format!("http://{web}");
     let http = reqwest::Client::new();
 
-    // Bootstrap store/group is store=1, group=1.
+    // Create store 1 and group 1 (stores no longer auto-create groups).
+    let store_resp = http
+        .post(format!("{base}/api/stores"))
+        .json(&json!({"store_id": 1, "nodes": ["n1"]}))
+        .send()
+        .await
+        .expect("add_store");
+    assert_eq!(store_resp.status(), 201, "add_store failed");
+    let group_resp = http
+        .post(format!("{base}/api/stores/1/groups"))
+        .json(&json!({"group_id": 1, "replica_id": 1, "nodes": ["n1"]}))
+        .send()
+        .await
+        .expect("add_group");
+    assert_eq!(group_resp.status(), 201, "add_group failed");
+
     let url = format!("{base}/api/stores/1/groups/1/kv");
 
     // PUT
@@ -204,6 +224,11 @@ async fn kv_get_returns_502_when_leader_unreachable() {
         url: format!("http://127.0.0.1:{dead_port}"),
         node_id: Some("n1".into()),
         grpc_url: Some(format!("http://127.0.0.1:{dead_port}")),
+        mgmt_port: None,
+        grpc_port: None,
+        auto_start: true,
+        binary: None,
+        election_profile: None,
         pid: None,
     })
     .unwrap();

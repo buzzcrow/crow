@@ -79,7 +79,12 @@ async fn deploy_local_and_observe_topology() {
         url: deployed.mgmt_url.clone(),
         node_id: Some("n1".into()),
         grpc_url: Some(deployed.grpc_url.clone()),
-        pid: Some(deployed.pid),
+        mgmt_port: Some(mgmt_port),
+        grpc_port: Some(grpc_port),
+        auto_start: true,
+        binary: None,
+        election_profile: Some("test".into()),
+        pid: None,
     })
     .unwrap();
 

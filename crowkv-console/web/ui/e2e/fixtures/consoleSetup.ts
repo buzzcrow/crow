@@ -111,6 +111,32 @@ export async function addReplica(baseURL: string, storeId: number, groupId: numb
   }
 }
 
+/**
+ * Poll until the group reports an elected leader. `POST /api/stores` only
+ * creates the store; a group must be added separately (`addGroup`) and then
+ * needs a moment to elect before KV ops can resolve a leader.
+ */
+export async function waitForLeader(baseURL: string, storeId: number, groupId: number, timeoutMs = 25_000) {
+  const api = await apiContext(baseURL);
+  try {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const r = await api.get(`/api/stores/${storeId}/groups/${groupId}`);
+      if (r.ok()) {
+        const v = await r.json();
+        const hasLeader =
+          (Array.isArray(v.replicas) && v.replicas.some((x: any) => String(x.role).toLowerCase() === 'leader')) ||
+          (typeof v.leader_id === 'number' && v.leader_id > 0);
+        if (hasLeader) return;
+      }
+      await new Promise((res) => setTimeout(res, 500));
+    }
+    throw new Error(`leader not elected for store ${storeId} group ${groupId} within ${timeoutMs}ms`);
+  } finally {
+    await api.dispose();
+  }
+}
+
 export async function createStore(baseURL: string, storeId: number, groupId: number, replicaId: number, nodeIds: string[]) {
   const api = await apiContext(baseURL);
   try {

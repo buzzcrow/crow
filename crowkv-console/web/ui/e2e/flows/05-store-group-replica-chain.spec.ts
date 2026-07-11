@@ -9,23 +9,36 @@ test.describe('E2E-05 store group replica chain', () => {
     const api = await apiContext(baseURL!);
     try {
       await page.goto('/');
-      if (await page.getByRole('heading', { name: 'Infrastructure' }).isVisible()) {
-        await page.getByRole('button', { name: 'Cluster' }).click();
-      }
-      await expect(page.getByRole('heading', { name: 'Cluster' })).toBeVisible({ timeout: 15_000 });
+      await page.getByRole('button', { name: 'Logical' }).click();
+      const aside = page.locator('aside').first();
 
-      await page.locator('aside').getByRole('button', { name: 'Add Store' }).click();
-      await expect(page.getByRole('dialog', { name: 'Add Store' })).toBeVisible();
-      await page.getByLabel('Store ID (numeric)').fill('57');
-      await page.getByLabel('Initial Group ID (numeric)').fill('570');
-      await page.getByLabel('First Replica ID (numeric)').fill('5700');
+      await aside.getByRole('button', { name: 'Add Store' }).click();
+      await expect(page.getByRole('dialog', { name: 'Add KV Store' })).toBeVisible();
+      await page.getByLabel('KV Store ID (numeric)').fill('57');
       await page.getByLabel(/^n5/).check();
-      await page.getByRole('button', { name: /create store/i }).click();
+      await page.getByRole('button', { name: /create kv store/i }).click();
 
-      await expect(page.getByText(/Store 57 created successfully/)).toBeVisible({ timeout: 30_000 });
-      await expect(page.getByRole('treeitem', { name: /Collapse 57 Healthy Open/ })).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByText(/KV Store 57 created successfully/)).toBeVisible({ timeout: 30_000 });
+      await expect(aside.getByText('S-57')).toBeVisible({ timeout: 15_000 });
 
-      await page.getByRole('treeitem', { name: /Collapse 57 Healthy Open/ }).click({ button: 'right' });
+      // Add the first group via the store row context menu.
+      await aside.getByText('S-57').click({ button: 'right' });
+      await page.getByRole('menuitem', { name: /add group/i }).click();
+      await expect(page.getByRole('dialog', { name: 'Add Group' })).toBeVisible();
+      await page.getByLabel('Group ID (numeric)').fill('570');
+      await page.getByLabel('Starting Replica ID (numeric)').fill('5700');
+      await page.getByLabel(/^n5/).check();
+      await page.getByRole('button', { name: /create group/i }).click();
+
+      // Expand the freshly-created store row (created after tree mount, so it
+      // is collapsed by default) to reveal its groups.
+      const store57 = page.getByRole('treeitem').filter({ hasText: 'S-57' });
+      const expandStore57 = store57.getByRole('button', { name: 'Expand' });
+      if (await expandStore57.count()) await expandStore57.click();
+      await expect(aside.getByText('G-570')).toBeVisible({ timeout: 15_000 });
+
+      // Add a second group via the store row context menu.
+      await aside.getByText('S-57').click({ button: 'right' });
       await page.getByRole('menuitem', { name: /add group/i }).click();
       await expect(page.getByRole('dialog', { name: 'Add Group' })).toBeVisible();
       await page.getByLabel('Group ID (numeric)').fill('580');
@@ -34,7 +47,7 @@ test.describe('E2E-05 store group replica chain', () => {
       await page.getByRole('button', { name: /create group/i }).click();
 
       await expect(page.getByText(/Group 580 created successfully/)).toBeVisible({ timeout: 30_000 });
-      await expect(page.getByRole('treeitem', { name: /580/ }).first()).toBeVisible({ timeout: 15_000 });
+      await expect(aside.getByText('G-580')).toBeVisible({ timeout: 15_000 });
 
       const stores = await api.get('/api/stores');
       expect(stores.ok(), await stores.text()).toBeTruthy();

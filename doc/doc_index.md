@@ -12,7 +12,7 @@ doc only when a task touches a topic in its row. Line counts are approximate
 | `design.md` | ~490 | Master design: cross-cutting architecture, write/read flows, module decomposition. Read for scope-spanning questions. |
 | `plan.md` | ~190 | Phases (P1–P5), milestones, dependency order, decision log. Read before picking a task. |
 | `test.md` | ~250 | Test pyramid, invariants, failure-injection taxonomy, CI gates, suites. Read when adding/restructuring tests. |
-| `requirement-ui.md` | ~220 | Web UI requirements: single-page embeddable console, functional surface mapped to current `crowkv-web` API, embedded Swagger. |
+| `requirement-ui.md` | ~340 | Web UI requirements: single-page embeddable console, functional surface mapped to current `crowkv-web` API, embedded Swagger. §9 lists features deferred to V2. |
 
 ## `requirement.md` Sections
 
@@ -90,7 +90,7 @@ doc only when a task touches a topic in its row. Line counts are approximate
 | `design/design-rpc.md` | ~265 | Wire protocol: classic Paxos messages, PeerStream bidi stream (frames, flow control, parallelism), PxService / AdminService, Rust mapping. |
 | `design/design-slot.md` | ~650 | `PxSlotList` / `PxSlotNode`: chunk layout, insert/get/trim, reclamation, performance model, future evolution. |
 | `design/design-storage-engine.md` | ~310 | Storage plug-in: per-key slot tracking, apply semantics, snapshot, compaction, compare, engine impls. |
-| `design/design-ui.md` | ~300 | Web UI design: SPA stack, single-page shell, theme tokens, topology canvas, embedding contract, embedded Swagger panel. |
+| `design/design-ui.md` | ~270 | Web UI design (v1 lean rewrite): 3-pane shell, two hierarchy views, slim React Flow canvas, inspector (Details/KV/Activity), embedded Swagger, minimal embedding contract. |
 | `design/design-wal.md` | ~300 | Write-ahead log: multi-disk segments, batched fsync, ack contract, replay, GC, disk loss. |
 
 ## How AI Should Use This Index

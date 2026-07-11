@@ -5,10 +5,41 @@ use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
+use crowkv_console_shared::cluster::{NodeHealth, ProcState, ServerProcess};
 use crowkv_console_shared::config::{NodeEntry, RackEntry, ServerEntry};
 use crowkv_console_shared::expand::RecursiveDepth;
+use crowkv_console_shared::monitor::NodeRecord;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+
+fn live_server_process(entry: &ServerEntry, rec: Option<&NodeRecord>) -> ServerProcess {
+    let health = rec.map_or(NodeHealth::Unknown, |node| node.health);
+    let state = match health {
+        NodeHealth::Up => ProcState::Running,
+        NodeHealth::Down => ProcState::Failed,
+        NodeHealth::Unknown => ProcState::Unknown,
+    };
+    ServerProcess {
+        mgmt_url: entry.url.clone(),
+        grpc_url: entry.grpc_url.clone().unwrap_or_default(),
+        pid: None,
+        state,
+        health,
+        last_seen_ms: rec.map_or(0, |node| node.last_seen_ms),
+    }
+}
+
+fn live_server_process_with_pid(
+    state: &AppState,
+    entry: &ServerEntry,
+    rec: Option<&NodeRecord>,
+) -> ServerProcess {
+    let mut proc = live_server_process(entry, rec);
+    if let Some(node_id) = entry.node_id.as_deref() {
+        proc.pid = state.runtime_pid(node_id);
+    }
+    proc
+}
 
 // ── Physical tree: rack / node / server lifecycle (A3) ──────────────
 //
@@ -138,6 +169,9 @@ pub async fn http_add_node(
         cfg.add_node(entry.clone()).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
+    state
+        .prepare_node_workspace(&entry.id)
+        .map_err(|e| err_500(e.to_string()))?;
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
@@ -353,6 +387,9 @@ pub async fn http_add_rack_node(
         cfg.add_node(entry.clone()).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
+    state
+        .prepare_node_workspace(&entry.id)
+        .map_err(|e| err_500(e.to_string()))?;
     Ok((StatusCode::CREATED, Json(entry)))
 }
 
@@ -370,6 +407,7 @@ pub async fn http_get_node(
     Path(id): Path<String>,
     Recursive(_depth): Recursive,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+    let snap = state.monitor_cache.snapshot().await;
     let cfg = state.config.read().unwrap();
     let node = cfg.node(&id).ok_or_else(|| {
         (
@@ -379,7 +417,9 @@ pub async fn http_get_node(
             }),
         )
     })?;
-    let server = cfg.server_for_node(&id);
+    let server = cfg
+        .server_for_node(&id)
+        .map(|entry| live_server_process_with_pid(&state, entry, snap.get(&id)));
     Ok(Json(serde_json::json!({
         "id": node.id,
         "rack_id": node.rack_id,
@@ -392,6 +432,54 @@ pub async fn http_get_node(
 }
 
 // ── Server lifecycle (node-addressed) ────────────────────────────────
+
+/// One row of `GET /api/servers`: a deployed `crowkv-server` projected
+/// from the persisted config plus the live monitor cache.
+#[derive(Debug, Serialize)]
+pub struct ServerSummary {
+    /// Owning node id (`None` for plain externally-registered servers).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    pub mgmt_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grpc_url: Option<String>,
+    /// Live pid if the console currently tracks the process.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    /// Latest health from the monitor cache (`unknown` until probed).
+    pub health: NodeHealth,
+}
+
+/// `GET /api/servers`. Cluster-wide list of deployed servers, one row
+/// per `ServerEntry`, with health from the monitor cache and the live
+/// pid when tracked. The CLI's `server list` renders this directly.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+pub async fn http_list_servers(State(state): State<AppState>) -> Json<Vec<ServerSummary>> {
+    let snap = state.monitor_cache.snapshot().await;
+    let cfg = state.config.read().unwrap();
+    let rows = cfg
+        .servers
+        .iter()
+        .map(|s| {
+            let health = s
+                .node_id
+                .as_deref()
+                .and_then(|n| snap.get(n))
+                .map_or(NodeHealth::Unknown, |rec| rec.health);
+            let pid = s.node_id.as_deref().and_then(|n| state.runtime_pid(n));
+            ServerSummary {
+                node_id: s.node_id.clone(),
+                mgmt_url: s.url.clone(),
+                grpc_url: s.grpc_url.clone(),
+                pid,
+                health,
+            }
+        })
+        .collect();
+    Json(rows)
+}
 
 #[derive(Debug, Deserialize)]
 pub struct DeployNodeServerBody {
@@ -421,15 +509,18 @@ pub async fn http_get_node_server(
     Path(node_id): Path<String>,
     Recursive(_depth): Recursive,
 ) -> Result<Json<ServerEntry>, (StatusCode, Json<ErrorBody>)> {
-    let cfg = state.config.read().unwrap();
-    let entry = cfg.server_for_node(&node_id).cloned().ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ErrorBody {
-                error: format!("no server deployed on node {node_id}"),
-            }),
-        )
-    })?;
+    let mut entry = {
+        let cfg = state.config.read().unwrap();
+        cfg.server_for_node(&node_id).cloned().ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("no server deployed on node {node_id}"),
+                }),
+            )
+        })?
+    };
+    entry.pid = state.runtime_pid(&node_id);
     Ok(Json(entry))
 }
 
@@ -485,7 +576,10 @@ pub async fn http_deploy_node_server(
             .await
             .map_err(|e| err_502(format!("ssh deploy: {e}")))?
     } else {
-        lifecycle::deploy_local(&req, &node)
+        let workspace_dir = state
+            .prepare_node_workspace(&node_id)
+            .map_err(|e| err_500(e.to_string()))?;
+        lifecycle::deploy_local_in_dir(&req, &node, &workspace_dir)
             .await
             .map_err(|e| err_502(format!("local deploy: {e}")))?
     };
@@ -495,8 +589,14 @@ pub async fn http_deploy_node_server(
         url: deployed.mgmt_url.clone(),
         node_id: Some(node_id.clone()),
         grpc_url: Some(deployed.grpc_url.clone()),
-        pid: Some(deployed.pid),
+        mgmt_port: Some(body.mgmt_port),
+        grpc_port: Some(body.grpc_port),
+        auto_start: true,
+        binary: body.binary.clone(),
+        election_profile: std::env::var("CROWKV_SERVER_ELECTION_PROFILE").ok(),
+        pid: None,
     };
+    state.set_runtime_pid(node_id.clone(), deployed.pid);
     {
         let mut cfg = state.config.write().unwrap();
         cfg.add_server(entry).map_err(map_config_err)?;
@@ -570,7 +670,7 @@ pub async fn http_restart_node_server(
         ))
     })?;
 
-    if let Some(pid) = entry.pid {
+    if let Some(pid) = state.runtime_pid(&node_id) {
         let _sent = match &node {
             n if n.ssh_enabled() => crowkv_console_shared::ssh::stop_via_ssh(n, pid)
                 .await
@@ -592,7 +692,10 @@ pub async fn http_restart_node_server(
             .await
             .map_err(|e| err_502(format!("ssh redeploy (restart): {e}")))?
     } else {
-        lifecycle::deploy_local(&req, &node)
+        let workspace_dir = state
+            .prepare_node_workspace(&node_id)
+            .map_err(|e| err_500(e.to_string()))?;
+        lifecycle::deploy_local_in_dir(&req, &node, &workspace_dir)
             .await
             .map_err(|e| err_502(format!("local redeploy (restart): {e}")))?
     };
@@ -602,8 +705,14 @@ pub async fn http_restart_node_server(
         url: deployed.mgmt_url.clone(),
         node_id: Some(node_id.clone()),
         grpc_url: Some(deployed.grpc_url.clone()),
-        pid: Some(deployed.pid),
+        mgmt_port: entry.mgmt_port,
+        grpc_port: entry.grpc_port,
+        auto_start: entry.auto_start,
+        binary: entry.binary.clone(),
+        election_profile: entry.election_profile.clone(),
+        pid: None,
     };
+    state.set_runtime_pid(node_id.clone(), deployed.pid);
     {
         let mut cfg = state.config.write().unwrap();
         // The old entry is still keyed by node_id; replace it.
@@ -639,7 +748,7 @@ pub struct StopResult {
 }
 
 /// `POST /api/nodes/:node_id/server/stop`. Stop the server on this node
-/// and remove the deployment record.
+/// but keep the deployment record so the console can restart / restore it.
 ///
 /// # Panics
 /// Panics if the `RwLock` is poisoned.
@@ -652,9 +761,9 @@ pub async fn http_stop_node_server(
 ) -> Result<Json<StopResult>, (StatusCode, Json<ErrorBody>)> {
     use crowkv_console_shared::lifecycle;
 
-    let (entry, node) = {
+    let node = {
         let cfg = state.config.read().unwrap();
-        let entry = cfg.server_for_node(&node_id).cloned().ok_or_else(|| {
+        let _entry = cfg.server_for_node(&node_id).cloned().ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
                 Json(ErrorBody {
@@ -662,10 +771,9 @@ pub async fn http_stop_node_server(
                 }),
             )
         })?;
-        let node = cfg.node(&node_id).cloned();
-        (entry, node)
+        cfg.node(&node_id).cloned()
     };
-    let Some(pid) = entry.pid else {
+    let Some(pid) = state.runtime_pid(&node_id) else {
         return Err(err_400(format!("server on node {node_id} has no tracked pid")));
     };
     let sent = match node {
@@ -674,11 +782,7 @@ pub async fn http_stop_node_server(
             .map_err(|e| err_502(format!("ssh stop: {e}")))?,
         _ => lifecycle::stop_pid(pid).map_err(|e| err_500(format!("stop_pid: {e}")))?,
     };
-    {
-        let mut cfg = state.config.write().unwrap();
-        let _ = cfg.remove_server_for_node(&node_id);
-    }
-    state.persist().map_err(map_persist_err)?;
+    state.clear_runtime_pid(&node_id);
     state.monitor_cache.drop_node(&node_id).await;
     Ok(Json(StopResult { sent }))
 }
@@ -697,9 +801,9 @@ pub async fn http_delete_node_server(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
     use crowkv_console_shared::lifecycle;
 
-    let (entry, node) = {
+    let node = {
         let cfg = state.config.read().unwrap();
-        let entry = cfg.server_for_node(&node_id).cloned().ok_or_else(|| {
+        let _entry = cfg.server_for_node(&node_id).cloned().ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
                 Json(ErrorBody {
@@ -707,10 +811,9 @@ pub async fn http_delete_node_server(
                 }),
             )
         })?;
-        let node = cfg.node(&node_id).cloned();
-        (entry, node)
+        cfg.node(&node_id).cloned()
     };
-    if let Some(pid) = entry.pid {
+    if let Some(pid) = state.runtime_pid(&node_id) {
         let _ = match node {
             Some(n) if n.ssh_enabled() => crowkv_console_shared::ssh::stop_via_ssh(&n, pid)
                 .await
@@ -721,7 +824,9 @@ pub async fn http_delete_node_server(
     {
         let mut cfg = state.config.write().unwrap();
         let _ = cfg.remove_server_for_node(&node_id);
+        cfg.purge_node_topology(&node_id);
     }
+    state.clear_runtime_pid(&node_id);
     state.persist().map_err(map_persist_err)?;
     Ok(StatusCode::NO_CONTENT)
 }

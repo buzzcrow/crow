@@ -23,7 +23,7 @@ pub mod snapshot;
 pub mod ssh;
 pub mod topology;
 
-pub use config::{ConsoleConfig, NodeEntry, RackEntry, ServerEntry};
+pub use config::{ConsoleConfig, ConsoleConfigEngine, NodeEntry, RackEntry, ServerEntry, TomlFileEngine};
 pub use snapshot::{
     ClusterSnapshot, GroupView, HealthInfo, KvStoreView, LocalReplicaView, RemoteMetrics, RemoteReplicaView,
     ServerSnapshot, StoreView,

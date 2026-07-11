@@ -2,6 +2,7 @@ import React from 'react';
 import { cn } from '../../utils/cn';
 import { CheckCircle2, AlertTriangle, XCircle, HelpCircle, Crown, Users } from 'lucide-react';
 import { ReplicaRole, ReplicaState, GroupHealth, NodeHealth } from '../../types';
+import { toDisplayState, toUiHealth, toUiRole } from '../../utils/entityDisplay';
 
 type BadgeVariant = 'default' | 'secondary' | 'outline' | 'health' | 'role';
 type BadgeSize = 'sm' | 'md' | 'lg';
@@ -43,7 +44,7 @@ const healthIcons = {
 };
 
 const roleColors = {
-  Leader: 'tw-bg-green-500/10 tw-text-green-500 tw-border tw-border-green-500/30',
+  Leader: 'tw-bg-amber-400/15 tw-text-amber-300 tw-border tw-border-amber-300/40',
   Follower: 'tw-bg-blue-500/10 tw-text-blue-500 tw-border tw-border-blue-500/30',
   Remote: 'tw-bg-purple-500/10 tw-text-purple-500 tw-border tw-border-purple-500/30',
 };
@@ -96,8 +97,7 @@ export function HealthBadge({
   status: NodeHealth | GroupHealth | ReplicaState | 'Healthy' | 'Degraded' | 'Failed' | 'Unknown';
   size?: BadgeSize;
 }) {
-  // Normalize status to the expected format
-  const normalizedStatus = status.toString() as 'Healthy' | 'Degraded' | 'Failed' | 'Unknown';
+  const normalizedStatus = toUiHealth(status.toString());
   return (
     <Badge variant="health" healthStatus={normalizedStatus} size={size}>
       {normalizedStatus}
@@ -106,10 +106,10 @@ export function HealthBadge({
 }
 
 export function RoleBadge({ role, size = 'sm' }: { role: ReplicaRole | 'Leader' | 'Follower' | 'Remote'; size?: BadgeSize }) {
-  const normalizedRole = role.toString() as 'Leader' | 'Follower' | 'Remote';
+  const normalizedRole = toUiRole(role.toString());
   return (
     <Badge variant="role" role={normalizedRole} size={size}>
-      {normalizedRole}
+      {toDisplayState(normalizedRole)}
     </Badge>
   );
 }

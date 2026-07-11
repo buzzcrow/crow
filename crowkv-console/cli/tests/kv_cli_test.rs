@@ -4,135 +4,12 @@
 //! end-to-end and verifies the legacy `--server` flag is no longer
 //! required for the four KV verbs.
 
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::process::Command;
+mod testkit;
+
 use std::time::Duration;
 
-use crowkv_console_shared::clients::http::ServerClient;
-use crowkv_console_shared::cluster::NodeHealth;
-use crowkv_console_shared::config::{NodeEntry, RackEntry, ServerEntry};
-use crowkv_console_shared::lifecycle::{self, crowkv_server_bin, DeployRequest};
-use crowkv_console_shared::monitor::{legacy_topology_to_node_stores, NodeRecord};
-use crowkv_console_shared::ConsoleConfig;
-use crowkv_web::{router, AppState};
-
-fn pick_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
-}
-
-fn crowkv_cli_bin() -> PathBuf {
-    if let Some(path) = option_env!("CARGO_BIN_EXE_crowkv") {
-        return PathBuf::from(path);
-    }
-    let mut p = std::env::current_exe().expect("current_exe");
-    while p.file_name().is_some_and(|n| n != "debug" && n != "release") {
-        p.pop();
-    }
-    p.push("crowkv");
-    p
-}
-
-struct Upstream {
-    pid: u32,
-    mgmt_url: String,
-    grpc_url: String,
-}
-
-async fn spawn_upstream() -> Option<Upstream> {
-    let bin = crowkv_server_bin()?;
-    if !bin.exists() {
-        return None;
-    }
-    let node = NodeEntry {
-        id: "n1".into(),
-        rack_id: "r1".into(),
-        host: "127.0.0.1".into(),
-        ssh_port: 22,
-        ssh_user: String::new(),
-        ssh_key: None,
-        ssh_password: None,
-    };
-    let req = DeployRequest {
-        server_id: "n1".into(),
-        mgmt_port: pick_free_port(),
-        grpc_port: pick_free_port(),
-        election_profile: Some("test".into()),
-        binary: Some(bin),
-    };
-    let deployed = lifecycle::deploy_local(&req, &node).await.expect("deploy_local");
-    Some(Upstream {
-        pid: deployed.pid,
-        mgmt_url: deployed.mgmt_url,
-        grpc_url: deployed.grpc_url,
-    })
-}
-
-async fn spawn_console(upstream: &Upstream) -> SocketAddr {
-    let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
-        .await
-        .unwrap();
-    let addr = listener.local_addr().unwrap();
-    let mut cfg = ConsoleConfig::default();
-    cfg.racks.push(RackEntry {
-        id: "r1".into(),
-        name: "r1".into(),
-    });
-    cfg.nodes.push(NodeEntry {
-        id: "n1".into(),
-        rack_id: "r1".into(),
-        host: "127.0.0.1".into(),
-        ssh_port: 22,
-        ssh_user: String::new(),
-        ssh_key: None,
-        ssh_password: None,
-    });
-    cfg.add_server(ServerEntry {
-        id: "n1".into(),
-        url: upstream.mgmt_url.clone(),
-        node_id: Some("n1".into()),
-        grpc_url: Some(upstream.grpc_url.clone()),
-        pid: Some(upstream.pid),
-    })
-    .unwrap();
-    let state = AppState::with_config(cfg, None);
-
-    // Seed the monitor cache so leader resolution works on the first
-    // KV call (the CLI test does no GET-stores beforehand).
-    let client = ServerClient::new(upstream.mgmt_url.clone()).unwrap();
-    if let Ok(stores) = client.topology().await {
-        let rec = NodeRecord {
-            health: NodeHealth::Up,
-            last_seen_ms: 1,
-            stores: legacy_topology_to_node_stores("n1", &stores),
-            last_error: None,
-        };
-        state.monitor_cache.set_node_report("n1".to_string(), rec).await;
-    }
-
-    tokio::spawn(async move {
-        axum::serve(listener, router(state)).await.unwrap();
-    });
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    addr
-}
-
-fn run(cli: &PathBuf, console_url: &str, args: &[&str]) -> (i32, String, String) {
-    let out = Command::new(cli)
-        .arg("--console")
-        .arg(console_url)
-        .args(args)
-        .output()
-        .expect("spawn cli");
-    (
-        out.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-    )
-}
+use crowkv_console_shared::lifecycle;
+use testkit::console::{crowkv_cli_bin, run, spawn_console, spawn_upstream};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::too_many_lines)]
@@ -150,6 +27,34 @@ async fn kv_put_get_delete_round_trip() {
 
     let console = spawn_console(&upstream).await;
     let console_url = format!("http://{console}");
+
+    // Create store 1 and group 1 through the console's API (stores no longer
+    // auto-create groups). This updates the monitor cache automatically.
+    let http_client = reqwest::Client::new();
+    let store_resp = http_client
+        .post(format!("{console_url}/api/stores"))
+        .json(&serde_json::json!({"store_id": 1, "nodes": ["n1"]}))
+        .send()
+        .await
+        .expect("add_store");
+    if !store_resp.status().is_success() {
+        let status = store_resp.status();
+        let body = store_resp.text().await.unwrap_or_default();
+        panic!("add_store failed with status {status}: {body}");
+    }
+    assert_eq!(store_resp.status(), 201, "add_store failed");
+    let group_resp = http_client
+        .post(format!("{console_url}/api/stores/1/groups"))
+        .json(&serde_json::json!({"group_id": 1, "replica_id": 1, "nodes": ["n1"]}))
+        .send()
+        .await
+        .expect("add_group");
+    if !group_resp.status().is_success() {
+        let status = group_resp.status();
+        let body = group_resp.text().await.unwrap_or_default();
+        panic!("add_group failed with status {status}: {body}");
+    }
+    assert_eq!(group_resp.status(), 201, "add_group failed");
 
     // put
     let (code, stdout, stderr) = run(

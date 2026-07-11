@@ -3,6 +3,7 @@
 
 # Frontend directory
 UI_DIR := crowkv-console/web/ui
+UI_NODE_MODULES := $(UI_DIR)/node_modules
 
 # Detect OS
 UNAME_S := $(shell uname -s)
@@ -20,11 +21,23 @@ test:
 	cargo test --workspace --all-targets
 
 # Run web-related tests: crowkv-web Rust crate + UI vitest unit tests
-test-web:
+test-web: $(UI_NODE_MODULES)
 	@echo "Running crowkv-web Rust tests..."
 	cargo test -p crowkv-web --all-targets
 	@echo "Running UI unit tests (vitest)..."
 	cd $(UI_DIR) && npm test
+
+# Run the real-backend Playwright E2E suite (workers=1). The Playwright
+# config's webServer builds the SPA and boots `crowkv-web --test-mode`; we
+# only need the debug `crowkv-server` binary the lifecycle layer deploys.
+# Override the browser with PLAYWRIGHT_CHROMIUM_EXECUTABLE / PLAYWRIGHT_CHANNEL,
+# or run `npx playwright install chromium` once to use the bundled browser.
+e2e: $(UI_NODE_MODULES)
+	@echo "Building crowkv-server (debug) for E2E..."
+	cargo build -p crowkv-server
+	@echo "Running real-backend Playwright suite..."
+	cd $(UI_DIR) && CROWKV_SERVER_BINARY=$(CURDIR)/target/debug/crowkv-server \
+		npx playwright test --config=e2e/realBackend.config.ts
 
 # Install dependencies and pre-commit hooks
 install:
@@ -45,8 +58,12 @@ endif
 	chmod +x .git/hooks/pre-commit
 	@echo "Installation complete."
 
+$(UI_NODE_MODULES): $(UI_DIR)/package.json $(UI_DIR)/package-lock.json
+	@echo "Installing UI dependencies (npm ci)..."
+	cd $(UI_DIR) && npm ci
+
 # Build in release mode
-build:
+build: $(UI_NODE_MODULES)
 	@echo "Building in release mode..."
 	cargo build --release
 	@echo "Building React SPA (vite build)..."
@@ -86,6 +103,8 @@ clean:
 	rm -rf $(UI_DIR)/dist $(UI_DIR)/node_modules
 	@echo "Removing log directories..."
 	find . -type d -name "log" ! -path "*/src/*" -prune -exec rm -rf {} +
+	@echo "Removing runtime-data directories..."
+	find . -type d -name "runtime-data" ! -path "*/src/*" -prune -exec rm -rf {} +
 
 # Reset: kill processes, remove logs and config, keep build artifacts
 reset:
@@ -101,6 +120,6 @@ reset:
 # For development with hot reload, use ui-dev. This runs the Vite
 # dev server which proxies /api requests to crowkv-web at :9920.
 
-ui-dev:
+ui-dev: $(UI_NODE_MODULES)
 	@echo "Starting Vite dev server (proxies /api -> 127.0.0.1:9920)..."
 	cd $(UI_DIR) && npm run dev

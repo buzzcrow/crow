@@ -66,6 +66,50 @@ async fn delete_status(client: &reqwest::Client, url: &str) -> reqwest::StatusCo
     client.delete(url).send().await.unwrap().status()
 }
 
+fn assert_node_workspace(dir: &std::path::Path, node_id: &str) {
+    let base = dir.join(format!("N-{node_id}"));
+    assert!(
+        base.is_dir(),
+        "missing workspace for {node_id}: {}",
+        base.display()
+    );
+    assert!(
+        base.join("bin").is_dir(),
+        "missing bin for {node_id}: {}",
+        base.display()
+    );
+    assert!(
+        base.join("log").is_dir(),
+        "missing log for {node_id}: {}",
+        base.display()
+    );
+    assert!(
+        base.join("data").is_dir(),
+        "missing data for {node_id}: {}",
+        base.display()
+    );
+}
+
+#[tokio::test]
+async fn prepare_node_workspace_creates_base_directory_when_missing() {
+    // Test the specific regression: prepare_node_workspace should create
+    // the base directory (N-{node_id}) before creating subdirectories.
+    let dir = tempdir("workspace-missing-base");
+    let cfg_path = dir.join("console.toml");
+    let state = AppState::with_config(ConsoleConfig::default(), Some(cfg_path.clone()));
+
+    // The runtime_root is the parent of cfg_path (dir), which exists.
+    // But N-test-node doesn't exist yet.
+    let result = state.prepare_node_workspace("test-node");
+    assert!(result.is_ok(), "prepare_node_workspace should succeed");
+
+    let base = dir.join("N-test-node");
+    assert!(base.is_dir(), "base directory should be created");
+    assert!(base.join("bin").is_dir(), "bin directory should be created");
+    assert!(base.join("log").is_dir(), "log directory should be created");
+    assert!(base.join("data").is_dir(), "data directory should be created");
+}
+
 #[tokio::test]
 async fn rack_node_crud_through_web_routes() {
     let dir = tempdir("rack-node");
@@ -118,6 +162,7 @@ async fn rack_node_crud_through_web_routes() {
     .await;
     assert_eq!(s.as_u16(), 201, "add rack node: {s} {v}");
     assert_eq!(v["rack_id"], "r1");
+    assert_node_workspace(&dir, "n1");
 
     // GET /api/racks/:rack_id/nodes.
     let (_, v) = json_get(&client, &format!("{base}/api/racks/r1/nodes")).await;
@@ -169,6 +214,108 @@ async fn rack_node_crud_through_web_routes() {
 }
 
 #[tokio::test]
+async fn multiple_racks_and_nodes_create_expected_workspaces() {
+    let bin = match crowkv_server_bin() {
+        Some(p) if p.exists() => p,
+        _ => {
+            eprintln!("skipping: crowkv-server binary not built");
+            return;
+        }
+    };
+
+    let dir = tempdir("multi-workspace");
+    let cfg_path = dir.join("console.toml");
+    let addr = spawn_web_with_path(cfg_path.clone()).await;
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::new();
+
+    let (s, _) = json_post(
+        &client,
+        &format!("{base}/api/racks"),
+        json!({ "id": "r1", "name": "rack-1" }),
+    )
+    .await;
+    assert_eq!(s.as_u16(), 201);
+    let (s, _) = json_post(
+        &client,
+        &format!("{base}/api/racks"),
+        json!({ "id": "r2", "name": "rack-2" }),
+    )
+    .await;
+    assert_eq!(s.as_u16(), 201);
+
+    let (s, _) = json_post(
+        &client,
+        &format!("{base}/api/racks/r1/nodes"),
+        json!({ "id": "1", "rack_id": "ignored", "host": "127.0.0.1", "ssh_user": "" }),
+    )
+    .await;
+    assert_eq!(s.as_u16(), 201);
+    let (s, _) = json_post(
+        &client,
+        &format!("{base}/api/racks/r1/nodes"),
+        json!({ "id": "2", "rack_id": "ignored", "host": "127.0.0.1", "ssh_user": "" }),
+    )
+    .await;
+    assert_eq!(s.as_u16(), 201);
+    let (s, _) = json_post(
+        &client,
+        &format!("{base}/api/racks/r2/nodes"),
+        json!({ "id": "10", "rack_id": "ignored", "host": "127.0.0.1", "ssh_user": "" }),
+    )
+    .await;
+    assert_eq!(s.as_u16(), 201);
+
+    assert_node_workspace(&dir, "1");
+    assert_node_workspace(&dir, "2");
+    assert_node_workspace(&dir, "10");
+
+    std::env::set_var("CROWKV_SERVER_ELECTION_PROFILE", "test");
+    let (s, v) = json_post(
+        &client,
+        &format!("{base}/api/nodes/1/server/deploy"),
+        json!({
+            "mgmt_port": pick_free_port(),
+            "grpc_port": pick_free_port(),
+            "binary": bin.to_string_lossy().to_string(),
+        }),
+    )
+    .await;
+    assert!(s.is_success(), "deploy node 1: {s} {v}");
+    let pid1 = u32::try_from(v["pid"].as_u64().unwrap()).unwrap();
+
+    let (s, v) = json_post(
+        &client,
+        &format!("{base}/api/nodes/10/server/deploy"),
+        json!({
+            "mgmt_port": pick_free_port(),
+            "grpc_port": pick_free_port(),
+            "binary": bin.to_string_lossy().to_string(),
+        }),
+    )
+    .await;
+    assert!(s.is_success(), "deploy node 10: {s} {v}");
+    let pid10 = u32::try_from(v["pid"].as_u64().unwrap()).unwrap();
+
+    assert!(std::fs::read_dir(dir.join("N-1/bin")).unwrap().next().is_some());
+    assert!(dir.join("N-1/log/crowkv-server.stdout.log").exists());
+    assert!(dir.join("N-1/log/crowkv-server.stderr.log").exists());
+    assert!(std::fs::read_dir(dir.join("N-10/bin")).unwrap().next().is_some());
+    assert!(dir.join("N-10/log/crowkv-server.stdout.log").exists());
+    assert!(dir.join("N-10/log/crowkv-server.stderr.log").exists());
+    assert!(std::fs::read_dir(dir.join("N-2/bin")).unwrap().next().is_none());
+
+    let _ = std::process::Command::new("kill")
+        .arg("-KILL")
+        .arg(pid1.to_string())
+        .status();
+    let _ = std::process::Command::new("kill")
+        .arg("-KILL")
+        .arg(pid10.to_string())
+        .status();
+}
+
+#[tokio::test]
 async fn deploy_then_stop_local_server() {
     let bin = match crowkv_server_bin() {
         Some(p) if p.exists() => p,
@@ -213,6 +360,11 @@ async fn deploy_then_stop_local_server() {
     assert_eq!(v["node_id"], "n1");
     assert!(v["pid"].as_u64().unwrap() > 0);
     let pid = u32::try_from(v["pid"].as_u64().unwrap()).unwrap();
+    assert!(dir.join("N-n1/bin").is_dir());
+    assert!(dir.join("N-n1/log").is_dir());
+    assert!(std::fs::read_dir(dir.join("N-n1/bin")).unwrap().next().is_some());
+    assert!(dir.join("N-n1/log/crowkv-server.stdout.log").exists());
+    assert!(dir.join("N-n1/log/crowkv-server.stderr.log").exists());
 
     // GET /api/nodes/:id/server confirms deployment.
     let (s, v) = json_get(&client, &format!("{base}/api/nodes/n1/server")).await;
@@ -240,9 +392,13 @@ async fn deploy_then_stop_local_server() {
     let (s, v) = json_post(&client, &format!("{base}/api/nodes/n1/server/stop"), json!({})).await;
     assert!(s.is_success(), "stop: {s} {v}");
 
-    // GET /api/nodes/:id/server — 404 after stop.
-    let (s, _) = json_get(&client, &format!("{base}/api/nodes/n1/server")).await;
-    assert_eq!(s.as_u16(), 404);
+    // GET /api/nodes/:id/server — declaration remains, but runtime pid is gone.
+    let (s, v) = json_get(&client, &format!("{base}/api/nodes/n1/server")).await;
+    assert_eq!(s.as_u16(), 200);
+    assert!(
+        v.get("pid").is_none() || v["pid"].is_null(),
+        "pid should be cleared after stop: {v}"
+    );
 
     // Best-effort: reap if the process is still around.
     let _ = std::process::Command::new("kill")

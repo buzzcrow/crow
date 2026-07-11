@@ -1,5 +1,6 @@
 use clap::Subcommand;
 use crowkv_console_shared::clients::console::DeployNodeServerBody;
+use crowkv_console_shared::cluster::NodeHealth;
 use std::process::ExitCode;
 
 use crate::utils::{client::console_client, print_json};
@@ -33,6 +34,8 @@ pub enum ServerVerb {
         #[arg(long)]
         node: String,
     },
+    /// List every deployed `crowkv-server` (node, endpoints, health).
+    List,
 }
 
 pub async fn run_server_verb(cli: &Cli, verb: ServerVerb) -> ExitCode {
@@ -45,6 +48,45 @@ pub async fn run_server_verb(cli: &Cli, verb: ServerVerb) -> ExitCode {
         } => server_deploy(cli, &node, mgmt_port, grpc_port, binary).await,
         ServerVerb::Restart { node } => server_restart(cli, &node).await,
         ServerVerb::Stop { node } => server_stop(cli, &node).await,
+        ServerVerb::List => server_list(cli).await,
+    }
+}
+
+async fn server_list(cli: &Cli) -> ExitCode {
+    let client = match console_client(cli) {
+        Ok(c) => c,
+        Err(c) => return c,
+    };
+    match client.list_servers().await {
+        Ok(servers) => {
+            if cli.json {
+                return print_json(&servers);
+            }
+            if servers.is_empty() {
+                println!("(no servers deployed)");
+                return ExitCode::SUCCESS;
+            }
+            println!("{:<12}  {:<26}  {:<26}  {:<8}  HEALTH", "NODE", "MGMT", "GRPC", "PID");
+            for s in &servers {
+                let health = match s.health {
+                    NodeHealth::Up => "up",
+                    NodeHealth::Down => "down",
+                    NodeHealth::Unknown => "unknown",
+                };
+                println!(
+                    "{:<12}  {:<26}  {:<26}  {:<8}  {health}",
+                    s.node_id.as_deref().unwrap_or("-"),
+                    s.mgmt_url,
+                    s.grpc_url.as_deref().unwrap_or("-"),
+                    s.pid.map_or_else(|| "-".to_string(), |p| p.to_string()),
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: list servers: {e}");
+            ExitCode::from(2)
+        }
     }
 }
 

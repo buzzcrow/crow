@@ -10,7 +10,7 @@ repository.workspace = true
 workspace = true
 
 [[bin]]
-name = "crowkv"
+name = "crowkv-cli"
 path = "src/main.rs"
 
 [dependencies]

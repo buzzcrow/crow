@@ -9,7 +9,7 @@ pub mod server;
 pub mod store;
 
 pub use bench::{run_bench_verb, BenchVerb};
-pub use cluster::{run_cluster_status, run_cluster_topology, ClusterVerb};
+pub use cluster::{run_cluster_inspect, run_cluster_status, run_cluster_topology, ClusterVerb};
 pub use kv::{run_kv_verb, KvVerb};
 pub use node::{run_node_verb, NodeVerb};
 pub use paxos::{run_group_verb, GroupVerb};

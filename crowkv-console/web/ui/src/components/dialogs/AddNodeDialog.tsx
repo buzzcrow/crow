@@ -1,37 +1,70 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Dialog } from '../Dialog';
 import { Input, Select } from '../ui/Input';
 import { useToast } from '../../contexts/ToastContext';
-import { addNode } from '../../api';
+import { addNode, deployServer } from '../../api';
 import { Rack } from '../../types';
+import { nextIdFromSuffix } from './defaults';
 
 export interface AddNodeDialogProps {
   isOpen: boolean;
   onClose: () => void;
   racks: Rack[];
   defaultRackId?: string;
+  existingNodeIds?: string[];
+  defaultHost?: string;
+  defaultMgmtPort?: string;
+  defaultGrpcPort?: string;
+  onCreatedRackId?: (rackId: string) => void;
   onSuccess?: () => void | Promise<void>;
 }
 
 /**
  * Dialog for adding a new node.
  */
-export function AddNodeDialog({ isOpen, onClose, racks, defaultRackId, onSuccess }: AddNodeDialogProps) {
-  const [rackId, setRackId] = useState(defaultRackId || '');
-  const [nodeId, setNodeId] = useState('');
-  const [host, setHost] = useState('');
+export function AddNodeDialog({
+  isOpen,
+  onClose,
+  racks,
+  defaultRackId,
+  existingNodeIds = [],
+  defaultHost = '127.0.0.1',
+  defaultMgmtPort = '19910',
+  defaultGrpcPort = '19920',
+  onCreatedRackId,
+  onSuccess,
+}: AddNodeDialogProps) {
+  const initialRackId = defaultRackId || racks[0]?.id || '';
+  const initialNodeId = nextIdFromSuffix(existingNodeIds, 1);
+  const [rackId, setRackId] = useState(initialRackId);
+  const [nodeId, setNodeId] = useState(initialNodeId);
+  const [host, setHost] = useState(defaultHost);
   const [sshUser, setSshUser] = useState('');
   const [sshKeyPath, setSshKeyPath] = useState('');
+  const [enableCrowKV, setEnableCrowKV] = useState(true);
+  const [mgmtPort, setMgmtPort] = useState(defaultMgmtPort);
+  const [grpcPort, setGrpcPort] = useState(defaultGrpcPort);
   const [isLoading, setIsLoading] = useState(false);
   const { success, error } = useToast();
 
+  useEffect(() => {
+    if (!isOpen) return;
+    setMgmtPort(defaultMgmtPort);
+    setGrpcPort(defaultGrpcPort);
+    setEnableCrowKV(true);
+  }, [defaultGrpcPort, defaultMgmtPort, isOpen]);
+
+  const isPort = (value: string) => /^\d+$/.test(value) && Number(value) > 0 && Number(value) < 65536;
+  const deployPortsValid = isPort(mgmtPort) && isPort(grpcPort) && mgmtPort !== grpcPort;
+
   const handleSubmit = async () => {
-    if (!rackId || !nodeId.trim() || !host.trim()) return;
+    if (!rackId || !nodeId.trim() || !host.trim() || (enableCrowKV && !deployPortsValid)) return;
 
     setIsLoading(true);
     try {
+      const trimmedNodeId = nodeId.trim();
       await addNode({
-        id: nodeId.trim(),
+        id: trimmedNodeId,
         rack_id: rackId,
         host: host.trim(),
         ssh_port: 22,
@@ -39,12 +72,23 @@ export function AddNodeDialog({ isOpen, onClose, racks, defaultRackId, onSuccess
         ...(sshKeyPath.trim() ? { ssh_key: sshKeyPath.trim() } : {}),
       });
 
-      success(`Node "${nodeId}" created successfully`);
-      setRackId(defaultRackId || '');
-      setNodeId('');
-      setHost('');
+      if (enableCrowKV) {
+        await deployServer(trimmedNodeId, {
+          mgmt_port: Number(mgmtPort),
+          grpc_port: Number(grpcPort),
+        });
+      }
+
+      success(enableCrowKV ? `Node "${trimmedNodeId}" created and CrowKV enabled` : `Node "${trimmedNodeId}" created successfully`);
+      onCreatedRackId?.(rackId);
+      setRackId(initialRackId);
+      setNodeId(initialNodeId);
+      setHost(defaultHost);
       setSshUser('');
       setSshKeyPath('');
+      setEnableCrowKV(true);
+      setMgmtPort(defaultMgmtPort);
+      setGrpcPort(defaultGrpcPort);
       onClose();
       await onSuccess?.();
     } catch (err) {
@@ -56,11 +100,14 @@ export function AddNodeDialog({ isOpen, onClose, racks, defaultRackId, onSuccess
   };
 
   const handleClose = () => {
-    setRackId(defaultRackId || '');
-    setNodeId('');
-    setHost('');
+    setRackId(initialRackId);
+    setNodeId(initialNodeId);
+    setHost(defaultHost);
     setSshUser('');
     setSshKeyPath('');
+    setEnableCrowKV(true);
+    setMgmtPort(defaultMgmtPort);
+    setGrpcPort(defaultGrpcPort);
     onClose();
   };
 
@@ -72,7 +119,7 @@ export function AddNodeDialog({ isOpen, onClose, racks, defaultRackId, onSuccess
       description="Add a new physical node to your infrastructure"
       confirmLabel="Create Node"
       onConfirm={handleSubmit}
-      confirmDisabled={!rackId || !nodeId.trim() || !host.trim() || isLoading}
+      confirmDisabled={!rackId || !nodeId.trim() || !host.trim() || isLoading || (enableCrowKV && !deployPortsValid)}
       confirmLoading={isLoading}
     >
       <div className="tw-space-y-4">
@@ -96,7 +143,7 @@ export function AddNodeDialog({ isOpen, onClose, racks, defaultRackId, onSuccess
         )}
         <Input
           label="Node ID"
-          placeholder="node-01"
+          placeholder="N-01"
           value={nodeId}
           onChange={(e) => setNodeId(e.target.value)}
           autoFocus
@@ -119,6 +166,31 @@ export function AddNodeDialog({ isOpen, onClose, racks, defaultRackId, onSuccess
           value={sshKeyPath}
           onChange={(e) => setSshKeyPath(e.target.value)}
         />
+        <label className="tw-flex tw-items-center tw-gap-2 tw-text-sm tw-text-text">
+          <input
+            type="checkbox"
+            checked={enableCrowKV}
+            onChange={(e) => setEnableCrowKV(e.target.checked)}
+            className="tw-h-4 tw-w-4 tw-rounded tw-border tw-border-border tw-bg-bg tw-text-accent focus:tw-ring-accent"
+          />
+          <span>Enable CrowKV on this node</span>
+        </label>
+        {enableCrowKV && (
+          <>
+            <Input
+              label="Management Port"
+              inputMode="numeric"
+              value={mgmtPort}
+              onChange={(e) => setMgmtPort(e.target.value)}
+            />
+            <Input
+              label="gRPC Port"
+              inputMode="numeric"
+              value={grpcPort}
+              onChange={(e) => setGrpcPort(e.target.value)}
+            />
+          </>
+        )}
       </div>
     </Dialog>
   );

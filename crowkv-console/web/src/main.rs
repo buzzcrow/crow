@@ -51,15 +51,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let path = if args.test_mode {
         None
     } else {
-        crowkv_console_shared::ConsoleConfig::default_path()
+        crowkv_console_shared::TomlFileEngine::default_path()
     };
     let cfg = match path.as_ref() {
-        Some(p) => crowkv_console_shared::ConsoleConfig::load(p).unwrap_or_default(),
+        Some(p) => {
+            let engine = crowkv_console_shared::TomlFileEngine::new(p.clone());
+            crowkv_console_shared::ConsoleConfig::load_with_engine(&engine).unwrap_or_default()
+        }
         None => crowkv_console_shared::ConsoleConfig::default(),
     };
     let server_count = cfg.servers.len();
     let state = crowkv_web::AppState::with_config(cfg, path);
     tracing::info!(servers = server_count, "loaded registry");
+    crowkv_web::mgmt::restore_persisted_topology(&state).await;
 
     axum::serve(listener, crowkv_web::router(state)).await?;
     Ok(())

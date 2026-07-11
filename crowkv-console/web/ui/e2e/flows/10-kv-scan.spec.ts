@@ -1,12 +1,13 @@
 import { test, expect } from '../fixtures/realBackend';
-import { deployNodeServer, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader } from '../fixtures/consoleSetup';
 
 async function openKvTab(page: any) {
   await page.goto('/');
-  await expect(page.getByRole('heading', { name: 'Cluster' })).toBeVisible({ timeout: 15_000 });
-  await page.getByRole('treeitem', { name: /Collapse 1/ }).nth(1).click();
+  await page.getByRole('button', { name: 'Logical' }).click();
+  const aside = page.locator('aside').first();
+  await expect(aside.getByText('G-1100', { exact: true })).toBeVisible({ timeout: 20_000 });
+  await aside.getByText('G-1100', { exact: true }).click();
   const inspector = page.locator('aside[aria-label="Entity inspector"]');
-  await expect(inspector.locator('div').filter({ hasText: /^Group$/ })).toBeVisible({ timeout: 15_000 });
   await inspector.getByRole('tab', { name: 'KV' }).click();
   return inspector;
 }
@@ -25,6 +26,9 @@ test.describe('E2E-10 KV scan', () => {
   test('scans keys through the real KV UI', async ({ page, baseURL }) => {
     await seedRackAndNode(baseURL!, 'r10', 'n10');
     await deployNodeServer(baseURL!, 'n10', 9930, 9940);
+    await createStore(baseURL!, 110, 1100, 11000, ['n10']);
+    await addGroup(baseURL!, 110, 1100, 11000, ['n10']);
+    await waitForLeader(baseURL!, 110, 1100);
 
     try {
       const inspector = await openKvTab(page);
@@ -32,7 +36,7 @@ test.describe('E2E-10 KV scan', () => {
       await putKey(inspector, page, 'scan-10-b', 'value-b');
 
       await inspector.getByRole('button', { name: 'Scan' }).first().click();
-      await inspector.getByPlaceholder('Key prefix (leave empty for all keys)').fill('scan-10-');
+      await inspector.getByPlaceholder('Key prefix (empty = all)').fill('scan-10-');
       const responsePromise = page.waitForResponse((response) => response.url().includes('/kv/scan'));
       await inspector.getByRole('button', { name: 'Scan' }).last().click();
       const response = await responsePromise;

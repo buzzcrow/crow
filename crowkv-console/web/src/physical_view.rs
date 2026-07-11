@@ -27,7 +27,9 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
-use crowkv_console_shared::cluster::{NodeId, NodeStore, ReplicaId, ReplicaRole, ReplicaState};
+use crowkv_console_shared::cluster::{
+    NodeHealth, NodeId, NodeStore, ProcState, ReplicaId, ReplicaRole, ReplicaState, ServerProcess,
+};
 use crowkv_console_shared::config::{ConsoleConfig, NodeEntry, RackEntry, ServerEntry};
 use crowkv_console_shared::expand::{Expandable, Truncation};
 use crowkv_console_shared::monitor::NodeRecord;
@@ -54,7 +56,7 @@ pub struct NodeView {
     pub ssh_port: u16,
     pub has_server: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub server: Option<ServerEntry>,
+    pub server: Option<ServerProcess>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stores: Option<Vec<StoreOnNodeView>>,
 }
@@ -145,6 +147,23 @@ pub struct PhysicalBuilder<'a> {
 }
 
 impl<'a> PhysicalBuilder<'a> {
+    fn build_server_process(entry: &ServerEntry, rec: Option<&NodeRecord>) -> ServerProcess {
+        let health = rec.map_or(NodeHealth::Unknown, |node| node.health);
+        let state = match health {
+            NodeHealth::Up => ProcState::Running,
+            NodeHealth::Down => ProcState::Failed,
+            NodeHealth::Unknown => ProcState::Unknown,
+        };
+        ServerProcess {
+            mgmt_url: entry.url.clone(),
+            grpc_url: entry.grpc_url.clone().unwrap_or_default(),
+            pid: None,
+            state,
+            health,
+            last_seen_ms: rec.map_or(0, |node| node.last_seen_ms),
+        }
+    }
+
     #[must_use]
     pub fn new(cfg: &'a ConsoleConfig, snap: &'a BTreeMap<NodeId, NodeRecord>) -> Self {
         Self {
@@ -193,9 +212,12 @@ impl<'a> PhysicalBuilder<'a> {
     /// node's stores (and, recursively, groups).
     pub fn build_node(&mut self, node: &NodeEntry, remaining: u8) -> NodeView {
         self.path.push(format!("node:{}", node.id));
-        let server = self.cfg.server_for_node(&node.id).cloned();
-        let has_server = server.is_some();
         let rec = self.snap.get(&node.id);
+        let server = self
+            .cfg
+            .server_for_node(&node.id)
+            .map(|entry| Self::build_server_process(entry, rec));
+        let has_server = server.is_some();
         let has_stores = rec.is_some_and(|r| !r.stores.is_empty());
         let stores = if remaining >= 1 {
             let list: Vec<StoreOnNodeView> = rec

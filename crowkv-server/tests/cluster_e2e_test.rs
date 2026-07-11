@@ -687,28 +687,39 @@ async fn e2e_multi_group_isolated_kv() {
     assert_eq!(val_b_still, b"value-from-B");
 }
 
-/// Scenario: bring up a 2-replica group, do KV, then dynamically add a
-/// third remote replica via the management API and verify KV still
-/// works; finally remove that replica and verify KV continues. This
-/// exercises:
+/// Scenario: bring up a 3-replica group out of 5 nodes, do KV, then
+/// dynamically add the remaining 2 remote replicas via the management
+/// API and verify KV still works; finally remove those 2 replicas and
+/// verify KV continues. This exercises:
 ///   - `rebuild_group_with_same_config` preserving election state
 ///     across `add_remote_replicas`/`remove_remote_replica` (otherwise `term/leader_id`
 ///     reset and the cluster would dip into a fresh election),
 ///   - synchronous old-driver cancel on group replacement,
 ///   - the heartbeat-resets-deadline rule keeping the surviving leader
-///     stable through wiring changes.
+///     stable through wiring changes,
+///   - quorum transitions from 3→5→3 replicas.
 #[tokio::test]
 async fn e2e_kv_after_dynamic_replica_change() {
     let group_id = 1;
-    let nodes = start_cluster(&[0, 1, 2], group_id).await;
+    let nodes = start_cluster(&[0, 1, 2, 3, 4], group_id).await;
 
-    // Initial wiring: only nodes[0] and nodes[1] know about each other.
-    // nodes[2] hosts a local replica but is not yet a peer of the other
-    // two — its presence does not affect the (0,1) Paxos quorum.
-    wire_topology_subset(&[&nodes[0], &nodes[1]], group_id).await;
+    // Initial wiring: only nodes[0..3] know about each other.
+    // nodes[3] and nodes[4] host local replicas but are not yet peers
+    // of the initial trio — their presence does not affect the (0,1,2)
+    // Paxos quorum.
+    wire_topology_subset(&[&nodes[0], &nodes[1], &nodes[2]], group_id).await;
 
-    // Wait for one of {nodes[0], nodes[1]} to win quorum=2.
-    let leader_idx = wait_for_leader(&nodes[..2], group_id, std::time::Duration::from_secs(20)).await;
+    // Wait for one of {nodes[0], nodes[1], nodes[2]} to win quorum=2 (majority of 3).
+    // Use wait_for_stable_leader because the initial wiring triggers a
+    // leadership battle (all 3 nodes start as self-elected leaders with
+    // quorum=1 and must re-elect with quorum=2).
+    let leader_idx = wait_for_stable_leader(
+        &nodes[..3],
+        group_id,
+        std::time::Duration::from_secs(20),
+        std::time::Duration::from_millis(800),
+    )
+    .await;
     let leader_addr = node_endpoint(&topology(&nodes[leader_idx]).await);
     let mut kv = KvServiceClient::connect(format!("http://{leader_addr}"))
         .await
@@ -720,24 +731,43 @@ async fn e2e_kv_after_dynamic_replica_change() {
     assert!(found);
     assert_eq!(v, b"v1");
 
-    // Dynamically add nodes[2] as a remote on every existing peer, and
-    // make nodes[2] aware of [0, 1] in turn. After this, the group is a
-    // 3-replica group; election state is preserved by
-    // `rebuild_group_with_same_config`.
-    let n2_addr = node_endpoint(&topology(&nodes[2]).await);
-    let n0_addr = node_endpoint(&topology(&nodes[0]).await);
-    let n1_addr = node_endpoint(&topology(&nodes[1]).await);
-    add_remote_replica(&nodes[0], group_id, nodes[2].replica_id, &n2_addr).await;
-    add_remote_replica(&nodes[1], group_id, nodes[2].replica_id, &n2_addr).await;
-    add_remote_replica(&nodes[2], group_id, nodes[0].replica_id, &n0_addr).await;
-    add_remote_replica(&nodes[2], group_id, nodes[1].replica_id, &n1_addr).await;
+    // Dynamically add nodes[3] and nodes[4] as remotes on every existing
+    // peer, and make nodes[3]/nodes[4] aware of all current members.
+    // After this, the group is a 5-replica group; election state is
+    // preserved by `rebuild_group_with_same_config`.
+    let addrs: Vec<String> = {
+        let mut v = Vec::new();
+        for n in &nodes {
+            v.push(node_endpoint(&topology(n).await));
+        }
+        v
+    };
+    // Tell existing members (0,1,2) about the newcomers (3,4).
+    for existing in &nodes[..3] {
+        for new_idx in 3..5 {
+            add_remote_replica(existing, group_id, nodes[new_idx].replica_id, &addrs[new_idx]).await;
+        }
+    }
+    // Tell newcomers (3,4) about all existing members (0,1,2) and each other.
+    for new_idx in 3..5 {
+        for peer_idx in 0..5 {
+            if peer_idx == new_idx {
+                continue;
+            }
+            add_remote_replica(
+                &nodes[new_idx],
+                group_id,
+                nodes[peer_idx].replica_id,
+                &addrs[peer_idx],
+            )
+            .await;
+        }
+    }
 
-    // Leader must remain unique across all 3 nodes. (The election-state
-    // inheritance fix lets the existing leader keep its tenure across
-    // the rebuild rather than restarting election; however when the
-    // quorum size grows from 2 to 3, the previously-elected leader may
-    // step down if it cannot collect the new majority before its lease
-    // expires, so we re-resolve below rather than asserting tenure.)
+    // Leader must remain unique across all 5 nodes. When the quorum
+    // size grows from 3 to 5, the previously-elected leader may step
+    // down if it cannot collect the new majority before its lease
+    // expires, so we re-resolve below rather than asserting tenure.
     let leader_idx = wait_for_stable_leader(
         &nodes,
         group_id,
@@ -751,7 +781,7 @@ async fn e2e_kv_after_dynamic_replica_change() {
         .expect("reconnect after add");
 
     // Post-add KV: pre-add value still readable (Arc-shared learner), and
-    // a new write commits successfully against the (now 3-replica) quorum.
+    // a new write commits successfully against the (now 5-replica) quorum.
     let (found, v) = kv_get(&mut kv, group_id, b"k1", 6021).await;
     assert!(
         found,
@@ -760,29 +790,47 @@ async fn e2e_kv_after_dynamic_replica_change() {
     assert_eq!(v, b"v1");
     kv_put(&mut kv, group_id, b"k2", b"v2", 6101).await;
 
-    // Dynamically remove nodes[2] from the (0, 1) members' view.
-    // nodes[2] still hosts a local replica that thinks it belongs to
-    // the group, but the surviving (0, 1) members' Paxos quorum is
-    // self-contained and must keep accepting writes.
-    remove_remote_replica(&nodes[0], group_id, nodes[2].replica_id).await;
-    remove_remote_replica(&nodes[1], group_id, nodes[2].replica_id).await;
+    // Dynamically remove nodes[0] and nodes[1] from the (2,3,4) members'
+    // view, AND remove (2,3,4) from nodes[0,1]'s view so the old leader
+    // stops heartbeating the surviving group. The surviving (2,3,4)
+    // members' Paxos quorum is self-contained and must keep accepting
+    // writes.
+    for existing in &nodes[2..5] {
+        for removed in &nodes[..2] {
+            remove_remote_replica(existing, group_id, removed.replica_id).await;
+        }
+    }
+    for existing in &nodes[..2] {
+        for removed in &nodes[2..5] {
+            remove_remote_replica(existing, group_id, removed.replica_id).await;
+        }
+    }
 
-    // Re-resolve the leader on the (0, 1) wiring after the shrink.
+    // Re-resolve the leader on the (2,3,4) wiring after the shrink.
+    // wait_for_stable_leader returns a slice-relative index; offset by 2
+    // to index into the full `nodes` array.
     let leader_idx = wait_for_stable_leader(
-        &nodes[..2],
+        &nodes[2..5],
         group_id,
         std::time::Duration::from_secs(30),
         std::time::Duration::from_millis(800),
     )
     .await;
-    let leader_addr = node_endpoint(&topology(&nodes[leader_idx]).await);
+    let leader_addr = node_endpoint(&topology(&nodes[2 + leader_idx]).await);
     let mut kv = KvServiceClient::connect(format!("http://{leader_addr}"))
         .await
         .expect("reconnect after remove");
 
     // Post-remove KV: previous writes still readable, delete + re-write
     // commit through the smaller quorum.
-    let (found, v) = kv_get(&mut kv, group_id, b"k2", 6201).await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let (found, v) = loop {
+        let result = kv_get(&mut kv, group_id, b"k2", 6201).await;
+        if result.0 || std::time::Instant::now() >= deadline {
+            break result;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    };
     assert!(found);
     assert_eq!(v, b"v2");
     kv_delete(&mut kv, group_id, b"k1", 6301).await;

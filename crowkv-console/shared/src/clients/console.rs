@@ -31,8 +31,6 @@ pub struct ConsoleClient {
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateStoreBody {
     pub store_id: u64,
-    pub group_id: u64,
-    pub replica_id: u64,
     #[serde(default)]
     pub nodes: Vec<String>,
 }
@@ -133,6 +131,28 @@ pub struct KvScanItem {
 pub struct KvScanResponse {
     pub items: Vec<KvScanItem>,
     pub truncated: bool,
+}
+
+/// One row of `GET /api/servers` — a deployed `crowkv-server` projected
+/// from the console config plus the monitor cache.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ServerSummary {
+    #[serde(default)]
+    pub node_id: Option<String>,
+    pub mgmt_url: String,
+    #[serde(default)]
+    pub grpc_url: Option<String>,
+    #[serde(default)]
+    pub pid: Option<u32>,
+    #[serde(default)]
+    pub health: crate::cluster::NodeHealth,
+}
+
+/// Response of `GET /api/stores/:s/groups/:g/endpoint` — the leader's
+/// gRPC URL, ready to hand to a direct gRPC client.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EndpointInfo {
+    pub grpc_url: String,
 }
 
 impl ConsoleClient {
@@ -267,6 +287,14 @@ impl ConsoleClient {
         .await
     }
 
+    /// `GET /api/servers`. Cluster-wide list of deployed servers.
+    ///
+    /// # Errors
+    /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
+    pub async fn list_servers(&self) -> Result<Vec<ServerSummary>> {
+        self.get_json("/api/servers").await
+    }
+
     /// Restart the `crowkv-server` running on `node_id`. Stops the
     /// tracked process (if any) and re-deploys on the same ports
     /// recorded in the console config.
@@ -339,6 +367,16 @@ impl ConsoleClient {
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
     pub async fn add_group(&self, sid: u64, body: &CreateGroupBody) -> Result<Value> {
         self.post_json(&format!("/api/stores/{sid}/groups"), body).await
+    }
+
+    /// `GET /api/stores/:s/groups/:g/endpoint`. Resolve the leader's
+    /// gRPC URL for a direct gRPC client (the bench engine).
+    ///
+    /// # Errors
+    /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
+    pub async fn resolve_endpoint(&self, sid: u64, gid: u64) -> Result<EndpointInfo> {
+        self.get_json(&format!("/api/stores/{sid}/groups/{gid}/endpoint"))
+            .await
     }
 
     /// `DELETE /api/stores/:store_id/groups/:group_id`.

@@ -389,14 +389,21 @@ pub fn legacy_topology_to_node_stores(
     for s in stores {
         let mut groups: Vec<ClusterNodeGroup> = Vec::new();
         for g in &s.groups {
+            let local_role = g.local_replica.role.trim().to_ascii_lowercase();
             let local = LocalReplicaInfo {
                 replica_id: g.local_replica.id,
-                role: if g.local_replica.id == g.leader_id {
+                role: if g.leader_id == 0 || local_role == "candidate" || local_role == "pre_candidate" {
+                    ReplicaRole::Follower
+                } else if g.local_replica.id == g.leader_id {
                     ReplicaRole::Leader
                 } else {
                     ReplicaRole::Follower
                 },
-                state: ReplicaState::Running,
+                state: if g.leader_id == 0 || local_role == "candidate" || local_role == "pre_candidate" {
+                    ReplicaState::Unknown
+                } else {
+                    ReplicaState::Running
+                },
             };
             let remotes = g
                 .remotes
@@ -416,7 +423,7 @@ pub fn legacy_topology_to_node_stores(
                 group_id: g.group_id,
                 local,
                 remotes,
-                leader_hint: Some(g.leader_id),
+                leader_hint: (g.leader_id != 0).then_some(g.leader_id),
             });
         }
         out.insert(

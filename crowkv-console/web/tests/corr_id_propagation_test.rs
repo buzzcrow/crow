@@ -124,6 +124,11 @@ async fn corr_id_forwards_to_upstream_openapi_proxy() {
         url: format!("http://{upstream_addr}"),
         node_id: Some("n1".into()),
         grpc_url: None,
+        mgmt_port: None,
+        grpc_port: None,
+        auto_start: false,
+        binary: None,
+        election_profile: None,
         pid: None,
     })
     .unwrap();

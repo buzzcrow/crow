@@ -16,13 +16,11 @@ async fn start_server() -> ServerHandle {
         .expect("start crowkv-server")
 }
 
-async fn add_store(base: &str, store_id: u64, group_id: u64, replica_id: u64) -> reqwest::Response {
+async fn add_store(base: &str, store_id: u64, _group_id: u64, _replica_id: u64) -> reqwest::Response {
     client()
         .post(format!("{base}/stores"))
         .json(&serde_json::json!({
-            "store_id": store_id,
-            "group_id": group_id,
-            "replica_id": replica_id
+            "store_id": store_id
         }))
         .send()
         .await
@@ -108,7 +106,7 @@ async fn add_store_via_api() {
     assert_eq!(resp.status(), 201);
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["store_id"], 5);
-    assert_eq!(body["group_count"], 1);
+    assert_eq!(body["group_count"], 0);
 
     let list: Value = client()
         .get(format!("{}/stores", server.base_url()))
@@ -421,6 +419,8 @@ async fn progressive_setup_multiple_stores_groups_replicas() {
     for sid in 1..3u64 {
         let resp = add_store(server.base_url(), sid, 1, sid + 1).await;
         assert_eq!(resp.status(), 201, "store {sid} should be created");
+        let resp = add_group(server.base_url(), sid, 1, sid + 1).await;
+        assert_eq!(resp.status(), 201, "group 1 in store {sid}");
     }
 
     for sid in 0..3u64 {

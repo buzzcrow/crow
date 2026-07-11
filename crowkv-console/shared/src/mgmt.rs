@@ -13,12 +13,17 @@ use crate::error::{Error, Result};
 
 // ── Request / response DTOs ─────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddGroupInitialRole {
+    Leader,
+    Follower,
+}
+
 /// `POST /stores` body.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddStoreRequest {
     pub store_id: u64,
-    pub group_id: u64,
-    pub replica_id: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
 }
@@ -28,6 +33,8 @@ pub struct AddStoreRequest {
 pub struct AddGroupRequest {
     pub group_id: u64,
     pub replica_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_role: Option<AddGroupInitialRole>,
 }
 
 /// One element of `POST /stores/{sid}/groups/{gid}/remotes` body and

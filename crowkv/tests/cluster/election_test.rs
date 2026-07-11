@@ -94,6 +94,47 @@ async fn single_node_auto_promotes() {
     cluster.shutdown().await;
 }
 
+/// Drive a fresh `n`-replica cluster (ids `1..=n`) and assert it
+/// converges on *exactly one* leader. Exercises odd and even replica
+/// counts: with `n` voters the quorum is `n / 2 + 1`, which a single
+/// connected cluster can always satisfy (the even-`n` limitation only
+/// bites under a perfectly balanced split, which we do not inject).
+async fn assert_single_leader_for_replica_count(n: u64) {
+    let ids: Vec<u64> = (1..=n).collect();
+    let cluster = start_cluster_no_leader(&ids).await;
+
+    let leader_id = wait_for_leader(&cluster, Duration::from_secs(10))
+        .await
+        .unwrap_or_else(|| panic!("a leader should be elected for {n}-replica cluster within 10s"));
+
+    let leaders: Vec<u64> = cluster
+        .nodes()
+        .iter()
+        .filter_map(|node| {
+            let group = node.get_group(1).expect("group exists");
+            let replica = group.local_replica();
+            replica.is_leader().then_some(replica.id)
+        })
+        .collect();
+    assert_eq!(
+        leaders.len(),
+        1,
+        "exactly one leader expected for {n}-replica cluster, got: {leaders:?}"
+    );
+    assert_eq!(leaders[0], leader_id);
+
+    cluster.shutdown().await;
+}
+
+/// End-to-end: a leader must be elected for every replica count from 1
+/// through 7 (covering both odd and even group sizes).
+#[tokio::test]
+async fn leader_elected_for_replica_counts_1_through_7() {
+    for n in 1..=7 {
+        assert_single_leader_for_replica_count(n).await;
+    }
+}
+
 // ------------------------------------------------------------------
 // Driver unit tests (migrated from inline `#[cfg(test)]` module)
 // ------------------------------------------------------------------

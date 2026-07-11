@@ -1,15 +1,21 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Dialog } from '../Dialog';
-import { Input } from '../ui/Input';
+import { Input, Select } from '../ui/Input';
 import { useToast } from '../../contexts/ToastContext';
 import { addGroup } from '../../api';
-import { Node } from '../../types';
+import { Node, StoreView, CrowKVServerView } from '../../types';
+import { isCrowKVServerAvailable } from '../../data/crowkvServers';
 
 export interface AddGroupDialogProps {
   isOpen: boolean;
   onClose: () => void;
-  storeId: string;
+  storeId?: string;
+  stores: StoreView[];
   nodes: Node[];
+  servers?: CrowKVServerView[];
+  defaultGroupId?: string;
+  defaultReplicaId?: string;
+  defaultNodeIds?: string[];
   onSuccess?: () => void | Promise<void>;
 }
 
@@ -18,27 +24,55 @@ export interface AddGroupDialogProps {
  * (`POST /api/stores/:sid/groups`) creates one replica per selected
  * node, starting from `replica_id`.
  */
-export function AddGroupDialog({ isOpen, onClose, storeId, nodes, onSuccess }: AddGroupDialogProps) {
-  const [groupId, setGroupId] = useState('');
-  const [replicaId, setReplicaId] = useState('');
-  const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
+export function AddGroupDialog({
+  isOpen,
+  onClose,
+  storeId = '',
+  stores,
+  nodes,
+  servers = [],
+  defaultGroupId = '',
+  defaultReplicaId = '',
+  defaultNodeIds = [],
+  onSuccess,
+}: AddGroupDialogProps) {
+  const [selectedStoreId, setSelectedStoreId] = useState(storeId || (stores[0] ? String(stores[0].store_id) : ''));
+  const availableNodes = nodes.filter(
+    (node) =>
+      servers.some((server) => server.node_id === node.id && isCrowKVServerAvailable(server)),
+  );
+  const defaultSelectedNodeIds = defaultNodeIds.filter((id) => availableNodes.some((n) => n.id === id));
+  const [groupId, setGroupId] = useState(defaultGroupId);
+  const [replicaId, setReplicaId] = useState(defaultReplicaId);
+  const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>(defaultSelectedNodeIds);
   const [isLoading, setIsLoading] = useState(false);
+  const wasOpenRef = useRef(false);
   const { success, error } = useToast();
 
   const isNumeric = (v: string) => /^\d+$/.test(v.trim());
   const valid = isNumeric(groupId) && isNumeric(replicaId) && selectedNodeIds.length > 0;
 
   const reset = () => {
-    setGroupId('');
-    setReplicaId('');
-    setSelectedNodeIds([]);
+    setSelectedStoreId(storeId || (stores[0] ? String(stores[0].store_id) : ''));
+    setGroupId(defaultGroupId);
+    setReplicaId(defaultReplicaId);
+    setSelectedNodeIds(defaultSelectedNodeIds);
   };
 
+  useEffect(() => {
+    if (isOpen && !wasOpenRef.current) reset();
+    wasOpenRef.current = isOpen;
+  }, [defaultGroupId, defaultReplicaId, defaultSelectedNodeIds, isOpen, storeId, stores]);
+
+  useEffect(() => {
+    setSelectedNodeIds((prev) => prev.filter((id) => availableNodes.some((node) => node.id === id)));
+  }, [selectedStoreId]);
+
   const handleSubmit = async () => {
-    if (!valid) return;
+    if (!valid || !selectedStoreId) return;
     setIsLoading(true);
     try {
-      await addGroup(storeId, {
+      await addGroup(selectedStoreId, {
         group_id: groupId.trim(),
         replica_id: replicaId.trim(),
         nodes: selectedNodeIds,
@@ -71,20 +105,34 @@ export function AddGroupDialog({ isOpen, onClose, storeId, nodes, onSuccess }: A
       isOpen={isOpen}
       onClose={handleClose}
       title="Add Group"
-      description={`Create a new replication group in store ${storeId}.`}
+      description="Create a new replication group in a selected KV store. One local replica will be created on each selected node, then the backend wires the remote replicas between them."
       confirmLabel="Create Group"
       onConfirm={handleSubmit}
-      confirmDisabled={!valid || isLoading}
+      confirmDisabled={!valid || !selectedStoreId || isLoading}
       confirmLoading={isLoading}
     >
       <div className="tw-space-y-4">
+        {stores.length > 0 ? (
+          <Select label="KV Store" value={selectedStoreId} onChange={(e) => setSelectedStoreId(e.target.value)} autoFocus>
+            <option value="" disabled>Select a KV store</option>
+            {stores.map((store) => {
+              const sid = String(store.store_id);
+              return (
+                <option key={sid} value={sid}>
+                  {store.name ? `${store.name} (${sid})` : sid}
+                </option>
+              );
+            })}
+          </Select>
+        ) : (
+          <div className="tw-text-sm tw-text-muted">No KV stores available. Create a KV store first.</div>
+        )}
         <Input
           label="Group ID (numeric)"
           placeholder="80"
           inputMode="numeric"
           value={groupId}
           onChange={(e) => setGroupId(e.target.value)}
-          autoFocus
         />
         <Input
           label="Starting Replica ID (numeric)"
@@ -95,13 +143,13 @@ export function AddGroupDialog({ isOpen, onClose, storeId, nodes, onSuccess }: A
         />
         <div className="tw-space-y-2">
           <label className="tw-text-xs tw-font-medium tw-text-text">
-            Nodes (select at least one — one replica is created per node)
+            Available CrowKV nodes (select at least one — one local replica is created per node)
           </label>
-          {nodes.length === 0 ? (
-            <div className="tw-text-sm tw-text-muted">No nodes available.</div>
+          {availableNodes.length === 0 ? (
+            <div className="tw-text-sm tw-text-muted">No reachable CrowKV nodes are available.</div>
           ) : (
             <div className="tw-max-h-40 tw-overflow-y-auto tw-border tw-border-border tw-rounded-md tw-p-2 tw-space-y-1">
-              {nodes.map((node) => (
+              {availableNodes.map((node) => (
                 <label
                   key={node.id}
                   className="tw-flex tw-items-center tw-gap-2 tw-p-2 tw-rounded tw-cursor-pointer hover:tw-bg-bg"

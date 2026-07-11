@@ -55,19 +55,18 @@ async fn full_store_group_remote_cycle() {
         return;
     };
 
-    // The server bootstraps with `--stores 1 --groups 1 --replica 1` by
-    // default, so pick IDs outside that range.
+    let stores_before = client.list_stores().await.expect("list_stores before add_store");
+    assert!(
+        stores_before.is_empty(),
+        "fresh deploy should not auto-create stores: {stores_before:?}"
+    );
+
     let store_id: u64 = 5;
     let group_id: u64 = 50;
     let replica_id: u64 = 500;
 
     client
-        .add_store(&AddStoreRequest {
-            store_id,
-            group_id,
-            replica_id,
-            port: None,
-        })
+        .add_store(&AddStoreRequest { store_id, port: None })
         .await
         .expect("add_store");
 
@@ -78,22 +77,37 @@ async fn full_store_group_remote_cycle() {
         "add_store not reflected in list_stores: {stores:?}"
     );
 
-    // 3. get_store returns the bootstrap group.
+    // 3. get_store returns an empty store until a group is added.
     let detail = client.get_store(store_id).await.expect("get_store");
     assert_eq!(detail.store_id, store_id);
-    assert_eq!(detail.groups.len(), 1);
-    assert_eq!(detail.groups[0].group_id, group_id);
-    assert_eq!(detail.groups[0].local_replica_id, replica_id);
+    assert!(
+        detail.groups.is_empty(),
+        "new store should start empty: {detail:?}"
+    );
 
-    // 4. Add a second group.
+    // 4. Add the first group explicitly.
     let group_id_2: u64 = 60;
     let replica_id_2: u64 = 600;
     client
         .add_group(
             store_id,
             &AddGroupRequest {
+                group_id,
+                replica_id,
+                initial_role: None,
+            },
+        )
+        .await
+        .expect("add_group first");
+
+    // 5. Add a second group.
+    client
+        .add_group(
+            store_id,
+            &AddGroupRequest {
                 group_id: group_id_2,
                 replica_id: replica_id_2,
+                initial_role: None,
             },
         )
         .await
@@ -101,8 +115,10 @@ async fn full_store_group_remote_cycle() {
 
     let groups = client.list_groups(store_id).await.expect("list_groups");
     assert_eq!(groups.len(), 2, "expected both groups, got {groups:?}");
+    assert!(groups.iter().any(|g| g.group_id == group_id));
+    assert!(groups.iter().any(|g| g.group_id == group_id_2));
 
-    // 5. Add a remote replica on the second group.
+    // 6. Add a remote replica on the second group.
     let remotes = vec![RemoteReplicaInfo {
         replica_id: 601,
         endpoint: "127.0.0.1:39999".into(),

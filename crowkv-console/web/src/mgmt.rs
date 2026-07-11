@@ -11,11 +11,15 @@ use axum::http::StatusCode;
 use axum::Json;
 use crowkv_console_shared::clients::http::ServerClient;
 use crowkv_console_shared::cluster::{GroupSummary, GroupView, ReplicaView, StoreView};
-use crowkv_console_shared::mgmt::{AddGroupRequest, AddStoreRequest, RemoteReplicaInfo};
+use crowkv_console_shared::config::{GroupEntry, NodeEntry, ReplicaEntry, ServerEntry, StoreEntry};
+use crowkv_console_shared::error::Error as SharedError;
+use crowkv_console_shared::lifecycle::{self, DeployRequest};
+use crowkv_console_shared::mgmt::{AddGroupInitialRole, AddGroupRequest, AddStoreRequest, RemoteReplicaInfo};
 use serde::Deserialize;
+use std::collections::HashSet;
 
 use crate::expand::Recursive;
-use tracing::warn;
+use tracing::{info, warn};
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -52,6 +56,248 @@ pub(crate) async fn refresh_node_cache(state: &AppState, node_id: &str) {
             }
         }
     }
+}
+
+fn rpc_is_not_found(err: &SharedError) -> bool {
+    matches!(err, SharedError::UpstreamRpc { status, .. } if status.contains("HTTP 404"))
+}
+
+fn rpc_is_conflict(err: &SharedError) -> bool {
+    matches!(err, SharedError::UpstreamRpc { status, .. } if status.contains("HTTP 409"))
+}
+
+async fn ensure_server_running(
+    state: &AppState,
+    node: &NodeEntry,
+    server: &ServerEntry,
+) -> Result<(), String> {
+    let client = ServerClient::new(server.url.clone()).map_err(|e| e.to_string())?;
+    if client.health().await.is_ok() {
+        refresh_node_cache(state, &node.id).await;
+        return Ok(());
+    }
+    if !server.auto_start {
+        return Ok(());
+    }
+    let mgmt_port = server
+        .mgmt_port
+        .ok_or_else(|| format!("server {} missing persisted mgmt_port", server.id))?;
+    let grpc_port = server
+        .grpc_port
+        .ok_or_else(|| format!("server {} missing persisted grpc_port", server.id))?;
+    let req = DeployRequest {
+        server_id: server.id.clone(),
+        mgmt_port,
+        grpc_port,
+        election_profile: server.election_profile.clone(),
+        binary: server.binary.clone().map(std::path::PathBuf::from),
+    };
+    let deployed = if node.ssh_enabled() {
+        let server_bin = server.binary.clone().unwrap_or_else(|| {
+            std::env::var("CROWKV_SERVER_BIN").unwrap_or_else(|_| "crowkv-server".to_string())
+        });
+        crowkv_console_shared::ssh::deploy_via_ssh(&req, node, &server_bin)
+            .await
+            .map_err(|e| e.to_string())?
+    } else {
+        let workspace_dir = state
+            .prepare_node_workspace(&node.id)
+            .map_err(|e| e.to_string())?;
+        lifecycle::deploy_local_in_dir(&req, node, &workspace_dir)
+            .await
+            .map_err(|e| e.to_string())?
+    };
+    state.set_runtime_pid(node.id.clone(), deployed.pid);
+    refresh_node_cache(state, &node.id).await;
+    Ok(())
+}
+
+async fn ensure_store_on_node(state: &AppState, node_id: &str, store_id: u64) -> Result<(), String> {
+    let url = mgmt_url_for_node(state, node_id).map_err(|(_, body)| body.0.error.clone())?;
+    let client = ServerClient::new(url).map_err(|e| e.to_string())?;
+    match client.get_store(store_id).await {
+        Ok(_) => Ok(()),
+        Err(err) if rpc_is_not_found(&err) => {
+            client
+                .add_store(&AddStoreRequest { store_id, port: None })
+                .await
+                .map_err(|e| e.to_string())?;
+            refresh_node_cache(state, node_id).await;
+            Ok(())
+        }
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+async fn ensure_group_local(
+    state: &AppState,
+    node_id: &str,
+    store_id: u64,
+    group_id: u64,
+    replica_id: u64,
+    initial_role: AddGroupInitialRole,
+) -> Result<(), String> {
+    let url = mgmt_url_for_node(state, node_id).map_err(|(_, body)| body.0.error.clone())?;
+    let client = ServerClient::new(url).map_err(|e| e.to_string())?;
+    match client.list_groups(store_id).await {
+        Ok(groups)
+            if groups
+                .iter()
+                .any(|g| g.group_id == group_id && g.local_replica_id == replica_id) =>
+        {
+            Ok(())
+        }
+        Ok(_) => {
+            client
+                .add_group(
+                    store_id,
+                    &AddGroupRequest {
+                        group_id,
+                        replica_id,
+                        initial_role: Some(initial_role),
+                    },
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            refresh_node_cache(state, node_id).await;
+            Ok(())
+        }
+        Err(err) if rpc_is_not_found(&err) => {
+            ensure_store_on_node(state, node_id, store_id).await?;
+            client
+                .add_group(
+                    store_id,
+                    &AddGroupRequest {
+                        group_id,
+                        replica_id,
+                        initial_role: Some(initial_role),
+                    },
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+            refresh_node_cache(state, node_id).await;
+            Ok(())
+        }
+        Err(err) if rpc_is_conflict(&err) => Ok(()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+async fn ensure_group_remotes(state: &AppState, group: &GroupEntry) -> Result<(), String> {
+    for replica in &group.replicas {
+        refresh_node_cache(state, &replica.node_id).await;
+    }
+    for replica in &group.replicas {
+        let url = mgmt_url_for_node(state, &replica.node_id).map_err(|(_, body)| body.0.error.clone())?;
+        let client = ServerClient::new(url).map_err(|e| e.to_string())?;
+        let existing = client
+            .list_remote_replicas(group.store_id, group.group_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut missing = Vec::new();
+        for peer in &group.replicas {
+            if peer.replica_id == replica.replica_id {
+                continue;
+            }
+            if existing.iter().any(|r| r.replica_id == peer.replica_id) {
+                continue;
+            }
+            missing.push(RemoteReplicaInfo {
+                replica_id: peer.replica_id,
+                endpoint: grpc_endpoint_for_node(state, &peer.node_id, group.store_id).await,
+            });
+        }
+        if !missing.is_empty() {
+            client
+                .add_remote_replicas(group.store_id, group.group_id, &missing)
+                .await
+                .map_err(|e| e.to_string())?;
+            refresh_node_cache(state, &replica.node_id).await;
+        }
+    }
+    Ok(())
+}
+
+/// Restore persisted topology (servers, stores, groups, replicas) on startup.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+pub async fn restore_persisted_topology(state: &AppState) {
+    let (nodes, servers, stores, groups) = {
+        let cfg = state.config.read().unwrap();
+        (
+            cfg.nodes.clone(),
+            cfg.servers.clone(),
+            cfg.stores.clone(),
+            cfg.groups.clone(),
+        )
+    };
+    for server in &servers {
+        let Some(node_id) = server.node_id.as_deref() else {
+            continue;
+        };
+        let Some(node) = nodes.iter().find(|n| n.id == node_id) else {
+            warn!(
+                server_id = server.id,
+                node_id, "skipping restore for server with missing node"
+            );
+            continue;
+        };
+        if let Err(err) = ensure_server_running(state, node, server).await {
+            warn!(server_id = server.id, node_id, error = %err, "failed to restore server process");
+        }
+    }
+    for StoreEntry { store_id, nodes } in &stores {
+        for node_id in nodes {
+            if let Err(err) = ensure_store_on_node(state, node_id, *store_id).await {
+                warn!(store_id, node_id, error = %err, "failed to restore store");
+            }
+        }
+    }
+    for group in &groups {
+        let mut replicas = group.replicas.clone();
+        replicas.sort_by_key(|r| r.replica_id);
+        for (index, replica) in replicas.iter().enumerate() {
+            let initial_role = if index == 0 {
+                AddGroupInitialRole::Leader
+            } else {
+                AddGroupInitialRole::Follower
+            };
+            if let Err(err) = ensure_group_local(
+                state,
+                &replica.node_id,
+                group.store_id,
+                group.group_id,
+                replica.replica_id,
+                initial_role,
+            )
+            .await
+            {
+                warn!(
+                    store_id = group.store_id,
+                    group_id = group.group_id,
+                    replica_id = replica.replica_id,
+                    node_id = replica.node_id,
+                    error = %err,
+                    "failed to restore local group replica"
+                );
+            }
+        }
+        if let Err(err) = ensure_group_remotes(state, group).await {
+            warn!(store_id = group.store_id, group_id = group.group_id, error = %err, "failed to restore group remotes");
+        }
+    }
+    for server in &servers {
+        if let Some(node_id) = server.node_id.as_deref() {
+            refresh_node_cache(state, node_id).await;
+        }
+    }
+    info!(
+        servers = servers.len(),
+        stores = stores.len(),
+        groups = groups.len(),
+        "restore reconcile finished"
+    );
 }
 
 // ── A5: Logical store plane ─────────────────────────────────────────
@@ -97,13 +343,11 @@ pub async fn http_list_stores(
 #[derive(Debug, Deserialize)]
 pub struct CreateStoreBody {
     pub store_id: u64,
-    pub group_id: u64,
-    pub replica_id: u64,
     #[serde(default)]
     pub nodes: Vec<String>,
 }
 
-/// `POST /api/stores`. Create a store across the listed nodes (or the
+/// `POST /api/stores`. Create an empty store across the listed nodes (or the
 /// first node with a running server if `nodes` is empty). Orchestrated:
 /// fans out `add_store` to each node, rolls back on partial failure.
 ///
@@ -116,7 +360,7 @@ pub async fn http_add_store(
     State(state): State<AppState>,
     Json(body): Json<CreateStoreBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorBody>)> {
-    let target_nodes = if body.nodes.is_empty() {
+    let mut target_nodes = if body.nodes.is_empty() {
         let cfg = state.config.read().unwrap();
         let first = cfg
             .servers
@@ -128,14 +372,25 @@ pub async fn http_add_store(
         body.nodes.clone()
     };
 
-    let mut succeeded: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
+    target_nodes.retain(|node_id| seen.insert(node_id.clone()));
+
+    let mut reachable_targets: Vec<(String, ServerClient)> = Vec::with_capacity(target_nodes.len());
     for nid in &target_nodes {
         let url = mgmt_url_for_node(&state, nid)?;
-        let client = build_server_client(url)?;
+        let client = build_server_client(url.clone())?;
+        client.health().await.map_err(|e| {
+            err_502(format!(
+                "selected node {nid} is not currently reachable at {url}: {e}"
+            ))
+        })?;
+        reachable_targets.push((nid.clone(), client));
+    }
+
+    let mut succeeded: Vec<String> = Vec::new();
+    for (nid, client) in &reachable_targets {
         let req = AddStoreRequest {
             store_id: body.store_id,
-            group_id: body.group_id,
-            replica_id: body.replica_id,
             port: None,
         };
         match client.add_store(&req).await {
@@ -154,16 +409,18 @@ pub async fn http_add_store(
         }
     }
 
-    // Leader selection is fully automatic via Paxos election (see
-    // `cluster::election::spawn`). The per-group election driver in
-    // `PxKvStore::add_group` converges to a single leader within a few
-    // election deadlines for 1-, 2-, or N-replica groups; the console
-    // observes the elected leader through the monitor cache snapshot.
-
     // Refresh cache for all affected nodes.
     for nid in &succeeded {
         refresh_node_cache(&state, nid).await;
     }
+
+    {
+        let mut cfg = state.config.write().unwrap();
+        cfg.record_store(body.store_id, succeeded.clone());
+    }
+    state
+        .persist()
+        .map_err(|e| err_500(format!("persist config: {e}")))?;
 
     Ok((
         StatusCode::CREATED,
@@ -225,6 +482,13 @@ pub async fn http_remove_store(
     for nid in &view.nodes {
         refresh_node_cache(&state, nid).await;
     }
+    {
+        let mut cfg = state.config.write().unwrap();
+        cfg.remove_store_record(sid);
+    }
+    state
+        .persist()
+        .map_err(|e| err_500(format!("persist config: {e}")))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -285,6 +549,7 @@ pub async fn http_add_group(
         let req = AddGroupRequest {
             group_id: body.group_id,
             replica_id: rid,
+            initial_role: Some(AddGroupInitialRole::Leader),
         };
         match client.add_group(sid, &req).await {
             Ok(()) => succeeded.push((nid.clone(), rid)),
@@ -335,6 +600,27 @@ pub async fn http_add_group(
     for (nid, _) in &succeeded {
         refresh_node_cache(&state, nid).await;
     }
+
+    {
+        let mut cfg = state.config.write().unwrap();
+        cfg.record_group(
+            sid,
+            body.group_id,
+            succeeded
+                .iter()
+                .map(|(node_id, replica_id)| ReplicaEntry {
+                    replica_id: *replica_id,
+                    node_id: node_id.clone(),
+                })
+                .collect(),
+        );
+        for (node_id, _) in &succeeded {
+            cfg.ensure_store_node(sid, node_id);
+        }
+    }
+    state
+        .persist()
+        .map_err(|e| err_500(format!("persist config: {e}")))?;
 
     Ok((
         StatusCode::CREATED,
@@ -422,6 +708,13 @@ pub async fn http_remove_group(
     for nid in &node_ids {
         refresh_node_cache(&state, nid).await;
     }
+    {
+        let mut cfg = state.config.write().unwrap();
+        cfg.remove_group_record(sid, gid);
+    }
+    state
+        .persist()
+        .map_err(|e| err_500(format!("persist config: {e}")))?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -634,6 +927,7 @@ pub async fn http_add_replica(
         let req = AddGroupRequest {
             group_id: gid,
             replica_id: new_rid,
+            initial_role: Some(AddGroupInitialRole::Follower),
         };
         client
             .add_group(sid, &req)
@@ -643,14 +937,21 @@ pub async fn http_add_replica(
     } else {
         let req = AddStoreRequest {
             store_id: sid,
-            group_id: gid,
-            replica_id: new_rid,
             port: None,
         };
         client
             .add_store(&req)
             .await
             .map_err(|e| err_502(format!("create local store on node {target_node}: {e}")))?;
+        let req = AddGroupRequest {
+            group_id: gid,
+            replica_id: new_rid,
+            initial_role: Some(AddGroupInitialRole::Follower),
+        };
+        client
+            .add_group(sid, &req)
+            .await
+            .map_err(|e| err_502(format!("create local group on node {target_node}: {e}")))?;
         true
     };
 
@@ -728,6 +1029,22 @@ pub async fn http_add_replica(
         refresh_node_cache(&state, &existing.node_id).await;
     }
 
+    {
+        let mut cfg = state.config.write().unwrap();
+        cfg.ensure_store_node(sid, target_node);
+        cfg.add_group_replica(
+            sid,
+            gid,
+            ReplicaEntry {
+                replica_id: new_rid,
+                node_id: target_node.clone(),
+            },
+        );
+    }
+    state
+        .persist()
+        .map_err(|e| err_500(format!("persist config: {e}")))?;
+
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
@@ -802,6 +1119,14 @@ pub async fn http_remove_replica(
             refresh_node_cache(&state, &peer.node_id).await;
         }
     }
+
+    {
+        let mut cfg = state.config.write().unwrap();
+        cfg.remove_group_replica(sid, gid, rid);
+    }
+    state
+        .persist()
+        .map_err(|e| err_500(format!("persist config: {e}")))?;
 
     Ok(StatusCode::NO_CONTENT)
 }
