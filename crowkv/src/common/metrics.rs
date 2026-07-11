@@ -108,7 +108,7 @@ impl ElectionMetrics {
         self.step_downs_lease_unrenewable.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Leader stepped down because of an admin StepDown RPC.
+    /// Leader stepped down because of an admin `StepDown` RPC.
     pub fn record_step_down_admin(&self) {
         self.step_downs_admin.fetch_add(1, Ordering::Relaxed);
     }

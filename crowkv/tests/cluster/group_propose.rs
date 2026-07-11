@@ -5,7 +5,7 @@ use crowkv::cluster::{PxLocalReplica, PxLocalReplicaRole, PxRemoteReplica};
 
 fn single_leader_group() -> PxGroup {
     let local = PxLocalReplica::new(1, PxLocalReplicaRole::Leader);
-    let mut g = PxGroup::new(1, local);
+    let g = PxGroup::new(1, local);
     g.set_leader_id(1);
     g
 }

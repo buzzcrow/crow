@@ -20,8 +20,8 @@ impl PaxosConfig {
 /// converts to `Duration` at the consumption site.
 ///
 /// Defaults target a single-datacenter deployment with NTP-disciplined
-/// clocks. See `doc/todo_leader.md` §10 ("Heartbeat & Election Defaults") for
-/// the rationale and the cross-DC / WAN override profile.
+/// clocks. See `doc/design/design-leader-election.md` §10 ("Tunables and
+/// defaults") for the rationale and the cross-DC / WAN override profile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PxElectionConfig {
     /// Whether `PreVote` rounds protect against partition-rejoin disruption.
@@ -38,20 +38,20 @@ pub struct PxElectionConfig {
     /// Maximum admissible clock skew across the cluster. Subtracted from the
     /// leader's `lease_read_until` to remain safe under skew.
     pub max_clock_skew_ms: u64,
-    /// Slots scanned per bulk-Phase-1 batch (Step 7).
+    /// Slots scanned per bulk-Phase-1 batch (new-leader open-prefix repair).
     pub bulk_prepare_window: u64,
     /// Test-only override: when `true`, the election driver task is not
     /// spawned. Used by `testkit::cluster::start_cluster` to keep legacy M1/M2
     /// tests deterministic (pinned leader via `set_leader_id`).
     pub election_driver_disabled: bool,
-    /// Bounded capacity of the per-peer `PxPeerStream` outbound mpsc
-    /// (Step 10.3). Full mpsc surfaces as `PxPaxosError::Busy` on the
-    /// proposer side (already classified `FailRetryable`).
+    /// Bounded capacity of the per-peer `PxPeerStream` outbound mpsc.
+    /// Full mpsc surfaces as `PxPaxosError::Busy` on the proposer side
+    /// (already classified `FailRetryable`).
     pub peer_stream_window_frames: usize,
 }
 
 impl PxElectionConfig {
-    /// Production / single-DC default. See `doc/todo_leader.md` §10.
+    /// Production / single-DC default. See `doc/design/design-leader-election.md` §10.
     pub const DEFAULT: Self = Self {
         prevote_enabled: true,
         heartbeat_interval_ms: 500,

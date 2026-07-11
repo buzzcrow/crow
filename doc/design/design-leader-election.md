@@ -81,7 +81,7 @@ Each member is exactly one of:
 
 ### 3.2 Election trigger
 
-A follower starts an election when its **election timer** expires. The timer is reset on every legitimate heartbeat or `Accept` from the current leader. The timeout is randomized in `[election_min, election_max]` (defaults 800 ms – 1500 ms), avoiding split votes.
+A follower starts an election when its **election timer** expires. The timer is reset on every legitimate heartbeat or `Accept` from the current leader. The timeout is randomized in `[election_min, election_max]` (defaults 4000 ms – 8000 ms; see §10), avoiding split votes.
 
 When the timer fires:
 
@@ -158,8 +158,8 @@ Every heartbeat carries:
 
 ### 5.2 Heartbeat cadence
 
-- Default `heartbeat_interval = 100 ms`.
-- A follower's election timer must be ≫ `heartbeat_interval` to allow for occasional jitter; with defaults, election timeouts are 8–15× the heartbeat interval.
+- Default `heartbeat_interval = 500 ms` (see §10).
+- A follower's election timer must be ≫ `heartbeat_interval` to allow for occasional jitter; with defaults, election timeouts are 8–16× the heartbeat interval.
 
 ### 5.3 Heartbeat response
 

@@ -1,3 +1,14 @@
+//! `PxRemoteReplica` — gRPC adapter for a peer replica in a Paxos group.
+//!
+//! Wraps a lazy gRPC client, a per-peer bidi `PxPeerStream` (for
+//! Accept / Heartbeat / `ChosenNotification` fan-out), and a small layer
+//! of cached health/metrics state. Exposes `ReplicaClient` so callers
+//! talk to peers through a uniform RPC surface.
+//!
+//! Key work: lazy gRPC client init, peer-stream construction & lifecycle,
+//! Prepare/Accept/PreVote/RequestVote/Heartbeat/StepDown RPC bridges,
+//! cached health snapshots for the management API.
+
 use crate::cluster::health::HealthReport;
 use crate::cluster::peer_stream::PxPeerStream;
 use crate::cluster::replica::{
@@ -179,10 +190,14 @@ impl ReplicaClient for PxRemoteReplica {
     }
 
     async fn send_pre_vote(&self, req: VoteRequestPayload, group_id: u64) -> Result<VoteReply, PxReplicaError> {
-        let mut client = self.get_client().await.map_err(|s| {
-            self.metrics.record_err();
-            status_to_err(&s)
-        })?.clone();
+        let mut client = self
+            .get_client()
+            .await
+            .map_err(|s| {
+                self.metrics.record_err();
+                status_to_err(&s)
+            })?
+            .clone();
         let started = Instant::now();
         let resp = client
             .pre_vote(RpcPreVoteRequest {
@@ -213,10 +228,14 @@ impl ReplicaClient for PxRemoteReplica {
     }
 
     async fn send_request_vote(&self, req: VoteRequestPayload, group_id: u64) -> Result<VoteReply, PxReplicaError> {
-        let mut client = self.get_client().await.map_err(|s| {
-            self.metrics.record_err();
-            status_to_err(&s)
-        })?.clone();
+        let mut client = self
+            .get_client()
+            .await
+            .map_err(|s| {
+                self.metrics.record_err();
+                status_to_err(&s)
+            })?
+            .clone();
         let started = Instant::now();
         let resp = client
             .request_vote(RpcRequestVoteRequest {
@@ -286,10 +305,14 @@ impl ReplicaClient for PxRemoteReplica {
     }
 
     async fn send_step_down(&self, req: StepDownRequestPayload, group_id: u64) -> Result<StepDownReply, PxReplicaError> {
-        let mut client = self.get_client().await.map_err(|s| {
-            self.metrics.record_err();
-            status_to_err(&s)
-        })?.clone();
+        let mut client = self
+            .get_client()
+            .await
+            .map_err(|s| {
+                self.metrics.record_err();
+                status_to_err(&s)
+            })?
+            .clone();
         let started = Instant::now();
         let resp = client
             .step_down(RpcStepDownRequest {
@@ -378,7 +401,7 @@ impl PxRemoteReplica {
     /// # Errors
     /// Returns [`PxReplicaError::Internal`] if the per-peer stream is
     /// shut down or its reconnect loop is currently failing fast.
-    pub async fn send_chosen_notice(&self, slot: u64, term: crate::paxos::PxTerm, leader_id: PxNodeId, group_id: u64) -> Result<(), PxReplicaError> {
+    pub fn send_chosen_notice(&self, slot: u64, term: crate::paxos::PxTerm, leader_id: PxNodeId, group_id: u64) -> Result<(), PxReplicaError> {
         let notice = RpcChosenNotification {
             version: 1,
             group_id,
@@ -388,7 +411,7 @@ impl PxRemoteReplica {
             request_id: 0,
             request_create_ms: 0,
         };
-        self.peer_stream().send_chosen(notice).await
+        self.peer_stream().send_chosen(notice)
     }
 
     /// Allocate the next correlation id for an `Accept` / `Heartbeat`

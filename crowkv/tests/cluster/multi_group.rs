@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 
 fn leader_group(group_id: u64, node_id: u64) -> PxGroup {
     let local = PxLocalReplica::new(node_id, PxLocalReplicaRole::Leader);
-    let mut g = PxGroup::new(group_id, local);
+    let g = PxGroup::new(group_id, local);
     g.set_leader_id(node_id);
     g
 }

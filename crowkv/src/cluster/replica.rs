@@ -13,9 +13,9 @@
 //! (`on_pre_vote` / `on_request_vote` / `on_heartbeat` / `on_step_down`),
 //! matching client senders.
 
+use crate::paxos::roles::SlotIndex;
 use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
 use crate::paxos::{PxGroupId, PxNodeId, PxTerm};
-use crate::paxos::roles::SlotIndex;
 
 /// Transport-neutral replica error.
 ///
@@ -78,8 +78,8 @@ pub struct VoteRequestPayload {
     pub last_chosen_term: PxTerm,
 }
 
-/// Admin step-down request payload (strict-fence policy — see
-/// `doc/todo_leader.md` §7.1).
+/// Admin step-down request payload (strict-fence policy: target replica must
+/// still be leader at the requested term to accept).
 #[derive(Clone, Debug)]
 pub struct StepDownRequestPayload {
     pub term: PxTerm,

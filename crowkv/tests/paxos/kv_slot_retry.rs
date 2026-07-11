@@ -37,7 +37,10 @@ async fn kv_put_retries_next_slot_when_slot_has_prior_accepted_value() {
         seq: None,
     };
     let reply = follower_replica.on_accept(entry).await;
-    assert!(matches!(reply, crowkv::paxos::roles::PxAcceptReply::Accepted { .. }), "preload accept should succeed: {reply:?}");
+    assert!(
+        matches!(reply, crowkv::paxos::roles::PxAcceptReply::Accepted { .. }),
+        "preload accept should succeed: {reply:?}"
+    );
 
     let leader = cluster.leader();
     let mut kv = cluster.kv_client(leader).await;

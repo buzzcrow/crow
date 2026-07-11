@@ -87,7 +87,8 @@ pub enum PxPrepareReply {
     Rejected { slot: SlotIndex, current_promised: PxBallot },
     /// The request's election term is lower than the responder's
     /// `current_term`. The proposer (a stale leader) must step down and
-    /// adopt `new_term`. Two-fence rule, see `doc/todo_leader.md` Step 8.
+    /// adopt `new_term`. Two-fence rule, see
+    /// `doc/design/design-leader-election.md` §2.3 + §9 term fencing.
     TermStale { slot: SlotIndex, new_term: u64 },
 }
 

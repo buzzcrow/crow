@@ -26,3 +26,6 @@ mod node;
 
 #[path = "cluster/remote_error.rs"]
 mod remote_error;
+
+#[path = "cluster/election.rs"]
+mod election;

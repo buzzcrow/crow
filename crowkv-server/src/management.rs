@@ -897,7 +897,7 @@ fn rebuild_group_with_same_config(group: &PxGroup) -> PxGroup {
     let lr = group.local_replica();
     let local_replica = PxLocalReplica::new(lr.id, lr.role());
     let mut new_group = PxGroup::new(group.group_id, local_replica);
-    new_group.set_leader_id(group.leader_id);
+    new_group.set_leader_id(group.leader_id());
     if group.force_classic() {
         new_group.set_force_classic(true);
     }

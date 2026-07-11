@@ -169,7 +169,7 @@ async fn create_and_start_stores(store_ids: &[u64], group_ids: &[u64], replica_i
         for &group_id in group_ids {
             info!(store_id, group_id, replica_id, "creating PxGroup with local replica");
             let local_replica = PxLocalReplica::new(replica_id, PxLocalReplicaRole::Follower);
-            let mut group = PxGroup::new(group_id, local_replica);
+            let group = PxGroup::new(group_id, local_replica);
             // Set leader if provided via --leader CLI argument
             if let Some(leader) = leader_id {
                 group.set_leader_id(leader);

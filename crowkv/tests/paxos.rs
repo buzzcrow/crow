@@ -18,6 +18,9 @@ mod learner_note_chosen;
 #[path = "paxos/election_metrics.rs"]
 mod election_metrics;
 
+#[path = "paxos/election.rs"]
+mod election;
+
 #[path = "paxos/paxos_error.rs"]
 mod paxos_error;
 

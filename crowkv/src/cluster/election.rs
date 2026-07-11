@@ -1,17 +1,13 @@
 //! Leader election driver task.
 //!
-//! See `doc/todo_leader.md` Step 9 (split into substeps 9.1..9.8).
+//! Per-group async loop that observes the local replica's role and drives
+//! the state machine forward.
 //!
-//! Substeps landed so far:
-//! - **9.1** scaffold lifecycle (spawn, cancel, weak-drop exit).
-//! - **9.2** `Follower` → `Candidate` randomized election timer.
-//! - **9.3** `Candidate` `RequestVote` fanout + `become_leader` (kicks
-//!   [`PxGroup::run_bulk_phase1`]).
-//! - **9.4** `PreCandidate` `PreVote` round gating the term bump
-//!   (Raft-style; disabled when `cfg.prevote_enabled == false`).
-//!
-//! Remaining: heartbeat ticker + lease renewal (9.5), step-down sequence
-//! (9.6), admin signal (9.7), proposer leadership gate (9.8).
+//! Key work: scaffold lifecycle (spawn / cancel / weak-drop exit),
+//! follower election timer, `PreVote` / `RequestVote` fanout,
+//! `become_leader` handoff into bulk Phase 1, leader heartbeat ticker +
+//! lease renewal, step-down sequence (higher term / lease-unrenewable /
+//! admin), admin `StepDown` signal routing, proposer leadership gate.
 
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -109,15 +105,8 @@ async fn run(group: Weak<PxGroup>, cfg: PxElectionConfig, cancel: CancellationTo
     // Truncating the high bits of the wall-clock nanos is fine: the seed is
     // mixed with replica identity below and only feeds an xorshift PRNG.
     #[allow(clippy::cast_possible_truncation)]
-    let seed_nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0u64, |d| d.as_nanos() as u64);
-    let mut rng = XorShift64::new(
-        seed_nanos
-            .rotate_left(13)
-            ^ store_group_id.wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            ^ replica_l_id.wrapping_mul(0xBF58_476D_1CE4_E5B9),
-    );
+    let seed_nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0u64, |d| d.as_nanos() as u64);
+    let mut rng = XorShift64::new(seed_nanos.rotate_left(13) ^ store_group_id.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ replica_l_id.wrapping_mul(0xBF58_476D_1CE4_E5B9));
 
     let mut election_deadline = next_election_deadline(Instant::now(), &cfg, &mut rng);
 
@@ -192,11 +181,7 @@ async fn run_leader_state(group: &Arc<PxGroup>, cfg: &PxElectionConfig, cancel: 
 
     // Reset lease state at the start of the tenure. The first heartbeat
     // round that gets quorum extends the lease and unlocks read fast-path.
-    replica.with_lease_state(|s| {
-        let now = StdInstant::now();
-        s.lease_read_until = now;
-        s.last_quorum_heartbeat_at = now;
-    });
+    replica.reset_lease_to(StdInstant::now());
 
     // Per-leadership-tenure cancel token. Cancelled by the step-down
     // sequence (Step 9.6); aborts in-flight bulk Phase 1 and any future
@@ -250,7 +235,7 @@ async fn run_leader_state(group: &Arc<PxGroup>, cfg: &PxElectionConfig, cancel: 
             return;
         }
         // Step 9.6: lease-unrenewable check on every Leader tick.
-        let last_quorum = replica.lease_state_snapshot().last_quorum_heartbeat_at;
+        let last_quorum = replica.last_quorum_heartbeat_at();
         if StdInstant::now().duration_since(last_quorum) >= Duration::from_millis(cfg.lease_duration_ms) {
             step_down(group, &tenure_cancel, leader_term, StepDownReason::LeaseUnrenewable);
             return;
@@ -316,6 +301,9 @@ fn step_down(group: &Arc<PxGroup>, tenure_cancel: &CancellationToken, my_term: u
         StepDownReason::LeaseUnrenewable | StepDownReason::Admin => my_term,
     };
     group.local_replica().become_follower(target_term);
+    // Drop the cached leader id; after step-down the leader is
+    // unknown until the next heartbeat / vote round establishes one.
+    group.set_leader_id(0);
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -339,14 +327,10 @@ async fn run_heartbeat_round(group: &Arc<PxGroup>, cfg: &PxElectionConfig, leade
     let voting_peers = group.voting_remote_ids();
     let quorum = group.quorum();
     let t_send = StdInstant::now();
-    // `t_send_ms_mono` is a monotonic millisecond timestamp; using elapsed
-    // since process start would require a global anchor. We approximate with
-    // the millisecond representation of the wall clock; only relative
-    // ordering matters to peers.
-    #[allow(clippy::cast_possible_truncation)]
-    let t_send_ms_mono = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0u64, |d| d.as_millis() as u64);
+    // `t_send_ms_mono` is monotonic millis since the process-start anchor
+    // shared with [`crate::cluster::local_replica::process_anchor`]. Peers
+    // only use this for relative ordering inside a single leader's stream.
+    let t_send_ms_mono = crate::cluster::local_replica::instant_to_anchor_ms(t_send);
 
     let payload = HeartbeatRequestPayload {
         term: leader_term,
@@ -384,7 +368,14 @@ async fn run_heartbeat_round(group: &Arc<PxGroup>, cfg: &PxElectionConfig, leade
         match reply {
             Ok(hb) => {
                 if hb.term > leader_term {
-                    info!(group_id, leader_id = replica.id, my_term = leader_term, peer_id, peer_term = hb.term, "heartbeat saw higher term");
+                    info!(
+                        group_id,
+                        leader_id = replica.id,
+                        my_term = leader_term,
+                        peer_id,
+                        peer_term = hb.term,
+                        "heartbeat saw higher term"
+                    );
                     joinset.abort_all();
                     return HeartbeatOutcome::SteppedDown { peer_term: hb.term };
                 }
@@ -411,12 +402,11 @@ fn renew_lease(replica: &crate::cluster::local_replica::PxLocalReplica, t_send: 
     let skew = Duration::from_millis(cfg.max_clock_skew_ms);
     // Saturating sub avoids underflow when skew >= lease_duration.
     let extended_until = t_send + lease_dur.saturating_sub(skew);
-    replica.with_lease_state(|s| {
-        if extended_until > s.lease_read_until {
-            s.lease_read_until = extended_until;
-        }
-        s.last_quorum_heartbeat_at = StdInstant::now();
-    });
+    // Two atomic operations rather than a mutex round-trip; both fields
+    // only ever advance, so a brief torn snapshot from a concurrent reader
+    // cannot regress either value.
+    replica.extend_lease_read_until(extended_until);
+    replica.record_quorum_heartbeat(StdInstant::now());
 }
 
 /// Drive one full election attempt: optional `PreVote` (9.4) →
@@ -577,14 +567,7 @@ async fn run_candidate_election(group: &Arc<PxGroup>, cancel: &CancellationToken
     let mut peer_floor: u64 = replica.contiguous_chosen();
     let mut peer_ceiling: u64 = replica.highest_seen_slot();
 
-    debug!(
-        group_id,
-        candidate_id,
-        term,
-        peer_count = voting_peers.len(),
-        quorum,
-        "candidate fanning out RequestVote"
-    );
+    debug!(group_id, candidate_id, term, peer_count = voting_peers.len(), quorum, "candidate fanning out RequestVote");
 
     // Trivial-cluster fast path: local replica alone constitutes quorum.
     if grants >= quorum {
@@ -637,29 +620,14 @@ async fn run_candidate_election(group: &Arc<PxGroup>, cancel: &CancellationToken
                     grants += 1;
                     peer_floor = peer_floor.max(vote.contiguous_chosen);
                     peer_ceiling = peer_ceiling.max(vote.highest_seen_slot);
-                    debug!(
-                        group_id,
-                        candidate_id,
-                        term,
-                        peer_id,
-                        grants,
-                        quorum,
-                        "RequestVote granted"
-                    );
+                    debug!(group_id, candidate_id, term, peer_id, grants, quorum, "RequestVote granted");
                     if grants >= quorum {
                         joinset.abort_all();
                         finalize_leader(group, term, peer_floor, peer_ceiling);
                         return;
                     }
                 } else {
-                    debug!(
-                        group_id,
-                        candidate_id,
-                        term,
-                        peer_id,
-                        peer_term = vote.term,
-                        "RequestVote rejected"
-                    );
+                    debug!(group_id, candidate_id, term, peer_id, peer_term = vote.term, "RequestVote rejected");
                 }
             }
             Err(err) => {
@@ -677,11 +645,7 @@ async fn run_candidate_election(group: &Arc<PxGroup>, cancel: &CancellationToken
 
     info!(
         group_id,
-        candidate_id,
-        term,
-        grants,
-        quorum,
-        "candidate failed to gather quorum; will retry on next deadline"
+        candidate_id, term, grants, quorum, "candidate failed to gather quorum; will retry on next deadline"
     );
 }
 
@@ -702,6 +666,10 @@ fn finalize_leader(group: &Arc<PxGroup>, term: u64, peer_floor: u64, peer_ceilin
     // Step 9.8: stamp the proposing term so the propose leadership gate
     // accepts client proposals in this tenure.
     group.stamp_proposing_term(term);
+    // Mirror the elected identity onto the group so observers (health,
+    // topology, leader_endpoint forwarding) see this replica as leader
+    // immediately, not at next external set_leader_id call.
+    group.set_leader_id(replica.id);
 }
 
 #[cfg(test)]
@@ -777,7 +745,10 @@ mod tests {
         // trivially (self-grant), bumps term, wins RequestVote, and
         // becomes leader. Verifies the 9.4 path does not regress the
         // 9.3 outcome.
-        let cfg = PxElectionConfig { prevote_enabled: true, ..PxElectionConfig::for_tests() };
+        let cfg = PxElectionConfig {
+            prevote_enabled: true,
+            ..PxElectionConfig::for_tests()
+        };
         let replica = PxLocalReplica::new(9, PxLocalReplicaRole::Follower);
         let group = Arc::new(PxGroup::new(21, replica));
         let cancel = group.tenure_cancel();
@@ -789,7 +760,11 @@ mod tests {
             tokio::task::yield_now().await;
         }
 
-        assert_eq!(group.local_replica().role(), PxLocalReplicaRole::Leader, "PreVote path should still reach Leader for a single-voter group");
+        assert_eq!(
+            group.local_replica().role(),
+            PxLocalReplicaRole::Leader,
+            "PreVote path should still reach Leader for a single-voter group"
+        );
         assert_eq!(group.local_replica().current_term_snapshot(), 1);
 
         cancel.cancel();
@@ -874,8 +849,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn propose_after_admin_step_down_returns_not_leader() {
-        use crate::cluster::ProposeResult;
         use crate::cluster::replica::StepDownRequestPayload;
+        use crate::cluster::ProposeResult;
 
         let cfg = PxElectionConfig::for_tests();
         let replica = PxLocalReplica::new(23, PxLocalReplicaRole::Follower);

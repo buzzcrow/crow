@@ -31,7 +31,9 @@ use tracing::{debug, info, warn};
 use crate::cluster::replica::PxReplicaError;
 use crate::common::config::PxElectionConfig;
 use crate::rpc::px_service_client::PxServiceClient;
-use crate::rpc::{peer_stream_request, peer_stream_response, AcceptRequest, AcceptedResponse, ChosenNotification, HeartbeatRequest, HeartbeatResponse, PeerStreamRequest, PeerStreamResponse};
+use crate::rpc::{
+    peer_stream_request, peer_stream_response, AcceptRequest, AcceptedResponse, ChosenNotification, HeartbeatRequest, HeartbeatResponse, PeerStreamRequest, PeerStreamResponse,
+};
 
 /// Map from outbound `request_id` to the awaiting client `oneshot`.
 /// Shared between the send-half (insert) and recv-half (remove + dispatch)
@@ -108,8 +110,7 @@ impl PxPeerStream {
             frame,
             reply_tx: Some(tx),
             request_id,
-        })
-        .await?;
+        })?;
         match rx.await {
             Ok(Ok(PeerStreamReply::Accepted(r))) => Ok(r),
             Ok(Ok(PeerStreamReply::Heartbeat(_))) => Err(PxReplicaError::Internal("peer_stream: heartbeat reply on accept oneshot (correlation bug)".to_string())),
@@ -132,8 +133,7 @@ impl PxPeerStream {
             frame,
             reply_tx: Some(tx),
             request_id,
-        })
-        .await?;
+        })?;
         match rx.await {
             Ok(Ok(PeerStreamReply::Heartbeat(r))) => Ok(r),
             Ok(Ok(PeerStreamReply::Accepted(_))) => Err(PxReplicaError::Internal("peer_stream: accepted reply on heartbeat oneshot (correlation bug)".to_string())),
@@ -147,7 +147,7 @@ impl PxPeerStream {
     /// # Errors
     /// Returns [`PxReplicaError::Internal`] if the background task has
     /// shut down (the bounded mpsc receiver was dropped).
-    pub async fn send_chosen(&self, notice: ChosenNotification) -> Result<(), PxReplicaError> {
+    pub fn send_chosen(&self, notice: ChosenNotification) -> Result<(), PxReplicaError> {
         let frame = PeerStreamRequest {
             frame: Some(peer_stream_request::Frame::Chosen(notice)),
         };
@@ -156,10 +156,9 @@ impl PxPeerStream {
             reply_tx: None,
             request_id: 0,
         })
-        .await
     }
 
-    async fn dispatch(&self, cmd: OutboundCmd) -> Result<(), PxReplicaError> {
+    fn dispatch(&self, cmd: OutboundCmd) -> Result<(), PxReplicaError> {
         // Step 10.7 flow control: `try_send` (non-blocking) instead of
         // `send` (await). When the per-peer mpsc is full we surface the
         // queue depth as a typed error so the proposer can map it to

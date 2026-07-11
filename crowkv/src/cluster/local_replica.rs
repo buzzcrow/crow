@@ -16,8 +16,32 @@ use crate::paxos::roles::{Acceptor, Learner, PxAcceptReply, PxBallot, PxLogEntry
 use crate::paxos::{PxNodeId, PxTerm};
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tracing::{debug, info};
+
+/// Process-start monotonic anchor used to encode `Instant` values as a
+/// `u64` millisecond offset for atomic lease bookkeeping and for the
+/// monotonic `t_send_ms_mono` wire field. Lazily initialized on first
+/// call. Same anchor is reused for the lifetime of the process so
+/// converted values stay strictly comparable.
+pub(crate) fn process_anchor() -> Instant {
+    static ANCHOR: OnceLock<Instant> = OnceLock::new();
+    *ANCHOR.get_or_init(Instant::now)
+}
+
+/// Convert a monotonic `Instant` to milliseconds since [`process_anchor`].
+/// Saturates if `inst` is somehow before the anchor (cannot happen for
+/// `Instant::now()` after the anchor was sampled).
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) fn instant_to_anchor_ms(inst: Instant) -> u64 {
+    inst.saturating_duration_since(process_anchor()).as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+/// Reverse of [`instant_to_anchor_ms`].
+pub(crate) fn anchor_ms_to_instant(ms: u64) -> Instant {
+    process_anchor() + Duration::from_millis(ms)
+}
 
 /// Role of a local replica in the leader-election state machine.
 ///
@@ -107,35 +131,27 @@ impl ElectionPersistentState {
     }
 }
 
-/// Leader-side lease bookkeeping, mutex-guarded.
+/// Leader-side lease bookkeeping snapshot.
 ///
 /// Both timestamps are monotonic (`Instant`). `lease_read_until` is the read
 /// fast-path deadline (consumed by `Get(Linearizable)` in M5 — maintained but
 /// not yet read in M3). `last_quorum_heartbeat_at` is the leadership-liveness
 /// timestamp; if `now - last_quorum_heartbeat_at >= lease_duration` the leader
-/// must step down (`LeaseUnrenewable`, Step 9).
+/// must step down.
 ///
 /// On a follower these values are stale; the election driver only reads them
-/// while the replica's role is `Leader`.
-#[derive(Debug, Clone)]
+/// while the replica's role is `Leader`. The canonical state lives in two
+/// `AtomicU64`s on [`PxLocalReplica`]; this struct is just a snapshot.
+#[derive(Debug, Clone, Copy)]
 pub struct LeaseState {
     /// Max acknowledged `T_send + lease_duration - max_clock_skew` across all
-    /// heartbeat rounds that received a quorum response. Only ever extends.
+    /// heartbeat rounds that received a quorum response. Only ever extends
+    /// while leadership is held.
     pub lease_read_until: Instant,
-    /// Wall-clock-monotonic instant at which the most recent heartbeat round
+    /// Monotonic instant at which the most recent heartbeat round
     /// received a quorum of OK responses. Drives the lease-unrenewable
     /// step-down rule.
     pub last_quorum_heartbeat_at: Instant,
-}
-
-impl LeaseState {
-    fn expired() -> Self {
-        let now = Instant::now();
-        Self {
-            lease_read_until: now,
-            last_quorum_heartbeat_at: now,
-        }
-    }
 }
 
 /// Runtime container for one local group member.
@@ -159,8 +175,21 @@ pub struct PxLocalReplica {
     /// `Release`; readers use `Acquire`. Cheap hot-path check (e.g. proposer's
     /// leadership gate, `is_leader`).
     role_atomic: AtomicU8,
-    /// Leader-side lease bookkeeping. Stale on non-leader replicas.
-    lease_state: Mutex<LeaseState>,
+    /// Leader-side lease deadline (read fast-path) encoded as millis since
+    /// ``process_anchor``. Updated lock-free via `fetch_max` on heartbeat
+    /// renewal and via plain store on tenure transitions. Stale on non-
+    /// leader replicas; the election driver only reads it while role ==
+    /// `Leader`.
+    lease_read_until_ms: AtomicU64,
+    /// Monotonic millis since ``process_anchor`` of the most recent quorum
+    /// heartbeat round. Drives the lease-unrenewable step-down rule.
+    last_quorum_heartbeat_at_ms: AtomicU64,
+    /// Lease duration (ms) for this replica. Mirrors the group's
+    /// [`crate::common::config::PxElectionConfig::lease_duration_ms`] so
+    /// vote/heartbeat handlers can extend `vote_lockout_until` with the
+    /// configured (not hard-coded) value. Updated by
+    /// [`crate::cluster::group::PxGroup::set_election_config`].
+    lease_duration_ms: AtomicU64,
     /// Notify signalled by accepted admin `StepDown` RPCs (Step 9.7). The
     /// election driver's leader-state `select!` waits on this so the
     /// canonical step-down sequence runs immediately rather than on the
@@ -241,7 +270,9 @@ impl PxLocalReplica {
             election_state: Mutex::new(ElectionPersistentState::initial(role)),
             current_term_atomic: AtomicU64::new(0),
             role_atomic: AtomicU8::new(role.as_u8()),
-            lease_state: Mutex::new(LeaseState::expired()),
+            lease_read_until_ms: AtomicU64::new(instant_to_anchor_ms(Instant::now())),
+            last_quorum_heartbeat_at_ms: AtomicU64::new(instant_to_anchor_ms(Instant::now())),
+            lease_duration_ms: AtomicU64::new(crate::common::config::PxElectionConfig::DEFAULT.lease_duration_ms),
             admin_step_down_signal: tokio::sync::Notify::new(),
             shutdown_started: AtomicBool::new(false),
             election_metrics: ElectionMetrics::new(),
@@ -333,10 +364,59 @@ impl PxLocalReplica {
         self.role() == PxLocalReplicaRole::Leader
     }
 
-    /// Locked snapshot of [`LeaseState`].
+    /// Lock-free snapshot of [`LeaseState`].
     #[must_use]
     pub fn lease_state_snapshot(&self) -> LeaseState {
-        self.lease_state.lock().clone()
+        LeaseState {
+            lease_read_until: anchor_ms_to_instant(self.lease_read_until_ms.load(Ordering::Acquire)),
+            last_quorum_heartbeat_at: anchor_ms_to_instant(self.last_quorum_heartbeat_at_ms.load(Ordering::Acquire)),
+        }
+    }
+
+    /// Snapshot of `lease_read_until` only. Cheaper than the full state.
+    #[must_use]
+    pub fn lease_read_until(&self) -> Instant {
+        anchor_ms_to_instant(self.lease_read_until_ms.load(Ordering::Acquire))
+    }
+
+    /// Snapshot of `last_quorum_heartbeat_at` only.
+    #[must_use]
+    pub fn last_quorum_heartbeat_at(&self) -> Instant {
+        anchor_ms_to_instant(self.last_quorum_heartbeat_at_ms.load(Ordering::Acquire))
+    }
+
+    /// Replace both lease timestamps with `now`. Used on tenure entry
+    /// (`become_leader`) and on tenure exit (`become_follower`) to drop a
+    /// stale tenure's lease deadline.
+    pub fn reset_lease_to(&self, now: Instant) {
+        let ms = instant_to_anchor_ms(now);
+        self.lease_read_until_ms.store(ms, Ordering::Release);
+        self.last_quorum_heartbeat_at_ms.store(ms, Ordering::Release);
+    }
+
+    /// Monotonically extend `lease_read_until` to `candidate` (no-op if
+    /// already past). Heartbeat-tick hot path.
+    pub fn extend_lease_read_until(&self, candidate: Instant) {
+        let ms = instant_to_anchor_ms(candidate);
+        self.lease_read_until_ms.fetch_max(ms, Ordering::AcqRel);
+    }
+
+    /// Record a successful quorum heartbeat at `now`. Heartbeat-tick hot
+    /// path; lock-free.
+    pub fn record_quorum_heartbeat(&self, now: Instant) {
+        self.last_quorum_heartbeat_at_ms.store(instant_to_anchor_ms(now), Ordering::Release);
+    }
+
+    /// Update the cached lease duration (ms). Called from
+    /// [`crate::cluster::group::PxGroup::set_election_config`].
+    pub fn set_lease_duration_ms(&self, ms: u64) {
+        self.lease_duration_ms.store(ms, Ordering::Release);
+    }
+
+    /// Snapshot of the configured lease duration (ms).
+    #[must_use]
+    pub fn lease_duration_ms(&self) -> u64 {
+        self.lease_duration_ms.load(Ordering::Acquire)
     }
 
     /// Step 11: borrow the per-replica election counter handle so the
@@ -355,13 +435,16 @@ impl PxLocalReplica {
     pub fn election_metrics_snapshot(&self, bulk_phase1_in_flight_slots: u64) -> ElectionMetricsSnapshot {
         let counters = self.election_metrics.counters();
         let now = Instant::now();
-        let last_heartbeat_age_ms = self.last_heartbeat_at.lock().map(|inst| now.saturating_duration_since(inst).as_millis().try_into().unwrap_or(u64::MAX));
+        let last_heartbeat_age_ms = self
+            .last_heartbeat_at
+            .lock()
+            .map(|inst| now.saturating_duration_since(inst).as_millis().try_into().unwrap_or(u64::MAX));
         let lease_remaining_ms = if self.is_leader() {
-            let lease = self.lease_state.lock();
             // `lease_read_until` is the publishable read-lease deadline.
             // When the lease is in the past we report `None`.
-            if lease.lease_read_until > now {
-                Some(lease.lease_read_until.saturating_duration_since(now).as_millis().try_into().unwrap_or(u64::MAX))
+            let lease_read_until = self.lease_read_until();
+            if lease_read_until > now {
+                Some(lease_read_until.saturating_duration_since(now).as_millis().try_into().unwrap_or(u64::MAX))
             } else {
                 None
             }
@@ -388,12 +471,6 @@ impl PxLocalReplica {
         *self.last_heartbeat_at.lock() = Some(Instant::now());
     }
 
-    /// Update [`LeaseState`] under its mutex.
-    pub fn with_lease_state<R>(&self, f: impl FnOnce(&mut LeaseState) -> R) -> R {
-        let mut guard = self.lease_state.lock();
-        f(&mut guard)
-    }
-
     /// Transition to `Follower` and adopt `new_term` if higher.
     ///
     /// Resets `voted_for` on every term bump (Raft-style — one vote per
@@ -411,7 +488,7 @@ impl PxLocalReplica {
         self.role_atomic.store(PxLocalReplicaRole::Follower.as_u8(), Ordering::Release);
         // Lease is no longer meaningful as a non-leader. Expire it so any
         // stale read fast-path attempt rejects.
-        *self.lease_state.lock() = LeaseState::expired();
+        self.reset_lease_to(Instant::now());
         info!(replica_l_id = self.id, current_term = new_term, "become_follower");
     }
 
@@ -450,7 +527,7 @@ impl PxLocalReplica {
             s.role = PxLocalReplicaRole::Leader;
         });
         self.role_atomic.store(PxLocalReplicaRole::Leader.as_u8(), Ordering::Release);
-        *self.lease_state.lock() = LeaseState::expired();
+        self.reset_lease_to(Instant::now());
         info!(replica_l_id = self.id, current_term = self.current_term_snapshot(), "become_leader");
     }
 
@@ -491,7 +568,7 @@ impl PxLocalReplica {
 
     /// Phase-1 `Prepare` handler with election-term fence.
     ///
-    /// Two-fence rule (`doc/todo_leader.md` Step 8):
+    /// Two-fence rule (term fencing + acceptor ballot fencing):
     /// - `req.term < current_term` → `PxPrepareReply::TermStale { new_term }`.
     /// - `req.term > current_term` → adopt via [`Self::become_follower`], then
     ///   forward to the acceptor (this replica is now in the new term).
@@ -515,7 +592,10 @@ impl PxLocalReplica {
         let req_term = entry.term;
         let local_term = self.current_term_snapshot();
         if req_term < local_term {
-            return PxAcceptReply::TermStale { slot: entry.slot, new_term: local_term };
+            return PxAcceptReply::TermStale {
+                slot: entry.slot,
+                new_term: local_term,
+            };
         }
         if req_term > local_term {
             self.become_follower(req_term);
@@ -638,17 +718,17 @@ impl PxLocalReplica {
     /// the responder adopts `req.term`, sets `voted_for = candidate_id`, and
     /// extends `vote_lockout_until`.
     fn handle_request_vote(&self, req: VoteRequestPayload) -> VoteReply {
-        // We need the lease duration to extend vote_lockout_until. The driver
-        // (Step 9) owns the config; for now use the default lease.
-        let lease = Duration::from_millis(crate::common::config::PxElectionConfig::DEFAULT.lease_duration_ms);
+        // Vote lockout extension reuses the configured lease duration so
+        // followers honor the per-group profile (e.g. WAN) rather than the
+        // hard-coded default.
+        let lease = Duration::from_millis(self.lease_duration_ms());
         let now = Instant::now();
         let log_up_to_date = self.candidate_log_up_to_date(&req);
 
         let (granted, term, current_leader_id) = {
             let mut state = self.election_state.lock();
             let lockout_ok = now >= state.vote_lockout_until;
-            let term_ok = req.term > state.current_term
-                || (req.term == state.current_term && state.voted_for.map_or(true, |v| v == req.candidate_id));
+            let term_ok = req.term > state.current_term || (req.term == state.current_term && state.voted_for.map_or(true, |v| v == req.candidate_id));
             let mut granted = false;
             if term_ok && log_up_to_date && lockout_ok {
                 if req.term > state.current_term {
@@ -692,7 +772,7 @@ impl PxLocalReplica {
     /// our own; on lower term we reply `false` so the stale leader can step
     /// down on its next bookkeeping check.
     fn handle_heartbeat(&self, req: HeartbeatRequestPayload) -> HeartbeatReply {
-        let lease = Duration::from_millis(crate::common::config::PxElectionConfig::DEFAULT.lease_duration_ms);
+        let lease = Duration::from_millis(self.lease_duration_ms());
         let now = Instant::now();
         let term;
         let success;
@@ -740,10 +820,10 @@ impl PxLocalReplica {
         }
     }
 
-    /// `StepDown` handler. Strict-fence policy per `doc/todo_leader.md` §7.1:
+    /// `StepDown` handler. Strict-fence policy:
     /// accept iff `self.is_leader() && self.id == req.target_leader_id &&
     /// req.term == current_term`. On accept the replica becomes a follower in
-    /// the same term; the election driver (Step 9) picks up the role change
+    /// the same term; the election driver picks up the role change
     /// on its next tick and runs the full step-down sequence (cancel bulk
     /// Phase 1, stop heartbeats, drain proposals).
     pub(crate) fn handle_step_down(&self, req: &StepDownRequestPayload) -> StepDownReply {

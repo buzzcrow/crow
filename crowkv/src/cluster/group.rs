@@ -25,7 +25,11 @@ use crate::paxos::{PxGroupId, PxNodeId};
 
 pub struct PxGroup {
     pub group_id: PxGroupId,
-    pub leader_id: PxNodeId,
+    /// Node id believed to be the current leader. Atomic so the
+    /// election driver (holding `&Arc<PxGroup>`) can update it on
+    /// `finalize_leader` / step-down without `&mut`. `0` is the
+    /// "no known leader" sentinel.
+    leader_id: AtomicU64,
     cached_quorum: usize,
     local_replica: PxLocalReplica,
     remote_replicas: Vec<RemoteReplicaKind>,
@@ -69,7 +73,7 @@ pub struct PxGroup {
 /// when a candidate wins quorum. Carries the floor / ceiling needed by
 /// [`PxGroup::run_bulk_phase1`] under the new tenure's cancel token.
 #[derive(Clone, Copy, Debug)]
-pub struct PendingLeaderHandoff {
+pub(crate) struct PendingLeaderHandoff {
     pub term: u64,
     pub peer_floor: u64,
     pub peer_ceiling: u64,
@@ -80,11 +84,11 @@ impl std::fmt::Debug for PxGroup {
         f.debug_struct("PxGroup")
             .field("group_id", &self.group_id)
             .field("cached_quorum", &self.cached_quorum)
-            .field("leader_id", &self.leader_id)
+            .field("leader_id", &self.leader_id())
             .field("local_replica_id", &self.local_replica.id)
             .field("valid_replica_count", &self.valid_replica_count)
             .field("remote_replicas_len", &self.remote_replicas.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -92,7 +96,7 @@ impl PxGroup {
     pub fn new(group_id: PxGroupId, local_replica: PxLocalReplica) -> Self {
         let mut group = Self {
             group_id,
-            leader_id: 0,
+            leader_id: AtomicU64::new(0),
             cached_quorum: 0,
             local_replica,
             remote_replicas: Vec::new(),
@@ -117,6 +121,10 @@ impl PxGroup {
     /// deterministic. Production sites use the default profile.
     pub fn set_election_config(&mut self, cfg: PxElectionConfig) {
         self.election_cfg = cfg;
+        // Mirror onto the local replica so vote/heartbeat handlers extend
+        // `vote_lockout_until` with the configured profile rather than the
+        // hard-coded default.
+        self.local_replica.set_lease_duration_ms(cfg.lease_duration_ms);
     }
 
     /// Snapshot of the active election configuration.
@@ -182,8 +190,14 @@ impl PxGroup {
         self.force_classic
     }
 
+    /// Snapshot of the believed leader id (0 = unknown).
+    #[must_use]
+    pub fn leader_id(&self) -> PxNodeId {
+        self.leader_id.load(Ordering::Acquire)
+    }
+
     pub fn is_leader(&self) -> bool {
-        self.leader_id == self.local_replica.id
+        self.leader_id() == self.local_replica.id
     }
 
     pub fn quorum(&self) -> usize {
@@ -214,7 +228,7 @@ impl PxGroup {
             None
         } else {
             // Local is not leader, check if we have the leader's endpoint
-            let idx = self.leader_id as usize;
+            let idx = self.leader_id() as usize;
             self.remote_replicas.get(idx).and_then(|r| r.endpoint()).map(str::to_string)
         }
     }
@@ -229,8 +243,8 @@ impl PxGroup {
     /// automatic via Paxos, with leader status propagated through RPC to
     /// remote replicas. This function bypasses that mechanism and should only
     /// be used in tests where manual leader assignment is acceptable.
-    pub fn set_leader_id(&mut self, leader_id: PxNodeId) {
-        self.leader_id = leader_id;
+    pub fn set_leader_id(&self, leader_id: PxNodeId) {
+        self.leader_id.store(leader_id, Ordering::Release);
     }
 
     pub fn set_force_classic(&mut self, force: bool) {
@@ -254,20 +268,19 @@ impl PxGroup {
         self.recompute_quorum();
     }
 
+    /// Replace the endpoint of an existing real remote replica. Returns the
+    /// previous endpoint string when a real replica was updated, or `None`
+    /// when `node_id` is out of range / refers to a placeholder.
     pub fn update_member_endpoint(&mut self, node_id: PxNodeId, endpoint: impl Into<String>) -> Option<String> {
         let endpoint = endpoint.into();
         let idx = node_id as usize;
 
-        if let Some(replica) = self.remote_replicas.get_mut(idx) {
-            if let RemoteReplicaKind::Real(remote) = replica {
-                let old_endpoint = remote.endpoint.clone();
-                endpoint.clone_into(&mut remote.endpoint);
-                Some(old_endpoint)
-            } else {
-                None
-            }
+        if let Some(RemoteReplicaKind::Real(remote)) = self.remote_replicas.get_mut(idx) {
+            let old_endpoint = remote.endpoint.clone();
+            endpoint.clone_into(&mut remote.endpoint);
+            Some(old_endpoint)
         } else {
-            Some(endpoint)
+            None
         }
     }
 
@@ -288,7 +301,7 @@ impl PxGroup {
             .collect();
         GroupSnapshot {
             group_id: self.group_id,
-            leader_id: self.leader_id,
+            leader_id: self.leader_id(),
             force_classic: self.force_classic,
             local_replica,
             remotes,
@@ -346,7 +359,7 @@ impl PxGroup {
     #[must_use]
     pub fn report_health(&self) -> crate::cluster::health_info::HealthGroupInfo {
         let g_health = self.health();
-        let role = if self.leader_id == self.local_replica.id { "leader" } else { "follower" };
+        let role = if self.leader_id() == self.local_replica.id { "leader" } else { "follower" };
         let local_health = self.local_replica.health();
         let local_replica = crate::cluster::health_info::HealthReplicaInfo {
             id: self.local_replica.id,
@@ -543,7 +556,7 @@ impl PxGroup {
         let role_is_leader = replica.role() == crate::cluster::local_replica::PxLocalReplicaRole::Leader;
         let current_term = replica.current_term_snapshot();
         let proposing_term = self.proposing_term();
-        let legacy_pinned = self.leader_id == replica.id;
+        let legacy_pinned = self.leader_id() == replica.id;
         let gate_pass = legacy_pinned || (role_is_leader && current_term == proposing_term);
         if !gate_pass {
             return ProposeResult::NotLeader {
@@ -617,7 +630,7 @@ impl PxGroup {
                         // Step 10.6b: tell peers the slot is chosen so
                         // their `last_chosen_slot` watermark advances
                         // before the next heartbeat tick.
-                        self.fan_out_chosen_notice(&entry, group_id).await;
+                        self.fan_out_chosen_notice(&entry, group_id);
                         info!(
                             group_id,
                             slot = entry.slot,
@@ -690,10 +703,11 @@ impl PxGroup {
     /// Bulk Phase 1: a new leader's open-prefix repair sweep over
     /// `[floor + 1, ceiling]`.
     ///
-    /// Per `doc/todo_leader.md` Step 7 and `design-leader-election.md` §4:
+    /// Inputs:
     ///
     /// - `floor`  = `max(local.contiguous_chosen, peer_contiguous_chosen_max)`
-    ///   — values from peer `RequestVote` / `PreVote` replies (Step 9 supplies
+    ///   — values from peer `RequestVote` / `PreVote` replies (the election
+    ///   driver supplies
     ///   the aggregate via `peer_contiguous_chosen_max`).
     /// - `ceiling` = `max(local.acceptor.highest_seen_slot,
     ///                  self.next_slot - 1,
@@ -792,7 +806,7 @@ impl PxGroup {
                     replica.learn(&entry);
                     // Step 10.6b: notify peers about repaired slots so
                     // their watermarks catch up alongside ours.
-                    self.fan_out_chosen_notice(&entry, group_id).await;
+                    self.fan_out_chosen_notice(&entry, group_id);
                     slots_repaired += 1;
                 }
                 AcceptAttempt::Retry { error, .. } | AcceptAttempt::Fail { error } => {
@@ -1056,14 +1070,14 @@ impl PxGroup {
     /// once the per-peer bg task is running, so it returns near-
     /// instantly except when a peer is down (in which case it fast-
     /// fails via the connect-retry drain in `peer_stream.rs`).
-    async fn fan_out_chosen_notice(&self, entry: &PxLogEntry, group_id: u64) {
+    fn fan_out_chosen_notice(&self, entry: &PxLogEntry, group_id: u64) {
         let slot = entry.slot;
         let term = entry.term;
         let leader_id = entry.ballot.leader_id;
         for remote in &self.remote_replicas {
             let RemoteReplicaKind::Real(remote) = remote else { continue };
             let remote_id = remote.node_id;
-            if let Err(err) = remote.send_chosen_notice(slot, term, leader_id, group_id).await {
+            if let Err(err) = remote.send_chosen_notice(slot, term, leader_id, group_id) {
                 debug!(group_id, slot, term, remote_id, endpoint = %remote.endpoint, error = %err, "fan_out_chosen_notice: peer notice failed (best-effort)");
             }
         }

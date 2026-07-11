@@ -2,13 +2,13 @@
 
 pub mod election;
 pub mod group;
-pub mod peer_stream;
 pub mod health;
 pub mod health_info;
 pub mod info;
 pub mod kv_server;
 pub mod kv_store;
 pub mod local_replica;
+pub mod peer_stream;
 pub mod px_kv_store;
 pub mod remote_replica;
 pub mod replica;

@@ -17,8 +17,8 @@ use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxLogEntryKind, P
 
 use crate::rpc::px_service_server::PxService;
 use crate::rpc::{
-    peer_stream_request, peer_stream_response, AcceptRequest, AcceptedResponse, AcceptedValue, HeartbeatRequest, HeartbeatResponse, PeerStreamRequest, PeerStreamResponse, PreVoteRequest, PreVoteResponse, PrepareRequest, PromiseResponse,
-    RequestVoteRequest, RequestVoteResponse, StepDownRequest, StepDownResponse,
+    peer_stream_request, peer_stream_response, AcceptRequest, AcceptedResponse, AcceptedValue, HeartbeatRequest, HeartbeatResponse, PeerStreamRequest, PeerStreamResponse,
+    PreVoteRequest, PreVoteResponse, PrepareRequest, PromiseResponse, RequestVoteRequest, RequestVoteResponse, StepDownRequest, StepDownResponse,
 };
 
 /// gRPC adapter for the in-process [`PxReplicaError`] enum.
@@ -130,10 +130,7 @@ impl PxService for PxReplicaService {
         // 10.4). The proto method is kept for one release for binary-
         // compat, but the handler now refuses calls. New clients must
         // open a `PeerStream`.
-        debug!(
-            store_id = self.store.store_id,
-            "unary Accept RPC is deprecated; use PeerStream",
-        );
+        debug!(store_id = self.store.store_id, "unary Accept RPC is deprecated; use PeerStream",);
         Err(Status::unimplemented("unary Accept is deprecated in P1 M3; use PeerStream"))
     }
 
@@ -263,24 +260,20 @@ impl PxService for PxReplicaService {
                 };
                 let Some(frame) = frame else { continue };
                 let response_frame = match frame {
-                    peer_stream_request::Frame::Accept(accept_req) => {
-                        match handle_accept_inner(&store, accept_req).await {
-                            Ok(resp) => Some(peer_stream_response::Frame::Accepted(resp)),
-                            Err(status) => {
-                                let _ = tx.send(Err(status)).await;
-                                return;
-                            }
+                    peer_stream_request::Frame::Accept(accept_req) => match handle_accept_inner(&store, accept_req).await {
+                        Ok(resp) => Some(peer_stream_response::Frame::Accepted(resp)),
+                        Err(status) => {
+                            let _ = tx.send(Err(status)).await;
+                            return;
                         }
-                    }
-                    peer_stream_request::Frame::Heartbeat(hb_req) => {
-                        match handle_heartbeat_inner(&store, hb_req).await {
-                            Ok(resp) => Some(peer_stream_response::Frame::Heartbeat(resp)),
-                            Err(status) => {
-                                let _ = tx.send(Err(status)).await;
-                                return;
-                            }
+                    },
+                    peer_stream_request::Frame::Heartbeat(hb_req) => match handle_heartbeat_inner(&store, hb_req).await {
+                        Ok(resp) => Some(peer_stream_response::Frame::Heartbeat(resp)),
+                        Err(status) => {
+                            let _ = tx.send(Err(status)).await;
+                            return;
                         }
-                    }
+                    },
                     peer_stream_request::Frame::Chosen(notice) => {
                         // Step 10.6a: route into the local replica's
                         // learner via PxLocalReplica::note_chosen, which

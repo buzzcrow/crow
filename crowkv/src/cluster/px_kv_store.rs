@@ -326,7 +326,7 @@ impl PxKvStore {
             .iter()
             .map(|entry| {
                 let group = entry.value();
-                (group.group_id, group.local_replica().id, group.leader_id, group.remote_replica_info().len())
+                (group.group_id, group.local_replica().id, group.leader_id(), group.remote_replica_info().len())
             })
             .collect()
     }
