@@ -1,0 +1,1 @@
+{"root":["./src/App.tsx","./src/api.ts","./src/main.tsx","./src/components/KvTab.tsx","./src/components/NodesTab.tsx","./src/components/RacksTab.tsx","./src/components/ServersTab.tsx","./src/components/SnapshotTab.tsx","./src/components/StoresTab.tsx"],"version":"5.9.3"}

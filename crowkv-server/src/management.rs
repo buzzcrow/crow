@@ -26,6 +26,7 @@ pub fn router(state: RegistryArc) -> Router {
         .route("/stores/:sid", get(get_store).delete(remove_store))
         .route("/stores/:sid/groups", get(list_groups).post(add_group))
         .route("/stores/:sid/groups/:gid", delete(remove_group))
+        .route("/stores/:sid/groups/:gid/leader", post(set_leader))
         .route("/stores/:sid/groups/:gid/remotes", get(list_remotes).post(add_remotes))
         .route("/stores/:sid/groups/:gid/remotes/batch", post(batch_add_remotes))
         .route("/stores/:sid/groups/:gid/remotes/:rid", delete(remove_remote))
@@ -126,6 +127,11 @@ struct AddGroupRequest {
     replica_id: u64,
 }
 
+#[derive(ToSchema, Deserialize)]
+struct SetLeaderRequest {
+    leader_id: u64,
+}
+
 #[derive(ToSchema, Serialize, Deserialize, Clone)]
 struct RemoteReplicaInfo {
     replica_id: u64,
@@ -212,6 +218,7 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Err
         list_groups,
         add_group,
         remove_group,
+        set_leader,
         list_remotes,
         add_remotes,
         remove_remote,
@@ -231,6 +238,7 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Err
             GroupSummary,
             AddStoreRequest,
             AddGroupRequest,
+            SetLeaderRequest,
             RemoteReplicaInfo,
             RemoteListResponse,
             TopologyResponse,
@@ -569,6 +577,57 @@ async fn remove_group(State(state): State<RegistryArc>, Path((sid, gid)): Path<(
     }
 
     info!(store_id = sid, group_id = gid, "PxGroup removed via management API");
+    Ok(StatusCode::OK)
+}
+
+#[utoipa::path(
+        post,
+        path = "/stores/{sid}/groups/{gid}/leader",
+        tag = "management",
+        params(
+            ("sid" = u64, Path, description = "Store id"),
+            ("gid" = u64, Path, description = "Group id")
+        ),
+        request_body = SetLeaderRequest,
+        responses(
+            (status = 200, description = "Leader set"),
+            (status = 404, description = "Store or group not found", body = ErrorResponse)
+        )
+    )]
+/// Set the group leader.
+///
+/// # Note
+/// This is a temporary API for manual leader assignment. It reconstructs the group
+/// with the new leader ID but does not notify remote replicas via RPC. In production,
+/// leader selection should be automatic via Paxos, with leader status propagated
+/// through RPC to remote replicas. This endpoint is useful for testing and manual
+/// cluster setup where automatic leader election is not yet available.
+async fn set_leader(
+    State(state): State<RegistryArc>,
+    Path((sid, gid)): Path<(u64, u64)>,
+    Json(req): Json<SetLeaderRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let store = state.get_store(sid).ok_or_else(|| err_json(StatusCode::NOT_FOUND, format!("store {sid} not found")))?;
+    let group = store
+        .get_group(gid)
+        .ok_or_else(|| err_json(StatusCode::NOT_FOUND, format!("group {gid} not found in store {sid}")))?;
+
+    info!(store_id = sid, group_id = gid, leader_id = req.leader_id, "setting group leader via management API");
+    // Reconstruct group with new leader_id
+    let lr = group.local_replica();
+    let local_replica = PxLocalReplica::new(lr.id, lr.role);
+    let mut new_group = PxGroup::new(gid, local_replica);
+    new_group.set_leader_id(req.leader_id);
+    if group.force_classic() {
+        new_group.set_force_classic(true);
+    }
+    // Re-add existing remotes
+    for (id, endpoint) in group.remote_replica_info() {
+        new_group.add_remote_replica(PxRemoteReplica::new(id, endpoint.to_string()));
+    }
+    store.add_group(new_group);
+
+    info!(store_id = sid, group_id = gid, leader_id = req.leader_id, "group leader set via management API");
     Ok(StatusCode::OK)
 }
 

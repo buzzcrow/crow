@@ -67,7 +67,8 @@ Conventions:
     - [15.2.5 Error Handling](#1525-error-handling)
     - [15.2.6 Logging](#1526-logging)
   - [15.3 `crowbench`](#153-crowbench)
-  - [15.4 RPC and Communication](#154-rpc-and-communication)
+  - [15.4 `crowkv-console`](#154-crowkv-console)
+  - [15.5 RPC and Communication](#155-rpc-and-communication)
 
 ---
 
@@ -619,12 +620,154 @@ To form a cluster from multiple `crowkv-server` instances:
 
 ### 15.3 `crowbench`
 
-A KV client that is also a benchmark tool.
+A KV client that is also a benchmark tool. In the current implementation
+this role is fulfilled by the `shared` library and the `crowkv`
+CLI (`bench` subcommand) under `crowkv-console`; see [§15.4](#154-crowkv-console).
 
 - Supports multiple test modes with configurable behavior.
 - Records expected KV operation order for later verification against learner storage.
 - Each client request carries a unique `request_id`. The same `request_id` always produces the same result, regardless of retries (idempotent) — see [§10.2](#102-retry-and-idempotency).
 
-### 15.4 RPC and Communication
+### 15.4 `crowkv-console`
+
+`crowkv-console` is the unified management project for observing and
+operating CrowKV clusters. It ships two frontends sharing the same
+operation core:
+
+- **Web UI** — a single-page, embeddable cluster console. Detailed UI
+  requirements are normative in `requirement-ui.md`; the design lives
+  in `design/design-ui.md`.
+- **CLI** — scripting, automation, CI/CD, and load testing.
+
+All cluster access goes through `crowkv-server` public endpoints (HTTP
+management API + gRPC KV / health). The console must not bypass the
+server. The internal architecture (shared core lib, Axum web backend,
+SSH lifecycle, Swagger UI hosting) is described in
+`design/design-console.md`.
+
+#### 15.4.1 Architecture
+
+- A shared Rust core (`crowkv-console-shared`) encapsulates business
+  logic, HTTP/gRPC clients, data models, error types, and config
+  parsing.
+- The CLI (`crowkv`) and the Web backend (`crowkv-web`) are thin
+  command/argument layers on top of the shared core.
+- The Web UI is a static SPA (React + Vite + Tailwind) served by
+  `crowkv-web`.
+
+#### 15.4.2 Core Capabilities
+
+1. **Cluster observation** — inventory of registered server instances,
+   `Rack → Node → Server Instance → Store → Group → Replica` hierarchy,
+   live status / metrics, aggregated topology.
+2. **Simulated hardware cluster** — `Rack` and `Node` abstractions that
+   model a realistic topology while running on a single host (one
+   server instance per simulated node, ports differentiate hosts).
+   Every node is treated as remote even on `127.0.0.1`. Nodes carry
+   SSH credentials (key or password); SSH is used for lifecycle
+   (deploy / start / stop / log tail) while runtime control uses
+   HTTP/gRPC.
+3. **Dynamic management** — add/remove stores, groups, replicas, remote
+   endpoints; modify group configuration. All via the server's
+   management API.
+4. **KV operations** — browse keys per `(store, group)`, put/get/delete/
+   list/scan, display full value content (internal demo data, not
+   protected). Prefix scan is supported by `crowkv-server`'s scan RPC.
+5. **Load testing (CLI only)** — workload runs, percentile latency
+   reports, predesigned stress scenarios.
+6. **API integration** — bundled offline Swagger UI served by the
+   console; users select a registered `crowkv-server` to view its
+   OpenAPI document. The Web UI embeds Swagger inside the SPA (no new
+   browser page); the CLI is unaffected.
+
+#### 15.4.3 Swagger UI Hosting
+
+Swagger UI is hosted by `crowkv-console`, not by `crowkv-server`. The
+console bundles a pinned Swagger UI release under
+`crowkv-console/web/swagger-ui/` and proxies the OpenAPI document from
+the selected upstream server. `crowkv-server` keeps `ToSchema` derives
+(OpenAPI JSON still generated) but does not depend on Swagger UI.
+
+#### 15.4.4 Scope Boundaries
+
+- **No persistent server-side state beyond local config.** Cluster
+  registry (racks, nodes, servers) is persisted in a TOML file
+  (`~/.crowkv/console.toml`); runtime state (PID, snapshots) is always
+  fetched fresh.
+- **No authn/authz** — trusted-network assumption per [§11](#11-security).
+- **No multi-tenant isolation.**
+
+#### 15.4.5 CLI Command Hierarchy
+
+The CLI uses a two-layer command structure: `crowkv <group> <verb>
+[options]`. Top-level groups separate concerns; verbs are consistent
+within a group.
+
+```
+crowkv
+├── cluster              # observation
+│   ├── status           # high-level health summary
+│   ├── topology         # print full hierarchy
+│   └── inspect <id>     # detailed view of one entity
+│
+├── rack                 # simulated hardware: racks
+│   ├── add <name>
+│   ├── remove <name>
+│   └── list
+│
+├── node                 # simulated hardware: nodes
+│   ├── add --rack <r> --host <addr> --ssh-user <u> [--ssh-pass | --ssh-key]
+│   ├── remove <node>
+│   ├── list
+│   └── ping <node>      # SSH + HTTP reachability
+│
+├── server               # crowkv-server lifecycle on a node
+│   ├── deploy --node-id <n> [--mgmt-port <p> --grpc-port <p>]
+│   ├── start --node-id <n>
+│   ├── stop --node-id <n>
+│   └── list
+│
+├── store                # store mgmt (logical, cluster-wide)
+│   ├── add --store-id <id> --nodes <n1,n2,...>
+│   ├── remove --store-id <id>
+│   └── list
+│
+├── group                # paxos group mgmt
+│   ├── add --store-id <s> --group-id <id> --nodes <n1,n2,...> [--leader <n>]
+│   ├── remove --store-id <s> --group-id <id>
+│   ├── list --store-id <s>
+│   └── inspect --store-id <s> --group-id <id>
+│
+├── replica              # add/remove individual replicas
+│   ├── add --store-id <s> --group-id <g> --node <n> [--replica-id <r>]
+│   └── remove --store-id <s> --group-id <g> --replica-id <r>
+│
+├── kv                   # data plane
+│   ├── put --store-id <s> --group-id <g> <key> <value>
+│   ├── get --store-id <s> --group-id <g> <key>
+│   ├── delete --store-id <s> --group-id <g> <key>
+│   ├── scan --store-id <s> --group-id <g> [--prefix <p>] [--limit N]
+│   └── list --store-id <s> --group-id <g> [--prefix <p>]
+│
+└── bench                # load testing (CLI-only)
+    ├── run --workload <name> [--qps N --duration T ...]
+    ├── stress --duration T --target-qps N
+    └── report <run-id>
+```
+
+Design rules:
+- **Two layers max** — `crowkv <group> <verb>`. No three-level chains.
+- Verb vocabulary stays consistent: `add / remove / list / inspect`.
+  Lifecycle verbs (`deploy / start / stop`) are reserved for `server`;
+  data verbs (`put / get / delete / scan / list`) for `kv`.
+- Every command targets the same shared core library; CLI is a thin
+  argument-parsing layer.
+- Output: human-friendly table by default, `--json` flag for scripting.
+- **Logical entity addressing**: store/group/replica/KV commands use
+  `--store-id` / `--group-id` (cluster-wide logical ids); the backend
+  resolves placement from topology. Server lifecycle uses `--node-id`
+  (one server per node).
+
+### 15.5 RPC and Communication
 
 All communication uses protobuf over gRPC (via a mature Rust gRPC library). While raw TCP would have lower overhead, we prioritize a proven RPC library.

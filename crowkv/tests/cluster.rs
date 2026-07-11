@@ -15,6 +15,9 @@ mod group_propose;
 #[path = "cluster/kv.rs"]
 mod kv;
 
+#[path = "cluster/kv_forward.rs"]
+mod kv_forward;
+
 #[path = "cluster/multi_group.rs"]
 mod multi_group;
 

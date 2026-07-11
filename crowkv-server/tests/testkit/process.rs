@@ -1,9 +1,12 @@
 use std::io as std_io;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::AtomicU16;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+static PORT_OFFSET: AtomicU16 = AtomicU16::new(0);
 
 pub struct ServerHandle {
     child: Child,
@@ -52,11 +55,15 @@ impl Drop for ServerHandle {
 }
 
 pub async fn start_test_server(args: &[&str]) -> std_io::Result<ServerHandle> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    // Generate random port in range 20000-30000
-    let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().subsec_nanos();
-    let port = 20000 + (seed % 10000) as u16;
+    // Generate unique port using process ID, thread ID, and atomic counter
+    // This avoids collisions when multiple tests run in parallel
+    let pid = std::process::id();
+    let tid = std::thread::current().id();
+    let offset = PORT_OFFSET.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // Hash the thread ID into a number we can use
+    let tid_hash = format!("{tid:?}").bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(u64::from(b)));
+    let seed = (u64::from(pid) ^ tid_hash ^ u64::from(offset)) % 10000;
+    let port = 20000 + seed as u16;
 
     let bin = crowkv_server_bin();
     let mut child = Command::new(bin)

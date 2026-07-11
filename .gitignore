@@ -22,3 +22,9 @@ target
 
 tarpaulin-report.html
 log/
+
+# Frontend (crowkv-console/web/ui)
+crowkv-console/web/ui/node_modules/
+crowkv-console/web/ui/dist/
+crowkv-console/web/ui/.vite/
+crowkv-console/web/ui/*.tsbuildinfo

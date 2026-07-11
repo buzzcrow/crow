@@ -5,6 +5,7 @@
 //! - HTTP management API for runtime topology control.
 //! - Graceful shutdown on SIGINT/SIGTERM.
 
+use std::io::Write;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -33,17 +34,17 @@ async fn main() {
     info!("crowkv-server starting...");
 
     info!(
-        stores = %args.stores,
-        groups = %args.groups,
+        stores = ?args.stores.as_deref(),
+        groups = ?args.groups.as_deref(),
         replica = args.replica,
-        leader = args.leader,
+        leader = ?args.leader,
         ports = ?args.ports.as_deref(),
         management_addr = %args.management_addr,
         management_port = args.management_port,
         "parsed CLI arguments"
     );
 
-    let (store_ids, group_ids, replica_id, leader_id, ports) = parse_and_validate_cli_args(&args);
+    let bootstrap = parse_and_validate_cli_args(&args);
 
     let registry = Arc::new(KvStoreRegistry::new());
 
@@ -59,7 +60,7 @@ async fn main() {
         std::process::exit(1);
     });
 
-    let bound_mgmt_addr = listener.local_addr().unwrap_or(mgmt_addr);
+    let bound_mgmt_addr: SocketAddr = listener.local_addr().unwrap_or(mgmt_addr);
     // Use 127.0.0.1 in the URL if binding to 0.0.0.0 for better local testing UX
     let display_addr = if bound_mgmt_addr.ip().is_unspecified() {
         format!("127.0.0.1:{}", bound_mgmt_addr.port())
@@ -74,9 +75,12 @@ async fn main() {
     );
     // Print to stdout for test harness to read
     println!("Management API listening on: management_addr={display_addr}");
+    std::io::stdout().flush().expect("failed to flush stdout");
 
-    // Create and start stores after management API is ready
-    create_and_start_stores(&store_ids, &group_ids, replica_id, leader_id, ports, registry.clone()).await;
+    // Create and start stores after management API is ready.
+    if let Some(b) = bootstrap.as_ref() {
+        create_and_start_stores(&b.store_ids, &b.group_ids, b.replica_id, b.leader_id, b.ports.clone(), registry.clone()).await;
+    }
 
     // Serve until shutdown signal
     axum::serve(listener, router).with_graceful_shutdown(shutdown_signal()).await.unwrap_or_else(|e| {
@@ -92,24 +96,36 @@ async fn shutdown_signal() {
     info!("received shutdown signal (CTRL+C), initiating graceful shutdown");
 }
 
-/// Parse and validate CLI arguments.
-fn parse_and_validate_cli_args(args: &Cli) -> (Vec<u64>, Vec<u64>, u64, u64, Vec<u16>) {
-    let store_ids = parse_id_list(&args.stores).unwrap_or_else(|e| {
+/// Parsed bootstrap parameters. `None` means "no `--stores` was passed,
+/// so the server boots empty".
+struct Bootstrap {
+    store_ids: Vec<u64>,
+    group_ids: Vec<u64>,
+    replica_id: u64,
+    leader_id: Option<u64>,
+    ports: Vec<u16>,
+}
+
+/// Parse and validate CLI arguments. Returns `None` when `--stores`
+/// was not provided (empty-boot mode). Groups are optional; if not
+/// provided, stores are created without groups.
+fn parse_and_validate_cli_args(args: &Cli) -> Option<Bootstrap> {
+    let stores_str = args.stores.as_ref()?;
+    let store_ids = parse_id_list(stores_str).unwrap_or_else(|e| {
         eprintln!("error: invalid --stores: {e}");
         std::process::exit(1);
     });
-    let group_ids = parse_id_list(&args.groups).unwrap_or_else(|e| {
-        eprintln!("error: invalid --groups: {e}");
-        std::process::exit(1);
-    });
+    let group_ids = if let Some(ref groups_str) = args.groups {
+        parse_id_list(groups_str).unwrap_or_else(|e| {
+            eprintln!("error: invalid --groups: {e}");
+            std::process::exit(1);
+        })
+    } else {
+        Vec::new()
+    };
     let replica_id = args.replica;
     if !(1..=128).contains(&replica_id) {
         eprintln!("error: --replica must be in range [1, 128], got {replica_id}");
-        std::process::exit(1);
-    }
-    let leader_id = args.leader;
-    if !(1..=128).contains(&leader_id) {
-        eprintln!("error: --leader must be in range [1, 128], got {leader_id}");
         std::process::exit(1);
     }
 
@@ -127,12 +143,21 @@ fn parse_and_validate_cli_args(args: &Cli) -> (Vec<u64>, Vec<u64>, u64, u64, Vec
         vec![0u16; store_ids.len()]
     };
 
-    (store_ids, group_ids, replica_id, leader_id, ports)
+    let leader_id = args.leader;
+
+    Some(Bootstrap {
+        store_ids,
+        group_ids,
+        replica_id,
+        leader_id,
+        ports,
+    })
 }
 
 /// Create and start stores with their groups, registering each with the registry.
-async fn create_and_start_stores(store_ids: &[u64], group_ids: &[u64], replica_id: u64, leader_id: u64, ports: Vec<u16>, registry: Arc<KvStoreRegistry>) {
-    info!(store_count = store_ids.len(), group_count = group_ids.len(), "creating stores and groups");
+/// If `group_ids` is empty, stores are created without groups.
+async fn create_and_start_stores(store_ids: &[u64], group_ids: &[u64], replica_id: u64, leader_id: Option<u64>, ports: Vec<u16>, registry: Arc<KvStoreRegistry>) {
+    info!(store_count = store_ids.len(), group_count = group_ids.len(), leader_id = ?leader_id, "creating stores and groups");
 
     for (i, &store_id) in store_ids.iter().enumerate() {
         let port = ports[i];
@@ -140,12 +165,15 @@ async fn create_and_start_stores(store_ids: &[u64], group_ids: &[u64], replica_i
         info!(store_id, bind_addr = %addr, "creating PxKvStore");
         let store = Arc::new(PxKvStore::new(store_id, addr));
 
-        // Create groups with the single local replica for this store.
+        // Create groups with the single local replica for this store, if group_ids provided.
         for &group_id in group_ids {
             info!(store_id, group_id, replica_id, "creating PxGroup with local replica");
             let local_replica = PxLocalReplica::new(replica_id, PxLocalReplicaRole::Follower);
             let mut group = PxGroup::new(group_id, local_replica);
-            group.set_leader_id(leader_id);
+            // Set leader if provided via --leader CLI argument
+            if let Some(leader) = leader_id {
+                group.set_leader_id(leader);
+            }
             store.add_group(group);
         }
 

@@ -611,44 +611,38 @@ dependencies = [
 ]
 
 [[package]]
-name = "crowkv-console-bench"
+name = "crowkv-cli"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "chrono",
- "crowkv-console-core",
+ "clap",
+ "crowkv-console-shared",
+ "crowkv-web",
  "dirs",
  "hdrhistogram",
+ "hex",
  "rand 0.8.6",
+ "reqwest",
  "serde",
  "serde_json",
- "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
 ]
 
 [[package]]
-name = "crowkv-console-cli"
+name = "crowkv-console-shared"
 version = "0.1.0"
 dependencies = [
- "clap",
- "crowkv-console-bench",
- "crowkv-console-core",
- "crowkv-console-ssh",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "crowkv-console-core"
-version = "0.1.0"
-dependencies = [
+ "async-trait",
  "axum",
  "crowkv",
  "dirs",
  "futures",
+ "hex",
  "reqwest",
+ "russh",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -656,34 +650,6 @@ dependencies = [
  "toml",
  "tonic",
  "tracing",
-]
-
-[[package]]
-name = "crowkv-console-ssh"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "crowkv-console-core",
- "dirs",
- "russh",
- "tokio",
- "toml",
- "tracing",
-]
-
-[[package]]
-name = "crowkv-console-web"
-version = "0.1.0"
-dependencies = [
- "axum",
- "crowkv-console-core",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tower-http",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -701,6 +667,25 @@ dependencies = [
  "tonic",
  "tracing",
  "utoipa",
+]
+
+[[package]]
+name = "crowkv-web"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "clap",
+ "crowkv-console-shared",
+ "hex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower 0.5.3",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1268,6 +1253,12 @@ name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
+
+[[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hex-literal"

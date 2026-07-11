@@ -21,7 +21,7 @@ systemctl status sshd
 ssh $USER@127.0.0.1 echo ok
 
 # 5. Run SSH tests (CI defaults to CROWKV_TEST_SSH unset)
-CROWKV_TEST_SSH=1 cargo test -p crowkv-console-ssh
+CROWKV_TEST_SSH=1 cargo test -p crowkv-console-shared
 ```
 
 Note: CI skips real SSH tests by default (`CROWKV_TEST_SSH` unset). Set it to `1` to enable loopback SSH tests.
@@ -48,15 +48,16 @@ crowkv node list
 crowkv node remove --id node-1
 
 # Node ping (SSH connectivity check)
-crowkv node ping --node node-2
+crowkv node ping --id node-2
 
 # Server deployment (local-fork or SSH based on node config)
-crowkv server deploy --id server-1 --node node-1 --mgmt-port 9910 --grpc-port 9920
-crowkv server stop --id server-1
+# Server identity is node identity (one server per node)
+crowkv server deploy --node-id node-1 --mgmt-port 9910 --grpc-port 9920
+crowkv server stop --node-id node-1
 
 # Set custom crowkv-server binary path (for SSH deploy, this is the remote path)
 export CROWKV_SERVER_BIN=/path/to/crowkv-server
-crowkv server deploy --id server-2 --node node-2 --mgmt-port 9911 --grpc-port 9921
+crowkv server deploy --node-id node-2 --mgmt-port 9911 --grpc-port 9921
 
 # Cluster observation (uses deployed servers from registry)
 crowkv cluster status
@@ -80,6 +81,8 @@ ssh_port = 22
 ssh_user = ""
 ssh_key = null
 ssh_password = null
+# Server process info (internal, not user-facing)
+# server = { mgmt_url = "http://127.0.0.1:9910", grpc_url = "http://127.0.0.1:9920", pid = 12345 }
 
 [[nodes]]
 id = "node-2"
@@ -90,24 +93,49 @@ ssh_user = "ubuntu"
 ssh_key = "/home/ubuntu/.ssh/id_rsa"
 ssh_password = null
 
-[[servers]]
-id = "server-1"
-url = "http://127.0.0.1:9910"
-node_id = "node-1"
-grpc_url = "http://127.0.0.1:9920"
-pid = 12345
+[bench]
+# Optional: override built-in stress scenarios or define new ones
+[bench.stress.burst]
+workload = "write"
+threads = 64
+connections = 16
+duration_secs = 10
+key_space = 10000
+value_size = 128
+
+[bench.stress.custom_read]
+workload = "read"
+threads = 32
+connections = 8
+duration_secs = 30
+key_space = 5000
+value_size = 64
 ```
 
 ### Web UI
 
 ```bash
 # Start the console web server
-crowkv-console-web
+crowkv-web
 
 # Open http://127.0.0.1:9920 in your browser
 # Enter server URL to view cluster snapshot
 # Note: C3 does not yet include a rack/node visualization; C5/C8 will add React UI
 ```
+
+### SSH Known Hosts
+
+The console persists SSH host keys in a `known_hosts` file for security:
+
+**File location**: `$CROWKV_KNOWN_HOSTS` (if set) or `~/.crowkv/known_hosts` (default)
+
+**Format**: One line per host with `host_id <algo> <base64-key>` format. The file is created automatically on first connection (TOFU - Trust On First Use).
+
+**Mismatch behavior**: If a host presents a different key than what's stored, the connection is refused and a warning is logged with both the expected and presented algorithms. To recover, delete the offending line from the known_hosts file and re-connect.
+
+**Process-wide store**: The known_hosts store is shared across all SSH connections in a single process via `OnceLock`, ensuring consistent behavior.
+
+**Fallback**: If neither `$CROWKV_KNOWN_HOSTS` nor `$HOME` can be resolved, an in-memory store is used (keys won't persist across restarts), with a warning logged.
 
 ## C5 Status
 
@@ -116,75 +144,75 @@ C5 implements the cluster management plane (store/group/replica CRUD).
 ### CLI Usage
 
 ```bash
-# Store management
-# Create a new store (bootstrap group + local replica)
-crowkv store add --store-id 1 --group-id 1 --replica-id 1 --port 9930
+# Store management (logical, cluster-wide)
+# Create a new store across multiple nodes
+crowkv store add --store-id 1 --nodes node-1,node-2
 crowkv store list
 crowkv store inspect --store-id 1
 crowkv store remove --store-id 1
 
 # Paxos group management
-crowkv paxos add --store-id 1 --group-id 2 --replica-id 2
-crowkv paxos list --store-id 1
-crowkv paxos inspect --store-id 1 --group-id 1
-crowkv paxos remove --store-id 1 --group-id 2
+crowkv group add --store-id 1 --group-id 1 --nodes node-1,node-2 [--leader node-1]
+crowkv group list --store-id 1
+crowkv group inspect --store-id 1 --group-id 1
+crowkv group remove --store-id 1 --group-id 1
 
-# Remote replica management
-crowkv replica add --store-id 1 --group-id 1 --replica-id 3 --endpoint 10.0.0.1:9930
+# Replica management (unified local/remote)
+crowkv replica add --store-id 1 --group-id 1 --node node-3 [--replica-id 3]
 crowkv replica remove --store-id 1 --group-id 1 --replica-id 3
-
-# Target a specific server (by URL or registry id)
-crowkv --server http://127.0.0.1:9910 store list
-crowkv --server server-1 paxos list --store-id 1
 
 # JSON output
 crowkv --json store list
-crowkv --json paxos inspect --store-id 1 --group-id 1
+crowkv --json group inspect --store-id 1 --group-id 1
 ```
 
 ### HTTP API (Web Backend)
 
-The console web server proxies management requests to upstream `crowkv-server` instances:
+The console web server proxies management requests to upstream
+`crowkv-server` instances. The API uses **logical entity addressing**:
+store/group/replica/KV operations use cluster-wide logical IDs
+(`:store_id`, `:group_id`, `:replica_id`); the backend resolves
+placement from the topology cache. Server lifecycle uses `:node_id`
+(one server per node).
+
+> **Deprecated:** the previous `?server=<mgmt_url>` query-string
+> contract and server-scoped paths (`/api/servers/:sid/...`) have been
+> removed. See `doc/design/design-console.md` §6.1 and
+> `doc/requirement-ui.md` §3.6 for the replacement.
 
 ```bash
-# List stores (GET /api/stores?server=<url>)
-curl http://127.0.0.1:9920/api/stores?server=http://127.0.0.1:9910
+# List stores (logical, cluster-wide)
+curl http://127.0.0.1:9920/api/stores
 
-# Add store (POST /api/stores)
-curl -X POST http://127.0.0.1:9920/api/stores?server=http://127.0.0.1:9910 \
+# Add store (creates on specified nodes)
+curl -X POST http://127.0.0.1:9920/api/stores \
   -H "Content-Type: application/json" \
-  -d '{"store_id":1,"group_id":1,"replica_id":1,"port":9930}'
+  -d '{"store_id":1,"nodes":["node-1","node-2"]}'
 
-# Get store detail (GET /api/stores/{sid})
-curl http://127.0.0.1:9920/api/stores/1?server=http://127.0.0.1:9910
+# Get / remove store
+curl        http://127.0.0.1:9920/api/stores/1
+curl -X DELETE http://127.0.0.1:9920/api/stores/1
 
-# Remove store (DELETE /api/stores/{sid}) - returns 405 if not implemented upstream
-curl -X DELETE http://127.0.0.1:9920/api/stores/1?server=http://127.0.0.1:9910
-
-# List groups (GET /api/stores/{sid}/groups)
-curl http://127.0.0.1:9920/api/stores/1/groups?server=http://127.0.0.1:9910
-
-# Add group (POST /api/stores/{sid}/groups)
-curl -X POST http://127.0.0.1:9920/api/stores/1/groups?server=http://127.0.0.1:9910 \
+# Groups
+curl        http://127.0.0.1:9920/api/stores/1/groups
+curl -X POST http://127.0.0.1:9920/api/stores/1/groups \
   -H "Content-Type: application/json" \
-  -d '{"group_id":2,"replica_id":2}'
+  -d '{"group_id":1,"nodes":["node-1","node-2"],"leader_node":"node-1"}'
+curl -X DELETE http://127.0.0.1:9920/api/stores/1/groups/1
 
-# Remove group (DELETE /api/stores/{sid}/groups/{gid})
-curl -X DELETE http://127.0.0.1:9920/api/stores/1/groups/2?server=http://127.0.0.1:9910
-
-# List remote replicas (GET /api/stores/{sid}/groups/{gid}/remotes)
-curl http://127.0.0.1:9920/api/stores/1/groups/1/remotes?server=http://127.0.0.1:9910
-
-# Add remote replicas (POST /api/stores/{sid}/groups/{gid}/remotes)
-curl -X POST http://127.0.0.1:9920/api/stores/1/groups/1/remotes?server=http://127.0.0.1:9910 \
+# Replicas (unified local/remote)
+curl        http://127.0.0.1:9920/api/stores/1/groups/1/replicas
+curl -X POST http://127.0.0.1:9920/api/stores/1/groups/1/replicas \
   -H "Content-Type: application/json" \
-  -d '[{"replica_id":3,"endpoint":"10.0.0.1:9930"}]'
+  -d '{"node_id":"node-3","replica_id":3}'
+curl -X DELETE http://127.0.0.1:9920/api/stores/1/groups/1/replicas/3
 
-# Remove remote replica (DELETE /api/stores/{sid}/groups/{gid}/remotes/{rid})
-curl -X DELETE http://127.0.0.1:9920/api/stores/1/groups/1/remotes/3?server=http://127.0.0.1:9910
+# OpenAPI for embedded Swagger UI (per-node)
+curl http://127.0.0.1:9920/api/nodes/node-1/openapi.json
 ```
 
-All endpoints return JSON. Upstream errors map to `502 Bad Gateway` to distinguish console bugs from server errors.
+All endpoints return JSON. Upstream errors map to `502 Bad Gateway` to
+distinguish console bugs from server errors. Unknown IDs return `404`.
 
 ## C6 Status
 
@@ -204,12 +232,12 @@ crowkv kv get --store-id 1 --group-id 1 --key binkey --hex
 # Delete a key
 crowkv kv delete --store-id 1 --group-id 1 --key mykey
 
-# List/scan (not yet implemented on server)
-crowkv kv list --store-id 1 --group-id 1 --prefix "" --limit 100
+# List/scan keys by prefix (tab-separated rows; empty prefix = all keys)
 crowkv kv scan --store-id 1 --group-id 1 --prefix "" --limit 100
+crowkv kv scan --store-id 1 --group-id 1 --prefix "user:" --limit 100
 
-# Target a specific server (by URL or registry id)
-crowkv --server http://127.0.0.1:9910 kv get --store-id 1 --group-id 1 --key mykey
+# List/scan with JSON output
+crowkv --json kv scan --store-id 1 --group-id 1 --prefix "" --limit 100
 
 # JSON output
 crowkv --json kv get --store-id 1 --group-id 1 --key mykey
@@ -219,32 +247,37 @@ crowkv --json kv put --store-id 1 --group-id 1 --key mykey --value myvalue
 crowkv kv put --store-id 1 --group-id 1 --key mykey --value myvalue --client-id 1 --seq 1
 ```
 
-**Note**: `get` is a local follower read in V1 and may return stale data. Not-found exits with code 3 for scriptability. `list`/`scan` return a clear error until the server implements prefix scan.
+**Note**: `get` and `scan` are local follower reads in V1 and may return stale data. Not-found exits with code 3 for scriptability. `list`/`scan` output tab-separated `key\tvalue\n` rows (UTF-8 lossy); use `--json` for raw hex. When `--limit` is reached, the CLI prints `(truncated: more keys exist past --limit N)` to stderr.
 
 ### HTTP API (Web Backend)
 
-The console web server proxies KV requests to upstream `crowkv-server` gRPC endpoints:
+The console web server proxies KV requests to upstream `crowkv-server` gRPC endpoints using logical paths:
 
 ```bash
-# Get a key (GET /api/stores/{sid}/groups/{gid}/kv/get)
-curl "http://127.0.0.1:9920/api/stores/1/groups/1/kv/get?server=http://127.0.0.1:9910&key=mykey"
-curl "http://127.0.0.1:9920/api/stores/1/groups/1/kv/get?server=http://127.0.0.1:9910&key_hex=6d796b6579"
+# Get a key (GET /api/stores/:store_id/groups/:group_id/kv/get)
+curl "http://127.0.0.1:9920/api/stores/1/groups/1/kv/get?key=mykey"
+curl "http://127.0.0.1:9920/api/stores/1/groups/1/kv/get?key_hex=6d796b6579"
 
-# Put a key (POST /api/stores/{sid}/groups/{gid}/kv/put)
-curl -X POST "http://127.0.0.1:9920/api/stores/1/groups/1/kv/put?server=http://127.0.0.1:9910" \
+# Put a key (POST /api/stores/:store_id/groups/:group_id/kv/put)
+curl -X POST "http://127.0.0.1:9920/api/stores/1/groups/1/kv/put" \
   -H "Content-Type: application/json" \
   -d '{"key":"mykey","value":"myvalue","client_id":0,"seq":0}'
-curl -X POST "http://127.0.0.1:9920/api/stores/1/groups/1/kv/put?server=http://127.0.0.1:9910" \
+curl -X POST "http://127.0.0.1:9920/api/stores/1/groups/1/kv/put" \
   -H "Content-Type: application/json" \
   -d '{"key_hex":"6d796b6579","value_hex":"6d7976616c7565","client_id":0,"seq":0}'
 
-# Delete a key (POST /api/stores/{sid}/groups/{gid}/kv/delete)
-curl -X POST "http://127.0.0.1:9920/api/stores/1/groups/1/kv/delete?server=http://127.0.0.1:9910" \
+# Delete a key (POST /api/stores/:store_id/groups/:group_id/kv/delete)
+curl -X POST "http://127.0.0.1:9920/api/stores/1/groups/1/kv/delete" \
   -H "Content-Type: application/json" \
   -d '{"key":"mykey","client_id":0,"seq":0}'
+
+# Scan keys by prefix (GET /api/stores/:store_id/groups/:group_id/kv/scan)
+curl "http://127.0.0.1:9920/api/stores/1/groups/1/kv/scan?prefix=user:&limit=100"
+curl "http://127.0.0.1:9920/api/stores/1/groups/1/kv/scan?prefix_hex=757365723a&limit=100"
+curl "http://127.0.0.1:9920/api/stores/1/groups/1/kv/scan?limit=0"  # no limit
 ```
 
-All endpoints support both UTF-8 (`key`, `value`) and hex (`key_hex`, `value_hex`) for binary safety. Responses include both `value_utf8` and `value_hex` fields. Endpoint resolution rewrites the upstream's `0.0.0.0:N` listen_addr to use the management URL's host for remote access.
+All endpoints support both UTF-8 (`key`, `value`, `prefix`) and hex (`key_hex`, `value_hex`, `prefix_hex`) for binary safety. Scan responses include `key_utf8`, `key_hex`, `value_utf8`, `value_hex` per item, plus a `truncated` flag. Endpoint resolution rewrites the upstream's `0.0.0.0:N` listen_addr to use the management URL's host for remote access.
 
 ## C7 Status
 
@@ -266,9 +299,6 @@ crowkv bench stress hotread --store-id 1 --group-id 1
 # Re-render a previously-saved report
 crowkv bench report 2025-01-09T12-34-56-789Z
 
-# Target a specific server (by URL or registry id)
-crowkv --server http://127.0.0.1:9910 bench run read --store-id 1 --group-id 1
-
 # JSON output
 crowkv --json bench run read --store-id 1 --group-id 1
 crowkv --json bench report 2025-01-09T12-34-56-789Z
@@ -284,48 +314,85 @@ crowkv --json bench report 2025-01-09T12-34-56-789Z
 
 **Report location**: Reports are saved to `~/.crowkv/bench/<run-id>.json`. The CLI prints the report summary and the file path after each run.
 
-**Note**: The `list` workload always reports `error_rate=1.0` because the underlying `KvClient::scan` is a stub (C6 gap). The CLI accepts `bench run list` for wiring exercise, but results are only useful as a "did the path connect" signal until the server adds prefix scan.
+**Note**: The `scan` workload always reports `error_rate=1.0` because the underlying `KvClient::scan` is a stub (C6 gap). The CLI accepts `bench run scan` for wiring exercise, but results are only useful as a "did the path connect" signal until the server adds prefix scan.
 
 ## C8 Status
 
-C8 migrates Swagger UI from `crowkv-server` to `crowkv-console-web` and removes the `swagger-ui` Cargo feature from `crowkv-server`.
+C8 migrates Swagger UI from `crowkv-server` to `crowkv-web` and removes the `swagger-ui` Cargo feature from `crowkv-server`.
 
 ### Swagger UI
 
 The console now serves a vendored Swagger UI at `/api/swagger/`. This provides an interactive API explorer for the `crowkv-server` management API.
 
 ```bash
-# Access Swagger UI (uses default registered server or ?server=<url>)
+# Access Swagger UI
 open http://127.0.0.1:9920/api/swagger/
 
-# Access OpenAPI JSON spec (proxied from upstream server)
-curl "http://127.0.0.1:9920/api/openapi.json?server=http://127.0.0.1:9910"
-curl "http://127.0.0.1:9920/api/openapi.json"  # uses default registered server
+# Access OpenAPI JSON spec (per-node, proxied from selected node)
+curl "http://127.0.0.1:9920/api/nodes/node-1/openapi.json"
 ```
 
-**Vendored assets**: Swagger UI 5.17.14 is committed under `crowkv-console/static/swagger-ui/`. The directory includes:
+**Vendored assets**: Swagger UI 5.17.14 is committed under `crowkv-console/web/swagger-ui/`. The directory includes:
 - `swagger-ui.css`, `swagger-ui-bundle.js`, `swagger-ui-standalone-preset.js`
 - Favicons and OAuth2 redirect page
-- Hand-written `index.html` that requests `/api/openapi.json` with optional `?server=` propagation
+- Hand-written `index.html` that accepts a `url` query parameter for the OpenAPI spec (e.g., `/api/swagger/?url=/api/nodes/node-1/openapi.json`)
 
 **Bumping Swagger UI**: To upgrade to a new version:
 1. Download the new version from unpkg.com (e.g., `curl -O https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui-bundle.js`)
-2. Replace the files in `crowkv-console/static/swagger-ui/`
-3. Update the version in `static/swagger-ui/VERSION`
+2. Replace the files in `crowkv-console/web/swagger-ui/`
+3. Update the version in `web/swagger-ui/VERSION`
 4. Update the `index.html` script tags if the bundle names changed
 
 **crowkv-server changes**: The `swagger-ui` Cargo feature and `utoipa-swagger-ui` dependency have been removed. The `/openapi.json` endpoint is now unconditional, and all `ToSchema` derives are kept. The `examples/openapi-export.rs` binary is now unconditional.
 
-## Phases
+### React SPA (Vite + TypeScript + Tailwind)
 
-- **C0**: Skeleton (workspace + crates compile)
-- **C1**: Core + Read-Only Observation
-- **C2**: Multi-Server + Registry
-- **C3**: Simulated Hardware (local spawn)
-- **C4**: SSH Transport (russh)
-- **C5**: Cluster Management Plane
-- **C6**: KV Operations
-- **C7**: Bench (CLI only)
-- **C8**: Polish + Swagger
+The console root (`/` and any non-API path) now serves a React app built from `crowkv-console/web/ui/`. Node.js is **build-time only**; at runtime the compiled bundle in `web/ui/dist/` is served by Axum's SPA fallback handler.
 
-See [`doc/plan-console.md`](../doc/plan-console.md) for the full implementation plan.
+**Repo layout**:
+
+```
+crowkv-console/web/ui/
+  package.json       # pinned deps: react 18, vite 5, typescript 5, tailwind 3
+  .nvmrc             # Node 20 LTS
+  vite.config.ts     # dev server :5173, proxies /api -> 127.0.0.1:9920
+  tailwind.config.js # dark theme matching the previous inline SPA
+  index.html
+  src/
+    main.tsx
+    App.tsx          # tabbed shell (Snapshot / Stores / KV / Swagger)
+    api.ts           # typed wrappers over /api/*
+    components/
+      SnapshotTab.tsx
+      StoresTab.tsx
+      KvTab.tsx
+```
+
+**Build & run**:
+
+```bash
+# 1. Install Node 20 (use nvm if you have it)
+nvm use     # picks up crowkv-console/web/ui/.nvmrc
+
+# 2. One-time install of dev dependencies
+make ui-install
+
+# 3. Production build (emits dist/ which Axum serves)
+make ui-build
+
+# 4. Start the Axum backend
+cargo run -p crowkv-web
+# open http://127.0.0.1:9920/
+```
+
+**Hot-reload dev workflow**:
+
+```bash
+# Terminal 1: Vite dev server (auto-reloads on src/ changes)
+make ui-dev
+# open http://127.0.0.1:5173/  (Vite proxies /api/* and /healthz to :9920)
+```
+
+**Graceful fallback**: if `web/ui/dist/index.html` is missing (you ran `cargo run` without first running `make ui-build`), `/` returns a built-in instructional page pointing at the right `make` targets. This keeps `cargo build` and `cargo test` working with **no Node toolchain installed**, which is critical for CI and contributors who only touch the Rust crates.
+
+**Reproducible builds**: `package-lock.json` is committed; the release pipeline runs `npm ci` (lockfile-strict) via `make ui-install`, then `npm run build` via `make ui-build`. `node_modules/` and `dist/` are gitignored.

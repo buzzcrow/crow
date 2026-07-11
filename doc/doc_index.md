@@ -8,12 +8,12 @@ doc only when a task touches a topic in its row. Line counts are approximate
 
 | Doc | Lines | When to read |
 | --- | ---: | --- |
-| `requirement.md` | ~630 | Source of truth for what must be built. Any feature gap → fix here first. |
+| `requirement.md` | ~770 | Source of truth for what must be built. Any feature gap → fix here first. |
 | `design.md` | ~490 | Master design: cross-cutting architecture, write/read flows, module decomposition. Read for scope-spanning questions. |
 | `plan.md` | ~190 | Phases (P1–P5), milestones, dependency order, decision log. Read before picking a task. |
 | `test.md` | ~250 | Test pyramid, invariants, failure-injection taxonomy, CI gates, suites. Read when adding/restructuring tests. |
-| `requirement-console.md` | ~190 | `crowkv-console` (web UI + CLI) requirements: cluster observation, simulated hardware, KV ops, CLI hierarchy, load testing. |
-| `plan-console.md` | ~150 | `crowkv-console` phased implementation plan (C0–C8). |
+| `requirement-ui.md` | ~220 | Web UI requirements: single-page embeddable console, functional surface mapped to current `crowkv-web` API, embedded Swagger. |
+| `plan-console.md` | ~110 | `crowkv-console` phased implementation plan (C0–C8). |
 
 ## `requirement.md` Sections
 
@@ -82,7 +82,7 @@ doc only when a task touches a topic in its row. Line counts are approximate
 | Doc | Lines | Read when working on |
 | --- | ---: | --- |
 | `design/design-async-io.md` | ~200 | Async disk I/O backend (`tokio-uring`, `spawn_blocking` fallback), buffer mgmt, runtime topology. |
-| `design/design-console.md` | ~200 | `crowkv-console` design: shared core crate, web (Axum + React) and CLI (`clap`) frontends, SSH lifecycle, Swagger UI hosting. |
+| `design/design-console.md` | ~715 | `crowkv-console` design: shared core crate, web (Axum + React) and CLI (`clap`) frontends, two-hierarchy API (physical `/api/racks`,`/api/nodes` vs. logical `/api/stores`), monitor task, SSH lifecycle, Swagger UI hosting. |
 | `design/design-kv-server.md` | ~350 | `crowkv-server` binary: CLI, HTTP management API, store/group/replica wiring, topology export, lifecycle. |
 | `design/design-leader-election.md` | ~330 | Term/ballot bridge, election protocol, new-leader bulk Phase 1, heartbeats, leader lease, ReadIndex, step-down. |
 | `design/design-parallel-slots.md` | ~325 | Parallel slot pipelining, sliding window, gap detection / repair, safe-slot, per-key resolved-slot. |
@@ -91,6 +91,7 @@ doc only when a task touches a topic in its row. Line counts are approximate
 | `design/design-rpc.md` | ~230 | Wire protocol: Prepare/Promise/Accept/Accepted, message envelope, PeerService / AdminService, Rust mapping. |
 | `design/design-slot.md` | ~650 | `PxSlotList` / `PxSlotNode`: chunk layout, insert/get/trim, reclamation, performance model, future evolution. |
 | `design/design-storage-engine.md` | ~310 | Storage plug-in: per-key slot tracking, apply semantics, snapshot, compaction, compare, engine impls. |
+| `design/design-ui.md` | ~300 | Web UI design: SPA stack, single-page shell, theme tokens, topology canvas, embedding contract, embedded Swagger panel. |
 | `design/design-wal.md` | ~300 | Write-ahead log: multi-disk segments, batched fsync, ack contract, replay, GC, disk loss. |
 
 ## How AI Should Use This Index

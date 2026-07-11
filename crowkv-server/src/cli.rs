@@ -16,21 +16,28 @@ pub struct Cli {
     #[arg(long)]
     pub ports: Option<String>,
 
-    /// Store ID list (comma/range format). Default: "1".
-    #[arg(long, default_value = "1")]
-    pub stores: String,
+    /// Store ID list (comma/range format). When omitted, the server
+    /// starts with no stores; the operator (or the console) creates
+    /// stores explicitly via the management API. Pass `--stores 1
+    /// --groups 1` to keep the legacy auto-bootstrap behavior.
+    #[arg(long)]
+    pub stores: Option<String>,
 
-    /// Group ID list (comma/range format). Default: "1".
-    #[arg(long, default_value = "1")]
-    pub groups: String,
+    /// Group ID list (comma/range format). Required when `--stores` is
+    /// set; ignored otherwise.
+    #[arg(long)]
+    pub groups: Option<String>,
 
     /// Local replica ID (single value, range \[1, 128\]). Default: 1.
     #[arg(long, default_value_t = 1)]
     pub replica: u64,
 
-    /// Leader replica ID for initially-created groups. Default: 1.
-    #[arg(long, default_value_t = 1)]
-    pub leader: u64,
+    /// Initial leader replica ID for bootstrap groups. If set, this replica
+    /// becomes the leader of all groups created at startup. If omitted,
+    /// groups start with no leader; use the management API to set the
+    /// leader explicitly.
+    #[arg(long)]
+    pub leader: Option<u64>,
 
     /// Also print logs to console (in addition to file logging).
     #[arg(short = 'l', long)]

@@ -113,6 +113,14 @@ impl PxGroup {
 
     // ── Setters ───────────────────────────────────────────────────
 
+    /// Set the leader replica ID for this group.
+    ///
+    /// # Note
+    /// This is a test-only helper that directly sets the leader ID without
+    /// notifying remote replicas. In production, leader selection should be
+    /// automatic via Paxos, with leader status propagated through RPC to
+    /// remote replicas. This function bypasses that mechanism and should only
+    /// be used in tests where manual leader assignment is acceptable.
     pub fn set_leader_id(&mut self, leader_id: PxNodeId) {
         self.leader_id = leader_id;
     }

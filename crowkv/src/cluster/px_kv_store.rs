@@ -80,6 +80,62 @@ impl KvStore for PxKvStore {
         self.propose_and_respond(group_id, payload, optional_u64(client_id), Some(seq), request_id, request_create_ms)
             .await
     }
+
+    async fn kv_scan(&self, group_id: u64, prefix: Vec<u8>, limit: u32, request_id: u64, request_create_ms: u64) -> crate::rpc::KvScanResponse {
+        let Some(group) = self.get_group(group_id) else {
+            return crate::rpc::KvScanResponse {
+                version: 1,
+                ok: false,
+                error: format!("group {group_id} not found in store {}", self.store_id),
+                truncated: false,
+                items: Vec::new(),
+                request_id,
+                request_create_ms,
+            };
+        };
+
+        // Local-replica iteration. We snapshot the matching keys into a
+        // `Vec`, sort lexicographically, then materialize values for the
+        // bounded prefix slice. Sorting up front gives a stable order so
+        // pagination via `prefix` extension behaves predictably.
+        let store = group.local_replica().learner.store();
+        let mut matched_keys: Vec<Vec<u8>> = store
+            .iter()
+            .filter_map(|kv| if kv.key().starts_with(prefix.as_slice()) { Some(kv.key().clone()) } else { None })
+            .collect();
+        matched_keys.sort();
+
+        let cap = if limit == 0 { matched_keys.len() } else { (limit as usize).min(matched_keys.len()) };
+        let truncated = limit != 0 && matched_keys.len() > cap;
+        let mut items: Vec<crate::rpc::KvScanItem> = Vec::with_capacity(cap);
+        for key in matched_keys.into_iter().take(cap) {
+            // Re-fetch under the snapshot's lock; if the key was deleted
+            // between iter and get we just skip it.
+            if let Some(value) = store.get(&key).map(|v| v.value().clone()) {
+                items.push(crate::rpc::KvScanItem { key, value });
+            }
+        }
+
+        debug!(
+            store_id = self.store_id,
+            group_id,
+            prefix_len = prefix.len(),
+            limit,
+            returned = items.len(),
+            truncated,
+            "kv_scan local-replica read"
+        );
+
+        crate::rpc::KvScanResponse {
+            version: 1,
+            ok: true,
+            error: String::new(),
+            truncated,
+            items,
+            request_id,
+            request_create_ms,
+        }
+    }
 }
 
 impl PxKvStore {
@@ -224,6 +280,25 @@ impl PxKvStore {
 
     pub fn get_group(&self, group_id: u64) -> Option<Arc<PxGroup>> {
         self.groups.get(&group_id).map(|r| r.clone())
+    }
+
+    /// Decide whether a KV read on `group_id` should be forwarded to the
+    /// group's leader. Returns `Some(endpoint)` only when **all** of:
+    ///
+    /// * the group exists locally,
+    /// * the local replica is **not** the current leader, and
+    /// * the leader's gRPC endpoint is known (one of the group's
+    ///   `remote_replicas` carries it).
+    ///
+    /// Returns `None` when local is the leader, the group is missing,
+    /// or the leader endpoint is unknown. In those cases callers serve
+    /// the read from the local learner store as a best-effort fallback.
+    /// Used by `KvStoreService::{get, scan}` for transparent
+    /// leader-forwarding of reads.
+    #[must_use]
+    pub fn forward_target_for(&self, group_id: u64) -> Option<String> {
+        let group = self.get_group(group_id)?;
+        group.leader_endpoint()
     }
 
     pub fn remove_group(&self, group_id: u64) -> bool {

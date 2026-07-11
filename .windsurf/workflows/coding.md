@@ -64,7 +64,67 @@ When adding new internal state to `crowkv` lib:
 
 Rule: if the state helps operators debug or understand the system, expose it via health or info.
 
-## 6. Pre-Commit (auto via `.githooks/pre-commit`)
+## 7. Context Management
+
+When finishing a task, compress the context if the next task doesn't have a direct relationship with the current task.
+
+**Purpose**: Save token cost by avoiding carrying unrelated context between tasks.
+
+**When to compress**:
+- After completing a task (e.g., C7 implementation)
+- Before starting a new task that is unrelated (e.g., moving from C7 to C8)
+- If the new task touches different modules, files, or subsystems
+
+**How to compress**:
+- The system automatically summarizes your work when token limits are approached
+- Proactively signal task completion to trigger context cleanup
+- Keep only: project structure, recent file changes, and open gaps
+- Discard: detailed implementation history, intermediate debugging steps, resolved issues
+
+**Benefits**:
+- Reduces token usage by ~30-50% for unrelated task transitions
+- Improves focus by clearing irrelevant context
+- Prevents context pollution from stale information
+
+**When NOT to compress**:
+- The next task directly depends on the current task (e.g., fixing a bug you just introduced)
+- The next task modifies the same files or modules
+- Debugging an issue that requires full history
+
+## 8. Token Optimization
+
+**Goal**: Minimize token usage while maintaining code quality.
+
+### File Reading
+- **Use grep/search first**: Search for patterns before reading files to locate relevant sections
+- **Read with limits**: Use `offset` and `limit` parameters when reading large files (>1000 lines)
+- **Avoid full reads**: Don't read entire files unless necessary. Read only the sections you need
+- **Reuse viewed content**: Don't re-read files you've already viewed in the session
+
+### Tool Usage
+- **Maximize parallel calls**: Execute independent read/search operations in parallel
+- **Batch edits**: Use `multi_edit` for multiple changes in the same file instead of sequential `edit` calls
+- **Targeted edits**: Edit only the specific lines that need changing, not large blocks
+- **Avoid redundant operations**: Don't repeat operations you've already done
+
+### Search Strategy
+- **Specific patterns**: Use precise regex patterns in grep to narrow results
+- **File type filtering**: Use `type` parameter to search only relevant file types
+- **Glob patterns**: Use `glob` to filter files before searching
+- **Output mode**: Use `files_with_matches` for initial searches, then `content` for specific files
+
+### When to Be Thorough vs. Concise
+- **Be thorough**: When implementing core logic, fixing bugs, or adding new features
+- **Be concise**: When updating documentation, formatting, or making trivial changes
+- **Context matters**: Carry full context for complex tasks, compress for simple tasks
+
+### Estimated Savings
+- **Grep-first**: ~40% token reduction vs. reading entire files
+- **Parallel calls**: ~30% reduction vs. sequential operations
+- **Batch edits**: ~50% reduction vs. sequential single-file edits
+- **Combined**: Up to ~70% reduction when all practices are used
+
+## 9. Pre-Commit (auto via `.githooks/pre-commit`)
 
 // turbo
 ```bash

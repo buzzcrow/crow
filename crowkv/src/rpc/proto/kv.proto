@@ -66,9 +66,41 @@ message KvResponse {
   bytes  value      = 9;  // value for get operations
 }
 
+// Prefix scan over the learner store. V1: local-replica read like
+// `KvGet`, no Paxos round-trip; results may include uncommitted-on-this-
+// replica writes lagging behind the leader. The handler iterates the
+// `DashMap` keys, filters by `prefix`, sorts, then truncates to
+// `limit`. `limit == 0` means "no limit".
+message KvScanRequest {
+  uint32 version = 1;
+  bytes  prefix  = 2;
+  uint32 limit   = 3;
+  uint64 request_id = 4;
+  uint64 request_create_ms = 5;
+  uint64 group_id = 6;
+}
+
+message KvScanItem {
+  bytes key   = 1;
+  bytes value = 2;
+}
+
+message KvScanResponse {
+  uint32 version  = 1;
+  bool   ok       = 2;
+  string error    = 3;
+  // If `truncated` is true the caller hit `limit` and should re-scan
+  // with a longer `prefix` or higher `limit` to see the rest.
+  bool   truncated = 4;
+  repeated KvScanItem items = 5;
+  uint64 request_id = 6;
+  uint64 request_create_ms = 7;
+}
+
 service KvService {
   rpc Put(KvSetRequest) returns (KvResponse);
   rpc Get(KvGetRequest) returns (KvResponse);
   rpc Delete(KvDeleteRequest) returns (KvResponse);
   rpc BatchWrite(KvBatchWriteRequest) returns (KvResponse);
+  rpc Scan(KvScanRequest) returns (KvScanResponse);
 }

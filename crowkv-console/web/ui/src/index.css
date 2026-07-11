@@ -1,0 +1,39 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-bg text-text;
+  }
+  ::selection {
+    @apply bg-accent text-bg;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply bg-panel border border-border rounded-md p-4;
+  }
+  .input {
+    @apply bg-bg text-text border border-border rounded px-2 py-1 outline-none focus:border-accent2;
+  }
+  .btn {
+    @apply bg-border text-text border border-muted rounded px-3 py-1 hover:bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply bg-accent2 text-bg border-accent2 hover:bg-accent;
+  }
+  .tab {
+    @apply px-3 py-1 cursor-pointer border-b-2 border-transparent;
+  }
+  .tab-active {
+    @apply border-accent text-accent;
+  }
+  .pre {
+    @apply bg-panel border border-border rounded p-3 overflow-auto whitespace-pre-wrap text-sm;
+  }
+}
