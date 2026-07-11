@@ -1,14 +1,11 @@
 //! KV gRPC integration tests covering Put/Delete/BatchWrite flows.
 
-mod testkit;
-
-use crowkv::node::PxPaxosMode;
+use crate::testkit::cluster::{start_cluster, TestCluster};
 use crowkv::rpc::{KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvSetRequest};
-use testkit::{TestCluster, start_cluster};
 
 #[tokio::test]
 async fn kv_mutations_apply_to_all_learners() {
-    let cluster = start_cluster(&[0, 1, 2], 0, PxPaxosMode::Leader, true).await;
+    let cluster = start_cluster(&[0, 1, 2], 0).await;
     let leader = cluster.leader();
     let mut client = leader.kv_client().await;
 
@@ -23,6 +20,7 @@ async fn kv_mutations_apply_to_all_learners() {
             client_id: 11,
             request_id: 101,
             request_create_ms: 1001,
+            group_id: 1,
         })
         .await
         .expect("kv put")
@@ -51,6 +49,7 @@ async fn kv_mutations_apply_to_all_learners() {
             client_id: 11,
             request_id: 102,
             request_create_ms: 1002,
+            group_id: 1,
         })
         .await
         .expect("kv batch")
@@ -69,6 +68,7 @@ async fn kv_mutations_apply_to_all_learners() {
             client_id: 11,
             request_id: 103,
             request_create_ms: 1003,
+            group_id: 1,
         })
         .await
         .expect("kv delete")
@@ -84,12 +84,9 @@ async fn kv_mutations_apply_to_all_learners() {
 
 fn assert_cluster_value(cluster: &TestCluster, key: &[u8], expected: Option<&[u8]>) {
     for node in cluster.nodes() {
-        let value = node
-            .node
-            .learner
-            .store()
-            .get(key)
-            .map(|entry| entry.clone());
+        let group = node.group();
+        let replica = group.local_replica();
+        let value = replica.learner.store().get(key).map(|entry| entry.clone());
         match expected {
             Some(bytes) => {
                 let stored = value.expect("value missing");

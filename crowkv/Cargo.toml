@@ -15,7 +15,6 @@ tokio = { workspace = true, features = ["rt", "macros", "time", "net"] }
 tokio-stream = "0.1"
 tonic = { workspace = true }
 prost = { workspace = true }
-serde = { version = "1.0.228", features = ["derive"] }
 dashmap = "6"
 tracing = { workspace = true }
 tracing-appender = { workspace = true }

@@ -15,6 +15,7 @@ message PrepareRequest {
   uint64 leader_id = 4;
   uint64 request_id = 5;
   uint64 request_create_ms = 6;
+  uint64 group_id = 7;
 }
 
 message AcceptedValue {
@@ -49,6 +50,7 @@ message AcceptRequest {
   uint64 request_create_ms = 8;
   uint64 client_id = 9;
   uint64 seq = 10;
+  uint64 group_id = 11;
 }
 
 message AcceptedResponse {

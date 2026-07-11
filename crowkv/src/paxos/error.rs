@@ -1,4 +1,4 @@
-use crate::paxos::roles::Ballot;
+use crate::paxos::roles::PxBallot;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PxPaxosError {
@@ -6,10 +6,10 @@ pub enum PxPaxosError {
         leader_hint: String,
     },
     PrepareRejected {
-        promised: Ballot,
+        promised: PxBallot,
     },
     AcceptRejected {
-        promised: Ballot,
+        promised: PxBallot,
     },
     ForeignValueChosen {
         slot: u64,

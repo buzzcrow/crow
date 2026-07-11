@@ -19,9 +19,7 @@ mod generated {
 
 pub use generated::*;
 
-pub(crate) mod connection_pool;
-pub mod kv_service;
-pub mod px_service;
-
-pub use kv_service::KvNodeService;
-pub use px_service::PxNodeService;
+pub(crate) mod px_service;
+pub(crate) mod kv_service;
+pub use px_service::PxReplicaService;
+pub use kv_service::KvStoreService;

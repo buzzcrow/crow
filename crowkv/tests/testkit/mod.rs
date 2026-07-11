@@ -8,5 +8,3 @@ pub mod cluster;
 pub mod logging;
 pub mod simdisk;
 pub mod timer;
-
-pub use cluster::{TestCluster, start_cluster};

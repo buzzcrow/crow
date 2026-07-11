@@ -1,11 +1,11 @@
 #![allow(unsafe_code)]
 
-//! Integration tests for `SlotList` — lock-free chunked sparse array.
+//! Integration tests for `PxSlotList` — lock-free chunked sparse array.
 //!
 //! Covers general-value tests and `PxSlotNode` integration scenarios.
 
-use crowkv::paxos::roles::{Ballot as PxBallot, LogEntry, LogEntryKind};
-use crowkv::paxos::slot_list::SlotList;
+use crowkv::paxos::roles::{PxBallot, PxLogEntry, PxLogEntryKind};
+use crowkv::paxos::slot_list::PxSlotList;
 use crowkv::paxos::slot_node::PxSlotNode;
 
 const SLOT_CHUNK_SIZE: usize = 1024;
@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 #[test]
 fn new_is_empty() {
-    let list: SlotList<u64> = SlotList::new();
+    let list: PxSlotList<u64> = PxSlotList::new();
     assert!(list.is_empty());
     assert_eq!(list.len(), 0);
     assert_eq!(list.trim_slot(), 0);
@@ -24,7 +24,7 @@ fn new_is_empty() {
 
 #[test]
 fn insert_and_get() {
-    let list = SlotList::new();
+    let list = PxSlotList::new();
     let guard = list.insert_if_empty(5, 42u64);
     assert_eq!(*guard, 42);
     drop(guard);
@@ -36,14 +36,14 @@ fn insert_and_get() {
 
 #[test]
 fn get_nonexistent_returns_none() {
-    let list: SlotList<u64> = SlotList::new();
+    let list: PxSlotList<u64> = PxSlotList::new();
     assert!(list.get(0).is_none());
     assert!(list.get(999).is_none());
 }
 
 #[test]
 fn get_below_trim_returns_none() {
-    let list = SlotList::new();
+    let list = PxSlotList::new();
     list.insert_if_empty(10, 100u64);
     list.trim(11);
     assert!(list.get(10).is_none());
@@ -52,7 +52,7 @@ fn get_below_trim_returns_none() {
 
 #[test]
 fn insert_duplicate_returns_existing() {
-    let list = SlotList::new();
+    let list = PxSlotList::new();
     let g1 = list.insert_if_empty(3, "first");
     assert_eq!(*g1, "first");
     drop(g1);
@@ -66,7 +66,7 @@ fn insert_duplicate_returns_existing() {
 
 #[test]
 fn multiple_slots_and_chunks() {
-    let list = SlotList::new();
+    let list = PxSlotList::new();
     let count = SLOT_CHUNK_SIZE as u64 + 10;
     for i in 0..count {
         list.insert_if_empty(i, i * 2);
@@ -81,7 +81,7 @@ fn multiple_slots_and_chunks() {
 
 #[test]
 fn get_tail_finds_from_back() {
-    let list = SlotList::new();
+    let list = PxSlotList::new();
     let n = SLOT_CHUNK_SIZE as u64 * 3 + 5;
     for i in 0..n {
         list.insert_if_empty(i, i);
@@ -92,7 +92,7 @@ fn get_tail_finds_from_back() {
 
 #[test]
 fn get_tail_ptr_allows_atomic_access() {
-    let list = SlotList::new();
+    let list = PxSlotList::new();
     list.insert_if_empty(7, 99u64);
 
     let ptr_guard = list.get_tail_ptr(7).unwrap();
@@ -105,7 +105,7 @@ fn get_tail_ptr_allows_atomic_access() {
 
 #[test]
 fn trim_removes_chunks_and_updates_len() {
-    let list = SlotList::new();
+    let list = PxSlotList::new();
     let count = SLOT_CHUNK_SIZE as u64 * 2;
     for i in 0..count {
         list.insert_if_empty(i, i);
@@ -131,7 +131,7 @@ fn trim_removes_chunks_and_updates_len() {
 
 #[test]
 fn reclaim_frees_retired_chunks() {
-    let list = SlotList::new();
+    let list = PxSlotList::new();
     for i in 0..(SLOT_CHUNK_SIZE as u64 * 2) {
         list.insert_if_empty(i, i);
     }
@@ -145,7 +145,7 @@ fn reclaim_frees_retired_chunks() {
 
 #[test]
 fn sparse_insert_and_get() {
-    let list = SlotList::new();
+    let list = PxSlotList::new();
     list.insert_if_empty(0, "a");
     list.insert_if_empty(5, "b");
     list.insert_if_empty(1024, "c");
@@ -159,7 +159,7 @@ fn sparse_insert_and_get() {
 
 #[test]
 fn iter_range_returns_present_slots_only() {
-    let list = SlotList::new();
+    let list = PxSlotList::new();
     list.insert_if_empty(1, 10u64);
     list.insert_if_empty(3, 30u64);
     list.insert_if_empty(8, 80u64);
@@ -174,7 +174,7 @@ fn iter_range_returns_present_slots_only() {
 
 #[test]
 fn iter_range_respects_trim_watermark() {
-    let list = SlotList::new();
+    let list = PxSlotList::new();
     for i in 0..6u64 {
         list.insert_if_empty(i, i);
     }
@@ -202,7 +202,7 @@ fn drop_destroys_values() {
 
     let drops = Arc::new(AtomicUsize::new(0));
     {
-        let list = SlotList::new();
+        let list = PxSlotList::new();
         for i in 0..(SLOT_CHUNK_SIZE as u64 + 3) {
             let guard = list.insert_if_empty(
                 i,
@@ -219,7 +219,7 @@ fn drop_destroys_values() {
 
 #[test]
 fn guard_ref_counts_chunk() {
-    let list = SlotList::new();
+    let list = PxSlotList::new();
     // Create two chunks so we can retire the first one
     list.insert_if_empty(0, 0u64);
     list.insert_if_empty(SLOT_CHUNK_SIZE as u64, 1u64);
@@ -239,12 +239,12 @@ fn guard_ref_counts_chunk() {
 
 // ---------- slot_node integration tests ----------
 
-fn make_entry(slot: u64, ballot: PxBallot) -> LogEntry {
-    LogEntry {
+fn make_entry(slot: u64, ballot: PxBallot) -> PxLogEntry {
+    PxLogEntry {
         slot,
         ballot,
         term: ballot.round,
-        kind: LogEntryKind::Write,
+        kind: PxLogEntryKind::Write,
         payload: vec![1, 2, 3],
         client_id: Some(1),
         seq: Some(1),
@@ -253,7 +253,7 @@ fn make_entry(slot: u64, ballot: PxBallot) -> LogEntry {
 
 #[test]
 fn slot_node_insert_and_promise() {
-    let list = SlotList::new();
+    let list = PxSlotList::new();
     let guard = list.insert_if_empty(5, PxSlotNode::default());
     let node: &PxSlotNode = &guard;
 
@@ -267,7 +267,7 @@ fn slot_node_insert_and_promise() {
 
 #[test]
 fn slot_node_accept_after_promise() {
-    let list = SlotList::new();
+    let list = PxSlotList::new();
     let guard = list.insert_if_empty(7, PxSlotNode::default());
     let node: &PxSlotNode = &guard;
 
@@ -283,7 +283,7 @@ fn slot_node_accept_after_promise() {
 
 #[test]
 fn slot_node_duplicate_insert_returns_same() {
-    let list = SlotList::new();
+    let list = PxSlotList::new();
     let g1 = list.insert_if_empty(3, PxSlotNode::default());
     let node1: &PxSlotNode = &g1;
     node1.cas_promised(null_mut(), PxBallot::new(1, 1)).unwrap();
@@ -298,7 +298,7 @@ fn slot_node_duplicate_insert_returns_same() {
 
 #[test]
 fn slot_node_multiple_slots() {
-    let list = SlotList::new();
+    let list = PxSlotList::new();
     for i in 0..50u64 {
         let guard = list.insert_if_empty(i, PxSlotNode::default());
         let node: &PxSlotNode = &guard;
@@ -315,7 +315,7 @@ fn slot_node_multiple_slots() {
 
 #[test]
 fn slot_node_trim_and_reclaim_with_live_refs() {
-    let list = SlotList::new();
+    let list = PxSlotList::new();
     for i in 0..(SLOT_CHUNK_SIZE as u64) {
         let guard = list.insert_if_empty(i, PxSlotNode::default());
         let node: &PxSlotNode = &guard;

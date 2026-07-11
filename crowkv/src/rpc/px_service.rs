@@ -1,32 +1,34 @@
-//! Tonic `PxService` implementation that delegates to `PxNode`.
+//! Tonic `PxService` implementation that delegates to `PxLocalReplica`.
 //!
-//! This module contains the wire-format handler (`PxNodeService`) that
+//! This module contains the wire-format handler (`PxReplicaService`) that
 //! converts between protobuf messages and the in-memory Paxos types,
 //! then forwards to the node so that all real logic lives in one place.
 
+use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::{debug, warn};
 
-use crate::node::PxNode;
-use crate::paxos::roles::{AcceptReply, Ballot, Learner, LogEntry, LogEntryKind, PrepareReply};
+use crate::cluster::px_kv_store::PxKvStore;
+use crate::common::optional_u64;
+use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxLogEntryKind, PxPrepareReply};
 
 use crate::rpc::px_service_server::PxService;
 use crate::rpc::{AcceptRequest, AcceptedResponse, AcceptedValue, PrepareRequest, PromiseResponse};
 
-/// gRPC service wrapper that delegates `Prepare`/`Accept` to `PxNode`.
+/// gRPC service wrapper that delegates `Prepare`/`Accept` to `PxLocalReplica`.
 #[derive(Clone)]
-pub struct PxNodeService {
-    node: PxNode,
+pub struct PxReplicaService {
+    store: Arc<PxKvStore>,
 }
 
-impl PxNodeService {
-    pub fn new(node: PxNode) -> Self {
-        Self { node }
+impl PxReplicaService {
+    pub fn new(store: Arc<PxKvStore>) -> Self {
+        Self { store }
     }
 }
 
 #[tonic::async_trait]
-impl PxService for PxNodeService {
+impl PxService for PxReplicaService {
     async fn prepare(
         &self,
         request: Request<PrepareRequest>,
@@ -39,14 +41,19 @@ impl PxService for PxNodeService {
             leader_id = req.leader_id,
             "received paxos prepare rpc"
         );
-        let ballot = Ballot {
+        let ballot = PxBallot {
             round: req.round,
             leader_id: req.leader_id,
         };
-        let reply = self.node.on_prepare(req.slot, ballot).await;
+        let group = self
+            .store
+            .get_group(req.group_id)
+            .ok_or_else(|| Status::not_found("px group not found"))?;
+        let replica = group.local_replica();
+        let reply = replica.on_prepare(req.slot, ballot).await;
 
         let response = match reply {
-            PrepareReply::Promised { slot, accepted } => PromiseResponse {
+            PxPrepareReply::Promised { slot, accepted } => PromiseResponse {
                 version: 1,
                 slot,
                 round: req.round,
@@ -58,7 +65,7 @@ impl PxService for PxNodeService {
                 request_id: req.request_id,
                 request_create_ms: req.request_create_ms,
             },
-            PrepareReply::Rejected {
+            PxPrepareReply::Rejected {
                 slot,
                 current_promised,
             } => {
@@ -107,27 +114,32 @@ impl PxService for PxNodeService {
             );
             Status::invalid_argument("missing value")
         })?;
-        let entry = LogEntry {
+        let entry = PxLogEntry {
             slot: req.slot,
-            ballot: Ballot {
+            ballot: PxBallot {
                 round: req.round,
                 leader_id: req.leader_id,
             },
             term: req.term,
-            kind: LogEntryKind::Write,
+            kind: PxLogEntryKind::Write,
             payload: value.payload,
             client_id: optional_u64(req.client_id),
             seq: optional_u64(req.seq),
         };
 
-        let reply = self.node.on_accept(entry.clone()).await;
-        if matches!(reply, AcceptReply::Accepted { .. }) {
-            self.node.learner.learn(entry);
+        let group = self
+            .store
+            .get_group(req.group_id)
+            .ok_or_else(|| Status::not_found("px group not found"))?;
+        let replica = group.local_replica();
+        let reply = replica.on_accept(entry.clone()).await;
+        if matches!(reply, PxAcceptReply::Accepted { .. }) {
+            replica.learn(&entry);
         }
 
         let (rejected, rejected_round, rejected_leader_id) = match reply {
-            AcceptReply::Accepted { .. } => (false, 0, 0),
-            AcceptReply::Rejected {
+            PxAcceptReply::Accepted { .. } => (false, 0, 0),
+            PxAcceptReply::Rejected {
                 current_promised, ..
             } => {
                 warn!(
@@ -157,15 +169,7 @@ impl PxService for PxNodeService {
     }
 }
 
-fn optional_u64(value: u64) -> Option<u64> {
-    if value == 0 {
-        None
-    } else {
-        Some(value)
-    }
-}
-
-fn log_entry_to_proto(entry: &LogEntry) -> AcceptedValue {
+fn log_entry_to_proto(entry: &PxLogEntry) -> AcceptedValue {
     AcceptedValue {
         slot: entry.slot,
         round: entry.ballot.round,

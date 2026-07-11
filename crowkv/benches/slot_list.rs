@@ -2,8 +2,8 @@
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use crossbeam_skiplist::SkipMap;
-use crowkv::paxos::roles::{Ballot as PxBallot, LogEntry, LogEntryKind};
-use crowkv::paxos::slot_list::SlotList;
+use crowkv::paxos::roles::{PxBallot, PxLogEntry, PxLogEntryKind};
+use crowkv::paxos::slot_list::PxSlotList;
 use crowkv::paxos::slot_node::PxSlotNode;
 use dashmap::DashMap;
 use std::collections::BTreeMap;
@@ -33,21 +33,21 @@ macro_rules! define_slot_node_churn_bench {
                     replacements,
                     |b, &replacements| {
                         b.iter(|| {
-                            let list = SlotList::<PxSlotNode>::new();
+                            let list = PxSlotList::<PxSlotNode>::new();
                             let guard = list.insert_if_empty(7, PxSlotNode::default());
                             let node: &PxSlotNode = &guard;
 
                             let mut promised_ptr = null_mut();
                             let mut accepted_ptr = null_mut();
                             for i in 0..replacements {
-                                let ballot = Ballot::new(i + 1, 1);
+                                let ballot = PxBallot::new(i + 1, 1);
                                 promised_ptr = node.cas_promised(promised_ptr, ballot).unwrap();
 
-                                let entry = LogEntry {
+                                let entry = PxLogEntry {
                                     slot: 7,
                                     ballot,
                                     term: ballot.round,
-                                    kind: LogEntryKind::Write,
+                                    kind: PxLogEntryKind::Write,
                                     payload: vec![1, 2, 3],
                                     client_id: Some(1),
                                     seq: Some(i + 1),
@@ -206,7 +206,7 @@ macro_rules! define_concurrent_get_bench {
 define_tail_insert_bench!(
     bench_insert_u64_tail,
     "slot_list_insert_u64_tail",
-    SlotList::<u64>::new(),
+    PxSlotList::<u64>::new(),
     list,
     slot,
     {
@@ -228,7 +228,7 @@ define_tail_insert_bench!(
 define_concurrent_insert_bench!(
     bench_insert_u64_concurrent,
     "slot_list_insert_concurrent",
-    SlotList::<u64>::new(),
+    PxSlotList::<u64>::new(),
     list,
     slot,
     {
@@ -272,7 +272,7 @@ define_concurrent_insert_bench!(
 define_concurrent_get_bench!(
     bench_get_u64_concurrent,
     "slot_list_get_concurrent",
-    SlotList::<u64>::new(),
+    PxSlotList::<u64>::new(),
     list,
     slot,
     {

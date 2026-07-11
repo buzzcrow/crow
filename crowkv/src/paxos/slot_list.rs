@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, AtomicUsize
 use crate::paxos::roles::SlotIndex;
 
 /// A chunked, reader-pinned concurrent sparse list.
-pub struct SlotList<T> {
+pub struct PxSlotList<T> {
     head: AtomicPtr<SlotChunk<T>>,
     tail: AtomicPtr<SlotChunk<T>>,
     trim_slot: AtomicU64,
@@ -18,13 +18,24 @@ pub struct SlotList<T> {
     len: AtomicUsize,
 }
 
-impl<T> Default for SlotList<T> {
+impl<T> std::fmt::Debug for PxSlotList<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let has_garbage = !self.retired_head.load(Ordering::Acquire).is_null();
+        f.debug_struct("PxSlotList")
+            .field("len", &self.len())
+            .field("trim_slot", &self.trim_slot())
+            .field("has_garbage", &has_garbage)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T> Default for PxSlotList<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T> SlotList<T> {
+impl<T> PxSlotList<T> {
     pub fn new() -> Self {
         Self {
             head: AtomicPtr::new(null_mut()),
@@ -52,13 +63,13 @@ impl<T> SlotList<T> {
     /// Iterate all present entries in `[start_slot, end_slot_exclusive)`.
     ///
     /// This iterator is lock-free and safe under concurrent readers/writers.
-    /// Each yielded item holds its own `SlotReadGuard`.
+    /// Each yielded item holds its own `PxSlotReadGuard`.
     pub fn iter_range(
         &self,
         start_slot: SlotIndex,
         end_slot_exclusive: SlotIndex,
-    ) -> SlotIter<'_, T> {
-        SlotIter {
+    ) -> PxSlotIter<'_, T> {
+        PxSlotIter {
             list: self,
             next_slot: start_slot.max(self.trim_slot.load(Ordering::Acquire)),
             end_slot_exclusive,
@@ -67,7 +78,7 @@ impl<T> SlotList<T> {
 
     // ---------- read guards ----------
 
-    pub fn get(&self, slot: SlotIndex) -> Option<SlotReadGuard<'_, T>> {
+    pub fn get(&self, slot: SlotIndex) -> Option<PxSlotReadGuard<T>> {
         if slot < self.trim_slot.load(Ordering::Acquire) {
             return None;
         }
@@ -89,7 +100,7 @@ impl<T> SlotList<T> {
                     chunk.reader_refs.fetch_sub(1, Ordering::Release);
                     return None;
                 }
-                return Some(SlotReadGuard {
+                return Some(PxSlotReadGuard {
                     chunk,
                     ptr,
                     _marker: PhantomData,
@@ -103,7 +114,7 @@ impl<T> SlotList<T> {
         None
     }
 
-    pub fn get_tail(&self, slot: SlotIndex) -> Option<SlotReadGuard<'_, T>> {
+    pub fn get_tail(&self, slot: SlotIndex) -> Option<PxSlotReadGuard<'_, T>> {
         if slot < self.trim_slot.load(Ordering::Acquire) {
             return None;
         }
@@ -125,7 +136,7 @@ impl<T> SlotList<T> {
                     chunk.reader_refs.fetch_sub(1, Ordering::Release);
                     return None;
                 }
-                return Some(SlotReadGuard {
+                return Some(PxSlotReadGuard {
                     chunk,
                     ptr,
                     _marker: PhantomData,
@@ -139,7 +150,7 @@ impl<T> SlotList<T> {
         None
     }
 
-    pub fn get_ptr(&self, slot: SlotIndex) -> Option<SlotPtrGuard<'_, T>> {
+    pub fn get_ptr(&self, slot: SlotIndex) -> Option<PxSlotPtrGuard<'_, T>> {
         if slot < self.trim_slot.load(Ordering::Acquire) {
             return None;
         }
@@ -156,7 +167,7 @@ impl<T> SlotList<T> {
                     return None;
                 }
                 let offset = (slot - chunk.start_slot) as usize;
-                return Some(SlotPtrGuard { chunk, offset });
+                return Some(PxSlotPtrGuard { chunk, offset });
             }
             if chunk.start_slot > slot {
                 return None;
@@ -166,10 +177,7 @@ impl<T> SlotList<T> {
         None
     }
 
-    pub fn get_tail_ptr(&self, slot: SlotIndex) -> Option<SlotPtrGuard<'_, T>> {
-        if slot < self.trim_slot.load(Ordering::Acquire) {
-            return None;
-        }
+    pub fn get_tail_ptr(&self, slot: SlotIndex) -> Option<PxSlotPtrGuard<T>> {
         let mut chunk_ptr = self.tail.load(Ordering::Acquire);
         while !chunk_ptr.is_null() {
             let chunk = unsafe { &*chunk_ptr };
@@ -183,7 +191,7 @@ impl<T> SlotList<T> {
                     return None;
                 }
                 let offset = (slot - chunk.start_slot) as usize;
-                return Some(SlotPtrGuard { chunk, offset });
+                return Some(PxSlotPtrGuard { chunk, offset });
             }
             if slot >= end {
                 return None;
@@ -203,7 +211,7 @@ impl<T> SlotList<T> {
     /// # Design note: no safe `insert_or_replace`
     /// A general `insert_or_replace` (atomically swap the pointer regardless
     /// of whether a value exists) cannot be written safely because
-    /// `SlotList` only tracks reader pins at the *chunk* level, not per
+    /// `PxSlotList` only tracks reader pins at the *chunk* level, not per
     /// individual slot.  A concurrent `get` / `get_tail` on a different slot
     /// in the same chunk still pins the chunk; if we atomically swapped out
     /// this slot's pointer and immediately dropped the old value, that value
@@ -211,7 +219,7 @@ impl<T> SlotList<T> {
     ///
     /// For safe mutation, callers should insert once and then mutate the
     /// value in-place (e.g. `get_tail_ptr` + CAS on a field inside `T`).
-    pub fn insert_if_empty(&self, slot: SlotIndex, value: T) -> SlotReadGuard<'_, T> {
+    pub fn insert_if_empty(&self, slot: SlotIndex, value: T) -> PxSlotReadGuard<'_, T> {
         assert!(slot >= self.trim_slot.load(Ordering::Acquire));
         let offset = slot % SLOT_CHUNK_SIZE as u64;
         loop {
@@ -234,7 +242,7 @@ impl<T> SlotList<T> {
                 Ok(_) => {
                     chunk.live_count.fetch_add(1, Ordering::Relaxed);
                     self.len.fetch_add(1, Ordering::Relaxed);
-                    return SlotReadGuard {
+                    return PxSlotReadGuard {
                         chunk,
                         ptr: new_ptr,
                         _marker: PhantomData,
@@ -244,7 +252,7 @@ impl<T> SlotList<T> {
                     unsafe {
                         drop(Box::from_raw(new_ptr));
                     }
-                    return SlotReadGuard {
+                    return PxSlotReadGuard {
                         chunk,
                         ptr: existing,
                         _marker: PhantomData,
@@ -265,10 +273,10 @@ impl<T> SlotList<T> {
             self.trimming
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok(),
-            "SlotList::trim must be called from a single thread"
+            "PxSlotList::trim must be called from a single thread"
         );
 
-        struct TrimGuard<'a, T>(&'a SlotList<T>);
+        struct TrimGuard<'a, T>(&'a PxSlotList<T>);
         impl<T> Drop for TrimGuard<'_, T> {
             fn drop(&mut self) {
                 self.0.trimming.store(false, Ordering::Release);
@@ -318,10 +326,10 @@ impl<T> SlotList<T> {
             self.reclaiming
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok(),
-            "SlotList::reclaim must be called from a single thread"
+            "PxSlotList::reclaim must be called from a single thread"
         );
 
-        struct ReclaimGuard<'a, T>(&'a SlotList<T>);
+        struct ReclaimGuard<'a, T>(&'a PxSlotList<T>);
         impl<T> Drop for ReclaimGuard<'_, T> {
             fn drop(&mut self) {
                 self.0.reclaiming.store(false, Ordering::Release);
@@ -478,7 +486,7 @@ impl<T> SlotList<T> {
     }
 }
 
-impl<T> Drop for SlotList<T> {
+impl<T> Drop for PxSlotList<T> {
     fn drop(&mut self) {
         let mut chunk_ptr = self.head.load(Ordering::Acquire);
         while !chunk_ptr.is_null() {
@@ -502,14 +510,14 @@ impl<T> Drop for SlotList<T> {
     }
 }
 
-pub struct SlotIter<'a, T> {
-    list: &'a SlotList<T>,
+pub struct PxSlotIter<'a, T> {
+    list: &'a PxSlotList<T>,
     next_slot: SlotIndex,
     end_slot_exclusive: SlotIndex,
 }
 
-impl<'a, T> Iterator for SlotIter<'a, T> {
-    type Item = (SlotIndex, SlotReadGuard<'a, T>);
+impl<'a, T> Iterator for PxSlotIter<'a, T> {
+    type Item = (SlotIndex, PxSlotReadGuard<'a, T>);
 
     fn next(&mut self) -> Option<Self::Item> {
         while self.next_slot < self.end_slot_exclusive {
@@ -525,38 +533,38 @@ impl<'a, T> Iterator for SlotIter<'a, T> {
 
 // ---------- guards ----------
 
-pub struct SlotReadGuard<'a, T> {
+pub struct PxSlotReadGuard<'a, T> {
     chunk: &'a SlotChunk<T>,
     ptr: *const T,
     _marker: PhantomData<&'a T>,
 }
 
-impl<T> Deref for SlotReadGuard<'_, T> {
+impl<T> Deref for PxSlotReadGuard<'_, T> {
     type Target = T;
     fn deref(&self) -> &Self::Target {
         unsafe { &*self.ptr }
     }
 }
 
-impl<T> Drop for SlotReadGuard<'_, T> {
+impl<T> Drop for PxSlotReadGuard<'_, T> {
     fn drop(&mut self) {
         self.chunk.reader_refs.fetch_sub(1, Ordering::Release);
     }
 }
 
-pub struct SlotPtrGuard<'a, T> {
+pub struct PxSlotPtrGuard<'a, T> {
     chunk: &'a SlotChunk<T>,
     offset: usize,
 }
 
-impl<T> Deref for SlotPtrGuard<'_, T> {
+impl<T> Deref for PxSlotPtrGuard<'_, T> {
     type Target = AtomicPtr<T>;
     fn deref(&self) -> &Self::Target {
         &self.chunk.entries[self.offset]
     }
 }
 
-impl<T> Drop for SlotPtrGuard<'_, T> {
+impl<T> Drop for PxSlotPtrGuard<'_, T> {
     fn drop(&mut self) {
         self.chunk.reader_refs.fetch_sub(1, Ordering::Release);
     }

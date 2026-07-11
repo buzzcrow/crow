@@ -1,7 +1,7 @@
 #![allow(unsafe_code)]
 
-use crate::paxos::roles::{Ballot, LogEntry, SlotIndex};
-use crate::paxos::slot_list::SlotList;
+use crate::paxos::roles::{PxBallot, PxLogEntry, SlotIndex};
+use crate::paxos::slot_list::PxSlotList;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
@@ -17,14 +17,14 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 #[derive(Default)]
 pub struct PxSlotNode {
     /// Highest ballot promised. Null until first `prepare`.
-    pub(crate) promised: AtomicPtr<Ballot>,
+    pub(crate) promised: AtomicPtr<PxBallot>,
     /// Accepted entry. Null until first `accept`.
-    pub(crate) accepted: AtomicPtr<LogEntry>,
+    pub(crate) accepted: AtomicPtr<PxLogEntry>,
 
     // ---------- deferred reclamation state (correctness-critical) ----------
     // Replaced field pointers are pushed here and reclaimed when node drops.
-    retired_promised: AtomicPtr<RetiredPtr<Ballot>>,
-    retired_accepted: AtomicPtr<RetiredPtr<LogEntry>>,
+    pub(crate) retired_promised: AtomicPtr<RetiredPtr<PxBallot>>,
+    pub(crate) retired_accepted: AtomicPtr<RetiredPtr<PxLogEntry>>,
 }
 
 impl Drop for PxSlotNode {
@@ -89,7 +89,7 @@ impl PxSlotNode {
     }
 
     /// Load the current promised ballot (may be null).
-    pub fn promised(&self) -> Option<&Ballot> {
+    pub fn promised(&self) -> Option<&PxBallot> {
         let p = self.promised.load(Ordering::Acquire);
         if p.is_null() {
             None
@@ -98,7 +98,7 @@ impl PxSlotNode {
         }
     }
 
-    pub fn promised_cloned(&self) -> Option<Ballot> {
+    pub fn promised_cloned(&self) -> Option<PxBallot> {
         self.promised().copied()
     }
 
@@ -107,9 +107,9 @@ impl PxSlotNode {
     /// Returns `Ok(_)` on success, `Err(actual)` on failure.
     pub fn cas_promised(
         &self,
-        expected: *mut Ballot,
-        new: Ballot,
-    ) -> Result<*mut Ballot, *mut Ballot> {
+        expected: *mut PxBallot,
+        new: PxBallot,
+    ) -> Result<*mut PxBallot, *mut PxBallot> {
         let new_ptr = Box::into_raw(Box::new(new));
         match self
             .promised
@@ -129,7 +129,7 @@ impl PxSlotNode {
     }
 
     /// Load the current accepted entry (may be null).
-    pub fn accepted(&self) -> Option<&LogEntry> {
+    pub fn accepted(&self) -> Option<&PxLogEntry> {
         let p = self.accepted.load(Ordering::Acquire);
         if p.is_null() {
             None
@@ -138,7 +138,7 @@ impl PxSlotNode {
         }
     }
 
-    pub fn accepted_cloned(&self) -> Option<LogEntry> {
+    pub fn accepted_cloned(&self) -> Option<PxLogEntry> {
         self.accepted().cloned()
     }
 
@@ -147,9 +147,9 @@ impl PxSlotNode {
     /// Returns `Ok(_)` on success, `Err(actual)` on failure.
     pub fn cas_accepted(
         &self,
-        expected: *mut LogEntry,
-        new: LogEntry,
-    ) -> Result<*mut LogEntry, *mut LogEntry> {
+        expected: *mut PxLogEntry,
+        new: PxLogEntry,
+    ) -> Result<*mut PxLogEntry, *mut PxLogEntry> {
         let new_ptr = Box::into_raw(Box::new(new));
         match self
             .accepted
@@ -171,7 +171,7 @@ impl PxSlotNode {
 
 /// Fast path: tail-first lookup for already-created slots.
 /// Slow path: `insert_if_empty` to create the chunk and slot node.
-pub fn get_or_prepare_slot(list: &SlotList<PxSlotNode>, slot: SlotIndex) -> Option<&PxSlotNode> {
+pub fn get_or_prepare_slot(list: &PxSlotList<PxSlotNode>, slot: SlotIndex) -> Option<&PxSlotNode> {
     if let Some(ptr_guard) = list.get_tail_ptr(slot) {
         let slot_atomic = &*ptr_guard;
         let node_ptr = slot_atomic.load(Ordering::Acquire);
@@ -192,6 +192,7 @@ pub fn get_or_prepare_slot(list: &SlotList<PxSlotNode>, slot: SlotIndex) -> Opti
     }
     // Slow path: chunk does not exist yet → use insert to create it.
     let guard = list.insert_if_empty(slot, PxSlotNode::default());
+    #[allow(clippy::explicit_auto_deref)]
     let node: &PxSlotNode = &*guard;
     let ptr = node as *const PxSlotNode;
     // guard is dropped here (chunk pin released), but the node itself

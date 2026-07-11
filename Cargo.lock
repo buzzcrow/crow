@@ -315,7 +315,6 @@ dependencies = [
  "crossbeam-skiplist",
  "dashmap",
  "prost",
- "serde",
  "tokio",
  "tokio-stream",
  "tonic",

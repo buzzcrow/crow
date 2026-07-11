@@ -1,24 +1,27 @@
-use std::sync::Arc;
-
 use dashmap::DashMap;
 
-use crate::paxos::roles::{Learner, LogEntry};
+use crate::paxos::roles::{Learner, PxLogEntry};
 
 /// In-memory state-machine backed by a `DashMap`.
 ///
 /// `learn` is called once a log entry has been chosen (i.e. accepted by a
 /// quorum).  The payload is the minimal binary format emitted by
-/// `PxNode::encode_kv_payload`.
-#[derive(Clone)]
+/// `PxReplica::encode_kv_payload`.
 pub struct PxLearner {
-    store: Arc<DashMap<Vec<u8>, Vec<u8>>>,
+    store: DashMap<Vec<u8>, Vec<u8>>,
+}
+
+impl Default for PxLearner {
+    fn default() -> Self {
+        Self {
+            store: DashMap::new(),
+        }
+    }
 }
 
 impl PxLearner {
     pub fn new() -> Self {
-        Self {
-            store: Arc::new(DashMap::new()),
-        }
+        Self::default()
     }
 
     pub fn store(&self) -> &DashMap<Vec<u8>, Vec<u8>> {
@@ -27,7 +30,7 @@ impl PxLearner {
 
     /// Decode `payload` and apply each operation to the store.
     ///
-    /// Wire format (per `PxNode::encode_kv_payload`):
+    /// Wire format (per `PxReplica::encode_kv_payload`):
     ///   [op_count: u8]
     ///   for each op:
     ///     [kind: u8]  0=Put, 1=Delete
@@ -80,7 +83,7 @@ fn read_u32_le(buf: &[u8], offset: usize) -> u32 {
 }
 
 impl Learner for PxLearner {
-    fn learn(&self, entry: LogEntry) {
+    fn learn(&self, entry: PxLogEntry) {
         self.apply_payload(&entry.payload);
     }
 }

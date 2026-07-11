@@ -1,5 +1,4 @@
-use crate::common::cluster::start_cluster;
-use crowkv::node::PxPaxosMode;
+use crate::testkit::cluster::start_cluster_classic;
 use crowkv::rpc::{AcceptRequest, AcceptedValue, KvSetRequest};
 
 fn encode_put_payload(key: &[u8], value: &[u8]) -> Vec<u8> {
@@ -15,7 +14,7 @@ fn encode_put_payload(key: &[u8], value: &[u8]) -> Vec<u8> {
 
 #[tokio::test]
 async fn kv_put_retries_next_slot_when_slot_has_prior_accepted_value() {
-    let cluster = start_cluster(&[0, 1, 2], 0, PxPaxosMode::Classic, true).await;
+    let cluster = start_cluster_classic(&[0, 1, 2], 0).await;
 
     let stale_payload = encode_put_payload(b"stale", b"value");
     let follower = cluster.follower().expect("follower present");
@@ -38,6 +37,7 @@ async fn kv_put_retries_next_slot_when_slot_has_prior_accepted_value() {
             request_create_ms: 0,
             client_id: 0,
             seq: 0,
+            group_id: 1,
         })
         .await
         .expect("preload accept")
@@ -56,6 +56,7 @@ async fn kv_put_retries_next_slot_when_slot_has_prior_accepted_value() {
             client_id: 12,
             request_id: 201,
             request_create_ms: 2001,
+            group_id: 1,
         })
         .await
         .expect("kv put")
@@ -67,15 +68,18 @@ async fn kv_put_retries_next_slot_when_slot_has_prior_accepted_value() {
     );
 
     for node in cluster.nodes() {
-        let slot1 = node.node.accepted_at(1).await.expect("slot 1 accepted");
+        let group = node.group();
+        let replica = group.local_replica();
+        let slot1 = replica.accepted_at(1).await.expect("slot 1 accepted");
         assert_eq!(
             slot1.payload, stale_payload,
             "slot 1 must preserve pre-existing accepted value"
         );
     }
     for node in cluster.nodes() {
-        let value = node
-            .node
+        let group = node.group();
+        let replica = group.local_replica();
+        let value = replica
             .learner
             .store()
             .get(b"my-key".as_slice())

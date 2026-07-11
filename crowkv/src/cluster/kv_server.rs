@@ -1,58 +1,48 @@
-use crate::node::PxNode;
+use crate::cluster::px_kv_store::PxKvStore;
 use crate::rpc::kv_service_server::KvServiceServer;
 use crate::rpc::px_service_server::PxServiceServer;
-use crate::rpc::{KvNodeService, PxNodeService};
+use crate::rpc::{KvStoreService, PxReplicaService};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tonic::transport::Server;
 use tracing::{debug, error, info};
 
-/// Server-lifecycle trait for a CrowKV consensus node.
-///
-/// Implementors can start a gRPC service, wait for it to stop, and
-/// trigger graceful shutdown.
 #[allow(async_fn_in_trait)]
-pub trait NodeServer {
-    /// Start the gRPC service. Returns `true` if the server was
-    /// successfully bound and spawned.
+pub trait KvServer {
     async fn start(&self) -> bool;
 
-    /// Block until the service task has completed.
     async fn join(&self);
 
-    /// Signal graceful shutdown.
     fn stop(&self);
+
+    fn listen_addr(&self) -> Option<SocketAddr>;
 }
 
-/// Server-side state kept behind a short-lived `std::sync::Mutex` so that
-/// `start`/`stop`/`join` can all take `&self`.
-pub struct GrpcTaskState {
+#[derive(Default)]
+pub(crate) struct GrpcTaskState {
     pub(crate) handle: Option<tokio::task::JoinHandle<()>>,
     pub(crate) shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     pub(crate) listen_addr: Option<SocketAddr>,
 }
 
-impl NodeServer for PxNode {
+impl KvServer for Arc<PxKvStore> {
     async fn start(&self) -> bool {
         {
             let state = self.server_state.lock().unwrap();
             if state.handle.is_some() {
-                debug!(
-                    node_id = self.id,
-                    "node server start skipped because server is already running"
-                );
+                debug!("kv server start skipped because server is already running");
                 return false;
             }
         }
 
-        let listener = match TcpListener::bind(self.config.listen_addr).await {
+        let listener = match TcpListener::bind(self.listen_addr).await {
             Ok(tcp) => tcp,
             Err(error) => {
                 error!(
-                    node_id = self.id,
-                    listen_addr = %self.config.listen_addr,
+                    listen_addr = %self.listen_addr,
                     error = %error,
-                    "failed to bind node server; next step: choose an available listen_addr or stop the conflicting process"
+                    "failed to bind kv server; next step: choose an available listen_addr or stop the conflicting process"
                 );
                 return false;
             }
@@ -61,16 +51,20 @@ impl NodeServer for PxNode {
             Ok(addr) => addr,
             Err(error) => {
                 error!(
-                    node_id = self.id,
                     error = %error,
-                    "failed to read bound node server address; next step: restart node server and inspect socket state"
+                    "failed to read bound kv server address; next step: restart kv server and inspect socket state"
                 );
                 return false;
             }
         };
 
-        let px_service = PxNodeService::new(self.clone());
-        let kv_service = KvNodeService::new(self.clone());
+        if self.groups.is_empty() {
+            error!("no groups configured; cannot start server");
+            return false;
+        }
+
+        let px_service = PxReplicaService::new(self.clone());
+        let kv_service = KvStoreService::new(self.clone());
         let px_server = PxServiceServer::new(px_service);
         let kv_server = KvServiceServer::new(kv_service);
 
@@ -95,7 +89,7 @@ impl NodeServer for PxNode {
             state.shutdown_tx = Some(tx);
         }
 
-        info!(node_id = self.id, listen_addr = %bound_addr, "node server started");
+        info!(listen_addr = %bound_addr, "kv server started");
         true
     }
 
@@ -105,9 +99,9 @@ impl NodeServer for PxNode {
             state.handle.take()
         };
         if let Some(task) = handle {
-            debug!(node_id = self.id, "joining node server task");
+            debug!("joining kv server task");
             let _ = task.await;
-            info!(node_id = self.id, "node server task joined");
+            info!("kv server task joined");
         }
     }
 
@@ -118,7 +112,11 @@ impl NodeServer for PxNode {
         };
         if let Some(tx) = sender {
             let _ = tx.send(());
-            info!(node_id = self.id, "node server shutdown requested");
+            info!("kv server shutdown requested");
         }
+    }
+
+    fn listen_addr(&self) -> Option<SocketAddr> {
+        self.server_state.lock().unwrap().listen_addr
     }
 }

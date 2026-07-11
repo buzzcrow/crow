@@ -1,29 +1,30 @@
-//! Tonic `KvService` implementation that delegates to `PxNode`.
+//! Tonic `KvService` implementation that delegates to `KvStore`.
 //!
 //! All KV RPCs are forwarded to the node's stub methods so that the
 //! wire-format handling stays in the `rpc` module while the real logic
-//! lives next to `PxNode`.
+//! lives next to `KvStore`.
 
+use crate::cluster::kv_store::KvStore;
+use crate::cluster::px_kv_store::PxKvStore;
+use crate::rpc::kv_service_server::KvService;
+use crate::rpc::{KvBatchWriteRequest, KvDeleteRequest, KvResponse, KvSetRequest};
+use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::{debug, warn};
 
-use crate::node::PxNode;
-use crate::rpc::kv_service_server::KvService;
-use crate::rpc::{KvBatchWriteRequest, KvDeleteRequest, KvResponse, KvSetRequest};
-
 #[derive(Clone)]
-pub struct KvNodeService {
-    node: PxNode,
+pub struct KvStoreService {
+    store: Arc<PxKvStore>,
 }
 
-impl KvNodeService {
-    pub fn new(node: PxNode) -> Self {
-        Self { node }
+impl KvStoreService {
+    pub fn new(store: Arc<PxKvStore>) -> Self {
+        Self { store }
     }
 }
 
 #[tonic::async_trait]
-impl KvService for KvNodeService {
+impl KvService for KvStoreService {
     async fn put(&self, request: Request<KvSetRequest>) -> Result<Response<KvResponse>, Status> {
         let req = request.into_inner();
         debug!(
@@ -35,8 +36,9 @@ impl KvService for KvNodeService {
             "received kv put rpc"
         );
         let mut resp = self
-            .node
+            .store
             .kv_put(
+                req.group_id,
                 req.key,
                 req.value,
                 req.client_id,
@@ -71,8 +73,9 @@ impl KvService for KvNodeService {
             "received kv delete rpc"
         );
         let mut resp = self
-            .node
+            .store
             .kv_delete(
+                req.group_id,
                 req.key,
                 req.client_id,
                 req.seq,
@@ -106,8 +109,9 @@ impl KvService for KvNodeService {
             "received kv batch_write rpc"
         );
         let mut resp = self
-            .node
+            .store
             .kv_batch_write(
+                req.group_id,
                 req.items,
                 req.client_id,
                 req.seq,

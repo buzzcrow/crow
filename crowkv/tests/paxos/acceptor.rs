@@ -2,20 +2,17 @@
 //!
 //! Mirrors `doc/test/test-design-consensus.md` §2 rows plus invariant C2 cases.
 
-mod testkit;
-
 use crowkv::paxos::acceptor::PxAcceptor;
 use crowkv::paxos::roles::{
-    AcceptReply as PxAcceptReply, Acceptor, Ballot as PxBallot, LogEntry, LogEntryKind,
-    PrepareReply as PxPrepareReply, SlotIndex,
+    Acceptor, PxAcceptReply, PxBallot, PxLogEntry, PxLogEntryKind, PxPrepareReply, SlotIndex,
 };
 
-fn entry(slot: SlotIndex, ballot: PxBallot, payload: &[u8]) -> LogEntry {
-    LogEntry {
+fn entry(slot: SlotIndex, ballot: PxBallot, payload: &[u8]) -> PxLogEntry {
+    PxLogEntry {
         slot,
         ballot,
         term: ballot.round,
-        kind: LogEntryKind::Write,
+        kind: PxLogEntryKind::Write,
         payload: payload.to_vec(),
         client_id: Some(1),
         seq: Some(1),

@@ -16,6 +16,7 @@ message KvSetRequest {
   uint64 client_id = 6;
   uint64 request_id = 7;
   uint64 request_create_ms = 8;
+  uint64 group_id = 9;
 }
 
 message KvDeleteRequest {
@@ -25,6 +26,7 @@ message KvDeleteRequest {
   uint64 client_id = 4;
   uint64 request_id = 5;
   uint64 request_create_ms = 6;
+  uint64 group_id = 7;
 }
 
 message KvBatchItem {
@@ -40,6 +42,7 @@ message KvBatchWriteRequest {
   uint64 client_id = 4;
   uint64 request_id = 5;
   uint64 request_create_ms = 6;
+  uint64 group_id = 7;
 }
 
 // Unified mutation response.
@@ -52,6 +55,7 @@ message KvResponse {
   string not_leader_hint = 6;  // leader endpoint when this node is not the leader
   uint64 request_id = 7;
   uint64 request_create_ms = 8;
+  bytes  value      = 9;  // value for get operations
 }
 
 service KvService {

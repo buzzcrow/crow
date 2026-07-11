@@ -1,14 +1,18 @@
-use crate::common::cluster::{assert_all_accepted, start_cluster, GrpcProposer};
-use crowkv::node::PxPaxosMode;
-use crowkv::paxos::roles::Ballot as PxBallot;
+use crate::testkit::cluster::{assert_all_accepted, start_cluster, GrpcProposer};
+use crowkv::paxos::roles::PxBallot;
 use crowkv::rpc::PrepareRequest;
 
 #[tokio::test]
 async fn integration_accept_preemption_then_ballot_bump_retry() {
-    let cluster = start_cluster(&[0, 1, 2, 3, 4], 0, PxPaxosMode::Leader, false).await;
+    let cluster = start_cluster(&[0, 1, 2, 3, 4], 0).await;
 
     let high_ballot = PxBallot::new(8, 99);
-    for node in cluster.nodes().iter().filter(|n| n.node.id != 0).take(3) {
+    for node in cluster
+        .nodes()
+        .iter()
+        .filter(|n| n.group().local_replica().id != 0)
+        .take(3)
+    {
         let mut client = node.px_client().await;
         let resp = client
             .prepare(PrepareRequest {
@@ -18,6 +22,7 @@ async fn integration_accept_preemption_then_ballot_bump_retry() {
                 leader_id: high_ballot.leader_id,
                 request_id: 0,
                 request_create_ms: 0,
+                group_id: 1,
             })
             .await
             .expect("prepare request")

@@ -58,13 +58,12 @@ The literature backing each choice is collected in [§12 References](#12-referen
 
 ## 2. Architecture Overview
 
-A CrowKV cluster is a set of `PxNode`s. Each node hosts a process that may participate in **multiple** `PxGroup`s — Group-0 (system, holds topology) and any number of data groups. Membership in a group is independent of node identity.
+A CrowKV cluster is a set of physical nodes. Each physical node runs one `KvStore`. A `KvStore` may host **multiple** `PxGroup`s — Group-0 (system, holds topology) and any number of data groups. Membership in a group is independent of physical-node identity.
 
 ```
                               CrowKV Cluster
    ┌────────────────────────────────────────────────────────────────┐
-   │                                                                │
-   │   PxNode A                PxNode B                PxNode C     │
+   │   KvStore A               KvStore B               KvStore C    │
    │   ┌─────────┐             ┌─────────┐             ┌─────────┐  │
    │   │Group-0 L│  ◄────────► │Group-0 F│  ◄────────► │Group-0 F│  │
    │   │Group-1 F│             │Group-1 L│             │Group-1 F│  │
@@ -75,12 +74,17 @@ A CrowKV cluster is a set of `PxNode`s. Each node hosts a process that may parti
              │  describe-cluster RPC + per-group writes/reads
              │
         ┌────┴────┐
-        │ Client  │  hashes key → group_id → leader of that group
+        │ Client  │  sends KV RPC → KvStore selects group by group_id
         │ library │
         └─────────┘
 ```
 
 - **Group-0** is a special system group whose log records cluster topology, partitioning rule (`num_groups`), the per-group membership, and the cluster `config_version`. Clients learn this via the describe-cluster RPC at startup.
+- **KvStore** is the KV-facing runtime on one physical node. `KvService` delegates KV operations to `KvStore`; the store selects a `PxGroup` by explicit `group_id` routing hint and drives that group through Paxos.
+- **PxGroup** is Paxos-only. It does not depend on KV semantics. It exposes Paxos behavior such as proposing values and running accept/learn processing over opaque log entries.
+- **Local and remote replicas** compose a group on one store. Each `PxGroup` contains exactly one `PxLocalReplica` for the local member and zero or more `PxRemoteReplica` proxies for members on other stores.
+- **PxLocalReplica** plays acceptor and learner roles for one group member. It owns the slot list and learner storage, delegating acceptor state operations to `PxAcceptor` and learned-value application to `PxLearner`.
+- **PxRemoteReplica** is an RPC utility/proxy for a replica on a remote physical node. It owns or uses connection-management facilities for that remote endpoint; the local group communicates with it only through RPC.
 - **Data groups** (`Group-1` … `Group-N`) hold key ranges. The mapping is `group_id = hash(key) % num_groups`, fixed at cluster creation ([requirement.md §7.4](requirement.md#74-sharding)).
 - A node typically participates in Group-0 plus a subset of data groups. Group sizes can differ (e.g. Group-0 = 5, data groups = 3) for higher metadata availability.
 - All inter-node and client-facing communication is gRPC + protobuf, with append-only field numbers for rolling-upgrade compatibility ([requirement.md §9.2](requirement.md#92-rolling-upgrade)).
@@ -97,6 +101,10 @@ The `crowkv` library is structured as a small set of cooperating modules. The se
 | **Acceptor** | Maintains promised/accepted state per slot; persists every state change to WAL before responding. | WAL |
 | **Learner** | Tracks chosen values; applies them to the storage engine; maintains per-key resolved-slot. | Storage Engine, Acceptor |
 | **WAL** | Durable, multi-disk write-ahead log. Sole persistent ground truth. | (disk) |
+| **KvStore** | KV-facing runtime per physical node; owns one or more `PxGroup`s; implements KV routing by explicit `group_id` and exposes `KvService`. | PxGroup, RPC |
+| **PxGroup** | Paxos-only group runtime; coordinates one local replica with remote replica proxies and drives proposer/accept/learn flows over opaque log entries. | Local Replica, Remote Replica |
+| **PxLocalReplica** | Local group member; plays acceptor and learner; owns slot list and learner storage. | Acceptor, Learner |
+| **PxRemoteReplica** | RPC proxy/connection utility for a group member on another physical node. | RPC |
 | **Replicator** | Streams `Accept` and `Chosen` messages from leader to peers; handles backpressure. | Proposer, Learner, RPC |
 | **Leader Elector** | Raft-style election; manages `PxTerm`; emits leader-change events. | RPC |
 | **Lease** | Holds and renews the leader lease used for fast linearizable reads; falls back to ReadIndex on demand. | Leader Elector |
@@ -104,7 +112,6 @@ The `crowkv` library is structured as a small set of cooperating modules. The se
 | **Snapshot** | Takes per-group snapshots; serves snapshot install to lagging peers. | Storage Engine, WAL |
 | **Dedup Cache** | Per-`client_id` last-applied sequence; persisted in the log stream so it survives leader change. | Learner, Storage Engine |
 | **Storage Engine** | Pluggable trait. In-memory tree, ordered file, and crowtree backends share one interface. | Learner, Snapshot |
-| **Group Manager** | Top-level controller per node; multiplexes groups, owns the group→state map, dispatches RPCs. | All of the above |
 | **Topology / Group-0 Client** | Caches cluster topology and the group→leader map; refreshed on `NotLeader`. | RPC |
 | **RPC** | Thin gRPC layer with retries and `NotLeader` handling. | (network) |
 
