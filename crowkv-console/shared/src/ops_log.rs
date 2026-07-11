@@ -82,7 +82,10 @@ pub fn init(path: PathBuf) -> std::io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let file = OpenOptions::new().create(true).append(true).open(&path)?;
-    let _ = OPS_LOG.set(OpsLog { file: Mutex::new(file), path });
+    let _ = OPS_LOG.set(OpsLog {
+        file: Mutex::new(file),
+        path,
+    });
     Ok(())
 }
 
@@ -109,15 +112,27 @@ pub fn current() -> Option<&'static OpsLog> {
 /// don't write to the same file.
 #[must_use]
 pub fn default_path(role: &str) -> PathBuf {
-    let dir = dirs::home_dir().unwrap_or_else(std::env::temp_dir).join(".crowkv").join("log");
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let dir = dirs::home_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".crowkv")
+        .join("log");
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
     let pid = std::process::id();
     dir.join(format!("console-{role}-{secs}-{pid}.log"))
 }
 
 /// Append one HTTP-call record. `body_summary` is included verbatim
 /// (callers strip secrets / truncate as appropriate).
-pub fn append_http(corr_id: &str, method: &str, url: &str, status: u16, duration_ms: u128, body_summary: Option<&str>) {
+pub fn append_http(
+    corr_id: &str,
+    method: &str,
+    url: &str,
+    status: u16,
+    duration_ms: u128,
+    body_summary: Option<&str>,
+) {
     if let Some(log) = OPS_LOG.get() {
         log.append(&json!({
             "ts_unix_ms": now_ms(),
@@ -177,7 +192,12 @@ pub struct CustomRecord<'a> {
 }
 
 fn now_ms() -> u64 {
-    u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis())).unwrap_or(u64::MAX)
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis()),
+    )
+    .unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -206,7 +226,10 @@ mod tests {
         log.append(&json!({"kind": "ssh", "op": "exec"}));
 
         let f = std::fs::File::open(&tmp).unwrap();
-        let lines: Vec<String> = BufReader::new(f).lines().map_while(std::result::Result::ok).collect();
+        let lines: Vec<String> = BufReader::new(f)
+            .lines()
+            .map_while(std::result::Result::ok)
+            .collect();
         assert_eq!(lines.len(), 2);
         let v0: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
         assert_eq!(v0["op"], "GET /test");

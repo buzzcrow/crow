@@ -1,5 +1,5 @@
 use crate::paxos::PxNodeId;
-use std::sync::Arc;
+use bytes::Bytes;
 
 pub trait Proposer {
     fn propose(&self);
@@ -62,16 +62,22 @@ pub enum PxLogEntryKind {
 /// - `ConfigChange`     — serialized `crate::group::types::PxGroupConfig`.
 /// - `DedupCheckpoint`  — serialized dedup-cache snapshot.
 ///
-/// `payload` uses `Arc<Vec<u8>>` to enable cheap cloning (refcount increment) instead
-/// of deep copying the entire payload. This is important because log entries are cloned
-/// frequently during Paxos phases and learner propagation, and payloads can be large.
+/// `payload` uses [`bytes::Bytes`], which is internally a ref-counted
+/// shared buffer. Cloning is `O(1)` (refcount bump) and the same buffer
+/// is shared across:
+///
+/// - per-peer Accept fanout (`AcceptedValue.payload` is also `Bytes`,
+///   mapped via `tonic_build` `.bytes(["."])` in `build.rs`);
+/// - slot-retry attempts in the proposer's `'slot_retry` loop;
+/// - the on-wire response → log-entry conversion in
+///   `accepted_value_to_log_entry`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PxLogEntry {
     pub slot: SlotIndex,
     pub ballot: PxBallot,
     pub term: u64,
     pub kind: PxLogEntryKind,
-    pub payload: Arc<Vec<u8>>,
+    pub payload: Bytes,
     pub client_id: Option<u64>,
     pub seq: Option<u64>,
 }
@@ -81,10 +87,16 @@ pub struct PxLogEntry {
 pub enum PxPrepareReply {
     /// Promise accepted. If the acceptor previously accepted a value at this slot,
     /// the proposer must adopt it (classic Paxos value-recovery rule).
-    Promised { slot: SlotIndex, accepted: Option<PxLogEntry> },
+    Promised {
+        slot: SlotIndex,
+        accepted: Option<PxLogEntry>,
+    },
     /// Promise rejected because the slot already promised at a higher-or-equal ballot.
     /// The proposer should retry with a strictly higher ballot.
-    Rejected { slot: SlotIndex, current_promised: PxBallot },
+    Rejected {
+        slot: SlotIndex,
+        current_promised: PxBallot,
+    },
     /// The request's election term is lower than the responder's
     /// `current_term`. The proposer (a stale leader) must step down and
     /// adopt `new_term`. Two-fence rule, see
@@ -98,7 +110,10 @@ pub enum PxAcceptReply {
     /// Value accepted at the entry's `(slot, ballot)`.
     Accepted { slot: SlotIndex, ballot: PxBallot },
     /// Rejected because the slot promised a higher ballot.
-    Rejected { slot: SlotIndex, current_promised: PxBallot },
+    Rejected {
+        slot: SlotIndex,
+        current_promised: PxBallot,
+    },
     /// Term-fence rejection. See [`PxPrepareReply::TermStale`].
     TermStale { slot: SlotIndex, new_term: u64 },
 }

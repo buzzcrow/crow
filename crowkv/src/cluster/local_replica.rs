@@ -3,45 +3,25 @@
 //! Wraps the consensus state (`PxAcceptor`) and learner (`PxLearner`).
 //! All proposer/KV logic has been moved to `PxGroup` and `KvStore`.
 
-use crate::cluster::health::HealthReport;
 use crate::cluster::replica::{
-    HeartbeatReply, HeartbeatRequestPayload, PxReplicaError, Replica, ReplicaHandler, StepDownReply, StepDownRequestPayload, VoteReply, VoteRequestPayload,
+    HeartbeatReply, HeartbeatRequestPayload, PxReplicaError, Replica, ReplicaHandler, StepDownReply,
+    StepDownRequestPayload, VoteReply, VoteRequestPayload,
 };
-use crate::cluster::shutdown::ShutdownReport;
-use crate::cluster::snapshot::{KvStoreSnapshot, LocalReplicaSnapshot};
+use crate::cluster::status::{KvStoreStatus, ReplicaStatus, StatusLevel};
 use crate::common::metrics::{ElectionMetrics, ElectionMetricsSnapshot};
+use crate::common::report::OperationReport;
+use crate::common::time::{anchor_ms_to_instant, instant_to_anchor_ms};
 use crate::paxos::acceptor::PxAcceptor;
 use crate::paxos::learner::PxLearner;
-use crate::paxos::roles::{Acceptor, Learner, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply, SlotIndex};
+use crate::paxos::roles::{
+    Acceptor, Learner, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply, SlotIndex,
+};
 use crate::paxos::{PxNodeId, PxTerm};
 use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::OnceLock;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info};
-
-/// Process-start monotonic anchor used to encode `Instant` values as a
-/// `u64` millisecond offset for atomic lease bookkeeping and for the
-/// monotonic `t_send_ms_mono` wire field. Lazily initialized on first
-/// call. Same anchor is reused for the lifetime of the process so
-/// converted values stay strictly comparable.
-pub(crate) fn process_anchor() -> Instant {
-    static ANCHOR: OnceLock<Instant> = OnceLock::new();
-    *ANCHOR.get_or_init(Instant::now)
-}
-
-/// Convert a monotonic `Instant` to milliseconds since [`process_anchor`].
-/// Saturates if `inst` is somehow before the anchor (cannot happen for
-/// `Instant::now()` after the anchor was sampled).
-#[allow(clippy::cast_possible_truncation)]
-pub(crate) fn instant_to_anchor_ms(inst: Instant) -> u64 {
-    inst.saturating_duration_since(process_anchor()).as_millis().min(u128::from(u64::MAX)) as u64
-}
-
-/// Reverse of [`instant_to_anchor_ms`].
-pub(crate) fn anchor_ms_to_instant(ms: u64) -> Instant {
-    process_anchor() + Duration::from_millis(ms)
-}
 
 /// Role of a local replica in the leader-election state machine.
 ///
@@ -81,7 +61,19 @@ impl PxLocalReplicaRole {
             3 => Self::Leader,
             // Atomic mirror is only written under the mutex with a valid
             // enum value; any other byte indicates memory corruption.
-            _ => unreachable!("invalid PxLocalReplicaRole discriminant: {v}"),
+            // Per the no-panic-in-non-test-code policy, log a critical
+            // error and fall back to `Follower`, the safest role (it
+            // cannot serve client writes or grant pre-votes incorrectly).
+            // The next legitimate role transition will overwrite this
+            // mirror with a valid value.
+            other => {
+                tracing::error!(
+                    "critical: invalid PxLocalReplicaRole discriminant {other}; \
+                     falling back to Follower. next step: investigate atomic-mirror \
+                     corruption (memory corruption / mismatched as_u8/from_u8)"
+                );
+                Self::Follower
+            }
         }
     }
 }
@@ -117,8 +109,15 @@ pub struct ElectionPersistentState {
 }
 
 impl ElectionPersistentState {
-    fn initial(role: PxLocalReplicaRole) -> Self {
-        let leader_id = if role == PxLocalReplicaRole::Leader { Some(0) } else { None };
+    fn initial(id: PxNodeId, role: PxLocalReplicaRole) -> Self {
+        // A locally-constructed leader knows itself as the leader
+        // immediately. Followers / candidates have no believed leader
+        // until they receive a heartbeat or grant a vote.
+        let leader_id = if role == PxLocalReplicaRole::Leader {
+            Some(id)
+        } else {
+            None
+        };
         Self {
             current_term: 0,
             voted_for: None,
@@ -158,12 +157,22 @@ pub struct LeaseState {
 ///
 /// Pure acceptor/learner. Proposer logic lives in `PxGroup`.
 ///
-/// Key work: term/voted-for state (Step 1), role state machine (Step 2),
-/// election-side lease (Step 2), election + heartbeat handlers (Step 4).
+/// Key work: term/voted-for state, role state machine, election-side
+/// lease, election + heartbeat handlers.
 pub struct PxLocalReplica {
     pub id: u64,
-    pub acceptor: PxAcceptor,
-    pub learner: PxLearner,
+    /// `Arc`-wrapped so [`Self::new_inheriting_election_state`] can share
+    /// the prior replica's per-slot promised/accepted state across a
+    /// rebuild (e.g. `add_remote_replicas`). Without sharing, a rebuilt replica
+    /// forgets its Paxos promises, violating the safety property
+    /// ("never accept a value below the highest promised ballot").
+    pub acceptor: Arc<PxAcceptor>,
+    /// `Arc`-wrapped so [`Self::new_inheriting_election_state`] can share
+    /// the prior replica's learner store (committed KV log + watermarks)
+    /// across a rebuild. Without sharing, every `add_remote_replicas` /
+    /// `remove_remote_replica` call would silently wipe all previously committed
+    /// values from the local replica.
+    pub learner: Arc<PxLearner>,
     pub voting: bool,
     /// Election metadata (source of truth).
     election_state: Mutex<ElectionPersistentState>,
@@ -190,15 +199,22 @@ pub struct PxLocalReplica {
     /// configured (not hard-coded) value. Updated by
     /// [`crate::cluster::group::PxGroup::set_election_config`].
     lease_duration_ms: AtomicU64,
-    /// Notify signalled by accepted admin `StepDown` RPCs (Step 9.7). The
-    /// election driver's leader-state `select!` waits on this so the
-    /// canonical step-down sequence runs immediately rather than on the
-    /// next heartbeat tick. Cheap: a single `Notify` and a sticky boolean.
+    /// Notify signalled by accepted admin `StepDown` RPCs. The election
+    /// driver's leader-state `select!` waits on this so the canonical
+    /// step-down sequence runs immediately rather than on the next
+    /// heartbeat tick. Cheap: a single `Notify` and a sticky boolean.
     pub(crate) admin_step_down_signal: tokio::sync::Notify,
+    /// Notify signalled whenever a valid heartbeat is accepted or a vote
+    /// is granted to another candidate. The election driver's
+    /// follower-state `select!` waits on this in addition to the
+    /// election deadline so a follower receiving steady heartbeats from
+    /// the current leader does not spuriously time out and challenge it.
+    /// Mirrors Raft's "reset election timer on `AppendEntries`" rule.
+    pub(crate) deadline_reset_signal: tokio::sync::Notify,
     /// Idempotency gate for [`Self::shutdown`].
     shutdown_started: AtomicBool,
-    /// Per-replica leader-election counters (Step 11). Cheap `Relaxed`
-    /// atomic increments on the election hot path; consumed by
+    /// Per-replica leader-election counters. Cheap `Relaxed` atomic
+    /// increments on the election hot path; consumed by
     /// `election_metrics_snapshot()` for health / management API.
     election_metrics: ElectionMetrics,
     /// Wall-clock-monotonic instant of the most recent accepted
@@ -234,7 +250,13 @@ impl Replica for PxLocalReplica {
 }
 
 impl ReplicaHandler for PxLocalReplica {
-    async fn on_prepare(&self, slot: u64, ballot: PxBallot, term: PxTerm, _group_id: u64) -> Result<PxPrepareReply, PxReplicaError> {
+    async fn on_prepare(
+        &self,
+        slot: u64,
+        ballot: PxBallot,
+        term: PxTerm,
+        _group_id: u64,
+    ) -> Result<PxPrepareReply, PxReplicaError> {
         Ok(self.on_prepare(slot, ballot, term).await)
     }
 
@@ -242,20 +264,36 @@ impl ReplicaHandler for PxLocalReplica {
         Ok(self.on_accept(entry).await)
     }
 
-    async fn on_pre_vote(&self, req: VoteRequestPayload, _group_id: u64) -> Result<VoteReply, PxReplicaError> {
+    async fn on_pre_vote(
+        &self,
+        req: VoteRequestPayload,
+        _group_id: u64,
+    ) -> Result<VoteReply, PxReplicaError> {
         Ok(self.handle_pre_vote(req))
     }
 
-    async fn on_request_vote(&self, req: VoteRequestPayload, _group_id: u64) -> Result<VoteReply, PxReplicaError> {
+    async fn on_request_vote(
+        &self,
+        req: VoteRequestPayload,
+        _group_id: u64,
+    ) -> Result<VoteReply, PxReplicaError> {
         Ok(self.handle_request_vote(req))
     }
 
-    async fn on_heartbeat(&self, req: HeartbeatRequestPayload, _group_id: u64) -> Result<HeartbeatReply, PxReplicaError> {
+    async fn on_heartbeat(
+        &self,
+        req: HeartbeatRequestPayload,
+        _group_id: u64,
+    ) -> Result<HeartbeatReply, PxReplicaError> {
         Ok(self.handle_heartbeat(req))
     }
 
-    async fn on_step_down(&self, req: StepDownRequestPayload, _group_id: u64) -> Result<StepDownReply, PxReplicaError> {
-        Ok(self.handle_step_down(&req))
+    async fn on_step_down(
+        &self,
+        req: &StepDownRequestPayload,
+        _group_id: u64,
+    ) -> Result<StepDownReply, PxReplicaError> {
+        Ok(self.handle_step_down(req))
     }
 }
 
@@ -264,16 +302,62 @@ impl PxLocalReplica {
     pub fn new(id: u64, role: PxLocalReplicaRole) -> Self {
         Self {
             id,
-            acceptor: PxAcceptor::new(),
-            learner: PxLearner::new(),
+            acceptor: Arc::new(PxAcceptor::new()),
+            learner: Arc::new(PxLearner::new()),
             voting: true,
-            election_state: Mutex::new(ElectionPersistentState::initial(role)),
+            election_state: Mutex::new(ElectionPersistentState::initial(id, role)),
             current_term_atomic: AtomicU64::new(0),
             role_atomic: AtomicU8::new(role.as_u8()),
             lease_read_until_ms: AtomicU64::new(instant_to_anchor_ms(Instant::now())),
             last_quorum_heartbeat_at_ms: AtomicU64::new(instant_to_anchor_ms(Instant::now())),
-            lease_duration_ms: AtomicU64::new(crate::common::config::PxElectionConfig::DEFAULT.lease_duration_ms),
+            lease_duration_ms: AtomicU64::new(
+                crate::common::config::PxElectionConfig::DEFAULT.lease_duration_ms,
+            ),
             admin_step_down_signal: tokio::sync::Notify::new(),
+            deadline_reset_signal: tokio::sync::Notify::new(),
+            shutdown_started: AtomicBool::new(false),
+            election_metrics: ElectionMetrics::new(),
+            last_heartbeat_at: Mutex::new(None),
+        }
+    }
+
+    /// Construct a fresh `PxLocalReplica` that inherits the election
+    /// persistent state (`current_term`, `voted_for`, `role`,
+    /// `leader_id`, `vote_lockout_until`) from `prior`. Used by the
+    /// management-API rebuild path (`add_remote_replicas`, `remove_remote_replica`,
+    /// `batch_add_remote_replicas`) so wiring a new remote into a group does
+    /// **not** reset the cluster's election state. Without this, every
+    /// remote-add forces another election round, preventing leadership
+    /// from converging when a multi-replica group is being built up.
+    ///
+    /// The `id`, `voting` flag, and the [`PxAcceptor`] / [`PxLearner`]
+    /// are inherited from `prior` (the latter two via `Arc::clone` so
+    /// per-slot promises and the committed KV log survive the rebuild).
+    /// Per-tenure ephemeral signals (`Notify`s, `shutdown_started`) are
+    /// freshly initialised on the new instance.
+    #[must_use]
+    pub fn new_inheriting_election_state(prior: &Self) -> Self {
+        let snapshot = prior.election_state.lock().clone();
+        let term = snapshot.current_term;
+        let role = snapshot.role;
+        Self {
+            id: prior.id,
+            // Share the Paxos acceptor + learner with the prior replica.
+            // The acceptor must persist across rebuild for safety (Paxos
+            // P2b: an acceptor must not violate prior promises); the
+            // learner must persist or all previously committed KV writes
+            // disappear from this replica's local store.
+            acceptor: Arc::clone(&prior.acceptor),
+            learner: Arc::clone(&prior.learner),
+            voting: prior.voting,
+            election_state: Mutex::new(snapshot),
+            current_term_atomic: AtomicU64::new(term),
+            role_atomic: AtomicU8::new(role.as_u8()),
+            lease_read_until_ms: AtomicU64::new(instant_to_anchor_ms(Instant::now())),
+            last_quorum_heartbeat_at_ms: AtomicU64::new(instant_to_anchor_ms(Instant::now())),
+            lease_duration_ms: AtomicU64::new(prior.lease_duration_ms.load(Ordering::Acquire)),
+            admin_step_down_signal: tokio::sync::Notify::new(),
+            deadline_reset_signal: tokio::sync::Notify::new(),
             shutdown_started: AtomicBool::new(false),
             election_metrics: ElectionMetrics::new(),
             last_heartbeat_at: Mutex::new(None),
@@ -326,7 +410,8 @@ impl PxLocalReplica {
         let out = f(&mut guard);
         // Mirror after the closure runs so observers never see a term that the
         // mutex itself hasn't committed to yet.
-        self.current_term_atomic.store(guard.current_term, Ordering::Release);
+        self.current_term_atomic
+            .store(guard.current_term, Ordering::Release);
         out
     }
 
@@ -343,13 +428,19 @@ impl PxLocalReplica {
     /// hook for future persistence layers (P3) which will need to flush.
     #[tracing::instrument(level = "debug", skip_all, fields(replica_l_id = self.id))]
     #[allow(clippy::unused_async)] // async kept for cascade uniformity (P3 will await flush)
-    pub async fn shutdown(&self, _per_layer_timeout: Duration) -> ShutdownReport {
+    pub async fn shutdown(&self, _per_layer_timeout: Duration) -> OperationReport {
         if self.shutdown_started.swap(true, Ordering::AcqRel) {
-            debug!(replica_l_id = self.id, "PxLocalReplica::shutdown is a no-op (already shut down)");
-            return ShutdownReport::new();
+            debug!(
+                replica_l_id = self.id,
+                "PxLocalReplica::shutdown is a no-op (already shut down)"
+            );
+            return OperationReport::new();
         }
-        info!(replica_l_id = self.id, "PxLocalReplica shutdown (acceptor/learner cleanup deferred to Drop)");
-        ShutdownReport::new()
+        info!(
+            replica_l_id = self.id,
+            "PxLocalReplica shutdown (acceptor/learner cleanup deferred to Drop)"
+        );
+        OperationReport::new()
     }
 
     #[must_use]
@@ -364,12 +455,37 @@ impl PxLocalReplica {
         self.role() == PxLocalReplicaRole::Leader
     }
 
+    /// Believed leader id (i.e. who this replica thinks is currently the
+    /// leader of its group). `None` means "unknown" — the cluster is in the
+    /// middle of an election or this replica has not yet received a
+    /// heartbeat from a leader. Updated by:
+    ///
+    /// - [`Self::become_leader`] (sets `Some(self.id)`)
+    /// - [`Self::become_follower`] (clears to `None`)
+    /// - `on_heartbeat` (sets to the heartbeating leader's id)
+    /// - `on_request_vote` (clears when a vote is granted)
+    /// - [`Self::set_believed_leader`] (test/admin override)
+    #[must_use]
+    pub fn believed_leader_id(&self) -> Option<PxNodeId> {
+        self.election_state.lock().leader_id
+    }
+
+    /// Test/admin override for [`Self::believed_leader_id`]. Used by the
+    /// pinned-leader testkit (which skips the election driver). Production
+    /// code paths update the believed leader through the role transitions /
+    /// heartbeat / vote handlers, not this setter.
+    pub fn set_believed_leader(&self, leader_id: PxNodeId) {
+        self.election_state.lock().leader_id = Some(leader_id);
+    }
+
     /// Lock-free snapshot of [`LeaseState`].
     #[must_use]
     pub fn lease_state_snapshot(&self) -> LeaseState {
         LeaseState {
             lease_read_until: anchor_ms_to_instant(self.lease_read_until_ms.load(Ordering::Acquire)),
-            last_quorum_heartbeat_at: anchor_ms_to_instant(self.last_quorum_heartbeat_at_ms.load(Ordering::Acquire)),
+            last_quorum_heartbeat_at: anchor_ms_to_instant(
+                self.last_quorum_heartbeat_at_ms.load(Ordering::Acquire),
+            ),
         }
     }
 
@@ -404,7 +520,8 @@ impl PxLocalReplica {
     /// Record a successful quorum heartbeat at `now`. Heartbeat-tick hot
     /// path; lock-free.
     pub fn record_quorum_heartbeat(&self, now: Instant) {
-        self.last_quorum_heartbeat_at_ms.store(instant_to_anchor_ms(now), Ordering::Release);
+        self.last_quorum_heartbeat_at_ms
+            .store(instant_to_anchor_ms(now), Ordering::Release);
     }
 
     /// Update the cached lease duration (ms). Called from
@@ -413,38 +530,62 @@ impl PxLocalReplica {
         self.lease_duration_ms.store(ms, Ordering::Release);
     }
 
+    /// Quorum-OK heartbeat post-processing: extend `lease_read_until`
+    /// to `t_send + lease_duration - max_clock_skew` and bump
+    /// `last_quorum_heartbeat_at` to "now".
+    ///
+    /// Two atomic operations rather than a mutex round-trip; both
+    /// fields only ever advance, so a brief torn snapshot from a
+    /// concurrent reader cannot regress either value. Saturating sub
+    /// avoids underflow when `skew >= lease_duration`.
+    pub fn renew_lease(&self, t_send: Instant, cfg: &crate::common::config::PxElectionConfig) {
+        let lease_dur = std::time::Duration::from_millis(cfg.lease_duration_ms);
+        let skew = std::time::Duration::from_millis(cfg.max_clock_skew_ms);
+        let extended_until = t_send + lease_dur.saturating_sub(skew);
+        self.extend_lease_read_until(extended_until);
+        self.record_quorum_heartbeat(Instant::now());
+    }
+
     /// Snapshot of the configured lease duration (ms).
     #[must_use]
     pub fn lease_duration_ms(&self) -> u64 {
         self.lease_duration_ms.load(Ordering::Acquire)
     }
 
-    /// Step 11: borrow the per-replica election counter handle so the
-    /// election driver / step-down sequence can bump counters without
-    /// going through additional accessor noise.
+    /// Borrow the per-replica election counter handle so the election
+    /// driver / step-down sequence can bump counters without going
+    /// through additional accessor noise.
     #[must_use]
     pub fn election_metrics(&self) -> &ElectionMetrics {
         &self.election_metrics
     }
 
-    /// Step 11: combined election + lease snapshot for the management
-    /// API / health endpoint. Combines the monotonic counters with
-    /// derived gauges computed at read time so we don't have to keep
-    /// extra atomics in sync with the canonical mutex-guarded state.
+    /// Combined election + lease snapshot for the management API /
+    /// health endpoint. Combines the monotonic counters with derived
+    /// gauges computed at read time so we don't have to keep extra
+    /// atomics in sync with the canonical mutex-guarded state.
     #[must_use]
     pub fn election_metrics_snapshot(&self, bulk_phase1_in_flight_slots: u64) -> ElectionMetricsSnapshot {
         let counters = self.election_metrics.counters();
         let now = Instant::now();
-        let last_heartbeat_age_ms = self
-            .last_heartbeat_at
-            .lock()
-            .map(|inst| now.saturating_duration_since(inst).as_millis().try_into().unwrap_or(u64::MAX));
+        let last_heartbeat_age_ms = self.last_heartbeat_at.lock().map(|inst| {
+            now.saturating_duration_since(inst)
+                .as_millis()
+                .try_into()
+                .unwrap_or(u64::MAX)
+        });
         let lease_remaining_ms = if self.is_leader() {
             // `lease_read_until` is the publishable read-lease deadline.
             // When the lease is in the past we report `None`.
             let lease_read_until = self.lease_read_until();
             if lease_read_until > now {
-                Some(lease_read_until.saturating_duration_since(now).as_millis().try_into().unwrap_or(u64::MAX))
+                Some(
+                    lease_read_until
+                        .saturating_duration_since(now)
+                        .as_millis()
+                        .try_into()
+                        .unwrap_or(u64::MAX),
+                )
             } else {
                 None
             }
@@ -463,8 +604,8 @@ impl PxLocalReplica {
         }
     }
 
-    /// Step 11: record the wall-clock-monotonic instant of the most
-    /// recently accepted heartbeat (follower side). Called from
+    /// Record the wall-clock-monotonic instant of the most recently
+    /// accepted heartbeat (follower side). Called from
     /// [`Self::handle_heartbeat`] on the success path so the management
     /// snapshot can report `last_heartbeat_age_ms`.
     pub(crate) fn note_heartbeat_received(&self) {
@@ -484,8 +625,12 @@ impl PxLocalReplica {
                 s.voted_for = None;
             }
             s.role = PxLocalReplicaRole::Follower;
+            // Stepping down: the believed leader is unknown until the
+            // next heartbeat / vote round establishes one.
+            s.leader_id = None;
         });
-        self.role_atomic.store(PxLocalReplicaRole::Follower.as_u8(), Ordering::Release);
+        self.role_atomic
+            .store(PxLocalReplicaRole::Follower.as_u8(), Ordering::Release);
         // Lease is no longer meaningful as a non-leader. Expire it so any
         // stale read fast-path attempt rejects.
         self.reset_lease_to(Instant::now());
@@ -498,8 +643,13 @@ impl PxLocalReplica {
         self.with_election_state(|s| {
             s.role = PxLocalReplicaRole::PreCandidate;
         });
-        self.role_atomic.store(PxLocalReplicaRole::PreCandidate.as_u8(), Ordering::Release);
-        info!(replica_l_id = self.id, current_term = self.current_term_snapshot(), "become_precandidate");
+        self.role_atomic
+            .store(PxLocalReplicaRole::PreCandidate.as_u8(), Ordering::Release);
+        info!(
+            replica_l_id = self.id,
+            current_term = self.current_term_snapshot(),
+            "become_precandidate"
+        );
     }
 
     /// Transition to `Candidate`. Bumps term to `new_term`, votes for self.
@@ -512,10 +662,15 @@ impl PxLocalReplica {
             s.voted_for = Some(self.id);
             s.role = PxLocalReplicaRole::Candidate;
         });
-        self.role_atomic.store(PxLocalReplicaRole::Candidate.as_u8(), Ordering::Release);
-        // Step 11: one election attempt initiated.
+        self.role_atomic
+            .store(PxLocalReplicaRole::Candidate.as_u8(), Ordering::Release);
+        // One election attempt initiated.
         self.election_metrics.record_election();
-        info!(replica_l_id = self.id, current_term = new_term, "become_candidate");
+        info!(
+            replica_l_id = self.id,
+            current_term = new_term,
+            "become_candidate"
+        );
     }
 
     /// Transition to `Leader`. Initializes lease state as already-expired so
@@ -525,44 +680,44 @@ impl PxLocalReplica {
     pub fn become_leader(&self) {
         self.with_election_state(|s| {
             s.role = PxLocalReplicaRole::Leader;
+            s.leader_id = Some(self.id);
         });
-        self.role_atomic.store(PxLocalReplicaRole::Leader.as_u8(), Ordering::Release);
+        self.role_atomic
+            .store(PxLocalReplicaRole::Leader.as_u8(), Ordering::Release);
         self.reset_lease_to(Instant::now());
-        info!(replica_l_id = self.id, current_term = self.current_term_snapshot(), "become_leader");
+        info!(
+            replica_l_id = self.id,
+            current_term = self.current_term_snapshot(),
+            "become_leader"
+        );
     }
 
-    /// Point-in-time snapshot for the topology endpoint. Exposes only cheap
+    /// Point-in-time status for the topology endpoint. Exposes only cheap
     /// (`O(1)`) data: the kv-store key count via `DashMap::len()`.
     #[allow(clippy::cast_possible_truncation)]
     #[must_use]
-    pub fn snapshot(&self) -> LocalReplicaSnapshot {
+    pub fn status(&self) -> ReplicaStatus {
+        let mut status = StatusLevel::Ok;
+        let mut messages = Vec::new();
+        if self.shutdown_started.load(Ordering::Acquire) {
+            status = StatusLevel::Unhealthy;
+            messages.push(format!("local replica {} has been shut down", self.id));
+        }
         let role = match self.role() {
             PxLocalReplicaRole::Leader => "leader",
             PxLocalReplicaRole::Follower => "follower",
             PxLocalReplicaRole::PreCandidate => "pre_candidate",
             PxLocalReplicaRole::Candidate => "candidate",
         };
-        LocalReplicaSnapshot {
+        ReplicaStatus {
             id: self.id,
-            role,
+            role: role.to_string(),
             voting: self.voting,
-            kv_store: KvStoreSnapshot {
+            status,
+            messages,
+            kv_store: KvStoreStatus {
                 key_count: self.learner.store().len() as u64,
             },
-        }
-    }
-
-    /// Cached health for this local replica.
-    ///
-    /// V1 reports `Unhealthy` if `shutdown()` has run (resources released);
-    /// otherwise `Ok`. P3 will extend this to surface acceptor/learner
-    /// persistence I/O errors.
-    #[must_use]
-    pub fn health(&self) -> HealthReport {
-        if self.shutdown_started.load(Ordering::Acquire) {
-            HealthReport::unhealthy(format!("local replica {} has been shut down", self.id))
-        } else {
-            HealthReport::ok()
         }
     }
 
@@ -576,7 +731,10 @@ impl PxLocalReplica {
     pub async fn on_prepare(&self, slot: u64, ballot: PxBallot, term: PxTerm) -> PxPrepareReply {
         let local_term = self.current_term_snapshot();
         if term < local_term {
-            return PxPrepareReply::TermStale { slot, new_term: local_term };
+            return PxPrepareReply::TermStale {
+                slot,
+                new_term: local_term,
+            };
         }
         if term > local_term {
             self.become_follower(term);
@@ -610,14 +768,17 @@ impl PxLocalReplica {
 
     /// Receive a peer-side `ChosenNotice` for `(slot, term)` and update
     /// `last_chosen_slot` / `last_chosen_term` only. Drops notices whose
-    /// `term < current_term` (Step 8 fence). Notices with `term >
+    /// `term < current_term` (term fence). Notices with `term >
     /// current_term` are still recorded — the chosen high-water mark
     /// is informational and does not bump our own term.
     ///
     /// Returns `true` if the watermark advanced.
     pub fn note_chosen(&self, slot: SlotIndex, term: PxTerm) -> bool {
         if term < self.current_term_snapshot() {
-            debug!(replica_l_id = self.id, slot, term, "note_chosen: dropped (term < current_term)");
+            debug!(
+                replica_l_id = self.id,
+                slot, term, "note_chosen: dropped (term < current_term)"
+            );
             return false;
         }
         self.learner.note_chosen(slot, term)
@@ -637,7 +798,7 @@ impl PxLocalReplica {
 
     // ---------------- Learner / acceptor frontier accessors ----------------
     //
-    // Step 5 wires the learner watermarks. Step 6 adds the acceptor cursor.
+    // Learner watermarks and acceptor cursor accessors.
 
     /// Highest slot ever seen as chosen by the local learner (gaps allowed).
     #[must_use]
@@ -663,7 +824,7 @@ impl PxLocalReplica {
         self.learner.contiguous_applied()
     }
 
-    /// Highest slot ever opened on this replica's acceptor (Step 6 cursor).
+    /// Highest slot ever opened on this replica's acceptor.
     #[must_use]
     pub fn highest_seen_slot(&self) -> SlotIndex {
         self.acceptor.highest_seen_slot()
@@ -674,7 +835,11 @@ impl PxLocalReplica {
     /// Compute the responder's frontier triple (used by `PreVote` /
     /// `RequestVote` / `Heartbeat` replies).
     fn frontier_triple(&self) -> (SlotIndex, PxTerm, SlotIndex) {
-        (self.contiguous_chosen(), self.last_chosen_term(), self.highest_seen_slot())
+        (
+            self.contiguous_chosen(),
+            self.last_chosen_term(),
+            self.highest_seen_slot(),
+        )
     }
 
     /// Candidate's log is at least as up-to-date as ours iff
@@ -692,7 +857,9 @@ impl PxLocalReplica {
     fn handle_pre_vote(&self, req: VoteRequestPayload) -> VoteReply {
         let now = Instant::now();
         let state = self.election_state.lock();
-        let granted = req.term > state.current_term && self.candidate_log_up_to_date(&req) && now >= state.vote_lockout_until;
+        let granted = req.term > state.current_term
+            && self.candidate_log_up_to_date(&req)
+            && now >= state.vote_lockout_until;
         let term = state.current_term;
         drop(state);
         let (contiguous_chosen, last_chosen_term, highest_seen_slot) = self.frontier_triple();
@@ -725,10 +892,12 @@ impl PxLocalReplica {
         let now = Instant::now();
         let log_up_to_date = self.candidate_log_up_to_date(&req);
 
-        let (granted, term, current_leader_id) = {
+        let (granted, term) = {
             let mut state = self.election_state.lock();
             let lockout_ok = now >= state.vote_lockout_until;
-            let term_ok = req.term > state.current_term || (req.term == state.current_term && state.voted_for.map_or(true, |v| v == req.candidate_id));
+            let term_ok = req.term > state.current_term
+                || (req.term == state.current_term
+                    && state.voted_for.map_or(true, |v| v == req.candidate_id));
             let mut granted = false;
             if term_ok && log_up_to_date && lockout_ok {
                 if req.term > state.current_term {
@@ -741,15 +910,19 @@ impl PxLocalReplica {
                 state.vote_lockout_until = now + lease;
                 granted = true;
             }
-            (granted, state.current_term, state.leader_id)
+            (granted, state.current_term)
         };
         // Mirror the atomic snapshots if we mutated.
         if granted {
             self.current_term_atomic.store(term, Ordering::Release);
-            self.role_atomic.store(PxLocalReplicaRole::Follower.as_u8(), Ordering::Release);
+            self.role_atomic
+                .store(PxLocalReplicaRole::Follower.as_u8(), Ordering::Release);
+            // After granting a vote, reset our own election deadline so we
+            // give the candidate a chance to win quorum and start sending
+            // heartbeats before we time out and challenge it ourselves.
+            self.deadline_reset_signal.notify_one();
         }
         let (contiguous_chosen, last_chosen_term, highest_seen_slot) = self.frontier_triple();
-        let _ = current_leader_id; // not echoed in VoteReply
         info!(
             replica_l_id = self.id,
             candidate_id = req.candidate_id,
@@ -795,10 +968,17 @@ impl PxLocalReplica {
         }
         if success {
             self.current_term_atomic.store(term, Ordering::Release);
-            self.role_atomic.store(PxLocalReplicaRole::Follower.as_u8(), Ordering::Release);
-            // Step 11: timestamp the heartbeat so the metrics snapshot
-            // can report `last_heartbeat_age_ms`.
+            self.role_atomic
+                .store(PxLocalReplicaRole::Follower.as_u8(), Ordering::Release);
+            // Timestamp the heartbeat so the metrics snapshot can
+            // report `last_heartbeat_age_ms`.
             self.note_heartbeat_received();
+            // Reset the follower's election deadline (Raft heartbeat-resets-timer
+            // rule). Without this signal, a follower receiving steady heartbeats
+            // from the current leader will still spuriously fire its election
+            // deadline and challenge the leader at a higher term, causing
+            // leadership churn.
+            self.deadline_reset_signal.notify_one();
         }
         let (contiguous_chosen, last_chosen_term, highest_seen_slot) = self.frontier_triple();
         let contiguous_applied = self.contiguous_applied();
@@ -826,9 +1006,11 @@ impl PxLocalReplica {
     /// the same term; the election driver picks up the role change
     /// on its next tick and runs the full step-down sequence (cancel bulk
     /// Phase 1, stop heartbeats, drain proposals).
-    pub(crate) fn handle_step_down(&self, req: &StepDownRequestPayload) -> StepDownReply {
+    pub fn handle_step_down(&self, req: &StepDownRequestPayload) -> StepDownReply {
         let snapshot = self.election_state_snapshot();
-        let accepted = snapshot.role == PxLocalReplicaRole::Leader && self.id == req.target_leader_id && req.term == snapshot.current_term;
+        let accepted = snapshot.role == PxLocalReplicaRole::Leader
+            && self.id == req.target_leader_id
+            && req.term == snapshot.current_term;
         if accepted {
             info!(
                 replica_l_id = self.id,
@@ -837,8 +1019,8 @@ impl PxLocalReplica {
                 "on_step_down accepted (strict fence)"
             );
             // Stay in the same term; only the role flips. The election
-            // driver (Step 9.7) waits on `admin_step_down_signal` and
-            // runs the canonical step-down sequence (cancel per-tenure
+            // driver waits on `admin_step_down_signal` and runs the
+            // canonical step-down sequence (cancel per-tenure
             // token, drain proposals, log reason=Admin) on its next
             // wakeup. We still flip the role here so any concurrent
             // proposer leadership check observes Follower without

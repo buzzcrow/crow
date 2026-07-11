@@ -13,7 +13,10 @@ pub fn err_400(msg: impl Into<String>) -> (StatusCode, Json<ErrorBody>) {
 }
 
 pub fn err_500(msg: impl Into<String>) -> (StatusCode, Json<ErrorBody>) {
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorBody { error: msg.into() }))
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorBody { error: msg.into() }),
+    )
 }
 
 pub fn err_502(msg: impl Into<String>) -> (StatusCode, Json<ErrorBody>) {

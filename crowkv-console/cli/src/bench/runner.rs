@@ -178,7 +178,12 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
     }
 
     let progress_handle = match cfg.progress_interval {
-        Some(d) if !d.is_zero() => Some(spawn_progress_snapshotter(d, started_instant, deadline, counters.clone())),
+        Some(d) if !d.is_zero() => Some(spawn_progress_snapshotter(
+            d,
+            started_instant,
+            deadline,
+            counters.clone(),
+        )),
         _ => None,
     };
 
@@ -192,8 +197,21 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
             // Channel is multiplexed; cloning is cheap).
             let mut kv = pool[worker_id as usize % pool.len()].clone();
             // Per-worker rng seed = worker_id for determinism.
-            let mut gen = OpGen::new(u64::from(worker_id) ^ 0x9E37_79B9_7F4A_7C15, cfg2.key_space, cfg2.value_size);
-            run_worker(&mut kv, &mut gen, &cfg2, measure_start, deadline, worker_id, &counters).await
+            let mut gen = OpGen::new(
+                u64::from(worker_id) ^ 0x9E37_79B9_7F4A_7C15,
+                cfg2.key_space,
+                cfg2.value_size,
+            );
+            run_worker(
+                &mut kv,
+                &mut gen,
+                &cfg2,
+                measure_start,
+                deadline,
+                worker_id,
+                &counters,
+            )
+            .await
         });
         handles.push(handle);
     }
@@ -225,7 +243,11 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
     let total_ops: u64 = by_kind.values().map(|s| s.ops).sum();
     let total_errors: u64 = by_kind.values().map(|s| s.errors).sum();
     #[allow(clippy::cast_precision_loss)]
-    let error_rate = if total_ops == 0 { 0.0 } else { total_errors as f64 / total_ops as f64 };
+    let error_rate = if total_ops == 0 {
+        0.0
+    } else {
+        total_errors as f64 / total_ops as f64
+    };
 
     let run_id = cfg.run_id.clone().unwrap_or_else(|| {
         let ms = started_at.timestamp_millis();
@@ -234,7 +256,8 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
 
     // Measurement duration excludes the warmup window. For a 5 s run
     // with `warmup = 1 s`, `duration_ms` reads as ≈ 4000.
-    let measure_ms = u64::try_from(actual_duration.saturating_sub(warmup_dur).as_millis()).unwrap_or(u64::MAX);
+    let measure_ms =
+        u64::try_from(actual_duration.saturating_sub(warmup_dur).as_millis()).unwrap_or(u64::MAX);
     let warmup_ms = u64::try_from(warmup_dur.as_millis()).unwrap_or(u64::MAX);
 
     let report = BenchReport {
@@ -262,7 +285,9 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
         .clone()
         .or_else(BenchReport::default_dir)
         .ok_or_else(|| Error::Config("cannot resolve report directory (no $HOME?)".into()))?;
-    let path = report.write_to(&dir).map_err(|e| Error::Config(format!("write report: {e}")))?;
+    let path = report
+        .write_to(&dir)
+        .map_err(|e| Error::Config(format!("write report: {e}")))?;
     info!(path = %path.display(), total_ops, error_rate, "bench: finished");
 
     Ok((report, path))
@@ -380,7 +405,12 @@ async fn run_worker(
 /// Where `qps` is the **delta** ops since the previous tick divided by
 /// the actual elapsed time between ticks (so it self-corrects if the
 /// runtime can't quite hit the requested cadence).
-fn spawn_progress_snapshotter(interval: Duration, started: Instant, deadline: Instant, counters: Vec<Arc<WorkerCounters>>) -> tokio::task::JoinHandle<()> {
+fn spawn_progress_snapshotter(
+    interval: Duration,
+    started: Instant,
+    deadline: Instant,
+    counters: Vec<Arc<WorkerCounters>>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut last_ops: u64 = 0;
         let mut last_tick = started;
@@ -395,7 +425,11 @@ fn spawn_progress_snapshotter(interval: Duration, started: Instant, deadline: In
             let total_err: u64 = counters.iter().map(|c| c.errors.load(Ordering::Relaxed)).sum();
             let delta_ops = total_ops.saturating_sub(last_ops);
             let dt = now.duration_since(last_tick).as_secs_f64().max(1e-9);
-            #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            #[allow(
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss
+            )]
             let qps = (delta_ops as f64 / dt).round() as u64;
             let elapsed_s = now.duration_since(started).as_secs();
 

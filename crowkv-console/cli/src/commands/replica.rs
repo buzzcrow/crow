@@ -47,13 +47,19 @@ pub async fn run_replica_verb(cli: &Cli, verb: ReplicaVerb) -> ExitCode {
             node,
             replica_id,
         } => {
-            let body = AddReplicaBody { node_id: node, replica_id };
+            let body = AddReplicaBody {
+                node_id: node,
+                replica_id,
+            };
             match client.add_replica(store_id, group_id, &body).await {
                 Ok(v) => {
                     if cli.json {
                         return print_json(&v);
                     }
-                    println!("added replica {} on node {} (store {}, group {})", v["replica_id"], v["node_id"], store_id, group_id);
+                    println!(
+                        "added replica {} on node {} (store {}, group {})",
+                        v["replica_id"], v["node_id"], store_id, group_id
+                    );
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
@@ -62,7 +68,11 @@ pub async fn run_replica_verb(cli: &Cli, verb: ReplicaVerb) -> ExitCode {
                 }
             }
         }
-        ReplicaVerb::Remove { store_id, group_id, replica_id } => match client.remove_replica(store_id, group_id, replica_id).await {
+        ReplicaVerb::Remove {
+            store_id,
+            group_id,
+            replica_id,
+        } => match client.remove_replica(store_id, group_id, replica_id).await {
             Ok(()) => {
                 println!("removed replica {replica_id} from group {group_id} (store {store_id})");
                 ExitCode::SUCCESS

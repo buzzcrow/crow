@@ -43,7 +43,10 @@ pub struct NodeQuery {
 /// `recursive>=1` returns a wrapper `{ items, truncated_at }` where
 /// each item carries an optional `nodes` collection inflated up to the
 /// requested depth (rack → node → store → group).
-pub async fn http_list_racks(State(state): State<AppState>, Recursive(depth): Recursive) -> Json<serde_json::Value> {
+pub async fn http_list_racks(
+    State(state): State<AppState>,
+    Recursive(depth): Recursive,
+) -> Json<serde_json::Value> {
     if matches!(depth, RecursiveDepth::None) {
         let cfg = state.config.read().unwrap();
         return Json(serde_json::to_value(&cfg.racks).expect("serialize racks"));
@@ -67,8 +70,14 @@ pub async fn http_list_racks(State(state): State<AppState>, Recursive(depth): Re
 ///
 /// # Errors
 /// Returns an error if rack addition or config persistence fails.
-pub async fn http_add_rack(State(state): State<AppState>, Json(body): Json<AddRackBody>) -> Result<(StatusCode, Json<RackEntry>), (StatusCode, Json<ErrorBody>)> {
-    let entry = RackEntry { id: body.id, name: body.name };
+pub async fn http_add_rack(
+    State(state): State<AppState>,
+    Json(body): Json<AddRackBody>,
+) -> Result<(StatusCode, Json<RackEntry>), (StatusCode, Json<ErrorBody>)> {
+    let entry = RackEntry {
+        id: body.id,
+        name: body.name,
+    };
     {
         let mut cfg = state.config.write().unwrap();
         cfg.add_rack(entry.clone()).map_err(map_config_err)?;
@@ -84,7 +93,10 @@ pub async fn http_add_rack(State(state): State<AppState>, Json(body): Json<AddRa
 ///
 /// # Errors
 /// Returns an error if rack removal or config persistence fails.
-pub async fn http_remove_rack(State(state): State<AppState>, Path(id): Path<String>) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+pub async fn http_remove_rack(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
     {
         let mut cfg = state.config.write().unwrap();
         cfg.remove_rack(&id).map_err(map_config_err)?;
@@ -97,7 +109,11 @@ pub async fn http_remove_rack(State(state): State<AppState>, Path(id): Path<Stri
 ///
 /// # Panics
 /// Panics if the `RwLock` is poisoned.
-pub async fn http_list_nodes(State(state): State<AppState>, Query(q): Query<NodeQuery>, Recursive(_depth): Recursive) -> Json<Vec<NodeEntry>> {
+pub async fn http_list_nodes(
+    State(state): State<AppState>,
+    Query(q): Query<NodeQuery>,
+    Recursive(_depth): Recursive,
+) -> Json<Vec<NodeEntry>> {
     let cfg = state.config.read().unwrap();
     let nodes: Vec<NodeEntry> = match q.rack_id {
         Some(r) => cfg.nodes.iter().filter(|n| n.rack_id == r).cloned().collect(),
@@ -113,7 +129,10 @@ pub async fn http_list_nodes(State(state): State<AppState>, Query(q): Query<Node
 ///
 /// # Errors
 /// Returns an error if node addition or config persistence fails.
-pub async fn http_add_node(State(state): State<AppState>, Json(entry): Json<NodeEntry>) -> Result<(StatusCode, Json<NodeEntry>), (StatusCode, Json<ErrorBody>)> {
+pub async fn http_add_node(
+    State(state): State<AppState>,
+    Json(entry): Json<NodeEntry>,
+) -> Result<(StatusCode, Json<NodeEntry>), (StatusCode, Json<ErrorBody>)> {
     {
         let mut cfg = state.config.write().unwrap();
         cfg.add_node(entry.clone()).map_err(map_config_err)?;
@@ -129,7 +148,10 @@ pub async fn http_add_node(State(state): State<AppState>, Json(entry): Json<Node
 ///
 /// # Errors
 /// Returns an error if node removal or config persistence fails.
-pub async fn http_remove_node(State(state): State<AppState>, Path(id): Path<String>) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+pub async fn http_remove_node(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
     {
         let mut cfg = state.config.write().unwrap();
         cfg.remove_node(&id).map_err(map_config_err)?;
@@ -156,7 +178,10 @@ pub struct PingResult {
 ///
 /// # Errors
 /// Returns an error if the node is not found.
-pub async fn http_ping_node(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<PingResult>, (StatusCode, Json<ErrorBody>)> {
+pub async fn http_ping_node(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<PingResult>, (StatusCode, Json<ErrorBody>)> {
     let node = {
         let cfg = state.config.read().unwrap();
         cfg.node(&id).cloned().ok_or_else(|| {
@@ -169,10 +194,16 @@ pub async fn http_ping_node(State(state): State<AppState>, Path(id): Path<String
         })?
     };
     if !node.ssh_enabled() {
-        return Ok(Json(PingResult { ok: true, error: None }));
+        return Ok(Json(PingResult {
+            ok: true,
+            error: None,
+        }));
     }
     match crowkv_console_shared::ssh::probe(&node).await {
-        Ok(()) => Ok(Json(PingResult { ok: true, error: None })),
+        Ok(()) => Ok(Json(PingResult {
+            ok: true,
+            error: None,
+        })),
         Err(e) => Ok(Json(PingResult {
             ok: false,
             error: Some(format!("{e}")),
@@ -194,7 +225,11 @@ pub async fn http_ping_node(State(state): State<AppState>, Path(id): Path<String
 ///
 /// # Errors
 /// Returns `404` if the rack does not exist.
-pub async fn http_get_rack(State(state): State<AppState>, Path(id): Path<String>, Recursive(depth): Recursive) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+pub async fn http_get_rack(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Recursive(depth): Recursive,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
     if matches!(depth, RecursiveDepth::None) {
         let cfg = state.config.read().unwrap();
         let rack = cfg.racks.iter().find(|r| r.id == id).ok_or_else(|| {
@@ -205,7 +240,12 @@ pub async fn http_get_rack(State(state): State<AppState>, Path(id): Path<String>
                 }),
             )
         })?;
-        let node_ids: Vec<&str> = cfg.nodes.iter().filter(|n| n.rack_id == id).map(|n| n.id.as_str()).collect();
+        let node_ids: Vec<&str> = cfg
+            .nodes
+            .iter()
+            .filter(|n| n.rack_id == id)
+            .map(|n| n.id.as_str())
+            .collect();
         return Ok(Json(serde_json::json!({
             "id": rack.id,
             "name": rack.name,
@@ -261,7 +301,12 @@ pub async fn http_list_rack_nodes(
                 }),
             ));
         }
-        let nodes: Vec<NodeEntry> = cfg.nodes.iter().filter(|n| n.rack_id == rack_id).cloned().collect();
+        let nodes: Vec<NodeEntry> = cfg
+            .nodes
+            .iter()
+            .filter(|n| n.rack_id == rack_id)
+            .cloned()
+            .collect();
         return Ok(Json(serde_json::to_value(&nodes).expect("serialize nodes")));
     }
     let snap = state.monitor_cache.snapshot().await;
@@ -274,7 +319,12 @@ pub async fn http_list_rack_nodes(
             }),
         ));
     }
-    let nodes: Vec<NodeEntry> = cfg.nodes.iter().filter(|n| n.rack_id == rack_id).cloned().collect();
+    let nodes: Vec<NodeEntry> = cfg
+        .nodes
+        .iter()
+        .filter(|n| n.rack_id == rack_id)
+        .cloned()
+        .collect();
     let mut builder = PhysicalBuilder::new(&cfg, &snap);
     let limit = depth.effective();
     let views: Vec<_> = nodes.iter().map(|n| builder.build_node(n, limit)).collect();
@@ -315,7 +365,11 @@ pub async fn http_add_rack_node(
 ///
 /// # Errors
 /// Returns `404` if the node does not exist.
-pub async fn http_get_node(State(state): State<AppState>, Path(id): Path<String>, Recursive(_depth): Recursive) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+pub async fn http_get_node(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Recursive(_depth): Recursive,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
     let cfg = state.config.read().unwrap();
     let node = cfg.node(&id).ok_or_else(|| {
         (
@@ -419,19 +473,21 @@ pub async fn http_deploy_node_server(
         server_id: node_id.clone(),
         mgmt_port: body.mgmt_port,
         grpc_port: body.grpc_port,
+        election_profile: std::env::var("CROWKV_SERVER_ELECTION_PROFILE").ok(),
         binary: body.binary.clone().map(std::path::PathBuf::from),
     };
 
     let deployed = if node.ssh_enabled() {
-        let server_bin = body
-            .binary
-            .clone()
-            .unwrap_or_else(|| std::env::var("CROWKV_SERVER_BIN").unwrap_or_else(|_| "crowkv-server".to_string()));
+        let server_bin = body.binary.clone().unwrap_or_else(|| {
+            std::env::var("CROWKV_SERVER_BIN").unwrap_or_else(|_| "crowkv-server".to_string())
+        });
         crowkv_console_shared::ssh::deploy_via_ssh(&req, &node, &server_bin)
             .await
             .map_err(|e| err_502(format!("ssh deploy: {e}")))?
     } else {
-        lifecycle::deploy_local(&req, &node).await.map_err(|e| err_502(format!("local deploy: {e}")))?
+        lifecycle::deploy_local(&req, &node)
+            .await
+            .map_err(|e| err_502(format!("local deploy: {e}")))?
     };
 
     let entry = ServerEntry {
@@ -446,6 +502,7 @@ pub async fn http_deploy_node_server(
         cfg.add_server(entry).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
+    crate::mgmt::refresh_node_cache(&state, &node_id).await;
     Ok((
         StatusCode::CREATED,
         Json(DeployResult {
@@ -474,7 +531,10 @@ pub async fn http_deploy_node_server(
 /// # Errors
 /// Returns `404` if no server is registered for this node, `502` if
 /// the SSH/local restart cycle fails.
-pub async fn http_restart_node_server(State(state): State<AppState>, Path(node_id): Path<String>) -> Result<Json<DeployResult>, (StatusCode, Json<ErrorBody>)> {
+pub async fn http_restart_node_server(
+    State(state): State<AppState>,
+    Path(node_id): Path<String>,
+) -> Result<Json<DeployResult>, (StatusCode, Json<ErrorBody>)> {
     use crowkv_console_shared::lifecycle::{self, DeployRequest};
 
     let (entry, node) = {
@@ -501,12 +561,14 @@ pub async fn http_restart_node_server(State(state): State<AppState>, Path(node_i
     // Extract ports from the persisted URLs. The deploy path stamped
     // them in originally as host:port; if either fails to parse we
     // surface a 500 since that's a console-state-corruption case.
-    let mgmt_port = port_of(&entry.url).ok_or_else(|| err_500(format!("server entry has malformed mgmt_url: {}", entry.url)))?;
-    let grpc_port = entry
-        .grpc_url
-        .as_deref()
-        .and_then(port_of)
-        .ok_or_else(|| err_500(format!("server entry has malformed grpc_url: {:?}", entry.grpc_url)))?;
+    let mgmt_port = port_of(&entry.url)
+        .ok_or_else(|| err_500(format!("server entry has malformed mgmt_url: {}", entry.url)))?;
+    let grpc_port = entry.grpc_url.as_deref().and_then(port_of).ok_or_else(|| {
+        err_500(format!(
+            "server entry has malformed grpc_url: {:?}",
+            entry.grpc_url
+        ))
+    })?;
 
     if let Some(pid) = entry.pid {
         let _sent = match &node {
@@ -521,6 +583,7 @@ pub async fn http_restart_node_server(State(state): State<AppState>, Path(node_i
         server_id: node_id.clone(),
         mgmt_port,
         grpc_port,
+        election_profile: std::env::var("CROWKV_SERVER_ELECTION_PROFILE").ok(),
         binary: None,
     };
     let deployed = if node.ssh_enabled() {
@@ -529,7 +592,9 @@ pub async fn http_restart_node_server(State(state): State<AppState>, Path(node_i
             .await
             .map_err(|e| err_502(format!("ssh redeploy (restart): {e}")))?
     } else {
-        lifecycle::deploy_local(&req, &node).await.map_err(|e| err_502(format!("local redeploy (restart): {e}")))?
+        lifecycle::deploy_local(&req, &node)
+            .await
+            .map_err(|e| err_502(format!("local redeploy (restart): {e}")))?
     };
 
     let new_entry = ServerEntry {
@@ -559,7 +624,10 @@ pub async fn http_restart_node_server(State(state): State<AppState>, Path(node_i
 /// Returns `None` on any shape we don't recognise.
 fn port_of(url: &str) -> Option<u16> {
     // Strip scheme if present.
-    let stripped = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://")).unwrap_or(url);
+    let stripped = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))
+        .unwrap_or(url);
     let host_port = stripped.split('/').next().unwrap_or(stripped);
     let port_str = host_port.rsplit(':').next()?;
     port_str.parse::<u16>().ok()
@@ -578,7 +646,10 @@ pub struct StopResult {
 ///
 /// # Errors
 /// Returns an error if the server is not found or has no tracked pid.
-pub async fn http_stop_node_server(State(state): State<AppState>, Path(node_id): Path<String>) -> Result<Json<StopResult>, (StatusCode, Json<ErrorBody>)> {
+pub async fn http_stop_node_server(
+    State(state): State<AppState>,
+    Path(node_id): Path<String>,
+) -> Result<Json<StopResult>, (StatusCode, Json<ErrorBody>)> {
     use crowkv_console_shared::lifecycle;
 
     let (entry, node) = {
@@ -598,7 +669,9 @@ pub async fn http_stop_node_server(State(state): State<AppState>, Path(node_id):
         return Err(err_400(format!("server on node {node_id} has no tracked pid")));
     };
     let sent = match node {
-        Some(n) if n.ssh_enabled() => crowkv_console_shared::ssh::stop_via_ssh(&n, pid).await.map_err(|e| err_502(format!("ssh stop: {e}")))?,
+        Some(n) if n.ssh_enabled() => crowkv_console_shared::ssh::stop_via_ssh(&n, pid)
+            .await
+            .map_err(|e| err_502(format!("ssh stop: {e}")))?,
         _ => lifecycle::stop_pid(pid).map_err(|e| err_500(format!("stop_pid: {e}")))?,
     };
     {
@@ -606,6 +679,7 @@ pub async fn http_stop_node_server(State(state): State<AppState>, Path(node_id):
         let _ = cfg.remove_server_for_node(&node_id);
     }
     state.persist().map_err(map_persist_err)?;
+    state.monitor_cache.drop_node(&node_id).await;
     Ok(Json(StopResult { sent }))
 }
 
@@ -617,7 +691,10 @@ pub async fn http_stop_node_server(State(state): State<AppState>, Path(node_id):
 ///
 /// # Errors
 /// Returns `404` if no server is deployed on this node.
-pub async fn http_delete_node_server(State(state): State<AppState>, Path(node_id): Path<String>) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+pub async fn http_delete_node_server(
+    State(state): State<AppState>,
+    Path(node_id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
     use crowkv_console_shared::lifecycle;
 
     let (entry, node) = {
@@ -635,7 +712,9 @@ pub async fn http_delete_node_server(State(state): State<AppState>, Path(node_id
     };
     if let Some(pid) = entry.pid {
         let _ = match node {
-            Some(n) if n.ssh_enabled() => crowkv_console_shared::ssh::stop_via_ssh(&n, pid).await.unwrap_or(false),
+            Some(n) if n.ssh_enabled() => crowkv_console_shared::ssh::stop_via_ssh(&n, pid)
+                .await
+                .unwrap_or(false),
             _ => lifecycle::stop_pid(pid).unwrap_or(false),
         };
     }
@@ -660,7 +739,10 @@ const OPENAPI_CACHE_TTL: Duration = Duration::from_secs(300);
 ///
 /// # Errors
 /// Returns an error if no server is deployed or the upstream request fails.
-pub async fn http_node_openapi_proxy(State(state): State<AppState>, Path(node_id): Path<String>) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+pub async fn http_node_openapi_proxy(
+    State(state): State<AppState>,
+    Path(node_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
     let mgmt_url = {
         let cfg = state.config.read().unwrap();
         let entry = cfg.server_for_node(&node_id).ok_or_else(|| {
@@ -693,15 +775,32 @@ pub async fn http_node_openapi_proxy(State(state): State<AppState>, Path(node_id
         .send()
         .await
         .map_err(|e| {
-            crowkv_console_shared::ops_log::append_http(&cid, "GET", &url, 0, started.elapsed().as_millis(), Some(&format!("transport error: {e}")));
+            crowkv_console_shared::ops_log::append_http(
+                &cid,
+                "GET",
+                &url,
+                0,
+                started.elapsed().as_millis(),
+                Some(&format!("transport error: {e}")),
+            );
             err_502(format!("openapi proxy: {e}"))
         })?;
     let upstream_status = resp.status();
-    crowkv_console_shared::ops_log::append_http(&cid, "GET", &url, upstream_status.as_u16(), started.elapsed().as_millis(), None);
+    crowkv_console_shared::ops_log::append_http(
+        &cid,
+        "GET",
+        &url,
+        upstream_status.as_u16(),
+        started.elapsed().as_millis(),
+        None,
+    );
     if !upstream_status.is_success() {
         return Err(err_502(format!("openapi proxy: upstream {upstream_status}")));
     }
-    let value = resp.json::<serde_json::Value>().await.map_err(|e| err_502(format!("openapi proxy: parse: {e}")))?;
+    let value = resp
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| err_502(format!("openapi proxy: parse: {e}")))?;
 
     {
         let mut cache = state.openapi_cache.lock().unwrap();

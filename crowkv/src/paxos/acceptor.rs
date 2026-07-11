@@ -24,9 +24,9 @@ enum PxAcceptResult {
 pub struct PxAcceptor {
     slot_list: PxSlotList<PxSlotNode>,
     /// Highest slot index ever opened on this acceptor via `prepare` or
-    /// `accept`. Used as the bulk-Phase-1 ceiling input (Step 7) so a new
-    /// leader can re-Prepare every slot a previous leader may have touched
-    /// here, even ones whose values were never chosen.
+    /// `accept`. Used as the bulk-Phase-1 ceiling input so a new leader
+    /// can re-Prepare every slot a previous leader may have touched here,
+    /// even ones whose values were never chosen.
     highest_seen_slot: AtomicU64,
 }
 
@@ -45,7 +45,12 @@ impl PxAcceptor {
     fn bump_highest_seen(&self, slot: SlotIndex) {
         let mut prev = self.highest_seen_slot.load(Ordering::Relaxed);
         while slot > prev {
-            match self.highest_seen_slot.compare_exchange_weak(prev, slot, Ordering::AcqRel, Ordering::Relaxed) {
+            match self.highest_seen_slot.compare_exchange_weak(
+                prev,
+                slot,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
                 Ok(_) => break,
                 Err(actual) => prev = actual,
             }
@@ -68,7 +73,10 @@ impl PxAcceptor {
             if !current_ptr.is_null() {
                 let current = unsafe { &*current_ptr };
                 if ballot <= *current {
-                    return PxPrepareReply::Rejected { slot, current_promised: *current };
+                    return PxPrepareReply::Rejected {
+                        slot,
+                        current_promised: *current,
+                    };
                 }
             }
             let accepted = node.accepted_cloned();
@@ -111,8 +119,13 @@ impl Acceptor for PxAcceptor {
     async fn accept(&self, entry: PxLogEntry) -> PxAcceptReply {
         let slot = entry.slot;
         match self.inner_accept(&entry) {
-            Some(PxAcceptResult::Accepted { slot: s, ballot: b }) => PxAcceptReply::Accepted { slot: s, ballot: b },
-            Some(PxAcceptResult::Rejected(current)) => PxAcceptReply::Rejected { slot, current_promised: current },
+            Some(PxAcceptResult::Accepted { slot: s, ballot: b }) => {
+                PxAcceptReply::Accepted { slot: s, ballot: b }
+            }
+            Some(PxAcceptResult::Rejected(current)) => PxAcceptReply::Rejected {
+                slot,
+                current_promised: current,
+            },
             None => PxAcceptReply::Rejected {
                 slot,
                 current_promised: PxBallot::new(0, 0),

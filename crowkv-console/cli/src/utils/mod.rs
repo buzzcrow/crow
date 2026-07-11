@@ -27,8 +27,10 @@ pub fn not_implemented(what: &str) -> ExitCode {
 
 pub async fn fetch_snapshot(cli: &Cli) -> Result<ClusterSnapshot, ExitCode> {
     let targets = config::resolve_targets(cli)?;
-    crowkv_console_shared::topology::aggregate(&targets).await.map_err(|e| {
-        eprintln!("error: aggregate failed: {e}");
-        ExitCode::from(2)
-    })
+    crowkv_console_shared::topology::aggregate(&targets)
+        .await
+        .map_err(|e| {
+            eprintln!("error: aggregate failed: {e}");
+            ExitCode::from(2)
+        })
 }

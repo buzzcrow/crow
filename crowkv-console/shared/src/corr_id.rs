@@ -54,7 +54,12 @@ pub fn current_or_new() -> String {
 #[must_use]
 pub fn generate() -> String {
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    let nanos = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos())).unwrap_or(u64::MAX);
+    let nanos = u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos()),
+    )
+    .unwrap_or(u64::MAX);
     let pid = u64::from(std::process::id());
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let t = (nanos & 0xFFFF_FFFF) as u32;
@@ -93,7 +98,11 @@ mod tests {
     fn generated_id_is_16_lowercase_hex_chars() {
         let id = generate();
         assert_eq!(id.len(), 16, "expected 16 chars, got {id:?}");
-        assert!(id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()), "non-lowercase-hex in {id:?}");
+        assert!(
+            id.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "non-lowercase-hex in {id:?}"
+        );
     }
 
     #[test]

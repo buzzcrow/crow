@@ -36,6 +36,7 @@ Hot paths: `propose`, `accept`, `learn`, `kv_get`, `kv_put`, `kv_delete`, `kv_ba
 9. **Naming** — `Px` prefix for Paxos types. `&self` when interior mutability suffices.
 10. **Visibility** — minimise `pub`; use `pub(crate)` / `pub(super)`. Test helpers `#[cfg(test)]` or test feature.
 11. **Debug** — all public structs implement `Debug`. Manual: identity fields + `finish_non_exhaustive()`.
+12. **Tests** — integration tests only, under each crate's `tests/<topic>.rs`. No new inline `#[cfg(test)] mod tests`; migrate existing inline tests when you next touch the file. Shared helpers live in `tests/testkit/`. Entry stubs in `tests/<suite>.rs`.
 
 ## Steps
 
@@ -45,6 +46,7 @@ grep -rn '#\[derive(.*Clone' src/
 grep -rn 'Arc<' src/
 grep -rn '\.unwrap()' src/
 grep -rn 'fn .*(&self' src/
+grep -rn '#\[cfg\(test\)\]' src/
 cargo clippy --all-targets -- -D warnings
 cargo build && cargo test
 ```
@@ -61,3 +63,4 @@ cargo build && cargo test
 - Changing getter return type (`Arc<T>` → `&T`) without updating callers/tests.
 - Removing a dep used only by generated code (check `OUT_DIR`).
 - `&T` across `.await` is unsafe once moved into spawned task — must be `Arc<T>` then.
+- Inline `#[cfg(test)] mod tests` instead of `tests/<topic>.rs`.

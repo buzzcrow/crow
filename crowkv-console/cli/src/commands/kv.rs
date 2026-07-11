@@ -105,7 +105,12 @@ pub async fn run_kv_verb(cli: &Cli, verb: KvVerb) -> ExitCode {
             )
             .await
         }
-        KvVerb::Get { store_id, group_id, key, hex } => kv_get(cli, store_id, group_id, &key, hex).await,
+        KvVerb::Get {
+            store_id,
+            group_id,
+            key,
+            hex,
+        } => kv_get(cli, store_id, group_id, &key, hex).await,
         KvVerb::Delete {
             store_id,
             group_id,
@@ -156,7 +161,17 @@ async fn kv_put(cli: &Cli, store_id: u64, group_id: u64, args: KvPutArgs<'_>) ->
         Ok(c) => c,
         Err(c) => return c,
     };
-    match client.kv_put(store_id, group_id, args.key.as_bytes(), &value_bytes, args.client_id, args.seq).await {
+    match client
+        .kv_put(
+            store_id,
+            group_id,
+            args.key.as_bytes(),
+            &value_bytes,
+            args.client_id,
+            args.seq,
+        )
+        .await
+    {
         Ok(out) => {
             if cli.json {
                 return print_json(&serde_json::json!({"ok": true, "revision": out.revision}));
@@ -224,7 +239,10 @@ async fn kv_delete(cli: &Cli, store_id: u64, group_id: u64, key: &str, client_id
         Ok(c) => c,
         Err(c) => return c,
     };
-    match client.kv_delete(store_id, group_id, key.as_bytes(), client_id, seq).await {
+    match client
+        .kv_delete(store_id, group_id, key.as_bytes(), client_id, seq)
+        .await
+    {
         Ok(out) => {
             if cli.json {
                 return print_json(&serde_json::json!({"ok": true, "revision": out.revision}));

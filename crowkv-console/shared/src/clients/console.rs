@@ -145,11 +145,17 @@ impl ConsoleClient {
         while base.ends_with('/') {
             base.pop();
         }
-        let inner = reqwest::Client::builder().timeout(Duration::from_secs(15)).build().map_err(|e| Error::UpstreamRpc {
-            node_id: base.clone(),
-            status: format!("client build failed: {e}"),
-        })?;
-        Ok(Self { base_url: base, inner })
+        let inner = reqwest::Client::builder()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .map_err(|e| Error::UpstreamRpc {
+                node_id: base.clone(),
+                status: format!("client build failed: {e}"),
+            })?;
+        Ok(Self {
+            base_url: base,
+            inner,
+        })
     }
 
     #[must_use]
@@ -204,7 +210,8 @@ impl ConsoleClient {
     /// # Errors
     /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
     pub async fn add_node(&self, rack_id: &str, entry: &NodeEntry) -> Result<NodeEntry> {
-        self.post_json(&format!("/api/racks/{rack_id}/nodes"), entry).await
+        self.post_json(&format!("/api/racks/{rack_id}/nodes"), entry)
+            .await
     }
 
     /// `DELETE /api/nodes/:node_id`.
@@ -220,7 +227,8 @@ impl ConsoleClient {
     /// # Errors
     /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
     pub async fn ping_node(&self, node_id: &str) -> Result<PingResult> {
-        self.post_json(&format!("/api/nodes/{node_id}/ping"), &serde_json::json!({})).await
+        self.post_json(&format!("/api/nodes/{node_id}/ping"), &serde_json::json!({}))
+            .await
     }
 
     // ── Physical: server lifecycle (one server per node) ──────────
@@ -238,8 +246,13 @@ impl ConsoleClient {
     ///
     /// # Errors
     /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
-    pub async fn deploy_node_server(&self, node_id: &str, body: &DeployNodeServerBody) -> Result<DeployResult> {
-        self.post_json(&format!("/api/nodes/{node_id}/server/deploy"), body).await
+    pub async fn deploy_node_server(
+        &self,
+        node_id: &str,
+        body: &DeployNodeServerBody,
+    ) -> Result<DeployResult> {
+        self.post_json(&format!("/api/nodes/{node_id}/server/deploy"), body)
+            .await
     }
 
     /// `POST /api/nodes/:node_id/server/stop`.
@@ -247,7 +260,11 @@ impl ConsoleClient {
     /// # Errors
     /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
     pub async fn stop_node_server(&self, node_id: &str) -> Result<StopResult> {
-        self.post_json(&format!("/api/nodes/{node_id}/server/stop"), &serde_json::json!({})).await
+        self.post_json(
+            &format!("/api/nodes/{node_id}/server/stop"),
+            &serde_json::json!({}),
+        )
+        .await
     }
 
     /// Restart the `crowkv-server` running on `node_id`. Stops the
@@ -257,7 +274,11 @@ impl ConsoleClient {
     /// # Errors
     /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
     pub async fn restart_node_server(&self, node_id: &str) -> Result<DeployResult> {
-        self.post_json(&format!("/api/nodes/{node_id}/server/restart"), &serde_json::json!({})).await
+        self.post_json(
+            &format!("/api/nodes/{node_id}/server/restart"),
+            &serde_json::json!({}),
+        )
+        .await
     }
 
     // ── Logical store plane ────────────────────────────────────────
@@ -335,7 +356,8 @@ impl ConsoleClient {
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
     pub async fn list_replicas(&self, sid: u64, gid: u64) -> Result<Vec<ReplicaView>> {
-        self.get_json(&format!("/api/stores/{sid}/groups/{gid}/replicas")).await
+        self.get_json(&format!("/api/stores/{sid}/groups/{gid}/replicas"))
+            .await
     }
 
     /// `GET /api/stores/:s/groups/:g/replicas/:rid`.
@@ -343,7 +365,8 @@ impl ConsoleClient {
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
     pub async fn get_replica(&self, sid: u64, gid: u64, rid: u64) -> Result<ReplicaView> {
-        self.get_json(&format!("/api/stores/{sid}/groups/{gid}/replicas/{rid}")).await
+        self.get_json(&format!("/api/stores/{sid}/groups/{gid}/replicas/{rid}"))
+            .await
     }
 
     /// `POST /api/stores/:s/groups/:g/replicas`.
@@ -351,7 +374,8 @@ impl ConsoleClient {
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
     pub async fn add_replica(&self, sid: u64, gid: u64, body: &AddReplicaBody) -> Result<Value> {
-        self.post_json(&format!("/api/stores/{sid}/groups/{gid}/replicas"), body).await
+        self.post_json(&format!("/api/stores/{sid}/groups/{gid}/replicas"), body)
+            .await
     }
 
     /// `DELETE /api/stores/:s/groups/:g/replicas/:rid`.
@@ -359,7 +383,8 @@ impl ConsoleClient {
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
     pub async fn remove_replica(&self, sid: u64, gid: u64, rid: u64) -> Result<()> {
-        self.delete_path(&format!("/api/stores/{sid}/groups/{gid}/replicas/{rid}")).await
+        self.delete_path(&format!("/api/stores/{sid}/groups/{gid}/replicas/{rid}"))
+            .await
     }
 
     // ── KV data plane ──────────────────────────────────────────────
@@ -369,7 +394,10 @@ impl ConsoleClient {
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
     pub async fn kv_get(&self, sid: u64, gid: u64, key: &[u8]) -> Result<KvGetResponse> {
-        let path = format!("/api/stores/{sid}/groups/{gid}/kv/get?key_hex={}", hex::encode(key));
+        let path = format!(
+            "/api/stores/{sid}/groups/{gid}/kv/get?key_hex={}",
+            hex::encode(key)
+        );
         self.get_json(&path).await
     }
 
@@ -377,7 +405,15 @@ impl ConsoleClient {
     ///
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
-    pub async fn kv_put(&self, sid: u64, gid: u64, key: &[u8], value: &[u8], client_id: u64, seq: u64) -> Result<KvWriteResponse> {
+    pub async fn kv_put(
+        &self,
+        sid: u64,
+        gid: u64,
+        key: &[u8],
+        value: &[u8],
+        client_id: u64,
+        seq: u64,
+    ) -> Result<KvWriteResponse> {
         let body = KvWriteBody {
             key: None,
             key_hex: Some(hex::encode(key)),
@@ -386,14 +422,22 @@ impl ConsoleClient {
             client_id,
             seq,
         };
-        self.post_json(&format!("/api/stores/{sid}/groups/{gid}/kv/put"), &body).await
+        self.post_json(&format!("/api/stores/{sid}/groups/{gid}/kv/put"), &body)
+            .await
     }
 
     /// `POST /api/stores/:s/groups/:g/kv/delete`.
     ///
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
-    pub async fn kv_delete(&self, sid: u64, gid: u64, key: &[u8], client_id: u64, seq: u64) -> Result<KvWriteResponse> {
+    pub async fn kv_delete(
+        &self,
+        sid: u64,
+        gid: u64,
+        key: &[u8],
+        client_id: u64,
+        seq: u64,
+    ) -> Result<KvWriteResponse> {
         let body = KvWriteBody {
             key: None,
             key_hex: Some(hex::encode(key)),
@@ -402,7 +446,8 @@ impl ConsoleClient {
             client_id,
             seq,
         };
-        self.post_json(&format!("/api/stores/{sid}/groups/{gid}/kv/delete"), &body).await
+        self.post_json(&format!("/api/stores/{sid}/groups/{gid}/kv/delete"), &body)
+            .await
     }
 
     /// `GET /api/stores/:s/groups/:g/kv/scan?prefix_hex=…&limit=N`.
@@ -410,7 +455,10 @@ impl ConsoleClient {
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
     pub async fn kv_scan(&self, sid: u64, gid: u64, prefix: &[u8], limit: u32) -> Result<KvScanResponse> {
-        let path = format!("/api/stores/{sid}/groups/{gid}/kv/scan?prefix_hex={}&limit={limit}", hex::encode(prefix));
+        let path = format!(
+            "/api/stores/{sid}/groups/{gid}/kv/scan?prefix_hex={}&limit={limit}",
+            hex::encode(prefix)
+        );
         self.get_json(&path).await
     }
 
@@ -426,25 +474,70 @@ impl ConsoleClient {
         let url = format!("{}{path}", self.base_url);
         let cid = crate::corr_id::current_or_new();
         let started = std::time::Instant::now();
-        let resp = self.inner.get(&url).header(crate::corr_id::HEADER, &cid).send().await.map_err(|e| {
-            crate::ops_log::append_http(&cid, "GET", &url, 0, started.elapsed().as_millis(), Some(&format!("transport error: {e}")));
-            self.rpc_err(format!("GET {path}: {e}"))
-        })?;
+        let resp = self
+            .inner
+            .get(&url)
+            .header(crate::corr_id::HEADER, &cid)
+            .send()
+            .await
+            .map_err(|e| {
+                crate::ops_log::append_http(
+                    &cid,
+                    "GET",
+                    &url,
+                    0,
+                    started.elapsed().as_millis(),
+                    Some(&format!("transport error: {e}")),
+                );
+                self.rpc_err(format!("GET {path}: {e}"))
+            })?;
         let status = resp.status();
-        crate::ops_log::append_http(&cid, "GET", &url, status.as_u16(), started.elapsed().as_millis(), None);
+        crate::ops_log::append_http(
+            &cid,
+            "GET",
+            &url,
+            status.as_u16(),
+            started.elapsed().as_millis(),
+            None,
+        );
         self.decode(resp, path).await
     }
 
-    async fn post_json<B: Serialize, T: serde::de::DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
+    async fn post_json<B: Serialize, T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
         let url = format!("{}{path}", self.base_url);
         let cid = crate::corr_id::current_or_new();
         let started = std::time::Instant::now();
-        let resp = self.inner.post(&url).header(crate::corr_id::HEADER, &cid).json(body).send().await.map_err(|e| {
-            crate::ops_log::append_http(&cid, "POST", &url, 0, started.elapsed().as_millis(), Some(&format!("transport error: {e}")));
-            self.rpc_err(format!("POST {path}: {e}"))
-        })?;
+        let resp = self
+            .inner
+            .post(&url)
+            .header(crate::corr_id::HEADER, &cid)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| {
+                crate::ops_log::append_http(
+                    &cid,
+                    "POST",
+                    &url,
+                    0,
+                    started.elapsed().as_millis(),
+                    Some(&format!("transport error: {e}")),
+                );
+                self.rpc_err(format!("POST {path}: {e}"))
+            })?;
         let status = resp.status();
-        crate::ops_log::append_http(&cid, "POST", &url, status.as_u16(), started.elapsed().as_millis(), None);
+        crate::ops_log::append_http(
+            &cid,
+            "POST",
+            &url,
+            status.as_u16(),
+            started.elapsed().as_millis(),
+            None,
+        );
         self.decode(resp, path).await
     }
 
@@ -452,12 +545,32 @@ impl ConsoleClient {
         let url = format!("{}{path}", self.base_url);
         let cid = crate::corr_id::current_or_new();
         let started = std::time::Instant::now();
-        let resp = self.inner.delete(&url).header(crate::corr_id::HEADER, &cid).send().await.map_err(|e| {
-            crate::ops_log::append_http(&cid, "DELETE", &url, 0, started.elapsed().as_millis(), Some(&format!("transport error: {e}")));
-            self.rpc_err(format!("DELETE {path}: {e}"))
-        })?;
+        let resp = self
+            .inner
+            .delete(&url)
+            .header(crate::corr_id::HEADER, &cid)
+            .send()
+            .await
+            .map_err(|e| {
+                crate::ops_log::append_http(
+                    &cid,
+                    "DELETE",
+                    &url,
+                    0,
+                    started.elapsed().as_millis(),
+                    Some(&format!("transport error: {e}")),
+                );
+                self.rpc_err(format!("DELETE {path}: {e}"))
+            })?;
         let status = resp.status();
-        crate::ops_log::append_http(&cid, "DELETE", &url, status.as_u16(), started.elapsed().as_millis(), None);
+        crate::ops_log::append_http(
+            &cid,
+            "DELETE",
+            &url,
+            status.as_u16(),
+            started.elapsed().as_millis(),
+            None,
+        );
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
             return Err(self.rpc_err(format!("DELETE {path}: HTTP {status}: {body}")));
@@ -471,7 +584,9 @@ impl ConsoleClient {
             let body = resp.text().await.unwrap_or_default();
             return Err(self.rpc_err(format!("{path}: HTTP {status}: {body}")));
         }
-        resp.json::<T>().await.map_err(|e| self.rpc_err(format!("{path}: decode: {e}")))
+        resp.json::<T>()
+            .await
+            .map_err(|e| self.rpc_err(format!("{path}: decode: {e}")))
     }
 
     fn rpc_err(&self, status: impl Into<String>) -> Error {

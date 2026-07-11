@@ -49,9 +49,14 @@ pub enum PxPaxosPhase {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PxRetryAction {
-    RetrySameSlot { min_round: Option<u64>, force_prepare: bool },
+    RetrySameSlot {
+        min_round: Option<u64>,
+        force_prepare: bool,
+    },
     RetryNextSlot,
-    Redirect { leader_hint: String },
+    Redirect {
+        leader_hint: String,
+    },
     FailRetryable,
     FailFatal,
 }
@@ -60,7 +65,9 @@ impl PxPaxosError {
     #[must_use]
     pub fn retry_action(&self) -> PxRetryAction {
         match self {
-            Self::NotLeader { leader_hint } => PxRetryAction::Redirect { leader_hint: leader_hint.clone() },
+            Self::NotLeader { leader_hint } => PxRetryAction::Redirect {
+                leader_hint: leader_hint.clone(),
+            },
             Self::PrepareRejected { promised } => PxRetryAction::RetrySameSlot {
                 min_round: Some(promised.round),
                 force_prepare: true,
@@ -75,7 +82,9 @@ impl PxPaxosError {
                 force_prepare: false,
             },
             Self::Busy => PxRetryAction::FailRetryable,
-            Self::TermStale { .. } | Self::LeaseUnrenewable | Self::InternalInvariantViolation { .. } => PxRetryAction::FailFatal,
+            Self::TermStale { .. } | Self::LeaseUnrenewable | Self::InternalInvariantViolation { .. } => {
+                PxRetryAction::FailFatal
+            }
         }
     }
 

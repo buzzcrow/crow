@@ -2,7 +2,7 @@ use std::io as std_io;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::AtomicU16;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -28,26 +28,35 @@ impl ServerHandle {
                     return Ok(());
                 }
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        Err(std_io::Error::new(std_io::ErrorKind::TimedOut, "server was not ready before timeout"))
+        Err(std_io::Error::new(
+            std_io::ErrorKind::TimedOut,
+            "server was not ready before timeout",
+        ))
     }
 }
 
 impl Drop for ServerHandle {
     fn drop(&mut self) {
         let pid = self.child.id();
-        let _ = std::process::Command::new("kill").arg("-TERM").arg(pid.to_string()).status();
+        let _ = std::process::Command::new("kill")
+            .arg("-TERM")
+            .arg(pid.to_string())
+            .status();
         let start = Instant::now();
         loop {
             match self.child.try_wait() {
                 Ok(Some(_)) | Err(_) => break,
                 Ok(None) => {
-                    if start.elapsed() >= Duration::from_secs(5) {
-                        let _ = std::process::Command::new("kill").arg("-KILL").arg(pid.to_string()).status();
+                    if start.elapsed() >= Duration::from_secs(1) {
+                        let _ = std::process::Command::new("kill")
+                            .arg("-KILL")
+                            .arg(pid.to_string())
+                            .status();
                         break;
                     }
-                    std::thread::sleep(Duration::from_millis(50));
+                    std::thread::sleep(Duration::from_millis(10));
                 }
             }
         }
@@ -61,7 +70,9 @@ pub async fn start_test_server(args: &[&str]) -> std_io::Result<ServerHandle> {
     let tid = std::thread::current().id();
     let offset = PORT_OFFSET.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // Hash the thread ID into a number we can use
-    let tid_hash = format!("{tid:?}").bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(u64::from(b)));
+    let tid_hash = format!("{tid:?}")
+        .bytes()
+        .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(u64::from(b)));
     let seed = (u64::from(pid) ^ tid_hash ^ u64::from(offset)) % 10000;
     let port = 20000 + seed as u16;
 
@@ -74,13 +85,18 @@ pub async fn start_test_server(args: &[&str]) -> std_io::Result<ServerHandle> {
         .arg(port.to_string())
         .arg("--ports")
         .arg("0")
+        .arg("--election-profile")
+        .arg("test")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
 
     // Use a thread to read stdout and find the bound management address
     let stdout = child.stdout.take().expect("stdout should be captured");
+    let stderr = child.stderr.take().expect("stderr should be captured");
     let (tx, rx) = mpsc::channel();
+    let stderr_buf = Arc::new(Mutex::new(Vec::<String>::new()));
+    let stderr_buf_clone = Arc::clone(&stderr_buf);
 
     thread::spawn(move || {
         use std::io::{BufRead, BufReader};
@@ -103,6 +119,14 @@ pub async fn start_test_server(args: &[&str]) -> std_io::Result<ServerHandle> {
         // The main loop will timeout with a better error message
     });
 
+    thread::spawn(move || {
+        use std::io::{BufRead, BufReader};
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().map_while(Result::ok) {
+            stderr_buf_clone.lock().unwrap().push(line);
+        }
+    });
+
     // Wait for address from thread (with timeout)
     let deadline = Instant::now() + Duration::from_secs(10);
     #[allow(clippy::never_loop)]
@@ -111,10 +135,25 @@ pub async fn start_test_server(args: &[&str]) -> std_io::Result<ServerHandle> {
         match rx.recv_timeout(remaining) {
             Ok(addr) => break addr,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                return Err(std_io::Error::new(std_io::ErrorKind::TimedOut, "management_addr was not found in stdout before timeout"));
+                return Err(std_io::Error::new(
+                    std_io::ErrorKind::TimedOut,
+                    "management_addr was not found in stdout before timeout",
+                ));
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Err(std_io::Error::new(std_io::ErrorKind::BrokenPipe, "stdout reader thread disconnected"));
+                // The stdout reader exited early, which usually means the process
+                // crashed. Wait briefly for it to exit so we can capture stderr.
+                let _ = child.wait();
+                let stderr_lines = stderr_buf.lock().unwrap();
+                let msg = if stderr_lines.is_empty() {
+                    "stdout reader thread disconnected (process exited early)".to_string()
+                } else {
+                    format!(
+                        "stdout reader thread disconnected; stderr:\n{}",
+                        stderr_lines.join("\n")
+                    )
+                };
+                return Err(std_io::Error::new(std_io::ErrorKind::BrokenPipe, msg));
             }
         }
     };
@@ -134,7 +173,10 @@ fn crowkv_server_bin() -> PathBuf {
 
     // Walk up from test executable (target/debug/deps/test-name) to target/debug/
     let mut path = std::env::current_exe().expect("current test executable path");
-    while path.file_name().is_some_and(|name| name != "debug" && name != "release") {
+    while path
+        .file_name()
+        .is_some_and(|name| name != "debug" && name != "release")
+    {
         path.pop();
     }
     // Now at target/debug/ or target/release/, push the binary name

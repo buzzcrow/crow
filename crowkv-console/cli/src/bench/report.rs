@@ -246,5 +246,8 @@ impl Default for OpStats {
 /// Helper for the runner: build the per-op map keyed by `OpKind::label`.
 #[must_use]
 pub fn per_op_map(stats: BTreeMap<OpKind, OpStats>) -> BTreeMap<String, OpReport> {
-    stats.into_iter().map(|(k, v)| (k.label().to_string(), v.into_report())).collect()
+    stats
+        .into_iter()
+        .map(|(k, v)| (k.label().to_string(), v.into_report()))
+        .collect()
 }

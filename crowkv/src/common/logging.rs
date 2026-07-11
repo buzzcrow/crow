@@ -1,3 +1,8 @@
+//! `tracing-subscriber` initialization for the server and console
+//! binaries. Provides file-only and file+console variants, each
+//! returning a [`LogGuards`] handle whose `Drop` flushes the
+//! non-blocking appender.
+
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,7 +21,12 @@ pub struct LogGuards {
 /// # Errors
 /// Returns `Err` if the log directory cannot be created due to permission issues or invalid path.
 pub fn init_file_logging(log_dir: impl AsRef<Path>, process_name: &str) -> Result<LogGuards, String> {
-    std::fs::create_dir_all(log_dir.as_ref()).map_err(|e| format!("failed to create log directory {}; next step: check path permissions: {e}", log_dir.as_ref().display()))?;
+    std::fs::create_dir_all(log_dir.as_ref()).map_err(|e| {
+        format!(
+            "failed to create log directory {}; next step: check path permissions: {e}",
+            log_dir.as_ref().display()
+        )
+    })?;
 
     let started_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -47,8 +57,16 @@ pub fn init_file_logging(log_dir: impl AsRef<Path>, process_name: &str) -> Resul
 ///
 /// # Errors
 /// Returns `Err` if the log directory cannot be created due to permission issues or invalid path.
-pub fn init_file_and_console_logging(log_dir: impl AsRef<Path>, process_name: &str) -> Result<LogGuards, String> {
-    std::fs::create_dir_all(log_dir.as_ref()).map_err(|e| format!("failed to create log directory {}; next step: check path permissions: {e}", log_dir.as_ref().display()))?;
+pub fn init_file_and_console_logging(
+    log_dir: impl AsRef<Path>,
+    process_name: &str,
+) -> Result<LogGuards, String> {
+    std::fs::create_dir_all(log_dir.as_ref()).map_err(|e| {
+        format!(
+            "failed to create log directory {}; next step: check path permissions: {e}",
+            log_dir.as_ref().display()
+        )
+    })?;
 
     let started_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)

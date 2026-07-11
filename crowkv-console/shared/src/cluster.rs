@@ -117,6 +117,14 @@ pub enum NodeHealth {
 pub struct NodeStore {
     pub node_id: NodeId,
     pub store_id: StoreId,
+    /// gRPC listen address (`host:port`) of this `PxKvStore`. Each store
+    /// binds its own port, so the bootstrap grpc port reported in
+    /// `ServerEntry::grpc_url` is only correct for the bootstrap store
+    /// (id 1). Operator-created stores get a random port and must wire
+    /// Paxos remotes to *this* address. `None` until the next monitor
+    /// poll fills it in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen_addr: Option<String>,
     pub groups: Vec<NodeGroup>,
 }
 
@@ -193,15 +201,36 @@ pub struct GroupSummary {
 
 /// Cluster-wide Paxos group. Replicas are unified — no local / remote
 /// split; each entry tagged with the hosting `node_id`.
+///
+/// The current leader is not a top-level field: each `ReplicaView`
+/// already carries the hosting node's `role`, so consumers identify the
+/// leader as `replicas.iter().find(|r| r.role == ReplicaRole::Leader)`.
+/// This avoids the previous redundancy where `leader` and per-replica
+/// roles could disagree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GroupView {
     pub store_id: StoreId,
     pub group_id: GroupId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub leader: Option<ReplicaId>,
     pub replicas: Vec<ReplicaView>,
     #[serde(default)]
     pub state: GroupHealth,
+}
+
+impl GroupView {
+    /// Convenience accessor: the replica self-reporting `Leader` role,
+    /// if any. Returns `None` when no replica reports as leader (the
+    /// group is in the middle of an election or the monitor has not
+    /// finished probing).
+    #[must_use]
+    pub fn leader(&self) -> Option<&ReplicaView> {
+        self.replicas.iter().find(|r| r.role == ReplicaRole::Leader)
+    }
+
+    /// Convenience accessor: the leader's replica id, if any.
+    #[must_use]
+    pub fn leader_id(&self) -> Option<ReplicaId> {
+        self.leader().map(|r| r.replica_id)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -257,7 +286,6 @@ mod tests {
         let v = GroupView {
             store_id: 1,
             group_id: 2,
-            leader: Some(10),
             replicas: vec![ReplicaView {
                 replica_id: 10,
                 node_id: "n1".into(),
@@ -267,8 +295,8 @@ mod tests {
             state: GroupHealth::Healthy,
         };
         let s = serde_json::to_string(&v).unwrap();
-        assert!(s.contains("\"leader\":10"));
         assert!(s.contains("\"node_id\":\"n1\""));
         assert!(s.contains("\"role\":\"leader\""));
+        assert_eq!(v.leader_id(), Some(10));
     }
 }

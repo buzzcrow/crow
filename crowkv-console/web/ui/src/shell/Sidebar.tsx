@@ -67,16 +67,28 @@ export function Sidebar({ racks = [], stores = [], loading, onNodeClick, onNodeC
         type: 'Store',
         icon: <Database className="tw-h-4 tw-w-4 tw-text-muted" />,
         health: 'Healthy', // TODO: Calculate aggregate health
-        children: store.groups?.map(group => ({
-          id: `group-${group.group_id}`,
-          rawId: String(group.group_id),
-          label: String(group.group_id),
-          type: 'Group',
-          icon: <Users className="tw-h-4 tw-w-4 tw-text-muted" />,
-          health: (group.health || 'Unknown') as 'Healthy' | 'Degraded' | 'Failed' | 'Unknown',
-          parentIds: { store_id: String(store.store_id) },
-          // TODO: Add replicas
-        })),
+        children: store.groups?.map(group => {
+          const replicas = 'replicas' in group && Array.isArray((group as any).replicas) ? (group as any).replicas : [];
+          return {
+            id: `group-${group.group_id}`,
+            rawId: String(group.group_id),
+            label: String(group.group_id),
+            type: 'Group',
+            icon: <Users className="tw-h-4 tw-w-4 tw-text-muted" />,
+            health: (group.health || (group as any).state || 'Unknown') as 'Healthy' | 'Degraded' | 'Failed' | 'Unknown',
+            parentIds: { store_id: String(store.store_id) },
+            children: replicas.map((replica: any) => ({
+              id: `replica-${replica.replica_id}`,
+              rawId: String(replica.replica_id),
+              label: String(replica.replica_id),
+              type: 'Replica' as const,
+              icon: <HardDrive className="tw-h-4 tw-w-4 tw-text-muted" />,
+              health: (replica.state || 'Unknown') as 'Healthy' | 'Degraded' | 'Failed' | 'Unknown',
+              role: replica.role,
+              parentIds: { store_id: String(store.store_id), group_id: String(group.group_id), node_id: String(replica.node_id) },
+            })),
+          };
+        }),
       }));
     }
   }, [viewMode, racks, stores]);
@@ -107,6 +119,18 @@ export function Sidebar({ racks = [], stores = [], loading, onNodeClick, onNodeC
 
     return treeNodes.map(filterNode).filter(Boolean) as TreeNode[];
   }, [treeNodes, filterQuery]);
+
+  const expandedTreeNodeIds = useMemo(() => {
+    const ids: string[] = [];
+    const collect = (nodes: TreeNode[]) => {
+      for (const node of nodes) {
+        ids.push(node.id);
+        if (node.children) collect(node.children);
+      }
+    };
+    collect(filteredTreeNodes);
+    return ids;
+  }, [filteredTreeNodes]);
 
   // Convert favorites/recent items to tree nodes for display
   const favoriteNodes = useMemo<TreeNode[]>(() => {
@@ -262,6 +286,7 @@ export function Sidebar({ racks = [], stores = [], loading, onNodeClick, onNodeC
             variant="ghost"
             size="sm"
             onClick={onAdd}
+            aria-label={viewMode === ViewMode.Physical ? 'Add Rack' : 'Add Store'}
             className="tw-h-7 tw-px-2"
           >
             <Plus className="tw-h-3.5 tw-w-3.5" />
@@ -274,7 +299,7 @@ export function Sidebar({ racks = [], stores = [], loading, onNodeClick, onNodeC
         {filteredTreeNodes.length > 0 ? (
           <Tree
             nodes={filteredTreeNodes}
-            defaultExpandedIds={filteredTreeNodes.map(n => n.id)}
+            defaultExpandedIds={expandedTreeNodeIds}
             onNodeClick={onNodeClick}
             onNodeContextMenu={onNodeContextMenu}
           />

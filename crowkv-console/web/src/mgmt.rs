@@ -15,12 +15,15 @@ use crowkv_console_shared::mgmt::{AddGroupRequest, AddStoreRequest, RemoteReplic
 use serde::Deserialize;
 
 use crate::expand::Recursive;
+use tracing::warn;
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
 fn mgmt_url_for_node(state: &AppState, node_id: &str) -> Result<String, (StatusCode, Json<ErrorBody>)> {
     let cfg = state.config.read().unwrap();
-    let entry = cfg.server_for_node(node_id).ok_or_else(|| err_502(format!("node {node_id} has no deployed server")))?;
+    let entry = cfg
+        .server_for_node(node_id)
+        .ok_or_else(|| err_502(format!("node {node_id} has no deployed server")))?;
     Ok(entry.url.clone())
 }
 
@@ -42,7 +45,10 @@ pub(crate) async fn refresh_node_cache(state: &AppState, node_id: &str) {
                     stores: crowkv_console_shared::monitor::legacy_topology_to_node_stores(node_id, &stores),
                     last_error: None,
                 };
-                state.monitor_cache.set_node_report(node_id.to_string(), rec).await;
+                state
+                    .monitor_cache
+                    .set_node_report(node_id.to_string(), rec)
+                    .await;
             }
         }
     }
@@ -54,7 +60,10 @@ pub(crate) async fn refresh_node_cache(state: &AppState, node_id: &str) {
 ///
 /// # Panics
 /// Panics if the `RwLock` is poisoned (inside `snapshot()`).
-pub async fn http_list_stores(State(state): State<AppState>, Recursive(_depth): Recursive) -> Json<Vec<StoreView>> {
+pub async fn http_list_stores(
+    State(state): State<AppState>,
+    Recursive(_depth): Recursive,
+) -> Json<Vec<StoreView>> {
     let snap = state.monitor_cache.snapshot().await;
     let mut seen: std::collections::BTreeMap<u64, StoreView> = std::collections::BTreeMap::new();
     for (node_id, rec) in &snap {
@@ -103,7 +112,10 @@ pub struct CreateStoreBody {
 ///
 /// # Errors
 /// Returns an error if no nodes are available or any upstream RPC fails.
-pub async fn http_add_store(State(state): State<AppState>, Json(body): Json<CreateStoreBody>) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorBody>)> {
+pub async fn http_add_store(
+    State(state): State<AppState>,
+    Json(body): Json<CreateStoreBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorBody>)> {
     let target_nodes = if body.nodes.is_empty() {
         let cfg = state.config.read().unwrap();
         let first = cfg
@@ -142,27 +154,45 @@ pub async fn http_add_store(State(state): State<AppState>, Json(body): Json<Crea
         }
     }
 
+    // Leader selection is fully automatic via Paxos election (see
+    // `cluster::election::spawn`). The per-group election driver in
+    // `PxKvStore::add_group` converges to a single leader within a few
+    // election deadlines for 1-, 2-, or N-replica groups; the console
+    // observes the elected leader through the monitor cache snapshot.
+
     // Refresh cache for all affected nodes.
     for nid in &succeeded {
         refresh_node_cache(&state, nid).await;
     }
 
-    Ok((StatusCode::CREATED, Json(serde_json::json!({ "store_id": body.store_id, "nodes": succeeded }))))
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "store_id": body.store_id, "nodes": succeeded })),
+    ))
 }
 
 /// `GET /api/stores/:store_id`. Aggregated store view from cache.
 ///
 /// # Errors
 /// Returns `404` if the store is not found.
-pub async fn http_get_store(State(state): State<AppState>, Path(sid): Path<u64>, Recursive(_depth): Recursive) -> Result<Json<StoreView>, (StatusCode, Json<ErrorBody>)> {
-    state.monitor_cache.resolve_store(sid).await.map(Json).ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ErrorBody {
-                error: format!("store {sid} not found"),
-            }),
-        )
-    })
+pub async fn http_get_store(
+    State(state): State<AppState>,
+    Path(sid): Path<u64>,
+    Recursive(_depth): Recursive,
+) -> Result<Json<StoreView>, (StatusCode, Json<ErrorBody>)> {
+    state
+        .monitor_cache
+        .resolve_store(sid)
+        .await
+        .map(Json)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("store {sid} not found"),
+                }),
+            )
+        })
 }
 
 /// `DELETE /api/stores/:store_id`. Delete the store across every hosting
@@ -173,7 +203,10 @@ pub async fn http_get_store(State(state): State<AppState>, Path(sid): Path<u64>,
 ///
 /// # Errors
 /// Returns `404` if the store is not found in the cache.
-pub async fn http_remove_store(State(state): State<AppState>, Path(sid): Path<u64>) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+pub async fn http_remove_store(
+    State(state): State<AppState>,
+    Path(sid): Path<u64>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
     let view = state.monitor_cache.resolve_store(sid).await.ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
@@ -201,7 +234,11 @@ pub async fn http_remove_store(State(state): State<AppState>, Path(sid): Path<u6
 ///
 /// # Errors
 /// Returns `404` if the store is not found.
-pub async fn http_list_groups(State(state): State<AppState>, Path(sid): Path<u64>, Recursive(_depth): Recursive) -> Result<Json<Vec<GroupSummary>>, (StatusCode, Json<ErrorBody>)> {
+pub async fn http_list_groups(
+    State(state): State<AppState>,
+    Path(sid): Path<u64>,
+    Recursive(_depth): Recursive,
+) -> Result<Json<Vec<GroupSummary>>, (StatusCode, Json<ErrorBody>)> {
     let view = state.monitor_cache.resolve_store(sid).await.ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
@@ -264,6 +301,13 @@ pub async fn http_add_group(
         }
     }
 
+    // Refresh the cache for each node before wiring remotes so the per-store
+    // `listen_addr` (each `PxKvStore` binds its own port) is known to the
+    // monitor cache used by `grpc_endpoint_for_node`.
+    for (nid, _) in &succeeded {
+        refresh_node_cache(&state, nid).await;
+    }
+
     // Phase 2: wire remote replicas. Each node gets every other node's
     // replica as a remote.
     for (i, (nid, _rid)) in succeeded.iter().enumerate() {
@@ -273,25 +317,18 @@ pub async fn http_add_group(
         let Ok(client) = build_server_client(url) else {
             continue;
         };
-        let remotes: Vec<RemoteReplicaInfo> = succeeded
-            .iter()
-            .enumerate()
-            .filter(|(j, _)| *j != i)
-            .map(|(_, (peer_nid, peer_rid))| {
-                let peer_endpoint = {
-                    let cfg = state.config.read().unwrap();
-                    cfg.server_for_node(peer_nid)
-                        .and_then(|s| s.grpc_url.clone())
-                        .unwrap_or_else(|| format!("unknown:{peer_nid}"))
-                };
-                RemoteReplicaInfo {
-                    replica_id: *peer_rid,
-                    endpoint: peer_endpoint,
-                }
-            })
-            .collect();
+        let mut remotes: Vec<RemoteReplicaInfo> = Vec::new();
+        for (j, (peer_nid, peer_rid)) in succeeded.iter().enumerate() {
+            if j == i {
+                continue;
+            }
+            remotes.push(RemoteReplicaInfo {
+                replica_id: *peer_rid,
+                endpoint: grpc_endpoint_for_node(&state, peer_nid, sid).await,
+            });
+        }
         if !remotes.is_empty() {
-            let _ = client.add_remotes(sid, body.group_id, &remotes).await;
+            let _ = client.add_remote_replicas(sid, body.group_id, &remotes).await;
         }
     }
 
@@ -318,14 +355,40 @@ pub async fn http_get_group(
     Path((sid, gid)): Path<(u64, u64)>,
     Recursive(_depth): Recursive,
 ) -> Result<Json<GroupView>, (StatusCode, Json<ErrorBody>)> {
-    state.monitor_cache.resolve_group(sid, gid).await.map(Json).ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ErrorBody {
-                error: format!("group {gid} in store {sid} not found"),
-            }),
-        )
-    })
+    // Refresh the cache for every node currently believed to host this
+    // store so role / leader info reflects the most recent topology
+    // (elections happen asynchronously after the last write that
+    // refreshed the cache; without this read-side refresh the response
+    // would otherwise show stale `Follower` roles for the actual
+    // leader). Bounded by the number of nodes hosting the store.
+    let node_ids: Vec<String> = {
+        let snap = state.monitor_cache.snapshot().await;
+        snap.iter()
+            .filter_map(|(nid, rec)| {
+                if rec.stores.contains_key(&sid) {
+                    Some(nid.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
+    for nid in &node_ids {
+        refresh_node_cache(&state, nid).await;
+    }
+    state
+        .monitor_cache
+        .resolve_group(sid, gid)
+        .await
+        .map(Json)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("group {gid} in store {sid} not found"),
+                }),
+            )
+        })
 }
 
 /// `DELETE /api/stores/:store_id/groups/:group_id`. Delete the group
@@ -336,7 +399,10 @@ pub async fn http_get_group(
 ///
 /// # Errors
 /// Returns `404` if the group is not found in the cache.
-pub async fn http_remove_group(State(state): State<AppState>, Path((sid, gid)): Path<(u64, u64)>) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+pub async fn http_remove_group(
+    State(state): State<AppState>,
+    Path((sid, gid)): Path<(u64, u64)>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
     let view = state.monitor_cache.resolve_group(sid, gid).await.ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
@@ -365,11 +431,19 @@ pub async fn http_remove_group(State(state): State<AppState>, Path((sid, gid)): 
 /// then delete the local group on `target_node`. If
 /// `created_store_on_target` is true, also drop the store on
 /// `target_node` (we created it atomically in step 1).
-async fn rollback_replica(state: &AppState, sid: u64, gid: u64, rid: u64, peer_nodes: &[String], target_node: &str, created_store_on_target: bool) {
+async fn rollback_replica(
+    state: &AppState,
+    sid: u64,
+    gid: u64,
+    rid: u64,
+    peer_nodes: &[String],
+    target_node: &str,
+    created_store_on_target: bool,
+) {
     for nid in peer_nodes {
         if let Ok(u) = mgmt_url_for_node(state, nid) {
             if let Ok(c) = build_server_client(u) {
-                let _ = c.remove_remote(sid, gid, rid).await;
+                let _ = c.remove_remote_replica(sid, gid, rid).await;
             }
         }
     }
@@ -385,11 +459,50 @@ async fn rollback_replica(state: &AppState, sid: u64, gid: u64, rid: u64, peer_n
     }
 }
 
-fn grpc_endpoint_for_node(state: &AppState, node_id: &str) -> String {
+/// Return the bare `host:port` of the gRPC listener that hosts `store_id`
+/// on `node_id`. Each `PxKvStore` on a `crowkv-server` binds its own
+/// random port, so the bootstrap `ServerEntry::grpc_url` only points at
+/// the store created at process start (id 1). Operator-created stores
+/// must be looked up via the monitor cache, which carries the actual
+/// `listen_addr` reported by the server's `/topology` endpoint.
+///
+/// `0.0.0.0` listen addresses are remapped to `127.0.0.1` so other
+/// processes on the same host can dial the channel.
+async fn grpc_endpoint_for_node(state: &AppState, node_id: &str, store_id: u64) -> String {
+    let snap = state.monitor_cache.snapshot().await;
+    if let Some(rec) = snap.get(node_id) {
+        if let Some(addr) = rec.stores.get(&store_id).and_then(|s| s.listen_addr.clone()) {
+            return strip_scheme(remap_zero_host(&addr));
+        }
+    }
+    // Fallback to the bootstrap gRPC port from the deploy record. Correct
+    // for store id 1; only used when the monitor cache hasn't observed
+    // the operator-created store yet.
+    warn!(
+        node_id,
+        store_id, "grpc_endpoint_for_node: cache miss, falling back to bootstrap grpc_url"
+    );
     let cfg = state.config.read().unwrap();
-    cfg.server_for_node(node_id)
+    let raw = cfg
+        .server_for_node(node_id)
         .and_then(|s| s.grpc_url.clone())
-        .unwrap_or_else(|| format!("unknown:{node_id}"))
+        .unwrap_or_else(|| format!("unknown:{node_id}"));
+    strip_scheme(raw)
+}
+
+fn strip_scheme(s: String) -> String {
+    if let Some(stripped) = s.strip_prefix("http://").or_else(|| s.strip_prefix("https://")) {
+        stripped.to_string()
+    } else {
+        s
+    }
+}
+
+fn remap_zero_host(addr: &str) -> String {
+    // `PxKvStore` binds to `0.0.0.0:port`; remap to a routable loopback
+    // address for cross-process connections on the same host.
+    addr.strip_prefix("0.0.0.0:")
+        .map_or_else(|| addr.to_string(), |port| format!("127.0.0.1:{port}"))
 }
 
 /// `GET /api/stores/:s/groups/:g/replicas`. Unified replica list from
@@ -431,14 +544,18 @@ pub async fn http_get_replica(
             }),
         )
     })?;
-    let replica = view.replicas.iter().find(|r| r.replica_id == rid).ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ErrorBody {
-                error: format!("replica {rid} not found in group {gid}"),
-            }),
-        )
-    })?;
+    let replica = view
+        .replicas
+        .iter()
+        .find(|r| r.replica_id == rid)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("replica {rid} not found in group {gid}"),
+                }),
+            )
+        })?;
     Ok(Json(replica.clone()))
 }
 
@@ -463,6 +580,7 @@ pub struct AddReplicaBody {
 /// # Errors
 /// Returns an error if the group doesn't exist, the node has no server,
 /// or any upstream RPC fails.
+#[allow(clippy::too_many_lines)]
 pub async fn http_add_replica(
     State(state): State<AppState>,
     Path((sid, gid)): Path<(u64, u64)>,
@@ -479,7 +597,9 @@ pub async fn http_add_replica(
     })?;
 
     // Auto-assign replica_id if not provided: max existing + 1.
-    let new_rid = body.replica_id.unwrap_or_else(|| view.replicas.iter().map(|r| r.replica_id).max().unwrap_or(0) + 1);
+    let new_rid = body
+        .replica_id
+        .unwrap_or_else(|| view.replicas.iter().map(|r| r.replica_id).max().unwrap_or(0) + 1);
 
     // Check for conflict.
     if view.replicas.iter().any(|r| r.replica_id == new_rid) {
@@ -534,37 +654,70 @@ pub async fn http_add_replica(
         true
     };
 
+    // Refresh the target node's cache so the new store's `listen_addr` is
+    // known before we wire it as a remote on existing peers. Each
+    // `PxKvStore` on a `crowkv-server` binds its own port, so we cannot
+    // rely on the bootstrap `grpc_url` configured at deploy time.
+    refresh_node_cache(&state, target_node).await;
+
     // Step 2: Register the new replica as a remote on every existing peer.
     let new_remote = RemoteReplicaInfo {
         replica_id: new_rid,
-        endpoint: grpc_endpoint_for_node(&state, target_node),
+        endpoint: grpc_endpoint_for_node(&state, target_node, sid).await,
     };
     let mut wired_peers: Vec<String> = Vec::new();
     for existing in &view.replicas {
-        let Ok(peer_url) = mgmt_url_for_node(&state, &existing.node_id) else { continue };
-        let Ok(peer_client) = build_server_client(peer_url) else { continue };
-        if let Err(e) = peer_client.add_remotes(sid, gid, std::slice::from_ref(&new_remote)).await {
-            rollback_replica(&state, sid, gid, new_rid, &wired_peers, target_node, created_store_on_target).await;
-            return Err(err_502(format!("wire new replica on peer {}: {e}", existing.node_id)));
+        let Ok(peer_url) = mgmt_url_for_node(&state, &existing.node_id) else {
+            continue;
+        };
+        let Ok(peer_client) = build_server_client(peer_url) else {
+            continue;
+        };
+        if let Err(e) = peer_client
+            .add_remote_replicas(sid, gid, std::slice::from_ref(&new_remote))
+            .await
+        {
+            rollback_replica(
+                &state,
+                sid,
+                gid,
+                new_rid,
+                &wired_peers,
+                target_node,
+                created_store_on_target,
+            )
+            .await;
+            return Err(err_502(format!(
+                "wire new replica on peer {}: {e}",
+                existing.node_id
+            )));
         }
         wired_peers.push(existing.node_id.clone());
     }
 
     // Step 3: Register every existing peer as a remote on the new replica.
-    let existing_remotes: Vec<RemoteReplicaInfo> = view
-        .replicas
-        .iter()
-        .map(|r| RemoteReplicaInfo {
+    let mut existing_remotes: Vec<RemoteReplicaInfo> = Vec::with_capacity(view.replicas.len());
+    for r in &view.replicas {
+        existing_remotes.push(RemoteReplicaInfo {
             replica_id: r.replica_id,
-            endpoint: grpc_endpoint_for_node(&state, &r.node_id),
-        })
-        .collect();
+            endpoint: grpc_endpoint_for_node(&state, &r.node_id, sid).await,
+        });
+    }
     if !existing_remotes.is_empty() {
         let new_url = mgmt_url_for_node(&state, target_node)?;
         let new_client = build_server_client(new_url)?;
-        if let Err(e) = new_client.add_remotes(sid, gid, &existing_remotes).await {
+        if let Err(e) = new_client.add_remote_replicas(sid, gid, &existing_remotes).await {
             let all_peers: Vec<String> = view.replicas.iter().map(|r| r.node_id.clone()).collect();
-            rollback_replica(&state, sid, gid, new_rid, &all_peers, target_node, created_store_on_target).await;
+            rollback_replica(
+                &state,
+                sid,
+                gid,
+                new_rid,
+                &all_peers,
+                target_node,
+                created_store_on_target,
+            )
+            .await;
             return Err(err_502(format!("wire existing peers on new replica: {e}")));
         }
     }
@@ -596,7 +749,10 @@ pub async fn http_add_replica(
 ///
 /// # Errors
 /// Returns `404` if the group or replica is not found.
-pub async fn http_remove_replica(State(state): State<AppState>, Path((sid, gid, rid)): Path<(u64, u64, u64)>) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+pub async fn http_remove_replica(
+    State(state): State<AppState>,
+    Path((sid, gid, rid)): Path<(u64, u64, u64)>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
     let view = state.monitor_cache.resolve_group(sid, gid).await.ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
@@ -606,14 +762,18 @@ pub async fn http_remove_replica(State(state): State<AppState>, Path((sid, gid, 
         )
     })?;
 
-    let target = view.replicas.iter().find(|r| r.replica_id == rid).ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ErrorBody {
-                error: format!("replica {rid} not found in group {gid}"),
-            }),
-        )
-    })?;
+    let target = view
+        .replicas
+        .iter()
+        .find(|r| r.replica_id == rid)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("replica {rid} not found in group {gid}"),
+                }),
+            )
+        })?;
     let target_node = target.node_id.clone();
 
     // Step 1: Deregister this replica as a remote from every peer.
@@ -623,7 +783,7 @@ pub async fn http_remove_replica(State(state): State<AppState>, Path((sid, gid, 
         }
         if let Ok(url) = mgmt_url_for_node(&state, &peer.node_id) {
             if let Ok(client) = build_server_client(url) {
-                let _ = client.remove_remote(sid, gid, rid).await;
+                let _ = client.remove_remote_replica(sid, gid, rid).await;
             }
         }
     }

@@ -1,3 +1,11 @@
+//! Static configuration profiles for the Paxos retry budget, server
+//! lifecycle, and per-group leader-election / heartbeat / lease tunables.
+//!
+//! All values here are compile-time `const`s exposed via `DEFAULT`
+//! constants and `for_tests()` constructors; runtime overrides happen at
+//! the call sites (`crowkv-server` CLI, testkit harness) before the
+//! group is wrapped in an `Arc`.
+
 /// Paxos retry configuration (static, global).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PaxosConfig {
@@ -11,6 +19,21 @@ impl PaxosConfig {
         max_paxos_retries: 3,
         max_slot_retries: 3,
         retry_base_backoff_ms: 5,
+    };
+}
+
+/// Server-level configuration (static, global).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ServerConfig {
+    /// Per-layer graceful-shutdown timeout in milliseconds.
+    /// Shutdowns that take longer almost always indicate a stuck task and are
+    /// better force-cleaned than waited on.
+    pub shutdown_timeout_ms: u64,
+}
+
+impl ServerConfig {
+    pub const DEFAULT: Self = Self {
+        shutdown_timeout_ms: 10_000,
     };
 }
 

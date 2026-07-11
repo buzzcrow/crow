@@ -8,7 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let json = crowkv_server::management::openapi_json();
+    let json = crowkv_server::mgmt_api::openapi_json();
     std::fs::write(out, serde_json::to_string_pretty(&json)?)?;
     println!("{}", out.display());
     Ok(())

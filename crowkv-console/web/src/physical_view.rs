@@ -169,7 +169,12 @@ impl<'a> PhysicalBuilder<'a> {
         self.path.push(format!("rack:{}", rack.id));
         let children: Vec<&NodeEntry> = self.cfg.nodes.iter().filter(|n| n.rack_id == rack.id).collect();
         let nodes = if remaining >= 1 {
-            Some(children.iter().map(|n| self.build_node(n, remaining - 1)).collect())
+            Some(
+                children
+                    .iter()
+                    .map(|n| self.build_node(n, remaining - 1))
+                    .collect(),
+            )
         } else {
             if !children.is_empty() {
                 self.truncation.record(self.path.clone());
@@ -241,7 +246,10 @@ impl<'a> PhysicalBuilder<'a> {
             None
         };
         self.path.pop();
-        StoreOnNodeView { store_id: ns.store_id, groups }
+        StoreOnNodeView {
+            store_id: ns.store_id,
+            groups,
+        }
     }
 }
 
@@ -274,6 +282,7 @@ mod tests {
         let ns = NodeStore {
             node_id: "n1".into(),
             store_id: 7,
+            listen_addr: None,
             groups: vec![NodeGroup {
                 node_id: "n1".into(),
                 store_id: 7,
@@ -308,7 +317,10 @@ mod tests {
         let (cfg, snap) = seeded_state();
         let mut b = PhysicalBuilder::new(&cfg, &snap);
         let view = b.build_rack(&cfg.racks[0], 2);
-        let stores = view.nodes.as_ref().unwrap()[0].stores.as_ref().expect("stores inlined");
+        let stores = view.nodes.as_ref().unwrap()[0]
+            .stores
+            .as_ref()
+            .expect("stores inlined");
         assert_eq!(stores.len(), 1);
         assert_eq!(stores[0].store_id, 7);
         assert!(stores[0].groups.is_none(), "depth 2 stops before groups");
@@ -319,7 +331,10 @@ mod tests {
         let (cfg, snap) = seeded_state();
         let mut b = PhysicalBuilder::new(&cfg, &snap);
         let view = b.build_rack(&cfg.racks[0], 3);
-        let groups = view.nodes.as_ref().unwrap()[0].stores.as_ref().unwrap()[0].groups.as_ref().expect("groups inlined");
+        let groups = view.nodes.as_ref().unwrap()[0].stores.as_ref().unwrap()[0]
+            .groups
+            .as_ref()
+            .expect("groups inlined");
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].group_id, 9);
         assert_eq!(groups[0].replica_id, 100);
@@ -340,7 +355,10 @@ mod tests {
         // depth=1: nodes inlined but stores clipped under n1.
         let _view = b.build_rack(&cfg.racks[0], 1);
         let trunc = b.into_truncation();
-        assert_eq!(trunc.paths, vec![vec!["rack:r1".to_string(), "node:n1".to_string()]]);
+        assert_eq!(
+            trunc.paths,
+            vec![vec!["rack:r1".to_string(), "node:n1".to_string()]]
+        );
     }
 
     #[test]
@@ -384,6 +402,9 @@ mod tests {
         let snap = BTreeMap::new();
         let mut b = PhysicalBuilder::new(&cfg, &snap);
         let _view = b.build_rack(&cfg.racks[0], 2);
-        assert!(b.into_truncation().is_empty(), "no cache → no children → no truncation");
+        assert!(
+            b.into_truncation().is_empty(),
+            "no cache → no children → no truncation"
+        );
     }
 }

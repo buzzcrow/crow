@@ -24,7 +24,10 @@ pub mod ssh;
 pub mod topology;
 
 pub use config::{ConsoleConfig, NodeEntry, RackEntry, ServerEntry};
-pub use snapshot::{ClusterSnapshot, GroupView, HealthInfo, KvStoreView, LocalReplicaView, RemoteMetrics, RemoteReplicaView, ServerSnapshot, StoreView};
+pub use snapshot::{
+    ClusterSnapshot, GroupView, HealthInfo, KvStoreView, LocalReplicaView, RemoteMetrics, RemoteReplicaView,
+    ServerSnapshot, StoreView,
+};
 
 /// Library version string, exposed for diagnostic / `--version` use.
 #[must_use]

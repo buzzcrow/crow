@@ -99,7 +99,10 @@ impl PxLearner {
             if slot <= prev {
                 return false;
             }
-            match self.last_chosen_slot.compare_exchange_weak(prev, slot, Ordering::AcqRel, Ordering::Relaxed) {
+            match self
+                .last_chosen_slot
+                .compare_exchange_weak(prev, slot, Ordering::AcqRel, Ordering::Relaxed)
+            {
                 Ok(_) => {
                     let _guard = self.out_of_order.lock();
                     self.last_chosen_term.store(term, Ordering::Release);
@@ -120,7 +123,10 @@ impl PxLearner {
             if slot <= prev {
                 break;
             }
-            match self.last_chosen_slot.compare_exchange_weak(prev, slot, Ordering::AcqRel, Ordering::Relaxed) {
+            match self
+                .last_chosen_slot
+                .compare_exchange_weak(prev, slot, Ordering::AcqRel, Ordering::Relaxed)
+            {
                 Ok(_) => {
                     // Race-free under `&self`: lock the out-of-order map for the
                     // term write so we don't race with a concurrent advance.

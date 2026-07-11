@@ -53,13 +53,19 @@ impl PxSlotNode {
         if ptr.is_null() {
             return;
         }
-        let node = Box::into_raw(Box::new(RetiredPtr { ptr, next: null_mut() }));
+        let node = Box::into_raw(Box::new(RetiredPtr {
+            ptr,
+            next: null_mut(),
+        }));
         loop {
             let old = head.load(Ordering::Acquire);
             unsafe {
                 (*node).next = old;
             }
-            if head.compare_exchange(old, node, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            if head
+                .compare_exchange(old, node, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
                 break;
             }
         }
@@ -102,9 +108,16 @@ impl PxSlotNode {
     ///
     /// # Errors
     /// Returns `Err(actual)` if the current value does not match `expected`.
-    pub fn cas_promised(&self, expected: *mut PxBallot, new: PxBallot) -> Result<*mut PxBallot, *mut PxBallot> {
+    pub fn cas_promised(
+        &self,
+        expected: *mut PxBallot,
+        new: PxBallot,
+    ) -> Result<*mut PxBallot, *mut PxBallot> {
         let new_ptr = Box::into_raw(Box::new(new));
-        match self.promised.compare_exchange(expected, new_ptr, Ordering::AcqRel, Ordering::Acquire) {
+        match self
+            .promised
+            .compare_exchange(expected, new_ptr, Ordering::AcqRel, Ordering::Acquire)
+        {
             Ok(old) => {
                 Self::push_retired(&self.retired_promised, old);
                 Ok(new_ptr)
@@ -138,9 +151,16 @@ impl PxSlotNode {
     ///
     /// # Errors
     /// Returns `Err(actual)` if the current value does not match `expected`.
-    pub fn cas_accepted(&self, expected: *mut PxLogEntry, new: PxLogEntry) -> Result<*mut PxLogEntry, *mut PxLogEntry> {
+    pub fn cas_accepted(
+        &self,
+        expected: *mut PxLogEntry,
+        new: PxLogEntry,
+    ) -> Result<*mut PxLogEntry, *mut PxLogEntry> {
         let new_ptr = Box::into_raw(Box::new(new));
-        match self.accepted.compare_exchange(expected, new_ptr, Ordering::AcqRel, Ordering::Acquire) {
+        match self
+            .accepted
+            .compare_exchange(expected, new_ptr, Ordering::AcqRel, Ordering::Acquire)
+        {
             Ok(old) => {
                 Self::push_retired(&self.retired_accepted, old);
                 Ok(new_ptr)

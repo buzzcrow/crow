@@ -205,10 +205,14 @@ impl ConsoleConfig {
     /// # Errors
     /// Returns `Error::NotFound` if no entry has that id.
     pub fn remove_server(&mut self, id: &str) -> Result<ServerEntry> {
-        let pos = self.servers.iter().position(|s| s.id == id).ok_or_else(|| Error::NotFound {
-            kind: "server".into(),
-            id: id.to_string(),
-        })?;
+        let pos = self
+            .servers
+            .iter()
+            .position(|s| s.id == id)
+            .ok_or_else(|| Error::NotFound {
+                kind: "server".into(),
+                id: id.to_string(),
+            })?;
         Ok(self.servers.remove(pos))
     }
 
@@ -245,10 +249,14 @@ impl ConsoleConfig {
                 id: format!("{id}: rack still referenced by nodes"),
             });
         }
-        let pos = self.racks.iter().position(|r| r.id == id).ok_or_else(|| Error::NotFound {
-            kind: "rack".into(),
-            id: id.to_string(),
-        })?;
+        let pos = self
+            .racks
+            .iter()
+            .position(|r| r.id == id)
+            .ok_or_else(|| Error::NotFound {
+                kind: "rack".into(),
+                id: id.to_string(),
+            })?;
         Ok(self.racks.remove(pos))
     }
 
@@ -285,10 +293,14 @@ impl ConsoleConfig {
                 id: format!("{id}: node still hosts a deployed server"),
             });
         }
-        let pos = self.nodes.iter().position(|n| n.id == id).ok_or_else(|| Error::NotFound {
-            kind: "node".into(),
-            id: id.to_string(),
-        })?;
+        let pos = self
+            .nodes
+            .iter()
+            .position(|n| n.id == id)
+            .ok_or_else(|| Error::NotFound {
+                kind: "node".into(),
+                id: id.to_string(),
+            })?;
         Ok(self.nodes.remove(pos))
     }
 
@@ -307,7 +319,9 @@ impl ConsoleConfig {
     /// Look up the server deployed on a given node.
     #[must_use]
     pub fn server_for_node(&self, node_id: &str) -> Option<&ServerEntry> {
-        self.servers.iter().find(|s| s.node_id.as_deref() == Some(node_id))
+        self.servers
+            .iter()
+            .find(|s| s.node_id.as_deref() == Some(node_id))
     }
 
     /// Remove the server entry deployed on a given node.
@@ -315,10 +329,14 @@ impl ConsoleConfig {
     /// # Errors
     /// `Error::NotFound` if no server is deployed on this node.
     pub fn remove_server_for_node(&mut self, node_id: &str) -> Result<ServerEntry> {
-        let pos = self.servers.iter().position(|s| s.node_id.as_deref() == Some(node_id)).ok_or_else(|| Error::NotFound {
-            kind: "server".into(),
-            id: format!("no server on node {node_id}"),
-        })?;
+        let pos = self
+            .servers
+            .iter()
+            .position(|s| s.node_id.as_deref() == Some(node_id))
+            .ok_or_else(|| Error::NotFound {
+                kind: "server".into(),
+                id: format!("no server on node {node_id}"),
+            })?;
         Ok(self.servers.remove(pos))
     }
 
@@ -339,8 +357,10 @@ mod tests {
         let path = dir.join("console.toml");
 
         let mut cfg = ConsoleConfig::default();
-        cfg.add_server(ServerEntry::new("a", "http://127.0.0.1:9910")).unwrap();
-        cfg.add_server(ServerEntry::new("b", "http://127.0.0.1:9911")).unwrap();
+        cfg.add_server(ServerEntry::new("a", "http://127.0.0.1:9910"))
+            .unwrap();
+        cfg.add_server(ServerEntry::new("b", "http://127.0.0.1:9911"))
+            .unwrap();
 
         cfg.save(&path).unwrap();
         let loaded = ConsoleConfig::load(&path).unwrap();
@@ -383,7 +403,10 @@ mod tests {
         let unique = format!(
             "crowkv-console-cfg-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         );
         let dir = base.join(unique);
         std::fs::create_dir_all(&dir).unwrap();

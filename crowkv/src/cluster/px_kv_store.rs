@@ -1,17 +1,19 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use crate::cluster::group::{ProposeResult, PxGroup};
-use crate::cluster::health::HealthReport;
+use crate::cluster::group_election::LeaderElection;
 use crate::cluster::kv_server::GrpcTaskState;
 use crate::cluster::kv_store::KvStore;
-use crate::cluster::shutdown::ShutdownReport;
-use crate::cluster::snapshot::StoreSnapshot;
+use crate::cluster::status::{StatusLevel, StoreStatus};
 use crate::common::optional_u64;
+use crate::common::report::OperationReport;
 use dashmap::DashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
+
+use parking_lot::Mutex;
 use tracing::{debug, info};
 
 pub struct PxKvStore {
@@ -24,48 +26,70 @@ pub struct PxKvStore {
 }
 
 impl KvStore for PxKvStore {
-    async fn kv_get(&self, group_id: u64, key: Vec<u8>, request_id: u64, request_create_ms: u64) -> crate::rpc::KvResponse {
+    async fn kv_get(
+        &self,
+        group_id: u64,
+        key: &[u8],
+        request_id: u64,
+        request_create_ms: u64,
+    ) -> crate::rpc::KvResponse {
         let Some(group) = self.get_group(group_id) else {
             return missing_group_response(request_id, request_create_ms);
         };
 
-        let value = group.local_replica().learner.store().get(&key).map(|v| v.value().clone());
+        let value = group
+            .local_replica()
+            .learner
+            .store()
+            .get(key)
+            .map(|v| v.value().clone());
 
         match value {
-            Some(v) => crate::rpc::KvResponse {
-                version: 1,
-                ok: true,
-                revision: 0, // TODO: track revision for reads
-                error: String::new(),
-                not_found: false,
-                not_leader_hint: String::new(),
-                request_id,
-                request_create_ms,
-                value: v,
-            },
-            None => crate::rpc::KvResponse {
-                version: 1,
-                ok: false,
-                revision: 0,
-                error: String::new(),
-                not_found: true,
-                not_leader_hint: String::new(),
-                request_id,
-                request_create_ms,
-                value: Vec::new(),
-            },
+            Some(v) => crate::rpc::KvResponse::ok_value(v, request_id, request_create_ms),
+            None => crate::rpc::KvResponse::not_found(request_id, request_create_ms),
         }
     }
 
-    async fn kv_put(&self, group_id: u64, key: Vec<u8>, value: Vec<u8>, client_id: u64, seq: u64, request_id: u64, request_create_ms: u64) -> crate::rpc::KvResponse {
+    async fn kv_put(
+        &self,
+        group_id: u64,
+        key: &[u8],
+        value: &[u8],
+        client_id: u64,
+        seq: u64,
+        request_id: u64,
+        request_create_ms: u64,
+    ) -> crate::rpc::KvResponse {
         let payload = Self::encode_kv_payload(&[(key, Some(value))]);
-        self.propose_and_respond(group_id, payload, optional_u64(client_id), Some(seq), request_id, request_create_ms)
-            .await
+        self.propose_and_respond(
+            group_id,
+            payload,
+            optional_u64(client_id),
+            Some(seq),
+            request_id,
+            request_create_ms,
+        )
+        .await
     }
-    async fn kv_delete(&self, group_id: u64, key: Vec<u8>, client_id: u64, seq: u64, request_id: u64, request_create_ms: u64) -> crate::rpc::KvResponse {
+    async fn kv_delete(
+        &self,
+        group_id: u64,
+        key: &[u8],
+        client_id: u64,
+        seq: u64,
+        request_id: u64,
+        request_create_ms: u64,
+    ) -> crate::rpc::KvResponse {
         let payload = Self::encode_kv_payload(&[(key, None)]);
-        self.propose_and_respond(group_id, payload, optional_u64(client_id), Some(seq), request_id, request_create_ms)
-            .await
+        self.propose_and_respond(
+            group_id,
+            payload,
+            optional_u64(client_id),
+            Some(seq),
+            request_id,
+            request_create_ms,
+        )
+        .await
     }
     async fn kv_batch_write(
         &self,
@@ -77,11 +101,25 @@ impl KvStore for PxKvStore {
         request_create_ms: u64,
     ) -> crate::rpc::KvResponse {
         let payload = Self::encode_kv_batch_items(&items);
-        self.propose_and_respond(group_id, payload, optional_u64(client_id), Some(seq), request_id, request_create_ms)
-            .await
+        self.propose_and_respond(
+            group_id,
+            payload,
+            optional_u64(client_id),
+            Some(seq),
+            request_id,
+            request_create_ms,
+        )
+        .await
     }
 
-    async fn kv_scan(&self, group_id: u64, prefix: Vec<u8>, limit: u32, request_id: u64, request_create_ms: u64) -> crate::rpc::KvScanResponse {
+    async fn kv_scan(
+        &self,
+        group_id: u64,
+        prefix: &[u8],
+        limit: u32,
+        request_id: u64,
+        request_create_ms: u64,
+    ) -> crate::rpc::KvScanResponse {
         let Some(group) = self.get_group(group_id) else {
             return crate::rpc::KvScanResponse {
                 version: 1,
@@ -94,23 +132,53 @@ impl KvStore for PxKvStore {
             };
         };
 
-        // Local-replica iteration. We snapshot the matching keys into a
-        // `Vec`, sort lexicographically, then materialize values for the
-        // bounded prefix slice. Sorting up front gives a stable order so
-        // pagination via `prefix` extension behaves predictably.
+        // Local-replica iteration. When `limit > 0` we keep only the
+        // smallest `limit` matching keys via a bounded max-heap, holding
+        // at most `limit + 1` keys at once instead of materializing and
+        // sorting every match. When `limit == 0` we return all matches
+        // and fall back to a single full sort. Sorted output keeps
+        // pagination via `prefix` extension predictable.
+        //
+        // DashMap does not expose a snapshot iterator: shard guards drop
+        // between `iter` and `get`, so a key can be deleted in between.
+        // We tolerate that by skipping any post-iteration miss.
         let store = group.local_replica().learner.store();
-        let mut matched_keys: Vec<Vec<u8>> = store
-            .iter()
-            .filter_map(|kv| if kv.key().starts_with(prefix.as_slice()) { Some(kv.key().clone()) } else { None })
-            .collect();
-        matched_keys.sort();
-
-        let cap = if limit == 0 { matched_keys.len() } else { (limit as usize).min(matched_keys.len()) };
-        let truncated = limit != 0 && matched_keys.len() > cap;
-        let mut items: Vec<crate::rpc::KvScanItem> = Vec::with_capacity(cap);
-        for key in matched_keys.into_iter().take(cap) {
-            // Re-fetch under the snapshot's lock; if the key was deleted
-            // between iter and get we just skip it.
+        let cap = limit as usize;
+        let (matched_keys, total_seen): (Vec<Vec<u8>>, usize) = if limit == 0 {
+            let mut keys: Vec<Vec<u8>> = store
+                .iter()
+                .filter_map(|kv| kv.key().starts_with(prefix).then(|| kv.key().clone()))
+                .collect();
+            keys.sort();
+            let len = keys.len();
+            (keys, len)
+        } else {
+            // Max-heap keyed on `Vec<u8>` (lexicographic). Push every
+            // candidate, then pop the largest once size exceeds `cap`.
+            // Result: the `cap` smallest matches survive.
+            use std::collections::BinaryHeap;
+            let mut heap: BinaryHeap<Vec<u8>> = BinaryHeap::with_capacity(cap + 1);
+            let mut total = 0usize;
+            for kv in store {
+                if !kv.key().starts_with(prefix) {
+                    continue;
+                }
+                total += 1;
+                heap.push(kv.key().clone());
+                if heap.len() > cap {
+                    heap.pop();
+                }
+            }
+            let mut keys = heap.into_sorted_vec();
+            keys.truncate(cap);
+            (keys, total)
+        };
+        let truncated = limit != 0 && total_seen > cap;
+        let mut items: Vec<crate::rpc::KvScanItem> = Vec::with_capacity(matched_keys.len());
+        for key in matched_keys {
+            // Re-fetch the value; the entry may have been removed
+            // between the `iter` pass above and now (DashMap drops
+            // shard guards between calls), in which case we skip it.
             if let Some(value) = store.get(&key).map(|v| v.value().clone()) {
                 items.push(crate::rpc::KvScanItem { key, value });
             }
@@ -151,21 +219,46 @@ impl PxKvStore {
     }
 
     /// Cascade shutdown: stop gRPC server (with timeout), then shut down each
-    /// group. Idempotent; second+ calls return an empty clean report.
+    /// group, cascading into every replica layer.
     ///
-    /// Continue on errors, aggregate `critical:` messages into [`ShutdownReport`],
-    /// force-clean on layer timeout. Caller decides what to do with a non-clean
-    /// report (typically: surface to operator, fail health check).
+    /// The shutdown contract across layers (`PxKvStore` → `PxGroup` →
+    /// `PxLocalReplica` / `PxRemoteReplica` → `acceptor` / `learner` / `slot_list`
+    /// / `kv_store`) is:
+    ///
+    /// 1. Stops accepting new work for that layer.
+    /// 2. Cascades into children, **continuing on errors** (never aborts the chain).
+    /// 3. Force-cleans the resource it owns (abort task, close channel, drain
+    ///    retired pointers, …) when graceful join times out.
+    /// 4. Returns an [`OperationReport`](crate::common::report::OperationReport)
+    ///    with aggregated `critical:` errors.
+    ///
+    /// Calls are **idempotent** — second and later calls return an empty clean
+    /// report and log at `debug`. Layers are responsible for their own
+    /// `AtomicBool` "already-shutdown" gate.
+    ///
+    /// ## Why this shape
+    ///
+    /// - Caller decides what to do with errors (retry, surface to operator, panic
+    ///   in tests). Mirrors how Rust idiomatic shutdown is usually expressed via
+    ///   `Result`-aggregation.
+    /// - Per-layer timeout guarantees the chain returns even if a child hangs;
+    ///   the timed-out layer is force-cleaned and a `critical:` line tells the
+    ///   operator which resource leaked.
+    /// - Sub-shutdowns are awaited (not spawned) so the report accurately
+    ///   reflects the state of every owned resource at return time.
     #[tracing::instrument(
         level = "info",
         skip_all,
         fields(store_id = self.store_id, timeout_ms = per_layer_timeout.as_millis() as u64)
     )]
-    pub async fn shutdown(&self, per_layer_timeout: Duration) -> ShutdownReport {
+    pub async fn shutdown(&self, per_layer_timeout: Duration) -> OperationReport {
         // Idempotency gate: only the first caller proceeds.
         if self.shutdown_started.swap(true, Ordering::AcqRel) {
-            debug!(store_id = self.store_id, "PxKvStore::shutdown is a no-op (already shut down)");
-            return ShutdownReport::new();
+            debug!(
+                store_id = self.store_id,
+                "PxKvStore::shutdown is a no-op (already shut down)"
+            );
+            return OperationReport::new();
         }
 
         info!(
@@ -175,7 +268,7 @@ impl PxKvStore {
             "PxKvStore shutdown starting"
         );
 
-        let mut report = ShutdownReport::new();
+        let mut report = OperationReport::new();
 
         // 1. Stop gRPC server first so no new requests reach the groups.
         if let Err(msg) = self.shutdown_server(per_layer_timeout).await {
@@ -189,7 +282,12 @@ impl PxKvStore {
             info!(store_id = self.store_id, group_id, "shutting down PxGroup");
             let sub = group.shutdown(per_layer_timeout).await;
             if !sub.is_clean() {
-                debug!(store_id = self.store_id, group_id, error_count = sub.errors.len(), "PxGroup shutdown reported errors");
+                debug!(
+                    store_id = self.store_id,
+                    group_id,
+                    error_count = sub.errors.len(),
+                    "PxGroup shutdown reported errors"
+                );
             }
             report.merge(sub);
         }
@@ -206,77 +304,62 @@ impl PxKvStore {
         report
     }
 
-    /// Hierarchical point-in-time snapshot for `/topology`.
-    /// Composes group snapshots; cheap.
-    ///
-    /// # Panics
-    /// If the internal `server_state` mutex is poisoned (i.e. another thread
-    /// panicked while holding it). Treat as unrecoverable.
+    /// Hierarchical point-in-time status for `/topology` and `/health`.
+    /// Composes group statuses from cached state (no RPC).
     #[must_use]
-    pub fn snapshot(&self) -> StoreSnapshot {
-        StoreSnapshot {
-            store_id: self.store_id,
-            listen_addr: self.server_state.lock().unwrap().listen_addr,
-            groups: self.groups.iter().map(|entry| entry.value().snapshot()).collect(),
+    pub fn status(&self) -> StoreStatus {
+        let mut status = StatusLevel::Ok;
+        let mut messages = Vec::new();
+
+        if self.shutdown_started.load(Ordering::Acquire) {
+            status = StatusLevel::Unhealthy;
+            messages.push(format!("store {} has been shut down", self.store_id));
+        } else {
+            // gRPC server liveness — listen_addr is set by start() and cleared by
+            // shutdown_server() taking the JoinHandle.
+            let server_running = self.server_state.lock().handle.is_some();
+            if !server_running {
+                status = StatusLevel::Unhealthy;
+                messages.push(format!("store {}: gRPC server not running", self.store_id));
+            }
         }
-    }
 
-    /// Report JSON-serializable info for API responses.
-    ///
-    /// Calls `report_info()` on the snapshot to build the complete info hierarchy.
-    #[must_use]
-    pub fn report_info(&self) -> crate::cluster::info::StoreInfo {
-        self.snapshot().report_info()
-    }
+        let groups = self
+            .groups
+            .iter()
+            .map(|entry| {
+                let group_id = *entry.key();
+                let group = entry.value().status();
+                status = StatusLevel::worst(status, group.status);
+                messages.extend(
+                    group
+                        .messages
+                        .iter()
+                        .map(|msg| format!("group#{group_id}: {msg}")),
+                );
+                group
+            })
+            .collect();
 
-    /// Report JSON-serializable health info for API responses.
-    #[must_use]
-    pub fn report_health(&self) -> crate::cluster::health_info::HealthStoreInfo {
-        let health = self.health();
-        let groups: Vec<crate::cluster::health_info::HealthGroupInfo> = self.groups.iter().map(|entry| entry.value().report_health()).collect();
-        crate::cluster::health_info::HealthStoreInfo {
+        StoreStatus {
             store_id: self.store_id,
-            status: health.status.as_str().to_string(),
-            messages: health.messages,
+            listen_addr: self.server_state.lock().listen_addr.map(|a| a.to_string()),
+            status,
+            messages,
             groups,
         }
     }
 
-    /// Aggregate cached health for this store: server liveness + each group.
-    ///
-    /// - `Unhealthy` if `shutdown()` has run or the gRPC server is not active.
-    /// - Otherwise worst-of across groups.
-    ///
-    /// # Panics
-    /// If the internal `server_state` mutex is poisoned. Treat as unrecoverable.
-    #[must_use]
-    pub fn health(&self) -> HealthReport {
-        let mut report = HealthReport::ok();
-
-        if self.shutdown_started.load(Ordering::Acquire) {
-            return HealthReport::unhealthy(format!("store {} has been shut down", self.store_id));
-        }
-
-        // gRPC server liveness — listen_addr is set by start() and cleared by
-        // shutdown_server() taking the JoinHandle.
-        let server_running = self.server_state.lock().unwrap().handle.is_some();
-        if !server_running {
-            return HealthReport::unhealthy(format!("store {}: gRPC server not running", self.store_id));
-        }
-
-        for entry in &self.groups {
-            let group_id = *entry.key();
-            let sub = entry.value().health();
-            report.merge_child(&format!("group#{group_id}"), sub);
-        }
-        report
-    }
-
     pub fn add_group(&self, group: PxGroup) {
         let group_id = group.group_id;
-        info!(store_id = self.store_id, group_id, replicas = group.remote_replica_count(), "added group to kv store");
+        info!(
+            store_id = self.store_id,
+            group_id,
+            replicas = group.remote_replica_count(),
+            "added group to kv store"
+        );
         let arc = Arc::new(group);
-        // Step 9.1: spawn the per-group election driver (no-op when
+        // Spawn the per-group election driver (no-op when
         // `election_driver_disabled`). Driver holds a `Weak<PxGroup>` so
         // dropping the store's `Arc` does not leak the task. Skip when no
         // tokio runtime is active (structural / non-async unit tests).
@@ -286,7 +369,20 @@ impl PxKvStore {
                 arc_for_spawn.start_election_loop().await;
             });
         }
-        self.groups.insert(group_id, arc);
+        // Atomically replace any prior group entry with the new arc and
+        // cancel the prior group's driver synchronously. Without the
+        // synchronous cancel, the old driver keeps running until its
+        // next loop iteration discovers `Weak::upgrade` failed, which
+        // creates a window where two drivers (old and new) race for
+        // leadership of the same `(store_id, group_id)`. Common path:
+        // `add_store` lands the group with 0 remotes, the old driver
+        // self-elects leader at `quorum=1`, then `add_remote_replicas` rebuilds
+        // and the new driver re-elects, producing split-brain at
+        // `term=1` until both drivers eventually step down via
+        // heartbeats and the cluster re-races.
+        if let Some(old_arc) = self.groups.insert(group_id, arc) {
+            old_arc.tenure_cancel().cancel();
+        }
     }
 
     pub fn get_group(&self, group_id: u64) -> Option<Arc<PxGroup>> {
@@ -326,7 +422,12 @@ impl PxKvStore {
             .iter()
             .map(|entry| {
                 let group = entry.value();
-                (group.group_id, group.local_replica().id, group.leader_id(), group.remote_replica_info().len())
+                (
+                    group.group_id,
+                    group.local_replica().id,
+                    group.leader_id(),
+                    group.remote_replica_info().len(),
+                )
             })
             .collect()
     }
@@ -347,52 +448,26 @@ impl PxKvStore {
         };
 
         match group.propose(payload, client_id, seq).await {
-            ProposeResult::Chosen { slot } => crate::rpc::KvResponse {
-                version: 1,
-                ok: true,
-                revision: slot,
-                error: String::new(),
-                not_found: false,
-                not_leader_hint: String::new(),
-                request_id,
-                request_create_ms,
-                value: Vec::new(),
-            },
-            ProposeResult::NotLeader { leader_hint } => crate::rpc::KvResponse {
-                version: 1,
-                ok: false,
-                revision: 0,
-                error: "not leader".to_string(),
-                not_found: false,
-                not_leader_hint: leader_hint,
-                request_id,
-                request_create_ms,
-                value: Vec::new(),
-            },
-            ProposeResult::Err(msg) => crate::rpc::KvResponse {
-                version: 1,
-                ok: false,
-                revision: 0,
-                error: msg,
-                not_found: false,
-                not_leader_hint: String::new(),
-                request_id,
-                request_create_ms,
-                value: Vec::new(),
-            },
+            ProposeResult::Chosen { slot } => {
+                crate::rpc::KvResponse::ok_chosen(slot, request_id, request_create_ms)
+            }
+            ProposeResult::NotLeader { leader_hint } => {
+                crate::rpc::KvResponse::not_leader(leader_hint, request_id, request_create_ms)
+            }
+            ProposeResult::Err(msg) => crate::rpc::KvResponse::err(msg, request_id, request_create_ms),
         }
     }
 
     // ── KV payload encoding ───────────────────────────────────
 
-    fn encode_kv_payload(ops: &[(Vec<u8>, Option<Vec<u8>>)]) -> Vec<u8> {
+    fn encode_kv_payload(ops: &[(&[u8], Option<&[u8]>)]) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.push(ops.len() as u8);
         for (key, value_opt) in ops {
             buf.push(u8::from(value_opt.is_none()));
             buf.extend_from_slice(&(key.len() as u32).to_le_bytes());
             buf.extend_from_slice(key);
-            let value_len = value_opt.as_ref().map_or(0, Vec::len) as u32;
+            let value_len = value_opt.map_or(0, <[u8]>::len) as u32;
             buf.extend_from_slice(&value_len.to_le_bytes());
             if let Some(value) = value_opt {
                 buf.extend_from_slice(value);
@@ -408,7 +483,11 @@ impl PxKvStore {
             buf.push(u8::from(item.is_delete));
             buf.extend_from_slice(&(item.key.len() as u32).to_le_bytes());
             buf.extend_from_slice(&item.key);
-            let value_len = if item.is_delete { 0 } else { item.value.len() as u32 };
+            let value_len = if item.is_delete {
+                0
+            } else {
+                item.value.len() as u32
+            };
             buf.extend_from_slice(&value_len.to_le_bytes());
             if !item.is_delete {
                 buf.extend_from_slice(&item.value);
@@ -419,15 +498,9 @@ impl PxKvStore {
 }
 
 fn missing_group_response(request_id: u64, request_create_ms: u64) -> crate::rpc::KvResponse {
-    crate::rpc::KvResponse {
-        version: 1,
-        ok: false,
-        revision: 0,
-        error: "no kv group configured for request group_id".to_string(),
-        not_found: false,
-        not_leader_hint: String::new(),
+    crate::rpc::KvResponse::err(
+        "no kv group configured for request group_id".to_string(),
         request_id,
         request_create_ms,
-        value: Vec::new(),
-    }
+    )
 }

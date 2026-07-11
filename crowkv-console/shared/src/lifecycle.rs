@@ -30,6 +30,7 @@ pub struct DeployRequest {
     /// `$PATH` → `target/{debug,release}/crowkv-server` next to the
     /// current executable.
     pub binary: Option<PathBuf>,
+    pub election_profile: Option<String>,
 }
 
 /// Result of a successful deploy. Persist these fields onto the
@@ -87,6 +88,14 @@ pub async fn deploy_local(req: &DeployRequest, node: &NodeEntry) -> Result<Deplo
         .arg("1")
         .arg("--ports")
         .arg(req.grpc_port.to_string())
+        .arg("--election-profile")
+        .arg(
+            req.election_profile
+                .as_deref()
+                .map(str::to_owned)
+                .or_else(|| std::env::var("CROWKV_SERVER_ELECTION_PROFILE").ok())
+                .unwrap_or_else(|| "default".into()),
+        )
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(false)
@@ -115,18 +124,16 @@ pub async fn deploy_local(req: &DeployRequest, node: &NodeEntry) -> Result<Deplo
 
     wait_for_ready(&mgmt_url, Duration::from_secs(10)).await?;
 
-    // Set the leader for the bootstrap group (store 1, group 1, replica 1)
-    let client = ServerClient::new(mgmt_url.clone()).map_err(|e| Error::Validation {
-        field: "client".into(),
-        message: format!("failed to create server client: {e}"),
-    })?;
-    client
-        .set_leader(1, 1, &crate::mgmt::SetLeaderRequest { leader_id: 1 })
-        .await
-        .map_err(|e| Error::Validation {
-            field: "leader".into(),
-            message: format!("failed to set leader: {e}"),
-        })?;
+    // Leader selection is fully automatic via Paxos election (see
+    // `cluster::election::spawn`); the per-group election driver is
+    // started in `PxKvStore::add_group` and converges to a single leader
+    // for 1-, 2-, or N-replica groups. We block here until the bootstrap
+    // group (store 1 / group 1) has elected its initial leader so the
+    // returned `DeployedServer` is immediately writable. Without this
+    // wait, callers that issue a KV write right after deploy will see a
+    // transient `NotLeader` response during the 4-8 s election deadline
+    // window.
+    wait_for_leader(&mgmt_url, 1, 1, Duration::from_secs(15)).await?;
 
     Ok(DeployedServer {
         server_id: req.server_id.clone(),
@@ -148,7 +155,11 @@ pub async fn deploy_local(req: &DeployRequest, node: &NodeEntry) -> Result<Deplo
 /// # Errors
 /// Surfaces spawn / wait failures as `Error::Io`.
 pub fn stop_pid(pid: u32) -> Result<bool> {
-    let status = std::process::Command::new("kill").arg("-TERM").arg(pid.to_string()).status().map_err(Error::Io)?;
+    let status = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(pid.to_string())
+        .status()
+        .map_err(Error::Io)?;
     // `kill` exits non-zero when the pid is already gone. Treat that as
     // "not alive" rather than an error.
     Ok(status.success())
@@ -177,11 +188,41 @@ async fn wait_for_ready(mgmt_url: &str, timeout: Duration) -> Result<()> {
         if client.health().await.is_ok() {
             return Ok(());
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     Err(Error::UpstreamRpc {
         node_id: mgmt_url.to_string(),
         status: "did not become healthy within timeout".into(),
+    })
+}
+
+/// Poll a server's `/topology` until `(store_id, group_id)` reports a
+/// non-zero `leader_id`, meaning the per-group Paxos election driver has
+/// elected a leader. Used by [`deploy_local`] to gate the deploy on the
+/// bootstrap group's election so callers see a write-ready server.
+///
+/// # Errors
+/// Returns `Error::UpstreamRpc` if the timeout elapses without seeing a
+/// leader.
+pub async fn wait_for_leader(mgmt_url: &str, store_id: u64, group_id: u64, timeout: Duration) -> Result<()> {
+    let client = ServerClient::new(mgmt_url.to_string())?;
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if let Ok(detail) = client.get_store(store_id).await {
+            if detail
+                .groups
+                .iter()
+                .find(|g| g.group_id == group_id)
+                .is_some_and(|g| g.leader_id != 0)
+            {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    Err(Error::UpstreamRpc {
+        node_id: mgmt_url.to_string(),
+        status: format!("group {group_id} in store {store_id} did not elect a leader within {timeout:?}"),
     })
 }
 

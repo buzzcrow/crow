@@ -36,7 +36,7 @@ pub enum PxReplicaError {
 /// Information returned by a `PreVote` / `RequestVote` reply.
 ///
 /// Carries the responder's term plus the learner-frontier triple used by the
-/// candidate's bulk-Phase-1 floor / ceiling computation (Step 7).
+/// candidate's bulk-Phase-1 floor / ceiling computation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VoteReply {
     pub term: PxTerm,
@@ -124,7 +124,13 @@ pub trait ReplicaHandler: Replica {
     /// If it leads, the handler adopts the new term via
     /// [`crate::cluster::local_replica::PxLocalReplica::become_follower`]
     /// before forwarding to the acceptor.
-    async fn on_prepare(&self, slot: u64, ballot: PxBallot, term: PxTerm, group_id: u64) -> Result<PxPrepareReply, PxReplicaError>;
+    async fn on_prepare(
+        &self,
+        slot: u64,
+        ballot: PxBallot,
+        term: PxTerm,
+        group_id: u64,
+    ) -> Result<PxPrepareReply, PxReplicaError>;
 
     /// Phase-2 `Accept` handler.
     async fn on_accept(&self, entry: PxLogEntry, group_id: u64) -> Result<PxAcceptReply, PxReplicaError>;
@@ -135,15 +141,27 @@ pub trait ReplicaHandler: Replica {
 
     /// `RequestVote` handler. State-mutating: on grant, persists `voted_for`
     /// and bumps `current_term` if higher.
-    async fn on_request_vote(&self, req: VoteRequestPayload, group_id: u64) -> Result<VoteReply, PxReplicaError>;
+    async fn on_request_vote(
+        &self,
+        req: VoteRequestPayload,
+        group_id: u64,
+    ) -> Result<VoteReply, PxReplicaError>;
 
     /// `Heartbeat` handler. Bumps `vote_lockout_until`, adopts a higher term
     /// observed in the request, records the current leader id, and resets
-    /// the follower's election deadline (driver-managed; see Step 9).
-    async fn on_heartbeat(&self, req: HeartbeatRequestPayload, group_id: u64) -> Result<HeartbeatReply, PxReplicaError>;
+    /// the follower's election deadline (driver-managed).
+    async fn on_heartbeat(
+        &self,
+        req: HeartbeatRequestPayload,
+        group_id: u64,
+    ) -> Result<HeartbeatReply, PxReplicaError>;
 
     /// `StepDown` handler. Strict fence per §7.1.
-    async fn on_step_down(&self, req: StepDownRequestPayload, group_id: u64) -> Result<StepDownReply, PxReplicaError>;
+    async fn on_step_down(
+        &self,
+        req: &StepDownRequestPayload,
+        group_id: u64,
+    ) -> Result<StepDownReply, PxReplicaError>;
 }
 
 /// Client-side sender trait for remote replicas.
@@ -153,10 +171,32 @@ pub trait ReplicaHandler: Replica {
 /// adapter.
 #[allow(async_fn_in_trait)]
 pub trait ReplicaClient: Replica {
-    async fn send_prepare(&self, slot: u64, ballot: PxBallot, term: PxTerm, group_id: u64) -> Result<PxPrepareReply, PxReplicaError>;
+    async fn send_prepare(
+        &self,
+        slot: u64,
+        ballot: PxBallot,
+        term: PxTerm,
+        group_id: u64,
+    ) -> Result<PxPrepareReply, PxReplicaError>;
     async fn send_accept(&self, entry: &PxLogEntry, group_id: u64) -> Result<PxAcceptReply, PxReplicaError>;
-    async fn send_pre_vote(&self, req: VoteRequestPayload, group_id: u64) -> Result<VoteReply, PxReplicaError>;
-    async fn send_request_vote(&self, req: VoteRequestPayload, group_id: u64) -> Result<VoteReply, PxReplicaError>;
-    async fn send_heartbeat(&self, req: HeartbeatRequestPayload, group_id: u64) -> Result<HeartbeatReply, PxReplicaError>;
-    async fn send_step_down(&self, req: StepDownRequestPayload, group_id: u64) -> Result<StepDownReply, PxReplicaError>;
+    async fn send_pre_vote(
+        &self,
+        req: VoteRequestPayload,
+        group_id: u64,
+    ) -> Result<VoteReply, PxReplicaError>;
+    async fn send_request_vote(
+        &self,
+        req: VoteRequestPayload,
+        group_id: u64,
+    ) -> Result<VoteReply, PxReplicaError>;
+    async fn send_heartbeat(
+        &self,
+        req: HeartbeatRequestPayload,
+        group_id: u64,
+    ) -> Result<HeartbeatReply, PxReplicaError>;
+    async fn send_step_down(
+        &self,
+        req: &StepDownRequestPayload,
+        group_id: u64,
+    ) -> Result<StepDownReply, PxReplicaError>;
 }

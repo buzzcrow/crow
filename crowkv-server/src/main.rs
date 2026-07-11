@@ -13,22 +13,26 @@ use clap::Parser;
 use tracing::info;
 
 use crowkv::cluster::group::PxGroup;
+use crowkv::cluster::group_election::LeaderElection;
 use crowkv::cluster::kv_server::KvServer;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crowkv::cluster::px_kv_store::PxKvStore;
+use crowkv::common::config::{PxElectionConfig, ServerConfig};
 
 use crowkv_server::cli::{parse_id_list, parse_port_list, Cli};
-use crowkv_server::management;
-use crowkv_server::state::KvStoreRegistry;
+use crowkv_server::mgmt_api;
+use crowkv_server::store_registry::KvStoreRegistry;
 
 #[tokio::main]
 async fn main() {
     let args = Cli::parse();
 
     let _guards = if args.log {
-        crowkv::common::logging::init_file_and_console_logging("log", "crowkv-server").expect("failed to initialize crowkv-server logging")
+        crowkv::common::logging::init_file_and_console_logging("log", "crowkv-server")
+            .expect("failed to initialize crowkv-server logging")
     } else {
-        crowkv::common::logging::init_file_logging("log", "crowkv-server").expect("failed to initialize crowkv-server logging")
+        crowkv::common::logging::init_file_logging("log", "crowkv-server")
+            .expect("failed to initialize crowkv-server logging")
     };
 
     info!("crowkv-server starting...");
@@ -37,10 +41,10 @@ async fn main() {
         stores = ?args.stores.as_deref(),
         groups = ?args.groups.as_deref(),
         replica = args.replica,
-        leader = ?args.leader,
         ports = ?args.ports.as_deref(),
         management_addr = %args.management_addr,
         management_port = args.management_port,
+        election_profile = %args.election_profile,
         "parsed CLI arguments"
     );
 
@@ -49,16 +53,20 @@ async fn main() {
     let registry = Arc::new(KvStoreRegistry::new());
 
     // Start HTTP management server first
-    let mgmt_addr: SocketAddr = format!("{}:{}", args.management_addr, args.management_port).parse().unwrap_or_else(|e| {
-        eprintln!("error: invalid management address: {e}");
-        std::process::exit(1);
-    });
+    let mgmt_addr: SocketAddr = format!("{}:{}", args.management_addr, args.management_port)
+        .parse()
+        .unwrap_or_else(|e| {
+            eprintln!("error: invalid management address: {e}");
+            std::process::exit(1);
+        });
 
-    let router = management::router(registry.clone());
-    let listener = tokio::net::TcpListener::bind(mgmt_addr).await.unwrap_or_else(|e| {
-        eprintln!("error: failed to bind management HTTP on {mgmt_addr}: {e}");
-        std::process::exit(1);
-    });
+    let router = mgmt_api::router(registry.clone());
+    let listener = tokio::net::TcpListener::bind(mgmt_addr)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("error: failed to bind management HTTP on {mgmt_addr}: {e}");
+            std::process::exit(1);
+        });
 
     let bound_mgmt_addr: SocketAddr = listener.local_addr().unwrap_or(mgmt_addr);
     // Use 127.0.0.1 in the URL if binding to 0.0.0.0 for better local testing UX
@@ -79,20 +87,33 @@ async fn main() {
 
     // Create and start stores after management API is ready.
     if let Some(b) = bootstrap.as_ref() {
-        create_and_start_stores(&b.store_ids, &b.group_ids, b.replica_id, b.leader_id, b.ports.clone(), registry.clone()).await;
+        create_and_start_stores(
+            &b.store_ids,
+            &b.group_ids,
+            b.replica_id,
+            b.ports.clone(),
+            &args.election_profile,
+            registry.clone(),
+        )
+        .await;
     }
 
     // Serve until shutdown signal
-    axum::serve(listener, router).with_graceful_shutdown(shutdown_signal()).await.unwrap_or_else(|e| {
-        tracing::error!("management HTTP server error: {e}");
-    });
+    axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("management HTTP server error: {e}");
+        });
 
     // Graceful cascade shutdown (PxKvStore → PxGroup → replicas)
     graceful_shutdown(registry).await;
 }
 
 async fn shutdown_signal() {
-    tokio::signal::ctrl_c().await.expect("failed to install CTRL+C handler");
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to install CTRL+C handler");
     info!("received shutdown signal (CTRL+C), initiating graceful shutdown");
 }
 
@@ -102,7 +123,6 @@ struct Bootstrap {
     store_ids: Vec<u64>,
     group_ids: Vec<u64>,
     replica_id: u64,
-    leader_id: Option<u64>,
     ports: Vec<u16>,
 }
 
@@ -135,7 +155,11 @@ fn parse_and_validate_cli_args(args: &Cli) -> Option<Bootstrap> {
             std::process::exit(1);
         });
         if p.len() < store_ids.len() {
-            eprintln!("error: --ports has {} ports but --stores needs {}", p.len(), store_ids.len());
+            eprintln!(
+                "error: --ports has {} ports but --stores needs {}",
+                p.len(),
+                store_ids.len()
+            );
             std::process::exit(1);
         }
         p
@@ -143,21 +167,29 @@ fn parse_and_validate_cli_args(args: &Cli) -> Option<Bootstrap> {
         vec![0u16; store_ids.len()]
     };
 
-    let leader_id = args.leader;
-
     Some(Bootstrap {
         store_ids,
         group_ids,
         replica_id,
-        leader_id,
         ports,
     })
 }
 
 /// Create and start stores with their groups, registering each with the registry.
 /// If `group_ids` is empty, stores are created without groups.
-async fn create_and_start_stores(store_ids: &[u64], group_ids: &[u64], replica_id: u64, leader_id: Option<u64>, ports: Vec<u16>, registry: Arc<KvStoreRegistry>) {
-    info!(store_count = store_ids.len(), group_count = group_ids.len(), leader_id = ?leader_id, "creating stores and groups");
+async fn create_and_start_stores(
+    store_ids: &[u64],
+    group_ids: &[u64],
+    replica_id: u64,
+    ports: Vec<u16>,
+    election_profile: &str,
+    registry: Arc<KvStoreRegistry>,
+) {
+    info!(
+        store_count = store_ids.len(),
+        group_count = group_ids.len(),
+        "creating stores and groups"
+    );
 
     for (i, &store_id) in store_ids.iter().enumerate() {
         let port = ports[i];
@@ -166,19 +198,23 @@ async fn create_and_start_stores(store_ids: &[u64], group_ids: &[u64], replica_i
         let store = Arc::new(PxKvStore::new(store_id, addr));
 
         // Create groups with the single local replica for this store, if group_ids provided.
+        // The election driver auto-starts in PxKvStore::add_group; the local replica
+        // begins as Follower and is promoted via Paxos PreVote/RequestVote.
         for &group_id in group_ids {
-            info!(store_id, group_id, replica_id, "creating PxGroup with local replica");
+            info!(
+                store_id,
+                group_id, replica_id, "creating PxGroup with local replica"
+            );
             let local_replica = PxLocalReplica::new(replica_id, PxLocalReplicaRole::Follower);
-            let group = PxGroup::new(group_id, local_replica);
-            // Set leader if provided via --leader CLI argument
-            if let Some(leader) = leader_id {
-                group.set_leader_id(leader);
+            let mut group = PxGroup::new(group_id, local_replica);
+            if election_profile == "test" {
+                group.set_election_config(PxElectionConfig::for_tests());
             }
             store.add_group(group);
         }
 
-        if !store.start().await {
-            tracing::error!(store_id, port, "failed to start store, skipping");
+        if let Err(e) = store.start().await {
+            tracing::error!(store_id, port, error = %e, "failed to start store, skipping");
             continue;
         }
 
@@ -191,18 +227,29 @@ async fn create_and_start_stores(store_ids: &[u64], group_ids: &[u64], replica_i
         registry.add_store(store_id, store);
     }
 
-    info!(store_count = registry.stores.len(), "all stores started, management API ready");
+    info!(
+        store_count = registry.stores.len(),
+        "all stores started, management API ready"
+    );
 }
 
 /// Gracefully cascade-shutdown every store via [`PxKvStore::shutdown`].
 ///
 /// Continues on errors; aggregates `critical:` messages to the operator.
 async fn graceful_shutdown(registry: Arc<KvStoreRegistry>) {
-    info!(store_count = registry.stores.len(), "initiating graceful shutdown of gRPC stores");
+    info!(
+        store_count = registry.stores.len(),
+        "initiating graceful shutdown of gRPC stores"
+    );
     let mut total_errors = 0usize;
     for entry in &registry.stores {
         let store_id = *entry.key();
-        let report = entry.value().shutdown(crowkv::cluster::DEFAULT_SHUTDOWN_TIMEOUT).await;
+        let report = entry
+            .value()
+            .shutdown(std::time::Duration::from_millis(
+                ServerConfig::DEFAULT.shutdown_timeout_ms,
+            ))
+            .await;
         if !report.is_clean() {
             total_errors += report.errors.len();
             for err in &report.errors {
@@ -213,6 +260,9 @@ async fn graceful_shutdown(registry: Arc<KvStoreRegistry>) {
     if total_errors == 0 {
         info!("crowkv-server shut down cleanly");
     } else {
-        tracing::warn!(error_count = total_errors, "crowkv-server shut down with errors (see critical: logs above)");
+        tracing::warn!(
+            error_count = total_errors,
+            "crowkv-server shut down with errors (see critical: logs above)"
+        );
     }
 }

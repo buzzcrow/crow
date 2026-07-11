@@ -181,7 +181,10 @@ pub async fn http_add_node_store(
 ///
 /// # Errors
 /// Returns an error if the node has no server or the upstream RPC fails.
-pub async fn http_remove_node_store(State(state): State<AppState>, Path((node_id, store_id)): Path<(String, u64)>) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+pub async fn http_remove_node_store(
+    State(state): State<AppState>,
+    Path((node_id, store_id)): Path<(String, u64)>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
     let url = mgmt_url_for_node(&state, &node_id)?;
     let client = build_server_client(url)?;
     client.remove_store(store_id).await.map_err(map_err)?;
@@ -243,7 +246,10 @@ pub async fn http_add_node_remote(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
     let url = mgmt_url_for_node(&state, &node_id)?;
     let client = build_server_client(url)?;
-    client.add_remotes(store_id, group_id, &remotes).await.map_err(map_err)?;
+    client
+        .add_remote_replicas(store_id, group_id, &remotes)
+        .await
+        .map_err(map_err)?;
     state.monitor_cache.drop_node(&node_id).await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -262,7 +268,10 @@ pub async fn http_remove_node_remote(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
     let url = mgmt_url_for_node(&state, &node_id)?;
     let client = build_server_client(url)?;
-    client.remove_remote(store_id, group_id, replica_id).await.map_err(map_err)?;
+    client
+        .remove_remote_replica(store_id, group_id, replica_id)
+        .await
+        .map_err(map_err)?;
     state.monitor_cache.drop_node(&node_id).await;
     Ok(StatusCode::NO_CONTENT)
 }

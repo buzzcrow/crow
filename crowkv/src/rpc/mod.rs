@@ -28,6 +28,7 @@ mod generated {
 
 pub use generated::*;
 
+mod kv_response;
 pub(crate) mod kv_service;
 pub(crate) mod px_service;
 pub use kv_service::KvStoreService;

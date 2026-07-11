@@ -189,7 +189,7 @@ message StepDownResponse {
   uint64 request_create_ms = 7;
 }
 
-// Per-peer bidi PeerStream (Step 10). Multiplexes Accept + Heartbeat + Chosen
+// Per-peer bidi PeerStream. Multiplexes Accept + Heartbeat + Chosen
 // notifications on one stream per (group_id, peer_id) pair so heartbeats
 // cannot reorder ahead of an Accept they logically follow. Prepare /
 // RequestVote / PreVote / StepDown remain unary RPCs.

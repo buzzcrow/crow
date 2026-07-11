@@ -88,16 +88,17 @@ function AppContent({ brandLogo, customPanels, customActions, apiPrefix, onEvent
   const { menuState, openMenu, closeMenu } = useContextMenu();
 
   // Data hooks
-  const { racks, nodes, loading: physicalLoading, refresh: refreshPhysical } = usePhysicalTree({
+  const { racks, nodes, loading: physicalLoading, error: physicalError, refresh: refreshPhysical } = usePhysicalTree({
     enabled: true,
     recursive: 2,
   });
-  const { stores, loading: logicalLoading, refresh: refreshLogical } = useLogicalTree({
+  const { stores, loading: logicalLoading, error: logicalError, refresh: refreshLogical } = useLogicalTree({
     enabled: true,
     recursive: 2,
   });
 
   const loading = physicalLoading || logicalLoading;
+  const dataError = physicalError || logicalError;
 
   // Refresh everything
   const handleRefresh = useCallback(async () => {
@@ -352,6 +353,15 @@ function AppContent({ brandLogo, customPanels, customActions, apiPrefix, onEvent
         onNodeSelect={setSelectedNodeId}
         onOpenCommandPalette={handleOpenCommandPalette}
       />
+
+      {dataError && (
+        <div
+          role="alert"
+          className="tw-fixed tw-top-16 tw-left-1/2 -tw-translate-x-1/2 tw-z-50 tw-bg-failed/10 tw-border tw-border-failed/30 tw-text-failed tw-px-4 tw-py-2 tw-rounded-md tw-text-sm tw-shadow-lg"
+        >
+          Backend unreachable: {dataError.message}
+        </div>
+      )}
 
       <div className="tw-flex">
         <Sidebar

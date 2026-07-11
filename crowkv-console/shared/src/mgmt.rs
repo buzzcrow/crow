@@ -30,12 +30,6 @@ pub struct AddGroupRequest {
     pub replica_id: u64,
 }
 
-/// `POST /stores/{sid}/groups/{gid}/leader` body.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SetLeaderRequest {
-    pub leader_id: u64,
-}
-
 /// One element of `POST /stores/{sid}/groups/{gid}/remotes` body and
 /// the `GET` response. `endpoint` is the `host:port` of the remote
 /// replica's gRPC service.
@@ -144,20 +138,14 @@ impl ServerClient {
         self.delete_path(&format!("/stores/{sid}/groups/{gid}")).await
     }
 
-    /// `POST /stores/{sid}/groups/{gid}/leader` — set the group leader.
-    ///
-    /// # Errors
-    /// Transport / non-2xx status codes surface as `Error::UpstreamRpc`.
-    pub async fn set_leader(&self, sid: u64, gid: u64, req: &SetLeaderRequest) -> Result<()> {
-        self.post_empty(&format!("/stores/{sid}/groups/{gid}/leader"), req).await
-    }
-
     /// `GET /stores/{sid}/groups/{gid}/remotes`.
     ///
     /// # Errors
     /// Transport / decode failures surface as `Error::UpstreamRpc`.
-    pub async fn list_remotes(&self, sid: u64, gid: u64) -> Result<Vec<RemoteReplicaInfo>> {
-        let r: RemoteListResponse = self.get_json(&format!("/stores/{sid}/groups/{gid}/remotes")).await?;
+    pub async fn list_remote_replicas(&self, sid: u64, gid: u64) -> Result<Vec<RemoteReplicaInfo>> {
+        let r: RemoteListResponse = self
+            .get_json(&format!("/stores/{sid}/groups/{gid}/remotes"))
+            .await?;
         Ok(r.remotes)
     }
 
@@ -166,47 +154,97 @@ impl ServerClient {
     ///
     /// # Errors
     /// Transport / non-2xx status codes surface as `Error::UpstreamRpc`.
-    pub async fn add_remotes(&self, sid: u64, gid: u64, remotes: &[RemoteReplicaInfo]) -> Result<()> {
-        self.post_empty(&format!("/stores/{sid}/groups/{gid}/remotes"), remotes).await
+    pub async fn add_remote_replicas(&self, sid: u64, gid: u64, remotes: &[RemoteReplicaInfo]) -> Result<()> {
+        self.post_empty(&format!("/stores/{sid}/groups/{gid}/remotes"), remotes)
+            .await
     }
 
     /// `DELETE /stores/{sid}/groups/{gid}/remotes/{rid}`.
     ///
     /// # Errors
     /// Transport / non-2xx status codes surface as `Error::UpstreamRpc`.
-    pub async fn remove_remote(&self, sid: u64, gid: u64, rid: u64) -> Result<()> {
-        self.delete_path(&format!("/stores/{sid}/groups/{gid}/remotes/{rid}")).await
+    pub async fn remove_remote_replica(&self, sid: u64, gid: u64, rid: u64) -> Result<()> {
+        self.delete_path(&format!("/stores/{sid}/groups/{gid}/remotes/{rid}"))
+            .await
     }
 
     // ── Transport helpers shared by mgmt methods ────────────────────
 
-    async fn post_json<B: Serialize + ?Sized, T: serde::de::DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
+    async fn post_json<B: Serialize + ?Sized, T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T> {
         let url = format!("{}{path}", self.base_url());
         let cid = crate::corr_id::current_or_new();
         let started = std::time::Instant::now();
-        let resp = self.inner().post(&url).header(crate::corr_id::HEADER, &cid).json(body).send().await.map_err(|e| {
-            crate::ops_log::append_http(&cid, "POST", &url, 0, started.elapsed().as_millis(), Some(&format!("transport error: {e}")));
-            self.rpc_err(format!("POST {path}: {e}"))
-        })?;
+        let resp = self
+            .inner()
+            .post(&url)
+            .header(crate::corr_id::HEADER, &cid)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| {
+                crate::ops_log::append_http(
+                    &cid,
+                    "POST",
+                    &url,
+                    0,
+                    started.elapsed().as_millis(),
+                    Some(&format!("transport error: {e}")),
+                );
+                self.rpc_err(format!("POST {path}: {e}"))
+            })?;
         let status = resp.status();
-        crate::ops_log::append_http(&cid, "POST", &url, status.as_u16(), started.elapsed().as_millis(), None);
+        crate::ops_log::append_http(
+            &cid,
+            "POST",
+            &url,
+            status.as_u16(),
+            started.elapsed().as_millis(),
+            None,
+        );
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
             return Err(self.rpc_err(format!("POST {path}: HTTP {status}: {text}")));
         }
-        resp.json::<T>().await.map_err(|e| self.rpc_err(format!("POST {path}: decode: {e}")))
+        resp.json::<T>()
+            .await
+            .map_err(|e| self.rpc_err(format!("POST {path}: decode: {e}")))
     }
 
     async fn post_empty<B: Serialize + ?Sized>(&self, path: &str, body: &B) -> Result<()> {
         let url = format!("{}{path}", self.base_url());
         let cid = crate::corr_id::current_or_new();
         let started = std::time::Instant::now();
-        let resp = self.inner().post(&url).header(crate::corr_id::HEADER, &cid).json(body).send().await.map_err(|e| {
-            crate::ops_log::append_http(&cid, "POST", &url, 0, started.elapsed().as_millis(), Some(&format!("transport error: {e}")));
-            self.rpc_err(format!("POST {path}: {e}"))
-        })?;
+        let resp = self
+            .inner()
+            .post(&url)
+            .header(crate::corr_id::HEADER, &cid)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| {
+                crate::ops_log::append_http(
+                    &cid,
+                    "POST",
+                    &url,
+                    0,
+                    started.elapsed().as_millis(),
+                    Some(&format!("transport error: {e}")),
+                );
+                self.rpc_err(format!("POST {path}: {e}"))
+            })?;
         let status = resp.status();
-        crate::ops_log::append_http(&cid, "POST", &url, status.as_u16(), started.elapsed().as_millis(), None);
+        crate::ops_log::append_http(
+            &cid,
+            "POST",
+            &url,
+            status.as_u16(),
+            started.elapsed().as_millis(),
+            None,
+        );
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
             return Err(self.rpc_err(format!("POST {path}: HTTP {status}: {text}")));
@@ -218,12 +256,32 @@ impl ServerClient {
         let url = format!("{}{path}", self.base_url());
         let cid = crate::corr_id::current_or_new();
         let started = std::time::Instant::now();
-        let resp = self.inner().delete(&url).header(crate::corr_id::HEADER, &cid).send().await.map_err(|e| {
-            crate::ops_log::append_http(&cid, "DELETE", &url, 0, started.elapsed().as_millis(), Some(&format!("transport error: {e}")));
-            self.rpc_err(format!("DELETE {path}: {e}"))
-        })?;
+        let resp = self
+            .inner()
+            .delete(&url)
+            .header(crate::corr_id::HEADER, &cid)
+            .send()
+            .await
+            .map_err(|e| {
+                crate::ops_log::append_http(
+                    &cid,
+                    "DELETE",
+                    &url,
+                    0,
+                    started.elapsed().as_millis(),
+                    Some(&format!("transport error: {e}")),
+                );
+                self.rpc_err(format!("DELETE {path}: {e}"))
+            })?;
         let status = resp.status();
-        crate::ops_log::append_http(&cid, "DELETE", &url, status.as_u16(), started.elapsed().as_millis(), None);
+        crate::ops_log::append_http(
+            &cid,
+            "DELETE",
+            &url,
+            status.as_u16(),
+            started.elapsed().as_millis(),
+            None,
+        );
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
             return Err(self.rpc_err(format!("DELETE {path}: HTTP {status}: {text}")));

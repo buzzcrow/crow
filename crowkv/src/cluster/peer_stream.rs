@@ -1,4 +1,4 @@
-//! Per-peer bidi `PeerStream` client (Step 10.3).
+//! Per-peer bidi `PeerStream` client.
 //!
 //! Multiplexes `Accept`, `Heartbeat`, and `ChosenNotification` frames over a
 //! single long-running gRPC bidi stream per `(group_id, peer_id)` pair so
@@ -8,7 +8,7 @@
 //! 2. Connection setup cost is paid once per leadership tenure rather than
 //!    per RPC.
 //! 3. Per-peer flow control is enforceable with a single bounded mpsc
-//!    (Step 10.7).
+//!    channel.
 //!
 //! `Prepare` / `RequestVote` / `PreVote` / `StepDown` remain unary RPCs
 //! (one-shot, no ordering requirement).
@@ -32,7 +32,8 @@ use crate::cluster::replica::PxReplicaError;
 use crate::common::config::PxElectionConfig;
 use crate::rpc::px_service_client::PxServiceClient;
 use crate::rpc::{
-    peer_stream_request, peer_stream_response, AcceptRequest, AcceptedResponse, ChosenNotification, HeartbeatRequest, HeartbeatResponse, PeerStreamRequest, PeerStreamResponse,
+    peer_stream_request, peer_stream_response, AcceptRequest, AcceptedResponse, ChosenNotification,
+    HeartbeatRequest, HeartbeatResponse, PeerStreamRequest, PeerStreamResponse,
 };
 
 /// Map from outbound `request_id` to the awaiting client `oneshot`.
@@ -113,9 +114,13 @@ impl PxPeerStream {
         })?;
         match rx.await {
             Ok(Ok(PeerStreamReply::Accepted(r))) => Ok(r),
-            Ok(Ok(PeerStreamReply::Heartbeat(_))) => Err(PxReplicaError::Internal("peer_stream: heartbeat reply on accept oneshot (correlation bug)".to_string())),
+            Ok(Ok(PeerStreamReply::Heartbeat(_))) => Err(PxReplicaError::Internal(
+                "peer_stream: heartbeat reply on accept oneshot (correlation bug)".to_string(),
+            )),
             Ok(Err(e)) => Err(e),
-            Err(_) => Err(PxReplicaError::Internal("peer_stream: oneshot dropped".to_string())),
+            Err(_) => Err(PxReplicaError::Internal(
+                "peer_stream: oneshot dropped".to_string(),
+            )),
         }
     }
 
@@ -136,9 +141,13 @@ impl PxPeerStream {
         })?;
         match rx.await {
             Ok(Ok(PeerStreamReply::Heartbeat(r))) => Ok(r),
-            Ok(Ok(PeerStreamReply::Accepted(_))) => Err(PxReplicaError::Internal("peer_stream: accepted reply on heartbeat oneshot (correlation bug)".to_string())),
+            Ok(Ok(PeerStreamReply::Accepted(_))) => Err(PxReplicaError::Internal(
+                "peer_stream: accepted reply on heartbeat oneshot (correlation bug)".to_string(),
+            )),
             Ok(Err(e)) => Err(e),
-            Err(_) => Err(PxReplicaError::Internal("peer_stream: oneshot dropped".to_string())),
+            Err(_) => Err(PxReplicaError::Internal(
+                "peer_stream: oneshot dropped".to_string(),
+            )),
         }
     }
 
@@ -159,15 +168,21 @@ impl PxPeerStream {
     }
 
     fn dispatch(&self, cmd: OutboundCmd) -> Result<(), PxReplicaError> {
-        // Step 10.7 flow control: `try_send` (non-blocking) instead of
+        // Flow control: `try_send` (non-blocking) instead of
         // `send` (await). When the per-peer mpsc is full we surface the
         // queue depth as a typed error so the proposer can map it to
         // `PxPaxosError::Busy` (already classified `FailRetryable`)
         // rather than blocking the call site behind backpressure.
         match self.cmd_tx.try_send(cmd) {
             Ok(()) => Ok(()),
-            Err(mpsc::error::TrySendError::Full(_)) => Err(PxReplicaError::Internal(format!("peer_stream: outbound queue full at peer {}", self.endpoint))),
-            Err(mpsc::error::TrySendError::Closed(_)) => Err(PxReplicaError::Internal(format!("peer_stream: peer {} is shut down", self.endpoint))),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(PxReplicaError::Internal(format!(
+                "peer_stream: outbound queue full at peer {}",
+                self.endpoint
+            ))),
+            Err(mpsc::error::TrySendError::Closed(_)) => Err(PxReplicaError::Internal(format!(
+                "peer_stream: peer {} is shut down",
+                self.endpoint
+            ))),
         }
     }
 
@@ -186,7 +201,11 @@ impl PxPeerStream {
 /// Single background task that owns the bidi stream and runs the
 /// reconnect loop. Cancellation aborts all in-flight pending oneshots
 /// with `stream reset`.
-async fn run_peer_stream(endpoint: String, mut cmd_rx: mpsc::Receiver<OutboundCmd>, cancel: CancellationToken) {
+async fn run_peer_stream(
+    endpoint: String,
+    mut cmd_rx: mpsc::Receiver<OutboundCmd>,
+    cancel: CancellationToken,
+) {
     let mut backoff = BACKOFF_INITIAL;
 
     loop {
@@ -295,7 +314,9 @@ async fn run_peer_stream(endpoint: String, mut cmd_rx: mpsc::Receiver<OutboundCm
         // Fail all pending oneshots so callers don't hang.
         let drained: Vec<_> = std::mem::take(&mut *pending.lock()).into_iter().collect();
         for (_, sender) in drained {
-            let _ = sender.send(Err(PxReplicaError::Internal("peer_stream: stream reset".to_string())));
+            let _ = sender.send(Err(PxReplicaError::Internal(
+                "peer_stream: stream reset".to_string(),
+            )));
         }
 
         if cancel.is_cancelled() {
@@ -319,7 +340,10 @@ fn dispatch_response(pending: &PendingMap, resp: PeerStreamResponse) {
     if let Some(tx) = pending.lock().remove(&request_id) {
         let _ = tx.send(Ok(reply));
     } else {
-        debug!(request_id, "peer_stream recv: no pending oneshot (late ack or duplicate)");
+        debug!(
+            request_id,
+            "peer_stream recv: no pending oneshot (late ack or duplicate)"
+        );
     }
 }
 

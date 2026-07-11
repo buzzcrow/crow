@@ -14,9 +14,11 @@ use crate::cluster::kv_store::KvStore;
 use crate::cluster::px_kv_store::PxKvStore;
 use crate::rpc::kv_service_client::KvServiceClient;
 use crate::rpc::kv_service_server::KvService;
-use crate::rpc::{KvBatchWriteRequest, KvDeleteRequest, KvGetRequest, KvResponse, KvScanRequest, KvScanResponse, KvSetRequest};
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use crate::rpc::{
+    KvBatchWriteRequest, KvDeleteRequest, KvGetRequest, KvResponse, KvScanRequest, KvScanResponse,
+    KvSetRequest,
+};
+use std::sync::{Arc, OnceLock};
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Response, Status};
@@ -29,28 +31,27 @@ use tracing::{debug, warn};
 /// guarantees forwarding terminates after at most one hop.
 const FORWARD_HEADER: &str = "x-crowkv-forwarded";
 
+use dashmap::DashMap;
+
 /// Process-wide cache of tonic `Channel`s keyed by leader endpoint
 /// (`host:port`). `Channel` is a thin Arc handle that multiplexes
 /// HTTP/2 streams, so cloning is cheap; the cache only saves the
 /// initial TCP+TLS+HTTP/2 handshake on subsequent forwards.
-fn forward_channel_cache() -> &'static Mutex<HashMap<String, Channel>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Channel>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+fn forward_channel_cache() -> &'static DashMap<String, Channel> {
+    static CACHE: OnceLock<DashMap<String, Channel>> = OnceLock::new();
+    CACHE.get_or_init(DashMap::new)
 }
 
 async fn forward_channel(endpoint: &str) -> Result<Channel, Status> {
-    {
-        let cache = forward_channel_cache().lock().unwrap();
-        if let Some(ch) = cache.get(endpoint) {
-            return Ok(ch.clone());
-        }
+    let cache = forward_channel_cache();
+    if let Some(entry) = cache.get(endpoint) {
+        return Ok(entry.clone());
     }
     let ch = Endpoint::from_shared(format!("http://{endpoint}"))
         .map_err(|e| Status::invalid_argument(format!("bad leader endpoint {endpoint}: {e}")))?
         .connect()
         .await
         .map_err(|e| Status::unavailable(format!("connect leader {endpoint}: {e}")))?;
-    let mut cache = forward_channel_cache().lock().unwrap();
     Ok(cache.entry(endpoint.to_string()).or_insert(ch).clone())
 }
 
@@ -87,7 +88,15 @@ impl KvService for KvStoreService {
         );
         let mut resp = self
             .store
-            .kv_put(req.group_id, req.key, req.value, req.client_id, req.seq, req.request_id, req.request_create_ms)
+            .kv_put(
+                req.group_id,
+                &req.key,
+                &req.value,
+                req.client_id,
+                req.seq,
+                req.request_id,
+                req.request_create_ms,
+            )
             .await;
         if !resp.ok {
             warn!(
@@ -145,7 +154,10 @@ impl KvService for KvStoreService {
                             error = %status,
                             "kv get forward failed; next step: serving stale local read with not_leader_hint"
                         );
-                        let mut resp = self.store.kv_get(req.group_id, req.key, req.request_id, req.request_create_ms).await;
+                        let mut resp = self
+                            .store
+                            .kv_get(req.group_id, &req.key, req.request_id, req.request_create_ms)
+                            .await;
                         resp.not_leader_hint = endpoint;
                         resp.request_id = req.request_id;
                         resp.request_create_ms = req.request_create_ms;
@@ -155,7 +167,10 @@ impl KvService for KvStoreService {
             }
         }
 
-        let mut resp = self.store.kv_get(req.group_id, req.key, req.request_id, req.request_create_ms).await;
+        let mut resp = self
+            .store
+            .kv_get(req.group_id, &req.key, req.request_id, req.request_create_ms)
+            .await;
         resp.request_id = req.request_id;
         resp.request_create_ms = req.request_create_ms;
         Ok(Response::new(resp))
@@ -174,7 +189,14 @@ impl KvService for KvStoreService {
         );
         let mut resp = self
             .store
-            .kv_delete(req.group_id, req.key, req.client_id, req.seq, req.request_id, req.request_create_ms)
+            .kv_delete(
+                req.group_id,
+                &req.key,
+                req.client_id,
+                req.seq,
+                req.request_id,
+                req.request_create_ms,
+            )
             .await;
         if !resp.ok {
             warn!(
@@ -238,7 +260,16 @@ impl KvService for KvStoreService {
             }
         }
 
-        let mut resp = self.store.kv_scan(req.group_id, req.prefix, req.limit, req.request_id, req.request_create_ms).await;
+        let mut resp = self
+            .store
+            .kv_scan(
+                req.group_id,
+                &req.prefix,
+                req.limit,
+                req.request_id,
+                req.request_create_ms,
+            )
+            .await;
         if !resp.ok {
             warn!(
                 store_id = self.store.store_id,
@@ -253,7 +284,10 @@ impl KvService for KvStoreService {
         Ok(Response::new(resp))
     }
 
-    async fn batch_write(&self, request: Request<KvBatchWriteRequest>) -> Result<Response<KvResponse>, Status> {
+    async fn batch_write(
+        &self,
+        request: Request<KvBatchWriteRequest>,
+    ) -> Result<Response<KvResponse>, Status> {
         let req = request.into_inner();
         debug!(
             store_id = self.store.store_id,
@@ -266,7 +300,14 @@ impl KvService for KvStoreService {
         );
         let mut resp = self
             .store
-            .kv_batch_write(req.group_id, req.items, req.client_id, req.seq, req.request_id, req.request_create_ms)
+            .kv_batch_write(
+                req.group_id,
+                req.items,
+                req.client_id,
+                req.seq,
+                req.request_id,
+                req.request_create_ms,
+            )
             .await;
         if !resp.ok {
             warn!(

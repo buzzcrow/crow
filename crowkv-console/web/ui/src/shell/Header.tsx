@@ -188,17 +188,17 @@ export function Header({
           crumbs.push({ label: selectedEntity.name || selectedEntity.id, current: true });
           break;
         case 'Group':
-          if (selectedEntity.parentIds?.storeId) {
-            crumbs.push({ label: selectedEntity.parentIds.storeId });
+          if (selectedEntity.parentIds?.storeId || selectedEntity.parentIds?.store_id) {
+            crumbs.push({ label: selectedEntity.parentIds.storeId || selectedEntity.parentIds.store_id });
           }
           crumbs.push({ label: selectedEntity.name || selectedEntity.id, current: true });
           break;
         case 'Replica':
-          if (selectedEntity.parentIds?.storeId) {
-            crumbs.push({ label: selectedEntity.parentIds.storeId });
+          if (selectedEntity.parentIds?.storeId || selectedEntity.parentIds?.store_id) {
+            crumbs.push({ label: selectedEntity.parentIds.storeId || selectedEntity.parentIds.store_id });
           }
-          if (selectedEntity.parentIds?.groupId) {
-            crumbs.push({ label: selectedEntity.parentIds.groupId });
+          if (selectedEntity.parentIds?.groupId || selectedEntity.parentIds?.group_id) {
+            crumbs.push({ label: selectedEntity.parentIds.groupId || selectedEntity.parentIds.group_id });
           }
           crumbs.push({ label: 'Replica', current: true });
           break;

@@ -59,7 +59,10 @@ pub async fn run_store_verb(cli: &Cli, verb: StoreVerb) -> ExitCode {
                     if cli.json {
                         return print_json(&v);
                     }
-                    println!("added store {store_id} (group {group_id}, replica {replica_id}) on nodes {}", v["nodes"]);
+                    println!(
+                        "added store {store_id} (group {group_id}, replica {replica_id}) on nodes {}",
+                        v["nodes"]
+                    );
                     ExitCode::SUCCESS
                 }
                 Err(e) => {

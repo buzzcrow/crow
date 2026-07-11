@@ -17,12 +17,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         /// Port for the web server (default: 9920)
         #[arg(long, default_value_t = 9920)]
         port: u16,
+
+        /// Use an in-memory registry instead of the persisted console config.
+        #[arg(long)]
+        test_mode: bool,
     }
 
     let args = Args::parse();
 
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
         .init();
 
     // Open the per-session operation log file. Outbound HTTP/gRPC/SSH
@@ -41,7 +48,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Load the persisted registry; absence yields an empty default.
     // Mutating handlers (rack/node/server CRUD) write back to this path.
-    let path = crowkv_console_shared::ConsoleConfig::default_path();
+    let path = if args.test_mode {
+        None
+    } else {
+        crowkv_console_shared::ConsoleConfig::default_path()
+    };
     let cfg = match path.as_ref() {
         Some(p) => crowkv_console_shared::ConsoleConfig::load(p).unwrap_or_default(),
         None => crowkv_console_shared::ConsoleConfig::default(),

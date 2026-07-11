@@ -102,7 +102,18 @@ pub async fn run_bench_verb(cli: &Cli, verb: BenchVerb) -> ExitCode {
             group_id,
             progress_interval_secs,
             warmup_secs,
-        } => bench_stress(cli, scenario, store_id, group_id, progress_interval_secs, warmup_secs, cli.json).await,
+        } => {
+            bench_stress(
+                cli,
+                scenario,
+                store_id,
+                group_id,
+                progress_interval_secs,
+                warmup_secs,
+                cli.json,
+            )
+            .await
+        }
         BenchVerb::Report { run_id } => bench_report(&run_id, cli.json),
     }
 }
@@ -146,7 +157,8 @@ async fn bench_run(cli: &Cli, args: BenchRunArgs, json: bool) -> ExitCode {
     cfg.key_space = args.key_space;
     cfg.value_size = args.value_size;
     cfg.run_id = args.run_id;
-    cfg.progress_interval = (args.progress_interval_secs > 0).then(|| Duration::from_secs(args.progress_interval_secs));
+    cfg.progress_interval =
+        (args.progress_interval_secs > 0).then(|| Duration::from_secs(args.progress_interval_secs));
     cfg.warmup = (args.warmup_secs > 0).then(|| Duration::from_secs(args.warmup_secs));
     match run_bench(cfg).await {
         Ok((report, path)) => {
@@ -164,7 +176,15 @@ async fn bench_run(cli: &Cli, args: BenchRunArgs, json: bool) -> ExitCode {
     }
 }
 
-async fn bench_stress(cli: &Cli, scenario: String, store_id: u64, group_id: u64, progress_interval_secs: u64, warmup_secs: u64, json: bool) -> ExitCode {
+async fn bench_stress(
+    cli: &Cli,
+    scenario: String,
+    store_id: u64,
+    group_id: u64,
+    progress_interval_secs: u64,
+    warmup_secs: u64,
+    json: bool,
+) -> ExitCode {
     use crate::bench::{resolve_stress_scenario, run_bench, stress_scenario_names};
     use crate::commands::kv::resolve_kv_endpoint;
     use std::time::Duration;
@@ -176,9 +196,14 @@ async fn bench_stress(cli: &Cli, scenario: String, store_id: u64, group_id: u64,
     // Layer in any [bench.stress.<name>] overrides from console.toml.
     // Missing or unreadable config silently falls back to built-ins
     // only — operators don't need a config file to use stress.
-    let overrides = crate::utils::config::load_config(cli).map(|c| c.bench.stress).unwrap_or_default();
+    let overrides = crate::utils::config::load_config(cli)
+        .map(|c| c.bench.stress)
+        .unwrap_or_default();
     let Ok(mut cfg) = resolve_stress_scenario(&scenario, endpoint, &overrides) else {
-        eprintln!("error: unknown scenario '{scenario}'. Available: {}", stress_scenario_names().join(", "));
+        eprintln!(
+            "error: unknown scenario '{scenario}'. Available: {}",
+            stress_scenario_names().join(", ")
+        );
         return ExitCode::from(1);
     };
     cfg.store_id = store_id;

@@ -27,11 +27,17 @@ impl ServerClient {
         while base.ends_with('/') {
             base.pop();
         }
-        let inner = reqwest::Client::builder().timeout(Duration::from_secs(5)).build().map_err(|e| Error::UpstreamRpc {
-            node_id: base.clone(),
-            status: format!("client build failed: {e}"),
-        })?;
-        Ok(Self { base_url: base, inner })
+        let inner = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .map_err(|e| Error::UpstreamRpc {
+                node_id: base.clone(),
+                status: format!("client build failed: {e}"),
+            })?;
+        Ok(Self {
+            base_url: base,
+            inner,
+        })
     }
 
     #[must_use]
@@ -68,15 +74,35 @@ impl ServerClient {
         let url = format!("{}{path}", self.base_url);
         let cid = crate::corr_id::current_or_new();
         let started = std::time::Instant::now();
-        let resp = self.inner.get(&url).header(crate::corr_id::HEADER, &cid).send().await.map_err(|e| {
-            crate::ops_log::append_http(&cid, "GET", &url, 0, started.elapsed().as_millis(), Some(&format!("transport error: {e}")));
-            Error::UpstreamRpc {
-                node_id: self.base_url.clone(),
-                status: format!("GET {path}: {e}"),
-            }
-        })?;
+        let resp = self
+            .inner
+            .get(&url)
+            .header(crate::corr_id::HEADER, &cid)
+            .send()
+            .await
+            .map_err(|e| {
+                crate::ops_log::append_http(
+                    &cid,
+                    "GET",
+                    &url,
+                    0,
+                    started.elapsed().as_millis(),
+                    Some(&format!("transport error: {e}")),
+                );
+                Error::UpstreamRpc {
+                    node_id: self.base_url.clone(),
+                    status: format!("GET {path}: {e}"),
+                }
+            })?;
         let status = resp.status();
-        crate::ops_log::append_http(&cid, "GET", &url, status.as_u16(), started.elapsed().as_millis(), None);
+        crate::ops_log::append_http(
+            &cid,
+            "GET",
+            &url,
+            status.as_u16(),
+            started.elapsed().as_millis(),
+            None,
+        );
         if !status.is_success() {
             return Err(Error::UpstreamRpc {
                 node_id: self.base_url.clone(),

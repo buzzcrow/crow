@@ -17,3 +17,5 @@ Open implementation items in code. Add new entries when you encounter a TODO/FIX
 - Add an entry here when you encounter a `TODO`/`FIXME`/`unimplemented!` marker in code
 - Remove the entry when the TODO is resolved and the marker is deleted
 - Keep this file under ~50 lines; split to `todo_code-<topic>.md` if it grows
+
+---

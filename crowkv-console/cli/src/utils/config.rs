@@ -41,7 +41,9 @@ pub fn resolve_targets(cli: &Cli) -> Result<Vec<String>, ExitCode> {
     }
     let cfg = load_config(cli)?;
     if cfg.servers.is_empty() {
-        eprintln!("error: no servers registered. Use `crowkv server add --id <id> --url <url>` or pass --server.");
+        eprintln!(
+            "error: no servers registered. Use `crowkv server add --id <id> --url <url>` or pass --server."
+        );
         return Err(ExitCode::from(1));
     }
     Ok(cfg.server_urls())

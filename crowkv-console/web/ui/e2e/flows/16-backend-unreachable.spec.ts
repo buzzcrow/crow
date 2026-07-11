@@ -1,0 +1,11 @@
+import { test, expect } from '../fixtures/realBackend';
+
+test.describe('E2E-16 backend unreachable', () => {
+  test('shows an alert when backend API requests fail', async ({ page }) => {
+    await page.route('**/api/**', route => route.abort('failed'));
+
+    await page.goto('/');
+
+    await expect(page.getByRole('alert')).toContainText('Backend unreachable', { timeout: 15_000 });
+  });
+});

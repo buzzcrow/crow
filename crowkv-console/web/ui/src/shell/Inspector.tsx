@@ -189,10 +189,27 @@ function DetailsTab({
     { label: 'ID', value: entity.id },
     ...(entity.name ? [{ label: 'Name', value: entity.name }] : []),
     { label: 'View', value: entity.viewMode },
-    ...Object.entries(entity.parentIds || {}).map(([k, v]) => ({
-      label: `Parent: ${k}`,
-      value: v,
-    })),
+    ...Object.entries(entity.parentIds || {}).map(([k, v]) => {
+      const node = k === 'node_id' ? nodes.find(n => n.id === v) : undefined;
+      const clickable =
+        entity.type === 'Replica' && entity.viewMode === ViewMode.Logical && k === 'node_id'
+          ? () => {
+              setViewMode(ViewMode.Physical);
+              selectEntity({
+                type: 'Node',
+                id: v,
+                viewMode: ViewMode.Physical,
+                parentIds: node?.rack_id ? { rack_id: node.rack_id } : {},
+                name: node?.host,
+              });
+            }
+          : undefined;
+      return {
+        label: `Parent: ${k}`,
+        value: v,
+        clickable,
+      };
+    }),
   ];
 
   // Build cross-jump fields based on entity type and view mode
@@ -224,6 +241,24 @@ function DetailsTab({
       }
     } else if (entity.type === 'Replica') {
       // Replica -> Jump to corresponding Node in physical view
+      const directNodeId = entity.parentIds?.node_id;
+      if (directNodeId) {
+        const node = nodes.find(n => n.id === directNodeId);
+        crossJumpFields.push({
+          label: 'Running on Node',
+          value: node?.host || directNodeId,
+          clickable: () => {
+            setViewMode(ViewMode.Physical);
+            selectEntity({
+              type: 'Node',
+              id: directNodeId,
+              viewMode: ViewMode.Physical,
+              parentIds: node?.rack_id ? { rack_id: node.rack_id } : {},
+              name: node?.host,
+            });
+          },
+        });
+      }
       // Find the store to get the replica info
       for (const store of stores) {
         if (store.groups) {
@@ -231,7 +266,7 @@ function DetailsTab({
           // @ts-ignore - group may have replicas
           if (group.replicas) {
             // @ts-ignore
-            const replica = group.replicas.find((r: any) => r.replica_id === entity.id);
+            const replica = group.replicas.find((r: any) => String(r.replica_id) === entity.id);
             if (replica?.node_id) {
               const node = nodes.find(n => n.id === replica.node_id);
               crossJumpFields.push({

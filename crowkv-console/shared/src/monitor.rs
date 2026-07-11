@@ -17,7 +17,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, RwLock};
 
 use crate::clients::http::ServerClient;
-use crate::cluster::{GroupHealth, GroupSummary, GroupView, NodeGroup, NodeHealth, NodeId, NodeStore, ReplicaId, ReplicaRole, ReplicaState, ReplicaView, StoreId, StoreView};
+use crate::cluster::{
+    GroupHealth, GroupSummary, GroupView, NodeGroup, NodeHealth, NodeId, NodeStore, ReplicaId, ReplicaRole,
+    ReplicaState, ReplicaView, StoreId, StoreView,
+};
 
 /// Per-node entry in the live cache.
 #[derive(Debug, Clone, Default)]
@@ -83,7 +86,9 @@ impl MonitorCache {
         let mut nodes: Vec<NodeId> = Vec::new();
         let mut groups: BTreeMap<u64, GroupSummary> = BTreeMap::new();
         for (node_id, rec) in guard.iter() {
-            let Some(ns) = rec.stores.get(&store_id) else { continue };
+            let Some(ns) = rec.stores.get(&store_id) else {
+                continue;
+            };
             nodes.push(node_id.clone());
             for g in &ns.groups {
                 let entry = groups.entry(g.group_id).or_insert(GroupSummary {
@@ -113,21 +118,19 @@ impl MonitorCache {
     pub async fn resolve_group(&self, store_id: StoreId, group_id: u64) -> Option<GroupView> {
         let guard = self.nodes.read().await;
         let mut replicas: Vec<ReplicaView> = Vec::new();
-        let mut leader_votes: BTreeMap<ReplicaId, usize> = BTreeMap::new();
         let mut down_count = 0usize;
         let mut total = 0usize;
 
         for (node_id, rec) in guard.iter() {
-            let Some(ns) = rec.stores.get(&store_id) else { continue };
+            let Some(ns) = rec.stores.get(&store_id) else {
+                continue;
+            };
             let Some(g) = ns.groups.iter().find(|g| g.group_id == group_id) else {
                 continue;
             };
             total += 1;
             if rec.health == NodeHealth::Down {
                 down_count += 1;
-            }
-            if let Some(l) = g.leader_hint {
-                *leader_votes.entry(l).or_insert(0) += 1;
             }
             replicas.push(ReplicaView {
                 replica_id: g.local.replica_id,
@@ -140,37 +143,30 @@ impl MonitorCache {
             return None;
         }
 
-        // Leader resolution:
-        // 1. plurality of `leader_hint` across reports;
-        // 2. fall back to any replica self-reporting `Leader`;
-        // 3. fall back to None — callers handle "leader unknown".
-        let leader = leader_votes
-            .into_iter()
-            .max_by_key(|(_, n)| *n)
-            .map(|(id, _)| id)
-            .or_else(|| replicas.iter().find(|r| r.role == ReplicaRole::Leader).map(|r| r.replica_id));
+        // Leader = the replica self-reporting `Leader` role. Per-node
+        // `leader_hint` is no longer aggregated here: each node already
+        // surfaces its own role in `ReplicaView`, which is the single
+        // source of truth.
+        let has_leader = replicas.iter().any(|r| r.role == ReplicaRole::Leader);
 
-        let state = group_health(total, down_count, leader.is_some());
+        let state = group_health(total, down_count, has_leader);
 
         Some(GroupView {
             store_id,
             group_id,
-            leader,
             replicas,
             state,
         })
     }
 
-    /// Resolve `(replica_id, node_id)` for the current leader. When the
-    /// leader hint is missing across every report, falls back to the
-    /// first replica whose hosting node is observed `Up`. Returns `None`
-    /// if no replica matches.
+    /// Resolve `(replica_id, node_id)` for the current leader. When no
+    /// replica self-reports as leader, falls back to the first replica
+    /// whose hosting node is observed `Up`. Returns `None` if no replica
+    /// matches.
     pub async fn leader_for(&self, store_id: StoreId, group_id: u64) -> Option<(ReplicaId, NodeId)> {
         let view = self.resolve_group(store_id, group_id).await?;
-        if let Some(lid) = view.leader {
-            if let Some(r) = view.replicas.iter().find(|r| r.replica_id == lid) {
-                return Some((r.replica_id, r.node_id.clone()));
-            }
+        if let Some(r) = view.leader() {
+            return Some((r.replica_id, r.node_id.clone()));
         }
         // First-healthy fallback. Health is read from the per-node
         // record because `ReplicaView` does not carry node health.
@@ -344,7 +340,9 @@ impl MonitorTask {
         let client = match ServerClient::new(t.mgmt_url.clone()) {
             Ok(c) => c,
             Err(e) => {
-                self.cache.mark_down(&t.node_id, format!("client build: {e}")).await;
+                self.cache
+                    .mark_down(&t.node_id, format!("client build: {e}"))
+                    .await;
                 return;
             }
         };
@@ -362,7 +360,8 @@ impl MonitorTask {
                 // (A4) is wired through `ServerClient`. For A0–A2 the
                 // health probe is enough to drive `leader_for`'s
                 // healthy-fallback path.
-                if let Ok(Ok(stores)) = tokio::time::timeout(self.cfg.probe_timeout, client.topology()).await {
+                if let Ok(Ok(stores)) = tokio::time::timeout(self.cfg.probe_timeout, client.topology()).await
+                {
                     // Best-effort translation of the legacy snapshot
                     // shape into the new per-node-store cache entry.
                     // The new RPC (A4) will replace this verbatim.
@@ -381,7 +380,10 @@ impl MonitorTask {
 }
 
 #[must_use]
-pub fn legacy_topology_to_node_stores(node_id: &str, stores: &[crate::snapshot::StoreView]) -> BTreeMap<StoreId, NodeStore> {
+pub fn legacy_topology_to_node_stores(
+    node_id: &str,
+    stores: &[crate::snapshot::StoreView],
+) -> BTreeMap<StoreId, NodeStore> {
     use crate::cluster::{LocalReplicaInfo, NodeGroup as ClusterNodeGroup, RemoteReplicaInfo};
     let mut out = BTreeMap::new();
     for s in stores {
@@ -422,6 +424,7 @@ pub fn legacy_topology_to_node_stores(node_id: &str, stores: &[crate::snapshot::
             NodeStore {
                 node_id: node_id.to_string(),
                 store_id: s.store_id,
+                listen_addr: s.listen_addr.clone(),
                 groups,
             },
         );
@@ -430,7 +433,12 @@ pub fn legacy_topology_to_node_stores(node_id: &str, stores: &[crate::snapshot::
 }
 
 fn now_ms() -> u64 {
-    u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis())).unwrap_or(0)
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis()),
+    )
+    .unwrap_or(0)
 }
 
 // Allow `NodeGroup`'s import in tests below.
@@ -455,10 +463,18 @@ mod tests {
         }
     }
 
-    fn ng(node: &str, store: StoreId, group: u64, replica: ReplicaId, role: ReplicaRole, leader_hint: Option<ReplicaId>) -> NodeStore {
+    fn ng(
+        node: &str,
+        store: StoreId,
+        group: u64,
+        replica: ReplicaId,
+        role: ReplicaRole,
+        leader_hint: Option<ReplicaId>,
+    ) -> NodeStore {
         NodeStore {
             node_id: node.into(),
             store_id: store,
+            listen_addr: None,
             groups: vec![ClusterNodeGroup {
                 node_id: node.into(),
                 store_id: store,
@@ -477,13 +493,28 @@ mod tests {
     #[tokio::test]
     async fn resolve_group_aggregates_three_nodes() {
         let cache = MonitorCache::new();
-        cache.set_node_report("n1".into(), rec(vec![ng("n1", 1, 7, 100, ReplicaRole::Leader, Some(100))])).await;
-        cache.set_node_report("n2".into(), rec(vec![ng("n2", 1, 7, 200, ReplicaRole::Follower, Some(100))])).await;
-        cache.set_node_report("n3".into(), rec(vec![ng("n3", 1, 7, 300, ReplicaRole::Follower, Some(100))])).await;
+        cache
+            .set_node_report(
+                "n1".into(),
+                rec(vec![ng("n1", 1, 7, 100, ReplicaRole::Leader, Some(100))]),
+            )
+            .await;
+        cache
+            .set_node_report(
+                "n2".into(),
+                rec(vec![ng("n2", 1, 7, 200, ReplicaRole::Follower, Some(100))]),
+            )
+            .await;
+        cache
+            .set_node_report(
+                "n3".into(),
+                rec(vec![ng("n3", 1, 7, 300, ReplicaRole::Follower, Some(100))]),
+            )
+            .await;
 
         let view = cache.resolve_group(1, 7).await.expect("group exists");
         assert_eq!(view.replicas.len(), 3);
-        assert_eq!(view.leader, Some(100));
+        assert_eq!(view.leader_id(), Some(100));
         assert_eq!(view.state, GroupHealth::Healthy);
     }
 
@@ -516,7 +547,12 @@ mod tests {
     #[tokio::test]
     async fn resolve_group_not_found_returns_none() {
         let cache = MonitorCache::new();
-        cache.set_node_report("n1".into(), rec(vec![ng("n1", 1, 7, 100, ReplicaRole::Leader, Some(100))])).await;
+        cache
+            .set_node_report(
+                "n1".into(),
+                rec(vec![ng("n1", 1, 7, 100, ReplicaRole::Leader, Some(100))]),
+            )
+            .await;
         assert!(cache.resolve_group(1, 8).await.is_none());
         assert!(cache.resolve_group(2, 7).await.is_none());
     }
@@ -524,8 +560,18 @@ mod tests {
     #[tokio::test]
     async fn resolve_store_lists_member_nodes_and_groups() {
         let cache = MonitorCache::new();
-        cache.set_node_report("n1".into(), rec(vec![ng("n1", 1, 7, 100, ReplicaRole::Leader, Some(100))])).await;
-        cache.set_node_report("n2".into(), rec(vec![ng("n2", 1, 7, 200, ReplicaRole::Follower, Some(100))])).await;
+        cache
+            .set_node_report(
+                "n1".into(),
+                rec(vec![ng("n1", 1, 7, 100, ReplicaRole::Leader, Some(100))]),
+            )
+            .await;
+        cache
+            .set_node_report(
+                "n2".into(),
+                rec(vec![ng("n2", 1, 7, 200, ReplicaRole::Follower, Some(100))]),
+            )
+            .await;
         let view = cache.resolve_store(1).await.expect("store exists");
         assert_eq!(view.nodes.len(), 2);
         assert_eq!(view.groups.len(), 1);

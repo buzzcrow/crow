@@ -4,6 +4,9 @@
 # Frontend directory
 UI_DIR := crowkv-console/web/ui
 
+# Detect OS
+UNAME_S := $(shell uname -s)
+
 # Default target: run pre-commit checks
 default:
 	@echo "Running pre-commit checks..."
@@ -25,7 +28,15 @@ test-web:
 
 # Install dependencies and pre-commit hooks
 install:
-	@echo "Installing dependencies..."
+ifeq ($(UNAME_S),Darwin)
+	@echo "Detected macOS — checking Homebrew dependencies..."
+	@which brew > /dev/null || (echo "Homebrew not found. Please install it from https://brew.sh/" && exit 1)
+	@brew list pkgconf >/dev/null 2>&1 || brew install pkgconf
+	@brew list openssl >/dev/null 2>&1 || brew install openssl
+	@brew list protobuf >/dev/null 2>&1 || brew install protobuf
+	@brew list node >/dev/null 2>&1 || brew install node
+endif
+	@echo "Installing Rust tools..."
 	cargo install cargo-tarpaulin
 	@echo "Installing UI dependencies (npm ci)..."
 	cd $(UI_DIR) && npm ci

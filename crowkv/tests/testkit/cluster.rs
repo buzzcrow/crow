@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::testkit::logging::init_test_subscriber;
 use crowkv::cluster::group::PxGroup;
+use crowkv::cluster::group_election::LeaderElection;
 use crowkv::cluster::{KvServer, PxKvStore, PxLocalReplica, PxLocalReplicaRole, PxRemoteReplica};
 use crowkv::common::config::PxElectionConfig;
 use crowkv::rpc::kv_service_client::KvServiceClient;
@@ -59,15 +60,21 @@ impl TestCluster {
 
     #[allow(dead_code)]
     pub async fn px_client(&self, node: &Arc<PxKvStore>) -> PxServiceClient<Channel> {
-        PxServiceClient::connect(format!("http://{}", node.listen_addr().expect("server not started")))
-            .await
-            .expect("connect PxService")
+        PxServiceClient::connect(format!(
+            "http://{}",
+            node.listen_addr().expect("server not started")
+        ))
+        .await
+        .expect("connect PxService")
     }
 
     pub async fn kv_client(&self, node: &Arc<PxKvStore>) -> KvServiceClient<Channel> {
-        KvServiceClient::connect(format!("http://{}", node.listen_addr().expect("server not started")))
-            .await
-            .expect("connect KvService")
+        KvServiceClient::connect(format!(
+            "http://{}",
+            node.listen_addr().expect("server not started")
+        ))
+        .await
+        .expect("connect KvService")
     }
 }
 
@@ -122,7 +129,7 @@ async fn start_cluster_no_leader_inner(ids: &[u64]) -> TestCluster {
         // Deliberately no `set_leader_id` — let the driver elect.
 
         server.add_group(group);
-        assert!(server.start().await, "failed to start KvStore");
+        server.start().await.expect("failed to start KvStore");
         running.push(server);
     }
 
@@ -131,7 +138,10 @@ async fn start_cluster_no_leader_inner(ids: &[u64]) -> TestCluster {
         .iter()
         .map(|node| {
             let group = node.get_group(1).expect("group exists");
-            (group.local_replica().id, node.listen_addr().expect("server not started").to_string())
+            (
+                group.local_replica().id,
+                node.listen_addr().expect("server not started").to_string(),
+            )
         })
         .collect();
     for node in &running {
@@ -163,8 +173,15 @@ async fn start_cluster_inner(ids: &[u64], leader_id: u64, force_classic: bool) -
 
     let mut running = Vec::with_capacity(ids.len());
     for &id in ids {
-        let role = if id == leader_id { PxLocalReplicaRole::Leader } else { PxLocalReplicaRole::Follower };
+        let role = if id == leader_id {
+            PxLocalReplicaRole::Leader
+        } else {
+            PxLocalReplicaRole::Follower
+        };
         let replica = PxLocalReplica::new(id, role);
+        if id != leader_id {
+            replica.set_believed_leader(leader_id);
+        }
 
         let store = PxKvStore::new(id, "127.0.0.1:0".parse().unwrap());
         let server = Arc::new(store);
@@ -177,7 +194,6 @@ async fn start_cluster_inner(ids: &[u64], leader_id: u64, force_classic: bool) -
 
         let mut group = PxGroup::new(1, replica);
         group.set_remote_replicas(remote_replicas);
-        group.set_leader_id(leader_id);
 
         if force_classic {
             group.set_force_classic(true);
@@ -185,7 +201,7 @@ async fn start_cluster_inner(ids: &[u64], leader_id: u64, force_classic: bool) -
 
         server.add_group(group);
 
-        assert!(server.start().await, "failed to start KvStore");
+        server.start().await.expect("failed to start KvStore");
 
         running.push(server);
     }
@@ -195,16 +211,21 @@ async fn start_cluster_inner(ids: &[u64], leader_id: u64, force_classic: bool) -
         .iter()
         .map(|node| {
             let group = node.get_group(1).expect("group exists");
-            (group.local_replica().id, node.listen_addr().expect("server not started").to_string())
+            (
+                group.local_replica().id,
+                node.listen_addr().expect("server not started").to_string(),
+            )
         })
         .collect();
     for node in &running {
         let group = node.get_group(1).expect("group should exist");
         let group_id = group.group_id;
-        let leader_id = group.leader_id();
         let force_classic = group.force_classic();
         let lr = group.local_replica();
         let local_replica = PxLocalReplica::new(lr.id, lr.role());
+        if let Some(believed) = lr.believed_leader_id() {
+            local_replica.set_believed_leader(believed);
+        }
 
         // Reconstruct remote replicas with updated endpoints
         let my_id = group.local_replica().id;
@@ -216,7 +237,6 @@ async fn start_cluster_inner(ids: &[u64], leader_id: u64, force_classic: bool) -
 
         let mut new_group = PxGroup::new(group_id, local_replica);
         new_group.set_remote_replicas(remote_replicas);
-        new_group.set_leader_id(leader_id);
 
         if force_classic {
             new_group.set_force_classic(true);
@@ -233,7 +253,16 @@ pub async fn assert_all_accepted(cluster: &TestCluster, slot: u64, expected_payl
     for node in cluster.nodes() {
         let group = node.get_group(1).expect("group exists");
         let replica = group.local_replica();
-        let accepted = replica.accepted_at(slot).await.unwrap_or_else(|| panic!("replica {} missing slot {}", replica.id, slot));
-        assert_eq!(*accepted.payload, expected_payload, "replica {} has wrong payload at slot {}", replica.id, slot);
+        let accepted = replica
+            .accepted_at(slot)
+            .await
+            .unwrap_or_else(|| panic!("replica {} missing slot {}", replica.id, slot));
+        assert_eq!(
+            accepted.payload.as_ref(),
+            expected_payload,
+            "replica {} has wrong payload at slot {}",
+            replica.id,
+            slot
+        );
     }
 }

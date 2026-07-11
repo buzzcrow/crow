@@ -57,7 +57,10 @@ impl SshCreds {
         }
         Err(Error::Validation {
             field: "ssh".into(),
-            message: format!("no ssh creds found for node {} (set ssh_key or ssh_password)", node.id),
+            message: format!(
+                "no ssh creds found for node {} (set ssh_key or ssh_password)",
+                node.id
+            ),
         })
     }
 }
@@ -119,9 +122,14 @@ impl Session {
         // back to a strict-reject ephemeral store so we never silently
         // accept arbitrary keys.
         let store = known_hosts_store_for_session()?;
-        let handler = ClientHandler { host_id: id.clone(), store };
+        let handler = ClientHandler {
+            host_id: id.clone(),
+            store,
+        };
 
-        let mut handle = client::connect(config, addr, handler).await.map_err(|e| ssh_err(&id, &e))?;
+        let mut handle = client::connect(config, addr, handler)
+            .await
+            .map_err(|e| ssh_err(&id, &e))?;
 
         let authed = match creds {
             SshCreds::KeyPath(path) => {
@@ -129,9 +137,15 @@ impl Session {
                     field: "ssh_key".into(),
                     message: format!("load {}: {e}", path.display()),
                 })?;
-                handle.authenticate_publickey(node.ssh_user.clone(), Arc::new(key)).await.map_err(|e| ssh_err(&id, &e))?
+                handle
+                    .authenticate_publickey(node.ssh_user.clone(), Arc::new(key))
+                    .await
+                    .map_err(|e| ssh_err(&id, &e))?
             }
-            SshCreds::Password(pw) => handle.authenticate_password(node.ssh_user.clone(), pw.clone()).await.map_err(|e| ssh_err(&id, &e))?,
+            SshCreds::Password(pw) => handle
+                .authenticate_password(node.ssh_user.clone(), pw.clone())
+                .await
+                .map_err(|e| ssh_err(&id, &e))?,
         };
 
         if !authed {
@@ -150,7 +164,11 @@ impl Session {
     /// `Error::UpstreamRpc` for channel / exec / IO failures.
     pub async fn exec(&mut self, command: &str) -> Result<ExecOutput> {
         let id = "<ssh>".to_string();
-        let mut channel = self.handle.channel_open_session().await.map_err(|e| ssh_err(&id, &e))?;
+        let mut channel = self
+            .handle
+            .channel_open_session()
+            .await
+            .map_err(|e| ssh_err(&id, &e))?;
         channel.exec(true, command).await.map_err(|e| ssh_err(&id, &e))?;
 
         let mut stdout = Vec::new();
@@ -178,7 +196,10 @@ impl Session {
 
     /// Send a clean disconnect. Best-effort — errors are ignored.
     pub async fn close(self) {
-        let _ = self.handle.disconnect(russh::Disconnect::ByApplication, "", "").await;
+        let _ = self
+            .handle
+            .disconnect(russh::Disconnect::ByApplication, "", "")
+            .await;
     }
 }
 
@@ -224,7 +245,10 @@ struct ClientHandler {
 impl client::Handler for ClientHandler {
     type Error = russh::Error;
 
-    async fn check_server_key(&mut self, server_public_key: &PublicKey) -> std::result::Result<bool, Self::Error> {
+    async fn check_server_key(
+        &mut self,
+        server_public_key: &PublicKey,
+    ) -> std::result::Result<bool, Self::Error> {
         let presented = KeyRecord::from_public_key(server_public_key);
         match self.store.check_or_insert(&self.host_id, &presented) {
             Ok(KnownHostsOutcome::Known | KnownHostsOutcome::InsertedTofu) => Ok(true),
@@ -264,7 +288,8 @@ fn known_hosts_store_for_session() -> Result<Arc<KnownHostsStore>> {
         warn!("ssh: cannot resolve $HOME or $CROWKV_KNOWN_HOSTS; using in-memory known_hosts (keys will not persist)");
         std::env::temp_dir().join(format!("crowkv-known_hosts-{}", std::process::id()))
     });
-    let store = KnownHostsStore::open(&path).map_err(|e| Error::Config(format!("open known_hosts {}: {e}", path.display())))?;
+    let store = KnownHostsStore::open(&path)
+        .map_err(|e| Error::Config(format!("open known_hosts {}: {e}", path.display())))?;
     let arc = Arc::new(store);
     let _ = SHARED.set(arc.clone());
     Ok(arc)
@@ -289,7 +314,11 @@ pub async fn run_remote(node: &NodeEntry, command: &str) -> Result<ExecOutput> {
 ///
 /// # Errors
 /// Surfaces SSH or readiness failures.
-pub async fn deploy_via_ssh(req: &crate::lifecycle::DeployRequest, node: &NodeEntry, server_bin: &str) -> Result<crate::lifecycle::DeployedServer> {
+pub async fn deploy_via_ssh(
+    req: &crate::lifecycle::DeployRequest,
+    node: &NodeEntry,
+    server_bin: &str,
+) -> Result<crate::lifecycle::DeployedServer> {
     use crate::clients::http::ServerClient;
     use std::time::Instant;
     use tokio::time::sleep;
@@ -299,13 +328,27 @@ pub async fn deploy_via_ssh(req: &crate::lifecycle::DeployRequest, node: &NodeEn
     if !out.success() {
         return Err(Error::UpstreamRpc {
             node_id: node.host.clone(),
-            status: format!("remote start failed: exit={:?} stderr={}", out.exit, out.stderr_str()),
+            status: format!(
+                "remote start failed: exit={:?} stderr={}",
+                out.exit,
+                out.stderr_str()
+            ),
         });
     }
-    let pid: u32 = out.stdout_str().trim().lines().last().unwrap_or_default().parse().map_err(|e| Error::UpstreamRpc {
-        node_id: node.host.clone(),
-        status: format!("could not parse remote pid from stdout {:?}: {e}", out.stdout_str()),
-    })?;
+    let pid: u32 = out
+        .stdout_str()
+        .trim()
+        .lines()
+        .last()
+        .unwrap_or_default()
+        .parse()
+        .map_err(|e| Error::UpstreamRpc {
+            node_id: node.host.clone(),
+            status: format!(
+                "could not parse remote pid from stdout {:?}: {e}",
+                out.stdout_str()
+            ),
+        })?;
 
     // Poll /health up to 10s, like the local-fork path.
     let mgmt_url = format!("http://{}:{}", node.host, req.mgmt_port);

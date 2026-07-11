@@ -57,9 +57,16 @@ fn print_topology_human(snap: &ClusterSnapshot) {
             continue;
         }
         for store in &s.stores {
-            println!("  store {} listen={}", store.store_id, store.listen_addr.as_deref().unwrap_or("-"));
+            println!(
+                "  store {} listen={}",
+                store.store_id,
+                store.listen_addr.as_deref().unwrap_or("-")
+            );
             for g in &store.groups {
-                println!("    group {} leader={} local={} role={}", g.group_id, g.leader_id, g.local_replica.id, g.local_replica.role);
+                println!(
+                    "    group {} leader={} local={} role={}",
+                    g.group_id, g.leader_id, g.local_replica.id, g.local_replica.role
+                );
                 for r in &g.remotes {
                     println!("      remote {} {}", r.id, r.endpoint);
                 }

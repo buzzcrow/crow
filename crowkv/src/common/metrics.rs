@@ -23,6 +23,7 @@
 //!
 //! Future fields (deferred to V2): `bytes_in`, `bytes_out`, `tps_window`.
 
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Default)]
@@ -61,14 +62,14 @@ impl LayerMetrics {
 }
 
 /// Point-in-time read of `LayerMetrics`. Pure data; trivially serializable.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct MetricsSnapshot {
     pub rpc_count: u64,
     pub err_count: u64,
     pub last_rtt_ms: u64,
 }
 
-/// Per-`PxLocalReplica` leader-election counters (Step 11).
+/// Per-`PxLocalReplica` leader-election counters.
 ///
 /// Counters are cheap `Relaxed` increments on the election hot path; the
 /// election driver and step-down sequence call into the bump helpers,

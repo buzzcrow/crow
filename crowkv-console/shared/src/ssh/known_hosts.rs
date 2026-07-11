@@ -100,10 +100,16 @@ impl KnownHostsStore {
                 let mut parts = line.split_whitespace();
                 let Some(host) = parts.next() else { continue };
                 let Some(algo) = parts.next() else {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{}:{}: missing algorithm", path.display(), idx + 1)));
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{}:{}: missing algorithm", path.display(), idx + 1),
+                    ));
                 };
                 let Some(b64) = parts.next() else {
-                    return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{}:{}: missing key", path.display(), idx + 1)));
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{}:{}: missing key", path.display(), idx + 1),
+                    ));
                 };
                 inner.insert(
                     host.to_string(),
@@ -114,7 +120,10 @@ impl KnownHostsStore {
                 );
             }
         }
-        Ok(Self { path, inner: Mutex::new(inner) })
+        Ok(Self {
+            path,
+            inner: Mutex::new(inner),
+        })
     }
 
     /// Check whether the presented key matches the stored one. On first
@@ -150,7 +159,11 @@ impl KnownHostsStore {
     /// Panics if the inner mutex is poisoned.
     #[must_use]
     pub fn get(&self, host_id: &str) -> Option<KeyRecord> {
-        self.inner.lock().expect("known_hosts mutex").get(host_id).cloned()
+        self.inner
+            .lock()
+            .expect("known_hosts mutex")
+            .get(host_id)
+            .cloned()
     }
 
     fn persist_locked(path: &Path, map: &HashMap<String, KeyRecord>) -> io::Result<()> {
@@ -158,7 +171,9 @@ impl KnownHostsStore {
             fs::create_dir_all(parent)?;
         }
         let mut lines = String::with_capacity(map.len() * 96);
-        lines.push_str("# crowkv-console known_hosts — managed file, do not edit while the console is running.\n");
+        lines.push_str(
+            "# crowkv-console known_hosts — managed file, do not edit while the console is running.\n",
+        );
         // Sort for deterministic output so diffs are reviewable.
         let mut entries: Vec<_> = map.iter().collect();
         entries.sort_by(|a, b| a.0.cmp(b.0));

@@ -3,8 +3,8 @@
 //! and the registry without spawning a process.
 //!
 //! The binary entry (`main.rs`) imports from this lib via
-//! `use crowkv_server::{cli, management, state};`.
+//! `use crowkv_server::{cli, mgmt_api, store_registry};`.
 
 pub mod cli;
-pub mod management;
-pub mod state;
+pub mod mgmt_api;
+pub mod store_registry;

@@ -54,18 +54,19 @@ function TreeNodeComponent({
   onNodeClick,
   onNodeContextMenu,
 }: TreeNodeProps) {
-  const { isSelected, toggleSelection } = useSelection();
+  const { isSelected, selectEntity, toggleSelection } = useSelection();
   const { viewMode } = useViewMode();
   const [isContextMenuOpen, setIsContextMenuOpen] = useState(false);
   const hasChildren = node.children && node.children.length > 0;
   const isExpanded = expandedIds.has(node.id);
-  const isNodeSelected = isSelected(node.id);
+  const entityId = node.rawId ?? node.id;
+  const isNodeSelected = isSelected(entityId);
 
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
       const selectedEntity = {
         type: node.type,
-        id: node.id,
+        id: entityId,
         name: node.label,
         parentIds: node.parentIds,
         viewMode,
@@ -79,19 +80,27 @@ function TreeNodeComponent({
         if (hasChildren) {
           toggleExpanded(node.id);
         }
+        selectEntity(selectedEntity);
         onNodeClick?.(node);
       }
     },
-    [node, hasChildren, toggleExpanded, onNodeClick, toggleSelection, viewMode]
+    [node, entityId, hasChildren, toggleExpanded, onNodeClick, selectEntity, toggleSelection, viewMode]
   );
 
   const handleContextMenu = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault();
+      selectEntity({
+        type: node.type,
+        id: entityId,
+        name: node.label,
+        parentIds: node.parentIds,
+        viewMode,
+      });
       onNodeContextMenu?.(node, e);
       setIsContextMenuOpen(true);
     },
-    [node, onNodeContextMenu]
+    [node, entityId, onNodeContextMenu, selectEntity, viewMode]
   );
 
   const handleChevronClick = useCallback(

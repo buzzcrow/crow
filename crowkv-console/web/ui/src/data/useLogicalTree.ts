@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { listStores, listGroups } from '../api';
+import { getGroup, listStores, listGroups } from '../api';
 import type { StoreView, GroupView, ReplicaView } from '../types';
 
 interface UseLogicalTreeOptions {
@@ -61,22 +61,34 @@ export function useLogicalTree({
 
       // Fetch stores with recursive depth
       const storesData = await listStores(recursive);
-      setStores(Array.isArray(storesData) ? storesData : []);
+      const sourceStores = Array.isArray(storesData) ? storesData : [];
 
       // Build flat lists of groups and replicas
       const allGroups: GroupView[] = [];
       const allReplicas: ReplicaView[] = [];
 
-      for (const store of storesData) {
+      const enrichedStores: StoreView[] = [];
+      for (const store of sourceStores) {
         // Fetch groups for each store (or use existing if recursive included them)
         let storeGroups: GroupView[];
         if (store.groups) {
-          storeGroups = store.groups.map(g => ({
-            store_id: store.store_id,
-            group_id: g.group_id,
-            leader: g.leader,
-            replicas: [],
-            state: g.health || 'Unknown',
+          storeGroups = await Promise.all(store.groups.map(async g => {
+            try {
+              const detail = await getGroup(store.store_id, g.group_id, recursive);
+              return {
+                ...detail,
+                store_id: store.store_id,
+                replicas: detail.replicas || [],
+              };
+            } catch {
+              return {
+                store_id: store.store_id,
+                group_id: g.group_id,
+                leader: g.leader,
+                replicas: [],
+                state: g.health || 'Unknown',
+              };
+            }
           }));
         } else {
           const fetchedGroups = await listGroups(store.store_id, recursive);
@@ -87,6 +99,10 @@ export function useLogicalTree({
           })) : [];
         }
         allGroups.push(...storeGroups);
+        enrichedStores.push({
+          ...store,
+          groups: storeGroups as any,
+        });
 
         for (const group of storeGroups) {
           if (group.replicas && Array.isArray(group.replicas)) {
@@ -95,6 +111,7 @@ export function useLogicalTree({
         }
       }
 
+      setStores(enrichedStores);
       setGroups(allGroups);
       setReplicas(allReplicas);
     } catch (err) {

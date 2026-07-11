@@ -66,7 +66,10 @@ pub async fn run_group_verb(cli: &Cli, verb: GroupVerb) -> ExitCode {
                     if cli.json {
                         return print_json(&v);
                     }
-                    println!("added group {group_id} to store {store_id} on nodes {}", v["nodes"]);
+                    println!(
+                        "added group {group_id} to store {store_id} on nodes {}",
+                        v["nodes"]
+                    );
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
@@ -96,7 +99,12 @@ pub async fn run_group_verb(cli: &Cli, verb: GroupVerb) -> ExitCode {
                 }
                 println!("{:>8}  {:>8}  {:>10}", "GROUP", "LEADER", "REPLICAS");
                 for g in &groups {
-                    println!("{:>8}  {:>8}  {:>10}", g.group_id, g.leader.map_or_else(|| "?".into(), |l| l.to_string()), g.replica_count);
+                    println!(
+                        "{:>8}  {:>8}  {:>10}",
+                        g.group_id,
+                        g.leader.map_or_else(|| "?".into(), |l| l.to_string()),
+                        g.replica_count
+                    );
                 }
                 ExitCode::SUCCESS
             }
@@ -110,10 +118,17 @@ pub async fn run_group_verb(cli: &Cli, verb: GroupVerb) -> ExitCode {
                 if cli.json {
                     return print_json(&view);
                 }
-                println!("group {} leader={}", view.group_id, view.leader.map_or_else(|| "?".into(), |l| l.to_string()));
+                println!(
+                    "group {} leader={}",
+                    view.group_id,
+                    view.leader_id().map_or_else(|| "?".into(), |l| l.to_string())
+                );
                 println!("{:>10}  {:<12}  {:<10}  STATE", "REPLICA", "NODE", "ROLE");
                 for r in &view.replicas {
-                    println!("{:>10}  {:<12}  {:?}  {:?}", r.replica_id, r.node_id, r.role, r.state);
+                    println!(
+                        "{:>10}  {:<12}  {:?}  {:?}",
+                        r.replica_id, r.node_id, r.role, r.state
+                    );
                 }
                 ExitCode::SUCCESS
             }

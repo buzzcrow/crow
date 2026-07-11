@@ -80,7 +80,12 @@ impl KvClient {
 
         // Cache hit fast path — clone the Arc-backed `Channel` and skip
         // the TCP+HTTP/2 handshake.
-        if let Some(channel) = channel_cache().lock().expect("channel cache mutex").get(&url).cloned() {
+        if let Some(channel) = channel_cache()
+            .lock()
+            .expect("channel cache mutex")
+            .get(&url)
+            .cloned()
+        {
             return Ok(Self {
                 inner: KvServiceClient::new(channel),
                 endpoint,
@@ -103,7 +108,10 @@ impl KvClient {
         // hand back our freshly-built channel; the loser's channel will
         // be dropped on the next hit. No correctness issue, only a
         // brief duplicate connection.
-        channel_cache().lock().expect("channel cache mutex").insert(url, channel.clone());
+        channel_cache()
+            .lock()
+            .expect("channel cache mutex")
+            .insert(url, channel.clone());
 
         Ok(Self {
             inner: KvServiceClient::new(channel),
@@ -133,7 +141,14 @@ impl KvClient {
     /// # Errors
     /// Transport errors, or `Error::UpstreamRpc` if the server returns
     /// `ok=false`.
-    pub async fn put(&mut self, group_id: u64, key: &[u8], value: &[u8], client_id: u64, seq: u64) -> Result<WriteOutcome> {
+    pub async fn put(
+        &mut self,
+        group_id: u64,
+        key: &[u8],
+        value: &[u8],
+        client_id: u64,
+        seq: u64,
+    ) -> Result<WriteOutcome> {
         let request_id = next_request_id();
         let request_create_ms = now_ms();
         let req = KvSetRequest {
@@ -147,7 +162,12 @@ impl KvClient {
             request_create_ms,
             group_id,
         };
-        let resp = self.inner.put(req).await.map_err(|e| self.rpc_err(format!("put: {e}")))?.into_inner();
+        let resp = self
+            .inner
+            .put(req)
+            .await
+            .map_err(|e| self.rpc_err(format!("put: {e}")))?
+            .into_inner();
         check_ok(&resp).map(|()| WriteOutcome {
             revision: resp.revision,
             request_id: resp.request_id,
@@ -169,7 +189,12 @@ impl KvClient {
             request_create_ms: now_ms(),
             group_id,
         };
-        let resp = self.inner.get(req).await.map_err(|e| self.rpc_err(format!("get: {e}")))?.into_inner();
+        let resp = self
+            .inner
+            .get(req)
+            .await
+            .map_err(|e| self.rpc_err(format!("get: {e}")))?
+            .into_inner();
         if resp.not_found {
             return Ok(GetOutcome::NotFound);
         }
@@ -187,7 +212,13 @@ impl KvClient {
     /// # Errors
     /// Transport errors, or `Error::UpstreamRpc` if the server returns
     /// `ok=false` for reasons other than `not_found`.
-    pub async fn delete(&mut self, group_id: u64, key: &[u8], client_id: u64, seq: u64) -> Result<WriteOutcome> {
+    pub async fn delete(
+        &mut self,
+        group_id: u64,
+        key: &[u8],
+        client_id: u64,
+        seq: u64,
+    ) -> Result<WriteOutcome> {
         let request_id = next_request_id();
         let request_create_ms = now_ms();
         let req = KvDeleteRequest {
@@ -199,7 +230,12 @@ impl KvClient {
             request_create_ms,
             group_id,
         };
-        let resp = self.inner.delete(req).await.map_err(|e| self.rpc_err(format!("delete: {e}")))?.into_inner();
+        let resp = self
+            .inner
+            .delete(req)
+            .await
+            .map_err(|e| self.rpc_err(format!("delete: {e}")))?
+            .into_inner();
         // not_found on delete is a benign no-op: report it as a successful
         // write with revision 0.
         if resp.not_found {
@@ -242,7 +278,10 @@ impl KvClient {
             return Err(self.rpc_err(format!("scan: {}", resp.error)));
         }
         let items: Vec<(Vec<u8>, Vec<u8>)> = resp.items.into_iter().map(|i| (i.key, i.value)).collect();
-        Ok(ScanOutcome { items, truncated: resp.truncated })
+        Ok(ScanOutcome {
+            items,
+            truncated: resp.truncated,
+        })
     }
 
     #[must_use]
@@ -269,18 +308,26 @@ fn check_ok(resp: &KvResponse) -> Result<()> {
     }
     Err(Error::UpstreamRpc {
         node_id: "<grpc>".into(),
-        status: if resp.error.is_empty() { "server returned ok=false".into() } else { resp.error.clone() },
+        status: if resp.error.is_empty() {
+            "server returned ok=false".into()
+        } else {
+            resp.error.clone()
+        },
     })
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Monotonic-ish request id derived from the system clock. Good enough
 /// for log correlation; not a globally unique identifier.
 fn next_request_id() -> u64 {
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
     u64::try_from(nanos).unwrap_or(u64::MAX)
 }
 

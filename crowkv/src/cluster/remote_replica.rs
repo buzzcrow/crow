@@ -2,27 +2,28 @@
 //!
 //! Wraps a lazy gRPC client, a per-peer bidi `PxPeerStream` (for
 //! Accept / Heartbeat / `ChosenNotification` fan-out), and a small layer
-//! of cached health/metrics state. Exposes `ReplicaClient` so callers
+//! of cached status/metrics state. Exposes `ReplicaClient` so callers
 //! talk to peers through a uniform RPC surface.
 //!
 //! Key work: lazy gRPC client init, peer-stream construction & lifecycle,
 //! Prepare/Accept/PreVote/RequestVote/Heartbeat/StepDown RPC bridges,
-//! cached health snapshots for the management API.
+//! cached status snapshots for the management API.
 
-use crate::cluster::health::HealthReport;
 use crate::cluster::peer_stream::PxPeerStream;
 use crate::cluster::replica::{
-    HeartbeatReply, HeartbeatRequestPayload, PxReplicaError, Replica, ReplicaClient, StepDownReply, StepDownRequestPayload, VoteReply, VoteRequestPayload,
+    HeartbeatReply, HeartbeatRequestPayload, PxReplicaError, Replica, ReplicaClient, StepDownReply,
+    StepDownRequestPayload, VoteReply, VoteRequestPayload,
 };
-use crate::cluster::shutdown::ShutdownReport;
-use crate::cluster::snapshot::RemoteSnapshot;
+use crate::cluster::status::{RemoteStatus, StatusLevel};
 use crate::common::config::PxElectionConfig;
 use crate::common::metrics::LayerMetrics;
+use crate::common::report::OperationReport;
 use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxLogEntryKind, PxPrepareReply};
 use crate::paxos::PxNodeId;
 use crate::rpc::px_service_client::PxServiceClient;
 use crate::rpc::{
-    AcceptRequest, AcceptedValue, ChosenNotification as RpcChosenNotification, HeartbeatRequest as RpcHeartbeatRequest, PreVoteRequest as RpcPreVoteRequest, PrepareRequest,
+    AcceptRequest, AcceptedValue, ChosenNotification as RpcChosenNotification,
+    HeartbeatRequest as RpcHeartbeatRequest, PreVoteRequest as RpcPreVoteRequest, PrepareRequest,
     RequestVoteRequest as RpcRequestVoteRequest, StepDownRequest as RpcStepDownRequest,
 };
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -41,9 +42,9 @@ pub struct PxRemoteReplica {
     // which would make RemoteReplicaKind::Real large and trigger large_enum_variant warning.
     // Heap allocation is deferred via OnceCell until first use.
     grpc_client: OnceCell<Box<PxServiceClient<Channel>>>,
-    /// Lazy-initialized per-peer bidi stream (Step 10.3 / 10.4). Carries
-    /// `Accept` (10.4), `Heartbeat` (10.5), and `ChosenNotification`
-    /// (10.6) frames. Constructed on first call to [`Self::peer_stream`].
+    /// Lazy-initialized per-peer bidi stream. Carries `Accept`,
+    /// `Heartbeat`, and `ChosenNotification` frames. Constructed on
+    /// first call to [`Self::peer_stream`].
     peer_stream: OnceLock<Arc<PxPeerStream>>,
     /// Window size used for the lazy `peer_stream` mpsc. Snapshot of
     /// `PxElectionConfig::peer_stream_window_frames` taken at the time
@@ -83,7 +84,13 @@ fn status_to_err(status: &tonic::Status) -> PxReplicaError {
 }
 
 impl ReplicaClient for PxRemoteReplica {
-    async fn send_prepare(&self, slot: u64, ballot: PxBallot, term: crate::paxos::PxTerm, group_id: u64) -> Result<PxPrepareReply, PxReplicaError> {
+    async fn send_prepare(
+        &self,
+        slot: u64,
+        ballot: PxBallot,
+        term: crate::paxos::PxTerm,
+        group_id: u64,
+    ) -> Result<PxPrepareReply, PxReplicaError> {
         let mut client = match self.get_client().await {
             Ok(c) => c.clone(),
             Err(status) => {
@@ -133,12 +140,10 @@ impl ReplicaClient for PxRemoteReplica {
     }
 
     async fn send_accept(&self, entry: &PxLogEntry, group_id: u64) -> Result<PxAcceptReply, PxReplicaError> {
-        // Step 10.4: route `Accept` through the per-peer bidi PxPeerStream
-        // rather than a one-shot unary RPC. The wire-level conversion
+        // Route `Accept` through the per-peer bidi PxPeerStream rather
+        // than a one-shot unary RPC. The wire-level conversion
         // (PxLogEntry -> AcceptRequest, AcceptedResponse -> PxAcceptReply)
-        // is identical; only the transport changes. The unary `accept`
-        // RPC handler on the server side stays alive (Step 10.2 dual-path)
-        // and is removed in Step 10.7 once all callers have migrated.
+        // is identical; only the transport changes.
         let request_id = self.alloc_request_id();
         let req = AcceptRequest {
             version: 1,
@@ -151,7 +156,9 @@ impl ReplicaClient for PxRemoteReplica {
                 round: entry.ballot.round,
                 leader_id: entry.ballot.leader_id,
                 term: entry.term,
-                payload: (*entry.payload).clone(),
+                // `Bytes::clone` is an `O(1)` ref-count bump; the
+                // underlying buffer is shared with the local entry.
+                payload: entry.payload.clone(),
             }),
             request_id,
             request_create_ms: 0,
@@ -189,7 +196,11 @@ impl ReplicaClient for PxRemoteReplica {
         }
     }
 
-    async fn send_pre_vote(&self, req: VoteRequestPayload, group_id: u64) -> Result<VoteReply, PxReplicaError> {
+    async fn send_pre_vote(
+        &self,
+        req: VoteRequestPayload,
+        group_id: u64,
+    ) -> Result<VoteReply, PxReplicaError> {
         let mut client = self
             .get_client()
             .await
@@ -227,7 +238,11 @@ impl ReplicaClient for PxRemoteReplica {
         })
     }
 
-    async fn send_request_vote(&self, req: VoteRequestPayload, group_id: u64) -> Result<VoteReply, PxReplicaError> {
+    async fn send_request_vote(
+        &self,
+        req: VoteRequestPayload,
+        group_id: u64,
+    ) -> Result<VoteReply, PxReplicaError> {
         let mut client = self
             .get_client()
             .await
@@ -265,11 +280,15 @@ impl ReplicaClient for PxRemoteReplica {
         })
     }
 
-    async fn send_heartbeat(&self, req: HeartbeatRequestPayload, group_id: u64) -> Result<HeartbeatReply, PxReplicaError> {
-        // Step 10.5: route Heartbeat through the per-peer bidi
-        // PxPeerStream so it shares ordering with `Accept` (no
-        // heartbeat can race ahead of an in-flight Accept on the same
-        // peer). Wire-format conversion is unchanged.
+    async fn send_heartbeat(
+        &self,
+        req: HeartbeatRequestPayload,
+        group_id: u64,
+    ) -> Result<HeartbeatReply, PxReplicaError> {
+        // Route Heartbeat through the per-peer bidi PxPeerStream so it
+        // shares ordering with `Accept` (no heartbeat can race ahead of
+        // an in-flight Accept on the same peer). Wire-format conversion
+        // is unchanged.
         let request_id = self.alloc_request_id();
         let rpc_req = RpcHeartbeatRequest {
             version: 1,
@@ -304,7 +323,11 @@ impl ReplicaClient for PxRemoteReplica {
         })
     }
 
-    async fn send_step_down(&self, req: StepDownRequestPayload, group_id: u64) -> Result<StepDownReply, PxReplicaError> {
+    async fn send_step_down(
+        &self,
+        req: &StepDownRequestPayload,
+        group_id: u64,
+    ) -> Result<StepDownReply, PxReplicaError> {
         let mut client = self
             .get_client()
             .await
@@ -370,7 +393,7 @@ impl PxRemoteReplica {
 
     /// Construct a remote replica with the given election config snapshot.
     /// The only field consumed today is `peer_stream_window_frames`
-    /// (Step 10.3); other fields stay configurable per-call.
+    /// (peer stream window); other fields stay configurable per-call.
     #[must_use]
     pub fn with_config(node_id: PxNodeId, endpoint: String, cfg: &PxElectionConfig) -> Self {
         let mut r = Self::new(node_id, endpoint);
@@ -392,8 +415,8 @@ impl PxRemoteReplica {
     }
 
     /// Fire-and-forget peer notification that `(slot, term)` is chosen
-    /// in `group_id`. Sent over the per-peer bidi `PxPeerStream`
-    /// (Step 10.6b). No response is awaited; failures (peer down,
+    /// in `group_id`. Sent over the per-peer bidi `PxPeerStream`. No
+    /// response is awaited; failures (peer down,
     /// stream reset) are returned for caller-side observability but
     /// the proposer treats them as best-effort and swallows them
     /// since the next heartbeat re-converges frontiers anyway.
@@ -401,7 +424,13 @@ impl PxRemoteReplica {
     /// # Errors
     /// Returns [`PxReplicaError::Internal`] if the per-peer stream is
     /// shut down or its reconnect loop is currently failing fast.
-    pub fn send_chosen_notice(&self, slot: u64, term: crate::paxos::PxTerm, leader_id: PxNodeId, group_id: u64) -> Result<(), PxReplicaError> {
+    pub fn send_chosen_notice(
+        &self,
+        slot: u64,
+        term: crate::paxos::PxTerm,
+        leader_id: PxNodeId,
+        group_id: u64,
+    ) -> Result<(), PxReplicaError> {
         let notice = RpcChosenNotification {
             version: 1,
             group_id,
@@ -428,11 +457,22 @@ impl PxRemoteReplica {
 
     /// Read this remote's RPC metrics for the topology endpoint.
     #[must_use]
-    pub fn snapshot(&self) -> RemoteSnapshot {
-        RemoteSnapshot {
+    pub fn status(&self) -> RemoteStatus {
+        let mut status = StatusLevel::Ok;
+        let mut messages = Vec::new();
+        if !self.grpc_client.initialized() {
+            status = StatusLevel::Degraded;
+            messages.push(format!(
+                "remote {} ({}): channel not yet established",
+                self.node_id, self.endpoint
+            ));
+        }
+        RemoteStatus {
             id: self.node_id,
             endpoint: self.endpoint.clone(),
             voting: self.voting,
+            status,
+            messages,
             metrics: self.metrics.snapshot(),
         }
     }
@@ -445,10 +485,13 @@ impl PxRemoteReplica {
     /// uniformity with the cascade contract.
     #[tracing::instrument(level = "debug", skip_all, fields(replica_r_id = self.node_id))]
     #[allow(clippy::unused_async)] // async kept for cascade uniformity
-    pub async fn shutdown(&self, _per_layer_timeout: Duration) -> ShutdownReport {
+    pub async fn shutdown(&self, _per_layer_timeout: Duration) -> OperationReport {
         if self.shutdown_started.swap(true, Ordering::AcqRel) {
-            debug!(replica_r_id = self.node_id, "PxRemoteReplica::shutdown is a no-op (already shut down)");
-            return ShutdownReport::new();
+            debug!(
+                replica_r_id = self.node_id,
+                "PxRemoteReplica::shutdown is a no-op (already shut down)"
+            );
+            return OperationReport::new();
         }
 
         // `take` requires `&mut`; OnceCell doesn't expose that on `&self`.
@@ -457,7 +500,7 @@ impl PxRemoteReplica {
         // explicit close is needed earlier (e.g. tearing down a remote without
         // tearing down the group), expose `OnceCell` mutation through a
         // `&mut self` API.
-        // Step 10.4: stop the PxPeerStream background task (idempotent;
+        // Stop the PxPeerStream background task (idempotent;
         // safe to call even if the stream was never initialized).
         if let Some(stream) = self.peer_stream.get() {
             stream.shutdown();
@@ -468,7 +511,7 @@ impl PxRemoteReplica {
             endpoint = %self.endpoint,
             "PxRemoteReplica shutdown (channel will close on drop)"
         );
-        ShutdownReport::new()
+        OperationReport::new()
     }
 
     #[must_use]
@@ -477,40 +520,13 @@ impl PxRemoteReplica {
         self
     }
 
-    pub fn id(&self) -> PxNodeId {
-        self.node_id
-    }
-
-    pub fn endpoint(&self) -> &str {
-        &self.endpoint
-    }
-
-    /// Best-effort cached health.
-    ///
-    /// V1: no active probe. We only know:
-    /// - if the `OnceCell` is initialized, we connected at least once and the
-    ///   tonic `Channel` is auto-reconnecting; report `Ok`.
-    /// - if not initialized, no traffic has been sent; report `Degraded`
-    ///   with a message so operators see "haven't talked yet".
-    ///
-    /// Once §3 metrics expose `err_count` / `last_rtt_ms`, this method should
-    /// downgrade to `Degraded`/`Unhealthy` based on those counters.
-    #[must_use]
-    pub fn health(&self) -> HealthReport {
-        if self.grpc_client.initialized() {
-            HealthReport::ok()
-        } else {
-            HealthReport::degraded(format!("remote {} ({}): channel not yet established", self.node_id, self.endpoint))
-        }
-    }
-
     fn accepted_value_to_log_entry(value: AcceptedValue) -> PxLogEntry {
         PxLogEntry {
             slot: value.slot,
             ballot: PxBallot::new(value.round, value.leader_id),
             term: value.term,
             kind: PxLogEntryKind::Write,
-            payload: Arc::new(value.payload),
+            payload: value.payload,
             client_id: None,
             seq: None,
         }

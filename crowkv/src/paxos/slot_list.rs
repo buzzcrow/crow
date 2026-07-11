@@ -113,7 +113,11 @@ impl<T> PxSlotList<T> {
                     chunk.reader_refs.fetch_sub(1, Ordering::Release);
                     return None;
                 }
-                return Some(PxSlotReadGuard { chunk, ptr, _marker: PhantomData });
+                return Some(PxSlotReadGuard {
+                    chunk,
+                    ptr,
+                    _marker: PhantomData,
+                });
             }
             if chunk.start_slot > slot {
                 return None;
@@ -143,7 +147,11 @@ impl<T> PxSlotList<T> {
                     chunk.reader_refs.fetch_sub(1, Ordering::Release);
                     return None;
                 }
-                return Some(PxSlotReadGuard { chunk, ptr, _marker: PhantomData });
+                return Some(PxSlotReadGuard {
+                    chunk,
+                    ptr,
+                    _marker: PhantomData,
+                });
             }
             if slot >= end {
                 return None;
@@ -233,7 +241,12 @@ impl<T> PxSlotList<T> {
                 continue;
             }
             let new_ptr = Box::into_raw(Box::new(value));
-            match chunk.entries[offset as usize].compare_exchange(null_mut(), new_ptr, Ordering::AcqRel, Ordering::Acquire) {
+            match chunk.entries[offset as usize].compare_exchange(
+                null_mut(),
+                new_ptr,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
                 Ok(_) => {
                     chunk.live_count.fetch_add(1, Ordering::Relaxed);
                     self.len.fetch_add(1, Ordering::Relaxed);
@@ -268,7 +281,9 @@ impl<T> PxSlotList<T> {
     /// Panics if called concurrently with another `trim` operation.
     pub fn trim(&self, before_slot: SlotIndex) {
         assert!(
-            self.trimming.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok(),
+            self.trimming
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok(),
             "PxSlotList::trim must be called from a single thread"
         );
 
@@ -283,7 +298,10 @@ impl<T> PxSlotList<T> {
             }
             let next = chunk.next.load(Ordering::Acquire);
             chunk.retired.store(true, Ordering::Release);
-            match self.head.compare_exchange(chunk_ptr, next, Ordering::AcqRel, Ordering::Acquire) {
+            match self
+                .head
+                .compare_exchange(chunk_ptr, next, Ordering::AcqRel, Ordering::Acquire)
+            {
                 Ok(_) => {
                     if next.is_null() {
                         self.tail.store(null_mut(), Ordering::Release);
@@ -312,7 +330,9 @@ impl<T> PxSlotList<T> {
     /// Panics if called concurrently with another `reclaim` operation.
     pub fn reclaim(&self) -> usize {
         assert!(
-            self.reclaiming.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok(),
+            self.reclaiming
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok(),
             "PxSlotList::reclaim must be called from a single thread"
         );
 
@@ -326,7 +346,11 @@ impl<T> PxSlotList<T> {
             if curr.reader_refs.load(Ordering::Acquire) == 0 {
                 // Unlink from retired list.
                 if prev_ptr.is_null() {
-                    if self.retired_head.compare_exchange(curr_ptr, next_ptr, Ordering::AcqRel, Ordering::Acquire).is_err() {
+                    if self
+                        .retired_head
+                        .compare_exchange(curr_ptr, next_ptr, Ordering::AcqRel, Ordering::Acquire)
+                        .is_err()
+                    {
                         // Head changed, restart.
                         prev_ptr = null_mut();
                         curr_ptr = self.retired_head.load(Ordering::Acquire);
@@ -401,16 +425,27 @@ impl<T> PxSlotList<T> {
         (pred, null_mut())
     }
 
-    fn link_chunk(&self, pred: *mut SlotChunk<T>, succ: *mut SlotChunk<T>, new_chunk: *mut SlotChunk<T>) -> Result<(), ()> {
+    fn link_chunk(
+        &self,
+        pred: *mut SlotChunk<T>,
+        succ: *mut SlotChunk<T>,
+        new_chunk: *mut SlotChunk<T>,
+    ) -> Result<(), ()> {
         if pred.is_null() {
             // Insert at head.
-            match self.head.compare_exchange(succ, new_chunk, Ordering::AcqRel, Ordering::Acquire) {
+            match self
+                .head
+                .compare_exchange(succ, new_chunk, Ordering::AcqRel, Ordering::Acquire)
+            {
                 Ok(_) => Ok(()),
                 Err(_) => Err(()),
             }
         } else {
             let pred_ref = unsafe { &*pred };
-            match pred_ref.next.compare_exchange(succ, new_chunk, Ordering::AcqRel, Ordering::Acquire) {
+            match pred_ref
+                .next
+                .compare_exchange(succ, new_chunk, Ordering::AcqRel, Ordering::Acquire)
+            {
                 Ok(_) => Ok(()),
                 Err(_) => Err(()),
             }
@@ -421,7 +456,11 @@ impl<T> PxSlotList<T> {
         loop {
             let old = self.retired_head.load(Ordering::Acquire);
             unsafe { &*chunk_ptr }.next.store(old, Ordering::Relaxed);
-            if self.retired_head.compare_exchange(old, chunk_ptr, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            if self
+                .retired_head
+                .compare_exchange(old, chunk_ptr, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
                 break;
             }
         }

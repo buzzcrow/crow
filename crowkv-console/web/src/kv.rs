@@ -59,7 +59,10 @@ pub struct KvWriteResponse {
 ///
 /// # Errors
 /// Returns an error if neither encoding is provided or if hex decoding fails.
-pub fn decode_key(utf8: Option<String>, hex_enc: Option<String>) -> Result<Vec<u8>, (axum::http::StatusCode, Json<ErrorBody>)> {
+pub fn decode_key(
+    utf8: Option<String>,
+    hex_enc: Option<String>,
+) -> Result<Vec<u8>, (axum::http::StatusCode, Json<ErrorBody>)> {
     if let Some(h) = hex_enc {
         return decode_hex(&h);
     }
@@ -82,7 +85,11 @@ fn decode_hex(s: &str) -> Result<Vec<u8>, (axum::http::StatusCode, Json<ErrorBod
 /// # Errors
 /// Returns `404` if the group is unknown, or `502` if the leader's
 /// node has no gRPC URL configured.
-pub async fn resolve_kv_endpoint(state: &AppState, sid: u64, gid: u64) -> Result<String, (StatusCode, Json<ErrorBody>)> {
+pub async fn resolve_kv_endpoint(
+    state: &AppState,
+    sid: u64,
+    gid: u64,
+) -> Result<String, (StatusCode, Json<ErrorBody>)> {
     let (_rid, node_id) = state.monitor_cache.leader_for(sid, gid).await.ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
@@ -120,7 +127,12 @@ async fn refresh_group_nodes(state: &AppState, sid: u64, gid: u64) {
 /// `op` receives a mutable `KvClient` bound to the current leader's
 /// endpoint. It must be re-runnable (idempotent under `(client_id,
 /// seq)` at the upstream, which every KV request is).
-async fn with_leader_retry<F, Fut, T>(state: &AppState, sid: u64, gid: u64, mut op: F) -> Result<T, (StatusCode, Json<ErrorBody>)>
+async fn with_leader_retry<F, Fut, T>(
+    state: &AppState,
+    sid: u64,
+    gid: u64,
+    mut op: F,
+) -> Result<T, (StatusCode, Json<ErrorBody>)>
 where
     F: FnMut(KvClient) -> Fut,
     Fut: std::future::Future<Output = Result<T, SharedError>>,
@@ -259,7 +271,10 @@ pub async fn http_kv_put(
         async move { client.put(gid, &key, &value, client_id, seq).await }
     })
     .await?;
-    Ok(Json(KvWriteResponse { ok: true, revision: out.revision }))
+    Ok(Json(KvWriteResponse {
+        ok: true,
+        revision: out.revision,
+    }))
 }
 
 /// Delete a value from the KV store.
@@ -279,5 +294,8 @@ pub async fn http_kv_delete(
         async move { client.delete(gid, &key, client_id, seq).await }
     })
     .await?;
-    Ok(Json(KvWriteResponse { ok: true, revision: out.revision }))
+    Ok(Json(KvWriteResponse {
+        ok: true,
+        revision: out.revision,
+    }))
 }

@@ -59,12 +59,17 @@ impl RecursiveDepth {
         if trimmed.eq_ignore_ascii_case("all") {
             return Ok(Self::All);
         }
-        let n: u32 = trimmed.parse().map_err(|_| ParseError::Malformed(raw.to_string()))?;
+        let n: u32 = trimmed
+            .parse()
+            .map_err(|_| ParseError::Malformed(raw.to_string()))?;
         if n == 0 {
             return Ok(Self::None);
         }
         if n > u32::from(MAX_DEPTH) {
-            return Err(ParseError::OutOfRange { value: n, max: MAX_DEPTH });
+            return Err(ParseError::OutOfRange {
+                value: n,
+                max: MAX_DEPTH,
+            });
         }
         Ok(Self::Levels(u8::try_from(n).unwrap_or(MAX_DEPTH)))
     }
@@ -132,14 +137,24 @@ pub trait Expandable {
 /// Drive a depth-bounded walk of `root` and report what was truncated.
 /// The `enter` callback fires once per visited resource (root + every
 /// expanded child) so handlers can collect the serialized payload.
-pub fn walk<F: FnMut(&dyn Expandable, &[String])>(root: &dyn Expandable, depth: RecursiveDepth, mut enter: F) -> Truncation {
+pub fn walk<F: FnMut(&dyn Expandable, &[String])>(
+    root: &dyn Expandable,
+    depth: RecursiveDepth,
+    mut enter: F,
+) -> Truncation {
     let mut trunc = Truncation::default();
     let mut path: Vec<String> = Vec::new();
     walk_inner(root, depth.effective(), &mut path, &mut enter, &mut trunc);
     trunc
 }
 
-fn walk_inner<F: FnMut(&dyn Expandable, &[String])>(node: &dyn Expandable, remaining: u8, path: &mut Vec<String>, enter: &mut F, trunc: &mut Truncation) {
+fn walk_inner<F: FnMut(&dyn Expandable, &[String])>(
+    node: &dyn Expandable,
+    remaining: u8,
+    path: &mut Vec<String>,
+    enter: &mut F,
+    trunc: &mut Truncation,
+) {
     path.push(node.path_segment());
     enter(node, path);
     if remaining == 0 {
@@ -261,7 +276,10 @@ mod tests {
         assert_eq!(visited, vec!["rack:r1", "node:n1"]);
         // node:n1 has children (store:7) but we stopped at depth 1,
         // so the truncation hint points at the chain through n1.
-        assert_eq!(trunc.paths, vec![vec!["rack:r1".to_string(), "node:n1".to_string()]]);
+        assert_eq!(
+            trunc.paths,
+            vec![vec!["rack:r1".to_string(), "node:n1".to_string()]]
+        );
     }
 
     #[test]
@@ -272,7 +290,14 @@ mod tests {
             visited.push(n.path_segment());
         });
         assert_eq!(visited, vec!["rack:r1", "node:n1", "store:7"]);
-        assert_eq!(trunc.paths, vec![vec!["rack:r1".to_string(), "node:n1".to_string(), "store:7".to_string()]]);
+        assert_eq!(
+            trunc.paths,
+            vec![vec![
+                "rack:r1".to_string(),
+                "node:n1".to_string(),
+                "store:7".to_string()
+            ]]
+        );
     }
 
     #[test]

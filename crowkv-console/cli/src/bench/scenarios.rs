@@ -68,7 +68,10 @@ pub fn stress_scenario_names() -> &'static [&'static str] {
 /// # Errors
 /// Returns the unrecognized workload string when `override.workload` is
 /// non-empty but not one of `read|write|list|mix`.
-pub fn apply_stress_override(cfg: &mut BenchConfig, ov: &crowkv_console_shared::config::StressScenarioOverride) -> std::result::Result<(), String> {
+pub fn apply_stress_override(
+    cfg: &mut BenchConfig,
+    ov: &crowkv_console_shared::config::StressScenarioOverride,
+) -> std::result::Result<(), String> {
     if let Some(w) = &ov.workload {
         cfg.workload = super::workload::WorkloadKind::parse(w)?;
     }

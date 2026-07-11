@@ -32,18 +32,25 @@ where
     type Rejection = (StatusCode, Json<ErrorBody>);
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let q = Query::<RecursiveQuery>::from_request_parts(parts, state).await.map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorBody {
-                    error: format!("invalid query string: {e}"),
-                }),
-            )
-        })?;
+        let q = Query::<RecursiveQuery>::from_request_parts(parts, state)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorBody {
+                        error: format!("invalid query string: {e}"),
+                    }),
+                )
+            })?;
         let raw = q.0.recursive.unwrap_or_default();
         match RecursiveDepth::parse(&raw) {
             Ok(d) => Ok(Recursive(d)),
-            Err(e) => Err((StatusCode::BAD_REQUEST, Json(ErrorBody { error: format!("{e}") }))),
+            Err(e) => Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody {
+                    error: format!("{e}"),
+                }),
+            )),
         }
     }
 }
@@ -65,7 +72,15 @@ mod tests {
 
     async fn call(uri: &str) -> (StatusCode, String) {
         use tower::ServiceExt;
-        let resp = app().oneshot(Request::builder().uri(uri).body(axum::body::Body::empty()).unwrap()).await.unwrap();
+        let resp = app()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
         let status = resp.status();
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         (status, String::from_utf8(body.to_vec()).unwrap())

@@ -32,16 +32,12 @@ pub struct Cli {
     #[arg(long, default_value_t = 1)]
     pub replica: u64,
 
-    /// Initial leader replica ID for bootstrap groups. If set, this replica
-    /// becomes the leader of all groups created at startup. If omitted,
-    /// groups start with no leader; use the management API to set the
-    /// leader explicitly.
-    #[arg(long)]
-    pub leader: Option<u64>,
-
     /// Also print logs to console (in addition to file logging).
     #[arg(short = 'l', long)]
     pub log: bool,
+
+    #[arg(long, default_value = "default", value_parser = ["default", "test"])]
+    pub election_profile: String,
 }
 
 /// Parse a comma-separated list of numbers and ranges into a `Vec<u64>`.
@@ -70,8 +66,14 @@ pub fn parse_id_list(input: &str) -> Result<Vec<u64>, String> {
         }
 
         if let Some((start_s, end_s)) = part.split_once("..") {
-            let start: u64 = start_s.trim().parse().map_err(|_| format!("invalid range start: '{start_s}'"))?;
-            let end: u64 = end_s.trim().parse().map_err(|_| format!("invalid range end: '{end_s}'"))?;
+            let start: u64 = start_s
+                .trim()
+                .parse()
+                .map_err(|_| format!("invalid range start: '{start_s}'"))?;
+            let end: u64 = end_s
+                .trim()
+                .parse()
+                .map_err(|_| format!("invalid range end: '{end_s}'"))?;
             if start > end {
                 return Err(format!("range start must be <= end: '{part}'"));
             }
@@ -104,5 +106,7 @@ pub fn parse_id_list(input: &str) -> Result<Vec<u64>, String> {
 /// - Any value is outside the u16 range (0-65535)
 pub fn parse_port_list(input: &str) -> Result<Vec<u16>, String> {
     let ids = parse_id_list(input)?;
-    ids.into_iter().map(|v| u16::try_from(v).map_err(|_| format!("port out of range (0-65535): {v}"))).collect()
+    ids.into_iter()
+        .map(|v| u16::try_from(v).map_err(|_| format!("port out of range (0-65535): {v}")))
+        .collect()
 }

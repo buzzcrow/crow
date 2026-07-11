@@ -48,18 +48,31 @@ pub async fn run_server_verb(cli: &Cli, verb: ServerVerb) -> ExitCode {
     }
 }
 
-async fn server_deploy(cli: &Cli, node_id: &str, mgmt_port: u16, grpc_port: u16, binary: Option<String>) -> ExitCode {
+async fn server_deploy(
+    cli: &Cli,
+    node_id: &str,
+    mgmt_port: u16,
+    grpc_port: u16,
+    binary: Option<String>,
+) -> ExitCode {
     let client = match console_client(cli) {
         Ok(c) => c,
         Err(c) => return c,
     };
-    let body = DeployNodeServerBody { mgmt_port, grpc_port, binary };
+    let body = DeployNodeServerBody {
+        mgmt_port,
+        grpc_port,
+        binary,
+    };
     match client.deploy_node_server(node_id, &body).await {
         Ok(r) => {
             if cli.json {
                 return print_json(&r);
             }
-            println!("deployed server on node {} -> {} (pid {}, grpc {})", r.node_id, r.mgmt_url, r.pid, r.grpc_url);
+            println!(
+                "deployed server on node {} -> {} (pid {}, grpc {})",
+                r.node_id, r.mgmt_url, r.pid, r.grpc_url
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {
@@ -79,7 +92,10 @@ async fn server_restart(cli: &Cli, node_id: &str) -> ExitCode {
             if cli.json {
                 return print_json(&r);
             }
-            println!("restarted crowkv-server on node {} -> {} (pid {}, grpc {})", r.node_id, r.mgmt_url, r.pid, r.grpc_url);
+            println!(
+                "restarted crowkv-server on node {} -> {} (pid {}, grpc {})",
+                r.node_id, r.mgmt_url, r.pid, r.grpc_url
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {

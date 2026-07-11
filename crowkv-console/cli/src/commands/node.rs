@@ -165,7 +165,10 @@ async fn node_ping(cli: &Cli, node_id: &str) -> ExitCode {
             if cli.json {
                 return print_json(&r);
             }
-            eprintln!("error: ping failed: {}", r.error.unwrap_or_else(|| "unknown".into()));
+            eprintln!(
+                "error: ping failed: {}",
+                r.error.unwrap_or_else(|| "unknown".into())
+            );
             ExitCode::from(2)
         }
         Err(e) => {

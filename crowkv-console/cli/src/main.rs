@@ -15,9 +15,12 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use commands::{
-    run_bench_verb, run_cluster_status, run_cluster_topology, run_group_verb, run_kv_verb, run_node_verb, run_rack_verb, run_replica_verb, run_server_verb, run_store_verb,
+    run_bench_verb, run_cluster_status, run_cluster_topology, run_group_verb, run_kv_verb, run_node_verb,
+    run_rack_verb, run_replica_verb, run_server_verb, run_store_verb,
 };
-use commands::{BenchVerb, ClusterVerb, GroupVerb, KvVerb, NodeVerb, RackVerb, ReplicaVerb, ServerVerb, StoreVerb};
+use commands::{
+    BenchVerb, ClusterVerb, GroupVerb, KvVerb, NodeVerb, RackVerb, ReplicaVerb, ServerVerb, StoreVerb,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "crowkv", version, about = "CrowKV cluster console (CLI)")]
@@ -25,7 +28,12 @@ struct Cli {
     /// `crowkv-web` console base URL. The CLI talks to the console,
     /// not directly to a `crowkv-server`; the console resolves
     /// upstream nodes from its config and the monitor cache.
-    #[arg(long, global = true, env = "CROWKV_CONSOLE", default_value = "http://127.0.0.1:9920")]
+    #[arg(
+        long,
+        global = true,
+        env = "CROWKV_CONSOLE",
+        default_value = "http://127.0.0.1:9920"
+    )]
     console: String,
 
     /// **Deprecated**: pre-A12 verbs that still talk directly to a
@@ -109,7 +117,10 @@ fn main() -> ExitCode {
     // going.
     crowkv_console_shared::ops_log::init_default("cli");
 
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
 
     // Bind a fresh correlation id for the whole invocation. Every
     // client call inside `dispatch` will attach it as
@@ -119,7 +130,12 @@ fn main() -> ExitCode {
 }
 
 async fn dispatch(mut cli: Cli) -> ExitCode {
-    let command = std::mem::replace(&mut cli.command, Group::Cluster { verb: ClusterVerb::Status });
+    let command = std::mem::replace(
+        &mut cli.command,
+        Group::Cluster {
+            verb: ClusterVerb::Status,
+        },
+    );
     match command {
         Group::Cluster { verb } => match verb {
             ClusterVerb::Status => run_cluster_status(&cli).await,
