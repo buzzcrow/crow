@@ -85,6 +85,10 @@ pub enum PxPrepareReply {
     /// Promise rejected because the slot already promised at a higher-or-equal ballot.
     /// The proposer should retry with a strictly higher ballot.
     Rejected { slot: SlotIndex, current_promised: PxBallot },
+    /// The request's election term is lower than the responder's
+    /// `current_term`. The proposer (a stale leader) must step down and
+    /// adopt `new_term`. Two-fence rule, see `doc/todo_leader.md` Step 8.
+    TermStale { slot: SlotIndex, new_term: u64 },
 }
 
 /// Reply to a Phase-2 `Accept`.
@@ -94,4 +98,6 @@ pub enum PxAcceptReply {
     Accepted { slot: SlotIndex, ballot: PxBallot },
     /// Rejected because the slot promised a higher ballot.
     Rejected { slot: SlotIndex, current_promised: PxBallot },
+    /// Term-fence rejection. See [`PxPrepareReply::TermStale`].
+    TermStale { slot: SlotIndex, new_term: u64 },
 }

@@ -1,5 +1,6 @@
 //! Cluster group management: membership, topology, replica runtime, and reconfiguration support.
 
+pub mod election;
 pub mod group;
 pub mod health;
 pub mod health_info;

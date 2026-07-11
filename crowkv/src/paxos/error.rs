@@ -9,6 +9,17 @@ pub enum PxPaxosError {
     QuorumUnavailable { phase: PxPaxosPhase },
     TransportFailure { phase: PxPaxosPhase, message: String },
     Busy,
+    /// Stale leader detected by a peer (peer's `current_term > req.term`).
+    /// The proposer must step down to follower and adopt `current_term`.
+    /// Classified `FailFatal` for the in-flight proposal; the group-level
+    /// driver triggers `become_follower(current_term)`. See `doc/todo_leader.md`
+    /// Step 8.
+    TermStale { current_term: u64 },
+    /// Driver-side step-down trigger: this leader could not renew its lease
+    /// (`now - last_quorum_heartbeat_at >= lease_duration`). Not raised by
+    /// `propose`; raised by the election driver to convert in-flight proposals
+    /// into `NotLeader`.
+    LeaseUnrenewable,
     InternalInvariantViolation { message: String },
 }
 
@@ -47,7 +58,7 @@ impl PxPaxosError {
                 force_prepare: false,
             },
             Self::Busy => PxRetryAction::FailRetryable,
-            Self::InternalInvariantViolation { .. } => PxRetryAction::FailFatal,
+            Self::TermStale { .. } | Self::LeaseUnrenewable | Self::InternalInvariantViolation { .. } => PxRetryAction::FailFatal,
         }
     }
 
@@ -61,6 +72,8 @@ impl PxPaxosError {
             Self::QuorumUnavailable { .. } => "quorum_unavailable",
             Self::TransportFailure { .. } => "transport_failure",
             Self::Busy => "busy",
+            Self::TermStale { .. } => "term_stale",
+            Self::LeaseUnrenewable => "lease_unrenewable",
             Self::InternalInvariantViolation { .. } => "internal_invariant_violation",
         }
     }

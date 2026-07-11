@@ -275,7 +275,18 @@ impl PxKvStore {
     pub fn add_group(&self, group: PxGroup) {
         let group_id = group.group_id;
         info!(store_id = self.store_id, group_id, replicas = group.remote_replica_count(), "added group to kv store");
-        self.groups.insert(group_id, Arc::new(group));
+        let arc = Arc::new(group);
+        // Step 9.1: spawn the per-group election driver (no-op when
+        // `election_driver_disabled`). Driver holds a `Weak<PxGroup>` so
+        // dropping the store's `Arc` does not leak the task. Skip when no
+        // tokio runtime is active (structural / non-async unit tests).
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let arc_for_spawn = arc.clone();
+            tokio::spawn(async move {
+                arc_for_spawn.start_election_loop().await;
+            });
+        }
+        self.groups.insert(group_id, arc);
     }
 
     pub fn get_group(&self, group_id: u64) -> Option<Arc<PxGroup>> {

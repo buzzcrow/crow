@@ -55,7 +55,7 @@ fn status_to_err(status: &tonic::Status) -> PxReplicaError {
 }
 
 impl ReplicaClient for PxRemoteReplica {
-    async fn send_prepare(&self, slot: u64, ballot: PxBallot, group_id: u64) -> Result<PxPrepareReply, PxReplicaError> {
+    async fn send_prepare(&self, slot: u64, ballot: PxBallot, term: crate::paxos::PxTerm, group_id: u64) -> Result<PxPrepareReply, PxReplicaError> {
         let mut client = match self.get_client().await {
             Ok(c) => c.clone(),
             Err(status) => {
@@ -73,9 +73,7 @@ impl ReplicaClient for PxRemoteReplica {
                 request_id: 0,
                 request_create_ms: 0,
                 group_id,
-                // P1 M3 Step 3: term piggy-back; populated by Step 8 (proposer
-                // tags Prepares with the term it was admitted under).
-                term: 0,
+                term,
             })
             .await
         {
@@ -88,7 +86,12 @@ impl ReplicaClient for PxRemoteReplica {
         #[allow(clippy::cast_possible_truncation)]
         self.metrics.record_ok(started.elapsed().as_millis() as u64);
 
-        if resp.rejected {
+        if resp.term_stale {
+            Ok(PxPrepareReply::TermStale {
+                slot: resp.slot,
+                new_term: resp.term,
+            })
+        } else if resp.rejected {
             Ok(PxPrepareReply::Rejected {
                 slot: resp.slot,
                 current_promised: PxBallot::new(resp.rejected_round, resp.rejected_leader_id),
@@ -141,7 +144,12 @@ impl ReplicaClient for PxRemoteReplica {
         #[allow(clippy::cast_possible_truncation)]
         self.metrics.record_ok(started.elapsed().as_millis() as u64);
 
-        if resp.rejected {
+        if resp.term_stale {
+            Ok(PxAcceptReply::TermStale {
+                slot: resp.slot,
+                new_term: resp.term,
+            })
+        } else if resp.rejected {
             Ok(PxAcceptReply::Rejected {
                 slot: resp.slot,
                 current_promised: PxBallot::new(resp.rejected_round, resp.rejected_leader_id),

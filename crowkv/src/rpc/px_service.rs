@@ -63,7 +63,7 @@ impl PxService for PxReplicaService {
         };
         let group = self.store.get_group(req.group_id).ok_or_else(|| Status::not_found("px group not found"))?;
         let replica = group.local_replica();
-        let reply = <crate::cluster::local_replica::PxLocalReplica as ReplicaHandler>::on_prepare(replica, req.slot, ballot, req.group_id).await?;
+        let reply = <crate::cluster::local_replica::PxLocalReplica as ReplicaHandler>::on_prepare(replica, req.slot, ballot, req.term, req.group_id).await?;
 
         let response = match reply {
             PxPrepareReply::Promised { slot, accepted } => PromiseResponse {
@@ -77,9 +77,22 @@ impl PxService for PxReplicaService {
                 rejected_leader_id: 0,
                 request_id: req.request_id,
                 request_create_ms: req.request_create_ms,
-                // Step 3: term-stale machinery is wired in Step 8.
                 term: replica.current_term_snapshot(),
                 term_stale: false,
+            },
+            PxPrepareReply::TermStale { slot, new_term } => PromiseResponse {
+                version: 1,
+                slot,
+                round: req.round,
+                leader_id: req.leader_id,
+                previously_accepted: None,
+                rejected: false,
+                rejected_round: 0,
+                rejected_leader_id: 0,
+                request_id: req.request_id,
+                request_create_ms: req.request_create_ms,
+                term: new_term,
+                term_stale: true,
             },
             PxPrepareReply::Rejected { slot, current_promised } => {
                 warn!(
@@ -152,8 +165,8 @@ impl PxService for PxReplicaService {
             replica.learn(&entry);
         }
 
-        let (rejected, rejected_round, rejected_leader_id) = match reply {
-            PxAcceptReply::Accepted { .. } => (false, 0, 0),
+        let (rejected, rejected_round, rejected_leader_id, term_stale, reply_term) = match reply {
+            PxAcceptReply::Accepted { .. } => (false, 0, 0, false, replica.current_term_snapshot()),
             PxAcceptReply::Rejected { current_promised, .. } => {
                 warn!(
                     store_id = self.store.store_id,
@@ -164,7 +177,18 @@ impl PxService for PxReplicaService {
                     current_leader_id = current_promised.leader_id,
                     "accept rejected; next step: proposer should run prepare with a higher ballot"
                 );
-                (true, current_promised.round, current_promised.leader_id)
+                (true, current_promised.round, current_promised.leader_id, false, replica.current_term_snapshot())
+            }
+            PxAcceptReply::TermStale { new_term, .. } => {
+                warn!(
+                    store_id = self.store.store_id,
+                    group_id = req.group_id,
+                    request_id = req.request_id,
+                    slot = req.slot,
+                    new_term,
+                    "accept rejected by term fence; proposer should step down"
+                );
+                (false, 0, 0, true, new_term)
             }
         };
 
@@ -178,9 +202,8 @@ impl PxService for PxReplicaService {
             rejected_leader_id,
             request_id: req.request_id,
             request_create_ms: req.request_create_ms,
-            // Step 3: term-stale machinery is wired in Step 8.
-            term: replica.current_term_snapshot(),
-            term_stale: false,
+            term: reply_term,
+            term_stale,
         };
 
         Ok(Response::new(response))

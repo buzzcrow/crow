@@ -160,6 +160,11 @@ pub struct PxLocalReplica {
     role_atomic: AtomicU8,
     /// Leader-side lease bookkeeping. Stale on non-leader replicas.
     lease_state: Mutex<LeaseState>,
+    /// Notify signalled by accepted admin `StepDown` RPCs (Step 9.7). The
+    /// election driver's leader-state `select!` waits on this so the
+    /// canonical step-down sequence runs immediately rather than on the
+    /// next heartbeat tick. Cheap: a single `Notify` and a sticky boolean.
+    pub(crate) admin_step_down_signal: tokio::sync::Notify,
     /// Idempotency gate for [`Self::shutdown`].
     shutdown_started: AtomicBool,
 }
@@ -190,14 +195,11 @@ impl Replica for PxLocalReplica {
 }
 
 impl ReplicaHandler for PxLocalReplica {
-    async fn on_prepare(&self, slot: u64, ballot: PxBallot, _group_id: u64) -> Result<PxPrepareReply, PxReplicaError> {
-        // Step 8 will inject the term-fence here; for now the acceptor reply
-        // is forwarded unchanged.
-        Ok(self.on_prepare(slot, ballot).await)
+    async fn on_prepare(&self, slot: u64, ballot: PxBallot, term: PxTerm, _group_id: u64) -> Result<PxPrepareReply, PxReplicaError> {
+        Ok(self.on_prepare(slot, ballot, term).await)
     }
 
     async fn on_accept(&self, entry: PxLogEntry, _group_id: u64) -> Result<PxAcceptReply, PxReplicaError> {
-        // Step 8: term-fence injection point.
         Ok(self.on_accept(entry).await)
     }
 
@@ -230,6 +232,7 @@ impl PxLocalReplica {
             current_term_atomic: AtomicU64::new(0),
             role_atomic: AtomicU8::new(role.as_u8()),
             lease_state: Mutex::new(LeaseState::expired()),
+            admin_step_down_signal: tokio::sync::Notify::new(),
             shutdown_started: AtomicBool::new(false),
         }
     }
@@ -423,13 +426,37 @@ impl PxLocalReplica {
         }
     }
 
-    /// Phase-1 `Prepare` handler — delegates to the in-memory acceptor.
-    pub async fn on_prepare(&self, slot: u64, ballot: PxBallot) -> PxPrepareReply {
+    /// Phase-1 `Prepare` handler with election-term fence.
+    ///
+    /// Two-fence rule (`doc/todo_leader.md` Step 8):
+    /// - `req.term < current_term` → `PxPrepareReply::TermStale { new_term }`.
+    /// - `req.term > current_term` → adopt via [`Self::become_follower`], then
+    ///   forward to the acceptor (this replica is now in the new term).
+    /// - `req.term == current_term` → forward to the acceptor unchanged.
+    pub async fn on_prepare(&self, slot: u64, ballot: PxBallot, term: PxTerm) -> PxPrepareReply {
+        let local_term = self.current_term_snapshot();
+        if term < local_term {
+            return PxPrepareReply::TermStale { slot, new_term: local_term };
+        }
+        if term > local_term {
+            self.become_follower(term);
+        }
         self.acceptor.prepare(slot, ballot).await
     }
 
-    /// Phase-2 `Accept` handler — delegates to the in-memory acceptor.
+    /// Phase-2 `Accept` handler with election-term fence.
+    ///
+    /// Same two-fence rule as [`Self::on_prepare`] but the term lives on
+    /// `entry.term` (because the accept message carries the value).
     pub async fn on_accept(&self, entry: PxLogEntry) -> PxAcceptReply {
+        let req_term = entry.term;
+        let local_term = self.current_term_snapshot();
+        if req_term < local_term {
+            return PxAcceptReply::TermStale { slot: entry.slot, new_term: local_term };
+        }
+        if req_term > local_term {
+            self.become_follower(req_term);
+        }
         self.acceptor.accept(entry).await
     }
 
@@ -638,7 +665,7 @@ impl PxLocalReplica {
     /// the same term; the election driver (Step 9) picks up the role change
     /// on its next tick and runs the full step-down sequence (cancel bulk
     /// Phase 1, stop heartbeats, drain proposals).
-    fn handle_step_down(&self, req: &StepDownRequestPayload) -> StepDownReply {
+    pub(crate) fn handle_step_down(&self, req: &StepDownRequestPayload) -> StepDownReply {
         let snapshot = self.election_state_snapshot();
         let accepted = snapshot.role == PxLocalReplicaRole::Leader && self.id == req.target_leader_id && req.term == snapshot.current_term;
         if accepted {
@@ -648,8 +675,15 @@ impl PxLocalReplica {
                 reason = %req.reason,
                 "on_step_down accepted (strict fence)"
             );
-            // Stay in the same term; only the role flips.
+            // Stay in the same term; only the role flips. The election
+            // driver (Step 9.7) waits on `admin_step_down_signal` and
+            // runs the canonical step-down sequence (cancel per-tenure
+            // token, drain proposals, log reason=Admin) on its next
+            // wakeup. We still flip the role here so any concurrent
+            // proposer leadership check observes Follower without
+            // needing the driver to advance first.
             self.become_follower(snapshot.current_term);
+            self.admin_step_down_signal.notify_waiters();
         } else {
             info!(
                 replica_l_id = self.id,

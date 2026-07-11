@@ -118,7 +118,13 @@ pub trait Replica {
 #[allow(async_fn_in_trait)]
 pub trait ReplicaHandler: Replica {
     /// Phase-1 `Prepare` handler.
-    async fn on_prepare(&self, slot: u64, ballot: PxBallot, group_id: u64) -> Result<PxPrepareReply, PxReplicaError>;
+    ///
+    /// `term` is the proposer's election term. If it lags the responder's
+    /// `current_term`, the handler replies [`PxPrepareReply::TermStale`].
+    /// If it leads, the handler adopts the new term via
+    /// [`crate::cluster::local_replica::PxLocalReplica::become_follower`]
+    /// before forwarding to the acceptor.
+    async fn on_prepare(&self, slot: u64, ballot: PxBallot, term: PxTerm, group_id: u64) -> Result<PxPrepareReply, PxReplicaError>;
 
     /// Phase-2 `Accept` handler.
     async fn on_accept(&self, entry: PxLogEntry, group_id: u64) -> Result<PxAcceptReply, PxReplicaError>;
@@ -147,7 +153,7 @@ pub trait ReplicaHandler: Replica {
 /// adapter.
 #[allow(async_fn_in_trait)]
 pub trait ReplicaClient: Replica {
-    async fn send_prepare(&self, slot: u64, ballot: PxBallot, group_id: u64) -> Result<PxPrepareReply, PxReplicaError>;
+    async fn send_prepare(&self, slot: u64, ballot: PxBallot, term: PxTerm, group_id: u64) -> Result<PxPrepareReply, PxReplicaError>;
     async fn send_accept(&self, entry: &PxLogEntry, group_id: u64) -> Result<PxAcceptReply, PxReplicaError>;
     async fn send_pre_vote(&self, req: VoteRequestPayload, group_id: u64) -> Result<VoteReply, PxReplicaError>;
     async fn send_request_vote(&self, req: VoteRequestPayload, group_id: u64) -> Result<VoteReply, PxReplicaError>;

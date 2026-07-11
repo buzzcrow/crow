@@ -94,7 +94,7 @@ async fn classic_prepare_and_accept_track_state() {
     let node = PxLocalReplica::new(9, PxLocalReplicaRole::Leader);
     let ballot = PxBallot::new(1, node.id);
 
-    let prepare_reply = node.on_prepare(5, ballot).await;
+    let prepare_reply = node.on_prepare(5, ballot, 0).await;
     assert!(matches!(prepare_reply, crowkv::paxos::roles::PxPrepareReply::Promised { .. }));
 
     let entry = PxLogEntry {

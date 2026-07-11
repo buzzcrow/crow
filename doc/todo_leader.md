@@ -261,24 +261,111 @@ Resolves the `tonic::Status` leak. See §5.9 below for the full explanation/rati
 - New `PxPaxosError::LeaseUnrenewable` → step-down trigger from the election driver, not from `propose`.
 
 ### Step 9 — Election + heartbeat + lease driver
-- New module `@/cjdata/cpp/crowkv/crowkv/src/cluster/election.rs`.
-- One long-running `tokio::task` per `PxGroup`, spawned by `PxGroup::start_election_loop()` called from `PxKvStore::add_group`. Cancellable via `tokio_util::sync::CancellationToken` held on `PxGroup`; hook into existing `PxGroup::shutdown`.
-- Driver state-machine (single `select!` loop):
-  - **Follower:** sleep until `election_deadline`; on fire, → PreCandidate (if `prevote_enabled`) or Candidate.
-  - **PreCandidate:** fan out `PreVote` with `proposed_term = current_term + 1` (Critical Gap 6) to peers in parallel. On quorum-grant → Candidate (do *not* bump term yet). On any negative reply or timeout → Follower with reset deadline.
-  - **Candidate:** `become_candidate()` (bumps term to the pre-vote term that won, votes for self), fan out `RequestVote` with that same term. On quorum → `become_leader()`, kick `run_bulk_phase1(term, cancel_token)`, start heartbeat ticker.
-  - **Leader:** every `heartbeat_interval_ms`, send heartbeat to all peers in parallel; record `T_send` per round.
-    - On a heartbeat round receiving quorum-OK: `lease_read_until = max(lease_read_until, T_send + lease_duration - max_clock_skew)` and `last_quorum_heartbeat_at = Instant::now()`.
-    - **Lease-unrenewable step-down (Critical Gap 4):** `if Instant::now() - last_quorum_heartbeat_at >= lease_duration { become_follower(current_term, reason = LeaseUnrenewable) }`. The old formula `now >= lease_quorum_until + lease_duration` (≈ `2 * lease_duration`) was incorrect.
-- Driver also services the **admin step-down** path: `on_step_down` handler signals the driver to transition immediately.
-- **Step-down execution sequence** (resolves Medium Gap 9; applies to *all* step-down triggers — higher term, lease unrenewable, admin):
-  1. Cancel the per-tenure `CancellationToken` (Step 7) → aborts in-flight bulk Phase 1.
-  2. Stop the heartbeat ticker.
-  3. Inside the `ElectionPersistentState` mutex: set `role = Follower`, clear `leader_id`, leave `current_term` and `voted_for` unchanged (raised only by *higher* term observation, not by step-down itself).
-  4. Reset `election_deadline = Instant::now() + random(election_min, election_max)`.
-  5. Drop `lease_read_until` / `last_quorum_heartbeat_at` to expired (`Instant::now()`).
-  6. Drain in-flight client proposals via `PxGroup::propose`'s leadership gate — they fail with `ProposeResult::NotLeader { hint: None }` (current leader is unknown post step-down).
-- **`PxGroup::propose` leadership gate** (resolves Medium Gap 10): before slot allocation, take the persistent-state mutex once and check `role == Leader` AND `current_term == self.proposing_term`. On miss, return `ProposeResult::NotLeader { hint: leader_id }` immediately. The proposer also tags every Accept with the term it was admitted under; if `current_term` advances mid-propose the slot-retry classifier returns `PxPaxosError::TermStale`.
+
+> **Splitting note (2026-05-17):** Step 9 was the single largest entry in the
+> original plan and conflated multiple concerns (scaffold, election timer,
+> RequestVote, PreVote, heartbeat ticker, lease, admin step-down, propose
+> gate). It is now split into eight substeps so each lands in one commit and
+> can be reviewed independently. Order is dependency-first.
+
+#### Step 9.1 — Election driver scaffold (module + lifecycle)
+- New module `@/cjdata/cpp/crowkv/crowkv/src/cluster/election.rs` exposing
+  `ElectionDriver` with `start(group_handle, cfg, cancel)` returning a
+  `JoinHandle`.
+- `PxGroup` owns a `tokio_util::sync::CancellationToken` per-tenure (created
+  in `new`, cancelled in `shutdown`) and a stored `JoinHandle<()>` for the
+  driver task.
+- `PxKvStore::add_group` (or wherever groups are constructed) calls
+  `PxGroup::start_election_loop()`; when `cfg.election_driver_disabled` is
+  set the call is a no-op so existing M1/M2 tests with pinned leaders are
+  unaffected.
+- Driver body in this substep is intentionally minimal: a `select!` loop with
+  a 100 ms tick and a `cancel.cancelled()` arm. Logs the current role on
+  each tick. No state machine logic yet.
+- `PxGroup::shutdown` cancels the token and awaits the JoinHandle with the
+  existing shutdown timeout.
+- Test: `election_driver_scaffold_starts_and_stops` — spawn driver, advance
+  time, cancel, confirm task ends.
+
+#### Step 9.2 — Follower → Candidate election timer
+- Add `election_deadline: Instant` to driver-local state (the driver task
+  owns it; nothing exposed on `PxLocalReplica`).
+- On every Follower tick: if `now >= election_deadline`, call
+  `replica.become_candidate(current_term + 1)` (existing method seeds
+  `voted_for = me`). Reset the deadline using a `rand`-backed
+  `random_between(election_min, election_max)`.
+- Reset the deadline on receipt of a valid Heartbeat or successful
+  vote-grant (driver subscribes to a small `Notify` posted by the
+  Heartbeat/Vote handlers).
+- Test: `election_timer_randomized_within_bounds` + the existing
+  `prevote_does_not_bump_term` placeholder marked `#[ignore]` until 9.4.
+
+#### Step 9.3 — Candidate RequestVote fanout + become_leader
+- Candidate state issues `send_request_vote` to all voting peers in parallel
+  via `tokio::join_all` over the `PxRemoteReplica` clients (collected from
+  `PxGroup::remote_replicas`).
+- Reply aggregation collects `(granted, peer_term, contiguous_chosen,
+  highest_seen_slot)`. On `peer_term > my_term`: `become_follower(peer_term)`
+  and reset deadline. On quorum-grant: `become_leader()`, kick
+  `PxGroup::run_bulk_phase1(term, peer_contiguous_chosen_max,
+  peer_highest_seen_slot_max, cfg, cancel)` via `tokio::spawn`, transition
+  to Leader state.
+- Tracks `peer_contiguous_chosen_max` / `peer_highest_seen_slot_max` from
+  granting peers and threads them into bulk Phase 1.
+
+#### Step 9.4 — PreVote round (Raft-style)
+- Insert PreCandidate state between Follower and Candidate. On election
+  timer fire, → PreCandidate first.
+- PreCandidate fan-outs `send_pre_vote` with `proposed_term =
+  current_term + 1` and does **not** bump the term (Critical Gap 6).
+- On quorum-grant: → Candidate (which bumps the term and re-fans
+  RequestVote as in 9.3). On any negative reply or timeout: → Follower with
+  reset deadline.
+- Add `cfg.prevote_enabled: bool` (default true; test profile may flip).
+
+#### Step 9.5 — Leader heartbeat ticker + lease renewal
+- On Leader entry, the driver starts a `tokio::time::interval` at
+  `cfg.heartbeat_interval_ms`. Each tick fans `send_heartbeat` to all
+  voting peers in parallel, recording `t_send_ms_mono` per round.
+- On a heartbeat round receiving quorum-OK replies: under the lease mutex,
+  `lease_read_until = max(lease_read_until, T_send +
+  cfg.lease_duration_ms - cfg.max_clock_skew_ms)` and
+  `last_quorum_heartbeat_at = Instant::now()`.
+- On any reply carrying `peer_term > my_term`: invoke the step-down
+  sequence (introduced in 9.6) with `LeaseUnrenewable=false,
+  higher_term=Some(peer_term)`.
+
+#### Step 9.6 — Step-down execution sequence + lease-unrenewable trigger
+- Introduce a single private `step_down(reason: StepDownReason)` helper in
+  the driver that executes the 6-step sequence (cancel token, stop ticker,
+  mutate `ElectionPersistentState`, reset deadline, expire lease, leave
+  inflight proposals to fail the gate from 9.8). All step-down callers go
+  through it.
+- Add the lease-unrenewable check on every Leader-state tick: `if now -
+  last_quorum_heartbeat_at >= cfg.lease_duration_ms { step_down(reason =
+  LeaseUnrenewable) }`. Resolves Critical Gap 4.
+- Reason is a small enum `{ HigherTerm(PxTerm), LeaseUnrenewable, Admin }`
+  used for logs + the Step-11 metrics counter.
+
+#### Step 9.7 — Admin StepDown signalling
+- Wire `PxLocalReplica::handle_step_down` (already exists in source) to
+  push a message into a `tokio::sync::Notify` (or 1-slot `mpsc`) owned by
+  the driver. The handler enforces strict fencing per §7.1: accept iff
+  `is_leader && req.target_leader_id == self.id && req.term ==
+  current_term`. On reject, the StepDownReply carries `current_term` and
+  `current_leader_id`.
+- Driver's Leader-state `select!` adds the admin-signal arm and calls
+  `step_down(Admin)` on receipt.
+
+#### Step 9.8 — `PxGroup::propose` leadership gate
+- Before slot allocation, take the `ElectionPersistentState` mutex once
+  and check `role == Leader` AND `current_term == self.proposing_term`
+  (added to `PxGroup`, stamped on `become_leader`). On miss return
+  `ProposeResult::NotLeader { hint: leader_id }` immediately. Resolves
+  Medium Gap 10.
+- The bulk-Phase-1 sweep already tags entries with `term`; the proposer's
+  steady-state `base_entry` likewise reads `current_term_snapshot`.
+- Test: `propose_after_step_down_returns_not_leader`.
 
 ### Step 10 — Per-peer bidi stream (moved from P1 M4)
 - Replace per-call unary `PxServiceClient` use inside `PxRemoteReplica` for `Accept` + `Heartbeat` + `Chosen` notifications with a single bidi stream per `(group_id, peer_id)` pair. `Prepare` / `RequestVote` / `PreVote` / `StepDown` stay as unary RPCs (one-shot, no ordering need).
@@ -535,10 +622,17 @@ Updated as each Step lands. Status legend: ⏳ pending · 🚧 in progress · �
 | 3 | Wire protocol additions (`pxos.proto`) | ✅ (stub handlers return `Unimplemented`; real impls land in Steps 4/8/9/10) | `f0798f3` |
 | 4 | `ReplicaHandler` / `ReplicaClient` + `PxReplicaError` + new handlers | ✅ (frontier values stubbed to 0 until Steps 5/6 wire learner watermarks + acceptor cursor) | `cc069fb` |
 | 5 | Learner frontier (`contiguous_chosen` / `contiguous_applied` / `last_chosen_term`) | ✅ | `9666856` |
-| 6 | Acceptor `highest_seen_slot` cursor | ✅ | pending |
-| 7 | Bulk Phase 1 on new leader | 🚧 | — |
-| 8 | Step-down hooks + `TermStale` error taxonomy | ⏳ | — |
-| 9 | Election + heartbeat + lease driver | ⏳ | — |
+| 6 | Acceptor `highest_seen_slot` cursor | ✅ | `a6cbec5` |
+| 7 | Bulk Phase 1 on new leader | ✅ (driver hook-up in Step 9) | `059890a` |
+| 8 | Step-down hooks + `TermStale` error taxonomy | ✅ | `627e346` |
+| 9.1 | Election driver scaffold (module + lifecycle) | ✅ | `9e8dabe` |
+| 9.2 | Follower → Candidate election timer | ✅ | `27a5776` |
+| 9.3 | Candidate RequestVote fanout + `become_leader` | ✅ | `43083fc` |
+| 9.4 | PreVote round (Raft-style) | ✅ | `255d034` |
+| 9.5 | Leader heartbeat ticker + lease renewal | ✅ | `10d4706` |
+| 9.6 | Step-down execution sequence + lease-unrenewable | ✅ | `0e257ec` |
+| 9.7 | Admin StepDown signalling | ✅ | `267d667` |
+| 9.8 | `PxGroup::propose` leadership gate | ✅ | `451504d` |
 | 10 | Per-peer bidi `PeerStream` | ⏳ | — |
 | 11 | Observability (`ElectionMetrics`) | ⏳ | — |
 | 12 | Tests (`paxos/election`, `cluster/election`) | ⏳ | — |
