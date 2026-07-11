@@ -31,7 +31,16 @@ async fn bench_run_write_smoke() {
         &cli,
         &console_url,
         &[
-            "paxos", "add", "--store-id", "1", "--group-id", "1", "--replica-id", "1", "--nodes", "n1",
+            "paxos",
+            "add",
+            "--store-id",
+            "1",
+            "--group-id",
+            "1",
+            "--replica-id",
+            "1",
+            "--nodes",
+            "n1",
         ],
     );
     assert_eq!(code, 0, "paxos add stderr={stderr}");
@@ -44,8 +53,19 @@ async fn bench_run_write_smoke() {
         &cli,
         &console_url,
         &[
-            "bench", "run", "write", "--store-id", "1", "--group-id", "1", "--duration-secs", "1",
-            "--threads", "2", "--connections", "2",
+            "bench",
+            "run",
+            "write",
+            "--store-id",
+            "1",
+            "--group-id",
+            "1",
+            "--duration-secs",
+            "1",
+            "--threads",
+            "2",
+            "--connections",
+            "2",
         ],
     );
     assert_eq!(code, 0, "bench run stdout={stdout}\nstderr={stderr}");

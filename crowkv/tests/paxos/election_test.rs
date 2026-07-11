@@ -21,15 +21,15 @@ fn noop_apply_path() {
         ballot: PxBallot::new(0, 0),
         term: 0,
         kind: PxLogEntryKind::NoOp,
-        // Empty payload triggers the `apply_payload` early return —
-        // no Puts / Deletes are decoded.
+        // Empty payload decodes to an empty batch — no Puts / Deletes
+        // reach the engine.
         payload: bytes::Bytes::new(),
         client_id: None,
         seq: None,
     };
-    let before = learner.store().len();
+    let before = learner.live_key_count();
     learner.learn(entry);
-    let after = learner.store().len();
+    let after = learner.live_key_count();
     assert_eq!(before, after, "NoOp must not mutate the KV store");
     assert_eq!(
         learner.contiguous_chosen(),

@@ -20,6 +20,7 @@
     clippy::cast_possible_truncation,
     clippy::items_after_statements,
     clippy::missing_errors_doc,
+    clippy::must_use_candidate,
     missing_docs
 )]
 mod generated {

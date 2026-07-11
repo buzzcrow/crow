@@ -19,12 +19,34 @@ message KvSetRequest {
   uint64 group_id = 9;
 }
 
+// Point-read consistency mode. Applies to both KvGetRequest and (with the
+// same numeric values) KvScanRequest.
+//   0 LINEARIZABLE     — reflect every committed write; served by the leader
+//                        behind a lease fast-path or ReadIndex quorum check,
+//                        followers transparently forward.
+//   1 READ_YOUR_WRITES — served locally on any replica once its applied
+//                        frontier has caught up to `client_slot`; otherwise
+//                        forwarded to the leader.
+//   2 BOUNDED_STALE    — served locally without a round-trip; `safe_slot`
+//                        in the response reports the freshness floor.
+//   3 BEST_EFFORT      — served locally, no freshness guarantee.
+enum ReadMode {
+  LINEARIZABLE = 0;
+  READ_YOUR_WRITES = 1;
+  BOUNDED_STALE = 2;
+  BEST_EFFORT = 3;
+}
+
 message KvGetRequest {
   uint32 version = 1;
   bytes  key     = 2;
   uint64 request_id = 3;
   uint64 request_create_ms = 4;
   uint64 group_id = 5;
+  ReadMode read_mode = 6;
+  // For READ_YOUR_WRITES: the slot the client must observe (typically the
+  // `revision` returned by its last write). Ignored by other modes.
+  uint64 client_slot = 7;
 }
 
 message KvDeleteRequest {
@@ -64,6 +86,11 @@ message KvResponse {
   uint64 request_id = 7;
   uint64 request_create_ms = 8;
   bytes  value      = 9;  // value for get operations
+  // Slot the read was served at (the replica's applied frontier for reads).
+  uint64 read_slot = 10;
+  // Group safe-slot known to the serving replica (min applied across voting
+  // members). Meaningful for BOUNDED_STALE reads.
+  uint64 safe_slot = 11;
 }
 
 // Prefix scan over the learner store. V1: local-replica read like
@@ -78,6 +105,7 @@ message KvScanRequest {
   uint64 request_id = 4;
   uint64 request_create_ms = 5;
   uint64 group_id = 6;
+  ReadMode read_mode = 7;
 }
 
 message KvScanItem {
@@ -95,6 +123,8 @@ message KvScanResponse {
   repeated KvScanItem items = 5;
   uint64 request_id = 6;
   uint64 request_create_ms = 7;
+  // Slot the scan was served at (the serving replica's applied frontier).
+  uint64 read_slot = 8;
 }
 
 service KvService {

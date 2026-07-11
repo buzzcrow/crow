@@ -15,6 +15,9 @@ mod kv_slot_retry;
 #[path = "paxos/learner_note_chosen_test.rs"]
 mod learner_note_chosen;
 
+#[path = "paxos/lease_read_test.rs"]
+mod lease_read;
+
 #[path = "paxos/election_metrics_test.rs"]
 mod election_metrics;
 

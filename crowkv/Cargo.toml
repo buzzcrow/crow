@@ -10,6 +10,14 @@ description = "CrowKV core library: consensus, engine, WAL, I/O, RPC, reconfigur
 [lints]
 workspace = true
 
+[features]
+# Exposes a handful of crate-internal hooks (proposer-window semaphore,
+# single-step repair, peer-applied injection) as `pub` so integration tests
+# under `tests/` can drive them without permanently widening the public API.
+# Enabled automatically for this crate's own test build via the self
+# dev-dependency below, so `cargo test` needs no extra flags.
+test-util = []
+
 [dependencies]
 tokio = { workspace = true, features = ["rt", "macros", "time", "net"] }
 tokio-stream = "0.1"
@@ -33,6 +41,10 @@ tonic-build = "0.12"
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 crossbeam-skiplist = "0.1"
+# Self dev-dependency: turns on the `test-util` feature for this crate's own
+# test/bench build so integration tests can reach the test-only hooks under
+# plain `cargo test` (no `--features` needed).
+crowkv = { path = ".", features = ["test-util"] }
 
 [[bench]]
 name = "slot_list"

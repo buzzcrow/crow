@@ -29,14 +29,12 @@ async fn multi_group_routes_to_correct_group() {
     assert!(g1
         .local_replica()
         .learner
-        .store()
-        .get(b"g1-key".as_slice())
+        .engine_get(b"g1-key".as_slice())
         .is_some());
     assert!(g1
         .local_replica()
         .learner
-        .store()
-        .get(b"g2-key".as_slice())
+        .engine_get(b"g2-key".as_slice())
         .is_none());
 
     // Verify isolation: group 2 has only its key
@@ -44,14 +42,12 @@ async fn multi_group_routes_to_correct_group() {
     assert!(g2
         .local_replica()
         .learner
-        .store()
-        .get(b"g2-key".as_slice())
+        .engine_get(b"g2-key".as_slice())
         .is_some());
     assert!(g2
         .local_replica()
         .learner
-        .store()
-        .get(b"g1-key".as_slice())
+        .engine_get(b"g1-key".as_slice())
         .is_none());
 }
 
@@ -80,7 +76,7 @@ async fn missing_group_returns_error() {
     assert!(resp.error.contains("no kv group"));
 
     // Get from non-existent group
-    let resp = store.kv_get(99, b"k", 103, 1003).await;
+    let resp = store.kv_get(99, b"k", 0, 0, 103, 1003).await;
     assert!(!resp.ok);
     assert!(resp.error.contains("no kv group"));
 }

@@ -598,6 +598,7 @@ dependencies = [
  "bytes",
  "criterion",
  "crossbeam-skiplist",
+ "crowkv",
  "dashmap",
  "parking_lot",
  "prost",

@@ -1,12 +1,13 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use crate::cluster::group::{ProposeResult, PxGroup};
-use crate::cluster::group_election::LeaderElection;
+use crate::cluster::group_election::{LeaderElection, ReadBarrierOutcome};
 use crate::cluster::kv_server::GrpcTaskState;
 use crate::cluster::kv_store::KvStore;
 use crate::cluster::status::{StatusLevel, StoreStatus};
 use crate::common::optional_u64;
 use crate::common::report::OperationReport;
+use crate::rpc::ReadMode;
 use dashmap::DashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -30,6 +31,8 @@ impl KvStore for PxKvStore {
         &self,
         group_id: u64,
         key: &[u8],
+        read_mode: i32,
+        client_slot: u64,
         request_id: u64,
         request_create_ms: u64,
     ) -> crate::rpc::KvResponse {
@@ -37,16 +40,22 @@ impl KvStore for PxKvStore {
             return missing_group_response(request_id, request_create_ms);
         };
 
-        let value = group
-            .local_replica()
-            .learner
-            .store()
-            .get(key)
-            .map(|v| v.value().clone());
-
-        match value {
-            Some(v) => crate::rpc::KvResponse::ok_value(v, request_id, request_create_ms),
-            None => crate::rpc::KvResponse::not_found(request_id, request_create_ms),
+        match self.resolve_read_point(&group, read_mode, client_slot).await {
+            ReadDecision::Serve { read_slot, safe_slot } => {
+                let value = group.local_replica().learner.engine_get(key).map(|(_slot, v)| v);
+                match value {
+                    Some(v) => crate::rpc::KvResponse::ok_value(v, request_id, request_create_ms)
+                        .with_read_slots(read_slot, safe_slot),
+                    None => crate::rpc::KvResponse::not_found(request_id, request_create_ms)
+                        .with_read_slots(read_slot, safe_slot),
+                }
+            }
+            ReadDecision::NotLeader { hint } => {
+                crate::rpc::KvResponse::not_leader(hint, request_id, request_create_ms)
+            }
+            ReadDecision::Unavailable { msg } => {
+                crate::rpc::KvResponse::err(msg, request_id, request_create_ms)
+            }
         }
     }
 
@@ -117,71 +126,41 @@ impl KvStore for PxKvStore {
         group_id: u64,
         prefix: &[u8],
         limit: u32,
+        read_mode: i32,
         request_id: u64,
         request_create_ms: u64,
     ) -> crate::rpc::KvScanResponse {
         let Some(group) = self.get_group(group_id) else {
-            return crate::rpc::KvScanResponse {
-                version: 1,
-                ok: false,
-                error: format!("group {group_id} not found in store {}", self.store_id),
-                truncated: false,
-                items: Vec::new(),
+            return scan_err(
+                format!("group {group_id} not found in store {}", self.store_id),
                 request_id,
                 request_create_ms,
-            };
+            );
         };
 
-        // Local-replica iteration. When `limit > 0` we keep only the
-        // smallest `limit` matching keys via a bounded max-heap, holding
-        // at most `limit + 1` keys at once instead of materializing and
-        // sorting every match. When `limit == 0` we return all matches
-        // and fall back to a single full sort. Sorted output keeps
-        // pagination via `prefix` extension predictable.
-        //
-        // DashMap does not expose a snapshot iterator: shard guards drop
-        // between `iter` and `get`, so a key can be deleted in between.
-        // We tolerate that by skipping any post-iteration miss.
-        let store = group.local_replica().learner.store();
-        let cap = limit as usize;
-        let (matched_keys, total_seen): (Vec<Vec<u8>>, usize) = if limit == 0 {
-            let mut keys: Vec<Vec<u8>> = store
-                .iter()
-                .filter_map(|kv| kv.key().starts_with(prefix).then(|| kv.key().clone()))
-                .collect();
-            keys.sort();
-            let len = keys.len();
-            (keys, len)
-        } else {
-            // Max-heap keyed on `Vec<u8>` (lexicographic). Push every
-            // candidate, then pop the largest once size exceeds `cap`.
-            // Result: the `cap` smallest matches survive.
-            use std::collections::BinaryHeap;
-            let mut heap: BinaryHeap<Vec<u8>> = BinaryHeap::with_capacity(cap + 1);
-            let mut total = 0usize;
-            for kv in store {
-                if !kv.key().starts_with(prefix) {
-                    continue;
-                }
-                total += 1;
-                heap.push(kv.key().clone());
-                if heap.len() > cap {
-                    heap.pop();
-                }
+        // Scans carry no read-your-writes slot, so `client_slot` is 0.
+        let read_slot = match self.resolve_read_point(&group, read_mode, 0).await {
+            ReadDecision::Serve { read_slot, .. } => read_slot,
+            ReadDecision::NotLeader { hint } => {
+                return scan_err(
+                    format!("not leader; retry scan at {hint}"),
+                    request_id,
+                    request_create_ms,
+                );
             }
-            let mut keys = heap.into_sorted_vec();
-            keys.truncate(cap);
-            (keys, total)
+            ReadDecision::Unavailable { msg } => {
+                return scan_err(msg, request_id, request_create_ms);
+            }
         };
-        let truncated = limit != 0 && total_seen > cap;
-        let mut items: Vec<crate::rpc::KvScanItem> = Vec::with_capacity(matched_keys.len());
-        for key in matched_keys {
-            // Re-fetch the value; the entry may have been removed
-            // between the `iter` pass above and now (DashMap drops
-            // shard guards between calls), in which case we skip it.
-            if let Some(value) = store.get(&key).map(|v| v.value().clone()) {
-                items.push(crate::rpc::KvScanItem { key, value });
-            }
+
+        // Ordered prefix scan from the engine. The engine returns the
+        // `limit` smallest matching live keys (no tombstones) in key order
+        // plus a `truncated` flag; `limit == 0` means unlimited. Sorted
+        // output keeps pagination via `prefix` extension predictable.
+        let (scanned, truncated) = group.local_replica().learner.engine_scan(prefix, limit as usize);
+        let mut items: Vec<crate::rpc::KvScanItem> = Vec::with_capacity(scanned.len());
+        for (key, _slot, value) in scanned {
+            items.push(crate::rpc::KvScanItem { key, value });
         }
 
         debug!(
@@ -202,6 +181,7 @@ impl KvStore for PxKvStore {
             items,
             request_id,
             request_create_ms,
+            read_slot,
         }
     }
 }
@@ -408,6 +388,76 @@ impl PxKvStore {
         group.leader_endpoint()
     }
 
+    /// Resolve the consistency discipline for a read on `group` and, when the
+    /// read may be served locally, the slot it is served at. Mirrors
+    /// `requirement.md` §6.4:
+    ///
+    /// * **Linearizable** — on the leader, run the lease / `ReadIndex` barrier
+    ///   ([`PxGroup::linearizable_read_barrier`]). A non-leader (or a leader
+    ///   that loses the barrier) must **never** serve local state: doing so
+    ///   would silently return a stale value for a read the caller asked to be
+    ///   fresh. Instead it redirects (`NotLeader`) so the caller retries at the
+    ///   real leader, or fails (`Unavailable`) when no quorum can confirm
+    ///   freshness.
+    /// * **`ReadYourWrites`** — serve locally once the applied frontier has
+    ///   caught up to `client_slot`; otherwise point the client at the leader.
+    /// * **`BoundedStale` / `BestEffort`** — serve from local applied state
+    ///   without a round-trip; the response reports `safe_slot`.
+    async fn resolve_read_point(
+        &self,
+        group: &Arc<PxGroup>,
+        read_mode: i32,
+        client_slot: u64,
+    ) -> ReadDecision {
+        let replica = group.local_replica();
+        let safe_slot = group.group_safe_slot();
+        let mode = ReadMode::try_from(read_mode).unwrap_or(ReadMode::Linearizable);
+        match mode {
+            ReadMode::Linearizable => {
+                if replica.is_leader() {
+                    match group.linearizable_read_barrier().await {
+                        ReadBarrierOutcome::Ready { read_slot } => {
+                            ReadDecision::Serve { read_slot, safe_slot }
+                        }
+                        // Lost leadership during the barrier: redirect to the
+                        // current leader rather than serving stale local state.
+                        ReadBarrierOutcome::NotLeader => ReadDecision::NotLeader {
+                            hint: self.forward_target_for(group.group_id()).unwrap_or_default(),
+                        },
+                        ReadBarrierOutcome::NoQuorum => ReadDecision::Unavailable {
+                            msg: "linearizable read: leadership quorum unavailable".to_string(),
+                        },
+                    }
+                } else {
+                    // Non-leader: a linearizable read cannot be proven fresh
+                    // here. `kv_service` forwards linearizable reads to the
+                    // leader before reaching the store; arriving here means
+                    // forwarding was unavailable or the loop-guard is set.
+                    // Redirect instead of serving a stale local value.
+                    ReadDecision::NotLeader {
+                        hint: self.forward_target_for(group.group_id()).unwrap_or_default(),
+                    }
+                }
+            }
+            ReadMode::ReadYourWrites => {
+                if replica.contiguous_applied() >= client_slot {
+                    ReadDecision::Serve {
+                        read_slot: replica.contiguous_applied(),
+                        safe_slot,
+                    }
+                } else {
+                    ReadDecision::NotLeader {
+                        hint: self.forward_target_for(group.group_id()).unwrap_or_default(),
+                    }
+                }
+            }
+            ReadMode::BoundedStale | ReadMode::BestEffort => ReadDecision::Serve {
+                read_slot: replica.contiguous_applied(),
+                safe_slot,
+            },
+        }
+    }
+
     pub fn remove_group(&self, group_id: u64) -> bool {
         // Cancel the removed group's per-tenure token so its election
         // driver (and, if it is the leader, its heartbeat loop) stops.
@@ -468,6 +518,13 @@ impl PxKvStore {
             ProposeResult::NotLeader { leader_hint } => {
                 crate::rpc::KvResponse::not_leader(leader_hint, request_id, request_create_ms)
             }
+            // Window-full: surface a retryable error keyword so clients back
+            // off and retry rather than treating it as a hard failure.
+            ProposeResult::Busy => crate::rpc::KvResponse::err(
+                crate::paxos::error::PxPaxosError::Busy.keyword().to_string(),
+                request_id,
+                request_create_ms,
+            ),
             ProposeResult::Err(msg) => crate::rpc::KvResponse::err(msg, request_id, request_create_ms),
         }
     }
@@ -517,4 +574,32 @@ fn missing_group_response(request_id: u64, request_create_ms: u64) -> crate::rpc
         request_id,
         request_create_ms,
     )
+}
+
+/// Build a failed [`crate::rpc::KvScanResponse`] carrying `error`. Scans have
+/// no dedicated `not_leader_hint`/`not_found` channel, so all failure shapes
+/// collapse to `ok = false` with a descriptive message.
+fn scan_err(error: String, request_id: u64, request_create_ms: u64) -> crate::rpc::KvScanResponse {
+    crate::rpc::KvScanResponse {
+        version: 1,
+        ok: false,
+        error,
+        truncated: false,
+        items: Vec::new(),
+        request_id,
+        request_create_ms,
+        read_slot: 0,
+    }
+}
+
+/// Outcome of [`PxKvStore::resolve_read_point`]: whether a read may be served
+/// from local state (and at which slots) or must be redirected / failed.
+enum ReadDecision {
+    /// Serve from local applied state. `read_slot` is the serving frontier;
+    /// `safe_slot` is the group safe-slot for bounded-stale reporting.
+    Serve { read_slot: u64, safe_slot: u64 },
+    /// Redirect the client to the leader (`hint` may be empty if unknown).
+    NotLeader { hint: String },
+    /// The read cannot currently be served with the requested consistency.
+    Unavailable { msg: String },
 }

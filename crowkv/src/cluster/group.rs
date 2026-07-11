@@ -2,6 +2,7 @@
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::missing_fields_in_debug)]
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::Mutex as AsyncMutex;
@@ -18,7 +19,7 @@ use crate::cluster::status::{GroupStatus, StatusLevel};
 use crate::common::config::{PaxosConfig, PxElectionConfig};
 use crate::common::report::OperationReport;
 use crate::paxos::error::{PxPaxosError, PxPaxosPhase, PxRetryAction};
-use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxLogEntryKind, PxPrepareReply};
+use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxLogEntryKind, PxPrepareReply, SlotIndex};
 use crate::paxos::{PxGroupId, PxNodeId};
 
 pub struct PxGroup {
@@ -58,6 +59,24 @@ pub struct PxGroup {
     /// constructed [`PxLocalReplica`], so testkit pinned-leader groups
     /// pass the gate without explicit stamping.
     pub(crate) proposing_term: AtomicU64,
+    /// Last-known `contiguous_applied` per voting peer, refreshed from
+    /// heartbeat replies. Peers never heard from are absent (treated as
+    /// `0`), which keeps [`Self::group_safe_slot`] conservative until every
+    /// member has reported. Only meaningful while this replica is leader.
+    pub(crate) peer_applied: parking_lot::Mutex<HashMap<PxNodeId, SlotIndex>>,
+    /// Group safe-slot: `min(contiguous_applied)` across the local replica
+    /// and all voting peers. Every slot `<= group_safe_slot` is applied on a
+    /// majority-and-then-some — specifically on *every* member that has
+    /// reported — so a bounded-stale read served at this slot reflects state
+    /// no follower can contradict. Recomputed at the end of each quorum
+    /// heartbeat round. `0` means "not yet established".
+    pub(crate) group_safe_slot: AtomicU64,
+    /// Proposer sliding-window admission gate. Holds `PaxosConfig::proposer_window`
+    /// permits; each in-flight `propose` call holds one for its duration, so at
+    /// most `window` proposals are allocated-but-not-chosen at once. A proposal
+    /// that cannot immediately acquire a permit returns `ProposeResult::Busy`
+    /// (retryable) rather than blocking the caller.
+    pub(crate) proposer_window: tokio::sync::Semaphore,
 }
 
 impl std::fmt::Debug for PxGroup {
@@ -88,6 +107,9 @@ impl PxGroup {
             driver_handle: AsyncMutex::new(None),
             pending_leader_handoff: parking_lot::Mutex::new(None),
             proposing_term: AtomicU64::new(0),
+            peer_applied: parking_lot::Mutex::new(HashMap::new()),
+            group_safe_slot: AtomicU64::new(0),
+            proposer_window: tokio::sync::Semaphore::new(PaxosConfig::DEFAULT.proposer_window),
         };
         group.recompute_quorum();
         group
@@ -119,6 +141,52 @@ impl PxGroup {
 
     pub fn quorum(&self) -> usize {
         self.cached_quorum
+    }
+
+    /// Group safe-slot snapshot: the highest slot known to be applied on the
+    /// local replica **and** every voting peer that has reported. Bounded /
+    /// safe-slot reads use this as their freshness floor. `0` until the first
+    /// quorum heartbeat round establishes it.
+    #[must_use]
+    pub fn group_safe_slot(&self) -> SlotIndex {
+        self.group_safe_slot.load(Ordering::Acquire)
+    }
+
+    /// Record a voting peer's reported `contiguous_applied` and recompute the
+    /// group safe-slot as the min over the local replica plus every voting
+    /// peer's last-known applied. A peer that has never reported is treated as
+    /// `0`, so the safe-slot only rises once *all* voting members are heard
+    /// from — the conservative choice that preserves the bounded-stale read
+    /// guarantee. Called from the leader heartbeat round.
+    pub(crate) fn note_peer_applied(&self, peer_id: PxNodeId, applied: SlotIndex) {
+        let mut peers = self.peer_applied.lock();
+        peers.insert(peer_id, applied);
+        let mut safe = self.local_replica.contiguous_applied();
+        for remote in &self.remote_replicas {
+            if let RemoteReplicaKind::Real(r) = remote {
+                if r.voting {
+                    let peer_applied = peers.get(&r.node_id).copied().unwrap_or(0);
+                    safe = safe.min(peer_applied);
+                }
+            }
+        }
+        drop(peers);
+        // Monotonic within a tenure: a transient peer regression cannot pull
+        // the published safe-slot backwards (it only ever advances).
+        self.group_safe_slot.fetch_max(safe, Ordering::AcqRel);
+    }
+
+    /// Clear all peer-applied tracking and reset the published group safe-slot
+    /// to `0`. Called at the start of every leader tenure: `group_safe_slot`
+    /// only ever advances (via `fetch_max`) *within* a tenure, so without this
+    /// reset a freshly elected leader would inherit the previous tenure's
+    /// elevated safe-slot and stale per-peer watermarks — overstating freshness
+    /// for bounded-stale reads until new heartbeats arrive. After the reset the
+    /// safe-slot stays at `0` until every voting member has reported again,
+    /// which is the conservative guarantee `group_safe_slot`'s docs promise.
+    pub(crate) fn reset_safe_slot_tracking(&self) {
+        self.peer_applied.lock().clear();
+        self.group_safe_slot.store(0, Ordering::Release);
     }
 
     /// Number of remote replica slots (including placeholders).
@@ -415,6 +483,36 @@ impl PxGroup {
             };
         }
 
+        // Idempotency: a retried `(client_id, seq)` that the learner has
+        // already applied returns its prior commit slot without re-running
+        // Paxos (exactly-once writes, `requirement.md` §10.2). Checked before
+        // window admission so duplicates never consume a window permit.
+        if let (Some(cid), Some(s)) = (client_id, seq) {
+            if let Some(cached_slot) = replica.learner.dedup_lookup(cid, s) {
+                debug!(
+                    group_id = self.group_id,
+                    client_id = cid,
+                    seq = s,
+                    slot = cached_slot,
+                    "dedup hit; returning cached commit without re-proposing"
+                );
+                return ProposeResult::Chosen { slot: cached_slot };
+            }
+        }
+
+        // Sliding-window admission: cap concurrent in-flight proposals. The
+        // permit is held for the whole proposal (released on drop at every
+        // return path below), so a full window fails fast with `Busy` instead
+        // of queuing unboundedly.
+        let Ok(_window_permit) = self.proposer_window.try_acquire() else {
+            warn!(
+                group_id = self.group_id,
+                window = PaxosConfig::DEFAULT.proposer_window,
+                "proposer window full; rejecting proposal as Busy"
+            );
+            return ProposeResult::Busy;
+        };
+
         let group_id = self.group_id;
         let total = self.valid_replica_count + 1;
         let quorum = total / 2 + 1;
@@ -582,6 +680,74 @@ impl PxGroup {
                 PaxosConfig::DEFAULT.max_slot_retries
             )
         })
+    }
+
+    /// One background-repair step: find the lowest gap in the open prefix
+    /// (the first unchosen slot below the highest slot this leader has seen
+    /// chosen) and drive classic Paxos to close it.
+    ///
+    /// Classic Paxos here is self-healing: the Prepare phase adopts any value
+    /// already accepted at the gap slot (recovering a half-committed write),
+    /// and otherwise fills the slot with an empty `NoOp` so the contiguous
+    /// frontier — and thus the group safe-slot — can advance past an abandoned
+    /// slot. Distinct from the one-shot bulk Phase 1 run on leader entry: this
+    /// runs repeatedly during steady-state leadership. A no-gap leader returns
+    /// [`RepairOutcome::NoGap`] without any RPCs, so it is cheap to poll.
+    pub(crate) async fn repair_once(&self) -> RepairOutcome {
+        let replica = &self.local_replica;
+        if replica.role() != crate::cluster::local_replica::PxLocalReplicaRole::Leader {
+            return RepairOutcome::NotLeader;
+        }
+        let contiguous = replica.contiguous_chosen();
+        let highest = replica.last_chosen_slot();
+        if contiguous >= highest {
+            return RepairOutcome::NoGap;
+        }
+        // The first slot above the contiguous frontier is, by definition, not
+        // yet chosen locally — the lowest hole to fill.
+        let gap_slot = contiguous + 1;
+        let quorum = self.quorum();
+        let group_id = self.group_id;
+        debug!(
+            group_id,
+            gap_slot, contiguous, highest, "background repair: filling gap"
+        );
+
+        // Always run Phase 1 (classic) so an already-accepted value is
+        // adopted rather than overwritten.
+        let entry = match self
+            .run_prepare_phase(replica, gap_slot, bytes::Bytes::new(), None, None, quorum, 0)
+            .await
+        {
+            PrepareAttempt::Proceed { entry, .. } => entry,
+            PrepareAttempt::Retry { error, .. } | PrepareAttempt::Fail { error } => {
+                debug!(
+                    group_id,
+                    gap_slot,
+                    error = error.keyword(),
+                    "repair prepare did not proceed"
+                );
+                return RepairOutcome::Failed;
+            }
+        };
+
+        match self.run_accept_phase(replica, &entry, quorum).await {
+            AcceptAttempt::Chosen => {
+                replica.learn(&entry);
+                self.fan_out_chosen_notice(&entry, group_id);
+                info!(group_id, slot = gap_slot, "background repair filled gap");
+                RepairOutcome::Filled { slot: gap_slot }
+            }
+            AcceptAttempt::Retry { error, .. } | AcceptAttempt::Fail { error } => {
+                debug!(
+                    group_id,
+                    gap_slot,
+                    error = error.keyword(),
+                    "repair accept did not choose"
+                );
+                RepairOutcome::Failed
+            }
+        }
     }
 
     fn base_entry(
@@ -929,12 +1095,65 @@ impl RemoteReplicaKind {
     }
 }
 
+/// Test-only hooks (compiled under the `test-util` feature). These expose
+/// crate-internal mechanisms — the proposer admission semaphore, a single
+/// repair step, and peer-applied injection — to integration tests under
+/// `tests/` without permanently widening the production public API.
+#[cfg(feature = "test-util")]
+impl PxGroup {
+    /// Borrow the proposer sliding-window admission semaphore so a test can
+    /// exhaust its permits and observe `ProposeResult::Busy`.
+    #[must_use]
+    pub fn proposer_window(&self) -> &tokio::sync::Semaphore {
+        &self.proposer_window
+    }
+
+    /// Run one background-repair step, returning the slot that was filled
+    /// (`Some`) or `None` when there was no gap to repair / repair did not
+    /// choose. Wraps the internal [`Self::repair_once`].
+    pub async fn repair_once_for_tests(&self) -> Option<u64> {
+        match self.repair_once().await {
+            RepairOutcome::Filled { slot } => Some(slot),
+            RepairOutcome::NoGap | RepairOutcome::NotLeader | RepairOutcome::Failed => None,
+        }
+    }
+
+    /// Inject a peer's reported `contiguous_applied` watermark, normally driven
+    /// by the leader heartbeat round, so a test can exercise group-safe-slot
+    /// computation deterministically. Wraps the internal [`Self::note_peer_applied`].
+    pub fn note_peer_applied_for_tests(&self, peer_id: PxNodeId, applied: SlotIndex) {
+        self.note_peer_applied(peer_id, applied);
+    }
+}
+
 /// Result of a `PxGroup::propose` call.
 #[derive(Debug)]
 pub enum ProposeResult {
-    Chosen { slot: u64 },
-    NotLeader { leader_hint: String },
+    Chosen {
+        slot: u64,
+    },
+    NotLeader {
+        leader_hint: String,
+    },
+    /// The proposer sliding window is full; the caller should retry shortly.
+    /// Distinct from `Err` so the KV layer can surface a retryable signal.
+    Busy,
     Err(String),
+}
+
+/// Result of one [`PxGroup::repair_once`] background-repair step.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum RepairOutcome {
+    /// A gap was found and chosen (recovered value or `NoOp` fill) at `slot`.
+    Filled { slot: u64 },
+    /// The contiguous frontier already reaches the highest seen slot; nothing
+    /// to repair (no RPCs issued).
+    NoGap,
+    /// This replica is not the leader; repair is a leader-only duty.
+    NotLeader,
+    /// The gap slot could not be chosen this round (quorum/transport); a later
+    /// poll retries.
+    Failed,
 }
 
 pub(crate) enum PrepareAttempt {

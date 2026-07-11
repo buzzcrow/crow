@@ -4,20 +4,36 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use dashmap::DashMap;
 use parking_lot::Mutex;
 
+use crate::engine::{Batch, Engine, InMemoryEngine};
 use crate::paxos::roles::{Learner, PxLogEntry, SlotIndex};
 use crate::paxos::PxTerm;
 
-/// In-memory state-machine backed by a `DashMap`, plus the chosen-slot
-/// frontier needed by leader-election safety checks and bulk Phase 1.
+/// Per-client dedup record: the highest applied client sequence number and the
+/// commit slot it landed at. Stored one-per-client (latest wins); a retry of
+/// any `seq <= last_seq` is treated as already-applied (`requirement.md` §10.2).
+#[derive(Clone, Copy, Debug)]
+struct DedupEntry {
+    last_seq: u64,
+    last_slot: SlotIndex,
+}
+
+/// State-machine driver: applies chosen log entries to a pluggable
+/// [`Engine`], plus the chosen-slot frontier needed by leader-election safety
+/// checks and bulk Phase 1.
 ///
 /// `learn` is called once a log entry has been chosen (i.e. accepted by a
 /// quorum). The payload is the minimal binary format emitted by
-/// `PxReplica::encode_kv_payload`.
+/// `PxKvStore::encode_kv_payload`, decoded here via [`Batch::decode`] and
+/// handed to the engine with the entry's slot for per-key highest-slot-wins
+/// apply.
 ///
-/// Key work: KV store apply, contiguous-chosen / contiguous-applied watermarks,
+/// Key work: engine apply, contiguous-chosen / contiguous-applied watermarks,
 /// `last_chosen_slot` / `last_chosen_term` (for `RequestVote` log-up-to-date check).
 pub struct PxLearner {
-    store: DashMap<Vec<u8>, Vec<u8>>,
+    /// Materialized key-value state. Boxed so the backend (in-memory, file,
+    /// crowtree) is a runtime choice; the whole `PxLearner` is `Arc`-shared
+    /// across replica rebuilds, so the engine is shared with it.
+    engine: Box<dyn Engine>,
     /// Highest slot S such that every slot in `[1, S]` has been learned.
     contiguous_chosen: AtomicU64,
     /// Highest slot S such that every slot in `[1, S]` has been applied to
@@ -34,17 +50,24 @@ pub struct PxLearner {
     /// slot → term so the frontier advance step can also bump
     /// `last_chosen_term` if it crosses an out-of-order slot.
     out_of_order: Mutex<BTreeMap<SlotIndex, PxTerm>>,
+    /// Per-`client_id` idempotency cache. Updated on every `learn` that
+    /// carries a `(client_id, seq)`; consulted by the proposer to short-
+    /// circuit a retried request to its prior commit slot without re-running
+    /// Paxos. In-memory only for P1 (rebuilt from `DedupCheckpoint` log entries
+    /// on P2 replay).
+    dedup: DashMap<u64, DedupEntry>,
 }
 
 impl Default for PxLearner {
     fn default() -> Self {
         Self {
-            store: DashMap::new(),
+            engine: Box::new(InMemoryEngine::new()),
             contiguous_chosen: AtomicU64::new(0),
             contiguous_applied: AtomicU64::new(0),
             last_chosen_slot: AtomicU64::new(0),
             last_chosen_term: AtomicU64::new(0),
             out_of_order: Mutex::new(BTreeMap::new()),
+            dedup: DashMap::new(),
         }
     }
 }
@@ -55,9 +78,30 @@ impl PxLearner {
         Self::default()
     }
 
+    /// Borrow the materialized state engine (point/range reads, `compare`).
     #[must_use]
-    pub fn store(&self) -> &DashMap<Vec<u8>, Vec<u8>> {
-        &self.store
+    pub fn engine(&self) -> &dyn Engine {
+        self.engine.as_ref()
+    }
+
+    /// Live value and its resolved slot for `key`, or `None` if unset or
+    /// tombstoned. Convenience wrapper over [`Engine::get`].
+    #[must_use]
+    pub fn engine_get(&self, key: &[u8]) -> Option<(SlotIndex, Vec<u8>)> {
+        self.engine.get(key)
+    }
+
+    /// Ordered prefix scan of live entries; see [`Engine::scan`].
+    #[must_use]
+    #[allow(clippy::type_complexity)]
+    pub fn engine_scan(&self, prefix: &[u8], limit: usize) -> (Vec<(Vec<u8>, SlotIndex, Vec<u8>)>, bool) {
+        self.engine.scan(prefix, limit)
+    }
+
+    /// Number of live (non-tombstoned) keys in the engine.
+    #[must_use]
+    pub fn live_key_count(&self) -> usize {
+        self.engine.live_key_count()
     }
 
     /// Highest contiguous chosen slot.
@@ -166,57 +210,64 @@ impl PxLearner {
         }
     }
 
-    /// Decode `payload` and apply each operation to the store.
-    ///
-    /// Wire format (per `PxReplica::encode_kv_payload`):
-    ///   [`op_count`: u8]
-    ///   for each op:
-    ///     [`kind`: u8]  0=Put, 1=Delete
-    ///     [`key_len`: u32 LE]
-    ///     [key bytes]
-    ///     [`value_len`: u32 LE]  (0 for Delete)
-    ///     [value bytes]
-    fn apply_payload(&self, payload: &[u8]) {
-        if payload.is_empty() {
+    /// Idempotency lookup: if `client_id`'s highest applied sequence number is
+    /// `>= seq`, the request was already committed; return the commit slot of
+    /// that client's latest applied request so the proposer can reply without
+    /// re-running Paxos. `client_id == 0` is the "no client" sentinel and never
+    /// dedups. Returns `None` for a fresh `(client, seq)`.
+    #[must_use]
+    pub fn dedup_lookup(&self, client_id: u64, seq: u64) -> Option<SlotIndex> {
+        if client_id == 0 {
+            return None;
+        }
+        self.dedup
+            .get(&client_id)
+            .filter(|e| seq <= e.last_seq)
+            .map(|e| e.last_slot)
+    }
+
+    /// Record that `(client_id, seq)` committed at `slot`. Keeps the highest
+    /// `seq` seen per client (monotonic; out-of-order / replayed lower seqs do
+    /// not regress the record). No-op for the `client_id == 0` sentinel.
+    fn record_dedup(&self, client_id: Option<u64>, seq: Option<u64>, slot: SlotIndex) {
+        let (Some(client_id), Some(seq)) = (client_id, seq) else {
+            return;
+        };
+        if client_id == 0 {
             return;
         }
-        let op_count = payload[0] as usize;
-        let mut offset = 1usize;
-
-        for _ in 0..op_count {
-            if offset >= payload.len() {
-                break;
-            }
-            let kind = payload[offset];
-            offset += 1;
-
-            let key_len = read_u32_le(payload, offset) as usize;
-            offset += 4;
-            let key = payload.get(offset..offset + key_len).unwrap_or(&[]).to_vec();
-            offset += key_len;
-
-            let value_len = read_u32_le(payload, offset) as usize;
-            offset += 4;
-            let value = payload.get(offset..offset + value_len).unwrap_or(&[]).to_vec();
-            offset += value_len;
-
-            if kind == 0 {
-                self.store.insert(key, value);
-            } else {
-                self.store.remove(&key);
-            }
-        }
+        self.dedup
+            .entry(client_id)
+            .and_modify(|e| {
+                if seq > e.last_seq {
+                    e.last_seq = seq;
+                    e.last_slot = slot;
+                }
+            })
+            .or_insert(DedupEntry {
+                last_seq: seq,
+                last_slot: slot,
+            });
     }
-}
 
-fn read_u32_le(buf: &[u8], offset: usize) -> u32 {
-    let b = buf.get(offset..offset + 4).unwrap_or(&[0; 4]);
-    u32::from_le_bytes([b[0], b[1], b[2], b[3]])
+    /// Decode `payload` and apply it to the engine at `slot`.
+    ///
+    /// An empty payload (`NoOp` repair fill) decodes to an empty batch and is
+    /// a no-op for the engine while still advancing the frontier in `learn`.
+    /// Per-key highest-slot-wins is enforced inside [`Engine::apply`].
+    fn apply_entry(&self, slot: SlotIndex, payload: &[u8]) {
+        let batch = Batch::decode(payload);
+        if batch.ops.is_empty() {
+            return;
+        }
+        self.engine.apply(slot, &batch);
+    }
 }
 
 impl Learner for PxLearner {
     fn learn(&self, entry: PxLogEntry) {
-        self.apply_payload(&entry.payload);
+        self.apply_entry(entry.slot, entry.payload.as_ref());
         self.update_frontier(entry.slot, entry.term);
+        self.record_dedup(entry.client_id, entry.seq, entry.slot);
     }
 }

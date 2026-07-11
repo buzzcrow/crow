@@ -188,6 +188,9 @@ impl KvClient {
             request_id: next_request_id(),
             request_create_ms: now_ms(),
             group_id,
+            // Console reads default to linearizable; no read-your-writes slot.
+            read_mode: 0,
+            client_slot: 0,
         };
         let resp = self
             .inner
@@ -268,6 +271,8 @@ impl KvClient {
             request_id,
             request_create_ms,
             group_id,
+            // Console scans default to linearizable.
+            read_mode: 0,
         };
         let resp = self.inner.scan(req).await.map_err(|e| Error::UpstreamRpc {
             node_id: self.endpoint.clone(),

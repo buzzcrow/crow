@@ -27,7 +27,7 @@ use crate::cluster::replica::{
     HeartbeatReply, HeartbeatRequestPayload, PxReplicaError, ReplicaClient, VoteReply, VoteRequestPayload,
 };
 use crate::common::config::PxElectionConfig;
-use crate::paxos::roles::PxLogEntryKind;
+use crate::paxos::roles::{PxLogEntryKind, SlotIndex};
 use crate::paxos::PxNodeId;
 
 /// Bundle handed off from `run_candidate_election` to `run_leader_state`
@@ -297,11 +297,28 @@ pub(crate) enum StepDownReason {
 /// Outcome of one heartbeat-fanout round.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum HeartbeatOutcome {
-    /// Round either gathered quorum-OK or failed without a higher term.
-    Continued,
+    /// Round completed without observing a higher term. `quorum_acked` is
+    /// `true` when a quorum (including self) acknowledged this round — the
+    /// condition a `ReadIndex` read requires to confirm the local replica is
+    /// still a legitimate leader before serving from local state.
+    Continued { quorum_acked: bool },
     /// A peer reply carried `peer_term > leader_term`; the leader-state
     /// loop steps down to follower in the observed term.
     SteppedDown { peer_term: u64 },
+}
+
+/// Outcome of a linearizable read barrier (`linearizable_read_barrier`).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ReadBarrierOutcome {
+    /// Read may be served from local applied state; every committed write up
+    /// to `read_slot` is reflected locally.
+    Ready { read_slot: SlotIndex },
+    /// This replica is not the leader (or stepped down during the barrier);
+    /// the caller should forward to / retry at the current leader.
+    NotLeader,
+    /// Leadership could not be confirmed this round (no reachable quorum);
+    /// the read cannot be proven fresh and should be retried.
+    NoQuorum,
 }
 
 /// Outcome of one `PreVote` fanout.
@@ -411,7 +428,7 @@ impl PxGroup {
         let mut acks: usize = 1;
         if acks >= quorum {
             replica.renew_lease(t_send, cfg);
-            return HeartbeatOutcome::Continued;
+            return HeartbeatOutcome::Continued { quorum_acked: true };
         }
 
         let mut joinset: JoinSet<(PxNodeId, Result<HeartbeatReply, PxReplicaError>)> = JoinSet::new();
@@ -446,6 +463,9 @@ impl PxGroup {
                     }
                     if hb.success {
                         acks += 1;
+                        // Refresh this peer's applied watermark and recompute
+                        // the group safe-slot used by bounded/safe-slot reads.
+                        self.note_peer_applied(peer_id, hb.contiguous_applied);
                         if acks >= quorum {
                             replica.renew_lease(t_send, cfg);
                             // Keep draining remaining replies; no further
@@ -459,7 +479,43 @@ impl PxGroup {
             }
         }
 
-        HeartbeatOutcome::Continued
+        HeartbeatOutcome::Continued {
+            quorum_acked: acks >= quorum,
+        }
+    }
+
+    /// Establish a linearizable read point on the leader.
+    ///
+    /// Returns the slot at which a local read is safe to serve (the commit
+    /// index captured up-front; under V1 apply==learn it is already applied).
+    /// Two paths, mirroring `requirement.md` §6.2:
+    /// - **Lease fast path:** if the read lease is still valid the leader is
+    ///   guaranteed to be the only one that could have committed anything, so
+    ///   the local applied state is linearizable with no round-trip.
+    /// - **`ReadIndex` fallback:** otherwise run one quorum heartbeat. A quorum
+    ///   ack confirms no higher term displaced us, so every committed write is
+    ///   reflected locally; a higher term steps us down; no quorum means we
+    ///   cannot prove freshness and the read must be retried elsewhere.
+    pub(crate) async fn linearizable_read_barrier(self: &Arc<Self>) -> ReadBarrierOutcome {
+        let replica = self.local_replica();
+        if !replica.is_leader() {
+            return ReadBarrierOutcome::NotLeader;
+        }
+        // Capture the commit index before confirmation: every slot <= this is
+        // already chosen on this leader.
+        let read_slot = replica.contiguous_chosen();
+
+        if replica.lease_read_valid(StdInstant::now()) {
+            return ReadBarrierOutcome::Ready { read_slot };
+        }
+
+        let cfg = self.election_cfg;
+        let term = replica.current_term_snapshot();
+        match self.run_heartbeat_round(&cfg, term).await {
+            HeartbeatOutcome::SteppedDown { .. } => ReadBarrierOutcome::NotLeader,
+            HeartbeatOutcome::Continued { quorum_acked: true } => ReadBarrierOutcome::Ready { read_slot },
+            HeartbeatOutcome::Continued { quorum_acked: false } => ReadBarrierOutcome::NoQuorum,
+        }
     }
 
     /// Drive one full election attempt: optional `PreVote` →
@@ -907,6 +963,12 @@ impl PxGroup {
         // round that gets quorum extends the lease and unlocks read fast-path.
         replica.reset_lease_to(StdInstant::now());
 
+        // Drop any safe-slot / per-peer watermarks inherited from a prior
+        // tenure. `group_safe_slot` only advances within a tenure, so a new
+        // leader must start conservative (0) and re-establish it from fresh
+        // heartbeats rather than overstate freshness for bounded-stale reads.
+        self.reset_safe_slot_tracking();
+
         // Per-leadership-tenure cancel token. Cancelled by the step-down
         // sequence; aborts in-flight bulk Phase 1 and any future
         // tenure-bound work. Always a child of the driver-lifetime
@@ -987,7 +1049,14 @@ impl PxGroup {
                 }
                 _ = ticker.tick() => {
                     match self.run_heartbeat_round(cfg, leader_term).await {
-                        HeartbeatOutcome::Continued => {}
+                        HeartbeatOutcome::Continued { .. } => {
+                            // Opportunistic background repair: close the lowest
+                            // gap in the open prefix so the contiguous frontier
+                            // (and group safe-slot) can advance past abandoned
+                            // slots. A no-gap leader returns immediately without
+                            // any RPCs, so steady state pays nothing.
+                            let _ = self.repair_once().await;
+                        }
                         HeartbeatOutcome::SteppedDown { peer_term } => {
                             self.step_down(&tenure_cancel, leader_term, StepDownReason::HigherTerm(peer_term));
                             return;

@@ -33,7 +33,15 @@ async fn cluster_status_topology_inspect_via_console() {
         &cli,
         &console_url,
         &[
-            "paxos", "add", "--store-id", "9", "--group-id", "90", "--replica-id", "900", "--nodes",
+            "paxos",
+            "add",
+            "--store-id",
+            "9",
+            "--group-id",
+            "90",
+            "--replica-id",
+            "900",
+            "--nodes",
             "n1",
         ],
     );

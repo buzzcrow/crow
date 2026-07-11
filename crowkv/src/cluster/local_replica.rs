@@ -503,6 +503,19 @@ impl PxLocalReplica {
         anchor_ms_to_instant(self.lease_read_until_ms.load(Ordering::Acquire))
     }
 
+    /// Whether a linearizable read may be served locally from this replica's
+    /// own applied state without a quorum round-trip: the replica must be the
+    /// leader and hold a still-valid read lease at `now`.
+    ///
+    /// A freshly elected leader starts with an expired lease
+    /// (`reset_lease_to` on tenure entry), so the first quorum heartbeat must
+    /// extend it before the read fast path opens. When this returns `false`
+    /// the caller falls back to a `ReadIndex` quorum check.
+    #[must_use]
+    pub fn lease_read_valid(&self, now: Instant) -> bool {
+        self.is_leader() && self.lease_read_until() > now
+    }
+
     /// Snapshot of `last_quorum_heartbeat_at` only.
     #[must_use]
     pub fn last_quorum_heartbeat_at(&self) -> Instant {
@@ -732,7 +745,7 @@ impl PxLocalReplica {
             status,
             messages,
             kv_store: KvStoreStatus {
-                key_count: self.learner.store().len() as u64,
+                key_count: self.learner.live_key_count() as u64,
             },
         }
     }

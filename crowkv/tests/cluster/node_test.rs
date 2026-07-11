@@ -36,7 +36,7 @@ async fn kv_ops_apply_locally_for_single_leader() {
     let group = store.get_group(1).unwrap();
     let replica = group.local_replica();
     assert_eq!(
-        replica.learner.store().get("k1".as_bytes()).map(|v| v.clone()),
+        replica.learner.engine_get("k1".as_bytes()).map(|(_, v)| v),
         Some(b"v1".to_vec())
     );
 
@@ -66,11 +66,11 @@ async fn kv_ops_apply_locally_for_single_leader() {
     let group = store.get_group(1).unwrap();
     let replica = group.local_replica();
     assert_eq!(
-        replica.learner.store().get("k1".as_bytes()).map(|v| v.clone()),
+        replica.learner.engine_get("k1".as_bytes()).map(|(_, v)| v),
         Some(b"v2".to_vec())
     );
     assert_eq!(
-        replica.learner.store().get("k2".as_bytes()).map(|v| v.clone()),
+        replica.learner.engine_get("k2".as_bytes()).map(|(_, v)| v),
         Some(b"v2".to_vec())
     );
 
@@ -79,7 +79,7 @@ async fn kv_ops_apply_locally_for_single_leader() {
 
     let group = store.get_group(1).unwrap();
     let replica = group.local_replica();
-    assert!(replica.learner.store().get("k1".as_bytes()).is_none());
+    assert!(replica.learner.engine_get("k1".as_bytes()).is_none());
 }
 
 #[tokio::test]
@@ -142,6 +142,89 @@ async fn role_can_be_changed_for_tests() {
 
     node.become_leader();
     assert!(node.is_leader());
+}
+
+#[tokio::test]
+async fn read_modes_serve_value_with_slots_on_single_leader() {
+    let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
+    store.add_group(sample_group(1, 1, "127.0.0.1:0"));
+
+    // Commit one write so the leader has an applied frontier at slot 1.
+    let put = store.kv_put(1, b"rk", b"rv", 11, 1, 1, 1).await;
+    assert!(put.ok, "leader put should commit");
+    let revision = put.revision;
+    assert!(revision >= 1, "commit should land at slot >= 1");
+
+    // Linearizable (mode 0): single-voter leader runs the ReadIndex barrier
+    // (lease starts expired), confirms quorum trivially, and serves locally.
+    let lin = store.kv_get(1, b"rk", 0, 0, 2, 2).await;
+    assert!(
+        lin.ok && lin.value == b"rv",
+        "linearizable read should hit: {lin:?}"
+    );
+    assert!(
+        lin.read_slot >= revision,
+        "read_slot should be at the committed frontier"
+    );
+
+    // ReadYourWrites (mode 1) with the client's own write slot: the applied
+    // frontier has caught up, so it is served locally.
+    let ryw = store.kv_get(1, b"rk", 1, revision, 3, 3).await;
+    assert!(
+        ryw.ok && ryw.value == b"rv",
+        "read-your-writes should hit: {ryw:?}"
+    );
+
+    // ReadYourWrites demanding a future slot the replica has not applied yet
+    // is redirected rather than served stale.
+    let ryw_future = store.kv_get(1, b"rk", 1, revision + 100, 4, 4).await;
+    assert!(
+        !ryw_future.ok,
+        "RYW past the applied frontier must not serve locally"
+    );
+
+    // BoundedStale (mode 2) and BestEffort (mode 3) always serve locally.
+    let bounded = store.kv_get(1, b"rk", 2, 0, 5, 5).await;
+    assert!(
+        bounded.ok && bounded.value == b"rv",
+        "bounded-stale read should hit"
+    );
+    let best = store.kv_get(1, b"rk", 3, 0, 6, 6).await;
+    assert!(best.ok && best.value == b"rv", "best-effort read should hit");
+}
+
+#[tokio::test]
+async fn dedup_suppresses_retried_client_seq() {
+    let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
+    store.add_group(sample_group(1, 1, "127.0.0.1:0"));
+
+    // First write commits at some slot.
+    let r1 = store.kv_put(1, b"dk", b"v1", 5, 1, 1, 1).await;
+    assert!(r1.ok, "first write should commit");
+    let slot1 = r1.revision;
+
+    // Retry the SAME (client_id=5, seq=1) with a different value: dedup must
+    // suppress re-execution, returning the original commit slot and leaving
+    // the stored value untouched (exactly-once).
+    let dup = store.kv_put(1, b"dk", b"v2", 5, 1, 2, 2).await;
+    assert!(dup.ok, "duplicate should report ok");
+    assert_eq!(dup.revision, slot1, "duplicate returns the original commit slot");
+    let group = store.get_group(1).unwrap();
+    assert_eq!(
+        group.local_replica().learner.engine_get(b"dk").map(|(_, v)| v),
+        Some(b"v1".to_vec()),
+        "duplicate (client,seq) must not overwrite the committed value"
+    );
+
+    // A higher seq is a new request: it advances and applies.
+    let r2 = store.kv_put(1, b"dk", b"v3", 5, 2, 3, 3).await;
+    assert!(r2.ok);
+    assert!(r2.revision > slot1, "higher seq advances to a new slot");
+    assert_eq!(
+        group.local_replica().learner.engine_get(b"dk").map(|(_, v)| v),
+        Some(b"v3".to_vec()),
+        "higher seq applies the new value"
+    );
 }
 
 #[tokio::test]

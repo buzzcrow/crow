@@ -76,11 +76,7 @@ async fn kv_put_retries_next_slot_when_slot_has_prior_accepted_value() {
     for node in cluster.nodes() {
         let group = node.get_group(1).expect("group exists");
         let replica = group.local_replica();
-        let value = replica
-            .learner
-            .store()
-            .get(b"my-key".as_slice())
-            .map(|v| v.clone());
+        let value = replica.learner.engine_get(b"my-key".as_slice()).map(|(_, v)| v);
         assert_eq!(value.as_deref(), Some(b"my-value".as_slice()));
     }
 

@@ -86,7 +86,7 @@ fn assert_cluster_value(cluster: &TestCluster, key: &[u8], expected: Option<&[u8
     for node in cluster.nodes() {
         let group = node.get_group(1).expect("group exists");
         let replica = group.local_replica();
-        let value = replica.learner.store().get(key).map(|entry| entry.clone());
+        let value = replica.learner.engine_get(key).map(|(_, v)| v);
         match expected {
             Some(bytes) => {
                 let stored = value.expect("value missing");

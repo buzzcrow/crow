@@ -1,15 +1,11 @@
 # CrowKV Console Web UI Design (v1, lean)
 
-Upstream: `doc/requirement-ui.md`. Sibling: `doc/design/design-console.md`
+Upstream: `doc/requirement.md` §15.4.6. Sibling: `doc/design/design-console.md`
 (backend Axum routes, registry, SSH lifecycle, Swagger asset hosting).
 
 This document covers the **frontend SPA only**. Backend-API contracts are
 normative in `design-console.md` and `requirement.md` §15.
 
-This is a deliberate **rewrite** of the earlier (overbuilt) design. v1
-ships the smallest surface that satisfies `requirement-ui.md` §3.1–§3.7.
-Everything in `requirement-ui.md` §9 is **out of scope for v1** and must
-not be implemented here.
 
 ## 1. Goals (recap)
 

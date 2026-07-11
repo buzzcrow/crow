@@ -29,3 +29,17 @@ mod remote_error;
 
 #[path = "cluster/election_test.rs"]
 mod election;
+
+#[path = "cluster/g1_step_down_survival_test.rs"]
+mod g1_step_down_survival;
+
+// These suites drive crate-internal mechanisms via the `test-util` feature
+// hooks on `PxGroup`; they compile only when that feature is enabled (the
+// crate's self dev-dependency turns it on for `cargo test`).
+#[cfg(feature = "test-util")]
+#[path = "cluster/proposer_test.rs"]
+mod proposer;
+
+#[cfg(feature = "test-util")]
+#[path = "cluster/safe_slot_test.rs"]
+mod safe_slot;

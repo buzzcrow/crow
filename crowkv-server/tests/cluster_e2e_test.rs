@@ -249,6 +249,8 @@ async fn e2e_three_node_cluster_kv_put_batch_delete() {
             request_id: 1011,
             request_create_ms: 10011,
             group_id,
+            read_mode: 0,
+            client_slot: 0,
         })
         .await
         .expect("kv get")
@@ -307,6 +309,8 @@ async fn e2e_three_node_cluster_kv_put_batch_delete() {
             request_id: 1013,
             request_create_ms: 10013,
             group_id,
+            read_mode: 0,
+            client_slot: 0,
         })
         .await
         .expect("kv get after delete")
@@ -580,6 +584,8 @@ async fn kv_get(
             request_id: req_id,
             request_create_ms: req_id,
             group_id,
+            read_mode: 0,
+            client_slot: 0,
         })
         .await
         .expect("kv get rpc")

@@ -27,7 +27,18 @@ impl KvResponse {
             request_id,
             request_create_ms,
             value: Vec::new(),
+            read_slot: 0,
+            safe_slot: 0,
         }
+    }
+
+    /// Attach the slot a read was served at and the serving replica's group
+    /// safe-slot. Chainable on `ok_value` / `not_found`.
+    #[must_use]
+    pub fn with_read_slots(mut self, read_slot: u64, safe_slot: u64) -> Self {
+        self.read_slot = read_slot;
+        self.safe_slot = safe_slot;
+        self
     }
 
     /// Successful read returning `value`. Used by `kv_get` hits.
@@ -43,6 +54,8 @@ impl KvResponse {
             request_id,
             request_create_ms,
             value,
+            read_slot: 0,
+            safe_slot: 0,
         }
     }
 
@@ -59,6 +72,8 @@ impl KvResponse {
             request_id,
             request_create_ms,
             value: Vec::new(),
+            read_slot: 0,
+            safe_slot: 0,
         }
     }
 
@@ -76,6 +91,8 @@ impl KvResponse {
             request_id,
             request_create_ms,
             value: Vec::new(),
+            read_slot: 0,
+            safe_slot: 0,
         }
     }
 
@@ -92,6 +109,8 @@ impl KvResponse {
             request_id,
             request_create_ms,
             value: Vec::new(),
+            read_slot: 0,
+            safe_slot: 0,
         }
     }
 }

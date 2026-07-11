@@ -66,7 +66,10 @@ async fn server_list(cli: &Cli) -> ExitCode {
                 println!("(no servers deployed)");
                 return ExitCode::SUCCESS;
             }
-            println!("{:<12}  {:<26}  {:<26}  {:<8}  HEALTH", "NODE", "MGMT", "GRPC", "PID");
+            println!(
+                "{:<12}  {:<26}  {:<26}  {:<8}  HEALTH",
+                "NODE", "MGMT", "GRPC", "PID"
+            );
             for s in &servers {
                 let health = match s.health {
                     NodeHealth::Up => "up",

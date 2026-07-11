@@ -27,7 +27,11 @@ async fn rack_node_server_lifecycle() {
     let console_url = format!("http://{console}");
 
     // rack add / list
-    let (code, _, stderr) = run(&cli, &console_url, &["rack", "add", "--id", "r1", "--name", "rack-one"]);
+    let (code, _, stderr) = run(
+        &cli,
+        &console_url,
+        &["rack", "add", "--id", "r1", "--name", "rack-one"],
+    );
     assert_eq!(code, 0, "rack add stderr={stderr}");
     let (code, stdout, _) = run(&cli, &console_url, &["rack", "list"]);
     assert_eq!(code, 0);
@@ -54,8 +58,16 @@ async fn rack_node_server_lifecycle() {
         &cli,
         &console_url,
         &[
-            "server", "deploy", "--node", "n1", "--mgmt-port", &mgmt_port, "--grpc-port", &grpc_port,
-            "--binary", &server_bin,
+            "server",
+            "deploy",
+            "--node",
+            "n1",
+            "--mgmt-port",
+            &mgmt_port,
+            "--grpc-port",
+            &grpc_port,
+            "--binary",
+            &server_bin,
         ],
     );
     assert_eq!(code, 0, "server deploy stderr={stderr}");

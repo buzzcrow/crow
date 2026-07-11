@@ -28,4 +28,3 @@ pub fn load_config(cli: &Cli) -> Result<ConsoleConfig, ExitCode> {
         ExitCode::from(1)
     })
 }
-

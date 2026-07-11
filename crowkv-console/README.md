@@ -178,7 +178,7 @@ placement from the topology cache. Server lifecycle uses `:node_id`
 > **Deprecated:** the previous `?server=<mgmt_url>` query-string
 > contract and server-scoped paths (`/api/servers/:sid/...`) have been
 > removed. See `doc/design/design-console.md` §6.1 and
-> `doc/requirement-ui.md` §3.6 for the replacement.
+> `doc/requirement.md` §15.4.6 (API routing rule) for the replacement.
 
 ```bash
 # List stores (logical, cluster-wide)

@@ -166,7 +166,9 @@ fn parse_inspect_id(id: &str) -> Result<InspectTarget, String> {
         if segs.len() == 1 && !id.is_empty() {
             return Ok(InspectTarget::Node(id.to_string()));
         }
-        return Err(format!("unrecognised id {id:?} (expected s<sid>[/g<gid>[/r<rid>]] or a node id)"));
+        return Err(format!(
+            "unrecognised id {id:?} (expected s<sid>[/g<gid>[/r<rid>]] or a node id)"
+        ));
     };
     match segs.as_slice() {
         [_] => Ok(InspectTarget::Store(sid)),
@@ -197,7 +199,10 @@ fn health_str(h: NodeHealth) -> &'static str {
 }
 
 fn print_status_human(servers: &[ServerSummary], stores: &[StoreView]) {
-    let up = servers.iter().filter(|s| matches!(s.health, NodeHealth::Up)).count();
+    let up = servers
+        .iter()
+        .filter(|s| matches!(s.health, NodeHealth::Up))
+        .count();
     println!("servers: {} ({up} up)", servers.len());
     for s in servers {
         println!(
@@ -242,7 +247,9 @@ fn print_topology_human(
 
     println!("physical:");
     for n in nodes {
-        let server = servers.iter().find(|s| s.node_id.as_deref() == Some(n.id.as_str()));
+        let server = servers
+            .iter()
+            .find(|s| s.node_id.as_deref() == Some(n.id.as_str()));
         let server_label = server.map_or_else(
             || "none".to_string(),
             |s| format!("{} ({})", s.mgmt_url, health_str(s.health)),

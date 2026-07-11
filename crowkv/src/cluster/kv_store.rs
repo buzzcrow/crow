@@ -10,7 +10,19 @@ use crate::rpc::{KvBatchItem, KvResponse, KvScanResponse};
 
 #[allow(async_fn_in_trait)]
 pub trait KvStore {
-    async fn kv_get(&self, group_id: u64, key: &[u8], request_id: u64, request_create_ms: u64) -> KvResponse;
+    /// Point read. `read_mode` is the proto `ReadMode` discriminant
+    /// (`0` = linearizable). `client_slot` is the read-your-writes target
+    /// slot (ignored by other modes). See `px_kv_store` for per-mode routing.
+    #[allow(clippy::too_many_arguments)]
+    async fn kv_get(
+        &self,
+        group_id: u64,
+        key: &[u8],
+        read_mode: i32,
+        client_slot: u64,
+        request_id: u64,
+        request_create_ms: u64,
+    ) -> KvResponse;
 
     #[allow(clippy::too_many_arguments)]
     async fn kv_put(
@@ -45,14 +57,16 @@ pub trait KvStore {
     ) -> KvResponse;
 
     /// Prefix-scan the learner store, returning at most `limit` items
-    /// (`limit == 0` means "no limit"). V1 is a local-replica read with
-    /// the same staleness window as `kv_get`; the response sets
-    /// `truncated = true` when `limit` was reached.
+    /// (`limit == 0` means "no limit"). `read_mode` selects the consistency
+    /// discipline as in [`Self::kv_get`]: linearizable scans run behind the
+    /// leader read barrier, stale modes serve from local applied state. The
+    /// response sets `truncated = true` when `limit` was reached.
     async fn kv_scan(
         &self,
         group_id: u64,
         prefix: &[u8],
         limit: u32,
+        read_mode: i32,
         request_id: u64,
         request_create_ms: u64,
     ) -> KvScanResponse;

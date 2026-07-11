@@ -125,12 +125,13 @@ impl KvService for KvStoreService {
             "received kv get rpc"
         );
 
-        // Transparent leader-forward: if this node is a follower and
-        // we know the leader's endpoint, re-issue the request to the
-        // leader so callers see committed values without an explicit
-        // `--linearizable` opt-in. The loop-guard header makes this
-        // hop at-most-once.
-        if !already_forwarded {
+        // Transparent leader-forward: only linearizable reads are forwarded
+        // to the leader; the stale read modes (`READ_YOUR_WRITES`,
+        // `BOUNDED_STALE`, `BEST_EFFORT`) are deliberately served from the
+        // local replica without a hop. The loop-guard header makes the
+        // linearizable hop at-most-once.
+        let linearizable = req.read_mode == crate::rpc::ReadMode::Linearizable as i32;
+        if linearizable && !already_forwarded {
             if let Some(endpoint) = self.store.forward_target_for(req.group_id) {
                 match forward_kv_get(&endpoint, req.clone()).await {
                     Ok(mut resp) => {
@@ -152,11 +153,18 @@ impl KvService for KvStoreService {
                             request_id = req.request_id,
                             leader = %endpoint,
                             error = %status,
-                            "kv get forward failed; next step: serving stale local read with not_leader_hint"
+                            "kv get forward failed; next step: returning the store decision (linearizable reads redirect with not_leader_hint rather than serve stale)"
                         );
                         let mut resp = self
                             .store
-                            .kv_get(req.group_id, &req.key, req.request_id, req.request_create_ms)
+                            .kv_get(
+                                req.group_id,
+                                &req.key,
+                                req.read_mode,
+                                req.client_slot,
+                                req.request_id,
+                                req.request_create_ms,
+                            )
                             .await;
                         resp.not_leader_hint = endpoint;
                         resp.request_id = req.request_id;
@@ -169,7 +177,14 @@ impl KvService for KvStoreService {
 
         let mut resp = self
             .store
-            .kv_get(req.group_id, &req.key, req.request_id, req.request_create_ms)
+            .kv_get(
+                req.group_id,
+                &req.key,
+                req.read_mode,
+                req.client_slot,
+                req.request_id,
+                req.request_create_ms,
+            )
             .await;
         resp.request_id = req.request_id;
         resp.request_create_ms = req.request_create_ms;
@@ -226,8 +241,10 @@ impl KvService for KvStoreService {
             "received kv scan rpc"
         );
 
-        // Transparent leader-forward, mirroring `get`.
-        if !already_forwarded {
+        // Transparent leader-forward, mirroring `get`: only linearizable
+        // scans hop to the leader; stale modes serve from the local replica.
+        let linearizable = req.read_mode == crate::rpc::ReadMode::Linearizable as i32;
+        if linearizable && !already_forwarded {
             if let Some(endpoint) = self.store.forward_target_for(req.group_id) {
                 match forward_kv_scan(&endpoint, req.clone()).await {
                     Ok(mut resp) => {
@@ -266,6 +283,7 @@ impl KvService for KvStoreService {
                 req.group_id,
                 &req.prefix,
                 req.limit,
+                req.read_mode,
                 req.request_id,
                 req.request_create_ms,
             )

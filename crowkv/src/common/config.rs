@@ -12,6 +12,12 @@ pub struct PaxosConfig {
     pub max_paxos_retries: usize,
     pub max_slot_retries: usize,
     pub retry_base_backoff_ms: u64,
+    /// Maximum number of in-flight (allocated-but-not-yet-chosen) proposals
+    /// the leader admits concurrently. A proposal that cannot acquire a window
+    /// permit fails fast with `PxPaxosError::Busy` (retryable) rather than
+    /// blocking, so the leader never stalls behind a saturated pipeline
+    /// (`requirement.md` §7.3 / §12.1).
+    pub proposer_window: usize,
 }
 
 impl PaxosConfig {
@@ -19,6 +25,7 @@ impl PaxosConfig {
         max_paxos_retries: 3,
         max_slot_retries: 3,
         retry_base_backoff_ms: 5,
+        proposer_window: 16,
     };
 }
 

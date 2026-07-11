@@ -1,7 +1,7 @@
 # CrowKV Console Design
 
 Upstream: `doc/requirement.md` §15 (the `crowkv-console` component
-overview) and `doc/requirement-ui.md` (Web UI requirements).
+overview) and §15.4.6 (Web UI requirements).
 Sibling: `doc/design/design-ui.md` (frontend SPA design).
 
 ## 1. Goals and Non-Goals

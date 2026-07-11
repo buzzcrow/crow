@@ -8,11 +8,14 @@ doc only when a task touches a topic in its row. Line counts are approximate
 
 | Doc | Lines | When to read |
 | --- | ---: | --- |
-| `requirement.md` | ~770 | Source of truth for what must be built. Any feature gap → fix here first. |
+| `requirement.md` | ~900 | Source of truth for what must be built. Any feature gap → fix here first. UI requirements live in §15.4.6. |
 | `design.md` | ~490 | Master design: cross-cutting architecture, write/read flows, module decomposition. Read for scope-spanning questions. |
 | `plan.md` | ~190 | Phases (P1–P5), milestones, dependency order, decision log. Read before picking a task. |
 | `test.md` | ~250 | Test pyramid, invariants, failure-injection taxonomy, CI gates, suites. Read when adding/restructuring tests. |
-| `requirement-ui.md` | ~340 | Web UI requirements: single-page embeddable console, functional surface mapped to current `crowkv-web` API, embedded Swagger. §9 lists features deferred to V2. |
+
+Web UI requirements now live in `requirement.md` §15.4.6 (single-page embeddable
+console, two hierarchy views, functional surface mapped to the `crowkv-web` API,
+embedded Swagger, V2 deferral list).
 
 ## `requirement.md` Sections
 
