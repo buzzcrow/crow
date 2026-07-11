@@ -615,7 +615,7 @@ async fn set_leader(
     info!(store_id = sid, group_id = gid, leader_id = req.leader_id, "setting group leader via management API");
     // Reconstruct group with new leader_id
     let lr = group.local_replica();
-    let local_replica = PxLocalReplica::new(lr.id, lr.role);
+    let local_replica = PxLocalReplica::new(lr.id, lr.role());
     let mut new_group = PxGroup::new(gid, local_replica);
     new_group.set_leader_id(req.leader_id);
     if group.force_classic() {
@@ -895,7 +895,7 @@ fn group_to_topology(g: crowkv::cluster::GroupSnapshot) -> TopologyGroup {
 /// but no remote replicas. Caller is responsible for adding remotes.
 fn rebuild_group_with_same_config(group: &PxGroup) -> PxGroup {
     let lr = group.local_replica();
-    let local_replica = PxLocalReplica::new(lr.id, lr.role);
+    let local_replica = PxLocalReplica::new(lr.id, lr.role());
     let mut new_group = PxGroup::new(group.group_id, local_replica);
     new_group.set_leader_id(group.leader_id);
     if group.force_classic() {

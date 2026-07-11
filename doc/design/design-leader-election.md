@@ -196,17 +196,17 @@ Each heartbeat round-trip is also a lease grant:
 3. Leader receives the response at `T_recv_reply`. The lease is valid through `T_send + lease_duration` on the leader's clock — the leader uses `T_send` (not `T_recv_reply`) as the start so that any clock skew works in its favor.
 4. The leader treats the lease as effective until `T_send + lease_duration - max_clock_skew`. This is conservative; it gives a safety margin equal to the assumed skew bound.
 
-Because heartbeats run every `heartbeat_interval = 100 ms` and lease durations are around `lease_duration = 9 × heartbeat_interval = 900 ms`, the leader is essentially always within an active lease in steady state. A short network blip costs the leader its fast-read privilege but not its leadership.
+With the default `heartbeat_interval = 500 ms` and `lease_duration = 9 × heartbeat_interval = 4500 ms` (see §10), the leader is essentially always within an active lease in steady state. A short network blip costs the leader its fast-read privilege but not its leadership.
 
 ### 6.3 Clock-skew assumption
 
-[requirement.md §3](requirement.md#3-dependencies-and-assumptions) caps clock skew at `max_clock_skew = 100 ms` per heartbeat interval. The lease formula is:
+[requirement.md §3](requirement.md#3-dependencies-and-assumptions) caps clock skew at `max_clock_skew` (default `500 ms`, see §10) per heartbeat interval. The lease formula is:
 
 ```
   effective_lease = lease_duration - max_clock_skew
 ```
 
-Concretely with defaults: `900 ms - 100 ms = 800 ms` of "fast-read" coverage between successful heartbeat round-trips. If the round-trip exceeds 800 ms, the lease has *technically* expired and the leader downgrades to ReadIndex for the next linearizable read until the next successful heartbeat refreshes the lease.
+Concretely with defaults: `4500 ms - 500 ms = 4000 ms` of "fast-read" coverage between successful heartbeat round-trips. If the round-trip exceeds the effective lease, the lease has *technically* expired and the leader downgrades to ReadIndex for the next linearizable read until the next successful heartbeat refreshes the lease.
 
 ### 6.4 Why monotonic-only
 
@@ -312,12 +312,12 @@ If the clock-skew assumption is *violated*, lease-based reads can return stale d
 
 | Parameter | Default | Range | Notes |
 | --- | --- | --- | --- |
-| `heartbeat_interval` | 100 ms | 10 ms – 1 s | Should be ≪ `lease_duration` |
-| `lease_duration` | 900 ms | 100 ms – 30 s | Should be ≫ `heartbeat_interval` + `max_clock_skew` |
+| `heartbeat_interval` | 500 ms | 10 ms – 30 s | Should be ≪ `lease_duration` |
+| `lease_duration` | 4500 ms | 100 ms – 60 s | Should be ≫ `heartbeat_interval` + `max_clock_skew` (rule of thumb: `9 × heartbeat_interval`) |
 | `effective_lease` | derived | — | `= lease_duration - max_clock_skew` |
-| `max_clock_skew` | 100 ms | 1 ms – 1 s | Architectural bound from [requirement.md §3](requirement.md#3-dependencies-and-assumptions) |
-| `election_min` | 800 ms | ≥ 8 × `heartbeat_interval` | Avoid spurious elections |
-| `election_max` | 1500 ms | ≤ 30 s | Bounds time to elect after leader loss |
+| `max_clock_skew` | 500 ms | 1 ms – 5 s | Architectural bound from [requirement.md §3](requirement.md#3-dependencies-and-assumptions) |
+| `election_min` | 4000 ms | ≥ 8 × `heartbeat_interval` | Avoid spurious elections |
+| `election_max` | 8000 ms | ≤ 60 s | Bounds time to elect after leader loss |
 | `readindex_batch_window` | 1 ms | 0 – 100 ms | Latency vs network amortization |
 | `prevote_enabled` | true | bool | Reduces disruption from rejoining nodes |
 
@@ -325,3 +325,8 @@ Notes:
 
 - **PreVote** (Raft optimization, ON by default): a candidate first asks "would you vote for me?" without bumping the term. This avoids spurious term increments from a partitioned-and-rejoined node.
 - **Pre-emptive step-down on heartbeat loss** is governed by `lease_duration`, not `election_min`. A leader that loses contact with quorum gives up its lease at `lease_duration` and stops serving fast reads even before any follower starts an election.
+- **Default choice rationale.** The defaults above are tuned for general-purpose deployments (mix of single-DC and modest cross-AZ latency). They give ~5–8 s failover detection, which matches the operational expectations of most online KV workloads while keeping heartbeat chatter low. See [`plan.md`](../plan.md#6-decision-log) decision log for the analysis.
+- **Operational profiles:**
+  - *Low-latency single datacenter:* `heartbeat_interval = 100 ms`, `election_min/max = 800/1500 ms`, `lease_duration = 900 ms`, `max_clock_skew = 100 ms`. Sub-second failover; higher message rate.
+  - *Cross-region / WAN:* `heartbeat_interval = 3 s`, `election_min/max = 24/48 s`, `lease_duration = 27 s`. Matches CockroachDB-style geo-replicated tunings; tolerates wider RTT variance at the cost of failover latency.
+  - *Tests:* `PxElectionConfig::for_tests()` produces `heartbeat = 5 ms`, `election = 30–60 ms`, `lease = 25 ms` for use under `tokio::time::pause()`. Not exposed on `crowkv-server` CLI.

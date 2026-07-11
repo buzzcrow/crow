@@ -1,8 +1,9 @@
 import React, { useState, useMemo } from 'react';
-import { Search, Star, Clock, ChevronDown, ChevronRight, Server, Database, HardDrive, Users } from 'lucide-react';
+import { Search, Star, Clock, ChevronDown, ChevronRight, Server, Database, HardDrive, Users, Plus } from 'lucide-react';
 import { useViewMode } from '../contexts/ViewModeContext';
 import { useSelection } from '../contexts/SelectionContext';
 import { Tree, TreeNode } from '../components/Tree';
+import { Button } from '../components/ui/Button';
 import { ViewMode, Rack, StoreView } from '../types';
 
 interface SidebarProps {
@@ -16,9 +17,11 @@ interface SidebarProps {
   onNodeClick?: (node: TreeNode) => void;
   /** Callback when a context menu is invoked on a node */
   onNodeContextMenu?: (node: TreeNode, event: React.MouseEvent) => void;
+  /** Callback when add button is clicked */
+  onAdd?: () => void;
 }
 
-export function Sidebar({ racks = [], stores = [], loading, onNodeClick, onNodeContextMenu }: SidebarProps) {
+export function Sidebar({ racks = [], stores = [], loading, onNodeClick, onNodeContextMenu, onAdd }: SidebarProps) {
   const { viewMode } = useViewMode();
   const { favorites, recentItems, removeFromFavorites } = useSelection();
   const [filterQuery, setFilterQuery] = useState('');
@@ -31,35 +34,47 @@ export function Sidebar({ racks = [], stores = [], loading, onNodeClick, onNodeC
       // Build physical tree: Rack → Node → Server → Store → Group
       return racks.map(rack => ({
         id: `rack-${rack.id}`,
+        rawId: rack.id,
         label: rack.name || rack.id,
         type: 'Rack',
         icon: <Server className="tw-h-4 tw-w-4 tw-text-muted" />,
         health: 'Healthy', // TODO: Calculate aggregate health
-        children: rack.nodes?.map(nodeId => ({
-        id: `node-${nodeId}`,
-        label: nodeId,
-        type: 'Node',
-        icon: <HardDrive className="tw-h-4 tw-w-4 tw-text-muted" />,
-        health: 'Unknown' as const,
-        parentIds: { rackId: rack.id },
-        // TODO: Add server, stores and groups once we have the data
-      })),
+        // `rack.nodes` is `NodeId[]` at recursive=0 but switches to
+        // `NodeView[]` (object with `id`, `host`, `has_server`, …) at
+        // recursive>=1. Normalize to the id string before rendering —
+        // otherwise React error #31 fires when a `NodeView` ends up as
+        // a `label` (see doc/todo_ui2.md §5.6).
+        children: rack.nodes?.map((entry: any) => {
+          const nodeId: string = typeof entry === 'string' ? entry : entry.id;
+          return {
+            id: `node-${nodeId}`,
+            rawId: nodeId,
+            label: nodeId,
+            type: 'Node',
+            icon: <HardDrive className="tw-h-4 tw-w-4 tw-text-muted" />,
+            health: 'Unknown' as const,
+            parentIds: { rackId: rack.id },
+            // TODO: Add server, stores and groups once we have the data
+          };
+        }),
       }));
     } else {
       // Build logical tree: Store → Group → Replica
       return stores.map(store => ({
         id: `store-${store.store_id}`,
-        label: store.name || store.store_id,
+        rawId: String(store.store_id),
+        label: store.name || String(store.store_id),
         type: 'Store',
         icon: <Database className="tw-h-4 tw-w-4 tw-text-muted" />,
         health: 'Healthy', // TODO: Calculate aggregate health
         children: store.groups?.map(group => ({
           id: `group-${group.group_id}`,
-          label: group.group_id,
+          rawId: String(group.group_id),
+          label: String(group.group_id),
           type: 'Group',
           icon: <Users className="tw-h-4 tw-w-4 tw-text-muted" />,
           health: (group.health || 'Unknown') as 'Healthy' | 'Degraded' | 'Failed' | 'Unknown',
-          parentIds: { storeId: store.store_id },
+          parentIds: { store_id: String(store.store_id) },
           // TODO: Add replicas
         })),
       }));
@@ -234,6 +249,23 @@ export function Sidebar({ racks = [], stores = [], loading, onNodeClick, onNodeC
           <div className="tw-px-3 tw-py-4 tw-text-sm tw-text-muted tw-text-center">
             No recent items
           </div>
+        )}
+      </div>
+
+      {/* Tree view header */}
+      <div className="tw-flex tw-items-center tw-justify-between tw-px-3 tw-py-2 tw-border-b tw-border-border">
+        <h3 className="tw-text-xs tw-font-semibold tw-text-muted tw-uppercase tw-tracking-wider">
+          {viewMode === ViewMode.Physical ? 'Infrastructure' : 'Cluster'}
+        </h3>
+        {onAdd && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onAdd}
+            className="tw-h-7 tw-px-2"
+          >
+            <Plus className="tw-h-3.5 tw-w-3.5" />
+          </Button>
         )}
       </div>
 

@@ -119,10 +119,10 @@ async fn classic_prepare_and_accept_track_state() {
 
 #[tokio::test]
 async fn role_can_be_changed_for_tests() {
-    let mut node = PxLocalReplica::new(21, PxLocalReplicaRole::Follower);
+    let node = PxLocalReplica::new(21, PxLocalReplicaRole::Follower);
     assert!(!node.is_leader());
 
-    node.set_role(PxLocalReplicaRole::Leader);
+    node.become_leader();
     assert!(node.is_leader());
 }
 

@@ -6,7 +6,18 @@ import { useViewMode } from '../contexts/ViewModeContext';
 import { HealthBadge, RoleBadge } from './ui/Badge';
 
 export interface TreeNode {
+  /**
+   * Tree-unique identifier (e.g. `rack-r1`, `node-n1`). Used as the
+   * React key and for expand/collapse bookkeeping; NOT the backend id.
+   */
   id: string;
+  /**
+   * The unprefixed backend entity id (e.g. `r1`, `n1`, `7`). API
+   * handlers must use this — the prefixed `id` field will produce
+   * 404s like `node node-n1 not found`. Optional only for legacy
+   * favorite/recent entries built before this field existed.
+   */
+  rawId?: string;
   label: string;
   type: 'Rack' | 'Node' | 'Server' | 'Store' | 'Group' | 'Replica';
   icon?: React.ReactNode;

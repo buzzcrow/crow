@@ -1,12 +1,17 @@
 use crate::cluster::health::HealthReport;
-use crate::cluster::replica::{Replica, ReplicaClient};
+use crate::cluster::replica::{
+    HeartbeatReply, HeartbeatRequestPayload, PxReplicaError, Replica, ReplicaClient, StepDownReply, StepDownRequestPayload, VoteReply, VoteRequestPayload,
+};
 use crate::cluster::shutdown::ShutdownReport;
 use crate::cluster::snapshot::RemoteSnapshot;
 use crate::common::metrics::LayerMetrics;
 use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxLogEntryKind, PxPrepareReply};
 use crate::paxos::PxNodeId;
 use crate::rpc::px_service_client::PxServiceClient;
-use crate::rpc::{AcceptRequest, AcceptedValue, PrepareRequest};
+use crate::rpc::{
+    AcceptRequest, AcceptedValue, HeartbeatRequest as RpcHeartbeatRequest, PreVoteRequest as RpcPreVoteRequest, PrepareRequest, RequestVoteRequest as RpcRequestVoteRequest,
+    StepDownRequest as RpcStepDownRequest,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -43,13 +48,19 @@ impl Replica for PxRemoteReplica {
     }
 }
 
+fn status_to_err(status: &tonic::Status) -> PxReplicaError {
+    // Preserve the gRPC code in the message so logs / observability can still
+    // distinguish Unavailable / NotFound / Internal at the network boundary.
+    PxReplicaError::Internal(format!("grpc {}: {}", status.code(), status.message()))
+}
+
 impl ReplicaClient for PxRemoteReplica {
-    async fn send_prepare(&self, slot: u64, ballot: PxBallot, group_id: u64) -> Result<PxPrepareReply, tonic::Status> {
+    async fn send_prepare(&self, slot: u64, ballot: PxBallot, group_id: u64) -> Result<PxPrepareReply, PxReplicaError> {
         let mut client = match self.get_client().await {
             Ok(c) => c.clone(),
             Err(status) => {
                 self.metrics.record_err();
-                return Err(status);
+                return Err(status_to_err(&status));
             }
         };
         let started = Instant::now();
@@ -62,13 +73,16 @@ impl ReplicaClient for PxRemoteReplica {
                 request_id: 0,
                 request_create_ms: 0,
                 group_id,
+                // P1 M3 Step 3: term piggy-back; populated by Step 8 (proposer
+                // tags Prepares with the term it was admitted under).
+                term: 0,
             })
             .await
         {
             Ok(r) => r.into_inner(),
             Err(status) => {
                 self.metrics.record_err();
-                return Err(status);
+                return Err(status_to_err(&status));
             }
         };
         #[allow(clippy::cast_possible_truncation)]
@@ -87,12 +101,12 @@ impl ReplicaClient for PxRemoteReplica {
         }
     }
 
-    async fn send_accept(&self, entry: &PxLogEntry, group_id: u64) -> Result<PxAcceptReply, tonic::Status> {
+    async fn send_accept(&self, entry: &PxLogEntry, group_id: u64) -> Result<PxAcceptReply, PxReplicaError> {
         let mut client = match self.get_client().await {
             Ok(c) => c.clone(),
             Err(status) => {
                 self.metrics.record_err();
-                return Err(status);
+                return Err(status_to_err(&status));
             }
         };
         let started = Instant::now();
@@ -121,7 +135,7 @@ impl ReplicaClient for PxRemoteReplica {
             Ok(r) => r.into_inner(),
             Err(status) => {
                 self.metrics.record_err();
-                return Err(status);
+                return Err(status_to_err(&status));
             }
         };
         #[allow(clippy::cast_possible_truncation)]
@@ -138,6 +152,143 @@ impl ReplicaClient for PxRemoteReplica {
                 ballot: PxBallot::new(resp.round, resp.leader_id),
             })
         }
+    }
+
+    async fn send_pre_vote(&self, req: VoteRequestPayload, group_id: u64) -> Result<VoteReply, PxReplicaError> {
+        let mut client = self.get_client().await.map_err(|s| {
+            self.metrics.record_err();
+            status_to_err(&s)
+        })?.clone();
+        let started = Instant::now();
+        let resp = client
+            .pre_vote(RpcPreVoteRequest {
+                version: 1,
+                group_id,
+                term: req.term,
+                candidate_id: req.candidate_id,
+                last_chosen_slot: req.last_chosen_slot,
+                last_chosen_term: req.last_chosen_term,
+                request_id: 0,
+                request_create_ms: 0,
+            })
+            .await
+            .map_err(|s| {
+                self.metrics.record_err();
+                status_to_err(&s)
+            })?
+            .into_inner();
+        #[allow(clippy::cast_possible_truncation)]
+        self.metrics.record_ok(started.elapsed().as_millis() as u64);
+        Ok(VoteReply {
+            term: resp.term,
+            granted: resp.granted,
+            contiguous_chosen: resp.contiguous_chosen,
+            last_chosen_term: resp.last_chosen_term,
+            highest_seen_slot: resp.highest_seen_slot,
+        })
+    }
+
+    async fn send_request_vote(&self, req: VoteRequestPayload, group_id: u64) -> Result<VoteReply, PxReplicaError> {
+        let mut client = self.get_client().await.map_err(|s| {
+            self.metrics.record_err();
+            status_to_err(&s)
+        })?.clone();
+        let started = Instant::now();
+        let resp = client
+            .request_vote(RpcRequestVoteRequest {
+                version: 1,
+                group_id,
+                term: req.term,
+                candidate_id: req.candidate_id,
+                last_chosen_slot: req.last_chosen_slot,
+                last_chosen_term: req.last_chosen_term,
+                request_id: 0,
+                request_create_ms: 0,
+            })
+            .await
+            .map_err(|s| {
+                self.metrics.record_err();
+                status_to_err(&s)
+            })?
+            .into_inner();
+        #[allow(clippy::cast_possible_truncation)]
+        self.metrics.record_ok(started.elapsed().as_millis() as u64);
+        Ok(VoteReply {
+            term: resp.term,
+            granted: resp.granted,
+            contiguous_chosen: resp.contiguous_chosen,
+            last_chosen_term: resp.last_chosen_term,
+            highest_seen_slot: resp.highest_seen_slot,
+        })
+    }
+
+    async fn send_heartbeat(&self, req: HeartbeatRequestPayload, group_id: u64) -> Result<HeartbeatReply, PxReplicaError> {
+        let mut client = self.get_client().await.map_err(|s| {
+            self.metrics.record_err();
+            status_to_err(&s)
+        })?.clone();
+        let started = Instant::now();
+        let resp = client
+            .heartbeat(RpcHeartbeatRequest {
+                version: 1,
+                group_id,
+                term: req.term,
+                leader_id: req.leader_id,
+                prev_log_slot: req.prev_log_slot,
+                prev_log_term: req.prev_log_term,
+                committed_safe_slot: req.committed_safe_slot,
+                lease_grant_until_ms_mono: req.lease_grant_until_ms_mono,
+                t_send_ms_mono: req.t_send_ms_mono,
+                request_id: 0,
+                request_create_ms: 0,
+            })
+            .await
+            .map_err(|s| {
+                self.metrics.record_err();
+                status_to_err(&s)
+            })?
+            .into_inner();
+        #[allow(clippy::cast_possible_truncation)]
+        self.metrics.record_ok(started.elapsed().as_millis() as u64);
+        Ok(HeartbeatReply {
+            term: resp.term,
+            success: resp.success,
+            contiguous_chosen: resp.contiguous_chosen,
+            last_chosen_term: resp.last_chosen_term,
+            contiguous_applied: resp.contiguous_applied,
+            highest_seen_slot: resp.highest_seen_slot,
+        })
+    }
+
+    async fn send_step_down(&self, req: StepDownRequestPayload, group_id: u64) -> Result<StepDownReply, PxReplicaError> {
+        let mut client = self.get_client().await.map_err(|s| {
+            self.metrics.record_err();
+            status_to_err(&s)
+        })?.clone();
+        let started = Instant::now();
+        let resp = client
+            .step_down(RpcStepDownRequest {
+                version: 1,
+                group_id,
+                term: req.term,
+                target_leader_id: req.target_leader_id,
+                reason: req.reason.clone(),
+                request_id: 0,
+                request_create_ms: 0,
+            })
+            .await
+            .map_err(|s| {
+                self.metrics.record_err();
+                status_to_err(&s)
+            })?
+            .into_inner();
+        #[allow(clippy::cast_possible_truncation)]
+        self.metrics.record_ok(started.elapsed().as_millis() as u64);
+        Ok(StepDownReply {
+            accepted: resp.accepted,
+            current_term: resp.current_term,
+            current_leader_id: resp.current_leader_id,
+        })
     }
 }
 

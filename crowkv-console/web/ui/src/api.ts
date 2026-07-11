@@ -9,8 +9,23 @@ import type {
   StoreView,
   GroupView,
   ReplicaView,
-  SshCreds,
 } from './types';
+
+/**
+ * Flat shape accepted by `POST /api/nodes` (backend `NodeEntry` in
+ * `crowkv-console-shared::config`). The tagged `SshCreds` enum is a
+ * response-only shape; on the wire the create body uses these flat
+ * fields.
+ */
+export interface AddNodeRequest {
+  id: string;
+  rack_id: string;
+  host: string;
+  ssh_port?: number;
+  ssh_user?: string;
+  ssh_key?: string;
+  ssh_password?: string;
+}
 
 /**
  * Helper function to build query strings
@@ -195,12 +210,26 @@ async function fetchWithOptions(
 // ─────────────────────────────────────────────────────────────────────
 
 /**
- * List all racks with optional recursive depth
- * @param recursive How many levels of children to include: 0 = just racks, 1 = racks + nodes, etc.
+ * List all racks with optional recursive depth.
+ *
+ * @param recursive How many levels of children to include: 0 = just racks,
+ *   1 = racks + nodes, etc.
+ *
+ * Backend protocol quirk: at `recursive=0` (or absent) the backend returns
+ * a flat `Vec<RackEntry>`; at `recursive>=1` it switches to an envelope
+ * `{ items, truncated_at }` (`crowkv-console/web/src/lifecycle.rs`
+ * `http_list_racks`). We normalize both shapes back to `Rack[]` so every
+ * caller — in particular `usePhysicalTree` — sees the rack a user just
+ * created and renders it in the sidebar.
  */
 export async function listRacks(recursive?: number, options?: RequestOptions): Promise<Rack[]> {
   const url = `/api/racks${qs({ recursive })}`;
-  return jsonOrThrow(await fetchWithOptions(url, { ...options, method: 'GET' }));
+  const body = await jsonOrThrow<unknown>(await fetchWithOptions(url, { ...options, method: 'GET' }));
+  if (Array.isArray(body)) return body as Rack[];
+  if (body && typeof body === 'object' && Array.isArray((body as { items?: unknown }).items)) {
+    return (body as { items: Rack[] }).items;
+  }
+  return [];
 }
 
 /**
@@ -253,10 +282,15 @@ export async function getNode(nodeId: string, recursive?: number, options?: Requ
 }
 
 /**
- * Create a new node
+ * Create a new node. Matches backend `NodeEntry` shape exactly: `ssh_user=""`
+ * (default) selects the local-fork lifecycle used by integration tests.
  */
-export async function addNode(req: { id: string; rack_id: string; host: string; ssh: SshCreds }, options?: RequestOptions): Promise<Node> {
-  const body = JSON.stringify(req);
+export async function addNode(req: AddNodeRequest, options?: RequestOptions): Promise<Node> {
+  const body = JSON.stringify({
+    ssh_port: 22,
+    ssh_user: '',
+    ...req,
+  });
   const url = `/api/nodes`;
   return jsonOrThrow(
     await fetchWithOptions(url, {
@@ -331,6 +365,20 @@ export async function startServer(nodeId: string, options?: RequestOptions): Pro
  */
 export async function stopServer(nodeId: string, options?: RequestOptions): Promise<ServerProcess> {
   const url = `/api/nodes/${encodeURIComponent(nodeId)}/server/stop`;
+  return jsonOrThrow(
+    await fetchWithOptions(url, {
+      ...options,
+      method: 'POST',
+      skipDeduplication: true,
+    })
+  );
+}
+
+/**
+ * Restart a previously deployed server on a node.
+ */
+export async function restartServer(nodeId: string, options?: RequestOptions): Promise<ServerProcess> {
+  const url = `/api/nodes/${encodeURIComponent(nodeId)}/server/restart`;
   return jsonOrThrow(
     await fetchWithOptions(url, {
       ...options,
@@ -426,13 +474,32 @@ export async function getStore(storeId: string, recursive?: number, options?: Re
 }
 
 /**
- * Create a new cluster-wide store
+ * Body accepted by `POST /api/stores` (`crowkv_web::mgmt::CreateStoreBody`).
+ * `store_id`, `group_id` and `replica_id` are u64 on the wire; the SPA
+ * keeps them as strings of decimal digits to round-trip cleanly through
+ * URL params and React state.
+ */
+export interface AddStoreRequest {
+  store_id: number | string;
+  group_id: number | string;
+  replica_id: number | string;
+  nodes: string[];
+}
+
+/**
+ * Create a new cluster-wide store. The target nodes must already have a
+ * running `crowkv-server` (deployed via `deployServer`).
  */
 export async function addStore(
-  req: { id: string; name?: string; node_ids: string[] },
+  req: AddStoreRequest,
   options?: RequestOptions
 ): Promise<StoreView> {
-  const body = JSON.stringify(req);
+  const body = JSON.stringify({
+    store_id: Number(req.store_id),
+    group_id: Number(req.group_id),
+    replica_id: Number(req.replica_id),
+    nodes: req.nodes,
+  });
   const url = `/api/stores`;
   return jsonOrThrow(
     await fetchWithOptions(url, {
@@ -470,14 +537,28 @@ export async function getGroup(storeId: string, groupId: string, recursive?: num
 }
 
 /**
- * Create a new group in a store
+ * Body accepted by `POST /api/stores/:sid/groups` (`CreateGroupBody`).
+ * One replica per listed node is created, starting from `replica_id`.
+ */
+export interface AddGroupRequest {
+  group_id: number | string;
+  replica_id: number | string;
+  nodes: string[];
+}
+
+/**
+ * Create a new group in a store.
  */
 export async function addGroup(
   storeId: string,
-  req: { id: string; replica_count: number; node_ids?: string[] },
+  req: AddGroupRequest,
   options?: RequestOptions
 ): Promise<GroupView> {
-  const body = JSON.stringify(req);
+  const body = JSON.stringify({
+    group_id: Number(req.group_id),
+    replica_id: Number(req.replica_id),
+    nodes: req.nodes,
+  });
   const url = `/api/stores/${encodeURIComponent(storeId)}/groups`;
   return jsonOrThrow(
     await fetchWithOptions(url, {
@@ -507,15 +588,30 @@ export async function listReplicas(storeId: string, groupId: string, options?: R
 }
 
 /**
- * Add a replica to a group
+ * Body accepted by `POST /api/stores/:sid/groups/:gid/replicas`
+ * (`AddReplicaBody`). `replica_id` is optional and assigned by the
+ * backend (`max(existing) + 1`) when omitted.
+ */
+export interface AddReplicaRequest {
+  node_id: string;
+  replica_id?: number | string;
+}
+
+/**
+ * Add a replica to a group.
  */
 export async function addReplica(
   storeId: string,
   groupId: string,
-  req: { node_id: string; replica_id?: string },
+  req: AddReplicaRequest,
   options?: RequestOptions
 ): Promise<ReplicaView> {
-  const body = JSON.stringify(req);
+  const body = JSON.stringify({
+    node_id: req.node_id,
+    ...(req.replica_id !== undefined && req.replica_id !== ''
+      ? { replica_id: Number(req.replica_id) }
+      : {}),
+  });
   const url = `/api/stores/${encodeURIComponent(storeId)}/groups/${encodeURIComponent(groupId)}/replicas`;
   return jsonOrThrow(
     await fetchWithOptions(url, {

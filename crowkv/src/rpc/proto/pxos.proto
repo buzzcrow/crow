@@ -1,8 +1,8 @@
-// Minimal classic-Paxos message set for P1 M2.
-// Wire shapes frozen at end of P1 M2; P4 extends with heartbeat, vote,
-// chosen, snapshot, and client messages using append-only field numbers.
+// Classic-Paxos + leader-election message set (P1 M2 + P1 M3).
+// P4 will extend further with snapshot and client messages.
 //
-// Field-number rules: use append-only numbering, never reuse numbers.
+// Field-number rules: append-only within a message. Tags reserved for
+// historical fields are not reused.
 
 syntax = "proto3";
 
@@ -16,6 +16,8 @@ message PrepareRequest {
   uint64 request_id = 5;
   uint64 request_create_ms = 6;
   uint64 group_id = 7;
+  // P1 M3: leader's current term for the two-fence rule.
+  uint64 term = 8;
 }
 
 message AcceptedValue {
@@ -37,6 +39,12 @@ message PromiseResponse {
   uint64 rejected_leader_id = 8;
   uint64 request_id = 9;
   uint64 request_create_ms = 10;
+  // P1 M3: responder's current term so the proposer can detect a stale
+  // leader (term < responder.current_term -> step down with TermStale).
+  uint64 term = 11;
+  // P1 M3: responder echoes back TermStale when the prepare's term is lower
+  // than its own. Carries `term` as the new term to adopt.
+  bool term_stale = 12;
 }
 
 message AcceptRequest {
@@ -63,9 +71,163 @@ message AcceptedResponse {
   uint64 rejected_leader_id = 7;
   uint64 request_id = 8;
   uint64 request_create_ms = 9;
+  // P1 M3: responder's current term.
+  uint64 term = 10;
+  // P1 M3: term-stale rejection (see PromiseResponse.term_stale).
+  bool term_stale = 11;
+}
+
+// ---------------------------------------------------------------------------
+// P1 M3: leader election
+// ---------------------------------------------------------------------------
+
+// PreVote round (Raft-style). PreCandidate sends proposed_term =
+// current_term + 1 without bumping its own term; peers reply granted=true if
+// they would vote for it in proposed_term (log-up-to-date check + vote
+// lockout window). This avoids disruption from partitioned nodes whose term
+// would otherwise leap past the cluster's.
+message PreVoteRequest {
+  uint32 version = 1;
+  uint64 group_id = 2;
+  uint64 term = 3;            // proposed term (current_term + 1)
+  uint64 candidate_id = 4;
+  uint64 last_chosen_slot = 5;
+  uint64 last_chosen_term = 6;
+  uint64 request_id = 7;
+  uint64 request_create_ms = 8;
+}
+
+message PreVoteResponse {
+  uint32 version = 1;
+  uint64 group_id = 2;
+  uint64 term = 3;            // responder's current_term (for stale detect)
+  bool   granted = 4;
+  // Learner frontier piggy-back for the candidate's bulk-Phase-1 ceiling.
+  uint64 contiguous_chosen = 5;
+  uint64 last_chosen_term = 6;
+  uint64 highest_seen_slot = 7;
+  uint64 request_id = 8;
+  uint64 request_create_ms = 9;
+}
+
+// Real RequestVote round (same shape as PreVote; consumes the vote slot).
+message RequestVoteRequest {
+  uint32 version = 1;
+  uint64 group_id = 2;
+  uint64 term = 3;            // term that won the prevote quorum
+  uint64 candidate_id = 4;
+  uint64 last_chosen_slot = 5;
+  uint64 last_chosen_term = 6;
+  uint64 request_id = 7;
+  uint64 request_create_ms = 8;
+}
+
+message RequestVoteResponse {
+  uint32 version = 1;
+  uint64 group_id = 2;
+  uint64 term = 3;
+  bool   granted = 4;
+  uint64 contiguous_chosen = 5;
+  uint64 last_chosen_term = 6;
+  uint64 highest_seen_slot = 7;
+  uint64 request_id = 8;
+  uint64 request_create_ms = 9;
+}
+
+// Heartbeat (also extends the follower's election deadline and vote-lockout
+// window). `lease_grant_until_ms_mono` and `t_send_ms_mono` are the leader's
+// monotonic-clock timestamps; followers do not treat them as wall-clock.
+message HeartbeatRequest {
+  uint32 version = 1;
+  uint64 group_id = 2;
+  uint64 term = 3;
+  uint64 leader_id = 4;
+  uint64 prev_log_slot = 5;
+  uint64 prev_log_term = 6;
+  uint64 committed_safe_slot = 7;
+  uint64 lease_grant_until_ms_mono = 8;
+  uint64 t_send_ms_mono = 9;
+  uint64 request_id = 10;
+  uint64 request_create_ms = 11;
+}
+
+message HeartbeatResponse {
+  uint32 version = 1;
+  uint64 group_id = 2;
+  uint64 term = 3;
+  bool   success = 4;
+  uint64 contiguous_chosen = 5;
+  uint64 last_chosen_term = 6;
+  uint64 contiguous_applied = 7;
+  uint64 highest_seen_slot = 8;
+  uint64 request_id = 9;
+  uint64 request_create_ms = 10;
+}
+
+// Admin step-down primitive (decision §7.1: strict fence).
+//
+// Accept iff is_leader && self.id == target_leader_id && term == current_term.
+// On reject, response echoes current_term and current_leader_id so the admin
+// client can reissue against the right replica.
+message StepDownRequest {
+  uint32 version = 1;
+  uint64 group_id = 2;
+  uint64 term = 3;
+  uint64 target_leader_id = 4;
+  string reason = 5;
+  uint64 request_id = 6;
+  uint64 request_create_ms = 7;
+}
+
+message StepDownResponse {
+  uint32 version = 1;
+  uint64 group_id = 2;
+  bool   accepted = 3;
+  uint64 current_term = 4;
+  uint64 current_leader_id = 5;
+  uint64 request_id = 6;
+  uint64 request_create_ms = 7;
+}
+
+// Per-peer bidi PeerStream (Step 10). Multiplexes Accept + Heartbeat + Chosen
+// notifications on one stream per (group_id, peer_id) pair so heartbeats
+// cannot reorder ahead of an Accept they logically follow. Prepare /
+// RequestVote / PreVote / StepDown remain unary RPCs.
+message ChosenNotification {
+  uint32 version = 1;
+  uint64 group_id = 2;
+  uint64 slot = 3;
+  uint64 term = 4;
+  uint64 leader_id = 5;
+  uint64 request_id = 6;
+  uint64 request_create_ms = 7;
+}
+
+message PeerStreamRequest {
+  oneof frame {
+    AcceptRequest      accept    = 1;
+    HeartbeatRequest   heartbeat = 2;
+    ChosenNotification chosen    = 3;
+  }
+}
+
+message PeerStreamResponse {
+  oneof frame {
+    AcceptedResponse  accepted  = 1;
+    HeartbeatResponse heartbeat = 2;
+  }
 }
 
 service PxService {
   rpc Prepare(PrepareRequest) returns (PromiseResponse);
   rpc Accept(AcceptRequest) returns (AcceptedResponse);
+
+  // P1 M3 leader election.
+  rpc PreVote(PreVoteRequest) returns (PreVoteResponse);
+  rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc StepDown(StepDownRequest) returns (StepDownResponse);
+
+  // P1 M3 per-peer bidi stream (steady-state Accept/Heartbeat/Chosen).
+  rpc PeerStream(stream PeerStreamRequest) returns (stream PeerStreamResponse);
 }

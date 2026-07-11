@@ -1,6 +1,6 @@
 //! `PxRemoteReplica` connection failure and error handling tests.
 
-use crowkv::cluster::replica::ReplicaClient;
+use crowkv::cluster::replica::{PxReplicaError, ReplicaClient};
 use crowkv::cluster::PxRemoteReplica;
 use crowkv::paxos::roles::PxBallot;
 use std::sync::Arc;
@@ -13,8 +13,13 @@ async fn send_prepare_to_unreachable_endpoint_returns_error() {
 
     let result = remote.send_prepare(1, ballot, 1).await;
     assert!(result.is_err(), "should fail when remote is unreachable");
-    let status = result.unwrap_err();
-    assert_eq!(status.code(), tonic::Code::Unavailable, "error code should be Unavailable");
+    let err = result.unwrap_err();
+    match &err {
+        PxReplicaError::Internal(msg) => {
+            assert!(msg.to_lowercase().contains("unavailable"), "expected Unavailable in error: {msg}");
+        }
+        other => panic!("unexpected error variant: {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -32,8 +37,13 @@ async fn send_accept_to_unreachable_endpoint_returns_error() {
 
     let result = remote.send_accept(&entry, 1).await;
     assert!(result.is_err(), "should fail when remote is unreachable");
-    let status = result.unwrap_err();
-    assert_eq!(status.code(), tonic::Code::Unavailable);
+    let err = result.unwrap_err();
+    match &err {
+        PxReplicaError::Internal(msg) => {
+            assert!(msg.to_lowercase().contains("unavailable"), "expected Unavailable in error: {msg}");
+        }
+        other => panic!("unexpected error variant: {other:?}"),
+    }
 }
 
 #[tokio::test]

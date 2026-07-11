@@ -114,7 +114,7 @@ async fn start_cluster_inner(ids: &[u64], leader_id: u64, force_classic: bool) -
         let leader_id = group.leader_id;
         let force_classic = group.force_classic();
         let lr = group.local_replica();
-        let local_replica = PxLocalReplica::new(lr.id, lr.role);
+        let local_replica = PxLocalReplica::new(lr.id, lr.role());
 
         // Reconstruct remote replicas with updated endpoints
         let my_id = group.local_replica().id;

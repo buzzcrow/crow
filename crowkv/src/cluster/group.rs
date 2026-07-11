@@ -497,7 +497,7 @@ impl PxGroup {
                 round: 0,
                 leader_id: self.local_replica.id,
             },
-            term: 0,
+            term: self.local_replica.current_term_snapshot(),
             kind: PxLogEntryKind::Write,
             payload: Arc::new(payload),
             client_id,

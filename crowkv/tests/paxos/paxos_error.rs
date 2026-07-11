@@ -89,6 +89,7 @@ async fn prepare_rejection_blocks_low_ballot_until_retry_uses_higher_ballot() {
                 request_id: 0,
                 request_create_ms: 0,
                 group_id: 1,
+                term: 0,
             })
             .await
             .expect("prepare request")

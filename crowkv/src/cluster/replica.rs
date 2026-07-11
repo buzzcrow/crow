@@ -4,8 +4,96 @@
 //! - `Replica`: Metadata interface (id, endpoint, voting)
 //! - `ReplicaHandler`: Server-side handlers (local replicas)
 //! - `ReplicaClient`: Client-side senders (remote replicas)
+//!
+//! Both handler/client traits are **transport-neutral**: errors flow through
+//! [`PxReplicaError`], an in-process enum. The gRPC adapter
+//! (`rpc::px_service`) maps both directions across the network boundary.
+//!
+//! Key work: error taxonomy ([`PxReplicaError`]), election handler methods
+//! (`on_pre_vote` / `on_request_vote` / `on_heartbeat` / `on_step_down`),
+//! matching client senders.
 
 use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
+use crate::paxos::{PxGroupId, PxNodeId, PxTerm};
+use crate::paxos::roles::SlotIndex;
+
+/// Transport-neutral replica error.
+///
+/// All [`ReplicaHandler`] and [`ReplicaClient`] methods return this. The gRPC
+/// adapter (`crate::rpc::px_service`) maps to/from `tonic::Status` at the
+/// network boundary so `crowkv` library code never names `tonic::Status`
+/// outside of `rpc/`.
+#[derive(Debug, thiserror::Error)]
+pub enum PxReplicaError {
+    #[error("group {0} not found on this replica")]
+    GroupNotFound(PxGroupId),
+    #[error("replica is shutting down")]
+    ShuttingDown,
+    #[error("internal invariant violation: {0}")]
+    Internal(String),
+}
+
+/// Information returned by a `PreVote` / `RequestVote` reply.
+///
+/// Carries the responder's term plus the learner-frontier triple used by the
+/// candidate's bulk-Phase-1 floor / ceiling computation (Step 7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VoteReply {
+    pub term: PxTerm,
+    pub granted: bool,
+    pub contiguous_chosen: SlotIndex,
+    pub last_chosen_term: PxTerm,
+    pub highest_seen_slot: SlotIndex,
+}
+
+/// `Heartbeat` request payload from the leader.
+#[derive(Clone, Copy, Debug)]
+pub struct HeartbeatRequestPayload {
+    pub term: PxTerm,
+    pub leader_id: PxNodeId,
+    pub prev_log_slot: SlotIndex,
+    pub prev_log_term: PxTerm,
+    pub committed_safe_slot: SlotIndex,
+    pub lease_grant_until_ms_mono: u64,
+    pub t_send_ms_mono: u64,
+}
+
+/// `Heartbeat` reply from a follower.
+#[derive(Clone, Copy, Debug)]
+pub struct HeartbeatReply {
+    pub term: PxTerm,
+    pub success: bool,
+    pub contiguous_chosen: SlotIndex,
+    pub last_chosen_term: PxTerm,
+    pub contiguous_applied: SlotIndex,
+    pub highest_seen_slot: SlotIndex,
+}
+
+/// Inputs for the `RequestVote` / `PreVote` decision.
+#[derive(Clone, Copy, Debug)]
+pub struct VoteRequestPayload {
+    pub term: PxTerm,
+    pub candidate_id: PxNodeId,
+    pub last_chosen_slot: SlotIndex,
+    pub last_chosen_term: PxTerm,
+}
+
+/// Admin step-down request payload (strict-fence policy — see
+/// `doc/todo_leader.md` §7.1).
+#[derive(Clone, Debug)]
+pub struct StepDownRequestPayload {
+    pub term: PxTerm,
+    pub target_leader_id: PxNodeId,
+    pub reason: String,
+}
+
+/// Admin step-down reply.
+#[derive(Clone, Copy, Debug)]
+pub struct StepDownReply {
+    pub accepted: bool,
+    pub current_term: PxTerm,
+    pub current_leader_id: PxNodeId,
+}
 
 /// Common trait for replica metadata.
 ///
@@ -25,24 +113,44 @@ pub trait Replica {
 
 /// Server-side handler trait for local replicas.
 ///
-/// This trait defines the handlers that process incoming Paxos requests.
+/// All errors are transport-neutral ([`PxReplicaError`]); the gRPC adapter
+/// translates to `tonic::Status` only at the network boundary.
 #[allow(async_fn_in_trait)]
 pub trait ReplicaHandler: Replica {
     /// Phase-1 `Prepare` handler.
-    async fn on_prepare(&self, slot: u64, ballot: PxBallot, group_id: u64) -> Result<PxPrepareReply, tonic::Status>;
+    async fn on_prepare(&self, slot: u64, ballot: PxBallot, group_id: u64) -> Result<PxPrepareReply, PxReplicaError>;
 
     /// Phase-2 `Accept` handler.
-    async fn on_accept(&self, entry: PxLogEntry, group_id: u64) -> Result<PxAcceptReply, tonic::Status>;
+    async fn on_accept(&self, entry: PxLogEntry, group_id: u64) -> Result<PxAcceptReply, PxReplicaError>;
+
+    /// `PreVote` handler. No state mutation; returns the vote decision plus the
+    /// learner-frontier triple for the candidate's bulk-Phase-1 calculation.
+    async fn on_pre_vote(&self, req: VoteRequestPayload, group_id: u64) -> Result<VoteReply, PxReplicaError>;
+
+    /// `RequestVote` handler. State-mutating: on grant, persists `voted_for`
+    /// and bumps `current_term` if higher.
+    async fn on_request_vote(&self, req: VoteRequestPayload, group_id: u64) -> Result<VoteReply, PxReplicaError>;
+
+    /// `Heartbeat` handler. Bumps `vote_lockout_until`, adopts a higher term
+    /// observed in the request, records the current leader id, and resets
+    /// the follower's election deadline (driver-managed; see Step 9).
+    async fn on_heartbeat(&self, req: HeartbeatRequestPayload, group_id: u64) -> Result<HeartbeatReply, PxReplicaError>;
+
+    /// `StepDown` handler. Strict fence per §7.1.
+    async fn on_step_down(&self, req: StepDownRequestPayload, group_id: u64) -> Result<StepDownReply, PxReplicaError>;
 }
 
 /// Client-side sender trait for remote replicas.
 ///
-/// This trait defines methods for sending Paxos requests to remote nodes.
+/// All errors are transport-neutral ([`PxReplicaError`]); transport-level gRPC
+/// failures fold into [`PxReplicaError::Internal`] inside the gRPC client
+/// adapter.
 #[allow(async_fn_in_trait)]
 pub trait ReplicaClient: Replica {
-    /// Send a Prepare request to a remote replica.
-    async fn send_prepare(&self, slot: u64, ballot: PxBallot, group_id: u64) -> Result<PxPrepareReply, tonic::Status>;
-
-    /// Send an Accept request to a remote replica.
-    async fn send_accept(&self, entry: &PxLogEntry, group_id: u64) -> Result<PxAcceptReply, tonic::Status>;
+    async fn send_prepare(&self, slot: u64, ballot: PxBallot, group_id: u64) -> Result<PxPrepareReply, PxReplicaError>;
+    async fn send_accept(&self, entry: &PxLogEntry, group_id: u64) -> Result<PxAcceptReply, PxReplicaError>;
+    async fn send_pre_vote(&self, req: VoteRequestPayload, group_id: u64) -> Result<VoteReply, PxReplicaError>;
+    async fn send_request_vote(&self, req: VoteRequestPayload, group_id: u64) -> Result<VoteReply, PxReplicaError>;
+    async fn send_heartbeat(&self, req: HeartbeatRequestPayload, group_id: u64) -> Result<HeartbeatReply, PxReplicaError>;
+    async fn send_step_down(&self, req: StepDownRequestPayload, group_id: u64) -> Result<StepDownReply, PxReplicaError>;
 }

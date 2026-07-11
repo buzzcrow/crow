@@ -4,16 +4,33 @@
 //! converts between protobuf messages and the in-memory Paxos types,
 //! then forwards to the node so that all real logic lives in one place.
 
+use std::pin::Pin;
 use std::sync::Arc;
-use tonic::{Request, Response, Status};
+use tokio_stream::Stream;
+use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, warn};
 
 use crate::cluster::px_kv_store::PxKvStore;
+use crate::cluster::replica::{HeartbeatRequestPayload, PxReplicaError, ReplicaHandler, StepDownRequestPayload, VoteRequestPayload};
 use crate::common::optional_u64;
 use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxLogEntryKind, PxPrepareReply};
 
 use crate::rpc::px_service_server::PxService;
-use crate::rpc::{AcceptRequest, AcceptedResponse, AcceptedValue, PrepareRequest, PromiseResponse};
+use crate::rpc::{
+    AcceptRequest, AcceptedResponse, AcceptedValue, HeartbeatRequest, HeartbeatResponse, PeerStreamRequest, PeerStreamResponse, PreVoteRequest, PreVoteResponse, PrepareRequest, PromiseResponse,
+    RequestVoteRequest, RequestVoteResponse, StepDownRequest, StepDownResponse,
+};
+
+/// gRPC adapter for the in-process [`PxReplicaError`] enum.
+impl From<PxReplicaError> for Status {
+    fn from(e: PxReplicaError) -> Self {
+        match &e {
+            PxReplicaError::GroupNotFound(_) => Status::not_found(e.to_string()),
+            PxReplicaError::ShuttingDown => Status::unavailable(e.to_string()),
+            PxReplicaError::Internal(_) => Status::internal(e.to_string()),
+        }
+    }
+}
 
 /// gRPC service wrapper that delegates `Prepare`/`Accept` to `PxLocalReplica`.
 #[derive(Clone)]
@@ -46,7 +63,7 @@ impl PxService for PxReplicaService {
         };
         let group = self.store.get_group(req.group_id).ok_or_else(|| Status::not_found("px group not found"))?;
         let replica = group.local_replica();
-        let reply = replica.on_prepare(req.slot, ballot).await;
+        let reply = <crate::cluster::local_replica::PxLocalReplica as ReplicaHandler>::on_prepare(replica, req.slot, ballot, req.group_id).await?;
 
         let response = match reply {
             PxPrepareReply::Promised { slot, accepted } => PromiseResponse {
@@ -60,6 +77,9 @@ impl PxService for PxReplicaService {
                 rejected_leader_id: 0,
                 request_id: req.request_id,
                 request_create_ms: req.request_create_ms,
+                // Step 3: term-stale machinery is wired in Step 8.
+                term: replica.current_term_snapshot(),
+                term_stale: false,
             },
             PxPrepareReply::Rejected { slot, current_promised } => {
                 warn!(
@@ -82,6 +102,8 @@ impl PxService for PxReplicaService {
                     rejected_leader_id: current_promised.leader_id,
                     request_id: req.request_id,
                     request_create_ms: req.request_create_ms,
+                    term: replica.current_term_snapshot(),
+                    term_stale: false,
                 }
             }
         };
@@ -125,7 +147,7 @@ impl PxService for PxReplicaService {
 
         let group = self.store.get_group(req.group_id).ok_or_else(|| Status::not_found("px group not found"))?;
         let replica = group.local_replica();
-        let reply = replica.on_accept(entry.clone()).await;
+        let reply = <crate::cluster::local_replica::PxLocalReplica as ReplicaHandler>::on_accept(replica, entry.clone(), req.group_id).await?;
         if matches!(reply, PxAcceptReply::Accepted { .. }) {
             replica.learn(&entry);
         }
@@ -156,9 +178,123 @@ impl PxService for PxReplicaService {
             rejected_leader_id,
             request_id: req.request_id,
             request_create_ms: req.request_create_ms,
+            // Step 3: term-stale machinery is wired in Step 8.
+            term: replica.current_term_snapshot(),
+            term_stale: false,
         };
 
         Ok(Response::new(response))
+    }
+
+    // ---------------- P1 M3 leader-election stubs ----------------
+    //
+    // Full handlers land in Steps 4 / 8 / 9. Until then these reject with
+    // Unimplemented so callers see a clear gap and tests cannot accidentally
+    // depend on partial behavior.
+
+    async fn pre_vote(&self, request: Request<PreVoteRequest>) -> Result<Response<PreVoteResponse>, Status> {
+        let req = request.into_inner();
+        let group = self.store.get_group(req.group_id).ok_or_else(|| Status::not_found("px group not found"))?;
+        let replica = group.local_replica();
+        let payload = VoteRequestPayload {
+            term: req.term,
+            candidate_id: req.candidate_id,
+            last_chosen_slot: req.last_chosen_slot,
+            last_chosen_term: req.last_chosen_term,
+        };
+        let reply = <crate::cluster::local_replica::PxLocalReplica as ReplicaHandler>::on_pre_vote(replica, payload, req.group_id).await?;
+        Ok(Response::new(PreVoteResponse {
+            version: 1,
+            group_id: req.group_id,
+            term: reply.term,
+            granted: reply.granted,
+            contiguous_chosen: reply.contiguous_chosen,
+            last_chosen_term: reply.last_chosen_term,
+            highest_seen_slot: reply.highest_seen_slot,
+            request_id: req.request_id,
+            request_create_ms: req.request_create_ms,
+        }))
+    }
+
+    async fn request_vote(&self, request: Request<RequestVoteRequest>) -> Result<Response<RequestVoteResponse>, Status> {
+        let req = request.into_inner();
+        let group = self.store.get_group(req.group_id).ok_or_else(|| Status::not_found("px group not found"))?;
+        let replica = group.local_replica();
+        let payload = VoteRequestPayload {
+            term: req.term,
+            candidate_id: req.candidate_id,
+            last_chosen_slot: req.last_chosen_slot,
+            last_chosen_term: req.last_chosen_term,
+        };
+        let reply = <crate::cluster::local_replica::PxLocalReplica as ReplicaHandler>::on_request_vote(replica, payload, req.group_id).await?;
+        Ok(Response::new(RequestVoteResponse {
+            version: 1,
+            group_id: req.group_id,
+            term: reply.term,
+            granted: reply.granted,
+            contiguous_chosen: reply.contiguous_chosen,
+            last_chosen_term: reply.last_chosen_term,
+            highest_seen_slot: reply.highest_seen_slot,
+            request_id: req.request_id,
+            request_create_ms: req.request_create_ms,
+        }))
+    }
+
+    async fn heartbeat(&self, request: Request<HeartbeatRequest>) -> Result<Response<HeartbeatResponse>, Status> {
+        let req = request.into_inner();
+        let group = self.store.get_group(req.group_id).ok_or_else(|| Status::not_found("px group not found"))?;
+        let replica = group.local_replica();
+        let payload = HeartbeatRequestPayload {
+            term: req.term,
+            leader_id: req.leader_id,
+            prev_log_slot: req.prev_log_slot,
+            prev_log_term: req.prev_log_term,
+            committed_safe_slot: req.committed_safe_slot,
+            lease_grant_until_ms_mono: req.lease_grant_until_ms_mono,
+            t_send_ms_mono: req.t_send_ms_mono,
+        };
+        let reply = <crate::cluster::local_replica::PxLocalReplica as ReplicaHandler>::on_heartbeat(replica, payload, req.group_id).await?;
+        Ok(Response::new(HeartbeatResponse {
+            version: 1,
+            group_id: req.group_id,
+            term: reply.term,
+            success: reply.success,
+            contiguous_chosen: reply.contiguous_chosen,
+            last_chosen_term: reply.last_chosen_term,
+            contiguous_applied: reply.contiguous_applied,
+            highest_seen_slot: reply.highest_seen_slot,
+            request_id: req.request_id,
+            request_create_ms: req.request_create_ms,
+        }))
+    }
+
+    async fn step_down(&self, request: Request<StepDownRequest>) -> Result<Response<StepDownResponse>, Status> {
+        let req = request.into_inner();
+        let group = self.store.get_group(req.group_id).ok_or_else(|| Status::not_found("px group not found"))?;
+        let replica = group.local_replica();
+        let payload = StepDownRequestPayload {
+            term: req.term,
+            target_leader_id: req.target_leader_id,
+            reason: req.reason,
+        };
+        let reply = <crate::cluster::local_replica::PxLocalReplica as ReplicaHandler>::on_step_down(replica, payload, req.group_id).await?;
+        Ok(Response::new(StepDownResponse {
+            version: 1,
+            group_id: req.group_id,
+            accepted: reply.accepted,
+            current_term: reply.current_term,
+            current_leader_id: reply.current_leader_id,
+            request_id: req.request_id,
+            request_create_ms: req.request_create_ms,
+        }))
+    }
+
+    type PeerStreamStream = Pin<Box<dyn Stream<Item = Result<PeerStreamResponse, Status>> + Send + 'static>>;
+
+    async fn peer_stream(&self, _request: Request<Streaming<PeerStreamRequest>>) -> Result<Response<Self::PeerStreamStream>, Status> {
+        // Bidi PeerStream lands in P1 M3 Step 10; until then the steady-state
+        // path falls back to unary Accept / Heartbeat RPCs.
+        Err(Status::unimplemented("PeerStream bidi handler lands in P1 M3 Step 10"))
     }
 }
 

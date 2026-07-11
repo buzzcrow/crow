@@ -12,7 +12,7 @@
 use crate::paxos::roles::{Acceptor, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply, SlotIndex};
 use crate::paxos::slot_list::PxSlotList;
 use crate::paxos::slot_node::{get_or_prepare_slot, PxSlotNode};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, PartialEq, Eq)]
 enum PxAcceptResult {
@@ -23,12 +23,33 @@ enum PxAcceptResult {
 #[derive(Default)]
 pub struct PxAcceptor {
     slot_list: PxSlotList<PxSlotNode>,
+    /// Highest slot index ever opened on this acceptor via `prepare` or
+    /// `accept`. Used as the bulk-Phase-1 ceiling input (Step 7) so a new
+    /// leader can re-Prepare every slot a previous leader may have touched
+    /// here, even ones whose values were never chosen.
+    highest_seen_slot: AtomicU64,
 }
 
 impl PxAcceptor {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Highest slot ever opened (monotonic).
+    #[must_use]
+    pub fn highest_seen_slot(&self) -> SlotIndex {
+        self.highest_seen_slot.load(Ordering::Acquire)
+    }
+
+    fn bump_highest_seen(&self, slot: SlotIndex) {
+        let mut prev = self.highest_seen_slot.load(Ordering::Relaxed);
+        while slot > prev {
+            match self.highest_seen_slot.compare_exchange_weak(prev, slot, Ordering::AcqRel, Ordering::Relaxed) {
+                Ok(_) => break,
+                Err(actual) => prev = actual,
+            }
+        }
     }
 
     // ---------- internals ----------
@@ -41,6 +62,7 @@ impl PxAcceptor {
                 current_promised: PxBallot::new(0, 0),
             };
         };
+        self.bump_highest_seen(slot);
         loop {
             let current_ptr = node.promised.load(Ordering::Acquire);
             if !current_ptr.is_null() {
@@ -61,6 +83,7 @@ impl PxAcceptor {
         let slot = entry.slot;
         let ballot = entry.ballot;
         let node = get_or_prepare_slot(&self.slot_list, slot)?;
+        self.bump_highest_seen(slot);
         loop {
             let promised_ptr = node.promised.load(Ordering::Acquire);
             if !promised_ptr.is_null() {
