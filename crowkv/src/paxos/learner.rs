@@ -84,6 +84,32 @@ impl PxLearner {
         self.last_chosen_term.load(Ordering::Acquire)
     }
 
+    /// Receive a peer's notification that `(slot, term)` is chosen.
+    ///
+    /// Updates `last_chosen_slot` / `last_chosen_term` only; never
+    /// touches the contiguous-chosen / contiguous-applied watermarks
+    /// because the receiver has no value to apply yet (notices carry
+    /// no payload). Idempotent.
+    ///
+    /// Returns `true` if the high-water mark advanced, `false` if the
+    /// notice was already at or behind the current `last_chosen_slot`.
+    pub fn note_chosen(&self, slot: SlotIndex, term: PxTerm) -> bool {
+        let mut prev = self.last_chosen_slot.load(Ordering::Relaxed);
+        loop {
+            if slot <= prev {
+                return false;
+            }
+            match self.last_chosen_slot.compare_exchange_weak(prev, slot, Ordering::AcqRel, Ordering::Relaxed) {
+                Ok(_) => {
+                    let _guard = self.out_of_order.lock();
+                    self.last_chosen_term.store(term, Ordering::Release);
+                    return true;
+                }
+                Err(actual) => prev = actual,
+            }
+        }
+    }
+
     /// Update the frontier for a newly learned `(slot, term)`.
     ///
     /// Idempotent: re-applying an already-learned slot is a no-op.

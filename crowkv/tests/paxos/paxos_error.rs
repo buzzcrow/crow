@@ -134,7 +134,13 @@ async fn malformed_accept_request_is_rejected_by_grpc_boundary() {
         .await
         .expect_err("missing value should be rejected");
 
-    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    // Step 10.7: unary `Accept` is retired (proposers use `PeerStream`),
+    // so the server now returns `Unimplemented` regardless of payload
+    // shape. The boundary input-validation that previously surfaced
+    // `InvalidArgument` (missing `value`) now lives behind the bidi
+    // stream's `handle_accept_inner` helper, exercised by the M3
+    // integration tests rather than this unary-only smoke test.
+    assert_eq!(status.code(), tonic::Code::Unimplemented);
 
     cluster.shutdown().await;
 }

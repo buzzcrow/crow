@@ -368,10 +368,115 @@ Resolves the `tonic::Status` leak. See §5.9 below for the full explanation/rati
 - Test: `propose_after_step_down_returns_not_leader`.
 
 ### Step 10 — Per-peer bidi stream (moved from P1 M4)
-- Replace per-call unary `PxServiceClient` use inside `PxRemoteReplica` for `Accept` + `Heartbeat` + `Chosen` notifications with a single bidi stream per `(group_id, peer_id)` pair. `Prepare` / `RequestVote` / `PreVote` / `StepDown` stay as unary RPCs (one-shot, no ordering need).
-- Add a small per-peer `mpsc::Sender<PeerStreamFrame>` so the driver and proposer share the stream without lock contention. Drop and re-establish on transport error.
-- Per-peer flow control: bounded mpsc (default capacity = window). When full, the proposer returns `PxPaxosError::Busy` for that slot's `Accept` (already classified `FailRetryable`).
-- Update `plan.md` P1 M4 row: remove "per-peer connection pool" sub-item (now in M3). M4 retains `Proposer` (slot allocation, sliding window, admission queue) and the `Replicator` per-slot quorum bitmap.
+
+> **Splitting note (2026-05-17):** Step 10 is a substantial wire-protocol
+> refactor (new bidi RPC, server stream handler, client stream + reconnect,
+> migration of three message types, flow control). Split into seven
+> dependency-first substeps so each lands as one commit and the existing
+> unary RPCs keep working until the very last switch-over.
+
+#### Step 10.1 — `pxos.proto` `PeerStream` bidi RPC + regen stubs
+- Add `rpc PeerStream(stream PeerStreamFrame) returns (stream PeerStreamFrame);`
+  to `crowkv/proto/pxos.proto`.
+- `PeerStreamFrame` is a `oneof { AcceptRequest accept; HeartbeatRequest
+  heartbeat; ChosenNotice chosen; AcceptResponse accept_ack;
+  HeartbeatResponse heartbeat_ack; }` so a single connection multiplexes
+  all three message families.
+- `ChosenNotice { group_id, slot, term, leader_id }` is new (currently no
+  unary equivalent — Step 6 learners only learn locally).
+- Regen via `build.rs`; no callers wired yet.
+
+#### Step 10.2 — Server-side `PeerStream` handler (no-op echo)
+- Implement `PxService::peer_stream` in `crowkv/src/rpc/px_service.rs`. For
+  the first commit it routes inbound frames through the existing
+  `ReplicaHandler` methods (`on_accept`, `on_heartbeat`, `on_chosen`) and
+  forwards replies back through the outbound half of the stream.
+- Server-side handler is per-stream; one task per peer connection.
+- All existing unary RPCs remain in place and unchanged.
+
+#### Step 10.3 — Client-side `PxPeerStream` skeleton + reconnect loop
+- New module `crowkv/src/cluster/peer_stream.rs` containing
+  `PxPeerStream { tx: mpsc::Sender<PeerStreamFrame>, ...}`.
+- Spawned per `(group_id, peer_id)` on first use, lives until shutdown.
+- Reconnect loop with capped exponential backoff on transport failure;
+  on reconnect, any in-flight frames whose ack is still pending fail with
+  `PxReplicaError::Internal("stream reset")`.
+- Bounded `tokio::sync::mpsc` of capacity = `peer_stream_window_frames`
+  (new field on `PxElectionConfig`, default 64).
+
+#### Step 10.4 — Migrate `Accept` to `PxPeerStream`
+- `PxRemoteReplica::send_accept` now enqueues an `AcceptRequest` frame on
+  the peer's stream and awaits the matching `AcceptResponse` via a
+  per-request `oneshot`. Correlation id is included in the frame.
+- Unary `Accept` RPC handler stays alive (Step 10.2 wires both); will be
+  removed in Step 10.7.
+
+#### Step 10.5 — Migrate `Heartbeat` to `PxPeerStream`
+- Same pattern as 10.4 for `HeartbeatRequest` / `HeartbeatResponse`. The
+  leader heartbeat ticker (Step 9.5) keeps its `JoinSet` fanout but each
+  spawned task now uses the streamed sender.
+
+#### Step 10.6 — Add `ChosenNotice` over `PxPeerStream`
+
+**Learner API design.** `ChosenNotice` carries `(group_id, slot, term,
+leader_id)` only — no payload. The receiver therefore cannot run the
+classical `learn` path (which requires `apply_payload`). Instead we
+expose a new public hook on `PxLearner`:
+
+```rust
+/// Receive a peer's notification that `(slot, term)` is chosen.
+/// Updates `last_chosen_slot` / `last_chosen_term` only — never
+/// touches `contiguous_chosen` / `contiguous_applied` because the
+/// receiver has no value to apply yet. Idempotent.
+///
+/// Returns `true` if the watermark advanced, `false` if dropped
+/// (already past, or `term < last_chosen_term`).
+pub fn note_chosen(&self, slot: SlotIndex, term: PxTerm) -> bool;
+```
+
+This is exactly the first half of `update_frontier` (the
+`last_chosen_slot` CAS loop) factored out behind a `pub` API. The
+`contiguous_*` watermarks remain coupled to actual `learn` so the
+existing invariant "`contiguous_applied` == applied to store" holds.
+
+**Why not advance `contiguous_chosen` from a notice.** The current
+implementation conflates `contiguous_chosen` with `contiguous_applied`
+(see `paxos/learner.rs:128`). Decoupling them is a heavier refactor
+deferred to P2 (snapshot install / catch-up). For M3, `last_chosen_slot`
+is sufficient for the PreVote / RequestVote "log up-to-date" check
+(§5.3), which is the actual reason ChosenNotice exists.
+
+**Term fencing.** Receivers drop a notice whose `term <
+current_term` (§ replica-side fence already in Step 8). Notices with
+`term > current_term` advance `last_chosen_slot` but do **not** bump
+the receiver's `current_term` (that requires the full PreVote /
+RequestVote dance from Step 9).
+
+**Substeps:**
+
+- **10.6a** — `PxLearner::note_chosen` public API + unit tests
+  (`tests/paxos/learner_note_chosen.rs`); server-side `peer_stream`
+  handler routes a `Chosen` frame into the local replica's learner via
+  a thin `PxLocalReplica::note_chosen(slot, term)` shim (with term
+  fence). Replaces today's debug-log no-op.
+- **10.6b** — `PxRemoteReplica::send_chosen_notice(slot, term,
+  leader_id, group_id)` helper around `PxPeerStream::send_chosen`;
+  proposer integrates the fan-out in `PxGroup::propose` immediately
+  after the local `learner.learn(entry)` call on the chosen path
+  (best-effort, fire-and-forget — failures logged at `debug!` and
+  swallowed since the next heartbeat will re-converge frontiers
+  anyway).
+
+#### Step 10.7 — Flow control + `Busy` on full mpsc + remove unary `Accept`
+- When the per-peer `tx.try_send(...)` returns `Full`, the proposer
+  surfaces `PxPaxosError::Busy` (already classified `FailRetryable` —
+  Step 8).
+- Now that all `Accept` traffic flows through `PxPeerStream`, the unary
+  `Accept` RPC handler is removed and the corresponding proto method
+  marked deprecated (kept for one release for binary-compat).
+- Update `plan.md` P1 M4 row: remove "per-peer connection pool" sub-item
+  (now in M3). M4 retains `Proposer` (slot allocation, sliding window,
+  admission queue) and the `Replicator` per-slot quorum bitmap.
 
 ### Step 11 — Observability
 - New `crowkv/src/common/metrics.rs` additions (already a `LayerMetrics` exists for RPCs):
@@ -633,9 +738,18 @@ Updated as each Step lands. Status legend: ⏳ pending · 🚧 in progress · �
 | 9.6 | Step-down execution sequence + lease-unrenewable | ✅ | `0e257ec` |
 | 9.7 | Admin StepDown signalling | ✅ | `267d667` |
 | 9.8 | `PxGroup::propose` leadership gate | ✅ | `451504d` |
-| 10 | Per-peer bidi `PeerStream` | ⏳ | — |
-| 11 | Observability (`ElectionMetrics`) | ⏳ | — |
-| 12 | Tests (`paxos/election`, `cluster/election`) | ⏳ | — |
+| 10.1 | `pxos.proto` `PeerStream` bidi RPC + regen stubs | ✅ (already in `f0798f3` Step 3) | `f0798f3` |
+| 10.2 | Server-side `PeerStream` handler (no-op echo) | ✅ | _pending_ |
+| 10.3 | Client-side `PxPeerStream` skeleton + reconnect loop | ✅ | _pending_ |
+| 10.4 | Migrate `Accept` to `PxPeerStream` | ✅ | _pending_ |
+| 10.5 | Migrate `Heartbeat` to `PxPeerStream` | ✅ | _pending_ |
+| 10.6a | `PxLearner::note_chosen` + server-side `Chosen` routing | ✅ | _pending_ |
+| 10.6b | `PxRemoteReplica::send_chosen_notice` + proposer fan-out | ✅ | _pending_ |
+| 10.7 | Flow control + `Busy` on full mpsc + remove unary `Accept` | ✅ | _pending_ |
+| 11 | Observability (`ElectionMetrics`) | ✅ | _pending_ |
+| 12a | `tests/paxos/election.rs` unit tests | ⏳ | — |
+| 12b | `tests/cluster/election.rs` integration tests | ⏳ | — |
+| 12c | `testkit/cluster.rs` — `start_cluster_no_leader` helper | ⏳ | — |
 | 13 | Doc + `plan.md` + `doc_index.md` updates | ⏳ | — |
 
 ## 9. Implementation Issues / Open Questions

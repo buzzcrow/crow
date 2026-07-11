@@ -88,7 +88,7 @@ doc only when a task touches a topic in its row. Line counts are approximate
 | `design/design-parallel-slots.md` | ~325 | Parallel slot pipelining, sliding window, gap detection / repair, safe-slot, per-key resolved-slot. |
 | `design/design-paxos-error.md` | ~55 | Paxos error categories, retry rules, RPC mapping. |
 | `design/design-reconfiguration.md` | ~280 | Joint consensus, member add/remove, leader transfer, group-0 special cases, quorum-overlap safety. |
-| `design/design-rpc.md` | ~230 | Wire protocol: Prepare/Promise/Accept/Accepted, message envelope, PeerService / AdminService, Rust mapping. |
+| `design/design-rpc.md` | ~265 | Wire protocol: classic Paxos messages, PeerStream bidi stream (frames, flow control, parallelism), PxService / AdminService, Rust mapping. |
 | `design/design-slot.md` | ~650 | `PxSlotList` / `PxSlotNode`: chunk layout, insert/get/trim, reclamation, performance model, future evolution. |
 | `design/design-storage-engine.md` | ~310 | Storage plug-in: per-key slot tracking, apply semantics, snapshot, compaction, compare, engine impls. |
 | `design/design-ui.md` | ~300 | Web UI design: SPA stack, single-page shell, theme tokens, topology canvas, embedding contract, embedded Swagger panel. |

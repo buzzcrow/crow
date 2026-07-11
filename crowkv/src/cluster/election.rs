@@ -301,6 +301,15 @@ fn step_down(group: &Arc<PxGroup>, tenure_cancel: &CancellationToken, my_term: u
         ?reason,
         "stepping down from leader"
     );
+    // Step 11: bump per-reason step-down counters before the role flip
+    // so concurrent metric snapshots observe the increment alongside
+    // (or before) the role transition.
+    let metrics = group.local_replica().election_metrics();
+    match reason {
+        StepDownReason::HigherTerm(_) => metrics.record_step_down_higher_term(),
+        StepDownReason::LeaseUnrenewable => metrics.record_step_down_lease_unrenewable(),
+        StepDownReason::Admin => metrics.record_step_down_admin(),
+    }
     tenure_cancel.cancel();
     let target_term = match reason {
         StepDownReason::HigherTerm(t) => t.max(my_term),

@@ -67,3 +67,91 @@ pub struct MetricsSnapshot {
     pub err_count: u64,
     pub last_rtt_ms: u64,
 }
+
+/// Per-`PxLocalReplica` leader-election counters (Step 11).
+///
+/// Counters are cheap `Relaxed` increments on the election hot path; the
+/// election driver and step-down sequence call into the bump helpers,
+/// then operators read [`ElectionMetricsSnapshot`] via the management
+/// API / health endpoint. Only monotonic counters live here — derived
+/// gauges (`current_term`, `last_heartbeat_age_ms`, `lease_remaining_ms`,
+/// `bulk_phase1_in_flight_slots`) are computed in
+/// `PxLocalReplica::election_metrics_snapshot()` at read time so we
+/// never have to keep an `AtomicU64` in sync with the canonical mutex-
+/// guarded state.
+#[derive(Debug, Default)]
+pub struct ElectionMetrics {
+    election_count: AtomicU64,
+    step_downs_higher_term: AtomicU64,
+    step_downs_lease_unrenewable: AtomicU64,
+    step_downs_admin: AtomicU64,
+}
+
+impl ElectionMetrics {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// One election attempt started (Candidate transition).
+    pub fn record_election(&self) {
+        self.election_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Leader stepped down because it observed `term > current_term`.
+    pub fn record_step_down_higher_term(&self) {
+        self.step_downs_higher_term.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Leader stepped down because the lease became unrenewable.
+    pub fn record_step_down_lease_unrenewable(&self) {
+        self.step_downs_lease_unrenewable.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Leader stepped down because of an admin StepDown RPC.
+    pub fn record_step_down_admin(&self) {
+        self.step_downs_admin.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Read counters (monotonic). Derived gauges are filled in by the
+    /// `PxLocalReplica::election_metrics_snapshot()` wrapper.
+    #[must_use]
+    pub fn counters(&self) -> ElectionMetricsCounters {
+        ElectionMetricsCounters {
+            election_count: self.election_count.load(Ordering::Relaxed),
+            step_downs_higher_term: self.step_downs_higher_term.load(Ordering::Relaxed),
+            step_downs_lease_unrenewable: self.step_downs_lease_unrenewable.load(Ordering::Relaxed),
+            step_downs_admin: self.step_downs_admin.load(Ordering::Relaxed),
+        }
+    }
+}
+
+/// Monotonic-counter half of [`ElectionMetricsSnapshot`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ElectionMetricsCounters {
+    pub election_count: u64,
+    pub step_downs_higher_term: u64,
+    pub step_downs_lease_unrenewable: u64,
+    pub step_downs_admin: u64,
+}
+
+/// Point-in-time election + lease state on one replica. Combines the
+/// monotonic counters from [`ElectionMetrics`] with snapshots of the
+/// mutex-guarded election / lease state computed at read time.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ElectionMetricsSnapshot {
+    pub election_count: u64,
+    pub current_term: u64,
+    /// Milliseconds since the most recent accepted heartbeat (followers)
+    /// or the most recent quorum-renewing heartbeat (leaders). `None`
+    /// before the first heartbeat has been observed.
+    pub last_heartbeat_age_ms: Option<u64>,
+    /// Remaining lease window in milliseconds for the leader. `None`
+    /// when the lease has expired or this replica is not the leader.
+    pub lease_remaining_ms: Option<u64>,
+    /// Number of slots currently being repaired by bulk Phase 1.
+    pub bulk_phase1_in_flight_slots: u64,
+    pub step_downs_higher_term: u64,
+    pub step_downs_lease_unrenewable: u64,
+    pub step_downs_admin: u64,
+}

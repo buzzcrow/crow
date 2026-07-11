@@ -1,19 +1,22 @@
 use crate::cluster::health::HealthReport;
+use crate::cluster::peer_stream::PxPeerStream;
 use crate::cluster::replica::{
     HeartbeatReply, HeartbeatRequestPayload, PxReplicaError, Replica, ReplicaClient, StepDownReply, StepDownRequestPayload, VoteReply, VoteRequestPayload,
 };
 use crate::cluster::shutdown::ShutdownReport;
 use crate::cluster::snapshot::RemoteSnapshot;
+use crate::common::config::PxElectionConfig;
 use crate::common::metrics::LayerMetrics;
 use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxLogEntryKind, PxPrepareReply};
 use crate::paxos::PxNodeId;
 use crate::rpc::px_service_client::PxServiceClient;
 use crate::rpc::{
-    AcceptRequest, AcceptedValue, HeartbeatRequest as RpcHeartbeatRequest, PreVoteRequest as RpcPreVoteRequest, PrepareRequest, RequestVoteRequest as RpcRequestVoteRequest,
-    StepDownRequest as RpcStepDownRequest,
+    AcceptRequest, AcceptedValue, ChosenNotification as RpcChosenNotification, HeartbeatRequest as RpcHeartbeatRequest, PreVoteRequest as RpcPreVoteRequest, PrepareRequest,
+    RequestVoteRequest as RpcRequestVoteRequest, StepDownRequest as RpcStepDownRequest,
 };
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio::sync::OnceCell;
 use tonic::transport::Channel;
@@ -27,6 +30,20 @@ pub struct PxRemoteReplica {
     // which would make RemoteReplicaKind::Real large and trigger large_enum_variant warning.
     // Heap allocation is deferred via OnceCell until first use.
     grpc_client: OnceCell<Box<PxServiceClient<Channel>>>,
+    /// Lazy-initialized per-peer bidi stream (Step 10.3 / 10.4). Carries
+    /// `Accept` (10.4), `Heartbeat` (10.5), and `ChosenNotification`
+    /// (10.6) frames. Constructed on first call to [`Self::peer_stream`].
+    peer_stream: OnceLock<Arc<PxPeerStream>>,
+    /// Window size used for the lazy `peer_stream` mpsc. Snapshot of
+    /// `PxElectionConfig::peer_stream_window_frames` taken at the time
+    /// `with_config` is called; defaults to `64` for tests / callsites
+    /// that construct via [`Self::new`] without a config.
+    peer_stream_window_frames: usize,
+    /// Monotonic correlation id allocator for `Accept` / `Heartbeat`
+    /// frames sent over [`Self::peer_stream`]. Starts at 1; 0 is
+    /// reserved as the "no correlation" sentinel used by fire-and-forget
+    /// frames such as `ChosenNotification`.
+    next_request_id: AtomicU64,
     pub(crate) voting: bool,
     /// Per-remote RPC counters consumed by `/topology`.
     metrics: LayerMetrics,
@@ -105,40 +122,39 @@ impl ReplicaClient for PxRemoteReplica {
     }
 
     async fn send_accept(&self, entry: &PxLogEntry, group_id: u64) -> Result<PxAcceptReply, PxReplicaError> {
-        let mut client = match self.get_client().await {
-            Ok(c) => c.clone(),
-            Err(status) => {
-                self.metrics.record_err();
-                return Err(status_to_err(&status));
-            }
-        };
-        let started = Instant::now();
-        let resp = match client
-            .accept(AcceptRequest {
-                version: 1,
+        // Step 10.4: route `Accept` through the per-peer bidi PxPeerStream
+        // rather than a one-shot unary RPC. The wire-level conversion
+        // (PxLogEntry -> AcceptRequest, AcceptedResponse -> PxAcceptReply)
+        // is identical; only the transport changes. The unary `accept`
+        // RPC handler on the server side stays alive (Step 10.2 dual-path)
+        // and is removed in Step 10.7 once all callers have migrated.
+        let request_id = self.alloc_request_id();
+        let req = AcceptRequest {
+            version: 1,
+            slot: entry.slot,
+            round: entry.ballot.round,
+            leader_id: entry.ballot.leader_id,
+            term: entry.term,
+            value: Some(AcceptedValue {
                 slot: entry.slot,
                 round: entry.ballot.round,
                 leader_id: entry.ballot.leader_id,
                 term: entry.term,
-                value: Some(AcceptedValue {
-                    slot: entry.slot,
-                    round: entry.ballot.round,
-                    leader_id: entry.ballot.leader_id,
-                    term: entry.term,
-                    payload: (*entry.payload).clone(),
-                }),
-                request_id: 0,
-                request_create_ms: 0,
-                client_id: entry.client_id.unwrap_or(0),
-                seq: entry.seq.unwrap_or(0),
-                group_id,
-            })
-            .await
-        {
-            Ok(r) => r.into_inner(),
-            Err(status) => {
+                payload: (*entry.payload).clone(),
+            }),
+            request_id,
+            request_create_ms: 0,
+            client_id: entry.client_id.unwrap_or(0),
+            seq: entry.seq.unwrap_or(0),
+            group_id,
+        };
+
+        let started = Instant::now();
+        let resp = match self.peer_stream().send_accept(req).await {
+            Ok(r) => r,
+            Err(err) => {
                 self.metrics.record_err();
-                return Err(status_to_err(&status));
+                return Err(err);
             }
         };
         #[allow(clippy::cast_possible_truncation)]
@@ -231,31 +247,32 @@ impl ReplicaClient for PxRemoteReplica {
     }
 
     async fn send_heartbeat(&self, req: HeartbeatRequestPayload, group_id: u64) -> Result<HeartbeatReply, PxReplicaError> {
-        let mut client = self.get_client().await.map_err(|s| {
-            self.metrics.record_err();
-            status_to_err(&s)
-        })?.clone();
+        // Step 10.5: route Heartbeat through the per-peer bidi
+        // PxPeerStream so it shares ordering with `Accept` (no
+        // heartbeat can race ahead of an in-flight Accept on the same
+        // peer). Wire-format conversion is unchanged.
+        let request_id = self.alloc_request_id();
+        let rpc_req = RpcHeartbeatRequest {
+            version: 1,
+            group_id,
+            term: req.term,
+            leader_id: req.leader_id,
+            prev_log_slot: req.prev_log_slot,
+            prev_log_term: req.prev_log_term,
+            committed_safe_slot: req.committed_safe_slot,
+            lease_grant_until_ms_mono: req.lease_grant_until_ms_mono,
+            t_send_ms_mono: req.t_send_ms_mono,
+            request_id,
+            request_create_ms: 0,
+        };
         let started = Instant::now();
-        let resp = client
-            .heartbeat(RpcHeartbeatRequest {
-                version: 1,
-                group_id,
-                term: req.term,
-                leader_id: req.leader_id,
-                prev_log_slot: req.prev_log_slot,
-                prev_log_term: req.prev_log_term,
-                committed_safe_slot: req.committed_safe_slot,
-                lease_grant_until_ms_mono: req.lease_grant_until_ms_mono,
-                t_send_ms_mono: req.t_send_ms_mono,
-                request_id: 0,
-                request_create_ms: 0,
-            })
-            .await
-            .map_err(|s| {
+        let resp = match self.peer_stream().send_heartbeat(rpc_req).await {
+            Ok(r) => r,
+            Err(err) => {
                 self.metrics.record_err();
-                status_to_err(&s)
-            })?
-            .into_inner();
+                return Err(err);
+            }
+        };
         #[allow(clippy::cast_possible_truncation)]
         self.metrics.record_ok(started.elapsed().as_millis() as u64);
         Ok(HeartbeatReply {
@@ -319,9 +336,70 @@ impl PxRemoteReplica {
             node_id,
             endpoint,
             grpc_client: OnceCell::new(),
+            peer_stream: OnceLock::new(),
+            peer_stream_window_frames: PxElectionConfig::DEFAULT.peer_stream_window_frames,
+            next_request_id: AtomicU64::new(1),
             voting: true,
             metrics: LayerMetrics::new(),
             shutdown_started: AtomicBool::new(false),
+        }
+    }
+
+    /// Construct a remote replica with the given election config snapshot.
+    /// The only field consumed today is `peer_stream_window_frames`
+    /// (Step 10.3); other fields stay configurable per-call.
+    #[must_use]
+    pub fn with_config(node_id: PxNodeId, endpoint: String, cfg: &PxElectionConfig) -> Self {
+        let mut r = Self::new(node_id, endpoint);
+        r.peer_stream_window_frames = cfg.peer_stream_window_frames;
+        r
+    }
+
+    /// Lazily construct (and reuse) the per-peer bidi stream client.
+    /// Returns the shared `Arc<PxPeerStream>`; the underlying background
+    /// task is spawned on first call and lives until [`Self::shutdown`].
+    fn peer_stream(&self) -> &Arc<PxPeerStream> {
+        self.peer_stream.get_or_init(|| {
+            let cfg = PxElectionConfig {
+                peer_stream_window_frames: self.peer_stream_window_frames,
+                ..PxElectionConfig::DEFAULT
+            };
+            PxPeerStream::new(self.endpoint.clone(), &cfg)
+        })
+    }
+
+    /// Fire-and-forget peer notification that `(slot, term)` is chosen
+    /// in `group_id`. Sent over the per-peer bidi `PxPeerStream`
+    /// (Step 10.6b). No response is awaited; failures (peer down,
+    /// stream reset) are returned for caller-side observability but
+    /// the proposer treats them as best-effort and swallows them
+    /// since the next heartbeat re-converges frontiers anyway.
+    ///
+    /// # Errors
+    /// Returns [`PxReplicaError::Internal`] if the per-peer stream is
+    /// shut down or its reconnect loop is currently failing fast.
+    pub async fn send_chosen_notice(&self, slot: u64, term: crate::paxos::PxTerm, leader_id: PxNodeId, group_id: u64) -> Result<(), PxReplicaError> {
+        let notice = RpcChosenNotification {
+            version: 1,
+            group_id,
+            slot,
+            term,
+            leader_id,
+            request_id: 0,
+            request_create_ms: 0,
+        };
+        self.peer_stream().send_chosen(notice).await
+    }
+
+    /// Allocate the next correlation id for an `Accept` / `Heartbeat`
+    /// frame. Never returns 0 (that value is reserved for fire-and-forget
+    /// frames like `ChosenNotification`).
+    fn alloc_request_id(&self) -> u64 {
+        let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        if id == 0 {
+            self.next_request_id.fetch_add(1, Ordering::Relaxed)
+        } else {
+            id
         }
     }
 
@@ -356,6 +434,12 @@ impl PxRemoteReplica {
         // explicit close is needed earlier (e.g. tearing down a remote without
         // tearing down the group), expose `OnceCell` mutation through a
         // `&mut self` API.
+        // Step 10.4: stop the PxPeerStream background task (idempotent;
+        // safe to call even if the stream was never initialized).
+        if let Some(stream) = self.peer_stream.get() {
+            stream.shutdown();
+        }
+
         info!(
             replica_r_id = self.node_id,
             endpoint = %self.endpoint,

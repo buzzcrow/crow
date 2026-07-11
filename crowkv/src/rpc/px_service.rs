@@ -6,7 +6,7 @@
 
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio_stream::Stream;
+use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, warn};
 
@@ -17,7 +17,7 @@ use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxLogEntryKind, P
 
 use crate::rpc::px_service_server::PxService;
 use crate::rpc::{
-    AcceptRequest, AcceptedResponse, AcceptedValue, HeartbeatRequest, HeartbeatResponse, PeerStreamRequest, PeerStreamResponse, PreVoteRequest, PreVoteResponse, PrepareRequest, PromiseResponse,
+    peer_stream_request, peer_stream_response, AcceptRequest, AcceptedResponse, AcceptedValue, HeartbeatRequest, HeartbeatResponse, PeerStreamRequest, PeerStreamResponse, PreVoteRequest, PreVoteResponse, PrepareRequest, PromiseResponse,
     RequestVoteRequest, RequestVoteResponse, StepDownRequest, StepDownResponse,
 };
 
@@ -124,89 +124,17 @@ impl PxService for PxReplicaService {
         Ok(Response::new(response))
     }
 
-    async fn accept(&self, request: Request<AcceptRequest>) -> Result<Response<AcceptedResponse>, Status> {
-        let req = request.into_inner();
+    async fn accept(&self, _request: Request<AcceptRequest>) -> Result<Response<AcceptedResponse>, Status> {
+        // Step 10.7: unary `Accept` RPC is retired — all proposers route
+        // Accept frames over the per-peer bidi `PeerStream` (Steps 10.2–
+        // 10.4). The proto method is kept for one release for binary-
+        // compat, but the handler now refuses calls. New clients must
+        // open a `PeerStream`.
         debug!(
             store_id = self.store.store_id,
-            group_id = req.group_id,
-            request_id = req.request_id,
-            slot = req.slot,
-            round = req.round,
-            leader_id = req.leader_id,
-            "received paxos accept rpc"
+            "unary Accept RPC is deprecated; use PeerStream",
         );
-        let value = req.value.ok_or_else(|| {
-            warn!(
-                store_id = self.store.store_id,
-                group_id = req.group_id,
-                request_id = req.request_id,
-                slot = req.slot,
-                "accept rpc missing value; next step: check caller/protobuf conversion"
-            );
-            Status::invalid_argument("missing value")
-        })?;
-        let entry = PxLogEntry {
-            slot: req.slot,
-            ballot: PxBallot {
-                round: req.round,
-                leader_id: req.leader_id,
-            },
-            term: req.term,
-            kind: PxLogEntryKind::Write,
-            payload: Arc::new(value.payload),
-            client_id: optional_u64(req.client_id),
-            seq: optional_u64(req.seq),
-        };
-
-        let group = self.store.get_group(req.group_id).ok_or_else(|| Status::not_found("px group not found"))?;
-        let replica = group.local_replica();
-        let reply = <crate::cluster::local_replica::PxLocalReplica as ReplicaHandler>::on_accept(replica, entry.clone(), req.group_id).await?;
-        if matches!(reply, PxAcceptReply::Accepted { .. }) {
-            replica.learn(&entry);
-        }
-
-        let (rejected, rejected_round, rejected_leader_id, term_stale, reply_term) = match reply {
-            PxAcceptReply::Accepted { .. } => (false, 0, 0, false, replica.current_term_snapshot()),
-            PxAcceptReply::Rejected { current_promised, .. } => {
-                warn!(
-                    store_id = self.store.store_id,
-                    group_id = req.group_id,
-                    request_id = req.request_id,
-                    slot = req.slot,
-                    current_round = current_promised.round,
-                    current_leader_id = current_promised.leader_id,
-                    "accept rejected; next step: proposer should run prepare with a higher ballot"
-                );
-                (true, current_promised.round, current_promised.leader_id, false, replica.current_term_snapshot())
-            }
-            PxAcceptReply::TermStale { new_term, .. } => {
-                warn!(
-                    store_id = self.store.store_id,
-                    group_id = req.group_id,
-                    request_id = req.request_id,
-                    slot = req.slot,
-                    new_term,
-                    "accept rejected by term fence; proposer should step down"
-                );
-                (false, 0, 0, true, new_term)
-            }
-        };
-
-        let response = AcceptedResponse {
-            version: 1,
-            slot: req.slot,
-            round: req.round,
-            leader_id: req.leader_id,
-            rejected,
-            rejected_round,
-            rejected_leader_id,
-            request_id: req.request_id,
-            request_create_ms: req.request_create_ms,
-            term: reply_term,
-            term_stale,
-        };
-
-        Ok(Response::new(response))
+        Err(Status::unimplemented("unary Accept is deprecated in P1 M3; use PeerStream"))
     }
 
     // ---------------- P1 M3 leader-election stubs ----------------
@@ -314,11 +242,193 @@ impl PxService for PxReplicaService {
 
     type PeerStreamStream = Pin<Box<dyn Stream<Item = Result<PeerStreamResponse, Status>> + Send + 'static>>;
 
-    async fn peer_stream(&self, _request: Request<Streaming<PeerStreamRequest>>) -> Result<Response<Self::PeerStreamStream>, Status> {
-        // Bidi PeerStream lands in P1 M3 Step 10; until then the steady-state
-        // path falls back to unary Accept / Heartbeat RPCs.
-        Err(Status::unimplemented("PeerStream bidi handler lands in P1 M3 Step 10"))
+    async fn peer_stream(&self, request: Request<Streaming<PeerStreamRequest>>) -> Result<Response<Self::PeerStreamStream>, Status> {
+        // Step 10.2: route inbound frames through the existing
+        // `ReplicaHandler` methods and ship matching responses back on the
+        // outbound half of the same bidi stream. This shares the helper
+        // bodies with the unary `Accept` / `Heartbeat` RPCs so semantics
+        // stay identical until the unary handlers are retired in Step 10.7.
+        let mut inbound = request.into_inner();
+        let store = self.store.clone();
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<PeerStreamResponse, Status>>(64);
+
+        tokio::spawn(async move {
+            while let Some(item) = inbound.next().await {
+                let frame = match item {
+                    Ok(req) => req.frame,
+                    Err(status) => {
+                        let _ = tx.send(Err(status)).await;
+                        return;
+                    }
+                };
+                let Some(frame) = frame else { continue };
+                let response_frame = match frame {
+                    peer_stream_request::Frame::Accept(accept_req) => {
+                        match handle_accept_inner(&store, accept_req).await {
+                            Ok(resp) => Some(peer_stream_response::Frame::Accepted(resp)),
+                            Err(status) => {
+                                let _ = tx.send(Err(status)).await;
+                                return;
+                            }
+                        }
+                    }
+                    peer_stream_request::Frame::Heartbeat(hb_req) => {
+                        match handle_heartbeat_inner(&store, hb_req).await {
+                            Ok(resp) => Some(peer_stream_response::Frame::Heartbeat(resp)),
+                            Err(status) => {
+                                let _ = tx.send(Err(status)).await;
+                                return;
+                            }
+                        }
+                    }
+                    peer_stream_request::Frame::Chosen(notice) => {
+                        // Step 10.6a: route into the local replica's
+                        // learner via PxLocalReplica::note_chosen, which
+                        // applies the Step 8 term fence and only updates
+                        // the (last_chosen_slot, last_chosen_term) high-
+                        // water mark — no payload is shipped, so the
+                        // contiguous-chosen / contiguous-applied
+                        // watermarks are intentionally untouched.
+                        if let Some(group) = store.get_group(notice.group_id) {
+                            let advanced = group.local_replica().note_chosen(notice.slot, notice.term);
+                            debug!(
+                                store_id = store.store_id,
+                                group_id = notice.group_id,
+                                slot = notice.slot,
+                                term = notice.term,
+                                leader_id = notice.leader_id,
+                                advanced,
+                                "PeerStream: chosen notification applied"
+                            );
+                        } else {
+                            debug!(
+                                store_id = store.store_id,
+                                group_id = notice.group_id,
+                                slot = notice.slot,
+                                term = notice.term,
+                                "PeerStream: chosen notification dropped (group not found)"
+                            );
+                        }
+                        None
+                    }
+                };
+                if let Some(frame) = response_frame {
+                    if tx.send(Ok(PeerStreamResponse { frame: Some(frame) })).await.is_err() {
+                        // Receiver dropped (peer disconnected); stop processing.
+                        return;
+                    }
+                }
+            }
+        });
+
+        let out_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(out_stream) as Self::PeerStreamStream))
     }
+}
+
+/// Inner `Accept` handler shared by the unary `Accept` RPC and the
+/// `PeerStream` bidi (Step 10.2). Wire-format → in-memory conversion
+/// + delegation to [`ReplicaHandler::on_accept`] + response build.
+async fn handle_accept_inner(store: &Arc<PxKvStore>, req: AcceptRequest) -> Result<AcceptedResponse, Status> {
+    let value = req.value.ok_or_else(|| {
+        warn!(
+            store_id = store.store_id,
+            group_id = req.group_id,
+            request_id = req.request_id,
+            slot = req.slot,
+            "accept rpc missing value; next step: check caller/protobuf conversion"
+        );
+        Status::invalid_argument("missing value")
+    })?;
+    let entry = PxLogEntry {
+        slot: req.slot,
+        ballot: PxBallot {
+            round: req.round,
+            leader_id: req.leader_id,
+        },
+        term: req.term,
+        kind: PxLogEntryKind::Write,
+        payload: Arc::new(value.payload),
+        client_id: optional_u64(req.client_id),
+        seq: optional_u64(req.seq),
+    };
+
+    let group = store.get_group(req.group_id).ok_or_else(|| Status::not_found("px group not found"))?;
+    let replica = group.local_replica();
+    let reply = <crate::cluster::local_replica::PxLocalReplica as ReplicaHandler>::on_accept(replica, entry.clone(), req.group_id).await?;
+    if matches!(reply, PxAcceptReply::Accepted { .. }) {
+        replica.learn(&entry);
+    }
+
+    let (rejected, rejected_round, rejected_leader_id, term_stale, reply_term) = match reply {
+        PxAcceptReply::Accepted { .. } => (false, 0, 0, false, replica.current_term_snapshot()),
+        PxAcceptReply::Rejected { current_promised, .. } => {
+            warn!(
+                store_id = store.store_id,
+                group_id = req.group_id,
+                request_id = req.request_id,
+                slot = req.slot,
+                current_round = current_promised.round,
+                current_leader_id = current_promised.leader_id,
+                "accept rejected; next step: proposer should run prepare with a higher ballot"
+            );
+            (true, current_promised.round, current_promised.leader_id, false, replica.current_term_snapshot())
+        }
+        PxAcceptReply::TermStale { new_term, .. } => {
+            warn!(
+                store_id = store.store_id,
+                group_id = req.group_id,
+                request_id = req.request_id,
+                slot = req.slot,
+                new_term,
+                "accept rejected by term fence; proposer should step down"
+            );
+            (false, 0, 0, true, new_term)
+        }
+    };
+
+    Ok(AcceptedResponse {
+        version: 1,
+        slot: req.slot,
+        round: req.round,
+        leader_id: req.leader_id,
+        rejected,
+        rejected_round,
+        rejected_leader_id,
+        request_id: req.request_id,
+        request_create_ms: req.request_create_ms,
+        term: reply_term,
+        term_stale,
+    })
+}
+
+/// Inner `Heartbeat` handler shared by the unary `Heartbeat` RPC and the
+/// `PeerStream` bidi (Step 10.2).
+async fn handle_heartbeat_inner(store: &Arc<PxKvStore>, req: HeartbeatRequest) -> Result<HeartbeatResponse, Status> {
+    let group = store.get_group(req.group_id).ok_or_else(|| Status::not_found("px group not found"))?;
+    let replica = group.local_replica();
+    let payload = HeartbeatRequestPayload {
+        term: req.term,
+        leader_id: req.leader_id,
+        prev_log_slot: req.prev_log_slot,
+        prev_log_term: req.prev_log_term,
+        committed_safe_slot: req.committed_safe_slot,
+        lease_grant_until_ms_mono: req.lease_grant_until_ms_mono,
+        t_send_ms_mono: req.t_send_ms_mono,
+    };
+    let reply = <crate::cluster::local_replica::PxLocalReplica as ReplicaHandler>::on_heartbeat(replica, payload, req.group_id).await?;
+    Ok(HeartbeatResponse {
+        version: 1,
+        group_id: req.group_id,
+        term: reply.term,
+        success: reply.success,
+        contiguous_chosen: reply.contiguous_chosen,
+        last_chosen_term: reply.last_chosen_term,
+        contiguous_applied: reply.contiguous_applied,
+        highest_seen_slot: reply.highest_seen_slot,
+        request_id: req.request_id,
+        request_create_ms: req.request_create_ms,
+    })
 }
 
 fn log_entry_to_proto(entry: &PxLogEntry) -> AcceptedValue {

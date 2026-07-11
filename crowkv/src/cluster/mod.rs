@@ -2,6 +2,7 @@
 
 pub mod election;
 pub mod group;
+pub mod peer_stream;
 pub mod health;
 pub mod health_info;
 pub mod info;

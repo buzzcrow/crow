@@ -1,5 +1,7 @@
 use crate::testkit::cluster::start_cluster_classic;
-use crowkv::rpc::{AcceptRequest, AcceptedValue, KvSetRequest};
+use crowkv::paxos::roles::{PxBallot, PxLogEntry, PxLogEntryKind};
+use crowkv::rpc::KvSetRequest;
+use std::sync::Arc;
 
 fn encode_put_payload(key: &[u8], value: &[u8]) -> Vec<u8> {
     let mut payload = Vec::new();
@@ -19,31 +21,23 @@ async fn kv_put_retries_next_slot_when_slot_has_prior_accepted_value() {
     let stale_payload = encode_put_payload(b"stale", b"value");
     let followers = cluster.followers();
     let follower = followers.first().expect("follower present");
-    let mut px = cluster.px_client(follower).await;
-    let accept_resp = px
-        .accept(AcceptRequest {
-            version: 1,
-            slot: 1,
-            round: 10,
-            leader_id: 99,
-            term: 0,
-            value: Some(AcceptedValue {
-                slot: 1,
-                round: 10,
-                leader_id: 99,
-                term: 0,
-                payload: stale_payload.clone(),
-            }),
-            request_id: 0,
-            request_create_ms: 0,
-            client_id: 0,
-            seq: 0,
-            group_id: 1,
-        })
-        .await
-        .expect("preload accept")
-        .into_inner();
-    assert!(!accept_resp.rejected);
+    // Step 10.7: unary `Accept` is retired. Seed the follower's slot 1
+    // by driving the local acceptor directly (the on_accept path the
+    // gRPC handler used to wrap). This keeps the test focused on the
+    // proposer's slot-retry behaviour rather than RPC plumbing.
+    let follower_group = follower.get_group(1).expect("group exists on follower");
+    let follower_replica = follower_group.local_replica();
+    let entry = PxLogEntry {
+        slot: 1,
+        ballot: PxBallot::new(10, 99),
+        term: 0,
+        kind: PxLogEntryKind::Write,
+        payload: Arc::new(stale_payload.clone()),
+        client_id: None,
+        seq: None,
+    };
+    let reply = follower_replica.on_accept(entry).await;
+    assert!(matches!(reply, crowkv::paxos::roles::PxAcceptReply::Accepted { .. }), "preload accept should succeed: {reply:?}");
 
     let leader = cluster.leader();
     let mut kv = cluster.kv_client(leader).await;

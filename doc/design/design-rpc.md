@@ -13,20 +13,24 @@ This document defines the wire-serialization contract for all node-to-node and c
   - [2.2 Promise](#22-promise)
   - [2.3 Accept](#23-accept)
   - [2.4 Accepted](#24-accepted)
-- [3. Message Envelope (P4 extension)](#3-message-envelope-p4-extension)
+- [3. PeerStream Bidirectional Stream (P1 M3)](#3-peerstream-bidirectional-stream-p1-m3)
+  - [3.1 Why a dedicated stream](#31-why-a-dedicated-stream)
+  - [3.2 Frame types](#32-frame-types)
+  - [3.3 What stays unary](#33-what-stays-unary)
 - [4. Service Definitions](#4-service-definitions)
-  - [4.1 PeerService (node-to-node)](#41-peerservice-node-to-node)
+  - [4.1 PxService (node-to-node)](#41-pxservice-node-to-node)
   - [4.2 AdminService (client / operator)](#42-adminservice-client--operator)
 - [5. Rust Mapping](#5-rust-mapping)
 - [6. Version Compatibility Rules](#6-version-compatibility-rules)
-- [7. Open Questions](#7-open-questions)
+- [7. Flow Control and Parallelism](#7-flow-control-and-parallelism)
+- [8. Open Questions](#8-open-questions)
 
 ---
 
 ## 1. Design Principles
 
-1. **One bidirectional stream per peer pair.** All node-to-node messages multiplex over a single gRPC bidi stream keyed by `(group_id, peer_node_id)`. This reduces connection count and simplifies backpressure.
-2. **Envelope + payload pattern.** Every stream message is a `PeerMessage` oneof envelope; the payload carries the actual Paxos / heartbeat / snapshot chunk. New message types add new oneof arms without changing existing field numbers.
+1. **One bidirectional stream per peer pair.** All steady-state node-to-node traffic (`Accept`, `Heartbeat`, `Chosen`) multiplexes over a single gRPC bidi stream keyed by `(group_id, peer_node_id)`. One-shot messages (`Prepare`, `PreVote`, `RequestVote`, `StepDown`) remain unary RPCs. This reduces connection count for the hot path while keeping election messages unblocked.
+2. **Frame multiplexing.** Each `PeerStreamRequest` / `PeerStreamResponse` is a protobuf `oneof` frame; the concrete message type (`AcceptRequest`, `HeartbeatRequest`, etc.) carries its own `group_id`, `version`, and correlation fields. New steady-state message types add new oneof arms without changing existing field numbers.
 3. **No `required` fields.** All protobuf fields are `optional` or have sensible defaults. A missing `version` field defaults to `0` (meaning "pre-versioning, treat as earliest").
 4. **Field numbers are append-only.** Once assigned, a field number is never reused for a different semantic meaning. This is a hard rule for rolling upgrades ([requirement.md §9.2](requirement.md#92-rolling-upgrade)).
 5. **Plaintext in P1/P4; TLS hooks reserved.** The transport layer is plaintext TCP loopback in tests and P1/P4 integration. TLS config slots exist in the service builder but are unimplemented ([requirement.md §11](requirement.md#11-security)).
@@ -35,14 +39,14 @@ This document defines the wire-serialization contract for all node-to-node and c
 
 ## 2. Classic Paxos Messages (P1 M2 subset)
 
-These four messages are the **minimum viable wire surface** introduced in P1 M2. They are sufficient to run a full classic Paxos round across a real network boundary. All other messages (`Heartbeat`, `RequestVote`, `Vote`, `Chosen`, `SnapshotChunk`, client RPCs) are added in P4 without mutating the field numbers below.
+These four messages are the **minimum viable wire surface** introduced in P1 M2. They are sufficient to run a full classic Paxos round across a real network boundary. Election messages (`Heartbeat`, `RequestVote`, `PreVote`, `StepDown`) and the `PeerStream` / `ChosenNotification` frames are added in P1 M3; snapshot and client RPCs land in P4. No existing field numbers are mutated.
 
 ### 2.1 Prepare
 
 Phase-1 request sent by the leader (proposer) to all acceptors.
 
 ```protobuf
-message Prepare {
+message PrepareRequest {
   uint32 version = 1;   // wire-format version, always present
   uint64 slot    = 2;   // PxSlot index being prepared
   uint64 round   = 3;   // ballot.round
@@ -55,7 +59,7 @@ message Prepare {
 Phase-1 response returned by each acceptor.
 
 ```protobuf
-message Promise {
+message PromiseResponse {
   uint32 version = 1;
   uint64 slot    = 2;
   uint64 round   = 3;
@@ -92,7 +96,7 @@ message AcceptedValue {
 Phase-2 request sent by the leader after receiving a quorum of promises.
 
 ```protobuf
-message Accept {
+message AcceptRequest {
   uint32 version = 1;
   uint64 slot    = 2;
   uint64 round   = 3;
@@ -107,7 +111,7 @@ message Accept {
 Phase-2 response returned by each acceptor.
 
 ```protobuf
-message Accepted {
+message AcceptedResponse {
   uint32 version = 1;
   uint64 slot    = 2;
   uint64 round   = 3;     // ballot.round that was accepted
@@ -121,61 +125,76 @@ message Accepted {
 
 ---
 
-## 3. Message Envelope (P4 extension)
+## 3. PeerStream Bidirectional Stream (P1 M3)
 
-In P1 M2 the service uses unary RPCs (one request → one response) for simplicity. P4 generalizes to a bidirectional `PeerMessage` stream envelope:
+The steady-state consensus traffic (`Accept`, `Heartbeat`, and `Chosen` notification) moves onto a **single gRPC bidi stream per `(group_id, peer_id)` pair**. One-shot messages (`Prepare`, `PreVote`, `RequestVote`, `StepDown`) remain unary RPCs.
+
+### 3.1 Why a dedicated stream
+
+Three problems the unary-per-RPC pattern cannot solve:
+
+1. **Ordering hazard.** A heartbeat carries a lease grant ("I won't vote before T"). If that heartbeat reorders ahead of an earlier-sent `Accept` on the same peer, the follower could reject the `Accept` while already having promised not to vote. A single stream guarantees FIFO delivery.
+2. **Connection churn.** Paying TCP + HTTP/2 setup cost once per leadership tenure, rather than per-RPC, amortizes overhead under high write throughput.
+3. **Per-peer backpressure.** A bounded `mpsc` on the stream gives the proposer an explicit signal (`Busy`) when a peer cannot keep up.
+
+### 3.2 Frame types
 
 ```protobuf
-message PeerMessage {
-  uint32 version = 1;
-  uint64 group_id = 2;
-  uint64 sender_node_id = 3;
+message PeerStreamRequest {
+  oneof frame {
+    AcceptRequest      accept    = 1;
+    HeartbeatRequest   heartbeat = 2;
+    ChosenNotification chosen    = 3;
+  }
+}
 
-  oneof payload {
-    Prepare    prepare    = 10;
-    Promise    promise    = 11;
-    Accept     accept     = 12;
-    Accepted   accepted   = 13;
-    // P4 additions (append-only field numbers):
-    // Heartbeat  heartbeat  = 14;
-    // Chosen     chosen     = 15;
-    // SnapshotChunk snapshot_chunk = 16;
+message PeerStreamResponse {
+  oneof frame {
+    AcceptedResponse  accepted  = 1;
+    HeartbeatResponse heartbeat = 2;
   }
 }
 ```
 
-**P1 M2 simplification:** because there is no `Heartbeat`, `RequestVote`, `Vote`, `Chosen`, or `SnapshotChunk` yet, the service is defined as two unary methods (`Prepare`, `Accept`) rather than a bidi stream. The envelope is reserved for P4 and must use the **same field numbers** listed above.
+`AcceptRequest` / `AcceptedResponse` and `HeartbeatRequest` / `HeartbeatResponse` reuse the same message shapes as the unary RPCs (§2.3 / §2.4 and the election messages in `design-leader-election.md`). `ChosenNotification` is a new fire-and-forget frame (no response arm) used by the learner to tell peers that a slot has reached quorum.
 
-> **Reading back a slot in M2:** there is no dedicated query RPC. Tests verify follower state by issuing a `Prepare` with a higher ballot than any previously used ballot for that slot. The returned `Promise.previously_accepted` field carries the accepted value if one exists, or is absent if the slot is empty. This reuses the classic-Paxos value-recovery mechanism as an implicit read.
+### 3.3 What stays unary
+
+| Message | RPC style | Reason |
+|---|---|---|
+| `Prepare` | unary | One-shot Phase-1; no ordering need with steady-state traffic |
+| `PreVote` | unary | Election probe; must not be queued behind a stream of `Accept`s |
+| `RequestVote` | unary | Real vote; same one-shot property |
+| `StepDown` | unary | Admin primitive; must cut through immediately |
 
 ---
 
 ## 4. Service Definitions
 
-### 4.1 PeerService (node-to-node)
-
-P1 M2 minimal surface:
+### 4.1 PxService (node-to-node)
 
 ```protobuf
-service PeerService {
-  rpc Prepare(Prepare) returns (Promise);
-  rpc Accept(Accept) returns (Accepted);
+service PxService {
+  // Classic Paxos (unary)
+  rpc Prepare(PrepareRequest) returns (PromiseResponse);
+  rpc Accept(AcceptRequest) returns (AcceptedResponse);
+
+  // Leader election (unary)
+  rpc PreVote(PreVoteRequest) returns (PreVoteResponse);
+  rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc StepDown(StepDownRequest) returns (StepDownResponse);
+
+  // Steady-state bidi stream (P1 M3)
+  rpc PeerStream(stream PeerStreamRequest) returns (stream PeerStreamResponse);
 }
 ```
 
-P4 extension: replaces the two unary methods with a single bidi stream:
-
-```protobuf
-service PeerService {
-  rpc Stream(stream PeerMessage) returns (stream PeerMessage);
-}
-```
-
-The P4 `Stream` method must still be able to carry the four classic-Paxos message types using the `PeerMessage` oneof arms defined in §3.
+The unary `Accept` RPC is kept during the P1 M3 → M4 migration window. Once all `Accept` traffic flows through `PeerStream` (P1 M4), the unary handler may be deprecated (kept for one release for binary compatibility) and eventually removed.
 
 ### 4.2 AdminService (client / operator)
 
-Not needed in P1 M2. Defined in P4 per [`plan.md`](plan.md) §1 P4 M3/M4:
+Not needed in P1. Defined in P4 per [`plan.md`](plan.md) §1 P4 M3/M4:
 
 ```protobuf
 service AdminService {
@@ -187,20 +206,19 @@ service AdminService {
 
 ## 5. Rust Mapping
 
-| Protobuf message | Generated Rust type (tonic-build) | Runtime Rust equivalent (pre-P4) |
+| Protobuf message | Generated Rust type (tonic-build) | Notes |
 |---|---|---|
-| `Prepare` | `rpc::proto::Prepare` | `paxos::protocol::PrepareRequest` (hand-coded struct, same fields) |
-| `Promise` | `rpc::proto::Promise` | `paxos::protocol::PxPrepareReply` (existing enum, extended with `rejected` info) |
-| `Accept` | `rpc::proto::Accept` | `paxos::protocol::AcceptRequest` (hand-coded struct, same fields) |
-| `Accepted` | `rpc::proto::Accepted` | `paxos::protocol::PxAcceptReply` (existing enum, extended with `rejected` info) |
+| `PrepareRequest` | `rpc::PrepareRequest` | Hand-coded struct with `#[derive(prost::Message)]` |
+| `PromiseResponse` | `rpc::PromiseResponse` | Hand-coded struct |
+| `AcceptRequest` | `rpc::AcceptRequest` | Hand-coded struct |
+| `AcceptedResponse` | `rpc::AcceptedResponse` | Hand-coded struct |
+| `PeerStreamRequest` | `rpc::PeerStreamRequest` | tonic-build from `build.rs` |
+| `PeerStreamResponse` | `rpc::PeerStreamResponse` | tonic-build from `build.rs` |
+| `ChosenNotification` | `rpc::ChosenNotification` | tonic-build from `build.rs` |
 
-**P1 M2 strategy:** because `.proto` generation via `tonic-build` in a `build.rs` is a P4 milestone ([`plan.md`](plan.md) §1 P4 M1), P1 M2 uses **hand-coded Rust structs** that mirror the protobuf shape above, **including the `version: u32 = 1` field on every message**. This ensures P4 can decode M2 wire bytes without ambiguity.
+**Client-side transport:** `crowkv/src/cluster/peer_stream.rs` defines `PxPeerStream` — a thin handle that enqueues frames on a per-peer background task. The background task owns the actual gRPC bidi stream, reconnects on transport failure with capped exponential backoff, and correlates inbound responses to outbound oneshots via `request_id`.
 
-The structs are annotated with `#[derive(prost::Message)]` (or an equivalent lightweight encode/decode impl) so that P4's `.proto` generation produces byte-identical output. This avoids:
-- Adding a `build.rs` dependency to the `crowkv` crate in P1.
-- Committing to exact `.proto` file paths before P4 reviews them.
-
-If `prost` derive is unavailable, a manual `Encoder`/`Decoder` trait impl targeting the protobuf wire format is acceptable for M2 only; the `version` field must still occupy tag 1 in the manual impl.
+**Server-side handler:** `crowkv/src/rpc/px_service.rs` implements `PxService::peer_stream`. Each inbound stream spawns one task. Frames are routed through the existing `ReplicaHandler` methods (`on_accept`, `on_heartbeat`, `on_chosen`) and matching replies are shipped back on the outbound half of the same stream.
 
 ---
 
@@ -208,17 +226,33 @@ If `prost` derive is unavailable, a manual `Encoder`/`Decoder` trait impl target
 
 1. **Sender rule:** every message sets `version = 1` (the initial wire version).
 2. **Receiver rule:** decode must accept any `version <= max_supported`. Unknown fields are ignored (protobuf default behavior).
-3. **Upgrade rule:** when P4 introduces `version = 2`, new fields are added with new field numbers; old fields are never removed or renumbered.
-4. **P1 M2 freeze:** field numbers 1–13 are frozen. P4 may add new oneof arms starting at field number 14. No changes to the semantic meaning of fields 1–13.
+3. **Upgrade rule:** new fields are added with new field numbers; old fields are never removed or renumbered.
+4. **Field-number freeze per message:**
+   - `PrepareRequest`: 1–8 frozen
+   - `PromiseResponse`: 1–12 frozen
+   - `AcceptRequest`: 1–11 frozen
+   - `AcceptedResponse`: 1–11 frozen
+   - `PeerStreamRequest` / `PeerStreamResponse` oneof arms: 1–3 frozen
+   - P4 may add new oneof arms starting at the next free field number.
 
 ---
 
-## 7. Open Questions
+## 7. Flow Control and Parallelism
+
+The `PeerStream` design directly enables the parallel-slot pipelining described in [`design-parallel-slots.md`](design-parallel-slots.md) §5:
+
+- **Multiple in-flight `Accept` frames per peer.** The background task maintains a `PendingMap` (`HashMap<request_id, oneshot::Sender>`). Each `send_accept` call inserts a new oneshot and returns immediately; the caller does not block waiting for the peer's reply. This allows slot N+1's `Accept` to be sent before slot N's `Accepted` response arrives.
+- **Bounded mpsc backpressure.** The user-facing `cmd_tx` is a bounded `tokio::sync::mpsc` whose capacity is `peer_stream_window_frames` (default 64, tunable via `PxElectionConfig`). When the queue is full, `dispatch` fails and the proposer surfaces `PxPaxosError::Busy` (already classified `FailRetryable` in [`design-paxos-error.md`](design-paxos-error.md)).
+- **Reconnect safety.** On transport failure the background task fails all pending oneshots with `PxReplicaError::Internal("stream reset")`, then reconnects with capped exponential backoff (50 ms → 2 s). The proposer treats this as a retryable failure and re-sends the `Accept` after the reconnect.
+
+---
+
+## 8. Open Questions
 
 - **Q1:** Should `AcceptedValue.payload` carry a `LogEntryKind` enum in P1 M2, or is it purely opaque bytes until P1 M4 introduces the learner?  
-  **Tentative:** opaque bytes in M2; the leader and acceptor treat it as a blob. M4 introduces `kind` discrimination when the learner needs to distinguish `Write` from `NoOp`.
+  **Resolved:** opaque bytes in M2; `kind` discrimination added in M3 (`NoOp` for bulk Phase-1) and fully wired in M4.
 - **Q2:** Should `Promise` and `Accepted` carry `term` for leader-fencing, or is `ballot` sufficient in classic Paxos?  
-  **Tentative:** `term` is omitted from the P1 M2 wire format; the leader's `term` is implicit because there is no election. M3 (leader election) adds `term` to all messages for fencing.
+  **Resolved:** `term` added in P1 M3 to all messages for the two-fence rule (see [`design-leader-election.md`](design-leader-election.md) §2.3).
 
 ---
 
@@ -227,5 +261,7 @@ If `prost` derive is unavailable, a manual `Encoder`/`Decoder` trait impl target
 - [Protocol Buffers Language Guide](https://developers.google.com/protocol-buffers/docs/proto3)
 - [Tonic gRPC framework](https://github.com/hyperium/tonic)
 - [prost — Protocol Buffers implementation for the Rust Language](https://github.com/tokio-rs/prost)
-- [`plan.md`](plan.md) §1 P4 — full RPC phase plan
-- [`plan.md`](plan.md) §1 P1 M2 — minimal RPC milestone that introduces this subset
+- [`design-leader-election.md`](design-leader-election.md) §6 — heartbeat/lease interaction with stream ordering
+- [`design-parallel-slots.md`](design-parallel-slots.md) §5 — pipelined fanout and per-peer flow control
+- [`plan.md`](plan.md) §1 P1 M3 — leader election + bidi stream milestone
+- [`plan.md`](plan.md) §1 P1 M4 — parallel proposer milestone

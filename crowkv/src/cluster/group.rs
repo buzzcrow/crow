@@ -614,6 +614,10 @@ impl PxGroup {
                 match self.run_accept_phase(replica, &entry, quorum).await {
                     AcceptAttempt::Chosen => {
                         replica.learn(&entry);
+                        // Step 10.6b: tell peers the slot is chosen so
+                        // their `last_chosen_slot` watermark advances
+                        // before the next heartbeat tick.
+                        self.fan_out_chosen_notice(&entry, group_id).await;
                         info!(
                             group_id,
                             slot = entry.slot,
@@ -786,6 +790,9 @@ impl PxGroup {
             match self.run_accept_phase(replica, &entry, quorum).await {
                 AcceptAttempt::Chosen => {
                     replica.learn(&entry);
+                    // Step 10.6b: notify peers about repaired slots so
+                    // their watermarks catch up alongside ours.
+                    self.fan_out_chosen_notice(&entry, group_id).await;
                     slots_repaired += 1;
                 }
                 AcceptAttempt::Retry { error, .. } | AcceptAttempt::Fail { error } => {
@@ -1032,6 +1039,33 @@ impl PxGroup {
         }
         AcceptAttempt::Fail {
             error: PxPaxosError::QuorumUnavailable { phase: PxPaxosPhase::Accept },
+        }
+    }
+
+    /// Step 10.6b: best-effort fan-out of a `ChosenNotification` to every
+    /// real remote in this group after a slot has been chosen. The
+    /// notice is fire-and-forget over the per-peer bidi `PxPeerStream`;
+    /// failures are logged at `debug!` and never propagated, since the
+    /// next heartbeat (carrying `committed_safe_slot`) will re-converge
+    /// peer frontiers regardless.
+    ///
+    /// `leader_id` is taken from `entry.ballot.leader_id`, matching the
+    /// proposer that chose the value. Sequential await rather than
+    /// `JoinSet` fan-out is fine for now: each `send_chosen_notice` is
+    /// just an mpsc enqueue (capacity = `peer_stream_window_frames`)
+    /// once the per-peer bg task is running, so it returns near-
+    /// instantly except when a peer is down (in which case it fast-
+    /// fails via the connect-retry drain in `peer_stream.rs`).
+    async fn fan_out_chosen_notice(&self, entry: &PxLogEntry, group_id: u64) {
+        let slot = entry.slot;
+        let term = entry.term;
+        let leader_id = entry.ballot.leader_id;
+        for remote in &self.remote_replicas {
+            let RemoteReplicaKind::Real(remote) = remote else { continue };
+            let remote_id = remote.node_id;
+            if let Err(err) = remote.send_chosen_notice(slot, term, leader_id, group_id).await {
+                debug!(group_id, slot, term, remote_id, endpoint = %remote.endpoint, error = %err, "fan_out_chosen_notice: peer notice failed (best-effort)");
+            }
         }
     }
 

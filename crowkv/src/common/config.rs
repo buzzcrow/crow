@@ -44,6 +44,10 @@ pub struct PxElectionConfig {
     /// spawned. Used by `testkit::cluster::start_cluster` to keep legacy M1/M2
     /// tests deterministic (pinned leader via `set_leader_id`).
     pub election_driver_disabled: bool,
+    /// Bounded capacity of the per-peer `PxPeerStream` outbound mpsc
+    /// (Step 10.3). Full mpsc surfaces as `PxPaxosError::Busy` on the
+    /// proposer side (already classified `FailRetryable`).
+    pub peer_stream_window_frames: usize,
 }
 
 impl PxElectionConfig {
@@ -57,6 +61,7 @@ impl PxElectionConfig {
         max_clock_skew_ms: 500,
         bulk_prepare_window: 1024,
         election_driver_disabled: false,
+        peer_stream_window_frames: 64,
     };
 
     /// Aggressive timings for `#[tokio::test(start_paused = true)]` suites.
@@ -74,6 +79,7 @@ impl PxElectionConfig {
             max_clock_skew_ms: 1,
             bulk_prepare_window: 1024,
             election_driver_disabled: false,
+            peer_stream_window_frames: 64,
         }
     }
 }

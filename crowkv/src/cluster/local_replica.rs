@@ -9,6 +9,7 @@ use crate::cluster::replica::{
 };
 use crate::cluster::shutdown::ShutdownReport;
 use crate::cluster::snapshot::{KvStoreSnapshot, LocalReplicaSnapshot};
+use crate::common::metrics::{ElectionMetrics, ElectionMetricsSnapshot};
 use crate::paxos::acceptor::PxAcceptor;
 use crate::paxos::learner::PxLearner;
 use crate::paxos::roles::{Acceptor, Learner, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply, SlotIndex};
@@ -167,6 +168,15 @@ pub struct PxLocalReplica {
     pub(crate) admin_step_down_signal: tokio::sync::Notify,
     /// Idempotency gate for [`Self::shutdown`].
     shutdown_started: AtomicBool,
+    /// Per-replica leader-election counters (Step 11). Cheap `Relaxed`
+    /// atomic increments on the election hot path; consumed by
+    /// `election_metrics_snapshot()` for health / management API.
+    election_metrics: ElectionMetrics,
+    /// Wall-clock-monotonic instant of the most recent accepted
+    /// heartbeat (follower side; `None` before the first one). Read
+    /// by `election_metrics_snapshot()` to compute
+    /// `last_heartbeat_age_ms`.
+    last_heartbeat_at: Mutex<Option<Instant>>,
 }
 
 impl std::fmt::Debug for PxLocalReplica {
@@ -234,6 +244,8 @@ impl PxLocalReplica {
             lease_state: Mutex::new(LeaseState::expired()),
             admin_step_down_signal: tokio::sync::Notify::new(),
             shutdown_started: AtomicBool::new(false),
+            election_metrics: ElectionMetrics::new(),
+            last_heartbeat_at: Mutex::new(None),
         }
     }
 
@@ -327,6 +339,55 @@ impl PxLocalReplica {
         self.lease_state.lock().clone()
     }
 
+    /// Step 11: borrow the per-replica election counter handle so the
+    /// election driver / step-down sequence can bump counters without
+    /// going through additional accessor noise.
+    #[must_use]
+    pub fn election_metrics(&self) -> &ElectionMetrics {
+        &self.election_metrics
+    }
+
+    /// Step 11: combined election + lease snapshot for the management
+    /// API / health endpoint. Combines the monotonic counters with
+    /// derived gauges computed at read time so we don't have to keep
+    /// extra atomics in sync with the canonical mutex-guarded state.
+    #[must_use]
+    pub fn election_metrics_snapshot(&self, bulk_phase1_in_flight_slots: u64) -> ElectionMetricsSnapshot {
+        let counters = self.election_metrics.counters();
+        let now = Instant::now();
+        let last_heartbeat_age_ms = self.last_heartbeat_at.lock().map(|inst| now.saturating_duration_since(inst).as_millis().try_into().unwrap_or(u64::MAX));
+        let lease_remaining_ms = if self.is_leader() {
+            let lease = self.lease_state.lock();
+            // `lease_read_until` is the publishable read-lease deadline.
+            // When the lease is in the past we report `None`.
+            if lease.lease_read_until > now {
+                Some(lease.lease_read_until.saturating_duration_since(now).as_millis().try_into().unwrap_or(u64::MAX))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        ElectionMetricsSnapshot {
+            election_count: counters.election_count,
+            current_term: self.current_term_snapshot(),
+            last_heartbeat_age_ms,
+            lease_remaining_ms,
+            bulk_phase1_in_flight_slots,
+            step_downs_higher_term: counters.step_downs_higher_term,
+            step_downs_lease_unrenewable: counters.step_downs_lease_unrenewable,
+            step_downs_admin: counters.step_downs_admin,
+        }
+    }
+
+    /// Step 11: record the wall-clock-monotonic instant of the most
+    /// recently accepted heartbeat (follower side). Called from
+    /// [`Self::handle_heartbeat`] on the success path so the management
+    /// snapshot can report `last_heartbeat_age_ms`.
+    pub(crate) fn note_heartbeat_received(&self) {
+        *self.last_heartbeat_at.lock() = Some(Instant::now());
+    }
+
     /// Update [`LeaseState`] under its mutex.
     pub fn with_lease_state<R>(&self, f: impl FnOnce(&mut LeaseState) -> R) -> R {
         let mut guard = self.lease_state.lock();
@@ -375,6 +436,8 @@ impl PxLocalReplica {
             s.role = PxLocalReplicaRole::Candidate;
         });
         self.role_atomic.store(PxLocalReplicaRole::Candidate.as_u8(), Ordering::Release);
+        // Step 11: one election attempt initiated.
+        self.election_metrics.record_election();
         info!(replica_l_id = self.id, current_term = new_term, "become_candidate");
     }
 
@@ -463,6 +526,21 @@ impl PxLocalReplica {
     /// Learn a chosen entry (apply to state machine).
     pub fn learn(&self, entry: &PxLogEntry) {
         self.learner.learn(entry.clone());
+    }
+
+    /// Receive a peer-side `ChosenNotice` for `(slot, term)` and update
+    /// `last_chosen_slot` / `last_chosen_term` only. Drops notices whose
+    /// `term < current_term` (Step 8 fence). Notices with `term >
+    /// current_term` are still recorded — the chosen high-water mark
+    /// is informational and does not bump our own term.
+    ///
+    /// Returns `true` if the watermark advanced.
+    pub fn note_chosen(&self, slot: SlotIndex, term: PxTerm) -> bool {
+        if term < self.current_term_snapshot() {
+            debug!(replica_l_id = self.id, slot, term, "note_chosen: dropped (term < current_term)");
+            return false;
+        }
+        self.learner.note_chosen(slot, term)
     }
 
     /// Read the currently accepted value at a slot (for verification).
@@ -638,6 +716,9 @@ impl PxLocalReplica {
         if success {
             self.current_term_atomic.store(term, Ordering::Release);
             self.role_atomic.store(PxLocalReplicaRole::Follower.as_u8(), Ordering::Release);
+            // Step 11: timestamp the heartbeat so the metrics snapshot
+            // can report `last_heartbeat_age_ms`.
+            self.note_heartbeat_received();
         }
         let (contiguous_chosen, last_chosen_term, highest_seen_slot) = self.frontier_triple();
         let contiguous_applied = self.contiguous_applied();
