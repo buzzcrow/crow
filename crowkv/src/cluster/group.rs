@@ -226,6 +226,43 @@ impl PxGroup {
         report
     }
 
+    /// Report JSON-serializable health info for API responses.
+    #[must_use]
+    pub fn report_health(&self) -> crate::cluster::health_info::HealthGroupInfo {
+        let g_health = self.health();
+        let role = if self.leader_id == self.local_replica.id { "leader" } else { "follower" };
+        let local_health = self.local_replica.health();
+        let local_replica = crate::cluster::health_info::HealthReplicaInfo {
+            id: self.local_replica.id,
+            role: role.to_string(),
+            status: local_health.status.as_str().to_string(),
+            messages: local_health.messages,
+        };
+        let remotes: Vec<crate::cluster::health_info::HealthRemoteInfo> = self
+            .remote_replicas
+            .iter()
+            .filter_map(|r| match r {
+                RemoteReplicaKind::Real(remote) => {
+                    let h = remote.health();
+                    Some(crate::cluster::health_info::HealthRemoteInfo {
+                        id: remote.node_id,
+                        endpoint: remote.endpoint.clone(),
+                        status: h.status.as_str().to_string(),
+                        messages: h.messages,
+                    })
+                }
+                RemoteReplicaKind::Placeholder => None,
+            })
+            .collect();
+        crate::cluster::health_info::HealthGroupInfo {
+            group_id: self.group_id,
+            status: g_health.status.as_str().to_string(),
+            messages: g_health.messages,
+            local_replica,
+            remotes,
+        }
+    }
+
     // ── Shutdown ──────────────────────────────────────────────────
 
     /// Cascade shutdown through this group's replicas.

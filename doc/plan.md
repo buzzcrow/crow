@@ -120,7 +120,6 @@ P4 RPC ────────────────────────�
 ```
 crowkv    (all core logic: consensus, engine, wal, io, rpc, reconfig)
   └─ crowkv-server                                 [P4] (binary)
-  └─ crowkv-bench                                  [P4] (benchmark binary)
 
 crowkv::testkit  (dev-dep only; TestTimer, TestRouter, TestNode, SimDisk)
   └─ crowkv::io (re-exports SimDisk)

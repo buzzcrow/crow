@@ -6,6 +6,11 @@ description: CrowKV coding flow with logging rules and test layout
 
 Companion: `/review` (pre-push), `/doc` (doc rules).
 
+## Model Scope Division
+
+- **AI scope (expensive model)**: implement core code and fix bugs surfaced by tests
+- **User scope (free model / SWE-1.6)**: cargo fmt, clippy fixes, doc comments, README/index updates, git commit, push
+
 ## 1. Doc-First
 
 - Start at `doc/doc_index.md` — match the task to a row, then open only that doc and grep for the listed `##` section. Avoid full reads.
@@ -50,7 +55,16 @@ Defaults: file=`debug`, console (`-l`)=`info`. Override via `RUST_LOG`. See `cro
 - Paxos suite: `crowkv/tests/paxos/*.rs` with `tests/paxos.rs` as entry stub.
 - Tracing in tests: set `CROWKV_TEST_LOG=1`; init in `tests/testkit/logging.rs`.
 
-## 5. Pre-Commit (auto via `.githooks/pre-commit`)
+## 5. Health & Info Reporting
+
+When adding new internal state to `crowkv` lib:
+
+- **HealthStatus** (`crowkv/src/cluster/health.rs`): add new variants if they represent distinct operational states that operators need to see (e.g., `Initializing`, `Draining`). These are exposed to UI for internal monitoring.
+- **Info structs** (`crowkv/src/cluster/info.rs`): add fields that help operators understand cluster state (e.g., pending operations, configuration drift). Default to exposing useful internal state since this is internal UI usage with no security concerns.
+
+Rule: if the state helps operators debug or understand the system, expose it via health or info.
+
+## 6. Pre-Commit (auto via `.githooks/pre-commit`)
 
 // turbo
 ```bash

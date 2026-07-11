@@ -46,7 +46,7 @@ async fn health_check() {
     assert_eq!(resp["status"], "ok");
 }
 
-#[cfg(feature = "openapi")]
+#[cfg(feature = "swagger-ui")]
 #[tokio::test]
 async fn openapi_json_is_served() {
     let server = start_server().await;

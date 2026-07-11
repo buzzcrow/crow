@@ -7,9 +7,9 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tracing::info;
-#[cfg(feature = "openapi")]
+#[cfg(feature = "swagger-ui")]
 use utoipa::{OpenApi, ToSchema};
-#[cfg(feature = "openapi")]
+#[cfg(feature = "swagger-ui")]
 use utoipa_swagger_ui::SwaggerUi;
 
 use crowkv::cluster::group::PxGroup;
@@ -36,7 +36,7 @@ pub fn router(state: RegistryArc) -> Router {
         .route("/top", get(export_topology))
         .with_state(state);
 
-    #[cfg(feature = "openapi")]
+    #[cfg(feature = "swagger-ui")]
     let router = router.merge(SwaggerUi::new("/api")).route("/openapi.json", get(openapi_spec));
 
     router
@@ -44,7 +44,7 @@ pub fn router(state: RegistryArc) -> Router {
 
 // ── JSON types ──────────────────────────────────────────────
 
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
 #[derive(Serialize)]
 struct HealthResponse {
     status: String,
@@ -53,7 +53,7 @@ struct HealthResponse {
     stores: Vec<HealthStore>,
 }
 
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
 #[derive(Serialize)]
 struct HealthStore {
     store_id: u64,
@@ -63,7 +63,7 @@ struct HealthStore {
     groups: Vec<HealthGroup>,
 }
 
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
 #[derive(Serialize)]
 struct HealthGroup {
     group_id: u64,
@@ -74,7 +74,7 @@ struct HealthGroup {
     remotes: Vec<HealthRemote>,
 }
 
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
 #[derive(Serialize)]
 struct HealthReplica {
     id: u64,
@@ -84,7 +84,7 @@ struct HealthReplica {
     messages: Vec<String>,
 }
 
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
 #[derive(Serialize)]
 struct HealthRemote {
     id: u64,
@@ -94,31 +94,31 @@ struct HealthRemote {
     messages: Vec<String>,
 }
 
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
 #[derive(Serialize)]
 struct StoreListResponse {
     stores: Vec<StoreSummary>,
 }
 
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
 #[derive(Serialize)]
 struct StoreSummary {
     store_id: u64,
-    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[cfg_attr(feature = "swagger-ui", schema(value_type = Option<String>))]
     listen_addr: Option<SocketAddr>,
     group_count: usize,
 }
 
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
 #[derive(Serialize)]
 struct StoreDetail {
     store_id: u64,
-    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[cfg_attr(feature = "swagger-ui", schema(value_type = Option<String>))]
     listen_addr: Option<SocketAddr>,
     groups: Vec<GroupSummary>,
 }
 
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
 #[derive(Serialize)]
 struct GroupSummary {
     group_id: u64,
@@ -127,7 +127,7 @@ struct GroupSummary {
     remote_count: usize,
 }
 
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
 #[derive(Deserialize)]
 struct AddStoreRequest {
     store_id: u64,
@@ -137,42 +137,42 @@ struct AddStoreRequest {
     port: Option<u16>,
 }
 
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
 #[derive(Deserialize)]
 struct AddGroupRequest {
     group_id: u64,
     replica_id: u64,
 }
 
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
 #[derive(Serialize, Deserialize, Clone)]
 struct RemoteReplicaInfo {
     replica_id: u64,
     endpoint: String,
 }
 
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
 #[derive(Serialize)]
 struct RemoteListResponse {
     remotes: Vec<RemoteReplicaInfo>,
 }
 
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
 #[derive(Serialize, Deserialize)]
 struct TopologyResponse {
     stores: Vec<TopologyStore>,
 }
 
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
 #[derive(Serialize, Deserialize)]
 struct TopologyStore {
     store_id: u64,
-    #[cfg_attr(feature = "openapi", schema(value_type = Option<String>))]
+    #[cfg_attr(feature = "swagger-ui", schema(value_type = Option<String>))]
     listen_addr: Option<SocketAddr>,
     groups: Vec<TopologyGroup>,
 }
 
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
 #[derive(Serialize, Deserialize)]
 struct TopologyGroup {
     group_id: u64,
@@ -185,7 +185,7 @@ struct TopologyGroup {
     remotes: Vec<TopologyRemote>,
 }
 
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
 #[derive(Serialize, Deserialize)]
 struct TopologyLocalReplica {
     id: u64,
@@ -194,13 +194,13 @@ struct TopologyLocalReplica {
     kv_store: TopologyKvStore,
 }
 
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
 #[derive(Serialize, Deserialize)]
 struct TopologyKvStore {
     key_count: u64,
 }
 
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
 #[derive(Serialize, Deserialize)]
 struct TopologyRemote {
     id: u64,
@@ -209,7 +209,7 @@ struct TopologyRemote {
     metrics: TopologyMetrics,
 }
 
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
 #[derive(Serialize, Deserialize)]
 struct TopologyMetrics {
     rpc_count: u64,
@@ -217,7 +217,7 @@ struct TopologyMetrics {
     last_rtt_ms: u64,
 }
 
-#[cfg_attr(feature = "openapi", derive(ToSchema))]
+#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
 #[derive(Serialize)]
 struct ErrorResponse {
     error: String,
@@ -229,7 +229,7 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Err
 
 // ── Handlers ────────────────────────────────────────────────
 
-#[cfg(feature = "openapi")]
+#[cfg(feature = "swagger-ui")]
 #[derive(OpenApi)]
 #[openapi(
     paths(
@@ -281,18 +281,18 @@ pub struct ApiDoc;
 /// # Panics
 ///
 /// Panics if the `OpenAPI` document cannot be serialized to JSON (should never happen with valid utoipa annotations).
-#[cfg(feature = "openapi")]
+#[cfg(feature = "swagger-ui")]
 #[must_use]
 pub fn openapi_json() -> serde_json::Value {
     serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI document should serialize")
 }
 
-#[cfg(feature = "openapi")]
+#[cfg(feature = "swagger-ui")]
 async fn openapi_spec() -> Json<serde_json::Value> {
     Json(openapi_json())
 }
 
-#[cfg(not(feature = "openapi"))]
+#[cfg(not(feature = "swagger-ui"))]
 #[allow(dead_code)]
 fn openapi_spec() -> StatusCode {
     StatusCode::NOT_FOUND
@@ -304,7 +304,7 @@ fn openapi_spec() -> StatusCode {
 /// when overall status is `ok` / `degraded`, `503` when `unhealthy`
 /// (load-balancer signal).
 #[cfg_attr(
-    feature = "openapi",
+    feature = "swagger-ui",
     utoipa::path(
         get,
         path = "/health",
@@ -392,7 +392,7 @@ async fn health_check(State(state): State<RegistryArc>) -> (StatusCode, Json<Hea
 }
 
 #[cfg_attr(
-    feature = "openapi",
+    feature = "swagger-ui",
     utoipa::path(
         get,
         path = "/stores",
@@ -418,7 +418,7 @@ async fn list_stores(State(state): State<RegistryArc>) -> Json<StoreListResponse
 }
 
 #[cfg_attr(
-    feature = "openapi",
+    feature = "swagger-ui",
     utoipa::path(
         get,
         path = "/stores/{sid}",
@@ -452,7 +452,7 @@ async fn get_store(State(state): State<RegistryArc>, Path(sid): Path<u64>) -> Re
 }
 
 #[cfg_attr(
-    feature = "openapi",
+    feature = "swagger-ui",
     utoipa::path(
         post,
         path = "/stores",
@@ -514,7 +514,7 @@ async fn add_store(State(state): State<RegistryArc>, Json(req): Json<AddStoreReq
 }
 
 #[cfg_attr(
-    feature = "openapi",
+    feature = "swagger-ui",
     utoipa::path(
         delete,
         path = "/stores/{sid}",
@@ -540,7 +540,7 @@ async fn remove_store(State(state): State<RegistryArc>, Path(sid): Path<u64>) ->
 }
 
 #[cfg_attr(
-    feature = "openapi",
+    feature = "swagger-ui",
     utoipa::path(
         get,
         path = "/stores/{sid}/groups",
@@ -570,7 +570,7 @@ async fn list_groups(State(state): State<RegistryArc>, Path(sid): Path<u64>) -> 
 }
 
 #[cfg_attr(
-    feature = "openapi",
+    feature = "swagger-ui",
     utoipa::path(
         post,
         path = "/stores/{sid}/groups",
@@ -606,7 +606,7 @@ async fn add_group(State(state): State<RegistryArc>, Path(sid): Path<u64>, Json(
 }
 
 #[cfg_attr(
-    feature = "openapi",
+    feature = "swagger-ui",
     utoipa::path(
         delete,
         path = "/stores/{sid}/groups/{gid}",
@@ -634,7 +634,7 @@ async fn remove_group(State(state): State<RegistryArc>, Path((sid, gid)): Path<(
 }
 
 #[cfg_attr(
-    feature = "openapi",
+    feature = "swagger-ui",
     utoipa::path(
         get,
         path = "/stores/{sid}/groups/{gid}/remotes",
@@ -668,7 +668,7 @@ async fn list_remotes(State(state): State<RegistryArc>, Path((sid, gid)): Path<(
 }
 
 #[cfg_attr(
-    feature = "openapi",
+    feature = "swagger-ui",
     utoipa::path(
         post,
         path = "/stores/{sid}/groups/{gid}/remotes",
@@ -732,7 +732,7 @@ async fn add_remotes(
 }
 
 #[cfg_attr(
-    feature = "openapi",
+    feature = "swagger-ui",
     utoipa::path(
         delete,
         path = "/stores/{sid}/groups/{gid}/remotes/{rid}",
@@ -781,7 +781,7 @@ async fn remove_remote(State(state): State<RegistryArc>, Path((sid, gid, rid)): 
 }
 
 #[cfg_attr(
-    feature = "openapi",
+    feature = "swagger-ui",
     utoipa::path(
         post,
         path = "/stores/{sid}/groups/{gid}/remotes/batch",
@@ -853,7 +853,7 @@ async fn batch_add_remotes(
 /// `GET /topology` (alias `/top`) — full hierarchy with per-remote RPC
 /// metrics and cheap kv-store stats.
 #[cfg_attr(
-    feature = "openapi",
+    feature = "swagger-ui",
     utoipa::path(
         get,
         path = "/topology",

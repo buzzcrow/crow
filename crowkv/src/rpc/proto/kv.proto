@@ -19,6 +19,14 @@ message KvSetRequest {
   uint64 group_id = 9;
 }
 
+message KvGetRequest {
+  uint32 version = 1;
+  bytes  key     = 2;
+  uint64 request_id = 3;
+  uint64 request_create_ms = 4;
+  uint64 group_id = 5;
+}
+
 message KvDeleteRequest {
   uint32 version = 1;
   bytes  key     = 2;
@@ -60,6 +68,7 @@ message KvResponse {
 
 service KvService {
   rpc Put(KvSetRequest) returns (KvResponse);
+  rpc Get(KvGetRequest) returns (KvResponse);
   rpc Delete(KvDeleteRequest) returns (KvResponse);
   rpc BatchWrite(KvBatchWriteRequest) returns (KvResponse);
 }

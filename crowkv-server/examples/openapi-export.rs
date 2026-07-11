@@ -1,4 +1,4 @@
-#[cfg(feature = "openapi")]
+#[cfg(feature = "swagger-ui")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out = std::path::Path::new("target/openapi.json");
     if let Some(parent) = out.parent() {
@@ -10,7 +10,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-#[cfg(not(feature = "openapi"))]
+#[cfg(not(feature = "swagger-ui"))]
 fn main() {
     eprintln!("openapi feature is required");
     std::process::exit(1);

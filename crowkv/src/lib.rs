@@ -1,6 +1,6 @@
 //! `CrowKV` core library.
 //!
-//! All business logic lives here as modules. Binaries (`crowkv-server`, `crowkv-bench`)
+//! All business logic lives here as modules. Binaries (`crowkv-server`)
 //! are thin wrappers that wire configuration and CLI parsing.
 
 pub mod cluster;

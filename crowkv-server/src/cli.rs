@@ -4,8 +4,8 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(name = "crowkv-server", about = "CrowKV server daemon")]
 pub struct Cli {
-    /// HTTP management API listen port.
-    #[arg(long, default_value_t = 0)]
+    /// HTTP management API listen port. Default: 9910.
+    #[arg(long, default_value_t = 9910)]
     pub management_port: u16,
 
     /// HTTP management API bind address.
@@ -41,7 +41,7 @@ pub struct Cli {
 ///
 /// Supported formats:
 /// - Single value: `28`
-/// - Half-open range: `40..50` (produces 40..49)
+/// - Inclusive range: `40..50` (produces 40..50)
 /// - Mixed: `28,39,40..50,59`
 ///
 /// Duplicates are silently deduplicated. Order is preserved (first occurrence wins).
@@ -65,10 +65,10 @@ pub fn parse_id_list(input: &str) -> Result<Vec<u64>, String> {
         if let Some((start_s, end_s)) = part.split_once("..") {
             let start: u64 = start_s.trim().parse().map_err(|_| format!("invalid range start: '{start_s}'"))?;
             let end: u64 = end_s.trim().parse().map_err(|_| format!("invalid range end: '{end_s}'"))?;
-            if start >= end {
-                return Err(format!("range start must be < end: '{part}'"));
+            if start > end {
+                return Err(format!("range start must be <= end: '{part}'"));
             }
-            for v in start..end {
+            for v in start..=end {
                 if seen.insert(v) {
                     result.push(v);
                 }

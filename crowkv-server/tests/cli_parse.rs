@@ -16,17 +16,17 @@ fn parse_multiple() {
 
 #[test]
 fn parse_range() {
-    assert_eq!(parse_id_list("10..13").unwrap(), vec![10, 11, 12]);
+    assert_eq!(parse_id_list("10..13").unwrap(), vec![10, 11, 12, 13]);
 }
 
 #[test]
 fn parse_mixed() {
-    assert_eq!(parse_id_list("5,10..13,20").unwrap(), vec![5, 10, 11, 12, 20]);
+    assert_eq!(parse_id_list("5,10..13,20").unwrap(), vec![5, 10, 11, 12, 13, 20]);
 }
 
 #[test]
 fn parse_dedup() {
-    assert_eq!(parse_id_list("1,1,2,2..4").unwrap(), vec![1, 2, 3]);
+    assert_eq!(parse_id_list("1,1,2,2..4").unwrap(), vec![1, 2, 3, 4]);
 }
 
 #[test]

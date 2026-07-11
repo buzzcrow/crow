@@ -3,7 +3,11 @@ resolver = "2"
 members = [
     "crowkv",
     "crowkv-server",
-    "crowkv-bench",
+    "crowkv-console/crowkv-console-core",
+    "crowkv-console/crowkv-console-ssh",
+    "crowkv-console/crowkv-console-bench",
+    "crowkv-console/crowkv-console-web",
+    "crowkv-console/crowkv-console-cli",
 ]
 
 [workspace.package]

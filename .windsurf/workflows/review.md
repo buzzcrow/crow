@@ -16,13 +16,17 @@ Hot paths: `propose`, `accept`, `learn`, `kv_get`, `kv_put`, `kv_delete`, `kv_ba
 
 ## Checklist
 
-1. **Comments** — ensure code comments follow conventions:
+1. **Health & Info exposure** — when adding internal state, consider if it should be exposed to UI:
+   - Add `HealthStatus` variants for distinct operational states operators need to see
+   - Add info struct fields that help operators understand cluster state
+   - Default to exposing useful internal state (internal UI, no security concerns)
+2. **Comments** — ensure code comments follow conventions:
    - Module-level comments (`//!`) summarize purpose, explain why, list key work areas
    - No doc references (`doc/`, `plan.md`, etc.) in code comments
    - Function/struct comments (`///`) describe what and why
    - Inline comments explain non-obvious logic, invariants, trade-offs
    - TODO/FIXME markers tracked in `doc/todo_code.md`
-2. **Clone** — review every `#[derive(Clone)]` and `.clone()`. In hot paths, justify with a comment if non-trivial overhead is accepted (e.g. `Arc<Vec<u8>>` payloads sharing).
+3. **Clone** — review every `#[derive(Clone)]` and `.clone()`. In hot paths, justify with a comment if non-trivial overhead is accepted (e.g. `Arc<Vec<u8>>` payloads sharing).
 3. **Arc** — drop inner `Arc` when parent is already `Arc`. Return `&T` instead of `Arc<T>` when parent keeps it alive. Inner `Arc` only needed if it outlives parent (e.g. moved into `tokio::spawn`). `&T` across `.await` is safe while owner is in scope.
 4. **Mutex** — `std::sync::Mutex` for short non-async sections; `tokio::sync::Mutex` only across `.await`; remove if all state is atomic.
 5. **Enum vs `dyn Trait`** — prefer enum dispatch. `dyn` only for open-ended / cross-crate.

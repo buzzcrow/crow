@@ -1,0 +1,23 @@
+[package]
+name = "crowkv-console-ssh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+crowkv-console-core = { path = "../crowkv-console-core" }
+russh = "0.45"
+tokio = { workspace = true, features = ["rt", "macros", "io-util", "time", "net"] }
+tracing = { workspace = true }
+dirs = "5"
+toml = "0.8"
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+crowkv-console-core = { path = "../crowkv-console-core" }

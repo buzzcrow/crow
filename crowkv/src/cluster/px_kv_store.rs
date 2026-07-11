@@ -165,6 +165,27 @@ impl PxKvStore {
         }
     }
 
+    /// Report JSON-serializable info for API responses.
+    ///
+    /// Calls `report_info()` on the snapshot to build the complete info hierarchy.
+    #[must_use]
+    pub fn report_info(&self) -> crate::cluster::info::StoreInfo {
+        self.snapshot().report_info()
+    }
+
+    /// Report JSON-serializable health info for API responses.
+    #[must_use]
+    pub fn report_health(&self) -> crate::cluster::health_info::HealthStoreInfo {
+        let health = self.health();
+        let groups: Vec<crate::cluster::health_info::HealthGroupInfo> = self.groups.iter().map(|entry| entry.value().report_health()).collect();
+        crate::cluster::health_info::HealthStoreInfo {
+            store_id: self.store_id,
+            status: health.status.as_str().to_string(),
+            messages: health.messages,
+            groups,
+        }
+    }
+
     /// Aggregate cached health for this store: server liveness + each group.
     ///
     /// - `Unhealthy` if `shutdown()` has run or the gRPC server is not active.

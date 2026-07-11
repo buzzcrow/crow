@@ -2,6 +2,8 @@
 
 pub mod group;
 pub mod health;
+pub mod health_info;
+pub mod info;
 pub mod kv_server;
 pub mod kv_store;
 pub mod local_replica;
@@ -13,6 +15,8 @@ pub mod snapshot;
 
 pub use group::ProposeResult;
 pub use health::{HealthReport, HealthStatus};
+pub use health_info::{HealthGroupInfo, HealthRemoteInfo, HealthReplicaInfo, HealthStoreInfo};
+pub use info::{GroupInfo, KvStoreInfo, RemoteReplicaInfo, ReplicaInfo, StoreInfo};
 pub use kv_server::*;
 pub use local_replica::*;
 pub use px_kv_store::*;

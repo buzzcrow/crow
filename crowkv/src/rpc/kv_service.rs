@@ -7,7 +7,7 @@
 use crate::cluster::kv_store::KvStore;
 use crate::cluster::px_kv_store::PxKvStore;
 use crate::rpc::kv_service_server::KvService;
-use crate::rpc::{KvBatchWriteRequest, KvDeleteRequest, KvResponse, KvSetRequest};
+use crate::rpc::{KvBatchWriteRequest, KvDeleteRequest, KvGetRequest, KvResponse, KvSetRequest};
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 use tracing::{debug, warn};
@@ -51,6 +51,24 @@ impl KvService for KvStoreService {
                 "kv put failed; next step: retry at hinted leader or inspect paxos logs"
             );
         }
+        resp.request_id = req.request_id;
+        resp.request_create_ms = req.request_create_ms;
+        Ok(Response::new(resp))
+    }
+
+    async fn get(&self, request: Request<KvGetRequest>) -> Result<Response<KvResponse>, Status> {
+        let req = request.into_inner();
+        debug!(
+            store_id = self.store.store_id,
+            group_id = req.group_id,
+            request_id = req.request_id,
+            key_len = req.key.len(),
+            "received kv get rpc"
+        );
+        let mut resp = self.store.kv_get(req.group_id, req.key, req.request_id, req.request_create_ms).await;
+        // kv_get is a local-only read in V1; missing-key is reported via
+        // not_found rather than an RPC-level error. Just echo the
+        // request envelope back to the client.
         resp.request_id = req.request_id;
         resp.request_create_ms = req.request_create_ms;
         Ok(Response::new(resp))

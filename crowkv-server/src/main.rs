@@ -73,7 +73,7 @@ async fn main() {
         "HTTP management API starting"
     );
     // Print to stdout for test harness to read
-    println!("management_addr={display_addr}");
+    println!("Management API listening on: management_addr={display_addr}");
 
     // Create and start stores after management API is ready
     create_and_start_stores(&store_ids, &group_ids, replica_id, leader_id, ports, registry.clone()).await;

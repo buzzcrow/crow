@@ -12,6 +12,8 @@ doc only when a task touches a topic in its row. Line counts are approximate
 | `design.md` | ~490 | Master design: cross-cutting architecture, write/read flows, module decomposition. Read for scope-spanning questions. |
 | `plan.md` | ~190 | Phases (P1–P5), milestones, dependency order, decision log. Read before picking a task. |
 | `test.md` | ~250 | Test pyramid, invariants, failure-injection taxonomy, CI gates, suites. Read when adding/restructuring tests. |
+| `requirement-console.md` | ~190 | `crowkv-console` (web UI + CLI) requirements: cluster observation, simulated hardware, KV ops, CLI hierarchy, load testing. |
+| `plan-console.md` | ~150 | `crowkv-console` phased implementation plan (C0–C8). |
 
 ## `requirement.md` Sections
 
@@ -80,6 +82,7 @@ doc only when a task touches a topic in its row. Line counts are approximate
 | Doc | Lines | Read when working on |
 | --- | ---: | --- |
 | `design/design-async-io.md` | ~200 | Async disk I/O backend (`tokio-uring`, `spawn_blocking` fallback), buffer mgmt, runtime topology. |
+| `design/design-console.md` | ~200 | `crowkv-console` design: shared core crate, web (Axum + React) and CLI (`clap`) frontends, SSH lifecycle, Swagger UI hosting. |
 | `design/design-kv-server.md` | ~350 | `crowkv-server` binary: CLI, HTTP management API, store/group/replica wiring, topology export, lifecycle. |
 | `design/design-leader-election.md` | ~330 | Term/ballot bridge, election protocol, new-leader bulk Phase 1, heartbeats, leader lease, ReadIndex, step-down. |
 | `design/design-parallel-slots.md` | ~325 | Parallel slot pipelining, sliding window, gap detection / repair, safe-slot, per-key resolved-slot. |

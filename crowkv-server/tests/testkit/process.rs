@@ -78,15 +78,22 @@ pub async fn start_test_server(args: &[&str]) -> std_io::Result<ServerHandle> {
     thread::spawn(move || {
         use std::io::{BufRead, BufReader};
         let reader = BufReader::new(stdout);
-        for line in reader.lines().map_while(Result::ok) {
-            if line.contains("management_addr=") {
-                if let Some(idx) = line.find("management_addr=") {
-                    let after = &line[idx + "management_addr=".len()..];
-                    let _ = tx.send(after.trim().to_string());
-                    break;
+        for line in reader.lines() {
+            if let Ok(l) = line {
+                if l.contains("management_addr=") {
+                    if let Some(idx) = l.find("management_addr=") {
+                        let after = &l[idx + "management_addr=".len()..];
+                        let _ = tx.send(after.trim().to_string());
+                        break;
+                    }
                 }
+            } else {
+                // Stdio error - process likely exited early, stop reading
+                break;
             }
         }
+        // If we exit the loop without finding management_addr, don't send anything
+        // The main loop will timeout with a better error message
     });
 
     // Wait for address from thread (with timeout)

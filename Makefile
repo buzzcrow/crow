@@ -28,19 +28,18 @@ build:
 	@echo "Building in release mode..."
 	cargo build --release
 
-# Start crowkv-server in release mode with logging
+# Start crowkv-server in release mode with logging and OpenAPI documentation
 run: build
 	@echo "Starting crowkv-server in release mode with logging..."
-	cargo run --release -p crowkv-server -- -l
+	@echo "Access Swagger UI at http://127.0.0.1:9910/api"
+	@echo "Access OpenAPI JSON at http://127.0.0.1:9910/openapi.json"
+	@echo "Access topology at http://127.0.0.1:9910/top"
+	cargo run --release -p crowkv-server --features swagger-ui -- -l --stores 1..2 --groups 1..3 --replica 1
 
 # Run test coverage with tarpaulin and generate HTML report
 coverage:
 	@echo "Running test coverage..."
 	cargo tarpaulin --workspace --out Html --output-dir target/coverage --exclude-files '*/tests/*'
-
-doc:
-	@echo "Exporting OpenAPI JSON..."
-	cargo run -p crowkv-server --example openapi-export
 
 # Count lines of code using tokei
 loc:
@@ -51,5 +50,6 @@ loc:
 clean:
 	@echo "Cleaning build artifacts..."
 	cargo clean
-	@echo "Removing log directory..."
+	@echo "Removing log directories..."
 	rm -rf log
+	rm -rf crowkv-server/log
