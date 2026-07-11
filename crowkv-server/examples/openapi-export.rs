@@ -1,4 +1,8 @@
-#[cfg(feature = "swagger-ui")]
+//! Dump the in-process `OpenAPI` document to `target/openapi.json`. The
+//! Swagger UI bundle that consumes it now lives in the console
+//! (`crowkv-console/static/swagger-ui/`), so this binary is just a
+//! convenience for offline tooling and CI verification.
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out = std::path::Path::new("target/openapi.json");
     if let Some(parent) = out.parent() {
@@ -8,10 +12,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(out, serde_json::to_string_pretty(&json)?)?;
     println!("{}", out.display());
     Ok(())
-}
-
-#[cfg(not(feature = "swagger-ui"))]
-fn main() {
-    eprintln!("openapi feature is required");
-    std::process::exit(1);
 }

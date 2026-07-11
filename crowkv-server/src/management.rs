@@ -7,10 +7,7 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tracing::info;
-#[cfg(feature = "swagger-ui")]
 use utoipa::{OpenApi, ToSchema};
-#[cfg(feature = "swagger-ui")]
-use utoipa_swagger_ui::SwaggerUi;
 
 use crowkv::cluster::group::PxGroup;
 use crowkv::cluster::kv_server::KvServer;
@@ -23,7 +20,7 @@ use crate::state::KvStoreRegistry;
 type RegistryArc = Arc<KvStoreRegistry>;
 
 pub fn router(state: RegistryArc) -> Router {
-    let router = Router::new()
+    Router::new()
         .route("/health", get(health_check))
         .route("/stores", get(list_stores).post(add_store))
         .route("/stores/:sid", get(get_store).delete(remove_store))
@@ -34,18 +31,13 @@ pub fn router(state: RegistryArc) -> Router {
         .route("/stores/:sid/groups/:gid/remotes/:rid", delete(remove_remote))
         .route("/topology", get(export_topology))
         .route("/top", get(export_topology))
-        .with_state(state);
-
-    #[cfg(feature = "swagger-ui")]
-    let router = router.merge(SwaggerUi::new("/api")).route("/openapi.json", get(openapi_spec));
-
-    router
+        .route("/openapi.json", get(openapi_spec))
+        .with_state(state)
 }
 
 // ── JSON types ──────────────────────────────────────────────
 
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
-#[derive(Serialize)]
+#[derive(ToSchema, Serialize)]
 struct HealthResponse {
     status: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -53,8 +45,7 @@ struct HealthResponse {
     stores: Vec<HealthStore>,
 }
 
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
-#[derive(Serialize)]
+#[derive(ToSchema, Serialize)]
 struct HealthStore {
     store_id: u64,
     status: String,
@@ -63,8 +54,7 @@ struct HealthStore {
     groups: Vec<HealthGroup>,
 }
 
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
-#[derive(Serialize)]
+#[derive(ToSchema, Serialize)]
 struct HealthGroup {
     group_id: u64,
     status: String,
@@ -74,8 +64,7 @@ struct HealthGroup {
     remotes: Vec<HealthRemote>,
 }
 
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
-#[derive(Serialize)]
+#[derive(ToSchema, Serialize)]
 struct HealthReplica {
     id: u64,
     role: String,
@@ -84,8 +73,7 @@ struct HealthReplica {
     messages: Vec<String>,
 }
 
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
-#[derive(Serialize)]
+#[derive(ToSchema, Serialize)]
 struct HealthRemote {
     id: u64,
     endpoint: String,
@@ -94,32 +82,28 @@ struct HealthRemote {
     messages: Vec<String>,
 }
 
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
-#[derive(Serialize)]
+#[derive(ToSchema, Serialize)]
 struct StoreListResponse {
     stores: Vec<StoreSummary>,
 }
 
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
-#[derive(Serialize)]
+#[derive(ToSchema, Serialize)]
 struct StoreSummary {
     store_id: u64,
-    #[cfg_attr(feature = "swagger-ui", schema(value_type = Option<String>))]
+    #[schema(value_type = Option<String>)]
     listen_addr: Option<SocketAddr>,
     group_count: usize,
 }
 
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
-#[derive(Serialize)]
+#[derive(ToSchema, Serialize)]
 struct StoreDetail {
     store_id: u64,
-    #[cfg_attr(feature = "swagger-ui", schema(value_type = Option<String>))]
+    #[schema(value_type = Option<String>)]
     listen_addr: Option<SocketAddr>,
     groups: Vec<GroupSummary>,
 }
 
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
-#[derive(Serialize)]
+#[derive(ToSchema, Serialize)]
 struct GroupSummary {
     group_id: u64,
     local_replica_id: u64,
@@ -127,8 +111,7 @@ struct GroupSummary {
     remote_count: usize,
 }
 
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
-#[derive(Deserialize)]
+#[derive(ToSchema, Deserialize)]
 struct AddStoreRequest {
     store_id: u64,
     group_id: u64,
@@ -137,43 +120,37 @@ struct AddStoreRequest {
     port: Option<u16>,
 }
 
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
-#[derive(Deserialize)]
+#[derive(ToSchema, Deserialize)]
 struct AddGroupRequest {
     group_id: u64,
     replica_id: u64,
 }
 
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(ToSchema, Serialize, Deserialize, Clone)]
 struct RemoteReplicaInfo {
     replica_id: u64,
     endpoint: String,
 }
 
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
-#[derive(Serialize)]
+#[derive(ToSchema, Serialize)]
 struct RemoteListResponse {
     remotes: Vec<RemoteReplicaInfo>,
 }
 
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
-#[derive(Serialize, Deserialize)]
+#[derive(ToSchema, Serialize, Deserialize)]
 struct TopologyResponse {
     stores: Vec<TopologyStore>,
 }
 
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
-#[derive(Serialize, Deserialize)]
+#[derive(ToSchema, Serialize, Deserialize)]
 struct TopologyStore {
     store_id: u64,
-    #[cfg_attr(feature = "swagger-ui", schema(value_type = Option<String>))]
+    #[schema(value_type = Option<String>)]
     listen_addr: Option<SocketAddr>,
     groups: Vec<TopologyGroup>,
 }
 
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
-#[derive(Serialize, Deserialize)]
+#[derive(ToSchema, Serialize, Deserialize)]
 struct TopologyGroup {
     group_id: u64,
     /// Backwards-compat alias for `local_replica.id`. Existing
@@ -185,8 +162,7 @@ struct TopologyGroup {
     remotes: Vec<TopologyRemote>,
 }
 
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
-#[derive(Serialize, Deserialize)]
+#[derive(ToSchema, Serialize, Deserialize)]
 struct TopologyLocalReplica {
     id: u64,
     role: String,
@@ -194,14 +170,12 @@ struct TopologyLocalReplica {
     kv_store: TopologyKvStore,
 }
 
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
-#[derive(Serialize, Deserialize)]
+#[derive(ToSchema, Serialize, Deserialize)]
 struct TopologyKvStore {
     key_count: u64,
 }
 
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
-#[derive(Serialize, Deserialize)]
+#[derive(ToSchema, Serialize, Deserialize)]
 struct TopologyRemote {
     id: u64,
     endpoint: String,
@@ -209,16 +183,14 @@ struct TopologyRemote {
     metrics: TopologyMetrics,
 }
 
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
-#[derive(Serialize, Deserialize)]
+#[derive(ToSchema, Serialize, Deserialize)]
 struct TopologyMetrics {
     rpc_count: u64,
     err_count: u64,
     last_rtt_ms: u64,
 }
 
-#[cfg_attr(feature = "swagger-ui", derive(ToSchema))]
-#[derive(Serialize)]
+#[derive(ToSchema, Serialize)]
 struct ErrorResponse {
     error: String,
 }
@@ -229,7 +201,6 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Err
 
 // ── Handlers ────────────────────────────────────────────────
 
-#[cfg(feature = "swagger-ui")]
 #[derive(OpenApi)]
 #[openapi(
     paths(
@@ -281,21 +252,13 @@ pub struct ApiDoc;
 /// # Panics
 ///
 /// Panics if the `OpenAPI` document cannot be serialized to JSON (should never happen with valid utoipa annotations).
-#[cfg(feature = "swagger-ui")]
 #[must_use]
 pub fn openapi_json() -> serde_json::Value {
     serde_json::to_value(ApiDoc::openapi()).expect("OpenAPI document should serialize")
 }
 
-#[cfg(feature = "swagger-ui")]
 async fn openapi_spec() -> Json<serde_json::Value> {
     Json(openapi_json())
-}
-
-#[cfg(not(feature = "swagger-ui"))]
-#[allow(dead_code)]
-fn openapi_spec() -> StatusCode {
-    StatusCode::NOT_FOUND
 }
 
 /// `GET /health` — hierarchical cluster health report.
@@ -303,9 +266,7 @@ fn openapi_spec() -> StatusCode {
 /// Aggregates per-layer cached status (no active probing in V1). Returns `200`
 /// when overall status is `ok` / `degraded`, `503` when `unhealthy`
 /// (load-balancer signal).
-#[cfg_attr(
-    feature = "swagger-ui",
-    utoipa::path(
+#[utoipa::path(
         get,
         path = "/health",
         tag = "management",
@@ -313,8 +274,7 @@ fn openapi_spec() -> StatusCode {
             (status = 200, description = "Cluster is live", body = HealthResponse),
             (status = 503, description = "Cluster is unhealthy", body = HealthResponse)
         )
-    )
-)]
+    )]
 async fn health_check(State(state): State<RegistryArc>) -> (StatusCode, Json<HealthResponse>) {
     use crowkv::cluster::HealthStatus;
 
@@ -391,15 +351,12 @@ async fn health_check(State(state): State<RegistryArc>) -> (StatusCode, Json<Hea
     )
 }
 
-#[cfg_attr(
-    feature = "swagger-ui",
-    utoipa::path(
+#[utoipa::path(
         get,
         path = "/stores",
         tag = "management",
         responses((status = 200, description = "Stores in this server", body = StoreListResponse))
-    )
-)]
+    )]
 async fn list_stores(State(state): State<RegistryArc>) -> Json<StoreListResponse> {
     let stores: Vec<StoreSummary> = state
         .stores
@@ -417,9 +374,7 @@ async fn list_stores(State(state): State<RegistryArc>) -> Json<StoreListResponse
     Json(StoreListResponse { stores })
 }
 
-#[cfg_attr(
-    feature = "swagger-ui",
-    utoipa::path(
+#[utoipa::path(
         get,
         path = "/stores/{sid}",
         tag = "management",
@@ -428,8 +383,7 @@ async fn list_stores(State(state): State<RegistryArc>) -> Json<StoreListResponse
             (status = 200, description = "Store detail", body = StoreDetail),
             (status = 404, description = "Store not found", body = ErrorResponse)
         )
-    )
-)]
+    )]
 async fn get_store(State(state): State<RegistryArc>, Path(sid): Path<u64>) -> Result<Json<StoreDetail>, (StatusCode, Json<ErrorResponse>)> {
     let store = state.get_store(sid).ok_or_else(|| err_json(StatusCode::NOT_FOUND, format!("store {sid} not found")))?;
 
@@ -451,9 +405,7 @@ async fn get_store(State(state): State<RegistryArc>, Path(sid): Path<u64>) -> Re
     }))
 }
 
-#[cfg_attr(
-    feature = "swagger-ui",
-    utoipa::path(
+#[utoipa::path(
         post,
         path = "/stores",
         tag = "management",
@@ -464,8 +416,7 @@ async fn get_store(State(state): State<RegistryArc>, Path(sid): Path<u64>) -> Re
             (status = 409, description = "Store already exists", body = ErrorResponse),
             (status = 500, description = "Store failed to start", body = ErrorResponse)
         )
-    )
-)]
+    )]
 async fn add_store(State(state): State<RegistryArc>, Json(req): Json<AddStoreRequest>) -> Result<(StatusCode, Json<StoreSummary>), (StatusCode, Json<ErrorResponse>)> {
     if state.stores.contains_key(&req.store_id) {
         return Err(err_json(StatusCode::CONFLICT, format!("store {} already exists", req.store_id)));
@@ -513,9 +464,7 @@ async fn add_store(State(state): State<RegistryArc>, Json(req): Json<AddStoreReq
     Ok((StatusCode::CREATED, Json(summary)))
 }
 
-#[cfg_attr(
-    feature = "swagger-ui",
-    utoipa::path(
+#[utoipa::path(
         delete,
         path = "/stores/{sid}",
         tag = "management",
@@ -524,8 +473,7 @@ async fn add_store(State(state): State<RegistryArc>, Json(req): Json<AddStoreReq
             (status = 200, description = "Store removed"),
             (status = 404, description = "Store not found", body = ErrorResponse)
         )
-    )
-)]
+    )]
 async fn remove_store(State(state): State<RegistryArc>, Path(sid): Path<u64>) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     info!(store_id = sid, "removing PxKvStore via management API");
     let store = state.remove_store(sid).ok_or_else(|| err_json(StatusCode::NOT_FOUND, format!("store {sid} not found")))?;
@@ -539,9 +487,7 @@ async fn remove_store(State(state): State<RegistryArc>, Path(sid): Path<u64>) ->
     Ok(StatusCode::OK)
 }
 
-#[cfg_attr(
-    feature = "swagger-ui",
-    utoipa::path(
+#[utoipa::path(
         get,
         path = "/stores/{sid}/groups",
         tag = "management",
@@ -550,8 +496,7 @@ async fn remove_store(State(state): State<RegistryArc>, Path(sid): Path<u64>) ->
             (status = 200, description = "Groups in the store", body = Vec<GroupSummary>),
             (status = 404, description = "Store not found", body = ErrorResponse)
         )
-    )
-)]
+    )]
 async fn list_groups(State(state): State<RegistryArc>, Path(sid): Path<u64>) -> Result<Json<Vec<GroupSummary>>, (StatusCode, Json<ErrorResponse>)> {
     let store = state.get_store(sid).ok_or_else(|| err_json(StatusCode::NOT_FOUND, format!("store {sid} not found")))?;
 
@@ -569,9 +514,7 @@ async fn list_groups(State(state): State<RegistryArc>, Path(sid): Path<u64>) -> 
     Ok(Json(groups))
 }
 
-#[cfg_attr(
-    feature = "swagger-ui",
-    utoipa::path(
+#[utoipa::path(
         post,
         path = "/stores/{sid}/groups",
         tag = "management",
@@ -582,8 +525,7 @@ async fn list_groups(State(state): State<RegistryArc>, Path(sid): Path<u64>) -> 
             (status = 404, description = "Store not found", body = ErrorResponse),
             (status = 409, description = "Group already exists", body = ErrorResponse)
         )
-    )
-)]
+    )]
 async fn add_group(State(state): State<RegistryArc>, Path(sid): Path<u64>, Json(req): Json<AddGroupRequest>) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     let store = state.get_store(sid).ok_or_else(|| err_json(StatusCode::NOT_FOUND, format!("store {sid} not found")))?;
 
@@ -605,9 +547,7 @@ async fn add_group(State(state): State<RegistryArc>, Path(sid): Path<u64>, Json(
     Ok(StatusCode::CREATED)
 }
 
-#[cfg_attr(
-    feature = "swagger-ui",
-    utoipa::path(
+#[utoipa::path(
         delete,
         path = "/stores/{sid}/groups/{gid}",
         tag = "management",
@@ -619,8 +559,7 @@ async fn add_group(State(state): State<RegistryArc>, Path(sid): Path<u64>, Json(
             (status = 200, description = "Group removed"),
             (status = 404, description = "Store or group not found", body = ErrorResponse)
         )
-    )
-)]
+    )]
 async fn remove_group(State(state): State<RegistryArc>, Path((sid, gid)): Path<(u64, u64)>) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     let store = state.get_store(sid).ok_or_else(|| err_json(StatusCode::NOT_FOUND, format!("store {sid} not found")))?;
 
@@ -633,9 +572,7 @@ async fn remove_group(State(state): State<RegistryArc>, Path((sid, gid)): Path<(
     Ok(StatusCode::OK)
 }
 
-#[cfg_attr(
-    feature = "swagger-ui",
-    utoipa::path(
+#[utoipa::path(
         get,
         path = "/stores/{sid}/groups/{gid}/remotes",
         tag = "management",
@@ -647,8 +584,7 @@ async fn remove_group(State(state): State<RegistryArc>, Path((sid, gid)): Path<(
             (status = 200, description = "Remote replicas", body = RemoteListResponse),
             (status = 404, description = "Store or group not found", body = ErrorResponse)
         )
-    )
-)]
+    )]
 async fn list_remotes(State(state): State<RegistryArc>, Path((sid, gid)): Path<(u64, u64)>) -> Result<Json<RemoteListResponse>, (StatusCode, Json<ErrorResponse>)> {
     let store = state.get_store(sid).ok_or_else(|| err_json(StatusCode::NOT_FOUND, format!("store {sid} not found")))?;
     let group = store
@@ -667,9 +603,7 @@ async fn list_remotes(State(state): State<RegistryArc>, Path((sid, gid)): Path<(
     Ok(Json(RemoteListResponse { remotes }))
 }
 
-#[cfg_attr(
-    feature = "swagger-ui",
-    utoipa::path(
+#[utoipa::path(
         post,
         path = "/stores/{sid}/groups/{gid}/remotes",
         tag = "management",
@@ -683,8 +617,7 @@ async fn list_remotes(State(state): State<RegistryArc>, Path((sid, gid)): Path<(
             (status = 400, description = "Invalid remote replica", body = ErrorResponse),
             (status = 404, description = "Store or group not found", body = ErrorResponse)
         )
-    )
-)]
+    )]
 async fn add_remotes(
     State(state): State<RegistryArc>,
     Path((sid, gid)): Path<(u64, u64)>,
@@ -731,9 +664,7 @@ async fn add_remotes(
     Ok(StatusCode::OK)
 }
 
-#[cfg_attr(
-    feature = "swagger-ui",
-    utoipa::path(
+#[utoipa::path(
         delete,
         path = "/stores/{sid}/groups/{gid}/remotes/{rid}",
         tag = "management",
@@ -747,8 +678,7 @@ async fn add_remotes(
             (status = 400, description = "Local replica cannot be removed as remote", body = ErrorResponse),
             (status = 404, description = "Store, group, or remote replica not found", body = ErrorResponse)
         )
-    )
-)]
+    )]
 async fn remove_remote(State(state): State<RegistryArc>, Path((sid, gid, rid)): Path<(u64, u64, u64)>) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
     let store = state.get_store(sid).ok_or_else(|| err_json(StatusCode::NOT_FOUND, format!("store {sid} not found")))?;
     let group = store
@@ -780,9 +710,7 @@ async fn remove_remote(State(state): State<RegistryArc>, Path((sid, gid, rid)): 
     Ok(StatusCode::OK)
 }
 
-#[cfg_attr(
-    feature = "swagger-ui",
-    utoipa::path(
+#[utoipa::path(
         post,
         path = "/stores/{sid}/groups/{gid}/remotes/batch",
         tag = "management",
@@ -795,8 +723,7 @@ async fn remove_remote(State(state): State<RegistryArc>, Path((sid, gid, rid)): 
             (status = 200, description = "Remote replicas added from topology"),
             (status = 404, description = "Store or group not found", body = ErrorResponse)
         )
-    )
-)]
+    )]
 async fn batch_add_remotes(
     State(state): State<RegistryArc>,
     Path((sid, gid)): Path<(u64, u64)>,
@@ -852,15 +779,12 @@ async fn batch_add_remotes(
 
 /// `GET /topology` (alias `/top`) — full hierarchy with per-remote RPC
 /// metrics and cheap kv-store stats.
-#[cfg_attr(
-    feature = "swagger-ui",
-    utoipa::path(
+#[utoipa::path(
         get,
         path = "/topology",
         tag = "management",
         responses((status = 200, description = "Cluster topology snapshot", body = TopologyResponse))
-    )
-)]
+    )]
 async fn export_topology(State(state): State<RegistryArc>) -> Json<TopologyResponse> {
     let stores: Vec<TopologyStore> = state
         .stores

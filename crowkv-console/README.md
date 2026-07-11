@@ -246,6 +246,76 @@ curl -X POST "http://127.0.0.1:9920/api/stores/1/groups/1/kv/delete?server=http:
 
 All endpoints support both UTF-8 (`key`, `value`) and hex (`key_hex`, `value_hex`) for binary safety. Responses include both `value_utf8` and `value_hex` fields. Endpoint resolution rewrites the upstream's `0.0.0.0:N` listen_addr to use the management URL's host for remote access.
 
+## C7 Status
+
+C7 implements a CLI-only benchmarking engine for workload testing against `crowkv-server` gRPC endpoints.
+
+### CLI Usage
+
+```bash
+# Run a workload (read, write, list, or mix)
+crowkv bench run read --store-id 1 --group-id 1 --connections 4 --threads 8 --duration-secs 5 --key-space 1000 --value-size 64
+crowkv bench run write --store-id 1 --group-id 1 --connections 4 --threads 8 --duration-secs 5 --key-space 1000 --value-size 64
+crowkv bench run mix --store-id 1 --group-id 1 --connections 4 --threads 8 --duration-secs 5 --key-space 1000 --value-size 64
+
+# Run a stress scenario (burst, soak, hotread)
+crowkv bench stress burst --store-id 1 --group-id 1
+crowkv bench stress soak --store-id 1 --group-id 1
+crowkv bench stress hotread --store-id 1 --group-id 1
+
+# Re-render a previously-saved report
+crowkv bench report 2025-01-09T12-34-56-789Z
+
+# Target a specific server (by URL or registry id)
+crowkv --server http://127.0.0.1:9910 bench run read --store-id 1 --group-id 1
+
+# JSON output
+crowkv --json bench run read --store-id 1 --group-id 1
+crowkv --json bench report 2025-01-09T12-34-56-789Z
+```
+
+**Parameters**:
+- `--connections N`: Number of gRPC channels (1..=64, default 4)
+- `--threads M`: Number of worker tasks (1..=1000, default 8)
+- `--duration-secs`: Test duration in seconds (default 5)
+- `--key-space`: Distinct keys per worker key space (default 1000)
+- `--value-size`: Per-op value size in bytes (default 64)
+- `--run-id`: Optional explicit run id; defaults to timestamp-based one
+
+**Report location**: Reports are saved to `~/.crowkv/bench/<run-id>.json`. The CLI prints the report summary and the file path after each run.
+
+**Note**: The `list` workload always reports `error_rate=1.0` because the underlying `KvClient::scan` is a stub (C6 gap). The CLI accepts `bench run list` for wiring exercise, but results are only useful as a "did the path connect" signal until the server adds prefix scan.
+
+## C8 Status
+
+C8 migrates Swagger UI from `crowkv-server` to `crowkv-console-web` and removes the `swagger-ui` Cargo feature from `crowkv-server`.
+
+### Swagger UI
+
+The console now serves a vendored Swagger UI at `/api/swagger/`. This provides an interactive API explorer for the `crowkv-server` management API.
+
+```bash
+# Access Swagger UI (uses default registered server or ?server=<url>)
+open http://127.0.0.1:9920/api/swagger/
+
+# Access OpenAPI JSON spec (proxied from upstream server)
+curl "http://127.0.0.1:9920/api/openapi.json?server=http://127.0.0.1:9910"
+curl "http://127.0.0.1:9920/api/openapi.json"  # uses default registered server
+```
+
+**Vendored assets**: Swagger UI 5.17.14 is committed under `crowkv-console/static/swagger-ui/`. The directory includes:
+- `swagger-ui.css`, `swagger-ui-bundle.js`, `swagger-ui-standalone-preset.js`
+- Favicons and OAuth2 redirect page
+- Hand-written `index.html` that requests `/api/openapi.json` with optional `?server=` propagation
+
+**Bumping Swagger UI**: To upgrade to a new version:
+1. Download the new version from unpkg.com (e.g., `curl -O https://unpkg.com/swagger-ui-dist@5.17.14/swagger-ui-bundle.js`)
+2. Replace the files in `crowkv-console/static/swagger-ui/`
+3. Update the version in `static/swagger-ui/VERSION`
+4. Update the `index.html` script tags if the bundle names changed
+
+**crowkv-server changes**: The `swagger-ui` Cargo feature and `utoipa-swagger-ui` dependency have been removed. The `/openapi.json` endpoint is now unconditional, and all `ToSchema` derives are kept. The `examples/openapi-export.rs` binary is now unconditional.
+
 ## Phases
 
 - **C0**: Skeleton (workspace + crates compile)
@@ -254,7 +324,7 @@ All endpoints support both UTF-8 (`key`, `value`) and hex (`key_hex`, `value_hex
 - **C3**: Simulated Hardware (local spawn)
 - **C4**: SSH Transport (russh)
 - **C5**: Cluster Management Plane
-- **C6**: KV Operations (current)
+- **C6**: KV Operations
 - **C7**: Bench (CLI only)
 - **C8**: Polish + Swagger
 

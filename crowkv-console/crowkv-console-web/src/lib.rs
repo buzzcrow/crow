@@ -39,12 +39,23 @@ impl AppState {
     }
 }
 
+/// Compile-time path to the vendored Swagger UI assets (committed under
+/// `crowkv-console/static/swagger-ui`). The directory layout puts the
+/// `static/` tree as a sibling of the `crowkv-console-web` crate.
+const SWAGGER_UI_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../static/swagger-ui");
+
 /// Build the Axum router used by both the binary and integration tests.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/", get(index_page))
         .route("/api/cluster/snapshot", get(cluster_snapshot))
+        // C8: vendored Swagger UI + management-API OpenAPI proxy. The
+        // assets live under `crowkv-console/static/swagger-ui/` and the
+        // proxy pulls `/openapi.json` from the upstream `crowkv-server`
+        // selected by `?server=<url>` (or the first registered server).
+        .nest_service("/api/swagger", tower_http::services::ServeDir::new(SWAGGER_UI_DIR))
+        .route("/api/openapi.json", get(http_openapi_proxy))
         // C5 management proxy routes. Each takes a `?server=<url>` query
         // parameter selecting which `crowkv-server` to forward to. When
         // omitted, the first entry in `default_servers` is used.
@@ -264,6 +275,22 @@ fn err_502(msg: impl Into<String>) -> (StatusCode, Json<ErrorBody>) {
 #[allow(clippy::needless_pass_by_value)]
 fn map_err(e: Error) -> (StatusCode, Json<ErrorBody>) {
     err_502(format!("{e}"))
+}
+
+/// Forward `GET /openapi.json` to the upstream `crowkv-server` selected
+/// by `?server=<url>` (or the first registered default). The response
+/// body is the raw upstream JSON; the proxy is required because Swagger
+/// UI runs in the browser and would otherwise hit cross-origin /
+/// authentication restrictions when calling the upstream directly.
+async fn http_openapi_proxy(State(state): State<AppState>, Query(sel): Query<ServerSelector>) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+    let base = pick_server(&state, &sel)?;
+    let url = format!("{}/openapi.json", base.trim_end_matches('/'));
+    let resp = reqwest::get(&url).await.map_err(|e| err_502(format!("openapi proxy: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(err_502(format!("openapi proxy: upstream {}", resp.status())));
+    }
+    let value = resp.json::<serde_json::Value>().await.map_err(|e| err_502(format!("openapi proxy: parse: {e}")))?;
+    Ok(Json(value))
 }
 
 async fn http_list_stores(State(state): State<AppState>, Query(sel): Query<ServerSelector>) -> Result<Json<Vec<StoreSummary>>, (StatusCode, Json<ErrorBody>)> {

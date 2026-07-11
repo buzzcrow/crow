@@ -16,7 +16,6 @@ workspace = true
 
 [features]
 default = []
-swagger-ui = ["dep:utoipa-swagger-ui"]
 
 [dependencies]
 crowkv = { path = "../crowkv" }
@@ -28,7 +27,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dashmap = "6"
 utoipa = "5"
-utoipa-swagger-ui = { version = "8", features = ["axum"], optional = true }
 
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }

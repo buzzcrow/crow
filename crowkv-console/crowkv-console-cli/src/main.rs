@@ -339,8 +339,43 @@ enum KvVerb {
 
 #[derive(Subcommand, Debug)]
 enum BenchVerb {
-    Run { workload: String },
-    Stress { scenario: String },
+    /// Run a workload (`read`, `write`, `list`, or `mix`).
+    Run {
+        /// Workload kind: `read | write | list | mix`.
+        workload: String,
+        /// Store id whose `listen_addr` is dialed for gRPC ops.
+        #[arg(long, default_value_t = 1)]
+        store_id: u64,
+        #[arg(long, default_value_t = 1)]
+        group_id: u64,
+        /// Number of independent gRPC channels (1..=64).
+        #[arg(long, default_value_t = 4)]
+        connections: u32,
+        /// Number of worker tasks (1..=1000).
+        #[arg(long, default_value_t = 8)]
+        threads: u32,
+        /// Test duration in seconds.
+        #[arg(long, default_value_t = 5)]
+        duration_secs: u64,
+        /// Distinct keys per worker key space.
+        #[arg(long, default_value_t = 1_000)]
+        key_space: u64,
+        /// Per-op value size in bytes.
+        #[arg(long, default_value_t = 64)]
+        value_size: usize,
+        /// Optional explicit run id; defaults to a timestamp-based one.
+        #[arg(long)]
+        run_id: Option<String>,
+    },
+    /// Run a built-in stress scenario (`burst`, `soak`, `hotread`).
+    Stress {
+        scenario: String,
+        #[arg(long, default_value_t = 1)]
+        store_id: u64,
+        #[arg(long, default_value_t = 1)]
+        group_id: u64,
+    },
+    /// Re-render a previously-saved report.
     Report { run_id: String },
 }
 
@@ -367,7 +402,7 @@ async fn dispatch(mut cli: Cli) -> ExitCode {
         Group::Paxos { verb } => run_paxos_verb(&cli, verb).await,
         Group::Replica { verb } => run_replica_verb(&cli, verb).await,
         Group::Kv { verb } => run_kv_verb(&cli, verb).await,
-        Group::Bench { .. } => not_implemented("bench <verb>"),
+        Group::Bench { verb } => run_bench_verb(&cli, verb).await,
     }
 }
 
@@ -1294,6 +1329,145 @@ async fn kv_scan(cli: &Cli, store_id: u64, group_id: u64, prefix: &str, limit: u
         Err(e) => {
             eprintln!("error: scan/list: {e}");
             ExitCode::from(2)
+        }
+    }
+}
+
+async fn run_bench_verb(cli: &Cli, verb: BenchVerb) -> ExitCode {
+    match verb {
+        BenchVerb::Run {
+            workload,
+            store_id,
+            group_id,
+            connections,
+            threads,
+            duration_secs,
+            key_space,
+            value_size,
+            run_id,
+        } => {
+            bench_run(
+                cli,
+                BenchRunArgs {
+                    workload,
+                    store_id,
+                    group_id,
+                    connections,
+                    threads,
+                    duration_secs,
+                    key_space,
+                    value_size,
+                    run_id,
+                },
+                cli.json,
+            )
+            .await
+        }
+        BenchVerb::Stress { scenario, store_id, group_id } => bench_stress(cli, scenario, store_id, group_id, cli.json).await,
+        BenchVerb::Report { run_id } => bench_report(&run_id, cli.json),
+    }
+}
+
+struct BenchRunArgs {
+    workload: String,
+    store_id: u64,
+    group_id: u64,
+    connections: u32,
+    threads: u32,
+    duration_secs: u64,
+    key_space: u64,
+    value_size: usize,
+    run_id: Option<String>,
+}
+
+async fn bench_run(cli: &Cli, args: BenchRunArgs, json: bool) -> ExitCode {
+    use crowkv_console_bench::{run_bench, BenchConfig, WorkloadKind};
+    use std::time::Duration;
+
+    let kind = match WorkloadKind::parse(&args.workload) {
+        Ok(k) => k,
+        Err(bad) => {
+            eprintln!("error: unknown workload {bad:?} (expected: read|write|list|mix)");
+            return ExitCode::from(1);
+        }
+    };
+    let endpoint = match resolve_kv_endpoint(cli, args.store_id).await {
+        Ok(e) => e,
+        Err(c) => return c,
+    };
+    let mut cfg = BenchConfig::defaults(endpoint, kind);
+    cfg.store_id = args.store_id;
+    cfg.group_id = args.group_id;
+    cfg.connections = args.connections;
+    cfg.threads = args.threads;
+    cfg.duration = Duration::from_secs(args.duration_secs);
+    cfg.key_space = args.key_space;
+    cfg.value_size = args.value_size;
+    cfg.run_id = args.run_id;
+    match run_bench(cfg).await {
+        Ok((report, path)) => {
+            if json {
+                return print_json(&report);
+            }
+            println!("{}", report.human_summary());
+            println!("\nreport: {}", path.display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: bench run: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+async fn bench_stress(cli: &Cli, scenario: String, store_id: u64, group_id: u64, json: bool) -> ExitCode {
+    use crowkv_console_bench::{run_bench, stress_scenario};
+
+    let endpoint = match resolve_kv_endpoint(cli, store_id).await {
+        Ok(e) => e,
+        Err(c) => return c,
+    };
+    let Some(mut cfg) = stress_scenario(&scenario, endpoint) else {
+        eprintln!("error: unknown stress scenario {scenario:?} (try: burst|soak|hotread)");
+        return ExitCode::from(1);
+    };
+    cfg.store_id = store_id;
+    cfg.group_id = group_id;
+    match run_bench(cfg).await {
+        Ok((report, path)) => {
+            if json {
+                return print_json(&report);
+            }
+            println!("{}", report.human_summary());
+            println!("\nreport: {}", path.display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: bench stress: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn bench_report(run_id: &str, json: bool) -> ExitCode {
+    use crowkv_console_bench::BenchReport;
+
+    let Some(dir) = BenchReport::default_dir() else {
+        eprintln!("error: cannot resolve $HOME for report dir");
+        return ExitCode::from(1);
+    };
+    let path = dir.join(format!("{run_id}.json"));
+    match BenchReport::read_from(&path) {
+        Ok(r) => {
+            if json {
+                return print_json(&r);
+            }
+            println!("{}", r.human_summary());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: read report {}: {e}", path.display());
+            ExitCode::from(1)
         }
     }
 }

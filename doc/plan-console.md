@@ -13,153 +13,19 @@ This plan is split across many small phases on purpose. To save tokens:
 
 ## Phase Overview
 
-| Phase | Name | Goal | Ships |
-| ---: | --- | --- | --- |
-| C0 | Skeleton | Workspace + crates compile; CLI prints help; web serves blank page | `crowkv-console/` workspace tree, 5 crates, CI passes |
-| C1 | Core + Read-Only Observation | Talk to one running `crowkv-server`; show topology in CLI and Web | `cluster status`, `cluster topology`, `/api/cluster/snapshot`, basic React page |
-| C2 | Multi-Server + Registry | Local config file; manage multiple `crowkv-server` instances; aggregate snapshots | `~/.crowkv/console.toml`, server registry, multi-instance topology |
-| C3 | Simulated Hardware (local spawn) | Rack/Node abstractions in registry; deploy as local child process (placeholder for SSH) | `rack add/remove`, `node add/remove`, `server deploy/start/stop` (local fork) |
-| C4 | SSH Transport (russh) | Replace local fork with real SSH; pre-flight probe; default to 127.0.0.1 self-ssh | `node ping`, ssh-backed deploy/start/stop, creds in TOML |
-| C5 | Cluster Management Plane | Create/delete stores/groups/replicas through console (UI + CLI) | Full Phase 2 of requirement |
-| C6 | KV Operations | Put / get / delete / list / scan; show full values in UI | Full Phase 3 of requirement (no prefix until server adds it) |
-| C7 | Bench (CLI only) | Workload engine, percentiles, reports | `bench run read|write|list|mix`, `bench stress <scenario>`, `bench report` |
-| C8 | Polish + Swagger | Demo-grade visual design; Swagger UI served by console; remove `swagger-ui` feature from `crowkv-server` | Final UX, offline Swagger, docs |
+| Phase | Name | Goal | Ships | Status |
+| ---: | --- | --- | --- | --- |
+| C0 | Skeleton | Workspace + crates compile; CLI prints help; web serves blank page | `crowkv-console/` workspace tree, 5 crates, CI passes | ✅ DONE |
+| C1 | Core + Read-Only Observation | Talk to one running `crowkv-server`; show topology in CLI and Web | `cluster status`, `cluster topology`, `/api/cluster/snapshot`, basic React page | ✅ DONE |
+| C2 | Multi-Server + Registry | Local config file; manage multiple `crowkv-server` instances; aggregate snapshots | `~/.crowkv/console.toml`, server registry, multi-instance topology | ✅ DONE |
+| C3 | Simulated Hardware (local spawn) | Rack/Node abstractions in registry; deploy as local child process (placeholder for SSH) | `rack add/remove`, `node add/remove`, `server deploy/start/stop` (local fork) | ✅ DONE |
+| C4 | SSH Transport (russh) | Replace local fork with real SSH; pre-flight probe; default to 127.0.0.1 self-ssh | `node ping`, ssh-backed deploy/start/stop, creds in TOML | ✅ DONE |
+| C5 | Cluster Management Plane | Create/delete stores/groups/replicas through console (UI + CLI) | Full Phase 2 of requirement | ✅ DONE |
+| C6 | KV Operations | Put / get / delete / list / scan; show full values in UI | Full Phase 3 of requirement (no prefix until server adds it) | ✅ DONE |
+| C7 | Bench (CLI only) | Workload engine, percentiles, reports | `bench run read|write|list|mix`, `bench stress <scenario>`, `bench report` | ✅ DONE |
+| C8 | Polish + Swagger | Demo-grade visual design; Swagger UI served by console; remove `swagger-ui` feature from `crowkv-server` | Final UX, offline Swagger, docs | ✅ DONE |
 
 Each phase ends with a working binary the user can run end-to-end.
-
----
-
-## C0 — Skeleton
-
-### AI scope (core)
-1. Add new top-level dir `crowkv-console/` to workspace `Cargo.toml`.
-2. Create five crates inside it:
-   - `crowkv-console-core` (lib)
-   - `crowkv-console-ssh` (lib, stub)
-   - `crowkv-console-bench` (lib, stub)
-   - `crowkv-console-web` (bin)
-   - `crowkv-console-cli` (bin: `crowkv`)
-3. `crowkv-console-cli` exposes `crowkv --help` listing the top-level groups (no logic).
-4. `crowkv-console-web` boots Axum on `:9920`, returns `200 OK` for `/healthz`.
-5. Smoke test (per crate): `cargo test -p crowkv-console-*` runs at least one trivial unit test in each crate.
-
-### Tests (AI must keep green)
-- `cargo build -p crowkv-console-core -p crowkv-console-ssh -p crowkv-console-bench -p crowkv-console-web -p crowkv-console-cli` succeeds.
-- `crowkv --help` exits 0 and prints the command tree.
-- `crowkv-console-web` /healthz returns 200 (single integration test).
-
-### Hand-off to user (free model)
-- `cargo fmt`, clippy fixes, README stub for `crowkv-console/`.
-- Update `doc/doc_index.md` once the new crates land (rows already added for the docs).
-- Commit + push.
-
----
-
-## C1 — Core + Read-Only Observation
-
-### AI scope (core)
-1. `crowkv-console-core::clients::http`: `reqwest`-based client for `crowkv-server` management API. Methods: `list_stores`, `get_store`, `list_groups`, `health`.
-2. `crowkv-console-core::clients::grpc`: tonic stubs reused from existing `crowkv` proto.
-3. `crowkv-console-core::topology::aggregate(servers) -> ClusterSnapshot`.
-4. CLI: `crowkv cluster status`, `crowkv cluster topology` against `--server <url>` (single ad-hoc server, no registry yet).
-5. Web: `GET /api/cluster/snapshot` returning aggregated JSON; static React page renders raw JSON tree (no styling).
-
-### Tests
-- Integration: spin up one `crowkv-server` via existing test harness, call `aggregate`, assert hierarchy contents.
-- CLI: `crowkv cluster topology --server http://...` exits 0 and prints non-empty tree.
-
-### Hand-off to user
-- Pretty-print refinements, table styling, README usage examples.
-- Commit + push.
-
----
-
-## C2 — Multi-Server + Registry
-
-### AI scope (core)
-1. Config schema (TOML) `[[server]]` blocks; load/save in `crowkv-console-core::config`.
-2. CLI: `crowkv server list / add --url / remove`.
-3. Aggregator polls all configured servers in parallel. Per-server failures surface in the snapshot but do not fail the whole call.
-4. Web: server selector dropdown wired to the same `/api/cluster/snapshot` (filter param).
-
-### Tests
-- Round-trip: write config → load → assert equality.
-- Aggregator: 2-server fixture; kill one; assert snapshot still returns with one error entry.
-
-### Hand-off to user
-- Default config path docs, sample `console.toml`.
-- Commit + push.
-
----
-
-## C3 — Simulated Hardware (local spawn)
-
-### AI scope (core)
-1. Add `Rack` / `Node` to config + registry.
-2. CLI: `rack add/remove/list`, `node add/remove/list`.
-3. `crowkv-console-core::lifecycle::deploy(node)` implemented via `tokio::process::Command::spawn`. **Placeholder** — replaced in C4 by real SSH.
-4. CLI: `server deploy --node`, `server start <id>`, `server stop <id>` (local fork only).
-
-### Tests
-- End-to-end: from clean state, `rack add r1 → node add ... → server deploy --node n1 → cluster topology` shows the new server.
-
-### Hand-off to user
-- React Flow basic graph rendering for racks/nodes (visual polish, not logic).
-- Commit + push.
-
----
-
-## C4 — SSH Transport (russh)
-
-### AI scope (core)
-1. Add `russh` dep; implement `crowkv-console-ssh::session::Session` + `probe(node)`.
-2. `~/.ssh/*` default key auth; `KeyPath` and `Password` alternatives via `SshCreds`.
-3. Replace local-fork lifecycle (C3) with the SSH-driven flow from design §5.3.
-4. CLI: `crowkv node ping <node>`.
-
-### Tests
-- Unit: parse SSH creds from TOML.
-- Integration (gated `#[ignore]` unless `CROWKV_TEST_SSH=1`): SSH to `127.0.0.1` and run `echo`.
-- Lifecycle: deploy → start → stop on `127.0.0.1` via SSH; assert health endpoint up.
-
-### Hand-off to user
-- Document `~/.ssh/authorized_keys` self-loopback setup.
-- Commit + push.
-
----
-
-## C5 — Cluster Management Plane
-
-### AI scope (core)
-1. `crowkv-console-core::mgmt` wraps `crowkv-server` HTTP management API for stores/groups/replicas/remotes.
-2. CLI: `store add/remove/list`, `group add/remove/list/inspect`, `replica add/remove`.
-3. Web: POST/DELETE/GET routes per design §6.1; thin handlers calling `core`.
-4. Validation: refuse a second server deploy on a node (one-per-node UI rule).
-
-### Tests
-- Integration: full create → list → delete cycle for store, group, replica via CLI and via Axum routes.
-
-### Hand-off to user
-- Web UI forms / dialogs (visual polish, not logic).
-- Commit + push.
-
----
-
-## C6 — KV Operations
-
-### AI scope (core)
-1. `crowkv-console-core::kv` over gRPC: put / get / delete / list / scan.
-2. CLI: `kv put/get/delete/list/scan`.
-3. Web: `/api/kv/*` per design §6.1. `PUT` is the edit verb.
-4. Reserve `--prefix` flag and search box; return a clear "not yet supported by server" error until server adds prefix listing. Add a follow-up entry to `doc/todo_plan.md`.
-
-### Tests
-- Integration: put → get → delete cycle via CLI and Axum.
-- List: insert N keys, list, assert count/order.
-
-### Hand-off to user
-- KV browser panel UI (display only; logic is done).
-- Commit + push.
 
 ---
 
@@ -226,4 +92,17 @@ Each phase ends with a working binary the user can run end-to-end.
 
 (explain per gap. AI appends; user resolves in one pass.)
 
-- *(none yet)*
+- **C4**: SSH `known_hosts` persistence is not implemented (TOFU accept is intentional for C4). Hand-off to C8 to add persistent `~/.crowkv/known_hosts` support.
+- **C5**: No DELETE /stores/{sid} upstream in `crowkv-server` management API. Console calls it best-effort and ignores 405. C8 (or a server-side patch) needs to add the handler.
+- **C6**: No prefix scan / list on the server — `KvStore` trait has no `kv_scan` method and no Scan RPC. Adding it requires a non-trivial server change (range iteration over the learner store + leader-vs-follower decision). Console returns a clear error meanwhile.
+- **C6**: `get` is a local follower read — it reads directly from the learner store without going through Paxos, so followers can return stale data. C6 surfaces this in doc-comments but doesn't address it. C7+ (or a server-side change) should add a `--linearizable` flag that forces the read through the leader.
+- **C6**: Hex parser is hand-rolled in `crowkv-console-web/src/lib.rs` and `crowkv-console-cli/src/main.rs` to avoid adding a hex crate dependency. Acceptable for a console tool; if you prefer standardization, swap for the `hex` crate.
+- **C6**: gRPC channels are per-call — `KvClient::connect` happens for each CLI invocation and each web request. Acceptable for an admin console; for the bench crate (C7) we'll want pooling.
+- **C7**: HDR histograms are recorded with bounds 1µs..60s and 3 sig digits — generous but fixed. If a workload exceeds 60 s tail latency the runner saturates rather than reporting raw values. Switch to `Histogram::auto(true)` if that ever matters.
+- **C7**: List/scan workload always reports error_rate=1.0 because the underlying `KvClient::scan` is a stub (C6 gap). The CLI accepts `bench run list` so the wiring is exercised, but the result is only useful as a "did the path connect" signal until the server adds prefix scan.
+- **C7**: Stress scenarios are hardcoded in `scenarios.rs`. If you want them user-tunable from `console.toml`, add a `[bench.stress.<name>]` section in C8.
+- **C7**: Worker model is tokio tasks, not OS threads, despite the plan saying "blocking-loop threads (1..=1000)". Tonic's channel is async-only; OS threads would each need their own runtime. Tasks on a multi-thread runtime give the same parallelism with lower overhead. Documented in `runner.rs`'s module comment.
+- **C8**: No Node/React frontend yet — `crowkv-console-web` still ships a single inline HTML SPA. The make/release-build wiring step (`npm ci && npm run build`) is reserved for whoever introduces the React app; until then this part of the C8 spec is N/A.
+- **C8**: Swagger UI assets are vendored from unpkg.com/swagger-ui-dist@5.17.14. Bumping requires re-running the curl snippet in this commit's notes (or the procedure in `static/swagger-ui/VERSION`). No automated update path.
+- **C8**: The `/api/openapi.json` proxy uses a fresh `reqwest::get` per request — no caching. For the admin console scale this is fine; if it ever lands behind a load balancer, add a small TTL cache keyed on upstream URL.
+- **C8**: The handwritten `index.html` only forwards a single `?server=<url>` parameter. No deep-link state for which operation is open is preserved across reloads (Swagger UI's own `deepLinking: true` handles operation IDs but not the upstream selector).

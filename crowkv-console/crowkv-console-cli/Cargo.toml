@@ -15,8 +15,8 @@ path = "src/main.rs"
 
 [dependencies]
 crowkv-console-core = { path = "../crowkv-console-core" }
-crowkv-console-ssh = { path = "../crowkv-console-ssh" }
 crowkv-console-bench = { path = "../crowkv-console-bench" }
+crowkv-console-ssh = { path = "../crowkv-console-ssh" }
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 serde = "1"
