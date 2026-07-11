@@ -71,7 +71,7 @@ fn multiple_slots_and_chunks() {
     for i in 0..count {
         list.insert_if_empty(i, i * 2);
     }
-    assert_eq!(list.len(), count as usize);
+    assert_eq!(list.len(), usize::try_from(count).unwrap());
 
     for i in 0..count {
         let guard = list.get(i).unwrap();
@@ -110,7 +110,7 @@ fn trim_removes_chunks_and_updates_len() {
     for i in 0..count {
         list.insert_if_empty(i, i);
     }
-    assert_eq!(list.len(), count as usize);
+    assert_eq!(list.len(), usize::try_from(count).unwrap());
 
     let mid = SLOT_CHUNK_SIZE as u64;
     list.trim(mid);
@@ -126,7 +126,7 @@ fn trim_removes_chunks_and_updates_len() {
 
     // len is only decremented after reclaim
     let _ = list.reclaim();
-    assert_eq!(list.len(), (count - mid) as usize);
+    assert_eq!(list.len(), usize::try_from(count - mid).unwrap());
 }
 
 #[test]
@@ -164,10 +164,7 @@ fn iter_range_returns_present_slots_only() {
     list.insert_if_empty(3, 30u64);
     list.insert_if_empty(8, 80u64);
 
-    let items: Vec<(u64, u64)> = list
-        .iter_range(0, 10)
-        .map(|(slot, guard)| (slot, *guard))
-        .collect();
+    let items: Vec<(u64, u64)> = list.iter_range(0, 10).map(|(slot, guard)| (slot, *guard)).collect();
 
     assert_eq!(items, vec![(1, 10), (3, 30), (8, 80)]);
 }
@@ -180,10 +177,7 @@ fn iter_range_respects_trim_watermark() {
     }
     list.trim(3);
 
-    let items: Vec<(u64, u64)> = list
-        .iter_range(0, 6)
-        .map(|(slot, guard)| (slot, *guard))
-        .collect();
+    let items: Vec<(u64, u64)> = list.iter_range(0, 6).map(|(slot, guard)| (slot, *guard)).collect();
 
     assert_eq!(items, vec![(3, 3), (4, 4), (5, 5)]);
 }
@@ -204,12 +198,7 @@ fn drop_destroys_values() {
     {
         let list = PxSlotList::new();
         for i in 0..(SLOT_CHUNK_SIZE as u64 + 3) {
-            let guard = list.insert_if_empty(
-                i,
-                DropCounter {
-                    drops: Arc::clone(&drops),
-                },
-            );
+            let guard = list.insert_if_empty(i, DropCounter { drops: Arc::clone(&drops) });
             drop(guard);
         }
     }
@@ -245,7 +234,7 @@ fn make_entry(slot: u64, ballot: PxBallot) -> PxLogEntry {
         ballot,
         term: ballot.round,
         kind: PxLogEntryKind::Write,
-        payload: vec![1, 2, 3],
+        payload: Arc::new(vec![1, 2, 3]),
         client_id: Some(1),
         seq: Some(1),
     }

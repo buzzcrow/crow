@@ -25,7 +25,7 @@ fn endpoint_update_and_lookup() {
 
 #[test]
 fn group_adds_remote_replicas_for_all_non_local_members() {
-    let store = PxKvStore::new(SocketAddr::from(([127, 0, 0, 1], 0)));
+    let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
     let replica = PxLocalReplica::new(1, PxLocalReplicaRole::Leader);
     let remote_replicas = vec![PxRemoteReplica::new(2, "127.0.0.1:2".to_string())];
     let mut group = PxGroup::new(1, replica);
@@ -43,14 +43,12 @@ fn group_adds_remote_replicas_for_all_non_local_members() {
 
 #[test]
 fn group_remote_replica_scale_shape_supports_large_membership() {
-    let remote_replicas: Vec<_> = (1..99)
-        .map(|id| PxRemoteReplica::new(id, format!("127.0.0.1:{}", 10_000 + id)))
-        .collect();
+    let remote_replicas: Vec<_> = (1..99).map(|id| PxRemoteReplica::new(id, format!("127.0.0.1:{}", 10_000 + id))).collect();
     let local_replica = PxLocalReplica::new(0, PxLocalReplicaRole::Leader);
     let mut group = PxGroup::new(99, local_replica);
     group.set_remote_replicas(remote_replicas);
     group.set_leader_id(0);
-    let store = PxKvStore::new(SocketAddr::from(([127, 0, 0, 1], 0)));
+    let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
     store.add_group(group);
 
     let group = store.get_group(99).expect("group should be registered");
@@ -64,10 +62,7 @@ fn group_is_leader_reflects_my_id() {
     let group = sample_group(); // leader_id=1, local replica id=1
     assert!(group.is_leader());
 
-    let remote_replicas = vec![
-        PxRemoteReplica::new(1, "127.0.0.1:1".to_string()),
-        PxRemoteReplica::new(2, "127.0.0.1:2".to_string()),
-    ];
+    let remote_replicas = vec![PxRemoteReplica::new(1, "127.0.0.1:1".to_string()), PxRemoteReplica::new(2, "127.0.0.1:2".to_string())];
     let local_replica = PxLocalReplica::new(2, PxLocalReplicaRole::Follower);
     let mut follower_group = PxGroup::new(2, local_replica);
     follower_group.set_remote_replicas(remote_replicas);

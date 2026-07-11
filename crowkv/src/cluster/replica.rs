@@ -29,19 +29,10 @@ pub trait Replica {
 #[allow(async_fn_in_trait)]
 pub trait ReplicaHandler: Replica {
     /// Phase-1 `Prepare` handler.
-    async fn on_prepare(
-        &self,
-        slot: u64,
-        ballot: PxBallot,
-        group_id: u64,
-    ) -> Result<PxPrepareReply, tonic::Status>;
+    async fn on_prepare(&self, slot: u64, ballot: PxBallot, group_id: u64) -> Result<PxPrepareReply, tonic::Status>;
 
     /// Phase-2 `Accept` handler.
-    async fn on_accept(
-        &self,
-        entry: PxLogEntry,
-        group_id: u64,
-    ) -> Result<PxAcceptReply, tonic::Status>;
+    async fn on_accept(&self, entry: PxLogEntry, group_id: u64) -> Result<PxAcceptReply, tonic::Status>;
 }
 
 /// Client-side sender trait for remote replicas.
@@ -50,17 +41,8 @@ pub trait ReplicaHandler: Replica {
 #[allow(async_fn_in_trait)]
 pub trait ReplicaClient: Replica {
     /// Send a Prepare request to a remote replica.
-    async fn send_prepare(
-        &self,
-        slot: u64,
-        ballot: PxBallot,
-        group_id: u64,
-    ) -> Result<PxPrepareReply, tonic::Status>;
+    async fn send_prepare(&self, slot: u64, ballot: PxBallot, group_id: u64) -> Result<PxPrepareReply, tonic::Status>;
 
     /// Send an Accept request to a remote replica.
-    async fn send_accept(
-        &self,
-        entry: &PxLogEntry,
-        group_id: u64,
-    ) -> Result<PxAcceptReply, tonic::Status>;
+    async fn send_accept(&self, entry: &PxLogEntry, group_id: u64) -> Result<PxAcceptReply, tonic::Status>;
 }

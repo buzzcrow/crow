@@ -1,4 +1,4 @@
-//! PxGroup unit tests for single-local-only group proposal.
+//! `PxGroup` unit tests for single-local-only group proposal.
 
 use crowkv::cluster::group::{ProposeResult, PxGroup};
 use crowkv::cluster::{PxLocalReplica, PxLocalReplicaRole, PxRemoteReplica};
@@ -18,7 +18,7 @@ async fn single_local_propose_succeeds() {
         ProposeResult::Chosen { slot } => {
             assert_eq!(slot, 1, "first proposal should get slot 1");
         }
-        other => panic!("expected Chosen, got {:?}", other),
+        other => panic!("expected Chosen, got {other:?}"),
     }
 
     // Second proposal gets next slot
@@ -26,7 +26,7 @@ async fn single_local_propose_succeeds() {
         ProposeResult::Chosen { slot } => {
             assert_eq!(slot, 2, "second proposal should get slot 2");
         }
-        other => panic!("expected Chosen, got {:?}", other),
+        other => panic!("expected Chosen, got {other:?}"),
     }
 }
 
@@ -38,7 +38,7 @@ async fn single_local_propose_learns_entry() {
     // Verify learner applied the payload
     let replica = group.local_replica();
     let accepted = replica.accepted_at(1).await.expect("slot 1 accepted");
-    assert_eq!(accepted.payload, b"test-value");
+    assert_eq!(*accepted.payload, b"test-value");
 }
 
 #[tokio::test]
@@ -53,7 +53,7 @@ async fn follower_group_rejects_proposal() {
         ProposeResult::NotLeader { leader_hint } => {
             assert_eq!(leader_hint, "127.0.0.1:9999");
         }
-        other => panic!("expected NotLeader, got {:?}", other),
+        other => panic!("expected NotLeader, got {other:?}"),
     }
 }
 
@@ -68,13 +68,13 @@ async fn single_local_classic_propose_succeeds() {
         ProposeResult::Chosen { slot } => {
             assert_eq!(slot, 1);
         }
-        other => panic!("expected Chosen, got {:?}", other),
+        other => panic!("expected Chosen, got {other:?}"),
     }
 
     // Verify entry was learned
     let replica = group.local_replica();
     let accepted = replica.accepted_at(1).await.expect("slot 1 accepted");
-    assert_eq!(accepted.payload, b"classic-payload");
+    assert_eq!(*accepted.payload, b"classic-payload");
 }
 
 #[tokio::test]
@@ -85,7 +85,7 @@ async fn propose_with_no_client_id() {
         ProposeResult::Chosen { slot } => {
             assert_eq!(slot, 1);
         }
-        other => panic!("expected Chosen, got {:?}", other),
+        other => panic!("expected Chosen, got {other:?}"),
     }
 }
 
@@ -95,14 +95,14 @@ async fn sequential_proposals_allocate_increasing_slots() {
 
     let mut slots = Vec::new();
     for i in 0..5 {
-        match group.propose(format!("val-{}", i).into_bytes(), Some(1), Some(i)).await {
+        match group.propose(format!("val-{i}").into_bytes(), Some(1), Some(i)).await {
             ProposeResult::Chosen { slot } => slots.push(slot),
-            other => panic!("expected Chosen, got {:?}", other),
+            other => panic!("expected Chosen, got {other:?}"),
         }
     }
 
     // Slots should be strictly increasing
     for w in slots.windows(2) {
-        assert!(w[1] > w[0], "slots should increase: {:?}", slots);
+        assert!(w[1] > w[0], "slots should increase: {slots:?}");
     }
 }

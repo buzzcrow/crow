@@ -1,11 +1,19 @@
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::too_many_lines)]
+#![allow(clippy::missing_fields_in_debug)]
+
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info, warn};
 
+use crate::cluster::health::{HealthReport, HealthStatus};
 use crate::cluster::local_replica::PxLocalReplica;
 use crate::cluster::remote_replica::PxRemoteReplica;
 use crate::cluster::replica::{Replica, ReplicaClient, ReplicaHandler};
+use crate::cluster::shutdown::ShutdownReport;
+use crate::cluster::snapshot::GroupSnapshot;
 use crate::common::config::PaxosConfig;
 use crate::paxos::error::{PxPaxosError, PxPaxosPhase, PxRetryAction};
 use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxLogEntryKind, PxPrepareReply};
@@ -99,10 +107,7 @@ impl PxGroup {
         } else {
             // Local is not leader, check if we have the leader's endpoint
             let idx = self.leader_id as usize;
-            self.remote_replicas
-                .get(idx)
-                .and_then(|r| r.endpoint())
-                .map(str::to_string)
+            self.remote_replicas.get(idx).and_then(|r| r.endpoint()).map(str::to_string)
         }
     }
 
@@ -120,9 +125,7 @@ impl PxGroup {
     pub fn set_remote_replicas(&mut self, remote_replicas: Vec<PxRemoteReplica>) {
         let max_node_id = remote_replicas.iter().map(|r| r.node_id).max().unwrap_or(0);
         let vec_len = (max_node_id + 1) as usize;
-        self.remote_replicas = (0..vec_len)
-            .map(|_| RemoteReplicaKind::Placeholder)
-            .collect();
+        self.remote_replicas = (0..vec_len).map(|_| RemoteReplicaKind::Placeholder).collect();
         self.valid_replica_count = 0;
 
         for remote in remote_replicas {
@@ -135,11 +138,7 @@ impl PxGroup {
         self.recompute_quorum();
     }
 
-    pub fn update_member_endpoint(
-        &mut self,
-        node_id: PxNodeId,
-        endpoint: impl Into<String>,
-    ) -> Option<String> {
+    pub fn update_member_endpoint(&mut self, node_id: PxNodeId, endpoint: impl Into<String>) -> Option<String> {
         let endpoint = endpoint.into();
         let idx = node_id as usize;
 
@@ -156,6 +155,115 @@ impl PxGroup {
         }
     }
 
+    // ── Snapshot ──────────────────────────────────────────────────
+
+    /// Point-in-time snapshot of this group: local replica + each remote.
+    /// Used by `/topology`.
+    #[must_use]
+    pub fn snapshot(&self) -> GroupSnapshot {
+        let local_replica = self.local_replica.snapshot();
+        let remotes = self
+            .remote_replicas
+            .iter()
+            .filter_map(|r| match r {
+                RemoteReplicaKind::Real(r) => Some(r.snapshot()),
+                RemoteReplicaKind::Placeholder => None,
+            })
+            .collect();
+        GroupSnapshot {
+            group_id: self.group_id,
+            leader_id: self.leader_id,
+            force_classic: self.force_classic,
+            local_replica,
+            remotes,
+        }
+    }
+
+    // ── Health ────────────────────────────────────────────────────
+
+    /// Aggregate cached health across the local replica and all remotes.
+    ///
+    /// Each layer decides its own status; here we take the worst-of from
+    /// children and additionally downgrade to `Degraded` if fewer than
+    /// `quorum` voting replicas are reachable (cached). `Unhealthy` if
+    /// quorum is impossible.
+    #[must_use]
+    pub fn health(&self) -> HealthReport {
+        let mut report = HealthReport::ok();
+
+        // 1. Local replica.
+        let local = self.local_replica.health();
+        report.merge_child(&format!("local#{}", self.local_replica.id), local);
+
+        // 2. Remotes — count how many voting members are believed Ok.
+        let mut ok_voting = u32::from(self.local_replica.voting() && report.status != HealthStatus::Unhealthy);
+        for remote in &self.remote_replicas {
+            if let RemoteReplicaKind::Real(r) = remote {
+                let r_health = r.health();
+                let voting_ok = r.voting() && r_health.status == HealthStatus::Ok;
+                if voting_ok {
+                    ok_voting += 1;
+                }
+                report.merge_child(&format!("remote#{}", r.node_id), r_health);
+            }
+        }
+
+        // 3. Quorum check.
+        let quorum = self.cached_quorum as u32;
+        if quorum > 0 && ok_voting < quorum {
+            // Worst-of with what children already produced. If any child is
+            // already Unhealthy, that wins; otherwise mark Degraded.
+            if report.status != HealthStatus::Unhealthy {
+                report.status = HealthStatus::Degraded;
+            }
+            report.note(format!(
+                "group {}: only {ok_voting}/{} voting replicas reachable (quorum {quorum})",
+                self.group_id,
+                self.valid_replica_count + 1,
+            ));
+        }
+
+        report
+    }
+
+    // ── Shutdown ──────────────────────────────────────────────────
+
+    /// Cascade shutdown through this group's replicas.
+    ///
+    /// Iterates real remote replicas and closes their gRPC channels, then
+    /// shuts down the local replica (which in turn cascades through
+    /// `acceptor` / `learner` / `slot_list` / `kv_store`). Continues on errors;
+    /// aggregated `critical:` messages are returned.
+    #[tracing::instrument(
+        level = "info",
+        skip_all,
+        fields(group_id = self.group_id, replica_l_id = self.local_replica.id)
+    )]
+    pub async fn shutdown(&self, per_layer_timeout: Duration) -> ShutdownReport {
+        let mut report = ShutdownReport::new();
+        info!(
+            group_id = self.group_id,
+            replica_l_id = self.local_replica.id,
+            remote_count = self.valid_replica_count,
+            "PxGroup shutdown starting"
+        );
+
+        // 1. Close remote gRPC channels first so no in-flight RPCs spin.
+        for remote in &self.remote_replicas {
+            if let RemoteReplicaKind::Real(remote) = remote {
+                let sub = remote.shutdown(per_layer_timeout).await;
+                report.merge(sub);
+            }
+        }
+
+        // 2. Shutdown local replica.
+        let sub = self.local_replica.shutdown(per_layer_timeout).await;
+        report.merge(sub);
+
+        info!(group_id = self.group_id, error_count = report.errors.len(), "PxGroup shutdown complete");
+        report
+    }
+
     // ── Add/Remove ────────────────────────────────────────────────
 
     /// Add a remote replica to the group.
@@ -170,15 +278,11 @@ impl PxGroup {
         let idx = remote.node_id as usize;
         // Ensure vec is large enough
         while idx >= self.remote_replicas.len() {
-            self.remote_replicas
-                .push(RemoteReplicaKind::Placeholder);
+            self.remote_replicas.push(RemoteReplicaKind::Placeholder);
         }
 
         // Check if this was a placeholder before
-        if matches!(
-            self.remote_replicas[idx],
-            RemoteReplicaKind::Placeholder
-        ) {
+        if matches!(self.remote_replicas[idx], RemoteReplicaKind::Placeholder) {
             self.valid_replica_count += 1;
         }
 
@@ -186,16 +290,35 @@ impl PxGroup {
         self.recompute_quorum();
     }
 
+    /// Remove a remote replica by node ID. Returns true if it was present.
+    pub fn remove_remote_replica(&mut self, node_id: PxNodeId) -> bool {
+        let idx = node_id as usize;
+        if idx < self.remote_replicas.len() && matches!(self.remote_replicas[idx], RemoteReplicaKind::Real(_)) {
+            info!(group_id = self.group_id, remote_id = node_id, "removed remote replica from group");
+            self.remote_replicas[idx] = RemoteReplicaKind::Placeholder;
+            self.valid_replica_count -= 1;
+            self.recompute_quorum();
+            return true;
+        }
+        false
+    }
+
+    /// Return info about all real remote replicas: `(node_id, endpoint)`.
+    pub fn remote_replica_info(&self) -> Vec<(PxNodeId, &str)> {
+        self.remote_replicas
+            .iter()
+            .filter_map(|r| match r {
+                RemoteReplicaKind::Real(remote) => Some((remote.node_id, remote.endpoint.as_str())),
+                RemoteReplicaKind::Placeholder => None,
+            })
+            .collect()
+    }
+
     // ── Proposer ──────────────────────────────────────────────
 
     /// Propose an opaque payload through Paxos. Returns the slot if chosen,
     /// or an error string.
-    pub async fn propose(
-        &self,
-        payload: Vec<u8>,
-        client_id: Option<u64>,
-        seq: Option<u64>,
-    ) -> ProposeResult {
+    pub async fn propose(&self, payload: Vec<u8>, client_id: Option<u64>, seq: Option<u64>) -> ProposeResult {
         let replica = &self.local_replica;
 
         if !self.is_leader() {
@@ -229,24 +352,10 @@ impl PxGroup {
             for attempt in 0..PaxosConfig::DEFAULT.max_paxos_retries {
                 let mut entry = base_entry.clone();
                 let mut adopted_foreign_value = false;
-                debug!(
-                    group_id,
-                    slot, attempt, force_prepare, min_round, "start paxos attempt"
-                );
+                debug!(group_id, slot, attempt, force_prepare, min_round, "start paxos attempt");
 
                 if force_prepare {
-                    match self
-                        .run_prepare_phase(
-                            replica,
-                            slot,
-                            payload.as_slice(),
-                            client_id,
-                            seq,
-                            quorum,
-                            min_round,
-                        )
-                        .await
-                    {
+                    match self.run_prepare_phase(replica, slot, payload.as_slice(), client_id, seq, quorum, min_round).await {
                         PrepareAttempt::Proceed {
                             entry: prepared_entry,
                             foreign_value,
@@ -254,31 +363,15 @@ impl PxGroup {
                             entry = prepared_entry;
                             adopted_foreign_value = foreign_value;
                         }
-                        PrepareAttempt::Retry {
-                            next_min_round,
-                            error,
-                        } => {
-                            warn!(
-                                group_id,
-                                slot,
-                                attempt,
-                                next_min_round,
-                                error = error.keyword(),
-                                "prepare retry requested"
-                            );
+                        PrepareAttempt::Retry { next_min_round, error } => {
+                            warn!(group_id, slot, attempt, next_min_round, error = error.keyword(), "prepare retry requested");
                             last_error = error.keyword().to_string();
                             min_round = next_min_round;
-                            sleep(self.retry_backoff(attempt)).await;
+                            sleep(Self::retry_backoff(attempt)).await;
                             continue;
                         }
                         PrepareAttempt::Fail { error } => {
-                            error!(
-                                group_id,
-                                slot,
-                                attempt,
-                                error = error.keyword(),
-                                "prepare failed"
-                            );
+                            error!(group_id, slot, attempt, error = error.keyword(), "prepare failed");
                             last_error = error.keyword().to_string();
                             break;
                         }
@@ -298,26 +391,16 @@ impl PxGroup {
                             "paxos entry chosen and learned locally"
                         );
 
-                        if adopted_foreign_value || entry.payload != payload {
-                            last_error = PxPaxosError::ForeignValueChosen { slot }
-                                .keyword()
-                                .to_string();
-                            warn!(
-                                group_id,
-                                slot,
-                                error = last_error,
-                                "foreign value chosen; retrying client value on next slot"
-                            );
+                        if adopted_foreign_value || *entry.payload != payload {
+                            last_error = PxPaxosError::ForeignValueChosen { slot }.keyword().to_string();
+                            warn!(group_id, slot, error = last_error, "foreign value chosen; retrying client value on next slot");
                             slot = self.next_slot.fetch_add(1, Ordering::SeqCst);
                             continue 'slot_retry;
                         }
 
                         return ProposeResult::Chosen { slot };
                     }
-                    AcceptAttempt::Retry {
-                        next_min_round,
-                        error,
-                    } => {
+                    AcceptAttempt::Retry { next_min_round, error } => {
                         warn!(
                             group_id,
                             slot,
@@ -329,26 +412,17 @@ impl PxGroup {
                         last_error = error.keyword().to_string();
                         min_round = next_min_round;
                         force_prepare = true;
-                        sleep(self.retry_backoff(attempt)).await;
+                        sleep(Self::retry_backoff(attempt)).await;
                     }
                     AcceptAttempt::Fail { error } => {
-                        error!(
-                            group_id,
-                            slot,
-                            attempt,
-                            error = error.keyword(),
-                            "accept failed"
-                        );
+                        error!(group_id, slot, attempt, error = error.keyword(), "accept failed");
                         last_error = error.keyword().to_string();
                         break;
                     }
                 }
             }
 
-            warn!(
-                group_id,
-                slot, last_error, "slot proposal failed; retrying on next slot"
-            );
+            warn!(group_id, slot, last_error, "slot proposal failed; retrying on next slot");
             slot = self.next_slot.fetch_add(1, Ordering::SeqCst);
         }
 
@@ -371,13 +445,7 @@ impl PxGroup {
         })
     }
 
-    fn base_entry(
-        &self,
-        slot: u64,
-        payload: Vec<u8>,
-        client_id: Option<u64>,
-        seq: Option<u64>,
-    ) -> PxLogEntry {
+    fn base_entry(&self, slot: u64, payload: Vec<u8>, client_id: Option<u64>, seq: Option<u64>) -> PxLogEntry {
         PxLogEntry {
             slot,
             ballot: PxBallot {
@@ -386,21 +454,20 @@ impl PxGroup {
             },
             term: 0,
             kind: PxLogEntryKind::Write,
-            payload,
+            payload: Arc::new(payload),
             client_id,
             seq,
         }
     }
 
     fn consider_accepted(adopted: &mut Option<PxLogEntry>, candidate: PxLogEntry) {
-        let should_replace = adopted
-            .as_ref()
-            .map_or(true, |current| candidate.ballot > current.ballot);
+        let should_replace = adopted.as_ref().map_or(true, |current| candidate.ballot > current.ballot);
         if should_replace {
             *adopted = Some(candidate);
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_prepare_phase(
         &self,
         replica: &PxLocalReplica,
@@ -421,14 +488,7 @@ impl PxGroup {
             leader_id: self.local_replica.id,
         };
         let group_id = self.group_id;
-        debug!(
-            group_id,
-            slot,
-            round = ballot.round,
-            peer_count = self.valid_replica_count,
-            quorum,
-            "run prepare phase"
-        );
+        debug!(group_id, slot, round = ballot.round, peer_count = self.valid_replica_count, quorum, "run prepare phase");
         let mut entry = self.base_entry(slot, payload.to_vec(), client_id, seq);
         entry.ballot = ballot;
 
@@ -436,17 +496,14 @@ impl PxGroup {
         let mut highest_rejected_round: Option<u64> = None;
         let mut adopted: Option<PxLogEntry> = None;
 
-        match <PxLocalReplica as ReplicaHandler>::on_prepare(replica, slot, ballot, group_id).await
-        {
+        match <PxLocalReplica as ReplicaHandler>::on_prepare(replica, slot, ballot, group_id).await {
             Ok(PxPrepareReply::Promised { accepted, .. }) => {
                 promised += 1;
                 if let Some(prev) = accepted {
                     Self::consider_accepted(&mut adopted, prev);
                 }
             }
-            Ok(PxPrepareReply::Rejected {
-                current_promised, ..
-            }) => {
+            Ok(PxPrepareReply::Rejected { current_promised, .. }) => {
                 highest_rejected_round = Some(current_promised.round);
             }
             Err(error) => {
@@ -469,13 +526,9 @@ impl PxGroup {
                             Self::consider_accepted(&mut adopted, prev);
                         }
                     }
-                    Ok(PxPrepareReply::Rejected {
-                        current_promised, ..
-                    }) => {
+                    Ok(PxPrepareReply::Rejected { current_promised, .. }) => {
                         let candidate = current_promised.round;
-                        highest_rejected_round = Some(
-                            highest_rejected_round.map_or(candidate, |r| r.max(candidate)),
-                        );
+                        highest_rejected_round = Some(highest_rejected_round.map_or(candidate, |r| r.max(candidate)));
                     }
                     Err(error) => {
                         warn!(
@@ -497,21 +550,13 @@ impl PxGroup {
                     promised: PxBallot::new(round, 0),
                 };
                 let next_min_round = match error.retry_action() {
-                    PxRetryAction::RetrySameSlot {
-                        min_round: Some(round),
-                        ..
-                    } => round,
+                    PxRetryAction::RetrySameSlot { min_round: Some(round), .. } => round,
                     _ => round,
                 };
-                return PrepareAttempt::Retry {
-                    next_min_round,
-                    error,
-                };
+                return PrepareAttempt::Retry { next_min_round, error };
             }
             return PrepareAttempt::Fail {
-                error: PxPaxosError::QuorumUnavailable {
-                    phase: PxPaxosPhase::Prepare,
-                },
+                error: PxPaxosError::QuorumUnavailable { phase: PxPaxosPhase::Prepare },
             };
         }
 
@@ -529,18 +574,10 @@ impl PxGroup {
             }
             entry = prev;
         }
-        PrepareAttempt::Proceed {
-            entry,
-            foreign_value,
-        }
+        PrepareAttempt::Proceed { entry, foreign_value }
     }
 
-    async fn run_accept_phase(
-        &self,
-        replica: &PxLocalReplica,
-        entry: &PxLogEntry,
-        quorum: usize,
-    ) -> AcceptAttempt {
+    async fn run_accept_phase(&self, replica: &PxLocalReplica, entry: &PxLogEntry, quorum: usize) -> AcceptAttempt {
         let mut accepted = 0usize;
         let mut highest_rejected_round: Option<u64> = None;
         let group_id = self.group_id;
@@ -553,14 +590,11 @@ impl PxGroup {
             "run accept phase"
         );
 
-        match <PxLocalReplica as ReplicaHandler>::on_accept(replica, entry.clone(), group_id).await
-        {
+        match <PxLocalReplica as ReplicaHandler>::on_accept(replica, entry.clone(), group_id).await {
             Ok(PxAcceptReply::Accepted { .. }) => {
                 accepted += 1;
             }
-            Ok(PxAcceptReply::Rejected {
-                current_promised, ..
-            }) => {
+            Ok(PxAcceptReply::Rejected { current_promised, .. }) => {
                 highest_rejected_round = Some(current_promised.round);
             }
             Err(error) => {
@@ -580,13 +614,9 @@ impl PxGroup {
                     Ok(PxAcceptReply::Accepted { .. }) => {
                         accepted += 1;
                     }
-                    Ok(PxAcceptReply::Rejected {
-                        current_promised, ..
-                    }) => {
+                    Ok(PxAcceptReply::Rejected { current_promised, .. }) => {
                         let candidate = current_promised.round;
-                        highest_rejected_round = Some(
-                            highest_rejected_round.map_or(candidate, |r| r.max(candidate)),
-                        );
+                        highest_rejected_round = Some(highest_rejected_round.map_or(candidate, |r| r.max(candidate)));
                     }
                     Err(error) => {
                         warn!(
@@ -611,37 +641,24 @@ impl PxGroup {
                 promised: PxBallot::new(round, 0),
             };
             let next_min_round = match error.retry_action() {
-                PxRetryAction::RetrySameSlot {
-                    min_round: Some(round),
-                    ..
-                } => round,
+                PxRetryAction::RetrySameSlot { min_round: Some(round), .. } => round,
                 _ => round + 1,
             };
-            return AcceptAttempt::Retry {
-                next_min_round,
-                error,
-            };
+            return AcceptAttempt::Retry { next_min_round, error };
         }
         AcceptAttempt::Fail {
-            error: PxPaxosError::QuorumUnavailable {
-                phase: PxPaxosPhase::Accept,
-            },
+            error: PxPaxosError::QuorumUnavailable { phase: PxPaxosPhase::Accept },
         }
     }
 
     fn recompute_quorum(&mut self) {
-        let voting_count = self.remote_replicas.iter().filter(|r| r.voting()).count()
-            + u32::from(self.local_replica.voting()) as usize;
+        let voting_count = self.remote_replicas.iter().filter(|r| r.voting()).count() + u32::from(self.local_replica.voting()) as usize;
         self.cached_quorum = (voting_count / 2) + 1;
     }
 
-    fn retry_backoff(&self, attempt: usize) -> Duration {
+    fn retry_backoff(attempt: usize) -> Duration {
         let factor = 1u64 << attempt.min(6);
-        Duration::from_millis(
-            PaxosConfig::DEFAULT
-                .retry_base_backoff_ms
-                .saturating_mul(factor),
-        )
+        Duration::from_millis(PaxosConfig::DEFAULT.retry_base_backoff_ms.saturating_mul(factor))
     }
 }
 
@@ -684,26 +701,13 @@ pub enum ProposeResult {
 }
 
 enum PrepareAttempt {
-    Proceed {
-        entry: PxLogEntry,
-        foreign_value: bool,
-    },
-    Retry {
-        next_min_round: u64,
-        error: PxPaxosError,
-    },
-    Fail {
-        error: PxPaxosError,
-    },
+    Proceed { entry: PxLogEntry, foreign_value: bool },
+    Retry { next_min_round: u64, error: PxPaxosError },
+    Fail { error: PxPaxosError },
 }
 
 enum AcceptAttempt {
     Chosen,
-    Retry {
-        next_min_round: u64,
-        error: PxPaxosError,
-    },
-    Fail {
-        error: PxPaxosError,
-    },
+    Retry { next_min_round: u64, error: PxPaxosError },
+    Fail { error: PxPaxosError },
 }

@@ -1,17 +1,32 @@
+use crate::cluster::health::HealthReport;
 use crate::cluster::replica::{Replica, ReplicaClient};
+use crate::cluster::shutdown::ShutdownReport;
+use crate::cluster::snapshot::RemoteSnapshot;
+use crate::common::metrics::LayerMetrics;
 use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxLogEntryKind, PxPrepareReply};
 use crate::paxos::PxNodeId;
 use crate::rpc::px_service_client::PxServiceClient;
 use crate::rpc::{AcceptRequest, AcceptedValue, PrepareRequest};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::OnceCell;
 use tonic::transport::Channel;
+use tracing::{debug, info};
 
 #[derive(Debug)]
 pub struct PxRemoteReplica {
     pub(crate) node_id: PxNodeId,
     pub(crate) endpoint: String,
-    grpc_client: OnceCell<PxServiceClient<Channel>>,
+    // Boxed to reduce inline size - PxServiceClient is large (~272 bytes),
+    // which would make RemoteReplicaKind::Real large and trigger large_enum_variant warning.
+    // Heap allocation is deferred via OnceCell until first use.
+    grpc_client: OnceCell<Box<PxServiceClient<Channel>>>,
     pub(crate) voting: bool,
+    /// Per-remote RPC counters consumed by `/topology`.
+    metrics: LayerMetrics,
+    /// Idempotency gate for [`Self::shutdown`].
+    shutdown_started: AtomicBool,
 }
 
 impl Replica for PxRemoteReplica {
@@ -29,14 +44,16 @@ impl Replica for PxRemoteReplica {
 }
 
 impl ReplicaClient for PxRemoteReplica {
-    async fn send_prepare(
-        &self,
-        slot: u64,
-        ballot: PxBallot,
-        group_id: u64,
-    ) -> Result<PxPrepareReply, tonic::Status> {
-        let mut client = self.get_client().await?.clone();
-        let resp = client
+    async fn send_prepare(&self, slot: u64, ballot: PxBallot, group_id: u64) -> Result<PxPrepareReply, tonic::Status> {
+        let mut client = match self.get_client().await {
+            Ok(c) => c.clone(),
+            Err(status) => {
+                self.metrics.record_err();
+                return Err(status);
+            }
+        };
+        let started = Instant::now();
+        let resp = match client
             .prepare(PrepareRequest {
                 version: 1,
                 slot,
@@ -46,8 +63,16 @@ impl ReplicaClient for PxRemoteReplica {
                 request_create_ms: 0,
                 group_id,
             })
-            .await?
-            .into_inner();
+            .await
+        {
+            Ok(r) => r.into_inner(),
+            Err(status) => {
+                self.metrics.record_err();
+                return Err(status);
+            }
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        self.metrics.record_ok(started.elapsed().as_millis() as u64);
 
         if resp.rejected {
             Ok(PxPrepareReply::Rejected {
@@ -57,20 +82,21 @@ impl ReplicaClient for PxRemoteReplica {
         } else {
             Ok(PxPrepareReply::Promised {
                 slot: resp.slot,
-                accepted: resp
-                    .previously_accepted
-                    .map(Self::accepted_value_to_log_entry),
+                accepted: resp.previously_accepted.map(Self::accepted_value_to_log_entry),
             })
         }
     }
 
-    async fn send_accept(
-        &self,
-        entry: &PxLogEntry,
-        group_id: u64,
-    ) -> Result<PxAcceptReply, tonic::Status> {
-        let mut client = self.get_client().await?.clone();
-        let resp = client
+    async fn send_accept(&self, entry: &PxLogEntry, group_id: u64) -> Result<PxAcceptReply, tonic::Status> {
+        let mut client = match self.get_client().await {
+            Ok(c) => c.clone(),
+            Err(status) => {
+                self.metrics.record_err();
+                return Err(status);
+            }
+        };
+        let started = Instant::now();
+        let resp = match client
             .accept(AcceptRequest {
                 version: 1,
                 slot: entry.slot,
@@ -82,7 +108,7 @@ impl ReplicaClient for PxRemoteReplica {
                     round: entry.ballot.round,
                     leader_id: entry.ballot.leader_id,
                     term: entry.term,
-                    payload: entry.payload.clone(),
+                    payload: (*entry.payload).clone(),
                 }),
                 request_id: 0,
                 request_create_ms: 0,
@@ -90,8 +116,16 @@ impl ReplicaClient for PxRemoteReplica {
                 seq: entry.seq.unwrap_or(0),
                 group_id,
             })
-            .await?
-            .into_inner();
+            .await
+        {
+            Ok(r) => r.into_inner(),
+            Err(status) => {
+                self.metrics.record_err();
+                return Err(status);
+            }
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        self.metrics.record_ok(started.elapsed().as_millis() as u64);
 
         if resp.rejected {
             Ok(PxAcceptReply::Rejected {
@@ -114,17 +148,61 @@ impl PxRemoteReplica {
                 PxServiceClient::connect(format!("http://{}", self.endpoint))
                     .await
                     .map_err(|e| tonic::Status::unavailable(e.to_string()))
+                    .map(Box::new)
             })
             .await
+            .map(std::convert::AsRef::as_ref)
     }
 
+    #[must_use]
     pub fn new(node_id: PxNodeId, endpoint: String) -> Self {
         Self {
             node_id,
             endpoint,
             grpc_client: OnceCell::new(),
             voting: true,
+            metrics: LayerMetrics::new(),
+            shutdown_started: AtomicBool::new(false),
         }
+    }
+
+    /// Read this remote's RPC metrics for the topology endpoint.
+    #[must_use]
+    pub fn snapshot(&self) -> RemoteSnapshot {
+        RemoteSnapshot {
+            id: self.node_id,
+            endpoint: self.endpoint.clone(),
+            voting: self.voting,
+            metrics: self.metrics.snapshot(),
+        }
+    }
+
+    /// Cascade shutdown: take and drop the gRPC client (closes the channel).
+    ///
+    /// `tonic::transport::Channel` cleans up its connection on drop, so taking
+    /// the `OnceCell`'s value is sufficient. This is fast (no real I/O) so
+    /// the timeout is informational only — we still pass it through for
+    /// uniformity with the cascade contract.
+    #[tracing::instrument(level = "debug", skip_all, fields(replica_r_id = self.node_id))]
+    #[allow(clippy::unused_async)] // async kept for cascade uniformity
+    pub async fn shutdown(&self, _per_layer_timeout: Duration) -> ShutdownReport {
+        if self.shutdown_started.swap(true, Ordering::AcqRel) {
+            debug!(replica_r_id = self.node_id, "PxRemoteReplica::shutdown is a no-op (already shut down)");
+            return ShutdownReport::new();
+        }
+
+        // `take` requires `&mut`; OnceCell doesn't expose that on `&self`.
+        // The Channel inside Box will be dropped when the OnceCell itself is
+        // dropped (when PxGroup is dropped). For now, we rely on Drop. If
+        // explicit close is needed earlier (e.g. tearing down a remote without
+        // tearing down the group), expose `OnceCell` mutation through a
+        // `&mut self` API.
+        info!(
+            replica_r_id = self.node_id,
+            endpoint = %self.endpoint,
+            "PxRemoteReplica shutdown (channel will close on drop)"
+        );
+        ShutdownReport::new()
     }
 
     #[must_use]
@@ -141,13 +219,32 @@ impl PxRemoteReplica {
         &self.endpoint
     }
 
+    /// Best-effort cached health.
+    ///
+    /// V1: no active probe. We only know:
+    /// - if the `OnceCell` is initialized, we connected at least once and the
+    ///   tonic `Channel` is auto-reconnecting; report `Ok`.
+    /// - if not initialized, no traffic has been sent; report `Degraded`
+    ///   with a message so operators see "haven't talked yet".
+    ///
+    /// Once §3 metrics expose `err_count` / `last_rtt_ms`, this method should
+    /// downgrade to `Degraded`/`Unhealthy` based on those counters.
+    #[must_use]
+    pub fn health(&self) -> HealthReport {
+        if self.grpc_client.initialized() {
+            HealthReport::ok()
+        } else {
+            HealthReport::degraded(format!("remote {} ({}): channel not yet established", self.node_id, self.endpoint))
+        }
+    }
+
     fn accepted_value_to_log_entry(value: AcceptedValue) -> PxLogEntry {
         PxLogEntry {
             slot: value.slot,
             ballot: PxBallot::new(value.round, value.leader_id),
             term: value.term,
             kind: PxLogEntryKind::Write,
-            payload: value.payload,
+            payload: Arc::new(value.payload),
             client_id: None,
             seq: None,
         }

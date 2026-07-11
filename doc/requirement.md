@@ -59,7 +59,13 @@ Conventions:
   - [14.2 Failure Scenarios](#142-failure-scenarios-must-be-covered-in-test-designmd)
 - [15. Components](#15-components)
   - [15.1 `crowkv` library (core)](#151-crowkv-library-core)
-  - [15.2 `crowkv` server](#152-crowkv-server)
+  - [15.2 `crowkv-server`](#152-crowkv-server)
+    - [15.2.1 CLI Interface](#1521-cli-interface)
+    - [15.2.2 HTTP Management API](#1522-http-management-api)
+    - [15.2.3 Topology Wiring Workflow](#1523-topology-wiring-workflow)
+    - [15.2.4 Non-Goals](#1524-non-goals)
+    - [15.2.5 Error Handling](#1525-error-handling)
+    - [15.2.6 Logging](#1526-logging)
   - [15.3 `crowbench`](#153-crowbench)
   - [15.4 RPC and Communication](#154-rpc-and-communication)
 
@@ -537,9 +543,79 @@ Full Jepsen-style linearizability checking is deferred and will be specified in 
 
 Contains all core logic and functionality. Other top-level programs (server, benchmark) use this library to build their own applications.
 
-### 15.2 `crowkv` server
+### 15.2 `crowkv-server`
 
-Reference server implementation for testing. Demonstrates usage of the `crowkv` library.
+Reference server that wraps the `crowkv` library into a runnable daemon. It provides:
+- CLI-driven startup of one or more `PxKvStore` instances, each hosting one or more `PxGroup`s.
+- An HTTP management API for runtime inspection and topology wiring.
+- A complete deployment unit that can form a CrowKV cluster with other `crowkv-server` instances.
+
+#### 15.2.1 CLI Interface
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `--management-port` | No | `9910` | HTTP management API listen port. |
+| `--management-addr` | No | `0.0.0.0` | HTTP management API bind address. |
+| `--ports` | No | (OS-assigned) | Port pool for gRPC `PxKvStore` listeners. Comma/range format. |
+| `--stores` | No | `0` | Store ID list (comma/range). |
+| `--groups` | No | `1` | Group ID list (comma/range). Each store gets all listed groups. |
+| `--replicas` | No | `0` | Local replica ID (single value). Used as the local replica for every group in every store. Max 128. |
+
+When `--ports` is omitted, the server uses port `0` for each `PxKvStore` and lets the OS assign ephemeral ports.
+
+#### 15.2.2 HTTP Management API
+
+The management API is a lightweight HTTP/JSON service for operational control.
+
+**Health:** `GET /health` → `{"status": "ok"}`.
+
+**Store management:**
+- `GET /stores` — list all stores with bound addresses and group counts.
+- `GET /stores/:sid` — store detail (address, groups, replicas).
+- `POST /stores` — add a new store (requires `store_id`, `group_id`, `replica_id`).
+- `DELETE /stores/:sid` — remove a store and all its groups.
+
+**Group management:**
+- `GET /stores/:sid/groups` — list groups in a store.
+- `POST /stores/:sid/groups` — add a group (requires `group_id`, `replica_id`).
+- `DELETE /stores/:sid/groups/:gid` — remove a group.
+
+**Remote replica management:**
+- `GET /stores/:sid/groups/:gid/remotes` — list remote replicas.
+- `POST /stores/:sid/groups/:gid/remotes` — add remote replicas.
+- `DELETE /stores/:sid/groups/:gid/remotes/:rid` — remove a remote replica.
+- `POST /stores/:sid/groups/:gid/remotes/batch` — batch-add from topology export.
+
+Adding or deleting a **local** replica is not supported — local replicas are created/destroyed with the group.
+
+**Topology:** `GET /topology` (alias `GET /top`) — export full server topology as JSON.
+
+#### 15.2.3 Topology Wiring Workflow
+
+To form a cluster from multiple `crowkv-server` instances:
+1. Start each server (each creates its stores with groups).
+2. Export topology from each server via `GET /topology`.
+3. On each server, batch-add other servers' replicas via `POST .../remotes/batch`.
+4. Assign leaders for each group.
+
+#### 15.2.4 Non-Goals
+
+- **Persistent configuration** — the server is stateless; topology is wired via the management API each time.
+- **Automatic leader election** — leader assignment is explicit until leader election is integrated.
+- **Authentication/TLS on management API** — trusted-network assumption per [§11](#11-security).
+
+#### 15.2.5 Error Handling
+
+- Invalid CLI arguments → exit with descriptive error message.
+- Port already in use → log error, skip that store, continue.
+- Management API errors → appropriate HTTP status codes (400, 404, 409, 500) with JSON error body.
+
+#### 15.2.6 Logging
+
+- Use `tracing` with file-based logging (via `crowkv::common::logging`).
+- Log bound addresses for all stores and the management endpoint at startup.
+- Log all management API mutations at INFO level.
+- All log messages in the `crowkv` library include `store_id` and `group_id` where applicable.
 
 ### 15.3 `crowbench`
 

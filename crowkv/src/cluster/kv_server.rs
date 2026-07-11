@@ -1,9 +1,12 @@
+#![allow(clippy::cast_possible_truncation)]
+
 use crate::cluster::px_kv_store::PxKvStore;
 use crate::rpc::kv_service_server::KvServiceServer;
 use crate::rpc::px_service_server::PxServiceServer;
 use crate::rpc::{KvStoreService, PxReplicaService};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tonic::transport::Server;
 use tracing::{debug, error, info};
@@ -31,7 +34,7 @@ impl KvServer for Arc<PxKvStore> {
         {
             let state = self.server_state.lock().unwrap();
             if state.handle.is_some() {
-                debug!("kv server start skipped because server is already running");
+                debug!(store_id = self.store_id, "kv server start skipped because server is already running");
                 return false;
             }
         }
@@ -40,6 +43,7 @@ impl KvServer for Arc<PxKvStore> {
             Ok(tcp) => tcp,
             Err(error) => {
                 error!(
+                    store_id = self.store_id,
                     listen_addr = %self.listen_addr,
                     error = %error,
                     "failed to bind kv server; next step: choose an available listen_addr or stop the conflicting process"
@@ -51,17 +55,13 @@ impl KvServer for Arc<PxKvStore> {
             Ok(addr) => addr,
             Err(error) => {
                 error!(
+                    store_id = self.store_id,
                     error = %error,
                     "failed to read bound kv server address; next step: restart kv server and inspect socket state"
                 );
                 return false;
             }
         };
-
-        if self.groups.is_empty() {
-            error!("no groups configured; cannot start server");
-            return false;
-        }
 
         let px_service = PxReplicaService::new(self.clone());
         let kv_service = KvStoreService::new(self.clone());
@@ -89,7 +89,7 @@ impl KvServer for Arc<PxKvStore> {
             state.shutdown_tx = Some(tx);
         }
 
-        info!(listen_addr = %bound_addr, "kv server started");
+        info!(store_id = self.store_id, listen_addr = %bound_addr, "kv server started");
         true
     }
 
@@ -99,9 +99,9 @@ impl KvServer for Arc<PxKvStore> {
             state.handle.take()
         };
         if let Some(task) = handle {
-            debug!("joining kv server task");
+            debug!(store_id = self.store_id, "joining kv server task");
             let _ = task.await;
-            info!("kv server task joined");
+            info!(store_id = self.store_id, "kv server task joined");
         }
     }
 
@@ -112,11 +112,59 @@ impl KvServer for Arc<PxKvStore> {
         };
         if let Some(tx) = sender {
             let _ = tx.send(());
-            info!("kv server shutdown requested");
+            info!(store_id = self.store_id, "kv server shutdown requested");
         }
     }
 
     fn listen_addr(&self) -> Option<SocketAddr> {
         self.server_state.lock().unwrap().listen_addr
+    }
+}
+
+impl PxKvStore {
+    /// Stop the gRPC server task and await its join under a timeout.
+    ///
+    /// Used by [`PxKvStore::shutdown`] as the first cascade step. Aborts the
+    /// task on hang; idempotent.
+    pub(crate) async fn shutdown_server(&self, timeout: Duration) -> Result<(), String> {
+        let (handle, sender) = {
+            let mut state = self.server_state.lock().unwrap();
+            (state.handle.take(), state.shutdown_tx.take())
+        };
+        if handle.is_none() && sender.is_none() {
+            debug!(store_id = self.store_id, "kv server shutdown is a no-op (already stopped)");
+            return Ok(());
+        }
+
+        if let Some(tx) = sender {
+            let _ = tx.send(());
+            info!(store_id = self.store_id, "kv server shutdown requested");
+        }
+
+        let Some(task) = handle else { return Ok(()) };
+        // abort_handle() lets us force-cancel on timeout; dropping a JoinHandle
+        // only detaches the task.
+        let abort = task.abort_handle();
+        match tokio::time::timeout(timeout, task).await {
+            Ok(Ok(())) => {
+                info!(store_id = self.store_id, "kv server task joined");
+                Ok(())
+            }
+            Ok(Err(join_err)) if join_err.is_cancelled() => {
+                debug!(store_id = self.store_id, "kv server task was already cancelled");
+                Ok(())
+            }
+            Ok(Err(join_err)) => {
+                let msg = format!("critical: kv server task ended abnormally: {join_err}; next step: inspect server logs for panic");
+                error!(store_id = self.store_id, error = %join_err, "{msg}");
+                Err(msg)
+            }
+            Err(_elapsed) => {
+                abort.abort();
+                let msg = format!("critical: kv server shutdown hung > {timeout:?}; aborted task; next step: investigate stuck gRPC handlers");
+                error!(store_id = self.store_id, timeout_ms = timeout.as_millis() as u64, "{msg}");
+                Err(msg)
+            }
+        }
     }
 }

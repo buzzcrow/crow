@@ -13,17 +13,17 @@ pub struct PxLearner {
 
 impl Default for PxLearner {
     fn default() -> Self {
-        Self {
-            store: DashMap::new(),
-        }
+        Self { store: DashMap::new() }
     }
 }
 
 impl PxLearner {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
+    #[must_use]
     pub fn store(&self) -> &DashMap<Vec<u8>, Vec<u8>> {
         &self.store
     }
@@ -31,12 +31,12 @@ impl PxLearner {
     /// Decode `payload` and apply each operation to the store.
     ///
     /// Wire format (per `PxReplica::encode_kv_payload`):
-    ///   [op_count: u8]
+    ///   [`op_count`: u8]
     ///   for each op:
-    ///     [kind: u8]  0=Put, 1=Delete
-    ///     [key_len: u32 LE]
+    ///     [`kind`: u8]  0=Put, 1=Delete
+    ///     [`key_len`: u32 LE]
     ///     [key bytes]
-    ///     [value_len: u32 LE]  (0 for Delete)
+    ///     [`value_len`: u32 LE]  (0 for Delete)
     ///     [value bytes]
     fn apply_payload(&self, payload: &[u8]) {
         if payload.is_empty() {
@@ -54,18 +54,12 @@ impl PxLearner {
 
             let key_len = read_u32_le(payload, offset) as usize;
             offset += 4;
-            let key = payload
-                .get(offset..offset + key_len)
-                .unwrap_or(&[])
-                .to_vec();
+            let key = payload.get(offset..offset + key_len).unwrap_or(&[]).to_vec();
             offset += key_len;
 
             let value_len = read_u32_le(payload, offset) as usize;
             offset += 4;
-            let value = payload
-                .get(offset..offset + value_len)
-                .unwrap_or(&[])
-                .to_vec();
+            let value = payload.get(offset..offset + value_len).unwrap_or(&[]).to_vec();
             offset += value_len;
 
             if kind == 0 {

@@ -29,12 +29,11 @@ impl PxReplicaService {
 
 #[tonic::async_trait]
 impl PxService for PxReplicaService {
-    async fn prepare(
-        &self,
-        request: Request<PrepareRequest>,
-    ) -> Result<Response<PromiseResponse>, Status> {
+    async fn prepare(&self, request: Request<PrepareRequest>) -> Result<Response<PromiseResponse>, Status> {
         let req = request.into_inner();
         debug!(
+            store_id = self.store.store_id,
+            group_id = req.group_id,
             request_id = req.request_id,
             slot = req.slot,
             round = req.round,
@@ -45,10 +44,7 @@ impl PxService for PxReplicaService {
             round: req.round,
             leader_id: req.leader_id,
         };
-        let group = self
-            .store
-            .get_group(req.group_id)
-            .ok_or_else(|| Status::not_found("px group not found"))?;
+        let group = self.store.get_group(req.group_id).ok_or_else(|| Status::not_found("px group not found"))?;
         let replica = group.local_replica();
         let reply = replica.on_prepare(req.slot, ballot).await;
 
@@ -65,11 +61,10 @@ impl PxService for PxReplicaService {
                 request_id: req.request_id,
                 request_create_ms: req.request_create_ms,
             },
-            PxPrepareReply::Rejected {
-                slot,
-                current_promised,
-            } => {
+            PxPrepareReply::Rejected { slot, current_promised } => {
                 warn!(
+                    store_id = self.store.store_id,
+                    group_id = req.group_id,
                     request_id = req.request_id,
                     slot,
                     current_round = current_promised.round,
@@ -94,12 +89,11 @@ impl PxService for PxReplicaService {
         Ok(Response::new(response))
     }
 
-    async fn accept(
-        &self,
-        request: Request<AcceptRequest>,
-    ) -> Result<Response<AcceptedResponse>, Status> {
+    async fn accept(&self, request: Request<AcceptRequest>) -> Result<Response<AcceptedResponse>, Status> {
         let req = request.into_inner();
         debug!(
+            store_id = self.store.store_id,
+            group_id = req.group_id,
             request_id = req.request_id,
             slot = req.slot,
             round = req.round,
@@ -108,6 +102,8 @@ impl PxService for PxReplicaService {
         );
         let value = req.value.ok_or_else(|| {
             warn!(
+                store_id = self.store.store_id,
+                group_id = req.group_id,
                 request_id = req.request_id,
                 slot = req.slot,
                 "accept rpc missing value; next step: check caller/protobuf conversion"
@@ -122,15 +118,12 @@ impl PxService for PxReplicaService {
             },
             term: req.term,
             kind: PxLogEntryKind::Write,
-            payload: value.payload,
+            payload: Arc::new(value.payload),
             client_id: optional_u64(req.client_id),
             seq: optional_u64(req.seq),
         };
 
-        let group = self
-            .store
-            .get_group(req.group_id)
-            .ok_or_else(|| Status::not_found("px group not found"))?;
+        let group = self.store.get_group(req.group_id).ok_or_else(|| Status::not_found("px group not found"))?;
         let replica = group.local_replica();
         let reply = replica.on_accept(entry.clone()).await;
         if matches!(reply, PxAcceptReply::Accepted { .. }) {
@@ -139,10 +132,10 @@ impl PxService for PxReplicaService {
 
         let (rejected, rejected_round, rejected_leader_id) = match reply {
             PxAcceptReply::Accepted { .. } => (false, 0, 0),
-            PxAcceptReply::Rejected {
-                current_promised, ..
-            } => {
+            PxAcceptReply::Rejected { current_promised, .. } => {
                 warn!(
+                    store_id = self.store.store_id,
+                    group_id = req.group_id,
                     request_id = req.request_id,
                     slot = req.slot,
                     current_round = current_promised.round,
@@ -175,6 +168,6 @@ fn log_entry_to_proto(entry: &PxLogEntry) -> AcceptedValue {
         round: entry.ballot.round,
         leader_id: entry.ballot.leader_id,
         term: entry.term,
-        payload: entry.payload.clone(),
+        payload: (*entry.payload).clone(),
     }
 }

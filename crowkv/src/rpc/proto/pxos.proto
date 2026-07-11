@@ -2,7 +2,7 @@
 // Wire shapes frozen at end of P1 M2; P4 extends with heartbeat, vote,
 // chosen, snapshot, and client messages using append-only field numbers.
 //
-// See doc/design/design-rpc.md §2 for field-number rules.
+// Field-number rules: use append-only numbering, never reuse numbers.
 
 syntax = "proto3";
 

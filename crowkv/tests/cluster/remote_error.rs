@@ -1,8 +1,9 @@
-//! PxRemoteReplica connection failure and error handling tests.
+//! `PxRemoteReplica` connection failure and error handling tests.
 
 use crowkv::cluster::replica::ReplicaClient;
 use crowkv::cluster::PxRemoteReplica;
 use crowkv::paxos::roles::PxBallot;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn send_prepare_to_unreachable_endpoint_returns_error() {
@@ -13,11 +14,7 @@ async fn send_prepare_to_unreachable_endpoint_returns_error() {
     let result = remote.send_prepare(1, ballot, 1).await;
     assert!(result.is_err(), "should fail when remote is unreachable");
     let status = result.unwrap_err();
-    assert_eq!(
-        status.code(),
-        tonic::Code::Unavailable,
-        "error code should be Unavailable"
-    );
+    assert_eq!(status.code(), tonic::Code::Unavailable, "error code should be Unavailable");
 }
 
 #[tokio::test]
@@ -28,7 +25,7 @@ async fn send_accept_to_unreachable_endpoint_returns_error() {
         ballot: PxBallot::new(1, 0),
         term: 0,
         kind: crowkv::paxos::roles::PxLogEntryKind::Write,
-        payload: b"test".to_vec(),
+        payload: Arc::new(b"test".to_vec()),
         client_id: None,
         seq: None,
     };

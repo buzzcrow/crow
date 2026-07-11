@@ -28,6 +28,8 @@ impl KvService for KvStoreService {
     async fn put(&self, request: Request<KvSetRequest>) -> Result<Response<KvResponse>, Status> {
         let req = request.into_inner();
         debug!(
+            store_id = self.store.store_id,
+            group_id = req.group_id,
             request_id = req.request_id,
             client_id = req.client_id,
             seq = req.seq,
@@ -37,18 +39,12 @@ impl KvService for KvStoreService {
         );
         let mut resp = self
             .store
-            .kv_put(
-                req.group_id,
-                req.key,
-                req.value,
-                req.client_id,
-                req.seq,
-                req.request_id,
-                req.request_create_ms,
-            )
+            .kv_put(req.group_id, req.key, req.value, req.client_id, req.seq, req.request_id, req.request_create_ms)
             .await;
         if !resp.ok {
             warn!(
+                store_id = self.store.store_id,
+                group_id = req.group_id,
                 request_id = req.request_id,
                 error = resp.error,
                 not_leader_hint = resp.not_leader_hint,
@@ -60,12 +56,11 @@ impl KvService for KvStoreService {
         Ok(Response::new(resp))
     }
 
-    async fn delete(
-        &self,
-        request: Request<KvDeleteRequest>,
-    ) -> Result<Response<KvResponse>, Status> {
+    async fn delete(&self, request: Request<KvDeleteRequest>) -> Result<Response<KvResponse>, Status> {
         let req = request.into_inner();
         debug!(
+            store_id = self.store.store_id,
+            group_id = req.group_id,
             request_id = req.request_id,
             client_id = req.client_id,
             seq = req.seq,
@@ -74,17 +69,12 @@ impl KvService for KvStoreService {
         );
         let mut resp = self
             .store
-            .kv_delete(
-                req.group_id,
-                req.key,
-                req.client_id,
-                req.seq,
-                req.request_id,
-                req.request_create_ms,
-            )
+            .kv_delete(req.group_id, req.key, req.client_id, req.seq, req.request_id, req.request_create_ms)
             .await;
         if !resp.ok {
             warn!(
+                store_id = self.store.store_id,
+                group_id = req.group_id,
                 request_id = req.request_id,
                 error = resp.error,
                 not_leader_hint = resp.not_leader_hint,
@@ -96,12 +86,11 @@ impl KvService for KvStoreService {
         Ok(Response::new(resp))
     }
 
-    async fn batch_write(
-        &self,
-        request: Request<KvBatchWriteRequest>,
-    ) -> Result<Response<KvResponse>, Status> {
+    async fn batch_write(&self, request: Request<KvBatchWriteRequest>) -> Result<Response<KvResponse>, Status> {
         let req = request.into_inner();
         debug!(
+            store_id = self.store.store_id,
+            group_id = req.group_id,
             request_id = req.request_id,
             client_id = req.client_id,
             seq = req.seq,
@@ -110,17 +99,12 @@ impl KvService for KvStoreService {
         );
         let mut resp = self
             .store
-            .kv_batch_write(
-                req.group_id,
-                req.items,
-                req.client_id,
-                req.seq,
-                req.request_id,
-                req.request_create_ms,
-            )
+            .kv_batch_write(req.group_id, req.items, req.client_id, req.seq, req.request_id, req.request_create_ms)
             .await;
         if !resp.ok {
             warn!(
+                store_id = self.store.store_id,
+                group_id = req.group_id,
                 request_id = req.request_id,
                 error = resp.error,
                 not_leader_hint = resp.not_leader_hint,

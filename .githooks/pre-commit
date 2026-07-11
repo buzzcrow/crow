@@ -1,0 +1,41 @@
+#!/bin/bash
+
+echo "Running pre-commit checks..."
+
+# Check formatting
+echo "Checking formatting..."
+cargo fmt --all -- --check
+if [ $? -ne 0 ]; then
+    echo "❌ Formatting check failed. Run 'cargo fmt' to fix."
+    exit 1
+fi
+
+# Run clippy
+echo "Running clippy..."
+cargo clippy --all-targets -- -D warnings
+if [ $? -ne 0 ]; then
+    echo "❌ Clippy failed. Fix warnings before committing."
+    exit 1
+fi
+
+# Run tests (including e2e)
+echo "Running tests (including e2e)..."
+cargo test --workspace --all-targets --exclude crowkv-server
+if [ $? -ne 0 ]; then
+    echo "❌ Tests failed. Fix failing tests before committing."
+    exit 1
+fi
+
+cargo test -p crowkv-server --test management_api
+if [ $? -ne 0 ]; then
+    echo "❌ Tests failed. Fix failing tests before committing."
+    exit 1
+fi
+
+cargo test -p crowkv-server --test cluster_e2e
+if [ $? -ne 0 ]; then
+    echo "❌ Tests failed. Fix failing tests before committing."
+    exit 1
+fi
+
+echo "✅ All checks passed!"

@@ -1,11 +1,11 @@
 //! Integration tests for the Paxos acceptor.
 //!
-//! Mirrors `doc/test/test-design-consensus.md` §2 rows plus invariant C2 cases.
+//! Covers acceptor state machine invariants and ballot monotonicity.
+//! Key work: prepare/promise, accept/accepted, ballot ordering, idempotency.
 
 use crowkv::paxos::acceptor::PxAcceptor;
-use crowkv::paxos::roles::{
-    Acceptor, PxAcceptReply, PxBallot, PxLogEntry, PxLogEntryKind, PxPrepareReply, SlotIndex,
-};
+use crowkv::paxos::roles::{Acceptor, PxAcceptReply, PxBallot, PxLogEntry, PxLogEntryKind, PxPrepareReply, SlotIndex};
+use std::sync::Arc;
 
 fn entry(slot: SlotIndex, ballot: PxBallot, payload: &[u8]) -> PxLogEntry {
     PxLogEntry {
@@ -13,7 +13,7 @@ fn entry(slot: SlotIndex, ballot: PxBallot, payload: &[u8]) -> PxLogEntry {
         ballot,
         term: ballot.round,
         kind: PxLogEntryKind::Write,
-        payload: payload.to_vec(),
+        payload: Arc::new(payload.to_vec()),
         client_id: Some(1),
         seq: Some(1),
     }
@@ -21,21 +21,15 @@ fn entry(slot: SlotIndex, ballot: PxBallot, payload: &[u8]) -> PxLogEntry {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn prepare_promise() {
-    let mut acc = PxAcceptor::new();
+    let acc = PxAcceptor::new();
     let reply = acc.prepare(7, PxBallot::new(1, 1)).await;
-    assert_eq!(
-        reply,
-        PxPrepareReply::Promised {
-            slot: 7,
-            accepted: None,
-        }
-    );
+    assert_eq!(reply, PxPrepareReply::Promised { slot: 7, accepted: None });
     assert_eq!(acc.promised_at(7), Some(PxBallot::new(1, 1)));
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn reject_lower_ballot() {
-    let mut acc = PxAcceptor::new();
+    let acc = PxAcceptor::new();
     let _ = acc.prepare(7, PxBallot::new(2, 1)).await;
     let reply = acc.prepare(7, PxBallot::new(1, 1)).await;
     assert_eq!(
@@ -50,7 +44,7 @@ async fn reject_lower_ballot() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn accept_after_promise() {
-    let mut acc = PxAcceptor::new();
+    let acc = PxAcceptor::new();
     let _ = acc.prepare(7, PxBallot::new(1, 1)).await;
     let e = entry(7, PxBallot::new(1, 1), b"v1");
     let reply = acc.accept(e.clone()).await;
@@ -66,7 +60,7 @@ async fn accept_after_promise() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn accept_rejects_lower_ballot() {
-    let mut acc = PxAcceptor::new();
+    let acc = PxAcceptor::new();
     let _ = acc.prepare(7, PxBallot::new(5, 1)).await;
     let stale = entry(7, PxBallot::new(4, 1), b"stale");
     let reply = acc.accept(stale).await;
@@ -82,18 +76,12 @@ async fn accept_rejects_lower_ballot() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn prepare_returns_previously_accepted_value() {
-    let mut acc = PxAcceptor::new();
+    let acc = PxAcceptor::new();
     let _ = acc.prepare(7, PxBallot::new(1, 1)).await;
     let v1 = entry(7, PxBallot::new(1, 1), b"v1");
     let _ = acc.accept(v1.clone()).await;
     let reply = acc.prepare(7, PxBallot::new(2, 2)).await;
-    assert_eq!(
-        reply,
-        PxPrepareReply::Promised {
-            slot: 7,
-            accepted: Some(v1),
-        }
-    );
+    assert_eq!(reply, PxPrepareReply::Promised { slot: 7, accepted: Some(v1) });
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]

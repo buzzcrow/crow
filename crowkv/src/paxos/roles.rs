@@ -1,9 +1,11 @@
 use crate::paxos::PxNodeId;
+use std::sync::Arc;
 
 pub trait Proposer {
     fn propose(&self);
 }
 
+#[allow(async_fn_in_trait)]
 pub trait Acceptor {
     #[allow(clippy::unused_async)]
     async fn accept(&self, entry: PxLogEntry) -> PxAcceptReply;
@@ -35,6 +37,7 @@ pub struct PxBallot {
 }
 
 impl PxBallot {
+    #[must_use]
     pub const fn new(round: u64, leader_id: PxNodeId) -> Self {
         Self { round, leader_id }
     }
@@ -58,13 +61,17 @@ pub enum PxLogEntryKind {
 /// - `NoOp`      — empty (used to fill repair gaps).
 /// - `ConfigChange`     — serialized `crate::group::types::PxGroupConfig`.
 /// - `DedupCheckpoint`  — serialized dedup-cache snapshot.
+///
+/// `payload` uses `Arc<Vec<u8>>` to enable cheap cloning (refcount increment) instead
+/// of deep copying the entire payload. This is important because log entries are cloned
+/// frequently during Paxos phases and learner propagation, and payloads can be large.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PxLogEntry {
     pub slot: SlotIndex,
     pub ballot: PxBallot,
     pub term: u64,
     pub kind: PxLogEntryKind,
-    pub payload: Vec<u8>,
+    pub payload: Arc<Vec<u8>>,
     pub client_id: Option<u64>,
     pub seq: Option<u64>,
 }
@@ -74,16 +81,10 @@ pub struct PxLogEntry {
 pub enum PxPrepareReply {
     /// Promise accepted. If the acceptor previously accepted a value at this slot,
     /// the proposer must adopt it (classic Paxos value-recovery rule).
-    Promised {
-        slot: SlotIndex,
-        accepted: Option<PxLogEntry>,
-    },
+    Promised { slot: SlotIndex, accepted: Option<PxLogEntry> },
     /// Promise rejected because the slot already promised at a higher-or-equal ballot.
     /// The proposer should retry with a strictly higher ballot.
-    Rejected {
-        slot: SlotIndex,
-        current_promised: PxBallot,
-    },
+    Rejected { slot: SlotIndex, current_promised: PxBallot },
 }
 
 /// Reply to a Phase-2 `Accept`.
@@ -92,8 +93,5 @@ pub enum PxAcceptReply {
     /// Value accepted at the entry's `(slot, ballot)`.
     Accepted { slot: SlotIndex, ballot: PxBallot },
     /// Rejected because the slot promised a higher ballot.
-    Rejected {
-        slot: SlotIndex,
-        current_promised: PxBallot,
-    },
+    Rejected { slot: SlotIndex, current_promised: PxBallot },
 }

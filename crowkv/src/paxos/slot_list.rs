@@ -1,4 +1,6 @@
 #![allow(unsafe_code)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::too_many_lines)]
 
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -35,7 +37,24 @@ impl<T> Default for PxSlotList<T> {
     }
 }
 
+// RAII guard for single-caller trim contract
+struct TrimGuard<'a, T>(&'a PxSlotList<T>);
+impl<T> Drop for TrimGuard<'_, T> {
+    fn drop(&mut self) {
+        self.0.trimming.store(false, Ordering::Release);
+    }
+}
+
+// RAII guard for single-caller reclaim contract
+struct ReclaimGuard<'a, T>(&'a PxSlotList<T>);
+impl<T> Drop for ReclaimGuard<'_, T> {
+    fn drop(&mut self) {
+        self.0.reclaiming.store(false, Ordering::Release);
+    }
+}
+
 impl<T> PxSlotList<T> {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             head: AtomicPtr::new(null_mut()),
@@ -64,11 +83,7 @@ impl<T> PxSlotList<T> {
     ///
     /// This iterator is lock-free and safe under concurrent readers/writers.
     /// Each yielded item holds its own `PxSlotReadGuard`.
-    pub fn iter_range(
-        &self,
-        start_slot: SlotIndex,
-        end_slot_exclusive: SlotIndex,
-    ) -> PxSlotIter<'_, T> {
+    pub fn iter_range(&self, start_slot: SlotIndex, end_slot_exclusive: SlotIndex) -> PxSlotIter<'_, T> {
         PxSlotIter {
             list: self,
             next_slot: start_slot.max(self.trim_slot.load(Ordering::Acquire)),
@@ -78,7 +93,7 @@ impl<T> PxSlotList<T> {
 
     // ---------- read guards ----------
 
-    pub fn get(&self, slot: SlotIndex) -> Option<PxSlotReadGuard<T>> {
+    pub fn get(&self, slot: SlotIndex) -> Option<PxSlotReadGuard<'_, T>> {
         if slot < self.trim_slot.load(Ordering::Acquire) {
             return None;
         }
@@ -88,9 +103,7 @@ impl<T> PxSlotList<T> {
             let end = chunk.start_slot + SLOT_CHUNK_SIZE as u64;
             if slot >= chunk.start_slot && slot < end {
                 chunk.reader_refs.fetch_add(1, Ordering::Acquire);
-                if chunk.retired.load(Ordering::Acquire)
-                    || slot < self.trim_slot.load(Ordering::Acquire)
-                {
+                if chunk.retired.load(Ordering::Acquire) || slot < self.trim_slot.load(Ordering::Acquire) {
                     chunk.reader_refs.fetch_sub(1, Ordering::Release);
                     return None;
                 }
@@ -100,11 +113,7 @@ impl<T> PxSlotList<T> {
                     chunk.reader_refs.fetch_sub(1, Ordering::Release);
                     return None;
                 }
-                return Some(PxSlotReadGuard {
-                    chunk,
-                    ptr,
-                    _marker: PhantomData,
-                });
+                return Some(PxSlotReadGuard { chunk, ptr, _marker: PhantomData });
             }
             if chunk.start_slot > slot {
                 return None;
@@ -124,9 +133,7 @@ impl<T> PxSlotList<T> {
             let end = chunk.start_slot + SLOT_CHUNK_SIZE as u64;
             if slot >= chunk.start_slot && slot < end {
                 chunk.reader_refs.fetch_add(1, Ordering::Acquire);
-                if chunk.retired.load(Ordering::Acquire)
-                    || slot < self.trim_slot.load(Ordering::Acquire)
-                {
+                if chunk.retired.load(Ordering::Acquire) || slot < self.trim_slot.load(Ordering::Acquire) {
                     chunk.reader_refs.fetch_sub(1, Ordering::Release);
                     return None;
                 }
@@ -136,11 +143,7 @@ impl<T> PxSlotList<T> {
                     chunk.reader_refs.fetch_sub(1, Ordering::Release);
                     return None;
                 }
-                return Some(PxSlotReadGuard {
-                    chunk,
-                    ptr,
-                    _marker: PhantomData,
-                });
+                return Some(PxSlotReadGuard { chunk, ptr, _marker: PhantomData });
             }
             if slot >= end {
                 return None;
@@ -160,9 +163,7 @@ impl<T> PxSlotList<T> {
             let end = chunk.start_slot + SLOT_CHUNK_SIZE as u64;
             if slot >= chunk.start_slot && slot < end {
                 chunk.reader_refs.fetch_add(1, Ordering::Acquire);
-                if chunk.retired.load(Ordering::Acquire)
-                    || slot < self.trim_slot.load(Ordering::Acquire)
-                {
+                if chunk.retired.load(Ordering::Acquire) || slot < self.trim_slot.load(Ordering::Acquire) {
                     chunk.reader_refs.fetch_sub(1, Ordering::Release);
                     return None;
                 }
@@ -177,16 +178,14 @@ impl<T> PxSlotList<T> {
         None
     }
 
-    pub fn get_tail_ptr(&self, slot: SlotIndex) -> Option<PxSlotPtrGuard<T>> {
+    pub fn get_tail_ptr(&self, slot: SlotIndex) -> Option<PxSlotPtrGuard<'_, T>> {
         let mut chunk_ptr = self.tail.load(Ordering::Acquire);
         while !chunk_ptr.is_null() {
             let chunk = unsafe { &*chunk_ptr };
             let end = chunk.start_slot + SLOT_CHUNK_SIZE as u64;
             if slot >= chunk.start_slot && slot < end {
                 chunk.reader_refs.fetch_add(1, Ordering::Acquire);
-                if chunk.retired.load(Ordering::Acquire)
-                    || slot < self.trim_slot.load(Ordering::Acquire)
-                {
+                if chunk.retired.load(Ordering::Acquire) || slot < self.trim_slot.load(Ordering::Acquire) {
                     chunk.reader_refs.fetch_sub(1, Ordering::Release);
                     return None;
                 }
@@ -219,6 +218,9 @@ impl<T> PxSlotList<T> {
     ///
     /// For safe mutation, callers should insert once and then mutate the
     /// value in-place (e.g. `get_tail_ptr` + CAS on a field inside `T`).
+    ///
+    /// # Panics
+    /// Panics if `slot` is less than the current trim slot.
     pub fn insert_if_empty(&self, slot: SlotIndex, value: T) -> PxSlotReadGuard<'_, T> {
         assert!(slot >= self.trim_slot.load(Ordering::Acquire));
         let offset = slot % SLOT_CHUNK_SIZE as u64;
@@ -226,19 +228,12 @@ impl<T> PxSlotList<T> {
             let chunk = self.find_or_create_chunk(slot);
             assert!(offset < SLOT_CHUNK_SIZE as u64);
             chunk.reader_refs.fetch_add(1, Ordering::Acquire);
-            if chunk.retired.load(Ordering::Acquire)
-                || slot < self.trim_slot.load(Ordering::Acquire)
-            {
+            if chunk.retired.load(Ordering::Acquire) || slot < self.trim_slot.load(Ordering::Acquire) {
                 chunk.reader_refs.fetch_sub(1, Ordering::Release);
                 continue;
             }
             let new_ptr = Box::into_raw(Box::new(value));
-            match chunk.entries[offset as usize].compare_exchange(
-                null_mut(),
-                new_ptr,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
+            match chunk.entries[offset as usize].compare_exchange(null_mut(), new_ptr, Ordering::AcqRel, Ordering::Acquire) {
                 Ok(_) => {
                     chunk.live_count.fetch_add(1, Ordering::Relaxed);
                     self.len.fetch_add(1, Ordering::Relaxed);
@@ -268,20 +263,14 @@ impl<T> PxSlotList<T> {
     ///
     /// `trim` must be called by a single GC caller at a time.
     /// Concurrent `trim` calls are unsupported and will panic.
+    ///
+    /// # Panics
+    /// Panics if called concurrently with another `trim` operation.
     pub fn trim(&self, before_slot: SlotIndex) {
         assert!(
-            self.trimming
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok(),
+            self.trimming.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok(),
             "PxSlotList::trim must be called from a single thread"
         );
-
-        struct TrimGuard<'a, T>(&'a PxSlotList<T>);
-        impl<T> Drop for TrimGuard<'_, T> {
-            fn drop(&mut self) {
-                self.0.trimming.store(false, Ordering::Release);
-            }
-        }
 
         let _guard = TrimGuard(self);
         self.trim_slot.fetch_max(before_slot, Ordering::AcqRel);
@@ -294,15 +283,12 @@ impl<T> PxSlotList<T> {
             }
             let next = chunk.next.load(Ordering::Acquire);
             chunk.retired.store(true, Ordering::Release);
-            match self
-                .head
-                .compare_exchange(chunk_ptr, next, Ordering::AcqRel, Ordering::Acquire)
-            {
+            match self.head.compare_exchange(chunk_ptr, next, Ordering::AcqRel, Ordering::Acquire) {
                 Ok(_) => {
-                    if !next.is_null() {
-                        unsafe { &*next }.prev.store(null_mut(), Ordering::Release);
-                    } else {
+                    if next.is_null() {
                         self.tail.store(null_mut(), Ordering::Release);
+                    } else {
+                        unsafe { &*next }.prev.store(null_mut(), Ordering::Release);
                     }
                     let len_delta = chunk.live_count.load(Ordering::Relaxed);
                     self.len.fetch_sub(len_delta, Ordering::Relaxed);
@@ -321,20 +307,14 @@ impl<T> PxSlotList<T> {
     ///
     /// `reclaim` must be called by a single GC caller at a time.
     /// Concurrent `reclaim` calls are unsupported and will panic.
+    ///
+    /// # Panics
+    /// Panics if called concurrently with another `reclaim` operation.
     pub fn reclaim(&self) -> usize {
         assert!(
-            self.reclaiming
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok(),
+            self.reclaiming.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_ok(),
             "PxSlotList::reclaim must be called from a single thread"
         );
-
-        struct ReclaimGuard<'a, T>(&'a PxSlotList<T>);
-        impl<T> Drop for ReclaimGuard<'_, T> {
-            fn drop(&mut self) {
-                self.0.reclaiming.store(false, Ordering::Release);
-            }
-        }
 
         let _guard = ReclaimGuard(self);
         let mut freed = 0;
@@ -346,20 +326,14 @@ impl<T> PxSlotList<T> {
             if curr.reader_refs.load(Ordering::Acquire) == 0 {
                 // Unlink from retired list.
                 if prev_ptr.is_null() {
-                    if self
-                        .retired_head
-                        .compare_exchange(curr_ptr, next_ptr, Ordering::AcqRel, Ordering::Acquire)
-                        .is_err()
-                    {
+                    if self.retired_head.compare_exchange(curr_ptr, next_ptr, Ordering::AcqRel, Ordering::Acquire).is_err() {
                         // Head changed, restart.
                         prev_ptr = null_mut();
                         curr_ptr = self.retired_head.load(Ordering::Acquire);
                         continue;
                     }
                 } else {
-                    unsafe { &*prev_ptr }
-                        .next
-                        .store(next_ptr, Ordering::Release);
+                    unsafe { &*prev_ptr }.next.store(next_ptr, Ordering::Release);
                 }
                 unsafe {
                     Self::drop_chunk(curr_ptr);
@@ -398,10 +372,10 @@ impl<T> PxSlotList<T> {
                 (*new_chunk).next.store(succ, Ordering::Relaxed);
             }
             if self.link_chunk(pred, succ, new_chunk).is_ok() {
-                if !succ.is_null() {
-                    unsafe { &*succ }.prev.store(new_chunk, Ordering::Release);
-                } else {
+                if succ.is_null() {
                     self.tail.store(new_chunk, Ordering::Release);
+                } else {
+                    unsafe { &*succ }.prev.store(new_chunk, Ordering::Release);
                 }
                 return unsafe { &*new_chunk };
             }
@@ -411,8 +385,8 @@ impl<T> PxSlotList<T> {
         }
     }
 
-    /// Returns (pred, succ) where pred.start < aligned_start < succ.start
-    /// (or null_mut() for list boundaries).
+    /// Returns (pred, succ) where pred.start < `aligned_start` < succ.start
+    /// (or `null_mut()` for list boundaries).
     fn find_window(&self, aligned_start: SlotIndex) -> (*mut SlotChunk<T>, *mut SlotChunk<T>) {
         let mut pred = null_mut();
         let mut curr = self.head.load(Ordering::Acquire);
@@ -427,29 +401,16 @@ impl<T> PxSlotList<T> {
         (pred, null_mut())
     }
 
-    fn link_chunk(
-        &self,
-        pred: *mut SlotChunk<T>,
-        succ: *mut SlotChunk<T>,
-        new_chunk: *mut SlotChunk<T>,
-    ) -> Result<(), ()> {
+    fn link_chunk(&self, pred: *mut SlotChunk<T>, succ: *mut SlotChunk<T>, new_chunk: *mut SlotChunk<T>) -> Result<(), ()> {
         if pred.is_null() {
             // Insert at head.
-            match self
-                .head
-                .compare_exchange(succ, new_chunk, Ordering::AcqRel, Ordering::Acquire)
-            {
+            match self.head.compare_exchange(succ, new_chunk, Ordering::AcqRel, Ordering::Acquire) {
                 Ok(_) => Ok(()),
                 Err(_) => Err(()),
             }
         } else {
             let pred_ref = unsafe { &*pred };
-            match pred_ref.next.compare_exchange(
-                succ,
-                new_chunk,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
+            match pred_ref.next.compare_exchange(succ, new_chunk, Ordering::AcqRel, Ordering::Acquire) {
                 Ok(_) => Ok(()),
                 Err(_) => Err(()),
             }
@@ -460,11 +421,7 @@ impl<T> PxSlotList<T> {
         loop {
             let old = self.retired_head.load(Ordering::Acquire);
             unsafe { &*chunk_ptr }.next.store(old, Ordering::Relaxed);
-            if self
-                .retired_head
-                .compare_exchange(old, chunk_ptr, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
+            if self.retired_head.compare_exchange(old, chunk_ptr, Ordering::AcqRel, Ordering::Acquire).is_ok() {
                 break;
             }
         }

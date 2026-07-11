@@ -7,7 +7,7 @@ use crowkv::rpc::{KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvSetReques
 async fn kv_mutations_apply_to_all_learners() {
     let cluster = start_cluster(&[0, 1, 2], 0).await;
     let leader = cluster.leader();
-    let mut client = leader.kv_client().await;
+    let mut client = cluster.kv_client(leader).await;
 
     // Put k1=v1
     let resp = client
@@ -84,7 +84,7 @@ async fn kv_mutations_apply_to_all_learners() {
 
 fn assert_cluster_value(cluster: &TestCluster, key: &[u8], expected: Option<&[u8]>) {
     for node in cluster.nodes() {
-        let group = node.group();
+        let group = node.get_group(1).expect("group exists");
         let replica = group.local_replica();
         let value = replica.learner.store().get(key).map(|entry| entry.clone());
         match expected {
@@ -93,7 +93,7 @@ fn assert_cluster_value(cluster: &TestCluster, key: &[u8], expected: Option<&[u8
                 assert_eq!(stored.as_slice(), bytes);
             }
             None => {
-                assert!(value.is_none(), "value for {:?} should be absent", key);
+                assert!(value.is_none(), "value for {key:?} should be absent");
             }
         }
     }

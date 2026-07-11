@@ -1,6 +1,6 @@
 #![allow(unsafe_code)]
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use crossbeam_skiplist::SkipMap;
 use crowkv::paxos::roles::{PxBallot, PxLogEntry, PxLogEntryKind};
 use crowkv::paxos::slot_list::PxSlotList;
@@ -18,7 +18,7 @@ use std::thread;
 /// Simple LCG for deterministic "randomness" without adding a dependency.
 fn lcg(seed: &mut u64) -> u64 {
     // constants from Numerical Recipes
-    *seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+    *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
     *seed
 }
 
@@ -28,38 +28,34 @@ macro_rules! define_slot_node_churn_bench {
             let mut group = c.benchmark_group($group_name);
             for replacements in [1_000u64, 10_000u64].iter() {
                 group.throughput(Throughput::Elements(*replacements * 2));
-                group.bench_with_input(
-                    BenchmarkId::from_parameter(replacements),
-                    replacements,
-                    |b, &replacements| {
-                        b.iter(|| {
-                            let list = PxSlotList::<PxSlotNode>::new();
-                            let guard = list.insert_if_empty(7, PxSlotNode::default());
-                            let node: &PxSlotNode = &guard;
+                group.bench_with_input(BenchmarkId::from_parameter(replacements), replacements, |b, &replacements| {
+                    b.iter(|| {
+                        let list = PxSlotList::<PxSlotNode>::new();
+                        let guard = list.insert_if_empty(7, PxSlotNode::default());
+                        let node: &PxSlotNode = &guard;
 
-                            let mut promised_ptr = null_mut();
-                            let mut accepted_ptr = null_mut();
-                            for i in 0..replacements {
-                                let ballot = PxBallot::new(i + 1, 1);
-                                promised_ptr = node.cas_promised(promised_ptr, ballot).unwrap();
+                        let mut promised_ptr = null_mut();
+                        let mut accepted_ptr = null_mut();
+                        for i in 0..replacements {
+                            let ballot = PxBallot::new(i + 1, 1);
+                            promised_ptr = node.cas_promised(promised_ptr, ballot).unwrap();
 
-                                let entry = PxLogEntry {
-                                    slot: 7,
-                                    ballot,
-                                    term: ballot.round,
-                                    kind: PxLogEntryKind::Write,
-                                    payload: vec![1, 2, 3],
-                                    client_id: Some(1),
-                                    seq: Some(i + 1),
-                                };
-                                accepted_ptr = node.cas_accepted(accepted_ptr, entry).unwrap();
-                            }
+                            let entry = PxLogEntry {
+                                slot: 7,
+                                ballot,
+                                term: ballot.round,
+                                kind: PxLogEntryKind::Write,
+                                payload: Arc::new(vec![1, 2, 3]),
+                                client_id: Some(1),
+                                seq: Some(i + 1),
+                            };
+                            accepted_ptr = node.cas_accepted(accepted_ptr, entry).unwrap();
+                        }
 
-                            black_box(promised_ptr);
-                            black_box(accepted_ptr);
-                        });
-                    },
-                );
+                        std::hint::black_box(promised_ptr);
+                        std::hint::black_box(accepted_ptr);
+                    });
+                });
             }
             group.finish();
         }
@@ -203,60 +199,25 @@ macro_rules! define_concurrent_get_bench {
     };
 }
 
-define_tail_insert_bench!(
-    bench_insert_u64_tail,
-    "slot_list_insert_u64_tail",
-    PxSlotList::<u64>::new(),
-    list,
-    slot,
-    {
-        black_box(list.insert_if_empty(slot, slot));
-    }
-);
+define_tail_insert_bench!(bench_insert_u64_tail, "slot_list_insert_u64_tail", PxSlotList::<u64>::new(), list, slot, {
+    std::hint::black_box(list.insert_if_empty(slot, slot));
+});
 
-define_tail_insert_bench!(
-    bench_btreemap_insert_u64_tail,
-    "btreemap_insert_u64_tail",
-    BTreeMap::<u64, u64>::new(),
-    map,
-    slot,
-    {
-        black_box(map.insert(slot, slot));
-    }
-);
+define_tail_insert_bench!(bench_btreemap_insert_u64_tail, "btreemap_insert_u64_tail", BTreeMap::<u64, u64>::new(), map, slot, {
+    std::hint::black_box(map.insert(slot, slot));
+});
 
-define_concurrent_insert_bench!(
-    bench_insert_u64_concurrent,
-    "slot_list_insert_concurrent",
-    PxSlotList::<u64>::new(),
-    list,
-    slot,
-    {
-        list.insert_if_empty(slot, slot);
-    }
-);
+define_concurrent_insert_bench!(bench_insert_u64_concurrent, "slot_list_insert_concurrent", PxSlotList::<u64>::new(), list, slot, {
+    list.insert_if_empty(slot, slot);
+});
 
-define_concurrent_insert_bench!(
-    bench_dashmap_insert_concurrent,
-    "dashmap_insert_concurrent",
-    DashMap::<u64, u64>::new(),
-    map,
-    slot,
-    {
-        map.insert(slot, slot);
-    }
-);
+define_concurrent_insert_bench!(bench_dashmap_insert_concurrent, "dashmap_insert_concurrent", DashMap::<u64, u64>::new(), map, slot, {
+    map.insert(slot, slot);
+});
 
-define_concurrent_insert_bench!(
-    bench_skipmap_insert_concurrent,
-    "skipmap_insert_concurrent",
-    SkipMap::<u64, u64>::new(),
-    map,
-    slot,
-    {
-        map.insert(slot, slot);
-    }
-);
+define_concurrent_insert_bench!(bench_skipmap_insert_concurrent, "skipmap_insert_concurrent", SkipMap::<u64, u64>::new(), map, slot, {
+    map.insert(slot, slot);
+});
 
 define_concurrent_insert_bench!(
     bench_btreemap_insert_concurrent,
@@ -281,7 +242,7 @@ define_concurrent_get_bench!(
     list,
     slot,
     {
-        black_box(list.get_tail(slot));
+        std::hint::black_box(list.get_tail(slot));
     },
     _list,
     window_start,
@@ -302,7 +263,7 @@ define_concurrent_get_bench!(
     map,
     slot,
     {
-        black_box(map.get(&slot));
+        std::hint::black_box(map.get(&slot));
     },
     _map,
     window_start,
@@ -323,7 +284,7 @@ define_concurrent_get_bench!(
     map,
     slot,
     {
-        black_box(map.get(&slot));
+        std::hint::black_box(map.get(&slot));
     },
     _map,
     window_start,
@@ -346,7 +307,7 @@ define_concurrent_get_bench!(
     {
         let guard = map.read().unwrap();
         let r = guard.get(&slot);
-        black_box(r);
+        std::hint::black_box(r);
         drop(guard);
     },
     _map,

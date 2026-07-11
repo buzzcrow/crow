@@ -1,0 +1,101 @@
+use clap::Parser;
+
+/// `CrowKV` server — reference implementation wrapping the crowkv library.
+#[derive(Parser, Debug)]
+#[command(name = "crowkv-server", about = "CrowKV server daemon")]
+pub struct Cli {
+    /// HTTP management API listen port.
+    #[arg(long, default_value_t = 0)]
+    pub management_port: u16,
+
+    /// HTTP management API bind address.
+    #[arg(long, default_value = "0.0.0.0")]
+    pub management_addr: String,
+
+    /// Port pool for gRPC `PxKvStore` listeners (comma/range format, e.g. "28001,28002,28010..28020").
+    #[arg(long)]
+    pub ports: Option<String>,
+
+    /// Store ID list (comma/range format). Default: "1".
+    #[arg(long, default_value = "1")]
+    pub stores: String,
+
+    /// Group ID list (comma/range format). Default: "1".
+    #[arg(long, default_value = "1")]
+    pub groups: String,
+
+    /// Local replica ID (single value, range \[1, 128\]). Default: 1.
+    #[arg(long, default_value_t = 1)]
+    pub replica: u64,
+
+    /// Leader replica ID for initially-created groups. Default: 1.
+    #[arg(long, default_value_t = 1)]
+    pub leader: u64,
+
+    /// Also print logs to console (in addition to file logging).
+    #[arg(short = 'l', long)]
+    pub log: bool,
+}
+
+/// Parse a comma-separated list of numbers and ranges into a `Vec<u64>`.
+///
+/// Supported formats:
+/// - Single value: `28`
+/// - Half-open range: `40..50` (produces 40..49)
+/// - Mixed: `28,39,40..50,59`
+///
+/// Duplicates are silently deduplicated. Order is preserved (first occurrence wins).
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The input string is empty
+/// - Any part cannot be parsed as a number
+/// - A range has start >= end
+pub fn parse_id_list(input: &str) -> Result<Vec<u64>, String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::new();
+
+    for part in input.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+
+        if let Some((start_s, end_s)) = part.split_once("..") {
+            let start: u64 = start_s.trim().parse().map_err(|_| format!("invalid range start: '{start_s}'"))?;
+            let end: u64 = end_s.trim().parse().map_err(|_| format!("invalid range end: '{end_s}'"))?;
+            if start >= end {
+                return Err(format!("range start must be < end: '{part}'"));
+            }
+            for v in start..end {
+                if seen.insert(v) {
+                    result.push(v);
+                }
+            }
+        } else {
+            let v: u64 = part.parse().map_err(|_| format!("invalid number: '{part}'"))?;
+            if seen.insert(v) {
+                result.push(v);
+            }
+        }
+    }
+
+    if result.is_empty() {
+        return Err("empty list".to_string());
+    }
+
+    Ok(result)
+}
+
+/// Parse port list — same format as `parse_id_list` but validates u16 range.
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The input cannot be parsed by `parse_id_list`
+/// - Any value is outside the u16 range (0-65535)
+pub fn parse_port_list(input: &str) -> Result<Vec<u16>, String> {
+    let ids = parse_id_list(input)?;
+    ids.into_iter().map(|v| u16::try_from(v).map_err(|_| format!("port out of range (0-65535): {v}"))).collect()
+}

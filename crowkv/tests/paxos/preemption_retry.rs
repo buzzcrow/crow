@@ -1,4 +1,4 @@
-use crate::testkit::cluster::{assert_all_accepted, start_cluster, GrpcProposer};
+use crate::testkit::cluster::{assert_all_accepted, start_cluster};
 use crowkv::paxos::roles::PxBallot;
 use crowkv::rpc::PrepareRequest;
 
@@ -6,14 +6,10 @@ use crowkv::rpc::PrepareRequest;
 async fn integration_accept_preemption_then_ballot_bump_retry() {
     let cluster = start_cluster(&[0, 1, 2, 3, 4], 0).await;
 
+    // Pre-empt some replicas with a high ballot by sending prepare requests
     let high_ballot = PxBallot::new(8, 99);
-    for node in cluster
-        .nodes()
-        .iter()
-        .filter(|n| n.group().local_replica().id != 0)
-        .take(3)
-    {
-        let mut client = node.px_client().await;
+    for node in cluster.nodes().iter().filter(|n| n.get_group(1).expect("group exists").local_replica().id != 0).take(3) {
+        let mut client = cluster.px_client(node).await;
         let resp = client
             .prepare(PrepareRequest {
                 version: 1,
@@ -30,21 +26,16 @@ async fn integration_accept_preemption_then_ballot_bump_retry() {
         assert!(!resp.rejected);
     }
 
-    {
-        let proposer = GrpcProposer::new(&cluster);
-        let low_ballot = PxBallot::new(1, 0);
-        let chosen = proposer
-            .optimized_round(2, low_ballot, b"low-ballot".to_vec())
-            .await;
-        assert!(!chosen, "low ballot should be preempted by higher promises");
-
-        let retry_ballot = PxBallot::new(high_ballot.round + 1, 0);
-        let chosen = proposer
-            .optimized_round(2, retry_ballot, b"retry-high-ballot".to_vec())
-            .await;
-        assert!(chosen, "higher ballot retry should succeed");
+    // Use PxGroup::propose() - it should detect preemption, bump ballot, and succeed
+    let leader = cluster.leader();
+    let group = leader.get_group(1).expect("group exists");
+    let result = group.propose(b"test-value".to_vec(), Some(1), Some(1)).await;
+    match result {
+        crowkv::cluster::group::ProposeResult::Chosen { slot } => {
+            assert_all_accepted(&cluster, slot, b"test-value").await;
+        }
+        _ => panic!("Expected Chosen result, got {result:?}"),
     }
 
-    assert_all_accepted(&cluster, 2, b"retry-high-ballot").await;
     cluster.shutdown().await;
 }
