@@ -1,10 +1,10 @@
 //! KV gRPC integration tests covering Put/Delete/BatchWrite flows.
 
-mod common;
+mod testkit;
 
-use common::cluster::{start_cluster, TestCluster};
 use crowkv::node::PxPaxosMode;
 use crowkv::rpc::{KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvSetRequest};
+use testkit::{TestCluster, start_cluster};
 
 #[tokio::test]
 async fn kv_mutations_apply_to_all_learners() {

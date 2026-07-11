@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use crate::common::logging::init_test_subscriber;
+use crate::testkit::logging::init_test_subscriber;
 use crowkv::group::group::{PxGroup, PxGroupConfig, PxGroupMember};
 use crowkv::node::server::NodeServer;
 use crowkv::node::{PxNode, PxNodeRole, PxPaxosMode};
