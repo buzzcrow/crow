@@ -131,6 +131,7 @@ impl AppState {
         std::fs::create_dir_all(base.join("bin")).map_err(Error::Io)?;
         std::fs::create_dir_all(base.join("log")).map_err(Error::Io)?;
         std::fs::create_dir_all(base.join("data")).map_err(Error::Io)?;
+        std::fs::create_dir_all(base.join("data").join("wal")).map_err(Error::Io)?;
         std::fs::canonicalize(base).map_err(Error::Io)
     }
 }
@@ -181,6 +182,7 @@ mod tests {
         assert!(workspace.join("bin").is_dir());
         assert!(workspace.join("log").is_dir());
         assert!(workspace.join("data").is_dir());
+        assert!(workspace.join("data/wal").is_dir());
 
         std::env::set_current_dir(original_cwd).unwrap();
         let _ = std::fs::remove_dir_all(root);

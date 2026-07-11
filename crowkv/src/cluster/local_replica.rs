@@ -17,7 +17,11 @@ use crate::paxos::roles::{
     Acceptor, Learner, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply, SlotIndex,
 };
 use crate::paxos::{PxNodeId, PxTerm};
+use crate::wal::record::WALRecord;
+use crate::wal::replay::ReplayResult;
+use crate::wal::WalEngine;
 use parking_lot::Mutex;
+use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -211,6 +215,8 @@ pub struct PxLocalReplica {
     /// the current leader does not spuriously time out and challenge it.
     /// Mirrors Raft's "reset election timer on `AppendEntries`" rule.
     pub(crate) deadline_reset_signal: tokio::sync::Notify,
+    /// Optional WAL manager for durability. `None` in P1 (no WAL).
+    wal: Option<Arc<WalEngine>>,
     /// Idempotency gate for [`Self::shutdown`].
     shutdown_started: AtomicBool,
     /// Per-replica leader-election counters. Cheap `Relaxed` atomic
@@ -277,7 +283,7 @@ impl ReplicaHandler for PxLocalReplica {
         req: VoteRequestPayload,
         _group_id: u64,
     ) -> Result<VoteReply, PxReplicaError> {
-        Ok(self.handle_request_vote(req))
+        Ok(self.handle_request_vote(req).await)
     }
 
     async fn on_heartbeat(
@@ -313,6 +319,7 @@ impl PxLocalReplica {
             lease_duration_ms: AtomicU64::new(
                 crate::common::config::PxElectionConfig::DEFAULT.lease_duration_ms,
             ),
+            wal: None,
             admin_step_down_signal: tokio::sync::Notify::new(),
             deadline_reset_signal: tokio::sync::Notify::new(),
             shutdown_started: AtomicBool::new(false),
@@ -356,12 +363,91 @@ impl PxLocalReplica {
             lease_read_until_ms: AtomicU64::new(instant_to_anchor_ms(Instant::now())),
             last_quorum_heartbeat_at_ms: AtomicU64::new(instant_to_anchor_ms(Instant::now())),
             lease_duration_ms: AtomicU64::new(prior.lease_duration_ms.load(Ordering::Acquire)),
+            wal: prior.wal.clone(),
             admin_step_down_signal: tokio::sync::Notify::new(),
             deadline_reset_signal: tokio::sync::Notify::new(),
             shutdown_started: AtomicBool::new(false),
             election_metrics: ElectionMetrics::new(),
             last_heartbeat_at: Mutex::new(None),
         }
+    }
+
+    /// Attach a WAL manager for durable persistence (P2 W6).
+    ///
+    /// After this is set, `on_accept`/`on_prepare` will persist to the WAL
+    /// before returning success (the ack contract). `handle_request_vote`
+    /// will persist `voted_for` changes.
+    pub fn set_wal(&mut self, wal: Arc<WalEngine>) {
+        self.wal = Some(wal);
+    }
+
+    /// Rebuild a fresh local replica from WAL replay output.
+    ///
+    /// Replays the recovered records through the normal acceptor / learner APIs
+    /// so restored state follows the same invariants as live traffic.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidData` if any replayed promised/accepted record cannot be
+    /// re-applied through the normal replica handlers.
+    pub async fn restore_from_replay(
+        id: u64,
+        role: PxLocalReplicaRole,
+        replay: &ReplayResult,
+    ) -> io::Result<Self> {
+        let replica = Self::new(id, role);
+
+        for record in &replay.records {
+            match record.record_type {
+                crate::wal::record::RecordType::Promised => {
+                    match replica.on_prepare(record.slot, record.ballot, record.term).await {
+                        PxPrepareReply::Promised { .. } => {}
+                        other => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!(
+                                    "restore replay promised failed for slot {}: {other:?}",
+                                    record.slot
+                                ),
+                            ));
+                        }
+                    }
+                }
+                crate::wal::record::RecordType::Accepted => {
+                    let entry = record.to_log_entry().ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "restore replay accepted missing log entry",
+                        )
+                    })?;
+                    match replica.on_accept(entry.clone()).await {
+                        PxAcceptReply::Accepted { .. } => replica.learn(&entry),
+                        other => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("restore replay accept failed for slot {}: {other:?}", record.slot),
+                            ));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        replica.with_election_state(|state| {
+            state.current_term = replay.current_term;
+            state.voted_for = replay.voted_for;
+            state.role = role;
+            state.leader_id = if role == PxLocalReplicaRole::Leader {
+                Some(id)
+            } else {
+                None
+            };
+        });
+        replica.role_atomic.store(role.as_u8(), Ordering::Release);
+        replica.learner.restore_dedup_cache(&replay.dedup_cache);
+
+        Ok(replica)
     }
 
     /// Lock-free snapshot of the current role.
@@ -768,7 +854,19 @@ impl PxLocalReplica {
         if term > local_term {
             self.become_follower(term);
         }
-        self.acceptor.prepare(slot, ballot).await
+        let reply = self.acceptor.prepare(slot, ballot).await;
+
+        // Ack contract (W6): persist Promised record before replying.
+        if matches!(reply, PxPrepareReply::Promised { .. }) {
+            if let Some(wal) = &self.wal {
+                let record = WALRecord::from_promised(wal.group_id(), term, slot, ballot);
+                if let Err(e) = wal.append(&record).await {
+                    tracing::error!(slot, ?ballot, error = %e, "WAL persist Promised failed");
+                }
+            }
+        }
+
+        reply
     }
 
     /// Phase-2 `Accept` handler with election-term fence.
@@ -787,7 +885,23 @@ impl PxLocalReplica {
         if req_term > local_term {
             self.become_follower(req_term);
         }
-        self.acceptor.accept(entry).await
+
+        // Keep a reference for the WAL persist below.
+        let slot = entry.slot;
+        let ballot = entry.ballot;
+        let reply = self.acceptor.accept(entry.clone()).await;
+
+        // Ack contract (W6): persist Accepted record before replying.
+        if matches!(reply, PxAcceptReply::Accepted { .. }) {
+            if let Some(wal) = &self.wal {
+                let record = WALRecord::from_accepted(wal.group_id(), &entry);
+                if let Err(e) = wal.append(&record).await {
+                    tracing::error!(slot, ?ballot, error = %e, "WAL persist Accepted failed");
+                }
+            }
+        }
+
+        reply
     }
 
     /// Learn a chosen entry (apply to state machine).
@@ -913,7 +1027,7 @@ impl PxLocalReplica {
     /// plus a `voted_for ∈ {None, candidate_id}` check in `req.term`. On grant
     /// the responder adopts `req.term`, sets `voted_for = candidate_id`, and
     /// extends `vote_lockout_until`.
-    fn handle_request_vote(&self, req: VoteRequestPayload) -> VoteReply {
+    async fn handle_request_vote(&self, req: VoteRequestPayload) -> VoteReply {
         // Vote lockout extension reuses the configured lease duration so
         // followers honor the per-group profile (e.g. WAN) rather than the
         // hard-coded default.
@@ -946,6 +1060,13 @@ impl PxLocalReplica {
             self.current_term_atomic.store(term, Ordering::Release);
             self.role_atomic
                 .store(PxLocalReplicaRole::Follower.as_u8(), Ordering::Release);
+            // Persist voted_for durably (W12) before acknowledging.
+            if let Some(wal) = &self.wal {
+                let record = WALRecord::from_vote_granted(wal.group_id(), term, req.candidate_id);
+                if let Err(e) = wal.append(&record).await {
+                    tracing::error!(term, voted_for = req.candidate_id, error = %e, "WAL persist VoteGranted failed");
+                }
+            }
             // After granting a vote, reset our own election deadline so we
             // give the candidate a chance to win quorum and start sending
             // heartbeats before we time out and challenge it ourselves.

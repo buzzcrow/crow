@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use dashmap::DashMap;
 use parking_lot::Mutex;
 
-use crate::engine::{Batch, Engine, InMemoryEngine};
+use crate::kv::{Batch, InMemKV, KVEngine};
 use crate::paxos::roles::{Learner, PxLogEntry, SlotIndex};
 use crate::paxos::PxTerm;
 
@@ -18,7 +18,7 @@ struct DedupEntry {
 }
 
 /// State-machine driver: applies chosen log entries to a pluggable
-/// [`Engine`], plus the chosen-slot frontier needed by leader-election safety
+/// [`KVEngine`], plus the chosen-slot frontier needed by leader-election safety
 /// checks and bulk Phase 1.
 ///
 /// `learn` is called once a log entry has been chosen (i.e. accepted by a
@@ -33,7 +33,7 @@ pub struct PxLearner {
     /// Materialized key-value state. Boxed so the backend (in-memory, file,
     /// crowtree) is a runtime choice; the whole `PxLearner` is `Arc`-shared
     /// across replica rebuilds, so the engine is shared with it.
-    engine: Box<dyn Engine>,
+    engine: Box<dyn KVEngine>,
     /// Highest slot S such that every slot in `[1, S]` has been learned.
     contiguous_chosen: AtomicU64,
     /// Highest slot S such that every slot in `[1, S]` has been applied to
@@ -61,7 +61,7 @@ pub struct PxLearner {
 impl Default for PxLearner {
     fn default() -> Self {
         Self {
-            engine: Box::new(InMemoryEngine::new()),
+            engine: Box::new(InMemKV::new()),
             contiguous_chosen: AtomicU64::new(0),
             contiguous_applied: AtomicU64::new(0),
             last_chosen_slot: AtomicU64::new(0),
@@ -80,18 +80,18 @@ impl PxLearner {
 
     /// Borrow the materialized state engine (point/range reads, `compare`).
     #[must_use]
-    pub fn engine(&self) -> &dyn Engine {
+    pub fn engine(&self) -> &dyn KVEngine {
         self.engine.as_ref()
     }
 
     /// Live value and its resolved slot for `key`, or `None` if unset or
-    /// tombstoned. Convenience wrapper over [`Engine::get`].
+    /// tombstoned. Convenience wrapper over [`KVEngine::get`].
     #[must_use]
     pub fn engine_get(&self, key: &[u8]) -> Option<(SlotIndex, Vec<u8>)> {
         self.engine.get(key)
     }
 
-    /// Ordered prefix scan of live entries; see [`Engine::scan`].
+    /// Ordered prefix scan of live entries; see [`KVEngine::scan`].
     #[must_use]
     #[allow(clippy::type_complexity)]
     pub fn engine_scan(&self, prefix: &[u8], limit: usize) -> (Vec<(Vec<u8>, SlotIndex, Vec<u8>)>, bool) {
@@ -226,6 +226,17 @@ impl PxLearner {
             .map(|e| e.last_slot)
     }
 
+    /// Replace the in-memory dedup cache with a restored snapshot from WAL replay.
+    pub fn restore_dedup_cache(&self, cache: &BTreeMap<u64, (u64, SlotIndex)>) {
+        self.dedup.clear();
+        for (&client_id, &(last_seq, last_slot)) in cache {
+            if client_id == 0 {
+                continue;
+            }
+            self.dedup.insert(client_id, DedupEntry { last_seq, last_slot });
+        }
+    }
+
     /// Record that `(client_id, seq)` committed at `slot`. Keeps the highest
     /// `seq` seen per client (monotonic; out-of-order / replayed lower seqs do
     /// not regress the record). No-op for the `client_id == 0` sentinel.
@@ -254,7 +265,7 @@ impl PxLearner {
     ///
     /// An empty payload (`NoOp` repair fill) decodes to an empty batch and is
     /// a no-op for the engine while still advancing the frontier in `learn`.
-    /// Per-key highest-slot-wins is enforced inside [`Engine::apply`].
+    /// Per-key highest-slot-wins is enforced inside [`KVEngine::apply`].
     fn apply_entry(&self, slot: SlotIndex, payload: &[u8]) {
         let batch = Batch::decode(payload);
         if batch.ops.is_empty() {

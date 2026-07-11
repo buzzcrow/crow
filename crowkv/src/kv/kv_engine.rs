@@ -3,7 +3,7 @@ use super::Batch;
 
 /// Storage engine surface. All reads are non-mutating and may run concurrently
 /// with `apply`.
-pub trait Engine: Send + Sync {
+pub trait KVEngine: Send + Sync {
     /// Apply `batch` at `slot`. Atomic to readers and idempotent: an op for
     /// key `k` is skipped when `slot <= resolved_slot(k)`. The last occurrence
     /// of a repeated key within the batch wins.
@@ -31,7 +31,7 @@ pub trait Engine: Send + Sync {
     /// Logical diff against `other`, sorted by key. Empty means the two
     /// engines hold the same `(slot, cell)` for every key. Compared exactly,
     /// including resolved-slot and tombstones.
-    fn compare(&self, other: &dyn Engine) -> Vec<EngineDiff> {
+    fn compare(&self, other: &dyn KVEngine) -> Vec<EngineDiff> {
         let left = self.iter_all();
         let right = other.iter_all();
         let mut diffs = Vec::new();

@@ -18,6 +18,7 @@ use crowkv::cluster::px_kv_store::PxKvStore;
 use crowkv::cluster::remote_replica::PxRemoteReplica;
 use crowkv::common::config::ServerConfig;
 
+use crate::startup::create_group_with_wal;
 use crate::store_registry::KvStoreRegistry;
 
 type RegistryArc = Arc<KvStoreRegistry>;
@@ -464,9 +465,25 @@ async fn add_group(
         AddGroupInitialRole::Leader => PxLocalReplicaRole::Leader,
         AddGroupInitialRole::Follower => PxLocalReplicaRole::Follower,
     };
-    let local_replica = PxLocalReplica::new(req.replica_id, initial_role);
-    let mut group = PxGroup::new(req.group_id, local_replica);
-    group.set_election_config(state.election_cfg);
+    let group = create_group_with_wal(
+        sid,
+        req.group_id,
+        req.replica_id,
+        initial_role,
+        state.election_cfg,
+        &state.wal_root,
+        state.wal_backend.clone(),
+    )
+    .await
+    .map_err(|e| {
+        err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "failed to create WAL-backed group {} in store {sid}: {e}",
+                req.group_id
+            ),
+        )
+    })?;
     store.add_group(group);
 
     info!(

@@ -36,6 +36,9 @@ pub struct Cli {
     #[arg(short = 'l', long)]
     pub log: bool,
 
+    #[arg(long)]
+    pub wal_root: Option<std::path::PathBuf>,
+
     #[arg(long, default_value = "default", value_parser = ["default", "test"])]
     pub election_profile: String,
 }

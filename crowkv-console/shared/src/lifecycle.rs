@@ -117,6 +117,7 @@ async fn deploy_local_in_workspace(
         )
         .kill_on_drop(false);
     if let Some(dir) = workspace_dir {
+        cmd.arg("--wal-root").arg("data/wal");
         let stdout = std::fs::OpenOptions::new()
             .create(true)
             .append(true)

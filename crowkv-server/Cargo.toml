@@ -31,3 +31,5 @@ utoipa = "5"
 [dev-dependencies]
 reqwest = { version = "0.12", features = ["json"] }
 tonic = { workspace = true }
+tempfile = "3"
+bytes = "1"

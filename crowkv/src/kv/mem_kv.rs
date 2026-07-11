@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use parking_lot::RwLock;
 
 use super::op::Cell;
-use super::{Batch, BatchOp, Engine, Op};
+use super::{Batch, BatchOp, KVEngine, Op};
 
 /// In-memory, single-version engine backed by an ordered `BTreeMap` under a
 /// single `RwLock`. The write lock held for the duration of `apply` makes the
@@ -11,18 +11,18 @@ use super::{Batch, BatchOp, Engine, Op};
 /// free. No persistence — intended for unit/integration tests and behavior
 /// validation.
 #[derive(Default)]
-pub struct InMemoryEngine {
+pub struct InMemKV {
     map: RwLock<BTreeMap<Vec<u8>, (u64, Cell)>>,
 }
 
-impl InMemoryEngine {
+impl InMemKV {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-impl Engine for InMemoryEngine {
+impl KVEngine for InMemKV {
     fn apply(&self, slot: u64, batch: &Batch) {
         // Collapse intra-batch duplicates first: the last occurrence of a key
         // in batch order wins, so the per-key slot check below is made once

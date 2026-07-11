@@ -1,8 +1,8 @@
-//! `InMemoryEngine` behavior: per-key highest-slot-wins apply, tombstones,
+//! `InMemKV` behavior: per-key highest-slot-wins apply, tombstones,
 //! apply idempotency, ordered prefix scan with truncation, and cross-engine
 //! `compare`.
 
-use crowkv::engine::{Batch, BatchOp, Cell, Engine, InMemoryEngine, Op};
+use crowkv::kv::{Batch, BatchOp, Cell, InMemKV, KVEngine, Op};
 
 fn put(key: &[u8], value: &[u8]) -> BatchOp {
     BatchOp {
@@ -24,7 +24,7 @@ fn batch(ops: Vec<BatchOp>) -> Batch {
 
 #[test]
 fn highest_slot_wins_regardless_of_apply_order() {
-    let e = InMemoryEngine::new();
+    let e = InMemKV::new();
     // Apply the higher slot first, then a lower slot for the same key.
     e.apply(5, &batch(vec![put(b"k", b"v5")]));
     e.apply(3, &batch(vec![put(b"k", b"v3")]));
@@ -41,7 +41,7 @@ fn highest_slot_wins_regardless_of_apply_order() {
 
 #[test]
 fn equal_slot_is_idempotent_noop() {
-    let e = InMemoryEngine::new();
+    let e = InMemKV::new();
     e.apply(4, &batch(vec![put(b"k", b"first")]));
     // Re-applying the same slot must not change the stored value.
     e.apply(4, &batch(vec![put(b"k", b"second")]));
@@ -50,7 +50,7 @@ fn equal_slot_is_idempotent_noop() {
 
 #[test]
 fn delete_writes_tombstone() {
-    let e = InMemoryEngine::new();
+    let e = InMemKV::new();
     e.apply(1, &batch(vec![put(b"k", b"v")]));
     e.apply(2, &batch(vec![del(b"k")]));
     assert_eq!(e.get(b"k"), None, "tombstoned key is not live");
@@ -62,14 +62,14 @@ fn delete_writes_tombstone() {
 
 #[test]
 fn intra_batch_last_occurrence_wins() {
-    let e = InMemoryEngine::new();
+    let e = InMemKV::new();
     e.apply(1, &batch(vec![put(b"k", b"a"), del(b"k"), put(b"k", b"final")]));
     assert_eq!(e.get(b"k"), Some((1, b"final".to_vec())));
 }
 
 #[test]
 fn scan_is_ordered_prefix_filtered_and_truncates() {
-    let e = InMemoryEngine::new();
+    let e = InMemKV::new();
     e.apply(
         1,
         &batch(vec![put(b"a:1", b"1"), put(b"a:2", b"2"), put(b"a:3", b"3")]),
@@ -96,8 +96,8 @@ fn scan_is_ordered_prefix_filtered_and_truncates() {
 
 #[test]
 fn compare_is_empty_for_identical_state_and_detects_divergence() {
-    let a = InMemoryEngine::new();
-    let b = InMemoryEngine::new();
+    let a = InMemKV::new();
+    let b = InMemKV::new();
     // Same ops, different apply order — must converge to identical state.
     a.apply(2, &batch(vec![put(b"x", b"2")]));
     a.apply(1, &batch(vec![put(b"y", b"1")]));
@@ -114,7 +114,7 @@ fn compare_is_empty_for_identical_state_and_detects_divergence() {
 
 #[test]
 fn clear_drops_all_state() {
-    let e = InMemoryEngine::new();
+    let e = InMemKV::new();
     e.apply(1, &batch(vec![put(b"k", b"v")]));
     e.clear();
     assert_eq!(e.get(b"k"), None);

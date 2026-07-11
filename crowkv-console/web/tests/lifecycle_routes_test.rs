@@ -88,6 +88,11 @@ fn assert_node_workspace(dir: &std::path::Path, node_id: &str) {
         "missing data for {node_id}: {}",
         base.display()
     );
+    assert!(
+        base.join("data/wal").is_dir(),
+        "missing data/wal for {node_id}: {}",
+        base.display()
+    );
 }
 
 #[tokio::test]
@@ -108,6 +113,10 @@ async fn prepare_node_workspace_creates_base_directory_when_missing() {
     assert!(base.join("bin").is_dir(), "bin directory should be created");
     assert!(base.join("log").is_dir(), "log directory should be created");
     assert!(base.join("data").is_dir(), "data directory should be created");
+    assert!(
+        base.join("data/wal").is_dir(),
+        "data/wal directory should be created"
+    );
 }
 
 #[tokio::test]

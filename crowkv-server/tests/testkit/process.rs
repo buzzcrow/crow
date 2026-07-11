@@ -11,6 +11,7 @@ static PORT_OFFSET: AtomicU16 = AtomicU16::new(0);
 pub struct ServerHandle {
     child: Child,
     base_url: String,
+    _wal_dir: tempfile::TempDir,
 }
 
 impl ServerHandle {
@@ -64,17 +65,16 @@ impl Drop for ServerHandle {
 }
 
 pub async fn start_test_server(args: &[&str]) -> std_io::Result<ServerHandle> {
-    // Generate unique port using process ID, thread ID, and atomic counter
-    // This avoids collisions when multiple tests run in parallel
     let pid = std::process::id();
     let tid = std::thread::current().id();
     let offset = PORT_OFFSET.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    // Hash the thread ID into a number we can use
     let tid_hash = format!("{tid:?}")
         .bytes()
         .fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(u64::from(b)));
     let seed = (u64::from(pid) ^ tid_hash ^ u64::from(offset)) % 10000;
     let port = 20000 + seed as u16;
+    let wal_dir = tempfile::tempdir()?;
+    let wal_root = wal_dir.path().join("wal");
 
     let bin = crowkv_server_bin();
     let mut child = Command::new(bin)
@@ -87,11 +87,12 @@ pub async fn start_test_server(args: &[&str]) -> std_io::Result<ServerHandle> {
         .arg("0")
         .arg("--election-profile")
         .arg("test")
+        .arg("--wal-root")
+        .arg(&wal_root)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
 
-    // Use a thread to read stdout and find the bound management address
     let stdout = child.stdout.take().expect("stdout should be captured");
     let stderr = child.stderr.take().expect("stderr should be captured");
     let (tx, rx) = mpsc::channel();
@@ -115,8 +116,6 @@ pub async fn start_test_server(args: &[&str]) -> std_io::Result<ServerHandle> {
                 break;
             }
         }
-        // If we exit the loop without finding management_addr, don't send anything
-        // The main loop will timeout with a better error message
     });
 
     thread::spawn(move || {
@@ -127,7 +126,6 @@ pub async fn start_test_server(args: &[&str]) -> std_io::Result<ServerHandle> {
         }
     });
 
-    // Wait for address from thread (with timeout)
     let deadline = Instant::now() + Duration::from_secs(10);
     #[allow(clippy::never_loop)]
     let addr = loop {
@@ -141,8 +139,6 @@ pub async fn start_test_server(args: &[&str]) -> std_io::Result<ServerHandle> {
                 ));
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                // The stdout reader exited early, which usually means the process
-                // crashed. Wait briefly for it to exit so we can capture stderr.
                 let _ = child.wait();
                 let stderr_lines = stderr_buf.lock().unwrap();
                 let msg = if stderr_lines.is_empty() {
@@ -161,6 +157,7 @@ pub async fn start_test_server(args: &[&str]) -> std_io::Result<ServerHandle> {
     let handle = ServerHandle {
         child,
         base_url: format!("http://{addr}"),
+        _wal_dir: wal_dir,
     };
     handle.wait_for_ready(Duration::from_secs(10)).await?;
     Ok(handle)

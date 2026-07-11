@@ -19,7 +19,7 @@ workspace = true
 test-util = []
 
 [dependencies]
-tokio = { workspace = true, features = ["rt", "macros", "time", "net"] }
+tokio = { workspace = true, features = ["rt", "macros", "time", "net", "fs", "sync", "io-util"] }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["rt"] }
 tonic = { workspace = true }
@@ -33,6 +33,7 @@ tracing = { workspace = true }
 tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true }
 utoipa = "5"
+crc32c = "0.6"
 
 [build-dependencies]
 tonic-build = "0.12"
@@ -45,7 +46,16 @@ crossbeam-skiplist = "0.1"
 # test/bench build so integration tests can reach the test-only hooks under
 # plain `cargo test` (no `--features` needed).
 crowkv = { path = ".", features = ["test-util"] }
+tempfile = "3"
 
 [[bench]]
 name = "slot_list"
+harness = false
+
+[[bench]]
+name = "wal_fsync"
+harness = false
+
+[[bench]]
+name = "wal_multidisk"
 harness = false

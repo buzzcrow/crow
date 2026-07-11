@@ -5,8 +5,7 @@
 
 pub mod cluster;
 pub mod common;
-pub mod engine;
-pub mod io;
+pub mod kv;
 pub mod paxos;
 pub mod reconfig;
 pub mod rpc;

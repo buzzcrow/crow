@@ -7,20 +7,20 @@
 
 use std::io::Write;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
 use tracing::info;
 
-use crowkv::cluster::group::PxGroup;
-use crowkv::cluster::group_election::LeaderElection;
 use crowkv::cluster::kv_server::KvServer;
-use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
+use crowkv::cluster::local_replica::PxLocalReplicaRole;
 use crowkv::cluster::px_kv_store::PxKvStore;
 use crowkv::common::config::{PxElectionConfig, ServerConfig};
 
 use crowkv_server::cli::{parse_id_list, parse_port_list, Cli};
 use crowkv_server::mgmt_api;
+use crowkv_server::startup::create_group_with_wal;
 use crowkv_server::store_registry::KvStoreRegistry;
 
 #[tokio::main]
@@ -56,7 +56,10 @@ async fn main() {
         PxElectionConfig::DEFAULT
     };
 
-    let registry = Arc::new(KvStoreRegistry::with_election_config(election_cfg));
+    let wal_root = args.wal_root.clone().unwrap_or_else(|| PathBuf::from("wal"));
+    let wal_backend = Arc::new(crowkv::wal::IoBackend::detect());
+
+    let registry = Arc::new(KvStoreRegistry::with_runtime(election_cfg, wal_root, wal_backend));
 
     // Start HTTP management server first
     let mgmt_addr: SocketAddr = format!("{}:{}", args.management_addr, args.management_port)
@@ -98,7 +101,6 @@ async fn main() {
             &b.group_ids,
             b.replica_id,
             b.ports.clone(),
-            &args.election_profile,
             registry.clone(),
         )
         .await;
@@ -188,7 +190,6 @@ async fn create_and_start_stores(
     group_ids: &[u64],
     replica_id: u64,
     ports: Vec<u16>,
-    election_profile: &str,
     registry: Arc<KvStoreRegistry>,
 ) {
     info!(
@@ -211,11 +212,23 @@ async fn create_and_start_stores(
                 store_id,
                 group_id, replica_id, "creating PxGroup with local replica"
             );
-            let local_replica = PxLocalReplica::new(replica_id, PxLocalReplicaRole::Follower);
-            let mut group = PxGroup::new(group_id, local_replica);
-            if election_profile == "test" {
-                group.set_election_config(PxElectionConfig::for_tests());
-            }
+            let group = match create_group_with_wal(
+                store_id,
+                group_id,
+                replica_id,
+                PxLocalReplicaRole::Follower,
+                registry.election_cfg,
+                &registry.wal_root,
+                registry.wal_backend.clone(),
+            )
+            .await
+            {
+                Ok(group) => group,
+                Err(e) => {
+                    tracing::error!(store_id, group_id, error = %e, "failed to create WAL-backed group");
+                    continue;
+                }
+            };
             store.add_group(group);
         }
 

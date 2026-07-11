@@ -2,7 +2,8 @@
 //! tests` in `crowkv-server/src/cli.rs` per `.windsurf/workflows/coding.md`
 //! §3 ("integration tests only — do not add new inline test modules").
 
-use crowkv_server::cli::{parse_id_list, parse_port_list};
+use clap::Parser;
+use crowkv_server::cli::{parse_id_list, parse_port_list, Cli};
 
 #[test]
 fn parse_single() {
@@ -47,4 +48,16 @@ fn parse_port_out_of_range() {
 #[test]
 fn parse_port_valid() {
     assert_eq!(parse_port_list("8080,9090").unwrap(), vec![8080, 9090]);
+}
+
+#[test]
+fn parse_wal_root_cli_option() {
+    let cli = Cli::parse_from([
+        "crowkv-server",
+        "--management-port",
+        "9910",
+        "--wal-root",
+        "data/wal",
+    ]);
+    assert_eq!(cli.wal_root, Some(std::path::PathBuf::from("data/wal")));
 }

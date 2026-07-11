@@ -52,8 +52,9 @@ async fn rack_node_server_lifecycle() {
     assert!(stdout.contains("reachable"), "stdout={stdout}");
 
     // server deploy / list / restart / stop on n1.
-    let mgmt_port = testkit::console::pick_free_port().to_string();
-    let grpc_port = testkit::console::pick_free_port().to_string();
+    let (mgmt_port, grpc_port) = testkit::console::pick_two_distinct_free_ports();
+    let mgmt_port = mgmt_port.to_string();
+    let grpc_port = grpc_port.to_string();
     let (code, stdout, stderr) = run(
         &cli,
         &console_url,

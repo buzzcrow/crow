@@ -6,6 +6,10 @@
 //! the call sites (`crowkv-server` CLI, testkit harness) before the
 //! group is wrapped in an `Arc`.
 
+use std::path::PathBuf;
+
+use crate::wal::pipeline_backend::WalBlockAlignment;
+
 /// Paxos retry configuration (static, global).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PaxosConfig {
@@ -42,6 +46,61 @@ impl ServerConfig {
     pub const DEFAULT: Self = Self {
         shutdown_timeout_ms: 10_000,
     };
+}
+
+/// WAL configuration for a single consensus group.
+#[derive(Clone, Debug)]
+pub struct WalConfig {
+    /// Directories to distribute WAL segments across.
+    pub wal_disks: Vec<PathBuf>,
+    /// Target segment size before rotation (bytes). Default 64 MiB.
+    pub wal_segment_size: u64,
+    /// Fsync batch size trigger (bytes). Default 64 KiB.
+    pub wal_fsync_batch_bytes: usize,
+    /// Fsync batch interval trigger. Default 1 ms.
+    pub wal_fsync_batch_interval_ms: u64,
+    /// Watchdog timer for stuck batches. Default 100 ms.
+    pub wal_fsync_watchdog_ms: u64,
+    /// Disk-pressure watermark for eager GC. Default 80%.
+    pub wal_disk_high_watermark_pct: u8,
+    /// Forensics retention grace period (seconds). Default 3600 (1 hour).
+    pub wal_min_retention_secs: u64,
+    /// GC scan cadence (seconds). Default 30.
+    pub gc_tick_secs: u64,
+    /// Physical alignment the WAL backend must satisfy. `Unaligned` (default)
+    /// targets byte-addressable media and the file backend; `Aligned` targets a
+    /// block device (e.g. a 4 KiB SSD/NVMe) and selects a block pipeline.
+    pub wal_alignment: WalBlockAlignment,
+}
+
+impl WalConfig {
+    #[must_use]
+    pub fn with_root(wal_root: impl Into<PathBuf>) -> Self {
+        Self {
+            wal_disks: vec![wal_root.into()],
+            ..Self::default()
+        }
+    }
+
+    pub fn set_root(&mut self, wal_root: impl Into<PathBuf>) {
+        self.wal_disks = vec![wal_root.into()];
+    }
+}
+
+impl Default for WalConfig {
+    fn default() -> Self {
+        Self {
+            wal_disks: vec![PathBuf::from("wal")],
+            wal_segment_size: 64 * 1024 * 1024,
+            wal_fsync_batch_bytes: 64 * 1024,
+            wal_fsync_batch_interval_ms: 1,
+            wal_fsync_watchdog_ms: 100,
+            wal_disk_high_watermark_pct: 80,
+            wal_min_retention_secs: 3600,
+            gc_tick_secs: 30,
+            wal_alignment: WalBlockAlignment::Unaligned,
+        }
+    }
 }
 
 /// Leader-election / heartbeat / lease tunables (per group).

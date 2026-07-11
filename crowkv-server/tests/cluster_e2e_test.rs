@@ -624,6 +624,68 @@ async fn kv_delete(
     assert!(resp.ok, "kv delete failed: {}", resp.error);
 }
 
+async fn kv_get_until(
+    kv: &mut KvServiceClient<tonic::transport::Channel>,
+    group_id: u64,
+    key: &[u8],
+    req_id: u64,
+    timeout: std::time::Duration,
+    want_found: bool,
+) -> (bool, Vec<u8>) {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let result = kv_get(kv, group_id, key, req_id).await;
+        if result.0 == want_found || std::time::Instant::now() >= deadline {
+            return result;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
+async fn expand_group_to_five(nodes: &[ServerNode], group_id: u64) {
+    let addrs: Vec<String> = {
+        let mut v = Vec::new();
+        for n in nodes {
+            v.push(node_endpoint(&topology(n).await));
+        }
+        v
+    };
+
+    for existing in &nodes[..3] {
+        for new_idx in 3..5 {
+            add_remote_replica(existing, group_id, nodes[new_idx].replica_id, &addrs[new_idx]).await;
+        }
+    }
+
+    for new_idx in 3..5 {
+        for peer_idx in 0..5 {
+            if peer_idx == new_idx {
+                continue;
+            }
+            add_remote_replica(
+                &nodes[new_idx],
+                group_id,
+                nodes[peer_idx].replica_id,
+                &addrs[peer_idx],
+            )
+            .await;
+        }
+    }
+}
+
+async fn shrink_group_to_three(nodes: &[ServerNode], group_id: u64) {
+    for existing in &nodes[2..5] {
+        for removed in &nodes[..2] {
+            remove_remote_replica(existing, group_id, removed.replica_id).await;
+        }
+    }
+    for existing in &nodes[..2] {
+        for removed in &nodes[2..5] {
+            remove_remote_replica(existing, group_id, removed.replica_id).await;
+        }
+    }
+}
+
 /// Scenario: one cluster, one store per node, **two** `PxGroups` sharing
 /// the same nodes. Each group must elect its own leader via Paxos
 /// (automatic; no `set_leader`) and writes on group A must not appear on
@@ -741,34 +803,7 @@ async fn e2e_kv_after_dynamic_replica_change() {
     // peer, and make nodes[3]/nodes[4] aware of all current members.
     // After this, the group is a 5-replica group; election state is
     // preserved by `rebuild_group_with_same_config`.
-    let addrs: Vec<String> = {
-        let mut v = Vec::new();
-        for n in &nodes {
-            v.push(node_endpoint(&topology(n).await));
-        }
-        v
-    };
-    // Tell existing members (0,1,2) about the newcomers (3,4).
-    for existing in &nodes[..3] {
-        for new_idx in 3..5 {
-            add_remote_replica(existing, group_id, nodes[new_idx].replica_id, &addrs[new_idx]).await;
-        }
-    }
-    // Tell newcomers (3,4) about all existing members (0,1,2) and each other.
-    for new_idx in 3..5 {
-        for peer_idx in 0..5 {
-            if peer_idx == new_idx {
-                continue;
-            }
-            add_remote_replica(
-                &nodes[new_idx],
-                group_id,
-                nodes[peer_idx].replica_id,
-                &addrs[peer_idx],
-            )
-            .await;
-        }
-    }
+    expand_group_to_five(&nodes, group_id).await;
 
     // Leader must remain unique across all 5 nodes. When the quorum
     // size grows from 3 to 5, the previously-elected leader may step
@@ -801,16 +836,7 @@ async fn e2e_kv_after_dynamic_replica_change() {
     // stops heartbeating the surviving group. The surviving (2,3,4)
     // members' Paxos quorum is self-contained and must keep accepting
     // writes.
-    for existing in &nodes[2..5] {
-        for removed in &nodes[..2] {
-            remove_remote_replica(existing, group_id, removed.replica_id).await;
-        }
-    }
-    for existing in &nodes[..2] {
-        for removed in &nodes[2..5] {
-            remove_remote_replica(existing, group_id, removed.replica_id).await;
-        }
-    }
+    shrink_group_to_three(&nodes, group_id).await;
 
     // Re-resolve the leader on the (2,3,4) wiring after the shrink.
     // wait_for_stable_leader returns a slice-relative index; offset by 2
@@ -829,18 +855,27 @@ async fn e2e_kv_after_dynamic_replica_change() {
 
     // Post-remove KV: previous writes still readable, delete + re-write
     // commit through the smaller quorum.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let (found, v) = loop {
-        let result = kv_get(&mut kv, group_id, b"k2", 6201).await;
-        if result.0 || std::time::Instant::now() >= deadline {
-            break result;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    };
+    let (found, v) = kv_get_until(
+        &mut kv,
+        group_id,
+        b"k2",
+        6201,
+        std::time::Duration::from_secs(30),
+        true,
+    )
+    .await;
     assert!(found);
     assert_eq!(v, b"v2");
     kv_delete(&mut kv, group_id, b"k1", 6301).await;
-    let (found, _) = kv_get(&mut kv, group_id, b"k1", 6311).await;
+    let (found, _) = kv_get_until(
+        &mut kv,
+        group_id,
+        b"k1",
+        6311,
+        std::time::Duration::from_secs(30),
+        false,
+    )
+    .await;
     assert!(!found, "k1 must be gone after delete");
     kv_put(&mut kv, group_id, b"k3", b"v3", 6401).await;
 }

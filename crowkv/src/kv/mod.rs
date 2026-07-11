@@ -12,14 +12,14 @@
 //! and out-of-order parallel-slot applies naturally correct (highest slot
 //! wins).
 //!
-//! Key work: `Engine` trait, in-memory implementation, payload `Batch` decode,
+//! Key work: `KVEngine` trait, in-memory implementation, payload `Batch` decode,
 //! cross-learner `compare`. Ordered-file / crowtree engines and streamable
 //! snapshot import/export land in later phases.
 
-mod mem_engine;
+mod kv_engine;
+mod mem_kv;
 mod op;
-mod store_engine;
 
-pub use mem_engine::InMemoryEngine;
+pub use kv_engine::KVEngine;
+pub use mem_kv::InMemKV;
 pub use op::{Batch, BatchOp, Cell, EngineDiff, Op};
-pub use store_engine::Engine;

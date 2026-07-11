@@ -227,6 +227,10 @@ impl PxGroup {
         self.force_classic = force;
     }
 
+    pub fn set_next_slot(&self, next_slot: SlotIndex) {
+        self.next_slot.store(next_slot.max(1), Ordering::Release);
+    }
+
     /// Set up the group with a list of remote replicas.
     pub fn set_remote_replicas(&mut self, remote_replicas: Vec<PxRemoteReplica>) {
         let max_node_id = remote_replicas.iter().map(|r| r.node_id).max().unwrap_or(0);

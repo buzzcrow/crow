@@ -29,6 +29,17 @@ pub fn pick_free_port() -> u16 {
     port
 }
 
+/// Grab two distinct ephemeral TCP ports.
+#[must_use]
+pub fn pick_two_distinct_free_ports() -> (u16, u16) {
+    let first = pick_free_port();
+    let mut second = pick_free_port();
+    while second == first {
+        second = pick_free_port();
+    }
+    (first, second)
+}
+
 /// Locate the compiled `crowkv-cli` binary next to the test runner.
 /// Cargo exposes its path via `CARGO_BIN_EXE_crowkv-cli`; the fallback
 /// walks up to the `debug`/`release` dir for `cargo test` invocations
@@ -74,10 +85,11 @@ pub async fn spawn_upstream() -> Option<Upstream> {
     if !bin.exists() {
         return None;
     }
+    let (mgmt_port, grpc_port) = pick_two_distinct_free_ports();
     let req = DeployRequest {
         server_id: "n1".into(),
-        mgmt_port: pick_free_port(),
-        grpc_port: pick_free_port(),
+        mgmt_port,
+        grpc_port,
         election_profile: Some("test".into()),
         binary: Some(bin),
     };

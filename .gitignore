@@ -22,6 +22,7 @@ target
 
 tarpaulin-report.html
 log/
+wal/
 runtime-data/
 
 # Frontend (crowkv-console/web/ui)
@@ -29,3 +30,5 @@ crowkv-console/web/ui/node_modules/
 crowkv-console/web/ui/dist/
 crowkv-console/web/ui/.vite/
 crowkv-console/web/ui/*.tsbuildinfo
+
+.DS_Store
