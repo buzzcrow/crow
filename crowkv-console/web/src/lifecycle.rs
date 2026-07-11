@@ -1,10 +1,12 @@
 use crate::error::{err_400, err_500, err_502, map_config_err, map_persist_err, ErrorBody};
 use crate::expand::Recursive;
+use crate::physical_view::PhysicalBuilder;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use crowkv_console_shared::config::{NodeEntry, RackEntry, ServerEntry};
+use crowkv_console_shared::expand::RecursiveDepth;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -36,11 +38,26 @@ pub struct NodeQuery {
 ///
 /// # Errors
 /// Returns `400` if `?recursive=` is malformed or out of range.
-pub async fn http_list_racks(State(state): State<AppState>, Recursive(_depth): Recursive) -> Json<Vec<RackEntry>> {
-    // Depth currently ignored: the payload is flat by design. A future
-    // slice may inline each rack's nodes when depth >= 1.
+///
+/// At `recursive=0` (or absent) returns a flat `Vec<RackEntry>`. At
+/// `recursive>=1` returns a wrapper `{ items, truncated_at }` where
+/// each item carries an optional `nodes` collection inflated up to the
+/// requested depth (rack → node → store → group).
+pub async fn http_list_racks(State(state): State<AppState>, Recursive(depth): Recursive) -> Json<serde_json::Value> {
+    if matches!(depth, RecursiveDepth::None) {
+        let cfg = state.config.read().unwrap();
+        return Json(serde_json::to_value(&cfg.racks).expect("serialize racks"));
+    }
+    let snap = state.monitor_cache.snapshot().await;
     let cfg = state.config.read().unwrap();
-    Json(cfg.racks.clone())
+    let mut builder = PhysicalBuilder::new(&cfg, &snap);
+    let limit = depth.effective();
+    let racks: Vec<_> = cfg.racks.iter().map(|r| builder.build_rack(r, limit)).collect();
+    let trunc = builder.into_truncation();
+    Json(serde_json::json!({
+        "items": racks,
+        "truncated_at": trunc.paths,
+    }))
 }
 
 /// Add a new rack.
@@ -165,32 +182,64 @@ pub async fn http_ping_node(State(state): State<AppState>, Path(id): Path<String
 
 // ── Rack detail ──────────────────────────────────────────────────────
 
-/// `GET /api/racks/:rack_id`. Rack detail with child node ids.
+/// `GET /api/racks/:rack_id`. Rack detail.
+///
+/// At `recursive=0` (or absent) the legacy shape `{id, name, nodes: [node_ids]}`
+/// is preserved. At `recursive>=1` the response shape changes to
+/// `{id, name, nodes: [<NodeView>], truncated_at: [...]}` where each
+/// node inlines stores / groups up to the requested depth.
 ///
 /// # Panics
 /// Panics if the `RwLock` is poisoned.
 ///
 /// # Errors
 /// Returns `404` if the rack does not exist.
-pub async fn http_get_rack(State(state): State<AppState>, Path(id): Path<String>, Recursive(_depth): Recursive) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+pub async fn http_get_rack(State(state): State<AppState>, Path(id): Path<String>, Recursive(depth): Recursive) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+    if matches!(depth, RecursiveDepth::None) {
+        let cfg = state.config.read().unwrap();
+        let rack = cfg.racks.iter().find(|r| r.id == id).ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("rack {id} not found"),
+                }),
+            )
+        })?;
+        let node_ids: Vec<&str> = cfg.nodes.iter().filter(|n| n.rack_id == id).map(|n| n.id.as_str()).collect();
+        return Ok(Json(serde_json::json!({
+            "id": rack.id,
+            "name": rack.name,
+            "nodes": node_ids,
+        })));
+    }
+    let snap = state.monitor_cache.snapshot().await;
     let cfg = state.config.read().unwrap();
-    let rack = cfg.racks.iter().find(|r| r.id == id).ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ErrorBody {
-                error: format!("rack {id} not found"),
-            }),
-        )
-    })?;
-    let node_ids: Vec<&str> = cfg.nodes.iter().filter(|n| n.rack_id == id).map(|n| n.id.as_str()).collect();
-    Ok(Json(serde_json::json!({
-        "id": rack.id,
-        "name": rack.name,
-        "nodes": node_ids,
-    })))
+    let rack = cfg
+        .racks
+        .iter()
+        .find(|r| r.id == id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("rack {id} not found"),
+                }),
+            )
+        })?
+        .clone();
+    let mut builder = PhysicalBuilder::new(&cfg, &snap);
+    let view = builder.build_rack(&rack, depth.effective());
+    let trunc = builder.into_truncation();
+    let mut body = serde_json::to_value(&view).expect("serialize rack view");
+    body["truncated_at"] = serde_json::to_value(&trunc.paths).expect("serialize truncated_at");
+    Ok(Json(body))
 }
 
 /// `GET /api/racks/:rack_id/nodes`. List nodes under a specific rack.
+///
+/// At `recursive=0` returns a flat `Vec<NodeEntry>` (legacy shape). At
+/// `recursive>=1` returns `{ items: [NodeView], truncated_at: [...] }`
+/// with the per-node store / group tree inflated up to the depth cap.
 ///
 /// # Panics
 /// Panics if the `RwLock` is poisoned.
@@ -200,8 +249,22 @@ pub async fn http_get_rack(State(state): State<AppState>, Path(id): Path<String>
 pub async fn http_list_rack_nodes(
     State(state): State<AppState>,
     Path(rack_id): Path<String>,
-    Recursive(_depth): Recursive,
-) -> Result<Json<Vec<NodeEntry>>, (StatusCode, Json<ErrorBody>)> {
+    Recursive(depth): Recursive,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+    if matches!(depth, RecursiveDepth::None) {
+        let cfg = state.config.read().unwrap();
+        if !cfg.racks.iter().any(|r| r.id == rack_id) {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("rack {rack_id} not found"),
+                }),
+            ));
+        }
+        let nodes: Vec<NodeEntry> = cfg.nodes.iter().filter(|n| n.rack_id == rack_id).cloned().collect();
+        return Ok(Json(serde_json::to_value(&nodes).expect("serialize nodes")));
+    }
+    let snap = state.monitor_cache.snapshot().await;
     let cfg = state.config.read().unwrap();
     if !cfg.racks.iter().any(|r| r.id == rack_id) {
         return Err((
@@ -211,7 +274,15 @@ pub async fn http_list_rack_nodes(
             }),
         ));
     }
-    Ok(Json(cfg.nodes.iter().filter(|n| n.rack_id == rack_id).cloned().collect()))
+    let nodes: Vec<NodeEntry> = cfg.nodes.iter().filter(|n| n.rack_id == rack_id).cloned().collect();
+    let mut builder = PhysicalBuilder::new(&cfg, &snap);
+    let limit = depth.effective();
+    let views: Vec<_> = nodes.iter().map(|n| builder.build_node(n, limit)).collect();
+    let trunc = builder.into_truncation();
+    Ok(Json(serde_json::json!({
+        "items": views,
+        "truncated_at": trunc.paths,
+    })))
 }
 
 /// `POST /api/racks/:rack_id/nodes`. Create a node under a specific rack.

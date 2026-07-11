@@ -1,0 +1,8 @@
+
+# Playwright + Lighthouse artifacts
+test-results/
+playwright-report/
+a11y-reports/
+lighthouse-report.json
+lighthouse-report.html
+e2e-debug.png

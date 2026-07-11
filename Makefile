@@ -1,4 +1,4 @@
-.PHONY: default install coverage loc clean build doc e2e test \
+.PHONY: default install coverage loc clean build doc e2e test test-web \
         ui-dev web reset
 
 # Frontend directory
@@ -15,6 +15,13 @@ default:
 test:
 	@echo "Running tests ..."
 	cargo test --workspace --all-targets
+
+# Run web-related tests: crowkv-web Rust crate + UI vitest unit tests
+test-web:
+	@echo "Running crowkv-web Rust tests..."
+	cargo test -p crowkv-web --all-targets
+	@echo "Running UI unit tests (vitest)..."
+	cd $(UI_DIR) && npm test
 
 # Install dependencies and pre-commit hooks
 install:

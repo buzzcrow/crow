@@ -3,37 +3,119 @@
 @tailwind utilities;
 
 @layer base {
+  * {
+    @apply tw-border-border;
+  }
+
   html, body, #root {
-    height: 100%;
+    @apply tw-h-full tw-w-full;
   }
+
   body {
-    @apply bg-bg text-text;
+    @apply tw-bg-bg tw-text-text tw-font-sans tw-antialiased;
   }
+
   ::selection {
-    @apply bg-accent text-bg;
+    @apply tw-bg-accent tw-text-white;
+  }
+
+  :root {
+    /* Light theme */
+    --color-bg: #ffffff;
+    --color-panel: #f8fafc;
+    --color-accent: #3b82f6;
+    --color-accent2: #2563eb;
+    --color-muted: #64748b;
+    --color-text: #1e293b;
+    --color-border: #e2e8f0;
+
+    /* Radix UI color system for backward compatibility */
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 221.2 83.2% 53.3%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 221.2 83.2% 53.3%;
+  }
+
+  .tw-dark {
+    /* Dark theme (default) */
+    --color-bg: #0b0d10;
+    --color-panel: #161a1f;
+    --color-accent: #88c0d0;
+    --color-accent2: #81a1c1;
+    --color-muted: #a0a9bd;
+    --color-text: #d8dee9;
+    --color-border: #2e3440;
+
+    /* Radix UI color system for backward compatibility */
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222.2 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 217.2 91.2% 59.8%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 224.3 76.3% 48%;
   }
 }
 
 @layer components {
+  /* Legacy styles for backward compatibility */
   .panel {
-    @apply bg-panel border border-border rounded-md p-4;
+    @apply tw-bg-panel tw-border tw-border-border tw-rounded-md tw-p-4;
   }
   .input {
-    @apply bg-bg text-text border border-border rounded px-2 py-1 outline-none focus:border-accent2;
+    @apply tw-bg-bg tw-text-text tw-border tw-border-border tw-rounded tw-px-2 tw-py-1 tw-outline-none focus:tw-border-accent;
   }
   .btn {
-    @apply bg-border text-text border border-muted rounded px-3 py-1 hover:bg-muted transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+    @apply tw-bg-border tw-text-text tw-border tw-border-muted tw-rounded tw-px-3 tw-py-1 hover:tw-bg-muted tw-transition-colors disabled:tw-opacity-50 disabled:tw-cursor-not-allowed;
   }
   .btn-primary {
-    @apply bg-accent2 text-bg border-accent2 hover:bg-accent;
+    @apply tw-bg-accent tw-text-white tw-border-accent hover:tw-bg-accent/90;
   }
   .tab {
-    @apply px-3 py-1 cursor-pointer border-b-2 border-transparent;
+    @apply tw-px-3 tw-py-1 tw-cursor-pointer tw-border-b-2 tw-border-transparent;
   }
   .tab-active {
-    @apply border-accent text-accent;
+    @apply tw-border-accent tw-text-accent;
   }
   .pre {
-    @apply bg-panel border border-border rounded p-3 overflow-auto whitespace-pre-wrap text-sm;
+    @apply tw-bg-panel tw-border tw-border-border tw-rounded tw-p-3 tw-overflow-auto tw-whitespace-pre-wrap tw-text-sm;
   }
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  @apply tw-w-2 tw-h-2;
+}
+::-webkit-scrollbar-track {
+  @apply tw-bg-transparent;
+}
+::-webkit-scrollbar-thumb {
+  @apply tw-bg-border tw-rounded-full hover:tw-bg-muted;
 }

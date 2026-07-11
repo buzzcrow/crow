@@ -1,135 +1,168 @@
-import { useCallback, useEffect, useState } from "react";
-import SnapshotTab from "./components/SnapshotTab";
-import StoresTab from "./components/StoresTab";
-import KvTab from "./components/KvTab";
-import RacksTab from "./components/RacksTab";
-import NodesTab from "./components/NodesTab";
-import ServersTab from "./components/ServersTab";
-import { listServers, type ServerEntry } from "./api";
+import React, { Suspense, lazy, useState, useCallback } from 'react';
+import { ViewModeProvider } from './contexts/ViewModeContext';
+import { ThemeProvider } from './contexts/ThemeContext';
+import { SelectionProvider } from './contexts/SelectionContext';
+import { ToastProvider } from './contexts/ToastContext';
+import { ActivityProvider } from './contexts/ActivityContext';
+import { usePhysicalTree } from './data/usePhysicalTree';
+import { useLogicalTree } from './data/useLogicalTree';
+import { Header } from './shell/Header';
+import { Sidebar } from './shell/Sidebar';
+import { ToastContainer } from './components/ToastContainer';
+import { TreeNode } from './components/Tree';
+import { useEffect } from 'react';
+import { CustomAction, CustomPanel, ThemeMode, ViewMode } from './types';
 
-type TabId = "snapshot" | "racks" | "nodes" | "servers" | "stores" | "kv" | "swagger";
+// Lazy-loaded chunks: each pulls heavy deps (reactflow / portal-only UI) the
+// initial render does not need.
+const TopologyCanvas = lazy(() =>
+  import('./topology/TopologyCanvas').then((m) => ({ default: m.TopologyCanvas })),
+);
+const Inspector = lazy(() => import('./shell/Inspector').then((m) => ({ default: m.Inspector })));
+const CommandPalette = lazy(() =>
+  import('./shell/CommandPalette').then((m) => ({ default: m.CommandPalette })),
+);
 
-const TABS: { id: TabId; label: string }[] = [
-  { id: "snapshot", label: "Snapshot" },
-  { id: "racks", label: "Racks" },
-  { id: "nodes", label: "Nodes" },
-  { id: "servers", label: "Servers" },
-  { id: "stores", label: "Stores" },
-  { id: "kv", label: "KV" },
-  { id: "swagger", label: "Swagger" },
-];
-
-const SERVER_KEY = "crowkv.console.server";
-const CUSTOM = "__custom__";
-
-export default function App() {
-  const [tab, setTab] = useState<TabId>("snapshot");
-  const [server, setServer] = useState<string>(() => localStorage.getItem(SERVER_KEY) ?? "");
-  const [registered, setRegistered] = useState<ServerEntry[]>([]);
-  const [custom, setCustom] = useState<boolean>(false);
-
-  const reloadServers = useCallback(async () => {
-    try {
-      const list = await listServers();
-      setRegistered(list);
-      // If the saved server is not in the registry, treat it as a custom URL.
-      if (server && !list.some((s) => s.url === server)) {
-        setCustom(true);
+/** Inline Cmd/Ctrl+K hotkey so we don't statically pull the CommandPalette chunk. */
+function useCommandPaletteHotkey(open: () => void) {
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        open();
       }
-    } catch {
-      // ignore — backend may be starting up
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [open]);
+}
+
+export interface CrowkvConsoleProps {
+  /** Custom logo replacing the default CrowKV brand in the header. */
+  brandLogo?: React.ReactNode;
+  /** Initial theme mode; defaults to system. */
+  themeMode?: ThemeMode;
+  /** Initial view mode; defaults to Logical. */
+  initialViewMode?: ViewMode;
+  /** Custom inspector / context-menu actions. */
+  customActions?: CustomAction[];
+  /** Custom inspector panels rendered after built-in tabs. */
+  customPanels?: CustomPanel[];
+  /** API prefix forwarded to custom panels; defaults to '/api'. */
+  apiPrefix?: string;
+  /** Structured event callback for host integration. */
+  onEvent?: (event: { type: string; payload?: unknown }) => void;
+}
+
+function AppContent({ brandLogo, customPanels, customActions, apiPrefix, onEvent }: CrowkvConsoleProps) {
+  const [selectedNodeId, setSelectedNodeId] = useState<string>('');
+  const [lastRefreshTime, setLastRefreshTime] = useState<Date>(new Date());
+  const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
+
+  // Data hooks
+  const { racks, nodes, loading: physicalLoading, refresh: refreshPhysical } = usePhysicalTree({
+    enabled: true,
+    recursive: 2,
+  });
+  const { stores, loading: logicalLoading, refresh: refreshLogical } = useLogicalTree({
+    enabled: true,
+    recursive: 2,
+  });
+
+  const loading = physicalLoading || logicalLoading;
+
+  // Manual refresh
+  const handleRefresh = useCallback(async () => {
+    await Promise.all([refreshPhysical(), refreshLogical()]);
+    setLastRefreshTime(new Date());
+  }, [refreshPhysical, refreshLogical]);
+
+  // Handle node click from sidebar (selection is handled inside Sidebar/Tree via SelectionContext)
+  const handleNodeClick = useCallback((_node: TreeNode) => {
+    // Inspector / panels will react to SelectionContext.
   }, []);
 
-  useEffect(() => {
-    void reloadServers();
-  }, [reloadServers]);
+  const handleOpenCommandPalette = useCallback(() => {
+    setIsCommandPaletteOpen(true);
+  }, []);
 
-  useEffect(() => {
-    localStorage.setItem(SERVER_KEY, server);
-  }, [server]);
+  useCommandPaletteHotkey(handleOpenCommandPalette);
+
+  // TODO: Compute aggregate cluster health from physical+logical trees.
+  const clusterHealth = 'Healthy' as const;
 
   return (
-    <div className="min-h-full flex flex-col">
-      <header className="border-b border-border px-6 py-3 flex items-center gap-4 bg-panel">
-        <h1 className="text-accent text-base font-bold tracking-wide">CrowKV Console</h1>
-        <nav className="flex gap-1 ml-4">
-          {TABS.map((t) => (
-            <button
-              key={t.id}
-              className={`tab ${tab === t.id ? "tab-active" : "text-text/70 hover:text-text"}`}
-              onClick={() => {
-                if (t.id === "swagger") {
-                  window.open("/api/swagger/", "_blank");
-                  return;
-                }
-                setTab(t.id);
-              }}
-            >
-              {t.label}
-            </button>
-          ))}
-        </nav>
-        <div className="ml-auto flex items-center gap-2">
-          <label htmlFor="server" className="text-sm text-text/70">
-            Server:
-          </label>
-          {custom ? (
-            <input
-              id="server"
-              className="input w-80"
-              placeholder="http://127.0.0.1:9910"
-              value={server}
-              onChange={(e) => setServer(e.target.value)}
-              spellCheck={false}
-            />
-          ) : (
-            <select
-              id="server"
-              className="input w-80"
-              value={server}
-              onChange={(e) => {
-                if (e.target.value === CUSTOM) {
-                  setCustom(true);
-                  setServer("");
-                } else {
-                  setServer(e.target.value);
-                }
-              }}
-            >
-              <option value="">(default — first registered)</option>
-              {registered.map((s) => (
-                <option key={s.id} value={s.url}>
-                  {s.id} — {s.url}
-                </option>
-              ))}
-              <option value={CUSTOM}>(custom URL…)</option>
-            </select>
-          )}
-          {custom && (
-            <button className="btn" onClick={() => setCustom(false)}>
-              use registered
-            </button>
-          )}
-          <button className="btn" title="Reload server list" onClick={() => void reloadServers()}>
-            ↻
-          </button>
-        </div>
-      </header>
+    <div className="tw-min-h-screen tw-bg-bg tw-text-text crowkv-console">
+      <Header
+        brandLogo={brandLogo}
+        clusterHealth={clusterHealth}
+        lastRefreshTime={lastRefreshTime}
+        onRefresh={handleRefresh}
+        nodes={nodes.map(node => ({ id: node.id, host: node.host }))}
+        selectedNodeId={selectedNodeId}
+        onNodeSelect={setSelectedNodeId}
+        onOpenCommandPalette={handleOpenCommandPalette}
+      />
 
-      <main className="flex-1 px-6 py-4 overflow-auto">
-        {tab === "snapshot" && <SnapshotTab server={server} />}
-        {tab === "racks" && <RacksTab />}
-        {tab === "nodes" && <NodesTab />}
-        {tab === "servers" && <ServersTab onChange={() => void reloadServers()} />}
-        {tab === "stores" && <StoresTab server={server} />}
-        {tab === "kv" && <KvTab server={server} />}
-      </main>
+      <div className="tw-flex">
+        <Sidebar racks={racks} stores={stores} loading={loading} onNodeClick={handleNodeClick} />
 
-      <footer className="border-t border-border px-6 py-2 text-xs text-text/50">
-        crowkv-web · React + Vite · {server ? `target=${server}` : "no server set (uses backend default)"}
-      </footer>
+        <main className="tw-flex-1 tw-ml-64 tw-mt-14 tw-min-h-[calc(100vh-3.5rem)] tw-h-[calc(100vh-3.5rem)]">
+          <Suspense fallback={<CanvasFallback />}>
+            <TopologyCanvas racks={racks} nodes={nodes} stores={stores} />
+          </Suspense>
+        </main>
+      </div>
+
+      <Suspense fallback={null}>
+        <Inspector
+          customPanels={customPanels}
+          customActions={customActions}
+          apiPrefix={apiPrefix}
+          onEvent={onEvent}
+          nodes={nodes}
+          stores={stores}
+        />
+      </Suspense>
+
+      {isCommandPaletteOpen && (
+        <Suspense fallback={null}>
+          <CommandPalette
+            isOpen={isCommandPaletteOpen}
+            onClose={() => setIsCommandPaletteOpen(false)}
+            racks={racks}
+            nodes={nodes}
+            stores={stores}
+            onRefresh={handleRefresh}
+          />
+        </Suspense>
+      )}
+
+      <ToastContainer />
     </div>
+  );
+}
+
+function CanvasFallback() {
+  return (
+    <div className="tw-w-full tw-h-full tw-flex tw-items-center tw-justify-center tw-text-muted tw-text-sm">
+      Loading topology...
+    </div>
+  );
+}
+
+export default function App(props: CrowkvConsoleProps = {}) {
+  return (
+    <ThemeProvider initialThemeMode={props.themeMode}>
+      <ViewModeProvider initialViewMode={props.initialViewMode}>
+        <SelectionProvider>
+          <ToastProvider>
+            <ActivityProvider>
+              <AppContent {...props} />
+            </ActivityProvider>
+          </ToastProvider>
+        </SelectionProvider>
+      </ViewModeProvider>
+    </ThemeProvider>
   );
 }

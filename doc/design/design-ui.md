@@ -32,43 +32,101 @@ The build output is the existing `web/ui/dist/` tree consumed by
 
 ## 3. Information Architecture
 
-The SPA is a **single page with a fixed three-pane shell**:
+The SPA is a **single page with a fixed three-pane shell**, and every
+data-bearing region (sidebar tree, topology canvas, inspector) is
+driven by a **view-mode toggle** that selects either the *physical*
+or the *logical* hierarchy from `design/design-console.md` §3.
 
 ```
-┌─ Header ─────────────────────────────────────────────────────────┐
-│ brand · cluster health pill · last-refresh · refresh · ⋯ menu     │
-├─ Sidebar ──┬─ Canvas / Detail body ─────────┬─ Inspector ────────┤
-│ Hierarchy  │                                │ Selection details  │
-│ tree       │ React Flow topology  *or*      │ Metrics            │
-│ + search   │ active feature panel:          │ KV browser         │
-│            │   Snapshot · Racks · Nodes ·   │ Activity log       │
-│            │   Servers · Stores · KV ·      │                    │
-│            │   Swagger                      │                    │
-└────────────┴────────────────────────────────┴────────────────────┘
+┌─ Header ────────────────────────────────────────────────────────────┐
+│ brand · cluster health pill · view-mode toggle (Physical/Logical) · │
+│ last-refresh · refresh · node selector (Swagger only) · ⋯ menu      │
+├─ Sidebar ──┬─ Canvas / Detail body ─────────┬─ Inspector ───────────┤
+│ Hierarchy  │ React Flow topology canvas     │ Selection details     │
+│ tree for   │   rendered in the active       │ (shape depends on the │
+│ the active │   view-mode  *or*              │ active view-mode and  │
+│ view-mode  │ active feature panel:          │ selection)            │
+│ + search   │   Physical: Racks · Nodes ·    │ Metrics               │
+│            │             Servers ·          │ KV browser            │
+│            │             NodeInspect        │ Activity log          │
+│            │   Logical : Stores · Groups ·  │                       │
+│            │             Replicas · KV      │                       │
+│            │   Shared  : Swagger ·          │                       │
+│            │             Activity           │                       │
+└────────────┴────────────────────────────────┴───────────────────────┘
 ```
 
-- **Header** (fixed, ~56 px): brand, cluster health pill, last snapshot
-  timestamp, manual-refresh button, server selector, overflow menu
-  (theme toggle, Swagger panel toggle, About).
-- **Sidebar** (collapsible, ~240 px): hierarchy tree backed by the latest
-  snapshot. Selecting a node reflects in the inspector.
-- **Body**: a tabbed feature surface. The default tab is the React Flow
-  topology canvas; subsequent tabs are the existing feature panels
-  (Racks, Nodes, Servers, Stores, KV, Swagger). The Swagger tab is an
-  in-page panel — it does **not** open a new browser tab (this is the
-  primary correction from the v1 implementation).
+- **Header** (fixed, ~56 px):
+  - Left: customisable brand logo, cluster health pill (with optional
+    timeline dropdown showing health history), **view-mode toggle**
+    (Physical ⇄ Logical, persisted in `localStorage`),
+  - Center: breadcrumb trail showing the full hierarchy path of the current
+    selection, with clickable parent links,
+  - Right: last refresh timestamp, manual-refresh button, *node selector*
+    (consumed **only** by the Swagger panel), command palette trigger
+    button, overflow menu (theme toggle: light/dark/system, export options,
+    About).
+- **Command Palette**: A global, keyboard-first modal accessible via
+  `Cmd/Ctrl+K` or the header button. It uses fuzzy search over all entities
+  and actions, with keyboard navigation (arrow keys to select, Enter to
+  activate, Escape to close). Results are grouped by category (Entities,
+  Actions, Views) for scannability.
+- **Sidebar** (collapsible, ~240 px):
+  - Top: search/filter input for the hierarchy tree, with filter options
+    (status, role) in a dropdown.
+  - Favorites section: pinned entities (cross-view, persisted in
+    `localStorage`), with a "remove from favorites" action on hover.
+  - Recent items section: last 10 accessed entities, with a "clear recent"
+    action.
+  - Hierarchy tree of the active view-mode:
+    - Physical: `Rack → Node → Server → PxStore → PxGroup →
+      { Local, Remote… }`. Local and Remote replicas render with
+      distinct glyphs so a mis-wired peer is visible at a glance.
+    - Logical: `Cluster → Store → Group → Replica…` with each replica
+      rendered as a single row badged by `node_id`.
+    - Tree items support multi-selection via `Ctrl/Cmd+click` for bulk
+      operations.
+  - Selecting any row drives both the topology canvas (focus / fit
+    into view) and the inspector.
+- **Body**: a tabbed feature surface. The default tab is the topology
+  canvas; the remaining tabs are partitioned by which view they
+  belong to (see §5.2 / §5.3 below). Switching view-mode swaps the
+  tab strip; the canvas tab is always present in both modes. The
+  Swagger and Activity tabs are view-mode-agnostic.
 - **Inspector** (collapsible, ~320 px): contextual detail of the
-  currently selected entity, with KV operations available when a Group
-  is selected.
+  current selection. In the **physical** view, a `PxGroup` selection
+  surfaces the full `local` + `remotes` split with reachability
+  flags; in the **logical** view, a `Group` selection surfaces the
+  unified replica list and the leader hint, and exposes KV
+  operations.
 
 The shell is implemented once and never re-rendered when feature tabs
-change; only the body region swaps.
+or the view-mode change; only the body region and the sidebar's tree
+data swap. View-mode is held in a single root-level context so every
+descendant can react to it consistently.
+
+### 3.1 Cross-jumping between views
+
+The two views describe the same entities and must remain navigable
+in both directions in one click:
+
+- From a logical `Replica` → "Show on node" jumps to physical view,
+  expands the owning `Node → Server → PxStore → PxGroup`, and selects
+  the corresponding `LocalReplica`.
+- From a physical `LocalReplica` (or `RemoteReplica`) → "Show in
+  cluster" jumps to logical view, expands the owning `Store → Group`,
+  and selects the unified `Replica` row sharing the same
+  `replica_id`.
+- From any physical `PxGroup` → "Show logical group" jumps to the
+  logical `Group` view for the same `(store_id, group_id)`.
+- These jumps preserve the current selection in a small navigation
+  stack so "Back" returns to the originating view.
 
 ## 4. Visual Language
 
 ### 4.1 Theme tokens
 The palette is exposed as CSS variables under a `.crowkv-console` scope
-so that hosts can override them through the `theme` mount prop.
+so that hosts can override them through the `theme` mount prop. A `--brand-accent` token is added for custom host branding, which overrides `--accent` when supplied.
 
 | Token | Default (dark) | Use |
 | --- | --- | --- |
@@ -77,15 +135,22 @@ so that hosts can override them through the `theme` mount prop.
 | `--border` | `#374151` | Dividers |
 | `--text` | `#f9fafb` | Primary text |
 | `--muted` | `#9ca3af` | Secondary text |
-| `--accent` | `#3b82f6` | Brand / interactive emphasis |
+| `--accent` | `#3b82f6` | Default interactive emphasis |
+| `--brand-accent` | `inherit (uses --accent | Host custom brand color |
 | `--healthy` | `#10b981` | Healthy / leader-ok |
 | `--degraded` | `#f59e0b` | Degraded |
 | `--failed` | `#ef4444` | Failed |
 | `--unknown` | `#6b7280` | Unknown |
 | `--remote` | `#8b5cf6` | Remote replica accent |
+| `--shadow-sm` | `0 1px 2px 0 rgb(0 0 0 / 0.05)` | Subtle depth |
+| `--shadow-md` | `0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1)` | Panel depth |
+| `--shadow-lg` | `0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1)` | Modals/toasts |
 
-A light theme ships as a token override; the user toggle persists in
-`localStorage`. The host's `theme` prop, when supplied, takes priority.
+Themes:
+- Light theme ships as a complete token override;
+- System theme detection is enabled by default (auto-switches based on `prefers-color-scheme`);
+- User theme selection (light/dark/system) persists in `localStorage`;
+- The host's `theme` prop, when supplied, takes priority over all defaults.
 
 ### 4.2 Status semantics
 
@@ -95,61 +160,160 @@ A light theme ships as a token override; the user toggle persists in
 | `Degraded` | dashed border | slow pulse (~1.5 s) |
 | `Failed` | thick border (2 px) | fast blink (~0.5 s), opt-out via "reduce motion" |
 | `Unknown` | thin border, muted icon | none |
-| `Leader` | solid border + crown badge + glow | slow pulse |
+| `Leader` | solid border + crown badge + soft glow | slow pulse |
 | `Follower (local)` | solid border | none |
 | `Remote replica` | dashed border, `--remote` accent | none |
+| `Selected` | 2px `--brand-accent` border, subtle elevation | fast scale-in transition on selection |
 
 Animations respect `prefers-reduced-motion`; embedding hosts can disable
 all animation through the theme contract.
 
 ### 4.3 Typography
 System sans (Inter / Roboto / system-ui fallback). Title 20 px / 700,
-section 14 px / 600, body 14 px / 400, meta 12 px / 400 in `--muted`.
+section 14 px / 600, body 14 px / 400, meta 12 px / 400 in `--muted`. All text uses 1.5 line height for readability.
+
+### 4.4 Motion Design
+Subtle, purposeful animations are used throughout to provide feedback and guide attention:
+- **State transitions**: 200ms ease transitions for all state changes (selection, hover, view mode switch, panel expansion)
+- **Micro-interactions**: Hover effects on all interactive elements (scale 1.02, subtle shadow), press effects (scale 0.98)
+- **Toast notifications**: Slide-in from the bottom-right corner, 4s auto-dismiss (persist for errors)
+- **Canvas updates**: Smooth position transitions when nodes are added/removed or layout changes, to avoid jarring jumps
+
+### 4.5 Toast Notification System
+Unobtrusive toast notifications are used for operation feedback:
+- Stacked in the bottom-right corner, 4s auto-dismiss for success/info, persistent for errors until manually dismissed
+- Include an action button to jump directly to the activity log for full details
+- Support different styles: success (green accent), error (red accent), info (blue accent), warning (orange accent)
+- Support keyboard navigation (Tab to focus action, Escape to dismiss all)
 
 ## 5. Topology Canvas (React Flow)
 
-### 5.1 Custom node types
+The canvas renders one of **two layouts** at a time, selected by the
+header's view-mode toggle. Each layout uses its own node types and
+its own edge semantics, so the operator's mental model never has to
+"translate" between physical and logical at the same time.
+
+### 5.1 Physical layout (deployment view)
+
+Reads `Rack → Node → Server → PxStore → PxGroup → {Local, Remote…}`
+from the physical tree (`design-console.md` §6.3, with `?recursive=`
+as needed). Parent-child containment is used wherever it reads well:
+Racks contain their Nodes; each Node contains its (optional) Server;
+each Server contains its `PxStore`s and `PxGroup`s.
 
 | Layer | Shape | Required content | Status surface |
 | --- | --- | --- | --- |
 | Rack | Wide rounded rectangle, container | Rack id, name, child node count | summary of children |
-| Node | Rectangle | Node id, host, SSH state | per-node status |
-| Server Instance | Rectangle | Server id, mgmt URL, PID | server lifecycle state |
-| Store | Compact pill | Store id, listen addr, group count | store status |
-| Group | Compact pill | Group id, leader hint, replica count | leader / quorum status |
-| Replica | Circle | Short replica id | local-vs-remote, health |
+| Node | Rectangle, container | Node id, host, SSH state | per-node status |
+| Server | Rectangle | mgmt port, gRPC port, PID, `ProcState` | server lifecycle state |
+| PxStore | Compact pill (inside Server) | Store id, group count | per-node store status |
+| PxGroup | Compact pill (inside PxStore) | Group id, leader hint, replica count | leader / quorum status |
+| LocalReplica | Filled circle | Short replica id, role | health, leader badge |
+| RemoteReplica | Hollow circle, `--remote` accent | Short replica id, peer `node_id`, `reachable` flag | health, reachability |
 
-Hierarchy is rendered with parent-child containment where it reads well
-(Rack contains Nodes; Group surfaces its replicas as adjacent satellites
-linked by edges). React Flow's auto-layout is run once on data changes
-and again on user-initiated "auto layout" actions.
+Edges:
 
-### 5.2 Interactions
-- Click selects; selection drives the inspector and the sidebar tree.
-- `Ctrl/Cmd`-click multi-selects within a layer.
+- A solid edge connects each `RemoteReplica` glyph on a Node to the
+  matching `LocalReplica` on the peer Node. These edges are the
+  **visual representation of the per-node remote list**: a missing
+  edge is exactly the bug the physical view exists to surface.
+- The current leader replica radiates accent-colored edges to all
+  followers in the same group.
+
+### 5.2 Logical layout (usage view)
+
+Reads `Cluster → Store → Group → Replica…` from the logical tree
+(`design-console.md` §6.4). Replicas are rendered as a single
+unified ring around each Group; `node_id` is a badge on the replica
+glyph rather than a separate hierarchy level.
+
+| Layer | Shape | Required content | Status surface |
+| --- | --- | --- | --- |
+| Cluster | Outermost frame | Cluster name, store count, aggregate health | aggregate roll-up |
+| Store | Wide rounded rectangle, container | Store id, name, member-node count | store health |
+| Group | Compact pill (inside Store) | Group id, leader `replica_id`, `GroupHealth` | leader / quorum |
+| Replica | Filled circle with `node_id` badge | Short replica id, role, state | health, leader badge |
+
+Edges:
+
+- The leader replica radiates accent edges to its followers (same
+  visual as the physical leader, but no local-vs-remote distinction).
+- No remote-list edges exist in this layout; mis-wirings are only
+  visible by switching to the physical layout.
+
+### 5.3 Auto-layout and interactions
+
+- **Layout options**: Users can select between three auto-layout modes, persisted per view-mode in `localStorage`:
+  - Force-directed (default): Balanced layout for most cluster sizes, groups related entities together
+  - Hierarchical: Tree-like layout that strictly follows the parent-child containment hierarchy
+  - Grid: Compact grid layout for large clusters with many similar entities
+- React Flow's auto-layout runs once on data changes and again on
+  user-initiated "auto layout" actions. Each view-mode keeps its own
+  saved viewport (pan/zoom) so toggling between views does not lose
+  the user's place.
+- **Search & highlight**: A canvas search input in the topology controls lets users search for entities by ID/name; matching entities are highlighted with a pulsing border and automatically centered in the viewport.
+- **Focus mode**: A toggle in the canvas controls hides all entities except the current selection and its direct peers/connections, simplifying debugging of specific groups or replication issues.
+- **Edge labels**: A toggle in the canvas controls shows/hides metrics labels on replication edges (replication lag, throughput, last heartbeat time). Labels are positioned to avoid overlapping nodes.
+- Click selects; selection drives the inspector and the sidebar tree
+  in the active view. The selection is **translated** when the user
+  toggles view-mode (see §3.1 cross-jumps) — selecting a logical
+  `Replica` then toggling to Physical lands on its `LocalReplica`.
+- `Ctrl/Cmd`-click multi-selects within a layer for bulk operations; selected entities show a common selection border.
 - Right-click opens a context menu whose actions are exactly the
-  per-layer mutations from the requirement (`requirement-ui.md` §3.2,
-  §3.3). Disabled actions show a tooltip explaining why.
-- Drag pans; wheel zooms; mini-map and "fit view" controls in a corner.
-- Tooltips on hover surface the most useful single fact (host, mgmt
-  URL, leader id) without forcing the user to open the inspector.
+  per-layer mutations from the requirement: physical actions come
+  from `requirement-ui.md` §3.2 (hardware lifecycle), logical actions
+  from §3.3 (cluster management), plus any custom actions injected by the embedding host. The menu shown is the menu for the
+  active view-mode; disabled actions show a tooltip explaining why.
+- Drag pans; wheel zooms; mini-map, fit view, layout selector, search, focus mode, and edge label controls in a floating corner toolbar.
+- Tooltips on hover surface the most useful single fact (host, leader
+  id, peer reachability, replication lag) without forcing the user to open the
+  inspector.
+- Export controls: A dropdown in the canvas toolbar allows exporting the current view as SVG or PNG, with options to include/exclude labels, edges, and status indicators.
 
 ## 6. Inspector Panel
 
-A four-tab inspector that re-renders against the current selection:
+A four-tab inspector that re-renders against the current selection.
+What the tabs show depends on the active view-mode (because the
+underlying API shapes differ — see `design-console.md` §3 and §6).
+Custom metrics panels injected by the embedding host are appended as additional tabs.
 
-1. **Details** — labelled key/value table sourced from the snapshot.
-   Long values support copy-to-clipboard.
-2. **Metrics** — Recharts line/area charts for the metrics that
-   `ClusterSnapshot` exposes today (key count, RPC rates, replica RTT,
-   etc.). The chart series is held in memory, sampled per snapshot
-   poll, capped at a fixed window.
-3. **KV** — only enabled when a Group is selected. Wraps `kvGet`,
-   `kvScan`, `kvPut`, `kvDelete` from `web/ui/src/api.ts`. Confirms
-   destructive operations.
+1. **Details** — labelled key/value table.
+   - Physical selection: fields from the physical tree —
+     `Rack { id, name, nodes }`, `Node { id, host, ssh, server? }`,
+     `ServerProcess { mgmt_url, grpc_url, pid, state, health }`,
+     `NodeStore { groups }`, `NodeGroup { local, remotes,
+     leader_hint }`, `LocalReplicaInfo`, `RemoteReplicaInfo {
+     replica_id, node_id, reachable }`. Long values support
+     copy-to-clipboard.
+   - Logical selection: fields from the logical tree —
+     `StoreView { nodes, groups }`, `GroupView { leader, replicas,
+     state }`, `ReplicaView { replica_id, node_id, role, state }`.
+   - A footer row always shows the **cross-jump link** to the same
+     entity in the other view (§3.1), plus an "Add to favorites" toggle.
+   - Export dropdown in the tab header allows exporting the current entity's details as JSON.
+2. **Metrics** — Recharts line/area charts driven by per-resource
+   live reads (no `ClusterSnapshot`). The chart series is held in
+   memory, sampled per polling tick, capped at a fixed window (1 hour default). Series
+   are pulled from whichever endpoint matches the selection: per-node
+   liveness for physical selections, per-group leader / quorum stats
+   for logical selections.
+   - Time range selector in the tab header allows adjusting the window (15m / 1h / 6h / 1d).
+   - Export dropdown allows exporting metrics data as CSV.
+3. **KV** — only enabled when a **logical** `Group` is selected.
+   Wraps `kvGet`, `kvScan`, `kvPut`, `kvDelete` against
+   `/api/stores/:s/groups/:g/kv/...`. Confirms destructive
+   operations. KV is intentionally *not* offered for a physical
+   `PxGroup` selection: KV is a cluster-wide concept and the backend
+   resolves the leader from the logical view's monitor cache.
+   - Filter/sort controls for scan results (filter by key prefix, sort by key/value size).
+   - Export dropdown allows exporting scan results as JSON or CSV.
 4. **Activity** — chronological list of UI-issued operations with
    timestamp, action, target, outcome. v1 keeps this client-side only;
    a future revision can persist it on the backend.
+   - Filter controls to show only operations for the current selection, or all operations.
+   - Export dropdown allows exporting the activity log as CSV.
+
+Custom panels injected by the embedding host are rendered after the default tabs, with their own tab labels and content. Each custom panel receives the current selection, polling data, and `apiPrefix` as props.
 
 ## 7. Embedded Swagger Panel
 
@@ -180,13 +344,54 @@ interface CrowkvConsoleProps {
   basePath?: string;           // default "/"
   readonly?: boolean;          // default false
   modules?: Partial<Record<
-    "snapshot" | "racks" | "nodes" | "servers" |
-    "stores" | "kv" | "swagger" | "activity",
+    // Physical-tree panels
+    "racks" | "nodes" | "nodeInspect" |
+    // Logical-tree panels
+    "stores" | "groups" | "replicas" | "kv" |
+    // View-mode-agnostic panels
+    "swagger" | "activity",
     boolean
   >>;
-  theme?: ThemeOverride;       // CSS-variable overrides
-  initialServer?: string;      // mgmt URL of an upstream crowkv-server
+  theme?: ThemeOverride;       // CSS-variable overrides, including --brand-accent
+  initialViewMode?: "physical" | "logical"; // default "logical"
+  initialNodeId?: string;      // pre-selects a node for the Swagger panel
   onEvent?: (event: ConsoleEvent) => void; // structured op log fan-out
+
+  // New embedding features
+  brandLogo?: React.ReactNode; // Custom logo to replace the default CrowKV logo in the header
+  themeMode?: "light" | "dark" | "system"; // Initial theme mode, defaults to "system"
+  customActions?: CustomAction[]; // Custom context menu and inspector actions
+  customPanels?: CustomPanel[]; // Custom inspector panels injected by the host
+}
+
+// Custom action definition
+interface CustomAction {
+  id: string;
+  label: string;
+  icon?: React.ReactNode;
+  // Which entity types this action applies to
+  appliesTo: ("rack" | "node" | "server" | "store" | "group" | "replica")[];
+  // Which view modes this action is available in
+  viewModes?: ("physical" | "logical")[];
+  // Whether to show in context menu, inspector, or both
+  placement?: ("contextMenu" | "inspector" | "both")[];
+  // Disabled state callback
+  isDisabled?: (entity: Entity) => boolean;
+}
+
+// Custom panel definition
+interface CustomPanel {
+  id: string;
+  label: string;
+  // Which entity types this panel applies to
+  appliesTo: ("rack" | "node" | "server" | "store" | "group" | "replica")[];
+  // React component to render as the panel content
+  component: React.ComponentType<{
+    entity: Entity;
+    viewMode: "physical" | "logical";
+    apiPrefix: string;
+    pollingData: any;
+  }>;
 }
 ```
 
@@ -239,51 +444,89 @@ standalone build) and is consumed **only** by the Swagger panel; every
 other panel operates on logical ids.
 
 ### 9.2 Polling
-- A single root data hook owns the cluster snapshot, the registered
-  server list, and a derived selection map keyed by entity id.
-- Polling cadence is configurable; default ~5 s. Polling pauses while
-  the tab is hidden (`document.visibilityState`) and resumes on focus.
-- A poll failure surfaces a non-blocking banner ("backend unreachable —
-  retrying"); the previous snapshot stays visible, marked stale.
-- Per-tab data (rack list, node list, server list) is fetched on tab
-  entry and refreshed against the same polling tick to avoid lag with
-  the snapshot view.
-- Mutations call the backend, await success, then trigger a snapshot
-  refresh; they do not hand-edit the cached snapshot.
+- There is **no aggregate snapshot endpoint**. The SPA owns two
+  root-level data hooks, one per view:
+  - `usePhysicalTree()` polls `GET /api/racks?recursive=all` (capped
+    by the backend, see `design-console.md` §6.5) for the
+    physical layout.
+  - `useLogicalTree()` polls `GET /api/stores?recursive=all` for the
+    logical layout.
+  Both hooks publish their results into a shared selection map keyed
+  by entity id so cross-jumps (§3.1) resolve in O(1).
+- Only the hook for the **active** view-mode polls on the fast
+  cadence; the other hook continues to poll on a slower keep-alive
+  cadence so view-mode toggles render immediately.
+- Polling cadence is configurable; default ~5 s active / ~30 s
+  background. Polling pauses while the tab is hidden
+  (`document.visibilityState`) and resumes on focus.
+- A poll failure surfaces a non-blocking banner ("backend unreachable
+  — retrying"); the previous tree stays visible, marked stale.
+- Mutations call the backend, await success, then trigger a targeted
+  refresh of the affected sub-tree (the backend's monitor cache is
+  already refreshed by `design-console.md` §6.6); they do not
+  hand-edit cached data.
 
 ## 10. Module Layout (`crowkv-console/web/ui/src/`)
+
+Modules are organised by **view-mode** so that the two-view contract
+is reflected in the source tree, not just at runtime.
 
 ```
 src/
   index.tsx                  // standalone mount
   embed.ts                   // <CrowkvConsole /> export for hosts
   shell/
-    Header.tsx
-    Sidebar.tsx
-    Inspector.tsx
-    ThemeProvider.tsx
+    Header.tsx               // brand logo, health pill (with timeline dropdown), view-mode toggle, breadcrumbs, refresh, command palette trigger, node selector, overflow menu
+    Sidebar.tsx              // favorites, recent items, search/filter input, delegates to physical/Tree or logical/Tree
+    Inspector.tsx            // delegates to physical/Inspector or logical/Inspector, renders custom host panels
+    CommandPalette.tsx       // global Cmd/Ctrl+K modal with fuzzy search
+    ToastContainer.tsx       // global toast notification container
+    ViewModeContext.tsx      // root-level Physical | Logical context
+    ThemeProvider.tsx        // theme mode management (light/dark/system)
+    SelectionContext.tsx     // multi-selection state management for bulk operations
   topology/
-    TopologyCanvas.tsx
-    nodes/{Rack,Node,Server,Store,Group,Replica}Node.tsx
-    layout.ts
+    TopologyCanvas.tsx       // switches on view-mode, includes floating toolbar (layout selector, search, focus mode, edge labels, export)
+    layout.ts                // layout algorithm implementations (force-directed, hierarchical, grid)
+    physical/
+      PhysicalLayout.tsx
+      nodes/{Rack,Node,Server,PxStore,PxGroup,LocalReplica,RemoteReplica}Node.tsx
+    logical/
+      LogicalLayout.tsx
+      nodes/{Cluster,Store,Group,Replica}Node.tsx
+    EdgeLabel.tsx            // reusable edge label component for metrics
   panels/
-    SnapshotTab.tsx
-    RacksTab.tsx             // physical tree, recursive=1 to inline children
-    NodesTab.tsx             // physical tree; server lifecycle lives here
-    StoresTab.tsx            // logical tree; multi-node create form
-    GroupsTab.tsx            // logical tree; subset-of-store-nodes create
-    ReplicasTab.tsx          // logical add/remove; inspect opens physical detail
-    KvPanel.tsx              // logical (store_id, group_id) only; no server selector
-    SwaggerPanel.tsx         // iframe /api/swagger/?url=/api/nodes/:n/openapi.json
-    ActivityLog.tsx
+    physical/
+      RacksTab.tsx           // GET /api/racks?recursive=1
+      NodesTab.tsx           // GET /api/nodes; server lifecycle lives here, bulk operations
+      NodeInspectTab.tsx     // GET /api/nodes/:n/stores/:s/groups/:g (local+remotes)
+    logical/
+      StoresTab.tsx          // POST /api/stores with member-node list, bulk operations
+      GroupsTab.tsx          // POST /api/stores/:s/groups with node subset, bulk operations
+      ReplicasTab.tsx        // unified add/remove; "inspect" → NodeInspectTab, bulk operations
+      KvPanel.tsx            // /api/stores/:s/groups/:g/kv/*; no node selector, filter/sort controls
+    shared/
+      SwaggerPanel.tsx       // /api/swagger/?url=/api/nodes/:n/openapi.json
+      ActivityLog.tsx        // filter controls, export functionality
+  components/
+    FilterControls.tsx       // reusable filter/sort component for lists
+    ExportDropdown.tsx       // reusable export dropdown with format options
+    BulkActionDialog.tsx     // confirmation dialog for bulk operations
+    Breadcrumbs.tsx          // reusable breadcrumb component
   data/
-    api.ts                   // existing thin wrappers
-    useSnapshot.ts
-    useRegistry.ts
-    selection.ts
+    api.ts                   // physical-tree + logical-tree URL builders, export endpoints
+    usePhysicalTree.ts       // GET /api/racks?recursive=all polling
+    useLogicalTree.ts        // GET /api/stores?recursive=all polling
+    crossJump.ts             // physical↔logical id resolution (§3.1)
+    selection.ts             // shared selection map, multi-selection state
+    favorites.ts             // favorites/recent items persistence
+    commandPaletteActions.ts // command palette search index and action definitions
+  lib/
+    exportUtils.ts           // SVG/PNG/CSV/PDF export utilities
+    fuzzySearch.ts           // fuzzy search implementation for command palette and tree filters
   styles/
     tokens.css
     tailwind.css
+    animations.css           // motion design keyframes and transition classes
 ```
 
 The current flat `components/*Tab.tsx` layout is the v1 structure and
@@ -310,5 +553,14 @@ SPA fallback still serves `index.html` for unknown routes.
   needs it, expose `onEvent` (the embedding callback) and let the host
   persist.
 - **Per-component metrics retention**: currently in-memory only;
-  acceptable for a console, but a "save to file" affordance may be
-  needed for demos.
+  acceptable for a console, with export to file available for demos.
+- **Command palette performance**: For very large clusters (> 1000 entities),
+  we need to ensure fuzzy search remains responsive. We may need to add
+  pagination or incremental search if this becomes an issue.
+- **Export file size limits**: For very large KV datasets or long activity logs,
+  we may need to add streaming exports or size limits to avoid browser memory
+  issues.
+- **Custom panel isolation**: We need to ensure custom host panels don't leak
+  styles or break the console's internal state. We may need to wrap custom
+  panels in a shadow DOM or isolate their React context if security concerns
+  arise.

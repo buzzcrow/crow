@@ -6,7 +6,8 @@ use crate::utils::{client::console_client, print_json};
 use crate::Cli;
 
 #[derive(Subcommand, Debug)]
-pub enum PaxosVerb {
+#[command(name = "group")]
+pub enum GroupVerb {
     /// Add a Paxos group to an existing store. The console
     /// orchestrates the per-node `PxGroup` creation across `--nodes`
     /// and wires bidirectional remote-replica entries.
@@ -43,13 +44,13 @@ pub enum PaxosVerb {
     },
 }
 
-pub async fn run_paxos_verb(cli: &Cli, verb: PaxosVerb) -> ExitCode {
+pub async fn run_group_verb(cli: &Cli, verb: GroupVerb) -> ExitCode {
     let client = match console_client(cli) {
         Ok(c) => c,
         Err(c) => return c,
     };
     match verb {
-        PaxosVerb::Add {
+        GroupVerb::Add {
             store_id,
             group_id,
             replica_id,
@@ -74,7 +75,7 @@ pub async fn run_paxos_verb(cli: &Cli, verb: PaxosVerb) -> ExitCode {
                 }
             }
         }
-        PaxosVerb::Remove { store_id, group_id } => match client.remove_group(store_id, group_id).await {
+        GroupVerb::Remove { store_id, group_id } => match client.remove_group(store_id, group_id).await {
             Ok(()) => {
                 println!("removed group {group_id} from store {store_id}");
                 ExitCode::SUCCESS
@@ -84,7 +85,7 @@ pub async fn run_paxos_verb(cli: &Cli, verb: PaxosVerb) -> ExitCode {
                 ExitCode::from(2)
             }
         },
-        PaxosVerb::List { store_id } => match client.list_groups(store_id).await {
+        GroupVerb::List { store_id } => match client.list_groups(store_id).await {
             Ok(groups) => {
                 if cli.json {
                     return print_json(&groups);
@@ -104,7 +105,7 @@ pub async fn run_paxos_verb(cli: &Cli, verb: PaxosVerb) -> ExitCode {
                 ExitCode::from(2)
             }
         },
-        PaxosVerb::Inspect { store_id, group_id } => match client.get_group(store_id, group_id).await {
+        GroupVerb::Inspect { store_id, group_id } => match client.get_group(store_id, group_id).await {
             Ok(view) => {
                 if cli.json {
                     return print_json(&view);

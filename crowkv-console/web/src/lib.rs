@@ -14,6 +14,7 @@ pub mod kv;
 pub mod lifecycle;
 pub mod mgmt;
 pub mod physical;
+pub mod physical_view;
 pub mod spa;
 pub mod state;
 

@@ -15,9 +15,9 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use commands::{
-    run_bench_verb, run_cluster_status, run_cluster_topology, run_kv_verb, run_node_verb, run_paxos_verb, run_rack_verb, run_replica_verb, run_server_verb, run_store_verb,
+    run_bench_verb, run_cluster_status, run_cluster_topology, run_group_verb, run_kv_verb, run_node_verb, run_rack_verb, run_replica_verb, run_server_verb, run_store_verb,
 };
-use commands::{BenchVerb, ClusterVerb, KvVerb, NodeVerb, PaxosVerb, RackVerb, ReplicaVerb, ServerVerb, StoreVerb};
+use commands::{BenchVerb, ClusterVerb, GroupVerb, KvVerb, NodeVerb, RackVerb, ReplicaVerb, ServerVerb, StoreVerb};
 
 #[derive(Parser, Debug)]
 #[command(name = "crowkv", version, about = "CrowKV cluster console (CLI)")]
@@ -29,8 +29,7 @@ struct Cli {
     console: String,
 
     /// **Deprecated**: pre-A12 verbs that still talk directly to a
-    /// single `crowkv-server` (`store`, `paxos`, `replica` legacy
-    /// remote-replica primitives) read this. New verbs (`kv`, the
+    /// single `crowkv-server` read this. New verbs (`kv`, the
     /// orchestrated `store`/`group`/`replica` plane) ignore it and
     /// use `--console` instead. Keep this flag until the legacy
     /// commands are migrated, then remove.
@@ -78,9 +77,10 @@ enum Group {
         verb: StoreVerb,
     },
     /// Paxos group management.
+    #[command(name = "group", alias = "paxos")]
     Paxos {
         #[command(subcommand)]
-        verb: PaxosVerb,
+        verb: GroupVerb,
     },
     /// Replica add/remove.
     Replica {
@@ -130,7 +130,7 @@ async fn dispatch(mut cli: Cli) -> ExitCode {
         Group::Node { verb } => run_node_verb(&cli, verb).await,
         Group::Server { verb } => run_server_verb(&cli, verb).await,
         Group::Store { verb } => run_store_verb(&cli, verb).await,
-        Group::Paxos { verb } => run_paxos_verb(&cli, verb).await,
+        Group::Paxos { verb } => run_group_verb(&cli, verb).await,
         Group::Replica { verb } => run_replica_verb(&cli, verb).await,
         Group::Kv { verb } => run_kv_verb(&cli, verb).await,
         Group::Bench { verb } => run_bench_verb(&cli, verb).await,

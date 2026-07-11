@@ -45,22 +45,69 @@ The UI surfaces every endpoint that `crowkv-web` already exposes
 the listed endpoint is the contract the UI is allowed to assume.
 
 ### 3.1 Cluster Observation
-- **Aggregated snapshot view** of all registered server instances, refreshed
-  on a configurable polling interval (default: a few seconds).
-  - API: `GET /api/cluster/snapshot`. The backend aggregates across the
-    registry — the SPA does **not** pass upstream URLs.
-- **Hierarchical view** of `Rack → Node → Server Instance → Store → Group →
-  Replica` derived from the snapshot. Local replicas, remote replicas, and
-  the current leader of each group must be visually distinguishable.
-- **Per-component status**: `Healthy / Degraded / Failed / Unknown` for
-  every node, server, store, group, replica.
-- **Cluster health summary** visible at all times (header / banner): an
-  at-a-glance answer to "is anything wrong?".
 
-### 3.2 Hardware Lifecycle
-The UI must drive the rack/node/server registry that `crowkv-web` persists
-in `~/.crowkv/console.toml`. Servers are **addressed by the hosting
-node** (one `crowkv-server` per node by console convention):
+The UI exposes **two hierarchy views** of the cluster, as defined
+normatively in `design/design-console.md` §3. Both views describe the
+same underlying entities but differ in viewpoint, and the UI must
+keep them **first-class** — a user must be able to switch between
+them, and never sees a single flattened tree that mixes the two.
+
+- **Physical (deployment) view** — rooted at **Rack → Node**:
+  `Rack → Node → Server → PxStore → PxGroup → { LocalReplica, RemoteReplica… }`.
+  Used to inspect what hardware exists, what is running on each node,
+  and how that node has wired its peers (the explicit local-vs-remote
+  split makes it the **debugging view**). Identity is the parent
+  chain `(rack_id, node_id, store_id, group_id, replica_id)`.
+- **Logical (usage) view** — rooted at **Cluster**:
+  `Cluster → Store → Group → Replica…` with a **unified** replica
+  list (each replica tagged with its `node_id`). Used for routine
+  cluster operations and KV traffic; identity is
+  `(store_id[, group_id[, replica_id]])`.
+
+The UI must:
+
+- Provide a **view-mode toggle** (Physical ⇄ Logical) that drives the
+  sidebar tree, the topology canvas, and the inspector simultaneously.
+  Cross-jumping (e.g. "show this logical replica's physical detail")
+  must be one click.
+- Refresh both views from the per-resource live endpoints on a
+  configurable polling interval (default: a few seconds). There is
+  **no aggregate `/api/cluster/snapshot`** — the SPA reads each tree
+  through its own per-resource endpoints, served from the backend's
+  monitor cache.
+- In the physical view, render **LocalReplica** and **RemoteReplica**
+  with distinct visual treatment so an operator can spot peer-list
+  mis-wirings at a glance. The current leader must also be
+  distinguishable.
+- In the logical view, render every replica in a single list with a
+  `node_id` badge; do not surface the local/remote split here.
+- Display **per-component status** (`Healthy / Degraded / Failed /
+  Unknown`) for every node, server, store, group, and replica in
+  whichever view is active.
+- Keep a **cluster health summary** visible at all times (header /
+  banner), independent of view-mode: an at-a-glance answer to "is
+  anything wrong?".
+- **Health history**: The cluster health summary includes an optional
+  timeline view showing health trends over the last 1 hour / 1 day
+  (configurable). The inspector's Metrics tab includes per-entity health
+  history for the same window.
+- **Topology enhancements**:
+  - Search/highlight functionality in the topology canvas: users can search
+    for an entity to have it centered and highlighted in the viewport
+  - Multiple layout options for the topology canvas: force-directed
+    (default), hierarchical, grid, with user selection persisted in
+    `localStorage`
+  - Focus mode: toggles visibility of all entities except the selected one
+    and its direct peers, for simplified debugging of specific groups
+  - Edge labels: replication edges between replicas show optional metrics
+    (replication lag, throughput) at a glance, toggleable via a canvas
+    control
+
+### 3.2 Hardware Lifecycle (Physical-tree operations)
+This section is the SPA's surface onto the **physical view** (§3.1).
+The UI must drive the rack/node/server registry that `crowkv-web`
+persists in `~/.crowkv/console.toml`. Servers are **addressed by the
+hosting node** (one `crowkv-server` per node by console convention):
 
 | Capability | Endpoints |
 | --- | --- |
@@ -77,11 +124,13 @@ Form input must validate against the same constraints the backend enforces
 (non-empty IDs, IP/host format, port range, SSH credential exclusivity)
 and surface server-side validation errors inline.
 
-### 3.3 Cluster Management
-The UI must drive the logical store/group/replica plane. Endpoints are
-rooted at `/api/stores/...`; the backend aggregates state from the
-monitor cache (§4.2 of `design-console.md`) and orchestrates writes
-via the per-node primitives under `/api/nodes/:n/stores/...`.
+### 3.3 Cluster Management (Logical-tree operations)
+This section is the SPA's surface onto the **logical view** (§3.1).
+The UI must drive the cluster-wide store/group/replica plane.
+Endpoints are rooted at `/api/stores/...`; the backend aggregates
+state from the monitor cache (§4.2 of `design-console.md`) and
+orchestrates writes via the per-node primitives under
+`/api/nodes/:n/stores/...`.
 
 | Capability | Endpoints |
 | --- | --- |
@@ -164,6 +213,58 @@ Concretely:
 - A view of recent UI-initiated operations (timestamp, action, target,
   outcome) must be reachable from the SPA. It is acceptable for this view
   to be backed entirely by client-side state for v1.
+- **Toast notifications**: Operation success/failure is shown via
+  unobtrusive toast notifications (stacked in a corner) instead of blocking
+  banners, with a dismiss action and a link to the activity log for details.
+- **Inline form validation**: All form inputs validate in real-time as the
+  user types, with clear error messages shown inline before the form is
+  submitted.
+- **Bulk operations**: The UI supports multi-selection of entities in the
+  sidebar tree and topology canvas, with bulk actions applicable to all
+  selected items (start/stop servers, delete replicas, add nodes to stores).
+  Bulk operations show a summary confirmation dialog before execution, and
+  report per-item success/failure in the activity log.
+
+### 3.8 Navigation & Productivity
+The UI must include productivity features to speed up common workflows for
+both new and power users:
+- **Command palette**: Accessible via `Cmd/Ctrl+K` global shortcut, allowing:
+  - Fuzzy search across all cluster entities (racks, nodes, stores, groups,
+    replicas) by ID or name
+  - Quick execution of common actions (deploy server, create store, add
+    replica) without navigating through menus
+  - One-click switching between view modes (Physical/Logical) and feature
+    panels
+  - Jump directly to KV operations for a specific group
+- **Breadcrumb navigation**: A persistent breadcrumb trail in the header
+  showing the full hierarchy path of the current selection, allowing
+  one-click navigation to any parent entity.
+- **Favorites & recent items**:
+  - Users can pin frequently accessed entities to a "Favorites" section at
+    the top of the sidebar
+  - A "Recently viewed" section shows the last 10 accessed entities for
+    quick navigation
+  - Favorites and recent items are persisted across sessions in
+    `localStorage`
+- **Filter & sort controls**:
+  - All entity lists (sidebar tree, replica lists, KV scan results) support
+    filtering by status (healthy/degraded/failed), role (leader/follower),
+    or ID/name
+  - All entity lists support sorting by ID, name, status, or health score
+  - Custom filter/sort presets can be saved and reused for frequent
+    workflows
+
+### 3.9 Export & Sharing
+The UI must support exporting cluster state and operation data for
+documentation, demos, and audit purposes:
+- **Topology export**: Export the current topology canvas view as SVG or
+  PNG, including all status indicators and labels
+- **Data export**: Export KV scan results, replica lists, or node lists as
+  JSON or CSV
+- **Activity log export**: Export the full activity log as CSV, including
+  timestamps, actions, targets, and outcomes
+- **Health report export**: Generate and export a PDF cluster health report
+  including summary status, entity health breakdown, and recent metrics
 
 ## 4. Embeddability Requirements
 
@@ -194,24 +295,54 @@ larger product that already uses CrowKV. To make that practical:
 The UI must also be runnable standalone — i.e. served directly by
 `crowkv-web` without a host system — for development and customer demos.
 
+Additional embeddability features:
+- **Custom branding**: Embedding hosts can supply a custom logo and brand
+  color via the mount props, which replaces the default CrowKV logo in the
+  header and adjusts the accent color palette.
+- **Custom actions**: Embedding hosts can inject custom context menu items
+  and inspector actions via the mount props, which are passed to the
+  `onEvent` callback when triggered.
+- **Custom metrics panels**: Embedding hosts can inject custom metrics chart
+  components into the inspector, which receive the current selection and
+  polling data as props.
+- **System theme detection**: The UI automatically switches between light
+  and dark themes based on the user's OS preference, unless explicitly
+  overridden by the user or host theme prop.
+
 ## 5. Scope of Resources Managed
 
-The hierarchy is fixed and must be reflected in every view:
+The UI manages the same set of entities through **two views** of one
+underlying cluster (see §3.1 and `design/design-console.md` §3):
 
 ```
-Cluster
-└── Rack
-    └── Node                      (host + SSH credentials; "remote" even on localhost)
-        └── Server Instance       (≤ 1 per node, enforced by the console)
-            └── Store
-                └── Paxos Group
-                    ├── Local Replica
-                    └── Remote Replica(s)
+Physical (deployment) view              Logical (usage) view
+────────────────────────────            ────────────────────
+Rack                                    Cluster
+└── Node                                └── Store
+    └── Server   (≤ 1 per node)             └── Group
+        └── PxStore                             └── Replica…
+            └── PxGroup                             (unified; each
+                ├── LocalReplica                     tagged with
+                └── RemoteReplica…                   node_id)
 ```
 
-The "≤ 1 server instance per node" constraint is a console-level rule
-(not a CrowKV core limitation); the UI enforces it by hiding the deploy
-action when a node already hosts an instance.
+Mapping between the two views (which the SPA must support as
+one-click cross-jumps):
+
+- Each `Replica` in the logical view corresponds to **one** `LocalReplica`
+  on the node identified by its `node_id` plus **N − 1** `RemoteReplica`
+  proxies on the peer nodes of the same group.
+- Each `Store` / `Group` in the logical view is the aggregate of the
+  per-node `PxStore` / `PxGroup` records returned by the physical
+  tree.
+
+Constraints:
+
+- The "≤ 1 server instance per node" rule is a console-level rule
+  (not a CrowKV core limitation); the UI enforces it by hiding the
+  deploy action when a node already hosts an instance.
+- The UI must not surface upstream `host:port` strings as identifiers;
+  servers are addressed only by `node_id`.
 
 ## 6. Read-Only Mode and Safety
 

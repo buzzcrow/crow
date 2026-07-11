@@ -12,7 +12,7 @@ pub use bench::{run_bench_verb, BenchVerb};
 pub use cluster::{run_cluster_status, run_cluster_topology, ClusterVerb};
 pub use kv::{run_kv_verb, KvVerb};
 pub use node::{run_node_verb, NodeVerb};
-pub use paxos::{run_paxos_verb, PaxosVerb};
+pub use paxos::{run_group_verb, GroupVerb};
 pub use rack::{run_rack_verb, RackVerb};
 pub use replica::{run_replica_verb, ReplicaVerb};
 pub use server::{run_server_verb, ServerVerb};

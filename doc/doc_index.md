@@ -13,7 +13,6 @@ doc only when a task touches a topic in its row. Line counts are approximate
 | `plan.md` | ~190 | Phases (P1–P5), milestones, dependency order, decision log. Read before picking a task. |
 | `test.md` | ~250 | Test pyramid, invariants, failure-injection taxonomy, CI gates, suites. Read when adding/restructuring tests. |
 | `requirement-ui.md` | ~220 | Web UI requirements: single-page embeddable console, functional surface mapped to current `crowkv-web` API, embedded Swagger. |
-| `plan-console.md` | ~110 | `crowkv-console` phased implementation plan (C0–C8). |
 
 ## `requirement.md` Sections
 
