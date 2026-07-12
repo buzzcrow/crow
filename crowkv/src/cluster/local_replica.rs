@@ -291,7 +291,7 @@ impl ReplicaHandler for PxLocalReplica {
         req: HeartbeatRequestPayload,
         _group_id: u64,
     ) -> Result<HeartbeatReply, PxReplicaError> {
-        Ok(self.handle_heartbeat(req))
+        Ok(self.handle_heartbeat(req).await)
     }
 
     async fn on_step_down(
@@ -381,6 +381,12 @@ impl PxLocalReplica {
         self.wal = Some(wal);
     }
 
+    /// Read-only access to the optional WAL engine.
+    #[must_use]
+    pub fn wal(&self) -> Option<&Arc<WalEngine>> {
+        self.wal.as_ref()
+    }
+
     /// Rebuild a fresh local replica from WAL replay output.
     ///
     /// Replays the recovered records through the normal acceptor / learner APIs
@@ -398,25 +404,10 @@ impl PxLocalReplica {
         let replica = Self::new(id, role);
 
         // Pass 1: rebuild acceptor (promise + accept) state from the WAL.
-        //
-        // The WAL is append-only and may hold MULTIPLE `Accepted` records for
-        // the same slot — a value accepted under one ballot, then a
-        // higher-ballot value adopted during leader churn / repair. Live, the
-        // acceptor keeps only the highest-ballot value per slot; replay must
-        // converge to the same result. Crucially we must NOT `learn()` each
-        // record inline here: the learner's engine enforces per-key
-        // highest-*slot*-wins and skips an op when `slot <= resolved_slot(key)`.
-        // Applying records in append order would let an earlier, lower-ballot
-        // value at a slot win and mask the later chosen value at that same slot
-        // (e.g. a delete tombstone silently reverting to its old value after
-        // restart — the resurrected-key bug). A non-`Accepted` reply here just
-        // means a higher-ballot value for the slot was already restored, which
-        // is exactly the state we want, so such replies are benign.
-        let mut accepted_slots = std::collections::BTreeSet::new();
         for record in &replay.records {
             match record.record_type {
                 crate::wal::record::RecordType::Promised => {
-                    let _ = replica.on_prepare(record.slot, record.ballot, record.term).await;
+                    let _ = replica.acceptor.prepare(record.slot, record.ballot).await;
                 }
                 crate::wal::record::RecordType::Accepted => {
                     let entry = record.to_log_entry().ok_or_else(|| {
@@ -425,21 +416,9 @@ impl PxLocalReplica {
                             "restore replay accepted missing log entry",
                         )
                     })?;
-                    let _ = replica.on_accept(entry).await;
-                    accepted_slots.insert(record.slot);
+                    let _ = replica.acceptor.accept(entry).await;
                 }
                 _ => {}
-            }
-        }
-
-        // Pass 2: apply the FINAL (highest-ballot) accepted value per slot, in
-        // ascending slot order. Reading back from the acceptor guarantees we
-        // learn the ballot-winning value at each slot, and ascending order
-        // makes the engine's highest-slot-wins rule yield the correct final
-        // state for every key.
-        for slot in accepted_slots {
-            if let Some(entry) = replica.accepted_at(slot).await {
-                replica.learn(&entry);
             }
         }
 
@@ -455,6 +434,36 @@ impl PxLocalReplica {
         });
         replica.role_atomic.store(role.as_u8(), Ordering::Release);
         replica.learner.restore_dedup_cache(&replay.dedup_cache);
+
+        // Pass 3 (W6/W9): rebuild the learner's committed KV state by replaying
+        // the durably-committed prefix.
+        //
+        // This is the durable-commit-watermark / snapshot-covered apply hook
+        // (W5): replay restores only *consensus* state (acceptor promises +
+        // accepts); the learner's KV map and applied frontier are not implied
+        // by that. The durable commit watermark is the highest slot the learner
+        // had contiguously applied and persisted before the crash, and the
+        // snapshot slot is the highest slot covered by a persisted snapshot.
+        // Every Accepted value at or below `max(snapshot_slot, watermark)` is
+        // known-chosen and safe to re-apply.
+        //
+        // Slots ABOVE the watermark are durable in the acceptor but not yet
+        // known-committed, so they are deliberately left to consensus / bulk
+        // Phase 1. Re-applying the committed prefix here is what lets a restored
+        // node come up with the correct KV (committed deletes included) and sets
+        // `contiguous_chosen` to the watermark, which bulk Phase 1 then uses as
+        // its recovery floor instead of sweeping from slot 0.
+        let seed_point = replay.durable_commit_watermark.max(replay.snapshot_slot);
+        let mut slot = 1;
+        while slot <= seed_point {
+            let Some(entry) = replica.acceptor.accepted_at(slot) else {
+                // Contiguity below the watermark is an invariant; stop at the
+                // first hole rather than applying out-of-order.
+                break;
+            };
+            replica.learner.learn(entry);
+            slot += 1;
+        }
 
         Ok(replica)
     }
@@ -827,6 +836,20 @@ impl PxLocalReplica {
         }
     }
 
+    async fn persist_durable_commit_watermark_if_advanced(&self, previous: SlotIndex) {
+        let watermark = self.learner.contiguous_applied();
+        if watermark <= previous {
+            return;
+        }
+        if let Some(wal) = &self.wal {
+            let term = self.current_term_snapshot();
+            let record = WALRecord::from_durable_commit_watermark(wal.group_id(), term, watermark);
+            if let Err(e) = wal.append(&record).await {
+                tracing::error!(watermark, error = %e, "WAL persist DurableCommitWatermark failed");
+            }
+        }
+    }
+
     /// Point-in-time status for the topology endpoint. Exposes only cheap
     /// (`O(1)`) data: the kv-store key count via `DashMap::len()`.
     #[allow(clippy::cast_possible_truncation)]
@@ -924,9 +947,17 @@ impl PxLocalReplica {
         reply
     }
 
-    /// Learn a chosen entry (apply to state machine).
+    /// Apply an entry to the local learner.
     pub fn learn(&self, entry: &PxLogEntry) {
         self.learner.learn(entry.clone());
+    }
+
+    /// Learn a chosen entry (apply to state machine) and persist the durable
+    /// commit watermark if the contiguous applied prefix advanced.
+    pub async fn learn_chosen(&self, entry: &PxLogEntry) {
+        let previous = self.learner.contiguous_applied();
+        self.learner.learn(entry.clone());
+        self.persist_durable_commit_watermark_if_advanced(previous).await;
     }
 
     /// Apply locally-accepted entries to the state machine up to `commit_slot`
@@ -940,7 +971,8 @@ impl PxLocalReplica {
     /// Idempotent: re-applying an already-applied slot is a no-op in the
     /// learner. Used by followers, which otherwise never apply in steady state
     /// (`on_accept` only persists; `ChosenNotice` only moves the watermark).
-    fn apply_committed_up_to(&self, commit_slot: SlotIndex) {
+    async fn apply_committed_up_to(&self, commit_slot: SlotIndex) {
+        let previous = self.learner.contiguous_applied();
         let mut next = self.learner.contiguous_applied().saturating_add(1);
         while next <= commit_slot {
             let Some(entry) = self.acceptor.accepted_at(next) else {
@@ -949,30 +981,34 @@ impl PxLocalReplica {
             self.learner.learn(entry);
             next += 1;
         }
+        self.persist_durable_commit_watermark_if_advanced(previous).await;
     }
 
     /// Receive a peer-side `ChosenNotice` for `(slot, term)`.
     ///
-    /// **No-op for the chosen watermark.** A `ChosenNotice` carries no payload,
-    /// so it is *not* evidence this replica holds the chosen value. Advancing
-    /// `last_chosen_slot` from it would let a value-missing replica appear
-    /// up-to-date in the election log-comparison ([`Self::candidate_log_up_to_date`])
-    /// and win leadership while lacking committed writes — the missing-key /
-    /// resurrection bug (`doc/bug-wal.md` §8.2). The watermark now advances only
-    /// via [`Self::learn`] (real applied values), driven on followers by
-    /// [`Self::apply_committed_up_to`] on each heartbeat.
+    /// Advances the `(last_chosen_slot, last_chosen_term)` high-water mark only
+    /// (never the contiguous-chosen / contiguous-applied watermarks, since a
+    /// `ChosenNotice` carries no payload to apply). The high-water mark is the
+    /// follower's signal that committed slots exist past its applied frontier,
+    /// which drives `repair_once` and heartbeat catch-up to fetch the real
+    /// values via [`Self::apply_committed_up_to`].
     ///
-    /// NOTE: neutering this advance is known to regress
-    /// `e2e_kv_after_dynamic_replica_change` (left failing per plan, to revisit
-    /// with the durable acceptor-log-tip election check).
+    /// W7: this used to be neutered (always `false`) because the election
+    /// log-up-to-date check read `last_chosen_slot`, so advancing it from a
+    /// payload-less notice could let a value-missing replica win leadership
+    /// (the missing-key / resurrection bug, `doc/plan-ut.md` §3.2). The check
+    /// now compares the **durable acceptor log tip** instead
+    /// ([`Self::candidate_log_up_to_date`] → [`Self::accepted_log_tip`]), so the
+    /// notice no longer influences electability and the advance is safe again.
     ///
-    /// Returns `false` always (the watermark never advances from a notice).
+    /// Returns `true` if the high-water mark advanced.
     pub fn note_chosen(&self, slot: SlotIndex, term: PxTerm) -> bool {
+        let advanced = self.learner.note_chosen(slot, term);
         debug!(
             replica_l_id = self.id,
-            slot, term, "note_chosen: ignored (payload-less; watermark advances only via learn)"
+            slot, term, advanced, "note_chosen: advanced chosen high-water mark"
         );
-        false
+        advanced
     }
 
     /// Read the currently accepted value at a slot (for verification).
@@ -1021,6 +1057,11 @@ impl PxLocalReplica {
         self.acceptor.highest_seen_slot()
     }
 
+    #[must_use]
+    pub fn accepted_log_tip(&self) -> (SlotIndex, PxTerm) {
+        self.acceptor.accepted_log_tip().unwrap_or((0, 0))
+    }
+
     // ---------------- Election handler internals ----------------
 
     /// Compute the responder's frontier triple (used by `PreVote` /
@@ -1033,12 +1074,12 @@ impl PxLocalReplica {
         )
     }
 
-    /// Candidate's log is at least as up-to-date as ours iff
-    /// `(last_chosen_term, last_chosen_slot)` is lexicographically `>=` ours.
+    /// Candidate's durable acceptor log is at least as up-to-date as ours iff
+    /// `(accepted_log_tip_term, accepted_log_tip_slot)` is lexicographically
+    /// `>=` ours.
     fn candidate_log_up_to_date(&self, req: &VoteRequestPayload) -> bool {
-        let my_term = self.last_chosen_term();
-        let my_slot = self.last_chosen_slot();
-        (req.last_chosen_term, req.last_chosen_slot) >= (my_term, my_slot)
+        let (my_slot, my_term) = self.accepted_log_tip();
+        (req.accepted_log_tip_term, req.accepted_log_tip_slot) >= (my_term, my_slot)
     }
 
     /// `PreVote` decision (no state mutation). Reply iff:
@@ -1136,7 +1177,7 @@ impl PxLocalReplica {
     /// the vote-lockout window. Returns `success=true` iff the term is `>=`
     /// our own; on lower term we reply `false` so the stale leader can step
     /// down on its next bookkeeping check.
-    fn handle_heartbeat(&self, req: HeartbeatRequestPayload) -> HeartbeatReply {
+    async fn handle_heartbeat(&self, req: HeartbeatRequestPayload) -> HeartbeatReply {
         let lease = Duration::from_millis(self.lease_duration_ms());
         let now = Instant::now();
         let term;
@@ -1166,8 +1207,8 @@ impl PxLocalReplica {
             // `leaderCommit` rule). Followers do not apply on `on_accept`
             // (which only persists) nor on `ChosenNotice` (watermark only), so
             // without this a follower's local KVEngine never reflects committed
-            // writes in steady state (`doc/bug-wal.md` §7/§8.1).
-            self.apply_committed_up_to(req.committed_safe_slot);
+            // writes in steady state (`doc/plan-ut.md` §3.3).
+            self.apply_committed_up_to(req.committed_safe_slot).await;
             // Timestamp the heartbeat so the metrics snapshot can
             // report `last_heartbeat_age_ms`.
             self.note_heartbeat_received();

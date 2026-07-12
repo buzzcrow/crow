@@ -39,8 +39,9 @@ async fn gc_loop(wal: Arc<WalEngine>, gc_tick: Duration, cancel: Arc<AtomicBool>
 
 /// GC watermark source. The caller provides the current `safe_slot`.
 ///
-/// `gc_slot = min(safe_slot, snapshot_slot)`.
-/// For P2, `snapshot_slot` is `u64::MAX` (stub until P5).
+/// `gc_slot = min(safe_slot, snapshot_slot)`. The `snapshot_slot` comes from
+/// the latest `SnapshotMarker` record in the WAL (or from the `WalEngine`
+/// snapshot state when it is driven by the group).
 #[must_use]
 pub fn compute_gc_slot(safe_slot: u64, snapshot_slot: u64) -> u64 {
     safe_slot.min(snapshot_slot)
@@ -48,13 +49,18 @@ pub fn compute_gc_slot(safe_slot: u64, snapshot_slot: u64) -> u64 {
 
 /// Run one GC pass: unlink segments fully below `gc_slot`.
 ///
+/// The GC watermark is `min(safe_slot, snapshot_slot)`, where `safe_slot` is the
+/// highest slot that is known to be contiguously applied and `snapshot_slot` is
+/// the latest persisted snapshot slot from the WAL. Without a real `safe_slot`
+/// source the snapshot slot itself is the limiting factor.
+///
 /// # Errors
 /// Returns IO error if segment files cannot be unlinked.
 pub async fn run_gc_pass(wal: &WalEngine) -> io::Result<usize> {
-    // For V1, use u64::MAX as snapshot_slot and a conservative safe_slot.
-    // The actual safe_slot integration will come from the group's contiguous_applied.
-    // For now, GC is a no-op unless explicitly driven.
-    run_gc_with_watermark(wal, 0).await
+    let snapshot_slot = wal.snapshot_slot();
+    let safe_slot = u64::MAX; // TODO: integrate with the group's contiguous_applied.
+    let gc_slot = compute_gc_slot(safe_slot, snapshot_slot);
+    run_gc_with_watermark(wal, gc_slot).await
 }
 
 /// Run one GC pass with an explicit `gc_slot` watermark.
@@ -68,7 +74,7 @@ pub async fn run_gc_with_watermark(wal: &WalEngine, gc_slot: u64) -> io::Result<
 
     let backend = wal.backend();
     let mut unlinked = 0usize;
-    let disk_paths = wal.disk_group_paths().await;
+    let disk_paths = wal.disk_group_paths();
 
     // Collect segments eligible for GC.
     let eligible: Vec<(u64, usize, std::path::PathBuf)> = {

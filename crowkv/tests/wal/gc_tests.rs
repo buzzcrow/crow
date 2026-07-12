@@ -2,7 +2,7 @@
 
 use bytes::Bytes;
 use crowkv::paxos::roles::{PxBallot, PxLogEntry, PxLogEntryKind};
-use crowkv::wal::gc::run_gc_with_watermark;
+use crowkv::wal::gc::{run_gc_pass, run_gc_with_watermark};
 use crowkv::wal::record::WALRecord;
 use crowkv::wal::replay::replay_group;
 use crowkv::wal::wal_engine::WalEngine;
@@ -109,4 +109,56 @@ async fn replay_after_gc_is_correct() {
     // that weren't fully below the watermark).
     assert!(!result.records.is_empty());
     assert_eq!(result.current_term, 1);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn gc_snapshot_slot_covered_prefix_is_removed() {
+    let backend = sim_backend();
+    let disks = vec![PathBuf::from("/wal")];
+    let config = WalConfig {
+        wal_disks: disks.clone(),
+        wal_segment_size: 200,
+        ..Default::default()
+    };
+    let wal = WalEngine::create(backend.clone(), config, 1).await.unwrap();
+
+    // Accepted records for slots 1..=20.
+    for slot in 1..=20 {
+        let entry = PxLogEntry {
+            slot,
+            ballot: PxBallot::new(0, 1),
+            term: 1,
+            kind: PxLogEntryKind::Write,
+            payload: Bytes::from("data"),
+            client_id: Some(1),
+            seq: Some(slot),
+        };
+        let record = WALRecord::from_accepted(1, &entry);
+        wal.append(&record).await.unwrap();
+    }
+
+    // Persist a snapshot marker covering slot 15 and update the engine state.
+    let snapshot = WALRecord::from_snapshot_marker(1, 1, 15);
+    wal.append(&snapshot).await.unwrap();
+    wal.set_snapshot_slot(15);
+
+    wal.seal_all().await.unwrap();
+
+    let seg_count_before = wal.index().lock().segments().count();
+    assert!(seg_count_before >= 2, "need multiple segments for GC test");
+
+    let unlinked = run_gc_pass(&wal).await.unwrap();
+    assert!(
+        unlinked > 0,
+        "snapshot-covered prefix should GC at least one segment"
+    );
+
+    let seg_count_after = wal.index().lock().segments().count();
+    assert!(seg_count_after < seg_count_before);
+
+    // Replay after GC should still work and recover the snapshot slot.
+    let result = replay_group(&backend, &disks, 1).await.unwrap();
+    assert!(!result.records.is_empty());
+    assert_eq!(result.current_term, 1);
+    assert_eq!(result.snapshot_slot, 15);
 }

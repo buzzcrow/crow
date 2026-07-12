@@ -429,7 +429,7 @@ async fn wait_for_deleted_keys_on_all_replicas(
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
-#[ignore = "test is failing: expected deleted key still found after restart"]
+#[ignore = "W8 web-level endpoint refresh is now hardened, but the test fails on a separate crowkv-level data issue: deleted keys (e.g. 12/2/k60) are resurrected after a full cluster restart. Re-enable once the WAL replay / GC delete-survival bug (W11) is fixed."]
 async fn cluster_restart_restores_multistore_groups_and_kv() {
     let bin = match crowkv_server_bin() {
         Some(p) if p.exists() => p,

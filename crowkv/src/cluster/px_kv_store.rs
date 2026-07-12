@@ -340,7 +340,7 @@ impl PxKvStore {
     /// must not self-elect leader at `quorum == 1` (no remotes wired yet) and
     /// then run `bulk_phase1` / `repair_once` against only itself, which can
     /// `NoOp`-fill or finalize a committed slot the node is personally missing
-    /// and thereby **erase** committed data (see `doc/bug-wal.md` §8.4). The
+    /// and thereby **erase** committed data (see `doc/plan-ut.md` §3.1). The
     /// caller wires the full configured membership first; the subsequent
     /// remote-wiring rebuild (`add_remote_replicas` → [`Self::add_group`])
     /// starts the driver with a correct quorum.
@@ -350,6 +350,10 @@ impl PxKvStore {
 
     fn add_group_inner(&self, group: PxGroup, spawn_driver: bool) {
         let group_id = group.group_id;
+        let mut group = group;
+        if let Some(prior) = self.groups.get(&group_id) {
+            group.inherit_local_state_from(prior.value());
+        }
         info!(
             store_id = self.store_id,
             group_id,

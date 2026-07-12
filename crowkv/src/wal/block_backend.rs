@@ -18,6 +18,7 @@ pub struct BlockDeviceController {
 struct BlockDeviceControllerInner {
     full: AtomicBool,
     io_error: AtomicBool,
+    sync_error: AtomicBool,
     corrupt_requests: Mutex<Vec<(PathBuf, u64)>>,
 }
 
@@ -28,6 +29,20 @@ impl BlockDeviceController {
 
     pub fn inject_io_error(&self, on: bool) {
         self.inner.io_error.store(on, Ordering::Release);
+    }
+
+    /// Inject a durable-flush-only failure: `fdatasync` / `fsync` error while
+    /// `write_at` keeps succeeding. Models a media that accepts buffered writes
+    /// but cannot persist them, exercising the flush worker's error path (W3).
+    pub fn inject_sync_error(&self, on: bool) {
+        self.inner.sync_error.store(on, Ordering::Release);
+    }
+
+    fn check_sync(&self) -> io::Result<()> {
+        if self.inner.sync_error.load(Ordering::Acquire) {
+            return Err(io::Error::other("BlockDevice: injected durable-flush failure"));
+        }
+        Ok(())
     }
 
     pub fn corrupt_at_offset(&self, segment: impl AsRef<Path>, offset: u64) {
@@ -84,6 +99,7 @@ pub struct BlockDevice {
     segments: Arc<Mutex<BTreeMap<PathBuf, Vec<u8>>>>,
     layouts: Arc<Mutex<BTreeSet<PathBuf>>>,
     controller: BlockDeviceController,
+    write_count: Arc<AtomicU64>,
     fdatasync_count: Arc<AtomicU64>,
     alignment: WalBlockAlignment,
     /// Logical (payload) bytes accepted by `write_at`.
@@ -117,6 +133,7 @@ impl BlockDevice {
             segments: Arc::new(Mutex::new(BTreeMap::new())),
             layouts: Arc::new(Mutex::new(BTreeSet::new())),
             controller: BlockDeviceController::default(),
+            write_count: Arc::new(AtomicU64::new(0)),
             fdatasync_count: Arc::new(AtomicU64::new(0)),
             alignment,
             logical_bytes_written: Arc::new(AtomicU64::new(0)),
@@ -133,6 +150,11 @@ impl BlockDevice {
     #[must_use]
     pub fn alignment(&self) -> WalBlockAlignment {
         self.alignment
+    }
+
+    #[must_use]
+    pub fn write_count(&self) -> u64 {
+        self.write_count.load(Ordering::Acquire)
     }
 
     #[must_use]
@@ -278,19 +300,44 @@ impl BlockSegment {
     /// implementation.
     pub fn write_at(&self, data: &[u8], offset: u64) -> io::Result<usize> {
         self.device.controller.check_write()?;
-        let written = match self.device.alignment {
-            WalBlockAlignment::Unaligned => self.write_unaligned(data, offset)?,
-            WalBlockAlignment::Aligned { .. } => self.write_aligned(data, offset)?,
-        };
+        self.write_bytes(data, offset)?;
+        self.device.write_count.fetch_add(1, Ordering::AcqRel);
         self.device
             .logical_bytes_written
             .fetch_add(data.len() as u64, Ordering::AcqRel);
-        Ok(written)
+        Ok(data.len())
+    }
+
+    /// Write multiple non-contiguous buffers at `offset` as a single logical
+    /// write operation. The underlying simulated media still copies each slice,
+    /// but this avoids a caller-side concatenation copy.
+    pub fn write_vectored_at(&self, bufs: &[std::io::IoSlice<'_>], offset: u64) -> io::Result<usize> {
+        self.device.controller.check_write()?;
+        let total_len: usize = bufs.iter().map(|b| b.len()).sum();
+        let mut cur_offset = offset;
+        for buf in bufs {
+            self.write_bytes(buf, cur_offset)?;
+            cur_offset += buf.len() as u64;
+        }
+        self.device.write_count.fetch_add(1, Ordering::AcqRel);
+        self.device
+            .logical_bytes_written
+            .fetch_add(total_len as u64, Ordering::AcqRel);
+        Ok(total_len)
+    }
+
+    /// Internal byte copy: applies the data to the in-memory segment without
+    /// updating any counters. Used by both `write_at` and `write_vectored_at`.
+    fn write_bytes(&self, data: &[u8], offset: u64) -> io::Result<()> {
+        match self.device.alignment {
+            WalBlockAlignment::Unaligned => self.write_unaligned(data, offset),
+            WalBlockAlignment::Aligned { .. } => self.write_aligned(data, offset),
+        }
     }
 
     /// Byte-addressable write: payload lands directly at `offset`. Models
     /// RAM / SCM / PMEM where there is no alignment requirement.
-    fn write_unaligned(&self, data: &[u8], offset: u64) -> io::Result<usize> {
+    fn write_unaligned(&self, data: &[u8], offset: u64) -> io::Result<()> {
         let mut segments = self.device.segments.lock();
         let segment_data = segments
             .get_mut(&self.segment_path)
@@ -304,14 +351,14 @@ impl BlockSegment {
         self.device
             .physical_bytes_written
             .fetch_add(data.len() as u64, Ordering::AcqRel);
-        Ok(data.len())
+        Ok(())
     }
 
     /// Block-aligned write: the logical write is widened to the enclosing
     /// aligned range and applied as a read-modify-write so the device only ever
     /// performs aligned physical I/O. Models an SSD/NVMe whose I/O unit equals
     /// the configured alignment. Tracks the resulting write amplification.
-    fn write_aligned(&self, data: &[u8], offset: u64) -> io::Result<usize> {
+    fn write_aligned(&self, data: &[u8], offset: u64) -> io::Result<()> {
         let plan = self.device.alignment.plan_write(offset, data.len());
         let mut segments = self.device.segments.lock();
         let segment_data = segments
@@ -334,7 +381,7 @@ impl BlockSegment {
         if plan.requires_read_modify_write {
             self.device.rmw_count.fetch_add(1, Ordering::AcqRel);
         }
-        Ok(data.len())
+        Ok(())
     }
 
     pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
@@ -369,6 +416,7 @@ impl BlockSegment {
     }
 
     pub fn fdatasync(&self) -> io::Result<()> {
+        self.device.controller.check_sync()?;
         self.device.controller.check_write()?;
         self.device.fdatasync_count.fetch_add(1, Ordering::AcqRel);
         Ok(())

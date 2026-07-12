@@ -91,8 +91,8 @@ message PreVoteRequest {
   uint64 group_id = 2;
   uint64 term = 3;            // proposed term (current_term + 1)
   uint64 candidate_id = 4;
-  uint64 last_chosen_slot = 5;
-  uint64 last_chosen_term = 6;
+  uint64 accepted_log_tip_slot = 5;
+  uint64 accepted_log_tip_term = 6;
   uint64 request_id = 7;
   uint64 request_create_ms = 8;
 }
@@ -116,8 +116,8 @@ message RequestVoteRequest {
   uint64 group_id = 2;
   uint64 term = 3;            // term that won the prevote quorum
   uint64 candidate_id = 4;
-  uint64 last_chosen_slot = 5;
-  uint64 last_chosen_term = 6;
+  uint64 accepted_log_tip_slot = 5;
+  uint64 accepted_log_tip_term = 6;
   uint64 request_id = 7;
   uint64 request_create_ms = 8;
 }

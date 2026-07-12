@@ -25,6 +25,7 @@ async fn unaligned_device_writes_payload_directly_without_amplification() {
     file.read_exact_at(&mut buf, 10).await.unwrap();
     assert_eq!(&buf, b"hello");
 
+    assert_eq!(device.write_count(), 1);
     assert_eq!(device.logical_bytes_written(), 5);
     assert_eq!(
         device.physical_bytes_written(),
@@ -63,6 +64,23 @@ async fn aligned_device_partial_write_does_read_modify_write() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn unaligned_device_counts_writes_and_durable_flushes() {
+    let device = BlockDevice::new();
+    let backend = IoBackend::BlockDevice(device.clone());
+
+    let mut file = open_segment(&backend, "/dev/mem/seg-0000002.log").await;
+    file.write_at(b"ab", 0).await.unwrap();
+    file.write_at(b"cd", 2).await.unwrap();
+    file.fdatasync().await.unwrap();
+    file.fdatasync().await.unwrap();
+
+    assert_eq!(device.write_count(), 2);
+    assert_eq!(device.fdatasync_count(), 2);
+    assert_eq!(device.logical_bytes_written(), 4);
+    assert_eq!(device.physical_bytes_written(), 4);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn aligned_device_rmw_preserves_neighbouring_bytes_in_same_block() {
     let device = BlockDevice::ssd_4k();
     let backend = IoBackend::BlockDevice(device.clone());
@@ -81,6 +99,7 @@ async fn aligned_device_rmw_preserves_neighbouring_bytes_in_same_block() {
     assert_eq!(&mid, b"B");
 
     // Both writes are partial blocks → two RMWs; each rewrites the 4 KiB block.
+    assert_eq!(device.write_count(), 2);
     assert_eq!(device.rmw_count(), 2);
     assert_eq!(device.physical_bytes_written(), 4096 * 2);
 }

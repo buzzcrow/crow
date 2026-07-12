@@ -9,7 +9,7 @@ mod testkit;
 use std::time::Duration;
 
 use crowkv_console_shared::lifecycle;
-use testkit::console::{crowkv_cli_bin, run, spawn_console, spawn_upstream};
+use testkit::console::{crowkv_cli_bin, run, spawn_console, spawn_upstream, wait_for_leader};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::too_many_lines)]
@@ -28,51 +28,57 @@ async fn kv_put_get_delete_round_trip() {
     let console = spawn_console(&upstream).await;
     let console_url = format!("http://{console}");
 
-    // Create store 1 and group 1 through the console's API (stores no longer
-    // auto-create groups). This updates the monitor cache automatically.
-    let http_client = reqwest::Client::new();
-    let store_resp = http_client
-        .post(format!("{console_url}/api/stores"))
-        .json(&serde_json::json!({"store_id": 1, "nodes": ["n1"]}))
-        .send()
-        .await
-        .expect("add_store");
-    if !store_resp.status().is_success() {
-        let status = store_resp.status();
-        let body = store_resp.text().await.unwrap_or_default();
-        panic!("add_store failed with status {status}: {body}");
-    }
-    assert_eq!(store_resp.status(), 201, "add_store failed");
-    let group_resp = http_client
-        .post(format!("{console_url}/api/stores/1/groups"))
-        .json(&serde_json::json!({"group_id": 1, "replica_id": 1, "nodes": ["n1"]}))
-        .send()
-        .await
-        .expect("add_group");
-    if !group_resp.status().is_success() {
-        let status = group_resp.status();
-        let body = group_resp.text().await.unwrap_or_default();
-        panic!("add_group failed with status {status}: {body}");
-    }
-    assert_eq!(group_resp.status(), 201, "add_group failed");
-
-    // put
-    let (code, stdout, stderr) = run(
+    // Create store 1 / group 1 via the same CLI control path used by the
+    // passing bench smoke test, then wait for the single-replica group to
+    // report a leader before exercising KV verbs.
+    let (code, _, stderr) = run(&cli, &console_url, &["store", "add", "--store-id", "1"]);
+    assert_eq!(code, 0, "store add stderr={stderr}");
+    let (code, _, stderr) = run(
         &cli,
         &console_url,
         &[
-            "kv",
-            "put",
+            "paxos",
+            "add",
             "--store-id",
             "1",
             "--group-id",
             "1",
-            "--key",
-            "color",
-            "--value",
-            "indigo",
+            "--replica-id",
+            "1",
+            "--nodes",
+            "n1",
         ],
     );
+    assert_eq!(code, 0, "paxos add stderr={stderr}");
+    assert!(
+        wait_for_leader(&console_url, 1, 1, Duration::from_secs(15)).await,
+        "group 1 never reported a leader"
+    );
+
+    // put
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let (code, stdout, stderr) = loop {
+        let result = run(
+            &cli,
+            &console_url,
+            &[
+                "kv",
+                "put",
+                "--store-id",
+                "1",
+                "--group-id",
+                "1",
+                "--key",
+                "color",
+                "--value",
+                "indigo",
+            ],
+        );
+        if result.0 == 0 || tokio::time::Instant::now() >= deadline {
+            break result;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
     assert_eq!(code, 0, "stdout={stdout}\nstderr={stderr}");
     assert!(stdout.contains("ok:"));
 

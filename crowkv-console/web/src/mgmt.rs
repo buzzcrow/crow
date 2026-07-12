@@ -137,7 +137,7 @@ async fn ensure_group_local(
     replica_id: u64,
     initial_role: AddGroupInitialRole,
     // `Some(false)` for multi-replica groups so the server does not self-elect
-    // at `quorum == 1` before remotes are wired (`doc/bug-wal.md` §8.4); the
+    // at `quorum == 1` before remotes are wired (`doc/plan-ut.md` §3.1); the
     // following `ensure_group_remotes` rebuild starts the driver with a correct
     // quorum. `None`/`Some(true)` for single-replica groups (no remote-wiring
     // step to start the driver).
@@ -266,7 +266,7 @@ pub async fn restore_persisted_topology(state: &AppState) {
         let mut replicas = group.replicas.clone();
         replicas.sort_by_key(|r| r.replica_id);
         // Defer the election driver for multi-replica groups until remotes are
-        // wired (`doc/bug-wal.md` §8.4).
+        // wired (`doc/plan-ut.md` §3.1).
         let start_election = Some(replicas.len() <= 1);
         for (index, replica) in replicas.iter().enumerate() {
             let initial_role = if index == 0 {
@@ -350,7 +350,7 @@ pub async fn restore_persisted_topology_for_node(state: &AppState, node_id: &str
             local_replica.replica_id,
             AddGroupInitialRole::Follower,
             // Defer for multi-replica groups until remotes are wired
-            // (`doc/bug-wal.md` §8.4).
+            // (`doc/plan-ut.md` §3.1).
             Some(group.replicas.len() <= 1),
         )
         .await?;
@@ -624,7 +624,7 @@ pub async fn http_add_group(
                 AddGroupInitialRole::Follower
             }),
             // Multi-node groups defer the driver until Phase-2 wires remotes
-            // (`doc/bug-wal.md` §8.4); single-node groups start it now.
+            // (`doc/plan-ut.md` §3.1); single-node groups start it now.
             start_election: Some(body.nodes.len() <= 1),
         };
         match client.add_group(sid, &req).await {
@@ -1005,7 +1005,7 @@ pub async fn http_add_replica(
             replica_id: new_rid,
             initial_role: Some(AddGroupInitialRole::Follower),
             // The new replica joins a multi-replica group; remotes are wired in
-            // step 3, which starts the driver. Defer (`doc/bug-wal.md` §8.4).
+            // step 3, which starts the driver. Defer (`doc/plan-ut.md` §3.1).
             start_election: Some(false),
         };
         client
@@ -1027,7 +1027,7 @@ pub async fn http_add_replica(
             replica_id: new_rid,
             initial_role: Some(AddGroupInitialRole::Follower),
             // The new replica joins a multi-replica group; remotes are wired in
-            // step 3, which starts the driver. Defer (`doc/bug-wal.md` §8.4).
+            // step 3, which starts the driver. Defer (`doc/plan-ut.md` §3.1).
             start_election: Some(false),
         };
         client

@@ -5,7 +5,7 @@ Satisfies: all of [`requirement.md`](requirement.md) (this is the root design do
 
 This is the master design document. It establishes the conceptual model, module decomposition, and cross-cutting flows. Deep dives for the heavy areas live in sibling sub-topic docs (`design-parallel-slots.md`, `design-leader-election.md`, `design-wal.md`, `design-reconfiguration.md`, `design-storage-engine.md`, `design-async-io.md`, `design-rpc.md`).
 
-The doc explains **what the system is** and **how it behaves**. It does not prescribe an implementation phasing (that lives in `plan.md`) and does not enumerate test scenarios (those live in `test.md`).
+The doc explains **what the system is** and **how it behaves**. It does not prescribe an implementation phasing (that lives in `plan.md`) and does not enumerate test scenarios.
 
 ## Table of Contents
 
@@ -164,7 +164,7 @@ Per slot, on an acceptor:
 | --- | --- | --- |
 | `None` | initial | nothing |
 | `Promised(b)` | Phase 1 from ballot `b` | yes |
-| `Accepted(b, v)` | Phase 2 from ballot `b` value `v` | yes (via WAL fsync) |
+| `Accepted(b, v)` | Phase 2 from ballot `b` value `v` | yes (via WAL durable flush) |
 
 `Chosen` is *learned*, not persisted as a separate state by acceptors; it is reconstructed by the learner from a quorum of `Accepted` messages.
 
@@ -192,7 +192,7 @@ This is the hot path that the design optimizes. Multiple writes are in flight at
      │                  │ assign slot N (counter++)          │
      │                  │ append PxLogEntry to WAL           │
      │                  │── Accept(N, ballot, v) ─────────► │
-     │                  │                                    │ fsync WAL
+     │                  │                                    │ durable flush WAL
      │                  │◄──────────── Accepted(N) ──────────│
      │                  │ (quorum reached → Chosen)          │
      │                  │ apply slot N to its own learner    │
@@ -205,7 +205,7 @@ This is the hot path that the design optimizes. Multiple writes are in flight at
 Key properties:
 
 - **Slot assignment is the linearization point** ([requirement.md §6.1](requirement.md#61-write-guarantee)). The counter is owned by a single async task on the leader (serial assignment, no shared mutex); assignment happens before any I/O. See [`plan.md`](plan.md) §5 for the project-wide concurrency model.
-- **Ack contract**: the leader ack to the client requires (a) leader's own WAL fsync completed and (b) a quorum of acceptors have responded `Accepted` after their fsync. Until both, the leader does not respond.
+- **Ack contract**: the leader ack to the client requires (a) leader's own WAL durable flush completed and (b) a quorum of acceptors have responded `Accepted` after their durable flush. Until both, the leader does not respond.
 - **Parallelism**: slots N, N+1, N+2 may be in any of `Proposed` / `Accepted` / `Chosen` / `Applied` independently. The leader does not wait for slot N to apply before assigning N+1.
 - **Backpressure**: if the in-flight window is full, the leader admits to a bounded queue and beyond that returns `Busy` ([requirement.md §7.3](requirement.md#73-parallel-slot-processing)). The leader never blocks indefinitely.
 
@@ -255,7 +255,7 @@ Batching is preferred for high-throughput clients; per-op overhead drops to a fr
      │◄────── value, slot ──────────│
 ```
 
-The lease check is constant-time when valid. ReadIndex adds one round-trip but no fsync. The leader's learner already reflects every chosen slot on the leader (the leader applies before acking writes), so the returned value is the latest in the linearization order.
+The lease check is constant-time when valid. ReadIndex adds one round-trip but no durable flush. The leader's learner already reflects every chosen slot on the leader (the leader applies before acking writes), so the returned value is the latest in the linearization order.
 
 Details of lease and ReadIndex live in [`design-leader-election.md`](design/design-leader-election.md).
 
@@ -353,10 +353,10 @@ Correctness rests on the blind-ops premise: out-of-order apply is safe when no o
 
 The Acceptor's WAL is the only persistent log. Properties:
 
-- **Multi-disk segments**, slot-tagged. Slots are assigned to segments by simple round-robin (or tag-by-disk-load) so multiple disks fsync in parallel.
-- **Batched fsync** with a configurable batch size or time interval; a watchdog timer forces flush in case the batch never fills.
+- **Multi-disk segments**, slot-tagged. Slot records use deterministic slot affinity, while metadata records use the group metadata lane, so segment slot ranges may contain holes.
+- **Batched durable flush** with configurable batch size, optional microsecond coalescing, and a watchdog timer for stuck batches.
 - **CRC32C** per record; replay truncates at the first CRC failure and triggers peer-based catch-up.
-- **Ack contract**: an `Accepted` is sent only after that record's fsync completes. A client write is acked only after a quorum of `Accepted`s ([requirement.md §8.1](requirement.md#81-wal-write-ahead-log)).
+- **Ack contract**: an `Accepted` is sent only after that record's durable flush completes. A client write is acked only after a quorum of `Accepted`s ([requirement.md §8.1](requirement.md#81-wal-write-ahead-log)).
 - **Disk loss** → the node fails itself out of that group and rebuilds from peers via snapshot install.
 
 → Full design: [`design-wal.md`](design/design-wal.md). The async disk-I/O substrate (io_uring + fallback) is specified in [`design-async-io.md`](design/design-async-io.md).
@@ -418,7 +418,7 @@ Sketch of recovery flow for each failure scenario in [requirement.md §14.2](req
 
 **Message delay / slow node.** Slow acceptors do not block the quorum, but they do contribute to gap-rate growth if the slow node is also a learner needed for safe-slot. Mitigations: per-peer flow control, exclusion from the safe-slot computation if persistently lagging beyond a threshold (with admin alert).
 
-**Message duplication.** Each `PxLogEntry` is keyed by `(slot, ballot)`; the acceptor recognizes a duplicate `Accept` for `(slot, ballot, v)` it has already accepted and replies idempotently without re-fsyncing.
+**Message duplication.** Each `PxLogEntry` is keyed by `(slot, ballot)`; the acceptor recognizes a duplicate `Accept` for `(slot, ballot, v)` it has already accepted and replies idempotently without re-flushing durably.
 
 **Message loss.** The replicator retransmits unacknowledged messages. Out-of-order delivery is tolerated by Paxos semantics. Permanent loss is detected by the gap repair task and resolved via classic Paxos.
 
@@ -428,7 +428,7 @@ Sketch of recovery flow for each failure scenario in [requirement.md §14.2](req
 
 **Node restart / WAL replay.** Standard recovery flow: open WAL, validate CRCs, rebuild slot state, reconstruct dedup cache from latest `DedupCheckpoint` plus subsequent entries, register with the group leader.
 
-**Disk full on WAL.** The WAL cannot fsync; the acceptor stops sending `Accepted`. The leader observes the timeout and does not count this acceptor in the quorum. If the cluster falls below quorum, writes pause until disk is freed (typically by snapshot-driven GC) or operator intervention.
+**Disk full on WAL.** The WAL cannot durably flush; the acceptor stops sending `Accepted`. The leader observes the timeout and does not count this acceptor in the quorum. If the cluster falls below quorum, writes pause until disk is freed (typically by snapshot-driven GC) or operator intervention.
 
 **Corrupted WAL segment.** CRC fails on replay; the node truncates the WAL at the corruption point, snapshot-installs from a peer if necessary, and resumes.
 
@@ -466,7 +466,7 @@ These are intentional gaps left for sub-topic docs or for a future iteration. Th
 
 - **Exact lease duration formula.** Should be a function of heartbeat interval, observed skew, and a safety margin. To be specified in [`design-leader-election.md`](design/design-leader-election.md).
 - **Repair-task cadence and trigger heuristics.** Default scan period, gap-age threshold, batch size. To be specified in [`design-parallel-slots.md`](design/design-parallel-slots.md).
-- **WAL segment rotation policy.** Size threshold, retention, multi-disk allocation algorithm (round-robin vs load-aware). To be specified in [`design-wal.md`](design/design-wal.md).
+- **WAL segment rotation policy.** Size threshold and retention policy. To be specified in [`design-wal.md`](design/design-wal.md).
 - **Joint-consensus quorum overlap proof for asymmetric transitions.** E.g. when going 3 → 5 with the new two members not yet caught up, what is the safe ordering of catch-up vs vote-eligibility? To be specified in [`design-reconfiguration.md`](design/design-reconfiguration.md).
 - **Compaction policy for the storage engine.** When are tombstones safe to drop? Two watermarks (snapshot-slot and safe-slot) must both pass. Exact policy to be specified in [`design-storage-engine.md`](design/design-storage-engine.md).
 - **Snapshot transfer chunk size and throttling defaults.** Network-friendly defaults; pluggable.

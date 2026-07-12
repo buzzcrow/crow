@@ -1,6 +1,7 @@
 //! Cluster group management: membership, topology, replica runtime, and reconfiguration support.
 
 pub mod group;
+pub mod group_config;
 pub mod group_election;
 pub mod kv_server;
 pub mod kv_store;
@@ -12,6 +13,7 @@ pub mod replica;
 pub mod status;
 
 pub use group::ProposeResult;
+pub use group_config::{PxGroupConfig, PxGroupMember};
 
 pub use kv_server::*;
 pub use local_replica::*;

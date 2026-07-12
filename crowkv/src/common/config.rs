@@ -56,12 +56,12 @@ pub struct WalConfig {
     pub wal_disks: Vec<PathBuf>,
     /// Target segment size before rotation (bytes). Default 64 MiB.
     pub wal_segment_size: u64,
-    /// Fsync batch size trigger (bytes). Default 64 KiB.
-    pub wal_fsync_batch_bytes: usize,
-    /// Fsync batch interval trigger. Default 1 ms.
-    pub wal_fsync_batch_interval_ms: u64,
-    /// Watchdog timer for stuck batches. Default 100 ms.
-    pub wal_fsync_watchdog_ms: u64,
+    /// Durable flush batch size trigger (bytes). Default 64 KiB.
+    pub wal_flush_batch_bytes: usize,
+    /// Optional durable flush coalescing budget (microseconds). Default 0.
+    pub wal_flush_coalesce_us: u64,
+    /// Watchdog timer for stuck durable flush batches. Default 100 ms.
+    pub wal_flush_watchdog_ms: u64,
     /// Disk-pressure watermark for eager GC. Default 80%.
     pub wal_disk_high_watermark_pct: u8,
     /// Forensics retention grace period (seconds). Default 3600 (1 hour).
@@ -72,8 +72,8 @@ pub struct WalConfig {
     /// targets byte-addressable media and the file backend; `Aligned` targets a
     /// block device (e.g. a 4 KiB SSD/NVMe) and selects a block pipeline.
     pub wal_alignment: WalBlockAlignment,
-    /// Record encoding format. `Auto` selects text lines for byte-addressable
-    /// file/test backends and binary frames for block-aligned backends.
+    /// Record encoding format. `Auto` selects binary frames (zero-copy) on all
+    /// backends.
     pub wal_record_format: WalRecordFormat,
 }
 
@@ -96,9 +96,9 @@ impl Default for WalConfig {
         Self {
             wal_disks: vec![PathBuf::from("wal")],
             wal_segment_size: 64 * 1024 * 1024,
-            wal_fsync_batch_bytes: 64 * 1024,
-            wal_fsync_batch_interval_ms: 1,
-            wal_fsync_watchdog_ms: 100,
+            wal_flush_batch_bytes: 64 * 1024,
+            wal_flush_coalesce_us: 0,
+            wal_flush_watchdog_ms: 100,
             wal_disk_high_watermark_pct: 80,
             wal_min_retention_secs: 3600,
             gc_tick_secs: 30,

@@ -102,7 +102,7 @@ impl WalSegment {
 
     /// Append a record to this segment. Returns the file offset of the record.
     ///
-    /// Does **not** fsync — that is the `FsyncWorker`'s job (W5).
+    /// Does **not** durably flush — that is the flush worker's job (W5).
     ///
     /// # Panics
     /// Panics if called on a sealed segment.
@@ -134,7 +134,7 @@ impl WalSegment {
     /// Seal the segment: write footer, mark immutable.
     ///
     /// # Errors
-    /// Returns IO error if the write or fsync fails.
+    /// Returns IO error if the write or durable flush fails.
     pub async fn seal(&mut self) -> io::Result<()> {
         if self.sealed {
             return Ok(());
@@ -170,14 +170,58 @@ impl WalSegment {
         &self.path
     }
 
-    /// Expose the file handle for fdatasync (used by `FsyncWorker`).
+    /// Expose the file handle for durable flush operations.
     pub fn file_mut(&mut self) -> &mut AsyncFile {
         &mut self.file
     }
 
-    /// Expose the file handle for fdatasync (used by `FsyncWorker`).
+    /// Expose the file handle for durable flush operations.
     pub fn file(&self) -> &AsyncFile {
         &self.file
+    }
+
+    /// Write raw bytes at the given offset and advance `write_offset`.
+    /// Does NOT flush — caller must call `fdatasync`.
+    ///
+    /// # Panics
+    /// Panics if called on a sealed segment.
+    ///
+    /// # Errors
+    /// Returns IO error if the write fails.
+    pub async fn write_raw(&mut self, data: &[u8], offset: u64) -> io::Result<()> {
+        assert!(!self.sealed, "write_raw to sealed segment");
+        self.file.write_at(data, offset).await?;
+        self.write_offset = offset + data.len() as u64;
+        Ok(())
+    }
+
+    /// Write multiple non-contiguous buffers at the current `write_offset` in a
+    /// single vectored write and advance `write_offset`. Does NOT flush — caller
+    /// must call `fdatasync`.
+    ///
+    /// # Panics
+    /// Panics if called on a sealed segment.
+    ///
+    /// # Errors
+    /// Returns IO error if the write fails.
+    pub async fn write_raw_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> io::Result<()> {
+        assert!(!self.sealed, "write_raw_vectored to sealed segment");
+        let total_len: usize = bufs.iter().map(|b| b.len()).sum();
+        if total_len == 0 {
+            return Ok(());
+        }
+        let offset = self.write_offset;
+        self.file.write_vectored_at(bufs, offset).await?;
+        self.write_offset += total_len as u64;
+        Ok(())
+    }
+
+    /// Durably flush the segment file (fdatasync).
+    ///
+    /// # Errors
+    /// Returns IO error if the sync fails.
+    pub async fn fdatasync(&self) -> io::Result<()> {
+        self.file.fdatasync().await
     }
 }
 

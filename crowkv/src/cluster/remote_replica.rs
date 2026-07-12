@@ -216,8 +216,8 @@ impl ReplicaClient for PxRemoteReplica {
                 group_id,
                 term: req.term,
                 candidate_id: req.candidate_id,
-                last_chosen_slot: req.last_chosen_slot,
-                last_chosen_term: req.last_chosen_term,
+                accepted_log_tip_slot: req.accepted_log_tip_slot,
+                accepted_log_tip_term: req.accepted_log_tip_term,
                 request_id: 0,
                 request_create_ms: 0,
             })
@@ -258,8 +258,8 @@ impl ReplicaClient for PxRemoteReplica {
                 group_id,
                 term: req.term,
                 candidate_id: req.candidate_id,
-                last_chosen_slot: req.last_chosen_slot,
-                last_chosen_term: req.last_chosen_term,
+                accepted_log_tip_slot: req.accepted_log_tip_slot,
+                accepted_log_tip_term: req.accepted_log_tip_term,
                 request_id: 0,
                 request_create_ms: 0,
             })

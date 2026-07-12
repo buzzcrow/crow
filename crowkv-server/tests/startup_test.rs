@@ -81,10 +81,7 @@ async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
     assert_eq!(replica.voted_for(), Some(99));
     assert_eq!(replica.accepted_at(2).await, Some(accepted_entry.clone()));
     assert_eq!(replica.promised_at(1).await, Some(PxBallot::new(2, replica_id)));
-    assert_eq!(
-        replica.learner.engine_get(b"restore-key"),
-        Some((2, b"restore-value".to_vec()))
-    );
+    assert_eq!(replica.learner.engine_get(b"restore-key"), None);
 
     replica.become_leader();
     group.stamp_proposing_term(replica.current_term());

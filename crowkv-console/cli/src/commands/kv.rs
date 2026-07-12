@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 use crate::utils::{client::console_client, print_json};
 use crate::Cli;
+use crowkv_console_shared::clients::grpc::{GetOutcome, KvClient};
 
 #[derive(Subcommand, Debug)]
 pub enum KvVerb {
@@ -139,6 +140,24 @@ struct KvPutArgs<'a> {
     seq: u64,
 }
 
+async fn resolve_kv_client(cli: &Cli, store_id: u64, group_id: u64) -> Result<KvClient, ExitCode> {
+    let client = match console_client(cli) {
+        Ok(c) => c,
+        Err(c) => return Err(c),
+    };
+    let endpoint = match client.resolve_endpoint(store_id, group_id).await {
+        Ok(info) => info.grpc_url,
+        Err(e) => {
+            eprintln!("error: resolve endpoint for store {store_id} group {group_id}: {e}");
+            return Err(ExitCode::from(2));
+        }
+    };
+    KvClient::connect(endpoint).await.map_err(|e| {
+        eprintln!("error: connect kv endpoint for store {store_id} group {group_id}: {e}");
+        ExitCode::from(2)
+    })
+}
+
 async fn kv_put(cli: &Cli, store_id: u64, group_id: u64, args: KvPutArgs<'_>) -> ExitCode {
     let value_bytes = match (args.value, args.value_file) {
         (Some(v), None) => v.into_bytes(),
@@ -155,13 +174,12 @@ async fn kv_put(cli: &Cli, store_id: u64, group_id: u64, args: KvPutArgs<'_>) ->
         }
         (Some(_), Some(_)) => unreachable!("clap conflicts_with"),
     };
-    let client = match console_client(cli) {
+    let mut client = match resolve_kv_client(cli, store_id, group_id).await {
         Ok(c) => c,
         Err(c) => return c,
     };
     match client
-        .kv_put(
-            store_id,
+        .put(
             group_id,
             args.key.as_bytes(),
             &value_bytes,
@@ -189,38 +207,34 @@ async fn kv_put(cli: &Cli, store_id: u64, group_id: u64, args: KvPutArgs<'_>) ->
 }
 
 async fn kv_get(cli: &Cli, store_id: u64, group_id: u64, key: &str, hex_out: bool) -> ExitCode {
-    let client = match console_client(cli) {
+    let mut client = match resolve_kv_client(cli, store_id, group_id).await {
         Ok(c) => c,
         Err(c) => return c,
     };
-    match client.kv_get(store_id, group_id, key.as_bytes()).await {
-        Ok(out) if !out.found => {
+    match client.get(group_id, key.as_bytes()).await {
+        Ok(GetOutcome::NotFound) => {
             if cli.json {
                 return print_json(&serde_json::json!({"found": false}));
             }
             println!("(not found)");
             ExitCode::from(3)
         }
-        Ok(out) => {
-            // The console populates value_hex unconditionally for
-            // found responses; decoding back to bytes is the only way
-            // to print a binary value verbatim.
-            let hex_value = out.value_hex.clone().unwrap_or_default();
+        Ok(GetOutcome::Found { value, revision }) => {
+            let hex_value = hex::encode(&value);
             if cli.json {
                 return print_json(&serde_json::json!({
                     "found": true,
-                    "revision": out.revision,
+                    "revision": revision,
                     "value_hex": hex_value,
-                    "value_utf8": out.value_utf8.clone().unwrap_or_default(),
+                    "value_utf8": String::from_utf8_lossy(&value).to_string(),
                 }));
             }
             if hex_out {
                 println!("{hex_value}");
             } else {
                 use std::io::Write;
-                let bytes = hex::decode(&hex_value).unwrap_or_default();
                 let mut sink = std::io::stdout().lock();
-                let _ = sink.write_all(&bytes);
+                let _ = sink.write_all(&value);
                 let _ = sink.write_all(b"\n");
             }
             ExitCode::SUCCESS
@@ -233,14 +247,11 @@ async fn kv_get(cli: &Cli, store_id: u64, group_id: u64, key: &str, hex_out: boo
 }
 
 async fn kv_delete(cli: &Cli, store_id: u64, group_id: u64, key: &str, client_id: u64, seq: u64) -> ExitCode {
-    let client = match console_client(cli) {
+    let mut client = match resolve_kv_client(cli, store_id, group_id).await {
         Ok(c) => c,
         Err(c) => return c,
     };
-    match client
-        .kv_delete(store_id, group_id, key.as_bytes(), client_id, seq)
-        .await
-    {
+    match client.delete(group_id, key.as_bytes(), client_id, seq).await {
         Ok(out) => {
             if cli.json {
                 return print_json(&serde_json::json!({"ok": true, "revision": out.revision}));
@@ -256,20 +267,36 @@ async fn kv_delete(cli: &Cli, store_id: u64, group_id: u64, key: &str, client_id
 }
 
 async fn kv_scan(cli: &Cli, store_id: u64, group_id: u64, prefix: &str, limit: u32) -> ExitCode {
-    let client = match console_client(cli) {
+    let mut client = match resolve_kv_client(cli, store_id, group_id).await {
         Ok(c) => c,
         Err(c) => return c,
     };
-    match client.kv_scan(store_id, group_id, prefix.as_bytes(), limit).await {
+    match client.scan(group_id, prefix.as_bytes(), limit).await {
         Ok(out) => {
             if cli.json {
+                let items: Vec<serde_json::Value> = out
+                    .items
+                    .iter()
+                    .map(|(key, value)| {
+                        serde_json::json!({
+                            "key_utf8": String::from_utf8_lossy(key).to_string(),
+                            "value_utf8": String::from_utf8_lossy(value).to_string(),
+                            "key_hex": hex::encode(key),
+                            "value_hex": hex::encode(value),
+                        })
+                    })
+                    .collect();
                 return print_json(&serde_json::json!({
-                    "items": out.items,
+                    "items": items,
                     "truncated": out.truncated,
                 }));
             }
-            for item in &out.items {
-                println!("{}\t{}", item.key_utf8, item.value_utf8);
+            for (key, value) in &out.items {
+                println!(
+                    "{}\t{}",
+                    String::from_utf8_lossy(key),
+                    String::from_utf8_lossy(value)
+                );
             }
             if out.truncated {
                 eprintln!("(truncated: more keys exist past --limit {limit})");

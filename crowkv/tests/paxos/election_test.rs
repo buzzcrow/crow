@@ -54,8 +54,8 @@ async fn prevote_does_not_bump_term() {
         VoteRequestPayload {
             term: term_before + 5,
             candidate_id: 2,
-            last_chosen_slot: 0,
-            last_chosen_term: 0,
+            accepted_log_tip_slot: 0,
+            accepted_log_tip_term: 0,
         },
         1,
     )
@@ -121,5 +121,80 @@ async fn term_fencing_in_acceptor_adopts_higher_term() {
         replica.current_term_snapshot(),
         9,
         "current_term must be adopted from the higher-term Accept"
+    );
+}
+
+#[tokio::test]
+async fn request_vote_rejects_candidate_missing_higher_accepted_log_tip() {
+    let voter = PxLocalReplica::new(7, PxLocalReplicaRole::Follower);
+    let accepted = PxLogEntry {
+        slot: 10,
+        ballot: PxBallot::new(0, 7),
+        term: 4,
+        kind: PxLogEntryKind::Write,
+        payload: bytes::Bytes::from_static(b"v"),
+        client_id: None,
+        seq: None,
+    };
+    let reply = voter.on_accept(accepted).await;
+    assert!(matches!(reply, PxAcceptReply::Accepted { .. }));
+    let term = voter.current_term_snapshot();
+
+    let vote = <PxLocalReplica as ReplicaHandler>::on_request_vote(
+        &voter,
+        VoteRequestPayload {
+            term,
+            candidate_id: 9,
+            accepted_log_tip_slot: 0,
+            accepted_log_tip_term: 0,
+        },
+        1,
+    )
+    .await
+    .expect("request vote reply");
+
+    assert!(
+        !vote.granted,
+        "candidate missing higher accepted log tip must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn request_vote_grants_candidate_with_matching_accepted_log_tip_even_if_learner_is_cold() {
+    let voter = PxLocalReplica::new(8, PxLocalReplicaRole::Follower);
+    let accepted = PxLogEntry {
+        slot: 11,
+        ballot: PxBallot::new(0, 8),
+        term: 6,
+        kind: PxLogEntryKind::Write,
+        payload: bytes::Bytes::from_static(b"v2"),
+        client_id: None,
+        seq: None,
+    };
+    let reply = voter.on_accept(accepted).await;
+    assert!(matches!(reply, PxAcceptReply::Accepted { .. }));
+    assert_eq!(
+        voter.last_chosen_slot(),
+        0,
+        "accepted-only state keeps learner cold"
+    );
+    let term = voter.current_term_snapshot();
+
+    let vote = <PxLocalReplica as ReplicaHandler>::on_request_vote(
+        &voter,
+        VoteRequestPayload {
+            term,
+            candidate_id: 10,
+            accepted_log_tip_slot: 11,
+            accepted_log_tip_term: 6,
+        },
+        1,
+    )
+    .await
+    .expect("request vote reply");
+
+    assert!(
+        vote.granted,
+        "matching accepted log tip should satisfy up-to-date check"
     );
 }

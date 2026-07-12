@@ -6,7 +6,7 @@ Satisfies: all of [`requirement.md`](requirement.md) (phased implementation)
 This document defines the phased implementation schedule and cross-stream dependencies.
 Detailed per-milestone plans are created temporarily before each step (see §6).
 
-> **Note:** sub-topic plan files (`plan-consensus.md`, `plan-wal.md`, etc.) have been merged into this outline. Before implementing a milestone, create a temporary detailed plan if needed.
+> **Note:** sub-topic plan files (`plan-consensus.md`, `plan-ut.md`, etc.) have been merged into this outline. Before implementing a milestone, create a temporary detailed plan if needed.
 
 ---
 
@@ -158,7 +158,7 @@ Every phase milestone includes:
 2. **Failure-injection** matching [`design.md`](design.md) §9 scenarios.
 3. **crowbench** integration test (end-to-end correctness) once P4 is reached.
 
-See [`test.md`](test.md) for the consolidated test strategy, invariants, and execution plan.
+See [`plan-ut.md`](plan-ut.md) for ignored/pending test tracking.
 
 ---
 

@@ -116,14 +116,22 @@ async fn single_node_crash_restart_preserves_committed_state() {
         "promise ballot survives crash"
     );
 
-    // Every accepted value survived with no data loss.
-    assert_eq!(restored.last_chosen_slot(), 5, "all five slots recovered");
+    assert_eq!(
+        restored.highest_seen_slot(),
+        6,
+        "highest seen slot survives crash"
+    );
+    assert_eq!(
+        restored.last_chosen_slot(),
+        0,
+        "replay alone does not mark entries chosen"
+    );
     assert_eq!(
         restored.contiguous_chosen(),
-        5,
-        "slots 1..=5 are contiguously chosen"
+        0,
+        "replay alone does not advance chosen frontier"
     );
-    for (entry, key, value) in &entries {
+    for (entry, key, _) in &entries {
         assert_eq!(
             restored.accepted_at(entry.slot).await,
             Some(entry.clone()),
@@ -132,9 +140,8 @@ async fn single_node_crash_restart_preserves_committed_state() {
         );
         assert_eq!(
             restored.learner.engine_get(key),
-            Some((entry.slot, value.clone())),
-            "engine value for slot {} survives",
-            entry.slot
+            None,
+            "engine must stay cold after replay-only restore"
         );
     }
 

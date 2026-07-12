@@ -1,6 +1,4 @@
 use std::path::PathBuf;
-
-/// Configured alignment behavior for a block-oriented WAL backend.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WalBlockAlignment {
     /// No alignment requirement. Writes may target arbitrary byte offsets.

@@ -3,7 +3,7 @@
 #![allow(clippy::missing_fields_in_debug)]
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
@@ -11,6 +11,7 @@ use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
+use crate::cluster::group_config::{PxGroupConfig, PxGroupMember};
 use crate::cluster::group_election::PendingLeaderHandoff;
 use crate::cluster::local_replica::PxLocalReplica;
 use crate::cluster::remote_replica::PxRemoteReplica;
@@ -59,6 +60,11 @@ pub struct PxGroup {
     /// constructed [`PxLocalReplica`], so testkit pinned-leader groups
     /// pass the gate without explicit stamping.
     pub(crate) proposing_term: AtomicU64,
+    /// Whether the current leader tenure may serve linearizable reads from the
+    /// local learner state. A freshly elected leader that came from replay-only
+    /// restore must first finish bulk Phase 1 recovery and locally relearn the
+    /// chosen prefix before it can safely serve reads.
+    pub(crate) leader_read_ready: AtomicBool,
     /// Last-known `contiguous_applied` per voting peer, refreshed from
     /// heartbeat replies. Peers never heard from are absent (treated as
     /// `0`), which keeps [`Self::group_safe_slot`] conservative until every
@@ -107,6 +113,7 @@ impl PxGroup {
             driver_handle: AsyncMutex::new(None),
             pending_leader_handoff: parking_lot::Mutex::new(None),
             proposing_term: AtomicU64::new(0),
+            leader_read_ready: AtomicBool::new(true),
             peer_applied: parking_lot::Mutex::new(HashMap::new()),
             group_safe_slot: AtomicU64::new(0),
             proposer_window: tokio::sync::Semaphore::new(PaxosConfig::DEFAULT.proposer_window),
@@ -150,6 +157,11 @@ impl PxGroup {
     #[must_use]
     pub fn group_safe_slot(&self) -> SlotIndex {
         self.group_safe_slot.load(Ordering::Acquire)
+    }
+
+    #[must_use]
+    pub fn leader_read_ready(&self) -> bool {
+        self.leader_read_ready.load(Ordering::Acquire)
     }
 
     /// Record a voting peer's reported `contiguous_applied` and recompute the
@@ -227,6 +239,22 @@ impl PxGroup {
         self.force_classic = force;
     }
 
+    pub fn inherit_local_state_from(&mut self, prior: &Self) {
+        self.local_replica = PxLocalReplica::new_inheriting_election_state(prior.local_replica());
+        self.next_slot.store(
+            self.next_slot
+                .load(Ordering::Acquire)
+                .max(prior.next_slot.load(Ordering::Acquire)),
+            Ordering::Release,
+        );
+        self.proposing_term
+            .store(prior.proposing_term.load(Ordering::Acquire), Ordering::Release);
+        self.leader_read_ready
+            .store(prior.leader_read_ready(), Ordering::Release);
+        self.group_safe_slot
+            .store(prior.group_safe_slot(), Ordering::Release);
+    }
+
     pub fn set_next_slot(&self, next_slot: SlotIndex) {
         self.next_slot.store(next_slot.max(1), Ordering::Release);
     }
@@ -265,6 +293,78 @@ impl PxGroup {
             Some(old_endpoint)
         } else {
             None
+        }
+    }
+
+    /// Apply a persisted group configuration, wiring remote replicas from the
+    /// durable config snapshot. The local replica is skipped.
+    ///
+    /// This is the restore-window seed (W9): a restarted node that recovers a
+    /// `ConfigChange` record starts with the same intended membership it had
+    /// before the crash, instead of starting as a `quorum=1` singleton.
+    pub fn apply_config(&mut self, config: &PxGroupConfig) {
+        let local_id = self.local_replica().id;
+        let remotes: Vec<PxRemoteReplica> = config
+            .members
+            .iter()
+            .filter(|m| m.replica_id != local_id)
+            .map(|m| PxRemoteReplica::new(m.replica_id, m.endpoint.clone()))
+            .collect();
+        self.set_remote_replicas(remotes);
+        info!(
+            group_id = self.group_id,
+            local_id,
+            member_count = config.members.len(),
+            "applied persisted group config"
+        );
+    }
+
+    /// Persist the current group membership to the WAL as a `ConfigChange`
+    /// record on the metadata lane.
+    ///
+    /// Writes the local replica plus every real remote replica. Non-fatal on
+    /// WAL error: the group continues running but logs the failure.
+    pub async fn persist_config(&self) {
+        let local_id = self.local_replica().id;
+        let term = self.local_replica().current_term_snapshot();
+        let mut members = Vec::new();
+        // Local replica has no outbound endpoint in this group; store an empty
+        // endpoint as a placeholder so the local id appears in the persisted
+        // member list for quorum computation.
+        members.push(PxGroupMember {
+            replica_id: local_id,
+            endpoint: String::new(),
+            voting: self.local_replica().voting(),
+        });
+        for remote in self.remote_replicas.iter().filter_map(|r| r.as_real()) {
+            members.push(PxGroupMember {
+                replica_id: remote.node_id,
+                endpoint: remote.endpoint.clone(),
+                voting: remote.voting,
+            });
+        }
+        let config = PxGroupConfig {
+            group_id: self.group_id,
+            term,
+            members,
+        };
+        let record = config.to_record();
+        if let Some(wal) = self.local_replica().wal() {
+            if let Err(e) = wal.append(&record).await {
+                warn!(
+                    group_id = self.group_id,
+                    term,
+                    error = %e,
+                    "WAL persist ConfigChange failed"
+                );
+            } else {
+                info!(
+                    group_id = self.group_id,
+                    term,
+                    replica_count = config.members.len(),
+                    "persisted group config to WAL"
+                );
+            }
         }
     }
 
@@ -598,7 +698,7 @@ impl PxGroup {
 
                 match self.run_accept_phase(replica, &entry, quorum).await {
                     AcceptAttempt::Chosen => {
-                        replica.learn(&entry);
+                        replica.learn_chosen(&entry).await;
                         // Tell peers the slot is chosen so their
                         // `last_chosen_slot` watermark advances before
                         // the next heartbeat tick.
@@ -737,7 +837,7 @@ impl PxGroup {
 
         match self.run_accept_phase(replica, &entry, quorum).await {
             AcceptAttempt::Chosen => {
-                replica.learn(&entry);
+                replica.learn_chosen(&entry).await;
                 self.fan_out_chosen_notice(&entry, group_id);
                 info!(group_id, slot = gap_slot, "background repair filled gap");
                 RepairOutcome::Filled { slot: gap_slot }
@@ -920,7 +1020,10 @@ impl PxGroup {
                     "prepare adopted foreign value"
                 );
             }
-            entry = prev;
+            entry.kind = prev.kind;
+            entry.payload = prev.payload;
+            entry.client_id = prev.client_id;
+            entry.seq = prev.seq;
         }
         PrepareAttempt::Proceed { entry, foreign_value }
     }

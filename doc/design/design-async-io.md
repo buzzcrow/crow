@@ -51,7 +51,7 @@ For CrowKV, the WAL fsync is on every write's critical path; the engine snapshot
 
 A thin abstraction lets us:
 - Swap backends behind a `cfg` flag without touching call sites.
-- Inject a deterministic in-memory backend for `test_harness`-driven unit tests (per [`test.md`](test.md) §8.2).
+- Inject a deterministic in-memory backend for `testkit`-driven unit tests.
 - Keep the WAL and engine code free of `cfg(target_os = "linux")` branches.
 
 ---
@@ -157,7 +157,7 @@ io_uring's safety contract: while a SQE is in flight, the buffer must not be rea
 
 **Project rule:** all callers use the same owned-buffer pattern even on the fallback backend. This means the WAL `Segment::write` accepts `Vec<u8>` and gets it back; no `&[u8]` passed across an `await` boundary.
 
-**Pool reuse.** A small per-disk free-list of fixed-size 64 KiB buffers is sufficient for WAL fsync coalescing (matches `wal_fsync_batch_bytes` default in [`design-wal.md`](design/design-wal.md) §4.3). The engine snapshot path uses 1 MiB buffers (matches snapshot chunk size). No global pool — each subsystem owns its own.
+**Pool reuse.** A small per-disk free-list of fixed-size 64 KiB buffers is sufficient for WAL durable-flush coalescing (matches `wal_flush_batch_bytes` default in [`design-wal.md`](design/design-wal.md) §4.3). The engine snapshot path uses 1 MiB buffers (matches snapshot chunk size). No global pool — each subsystem owns its own.
 
 **Fixed buffers (registered).** `IORING_REGISTER_BUFFERS` lets us pre-register buffers for zero-copy submission. **Deferred to V2** unless profiling shows submission overhead is a bottleneck.
 
@@ -179,10 +179,10 @@ Specific cases:
 | Layer | Backend | Where |
 |---|---|---|
 | Unit tests for the I/O layer | Real `tokio-uring` on Linux CI; fallback elsewhere | `cargo test` |
-| Unit tests for WAL, engine | A third **simulated** backend (`SimDisk`) that holds an in-memory `BTreeMap<u64, Vec<u8>>` and exposes the same `AsyncFile` API | `test_harness` (per [`test.md`](test.md) §8.2) |
+| Unit tests for WAL, engine | A third **simulated** backend (`SimDisk`) that holds an in-memory `BTreeMap<u64, Vec<u8>>` and exposes the same `AsyncFile` API | `testkit` |
 | Integration tests | Real backend on a `tempfile`-managed directory | `cargo test --test wal_integration` |
 
-The simulated backend supports failure injection: `SimDisk::set_full()`, `SimDisk::inject_io_error()`, `SimDisk::corrupt_at_offset()` — these are the same hooks listed in [`test.md`](test.md) §3.
+The simulated backend supports failure injection: `SimDisk::set_full()`, `SimDisk::inject_io_error()`, `SimDisk::corrupt_at_offset()`.
 
 **Determinism.** The simulated backend completes immediately (no `await` yield) so test scheduling stays deterministic under `start_paused = true`. The real io_uring backend is non-deterministic and is only used in non-unit tests.
 

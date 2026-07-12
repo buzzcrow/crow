@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use crowkv::cluster::group::PxGroup;
 use crowkv::cluster::group_election::LeaderElection;
-use crowkv::cluster::{KvServer, PxKvStore, PxLocalReplica, PxLocalReplicaRole, PxRemoteReplica};
+use crowkv::cluster::{KvServer, PxKvStore, PxLocalReplica, PxLocalReplicaRole};
 use crowkv::common::config::{PxElectionConfig, WalConfig};
 use crowkv::rpc::kv_service_client::KvServiceClient;
 use crowkv::rpc::{KvDeleteRequest, KvGetRequest, KvSetRequest};
@@ -53,14 +53,17 @@ async fn build_wal_group(id: u64, wal_dir: &Path, peers: &[(u64, String)], cfg: 
         .expect("restore replica");
     replica.set_wal(wal);
 
-    let remote_replicas: Vec<PxRemoteReplica> = peers
-        .iter()
-        .filter(|(peer_id, _)| *peer_id != id)
-        .map(|(peer_id, endpoint)| PxRemoteReplica::new(*peer_id, endpoint.clone()))
-        .collect();
-
     let mut group = PxGroup::new(GROUP, replica);
-    group.set_remote_replicas(remote_replicas);
+    if let Some(persisted) = replay.config.as_ref() {
+        group.apply_config(persisted);
+    }
+    // Caller-supplied endpoints (e.g., after restart rewiring) override the
+    // persisted endpoints so ephemeral ports can be reconciled.
+    for (peer_id, endpoint) in peers {
+        if *peer_id != id {
+            group.update_member_endpoint(*peer_id, endpoint.clone());
+        }
+    }
     group.set_election_config(cfg);
     let next_slot = group
         .local_replica()

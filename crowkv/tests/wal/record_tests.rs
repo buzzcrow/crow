@@ -75,6 +75,20 @@ fn encode_decode_roundtrip_vote_granted() {
 }
 
 #[test]
+fn encode_decode_roundtrip_durable_commit_watermark() {
+    let record = WALRecord::from_durable_commit_watermark(3, 17, 123);
+    assert_eq!(record.record_type, RecordType::DurableCommitWatermark);
+    assert_eq!(record.slot, 0);
+
+    let encoded = record.encode();
+    let (decoded, _) = WALRecord::decode(&encoded).unwrap();
+    assert_eq!(decoded.record_type, RecordType::DurableCommitWatermark);
+    assert_eq!(decoded.group_id, 3);
+    assert_eq!(decoded.term, 17);
+    assert_eq!(decoded.durable_commit_watermark(), Some(123));
+}
+
+#[test]
 fn decode_truncated_returns_error() {
     let record = WALRecord::from_promised(1, 1, 1, PxBallot::new(0, 0));
     let encoded = record.encode();
@@ -155,6 +169,7 @@ fn text_line_roundtrips_all_record_types_and_binary_payload() {
             payload: Bytes::new(),
         },
         WALRecord::from_vote_granted(14, 24, 34),
+        WALRecord::from_durable_commit_watermark(15, 25, 35),
     ];
 
     for record in records {

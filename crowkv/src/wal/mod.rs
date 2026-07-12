@@ -1,6 +1,6 @@
 //! `CrowKV` write-ahead log.
 //!
-//! Multi-disk segmented WAL with batched fsync, ack contract, replay, and GC.
+//! Multi-disk segmented WAL with batched durable flush, ack contract, replay, and GC.
 //! All WAL storage I/O goes through `IoBackend` / `AsyncFile`.
 //!
 //! ## Modules
@@ -10,7 +10,8 @@
 //! - [`index`] — `SegmentIndex`: slot → (disk, `segment_id`, offset).
 //! - [`io_backend`] — WAL backend selection and file/block façade.
 //! - [`pipeline_backend`] — Backend model for file, memory-block, and block pipelines.
-//! - [`fsync_worker`] — Per-disk batched fsync task.
+//! - [`pipeline`] — `WalPipeline`: single-disk active segment state.
+//! - [`pipeline_writer`] — Per-pipeline dedicated writer task: drain, batch write, `fdatasync`, ack.
 //! - [`wal_engine`] — `WalEngine`: disk selection, rotation, append API.
 //! - [`replay`] — Replay engine: discover, scan, CRC-truncate, rebuild.
 //! - [`gc`] — GC worker: watermark-based segment unlink.
@@ -23,10 +24,11 @@ pub mod io_backend;
 
 use std::io;
 
-pub mod fsync_worker;
 pub mod gc;
 pub mod index;
+pub mod pipeline;
 pub mod pipeline_backend;
+pub mod pipeline_writer;
 pub mod record;
 pub mod replay;
 pub mod segment;
@@ -62,6 +64,24 @@ impl AsyncFile {
             AsyncFileInner::File(f) => f.write_at(data, offset).await,
             #[cfg(feature = "test-util")]
             AsyncFileInner::Block(f) => f.write_at(data, offset),
+        }
+    }
+
+    /// Write multiple non-contiguous buffers at byte `offset` in a single
+    /// vectored system call. Returns the total number of bytes written.
+    ///
+    /// # Errors
+    /// Returns an IO error if the write fails or if fewer than the total bytes
+    /// could be written.
+    pub async fn write_vectored_at(
+        &mut self,
+        bufs: &[std::io::IoSlice<'_>],
+        offset: u64,
+    ) -> io::Result<usize> {
+        match &mut self.inner {
+            AsyncFileInner::File(f) => f.write_vectored_at(bufs, offset).await,
+            #[cfg(feature = "test-util")]
+            AsyncFileInner::Block(f) => f.write_vectored_at(bufs, offset),
         }
     }
 

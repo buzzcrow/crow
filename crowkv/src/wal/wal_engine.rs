@@ -1,23 +1,27 @@
 //! `WalEngine` — multi-disk WAL coordinator (P2 W8).
 //!
-//! Owns the disk set, active segments (one per disk), segment index,
-//! and fsync workers. Provides the `append` API consumed by the acceptor
+//! Owns the disk set, pipeline handles, segment index, and per-pipeline
+//! writer tasks. Provides the `append` API consumed by the acceptor
 //! durability hook (W6).
 
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
-use tracing::{debug, error, info};
+use tokio::sync::oneshot;
+use tracing::{debug, info};
 
 use crate::common::config::WalConfig;
+use crate::paxos::roles::SlotIndex;
 use crate::paxos::PxGroupId;
 
-use super::index::{SegmentIndex, SegmentMeta, SlotLocation};
+use super::index::{SegmentIndex, SlotLocation};
+use super::pipeline::WalPipeline;
 use super::pipeline_backend::{WalBlockAlignment, WalPipelineBackend};
+use super::pipeline_writer::{spawn_pipeline_writer, EncodedRecord, PendingWrite, WriterCommand};
 use super::record::{WALRecord, WalRecordFormat};
-use super::segment::WalSegment;
 use super::IoBackend;
 
 /// The main WAL handle, shared (via `Arc`) by the acceptor and the GC worker.
@@ -25,52 +29,32 @@ pub struct WalEngine {
     backend: Arc<IoBackend>,
     config: WalConfig,
     group_id: PxGroupId,
-    /// One active (unsealed) segment per disk.
-    ///
-    /// `tokio::sync::Mutex` because the guard is held across `.await`
-    /// (segment create, record write, fdatasync). Using `parking_lot::Mutex`
-    /// would make the resulting future `!Send`.
-    pipelines: tokio::sync::Mutex<Vec<WalPipeline>>,
-    /// In-memory index: slot → location. Accessed synchronously only.
-    index: parking_lot::Mutex<SegmentIndex>,
+    /// One pipeline per disk. Each pipeline is independently lock-free for
+    /// appends — the writer task owns the segment exclusively.
+    pipelines: Vec<WalPipeline>,
+    /// In-memory index: slot → location. Updated by writer tasks after flush.
+    index: Arc<parking_lot::Mutex<SegmentIndex>>,
     /// Monotonically increasing segment id counter.
-    next_segment_id: AtomicU64,
-    /// Round-robin counter for disk selection.
-    rr_counter: AtomicU64,
+    next_segment_id: Arc<AtomicU64>,
     /// Number of configured pipelines (cached for lock-free `select_pipeline`).
     pipeline_count: usize,
     /// Set to true on disk I/O error; stops further writes.
     failed: Arc<AtomicBool>,
+    /// Highest slot covered by a persisted snapshot marker.
+    ///
+    /// Records at or below this slot may be GC'd once the caller's safety
+    /// criteria are met. `0` means no snapshot has been recorded.
+    snapshot_slot: AtomicU64,
+    /// Join handles for the writer tasks (aborted on drop).
+    writer_tasks: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
-struct WalPipeline {
-    pipeline_path: PathBuf,
-    backend: WalPipelineBackend,
-    active_segment: Option<WalSegment>,
-    pipeline_idx: usize,
-    record_format: WalRecordFormat,
-}
-
-impl WalPipeline {
-    async fn ensure_active_segment(
-        &mut self,
-        backend: &IoBackend,
-        next_segment_id: &AtomicU64,
-        group_id: PxGroupId,
-    ) -> io::Result<()> {
-        if self.active_segment.is_none() {
-            let seg_id = next_segment_id.fetch_add(1, Ordering::Relaxed);
-            let seg = WalSegment::create_with_format(
-                backend,
-                &self.pipeline_path,
-                seg_id,
-                group_id,
-                self.record_format,
-            )
-            .await?;
-            self.active_segment = Some(seg);
+impl Drop for WalEngine {
+    fn drop(&mut self) {
+        // Drop writer_tx by dropping pipelines, then abort tasks.
+        for task in self.writer_tasks.lock().drain(..) {
+            task.abort();
         }
-        Ok(())
     }
 }
 
@@ -87,7 +71,19 @@ impl WalEngine {
         config: WalConfig,
         group_id: PxGroupId,
     ) -> io::Result<Arc<Self>> {
-        let mut pipelines = Vec::with_capacity(config.wal_disks.len());
+        let pipeline_count = config.wal_disks.len();
+        let failed = Arc::new(AtomicBool::new(false));
+        let index = Arc::new(parking_lot::Mutex::new(SegmentIndex::new()));
+        let next_segment_id = Arc::new(AtomicU64::new(1));
+
+        let coalesce = Duration::from_micros(config.wal_flush_coalesce_us);
+        let watchdog = Duration::from_millis(config.wal_flush_watchdog_ms);
+        let batch_bytes = config.wal_flush_batch_bytes;
+        let segment_size = config.wal_segment_size;
+
+        let mut pipelines = Vec::with_capacity(pipeline_count);
+        let mut writer_tasks = Vec::with_capacity(pipeline_count);
+
         for (idx, disk_path) in config.wal_disks.iter().enumerate() {
             let group_dir = disk_path.join(format!("group{group_id}"));
             backend.create_dir_all(&group_dir).await?;
@@ -97,139 +93,114 @@ impl WalEngine {
                     WalPipelineBackend::block(disk_path.to_string_lossy(), config.wal_alignment)
                 }
             };
-            let record_format = select_record_format(config.wal_record_format, &pipeline_backend);
+            let record_format = select_record_format(config.wal_record_format);
+
+            let (writer_tx, task) = spawn_pipeline_writer(
+                idx,
+                backend.clone(),
+                group_dir.clone(),
+                record_format,
+                group_id,
+                next_segment_id.clone(),
+                segment_size,
+                coalesce,
+                watchdog,
+                batch_bytes,
+                failed.clone(),
+                index.clone(),
+            );
+            writer_tasks.push(task);
+
             pipelines.push(WalPipeline {
                 pipeline_path: group_dir,
                 backend: pipeline_backend,
-                active_segment: None,
-                pipeline_idx: idx,
+                writer_tx,
                 record_format,
             });
         }
 
-        let pipeline_count = pipelines.len();
         info!(group_id, pipeline_count, "wal engine created");
 
         Ok(Arc::new(Self {
             backend,
             config,
             group_id,
-            pipelines: tokio::sync::Mutex::new(pipelines),
-            index: parking_lot::Mutex::new(SegmentIndex::new()),
-            next_segment_id: AtomicU64::new(1),
-            rr_counter: AtomicU64::new(0),
+            pipelines,
+            index,
+            next_segment_id,
             pipeline_count,
-            failed: Arc::new(AtomicBool::new(false)),
+            failed,
+            snapshot_slot: AtomicU64::new(0),
+            writer_tasks: parking_lot::Mutex::new(writer_tasks),
         }))
     }
 
-    /// Append a WAL record, write to disk, fdatasync, and return the location.
+    /// Append a WAL record, write it durably, and return the location.
     ///
     /// This is the **ack contract** path: the future only resolves after
-    /// the record is fsynced to disk.
-    ///
-    /// # Panics
-    /// Panics if the segment is not available (internal invariant violation).
+    /// the record's durable flush completes.
     ///
     /// # Errors
-    /// Returns IO error if the write or fsync fails, or if WAL disk has failed.
+    /// Returns IO error if the write or durable flush fails, or if WAL disk has failed.
     pub async fn append(&self, record: &WALRecord) -> io::Result<SlotLocation> {
         if self.failed.load(Ordering::Acquire) {
             return Err(io::Error::other("WAL disk failed"));
         }
 
-        let pipeline_idx = self.select_pipeline();
+        let pipeline_idx = self.select_pipeline(record);
+        let pipeline = &self.pipelines[pipeline_idx];
 
-        let mut pipelines = self.pipelines.lock().await;
-        let pipeline = &mut pipelines[pipeline_idx];
-
-        pipeline
-            .ensure_active_segment(&self.backend, &self.next_segment_id, self.group_id)
-            .await?;
-
-        let seg = pipeline.active_segment.as_mut().unwrap();
-        let file_offset = seg.append(record).await?;
-        let segment_id = seg.segment_id;
-
-        if seg.is_full(self.config.wal_segment_size) {
-            self.rotate_pipeline(&mut pipelines[pipeline_idx]).await?;
-        }
-
-        if let Some(seg) = pipelines[pipeline_idx].active_segment.as_ref() {
-            if let Err(e) = seg.file().fdatasync().await {
-                error!(group_id = self.group_id, pipeline_idx, error = %e, "fdatasync failed");
-                self.failed.store(true, Ordering::Release);
-                return Err(e);
-            }
-        }
-
-        drop(pipelines);
-
-        let loc = SlotLocation {
-            disk_idx: pipeline_idx,
-            segment_id,
-            file_offset,
+        // Encode the record using the format resolved for this pipeline. Binary
+        // uses the zero-copy frame; text-line keeps the formatted line.
+        let encoded = match pipeline.record_format {
+            WalRecordFormat::Binary => EncodedRecord::Binary(record.encode_frame()),
+            WalRecordFormat::TextLine => EncodedRecord::TextLine(record.encode_text_line().into_bytes()),
+            WalRecordFormat::Auto => unreachable!("Auto must be resolved at pipeline creation"),
         };
 
-        if record.slot != 0 {
-            self.index.lock().insert(record.slot, loc);
-        }
+        // Enqueue to the writer task and await the durable-flush ack.
+        //
+        // Per-record allocations (unavoidable, inherent to async ack design):
+        //   - `oneshot::channel()` — 1 allocation for the ack future
+        //   - `mpsc::unbounded_send` — 1 allocation for the channel node
+        // These are the minimum required by the channel-based ack contract
+        // and cannot be eliminated without changing the concurrency model.
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let pending = PendingWrite {
+            encoded,
+            slot: record.slot,
+            ack: ack_tx,
+        };
+
+        pipeline
+            .writer_tx
+            .send(WriterCommand::Write(pending))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "WAL writer stopped"))?;
+
+        // Ack contract (W3/W6): resolve only after durable flush.
+        // The writer sends back the SlotLocation.
+        let loc = ack_rx
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "WAL writer dropped ack"))??;
 
         debug!(
             group_id = self.group_id,
             slot = record.slot,
             pipeline_idx,
-            segment_id,
-            file_offset,
-            "wal record appended and fsynced"
+            "wal record appended and durably flushed"
         );
 
         Ok(loc)
     }
 
-    /// Select pipeline via round-robin (lock-free).
-    fn select_pipeline(&self) -> usize {
-        if self.pipeline_count == 0 {
+    /// Select pipeline via deterministic slot affinity.
+    fn select_pipeline(&self, record: &WALRecord) -> usize {
+        if self.pipeline_count <= 1 {
             return 0;
         }
-        usize::try_from(self.rr_counter.fetch_add(1, Ordering::Relaxed) % self.pipeline_count as u64)
-            .expect("pipeline_count exceeds usize")
-    }
-
-    /// Rotate the active segment on a pipeline: seal current, open new.
-    async fn rotate_pipeline(&self, pipeline: &mut WalPipeline) -> io::Result<()> {
-        if let Some(mut old_seg) = pipeline.active_segment.take() {
-            old_seg.seal().await?;
-
-            let meta = SegmentMeta {
-                segment_id: old_seg.segment_id,
-                disk_idx: pipeline.pipeline_idx,
-                min_slot: old_seg.min_slot,
-                max_slot: old_seg.max_slot,
-                record_count: old_seg.record_count,
-            };
-            self.index.lock().register_segment(meta);
-
-            info!(
-                group_id = self.group_id,
-                segment_id = old_seg.segment_id,
-                min_slot = old_seg.min_slot,
-                max_slot = old_seg.max_slot,
-                "segment sealed"
-            );
-        }
-
-        let seg_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
-        let seg = WalSegment::create_with_format(
-            &self.backend,
-            &pipeline.pipeline_path,
-            seg_id,
-            self.group_id,
-            pipeline.record_format,
-        )
-        .await?;
-        pipeline.active_segment = Some(seg);
-        Ok(())
+        let lane_slot = if record.slot == 0 { 0 } else { record.slot };
+        let hash = lane_slot.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ record.group_id;
+        usize::try_from(hash % self.pipeline_count as u64).expect("pipeline_count exceeds usize")
     }
 
     /// Seal all active segments (used during shutdown or forced rotation).
@@ -237,20 +208,18 @@ impl WalEngine {
     /// # Errors
     /// Returns IO error if sealing any segment fails.
     pub async fn seal_all(&self) -> io::Result<()> {
-        let mut pipelines = self.pipelines.lock().await;
-        for pipeline in pipelines.iter_mut() {
-            if let Some(seg) = pipeline.active_segment.as_mut() {
-                seg.seal().await?;
-                let meta = SegmentMeta {
-                    segment_id: seg.segment_id,
-                    disk_idx: pipeline.pipeline_idx,
-                    min_slot: seg.min_slot,
-                    max_slot: seg.max_slot,
-                    record_count: seg.record_count,
-                };
-                self.index.lock().register_segment(meta);
-            }
-            pipeline.active_segment = None;
+        let mut acks = Vec::with_capacity(self.pipelines.len());
+        for pipeline in &self.pipelines {
+            let (tx, rx) = oneshot::channel();
+            pipeline
+                .writer_tx
+                .send(WriterCommand::Seal { ack: tx })
+                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "WAL writer stopped"))?;
+            acks.push(rx);
+        }
+        for rx in acks {
+            rx.await
+                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "WAL writer dropped ack"))??;
         }
         Ok(())
     }
@@ -272,6 +241,17 @@ impl WalEngine {
         self.failed.load(Ordering::Acquire)
     }
 
+    /// Return the highest slot covered by a persisted snapshot marker.
+    #[must_use]
+    pub fn snapshot_slot(&self) -> SlotIndex {
+        self.snapshot_slot.load(Ordering::Acquire)
+    }
+
+    /// Set the highest slot covered by a persisted snapshot marker.
+    pub fn set_snapshot_slot(&self, slot: SlotIndex) {
+        self.snapshot_slot.store(slot, Ordering::Release);
+    }
+
     /// Backend reference (for replay, GC file ops).
     pub fn backend(&self) -> &Arc<IoBackend> {
         &self.backend
@@ -284,20 +264,16 @@ impl WalEngine {
 
     /// Per-pipeline backend descriptors, in disk order. Reflects the alignment
     /// selected from [`WalConfig::wal_alignment`] at construction.
-    pub async fn pipeline_backends(&self) -> Vec<WalPipelineBackend> {
+    pub fn pipeline_backends(&self) -> Vec<WalPipelineBackend> {
         self.pipelines
-            .lock()
-            .await
             .iter()
             .map(|pipeline| pipeline.backend.clone())
             .collect()
     }
 
     /// Pipeline paths (group-level subdirectories).
-    pub async fn disk_group_paths(&self) -> Vec<PathBuf> {
+    pub fn disk_group_paths(&self) -> Vec<PathBuf> {
         self.pipelines
-            .lock()
-            .await
             .iter()
             .map(|pipeline| pipeline.pipeline_path.clone())
             .collect()
@@ -308,18 +284,15 @@ impl WalEngine {
         self.next_segment_id.store(id, Ordering::Release);
     }
 
-    /// Get the failed flag for sharing with fsync workers.
+    /// Get the failed flag for sharing with external components.
     pub fn failed_flag(&self) -> Arc<AtomicBool> {
         self.failed.clone()
     }
 }
 
-fn select_record_format(configured: WalRecordFormat, backend: &WalPipelineBackend) -> WalRecordFormat {
+fn select_record_format(configured: WalRecordFormat) -> WalRecordFormat {
     match configured {
-        WalRecordFormat::Auto => match backend {
-            WalPipelineBackend::File(_) | WalPipelineBackend::MemBlock(_) => WalRecordFormat::TextLine,
-            WalPipelineBackend::Block(_) => WalRecordFormat::Binary,
-        },
+        WalRecordFormat::Auto => WalRecordFormat::Binary,
         explicit => explicit,
     }
 }

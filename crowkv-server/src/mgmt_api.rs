@@ -110,7 +110,7 @@ struct AddGroupRequest {
     initial_role: Option<AddGroupInitialRole>,
     /// When `Some(false)`, the group is added **without** starting its election
     /// driver, so it cannot self-elect at `quorum == 1` before its remotes are
-    /// wired (see `doc/bug-wal.md` §8.4). The subsequent remote-wiring rebuild
+    /// wired (see `doc/plan-ut.md` §3.1). The subsequent remote-wiring rebuild
     /// (`add_remote_replicas`) starts the driver with a correct quorum. Defaults
     /// to starting the driver (backward compatible).
     #[serde(default)]
@@ -491,12 +491,22 @@ async fn add_group(
             ),
         )
     })?;
+    let group = group;
     // Defer the election driver when the caller is about to wire remotes
     // (multi-replica restore / creation). Avoids a `quorum == 1` self-election
     // running `bulk_phase1` / `repair_once` against only itself, which can
-    // erase committed data (`doc/bug-wal.md` §8.4). The driver is started by
+    // erase committed data (`doc/plan-ut.md` §3.1). The driver is started by
     // the subsequent `add_remote_replicas` rebuild.
     let start_election = req.start_election.unwrap_or(true);
+    if start_election && group.quorum() == 1 {
+        let current_term = group.local_replica().current_term_snapshot();
+        if current_term == 0 {
+            group.local_replica().become_candidate(1);
+            group.local_replica().persist_current_vote().await;
+            group.local_replica().become_leader();
+        }
+        group.stamp_proposing_term(group.local_replica().current_term_snapshot());
+    }
     if start_election {
         store.add_group(group);
     } else {
@@ -661,6 +671,7 @@ async fn add_remote_replicas(
         );
         new_group.add_remote_replica(PxRemoteReplica::new(r.replica_id, r.endpoint.clone()));
     }
+    new_group.persist_config().await;
     store.add_group(new_group);
 
     info!(
@@ -740,6 +751,7 @@ async fn remove_remote_replica(
         new_group.local_replica().become_follower(current_term);
         new_group.local_replica().clear_vote_lockout();
     }
+    new_group.persist_config().await;
     store.add_group(new_group);
 
     info!(
@@ -827,6 +839,7 @@ async fn batch_add_remote_replicas(
         );
         new_group.add_remote_replica(PxRemoteReplica::new(r.replica_id, r.endpoint.clone()));
     }
+    new_group.persist_config().await;
     store.add_group(new_group);
 
     info!(

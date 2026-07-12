@@ -461,7 +461,7 @@ The WAL is per-node. Inter-node consistency is the consensus layer's job. If a n
 
 ## 10. Follow-up Implementation Scope
 
-The design deltas above are tracked in [`plan-wal.md`](../plan-wal.md):
+The design deltas above have been implemented. Remaining ignored or pending tests are tracked in [`plan-ut.md`](../plan-ut.md):
 
 - Slot-affinity WAL placement instead of per-record round-robin.
 - Backend-specific durable flush and alignment semantics.

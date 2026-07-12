@@ -74,8 +74,8 @@ pub struct HeartbeatReply {
 pub struct VoteRequestPayload {
     pub term: PxTerm,
     pub candidate_id: PxNodeId,
-    pub last_chosen_slot: SlotIndex,
-    pub last_chosen_term: PxTerm,
+    pub accepted_log_tip_slot: SlotIndex,
+    pub accepted_log_tip_term: PxTerm,
 }
 
 /// Admin step-down request payload (strict-fence policy: target replica must

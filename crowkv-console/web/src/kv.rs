@@ -5,7 +5,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use crowkv_console_shared::clients::grpc::{GetOutcome, KvClient, ScanOutcome};
-use crowkv_console_shared::cluster::ReplicaRole;
+use crowkv_console_shared::cluster::{GroupHealth, ReplicaRole};
 use crowkv_console_shared::error::Error as SharedError;
 use hex;
 use serde::{Deserialize, Serialize};
@@ -82,6 +82,10 @@ fn decode_hex(s: &str) -> Result<Vec<u8>, (axum::http::StatusCode, Json<ErrorBod
 /// Resolve the gRPC endpoint for a group's leader via the monitor cache.
 /// Falls back to any healthy replica if no leader hint is available.
 ///
+/// Before returning, the monitor cache is refreshed for every node hosting
+/// the group until a leader is observed, so KV reads are not forwarded
+/// based on stale topology immediately after a restart.
+///
 /// # Panics
 /// Panics if the `RwLock` is poisoned.
 ///
@@ -93,16 +97,27 @@ pub async fn resolve_kv_endpoint(
     sid: u64,
     gid: u64,
 ) -> Result<String, (StatusCode, Json<ErrorBody>)> {
-    let (_rid, node_id) = state.monitor_cache.leader_for(sid, gid).await.ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ErrorBody {
-                error: format!("group {gid} in store {sid} not found or has no replicas"),
-            }),
-        )
-    })?;
+    for attempt in 0..5 {
+        if let Some(view) = state.monitor_cache.resolve_group(sid, gid).await {
+            if view.state == GroupHealth::Healthy {
+                if let Some(leader) = view.leader() {
+                    return kv_endpoint_for_node(state, sid, &leader.node_id).await;
+                }
+            }
+        }
+        if attempt == 4 {
+            break;
+        }
+        refresh_group_nodes(state, sid, gid).await;
+        sleep(Duration::from_millis(50 * (1 + attempt))).await;
+    }
 
-    kv_endpoint_for_node(state, sid, &node_id).await
+    Err((
+        StatusCode::NOT_FOUND,
+        Json(ErrorBody {
+            error: format!("group {gid} in store {sid} not found or has no healthy leader"),
+        }),
+    ))
 }
 
 async fn kv_endpoint_for_node(
@@ -195,6 +210,7 @@ pub async fn http_kv_endpoint(
     State(state): State<AppState>,
     Path((sid, gid)): Path<(u64, u64)>,
 ) -> Result<Json<EndpointResponse>, (StatusCode, Json<ErrorBody>)> {
+    refresh_group_nodes(&state, sid, gid).await;
     let grpc_url = resolve_kv_endpoint(&state, sid, gid).await?;
     Ok(Json(EndpointResponse { grpc_url }))
 }
@@ -252,15 +268,25 @@ fn enqueue_front(queue: &mut VecDeque<String>, pending: &mut HashSet<String>, en
     }
 }
 
-/// Refresh the monitor cache for every node currently hosting a
-/// replica of `(sid, gid)`. Called on `NotLeader` so the next
-/// `leader_for` call can observe a post-election view.
+/// Refresh the monitor cache for every node hosting a replica of
+/// `(sid, gid)`. Called on `NotLeader` and on initial endpoint resolution so
+/// the next `leader_for` call observes a post-election view. If the cache
+/// has no record for the group yet, fall back to the persisted config
+/// replica list so a restarted web console can still find the nodes to
+/// refresh.
 async fn refresh_group_nodes(state: &AppState, sid: u64, gid: u64) {
-    let Some(view) = state.monitor_cache.resolve_group(sid, gid).await else {
-        return;
+    let node_ids: Vec<String> = if let Some(view) = state.monitor_cache.resolve_group(sid, gid).await {
+        view.replicas.into_iter().map(|r| r.node_id).collect()
+    } else {
+        let cfg = state.config.read().unwrap();
+        cfg.groups
+            .iter()
+            .find(|g| g.store_id == sid && g.group_id == gid)
+            .map(|g| g.replicas.iter().map(|r| r.node_id.clone()).collect())
+            .unwrap_or_default()
     };
-    for r in &view.replicas {
-        refresh_node_cache(state, &r.node_id).await;
+    for node_id in &node_ids {
+        refresh_node_cache(state, node_id).await;
     }
 }
 

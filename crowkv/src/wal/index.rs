@@ -15,7 +15,11 @@ pub struct SlotLocation {
     pub file_offset: u64,
 }
 
-/// In-memory index mapping slot → location.
+/// In-memory index mapping slot → latest known location.
+///
+/// This is a rebuildable cache used for lookup and GC metadata. Multiple WAL
+/// records may exist for the same slot; inserting a later location overwrites
+/// the cache entry while replay still scans every durable record.
 #[derive(Default, Debug)]
 pub struct SegmentIndex {
     map: BTreeMap<SlotIndex, SlotLocation>,
@@ -39,7 +43,7 @@ impl SegmentIndex {
         Self::default()
     }
 
-    /// Record a slot→location mapping. Overwrites if already present.
+    /// Record a slot→location cache mapping. Overwrites if already present.
     pub fn insert(&mut self, slot: SlotIndex, loc: SlotLocation) {
         self.map.insert(slot, loc);
     }

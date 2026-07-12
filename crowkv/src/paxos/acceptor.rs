@@ -42,6 +42,17 @@ impl PxAcceptor {
         self.highest_seen_slot.load(Ordering::Acquire)
     }
 
+    #[must_use]
+    pub fn accepted_log_tip(&self) -> Option<(SlotIndex, u64)> {
+        let highest = self.highest_seen_slot();
+        for slot in (1..=highest).rev() {
+            if let Some(entry) = self.slot_list.get(slot).and_then(|node| node.accepted_cloned()) {
+                return Some((entry.slot, entry.term));
+            }
+        }
+        None
+    }
+
     fn bump_highest_seen(&self, slot: SlotIndex) {
         let mut prev = self.highest_seen_slot.load(Ordering::Relaxed);
         while slot > prev {

@@ -59,6 +59,7 @@ pub enum RecordType {
     DedupCheckpoint = 3,
     SnapshotMarker = 4,
     VoteGranted = 5,
+    DurableCommitWatermark = 6,
 }
 
 impl RecordType {
@@ -70,6 +71,7 @@ impl RecordType {
             3 => Some(Self::DedupCheckpoint),
             4 => Some(Self::SnapshotMarker),
             5 => Some(Self::VoteGranted),
+            6 => Some(Self::DurableCommitWatermark),
             _ => None,
         }
     }
@@ -82,6 +84,7 @@ impl RecordType {
             Self::DedupCheckpoint => "DedupCheckpoint",
             Self::SnapshotMarker => "SnapshotMarker",
             Self::VoteGranted => "VoteGranted",
+            Self::DurableCommitWatermark => "DurableCommitWatermark",
         }
     }
 
@@ -93,6 +96,7 @@ impl RecordType {
             "DedupCheckpoint" => Ok(Self::DedupCheckpoint),
             "SnapshotMarker" => Ok(Self::SnapshotMarker),
             "VoteGranted" => Ok(Self::VoteGranted),
+            "DurableCommitWatermark" => Ok(Self::DurableCommitWatermark),
             _ => Err(RecordError::BadText(format!("unknown record type: {value}"))),
         }
     }
@@ -137,57 +141,114 @@ pub struct WALRecord {
     pub payload: Bytes,
 }
 
+/// Zero-copy binary frame for a single WAL record.
+///
+/// The fixed-size header pieces are stored inline; the payload is borrowed via
+/// `Bytes`, so no data copy is needed when the frame is built or cloned.
+#[derive(Clone, Debug)]
+pub struct RecordFrame {
+    frame_len: [u8; 4],
+    header: [u8; HEADER_BODY_LEN],
+    payload: Bytes,
+    crc: [u8; 4],
+}
+
+impl RecordFrame {
+    /// Total on-disk size of the framed record (`frame_len` + header + payload + crc).
+    #[must_use]
+    pub fn total_len(&self) -> usize {
+        4 + HEADER_BODY_LEN + self.payload.len() + 4
+    }
+
+    /// Append this record's slices to `slices` so the whole batch can be written
+    /// with a single vectored write.
+    pub fn append_io_slices<'a>(&'a self, slices: &mut Vec<std::io::IoSlice<'a>>) {
+        slices.push(std::io::IoSlice::new(&self.frame_len));
+        slices.push(std::io::IoSlice::new(&self.header));
+        slices.push(std::io::IoSlice::new(&self.payload));
+        slices.push(std::io::IoSlice::new(&self.crc));
+    }
+}
+
+/// Write the fixed-size header body (everything after `frame_len` and before
+/// the payload) into `buf`.
+fn write_header_body(buf: &mut [u8; HEADER_BODY_LEN], record: &WALRecord, payload_len: usize) {
+    let mut off = 0;
+    buf[off..off + 4].copy_from_slice(&WAL_MAGIC.to_le_bytes());
+    off += 4;
+    buf[off..off + 2].copy_from_slice(&WAL_VERSION.to_le_bytes());
+    off += 2;
+    buf[off] = record.record_type as u8;
+    off += 1;
+    buf[off..off + 8].copy_from_slice(&record.group_id.to_le_bytes());
+    off += 8;
+    buf[off..off + 8].copy_from_slice(&record.term.to_le_bytes());
+    off += 8;
+    buf[off..off + 8].copy_from_slice(&record.slot.to_le_bytes());
+    off += 8;
+    buf[off..off + 8].copy_from_slice(&record.ballot.round.to_le_bytes());
+    off += 8;
+    buf[off..off + 8].copy_from_slice(&record.ballot.leader_id.to_le_bytes());
+    off += 8;
+    buf[off..off + 4].copy_from_slice(
+        &u32::try_from(payload_len)
+            .expect("payload_len exceeds u32")
+            .to_le_bytes(),
+    );
+    off += 4;
+    debug_assert_eq!(off, HEADER_BODY_LEN);
+}
+
 impl WALRecord {
     pub const TEXT_PREFIX: &'static str = "CROW_WAL_TEXT";
 
+    /// Zero-copy binary frame. Holds the fixed-size pieces and borrows the
+    /// payload via `Bytes`. The payload is not copied; cloning the frame only
+    /// bumps the ref-count.
+    ///
+    /// # Panics
+    /// Panics if `frame_len` or `payload_len` exceeds `u32::MAX`.
+    #[must_use]
+    pub fn encode_frame(&self) -> RecordFrame {
+        let payload_len = self.payload.len();
+        let frame_len_value = HEADER_BODY_LEN + payload_len + 4; // +4 for crc
+        let mut frame_len = [0u8; 4];
+        frame_len.copy_from_slice(
+            &u32::try_from(frame_len_value)
+                .expect("frame_len exceeds u32")
+                .to_le_bytes(),
+        );
+
+        let mut header = [0u8; HEADER_BODY_LEN];
+        write_header_body(&mut header, self, payload_len);
+
+        let crc = crc32c::crc32c_append(crc32c::crc32c(&header), &self.payload);
+        let mut crc_bytes = [0u8; 4];
+        crc_bytes.copy_from_slice(&crc.to_le_bytes());
+
+        RecordFrame {
+            frame_len,
+            header,
+            payload: self.payload.clone(),
+            crc: crc_bytes,
+        }
+    }
+
     /// Encode to the on-disk byte layout. Returns the complete framed record.
+    ///
+    /// This is kept for tests and legacy callers. The hot path uses
+    /// [`Self::encode_frame`] to avoid copying the payload.
     ///
     /// # Panics
     /// Panics if `frame_len` or `payload_len` exceeds `u32::MAX`.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
-        let payload_len = self.payload.len();
-        let frame_len = HEADER_BODY_LEN + payload_len + 4; // +4 for crc
-        let total = 4 + frame_len; // +4 for frame_len prefix
-        let mut buf = Vec::with_capacity(total);
-
-        // frame_len
-        buf.extend_from_slice(
-            &u32::try_from(frame_len)
-                .expect("frame_len exceeds u32")
-                .to_le_bytes(),
-        );
-        // --- CRC region starts here ---
-        let crc_start = buf.len();
-        // magic
-        buf.extend_from_slice(&WAL_MAGIC.to_le_bytes());
-        // version
-        buf.extend_from_slice(&WAL_VERSION.to_le_bytes());
-        // record_type
-        buf.push(self.record_type as u8);
-        // group_id
-        buf.extend_from_slice(&self.group_id.to_le_bytes());
-        // term
-        buf.extend_from_slice(&self.term.to_le_bytes());
-        // slot
-        buf.extend_from_slice(&self.slot.to_le_bytes());
-        // ballot round
-        buf.extend_from_slice(&self.ballot.round.to_le_bytes());
-        // ballot leader_id
-        buf.extend_from_slice(&self.ballot.leader_id.to_le_bytes());
-        // payload_len
-        buf.extend_from_slice(
-            &u32::try_from(payload_len)
-                .expect("payload_len exceeds u32")
-                .to_le_bytes(),
-        );
-        // payload
-        buf.extend_from_slice(&self.payload);
-        // --- CRC region ends here ---
-        let crc = crc32c::crc32c(&buf[crc_start..]);
-        buf.extend_from_slice(&crc.to_le_bytes());
-
-        debug_assert_eq!(buf.len(), total);
+        let frame = self.encode_frame();
+        let mut buf = Vec::with_capacity(frame.total_len());
+        buf.extend_from_slice(&frame.frame_len);
+        buf.extend_from_slice(&frame.header);
+        buf.extend_from_slice(&frame.payload);
+        buf.extend_from_slice(&frame.crc);
         buf
     }
 
@@ -395,6 +456,86 @@ impl WALRecord {
         }
     }
 
+    /// Encode a durable commit watermark record. Payload carries the highest
+    /// contiguous slot durably applied to the local learner.
+    #[must_use]
+    pub fn from_durable_commit_watermark(group_id: PxGroupId, term: PxTerm, watermark: SlotIndex) -> Self {
+        Self {
+            record_type: RecordType::DurableCommitWatermark,
+            group_id,
+            term,
+            slot: 0,
+            ballot: PxBallot::new(0, 0),
+            payload: Bytes::copy_from_slice(&watermark.to_le_bytes()),
+        }
+    }
+
+    /// Encode a `ConfigChange` record on the metadata lane.
+    ///
+    /// The payload is the serialized group membership configuration (see
+    /// [`crate::cluster::group_config::PxGroupConfig::encode`]).
+    #[must_use]
+    pub fn from_config_change(group_id: PxGroupId, term: PxTerm, payload: Vec<u8>) -> Self {
+        Self {
+            record_type: RecordType::ConfigChange,
+            group_id,
+            term,
+            slot: 0,
+            ballot: PxBallot::new(0, 0),
+            payload: Bytes::from(payload),
+        }
+    }
+
+    /// Encode a snapshot marker record on the metadata lane.
+    ///
+    /// The payload carries the slot up to and including which the state has
+    /// been snapshotted. WAL records at or below this slot may be GC'd once the
+    /// caller's safety criteria are met.
+    #[must_use]
+    pub fn from_snapshot_marker(group_id: PxGroupId, term: PxTerm, snapshot_slot: SlotIndex) -> Self {
+        Self {
+            record_type: RecordType::SnapshotMarker,
+            group_id,
+            term,
+            slot: 0,
+            ballot: PxBallot::new(0, 0),
+            payload: Bytes::copy_from_slice(&snapshot_slot.to_le_bytes()),
+        }
+    }
+
+    /// Returns `true` if this is a snapshot marker record.
+    #[must_use]
+    pub fn is_snapshot_marker(&self) -> bool {
+        self.record_type == RecordType::SnapshotMarker
+    }
+
+    /// For `SnapshotMarker` records, extract the snapshot slot.
+    #[must_use]
+    pub fn snapshot_slot(&self) -> Option<SlotIndex> {
+        if self.record_type != RecordType::SnapshotMarker {
+            return None;
+        }
+        if self.payload.len() < 8 {
+            return None;
+        }
+        Some(u64::from_le_bytes([
+            self.payload[0],
+            self.payload[1],
+            self.payload[2],
+            self.payload[3],
+            self.payload[4],
+            self.payload[5],
+            self.payload[6],
+            self.payload[7],
+        ]))
+    }
+
+    /// Returns `true` if this is a `ConfigChange` record.
+    #[must_use]
+    pub fn is_config_change(&self) -> bool {
+        self.record_type == RecordType::ConfigChange
+    }
+
     /// Decode the `Accepted` payload back to a [`PxLogEntry`].
     ///
     /// The WAL header fields (slot, ballot, term) are merged with the payload
@@ -411,6 +552,28 @@ impl WALRecord {
     #[must_use]
     pub fn voted_for_id(&self) -> Option<u64> {
         if self.record_type != RecordType::VoteGranted {
+            return None;
+        }
+        if self.payload.len() < 8 {
+            return None;
+        }
+        Some(u64::from_le_bytes([
+            self.payload[0],
+            self.payload[1],
+            self.payload[2],
+            self.payload[3],
+            self.payload[4],
+            self.payload[5],
+            self.payload[6],
+            self.payload[7],
+        ]))
+    }
+
+    /// For `DurableCommitWatermark` records, extract the durable contiguous
+    /// commit watermark.
+    #[must_use]
+    pub fn durable_commit_watermark(&self) -> Option<SlotIndex> {
+        if self.record_type != RecordType::DurableCommitWatermark {
             return None;
         }
         if self.payload.len() < 8 {

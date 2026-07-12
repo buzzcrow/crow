@@ -39,7 +39,7 @@ crc32c = "0.6"
 tonic-build = "0.12"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "test-util"] }
 criterion = { version = "0.8", features = ["html_reports"] }
 crossbeam-skiplist = "0.1"
 # Self dev-dependency: turns on the `test-util` feature for this crate's own

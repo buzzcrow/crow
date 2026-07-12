@@ -11,9 +11,7 @@ doc only when a task touches a topic in its row. Line counts are approximate
 | `requirement.md` | ~900 | Source of truth for what must be built. Any feature gap → fix here first. UI requirements live in §15.4.6. |
 | `design.md` | ~490 | Master design: cross-cutting architecture, write/read flows, module decomposition. Read for scope-spanning questions. |
 | `plan.md` | ~190 | Phases (P1–P5), milestones, dependency order, decision log. Read before picking a task. |
-| `test.md` | ~250 | Test pyramid, invariants, failure-injection taxonomy, CI gates, suites. Read when adding/restructuring tests. |
-| `bug-wal.md` | ~90 | Restart-recovery **open problems** tracker (design moved to `design/design-wal.md`): web-layer resurrection, the `note_chosen` election regression, and the recovery-floor/P2–P4 roadmap. |
-| `plan-wal.md` | ~180 | Follow-up WAL implementation plan after `design/design-wal.md` review: slot-affinity placement, event-driven durable flush, replay-only restore, durable commit watermark, and restart-recovery fixes. |
+| `plan-ut.md` | ~180 | Ignored and pending unit / integration tests, root-cause analysis, historical context, and repro commands. |
 
 Web UI requirements now live in `requirement.md` §15.4.6 (single-page embeddable
 console, two hierarchy views, functional surface mapped to the `crowkv-web` API,
@@ -66,20 +64,6 @@ embedded Swagger, V2 deferral list).
 | 4 | Test Pairing Rule |
 | 5 | Concurrency Model |
 | 6 | Decision Log |
-
-## `test.md` Sections
-
-| § | Topic |
-| --- | --- |
-| 1 | Test Pyramid |
-| 2 | Invariant Framework (consensus, WAL, storage, reconfig) |
-| 3 | Failure Injection Taxonomy |
-| 4 | Milestone Test Gates |
-| 5 | Regression Suites |
-| 6 | CI Pipeline |
-| 7 | crowbench Architecture |
-| 8 | Per-Area Test Outlines (consensus, WAL, storage, RPC, reconfig) |
-| 9 | Test Commands (Suites A/B, WAL benches, crowbench) |
 
 ## Sub-Designs (`design/design-xxx.md`)
 

@@ -222,6 +222,7 @@ impl LeaderElection for PxGroup {
         );
 
         if ceiling <= floor {
+            self.leader_read_ready.store(true, Ordering::Release);
             info!(group_id, term, "bulk phase 1 skipped (empty range)");
             return;
         }
@@ -270,7 +271,7 @@ impl LeaderElection for PxGroup {
 
             match self.run_accept_phase(replica, &entry, quorum).await {
                 AcceptAttempt::Chosen => {
-                    replica.learn(&entry);
+                    replica.learn_chosen(&entry).await;
                     self.fan_out_chosen_notice(&entry, group_id);
                     slots_repaired += 1;
                 }
@@ -288,6 +289,7 @@ impl LeaderElection for PxGroup {
 
         let next = ceiling.saturating_add(1);
         self.next_slot.fetch_max(next, Ordering::AcqRel);
+        self.leader_read_ready.store(true, Ordering::Release);
         info!(group_id, term, ceiling, next_slot = next, "bulk phase 1 done");
     }
 }
@@ -600,6 +602,10 @@ impl PxGroup {
         // already chosen on this leader.
         let read_slot = replica.contiguous_chosen();
 
+        if !self.leader_read_ready() {
+            return ReadBarrierOutcome::NoQuorum;
+        }
+
         if replica.lease_read_valid(StdInstant::now()) {
             return ReadBarrierOutcome::Ready { read_slot };
         }
@@ -657,12 +663,13 @@ impl PxGroup {
         let term = replica.current_term_snapshot();
         let proposed_term = term + 1;
         let candidate_id: PxNodeId = replica.id;
+        let (accepted_log_tip_slot, accepted_log_tip_term) = replica.accepted_log_tip();
 
         let payload = VoteRequestPayload {
             term: proposed_term,
             candidate_id,
-            last_chosen_slot: replica.last_chosen_slot(),
-            last_chosen_term: replica.last_chosen_term(),
+            accepted_log_tip_slot,
+            accepted_log_tip_term,
         };
 
         let voting_peers = self.voting_remote_ids();
@@ -679,7 +686,10 @@ impl PxGroup {
             "precandidate fanning out PreVote"
         );
 
-        if grants >= quorum {
+        // Trivial-cluster fast path: only win without contacting peers when the
+        // group is truly a singleton (no configured voting peers). See the
+        // matching gate in `run_candidate_election`.
+        if voting_peers.is_empty() {
             return PreVoteOutcome::Won { proposed_term };
         }
 
@@ -743,14 +753,13 @@ impl PxGroup {
         let replica = self.local_replica();
         let term = replica.current_term_snapshot();
         let candidate_id: PxNodeId = replica.id;
-        let last_chosen_slot = replica.last_chosen_slot();
-        let last_chosen_term = replica.last_chosen_term();
+        let (accepted_log_tip_slot, accepted_log_tip_term) = replica.accepted_log_tip();
 
         let payload = VoteRequestPayload {
             term,
             candidate_id,
-            last_chosen_slot,
-            last_chosen_term,
+            accepted_log_tip_slot,
+            accepted_log_tip_term,
         };
 
         let voting_peers = self.voting_remote_ids();
@@ -770,7 +779,12 @@ impl PxGroup {
         );
 
         // Trivial-cluster fast path: local replica alone constitutes quorum.
-        if grants >= quorum {
+        // Only self-elect when there are no configured voting peers. A
+        // restarted node that has recovered a multi-replica persisted config
+        // (W9) will have voting peers, so it must actually contact them before
+        // becoming leader and running bulk Phase 1. This prevents a quorum=1
+        // self-election in the restore window from overwriting committed data.
+        if voting_peers.is_empty() {
             self.finalize_leader(term, peer_floor, peer_ceiling);
             return;
         }
@@ -1056,6 +1070,14 @@ impl PxGroup {
         let leader_id: PxNodeId = replica.id;
         let leader_term = replica.current_term_snapshot();
 
+        // If we entered leader state while already in the Leader role (e.g., a
+        // single-replica group created via the management API, or a leader
+        // restored from replay), the proposing_term may not have been stamped.
+        // Stamp it now so the proposal leadership gate opens.
+        if replica.is_leader() {
+            self.stamp_proposing_term(leader_term);
+        }
+
         // Reset lease state at the start of the tenure. The first heartbeat
         // round that gets quorum extends the lease and unlocks read fast-path.
         replica.reset_lease_to(StdInstant::now());
@@ -1065,6 +1087,15 @@ impl PxGroup {
         // leader must start conservative (0) and re-establish it from fresh
         // heartbeats rather than overstate freshness for bounded-stale reads.
         self.reset_safe_slot_tracking();
+        // A single-replica group has no peers to repair from; the leader can
+        // serve reads immediately. Multi-replica leaders must finish bulk
+        // Phase 1 / the first heartbeat round before `leader_read_ready` is
+        // set by those paths.
+        if self.quorum() == 1 {
+            self.leader_read_ready.store(true, Ordering::Release);
+        } else {
+            self.leader_read_ready.store(false, Ordering::Release);
+        }
 
         // Per-leadership-tenure cancel token. Cancelled by the step-down
         // sequence; aborts in-flight bulk Phase 1 and any future
@@ -1097,6 +1128,8 @@ impl PxGroup {
                     )
                     .await;
             });
+        } else {
+            self.leader_read_ready.store(true, Ordering::Release);
         }
 
         let mut ticker = tokio::time::interval(Duration::from_millis(cfg.heartbeat_interval_ms));

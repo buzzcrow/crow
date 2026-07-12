@@ -1,6 +1,6 @@
 # CrowKV - Requirements
 
-This is the authoritative requirements document. All other documents (`design.md`, `plan.md`, `test.md`) must follow definitions and conclusions from this document.
+This is the authoritative requirements document. All other documents (`design.md`, `plan.md`) must follow definitions and conclusions from this document.
 
 Conventions:
 - **Decision record** callouts (`> **Decision record:** ...`) capture the `Suggest → Confirm` resolution for traceability. They are informational; the surrounding prose is normative.
@@ -184,9 +184,9 @@ Key = `Vec<u8>` (opaque bytes), Value = `Vec<u8>`. Keys are ordered (lexicograph
 
 ### 6.1 Write Guarantee
 
-**Linearizability** for all acknowledged writes. A write is acknowledged to the client only after a quorum of acceptors has fsynced the corresponding `PxLogEntry` (see [§8.1 Ack contract](#81-wal-write-ahead-log)).
+**Linearizability** for all acknowledged writes. A write is acknowledged to the client only after a quorum of acceptors has durably flushed the corresponding `PxLogEntry` (see [§8.1 Ack contract](#81-wal-write-ahead-log)).
 
-**Linearization point:** the leader's slot-assignment is **serialized** (single monotonic counter; no two threads stamp a slot independently). An op is ordered at its assigned slot and becomes visible to any observer after a quorum of acceptors has fsynced. Real-time ordering is preserved because the counter advances before the leader begins consensus on the next request. Consensus on different slots may then proceed in parallel without affecting this ordering — see [§6.5](#65-parallel-slot-linearizability-analysis).
+**Linearization point:** the leader's slot-assignment is **serialized** (single monotonic counter; no two threads stamp a slot independently). An op is ordered at its assigned slot and becomes visible to any observer after a quorum of acceptors has durably flushed it. Real-time ordering is preserved because the counter advances before the leader begins consensus on the next request. Consensus on different slots may then proceed in parallel without affecting this ordering — see [§6.5](#65-parallel-slot-linearizability-analysis).
 
 **Failure semantics for un-acked writes:** a request that times out or returns `Busy` has an *unknown* outcome — it may have been applied or not. The client recovers via `request_id` retry, which is deduplicated at the leader within the bounded retention window ([§10.2](#102-retry-and-idempotency)). Outside that window, the outcome remains unknown and the client must treat the operation accordingly. (This is why we say "linearizability with bounded idempotency" rather than textbook *strict linearizability*.)
 
@@ -232,7 +232,7 @@ Parallel-slot Paxos is the reason CrowKV chooses Multi-Paxos over Raft. This sec
 **Premises (all stated elsewhere, restated here for the proof):**
 1. Only **blind ops** (`Put`, `Delete`, and their batch forms) are supported ([§5.2](#52-operations)). No `CAS` / `Increment`.
 2. The leader **serializes slot assignment** via a single monotonic counter ([§6.1](#61-write-guarantee)).
-3. A client write is acknowledged only after a **quorum of acceptors has fsynced** the chosen value at its slot ([§8.1](#81-wal-write-ahead-log)).
+3. A client write is acknowledged only after a **quorum of acceptors has durably flushed** the chosen value at its slot ([§8.1](#81-wal-write-ahead-log)).
 4. Learners track `(slot, value)` **per key** and only accept writes where `slot > current_slot` for that key ([§7.3.1](#731-correctness-analysis-for-parallel-slot-writes), [§8.3](#83-learner-storage)).
 5. Leader reads are fenced by lease or ReadIndex ([§6.2](#62-leader-read-fencing)).
 
@@ -242,7 +242,7 @@ Parallel-slot Paxos is the reason CrowKV chooses Multi-Paxos over Raft. This sec
 
 - **Real-time order → slot order.** If `ack(A)` completes before `invoke(B)` in real time, then by the time the leader sees B, the counter has already advanced past `slot(A)`, so `slot(A) < slot(B)`. Concurrent operations may appear in either order, which linearizability allows.
 - **Blind apply-order independence.** For any key *k*, the final value is determined solely by `max{ slot | slot writes k }`. An undecided earlier slot that also writes *k* will, when eventually chosen, be ordered earlier in the linearization and immediately overwritten by the later slot's value — so observers never see an inconsistent final state for *k*.
-- **Durability before visibility.** The ack contract (quorum-fsync before ack) ensures that a client-observed write cannot be lost by a leader change. Classic-Paxos gap repair is guaranteed to re-choose the same value for any slot where at least one acceptor persisted it.
+- **Durability before visibility.** The ack contract (quorum durable-flush before ack) ensures that a client-observed write cannot be lost by a leader change. Classic-Paxos gap repair is guaranteed to re-choose the same value for any slot where at least one acceptor persisted it.
 - **Leader read correctness.** The leader's learner has applied slot N to its per-key state before acking slot N. For any subsequent `Get(k)` on the leader, the returned `(slot, value)` reflects the highest slot that has written k *and that has been chosen*. Any earlier in-flight slot writing k, when resolved, will be ordered before the returned value in the linearization and immediately overwritten — so the returned value is the correct one in the total order.
 - **Follower read correctness.** Read-your-writes uses the per-key resolved-slot to wait for exactly the client's slot; bounded-stale uses the global `safe-slot` which is by construction gap-free.
 
@@ -258,7 +258,7 @@ Note that the linearizable `Scan` uses the *leader's own contiguous applied fron
 
 **Implementation invariants this analysis depends on (must be enforced by the code):**
 - Slot assignment is a single point (no parallel counter increments).
-- `Accepted` responses are not sent before fsync of the WAL record.
+- `Accepted` responses are not sent before durable flush of the WAL record.
 - Classic-Paxos recovery never discards an already-accepted value at a slot.
 - Leader lease / ReadIndex fencing is applied on every linearizable read before returning.
 - Per-key slot comparison on apply (`slot > current_slot`) is atomic with the write.
@@ -356,17 +356,17 @@ This avoids split-brain at the cost of making the minority side fully unavailabl
 The Acceptor's WAL is the **only persistent log** in CrowKV. The learner's btree can replay the WAL on crash and find missing values. During replay, if some `PxSlot` is missing, we use classic Paxos to decide the missing value.
 
 **Durability contract:**
-- Batched fsync (aggregation) with configurable batch size or time interval.
+- Batched durable flush (aggregation) with configurable batch size or time interval.
 - Multiple WAL segments on multiple disks for parallelism, tagged with slot index.
 - Since apply order is determined by slot index (not WAL order), we can write slots to any available WAL segment.
 - Async WAL write with completion notification. A timer forces flush to prevent indefinite stalls in case of aggregation bugs.
 - Target: lowest possible latency under normal conditions.
 - **Integrity:** every WAL record carries a CRC32C (or equivalent) checksum. On replay, a record failing CRC truncates the WAL at that point and triggers catch-up via peers.
-- **Ack contract:** an `Accepted` response is only sent **after** the WAL record's fsync has completed. A client write is acknowledged only after a quorum of acceptors have fsynced.
+- **Ack contract:** an `Accepted` response is only sent **after** the WAL record's durable flush has completed. A client write is acknowledged only after a quorum of acceptors have durably flushed.
 
 **Multi-disk WAL failure semantics:** if one disk fails on a node with multi-disk WAL, the node marks itself failed for that group and rebuilds from peers via snapshot install, rather than attempting to keep running on remaining disks. (Running degraded would require per-slot replication across local disks, which adds complexity.)
 
-> **Decision record:** Confirmed — batched fsync, multi-disk segments tagged by slot, CRC integrity, quorum-fsync ack contract, fail-out on disk loss.
+> **Decision record:** Confirmed — batched durable flush, multi-disk segments tagged by slot, CRC integrity, quorum durable-flush ack contract, fail-out on disk loss.
 
 ### 8.2 Acceptor
 
@@ -495,7 +495,7 @@ Admin and monitoring is exposed via gRPC:
 ### 13.2 Mandatory Observability Signals
 
 - **Per group:** current leader, current `PxTerm`, current max-chosen `PxSlot`, max-applied `PxSlot`, `safe-slot`, in-flight slot count, gap count.
-- **Per node:** WAL fsync latency (p50/p99), WAL bytes/sec, snapshot age, disk usage per WAL disk.
+- **Per node:** WAL durable-flush latency (p50/p99), WAL bytes/sec, snapshot age, disk usage per WAL disk.
 - **Per RPC:** request rate, latency histogram, error rate by code (especially `NotLeader`, `Busy`).
 - **Logs:** structured logs with `node_id`, `group_id`, `slot`, `term` on every consensus-relevant event.
 - **Tracing:** out of scope for the initial design; add OpenTelemetry hooks so spans can be enabled later without wire changes, but no required spans are defined.
@@ -511,7 +511,7 @@ Two test modes depending on client behavior:
 
 Full Jepsen-style linearizability checking is deferred and will be specified in a separate test-design document when introduced.
 
-### 14.2 Failure Scenarios (must be covered in `test.md`)
+### 14.2 Failure Scenarios (must be covered in tests)
 
 **Network / RPC failures:**
 - Network partition (majority/minority split).
