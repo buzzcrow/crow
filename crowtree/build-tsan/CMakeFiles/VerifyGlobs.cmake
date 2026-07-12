@@ -18,6 +18,8 @@ endif()
 file(GLOB_RECURSE NEW_GLOB LIST_DIRECTORIES false "/cjdata/cpp/crowkv/crowtree/tests/*.cc")
 set(OLD_GLOB
   "/cjdata/cpp/crowkv/crowtree/tests/unit/cell_test.cc"
+  "/cjdata/cpp/crowkv/crowtree/tests/unit/epoch_test.cc"
+  "/cjdata/cpp/crowkv/crowtree/tests/unit/inner_page_test.cc"
   "/cjdata/cpp/crowkv/crowtree/tests/unit/leaf_page_test.cc"
   "/cjdata/cpp/crowkv/crowtree/tests/unit/mapping_table_test.cc"
   "/cjdata/cpp/crowkv/crowtree/tests/unit/scaffold_test.cc"

@@ -105,13 +105,13 @@ Makefile is the single entry point.
 
 ## Milestone CT-C — Concurrency primitives
 
-- [ ] **CT6 — Epoch manager** (core doc §10). `Enter`/guard, `Retire(ptr,
+- [x] **CT6 — Epoch manager** (core doc §10). `Enter`/guard, `Retire(ptr,
   deleter)`, `AdvanceEpoch`, `TryReclaim`; reader-light enter/exit.
   - Tests (`unit/epoch_test.cc`): retired object not freed while a guard is open;
     freed after all guards in the epoch drop; reclaim accounting; ASan/TSan
     stress (many readers + retiring writer).
   - Deps: CT1.
-- [ ] **CT7 — MemTable (L0)** (core doc §1, §6.1). Concurrent ordered map
+- [x] **CT7 — MemTable (L0)** (core doc §1, §6.1). Concurrent ordered map
   (skiplist or sharded ordered map) of `key → cell`; `upsert_if_higher` (keeps
   highest slot, drops `slot ≤ last_applied_slot`); ordered `take_while(slot ≤ cs)`
   prefix drain; immutable ordered snapshot for reads; size/entry accounting for
@@ -123,14 +123,14 @@ Makefile is the single entry point.
 
 ## Milestone CT-D — Delta chain & write path
 
-- [ ] **CT8 — Delta records** (core doc §5). `BatchDelta` build from a sorted
+- [x] **CT8 — Delta records** (core doc §5). `BatchDelta` build from a sorted
   per-leaf group (metadata arrays + key/cell bytes), `FindKey` binary search,
   chain linkage (`next`, `delta_len`, `chain_bytes`); chain replay/resolve by
   highest slot.
   - Tests (`unit/delta_test.cc`): build + `FindKey`; chain of N deltas over a
     base resolves newest/highest-slot; tombstone shadows value.
   - Deps: CT3.
-- [ ] **CT9 — Write path: apply + flush** (core doc §6). `apply(slot, batch,
+- [x] **CT9 — Write path: apply + flush** (core doc §6). `apply(slot, batch,
   contiguous_slot)` → MemTable ingest + frontier update + flush signal;
   `flush()` → drain contiguous prefix → `group_by_leaf` → one `BatchDelta` per
   leaf → `mapping.Store` → mark dirty → maybe consolidate → `publish_root_version`.
@@ -141,7 +141,7 @@ Makefile is the single entry point.
 
 ## Milestone CT-E — Maintenance SMOs
 
-- [ ] **CT10 — Consolidation** (core doc §7). Fold a leaf's delta chain into a
+- [x] **CT10 — Consolidation** (core doc §7). Fold a leaf's delta chain into a
   fresh base by highest slot; preserve tombstones (drop only with a GC hint, which
   is a no-op stub here); triggers on `max_delta_len` / `max_delta_bytes`; epoch-
   retire the old chain.
@@ -239,6 +239,15 @@ for the user to answer in one pass.
 - **MappingTable:** fixed top-level array of `kMaxSegments=65536` atomic segment
   pointers (64M PIDs), segments allocated on demand via CAS; lock-free `Get`/
   `Store`, mutex only for PID alloc/free. Does not own pages (epoch frees them).
+- **Write path (CT9):** `Apply` dedups intra-batch (last-wins) then upserts L0.
+  `Flush` sets the MemTable durable floor to `cs` *before* draining `<= cs`, so L0
+  is always strictly newer than L1 (no read race). Flush groups the key-sorted
+  drained entries by leaf, prepends one `BatchDelta` per leaf, and consolidates a
+  leaf whose chain exceeds `max_delta_len`/`max_delta_bytes`. A `BatchDelta`'s
+  `slot_` is the flushed `cs` (chain tag); each cell keeps its own real slot, so
+  resolve/consolidate stay highest-slot-wins even with mixed slots in one flush.
+  `~Crowtree` frees live pages by walking from the root; the (shared) Env's epoch
+  manager frees retired pages. Tests use a local `CrowtreeEnv` per test.
 
 ### Questions / issues for the user
 

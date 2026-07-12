@@ -249,6 +249,54 @@ tests/unit/cell_test.cc.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/unit/cell_test.cc.s
 .PHONY : tests/unit/cell_test.cc.s
 
+tests/unit/epoch_test.o: tests/unit/epoch_test.cc.o
+.PHONY : tests/unit/epoch_test.o
+
+# target to build an object file
+tests/unit/epoch_test.cc.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/unit/epoch_test.cc.o
+.PHONY : tests/unit/epoch_test.cc.o
+
+tests/unit/epoch_test.i: tests/unit/epoch_test.cc.i
+.PHONY : tests/unit/epoch_test.i
+
+# target to preprocess a source file
+tests/unit/epoch_test.cc.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/unit/epoch_test.cc.i
+.PHONY : tests/unit/epoch_test.cc.i
+
+tests/unit/epoch_test.s: tests/unit/epoch_test.cc.s
+.PHONY : tests/unit/epoch_test.s
+
+# target to generate assembly for a file
+tests/unit/epoch_test.cc.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/unit/epoch_test.cc.s
+.PHONY : tests/unit/epoch_test.cc.s
+
+tests/unit/inner_page_test.o: tests/unit/inner_page_test.cc.o
+.PHONY : tests/unit/inner_page_test.o
+
+# target to build an object file
+tests/unit/inner_page_test.cc.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/unit/inner_page_test.cc.o
+.PHONY : tests/unit/inner_page_test.cc.o
+
+tests/unit/inner_page_test.i: tests/unit/inner_page_test.cc.i
+.PHONY : tests/unit/inner_page_test.i
+
+# target to preprocess a source file
+tests/unit/inner_page_test.cc.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/unit/inner_page_test.cc.i
+.PHONY : tests/unit/inner_page_test.cc.i
+
+tests/unit/inner_page_test.s: tests/unit/inner_page_test.cc.s
+.PHONY : tests/unit/inner_page_test.s
+
+# target to generate assembly for a file
+tests/unit/inner_page_test.cc.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/unit/inner_page_test.cc.s
+.PHONY : tests/unit/inner_page_test.cc.s
+
 tests/unit/leaf_page_test.o: tests/unit/leaf_page_test.cc.o
 .PHONY : tests/unit/leaf_page_test.o
 
@@ -344,6 +392,12 @@ help:
 	@echo "... tests/unit/cell_test.o"
 	@echo "... tests/unit/cell_test.i"
 	@echo "... tests/unit/cell_test.s"
+	@echo "... tests/unit/epoch_test.o"
+	@echo "... tests/unit/epoch_test.i"
+	@echo "... tests/unit/epoch_test.s"
+	@echo "... tests/unit/inner_page_test.o"
+	@echo "... tests/unit/inner_page_test.i"
+	@echo "... tests/unit/inner_page_test.s"
 	@echo "... tests/unit/leaf_page_test.o"
 	@echo "... tests/unit/leaf_page_test.i"
 	@echo "... tests/unit/leaf_page_test.s"
