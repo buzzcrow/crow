@@ -15,7 +15,10 @@
 #include "crowtree/memtable.h"
 #include "crowtree/options.h"
 #include "crowtree/page.h"
+#include "crowtree/snapshot.h"
 #include "crowtree/status.h"
+
+#include <memory>
 
 namespace crowtree {
 
@@ -46,12 +49,21 @@ class Crowtree {
   // Advance the contiguous frontier without a batch (e.g. after NoOp slots).
   void AdvanceContiguous(uint64_t contiguous_slot);
 
+  // Logical retention GC watermark: tombstones with slot <= safe_slot may be
+  // dropped during consolidation (design-crowtree.md two-GC model).
+  void SetGcWatermark(uint64_t safe_slot);
+  uint64_t gc_watermark() const { return gc_floor_.load(); }
+
   // Drain the contiguous-applied prefix of L0 into L1 and publish a new root.
   Status Flush();
 
   // Point read (L0 overlay then L1). Returns true if a live value is found;
   // tombstones return false.
   bool Get(Slice key, uint64_t* out_slot, std::string* out_value) const;
+
+  // Pin a consistent point-in-time view at `last_applied_slot` (the durable L1
+  // state). Used for scan-at / compare / iter_all / snapshot export.
+  std::shared_ptr<Snapshot> SnapshotView();
 
   uint64_t last_applied_slot() const { return last_applied_slot_.load(); }
   uint64_t contiguous_slot() const { return contiguous_slot_.load(); }
@@ -61,11 +73,19 @@ class Crowtree {
   // Diagnostics.
   size_t MemTableCount() const { return memtable_.Count(); }
   MappingTable& mapping() { return mapping_; }
+  int Height() const;       // 1 = single-leaf root
+  size_t LeafCount() const; // live leaves reachable from the root
 
  private:
   void MaybeFlush();
-  void ConsolidateLocked(uint64_t pid);   // caller holds write_mutex_
-  void MaybeSplitOrMergeLocked(uint64_t pid);  // CT12; no-op stub for now
+  void ConsolidateLocked(uint64_t pid);        // caller holds write_mutex_
+  void MaybeSplitOrMergeLocked(uint64_t pid);  // dispatch on leaf size
+  // Inner PIDs from root down to (but excluding) the leaf `target_pid`.
+  std::vector<uint64_t> PathToPidLocked(uint64_t target_pid) const;
+  void SplitLeafLocked(uint64_t leaf_pid, std::vector<uint64_t> path);
+  void PropagateSplitLocked(std::vector<uint64_t> path, uint64_t child_pid,
+                            std::string sep, uint64_t right_pid);
+  void TryMergeLeafLocked(uint64_t leaf_pid, const std::vector<uint64_t>& path);
   void RetirePage(PageBase* p);
   void FreeSubtree(uint64_t pid);
 
@@ -78,6 +98,7 @@ class Crowtree {
   std::atomic<uint64_t> contiguous_slot_{0};
   std::atomic<uint64_t> last_applied_slot_{0};
   std::atomic<uint64_t> version_{0};
+  std::atomic<uint64_t> gc_floor_{0};
 
   std::mutex write_mutex_;  // serializes flush / consolidate / split-merge
 };

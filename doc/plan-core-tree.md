@@ -148,14 +148,14 @@ Makefile is the single entry point.
   - Tests (`unit/consolidation_test.cc`): fold correctness vs oracle; trigger at
     both thresholds; tombstones preserved; old chain retired (epoch counters).
   - Deps: CT8, CT6.
-- [ ] **CT11 — Versioned root / VersionTable** (core doc §9). `publish_root_version`
+- [x] **CT11 — Versioned root / VersionTable** (core doc §9). `publish_root_version`
   (immutable root + `last_applied_slot` tag, version++); `snapshot_view()` pins
   current version (refcount); release; eligibility check (refcount 0 + below a
   watermark stub).
   - Tests (`unit/version_test.cc`): pin sees a stable tree while writer churns;
     refcount lifecycle; exact-point-in-time tag equals flushed slot.
   - Deps: CT5, CT6.
-- [ ] **CT12 — Page split & merge** (core doc §8). Writer-exclusive split (by-bytes
+- [x] **CT12 — Page split & merge** (core doc §8). Writer-exclusive split (by-bytes
   split point, sibling relink, index-term insert, inner split propagate, root
   grow); merge (below threshold, absorb into left sibling, index-term remove,
   free PID, root collapse); hysteresis (split at target, merge at target/4).
@@ -249,6 +249,22 @@ for the user to answer in one pass.
   `~Crowtree` frees live pages by walking from the root; the (shared) Env's epoch
   manager frees retired pages. Tests use a local `CrowtreeEnv` per test.
 
+### More decisions (CT12)
+
+- **Split is reader-safe without an SMO/split-delta protocol:** the right sibling
+  is published and parents repointed *before* the original leaf is shrunk, and
+  merges publish the combined leaf + repoint the parent before retiring the old
+  leaf. So concurrent latest-`Get` never misses a key mid-SMO. Old pages are
+  epoch-retired.
+- **Minimal retention GC added (`SetGcWatermark`)**: consolidation/merge drop
+  tombstones with `slot <= watermark`. This was needed so deletes actually shrink
+  leaves (else merge/root-collapse can never fire). It also implements part of the
+  design's logical retention GC. Inner-node underflow merge is deferred (only leaf
+  merge + root collapse); correctness holds, tree may keep underfull inner nodes.
+- **Merge leaks the merged-away PID** (no `FreePID`) to avoid a nullptr race
+  window for stragglers; acceptable in v1 (64M PID space). `PathToPidLocked` is an
+  O(tree) DFS per SMO; a parent-pointer optimization is deferred.
+
 ### Questions / issues for the user
 
 - **Q1 (most important).** I implemented pages as in-memory C++ containers rather
@@ -257,4 +273,13 @@ for the user to answer in one pass.
   persistence plan and kept the core engine semantics-accurate but representation-
   simple. **OK?** If you want the exact packed layout in the core too, say so and
   I'll add a packed `LeafBase`/`InnerBase` codec.
+- **Q2 (snapshots).** `SnapshotView()` materializes the L1 keyspace into an
+  independent immutable `Snapshot` (key-sorted, includes tombstones), under a
+  brief write lock, instead of pinning a zero-copy COW root. Rationale: the live
+  tree uses in-place mapping-slot replacement (fast writes, lock-free *latest*
+  reads); true path-copy COW (new PID per modified node up to a new root) is the
+  design's zero-copy model but a much larger change, best done with persistence.
+  Materialized snapshots are O(N) and take a short lock — fine for tests, scan-at,
+  compare and the parity oracle. **OK to keep materialized snapshots for the core,
+  and add path-copy COW later (likely with the persistence plan)?**
 - (more added as tasks complete)

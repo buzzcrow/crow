@@ -69,10 +69,24 @@ include CMakeFiles/crowtree.dir/progress.make
 # Include the compile flags for this target's objects.
 include CMakeFiles/crowtree.dir/flags.make
 
+CMakeFiles/crowtree.dir/src/crowtree.cc.o: CMakeFiles/crowtree.dir/flags.make
+CMakeFiles/crowtree.dir/src/crowtree.cc.o: /cjdata/cpp/crowkv/crowtree/src/crowtree.cc
+CMakeFiles/crowtree.dir/src/crowtree.cc.o: CMakeFiles/crowtree.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Building CXX object CMakeFiles/crowtree.dir/src/crowtree.cc.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/crowtree.dir/src/crowtree.cc.o -MF CMakeFiles/crowtree.dir/src/crowtree.cc.o.d -o CMakeFiles/crowtree.dir/src/crowtree.cc.o -c /cjdata/cpp/crowkv/crowtree/src/crowtree.cc
+
+CMakeFiles/crowtree.dir/src/crowtree.cc.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/crowtree.dir/src/crowtree.cc.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /cjdata/cpp/crowkv/crowtree/src/crowtree.cc > CMakeFiles/crowtree.dir/src/crowtree.cc.i
+
+CMakeFiles/crowtree.dir/src/crowtree.cc.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/crowtree.dir/src/crowtree.cc.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /cjdata/cpp/crowkv/crowtree/src/crowtree.cc -o CMakeFiles/crowtree.dir/src/crowtree.cc.s
+
 CMakeFiles/crowtree.dir/src/env.cc.o: CMakeFiles/crowtree.dir/flags.make
 CMakeFiles/crowtree.dir/src/env.cc.o: /cjdata/cpp/crowkv/crowtree/src/env.cc
 CMakeFiles/crowtree.dir/src/env.cc.o: CMakeFiles/crowtree.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Building CXX object CMakeFiles/crowtree.dir/src/env.cc.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Building CXX object CMakeFiles/crowtree.dir/src/env.cc.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/crowtree.dir/src/env.cc.o -MF CMakeFiles/crowtree.dir/src/env.cc.o.d -o CMakeFiles/crowtree.dir/src/env.cc.o -c /cjdata/cpp/crowkv/crowtree/src/env.cc
 
 CMakeFiles/crowtree.dir/src/env.cc.i: cmake_force
@@ -86,7 +100,7 @@ CMakeFiles/crowtree.dir/src/env.cc.s: cmake_force
 CMakeFiles/crowtree.dir/src/epoch.cc.o: CMakeFiles/crowtree.dir/flags.make
 CMakeFiles/crowtree.dir/src/epoch.cc.o: /cjdata/cpp/crowkv/crowtree/src/epoch.cc
 CMakeFiles/crowtree.dir/src/epoch.cc.o: CMakeFiles/crowtree.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Building CXX object CMakeFiles/crowtree.dir/src/epoch.cc.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Building CXX object CMakeFiles/crowtree.dir/src/epoch.cc.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/crowtree.dir/src/epoch.cc.o -MF CMakeFiles/crowtree.dir/src/epoch.cc.o.d -o CMakeFiles/crowtree.dir/src/epoch.cc.o -c /cjdata/cpp/crowkv/crowtree/src/epoch.cc
 
 CMakeFiles/crowtree.dir/src/epoch.cc.i: cmake_force
@@ -100,7 +114,7 @@ CMakeFiles/crowtree.dir/src/epoch.cc.s: cmake_force
 CMakeFiles/crowtree.dir/src/mapping_table.cc.o: CMakeFiles/crowtree.dir/flags.make
 CMakeFiles/crowtree.dir/src/mapping_table.cc.o: /cjdata/cpp/crowkv/crowtree/src/mapping_table.cc
 CMakeFiles/crowtree.dir/src/mapping_table.cc.o: CMakeFiles/crowtree.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Building CXX object CMakeFiles/crowtree.dir/src/mapping_table.cc.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Building CXX object CMakeFiles/crowtree.dir/src/mapping_table.cc.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/crowtree.dir/src/mapping_table.cc.o -MF CMakeFiles/crowtree.dir/src/mapping_table.cc.o.d -o CMakeFiles/crowtree.dir/src/mapping_table.cc.o -c /cjdata/cpp/crowkv/crowtree/src/mapping_table.cc
 
 CMakeFiles/crowtree.dir/src/mapping_table.cc.i: cmake_force
@@ -111,21 +125,39 @@ CMakeFiles/crowtree.dir/src/mapping_table.cc.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/crowtree.dir/src/mapping_table.cc.s"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /cjdata/cpp/crowkv/crowtree/src/mapping_table.cc -o CMakeFiles/crowtree.dir/src/mapping_table.cc.s
 
+CMakeFiles/crowtree.dir/src/memtable.cc.o: CMakeFiles/crowtree.dir/flags.make
+CMakeFiles/crowtree.dir/src/memtable.cc.o: /cjdata/cpp/crowkv/crowtree/src/memtable.cc
+CMakeFiles/crowtree.dir/src/memtable.cc.o: CMakeFiles/crowtree.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Building CXX object CMakeFiles/crowtree.dir/src/memtable.cc.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/crowtree.dir/src/memtable.cc.o -MF CMakeFiles/crowtree.dir/src/memtable.cc.o.d -o CMakeFiles/crowtree.dir/src/memtable.cc.o -c /cjdata/cpp/crowkv/crowtree/src/memtable.cc
+
+CMakeFiles/crowtree.dir/src/memtable.cc.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/crowtree.dir/src/memtable.cc.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /cjdata/cpp/crowkv/crowtree/src/memtable.cc > CMakeFiles/crowtree.dir/src/memtable.cc.i
+
+CMakeFiles/crowtree.dir/src/memtable.cc.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/crowtree.dir/src/memtable.cc.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /cjdata/cpp/crowkv/crowtree/src/memtable.cc -o CMakeFiles/crowtree.dir/src/memtable.cc.s
+
 # Object files for target crowtree
 crowtree_OBJECTS = \
+"CMakeFiles/crowtree.dir/src/crowtree.cc.o" \
 "CMakeFiles/crowtree.dir/src/env.cc.o" \
 "CMakeFiles/crowtree.dir/src/epoch.cc.o" \
-"CMakeFiles/crowtree.dir/src/mapping_table.cc.o"
+"CMakeFiles/crowtree.dir/src/mapping_table.cc.o" \
+"CMakeFiles/crowtree.dir/src/memtable.cc.o"
 
 # External object files for target crowtree
 crowtree_EXTERNAL_OBJECTS =
 
+libcrowtree.a: CMakeFiles/crowtree.dir/src/crowtree.cc.o
 libcrowtree.a: CMakeFiles/crowtree.dir/src/env.cc.o
 libcrowtree.a: CMakeFiles/crowtree.dir/src/epoch.cc.o
 libcrowtree.a: CMakeFiles/crowtree.dir/src/mapping_table.cc.o
+libcrowtree.a: CMakeFiles/crowtree.dir/src/memtable.cc.o
 libcrowtree.a: CMakeFiles/crowtree.dir/build.make
 libcrowtree.a: CMakeFiles/crowtree.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Linking CXX static library libcrowtree.a"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Linking CXX static library libcrowtree.a"
 	$(CMAKE_COMMAND) -P CMakeFiles/crowtree.dir/cmake_clean_target.cmake
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/crowtree.dir/link.txt --verbose=$(VERBOSE)
 

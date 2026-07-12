@@ -12,7 +12,8 @@ using namespace crowtree;
 
 TEST(Slice, BasicAndCompare) {
   Slice a("apple");
-  Slice b(std::string("apple"));
+  std::string apple = "apple";  // lvalue: Slice is a non-owning view
+  Slice b(apple);
   EXPECT_EQ(a, b);
   EXPECT_EQ(a.size(), 5u);
   EXPECT_EQ(a.ToString(), "apple");

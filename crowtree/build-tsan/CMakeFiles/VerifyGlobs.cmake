@@ -5,9 +5,11 @@ cmake_policy(SET CMP0009 NEW)
 # CROWTREE_SRC at CMakeLists.txt:24 (file)
 file(GLOB_RECURSE NEW_GLOB LIST_DIRECTORIES false "/cjdata/cpp/crowkv/crowtree/src/*.cc")
 set(OLD_GLOB
+  "/cjdata/cpp/crowkv/crowtree/src/crowtree.cc"
   "/cjdata/cpp/crowkv/crowtree/src/env.cc"
   "/cjdata/cpp/crowkv/crowtree/src/epoch.cc"
   "/cjdata/cpp/crowkv/crowtree/src/mapping_table.cc"
+  "/cjdata/cpp/crowkv/crowtree/src/memtable.cc"
   )
 if(NOT "${NEW_GLOB}" STREQUAL "${OLD_GLOB}")
   message("-- GLOB mismatch!")
@@ -17,12 +19,18 @@ endif()
 # CROWTREE_TEST_SRC at CMakeLists.txt:35 (file)
 file(GLOB_RECURSE NEW_GLOB LIST_DIRECTORIES false "/cjdata/cpp/crowkv/crowtree/tests/*.cc")
 set(OLD_GLOB
+  "/cjdata/cpp/crowkv/crowtree/tests/integration/split_merge_test.cc"
+  "/cjdata/cpp/crowkv/crowtree/tests/integration/write_path_test.cc"
   "/cjdata/cpp/crowkv/crowtree/tests/unit/cell_test.cc"
+  "/cjdata/cpp/crowkv/crowtree/tests/unit/consolidation_test.cc"
+  "/cjdata/cpp/crowkv/crowtree/tests/unit/delta_test.cc"
   "/cjdata/cpp/crowkv/crowtree/tests/unit/epoch_test.cc"
   "/cjdata/cpp/crowkv/crowtree/tests/unit/inner_page_test.cc"
   "/cjdata/cpp/crowkv/crowtree/tests/unit/leaf_page_test.cc"
   "/cjdata/cpp/crowkv/crowtree/tests/unit/mapping_table_test.cc"
+  "/cjdata/cpp/crowkv/crowtree/tests/unit/memtable_test.cc"
   "/cjdata/cpp/crowkv/crowtree/tests/unit/scaffold_test.cc"
+  "/cjdata/cpp/crowkv/crowtree/tests/unit/version_test.cc"
   )
 if(NOT "${NEW_GLOB}" STREQUAL "${OLD_GLOB}")
   message("-- GLOB mismatch!")

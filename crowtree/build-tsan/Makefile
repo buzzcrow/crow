@@ -153,6 +153,30 @@ crowtree_tests/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/build
 .PHONY : crowtree_tests/fast
 
+src/crowtree.o: src/crowtree.cc.o
+.PHONY : src/crowtree.o
+
+# target to build an object file
+src/crowtree.cc.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree.dir/build.make CMakeFiles/crowtree.dir/src/crowtree.cc.o
+.PHONY : src/crowtree.cc.o
+
+src/crowtree.i: src/crowtree.cc.i
+.PHONY : src/crowtree.i
+
+# target to preprocess a source file
+src/crowtree.cc.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree.dir/build.make CMakeFiles/crowtree.dir/src/crowtree.cc.i
+.PHONY : src/crowtree.cc.i
+
+src/crowtree.s: src/crowtree.cc.s
+.PHONY : src/crowtree.s
+
+# target to generate assembly for a file
+src/crowtree.cc.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree.dir/build.make CMakeFiles/crowtree.dir/src/crowtree.cc.s
+.PHONY : src/crowtree.cc.s
+
 src/env.o: src/env.cc.o
 .PHONY : src/env.o
 
@@ -225,6 +249,78 @@ src/mapping_table.cc.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree.dir/build.make CMakeFiles/crowtree.dir/src/mapping_table.cc.s
 .PHONY : src/mapping_table.cc.s
 
+src/memtable.o: src/memtable.cc.o
+.PHONY : src/memtable.o
+
+# target to build an object file
+src/memtable.cc.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree.dir/build.make CMakeFiles/crowtree.dir/src/memtable.cc.o
+.PHONY : src/memtable.cc.o
+
+src/memtable.i: src/memtable.cc.i
+.PHONY : src/memtable.i
+
+# target to preprocess a source file
+src/memtable.cc.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree.dir/build.make CMakeFiles/crowtree.dir/src/memtable.cc.i
+.PHONY : src/memtable.cc.i
+
+src/memtable.s: src/memtable.cc.s
+.PHONY : src/memtable.s
+
+# target to generate assembly for a file
+src/memtable.cc.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree.dir/build.make CMakeFiles/crowtree.dir/src/memtable.cc.s
+.PHONY : src/memtable.cc.s
+
+tests/integration/split_merge_test.o: tests/integration/split_merge_test.cc.o
+.PHONY : tests/integration/split_merge_test.o
+
+# target to build an object file
+tests/integration/split_merge_test.cc.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/integration/split_merge_test.cc.o
+.PHONY : tests/integration/split_merge_test.cc.o
+
+tests/integration/split_merge_test.i: tests/integration/split_merge_test.cc.i
+.PHONY : tests/integration/split_merge_test.i
+
+# target to preprocess a source file
+tests/integration/split_merge_test.cc.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/integration/split_merge_test.cc.i
+.PHONY : tests/integration/split_merge_test.cc.i
+
+tests/integration/split_merge_test.s: tests/integration/split_merge_test.cc.s
+.PHONY : tests/integration/split_merge_test.s
+
+# target to generate assembly for a file
+tests/integration/split_merge_test.cc.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/integration/split_merge_test.cc.s
+.PHONY : tests/integration/split_merge_test.cc.s
+
+tests/integration/write_path_test.o: tests/integration/write_path_test.cc.o
+.PHONY : tests/integration/write_path_test.o
+
+# target to build an object file
+tests/integration/write_path_test.cc.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/integration/write_path_test.cc.o
+.PHONY : tests/integration/write_path_test.cc.o
+
+tests/integration/write_path_test.i: tests/integration/write_path_test.cc.i
+.PHONY : tests/integration/write_path_test.i
+
+# target to preprocess a source file
+tests/integration/write_path_test.cc.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/integration/write_path_test.cc.i
+.PHONY : tests/integration/write_path_test.cc.i
+
+tests/integration/write_path_test.s: tests/integration/write_path_test.cc.s
+.PHONY : tests/integration/write_path_test.s
+
+# target to generate assembly for a file
+tests/integration/write_path_test.cc.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/integration/write_path_test.cc.s
+.PHONY : tests/integration/write_path_test.cc.s
+
 tests/unit/cell_test.o: tests/unit/cell_test.cc.o
 .PHONY : tests/unit/cell_test.o
 
@@ -248,6 +344,54 @@ tests/unit/cell_test.s: tests/unit/cell_test.cc.s
 tests/unit/cell_test.cc.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/unit/cell_test.cc.s
 .PHONY : tests/unit/cell_test.cc.s
+
+tests/unit/consolidation_test.o: tests/unit/consolidation_test.cc.o
+.PHONY : tests/unit/consolidation_test.o
+
+# target to build an object file
+tests/unit/consolidation_test.cc.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/unit/consolidation_test.cc.o
+.PHONY : tests/unit/consolidation_test.cc.o
+
+tests/unit/consolidation_test.i: tests/unit/consolidation_test.cc.i
+.PHONY : tests/unit/consolidation_test.i
+
+# target to preprocess a source file
+tests/unit/consolidation_test.cc.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/unit/consolidation_test.cc.i
+.PHONY : tests/unit/consolidation_test.cc.i
+
+tests/unit/consolidation_test.s: tests/unit/consolidation_test.cc.s
+.PHONY : tests/unit/consolidation_test.s
+
+# target to generate assembly for a file
+tests/unit/consolidation_test.cc.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/unit/consolidation_test.cc.s
+.PHONY : tests/unit/consolidation_test.cc.s
+
+tests/unit/delta_test.o: tests/unit/delta_test.cc.o
+.PHONY : tests/unit/delta_test.o
+
+# target to build an object file
+tests/unit/delta_test.cc.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/unit/delta_test.cc.o
+.PHONY : tests/unit/delta_test.cc.o
+
+tests/unit/delta_test.i: tests/unit/delta_test.cc.i
+.PHONY : tests/unit/delta_test.i
+
+# target to preprocess a source file
+tests/unit/delta_test.cc.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/unit/delta_test.cc.i
+.PHONY : tests/unit/delta_test.cc.i
+
+tests/unit/delta_test.s: tests/unit/delta_test.cc.s
+.PHONY : tests/unit/delta_test.s
+
+# target to generate assembly for a file
+tests/unit/delta_test.cc.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/unit/delta_test.cc.s
+.PHONY : tests/unit/delta_test.cc.s
 
 tests/unit/epoch_test.o: tests/unit/epoch_test.cc.o
 .PHONY : tests/unit/epoch_test.o
@@ -345,6 +489,30 @@ tests/unit/mapping_table_test.cc.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/unit/mapping_table_test.cc.s
 .PHONY : tests/unit/mapping_table_test.cc.s
 
+tests/unit/memtable_test.o: tests/unit/memtable_test.cc.o
+.PHONY : tests/unit/memtable_test.o
+
+# target to build an object file
+tests/unit/memtable_test.cc.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/unit/memtable_test.cc.o
+.PHONY : tests/unit/memtable_test.cc.o
+
+tests/unit/memtable_test.i: tests/unit/memtable_test.cc.i
+.PHONY : tests/unit/memtable_test.i
+
+# target to preprocess a source file
+tests/unit/memtable_test.cc.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/unit/memtable_test.cc.i
+.PHONY : tests/unit/memtable_test.cc.i
+
+tests/unit/memtable_test.s: tests/unit/memtable_test.cc.s
+.PHONY : tests/unit/memtable_test.s
+
+# target to generate assembly for a file
+tests/unit/memtable_test.cc.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/unit/memtable_test.cc.s
+.PHONY : tests/unit/memtable_test.cc.s
+
 tests/unit/scaffold_test.o: tests/unit/scaffold_test.cc.o
 .PHONY : tests/unit/scaffold_test.o
 
@@ -369,6 +537,30 @@ tests/unit/scaffold_test.cc.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/unit/scaffold_test.cc.s
 .PHONY : tests/unit/scaffold_test.cc.s
 
+tests/unit/version_test.o: tests/unit/version_test.cc.o
+.PHONY : tests/unit/version_test.o
+
+# target to build an object file
+tests/unit/version_test.cc.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/unit/version_test.cc.o
+.PHONY : tests/unit/version_test.cc.o
+
+tests/unit/version_test.i: tests/unit/version_test.cc.i
+.PHONY : tests/unit/version_test.i
+
+# target to preprocess a source file
+tests/unit/version_test.cc.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/unit/version_test.cc.i
+.PHONY : tests/unit/version_test.cc.i
+
+tests/unit/version_test.s: tests/unit/version_test.cc.s
+.PHONY : tests/unit/version_test.s
+
+# target to generate assembly for a file
+tests/unit/version_test.cc.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/unit/version_test.cc.s
+.PHONY : tests/unit/version_test.cc.s
+
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -380,6 +572,9 @@ help:
 	@echo "... test"
 	@echo "... crowtree"
 	@echo "... crowtree_tests"
+	@echo "... src/crowtree.o"
+	@echo "... src/crowtree.i"
+	@echo "... src/crowtree.s"
 	@echo "... src/env.o"
 	@echo "... src/env.i"
 	@echo "... src/env.s"
@@ -389,9 +584,24 @@ help:
 	@echo "... src/mapping_table.o"
 	@echo "... src/mapping_table.i"
 	@echo "... src/mapping_table.s"
+	@echo "... src/memtable.o"
+	@echo "... src/memtable.i"
+	@echo "... src/memtable.s"
+	@echo "... tests/integration/split_merge_test.o"
+	@echo "... tests/integration/split_merge_test.i"
+	@echo "... tests/integration/split_merge_test.s"
+	@echo "... tests/integration/write_path_test.o"
+	@echo "... tests/integration/write_path_test.i"
+	@echo "... tests/integration/write_path_test.s"
 	@echo "... tests/unit/cell_test.o"
 	@echo "... tests/unit/cell_test.i"
 	@echo "... tests/unit/cell_test.s"
+	@echo "... tests/unit/consolidation_test.o"
+	@echo "... tests/unit/consolidation_test.i"
+	@echo "... tests/unit/consolidation_test.s"
+	@echo "... tests/unit/delta_test.o"
+	@echo "... tests/unit/delta_test.i"
+	@echo "... tests/unit/delta_test.s"
 	@echo "... tests/unit/epoch_test.o"
 	@echo "... tests/unit/epoch_test.i"
 	@echo "... tests/unit/epoch_test.s"
@@ -404,9 +614,15 @@ help:
 	@echo "... tests/unit/mapping_table_test.o"
 	@echo "... tests/unit/mapping_table_test.i"
 	@echo "... tests/unit/mapping_table_test.s"
+	@echo "... tests/unit/memtable_test.o"
+	@echo "... tests/unit/memtable_test.i"
+	@echo "... tests/unit/memtable_test.s"
 	@echo "... tests/unit/scaffold_test.o"
 	@echo "... tests/unit/scaffold_test.i"
 	@echo "... tests/unit/scaffold_test.s"
+	@echo "... tests/unit/version_test.o"
+	@echo "... tests/unit/version_test.i"
+	@echo "... tests/unit/version_test.s"
 .PHONY : help
 
 
