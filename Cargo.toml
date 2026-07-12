@@ -7,6 +7,9 @@ members = [
     "crowkv-console/web",
     "crowkv-console/cli",
 ]
+# Standalone C++/FFI bridge crate: built + tested on its own (it links the
+# crowtree C ABI and needs unsafe), kept out of the main async workspace build.
+exclude = ["crowtree/ffi"]
 
 [workspace.package]
 version = "0.1.0"

@@ -5,7 +5,7 @@ Depends on: [`design-crowtree-core.md`](design-crowtree-core.md), [`design-async
 
 This document specifies how crowtree pages reach durable media: the `PageStore`
 backend abstraction (local file, raw block device, remote/RDMA), the on-disk page
-format and alignment, checkpoint, crash recovery, the internal-WAL decision, and
+format and alignment, snapshot, crash recovery, the internal-WAL decision, and
 the C API surface used by the Rust FFI adapter.
 
 ## Table of Contents
@@ -14,7 +14,7 @@ the C API surface used by the Rust FFI adapter.
 - [2. Backends](#2-backends)
 - [3. On-Disk Page Format (Zero-Copy Frame)](#3-on-disk-page-format-zero-copy-frame)
 - [4. Buffer Pool (Frame Cache) and Dirty Tracking](#4-buffer-pool-frame-cache-and-dirty-tracking)
-- [5. Checkpoint](#5-checkpoint)
+- [5. Snapshot](#5-snapshot)
 - [5A. High-Performance Write/Durability Pipeline](#5a-high-performance-writedurability-pipeline)
 - [6. Internal WAL Decision](#6-internal-wal-decision)
 - [7. Recovery](#7-recovery)
@@ -65,7 +65,7 @@ public:
   verbs; the Rust FFI adapter bridges to tokio via `spawn_blocking` or a
   completion channel.
 - A small **page-allocation map** (free IUs in the backing file/device) is
-  persisted alongside the root pointer in the checkpoint superblock (§5).
+  persisted alongside the root pointer in the snapshot superblock (§5).
 
 ---
 
@@ -109,7 +109,12 @@ for base pages — `LeafBase`/`InnerBase` become thin **views** over a frame.
 - An entry (key + cell) larger than a frame's usable space spills to an
   **overflow chain** (a linked list of overflow frames whose body is raw value
   bytes); the leaf slot stores an overflow pointer instead of an inline cell.
-  Overflow is a later milestone; v1 caps entry size at the frame payload.
+  **Overflow value size policy (OQ4 resolved):** tiered with configurable
+  thresholds — inline (≤ frame payload, zero-copy), small overflow (frame limit
+  < v ≤ 1 MB, spill + `WARN` log), large overflow (1 MB < v ≤ 16 MB, spill +
+  `WARN`), rejected (> 16 MB, `InvalidArgument` error + `ERROR` log, assumed
+  bug). Defaults: `Options.max_overflow_value` = 1 MB (soft warn),
+  `Options.max_value_hard_limit` = 16 MB (reject).
 
 ### 3.2 Slotted layout (leaf)
 
@@ -192,7 +197,7 @@ byte-for-byte by another.
 
 - **`logical_len` + CRC32C trailer.** The trailer's `logical_len` lets a reader
   ignore IU zero padding; CRC32C covers `[0, logical_len)`. CRC mismatch ⇒ torn
-  page ⇒ recovery falls back to the previous checkpoint (§7).
+  page ⇒ recovery falls back to the previous snapshot (§7).
 - **Alignment modes.** For aligned block devices the frame is already an IU
   multiple. For unaligned/file-debug media a frame may be written without padding;
   the on-disk record then carries an explicit length prefix (see §5 manifest).
@@ -208,7 +213,7 @@ byte-for-byte by another.
 
 - Algorithm id: `0 = none`, `1 = LZ4` (default), `2 = zstd` (reserved). Chosen via
   `Options.compression`; recorded per page so mixed pages decode correctly.
-- Compress at **write_page** time (checkpoint / eviction), decompress at
+- Compress at **write_page** time (snapshot / eviction), decompress at
   **read_page** time into a freshly-acquired frame. The buffer pool only ever
   holds *uncompressed* frames.
 - LZ4 is vendored as a single-file dependency under `crowtree/third_party/lz4`
@@ -244,7 +249,7 @@ class BufferPool {
     // Allocate a fresh empty frame for a brand-new page (COW target / split).
     FrameRef PinNew(uint64_t pid);
     void     MarkDirty(uint64_t pid);
-    // Write all dirty frames to the store (checkpoint); returns addrs written.
+    // Write all dirty frames to the store (snapshot); returns addrs written.
     Status   FlushDirty(std::vector<PageBacking>* out);
 
     Stats stats() const;       // hits, misses, evictions, dirty_frames, bytes
@@ -266,7 +271,7 @@ class BufferPool {
   logical page *version* lifetime, §4.3).
 - **Eviction** uses a **CLOCK (second-chance)** sweep over frames: skip pinned and
   dirty frames, clear `ref` on first pass, evict a clean unpinned frame whose
-  `ref` is 0. A dirty frame is written back (or skipped until checkpoint,
+  `ref` is 0. A dirty frame is written back (or skipped until snapshot,
   configurable) before reuse.
 - Capacity is a hard cap; if every frame is pinned/dirty the pool blocks new pins
   briefly and triggers an eager dirty flush. Sizing guidance: `capacity_bytes`
@@ -281,10 +286,10 @@ and **epoch-retires the old frame's logical version**. Readers holding the old
 frame keep their pin until done; the frame returns to the free pool once both
 unpinned and past the epoch. Thus:
 
-- **DirtyTracker** = the set of frames with `dirty == true`. Checkpoint walks it
-  (§5) instead of the whole tree, enabling **incremental** checkpoints (only
+- **DirtyTracker** = the set of frames with `dirty == true`. Snapshot walks it
+  (§5) instead of the whole tree, enabling **incremental** snapshots (only
   dirty frames are written) — the high-performance win over PT3's full rewrite.
-- A dirty frame is never evicted until written by a checkpoint or an explicit
+- A dirty frame is never evicted until written by a snapshot or an explicit
   write-back.
 
 ### 4.4 Mapping table over frames
@@ -317,7 +322,7 @@ reads its frame bytes under its existing epoch guard. Residency is made safe **b
 the epoch manager, not by pins**: when the writer (single, under `write_mutex_`)
 replaces or evicts a base, the frame's memory is **retired through the epoch
 manager** and only returned to the pool's free list once no guard that could hold
-a pointer into it remains. Pins are retained only for the *writer/checkpoint*
+a pointer into it remains. Pins are retained only for the *writer/snapshot*
 (building, write-back) and for *demand-load installation*, never on the read hot
 path. This matches §4.2's "eviction waits for the epoch" and keeps `Pin`'s mutex
 off the reader. (A future lock-free pin with hazard/epoch counters is possible but
@@ -325,17 +330,17 @@ is **not** required for PT6c-5 and is out of scope.)
 
 **Problem B — anonymous frames (no durable addr yet).** The pool's `Pin`/
 write-back are addr-keyed, but the live tree creates pages (flush/consolidate/
-split/merge) long before a checkpoint assigns them a durable `PageAddr`. Such
+split/merge) long before a snapshot assigns them a durable `PageAddr`. Such
 frames are **anonymous + dirty**.
 
 *Resolution.* A newly built page gets a frame via `PinNew(pid, addr=kNoAddr)`; it
-is dirty and **pinned-resident until checkpoint** (it is the working set being
+is dirty and **pinned-resident until snapshot** (it is the working set being
 flushed, so this is the intended behavior, consistent with §4.3 "a dirty frame is
-never evicted until written"). Checkpoint's `FlushDirty` assigns each dirty
+never evicted until written"). Snapshot's `FlushDirty` assigns each dirty
 frame a durable `addr` (append cursor, §5), records `pid→addr`, clears dirty, and
-**drops the build pin** so the frame becomes evictable. Thus between checkpoints
-memory is bounded by *(working set since last checkpoint) + (resident clean
-cache)*; a write storm that outruns checkpoint triggers an eager checkpoint
+**drops the build pin** so the frame becomes evictable. Thus between snapshots
+memory is bounded by *(working set since last snapshot) + (resident clean
+cache)*; a write storm that outruns snapshot triggers an eager snapshot
 (§5A back-pressure). Anonymous frames are never written to a scratch area in v1.
 
 **Rollout (each step compiles + 117 tests green, ASan/TSan-clean):**
@@ -363,7 +368,7 @@ cache)*; a write storm that outruns checkpoint triggers an eager checkpoint
 
 PT6c-5.1 and 5.2 carry no on-disk or API change and are pure internal plumbing;
 5.3/5.4 enable lazy recovery and bounded memory and are the prerequisites for
-PT6d (incremental checkpoint) and PT7 (export/import).
+PT6d (incremental snapshot) and PT7 (export/import).
 
 ### 4.6 Eviction safety: epoch reclamation, not hazard pointers or pin counts
 
@@ -425,10 +430,10 @@ as the retire + re-tag above.
 **Precondition (why 5.4 follows PT6d).** Re-tagging a slot `unloaded(addr,plen)`
 is only correct if the page's **durable bytes at `addr` equal its live frame** (so
 the reload reconstructs the same page). A demand-loaded page already satisfies
-this; a freshly built/consolidated page does not until a checkpoint assigns it an
-`addr` and writes *that exact frame*. Today's checkpoint writes a *folded temp*
-image (it re-consolidates leaves into a throwaway page), so even post-checkpoint a
-live page has no `addr` whose bytes match it. PT6d makes checkpoint assign addrs
+this; a freshly built/consolidated page does not until a snapshot assigns it an
+`addr` and writes *that exact frame*. Today's snapshot writes a *folded temp*
+image (it re-consolidates leaves into a throwaway page), so even post-snapshot a
+live page has no `addr` whose bytes match it. PT6d makes snapshot assign addrs
 to the live frames and track dirty state; that is the precondition that unblocks
 general eviction. (Demand-loaded clean pages could be evicted earlier, but a
 writer-driven CLOCK over the full clean set is deferred to land atop PT6d's dirty
@@ -436,13 +441,18 @@ tracking rather than build a throwaway partial.)
 
 ---
 
-## 5. Checkpoint
+## 5. Snapshot
 
-`persist_checkpoint()` makes the engine's materialized state durable up to
+> **Note:** The snapshot mechanism (full manifest + superblock A/B) is the
+> current v1 implementation. Task #14 (plan-tree) will replace the full manifest
+> with segment-level incremental persistence — see [`design-crowtree-mappingtable.md`](design-crowtree-mappingtable.md).
+> The design below documents the current approach for reference.
+
+`persist_snapshot()` makes the engine's materialized state durable up to
 `last_applied_slot` and produces a `RootVersion` (core doc §9).
 
 ```
-checkpoint():
+snapshot():
     writer_lock:
         for pid in dirty.snapshot():
             consolidate(pid)                    // fold deltas into base pages
@@ -461,11 +471,11 @@ checkpoint():
 The **superblock** is a small, double-buffered (A/B) record at a fixed location
 holding: format version, current `root_pid`'s durable addr, `last_applied_slot`,
 the page-allocation map root, and a CRC. The atomic A/B swap is the commit point:
-a crash before the swap leaves the previous checkpoint intact; after the swap the
+a crash before the swap leaves the previous snapshot intact; after the swap the
 new state is live.
 
-Checkpoint cadence: by size (dirty bytes threshold), by slot count
-(`checkpoint_every_slots`), or on demand from the learner (e.g. before a snapshot
+Snapshot cadence: by size (dirty bytes threshold), by slot count
+(`snapshot_every_slots`), or on demand from the learner (e.g. before a snapshot
 export or a clean shutdown).
 
 ### Deferred design tasks for this section
@@ -474,7 +484,7 @@ export or a clean shutdown).
   `SnapshotView()` as a materialized consistent view because the live tree uses
   in-place mapping-slot replacement. The persistence milestone should design the
   true zero-copy model: allocate new PIDs along the modified path, publish a new
-  immutable root/version, define durable page-address remapping at checkpoint, and
+  immutable root/version, define durable page-address remapping at snapshot, and
   let `SnapshotView()` pin that version/root instead of materializing an O(N)
   copy under the write lock.
 
@@ -488,7 +498,7 @@ buffer-pool frames (§3, §4). crowtree is **not** an LSM: there is no leveled
 compaction. There are exactly two staged movements:
 
 ```
-apply(slot,batch)            flush (Flusher, 1/tree)         checkpoint (cadence)
+apply(slot,batch)            flush (Flusher, 1/tree)         snapshot (cadence)
    L0 MemTable   ───────────▶  L1 frames (buffer pool)  ───────────▶  PageStore
  (concurrent map)   batched,        single-writer COW          incremental, dirty
                   hot-key collapse   into frame builders        frames only + fsync
@@ -502,18 +512,18 @@ apply(slot,batch)            flush (Flusher, 1/tree)         checkpoint (cadence
    epoch-retired. Splits/merges (core §8) build 1–2 new frames the same way.
    - *Why fast:* hot keys already collapsed in L0; one frame rebuild per touched
      leaf per flush (not per key); the rebuilt frame **is** the durable image, so
-     checkpoint never re-encodes.
+     snapshot never re-encodes.
    - *Delta option:* to cut rebuild cost for tiny batches we may keep a bounded
      in-frame delta region appended to a leaf frame (search overlays it, capped at
      `max_delta_len`); this is an optional optimization gated behind a flag and
      measured against plain COW-rebuild. Default v1 = COW-rebuild (simpler, and
      the buffer pool keeps the source frame resident so the rebuild is memcpy-fast).
 
-2. **L1 → PageStore (checkpoint).** Walks the **DirtyTracker** (§4.3), not the
+2. **L1 → PageStore (snapshot).** Walks the **DirtyTracker** (§4.3), not the
    whole tree, and `write_page`s only dirty frames (optionally LZ4-compressed),
    remaps `pid -> PageAddr`, fsyncs, then commits the A/B superblock (§5). This is
    **incremental** — cost is proportional to dirtied pages since the last
-   checkpoint, not tree size. The PT3 full-rewrite path remains as the fallback
+   snapshot, not tree size. The PT3 full-rewrite path remains as the fallback
    for backends without stable per-page addresses.
 
 3. **Durability barrier ordering.** dirty frames + manifest fsync **before** the
@@ -522,14 +532,14 @@ apply(slot,batch)            flush (Flusher, 1/tree)         checkpoint (cadence
 
 Back-pressure: if L0 grows faster than the Flusher drains (e.g. slow device),
 `apply` is throttled once L0 crosses a high-water mark; the buffer pool's dirty
-ratio triggers an eager checkpoint. These keep memory bounded under write storms.
+ratio triggers an eager snapshot. These keep memory bounded under write storms.
 
 ---
 
 ## 6. Internal WAL Decision
 
 **Decision: crowtree does NOT keep a redo WAL of data operations. Recovery is
-checkpoint + consensus replay** (Model A, consistent with
+snapshot + consensus replay** (Model A, consistent with
 `design-state-machine.md §2.1` and `requirement.md §8`).
 
 Rationale:
@@ -537,21 +547,21 @@ Rationale:
 - The consensus layer already has a durable WAL of chosen entries
   (`design-wal.md`). Adding a second op-log in crowtree duplicates durability
   machinery and was explicitly dropped in the state-machine design.
-- crowtree persists a **checkpoint** (snapshot at `last_applied_slot`). On
+- crowtree persists a **snapshot** (snapshot at `last_applied_slot`). On
   restart, slots `> last_applied_slot` are re-applied from the consensus WAL /
   re-learned via consensus recovery. So the worst-case redo work is bounded by
-  the checkpoint interval, not unbounded.
+  the snapshot interval, not unbounded.
 
-Consequence: a crash between checkpoints loses only the in-memory deltas since the
-last checkpoint, which the consensus layer re-applies. The engine must therefore
+Consequence: a crash between snapshots loses only the in-memory deltas since the
+last snapshot, which the consensus layer re-applies. The engine must therefore
 report its restored `last_applied_slot` so the learner knows where to resume
 (snapshot-gc doc §3).
 
 A *structural* mini-journal (for in-progress split/merge) is unnecessary because
 SMOs are writer-exclusive and only their consolidated result is ever flushed;
-a crash mid-SMO simply reverts to the last checkpoint.
+a crash mid-SMO simply reverts to the last snapshot.
 
-> TODO-CONFIRM (later round): if checkpoint cost proves too high to run often
+> TODO-CONFIRM (later round): if snapshot cost proves too high to run often
 > enough, revisit adding a lightweight crowtree redo log for the delta tail only.
 
 ---
@@ -621,12 +631,12 @@ void      ct_view_release(ct_view*);
 
 // Durability + GC.
 uint64_t  ct_last_applied_slot(const ct_tree*);
-ct_status ct_checkpoint(ct_tree*, uint64_t* out_last_applied_slot);
+ct_status ct_snapshot(ct_tree*, uint64_t* out_last_applied_slot);
 void      ct_set_gc_watermark(ct_tree*, uint64_t snapshot_slot, uint64_t safe_slot);
 ct_status ct_collect_garbage(ct_tree*, ct_gc_stats* out);
 
 // Snapshot transfer (streaming chunks).
-ct_status ct_snapshot_export_begin(ct_tree*, uint64_t at_slot, ct_export** out);
+ct_status ct_snapshot_export_begin(ct_tree*, ct_export** out);
 ct_status ct_snapshot_export_next(ct_export*, ct_buf* chunk, int32_t* done);
 void      ct_snapshot_export_end(ct_export*);
 ct_status ct_snapshot_import(ct_tree*, const uint8_t* chunk, size_t len);
@@ -638,7 +648,7 @@ void      ct_free_buf(ct_buf*);
 
 `ct_options` carries: backend kind (file/block/rdma) + backend config (path /
 device / remote endpoint), IU size, target page bytes, consolidation policy,
-checkpoint cadence, and compression choice.
+snapshot cadence, and compression choice.
 
 ---
 
@@ -656,41 +666,45 @@ Two on-the-wire formats, selected at export-begin:
 
 | Format | Layout | Use |
 | --- | --- | --- |
-| **Portable** (v1, default) | versioned header `{magic, format, at_slot}`, then key-sorted `(klen,key,slot,kind,vlen,value)` tuples in **fixed ≤1 MiB chunks**, end marker, whole-stream CRC32C | cross-engine parity (in-mem ↔ crowtree), durable archival; deterministic chunk boundaries ⇒ resumable |
+| **Portable** (v1, default) | versioned header `{magic, format, slot}`, then key-sorted `(klen,key,slot,kind,vlen,value)` tuples in **fixed ≤1 MiB chunks**, end marker, whole-stream CRC32C | cross-engine parity (in-mem ↔ crowtree), durable archival; deterministic chunk boundaries ⇒ resumable |
 | **Native** (later) | header + raw frame images + a remapped manifest | fast crowtree→crowtree transfer; skips tuple re-encode |
 
 The portable format is deterministic and engine-independent, so an exported
-`.ctsnap` re-imports identically on any backend/page size.
+`.ctsnap` re-imports identically on any backend/page size. The `slot` in the
+header is the engine's `last_applied_slot` at export time (read-only metadata;
+always the latest durable state).
 
 ### 9.2 API (C++ + the C ABI in §8)
 
 ```cpp
-// Export: pins a RootVersion at >= at_slot, streams chunks; resumable.
+// Export: pins the current RootVersion, streams chunks; resumable.
 class SnapshotExport {            // ct_snapshot_export_*
   Status NextChunk(std::string* out, bool* done);  // ≤ chunk_bytes
 };
-Status SnapshotExportBegin(Crowtree&, uint64_t at_slot, Format, std::unique_ptr<SnapshotExport>*);
+Status SnapshotExportBegin(Crowtree&, Format, std::unique_ptr<SnapshotExport>*);
 
 // Convenience: dump a whole snapshot to a file (loops NextChunk).
-Status SnapshotDumpToFile(Crowtree&, uint64_t at_slot, Format, const std::string& path);
+Status SnapshotDumpToFile(Crowtree&, Format, const std::string& path);
 
 // Import: builds a fresh tree in staging, verifies CRC, atomically swaps in.
 class SnapshotImport {            // ct_snapshot_import*
   Status Feed(Slice chunk);
-  Status Finish(uint64_t* out_at_slot);
+  Status Finish(uint64_t* out_slot);
 };
 Status SnapshotLoadFromFile(Crowtree&, const std::string& path);
 ```
 
 ### 9.3 Semantics
 
-- **Export** pins the `RootVersion` at `at_slot` (core §9), triggering a
-  checkpoint first if needed, and streams over the pinned immutable tree; the pin
-  is released at end. Newer checkpoints may supersede it meanwhile (refcount).
+- **Export** pins the current `RootVersion` (core §9) and streams over the
+  pinned immutable tree; the pin is released at end. Newer snapshots may
+  supersede it meanwhile (refcount). The exported `slot` is the engine's
+  `last_applied_slot` at export time — always the latest durable state.
 - **Import** bulk-loads bottom-up into fully-consolidated immutable frames in a
   staging area (never touching the live tree), verifies the end-to-end CRC, then
-  atomically swaps in a new `RootVersion` with `last_applied_slot = at_slot`; the
-  old version is epoch-retired. Readers see the previous state until the swap.
+  atomically swaps in a new `RootVersion` with `last_applied_slot` = the slot from
+  the export stream; the old version is epoch-retired. Readers see the previous
+  state until the swap.
 - Resumability/throttling live **above** the engine (the snapshot module); the
   engine only guarantees deterministic, chunk-boundary-stable export and atomic
   import.

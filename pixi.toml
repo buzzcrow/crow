@@ -8,7 +8,7 @@ channels = ["conda-forge"]
 # conda-forge packages are built against glibc 2.17 by default.
 platforms = [
   "osx-arm64",
-  { platform = "linux-64", __glibc = "2.17" },
+  "linux-64",
 ]
 
 [dependencies]
@@ -20,6 +20,7 @@ gtest = "*"
 lz4 = "*"
 clang-format = "*"
 clang-tools = "*"
+folly = "*"
 # Rust toolchain (crowkv)
 rust = ">=1.75"
 protobuf = "*"
@@ -35,8 +36,8 @@ tokei = "*"
 
 # ── Build ────────────────────────────────────────────────────────
 install-git-hooks = "git config core.hooksPath .githooks"
-ct-fmt = "clang-format -i crowtree/src/*.cc crowtree/include/crowtree/*.h"
-ct-lint = "clang-tidy crowtree/src/*.cc -p crowtree/build -- -I crowtree/include"
+ct-fmt = "clang-format -i crowtree/src/*.cpp crowtree/include/crowtree/*.h"
+ct-lint = "clang-tidy crowtree/src/*.cpp -p crowtree/build -- -I crowtree/include"
 install-web-deps = "test -d crowkv-console/web/ui/node_modules || (cd crowkv-console/web/ui && npm ci)"
 build = { cmd = "cmake -S crowtree -B crowtree/build -DCMAKE_BUILD_TYPE=Release && cmake --build crowtree/build -j && cargo build --release && cd crowkv-console/web/ui && npm run build", depends-on = ["install-web-deps"] }
 default = { depends-on = ["build"] }
@@ -67,10 +68,10 @@ wait $p1 && wait $p2 && wait $p3 && wait $p4 && wait $p5 && wait $p6
 # ── Coverage & LOC ───────────────────────────────────────────────
 install-tarpaulin = "cargo install cargo-tarpaulin || echo 'Warning: cargo-tarpaulin install failed (expected on macOS)'"
 coverage = { cmd = "cargo tarpaulin --workspace --out Html --output-dir target/coverage --exclude-files '*/tests/*'", depends-on = ["install-tarpaulin"] }
-loc = "tokei --exclude swagger-ui"
+loc = "tokei --exclude swagger-ui --exclude 'crowtree/build-*' --exclude target --exclude dist --exclude node_modules"
 
 # ── Clean ────────────────────────────────────────────────────────
-clean = "pkill crowkv-server || true; pkill crowkv-web || true; pkill crowkv-cli || true; cargo clean && rm -rf crowtree/build crowtree/build-asan crowtree/build-tsan crowkv-console/web/ui/dist crowkv-console/web/ui/node_modules test-logs && find . -type d -name log ! -path '*/src/*' -prune -exec rm -rf {} + && find . -type d -name runtime-data ! -path '*/src/*' -prune -exec rm -rf {} +"
+clean = "pkill crowkv-server || true; pkill crowkv-web || true; pkill crowkv-cli || true; cargo clean && rm -rf crowtree/build crowtree/build-asan crowtree/build-tsan crowtree/build-ubsan crowkv-console/web/ui/dist crowkv-console/web/ui/node_modules test-logs && find . -type d -name log ! -path '*/src/*' -prune -exec rm -rf {} + && find . -type d -name runtime-data ! -path '*/src/*' -prune -exec rm -rf {} +"
 
 # ── crowtree sanitizers ──────────────────────────────────────────
 
@@ -96,5 +97,18 @@ if command -v setarch > /dev/null 2>&1; then
   setarch -R ctest --test-dir crowtree/build-tsan --output-on-failure
 else
   ctest --test-dir crowtree/build-tsan --output-on-failure
+fi
+'''
+
+# UndefinedBehaviorSanitizer build + tests.
+ct-ubsan = '''
+set -e
+cmake -S crowtree -B crowtree/build-ubsan -DCMAKE_BUILD_TYPE=Debug -DCROWTREE_SANITIZER=undefined
+cmake --build crowtree/build-ubsan -j
+export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
+if command -v setarch > /dev/null 2>&1; then
+  setarch -R ctest --test-dir crowtree/build-ubsan --output-on-failure
+else
+  ctest --test-dir crowtree/build-ubsan --output-on-failure
 fi
 '''

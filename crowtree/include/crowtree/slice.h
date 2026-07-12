@@ -23,21 +23,33 @@ class Slice {
   size_t size() const { return size_; }
   bool empty() const { return size_ == 0; }
 
-  std::string ToString() const { return std::string(data_, size_); }
-  std::string_view ToView() const { return std::string_view(data_, size_); }
+  std::string to_string() const { return std::string(data_, size_); }
+  std::string_view to_view() const { return std::string_view(data_, size_); }
 
   // Lexicographic comparison: <0, 0, >0.
   int compare(const Slice& o) const {
     size_t n = size_ < o.size_ ? size_ : o.size_;
     int r = n == 0 ? 0 : std::memcmp(data_, o.data_, n);
-    if (r != 0) return r;
-    if (size_ < o.size_) return -1;
-    if (size_ > o.size_) return 1;
+    if (r != 0)
+    {
+      return r;
+    }
+    if (size_ < o.size_)
+    {
+      return -1;
+    }
+    if (size_ > o.size_)
+    {
+      return 1;
+    }
     return 0;
   }
 
   bool starts_with(const Slice& prefix) const {
-    return size_ >= prefix.size_ && std::memcmp(data_, prefix.data_, prefix.size_) == 0;
+    // memcmp must not receive a null pointer even with length 0 (UB); an empty
+    // prefix is trivially a prefix of any slice.
+    return size_ >= prefix.size_ &&
+           (prefix.size_ == 0 || std::memcmp(data_, prefix.data_, prefix.size_) == 0);
   }
 
  private:

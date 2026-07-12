@@ -1,7 +1,7 @@
-// Epoch-based reclamation (design-crowtree-core.md §10).
+// Epoch-based reclamation.
 //
 // Readers take a Guard for the duration of a lock-free page walk. The writer
-// Retire()s pages it replaces; a retired page is freed only once no Guard that
+// retire()s pages it replaces; a retired page is freed only once no Guard that
 // could still reference it remains open.
 //
 // v1 uses a mutex-protected implementation (correct and TSan-clean). The
@@ -28,8 +28,9 @@ class EpochManager {
     Guard(EpochManager* m, uint64_t e) : mgr_(m), epoch_(e) {}
     Guard(Guard&& o) noexcept : mgr_(o.mgr_), epoch_(o.epoch_) { o.mgr_ = nullptr; }
     Guard& operator=(Guard&& o) noexcept {
-      if (this != &o) {
-        Release();
+      if (this != &o)
+      {
+        release();
         mgr_ = o.mgr_;
         epoch_ = o.epoch_;
         o.mgr_ = nullptr;
@@ -38,10 +39,10 @@ class EpochManager {
     }
     Guard(const Guard&) = delete;
     Guard& operator=(const Guard&) = delete;
-    ~Guard() { Release(); }
+    ~Guard() { release(); }
 
    private:
-    void Release();
+    void release();
     EpochManager* mgr_;
     uint64_t epoch_;
   };
@@ -52,29 +53,29 @@ class EpochManager {
   EpochManager(const EpochManager&) = delete;
   EpochManager& operator=(const EpochManager&) = delete;
 
-  // Open a reader guard at the current epoch.
-  Guard Enter();
+  // open a reader guard at the current epoch.
+  Guard enter();
 
   // Defer deletion of `ptr` until no guard opened at-or-before now remains.
-  void Retire(void* ptr, Deleter deleter);
+  void retire(void* ptr, Deleter deleter);
 
   // Convenience: retire a typed pointer with `delete`.
   template <class T>
-  void RetireObject(T* p) {
-    Retire(p, [](void* x) { delete static_cast<T*>(x); });
+  void retire_object(T* p) {
+    retire(p, [](void* x) { delete static_cast<T*>(x); });
   }
 
   // Force a reclamation sweep. Returns the number of objects freed.
-  size_t TryReclaim();
+  size_t try_reclaim();
 
   // Diagnostics.
-  size_t PendingRetired();
-  size_t ActiveGuards();
+  size_t pending_retired();
+  size_t active_guards();
 
  private:
   friend class Guard;
-  void ExitEpoch(uint64_t epoch);
-  size_t ReclaimLocked();  // caller holds mu_
+  void exit_epoch(uint64_t epoch);
+  size_t reclaim_locked();  // caller holds mu_
 
   struct Retired {
     uint64_t epoch;

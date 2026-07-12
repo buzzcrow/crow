@@ -1,4 +1,4 @@
-// MemTable (L0) — design-crowtree-core.md §1, §6.1.
+// MemTable (L0).
 //
 // A concurrent in-memory ordered map `key -> encoded cell` that absorbs apply()
 // (concurrent, possibly out-of-order by slot). It keeps one (highest-slot) cell
@@ -19,7 +19,7 @@
 
 namespace crowtree {
 
-struct MemEntry {
+struct mem_entry {
   std::string key;
   std::string cell;  // encoded cell payload (slot/flags/value)
   uint64_t slot;
@@ -30,34 +30,62 @@ class MemTable {
   MemTable() = default;
 
   // Insert/replace with highest-slot-wins. Returns true if the table changed.
-  // Drops the write if slot <= durable_floor (already in L1) or if an existing
-  // entry has a >= slot.
-  bool Upsert(Slice key, uint64_t slot, Slice cell_payload);
+  // Drops the write if an existing entry has a >= slot. Also drops writes with
+  // slot <= durable_floor (already in L1) unless allow_old_slots is set.
+  bool upsert(Slice key, uint64_t slot, Slice cell_payload);
+  // Move-based overload: avoids copying key/cell into the map when the caller
+  // already owns heap strings (apply's per-batch dedup map, snapshot import).
+  bool upsert(std::string&& key, uint64_t slot, std::string&& cell_payload);
 
   // Set the durable floor (engine's last_applied_slot). Writes at or below it are
-  // already in L1 and are rejected by Upsert. Does not retroactively evict.
-  void SetDurableFloor(uint64_t slot);
+  // already in L1 and are rejected by upsert (unless allow_old_slots). Does not
+  // retroactively evict.
+  void set_durable_floor(uint64_t slot);
   uint64_t durable_floor() const;
 
+  // Allow upsert to accept slots <= durable_floor. Needed during restore, when
+  // Paxos may re-learn an old slot whose value differs from L1. With this set,
+  // L0 is no longer strictly newer than L1, so get must always consult L0 first
+  // (it already does) and use the L0 cell when present.
+  void set_allow_old_slots(bool v);
+
+  // Range of slots currently held in L0 ([min,max]; empty when no entries). A
+  // reader that knows a key's expected slot can skip the L0 lookup when that
+  // slot falls outside this range and go straight to L1.
+  struct slot_range_t {
+    uint64_t min = UINT64_MAX;
+    uint64_t max = 0;
+    bool empty = true;
+  };
+  slot_range_t slot_range() const;
+
+  // Drop all entries and reset the durable floor to 0 (snapshot import: the L0
+  // overlay is fully replaced along with L1). Also resets allow_old_slots and
+  // slot-range tracking.
+  void reset();
+
   // Point read: copies the encoded cell into *out_cell. Returns false if absent.
-  bool Get(Slice key, std::string* out_cell) const;
+  bool get(Slice key, std::string* out_cell) const;
 
   // Remove and return, in key order, all entries with slot <= cs. Entries with
   // slot > cs are retained (not yet contiguous / durable-eligible).
-  std::vector<MemEntry> DrainUpTo(uint64_t cs);
+  std::vector<mem_entry> drain_up_to(uint64_t cs);
 
   // Ordered immutable copy of the current contents (for scan merge cursors).
-  std::vector<MemEntry> Snapshot() const;
+  std::vector<mem_entry> snapshot() const;
 
-  size_t ApproxBytes() const;
-  size_t Count() const;
-  bool Empty() const;
+  size_t approx_bytes() const;
+  size_t count() const;
+  bool empty() const;
 
  private:
   mutable std::mutex mu_;
   std::map<std::string, std::string, std::less<>> map_;  // key -> encoded cell
   size_t bytes_ = 0;
   uint64_t durable_floor_ = 0;
+  bool allow_old_slots_ = false;
+  uint64_t min_slot_ = UINT64_MAX;  // slot range of current entries; tracked on
+  uint64_t max_slot_ = 0;           // upsert, reset when the map empties
 };
 
 }  // namespace crowtree

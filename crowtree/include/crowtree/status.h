@@ -22,23 +22,26 @@ class Status {
   Status() : code_(Code::kOk) {}
 
   static Status Ok() { return Status(); }
-  static Status NotFound(std::string m = {}) { return Status(Code::kNotFound, std::move(m)); }
-  static Status InvalidArgument(std::string m = {}) {
+  static Status not_found(std::string m = {}) { return Status(Code::kNotFound, std::move(m)); }
+  static Status invalid_argument(std::string m = {}) {
     return Status(Code::kInvalidArgument, std::move(m));
   }
-  static Status Corruption(std::string m = {}) { return Status(Code::kCorruption, std::move(m)); }
-  static Status IoError(std::string m = {}) { return Status(Code::kIoError, std::move(m)); }
-  static Status NotSupported(std::string m = {}) {
+  static Status corruption(std::string m = {}) { return Status(Code::kCorruption, std::move(m)); }
+  static Status io_error(std::string m = {}) { return Status(Code::kIoError, std::move(m)); }
+  static Status not_supported(std::string m = {}) {
     return Status(Code::kNotSupported, std::move(m));
   }
-  static Status Internal(std::string m = {}) { return Status(Code::kInternal, std::move(m)); }
+  static Status internal_error(std::string m = {}) { return Status(Code::kInternal, std::move(m)); }
 
   bool ok() const { return code_ == Code::kOk; }
   Code code() const { return code_; }
   const std::string& message() const { return msg_; }
 
-  std::string ToString() const {
-    if (ok()) return "Ok";
+  std::string to_string() const {
+    if (ok())
+    {
+      return "Ok";
+    }
     return "Status(" + std::to_string(static_cast<int32_t>(code_)) + "): " + msg_;
   }
 

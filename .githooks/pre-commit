@@ -17,9 +17,9 @@ fi
 
 # Check C++ formatting
 echo "Checking C++ formatting..."
-if ! pixi run clang-format --dry-run --Werror crowtree/src/*.cc crowtree/include/crowtree/*.h 2>/dev/null; then
+if ! pixi run clang-format --dry-run --Werror crowtree/src/*.cpp crowtree/include/crowtree/*.h 2>/dev/null; then
     echo "⚠️  C++ formatting issues found. Running 'clang-format -i' to fix..."
-    pixi run clang-format -i crowtree/src/*.cc crowtree/include/crowtree/*.h
+    pixi run clang-format -i crowtree/src/*.cpp crowtree/include/crowtree/*.h
     echo "✅ C++ formatting auto-fixed. Review and re-stage the changes, then commit again."
     exit 1
 fi
@@ -35,7 +35,7 @@ fi
 # Run clang-tidy (C++ lint)
 echo "Running clang-tidy..."
 if [ -d crowtree/build ]; then
-    pixi run clang-tidy crowtree/src/*.cc -p crowtree/build -- -I crowtree/include 2>&1
+    pixi run clang-tidy crowtree/src/*.cpp -p crowtree/build -- -I crowtree/include 2>&1
     if [ $? -ne 0 ]; then
         echo "❌ clang-tidy failed. Fix warnings before committing."
         exit 1

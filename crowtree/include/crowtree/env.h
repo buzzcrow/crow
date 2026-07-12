@@ -20,7 +20,7 @@ class CrowtreeEnv {
   EpochManager& epoch() { return epoch_; }
 
   // Process-wide default Env (used by tests and simple single-process setups).
-  static CrowtreeEnv& Default();
+  static CrowtreeEnv& default_env();
 
  private:
   EpochManager epoch_;

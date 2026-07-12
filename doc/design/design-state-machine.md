@@ -187,11 +187,11 @@ In addition to peer transfer, the engine uses snapshot export to persist its own
 
 ### 6.2 Export
 
-`snapshot_export(at_slot) → stream<chunk>`:
+`snapshot_export() → stream<chunk>`:
 
-- Returns a stream of opaque chunks that, when imported by a peer engine, produce the same logical state at `at_slot`.
-- The export reflects the engine state *after* applying every slot ≤ `at_slot` (i.e. `contiguous_applied >= at_slot`).
-- Chunks have stable ordering and stable boundaries: the same `at_slot` always produces the same byte sequence, modulo any internal pagination. This determinism is what makes resumption possible.
+- Returns a stream of opaque chunks that, when imported by a peer engine, produce the same logical state as the exporter's current `last_applied_slot`.
+- The export reflects the engine state *after* applying every slot ≤ `last_applied_slot` (always the latest durable state).
+- Chunks have stable ordering and stable boundaries: the same state always produces the same byte sequence, modulo any internal pagination. This determinism is what makes resumption possible.
 - Chunk size is engine-defined; 1–4 MiB is a reasonable default.
 
 The chunk format is **engine-specific** — the in-memory tree might serialize key/value pairs in btree order; crowtree might dump native pages directly. The snapshot module treats chunks as opaque.
@@ -201,7 +201,7 @@ The chunk format is **engine-specific** — the in-memory tree might serialize k
 `snapshot_import(stream<chunk>) → ()`:
 
 - Consumes a stream of chunks produced by the same engine type.
-- On success, the engine's state is exactly what `snapshot_export(at_slot)` produced, with `contiguous_applied = at_slot` and `max_applied = at_slot`.
+- On success, the engine's state is exactly what `snapshot_export()` produced, with `contiguous_applied` and `max_applied` set to the exported slot.
 - Resumable: an import that fails part-way may be restarted from a known chunk offset (the snapshot module records the last successful offset).
 - Verified: the snapshot module checks an end-to-end CRC after the last chunk before activating the import.
 
@@ -306,7 +306,7 @@ Three engine implementations satisfy the surface above. Each is appropriate for 
   consumed from Rust over a coarse C ABI. Full design:
   [`design-crowtree.md`](design-crowtree.md) and its sub-docs.
 - Persistence: yes, via a pluggable `PageStore` (local file, raw block device,
-  remote/RDMA); checkpoint + consensus replay for recovery (no second op-log).
+  remote/RDMA); snapshot + consensus replay for recovery (no second op-log).
 - Use cases: production.
 - Snapshot format: portable `(key, slot, cell)` tuples first; native page dump as
   an optimization.

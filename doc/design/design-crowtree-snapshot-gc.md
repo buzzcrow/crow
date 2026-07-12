@@ -26,7 +26,7 @@ crowtree consumes two slot watermarks the learner already tracks, plus its own
 
 | Watermark | Source | Meaning |
 | --- | --- | --- |
-| `last_applied_slot` | crowtree (per checkpoint) | Highest slot whose effects are durable in the engine's last checkpoint. |
+| `last_applied_slot` | crowtree (per snapshot) | Highest slot whose effects are durable in the engine's last snapshot. |
 | `snapshot_slot` | learner / replicator | State at this slot is durable on leader + ≥1 peer. |
 | `safe_slot` | learner (`contiguous_applied` min across members) | Every learner has applied through here. |
 
@@ -45,17 +45,18 @@ Export/import back the `KVEngine::snapshot_export/import` methods
 
 ### Export
 
-`snapshot_export(at_slot)`:
+`snapshot_export()`:
 
-1. The engine ensures a checkpoint with `last_applied_slot >= at_slot` exists
-   (triggering one if needed), then pins that `RootVersion` (core doc §9).
+1. The engine pins the current `RootVersion` (core doc §9) — always the latest
+   durable state. There is no `at_slot` parameter; historical snapshot export is
+   not supported (Raft InstallSnapshot always installs the current state).
 2. It streams chunks over the pinned, immutable tree. Two formats:
    - **Portable** `(key, slot, kind, value)` tuples in key order, versioned
      header, default 1 MiB chunks. Deterministic byte boundaries → resumable.
      Required for cross-engine parity tests (in-memory ↔ crowtree).
    - **Native** page dump (faster) for crowtree↔crowtree production transfer.
 3. The pin is released when the export ends. The export holds the version alive
-   even as newer checkpoints supersede it (refcount in core doc §9).
+   even as newer snapshots supersede it (refcount in core doc §9).
 
 The first implementation ships the **portable** format (P3 M3); the native dump
 is an optimization (TODO-CONFIRM in `design-crowtree.md §7`).
@@ -68,7 +69,7 @@ is an optimization (TODO-CONFIRM in `design-crowtree.md §7`).
    pages) into staging, never touching the live tree.
 2. Verifies the end-to-end CRC after the last chunk.
 3. Atomically swaps the staged tree in as a new `RootVersion` with
-   `last_applied_slot = at_slot`; old version retired via epoch.
+   `last_applied_slot` = the slot from the export stream header; old version retired via epoch.
 
 Atomic to readers: until the swap, reads serve the previous state (core doc §9,
 state-machine §6.5).
@@ -113,8 +114,8 @@ Triggers (state-machine §7.3):
 
 - **Periodic** — background sweep every `compaction_tick` (default 5 min).
 - **Pressure** — backend reports low free space → focused sweep / eager
-  checkpoint+GC.
-- **Post-snapshot** — after a checkpoint, eligible tombstones below the new
+  snapshot+GC.
+- **Post-snapshot** — after a snapshot, eligible tombstones below the new
   `snapshot_slot` are swept.
 
 `GcStats` reports tombstones dropped, versions retired, pages/bytes freed.
@@ -133,7 +134,7 @@ min(safe_slot, snapshot_slot)`. crowtree's `last_applied_slot` participates:
   `last_applied_slot` of any member that might restart and replay locally.
 
 This couples the two GC watermarks: crowtree advancing `last_applied_slot` (via
-checkpoints) is what eventually lets the consensus WAL drop old segments.
+snapshots) is what eventually lets the consensus WAL drop old segments.
 
 ---
 
@@ -143,7 +144,8 @@ For a new or far-lagging member (`design-reconfiguration.md`, `plan.md P5 M1`):
 
 ```
 1. Leader picks a snapshot slot S (>= its last_applied_slot).
-2. Leader engine: snapshot_export(S) streams chunks via SnapshotService.
+2. Leader engine: snapshot_export() streams chunks via SnapshotService.
+   S = leader's last_applied_slot at export time (always the latest durable state).
 3. New member engine: snapshot_import(stream) builds + swaps in the tree at S.
 4. New member sets contiguous_applied = S, then streams consensus WAL
    (S+1, current_max_chosen] and applies via apply(slot, batch).
@@ -162,8 +164,8 @@ import (persistence §8 C API: `ct_snapshot_export_*` / `ct_snapshot_import*`).
 
 ```
 learner.learn(entry) -> engine.apply(slot, batch)         // in-memory deltas
-... every checkpoint_every_slots / dirty threshold ...
-engine.persist_checkpoint() -> last_applied_slot advances  // durable + new RootVersion
+... every snapshot_every_slots / dirty threshold ...
+engine.persist_snapshot() -> last_applied_slot advances  // durable + new RootVersion
 learner observes safe_slot/snapshot_slot advance -> engine.set_gc_watermark(...)
 background -> engine.collect_garbage()                      // tombstones + stale versions
 ```
@@ -180,5 +182,5 @@ drop(view)                         // release pin -> version GC-eligible
 
 These flows require no change to the learner's public contract beyond the
 redefined async `KVEngine` surface (`design-crowtree.md §4`); `InMemKV`
-implements the same methods (checkpoint/GC are near-no-ops in memory) so tests
+implements the same methods (snapshot/GC are near-no-ops in memory) so tests
 exercise the same code paths.
