@@ -365,6 +365,75 @@ PT6c-5.1 and 5.2 carry no on-disk or API change and are pure internal plumbing;
 5.3/5.4 enable lazy recovery and bounded memory and are the prerequisites for
 PT6d (incremental checkpoint) and PT7 (export/import).
 
+### 4.6 Eviction safety: epoch reclamation, not hazard pointers or pin counts
+
+The hard part of eviction is **not** picking a victim (CLOCK does that); it is
+answering *"when is it safe to actually reuse a page's frame bytes?"* Readers are
+lock-free and read `Slice`s that point **directly into a frame** (zero-copy, no
+lock, no per-page refcount), so freeing or reusing a frame while a reader still
+holds a pointer into it is a use-after-free. Three classic disciplines solve this;
+crowtree deliberately picks the third.
+
+1. **Pin counts / refcounting** (textbook buffer pool): `pin++` before touching a
+   page, `pin--` after; evict only at `pin == 0`. Correct, but it puts an atomic
+   RMW on a shared cacheline **on every page touch on the read hot path** — the
+   exact regression Problem A forbids.
+2. **Hazard pointers**: before dereferencing pointer `X`, a reader publishes `X`
+   into a per-thread single-writer slot (store + fence) and re-validates; the
+   reclaimer scans all threads' hazard slots before freeing `X`. Lock-free and
+   **tightly** memory-bounded (only the exact in-flight pointers are protected,
+   so one stalled reader pins at most its few hazards). Cost: the reader publishes
+   *every* pointer it touches (store + acq/rel fence + re-validation), and the
+   reclaimer does an `O(threads × hazards)` scan per free. It protects *individual
+   pointers* — a root→…→leaf descent needs a hazard per level / hand-over-hand.
+3. **Epoch-based reclamation (EBR / RCU-style)** — *crowtree's choice*
+   (`EpochManager`, core §10). A reader brackets its **whole** operation in one
+   `Guard` (`Enter()` = "active in epoch *e*"; `~Guard` = "left"); it never
+   publishes which pointers it holds. The writer **retires** an unlinked page
+   tagged with the current epoch; the page is freed only once **no guard open
+   at-or-before that epoch remains**. Reader cost is one Enter/Exit *per
+   operation*, not per pointer. Trade-off vs. hazard pointers: a single stalled
+   guard blocks *all* reclamation (worst-case unbounded retained memory). crowtree
+   accepts this because reads are short (one `Get`/`Scan`) and there is a single
+   writer, so the active-epoch window is tiny.
+
+**Eviction reuses the COW-retire path verbatim.** Dropping a resident page is
+structurally identical to the copy-on-write replace already done on every
+flush/split/merge — only the replacement value differs:
+
+```
+// COW replace (existing):   slot := new resident page;  retire(old)
+// Eviction (PT6c-5.4):       slot := unloaded(addr,plen); retire(old)
+mapping_.StoreUnloaded(pid, addr, plen);   // unlink resident, leave a reload tag
+RetirePage(old_page);                      // epoch-deferred free
+```
+
+The evicted page's frame is owned by its `FrameStore`; `~FrameStore` (which
+returns the frame to the pool free list) runs **only when the epoch reclaimer
+frees the page**, i.e. after every overlapping reader guard has drained. So frame
+reuse is epoch-safe *for free* — no read-path pins, no hazard scan. A later reader
+that loads the stale tag simply demand-loads again (§4.4, `Resident`).
+
+This is also why **the pool's own CLOCK must never evict a base frame**: the pool
+knows nothing about mapping slots or epochs and would reuse bytes a lock-free
+reader still points at (Problem A). Base frames are therefore pinned (`pin=1`) so
+the pool's victim search skips them; their lifetime is governed by epoch-retire,
+not by the pool's `pin==0` search. Eviction decisions are made by the **single
+writer under `write_mutex_`** (one writer of slots ⇒ no slot races) and executed
+as the retire + re-tag above.
+
+**Precondition (why 5.4 follows PT6d).** Re-tagging a slot `unloaded(addr,plen)`
+is only correct if the page's **durable bytes at `addr` equal its live frame** (so
+the reload reconstructs the same page). A demand-loaded page already satisfies
+this; a freshly built/consolidated page does not until a checkpoint assigns it an
+`addr` and writes *that exact frame*. Today's checkpoint writes a *folded temp*
+image (it re-consolidates leaves into a throwaway page), so even post-checkpoint a
+live page has no `addr` whose bytes match it. PT6d makes checkpoint assign addrs
+to the live frames and track dirty state; that is the precondition that unblocks
+general eviction. (Demand-loaded clean pages could be evicted earlier, but a
+writer-driven CLOCK over the full clean set is deferred to land atop PT6d's dirty
+tracking rather than build a throwaway partial.)
+
 ---
 
 ## 5. Checkpoint

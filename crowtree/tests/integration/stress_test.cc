@@ -11,6 +11,9 @@
 
 #include "crowtree/crowtree.h"
 #include "crowtree/env.h"
+#include "crowtree/page_store.h"
+
+#include <memory>
 
 using namespace crowtree;
 
@@ -21,6 +24,57 @@ std::string Key(int i) {
   return buf;
 }
 }  // namespace
+
+// Many readers race to demand-load an all-unloaded recovered tree (design
+// §4.5 cold path). Run under TSan: the load_mutex_-serialized installs must not
+// race with lock-free reads of just-published pages, and descriptors freed on
+// transition must not be touched by a concurrent reader.
+TEST(Stress, ConcurrentDemandLoadAfterRecovery) {
+  MemPageStore store(1);
+  Options opt;
+  opt.page_store = &store;
+  opt.max_delta_len = 1;
+  opt.leaf_split_bytes = 160;
+  opt.frame_bytes = 4096;
+  CrowtreeEnv env;
+
+  const int K = 300;
+  {
+    Crowtree t(env, opt);
+    // Flush incrementally so the tree splits into many small (pool-sized) leaves
+    // rather than one oversized leaf (a single bulk flush only halves once).
+    for (int i = 0; i < K; ++i) {
+      std::string val = "val" + std::to_string(i);
+      ASSERT_TRUE(t.Apply(i + 1, Batch{{BatchOp{Key(i), OpKind::kPut, val}}}, i + 1).ok());
+      ASSERT_TRUE(t.Flush().ok());
+    }
+    ASSERT_TRUE(t.Checkpoint(nullptr).ok());
+  }
+
+  std::unique_ptr<Crowtree> t2;
+  ASSERT_TRUE(Crowtree::Open(env, opt, &t2).ok());
+  EXPECT_EQ(t2->buffer_pool()->stats().used, 0u);  // nothing loaded yet
+
+  std::atomic<bool> fail{false};
+  std::vector<std::thread> readers;
+  for (int r = 0; r < 8; ++r) {
+    readers.emplace_back([&, r] {
+      std::mt19937 rng(7000 + r);
+      std::string v;
+      uint64_t s;
+      for (int it = 0; it < 4000 && !fail.load(std::memory_order_relaxed); ++it) {
+        int i = rng() % K;
+        if (!t2->Get(Slice(Key(i)), &s, &v) || v != "val" + std::to_string(i)) {
+          fail.store(true);
+          return;
+        }
+      }
+    });
+  }
+  for (auto& th : readers) th.join();
+  EXPECT_FALSE(fail.load());
+  EXPECT_GT(t2->buffer_pool()->stats().used, 0u);  // demand-loaded into the pool
+}
 
 TEST(Stress, ConcurrentReadersSingleWriter) {
   Options opt;

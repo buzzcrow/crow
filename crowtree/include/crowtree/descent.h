@@ -10,12 +10,15 @@
 namespace crowtree {
 
 // Returns the leaf PID that should contain `key`, or kInvalidPID if the tree is
-// empty / malformed. `max_depth` guards against accidental cycles.
-inline uint64_t FindLeafPID(const MappingTable& mt, uint64_t root_pid, Slice key,
+// empty / malformed. `resolve(pid)` maps a PID to its resident chain head,
+// demand-loading an unloaded slot (design §4.5); it returns a real PageBase* or
+// nullptr. `max_depth` guards against accidental cycles.
+template <class Resolve>
+inline uint64_t FindLeafPID(Resolve&& resolve, uint64_t root_pid, Slice key,
                             int max_depth = 64) {
   uint64_t pid = root_pid;
   for (int d = 0; d < max_depth; ++d) {
-    PageBase* page = mt.Get(pid);
+    PageBase* page = resolve(pid);
     if (page == nullptr) return kInvalidPID;
     // A leaf's mapping slot may point at a delta chain head; the chain shares the
     // leaf's PID, so the PID is already the answer once we reach a leaf level.

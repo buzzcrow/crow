@@ -1,19 +1,24 @@
 // Checkpoint and recovery (design-crowtree-persistence.md §5, §7).
 //
 // On-device layout owned here:
-//   [superblock slot A (4 KiB)][superblock slot B (4 KiB)][append-only regions]
-// Each checkpoint appends a fresh full image (all reachable base pages + a
-// manifest) past the current end of file, then commits by writing the inactive
-// superblock slot (chosen by seq parity) and syncing. The previous image stays
-// intact until the new superblock is durable, so a crash mid-checkpoint falls
-// back to the last committed superblock. Reusing dead regions (incremental
-// checkpoint) is deferred; see plan-persistent-tree.md PT6.
+//   [superblock slot A (4 KiB)][superblock slot B (4 KiB)][page/manifest region]
+// Each checkpoint (PT6d) writes only *dirty* base pages (clean pages keep their
+// prior addr) plus a fresh manifest listing every reachable page's (pid,addr,len),
+// then commits by writing the inactive superblock slot (chosen by seq parity) and
+// syncing. New writes land in space that is **dead w.r.t. the committed
+// checkpoint** (reused gaps) or appended past EOF — never over the committed
+// image, so a crash mid-checkpoint falls back intact to the last committed
+// superblock. Space freed by the committed checkpoint becomes reusable only after
+// the next checkpoint commits (two-generation safety).
 //
-// Key work: reachable-page walk, page/manifest framing, superblock A/B commit,
-// best-superblock recovery, mapping-table rebuild.
+// Key work: incremental reachable-page walk, crash-safe free-space reuse,
+// page/manifest framing, superblock A/B commit, best-superblock recovery,
+// lazy mapping-table rebuild.
+#include <algorithm>
 #include <cstring>
 #include <functional>
 #include <map>
+#include <utility>
 #include <vector>
 
 #include "crowtree/crc32c.h"
@@ -59,12 +64,6 @@ uint64_t GetU64(const uint8_t* p) {
   uint64_t v = 0;
   for (int i = 0; i < 8; ++i) v |= static_cast<uint64_t>(p[i]) << (8 * i);
   return v;
-}
-
-uint64_t RoundUp(uint64_t v, uint32_t iu) {
-  if (iu <= 1) return v;
-  uint64_t rem = v % iu;
-  return rem == 0 ? v : v + (iu - rem);
 }
 
 // Fold a leaf chain (head -> ... -> LeafBase) into key-sorted entries by
@@ -147,6 +146,72 @@ bool ReadBestSuperblock(const PageStore& store, Superblock* best) {
   return found;
 }
 
+// Crash-safe append/reuse allocator. `gaps` are byte ranges that are dead w.r.t.
+// the committed checkpoint (safe to overwrite); `append` is the grow cursor at
+// (or past) EOF. First-fit reuse, else append. Pages are uniform frame_bytes in
+// the common case, so freed gaps fit later rewrites exactly.
+struct SpaceAllocator {
+  std::vector<std::pair<uint64_t, uint64_t>> gaps;  // (addr, len), sorted by addr
+  uint64_t append = kRegionBase;
+
+  uint64_t Alloc(uint64_t len) {
+    for (auto& g : gaps) {
+      if (g.second >= len) {
+        uint64_t a = g.first;
+        g.first += len;
+        g.second -= len;
+        return a;
+      }
+    }
+    uint64_t a = append;
+    append += len;
+    return a;
+  }
+};
+
+// Live byte ranges of the committed checkpoint `sb`: every reachable page frame
+// plus the manifest itself. These must never be overwritten (they are the crash
+// fallback). Returns false if the manifest can't be read/validated.
+bool CollectLiveExtents(const PageStore& store, const Superblock& sb,
+                        std::vector<std::pair<uint64_t, uint64_t>>* out) {
+  std::vector<uint8_t> mbuf(sb.manifest_len);
+  if (!store.ReadAt(sb.manifest_addr, mbuf.data(), mbuf.size()).ok()) return false;
+  if (mbuf.size() < kPageFrameHeaderSize) return false;
+  uint32_t mlen = GetU32(mbuf.data());
+  uint32_t mcrc = GetU32(mbuf.data() + 4);
+  if (kPageFrameHeaderSize + mlen > mbuf.size()) return false;
+  const uint8_t* mbody = mbuf.data() + kPageFrameHeaderSize;
+  if (Crc32c(mbody, mlen) != mcrc) return false;
+  uint64_t count = GetU64(mbody);
+  size_t pos = 8;
+  for (uint64_t i = 0; i < count; ++i) {
+    if (pos + 20 > mlen) return false;
+    uint64_t addr = GetU64(mbody + pos + 8);
+    uint32_t plen = GetU32(mbody + pos + 16);
+    pos += 20;
+    out->push_back({addr, plen});
+  }
+  out->push_back({sb.manifest_addr, sb.manifest_len});
+  return true;
+}
+
+// Build the allocator: free = the complement of `live` within
+// [kRegionBase, file_size); append grows past EOF.
+SpaceAllocator BuildAllocator(std::vector<std::pair<uint64_t, uint64_t>> live,
+                              uint64_t file_size) {
+  SpaceAllocator a;
+  std::sort(live.begin(), live.end());
+  uint64_t prev_end = kRegionBase;
+  for (const auto& e : live) {
+    if (e.first > prev_end) a.gaps.push_back({prev_end, e.first - prev_end});
+    prev_end = std::max(prev_end, e.first + e.second);
+  }
+  uint64_t eof = file_size < kRegionBase ? kRegionBase : file_size;
+  if (eof > prev_end) a.gaps.push_back({prev_end, eof - prev_end});  // dead tail
+  a.append = eof;
+  return a;
+}
+
 }  // namespace
 
 Status Crowtree::Checkpoint(uint64_t* out_last_applied) {
@@ -157,43 +222,69 @@ Status Crowtree::Checkpoint(uint64_t* out_last_applied) {
   const uint32_t iu = store->iu_size();
   const uint64_t gc = gc_floor_.load();
 
-  // Append this checkpoint's image past the current end of file (never
-  // overwrite the committed image until the new superblock is durable).
-  uint64_t cursor = RoundUp(store->size() < kRegionBase ? kRegionBase : store->size(), iu);
+  // Build the crash-safe allocator from the committed checkpoint: its page
+  // frames and manifest are off-limits (the crash fallback); every other byte in
+  // the file is dead and reusable. The first checkpoint (no committed sb) just
+  // appends. Reusing only committed-dead space gives two-generation safety.
+  Superblock prev;
+  bool have_prev = ReadBestSuperblock(*store, &prev);
+  std::vector<std::pair<uint64_t, uint64_t>> live;
+  if (have_prev && !CollectLiveExtents(*store, prev, &live))
+    return Status::Corruption("Checkpoint: committed manifest unreadable");
+  SpaceAllocator alloc = BuildAllocator(std::move(live), store->size());
+  (void)iu;  // IU alignment of reused/appended extents is deferred (PT9).
 
   std::vector<uint8_t> manifest_body;  // page_count then (pid, addr, len)*
   uint64_t page_count = 0;
+  uint64_t pages_written = 0;
 
-  // DFS the reachable tree; encode each base page, write it, record its addr.
+  // DFS the reachable tree. Incremental (design §5): each base page persists its
+  // *live* frame verbatim, but only when **dirty** (durable_addr == kNoAddr);
+  // clean pages keep their prior durable addr (no rewrite). The manifest lists
+  // every reachable page's (pid, addr, len) so recovery can demand-load it.
   std::function<Status(uint64_t)> walk = [&](uint64_t pid) -> Status {
-    PageBase* head = mapping_.Get(pid);
+    PageBase* head = Resident(pid);
     if (head == nullptr) return Status::Internal("Checkpoint: null page in walk");
-    PageBase* base = head;
-    while (base != nullptr && base->type == PageType::kBatchDelta) base = base->next;
-    if (base == nullptr) return Status::Internal("Checkpoint: chain has no base");
 
-    // Durable image == the in-memory frame (zero-copy format). Leaves are
-    // folded first (chain -> fresh consolidated frame); inner pages are already
-    // base frames. Backends needing IU alignment pad on top of this (PT6d).
-    std::vector<uint8_t> frame;
-    if (base->type == PageType::kLeafBase) {
-      auto* leaf = static_cast<LeafBase*>(base);
-      LeafBase* folded = LeafBase::Build(ResolveLeaf(head, gc), leaf->right_sibling());
-      frame.assign(folded->frame(), folded->frame() + folded->page_bytes());
-      delete folded;
-    } else {
-      auto* inner = static_cast<InnerBase*>(base);
-      frame.assign(inner->frame(), inner->frame() + inner->page_bytes());
+    // Fold any delta chain into a fresh consolidated base, so the live page is a
+    // single base whose frame we persist as-is (deltas only stack on leaves).
+    // The fresh base is dirty (no durable addr) and replaces the chain in-tree;
+    // the old chain is epoch-retired (frame returns to the pool once safe).
+    if (head->type == PageType::kBatchDelta) {
+      PageBase* b = head;
+      while (b != nullptr && b->type == PageType::kBatchDelta) b = b->next;
+      if (b == nullptr || b->type != PageType::kLeafBase)
+        return Status::Internal("Checkpoint: delta chain without leaf base");
+      uint64_t right = static_cast<LeafBase*>(b)->right_sibling();
+      LeafBase* fresh = LeafBase::Build(ResolveLeaf(head, gc), right, pool_, opt_.frame_bytes);
+      mapping_.Store(pid, fresh);
+      for (PageBase* n = head; n != nullptr;) {
+        PageBase* nx = n->next;
+        RetirePage(n);
+        n = nx;
+      }
+      head = fresh;
     }
-    (void)iu;
+    PageBase* base = head;  // now a single base (no deltas above it)
 
-    uint64_t addr = cursor;
-    Status s = store->WriteAt(addr, frame.data(), frame.size());
-    if (!s.ok()) return s;
-    cursor += frame.size();
+    if (base->durable_addr == kNoAddr) {  // dirty: persist the live frame
+      const uint8_t* frame = base->type == PageType::kLeafBase
+                                 ? static_cast<LeafBase*>(base)->frame()
+                                 : static_cast<InnerBase*>(base)->frame();
+      uint32_t plen = base->type == PageType::kLeafBase
+                          ? static_cast<LeafBase*>(base)->page_bytes()
+                          : static_cast<InnerBase*>(base)->page_bytes();
+      uint64_t addr = alloc.Alloc(plen);
+      Status s = store->WriteAt(addr, frame, plen);
+      if (!s.ok()) return s;
+      base->durable_addr = addr;
+      base->durable_plen = plen;
+      ++pages_written;
+    }
+
     PutU64(&manifest_body, pid);
-    PutU64(&manifest_body, addr);
-    PutU32(&manifest_body, static_cast<uint32_t>(frame.size()));
+    PutU64(&manifest_body, base->durable_addr);
+    PutU32(&manifest_body, base->durable_plen);
     ++page_count;
 
     if (base->type == PageType::kInnerBase) {
@@ -206,6 +297,7 @@ Status Crowtree::Checkpoint(uint64_t* out_last_applied) {
   };
   Status ws = walk(root_pid_.load());
   if (!ws.ok()) return ws;
+  ckpt_pages_written_.store(pages_written);
 
   // Prepend the count, then frame the manifest like a page (logical_len + CRC).
   std::vector<uint8_t> counted;
@@ -216,7 +308,7 @@ Status Crowtree::Checkpoint(uint64_t* out_last_applied) {
   PutU32(&manifest, Crc32c(counted.data(), counted.size()));
   manifest.insert(manifest.end(), counted.begin(), counted.end());
 
-  uint64_t manifest_addr = cursor;
+  uint64_t manifest_addr = alloc.Alloc(manifest.size());
   Status ms = store->WriteAt(manifest_addr, manifest.data(), manifest.size());
   if (!ms.ok()) return ms;
 
@@ -224,8 +316,7 @@ Status Crowtree::Checkpoint(uint64_t* out_last_applied) {
   Status sync1 = store->Sync();
   if (!sync1.ok()) return sync1;
 
-  Superblock prev;
-  uint64_t seq = ReadBestSuperblock(*store, &prev) ? prev.checkpoint_seq + 1 : 1;
+  uint64_t seq = have_prev ? prev.checkpoint_seq + 1 : 1;
 
   Superblock sb;
   sb.magic = kSuperMagic;
@@ -277,9 +368,11 @@ Status Crowtree::Open(CrowtreeEnv& env, const Options& opt,
   if (Crc32c(mbody, mlen) != mcrc) return Status::Corruption("manifest CRC");
   uint64_t count = GetU64(mbody);
 
-  // Drop the freshly-built empty root before installing recovered pages.
+  // Drop the freshly-built empty root before installing recovered tags.
   tree->FreeSubtree(tree->root_pid_.load());
 
+  // Lazy recovery (design §4.5, §7): record pid->(addr,len) tags only; base
+  // pages are demand-loaded (and CRC-checked) on first access via Resident().
   size_t pos = 8;
   for (uint64_t i = 0; i < count; ++i) {
     if (pos + 20 > mlen) return Status::Corruption("manifest entry");
@@ -287,19 +380,7 @@ Status Crowtree::Open(CrowtreeEnv& env, const Options& opt,
     uint64_t addr = GetU64(mbody + pos + 8);
     uint32_t plen = GetU32(mbody + pos + 16);
     pos += 20;
-
-    std::vector<uint8_t> frame(plen);
-    Status pr = store->ReadAt(addr, frame.data(), frame.size());
-    if (!pr.ok()) return pr;
-    if (!FrameValidate(frame.data(), plen)) return Status::Corruption("page CRC on recover");
-    PageBase* page = nullptr;
-    if (FramePageType(frame.data()) == PageType::kLeafBase) {
-      page = LeafBase::FromFrameCopy(frame.data(), plen);
-    } else {
-      page = InnerBase::FromFrameCopy(frame.data(), plen);
-    }
-    page->pid = pid;
-    tree->mapping_.Store(pid, page);
+    tree->mapping_.StoreUnloaded(pid, addr, plen);
   }
 
   tree->mapping_.SetNextPid(sb.next_pid);

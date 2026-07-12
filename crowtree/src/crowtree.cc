@@ -45,15 +45,16 @@ std::vector<LeafEntry> ResolveChainSorted(PageBase* head, uint64_t gc_floor) {
 }
 
 // Collect all live entries in key order by an in-order walk of the L1 tree.
-void CollectInOrder(const MappingTable& mt, uint64_t pid, uint64_t gc_floor,
+template <class Resolve>
+void CollectInOrder(Resolve&& resolve, uint64_t pid, uint64_t gc_floor,
                     std::vector<LeafEntry>* out) {
-  PageBase* head = mt.Get(pid);
+  PageBase* head = resolve(pid);
   if (head == nullptr) return;
   PageBase* base = head;
   while (base != nullptr && base->type == PageType::kBatchDelta) base = base->next;
   if (base != nullptr && base->type == PageType::kInnerBase) {
     for (uint64_t child : static_cast<InnerBase*>(base)->children()) {
-      CollectInOrder(mt, child, gc_floor, out);
+      CollectInOrder(resolve, child, gc_floor, out);
     }
   } else {
     std::vector<LeafEntry> leaf = ResolveChainSorted(head, gc_floor);
@@ -80,9 +81,40 @@ void Crowtree::RetirePage(PageBase* p) {
   env_.epoch().RetireObject(p);
 }
 
+PageBase* Crowtree::Resident(uint64_t pid) const {
+  PageBase* v = mapping_.Get(pid);
+  if (v == nullptr || !MappingTable::IsUnloaded(v)) return v;  // hot path / unset
+  // Cold path: demand-load this base page (design §4.5). Serialized by
+  // load_mutex_; double-checked so only one loader installs. Lock-free readers
+  // never dereference the tagged descriptor without first taking this lock and
+  // re-reading the slot, so freeing it here is safe without epoch deferral.
+  std::lock_guard<std::mutex> lk(load_mutex_);
+  v = mapping_.Get(pid);
+  if (v == nullptr || !MappingTable::IsUnloaded(v)) return v;  // another loader won
+  UnloadedPage* u = MappingTable::AsUnloaded(v);
+  std::vector<uint8_t> frame(u->plen);
+  Status s = opt_.page_store->ReadAt(u->addr, frame.data(), frame.size());
+  if (!s.ok()) return nullptr;
+  if (!FrameValidate(frame.data(), u->plen)) return nullptr;
+  PageBase* page =
+      (FramePageType(frame.data()) == PageType::kLeafBase)
+          ? static_cast<PageBase*>(
+                LeafBase::FromFrameCopy(frame.data(), u->plen, pool_, opt_.frame_bytes))
+          : static_cast<PageBase*>(
+                InnerBase::FromFrameCopy(frame.data(), u->plen, pool_, opt_.frame_bytes));
+  page->pid = pid;
+  page->durable_addr = u->addr;  // loaded from here -> clean (design §4.6)
+  page->durable_plen = u->plen;
+  const_cast<MappingTable&>(mapping_).Store(pid, page);  // publish resident
+  delete u;
+  return page;
+}
+
 void Crowtree::FreeSubtree(uint64_t pid) {
   PageBase* head = mapping_.Get(pid);
-  if (head == nullptr) return;
+  // Skip unset and *unloaded* slots: an unloaded slot has no heap page to free
+  // (the descriptor is freed by ~MappingTable); its subtree was never loaded.
+  if (head == nullptr || MappingTable::IsUnloaded(head)) return;
   // Resolve to the base node to learn the page kind / children.
   PageBase* base = head;
   while (base != nullptr && base->type == PageType::kBatchDelta) base = base->next;
@@ -98,6 +130,63 @@ void Crowtree::FreeSubtree(uint64_t pid) {
     n = next;
   }
   mapping_.Store(pid, nullptr);
+}
+
+size_t Crowtree::EvictCleanLeavesLocked(size_t max_resident_leaves) {
+  // Collect resident, delta-free, clean leaf pids (the evictable set, §4.6).
+  // Descend only into already-resident inner children — never demand-load a page
+  // just to evict it.
+  std::vector<uint64_t> evictable;
+  std::function<void(uint64_t)> dfs = [&](uint64_t pid) {
+    PageBase* v = mapping_.Get(pid);
+    if (v == nullptr || MappingTable::IsUnloaded(v)) return;
+    PageBase* base = v;
+    while (base != nullptr && base->type == PageType::kBatchDelta) base = base->next;
+    if (base == nullptr) return;
+    if (base->type == PageType::kLeafBase) {
+      // Clean (durable bytes match) and no deltas above (v == base) ⇒ evictable.
+      if (v == base && v->durable_addr != kNoAddr) evictable.push_back(pid);
+      return;
+    }
+    for (uint64_t c : static_cast<InnerBase*>(base)->children()) {
+      PageBase* cv = mapping_.Get(c);
+      if (cv != nullptr && !MappingTable::IsUnloaded(cv)) dfs(c);
+    }
+  };
+  dfs(root_pid_.load());
+
+  if (evictable.size() <= max_resident_leaves) return 0;
+  size_t to_evict = evictable.size() - max_resident_leaves;
+  size_t evicted = 0;
+  for (uint64_t pid : evictable) {
+    if (evicted >= to_evict) break;
+    PageBase* v = mapping_.Get(pid);  // re-check (belt-and-suspenders; we hold write_mutex_)
+    if (v == nullptr || MappingTable::IsUnloaded(v)) continue;
+    if (v->type != PageType::kLeafBase || v->durable_addr == kNoAddr) continue;
+    // Re-tag the slot unloaded, then epoch-retire the resident page. A reader
+    // that already loaded `v` keeps using it under its guard (frame freed only
+    // once that guard drains); a later reader sees the tag and demand-loads.
+    mapping_.StoreUnloaded(pid, v->durable_addr, v->durable_plen);
+    RetirePage(v);
+    ++evicted;
+  }
+  return evicted;
+}
+
+size_t Crowtree::EvictCleanLeaves(size_t max_resident_leaves) {
+  std::lock_guard<std::mutex> lk(write_mutex_);
+  return EvictCleanLeavesLocked(max_resident_leaves);
+}
+
+void Crowtree::MaybeEvictLocked() {
+  if (!pool_) return;
+  BufferPool::Stats st = pool_->stats();
+  if (st.num_frames == 0) return;
+  // High-water 85%: evict clean leaves down to ~70% of the arena. Best-effort —
+  // inner pages and dirty/working-set frames are not evictable, so usage may
+  // remain above target until the next checkpoint cleans the working set.
+  if (uint64_t(st.used) * 100 < uint64_t(st.num_frames) * 85) return;
+  EvictCleanLeavesLocked((size_t(st.num_frames) * 70) / 100);
 }
 
 Status Crowtree::Apply(uint64_t slot, const Batch& batch, uint64_t contiguous_slot) {
@@ -151,18 +240,19 @@ Status Crowtree::Flush() {
 
   size_t i = 0;
   while (i < drained.size()) {
-    uint64_t pid = FindLeafPID(mapping_, root_pid_.load(), Slice(drained[i].key));
+    auto resolve = [this](uint64_t p) { return Resident(p); };
+    uint64_t pid = FindLeafPID(resolve, root_pid_.load(), Slice(drained[i].key));
     std::vector<LeafEntry> group;
     group.push_back(LeafEntry{drained[i].key, drained[i].cell});
     ++i;
 
     while (i < drained.size() &&
-           FindLeafPID(mapping_, root_pid_.load(), Slice(drained[i].key)) == pid) {
+           FindLeafPID(resolve, root_pid_.load(), Slice(drained[i].key)) == pid) {
       group.push_back(LeafEntry{drained[i].key, drained[i].cell});
       ++i;
     }
 
-    PageBase* head = mapping_.Get(pid);
+    PageBase* head = Resident(pid);
     BatchDelta* delta = BatchDelta::Build(cs, std::move(group), head);
     mapping_.Store(pid, delta);
     if (delta->delta_len > opt_.max_delta_len ||
@@ -173,11 +263,12 @@ Status Crowtree::Flush() {
 
   last_applied_slot_.store(cs);
   version_.fetch_add(1);
+  MaybeEvictLocked();  // keep cache bounded (design §4.6); only clean bases go
   return Status::Ok();
 }
 
 void Crowtree::ConsolidateLocked(uint64_t pid) {
-  PageBase* head = mapping_.Get(pid);
+  PageBase* head = Resident(pid);
   if (head == nullptr || head->type == PageType::kLeafBase) return;  // nothing to fold
 
   LeafBase* old_leaf = ChainLeafBase(head);
@@ -204,7 +295,7 @@ std::vector<uint64_t> Crowtree::PathToPidLocked(uint64_t target_pid) const {
   std::vector<uint64_t> path;
   std::function<bool(uint64_t)> dfs = [&](uint64_t pid) -> bool {
     if (pid == target_pid) return true;
-    PageBase* head = mapping_.Get(pid);
+    PageBase* head = Resident(pid);
     if (head == nullptr) return false;
     PageBase* base = head;
     while (base != nullptr && base->type == PageType::kBatchDelta) base = base->next;
@@ -221,7 +312,7 @@ std::vector<uint64_t> Crowtree::PathToPidLocked(uint64_t target_pid) const {
 }
 
 void Crowtree::MaybeSplitOrMergeLocked(uint64_t pid) {
-  PageBase* head = mapping_.Get(pid);
+  PageBase* head = Resident(pid);
   if (head == nullptr || head->type != PageType::kLeafBase) return;
   auto* leaf = static_cast<LeafBase*>(head);
   if (leaf->count() >= 2 && leaf->data_bytes() > opt_.leaf_split_bytes) {
@@ -233,7 +324,7 @@ void Crowtree::MaybeSplitOrMergeLocked(uint64_t pid) {
 }
 
 void Crowtree::SplitLeafLocked(uint64_t leaf_pid, std::vector<uint64_t> path) {
-  auto* leaf = static_cast<LeafBase*>(mapping_.Get(leaf_pid));
+  auto* leaf = static_cast<LeafBase*>(Resident(leaf_pid));
   const std::vector<LeafEntry>& e = leaf->entries();
   size_t mid = e.size() / 2;
   std::vector<LeafEntry> lo(e.begin(), e.begin() + mid);
@@ -267,7 +358,7 @@ void Crowtree::PropagateSplitLocked(std::vector<uint64_t> path, uint64_t child_p
   }
   uint64_t parent_pid = path.back();
   path.pop_back();
-  auto* parent = static_cast<InnerBase*>(mapping_.Get(parent_pid));
+  auto* parent = static_cast<InnerBase*>(Resident(parent_pid));
 
   // Locate child_pid among the parent's children.
   const std::vector<uint64_t>& ch = parent->children();
@@ -308,17 +399,17 @@ void Crowtree::TryMergeLeafLocked(uint64_t leaf_pid,
                                   const std::vector<uint64_t>& path) {
   if (path.empty()) return;  // root leaf: nothing to merge with
   uint64_t parent_pid = path.back();
-  auto* parent = static_cast<InnerBase*>(mapping_.Get(parent_pid));
+  auto* parent = static_cast<InnerBase*>(Resident(parent_pid));
   const std::vector<uint64_t>& ch = parent->children();
   size_t idx = 0;
   while (idx < ch.size() && ch[idx] != leaf_pid) ++idx;
   if (idx == 0) return;  // no left sibling under this parent (v1: left-merge only)
 
   uint64_t left_pid = ch[idx - 1];
-  auto* left_head = mapping_.Get(left_pid);
+  auto* left_head = Resident(left_pid);
   if (left_head == nullptr || left_head->type != PageType::kLeafBase) return;
   auto* left = static_cast<LeafBase*>(left_head);
-  auto* leaf = static_cast<LeafBase*>(mapping_.Get(leaf_pid));
+  auto* leaf = static_cast<LeafBase*>(Resident(leaf_pid));
 
   // 1. Publish the merged left sibling (superset of left+leaf entries). Readers
   //    routed to left_pid now find both halves; readers still routed to leaf_pid
@@ -380,9 +471,9 @@ bool Crowtree::Get(Slice key, uint64_t* out_slot, std::string* out_value) const 
   }
 
   // L1: descend to the leaf and resolve its chain.
-  uint64_t pid = FindLeafPID(mapping_, root_pid_.load(), key);
+  uint64_t pid = FindLeafPID([this](uint64_t p) { return Resident(p); }, root_pid_.load(), key);
   if (pid == kInvalidPID) return false;
-  PageBase* head = mapping_.Get(pid);
+  PageBase* head = Resident(pid);
   CellView v;
   if (!ResolveChain(head, key, &v)) return false;
   if (v.is_tombstone()) return false;
@@ -409,7 +500,8 @@ Status Crowtree::Scan(Slice prefix, size_t limit, std::vector<ScanEntry>* out,
   std::lock_guard<std::mutex> lk(write_mutex_);
 
   std::vector<LeafEntry> l1;
-  CollectInOrder(mapping_, root_pid_.load(), gc_floor_.load(), &l1);
+  CollectInOrder([this](uint64_t p) { return Resident(p); }, root_pid_.load(),
+                 gc_floor_.load(), &l1);
   std::vector<MemEntry> l0 = memtable_.Snapshot();
 
   auto consider = [&](const std::string& key, Slice cell) -> bool {
@@ -460,7 +552,7 @@ int Crowtree::Height() const {
   int h = 0;
   uint64_t pid = root_pid_.load();
   for (int d = 0; d < 64; ++d) {
-    PageBase* head = mapping_.Get(pid);
+    PageBase* head = Resident(pid);
     if (head == nullptr) break;
     PageBase* base = head;
     while (base != nullptr && base->type == PageType::kBatchDelta) base = base->next;
@@ -473,7 +565,7 @@ int Crowtree::Height() const {
 
 size_t Crowtree::LeafCount() const {
   std::function<size_t(uint64_t)> rec = [&](uint64_t pid) -> size_t {
-    PageBase* head = mapping_.Get(pid);
+    PageBase* head = Resident(pid);
     if (head == nullptr) return 0;
     PageBase* base = head;
     while (base != nullptr && base->type == PageType::kBatchDelta) base = base->next;
@@ -491,7 +583,8 @@ std::shared_ptr<Snapshot> Crowtree::SnapshotView() {
   // copy. (Deviation from zero-copy COW; see snapshot.h / plan log.)
   std::lock_guard<std::mutex> lk(write_mutex_);
   std::vector<LeafEntry> entries;
-  CollectInOrder(mapping_, root_pid_.load(), gc_floor_.load(), &entries);
+  CollectInOrder([this](uint64_t p) { return Resident(p); }, root_pid_.load(),
+                 gc_floor_.load(), &entries);
   return std::make_shared<Snapshot>(last_applied_slot_.load(), std::move(entries));
 }
 

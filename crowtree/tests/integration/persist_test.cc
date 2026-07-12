@@ -30,6 +30,45 @@ std::string Key(int i) {
 constexpr uint64_t kSbBytes = 4096;
 }  // namespace
 
+TEST(Persist, LazyRecoveryDemandLoadsOnAccess) {
+  MemPageStore store(1);
+  Options opt;
+  opt.page_store = &store;
+  opt.max_delta_len = 1;       // consolidate into base frames
+  opt.leaf_split_bytes = 200;  // multi-level tree -> many pages
+  opt.frame_bytes = 4096;
+  CrowtreeEnv env;
+  std::map<std::string, std::string> oracle;
+  {
+    Crowtree t(env, opt);
+    for (int i = 0; i < 80; ++i) {
+      ASSERT_TRUE(t.Apply(i + 1, Put1(Key(i), "val" + std::to_string(i)), i + 1).ok());
+      oracle[Key(i)] = "val" + std::to_string(i);
+    }
+    ASSERT_TRUE(t.Flush().ok());
+    ASSERT_TRUE(t.Checkpoint(nullptr).ok());
+  }
+
+  std::unique_ptr<Crowtree> t2;
+  ASSERT_TRUE(Crowtree::Open(env, opt, &t2).ok());
+  // Lazy: recovery only recorded pid->addr tags; nothing is resident yet.
+  ASSERT_NE(t2->buffer_pool(), nullptr);
+  EXPECT_EQ(t2->buffer_pool()->stats().used, 0u);
+
+  // First access demand-loads the pages along the descent path into the pool.
+  std::string v;
+  uint64_t s;
+  ASSERT_TRUE(t2->Get(Slice(Key(0)), &s, &v));
+  EXPECT_EQ(v, "val0");
+  EXPECT_GT(t2->buffer_pool()->stats().used, 0u);
+
+  // Every key reads back correctly through demand load.
+  for (const auto& kv : oracle) {
+    ASSERT_TRUE(t2->Get(Slice(kv.first), &s, &v)) << "missing " << kv.first;
+    EXPECT_EQ(v, kv.second);
+  }
+}
+
 TEST(Persist, CheckpointThenReopenRestoresKeys) {
   MemPageStore store(1);
   Options opt;

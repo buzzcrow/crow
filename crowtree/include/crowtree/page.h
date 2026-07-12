@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -59,8 +60,25 @@ struct FrameStore {
     return ptr;
   }
 
-  // Wrap a copy of an existing frame image (heap-backed; recovery path).
-  uint8_t* AdoptCopy(const uint8_t* buf, uint32_t n) {
+  // Wrap a copy of an existing `n`-byte frame image (demand load / recovery).
+  // Copies into a pool frame when one fits and is available, else a heap buffer.
+  // page_bytes stays `n` (the durable logical length); a pool frame may be
+  // larger (the tail past `n` is zero from AcquireFrame and unused).
+  uint8_t* AdoptCopy(const uint8_t* buf, uint32_t n,
+                     const std::shared_ptr<BufferPool>& p = nullptr,
+                     uint32_t frame_bytes = 0) {
+    if (p && n <= frame_bytes) {
+      uint32_t idx = 0;
+      uint8_t* bytes = nullptr;
+      if (p->AcquireFrame(&idx, &bytes).ok()) {
+        pool = p;
+        frame_idx = idx;
+        ptr = bytes;
+        page_bytes = n;
+        std::memcpy(bytes, buf, n);
+        return ptr;
+      }
+    }
     owned.assign(buf, buf + n);
     ptr = owned.data();
     page_bytes = n;
@@ -92,9 +110,11 @@ class LeafBase : public PageBase {
   }
 
   // Wrap a copy of an existing frame image (e.g. read from durable storage).
-  static LeafBase* FromFrameCopy(const uint8_t* buf, uint32_t page_bytes) {
+  static LeafBase* FromFrameCopy(const uint8_t* buf, uint32_t page_bytes,
+                                 const std::shared_ptr<BufferPool>& pool = nullptr,
+                                 uint32_t frame_bytes = 0) {
     auto* p = new LeafBase();
-    p->fs_.AdoptCopy(buf, page_bytes);
+    p->fs_.AdoptCopy(buf, page_bytes, pool, frame_bytes);
     return p;
   }
 
@@ -170,9 +190,11 @@ class InnerBase : public PageBase {
   }
 
   // Wrap a copy of an existing frame image (e.g. read from durable storage).
-  static InnerBase* FromFrameCopy(const uint8_t* buf, uint32_t page_bytes) {
+  static InnerBase* FromFrameCopy(const uint8_t* buf, uint32_t page_bytes,
+                                  const std::shared_ptr<BufferPool>& pool = nullptr,
+                                  uint32_t frame_bytes = 0) {
     auto* p = new InnerBase();
-    p->fs_.AdoptCopy(buf, page_bytes);
+    p->fs_.AdoptCopy(buf, page_bytes, pool, frame_bytes);
     return p;
   }
 

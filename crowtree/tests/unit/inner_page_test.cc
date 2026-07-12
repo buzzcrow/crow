@@ -30,8 +30,8 @@ TEST(Descent, SingleLeafRoot) {
   MappingTable mt;
   uint64_t leaf_pid = mt.AllocatePID();
   mt.Store(leaf_pid, LeafBase::Build({LeafEntry{"a", "x"}}));
-  EXPECT_EQ(FindLeafPID(mt, leaf_pid, "a"), leaf_pid);
-  EXPECT_EQ(FindLeafPID(mt, leaf_pid, "zzz"), leaf_pid);
+  EXPECT_EQ(FindLeafPID([&](uint64_t p) { return mt.Get(p); }, leaf_pid, "a"), leaf_pid);
+  EXPECT_EQ(FindLeafPID([&](uint64_t p) { return mt.Get(p); }, leaf_pid, "zzz"), leaf_pid);
   delete mt.Get(leaf_pid);
 }
 
@@ -48,12 +48,12 @@ TEST(Descent, TwoLevelTree) {
   uint64_t root = mt.AllocatePID();
   mt.Store(root, InnerBase::Build({"k", "q"}, {l0, l1, l2}));
 
-  EXPECT_EQ(FindLeafPID(mt, root, "a"), l0);
-  EXPECT_EQ(FindLeafPID(mt, root, "j"), l0);
-  EXPECT_EQ(FindLeafPID(mt, root, "k"), l1);
-  EXPECT_EQ(FindLeafPID(mt, root, "p"), l1);
-  EXPECT_EQ(FindLeafPID(mt, root, "q"), l2);
-  EXPECT_EQ(FindLeafPID(mt, root, "zz"), l2);
+  EXPECT_EQ(FindLeafPID([&](uint64_t p) { return mt.Get(p); }, root, "a"), l0);
+  EXPECT_EQ(FindLeafPID([&](uint64_t p) { return mt.Get(p); }, root, "j"), l0);
+  EXPECT_EQ(FindLeafPID([&](uint64_t p) { return mt.Get(p); }, root, "k"), l1);
+  EXPECT_EQ(FindLeafPID([&](uint64_t p) { return mt.Get(p); }, root, "p"), l1);
+  EXPECT_EQ(FindLeafPID([&](uint64_t p) { return mt.Get(p); }, root, "q"), l2);
+  EXPECT_EQ(FindLeafPID([&](uint64_t p) { return mt.Get(p); }, root, "zz"), l2);
 
   for (uint64_t pid : {l0, l1, l2, root}) delete mt.Get(pid);
 }
@@ -74,18 +74,18 @@ TEST(Descent, ThreeLevelTree) {
   uint64_t root = mt.AllocatePID();   // sep [m] -> [left, right]
   mt.Store(root, InnerBase::Build({"m"}, {left, right}));
 
-  EXPECT_EQ(FindLeafPID(mt, root, "a"), la);
-  EXPECT_EQ(FindLeafPID(mt, root, "e"), lb);
-  EXPECT_EQ(FindLeafPID(mt, root, "f"), lb);
-  EXPECT_EQ(FindLeafPID(mt, root, "m"), lc);
-  EXPECT_EQ(FindLeafPID(mt, root, "t"), ld);
-  EXPECT_EQ(FindLeafPID(mt, root, "zz"), ld);
+  EXPECT_EQ(FindLeafPID([&](uint64_t p) { return mt.Get(p); }, root, "a"), la);
+  EXPECT_EQ(FindLeafPID([&](uint64_t p) { return mt.Get(p); }, root, "e"), lb);
+  EXPECT_EQ(FindLeafPID([&](uint64_t p) { return mt.Get(p); }, root, "f"), lb);
+  EXPECT_EQ(FindLeafPID([&](uint64_t p) { return mt.Get(p); }, root, "m"), lc);
+  EXPECT_EQ(FindLeafPID([&](uint64_t p) { return mt.Get(p); }, root, "t"), ld);
+  EXPECT_EQ(FindLeafPID([&](uint64_t p) { return mt.Get(p); }, root, "zz"), ld);
 
   for (uint64_t pid : {la, lb, lc, ld, left, right, root}) delete mt.Get(pid);
 }
 
 TEST(Descent, EmptyRoot) {
   MappingTable mt;
-  EXPECT_EQ(FindLeafPID(mt, kInvalidPID, "a"), kInvalidPID);
-  EXPECT_EQ(FindLeafPID(mt, 999, "a"), kInvalidPID);  // unset pid
+  EXPECT_EQ(FindLeafPID([&](uint64_t p) { return mt.Get(p); }, kInvalidPID, "a"), kInvalidPID);
+  EXPECT_EQ(FindLeafPID([&](uint64_t p) { return mt.Get(p); }, 999, "a"), kInvalidPID);  // unset pid
 }

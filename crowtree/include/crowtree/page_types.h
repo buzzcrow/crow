@@ -32,6 +32,15 @@ struct PageBase {
   uint32_t delta_len = 0;      // # of deltas above the base (0 on a base)
   size_t chain_bytes = 0;      // approx bytes of this node + below (triggers)
   uint64_t pid = kInvalidPID;  // logical page id (set on install)
+
+  // Durable backing of THIS base page's current frame bytes (PT6d). `~0ull`
+  // (== kNoAddr in buffer_pool.h) means dirty/anonymous: the live frame is not
+  // yet durable. Set on demand-load (clean) and by checkpoint after a write;
+  // a freshly built page leaves it dirty. A page is checkpoint-clean (and thus
+  // evictable, design §4.6) iff it is a base, has no deltas above it, and
+  // durable_addr != ~0ull. Meaningful only for base pages.
+  uint64_t durable_addr = ~0ull;
+  uint32_t durable_plen = 0;
 };
 
 // One leaf entry: key + encoded slot-aware cell payload (see cell.h).

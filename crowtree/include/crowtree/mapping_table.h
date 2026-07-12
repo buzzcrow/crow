@@ -16,10 +16,33 @@
 
 namespace crowtree {
 
+// Placeholder for an on-disk base page that is not resident (design §4.5). A
+// mapping slot may hold a *tagged* pointer to one of these (low bit set) instead
+// of a real PageBase*; `Get` of such a slot is a demand-load miss. The slot owns
+// the descriptor: it is freed when the slot transitions to resident or when the
+// table is destroyed.
+struct UnloadedPage {
+  uint64_t addr = 0;   // durable PageAddr
+  uint32_t plen = 0;   // frame length to read
+};
+
 class MappingTable {
  public:
   static constexpr uint64_t kSegmentSize = 1024;        // PIDs per segment
   static constexpr uint64_t kMaxSegments = 1u << 16;    // -> 64M PIDs
+  static constexpr uintptr_t kUnloadedBit = 1;
+
+  // Tagged-slot helpers. A slot value with the low bit set is a tagged
+  // UnloadedPage*; otherwise it is a real PageBase* (8-byte aligned).
+  static bool IsUnloaded(PageBase* v) {
+    return (reinterpret_cast<uintptr_t>(v) & kUnloadedBit) != 0;
+  }
+  static PageBase* TagUnloaded(UnloadedPage* u) {
+    return reinterpret_cast<PageBase*>(reinterpret_cast<uintptr_t>(u) | kUnloadedBit);
+  }
+  static UnloadedPage* AsUnloaded(PageBase* v) {
+    return reinterpret_cast<UnloadedPage*>(reinterpret_cast<uintptr_t>(v) & ~kUnloadedBit);
+  }
 
   MappingTable();
   ~MappingTable();
@@ -27,11 +50,16 @@ class MappingTable {
   MappingTable(const MappingTable&) = delete;
   MappingTable& operator=(const MappingTable&) = delete;
 
-  // Reader: lock-free atomic load. Returns nullptr if unset/invalid.
+  // Reader: lock-free atomic load. May return a real PageBase*, a tagged
+  // UnloadedPage* (see IsUnloaded), or nullptr if unset/invalid.
   PageBase* Get(uint64_t pid) const;
 
   // Writer: plain atomic store (single-writer; no CAS).
   void Store(uint64_t pid, PageBase* page);
+
+  // Install an unloaded (on-disk, not-resident) tag for `pid` (recovery / 5.4
+  // eviction). Allocates the descriptor; the slot owns it.
+  void StoreUnloaded(uint64_t pid, uint64_t addr, uint32_t plen);
 
   // Allocate a fresh PID (recycled from the free list when available).
   uint64_t AllocatePID();

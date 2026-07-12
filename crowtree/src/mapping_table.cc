@@ -9,10 +9,17 @@ MappingTable::MappingTable() : segments_(kMaxSegments) {
 }
 
 MappingTable::~MappingTable() {
-  // The mapping table does not own pages (epoch manager frees them); it only
-  // owns the segment arrays.
+  // The mapping table does not own resident pages (the epoch manager frees
+  // them); it owns the segment arrays and any *unloaded* descriptors still
+  // tagged into slots (those never demand-loaded during this run).
   for (auto& s : segments_) {
     Segment* seg = s.load(std::memory_order_relaxed);
+    if (seg != nullptr) {
+      for (auto& slot : seg->slots) {
+        PageBase* v = slot.load(std::memory_order_relaxed);
+        if (v != nullptr && IsUnloaded(v)) delete AsUnloaded(v);
+      }
+    }
     delete seg;
   }
 }
@@ -50,8 +57,15 @@ void MappingTable::Store(uint64_t pid, PageBase* page) {
     std::lock_guard<std::mutex> lk(alloc_mu_);
     seg = EnsureSegment(seg_idx);
   }
-  if (page != nullptr) page->pid = pid;
+  if (page != nullptr && !IsUnloaded(page)) page->pid = pid;
   seg->slots[pid % kSegmentSize].store(page, std::memory_order_release);
+}
+
+void MappingTable::StoreUnloaded(uint64_t pid, uint64_t addr, uint32_t plen) {
+  auto* u = new UnloadedPage();
+  u->addr = addr;
+  u->plen = plen;
+  Store(pid, TagUnloaded(u));
 }
 
 uint64_t MappingTable::AllocatePID() {

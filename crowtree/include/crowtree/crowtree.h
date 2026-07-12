@@ -108,6 +108,14 @@ class Crowtree {
   const BufferPool* buffer_pool() const { return pool_.get(); }
   int Height() const;       // 1 = single-leaf root
   size_t LeafCount() const; // live leaves reachable from the root
+  // # of base pages physically written by the most recent Checkpoint (the rest
+  // were clean and retained their durable addr). For incremental-checkpoint tests.
+  uint64_t last_checkpoint_pages_written() const { return ckpt_pages_written_.load(); }
+  // Evict clean, delta-free resident leaf bases down to at most
+  // `max_resident_leaves`, re-tagging their slots unloaded and epoch-retiring the
+  // pages (design §4.6); returns the number evicted. Safe against lock-free
+  // readers (epoch-deferred frame reuse); evicted pages reload on next access.
+  size_t EvictCleanLeaves(size_t max_resident_leaves);
 
  private:
   void MaybeFlush();
@@ -121,6 +129,12 @@ class Crowtree {
   void TryMergeLeafLocked(uint64_t leaf_pid, const std::vector<uint64_t>& path);
   void RetirePage(PageBase* p);
   void FreeSubtree(uint64_t pid);
+  size_t EvictCleanLeavesLocked(size_t max_resident_leaves);  // caller holds write_mutex_
+  void MaybeEvictLocked();  // capacity-driven auto-evict (caller holds write_mutex_)
+  // Resolve a PID to its resident chain head, demand-loading an unloaded slot
+  // (design §4.5). Hot (resident) path is lock-free; the cold path locks
+  // load_mutex_ and double-checks. Returns nullptr if the slot is unset.
+  PageBase* Resident(uint64_t pid) const;
 
   CrowtreeEnv& env_;
   Options opt_;
@@ -136,8 +150,10 @@ class Crowtree {
   std::atomic<uint64_t> last_applied_slot_{0};
   std::atomic<uint64_t> version_{0};
   std::atomic<uint64_t> gc_floor_{0};
+  std::atomic<uint64_t> ckpt_pages_written_{0};  // pages written by last Checkpoint
 
   mutable std::mutex write_mutex_;  // serializes flush / consolidate / split-merge
+  mutable std::mutex load_mutex_;   // serializes cold-path demand loads (design §4.5)
 };
 
 }  // namespace crowtree

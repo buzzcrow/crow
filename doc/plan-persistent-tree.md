@@ -106,24 +106,53 @@ rearchitecture, sequenced foundation-first so each step builds + tests green.
   - **PT6c-5** buffer-pool residency (design §4.5; resolves lock-free-reads vs
     pin/evict via epoch-deferred frame reuse, and anonymous dirty frames). Reads
     stay lock-free; only the writer/checkpoint/demand-load pin. **Gates PT6d.**
-    - [ ] **PT6c-5.1** `Crowtree` owns a `BufferPool` (`Options.buffer_pool_bytes`,
-      `frame_bytes`); `LeafBase`/`InnerBase` build into a `PinNew` frame and hold
-      the pin for their lifetime (no eviction yet). Behavior unchanged.
-    - [ ] **PT6c-5.2** `RetirePage` frees the frame back to the pool **via the
-      epoch manager** (deferred), not `delete`; verify under TSan/ASan.
-    - [ ] **PT6c-5.3** tagged mapping slot (`PageBase*` | unloaded `PageAddr`) +
-      demand-load on `Get`; recovery stores `pid→addr` tags (lazy recovery).
-    - [ ] **PT6c-5.4** CLOCK eviction of clean unpinned bases -> re-tag slot
-      `unloaded`; skip anonymous/dirty frames; bounded memory.
+    - [x] **PT6c-5.1** `Crowtree` owns a shared `BufferPool` (`Options.buffer_pool_bytes`,
+      `frame_bytes`); `LeafBase`/`InnerBase` build into an anonymous pinned frame
+      (`FrameStore` via `AcquireFrame`), heap fallback when oversized/pool full.
+    - [x] **PT6c-5.2** frames freed back to the pool in `~FrameStore`, which runs
+      only on epoch reclaim of the retired page (epoch-deferred reuse); pages
+      co-own the pool via `shared_ptr`. Verified ASan + stress/SMO TSan.
+    - [x] **PT6c-5.3** tagged mapping slot (`UnloadedPage*` low-bit tag | real
+      `PageBase*`); `Crowtree::Resident(pid)` demand-loads the cold path under
+      `load_mutex_` (hot path stays lock-free) and publishes into a pool frame;
+      recovery stores `pid→addr` tags only (lazy). Descent (`FindLeafPID`,
+      `CollectInOrder`) takes a resolver. Tests: `Persist.LazyRecovery*`,
+      `Stress.ConcurrentDemandLoadAfterRecovery` (TSan-clean, ASan-clean).
+    - [x] **PT6c-5.4** writer-driven eviction of clean delta-free leaf bases
+      (`EvictCleanLeaves`/`EvictCleanLeavesLocked`): re-tag the slot `unloaded`
+      and epoch-retire the page (design §4.6); `MaybeEvictLocked` auto-triggers at
+      flush over an 85%→70% high/low-water. Unblocked once PT6d gave live pages a
+      durable `addr`. Anonymous/dirty pages and pages with deltas are skipped;
+      evicted pages demand-load on next access. Tests:
+      `integration/eviction_test.cc` (memory drops + reload-correct; idempotent;
+      concurrent readers-while-evicting under TSan). Policy is a simple sweep;
+      a CLOCK/registry over frames is a tracked refinement. 128 tests pass,
+      ASan + TSan clean.
   - Tests: full core suite (write/read/split-merge/parity/stress) green on
     frame-backed pages (PT6c-1..4 done, 117 pass, ASan-clean).
   - Deps: PT6b.
-- [ ] **PT6d — Incremental checkpoint + lazy recovery + durable-page GC.** Replace
-  the PT3 full-rewrite walk with a DirtyTracker walk (write only dirty frames,
-  remap `pid→PageAddr`); recovery loads superblock + page-allocation map and
-  demand-loads frames; reclaim durable pages no longer reachable.
-  - Tests (`integration/incremental_checkpoint_test.cc`): only-dirty-written;
-    reopen equals; space reused; lazy-load on first access.
+- **PT6d — Incremental checkpoint + lazy recovery + durable-page GC.**
+  - [x] **PT6d-1/2 — durable addrs + incremental checkpoint.** `PageBase` carries
+    `durable_addr`/`durable_plen` (`~0ull` == dirty/anonymous); `Resident` marks
+    demand-loaded pages clean. `Checkpoint` folds any delta chain into a fresh
+    base, then writes a page's **live frame** only when dirty and retains clean
+    pages' prior addr in the manifest (append-only, no overwrite ⇒ crash-safe).
+    `last_checkpoint_pages_written()` exposes the write count. Lazy recovery was
+    already done in PT6c-5.3. This also satisfies the **addr precondition that
+    unblocks PT6c-5.4** (design §4.6). Tests:
+    `integration/incremental_checkpoint_test.cc` (no-change ⇒ 0 written;
+    single-key edit rewrites only its path; reopen-after-incremental equals).
+    125 tests pass, ASan + TSan clean.
+  - [x] **PT6d-3 — durable-page GC / free-space reuse.** `Checkpoint` builds a
+    crash-safe `SpaceAllocator` from the committed superblock's live extents
+    (`CollectLiveExtents` = all reachable page frames + the manifest) and writes
+    dirty pages/manifest into the *complement* (dead-w.r.t.-committed gaps), else
+    appends past EOF. It never overwrites the committed image, so the crash
+    fallback stays intact (two-generation safety: space freed by the committed
+    checkpoint is reusable only after the next one commits). Fixed-size frames
+    reuse exactly-sized gaps, so steady rewriting keeps the file flat. Test:
+    `IncrementalCheckpoint.SpaceIsReusedAcrossManyCheckpoints` (file flat over 50
+    rewriting rounds; reopen equals). 129 tests pass, ASan + TSan clean.
   - Deps: PT6c.
 
 ## Milestone PT-E — Compression, export/import
