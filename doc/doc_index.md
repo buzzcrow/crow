@@ -11,7 +11,9 @@ doc only when a task touches a topic in its row. Line counts are approximate
 | `requirement.md` | ~900 | Source of truth for what must be built. Any feature gap → fix here first. UI requirements live in §15.4.6. |
 | `design.md` | ~490 | Master design: cross-cutting architecture, write/read flows, module decomposition. Read for scope-spanning questions. |
 | `plan.md` | ~190 | Phases (P1–P5), milestones, dependency order, decision log. Read before picking a task. |
-| `plan-ut.md` | ~180 | Ignored and pending unit / integration tests, root-cause analysis, historical context, and repro commands. |
+| `plan-ut.md` | ~100 | Ignored / flaky unit & integration tests, root-cause analysis, and repro commands. |
+| `test.md` | ~200 | Test strategy, layer scope definitions, high-level coverage per layer, and feature-dependent test gaps. Read when designing tests or deciding where a test belongs. |
+| `plan-test.md` | ~30 | Unfinished test task backlog with checkboxes. Read when picking the next test to implement. |
 
 Web UI requirements now live in `requirement.md` §15.4.6 (single-page embeddable
 console, two hierarchy views, functional surface mapped to the `crowkv-web` API,

@@ -1,36 +1,50 @@
-# CrowKV Ignored / Pending Unit & Integration Test Plan
+# CrowKV Ignored / Pending Test Plan
 
-This document tracks the test suite entries that are currently `#[ignore]` or otherwise pending, along with their root causes and the path to re-enable them.
+This document tracks `#[ignore]` tests and open issues, organized by the same
+layer structure as `test.md`:
 
-## 1. Currently Ignored Tests
+```
+store      <- crowkv/tests/store.rs
+  group    <- crowkv/tests/group.rs
+    replica  <- crowkv/tests/replica.rs
+      wal / slot <- crowkv/tests/{wal,slot}.rs
+        unit <- crowkv/tests/{paxos,kv}.rs
+deployment <- crowkv-server/tests/*, crowkv-console/{shared,web}/tests/*
+```
 
-The following tests are annotated with `#[ignore]` in the source tree. They are listed by crate / file, with the original ignore reason and any additional analysis.
+## 1. Ignored Tests by Layer
 
-### 1.1 `crowkv-server` — `tests/cluster_e2e_test.rs`
+### 1.1 Unit layer (`paxos.rs`, `kv.rs`)
 
-| Test | Line | Ignore Reason | Analysis / Path to Re-enable |
-|------|------|---------------|------------------------------|
-| `e2e_three_node_cluster_kv_put_batch_delete` | 202 | "test isolation issue: passes individually but fails in full suite" | Needs investigation into shared state / port / process isolation when the whole suite runs together. |
-| `e2e_multi_group_isolated_kv` | 698 | "test isolation issue: passes individually but fails in full suite" | Same class as above: test isolation problem when run in a multi-test process. |
-| `e2e_kv_after_dynamic_replica_change` | 772 | "W9 fixes restart-window quorum=1 self-election; this test still hits a live tenure-cancel race during shrink (post-shrink delete overwritten by stale repair). Needs additional in-flight repair cancellation before re-enable." | A 5→3 replica shrink is followed by a delete on the surviving quorum. The old driver's `tenure_cancel()` is called synchronously, but an in-flight `repair_once` / `run_bulk_phase1` from the prior 5-replica tenure can still land a stale `NoOp` at the delete slot after the delete is chosen but before the new driver stabilises. The test passes with `CROWKV_TEST_LOG=1` (slower scheduling) and fails at full speed. The fix requires (a) W9-style health-gating so stale repairs cannot commit without a reachable configured quorum, and (b) awaiting in-flight repair completion before the new group accepts proposals. This is the same root-cause class as the W11 cluster restart delete regression. |
+No ignored tests.
 
-### 1.2 `crowkv-console-shared` — `tests/lifecycle_e2e_test.rs`
+### 1.2 WAL / Slot subsystem layer (`wal.rs`, `slot.rs`)
 
-| Test | Line | Ignore Reason | Analysis / Path to Re-enable |
-|------|------|---------------|------------------------------|
-| `deploy_local_and_observe_topology` | 26 | "flaky: pick_free_port can return same port for mgmt and grpc causing validation failure" | `pick_free_port` binds a transient TCP socket to port 0, reads the port, and immediately drops it. The OS can reuse that port for the next call, so the management and gRPC ports collide and the server rejects the config. Fix by keeping both listener sockets alive until the real server binds them, or by using a single allocator that reserves two distinct ports atomically. |
+No ignored tests.
 
-### 1.3 `crowkv-console-web` — `tests/cluster_restart_recovery_test.rs`
+### 1.3 Replica layer (`replica.rs`)
 
-| Test | Line | Ignore Reason | Analysis / Path to Re-enable |
-|------|------|---------------|------------------------------|
-| `cluster_restart_restores_multistore_groups_and_kv` | 432 | "W8 web-level endpoint refresh is now hardened, but the test fails on a separate crowkv-level data issue: deleted keys (e.g. 12/2/k60) are resurrected after a full cluster restart. Re-enable once the WAL replay / GC delete-survival bug (W11) is fixed." | The W8 web read-routing hardening (monitor-cache refresh, healthy-leader gating, `NotLeader` retry) is complete. The test now fails because a deleted key is visible after the full cluster restart. This is a data-level bug, not a routing bug: the deleted slot is being overwritten by a stale repair or the delete is not surviving replay correctly. Re-enable after W11 is fixed. |
+No ignored tests.
 
-### 1.4 `crowkv` — `tests/cluster/g2_crash_restart_no_data_loss_test.rs`
+### 1.4 Group layer (`group.rs`)
 
-| Test | Line | Ignore Reason | Analysis / Path to Re-enable |
-|------|------|---------------|------------------------------|
-| `cluster_survives_leader_kill_and_restart_with_no_data_loss` | 340 | "W10 proposing_term readiness is fixed; this test now fails on data survival after leader restart (read returns None for committed keys). This is a repair / divergence issue after a restart, separate from leadership readiness. Needs further W11-style repair-correctness work before re-enable." | Leadership-readiness fixes (stamping `proposing_term` on single-replica leaders) are complete. The remaining failure is committed keys returning `None` after a leader is killed and restarted, indicating that the new leader's repair / learner state diverges from the previous leader's chosen prefix. This is a W11-style repair-correctness issue. |
+| Test | File | Line | Ignore Reason | Analysis / Path to Re-enable |
+|------|------|------|---------------|------------------------------|
+| `cluster_survives_leader_kill_and_restart_with_no_data_loss` | `tests/group/g2_crash_restart_no_data_loss_test.rs` | 340 | "W10 proposing_term readiness is fixed; this test now fails on data survival after leader restart (read returns None for committed keys). This is a repair / divergence issue after a restart, separate from leadership readiness. Needs further W11-style repair-correctness work before re-enable." | Leadership-readiness fixes (stamping `proposing_term` on single-replica leaders) are complete. The remaining failure is committed keys returning `None` after a leader is killed and restarted, indicating that the new leader's repair / learner state diverges from the previous leader's chosen prefix. This is a W11-style repair-correctness issue. |
+
+### 1.5 Store layer (`store.rs`)
+
+No ignored tests.
+
+### 1.6 Deployment layer (`crowkv-server`, `crowkv-console`)
+
+| Test | File | Line | Ignore Reason | Analysis / Path to Re-enable |
+|------|------|------|---------------|------------------------------|
+| `e2e_three_node_cluster_kv_put_batch_delete` | `crowkv-server/tests/cluster_e2e_test.rs` | 202 | "test isolation issue: passes individually but fails in full suite" | Needs investigation into shared state / port / process isolation when the whole suite runs together. |
+| `e2e_multi_group_isolated_kv` | `crowkv-server/tests/cluster_e2e_test.rs` | 698 | "test isolation issue: passes individually but fails in full suite" | Same class as above: test isolation problem when run in a multi-test process. |
+| `e2e_kv_after_dynamic_replica_change` | `crowkv-server/tests/cluster_e2e_test.rs` | 772 | "W9 fixes restart-window quorum=1 self-election; this test still hits a live tenure-cancel race during shrink (post-shrink delete overwritten by stale repair). Needs additional in-flight repair cancellation before re-enable." | A 5→3 replica shrink is followed by a delete on the surviving quorum. The old driver's `tenure_cancel()` is called synchronously, but an in-flight `repair_once` / `run_bulk_phase1` from the prior 5-replica tenure can still land a stale `NoOp` at the delete slot after the delete is chosen but before the new driver stabilises. The test passes with `CROWKV_TEST_LOG=1` (slower scheduling) and fails at full speed. The fix requires (a) W9-style health-gating so stale repairs cannot commit without a reachable configured quorum, and (b) awaiting in-flight repair completion before the new group accepts proposals. This is the same root-cause class as the W11 cluster restart delete regression. |
+| `deploy_local_and_observe_topology` | `crowkv-console/shared/tests/lifecycle_e2e_test.rs` | 26 | "flaky: pick_free_port can return same port for mgmt and grpc causing validation failure" | `pick_free_port` binds a transient TCP socket to port 0, reads the port, and immediately drops it. The OS can reuse that port for the next call, so the management and gRPC ports collide and the server rejects the config. Fix by keeping both listener sockets alive until the real server binds them, or by using a single allocator that reserves two distinct ports atomically. |
+| `cluster_restart_restores_multistore_groups_and_kv` | `crowkv-console/web/tests/cluster_restart_recovery_test.rs` | 432 | "W8 web-level endpoint refresh is now hardened, but the test fails on a separate crowkv-level data issue: deleted keys (e.g. 12/2/k60) are resurrected after a full cluster restart. Re-enable once the WAL replay / GC delete-survival bug (W11) is fixed." | The W8 web read-routing hardening (monitor-cache refresh, healthy-leader gating, `NotLeader` retry) is complete. The test now fails because a deleted key is visible after the full cluster restart. This is a data-level bug, not a routing bug: the deleted slot is being overwritten by a stale repair or the delete is not surviving replay correctly. Re-enable after W11 is fixed. |
 
 ## 2. Open Issues
 
@@ -40,7 +54,7 @@ A 5→3 replica shrink rebuilds the surviving nodes while the old 5-replica driv
 
 **Fix needed:** (a) ensure the new driver cannot accept proposals until in-flight repairs from the old tenure are cancelled or completed, and (b) rely on W9's health-gated repair so a stale task cannot commit without a reachable configured quorum.
 
-**Blocked tests:** `e2e_kv_after_dynamic_replica_change` (§1.1).
+**Blocked tests:** `e2e_kv_after_dynamic_replica_change` (§1.6).
 
 ### 2.2 Deleted keys resurrect after full cluster restart
 
@@ -50,7 +64,7 @@ After a full cluster restart, a deleted key is readable again. The W8 web routin
 - The learner / KV engine re-applies an old snapshot or accepted value that predates the delete.
 - The durable-commit watermark does not cover the delete slot, and replay applies a stale accepted value above the watermark.
 
-**Blocked tests:** `cluster_restart_restores_multistore_groups_and_kv` (§1.3).
+**Blocked tests:** `cluster_restart_restores_multistore_groups_and_kv` (§1.6).
 
 ### 2.3 Data loss after leader restart
 
@@ -63,7 +77,7 @@ After the old leader is killed and a new leader takes over, committed keys retur
 - `pick_free_port` reuse: `pick_free_port` binds a transient TCP socket to port 0, reads the port, and immediately drops it. The OS can reuse that port for the next call, so management and gRPC ports collide. Fix by keeping listener sockets alive until the real server binds them.
 - Test isolation in `crowkv-server` cluster E2E: `e2e_three_node_cluster_kv_put_batch_delete` and `e2e_multi_group_isolated_kv` pass individually but fail in full suite. Needs investigation into shared state / port / process isolation.
 
-**Blocked tests:** `deploy_local_and_observe_topology` (§1.2), `e2e_three_node_cluster_kv_put_batch_delete` (§1.1), `e2e_multi_group_isolated_kv` (§1.1).
+**Blocked tests:** `deploy_local_and_observe_topology` (§1.6), `e2e_three_node_cluster_kv_put_batch_delete` (§1.6), `e2e_multi_group_isolated_kv` (§1.6).
 
 ### 2.5 WAL GC safe slot not integrated
 
@@ -77,16 +91,16 @@ A full multi-node cluster recovery test for slots above the durable-commit water
 
 ```bash
 # Fast, crowkv-layer (passes):
-cargo test -p crowkv --test cluster full_cluster_restart_keeps_deletes
+cargo test -p crowkv --test group full_cluster_restart_keeps_deletes
 
-# Full web e2e (~40s, currently ignored — see §1.3):
+# Full web e2e (~40s, currently ignored — see §1.6):
 cargo test -p crowkv-web --test cluster_restart_recovery_test -- --ignored
 
-# Dynamic replica change (currently ignored — see §1.1):
+# Dynamic replica change (currently ignored — see §1.6):
 cargo test -p crowkv-server --test cluster_e2e_test -- --ignored e2e_kv_after_dynamic_replica_change
 
 # Leader kill/restart (currently ignored — see §1.4):
-cargo test -p crowkv --test cluster -- --ignored cluster_survives_leader_kill_and_restart_with_no_data_loss
+cargo test -p crowkv --test group -- --ignored cluster_survives_leader_kill_and_restart_with_no_data_loss
 ```
 
 ## 4. Suggested Fix Order

@@ -19,3 +19,7 @@ Open implementation items in code. Add new entries when you encounter a TODO/FIX
 - Keep this file under ~50 lines; split to `todo_code-<topic>.md` if it grows
 
 ---
+
+* KV pannel along side the hierchy view.
+* add metrics mod, and emtrics logs by time. 
+* we persistent config, find a better way for the cluster config, like config file in each node, I may cause some UT bugs.

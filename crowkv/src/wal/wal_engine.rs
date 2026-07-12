@@ -24,6 +24,26 @@ use super::pipeline_writer::{spawn_pipeline_writer, EncodedRecord, PendingWrite,
 use super::record::{WALRecord, WalRecordFormat};
 use super::IoBackend;
 
+/// Snapshot of WAL batch aggregation stats for observability/benchmarking.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BatchStats {
+    /// Total number of durable flush batches executed across all pipelines.
+    pub flush_count: u64,
+    /// Total number of records flushed across all batches.
+    pub records_flushed: u64,
+}
+
+impl BatchStats {
+    /// Average number of records per batch (0 if no flushes yet).
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn avg_batch_size(&self) -> f64 {
+        self.records_flushed
+            .checked_div(self.flush_count)
+            .map_or(0.0, |v| v as f64)
+    }
+}
+
 /// The main WAL handle, shared (via `Arc`) by the acceptor and the GC worker.
 pub struct WalEngine {
     backend: Arc<IoBackend>,
@@ -47,6 +67,10 @@ pub struct WalEngine {
     snapshot_slot: AtomicU64,
     /// Join handles for the writer tasks (aborted on drop).
     writer_tasks: parking_lot::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Total number of durable flush batches across all pipelines.
+    flush_count: Arc<AtomicU64>,
+    /// Total number of records flushed across all batches.
+    records_flushed: Arc<AtomicU64>,
 }
 
 impl Drop for WalEngine {
@@ -75,6 +99,8 @@ impl WalEngine {
         let failed = Arc::new(AtomicBool::new(false));
         let index = Arc::new(parking_lot::Mutex::new(SegmentIndex::new()));
         let next_segment_id = Arc::new(AtomicU64::new(1));
+        let flush_count = Arc::new(AtomicU64::new(0));
+        let records_flushed = Arc::new(AtomicU64::new(0));
 
         let coalesce = Duration::from_micros(config.wal_flush_coalesce_us);
         let watchdog = Duration::from_millis(config.wal_flush_watchdog_ms);
@@ -108,6 +134,8 @@ impl WalEngine {
                 batch_bytes,
                 failed.clone(),
                 index.clone(),
+                flush_count.clone(),
+                records_flushed.clone(),
             );
             writer_tasks.push(task);
 
@@ -132,6 +160,8 @@ impl WalEngine {
             failed,
             snapshot_slot: AtomicU64::new(0),
             writer_tasks: parking_lot::Mutex::new(writer_tasks),
+            flush_count,
+            records_flushed,
         }))
     }
 
@@ -287,6 +317,15 @@ impl WalEngine {
     /// Get the failed flag for sharing with external components.
     pub fn failed_flag(&self) -> Arc<AtomicBool> {
         self.failed.clone()
+    }
+
+    /// Snapshot of batch aggregation stats across all pipelines.
+    #[must_use]
+    pub fn batch_stats(&self) -> BatchStats {
+        BatchStats {
+            flush_count: self.flush_count.load(Ordering::Relaxed),
+            records_flushed: self.records_flushed.load(Ordering::Relaxed),
+        }
     }
 }
 

@@ -1,34 +1,22 @@
-//! Paxos integration tests.
+//! Paxos module-unit tests.
 //!
-//! This file serves as the entrypoint for all Paxos-related integration tests,
-//! which are organized as submodules in the `paxos/` directory.
-
-#[path = "testkit/mod.rs"]
-mod testkit;
+//! Entrypoint for isolated unit tests of the consensus roles in `paxos/`:
+//! the acceptor promise/accept fence, the learner note-chosen path, and the
+//! error classifier. Layered consensus behaviour lives in the `replica`,
+//! `group`, and `store` test binaries; the slot list has its own `slot`
+//! subsystem binary.
 
 #[path = "paxos/acceptor_test.rs"]
 mod acceptor;
 
-#[path = "paxos/kv_slot_retry_test.rs"]
-mod kv_slot_retry;
+#[path = "paxos/learner_test.rs"]
+mod learner;
 
-#[path = "paxos/learner_note_chosen_test.rs"]
-mod learner_note_chosen;
+#[path = "paxos/learner_dedup_test.rs"]
+mod learner_dedup;
 
-#[path = "paxos/lease_read_test.rs"]
-mod lease_read;
+#[path = "paxos/roles_test.rs"]
+mod roles;
 
-#[path = "paxos/election_metrics_test.rs"]
-mod election_metrics;
-
-#[path = "paxos/election_test.rs"]
-mod election;
-
-#[path = "paxos/paxos_error_test.rs"]
-mod paxos_error;
-
-#[path = "paxos/preemption_retry_test.rs"]
-mod preemption_retry;
-
-#[path = "paxos/slot_list_test.rs"]
-mod slot_list;
+#[path = "paxos/error_test.rs"]
+mod error;

@@ -97,6 +97,8 @@ pub(crate) fn spawn_pipeline_writer(
     batch_bytes: usize,
     failed: Arc<AtomicBool>,
     index: Arc<parking_lot::Mutex<SegmentIndex>>,
+    flush_count: Arc<AtomicU64>,
+    records_flushed: Arc<AtomicU64>,
 ) -> (mpsc::UnboundedSender<WriterCommand>, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::unbounded_channel::<WriterCommand>();
     let jh = tokio::spawn(pipeline_writer_loop(
@@ -113,6 +115,8 @@ pub(crate) fn spawn_pipeline_writer(
         batch_bytes,
         failed,
         index,
+        flush_count,
+        records_flushed,
     ));
     (tx, jh)
 }
@@ -133,6 +137,8 @@ async fn pipeline_writer_loop(
     batch_bytes: usize,
     failed: Arc<AtomicBool>,
     index: Arc<parking_lot::Mutex<SegmentIndex>>,
+    flush_count: Arc<AtomicU64>,
+    records_flushed: Arc<AtomicU64>,
 ) {
     // Reusable per-batch buffers — declared outside the loop so their
     // allocations persist across wake cycles (no per-batch malloc/free).
@@ -255,6 +261,10 @@ async fn pipeline_writer_loop(
 
                 match write_result {
                     Ok(()) => {
+                        // Track batch aggregation stats.
+                        flush_count.fetch_add(1, Ordering::Relaxed);
+                        records_flushed.fetch_add(batch.len() as u64, Ordering::Relaxed);
+
                         // Update index for non-metadata records.
                         {
                             let mut idx = index.lock();

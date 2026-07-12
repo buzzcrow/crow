@@ -4,5 +4,8 @@
 //! and the `InMemKV` implementation (apply idempotency, per-key
 //! highest-slot-wins, tombstones, prefix scan, `compare`).
 
-#[path = "kv/in_memory_test.rs"]
-mod in_memory;
+#[path = "kv/mem_kv_test.rs"]
+mod mem_kv;
+
+#[path = "kv/op_codec_test.rs"]
+mod op_codec;

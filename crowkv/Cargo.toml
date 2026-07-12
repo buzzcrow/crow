@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "CrowKV core library: consensus, engine, WAL, I/O, RPC, reconfiguration."
+autobenches = false
 
 [lints]
 workspace = true
@@ -53,9 +54,5 @@ name = "slot_list"
 harness = false
 
 [[bench]]
-name = "wal_fsync"
-harness = false
-
-[[bench]]
-name = "wal_multidisk"
+name = "wal"
 harness = false

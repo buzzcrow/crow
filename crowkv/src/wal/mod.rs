@@ -39,7 +39,7 @@ pub use crate::common::config::WalConfig;
 pub use block_backend::{BlockDevice, BlockDeviceController};
 pub use io_backend::{IoBackend, OpenOptions};
 pub use record::{RecordType, WALRecord, WalRecordFormat};
-pub use wal_engine::WalEngine;
+pub use wal_engine::{BatchStats, WalEngine};
 
 /// Backend-agnostic async WAL file handle.
 ///
