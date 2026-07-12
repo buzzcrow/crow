@@ -1,6 +1,5 @@
 // CT12: page split & merge integration tests.
 #include "crowtree/crowtree.h"
-#include "crowtree/env.h"
 
 #include <gtest/gtest.h>
 
@@ -26,8 +25,7 @@ TEST(SplitMerge, SplitGrowsMultiLevelTree) {
   Options opt;
   opt.max_delta_len = 1;       // consolidate aggressively
   opt.leaf_split_bytes = 200;  // small leaves -> force splits
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
 
   const int N = 300;
   for (int i = 0; i < N; ++i) {
@@ -60,8 +58,7 @@ TEST(SplitMerge, MergeAndRootCollapse) {
   opt.max_delta_len = 0;  // consolidate (and check merge) on every flush
   opt.leaf_split_bytes = 200;
   opt.leaf_merge_bytes = 60;
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
 
   const int N = 200;
   uint64_t slot = 0;
@@ -111,8 +108,7 @@ TEST(SplitMerge, LargeFlushSpanningLeavesSplitsMidFlush) {
   // Keep auto-flush from firing so we control exactly when the big flush runs.
   opt.memtable_flush_bytes = 1ull << 40;
   opt.memtable_flush_entries = 1u << 30;
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
 
   std::map<std::string, std::string> oracle;
   uint64_t slot = 0;
@@ -170,8 +166,7 @@ TEST(SplitMerge, ParityWithOracleUnderSplits) {
   opt.max_delta_len = 2;
   opt.leaf_split_bytes = 150;
   opt.leaf_merge_bytes = 40;
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
 
   std::map<std::string, std::string> oracle;
   std::mt19937 rng(12345);

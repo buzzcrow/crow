@@ -1,4 +1,4 @@
-// PT8: exercise the stable C ABI surface (open/apply/get/scan/checkpoint/reopen,
+// PT8: exercise the stable C ABI surface (open/apply/get/scan/snapshot/reopen,
 // snapshot view iteration, and export/import round-trip).
 #include "crowtree/c_api.h"
 
@@ -90,7 +90,7 @@ TEST(CApi, FileCheckpointReopen) {
       oracle[Key(i)] = v;
     }
     uint64_t durable = 0;
-    ASSERT_EQ(ct_checkpoint(t, &durable), 0);
+    ASSERT_EQ(ct_snapshot(t, &durable), 0);
     EXPECT_EQ(durable, 50u);
     ct_close(t);
   }
@@ -159,7 +159,7 @@ TEST(CApi, SnapshotExportImport) {
   ASSERT_EQ(ct_open(&opt, &b), 0);
 
   ct_export* e = nullptr;
-  ASSERT_EQ(ct_snapshot_export_begin(a, 0, &e), 0);
+  ASSERT_EQ(ct_snapshot_export_begin(a, &e), 0);
   ct_import* im = nullptr;
   ASSERT_EQ(ct_snapshot_import_begin(b, &im), 0);
   while (true) {

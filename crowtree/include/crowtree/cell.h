@@ -9,9 +9,11 @@
 // slot field.
 #pragma once
 
+#include "crowtree/buffer.h"
 #include "crowtree/slice.h"
 
 #include <cstdint>
+#include <cstring>
 #include <string>
 
 namespace crowtree {
@@ -64,6 +66,48 @@ inline std::string encode_overflow_cell(uint64_t slot, uint64_t head_page_id, ui
     s.push_back(static_cast<char>((total_len >> (8 * i)) & 0xff));
   }
   return s;
+}
+
+// buffer variants of the encoders (plan-tree #5 B2a): the encoded cell is one
+// contiguous allocation — the 9-byte header is written into the reserved prefix and
+// the value copied right after it, so there is no separate cell-header allocation.
+// Byte-for-byte identical to the std::string encoders above; `CellView` reads the
+// resulting `buffer::slice()` unchanged.
+inline buffer encode_cell_buf(uint64_t slot, OpKind kind, Slice value = Slice()) {
+  uint8_t flags = (kind == OpKind::kDelete) ? kFlagTombstone : 0;
+  size_t vlen = (kind != OpKind::kDelete) ? value.size() : 0;
+  buffer b = buffer::alloc(/*capacity=*/vlen, /*header_reserve=*/kCellHeaderSize);
+  uint8_t* p = b.data();  // [0,9) header, [9, 9+vlen) value — one block
+  for (int i = 0; i < 8; ++i)
+  {
+    p[i] = static_cast<uint8_t>((slot >> (8 * i)) & 0xff);
+  }
+  p[8] = flags;
+  if (vlen > 0)
+  {
+    std::memcpy(p + kCellHeaderSize, value.data(), vlen);
+  }
+  return b;  // size() is already kCellHeaderSize + vlen
+}
+
+inline buffer encode_overflow_cell_buf(uint64_t slot, uint64_t head_page_id,
+                                       uint64_t total_len) {
+  buffer b = buffer::alloc(kOverflowCellSize);  // 25 bytes: all metadata, no value
+  uint8_t* p = b.data();
+  for (int i = 0; i < 8; ++i)
+  {
+    p[i] = static_cast<uint8_t>((slot >> (8 * i)) & 0xff);
+  }
+  p[8] = kFlagOverflow;
+  for (int i = 0; i < 8; ++i)
+  {
+    p[kCellHeaderSize + i] = static_cast<uint8_t>((head_page_id >> (8 * i)) & 0xff);
+  }
+  for (int i = 0; i < 8; ++i)
+  {
+    p[kCellHeaderSize + 8 + i] = static_cast<uint8_t>((total_len >> (8 * i)) & 0xff);
+  }
+  return b;
 }
 
 // Decoded, non-owning view over an encoded cell payload.

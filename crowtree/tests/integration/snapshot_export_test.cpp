@@ -1,14 +1,15 @@
 // PT7: snapshot export / import (portable stream + file wrappers).
 #include "crowtree/crowtree.h"
-#include "crowtree/env.h"
 #include "crowtree/snapshot_io.h"
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <cstdio>
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace crowtree;
@@ -53,7 +54,7 @@ void BuildSource(Crowtree* t, std::map<std::string, std::string>* live) {
 // Stream A -> B through small chunks (forces multi-chunk transfer).
 void Transfer(Crowtree& a, Crowtree& b, size_t chunk_bytes, uint64_t* at_slot) {
   std::unique_ptr<SnapshotExport> exp;
-  ASSERT_TRUE(snapshot_export_begin(a, 0, snapshot_format::kPortable, chunk_bytes, &exp).ok());
+  ASSERT_TRUE(snapshot_export_begin(a, snapshot_format::kPortable, chunk_bytes, &exp).ok());
   SnapshotImport imp(b);
   bool done = false;
   while (!done) {
@@ -66,13 +67,12 @@ void Transfer(Crowtree& a, Crowtree& b, size_t chunk_bytes, uint64_t* at_slot) {
 }  // namespace
 
 TEST(SnapshotExport, ExportImportCompareEmpty) {
-  CrowtreeEnv env;
   Options opt;  // pure in-memory engines
-  Crowtree a(env, opt);
+  Crowtree a(opt);
   std::map<std::string, std::string> live;
   BuildSource(&a, &live);
 
-  Crowtree b(env, opt);
+  Crowtree b(opt);
   uint64_t at = 0;
   Transfer(a, b, 4096, &at);
   EXPECT_EQ(at, a.last_applied_slot());
@@ -86,13 +86,12 @@ TEST(SnapshotExport, ExportImportCompareEmpty) {
 }
 
 TEST(SnapshotExport, CrossEngineParityVsOracle) {
-  CrowtreeEnv env;
   Options opt;
-  Crowtree a(env, opt);
+  Crowtree a(opt);
   std::map<std::string, std::string> live;
   BuildSource(&a, &live);
 
-  Crowtree b(env, opt);
+  Crowtree b(opt);
   uint64_t at = 0;
   Transfer(a, b, 8192, &at);
 
@@ -108,10 +107,60 @@ TEST(SnapshotExport, CrossEngineParityVsOracle) {
   EXPECT_FALSE(b.get(Slice(Key(3)), &s, &v));  // deleted in BuildSource
 }
 
-TEST(SnapshotExport, FileDumpLoadRoundTrip) {
-  CrowtreeEnv env;
+// #13: install_snapshot must be safe against concurrent lock-free readers. B
+// starts with a populated multi-level tree; while reader threads walk it, we
+// repeatedly import A's snapshot into B (each import epoch-retires B's old tree).
+// A UAF in free_subtree would trip ASan/TSan here.
+TEST(SnapshotExport, ConcurrentReadersDuringImportNoUAF) {
   Options opt;
-  Crowtree a(env, opt);
+  Crowtree a(opt);
+  std::map<std::string, std::string> live;
+  BuildSource(&a, &live);
+
+  Crowtree b(opt);
+  {
+    std::map<std::string, std::string> tmp;
+    BuildSource(&b, &tmp);  // B has its own multi-level tree to be replaced
+  }
+
+  std::atomic<bool> stop{false};
+  std::atomic<uint64_t> reads{0};
+  std::vector<std::thread> readers;
+  for (int i = 0; i < 4; ++i) {
+    readers.emplace_back([&] {
+      while (!stop.load(std::memory_order_relaxed)) {
+        for (int k = 0; k < 120; ++k) {
+          std::string v;
+          uint64_t s;
+          (void)b.get(Slice(Key(k)), &s, &v);  // transient miss OK; must not UAF
+          reads.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+    });
+  }
+
+  for (int round = 0; round < 5; ++round) {
+    uint64_t at = 0;
+    Transfer(a, b, 4096, &at);
+  }
+  stop.store(true);
+  for (auto& t : readers) {
+    t.join();
+  }
+  EXPECT_GT(reads.load(), 0u);
+
+  // After the churn settles, B matches the source oracle.
+  for (const auto& kv : live) {
+    std::string v;
+    uint64_t s;
+    ASSERT_TRUE(b.get(Slice(kv.first), &s, &v)) << "missing " << kv.first;
+    EXPECT_EQ(v, kv.second);
+  }
+}
+
+TEST(SnapshotExport, FileDumpLoadRoundTrip) {
+  Options opt;
+  Crowtree a(opt);
   std::map<std::string, std::string> live;
   BuildSource(&a, &live);
 
@@ -121,9 +170,9 @@ TEST(SnapshotExport, FileDumpLoadRoundTrip) {
   close(fd);
   std::string path(tmpl);
 
-  ASSERT_TRUE(snapshot_dump_to_file(a, 0, snapshot_format::kPortable, path).ok());
+  ASSERT_TRUE(snapshot_dump_to_file(a, snapshot_format::kPortable, path).ok());
 
-  Crowtree b(env, opt);
+  Crowtree b(opt);
   ASSERT_TRUE(snapshot_load_from_file(b, path).ok());
   EXPECT_EQ(b.last_applied_slot(), a.last_applied_slot());
 
@@ -134,16 +183,15 @@ TEST(SnapshotExport, FileDumpLoadRoundTrip) {
 }
 
 TEST(SnapshotExport, ChunkBoundaryDeterminism) {
-  CrowtreeEnv env;
   Options opt;
-  Crowtree a(env, opt);
+  Crowtree a(opt);
   std::map<std::string, std::string> live;
   BuildSource(&a, &live);
 
   auto collect = [&](size_t cb) {
     std::vector<std::string> chunks;
     std::unique_ptr<SnapshotExport> exp;
-    EXPECT_TRUE(snapshot_export_begin(a, 0, snapshot_format::kPortable, cb, &exp).ok());
+    EXPECT_TRUE(snapshot_export_begin(a, snapshot_format::kPortable, cb, &exp).ok());
     bool done = false;
     while (!done) {
       std::string c;
@@ -166,15 +214,14 @@ TEST(SnapshotExport, ChunkBoundaryDeterminism) {
 }
 
 TEST(SnapshotExport, CrcTamperRejected) {
-  CrowtreeEnv env;
   Options opt;
-  Crowtree a(env, opt);
+  Crowtree a(opt);
   std::map<std::string, std::string> live;
   BuildSource(&a, &live);
 
   std::unique_ptr<SnapshotExport> exp;
   ASSERT_TRUE(
-      snapshot_export_begin(a, 0, snapshot_format::kPortable, kSnapshotChunkBytes, &exp).ok());
+      snapshot_export_begin(a, snapshot_format::kPortable, kSnapshotChunkBytes, &exp).ok());
   std::string stream;
   bool done = false;
   while (!done) {
@@ -185,17 +232,16 @@ TEST(SnapshotExport, CrcTamperRejected) {
   ASSERT_GT(stream.size(), 64u);
   stream[40] ^= 0xff;  // flip a byte in the tuple body
 
-  Crowtree b(env, opt);
+  Crowtree b(opt);
   SnapshotImport imp(b);
   ASSERT_TRUE(imp.feed(Slice(stream)).ok());
   EXPECT_EQ(imp.finish(nullptr).code(), Code::kCorruption);
 }
 
 TEST(SnapshotExport, NativeFormatNotSupported) {
-  CrowtreeEnv env;
   Options opt;
-  Crowtree a(env, opt);
+  Crowtree a(opt);
   std::unique_ptr<SnapshotExport> exp;
-  EXPECT_EQ(snapshot_export_begin(a, 0, snapshot_format::kNative, 0, &exp).code(),
+  EXPECT_EQ(snapshot_export_begin(a, snapshot_format::kNative, 0, &exp).code(),
             Code::kNotSupported);
 }

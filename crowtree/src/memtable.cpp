@@ -1,62 +1,37 @@
 #include "crowtree/memtable.h"
 
+#include <cstring>
+#include <utility>
+
 namespace crowtree {
 
+namespace {
+// Copy a byte range into a fresh owned buffer (SBO-inline for small ranges).
+buffer buf_of(Slice s) {
+  buffer b = buffer::alloc(s.size());
+  if (s.size() > 0)
+  {
+    std::memcpy(b.data(), s.data(), s.size());
+  }
+  return b;
+}
+}  // namespace
+
 bool MemTable::upsert(Slice key, uint64_t slot, Slice cell_payload) {
+  return upsert(key, slot, buf_of(cell_payload));
+}
+
+bool MemTable::upsert(Slice key, uint64_t slot, buffer&& cell_payload) {
   std::lock_guard<std::mutex> lk(mu_);
   // Already durable in L1; reject unless restore explicitly allows old slots.
   if (slot <= durable_floor_ && !allow_old_slots_)
   {
     return false;
   }
-  std::string_view kv = key.to_view();
-  auto it = map_.find(kv);
+  auto it = map_.find(key.to_view());  // heterogeneous lookup, no temp key
   if (it != map_.end())
   {
-    uint64_t existing = CellView{Slice(it->second)}.slot();
-    if (slot <= existing)
-    {
-      return false;  // highest-slot-wins: keep existing
-    }
-    bytes_ -= it->first.size() + it->second.size();
-    it->second.assign(cell_payload.data(), cell_payload.size());
-    bytes_ += it->first.size() + it->second.size();
-    if (slot < min_slot_)
-    {
-      min_slot_ = slot;
-    }
-    if (slot > max_slot_)
-    {
-      max_slot_ = slot;
-    }
-    return true;
-  }
-  std::string k(key.data(), key.size());
-  std::string c(cell_payload.data(), cell_payload.size());
-  bytes_ += k.size() + c.size();
-  map_.emplace(std::move(k), std::move(c));
-  if (slot < min_slot_)
-  {
-    min_slot_ = slot;
-  }
-  if (slot > max_slot_)
-  {
-    max_slot_ = slot;
-  }
-  return true;
-}
-
-bool MemTable::upsert(std::string&& key, uint64_t slot, std::string&& cell_payload) {
-  std::lock_guard<std::mutex> lk(mu_);
-  if (slot <= durable_floor_ && !allow_old_slots_)
-  {
-    return false;
-  }
-  std::string_view kv(key);
-  auto it = map_.find(kv);
-  if (it != map_.end())
-  {
-    uint64_t existing = CellView{Slice(it->second)}.slot();
+    uint64_t existing = CellView{it->second.slice()}.slot();
     if (slot <= existing)
     {
       return false;  // highest-slot-wins: keep existing
@@ -74,7 +49,8 @@ bool MemTable::upsert(std::string&& key, uint64_t slot, std::string&& cell_paylo
     }
     return true;
   }
-  bytes_ += key.size() + cell_payload.size();
+  std::string k(key.data(), key.size());
+  bytes_ += k.size() + cell_payload.size();
   if (slot < min_slot_)
   {
     min_slot_ = slot;
@@ -83,7 +59,9 @@ bool MemTable::upsert(std::string&& key, uint64_t slot, std::string&& cell_paylo
   {
     max_slot_ = slot;
   }
-  map_.emplace(std::move(key), std::move(cell_payload));
+  // string key (copyable, relocatable) + move-only buffer value: try_emplace
+  // constructs both in place without materializing a movable pair.
+  map_.try_emplace(std::move(k), std::move(cell_payload));
   return true;
 }
 
@@ -126,12 +104,12 @@ void MemTable::reset() {
 
 bool MemTable::get(Slice key, std::string* out_cell) const {
   std::lock_guard<std::mutex> lk(mu_);
-  auto it = map_.find(key.to_view());
+  auto it = map_.find(key);  // heterogeneous lookup by Slice (buffer_less)
   if (it == map_.end())
   {
     return false;
   }
-  out_cell->assign(it->second);
+  out_cell->assign(reinterpret_cast<const char*>(it->second.data()), it->second.size());
   return true;
 }
 
@@ -140,11 +118,12 @@ std::vector<mem_entry> MemTable::drain_up_to(uint64_t cs) {
   std::vector<mem_entry> out;
   for (auto it = map_.begin(); it != map_.end();)
   {
-    uint64_t slot = CellView{Slice(it->second)}.slot();
+    uint64_t slot = CellView{it->second.slice()}.slot();
     if (slot <= cs)
     {
-      out.push_back(mem_entry{it->first, it->second, slot});
+      // Copy the (small, SSO) key; move the cell buffer out before erase.
       bytes_ -= it->first.size() + it->second.size();
+      out.push_back(mem_entry{it->first, std::move(it->second), slot});
       it = map_.erase(it);
     } else
     {
@@ -165,7 +144,7 @@ std::vector<mem_entry> MemTable::snapshot() const {
   out.reserve(map_.size());
   for (auto& kv : map_)
   {
-    out.push_back(mem_entry{kv.first, kv.second, CellView{Slice(kv.second)}.slot()});
+    out.push_back(mem_entry{kv.first, kv.second.clone(), CellView{kv.second.slice()}.slot()});
   }
   return out;
 }

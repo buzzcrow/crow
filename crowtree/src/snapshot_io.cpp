@@ -50,21 +50,17 @@ uint64_t get_u64(const uint8_t* p) {
 
 }  // namespace
 
-Status snapshot_export_begin(Crowtree& tree, uint64_t at_slot, snapshot_format fmt,
-                             size_t chunk_bytes, std::unique_ptr<SnapshotExport>* out) {
+Status snapshot_export_begin(Crowtree& tree, snapshot_format fmt, size_t chunk_bytes,
+                             std::unique_ptr<SnapshotExport>* out) {
   if (fmt != snapshot_format::kPortable)
   {
     return Status::not_supported("snapshot export: only portable format in v1");
   }
-  // v1 exports the current durable view; an arbitrary historical pin is deferred
-  // until path-copy COW RootVersions exist. A request for a future slot the
-  // engine has not applied is unsatisfiable.
+  // v1 always exports the current durable view (its last_applied_slot is recorded
+  // in the stream header). An arbitrary historical pin is deferred until
+  // path-copy COW RootVersions exist.
   std::shared_ptr<Snapshot> snap = tree.snapshot_view();
   uint64_t slot = snap->at_slot();
-  if (at_slot != 0 && at_slot > slot)
-  {
-    return Status::invalid_argument("snapshot export: at_slot beyond last_applied_slot");
-  }
 
   std::string s;
   put_u32(&s, kSnapMagic);
@@ -105,10 +101,9 @@ Status SnapshotExport::next_chunk(std::string* out, bool* done) {
   return Status::Ok();
 }
 
-Status snapshot_dump_to_file(Crowtree& tree, uint64_t at_slot, snapshot_format fmt,
-                             const std::string& path) {
+Status snapshot_dump_to_file(Crowtree& tree, snapshot_format fmt, const std::string& path) {
   std::unique_ptr<SnapshotExport> exp;
-  Status s = snapshot_export_begin(tree, at_slot, fmt, kSnapshotChunkBytes, &exp);
+  Status s = snapshot_export_begin(tree, fmt, kSnapshotChunkBytes, &exp);
   if (!s.ok())
   {
     return s;
@@ -213,7 +208,7 @@ Status SnapshotImport::finish(uint64_t* out_at_slot) {
     }
     Slice value(reinterpret_cast<const char*>(p + pos), vlen);
     pos += vlen;
-    std::string cell = encode_cell(slot, kind ? OpKind::kDelete : OpKind::kPut, value);
+    buffer cell = encode_cell_buf(slot, kind ? OpKind::kDelete : OpKind::kPut, value);
     entries.push_back(leaf_entry{std::move(key), std::move(cell)});
   }
   if (pos != body_end)

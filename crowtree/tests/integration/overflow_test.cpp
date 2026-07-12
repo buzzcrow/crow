@@ -3,7 +3,6 @@
 // chains, get/scan/delete, reopen, eviction-reload, overwrite (chain retire),
 // and parity vs an in-mem oracle.
 #include "crowtree/crowtree.h"
-#include "crowtree/env.h"
 #include "crowtree/page_store.h"
 
 #include <gtest/gtest.h>
@@ -52,14 +51,13 @@ Options OverflowOpts(PageStore* store) {
 TEST(Overflow, PutGetScanReopenMultiFrame) {
   MemPageStore store(1);
   Options opt = OverflowOpts(&store);
-  CrowtreeEnv env;
 
   // Sizes spanning chain boundaries: <1 chunk, exactly 1, just over 1, several,
   // and a multi-MiB value.
   std::vector<size_t> sizes = {100, 4024, 4025, 10000, 1u << 20};
   std::map<std::string, std::string> oracle;
   {
-    Crowtree t(env, opt);
+    Crowtree t(opt);
     uint64_t slot = 0;
     for (size_t i = 0; i < sizes.size(); ++i) {
       ++slot;
@@ -75,7 +73,7 @@ TEST(Overflow, PutGetScanReopenMultiFrame) {
       ASSERT_TRUE(t.flush().ok());
       oracle[Key(i)] = "small" + std::to_string(i);
     }
-    ASSERT_TRUE(t.checkpoint(nullptr).ok());
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
 
     for (const auto& kv : oracle) {
       std::string v;
@@ -95,7 +93,7 @@ TEST(Overflow, PutGetScanReopenMultiFrame) {
 
   // Reopen: overflow chains demand-load through resident on first access.
   std::unique_ptr<Crowtree> t2;
-  ASSERT_TRUE(Crowtree::open(env, opt, &t2).ok());
+  ASSERT_TRUE(Crowtree::open(opt, &t2).ok());
   for (const auto& kv : oracle) {
     std::string v;
     uint64_t s;
@@ -107,8 +105,7 @@ TEST(Overflow, PutGetScanReopenMultiFrame) {
 TEST(Overflow, EvictionReload) {
   MemPageStore store(1);
   Options opt = OverflowOpts(&store);
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
 
   std::map<std::string, std::string> oracle;
   uint64_t slot = 0;
@@ -119,7 +116,7 @@ TEST(Overflow, EvictionReload) {
     ASSERT_TRUE(t.flush().ok());
     oracle[Key(i)] = v;
   }
-  ASSERT_TRUE(t.checkpoint(nullptr).ok());
+  ASSERT_TRUE(t.snapshot(nullptr).ok());
 
   t.evict_clean_leaves(0);  // drop all clean leaves; reads must reload them
   for (const auto& kv : oracle) {
@@ -133,9 +130,8 @@ TEST(Overflow, EvictionReload) {
 TEST(Overflow, OverwriteAndDeleteRetiresChains) {
   MemPageStore store(1);
   Options opt = OverflowOpts(&store);
-  CrowtreeEnv env;
   {
-    Crowtree t(env, opt);
+    Crowtree t(opt);
     uint64_t slot = 0;
     const std::string k = Key(1);
 
@@ -143,7 +139,7 @@ TEST(Overflow, OverwriteAndDeleteRetiresChains) {
     ++slot;
     ASSERT_TRUE(t.apply(slot, Put1(k, v1)).ok());
     ASSERT_TRUE(t.flush().ok());
-    ASSERT_TRUE(t.checkpoint(nullptr).ok());
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
 
     // Overwrite large -> large (old overflow chain superseded + retired).
     std::string v2 = BigVal(12000, 2);
@@ -176,14 +172,14 @@ TEST(Overflow, OverwriteAndDeleteRetiresChains) {
     ++slot;
     ASSERT_TRUE(t.apply(slot, Del1(k)).ok());
     ASSERT_TRUE(t.flush().ok());
-    ASSERT_TRUE(t.checkpoint(nullptr).ok());
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
     std::string v;
     uint64_t s;
     EXPECT_FALSE(t.get(Slice(k), &s, &v));
   }
   // Reopen sees the deleted key gone.
   std::unique_ptr<Crowtree> t2;
-  ASSERT_TRUE(Crowtree::open(env, opt, &t2).ok());
+  ASSERT_TRUE(Crowtree::open(opt, &t2).ok());
   std::string v;
   uint64_t s;
   EXPECT_FALSE(t2->get(Slice(Key(1)), &s, &v));
@@ -196,8 +192,7 @@ TEST(Overflow, ParityVsOracle) {
   opt.max_inline_value = 48;
   opt.max_delta_len = 2;
   opt.leaf_split_bytes = 1024;
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
 
   std::map<std::string, std::string> oracle;
   std::mt19937 rng(99);

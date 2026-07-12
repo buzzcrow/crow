@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace crowtree {
 
@@ -67,7 +68,7 @@ struct Options {
 
   // ── Persistence ──
   // Durable backend. Non-owning; nullptr = pure in-memory engine (no
-  // checkpoint/recovery). When set, checkpoint() writes the materialized L1
+  // snapshot/recovery). When set, snapshot() writes the materialized L1
   // state and open() recovers it.
   PageStore* page_store = nullptr;
 
@@ -85,10 +86,20 @@ struct Options {
   // ([algo][raw_len][stored_len][crc][stored]); the buffer pool always holds
   // uncompressed frames. The algo is recorded per page, so a page is decoded
   // correctly regardless of the option in force when it is read back (mixed
-  // pages across incremental checkpoints decode fine). default_env kNone keeps the
+  // pages across incremental snapshots decode fine). default_env kNone keeps the
   // stored bytes equal to the raw frame; kLz4 compresses when it shrinks the
   // page (falling back to stored-raw when LZ4 is unavailable or unhelpful).
   compress_algo compression = compress_algo::kNone;
+
+  // ── Logging (plan-tree #10) ──
+  // When log_dir is non-empty, Crowtree::open() initializes an async, size-
+  // rotating file logger at <log_dir>/crowtree.log (no-op if the library was
+  // built without spdlog). log_level is an spdlog level name
+  // (trace/debug/info/warn/error/off). Rotation defaults: 100 MiB × 5 files.
+  std::string log_dir;                 // empty = logging disabled
+  std::string log_level = "info";      // spdlog level name
+  size_t log_max_file_mb = 100;        // per-file rotation size
+  size_t log_max_files = 5;            // rotated files kept
 };
 
 }  // namespace crowtree

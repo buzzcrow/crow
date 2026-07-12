@@ -1,6 +1,5 @@
 // CT9: write path (apply + flush) integration tests.
 #include "crowtree/crowtree.h"
-#include "crowtree/env.h"
 
 #include <gtest/gtest.h>
 
@@ -34,8 +33,7 @@ TEST(WritePath, BasePagesLiveInBufferPool) {
   opt.leaf_split_bytes = 200;  // small leaves -> multiple leaf + inner frames
   opt.frame_bytes = 4096;      // small frames so a few hold these tiny pages
   opt.buffer_pool_bytes = 64 * 4096;
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
   for (int i = 0; i < 60; ++i) {
     uint64_t s = i + 1;
     ASSERT_TRUE(t.apply(s, Put1(Key(i), "payload-" + std::to_string(i))).ok());
@@ -54,8 +52,7 @@ TEST(WritePath, BasePagesLiveInBufferPool) {
 }
 
 TEST(WritePath, ApplyThenFlushVisible) {
-  CrowtreeEnv env;
-  Crowtree t(env);
+  Crowtree t;
   ASSERT_TRUE(t.apply(1, Put1("a", "A1")).ok());
   ASSERT_TRUE(t.apply(2, Put1("b", "B2")).ok());
   // Before flush, values are visible from L0.
@@ -70,8 +67,7 @@ TEST(WritePath, ApplyThenFlushVisible) {
 }
 
 TEST(WritePath, IntraBatchLastWins) {
-  CrowtreeEnv env;
-  Crowtree t(env);
+  Crowtree t;
   Batch b{{batch_op{"k", OpKind::kPut, "first"}, batch_op{"k", OpKind::kPut, "second"},
            batch_op{"k", OpKind::kPut, "third"}}};
   ASSERT_TRUE(t.apply(1, b).ok());
@@ -80,8 +76,7 @@ TEST(WritePath, IntraBatchLastWins) {
 }
 
 TEST(WritePath, OutOfOrderApplyConverges) {
-  CrowtreeEnv env;
-  Crowtree t(env);
+  Crowtree t;
   // Slot 3 arrives before slot 2 (parallel window). contiguous lags until 2.
   ASSERT_TRUE(t.apply(3, Put1("a", "A3")).ok());
   ASSERT_TRUE(t.apply(2, Put1("a", "A2")).ok());
@@ -92,8 +87,7 @@ TEST(WritePath, OutOfOrderApplyConverges) {
 }
 
 TEST(WritePath, FlushOnlyContiguousPrefix) {
-  CrowtreeEnv env;
-  Crowtree t(env);
+  Crowtree t;
   // a@2 contiguous; b@5 not yet contiguous (gap at 3,4).
   ASSERT_TRUE(t.apply(2, Put1("a", "A2")).ok());
   ASSERT_TRUE(t.apply(5, Put1("b", "B5")).ok());
@@ -107,8 +101,7 @@ TEST(WritePath, FlushOnlyContiguousPrefix) {
 }
 
 TEST(WritePath, NoOpAdvancesFrontier) {
-  CrowtreeEnv env;
-  Crowtree t(env);
+  Crowtree t;
   ASSERT_TRUE(t.apply(1, Put1("a", "A1")).ok());
   // NoOp/empty batch advances contiguous to 5 (slots 2-5 were NoOps).
   ASSERT_TRUE(t.apply(5, Batch{}).ok());
@@ -119,8 +112,7 @@ TEST(WritePath, NoOpAdvancesFrontier) {
 }
 
 TEST(WritePath, ReApplyBelowDurableDropped) {
-  CrowtreeEnv env;
-  Crowtree t(env);
+  Crowtree t;
   ASSERT_TRUE(t.apply(3, Put1("a", "A3")).ok());
   t.force_advance_slot(3);
   ASSERT_TRUE(t.flush().ok());
@@ -132,8 +124,7 @@ TEST(WritePath, ReApplyBelowDurableDropped) {
 }
 
 TEST(WritePath, DeleteTombstone) {
-  CrowtreeEnv env;
-  Crowtree t(env);
+  Crowtree t;
   ASSERT_TRUE(t.apply(1, Put1("a", "A1")).ok());
   ASSERT_TRUE(t.flush().ok());
   Batch del{{batch_op{"a", OpKind::kDelete, ""}}};
@@ -147,8 +138,7 @@ TEST(WritePath, DeleteTombstone) {
 TEST(WritePath, ConsolidationOnLongChain) {
   Options opt;
   opt.max_delta_len = 4;  // force consolidation quickly
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
   for (uint64_t s = 1; s <= 20; ++s) {
     ASSERT_TRUE(t.apply(s, Put1("k", "v" + std::to_string(s))).ok());
     ASSERT_TRUE(t.flush().ok());

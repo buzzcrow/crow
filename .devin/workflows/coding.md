@@ -9,7 +9,6 @@ Companion: `/review` (pre-push), `/doc` (doc rules).
 ## Model Scope Division
 
 - **AI scope (expensive model)**: implement core code and fix bugs surfaced by tests
-- **User scope (free model / SWE-1.6)**: cargo fmt, clippy fixes, doc comments, README/index updates, git commit, push
 
 ## 1. Doc-First
 

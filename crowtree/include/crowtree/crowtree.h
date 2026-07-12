@@ -4,7 +4,7 @@
 #pragma once
 
 #include "crowtree/cell.h"
-#include "crowtree/env.h"
+#include "crowtree/epoch.h"
 #include "crowtree/mapping_table.h"
 #include "crowtree/memtable.h"
 #include "crowtree/options.h"
@@ -47,21 +47,21 @@ struct get_result {
 
 class Crowtree {
  public:
-  explicit Crowtree(CrowtreeEnv& env, const Options& opt = Options());
+  explicit Crowtree(const Options& opt = Options());
   ~Crowtree();
 
   Crowtree(const Crowtree&) = delete;
   Crowtree& operator=(const Crowtree&) = delete;
 
   // open a tree, recovering durable state from opt.page_store if a valid
-  // checkpoint exists; otherwise start empty. Requires opt.page_store != null.
-  static Status open(CrowtreeEnv& env, const Options& opt, std::unique_ptr<Crowtree>* out);
+  // snapshot exists; otherwise start empty. Requires opt.page_store != null.
+  static Status open(const Options& opt, std::unique_ptr<Crowtree>* out);
 
   // Persist the materialized L1 state durably. Folds delta chains, appends the
   // reachable base pages + a manifest past the current end of the page store,
   // then commits the inactive A/B superblock slot. Returns the durable
   // last_applied_slot via out (if non-null). Requires opt.page_store != null.
-  Status checkpoint(uint64_t* out_last_applied = nullptr);
+  Status snapshot(uint64_t* out_last_applied = nullptr);
 
   // Ingest a batch at `slot`. The tree internally tracks received slots and
   // computes the contiguous prefix (how far the flusher may flush) itself, so
@@ -106,10 +106,11 @@ class Crowtree {
 
   // Replace the entire engine state with `sorted_entries` (key-sorted, including
   // tombstones) at `at_slot`, used by snapshot import. Clears L0/L1 and rebuilds
-  // a fresh tree, then sets last_applied_slot = at_slot. The caller must ensure
-  // no concurrent readers/writers (new-member install is single-threaded); the
-  // staging-then-atomic-swap of a pinned RootVersion from the design is a later
-  // refinement (see plan).
+  // a fresh tree, then sets last_applied_slot = at_slot. Serialized against other
+  // writers by write_mutex_. Concurrent lock-free readers are **safe** (#13): the
+  // old tree is epoch-retired, not freed, so a reader mid-walk keeps its pages
+  // under its guard (it may observe a transient empty/partly-replaced tree — a
+  // consistent snapshot swap via a pinned RootVersion is a later refinement).
   Status install_snapshot(std::vector<leaf_entry> sorted_entries, uint64_t at_slot);
 
   // Reassemble a large value spilled into an overflow chain headed at `head_page_id`
@@ -132,12 +133,14 @@ class Crowtree {
   // Diagnostics.
   size_t memtable_count() const { return memtable_.count(); }
   MappingTable& mapping() { return mapping_; }
+  // Diagnostics/tests: the tree-owned epoch manager (plan-tree #7).
+  EpochManager& epoch() { return epoch_; }
   const BufferPool* buffer_pool() const { return pool_.get(); }
   int height() const;         // 1 = single-leaf root
   size_t leaf_count() const;  // live leaves reachable from the root
-  // # of base pages physically written by the most recent checkpoint (the rest
-  // were clean and retained their durable addr). For incremental-checkpoint tests.
-  uint64_t last_checkpoint_pages_written() const { return ckpt_pages_written_.load(); }
+  // # of base pages physically written by the most recent snapshot (the rest
+  // were clean and retained their durable addr). For incremental-snapshot tests.
+  uint64_t last_snapshot_pages_written() const { return snapshot_pages_written_.load(); }
   // Evict clean, delta-free resident leaf bases down to at most
   // `max_resident_leaves`, re-tagging their slots unloaded and epoch-retiring the
   // pages (design §4.6); returns the number evicted. Safe against lock-free
@@ -173,7 +176,12 @@ class Crowtree {
     return q != 0 ? q : 1;
   }
   void retire_page(PageBase* p);
-  void free_subtree(uint64_t page_id);
+  // Recursively drop a subtree. `retire=false` frees pages immediately (teardown
+  // / no concurrent readers). `retire=true` epoch-retires each page and overflow
+  // chain and clears its mapping slot, so a lock-free reader still holding a page
+  // under its guard is never freed underneath it (used by install_snapshot on the
+  // live tree). Caller holds write_mutex_ for the retire path.
+  void free_subtree(uint64_t page_id, bool retire);
 
   // Effective overflow spill threshold (opt_.max_inline_value or frame_bytes/4).
   size_t max_inline_value() const {
@@ -216,11 +224,11 @@ class Crowtree {
   // load_mutex_ and double-checks. Returns nullptr if the slot is unset.
   PageBase* resident(uint64_t page_id) const;
 
-  CrowtreeEnv& env_;
   Options opt_;
   // Base-page frame arena (design §4). shared_ptr because epoch-retired pages
-  // co-own it and may outlive this Crowtree (the env-level EpochManager frees
-  // them); declared before mapping_ so it is destroyed after pages it backs.
+  // co-own it; the tree-owned EpochManager (epoch_, declared last so it is
+  // destroyed first) reclaims those pages before pool_ is destroyed. Declared
+  // before mapping_ so it is destroyed after the pages it backs.
   std::shared_ptr<BufferPool> pool_;
   MappingTable mapping_;
   MemTable memtable_;
@@ -239,11 +247,19 @@ class Crowtree {
   std::atomic<uint64_t> last_applied_slot_{0};
   std::atomic<uint64_t> version_{0};
   std::atomic<uint64_t> gc_floor_{0};
-  std::atomic<uint64_t> ckpt_pages_written_{0};  // pages written by last checkpoint
+  std::atomic<uint64_t> snapshot_pages_written_{0};  // pages written by last snapshot
   mutable std::atomic<bool> io_failed_{false};   // latched demand-load media fault
 
   mutable std::mutex write_mutex_;  // serializes flush / consolidate / split-merge
   mutable std::mutex load_mutex_;   // serializes cold-path demand loads (design §4.5)
+
+  // Tree-owned epoch-based reclamation (plan-tree #7; formerly on CrowtreeEnv).
+  // Declared last so it is destroyed first: ~Crowtree frees the live tree via
+  // free_subtree(root, /*retire=*/false) (no readers at teardown), then epoch_'s
+  // destructor reclaims any pages still pending from earlier retire()s (eviction,
+  // consolidation, install_snapshot) while pool_ / mapping_ are still alive.
+  // mutable: readers take a guard in const get().
+  mutable EpochManager epoch_;
 };
 
 }  // namespace crowtree

@@ -1,5 +1,4 @@
-// CT1: scaffold smoke tests for Slice, Status, Options, Env.
-#include "crowtree/env.h"
+// CT1: scaffold smoke tests for Slice, Status, Options.
 #include "crowtree/options.h"
 #include "crowtree/slice.h"
 #include "crowtree/status.h"
@@ -50,11 +49,4 @@ TEST(Options, Defaults) {
   EXPECT_EQ(o.max_delta_bytes, 256u * 1024u);
   EXPECT_GT(o.leaf_split_bytes, o.leaf_merge_bytes);
   EXPECT_FALSE(o.background_flush);
-}
-
-TEST(Env, DefaultSingleton) {
-  CrowtreeEnv& a = CrowtreeEnv::default_env();
-  CrowtreeEnv& b = CrowtreeEnv::default_env();
-  EXPECT_EQ(&a, &b);
-  EXPECT_EQ(a.epoch().pending_retired(), 0u);
 }

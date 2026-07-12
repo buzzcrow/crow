@@ -1,7 +1,6 @@
 // CT14: concurrent readers while a single writer applies/flushes/splits/merges.
 // Run under TSan/ASan to catch races and use-after-free in epoch reclamation.
 #include "crowtree/crowtree.h"
-#include "crowtree/env.h"
 #include "crowtree/page_store.h"
 
 #include <gtest/gtest.h>
@@ -35,11 +34,10 @@ TEST(Stress, ConcurrentDemandLoadAfterRecovery) {
   opt.max_delta_len = 1;
   opt.leaf_split_bytes = 160;
   opt.frame_bytes = 4096;
-  CrowtreeEnv env;
 
   const int K = 300;
   {
-    Crowtree t(env, opt);
+    Crowtree t(opt);
     // flush incrementally so the tree splits into many small (pool-sized) leaves
     // rather than one oversized leaf (a single bulk flush only halves once).
     for (int i = 0; i < K; ++i) {
@@ -47,11 +45,11 @@ TEST(Stress, ConcurrentDemandLoadAfterRecovery) {
       ASSERT_TRUE(t.apply(i + 1, Batch{{batch_op{Key(i), OpKind::kPut, val}}}).ok());
       ASSERT_TRUE(t.flush().ok());
     }
-    ASSERT_TRUE(t.checkpoint(nullptr).ok());
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
   }
 
   std::unique_ptr<Crowtree> t2;
-  ASSERT_TRUE(Crowtree::open(env, opt, &t2).ok());
+  ASSERT_TRUE(Crowtree::open(opt, &t2).ok());
   EXPECT_EQ(t2->buffer_pool()->stats().used, 0u);  // nothing loaded yet
 
   std::atomic<bool> fail{false};
@@ -86,8 +84,7 @@ TEST(Stress, ConcurrentReadersSingleWriter) {
   // exercises inner-node split AND underflow-merge SMOs concurrent with readers.
   opt.inner_max_keys = 8;
   opt.inner_merge_keys = 3;
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
 
   const int K = 200;
   std::atomic<bool> stop{false};

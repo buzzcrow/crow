@@ -1,13 +1,13 @@
 // C ABI implementation.
 //
 // Wraps the C++ engine behind opaque handles and an exception-free surface.
-// A ct_tree owns its PageStore + CrowtreeEnv + Crowtree so ct_close frees the
-// whole bundle. Owned buffers are allocated with malloc so the Rust side can
+// A ct_tree owns its PageStore + Crowtree so ct_close frees the whole bundle
+// (the epoch manager now lives inside Crowtree). Owned buffers are allocated
+// with malloc so the Rust side can
 // hand them back to ct_free_buf regardless of allocator details.
 #include "crowtree/c_api.h"
 
 #include "crowtree/crowtree.h"
-#include "crowtree/env.h"
 #include "crowtree/page_store.h"
 #include "crowtree/snapshot_io.h"
 
@@ -56,7 +56,6 @@ void PackU64(std::string* o, uint64_t v) {
 // ── Handle structs ────────────────────────────────────────────────
 
 struct ct_tree {
-  std::unique_ptr<CrowtreeEnv> env;
   std::unique_ptr<PageStore> store;  // null for pure in-memory engine
   std::unique_ptr<Crowtree> tree;
 };
@@ -99,7 +98,6 @@ ct_status ct_open(const ct_options* opt, ct_tree** out) {
     return static_cast<ct_status>(Code::kInvalidArgument);
   }
   auto h = std::make_unique<ct_tree>();
-  h->env = std::make_unique<CrowtreeEnv>();
 
   Options o;
   if (opt->frame_bytes != 0)
@@ -128,7 +126,7 @@ ct_status ct_open(const ct_options* opt, ct_tree** out) {
     h->store = std::move(fs);
     o.page_store = h->store.get();
     std::unique_ptr<Crowtree> t;
-    Status os = Crowtree::open(*h->env, o, &t);
+    Status os = Crowtree::open(o, &t);
     if (!os.ok())
     {
       return ToStatus(os);
@@ -139,7 +137,7 @@ ct_status ct_open(const ct_options* opt, ct_tree** out) {
     h->store = std::make_unique<MemPageStore>(opt->iu_size == 0 ? 1 : opt->iu_size);
     o.page_store = h->store.get();
     std::unique_ptr<Crowtree> t;
-    Status os = Crowtree::open(*h->env, o, &t);
+    Status os = Crowtree::open(o, &t);
     if (!os.ok())
     {
       return ToStatus(os);
@@ -152,12 +150,12 @@ ct_status ct_open(const ct_options* opt, ct_tree** out) {
 
 void ct_close(ct_tree* t) { delete t; }
 
-ct_status ct_checkpoint(ct_tree* t, uint64_t* out_last_applied) {
+ct_status ct_snapshot(ct_tree* t, uint64_t* out_last_applied) {
   if (t == nullptr)
   {
     return static_cast<ct_status>(Code::kInvalidArgument);
   }
-  return ToStatus(t->tree->checkpoint(out_last_applied));
+  return ToStatus(t->tree->snapshot(out_last_applied));
 }
 
 uint64_t ct_last_applied_slot(const ct_tree* t) {
@@ -176,8 +174,8 @@ ct_status ct_collect_garbage(ct_tree* t) {
   {
     return static_cast<ct_status>(Code::kInvalidArgument);
   }
-  // Durable free-space GC runs as part of checkpoint (it reuses dead extents).
-  return ToStatus(t->tree->checkpoint(nullptr));
+  // Durable free-space GC runs as part of snapshot (it reuses dead extents).
+  return ToStatus(t->tree->snapshot(nullptr));
 }
 
 int32_t ct_io_failed(const ct_tree* t) { return (t != nullptr && t->tree->io_failed()) ? 1 : 0; }
@@ -373,14 +371,14 @@ void ct_view_release(ct_view* v) { delete v; }
 
 // ── Snapshot export / import ──────────────────────────────────────
 
-ct_status ct_snapshot_export_begin(ct_tree* t, uint64_t at_slot, ct_export** out) {
+ct_status ct_snapshot_export_begin(ct_tree* t, ct_export** out) {
   if (t == nullptr || out == nullptr)
   {
     return static_cast<ct_status>(Code::kInvalidArgument);
   }
   auto e = std::make_unique<ct_export>();
-  Status s = snapshot_export_begin(*t->tree, at_slot, snapshot_format::kPortable,
-                                   kSnapshotChunkBytes, &e->exp);
+  Status s =
+      snapshot_export_begin(*t->tree, snapshot_format::kPortable, kSnapshotChunkBytes, &e->exp);
   if (!s.ok())
   {
     return ToStatus(s);

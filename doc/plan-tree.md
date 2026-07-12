@@ -32,15 +32,20 @@ clang-format, convenience methods (`put`/`del`/`batch_put`).
 
 Tasks related to the engine abstraction, FFI boundary, and Rust adapter.
 
-### #7. Epoch Ownership — Move into Crowtree `P0`
+### #7. Epoch Ownership — Move into Crowtree `P0` — ✅ DONE (2026-07-01)
 
 **Design:** `design-crowtree.md` D-Q9, core §10. Prerequisite for #5 B3.
-**Files:** `crowtree.h`, `crowtree.cc`, `env.h`, `epoch.h`
+**Files:** `crowtree.h`, `crowtree.cpp`, `persist.cpp`, `c_api.cpp`, `env.h`/`env.cpp` (deleted), all tests
 
-- [ ] Move `EpochManager epoch_` from `CrowtreeEnv` into `Crowtree` (private member)
-- [ ] `Crowtree::open()` signature: drop the `CrowtreeEnv& env` parameter
-- [ ] Delete `env.h` / `env.cc` entirely
-- [ ] Update all test call sites and C API (26 files reference `CrowtreeEnv`)
+- [x] Move `EpochManager epoch_` into `Crowtree` as a `mutable` member, **declared
+      last so it is destroyed first** — `~Crowtree` retires the live tree, then
+      `epoch_`'s dtor reclaims every retired page while `pool_`/`mapping_` are alive
+- [x] `Crowtree` ctor + `Crowtree::open()`: dropped the `CrowtreeEnv& env` parameter
+- [x] Deleted `env.h` / `env.cpp` entirely (removed `CrowtreeEnv`)
+- [x] Updated the C API (`ct_tree` no longer holds an env) and all ~23 test files
+- [x] Added a diagnostics `Crowtree::epoch()` accessor (mirrors `mapping()`) for tests
+- [x] Verified: 180 C++ tests + 6 FFI tests pass; **ASan clean, TSan clean**
+- Note: the `Env.DefaultSingleton` scaffold test was removed (the type no longer exists).
 
 ### #8. Snapshot & Flush — Unified Design `P0`
 
@@ -61,24 +66,32 @@ buffering changes the flush lock scope).
 - [ ] Dual trigger: keep size (`memtable_flush_bytes`/`_entries`, primary) + add time (`flush_interval_ms`, secondary; production default ~2 h)
 - [ ] Background auto-flush thread (ties into #3 double buffering)
 
-### #8a. Snapshot Export API Cleanup — Remove `at_slot` `P0`
+### #8a. Snapshot Export API Cleanup — Remove `at_slot` `P0` — ✅ DONE (2026-07-01)
 
-**Files:** `c_api.h/.cc`, `snapshot_io.h/.cc`, `ffi/src/lib.rs`, test files
+**Files:** `c_api.h/.cpp`, `snapshot_io.h/.cpp`, `ffi/src/lib.rs`, test files
 
-- [ ] C API: remove `at_slot` from `ct_snapshot_export_begin`
-- [ ] C++ API: remove `at_slot` from `snapshot_export_begin()` and `snapshot_dump_to_file()`
-- [ ] `snapshot_io.cc`: delete `at_slot` validation logic and historical pin comments
-- [ ] Rust FFI: `snapshot_export(&self)` — drop `at_slot` parameter
-- [ ] Tests: update `snapshot_export_test.cc` and `c_api_test.cc` call sites
-- [ ] Design docs: verify no "historical snapshot export" references remain
+- [x] C API: remove `at_slot` from `ct_snapshot_export_begin`
+- [x] C++ API: remove `at_slot` from `snapshot_export_begin()` and `snapshot_dump_to_file()`
+- [x] `snapshot_io.cpp`: delete `at_slot` validation logic and historical pin comments
+      (the snapshot's slot is still written into the stream header from the current view)
+- [x] Rust FFI: `snapshot_export(&self)` — drop `at_slot` parameter
+- [x] Tests: updated `snapshot_export_test.cpp`, `c_api_test.cpp`, `ffi_test.rs` call sites
+- [x] Design docs: already state "no `at_slot`; historical export not supported"
+      (`design-crowtree-core.md`, `design-crowtree-snapshot-gc.md`) — no change needed
 
-### #15. Reject Oversized Keys at `apply()` Entry `P0`
+### #15. Reject Oversized Keys at `apply()` Entry `P0` — ✅ DONE (2026-07-01)
 
-**Files:** `crowtree.cc` (`apply`), `c_api.cc`
+**Files:** `crowtree.cpp` (`apply`), `options.h`, `crowtree.h`, tests
 
-- [ ] Add key size check in `apply()` (threshold = `frame_payload / 2`)
-- [ ] Expose threshold via `Options.max_key_size` (default = frame-dependent)
-- [ ] Tests: verify rejection, verify normal-size keys unaffected
+- [x] Add key size check in `apply()` (threshold = `frame_bytes / 2`)
+- [x] Expose threshold via `Options.max_key_size` (default = frame-dependent)
+- [x] Tests: verify rejection, verify normal-size keys unaffected
+      (`oversized_key_test.cpp`, 5 cases)
+- Note: the check funnels through `apply()`, so `put`/`del`/`batch_put` and the C
+  API all inherit it (no separate `c_api.cc` change needed).
+- **Behavior change (see Q1 in the questions section):** the old
+  `DurableEdgeCases.OversizedKeyHeapFallbackReopen` test (oversized keys
+  heap-fell-back and persisted) was updated to assert rejection instead.
 
 ---
 
@@ -91,14 +104,57 @@ Tasks related to `buffer` abstraction, zero-copy pipeline, and BufferPool.
 **Design:** [`design-crowtree-memory.md`](design/design-crowtree-memory.md), `design-crowtree.md` D-Q8.
 **Files:** new `buffer.h`, `cell.h`, `memtable.h`, `crowtree.cc`, `page.h`, `c_api.h/.cc`, `ffi/src/lib.rs`
 
-**B1 — buffer core** `P0`
-- [ ] Create `buffer.h`: owned/borrowed modes, move-only, `header_reserve`, `clone()`, glibc-malloc backing
-- [ ] Unit tests for `buffer` (alloc/wrap/move_from/clone, header region, free-iff-owned)
+**B1 — buffer core** `P0` — ✅ DONE (2026-07-02)
+- [x] Create `buffer.h`: owned/borrowed modes, move-only, `header_reserve`, `clone()`,
+      glibc-malloc allocator seam (`alloc`/`wrap`/`move_from`, `header(off)`,
+      `set_size`, `slice()`, memcmp `operator<`/`==` so it can key an `absl::btree_map`)
+- [x] **SBO (small-buffer optimization)** — owned buffers ≤ `kInlineCap` (24 B) live
+      inline, no malloc (mirrors `std::string` SSO). *Correctness-for-performance:*
+      without it, replacing `std::string` on the write path would regress small
+      keys/values (forced malloc where SSO had none). `data()` is computed; moves
+      relocate inline bytes. Design updated (`design-crowtree-memory.md §2`).
+- [x] Unit tests (`buffer_test.cpp`, 16 cases): alloc/write/read, header-reserve
+      layout, set_size, move (heap ptr stable / inline relocates), clone independence
+      (heap + inline), wrap = borrowed (never frees — ASan-verified), move_from frees
+      once, ordering/equality, slice, SBO inline/heap boundary. **209 Debug + ASan-clean.**
+- Note: abstraction only; threading it through the write path (`cell.h`/MemTable/
+  flush) is **B2** and the read path is **B3**.
 
 **B2 — write path on buffer** (sequence with #9) `P0`
-- [ ] `cell.h` encode writes slot+flags into the reserved header (no second alloc)
-- [ ] MemTable stores `buffer` key/value; `mem_entry`/`leaf_entry` carry `buffer` (moved end-to-end)
-- [ ] `flush()` / `drain_up_to()` move buffers; `LeafFrameBuilder` takes `buffer` (final frame copy)
+
+Split into safe, independently-verifiable increments (each built + tested +
+ASan-clean + committed separately). **Do all of them now** (no deferral — the whole
+point is the single-allocation write path):
+
+- **B2a — buffer cell encoders (additive, zero churn).** Add `encode_cell_buf` /
+  `encode_overflow_cell_buf` returning a `buffer` whose header is written in the
+  reserved prefix and the value copied after it — one allocation. `CellView` already
+  reads any byte range, so it works unchanged on `buffer::slice()`. Unit tests assert
+  byte-equality with the `std::string` encoders. [foundation for B2b/B2c]
+- **B2b — MemTable → `absl::btree_map<std::string, buffer>`** ✅ DONE (2026-07-02).
+  `mem_entry.cell` is now a move-only `buffer`; the **key stays `std::string`** — a
+  B-tree relocates its `const` key slots on split/merge, which a move-only `buffer`
+  key can't satisfy (and `std::string` SSO already inlines small keys). `upsert(Slice,
+  slot, buffer&&)` moves the pre-encoded cell in (no cell copy); `try_emplace` builds
+  the move-only value in place; `get` copies out; `drain` moves the cell + copies the
+  key; `snapshot` clones. `apply_batch` builds cells with `encode_cell_buf` (single
+  alloc) and moves them into L0. Design §2 corrected (move-only-key limitation).
+  **209 Debug + ASan + 6 FFI pass.** (Flush still shims cell→string for `leaf_entry`
+  until B2c.)
+- **B2c — `leaf_entry.cell` → `buffer`** ✅ DONE (2026-07-02). `flush()` now MOVES the
+  drained cell buffer straight into `leaf_entry` (removed the string shim); the leaf
+  frame copy is the only remaining cell copy (that copy *is* page construction). Key
+  stays `std::string` (same reasoning as B2b). Enablers that kept churn low:
+  `buffer::operator Slice()` (implicit view, so `Slice(e.cell)` sites are unchanged),
+  `buffer::copy_of(Slice)`, `LeafBase::build` now takes `const&` (reads only). Updated
+  `page_codec` (added `Reader::bytes(buffer*)`), `snapshot_io`, `split_leaf` (move
+  iterators — the compiler *caught a real copy* here), overflow spill/materialize
+  (`encode_overflow_cell_buf`). `buffer` is **move-only by design** → a
+  braced-init-list can't hold it, so tests use a variadic `Entries(...)` helper.
+  **209 Debug + 209 ASan + 209 TSan + 6 FFI pass.**
+- **B2d — FFI boundary single-alloc.** `ct_apply_*` allocs the key/cell `buffer`s
+  once at the C boundary and moves them down (Option A). Sets up B4 (shared-allocator
+  ownership yield) with no further call-site changes.
 
 **B3 — zero-copy read** (depends on #7 epoch-in-tree; subsumes #4) `P0`
 
@@ -183,42 +239,77 @@ they use epoch guard + atomic mapping-table loads (see #5 B3).
 - [ ] Interacts with #8's background auto-flush thread
 - [ ] Tests: stress test asserting reads see a consistent overlay while a flush swap is in flight
 
-### #9. MemTable — Map Choice: `absl::btree_map` `P0`
+### #9. MemTable — Map Choice: `absl::btree_map` `P0` — ✅ DONE (2026-07-01)
 
 **Design:** `design-crowtree.md` D-Q10, core §1. OQ2/OQ3 resolved.
-**Files:** `memtable.h`, `memtable.cc`, `CMakeLists.txt`, `pixi.toml`
+**Files:** `memtable.h`, `CMakeLists.txt`, `pixi.toml`, `ffi/build.rs`
 
-- [ ] Add `absl` to `pixi.toml` + `CMakeLists.txt` (`find_package(absl REQUIRED)`, link `absl::btree`)
-- [ ] Replace `std::map<...>` with `absl::btree_map<buffer, buffer>` in `memtable.h`
-- [ ] Use `try_emplace` / `emplace` for move-only insertion; verify `get`/`drain_up_to`/`snapshot` compile
-- [ ] Benchmark point-get latency before/after
+- [x] Add `absl` to `pixi.toml` (`libabseil`) + `CMakeLists.txt` (`find_package(absl REQUIRED)`, link `absl::btree`)
+- [x] Replace `std::map<...>` with `absl::btree_map<std::string, std::string, std::less<>>` in `memtable.h`
+      (kept `std::string` keys/values; `buffer` migration is #5 B1/B2, not yet done)
+- [x] `emplace`/`erase(it)`/heterogeneous `find` verified; `get`/`drain_up_to`/`snapshot` unchanged and green (181 C++ tests, 6 ffi tests)
+- [x] `ffi/build.rs` adds `$CONDA_PREFIX/include` so the standalone crate finds absl headers
+- [x] Benchmark (Q2): added `crowtree_bench` (Google Benchmark, `-DCROWTREE_BENCH=ON`,
+      `bench/memtable_bench.cpp`). `absl::btree_map` beats `std::map` on ordered
+      scan (2.6×) and get-hit at 100k (1.65×); folly `ConcurrentSkipList` is slower
+      single-threaded. Choice validated — full numbers in the Q2 answer below.
 
-### #12. Lock-Free EBR for `EpochManager` `P1`
+### #12. Lock-Free EBR for `EpochManager` `P1` — ✅ DONE (2026-07-02)
 
 **Design:** `design-crowtree-core.md §10.1`
-**Files:** `epoch.h`, `epoch.cc`
+**Files:** `epoch.h`, `epoch.cpp`, `tests/unit/epoch_test.cpp`
 
-- [ ] Per-thread epoch slot registration (thread_local + dynamic slot pool, cache-padded)
-- [ ] `enter()` = atomic acquire-load global epoch + atomic release-store local epoch
-- [ ] `exit()` = atomic release-store 0 (no `ReclaimLocked` on reader path)
-- [ ] `try_reclaim()` = scan per-thread local epochs for min active, free retired < min
-- [ ] `retire()` keeps mutex (writer-only, no contention)
-- [ ] Tests: TSan clean, high-concurrency `enter()`/`exit()` benchmark vs mutex
+- [x] Per-thread participant slot: cache-line-padded `Participant{atomic<uint64_t>
+      local_epoch; next; nest}`, lazily allocated on a thread's first `enter()` and
+      pushed lock-free onto `participants_`; keyed per-manager by a monotonic id in
+      a process-global thread_local cache (no per-`enter` allocation on the hot path)
+- [x] `enter()` = seq_cst load global epoch + seq_cst publish to the thread's slot
+      (reentrant: only the outermost enter publishes; nested guards share the slot)
+- [x] `Guard::release()` = release-store 0 on the outermost exit; **no reclamation on
+      the reader path** (writer-driven, per design §10.1)
+- [x] `retire()` / `try_reclaim()` scan participant slots for the min active epoch and
+      free retired `< min`; the retired list stays under `reclaim_mu_` (writer-only,
+      off the hot path)
+- [x] Tests: existing invariants preserved; `MultipleGuardsHoldUntilAllExit` rewritten
+      to two threads (per-thread EBR gives one epoch per thread); new
+      `ConcurrentReadersDerefRetiredNoUAF` stress test (readers deref a shared node the
+      writer swaps+retires). **188 Debug + 188 ASan pass; all 8 Epoch tests TSan-clean.**
 
-**Sequencing:** After #5 B3 — guard frequency increases then, maximizing payoff.
+**Note:** done ahead of #5 B3 (the read path already takes a guard on every
+`get()`/`scan()`, so the mutex `enter`/`exit` was already the hot-path contention
+point). The seq_cst enter-publish / retire-scan pairing gives the standard EBR
+total-order safety; the participant list uses acquire/release (a brand-new reader can
+only be missed for objects retired before it entered, which it cannot reference).
 
-### #13. Make `install_snapshot` Safe for Lock-Free Readers `P0`
+### #13. Make `install_snapshot` Safe for Lock-Free Readers `P0` — ✅ DONE (2026-07-02)
 
-**Files:** `crowtree.cc` (`install_snapshot`, `free_subtree`)
+**Files:** `crowtree.cpp` (`install_snapshot`, `free_subtree`), `crowtree.h`,
+`persist.cpp`, `tests/integration/snapshot_export_test.cpp`
 
-After #5 B3 makes readers lock-free, `install_snapshot`'s `free_subtree()` must
-change to epoch `retire` — immediate free would be use-after-free.
+Readers are already lock-free (`get()`/`scan()` take an epoch guard, no
+`write_mutex_`), so `install_snapshot`'s immediate `delete` in `free_subtree()`
+was a **live use-after-free** — fixed now (not deferred behind #5 B3).
 
-- [ ] Change `free_subtree()` to epoch-retire old root + reachable pages instead of immediate free
-- [ ] Slot clearing via epoch deleter (deleter clears mapping slot to nullptr after all readers exit)
+- [x] `free_subtree(page_id, bool retire)`: `retire=true` epoch-retires each page
+      (and overflow chain via `retire_overflow_chain_locked`) and clears the mapping
+      slot first (new readers see "gone"); `retire=false` keeps immediate `delete`
+      for teardown / recovery (no concurrent readers)
+- [x] `install_snapshot` calls `free_subtree(root, /*retire=*/true)`; `~Crowtree` and
+      the open()-recovery drop call `retire=false`
+- [x] Slot cleared before retire so a reader that already loaded a page keeps it under
+      its guard; the page frees only once that guard drains (epoch reclamation)
+- [x] Test `SnapshotExport.ConcurrentReadersDuringImportNoUAF`: 4 reader threads walk
+      B while A's snapshot is imported into B 5×. **189 Debug + 189 ASan + 189 TSan
+      pass** (the new test is ASan/TSan-clean).
 
-**Sequencing:** After #5 B3. Install snapshot is uncommon (a corrupted replica is
-typically removed from the group and re-added fresh, not waited on while serving reads).
+**Note:** a fully *consistent* swap (readers never observe a transient empty tree)
+needs the staged RootVersion swap — deferred; the current fix guarantees safety
+(no UAF / no wrong data), only allowing a transient miss during the swap window.
+
+**Sequencing:** done alongside #12 (readers were already lock-free, so this was a
+latent UAF rather than a future one). Install snapshot is uncommon (a corrupted
+replica is typically removed from the group and re-added fresh, not waited on while
+serving reads).
 
 ### #14. Mapping Table Redesign — Segment Recycling + Incremental Persistence `P1`
 
@@ -232,7 +323,7 @@ typically removed from the group and re-added fresh, not waited on while serving
 - Backend abstraction: **YES** — all I/O via `PageStore` interface
 
 **14a — Packed slot word + segment struct** `P1`
-- [ ] Packed 64-bit slot word: `0`=empty, `bit0=0`=resident `PageBase*`, `bit0=1`=unloaded `(iu_index, iu_count)`; pack/unpack helpers + unit tests
+- [x] Packed 64-bit slot word: `0`=empty, `bit0=0`=resident `PageBase*`, `bit0=1`=unloaded `(iu_index, iu_count)`; pack/unpack helpers + unit tests — **DONE** (`mapping_slot.h`, `mapping_slot_test.cpp`; standalone, adopted by #14b)
 - [ ] `Segment { atomic<uint64_t> slots[kSegSlots]; atomic<uint32_t> live_count; atomic<uint32_t> generation; atomic<bool> dirty; }`
 - [ ] `Options.mapping_segment_slots` (default 1024, fixed per tree)
 
@@ -267,32 +358,83 @@ per-frame `PageAddr`) and async PageStore (#11).
 
 Tasks related to PageStore, snapshot, recovery, and on-disk format.
 
-### #17. Buffer Pool — Live-Engine Wiring `P1`
+### #17. Buffer Pool — Live-Engine Wiring `P1` — 🔎 AUDITED 2026-07-02, mostly DONE
 
 **Design:** [`design-crowtree-persistence.md §4.5`](design/design-crowtree-persistence.md) (PT6c-5.1–5.4).
-**Files:** `buffer_pool.h/.cc`, `crowtree.cc`, `mapping_table.h`, `options.h`
-**Prerequisite for #14c/#14d** (unloaded descriptors need pool-owned frames).
+**Files:** `buffer_pool.h/.cpp`, `crowtree.cpp` (`resident`, `evict_clean_leaves_locked`,
+`maybe_evict_locked`), `page.h` (`FrameStore`), `mapping_table.*`, `options.h`
 
-- [ ] 5.1 Pool owns live base frames: `Crowtree` gets a `BufferPool` sized by `Options.buffer_pool_bytes` (default `min(8 GiB, 25% RAM)`); bases built into `PinNew` frames, no eviction yet
-- [ ] 5.2 Epoch-deferred frame free: `RetirePage` returns frame to pool free list via the epoch manager (`FreeFrameDeferred`), not `delete`
-- [ ] 5.3 Mapping slot tagging + demand load: slot becomes the packed word (resident / unloaded `PageAddr`); `Get` of an unloaded slot demand-loads (CRC-checked) and publishes
-- [ ] 5.4 CLOCK eviction of clean resident bases (skips anonymous/dirty); re-tags slot to unloaded; retire via epoch
-- [ ] Tests: pool-stats residency, `stress_test` TSan/ASan, `lazy_load_test`, `eviction_test` (all per §4.5)
+**Audit result — what already works (no action needed):**
+- **5.1 pool owns base frames — DONE, differently than written.** Every resident
+  base page's bytes live in a `BufferPool` frame via `FrameStore::alloc`/`adopt_copy`
+  → `BufferPool::acquire_frame` (anonymous, pinned-resident); heap fallback when the
+  pool is full so correctness is size-independent. `Crowtree` holds a
+  `shared_ptr<BufferPool>` sized by `Options.buffer_pool_bytes`.
+- **5.2 epoch-deferred frame free — DONE in effect.** Pages are epoch-retired
+  (`retire_page`); the frame returns to the pool in `~FrameStore` (`release_frame`)
+  only when the retired `PageBase` is actually reclaimed. No separate
+  `FreeFrameDeferred` API is needed.
+- **5.3 mapping slot tagging + demand load — DONE.** The mapping table already tags
+  slots resident (`PageBase*`) vs unloaded (`unloaded_page*{addr,plen}`);
+  `Crowtree::resident()` demand-loads an unloaded slot (read → decode → CRC/validate
+  → publish), latching `io_failed_` on fault. (The *packed 64-bit word* form is
+  #14a, not this task.)
+- **5.4 clean-base eviction + re-tag — DONE at the Crowtree level.**
+  `evict_clean_leaves_locked` selects clean, delta-free resident leaves, re-tags the
+  slot unloaded, and epoch-retires the page; `maybe_evict_locked` runs it from the
+  flush path to keep the cache bounded.
+- **Tests present:** `eviction_test.cpp`, `buffer_pool_test.cpp`, `incremental_checkpoint_test.cpp`.
 
-**Sequencing:** After #5 B3 (lock-free readers + epoch retire). 5.4 lands after #18.
+**True remaining delta:**
+- [x] **D1 — RESOLVED (2026-07-02): keep the pin/CLOCK engine.** `BufferPool::pin`/
+      `pin_new`/`mark_dirty`/`flush_dirty` + CLOCK write-back are **not** dead code —
+      they are the *designed* pool-residency engine (demand-load + eviction +
+      write-back), fully unit-tested in `buffer_pool_test.cpp`. The live engine
+      currently uses the interim `acquire_frame` model; the remaining #17 work is to
+      **migrate the engine onto the pin/CLOCK path** (pool-owned demand-load +
+      eviction), which needs lock-free readers (**#5 B3**). Do not delete.
+- [x] **D2 — RESOLVED: keep the deterministic 64 MiB default** for
+      `Options.buffer_pool_bytes`; a server tunes it up (e.g. toward 25% RAM). No
+      auto-RAM sizing (keeps tests deterministic and avoids platform code).
+- [ ] **Real #17 remaining (needs #5 B3):** migrate `resident()` demand-load and
+      `evict_clean_leaves` onto `BufferPool::pin`/`pin_new`/CLOCK so the pool owns
+      residency (not `acquire_frame` + Crowtree-level eviction).
+- [ ] **D3 (optional)** — extend eviction to inner/overflow bases (currently clean
+      **leaf** bases only) if profiling shows it matters.
 
-### #18. Incremental Snapshot — Durable Frame Addrs + Dirty Tracking `P1`
+**Sequencing:** the real #17 migration is after #5 B3; D1/D2 are settled now.
+
+### #18. Incremental Snapshot — Durable Frame Addrs + Dirty Tracking `P1` — 🔎 AUDITED 2026-07-02, partially DONE
 
 **Design:** [`design-crowtree-persistence.md §4.3/§5A`](design/design-crowtree-persistence.md) (PT6d).
-**Files:** `persist.cc`, `buffer_pool.h/.cc`
-**Prerequisite for #14c/#14d** and for #17's 5.4 eviction.
+**Files:** `persist.cpp` (`snapshot` / `persist_one` / `walk`), `crowtree.cpp`,
+`page.h` (`PageBase::durable_addr`/`durable_plen`).
 
-- [ ] Snapshot assigns each dirty frame a durable `PageAddr` (append cursor) + records `pid→addr`, `page_len`
-- [ ] `DirtyTracker` = set of dirty frames; snapshot walks it (not the whole tree)
-- [ ] Write only dirty frames (optionally LZ4); drop build pins so frames become evictable
-- [ ] Tests: incremental cost (only dirty frames written), eager-snapshot back-pressure under write storm
+**Audit result — what already works (no action needed):**
+- **Durable per-page addr + record — DONE.** `PageBase::durable_addr`/`durable_plen`;
+  `kNoAddr` marks a dirty (not-yet-durable) page. `persist_one` assigns a durable
+  addr from the crash-safe append/reuse allocator and records `(pid, addr, len)` in
+  the manifest.
+- **Write only dirty pages — DONE.** `persist_one` writes a page's blob only when
+  `durable_addr == kNoAddr`; clean pages keep their prior addr (no rewrite).
+  `incremental_checkpoint_test.cpp` asserts only-dirty-pages-written via
+  `last_snapshot_pages_written()`.
 
-**Sequencing:** After #17 (5.1–5.3), before #14c.
+**True remaining delta:**
+- [ ] **D4 — writer-owned `DirtyTracker` (the real #18 work).** Snapshot still
+      **DFS-walks the entire reachable tree** each time (checking `durable_addr` per
+      page), so its cost is O(resident tree), not O(dirty). Add a writer-maintained
+      dirty-page set (populated at consolidate/split/merge/apply) and have `snapshot`
+      iterate that set instead of walking the tree. This dovetails with #14d
+      (segment-level dirty bits) — decide whether to build a page-level tracker now
+      or fold it straight into #14's segment dirty-set.
+- [ ] **D5 (model reconciliation)** — "drop build pins so frames become evictable"
+      does not apply as written: frames are anonymous+pinned until the page is
+      retired by explicit clean-leaf eviction, not unpinned at snapshot. Reconcile
+      with D1's chosen frame model; likely a no-op once D1 lands.
+- [ ] **D6 — back-pressure test** under a write storm (eager snapshot) is not present.
+
+**Sequencing:** D4 is the substantive item; align it with #14d rather than duplicating.
 
 ### #14 note
 
@@ -334,46 +476,66 @@ for the overall test strategy.*
 
 ## Infrastructure
 
-### #19. Terminology — `checkpoint` → `snapshot` (code) `P1`
+### #19. Terminology — `checkpoint` → `snapshot` (code) `P1` — ✅ DONE (crowtree) (2026-07-01)
 
 **Scope:** crowtree only. Consensus/WAL `DedupCheckpoint` is a different subsystem
 and stays unchanged. Docs are already renamed; this task carries it into code.
-**Files:** `c_api.h/.cc`, `ffi/src/lib.rs`, `persist.cc`, `crowtree.h/.cc`,
-engine trait (`KVEngine`), tests.
+**Files:** `c_api.h/.cpp`, `ffi/src/lib.rs`, `persist.cpp`, `crowtree.h/.cpp`, tests.
 
-- [ ] C API: `ct_checkpoint` → `ct_snapshot`, `ct_checkpoint_async` → `ct_snapshot_async`
-- [ ] Trait/adapter: `persist_checkpoint` → `persist_snapshot`
-- [ ] Internal: `persist_checkpoint()` / `checkpoint()` → `snapshot persist` naming; `checkpoint_every_slots` → `snapshot_every_slots`; `snapshot_seq` for the anchor sequence
-- [ ] Update all call sites, tests, and Rust FFI bindings; grep for residual `checkpoint` (allow only `DedupCheckpoint`)
+- [x] C API: `ct_checkpoint` → `ct_snapshot` (no `_async` variant exists yet)
+- [x] C++: `Crowtree::checkpoint()` → `Crowtree::snapshot()`; `checkpoint_seq` →
+      `snapshot_seq`; `ckpt_pages_written_` → `snapshot_pages_written_`;
+      `last_checkpoint_pages_written()` → `last_snapshot_pages_written()`
+- [x] Rust FFI: `Crowtree::checkpoint()` / `AsyncCrowtree::checkpoint()` → `snapshot()`;
+      `sys::ct_checkpoint` → `sys::ct_snapshot`
+- [x] Updated all call sites, tests, comments, and error strings; residual
+      `checkpoint` only in test/file names (`incremental_checkpoint_test.cpp`,
+      `file_checkpoint_reopen_smoke`) which are cosmetic
+- [x] Verified: 180 C++ + 6 FFI tests pass
+- **Deferred (see Q3):** the main-workspace `KVEngine::persist_checkpoint` trait
+      (crate `crowkv`) is **not** renamed here. `crowtree/ffi` is excluded from the
+      root workspace and not yet wired into `crowkv`, so that trait rename is a
+      separate main-workspace change (touches `InMemKV`, learner, consensus) and is
+      out of scope for a crowtree-only, independently-verifiable commit.
 
 **Sequencing:** Independent; can land anytime, but ideally before #14 so the new
 persistence code is written with the final names.
 
-### #10. C++ Logging — `spdlog` `P0`
+### #10. C++ Logging — `spdlog` `P0` — ✅ DONE (2026-07-02)
 
 **Design:** `design-crowtree.md` D-Q12. OQ6 resolved.
-**Files:** new `crowtree/include/crowtree/log.h`, `CMakeLists.txt`, `pixi.toml`
+**Files:** `crowtree/include/crowtree/log.h` (new), `src/log.cpp` (new),
+`CMakeLists.txt`, `pixi.toml`, `options.h`, `persist.cpp`, `crowtree.cpp`,
+`tests/integration/logging_test.cpp` (new)
 
-- [ ] Add `spdlog` + `fmt` to `pixi.toml` (conda-forge package names: `spdlog`, `fmt`)
-- [ ] Add to `CMakeLists.txt`: `find_package(spdlog REQUIRED)`, `target_link_libraries(crowtree PRIVATE spdlog::spdlog)`
-- [ ] Create `crowtree/include/crowtree/log.h`:
-  - `void init_logging(const std::string& log_dir, const std::string& level, size_t max_file_mb, size_t max_files);`
-  - `void shutdown_logging();` (flush + join async thread)
-  - Thin macros: `CT_LOG_ERROR(...)`, `CT_LOG_WARN(...)`, `CT_LOG_INFO(...)`, `CT_LOG_DEBUG(...)`, `CT_LOG_TRACE(...)`
-  - No-op when logging not initialized (zero overhead — check a `std::atomic<bool>` flag)
-  - Async logger: ring buffer (configurable, default 8192 entries), overflow policy = block
-  - Format: `YYYYMMDD-HHMMSS.mmm [tid] [level] [crowtree] message` (align with Rust `tracing` format)
-  - Rotating file: default 100MB × 5 files
-- [ ] Add to `Options`: `std::string log_dir;` (empty = no logging), `std::string log_level = "info";`
-- [ ] Initialize logging in `Crowtree::open()` when `opt.log_dir` is non-empty
-- [ ] Shutdown logging in `~Crowtree()` destructor (flush + join)
-- [ ] Add log calls per the level design table (error/warn/info/debug/trace)
-- [ ] Compile-time level guard: `SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_INFO` in release builds
-- [ ] Tests: integration test that enables file logging, runs a few ops, verifies log file
-- [ ] Log rotation + auto-compression (C++ spdlog + Rust tracing-appender):
-  - C++: Use `rotating_file_sink` (size-based, 100MB × 5). Add post-rotate gzip compression.
-  - Rust: Replace `rolling::never` with size-based rotation. Add gzip compression.
-  - Both: configurable via `Options` / CLI args: `max_file_size_mb` (default 100), `max_files` (default 5), `compress_rotated` (default true)
+- [x] Added `spdlog >=1.17` to `pixi.toml` (`fmt` already present, pulled transitively)
+- [x] `CMakeLists.txt`: `find_package(spdlog REQUIRED)` + `spdlog::spdlog` PRIVATE,
+      gated by `CROWTREE_HAVE_SPDLOG` (LZ4-style) so the Rust FFI `cc` build (no
+      spdlog) compiles the macros to no-ops; `SPDLOG_ACTIVE_LEVEL` = TRACE in Debug,
+      INFO otherwise
+- [x] `log.h`: `init_logging(dir, level, max_file_mb=100, max_files=5)`,
+      `shutdown_logging()`, `logging_enabled()`, and `CT_LOG_{ERROR,WARN,INFO,DEBUG,TRACE}`
+      macros; each macro checks a relaxed `atomic<bool>` gate (no output before init)
+- [x] Async logger: 8192-entry ring buffer, block-on-overflow; rotating file
+      `<log_dir>/crowtree.log`, 100 MiB × 5; pattern
+      `%Y%m%d-%H%M%S.%e [%t] [%l] [%n] %v`
+- [x] `Options`: `log_dir` (empty = off), `log_level="info"`, `log_max_file_mb=100`,
+      `log_max_files=5`
+- [x] `Crowtree::open()` calls `init_logging()` when `log_dir` is set; INFO on
+      open/recover, INFO on snapshot commit, ERROR on demand-load I/O/CRC faults
+- [x] Integration test `logging_test.cpp` (file created + format + content; disabled path)
+- [x] Verified: 182 C++ tests + 6 FFI tests pass (FFI compiles the no-op logging path)
+- **Deviation:** logging is process-global; init is done in `open()` and teardown is
+  **explicit** via `shutdown_logging()` rather than in `~Crowtree` (so multiple
+  `Crowtree` instances in one process don't tear down each other's logger).
+- **TSan-safe teardown (2026-07-02):** `log.cpp` now **owns** the async logger and
+  its `thread_pool` (instead of spdlog's global registry/`spdlog::shutdown()`).
+  `shutdown_logging()` drops registry refs, flushes, releases the logger, then
+  destroys the pool **last** — joining the worker before the sinks are freed. This
+  fixes a spdlog teardown race (drop-loggers-before-join-pool) that TSan flagged
+  once the sanitizer build was reconfigured with spdlog present.
+- **Remaining (deferred, low value now):** post-rotate gzip compression (C++ +
+  Rust `tracing-appender`) and Rust-side size rotation — tracked here, not blocking.
 
 ---
 
@@ -464,3 +626,83 @@ into the plan/design.
   (`design-crowtree-mappingtable.md §7.3 / §13`.)
 - **Gap F — Ordering → RESOLVED.** Recommended order updated to
   `… #12 → #17 → #18 → #14`.
+
+---
+
+## Session Log (2026-07-01 / 2026-07-02, autonomous)
+
+Each item below was built + tested green and committed separately. Baseline:
+**182 C++ tests** + **6 Rust FFI tests**; #7 also ASan+TSan clean. (Under
+`pixi run` the toolchain paths are set automatically.)
+
+**Completed:** ffi `.cpp` glob build fix · #15 reject oversized keys ·
+#9 `absl::btree_map` MemTable (+Q2 bench) · #8a drop snapshot `at_slot` ·
+#7 epoch-in-tree (drop `CrowtreeEnv`, ASan+TSan clean) · #19 checkpoint→snapshot
+(crowtree scope) · #19b crowkv rename (no-op — no such trait) · #10 spdlog logging ·
+Q4 audit of #17/#18 · #14a packed slot-word helpers.
+
+**Session 2 (2026-07-02) — concurrency foundation, all ASan+TSan clean:**
+- **#12 lock-free EBR** — per-thread participant slots; reader `enter`/`exit` is
+  lock-free; reclamation writer-driven. (+UAF stress test.)
+- **#10 TSan fix** — own the spdlog async logger + thread pool so teardown joins the
+  worker before sinks are freed (spdlog's global `shutdown()` had the race).
+- **#13 epoch-safe `install_snapshot`** — `free_subtree(retire=true)` epoch-retires
+  the old tree instead of `delete` (was a live UAF vs lock-free readers). (+concurrent
+  import stress test.)
+- **#5 B1 buffer core** — `buffer.h` owned/borrowed byte container + 10 unit tests.
+
+**Remaining (large / attended — not safe to rush unattended):**
+- **#5 B2** — thread `buffer` through the write path: move-only `buffer` in
+  `leaf_entry`/`mem_entry`/MemTable ripples across ~32 files / 214 sites (scan-merge,
+  `snapshot()` copies, `btree_map<buffer,buffer>` heterogeneous lookup, most tests).
+  A focused, single-purpose session; modest immediate payoff (copies aren't the
+  current bottleneck).
+- **#5 B3** — lock-free `scan()` (drop `write_mutex_`): needs a proven scan-consistency
+  argument under concurrent COW split/merge (get() is already lock-free). High risk.
+- **#3 + #8** — MemTable double-buffering + background flush thread. Highest race risk.
+- **#11** — io_uring async FFI reactor (large; Linux io_uring + Tokio `AsyncFd`).
+- **#14b/c/d** — segment mapping-table + incremental persistence (prereqs #12/#13 now
+  met; #14a helpers done). Large.
+- **#17** — migrate residency onto the pool `pin`/CLOCK engine. **#16** native frame
+  snapshot. **#18 D4** dirty tracker (folds into #14d).
+
+**Resolved questions** (details now live in each task section):
+- **Q1** — reject oversized keys, no heap-fallback (settled; see #15).
+- **Q2** — added Google Benchmark bench; `absl::btree_map` validated (see #9).
+- **Q3** — `crowkv` has no `persist_checkpoint` trait; rename was a no-op (see #19b).
+- **Q4** — #17/#18 reduced to their true delta (see #17/#18).
+
+## Roadmap Decision (2026-07-02)
+
+Folding in the two directives ("design + schedule the concurrency batch"; "do
+#17/#18, then #14 — change the order"):
+
+**Concurrency batch — design captured, scheduled (not yet implemented).** The
+design for #5 B1–B4, #3, #8, #11, #12, #13 lives in the design docs
+(`design-crowtree-core.md`, `design-crowtree-async.md §…`) plus the dependency
+graph and recommended-order table above (steps 4–10). These remain attended-session
+work (highest race risk); no code lands unattended.
+
+**Storage track is the chosen priority: #5 B3 → #17 → #18 → #14.** Honest
+dependency note (this corrects the earlier optimistic #17/#18 audit): the *real*
+#17 (pool-owned demand-load + CLOCK eviction — the already-tested `pin`/`pin_new`/
+`flush_dirty` engine in `buffer_pool.*`) and #18's writer-owned `DirtyTracker` both
+need **lock-free readers (#5 B3)** to be safe, and #14b/c/d additionally need
+**#13**. So **#5 B3 is the gating prerequisite even in the reordered plan** and is
+scheduled next.
+
+- **#17 status:** the *interim* model is done (base frames via `acquire_frame` +
+  heap fallback, tagged unloaded slots, demand-load in `resident()`, Crowtree-level
+  clean-leaf eviction). The *designed* pool-based residency (migrate the engine onto
+  the `pin`/CLOCK demand-load + write-back path — **not** dead code; it is the target
+  engine, fully unit-tested in `buffer_pool_test.cpp`) is the remaining #17 work and
+  waits on #5 B3. **D1 resolved:** keep the pin/CLOCK engine (do not delete). **D2:**
+  keep the deterministic 64 MiB default; servers tune `Options.buffer_pool_bytes`.
+- **#18 status:** per-page durable addr + write-only-dirty done. The `DirtyTracker`
+  (**D4**) only pays off once the manifest itself is incremental (**#14d** segment
+  images) — the current full manifest must enumerate every reachable page anyway —
+  so D4 is folded into #14d rather than built standalone.
+- **Done now (concurrency-independent): #14a** — packed 64-bit slot-word encode/
+  decode helpers + `Segment` layout constants (`design-crowtree-mappingtable.md §4`).
+  Pure data-structure work with unit tests; foundation the #14b/#14c wiring builds on
+  once #5 B3 + #13 land.

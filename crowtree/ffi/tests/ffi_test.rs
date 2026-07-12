@@ -31,7 +31,7 @@ fn mem_apply_get_scan() {
 }
 
 #[test]
-fn file_checkpoint_reopen_smoke() {
+fn file_snapshot_reopen_smoke() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tree.ct");
     let opt = Options {
@@ -48,7 +48,7 @@ fn file_checkpoint_reopen_smoke() {
             t.apply_put((i + 1) as u64, &key(i), &v).unwrap();
             t.flush().unwrap();
         }
-        let durable = t.checkpoint().unwrap();
+        let durable = t.snapshot().unwrap();
         assert_eq!(durable, 50);
     }
     // Reopen the same file and verify recovery.
@@ -74,7 +74,7 @@ fn snapshot_export_import_round_trip() {
         .unwrap();
         a.flush().unwrap();
     }
-    let stream = a.snapshot_export(0).unwrap();
+    let stream = a.snapshot_export().unwrap();
     assert!(!stream.is_empty());
 
     let b = Crowtree::open(&Options::default()).unwrap();
@@ -120,7 +120,7 @@ fn open_rejects_path_with_nul() {
 }
 
 #[tokio::test]
-async fn async_bridge_apply_get_checkpoint() {
+async fn async_bridge_apply_get_snapshot() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("async.ct");
     let opt = Options {
@@ -140,7 +140,7 @@ async fn async_bridge_apply_get_checkpoint() {
         .unwrap();
         t.flush().await.unwrap();
     }
-    let durable = t.checkpoint().await.unwrap();
+    let durable = t.snapshot().await.unwrap();
     assert_eq!(durable, 20);
     assert_eq!(t.get(key(3)).await.unwrap(), Some((4u64, b"a3".to_vec())));
     assert_eq!(t.get(key(999)).await.unwrap(), None);

@@ -1,7 +1,8 @@
----
-BasedOnStyle: Google
-IndentWidth: 2
-ColumnLimit: 100
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 120
+
+# Header include grouping rules
 IncludeBlocks: Regroup
 IncludeCategories:
   - Regex: '^"crowtree/'
@@ -10,9 +11,44 @@ IncludeCategories:
     Priority: 2
   - Regex: '^<.*>'
     Priority: 3
+
+# Custom brace wrapping: same line for if/for/while, wrap brace for function/class/struct/namespace
 BreakBeforeBraces: Custom
 BraceWrapping:
-  AfterControlStatement: Always
-  AfterFunction: false
-  AfterClass: false
-  AfterStruct: false
+  AfterControlStatement: Never
+  AfterFunction: true
+  AfterClass: true
+  AfterStruct: true
+  AfterNamespace: true
+  AfterEnum: false
+  AfterUnion: false
+  BeforeCatch: true
+  BeforeElse: true
+
+# Alignment beautify settings
+# Align equal signs for consecutive assignments
+AlignConsecutiveAssignments: true
+# Align consecutive variable declarations
+AlignConsecutiveDeclarations: true
+# Align constructor initializer lists
+AlignConsecutiveConstructors: true
+# Align struct bit field declarations
+AlignConsecutiveBitFields: true
+# Align consecutive macro definitions
+AlignConsecutiveMacros: true
+# Align multi-line function definition parameters
+AlignParameters: true
+# Align multi-line function call arguments
+AlignFunctionParameters: true
+# Align line-wrapped operators
+AlignOperands: true
+# Align trailing end-of-line comments
+AlignTrailingComments: true
+# Align inline structure array initializers
+AlignArrayOfStructures: true
+# Align backslash line breaks in multi-line string literals
+AlignEscapedNewlines: Left
+# Align compound brace initializer contents
+AlignCompoundBraces: true
+# Align preprocessor #ifdef / #elif / #endif blocks
+AlignIfDefs: true

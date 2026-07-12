@@ -2,7 +2,6 @@
 // in-frame deltas, fold at cap, reopen-equals, parity vs oracle) and a small
 // microbenchmark vs plain COW-rebuild (both must agree).
 #include "crowtree/crowtree.h"
-#include "crowtree/env.h"
 #include "crowtree/page_store.h"
 
 #include <gtest/gtest.h>
@@ -37,12 +36,11 @@ TEST(InFrameDelta, ReadOverlayAndFoldReopen) {
   opt.inframe_delta = true;
   opt.max_inframe_delta = 4;    // small cap -> folds frequently
   opt.leaf_split_bytes = 1024;  // keep multiple leaves
-  CrowtreeEnv env;
 
   std::map<std::string, std::string> oracle;
   uint64_t slot = 0;
   {
-    Crowtree t(env, opt);
+    Crowtree t(opt);
     // Seed a base, then stream small single-key flushes (the in-frame fast path).
     for (int i = 0; i < 60; ++i) {
       ++slot;
@@ -72,12 +70,12 @@ TEST(InFrameDelta, ReadOverlayAndFoldReopen) {
       ASSERT_TRUE(t.get(Slice(kv.first), &s, &v)) << "missing " << kv.first;
       EXPECT_EQ(v, kv.second);
     }
-    ASSERT_TRUE(t.checkpoint(nullptr).ok());
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
   }
 
   // Reopen: any in-frame deltas persisted in leaf frames overlay on read.
   std::unique_ptr<Crowtree> t2;
-  ASSERT_TRUE(Crowtree::open(env, opt, &t2).ok());
+  ASSERT_TRUE(Crowtree::open(opt, &t2).ok());
   for (const auto& kv : oracle) {
     std::string v;
     uint64_t s;
@@ -99,8 +97,7 @@ TEST(InFrameDelta, ParityWithDefaultMode) {
     opt.inframe_delta = inframe;
     opt.max_inframe_delta = 6;
     opt.leaf_split_bytes = 1024;
-    CrowtreeEnv env;
-    Crowtree t(env, opt);
+    Crowtree t(opt);
     std::mt19937 rng(2024);
     uint64_t slot = 0;
     for (int r = 0; r < 600; ++r) {
@@ -133,8 +130,7 @@ TEST(InFrameDelta, MicrobenchVsCowRebuild) {
     opt.inframe_delta = inframe;
     opt.max_inframe_delta = 16;
     opt.leaf_split_bytes = 1u << 20;  // single leaf: isolate the overlay vs rebuild cost
-    CrowtreeEnv env;
-    Crowtree t(env, opt);
+    Crowtree t(opt);
     uint64_t slot = 0;
     // Pre-populate a sizeable base so a rebuild is non-trivial.
     for (int i = 0; i < 300; ++i) {

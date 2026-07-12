@@ -27,6 +27,27 @@ target_include_directories(crowtree PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 find_package(Threads REQUIRED)
 target_link_libraries(crowtree PUBLIC Threads::Threads)
 
+# ── Abseil (MemTable ordered map: absl::btree_map, plan-tree #9) ───
+find_package(absl REQUIRED)
+target_link_libraries(crowtree PUBLIC absl::btree)
+
+# ── spdlog logging (plan-tree #10) ────────────────────────────────
+# Gated behind CROWTREE_HAVE_SPDLOG (mirrors the LZ4 pattern): the CMake build
+# gets an async rotating-file logger; the Rust FFI cc build (no spdlog) compiles
+# the CT_LOG_* macros to no-ops. Linked PRIVATE — libcrowtree is STATIC, so CMake
+# still propagates the spdlog/fmt link requirement to the final executables while
+# keeping the header/compile-def surface off the public interface.
+find_package(spdlog REQUIRED)
+target_link_libraries(crowtree PRIVATE spdlog::spdlog)
+target_compile_definitions(crowtree PRIVATE CROWTREE_HAVE_SPDLOG=1)
+# Compile-time level floor: keep trace/debug in Debug builds, strip below info in
+# optimized builds (SPDLOG_ACTIVE_LEVEL elides lower calls entirely).
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  target_compile_definitions(crowtree PRIVATE SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_TRACE)
+else()
+  target_compile_definitions(crowtree PRIVATE SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_INFO)
+endif()
+
 # ── LZ4 page compression (PT10 / PT13) ────────────────────────────
 # Resolution order:
 #   1. Vendored single-file source under third_party/lz4 (no system dep) — the
@@ -64,3 +85,24 @@ target_link_libraries(crowtree_tests PRIVATE crowtree GTest::gtest GTest::gtest_
 # builds (which can't run the binary at build time under restrictive ASLR) build
 # cleanly; the suite is then run via `setarch -R` (see Makefile).
 gtest_discover_tests(crowtree_tests DISCOVERY_MODE PRE_TEST)
+
+# ── Microbenchmarks (opt-in: -DCROWTREE_BENCH=ON, plan-tree #9/Q2) ──
+# Compares MemTable ordered containers (std::map / absl::btree_map / folly skip
+# list). Off by default so the normal build/test path needs no Google Benchmark.
+option(CROWTREE_BENCH "Build crowtree microbenchmarks" OFF)
+if(CROWTREE_BENCH)
+  find_package(benchmark REQUIRED)
+  file(GLOB CROWTREE_BENCH_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/bench/*.cpp)
+  add_executable(crowtree_bench ${CROWTREE_BENCH_SRC})
+  target_link_libraries(crowtree_bench PRIVATE benchmark::benchmark absl::btree)
+  # Third-party headers (folly/absl/benchmark) are not -Werror clean.
+  target_compile_options(crowtree_bench PRIVATE -Wno-error)
+  find_package(folly CONFIG QUIET)
+  if(folly_FOUND)
+    target_link_libraries(crowtree_bench PRIVATE Folly::folly)
+    target_compile_definitions(crowtree_bench PRIVATE CROWTREE_BENCH_FOLLY=1)
+    message(STATUS "crowtree bench: folly skip-list enabled")
+  else()
+    message(STATUS "crowtree bench: folly not found; skip-list bench disabled")
+  endif()
+endif()

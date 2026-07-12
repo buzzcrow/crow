@@ -1,5 +1,5 @@
 // PageStore: the byte-addressable durable medium under crowtree's persistence
-// layer. The tree logic is unaware of the medium; the checkpoint/recovery code
+// layer. The tree logic is unaware of the medium; the snapshot/recovery code
 // (persist.cc) owns the on-device layout (superblocks + ping-pong regions +
 // manifest + pages) and uses this interface only to read/write/sync bytes.
 //

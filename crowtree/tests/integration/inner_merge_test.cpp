@@ -2,7 +2,6 @@
 // tree (merge underfull inner pages, dropping height) while preserving data,
 // across reopen, and stay parity-correct vs an in-mem oracle.
 #include "crowtree/crowtree.h"
-#include "crowtree/env.h"
 #include "crowtree/page_store.h"
 
 #include <gtest/gtest.h>
@@ -41,13 +40,12 @@ Options TallTreeOpts(PageStore* s) {
 TEST(InnerMerge, DeleteHeavyCollapsesTreeAndReopens) {
   MemPageStore store(1);
   Options opt = TallTreeOpts(&store);
-  CrowtreeEnv env;
 
   const int N = 600;
   std::map<std::string, std::string> oracle;
   int tall_height = 0;
   {
-    Crowtree t(env, opt);
+    Crowtree t(opt);
     uint64_t slot = 0;
     for (int i = 0; i < N; ++i) {
       ++slot;
@@ -87,13 +85,13 @@ TEST(InnerMerge, DeleteHeavyCollapsesTreeAndReopens) {
         EXPECT_FALSE(found) << "resurrected " << Key(i);
       }
     }
-    ASSERT_TRUE(t.checkpoint(nullptr).ok());
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
     EXPECT_FALSE(t.io_failed());
   }
 
   // Reopen: the collapsed tree round-trips.
   std::unique_ptr<Crowtree> t2;
-  ASSERT_TRUE(Crowtree::open(env, opt, &t2).ok());
+  ASSERT_TRUE(Crowtree::open(opt, &t2).ok());
   for (const auto& kv : oracle) {
     std::string v;
     uint64_t s;
@@ -114,8 +112,7 @@ TEST(InnerMerge, RandomizedInsertDeleteParity) {
   opt.leaf_merge_bytes = 70;
   opt.inner_max_keys = 8;
   opt.inner_merge_keys = 3;
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
 
   std::map<std::string, std::string> oracle;
   std::mt19937 rng(424242);

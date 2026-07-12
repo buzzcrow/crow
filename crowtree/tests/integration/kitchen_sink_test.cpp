@@ -1,9 +1,8 @@
 // Combined stress: compression + overflow + in-frame deltas + a small buffer
-// pool (forces eviction) + periodic checkpoints, validated against an in-mem
+// pool (forces eviction) + periodic snapshots, validated against an in-mem
 // oracle live and after reopen. Plus a focused test that an overflow chain whose
 // pages were evicted is still fully retired on overwrite (no leak; ASan covers).
 #include "crowtree/crowtree.h"
-#include "crowtree/env.h"
 #include "crowtree/page_store.h"
 
 #include <gtest/gtest.h>
@@ -48,13 +47,12 @@ TEST(KitchenSink, AllFeaturesRandomizedReopen) {
   opt.max_inframe_delta = 6;
   opt.max_delta_len = 3;
   opt.leaf_split_bytes = 1024;
-  CrowtreeEnv env;
 
   std::map<std::string, std::string> oracle;
   std::mt19937 rng(20260701);
   uint64_t slot = 0;
   {
-    Crowtree t(env, opt);
+    Crowtree t(opt);
     for (int round = 0; round < 1500; ++round) {
       int k = rng() % 80;
       std::string key = Key(k);
@@ -73,11 +71,11 @@ TEST(KitchenSink, AllFeaturesRandomizedReopen) {
         ASSERT_TRUE(t.flush().ok());
       }
       if (round % 250 == 0) {
-        ASSERT_TRUE(t.checkpoint(nullptr).ok());
+        ASSERT_TRUE(t.snapshot(nullptr).ok());
       }
     }
     ASSERT_TRUE(t.flush().ok());
-    ASSERT_TRUE(t.checkpoint(nullptr).ok());
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
     EXPECT_FALSE(t.io_failed());
 
     // Live parity.
@@ -97,7 +95,7 @@ TEST(KitchenSink, AllFeaturesRandomizedReopen) {
 
   // Reopen parity (lazy recovery + demand-load + decompress + overflow assemble).
   std::unique_ptr<Crowtree> t2;
-  ASSERT_TRUE(Crowtree::open(env, opt, &t2).ok());
+  ASSERT_TRUE(Crowtree::open(opt, &t2).ok());
   for (const auto& kv : oracle) {
     std::string v;
     uint64_t s;
@@ -115,15 +113,14 @@ TEST(KitchenSink, OverwriteEvictedOverflowChainNoLeak) {
   opt.max_inline_value = 64;
   opt.max_delta_len = 1;
   opt.leaf_split_bytes = 1024;
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
 
   const std::string k = Key(1);
   uint64_t slot = 0;
   ++slot;
   ASSERT_TRUE(t.apply(slot, Put1(k, Val(12000, 1))).ok());  // ~3 overflow frames
   ASSERT_TRUE(t.flush().ok());
-  ASSERT_TRUE(t.checkpoint(nullptr).ok());
+  ASSERT_TRUE(t.snapshot(nullptr).ok());
 
   // Evict everything: the old overflow chain's pages become unloaded.
   t.evict_clean_leaves(0);
@@ -133,7 +130,7 @@ TEST(KitchenSink, OverwriteEvictedOverflowChainNoLeak) {
   ++slot;
   ASSERT_TRUE(t.apply(slot, Put1(k, Val(9000, 2))).ok());
   ASSERT_TRUE(t.flush().ok());
-  ASSERT_TRUE(t.checkpoint(nullptr).ok());
+  ASSERT_TRUE(t.snapshot(nullptr).ok());
 
   std::string v;
   uint64_t s;

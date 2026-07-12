@@ -1,9 +1,8 @@
-// PT10.3: end-to-end page compression. checkpoint writes compressed durable
+// PT10.3: end-to-end page compression. snapshot writes compressed durable
 // blobs; reopen/demand-load/eviction decode them transparently; a tampered
 // stored byte fails CRC on reload.
 #include "crowtree/compressor.h"
 #include "crowtree/crowtree.h"
-#include "crowtree/env.h"
 #include "crowtree/page_store.h"
 
 #include <gtest/gtest.h>
@@ -44,20 +43,19 @@ TEST(Compression, CheckpointReopenWithCompressedPages) {
   opt.max_delta_len = 1;
   opt.leaf_split_bytes = 200;  // multi-level tree -> many pages
   opt.frame_bytes = 4096;
-  CrowtreeEnv env;
 
   std::map<std::string, std::string> oracle;
   uint64_t compressed_size = 0;
   {
-    Crowtree t(env, opt);
+    Crowtree t(opt);
     Fill(&t, 200, &oracle);
     ASSERT_GT(t.height(), 1);
-    ASSERT_TRUE(t.checkpoint(nullptr).ok());
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
     compressed_size = store.size();
   }
 
   std::unique_ptr<Crowtree> t2;
-  ASSERT_TRUE(Crowtree::open(env, opt, &t2).ok());
+  ASSERT_TRUE(Crowtree::open(opt, &t2).ok());
   EXPECT_GT(t2->height(), 1);
   for (const auto& kv : oracle) {
     std::string v;
@@ -67,17 +65,16 @@ TEST(Compression, CheckpointReopenWithCompressedPages) {
   }
 
   // When LZ4 is linked, the compressed image should be smaller than an
-  // uncompressed checkpoint of the same tree.
+  // uncompressed snapshot of the same tree.
   if (lz4_available()) {
     MemPageStore raw_store(1);
     Options raw_opt = opt;
     raw_opt.page_store = &raw_store;
     raw_opt.compression = compress_algo::kNone;
-    CrowtreeEnv raw_env;
-    Crowtree raw(raw_env, raw_opt);
+    Crowtree raw(raw_opt);
     std::map<std::string, std::string> raw_oracle;
     Fill(&raw, 200, &raw_oracle);
-    ASSERT_TRUE(raw.checkpoint(nullptr).ok());
+    ASSERT_TRUE(raw.snapshot(nullptr).ok());
     EXPECT_LT(compressed_size, raw_store.size());
   }
 }
@@ -90,12 +87,11 @@ TEST(Compression, EvictionReloadOfCompressedPages) {
   opt.max_delta_len = 1;
   opt.leaf_split_bytes = 200;
   opt.frame_bytes = 4096;
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
 
   std::map<std::string, std::string> oracle;
   Fill(&t, 200, &oracle);
-  ASSERT_TRUE(t.checkpoint(nullptr).ok());
+  ASSERT_TRUE(t.snapshot(nullptr).ok());
 
   // Force all clean leaves out of the pool, then read everything back: each
   // access demand-loads + decompresses the durable blob.
@@ -114,12 +110,11 @@ TEST(Compression, CrcTamperRejectedOnReopen) {
   opt.page_store = &store;
   opt.compression = compress_algo::kLz4;
   opt.frame_bytes = 4096;
-  CrowtreeEnv env;
   {
-    Crowtree t(env, opt);
+    Crowtree t(opt);
     ASSERT_TRUE(t.apply(1, Put1("a", Val(1))).ok());
     ASSERT_TRUE(t.flush().ok());
-    ASSERT_TRUE(t.checkpoint(nullptr).ok());
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
   }
 
   // Corrupt a page's stored bytes deep in the page region (past both 4 KiB
@@ -131,7 +126,7 @@ TEST(Compression, CrcTamperRejectedOnReopen) {
   ASSERT_TRUE(store.write_at(off, &b, 1).ok());
 
   std::unique_ptr<Crowtree> t2;
-  ASSERT_TRUE(Crowtree::open(env, opt, &t2).ok());  // lazy: tags only
+  ASSERT_TRUE(Crowtree::open(opt, &t2).ok());  // lazy: tags only
   // Demand-load fails CRC -> the page reads as a miss, but the media fault is
   // latched so a caller can detect the corruption.
   std::string v;

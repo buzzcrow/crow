@@ -11,6 +11,18 @@
 
 using namespace crowtree;
 
+namespace {
+// Dummy leaf entry for descent tests (the cell bytes are never decoded here).
+leaf_entry LE(const char* k) { return leaf_entry{k, buffer::copy_of(Slice("x"))}; }
+template <class... Es>
+std::vector<leaf_entry> Entries(Es&&... es) {
+  std::vector<leaf_entry> v;
+  v.reserve(sizeof...(es));
+  (v.push_back(std::forward<Es>(es)), ...);
+  return v;
+}
+}  // namespace
+
 TEST(InnerPage, child_index_for) {
   // separators = [d, k, q]; children = [c0, c1, c2, c3]
   auto* inner = InnerBase::build({"d", "k", "q"}, {10, 11, 12, 13});
@@ -29,7 +41,7 @@ TEST(InnerPage, child_index_for) {
 TEST(Descent, SingleLeafRoot) {
   MappingTable mt;
   uint64_t leaf_page_id = mt.allocate_page_id();
-  mt.store(leaf_page_id, LeafBase::build({leaf_entry{"a", "x"}}));
+  mt.store(leaf_page_id, LeafBase::build(Entries(LE("a"))));
   EXPECT_EQ(find_leaf_page_id([&](uint64_t p) { return mt.get(p); }, leaf_page_id, "a"),
             leaf_page_id);
   EXPECT_EQ(find_leaf_page_id([&](uint64_t p) { return mt.get(p); }, leaf_page_id, "zzz"),
@@ -43,9 +55,9 @@ TEST(Descent, TwoLevelTree) {
   uint64_t l0 = mt.allocate_page_id();
   uint64_t l1 = mt.allocate_page_id();
   uint64_t l2 = mt.allocate_page_id();
-  mt.store(l0, LeafBase::build({leaf_entry{"a", "x"}}));
-  mt.store(l1, LeafBase::build({leaf_entry{"k", "x"}}));
-  mt.store(l2, LeafBase::build({leaf_entry{"q", "x"}}));
+  mt.store(l0, LeafBase::build(Entries(LE("a"))));
+  mt.store(l1, LeafBase::build(Entries(LE("k"))));
+  mt.store(l2, LeafBase::build(Entries(LE("q"))));
   // Root inner: separators [k, q] -> children [l0, l1, l2].
   uint64_t root = mt.allocate_page_id();
   mt.store(root, InnerBase::build({"k", "q"}, {l0, l1, l2}));
@@ -67,10 +79,10 @@ TEST(Descent, ThreeLevelTree) {
   // Leaves under two inner nodes, joined by a root.
   uint64_t la = mt.allocate_page_id(), lb = mt.allocate_page_id();
   uint64_t lc = mt.allocate_page_id(), ld = mt.allocate_page_id();
-  mt.store(la, LeafBase::build({leaf_entry{"a", "x"}}));
-  mt.store(lb, LeafBase::build({leaf_entry{"e", "x"}}));
-  mt.store(lc, LeafBase::build({leaf_entry{"m", "x"}}));
-  mt.store(ld, LeafBase::build({leaf_entry{"t", "x"}}));
+  mt.store(la, LeafBase::build(Entries(LE("a"))));
+  mt.store(lb, LeafBase::build(Entries(LE("e"))));
+  mt.store(lc, LeafBase::build(Entries(LE("m"))));
+  mt.store(ld, LeafBase::build(Entries(LE("t"))));
   uint64_t left = mt.allocate_page_id();   // sep [e] -> [la, lb]
   uint64_t right = mt.allocate_page_id();  // sep [t] -> [lc, ld]
   mt.store(left, InnerBase::build({"e"}, {la, lb}));

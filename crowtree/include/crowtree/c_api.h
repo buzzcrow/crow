@@ -48,10 +48,10 @@ typedef struct {
 // ── Lifecycle + durability ────────────────────────────────────────
 ct_status ct_open(const ct_options* opt, ct_tree** out);
 void ct_close(ct_tree* t);
-ct_status ct_checkpoint(ct_tree* t, uint64_t* out_last_applied);
+ct_status ct_snapshot(ct_tree* t, uint64_t* out_last_applied);
 uint64_t ct_last_applied_slot(const ct_tree* t);
 void ct_set_gc_watermark(ct_tree* t, uint64_t safe_slot);
-ct_status ct_collect_garbage(ct_tree* t);  // durable GC runs via checkpoint
+ct_status ct_collect_garbage(ct_tree* t);  // durable GC runs via snapshot
 // Latched media-fault flag: 1 if a demand-load hit an I/O error or CRC mismatch
 // on a committed page (the read degraded to a miss). ct_clear_io_error resets it.
 int32_t ct_io_failed(const ct_tree* t);
@@ -92,7 +92,7 @@ void ct_iter_release(ct_iter* it);
 void ct_view_release(ct_view* v);
 
 // ── Snapshot export / import (portable stream) ────────────────────
-ct_status ct_snapshot_export_begin(ct_tree* t, uint64_t at_slot, ct_export** out);
+ct_status ct_snapshot_export_begin(ct_tree* t, ct_export** out);
 ct_status ct_snapshot_export_next(ct_export* e, ct_buf* chunk, int32_t* done);
 void ct_snapshot_export_end(ct_export* e);
 

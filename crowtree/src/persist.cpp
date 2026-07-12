@@ -1,17 +1,17 @@
-// checkpoint and recovery.
+// snapshot and recovery.
 //
 // On-device layout owned here:
 //   [superblock slot A][superblock slot B][page/manifest region]
 // Each superblock slot is at least 4 KiB and rounded up to the store IU; the
 // page/manifest region begins after the two A/B slots.
-// Each checkpoint writes only *dirty* base pages (clean pages keep their prior
+// Each snapshot writes only *dirty* base pages (clean pages keep their prior
 // addr) plus a fresh manifest listing every reachable page's (page_id,addr,len),
 // then commits by writing the inactive superblock slot (chosen by seq parity) and
 // syncing. New writes land in space that is **dead w.r.t. the committed
-// checkpoint** (reused gaps) or appended past EOF — never over the committed
-// image, so a crash mid-checkpoint falls back intact to the last committed
-// superblock. Space freed by the committed checkpoint becomes reusable only after
-// the next checkpoint commits (two-generation safety).
+// snapshot** (reused gaps) or appended past EOF — never over the committed
+// image, so a crash mid-snapshot falls back intact to the last committed
+// superblock. Space freed by the committed snapshot becomes reusable only after
+// the next snapshot commits (two-generation safety).
 //
 // Key work: incremental reachable-page walk, crash-safe free-space reuse,
 // page/manifest framing, superblock A/B commit, best-superblock recovery,
@@ -20,6 +20,7 @@
 #include "crowtree/crc32c.h"
 #include "crowtree/crowtree.h"
 #include "crowtree/delta.h"
+#include "crowtree/log.h"
 #include "crowtree/page_codec.h"
 #include "crowtree/page_store.h"
 
@@ -50,7 +51,7 @@ inline uint64_t region_base_for(uint32_t iu) { return superblock_slot_bytes(iu) 
 struct Superblock {
   uint32_t magic = 0;
   uint32_t format_version = 0;
-  uint64_t checkpoint_seq = 0;
+  uint64_t snapshot_seq = 0;
   uint64_t root_page_id = 0;
   uint64_t last_applied_slot = 0;
   uint64_t next_page_id = 0;
@@ -91,7 +92,7 @@ uint64_t get_u64(const uint8_t* p) {
 void encode_superblock(const Superblock& sb, uint64_t slot_bytes, std::vector<uint8_t>* buf) {
   put_u32(buf, sb.magic);
   put_u32(buf, sb.format_version);
-  put_u64(buf, sb.checkpoint_seq);
+  put_u64(buf, sb.snapshot_seq);
   put_u64(buf, sb.root_page_id);
   put_u64(buf, sb.last_applied_slot);
   put_u64(buf, sb.next_page_id);
@@ -115,7 +116,7 @@ bool decode_superblock(const uint8_t* buf, Superblock* sb) {
   }
   sb->magic = get_u32(buf);
   sb->format_version = get_u32(buf + 4);
-  sb->checkpoint_seq = get_u64(buf + 8);
+  sb->snapshot_seq = get_u64(buf + 8);
   sb->root_page_id = get_u64(buf + 16);
   sb->last_applied_slot = get_u64(buf + 24);
   sb->next_page_id = get_u64(buf + 32);
@@ -146,7 +147,7 @@ bool read_best_superblock(const PageStore& store, uint32_t iu, Superblock* best)
     {
       continue;
     }
-    if (!found || sb.checkpoint_seq > best->checkpoint_seq)
+    if (!found || sb.snapshot_seq > best->snapshot_seq)
     {
       *best = sb;
       found = true;
@@ -156,7 +157,7 @@ bool read_best_superblock(const PageStore& store, uint32_t iu, Superblock* best)
 }
 
 // Crash-safe append/reuse allocator. `gaps` are byte ranges that are dead w.r.t.
-// the committed checkpoint (safe to overwrite); `append` is the grow cursor at
+// the committed snapshot (safe to overwrite); `append` is the grow cursor at
 // (or past) EOF. First-fit reuse, else append. Pages are uniform frame_bytes in
 // the common case, so freed gaps fit later rewrites exactly.
 struct SpaceAllocator {
@@ -182,7 +183,7 @@ struct SpaceAllocator {
   }
 };
 
-// Live byte ranges of the committed checkpoint `sb`: every reachable page frame
+// Live byte ranges of the committed snapshot `sb`: every reachable page frame
 // plus the manifest itself. These must never be overwritten (they are the crash
 // fallback). Returns false if the manifest can't be read/validated.
 bool collect_live_extents(const PageStore& store, const Superblock& sb, uint32_t iu,
@@ -254,11 +255,11 @@ SpaceAllocator build_allocator(std::vector<std::pair<uint64_t, uint64_t>> live, 
 
 }  // namespace
 
-Status Crowtree::checkpoint(uint64_t* out_last_applied) {
+Status Crowtree::snapshot(uint64_t* out_last_applied) {
   PageStore* store = opt_.page_store;
   if (store == nullptr)
   {
-    return Status::invalid_argument("checkpoint: no page_store");
+    return Status::invalid_argument("snapshot: no page_store");
   }
   std::lock_guard<std::mutex> lk(write_mutex_);
 
@@ -269,21 +270,21 @@ Status Crowtree::checkpoint(uint64_t* out_last_applied) {
   // supported (16/64 KiB etc.) — no fixed 4096 cap.
   if (iu > 1 && (opt_.frame_bytes % iu != 0))
   {
-    return Status::invalid_argument("checkpoint: frame_bytes must be IU-aligned");
+    return Status::invalid_argument("snapshot: frame_bytes must be IU-aligned");
   }
   const uint64_t sb_slot_bytes = superblock_slot_bytes(iu);
   const uint64_t region_base = region_base_for(iu);
 
-  // build the crash-safe allocator from the committed checkpoint: its page
+  // build the crash-safe allocator from the committed snapshot: its page
   // frames and manifest are off-limits (the crash fallback); every other byte in
-  // the file is dead and reusable. The first checkpoint (no committed sb) just
+  // the file is dead and reusable. The first snapshot (no committed sb) just
   // appends. Reusing only committed-dead space gives two-generation safety.
   Superblock prev;
   bool have_prev = read_best_superblock(*store, iu, &prev);
   std::vector<std::pair<uint64_t, uint64_t>> live;
   if (have_prev && !collect_live_extents(*store, prev, iu, &live))
   {
-    return Status::corruption("checkpoint: committed manifest unreadable");
+    return Status::corruption("snapshot: committed manifest unreadable");
   }
   SpaceAllocator alloc = build_allocator(std::move(live), store->size(), iu, region_base);
 
@@ -291,7 +292,7 @@ Status Crowtree::checkpoint(uint64_t* out_last_applied) {
   uint64_t page_count = 0;
   uint64_t pages_written = 0;
 
-  // DFS the reachable tree. Incremental checkpointing: each base page persists
+  // DFS the reachable tree. Incremental snapshotting: each base page persists
   // its *live* frame verbatim, but only when **dirty** (durable_addr == kNoAddr);
   // clean pages keep their prior durable addr (no rewrite). The manifest lists
   // every reachable page's (page_id, addr, len) so recovery can demand-load it.
@@ -328,7 +329,7 @@ Status Crowtree::checkpoint(uint64_t* out_last_applied) {
     PageBase* head = resident(page_id);
     if (head == nullptr)
     {
-      return Status::internal_error("checkpoint: null page in walk");
+      return Status::internal_error("snapshot: null page in walk");
     }
 
     // Fold any delta chain into a fresh consolidated base, so the live page is a
@@ -345,7 +346,7 @@ Status Crowtree::checkpoint(uint64_t* out_last_applied) {
       }
       if (b == nullptr || b->type != page_type::kLeafBase)
       {
-        return Status::internal_error("checkpoint: delta chain without leaf base");
+        return Status::internal_error("snapshot: delta chain without leaf base");
       }
       uint64_t right = static_cast<LeafBase*>(b)->right_sibling();
       std::vector<uint64_t> dead_overflow;
@@ -404,7 +405,7 @@ Status Crowtree::checkpoint(uint64_t* out_last_applied) {
           PageBase* op = resident(opid);
           if (op == nullptr || op->type != page_type::kOverflowFrame)
           {
-            return Status::internal_error("checkpoint: bad overflow page");
+            return Status::internal_error("snapshot: bad overflow page");
           }
           auto* ov = static_cast<OverflowBase*>(op);
           Status os = persist_one(opid, op, ov->frame(), ov->page_bytes());
@@ -423,7 +424,7 @@ Status Crowtree::checkpoint(uint64_t* out_last_applied) {
   {
     return ws;
   }
-  ckpt_pages_written_.store(pages_written);
+  snapshot_pages_written_.store(pages_written);
 
   // Prepend the count, then frame the manifest like a page (logical_len + CRC).
   std::vector<uint8_t> counted;
@@ -450,12 +451,12 @@ Status Crowtree::checkpoint(uint64_t* out_last_applied) {
     return sync1;
   }
 
-  uint64_t seq = have_prev ? prev.checkpoint_seq + 1 : 1;
+  uint64_t seq = have_prev ? prev.snapshot_seq + 1 : 1;
 
   Superblock sb;
   sb.magic = kSuperMagic;
   sb.format_version = kFormatVersion;
-  sb.checkpoint_seq = seq;
+  sb.snapshot_seq = seq;
   sb.root_page_id = root_page_id_.load();
   sb.last_applied_slot = last_applied_slot_.load();
   sb.next_page_id = mapping_.next_page_id();
@@ -478,6 +479,8 @@ Status Crowtree::checkpoint(uint64_t* out_last_applied) {
   }
 
   version_.fetch_add(1);
+  CT_LOG_INFO("snapshot committed: seq={} last_applied={} pages={} written={} manifest_len={}", seq,
+              sb.last_applied_slot, page_count, pages_written, manifest_len);
   if (out_last_applied)
   {
     *out_last_applied = sb.last_applied_slot;
@@ -485,13 +488,17 @@ Status Crowtree::checkpoint(uint64_t* out_last_applied) {
   return Status::Ok();
 }
 
-Status Crowtree::open(CrowtreeEnv& env, const Options& opt, std::unique_ptr<Crowtree>* out) {
+Status Crowtree::open(const Options& opt, std::unique_ptr<Crowtree>* out) {
   if (opt.page_store == nullptr)
   {
     return Status::invalid_argument("open: no page_store");
   }
   PageStore* store = opt.page_store;
   const uint32_t iu = store->iu_size();
+  // Bring up file logging before doing any work so recovery is observable
+  // (no-op when opt.log_dir is empty or the build has no spdlog).
+  init_logging(opt.log_dir, opt.log_level, opt.log_max_file_mb, opt.log_max_files);
+  CT_LOG_INFO("open: iu={} frame_bytes={} store_size={}", iu, opt.frame_bytes, store->size());
   // Geometry validation (PT9 §9.2): the pool frame must be IU-aligned. The
   // superblock slot is IU-rounded (superblock_slot_bytes), so any IU is supported.
   if (iu > 1 && (opt.frame_bytes % iu != 0))
@@ -499,12 +506,13 @@ Status Crowtree::open(CrowtreeEnv& env, const Options& opt, std::unique_ptr<Crow
     return Status::invalid_argument("open: frame_bytes must be IU-aligned");
   }
 
-  auto tree = std::unique_ptr<Crowtree>(new Crowtree(env, opt));
+  auto tree = std::unique_ptr<Crowtree>(new Crowtree(opt));
 
   Superblock sb;
   if (!read_best_superblock(*store, iu, &sb))
   {
-    // No valid checkpoint: fresh empty tree (already constructed).
+    // No valid snapshot: fresh empty tree (already constructed).
+    CT_LOG_INFO("open: no committed superblock; starting empty");
     *out = std::move(tree);
     return Status::Ok();
   }
@@ -534,8 +542,9 @@ Status Crowtree::open(CrowtreeEnv& env, const Options& opt, std::unique_ptr<Crow
   }
   uint64_t count = get_u64(mbody);
 
-  // Drop the freshly-built empty root before installing recovered tags.
-  tree->free_subtree(tree->root_page_id_.load());
+  // Drop the freshly-built empty root before installing recovered tags. open() is
+  // single-threaded (the tree is not yet published), so free immediately.
+  tree->free_subtree(tree->root_page_id_.load(), /*retire=*/false);
 
   // Lazy recovery: record page_id->(addr,len) tags only; base pages are
   // demand-loaded (and CRC-checked) on first access via resident().
@@ -557,8 +566,10 @@ Status Crowtree::open(CrowtreeEnv& env, const Options& opt, std::unique_ptr<Crow
   tree->root_page_id_.store(sb.root_page_id);
   tree->last_applied_slot_.store(sb.last_applied_slot);
   tree->contiguous_slot_.store(sb.last_applied_slot);
-  tree->version_.store(sb.checkpoint_seq);
+  tree->version_.store(sb.snapshot_seq);
 
+  CT_LOG_INFO("open: recovered seq={} last_applied={} root_pid={} pages={}", sb.snapshot_seq,
+              sb.last_applied_slot, sb.root_page_id, count);
   *out = std::move(tree);
   return Status::Ok();
 }

@@ -1,7 +1,6 @@
 // CT10: consolidation tests (fold by highest slot, triggers, tombstone keep,
 // old-chain retirement via the epoch manager).
 #include "crowtree/crowtree.h"
-#include "crowtree/env.h"
 #include "crowtree/page.h"
 
 #include <gtest/gtest.h>
@@ -20,8 +19,7 @@ page_type HeadType(Crowtree& t) { return t.mapping().get(t.root_page_id())->type
 TEST(Consolidation, FoldsChainAtDeltaLenThreshold) {
   Options opt;
   opt.max_delta_len = 4;
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
   // Each flush adds one delta to the single root leaf.
   for (uint64_t s = 1; s <= 4; ++s) {
     ASSERT_TRUE(t.apply(s, Put1("k" + std::to_string(s), "v")).ok());
@@ -44,8 +42,7 @@ TEST(Consolidation, FoldsChainAtDeltaLenThreshold) {
 TEST(Consolidation, FoldKeepsHighestSlotPerKey) {
   Options opt;
   opt.max_delta_len = 3;
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
   for (uint64_t s = 1; s <= 10; ++s) {
     ASSERT_TRUE(t.apply(s, Put1("k", "v" + std::to_string(s))).ok());
     ASSERT_TRUE(t.flush().ok());
@@ -60,8 +57,7 @@ TEST(Consolidation, FoldKeepsHighestSlotPerKey) {
 TEST(Consolidation, TombstonePreservedThroughFold) {
   Options opt;
   opt.max_delta_len = 2;
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
   ASSERT_TRUE(t.apply(1, Put1("a", "A")).ok());
   ASSERT_TRUE(t.flush().ok());
   Batch del{{batch_op{"a", OpKind::kDelete, ""}}};
@@ -81,20 +77,19 @@ TEST(Consolidation, TombstonePreservedThroughFold) {
 TEST(Consolidation, OldChainRetiredViaEpoch) {
   Options opt;
   opt.max_delta_len = 3;
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
   for (uint64_t s = 1; s <= 3; ++s) {
     ASSERT_TRUE(t.apply(s, Put1("k", "v" + std::to_string(s))).ok());
     ASSERT_TRUE(t.flush().ok());
   }
   // Hold a read guard so retired pages cannot be freed during consolidation.
   {
-    EpochManager::Guard g = env.epoch().enter();
+    EpochManager::Guard g = t.epoch().enter();
     ASSERT_TRUE(t.apply(4, Put1("k", "v4")).ok());
     ASSERT_TRUE(t.flush().ok());  // consolidation retires the old chain
-    EXPECT_GT(env.epoch().pending_retired(), 0u);
+    EXPECT_GT(t.epoch().pending_retired(), 0u);
   }
   // Guard dropped -> retired pages become reclaimable.
-  env.epoch().try_reclaim();
-  EXPECT_EQ(env.epoch().pending_retired(), 0u);
+  t.epoch().try_reclaim();
+  EXPECT_EQ(t.epoch().pending_retired(), 0u);
 }

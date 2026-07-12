@@ -51,7 +51,7 @@ class SnapshotExport {
   size_t total_bytes() const { return stream_.size(); }
 
  private:
-  friend Status snapshot_export_begin(Crowtree&, uint64_t, snapshot_format, size_t,
+  friend Status snapshot_export_begin(Crowtree&, snapshot_format, size_t,
                                       std::unique_ptr<SnapshotExport>*);
   std::string stream_;
   size_t pos_ = 0;
@@ -59,15 +59,15 @@ class SnapshotExport {
   uint64_t at_slot_ = 0;
 };
 
-// Begin a snapshot export of `tree` at `at_slot` (v1: exports the current
-// durable view; `at_slot` must be <= the engine's last_applied_slot, else
-// invalid_argument). Only kPortable is supported in v1.
-Status snapshot_export_begin(Crowtree& tree, uint64_t at_slot, snapshot_format fmt,
-                             size_t chunk_bytes, std::unique_ptr<SnapshotExport>* out);
+// Begin a snapshot export of `tree`: exports the current durable view (at the
+// engine's last_applied_slot, recorded in the stream header). Only kPortable is
+// supported in v1. (Historical/arbitrary-slot export is deferred until path-copy
+// COW RootVersions exist; there is no slot selector.)
+Status snapshot_export_begin(Crowtree& tree, snapshot_format fmt, size_t chunk_bytes,
+                             std::unique_ptr<SnapshotExport>* out);
 
 // Convenience: dump a whole snapshot to a `.ctsnap` file (loops next_chunk).
-Status snapshot_dump_to_file(Crowtree& tree, uint64_t at_slot, snapshot_format fmt,
-                             const std::string& path);
+Status snapshot_dump_to_file(Crowtree& tree, snapshot_format fmt, const std::string& path);
 
 // Accumulates a portable stream and atomically installs it into `tree` on
 // finish (verifying the whole-stream CRC first).

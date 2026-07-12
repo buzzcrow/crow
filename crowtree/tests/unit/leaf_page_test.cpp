@@ -14,7 +14,15 @@ using namespace crowtree;
 namespace {
 
 leaf_entry MakeEntry(const std::string& key, uint64_t slot, const std::string& val) {
-  return leaf_entry{key, encode_cell(slot, OpKind::kPut, Slice(val))};
+  return leaf_entry{key, encode_cell_buf(slot, OpKind::kPut, Slice(val))};
+}
+
+template <class... Es>
+std::vector<leaf_entry> Entries(Es&&... es) {
+  std::vector<leaf_entry> v;
+  v.reserve(sizeof...(es));
+  (v.push_back(std::forward<Es>(es)), ...);
+  return v;
 }
 
 std::unique_ptr<LeafBase> BuildLeaf(std::vector<leaf_entry> entries,
@@ -28,7 +36,7 @@ std::unique_ptr<LeafBase> BuildLeaf(std::vector<leaf_entry> entries,
 }  // namespace
 
 TEST(LeafPage, BuildAndFind) {
-  auto leaf = BuildLeaf({MakeEntry("a", 1, "1"), MakeEntry("c", 2, "3"), MakeEntry("e", 3, "5")});
+  auto leaf = BuildLeaf(Entries(MakeEntry("a", 1, "1"), MakeEntry("c", 2, "3"), MakeEntry("e", 3, "5")));
   EXPECT_EQ(leaf->count(), 3u);
   EXPECT_EQ(leaf->find("a"), 0);
   EXPECT_EQ(leaf->find("c"), 1);
@@ -40,7 +48,7 @@ TEST(LeafPage, BuildAndFind) {
 }
 
 TEST(LeafPage, LookupDecodesCell) {
-  auto leaf = BuildLeaf({MakeEntry("k", 42, "hello")});
+  auto leaf = BuildLeaf(Entries(MakeEntry("k", 42, "hello")));
   CellView v;
   ASSERT_TRUE(leaf->lookup("k", &v));
   EXPECT_EQ(v.slot(), 42u);
@@ -50,7 +58,7 @@ TEST(LeafPage, LookupDecodesCell) {
 
 TEST(LeafPage, Tombstone) {
   std::vector<leaf_entry> e;
-  e.push_back(leaf_entry{"d", encode_cell(9, OpKind::kDelete)});
+  e.push_back(leaf_entry{"d", encode_cell_buf(9, OpKind::kDelete)});
   auto leaf = BuildLeaf(std::move(e));
   CellView v;
   ASSERT_TRUE(leaf->lookup("d", &v));
@@ -59,7 +67,7 @@ TEST(LeafPage, Tombstone) {
 
 TEST(LeafPage, OrderedIterationAndBoundaries) {
   auto leaf = BuildLeaf(
-      {MakeEntry("apple", 1, "x"), MakeEntry("banana", 2, "y"), MakeEntry("cherry", 3, "z")});
+      Entries(MakeEntry("apple", 1, "x"), MakeEntry("banana", 2, "y"), MakeEntry("cherry", 3, "z")));
   EXPECT_EQ(leaf->low_key().to_string(), "apple");
   EXPECT_EQ(leaf->high_key().to_string(), "cherry");
   std::string prev;
@@ -73,7 +81,7 @@ TEST(LeafPage, OrderedIterationAndBoundaries) {
 }
 
 TEST(LeafPage, lower_bound) {
-  auto leaf = BuildLeaf({MakeEntry("b", 1, "x"), MakeEntry("d", 2, "y"), MakeEntry("f", 3, "z")});
+  auto leaf = BuildLeaf(Entries(MakeEntry("b", 1, "x"), MakeEntry("d", 2, "y"), MakeEntry("f", 3, "z")));
   EXPECT_EQ(leaf->lower_bound("a"), 0u);
   EXPECT_EQ(leaf->lower_bound("b"), 0u);
   EXPECT_EQ(leaf->lower_bound("c"), 1u);
@@ -82,7 +90,7 @@ TEST(LeafPage, lower_bound) {
 }
 
 TEST(LeafPage, RightSibling) {
-  auto leaf = BuildLeaf({MakeEntry("a", 1, "x")}, 7);
+  auto leaf = BuildLeaf(Entries(MakeEntry("a", 1, "x")), 7);
   EXPECT_EQ(leaf->right_sibling(), 7u);
   leaf->set_right_sibling(9);
   EXPECT_EQ(leaf->right_sibling(), 9u);
@@ -111,6 +119,6 @@ TEST(LeafPage, BloomTrueNegativeAndFpRate) {
 }
 
 TEST(LeafPage, DataBytesNonZero) {
-  auto leaf = BuildLeaf({MakeEntry("a", 1, "value")});
+  auto leaf = BuildLeaf(Entries(MakeEntry("a", 1, "value")));
   EXPECT_GT(leaf->data_bytes(), 0u);
 }

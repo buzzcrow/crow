@@ -1,6 +1,5 @@
 // CT13: read path (get, multi_get, scan with L0 overlay, iter_all via snapshot).
 #include "crowtree/crowtree.h"
-#include "crowtree/env.h"
 
 #include <gtest/gtest.h>
 
@@ -22,8 +21,7 @@ std::string Key(int i) {
 }  // namespace
 
 TEST(ReadPath, GetAfterPutAndDelete) {
-  CrowtreeEnv env;
-  Crowtree t(env);
+  Crowtree t;
   ASSERT_TRUE(t.apply(1, Put1("a", "A")).ok());
   ASSERT_TRUE(t.flush().ok());
   std::string v;
@@ -36,8 +34,7 @@ TEST(ReadPath, GetAfterPutAndDelete) {
 }
 
 TEST(ReadPath, L0OverridesL1) {
-  CrowtreeEnv env;
-  Crowtree t(env);
+  Crowtree t;
   ASSERT_TRUE(t.apply(1, Put1("a", "A1")).ok());
   ASSERT_TRUE(t.flush().ok());                    // A1 in L1
   ASSERT_TRUE(t.apply(2, Put1("a", "A2")).ok());  // A2 in L0 (not flushed)
@@ -55,8 +52,7 @@ TEST(ReadPath, L0OverridesL1) {
 }
 
 TEST(ReadPath, L0TombstoneHidesL1) {
-  CrowtreeEnv env;
-  Crowtree t(env);
+  Crowtree t;
   ASSERT_TRUE(t.apply(1, Put1("a", "A1")).ok());
   ASSERT_TRUE(t.flush().ok());
   ASSERT_TRUE(t.apply(2, Del1("a")).ok());  // tombstone in L0
@@ -73,8 +69,7 @@ TEST(ReadPath, ScanOrderLimitTruncatedAcrossLeaves) {
   Options opt;
   opt.max_delta_len = 1;
   opt.leaf_split_bytes = 120;  // force multiple leaves
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
   const int N = 100;
   for (int i = 0; i < N; ++i) {
     uint64_t s = i + 1;
@@ -102,8 +97,7 @@ TEST(ReadPath, ScanOrderLimitTruncatedAcrossLeaves) {
 }
 
 TEST(ReadPath, ScanPrefix) {
-  CrowtreeEnv env;
-  Crowtree t(env);
+  Crowtree t;
   ASSERT_TRUE(t.apply(1, Put1("apple", "1")).ok());
   ASSERT_TRUE(t.apply(2, Put1("apricot", "2")).ok());
   ASSERT_TRUE(t.apply(3, Put1("banana", "3")).ok());
@@ -117,8 +111,7 @@ TEST(ReadPath, ScanPrefix) {
 }
 
 TEST(ReadPath, multi_get) {
-  CrowtreeEnv env;
-  Crowtree t(env);
+  Crowtree t;
   ASSERT_TRUE(t.apply(1, Put1("a", "A")).ok());
   ASSERT_TRUE(t.apply(2, Put1("c", "C")).ok());
   ASSERT_TRUE(t.flush().ok());
@@ -133,8 +126,7 @@ TEST(ReadPath, multi_get) {
 }
 
 TEST(ReadPath, IterAllIncludesTombstones) {
-  CrowtreeEnv env;
-  Crowtree t(env);
+  Crowtree t;
   ASSERT_TRUE(t.apply(1, Put1("a", "A")).ok());
   ASSERT_TRUE(t.apply(1, Put1("b", "B")).ok());
   ASSERT_TRUE(t.flush().ok());

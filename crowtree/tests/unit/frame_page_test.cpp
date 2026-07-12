@@ -14,6 +14,10 @@ namespace {
 std::string Cell(uint64_t slot, const std::string& v, bool tomb = false) {
   return encode_cell(slot, tomb ? OpKind::kDelete : OpKind::kPut, Slice(v));
 }
+// buffer-cell variant for leaf_entry (whose cell is a move-only buffer).
+buffer CellBuf(uint64_t slot, const std::string& v, bool tomb = false) {
+  return encode_cell_buf(slot, tomb ? OpKind::kDelete : OpKind::kPut, Slice(v));
+}
 std::string Key(int i) {
   char b[16];
   snprintf(b, sizeof(b), "k%05d", i);
@@ -162,7 +166,9 @@ TEST(FramePage, InFrameDeltaOverlay) {
   ASSERT_EQ(LeafFrameView(base.data(), pb).delta_count(), 0u);
 
   // COW-append two deltas: overwrite "a", insert "c".
-  std::vector<leaf_entry> deltas = {{"a", Cell(5, "A5")}, {"c", Cell(5, "C5")}};
+  std::vector<leaf_entry> deltas;
+  deltas.push_back(leaf_entry{"a", CellBuf(5, "A5")});
+  deltas.push_back(leaf_entry{"c", CellBuf(5, "C5")});
   std::vector<uint8_t> out(pb);
   ASSERT_TRUE(leaf_frame_append_deltas(base.data(), pb, deltas, out.data()));
   ASSERT_TRUE(frame_validate(out.data(), pb));
@@ -186,7 +192,8 @@ TEST(FramePage, InFrameDeltaRejectsWhenFull) {
   LeafFrameBuilder b(base.data(), pb);
   ASSERT_TRUE(b.try_append_sorted(Slice("a"), Slice(Cell(1, "A"))));
   b.finish(1, kInvalidPageId);
-  std::vector<leaf_entry> big = {{std::string(400, 'k'), Cell(2, std::string(400, 'v'))}};
+  std::vector<leaf_entry> big;
+  big.push_back(leaf_entry{std::string(400, 'k'), CellBuf(2, std::string(400, 'v'))});
   std::vector<uint8_t> out(pb);
   EXPECT_FALSE(leaf_frame_append_deltas(base.data(), pb, big, out.data()));
 }

@@ -5,14 +5,19 @@
 // per key and drops writes already durable in L1 (slot <= durable_floor), so any
 // key present in L0 is strictly newer than L1 -> L0-first reads are correct.
 //
-// v1 uses a std::map under a mutex (sharded/skiplist is a later optimization).
+// v1 uses an absl::btree_map under a mutex (sharded/skiplist is a later
+// optimization). btree_map is cache-friendlier than std::map's red-black tree
+// for the point-get / ordered-drain workload (D-Q10, plan-tree #9).
 #pragma once
 
+#include "crowtree/buffer.h"
 #include "crowtree/cell.h"
 #include "crowtree/slice.h"
 
+#include <absl/container/btree_map.h>
+
 #include <cstdint>
-#include <map>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -20,8 +25,10 @@
 namespace crowtree {
 
 struct mem_entry {
-  std::string key;
-  std::string cell;  // encoded cell payload (slot/flags/value)
+  std::string key;  // key stays std::string: it must be COPYABLE (a btree relocates
+                    // its const-key slots on split/merge, which a move-only buffer key
+                    // cannot satisfy) and SSO already inlines small keys optimally.
+  buffer cell;      // encoded cell payload (single-alloc buffer; SBO-inline for small)
   uint64_t slot;
 };
 
@@ -33,9 +40,10 @@ class MemTable {
   // Drops the write if an existing entry has a >= slot. Also drops writes with
   // slot <= durable_floor (already in L1) unless allow_old_slots is set.
   bool upsert(Slice key, uint64_t slot, Slice cell_payload);
-  // Move-based overload: avoids copying key/cell into the map when the caller
-  // already owns heap strings (apply's per-batch dedup map, snapshot import).
-  bool upsert(std::string&& key, uint64_t slot, std::string&& cell_payload);
+  // Move the pre-encoded cell buffer in (no cell copy); the key is copied once.
+  // Used by apply's per-batch dedup (single-allocation encoded cell via
+  // encode_cell_buf) and snapshot import.
+  bool upsert(Slice key, uint64_t slot, buffer&& cell_payload);
 
   // Set the durable floor (engine's last_applied_slot). Writes at or below it are
   // already in L1 and are rejected by upsert (unless allow_old_slots). Does not
@@ -80,7 +88,10 @@ class MemTable {
 
  private:
   mutable std::mutex mu_;
-  std::map<std::string, std::string, std::less<>> map_;  // key -> encoded cell
+  // key (std::string, SSO) -> encoded cell (owned buffer, SBO-inline for small
+  // values). std::less<> is transparent, enabling heterogeneous lookup by
+  // std::string_view without allocating a temporary key.
+  absl::btree_map<std::string, buffer, std::less<>> map_;
   size_t bytes_ = 0;
   uint64_t durable_floor_ = 0;
   bool allow_old_slots_ = false;

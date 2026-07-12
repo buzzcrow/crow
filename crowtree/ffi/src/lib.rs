@@ -55,7 +55,7 @@ mod sys {
         pub fn ct_free_buf(buf: *mut ct_buf);
         pub fn ct_open(opt: *const ct_options, out: *mut *mut ct_tree) -> c_int;
         pub fn ct_close(t: *mut ct_tree);
-        pub fn ct_checkpoint(t: *mut ct_tree, out_last_applied: *mut u64) -> c_int;
+        pub fn ct_snapshot(t: *mut ct_tree, out_last_applied: *mut u64) -> c_int;
         pub fn ct_last_applied_slot(t: *const ct_tree) -> u64;
         pub fn ct_set_gc_watermark(t: *mut ct_tree, safe_slot: u64);
         pub fn ct_collect_garbage(t: *mut ct_tree) -> c_int;
@@ -115,7 +115,7 @@ mod sys {
         ) -> c_int;
         pub fn ct_iter_release(it: *mut ct_iter);
         pub fn ct_view_release(v: *mut ct_view);
-        pub fn ct_snapshot_export_begin(t: *mut ct_tree, at_slot: u64, out: *mut *mut ct_export) -> c_int;
+        pub fn ct_snapshot_export_begin(t: *mut ct_tree, out: *mut *mut ct_export) -> c_int;
         pub fn ct_snapshot_export_next(e: *mut ct_export, chunk: *mut ct_buf, done: *mut c_int) -> c_int;
         pub fn ct_snapshot_export_end(e: *mut ct_export);
         pub fn ct_snapshot_import_begin(t: *mut ct_tree, out: *mut *mut ct_import) -> c_int;
@@ -290,9 +290,9 @@ impl Crowtree {
         check(unsafe { sys::ct_flush(self.as_ptr()) })
     }
 
-    pub fn checkpoint(&self) -> Result<u64, CtError> {
+    pub fn snapshot(&self) -> Result<u64, CtError> {
         let mut last = 0u64;
-        check(unsafe { sys::ct_checkpoint(self.as_ptr(), &mut last) })?;
+        check(unsafe { sys::ct_snapshot(self.as_ptr(), &mut last) })?;
         Ok(last)
     }
 
@@ -419,10 +419,11 @@ impl Crowtree {
         Ok((at, out))
     }
 
-    /// Export the snapshot as the portable byte stream (concatenated chunks).
-    pub fn snapshot_export(&self, at_slot: u64) -> Result<Vec<u8>, CtError> {
+    /// Export the current durable snapshot as the portable byte stream
+    /// (concatenated chunks). The snapshot's slot is carried in the stream.
+    pub fn snapshot_export(&self) -> Result<Vec<u8>, CtError> {
         let mut exp: *mut sys::ct_export = std::ptr::null_mut();
-        check(unsafe { sys::ct_snapshot_export_begin(self.as_ptr(), at_slot, &mut exp) })?;
+        check(unsafe { sys::ct_snapshot_export_begin(self.as_ptr(), &mut exp) })?;
         let mut stream = Vec::new();
         loop {
             let mut chunk = sys::ct_buf {
@@ -567,9 +568,9 @@ impl AsyncCrowtree {
             .map_err(|_| CtError::Internal)?
     }
 
-    pub async fn checkpoint(&self) -> Result<u64, CtError> {
+    pub async fn snapshot(&self) -> Result<u64, CtError> {
         let t = self.inner.clone();
-        tokio::task::spawn_blocking(move || t.checkpoint())
+        tokio::task::spawn_blocking(move || t.snapshot())
             .await
             .map_err(|_| CtError::Internal)?
     }

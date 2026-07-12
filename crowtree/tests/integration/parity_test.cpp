@@ -1,7 +1,6 @@
 // CT14: randomized parity against a std::map oracle (in-order + out-of-order),
 // exercising flush / consolidate / split / merge.
 #include "crowtree/crowtree.h"
-#include "crowtree/env.h"
 
 #include <gtest/gtest.h>
 
@@ -47,8 +46,7 @@ Options SmallTree() {
 }  // namespace
 
 TEST(Parity, InOrderRandomOpsWithPeriodicCompare) {
-  CrowtreeEnv env;
-  Crowtree t(env, SmallTree());
+  Crowtree t(SmallTree());
   std::map<std::string, std::string> oracle;
   std::mt19937 rng(2024);
 
@@ -106,8 +104,7 @@ TEST(Parity, InOrderRandomOpsWithPeriodicCompare) {
 }
 
 TEST(Parity, OutOfOrderConvergesToHighestSlot) {
-  CrowtreeEnv env;
-  Crowtree t(env, SmallTree());
+  Crowtree t(SmallTree());
 
   struct Op {
     uint64_t slot;

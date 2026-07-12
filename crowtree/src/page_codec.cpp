@@ -70,6 +70,19 @@ class Reader {
     pos_ += len;
     return true;
   }
+  bool bytes(size_t len, buffer* out) {
+    if (pos_ + len > n_)
+    {
+      return false;
+    }
+    *out = buffer::alloc(len);
+    if (len > 0)
+    {
+      std::memcpy(out->data(), p_ + pos_, len);
+    }
+    pos_ += len;
+    return true;
+  }
 
  private:
   const uint8_t* p_;
@@ -94,7 +107,7 @@ void encode_leaf_body(const LeafBase* leaf, std::vector<uint8_t>* body) {
   }
   for (const auto& e : entries)
   {
-    body->insert(body->end(), e.cell.begin(), e.cell.end());
+    body->insert(body->end(), e.cell.data(), e.cell.data() + e.cell.size());
   }
 }
 

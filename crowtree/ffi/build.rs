@@ -33,6 +33,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut build = cc::Build::new();
     build.cpp(true).std("c++20").include(&include).warnings(false);
+
+    // The engine now includes Abseil headers (absl::btree_map in the MemTable,
+    // plan-tree #9). Abseil is header-only for btree, so we only need its include
+    // path; in the pixi/conda environment it lives under $CONDA_PREFIX/include.
+    if let Ok(prefix) = std::env::var("CONDA_PREFIX") {
+        let inc = PathBuf::from(&prefix).join("include");
+        if inc.join("absl").is_dir() {
+            build.include(&inc);
+        }
+    }
+    println!("cargo:rerun-if-env-changed=CONDA_PREFIX");
+
     for f in &files {
         build.file(f);
         println!("cargo:rerun-if-changed={}", f.display());

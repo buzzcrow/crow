@@ -1,8 +1,7 @@
 // Edge-case durability: empty values, binary keys/values with NULs, an oversized
 // key (heap fallback), and zero/boundary-sized overflow values — all through the
-// compression + overflow + checkpoint + reopen path.
+// compression + overflow + snapshot + reopen path.
 #include "crowtree/crowtree.h"
-#include "crowtree/env.h"
 #include "crowtree/page_store.h"
 
 #include <gtest/gtest.h>
@@ -41,12 +40,11 @@ void CheckAll(Crowtree* t, const std::map<std::string, std::string>& oracle) {
 TEST(DurableEdgeCases, EmptyAndBinaryValuesReopen) {
   MemPageStore store(1);
   Options opt = EdgeOpts(&store);
-  CrowtreeEnv env;
 
   std::map<std::string, std::string> oracle;
   uint64_t slot = 0;
   {
-    Crowtree t(env, opt);
+    Crowtree t(opt);
     // empty value (Put with ""), boundary at the inline threshold, binary data.
     std::vector<std::pair<std::string, std::string>> items = {
         {"empty", ""},
@@ -62,27 +60,26 @@ TEST(DurableEdgeCases, EmptyAndBinaryValuesReopen) {
       ASSERT_TRUE(t.flush().ok());
       oracle[it.first] = it.second;
     }
-    ASSERT_TRUE(t.checkpoint(nullptr).ok());
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
     CheckAll(&t, oracle);
   }
   std::unique_ptr<Crowtree> t2;
-  ASSERT_TRUE(Crowtree::open(env, opt, &t2).ok());
+  ASSERT_TRUE(Crowtree::open(opt, &t2).ok());
   CheckAll(t2.get(), oracle);
 }
 
 TEST(DurableEdgeCases, OversizedKeyRejectedNormalKeysDurable) {
   MemPageStore store(1);
   Options opt = EdgeOpts(&store);
-  CrowtreeEnv env;
 
   // plan-tree #15: a key larger than max_key_size (default frame_bytes/2) is now
   // rejected at apply() as a caller bug, rather than heap-fell-back into an
   // oversized leaf page. The rejection is all-or-nothing and the tree stays
-  // usable + durable for normal keys through checkpoint + reopen.
+  // usable + durable for normal keys through snapshot + reopen.
   std::string huge_key(6000, 'k');  // > frame_bytes/2 (2048)
   std::map<std::string, std::string> oracle;
   {
-    Crowtree t(env, opt);
+    Crowtree t(opt);
     // A rejected write leaves no durable effect; the learner fills its slot as a
     // NoOp (force_advance_slot) so the contiguous frontier still progresses.
     EXPECT_EQ(t.apply(1, Put1(huge_key, "small-value")).code(), Code::kInvalidArgument);
@@ -90,7 +87,7 @@ TEST(DurableEdgeCases, OversizedKeyRejectedNormalKeysDurable) {
     ASSERT_TRUE(t.apply(2, Put1("normal", "v")).ok());
     ASSERT_TRUE(t.flush().ok());
     oracle["normal"] = "v";
-    ASSERT_TRUE(t.checkpoint(nullptr).ok());
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
     CheckAll(&t, oracle);
     // The rejected key is absent.
     std::string v;
@@ -98,20 +95,19 @@ TEST(DurableEdgeCases, OversizedKeyRejectedNormalKeysDurable) {
     EXPECT_FALSE(t.get(Slice(huge_key), &s, &v));
   }
   std::unique_ptr<Crowtree> t2;
-  ASSERT_TRUE(Crowtree::open(env, opt, &t2).ok());
+  ASSERT_TRUE(Crowtree::open(opt, &t2).ok());
   CheckAll(t2.get(), oracle);
 }
 
 TEST(DurableEdgeCases, OverflowChunkBoundarySizes) {
   MemPageStore store(1);
   Options opt = EdgeOpts(&store);
-  CrowtreeEnv env;
 
   // Values exactly at, one below, and one above an overflow chunk boundary.
   const uint32_t cap = overflow_chunk_cap(opt.frame_bytes);  // payload per frame
   std::map<std::string, std::string> oracle;
   {
-    Crowtree t(env, opt);
+    Crowtree t(opt);
     std::vector<size_t> sizes = {cap - 1, cap, cap + 1, 2 * cap, 2 * cap + 1, 3 * cap};
     uint64_t slot = 0;
     for (size_t i = 0; i < sizes.size(); ++i) {
@@ -122,10 +118,10 @@ TEST(DurableEdgeCases, OverflowChunkBoundarySizes) {
       ASSERT_TRUE(t.flush().ok());
       oracle[key] = v;
     }
-    ASSERT_TRUE(t.checkpoint(nullptr).ok());
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
     CheckAll(&t, oracle);
   }
   std::unique_ptr<Crowtree> t2;
-  ASSERT_TRUE(Crowtree::open(env, opt, &t2).ok());
+  ASSERT_TRUE(Crowtree::open(opt, &t2).ok());
   CheckAll(t2.get(), oracle);
 }

@@ -3,14 +3,26 @@
 #include "crowtree/compressor.h"
 #include "crowtree/delta.h"
 #include "crowtree/descent.h"
+#include "crowtree/log.h"
 
 #include <algorithm>
+#include <cstring>
 #include <functional>
 #include <map>
 
 namespace crowtree {
 
 namespace {
+
+// Copy a byte range into a fresh owned cell buffer (SBO-inline for small cells).
+buffer cell_of(Slice s) {
+  buffer b = buffer::alloc(s.size());
+  if (s.size() > 0)
+  {
+    std::memcpy(b.data(), s.data(), s.size());
+  }
+  return b;
+}
 
 // Resolve a leaf chain (head -> ... -> LeafBase) to key-sorted entries by
 // highest-slot-wins. Tombstones whose slot <= gc_floor are dropped (logical
@@ -56,7 +68,7 @@ std::vector<leaf_entry> resolve_chain_sorted(PageBase* head, uint64_t gc_floor) 
     {
       continue;  // GC drop
     }
-    out.push_back(leaf_entry{kv.first, kv.second});
+    out.push_back(leaf_entry{kv.first, cell_of(kv.second)});
   }
   return out;
 }
@@ -93,7 +105,7 @@ void collect_in_order(Resolve&& resolve, uint64_t page_id, uint64_t gc_floor,
 
 }  // namespace
 
-Crowtree::Crowtree(CrowtreeEnv& env, const Options& opt) : env_(env), opt_(opt) {
+Crowtree::Crowtree(const Options& opt) : opt_(opt) {
   pool_ = std::make_shared<BufferPool>(opt_.buffer_pool_bytes, opt_.frame_bytes, opt_.page_store);
   // Initialize with a single empty leaf as the root.
   uint64_t page_id = mapping_.allocate_page_id();
@@ -101,9 +113,9 @@ Crowtree::Crowtree(CrowtreeEnv& env, const Options& opt) : env_(env), opt_(opt) 
   root_page_id_.store(page_id);
 }
 
-Crowtree::~Crowtree() { free_subtree(root_page_id_.load()); }
+Crowtree::~Crowtree() { free_subtree(root_page_id_.load(), /*retire=*/false); }
 
-void Crowtree::retire_page(PageBase* p) { env_.epoch().retire_object(p); }
+void Crowtree::retire_page(PageBase* p) { epoch_.retire_object(p); }
 
 PageBase* Crowtree::resident(uint64_t page_id) const {
   PageBase* v = mapping_.get(page_id);
@@ -134,23 +146,28 @@ PageBase* Crowtree::resident(uint64_t page_id) const {
   // to a miss, since the lock-free path can't propagate a Status).
   if (!s.ok())
   {
+    CT_LOG_ERROR("demand-load I/O fault: pid={} addr={} len={} status={}", page_id, u->addr,
+                 u->plen, s.to_string());
     io_failed_.store(true);
     return nullptr;
   }
   uint32_t raw_len = durable_blob_raw_len(blob.data(), blob.size());
   if (raw_len == 0)
   {
+    CT_LOG_ERROR("demand-load corrupt blob (raw_len=0): pid={} addr={}", page_id, u->addr);
     io_failed_.store(true);
     return nullptr;
   }
   std::vector<uint8_t> frame(raw_len);
   if (!decode_durable_page(blob.data(), blob.size(), frame.data(), raw_len).ok())
   {
+    CT_LOG_ERROR("demand-load decode failed: pid={} addr={} raw_len={}", page_id, u->addr, raw_len);
     io_failed_.store(true);
     return nullptr;
   }
   if (!frame_validate(frame.data(), raw_len))
   {
+    CT_LOG_ERROR("demand-load frame validation failed: pid={} addr={}", page_id, u->addr);
     io_failed_.store(true);
     return nullptr;
   }
@@ -173,7 +190,7 @@ PageBase* Crowtree::resident(uint64_t page_id) const {
   return page;
 }
 
-void Crowtree::free_subtree(uint64_t page_id) {
+void Crowtree::free_subtree(uint64_t page_id, bool retire) {
   PageBase* head = mapping_.get(page_id);
   // Skip unset and *unloaded* slots: an unloaded slot has no heap page to free
   // (the descriptor is freed by ~MappingTable); its subtree was never loaded.
@@ -192,7 +209,7 @@ void Crowtree::free_subtree(uint64_t page_id) {
     auto* inner = static_cast<InnerBase*>(base);
     for (uint64_t child : inner->children())
     {
-      free_subtree(child);
+      free_subtree(child, retire);
     }
   } else if (base != nullptr && base->type == page_type::kLeafBase)
   {
@@ -204,19 +221,42 @@ void Crowtree::free_subtree(uint64_t page_id) {
       CellView c{v.cell(i)};
       if (c.is_overflow())
       {
-        free_overflow_chain(c.overflow_head());
+        if (retire)
+        {
+          retire_overflow_chain_locked(c.overflow_head());
+        } else
+        {
+          free_overflow_chain(c.overflow_head());
+        }
       }
     }
   }
-  // Delete the whole chain (deltas + base).
-  PageBase* n = head;
-  while (n != nullptr)
+  if (retire)
   {
-    PageBase* next = n->next;
-    delete n;
-    n = next;
+    // Live tree (install_snapshot): clear the slot first so a new reader sees
+    // "gone", then epoch-retire each node in the chain. A reader that already
+    // loaded a node keeps using it under its guard; the frame is freed only once
+    // that guard drains.
+    mapping_.store(page_id, nullptr);
+    PageBase* n = head;
+    while (n != nullptr)
+    {
+      PageBase* next = n->next;
+      retire_page(n);
+      n = next;
+    }
+  } else
+  {
+    // Teardown / clear: no concurrent readers, delete the chain immediately.
+    PageBase* n = head;
+    while (n != nullptr)
+    {
+      PageBase* next = n->next;
+      delete n;
+      n = next;
+    }
+    mapping_.store(page_id, nullptr);
   }
-  mapping_.store(page_id, nullptr);
 }
 
 size_t Crowtree::evict_clean_leaves_locked(size_t max_resident_leaves) {
@@ -318,7 +358,7 @@ void Crowtree::maybe_evict_locked() {
   }
   // High-water 85%: evict clean leaves down to ~70% of the arena. Best-effort —
   // inner pages and dirty/working-set frames are not evictable, so usage may
-  // remain above target until the next checkpoint cleans the working set.
+  // remain above target until the next snapshot cleans the working set.
   if (uint64_t(st.used) * 100 < uint64_t(st.num_frames) * 85)
   {
     return;
@@ -332,16 +372,16 @@ void Crowtree::apply_batch(uint64_t slot, const Batch& batch) {
   {
     return;
   }
-  std::map<std::string, std::string> latest;  // key -> encoded cell
+  std::map<std::string, buffer> latest;  // key -> single-alloc encoded cell buffer
   for (const auto& op : batch.ops)
   {
-    latest[op.key] = encode_cell(slot, op.kind, Slice(op.value));
+    latest[op.key] = encode_cell_buf(slot, op.kind, Slice(op.value));
   }
-  // Move each deduped key+cell into L0 (avoids re-copying into the map).
+  // Move each deduped cell into L0 (the key is copied once into a buffer).
   while (!latest.empty())
   {
     auto node = latest.extract(latest.begin());
-    memtable_.upsert(std::move(node.key()), slot, std::move(node.mapped()));
+    memtable_.upsert(Slice(node.key()), slot, std::move(node.mapped()));
   }
 }
 
@@ -444,7 +484,7 @@ Status Crowtree::flush() {
   std::vector<mem_entry> drained = memtable_.drain_up_to(cs);
   if (drained.empty())
   {
-    // Still advance the durable watermark/version so checkpoints see progress.
+    // Still advance the durable watermark/version so snapshots see progress.
     if (cs > last_applied_slot_.load())
     {
       last_applied_slot_.store(cs);
@@ -458,13 +498,14 @@ Status Crowtree::flush() {
     auto resolve = [this](uint64_t p) { return resident(p); };
     uint64_t page_id = find_leaf_page_id(resolve, root_page_id_.load(), Slice(drained[i].key));
     std::vector<leaf_entry> group;
-    group.push_back(leaf_entry{drained[i].key, drained[i].cell});
+    // Move the drained cell buffer straight into the leaf entry (no copy).
+    group.push_back(leaf_entry{drained[i].key, std::move(drained[i].cell)});
     ++i;
 
     while (i < drained.size() &&
            find_leaf_page_id(resolve, root_page_id_.load(), Slice(drained[i].key)) == page_id)
     {
-      group.push_back(leaf_entry{drained[i].key, drained[i].cell});
+      group.push_back(leaf_entry{drained[i].key, std::move(drained[i].cell)});
       ++i;
     }
 
@@ -610,10 +651,13 @@ void Crowtree::maybe_split_or_merge_locked(uint64_t page_id) {
 
 void Crowtree::split_leaf_locked(uint64_t leaf_page_id, std::vector<uint64_t> path) {
   auto* leaf = static_cast<LeafBase*>(resident(leaf_page_id));
-  const std::vector<leaf_entry>& e = leaf->entries();
+  std::vector<leaf_entry> e = leaf->entries();  // materialized owned copy
   size_t mid = e.size() / 2;
-  std::vector<leaf_entry> lo(e.begin(), e.begin() + mid);
-  std::vector<leaf_entry> hi(e.begin() + mid, e.end());
+  // leaf_entry is move-only (buffer cell): move the halves out, don't copy.
+  std::vector<leaf_entry> lo(std::make_move_iterator(e.begin()),
+                             std::make_move_iterator(e.begin() + mid));
+  std::vector<leaf_entry> hi(std::make_move_iterator(e.begin() + mid),
+                             std::make_move_iterator(e.end()));
   std::string sep = hi.front().key;
 
   // Publish the right sibling, then repoint the parent(s) at it — all while
@@ -875,7 +919,7 @@ void Crowtree::try_merge_inner_locked(uint64_t inner_page_id, std::vector<uint64
 }
 
 bool Crowtree::get(Slice key, uint64_t* out_slot, std::string* out_value) const {
-  EpochManager::Guard guard = env_.epoch().enter();
+  EpochManager::Guard guard = epoch_.enter();
 
   // L0 first: any key present in L0 is strictly newer than L1.
   std::string cell;
@@ -952,8 +996,8 @@ Status Crowtree::scan(Slice prefix, size_t limit, std::vector<scan_entry>* out,
                    gc_floor_.load(), &l1);
   std::vector<mem_entry> l0 = memtable_.snapshot();
 
-  auto consider = [&](const std::string& key, Slice cell) -> bool {
-    if (!Slice(key).starts_with(prefix))
+  auto consider = [&](Slice key, Slice cell) -> bool {
+    if (!key.starts_with(prefix))
     {
       return true;
     }
@@ -972,7 +1016,7 @@ Status Crowtree::scan(Slice prefix, size_t limit, std::vector<scan_entry>* out,
     }
     std::string val = v.is_overflow() ? assemble_overflow_value(v.overflow_head(), v.overflow_len())
                                       : v.value().to_string();
-    out->push_back(scan_entry{key, v.slot(), std::move(val)});
+    out->push_back(scan_entry{key.to_string(), v.slot(), std::move(val)});
     return true;
   };
 
@@ -991,26 +1035,26 @@ Status Crowtree::scan(Slice prefix, size_t limit, std::vector<scan_entry>* out,
     {
       cmp = Slice(l0[i].key).compare(Slice(l1[j].key));
     }
-    const std::string* key;
+    Slice key;
     Slice cell;
     if (cmp < 0)
     {
-      key = &l0[i].key;
-      cell = Slice(l0[i].cell);
+      key = Slice(l0[i].key);
+      cell = l0[i].cell.slice();
       ++i;
     } else if (cmp > 0)
     {
-      key = &l1[j].key;
+      key = Slice(l1[j].key);
       cell = Slice(l1[j].cell);
       ++j;
     } else
     {
-      key = &l0[i].key;
-      cell = Slice(l0[i].cell);
+      key = Slice(l0[i].key);
+      cell = l0[i].cell.slice();
       ++i;
       ++j;  // drop the L1 copy; L0 wins
     }
-    if (!consider(*key, cell))
+    if (!consider(key, cell))
     {
       break;
     }
@@ -1078,7 +1122,9 @@ Status Crowtree::install_snapshot(std::vector<leaf_entry> sorted_entries, uint64
     std::lock_guard<std::mutex> lk(write_mutex_);
     // Replace L1: drop the live tree and start a fresh empty root. (v1 clears in
     // place under the write lock; a true staging + RootVersion swap is deferred.)
-    free_subtree(root_page_id_.load());
+    // Epoch-retire (not immediate free): lock-free readers may still be walking
+    // the old tree under a guard (#13).
+    free_subtree(root_page_id_.load(), /*retire=*/true);
     uint64_t page_id = mapping_.allocate_page_id();
     mapping_.store(page_id, LeafBase::build({}, kInvalidPageId, pool_, opt_.frame_bytes));
     root_page_id_.store(page_id);
@@ -1099,8 +1145,8 @@ Status Crowtree::install_snapshot(std::vector<leaf_entry> sorted_entries, uint64
   // slot+kind in the encoded cell, so tombstones survive as tombstones.
   for (leaf_entry& e : sorted_entries)
   {
-    uint64_t s = CellView{Slice(e.cell)}.slot();  // read slot before moving cell
-    memtable_.upsert(std::move(e.key), s, std::move(e.cell));
+    uint64_t s = CellView{Slice(e.cell)}.slot();
+    memtable_.upsert(Slice(e.key), s, std::move(e.cell));  // move the imported cell buffer
   }
   force_advance_slot(at_slot);
   Status fs = flush();
@@ -1132,8 +1178,8 @@ std::shared_ptr<Snapshot> Crowtree::snapshot_view() {
     CellView v{Slice(e.cell)};
     if (v.is_overflow())
     {
-      e.cell = encode_cell(v.slot(), OpKind::kPut,
-                           Slice(assemble_overflow_value(v.overflow_head(), v.overflow_len())));
+      e.cell = encode_cell_buf(v.slot(), OpKind::kPut,
+                               Slice(assemble_overflow_value(v.overflow_head(), v.overflow_len())));
     }
   }
   return std::make_shared<Snapshot>(last_applied_slot_.load(), std::move(entries));
@@ -1218,7 +1264,7 @@ std::vector<leaf_entry> Crowtree::resolve_leaf_chain_for_rebuild(
     {
       continue;  // GC drop
     }
-    out.push_back(leaf_entry{kv.first, kv.second});
+    out.push_back(leaf_entry{kv.first, cell_of(kv.second)});
   }
   return out;
 }
@@ -1261,7 +1307,7 @@ LeafBase* Crowtree::build_leaf_spilling_locked(std::vector<leaf_entry> entries,
     {
       std::string value = val.to_string();
       uint64_t head = spill_value_to_overflow_chain_locked(value);
-      e.cell = encode_overflow_cell(v.slot(), head, value.size());
+      e.cell = encode_overflow_cell_buf(v.slot(), head, value.size());
     }
   }
   return LeafBase::build(std::move(entries), right_sibling, pool_, opt_.frame_bytes);

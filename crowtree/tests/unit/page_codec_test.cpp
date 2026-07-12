@@ -14,12 +14,20 @@ using namespace crowtree;
 
 namespace {
 leaf_entry E(const std::string& k, uint64_t slot, const std::string& v, bool tomb = false) {
-  return leaf_entry{k, encode_cell(slot, tomb ? OpKind::kDelete : OpKind::kPut, Slice(v))};
+  return leaf_entry{k, encode_cell_buf(slot, tomb ? OpKind::kDelete : OpKind::kPut, Slice(v))};
+}
+// Build a vector of move-only leaf_entry (a braced-init-list can't hold move-only).
+template <class... Es>
+std::vector<leaf_entry> Entries(Es&&... es) {
+  std::vector<leaf_entry> v;
+  v.reserve(sizeof...(es));
+  (v.push_back(std::forward<Es>(es)), ...);
+  return v;
 }
 }  // namespace
 
 TEST(PageCodec, LeafRoundTrip) {
-  std::vector<leaf_entry> entries{E("a", 1, "A"), E("b", 2, "BB"), E("c", 3, "", true)};
+  auto entries = Entries(E("a", 1, "A"), E("b", 2, "BB"), E("c", 3, "", true));
   std::unique_ptr<LeafBase> leaf(LeafBase::build(entries, 42));
   leaf->page_id = 7;
 
@@ -69,7 +77,7 @@ TEST(PageCodec, EmptyLeaf) {
 
 TEST(PageCodec, BinaryKeysWithNuls) {
   std::string k("a\0b", 3);
-  std::vector<leaf_entry> entries{E(k, 5, std::string("v\0w", 3))};
+  auto entries = Entries(E(k, 5, std::string("v\0w", 3)));
   std::unique_ptr<LeafBase> leaf(LeafBase::build(entries));
   leaf->page_id = 1;
   auto frame = PageCodec::encode(leaf.get(), 1);
@@ -82,7 +90,7 @@ TEST(PageCodec, BinaryKeysWithNuls) {
 }
 
 TEST(PageCodec, BitFlipFailsCrc) {
-  std::vector<leaf_entry> entries{E("a", 1, "A"), E("b", 2, "B")};
+  auto entries = Entries(E("a", 1, "A"), E("b", 2, "B"));
   std::unique_ptr<LeafBase> leaf(LeafBase::build(entries));
   leaf->page_id = 1;
   auto frame = PageCodec::encode(leaf.get(), 1);

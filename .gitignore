@@ -12,6 +12,8 @@ tarpaulin-report.html
 crowtree/build/
 crowtree/build-asan/
 crowtree/build-tsan/
+crowtree/build-bench/
+crowtree/build*/
 
 # ── Frontend (crowkv-console/web/ui) ────────────────────────────
 crowkv-console/web/ui/node_modules/

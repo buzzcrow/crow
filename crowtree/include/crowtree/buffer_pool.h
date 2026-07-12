@@ -26,7 +26,7 @@ namespace crowtree {
 using PageAddr = uint64_t;
 
 // Sentinel addr for an anonymous (not-yet-durable) frame: a freshly built page
-// that no checkpoint has assigned a durable location to yet (design §4.5).
+// that no snapshot has assigned a durable location to yet (design §4.5).
 inline constexpr PageAddr kNoAddr = ~0ull;
 
 class BufferPool;
@@ -80,7 +80,7 @@ class BufferPool {
   Status pin_new(uint64_t page_id, PageAddr addr, FrameRef* out);
 
   // Acquire a fresh zeroed, anonymous frame for a freshly built base page (no
-  // page_id mapping, no durable addr; dirty until a checkpoint assigns one). The
+  // page_id mapping, no durable addr; dirty until a snapshot assigns one). The
   // frame is pinned-resident until release_frame so it is never evicted. Returns
   // an error (caller should fall back to a heap buffer) if no frame is free.
   // The returned `out_bytes` window is valid until release_frame(*out_idx).

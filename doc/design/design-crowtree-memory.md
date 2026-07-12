@@ -112,16 +112,31 @@ Design rules:
   in the reserved prefix and the value bytes follow contiguously — the encoded cell
   is one contiguous buffer with no second allocation or copy. This folds the old
   `encode_cell()` allocation into the original value allocation.
-- **Allocator seam.** `alloc()` routes through a single internal allocator hook.
-  Step 1 = glibc `malloc`. Later = size-classed pool (§6) or RDMA-pinned (§7),
-  with no call-site changes.
-- **Comparable + move-only ⇒ valid `absl::btree_map` key/value (OQ2/OQ3).** The
-  MemTable is `absl::btree_map<buffer, buffer>` (core §1, D-Q10). `operator<`
-  gives the byte-order key ordering; the deleted copy ctor/assign + valid move
-  ctor/assign let the B-tree relocate elements during node split/merge without
-  ever copying. Insertion uses `try_emplace` / `emplace` to move both key and
-  value in. `absl` is added as a full dependency (OQ2); static linking + LTO trim
-  unreferenced template code so the binary stays small.
+- **Small-buffer optimization (SBO) — required.** An owned `buffer` whose total
+  length fits `kInlineCap` (24 B) stores its bytes **inline** in the object, with
+  **no heap allocation** — mirroring `std::string`'s SSO. This is a *correctness-for-
+  performance* rule, not an optimization to defer: without it, replacing `std::string`
+  (which inlines ~15 B) with `buffer` on the write path would *regress* the common
+  small-key / small-value case by forcing a `malloc` where there was none. With SBO,
+  `buffer` is never worse than `std::string` and additionally supports borrowed
+  zero-copy views. A 9-byte cell header + up to 15 B of value therefore stays inline.
+  Moves relocate inline bytes (the object is not trivially relocatable when inline);
+  borrowed buffers never use inline storage.
+- **Allocator seam.** `alloc()` routes owned allocations **larger than `kInlineCap`**
+  through a single internal allocator hook. Step 1 = glibc `malloc`. Later =
+  size-classed pool (§6) or RDMA-pinned (§7), with no call-site changes.
+- **MemTable = `absl::btree_map<std::string, buffer>` (OQ2/OQ3, revised).** The
+  KEY stays `std::string`, the VALUE is a move-only `buffer`. **Why the key is not a
+  `buffer`:** a B-tree stores `pair<const Key, Value>` and *relocates* slots on node
+  split/merge, which requires moving the `const` key — a move-only `buffer` key falls
+  back to its deleted copy ctor and fails to compile. `std::string` is copyable
+  (relocatable) and its SSO already inlines small keys, so it is the correct key type;
+  `buffer`'s SBO gives the same inline benefit on the value side plus move-through and
+  the borrowed read path. Insertion uses `try_emplace(std::move(key), std::move(cell))`
+  so the move-only value is constructed in place (no movable-pair materialization).
+  `std::less<>` is transparent → heterogeneous `Slice`/`string_view` lookup with no
+  temporary key. `absl` is a full dependency (OQ2); static linking + LTO trim unused
+  template code.
 
 ---
 

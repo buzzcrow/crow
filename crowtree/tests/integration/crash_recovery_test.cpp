@@ -1,9 +1,8 @@
 // Crash / torn-write recovery across the full feature set (compression, overflow,
-// IU alignment). Verifies two-generation fallback (a corrupted newest checkpoint
+// IU alignment). Verifies two-generation fallback (a corrupted newest snapshot
 // falls back intact to the previous committed image) and that demand-load
 // corruption of the committed image is surfaced via the latched io_failed flag.
 #include "crowtree/crowtree.h"
-#include "crowtree/env.h"
 #include "crowtree/page_store.h"
 
 #include <gtest/gtest.h>
@@ -32,7 +31,7 @@ std::string Big(size_t n, char c) { return std::string(n, c); }
 constexpr uint64_t kSbBytes = 4096;
 }  // namespace
 
-// ckpt1 (large overflow values + compression) commits; a second checkpoint then
+// ckpt1 (large overflow values + compression) commits; a second snapshot then
 // commits new values; corrupting the newest superblock must fall back to ckpt1's
 // fully-intact image, including the multi-frame overflow values.
 TEST(CrashRecovery, TwoGenerationFallbackWithOverflowAndCompression) {
@@ -44,11 +43,10 @@ TEST(CrashRecovery, TwoGenerationFallbackWithOverflowAndCompression) {
   opt.max_inline_value = 64;  // force overflow chains
   opt.max_delta_len = 1;
   opt.leaf_split_bytes = 512;
-  CrowtreeEnv env;
 
   std::map<std::string, std::string> gen1;
   {
-    Crowtree t(env, opt);
+    Crowtree t(opt);
     uint64_t slot = 0;
     for (int i = 0; i < 20; ++i) {
       ++slot;
@@ -57,15 +55,15 @@ TEST(CrashRecovery, TwoGenerationFallbackWithOverflowAndCompression) {
       ASSERT_TRUE(t.flush().ok());
       gen1[Key(i)] = v;
     }
-    ASSERT_TRUE(t.checkpoint(nullptr).ok());  // seq 1 -> slot 0
+    ASSERT_TRUE(t.snapshot(nullptr).ok());  // seq 1 -> slot 0
 
-    // Second generation: overwrite a few keys, then checkpoint (seq 2 -> slot B).
+    // Second generation: overwrite a few keys, then snapshot (seq 2 -> slot B).
     for (int i = 0; i < 20; i += 5) {
       ++slot;
       ASSERT_TRUE(t.apply(slot, Put1(Key(i), Big(7000, 'Z'))).ok());
       ASSERT_TRUE(t.flush().ok());
     }
-    ASSERT_TRUE(t.checkpoint(nullptr).ok());  // seq 2 -> slot kSbBytes
+    ASSERT_TRUE(t.snapshot(nullptr).ok());  // seq 2 -> slot kSbBytes
   }
 
   // Simulate a crash that left the newest superblock unreadable.
@@ -73,7 +71,7 @@ TEST(CrashRecovery, TwoGenerationFallbackWithOverflowAndCompression) {
   ASSERT_TRUE(store.write_at(kSbBytes, garbage.data(), garbage.size()).ok());
 
   std::unique_ptr<Crowtree> t2;
-  ASSERT_TRUE(Crowtree::open(env, opt, &t2).ok());
+  ASSERT_TRUE(Crowtree::open(opt, &t2).ok());
   // Falls back to gen1: every key (incl. overflow values) matches the first ckpt.
   for (const auto& kv : gen1) {
     std::string v;
@@ -92,11 +90,10 @@ TEST(CrashRecovery, AlignedTwoGenerationFallback) {
   opt.frame_bytes = 4096;
   opt.max_delta_len = 1;
   opt.leaf_split_bytes = 256;
-  CrowtreeEnv env;
 
   std::map<std::string, std::string> gen1;
   {
-    Crowtree t(env, opt);
+    Crowtree t(opt);
     uint64_t slot = 0;
     for (int i = 0; i < 60; ++i) {
       ++slot;
@@ -105,19 +102,19 @@ TEST(CrashRecovery, AlignedTwoGenerationFallback) {
       ASSERT_TRUE(t.flush().ok());
       gen1[Key(i)] = v;
     }
-    ASSERT_TRUE(t.checkpoint(nullptr).ok());
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
     for (int i = 0; i < 60; i += 7) {
       ++slot;
       ASSERT_TRUE(t.apply(slot, Put1(Key(i), "new")).ok());
       ASSERT_TRUE(t.flush().ok());
     }
-    ASSERT_TRUE(t.checkpoint(nullptr).ok());
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
   }
   std::vector<uint8_t> garbage(kSbBytes, 0xcd);
   ASSERT_TRUE(store.write_at(kSbBytes, garbage.data(), garbage.size()).ok());
 
   std::unique_ptr<Crowtree> t2;
-  ASSERT_TRUE(Crowtree::open(env, opt, &t2).ok());
+  ASSERT_TRUE(Crowtree::open(opt, &t2).ok());
   for (const auto& kv : gen1) {
     std::string v;
     uint64_t s;
@@ -135,14 +132,13 @@ TEST(CrashRecovery, DemandLoadCorruptionLatched) {
   opt.frame_bytes = 4096;
   opt.max_delta_len = 1;
   opt.leaf_split_bytes = 256;  // multi-page so a single corruption is localized
-  CrowtreeEnv env;
   {
-    Crowtree t(env, opt);
+    Crowtree t(opt);
     for (int i = 0; i < 60; ++i) {
       ASSERT_TRUE(t.apply(i + 1, Put1(Key(i), "v" + std::to_string(i))).ok());
       ASSERT_TRUE(t.flush().ok());
     }
-    ASSERT_TRUE(t.checkpoint(nullptr).ok());
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
   }
   // Corrupt deep in the page region (well past both superblock slots).
   uint64_t off = 2 * kSbBytes + 200;
@@ -152,7 +148,7 @@ TEST(CrashRecovery, DemandLoadCorruptionLatched) {
   ASSERT_TRUE(store.write_at(off, &b, 1).ok());
 
   std::unique_ptr<Crowtree> t2;
-  ASSERT_TRUE(Crowtree::open(env, opt, &t2).ok());
+  ASSERT_TRUE(Crowtree::open(opt, &t2).ok());
   EXPECT_FALSE(t2->io_failed());  // nothing loaded yet (lazy recovery)
 
   // Read every key: the corrupted page demand-load fails CRC and latches.
@@ -167,7 +163,7 @@ TEST(CrashRecovery, DemandLoadCorruptionLatched) {
   EXPECT_FALSE(t2->io_failed());
 }
 
-// File-backed (real fsync) crash: gen2's checkpoint commits, but a crash tears
+// File-backed (real fsync) crash: gen2's snapshot commits, but a crash tears
 // its final superblock write (the engine writes pages+manifest, syncs, THEN the
 // superblock — so a torn superblock is the realistic mid-commit crash). Reopen
 // must fall back to gen1's committed image, fully intact, on a real file.
@@ -179,7 +175,6 @@ TEST(CrashRecovery, FileTornSuperblockFallsBack) {
   std::string path(tmpl);
 
   std::map<std::string, std::string> gen1;
-  CrowtreeEnv env;
   {
     std::unique_ptr<FilePageStore> store;
     ASSERT_TRUE(FilePageStore::open(path, 4096, &store).ok());
@@ -189,19 +184,19 @@ TEST(CrashRecovery, FileTornSuperblockFallsBack) {
     opt.compression = compress_algo::kLz4;
     opt.max_delta_len = 1;
     opt.leaf_split_bytes = 256;
-    Crowtree t(env, opt);
+    Crowtree t(opt);
     for (int i = 0; i < 80; ++i) {
       ASSERT_TRUE(t.apply(i + 1, Put1(Key(i), "v" + std::to_string(i))).ok());
       ASSERT_TRUE(t.flush().ok());
       gen1[Key(i)] = "v" + std::to_string(i);
     }
-    ASSERT_TRUE(t.checkpoint(nullptr).ok());  // gen1: seq 1 -> superblock slot 0
+    ASSERT_TRUE(t.snapshot(nullptr).ok());  // gen1: seq 1 -> superblock slot 0
 
     for (int i = 0; i < 80; i += 4) {
       ASSERT_TRUE(t.apply(1000 + i, Put1(Key(i), "GEN2")).ok());
       ASSERT_TRUE(t.flush().ok());
     }
-    ASSERT_TRUE(t.checkpoint(nullptr).ok());  // gen2: seq 2 -> superblock slot 4096
+    ASSERT_TRUE(t.snapshot(nullptr).ok());  // gen2: seq 2 -> superblock slot 4096
   }
 
   // Tear the gen2 superblock (slot B at offset 4096) as a crash would.
@@ -221,7 +216,7 @@ TEST(CrashRecovery, FileTornSuperblockFallsBack) {
     opt.frame_bytes = 4096;
     opt.compression = compress_algo::kLz4;
     std::unique_ptr<Crowtree> t;
-    ASSERT_TRUE(Crowtree::open(env, opt, &t).ok());
+    ASSERT_TRUE(Crowtree::open(opt, &t).ok());
     for (const auto& kv : gen1) {
       std::string v;
       uint64_t s;

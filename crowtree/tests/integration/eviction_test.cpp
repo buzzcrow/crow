@@ -3,7 +3,6 @@
 // the next access demand-loads it. Run under TSan for the eviction-vs-reader
 // race (epoch-deferred frame reuse).
 #include "crowtree/crowtree.h"
-#include "crowtree/env.h"
 #include "crowtree/page_store.h"
 
 #include <gtest/gtest.h>
@@ -43,12 +42,11 @@ TEST(Eviction, EvictedLeavesFreeMemoryAndReloadCorrectly) {
   opt.max_delta_len = 1;
   opt.leaf_split_bytes = 160;
   opt.frame_bytes = 4096;
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
 
   std::map<std::string, std::string> oracle;
   Fill(&t, 200, &oracle);
-  ASSERT_TRUE(t.checkpoint(nullptr).ok());  // all reachable pages now clean
+  ASSERT_TRUE(t.snapshot(nullptr).ok());  // all reachable pages now clean
 
   uint32_t before = t.buffer_pool()->stats().used;
   size_t evicted = t.evict_clean_leaves(2);  // keep at most 2 resident leaves
@@ -75,16 +73,15 @@ TEST(Eviction, EvictIsIdempotentAndSkipsDirty) {
   opt.max_delta_len = 1;
   opt.leaf_split_bytes = 160;
   opt.frame_bytes = 4096;
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
 
   std::map<std::string, std::string> oracle;
   Fill(&t, 120, &oracle);
-  // No checkpoint yet: every built leaf is dirty (no durable addr) -> nothing
+  // No snapshot yet: every built leaf is dirty (no durable addr) -> nothing
   // is evictable.
   EXPECT_EQ(t.evict_clean_leaves(0), 0u);
 
-  ASSERT_TRUE(t.checkpoint(nullptr).ok());  // pages become clean
+  ASSERT_TRUE(t.snapshot(nullptr).ok());  // pages become clean
   size_t first = t.evict_clean_leaves(1);
   EXPECT_GT(first, 0u);
   // A second pass with everything already unloaded evicts nothing more.
@@ -105,13 +102,12 @@ TEST(Eviction, ConcurrentReadersWhileEvicting) {
   opt.max_delta_len = 1;
   opt.leaf_split_bytes = 160;
   opt.frame_bytes = 4096;
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
 
   const int K = 250;
   std::map<std::string, std::string> oracle;
   Fill(&t, K, &oracle);
-  ASSERT_TRUE(t.checkpoint(nullptr).ok());
+  ASSERT_TRUE(t.snapshot(nullptr).ok());
 
   std::atomic<bool> stop{false};
   std::atomic<bool> fail{false};

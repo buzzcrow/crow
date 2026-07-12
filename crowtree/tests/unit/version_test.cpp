@@ -1,6 +1,5 @@
 // CT11: versioned root / snapshot view tests.
 #include "crowtree/crowtree.h"
-#include "crowtree/env.h"
 
 #include <gtest/gtest.h>
 
@@ -16,8 +15,7 @@ Batch Put1(const std::string& k, const std::string& v) {
 }  // namespace
 
 TEST(Version, FlushBumpsVersionAndTagsSlot) {
-  CrowtreeEnv env;
-  Crowtree t(env);
+  Crowtree t;
   EXPECT_EQ(t.version(), 0u);
   ASSERT_TRUE(t.apply(1, Put1("a", "A1")).ok());
   ASSERT_TRUE(t.flush().ok());
@@ -28,8 +26,7 @@ TEST(Version, FlushBumpsVersionAndTagsSlot) {
 }
 
 TEST(Version, SnapshotTagEqualsFlushedSlot) {
-  CrowtreeEnv env;
-  Crowtree t(env);
+  Crowtree t;
   ASSERT_TRUE(t.apply(7, Put1("a", "A7")).ok());
   t.force_advance_slot(7);
   ASSERT_TRUE(t.flush().ok());
@@ -38,8 +35,7 @@ TEST(Version, SnapshotTagEqualsFlushedSlot) {
 }
 
 TEST(Version, SnapshotIsStableWhileWriterChurns) {
-  CrowtreeEnv env;
-  Crowtree t(env);
+  Crowtree t;
   ASSERT_TRUE(t.apply(1, Put1("a", "A1")).ok());
   ASSERT_TRUE(t.apply(1, Put1("b", "B1")).ok());
   ASSERT_TRUE(t.flush().ok());
@@ -67,8 +63,7 @@ TEST(Version, SnapshotIsStableWhileWriterChurns) {
 }
 
 TEST(Version, SnapshotIncludesTombstonesButGetSkips) {
-  CrowtreeEnv env;
-  Crowtree t(env);
+  Crowtree t;
   ASSERT_TRUE(t.apply(1, Put1("a", "A1")).ok());
   ASSERT_TRUE(t.flush().ok());
   Batch del{{batch_op{"a", OpKind::kDelete, ""}}};
@@ -84,8 +79,7 @@ TEST(Version, SnapshotIncludesTombstonesButGetSkips) {
 }
 
 TEST(Version, CompareDetectsDiffs) {
-  CrowtreeEnv env;
-  Crowtree t(env);
+  Crowtree t;
   ASSERT_TRUE(t.apply(1, Put1("a", "A1")).ok());
   ASSERT_TRUE(t.apply(1, Put1("b", "B1")).ok());
   ASSERT_TRUE(t.flush().ok());
@@ -102,8 +96,7 @@ TEST(Version, CompareDetectsDiffs) {
 }
 
 TEST(Version, RefcountLifecycle) {
-  CrowtreeEnv env;
-  Crowtree t(env);
+  Crowtree t;
   ASSERT_TRUE(t.apply(1, Put1("a", "A1")).ok());
   ASSERT_TRUE(t.flush().ok());
   std::shared_ptr<Snapshot> a = t.snapshot_view();

@@ -1,6 +1,5 @@
 // plan-tree #15: apply() rejects oversized keys with kInvalidArgument.
 #include "crowtree/crowtree.h"
-#include "crowtree/env.h"
 
 #include <gtest/gtest.h>
 
@@ -19,8 +18,7 @@ Batch Put1(const std::string& k, const std::string& v) {
 TEST(OversizedKey, RejectedAtApplyWithDefaultLimit) {
   Options opt;
   opt.frame_bytes = 4096;  // default limit = frame_bytes / 2 = 2048
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
 
   const std::string big(opt.frame_bytes / 2 + 1, 'x');
   Status s = t.apply(1, Put1(big, "v"));
@@ -36,8 +34,7 @@ TEST(OversizedKey, RejectedAtApplyWithDefaultLimit) {
 TEST(OversizedKey, KeyAtLimitAccepted) {
   Options opt;
   opt.frame_bytes = 4096;  // limit = 2048
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
 
   const std::string ok_key(opt.frame_bytes / 2, 'y');  // exactly at the limit
   ASSERT_TRUE(t.apply(1, Put1(ok_key, "v")).ok());
@@ -51,8 +48,7 @@ TEST(OversizedKey, KeyAtLimitAccepted) {
 TEST(OversizedKey, ConfigurableLimit) {
   Options opt;
   opt.max_key_size = 8;  // explicit override
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
 
   EXPECT_EQ(t.apply(1, Put1("012345678", "v")).code(), Code::kInvalidArgument);  // 9 > 8
   EXPECT_TRUE(t.apply(2, Put1("01234567", "v")).ok());                           // 8 == 8
@@ -61,8 +57,7 @@ TEST(OversizedKey, ConfigurableLimit) {
 TEST(OversizedKey, BatchRejectedAtomicallyIfAnyKeyTooLarge) {
   Options opt;
   opt.max_key_size = 8;
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
 
   const std::string big(9, 'z');
   Batch b{{batch_op{"small", OpKind::kPut, "a"}, batch_op{big, OpKind::kPut, "b"}}};
@@ -74,8 +69,7 @@ TEST(OversizedKey, BatchRejectedAtomicallyIfAnyKeyTooLarge) {
 TEST(OversizedKey, PutAndDelConvenienceRespectLimit) {
   Options opt;
   opt.max_key_size = 4;
-  CrowtreeEnv env;
-  Crowtree t(env, opt);
+  Crowtree t(opt);
 
   EXPECT_EQ(t.put(Slice("abcde"), Slice("v")).code(), Code::kInvalidArgument);
   EXPECT_EQ(t.del(Slice("abcde")).code(), Code::kInvalidArgument);

@@ -99,8 +99,11 @@ class LeafBase : public PageBase {
  public:
   LeafBase() : PageBase(page_type::kLeafBase) {}
 
-  // build from already key-sorted, deduplicated entries.
-  static LeafBase* build(std::vector<leaf_entry> sorted_entries,
+  // build from already key-sorted, deduplicated entries. Entries are only READ
+  // (their bytes are copied into the frame — that copy is page construction), so
+  // take them by const ref: this both avoids requiring a move at every call site
+  // and works with the move-only `buffer` cell (leaf_entry is non-copyable).
+  static LeafBase* build(const std::vector<leaf_entry>& sorted_entries,
                          uint64_t right_sibling = kInvalidPageId,
                          const std::shared_ptr<BufferPool>& pool = nullptr,
                          uint32_t frame_bytes = 0) {
@@ -148,7 +151,7 @@ class LeafBase : public PageBase {
   leaf_entry entry(size_t i) const {
     LeafFrameView v = view();
     return leaf_entry{v.key(static_cast<uint32_t>(i)).to_string(),
-                      v.cell(static_cast<uint32_t>(i)).to_string()};
+                      buffer::copy_of(v.cell(static_cast<uint32_t>(i)))};
   }
   std::vector<leaf_entry> entries() const {
     LeafFrameView v = view();
@@ -156,7 +159,7 @@ class LeafBase : public PageBase {
     out.reserve(v.count());
     for (uint32_t i = 0; i < v.count(); ++i)
     {
-      out.push_back(leaf_entry{v.key(i).to_string(), v.cell(i).to_string()});
+      out.push_back(leaf_entry{v.key(i).to_string(), buffer::copy_of(v.cell(i))});
     }
     return out;
   }
