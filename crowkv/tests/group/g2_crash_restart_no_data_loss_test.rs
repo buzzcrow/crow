@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crowkv::cluster::group::PxGroup;
+use crowkv::cluster::group_config::GroupConfigStore;
 use crowkv::cluster::group_election::LeaderElection;
 use crowkv::cluster::{KvServer, PxKvStore, PxLocalReplica, PxLocalReplicaRole};
 use crowkv::common::config::{PxElectionConfig, WalConfig};
@@ -39,13 +40,24 @@ struct WalNode {
 struct WalCluster {
     nodes: Vec<WalNode>,
     _tmp: tempfile::TempDir,
+    _net: tokio::sync::MutexGuard<'static, ()>,
 }
 
 fn node_wal_dir(root: &Path, id: u64) -> PathBuf {
     root.join(format!("node-{id}")).join("wal")
 }
 
-async fn build_wal_group(id: u64, wal_dir: &Path, peers: &[(u64, String)], cfg: PxElectionConfig) -> PxGroup {
+fn node_conf_dir(root: &Path, id: u64) -> PathBuf {
+    root.join(format!("node-{id}")).join("conf")
+}
+
+async fn build_wal_group(
+    id: u64,
+    wal_dir: &Path,
+    conf_dir: &Path,
+    peers: &[(u64, String)],
+    cfg: PxElectionConfig,
+) -> PxGroup {
     let backend = Arc::new(IoBackend::File);
     let mut config = WalConfig::with_root(wal_dir.to_path_buf());
     config.wal_record_format = WalRecordFormat::Binary;
@@ -63,9 +75,11 @@ async fn build_wal_group(id: u64, wal_dir: &Path, peers: &[(u64, String)], cfg: 
     replica.set_wal(wal);
 
     let mut group = PxGroup::new(GROUP, replica);
-    if let Some(persisted) = replay.config.as_ref() {
-        group.apply_config(persisted);
+    let store = GroupConfigStore::new(conf_dir, 0, GROUP);
+    if let Some(persisted) = store.load().await.expect("load config") {
+        group.apply_config(&persisted);
     }
+    group.set_config_store(store);
     for (peer_id, endpoint) in peers {
         if *peer_id != id {
             group.update_member_endpoint(*peer_id, endpoint.clone());
@@ -84,6 +98,7 @@ async fn build_wal_group(id: u64, wal_dir: &Path, peers: &[(u64, String)], cfg: 
 }
 
 async fn start_wal_cluster(ids: &[u64]) -> WalCluster {
+    let net = crate::testkit::net_lock::lock().await;
     crate::testkit::logging::init_test_subscriber();
     let tmp = tempfile::tempdir().expect("tempdir");
     let cfg = PxElectionConfig::for_tests();
@@ -92,11 +107,17 @@ async fn start_wal_cluster(ids: &[u64]) -> WalCluster {
     let mut nodes = Vec::with_capacity(ids.len());
     for &id in ids {
         let wal_dir = node_wal_dir(tmp.path(), id);
+        let conf_dir = node_conf_dir(tmp.path(), id);
         let placeholders: Vec<(u64, String)> = ids
             .iter()
-            .map(|&other| (other, format!("127.0.0.1:{}", other + 10000)))
+            .map(|&other| {
+                (
+                    other,
+                    format!("127.0.0.1:{}", crate::testkit::net_lock::unique_port()),
+                )
+            })
             .collect();
-        let group = build_wal_group(id, &wal_dir, &placeholders, cfg).await;
+        let group = build_wal_group(id, &wal_dir, &conf_dir, &placeholders, cfg).await;
 
         let store = Arc::new(PxKvStore::new(id, "127.0.0.1:0".parse().unwrap()));
         store.add_group(group);
@@ -110,11 +131,16 @@ async fn start_wal_cluster(ids: &[u64]) -> WalCluster {
         .map(|n| (n.id, n.store.listen_addr().expect("bound addr").to_string()))
         .collect();
     for node in &nodes {
-        let group = build_wal_group(node.id, &node.wal_dir, &endpoints, cfg).await;
+        let conf_dir = node_conf_dir(tmp.path(), node.id);
+        let group = build_wal_group(node.id, &node.wal_dir, &conf_dir, &endpoints, cfg).await;
         node.store.add_group(group);
     }
 
-    WalCluster { nodes, _tmp: tmp }
+    WalCluster {
+        nodes,
+        _tmp: tmp,
+        _net: net,
+    }
 }
 
 impl WalCluster {
@@ -188,12 +214,13 @@ impl WalCluster {
 
     async fn restart(&mut self, id: u64, wal_dir: PathBuf) {
         let cfg = PxElectionConfig::for_tests();
+        let conf_dir = wal_dir.parent().expect("wal_dir parent").join("conf");
         let peers: Vec<(u64, String)> = self
             .nodes
             .iter()
             .map(|n| (n.id, n.store.listen_addr().expect("bound addr").to_string()))
             .collect();
-        let group = build_wal_group(id, &wal_dir, &peers, cfg).await;
+        let group = build_wal_group(id, &wal_dir, &conf_dir, &peers, cfg).await;
         let store = Arc::new(PxKvStore::new(id, "127.0.0.1:0".parse().unwrap()));
         store.add_group(group);
         store.start().await.expect("restart store");
@@ -205,7 +232,8 @@ impl WalCluster {
             .map(|n| (n.id, n.store.listen_addr().expect("bound addr").to_string()))
             .collect();
         for node in &self.nodes {
-            let group = build_wal_group(node.id, &node.wal_dir, &endpoints, cfg).await;
+            let conf_dir = node.wal_dir.parent().expect("wal_dir parent").join("conf");
+            let group = build_wal_group(node.id, &node.wal_dir, &conf_dir, &endpoints, cfg).await;
             node.store.add_group(group);
         }
     }
@@ -311,22 +339,23 @@ async fn assert_offline_replay_has_values(node_id: u64, wal_dir: PathBuf, kvs: &
         u64::try_from(kvs.len()).expect("kvs length exceeds u64"),
         "offline replay should recover every accepted slot"
     );
+    let n = u64::try_from(kvs.len()).expect("kvs length exceeds u64");
     assert_eq!(
         restored.last_chosen_slot(),
-        0,
-        "offline replay must not pre-mark slots chosen"
+        n,
+        "offline replay should restore last_chosen_slot from durable commit watermark"
     );
     assert_eq!(
         restored.contiguous_chosen(),
-        0,
-        "offline replay must not advance the chosen frontier without commit evidence"
+        n,
+        "offline replay should restore contiguous_chosen from durable commit watermark"
     );
-    for (slot, (key, _value)) in (1u64..).zip(kvs.iter()) {
+    for (slot, (key, value)) in (1u64..).zip(kvs.iter()) {
         let accepted = restored.accepted_at(slot).await;
         assert_eq!(
-            restored.learner.engine_get(key),
-            None,
-            "offline replay must not pre-apply {:?} into the learner",
+            restored.learner.engine_get(key).map(|(_, v)| v).as_deref(),
+            Some(value.as_slice()),
+            "offline replay should have committed value for {:?} applied from durable commit watermark",
             String::from_utf8_lossy(key)
         );
         assert!(
@@ -337,7 +366,6 @@ async fn assert_offline_replay_has_values(node_id: u64, wal_dir: PathBuf, kvs: &
 }
 
 #[tokio::test]
-#[ignore = "W10 proposing_term readiness is fixed; this test now fails on data survival after leader restart (read returns None for committed keys). This is a repair / divergence issue after a restart, separate from leadership readiness. Needs further W11-style repair-correctness work before re-enable."]
 async fn cluster_survives_leader_kill_and_restart_with_no_data_loss() {
     let mut cluster = start_wal_cluster(&[1, 2, 3]).await;
     let leader_id = cluster

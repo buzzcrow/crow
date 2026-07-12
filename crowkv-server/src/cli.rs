@@ -39,6 +39,10 @@ pub struct Cli {
     #[arg(long)]
     pub wal_root: Option<std::path::PathBuf>,
 
+    /// Root directory for group config files. Default: sibling of `wal_root` named `conf`.
+    #[arg(long)]
+    pub config_root: Option<std::path::PathBuf>,
+
     #[arg(long, default_value = "default", value_parser = ["default", "test"])]
     pub election_profile: String,
 }

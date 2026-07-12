@@ -17,7 +17,7 @@ use super::file_backend;
 /// Chosen I/O backend for the process lifetime.
 ///
 /// Callers never branch on this; they call [`IoBackend::open`] and get an
-/// [`super::AsyncFile`] that dispatches internally.
+/// [`super::WalFile`] that dispatches internally.
 pub enum IoBackend {
     /// `tokio::fs` + `spawn_blocking` for fdatasync. Works everywhere.
     File,
@@ -114,19 +114,19 @@ impl IoBackend {
     ///
     /// # Errors
     /// Returns IO error if the file cannot be opened or created.
-    pub async fn open(&self, path: impl AsRef<Path>, opts: OpenOptions) -> io::Result<super::AsyncFile> {
+    pub async fn open(&self, path: impl AsRef<Path>, opts: OpenOptions) -> io::Result<super::WalFile> {
         match self {
             Self::File => {
                 let f = file_backend::FileBackendFile::open(path.as_ref(), &opts).await?;
-                Ok(super::AsyncFile {
-                    inner: super::AsyncFileInner::File(f),
+                Ok(super::WalFile {
+                    inner: super::WalFileInner::File(f),
                 })
             }
             #[cfg(feature = "test-util")]
             Self::BlockDevice(disk) => {
                 let f = disk.open_segment(path.as_ref(), &opts)?;
-                Ok(super::AsyncFile {
-                    inner: super::AsyncFileInner::Block(f),
+                Ok(super::WalFile {
+                    inner: super::WalFileInner::Block(f),
                 })
             }
         }

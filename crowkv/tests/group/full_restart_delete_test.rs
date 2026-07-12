@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crowkv::cluster::group::PxGroup;
+use crowkv::cluster::group_config::GroupConfigStore;
 use crowkv::cluster::group_election::LeaderElection;
 use crowkv::cluster::{KvServer, PxKvStore, PxLocalReplica, PxLocalReplicaRole};
 use crowkv::common::config::{PxElectionConfig, WalConfig};
@@ -31,13 +32,24 @@ struct WalNode {
 struct WalCluster {
     nodes: Vec<WalNode>,
     _tmp: tempfile::TempDir,
+    _net: tokio::sync::MutexGuard<'static, ()>,
 }
 
 fn node_wal_dir(root: &Path, id: u64) -> PathBuf {
     root.join(format!("node-{id}")).join("wal")
 }
 
-async fn build_wal_group(id: u64, wal_dir: &Path, peers: &[(u64, String)], cfg: PxElectionConfig) -> PxGroup {
+fn node_conf_dir(root: &Path, id: u64) -> PathBuf {
+    root.join(format!("node-{id}")).join("conf")
+}
+
+async fn build_wal_group(
+    id: u64,
+    wal_dir: &Path,
+    conf_dir: &Path,
+    peers: &[(u64, String)],
+    cfg: PxElectionConfig,
+) -> PxGroup {
     let backend = Arc::new(IoBackend::File);
     let config = WalConfig::with_root(wal_dir.to_path_buf());
     let replay = replay_group(&backend, &config.wal_disks, GROUP)
@@ -54,9 +66,11 @@ async fn build_wal_group(id: u64, wal_dir: &Path, peers: &[(u64, String)], cfg: 
     replica.set_wal(wal);
 
     let mut group = PxGroup::new(GROUP, replica);
-    if let Some(persisted) = replay.config.as_ref() {
-        group.apply_config(persisted);
+    let store = GroupConfigStore::new(conf_dir, 0, GROUP);
+    if let Some(persisted) = store.load().await.expect("load config") {
+        group.apply_config(&persisted);
     }
+    group.set_config_store(store);
     // Caller-supplied endpoints (e.g., after restart rewiring) override the
     // persisted endpoints so ephemeral ports can be reconciled.
     for (peer_id, endpoint) in peers {
@@ -77,6 +91,7 @@ async fn build_wal_group(id: u64, wal_dir: &Path, peers: &[(u64, String)], cfg: 
 }
 
 async fn start_wal_cluster(ids: &[u64]) -> WalCluster {
+    let net = crate::testkit::net_lock::lock().await;
     crate::testkit::logging::init_test_subscriber();
     let tmp = tempfile::tempdir().expect("tempdir");
     let cfg = PxElectionConfig::for_tests();
@@ -84,11 +99,17 @@ async fn start_wal_cluster(ids: &[u64]) -> WalCluster {
     let mut nodes = Vec::with_capacity(ids.len());
     for &id in ids {
         let wal_dir = node_wal_dir(tmp.path(), id);
+        let conf_dir = node_conf_dir(tmp.path(), id);
         let placeholders: Vec<(u64, String)> = ids
             .iter()
-            .map(|&other| (other, format!("127.0.0.1:{}", other + 10000)))
+            .map(|&other| {
+                (
+                    other,
+                    format!("127.0.0.1:{}", crate::testkit::net_lock::unique_port()),
+                )
+            })
             .collect();
-        let group = build_wal_group(id, &wal_dir, &placeholders, cfg).await;
+        let group = build_wal_group(id, &wal_dir, &conf_dir, &placeholders, cfg).await;
 
         let store = Arc::new(PxKvStore::new(id, "127.0.0.1:0".parse().unwrap()));
         store.add_group(group);
@@ -101,11 +122,16 @@ async fn start_wal_cluster(ids: &[u64]) -> WalCluster {
         .map(|n| (n.id, n.store.listen_addr().expect("bound addr").to_string()))
         .collect();
     for node in &nodes {
-        let group = build_wal_group(node.id, &node.wal_dir, &endpoints, cfg).await;
+        let conf_dir = node_conf_dir(tmp.path(), node.id);
+        let group = build_wal_group(node.id, &node.wal_dir, &conf_dir, &endpoints, cfg).await;
         node.store.add_group(group);
     }
 
-    WalCluster { nodes, _tmp: tmp }
+    WalCluster {
+        nodes,
+        _tmp: tmp,
+        _net: net,
+    }
 }
 
 impl WalCluster {
@@ -186,7 +212,8 @@ impl WalCluster {
         // mis-decide it before peers wire in.
         let mut nodes = Vec::new();
         for (id, wal_dir) in &ids_dirs {
-            let group = build_wal_group(*id, wal_dir, &[], cfg).await;
+            let conf_dir = wal_dir.parent().expect("wal_dir parent").join("conf");
+            let group = build_wal_group(*id, wal_dir, &conf_dir, &[], cfg).await;
             let store = Arc::new(PxKvStore::new(*id, "127.0.0.1:0".parse().unwrap()));
             store.add_group(group);
             store.start().await.expect("restart store");
@@ -206,7 +233,8 @@ impl WalCluster {
             .map(|n| (n.id, n.store.listen_addr().expect("bound addr").to_string()))
             .collect();
         for node in &nodes {
-            let group = build_wal_group(node.id, &node.wal_dir, &endpoints, cfg).await;
+            let conf_dir = node.wal_dir.parent().expect("wal_dir parent").join("conf");
+            let group = build_wal_group(node.id, &node.wal_dir, &conf_dir, &endpoints, cfg).await;
             node.store.add_group(group);
         }
         self.nodes = nodes;

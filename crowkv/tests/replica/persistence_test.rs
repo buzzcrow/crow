@@ -37,6 +37,41 @@ fn encode_put_payload(key: &[u8], value: &[u8]) -> Vec<u8> {
     buf
 }
 
+fn encode_delete_payload(key: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.push(1); // op = DELETE
+    buf.push(1); // kind = Delete
+    let key_len = u32::try_from(key.len()).expect("key length exceeds u32");
+    buf.extend_from_slice(&key_len.to_le_bytes());
+    buf.extend_from_slice(key);
+    buf.extend_from_slice(&0u32.to_le_bytes()); // value_len = 0
+    buf
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn encode_batch_payload(ops: &[(Vec<u8>, Option<Vec<u8>>)]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.push(ops.len() as u8); // op_count
+    for (key, value) in ops {
+        if let Some(v) = value {
+            buf.push(0); // kind = Put
+            let key_len = u32::try_from(key.len()).expect("key len");
+            buf.extend_from_slice(&key_len.to_le_bytes());
+            buf.extend_from_slice(key);
+            let val_len = u32::try_from(v.len()).expect("val len");
+            buf.extend_from_slice(&val_len.to_le_bytes());
+            buf.extend_from_slice(v);
+        } else {
+            buf.push(1); // kind = Delete
+            let key_len = u32::try_from(key.len()).expect("key len");
+            buf.extend_from_slice(&key_len.to_le_bytes());
+            buf.extend_from_slice(key);
+            buf.extend_from_slice(&0u32.to_le_bytes()); // value_len = 0
+        }
+    }
+    buf
+}
+
 fn write_entry(slot: u64, key: &[u8], value: &[u8]) -> PxLogEntry {
     PxLogEntry {
         slot,
@@ -44,6 +79,30 @@ fn write_entry(slot: u64, key: &[u8], value: &[u8]) -> PxLogEntry {
         term: 1,
         kind: PxLogEntryKind::Write,
         payload: Bytes::from(encode_put_payload(key, value)),
+        client_id: Some(1),
+        seq: Some(slot),
+    }
+}
+
+fn delete_entry(slot: u64, key: &[u8]) -> PxLogEntry {
+    PxLogEntry {
+        slot,
+        ballot: PxBallot::new(1, REPLICA_ID),
+        term: 1,
+        kind: PxLogEntryKind::Write,
+        payload: Bytes::from(encode_delete_payload(key)),
+        client_id: Some(1),
+        seq: Some(slot),
+    }
+}
+
+fn batch_entry(slot: u64, ops: &[(Vec<u8>, Option<Vec<u8>>)]) -> PxLogEntry {
+    PxLogEntry {
+        slot,
+        ballot: PxBallot::new(1, REPLICA_ID),
+        term: 1,
+        kind: PxLogEntryKind::Write,
+        payload: Bytes::from(encode_batch_payload(ops)),
         client_id: Some(1),
         seq: Some(slot),
     }
@@ -116,4 +175,259 @@ async fn wal_backed_replica_reloads_committed_kv_after_restart() {
     assert_eq!(restored.contiguous_applied(), 3);
     assert!(restored.accepted_at(1).await.is_some());
     assert!(restored.accepted_at(3).await.is_some());
+}
+
+#[tokio::test]
+async fn delete_survives_wal_restart() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let wal_dir = tmp.path().join("wal");
+    let disks = vec![wal_dir.clone()];
+
+    {
+        let wal = create_file_wal(wal_dir.clone()).await;
+        let mut replica = PxLocalReplica::new(REPLICA_ID, PxLocalReplicaRole::Leader);
+        replica.set_wal(Arc::clone(&wal));
+
+        // Slot 1: put "k1" = "v1"
+        let e1 = write_entry(1, b"k1", b"v1");
+        let _ = replica.on_accept(e1.clone()).await;
+        replica.learn_chosen(&e1).await;
+
+        // Slot 2: delete "k1"
+        let e2 = delete_entry(2, b"k1");
+        let _ = replica.on_accept(e2.clone()).await;
+        replica.learn_chosen(&e2).await;
+
+        assert_eq!(replica.contiguous_applied(), 2);
+        assert_eq!(replica.learner.engine_get(b"k1"), None, "key deleted in memory");
+        wal.seal_all().await.expect("seal");
+    }
+
+    let backend = Arc::new(IoBackend::File);
+    let replay = replay_group(&backend, &disks, GROUP).await.expect("replay");
+    let restored = PxLocalReplica::restore_from_replay(REPLICA_ID, PxLocalReplicaRole::Leader, &replay)
+        .await
+        .expect("restore");
+
+    assert_eq!(
+        restored.learner.engine_get(b"k1"),
+        None,
+        "delete survives restart — key must not resurrect"
+    );
+    assert_eq!(restored.contiguous_applied(), 2);
+}
+
+#[tokio::test]
+async fn put_then_delete_same_key_survives_restart() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let wal_dir = tmp.path().join("wal");
+    let disks = vec![wal_dir.clone()];
+
+    {
+        let wal = create_file_wal(wal_dir.clone()).await;
+        let mut replica = PxLocalReplica::new(REPLICA_ID, PxLocalReplicaRole::Leader);
+        replica.set_wal(Arc::clone(&wal));
+
+        // Slot 1: put "k" = "v1"
+        let e1 = write_entry(1, b"k", b"v1");
+        let _ = replica.on_accept(e1.clone()).await;
+        replica.learn_chosen(&e1).await;
+
+        // Slot 2: put "k" = "v2" (overwrite)
+        let e2 = write_entry(2, b"k", b"v2");
+        let _ = replica.on_accept(e2.clone()).await;
+        replica.learn_chosen(&e2).await;
+
+        // Slot 3: delete "k"
+        let e3 = delete_entry(3, b"k");
+        let _ = replica.on_accept(e3.clone()).await;
+        replica.learn_chosen(&e3).await;
+
+        assert_eq!(replica.contiguous_applied(), 3);
+        assert_eq!(replica.learner.engine_get(b"k"), None, "key deleted");
+        wal.seal_all().await.expect("seal");
+    }
+
+    let backend = Arc::new(IoBackend::File);
+    let replay = replay_group(&backend, &disks, GROUP).await.expect("replay");
+    let restored = PxLocalReplica::restore_from_replay(REPLICA_ID, PxLocalReplicaRole::Leader, &replay)
+        .await
+        .expect("restore");
+
+    assert_eq!(
+        restored.learner.engine_get(b"k"),
+        None,
+        "delete after overwrite survives restart"
+    );
+    assert_eq!(restored.contiguous_applied(), 3);
+}
+
+#[tokio::test]
+async fn batch_with_put_and_delete_survives_restart() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let wal_dir = tmp.path().join("wal");
+    let disks = vec![wal_dir.clone()];
+
+    {
+        let wal = create_file_wal(wal_dir.clone()).await;
+        let mut replica = PxLocalReplica::new(REPLICA_ID, PxLocalReplicaRole::Leader);
+        replica.set_wal(Arc::clone(&wal));
+
+        // Slot 1: batch with 3 ops — put k1, put k2, delete k1 (intra-batch last-wins)
+        let e1 = batch_entry(
+            1,
+            &[
+                (b"k1".to_vec(), Some(b"v1".to_vec())),
+                (b"k2".to_vec(), Some(b"v2".to_vec())),
+                (b"k1".to_vec(), None), // delete k1 — should win over put in same batch
+            ],
+        );
+        let _ = replica.on_accept(e1.clone()).await;
+        replica.learn_chosen(&e1).await;
+
+        // Slot 2: put k3
+        let e2 = write_entry(2, b"k3", b"v3");
+        let _ = replica.on_accept(e2.clone()).await;
+        replica.learn_chosen(&e2).await;
+
+        assert_eq!(replica.contiguous_applied(), 2);
+        assert_eq!(replica.learner.engine_get(b"k1"), None, "k1 deleted in batch");
+        assert_eq!(
+            replica.learner.engine_get(b"k2").map(|(_, v)| v),
+            Some(b"v2".to_vec()),
+            "k2 put in batch"
+        );
+        assert_eq!(
+            replica.learner.engine_get(b"k3").map(|(_, v)| v),
+            Some(b"v3".to_vec()),
+            "k3 put in slot 2"
+        );
+        wal.seal_all().await.expect("seal");
+    }
+
+    let backend = Arc::new(IoBackend::File);
+    let replay = replay_group(&backend, &disks, GROUP).await.expect("replay");
+    let restored = PxLocalReplica::restore_from_replay(REPLICA_ID, PxLocalReplicaRole::Leader, &replay)
+        .await
+        .expect("restore");
+
+    assert_eq!(
+        restored.learner.engine_get(b"k1"),
+        None,
+        "k1 deleted in batch survives restart"
+    );
+    assert_eq!(
+        restored.learner.engine_get(b"k2").map(|(_, v)| v),
+        Some(b"v2".to_vec()),
+        "k2 put in batch survives restart"
+    );
+    assert_eq!(
+        restored.learner.engine_get(b"k3").map(|(_, v)| v),
+        Some(b"v3".to_vec()),
+        "k3 put in slot 2 survives restart"
+    );
+    assert_eq!(restored.contiguous_applied(), 2);
+}
+
+#[tokio::test]
+async fn mixed_put_delete_batch_survives_restart() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let wal_dir = tmp.path().join("wal");
+    let disks = vec![wal_dir.clone()];
+
+    {
+        let wal = create_file_wal(wal_dir.clone()).await;
+        let mut replica = PxLocalReplica::new(REPLICA_ID, PxLocalReplicaRole::Leader);
+        replica.set_wal(Arc::clone(&wal));
+
+        // Slot 1: put k1, k2, k3
+        let e1 = batch_entry(
+            1,
+            &[
+                (b"k1".to_vec(), Some(b"v1".to_vec())),
+                (b"k2".to_vec(), Some(b"v2".to_vec())),
+                (b"k3".to_vec(), Some(b"v3".to_vec())),
+            ],
+        );
+        let _ = replica.on_accept(e1.clone()).await;
+        replica.learn_chosen(&e1).await;
+
+        // Slot 2: delete k2 (single-op entry)
+        let e2 = delete_entry(2, b"k2");
+        let _ = replica.on_accept(e2.clone()).await;
+        replica.learn_chosen(&e2).await;
+
+        // Slot 3: batch — put k4, delete k1, put k5
+        let e3 = batch_entry(
+            3,
+            &[
+                (b"k4".to_vec(), Some(b"v4".to_vec())),
+                (b"k1".to_vec(), None), // delete k1
+                (b"k5".to_vec(), Some(b"v5".to_vec())),
+            ],
+        );
+        let _ = replica.on_accept(e3.clone()).await;
+        replica.learn_chosen(&e3).await;
+
+        assert_eq!(replica.contiguous_applied(), 3);
+
+        // Verify correctness before restart.
+        assert_eq!(
+            replica.learner.engine_get(b"k1"),
+            None,
+            "k1 deleted in batch slot 3"
+        );
+        assert_eq!(replica.learner.engine_get(b"k2"), None, "k2 deleted in slot 2");
+        assert_eq!(
+            replica.learner.engine_get(b"k3").map(|(_, v)| v),
+            Some(b"v3".to_vec()),
+            "k3 survives"
+        );
+        assert_eq!(
+            replica.learner.engine_get(b"k4").map(|(_, v)| v),
+            Some(b"v4".to_vec()),
+            "k4 put in batch slot 3"
+        );
+        assert_eq!(
+            replica.learner.engine_get(b"k5").map(|(_, v)| v),
+            Some(b"v5".to_vec()),
+            "k5 put in batch slot 3"
+        );
+
+        wal.seal_all().await.expect("seal");
+    }
+
+    let backend = Arc::new(IoBackend::File);
+    let replay = replay_group(&backend, &disks, GROUP).await.expect("replay");
+    let restored = PxLocalReplica::restore_from_replay(REPLICA_ID, PxLocalReplicaRole::Leader, &replay)
+        .await
+        .expect("restore");
+
+    // k1: put in slot 1, deleted in slot 3 batch → gone
+    assert_eq!(
+        restored.learner.engine_get(b"k1"),
+        None,
+        "k1 deleted in batch slot 3"
+    );
+    // k2: put in slot 1, deleted in slot 2 → gone
+    assert_eq!(restored.learner.engine_get(b"k2"), None, "k2 deleted in slot 2");
+    // k3: put in slot 1, never deleted → alive
+    assert_eq!(
+        restored.learner.engine_get(b"k3").map(|(_, v)| v),
+        Some(b"v3".to_vec()),
+        "k3 survives"
+    );
+    // k4: put in slot 3 batch → alive
+    assert_eq!(
+        restored.learner.engine_get(b"k4").map(|(_, v)| v),
+        Some(b"v4".to_vec()),
+        "k4 put in batch slot 3"
+    );
+    // k5: put in slot 3 batch → alive
+    assert_eq!(
+        restored.learner.engine_get(b"k5").map(|(_, v)| v),
+        Some(b"v5".to_vec()),
+        "k5 put in batch slot 3"
+    );
+    assert_eq!(restored.contiguous_applied(), 3);
 }

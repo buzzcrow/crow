@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::testkit::logging::init_test_subscriber;
+use crate::testkit::net_lock::{lock, unique_port};
 use crowkv::cluster::group::PxGroup;
 use crowkv::cluster::group_election::LeaderElection;
 use crowkv::cluster::{KvServer, PxKvStore, PxLocalReplica, PxLocalReplicaRole, PxRemoteReplica};
@@ -12,11 +13,16 @@ use tonic::transport::Channel;
 pub struct TestCluster {
     nodes: Vec<Arc<PxKvStore>>,
     leader_id: u64,
+    _net: tokio::sync::MutexGuard<'static, ()>,
 }
 
 impl TestCluster {
-    fn new(nodes: Vec<Arc<PxKvStore>>, leader_id: u64) -> Self {
-        Self { nodes, leader_id }
+    fn new(nodes: Vec<Arc<PxKvStore>>, leader_id: u64, net: tokio::sync::MutexGuard<'static, ()>) -> Self {
+        Self {
+            nodes,
+            leader_id,
+            _net: net,
+        }
     }
 
     pub fn nodes(&self) -> &[Arc<PxKvStore>] {
@@ -107,6 +113,7 @@ pub async fn start_cluster_no_leader(ids: &[u64]) -> TestCluster {
 }
 
 async fn start_cluster_no_leader_inner(ids: &[u64]) -> TestCluster {
+    let net = lock().await;
     init_test_subscriber();
 
     let cfg = PxElectionConfig::for_tests();
@@ -120,7 +127,7 @@ async fn start_cluster_no_leader_inner(ids: &[u64]) -> TestCluster {
         let remote_replicas: Vec<PxRemoteReplica> = ids
             .iter()
             .filter(|&&other_id| other_id != id)
-            .map(|&other_id| PxRemoteReplica::new(other_id, format!("127.0.0.1:{}", other_id + 10000)))
+            .map(|&other_id| PxRemoteReplica::new(other_id, format!("127.0.0.1:{}", unique_port())))
             .collect();
 
         let mut group = PxGroup::new(1, replica);
@@ -165,10 +172,11 @@ async fn start_cluster_no_leader_inner(ids: &[u64]) -> TestCluster {
     // `leader_id` is unknown until an election completes; seed with the
     // first id as a placeholder so the legacy `leader()` accessor still
     // compiles. Tests should prefer `elected_leader()`.
-    TestCluster::new(running, ids.first().copied().unwrap_or(0))
+    TestCluster::new(running, ids.first().copied().unwrap_or(0), net)
 }
 
 async fn start_cluster_inner(ids: &[u64], leader_id: u64, force_classic: bool) -> TestCluster {
+    let net = lock().await;
     init_test_subscriber();
 
     let mut running = Vec::with_capacity(ids.len());
@@ -189,7 +197,7 @@ async fn start_cluster_inner(ids: &[u64], leader_id: u64, force_classic: bool) -
         let remote_replicas: Vec<PxRemoteReplica> = ids
             .iter()
             .filter(|&&other_id| other_id != id)
-            .map(|&other_id| PxRemoteReplica::new(other_id, format!("127.0.0.1:{}", other_id + 10000)))
+            .map(|&other_id| PxRemoteReplica::new(other_id, format!("127.0.0.1:{}", unique_port())))
             .collect();
 
         let mut group = PxGroup::new(1, replica);
@@ -245,7 +253,7 @@ async fn start_cluster_inner(ids: &[u64], leader_id: u64, force_classic: bool) -
         node.add_group(new_group);
     }
 
-    TestCluster::new(running, leader_id)
+    TestCluster::new(running, leader_id, net)
 }
 
 #[allow(dead_code)]

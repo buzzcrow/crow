@@ -28,6 +28,7 @@ fn encode_put_payload(key: &[u8], value: &[u8]) -> Vec<u8> {
 async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
     let temp = tempfile::tempdir().unwrap();
     let wal_root = temp.path().join("wal-root");
+    let config_root = temp.path().join("conf-root");
     let backend = Arc::new(IoBackend::detect());
     let store_id = 9;
     let group_id = 11;
@@ -71,6 +72,7 @@ async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
         PxLocalReplicaRole::Leader,
         PxElectionConfig::for_tests(),
         &wal_root,
+        &config_root,
         backend.clone(),
     )
     .await

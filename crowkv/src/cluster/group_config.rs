@@ -1,14 +1,22 @@
-//! Persisted group membership configuration for WAL `ConfigChange` records.
+//! Persisted group membership configuration.
 //!
 //! `PxGroupConfig` is the durable, consensus-independent snapshot of a group's
-//! intended membership. It is written to the WAL metadata lane whenever a
-//! membership mutation completes (`add_remote_replicas`, `remove_remote_replica`).
-//! On restart, replay recovers the latest config and seeds the rebuilt group so
-//! that a node cannot accidentally start as a `quorum=1` singleton in the restore
-//! window.
+//! intended membership. It is persisted to a dedicated config file via
+//! [`GroupConfigStore`] whenever a membership mutation completes. On restart,
+//! the config file is loaded and seeds the rebuilt group so that a node
+//! cannot accidentally start as a `quorum=1` singleton in the restore window.
+//!
+//! Config files live in a `conf/` directory that is a sibling of `wal/`, with
+//! a flat layout: `conf/store{sid}_group{gid}.bin`. Each group owns its own
+//! file, so membership updates never interfere with other groups.
+
+use std::io;
+use std::path::{Path, PathBuf};
+
+use tokio::fs;
+use tokio::io::AsyncWriteExt;
 
 use crate::paxos::{PxGroupId, PxTerm};
-use crate::wal::record::WALRecord;
 
 /// A single member of a persisted group configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -130,27 +138,6 @@ impl PxGroupConfig {
         })
     }
 
-    /// Encode this config into a WAL `ConfigChange` record.
-    ///
-    /// The record is written on the metadata lane (slot 0) and is not a
-    /// consensus slot; it is a local durability aid for the restore window.
-    #[must_use]
-    pub fn to_record(&self) -> WALRecord {
-        WALRecord::from_config_change(self.group_id, self.term, self.encode())
-    }
-
-    /// Decode a `ConfigChange` WAL record back into a group config.
-    ///
-    /// Returns `None` if the record is not a `ConfigChange` or if the payload is
-    /// malformed.
-    #[must_use]
-    pub fn from_record(record: &WALRecord) -> Option<Self> {
-        if !record.is_config_change() {
-            return None;
-        }
-        Self::decode(record.payload.as_ref()).ok()
-    }
-
     /// Total number of voting members, including the local replica if it is part
     /// of this config.
     #[must_use]
@@ -171,51 +158,102 @@ impl PxGroupConfig {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+// ── File-based config store ───────────────────────────────────
 
-    #[test]
-    fn roundtrip_config() {
-        let cfg = PxGroupConfig {
-            group_id: 7,
-            term: 3,
-            members: vec![
-                PxGroupMember {
-                    replica_id: 1,
-                    endpoint: "127.0.0.1:10001".into(),
-                    voting: true,
-                },
-                PxGroupMember {
-                    replica_id: 2,
-                    endpoint: "127.0.0.1:10002".into(),
-                    voting: true,
-                },
-                PxGroupMember {
-                    replica_id: 3,
-                    endpoint: "127.0.0.1:10003".into(),
-                    voting: true,
-                },
-            ],
-        };
-        let encoded = cfg.encode();
-        let decoded = PxGroupConfig::decode(&encoded).expect("decode");
-        assert_eq!(cfg, decoded);
+/// Temp file suffix used during atomic write.
+const CONFIG_TMP_SUFFIX: &str = ".tmp";
+
+/// File-based store for a single group's membership configuration.
+///
+/// Config files are stored in a flat layout under a `conf/` root directory:
+/// `conf/store{sid}_group{gid}.bin`. Each group has its own file, so
+/// membership updates never interfere with other groups.
+#[derive(Clone, Debug)]
+pub struct GroupConfigStore {
+    config_path: PathBuf,
+}
+
+impl GroupConfigStore {
+    /// Create a store for a specific store+group pair under the given config
+    /// root directory.
+    ///
+    /// The config file path is `{config_root}/store{store_id}_group{group_id}.bin`.
+    /// The `config_root` directory is created on first `save` if it does not
+    /// already exist.
+    #[must_use]
+    pub fn new(config_root: impl AsRef<Path>, store_id: u64, group_id: u64) -> Self {
+        let file_name = format!("store{store_id}_group{group_id}.bin");
+        let config_path = config_root.as_ref().join(file_name);
+        Self { config_path }
     }
 
-    #[test]
-    fn roundtrip_record() {
-        let cfg = PxGroupConfig {
-            group_id: 7,
-            term: 3,
-            members: vec![PxGroupMember {
-                replica_id: 1,
-                endpoint: "127.0.0.1:10001".into(),
-                voting: true,
-            }],
+    /// Atomically persist the given config.
+    ///
+    /// Writes to a temp file, fsyncs it, then renames over the target.
+    /// On crash either the old or the new config is fully present — never
+    /// a partial write.
+    ///
+    /// # Errors
+    /// Returns IO error if the write, sync, or rename fails.
+    pub async fn save(&self, config: &PxGroupConfig) -> io::Result<()> {
+        // Ensure the parent directory exists.
+        if let Some(parent) = self.config_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
+        let payload = config.encode();
+        let tmp_path = {
+            let mut p = self.config_path.clone();
+            p.set_extension(format!("bin{CONFIG_TMP_SUFFIX}"));
+            p
         };
-        let record = cfg.to_record();
-        let decoded = PxGroupConfig::from_record(&record).expect("from record");
-        assert_eq!(cfg, decoded);
+
+        // Write temp file.
+        {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp_path)
+                .await?;
+            file.write_all(&payload).await?;
+            file.flush().await?;
+            file.sync_all().await?;
+        }
+
+        // Atomic rename.
+        fs::rename(&tmp_path, &self.config_path).await?;
+
+        // fsync the directory so the rename is durable.
+        if let Some(parent) = self.config_path.parent() {
+            if let Ok(dir) = fs::File::open(parent).await {
+                let _ = dir.sync_all().await;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Load the latest persisted config, or `None` if no config file exists.
+    ///
+    /// # Errors
+    /// Returns IO error if the file exists but cannot be read. Returns
+    /// `Ok(None)` if the file does not exist.
+    pub async fn load(&self) -> io::Result<Option<PxGroupConfig>> {
+        match fs::read(&self.config_path).await {
+            Ok(data) => {
+                let config = PxGroupConfig::decode(&data)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                Ok(Some(config))
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Path to the config file (for diagnostics / tests).
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.config_path
     }
 }

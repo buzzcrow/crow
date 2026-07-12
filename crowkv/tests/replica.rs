@@ -26,3 +26,6 @@ mod replay_ordering;
 
 #[path = "replica/concurrent_test.rs"]
 mod concurrent;
+
+#[path = "replica/op_correctness_test.rs"]
+mod op_correctness;

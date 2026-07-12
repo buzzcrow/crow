@@ -430,7 +430,7 @@ async fn handle_accept_inner(store: &Arc<PxKvStore>, req: AcceptRequest) -> Resu
     )
     .await?;
     if matches!(reply, PxAcceptReply::Accepted { .. }) {
-        replica.learn(&entry);
+        replica.learn_chosen(&entry).await;
     }
 
     let (rejected, rejected_round, rejected_leader_id, term_stale, reply_term) = match reply {

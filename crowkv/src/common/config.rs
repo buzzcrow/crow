@@ -68,10 +68,15 @@ pub struct WalConfig {
     pub wal_min_retention_secs: u64,
     /// GC scan cadence (seconds). Default 30.
     pub gc_tick_secs: u64,
-    /// Physical alignment the WAL backend must satisfy. `Unaligned` (default)
-    /// targets byte-addressable media and the file backend; `Aligned` targets a
-    /// block device (e.g. a 4 KiB SSD/NVMe) and selects a block pipeline.
-    pub wal_alignment: WalBlockAlignment,
+    /// Whether the WAL backend uses block-aligned I/O (SSD/NVMe under
+    /// `O_DIRECT`). When `false` (default), the file backend is used with
+    /// byte-addressable media (RAM/SCM/PMEM). When `true`, a block pipeline
+    /// is selected and `wal_io_unit_bytes` controls the alignment unit.
+    pub wal_aligned: bool,
+    /// SSD/NVMe I/O unit size in bytes. Only used when `wal_aligned` is `true`.
+    /// Common values: 512 (logical sector), 4096 (default 4 KiB), 8192,
+    /// 16384, 65536. Must be a power of two.
+    pub wal_io_unit_bytes: usize,
     /// Record encoding format. `Auto` selects binary frames (zero-copy) on all
     /// backends.
     pub wal_record_format: WalRecordFormat,
@@ -89,6 +94,20 @@ impl WalConfig {
     pub fn set_root(&mut self, wal_root: impl Into<PathBuf>) {
         self.wal_disks = vec![wal_root.into()];
     }
+
+    /// Construct the `WalBlockAlignment` implied by this config.
+    /// Returns `Unaligned` when `wal_aligned` is false, otherwise
+    /// `Aligned { io_unit_bytes: wal_io_unit_bytes }`.
+    #[must_use]
+    pub fn alignment(&self) -> WalBlockAlignment {
+        if self.wal_aligned {
+            WalBlockAlignment::Aligned {
+                io_unit_bytes: self.wal_io_unit_bytes,
+            }
+        } else {
+            WalBlockAlignment::Unaligned
+        }
+    }
 }
 
 impl Default for WalConfig {
@@ -102,7 +121,8 @@ impl Default for WalConfig {
             wal_disk_high_watermark_pct: 80,
             wal_min_retention_secs: 3600,
             gc_tick_secs: 30,
-            wal_alignment: WalBlockAlignment::Unaligned,
+            wal_aligned: false,
+            wal_io_unit_bytes: WalBlockAlignment::DEFAULT_IO_UNIT_BYTES,
             wal_record_format: WalRecordFormat::Auto,
         }
     }

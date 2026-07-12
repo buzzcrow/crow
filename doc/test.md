@@ -46,6 +46,20 @@ binds the embedded gRPC server via `PxKvStore::start`) lives in `crowkv`. A
 test that boots the `crowkv-server` binary / HTTP management API lives in
 `crowkv-server`.
 
+**KV operation correctness rule:** every layer that applies KV mutations
+(replica, group, store) must test all operation types and orderings:
+- Put (single key)
+- Overwrite (same key, new value)
+- Delete (produces tombstone)
+- Delete on non-existent key (no-op)
+- Batch with multiple puts
+- Batch with intra-batch last-wins (put → delete → put on same key)
+- Batch with put-then-delete same key (delete wins)
+- Batch with delete-then-put same key (put wins)
+- Empty batch / NoOp (advances frontier, no keys)
+- Mixed put/delete across multiple slots and batches
+- Persistence round-trip: all above operations survive WAL replay + restart
+
 ## Layer Definitions
 
 ### Unit Layer
@@ -139,8 +153,9 @@ acceptor + learner + WAL + slot integration: prepare/accept with WAL
 persistence, dedup suppression, snapshot install, WAL replay ordering.
 
 **Covered:**
-- WAL-backed persistence round-trip.
+- WAL-backed persistence round-trip: single Put, overwrite (highest-slot-wins), Delete (tombstone survives restart), put-then-delete same key, batch with intra-batch put+delete (last-wins), mixed put/delete across multiple slots and batches.
 - Classic prepare/accept tracking.
+- KV operation correctness: Put applies value, overwrite replaces previous, Delete produces tombstone, delete on non-existent key is no-op, batch with multiple puts, intra-batch last-wins (put→delete→put ordering), empty batch (NoOp), multiple slots with mixed ops.
 - Dedup suppression.
 - Snapshot install / truncate-and-resume.
 - Multi-slot WAL replay ordering: contiguous slots below watermark all applied, hole below watermark stops at hole (partial apply), out-of-order WAL records rebuilt correctly (replay sorts by slot), slots above watermark not applied (left for consensus), empty WAL produces zero state, watermark higher than accepted stops at first hole.
@@ -156,7 +171,7 @@ through the group, durability under crash/restart.
 - Single-leader propose, sequential slot allocation, follower rejects, classic propose.
 - Proposer window full → busy; repair fills gap and advances frontier.
 - Election: 1–7 replica counts elect a single leader, driver scaffold, step-down, propose-after-step-down.
-- KV through the group: mutations apply to all learners, follower forwards Get/Scan, forward loop-guard.
+- KV through the group: Put + BatchWrite (puts) + Delete apply to all learners, follower forwards Get/Scan, forward loop-guard. **Gap:** full op correctness checklist not yet covered (see `plan-test.md`).
 - Remote replica transport: unreachable/invalid endpoint returns error.
 - Preemption retry, kv-slot retry on prior accepted value.
 - Durability: single-node crash/restart, full-cluster restart keeps deletes (one path ignored — see `plan-ut.md`).
@@ -170,6 +185,7 @@ management, topology status. Tests use embedded gRPC server via
 **Covered:**
 - Single-node KV / read modes, follower redirect hint, dedup.
 - Multi-group routing within one node, dynamic add/remove group, missing-group error.
+- KV ops: Put + BatchWrite (puts) + Delete via `kv_put`/`kv_delete`/`kv_batch_write`, persistence round-trip (put/overwrite/delete survive restart). **Gap:** full op correctness checklist not yet covered (see `plan-test.md`).
 - Topology `status` composition, `health` levels, `shutdown` cascade + idempotency.
 
 ### Deployment Layer

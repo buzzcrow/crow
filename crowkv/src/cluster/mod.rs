@@ -13,7 +13,7 @@ pub mod replica;
 pub mod status;
 
 pub use group::ProposeResult;
-pub use group_config::{PxGroupConfig, PxGroupMember};
+pub use group_config::{GroupConfigStore, PxGroupConfig, PxGroupMember};
 
 pub use kv_server::*;
 pub use local_replica::*;

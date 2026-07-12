@@ -479,6 +479,7 @@ async fn add_group(
         initial_role,
         state.election_cfg,
         &state.wal_root,
+        &state.config_root,
         state.wal_backend.clone(),
     )
     .await
@@ -896,6 +897,9 @@ fn rebuild_group_with_same_config(group: &PxGroup) -> PxGroup {
     new_group.stamp_proposing_term(group.proposing_term());
     if group.force_classic() {
         new_group.set_force_classic(true);
+    }
+    if let Some(store) = group.config_store() {
+        new_group.set_config_store(store.clone());
     }
     new_group
 }

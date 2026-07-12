@@ -15,7 +15,7 @@ fn sim_backend() -> IoBackend {
 /// to the enclosing 4 KiB unit, so a sealed segment ends in zero padding out to
 /// the block boundary — the B1 scenario the reader must tolerate.
 fn aligned_backend() -> IoBackend {
-    IoBackend::BlockDevice(BlockDevice::ssd_4k())
+    IoBackend::BlockDevice(BlockDevice::ssd())
 }
 
 fn accepted_record(group: u64, slot: u64, payload_len: usize) -> WALRecord {

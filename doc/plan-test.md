@@ -16,6 +16,7 @@ For ignored / flaky tests and root causes, see `plan-ut.md`.
 
 ## Group
 
+- [ ] **KV operation correctness**: all op types and orderings through group `propose` — Put, overwrite, Delete, delete non-existent, batch with multiple puts, intra-batch last-wins, put-then-delete, delete-then-put, empty batch, mixed ops across slots. Verify via `engine_get` on all replicas (see `test.md` KV op correctness rule).
 - [ ] **PeerStream** (`cluster/peer_stream.rs`): bidi-stream framing, flow control, parallel in-flight slots, stream re-establish after drop.
 - [ ] **Recovery above the durable-commit watermark** via bulk Phase 1 / heartbeat catch-up on a fresh follower (see `plan-ut.md` §2.6).
 - [ ] **Leader-kill + restart no-data-loss** at full speed (blocked by repair-correctness; `plan-ut.md` §1.4 / §2.3).
@@ -23,6 +24,7 @@ For ignored / flaky tests and root causes, see `plan-ut.md`.
 
 ## Store
 
+- [ ] **KV operation correctness**: all op types and orderings through `PxKvStore` public API (`kv_put`, `kv_delete`, `kv_batch_write`) — same checklist as group layer. Verify via `kv_get` and `engine_get` (see `test.md` KV op correctness rule).
 - [ ] **Multi-node, multi-group store**: ≥3 nodes each hosting the same set of groups; assert per-group isolation and independent leadership.
 - [ ] Per-group WAL-root isolation on one node (no cross-group slot/key bleed) at the store layer.
 - [ ] Store-wide graceful shutdown with multiple active groups under load.

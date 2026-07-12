@@ -490,14 +490,15 @@ async fn writer_failure_fails_acks_and_marks_wal_failed() {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn aligned_engine_append_rotate_seal_replays_all_records() {
     let group_id = 4u64;
-    let device = BlockDevice::ssd_4k();
+    let device = BlockDevice::ssd();
     let backend = Arc::new(IoBackend::BlockDevice(device.clone()));
     let disk = PathBuf::from("/nvme0");
     let config = WalConfig {
         wal_disks: vec![disk.clone()],
         // Small segment so the run spans several rotations on the aligned path.
         wal_segment_size: 4 * 1024,
-        wal_alignment: WalBlockAlignment::default_aligned(),
+        wal_aligned: true,
+        wal_io_unit_bytes: 4096,
         ..Default::default()
     };
 

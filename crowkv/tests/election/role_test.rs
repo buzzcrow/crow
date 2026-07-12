@@ -177,7 +177,7 @@ fn new_inheriting_election_state_preserves_term_and_voted_for() {
 #[test]
 fn new_inheriting_election_state_shares_acceptor_and_learner() {
     use bytes::Bytes;
-    use crowkv::paxos::roles::{PxBallot, PxLogEntry, PxLogEntryKind};
+    use crowkv::paxos::roles::{Learner, PxBallot, PxLogEntry, PxLogEntryKind};
 
     let prior = PxLocalReplica::new(3, PxLocalReplicaRole::Leader);
     let entry = PxLogEntry {
@@ -189,7 +189,7 @@ fn new_inheriting_election_state_shares_acceptor_and_learner() {
         client_id: None,
         seq: None,
     };
-    prior.learn(&entry);
+    prior.learner.learn(entry);
 
     let inherited = PxLocalReplica::new_inheriting_election_state(&prior);
     assert_eq!(

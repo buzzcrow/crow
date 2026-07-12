@@ -11,7 +11,6 @@ use std::sync::Arc;
 
 use tracing::{error, info, warn};
 
-use crate::cluster::group_config::PxGroupConfig;
 use crate::paxos::roles::SlotIndex;
 use crate::paxos::{PxGroupId, PxNodeId, PxTerm};
 
@@ -42,12 +41,6 @@ pub struct ReplayResult {
     pub snapshot_slot: SlotIndex,
     /// Dedup cache: `client_id` → (`last_seq`, `last_slot`).
     pub dedup_cache: BTreeMap<u64, (u64, SlotIndex)>,
-    /// Latest persisted group membership configuration recovered from WAL.
-    ///
-    /// `None` if no `ConfigChange` record has been written for this group.
-    /// Used to seed the rebuilt group on restart so it does not start as a
-    /// `quorum=1` singleton in the restore window.
-    pub config: Option<PxGroupConfig>,
 }
 
 /// Replay all WAL segments for a group across all disk paths.
@@ -62,7 +55,6 @@ pub struct ReplayResult {
 /// 5. Reconstruct `current_term` from max term.
 /// 6. Reconstruct `voted_for` from latest `VoteGranted`.
 /// 7. Reconstruct dedup cache from latest `DedupCheckpoint` + subsequent writes.
-/// 8. Reconstruct latest persisted group config from `ConfigChange` records.
 ///
 /// # Errors
 /// Returns IO error if segments cannot be read or corruption is found in sealed segments.
@@ -221,14 +213,7 @@ pub async fn replay_group(
     // 7. Dedup cache: find latest DedupCheckpoint, then apply subsequent writes.
     let dedup_cache = rebuild_dedup_cache(&verified_records);
 
-    // 8. Latest persisted group config from ConfigChange records.
-    let config = verified_records
-        .iter()
-        .rev()
-        .find(|r| r.record_type == RecordType::ConfigChange)
-        .and_then(PxGroupConfig::from_record);
-
-    // 9. Latest snapshot slot from SnapshotMarker records.
+    // 8. Latest snapshot slot from SnapshotMarker records.
     let snapshot_slot = verified_records
         .iter()
         .rev()
@@ -245,7 +230,6 @@ pub async fn replay_group(
         durable_commit_watermark,
         snapshot_slot,
         dedup_cache,
-        config,
     })
 }
 

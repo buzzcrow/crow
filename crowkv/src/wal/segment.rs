@@ -25,7 +25,7 @@ use crate::paxos::roles::SlotIndex;
 use crate::paxos::PxGroupId;
 
 use super::record::{RecordError, WALRecord, WalRecordFormat};
-use super::{AsyncFile, IoBackend, OpenOptions};
+use super::{IoBackend, OpenOptions, WalFile};
 
 pub const SEG_MAGIC: u32 = 0x5345_474D;
 pub const SEG_VERSION: u16 = 1;
@@ -40,7 +40,7 @@ const FOOTER_TAIL_SCAN_BYTES: u64 = 64 * 1024;
 
 /// Write-side handle to one WAL segment file.
 pub struct WalSegment {
-    file: AsyncFile,
+    file: WalFile,
     path: PathBuf,
     pub segment_id: u64,
     pub group_id: PxGroupId,
@@ -171,12 +171,12 @@ impl WalSegment {
     }
 
     /// Expose the file handle for durable flush operations.
-    pub fn file_mut(&mut self) -> &mut AsyncFile {
+    pub fn file_mut(&mut self) -> &mut WalFile {
         &mut self.file
     }
 
     /// Expose the file handle for durable flush operations.
-    pub fn file(&self) -> &AsyncFile {
+    pub fn file(&self) -> &WalFile {
         &self.file
     }
 
@@ -242,7 +242,7 @@ pub struct SegmentFooter {
 
 /// Open an existing segment for replay: read header, then iterate records.
 pub struct SegmentReader {
-    file: AsyncFile,
+    file: WalFile,
     path: PathBuf,
     pub header: SegmentHeader,
     /// Read cursor within the file.
@@ -283,7 +283,7 @@ impl SegmentReader {
     ///
     /// ## Padding tolerance (B1)
     ///
-    /// On a block-aligned backend (e.g. `BlockDevice::ssd_4k`), every physical
+    /// On a block-aligned backend (e.g. `BlockDevice::ssd`), every physical
     /// write is widened to the enclosing I/O unit, so the final write in a
     /// segment (the footer when sealed, or the last record when not) leaves
     /// trailing zero padding out to the block boundary. The reader therefore

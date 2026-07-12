@@ -6,5 +6,6 @@
 
 pub mod cluster;
 pub mod logging;
+pub mod net_lock;
 pub mod simdisk;
 pub mod timer;

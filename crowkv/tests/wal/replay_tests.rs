@@ -1,7 +1,6 @@
 //! Replay engine tests (W10-W13) — `SimDisk` backend.
 
 use bytes::Bytes;
-use crowkv::cluster::group_config::{PxGroupConfig, PxGroupMember};
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crowkv::paxos::roles::{PxBallot, PxLogEntry, PxLogEntryKind};
 use crowkv::wal::record::{RecordType, WALRecord};
@@ -387,58 +386,4 @@ async fn restore_from_replay_rebuilds_live_replica_state() {
     assert_eq!(restored.learner.dedup_lookup(42, 9), Some(2));
     assert_eq!(restored.learner.dedup_lookup(42, 8), Some(2));
     assert_eq!(restored.learner.dedup_lookup(42, 10), None);
-}
-
-#[tokio::test(flavor = "current_thread", start_paused = true)]
-async fn replay_recovers_latest_config_change() {
-    let backend = sim_backend();
-    let disks = vec![PathBuf::from("/wal")];
-    let config = test_config(&disks);
-    let wal = WalEngine::create(backend.clone(), config, 1).await.unwrap();
-
-    let old_config = PxGroupConfig {
-        group_id: 1,
-        term: 1,
-        members: vec![
-            PxGroupMember {
-                replica_id: 1,
-                endpoint: "127.0.0.1:10001".into(),
-                voting: true,
-            },
-            PxGroupMember {
-                replica_id: 2,
-                endpoint: "127.0.0.1:10002".into(),
-                voting: true,
-            },
-        ],
-    };
-    wal.append(&old_config.to_record()).await.unwrap();
-
-    let new_config = PxGroupConfig {
-        group_id: 1,
-        term: 2,
-        members: vec![
-            PxGroupMember {
-                replica_id: 1,
-                endpoint: "127.0.0.1:10001".into(),
-                voting: true,
-            },
-            PxGroupMember {
-                replica_id: 2,
-                endpoint: "127.0.0.1:10002".into(),
-                voting: true,
-            },
-            PxGroupMember {
-                replica_id: 3,
-                endpoint: "127.0.0.1:10003".into(),
-                voting: true,
-            },
-        ],
-    };
-    wal.append(&new_config.to_record()).await.unwrap();
-    wal.seal_all().await.unwrap();
-
-    let replay = replay_group(&backend, &disks, 1).await.unwrap();
-    let recovered = replay.config.expect("config recovered");
-    assert_eq!(recovered, new_config);
 }

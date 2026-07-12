@@ -113,10 +113,11 @@ impl WalEngine {
         for (idx, disk_path) in config.wal_disks.iter().enumerate() {
             let group_dir = disk_path.join(format!("group{group_id}"));
             backend.create_dir_all(&group_dir).await?;
-            let pipeline_backend = match config.wal_alignment {
+            let alignment = config.alignment();
+            let pipeline_backend = match alignment {
                 WalBlockAlignment::Unaligned => WalPipelineBackend::file(disk_path.clone()),
                 WalBlockAlignment::Aligned { .. } => {
-                    WalPipelineBackend::block(disk_path.to_string_lossy(), config.wal_alignment)
+                    WalPipelineBackend::block(disk_path.to_string_lossy(), alignment)
                 }
             };
             let record_format = select_record_format(config.wal_record_format);

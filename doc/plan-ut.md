@@ -28,9 +28,7 @@ No ignored tests.
 
 ### 1.4 Group layer (`group.rs`)
 
-| Test | File | Line | Ignore Reason | Analysis / Path to Re-enable |
-|------|------|------|---------------|------------------------------|
-| `cluster_survives_leader_kill_and_restart_with_no_data_loss` | `tests/group/g2_crash_restart_no_data_loss_test.rs` | 340 | "W10 proposing_term readiness is fixed; this test now fails on data survival after leader restart (read returns None for committed keys). This is a repair / divergence issue after a restart, separate from leadership readiness. Needs further W11-style repair-correctness work before re-enable." | Leadership-readiness fixes (stamping `proposing_term` on single-replica leaders) are complete. The remaining failure is committed keys returning `None` after a leader is killed and restarted, indicating that the new leader's repair / learner state diverges from the previous leader's chosen prefix. This is a W11-style repair-correctness issue. |
+No ignored tests.
 
 ### 1.5 Store layer (`store.rs`)
 

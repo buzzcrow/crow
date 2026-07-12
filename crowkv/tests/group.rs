@@ -19,6 +19,9 @@ mod testkit;
 #[path = "group/group_test.rs"]
 mod group;
 
+#[path = "group/group_config_test.rs"]
+mod group_config;
+
 #[path = "group/group_propose_test.rs"]
 mod group_propose;
 

@@ -220,6 +220,14 @@ fn run_case(rt: &tokio::runtime::Runtime, case: &Case) -> CaseResult {
 }
 
 fn main() {
+    // When this bench is run via `cargo test --all-targets`, skip the heavy
+    // timed workload. Criterion-based benches do this automatically, but this
+    // custom bench needs an explicit guard to avoid blocking commits.
+    if cfg!(test) {
+        eprintln!("Skipping wal bench in cargo test mode; run `cargo bench --bench wal` for real results.");
+        return;
+    }
+
     let args: Vec<String> = std::env::args().collect();
     let filter = args
         .iter()

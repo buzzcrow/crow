@@ -1,8 +1,8 @@
-//! `file_backend` tests via the public `IoBackend::File` / `AsyncFile` API.
+//! `file_backend` tests via the public `IoBackend::File` / `WalFile` API.
 //!
 //! The `file_backend` module itself is private (`mod file_backend`), but its
 //! behaviour is fully exercised through the public `IoBackend::File` variant
-//! and `AsyncFile` methods. These tests cover the real-filesystem fallback
+//! and `WalFile` methods. These tests cover the real-filesystem fallback
 //! path (open/append/flush/fsync/truncate) independent of `BlockDevice`.
 
 use crowkv::wal::{IoBackend, OpenOptions};

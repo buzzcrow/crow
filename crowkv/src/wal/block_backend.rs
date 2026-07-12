@@ -90,10 +90,10 @@ impl BlockDeviceController {
 ///   PMEM). Writes land at arbitrary offsets with no amplification. This is the
 ///   simpler path and the default ([`BlockDevice::new`]).
 /// - [`WalBlockAlignment::Aligned`] — block media that requires I/O aligned to
-///   the device I/O unit (e.g. a 4 KiB SSD/`NVMe` under `O_DIRECT`). Sub-block
+///   the device I/O unit (e.g. an SSD/`NVMe` under `O_DIRECT`). Sub-block
 ///   writes are widened to the enclosing aligned range via read-modify-write,
 ///   so physical storage always advances in whole I/O units and the device
-///   tracks the resulting write amplification ([`BlockDevice::ssd_4k`]).
+///   tracks the resulting write amplification ([`BlockDevice::ssd`]).
 #[derive(Clone)]
 pub struct BlockDevice {
     segments: Arc<Mutex<BTreeMap<PathBuf, Vec<u8>>>>,
@@ -119,10 +119,10 @@ impl BlockDevice {
         Self::with_alignment(WalBlockAlignment::Unaligned)
     }
 
-    /// Create a 4 KiB-aligned block device modelling a typical SSD/NVMe whose
-    /// I/O unit is 4 KiB.
+    /// Create an aligned block device modelling an SSD/NVMe using the default
+    /// I/O unit size (`WalBlockAlignment::DEFAULT_IO_UNIT_BYTES`).
     #[must_use]
-    pub fn ssd_4k() -> Self {
+    pub fn ssd() -> Self {
         Self::with_alignment(WalBlockAlignment::default_aligned())
     }
 

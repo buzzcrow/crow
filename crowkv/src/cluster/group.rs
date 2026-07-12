@@ -11,7 +11,7 @@ use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-use crate::cluster::group_config::{PxGroupConfig, PxGroupMember};
+use crate::cluster::group_config::{GroupConfigStore, PxGroupConfig, PxGroupMember};
 use crate::cluster::group_election::PendingLeaderHandoff;
 use crate::cluster::local_replica::PxLocalReplica;
 use crate::cluster::remote_replica::PxRemoteReplica;
@@ -83,6 +83,11 @@ pub struct PxGroup {
     /// that cannot immediately acquire a permit returns `ProposeResult::Busy`
     /// (retryable) rather than blocking the caller.
     pub(crate) proposer_window: tokio::sync::Semaphore,
+    /// Optional file-based config store for persisting group membership.
+    /// Set via [`Self::set_config_store`] when the group has a WAL directory.
+    /// When set, [`Self::persist_config`] writes to the config file instead
+    /// of the WAL metadata lane.
+    pub(crate) config_store: Option<GroupConfigStore>,
 }
 
 impl std::fmt::Debug for PxGroup {
@@ -117,9 +122,25 @@ impl PxGroup {
             peer_applied: parking_lot::Mutex::new(HashMap::new()),
             group_safe_slot: AtomicU64::new(0),
             proposer_window: tokio::sync::Semaphore::new(PaxosConfig::DEFAULT.proposer_window),
+            config_store: None,
         };
         group.recompute_quorum();
         group
+    }
+
+    /// Set the file-based config store for this group.
+    ///
+    /// When set, [`Self::persist_config`] writes the group membership to a
+    /// dedicated config file (`group_config.bin`) in the group's WAL
+    /// directory instead of a WAL `ConfigChange` record.
+    pub fn set_config_store(&mut self, store: GroupConfigStore) {
+        self.config_store = Some(store);
+    }
+
+    /// Get the config store, if set.
+    #[must_use]
+    pub fn config_store(&self) -> Option<&GroupConfigStore> {
+        self.config_store.as_ref()
     }
 
     // ── Getters ───────────────────────────────────────────────────
@@ -276,9 +297,12 @@ impl PxGroup {
         self.recompute_quorum();
     }
 
-    /// Replace the endpoint of an existing real remote replica. Returns the
-    /// previous endpoint string when a real replica was updated, or `None`
-    /// when `node_id` is out of range / refers to a placeholder.
+    /// Replace the endpoint of a remote replica, inserting it if the slot is
+    /// a `Placeholder` or does not yet exist (upsert semantics).
+    ///
+    /// Returns the previous endpoint string when an existing `Real` replica
+    /// was updated, or `None` when a new entry was inserted (from a
+    /// `Placeholder` or by extending the vec).
     pub fn update_member_endpoint(
         &mut self,
         node_id: PxNodeId,
@@ -287,20 +311,36 @@ impl PxGroup {
         let endpoint = endpoint.into();
         let idx = node_id as usize;
 
+        // Existing Real entry: update in place.
         if let Some(RemoteReplicaKind::Real(remote)) = self.remote_replicas.get_mut(idx) {
             let old_endpoint = remote.endpoint.clone();
             endpoint.clone_into(&mut remote.endpoint);
-            Some(old_endpoint)
-        } else {
-            None
+            return Some(old_endpoint);
         }
+
+        // Placeholder or out-of-range: insert a new Real entry.
+        warn!(
+            group_id = self.group_id,
+            node_id, "update_member_endpoint: inserting new remote (was placeholder or out-of-range)"
+        );
+        while idx >= self.remote_replicas.len() {
+            self.remote_replicas.push(RemoteReplicaKind::Placeholder);
+        }
+        self.remote_replicas[idx] = RemoteReplicaKind::Real(PxRemoteReplica::new(node_id, endpoint));
+        self.valid_replica_count = self
+            .remote_replicas
+            .iter()
+            .filter(|r| matches!(r, RemoteReplicaKind::Real(_)))
+            .count();
+        self.recompute_quorum();
+        None
     }
 
     /// Apply a persisted group configuration, wiring remote replicas from the
     /// durable config snapshot. The local replica is skipped.
     ///
-    /// This is the restore-window seed (W9): a restarted node that recovers a
-    /// `ConfigChange` record starts with the same intended membership it had
+    /// This is the restore-window seed (W9): a restarted node that loads a
+    /// persisted config file starts with the same intended membership it had
     /// before the crash, instead of starting as a `quorum=1` singleton.
     pub fn apply_config(&mut self, config: &PxGroupConfig) {
         let local_id = self.local_replica().id;
@@ -319,11 +359,10 @@ impl PxGroup {
         );
     }
 
-    /// Persist the current group membership to the WAL as a `ConfigChange`
-    /// record on the metadata lane.
+    /// Persist the current group membership to a dedicated config file.
     ///
     /// Writes the local replica plus every real remote replica. Non-fatal on
-    /// WAL error: the group continues running but logs the failure.
+    /// error: the group continues running but logs the failure.
     pub async fn persist_config(&self) {
         let local_id = self.local_replica().id;
         let term = self.local_replica().current_term_snapshot();
@@ -348,21 +387,20 @@ impl PxGroup {
             term,
             members,
         };
-        let record = config.to_record();
-        if let Some(wal) = self.local_replica().wal() {
-            if let Err(e) = wal.append(&record).await {
+        if let Some(store) = &self.config_store {
+            if let Err(e) = store.save(&config).await {
                 warn!(
                     group_id = self.group_id,
                     term,
                     error = %e,
-                    "WAL persist ConfigChange failed"
+                    "persist group config failed"
                 );
             } else {
                 info!(
                     group_id = self.group_id,
                     term,
                     replica_count = config.members.len(),
-                    "persisted group config to WAL"
+                    "persisted group config to file"
                 );
             }
         }

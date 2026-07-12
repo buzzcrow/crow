@@ -9,6 +9,7 @@ pub struct KvStoreRegistry {
     pub stores: DashMap<u64, Arc<PxKvStore>>,
     pub election_cfg: PxElectionConfig,
     pub wal_root: PathBuf,
+    pub config_root: PathBuf,
     pub wal_backend: Arc<IoBackend>,
 }
 
@@ -24,25 +25,33 @@ impl KvStoreRegistry {
         Self::with_runtime(
             PxElectionConfig::DEFAULT,
             PathBuf::from("wal"),
+            PathBuf::from("conf"),
             Arc::new(IoBackend::detect()),
         )
     }
 
     #[must_use]
     pub fn with_election_config(election_cfg: PxElectionConfig) -> Self {
-        Self::with_runtime(election_cfg, PathBuf::from("wal"), Arc::new(IoBackend::detect()))
+        Self::with_runtime(
+            election_cfg,
+            PathBuf::from("wal"),
+            PathBuf::from("conf"),
+            Arc::new(IoBackend::detect()),
+        )
     }
 
     #[must_use]
     pub fn with_runtime(
         election_cfg: PxElectionConfig,
         wal_root: PathBuf,
+        config_root: PathBuf,
         wal_backend: Arc<IoBackend>,
     ) -> Self {
         Self {
             stores: DashMap::new(),
             election_cfg,
             wal_root,
+            config_root,
             wal_backend,
         }
     }

@@ -7,7 +7,7 @@
 
 use std::io::Write;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
@@ -57,9 +57,18 @@ async fn main() {
     };
 
     let wal_root = args.wal_root.clone().unwrap_or_else(|| PathBuf::from("wal"));
+    let config_root = args
+        .config_root
+        .clone()
+        .unwrap_or_else(|| wal_root.parent().unwrap_or_else(|| Path::new("")).join("conf"));
     let wal_backend = Arc::new(crowkv::wal::IoBackend::detect());
 
-    let registry = Arc::new(KvStoreRegistry::with_runtime(election_cfg, wal_root, wal_backend));
+    let registry = Arc::new(KvStoreRegistry::with_runtime(
+        election_cfg,
+        wal_root,
+        config_root,
+        wal_backend,
+    ));
 
     // Start HTTP management server first
     let mgmt_addr: SocketAddr = format!("{}:{}", args.management_addr, args.management_port)
@@ -219,6 +228,7 @@ async fn create_and_start_stores(
                 PxLocalReplicaRole::Follower,
                 registry.election_cfg,
                 &registry.wal_root,
+                &registry.config_root,
                 registry.wal_backend.clone(),
             )
             .await

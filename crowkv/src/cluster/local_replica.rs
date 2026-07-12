@@ -947,11 +947,6 @@ impl PxLocalReplica {
         reply
     }
 
-    /// Apply an entry to the local learner.
-    pub fn learn(&self, entry: &PxLogEntry) {
-        self.learner.learn(entry.clone());
-    }
-
     /// Learn a chosen entry (apply to state machine) and persist the durable
     /// commit watermark if the contiguous applied prefix advanced.
     pub async fn learn_chosen(&self, entry: &PxLogEntry) {

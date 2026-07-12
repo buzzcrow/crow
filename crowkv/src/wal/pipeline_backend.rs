@@ -8,7 +8,10 @@ pub enum WalBlockAlignment {
 }
 
 impl WalBlockAlignment {
-    /// Default SSD I/O unit size.
+    /// Default I/O unit size for a typical SSD/NVMe (4 KiB). Used by
+    /// `default_aligned()` and as the `WalConfig` default for
+    /// `wal_io_unit_bytes`. Actual deployments may override this to match
+    /// the device's logical/physical sector size (512, 8192, 16384, etc.).
     pub const DEFAULT_IO_UNIT_BYTES: usize = 4 * 1024;
 
     #[must_use]

@@ -5,7 +5,7 @@ use crowkv::wal::pipeline_backend::WalBlockAlignment;
 use crowkv::wal::{BlockDevice, IoBackend, OpenOptions};
 use std::path::Path;
 
-async fn open_segment(backend: &IoBackend, path: &str) -> crowkv::wal::AsyncFile {
+async fn open_segment(backend: &IoBackend, path: &str) -> crowkv::wal::WalFile {
     backend
         .open(Path::new(path), OpenOptions::create_rw())
         .await
@@ -37,7 +37,7 @@ async fn unaligned_device_writes_payload_directly_without_amplification() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn aligned_device_partial_write_does_read_modify_write() {
-    let device = BlockDevice::ssd_4k();
+    let device = BlockDevice::ssd();
     assert_eq!(
         device.alignment(),
         WalBlockAlignment::Aligned { io_unit_bytes: 4096 }
@@ -82,7 +82,7 @@ async fn unaligned_device_counts_writes_and_durable_flushes() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn aligned_device_rmw_preserves_neighbouring_bytes_in_same_block() {
-    let device = BlockDevice::ssd_4k();
+    let device = BlockDevice::ssd();
     let backend = IoBackend::BlockDevice(device.clone());
 
     let mut file = open_segment(&backend, "/dev/nvme0/seg-0000001.log").await;
@@ -106,7 +106,7 @@ async fn aligned_device_rmw_preserves_neighbouring_bytes_in_same_block() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn aligned_device_block_aligned_write_avoids_amplification() {
-    let device = BlockDevice::ssd_4k();
+    let device = BlockDevice::ssd();
     let backend = IoBackend::BlockDevice(device.clone());
 
     let mut file = open_segment(&backend, "/dev/nvme0/seg-0000001.log").await;
