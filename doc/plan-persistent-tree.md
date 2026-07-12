@@ -77,7 +77,7 @@ Implements `design-crowtree-persistence.md` §3 (zero-copy frame format), §4
 frame, no encode/decode; base pages become views over frames. This is a core
 rearchitecture, sequenced foundation-first so each step builds + tests green.
 
-- [ ] **PT6a — Slotted frame format + zero-copy views.** `FrameHeader`,
+- [x] **PT6a — Slotted frame format + zero-copy views.** `FrameHeader`,
   `LeafFrameView`/`LeafFrameBuilder`, `InnerFrameView`/`InnerFrameBuilder` over a
   fixed `page_bytes` frame; sorted slot dir + records-from-end; `logical_len` +
   CRC32C trailer. In-place binary search / `Find` / `LowerBound` / `ChildIndexFor`
@@ -86,7 +86,7 @@ rearchitecture, sequenced foundation-first so each step builds + tests green.
     binary search; tombstone cells; capacity (`TryAppend` fails when full); inner
     separators+children; CRC bit-flip; binary keys with NULs.
   - Deps: PT2 (CRC).
-- [ ] **PT6b — Buffer pool manager.** Contiguous frame arena sized by
+- [x] **PT6b — Buffer pool manager.** Contiguous frame arena sized by
   `capacity_bytes` (4/8 GiB knob); open-addressing `pid→frame` page table (no
   `unordered_map`); `Pin`/`PinNew`/`MarkDirty`/release (RAII `FrameRef`); CLOCK
   eviction skipping pinned+dirty; demand-load miss via `PageStore`; `Stats`.
@@ -94,13 +94,30 @@ rearchitecture, sequenced foundation-first so each step builds + tests green.
     store; eviction under pressure respects pins/dirty; dirty flush writes back;
     page-table collisions; capacity cap honored.
   - Deps: PT6a, PT1.
-- [ ] **PT6c — Mapping table over frames + core L1 migration.** Mapping slot holds
-  tagged `frame-id | unloaded PageAddr`; `Get` demand-loads. Migrate leaf/inner
-  base pages from `LeafBase`/`InnerBase` objects to frame views; flush/consolidate/
-  split/merge build new frames (COW) via builders; epoch-retire old frames.
-  - Tests: re-run full core suite (write/read/split-merge/parity/stress) on frames;
-    `bench` rebuild cost vs old path.
-  - Deps: PT6b. **Largest task; gates incremental checkpoint.**
+- **PT6c — Core L1 migration to frames.** Migrate leaf/inner base pages to the
+  zero-copy frame format and unify the durable format. Done incrementally:
+  - [x] **PT6c-1** widen frame slot offsets to u32 (remove 64 KiB cap so a
+    consolidated leaf fits one frame during build-then-split).
+  - [x] **PT6c-2** back `LeafBase` with a frame; zero-copy `key/cell/Find/
+    Lookup/LowerBound` via `LeafFrameView`; chain resolution reads the frame.
+  - [x] **PT6c-3** back `InnerBase` with a frame; route via `InnerFrameView`.
+  - [x] **PT6c-4** durable format == in-memory frame: checkpoint writes frame
+    bytes, recovery rebuilds via `FromFrameCopy` (PageCodec/PT2 superseded).
+  - **PT6c-5** buffer-pool residency (design §4.5; resolves lock-free-reads vs
+    pin/evict via epoch-deferred frame reuse, and anonymous dirty frames). Reads
+    stay lock-free; only the writer/checkpoint/demand-load pin. **Gates PT6d.**
+    - [ ] **PT6c-5.1** `Crowtree` owns a `BufferPool` (`Options.buffer_pool_bytes`,
+      `frame_bytes`); `LeafBase`/`InnerBase` build into a `PinNew` frame and hold
+      the pin for their lifetime (no eviction yet). Behavior unchanged.
+    - [ ] **PT6c-5.2** `RetirePage` frees the frame back to the pool **via the
+      epoch manager** (deferred), not `delete`; verify under TSan/ASan.
+    - [ ] **PT6c-5.3** tagged mapping slot (`PageBase*` | unloaded `PageAddr`) +
+      demand-load on `Get`; recovery stores `pid→addr` tags (lazy recovery).
+    - [ ] **PT6c-5.4** CLOCK eviction of clean unpinned bases -> re-tag slot
+      `unloaded`; skip anonymous/dirty frames; bounded memory.
+  - Tests: full core suite (write/read/split-merge/parity/stress) green on
+    frame-backed pages (PT6c-1..4 done, 117 pass, ASan-clean).
+  - Deps: PT6b.
 - [ ] **PT6d — Incremental checkpoint + lazy recovery + durable-page GC.** Replace
   the PT3 full-rewrite walk with a DirtyTracker walk (write only dirty frames,
   remap `pid→PageAddr`); recovery loads superblock + page-allocation map and
@@ -111,12 +128,18 @@ rearchitecture, sequenced foundation-first so each step builds + tests green.
 
 ## Milestone PT-E — Compression, export/import
 
-- [ ] **PT10 — Page compression (LZ4 default).** Vendor single-file LZ4 under
-  `crowtree/third_party/lz4`; compress frame body at `write_page`, decompress into
-  a full frame at `read_page`; per-page `flags.compressed` + algo id; store
-  uncompressed if it doesn't shrink. `Options.compression = kLz4` default.
-  - Tests (`unit/page_compression_test.cc`): compress/decompress round-trip;
-    incompressible page stored raw; CRC over stored bytes; mixed pages in one tree.
+- [x] **PT10 — Page compression (LZ4 default).** `Compressor` + durable
+  compressed-page blob `[algo][raw_len][stored_len][crc][stored]`; compress at
+  write, decompress into a full frame at read; store raw if it doesn't shrink.
+  `EncodeDurablePage`/`DecodeDurablePage`. Wiring into the checkpoint write path
+  lands with PT6d.
+  - Tests (`unit/page_compression_test.cc`): round-trip; compressible shrinks;
+    incompressible stored raw; CRC tamper rejected; short-blob rejected. Done,
+    ASan-clean.
+  - **Build note:** no LZ4 dev package in this env — CMake links the runtime
+    `liblz4.so.1` by path and compiles an identity fallback when absent. Replace
+    with a vendored single-file `third_party/lz4/{lz4.c,lz4.h}` for portability
+    (tracked below).
   - Deps: PT6a (+ PT6d for the write path).
 - [ ] **PT7 — Snapshot export/import.** Portable tuple stream (versioned header,
   key-sorted `(klen,key,slot,kind,vlen,value)` ≤1 MiB chunks, whole-stream CRC32C)
@@ -135,6 +158,8 @@ rearchitecture, sequenced foundation-first so each step builds + tests green.
   encode/decode; aligned vs unaligned block devices).
 - [ ] **PT11 — Overflow pages** for entries larger than a frame.
 - [ ] **PT12 — In-frame delta region** (optional flush-rebuild optimization, §5A).
+- [ ] **PT13 — Vendor LZ4 source** `third_party/lz4/{lz4.c,lz4.h}` to replace the
+  runtime-`.so.1`-by-path link (portability; no dev package needed).
 
 ---
 
@@ -181,6 +206,16 @@ phases land.
 - **Checkpoint holds the write lock for the whole walk + I/O.** O(tree)
   serialization + blocking writes block flush/SMO for the duration. Acceptable
   for v1; revisit with incremental checkpoint (PT6) and async I/O (PT8).
+- **LZ4 linked by runtime soname, not vendored.** The build env has no LZ4 dev
+  package/header/source, so CMake links `/usr/lib/.../liblz4.so.1` by path and
+  falls back to an identity codec when absent. Portable builds need the vendored
+  single-file source (PT13). Compression is correct where LZ4 is present
+  (verified: compressible pages shrink, round-trip + CRC tamper covered).
+- **PT6c core migration is invasive and not yet started.** Leaf/inner base pages
+  are still `LeafBase`/`InnerBase` objects in the live tree; the frame format +
+  buffer pool + compression are built and tested in isolation but not yet wired
+  into `crowtree.cc` read/write/SMO paths. PT6c is the largest task and gates
+  PT6d (incremental checkpoint) and PT7 (RootVersion-pinned export).
 - **No durable redo of the delta tail.** By design (checkpoint + consensus
   replay). A crash between checkpoints loses in-memory deltas; the learner
   re-applies slots `> last_applied_slot`. Revisit only if checkpoint cadence

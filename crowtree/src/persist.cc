@@ -71,20 +71,22 @@ uint64_t RoundUp(uint64_t v, uint32_t iu) {
 // highest-slot-wins, dropping tombstones with slot <= gc_floor.
 std::vector<LeafEntry> ResolveLeaf(PageBase* head, uint64_t gc_floor) {
   std::map<std::string, std::string> resolved;
-  for (PageBase* node = head; node != nullptr; node = node->next) {
-    const std::vector<LeafEntry>* entries = nullptr;
-    if (node->type == PageType::kBatchDelta) {
-      entries = &static_cast<BatchDelta*>(node)->entries();
-    } else if (node->type == PageType::kLeafBase) {
-      entries = &static_cast<LeafBase*>(node)->entries();
+  auto consider = [&](Slice key, Slice cell) {
+    uint64_t s = CellView{cell}.slot();
+    std::string k = key.ToString();
+    auto it = resolved.find(k);
+    if (it == resolved.end() || s > CellView{Slice(it->second)}.slot()) {
+      resolved[k] = cell.ToString();
     }
-    if (entries == nullptr) continue;
-    for (const LeafEntry& e : *entries) {
-      uint64_t s = CellView{Slice(e.cell)}.slot();
-      auto it = resolved.find(e.key);
-      if (it == resolved.end() || s > CellView{Slice(it->second)}.slot()) {
-        resolved[e.key] = e.cell;
+  };
+  for (PageBase* node = head; node != nullptr; node = node->next) {
+    if (node->type == PageType::kBatchDelta) {
+      for (const LeafEntry& e : static_cast<BatchDelta*>(node)->entries()) {
+        consider(Slice(e.key), Slice(e.cell));
       }
+    } else if (node->type == PageType::kLeafBase) {
+      LeafFrameView v = static_cast<LeafBase*>(node)->view();
+      for (uint32_t i = 0; i < v.count(); ++i) consider(v.key(i), v.cell(i));
     }
   }
   std::vector<LeafEntry> out;
@@ -170,16 +172,20 @@ Status Crowtree::Checkpoint(uint64_t* out_last_applied) {
     while (base != nullptr && base->type == PageType::kBatchDelta) base = base->next;
     if (base == nullptr) return Status::Internal("Checkpoint: chain has no base");
 
+    // Durable image == the in-memory frame (zero-copy format). Leaves are
+    // folded first (chain -> fresh consolidated frame); inner pages are already
+    // base frames. Backends needing IU alignment pad on top of this (PT6d).
     std::vector<uint8_t> frame;
     if (base->type == PageType::kLeafBase) {
       auto* leaf = static_cast<LeafBase*>(base);
       LeafBase* folded = LeafBase::Build(ResolveLeaf(head, gc), leaf->right_sibling());
-      folded->pid = pid;
-      frame = PageCodec::Encode(folded, iu);
+      frame.assign(folded->frame(), folded->frame() + folded->page_bytes());
       delete folded;
     } else {
-      frame = PageCodec::Encode(base, iu);
+      auto* inner = static_cast<InnerBase*>(base);
+      frame.assign(inner->frame(), inner->frame() + inner->page_bytes());
     }
+    (void)iu;
 
     uint64_t addr = cursor;
     Status s = store->WriteAt(addr, frame.data(), frame.size());
@@ -285,9 +291,14 @@ Status Crowtree::Open(CrowtreeEnv& env, const Options& opt,
     std::vector<uint8_t> frame(plen);
     Status pr = store->ReadAt(addr, frame.data(), frame.size());
     if (!pr.ok()) return pr;
+    if (!FrameValidate(frame.data(), plen)) return Status::Corruption("page CRC on recover");
     PageBase* page = nullptr;
-    Status ds = PageCodec::Decode(frame.data(), frame.size(), &page);
-    if (!ds.ok()) return ds;
+    if (FramePageType(frame.data()) == PageType::kLeafBase) {
+      page = LeafBase::FromFrameCopy(frame.data(), plen);
+    } else {
+      page = InnerBase::FromFrameCopy(frame.data(), plen);
+    }
+    page->pid = pid;
     tree->mapping_.Store(pid, page);
   }
 

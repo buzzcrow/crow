@@ -27,6 +27,22 @@ target_include_directories(crowtree PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 find_package(Threads REQUIRED)
 target_link_libraries(crowtree PUBLIC Threads::Threads)
 
+# ── Optional LZ4 page compression (PT10) ──────────────────────────
+# Prefer a vendored/dev lib; fall back to the runtime soname when only the
+# shared object (no -dev symlink/header) is installed. Compression is compiled
+# out (identity codec) when LZ4 is unavailable.
+find_library(LZ4_LIB NAMES lz4)
+if(NOT LZ4_LIB AND EXISTS /usr/lib/x86_64-linux-gnu/liblz4.so.1)
+  set(LZ4_LIB /usr/lib/x86_64-linux-gnu/liblz4.so.1)
+endif()
+if(LZ4_LIB)
+  message(STATUS "crowtree LZ4: ${LZ4_LIB}")
+  target_compile_definitions(crowtree PUBLIC CROWTREE_HAVE_LZ4=1)
+  target_link_libraries(crowtree PUBLIC ${LZ4_LIB})
+else()
+  message(STATUS "crowtree LZ4: not found (compression disabled)")
+endif()
+
 # ── Tests (GoogleTest) ────────────────────────────────────────────
 enable_testing()
 find_package(GTest REQUIRED)

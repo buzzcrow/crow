@@ -105,6 +105,7 @@ class Crowtree {
   // Diagnostics.
   size_t MemTableCount() const { return memtable_.Count(); }
   MappingTable& mapping() { return mapping_; }
+  const BufferPool* buffer_pool() const { return pool_.get(); }
   int Height() const;       // 1 = single-leaf root
   size_t LeafCount() const; // live leaves reachable from the root
 
@@ -123,6 +124,10 @@ class Crowtree {
 
   CrowtreeEnv& env_;
   Options opt_;
+  // Base-page frame arena (design §4). shared_ptr because epoch-retired pages
+  // co-own it and may outlive this Crowtree (the env-level EpochManager frees
+  // them); declared before mapping_ so it is destroyed after pages it backs.
+  std::shared_ptr<BufferPool> pool_;
   MappingTable mapping_;
   MemTable memtable_;
 

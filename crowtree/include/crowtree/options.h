@@ -39,6 +39,15 @@ struct Options {
   // checkpoint/recovery). When set, Checkpoint() writes the materialized L1
   // state and Open() recovers it.
   PageStore* page_store = nullptr;
+
+  // ── Buffer pool (design §4) ──
+  // The arena that holds base-page frames is a flat array of equal-size frames.
+  // `frame_bytes` is that fixed size; a base page larger than a frame (rare;
+  // overflow pages are PT11) or built when the pool is full falls back to a
+  // heap buffer, so correctness is independent of these knobs. `frame_bytes`
+  // should be >= leaf_split_bytes so normal leaves are pool-resident.
+  uint32_t frame_bytes = 64 * 1024;             // fixed arena frame size
+  size_t buffer_pool_bytes = 64 * 1024 * 1024;  // arena capacity (frames * frame_bytes)
 };
 
 }  // namespace crowtree

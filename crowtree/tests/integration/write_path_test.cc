@@ -14,6 +14,12 @@ Batch Put1(const std::string& k, const std::string& v) {
   return Batch{{BatchOp{k, OpKind::kPut, v}}};
 }
 
+std::string Key(int i) {
+  char b[16];
+  snprintf(b, sizeof(b), "k%05d", i);
+  return b;
+}
+
 std::string GetOr(Crowtree& t, const std::string& k, const std::string& dflt) {
   std::string v;
   uint64_t slot;
@@ -21,6 +27,29 @@ std::string GetOr(Crowtree& t, const std::string& k, const std::string& dflt) {
 }
 
 }  // namespace
+
+TEST(WritePath, BasePagesLiveInBufferPool) {
+  Options opt;
+  opt.max_delta_len = 1;       // consolidate into base frames quickly
+  opt.leaf_split_bytes = 200;  // small leaves -> multiple leaf + inner frames
+  opt.frame_bytes = 4096;      // small frames so a few hold these tiny pages
+  opt.buffer_pool_bytes = 64 * 4096;
+  CrowtreeEnv env;
+  Crowtree t(env, opt);
+  for (int i = 0; i < 60; ++i) {
+    uint64_t s = i + 1;
+    ASSERT_TRUE(t.Apply(s, Put1(Key(i), "payload-" + std::to_string(i)), s).ok());
+    ASSERT_TRUE(t.Flush().ok());
+  }
+  // The tree split into multiple leaves under one or more inner pages; every
+  // such base page is built into a pool frame (held resident by its page).
+  ASSERT_GT(t.LeafCount(), 1u);
+  ASSERT_NE(t.buffer_pool(), nullptr);
+  auto s = t.buffer_pool()->stats();
+  EXPECT_GE(s.used, t.LeafCount());  // at least one frame per live leaf
+  // Values remain correct when read straight out of the frames.
+  for (int i = 0; i < 60; ++i) EXPECT_EQ(GetOr(t, Key(i), "?"), "payload-" + std::to_string(i));
+}
 
 TEST(WritePath, ApplyThenFlushVisible) {
   CrowtreeEnv env;

@@ -296,6 +296,75 @@ resident"). `Get(pid)` that finds an unloaded slot pins it in (demand load),
 publishes the resident tag, and returns the frame. This keeps readers lock-free
 on the hot (resident) path and makes cold reads a pin-miss.
 
+### 4.5 Live-engine wiring (PT6c-5): two hard problems and the rollout
+
+§4.1–4.4 describe the steady state; this subsection resolves the two issues that
+make wiring the pool into the *live* engine the largest task, and fixes the
+order of implementation so each step builds and keeps the full suite green.
+
+**Problem A — reads are lock-free, the pool is mutex-guarded.** The core's
+headline property (core §4; `stress_test` under TSan) is that a reader does an
+atomic `mapping_.Get(pid)` + an `EpochManager::Guard`, with **no lock per read**.
+The PT6b pool guards pin/unpin/evict with a mutex *and reuses a victim frame's
+bytes immediately on eviction*. If a read had to `Pin` (take that mutex) on every
+descent step, or if a victim frame's bytes were reused while a lock-free reader
+still held `Slice`s into it, we would either regress the headline property or get
+a use-after-free.
+
+*Resolution — epoch-deferred frame reuse, not per-read pinning.* Reads stay
+lock-free: `mapping_.Get(pid)` returns the resident base directly and the reader
+reads its frame bytes under its existing epoch guard. Residency is made safe **by
+the epoch manager, not by pins**: when the writer (single, under `write_mutex_`)
+replaces or evicts a base, the frame's memory is **retired through the epoch
+manager** and only returned to the pool's free list once no guard that could hold
+a pointer into it remains. Pins are retained only for the *writer/checkpoint*
+(building, write-back) and for *demand-load installation*, never on the read hot
+path. This matches §4.2's "eviction waits for the epoch" and keeps `Pin`'s mutex
+off the reader. (A future lock-free pin with hazard/epoch counters is possible but
+is **not** required for PT6c-5 and is out of scope.)
+
+**Problem B — anonymous frames (no durable addr yet).** The pool's `Pin`/
+write-back are addr-keyed, but the live tree creates pages (flush/consolidate/
+split/merge) long before a checkpoint assigns them a durable `PageAddr`. Such
+frames are **anonymous + dirty**.
+
+*Resolution.* A newly built page gets a frame via `PinNew(pid, addr=kNoAddr)`; it
+is dirty and **pinned-resident until checkpoint** (it is the working set being
+flushed, so this is the intended behavior, consistent with §4.3 "a dirty frame is
+never evicted until written"). Checkpoint's `FlushDirty` assigns each dirty
+frame a durable `addr` (append cursor, §5), records `pid→addr`, clears dirty, and
+**drops the build pin** so the frame becomes evictable. Thus between checkpoints
+memory is bounded by *(working set since last checkpoint) + (resident clean
+cache)*; a write storm that outruns checkpoint triggers an eager checkpoint
+(§5A back-pressure). Anonymous frames are never written to a scratch area in v1.
+
+**Rollout (each step compiles + 117 tests green, ASan/TSan-clean):**
+
+- **PT6c-5.1 — pool ownership of live base frames (no eviction yet).** Give
+  `Crowtree` a `BufferPool` sized by a new `Options.buffer_pool_bytes`
+  (default `min(8 GiB, 25% RAM)`) with `page_bytes = Options.frame_bytes`.
+  `LeafBase`/`InnerBase` are built into a `PinNew` frame and hold their pin for
+  their (heap) lifetime; their bytes live in the arena. Capacity is sized to not
+  evict yet. Net effect: base-page bytes now live in the pool arena; behavior
+  unchanged. *Test:* existing suite + a pool-stats assertion (resident grows).
+- **PT6c-5.2 — epoch-deferred frame free on retire.** `RetirePage` of a
+  frame-backed base returns its frame to the pool's free list **via the epoch
+  manager** (deferred), instead of `delete`. Add `BufferPool::FreeFrameDeferred`.
+  *Test:* `stress_test` under TSan/ASan; `epoch_test`-style residency-after-guard.
+- **PT6c-5.3 — mapping slot tagging + demand load.** Slot becomes a tagged word
+  (`PageBase*` | `unloaded PageAddr`). Recovery stores `pid→addr` tags instead of
+  eagerly loading; `Get` of an unloaded slot demand-loads (CRC-checked) and
+  publishes. *Test:* `lazy_load_test` (first access loads; reopen equals).
+- **PT6c-5.4 — CLOCK eviction of clean resident bases.** Under capacity pressure,
+  evict a clean unpinned base: retire its heap handle via epoch and re-tag its
+  slot to `unloaded addr`. Anonymous/dirty frames are skipped (Problem B).
+  *Test:* `eviction_test` (small pool, many pages, residency capped, values
+  correct, re-load on access).
+
+PT6c-5.1 and 5.2 carry no on-disk or API change and are pure internal plumbing;
+5.3/5.4 enable lazy recovery and bounded memory and are the prerequisites for
+PT6d (incremental checkpoint) and PT7 (export/import).
+
 ---
 
 ## 5. Checkpoint

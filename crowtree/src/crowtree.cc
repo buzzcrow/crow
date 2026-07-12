@@ -16,20 +16,22 @@ namespace {
 // retention GC); all other tombstones are kept.
 std::vector<LeafEntry> ResolveChainSorted(PageBase* head, uint64_t gc_floor) {
   std::map<std::string, std::string> resolved;  // key -> encoded cell
-  for (PageBase* node = head; node != nullptr; node = node->next) {
-    const std::vector<LeafEntry>* entries = nullptr;
-    if (node->type == PageType::kBatchDelta) {
-      entries = &static_cast<BatchDelta*>(node)->entries();
-    } else if (node->type == PageType::kLeafBase) {
-      entries = &static_cast<LeafBase*>(node)->entries();
+  auto consider = [&](Slice key, Slice cell) {
+    uint64_t s = CellView{cell}.slot();
+    std::string k = key.ToString();
+    auto it = resolved.find(k);
+    if (it == resolved.end() || s > CellView{Slice(it->second)}.slot()) {
+      resolved[k] = cell.ToString();
     }
-    if (entries == nullptr) continue;
-    for (const LeafEntry& e : *entries) {
-      uint64_t s = CellView{Slice(e.cell)}.slot();
-      auto it = resolved.find(e.key);
-      if (it == resolved.end() || s > CellView{Slice(it->second)}.slot()) {
-        resolved[e.key] = e.cell;
+  };
+  for (PageBase* node = head; node != nullptr; node = node->next) {
+    if (node->type == PageType::kBatchDelta) {
+      for (const LeafEntry& e : static_cast<BatchDelta*>(node)->entries()) {
+        consider(Slice(e.key), Slice(e.cell));
       }
+    } else if (node->type == PageType::kLeafBase) {
+      LeafFrameView v = static_cast<LeafBase*>(node)->view();
+      for (uint32_t i = 0; i < v.count(); ++i) consider(v.key(i), v.cell(i));
     }
   }
   std::vector<LeafEntry> out;
@@ -62,9 +64,11 @@ void CollectInOrder(const MappingTable& mt, uint64_t pid, uint64_t gc_floor,
 }  // namespace
 
 Crowtree::Crowtree(CrowtreeEnv& env, const Options& opt) : env_(env), opt_(opt) {
+  pool_ = std::make_shared<BufferPool>(opt_.buffer_pool_bytes, opt_.frame_bytes,
+                                       opt_.page_store);
   // Initialize with a single empty leaf as the root.
   uint64_t pid = mapping_.AllocatePID();
-  mapping_.Store(pid, LeafBase::Build({}));
+  mapping_.Store(pid, LeafBase::Build({}, kInvalidPID, pool_, opt_.frame_bytes));
   root_pid_.store(pid);
 }
 
@@ -181,7 +185,7 @@ void Crowtree::ConsolidateLocked(uint64_t pid) {
 
   // Fold the chain by highest-slot-wins per key (GC drops tombstones <= floor).
   std::vector<LeafEntry> entries = ResolveChainSorted(head, gc_floor_.load());
-  LeafBase* fresh = LeafBase::Build(std::move(entries), right);
+  LeafBase* fresh = LeafBase::Build(std::move(entries), right, pool_, opt_.frame_bytes);
   mapping_.Store(pid, fresh);
 
   // Retire the old chain (deltas + old base).
@@ -242,11 +246,11 @@ void Crowtree::SplitLeafLocked(uint64_t leaf_pid, std::vector<uint64_t> path) {
   // routing upper-half keys to right_pid once it references it). Only after the
   // whole path is repointed do we shrink `leaf_pid` to the lower half.
   uint64_t right_pid = mapping_.AllocatePID();
-  LeafBase* right = LeafBase::Build(std::move(hi), leaf->right_sibling());
+  LeafBase* right = LeafBase::Build(std::move(hi), leaf->right_sibling(), pool_, opt_.frame_bytes);
   mapping_.Store(right_pid, right);
   PropagateSplitLocked(std::move(path), leaf_pid, std::move(sep), right_pid);
 
-  LeafBase* left = LeafBase::Build(std::move(lo), right_pid);
+  LeafBase* left = LeafBase::Build(std::move(lo), right_pid, pool_, opt_.frame_bytes);
   mapping_.Store(leaf_pid, left);
   RetirePage(leaf);
 }
@@ -256,7 +260,8 @@ void Crowtree::PropagateSplitLocked(std::vector<uint64_t> path, uint64_t child_p
   if (path.empty()) {
     // child was the root: grow a new root one level up.
     uint64_t new_root = mapping_.AllocatePID();
-    mapping_.Store(new_root, InnerBase::Build({std::move(sep)}, {child_pid, right_pid}));
+    mapping_.Store(new_root, InnerBase::Build({std::move(sep)}, {child_pid, right_pid},
+                                              pool_, opt_.frame_bytes));
     root_pid_.store(new_root);
     return;
   }
@@ -275,7 +280,8 @@ void Crowtree::PropagateSplitLocked(std::vector<uint64_t> path, uint64_t child_p
   children.insert(children.begin() + idx + 1, right_pid);
 
   if (seps.size() <= opt_.inner_max_keys) {
-    mapping_.Store(parent_pid, InnerBase::Build(std::move(seps), std::move(children)));
+    mapping_.Store(parent_pid, InnerBase::Build(std::move(seps), std::move(children),
+                                                pool_, opt_.frame_bytes));
     RetirePage(parent);
     return;
   }
@@ -289,8 +295,10 @@ void Crowtree::PropagateSplitLocked(std::vector<uint64_t> path, uint64_t child_p
   std::vector<uint64_t> rchildren(children.begin() + m + 1, children.end());
 
   uint64_t rinner_pid = mapping_.AllocatePID();
-  mapping_.Store(parent_pid, InnerBase::Build(std::move(lseps), std::move(lchildren)));
-  mapping_.Store(rinner_pid, InnerBase::Build(std::move(rseps), std::move(rchildren)));
+  mapping_.Store(parent_pid, InnerBase::Build(std::move(lseps), std::move(lchildren),
+                                              pool_, opt_.frame_bytes));
+  mapping_.Store(rinner_pid, InnerBase::Build(std::move(rseps), std::move(rchildren),
+                                              pool_, opt_.frame_bytes));
   RetirePage(parent);
 
   PropagateSplitLocked(std::move(path), parent_pid, std::move(median), rinner_pid);
@@ -329,7 +337,7 @@ void Crowtree::TryMergeLeafLocked(uint64_t leaf_pid,
     if (v.is_tombstone() && v.slot() <= gc) continue;
     merged.push_back(e);
   }
-  LeafBase* fresh = LeafBase::Build(std::move(merged), leaf->right_sibling());
+  LeafBase* fresh = LeafBase::Build(std::move(merged), leaf->right_sibling(), pool_, opt_.frame_bytes);
   mapping_.Store(left_pid, fresh);
   RetirePage(left);
 
@@ -344,7 +352,8 @@ void Crowtree::TryMergeLeafLocked(uint64_t leaf_pid,
     root_pid_.store(children[0]);
     RetirePage(parent);
   } else {
-    mapping_.Store(parent_pid, InnerBase::Build(std::move(seps), std::move(children)));
+    mapping_.Store(parent_pid, InnerBase::Build(std::move(seps), std::move(children),
+                                                pool_, opt_.frame_bytes));
     RetirePage(parent);
   }
 
