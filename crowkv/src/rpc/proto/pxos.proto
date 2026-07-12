@@ -189,7 +189,7 @@ message StepDownResponse {
   uint64 request_create_ms = 7;
 }
 
-// Per-peer bidi PeerStream. Multiplexes Accept + Heartbeat + Chosen
+// Per-peer bidi LearnerStream. Multiplexes Accept + Heartbeat + Chosen
 // notifications on one stream per (group_id, peer_id) pair so heartbeats
 // cannot reorder ahead of an Accept they logically follow. Prepare /
 // RequestVote / PreVote / StepDown remain unary RPCs.
@@ -203,7 +203,7 @@ message ChosenNotification {
   uint64 request_create_ms = 7;
 }
 
-message PeerStreamRequest {
+message LearnerStreamRequest {
   oneof frame {
     AcceptRequest      accept    = 1;
     HeartbeatRequest   heartbeat = 2;
@@ -211,7 +211,7 @@ message PeerStreamRequest {
   }
 }
 
-message PeerStreamResponse {
+message LearnerStreamResponse {
   oneof frame {
     AcceptedResponse  accepted  = 1;
     HeartbeatResponse heartbeat = 2;
@@ -229,5 +229,5 @@ service PxService {
   rpc StepDown(StepDownRequest) returns (StepDownResponse);
 
   // P1 M3 per-peer bidi stream (steady-state Accept/Heartbeat/Chosen).
-  rpc PeerStream(stream PeerStreamRequest) returns (stream PeerStreamResponse);
+  rpc LearnerStream(stream LearnerStreamRequest) returns (stream LearnerStreamResponse);
 }

@@ -15,15 +15,17 @@ use crowkv_console_shared::{
     topology, ConsoleConfig, ServerEntry,
 };
 
-fn pick_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
+fn pick_two_free_ports() -> (u16, u16) {
+    let l1 = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let l2 = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let p1 = l1.local_addr().unwrap().port();
+    let p2 = l2.local_addr().unwrap().port();
+    drop(l1);
+    drop(l2);
+    (p1, p2)
 }
 
 #[tokio::test]
-#[ignore = "flaky: pick_free_port can return same port for mgmt and grpc causing validation failure"]
 async fn deploy_local_and_observe_topology() {
     let Some(bin) = crowkv_server_bin() else {
         eprintln!("skipping: crowkv-server binary not found (build it with `cargo build -p crowkv-server` or set $CROWKV_SERVER_BIN)");
@@ -56,8 +58,7 @@ async fn deploy_local_and_observe_topology() {
     .unwrap();
 
     let node = cfg.node("n1").unwrap().clone();
-    let mgmt_port = pick_free_port();
-    let grpc_port = pick_free_port();
+    let (mgmt_port, grpc_port) = pick_two_free_ports();
 
     let req = DeployRequest {
         server_id: "s1".into(),

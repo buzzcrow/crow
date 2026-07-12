@@ -11,7 +11,6 @@ doc only when a task touches a topic in its row. Line counts are approximate
 | `requirement.md` | ~900 | Source of truth for what must be built. Any feature gap → fix here first. UI requirements live in §15.4.6. |
 | `design.md` | ~490 | Master design: cross-cutting architecture, write/read flows, module decomposition. Read for scope-spanning questions. |
 | `plan.md` | ~190 | Phases (P1–P5), milestones, dependency order, decision log. Read before picking a task. |
-| `plan-ut.md` | ~100 | Ignored / flaky unit & integration tests, root-cause analysis, and repro commands. |
 | `test.md` | ~200 | Test strategy, layer scope definitions, high-level coverage per layer, and feature-dependent test gaps. Read when designing tests or deciding where a test belongs. |
 | `plan-test.md` | ~30 | Unfinished test task backlog with checkboxes. Read when picking the next test to implement. |
 
@@ -80,7 +79,7 @@ embedded Swagger, V2 deferral list).
 | `design/design-reconfiguration.md` | ~280 | Joint consensus, member add/remove, leader transfer, group-0 special cases, quorum-overlap safety. |
 | `design/design-rpc.md` | ~265 | Wire protocol: classic Paxos messages, PeerStream bidi stream (frames, flow control, parallelism), PxService / AdminService, Rust mapping. |
 | `design/design-slot.md` | ~650 | `PxSlotList` / `PxSlotNode`: chunk layout, insert/get/trim, reclamation, performance model, future evolution. |
-| `design/design-storage-engine.md` | ~310 | Storage plug-in: per-key slot tracking, apply semantics, snapshot, compaction, compare, engine impls. |
+| `design/design-state-machine.md` | ~310 | Storage plug-in: per-key slot tracking, apply semantics, snapshot, compaction, compare, engine impls. |
 | `design/design-ui.md` | ~270 | Web UI design (v1 lean rewrite): 3-pane shell, two hierarchy views, slim React Flow canvas, inspector (Details/KV/Activity), embedded Swagger, minimal embedding contract. |
 | `design/design-wal.md` | ~470 | Write-ahead log: multi-disk segments, backend-neutral durable flush, ack contract, replay/restore/recovery, GC, disk loss. |
 

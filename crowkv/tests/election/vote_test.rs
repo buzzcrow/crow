@@ -6,7 +6,7 @@
 
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crowkv::cluster::replica::{ReplicaHandler, VoteRequestPayload};
-use crowkv::paxos::roles::{PxBallot, PxLogEntry, PxLogEntryKind};
+use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 
 fn make_vote_req(term: u64, candidate_id: u64, tip_slot: u64, tip_term: u64) -> VoteRequestPayload {
     VoteRequestPayload {
@@ -22,10 +22,7 @@ fn accept_entry(slot: u64, term: u64, replica_id: u64) -> PxLogEntry {
         slot,
         ballot: PxBallot::new(0, replica_id),
         term,
-        kind: PxLogEntryKind::Write,
         payload: bytes::Bytes::from_static(b"v"),
-        client_id: None,
-        seq: None,
     }
 }
 

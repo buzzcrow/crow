@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 
-use crowkv::paxos::roles::{PxBallot, PxLogEntry, PxLogEntryKind};
+use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 use crowkv::wal::record::WALRecord;
 use crowkv::wal::wal_engine::WalEngine;
 use crowkv::wal::{BlockDevice, IoBackend, WalConfig};
@@ -34,10 +34,7 @@ fn make_record(group: u64, slot: u64, payload_size: usize) -> WALRecord {
         slot,
         ballot: PxBallot::new(0, 1),
         term: 1,
-        kind: PxLogEntryKind::Write,
         payload: Bytes::from(vec![0u8; payload_size]),
-        client_id: Some(7),
-        seq: Some(slot),
     };
     WALRecord::from_accepted(group, &entry)
 }

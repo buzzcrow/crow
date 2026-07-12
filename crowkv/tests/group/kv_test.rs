@@ -15,11 +15,11 @@ async fn kv_mutations_apply_to_all_learners() {
             version: 1,
             key: b"k1".to_vec(),
             value: b"v1".to_vec(),
-            seq: 1,
             ttl_ms: 0,
-            client_id: 11,
             request_id: 101,
             request_create_ms: 1001,
+            client_id: 0,
+            seq: 0,
             group_id: 1,
         })
         .await
@@ -45,10 +45,10 @@ async fn kv_mutations_apply_to_all_learners() {
                     is_delete: false,
                 },
             ],
-            seq: 2,
-            client_id: 11,
             request_id: 102,
             request_create_ms: 1002,
+            client_id: 0,
+            seq: 0,
             group_id: 1,
         })
         .await
@@ -64,10 +64,10 @@ async fn kv_mutations_apply_to_all_learners() {
         .delete(KvDeleteRequest {
             version: 1,
             key: b"k1".to_vec(),
-            seq: 3,
-            client_id: 11,
             request_id: 103,
             request_create_ms: 1003,
+            client_id: 0,
+            seq: 0,
             group_id: 1,
         })
         .await

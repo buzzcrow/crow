@@ -63,11 +63,11 @@ async fn write_survives_forced_leader_step_down() {
             version: 1,
             key: b"g1".to_vec(),
             value: b"survives".to_vec(),
-            seq: 1,
             ttl_ms: 0,
-            client_id: 77,
             request_id: 1,
             request_create_ms: 1,
+            client_id: 0,
+            seq: 0,
             group_id: 1,
         })
         .await

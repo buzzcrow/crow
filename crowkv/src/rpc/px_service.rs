@@ -15,12 +15,12 @@ use crate::cluster::replica::{
     HeartbeatRequestPayload, PxReplicaError, ReplicaHandler, StepDownRequestPayload, VoteRequestPayload,
 };
 use crate::common::optional_u64;
-use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxLogEntryKind, PxPrepareReply};
+use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
 
 use crate::rpc::px_service_server::PxService;
 use crate::rpc::{
-    peer_stream_request, peer_stream_response, AcceptRequest, AcceptedResponse, AcceptedValue,
-    HeartbeatRequest, HeartbeatResponse, PeerStreamRequest, PeerStreamResponse, PreVoteRequest,
+    learner_stream_request, learner_stream_response, AcceptRequest, AcceptedResponse, AcceptedValue,
+    HeartbeatRequest, HeartbeatResponse, LearnerStreamRequest, LearnerStreamResponse, PreVoteRequest,
     PreVoteResponse, PrepareRequest, PromiseResponse, RequestVoteRequest, RequestVoteResponse,
     StepDownRequest, StepDownResponse,
 };
@@ -143,15 +143,15 @@ impl PxService for PxReplicaService {
 
     async fn accept(&self, _request: Request<AcceptRequest>) -> Result<Response<AcceptedResponse>, Status> {
         // Unary `Accept` RPC is retired — all proposers route Accept
-        // frames over the per-peer bidi `PeerStream`. The proto method
+        // frames over the per-peer bidi `LearnerStream`. The proto method
         // is kept for one release for binary-compat, but the handler
-        // now refuses calls. New clients must open a `PeerStream`.
+        // now refuses calls. New clients must open a `LearnerStream`.
         debug!(
             store_id = self.store.store_id,
-            "unary Accept RPC is deprecated; use PeerStream",
+            "unary Accept RPC is deprecated; use LearnerStream",
         );
         Err(Status::unimplemented(
-            "unary Accept is deprecated in P1 M3; use PeerStream",
+            "unary Accept is deprecated in P1 M3; use LearnerStream",
         ))
     }
 
@@ -300,19 +300,20 @@ impl PxService for PxReplicaService {
         }))
     }
 
-    type PeerStreamStream = Pin<Box<dyn Stream<Item = Result<PeerStreamResponse, Status>> + Send + 'static>>;
+    type LearnerStreamStream =
+        Pin<Box<dyn Stream<Item = Result<LearnerStreamResponse, Status>> + Send + 'static>>;
 
-    async fn peer_stream(
+    async fn learner_stream(
         &self,
-        request: Request<Streaming<PeerStreamRequest>>,
-    ) -> Result<Response<Self::PeerStreamStream>, Status> {
+        request: Request<Streaming<LearnerStreamRequest>>,
+    ) -> Result<Response<Self::LearnerStreamStream>, Status> {
         // Route inbound frames through the existing `ReplicaHandler`
         // methods and ship matching responses back on the outbound half
         // of the same bidi stream. This shares the helper bodies with
         // the unary `Accept` / `Heartbeat` RPCs.
         let mut inbound = request.into_inner();
         let store = self.store.clone();
-        let (tx, rx) = tokio::sync::mpsc::channel::<Result<PeerStreamResponse, Status>>(64);
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<LearnerStreamResponse, Status>>(64);
 
         tokio::spawn(async move {
             while let Some(item) = inbound.next().await {
@@ -325,25 +326,25 @@ impl PxService for PxReplicaService {
                 };
                 let Some(frame) = frame else { continue };
                 let response_frame = match frame {
-                    peer_stream_request::Frame::Accept(accept_req) => {
+                    learner_stream_request::Frame::Accept(accept_req) => {
                         match handle_accept_inner(&store, accept_req).await {
-                            Ok(resp) => Some(peer_stream_response::Frame::Accepted(resp)),
+                            Ok(resp) => Some(learner_stream_response::Frame::Accepted(resp)),
                             Err(status) => {
                                 let _ = tx.send(Err(status)).await;
                                 return;
                             }
                         }
                     }
-                    peer_stream_request::Frame::Heartbeat(hb_req) => {
+                    learner_stream_request::Frame::Heartbeat(hb_req) => {
                         match handle_heartbeat_inner(&store, hb_req).await {
-                            Ok(resp) => Some(peer_stream_response::Frame::Heartbeat(resp)),
+                            Ok(resp) => Some(learner_stream_response::Frame::Heartbeat(resp)),
                             Err(status) => {
                                 let _ = tx.send(Err(status)).await;
                                 return;
                             }
                         }
                     }
-                    peer_stream_request::Frame::Chosen(notice) => {
+                    learner_stream_request::Frame::Chosen(notice) => {
                         // Route into the local replica's learner via
                         // PxLocalReplica::note_chosen, which applies the
                         // term fence and only updates the
@@ -360,7 +361,7 @@ impl PxService for PxReplicaService {
                                 term = notice.term,
                                 leader_id = notice.leader_id,
                                 advanced,
-                                "PeerStream: chosen notification applied"
+                                "LearnerStream: chosen notification applied"
                             );
                         } else {
                             debug!(
@@ -368,7 +369,7 @@ impl PxService for PxReplicaService {
                                 group_id = notice.group_id,
                                 slot = notice.slot,
                                 term = notice.term,
-                                "PeerStream: chosen notification dropped (group not found)"
+                                "LearnerStream: chosen notification dropped (group not found)"
                             );
                         }
                         None
@@ -376,7 +377,7 @@ impl PxService for PxReplicaService {
                 };
                 if let Some(frame) = response_frame {
                     if tx
-                        .send(Ok(PeerStreamResponse { frame: Some(frame) }))
+                        .send(Ok(LearnerStreamResponse { frame: Some(frame) }))
                         .await
                         .is_err()
                     {
@@ -388,12 +389,12 @@ impl PxService for PxReplicaService {
         });
 
         let out_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-        Ok(Response::new(Box::pin(out_stream) as Self::PeerStreamStream))
+        Ok(Response::new(Box::pin(out_stream) as Self::LearnerStreamStream))
     }
 }
 
 /// Inner `Accept` handler shared by the unary `Accept` RPC and the
-/// `PeerStream` bidi. Wire-format → in-memory conversion + delegation
+/// `LearnerStream` bidi. Wire-format → in-memory conversion + delegation
 /// to [`ReplicaHandler::on_accept`] + response build.
 async fn handle_accept_inner(store: &Arc<PxKvStore>, req: AcceptRequest) -> Result<AcceptedResponse, Status> {
     let value = req.value.ok_or_else(|| {
@@ -406,6 +407,8 @@ async fn handle_accept_inner(store: &Arc<PxKvStore>, req: AcceptRequest) -> Resu
         );
         Status::invalid_argument("missing value")
     })?;
+    let client_id = optional_u64(req.client_id);
+    let seq = optional_u64(req.seq);
     let entry = PxLogEntry {
         slot: req.slot,
         ballot: PxBallot {
@@ -413,10 +416,7 @@ async fn handle_accept_inner(store: &Arc<PxKvStore>, req: AcceptRequest) -> Resu
             leader_id: req.leader_id,
         },
         term: req.term,
-        kind: PxLogEntryKind::Write,
         payload: value.payload,
-        client_id: optional_u64(req.client_id),
-        seq: optional_u64(req.seq),
     };
 
     let group = store
@@ -430,7 +430,7 @@ async fn handle_accept_inner(store: &Arc<PxKvStore>, req: AcceptRequest) -> Resu
     )
     .await?;
     if matches!(reply, PxAcceptReply::Accepted { .. }) {
-        replica.learn_chosen(&entry).await;
+        replica.learn_chosen(&entry, client_id, seq).await;
     }
 
     let (rejected, rejected_round, rejected_leader_id, term_stale, reply_term) = match reply {
@@ -482,7 +482,7 @@ async fn handle_accept_inner(store: &Arc<PxKvStore>, req: AcceptRequest) -> Resu
 }
 
 /// Inner `Heartbeat` handler shared by the unary `Heartbeat` RPC and the
-/// `PeerStream` bidi.
+/// `LearnerStream` bidi.
 async fn handle_heartbeat_inner(
     store: &Arc<PxKvStore>,
     req: HeartbeatRequest,

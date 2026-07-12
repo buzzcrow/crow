@@ -1,12 +1,12 @@
 # CrowKV - Plan: Implementation Master Schedule
 
-Depends on: [`requirement.md`](requirement.md), [`design.md`](design.md), [`design-leader-election.md`](design/design-leader-election.md), [`design-parallel-slots.md`](design/design-parallel-slots.md), [`design-wal.md`](design/design-wal.md), [`design-storage-engine.md`](design/design-storage-engine.md), [`design-reconfiguration.md`](design/design-reconfiguration.md)
+Depends on: [`requirement.md`](requirement.md), [`design.md`](design.md), [`design-leader-election.md`](design/design-leader-election.md), [`design-parallel-slots.md`](design/design-parallel-slots.md), [`design-wal.md`](design/design-wal.md), [`design-state-machine.md`](design/design-state-machine.md), [`design-reconfiguration.md`](design/design-reconfiguration.md)
 Satisfies: all of [`requirement.md`](requirement.md) (phased implementation)
 
 This document defines the phased implementation schedule and cross-stream dependencies.
 Detailed per-milestone plans are created temporarily before each step (see §6).
 
-> **Note:** sub-topic plan files (`plan-consensus.md`, `plan-ut.md`, etc.) have been merged into this outline. Before implementing a milestone, create a temporary detailed plan if needed.
+> **Note:** sub-topic plan files (`plan-consensus.md`, etc.) have been merged into this outline. Before implementing a milestone, create a temporary detailed plan if needed.
 
 ---
 
@@ -158,7 +158,7 @@ Every phase milestone includes:
 2. **Failure-injection** matching [`design.md`](design.md) §9 scenarios.
 3. **crowbench** integration test (end-to-end correctness) once P4 is reached.
 
-See [`plan-ut.md`](plan-ut.md) for ignored/pending test tracking.
+See [`plan-test.md`](plan-test.md) for pending test task tracking.
 
 ---
 

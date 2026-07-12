@@ -7,7 +7,7 @@
 
 use bytes::Bytes;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
-use crowkv::paxos::roles::{PxBallot, PxLogEntry, PxLogEntryKind};
+use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 
 #[allow(clippy::cast_possible_truncation)]
 fn encode_put(key: &[u8], value: &[u8]) -> Vec<u8> {
@@ -37,10 +37,7 @@ fn write_entry(slot: u64, key: &[u8], value: &[u8]) -> PxLogEntry {
         slot,
         ballot: PxBallot::new(0, 1),
         term: 1,
-        kind: PxLogEntryKind::Write,
         payload: Bytes::from(encode_put(key, value)),
-        client_id: Some(1),
-        seq: Some(slot),
     }
 }
 
@@ -49,10 +46,7 @@ fn delete_entry(slot: u64, key: &[u8]) -> PxLogEntry {
         slot,
         ballot: PxBallot::new(0, 1),
         term: 1,
-        kind: PxLogEntryKind::Write,
         payload: Bytes::from(encode_delete(key)),
-        client_id: Some(1),
-        seq: Some(slot),
     }
 }
 
@@ -64,7 +58,7 @@ async fn clear_wipes_kv_state_but_preserves_accepted_log() {
     for (slot, key, value) in [(1u64, b"k1", b"v1"), (2, b"k2", b"v2"), (3, b"k3", b"v3")] {
         let entry = write_entry(slot, key, value);
         let _ = replica.on_accept(entry.clone()).await;
-        replica.learn_chosen(&entry).await;
+        replica.learn_chosen(&entry, None, None).await;
     }
     assert_eq!(replica.contiguous_applied(), 3);
     assert_eq!(
@@ -94,7 +88,7 @@ async fn re_apply_after_clear_restores_kv_state() {
     let e3 = delete_entry(3, b"k1");
     for entry in [&e1, &e2, &e3] {
         let _ = replica.on_accept(entry.clone()).await;
-        replica.learn_chosen(entry).await;
+        replica.learn_chosen(entry, None, None).await;
     }
     assert_eq!(replica.contiguous_applied(), 3);
     assert_eq!(replica.learner.engine_get(b"k1"), None, "k1 deleted at slot 3");
@@ -107,7 +101,7 @@ async fn re_apply_after_clear_restores_kv_state() {
     replica.learner.engine().clear();
     for slot in 1..=3u64 {
         let entry = replica.accepted_at(slot).await.expect("accepted entry");
-        replica.learn_chosen(&entry).await;
+        replica.learn_chosen(&entry, None, None).await;
     }
 
     // KV state is restored correctly, including the delete.
@@ -130,7 +124,7 @@ async fn re_apply_after_clear_restores_watermarks() {
     for slot in 1..=3u64 {
         let entry = write_entry(slot, b"k", b"v");
         let _ = replica.on_accept(entry.clone()).await;
-        replica.learn_chosen(&entry).await;
+        replica.learn_chosen(&entry, None, None).await;
     }
     assert_eq!(replica.contiguous_applied(), 3);
 
@@ -138,7 +132,7 @@ async fn re_apply_after_clear_restores_watermarks() {
     replica.learner.engine().clear();
     for slot in 1..=3u64 {
         let entry = replica.accepted_at(slot).await.expect("accepted entry");
-        replica.learn_chosen(&entry).await;
+        replica.learn_chosen(&entry, None, None).await;
     }
 
     // Watermarks are restored.
@@ -154,9 +148,9 @@ async fn clear_drops_all_keys_including_tombstones() {
     let e1 = write_entry(1, b"k", b"v");
     let e2 = delete_entry(2, b"k");
     let _ = replica.on_accept(e1.clone()).await;
-    replica.learn_chosen(&e1).await;
+    replica.learn_chosen(&e1, None, None).await;
     let _ = replica.on_accept(e2.clone()).await;
-    replica.learn_chosen(&e2).await;
+    replica.learn_chosen(&e2, None, None).await;
 
     // Tombstone is retained internally.
     assert_eq!(replica.learner.engine().iter_all().len(), 1);

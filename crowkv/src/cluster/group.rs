@@ -9,7 +9,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::cluster::group_config::{GroupConfigStore, PxGroupConfig, PxGroupMember};
 use crate::cluster::group_election::PendingLeaderHandoff;
@@ -20,7 +20,7 @@ use crate::cluster::status::{GroupStatus, StatusLevel};
 use crate::common::config::{PaxosConfig, PxElectionConfig};
 use crate::common::report::OperationReport;
 use crate::paxos::error::{PxPaxosError, PxPaxosPhase, PxRetryAction};
-use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxLogEntryKind, PxPrepareReply, SlotIndex};
+use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply, SlotIndex};
 use crate::paxos::{PxGroupId, PxNodeId};
 
 pub struct PxGroup {
@@ -131,8 +131,7 @@ impl PxGroup {
     /// Set the file-based config store for this group.
     ///
     /// When set, [`Self::persist_config`] writes the group membership to a
-    /// dedicated config file (`group_config.bin`) in the group's WAL
-    /// directory instead of a WAL `ConfigChange` record.
+    /// dedicated config file (`store{sid}_group{gid}.json`) in the group's conf directory.
     pub fn set_config_store(&mut self, store: GroupConfigStore) {
         self.config_store = Some(store);
     }
@@ -367,12 +366,11 @@ impl PxGroup {
         let local_id = self.local_replica().id;
         let term = self.local_replica().current_term_snapshot();
         let mut members = Vec::new();
-        // Local replica has no outbound endpoint in this group; store an empty
-        // endpoint as a placeholder so the local id appears in the persisted
-        // member list for quorum computation.
+        // Local replica's endpoint is set by the store when the group is
+        // added, so all nodes share the same member list in the config file.
         members.push(PxGroupMember {
             replica_id: local_id,
-            endpoint: String::new(),
+            endpoint: self.local_replica().get_endpoint().unwrap_or_default(),
             voting: self.local_replica().voting(),
         });
         for remote in self.remote_replicas.iter().filter_map(|r| r.as_real()) {
@@ -389,7 +387,7 @@ impl PxGroup {
         };
         if let Some(store) = &self.config_store {
             if let Err(e) = store.save(&config).await {
-                warn!(
+                error!(
                     group_id = self.group_id,
                     term,
                     error = %e,
@@ -661,7 +659,7 @@ impl PxGroup {
         let mut slot = self.next_slot.fetch_add(1, Ordering::Relaxed);
         let mut last_error = String::new();
 
-        info!(
+        trace!(
             group_id,
             my_id = self.local_replica.id,
             client_id = ?client_id,
@@ -673,7 +671,7 @@ impl PxGroup {
         );
 
         'slot_retry: for _slot_attempt in 0..PaxosConfig::DEFAULT.max_slot_retries {
-            let base_entry = self.base_entry(slot, payload.clone(), client_id, seq);
+            let base_entry = self.base_entry(slot, payload.clone());
             let mut force_prepare = self.force_classic; // Classic: always prepare; Leader: Phase-2 only
             let mut min_round = 0u64;
 
@@ -687,7 +685,7 @@ impl PxGroup {
 
                 if force_prepare {
                     match self
-                        .run_prepare_phase(replica, slot, payload.clone(), client_id, seq, quorum, min_round)
+                        .run_prepare_phase(replica, slot, payload.clone(), quorum, min_round)
                         .await
                     {
                         PrepareAttempt::Proceed {
@@ -734,9 +732,12 @@ impl PxGroup {
                     entry.ballot.round = min_round;
                 }
 
-                match self.run_accept_phase(replica, &entry, quorum).await {
+                match self
+                    .run_accept_phase(replica, &entry, client_id, seq, quorum)
+                    .await
+                {
                     AcceptAttempt::Chosen => {
-                        replica.learn_chosen(&entry).await;
+                        replica.learn_chosen(&entry, client_id, seq).await;
                         // Tell peers the slot is chosen so their
                         // `last_chosen_slot` watermark advances before
                         // the next heartbeat tick.
@@ -858,7 +859,7 @@ impl PxGroup {
         // Always run Phase 1 (classic) so an already-accepted value is
         // adopted rather than overwritten.
         let entry = match self
-            .run_prepare_phase(replica, gap_slot, bytes::Bytes::new(), None, None, quorum, 0)
+            .run_prepare_phase(replica, gap_slot, bytes::Bytes::new(), quorum, 0)
             .await
         {
             PrepareAttempt::Proceed { entry, .. } => entry,
@@ -873,9 +874,9 @@ impl PxGroup {
             }
         };
 
-        match self.run_accept_phase(replica, &entry, quorum).await {
+        match self.run_accept_phase(replica, &entry, None, None, quorum).await {
             AcceptAttempt::Chosen => {
-                replica.learn_chosen(&entry).await;
+                replica.learn_chosen(&entry, None, None).await;
                 self.fan_out_chosen_notice(&entry, group_id);
                 info!(group_id, slot = gap_slot, "background repair filled gap");
                 RepairOutcome::Filled { slot: gap_slot }
@@ -892,21 +893,12 @@ impl PxGroup {
         }
     }
 
-    fn base_entry(
-        &self,
-        slot: u64,
-        payload: bytes::Bytes,
-        client_id: Option<u64>,
-        seq: Option<u64>,
-    ) -> PxLogEntry {
+    fn base_entry(&self, slot: u64, payload: bytes::Bytes) -> PxLogEntry {
         PxLogEntry {
             slot,
             ballot: PxBallot::new(0, self.local_replica.id),
             term: self.local_replica.current_term_snapshot(),
-            kind: PxLogEntryKind::Write,
             payload,
-            client_id,
-            seq,
         }
     }
 
@@ -925,8 +917,6 @@ impl PxGroup {
         replica: &PxLocalReplica,
         slot: u64,
         payload: bytes::Bytes,
-        client_id: Option<u64>,
-        seq: Option<u64>,
         quorum: usize,
         min_round: u64,
     ) -> PrepareAttempt {
@@ -948,7 +938,7 @@ impl PxGroup {
             quorum,
             "run prepare phase"
         );
-        let mut entry = self.base_entry(slot, payload.clone(), client_id, seq);
+        let mut entry = self.base_entry(slot, payload.clone());
         entry.ballot = ballot;
         let term = entry.term;
 
@@ -971,7 +961,7 @@ impl PxGroup {
                 highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
             }
             Err(error) => {
-                warn!(
+                error!(
                     group_id,
                     slot,
                     replica_id = replica.id,
@@ -999,7 +989,7 @@ impl PxGroup {
                         highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
                     }
                     Err(error) => {
-                        warn!(
+                        error!(
                             group_id,
                             slot,
                             remote_id = remote.node_id,
@@ -1058,10 +1048,7 @@ impl PxGroup {
                     "prepare adopted foreign value"
                 );
             }
-            entry.kind = prev.kind;
             entry.payload = prev.payload;
-            entry.client_id = prev.client_id;
-            entry.seq = prev.seq;
         }
         PrepareAttempt::Proceed { entry, foreign_value }
     }
@@ -1070,13 +1057,15 @@ impl PxGroup {
         &self,
         replica: &PxLocalReplica,
         entry: &PxLogEntry,
+        client_id: Option<u64>,
+        seq: Option<u64>,
         quorum: usize,
     ) -> AcceptAttempt {
         let mut accepted = 0usize;
         let mut highest_rejected_round: Option<u64> = None;
         let mut highest_seen_term: Option<u64> = None;
         let group_id = self.group_id;
-        debug!(
+        trace!(
             group_id,
             slot = entry.slot,
             round = entry.ballot.round,
@@ -1096,7 +1085,7 @@ impl PxGroup {
                 highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
             }
             Err(error) => {
-                warn!(
+                error!(
                     group_id,
                     slot = entry.slot,
                     replica_id = replica.id,
@@ -1108,7 +1097,7 @@ impl PxGroup {
 
         for remote in &self.remote_replicas {
             if let RemoteReplicaKind::Real(remote) = remote {
-                match remote.send_accept(entry, group_id).await {
+                match remote.send_accept(entry, client_id, seq, group_id).await {
                     Ok(PxAcceptReply::Accepted { .. }) => {
                         accepted += 1;
                     }
@@ -1121,7 +1110,7 @@ impl PxGroup {
                         highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
                     }
                     Err(error) => {
-                        warn!(
+                        error!(
                             group_id,
                             slot = entry.slot,
                             remote_id = remote.node_id,
@@ -1171,7 +1160,7 @@ impl PxGroup {
 
     /// Best-effort fan-out of a `ChosenNotification` to every real
     /// remote in this group after a slot has been chosen. The notice is
-    /// fire-and-forget over the per-peer bidi `PxPeerStream`; failures
+    /// fire-and-forget over the per-peer bidi `PxLearnerStream`; failures
     /// are logged at `debug!` and never propagated, since the next
     /// heartbeat (carrying `committed_safe_slot`) will re-converge
     /// peer frontiers regardless.
@@ -1179,10 +1168,10 @@ impl PxGroup {
     /// `leader_id` is taken from `entry.ballot.leader_id`, matching the
     /// proposer that chose the value. Sequential await rather than
     /// `JoinSet` fan-out is fine for now: each `send_chosen_notice` is
-    /// just an mpsc enqueue (capacity = `peer_stream_window_frames`)
+    /// just an mpsc enqueue (capacity = `learner_stream_window_frames`)
     /// once the per-peer bg task is running, so it returns near-
     /// instantly except when a peer is down (in which case it fast-
-    /// fails via the connect-retry drain in `peer_stream.rs`).
+    /// fails via the connect-retry drain in `learner_stream.rs`).
     pub(crate) fn fan_out_chosen_notice(&self, entry: &PxLogEntry, group_id: u64) {
         let slot = entry.slot;
         let term = entry.term;

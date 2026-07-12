@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::oneshot;
-use tracing::{debug, info};
+use tracing::{info, trace};
 
 use crate::common::config::WalConfig;
 use crate::paxos::roles::SlotIndex;
@@ -214,7 +214,7 @@ impl WalEngine {
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "WAL writer dropped ack"))??;
 
-        debug!(
+        trace!(
             group_id = self.group_id,
             slot = record.slot,
             pipeline_idx,

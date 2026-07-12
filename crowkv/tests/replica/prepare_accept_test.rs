@@ -7,17 +7,14 @@
 
 use bytes::Bytes;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
-use crowkv::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxLogEntryKind, PxPrepareReply};
+use crowkv::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
 
 fn write_entry(slot: u64, ballot: PxBallot, term: u64, payload: &[u8]) -> PxLogEntry {
     PxLogEntry {
         slot,
         ballot,
         term,
-        kind: PxLogEntryKind::Write,
         payload: Bytes::copy_from_slice(payload),
-        client_id: Some(1),
-        seq: Some(slot),
     }
 }
 
@@ -155,7 +152,7 @@ async fn learn_chosen_advances_applied_frontier() {
     let _ = replica.on_prepare(1, PxBallot::new(0, 1), 1).await;
     let entry = write_entry(1, PxBallot::new(0, 1), 1, b"v1");
     let _ = replica.on_accept(entry.clone()).await;
-    replica.learn_chosen(&entry).await;
+    replica.learn_chosen(&entry, None, None).await;
 
     assert_eq!(replica.contiguous_applied(), 1);
     assert_eq!(replica.contiguous_chosen(), 1);

@@ -50,11 +50,11 @@ async fn follower_get_forwards_to_leader_after_local_clear() {
             version: 1,
             key: b"fk".to_vec(),
             value: b"fv".to_vec(),
-            seq: 1,
             ttl_ms: 0,
-            client_id: 11,
             request_id: 101,
             request_create_ms: 1001,
+            client_id: 0,
+            seq: 0,
             group_id: 1,
         })
         .await
@@ -199,11 +199,11 @@ async fn forwarded_request_does_not_re_forward() {
             version: 1,
             key: b"loop".to_vec(),
             value: b"v".to_vec(),
-            seq: 1,
             ttl_ms: 0,
-            client_id: 11,
             request_id: 300,
             request_create_ms: 1200,
+            client_id: 0,
+            seq: 0,
             group_id: 1,
         })
         .await

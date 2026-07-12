@@ -1,7 +1,7 @@
 //! `WalEngine` tests (W8) — `SimDisk` backend.
 
 use bytes::Bytes;
-use crowkv::paxos::roles::{PxBallot, PxLogEntry, PxLogEntryKind};
+use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 use crowkv::wal::pipeline_backend::{WalBlockAlignment, WalPipelineBackend};
 use crowkv::wal::record::{WALRecord, WalRecordFormat, WAL_MAGIC};
 use crowkv::wal::replay::replay_group;
@@ -28,10 +28,7 @@ fn write_entry(group: u64, slot: u64) -> WALRecord {
         slot,
         ballot: PxBallot::new(0, 1),
         term: 1,
-        kind: PxLogEntryKind::Write,
         payload: Bytes::from(format!("aligned-val-{slot}")),
-        client_id: Some(7),
-        seq: Some(slot),
     };
     WALRecord::from_accepted(group, &entry)
 }
@@ -235,10 +232,7 @@ async fn append_multiple_records_different_slots() {
             slot,
             ballot: PxBallot::new(0, 1),
             term: 1,
-            kind: PxLogEntryKind::Write,
             payload: Bytes::from(format!("val-{slot}")),
-            client_id: Some(1),
-            seq: Some(slot),
         };
         let record = WALRecord::from_accepted(1, &entry);
         let loc = wal.append(&record).await.unwrap();

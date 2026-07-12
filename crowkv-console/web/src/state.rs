@@ -5,7 +5,7 @@ use std::sync::{Arc, RwLock};
 use crowkv_console_shared::error::{Error, Result};
 use crowkv_console_shared::monitor::MonitorCache;
 use crowkv_console_shared::{
-    config::{ConsoleConfigEngine, ServerEntry, TomlFileEngine},
+    config::{ConsoleConfigEngine, KvRetryConfig, ServerEntry, TomlFileEngine},
     ConsoleConfig,
 };
 
@@ -23,6 +23,7 @@ pub struct AppState {
     pub runtime_root: Arc<PathBuf>,
     pub openapi_cache: Arc<std::sync::Mutex<HashMap<String, (serde_json::Value, std::time::Instant)>>>,
     pub monitor_cache: Arc<MonitorCache>,
+    pub kv_retry: KvRetryConfig,
     pub runtime_pids: Arc<std::sync::Mutex<HashMap<String, u32>>>,
 }
 
@@ -70,6 +71,7 @@ impl AppState {
             runtime_root: Arc::new(runtime_root),
             openapi_cache: Arc::new(std::sync::Mutex::new(HashMap::new())),
             monitor_cache: Arc::new(MonitorCache::new()),
+            kv_retry: KvRetryConfig::default(),
             runtime_pids: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }

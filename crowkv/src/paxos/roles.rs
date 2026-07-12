@@ -22,7 +22,8 @@ pub trait Acceptor {
 
 pub trait Learner {
     /// Apply a chosen log entry to the state machine.
-    fn learn(&self, entry: PxLogEntry);
+    /// `client_id`/`seq` are runtime dedup metadata (not persisted in WAL).
+    fn learn(&self, entry: PxLogEntry, client_id: Option<u64>, seq: Option<u64>);
 }
 
 /// Paxos proposal number, ordered first by `round`, then by `leader_id`.
@@ -45,22 +46,10 @@ impl PxBallot {
 
 pub type SlotIndex = u64;
 
-/// Classification of a log entry's payload.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PxLogEntryKind {
-    Write,
-    NoOp,
-    ConfigChange,
-    DedupCheckpoint,
-}
-
 /// One durable consensus log record.
 ///
-/// `payload` semantics depend on `kind`:
-/// - `Write`     — a serialized batch of `Operation` tuples.
-/// - `NoOp`      — empty (used to fill repair gaps).
-/// - `ConfigChange`     — serialized `crate::group::types::PxGroupConfig`.
-/// - `DedupCheckpoint`  — serialized dedup-cache snapshot.
+/// `payload` semantics: an empty payload is a `NoOp` (used to fill repair
+/// gaps); a non-empty payload is a serialized batch of `Operation` tuples.
 ///
 /// `payload` uses [`bytes::Bytes`], which is internally a ref-counted
 /// shared buffer. Cloning is `O(1)` (refcount bump) and the same buffer
@@ -76,10 +65,7 @@ pub struct PxLogEntry {
     pub slot: SlotIndex,
     pub ballot: PxBallot,
     pub term: u64,
-    pub kind: PxLogEntryKind,
     pub payload: Bytes,
-    pub client_id: Option<u64>,
-    pub seq: Option<u64>,
 }
 
 /// Reply to a Phase-1 `Prepare`.

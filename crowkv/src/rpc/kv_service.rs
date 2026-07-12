@@ -22,7 +22,7 @@ use std::sync::{Arc, OnceLock};
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Response, Status};
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 /// Loop-guard header. The `Get`/`Scan` forwarder sets this to `"1"`
 /// before re-issuing a request against the leader. The receiving
@@ -76,7 +76,7 @@ impl KvStoreService {
 impl KvService for KvStoreService {
     async fn put(&self, request: Request<KvSetRequest>) -> Result<Response<KvResponse>, Status> {
         let req = request.into_inner();
-        debug!(
+        trace!(
             store_id = self.store.store_id,
             group_id = req.group_id,
             request_id = req.request_id,
@@ -116,14 +116,6 @@ impl KvService for KvStoreService {
     async fn get(&self, request: Request<KvGetRequest>) -> Result<Response<KvResponse>, Status> {
         let already_forwarded = request.metadata().get(FORWARD_HEADER).is_some();
         let req = request.into_inner();
-        debug!(
-            store_id = self.store.store_id,
-            group_id = req.group_id,
-            request_id = req.request_id,
-            key_len = req.key.len(),
-            forwarded_in = already_forwarded,
-            "received kv get rpc"
-        );
 
         // Transparent leader-forward: only linearizable reads are forwarded
         // to the leader; the stale read modes (`READ_YOUR_WRITES`,
@@ -193,7 +185,7 @@ impl KvService for KvStoreService {
 
     async fn delete(&self, request: Request<KvDeleteRequest>) -> Result<Response<KvResponse>, Status> {
         let req = request.into_inner();
-        debug!(
+        trace!(
             store_id = self.store.store_id,
             group_id = req.group_id,
             request_id = req.request_id,

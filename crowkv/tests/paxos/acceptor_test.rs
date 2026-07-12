@@ -4,19 +4,14 @@
 //! Key work: prepare/promise, accept/accepted, ballot ordering, idempotency.
 
 use crowkv::paxos::acceptor::PxAcceptor;
-use crowkv::paxos::roles::{
-    Acceptor, PxAcceptReply, PxBallot, PxLogEntry, PxLogEntryKind, PxPrepareReply, SlotIndex,
-};
+use crowkv::paxos::roles::{Acceptor, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply, SlotIndex};
 
 fn entry(slot: SlotIndex, ballot: PxBallot, payload: &[u8]) -> PxLogEntry {
     PxLogEntry {
         slot,
         ballot,
         term: ballot.round,
-        kind: PxLogEntryKind::Write,
         payload: bytes::Bytes::copy_from_slice(payload),
-        client_id: Some(1),
-        seq: Some(1),
     }
 }
 

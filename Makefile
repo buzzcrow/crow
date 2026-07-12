@@ -17,11 +17,15 @@ default:
 
 # Run all tests including e2e
 test:
+	@echo "Cleaning test-logs ..."
+	rm -rf test-logs
 	@echo "Running tests ..."
 	cargo test --workspace --all-targets
 
 # Run web-related tests: crowkv-web Rust crate + UI vitest unit tests
 test-web: $(UI_NODE_MODULES)
+	@echo "Cleaning test-logs ..."
+	rm -rf test-logs
 	@echo "Running crowkv-web Rust tests..."
 	cargo test -p crowkv-web --all-targets
 	@echo "Running UI unit tests (vitest)..."
@@ -33,6 +37,8 @@ test-web: $(UI_NODE_MODULES)
 # Override the browser with PLAYWRIGHT_CHROMIUM_EXECUTABLE / PLAYWRIGHT_CHANNEL,
 # or run `npx playwright install chromium` once to use the bundled browser.
 e2e: $(UI_NODE_MODULES)
+	@echo "Cleaning test-logs ..."
+	rm -rf test-logs
 	@echo "Building crowkv-server (debug) for E2E..."
 	cargo build -p crowkv-server
 	@echo "Running real-backend Playwright suite..."
@@ -101,6 +107,8 @@ clean:
 	cargo clean
 	@echo "Cleaning UI build output..."
 	rm -rf $(UI_DIR)/dist $(UI_DIR)/node_modules
+	@echo "Removing test-logs ..."
+	rm -rf test-logs
 	@echo "Removing log directories..."
 	find . -type d -name "log" ! -path "*/src/*" -prune -exec rm -rf {} +
 	@echo "Removing runtime-data directories..."

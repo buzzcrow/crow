@@ -112,7 +112,7 @@ By requiring catch-up *before* proposing the final `ConfigChange`, we ensure tha
 
 ### 4.3 Snapshot install protocol
 
-Defined in [§8.4 of design.md](design.md#84-snapshot-and-install) and `design-storage-engine.md` §6 (snapshot import). Resumable, throttled, end-to-end CRC.
+Defined in [§8.4 of design.md](design.md#84-snapshot-and-install) and `design-state-machine.md` §6 (snapshot import). Resumable, throttled, end-to-end CRC.
 
 ### 4.4 Catch-up termination criterion
 

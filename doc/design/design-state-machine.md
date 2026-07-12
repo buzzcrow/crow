@@ -1,4 +1,4 @@
-# CrowKV - Design: Storage Engine Plug-In
+# CrowKV - Design: State Machine
 
 Depends on: [`requirement.md`](requirement.md), [`design.md`](design.md)
 Satisfies: [requirement.md §8.3](requirement.md#83-learner-storage), [requirement.md §8.4 import/export](requirement.md#84-snapshot-and-install), implementation prerequisites of [requirement.md §14.1 crowbench `compare`](requirement.md#141-correctness-criteria-for-crowbench)
@@ -51,8 +51,22 @@ The engine encapsulates everything below the consensus / learner layer:
 | Export and import snapshots | Streamable; resumable on the consumer side |
 | Provide a deterministic state digest or comparison | For test-time validation |
 | Track watermarks for compaction | `snapshot_slot`, `safe_slot` (provided by learner) |
+| Persist snapshot with slot index | The engine persists its KV state and `last_applied_slot` to a snapshot file; on restart, it loads this snapshot to skip re-applying already-applied slots |
 
 The engine does **not** know about Paxos, terms, ballots, leaders, or the network. It receives `(slot, batch)` and applies; that is the entire write contract.
+
+### 2.1 State Machine Snapshot and Slot Index
+
+The state machine (engine + learner) owns its own persistence boundary, separate from the WAL. This replaces the former `DurableCommitWatermark` WAL record design.
+
+**Snapshot file:** The engine periodically (or on demand) writes a snapshot of its KV state to a file, along with the `last_applied_slot` (the highest slot contiguously applied to the engine). This file is separate from the WAL.
+
+**Restart behavior:**
+1. WAL replay rebuilds acceptor state only (`Promised`, `Accepted`, `VoteGranted`).
+2. The state machine loads its snapshot file and sets `contiguous_applied = snapshot_slot`.
+3. Slots above `snapshot_slot` are re-learned via new-leader recovery (bulk Phase 1) or steady-state heartbeat catch-up.
+
+**Current implementation:** Snapshot persistence is not yet implemented. The state machine starts empty on restart (`contiguous_applied = 0`) and relies entirely on consensus recovery to repopulate. A placeholder `snapshot_slot = 0` is used.
 
 ---
 
@@ -162,6 +176,8 @@ This minimal surface keeps multi-engine compatibility easy.
 ### 6.1 Purpose
 
 Snapshot install ([§8.4 of design.md](design.md#84-snapshot-and-install)) is the bootstrap path for new or far-lagging members. The engine provides export/import primitives that the snapshot module wraps in a chunked, resumable, throttled transfer.
+
+In addition to peer transfer, the engine uses snapshot export to persist its own state locally (see §2.1). The local snapshot file stores the KV state and `last_applied_slot`, enabling fast restart without re-applying the entire WAL.
 
 ### 6.2 Export
 

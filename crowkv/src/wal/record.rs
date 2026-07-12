@@ -26,7 +26,7 @@
 use bytes::Bytes;
 use std::fmt::Write;
 
-use crate::paxos::roles::{PxBallot, PxLogEntry, PxLogEntryKind, SlotIndex};
+use crate::paxos::roles::{PxBallot, PxLogEntry, SlotIndex};
 use crate::paxos::{PxGroupId, PxTerm};
 
 /// Magic number: ASCII "CROW" in little-endian.
@@ -55,11 +55,7 @@ pub enum WalRecordFormat {
 pub enum RecordType {
     Promised = 0,
     Accepted = 1,
-    ConfigChange = 2,
-    DedupCheckpoint = 3,
-    SnapshotMarker = 4,
-    VoteGranted = 5,
-    DurableCommitWatermark = 6,
+    VoteGranted = 2,
 }
 
 impl RecordType {
@@ -67,11 +63,7 @@ impl RecordType {
         match v {
             0 => Some(Self::Promised),
             1 => Some(Self::Accepted),
-            2 => Some(Self::ConfigChange),
-            3 => Some(Self::DedupCheckpoint),
-            4 => Some(Self::SnapshotMarker),
-            5 => Some(Self::VoteGranted),
-            6 => Some(Self::DurableCommitWatermark),
+            2 => Some(Self::VoteGranted),
             _ => None,
         }
     }
@@ -80,11 +72,7 @@ impl RecordType {
         match self {
             Self::Promised => "Promised",
             Self::Accepted => "Accepted",
-            Self::ConfigChange => "ConfigChange",
-            Self::DedupCheckpoint => "DedupCheckpoint",
-            Self::SnapshotMarker => "SnapshotMarker",
             Self::VoteGranted => "VoteGranted",
-            Self::DurableCommitWatermark => "DurableCommitWatermark",
         }
     }
 
@@ -92,11 +80,7 @@ impl RecordType {
         match value {
             "Promised" => Ok(Self::Promised),
             "Accepted" => Ok(Self::Accepted),
-            "ConfigChange" => Ok(Self::ConfigChange),
-            "DedupCheckpoint" => Ok(Self::DedupCheckpoint),
-            "SnapshotMarker" => Ok(Self::SnapshotMarker),
             "VoteGranted" => Ok(Self::VoteGranted),
-            "DurableCommitWatermark" => Ok(Self::DurableCommitWatermark),
             _ => Err(RecordError::BadText(format!("unknown record type: {value}"))),
         }
     }
@@ -456,96 +440,16 @@ impl WALRecord {
         }
     }
 
-    /// Encode a durable commit watermark record. Payload carries the highest
-    /// contiguous slot durably applied to the local learner.
-    #[must_use]
-    pub fn from_durable_commit_watermark(group_id: PxGroupId, term: PxTerm, watermark: SlotIndex) -> Self {
-        Self {
-            record_type: RecordType::DurableCommitWatermark,
-            group_id,
-            term,
-            slot: 0,
-            ballot: PxBallot::new(0, 0),
-            payload: Bytes::copy_from_slice(&watermark.to_le_bytes()),
-        }
-    }
-
-    /// Encode a `ConfigChange` record on the metadata lane.
-    ///
-    /// The payload is the serialized group membership configuration (see
-    /// [`crate::cluster::group_config::PxGroupConfig::encode`]).
-    #[must_use]
-    pub fn from_config_change(group_id: PxGroupId, term: PxTerm, payload: Vec<u8>) -> Self {
-        Self {
-            record_type: RecordType::ConfigChange,
-            group_id,
-            term,
-            slot: 0,
-            ballot: PxBallot::new(0, 0),
-            payload: Bytes::from(payload),
-        }
-    }
-
-    /// Encode a snapshot marker record on the metadata lane.
-    ///
-    /// The payload carries the slot up to and including which the state has
-    /// been snapshotted. WAL records at or below this slot may be GC'd once the
-    /// caller's safety criteria are met.
-    #[must_use]
-    pub fn from_snapshot_marker(group_id: PxGroupId, term: PxTerm, snapshot_slot: SlotIndex) -> Self {
-        Self {
-            record_type: RecordType::SnapshotMarker,
-            group_id,
-            term,
-            slot: 0,
-            ballot: PxBallot::new(0, 0),
-            payload: Bytes::copy_from_slice(&snapshot_slot.to_le_bytes()),
-        }
-    }
-
-    /// Returns `true` if this is a snapshot marker record.
-    #[must_use]
-    pub fn is_snapshot_marker(&self) -> bool {
-        self.record_type == RecordType::SnapshotMarker
-    }
-
-    /// For `SnapshotMarker` records, extract the snapshot slot.
-    #[must_use]
-    pub fn snapshot_slot(&self) -> Option<SlotIndex> {
-        if self.record_type != RecordType::SnapshotMarker {
-            return None;
-        }
-        if self.payload.len() < 8 {
-            return None;
-        }
-        Some(u64::from_le_bytes([
-            self.payload[0],
-            self.payload[1],
-            self.payload[2],
-            self.payload[3],
-            self.payload[4],
-            self.payload[5],
-            self.payload[6],
-            self.payload[7],
-        ]))
-    }
-
-    /// Returns `true` if this is a `ConfigChange` record.
-    #[must_use]
-    pub fn is_config_change(&self) -> bool {
-        self.record_type == RecordType::ConfigChange
-    }
-
     /// Decode the `Accepted` payload back to a [`PxLogEntry`].
     ///
     /// The WAL header fields (slot, ballot, term) are merged with the payload
-    /// fields (kind, `client_id`, seq, inner payload).
+    /// bytes.
     #[must_use]
     pub fn to_log_entry(&self) -> Option<PxLogEntry> {
         if self.record_type != RecordType::Accepted {
             return None;
         }
-        decode_accepted_payload(self)
+        Some(decode_accepted_payload(self))
     }
 
     /// For `VoteGranted` records, extract the `voted_for` node id.
@@ -568,87 +472,27 @@ impl WALRecord {
             self.payload[7],
         ]))
     }
-
-    /// For `DurableCommitWatermark` records, extract the durable contiguous
-    /// commit watermark.
-    #[must_use]
-    pub fn durable_commit_watermark(&self) -> Option<SlotIndex> {
-        if self.record_type != RecordType::DurableCommitWatermark {
-            return None;
-        }
-        if self.payload.len() < 8 {
-            return None;
-        }
-        Some(u64::from_le_bytes([
-            self.payload[0],
-            self.payload[1],
-            self.payload[2],
-            self.payload[3],
-            self.payload[4],
-            self.payload[5],
-            self.payload[6],
-            self.payload[7],
-        ]))
-    }
 }
 
 // ── Accepted payload (de)serialization ──────────────────────
 
 /// Accepted payload layout:
 /// ```text
-/// [kind      : u8    ]  — PxLogEntryKind discriminant
-/// [client_id : u64 LE]  — 0 = None
-/// [seq       : u64 LE]  — meaningful only when client_id != 0
-/// [inner     : rest  ]  — PxLogEntry.payload bytes
+/// [inner : rest]  — PxLogEntry.payload bytes
 /// ```
 fn encode_accepted_payload(entry: &PxLogEntry) -> Vec<u8> {
-    let kind_byte = match entry.kind {
-        PxLogEntryKind::Write => 0u8,
-        PxLogEntryKind::NoOp => 1,
-        PxLogEntryKind::ConfigChange => 2,
-        PxLogEntryKind::DedupCheckpoint => 3,
-    };
-    let client_id = entry.client_id.unwrap_or(0);
-    let seq = entry.seq.unwrap_or(0);
-    let mut buf = Vec::with_capacity(1 + 8 + 8 + entry.payload.len());
-    buf.push(kind_byte);
-    buf.extend_from_slice(&client_id.to_le_bytes());
-    buf.extend_from_slice(&seq.to_le_bytes());
-    buf.extend_from_slice(&entry.payload);
-    buf
+    entry.payload.to_vec()
 }
 
-fn decode_accepted_payload(rec: &WALRecord) -> Option<PxLogEntry> {
-    let p = &rec.payload;
-    if p.len() < 17 {
-        return None;
-    }
-    let kind = match p[0] {
-        0 => PxLogEntryKind::Write,
-        1 => PxLogEntryKind::NoOp,
-        2 => PxLogEntryKind::ConfigChange,
-        3 => PxLogEntryKind::DedupCheckpoint,
-        _ => return None,
-    };
-    let client_id_raw = u64::from_le_bytes(p[1..9].try_into().ok()?);
-    let seq_raw = u64::from_le_bytes(p[9..17].try_into().ok()?);
-    let client_id = if client_id_raw == 0 {
-        None
-    } else {
-        Some(client_id_raw)
-    };
-    let seq = if client_id.is_none() { None } else { Some(seq_raw) };
-    let inner_payload = Bytes::copy_from_slice(&p[17..]);
+fn decode_accepted_payload(rec: &WALRecord) -> PxLogEntry {
+    let inner_payload = Bytes::copy_from_slice(&rec.payload[..]);
 
-    Some(PxLogEntry {
+    PxLogEntry {
         slot: rec.slot,
         ballot: rec.ballot,
         term: rec.term,
-        kind,
         payload: inner_payload,
-        client_id,
-        seq,
-    })
+    }
 }
 
 // ── Primitive read helpers ──────────────────────────────────

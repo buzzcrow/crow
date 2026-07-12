@@ -61,11 +61,13 @@ pub async fn create_group_with_wal(
     config_root: &Path,
     wal_backend: Arc<IoBackend>,
 ) -> io::Result<PxGroup> {
-    let wal_config = WalConfig::with_root(store_wal_root(wal_root, store_id));
+    let mut wal_config = WalConfig::with_root(store_wal_root(wal_root, store_id));
+    if std::env::var("CROWKV_WAL_TEXT").as_deref() == Ok("1") {
+        wal_config.wal_record_format = crowkv::wal::WalRecordFormat::TextLine;
+    }
     let replay = replay_group(&wal_backend, &wal_config.wal_disks, group_id).await?;
     let wal = WalEngine::create(wal_backend, wal_config, group_id).await?;
     wal.set_next_segment_id(replay.max_segment_id.saturating_add(1).max(1));
-    wal.set_snapshot_slot(replay.snapshot_slot);
 
     let mut local_replica = PxLocalReplica::restore_from_replay(replica_id, initial_role, &replay).await?;
     local_replica.set_wal(wal);

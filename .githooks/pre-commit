@@ -24,6 +24,8 @@ if [ $? -ne 0 ]; then
 fi
 
 # Run tests (including e2e)
+echo "Cleaning test-logs ..."
+rm -rf test-logs
 echo "Running tests (including e2e)..."
 cargo test --workspace --all-targets --exclude crowkv-server
 if [ $? -ne 0 ]; then

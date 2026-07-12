@@ -137,7 +137,7 @@ async fn ensure_group_local(
     replica_id: u64,
     initial_role: AddGroupInitialRole,
     // `Some(false)` for multi-replica groups so the server does not self-elect
-    // at `quorum == 1` before remotes are wired (`doc/plan-ut.md` §3.1); the
+    // at `quorum == 1` before remotes are wired; the
     // following `ensure_group_remotes` rebuild starts the driver with a correct
     // quorum. `None`/`Some(true)` for single-replica groups (no remote-wiring
     // step to start the driver).
@@ -202,22 +202,32 @@ async fn ensure_group_remotes(state: &AppState, group: &GroupEntry) -> Result<()
             .list_remote_replicas(group.store_id, group.group_id)
             .await
             .map_err(|e| e.to_string())?;
-        let mut missing = Vec::new();
+        let mut to_update = Vec::new();
         for peer in &group.replicas {
             if peer.replica_id == replica.replica_id {
                 continue;
             }
-            if existing.iter().any(|r| r.replica_id == peer.replica_id) {
+            let Some(current_endpoint) = grpc_endpoint_for_node(state, &peer.node_id, group.store_id).await
+            else {
+                // Peer's store is not up yet; skip rather than overwriting
+                // the correct persisted-config endpoint with a stale one.
                 continue;
+            };
+            let existing_entry = existing.iter().find(|r| r.replica_id == peer.replica_id);
+            let needs_update = match existing_entry {
+                None => true,
+                Some(r) => r.endpoint != current_endpoint,
+            };
+            if needs_update {
+                to_update.push(RemoteReplicaInfo {
+                    replica_id: peer.replica_id,
+                    endpoint: current_endpoint,
+                });
             }
-            missing.push(RemoteReplicaInfo {
-                replica_id: peer.replica_id,
-                endpoint: grpc_endpoint_for_node(state, &peer.node_id, group.store_id).await,
-            });
         }
-        if !missing.is_empty() {
+        if !to_update.is_empty() {
             client
-                .add_remote_replicas(group.store_id, group.group_id, &missing)
+                .add_remote_replicas(group.store_id, group.group_id, &to_update)
                 .await
                 .map_err(|e| e.to_string())?;
             refresh_node_cache(state, &replica.node_id).await;
@@ -266,7 +276,7 @@ pub async fn restore_persisted_topology(state: &AppState) {
         let mut replicas = group.replicas.clone();
         replicas.sort_by_key(|r| r.replica_id);
         // Defer the election driver for multi-replica groups until remotes are
-        // wired (`doc/plan-ut.md` §3.1).
+        // wired.
         let start_election = Some(replicas.len() <= 1);
         for (index, replica) in replicas.iter().enumerate() {
             let initial_role = if index == 0 {
@@ -349,8 +359,7 @@ pub async fn restore_persisted_topology_for_node(state: &AppState, node_id: &str
             group.group_id,
             local_replica.replica_id,
             AddGroupInitialRole::Follower,
-            // Defer for multi-replica groups until remotes are wired
-            // (`doc/plan-ut.md` §3.1).
+            // Defer for multi-replica groups until remotes are wired.
             Some(group.replicas.len() <= 1),
         )
         .await?;
@@ -623,8 +632,8 @@ pub async fn http_add_group(
             } else {
                 AddGroupInitialRole::Follower
             }),
-            // Multi-node groups defer the driver until Phase-2 wires remotes
-            // (`doc/plan-ut.md` §3.1); single-node groups start it now.
+            // Multi-node groups defer the driver until Phase-2 wires remotes;
+            // single-node groups start it now.
             start_election: Some(body.nodes.len() <= 1),
         };
         match client.add_group(sid, &req).await {
@@ -663,10 +672,12 @@ pub async fn http_add_group(
             if j == i {
                 continue;
             }
-            remotes.push(RemoteReplicaInfo {
-                replica_id: *peer_rid,
-                endpoint: grpc_endpoint_for_node(&state, peer_nid, sid).await,
-            });
+            if let Some(ep) = grpc_endpoint_for_node(&state, peer_nid, sid).await {
+                remotes.push(RemoteReplicaInfo {
+                    replica_id: *peer_rid,
+                    endpoint: ep,
+                });
+            }
         }
         if !remotes.is_empty() {
             let _ = client.add_remote_replicas(sid, body.group_id, &remotes).await;
@@ -837,26 +848,22 @@ async fn rollback_replica(
 ///
 /// `0.0.0.0` listen addresses are remapped to `127.0.0.1` so other
 /// processes on the same host can dial the channel.
-async fn grpc_endpoint_for_node(state: &AppState, node_id: &str, store_id: u64) -> String {
+async fn grpc_endpoint_for_node(state: &AppState, node_id: &str, store_id: u64) -> Option<String> {
     let snap = state.monitor_cache.snapshot().await;
     if let Some(rec) = snap.get(node_id) {
         if let Some(addr) = rec.stores.get(&store_id).and_then(|s| s.listen_addr.clone()) {
-            return strip_scheme(remap_zero_host(&addr));
+            return Some(strip_scheme(remap_zero_host(&addr)));
         }
     }
-    // Fallback to the bootstrap gRPC port from the deploy record. Correct
-    // for store id 1; only used when the monitor cache hasn't observed
-    // the operator-created store yet.
+    // Cache miss: the node's store is not up yet (or the monitor hasn't
+    // observed it). Returning None lets callers skip wiring this peer
+    // rather than overwriting the correct persisted-config endpoint with
+    // a stale bootstrap port.
     warn!(
         node_id,
-        store_id, "grpc_endpoint_for_node: cache miss, falling back to bootstrap grpc_url"
+        store_id, "grpc_endpoint_for_node: cache miss, no known endpoint"
     );
-    let cfg = state.config.read().unwrap();
-    let raw = cfg
-        .server_for_node(node_id)
-        .and_then(|s| s.grpc_url.clone())
-        .unwrap_or_else(|| format!("unknown:{node_id}"));
-    strip_scheme(raw)
+    None
 }
 
 fn strip_scheme(s: String) -> String {
@@ -1005,7 +1012,7 @@ pub async fn http_add_replica(
             replica_id: new_rid,
             initial_role: Some(AddGroupInitialRole::Follower),
             // The new replica joins a multi-replica group; remotes are wired in
-            // step 3, which starts the driver. Defer (`doc/plan-ut.md` §3.1).
+            // step 3, which starts the driver. Defer.
             start_election: Some(false),
         };
         client
@@ -1027,7 +1034,7 @@ pub async fn http_add_replica(
             replica_id: new_rid,
             initial_role: Some(AddGroupInitialRole::Follower),
             // The new replica joins a multi-replica group; remotes are wired in
-            // step 3, which starts the driver. Defer (`doc/plan-ut.md` §3.1).
+            // step 3, which starts the driver. Defer.
             start_election: Some(false),
         };
         client
@@ -1044,9 +1051,14 @@ pub async fn http_add_replica(
     refresh_node_cache(&state, target_node).await;
 
     // Step 2: Register the new replica as a remote on every existing peer.
+    let Some(new_endpoint) = grpc_endpoint_for_node(&state, target_node, sid).await else {
+        return Err(err_502(format!(
+            "could not determine gRPC endpoint for new replica on node {target_node}"
+        )));
+    };
     let new_remote = RemoteReplicaInfo {
         replica_id: new_rid,
-        endpoint: grpc_endpoint_for_node(&state, target_node, sid).await,
+        endpoint: new_endpoint,
     };
     let mut wired_peers: Vec<String> = Vec::new();
     for existing in &view.replicas {
@@ -1081,10 +1093,12 @@ pub async fn http_add_replica(
     // Step 3: Register every existing peer as a remote on the new replica.
     let mut existing_remotes: Vec<RemoteReplicaInfo> = Vec::with_capacity(view.replicas.len());
     for r in &view.replicas {
-        existing_remotes.push(RemoteReplicaInfo {
-            replica_id: r.replica_id,
-            endpoint: grpc_endpoint_for_node(&state, &r.node_id, sid).await,
-        });
+        if let Some(ep) = grpc_endpoint_for_node(&state, &r.node_id, sid).await {
+            existing_remotes.push(RemoteReplicaInfo {
+                replica_id: r.replica_id,
+                endpoint: ep,
+            });
+        }
     }
     if !existing_remotes.is_empty() {
         let new_url = mgmt_url_for_node(&state, target_node)?;

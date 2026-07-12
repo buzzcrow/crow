@@ -1,10 +1,8 @@
 //! WAL replay engine (P2 W10–W13).
 //!
 //! Discovers segments, scans records with CRC verification, truncates on
-//! corruption, and rebuilds acceptor state, `current_term`, `voted_for`, and
-//! dedup cache.
+//! corruption, and rebuilds acceptor state, `current_term`, `voted_for`.
 
-use std::collections::BTreeMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,15 +30,6 @@ pub struct ReplayResult {
     pub current_term: PxTerm,
     /// Reconstructed `voted_for` from the latest `VoteGranted` record for `current_term`.
     pub voted_for: Option<PxNodeId>,
-    /// Latest durable commit watermark recovered from WAL.
-    pub durable_commit_watermark: SlotIndex,
-    /// Latest snapshot slot recovered from WAL.
-    ///
-    /// Records at or below this slot may be GC'd once the caller's safety
-    /// criteria are met. `0` means no snapshot has been recorded.
-    pub snapshot_slot: SlotIndex,
-    /// Dedup cache: `client_id` → (`last_seq`, `last_slot`).
-    pub dedup_cache: BTreeMap<u64, (u64, SlotIndex)>,
 }
 
 /// Replay all WAL segments for a group across all disk paths.
@@ -54,7 +43,6 @@ pub struct ReplayResult {
 /// 4. Rebuild acceptor state (highest-ballot wins per slot).
 /// 5. Reconstruct `current_term` from max term.
 /// 6. Reconstruct `voted_for` from latest `VoteGranted`.
-/// 7. Reconstruct dedup cache from latest `DedupCheckpoint` + subsequent writes.
 ///
 /// # Errors
 /// Returns IO error if segments cannot be read or corruption is found in sealed segments.
@@ -106,7 +94,7 @@ pub async fn replay_group(
         let mut reader = match SegmentReader::open(backend, &path).await {
             Ok(r) => r,
             Err(e) => {
-                warn!(group_id, segment_id = seg_id, error = %e, "replay: skipping unreadable segment");
+                error!(group_id, segment_id = seg_id, error = %e, "replay: skipping unreadable segment");
                 continue;
             }
         };
@@ -202,102 +190,11 @@ pub async fn replay_group(
         .find(|r| r.record_type == RecordType::VoteGranted && r.term == current_term)
         .and_then(WALRecord::voted_for_id);
 
-    // 6. durable commit watermark from the latest watermark record.
-    let durable_commit_watermark = verified_records
-        .iter()
-        .rev()
-        .find(|r| r.record_type == RecordType::DurableCommitWatermark)
-        .and_then(WALRecord::durable_commit_watermark)
-        .unwrap_or(0);
-
-    // 7. Dedup cache: find latest DedupCheckpoint, then apply subsequent writes.
-    let dedup_cache = rebuild_dedup_cache(&verified_records);
-
-    // 8. Latest snapshot slot from SnapshotMarker records.
-    let snapshot_slot = verified_records
-        .iter()
-        .rev()
-        .find(|r| r.record_type == RecordType::SnapshotMarker)
-        .and_then(WALRecord::snapshot_slot)
-        .unwrap_or(0);
-
     Ok(ReplayResult {
         records: verified_records,
         index,
         max_segment_id,
         current_term,
         voted_for,
-        durable_commit_watermark,
-        snapshot_slot,
-        dedup_cache,
     })
-}
-
-/// Rebuild the dedup cache from replay records.
-///
-/// Strategy: find the last `DedupCheckpoint` record, deserialize it,
-/// then apply all subsequent `Accepted` records' (`client_id`, seq) pairs.
-fn rebuild_dedup_cache(records: &[WALRecord]) -> BTreeMap<u64, (u64, SlotIndex)> {
-    let mut cache: BTreeMap<u64, (u64, SlotIndex)> = BTreeMap::new();
-
-    // Find the last DedupCheckpoint.
-    let checkpoint_idx = records
-        .iter()
-        .rposition(|r| r.record_type == RecordType::DedupCheckpoint);
-
-    let start = if let Some(idx) = checkpoint_idx {
-        // Decode the checkpoint payload: sequence of (client_id: u64, last_seq: u64, last_slot: u64).
-        let payload = &records[idx].payload;
-        let mut off = 0usize;
-        while off + 24 <= payload.len() {
-            let client_id = u64::from_le_bytes(payload[off..off + 8].try_into().unwrap());
-            let last_seq = u64::from_le_bytes(payload[off + 8..off + 16].try_into().unwrap());
-            let last_slot = u64::from_le_bytes(payload[off + 16..off + 24].try_into().unwrap());
-            if client_id != 0 {
-                cache.insert(client_id, (last_seq, last_slot));
-            }
-            off += 24;
-        }
-        idx + 1
-    } else {
-        0
-    };
-
-    // Apply subsequent Accepted records.
-    for rec in &records[start..] {
-        if rec.record_type != RecordType::Accepted {
-            continue;
-        }
-        if let Some(entry) = rec.to_log_entry() {
-            if let (Some(cid), Some(seq)) = (entry.client_id, entry.seq) {
-                if cid == 0 {
-                    continue;
-                }
-                cache
-                    .entry(cid)
-                    .and_modify(|e| {
-                        if seq > e.0 {
-                            *e = (seq, entry.slot);
-                        }
-                    })
-                    .or_insert((seq, entry.slot));
-            }
-        }
-    }
-
-    cache
-}
-
-/// Encode a dedup cache snapshot as a `DedupCheckpoint` record payload.
-///
-/// Wire format: repeated `[client_id: u64 LE][last_seq: u64 LE][last_slot: u64 LE]`.
-#[must_use]
-pub fn encode_dedup_checkpoint(cache: &BTreeMap<u64, (u64, SlotIndex)>) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(cache.len() * 24);
-    for (&client_id, &(last_seq, last_slot)) in cache {
-        buf.extend_from_slice(&client_id.to_le_bytes());
-        buf.extend_from_slice(&last_seq.to_le_bytes());
-        buf.extend_from_slice(&last_slot.to_le_bytes());
-    }
-    buf
 }

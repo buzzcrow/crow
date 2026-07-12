@@ -1,4 +1,4 @@
-//! Per-peer bidi `PeerStream` client.
+//! Per-peer bidi `LearnerStream` client.
 //!
 //! Multiplexes `Accept`, `Heartbeat`, and `ChosenNotification` frames over a
 //! single long-running gRPC bidi stream per `(group_id, peer_id)` pair so
@@ -13,7 +13,7 @@
 //! `Prepare` / `RequestVote` / `PreVote` / `StepDown` remain unary RPCs
 //! (one-shot, no ordering requirement).
 //!
-//! The stream is laid down at first use by [`PxPeerStream::new`] and lives
+//! The stream is laid down at first use by [`PxLearnerStream::new`] and lives
 //! for the lifetime of the parent `PxRemoteReplica`. On transport failure
 //! the background task tears down the connection, fails all pending
 //! oneshots with [`PxReplicaError::Internal`] (`"stream reset"`), and
@@ -26,20 +26,20 @@ use std::time::Duration;
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, error};
 
 use crate::cluster::replica::PxReplicaError;
 use crate::common::config::PxElectionConfig;
 use crate::rpc::px_service_client::PxServiceClient;
 use crate::rpc::{
-    peer_stream_request, peer_stream_response, AcceptRequest, AcceptedResponse, ChosenNotification,
-    HeartbeatRequest, HeartbeatResponse, PeerStreamRequest, PeerStreamResponse,
+    learner_stream_request, learner_stream_response, AcceptRequest, AcceptedResponse, ChosenNotification,
+    HeartbeatRequest, HeartbeatResponse, LearnerStreamRequest, LearnerStreamResponse,
 };
 
 /// Map from outbound `request_id` to the awaiting client `oneshot`.
 /// Shared between the send-half (insert) and recv-half (remove + dispatch)
 /// of a single connection lifetime.
-type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<PeerStreamReply, PxReplicaError>>>>>;
+type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<LearnerStreamReply, PxReplicaError>>>>>;
 
 /// Cap on the reconnect backoff.
 const BACKOFF_CAP: Duration = Duration::from_secs(2);
@@ -49,46 +49,46 @@ const BACKOFF_INITIAL: Duration = Duration::from_millis(50);
 
 /// Reply sent back through an in-flight `oneshot` once the server acks.
 #[derive(Debug)]
-pub enum PeerStreamReply {
+pub enum LearnerStreamReply {
     Accepted(AcceptedResponse),
     Heartbeat(HeartbeatResponse),
 }
 
 /// User-side request to the background task.
 struct OutboundCmd {
-    frame: PeerStreamRequest,
+    frame: LearnerStreamRequest,
     /// Oneshot for the reply. `None` for fire-and-forget frames
     /// (`ChosenNotification`).
-    reply_tx: Option<oneshot::Sender<Result<PeerStreamReply, PxReplicaError>>>,
+    reply_tx: Option<oneshot::Sender<Result<LearnerStreamReply, PxReplicaError>>>,
     /// Correlation key (echoed from the inner `request_id`). Only meaningful
     /// when `reply_tx.is_some()`.
     request_id: u64,
 }
 
-/// Per-peer bidi `PeerStream` client.
+/// Per-peer bidi `LearnerStream` client.
 ///
 /// Cheap to clone via `Arc`; the background task is shared.
 #[derive(Debug)]
-pub struct PxPeerStream {
+pub struct PxLearnerStream {
     endpoint: String,
     cmd_tx: mpsc::Sender<OutboundCmd>,
     cancel: CancellationToken,
 }
 
-impl PxPeerStream {
+impl PxLearnerStream {
     /// Spawn a background task that maintains a bidi stream to `endpoint`
     /// and reconnects on transport failure.
     #[must_use]
     pub fn new(endpoint: String, cfg: &PxElectionConfig) -> Arc<Self> {
         let cancel = CancellationToken::new();
-        let (cmd_tx, cmd_rx) = mpsc::channel(cfg.peer_stream_window_frames.max(1));
+        let (cmd_tx, cmd_rx) = mpsc::channel(cfg.learner_stream_window_frames.max(1));
         let stream = Arc::new(Self {
             endpoint: endpoint.clone(),
             cmd_tx,
             cancel: cancel.clone(),
         });
         let endpoint_for_task = endpoint;
-        tokio::spawn(run_peer_stream(endpoint_for_task, cmd_rx, cancel));
+        tokio::spawn(run_learner_stream(endpoint_for_task, cmd_rx, cancel));
         stream
     }
 
@@ -104,8 +104,8 @@ impl PxPeerStream {
     pub async fn send_accept(&self, req: AcceptRequest) -> Result<AcceptedResponse, PxReplicaError> {
         let request_id = req.request_id;
         let (tx, rx) = oneshot::channel();
-        let frame = PeerStreamRequest {
-            frame: Some(peer_stream_request::Frame::Accept(req)),
+        let frame = LearnerStreamRequest {
+            frame: Some(learner_stream_request::Frame::Accept(req)),
         };
         self.dispatch(OutboundCmd {
             frame,
@@ -113,13 +113,13 @@ impl PxPeerStream {
             request_id,
         })?;
         match rx.await {
-            Ok(Ok(PeerStreamReply::Accepted(r))) => Ok(r),
-            Ok(Ok(PeerStreamReply::Heartbeat(_))) => Err(PxReplicaError::Internal(
-                "peer_stream: heartbeat reply on accept oneshot (correlation bug)".to_string(),
+            Ok(Ok(LearnerStreamReply::Accepted(r))) => Ok(r),
+            Ok(Ok(LearnerStreamReply::Heartbeat(_))) => Err(PxReplicaError::Internal(
+                "learner_stream: heartbeat reply on accept oneshot (correlation bug)".to_string(),
             )),
             Ok(Err(e)) => Err(e),
             Err(_) => Err(PxReplicaError::Internal(
-                "peer_stream: oneshot dropped".to_string(),
+                "learner_stream: oneshot dropped".to_string(),
             )),
         }
     }
@@ -131,8 +131,8 @@ impl PxPeerStream {
     pub async fn send_heartbeat(&self, req: HeartbeatRequest) -> Result<HeartbeatResponse, PxReplicaError> {
         let request_id = req.request_id;
         let (tx, rx) = oneshot::channel();
-        let frame = PeerStreamRequest {
-            frame: Some(peer_stream_request::Frame::Heartbeat(req)),
+        let frame = LearnerStreamRequest {
+            frame: Some(learner_stream_request::Frame::Heartbeat(req)),
         };
         self.dispatch(OutboundCmd {
             frame,
@@ -140,13 +140,13 @@ impl PxPeerStream {
             request_id,
         })?;
         match rx.await {
-            Ok(Ok(PeerStreamReply::Heartbeat(r))) => Ok(r),
-            Ok(Ok(PeerStreamReply::Accepted(_))) => Err(PxReplicaError::Internal(
-                "peer_stream: accepted reply on heartbeat oneshot (correlation bug)".to_string(),
+            Ok(Ok(LearnerStreamReply::Heartbeat(r))) => Ok(r),
+            Ok(Ok(LearnerStreamReply::Accepted(_))) => Err(PxReplicaError::Internal(
+                "learner_stream: accepted reply on heartbeat oneshot (correlation bug)".to_string(),
             )),
             Ok(Err(e)) => Err(e),
             Err(_) => Err(PxReplicaError::Internal(
-                "peer_stream: oneshot dropped".to_string(),
+                "learner_stream: oneshot dropped".to_string(),
             )),
         }
     }
@@ -157,8 +157,8 @@ impl PxPeerStream {
     /// Returns [`PxReplicaError::Internal`] if the background task has
     /// shut down (the bounded mpsc receiver was dropped).
     pub fn send_chosen(&self, notice: ChosenNotification) -> Result<(), PxReplicaError> {
-        let frame = PeerStreamRequest {
-            frame: Some(peer_stream_request::Frame::Chosen(notice)),
+        let frame = LearnerStreamRequest {
+            frame: Some(learner_stream_request::Frame::Chosen(notice)),
         };
         self.dispatch(OutboundCmd {
             frame,
@@ -176,11 +176,11 @@ impl PxPeerStream {
         match self.cmd_tx.try_send(cmd) {
             Ok(()) => Ok(()),
             Err(mpsc::error::TrySendError::Full(_)) => Err(PxReplicaError::Internal(format!(
-                "peer_stream: outbound queue full at peer {}",
+                "learner_stream: outbound queue full at peer {}",
                 self.endpoint
             ))),
             Err(mpsc::error::TrySendError::Closed(_)) => Err(PxReplicaError::Internal(format!(
-                "peer_stream: peer {} is shut down",
+                "learner_stream: peer {} is shut down",
                 self.endpoint
             ))),
         }
@@ -201,7 +201,7 @@ impl PxPeerStream {
 /// Single background task that owns the bidi stream and runs the
 /// reconnect loop. Cancellation aborts all in-flight pending oneshots
 /// with `stream reset`.
-async fn run_peer_stream(
+async fn run_learner_stream(
     endpoint: String,
     mut cmd_rx: mpsc::Receiver<OutboundCmd>,
     cancel: CancellationToken,
@@ -218,7 +218,7 @@ async fn run_peer_stream(
         let mut client = match connect_result {
             Ok(c) => c,
             Err(err) => {
-                warn!(endpoint = %endpoint, error = %err, backoff_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX), "peer_stream: connect failed");
+                error!(endpoint = %endpoint, error = %err, backoff_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX), "learner_stream: connect failed");
                 // Fast-fail any commands queued behind the closed channel.
                 // Without this, callers (proposers) would block until the
                 // peer comes up, which regresses the unary fast-fail
@@ -226,7 +226,7 @@ async fn run_peer_stream(
                 // status the unary path used to surface, so existing error-
                 // matching call sites (e.g. `remote_error` test) keep
                 // working unchanged.
-                let reason = format!("grpc Unavailable: peer_stream connect failed: {err}");
+                let reason = format!("grpc Unavailable: learner_stream connect failed: {err}");
                 fail_queued_commands(&mut cmd_rx, &reason);
                 if !sleep_or_cancel(backoff, &cancel).await {
                     return;
@@ -239,13 +239,13 @@ async fn run_peer_stream(
         // Outbound channel feeding the bidi stream's request side. Capacity
         // 1 is fine: cmd_rx already provides flow control to the user-
         // facing API, and we never want the bg task to outrun the wire.
-        let (out_tx, out_rx) = mpsc::channel::<PeerStreamRequest>(1);
+        let (out_tx, out_rx) = mpsc::channel::<LearnerStreamRequest>(1);
         let req_stream = tokio_stream::wrappers::ReceiverStream::new(out_rx);
 
-        let bidi = match client.peer_stream(tonic::Request::new(req_stream)).await {
+        let bidi = match client.learner_stream(tonic::Request::new(req_stream)).await {
             Ok(resp) => resp.into_inner(),
             Err(err) => {
-                warn!(endpoint = %endpoint, error = %err, "peer_stream: failed to open bidi");
+                error!(endpoint = %endpoint, error = %err, "learner_stream: failed to open bidi");
                 if !sleep_or_cancel(backoff, &cancel).await {
                     return;
                 }
@@ -254,7 +254,7 @@ async fn run_peer_stream(
             }
         };
 
-        info!(endpoint = %endpoint, "peer_stream: connected");
+        debug!(endpoint = %endpoint, "learner_stream: connected");
         backoff = BACKOFF_INITIAL;
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
@@ -276,7 +276,7 @@ async fn run_peer_stream(
                         match item {
                             Ok(resp) => dispatch_response(&pending_for_recv, resp),
                             Err(status) => {
-                                debug!(endpoint = %endpoint_for_recv, error = %status, "peer_stream recv: tonic error");
+                                debug!(endpoint = %endpoint_for_recv, error = %status, "learner_stream recv: tonic error");
                                 return;
                             }
                         }
@@ -288,7 +288,7 @@ async fn run_peer_stream(
         // Drive the send-half: pull commands, register pending oneshots,
         // ship the wire frame. Exit conditions:
         //   * cancel fired -> shut down for good.
-        //   * cmd_rx returned None -> user dropped the PxPeerStream; exit.
+        //   * cmd_rx returned None -> user dropped the PxLearnerStream; exit.
         //   * out_tx.send failed -> server side closed; reconnect.
         loop {
             tokio::select! {
@@ -315,7 +315,7 @@ async fn run_peer_stream(
         let drained: Vec<_> = std::mem::take(&mut *pending.lock()).into_iter().collect();
         for (_, sender) in drained {
             let _ = sender.send(Err(PxReplicaError::Internal(
-                "peer_stream: stream reset".to_string(),
+                "learner_stream: stream reset".to_string(),
             )));
         }
 
@@ -331,18 +331,18 @@ async fn run_peer_stream(
     }
 }
 
-fn dispatch_response(pending: &PendingMap, resp: PeerStreamResponse) {
+fn dispatch_response(pending: &PendingMap, resp: LearnerStreamResponse) {
     let Some(frame) = resp.frame else { return };
     let (request_id, reply) = match frame {
-        peer_stream_response::Frame::Accepted(r) => (r.request_id, PeerStreamReply::Accepted(r)),
-        peer_stream_response::Frame::Heartbeat(r) => (r.request_id, PeerStreamReply::Heartbeat(r)),
+        learner_stream_response::Frame::Accepted(r) => (r.request_id, LearnerStreamReply::Accepted(r)),
+        learner_stream_response::Frame::Heartbeat(r) => (r.request_id, LearnerStreamReply::Heartbeat(r)),
     };
     if let Some(tx) = pending.lock().remove(&request_id) {
         let _ = tx.send(Ok(reply));
     } else {
         debug!(
             request_id,
-            "peer_stream recv: no pending oneshot (late ack or duplicate)"
+            "learner_stream recv: no pending oneshot (late ack or duplicate)"
         );
     }
 }

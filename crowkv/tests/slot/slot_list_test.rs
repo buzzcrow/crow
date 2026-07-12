@@ -4,7 +4,7 @@
 //!
 //! Covers general-value tests and `PxSlotNode` integration scenarios.
 
-use crowkv::paxos::roles::{PxBallot, PxLogEntry, PxLogEntryKind};
+use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 use crowkv::paxos::slot_list::PxSlotList;
 use crowkv::paxos::slot_node::PxSlotNode;
 
@@ -244,10 +244,7 @@ fn make_entry(slot: u64, ballot: PxBallot) -> PxLogEntry {
         slot,
         ballot,
         term: ballot.round,
-        kind: PxLogEntryKind::Write,
         payload: bytes::Bytes::from_static(&[1, 2, 3]),
-        client_id: Some(1),
-        seq: Some(1),
     }
 }
 

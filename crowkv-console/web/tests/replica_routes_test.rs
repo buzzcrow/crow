@@ -243,21 +243,31 @@ async fn replica_add_remove_wires_peers_bidirectionally() {
         "new replica should report a valid role: {detail}"
     );
 
-    let group_before_remove: serde_json::Value = http
-        .get(format!("{base}/api/stores/{sid}/groups/{gid}"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let leader_rid = group_before_remove["replicas"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|r| r["role"] == "leader")
-        .and_then(|r| r["replica_id"].as_u64())
-        .expect("group should have a leader before deletion");
+    // Wait for leader election to complete (2-node group needs a moment).
+    let leader_rid = {
+        let mut leader = None;
+        for _ in 0..20 {
+            let group: serde_json::Value = http
+                .get(format!("{base}/api/stores/{sid}/groups/{gid}"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            leader = group["replicas"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["role"] == "leader")
+                .and_then(|r| r["replica_id"].as_u64());
+            if leader.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        leader.expect("group should have a leader before deletion")
+    };
 
     // 8. DELETE of a non-existent replica → 404.
     let resp = http

@@ -6,7 +6,7 @@
 
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crowkv::cluster::replica::{HeartbeatRequestPayload, ReplicaHandler};
-use crowkv::paxos::roles::{PxBallot, PxLogEntry, PxLogEntryKind};
+use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 
 fn heartbeat(term: u64, leader_id: u64, commit_slot: u64) -> HeartbeatRequestPayload {
     HeartbeatRequestPayload {
@@ -34,10 +34,7 @@ fn write_entry(slot: u64, key: &[u8], value: &[u8]) -> PxLogEntry {
         slot,
         ballot: PxBallot::new(0, 1),
         term: 1,
-        kind: PxLogEntryKind::Write,
         payload: bytes::Bytes::from(payload),
-        client_id: Some(1),
-        seq: Some(slot),
     }
 }
 

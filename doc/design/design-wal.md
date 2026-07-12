@@ -57,12 +57,12 @@ A WAL record persists one of the messages an acceptor must remember durably. Con
 | Field | Purpose |
 | --- | --- |
 | `magic`, `version` | Format identifier, for upgrade compatibility |
-| `record_type` | One of `{ Promised, Accepted, VoteGranted, ConfigChange, DedupCheckpoint, SnapshotMarker }` (`ConfigChange` / `SnapshotMarker` reserved for P3/P4) |
+| `record_type` | One of `{ Promised, Accepted, VoteGranted }` |
 | `group_id` | Which group this record belongs to |
 | `term` | Acceptor's `current_term` at the time of record (for fence verification on replay) |
-| `slot` | Slot number this record concerns (n/a for `DedupCheckpoint`) |
+| `slot` | Slot number this record concerns (n/a for `VoteGranted`) |
 | `ballot` | `(round, leader_id)` for `Promised` / `Accepted` |
-| `payload` | Type-specific body — for `Accepted`, the `PxLogEntry` (kind + batch); for `Promised`, empty; for `ConfigChange`, the new membership; etc. |
+| `payload` | Type-specific body — for `Accepted`, the `PxLogEntry` (kind + batch); for `Promised`, empty; for `VoteGranted`, the voted-for node id |
 | `payload_len` | Length, for forward-skipping malformed records |
 | `crc32c` | CRC of header + payload |
 
@@ -82,13 +82,19 @@ handler replies (the ack contract, §5). The mapping is exhaustive:
 | `on_prepare` | acceptor grants a promise | `Promised` | none (slot + ballot + term in header) |
 | `on_accept` | acceptor accepts a value | `Accepted` | the `PxLogEntry` (kind + KV batch + `client_id`/`seq`) |
 | `handle_request_vote` | acceptor grants a vote | `VoteGranted` | `voted_for` node id (term in header) |
-| dedup checkpoint task | periodic | `DedupCheckpoint` | `(client_id, last_seq, last_slot)*` |
 
 **`learn()` writes nothing.** Applying a chosen value to the `KVEngine` is a pure
 in-memory projection; its durability comes entirely from the `Accepted` records
-that a quorum already persisted. This is why "chosen" is not, by itself, a
-durable *local* fact — see §6.2 / §6.4. (A durable commit watermark is planned
-in P2 to make local recovery cheaper, not to add a second copy of the value.)
+that a quorum already persisted. The state machine's KV state is **not** rebuilt
+from the WAL on restart — instead, the state machine will persist its own
+snapshot (with a slot index) to disk. On restart, the state machine loads its
+snapshot and the WAL replay only rebuilds acceptor state (promises + accepted
+values). The learner / `KVEngine` is repopulated by new-leader recovery (§6.4)
+or steady-state heartbeat catch-up (§6.5).
+
+This design avoids a separate `DurableCommitWatermark` WAL record type. The
+WAL carries only consensus state (`Promised`, `Accepted`, `VoteGranted`); the
+state machine owns its own persistence boundary via snapshots.
 
 ---
 
@@ -134,8 +140,7 @@ Each disk owns an independent append queue, active segment, flush worker, and du
 Non-slot records use fixed lanes:
 
 - `VoteGranted` and other election metadata go to the group metadata lane (`disk = hash(group_id, 0) % wal_disks.len()`).
-- `DedupCheckpoint` goes to the same metadata lane.
-- Future `ConfigChange` records must be persisted in the metadata lane and included in snapshot install / peer rebuild semantics.
+- Group membership configuration is persisted in a dedicated config file (`group_config.bin`) in the group's WAL directory, not as a WAL record.
 
 A future load-aware mode is only legal if it preserves slot affinity, for example by moving whole slot shards through an explicit re-sharding protocol. Per-record load-aware placement is not allowed for slot-addressed records.
 
@@ -247,16 +252,17 @@ Turning the on-disk WAL back into a live, serving replica has three stages, then
 a steady state:
 
 - **6.1 Replay** — rebuild in-memory *acceptor* state from the records.
-- **6.2 Restore** — rebuild a live replica shell from acceptor state only; do not apply accepted values to the `KVEngine` unless they are covered by a durable commit watermark / snapshot.
+- **6.2 Restore** — rebuild a live replica shell from acceptor state only; do not apply accepted values to the `KVEngine`. The state machine loads its own snapshot (if any) independently.
 - **6.3 Wiring** — attach a fresh WAL engine and seed the proposer conservatively.
 - **6.4 Recovery** — a new leader re-confirms *chosen* values from a quorum and fills holes.
 - **6.5 Steady-state apply** — followers keep their state machine current from the leader's commit watermark.
 
 The split matters: replay/restore are purely *local* (this node's WAL), but `Accepted` ≠ `chosen` (a value is chosen only on a quorum). Therefore replay may restore promises and accepted values into the acceptor, but learner / `KVEngine` application is delayed until the value is known chosen by one of:
 
-- A future durable commit watermark proving a contiguous chosen prefix.
-- A snapshot marker proving the engine image already includes the slot.
+- The state machine loading a persisted snapshot (with slot index) that covers the slot.
 - New-leader recovery / steady-state heartbeat catch-up re-learning the value from quorum-confirmed consensus.
+
+**No `DurableCommitWatermark` WAL record.** The state machine owns its persistence boundary: it persists a snapshot of the KV state along with the last-applied slot index. On restart, the state machine loads this snapshot and resumes from `snapshot_slot + 1`. The WAL does not duplicate this information.
 
 ### 6.1 Replay — rebuild acceptor state (`replay_group`)
 
@@ -268,11 +274,11 @@ The split matters: replay/restore are purely *local* (this node's WAL), but `Acc
    `Promised` / `Accepted` per slot (later/higher-ballot records win — Paxos rule).
 4. `current_term` = max `term` across all records.
 5. `voted_for` = the node from the latest `VoteGranted` whose `term == current_term`. This is election safety state, not just debug metadata: after crash, the node must not grant a second vote in the same term.
-6. Dedup cache = the latest `DedupCheckpoint` plus the `(client_id, seq)` of every `Accepted` after it.
+6. Dedup cache = the `(client_id, seq)` of every `Accepted` record (in-memory only, rebuilt from WAL on restart).
 
 **Dedup meaning:** client writes carry `(client_id, seq)` so a retried request can be recognized after timeout or leader change. The dedup cache stores the highest sequence and result slot already accepted for each client. It is an exactly-once / idempotency aid for client-visible behavior; it is not part of Paxos safety, but losing it can cause duplicate client operations after retry.
 
-Output: `ReplayResult { records, max_segment_id, current_term, voted_for, dedup_cache }`.
+Output: `ReplayResult { records, max_segment_id, current_term, voted_for }`.
 
 ### 6.2 Restore — rebuild live acceptor state (`restore_from_replay`)
 
@@ -280,14 +286,15 @@ A fresh `PxLocalReplica` is rebuilt without treating local accepts as committed 
 
 - Feed `Promised` through the acceptor restore path so the highest promise per slot is preserved.
 - Feed `Accepted` through the acceptor restore path so the highest accepted value per slot is available to future Phase 1.
-- Seed `current_term`, `voted_for`, role, and dedup cache from `ReplayResult`.
-- Do **not** call `learn()` for arbitrary accepted slots during restore.
+- Seed `current_term`, `voted_for`, role from `ReplayResult`.
+- Do **not** call `learn()` for accepted slots during restore.
 
-The learner / `KVEngine` is restored only from durable commit evidence:
+The learner / `KVEngine` is restored only from the state machine's own snapshot:
 
-- For P2, a durable commit watermark may allow applying the known-chosen contiguous prefix.
-- For P3, a snapshot plus `SnapshotMarker` may restore an engine image and applied index directly.
-- For slots above that proof, the engine waits for §6.4 / §6.5 to re-learn chosen values.
+- The state machine persists a snapshot of the KV state with its `last_applied_slot` to a separate file (not the WAL).
+- On restart, the state machine loads this snapshot and sets `contiguous_applied = snapshot_slot`.
+- For slots above `snapshot_slot`, the engine waits for §6.4 / §6.5 to re-learn chosen values.
+- **Current implementation:** snapshot persistence is not yet implemented. The state machine starts empty (`contiguous_applied = 0`) and relies entirely on §6.4 / §6.5 to repopulate.
 
 This avoids resurrecting a value that was accepted locally but never chosen, and it avoids over-claiming `contiguous_chosen` from a single replica's WAL.
 
@@ -298,8 +305,10 @@ This avoids resurrecting a value that was accepted locally but never chosen, and
 The group also records a conservative local slot tip:
 
 ```
-   local_tip = max(highest_seen_slot, durable_commit_watermark, snapshot_slot)
+   local_tip = max(highest_seen_slot, snapshot_slot)
 ```
+
+Where `snapshot_slot` is the state machine's persisted snapshot slot (0 if no snapshot exists yet).
 
 A restarted node must not serve as leader until election and §6.4 recovery establish the quorum-derived ceiling. After recovery is issued, the leader seeds new client proposals at `next_slot = ceiling + 1`.
 
@@ -322,7 +331,7 @@ Parallel slot assignment means holes are normal after crash / restart. Recovery 
 
 - If Phase 1 observes an accepted value from any quorum member, the leader adopts the highest-ballot value and re-accepts it.
 - If Phase 1 observes no accepted value for that slot, the leader writes a `NoOp` for the slot.
-- `NoOp` has no KV payload, but it is a real chosen slot and advances contiguous watermarks; future replay sees it and does not need to repair the hole again once it is covered by the durable commit watermark.
+- `NoOp` has no KV payload, but it is a real chosen slot and advances contiguous watermarks; future replay sees it and does not need to repair the hole again once it is covered by the state machine snapshot.
 
 Slot indexes are generated only by the active leader's proposer:
 
@@ -360,7 +369,7 @@ the node fails out of the group and rebuilds from peers via snapshot install.
 
 Replay is sequential disk reads, parallelized across disks; WAL sizes stay small
 because of GC (§7), so replays are typically sub-second. The dominant cost is
-engine apply, not WAL read.
+state machine snapshot load (if any), not WAL read.
 
 ---
 
@@ -461,7 +470,7 @@ The WAL is per-node. Inter-node consistency is the consensus layer's job. If a n
 
 ## 10. Follow-up Implementation Scope
 
-The design deltas above have been implemented. Remaining ignored or pending tests are tracked in [`plan-ut.md`](../plan-ut.md):
+The design deltas above have been implemented. Remaining pending test tasks are tracked in [`plan-test.md`](../plan-test.md):
 
 - Slot-affinity WAL placement instead of per-record round-robin.
 - Backend-specific durable flush and alignment semantics.

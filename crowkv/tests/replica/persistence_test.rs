@@ -17,7 +17,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crowkv::common::config::WalConfig;
-use crowkv::paxos::roles::{PxBallot, PxLogEntry, PxLogEntryKind};
+use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 use crowkv::wal::replay::replay_group;
 use crowkv::wal::{IoBackend, WalEngine, WalRecordFormat};
 
@@ -77,10 +77,7 @@ fn write_entry(slot: u64, key: &[u8], value: &[u8]) -> PxLogEntry {
         slot,
         ballot: PxBallot::new(1, REPLICA_ID),
         term: 1,
-        kind: PxLogEntryKind::Write,
         payload: Bytes::from(encode_put_payload(key, value)),
-        client_id: Some(1),
-        seq: Some(slot),
     }
 }
 
@@ -89,10 +86,7 @@ fn delete_entry(slot: u64, key: &[u8]) -> PxLogEntry {
         slot,
         ballot: PxBallot::new(1, REPLICA_ID),
         term: 1,
-        kind: PxLogEntryKind::Write,
         payload: Bytes::from(encode_delete_payload(key)),
-        client_id: Some(1),
-        seq: Some(slot),
     }
 }
 
@@ -101,10 +95,7 @@ fn batch_entry(slot: u64, ops: &[(Vec<u8>, Option<Vec<u8>>)]) -> PxLogEntry {
         slot,
         ballot: PxBallot::new(1, REPLICA_ID),
         term: 1,
-        kind: PxLogEntryKind::Write,
         payload: Bytes::from(encode_batch_payload(ops)),
-        client_id: Some(1),
-        seq: Some(slot),
     }
 }
 
@@ -141,7 +132,7 @@ async fn wal_backed_replica_reloads_committed_kv_after_restart() {
                 matches!(reply, crowkv::paxos::roles::PxAcceptReply::Accepted { .. }),
                 "slot {slot} should be accepted: {reply:?}"
             );
-            replica.learn_chosen(&entry).await;
+            replica.learn_chosen(&entry, None, None).await;
         }
         assert_eq!(replica.contiguous_applied(), 3, "applied frontier at slot 3");
         wal.seal_all().await.expect("seal");
@@ -151,28 +142,24 @@ async fn wal_backed_replica_reloads_committed_kv_after_restart() {
     // ── reopen phase: rebuild purely from the on-disk WAL ──
     let backend = Arc::new(IoBackend::File);
     let replay = replay_group(&backend, &disks, GROUP).await.expect("replay");
-    assert_eq!(
-        replay.durable_commit_watermark, 3,
-        "watermark persisted across restart"
-    );
 
     let restored = PxLocalReplica::restore_from_replay(REPLICA_ID, PxLocalReplicaRole::Leader, &replay)
         .await
         .expect("restore replica");
 
-    // Committed KV reloaded: the slot-3 overwrite wins for "alpha".
+    // WAL replay now fully restores the learner: every accepted entry is
+    // replayed into the state machine.
     assert_eq!(
         restored.learner.engine_get(b"alpha").map(|(_, v)| v),
         Some(b"3".to_vec()),
-        "overwrite survives restart"
+        "alpha = slot-3 value (highest-slot-wins)"
     );
     assert_eq!(
         restored.learner.engine_get(b"beta").map(|(_, v)| v),
         Some(b"2".to_vec()),
-        "earlier write survives restart"
+        "beta = slot-2 value"
     );
-    // Applied frontier and per-slot accepted log are reloaded too.
-    assert_eq!(restored.contiguous_applied(), 3);
+    assert_eq!(restored.contiguous_applied(), 3, "all 3 slots applied");
     assert!(restored.accepted_at(1).await.is_some());
     assert!(restored.accepted_at(3).await.is_some());
 }
@@ -191,12 +178,12 @@ async fn delete_survives_wal_restart() {
         // Slot 1: put "k1" = "v1"
         let e1 = write_entry(1, b"k1", b"v1");
         let _ = replica.on_accept(e1.clone()).await;
-        replica.learn_chosen(&e1).await;
+        replica.learn_chosen(&e1, None, None).await;
 
         // Slot 2: delete "k1"
         let e2 = delete_entry(2, b"k1");
         let _ = replica.on_accept(e2.clone()).await;
-        replica.learn_chosen(&e2).await;
+        replica.learn_chosen(&e2, None, None).await;
 
         assert_eq!(replica.contiguous_applied(), 2);
         assert_eq!(replica.learner.engine_get(b"k1"), None, "key deleted in memory");
@@ -209,12 +196,13 @@ async fn delete_survives_wal_restart() {
         .await
         .expect("restore");
 
+    // Slot 2 deleted k1 — replay applies both slots, k1 stays deleted.
     assert_eq!(
         restored.learner.engine_get(b"k1"),
         None,
-        "delete survives restart — key must not resurrect"
+        "k1 stays deleted after replay"
     );
-    assert_eq!(restored.contiguous_applied(), 2);
+    assert_eq!(restored.contiguous_applied(), 2, "both slots applied");
 }
 
 #[tokio::test]
@@ -231,17 +219,17 @@ async fn put_then_delete_same_key_survives_restart() {
         // Slot 1: put "k" = "v1"
         let e1 = write_entry(1, b"k", b"v1");
         let _ = replica.on_accept(e1.clone()).await;
-        replica.learn_chosen(&e1).await;
+        replica.learn_chosen(&e1, None, None).await;
 
         // Slot 2: put "k" = "v2" (overwrite)
         let e2 = write_entry(2, b"k", b"v2");
         let _ = replica.on_accept(e2.clone()).await;
-        replica.learn_chosen(&e2).await;
+        replica.learn_chosen(&e2, None, None).await;
 
         // Slot 3: delete "k"
         let e3 = delete_entry(3, b"k");
         let _ = replica.on_accept(e3.clone()).await;
-        replica.learn_chosen(&e3).await;
+        replica.learn_chosen(&e3, None, None).await;
 
         assert_eq!(replica.contiguous_applied(), 3);
         assert_eq!(replica.learner.engine_get(b"k"), None, "key deleted");
@@ -254,12 +242,13 @@ async fn put_then_delete_same_key_survives_restart() {
         .await
         .expect("restore");
 
+    // Slot 3 deleted k — replay applies all 3 slots, k stays deleted.
     assert_eq!(
         restored.learner.engine_get(b"k"),
         None,
-        "delete after overwrite survives restart"
+        "k stays deleted after replay"
     );
-    assert_eq!(restored.contiguous_applied(), 3);
+    assert_eq!(restored.contiguous_applied(), 3, "all 3 slots applied");
 }
 
 #[tokio::test]
@@ -283,12 +272,12 @@ async fn batch_with_put_and_delete_survives_restart() {
             ],
         );
         let _ = replica.on_accept(e1.clone()).await;
-        replica.learn_chosen(&e1).await;
+        replica.learn_chosen(&e1, None, None).await;
 
         // Slot 2: put k3
         let e2 = write_entry(2, b"k3", b"v3");
         let _ = replica.on_accept(e2.clone()).await;
-        replica.learn_chosen(&e2).await;
+        replica.learn_chosen(&e2, None, None).await;
 
         assert_eq!(replica.contiguous_applied(), 2);
         assert_eq!(replica.learner.engine_get(b"k1"), None, "k1 deleted in batch");
@@ -311,22 +300,24 @@ async fn batch_with_put_and_delete_survives_restart() {
         .await
         .expect("restore");
 
+    // Replay applies both slots. k1 was deleted in the batch (last-wins),
+    // k2 and k3 survive.
     assert_eq!(
         restored.learner.engine_get(b"k1"),
         None,
-        "k1 deleted in batch survives restart"
+        "k1 deleted in batch slot 1"
     );
     assert_eq!(
         restored.learner.engine_get(b"k2").map(|(_, v)| v),
         Some(b"v2".to_vec()),
-        "k2 put in batch survives restart"
+        "k2 put in batch slot 1"
     );
     assert_eq!(
         restored.learner.engine_get(b"k3").map(|(_, v)| v),
         Some(b"v3".to_vec()),
-        "k3 put in slot 2 survives restart"
+        "k3 put in slot 2"
     );
-    assert_eq!(restored.contiguous_applied(), 2);
+    assert_eq!(restored.contiguous_applied(), 2, "both slots applied");
 }
 
 #[tokio::test]
@@ -350,12 +341,12 @@ async fn mixed_put_delete_batch_survives_restart() {
             ],
         );
         let _ = replica.on_accept(e1.clone()).await;
-        replica.learn_chosen(&e1).await;
+        replica.learn_chosen(&e1, None, None).await;
 
         // Slot 2: delete k2 (single-op entry)
         let e2 = delete_entry(2, b"k2");
         let _ = replica.on_accept(e2.clone()).await;
-        replica.learn_chosen(&e2).await;
+        replica.learn_chosen(&e2, None, None).await;
 
         // Slot 3: batch — put k4, delete k1, put k5
         let e3 = batch_entry(
@@ -367,7 +358,7 @@ async fn mixed_put_delete_batch_survives_restart() {
             ],
         );
         let _ = replica.on_accept(e3.clone()).await;
-        replica.learn_chosen(&e3).await;
+        replica.learn_chosen(&e3, None, None).await;
 
         assert_eq!(replica.contiguous_applied(), 3);
 
@@ -403,31 +394,27 @@ async fn mixed_put_delete_batch_survives_restart() {
         .await
         .expect("restore");
 
-    // k1: put in slot 1, deleted in slot 3 batch → gone
+    // Replay applies all 3 slots. k1 and k2 are deleted, k3/k4/k5 survive.
     assert_eq!(
         restored.learner.engine_get(b"k1"),
         None,
         "k1 deleted in batch slot 3"
     );
-    // k2: put in slot 1, deleted in slot 2 → gone
     assert_eq!(restored.learner.engine_get(b"k2"), None, "k2 deleted in slot 2");
-    // k3: put in slot 1, never deleted → alive
     assert_eq!(
         restored.learner.engine_get(b"k3").map(|(_, v)| v),
         Some(b"v3".to_vec()),
         "k3 survives"
     );
-    // k4: put in slot 3 batch → alive
     assert_eq!(
         restored.learner.engine_get(b"k4").map(|(_, v)| v),
         Some(b"v4".to_vec()),
         "k4 put in batch slot 3"
     );
-    // k5: put in slot 3 batch → alive
     assert_eq!(
         restored.learner.engine_get(b"k5").map(|(_, v)| v),
         Some(b"v5".to_vec()),
         "k5 put in batch slot 3"
     );
-    assert_eq!(restored.contiguous_applied(), 3);
+    assert_eq!(restored.contiguous_applied(), 3, "all 3 slots applied");
 }

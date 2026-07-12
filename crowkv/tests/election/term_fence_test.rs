@@ -7,17 +7,14 @@
 
 use bytes::Bytes;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
-use crowkv::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxLogEntryKind, PxPrepareReply};
+use crowkv::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
 
 fn write_entry(slot: u64, term: u64, payload: &[u8]) -> PxLogEntry {
     PxLogEntry {
         slot,
         ballot: PxBallot::new(0, 0),
         term,
-        kind: PxLogEntryKind::Write,
         payload: Bytes::copy_from_slice(payload),
-        client_id: None,
-        seq: None,
     }
 }
 

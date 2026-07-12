@@ -13,7 +13,8 @@ pub fn init_test_subscriber() {
             return;
         }
 
-        let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
+        let filter = EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| EnvFilter::new("warn,crowkv=debug,crowkv_server=debug,crowkv_web=debug,crowkv_console_shared=debug,crowkv_cli=debug"));
         let _ = tracing_subscriber::registry()
             .with(filter)
             .with(fmt::layer().with_test_writer().with_target(true))

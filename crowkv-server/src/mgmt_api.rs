@@ -11,6 +11,7 @@ use tracing::info;
 use utoipa::{OpenApi, ToSchema};
 
 use crowkv::cluster::group::PxGroup;
+use crowkv::cluster::group_config::GroupConfigStore;
 use crowkv::cluster::group_election::LeaderElection;
 use crowkv::cluster::kv_server::KvServer;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
@@ -95,6 +96,41 @@ struct AddStoreRequest {
     port: Option<u16>,
 }
 
+/// Scan the config root for any `store{store_id}_group*.json` file, load it,
+/// and extract the port from the first member's endpoint. Returns `None` if
+/// no config file exists or no valid endpoint is found.
+///
+/// Priority: explicit port > persisted config port > OS-assigned (port 0).
+pub async fn persisted_port_for_store(config_root: &std::path::Path, store_id: u64) -> Option<u16> {
+    let conf_dir = std::fs::read_dir(config_root).ok()?;
+    for entry in conf_dir.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if let Some(rest) = name.strip_prefix(&format!("store{store_id}_group")) {
+            if let Some(group_str) = rest.strip_suffix(".json") {
+                if let Ok(group_id) = group_str.parse::<u64>() {
+                    let store = GroupConfigStore::new(config_root, store_id, group_id);
+                    if let Ok(Some(config)) = store.load().await {
+                        for member in &config.members {
+                            if let Some(port) = member
+                                .endpoint
+                                .rsplit(':')
+                                .next()
+                                .and_then(|p| p.parse::<u16>().ok())
+                            {
+                                if port > 0 {
+                                    return Some(port);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 #[derive(ToSchema, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum AddGroupInitialRole {
@@ -110,7 +146,7 @@ struct AddGroupRequest {
     initial_role: Option<AddGroupInitialRole>,
     /// When `Some(false)`, the group is added **without** starting its election
     /// driver, so it cannot self-elect at `quorum == 1` before its remotes are
-    /// wired (see `doc/plan-ut.md` §3.1). The subsequent remote-wiring rebuild
+    /// wired. The subsequent remote-wiring rebuild
     /// (`add_remote_replicas`) starts the driver with a correct quorum. Defaults
     /// to starting the driver (backward compatible).
     #[serde(default)]
@@ -330,7 +366,18 @@ async fn add_store(
         ));
     }
 
-    let addr: SocketAddr = format!("0.0.0.0:{}", req.port.unwrap_or(0))
+    // Port priority: explicit request > port pool (--ports) > persisted
+    // config file > OS-assigned (0).
+    let port = req.port.filter(|&p| p > 0);
+    let port = if port.is_none() {
+        match state.next_port() {
+            Some(p) => Some(p),
+            None => persisted_port_for_store(&state.config_root, req.store_id).await,
+        }
+    } else {
+        port
+    };
+    let addr: SocketAddr = format!("0.0.0.0:{}", port.unwrap_or(0))
         .parse()
         .map_err(|e| err_json(StatusCode::BAD_REQUEST, format!("invalid address: {e}")))?;
 
@@ -496,7 +543,7 @@ async fn add_group(
     // Defer the election driver when the caller is about to wire remotes
     // (multi-replica restore / creation). Avoids a `quorum == 1` self-election
     // running `bulk_phase1` / `repair_once` against only itself, which can
-    // erase committed data (`doc/plan-ut.md` §3.1). The driver is started by
+    // erase committed data. The driver is started by
     // the subsequent `add_remote_replicas` rebuild.
     let start_election = req.start_election.unwrap_or(true);
     if start_election && group.quorum() == 1 {
@@ -509,6 +556,17 @@ async fn add_group(
         group.stamp_proposing_term(group.local_replica().current_term_snapshot());
     }
     if start_election {
+        store.add_group(group);
+    } else if group.quorum() > 1 {
+        // Remotes were restored from the persisted config file, so the
+        // group already has the correct quorum. Start the election driver
+        // now — the quorum=1 deferral does not apply.
+        info!(
+            store_id = sid,
+            group_id = req.group_id,
+            quorum = group.quorum(),
+            "starting election driver for group with persisted config remotes"
+        );
         store.add_group(group);
     } else {
         store.add_group_without_election(group);
@@ -672,8 +730,11 @@ async fn add_remote_replicas(
         );
         new_group.add_remote_replica(PxRemoteReplica::new(r.replica_id, r.endpoint.clone()));
     }
-    new_group.persist_config().await;
     store.add_group(new_group);
+    // Re-persist after add_group so the local replica's endpoint is set.
+    if let Some(g) = store.get_group(gid) {
+        g.persist_config().await;
+    }
 
     info!(
         store_id = sid,
@@ -752,8 +813,11 @@ async fn remove_remote_replica(
         new_group.local_replica().become_follower(current_term);
         new_group.local_replica().clear_vote_lockout();
     }
-    new_group.persist_config().await;
     store.add_group(new_group);
+    // Re-persist after add_group so the local replica's endpoint is set.
+    if let Some(g) = store.get_group(gid) {
+        g.persist_config().await;
+    }
 
     info!(
         store_id = sid,
@@ -840,8 +904,11 @@ async fn batch_add_remote_replicas(
         );
         new_group.add_remote_replica(PxRemoteReplica::new(r.replica_id, r.endpoint.clone()));
     }
-    new_group.persist_config().await;
     store.add_group(new_group);
+    // Re-persist after add_group so the local replica's endpoint is set.
+    if let Some(g) = store.get_group(gid) {
+        g.persist_config().await;
+    }
 
     info!(
         store_id = sid,

@@ -1,6 +1,6 @@
 //! `PxRemoteReplica` — gRPC adapter for a peer replica in a Paxos group.
 //!
-//! Wraps a lazy gRPC client, a per-peer bidi `PxPeerStream` (for
+//! Wraps a lazy gRPC client, a per-peer bidi `PxLearnerStream` (for
 //! Accept / Heartbeat / `ChosenNotification` fan-out), and a small layer
 //! of cached status/metrics state. Exposes `ReplicaClient` so callers
 //! talk to peers through a uniform RPC surface.
@@ -9,7 +9,7 @@
 //! Prepare/Accept/PreVote/RequestVote/Heartbeat/StepDown RPC bridges,
 //! cached status snapshots for the management API.
 
-use crate::cluster::peer_stream::PxPeerStream;
+use crate::cluster::learner_stream::PxLearnerStream;
 use crate::cluster::replica::{
     HeartbeatReply, HeartbeatRequestPayload, PxReplicaError, Replica, ReplicaClient, StepDownReply,
     StepDownRequestPayload, VoteReply, VoteRequestPayload,
@@ -18,7 +18,7 @@ use crate::cluster::status::{RemoteStatus, StatusLevel};
 use crate::common::config::PxElectionConfig;
 use crate::common::metrics::LayerMetrics;
 use crate::common::report::OperationReport;
-use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxLogEntryKind, PxPrepareReply};
+use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
 use crate::paxos::PxNodeId;
 use crate::rpc::px_service_client::PxServiceClient;
 use crate::rpc::{
@@ -44,15 +44,15 @@ pub struct PxRemoteReplica {
     grpc_client: OnceCell<Box<PxServiceClient<Channel>>>,
     /// Lazy-initialized per-peer bidi stream. Carries `Accept`,
     /// `Heartbeat`, and `ChosenNotification` frames. Constructed on
-    /// first call to [`Self::peer_stream`].
-    peer_stream: OnceLock<Arc<PxPeerStream>>,
-    /// Window size used for the lazy `peer_stream` mpsc. Snapshot of
-    /// `PxElectionConfig::peer_stream_window_frames` taken at the time
+    /// first call to [`Self::learner_stream`].
+    learner_stream: OnceLock<Arc<PxLearnerStream>>,
+    /// Window size used for the lazy `learner_stream` mpsc. Snapshot of
+    /// `PxElectionConfig::learner_stream_window_frames` taken at the time
     /// `with_config` is called; defaults to `64` for tests / callsites
     /// that construct via [`Self::new`] without a config.
-    peer_stream_window_frames: usize,
+    learner_stream_window_frames: usize,
     /// Monotonic correlation id allocator for `Accept` / `Heartbeat`
-    /// frames sent over [`Self::peer_stream`]. Starts at 1; 0 is
+    /// frames sent over [`Self::learner_stream`]. Starts at 1; 0 is
     /// reserved as the "no correlation" sentinel used by fire-and-forget
     /// frames such as `ChosenNotification`.
     next_request_id: AtomicU64,
@@ -139,8 +139,14 @@ impl ReplicaClient for PxRemoteReplica {
         }
     }
 
-    async fn send_accept(&self, entry: &PxLogEntry, group_id: u64) -> Result<PxAcceptReply, PxReplicaError> {
-        // Route `Accept` through the per-peer bidi PxPeerStream rather
+    async fn send_accept(
+        &self,
+        entry: &PxLogEntry,
+        client_id: Option<u64>,
+        seq: Option<u64>,
+        group_id: u64,
+    ) -> Result<PxAcceptReply, PxReplicaError> {
+        // Route `Accept` through the per-peer bidi PxLearnerStream rather
         // than a one-shot unary RPC. The wire-level conversion
         // (PxLogEntry -> AcceptRequest, AcceptedResponse -> PxAcceptReply)
         // is identical; only the transport changes.
@@ -162,13 +168,13 @@ impl ReplicaClient for PxRemoteReplica {
             }),
             request_id,
             request_create_ms: 0,
-            client_id: entry.client_id.unwrap_or(0),
-            seq: entry.seq.unwrap_or(0),
+            client_id: client_id.unwrap_or(0),
+            seq: seq.unwrap_or(0),
             group_id,
         };
 
         let started = Instant::now();
-        let resp = match self.peer_stream().send_accept(req).await {
+        let resp = match self.learner_stream().send_accept(req).await {
             Ok(r) => r,
             Err(err) => {
                 self.metrics.record_err();
@@ -285,7 +291,7 @@ impl ReplicaClient for PxRemoteReplica {
         req: HeartbeatRequestPayload,
         group_id: u64,
     ) -> Result<HeartbeatReply, PxReplicaError> {
-        // Route Heartbeat through the per-peer bidi PxPeerStream so it
+        // Route Heartbeat through the per-peer bidi PxLearnerStream so it
         // shares ordering with `Accept` (no heartbeat can race ahead of
         // an in-flight Accept on the same peer). Wire-format conversion
         // is unchanged.
@@ -304,7 +310,7 @@ impl ReplicaClient for PxRemoteReplica {
             request_create_ms: 0,
         };
         let started = Instant::now();
-        let resp = match self.peer_stream().send_heartbeat(rpc_req).await {
+        let resp = match self.learner_stream().send_heartbeat(rpc_req).await {
             Ok(r) => r,
             Err(err) => {
                 self.metrics.record_err();
@@ -382,8 +388,8 @@ impl PxRemoteReplica {
             node_id,
             endpoint,
             grpc_client: OnceCell::new(),
-            peer_stream: OnceLock::new(),
-            peer_stream_window_frames: PxElectionConfig::DEFAULT.peer_stream_window_frames,
+            learner_stream: OnceLock::new(),
+            learner_stream_window_frames: PxElectionConfig::DEFAULT.learner_stream_window_frames,
             next_request_id: AtomicU64::new(1),
             voting: true,
             metrics: LayerMetrics::new(),
@@ -392,30 +398,30 @@ impl PxRemoteReplica {
     }
 
     /// Construct a remote replica with the given election config snapshot.
-    /// The only field consumed today is `peer_stream_window_frames`
-    /// (peer stream window); other fields stay configurable per-call.
+    /// The only field consumed today is `learner_stream_window_frames`
+    /// (learner stream window); other fields stay configurable per-call.
     #[must_use]
     pub fn with_config(node_id: PxNodeId, endpoint: String, cfg: &PxElectionConfig) -> Self {
         let mut r = Self::new(node_id, endpoint);
-        r.peer_stream_window_frames = cfg.peer_stream_window_frames;
+        r.learner_stream_window_frames = cfg.learner_stream_window_frames;
         r
     }
 
     /// Lazily construct (and reuse) the per-peer bidi stream client.
-    /// Returns the shared `Arc<PxPeerStream>`; the underlying background
+    /// Returns the shared `Arc<PxLearnerStream>`; the underlying background
     /// task is spawned on first call and lives until [`Self::shutdown`].
-    fn peer_stream(&self) -> &Arc<PxPeerStream> {
-        self.peer_stream.get_or_init(|| {
+    fn learner_stream(&self) -> &Arc<PxLearnerStream> {
+        self.learner_stream.get_or_init(|| {
             let cfg = PxElectionConfig {
-                peer_stream_window_frames: self.peer_stream_window_frames,
+                learner_stream_window_frames: self.learner_stream_window_frames,
                 ..PxElectionConfig::DEFAULT
             };
-            PxPeerStream::new(self.endpoint.clone(), &cfg)
+            PxLearnerStream::new(self.endpoint.clone(), &cfg)
         })
     }
 
     /// Fire-and-forget peer notification that `(slot, term)` is chosen
-    /// in `group_id`. Sent over the per-peer bidi `PxPeerStream`. No
+    /// in `group_id`. Sent over the per-peer bidi `PxLearnerStream`. No
     /// response is awaited; failures (peer down,
     /// stream reset) are returned for caller-side observability but
     /// the proposer treats them as best-effort and swallows them
@@ -440,7 +446,7 @@ impl PxRemoteReplica {
             request_id: 0,
             request_create_ms: 0,
         };
-        self.peer_stream().send_chosen(notice)
+        self.learner_stream().send_chosen(notice)
     }
 
     /// Allocate the next correlation id for an `Accept` / `Heartbeat`
@@ -500,9 +506,9 @@ impl PxRemoteReplica {
         // explicit close is needed earlier (e.g. tearing down a remote without
         // tearing down the group), expose `OnceCell` mutation through a
         // `&mut self` API.
-        // Stop the PxPeerStream background task (idempotent;
+        // Stop the PxLearnerStream background task (idempotent;
         // safe to call even if the stream was never initialized).
-        if let Some(stream) = self.peer_stream.get() {
+        if let Some(stream) = self.learner_stream.get() {
             stream.shutdown();
         }
 
@@ -525,10 +531,7 @@ impl PxRemoteReplica {
             slot: value.slot,
             ballot: PxBallot::new(value.round, value.leader_id),
             term: value.term,
-            kind: PxLogEntryKind::Write,
             payload: value.payload,
-            client_id: None,
-            seq: None,
         }
     }
 }

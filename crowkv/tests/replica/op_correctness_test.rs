@@ -7,7 +7,7 @@
 
 use bytes::Bytes;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
-use crowkv::paxos::roles::{PxBallot, PxLogEntry, PxLogEntryKind};
+use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 
 fn encode_put(key: &[u8], value: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -62,10 +62,7 @@ fn entry(slot: u64, payload: Vec<u8>) -> PxLogEntry {
         slot,
         ballot: PxBallot::new(1, 1),
         term: 1,
-        kind: PxLogEntryKind::Write,
         payload: Bytes::from(payload),
-        client_id: Some(1),
-        seq: Some(slot),
     }
 }
 
@@ -76,7 +73,7 @@ async fn put_applies_value_to_kv_engine() {
     let replica = PxLocalReplica::new(1, PxLocalReplicaRole::Follower);
     let entry = entry(1, encode_put(b"key", b"value"));
     let _ = replica.on_accept(entry.clone()).await;
-    replica.learn_chosen(&entry).await;
+    replica.learn_chosen(&entry, None, None).await;
 
     assert_eq!(
         replica.learner.engine_get(b"key").map(|(_, v)| v),
@@ -94,11 +91,11 @@ async fn overwrite_replaces_previous_value() {
 
     let e1 = entry(1, encode_put(b"k", b"v1"));
     let _ = replica.on_accept(e1.clone()).await;
-    replica.learn_chosen(&e1).await;
+    replica.learn_chosen(&e1, None, None).await;
 
     let e2 = entry(2, encode_put(b"k", b"v2"));
     let _ = replica.on_accept(e2.clone()).await;
-    replica.learn_chosen(&e2).await;
+    replica.learn_chosen(&e2, None, None).await;
 
     assert_eq!(
         replica.learner.engine_get(b"k").map(|(_, v)| v),
@@ -116,13 +113,13 @@ async fn delete_produces_tombstone() {
 
     let e1 = entry(1, encode_put(b"k", b"v1"));
     let _ = replica.on_accept(e1.clone()).await;
-    replica.learn_chosen(&e1).await;
+    replica.learn_chosen(&e1, None, None).await;
 
     assert!(replica.learner.engine_get(b"k").is_some(), "key exists after put");
 
     let e2 = entry(2, encode_delete(b"k"));
     let _ = replica.on_accept(e2.clone()).await;
-    replica.learn_chosen(&e2).await;
+    replica.learn_chosen(&e2, None, None).await;
 
     assert_eq!(
         replica.learner.engine_get(b"k"),
@@ -140,7 +137,7 @@ async fn delete_nonexistent_key_is_noop() {
 
     let e1 = entry(1, encode_delete(b"ghost"));
     let _ = replica.on_accept(e1.clone()).await;
-    replica.learn_chosen(&e1).await;
+    replica.learn_chosen(&e1, None, None).await;
 
     assert_eq!(
         replica.learner.engine_get(b"ghost"),
@@ -165,7 +162,7 @@ async fn batch_multiple_puts_apply_all() {
         ]),
     );
     let _ = replica.on_accept(e1.clone()).await;
-    replica.learn_chosen(&e1).await;
+    replica.learn_chosen(&e1, None, None).await;
 
     assert_eq!(
         replica.learner.engine_get(b"k1").map(|(_, v)| v),
@@ -198,7 +195,7 @@ async fn batch_intra_batch_last_wins() {
         ]),
     );
     let _ = replica.on_accept(e1.clone()).await;
-    replica.learn_chosen(&e1).await;
+    replica.learn_chosen(&e1, None, None).await;
 
     assert_eq!(
         replica.learner.engine_get(b"k"),
@@ -221,7 +218,7 @@ async fn batch_put_then_delete_same_key() {
         ]),
     );
     let _ = replica.on_accept(e1.clone()).await;
-    replica.learn_chosen(&e1).await;
+    replica.learn_chosen(&e1, None, None).await;
 
     assert_eq!(
         replica.learner.engine_get(b"k"),
@@ -244,7 +241,7 @@ async fn batch_delete_then_put_same_key() {
         ]),
     );
     let _ = replica.on_accept(e1.clone()).await;
-    replica.learn_chosen(&e1).await;
+    replica.learn_chosen(&e1, None, None).await;
 
     assert_eq!(
         replica.learner.engine_get(b"k").map(|(_, v)| v),
@@ -261,7 +258,7 @@ async fn empty_batch_is_noop() {
 
     let e1 = entry(1, encode_batch(&[]));
     let _ = replica.on_accept(e1.clone()).await;
-    replica.learn_chosen(&e1).await;
+    replica.learn_chosen(&e1, None, None).await;
 
     assert_eq!(
         replica.contiguous_applied(),
@@ -286,12 +283,12 @@ async fn multiple_slots_mixed_ops_correctness() {
         ]),
     );
     let _ = replica.on_accept(e1.clone()).await;
-    replica.learn_chosen(&e1).await;
+    replica.learn_chosen(&e1, None, None).await;
 
     // Slot 2: overwrite k1
     let e2 = entry(2, encode_put(b"k1", b"v1b"));
     let _ = replica.on_accept(e2.clone()).await;
-    replica.learn_chosen(&e2).await;
+    replica.learn_chosen(&e2, None, None).await;
 
     // Slot 3: delete k2, put k3
     let e3 = entry(
@@ -299,7 +296,7 @@ async fn multiple_slots_mixed_ops_correctness() {
         encode_batch(&[(b"k2".to_vec(), None), (b"k3".to_vec(), Some(b"v3".to_vec()))]),
     );
     let _ = replica.on_accept(e3.clone()).await;
-    replica.learn_chosen(&e3).await;
+    replica.learn_chosen(&e3, None, None).await;
 
     assert_eq!(
         replica.learner.engine_get(b"k1").map(|(_, v)| v),

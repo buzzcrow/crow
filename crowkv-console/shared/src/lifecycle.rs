@@ -107,6 +107,8 @@ async fn deploy_local_in_workspace(
         .arg("127.0.0.1")
         .arg("--management-port")
         .arg(req.mgmt_port.to_string())
+        .arg("--ports")
+        .arg(req.grpc_port.to_string())
         .arg("--election-profile")
         .arg(
             req.election_profile
@@ -118,19 +120,18 @@ async fn deploy_local_in_workspace(
         .kill_on_drop(false);
     if let Some(dir) = workspace_dir {
         cmd.arg("--wal-root").arg("wal");
-        let stdout = std::fs::OpenOptions::new()
+        // Merge stdout and stderr into one file. We open a temp file before
+        // spawn (PID unknown), then rename it with the PID after spawn.
+        let log_dir = dir.join("log");
+        let tmp_path = log_dir.join("crowkv-server.stdout.log");
+        let out = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(dir.join("log").join("crowkv-server.stdout.log"))
-            .map_err(Error::Io)?;
-        let stderr = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join("log").join("crowkv-server.stderr.log"))
+            .open(&tmp_path)
             .map_err(Error::Io)?;
         cmd.current_dir(dir);
-        cmd.stdout(Stdio::from(stdout));
-        cmd.stderr(Stdio::from(stderr));
+        cmd.stdout(Stdio::from(out.try_clone().map_err(Error::Io)?));
+        cmd.stderr(Stdio::from(out));
     } else {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -141,6 +142,14 @@ async fn deploy_local_in_workspace(
         field: "pid".into(),
         message: "spawned child has no pid".into(),
     })?;
+
+    // Rename the temp stdout file to include the PID.
+    if let Some(dir) = workspace_dir {
+        let log_dir = dir.join("log");
+        let from = log_dir.join("crowkv-server.stdout.log");
+        let to = log_dir.join(format!("crowkv-server-{pid}.out.log"));
+        let _ = std::fs::rename(&from, &to);
+    }
 
     // Drain stdout/stderr to a debug logger so the child doesn't block on
     // a full pipe. We deliberately don't wait for "management_addr=" here:
@@ -181,14 +190,61 @@ async fn deploy_local_in_workspace(
 /// # Errors
 /// Surfaces spawn / wait failures as `Error::Io`.
 pub fn stop_pid(pid: u32) -> Result<bool> {
+    stop_pid_with_timeout(pid, std::time::Duration::from_secs(15))
+}
+
+/// Same as [`stop_pid`] but with a configurable wait timeout before
+/// force-killing. Used by tests to keep test runtime short.
+///
+/// # Errors
+/// Surfaces spawn / wait failures as `Error::Io`.
+pub fn stop_pid_with_timeout(pid: u32, timeout: std::time::Duration) -> Result<bool> {
     let status = std::process::Command::new("kill")
         .arg("-TERM")
         .arg(pid.to_string())
         .status()
         .map_err(Error::Io)?;
-    // `kill` exits non-zero when the pid is already gone. Treat that as
-    // "not alive" rather than an error.
-    Ok(status.success())
+    if !status.success() {
+        return Ok(false);
+    }
+    // Wait for the process to actually exit so the caller can safely
+    // reuse resources (ports, WAL files) without racing the old process.
+    //
+    // We use `ps -p PID -o stat=` instead of `kill -0` because `kill -0`
+    // returns success for zombie processes (exited but not reaped by
+    // parent), causing a false "still alive" result.
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if !process_is_alive(pid) {
+            return Ok(true);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    // Process didn't exit within timeout — force kill.
+    let _ = std::process::Command::new("kill")
+        .arg("-KILL")
+        .arg(pid.to_string())
+        .status();
+    Ok(false)
+}
+
+/// Check if a process is alive (running or sleeping, not zombie or gone).
+/// Uses `ps -p PID -o stat=` which returns empty for non-existent PIDs
+/// and 'Z' for zombies.
+#[must_use]
+pub fn process_is_alive(pid: u32) -> bool {
+    let Ok(output) = std::process::Command::new("ps")
+        .arg("-p")
+        .arg(pid.to_string())
+        .arg("-o")
+        .arg("stat=")
+        .output()
+    else {
+        return false;
+    };
+    let stat = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    // Empty = process doesn't exist; 'Z' = zombie (effectively dead).
+    !stat.is_empty() && !stat.starts_with('Z')
 }
 
 /// Render the shell command that brings up `crowkv-server` on the remote

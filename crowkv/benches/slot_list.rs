@@ -2,7 +2,7 @@
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use crossbeam_skiplist::SkipMap;
-use crowkv::paxos::roles::{PxBallot, PxLogEntry, PxLogEntryKind};
+use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 use crowkv::paxos::slot_list::PxSlotList;
 use crowkv::paxos::slot_node::PxSlotNode;
 use dashmap::DashMap;
@@ -47,10 +47,7 @@ macro_rules! define_slot_node_churn_bench {
                                     slot: 7,
                                     ballot,
                                     term: ballot.round,
-                                    kind: PxLogEntryKind::Write,
                                     payload: bytes::Bytes::from_static(&[1, 2, 3]),
-                                    client_id: Some(1),
-                                    seq: Some(i + 1),
                                 };
                                 accepted_ptr = node.cas_accepted(accepted_ptr, entry).unwrap();
                             }

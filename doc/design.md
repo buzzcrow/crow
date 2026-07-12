@@ -3,7 +3,7 @@
 Depends on: [`requirement.md`](requirement.md)
 Satisfies: all of [`requirement.md`](requirement.md) (this is the root design doc)
 
-This is the master design document. It establishes the conceptual model, module decomposition, and cross-cutting flows. Deep dives for the heavy areas live in sibling sub-topic docs (`design-parallel-slots.md`, `design-leader-election.md`, `design-wal.md`, `design-reconfiguration.md`, `design-storage-engine.md`, `design-async-io.md`, `design-rpc.md`).
+This is the master design document. It establishes the conceptual model, module decomposition, and cross-cutting flows. Deep dives for the heavy areas live in sibling sub-topic docs (`design-parallel-slots.md`, `design-leader-election.md`, `design-wal.md`, `design-reconfiguration.md`, `design-state-machine.md`, `design-async-io.md`, `design-rpc.md`).
 
 The doc explains **what the system is** and **how it behaves**. It does not prescribe an implementation phasing (that lives in `plan.md`) and does not enumerate test scenarios.
 
@@ -370,7 +370,7 @@ Each group takes per-group snapshots when its WAL exceeds a configured size or s
 - **Install protocol**: chunked, byte-offset based (resumable), end-to-end CRC, throttleable. A new node or one whose WAL is older than the leader's earliest retained slot must receive a snapshot before resuming WAL-based catch-up.
 - **Source**: leader or any caught-up learner.
 
-The snapshot file format and engine-specific export/import mechanics live in [`design-storage-engine.md`](design/design-storage-engine.md).
+The snapshot file format and engine-specific export/import mechanics live in [`design-state-machine.md`](design/design-state-machine.md).
 
 ### 8.5 Reconfiguration
 
@@ -406,7 +406,7 @@ The Learner talks to a single engine trait. Three engines satisfy it: in-memory 
 - `snapshot_export()` / `snapshot_import()` — for snapshot install.
 - Per-key MVCC of one version: tombstones with slots; compacted only after both the snapshot watermark and the safe-slot watermark have passed.
 
-→ Full design: [`design-storage-engine.md`](design/design-storage-engine.md).
+→ Full design: [`design-state-machine.md`](design/design-state-machine.md).
 
 ---
 
@@ -468,7 +468,7 @@ These are intentional gaps left for sub-topic docs or for a future iteration. Th
 - **Repair-task cadence and trigger heuristics.** Default scan period, gap-age threshold, batch size. To be specified in [`design-parallel-slots.md`](design/design-parallel-slots.md).
 - **WAL segment rotation policy.** Size threshold and retention policy. To be specified in [`design-wal.md`](design/design-wal.md).
 - **Joint-consensus quorum overlap proof for asymmetric transitions.** E.g. when going 3 → 5 with the new two members not yet caught up, what is the safe ordering of catch-up vs vote-eligibility? To be specified in [`design-reconfiguration.md`](design/design-reconfiguration.md).
-- **Compaction policy for the storage engine.** When are tombstones safe to drop? Two watermarks (snapshot-slot and safe-slot) must both pass. Exact policy to be specified in [`design-storage-engine.md`](design/design-storage-engine.md).
+- **Compaction policy for the storage engine.** When are tombstones safe to drop? Two watermarks (snapshot-slot and safe-slot) must both pass. Exact policy to be specified in [`design-state-machine.md`](design/design-state-machine.md).
 - **Snapshot transfer chunk size and throttling defaults.** Network-friendly defaults; pluggable.
 - **Group-0 special handling during simultaneous topology + Group-0 membership change.** Likely serialized by holding a Group-0 leader lease, but the sequencing must be made explicit.
 

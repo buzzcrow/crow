@@ -53,8 +53,8 @@ pub struct PxLearner {
     /// Per-`client_id` idempotency cache. Updated on every `learn` that
     /// carries a `(client_id, seq)`; consulted by the proposer to short-
     /// circuit a retried request to its prior commit slot without re-running
-    /// Paxos. In-memory only for P1 (rebuilt from `DedupCheckpoint` log entries
-    /// on P2 replay).
+    /// Paxos. In-memory only — lost on crash/restart; retried requests after
+    /// a restart simply get a new Paxos slot (same value, no corruption).
     dedup: DashMap<u64, DedupEntry>,
 }
 
@@ -226,17 +226,6 @@ impl PxLearner {
             .map(|e| e.last_slot)
     }
 
-    /// Replace the in-memory dedup cache with a restored snapshot from WAL replay.
-    pub fn restore_dedup_cache(&self, cache: &BTreeMap<u64, (u64, SlotIndex)>) {
-        self.dedup.clear();
-        for (&client_id, &(last_seq, last_slot)) in cache {
-            if client_id == 0 {
-                continue;
-            }
-            self.dedup.insert(client_id, DedupEntry { last_seq, last_slot });
-        }
-    }
-
     /// Record that `(client_id, seq)` committed at `slot`. Keeps the highest
     /// `seq` seen per client (monotonic; out-of-order / replayed lower seqs do
     /// not regress the record). No-op for the `client_id == 0` sentinel.
@@ -276,9 +265,9 @@ impl PxLearner {
 }
 
 impl Learner for PxLearner {
-    fn learn(&self, entry: PxLogEntry) {
+    fn learn(&self, entry: PxLogEntry, client_id: Option<u64>, seq: Option<u64>) {
         self.apply_entry(entry.slot, entry.payload.as_ref());
         self.update_frontier(entry.slot, entry.term);
-        self.record_dedup(entry.client_id, entry.seq, entry.slot);
+        self.record_dedup(client_id, seq, entry.slot);
     }
 }

@@ -1,7 +1,7 @@
 use crowkv::cluster::group::PxGroup;
 use crowkv::cluster::kv_store::KvStore;
 use crowkv::cluster::{KvServer, PxKvStore, PxLocalReplica, PxLocalReplicaRole, PxRemoteReplica};
-use crowkv::paxos::roles::{PxBallot, PxLogEntry, PxLogEntryKind};
+use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 use crowkv::rpc::KvBatchItem;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -116,10 +116,7 @@ async fn classic_prepare_and_accept_track_state() {
         slot: 5,
         ballot,
         term: 0,
-        kind: PxLogEntryKind::Write,
         payload: bytes::Bytes::from_static(b"payload"),
-        client_id: None,
-        seq: None,
     };
 
     let accept_reply = node.on_accept(entry.clone()).await;

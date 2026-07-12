@@ -199,7 +199,6 @@ async fn remotes(node: &ServerNode, group_id: u64) -> Value {
 }
 
 #[tokio::test]
-#[ignore = "test isolation issue: passes individually but fails in full suite"]
 #[allow(clippy::too_many_lines)]
 async fn e2e_three_node_cluster_kv_put_batch_delete() {
     let group_id = 1;
@@ -695,7 +694,6 @@ async fn shrink_group_to_three(nodes: &[ServerNode], group_id: u64) {
 ///   - `wire_topology` for a non-bootstrap group,
 ///   - learner-store isolation between groups in the same `PxKvStore`.
 #[tokio::test]
-#[ignore = "test isolation issue: passes individually but fails in full suite"]
 async fn e2e_multi_group_isolated_kv() {
     let group_a = 1;
     let group_b = 2;

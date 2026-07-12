@@ -19,7 +19,7 @@ use std::time::Instant as StdInstant;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::cluster::group::{AcceptAttempt, PrepareAttempt, PxGroup, RemoteReplicaKind};
 use crate::cluster::local_replica::PxLocalReplicaRole;
@@ -27,7 +27,7 @@ use crate::cluster::replica::{
     HeartbeatReply, HeartbeatRequestPayload, PxReplicaError, ReplicaClient, VoteReply, VoteRequestPayload,
 };
 use crate::common::config::PxElectionConfig;
-use crate::paxos::roles::{PxLogEntryKind, SlotIndex};
+use crate::paxos::roles::SlotIndex;
 use crate::paxos::PxNodeId;
 
 /// Bundle handed off from `run_candidate_election` to `run_leader_state`
@@ -248,7 +248,7 @@ impl LeaderElection for PxGroup {
             // from a remote's previously-Accepted entry; if none exist
             // the entry stays a NoOp (we re-tag below).
             let attempt = self
-                .run_prepare_phase(replica, slot, bytes::Bytes::new(), None, None, quorum, 0)
+                .run_prepare_phase(replica, slot, bytes::Bytes::new(), quorum, 0)
                 .await;
             let mut entry = match attempt {
                 PrepareAttempt::Proceed { entry, .. } => entry,
@@ -264,14 +264,11 @@ impl LeaderElection for PxGroup {
                 }
             };
 
-            if entry.payload.is_empty() {
-                entry.kind = PxLogEntryKind::NoOp;
-            }
             entry.term = term;
 
-            match self.run_accept_phase(replica, &entry, quorum).await {
+            match self.run_accept_phase(replica, &entry, None, None, quorum).await {
                 AcceptAttempt::Chosen => {
-                    replica.learn_chosen(&entry).await;
+                    replica.learn_chosen(&entry, None, None).await;
                     self.fan_out_chosen_notice(&entry, group_id);
                     slots_repaired += 1;
                 }
@@ -401,6 +398,30 @@ impl PxGroup {
             peer_ceiling,
             "candidate won quorum; becoming leader"
         );
+
+        // Advance next_slot BEFORE become_leader so proposals can't
+        // reuse slots from the previous term.  Uses the same ceiling
+        // calculation as run_bulk_phase1 (max of local ceiling,
+        // current next_slot, and peer_ceiling from RequestVote
+        // replies).
+        let local_ceiling = replica.highest_seen_slot();
+        let next_slot_minus_one = self.next_slot.load(Ordering::Acquire).saturating_sub(1);
+        let ceiling = local_ceiling.max(next_slot_minus_one).max(peer_ceiling);
+        let next = ceiling.saturating_add(1);
+        let prev_next_slot = self.next_slot.fetch_max(next, Ordering::AcqRel);
+        info!(
+            group_id = self.group_id,
+            replica_l_id = replica.id,
+            term,
+            local_ceiling,
+            next_slot_minus_one,
+            peer_ceiling,
+            ceiling,
+            next,
+            prev_next_slot,
+            "finalize_leader: bumping next_slot"
+        );
+
         *self.pending_leader_handoff.lock() = Some(PendingLeaderHandoff {
             term,
             peer_floor,
@@ -507,7 +528,7 @@ impl PxGroup {
                                     // converges and persists a durable `Accepted` record.
                                     let mut caught_up = false;
                                     for catchup_attempt in 0..2u8 {
-                                        match remote.send_accept(&entry, group_id).await {
+                                        match remote.send_accept(&entry, None, None, group_id).await {
                                             Ok(crate::paxos::roles::PxAcceptReply::Accepted { .. }) => {
                                                 caught_up = true;
                                                 break;
@@ -811,7 +832,7 @@ impl PxGroup {
             let (peer_id, reply) = match joined {
                 Ok(pair) => pair,
                 Err(join_err) => {
-                    warn!(group_id, error = %join_err, "RequestVote task panicked");
+                    error!(group_id, error = %join_err, "RequestVote task panicked");
                     continue;
                 }
             };
@@ -1032,7 +1053,7 @@ impl PxGroup {
                             // A heartbeat was accepted or a vote was granted
                             // to a peer; reset the election deadline (Raft rule).
                             election_deadline = next_election_deadline(Instant::now(), &cfg, &mut rng);
-                            debug!(group_id = store_group_id, replica_l_id, "election deadline reset on heartbeat / granted vote");
+                            trace!(group_id = store_group_id, replica_l_id, "election deadline reset on heartbeat / granted vote");
                         }
                         () = tokio::time::sleep_until(election_deadline) => {
                             let role = g.local_replica().role();

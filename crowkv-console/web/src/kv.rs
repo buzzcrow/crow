@@ -326,7 +326,7 @@ where
         let canonical = canonical_endpoint(&endpoint);
         pending.remove(&canonical);
         let count = attempt_counts.entry(canonical.clone()).or_default();
-        if *count >= 20 {
+        if *count >= state.kv_retry.max_attempts_per_endpoint {
             continue;
         }
         *count += 1;
@@ -345,7 +345,7 @@ where
                 last_err = Some(SharedError::NotLeader { hint: hint.clone() });
                 KvClient::invalidate_cache(&endpoint);
                 refresh_group_nodes(state, sid, gid).await;
-                sleep(Duration::from_millis(50)).await;
+                sleep(Duration::from_millis(state.kv_retry.not_leader_backoff_ms)).await;
                 if let Some(endpoint) = endpoint_from_hint(&hint) {
                     enqueue_front(&mut queue, &mut pending, endpoint);
                 }
@@ -366,7 +366,7 @@ where
                 last_err = Some(err);
                 KvClient::invalidate_cache(&endpoint);
                 refresh_group_nodes(state, sid, gid).await;
-                sleep(Duration::from_millis(50)).await;
+                sleep(Duration::from_millis(state.kv_retry.not_leader_backoff_ms)).await;
                 enqueue_front(&mut queue, &mut pending, endpoint);
                 if let Ok(endpoints) = group_candidate_endpoints(state, sid, gid).await {
                     for endpoint in endpoints {

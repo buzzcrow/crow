@@ -13,7 +13,6 @@ when implementing features or components — consult this doc to determine
 which layer a new test belongs to and what it should cover.
 
 For the live task backlog (unfinished test gaps), see `plan-test.md`.
-For ignored / flaky tests and their root causes, see `plan-ut.md`.
 
 ## Architecture Stack
 
@@ -174,7 +173,7 @@ through the group, durability under crash/restart.
 - KV through the group: Put + BatchWrite (puts) + Delete apply to all learners, follower forwards Get/Scan, forward loop-guard. **Gap:** full op correctness checklist not yet covered (see `plan-test.md`).
 - Remote replica transport: unreachable/invalid endpoint returns error.
 - Preemption retry, kv-slot retry on prior accepted value.
-- Durability: single-node crash/restart, full-cluster restart keeps deletes (one path ignored — see `plan-ut.md`).
+- Durability: single-node crash/restart, full-cluster restart keeps deletes.
 
 ### Store Layer
 
@@ -195,7 +194,7 @@ clusters. Tests boot real processes and exercise the HTTP API end-to-end.
 
 **Covered:**
 - HTTP management API (health, openapi, stores/groups CRUD, conflicts).
-- Real-process 3-node cluster KV + topology + dynamic group mgmt (several ignored — see `plan-ut.md`).
+- Real-process 3-node cluster KV + topology + dynamic group mgmt.
 - CLI parsing, startup WAL restore/resume.
 
 ## Sequencing
@@ -204,7 +203,7 @@ Fill gaps bottom-up so a new failure is always attributable to the lowest layer:
 1. Unit + WAL/slot + Election — cheap, deterministic.
 2. Replica layer — highest-value gap; unblocks confident group debugging.
 3. Group reconfiguration + PeerStream.
-4. Multi-node store and deployment re-enables, after repair-correctness fixes tracked in `plan-ut.md`.
+4. Multi-node store and deployment re-enables, after repair-correctness fixes tracked in `plan-test.md`.
 
 ## Feature-Dependent Test Gaps
 
@@ -217,7 +216,7 @@ tests for these features.
 
 | Attribute | Value |
 | --- | --- |
-| Design doc | `design-storage-engine.md` §6 |
+| Design doc | `design-state-machine.md` §6 |
 | Depends on | New `KVEngine` trait methods (`snapshot_export`, `snapshot_import`) + `InMemKV` implementation + snapshot streaming module |
 | Target layer | Unit → Replica |
 | Description | Snapshot export serializes the KV state at a given slot; snapshot import replaces local KV state from a received snapshot. Tests will cover: export produces deterministic bytes, import restores state, import clears prior state, export/import round-trip preserves tombstones, snapshot install triggers WAL truncation. |
@@ -226,7 +225,7 @@ tests for these features.
 
 | Attribute | Value |
 | --- | --- |
-| Design doc | `design-storage-engine.md` §7 |
+| Design doc | `design-state-machine.md` §7 |
 | Depends on | `KVEngine::compact(watermark)` method + watermark wiring from `PxLearner` (`snapshot_slot`, `safe_slot`) + background sweeper task |
 | Target layer | Unit → Replica |
 | Description | Compaction removes tombstones below the safe watermark. Tests will cover: compact removes tombstones below watermark, live keys preserved, compact is idempotent, compact after snapshot install, watermark advances with learner progress. |
@@ -236,7 +235,7 @@ tests for these features.
 | Attribute | Value |
 | --- | --- |
 | Design doc | — |
-| Depends on | Wire group's `contiguous_applied` into WAL GC watermark instead of `u64::MAX`; see `plan-ut.md` §2.5 |
+| Depends on | Wire group's `contiguous_applied` into WAL GC watermark instead of `u64::MAX`; see `plan-test.md` WAL GC safe slot integration |
 | Target layer | WAL → Group |
 | Description | Today WAL GC uses `u64::MAX` as the watermark, meaning it never trims. The group's `contiguous_applied` (the highest slot chosen by quorum) should bound GC. Tests will cover: GC trims below `contiguous_applied`, replay after GC still recovers chosen entries, GC does not trim unchosen slots. |
 

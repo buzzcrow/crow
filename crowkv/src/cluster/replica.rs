@@ -178,7 +178,13 @@ pub trait ReplicaClient: Replica {
         term: PxTerm,
         group_id: u64,
     ) -> Result<PxPrepareReply, PxReplicaError>;
-    async fn send_accept(&self, entry: &PxLogEntry, group_id: u64) -> Result<PxAcceptReply, PxReplicaError>;
+    async fn send_accept(
+        &self,
+        entry: &PxLogEntry,
+        client_id: Option<u64>,
+        seq: Option<u64>,
+        group_id: u64,
+    ) -> Result<PxAcceptReply, PxReplicaError>;
     async fn send_pre_vote(
         &self,
         req: VoteRequestPayload,

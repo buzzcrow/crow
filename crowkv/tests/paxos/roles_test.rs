@@ -1,11 +1,11 @@
-//! Edge-case unit tests for `PxLogEntry` / `PxBallot` / `PxLogEntryKind`.
+//! Edge-case unit tests for `PxLogEntry` / `PxBallot`.
 //!
 //! The acceptor tests touch ballot ordering incidentally; these tests exercise
-//! the type surface directly: ballot total ordering, kind discriminants, and
-//! entry equality semantics.
+//! the type surface directly: ballot total ordering and entry equality
+//! semantics.
 
 use bytes::Bytes;
-use crowkv::paxos::roles::{PxBallot, PxLogEntry, PxLogEntryKind};
+use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 
 // ── PxBallot ordering ────────────────────────────────────────
 
@@ -39,58 +39,27 @@ fn ballot_tie_break_uses_leader_id() {
     assert!(b > a);
 }
 
-// ── PxLogEntryKind discriminants ─────────────────────────────
-
-#[test]
-fn log_entry_kind_equality() {
-    assert_eq!(PxLogEntryKind::Write, PxLogEntryKind::Write);
-    assert_eq!(PxLogEntryKind::NoOp, PxLogEntryKind::NoOp);
-    assert_eq!(PxLogEntryKind::ConfigChange, PxLogEntryKind::ConfigChange);
-    assert_eq!(PxLogEntryKind::DedupCheckpoint, PxLogEntryKind::DedupCheckpoint);
-    assert_ne!(PxLogEntryKind::Write, PxLogEntryKind::NoOp);
-    assert_ne!(PxLogEntryKind::Write, PxLogEntryKind::ConfigChange);
-    assert_ne!(PxLogEntryKind::Write, PxLogEntryKind::DedupCheckpoint);
-    assert_ne!(PxLogEntryKind::NoOp, PxLogEntryKind::ConfigChange);
-    assert_ne!(PxLogEntryKind::NoOp, PxLogEntryKind::DedupCheckpoint);
-    assert_ne!(PxLogEntryKind::ConfigChange, PxLogEntryKind::DedupCheckpoint);
-}
-
 // ── PxLogEntry equality ──────────────────────────────────────
 
-fn entry(
-    slot: u64,
-    kind: PxLogEntryKind,
-    payload: &[u8],
-    client_id: Option<u64>,
-    seq: Option<u64>,
-) -> PxLogEntry {
+fn entry(slot: u64, payload: &[u8]) -> PxLogEntry {
     PxLogEntry {
         slot,
         ballot: PxBallot::new(1, 1),
         term: 1,
-        kind,
         payload: Bytes::copy_from_slice(payload),
-        client_id,
-        seq,
     }
 }
 
 #[test]
 fn log_entry_equality_compares_all_fields() {
-    let a = entry(1, PxLogEntryKind::Write, b"v", Some(1), Some(1));
-    let b = entry(1, PxLogEntryKind::Write, b"v", Some(1), Some(1));
+    let a = entry(1, b"v");
+    let b = entry(1, b"v");
     assert_eq!(a, b);
 
     // Different slot.
-    assert_ne!(a, entry(2, PxLogEntryKind::Write, b"v", Some(1), Some(1)));
-    // Different kind.
-    assert_ne!(a, entry(1, PxLogEntryKind::NoOp, b"v", Some(1), Some(1)));
+    assert_ne!(a, entry(2, b"v"));
     // Different payload.
-    assert_ne!(a, entry(1, PxLogEntryKind::Write, b"w", Some(1), Some(1)));
-    // Different client_id.
-    assert_ne!(a, entry(1, PxLogEntryKind::Write, b"v", Some(2), Some(1)));
-    // Different seq.
-    assert_ne!(a, entry(1, PxLogEntryKind::Write, b"v", Some(1), Some(2)));
+    assert_ne!(a, entry(1, b"w"));
     // Different ballot.
     assert_ne!(
         a,
@@ -105,27 +74,13 @@ fn log_entry_equality_compares_all_fields() {
 
 #[test]
 fn noop_entry_has_empty_payload() {
-    let e = entry(1, PxLogEntryKind::NoOp, &[], None, None);
+    let e = entry(1, &[]);
     assert!(e.payload.is_empty());
 }
 
 #[test]
 fn write_entry_carries_kv_payload() {
-    let e = entry(1, PxLogEntryKind::Write, b"some-payload", Some(1), Some(1));
+    let e = entry(1, b"some-payload");
     assert!(!e.payload.is_empty());
     assert_eq!(e.payload.as_ref(), b"some-payload");
-}
-
-#[test]
-fn config_change_entry_kind_is_distinct() {
-    let e = entry(1, PxLogEntryKind::ConfigChange, b"cfg", None, None);
-    assert_eq!(e.kind, PxLogEntryKind::ConfigChange);
-    assert_ne!(e.kind, PxLogEntryKind::Write);
-}
-
-#[test]
-fn dedup_checkpoint_entry_kind_is_distinct() {
-    let e = entry(1, PxLogEntryKind::DedupCheckpoint, b"ckpt", None, None);
-    assert_eq!(e.kind, PxLogEntryKind::DedupCheckpoint);
-    assert_ne!(e.kind, PxLogEntryKind::Write);
 }

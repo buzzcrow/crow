@@ -7,22 +7,23 @@
 
 use crowkv::cluster::group::PxGroup;
 use crowkv::cluster::{PxLocalReplica, PxLocalReplicaRole, PxRemoteReplica};
-use crowkv::paxos::roles::{Learner, PxBallot, PxLogEntry, PxLogEntryKind, SlotIndex};
+use crowkv::paxos::roles::{Learner, PxBallot, PxLogEntry, SlotIndex};
 
 /// Drive the local learner's contiguous-applied watermark to `upto` by
 /// learning slots `1..=upto` (empty `NoOp` payloads; only the frontier
 /// matters here).
 fn apply_through(replica: &PxLocalReplica, upto: SlotIndex) {
     for slot in 1..=upto {
-        replica.learner.learn(PxLogEntry {
-            slot,
-            ballot: PxBallot::new(0, 0),
-            term: 0,
-            kind: PxLogEntryKind::NoOp,
-            payload: bytes::Bytes::new(),
-            client_id: None,
-            seq: None,
-        });
+        replica.learner.learn(
+            PxLogEntry {
+                slot,
+                ballot: PxBallot::new(0, 0),
+                term: 0,
+                payload: bytes::Bytes::new(),
+            },
+            None,
+            None,
+        );
     }
 }
 

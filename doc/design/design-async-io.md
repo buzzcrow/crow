@@ -1,7 +1,7 @@
 # CrowKV - Design: Async Local Disk I/O
 
 Depends on: [`design.md`](design.md), [`requirement.md`](requirement.md), [`plan.md`](plan.md) §5 (Concurrency Model)
-Satisfies: [requirement.md §8.1](requirement.md#81-wal-write-ahead-log) (durability contract), and underpins [`design-wal.md`](design/design-wal.md), [`design-storage-engine.md`](design/design-storage-engine.md)
+Satisfies: [requirement.md §8.1](requirement.md#81-wal-write-ahead-log) (durability contract), and underpins [`design-wal.md`](design/design-wal.md), [`design-state-machine.md`](design/design-state-machine.md)
 
 This document specifies the project-wide async local disk I/O abstraction. It is shared infrastructure: WAL fsync, ordered-file engine writes, snapshot file I/O, and any future on-disk subsystem all use it.
 

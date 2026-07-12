@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use crowkv::common::config::WalConfig;
-use crowkv::paxos::roles::{PxBallot, PxLogEntry, PxLogEntryKind};
+use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 use crowkv::wal::record::{RecordType, WALRecord};
 use crowkv::wal::replay::replay_group;
 use crowkv::wal::{IoBackend, WalEngine, WalRecordFormat};
@@ -38,10 +38,7 @@ fn accepted_write(slot: u64, term: u64, key: &[u8], value: &[u8]) -> PxLogEntry 
         slot,
         ballot: PxBallot::new(term, 7),
         term,
-        kind: PxLogEntryKind::Write,
         payload: Bytes::from(encode_put_payload(key, value)),
-        client_id: Some(1),
-        seq: Some(slot),
     }
 }
 
@@ -77,9 +74,6 @@ async fn file_backed_wal_recovers_state_after_reopen() {
         wal.append(&WALRecord::from_vote_granted(GROUP, 5, 99))
             .await
             .expect("append vote");
-        wal.append(&WALRecord::from_durable_commit_watermark(GROUP, 5, 3))
-            .await
-            .expect("append watermark");
         wal.seal_all().await.expect("seal");
     }
 
@@ -89,10 +83,6 @@ async fn file_backed_wal_recovers_state_after_reopen() {
 
     assert_eq!(replay.current_term, 5, "term must survive reopen");
     assert_eq!(replay.voted_for, Some(99), "vote must survive reopen");
-    assert_eq!(
-        replay.durable_commit_watermark, 3,
-        "durable commit watermark must survive reopen"
-    );
     let accepted_slots: Vec<u64> = replay
         .records
         .iter()

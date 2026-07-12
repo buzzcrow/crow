@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
-use tracing::info;
+use tracing::{info, warn};
 
 use crowkv::cluster::kv_server::KvServer;
 use crowkv::cluster::local_replica::PxLocalReplicaRole;
@@ -19,7 +19,7 @@ use crowkv::cluster::px_kv_store::PxKvStore;
 use crowkv::common::config::{PxElectionConfig, ServerConfig};
 
 use crowkv_server::cli::{parse_id_list, parse_port_list, Cli};
-use crowkv_server::mgmt_api;
+use crowkv_server::mgmt_api::{self, persisted_port_for_store};
 use crowkv_server::startup::create_group_with_wal;
 use crowkv_server::store_registry::KvStoreRegistry;
 
@@ -69,6 +69,21 @@ async fn main() {
         config_root,
         wal_backend,
     ));
+
+    // Populate the port pool from `--ports` even when `--stores` is not
+    // provided, so stores created later via the management API can use
+    // these ports instead of falling back to stale persisted config ports.
+    if let Some(ref port_str) = args.ports {
+        match parse_port_list(port_str) {
+            Ok(ports) => {
+                registry.set_port_pool(ports);
+            }
+            Err(e) => {
+                eprintln!("error: invalid --ports: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     // Start HTTP management server first
     let mgmt_addr: SocketAddr = format!("{}:{}", args.management_addr, args.management_port)
@@ -128,10 +143,16 @@ async fn main() {
 }
 
 async fn shutdown_signal() {
-    tokio::signal::ctrl_c()
-        .await
-        .expect("failed to install CTRL+C handler");
-    info!("received shutdown signal (CTRL+C), initiating graceful shutdown");
+    let mut term_stream = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to install SIGTERM handler");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            info!("received SIGINT (CTRL+C), initiating graceful shutdown");
+        }
+        _ = term_stream.recv() => {
+            warn!("received SIGTERM, initiating graceful shutdown");
+        }
+    }
 }
 
 /// Parsed bootstrap parameters. `None` means "no `--stores` was passed,
@@ -208,7 +229,14 @@ async fn create_and_start_stores(
     );
 
     for (i, &store_id) in store_ids.iter().enumerate() {
-        let port = ports[i];
+        // Port priority: explicit CLI port > persisted config file > OS-assigned (0).
+        let port = if ports[i] > 0 {
+            ports[i]
+        } else {
+            persisted_port_for_store(&registry.config_root, store_id)
+                .await
+                .unwrap_or(0)
+        };
         let addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
         info!(store_id, bind_addr = %addr, "creating PxKvStore");
         let store = Arc::new(PxKvStore::new(store_id, addr));

@@ -31,13 +31,10 @@ async fn send_accept_to_unreachable_endpoint_returns_error() {
         slot: 1,
         ballot: PxBallot::new(1, 0),
         term: 0,
-        kind: crowkv::paxos::roles::PxLogEntryKind::Write,
         payload: bytes::Bytes::from_static(b"test"),
-        client_id: None,
-        seq: None,
     };
 
-    let result = remote.send_accept(&entry, 1).await;
+    let result = remote.send_accept(&entry, None, None, 1).await;
     assert!(result.is_err(), "should fail when remote is unreachable");
     let err = result.unwrap_err();
     match &err {

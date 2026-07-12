@@ -37,7 +37,7 @@ pub struct AddGroupRequest {
     pub initial_role: Option<AddGroupInitialRole>,
     /// When `Some(false)`, the server adds the group without starting its
     /// election driver, so it cannot self-elect at `quorum == 1` before its
-    /// remotes are wired (`doc/plan-ut.md` §3.1). Used for multi-replica
+    /// remotes are wired. Used for multi-replica
     /// restore / creation; the subsequent remote-wiring rebuild starts the
     /// driver with a correct quorum. `None` keeps the default (start driver).
     #[serde(default, skip_serializing_if = "Option::is_none")]

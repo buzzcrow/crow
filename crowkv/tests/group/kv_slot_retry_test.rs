@@ -1,5 +1,5 @@
 use crate::testkit::cluster::start_cluster_classic;
-use crowkv::paxos::roles::{PxBallot, PxLogEntry, PxLogEntryKind};
+use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 use crowkv::rpc::KvSetRequest;
 
 fn encode_put_payload(key: &[u8], value: &[u8]) -> Vec<u8> {
@@ -30,10 +30,7 @@ async fn kv_put_retries_next_slot_when_slot_has_prior_accepted_value() {
         slot: 1,
         ballot: PxBallot::new(10, 99),
         term: 0,
-        kind: PxLogEntryKind::Write,
         payload: bytes::Bytes::from(stale_payload.clone()),
-        client_id: None,
-        seq: None,
     };
     let reply = follower_replica.on_accept(entry).await;
     assert!(
@@ -48,11 +45,11 @@ async fn kv_put_retries_next_slot_when_slot_has_prior_accepted_value() {
             version: 1,
             key: b"my-key".to_vec(),
             value: b"my-value".to_vec(),
-            seq: 1,
             ttl_ms: 0,
-            client_id: 12,
             request_id: 201,
             request_create_ms: 2001,
+            client_id: 0,
+            seq: 0,
             group_id: 1,
         })
         .await

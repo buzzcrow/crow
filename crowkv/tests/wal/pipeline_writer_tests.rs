@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use crowkv::common::config::WalConfig;
-use crowkv::paxos::roles::{PxBallot, PxLogEntry, PxLogEntryKind};
+use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 use crowkv::wal::record::WALRecord;
 use crowkv::wal::{IoBackend, WalEngine, WalRecordFormat};
 
@@ -36,10 +36,7 @@ fn accepted_write(slot: u64, term: u64, key: &[u8], value: &[u8]) -> PxLogEntry 
         slot,
         ballot: PxBallot::new(0, 1),
         term,
-        kind: PxLogEntryKind::Write,
         payload: Bytes::from(payload),
-        client_id: Some(1),
-        seq: Some(slot),
     }
 }
 

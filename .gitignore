@@ -52,3 +52,6 @@ crowkv-console/web/ui/.vite/
 crowkv-console/web/ui/*.tsbuildinfo
 
 .DS_Store
+
+# Test logs and artifacts from integration tests
+test-logs/

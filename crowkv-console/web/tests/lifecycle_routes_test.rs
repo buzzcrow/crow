@@ -304,11 +304,11 @@ async fn multiple_racks_and_nodes_create_expected_workspaces() {
     let pid10 = u32::try_from(v["pid"].as_u64().unwrap()).unwrap();
 
     assert!(std::fs::read_dir(dir.join("N-1/bin")).unwrap().next().is_some());
-    assert!(dir.join("N-1/log/crowkv-server.stdout.log").exists());
-    assert!(dir.join("N-1/log/crowkv-server.stderr.log").exists());
+    assert!(dir.join(format!("N-1/log/crowkv-server-{pid1}.out.log")).exists());
     assert!(std::fs::read_dir(dir.join("N-10/bin")).unwrap().next().is_some());
-    assert!(dir.join("N-10/log/crowkv-server.stdout.log").exists());
-    assert!(dir.join("N-10/log/crowkv-server.stderr.log").exists());
+    assert!(dir
+        .join(format!("N-10/log/crowkv-server-{pid10}.out.log"))
+        .exists());
     assert!(std::fs::read_dir(dir.join("N-2/bin")).unwrap().next().is_none());
 
     let _ = std::process::Command::new("kill")
@@ -369,8 +369,7 @@ async fn deploy_then_stop_local_server() {
     assert!(dir.join("N-n1/bin").is_dir());
     assert!(dir.join("N-n1/log").is_dir());
     assert!(std::fs::read_dir(dir.join("N-n1/bin")).unwrap().next().is_some());
-    assert!(dir.join("N-n1/log/crowkv-server.stdout.log").exists());
-    assert!(dir.join("N-n1/log/crowkv-server.stderr.log").exists());
+    assert!(dir.join(format!("N-n1/log/crowkv-server-{pid}.out.log")).exists());
 
     // GET /api/nodes/:id/server confirms deployment.
     let (s, v) = json_get(&client, &format!("{base}/api/nodes/n1/server")).await;

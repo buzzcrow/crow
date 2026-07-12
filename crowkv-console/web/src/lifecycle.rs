@@ -675,7 +675,10 @@ pub async fn http_restart_node_server(
             n if n.ssh_enabled() => crowkv_console_shared::ssh::stop_via_ssh(n, pid)
                 .await
                 .map_err(|e| err_502(format!("ssh stop (restart): {e}")))?,
-            _ => lifecycle::stop_pid(pid).unwrap_or(false),
+            _ => tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid))
+                .await
+                .map_err(|e| err_500(format!("spawn_blocking (restart): {e}")))?
+                .unwrap_or(false),
         };
     }
 
@@ -783,7 +786,10 @@ pub async fn http_stop_node_server(
         Some(n) if n.ssh_enabled() => crowkv_console_shared::ssh::stop_via_ssh(&n, pid)
             .await
             .map_err(|e| err_502(format!("ssh stop: {e}")))?,
-        _ => lifecycle::stop_pid(pid).map_err(|e| err_500(format!("stop_pid: {e}")))?,
+        _ => tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid))
+            .await
+            .map_err(|e| err_500(format!("spawn_blocking: {e}")))?
+            .map_err(|e| err_500(format!("stop_pid: {e}")))?,
     };
     state.clear_runtime_pid(&node_id);
     state.monitor_cache.drop_node(&node_id).await;
@@ -821,7 +827,12 @@ pub async fn http_delete_node_server(
             Some(n) if n.ssh_enabled() => crowkv_console_shared::ssh::stop_via_ssh(&n, pid)
                 .await
                 .unwrap_or(false),
-            _ => lifecycle::stop_pid(pid).unwrap_or(false),
+            _ => {
+                matches!(
+                    tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid)).await,
+                    Ok(Ok(true))
+                )
+            }
         };
     }
     {

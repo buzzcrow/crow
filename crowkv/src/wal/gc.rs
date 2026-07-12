@@ -40,8 +40,7 @@ async fn gc_loop(wal: Arc<WalEngine>, gc_tick: Duration, cancel: Arc<AtomicBool>
 /// GC watermark source. The caller provides the current `safe_slot`.
 ///
 /// `gc_slot = min(safe_slot, snapshot_slot)`. The `snapshot_slot` comes from
-/// the latest `SnapshotMarker` record in the WAL (or from the `WalEngine`
-/// snapshot state when it is driven by the group).
+/// the `WalEngine` snapshot state (set by the group when a snapshot is taken).
 #[must_use]
 pub fn compute_gc_slot(safe_slot: u64, snapshot_slot: u64) -> u64 {
     safe_slot.min(snapshot_slot)
@@ -51,7 +50,7 @@ pub fn compute_gc_slot(safe_slot: u64, snapshot_slot: u64) -> u64 {
 ///
 /// The GC watermark is `min(safe_slot, snapshot_slot)`, where `safe_slot` is the
 /// highest slot that is known to be contiguously applied and `snapshot_slot` is
-/// the latest persisted snapshot slot from the WAL. Without a real `safe_slot`
+/// the latest snapshot slot from the `WalEngine` state. Without a real `safe_slot`
 /// source the snapshot slot itself is the limiting factor.
 ///
 /// # Errors

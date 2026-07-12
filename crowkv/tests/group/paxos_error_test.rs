@@ -97,7 +97,7 @@ async fn malformed_accept_request_is_rejected_by_grpc_boundary() {
         .await
         .expect_err("missing value should be rejected");
 
-    // Step 10.7: unary `Accept` is retired (proposers use `PeerStream`),
+    // Step 10.7: unary `Accept` is retired (proposers use `LearnerStream`),
     // so the server now returns `Unimplemented` regardless of payload
     // shape. The boundary input-validation that previously surfaced
     // `InvalidArgument` (missing `value`) now lives behind the bidi

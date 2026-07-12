@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{timeout, Instant};
-use tracing::{debug, info, warn};
+use tracing::{error, info, trace};
 
 use crate::paxos::roles::SlotIndex;
 use crate::paxos::PxGroupId;
@@ -158,7 +158,7 @@ async fn pipeline_writer_loop(
         Ok(seg) => seg,
         Err(e) => {
             failed.store(true, Ordering::Release);
-            warn!(pipeline_idx, error = %e, "failed to create initial WAL segment");
+            error!(pipeline_idx, error = %e, "failed to create initial WAL segment");
             drain_and_fail_all(&mut rx);
             return;
         }
@@ -197,7 +197,7 @@ async fn pipeline_writer_loop(
                         Ok(new_seg) => segment = new_seg,
                         Err(e) => {
                             failed.store(true, Ordering::Release);
-                            warn!(pipeline_idx, error = %e, "failed to create new segment after seal");
+                            error!(pipeline_idx, error = %e, "failed to create new segment after seal");
                             let _ = ack.send(Err(e));
                             drain_and_fail_all(&mut rx);
                             return;
@@ -432,7 +432,7 @@ async fn write_batch(
     // Single durable flush for the whole batch.
     segment.fdatasync().await?;
 
-    debug!(
+    trace!(
         segment_id = segment.segment_id,
         records = batch.len(),
         bytes = total_len,

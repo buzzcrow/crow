@@ -339,23 +339,28 @@ async fn assert_offline_replay_has_values(node_id: u64, wal_dir: PathBuf, kvs: &
         u64::try_from(kvs.len()).expect("kvs length exceeds u64"),
         "offline replay should recover every accepted slot"
     );
-    let n = u64::try_from(kvs.len()).expect("kvs length exceeds u64");
+    // WAL replay now fully restores the learner: every accepted entry is
+    // replayed into the state machine, so last_chosen_slot and
+    // contiguous_chosen reflect the accepted slots, and the engine has the
+    // values pre-applied.
+    let expected_highest = u64::try_from(kvs.len()).expect("kvs length exceeds u64");
     assert_eq!(
         restored.last_chosen_slot(),
-        n,
-        "offline replay should restore last_chosen_slot from durable commit watermark"
+        expected_highest,
+        "replay replays all accepted entries into the learner"
     );
     assert_eq!(
         restored.contiguous_chosen(),
-        n,
-        "offline replay should restore contiguous_chosen from durable commit watermark"
+        expected_highest,
+        "replay advances chosen frontier for contiguous accepted slots"
     );
     for (slot, (key, value)) in (1u64..).zip(kvs.iter()) {
         let accepted = restored.accepted_at(slot).await;
+        let got = restored.learner.engine_get(key);
         assert_eq!(
-            restored.learner.engine_get(key).map(|(_, v)| v).as_deref(),
-            Some(value.as_slice()),
-            "offline replay should have committed value for {:?} applied from durable commit watermark",
+            got.map(|(_, v)| v),
+            Some(value.clone()),
+            "engine should have value after replay for {:?}",
             String::from_utf8_lossy(key)
         );
         assert!(

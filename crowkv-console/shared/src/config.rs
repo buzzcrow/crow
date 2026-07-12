@@ -120,6 +120,24 @@ impl BenchConfig {
     }
 }
 
+/// Tuning knobs for the KV data-plane retry loop (`with_leader_retry`).
+#[derive(Debug, Clone)]
+pub struct KvRetryConfig {
+    /// Max attempts per endpoint before giving up.
+    pub max_attempts_per_endpoint: usize,
+    /// Backoff (ms) after a `NotLeader` response before retrying.
+    pub not_leader_backoff_ms: u64,
+}
+
+impl Default for KvRetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts_per_endpoint: 20,
+            not_leader_backoff_ms: 50,
+        }
+    }
+}
+
 /// User-supplied overlay for a stress scenario. Every field is optional;
 /// missing fields fall through to the built-in defaults (or, for
 /// brand-new names, to `BenchConfig::defaults`).
@@ -931,10 +949,13 @@ mod tests {
     }
 
     fn tempdir() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let base = std::env::temp_dir();
         let unique = format!(
-            "crowkv-console-cfg-{}-{}",
+            "crowkv-console-cfg-{}-{}-{}",
             std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()

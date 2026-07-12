@@ -33,6 +33,9 @@ pub const SEG_HEADER_LEN: usize = 4 + 2 + 8 + 8; // 22
 pub const FOOTER_MAGIC: u32 = 0x464F_4F54;
 pub const FOOTER_LEN: usize = 4 + 8 + 8 + 4 + 4; // 28
 
+/// Text prefix for text-format segment headers (mirrors `WALRecord::TEXT_PREFIX`).
+pub const SEG_TEXT_PREFIX: &str = "CROW_WAL_SEG";
+
 /// Bytes scanned from the file tail when locating a sealed footer past
 /// block-alignment padding (B1). Trailing padding never exceeds one I/O unit,
 /// so 64 KiB comfortably covers any practical alignment plus the footer.
@@ -83,15 +86,27 @@ impl WalSegment {
         backend.create_dir_all(dir).await?;
         let mut file = backend.open(&path, OpenOptions::create_rw()).await?;
 
-        let header = encode_seg_header(segment_id, group_id);
-        file.write_at(&header, 0).await?;
+        let (header_bytes, header_len) = match record_format {
+            WalRecordFormat::TextLine => {
+                let text = format!(
+                    "{SEG_TEXT_PREFIX} v={SEG_VERSION} segment_id={segment_id} group_id={group_id}\n"
+                );
+                let len = text.len();
+                (text.into_bytes(), len)
+            }
+            WalRecordFormat::Auto | WalRecordFormat::Binary => {
+                let hdr = encode_seg_header(segment_id, group_id);
+                (hdr.to_vec(), SEG_HEADER_LEN)
+            }
+        };
+        file.write_at(&header_bytes, 0).await?;
 
         Ok(Self {
             file,
             path,
             segment_id,
             group_id,
-            write_offset: SEG_HEADER_LEN as u64,
+            write_offset: header_len as u64,
             min_slot: u64::MAX,
             max_slot: 0,
             record_count: 0,
@@ -265,17 +280,52 @@ impl SegmentReader {
                 format!("segment too small: {}", path.display()),
             ));
         }
-        let mut hdr_buf = [0u8; SEG_HEADER_LEN];
-        file.read_exact_at(&mut hdr_buf, 0).await?;
-        let header = decode_seg_header(&hdr_buf)?;
 
-        Ok(Self {
-            file,
-            path: path.to_path_buf(),
-            header,
-            offset: SEG_HEADER_LEN as u64,
-            file_len,
-        })
+        // Peek the first bytes to detect text vs binary header.
+        let prefix = SEG_TEXT_PREFIX.as_bytes();
+        let mut peek = vec![0u8; prefix.len()];
+        file.read_exact_at(&mut peek, 0).await?;
+
+        if peek == prefix {
+            // Text-format header: read until newline.
+            let mut buf = vec![
+                0u8;
+                usize::try_from(file_len).map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("file too large: {e}"))
+                })?
+            ];
+            file.read_exact_at(&mut buf, 0).await?;
+            let newline_idx = buf.iter().position(|b| *b == b'\n').ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "text segment header missing newline")
+            })?;
+            let header_line = std::str::from_utf8(&buf[..newline_idx]).map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("invalid UTF-8 in segment header: {e}"),
+                )
+            })?;
+            let header = decode_text_seg_header(header_line)?;
+            let data_offset = (newline_idx + 1) as u64;
+            Ok(Self {
+                file,
+                path: path.to_path_buf(),
+                header,
+                offset: data_offset,
+                file_len,
+            })
+        } else {
+            // Binary-format header.
+            let mut hdr_buf = [0u8; SEG_HEADER_LEN];
+            file.read_exact_at(&mut hdr_buf, 0).await?;
+            let header = decode_seg_header(&hdr_buf)?;
+            Ok(Self {
+                file,
+                path: path.to_path_buf(),
+                header,
+                offset: SEG_HEADER_LEN as u64,
+                file_len,
+            })
+        }
     }
 
     /// Read the next record. Returns `None` at EOF, footer, or block-alignment
@@ -493,6 +543,55 @@ fn decode_seg_header(buf: &[u8; SEG_HEADER_LEN]) -> io::Result<SegmentHeader> {
     let segment_id = u64::from_le_bytes(buf[6..14].try_into().unwrap());
     let group_id = u64::from_le_bytes(buf[14..22].try_into().unwrap());
     Ok(SegmentHeader { segment_id, group_id })
+}
+
+/// Decode a text-format segment header line (e.g. `CROW_WAL_SEG v=1 segment_id=1 group_id=1`).
+fn decode_text_seg_header(line: &str) -> io::Result<SegmentHeader> {
+    let mut fields = line.split(' ');
+    let prefix = fields
+        .next()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "text segment header missing prefix"))?;
+    if prefix != SEG_TEXT_PREFIX {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("bad text segment header prefix: {prefix}"),
+        ));
+    }
+    let mut segment_id = None;
+    let mut group_id = None;
+    for field in fields {
+        let (key, value) = field.split_once('=').ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("malformed segment header field: {field}"),
+            )
+        })?;
+        match key {
+            "v" => {} // version, validated implicitly by format
+            "segment_id" => {
+                segment_id = Some(value.parse::<u64>().map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("bad segment_id: {e}"))
+                })?);
+            }
+            "group_id" => {
+                group_id =
+                    Some(value.parse::<u64>().map_err(|e| {
+                        io::Error::new(io::ErrorKind::InvalidData, format!("bad group_id: {e}"))
+                    })?);
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unknown segment header field: {key}"),
+                ))
+            }
+        }
+    }
+    Ok(SegmentHeader {
+        segment_id: segment_id
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing segment_id"))?,
+        group_id: group_id.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing group_id"))?,
+    })
 }
 
 fn encode_footer(min_slot: SlotIndex, max_slot: SlotIndex, record_count: u32) -> Vec<u8> {

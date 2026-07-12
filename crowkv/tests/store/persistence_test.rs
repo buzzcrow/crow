@@ -99,16 +99,18 @@ async fn store_reloads_kv_through_public_api_after_restart() {
     let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
     store.add_group(reopen_group(&wal_dir).await);
 
-    // Best-effort read (mode 3) serves the restored local learner directly.
+    // WAL replay now fully restores the learner: every accepted entry is
+    // replayed into the state machine. alpha = "3" (slot 3 overwrites slot 1),
+    // beta was deleted in slot 4.
     let alpha = store.kv_get(GROUP, b"alpha", 3, 0, 10, 10).await;
     assert!(
-        alpha.ok && alpha.value == b"3",
-        "overwrite must survive restart: {alpha:?}"
+        alpha.ok && !alpha.not_found && alpha.value == b"3",
+        "alpha should be '3' after replay: {alpha:?}"
     );
 
     let beta = store.kv_get(GROUP, b"beta", 3, 0, 11, 11).await;
     assert!(
         !beta.ok || beta.not_found,
-        "committed delete must survive restart: {beta:?}"
+        "beta should be deleted after replay: {beta:?}"
     );
 }

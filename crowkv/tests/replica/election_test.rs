@@ -8,9 +8,9 @@
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crowkv::cluster::replica::{ReplicaHandler, VoteRequestPayload};
 use crowkv::paxos::learner::PxLearner;
-use crowkv::paxos::roles::{Learner, PxAcceptReply, PxBallot, PxLogEntry, PxLogEntryKind};
+use crowkv::paxos::roles::{Learner, PxAcceptReply, PxBallot, PxLogEntry};
 
-/// A `PxLogEntryKind::NoOp` entry should advance the chosen / applied
+/// A `NoOp` entry should advance the chosen / applied
 /// watermarks without inserting any key into the store. (See
 /// `doc/design/design-leader-election.md` §4 bulk Phase-1 gap fill.)
 #[test]
@@ -20,15 +20,12 @@ fn noop_apply_path() {
         slot: 1,
         ballot: PxBallot::new(0, 0),
         term: 0,
-        kind: PxLogEntryKind::NoOp,
         // Empty payload decodes to an empty batch — no Puts / Deletes
         // reach the engine.
         payload: bytes::Bytes::new(),
-        client_id: None,
-        seq: None,
     };
     let before = learner.live_key_count();
-    learner.learn(entry);
+    learner.learn(entry, None, None);
     let after = learner.live_key_count();
     assert_eq!(before, after, "NoOp must not mutate the KV store");
     assert_eq!(
@@ -82,10 +79,7 @@ async fn term_fencing_in_acceptor_rejects_old_term() {
         slot: 1,
         ballot: PxBallot::new(0, 0),
         term: 1,
-        kind: PxLogEntryKind::Write,
         payload: bytes::Bytes::from_static(b"old"),
-        client_id: None,
-        seq: None,
     };
     let reply = replica.on_accept(stale).await;
     match reply {
@@ -107,10 +101,7 @@ async fn term_fencing_in_acceptor_adopts_higher_term() {
         slot: 1,
         ballot: PxBallot::new(0, 0),
         term: 9,
-        kind: PxLogEntryKind::Write,
         payload: bytes::Bytes::from_static(b"v"),
-        client_id: None,
-        seq: None,
     };
     let reply = replica.on_accept(higher).await;
     assert!(
@@ -131,10 +122,7 @@ async fn request_vote_rejects_candidate_missing_higher_accepted_log_tip() {
         slot: 10,
         ballot: PxBallot::new(0, 7),
         term: 4,
-        kind: PxLogEntryKind::Write,
         payload: bytes::Bytes::from_static(b"v"),
-        client_id: None,
-        seq: None,
     };
     let reply = voter.on_accept(accepted).await;
     assert!(matches!(reply, PxAcceptReply::Accepted { .. }));
@@ -166,10 +154,7 @@ async fn request_vote_grants_candidate_with_matching_accepted_log_tip_even_if_le
         slot: 11,
         ballot: PxBallot::new(0, 8),
         term: 6,
-        kind: PxLogEntryKind::Write,
         payload: bytes::Bytes::from_static(b"v2"),
-        client_id: None,
-        seq: None,
     };
     let reply = voter.on_accept(accepted).await;
     assert!(matches!(reply, PxAcceptReply::Accepted { .. }));

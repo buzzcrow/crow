@@ -98,6 +98,14 @@ impl KvServer for Arc<PxKvStore> {
             state.shutdown_tx = Some(tx);
         }
 
+        // Update local replica endpoints on all groups with the actual
+        // bound address, so future persist_config calls write the correct
+        // endpoint. Groups added after start() get the endpoint in
+        // add_group_inner.
+        for entry in &self.groups {
+            entry.local_replica().set_endpoint(bound_addr.to_string());
+        }
+
         info!(store_id = self.store_id, listen_addr = %bound_addr, "kv server started");
         Ok(())
     }

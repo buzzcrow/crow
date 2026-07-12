@@ -13,14 +13,13 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
-use crowkv::paxos::roles::{PxBallot, PxLogEntry, PxLogEntryKind};
+use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 use crowkv::wal::record::WALRecord;
 use crowkv::wal::replay::replay_group;
 use crowkv::wal::wal_engine::WalEngine;
 use crowkv::wal::{IoBackend, WalConfig};
 
 const GROUP: u64 = 1;
-const CLIENT: u64 = 42;
 
 /// Encode an engine PUT payload (mirrors the engine's wire format used by the
 /// learner when applying chosen writes).
@@ -42,10 +41,7 @@ fn accepted_write(slot: u64, key: &[u8], value: &[u8]) -> PxLogEntry {
         slot,
         ballot: PxBallot::new(3, 7),
         term: 3,
-        kind: PxLogEntryKind::Write,
         payload: Bytes::from(encode_put_payload(key, value)),
-        client_id: Some(CLIENT),
-        seq: Some(slot),
     }
 }
 
@@ -123,29 +119,27 @@ async fn single_node_crash_restart_preserves_committed_state() {
     );
     assert_eq!(
         restored.last_chosen_slot(),
-        0,
-        "replay alone does not mark entries chosen"
+        5,
+        "replay replays all accepted entries into the learner"
     );
     assert_eq!(
         restored.contiguous_chosen(),
-        0,
-        "replay alone does not advance chosen frontier"
+        5,
+        "replay advances chosen frontier for contiguous accepted slots"
     );
-    for (entry, key, _) in &entries {
+    for (entry, key, value) in &entries {
         assert_eq!(
             restored.accepted_at(entry.slot).await,
             Some(entry.clone()),
             "accepted entry for slot {} survives",
             entry.slot
         );
+        let got = restored.learner.engine_get(key);
         assert_eq!(
-            restored.learner.engine_get(key),
-            None,
-            "engine must stay cold after replay-only restore"
+            got.map(|(_, v)| v),
+            Some(value.clone()),
+            "engine should have value after replay for {:?}",
+            String::from_utf8_lossy(key)
         );
     }
-
-    // Dedup cache survived: client 42 advanced to seq 5 (slot 5).
-    assert_eq!(restored.learner.dedup_lookup(CLIENT, 5), Some(5));
-    assert_eq!(restored.learner.dedup_lookup(CLIENT, 6), None);
 }

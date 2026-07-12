@@ -340,7 +340,7 @@ impl PxKvStore {
     /// must not self-elect leader at `quorum == 1` (no remotes wired yet) and
     /// then run `bulk_phase1` / `repair_once` against only itself, which can
     /// `NoOp`-fill or finalize a committed slot the node is personally missing
-    /// and thereby **erase** committed data (see `doc/plan-ut.md` §3.1). The
+    /// and thereby **erase** committed data. The
     /// caller wires the full configured membership first; the subsequent
     /// remote-wiring rebuild (`add_remote_replicas` → [`Self::add_group`])
     /// starts the driver with a correct quorum.
@@ -354,6 +354,15 @@ impl PxKvStore {
         if let Some(prior) = self.groups.get(&group_id) {
             group.inherit_local_state_from(prior.value());
         }
+        // Set the local replica's endpoint from the store's actual bound
+        // address (if the server is running) or the configured listen addr,
+        // so persist_config writes the correct endpoint for all nodes.
+        let endpoint = self
+            .server_state
+            .lock()
+            .listen_addr
+            .map_or_else(|| self.listen_addr.to_string(), |a| a.to_string());
+        group.local_replica().set_endpoint(endpoint);
         info!(
             store_id = self.store_id,
             group_id,
