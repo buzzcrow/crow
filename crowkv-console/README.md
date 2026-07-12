@@ -371,17 +371,15 @@ crowkv-console/web/ui/
 **Build & run**:
 
 ```bash
-# 1. Install Node 20 (use nvm if you have it)
-nvm use     # picks up crowkv-console/web/ui/.nvmrc
-
-# 2. One-time install of dev dependencies
-make ui-install
+# 1. Install pixi (one-time, see https://pixi.sh)
+# 2. Install dev dependencies (Node, Rust, C++ toolchain, etc.)
+pixi install
 
 # 3. Production build (emits dist/ which Axum serves)
-make ui-build
+pixi run build
 
 # 4. Start the Axum backend
-cargo run -p crowkv-web
+pixi run web
 # open http://127.0.0.1:9920/
 ```
 
@@ -389,10 +387,10 @@ cargo run -p crowkv-web
 
 ```bash
 # Terminal 1: Vite dev server (auto-reloads on src/ changes)
-make ui-dev
+cd crowkv-console/web/ui && npm run dev
 # open http://127.0.0.1:5173/  (Vite proxies /api/* and /healthz to :9920)
 ```
 
-**Graceful fallback**: if `web/ui/dist/index.html` is missing (you ran `cargo run` without first running `make ui-build`), `/` returns a built-in instructional page pointing at the right `make` targets. This keeps `cargo build` and `cargo test` working with **no Node toolchain installed**, which is critical for CI and contributors who only touch the Rust crates.
+**Graceful fallback**: if `web/ui/dist/index.html` is missing (you ran `pixi run web` without first running `pixi run build`), `/` returns a built-in instructional page. This keeps `cargo build` and `cargo test` working with **no Node toolchain installed**, which is critical for CI and contributors who only touch the Rust crates.
 
-**Reproducible builds**: `package-lock.json` is committed; the release pipeline runs `npm ci` (lockfile-strict) via `make ui-install`, then `npm run build` via `make ui-build`. `node_modules/` and `dist/` are gitignored.
+**Reproducible builds**: `package-lock.json` is committed; the release pipeline runs `npm ci` (lockfile-strict) via `pixi run install-ui`, then `npm run build` via `pixi run build`. `node_modules/` and `dist/` are gitignored.

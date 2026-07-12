@@ -3,9 +3,9 @@
 // shared by many lightweight Crowtree instances (one per consensus group).
 #pragma once
 
-#include <memory>
-
 #include "crowtree/epoch.h"
+
+#include <memory>
 
 namespace crowtree {
 

@@ -8,14 +8,14 @@
 // v1 uses a std::map under a mutex (sharded/skiplist is a later optimization).
 #pragma once
 
+#include "crowtree/cell.h"
+#include "crowtree/slice.h"
+
 #include <cstdint>
 #include <map>
 #include <mutex>
 #include <string>
 #include <vector>
-
-#include "crowtree/cell.h"
-#include "crowtree/slice.h"
 
 namespace crowtree {
 

@@ -1,9 +1,9 @@
 #include "crowtree/buffer_pool.h"
 
+#include "crowtree/frame_page.h"
+
 #include <cstring>
 #include <utility>
-
-#include "crowtree/frame_page.h"
 
 namespace crowtree {
 
@@ -186,9 +186,9 @@ Status BufferPool::AcquireFrame(uint32_t* out_idx, uint8_t** out_bytes) {
   FrameMeta& m = frames_[idx];
   m.pid = kInvalidPID;  // anonymous: not findable by pid
   m.addr = kNoAddr;
-  m.pin = 1;            // pinned-resident until ReleaseFrame (never evicted)
+  m.pin = 1;  // pinned-resident until ReleaseFrame (never evicted)
   m.ref = 1;
-  m.dirty = true;       // not yet durable
+  m.dirty = true;  // not yet durable
   *out_idx = idx;
   *out_bytes = FrameBytes(idx);
   return Status::Ok();

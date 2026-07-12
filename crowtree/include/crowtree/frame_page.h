@@ -15,13 +15,13 @@
 // ChildIndexFor), leaf/inner builders, CRC validation.
 #pragma once
 
-#include <cstdint>
-#include <cstring>
-#include <vector>
-
 #include "crowtree/cell.h"
 #include "crowtree/page_types.h"  // PageType, kInvalidPID, LeafEntry
 #include "crowtree/slice.h"
+
+#include <cstdint>
+#include <cstring>
+#include <vector>
 
 namespace crowtree {
 
@@ -31,8 +31,8 @@ inline constexpr uint32_t kFrameVersion = 1;
 
 inline constexpr size_t kFrameHeaderSize = 64;
 inline constexpr size_t kFrameTrailerSize = 8;  // logical_len u32 + crc32c u32
-inline constexpr size_t kLeafSlotSize = 12;   // rec_off, key_len, cell_len (u32)
-inline constexpr size_t kInnerSlotSize = 8;   // rec_off, key_len (u32)
+inline constexpr size_t kLeafSlotSize = 12;     // rec_off, key_len, cell_len (u32)
+inline constexpr size_t kInnerSlotSize = 8;     // rec_off, key_len (u32)
 
 // Header field byte offsets within a frame.
 namespace fh {
@@ -72,9 +72,7 @@ inline void FramePutU64(uint8_t* f, size_t off, uint64_t v) {
   for (int i = 0; i < 8; ++i) f[off + i] = static_cast<uint8_t>((v >> (8 * i)) & 0xff);
 }
 
-inline PageType FramePageType(const uint8_t* f) {
-  return static_cast<PageType>(f[fh::kType]);
-}
+inline PageType FramePageType(const uint8_t* f) { return static_cast<PageType>(f[fh::kType]); }
 
 // Validate a frame's CRC32C trailer (and magic/type). `page_bytes` is the frame
 // size. Returns true if intact.
@@ -111,7 +109,10 @@ class LeafFrameView {
       uint32_t mid = lo + (hi - lo) / 2;
       int c = key(mid).compare(k);
       if (c == 0) return static_cast<int>(mid);
-      if (c < 0) lo = mid + 1; else hi = mid;
+      if (c < 0)
+        lo = mid + 1;
+      else
+        hi = mid;
     }
     return -1;
   }
@@ -119,7 +120,10 @@ class LeafFrameView {
     uint32_t lo = 0, hi = count();
     while (lo < hi) {
       uint32_t mid = lo + (hi - lo) / 2;
-      if (key(mid).compare(k) < 0) lo = mid + 1; else hi = mid;
+      if (key(mid).compare(k) < 0)
+        lo = mid + 1;
+      else
+        hi = mid;
     }
     return lo;
   }
@@ -167,7 +171,10 @@ class InnerFrameView {
     uint32_t lo = 0, hi = num_separators();
     while (lo < hi) {
       uint32_t mid = lo + (hi - lo) / 2;
-      if (separator_at(mid).compare(k) <= 0) lo = mid + 1; else hi = mid;
+      if (separator_at(mid).compare(k) <= 0)
+        lo = mid + 1;
+      else
+        hi = mid;
     }
     return lo;
   }
@@ -208,7 +215,6 @@ class LeafFrameBuilder {
 // children.size() must equal separators.size() + 1. Returns false if the set
 // does not fit in one frame.
 bool InnerFrameBuild(uint8_t* f, uint32_t page_bytes, uint64_t self_pid,
-                     const std::vector<uint64_t>& children,
-                     const std::vector<Slice>& separators);
+                     const std::vector<uint64_t>& children, const std::vector<Slice>& separators);
 
 }  // namespace crowtree

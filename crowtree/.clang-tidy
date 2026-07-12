@@ -1,0 +1,14 @@
+---
+Checks: >
+  -*,
+  bugprone-*,
+  performance-*,
+  readability-*,
+  modernize-*,
+  -modernize-use-trailing-return-type,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -bugprone-easily-swappable-parameters,
+WarningsAsErrors: ''
+HeaderFilterRegex: 'crowtree/include/.*\.h'
+FormatStyle: file

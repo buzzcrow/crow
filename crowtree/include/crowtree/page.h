@@ -7,17 +7,17 @@
 // in front of a LeafBase via the chain fields in PageBase.
 #pragma once
 
-#include <cstdint>
-#include <cstring>
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "crowtree/buffer_pool.h"
 #include "crowtree/cell.h"
 #include "crowtree/frame_page.h"
 #include "crowtree/page_types.h"
 #include "crowtree/slice.h"
+
+#include <cstdint>
+#include <cstring>
+#include <memory>
+#include <string>
+#include <vector>
 
 namespace crowtree {
 
@@ -28,7 +28,7 @@ namespace crowtree {
 struct FrameStore {
   std::shared_ptr<BufferPool> pool;  // non-null => pool-backed
   uint32_t frame_idx = 0;
-  std::vector<uint8_t> owned;        // used iff pool == nullptr
+  std::vector<uint8_t> owned;  // used iff pool == nullptr
   uint8_t* ptr = nullptr;
   uint32_t page_bytes = 0;
 
@@ -64,8 +64,7 @@ struct FrameStore {
   // Copies into a pool frame when one fits and is available, else a heap buffer.
   // page_bytes stays `n` (the durable logical length); a pool frame may be
   // larger (the tail past `n` is zero from AcquireFrame and unused).
-  uint8_t* AdoptCopy(const uint8_t* buf, uint32_t n,
-                     const std::shared_ptr<BufferPool>& p = nullptr,
+  uint8_t* AdoptCopy(const uint8_t* buf, uint32_t n, const std::shared_ptr<BufferPool>& p = nullptr,
                      uint32_t frame_bytes = 0) {
     if (p && n <= frame_bytes) {
       uint32_t idx = 0;
@@ -99,8 +98,7 @@ class LeafBase : public PageBase {
                          const std::shared_ptr<BufferPool>& pool = nullptr,
                          uint32_t frame_bytes = 0) {
     auto* p = new LeafBase();
-    size_t need = kFrameHeaderSize + kFrameTrailerSize +
-                  sorted_entries.size() * kLeafSlotSize;
+    size_t need = kFrameHeaderSize + kFrameTrailerSize + sorted_entries.size() * kLeafSlotSize;
     for (const auto& e : sorted_entries) need += e.key.size() + e.cell.size();
     uint8_t* dst = p->fs_.Alloc(need, pool, frame_bytes);
     LeafFrameBuilder b(dst, p->fs_.page_bytes);
@@ -172,13 +170,11 @@ class InnerBase : public PageBase {
  public:
   InnerBase() : PageBase(PageType::kInnerBase) {}
 
-  static InnerBase* Build(std::vector<std::string> separators,
-                          std::vector<uint64_t> children,
+  static InnerBase* Build(std::vector<std::string> separators, std::vector<uint64_t> children,
                           const std::shared_ptr<BufferPool>& pool = nullptr,
                           uint32_t frame_bytes = 0) {
     auto* p = new InnerBase();
-    size_t need = kFrameHeaderSize + kFrameTrailerSize +
-                  children.size() * sizeof(uint64_t) +
+    size_t need = kFrameHeaderSize + kFrameTrailerSize + children.size() * sizeof(uint64_t) +
                   separators.size() * kInnerSlotSize;
     for (const auto& s : separators) need += s.size();
     uint8_t* dst = p->fs_.Alloc(need, pool, frame_bytes);

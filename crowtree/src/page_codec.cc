@@ -1,8 +1,8 @@
 #include "crowtree/page_codec.h"
 
-#include <cstring>
-
 #include "crowtree/crc32c.h"
+
+#include <cstring>
 
 namespace crowtree {
 

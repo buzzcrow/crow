@@ -3,12 +3,6 @@
 // (L0); flush() merges the contiguous-applied prefix into the COW B+tree (L1).
 #pragma once
 
-#include <atomic>
-#include <cstdint>
-#include <mutex>
-#include <string>
-#include <vector>
-
 #include "crowtree/cell.h"
 #include "crowtree/env.h"
 #include "crowtree/mapping_table.h"
@@ -18,7 +12,12 @@
 #include "crowtree/snapshot.h"
 #include "crowtree/status.h"
 
+#include <atomic>
+#include <cstdint>
 #include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
 
 namespace crowtree {
 
@@ -55,8 +54,7 @@ class Crowtree {
 
   // Open a tree, recovering durable state from opt.page_store if a valid
   // checkpoint exists; otherwise start empty. Requires opt.page_store != null.
-  static Status Open(CrowtreeEnv& env, const Options& opt,
-                     std::unique_ptr<Crowtree>* out);
+  static Status Open(CrowtreeEnv& env, const Options& opt, std::unique_ptr<Crowtree>* out);
 
   // Persist the materialized L1 state durably. Folds delta chains, appends the
   // reachable base pages + a manifest past the current end of the page store,
@@ -90,8 +88,7 @@ class Crowtree {
   // Ordered range scan over keys with `prefix` (empty = whole keyspace), latest
   // state (L0 overlaid on L1), skipping tombstones. Returns up to `limit`
   // entries in key order; sets *truncated if more matched beyond the limit.
-  Status Scan(Slice prefix, size_t limit, std::vector<ScanEntry>* out,
-              bool* truncated) const;
+  Status Scan(Slice prefix, size_t limit, std::vector<ScanEntry>* out, bool* truncated) const;
 
   // Pin a consistent point-in-time view at `last_applied_slot` (the durable L1
   // state). Used for scan-at / compare / iter_all / snapshot export.
@@ -106,8 +103,8 @@ class Crowtree {
   size_t MemTableCount() const { return memtable_.Count(); }
   MappingTable& mapping() { return mapping_; }
   const BufferPool* buffer_pool() const { return pool_.get(); }
-  int Height() const;       // 1 = single-leaf root
-  size_t LeafCount() const; // live leaves reachable from the root
+  int Height() const;        // 1 = single-leaf root
+  size_t LeafCount() const;  // live leaves reachable from the root
   // # of base pages physically written by the most recent Checkpoint (the rest
   // were clean and retained their durable addr). For incremental-checkpoint tests.
   uint64_t last_checkpoint_pages_written() const { return ckpt_pages_written_.load(); }
@@ -124,8 +121,8 @@ class Crowtree {
   // Inner PIDs from root down to (but excluding) the leaf `target_pid`.
   std::vector<uint64_t> PathToPidLocked(uint64_t target_pid) const;
   void SplitLeafLocked(uint64_t leaf_pid, std::vector<uint64_t> path);
-  void PropagateSplitLocked(std::vector<uint64_t> path, uint64_t child_pid,
-                            std::string sep, uint64_t right_pid);
+  void PropagateSplitLocked(std::vector<uint64_t> path, uint64_t child_pid, std::string sep,
+                            uint64_t right_pid);
   void TryMergeLeafLocked(uint64_t leaf_pid, const std::vector<uint64_t>& path);
   void RetirePage(PageBase* p);
   void FreeSubtree(uint64_t pid);

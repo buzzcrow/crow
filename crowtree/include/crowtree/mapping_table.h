@@ -6,13 +6,13 @@
 // atomic store (no CAS, per D2). PID allocation/free is mutex-guarded.
 #pragma once
 
+#include "crowtree/page.h"
+
 #include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <vector>
-
-#include "crowtree/page.h"
 
 namespace crowtree {
 
@@ -22,14 +22,14 @@ namespace crowtree {
 // the descriptor: it is freed when the slot transitions to resident or when the
 // table is destroyed.
 struct UnloadedPage {
-  uint64_t addr = 0;   // durable PageAddr
-  uint32_t plen = 0;   // frame length to read
+  uint64_t addr = 0;  // durable PageAddr
+  uint32_t plen = 0;  // frame length to read
 };
 
 class MappingTable {
  public:
-  static constexpr uint64_t kSegmentSize = 1024;        // PIDs per segment
-  static constexpr uint64_t kMaxSegments = 1u << 16;    // -> 64M PIDs
+  static constexpr uint64_t kSegmentSize = 1024;      // PIDs per segment
+  static constexpr uint64_t kMaxSegments = 1u << 16;  // -> 64M PIDs
   static constexpr uintptr_t kUnloadedBit = 1;
 
   // Tagged-slot helpers. A slot value with the low bit set is a tagged

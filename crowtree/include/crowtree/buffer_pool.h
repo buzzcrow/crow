@@ -13,13 +13,13 @@
 // CLOCK eviction, dirty write-back, stats.
 #pragma once
 
+#include "crowtree/page_store.h"
+#include "crowtree/page_types.h"  // kInvalidPID
+#include "crowtree/status.h"
+
 #include <cstdint>
 #include <mutex>
 #include <vector>
-
-#include "crowtree/page_types.h"  // kInvalidPID
-#include "crowtree/page_store.h"
-#include "crowtree/status.h"
 
 namespace crowtree {
 
@@ -67,7 +67,7 @@ class BufferPool {
     uint64_t writebacks = 0;
     uint32_t resident = 0;
     uint32_t dirty = 0;
-    uint32_t used = 0;        // frames currently held (pinned or pid-mapped)
+    uint32_t used = 0;  // frames currently held (pinned or pid-mapped)
     uint32_t num_frames = 0;
   };
 

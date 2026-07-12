@@ -8,13 +8,13 @@
 // for latest reads, at O(N) snapshot cost. Path-copy COW is a later optimization.
 #pragma once
 
-#include <cstdint>
-#include <string>
-#include <vector>
-
 #include "crowtree/cell.h"
 #include "crowtree/page.h"
 #include "crowtree/slice.h"
+
+#include <cstdint>
+#include <string>
+#include <vector>
 
 namespace crowtree {
 
@@ -41,7 +41,10 @@ class Snapshot {
       size_t mid = lo + (hi - lo) / 2;
       int c = Slice(entries_[mid].key).compare(key);
       if (c == 0) return static_cast<int>(mid);
-      if (c < 0) lo = mid + 1; else hi = mid;
+      if (c < 0)
+        lo = mid + 1;
+      else
+        hi = mid;
     }
     return -1;
   }

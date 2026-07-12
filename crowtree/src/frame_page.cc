@@ -51,7 +51,7 @@ LeafFrameBuilder::LeafFrameBuilder(uint8_t* f, uint32_t page_bytes)
 bool LeafFrameBuilder::TryAppendSorted(Slice key, Slice cell) {
   size_t reclen = key.size() + cell.size();
   size_t need = kLeafSlotSize + reclen;  // one slot (fwd) + record (bwd)
-  size_t avail = free_hi_ - free_lo_;     // free_hi_ >= free_lo_ invariant
+  size_t avail = free_hi_ - free_lo_;    // free_hi_ >= free_lo_ invariant
   if (need > avail) return false;
   uint32_t rec_off = free_hi_ - static_cast<uint32_t>(reclen);
   std::memcpy(f_ + rec_off, key.data(), key.size());
@@ -78,8 +78,7 @@ void LeafFrameBuilder::Finish(uint64_t self_pid, uint64_t right_sibling) {
 // ── InnerFrameBuild ───────────────────────────────────────────────
 
 bool InnerFrameBuild(uint8_t* f, uint32_t page_bytes, uint64_t self_pid,
-                     const std::vector<uint64_t>& children,
-                     const std::vector<Slice>& separators) {
+                     const std::vector<uint64_t>& children, const std::vector<Slice>& separators) {
   if (children.size() != separators.size() + 1) return false;
   uint32_t nsep = static_cast<uint32_t>(separators.size());
 

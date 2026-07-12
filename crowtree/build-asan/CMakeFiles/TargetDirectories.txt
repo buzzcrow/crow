@@ -1,5 +1,0 @@
-/cjdata/cpp/crowkv/crowtree/build-asan/CMakeFiles/crowtree.dir
-/cjdata/cpp/crowkv/crowtree/build-asan/CMakeFiles/crowtree_tests.dir
-/cjdata/cpp/crowkv/crowtree/build-asan/CMakeFiles/test.dir
-/cjdata/cpp/crowkv/crowtree/build-asan/CMakeFiles/edit_cache.dir
-/cjdata/cpp/crowkv/crowtree/build-asan/CMakeFiles/rebuild_cache.dir

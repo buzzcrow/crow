@@ -45,6 +45,20 @@ TEST(MappingTable, FreeAndRecycle) {
   EXPECT_EQ(c, a);  // recycled from the free list (LIFO)
 }
 
+TEST(MappingTable, FreePidClearsUnloadedSlot) {
+  MappingTable mt;
+  uint64_t pid = mt.AllocatePID();
+  mt.StoreUnloaded(pid, 123, 4096);
+  ASSERT_NE(mt.Get(pid), nullptr);
+  ASSERT_TRUE(MappingTable::IsUnloaded(mt.Get(pid)));
+
+  mt.FreePID(pid);
+  EXPECT_EQ(mt.Get(pid), nullptr);
+
+  uint64_t again = mt.AllocatePID();
+  EXPECT_EQ(again, pid);
+}
+
 TEST(MappingTable, SegmentGrowth) {
   MappingTable mt;
   // Allocate enough PIDs to span multiple segments.

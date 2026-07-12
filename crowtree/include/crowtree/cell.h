@@ -9,10 +9,10 @@
 // slot field.
 #pragma once
 
+#include "crowtree/slice.h"
+
 #include <cstdint>
 #include <string>
-
-#include "crowtree/slice.h"
 
 namespace crowtree {
 
@@ -22,8 +22,7 @@ inline constexpr uint8_t kFlagTombstone = 0x1;
 inline constexpr size_t kCellHeaderSize = sizeof(uint64_t) + sizeof(uint8_t);  // 9
 
 // Encode a cell payload into `out` (appends). Tombstone cells carry no value.
-inline void EncodeCellInto(std::string* out, uint64_t slot, OpKind kind,
-                           Slice value) {
+inline void EncodeCellInto(std::string* out, uint64_t slot, OpKind kind, Slice value) {
   uint8_t flags = (kind == OpKind::kDelete) ? kFlagTombstone : 0;
   char hdr[kCellHeaderSize];
   for (int i = 0; i < 8; ++i) hdr[i] = static_cast<char>((slot >> (8 * i)) & 0xff);
@@ -72,8 +71,6 @@ class CellView {
 
 // Highest-slot-wins: returns true if `a` shadows `b` (a is the resolved cell).
 // On equal slots the cells must be identical writes (same batch); we keep `a`.
-inline bool CellWins(const CellView& a, const CellView& b) {
-  return a.slot() >= b.slot();
-}
+inline bool CellWins(const CellView& a, const CellView& b) { return a.slot() >= b.slot(); }
 
 }  // namespace crowtree

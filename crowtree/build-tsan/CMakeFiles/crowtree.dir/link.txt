@@ -1,2 +1,0 @@
-/usr/bin/ar qc libcrowtree.a CMakeFiles/crowtree.dir/src/crowtree.cc.o CMakeFiles/crowtree.dir/src/env.cc.o CMakeFiles/crowtree.dir/src/epoch.cc.o CMakeFiles/crowtree.dir/src/mapping_table.cc.o CMakeFiles/crowtree.dir/src/memtable.cc.o
-/usr/bin/ranlib libcrowtree.a

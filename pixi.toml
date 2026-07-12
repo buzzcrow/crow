@@ -1,0 +1,100 @@
+[workspace]
+name = "crowkv"
+version = "0.1.0"
+description = "CrowKV — distributed key-value store with multi-paxos groups"
+channels = ["conda-forge"]
+# Keep glibc requirement low (2.17 = CentOS 7 / Ubuntu 16.04 era) so that
+# Linux binaries built in this environment run on older distributions.
+# conda-forge packages are built against glibc 2.17 by default.
+platforms = [
+  "osx-arm64",
+  { platform = "linux-64", __glibc = "2.17" },
+]
+
+[dependencies]
+# C++ build toolchain (crowtree)
+cmake = ">=3.20"
+make = "*"
+cxx-compiler = "*"
+gtest = "*"
+lz4 = "*"
+clang-format = "*"
+clang-tools = "*"
+# Rust toolchain (crowkv)
+rust = ">=1.75"
+protobuf = "*"
+openssl = "*"
+pkg-config = "*"
+# Frontend
+nodejs = ">=22,<23"
+# Tools
+git = "*"
+tokei = "*"
+
+[tasks]
+
+# ── Build ────────────────────────────────────────────────────────
+install-git-hooks = "git config core.hooksPath .githooks"
+ct-fmt = "clang-format -i crowtree/src/*.cc crowtree/include/crowtree/*.h"
+ct-lint = "clang-tidy crowtree/src/*.cc -p crowtree/build -- -I crowtree/include"
+install-web-deps = "test -d crowkv-console/web/ui/node_modules || (cd crowkv-console/web/ui && npm ci)"
+build = { cmd = "cmake -S crowtree -B crowtree/build -DCMAKE_BUILD_TYPE=Release && cmake --build crowtree/build -j && cargo build --release && cd crowkv-console/web/ui && npm run build", depends-on = ["install-web-deps"] }
+default = { depends-on = ["build"] }
+
+# ── Run ──────────────────────────────────────────────────────────
+web = { cmd = "cargo run --release -p crowkv-web", depends-on = ["build"] }
+
+# ── Test ─────────────────────────────────────────────────────────
+test-ct = { cmd = "ctest --test-dir crowtree/build --output-on-failure", depends-on = ["build"] }
+test-core = { cmd = "rm -rf test-logs && cargo test -p crowkv --all-targets", depends-on = ["build"] }
+test-server = { cmd = "cargo test -p crowkv-server --all-targets", depends-on = ["build"] }
+test-cli = { cmd = "cargo test -p crowkv-console-shared -p crowkv-cli --all-targets", depends-on = ["build"] }
+test-web = { cmd = "cargo test -p crowkv-web --all-targets", depends-on = ["build"] }
+install-playwright = "cd crowkv-console/web/ui && npx playwright install chromium"
+test-ui = { cmd = "rm -rf test-logs && cargo build -p crowkv-server && export CROWKV_SERVER_BINARY=$(pwd)/target/debug/crowkv-server && cd crowkv-console/web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-web-deps", "install-playwright"] }
+test = { cmd = '''
+bash -c '
+pixi run test-ct & p1=$!
+pixi run test-core & p2=$!
+pixi run test-server & p3=$!
+pixi run test-cli & p4=$!
+pixi run test-web & p5=$!
+pixi run test-ui & p6=$!
+wait $p1 && wait $p2 && wait $p3 && wait $p4 && wait $p5 && wait $p6
+'
+''', depends-on = ["build", "install-web-deps"] }
+
+# ── Coverage & LOC ───────────────────────────────────────────────
+install-tarpaulin = "cargo install cargo-tarpaulin || echo 'Warning: cargo-tarpaulin install failed (expected on macOS)'"
+coverage = { cmd = "cargo tarpaulin --workspace --out Html --output-dir target/coverage --exclude-files '*/tests/*'", depends-on = ["install-tarpaulin"] }
+loc = "tokei --exclude swagger-ui"
+
+# ── Clean ────────────────────────────────────────────────────────
+clean = "pkill crowkv-server || true; pkill crowkv-web || true; pkill crowkv-cli || true; cargo clean && rm -rf crowtree/build crowtree/build-asan crowtree/build-tsan crowkv-console/web/ui/dist crowkv-console/web/ui/node_modules test-logs && find . -type d -name log ! -path '*/src/*' -prune -exec rm -rf {} + && find . -type d -name runtime-data ! -path '*/src/*' -prune -exec rm -rf {} +"
+
+# ── crowtree sanitizers ──────────────────────────────────────────
+
+# AddressSanitizer build + tests. setarch -R disables ASLR (Linux only);
+# on macOS we run ctest directly.
+ct-asan = '''
+set -e
+cmake -S crowtree -B crowtree/build-asan -DCMAKE_BUILD_TYPE=Debug -DCROWTREE_SANITIZER=address
+cmake --build crowtree/build-asan -j
+if command -v setarch > /dev/null 2>&1; then
+  setarch -R ctest --test-dir crowtree/build-asan --output-on-failure
+else
+  ctest --test-dir crowtree/build-asan --output-on-failure
+fi
+'''
+
+# ThreadSanitizer build + tests.
+ct-tsan = '''
+set -e
+cmake -S crowtree -B crowtree/build-tsan -DCMAKE_BUILD_TYPE=Debug -DCROWTREE_SANITIZER=thread
+cmake --build crowtree/build-tsan -j
+if command -v setarch > /dev/null 2>&1; then
+  setarch -R ctest --test-dir crowtree/build-tsan --output-on-failure
+else
+  ctest --test-dir crowtree/build-tsan --output-on-failure
+fi
+'''

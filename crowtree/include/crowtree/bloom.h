@@ -2,11 +2,11 @@
 // negative check before scanning a leaf's entries. Double-hashing scheme.
 #pragma once
 
+#include "crowtree/slice.h"
+
 #include <cmath>
 #include <cstdint>
 #include <vector>
-
-#include "crowtree/slice.h"
 
 namespace crowtree {
 

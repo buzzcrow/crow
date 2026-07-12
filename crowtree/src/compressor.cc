@@ -1,8 +1,8 @@
 #include "crowtree/compressor.h"
 
-#include <cstring>
-
 #include "crowtree/crc32c.h"
+
+#include <cstring>
 
 #if CROWTREE_HAVE_LZ4
 // Minimal prototypes (the dev header may be absent; we link the runtime lib).
@@ -34,8 +34,8 @@ bool Lz4Available() {
 #endif
 }
 
-void EncodeDurablePage(const uint8_t* frame, uint32_t page_bytes,
-                       CompressAlgo prefer, std::vector<uint8_t>* out) {
+void EncodeDurablePage(const uint8_t* frame, uint32_t page_bytes, CompressAlgo prefer,
+                       std::vector<uint8_t>* out) {
   CompressAlgo algo = CompressAlgo::kNone;
   std::vector<uint8_t> stored;
 
@@ -44,8 +44,8 @@ void EncodeDurablePage(const uint8_t* frame, uint32_t page_bytes,
     int bound = LZ4_compressBound(static_cast<int>(page_bytes));
     std::vector<uint8_t> tmp(static_cast<size_t>(bound));
     int n = LZ4_compress_default(reinterpret_cast<const char*>(frame),
-                                 reinterpret_cast<char*>(tmp.data()),
-                                 static_cast<int>(page_bytes), bound);
+                                 reinterpret_cast<char*>(tmp.data()), static_cast<int>(page_bytes),
+                                 bound);
     if (n > 0 && static_cast<uint32_t>(n) < page_bytes) {
       tmp.resize(static_cast<size_t>(n));
       stored = std::move(tmp);
@@ -90,8 +90,7 @@ Status DecodeDurablePage(const uint8_t* blob, size_t blob_len, uint8_t* frame_ou
   if (algo == CompressAlgo::kLz4) {
 #if CROWTREE_HAVE_LZ4
     int n = LZ4_decompress_safe(reinterpret_cast<const char*>(stored),
-                                reinterpret_cast<char*>(frame_out),
-                                static_cast<int>(stored_len),
+                                reinterpret_cast<char*>(frame_out), static_cast<int>(stored_len),
                                 static_cast<int>(page_bytes));
     if (n < 0 || static_cast<uint32_t>(n) != page_bytes) {
       return Status::Corruption("LZ4 decompress");

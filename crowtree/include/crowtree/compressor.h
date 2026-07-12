@@ -14,10 +14,10 @@
 // Key work: algo enum, LZ4/none codecs, durable blob encode/decode.
 #pragma once
 
+#include "crowtree/status.h"
+
 #include <cstdint>
 #include <vector>
-
-#include "crowtree/status.h"
 
 namespace crowtree {
 
@@ -31,8 +31,8 @@ bool Lz4Available();
 
 // Encode `frame[0,page_bytes)` into a durable blob, compressing with `prefer`
 // when it actually shrinks the page (else stored raw with algo = kNone).
-void EncodeDurablePage(const uint8_t* frame, uint32_t page_bytes,
-                       CompressAlgo prefer, std::vector<uint8_t>* out);
+void EncodeDurablePage(const uint8_t* frame, uint32_t page_bytes, CompressAlgo prefer,
+                       std::vector<uint8_t>* out);
 
 // Decode a durable blob back into exactly `page_bytes` at `frame_out`. Verifies
 // the stored-bytes CRC and the decompressed length. Returns Corruption on any

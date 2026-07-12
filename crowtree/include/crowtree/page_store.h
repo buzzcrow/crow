@@ -12,13 +12,13 @@
 // geometry, durability barrier.
 #pragma once
 
+#include "crowtree/status.h"
+
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
-
-#include "crowtree/status.h"
 
 namespace crowtree {
 

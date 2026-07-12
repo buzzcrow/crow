@@ -13,8 +13,7 @@ class Slice {
  public:
   Slice() : data_(nullptr), size_(0) {}
   Slice(const char* d, size_t n) : data_(d), size_(n) {}
-  Slice(const uint8_t* d, size_t n)
-      : data_(reinterpret_cast<const char*>(d)), size_(n) {}
+  Slice(const uint8_t* d, size_t n) : data_(reinterpret_cast<const char*>(d)), size_(n) {}
   Slice(const std::string& s) : data_(s.data()), size_(s.size()) {}
   Slice(std::string_view s) : data_(s.data()), size_(s.size()) {}
   Slice(const char* s) : data_(s), size_(std::strlen(s)) {}
@@ -38,8 +37,7 @@ class Slice {
   }
 
   bool starts_with(const Slice& prefix) const {
-    return size_ >= prefix.size_ &&
-           std::memcmp(data_, prefix.data_, prefix.size_) == 0;
+    return size_ >= prefix.size_ && std::memcmp(data_, prefix.data_, prefix.size_) == 0;
   }
 
  private:

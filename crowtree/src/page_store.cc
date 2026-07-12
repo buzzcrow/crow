@@ -6,6 +6,10 @@
 #include <cerrno>
 #include <cstring>
 
+#ifdef __APPLE__
+#include <sys/stat.h>
+#endif
+
 namespace crowtree {
 
 // ── MemPageStore ──────────────────────────────────────────────────
@@ -75,9 +79,15 @@ Status FilePageStore::ReadAt(uint64_t off, uint8_t* buf, size_t len) const {
 }
 
 Status FilePageStore::Sync() {
+#ifdef __APPLE__
+  if (::fsync(fd_) < 0) {
+    return Status::IoError(std::string("fsync: ") + std::strerror(errno));
+  }
+#else
   if (::fdatasync(fd_) < 0) {
     return Status::IoError(std::string("fdatasync: ") + std::strerror(errno));
   }
+#endif
   return Status::Ok();
 }
 

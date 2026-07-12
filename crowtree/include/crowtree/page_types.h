@@ -17,9 +17,7 @@ enum class PageType : uint8_t {
   kBatchDelta = 3,
 };
 
-inline bool IsBase(PageType t) {
-  return t == PageType::kLeafBase || t == PageType::kInnerBase;
-}
+inline bool IsBase(PageType t) { return t == PageType::kLeafBase || t == PageType::kInnerBase; }
 
 // Common header for every node reachable through the mapping table. Delta nodes
 // chain in front of a base via `next`; bases have next == nullptr.

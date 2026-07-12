@@ -23,10 +23,14 @@ class Status {
 
   static Status Ok() { return Status(); }
   static Status NotFound(std::string m = {}) { return Status(Code::kNotFound, std::move(m)); }
-  static Status InvalidArgument(std::string m = {}) { return Status(Code::kInvalidArgument, std::move(m)); }
+  static Status InvalidArgument(std::string m = {}) {
+    return Status(Code::kInvalidArgument, std::move(m));
+  }
   static Status Corruption(std::string m = {}) { return Status(Code::kCorruption, std::move(m)); }
   static Status IoError(std::string m = {}) { return Status(Code::kIoError, std::move(m)); }
-  static Status NotSupported(std::string m = {}) { return Status(Code::kNotSupported, std::move(m)); }
+  static Status NotSupported(std::string m = {}) {
+    return Status(Code::kNotSupported, std::move(m));
+  }
   static Status Internal(std::string m = {}) { return Status(Code::kInternal, std::move(m)); }
 
   bool ok() const { return code_ == Code::kOk; }

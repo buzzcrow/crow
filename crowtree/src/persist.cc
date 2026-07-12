@@ -14,18 +14,18 @@
 // Key work: incremental reachable-page walk, crash-safe free-space reuse,
 // page/manifest framing, superblock A/B commit, best-superblock recovery,
 // lazy mapping-table rebuild.
+#include "crowtree/crc32c.h"
+#include "crowtree/crowtree.h"
+#include "crowtree/delta.h"
+#include "crowtree/page_codec.h"
+#include "crowtree/page_store.h"
+
 #include <algorithm>
 #include <cstring>
 #include <functional>
 #include <map>
 #include <utility>
 #include <vector>
-
-#include "crowtree/crc32c.h"
-#include "crowtree/crowtree.h"
-#include "crowtree/delta.h"
-#include "crowtree/page_codec.h"
-#include "crowtree/page_store.h"
 
 namespace crowtree {
 
@@ -197,8 +197,7 @@ bool CollectLiveExtents(const PageStore& store, const Superblock& sb,
 
 // Build the allocator: free = the complement of `live` within
 // [kRegionBase, file_size); append grows past EOF.
-SpaceAllocator BuildAllocator(std::vector<std::pair<uint64_t, uint64_t>> live,
-                              uint64_t file_size) {
+SpaceAllocator BuildAllocator(std::vector<std::pair<uint64_t, uint64_t>> live, uint64_t file_size) {
   SpaceAllocator a;
   std::sort(live.begin(), live.end());
   uint64_t prev_end = kRegionBase;
@@ -342,8 +341,7 @@ Status Crowtree::Checkpoint(uint64_t* out_last_applied) {
   return Status::Ok();
 }
 
-Status Crowtree::Open(CrowtreeEnv& env, const Options& opt,
-                      std::unique_ptr<Crowtree>* out) {
+Status Crowtree::Open(CrowtreeEnv& env, const Options& opt, std::unique_ptr<Crowtree>* out) {
   if (opt.page_store == nullptr) return Status::InvalidArgument("Open: no page_store");
   PageStore* store = opt.page_store;
 

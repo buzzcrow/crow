@@ -30,8 +30,7 @@ MappingTable::Segment* MappingTable::EnsureSegment(uint64_t seg_idx) {
   // Allocate under alloc_mu_ (caller already holds it during allocation).
   Segment* fresh = new Segment();
   Segment* expected = nullptr;
-  if (segments_[seg_idx].compare_exchange_strong(expected, fresh,
-                                                 std::memory_order_acq_rel)) {
+  if (segments_[seg_idx].compare_exchange_strong(expected, fresh, std::memory_order_acq_rel)) {
     return fresh;
   }
   // Lost the race; another thread installed one.
@@ -58,7 +57,8 @@ void MappingTable::Store(uint64_t pid, PageBase* page) {
     seg = EnsureSegment(seg_idx);
   }
   if (page != nullptr && !IsUnloaded(page)) page->pid = pid;
-  seg->slots[pid % kSegmentSize].store(page, std::memory_order_release);
+  PageBase* old = seg->slots[pid % kSegmentSize].exchange(page, std::memory_order_acq_rel);
+  if (old != nullptr && IsUnloaded(old)) delete AsUnloaded(old);
 }
 
 void MappingTable::StoreUnloaded(uint64_t pid, uint64_t addr, uint32_t plen) {

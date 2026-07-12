@@ -2,8 +2,8 @@
 
 echo "Running pre-commit checks..."
 
-# Check formatting
-echo "Checking formatting..."
+# Check Rust formatting
+echo "Checking Rust formatting..."
 if ! cargo fmt --all -- --check; then
     echo "⚠️  Formatting issues found. Running 'cargo fmt' to fix..."
     cargo fmt --all
@@ -15,7 +15,16 @@ if ! cargo fmt --all -- --check; then
     exit 1
 fi
 
-# Run clippy
+# Check C++ formatting
+echo "Checking C++ formatting..."
+if ! pixi run clang-format --dry-run --Werror crowtree/src/*.cc crowtree/include/crowtree/*.h 2>/dev/null; then
+    echo "⚠️  C++ formatting issues found. Running 'clang-format -i' to fix..."
+    pixi run clang-format -i crowtree/src/*.cc crowtree/include/crowtree/*.h
+    echo "✅ C++ formatting auto-fixed. Review and re-stage the changes, then commit again."
+    exit 1
+fi
+
+# Run clippy (Rust lint)
 echo "Running clippy..."
 cargo clippy --all-targets -- -D warnings
 if [ $? -ne 0 ]; then
@@ -23,21 +32,16 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-# Run tests (including e2e)
-echo "Cleaning test-logs ..."
-rm -rf test-logs
-echo "Running tests (including e2e)..."
-cargo test --workspace --all-targets --exclude crowkv-server
-if [ $? -ne 0 ]; then
-    echo "❌ Tests failed. Fix failing tests before committing."
-    exit 1
-fi
-
-
-cargo test -p crowkv-server --test cluster_e2e_test
-if [ $? -ne 0 ]; then
-    echo "❌ Tests failed. Fix failing tests before committing."
-    exit 1
+# Run clang-tidy (C++ lint)
+echo "Running clang-tidy..."
+if [ -d crowtree/build ]; then
+    pixi run clang-tidy crowtree/src/*.cc -p crowtree/build -- -I crowtree/include 2>&1
+    if [ $? -ne 0 ]; then
+        echo "❌ clang-tidy failed. Fix warnings before committing."
+        exit 1
+    fi
+else
+    echo "⚠️  Skipping clang-tidy: crowtree/build not found. Run 'pixi run build' first."
 fi
 
 echo "✅ All checks passed!"

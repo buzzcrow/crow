@@ -39,8 +39,6 @@ inline uint32_t Crc32cUpdate(uint32_t crc, const uint8_t* data, size_t len) {
   return ~crc;
 }
 
-inline uint32_t Crc32c(const uint8_t* data, size_t len) {
-  return Crc32cUpdate(0, data, len);
-}
+inline uint32_t Crc32c(const uint8_t* data, size_t len) { return Crc32cUpdate(0, data, len); }
 
 }  // namespace crowtree

@@ -1,11 +1,11 @@
 #include "crowtree/crowtree.h"
 
+#include "crowtree/delta.h"
+#include "crowtree/descent.h"
+
 #include <algorithm>
 #include <functional>
 #include <map>
-
-#include "crowtree/delta.h"
-#include "crowtree/descent.h"
 
 namespace crowtree {
 
@@ -65,21 +65,16 @@ void CollectInOrder(Resolve&& resolve, uint64_t pid, uint64_t gc_floor,
 }  // namespace
 
 Crowtree::Crowtree(CrowtreeEnv& env, const Options& opt) : env_(env), opt_(opt) {
-  pool_ = std::make_shared<BufferPool>(opt_.buffer_pool_bytes, opt_.frame_bytes,
-                                       opt_.page_store);
+  pool_ = std::make_shared<BufferPool>(opt_.buffer_pool_bytes, opt_.frame_bytes, opt_.page_store);
   // Initialize with a single empty leaf as the root.
   uint64_t pid = mapping_.AllocatePID();
   mapping_.Store(pid, LeafBase::Build({}, kInvalidPID, pool_, opt_.frame_bytes));
   root_pid_.store(pid);
 }
 
-Crowtree::~Crowtree() {
-  FreeSubtree(root_pid_.load());
-}
+Crowtree::~Crowtree() { FreeSubtree(root_pid_.load()); }
 
-void Crowtree::RetirePage(PageBase* p) {
-  env_.epoch().RetireObject(p);
-}
+void Crowtree::RetirePage(PageBase* p) { env_.epoch().RetireObject(p); }
 
 PageBase* Crowtree::Resident(uint64_t pid) const {
   PageBase* v = mapping_.Get(pid);
@@ -96,17 +91,15 @@ PageBase* Crowtree::Resident(uint64_t pid) const {
   Status s = opt_.page_store->ReadAt(u->addr, frame.data(), frame.size());
   if (!s.ok()) return nullptr;
   if (!FrameValidate(frame.data(), u->plen)) return nullptr;
-  PageBase* page =
-      (FramePageType(frame.data()) == PageType::kLeafBase)
-          ? static_cast<PageBase*>(
-                LeafBase::FromFrameCopy(frame.data(), u->plen, pool_, opt_.frame_bytes))
-          : static_cast<PageBase*>(
-                InnerBase::FromFrameCopy(frame.data(), u->plen, pool_, opt_.frame_bytes));
+  PageBase* page = (FramePageType(frame.data()) == PageType::kLeafBase)
+                       ? static_cast<PageBase*>(LeafBase::FromFrameCopy(frame.data(), u->plen,
+                                                                        pool_, opt_.frame_bytes))
+                       : static_cast<PageBase*>(InnerBase::FromFrameCopy(frame.data(), u->plen,
+                                                                         pool_, opt_.frame_bytes));
   page->pid = pid;
   page->durable_addr = u->addr;  // loaded from here -> clean (design §4.6)
   page->durable_plen = u->plen;
   const_cast<MappingTable&>(mapping_).Store(pid, page);  // publish resident
-  delete u;
   return page;
 }
 
@@ -213,8 +206,7 @@ void Crowtree::SetGcWatermark(uint64_t safe_slot) {
 
 void Crowtree::AdvanceContiguous(uint64_t contiguous_slot) {
   uint64_t prev = contiguous_slot_.load();
-  while (contiguous_slot > prev &&
-         !contiguous_slot_.compare_exchange_weak(prev, contiguous_slot)) {
+  while (contiguous_slot > prev && !contiguous_slot_.compare_exchange_weak(prev, contiguous_slot)) {
   }
 }
 
@@ -255,8 +247,7 @@ Status Crowtree::Flush() {
     PageBase* head = Resident(pid);
     BatchDelta* delta = BatchDelta::Build(cs, std::move(group), head);
     mapping_.Store(pid, delta);
-    if (delta->delta_len > opt_.max_delta_len ||
-        delta->chain_bytes > opt_.max_delta_bytes) {
+    if (delta->delta_len > opt_.max_delta_len || delta->chain_bytes > opt_.max_delta_bytes) {
       ConsolidateLocked(pid);
     }
   }
@@ -346,13 +337,13 @@ void Crowtree::SplitLeafLocked(uint64_t leaf_pid, std::vector<uint64_t> path) {
   RetirePage(leaf);
 }
 
-void Crowtree::PropagateSplitLocked(std::vector<uint64_t> path, uint64_t child_pid,
-                                    std::string sep, uint64_t right_pid) {
+void Crowtree::PropagateSplitLocked(std::vector<uint64_t> path, uint64_t child_pid, std::string sep,
+                                    uint64_t right_pid) {
   if (path.empty()) {
     // child was the root: grow a new root one level up.
     uint64_t new_root = mapping_.AllocatePID();
-    mapping_.Store(new_root, InnerBase::Build({std::move(sep)}, {child_pid, right_pid},
-                                              pool_, opt_.frame_bytes));
+    mapping_.Store(new_root, InnerBase::Build({std::move(sep)}, {child_pid, right_pid}, pool_,
+                                              opt_.frame_bytes));
     root_pid_.store(new_root);
     return;
   }
@@ -371,8 +362,8 @@ void Crowtree::PropagateSplitLocked(std::vector<uint64_t> path, uint64_t child_p
   children.insert(children.begin() + idx + 1, right_pid);
 
   if (seps.size() <= opt_.inner_max_keys) {
-    mapping_.Store(parent_pid, InnerBase::Build(std::move(seps), std::move(children),
-                                                pool_, opt_.frame_bytes));
+    mapping_.Store(parent_pid,
+                   InnerBase::Build(std::move(seps), std::move(children), pool_, opt_.frame_bytes));
     RetirePage(parent);
     return;
   }
@@ -386,17 +377,16 @@ void Crowtree::PropagateSplitLocked(std::vector<uint64_t> path, uint64_t child_p
   std::vector<uint64_t> rchildren(children.begin() + m + 1, children.end());
 
   uint64_t rinner_pid = mapping_.AllocatePID();
-  mapping_.Store(parent_pid, InnerBase::Build(std::move(lseps), std::move(lchildren),
-                                              pool_, opt_.frame_bytes));
-  mapping_.Store(rinner_pid, InnerBase::Build(std::move(rseps), std::move(rchildren),
-                                              pool_, opt_.frame_bytes));
+  mapping_.Store(parent_pid,
+                 InnerBase::Build(std::move(lseps), std::move(lchildren), pool_, opt_.frame_bytes));
+  mapping_.Store(rinner_pid,
+                 InnerBase::Build(std::move(rseps), std::move(rchildren), pool_, opt_.frame_bytes));
   RetirePage(parent);
 
   PropagateSplitLocked(std::move(path), parent_pid, std::move(median), rinner_pid);
 }
 
-void Crowtree::TryMergeLeafLocked(uint64_t leaf_pid,
-                                  const std::vector<uint64_t>& path) {
+void Crowtree::TryMergeLeafLocked(uint64_t leaf_pid, const std::vector<uint64_t>& path) {
   if (path.empty()) return;  // root leaf: nothing to merge with
   uint64_t parent_pid = path.back();
   auto* parent = static_cast<InnerBase*>(Resident(parent_pid));
@@ -428,7 +418,8 @@ void Crowtree::TryMergeLeafLocked(uint64_t leaf_pid,
     if (v.is_tombstone() && v.slot() <= gc) continue;
     merged.push_back(e);
   }
-  LeafBase* fresh = LeafBase::Build(std::move(merged), leaf->right_sibling(), pool_, opt_.frame_bytes);
+  LeafBase* fresh =
+      LeafBase::Build(std::move(merged), leaf->right_sibling(), pool_, opt_.frame_bytes);
   mapping_.Store(left_pid, fresh);
   RetirePage(left);
 
@@ -443,8 +434,8 @@ void Crowtree::TryMergeLeafLocked(uint64_t leaf_pid,
     root_pid_.store(children[0]);
     RetirePage(parent);
   } else {
-    mapping_.Store(parent_pid, InnerBase::Build(std::move(seps), std::move(children),
-                                                pool_, opt_.frame_bytes));
+    mapping_.Store(parent_pid,
+                   InnerBase::Build(std::move(seps), std::move(children), pool_, opt_.frame_bytes));
     RetirePage(parent);
   }
 
@@ -500,8 +491,8 @@ Status Crowtree::Scan(Slice prefix, size_t limit, std::vector<ScanEntry>* out,
   std::lock_guard<std::mutex> lk(write_mutex_);
 
   std::vector<LeafEntry> l1;
-  CollectInOrder([this](uint64_t p) { return Resident(p); }, root_pid_.load(),
-                 gc_floor_.load(), &l1);
+  CollectInOrder([this](uint64_t p) { return Resident(p); }, root_pid_.load(), gc_floor_.load(),
+                 &l1);
   std::vector<MemEntry> l0 = memtable_.Snapshot();
 
   auto consider = [&](const std::string& key, Slice cell) -> bool {
@@ -583,8 +574,8 @@ std::shared_ptr<Snapshot> Crowtree::SnapshotView() {
   // copy. (Deviation from zero-copy COW; see snapshot.h / plan log.)
   std::lock_guard<std::mutex> lk(write_mutex_);
   std::vector<LeafEntry> entries;
-  CollectInOrder([this](uint64_t p) { return Resident(p); }, root_pid_.load(),
-                 gc_floor_.load(), &entries);
+  CollectInOrder([this](uint64_t p) { return Resident(p); }, root_pid_.load(), gc_floor_.load(),
+                 &entries);
   return std::make_shared<Snapshot>(last_applied_slot_.load(), std::move(entries));
 }
 

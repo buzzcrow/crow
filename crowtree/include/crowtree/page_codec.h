@@ -13,11 +13,11 @@
 // decode into freshly-allocated pages.
 #pragma once
 
-#include <cstdint>
-#include <vector>
-
 #include "crowtree/page.h"
 #include "crowtree/status.h"
+
+#include <cstdint>
+#include <vector>
 
 namespace crowtree {
 

@@ -14,8 +14,7 @@ namespace crowtree {
 // demand-loading an unloaded slot (design §4.5); it returns a real PageBase* or
 // nullptr. `max_depth` guards against accidental cycles.
 template <class Resolve>
-inline uint64_t FindLeafPID(Resolve&& resolve, uint64_t root_pid, Slice key,
-                            int max_depth = 64) {
+inline uint64_t FindLeafPID(Resolve&& resolve, uint64_t root_pid, Slice key, int max_depth = 64) {
   uint64_t pid = root_pid;
   for (int d = 0; d < max_depth; ++d) {
     PageBase* page = resolve(pid);
