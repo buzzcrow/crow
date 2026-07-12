@@ -35,7 +35,7 @@ fi
 # Run clang-tidy (C++ lint)
 echo "Running clang-tidy..."
 if [ -d crowtree/build ]; then
-    pixi run clang-tidy crowtree/src/*.cpp -p crowtree/build -- -I crowtree/include 2>&1
+    pixi run clang-tidy crowtree/src/*.cpp -p crowtree/build 2>&1
     if [ $? -ne 0 ]; then
         echo "❌ clang-tidy failed. Fix warnings before committing."
         exit 1

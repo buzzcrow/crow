@@ -19,20 +19,22 @@
 #include <cstdint>
 #include <vector>
 
-namespace crowtree {
+namespace crowtree
+{
 
 // 8-byte frame prefix ahead of the body; the rest is body + IU zero padding.
 inline constexpr size_t kPageFrameHeaderSize = sizeof(uint32_t) * 2;
 
-class PageCodec {
- public:
-  // Encode `page` (kLeafBase or kInnerBase) into a framed, IU-padded buffer.
-  static std::vector<uint8_t> encode(const PageBase* page, uint32_t iu_size);
+class PageCodec
+{
+  public:
+    // Encode `page` (kLeafBase or kInnerBase) into a framed, IU-padded buffer.
+    [[nodiscard]] static std::vector<uint8_t> encode(const PageBase *page, uint32_t iu_size);
 
-  // Decode a framed buffer into a freshly heap-allocated page (LeafBase or
-  // InnerBase). On success the caller owns *out. Returns corruption on a CRC
-  // mismatch or a malformed body, kInvalidArgument on a short buffer.
-  static Status decode(const uint8_t* buf, size_t len, PageBase** out);
+    // Decode a framed buffer into a freshly heap-allocated page (LeafBase or
+    // InnerBase). On success the caller owns *out. Returns corruption on a CRC
+    // mismatch or a malformed body, kInvalidArgument on a short buffer.
+    static Status decode(const uint8_t *buf, size_t len, PageBase **out);
 };
 
-}  // namespace crowtree
+} // namespace crowtree

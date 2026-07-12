@@ -27,91 +27,109 @@
 #include <mutex>
 #include <vector>
 
-namespace crowtree {
+namespace crowtree
+{
 
-class EpochManager {
- private:
-  // Per-thread participant slot. Owned by the manager (allocated lazily on a
-  // thread's first enter(), linked into participants_, freed at destruction).
-  // Cache-line padded so readers on different threads don't false-share.
-  struct alignas(64) Participant {
-    std::atomic<uint64_t> local_epoch{0};  // 0 = inactive (not inside a guard)
-    Participant* next{nullptr};            // intrusive list; published w/ release
-    uint32_t nest{0};                      // reentrancy depth (owner thread only)
-  };
+class EpochManager
+{
+  private:
+    // Per-thread participant slot. Owned by the manager (allocated lazily on a
+    // thread's first enter(), linked into participants_, freed at destruction).
+    // Cache-line padded so readers on different threads don't false-share.
+    struct alignas(64) Participant
+    {
+        std::atomic<uint64_t> local_epoch{0}; // 0 = inactive (not inside a guard)
+        Participant          *next{nullptr};  // intrusive list; published w/ release
+        uint32_t              nest{0};        // reentrancy depth (owner thread only)
+    };
 
- public:
-  using Deleter = std::function<void(void*)>;
+  public:
+    using Deleter = std::function<void(void *)>;
 
-  // RAII reader guard. Holds an epoch open until destroyed. Thread-bound: a
-  // Guard must be released on the thread that created it (do not move across
-  // threads).
-  class Guard {
-   public:
-    Guard() = default;
-    explicit Guard(Participant* p) : p_(p) {}
-    Guard(Guard&& o) noexcept : p_(o.p_) { o.p_ = nullptr; }
-    Guard& operator=(Guard&& o) noexcept {
-      if (this != &o)
-      {
-        release();
-        p_ = o.p_;
-        o.p_ = nullptr;
-      }
-      return *this;
+    // RAII reader guard. Holds an epoch open until destroyed. Thread-bound: a
+    // Guard must be released on the thread that created it (do not move across
+    // threads).
+    class Guard
+    {
+      public:
+        Guard() = default;
+
+        explicit Guard(Participant *p) : p_(p)
+        {
+        }
+
+        Guard(Guard &&o) noexcept : p_(o.p_)
+        {
+            o.p_ = nullptr;
+        }
+
+        Guard &operator=(Guard &&o) noexcept
+        {
+            if (this != &o) {
+                release();
+                p_   = o.p_;
+                o.p_ = nullptr;
+            }
+            return *this;
+        }
+
+        Guard(const Guard &)            = delete;
+        Guard &operator=(const Guard &) = delete;
+
+        ~Guard()
+        {
+            release();
+        }
+
+      private:
+        void         release();
+        Participant *p_ = nullptr;
+    };
+
+    EpochManager();
+    ~EpochManager();
+
+    EpochManager(const EpochManager &)            = delete;
+    EpochManager &operator=(const EpochManager &) = delete;
+
+    // Open a reader guard at the current epoch (lock-free).
+    Guard enter();
+
+    // Defer deletion of `ptr` until no guard opened at-or-before now remains.
+    void retire(void *ptr, Deleter deleter);
+
+    // Convenience: retire a typed pointer with `delete`.
+    template <class T> void retire_object(T *p)
+    {
+        retire(p, [](void *x) { delete static_cast<T *>(x); });
     }
-    Guard(const Guard&) = delete;
-    Guard& operator=(const Guard&) = delete;
-    ~Guard() { release(); }
 
-   private:
-    void release();
-    Participant* p_ = nullptr;
-  };
+    // Force a reclamation sweep. Returns the number of objects freed.
+    size_t try_reclaim();
 
-  EpochManager();
-  ~EpochManager();
+    // Diagnostics.
+    [[nodiscard]] size_t pending_retired();
+    [[nodiscard]] size_t active_guards();
 
-  EpochManager(const EpochManager&) = delete;
-  EpochManager& operator=(const EpochManager&) = delete;
+  private:
+    friend class Guard;
+    Participant *participant_for_this_thread();
+    size_t       reclaim_locked();   // caller holds reclaim_mu_
+    uint64_t     min_active_epoch(); // oldest epoch any reader might still see
 
-  // Open a reader guard at the current epoch (lock-free).
-  Guard enter();
+    struct Retired
+    {
+        uint64_t epoch;
+        void    *ptr;
+        Deleter  deleter;
+    };
 
-  // Defer deletion of `ptr` until no guard opened at-or-before now remains.
-  void retire(void* ptr, Deleter deleter);
+    const uint64_t             id_; // stable key for per-thread cache
+    std::atomic<uint64_t>      global_epoch_{1};
+    std::atomic<Participant *> participants_{nullptr}; // lock-free push list head
 
-  // Convenience: retire a typed pointer with `delete`.
-  template <class T>
-  void retire_object(T* p) {
-    retire(p, [](void* x) { delete static_cast<T*>(x); });
-  }
-
-  // Force a reclamation sweep. Returns the number of objects freed.
-  size_t try_reclaim();
-
-  // Diagnostics.
-  size_t pending_retired();
-  size_t active_guards();
-
- private:
-  friend class Guard;
-  Participant* participant_for_this_thread();
-  size_t reclaim_locked();       // caller holds reclaim_mu_
-  uint64_t min_active_epoch();   // oldest epoch any reader might still see
-
-  struct Retired {
-    uint64_t epoch;
-    void* ptr;
-    Deleter deleter;
-  };
-
-  const uint64_t id_;                             // stable key for per-thread cache
-  std::atomic<uint64_t> global_epoch_{1};
-  std::atomic<Participant*> participants_{nullptr};  // lock-free push list head
-
-  std::mutex reclaim_mu_;                          // guards retired_ (writer side)
-  std::vector<Retired> retired_;
+    std::mutex           reclaim_mu_; // guards retired_ (writer side)
+    std::vector<Retired> retired_;
 };
 
-}  // namespace crowtree
+} // namespace crowtree

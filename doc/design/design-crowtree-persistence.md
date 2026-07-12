@@ -201,8 +201,8 @@ byte-for-byte by another.
 - **Alignment modes.** For aligned block devices the frame is already an IU
   multiple. For unaligned/file-debug media a frame may be written without padding;
   the on-disk record then carries an explicit length prefix (see §5 manifest).
-- **Compression** is per-page and **on-disk only**: the frame body is compressed
-  with **LZ4 by default** (a `flags.compressed` bit + algorithm id in the header),
+- **Compression** is per-page and **on-disk only**: the frame body is optionally
+  compressed with **LZ4** (a `flags.compressed` bit + algorithm id in the header),
   written as `[FrameHeader][compressed body][trailer]`, and **decompressed into a
   full frame on load** so in-memory access stays zero-copy and uniform. A page
   whose compressed size ≥ its raw size is stored uncompressed (flag clear). The
@@ -211,13 +211,26 @@ byte-for-byte by another.
 
 ### 3.6 Compression details (PT10)
 
-- Algorithm id: `0 = none`, `1 = LZ4` (default), `2 = zstd` (reserved). Chosen via
-  `Options.compression`; recorded per page so mixed pages decode correctly.
+- Algorithm id: `0 = none` (**default** — `Options.compression = kNone`), `1 =
+  LZ4` (opt-in via `Options.compression = kLz4`), `2 = zstd` (reserved). Recorded
+  per page so mixed pages decode correctly regardless of the option in force when
+  written. **Off by default**: a caller opts into LZ4 explicitly; this keeps
+  behavior deterministic across build environments (see below) instead of
+  silently changing based on what the build machine has installed.
 - Compress at **write_page** time (snapshot / eviction), decompress at
   **read_page** time into a freshly-acquired frame. The buffer pool only ever
   holds *uncompressed* frames.
-- LZ4 is vendored as a single-file dependency under `crowtree/third_party/lz4`
-  (block API: `LZ4_compress_default` / `LZ4_decompress_safe`), no system dep.
+- **LZ4 is a system dependency, not vendored.** `CMakeLists.txt` discovers a
+  system LZ4 dev package (`find_path(lz4.h)` / `find_library(lz4)`, resolved via
+  the `pixi` environment) and defines `CROWTREE_HAVE_LZ4` when found; the FFI
+  `cc`-based Rust build does not link LZ4 at all. `compressor.cpp` degrades to an
+  identity codec (`lz4_available() == false`, requesting `kLz4` silently stores
+  raw) when the library isn't linked, so correctness never depends on LZ4 being
+  present — only the compression ratio does. (An earlier draft of this doc
+  planned to vendor LZ4 as a single-file dependency under
+  `crowtree/third_party/lz4`; that was superseded by the system-package
+  approach above and never implemented. Fully vendoring is tracked as a
+  low-priority follow-up — see plan-tree.md Open Issues.)
 
 ---
 
@@ -592,10 +605,22 @@ recover(options) -> RestoredState:
 
 ## 8. C API
 
-The Rust FFI adapter (`CrowtreeEngine`) talks to `libcrowtree` through this C
-ABI. All functions are `noexcept`, return a status code, and use explicit
-`(ptr, len)` buffers. Output buffers are either copied by Rust immediately or
-returned as opaque owned handles freed by a `ct_free_*`.
+The Rust FFI adapter talks to `libcrowtree` through this C ABI. All functions
+are `noexcept`, return a status code, and use explicit `(ptr, len)` buffers.
+Output buffers are either copied by Rust immediately or returned as opaque
+owned handles freed by a `ct_free_*`.
+
+> **This section is an illustrative sketch, not the authoritative signature
+> list.** The real, up-to-date ABI is
+> [`crowtree/include/crowtree/c_api.h`](../../../crowtree/include/crowtree/c_api.h)
+> — consult it directly for exact signatures (e.g. `ct_apply` is split into
+> `ct_apply_put`/`ct_apply_delete` + `ct_force_advance_slot` rather than one
+> call with a `contiguous_slot` argument; `ct_set_gc_watermark` currently takes
+> only `safe_slot`, not `(snapshot_slot, safe_slot)`; there is no `ct_gc_stats`
+> output type yet — `ct_collect_garbage` just re-runs `snapshot()`). The
+> **intended end-state contract** (dual GC watermark, richer GC stats) is
+> still what's shown below; the gap to get there is tracked in this doc's
+> parent plan (`plan-tree.md` § Open Issues).
 
 ```c
 typedef struct ct_tree ct_tree;            // opaque tree handle

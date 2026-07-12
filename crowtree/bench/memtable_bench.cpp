@@ -16,9 +16,8 @@
 // The MemTable stores key -> encoded cell; here we model that as fixed-size 16 B
 // keys -> ~48 B values, uniformly random (so tree/skiplist ordering is exercised
 // without key-locality helping any one structure).
-#include <benchmark/benchmark.h>
-
 #include <absl/container/btree_map.h>
+#include <benchmark/benchmark.h>
 
 #include <cstdint>
 #include <cstring>
@@ -29,134 +28,125 @@
 #include <vector>
 
 #ifdef CROWTREE_BENCH_FOLLY
-#include <folly/ConcurrentSkipList.h>
+#    include <folly/ConcurrentSkipList.h>
 #endif
 
-namespace {
+namespace
+{
 
 // Deterministic random 16-byte keys (seeded), generated once per size.
-const std::vector<std::string>& keys(size_t n) {
-  static std::map<size_t, std::vector<std::string>> cache;
-  auto it = cache.find(n);
-  if (it != cache.end())
-  {
-    return it->second;
-  }
-  std::mt19937_64 rng(0x9E3779B97F4A7C15ull ^ n);
-  std::vector<std::string> ks;
-  ks.reserve(n);
-  for (size_t i = 0; i < n; ++i)
-  {
-    uint64_t a = rng();
-    uint64_t b = rng();
-    std::string s(16, '\0');
-    std::memcpy(s.data(), &a, 8);
-    std::memcpy(s.data() + 8, &b, 8);
-    ks.push_back(std::move(s));
-  }
-  auto& out = cache.emplace(n, std::move(ks)).first->second;
-  return out;
+const std::vector<std::string> &keys(size_t n)
+{
+    static std::map<size_t, std::vector<std::string>> cache;
+    auto                                              it = cache.find(n);
+    if (it != cache.end()) {
+        return it->second;
+    }
+    std::mt19937_64          rng(0x9E3779B97F4A7C15ull ^ n);
+    std::vector<std::string> ks;
+    ks.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        uint64_t    a = rng();
+        uint64_t    b = rng();
+        std::string s(16, '\0');
+        std::memcpy(s.data(), &a, 8);
+        std::memcpy(s.data() + 8, &b, 8);
+        ks.push_back(std::move(s));
+    }
+    auto &out = cache.emplace(n, std::move(ks)).first->second;
+    return out;
 }
 
 // Keys guaranteed absent from keys(n) (flip the high bit of the seed space).
-std::vector<std::string> miss_keys(size_t n) {
-  std::mt19937_64 rng(0xD1B54A32D192ED03ull ^ n);
-  std::vector<std::string> ks;
-  ks.reserve(n);
-  for (size_t i = 0; i < n; ++i)
-  {
-    uint64_t a = rng() | (1ull << 63);
-    uint64_t b = rng();
-    std::string s(16, '\0');
-    std::memcpy(s.data(), &a, 8);
-    std::memcpy(s.data() + 8, &b, 8);
-    ks.push_back(std::move(s));
-  }
-  return ks;
+std::vector<std::string> miss_keys(size_t n)
+{
+    std::mt19937_64          rng(0xD1B54A32D192ED03ull ^ n);
+    std::vector<std::string> ks;
+    ks.reserve(n);
+    for (size_t i = 0; i < n; ++i) {
+        uint64_t    a = rng() | (1ull << 63);
+        uint64_t    b = rng();
+        std::string s(16, '\0');
+        std::memcpy(s.data(), &a, 8);
+        std::memcpy(s.data() + 8, &b, 8);
+        ks.push_back(std::move(s));
+    }
+    return ks;
 }
 
 const std::string kVal(48, 'v');
 
 // ── std::map / absl::btree_map share the ordered-map API ──────────
 
-template <class MapT>
-void fill(MapT& m, const std::vector<std::string>& ks) {
-  for (const auto& k : ks)
-  {
-    m.emplace(k, kVal);
-  }
+template <class MapT> void fill(MapT &m, const std::vector<std::string> &ks)
+{
+    for (const auto &k : ks) {
+        m.emplace(k, kVal);
+    }
 }
 
-template <class MapT>
-void BM_Insert(benchmark::State& state) {
-  const auto& ks = keys(static_cast<size_t>(state.range(0)));
-  for (auto _ : state)
-  {
-    MapT m;
+template <class MapT> void BM_Insert(benchmark::State &state)
+{
+    const auto &ks = keys(static_cast<size_t>(state.range(0)));
+    for (auto _ : state) {
+        MapT m;
+        fill(m, ks);
+        benchmark::DoNotOptimize(&m);
+    }
+    state.SetItemsProcessed(state.iterations() * state.range(0));
+}
+
+template <class MapT> void BM_GetHit(benchmark::State &state)
+{
+    const auto &ks = keys(static_cast<size_t>(state.range(0)));
+    MapT        m;
     fill(m, ks);
-    benchmark::DoNotOptimize(&m);
-  }
-  state.SetItemsProcessed(state.iterations() * state.range(0));
-}
-
-template <class MapT>
-void BM_GetHit(benchmark::State& state) {
-  const auto& ks = keys(static_cast<size_t>(state.range(0)));
-  MapT m;
-  fill(m, ks);
-  for (auto _ : state)
-  {
-    for (const auto& k : ks)
-    {
-      auto it = m.find(k);
-      benchmark::DoNotOptimize(it);
+    for (auto _ : state) {
+        for (const auto &k : ks) {
+            auto it = m.find(k);
+            benchmark::DoNotOptimize(it);
+        }
     }
-  }
-  state.SetItemsProcessed(state.iterations() * state.range(0));
+    state.SetItemsProcessed(state.iterations() * state.range(0));
 }
 
-template <class MapT>
-void BM_GetMiss(benchmark::State& state) {
-  const auto& ks = keys(static_cast<size_t>(state.range(0)));
-  auto absent = miss_keys(static_cast<size_t>(state.range(0)));
-  MapT m;
-  fill(m, ks);
-  for (auto _ : state)
-  {
-    for (const auto& k : absent)
-    {
-      auto it = m.find(k);
-      benchmark::DoNotOptimize(it);
+template <class MapT> void BM_GetMiss(benchmark::State &state)
+{
+    const auto &ks     = keys(static_cast<size_t>(state.range(0)));
+    auto        absent = miss_keys(static_cast<size_t>(state.range(0)));
+    MapT        m;
+    fill(m, ks);
+    for (auto _ : state) {
+        for (const auto &k : absent) {
+            auto it = m.find(k);
+            benchmark::DoNotOptimize(it);
+        }
     }
-  }
-  state.SetItemsProcessed(state.iterations() * state.range(0));
+    state.SetItemsProcessed(state.iterations() * state.range(0));
 }
 
-template <class MapT>
-void BM_OrderedScan(benchmark::State& state) {
-  const auto& ks = keys(static_cast<size_t>(state.range(0)));
-  MapT m;
-  fill(m, ks);
-  for (auto _ : state)
-  {
-    size_t bytes = 0;
-    for (const auto& kv : m)
-    {
-      bytes += kv.first.size();
-      benchmark::DoNotOptimize(kv.first.data());
+template <class MapT> void BM_OrderedScan(benchmark::State &state)
+{
+    const auto &ks = keys(static_cast<size_t>(state.range(0)));
+    MapT        m;
+    fill(m, ks);
+    for (auto _ : state) {
+        size_t bytes = 0;
+        for (const auto &kv : m) {
+            bytes += kv.first.size();
+            benchmark::DoNotOptimize(kv.first.data());
+        }
+        benchmark::DoNotOptimize(bytes);
     }
-    benchmark::DoNotOptimize(bytes);
-  }
-  state.SetItemsProcessed(state.iterations() * state.range(0));
+    state.SetItemsProcessed(state.iterations() * state.range(0));
 }
 
-using StdMap = std::map<std::string, std::string, std::less<>>;
+using StdMap  = std::map<std::string, std::string, std::less<>>;
 using AbslMap = absl::btree_map<std::string, std::string, std::less<>>;
 
-}  // namespace
+} // namespace
 
-#define REGISTER_MAP(fn, MapT)                        \
-  BENCHMARK_TEMPLATE(fn, MapT)->Arg(1000)->Arg(100000)
+#define REGISTER_MAP(fn, MapT) BENCHMARK_TEMPLATE(fn, MapT)->Arg(1000)->Arg(100000)
 
 REGISTER_MAP(BM_Insert, StdMap);
 REGISTER_MAP(BM_Insert, AbslMap);
@@ -169,98 +159,99 @@ REGISTER_MAP(BM_OrderedScan, AbslMap);
 
 // ── folly::ConcurrentSkipList (optional) ──────────────────────────
 #ifdef CROWTREE_BENCH_FOLLY
-namespace {
+namespace
+{
 
-struct Entry {
-  std::string key;
-  std::string val;
+struct Entry
+{
+    std::string key;
+    std::string val;
 };
-struct EntryLess {
-  bool operator()(const Entry& a, const Entry& b) const { return a.key < b.key; }
+
+struct EntryLess
+{
+    bool operator()(const Entry &a, const Entry &b) const
+    {
+        return a.key < b.key;
+    }
 };
+
 using CSL = folly::ConcurrentSkipList<Entry, EntryLess>;
 
-void BM_Insert_Folly(benchmark::State& state) {
-  const auto& ks = keys(static_cast<size_t>(state.range(0)));
-  for (auto _ : state)
-  {
-    auto sl = CSL::createInstance(/*height=*/1);
+void BM_Insert_Folly(benchmark::State &state)
+{
+    const auto &ks = keys(static_cast<size_t>(state.range(0)));
+    for (auto _ : state) {
+        auto          sl = CSL::createInstance(/*height=*/1);
+        CSL::Accessor acc(sl);
+        for (const auto &k : ks) {
+            acc.insert(Entry{k, kVal});
+        }
+        benchmark::DoNotOptimize(&acc);
+    }
+    state.SetItemsProcessed(state.iterations() * state.range(0));
+}
+
+void BM_GetHit_Folly(benchmark::State &state)
+{
+    const auto   &ks = keys(static_cast<size_t>(state.range(0)));
+    auto          sl = CSL::createInstance(1);
     CSL::Accessor acc(sl);
-    for (const auto& k : ks)
-    {
-      acc.insert(Entry{k, kVal});
+    for (const auto &k : ks) {
+        acc.insert(Entry{k, kVal});
     }
-    benchmark::DoNotOptimize(&acc);
-  }
-  state.SetItemsProcessed(state.iterations() * state.range(0));
+    for (auto _ : state) {
+        for (const auto &k : ks) {
+            auto it = acc.find(Entry{k, std::string()});
+            benchmark::DoNotOptimize(it);
+        }
+    }
+    state.SetItemsProcessed(state.iterations() * state.range(0));
 }
 
-void BM_GetHit_Folly(benchmark::State& state) {
-  const auto& ks = keys(static_cast<size_t>(state.range(0)));
-  auto sl = CSL::createInstance(1);
-  CSL::Accessor acc(sl);
-  for (const auto& k : ks)
-  {
-    acc.insert(Entry{k, kVal});
-  }
-  for (auto _ : state)
-  {
-    for (const auto& k : ks)
-    {
-      auto it = acc.find(Entry{k, std::string()});
-      benchmark::DoNotOptimize(it);
+void BM_GetMiss_Folly(benchmark::State &state)
+{
+    const auto   &ks     = keys(static_cast<size_t>(state.range(0)));
+    auto          absent = miss_keys(static_cast<size_t>(state.range(0)));
+    auto          sl     = CSL::createInstance(1);
+    CSL::Accessor acc(sl);
+    for (const auto &k : ks) {
+        acc.insert(Entry{k, kVal});
     }
-  }
-  state.SetItemsProcessed(state.iterations() * state.range(0));
+    for (auto _ : state) {
+        for (const auto &k : absent) {
+            auto it = acc.find(Entry{k, std::string()});
+            benchmark::DoNotOptimize(it);
+        }
+    }
+    state.SetItemsProcessed(state.iterations() * state.range(0));
 }
 
-void BM_GetMiss_Folly(benchmark::State& state) {
-  const auto& ks = keys(static_cast<size_t>(state.range(0)));
-  auto absent = miss_keys(static_cast<size_t>(state.range(0)));
-  auto sl = CSL::createInstance(1);
-  CSL::Accessor acc(sl);
-  for (const auto& k : ks)
-  {
-    acc.insert(Entry{k, kVal});
-  }
-  for (auto _ : state)
-  {
-    for (const auto& k : absent)
-    {
-      auto it = acc.find(Entry{k, std::string()});
-      benchmark::DoNotOptimize(it);
+void BM_OrderedScan_Folly(benchmark::State &state)
+{
+    const auto   &ks = keys(static_cast<size_t>(state.range(0)));
+    auto          sl = CSL::createInstance(1);
+    CSL::Accessor acc(sl);
+    for (const auto &k : ks) {
+        acc.insert(Entry{k, kVal});
     }
-  }
-  state.SetItemsProcessed(state.iterations() * state.range(0));
+    for (auto _ : state) {
+        size_t bytes = 0;
+        for (auto it = acc.begin(); it != acc.end(); ++it) {
+            bytes += it->key.size();
+            benchmark::DoNotOptimize(it->key.data());
+        }
+        benchmark::DoNotOptimize(bytes);
+    }
+    state.SetItemsProcessed(state.iterations() * state.range(0));
 }
 
-void BM_OrderedScan_Folly(benchmark::State& state) {
-  const auto& ks = keys(static_cast<size_t>(state.range(0)));
-  auto sl = CSL::createInstance(1);
-  CSL::Accessor acc(sl);
-  for (const auto& k : ks)
-  {
-    acc.insert(Entry{k, kVal});
-  }
-  for (auto _ : state)
-  {
-    size_t bytes = 0;
-    for (auto it = acc.begin(); it != acc.end(); ++it)
-    {
-      bytes += it->key.size();
-      benchmark::DoNotOptimize(it->key.data());
-    }
-    benchmark::DoNotOptimize(bytes);
-  }
-  state.SetItemsProcessed(state.iterations() * state.range(0));
-}
-
-}  // namespace
+} // namespace
 
 BENCHMARK(BM_Insert_Folly)->Arg(1000)->Arg(100000);
 BENCHMARK(BM_GetHit_Folly)->Arg(1000)->Arg(100000);
 BENCHMARK(BM_GetMiss_Folly)->Arg(1000)->Arg(100000);
 BENCHMARK(BM_OrderedScan_Folly)->Arg(1000)->Arg(100000);
-#endif  // CROWTREE_BENCH_FOLLY
+#endif // CROWTREE_BENCH_FOLLY
 
 BENCHMARK_MAIN();

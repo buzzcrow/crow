@@ -19,7 +19,8 @@
 #include <cstdint>
 #include <vector>
 
-namespace crowtree {
+namespace crowtree
+{
 
 enum class compress_algo : uint8_t { kNone = 0, kLz4 = 1 };
 
@@ -27,22 +28,20 @@ enum class compress_algo : uint8_t { kNone = 0, kLz4 = 1 };
 inline constexpr size_t kDurableBlobHeader = 1 + 4 + 4 + 4;
 
 // True if LZ4 was linked in this build.
-bool lz4_available();
+[[nodiscard]] bool lz4_available();
 
 // Encode `frame[0,page_bytes)` into a durable blob, compressing with `prefer`
 // when it actually shrinks the page (else stored raw with algo = kNone).
-void encode_durable_page(const uint8_t* frame, uint32_t page_bytes, compress_algo prefer,
-                         std::vector<uint8_t>* out);
+void encode_durable_page(const uint8_t *frame, uint32_t page_bytes, compress_algo prefer, std::vector<uint8_t> *out);
 
 // Read the logical (raw, uncompressed) frame length recorded in a durable
 // blob's header, so a reader can size the decode buffer without knowing the
 // frame geometry up front. Returns 0 if the blob is shorter than the header.
-uint32_t durable_blob_raw_len(const uint8_t* blob, size_t blob_len);
+[[nodiscard]] uint32_t durable_blob_raw_len(const uint8_t *blob, size_t blob_len);
 
 // Decode a durable blob back into exactly `page_bytes` at `frame_out`. Verifies
 // the stored-bytes CRC and the decompressed length. Returns corruption on any
 // mismatch, kInvalidArgument on a short/garbled header.
-Status decode_durable_page(const uint8_t* blob, size_t blob_len, uint8_t* frame_out,
-                           uint32_t page_bytes);
+Status decode_durable_page(const uint8_t *blob, size_t blob_len, uint8_t *frame_out, uint32_t page_bytes);
 
-}  // namespace crowtree
+} // namespace crowtree

@@ -15,80 +15,90 @@
 
 using namespace crowtree;
 
-namespace {
+namespace
+{
 
 namespace fs = std::filesystem;
 
-Batch Put1(const std::string& k, const std::string& v) {
-  return Batch{{batch_op{k, OpKind::kPut, v}}};
+Batch put_one(const std::string &k, const std::string &v)
+{
+    return Batch{{{.key = k, .kind = OpKind::kPut, .value = v}}};
 }
 
 // A unique temp directory removed on scope exit.
-struct TempDir {
-  fs::path path;
-  TempDir() {
-    path = fs::temp_directory_path() /
-           ("crowtree_log_" + std::to_string(::testing::UnitTest::GetInstance()->random_seed()) +
-            "_" + std::to_string(reinterpret_cast<uintptr_t>(this)));
-    fs::create_directories(path);
-  }
-  ~TempDir() {
-    std::error_code ec;
-    fs::remove_all(path, ec);
-  }
+struct TempDir
+{
+    fs::path path;
+
+    TempDir()
+    {
+        path = fs::temp_directory_path() /
+               ("crowtree_log_" + std::to_string(::testing::UnitTest::GetInstance()->random_seed()) + "_" +
+                std::to_string(reinterpret_cast<uintptr_t>(this)));
+        fs::create_directories(path);
+    }
+
+    ~TempDir()
+    {
+        std::error_code ec;
+        fs::remove_all(path, ec);
+    }
 };
 
-std::string read_file(const fs::path& p) {
-  std::ifstream in(p, std::ios::binary);
-  std::ostringstream ss;
-  ss << in.rdbuf();
-  return ss.str();
+std::string read_file(const fs::path &p)
+{
+    std::ifstream      in(p, std::ios::binary);
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
 }
 
-}  // namespace
+} // namespace
 
-TEST(Logging, WritesFormattedFileOnOpenAndSnapshot) {
-  TempDir dir;
-  MemPageStore store(1);
-  Options opt;
-  opt.page_store = &store;
-  opt.log_dir = dir.path.string();
-  opt.log_level = "info";
+TEST(Logging, WritesFormattedFileOnOpenAndSnapshot)
+{
+    TempDir      dir;
+    MemPageStore store(1);
+    Options      opt;
+    opt.page_store = &store;
+    opt.log_dir    = dir.path.string();
+    opt.log_level  = "info";
 
-  {
+    {
+        std::unique_ptr<Crowtree> t;
+        ASSERT_TRUE(Crowtree::open(opt, &t).ok());
+        EXPECT_TRUE(logging_enabled());
+        ASSERT_TRUE(t->apply(1, put_one("a", "1")).ok());
+        ASSERT_TRUE(t->flush().ok());
+        ASSERT_TRUE(t->snapshot(nullptr).ok());
+    }
+    // Flush + join the async logger so the file is complete before we read it.
+    shutdown_logging();
+    EXPECT_FALSE(logging_enabled());
+
+    fs::path log = dir.path / "crowtree.log";
+    ASSERT_TRUE(fs::exists(log)) << "log file not created at " << log;
+    std::string body = read_file(log);
+    EXPECT_FALSE(body.empty());
+    // Pattern: "YYYYMMDD-HHMMSS.mmm [tid] [level] [crowtree] message"
+    EXPECT_NE(body.find("[crowtree]"), std::string::npos);
+    EXPECT_NE(body.find("[info]"), std::string::npos);
+    // The open() and snapshot() info lines both fired.
+    EXPECT_NE(body.find("open:"), std::string::npos);
+    EXPECT_NE(body.find("snapshot committed:"), std::string::npos);
+}
+
+TEST(Logging, DisabledWhenNoLogDir)
+{
+    // Make sure a prior test's logger is torn down first.
+    shutdown_logging();
+    MemPageStore store(1);
+    Options      opt;
+    opt.page_store = &store;
+    // opt.log_dir left empty -> logging stays disabled, no file written anywhere.
     std::unique_ptr<Crowtree> t;
     ASSERT_TRUE(Crowtree::open(opt, &t).ok());
-    EXPECT_TRUE(logging_enabled());
-    ASSERT_TRUE(t->apply(1, Put1("a", "1")).ok());
+    EXPECT_FALSE(logging_enabled());
+    ASSERT_TRUE(t->apply(1, put_one("k", "v")).ok());
     ASSERT_TRUE(t->flush().ok());
-    ASSERT_TRUE(t->snapshot(nullptr).ok());
-  }
-  // Flush + join the async logger so the file is complete before we read it.
-  shutdown_logging();
-  EXPECT_FALSE(logging_enabled());
-
-  fs::path log = dir.path / "crowtree.log";
-  ASSERT_TRUE(fs::exists(log)) << "log file not created at " << log;
-  std::string body = read_file(log);
-  EXPECT_FALSE(body.empty());
-  // Pattern: "YYYYMMDD-HHMMSS.mmm [tid] [level] [crowtree] message"
-  EXPECT_NE(body.find("[crowtree]"), std::string::npos);
-  EXPECT_NE(body.find("[info]"), std::string::npos);
-  // The open() and snapshot() info lines both fired.
-  EXPECT_NE(body.find("open:"), std::string::npos);
-  EXPECT_NE(body.find("snapshot committed:"), std::string::npos);
-}
-
-TEST(Logging, DisabledWhenNoLogDir) {
-  // Make sure a prior test's logger is torn down first.
-  shutdown_logging();
-  MemPageStore store(1);
-  Options opt;
-  opt.page_store = &store;
-  // opt.log_dir left empty -> logging stays disabled, no file written anywhere.
-  std::unique_ptr<Crowtree> t;
-  ASSERT_TRUE(Crowtree::open(opt, &t).ok());
-  EXPECT_FALSE(logging_enabled());
-  ASSERT_TRUE(t->apply(1, Put1("k", "v")).ok());
-  ASSERT_TRUE(t->flush().ok());
 }

@@ -310,11 +310,23 @@ per-call data shapes in [`design-crowtree-core.md`](design-crowtree-core.md).
 
 ## 5a. Rust Adapter — `CrowtreeEngine`
 
-The `CrowtreeEngine` struct in `crowkv/src/kv/crowtree_engine.rs` implements
-`KVEngine` by wrapping the C API. It is the integration point between Rust
-consensus and C++ storage.
+> **Status: not yet implemented (plan.md P3 M1/M2 gap — see `plan-tree.md`
+> Open Issues).** As of this writing, `crowkv/src/kv/kv_engine.rs::KVEngine` is
+> still the original **synchronous** trait (no `EngineError`, no
+> `snapshot_view`/`last_applied_slot`/`persist_snapshot`/`set_gc_watermark`/
+> `collect_garbage`/`snapshot_export`/`snapshot_import`), `crowtree/ffi` is
+> excluded from the root Cargo workspace (`Cargo.toml` `[workspace] exclude`),
+> and there is no `crowkv/src/kv/crowtree_engine.rs` file. The safe wrapper that
+> exists today, `crowtree::Crowtree`/`crowtree::AsyncCrowtree` in
+> `crowtree/ffi/src/lib.rs`, is a standalone, synchronous-underneath facade
+> (`AsyncCrowtree` bridges via `spawn_blocking`, matching the "Target first
+> implementation" sketch below) but it does **not** implement any `KVEngine` trait and
+> is never constructed by `crowkv`. The C++ engine (§6 sub-docs) is
+> substantially implemented; this Rust integration layer is the missing link
+> that makes it reachable from the running system. The subsections below
+> describe the **target** design for that adapter once built.
 
-### Current implementation (spawn_blocking bridge)
+### Target first implementation (spawn_blocking bridge)
 
 ```rust
 pub struct CrowtreeEngine {

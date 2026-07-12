@@ -1,0 +1,21 @@
+---
+Checks: >
+  -*,
+  clang-analyzer-*,
+  bugprone-*,
+  modernize-*,
+  performance-*,
+  readability-*,
+  -modernize-use-trailing-return-type,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -readability-function-cognitive-complexity,
+  -bugprone-easily-swappable-parameters
+WarningsAsErrors: ''
+HeaderFilterRegex: '(^|.*/)crowtree/(include|src|tests)/.*'
+FormatStyle: file
+CheckOptions:
+  - key: modernize-use-nodiscard.ReplacementString
+    value: '[[nodiscard]]'
+  - key: readability-identifier-naming.FunctionCase
+    value: lower_case

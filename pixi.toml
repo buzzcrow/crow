@@ -20,7 +20,7 @@ gtest = "*"
 lz4 = "*"
 libabseil = "*"  # crowtree MemTable uses absl::btree_map (plan-tree #9)
 spdlog = ">=1.17.0,<2"  # crowtree async file logging (plan-tree #10)
-clang-format = "*"
+clang-format = ">=19.0.0"
 clang-tools = "*"
 folly = "*"
 # Rust toolchain (crowkv)
@@ -44,8 +44,10 @@ snappy = ">=1.2.2,<2"
 
 # ── Build ────────────────────────────────────────────────────────
 install-git-hooks = "git config core.hooksPath .githooks"
-ct-fmt = "clang-format -i crowtree/src/*.cpp crowtree/include/crowtree/*.h"
-ct-lint = "clang-tidy crowtree/src/*.cpp -p crowtree/build -- -I crowtree/include"
+ct-fmt = '''
+find crowtree/src crowtree/include crowtree/tests crowtree/bench -type f \( -name '*.cpp' -o -name '*.h' \) -print0 | xargs -0 clang-format -i
+'''
+ct-lint = "python3 tools/ct_lint.py"
 install-web-deps = "test -d crowkv-console/web/ui/node_modules || (cd crowkv-console/web/ui && npm ci)"
 build = { cmd = "cmake -S crowtree -B crowtree/build -DCMAKE_BUILD_TYPE=Release && cmake --build crowtree/build -j && cargo build --release && cd crowkv-console/web/ui && npm run build", depends-on = ["install-web-deps"] }
 default = { depends-on = ["build"] }
@@ -72,6 +74,17 @@ pixi run test-ui & p6=$!
 wait $p1 && wait $p2 && wait $p3 && wait $p4 && wait $p5 && wait $p6
 '
 ''', depends-on = ["build", "install-web-deps"] }
+test-s = { cmd = '''
+bash -c '
+set -e
+pixi run test-ct
+pixi run test-core
+pixi run test-server
+pixi run test-cli
+pixi run test-web
+pixi run test-ui
+'
+''', depends-on = ["build", "install-web-deps"] }
 
 # ── Coverage & LOC ───────────────────────────────────────────────
 install-tarpaulin = "cargo install cargo-tarpaulin || echo 'Warning: cargo-tarpaulin install failed (expected on macOS)'"
@@ -79,7 +92,19 @@ coverage = { cmd = "cargo tarpaulin --workspace --out Html --output-dir target/c
 loc = "tokei --exclude swagger-ui --exclude 'crowtree/build-*' --exclude target --exclude dist --exclude node_modules"
 
 # ── Clean ────────────────────────────────────────────────────────
-clean = "pkill crowkv-server || true; pkill crowkv-web || true; pkill crowkv-cli || true; cargo clean && rm -rf crowtree/build crowtree/build-asan crowtree/build-tsan crowtree/build-ubsan crowkv-console/web/ui/dist crowkv-console/web/ui/node_modules test-logs && find . -type d -name log ! -path '*/src/*' -prune -exec rm -rf {} + && find . -type d -name runtime-data ! -path '*/src/*' -prune -exec rm -rf {} +"
+clean = { cmd = '''
+bash -c '
+pkill crowkv-server || true
+pkill crowkv-web || true
+pkill crowkv-cli || true
+cargo clean
+rm -rf crowtree/build crowtree/build-asan crowtree/build-tsan crowtree/build-ubsan
+rm -rf crowkv-console/web/ui/dist crowkv-console/web/ui/node_modules
+rm -rf test-logs
+find . -type d -name log ! -path "*/src/*" -prune -exec rm -rf {} \; 2>/dev/null || true
+find . -type d -name runtime-data ! -path "*/src/*" -prune -exec rm -rf {} \; 2>/dev/null || true
+'
+''' }
 
 # ── crowtree sanitizers ──────────────────────────────────────────
 

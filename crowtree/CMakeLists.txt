@@ -50,27 +50,17 @@ endif()
 
 # ── LZ4 page compression (PT10 / PT13) ────────────────────────────
 # Resolution order:
-#   1. Vendored single-file source under third_party/lz4 (no system dep) — the
-#      portable build; compiled straight into libcrowtree.
-#   2. System LZ4 dev package (header + lib) discovered via CMake.
-#   3. None: compression compiles out to an identity codec (still correct).
-set(LZ4_VENDOR_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/lz4)
-if(EXISTS ${LZ4_VENDOR_DIR}/lz4.c AND EXISTS ${LZ4_VENDOR_DIR}/lz4.h)
-  message(STATUS "crowtree LZ4: vendored source (${LZ4_VENDOR_DIR})")
-  target_sources(crowtree PRIVATE ${LZ4_VENDOR_DIR}/lz4.c)
-  target_include_directories(crowtree PRIVATE ${LZ4_VENDOR_DIR})
+#   1. System LZ4 dev package (header + lib) discovered via CMake / pixi.
+#   2. None: compression compiles out to an identity codec (still correct).
+find_path(LZ4_INCLUDE_DIR lz4.h)
+find_library(LZ4_LIB NAMES lz4)
+if(LZ4_INCLUDE_DIR AND LZ4_LIB)
+  message(STATUS "crowtree LZ4: system ${LZ4_LIB} (${LZ4_INCLUDE_DIR})")
+  target_include_directories(crowtree PRIVATE ${LZ4_INCLUDE_DIR})
   target_compile_definitions(crowtree PUBLIC CROWTREE_HAVE_LZ4=1)
+  target_link_libraries(crowtree PUBLIC ${LZ4_LIB})
 else()
-  find_path(LZ4_INCLUDE_DIR lz4.h)
-  find_library(LZ4_LIB NAMES lz4)
-  if(LZ4_INCLUDE_DIR AND LZ4_LIB)
-    message(STATUS "crowtree LZ4: system ${LZ4_LIB} (${LZ4_INCLUDE_DIR})")
-    target_include_directories(crowtree PRIVATE ${LZ4_INCLUDE_DIR})
-    target_compile_definitions(crowtree PUBLIC CROWTREE_HAVE_LZ4=1)
-    target_link_libraries(crowtree PUBLIC ${LZ4_LIB})
-  else()
-    message(STATUS "crowtree LZ4: not found (compression disabled)")
-  endif()
+  message(STATUS "crowtree LZ4: not found (compression disabled)")
 endif()
 
 # ── Tests (GoogleTest) ────────────────────────────────────────────

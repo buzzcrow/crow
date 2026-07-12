@@ -64,7 +64,14 @@ buffering changes the flush lock scope).
 - [ ] `compare()` / `iter_all()` / `snapshot_export()` updated to operate on the pinned root instead of the materialized copy
 - [ ] Remove `write_mutex_` from `snapshot()`/`create_snapshot()` persistence phase (I/O goes through async PageStore #11; only MemTable swap holds lock #3)
 - [ ] Dual trigger: keep size (`memtable_flush_bytes`/`_entries`, primary) + add time (`flush_interval_ms`, secondary; production default ~2 h)
-- [ ] Background auto-flush thread (ties into #3 double buffering)
+- [x] Background auto-flush thread — **DONE (interim, 2026-07-08):** a simple
+      timer thread (`Options.background_flush` / `flush_interval_ms`) calls the
+      existing synchronous `flush()` periodically, reusing its `write_mutex_` /
+      MemTable-`mu_` locking (no new synchronization introduced). This makes a
+      low/no-write-rate workload durable-eligible on a timer instead of only on
+      the size thresholds — see `crowtree/tests/integration/
+      background_flush_test.cpp` (ASan + TSan clean). Does **not** yet remove
+      the write-stall during flush; that still needs the rest of this task.
 
 ### #8a. Snapshot Export API Cleanup — Remove `at_slot` `P0` — ✅ DONE (2026-07-01)
 
@@ -92,6 +99,47 @@ buffering changes the flush lock scope).
 - **Behavior change (see Q1 in the questions section):** the old
   `DurableEdgeCases.OversizedKeyHeapFallbackReopen` test (oversized keys
   heap-fell-back and persisted) was updated to assert rejection instead.
+
+### #20. Wire `CrowtreeEngine` into `crowkv` (plan.md P3 M1/M2) `P0`
+
+**Design:** `design-crowtree.md §4` (async `KVEngine`/`EngineView`), §5a (Rust
+adapter target design). **Status (found in review, 2026-07-08):** nothing in
+`crowkv` can reach crowtree yet — `crowkv/src/kv/kv_engine.rs::KVEngine` is
+still the original synchronous trait, `crowtree/ffi` is excluded from the root
+Cargo workspace, and there is no `CrowtreeEngine` type. `mem_kv::InMemKV` and
+the new `CrowtreeEngine` will be the two `KVEngine` implementations behind the
+same trait.
+**Files:** root `Cargo.toml`, `crowkv/Cargo.toml`, `crowkv/src/kv/kv_engine.rs`,
+`crowkv/src/kv/mem_kv.rs`, new `crowkv/src/kv/crowtree_engine.rs`, the learner,
+`crowtree/ffi/src/lib.rs`.
+
+- [ ] Move `crowtree/ffi` from `[workspace] exclude` into `members` (or keep it
+      standalone and add a thin path-dependency from `crowkv/Cargo.toml`) —
+      decide based on whether the C build step is acceptable in the main
+      workspace's `cargo build`.
+- [ ] Upgrade `KVEngine` to the async trait in `design-crowtree.md §4`
+      (`apply`/`get`/`scan` become `async fn` returning `Result<_, EngineError>`;
+      add `snapshot_view`/`EngineView`, `last_applied_slot`, `persist_snapshot`,
+      `set_gc_watermark`, `collect_garbage`, `snapshot_export`/`snapshot_import`,
+      `clear`). Migrate `InMemKV` to it first so the trait change is verified
+      against the existing test suite before crowtree lands.
+- [ ] Add `crowkv/src/kv/crowtree_engine.rs`: `CrowtreeEngine` wraps
+      `crowtree::AsyncCrowtree` and implements the upgraded `KVEngine` trait.
+      Map `CtError` → `EngineError`. `InMemKV` and `CrowtreeEngine` are the two
+      engines behind `Box<dyn KVEngine>`.
+- [ ] Wire the learner to drive `Box<dyn KVEngine>` through the new async
+      surface; thread `contiguous_applied` → `force_advance_slot`-equivalent
+      per `design-crowtree.md §4.1`.
+- [ ] Cross-engine parity test: shared parametrized `KVEngine` test suite run
+      against both `InMemKV` and `CrowtreeEngine` (`design-crowtree-test.md
+      §5`); `compare()` empty after an identical random op stream.
+- [ ] Snapshot/GC wiring per `design-crowtree-snapshot-gc.md` (restart resume,
+      new-member install via `snapshot_export`/`import`) — plan.md P3 M4;
+      depends on the above landing first, and on #21 (dual GC watermark).
+
+**Sequencing:** independent of the C++-only concurrency/storage tasks in this
+file; can be worked in parallel. High priority since it's the only path that
+makes the substantial C++ engine work reachable from the running system.
 
 ---
 
@@ -165,8 +213,33 @@ mapping-table slots. Readers never block writers and writers never block readers
 
 - [ ] `get()`/`scan()` return borrowed `buffer` + slot for L1 hits; owned copy for L0 hits
 - [ ] Owning `get`/`multi_get`/`scan` become wrappers (zero-copy get + `clone` + release guard)
-- [ ] Remove `write_mutex_` from `scan()` — use epoch guard + atomic loads instead
-- [ ] Remove `write_mutex_` from `get()` if any path still holds it (verify no regression)
+- [x] **Remove `write_mutex_` from `scan()` — DONE (2026-07-08).** `scan()` now
+      takes only an `EpochManager::Guard` (no `write_mutex_`), walking L1
+      leaf-by-leaf via `right_sibling` starting at the leaf `find_leaf_page_id`
+      would route `prefix` to (one leaf resolved at a time via
+      `resolve_chain_sorted`, merge-cursored against an `L0` snapshot), instead
+      of `collect_in_order`'s full-tree DFS materialized under a lock.
+      **Concurrency-safety argument** (the design's flagged "needs a proven
+      scan-consistency argument" — see `crowtree.cpp::scan()`'s header comment
+      for the full writeup): `split_leaf_locked` publishes the new right half
+      and repoints the parent *before* shrinking the original PID, and
+      `try_merge_leaf_locked` gives the merged page the removed leaf's old
+      `right_sibling`; in both cases a leaf read at any point mid-SMO either
+      still holds its full pre-SMO entry set (old `right_sibling`, no gap) or
+      the new shrunk/merged content with `right_sibling` already repointed
+      correctly (no gap, no duplicate) — a chain walk under a single epoch
+      guard therefore never skips or double-visits a live entry. Point lookups
+      (`get()`) were already lock-free via the same per-PID atomic-store
+      invariant; this extends it to the multi-leaf case. New
+      `Stress.ConcurrentScanDuringChurnNoCorruption`
+      (`tests/integration/stress_test.cpp`) hammers `scan()` (full + narrow
+      prefix) on every iteration concurrently with heavy split/merge churn and
+      asserts sorted/unique/prefix-matching/uncorrupted output on every call,
+      not just at the end. 213/213 tests pass; ASan + TSan clean (incl. the
+      pre-existing `Stress.ConcurrentReadersSingleWriter`).
+- [x] **Remove `write_mutex_` from `get()` if any path still holds it — DONE
+      (verified, no change needed).** `get()` already took only an epoch guard;
+      confirmed no regression.
 
 **B4 — Rust FFI** `P1`
 - [ ] Step 1 (Option A): C API accepts raw ptrs, `buffer::alloc()`+copy at boundary
@@ -326,6 +399,14 @@ serving reads).
 - [x] Packed 64-bit slot word: `0`=empty, `bit0=0`=resident `PageBase*`, `bit0=1`=unloaded `(iu_index, iu_count)`; pack/unpack helpers + unit tests — **DONE** (`mapping_slot.h`, `mapping_slot_test.cpp`; standalone, adopted by #14b)
 - [ ] `Segment { atomic<uint64_t> slots[kSegSlots]; atomic<uint32_t> live_count; atomic<uint32_t> generation; atomic<bool> dirty; }`
 - [ ] `Options.mapping_segment_slots` (default 1024, fixed per tree)
+- [ ] **Cleanup (found in review, 2026-07-08):** remove the dead PID-recycling
+      path (`MappingTable::free_page_id()` / `free_list_` in
+      `mapping_table.h`/`.cpp`, plus its two tests `FreeAndRecycle` /
+      `FreePidClearsUnloadedSlot` in `mapping_table_test.cpp`) before wiring
+      14b. It contradicts D1 ("No PID recycling") above and is unused by
+      `Crowtree` today (merged-away PIDs currently just leak, matching the
+      design's "P1 — PID leak" problem statement) — don't let it get
+      accidentally wired up once the table is otherwise rewritten.
 
 **14b — Segment recycling (needs #5 B3 + #13)** `P1`
 - [ ] Epoch deleter clears slot → `live_count.fetch_sub` → CAS segment to nullptr + `epoch.retire` when 0
@@ -441,11 +522,65 @@ Tasks related to PageStore, snapshot, recovery, and on-disk format.
 The current full-manifest snapshot/recovery is functional and remains as the
 fallback until #14 replaces it with segment-level persistence (needs #17 + #18).
 
+### #22. Raw Block-Device `PageStore` (`BlockPageStore`) `P1`
+
+**Design:** `design-crowtree-persistence.md §2` (backend abstraction:
+`FilePageStore` + `BlockPageStore`, one abstraction covering raw SSD/SCM via a
+pluggable medium driver; RDMA deferred). **Status (found in review,
+2026-07-08):** `FilePageStore` (local file, pread/pwrite + fdatasync) is
+implemented and in production use; only a raw block-device backend is
+missing — `MemPageStore` is explicitly a test placeholder ("the in-memory
+`BlockPageStore` for tests"), not a real block-device driver.
+**Files:** `page_store.h/.cpp`, new `block_page_store.h/.cpp`, `CMakeLists.txt`.
+
+- [ ] `BlockPageStore`: open a raw block device (or a pre-allocated file with
+      `O_DIRECT`) with IU alignment matching the device's logical sector size;
+      `write_at`/`read_at` respect `O_DIRECT` alignment (offset/length/buffer
+      alignment) with a bounce-buffer fallback for unaligned callers.
+- [ ] `sync()` → `fdatasync`/`fsync` (or the appropriate raw-device barrier).
+- [ ] Capacity/geometry probe (device size via `ioctl(BLKGETSIZE64)` on Linux
+      block devices; a regular pre-allocated file falls back to `stat`).
+- [ ] Tests: run the existing `PageStore` test matrix (`page_store_test.cpp`)
+      against `BlockPageStore` backed by a loopback device or a large
+      `O_DIRECT`-opened file; alignment edge cases (sub-sector writes).
+- [ ] RDMA medium driver stays **future work** (no immediate task) — same
+      `PageStore` interface, deferred per the design.
+
+**Sequencing:** independent; can land whenever a real deployment target
+(SSD/SCM) needs it. Not on the critical path for #14/#17/#18 (backend-agnostic).
+
 ---
 
 ## Snapshot & GC Layer
 
 Tasks related to snapshot export/import and GC integration.
+
+### #21. GC Sweep + Dual Watermark + `GcStats` `P1`
+
+**Design:** `design-crowtree.md §4.1`, `design-crowtree-snapshot-gc.md §1/§4`.
+**Status (found in review, 2026-07-08):** GC today is opportunistic-only — a
+tombstone is dropped only as a side effect of `consolidate()` (delta-chain-
+length/bytes trigger) or of `snapshot()`'s DFS rebuild of *dirty* pages. A leaf
+that receives a delete and then no further writes can keep its tombstone past
+`gc_floor_` indefinitely (no periodic/forced sweep). `set_gc_watermark(safe_slot)`
+is single-param (design wants `gc_slot = min(snapshot_slot, safe_slot)`), and
+`ct_collect_garbage`/`Crowtree` report no `GcStats`.
+**Files:** `crowtree.h/.cpp`, `c_api.h/.cpp`, `ffi/src/lib.rs`.
+
+- [ ] `set_gc_watermark(snapshot_slot, safe_slot)` — store both, compute
+      `gc_floor_ = min(snapshot_slot, safe_slot)`.
+- [ ] Explicit sweep entry point that walks resident leaves (not just dirty
+      ones) and force-consolidates any leaf holding a tombstone `< gc_floor_`,
+      independent of the delta-chain-length trigger.
+- [ ] `GcStats { tombstones_dropped, pages_freed, bytes_freed }` returned from
+      `collect_garbage()` end to end (C++ → C API → Rust).
+- [ ] Periodic trigger — reuse the background-flush-thread machinery added
+      under #8 rather than adding a second thread.
+
+**Sequencing:** after #8's `RootVersion` (stale-version GC needs it); the dual
+watermark must land before #20's learner wiring calls `set_gc_watermark` for
+real (using `safe_slot` alone could drop a tombstone before its deletion is
+durable on a quorum).
 
 ### #16. Native Frame Snapshot Format `P2`
 
@@ -572,6 +707,11 @@ persistence code is written with the final names.
 #14 ───► #16 native frame snapshot format (shares segment image concept)
 ```
 
+`#20` (Rust integration), `#21` (GC sweep + dual watermark), and `#22`
+(block-device backend) are independent of this graph and of each other except
+where noted in their own sections (Overview / Snapshot & GC / Persistence
+Layer above) — they aren't part of the C++ concurrency-batch sequencing below.
+
 ### Recommended order
 
 | Step | Item | Priority | Why here | Effort | Risk |
@@ -657,9 +797,14 @@ Q4 audit of #17/#18 · #14a packed slot-word helpers.
   `snapshot()` copies, `btree_map<buffer,buffer>` heterogeneous lookup, most tests).
   A focused, single-purpose session; modest immediate payoff (copies aren't the
   current bottleneck).
-- **#5 B3** — lock-free `scan()` (drop `write_mutex_`): needs a proven scan-consistency
-  argument under concurrent COW split/merge (get() is already lock-free). High risk.
-- **#3 + #8** — MemTable double-buffering + background flush thread. Highest race risk.
+- ~~**#5 B3** — lock-free `scan()` (drop `write_mutex_`)~~ **DONE (2026-07-08)** —
+  see #5 B3's checklist above for the scan-consistency argument + stress test.
+  The remaining B3 items (borrowed-`buffer` zero-copy value returns) are a
+  separate, lower-risk memory-efficiency refinement, not a locking/correctness
+  concern.
+- **#3 + #8** — MemTable double-buffering + background flush thread (the simple,
+  non-double-buffered timer-thread version of the flush half is done — see #8).
+  The double-buffering half remains highest race risk.
 - **#11** — io_uring async FFI reactor (large; Linux io_uring + Tokio `AsyncFd`).
 - **#14b/c/d** — segment mapping-table + incremental persistence (prereqs #12/#13 now
   met; #14a helpers done). Large.
@@ -706,3 +851,113 @@ scheduled next.
   decode helpers + `Segment` layout constants (`design-crowtree-mappingtable.md §4`).
   Pure data-structure work with unit tests; foundation the #14b/#14c wiring builds on
   once #5 B3 + #13 land.
+
+---
+
+## Open Issues (Design & Code Review — 2026-07-08)
+
+Findings from a full pass over `design-crowtree*.md` against the current
+`crowtree`/`crowkv` implementation. Gaps that needed a task were moved into
+their layer sections above (this section keeps only short pointers so it
+doesn't duplicate them); design-doc wording issues were fixed in place in the
+docs themselves.
+
+- **Rust integration layer missing** (nothing in `crowkv` can reach crowtree;
+  `KVEngine` still sync, `crowtree/ffi` excluded from the workspace, no
+  `CrowtreeEngine`) → moved to **#20** (Overview Layer). `InMemKV` and the new
+  `CrowtreeEngine` will be the two `KVEngine` implementations.
+- **GC is opportunistic-only** (no periodic tombstone sweep, no `GcStats`,
+  single- vs dual-watermark) → moved to **#21** (Snapshot & GC Layer).
+- **Dead PID-recycling code contradicts D1** (`MappingTable::free_page_id()`/
+  `free_list_`, unused by `Crowtree`) → tracked as a cleanup item under **14a**
+  (Core Layer), to land before 14b.
+- **`Options.background_flush` / `flush_interval_ms` were unwired** →
+  **RESOLVED (2026-07-08).** Easy, safe fix — implemented directly rather than
+  filing a task: a background timer thread now calls the existing synchronous
+  `flush()` on `flush_interval_ms`, reusing `flush()`'s own locking (see #8's
+  checklist for detail + the caveat it doesn't yet eliminate the write-stall
+  during flush). Regression tests in
+  `crowtree/tests/integration/background_flush_test.cpp` (ASan + TSan clean).
+- **No raw block-device backend** (`FilePageStore` done; only a `BlockPageStore`
+  medium driver is missing, RDMA already deferred by design) → moved to **#22**
+  (Persistence Layer).
+- **Design-doc corrections** — fixed in place, no outstanding action: LZ4
+  vendoring text corrected to match the actual system-package-via-`pixi`
+  approach (`design-crowtree-persistence.md §3.5/§3.6`); `design-crowtree.md
+  §5a` now states `CrowtreeEngine` is unimplemented instead of reading as
+  current; `design-crowtree-persistence.md §8`'s C API sketch now points to
+  the real `c_api.h` and calls out where it has drifted.
+
+---
+
+## Session Status (2026-07-08, paused mid-session — resume here)
+
+Working tree is clean; everything below is either committed or a plan for
+next time. Implementing tasks one-by-one per priority order; committing after
+each. **Paused by request mid-#20-investigation** (no partial/uncommitted code).
+
+**Done this session (2 commits, `task-tree` branch, 2 ahead of `origin/task-tree`):**
+1. **Background flush thread** (`f79795c`) — wired up the previously-dead
+   `Options.background_flush`/`flush_interval_ms`; see #8's checklist above.
+2. **#5 B3: lock-free `scan()`** (`bf4d63d`) — dropped `write_mutex_`, walk L1
+   via `right_sibling`; see #5 B3's checklist above for the correctness
+   argument + new stress test. 213 C++ tests + 6 FFI tests pass; ASan+TSan clean.
+
+**In progress / next up: #20 (wire `CrowtreeEngine` into `crowkv`).**
+Investigated the actual Rust call graph before writing code — key finding that
+**changes the plan from #20's original checklist above:**
+
+- `KVEngine` (`crowkv/src/kv/kv_engine.rs`) is used in exactly **one** place:
+  `PxLearner.engine: Box<dyn KVEngine>` (`crowkv/src/paxos/learner.rs`).
+  Everything else (`PxKvStore`, `kv_service.rs` gRPC handlers, etc.) calls
+  `PxLearner`'s own **synchronous** wrapper methods (`engine_get`,
+  `engine_scan`, `apply_entry`, ...) — never the trait directly. `PxKvStore`'s
+  `async fn kv_get`/`kv_scan` call these learner wrappers **synchronously
+  inline** (not `.await`ed), and the codebase already tolerates brief sync
+  critical sections inside async fns elsewhere (`parking_lot`/`DashMap` locks
+  used the same way).
+- **Revised, smaller-scoped plan for a first landing:** skip the async
+  `KVEngine` trait rewrite for now. Wrap `crowtree::Crowtree` (the existing
+  **synchronous** safe wrapper in `crowtree/ffi/src/lib.rs` — not
+  `AsyncCrowtree`) directly behind the **existing, unchanged** sync `KVEngine`
+  trait. This gets `CrowtreeEngine` implemented and parity-tested against
+  `InMemKV` with a dramatically smaller/safer diff (no ripple through
+  `PxLearner`/`PxKvStore`/tests), since in-memory crowtree ops are fast enough
+  to match `InMemKV`'s existing "sync call inside an async fn" pattern. The
+  async trait upgrade (`design-crowtree.md §4`) becomes a **separate, later**
+  task, worth doing once #11 (io_uring reactor) exists and file-backed
+  crowtree I/O latency actually matters — not a prerequisite for a first
+  working integration. **This decision should be reflected in #20's checklist
+  next time** (replace the "upgrade KVEngine to async" bullet with this
+  smaller sync-first plan; keep the async version as a follow-on bullet).
+- Still need to check (not yet done): whether `PxLearner` has/needs a
+  non-`Default` constructor to inject a custom engine (`Box<dyn KVEngine>`)
+  instead of always defaulting to `InMemKV::new()` — likely a small
+  `PxLearner::with_engine(engine: Box<dyn KVEngine>)` addition next to the
+  existing `new()`. Learner file also needs a look at `apply_entry`/
+  `iter_all`/`compare`/`live_key_count`/`clear` call sites (only `engine_get`/
+  `engine_scan` confirmed so far) before writing `CrowtreeEngine`.
+- `crowtree/ffi` is still `[workspace] exclude`d in the root `Cargo.toml` —
+  first concrete step next session is deciding/doing the workspace-membership
+  move (or a path dep from `crowkv/Cargo.toml` instead) and confirming
+  `cargo build`/`cargo test` at the root still work with the C++ static lib
+  in the loop.
+
+**Remaining, in priority order (see "Recommended order" table above for the
+original C++-only sequencing; #20/#21/#22 are independent of it):**
+1. #20 — wire `CrowtreeEngine` into `crowkv` (revised scope above).
+2. #8 remaining — `create_snapshot()` naming (needs reconciling with #19's
+   existing `checkpoint→snapshot` rename — re-check whether "rename `flush()`
+   → `create_snapshot()`" in #8's checklist is stale text superseded by #19,
+   or a genuinely separate unify-flush+persist API before implementing),
+   pinned `RootVersion` for `snapshot_view()`/`compare()`/`iter_all()`, removing
+   `write_mutex_` from the snapshot persistence phase. Coupled to #3 per the
+   doc's own note — read that coupling carefully before starting.
+3. #3 — MemTable double buffering (highest race risk item in the whole plan).
+4. #17 real remaining — migrate `resident()`/eviction onto the pool's
+   pin/CLOCK engine (unblocked now that #5 B3 is done).
+5. #18 D4, #14b/c/d/e, #11, #16, #21, #22, #5 B4/B5/B6 — as scoped in their
+   own sections above.
+
+No code changes are pending; the working tree is clean and both commits above
+are on `task-tree` (not yet pushed to `origin/task-tree`).

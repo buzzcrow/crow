@@ -1,0 +1,42 @@
+BasedOnStyle: LLVM
+IndentWidth: 4
+ColumnLimit: 120
+AllowShortFunctionsOnASingleLine: None
+SeparateDefinitionBlocks: Always
+
+# Header include grouping rules
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^".*"'
+    Priority: 1
+  - Regex: '^<.*\.h>'
+    Priority: 2
+  - Regex: '^<.*>'
+    Priority: 3
+
+# Brace wrapping: same line for control statements, wrapped for types/functions.
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterControlStatement: Never
+  AfterFunction: true
+  AfterClass: true
+  AfterStruct: true
+  AfterNamespace: true
+  AfterEnum: false
+  AfterUnion: false
+  BeforeCatch: true
+  BeforeElse: true
+
+# Common alignment settings.
+AlignConsecutiveAssignments: Consecutive
+AlignConsecutiveDeclarations: Consecutive
+AlignConsecutiveBitFields: Consecutive
+AlignConsecutiveMacros: Consecutive
+AlignTrailingComments: true
+AlignOperands: AlignAfterOperator
+AlignArrayOfStructures: Left
+AlignEscapedNewlines: Left
+PackConstructorInitializers: CurrentLine
+AlignAfterOpenBracket: Align
+BracedInitializerIndentWidth: 4
+IndentPPDirectives: AfterHash

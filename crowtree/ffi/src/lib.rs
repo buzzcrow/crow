@@ -75,6 +75,13 @@ mod sys {
             key: *const u8,
             klen: usize,
         ) -> c_int;
+        pub fn ct_apply_batch(
+            t: *mut ct_tree,
+            slot: u64,
+            ops: *const u8,
+            ops_len: usize,
+            count: u64,
+        ) -> c_int;
         pub fn ct_force_advance_slot(t: *mut ct_tree, slot: u64);
         pub fn ct_put(
             t: *mut ct_tree,
@@ -186,6 +193,31 @@ pub struct Options {
     pub max_inline_value: u64,
 }
 
+/// One record of a multi-key batch passed to [`Crowtree::apply_batch`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BatchOp<'a> {
+    Put { key: &'a [u8], value: &'a [u8] },
+    Delete { key: &'a [u8] },
+}
+
+/// Encode `ops` into `ct_apply_batch`'s packed wire format:
+/// `[u8 kind][u32 klen][key][u32 vlen][value] * count` (kind 0=put, 1=delete).
+fn encode_batch(ops: &[BatchOp<'_>]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for op in ops {
+        let (kind, key, value): (u8, &[u8], &[u8]) = match op {
+            BatchOp::Put { key, value } => (0, key, value),
+            BatchOp::Delete { key } => (1, key, b""),
+        };
+        out.push(kind);
+        out.extend_from_slice(&(key.len() as u32).to_le_bytes());
+        out.extend_from_slice(key);
+        out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        out.extend_from_slice(value);
+    }
+    out
+}
+
 /// A scan result entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanEntry {
@@ -262,6 +294,16 @@ impl Crowtree {
 
     pub fn apply_delete(&self, slot: u64, key: &[u8]) -> Result<(), CtError> {
         check(unsafe { sys::ct_apply_delete(self.as_ptr(), slot, key.as_ptr(), key.len()) })
+    }
+
+    /// Apply `ops` atomically at `slot` (one call into the C++ engine, so a
+    /// concurrent reader never observes a partially-applied batch -- unlike
+    /// looping [`Self::apply_put`]/[`Self::apply_delete`] per key).
+    pub fn apply_batch(&self, slot: u64, ops: &[BatchOp<'_>]) -> Result<(), CtError> {
+        let packed = encode_batch(ops);
+        check(unsafe {
+            sys::ct_apply_batch(self.as_ptr(), slot, packed.as_ptr(), packed.len(), ops.len() as u64)
+        })
     }
 
     pub fn force_advance_slot(&self, slot: u64) {

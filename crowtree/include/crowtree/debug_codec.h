@@ -16,13 +16,14 @@
 #include <string>
 #include <vector>
 
-namespace crowtree {
+namespace crowtree
+{
 
 // Encode a `plen`-byte frame into annotated, human-readable text.
-std::string encode_frame_text(const uint8_t* frame, uint32_t plen);
+std::string encode_frame_text(const uint8_t *frame, uint32_t plen);
 
 // Decode text produced by encode_frame_text back into the exact frame bytes.
 // Returns corruption / invalid_argument on a malformed or inconsistent stream.
-Status decode_frame_text(const std::string& text, std::vector<uint8_t>* out);
+Status decode_frame_text(const std::string &text, std::vector<uint8_t> *out);
 
-}  // namespace crowtree
+} // namespace crowtree

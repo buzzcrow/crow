@@ -1,5 +1,5 @@
 // PT8.5: C ABI / Rust integration tests through the safe adapter.
-use crowtree_ffi::{AsyncCrowtree, Crowtree, CtError, Options};
+use crowtree_ffi::{AsyncCrowtree, BatchOp, Crowtree, CtError, Options};
 
 fn key(i: usize) -> Vec<u8> {
     format!("key{i:05}").into_bytes()
@@ -28,6 +28,39 @@ fn mem_apply_get_scan() {
     assert!(!truncated);
     assert_eq!(entries.len(), 39); // 40 puts - 1 delete
     assert!(entries.windows(2).all(|w| w[0].key < w[1].key)); // key-sorted
+}
+
+#[test]
+fn mem_apply_batch_multi_key_and_dup_last_wins() {
+    let t = Crowtree::open(&Options::default()).unwrap();
+    t.apply_batch(
+        1,
+        &[
+            BatchOp::Put { key: b"a", value: b"va" },
+            BatchOp::Put { key: b"b", value: b"vb" },
+            BatchOp::Delete { key: b"c" },
+        ],
+    )
+    .unwrap();
+    t.flush().unwrap();
+    assert_eq!(t.get(b"a").unwrap(), Some((1, b"va".to_vec())));
+    assert_eq!(t.get(b"b").unwrap(), Some((1, b"vb".to_vec())));
+    assert_eq!(t.get(b"c").unwrap(), None);
+
+    // Intra-batch duplicate key: last occurrence wins.
+    t.apply_batch(
+        2,
+        &[
+            BatchOp::Put { key: b"d", value: b"first" },
+            BatchOp::Put { key: b"d", value: b"second" },
+        ],
+    )
+    .unwrap();
+    t.flush().unwrap();
+    assert_eq!(t.get(b"d").unwrap(), Some((2, b"second".to_vec())));
+
+    // Empty batch is a no-op (mirrors a NoOp repair-fill payload).
+    t.apply_batch(3, &[]).unwrap();
 }
 
 #[test]
