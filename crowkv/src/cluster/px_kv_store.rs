@@ -331,19 +331,39 @@ impl PxKvStore {
     }
 
     pub fn add_group(&self, group: PxGroup) {
+        self.add_group_inner(group, true);
+    }
+
+    /// Add a group **without** spawning its election driver.
+    ///
+    /// Used by the restore / multi-replica-creation orchestration: a group
+    /// must not self-elect leader at `quorum == 1` (no remotes wired yet) and
+    /// then run `bulk_phase1` / `repair_once` against only itself, which can
+    /// `NoOp`-fill or finalize a committed slot the node is personally missing
+    /// and thereby **erase** committed data (see `doc/bug-wal.md` §8.4). The
+    /// caller wires the full configured membership first; the subsequent
+    /// remote-wiring rebuild (`add_remote_replicas` → [`Self::add_group`])
+    /// starts the driver with a correct quorum.
+    pub fn add_group_without_election(&self, group: PxGroup) {
+        self.add_group_inner(group, false);
+    }
+
+    fn add_group_inner(&self, group: PxGroup, spawn_driver: bool) {
         let group_id = group.group_id;
         info!(
             store_id = self.store_id,
             group_id,
             replicas = group.remote_replica_count(),
+            spawn_driver,
             "added group to kv store"
         );
         let arc = Arc::new(group);
         // Spawn the per-group election driver (no-op when
         // `election_driver_disabled`). Driver holds a `Weak<PxGroup>` so
         // dropping the store's `Arc` does not leak the task. Skip when no
-        // tokio runtime is active (structural / non-async unit tests).
-        if tokio::runtime::Handle::try_current().is_ok() {
+        // tokio runtime is active (structural / non-async unit tests), or when
+        // the caller deferred the driver (`spawn_driver == false`).
+        if spawn_driver && tokio::runtime::Handle::try_current().is_ok() {
             let arc_for_spawn = arc.clone();
             tokio::spawn(async move {
                 arc_for_spawn.start_election_loop().await;

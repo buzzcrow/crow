@@ -16,7 +16,7 @@ use crate::paxos::PxGroupId;
 
 use super::index::{SegmentIndex, SegmentMeta, SlotLocation};
 use super::pipeline_backend::{WalBlockAlignment, WalPipelineBackend};
-use super::record::WALRecord;
+use super::record::{WALRecord, WalRecordFormat};
 use super::segment::WalSegment;
 use super::IoBackend;
 
@@ -48,6 +48,7 @@ struct WalPipeline {
     backend: WalPipelineBackend,
     active_segment: Option<WalSegment>,
     pipeline_idx: usize,
+    record_format: WalRecordFormat,
 }
 
 impl WalPipeline {
@@ -59,7 +60,14 @@ impl WalPipeline {
     ) -> io::Result<()> {
         if self.active_segment.is_none() {
             let seg_id = next_segment_id.fetch_add(1, Ordering::Relaxed);
-            let seg = WalSegment::create(backend, &self.pipeline_path, seg_id, group_id).await?;
+            let seg = WalSegment::create_with_format(
+                backend,
+                &self.pipeline_path,
+                seg_id,
+                group_id,
+                self.record_format,
+            )
+            .await?;
             self.active_segment = Some(seg);
         }
         Ok(())
@@ -89,11 +97,13 @@ impl WalEngine {
                     WalPipelineBackend::block(disk_path.to_string_lossy(), config.wal_alignment)
                 }
             };
+            let record_format = select_record_format(config.wal_record_format, &pipeline_backend);
             pipelines.push(WalPipeline {
                 pipeline_path: group_dir,
                 backend: pipeline_backend,
                 active_segment: None,
                 pipeline_idx: idx,
+                record_format,
             });
         }
 
@@ -210,7 +220,14 @@ impl WalEngine {
         }
 
         let seg_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
-        let seg = WalSegment::create(&self.backend, &pipeline.pipeline_path, seg_id, self.group_id).await?;
+        let seg = WalSegment::create_with_format(
+            &self.backend,
+            &pipeline.pipeline_path,
+            seg_id,
+            self.group_id,
+            pipeline.record_format,
+        )
+        .await?;
         pipeline.active_segment = Some(seg);
         Ok(())
     }
@@ -294,5 +311,15 @@ impl WalEngine {
     /// Get the failed flag for sharing with fsync workers.
     pub fn failed_flag(&self) -> Arc<AtomicBool> {
         self.failed.clone()
+    }
+}
+
+fn select_record_format(configured: WalRecordFormat, backend: &WalPipelineBackend) -> WalRecordFormat {
+    match configured {
+        WalRecordFormat::Auto => match backend {
+            WalPipelineBackend::File(_) | WalPipelineBackend::MemBlock(_) => WalRecordFormat::TextLine,
+            WalPipelineBackend::Block(_) => WalRecordFormat::Binary,
+        },
+        explicit => explicit,
     }
 }

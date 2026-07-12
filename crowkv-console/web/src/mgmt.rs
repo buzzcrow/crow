@@ -136,6 +136,12 @@ async fn ensure_group_local(
     group_id: u64,
     replica_id: u64,
     initial_role: AddGroupInitialRole,
+    // `Some(false)` for multi-replica groups so the server does not self-elect
+    // at `quorum == 1` before remotes are wired (`doc/bug-wal.md` §8.4); the
+    // following `ensure_group_remotes` rebuild starts the driver with a correct
+    // quorum. `None`/`Some(true)` for single-replica groups (no remote-wiring
+    // step to start the driver).
+    start_election: Option<bool>,
 ) -> Result<(), String> {
     let url = mgmt_url_for_node(state, node_id).map_err(|(_, body)| body.0.error.clone())?;
     let client = ServerClient::new(url).map_err(|e| e.to_string())?;
@@ -155,6 +161,7 @@ async fn ensure_group_local(
                         group_id,
                         replica_id,
                         initial_role: Some(initial_role),
+                        start_election,
                     },
                 )
                 .await
@@ -171,6 +178,7 @@ async fn ensure_group_local(
                         group_id,
                         replica_id,
                         initial_role: Some(initial_role),
+                        start_election,
                     },
                 )
                 .await
@@ -257,6 +265,9 @@ pub async fn restore_persisted_topology(state: &AppState) {
     for group in &groups {
         let mut replicas = group.replicas.clone();
         replicas.sort_by_key(|r| r.replica_id);
+        // Defer the election driver for multi-replica groups until remotes are
+        // wired (`doc/bug-wal.md` §8.4).
+        let start_election = Some(replicas.len() <= 1);
         for (index, replica) in replicas.iter().enumerate() {
             let initial_role = if index == 0 {
                 AddGroupInitialRole::Leader
@@ -270,6 +281,7 @@ pub async fn restore_persisted_topology(state: &AppState) {
                 group.group_id,
                 replica.replica_id,
                 initial_role,
+                start_election,
             )
             .await
             {
@@ -298,6 +310,63 @@ pub async fn restore_persisted_topology(state: &AppState) {
         groups = groups.len(),
         "restore reconcile finished"
     );
+}
+
+/// Restores persisted topology (stores and groups) for a specific node.
+///
+/// This function ensures that all stores and groups configured for the given node
+/// are properly set up on the node after a restart.
+///
+/// # Panics
+/// Panics if the config read lock is poisoned (should not happen in normal operation).
+///
+/// # Errors
+/// Returns an error if store or group restoration fails.
+pub async fn restore_persisted_topology_for_node(state: &AppState, node_id: &str) -> Result<(), String> {
+    let (stores, groups) = {
+        let cfg = state.config.read().unwrap();
+        (cfg.stores.clone(), cfg.groups.clone())
+    };
+
+    for store in stores
+        .iter()
+        .filter(|store| store.nodes.iter().any(|id| id == node_id))
+    {
+        ensure_store_on_node(state, node_id, store.store_id).await?;
+    }
+
+    for group in groups
+        .iter()
+        .filter(|group| group.replicas.iter().any(|replica| replica.node_id == node_id))
+    {
+        let Some(local_replica) = group.replicas.iter().find(|replica| replica.node_id == node_id) else {
+            continue;
+        };
+        ensure_group_local(
+            state,
+            node_id,
+            group.store_id,
+            group.group_id,
+            local_replica.replica_id,
+            AddGroupInitialRole::Follower,
+            // Defer for multi-replica groups until remotes are wired
+            // (`doc/bug-wal.md` §8.4).
+            Some(group.replicas.len() <= 1),
+        )
+        .await?;
+        if let Err(err) = ensure_group_remotes(state, group).await {
+            warn!(
+                store_id = group.store_id,
+                group_id = group.group_id,
+                node_id,
+                error = %err,
+                "failed to restore group remotes for restarted node"
+            );
+        }
+    }
+
+    refresh_node_cache(state, node_id).await;
+    Ok(())
 }
 
 // ── A5: Logical store plane ─────────────────────────────────────────
@@ -549,7 +618,14 @@ pub async fn http_add_group(
         let req = AddGroupRequest {
             group_id: body.group_id,
             replica_id: rid,
-            initial_role: Some(AddGroupInitialRole::Leader),
+            initial_role: Some(if i == 0 {
+                AddGroupInitialRole::Leader
+            } else {
+                AddGroupInitialRole::Follower
+            }),
+            // Multi-node groups defer the driver until Phase-2 wires remotes
+            // (`doc/bug-wal.md` §8.4); single-node groups start it now.
+            start_election: Some(body.nodes.len() <= 1),
         };
         match client.add_group(sid, &req).await {
             Ok(()) => succeeded.push((nid.clone(), rid)),
@@ -928,6 +1004,9 @@ pub async fn http_add_replica(
             group_id: gid,
             replica_id: new_rid,
             initial_role: Some(AddGroupInitialRole::Follower),
+            // The new replica joins a multi-replica group; remotes are wired in
+            // step 3, which starts the driver. Defer (`doc/bug-wal.md` §8.4).
+            start_election: Some(false),
         };
         client
             .add_group(sid, &req)
@@ -947,6 +1026,9 @@ pub async fn http_add_replica(
             group_id: gid,
             replica_id: new_rid,
             initial_role: Some(AddGroupInitialRole::Follower),
+            // The new replica joins a multi-replica group; remotes are wired in
+            // step 3, which starts the driver. Defer (`doc/bug-wal.md` §8.4).
+            start_election: Some(false),
         };
         client
             .add_group(sid, &req)

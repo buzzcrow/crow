@@ -427,8 +427,8 @@ describe('Add Group dialog', () => {
     fireEvent.change(screen.getByLabelText('Starting Replica ID (numeric)'), {
       target: { value: '800' },
     });
-    fireEvent.click(screen.getByLabelText(/^n1/));
-    fireEvent.click(screen.getByLabelText(/^n2/));
+    expect(screen.getByLabelText(/^n1/) as HTMLInputElement).toBeChecked();
+    expect(screen.getByLabelText(/^n2/) as HTMLInputElement).toBeChecked();
     fireEvent.click(screen.getByRole('button', { name: /create group/i }));
 
     await waitFor(() => expect(captured.length).toBe(1));
@@ -460,6 +460,123 @@ describe('Add Group dialog', () => {
 
     await waitFor(() => expect(captured.length).toBe(1));
     expect(captured[0].body).toEqual({ group_id: 81, replica_id: 801, nodes: ['n1'] });
+  });
+
+  it('defaults to all active store nodes when the selected store already has active nodes', () => {
+    const bothServers: CrowKVServerView[] = [
+      ...mockServers,
+      {
+        id: 'KV-n2',
+        node_id: 'n2',
+        rack_id: 'r1',
+        host: '127.0.0.1',
+        process: {
+          mgmt_url: 'http://127.0.0.1:29910',
+          grpc_url: 'http://127.0.0.1:29920',
+          state: ProcState.Running,
+          health: NodeHealth.Up,
+          last_seen_ms: Date.now(),
+        },
+        mgmt_port: 29910,
+        grpc_port: 29920,
+      },
+    ];
+
+    render(
+      <AddGroupDialog isOpen onClose={() => {}} storeId="7" stores={mockStores} nodes={mockNodes} servers={bothServers} />,
+      { wrapper },
+    );
+
+    expect(screen.getByLabelText(/^n1/) as HTMLInputElement).toBeChecked();
+    expect(screen.getByLabelText(/^n2/) as HTMLInputElement).toBeChecked();
+  });
+
+  it('defaults to the first three active nodes when the selected store has no active nodes yet', () => {
+    const fourNodes: Node[] = [
+      { id: 'n1', rack_id: 'r1', host: '127.0.0.1', ssh: { type: 'KeyDefault', user: '' } },
+      { id: 'n2', rack_id: 'r1', host: '127.0.0.1', ssh: { type: 'KeyDefault', user: '' } },
+      { id: 'n3', rack_id: 'r1', host: '127.0.0.1', ssh: { type: 'KeyDefault', user: '' } },
+      { id: 'n4', rack_id: 'r1', host: '127.0.0.1', ssh: { type: 'KeyDefault', user: '' } },
+    ];
+    const fourServers: CrowKVServerView[] = [
+      {
+        id: 'KV-n1',
+        node_id: 'n1',
+        rack_id: 'r1',
+        host: '127.0.0.1',
+        process: {
+          mgmt_url: 'http://127.0.0.1:19910',
+          grpc_url: 'http://127.0.0.1:19920',
+          state: ProcState.Running,
+          health: NodeHealth.Up,
+          last_seen_ms: Date.now(),
+        },
+        mgmt_port: 19910,
+        grpc_port: 19920,
+      },
+      {
+        id: 'KV-n2',
+        node_id: 'n2',
+        rack_id: 'r1',
+        host: '127.0.0.1',
+        process: {
+          mgmt_url: 'http://127.0.0.1:29910',
+          grpc_url: 'http://127.0.0.1:29920',
+          state: ProcState.Running,
+          health: NodeHealth.Up,
+          last_seen_ms: Date.now(),
+        },
+        mgmt_port: 29910,
+        grpc_port: 29920,
+      },
+      {
+        id: 'KV-n3',
+        node_id: 'n3',
+        rack_id: 'r1',
+        host: '127.0.0.1',
+        process: {
+          mgmt_url: 'http://127.0.0.1:39910',
+          grpc_url: 'http://127.0.0.1:39920',
+          state: ProcState.Running,
+          health: NodeHealth.Up,
+          last_seen_ms: Date.now(),
+        },
+        mgmt_port: 39910,
+        grpc_port: 39920,
+      },
+      {
+        id: 'KV-n4',
+        node_id: 'n4',
+        rack_id: 'r1',
+        host: '127.0.0.1',
+        process: {
+          mgmt_url: 'http://127.0.0.1:49910',
+          grpc_url: 'http://127.0.0.1:49920',
+          state: ProcState.Running,
+          health: NodeHealth.Up,
+          last_seen_ms: Date.now(),
+        },
+        mgmt_port: 49910,
+        grpc_port: 49920,
+      },
+    ];
+
+    render(
+      <AddGroupDialog
+        isOpen
+        onClose={() => {}}
+        storeId="9"
+        stores={[{ store_id: '9', nodes: [], groups: [] }]}
+        nodes={fourNodes}
+        servers={fourServers}
+      />,
+      { wrapper },
+    );
+
+    expect(screen.getByLabelText(/^n1/) as HTMLInputElement).toBeChecked();
+    expect(screen.getByLabelText(/^n2/) as HTMLInputElement).toBeChecked();
+    expect(screen.getByLabelText(/^n3/) as HTMLInputElement).toBeChecked();
+    expect(screen.getByLabelText(/^n4/) as HTMLInputElement).not.toBeChecked();
   });
 
   it('filters selectable nodes to the selected store owners', () => {
@@ -646,7 +763,7 @@ describe('end-to-end create flow', () => {
     fireEvent.change(screen.getByLabelText('Starting Replica ID (numeric)'), {
       target: { value: '800' },
     });
-    fireEvent.click(screen.getByLabelText(/^n1/));
+    expect(screen.getByLabelText(/^n1/) as HTMLInputElement).toBeChecked();
     fireEvent.click(screen.getByRole('button', { name: /create group/i }));
     await waitFor(() => expect(captured.length).toBe(5));
     group.unmount();

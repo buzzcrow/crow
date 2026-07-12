@@ -126,6 +126,24 @@ async fn replay_rebuilds_voted_for() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn replica_persists_self_vote_for_replay() {
+    let backend = sim_backend();
+    let disks = vec![PathBuf::from("/wal")];
+    let config = test_config(&disks);
+    let wal = WalEngine::create(backend.clone(), config, 1).await.unwrap();
+
+    let mut replica = PxLocalReplica::new(7, PxLocalReplicaRole::Follower);
+    replica.set_wal(wal.clone());
+    replica.become_candidate(11);
+    replica.persist_current_vote().await;
+    wal.seal_all().await.unwrap();
+
+    let result = replay_group(&backend, &disks, 1).await.unwrap();
+    assert_eq!(result.current_term, 11);
+    assert_eq!(result.voted_for, Some(7));
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn replay_rebuilds_dedup_cache() {
     let backend = sim_backend();
     let disks = vec![PathBuf::from("/wal")];

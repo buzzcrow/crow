@@ -70,6 +70,7 @@ async fn put_get_delete_cycle() {
             group_id,
             replica_id,
             initial_role: None,
+            start_election: None,
         },
     )
     .await

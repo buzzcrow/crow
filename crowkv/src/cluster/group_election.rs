@@ -189,7 +189,20 @@ impl LeaderElection for PxGroup {
         let total = self.valid_replica_count + 1;
         let quorum = total / 2 + 1;
 
-        let floor = replica.contiguous_chosen().max(peer_contiguous_chosen_max);
+        // Floor is the leader's OWN committed frontier — deliberately NOT maxed
+        // with `peer_contiguous_chosen_max`. After a restart a replica can win
+        // election while missing committed slots it never received (the value
+        // lived only as a `ChosenNotice` watermark, which carries no payload).
+        // Maxing the floor with the peers' commit point would SKIP exactly
+        // those slots, leaving the new leader serving a stale/old value for a
+        // committed key (e.g. a resurrected delete, or a missing put). Sweeping
+        // from the leader's own frontier forces Phase 1 to re-derive every
+        // higher slot from the quorum and adopt the real chosen value. This is
+        // safe because Phase 1 contacts a quorum: a committed value is held by
+        // at least one quorum member, so it is recovered rather than
+        // overwritten.
+        let _ = peer_contiguous_chosen_max;
+        let floor = replica.contiguous_chosen();
         let local_ceiling = replica.highest_seen_slot();
         let next_slot_minus_one = self.next_slot.load(Ordering::Acquire).saturating_sub(1);
         let ceiling = local_ceiling
@@ -400,6 +413,7 @@ impl PxGroup {
     /// On quorum-OK: extends `lease_read_until` and bumps
     /// `last_quorum_heartbeat_at`. On any peer reply with
     /// `term > leader_term`: returns [`HeartbeatOutcome::SteppedDown`].
+    #[allow(clippy::too_many_lines)]
     pub(crate) async fn run_heartbeat_round(
         self: &Arc<Self>,
         cfg: &PxElectionConfig,
@@ -463,6 +477,87 @@ impl PxGroup {
                     }
                     if hb.success {
                         acks += 1;
+                        if hb.contiguous_applied < payload.committed_safe_slot {
+                            if let Some(remote) = self.get_remote_replica(peer_id) {
+                                for slot in
+                                    hb.contiguous_applied.saturating_add(1)..=payload.committed_safe_slot
+                                {
+                                    let Some(mut entry) = replica.accepted_at(slot).await else {
+                                        debug!(
+                                            group_id,
+                                            peer_id, slot, "heartbeat catch-up: local accepted entry missing"
+                                        );
+                                        break;
+                                    };
+                                    // Every slot in this range is `<= committed_safe_slot`
+                                    // (= the leader's `contiguous_chosen`), i.e. ALREADY
+                                    // CHOSEN on a quorum and therefore immutable (Paxos
+                                    // P2c): no other value can ever be chosen here. A
+                                    // lagging peer may still REJECT a replayed accept
+                                    // because it promised a higher ballot during election
+                                    // churn — and `ChosenNotice` only advances its
+                                    // watermark without applying or persisting the value,
+                                    // so without this the peer's engine/WAL never receives
+                                    // the committed write (a deleted key fails to
+                                    // converge, and after restart resurrects). Since the
+                                    // value can no longer change, re-accept the SAME value
+                                    // at a ballot just above the peer's promise so it
+                                    // converges and persists a durable `Accepted` record.
+                                    let mut caught_up = false;
+                                    for catchup_attempt in 0..2u8 {
+                                        match remote.send_accept(&entry, group_id).await {
+                                            Ok(crate::paxos::roles::PxAcceptReply::Accepted { .. }) => {
+                                                caught_up = true;
+                                                break;
+                                            }
+                                            Ok(crate::paxos::roles::PxAcceptReply::Rejected {
+                                                current_promised,
+                                                ..
+                                            }) => {
+                                                if catchup_attempt == 0 {
+                                                    // Escalate above the peer's promise and
+                                                    // retry once. Safe: the value is chosen.
+                                                    entry.ballot = crate::paxos::roles::PxBallot::new(
+                                                        current_promised.round.saturating_add(1),
+                                                        replica.id,
+                                                    );
+                                                    continue;
+                                                }
+                                                debug!(
+                                                    group_id,
+                                                    peer_id,
+                                                    slot,
+                                                    rejected_round = current_promised.round,
+                                                    rejected_leader_id = current_promised.leader_id,
+                                                    "heartbeat catch-up: peer still rejected after ballot escalation"
+                                                );
+                                                break;
+                                            }
+                                            Ok(crate::paxos::roles::PxAcceptReply::TermStale {
+                                                new_term,
+                                                ..
+                                            }) => {
+                                                debug!(
+                                                    group_id,
+                                                    peer_id,
+                                                    slot,
+                                                    new_term,
+                                                    "heartbeat catch-up: peer reported higher term during replay"
+                                                );
+                                                break;
+                                            }
+                                            Err(err) => {
+                                                debug!(group_id, peer_id, slot, error = %err, "heartbeat catch-up: replay accept failed");
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if !caught_up {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                         // Refresh this peer's applied watermark and recompute
                         // the group safe-slot used by bounded/safe-slot reads.
                         self.note_peer_applied(peer_id, hb.contiguous_applied);
@@ -533,6 +628,7 @@ impl PxGroup {
             match self.run_prevote_round(cancel).await {
                 PreVoteOutcome::Won { proposed_term } => {
                     replica.become_candidate(proposed_term);
+                    replica.persist_current_vote().await;
                     self.run_candidate_election(cancel).await;
                 }
                 PreVoteOutcome::HigherTerm(t) => {
@@ -547,6 +643,7 @@ impl PxGroup {
         } else {
             let new_term = replica.current_term_snapshot() + 1;
             replica.become_candidate(new_term);
+            replica.persist_current_vote().await;
             self.run_candidate_election(cancel).await;
         }
     }

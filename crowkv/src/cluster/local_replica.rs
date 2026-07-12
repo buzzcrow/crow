@@ -397,21 +397,26 @@ impl PxLocalReplica {
     ) -> io::Result<Self> {
         let replica = Self::new(id, role);
 
+        // Pass 1: rebuild acceptor (promise + accept) state from the WAL.
+        //
+        // The WAL is append-only and may hold MULTIPLE `Accepted` records for
+        // the same slot — a value accepted under one ballot, then a
+        // higher-ballot value adopted during leader churn / repair. Live, the
+        // acceptor keeps only the highest-ballot value per slot; replay must
+        // converge to the same result. Crucially we must NOT `learn()` each
+        // record inline here: the learner's engine enforces per-key
+        // highest-*slot*-wins and skips an op when `slot <= resolved_slot(key)`.
+        // Applying records in append order would let an earlier, lower-ballot
+        // value at a slot win and mask the later chosen value at that same slot
+        // (e.g. a delete tombstone silently reverting to its old value after
+        // restart — the resurrected-key bug). A non-`Accepted` reply here just
+        // means a higher-ballot value for the slot was already restored, which
+        // is exactly the state we want, so such replies are benign.
+        let mut accepted_slots = std::collections::BTreeSet::new();
         for record in &replay.records {
             match record.record_type {
                 crate::wal::record::RecordType::Promised => {
-                    match replica.on_prepare(record.slot, record.ballot, record.term).await {
-                        PxPrepareReply::Promised { .. } => {}
-                        other => {
-                            return Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                format!(
-                                    "restore replay promised failed for slot {}: {other:?}",
-                                    record.slot
-                                ),
-                            ));
-                        }
-                    }
+                    let _ = replica.on_prepare(record.slot, record.ballot, record.term).await;
                 }
                 crate::wal::record::RecordType::Accepted => {
                     let entry = record.to_log_entry().ok_or_else(|| {
@@ -420,17 +425,21 @@ impl PxLocalReplica {
                             "restore replay accepted missing log entry",
                         )
                     })?;
-                    match replica.on_accept(entry.clone()).await {
-                        PxAcceptReply::Accepted { .. } => replica.learn(&entry),
-                        other => {
-                            return Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                format!("restore replay accept failed for slot {}: {other:?}", record.slot),
-                            ));
-                        }
-                    }
+                    let _ = replica.on_accept(entry).await;
+                    accepted_slots.insert(record.slot);
                 }
                 _ => {}
+            }
+        }
+
+        // Pass 2: apply the FINAL (highest-ballot) accepted value per slot, in
+        // ascending slot order. Reading back from the acceptor guarantees we
+        // learn the ballot-winning value at each slot, and ascending order
+        // makes the engine's highest-slot-wins rule yield the correct final
+        // state for every key.
+        for slot in accepted_slots {
+            if let Some(entry) = replica.accepted_at(slot).await {
+                replica.learn(&entry);
             }
         }
 
@@ -807,6 +816,17 @@ impl PxLocalReplica {
         );
     }
 
+    pub async fn persist_current_vote(&self) {
+        if let Some(wal) = &self.wal {
+            let term = self.current_term_snapshot();
+            let voted_for = self.voted_for().unwrap_or(self.id);
+            let record = WALRecord::from_vote_granted(wal.group_id(), term, voted_for);
+            if let Err(e) = wal.append(&record).await {
+                tracing::error!(term, voted_for, error = %e, "WAL persist VoteGranted failed");
+            }
+        }
+    }
+
     /// Point-in-time status for the topology endpoint. Exposes only cheap
     /// (`O(1)`) data: the kv-store key count via `DashMap::len()`.
     #[allow(clippy::cast_possible_truncation)]
@@ -909,22 +929,50 @@ impl PxLocalReplica {
         self.learner.learn(entry.clone());
     }
 
-    /// Receive a peer-side `ChosenNotice` for `(slot, term)` and update
-    /// `last_chosen_slot` / `last_chosen_term` only. Drops notices whose
-    /// `term < current_term` (term fence). Notices with `term >
-    /// current_term` are still recorded — the chosen high-water mark
-    /// is informational and does not bump our own term.
+    /// Apply locally-accepted entries to the state machine up to `commit_slot`
+    /// (the leader's committed/chosen frontier, carried on each heartbeat).
     ///
-    /// Returns `true` if the watermark advanced.
-    pub fn note_chosen(&self, slot: SlotIndex, term: PxTerm) -> bool {
-        if term < self.current_term_snapshot() {
-            debug!(
-                replica_l_id = self.id,
-                slot, term, "note_chosen: dropped (term < current_term)"
-            );
-            return false;
+    /// Walks the contiguous-applied prefix forward: for each next slot it reads
+    /// the highest-ballot value the acceptor holds and `learn()`s it. Stops at
+    /// the first gap (a slot this replica has not accepted yet) — the prefix is
+    /// contiguous by construction, and the leader's heartbeat catch-up
+    /// re-sends the missing `Accepted` so the next heartbeat can continue.
+    /// Idempotent: re-applying an already-applied slot is a no-op in the
+    /// learner. Used by followers, which otherwise never apply in steady state
+    /// (`on_accept` only persists; `ChosenNotice` only moves the watermark).
+    fn apply_committed_up_to(&self, commit_slot: SlotIndex) {
+        let mut next = self.learner.contiguous_applied().saturating_add(1);
+        while next <= commit_slot {
+            let Some(entry) = self.acceptor.accepted_at(next) else {
+                break;
+            };
+            self.learner.learn(entry);
+            next += 1;
         }
-        self.learner.note_chosen(slot, term)
+    }
+
+    /// Receive a peer-side `ChosenNotice` for `(slot, term)`.
+    ///
+    /// **No-op for the chosen watermark.** A `ChosenNotice` carries no payload,
+    /// so it is *not* evidence this replica holds the chosen value. Advancing
+    /// `last_chosen_slot` from it would let a value-missing replica appear
+    /// up-to-date in the election log-comparison ([`Self::candidate_log_up_to_date`])
+    /// and win leadership while lacking committed writes — the missing-key /
+    /// resurrection bug (`doc/bug-wal.md` §8.2). The watermark now advances only
+    /// via [`Self::learn`] (real applied values), driven on followers by
+    /// [`Self::apply_committed_up_to`] on each heartbeat.
+    ///
+    /// NOTE: neutering this advance is known to regress
+    /// `e2e_kv_after_dynamic_replica_change` (left failing per plan, to revisit
+    /// with the durable acceptor-log-tip election check).
+    ///
+    /// Returns `false` always (the watermark never advances from a notice).
+    pub fn note_chosen(&self, slot: SlotIndex, term: PxTerm) -> bool {
+        debug!(
+            replica_l_id = self.id,
+            slot, term, "note_chosen: ignored (payload-less; watermark advances only via learn)"
+        );
+        false
     }
 
     /// Read the currently accepted value at a slot (for verification).
@@ -1060,13 +1108,7 @@ impl PxLocalReplica {
             self.current_term_atomic.store(term, Ordering::Release);
             self.role_atomic
                 .store(PxLocalReplicaRole::Follower.as_u8(), Ordering::Release);
-            // Persist voted_for durably (W12) before acknowledging.
-            if let Some(wal) = &self.wal {
-                let record = WALRecord::from_vote_granted(wal.group_id(), term, req.candidate_id);
-                if let Err(e) = wal.append(&record).await {
-                    tracing::error!(term, voted_for = req.candidate_id, error = %e, "WAL persist VoteGranted failed");
-                }
-            }
+            self.persist_current_vote().await;
             // After granting a vote, reset our own election deadline so we
             // give the candidate a chance to win quorum and start sending
             // heartbeats before we time out and challenge it ourselves.
@@ -1120,6 +1162,12 @@ impl PxLocalReplica {
             self.current_term_atomic.store(term, Ordering::Release);
             self.role_atomic
                 .store(PxLocalReplicaRole::Follower.as_u8(), Ordering::Release);
+            // Apply committed entries up to the leader's commit point (Raft
+            // `leaderCommit` rule). Followers do not apply on `on_accept`
+            // (which only persists) nor on `ChosenNotice` (watermark only), so
+            // without this a follower's local KVEngine never reflects committed
+            // writes in steady state (`doc/bug-wal.md` §7/§8.1).
+            self.apply_committed_up_to(req.committed_safe_slot);
             // Timestamp the heartbeat so the metrics snapshot can
             // report `last_heartbeat_age_ms`.
             self.note_heartbeat_received();

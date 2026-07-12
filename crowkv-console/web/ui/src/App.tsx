@@ -402,6 +402,9 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
 
   const groupDialogDefaults = useMemo(() => {
     const defaults: Record<string, { groupId: string; replicaId: string; nodeIds: string[] }> = {};
+    const activeNodeIds = servers
+      .filter((server) => isCrowKVServerAvailable(server))
+      .map((server) => server.node_id);
     for (const store of stores) {
       const storeId = String(store.store_id);
       const groupsInStore = groups.filter((g) => String(g.store_id) === storeId);
@@ -415,8 +418,8 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
       }
 
       const replicaId = nextNumericId(replicaIds, 1);
-      const preferredNodes = servers.map((server) => server.node_id);
-      const nodeIds = preferredNodes.length > 0 ? [preferredNodes[0]] : (nodes[0] ? [nodes[0].id] : []);
+      const storeNodeIds = store.nodes.filter((nodeId) => activeNodeIds.includes(String(nodeId))).map(String);
+      const nodeIds = storeNodeIds.length > 0 ? storeNodeIds : activeNodeIds.slice(0, 3);
 
       defaults[storeId] = { groupId, replicaId, nodeIds };
     }

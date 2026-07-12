@@ -21,9 +21,22 @@ target
 .idea/
 
 tarpaulin-report.html
-log/
-wal/
-runtime-data/
+/log/
+/wal/
+/runtime-data/
+
+# Runtime WAL output from crate-local test runs
+crowkv-server/wal/
+crowkv-console/cli/wal/
+crowkv-console/shared/wal/
+crowkv-console/web/wal/
+
+# Runtime logs/output from crate-local test runs
+crowkv-server/log/
+crowkv-console/cli/log/
+crowkv-console/shared/log/
+crowkv-console/web/log/
+crowkv-console/web/ui/e2e/runtime-data/
 
 # Frontend (crowkv-console/web/ui)
 crowkv-console/web/ui/node_modules/

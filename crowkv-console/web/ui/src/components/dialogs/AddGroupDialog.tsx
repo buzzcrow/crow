@@ -41,7 +41,20 @@ export function AddGroupDialog({
     (node) =>
       servers.some((server) => server.node_id === node.id && isCrowKVServerAvailable(server)),
   );
-  const defaultSelectedNodeIds = defaultNodeIds.filter((id) => availableNodes.some((n) => n.id === id));
+  const availableNodeIds = availableNodes.map((node) => node.id);
+  const resolveDefaultNodeIds = (targetStoreId: string, preferExplicit: boolean): string[] => {
+    const explicit = defaultNodeIds.filter((id) => availableNodeIds.includes(id));
+    if (preferExplicit && explicit.length > 0) {
+      return explicit;
+    }
+    const selectedStore = stores.find((store) => String(store.store_id) === targetStoreId);
+    const storeNodeIds = (selectedStore?.nodes || []).map(String).filter((id) => availableNodeIds.includes(id));
+    if (storeNodeIds.length > 0) {
+      return storeNodeIds;
+    }
+    return availableNodeIds.slice(0, 3);
+  };
+  const defaultSelectedNodeIds = resolveDefaultNodeIds(selectedStoreId, true);
   const [groupId, setGroupId] = useState(defaultGroupId);
   const [replicaId, setReplicaId] = useState(defaultReplicaId);
   const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>(defaultSelectedNodeIds);
@@ -53,10 +66,11 @@ export function AddGroupDialog({
   const valid = isNumeric(groupId) && isNumeric(replicaId) && selectedNodeIds.length > 0;
 
   const reset = () => {
-    setSelectedStoreId(storeId || (stores[0] ? String(stores[0].store_id) : ''));
+    const nextStoreId = storeId || (stores[0] ? String(stores[0].store_id) : '');
+    setSelectedStoreId(nextStoreId);
     setGroupId(defaultGroupId);
     setReplicaId(defaultReplicaId);
-    setSelectedNodeIds(defaultSelectedNodeIds);
+    setSelectedNodeIds(resolveDefaultNodeIds(nextStoreId, true));
   };
 
   useEffect(() => {
@@ -65,8 +79,9 @@ export function AddGroupDialog({
   }, [defaultGroupId, defaultReplicaId, defaultSelectedNodeIds, isOpen, storeId, stores]);
 
   useEffect(() => {
-    setSelectedNodeIds((prev) => prev.filter((id) => availableNodes.some((node) => node.id === id)));
-  }, [selectedStoreId]);
+    if (!isOpen) return;
+    setSelectedNodeIds(resolveDefaultNodeIds(selectedStoreId, false));
+  }, [isOpen, selectedStoreId]);
 
   const handleSubmit = async () => {
     if (!valid || !selectedStoreId) return;

@@ -1,167 +1,184 @@
-# CrowKV — Plan: WAL Persistence & Crash Recovery (remaining work)
+# CrowKV WAL Follow-up Plan
 
-> Consolidated remaining-work plan. Supersedes the old `plan-wal.md` (W1–W14
-> milestone plan, all DONE) and `plan-wal-refract.md` (pipeline refactor, first
-> slice DONE). Both originals were deleted. (Filename note: the request said
-> `plan-wsl.md`; interpreted as a typo for **WAL** = write-ahead log. Rename if
-> you actually meant something else.)
+Depends on: [`requirement.md`](requirement.md), [`design/design-wal.md`](design/design-wal.md), [`design/design-parallel-slots.md`](design/design-parallel-slots.md), [`design/design-leader-election.md`](design/design-leader-election.md), [`bug-wal.md`](bug-wal.md)
 
-Depends on: [`design/design-wal.md`](design/design-wal.md),
-[`design/design-async-io.md`](design/design-async-io.md),
-[`design/design-console.md`](design/design-console.md) (node workspace layout).
+This plan tracks the follow-up work created by resolving the `ai-todo` review notes in [`design/design-wal.md`](design/design-wal.md). The old WAL milestone plan was completed and deleted; this is the new implementation plan for the remaining WAL correctness and flush-pipeline changes.
 
----
+## 1. Current State
 
-## 0. What is already DONE (do not redo)
+- `WalEngine` writes directly in `append`, selects disk by round-robin, and calls `fdatasync` inline.
+- `fsync_worker.rs` exists but is not wired into `WalEngine`'s append path.
+- `WalConfig` still exposes `wal_fsync_batch_bytes`, `wal_fsync_batch_interval_ms`, and `wal_fsync_watchdog_ms`.
+- `restore_from_replay` restores acceptor state and then calls `learn()` for every accepted slot, which can apply locally accepted but not quorum-chosen values.
+- `run_bulk_phase1` already computes a quorum-derived ceiling, fills empty slots with `NoOp`, and moves `next_slot` past the recovery range.
+- Open restart-recovery bugs are tracked in `bug-wal.md`: web-layer read routing resurrection, election up-to-date based on learner watermark, and unbounded / stale recovery floor without a durable commit watermark.
 
-- **W1–W14** (record codec, segment, index, fsync worker, acceptor ack-contract
-  hook, multi-disk `WalEngine`, replay engine producing `ReplayResult`, GC).
-  Replay is validated at the `ReplayResult` level only (see gaps below).
-- **Pipeline refactor first slice:** `Segment`→`WalSegment`, `WalConfig` moved to
-  `common/config.rs`, `DiskState`→`WalPipeline`, `pipeline_backend.rs` backend
-  model (`File`/`MemBlock`/`Block`).
-- **Block-device alignment (device level):** `BlockDevice` now has two write
-  implementations selected by `WalBlockAlignment` — unaligned (RAM/SCM/PMEM,
-  `BlockDevice::new`) and 4 KiB-aligned read-modify-write (SSD/NVMe,
-  `BlockDevice::ssd_4k`), with write-amplification stats
-  (`physical_bytes_written`, `rmw_count`). Planning logic lives on
-  `WalBlockAlignment::plan_write`. Tests in
-  `crowkv/tests/wal/block_backend_tests.rs`.
+## 2. Target Decisions
 
-## 1. Known gaps (root of the remaining work)
+- Slot-addressed WAL records use deterministic slot affinity: `disk = hash(group_id, slot) % wal_disks.len()`.
+- Metadata records (`VoteGranted`, `DedupCheckpoint`, future `ConfigChange`) use the group metadata lane: `hash(group_id, 0) % wal_disks.len()`.
+- Segment physical order is append order only; it is not a contiguous slot range.
+- Durable flush is backend-neutral: filesystem `fdatasync`, block-device aligned writes, or backend-specific persistence for RAM / SCM / simulated backends.
+- Default flush behavior is event-driven wake-drain-flush with no fixed 1 ms latency floor.
+- Replay restores acceptor/election/dedup state; learner application requires durable commit evidence, snapshot evidence, or new-leader / heartbeat re-learning.
+- Empty slots in the recovery interval become chosen `NoOp` slots.
 
-- `PxLocalReplica::set_wal` is now wired for live groups created through
-  `crowkv-server` bootstrap and management API paths; replay + restore are also
-  wired there. Remaining validation work is crash/restart coverage (A3/A5), not
-  basic attachment.
-- WAL data now has a managed-node home under
-  `runtime-data/N-<node_id>/data/wal/`, while direct bare runs still default to
-  relative `wal/`.
-- **Aligned-device full replay (✅ RESOLVED, see B1/B2/B3 DONE):** a sealed
-  segment on a 4 KiB device is padded to the block boundary. `SegmentReader` is
-  now padding-tolerant — `next_record` stops cleanly on a `FOOTER_MAGIC` or zero
-  `frame_len` marker, and `read_footer` scans the file tail to locate the footer
-  past trailing zero padding. No format/version bump was needed.
+## 3. Work Items
 
-ai-todo: the 4K is configable. During test, we could use a file to simulate the block device require aligned. We need UT to cover this case. 
-We can test mem backend for performance, test with file and file simulate block device for functional.
+### W1 — Rename WAL flush config and defaults
 
----
+- [ ] Replace `wal_fsync_batch_bytes` with `wal_flush_batch_bytes`.
+- [ ] Replace `wal_fsync_batch_interval_ms` with `wal_flush_coalesce_us`.
+- [ ] Replace `wal_fsync_watchdog_ms` with `wal_flush_watchdog_ms`.
+- [ ] Default `wal_flush_coalesce_us = 0` for wake-drain-flush behavior.
+- [ ] Update code, tests, and docs using old names.
 
-## 2. Target outcome
+**Tests:**
 
-A killed `crowkv-server` process, when redeployed/restarted against the same
-`runtime-data/N-<node_id>/data/` workspace, **replays its WAL and restores its
-consensus + KV state with no data loss**, then rejoins/re-elects normally.
+- [ ] Config default test verifies new field names and defaults.
+- [ ] No code path references old fsync interval field names.
 
-ai-todo: kill is a case, normal shutdown and reload is also a common case.
+### W2 — Slot-affinity WAL placement
 
----
+- [ ] Replace `WalEngine::select_pipeline()` round-robin with deterministic selection from the `WALRecord`.
+- [ ] Slot records (`slot != 0`) hash `(group_id, slot)`.
+- [ ] Metadata records (`slot == 0`) hash `(group_id, 0)`.
+- [ ] Remove `rr_counter` if no longer needed.
+- [ ] Keep `SegmentIndex` able to store multiple records per slot or explicitly document highest-location overwrite as cache-only.
 
-## A. Crash recovery subsystem (chosen: full)
+**Tests:**
 
-Do these in order; each step lands with its tests.
+- [ ] Multiple appends for the same slot always land on the same disk.
+- [ ] Adjacent slots distribute across multiple disks.
+- [ ] Replay succeeds with non-contiguous slot ranges per segment.
 
-**Current status**
+### W3 — Wire event-driven flush workers into `WalEngine`
 
-- **DONE:** A1 WAL data placement + path plumbing
-- **DONE:** A2 restore-from-replay core path
-- **DONE:** A4 live startup wiring (`create_group_with_wal`, replay on startup,
-  WAL attached to live groups, next-slot and next-segment-id resume)
-- **NEXT:** A3 single-node crash/restart no-data-loss test over the real file
-  backend and shared workspace
+- [ ] Replace inline write + inline `fdatasync` in `WalEngine::append` with per-pipeline pending queues.
+- [ ] Worker waits when empty and wakes on enqueue.
+- [ ] Worker drains immediately-ready records up to `wal_flush_batch_bytes`.
+- [ ] Optional coalescing uses microsecond budget only when configured.
+- [ ] Watchdog remains as a safety path.
+- [ ] Record futures resolve only after backend durable flush succeeds.
+- [ ] Errors mark the WAL failed and fail queued records.
 
-### A1 — WAL data placement + log/data path audit ✅ DONE
-- Add a WAL root concept tied to the node workspace:
-  `runtime-data/N-<node_id>/data/wal/` (per-group subdir `group<N>/seg-*.log`,
-  matching `replay_group`'s expectation). File naming under that dir per the
-  refactor note: `…/data/wal/group<N>/seg-NNNNNNN.log`.
-- Thread a configurable WAL root from CLI/config down to `WalConfig.wal_disks`
-  (default still relative for bare runs; web-managed nodes get the workspace
-  path).
-- **Audit all log/data path usage** and align to the workspace hierarchy where
-  required:
-  - `crowkv-server/src/main.rs` logging root `"log"` (relative cwd; under
-    web-managed nodes resolves to `runtime-data/N-<id>/log/` — confirm/keep).
-  - `crowkv-console/web/src/state.rs::prepare_node_workspace` (creates
-    `bin/`,`log/`,`data/`) — WAL should live under `data/`.
-  - `crowkv-console/shared/src/lifecycle.rs` stdout/stderr log placement.
-  - Document the final hierarchy in `design-wal.md` / `design-console.md`.
-- Tests: workspace creates `data/wal/`; `WalConfig` resolves to the workspace
-  path for a managed node.
+**Tests:**
 
-### A2 — Restore-from-replay (rebuild a live replica) ✅ DONE
-- Add a restore path (e.g. `PxLocalReplica::restore_from_replay(id, role,
-  &ReplayResult)` or a free fn) that, from a `ReplayResult`, rebuilds:
-  - `PxAcceptor` promised/accepted per slot (highest-ballot wins — already the
-    replay dedup rule),
-  - `PxLearner` chosen entries + dedup cache,
-  - `current_term` and `voted_for` seeded into `ElectionPersistentState`.
-- Use existing acceptor/learner APIs; do **not** change Paxos semantics.
-- Tests: write a known accept/vote/dedup sequence → `ReplayResult` → restore →
-  assert `promised_at`/`accepted_at`/term/`voted_for`/dedup match.
+- [ ] Single record completes without waiting for millisecond interval.
+- [ ] Burst records coalesce into fewer durable flushes than records.
+- [ ] Worker error fails all records in the batch and marks WAL failed.
+- [ ] Append after failed WAL returns error.
 
-### A3 — Single-node crash/restart no-data-loss (real fsync) ← NEXT
-- Integration test under `crowkv/tests/cluster/` using a **tempfile** dir +
-  fallback `File` backend: attach WAL to a replica, accept entries (durable via
-  ack contract), drop everything (crash), `replay_group` + A2 restore into a
-  fresh replica, assert all accepted values + term + `voted_for` survive.
+### W4 — Backend-neutral durable flush and alignment
 
-### A4 — Attach WAL to the live store/group + startup replay ✅ DONE
-- Wire `WalEngine::create` + `replay_group` + A2 restore into
-  `PxKvStore`/`PxGroup` construction (and `crowkv-server` startup), gated so
-  no-WAL mode still works for existing in-memory tests.
-- Tests: a store created over a populated WAL dir comes up with prior state.
+- [ ] Introduce a `WalPipelineBackend` append / durable-flush API used by `WalEngine` workers.
+- [ ] Add human-readable UTF-8 line codec for `WALRecord`: one record per line, stable field names, escaped/base64 payload, and text decode for debugging/tests.
+- [ ] Add a WAL record format selector so file/test backends may use the text line codec while block backends use the binary framed codec.
+- [ ] File backend writes bytes then runs filesystem durable flush.
+- [ ] Block backend routes through alignment planner and direct / aligned write semantics.
+- [ ] Sim backend exposes deterministic counters for write count, durable flush count, and bytes.
+- [ ] Update log messages and docs from `fsync` to durable flush except where specifically describing filesystem behavior.
 
-### A5 — G2: multi-node kill/restart/re-elect/no-data-loss
-- End-to-end test (`crowkv/tests/cluster/g2_crash_restart_no_data_loss_test.rs`)
-  reusing the testkit harness with per-node tempfile WAL dirs: commit writes,
-  `kill` the leader, restart it (startup replay via A4), let the cluster
-  re-elect, verify committed data is intact and readable.
-- This is the `plan.md` §3 **G2** freeze gate.
+**Tests:**
 
-## B. Aligned block backend — full replay integration
+- [ ] Text codec round-trips every `RecordType`, including non-UTF-8 payload bytes.
+- [ ] File backend durable flush called once per drained batch.
+- [ ] Block backend respects 4 KiB alignment / RMW planning.
+- [ ] Sim backend can assert batching behavior without real disk.
 
-**Current status:** B1, B2, B3 all ✅ DONE (aligned 4 KiB device survives the full append→rotate→seal→replay cycle; tests in `crowkv/tests/wal/segment_tests.rs` and `manager_tests.rs`).
+### W5 — Replay-only restore for uncommitted accepted values
 
-### B1 — Segment padding tolerance ✅ DONE
-- Chose the simpler padding-tolerant `SegmentReader` over a header version
-  bump: `next_record` treats `FOOTER_MAGIC`/zero `frame_len` as clean end,
-  `read_footer` scans the tail past zero padding. Documented in `segment.rs`.
-- Record logical content length so a reader can find records/footer past device
-  padding: write logical length into the segment header at `seal()` (bump
-  `SEG_VERSION`, keep v1 readable) **or** make `SegmentReader` padding-tolerant
-  (treat a zero `frame_len` as clean end-of-records). Pick the simpler correct
-  option; document in `segment.rs`.
+- [ ] Change `PxLocalReplica::restore_from_replay` to restore `Promised` / `Accepted` into acceptor state without calling `learn()` for arbitrary accepted slots.
+- [ ] Preserve `current_term`, `voted_for`, role, and dedup restoration.
+- [ ] Keep a future hook for durable commit watermark / snapshot-covered apply.
+- [ ] Update tests that currently expect restore to warm the KV engine from accepted records.
 
-### B2 — Aligned `WalEngine` append + replay test ✅ DONE
-- `WalEngine` integration test over `BlockDevice::ssd_4k()`: append across
-  rotation, seal, `replay_group`, assert every record recovered and
-  `rmw_count`/`physical_bytes_written` reflect the aligned path.
+**Tests:**
 
-### B3 — Plumb alignment through config ✅ DONE
-- Add `WalConfig` alignment selection (default `Unaligned`); `WalEngine` builds
-  the per-pipeline `WalPipelineBackend` from it; remove the `#[allow(dead_code)]`
-  on `WalPipeline.backend` by actually consulting it.
+- [ ] Locally accepted but unchosen value is not visible in `KVEngine` immediately after restore.
+- [ ] Restored accepted value can still be adopted by Phase 1 and chosen.
+- [ ] Dedup cache survives replay independently of learner apply.
 
----
+### W6 — Durable commit watermark (P2)
 
-## 3. Conventions & boundaries
+- [ ] Add WAL record payload for the durable committed prefix / safe local chosen prefix.
+- [ ] Persist watermark only after local learner has applied the contiguous prefix.
+- [ ] Replay exposes `durable_commit_watermark` in `ReplayResult`.
+- [ ] Restore may apply only slots covered by this watermark, or seed learner state from snapshot once P3 exists.
+- [ ] Use watermark as the correct recovery floor to avoid full floor=0 sweeps.
 
-- Follow `/coding`: integration tests under `tests/`, structured `tracing`
-  fields (`store_id`/`group_id`/`slot`/`ballot`), no inline `#[cfg(test)] mod`.
-- SimDisk/`BlockDevice` unit tests: `#[tokio::test(flavor = "current_thread",
-  start_paused = true)]`. Crash/restart tests: real `File` backend over
-  `tempfile`.
-- **No consensus-semantics changes** — restore only rebuilds existing state.
-- **No `WALRecord` format reorder** — versioned/append-only (frozen at W2).
+**Tests:**
 
-## 4. Exit criteria
+- [ ] Crash/restart applies only watermark-covered slots.
+- [ ] Slots above watermark are recovered by bulk Phase 1 / heartbeat catch-up.
+- [ ] Restart recovery no longer needs to over-claim `contiguous_chosen` from local accepts.
 
-- Managed-node WAL lives under `runtime-data/N-<node_id>/data/wal/` and all log
-  paths follow the workspace hierarchy.
-- Startup replay restores acceptor/learner/term/`voted_for`/dedup (A2/A4).
-- G2 green: kill leader → restart → re-elect → no data loss (A5).
-- Aligned 4 KiB device survives the full append→seal→replay cycle (B1/B2).
+### W7 — Election up-to-date check from durable acceptor log tip
 
-Delete this file once all of §4 is green.
+- [ ] Add `PxAcceptor` accessor for highest accepted slot and that slot's term.
+- [ ] Change vote request payload to advertise accepted-log tip instead of learner `last_chosen_slot` / `last_chosen_term`.
+- [ ] Change `candidate_log_up_to_date` to compare durable accepted log tip.
+- [ ] Revisit `note_chosen` behavior after the accepted-tip check is in place.
+
+**Tests:**
+
+- [ ] Re-enable and pass `crowkv-server` dynamic replica test currently ignored.
+- [ ] Election rejects candidates missing a higher accepted log tip.
+- [ ] Election allows candidates whose accepted log tip is up to date even if learner watermark lags.
+
+### W8 — Web restart read-routing hardening
+
+- [ ] Investigate `crowkv-web` post-restart leader / endpoint resolution for per-store ephemeral gRPC ports.
+- [ ] Force monitor-cache refresh after server restart before KV reads are forwarded.
+- [ ] Gate linearizable reads until the target group reports a stable healthy leader.
+- [ ] Retry `NotLeader` with refreshed topology rather than stale cached endpoint.
+
+**Tests:**
+
+- [ ] Re-enable and pass `crowkv-web` cluster restart recovery test currently ignored.
+- [ ] Full restart with deleted keys verifies no stale leader / endpoint read resurrection.
+
+### W9 — ConfigChange and snapshot integration (P3/P4 prep)
+
+- [ ] Persist future `ConfigChange` records on the metadata lane.
+- [ ] Wire `SnapshotMarker` and snapshot slot into replay result.
+- [ ] Wire `compute_gc_slot` to real snapshot slot instead of stubbed value.
+- [ ] Health-gate repair / bulk Phase 1 on reachable configured quorum once config persistence exists.
+
+**Tests:**
+
+- [ ] Snapshot-covered WAL prefix can be GC'd safely.
+- [ ] Replayed config membership matches pre-restart group membership.
+- [ ] Repair refuses to proceed without reachable configured quorum.
+
+## 4. Implementation Order
+
+1. W1 config rename.
+2. W2 slot-affinity placement.
+3. W3/W4 event-driven backend-neutral flush pipeline.
+4. W5 replay-only restore.
+5. W6 durable commit watermark.
+6. W7 election accepted-tip fix and re-enable dynamic-replica test.
+7. W8 web restart read-routing fix and re-enable web restart test.
+8. W9 snapshot / config-change persistence prep.
+
+## 5. Validation Commands
+
+```bash
+cargo fmt --all
+cargo clippy --all-targets -- -D warnings
+cargo test -p crowkv --test wal
+cargo test -p crowkv --test cluster full_cluster_restart_keeps_deletes
+cargo test -p crowkv-server --test cluster_e2e_test -- --ignored
+cargo test -p crowkv-web --test cluster_restart_recovery_test -- --ignored
+```
+
+Run ignored tests only when working on their corresponding fixes. Do not un-ignore them until they pass in the normal suite.
+
+## 6. Decision Log
+
+- `Accepted` remains the only durable copy of the operation value; no separate KV op-log is introduced.
+- Physical segment slot ranges are metadata only and may contain holes.
+- Slot affinity is required for same-slot locality; per-record round-robin is no longer allowed.
+- Wake-drain-flush replaces fixed 1 ms batching as the default latency policy.
+- Restore must not treat one replica's accepted value as chosen.

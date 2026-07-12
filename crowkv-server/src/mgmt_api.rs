@@ -108,6 +108,13 @@ struct AddGroupRequest {
     replica_id: u64,
     #[serde(default)]
     initial_role: Option<AddGroupInitialRole>,
+    /// When `Some(false)`, the group is added **without** starting its election
+    /// driver, so it cannot self-elect at `quorum == 1` before its remotes are
+    /// wired (see `doc/bug-wal.md` §8.4). The subsequent remote-wiring rebuild
+    /// (`add_remote_replicas`) starts the driver with a correct quorum. Defaults
+    /// to starting the driver (backward compatible).
+    #[serde(default)]
+    start_election: Option<bool>,
 }
 
 #[derive(ToSchema, Serialize, Deserialize, Clone)]
@@ -484,12 +491,23 @@ async fn add_group(
             ),
         )
     })?;
-    store.add_group(group);
+    // Defer the election driver when the caller is about to wire remotes
+    // (multi-replica restore / creation). Avoids a `quorum == 1` self-election
+    // running `bulk_phase1` / `repair_once` against only itself, which can
+    // erase committed data (`doc/bug-wal.md` §8.4). The driver is started by
+    // the subsequent `add_remote_replicas` rebuild.
+    let start_election = req.start_election.unwrap_or(true);
+    if start_election {
+        store.add_group(group);
+    } else {
+        store.add_group_without_election(group);
+    }
 
     info!(
         store_id = sid,
         group_id = req.group_id,
         replica_id = req.replica_id,
+        start_election,
         "PxGroup added via management API"
     );
     Ok(StatusCode::CREATED)
@@ -716,6 +734,7 @@ async fn remove_remote_replica(
     let current_term = group.local_replica().current_term_snapshot();
     if new_group.quorum() == 1 {
         new_group.local_replica().become_leader();
+        new_group.local_replica().persist_current_vote().await;
         new_group.stamp_proposing_term(current_term);
     } else if group.leader_id() == rid {
         new_group.local_replica().become_follower(current_term);

@@ -12,6 +12,8 @@ doc only when a task touches a topic in its row. Line counts are approximate
 | `design.md` | ~490 | Master design: cross-cutting architecture, write/read flows, module decomposition. Read for scope-spanning questions. |
 | `plan.md` | ~190 | Phases (P1–P5), milestones, dependency order, decision log. Read before picking a task. |
 | `test.md` | ~250 | Test pyramid, invariants, failure-injection taxonomy, CI gates, suites. Read when adding/restructuring tests. |
+| `bug-wal.md` | ~90 | Restart-recovery **open problems** tracker (design moved to `design/design-wal.md`): web-layer resurrection, the `note_chosen` election regression, and the recovery-floor/P2–P4 roadmap. |
+| `plan-wal.md` | ~180 | Follow-up WAL implementation plan after `design/design-wal.md` review: slot-affinity placement, event-driven durable flush, replay-only restore, durable commit watermark, and restart-recovery fixes. |
 
 Web UI requirements now live in `requirement.md` §15.4.6 (single-page embeddable
 console, two hierarchy views, functional surface mapped to the `crowkv-web` API,
@@ -94,7 +96,7 @@ embedded Swagger, V2 deferral list).
 | `design/design-slot.md` | ~650 | `PxSlotList` / `PxSlotNode`: chunk layout, insert/get/trim, reclamation, performance model, future evolution. |
 | `design/design-storage-engine.md` | ~310 | Storage plug-in: per-key slot tracking, apply semantics, snapshot, compaction, compare, engine impls. |
 | `design/design-ui.md` | ~270 | Web UI design (v1 lean rewrite): 3-pane shell, two hierarchy views, slim React Flow canvas, inspector (Details/KV/Activity), embedded Swagger, minimal embedding contract. |
-| `design/design-wal.md` | ~300 | Write-ahead log: multi-disk segments, batched fsync, ack contract, replay, GC, disk loss. |
+| `design/design-wal.md` | ~470 | Write-ahead log: multi-disk segments, backend-neutral durable flush, ack contract, replay/restore/recovery, GC, disk loss. |
 
 ## How AI Should Use This Index
 

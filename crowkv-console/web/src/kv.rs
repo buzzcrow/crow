@@ -5,9 +5,12 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use crowkv_console_shared::clients::grpc::{GetOutcome, KvClient, ScanOutcome};
+use crowkv_console_shared::cluster::ReplicaRole;
 use crowkv_console_shared::error::Error as SharedError;
 use hex;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet, VecDeque};
+use tokio::time::{sleep, Duration};
 
 #[derive(Debug, Deserialize)]
 pub struct KvGetQuery {
@@ -99,6 +102,16 @@ pub async fn resolve_kv_endpoint(
         )
     })?;
 
+    kv_endpoint_for_node(state, sid, &node_id).await
+}
+
+async fn kv_endpoint_for_node(
+    state: &AppState,
+    sid: u64,
+    node_id: &str,
+) -> Result<String, (StatusCode, Json<ErrorBody>)> {
+    let node_id = node_id.to_string();
+
     // Each `PxKvStore` listens on its own gRPC port (ephemeral when created
     // via the management API with `port: None`), reported as the store's
     // `listen_addr`. KV requests must target that per-store endpoint — the
@@ -125,6 +138,42 @@ pub async fn resolve_kv_endpoint(
         Some(port) => Ok(format!("http://{}:{port}", host_of(&grpc_url))),
         None => Ok(grpc_url),
     }
+}
+
+async fn group_candidate_endpoints(
+    state: &AppState,
+    sid: u64,
+    gid: u64,
+) -> Result<Vec<String>, (StatusCode, Json<ErrorBody>)> {
+    let view = state.monitor_cache.resolve_group(sid, gid).await.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorBody {
+                error: format!("group {gid} in store {sid} not found or has no replicas"),
+            }),
+        )
+    })?;
+
+    let mut replicas = view.replicas;
+    replicas.sort_by_key(|replica| replica.role != ReplicaRole::Leader);
+
+    let mut seen = HashSet::new();
+    let mut endpoints = Vec::new();
+    for replica in replicas {
+        if let Ok(endpoint) = kv_endpoint_for_node(state, sid, &replica.node_id).await {
+            let canonical = canonical_endpoint(&endpoint);
+            if seen.insert(canonical) {
+                endpoints.push(endpoint);
+            }
+        }
+    }
+
+    if endpoints.is_empty() {
+        return Err(err_502(format!(
+            "group {gid} in store {sid} has no gRPC endpoints configured"
+        )));
+    }
+    Ok(endpoints)
 }
 
 #[derive(Debug, Serialize)]
@@ -167,6 +216,42 @@ fn host_of(grpc_url: &str) -> String {
     }
 }
 
+fn endpoint_from_hint(hint: &str) -> Option<String> {
+    let trimmed = hint.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn canonical_endpoint(endpoint: &str) -> String {
+    endpoint
+        .strip_prefix("http://")
+        .or_else(|| endpoint.strip_prefix("https://"))
+        .unwrap_or(endpoint)
+        .trim()
+        .to_string()
+}
+
+fn status_is_not_leader(status: &str) -> bool {
+    status.to_ascii_lowercase().contains("not leader")
+}
+
+fn enqueue_back(queue: &mut VecDeque<String>, pending: &mut HashSet<String>, endpoint: String) {
+    let canonical = canonical_endpoint(&endpoint);
+    if pending.insert(canonical) {
+        queue.push_back(endpoint);
+    }
+}
+
+fn enqueue_front(queue: &mut VecDeque<String>, pending: &mut HashSet<String>, endpoint: String) {
+    let canonical = canonical_endpoint(&endpoint);
+    if pending.insert(canonical) {
+        queue.push_front(endpoint);
+    }
+}
+
 /// Refresh the monitor cache for every node currently hosting a
 /// replica of `(sid, gid)`. Called on `NotLeader` so the next
 /// `leader_for` call can observe a post-election view.
@@ -197,18 +282,90 @@ where
     F: FnMut(KvClient) -> Fut,
     Fut: std::future::Future<Output = Result<T, SharedError>>,
 {
-    let endpoint = resolve_kv_endpoint(state, sid, gid).await?;
-    let client = KvClient::connect(endpoint).await.map_err(map_err)?;
-    match op(client).await {
-        Ok(v) => Ok(v),
-        Err(SharedError::NotLeader { .. }) => {
-            refresh_group_nodes(state, sid, gid).await;
-            let endpoint = resolve_kv_endpoint(state, sid, gid).await?;
-            let client = KvClient::connect(endpoint).await.map_err(map_err)?;
-            op(client).await.map_err(map_err)
-        }
-        Err(e) => Err(map_err(e)),
+    let mut queue = VecDeque::new();
+    let mut pending = HashSet::new();
+    let mut attempt_counts: HashMap<String, usize> = HashMap::new();
+    let mut last_err: Option<SharedError> = None;
+
+    enqueue_back(
+        &mut queue,
+        &mut pending,
+        resolve_kv_endpoint(state, sid, gid).await?,
+    );
+    for endpoint in group_candidate_endpoints(state, sid, gid).await? {
+        enqueue_back(&mut queue, &mut pending, endpoint);
     }
+
+    while let Some(endpoint) = queue.pop_front() {
+        let canonical = canonical_endpoint(&endpoint);
+        pending.remove(&canonical);
+        let count = attempt_counts.entry(canonical.clone()).or_default();
+        if *count >= 20 {
+            continue;
+        }
+        *count += 1;
+
+        let client = match KvClient::connect(endpoint.clone()).await {
+            Ok(client) => client,
+            Err(e) => {
+                last_err = Some(e);
+                continue;
+            }
+        };
+
+        match op(client).await {
+            Ok(v) => return Ok(v),
+            Err(SharedError::NotLeader { hint }) => {
+                last_err = Some(SharedError::NotLeader { hint: hint.clone() });
+                KvClient::invalidate_cache(&endpoint);
+                refresh_group_nodes(state, sid, gid).await;
+                sleep(Duration::from_millis(50)).await;
+                if let Some(endpoint) = endpoint_from_hint(&hint) {
+                    enqueue_front(&mut queue, &mut pending, endpoint);
+                }
+                if let Ok(endpoints) = group_candidate_endpoints(state, sid, gid).await {
+                    for endpoint in endpoints {
+                        enqueue_back(&mut queue, &mut pending, endpoint);
+                    }
+                }
+            }
+            Err(SharedError::UpstreamRpc { node_id, status }) => {
+                let err = SharedError::UpstreamRpc {
+                    node_id: node_id.clone(),
+                    status: status.clone(),
+                };
+                if node_id == "<grpc>" && !status_is_not_leader(&status) {
+                    return Err(map_err(err));
+                }
+                last_err = Some(err);
+                KvClient::invalidate_cache(&endpoint);
+                refresh_group_nodes(state, sid, gid).await;
+                sleep(Duration::from_millis(50)).await;
+                enqueue_front(&mut queue, &mut pending, endpoint);
+                if let Ok(endpoints) = group_candidate_endpoints(state, sid, gid).await {
+                    for endpoint in endpoints {
+                        enqueue_back(&mut queue, &mut pending, endpoint);
+                    }
+                }
+            }
+            Err(SharedError::NodeUnreachable { node_id, reason }) => {
+                last_err = Some(SharedError::NodeUnreachable { node_id, reason });
+                KvClient::invalidate_cache(&endpoint);
+                refresh_group_nodes(state, sid, gid).await;
+                if let Ok(endpoints) = group_candidate_endpoints(state, sid, gid).await {
+                    for endpoint in endpoints {
+                        enqueue_back(&mut queue, &mut pending, endpoint);
+                    }
+                }
+            }
+            Err(e) => return Err(map_err(e)),
+        }
+    }
+
+    Err(map_err(last_err.unwrap_or_else(|| SharedError::UpstreamRpc {
+        node_id: "<grpc>".into(),
+        status: format!("no reachable leader for group {gid} in store {sid}"),
+    })))
 }
 
 /// Get a value from the KV store.

@@ -95,6 +95,7 @@ async fn full_store_group_remote_cycle() {
                 group_id,
                 replica_id,
                 initial_role: None,
+                start_election: None,
             },
         )
         .await
@@ -108,6 +109,7 @@ async fn full_store_group_remote_cycle() {
                 group_id: group_id_2,
                 replica_id: replica_id_2,
                 initial_role: None,
+                start_election: None,
             },
         )
         .await

@@ -4,9 +4,14 @@ echo "Running pre-commit checks..."
 
 # Check formatting
 echo "Checking formatting..."
-cargo fmt --all -- --check
-if [ $? -ne 0 ]; then
-    echo "❌ Formatting check failed. Run 'cargo fmt' to fix."
+if ! cargo fmt --all -- --check; then
+    echo "⚠️  Formatting issues found. Running 'cargo fmt' to fix..."
+    cargo fmt --all
+    if ! cargo fmt --all -- --check; then
+        echo "❌ Formatting still failing after 'cargo fmt'. Fix manually before committing."
+        exit 1
+    fi
+    echo "✅ Formatting auto-fixed. Review and re-stage the changes, then commit again."
     exit 1
 fi
 

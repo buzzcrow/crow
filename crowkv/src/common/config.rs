@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 
 use crate::wal::pipeline_backend::WalBlockAlignment;
+use crate::wal::record::WalRecordFormat;
 
 /// Paxos retry configuration (static, global).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,6 +72,9 @@ pub struct WalConfig {
     /// targets byte-addressable media and the file backend; `Aligned` targets a
     /// block device (e.g. a 4 KiB SSD/NVMe) and selects a block pipeline.
     pub wal_alignment: WalBlockAlignment,
+    /// Record encoding format. `Auto` selects text lines for byte-addressable
+    /// file/test backends and binary frames for block-aligned backends.
+    pub wal_record_format: WalRecordFormat,
 }
 
 impl WalConfig {
@@ -99,6 +103,7 @@ impl Default for WalConfig {
             wal_min_retention_secs: 3600,
             gc_tick_secs: 30,
             wal_alignment: WalBlockAlignment::Unaligned,
+            wal_record_format: WalRecordFormat::Auto,
         }
     }
 }

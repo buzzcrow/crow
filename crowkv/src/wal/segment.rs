@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use crate::paxos::roles::SlotIndex;
 use crate::paxos::PxGroupId;
 
-use super::record::{RecordError, WALRecord};
+use super::record::{RecordError, WALRecord, WalRecordFormat};
 use super::{AsyncFile, IoBackend, OpenOptions};
 
 pub const SEG_MAGIC: u32 = 0x5345_474D;
@@ -50,6 +50,7 @@ pub struct WalSegment {
     pub max_slot: SlotIndex,
     pub record_count: u32,
     sealed: bool,
+    record_format: WalRecordFormat,
 }
 
 impl WalSegment {
@@ -62,6 +63,20 @@ impl WalSegment {
         dir: &Path,
         segment_id: u64,
         group_id: PxGroupId,
+    ) -> io::Result<Self> {
+        Self::create_with_format(backend, dir, segment_id, group_id, WalRecordFormat::Binary).await
+    }
+
+    /// Create a new segment file and write its header using the selected record format.
+    ///
+    /// # Errors
+    /// Returns IO error if the file cannot be created or written.
+    pub async fn create_with_format(
+        backend: &IoBackend,
+        dir: &Path,
+        segment_id: u64,
+        group_id: PxGroupId,
+        record_format: WalRecordFormat,
     ) -> io::Result<Self> {
         let filename = format!("seg-{segment_id:07}.log");
         let path = dir.join(filename);
@@ -81,6 +96,7 @@ impl WalSegment {
             max_slot: 0,
             record_count: 0,
             sealed: false,
+            record_format,
         })
     }
 
@@ -95,7 +111,10 @@ impl WalSegment {
     /// Returns IO error if the write fails.
     pub async fn append(&mut self, record: &WALRecord) -> io::Result<u64> {
         assert!(!self.sealed, "append to sealed segment");
-        let encoded = record.encode();
+        let encoded = match self.record_format {
+            WalRecordFormat::Auto | WalRecordFormat::Binary => record.encode(),
+            WalRecordFormat::TextLine => record.encode_text_line().into_bytes(),
+        };
         let offset = self.write_offset;
         self.file.write_at(&encoded, offset).await?;
         self.write_offset += encoded.len() as u64;
@@ -249,6 +268,11 @@ impl SegmentReader {
             return Ok(None);
         }
 
+        let record_offset = self.offset;
+        if self.next_record_is_text().await? {
+            return self.next_text_record(record_offset).await;
+        }
+
         // Peek the next frame marker (the `frame_len` of a record, the
         // `FOOTER_MAGIC` of a seal footer, or `0` for trailing padding).
         let mut frame_hdr = [0u8; 4];
@@ -284,10 +308,47 @@ impl SegmentReader {
             .await
             .map_err(|_| (RecordError::Truncated, self.offset))?;
 
-        let record_offset = self.offset;
         match WALRecord::decode(&buf) {
             Ok((record, consumed)) => {
                 self.offset += consumed as u64;
+                Ok(Some((record, record_offset)))
+            }
+            Err(e) => Err((e, self.offset)),
+        }
+    }
+
+    async fn next_record_is_text(&mut self) -> Result<bool, (RecordError, u64)> {
+        let prefix = WALRecord::TEXT_PREFIX.as_bytes();
+        if self.file_len - self.offset < prefix.len() as u64 {
+            return Ok(false);
+        }
+        let mut buf = vec![0u8; prefix.len()];
+        self.file
+            .read_exact_at(&mut buf, self.offset)
+            .await
+            .map_err(|_| (RecordError::Truncated, self.offset))?;
+        Ok(buf == prefix)
+    }
+
+    async fn next_text_record(
+        &mut self,
+        record_offset: u64,
+    ) -> Result<Option<(WALRecord, u64)>, (RecordError, u64)> {
+        let max_len = usize::try_from(self.file_len - self.offset).expect("record tail exceeds usize");
+        let mut buf = vec![0u8; max_len];
+        self.file
+            .read_exact_at(&mut buf, self.offset)
+            .await
+            .map_err(|_| (RecordError::Truncated, self.offset))?;
+        let newline_idx = buf
+            .iter()
+            .position(|b| *b == b'\n')
+            .ok_or((RecordError::Truncated, self.offset))?;
+        let line = std::str::from_utf8(&buf[..=newline_idx])
+            .map_err(|e| (RecordError::BadText(format!("invalid UTF-8: {e}")), self.offset))?;
+        match WALRecord::decode_text_line(line) {
+            Ok(record) => {
+                self.offset += (newline_idx + 1) as u64;
                 Ok(Some((record, record_offset)))
             }
             Err(e) => Err((e, self.offset)),

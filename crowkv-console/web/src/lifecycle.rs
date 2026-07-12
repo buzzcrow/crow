@@ -720,6 +720,9 @@ pub async fn http_restart_node_server(
         cfg.add_server(new_entry).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
+    crate::mgmt::restore_persisted_topology_for_node(&state, &node_id)
+        .await
+        .map_err(|e| err_502(format!("restore topology after restart: {e}")))?;
 
     Ok(Json(DeployResult {
         node_id,

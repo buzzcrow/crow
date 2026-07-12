@@ -77,6 +77,24 @@ async fn append_multiple_records_different_slots() {
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn auto_format_unaligned_engine_replays_text_line_records() {
+    let group_id = 3u64;
+    let backend = sim_backend();
+    let disk = PathBuf::from("/wal-text-auto");
+    let config = test_config(vec![disk.clone()]);
+    let wal = WalEngine::create(backend.clone(), config, group_id)
+        .await
+        .unwrap();
+
+    let record = WALRecord::from_promised(group_id, 7, 11, PxBallot::new(2, 9));
+    wal.append(&record).await.unwrap();
+    wal.seal_all().await.unwrap();
+
+    let replay = replay_group(&backend, &[disk], group_id).await.unwrap();
+    assert_eq!(replay.records, vec![record]);
+}
+
+#[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn multi_disk_round_robin() {
     let backend = sim_backend();
     let config = test_config(vec![PathBuf::from("/wal-disk0"), PathBuf::from("/wal-disk1")]);

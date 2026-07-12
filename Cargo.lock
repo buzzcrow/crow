@@ -694,6 +694,7 @@ dependencies = [
  "async-trait",
  "axum",
  "clap",
+ "crowkv",
  "crowkv-console-shared",
  "hex",
  "reqwest",

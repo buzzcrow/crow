@@ -117,3 +117,79 @@ fn noop_entry_roundtrip() {
     assert!(recovered.client_id.is_none());
     assert!(recovered.seq.is_none());
 }
+
+#[test]
+fn text_line_roundtrips_all_record_types_and_binary_payload() {
+    let records = vec![
+        WALRecord::from_promised(1, 2, 3, PxBallot::new(4, 5)),
+        WALRecord {
+            record_type: RecordType::Accepted,
+            group_id: 10,
+            term: 20,
+            slot: 30,
+            ballot: PxBallot::new(40, 50),
+            payload: Bytes::from_static(&[0, 1, 2, 0xff, b'\n', b' ', b'=']),
+        },
+        WALRecord {
+            record_type: RecordType::ConfigChange,
+            group_id: 11,
+            term: 21,
+            slot: 0,
+            ballot: PxBallot::new(0, 0),
+            payload: Bytes::from_static(b"members=1,2,3"),
+        },
+        WALRecord {
+            record_type: RecordType::DedupCheckpoint,
+            group_id: 12,
+            term: 22,
+            slot: 0,
+            ballot: PxBallot::new(0, 0),
+            payload: Bytes::from_static(&[9, 8, 7]),
+        },
+        WALRecord {
+            record_type: RecordType::SnapshotMarker,
+            group_id: 13,
+            term: 23,
+            slot: 99,
+            ballot: PxBallot::new(0, 0),
+            payload: Bytes::new(),
+        },
+        WALRecord::from_vote_granted(14, 24, 34),
+    ];
+
+    for record in records {
+        let line = record.encode_text_line();
+        assert!(line.is_ascii());
+        assert!(line.ends_with('\n'));
+        assert!(line.starts_with("CROW_WAL_TEXT "));
+        assert!(line.contains(" payload_hex="));
+        assert!(line.contains(" crc32c="));
+        let decoded = WALRecord::decode_text_line(&line).unwrap();
+        assert_eq!(decoded, record);
+    }
+}
+
+#[test]
+fn text_line_corruption_returns_bad_crc() {
+    let record = WALRecord::from_promised(1, 2, 3, PxBallot::new(4, 5));
+    let mut line = record.encode_text_line();
+    let idx = line.find("slot=3").unwrap() + "slot=".len();
+    line.replace_range(idx..=idx, "4");
+
+    assert!(matches!(
+        WALRecord::decode_text_line(&line),
+        Err(RecordError::BadCrc { .. })
+    ));
+}
+
+#[test]
+fn text_line_rejects_malformed_payload_hex() {
+    let body = "CROW_WAL_TEXT v=1 type=Promised group_id=1 term=2 slot=3 ballot_round=4 ballot_leader_id=5 payload_hex=abc";
+    let crc = crc32c::crc32c(body.as_bytes());
+    let line = format!("{body} crc32c={crc:08x}\n");
+
+    assert!(matches!(
+        WALRecord::decode_text_line(&line),
+        Err(RecordError::BadText(_))
+    ));
+}

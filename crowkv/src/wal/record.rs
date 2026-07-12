@@ -24,6 +24,7 @@
 //! where `HEADER_BODY_LEN = 4+2+1+8+8+8+8+8+4 = 51`.
 
 use bytes::Bytes;
+use std::fmt::Write;
 
 use crate::paxos::roles::{PxBallot, PxLogEntry, PxLogEntryKind, SlotIndex};
 use crate::paxos::{PxGroupId, PxTerm};
@@ -39,6 +40,14 @@ pub const HEADER_BODY_LEN: usize = 4 + 2 + 1 + 8 + 8 + 8 + 8 + 8 + 4; // 51
 
 /// Minimum encoded record size: `frame_len(4)` + `header_body(51)` + crc(4) = 59.
 pub const MIN_RECORD_SIZE: usize = 4 + HEADER_BODY_LEN + 4;
+
+/// Encoding format used for WAL records inside a segment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WalRecordFormat {
+    Auto,
+    Binary,
+    TextLine,
+}
 
 /// Discriminant for [`RecordType`]. Stable; append-only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +73,29 @@ impl RecordType {
             _ => None,
         }
     }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Promised => "Promised",
+            Self::Accepted => "Accepted",
+            Self::ConfigChange => "ConfigChange",
+            Self::DedupCheckpoint => "DedupCheckpoint",
+            Self::SnapshotMarker => "SnapshotMarker",
+            Self::VoteGranted => "VoteGranted",
+        }
+    }
+
+    fn from_name(value: &str) -> Result<Self, RecordError> {
+        match value {
+            "Promised" => Ok(Self::Promised),
+            "Accepted" => Ok(Self::Accepted),
+            "ConfigChange" => Ok(Self::ConfigChange),
+            "DedupCheckpoint" => Ok(Self::DedupCheckpoint),
+            "SnapshotMarker" => Ok(Self::SnapshotMarker),
+            "VoteGranted" => Ok(Self::VoteGranted),
+            _ => Err(RecordError::BadText(format!("unknown record type: {value}"))),
+        }
+    }
 }
 
 /// Typed decode error.
@@ -74,6 +106,7 @@ pub enum RecordError {
     BadMagic(u32),
     BadVersion(u16),
     BadRecordType(u8),
+    BadText(String),
 }
 
 impl std::fmt::Display for RecordError {
@@ -86,6 +119,7 @@ impl std::fmt::Display for RecordError {
             Self::BadMagic(m) => write!(f, "bad magic: {m:#x}"),
             Self::BadVersion(v) => write!(f, "bad version: {v}"),
             Self::BadRecordType(t) => write!(f, "bad record type: {t}"),
+            Self::BadText(msg) => write!(f, "bad text record: {msg}"),
         }
     }
 }
@@ -104,6 +138,8 @@ pub struct WALRecord {
 }
 
 impl WALRecord {
+    pub const TEXT_PREFIX: &'static str = "CROW_WAL_TEXT";
+
     /// Encode to the on-disk byte layout. Returns the complete framed record.
     ///
     /// # Panics
@@ -224,6 +260,97 @@ impl WALRecord {
             },
             total,
         ))
+    }
+
+    /// Encode to a self-checking UTF-8 line format.
+    #[must_use]
+    pub fn encode_text_line(&self) -> String {
+        let mut line = format!(
+            "{} v={} type={} group_id={} term={} slot={} ballot_round={} ballot_leader_id={} payload_hex={}",
+            Self::TEXT_PREFIX,
+            WAL_VERSION,
+            self.record_type.as_str(),
+            self.group_id,
+            self.term,
+            self.slot,
+            self.ballot.round,
+            self.ballot.leader_id,
+            encode_hex(&self.payload)
+        );
+        let crc = crc32c::crc32c(line.as_bytes());
+        let _ = writeln!(line, " crc32c={crc:08x}");
+        line
+    }
+
+    /// Decode one UTF-8 text WAL record line.
+    ///
+    /// # Errors
+    /// Returns `RecordError` if the line is malformed, has a bad CRC, uses an
+    /// unsupported version, or contains an unknown record type.
+    pub fn decode_text_line(line: &str) -> Result<Self, RecordError> {
+        let line = line.trim_end_matches(['\r', '\n']);
+        let (body, crc_hex) = line
+            .rsplit_once(" crc32c=")
+            .ok_or_else(|| RecordError::BadText("missing crc32c field".to_string()))?;
+        let got = parse_hex_u32(crc_hex)?;
+        let expected = crc32c::crc32c(body.as_bytes());
+        if got != expected {
+            return Err(RecordError::BadCrc { expected, got });
+        }
+
+        let mut fields = body.split(' ');
+        let prefix = fields
+            .next()
+            .ok_or_else(|| RecordError::BadText("missing prefix".to_string()))?;
+        if prefix != Self::TEXT_PREFIX {
+            return Err(RecordError::BadText(format!("bad prefix: {prefix}")));
+        }
+
+        let mut version = None;
+        let mut record_type = None;
+        let mut group_id = None;
+        let mut term = None;
+        let mut slot = None;
+        let mut ballot_round = None;
+        let mut ballot_leader_id = None;
+        let mut payload = None;
+
+        for field in fields {
+            let (key, value) = field
+                .split_once('=')
+                .ok_or_else(|| RecordError::BadText(format!("malformed field: {field}")))?;
+            match key {
+                "v" => version = Some(parse_u16(value, key)?),
+                "type" => record_type = Some(RecordType::from_name(value)?),
+                "group_id" => group_id = Some(parse_u64(value, key)?),
+                "term" => term = Some(parse_u64(value, key)?),
+                "slot" => slot = Some(parse_u64(value, key)?),
+                "ballot_round" => ballot_round = Some(parse_u64(value, key)?),
+                "ballot_leader_id" => ballot_leader_id = Some(parse_u64(value, key)?),
+                "payload_hex" => payload = Some(decode_hex(value)?),
+                _ => return Err(RecordError::BadText(format!("unknown field: {key}"))),
+            }
+        }
+
+        let version = version.ok_or_else(|| RecordError::BadText("missing v field".to_string()))?;
+        if version != WAL_VERSION {
+            return Err(RecordError::BadVersion(version));
+        }
+
+        Ok(Self {
+            record_type: record_type.ok_or_else(|| RecordError::BadText("missing type field".to_string()))?,
+            group_id: group_id.ok_or_else(|| RecordError::BadText("missing group_id field".to_string()))?,
+            term: term.ok_or_else(|| RecordError::BadText("missing term field".to_string()))?,
+            slot: slot.ok_or_else(|| RecordError::BadText("missing slot field".to_string()))?,
+            ballot: PxBallot::new(
+                ballot_round.ok_or_else(|| RecordError::BadText("missing ballot_round field".to_string()))?,
+                ballot_leader_id
+                    .ok_or_else(|| RecordError::BadText("missing ballot_leader_id field".to_string()))?,
+            ),
+            payload: Bytes::from(
+                payload.ok_or_else(|| RecordError::BadText("missing payload_hex field".to_string()))?,
+            ),
+        })
     }
 
     // ── Accepted payload helpers ───────────────────────────
@@ -362,6 +489,65 @@ fn decode_accepted_payload(rec: &WALRecord) -> Option<PxLogEntry> {
 }
 
 // ── Primitive read helpers ──────────────────────────────────
+
+fn parse_u16(value: &str, field: &str) -> Result<u16, RecordError> {
+    value
+        .parse::<u16>()
+        .map_err(|e| RecordError::BadText(format!("invalid {field}: {e}")))
+}
+
+fn parse_u64(value: &str, field: &str) -> Result<u64, RecordError> {
+    value
+        .parse::<u64>()
+        .map_err(|e| RecordError::BadText(format!("invalid {field}: {e}")))
+}
+
+fn parse_hex_u32(value: &str) -> Result<u32, RecordError> {
+    u32::from_str_radix(value, 16).map_err(|e| RecordError::BadText(format!("invalid crc32c: {e}")))
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(nibble_to_hex(byte >> 4));
+        out.push(nibble_to_hex(byte & 0x0f));
+    }
+    out
+}
+
+fn decode_hex(value: &str) -> Result<Vec<u8>, RecordError> {
+    let bytes = value.as_bytes();
+    if bytes.len() % 2 != 0 {
+        return Err(RecordError::BadText("payload_hex has odd length".to_string()));
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for chunk in bytes.chunks_exact(2) {
+        let high = hex_to_nibble(chunk[0])?;
+        let low = hex_to_nibble(chunk[1])?;
+        out.push((high << 4) | low);
+    }
+    Ok(out)
+}
+
+fn nibble_to_hex(value: u8) -> char {
+    match value {
+        0..=9 => char::from(b'0' + value),
+        10..=15 => char::from(b'a' + (value - 10)),
+        _ => unreachable!("nibble out of range"),
+    }
+}
+
+fn hex_to_nibble(value: u8) -> Result<u8, RecordError> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        b'A'..=b'F' => Ok(value - b'A' + 10),
+        _ => Err(RecordError::BadText(format!(
+            "invalid hex digit: {}",
+            char::from(value)
+        ))),
+    }
+}
 
 fn read_u16(buf: &[u8], off: &mut usize) -> u16 {
     let v = u16::from_le_bytes([buf[*off], buf[*off + 1]]);

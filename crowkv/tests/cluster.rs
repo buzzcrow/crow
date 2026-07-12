@@ -33,6 +33,15 @@ mod election;
 #[path = "cluster/g1_step_down_survival_test.rs"]
 mod g1_step_down_survival;
 
+#[path = "cluster/a3_crash_restart_no_data_loss_test.rs"]
+mod a3_crash_restart_no_data_loss;
+
+#[path = "cluster/g2_crash_restart_no_data_loss_test.rs"]
+mod g2_crash_restart_no_data_loss;
+
+#[path = "cluster/full_restart_delete_test.rs"]
+mod full_restart_delete;
+
 // These suites drive crate-internal mechanisms via the `test-util` feature
 // hooks on `PxGroup`; they compile only when that feature is enabled (the
 // crate's self dev-dependency turns it on for `cargo test`).
