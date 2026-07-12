@@ -55,3 +55,13 @@ crowkv-console/web/ui/*.tsbuildinfo
 
 # Test logs and artifacts from integration tests
 test-logs/
+
+# C++ crowtree build directories
+crowtree/build/
+crowtree/build-asan/
+crowtree/build-tsan/
+
+# C++ build artifacts
+*.o
+*.a
+compile_commands.json

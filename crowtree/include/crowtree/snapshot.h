@@ -6,7 +6,6 @@
 // root (zero-copy). The in-memory core materializes the keyspace into an
 // independent immutable copy instead; this is correct and keeps writes lock-free
 // for latest reads, at O(N) snapshot cost. Path-copy COW is a later optimization.
-// See plan-core-tree.md implementation log.
 #pragma once
 
 #include <cstdint>

@@ -42,6 +42,10 @@ class MappingTable {
   // Number of segments currently allocated (diagnostics).
   size_t SegmentsAllocated() const;
 
+  // Recovery: resume fresh PID allocation past the highest persisted PID.
+  void SetNextPid(uint64_t next);
+  uint64_t NextPid() const;
+
  private:
   using Slot = std::atomic<PageBase*>;
   struct Segment {

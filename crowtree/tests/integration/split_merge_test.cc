@@ -101,6 +101,72 @@ TEST(SplitMerge, MergeAndRootCollapse) {
   EXPECT_EQ(snap->size(), 2u);
 }
 
+TEST(SplitMerge, LargeFlushSpanningLeavesSplitsMidFlush) {
+  // Regression: one Flush() drains keys spanning many existing leaves and
+  // triggers splits mid-flush. Each per-leaf group must be routed against the
+  // CURRENT tree (after prior groups' SMOs), not a routing snapshot captured
+  // before the flush began. Otherwise later keys land in a just-split leaf.
+  Options opt;
+  opt.max_delta_len = 0;       // consolidate on every flush
+  opt.leaf_split_bytes = 200;  // small leaves -> splits during the big flush
+  opt.leaf_merge_bytes = 40;
+  // Keep auto-flush from firing so we control exactly when the big flush runs.
+  opt.memtable_flush_bytes = 1ull << 40;
+  opt.memtable_flush_entries = 1u << 30;
+  CrowtreeEnv env;
+  Crowtree t(env, opt);
+
+  std::map<std::string, std::string> oracle;
+  uint64_t slot = 0;
+
+  // Phase A: build a multi-level tree with incremental flushes.
+  const int N = 400;
+  for (int i = 0; i < N; i += 2) {  // even keys first
+    ++slot;
+    std::string val = "a" + std::to_string(slot);
+    ASSERT_TRUE(t.Apply(slot, Put1(Key(i), val), slot).ok());
+    oracle[Key(i)] = val;
+    ASSERT_TRUE(t.Flush().ok());
+  }
+  ASSERT_GT(t.Height(), 1);
+  ASSERT_GT(t.LeafCount(), 2u);
+
+  // Phase B: stage many keys interleaved across the whole keyspace WITHOUT
+  // flushing, so a single Flush() drains a set that spans every existing leaf
+  // and grows several of them past the split threshold in one pass.
+  for (int i = 1; i < N; i += 2) {  // odd keys interleave between existing keys
+    ++slot;
+    std::string val = "b" + std::to_string(slot);
+    ASSERT_TRUE(t.Apply(slot, Put1(Key(i), val), slot).ok());
+    oracle[Key(i)] = val;
+  }
+  // Also overwrite a spread of even keys so groups are non-trivial.
+  for (int i = 0; i < N; i += 8) {
+    ++slot;
+    std::string val = "c" + std::to_string(slot);
+    ASSERT_TRUE(t.Apply(slot, Put1(Key(i), val), slot).ok());
+    oracle[Key(i)] = val;
+  }
+  // The single flush that exercises mid-flush re-routing.
+  ASSERT_TRUE(t.Flush().ok());
+
+  // Every key must be present and correct.
+  for (int i = 0; i < N; ++i) {
+    std::string v;
+    uint64_t s;
+    ASSERT_TRUE(t.Get(Slice(Key(i)), &s, &v)) << "missing " << Key(i);
+    EXPECT_EQ(v, oracle[Key(i)]) << "wrong value " << Key(i);
+  }
+
+  // Snapshot is globally key-sorted and complete (no entry lost to a stale
+  // route into a split leaf).
+  auto snap = t.SnapshotView();
+  ASSERT_EQ(snap->size(), oracle.size());
+  for (size_t i = 1; i < snap->size(); ++i) {
+    EXPECT_LT(snap->entries()[i - 1].key, snap->entries()[i].key);
+  }
+}
+
 TEST(SplitMerge, ParityWithOracleUnderSplits) {
   Options opt;
   opt.max_delta_len = 2;

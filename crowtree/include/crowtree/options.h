@@ -7,6 +7,8 @@
 
 namespace crowtree {
 
+class PageStore;
+
 struct Options {
   // ── Consolidation (core doc §7) ──
   // Fold a leaf's delta chain into a fresh base when either threshold trips.
@@ -31,6 +33,12 @@ struct Options {
   // Run the flusher on a background thread. Tests often set this false and
   // drive flush() synchronously for determinism.
   bool background_flush = false;
+
+  // ── Persistence (design-crowtree-persistence.md) ──
+  // Durable backend. Non-owning; nullptr = pure in-memory engine (no
+  // checkpoint/recovery). When set, Checkpoint() writes the materialized L1
+  // state and Open() recovers it.
+  PageStore* page_store = nullptr;
 };
 
 }  // namespace crowtree

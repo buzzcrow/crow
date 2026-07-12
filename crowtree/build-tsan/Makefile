@@ -273,6 +273,54 @@ src/memtable.cc.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree.dir/build.make CMakeFiles/crowtree.dir/src/memtable.cc.s
 .PHONY : src/memtable.cc.s
 
+tests/integration/parity_test.o: tests/integration/parity_test.cc.o
+.PHONY : tests/integration/parity_test.o
+
+# target to build an object file
+tests/integration/parity_test.cc.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/integration/parity_test.cc.o
+.PHONY : tests/integration/parity_test.cc.o
+
+tests/integration/parity_test.i: tests/integration/parity_test.cc.i
+.PHONY : tests/integration/parity_test.i
+
+# target to preprocess a source file
+tests/integration/parity_test.cc.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/integration/parity_test.cc.i
+.PHONY : tests/integration/parity_test.cc.i
+
+tests/integration/parity_test.s: tests/integration/parity_test.cc.s
+.PHONY : tests/integration/parity_test.s
+
+# target to generate assembly for a file
+tests/integration/parity_test.cc.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/integration/parity_test.cc.s
+.PHONY : tests/integration/parity_test.cc.s
+
+tests/integration/read_path_test.o: tests/integration/read_path_test.cc.o
+.PHONY : tests/integration/read_path_test.o
+
+# target to build an object file
+tests/integration/read_path_test.cc.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/integration/read_path_test.cc.o
+.PHONY : tests/integration/read_path_test.cc.o
+
+tests/integration/read_path_test.i: tests/integration/read_path_test.cc.i
+.PHONY : tests/integration/read_path_test.i
+
+# target to preprocess a source file
+tests/integration/read_path_test.cc.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/integration/read_path_test.cc.i
+.PHONY : tests/integration/read_path_test.cc.i
+
+tests/integration/read_path_test.s: tests/integration/read_path_test.cc.s
+.PHONY : tests/integration/read_path_test.s
+
+# target to generate assembly for a file
+tests/integration/read_path_test.cc.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/integration/read_path_test.cc.s
+.PHONY : tests/integration/read_path_test.cc.s
+
 tests/integration/split_merge_test.o: tests/integration/split_merge_test.cc.o
 .PHONY : tests/integration/split_merge_test.o
 
@@ -296,6 +344,30 @@ tests/integration/split_merge_test.s: tests/integration/split_merge_test.cc.s
 tests/integration/split_merge_test.cc.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/integration/split_merge_test.cc.s
 .PHONY : tests/integration/split_merge_test.cc.s
+
+tests/integration/stress_test.o: tests/integration/stress_test.cc.o
+.PHONY : tests/integration/stress_test.o
+
+# target to build an object file
+tests/integration/stress_test.cc.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/integration/stress_test.cc.o
+.PHONY : tests/integration/stress_test.cc.o
+
+tests/integration/stress_test.i: tests/integration/stress_test.cc.i
+.PHONY : tests/integration/stress_test.i
+
+# target to preprocess a source file
+tests/integration/stress_test.cc.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/integration/stress_test.cc.i
+.PHONY : tests/integration/stress_test.cc.i
+
+tests/integration/stress_test.s: tests/integration/stress_test.cc.s
+.PHONY : tests/integration/stress_test.s
+
+# target to generate assembly for a file
+tests/integration/stress_test.cc.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/crowtree_tests.dir/build.make CMakeFiles/crowtree_tests.dir/tests/integration/stress_test.cc.s
+.PHONY : tests/integration/stress_test.cc.s
 
 tests/integration/write_path_test.o: tests/integration/write_path_test.cc.o
 .PHONY : tests/integration/write_path_test.o
@@ -587,9 +659,18 @@ help:
 	@echo "... src/memtable.o"
 	@echo "... src/memtable.i"
 	@echo "... src/memtable.s"
+	@echo "... tests/integration/parity_test.o"
+	@echo "... tests/integration/parity_test.i"
+	@echo "... tests/integration/parity_test.s"
+	@echo "... tests/integration/read_path_test.o"
+	@echo "... tests/integration/read_path_test.i"
+	@echo "... tests/integration/read_path_test.s"
 	@echo "... tests/integration/split_merge_test.o"
 	@echo "... tests/integration/split_merge_test.i"
 	@echo "... tests/integration/split_merge_test.s"
+	@echo "... tests/integration/stress_test.o"
+	@echo "... tests/integration/stress_test.i"
+	@echo "... tests/integration/stress_test.s"
 	@echo "... tests/integration/write_path_test.o"
 	@echo "... tests/integration/write_path_test.i"
 	@echo "... tests/integration/write_path_test.s"

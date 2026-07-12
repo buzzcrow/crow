@@ -12,12 +12,14 @@ the C API surface used by the Rust FFI adapter.
 
 - [1. PageStore Abstraction](#1-pagestore-abstraction)
 - [2. Backends](#2-backends)
-- [3. On-Disk Page Format](#3-on-disk-page-format)
-- [4. Page Cache and Dirty Tracking](#4-page-cache-and-dirty-tracking)
+- [3. On-Disk Page Format (Zero-Copy Frame)](#3-on-disk-page-format-zero-copy-frame)
+- [4. Buffer Pool (Frame Cache) and Dirty Tracking](#4-buffer-pool-frame-cache-and-dirty-tracking)
 - [5. Checkpoint](#5-checkpoint)
+- [5A. High-Performance Write/Durability Pipeline](#5a-high-performance-writedurability-pipeline)
 - [6. Internal WAL Decision](#6-internal-wal-decision)
 - [7. Recovery](#7-recovery)
 - [8. C API](#8-c-api)
+- [9. Snapshot Export / Import](#9-snapshot-export--import)
 
 ---
 
@@ -90,49 +92,209 @@ target is `FilePageStore` (and the in-memory `BlockPageStore` for tests).
 
 ---
 
-## 3. On-Disk Page Format
+## 3. On-Disk Page Format (Zero-Copy Frame)
 
-A flushed page is self-describing and checksummed so recovery can validate it
-without external metadata.
+**Decision (D-Q6): the in-memory and on-disk page representations are
+identical.** A page is a fixed-size *frame*; loading is one `read_page` into a
+frame with **no decode/copy**, and the B+tree reads, binary-searches, and
+compares keys directly on the frame bytes. Persisting is the reverse: write the
+frame bytes (optionally compressed) back. There is no separate "C++ object" form
+for base pages — `LeafBase`/`InnerBase` become thin **views** over a frame.
+
+### 3.1 Frame geometry
+
+- A frame is `page_bytes` long (default **16 KiB**, configurable; a multiple of
+  the backend IU). All frames in a pool are the same size, so the buffer pool
+  (§4) is a flat array of frames with O(1) indexing.
+- An entry (key + cell) larger than a frame's usable space spills to an
+  **overflow chain** (a linked list of overflow frames whose body is raw value
+  bytes); the leaf slot stores an overflow pointer instead of an inline cell.
+  Overflow is a later milestone; v1 caps entry size at the frame payload.
+
+### 3.2 Slotted layout (leaf)
+
+The slotted page is the standard "sorted slot directory growing forward +
+records growing backward" so keys stay binary-searchable in place and inserts
+don't rewrite the record bytes.
 
 ```
-On-disk page (multiple of IU size):
-+-------------------------------+ offset 0
-| PageDiskHeader                |  type, version, self_pid, logical_len,
-|                               |  last_applied_slot_hint, flags(compressed)
-+-------------------------------+
-| Page body                     |  consolidated leaf/inner base page (§3 core doc)
-|                               |  (optionally LZ4/zstd compressed)
-+-------------------------------+
-| Zero padding to IU boundary   |
-+-------------------------------+
-| Trailer: logical_len, CRC32C  |  CRC covers header+body+padding
-+-------------------------------+
+frame (page_bytes):
++--------------------------------------------------+ 0
+| FrameHeader (fixed, 64 B)                        |  magic, type, version, flags,
+|   slot_count u16, free_lo u16, free_hi u16,      |  self_pid, right_sibling,
+|   logical_len u32, lsn/last_applied_slot u64,    |  page_bytes, crc32c (trailer)
+|   self_pid u64, right_sibling u64 (leaf only)    |
++--------------------------------------------------+ 64
+| Slot directory: Slot[slot_count]                 |  grows forward (free_lo)
+|   Slot = { rec_off u16, key_len u16, cell_len u16 } (sorted by key)
++--------------------------------------------------+
+| ... free space ...                               |
++--------------------------------------------------+ free_hi
+| Records: [key bytes][cell bytes] ...             |  grows backward from end
++--------------------------------------------------+ page_bytes - trailer
+| Trailer: { logical_len u32, crc32c u32 }         |  CRC over [0, logical_len)
++--------------------------------------------------+
 ```
 
-- **Only base pages are flushed.** Delta chains are an in-memory, pre-consolidation
-  optimization; a checkpoint consolidates them first (§5). Inner pages are flushed
-  too (small).
-- **`logical_len`** in the trailer lets the reader ignore IU zero padding (the
-  alignment marker requirement carried over from the WAL block-alignment work).
-- **CRC32C** mismatch ⇒ the page is treated as torn/corrupt; recovery falls back
-  to the previous checkpoint (§7).
-- Compression is a per-page option negotiated by the backend; the header flag
-  records it so reads can decompress transparently.
+- The slot directory is **kept sorted by key**, so lookup is a binary search
+  reading `key(i)` directly from the frame (`Slice` into the record region — zero
+  copy). `cell(i)` likewise returns a `Slice` over the cell payload (§2 core doc).
+- Insert: append the record at `free_hi`, splice a `Slot` into the sorted
+  position (a small `memmove` of the slot array only, not the records). Delete:
+  remove the slot (records become dead space). **Compaction** rewrites a fresh
+  frame when dead space crosses a threshold — and, because L1 is single-writer
+  COW (§5), most leaf mutation already produces a fresh frame.
+- `data_bytes` (for split/merge thresholds, core §8) = `free_lo` + (page_bytes −
+  `free_hi`) − header/trailer, i.e. live slot + record bytes.
+
+### 3.3 Slotted layout (inner)
+
+Inner pages hold `n+1` child PIDs and `n` separators, no cells:
+
+```
++ FrameHeader (type = inner) +
++ child PIDs: u64[slot_count + 1]            (fixed array, grows forward) +
++ separator slot dir: Slot{rec_off,key_len}[slot_count] (sorted) +
++ ... free ... +
++ separator records: [sep bytes] ... (grows backward) +
++ Trailer {logical_len, crc32c} +
+```
+
+`ChildIndexFor(key)` is an `upper_bound` binary search over the separator slots,
+reading separators directly from the frame.
+
+### 3.4 Views (the "easy to list & compare" surface)
+
+The frame is accessed only through non-owning, zero-copy views; this is the API
+C++ call sites use to list and compare keys without any deserialization:
+
+```cpp
+class LeafFrameView {            // wraps a const uint8_t* frame
+  uint16_t count() const;
+  Slice    key(uint16_t i) const;     // Slice into the frame, no copy
+  Slice    cell(uint16_t i) const;
+  uint64_t right_sibling() const;
+  int      Find(Slice key) const;     // binary search -> index or -1
+  uint16_t LowerBound(Slice key) const;
+};
+class LeafFrameBuilder {         // writes into a frame being constructed
+  bool TryAppendSorted(Slice key, Slice cell);   // false if it wouldn't fit
+  void Finish(uint64_t self_pid, uint64_t right_sibling);  // header + CRC
+};
+// InnerFrameView / InnerFrameBuilder analogous (separators + child PIDs).
+```
+
+Key comparison is `Slice::compare` (memcmp) directly on frame bytes — identical
+ordering in memory and on disk, so a frame written by one node is searchable
+byte-for-byte by another.
+
+### 3.5 Durability framing, alignment, compression
+
+- **`logical_len` + CRC32C trailer.** The trailer's `logical_len` lets a reader
+  ignore IU zero padding; CRC32C covers `[0, logical_len)`. CRC mismatch ⇒ torn
+  page ⇒ recovery falls back to the previous checkpoint (§7).
+- **Alignment modes.** For aligned block devices the frame is already an IU
+  multiple. For unaligned/file-debug media a frame may be written without padding;
+  the on-disk record then carries an explicit length prefix (see §5 manifest).
+- **Compression** is per-page and **on-disk only**: the frame body is compressed
+  with **LZ4 by default** (a `flags.compressed` bit + algorithm id in the header),
+  written as `[FrameHeader][compressed body][trailer]`, and **decompressed into a
+  full frame on load** so in-memory access stays zero-copy and uniform. A page
+  whose compressed size ≥ its raw size is stored uncompressed (flag clear). The
+  CRC is computed over the *stored* (compressed) bytes so torn-write detection is
+  independent of the codec. See §3.6.
+
+### 3.6 Compression details (PT10)
+
+- Algorithm id: `0 = none`, `1 = LZ4` (default), `2 = zstd` (reserved). Chosen via
+  `Options.compression`; recorded per page so mixed pages decode correctly.
+- Compress at **write_page** time (checkpoint / eviction), decompress at
+  **read_page** time into a freshly-acquired frame. The buffer pool only ever
+  holds *uncompressed* frames.
+- LZ4 is vendored as a single-file dependency under `crowtree/third_party/lz4`
+  (block API: `LZ4_compress_default` / `LZ4_decompress_safe`), no system dep.
 
 ---
 
-## 4. Page Cache and Dirty Tracking
+## 4. Buffer Pool (Frame Cache) and Dirty Tracking
 
-- In-memory base pages are the working set. A bounded **page cache** holds hot
-  base pages; cold pages are read on demand via `read_page`. For `FilePageStore`
-  and `BlockDevicePageStore` the OS page cache can back this; for `RdmaPageStore`
-  crowtree owns an explicit cache because remote reads are expensive.
-- The **`DirtyTracker`** (per tree) records PIDs whose in-memory base/chain
-  differs from the last checkpoint. `apply`, consolidate, and split/merge mark
-  dirty PIDs.
-- Eviction of a clean cached page is epoch-gated (§core doc §10). A dirty page is
-  not evicted until the next checkpoint flushes it.
+The buffer pool is crowtree's **only** holder of base-page memory. It is a
+fixed-capacity arena of equal-size frames (§3), explicitly managed (not the OS
+page cache) so memory is bounded and eviction is epoch-correct for RDMA/SCM/SSD
+alike. This is the "4 GiB / 8 GiB btree cache" knob.
+
+### 4.1 Structures (no per-page heap objects)
+
+```cpp
+struct Frame {                 // one cache-line-aligned slot in the arena
+    uint8_t*           bytes;  // page_bytes window into the arena
+    std::atomic<uint64_t> pid; // logical page this frame holds (kInvalidPID = empty)
+    std::atomic<int32_t>  pin; // pin count (readers/writer); >0 = not evictable
+    std::atomic<uint8_t>  ref; // clock second-chance bit
+    bool                  dirty;
+    PageAddr              durable_addr;  // where it was last written (or unset)
+};
+
+class BufferPool {
+    explicit BufferPool(size_t capacity_bytes, uint32_t page_bytes, PageStore*);
+
+    // Pin the frame holding `pid`, reading it from the store on a miss. The
+    // returned handle keeps the frame resident until released (RAII unpin).
+    FrameRef Pin(uint64_t pid, PageAddr addr);
+    // Allocate a fresh empty frame for a brand-new page (COW target / split).
+    FrameRef PinNew(uint64_t pid);
+    void     MarkDirty(uint64_t pid);
+    // Write all dirty frames to the store (checkpoint); returns addrs written.
+    Status   FlushDirty(std::vector<PageBacking>* out);
+
+    Stats stats() const;       // hits, misses, evictions, dirty_frames, bytes
+};
+```
+
+- The **page table** maps `pid -> frame index` (an open-addressing array keyed by
+  pid, sized to the frame count; **not** `std::unordered_map`, to honour "no C++
+  containers on the hot path" and keep lookups branch-light and cache-friendly).
+- Frames themselves live in **one contiguous arena** (`capacity_bytes /
+  page_bytes` frames). No per-page allocation; pin/unpin are atomic counter ops.
+
+### 4.2 Pinning, eviction, and epoch safety
+
+- A reader `Pin`s the leaf/inner frames along its descent (pin++), reads via the
+  view, then releases (pin--). Pinned frames are never evicted, so a reader's
+  `Slice`s into a frame stay valid for the read's duration — this replaces the
+  per-page epoch retire for *cache residency* (the epoch manager still governs
+  logical page *version* lifetime, §4.3).
+- **Eviction** uses a **CLOCK (second-chance)** sweep over frames: skip pinned and
+  dirty frames, clear `ref` on first pass, evict a clean unpinned frame whose
+  `ref` is 0. A dirty frame is written back (or skipped until checkpoint,
+  configurable) before reuse.
+- Capacity is a hard cap; if every frame is pinned/dirty the pool blocks new pins
+  briefly and triggers an eager dirty flush. Sizing guidance: `capacity_bytes`
+  default = `min(8 GiB, 25% RAM)`, configurable to e.g. 4 GiB.
+
+### 4.3 COW + dirty tracking interaction
+
+L1 stays single-writer COW (core §5/§8): to mutate page `pid`, the Flusher
+`PinNew`s a fresh frame, builds the new page with a `FrameBuilder`, atomically
+publishes it (mapping `Store(pid, new_frame_pid)` — see §4.4), marks it dirty,
+and **epoch-retires the old frame's logical version**. Readers holding the old
+frame keep their pin until done; the frame returns to the free pool once both
+unpinned and past the epoch. Thus:
+
+- **DirtyTracker** = the set of frames with `dirty == true`. Checkpoint walks it
+  (§5) instead of the whole tree, enabling **incremental** checkpoints (only
+  dirty frames are written) — the high-performance win over PT3's full rewrite.
+- A dirty frame is never evicted until written by a checkpoint or an explicit
+  write-back.
+
+### 4.4 Mapping table over frames
+
+The mapping table (core §4) changes from `pid -> PageBase*` to `pid ->
+frame-resident page`. Concretely the slot holds a tagged value: either a
+**cached frame id** or an **unloaded `PageAddr`** (high bit tags "on disk, not
+resident"). `Get(pid)` that finds an unloaded slot pins it in (demand load),
+publishes the resident tag, and returns the frame. This keeps readers lock-free
+on the hot (resident) path and makes cold reads a pin-miss.
 
 ---
 
@@ -167,6 +329,62 @@ new state is live.
 Checkpoint cadence: by size (dirty bytes threshold), by slot count
 (`checkpoint_every_slots`), or on demand from the learner (e.g. before a snapshot
 export or a clean shutdown).
+
+### Deferred design tasks for this section
+
+- **Path-copy COW snapshot implementation.** The core currently keeps
+  `SnapshotView()` as a materialized consistent view because the live tree uses
+  in-place mapping-slot replacement. The persistence milestone should design the
+  true zero-copy model: allocate new PIDs along the modified path, publish a new
+  immutable root/version, define durable page-address remapping at checkpoint, and
+  let `SnapshotView()` pin that version/root instead of materializing an O(N)
+  copy under the write lock.
+
+---
+
+## 5A. High-Performance Write/Durability Pipeline
+
+This section answers "how do we dump the mem layer (L0) to the disk layer
+(durable L1) at high performance" end to end, now that L1 base pages are
+buffer-pool frames (§3, §4). crowtree is **not** an LSM: there is no leveled
+compaction. There are exactly two staged movements:
+
+```
+apply(slot,batch)            flush (Flusher, 1/tree)         checkpoint (cadence)
+   L0 MemTable   ───────────▶  L1 frames (buffer pool)  ───────────▶  PageStore
+ (concurrent map)   batched,        single-writer COW          incremental, dirty
+                  hot-key collapse   into frame builders        frames only + fsync
+```
+
+1. **L0 → L1 (flush).** The Flusher drains the contiguous-applied prefix
+   (core §6.2), groups by leaf, and for each affected leaf builds a **new frame**
+   via `LeafFrameBuilder` from the old frame's entries merged with the batch
+   (highest-slot-wins), then atomically republishes the pid. No serialization
+   step — the builder writes the final on-disk bytes directly. The old frame is
+   epoch-retired. Splits/merges (core §8) build 1–2 new frames the same way.
+   - *Why fast:* hot keys already collapsed in L0; one frame rebuild per touched
+     leaf per flush (not per key); the rebuilt frame **is** the durable image, so
+     checkpoint never re-encodes.
+   - *Delta option:* to cut rebuild cost for tiny batches we may keep a bounded
+     in-frame delta region appended to a leaf frame (search overlays it, capped at
+     `max_delta_len`); this is an optional optimization gated behind a flag and
+     measured against plain COW-rebuild. Default v1 = COW-rebuild (simpler, and
+     the buffer pool keeps the source frame resident so the rebuild is memcpy-fast).
+
+2. **L1 → PageStore (checkpoint).** Walks the **DirtyTracker** (§4.3), not the
+   whole tree, and `write_page`s only dirty frames (optionally LZ4-compressed),
+   remaps `pid -> PageAddr`, fsyncs, then commits the A/B superblock (§5). This is
+   **incremental** — cost is proportional to dirtied pages since the last
+   checkpoint, not tree size. The PT3 full-rewrite path remains as the fallback
+   for backends without stable per-page addresses.
+
+3. **Durability barrier ordering.** dirty frames + manifest fsync **before** the
+   superblock write (the commit point), so a crash never exposes a superblock
+   referencing a half-written frame (CRC also guards this).
+
+Back-pressure: if L0 grows faster than the Flusher drains (e.g. slow device),
+`apply` is throttled once L0 crosses a high-water mark; the buffer pool's dirty
+ratio triggers an eager checkpoint. These keep memory bounded under write storms.
 
 ---
 
@@ -283,3 +501,58 @@ void      ct_free_buf(ct_buf*);
 `ct_options` carries: backend kind (file/block/rdma) + backend config (path /
 device / remote endpoint), IU size, target page bytes, consolidation policy,
 checkpoint cadence, and compression choice.
+
+---
+
+## 9. Snapshot Export / Import
+
+**Decision (D-Q7): export is a byte stream, with a thin "to a file" convenience
+wrapper.** The streaming form is the primitive (it feeds the network
+`SnapshotService` for new-member install, snapshot-gc doc §6, without ever
+touching local disk); dumping to a `.ctsnap` file is just streaming into a file
+writer. So the same code serves both "send to a peer" and "dump to a bin file".
+
+### 9.1 Format
+
+Two on-the-wire formats, selected at export-begin:
+
+| Format | Layout | Use |
+| --- | --- | --- |
+| **Portable** (v1, default) | versioned header `{magic, format, at_slot}`, then key-sorted `(klen,key,slot,kind,vlen,value)` tuples in **fixed ≤1 MiB chunks**, end marker, whole-stream CRC32C | cross-engine parity (in-mem ↔ crowtree), durable archival; deterministic chunk boundaries ⇒ resumable |
+| **Native** (later) | header + raw frame images + a remapped manifest | fast crowtree→crowtree transfer; skips tuple re-encode |
+
+The portable format is deterministic and engine-independent, so an exported
+`.ctsnap` re-imports identically on any backend/page size.
+
+### 9.2 API (C++ + the C ABI in §8)
+
+```cpp
+// Export: pins a RootVersion at >= at_slot, streams chunks; resumable.
+class SnapshotExport {            // ct_snapshot_export_*
+  Status NextChunk(std::string* out, bool* done);  // ≤ chunk_bytes
+};
+Status SnapshotExportBegin(Crowtree&, uint64_t at_slot, Format, std::unique_ptr<SnapshotExport>*);
+
+// Convenience: dump a whole snapshot to a file (loops NextChunk).
+Status SnapshotDumpToFile(Crowtree&, uint64_t at_slot, Format, const std::string& path);
+
+// Import: builds a fresh tree in staging, verifies CRC, atomically swaps in.
+class SnapshotImport {            // ct_snapshot_import*
+  Status Feed(Slice chunk);
+  Status Finish(uint64_t* out_at_slot);
+};
+Status SnapshotLoadFromFile(Crowtree&, const std::string& path);
+```
+
+### 9.3 Semantics
+
+- **Export** pins the `RootVersion` at `at_slot` (core §9), triggering a
+  checkpoint first if needed, and streams over the pinned immutable tree; the pin
+  is released at end. Newer checkpoints may supersede it meanwhile (refcount).
+- **Import** bulk-loads bottom-up into fully-consolidated immutable frames in a
+  staging area (never touching the live tree), verifies the end-to-end CRC, then
+  atomically swaps in a new `RootVersion` with `last_applied_slot = at_slot`; the
+  old version is epoch-retired. Readers see the previous state until the swap.
+- Resumability/throttling live **above** the engine (the snapshot module); the
+  engine only guarantees deterministic, chunk-boundary-stable export and atomic
+  import.

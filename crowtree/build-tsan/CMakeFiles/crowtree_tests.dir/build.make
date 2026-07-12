@@ -69,10 +69,38 @@ include CMakeFiles/crowtree_tests.dir/progress.make
 # Include the compile flags for this target's objects.
 include CMakeFiles/crowtree_tests.dir/flags.make
 
+CMakeFiles/crowtree_tests.dir/tests/integration/parity_test.cc.o: CMakeFiles/crowtree_tests.dir/flags.make
+CMakeFiles/crowtree_tests.dir/tests/integration/parity_test.cc.o: /cjdata/cpp/crowkv/crowtree/tests/integration/parity_test.cc
+CMakeFiles/crowtree_tests.dir/tests/integration/parity_test.cc.o: CMakeFiles/crowtree_tests.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/integration/parity_test.cc.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/crowtree_tests.dir/tests/integration/parity_test.cc.o -MF CMakeFiles/crowtree_tests.dir/tests/integration/parity_test.cc.o.d -o CMakeFiles/crowtree_tests.dir/tests/integration/parity_test.cc.o -c /cjdata/cpp/crowkv/crowtree/tests/integration/parity_test.cc
+
+CMakeFiles/crowtree_tests.dir/tests/integration/parity_test.cc.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/crowtree_tests.dir/tests/integration/parity_test.cc.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /cjdata/cpp/crowkv/crowtree/tests/integration/parity_test.cc > CMakeFiles/crowtree_tests.dir/tests/integration/parity_test.cc.i
+
+CMakeFiles/crowtree_tests.dir/tests/integration/parity_test.cc.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/crowtree_tests.dir/tests/integration/parity_test.cc.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /cjdata/cpp/crowkv/crowtree/tests/integration/parity_test.cc -o CMakeFiles/crowtree_tests.dir/tests/integration/parity_test.cc.s
+
+CMakeFiles/crowtree_tests.dir/tests/integration/read_path_test.cc.o: CMakeFiles/crowtree_tests.dir/flags.make
+CMakeFiles/crowtree_tests.dir/tests/integration/read_path_test.cc.o: /cjdata/cpp/crowkv/crowtree/tests/integration/read_path_test.cc
+CMakeFiles/crowtree_tests.dir/tests/integration/read_path_test.cc.o: CMakeFiles/crowtree_tests.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/integration/read_path_test.cc.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/crowtree_tests.dir/tests/integration/read_path_test.cc.o -MF CMakeFiles/crowtree_tests.dir/tests/integration/read_path_test.cc.o.d -o CMakeFiles/crowtree_tests.dir/tests/integration/read_path_test.cc.o -c /cjdata/cpp/crowkv/crowtree/tests/integration/read_path_test.cc
+
+CMakeFiles/crowtree_tests.dir/tests/integration/read_path_test.cc.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/crowtree_tests.dir/tests/integration/read_path_test.cc.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /cjdata/cpp/crowkv/crowtree/tests/integration/read_path_test.cc > CMakeFiles/crowtree_tests.dir/tests/integration/read_path_test.cc.i
+
+CMakeFiles/crowtree_tests.dir/tests/integration/read_path_test.cc.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/crowtree_tests.dir/tests/integration/read_path_test.cc.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /cjdata/cpp/crowkv/crowtree/tests/integration/read_path_test.cc -o CMakeFiles/crowtree_tests.dir/tests/integration/read_path_test.cc.s
+
 CMakeFiles/crowtree_tests.dir/tests/integration/split_merge_test.cc.o: CMakeFiles/crowtree_tests.dir/flags.make
 CMakeFiles/crowtree_tests.dir/tests/integration/split_merge_test.cc.o: /cjdata/cpp/crowkv/crowtree/tests/integration/split_merge_test.cc
 CMakeFiles/crowtree_tests.dir/tests/integration/split_merge_test.cc.o: CMakeFiles/crowtree_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/integration/split_merge_test.cc.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/integration/split_merge_test.cc.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/crowtree_tests.dir/tests/integration/split_merge_test.cc.o -MF CMakeFiles/crowtree_tests.dir/tests/integration/split_merge_test.cc.o.d -o CMakeFiles/crowtree_tests.dir/tests/integration/split_merge_test.cc.o -c /cjdata/cpp/crowkv/crowtree/tests/integration/split_merge_test.cc
 
 CMakeFiles/crowtree_tests.dir/tests/integration/split_merge_test.cc.i: cmake_force
@@ -83,10 +111,24 @@ CMakeFiles/crowtree_tests.dir/tests/integration/split_merge_test.cc.s: cmake_for
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/crowtree_tests.dir/tests/integration/split_merge_test.cc.s"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /cjdata/cpp/crowkv/crowtree/tests/integration/split_merge_test.cc -o CMakeFiles/crowtree_tests.dir/tests/integration/split_merge_test.cc.s
 
+CMakeFiles/crowtree_tests.dir/tests/integration/stress_test.cc.o: CMakeFiles/crowtree_tests.dir/flags.make
+CMakeFiles/crowtree_tests.dir/tests/integration/stress_test.cc.o: /cjdata/cpp/crowkv/crowtree/tests/integration/stress_test.cc
+CMakeFiles/crowtree_tests.dir/tests/integration/stress_test.cc.o: CMakeFiles/crowtree_tests.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/integration/stress_test.cc.o"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/crowtree_tests.dir/tests/integration/stress_test.cc.o -MF CMakeFiles/crowtree_tests.dir/tests/integration/stress_test.cc.o.d -o CMakeFiles/crowtree_tests.dir/tests/integration/stress_test.cc.o -c /cjdata/cpp/crowkv/crowtree/tests/integration/stress_test.cc
+
+CMakeFiles/crowtree_tests.dir/tests/integration/stress_test.cc.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/crowtree_tests.dir/tests/integration/stress_test.cc.i"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /cjdata/cpp/crowkv/crowtree/tests/integration/stress_test.cc > CMakeFiles/crowtree_tests.dir/tests/integration/stress_test.cc.i
+
+CMakeFiles/crowtree_tests.dir/tests/integration/stress_test.cc.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/crowtree_tests.dir/tests/integration/stress_test.cc.s"
+	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /cjdata/cpp/crowkv/crowtree/tests/integration/stress_test.cc -o CMakeFiles/crowtree_tests.dir/tests/integration/stress_test.cc.s
+
 CMakeFiles/crowtree_tests.dir/tests/integration/write_path_test.cc.o: CMakeFiles/crowtree_tests.dir/flags.make
 CMakeFiles/crowtree_tests.dir/tests/integration/write_path_test.cc.o: /cjdata/cpp/crowkv/crowtree/tests/integration/write_path_test.cc
 CMakeFiles/crowtree_tests.dir/tests/integration/write_path_test.cc.o: CMakeFiles/crowtree_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/integration/write_path_test.cc.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/integration/write_path_test.cc.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/crowtree_tests.dir/tests/integration/write_path_test.cc.o -MF CMakeFiles/crowtree_tests.dir/tests/integration/write_path_test.cc.o.d -o CMakeFiles/crowtree_tests.dir/tests/integration/write_path_test.cc.o -c /cjdata/cpp/crowkv/crowtree/tests/integration/write_path_test.cc
 
 CMakeFiles/crowtree_tests.dir/tests/integration/write_path_test.cc.i: cmake_force
@@ -100,7 +142,7 @@ CMakeFiles/crowtree_tests.dir/tests/integration/write_path_test.cc.s: cmake_forc
 CMakeFiles/crowtree_tests.dir/tests/unit/cell_test.cc.o: CMakeFiles/crowtree_tests.dir/flags.make
 CMakeFiles/crowtree_tests.dir/tests/unit/cell_test.cc.o: /cjdata/cpp/crowkv/crowtree/tests/unit/cell_test.cc
 CMakeFiles/crowtree_tests.dir/tests/unit/cell_test.cc.o: CMakeFiles/crowtree_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/unit/cell_test.cc.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/unit/cell_test.cc.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/crowtree_tests.dir/tests/unit/cell_test.cc.o -MF CMakeFiles/crowtree_tests.dir/tests/unit/cell_test.cc.o.d -o CMakeFiles/crowtree_tests.dir/tests/unit/cell_test.cc.o -c /cjdata/cpp/crowkv/crowtree/tests/unit/cell_test.cc
 
 CMakeFiles/crowtree_tests.dir/tests/unit/cell_test.cc.i: cmake_force
@@ -114,7 +156,7 @@ CMakeFiles/crowtree_tests.dir/tests/unit/cell_test.cc.s: cmake_force
 CMakeFiles/crowtree_tests.dir/tests/unit/consolidation_test.cc.o: CMakeFiles/crowtree_tests.dir/flags.make
 CMakeFiles/crowtree_tests.dir/tests/unit/consolidation_test.cc.o: /cjdata/cpp/crowkv/crowtree/tests/unit/consolidation_test.cc
 CMakeFiles/crowtree_tests.dir/tests/unit/consolidation_test.cc.o: CMakeFiles/crowtree_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/unit/consolidation_test.cc.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_7) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/unit/consolidation_test.cc.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/crowtree_tests.dir/tests/unit/consolidation_test.cc.o -MF CMakeFiles/crowtree_tests.dir/tests/unit/consolidation_test.cc.o.d -o CMakeFiles/crowtree_tests.dir/tests/unit/consolidation_test.cc.o -c /cjdata/cpp/crowkv/crowtree/tests/unit/consolidation_test.cc
 
 CMakeFiles/crowtree_tests.dir/tests/unit/consolidation_test.cc.i: cmake_force
@@ -128,7 +170,7 @@ CMakeFiles/crowtree_tests.dir/tests/unit/consolidation_test.cc.s: cmake_force
 CMakeFiles/crowtree_tests.dir/tests/unit/delta_test.cc.o: CMakeFiles/crowtree_tests.dir/flags.make
 CMakeFiles/crowtree_tests.dir/tests/unit/delta_test.cc.o: /cjdata/cpp/crowkv/crowtree/tests/unit/delta_test.cc
 CMakeFiles/crowtree_tests.dir/tests/unit/delta_test.cc.o: CMakeFiles/crowtree_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/unit/delta_test.cc.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_8) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/unit/delta_test.cc.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/crowtree_tests.dir/tests/unit/delta_test.cc.o -MF CMakeFiles/crowtree_tests.dir/tests/unit/delta_test.cc.o.d -o CMakeFiles/crowtree_tests.dir/tests/unit/delta_test.cc.o -c /cjdata/cpp/crowkv/crowtree/tests/unit/delta_test.cc
 
 CMakeFiles/crowtree_tests.dir/tests/unit/delta_test.cc.i: cmake_force
@@ -142,7 +184,7 @@ CMakeFiles/crowtree_tests.dir/tests/unit/delta_test.cc.s: cmake_force
 CMakeFiles/crowtree_tests.dir/tests/unit/epoch_test.cc.o: CMakeFiles/crowtree_tests.dir/flags.make
 CMakeFiles/crowtree_tests.dir/tests/unit/epoch_test.cc.o: /cjdata/cpp/crowkv/crowtree/tests/unit/epoch_test.cc
 CMakeFiles/crowtree_tests.dir/tests/unit/epoch_test.cc.o: CMakeFiles/crowtree_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/unit/epoch_test.cc.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_9) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/unit/epoch_test.cc.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/crowtree_tests.dir/tests/unit/epoch_test.cc.o -MF CMakeFiles/crowtree_tests.dir/tests/unit/epoch_test.cc.o.d -o CMakeFiles/crowtree_tests.dir/tests/unit/epoch_test.cc.o -c /cjdata/cpp/crowkv/crowtree/tests/unit/epoch_test.cc
 
 CMakeFiles/crowtree_tests.dir/tests/unit/epoch_test.cc.i: cmake_force
@@ -156,7 +198,7 @@ CMakeFiles/crowtree_tests.dir/tests/unit/epoch_test.cc.s: cmake_force
 CMakeFiles/crowtree_tests.dir/tests/unit/inner_page_test.cc.o: CMakeFiles/crowtree_tests.dir/flags.make
 CMakeFiles/crowtree_tests.dir/tests/unit/inner_page_test.cc.o: /cjdata/cpp/crowkv/crowtree/tests/unit/inner_page_test.cc
 CMakeFiles/crowtree_tests.dir/tests/unit/inner_page_test.cc.o: CMakeFiles/crowtree_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_7) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/unit/inner_page_test.cc.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_10) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/unit/inner_page_test.cc.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/crowtree_tests.dir/tests/unit/inner_page_test.cc.o -MF CMakeFiles/crowtree_tests.dir/tests/unit/inner_page_test.cc.o.d -o CMakeFiles/crowtree_tests.dir/tests/unit/inner_page_test.cc.o -c /cjdata/cpp/crowkv/crowtree/tests/unit/inner_page_test.cc
 
 CMakeFiles/crowtree_tests.dir/tests/unit/inner_page_test.cc.i: cmake_force
@@ -170,7 +212,7 @@ CMakeFiles/crowtree_tests.dir/tests/unit/inner_page_test.cc.s: cmake_force
 CMakeFiles/crowtree_tests.dir/tests/unit/leaf_page_test.cc.o: CMakeFiles/crowtree_tests.dir/flags.make
 CMakeFiles/crowtree_tests.dir/tests/unit/leaf_page_test.cc.o: /cjdata/cpp/crowkv/crowtree/tests/unit/leaf_page_test.cc
 CMakeFiles/crowtree_tests.dir/tests/unit/leaf_page_test.cc.o: CMakeFiles/crowtree_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_8) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/unit/leaf_page_test.cc.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_11) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/unit/leaf_page_test.cc.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/crowtree_tests.dir/tests/unit/leaf_page_test.cc.o -MF CMakeFiles/crowtree_tests.dir/tests/unit/leaf_page_test.cc.o.d -o CMakeFiles/crowtree_tests.dir/tests/unit/leaf_page_test.cc.o -c /cjdata/cpp/crowkv/crowtree/tests/unit/leaf_page_test.cc
 
 CMakeFiles/crowtree_tests.dir/tests/unit/leaf_page_test.cc.i: cmake_force
@@ -184,7 +226,7 @@ CMakeFiles/crowtree_tests.dir/tests/unit/leaf_page_test.cc.s: cmake_force
 CMakeFiles/crowtree_tests.dir/tests/unit/mapping_table_test.cc.o: CMakeFiles/crowtree_tests.dir/flags.make
 CMakeFiles/crowtree_tests.dir/tests/unit/mapping_table_test.cc.o: /cjdata/cpp/crowkv/crowtree/tests/unit/mapping_table_test.cc
 CMakeFiles/crowtree_tests.dir/tests/unit/mapping_table_test.cc.o: CMakeFiles/crowtree_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_9) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/unit/mapping_table_test.cc.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_12) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/unit/mapping_table_test.cc.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/crowtree_tests.dir/tests/unit/mapping_table_test.cc.o -MF CMakeFiles/crowtree_tests.dir/tests/unit/mapping_table_test.cc.o.d -o CMakeFiles/crowtree_tests.dir/tests/unit/mapping_table_test.cc.o -c /cjdata/cpp/crowkv/crowtree/tests/unit/mapping_table_test.cc
 
 CMakeFiles/crowtree_tests.dir/tests/unit/mapping_table_test.cc.i: cmake_force
@@ -198,7 +240,7 @@ CMakeFiles/crowtree_tests.dir/tests/unit/mapping_table_test.cc.s: cmake_force
 CMakeFiles/crowtree_tests.dir/tests/unit/memtable_test.cc.o: CMakeFiles/crowtree_tests.dir/flags.make
 CMakeFiles/crowtree_tests.dir/tests/unit/memtable_test.cc.o: /cjdata/cpp/crowkv/crowtree/tests/unit/memtable_test.cc
 CMakeFiles/crowtree_tests.dir/tests/unit/memtable_test.cc.o: CMakeFiles/crowtree_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_10) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/unit/memtable_test.cc.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_13) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/unit/memtable_test.cc.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/crowtree_tests.dir/tests/unit/memtable_test.cc.o -MF CMakeFiles/crowtree_tests.dir/tests/unit/memtable_test.cc.o.d -o CMakeFiles/crowtree_tests.dir/tests/unit/memtable_test.cc.o -c /cjdata/cpp/crowkv/crowtree/tests/unit/memtable_test.cc
 
 CMakeFiles/crowtree_tests.dir/tests/unit/memtable_test.cc.i: cmake_force
@@ -212,7 +254,7 @@ CMakeFiles/crowtree_tests.dir/tests/unit/memtable_test.cc.s: cmake_force
 CMakeFiles/crowtree_tests.dir/tests/unit/scaffold_test.cc.o: CMakeFiles/crowtree_tests.dir/flags.make
 CMakeFiles/crowtree_tests.dir/tests/unit/scaffold_test.cc.o: /cjdata/cpp/crowkv/crowtree/tests/unit/scaffold_test.cc
 CMakeFiles/crowtree_tests.dir/tests/unit/scaffold_test.cc.o: CMakeFiles/crowtree_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_11) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/unit/scaffold_test.cc.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_14) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/unit/scaffold_test.cc.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/crowtree_tests.dir/tests/unit/scaffold_test.cc.o -MF CMakeFiles/crowtree_tests.dir/tests/unit/scaffold_test.cc.o.d -o CMakeFiles/crowtree_tests.dir/tests/unit/scaffold_test.cc.o -c /cjdata/cpp/crowkv/crowtree/tests/unit/scaffold_test.cc
 
 CMakeFiles/crowtree_tests.dir/tests/unit/scaffold_test.cc.i: cmake_force
@@ -226,7 +268,7 @@ CMakeFiles/crowtree_tests.dir/tests/unit/scaffold_test.cc.s: cmake_force
 CMakeFiles/crowtree_tests.dir/tests/unit/version_test.cc.o: CMakeFiles/crowtree_tests.dir/flags.make
 CMakeFiles/crowtree_tests.dir/tests/unit/version_test.cc.o: /cjdata/cpp/crowkv/crowtree/tests/unit/version_test.cc
 CMakeFiles/crowtree_tests.dir/tests/unit/version_test.cc.o: CMakeFiles/crowtree_tests.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_12) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/unit/version_test.cc.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_15) "Building CXX object CMakeFiles/crowtree_tests.dir/tests/unit/version_test.cc.o"
 	/usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT CMakeFiles/crowtree_tests.dir/tests/unit/version_test.cc.o -MF CMakeFiles/crowtree_tests.dir/tests/unit/version_test.cc.o.d -o CMakeFiles/crowtree_tests.dir/tests/unit/version_test.cc.o -c /cjdata/cpp/crowkv/crowtree/tests/unit/version_test.cc
 
 CMakeFiles/crowtree_tests.dir/tests/unit/version_test.cc.i: cmake_force
@@ -239,7 +281,10 @@ CMakeFiles/crowtree_tests.dir/tests/unit/version_test.cc.s: cmake_force
 
 # Object files for target crowtree_tests
 crowtree_tests_OBJECTS = \
+"CMakeFiles/crowtree_tests.dir/tests/integration/parity_test.cc.o" \
+"CMakeFiles/crowtree_tests.dir/tests/integration/read_path_test.cc.o" \
 "CMakeFiles/crowtree_tests.dir/tests/integration/split_merge_test.cc.o" \
+"CMakeFiles/crowtree_tests.dir/tests/integration/stress_test.cc.o" \
 "CMakeFiles/crowtree_tests.dir/tests/integration/write_path_test.cc.o" \
 "CMakeFiles/crowtree_tests.dir/tests/unit/cell_test.cc.o" \
 "CMakeFiles/crowtree_tests.dir/tests/unit/consolidation_test.cc.o" \
@@ -255,7 +300,10 @@ crowtree_tests_OBJECTS = \
 # External object files for target crowtree_tests
 crowtree_tests_EXTERNAL_OBJECTS =
 
+crowtree_tests: CMakeFiles/crowtree_tests.dir/tests/integration/parity_test.cc.o
+crowtree_tests: CMakeFiles/crowtree_tests.dir/tests/integration/read_path_test.cc.o
 crowtree_tests: CMakeFiles/crowtree_tests.dir/tests/integration/split_merge_test.cc.o
+crowtree_tests: CMakeFiles/crowtree_tests.dir/tests/integration/stress_test.cc.o
 crowtree_tests: CMakeFiles/crowtree_tests.dir/tests/integration/write_path_test.cc.o
 crowtree_tests: CMakeFiles/crowtree_tests.dir/tests/unit/cell_test.cc.o
 crowtree_tests: CMakeFiles/crowtree_tests.dir/tests/unit/consolidation_test.cc.o
@@ -273,7 +321,7 @@ crowtree_tests: /usr/lib/x86_64-linux-gnu/libgtest.a
 crowtree_tests: /usr/lib/x86_64-linux-gnu/libgtest_main.a
 crowtree_tests: /usr/lib/x86_64-linux-gnu/libgtest.a
 crowtree_tests: CMakeFiles/crowtree_tests.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_13) "Linking CXX executable crowtree_tests"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/cjdata/cpp/crowkv/crowtree/build-tsan/CMakeFiles --progress-num=$(CMAKE_PROGRESS_16) "Linking CXX executable crowtree_tests"
 	$(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/crowtree_tests.dir/link.txt --verbose=$(VERBOSE)
 
 # Rule to build all files generated by this target.

@@ -75,6 +75,17 @@ void MappingTable::FreePID(uint64_t pid) {
   free_list_.push_back(pid);
 }
 
+void MappingTable::SetNextPid(uint64_t next) {
+  std::lock_guard<std::mutex> lk(alloc_mu_);
+  next_pid_ = next;
+  free_list_.clear();
+}
+
+uint64_t MappingTable::NextPid() const {
+  std::lock_guard<std::mutex> lk(alloc_mu_);
+  return next_pid_;
+}
+
 size_t MappingTable::SegmentsAllocated() const {
   size_t n = 0;
   for (auto& s : segments_) {

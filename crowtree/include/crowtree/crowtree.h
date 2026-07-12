@@ -33,6 +33,18 @@ struct Batch {
   std::vector<BatchOp> ops;
 };
 
+struct ScanEntry {
+  std::string key;
+  uint64_t slot;
+  std::string value;
+};
+
+struct GetResult {
+  bool found = false;
+  uint64_t slot = 0;
+  std::string value;
+};
+
 class Crowtree {
  public:
   explicit Crowtree(CrowtreeEnv& env, const Options& opt = Options());
@@ -40,6 +52,17 @@ class Crowtree {
 
   Crowtree(const Crowtree&) = delete;
   Crowtree& operator=(const Crowtree&) = delete;
+
+  // Open a tree, recovering durable state from opt.page_store if a valid
+  // checkpoint exists; otherwise start empty. Requires opt.page_store != null.
+  static Status Open(CrowtreeEnv& env, const Options& opt,
+                     std::unique_ptr<Crowtree>* out);
+
+  // Persist the materialized L1 state durably. Folds delta chains, appends the
+  // reachable base pages + a manifest past the current end of the page store,
+  // then commits the inactive A/B superblock slot. Returns the durable
+  // last_applied_slot via out (if non-null). Requires opt.page_store != null.
+  Status Checkpoint(uint64_t* out_last_applied = nullptr);
 
   // Ingest a batch at `slot`; `contiguous_slot` is the learner's contiguous
   // applied frontier (how far the flusher may flush). Lands in L0; may trigger a
@@ -60,6 +83,15 @@ class Crowtree {
   // Point read (L0 overlay then L1). Returns true if a live value is found;
   // tombstones return false.
   bool Get(Slice key, uint64_t* out_slot, std::string* out_value) const;
+
+  // Batched point read.
+  std::vector<GetResult> MultiGet(const std::vector<Slice>& keys) const;
+
+  // Ordered range scan over keys with `prefix` (empty = whole keyspace), latest
+  // state (L0 overlaid on L1), skipping tombstones. Returns up to `limit`
+  // entries in key order; sets *truncated if more matched beyond the limit.
+  Status Scan(Slice prefix, size_t limit, std::vector<ScanEntry>* out,
+              bool* truncated) const;
 
   // Pin a consistent point-in-time view at `last_applied_slot` (the durable L1
   // state). Used for scan-at / compare / iter_all / snapshot export.
@@ -100,7 +132,7 @@ class Crowtree {
   std::atomic<uint64_t> version_{0};
   std::atomic<uint64_t> gc_floor_{0};
 
-  std::mutex write_mutex_;  // serializes flush / consolidate / split-merge
+  mutable std::mutex write_mutex_;  // serializes flush / consolidate / split-merge
 };
 
 }  // namespace crowtree

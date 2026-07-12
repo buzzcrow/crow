@@ -145,23 +145,21 @@ Status Crowtree::Flush() {
     return Status::Ok();
   }
 
-  // Group key-sorted drained entries by their target leaf PID.
-  uint64_t root = root_pid_.load();
-  std::vector<std::pair<uint64_t, std::vector<LeafEntry>>> groups;
-  uint64_t cur_pid = kInvalidPID;
-  for (auto& e : drained) {
-    uint64_t pid = FindLeafPID(mapping_, root, Slice(e.key));
-    if (pid != cur_pid) {
-      groups.emplace_back(pid, std::vector<LeafEntry>{});
-      cur_pid = pid;
-    }
-    groups.back().second.push_back(LeafEntry{e.key, e.cell});
-  }
+  size_t i = 0;
+  while (i < drained.size()) {
+    uint64_t pid = FindLeafPID(mapping_, root_pid_.load(), Slice(drained[i].key));
+    std::vector<LeafEntry> group;
+    group.push_back(LeafEntry{drained[i].key, drained[i].cell});
+    ++i;
 
-  for (auto& g : groups) {
-    uint64_t pid = g.first;
+    while (i < drained.size() &&
+           FindLeafPID(mapping_, root_pid_.load(), Slice(drained[i].key)) == pid) {
+      group.push_back(LeafEntry{drained[i].key, drained[i].cell});
+      ++i;
+    }
+
     PageBase* head = mapping_.Get(pid);
-    BatchDelta* delta = BatchDelta::Build(cs, std::move(g.second), head);
+    BatchDelta* delta = BatchDelta::Build(cs, std::move(group), head);
     mapping_.Store(pid, delta);
     if (delta->delta_len > opt_.max_delta_len ||
         delta->chain_bytes > opt_.max_delta_bytes) {
@@ -382,6 +380,71 @@ bool Crowtree::Get(Slice key, uint64_t* out_slot, std::string* out_value) const 
   if (out_slot) *out_slot = v.slot();
   if (out_value) *out_value = v.value().ToString();
   return true;
+}
+
+std::vector<GetResult> Crowtree::MultiGet(const std::vector<Slice>& keys) const {
+  std::vector<GetResult> results;
+  results.reserve(keys.size());
+  for (const Slice& k : keys) {
+    GetResult g;
+    g.found = Get(k, &g.slot, &g.value);
+    results.push_back(std::move(g));
+  }
+  return results;
+}
+
+Status Crowtree::Scan(Slice prefix, size_t limit, std::vector<ScanEntry>* out,
+                      bool* truncated) const {
+  out->clear();
+  if (truncated) *truncated = false;
+  std::lock_guard<std::mutex> lk(write_mutex_);
+
+  std::vector<LeafEntry> l1;
+  CollectInOrder(mapping_, root_pid_.load(), gc_floor_.load(), &l1);
+  std::vector<MemEntry> l0 = memtable_.Snapshot();
+
+  auto consider = [&](const std::string& key, Slice cell) -> bool {
+    if (!Slice(key).starts_with(prefix)) return true;
+    CellView v{cell};
+    if (v.is_tombstone()) return true;
+    if (limit != 0 && out->size() >= limit) {
+      if (truncated) *truncated = true;
+      return false;  // stop: a matching entry didn't fit
+    }
+    out->push_back(ScanEntry{key, v.slot(), v.value().ToString()});
+    return true;
+  };
+
+  // Merge the two key-sorted streams; on a tie L0 (newer) wins.
+  size_t i = 0, j = 0;
+  while (i < l0.size() || j < l1.size()) {
+    int cmp;
+    if (i >= l0.size()) {
+      cmp = 1;
+    } else if (j >= l1.size()) {
+      cmp = -1;
+    } else {
+      cmp = Slice(l0[i].key).compare(Slice(l1[j].key));
+    }
+    const std::string* key;
+    Slice cell;
+    if (cmp < 0) {
+      key = &l0[i].key;
+      cell = Slice(l0[i].cell);
+      ++i;
+    } else if (cmp > 0) {
+      key = &l1[j].key;
+      cell = Slice(l1[j].cell);
+      ++j;
+    } else {
+      key = &l0[i].key;
+      cell = Slice(l0[i].cell);
+      ++i;
+      ++j;  // drop the L1 copy; L0 wins
+    }
+    if (!consider(*key, cell)) break;
+  }
+  return Status::Ok();
 }
 
 int Crowtree::Height() const {

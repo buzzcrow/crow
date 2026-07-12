@@ -13,7 +13,7 @@ doc only when a task touches a topic in its row. Line counts are approximate
 | `plan.md` | ~190 | Phases (P1–P5), milestones, dependency order, decision log. Read before picking a task. |
 | `test.md` | ~200 | Test strategy, layer scope definitions, high-level coverage per layer, and feature-dependent test gaps. Read when designing tests or deciding where a test belongs. |
 | `plan-test.md` | ~30 | Unfinished test task backlog with checkboxes. Read when picking the next test to implement. |
-| `plan-core-tree.md` | ~190 | crowtree core (libcrowtree, C++) implementation task backlog: tasks CT1–CT14 with tests, covering `design-crowtree-core.md` (MemTable, pages, mapping table, deltas, write path, consolidation, split/merge, versioned root, epoch GC, read path). Read before implementing the crowtree core. |
+| `plan-persistent-tree.md` | ~190 | crowtree persistence (libcrowtree, C++) implementation task backlog: PT1–PT5 done (PageStore, page codec+CRC, append-only checkpoint/superblock A/B, recovery); PT6a–PT6d frame-based zero-copy buffer pool + core migration + incremental checkpoint; PT7 export/import, PT10 LZ4; PT8/PT9/PT11/PT12 deferred. Last section tracks carried-over + persistence risks. (Core plan CT1–CT14 complete; `plan-core-tree.md` removed.) |
 
 Web UI requirements now live in `requirement.md` §15.4.6 (single-page embeddable
 console, two hierarchy views, functional surface mapped to the `crowkv-web` API,
@@ -75,7 +75,7 @@ embedded Swagger, V2 deferral list).
 | `design/design-console.md` | ~715 | `crowkv-console` design: shared core crate, web (Axum + React) and CLI (`clap`) frontends, two-hierarchy API (physical `/api/racks`,`/api/nodes` vs. logical `/api/stores`), monitor task, SSH lifecycle, Swagger UI hosting. |
 | `design/design-crowtree.md` | ~360 | crowtree overview: P3 decisions (C++ lib + top-boundary FFI, COW B+tree not bw-tree/LSM), architecture, redefined async `KVEngine`/`EngineView` abstraction, out-of-order apply + two-GC model (§4.1), FFI boundary, sub-doc map, **§7 open decisions Q1–Q4**. Read first for storage-engine work. |
 | `design/design-crowtree-core.md` | ~260 | crowtree core data structure: slot cell, pages, mapping table, delta records, write path (apply→delta→consolidate→split/merge), versioned root, epoch GC, read path, concurrency invariants. |
-| `design/design-crowtree-persistence.md` | ~200 | crowtree persistence: `PageStore` (file/block/RDMA), on-disk page format + IU alignment + CRC, page cache, checkpoint, internal-WAL decision (none; checkpoint+replay), recovery, C API. |
+| `design/design-crowtree-persistence.md` | ~560 | crowtree persistence: `PageStore` (file/block/RDMA); **zero-copy slotted frame** format (in-mem == on-disk, §3); **buffer pool** (frame arena, pin/unpin, CLOCK eviction, 4/8 GiB cap, dirty tracking, §4); checkpoint + §5A high-perf L0→L1→disk pipeline; internal-WAL decision (none; checkpoint+replay); recovery; C API; **§9 snapshot export/import** (portable stream + `.ctsnap` file). LZ4 default compression. |
 | `design/design-crowtree-snapshot-gc.md` | ~150 | crowtree snapshot/GC flow integration: watermarks, export/import, restart + `last_applied_slot`, GC, consensus-WAL GC coupling, new-member install. |
 | `design/design-crowtree-test.md` | ~150 | crowtree test strategy: layers (C++ unit/integration, crash/recovery, Rust FFI, cross-engine parity, sanitizer), cases, benchmarks, tooling. |
 | `design/design-kv-server.md` | ~350 | `crowkv-server` binary: CLI, HTTP management API, store/group/replica wiring, topology export, lifecycle. |

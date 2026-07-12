@@ -19,7 +19,10 @@ endif()
 # CROWTREE_TEST_SRC at CMakeLists.txt:35 (file)
 file(GLOB_RECURSE NEW_GLOB LIST_DIRECTORIES false "/cjdata/cpp/crowkv/crowtree/tests/*.cc")
 set(OLD_GLOB
+  "/cjdata/cpp/crowkv/crowtree/tests/integration/parity_test.cc"
+  "/cjdata/cpp/crowkv/crowtree/tests/integration/read_path_test.cc"
   "/cjdata/cpp/crowkv/crowtree/tests/integration/split_merge_test.cc"
+  "/cjdata/cpp/crowkv/crowtree/tests/integration/stress_test.cc"
   "/cjdata/cpp/crowkv/crowtree/tests/integration/write_path_test.cc"
   "/cjdata/cpp/crowkv/crowtree/tests/unit/cell_test.cc"
   "/cjdata/cpp/crowkv/crowtree/tests/unit/consolidation_test.cc"
