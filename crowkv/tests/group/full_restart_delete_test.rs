@@ -248,43 +248,61 @@ impl WalCluster {
 }
 
 async fn put(cluster: &WalCluster, key: &str, value: &str, seq: u64) {
-    let leader = cluster.elected_leader().expect("leader present");
-    let mut client = cluster.kv_client(leader).await;
-    let resp = client
-        .put(KvSetRequest {
-            version: 1,
-            key: key.as_bytes().to_vec(),
-            value: value.as_bytes().to_vec(),
-            seq,
-            client_id: 0,
-            ttl_ms: 0,
-            request_id: seq,
-            request_create_ms: 1,
-            group_id: GROUP,
-        })
-        .await
-        .expect("put rpc")
-        .into_inner();
-    assert!(resp.ok, "put {key} should commit: {resp:?}");
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(10) {
+        if let Some(leader) = cluster.elected_leader() {
+            let mut client = cluster.kv_client(leader).await;
+            let resp = client
+                .put(KvSetRequest {
+                    version: 1,
+                    key: key.as_bytes().to_vec(),
+                    value: value.as_bytes().to_vec(),
+                    seq,
+                    client_id: 0,
+                    ttl_ms: 0,
+                    request_id: seq,
+                    request_create_ms: 1,
+                    group_id: GROUP,
+                })
+                .await
+                .expect("put rpc")
+                .into_inner();
+            if resp.ok {
+                return;
+            }
+            assert!(resp.error == "not leader", "put {key} should commit: {resp:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("put {key} should commit before timeout");
 }
 
 async fn delete(cluster: &WalCluster, key: &str, seq: u64) {
-    let leader = cluster.elected_leader().expect("leader present");
-    let mut client = cluster.kv_client(leader).await;
-    let resp = client
-        .delete(KvDeleteRequest {
-            version: 1,
-            key: key.as_bytes().to_vec(),
-            seq,
-            client_id: 0,
-            request_id: seq,
-            request_create_ms: 1,
-            group_id: GROUP,
-        })
-        .await
-        .expect("delete rpc")
-        .into_inner();
-    assert!(resp.ok, "delete {key} should commit: {resp:?}");
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(10) {
+        if let Some(leader) = cluster.elected_leader() {
+            let mut client = cluster.kv_client(leader).await;
+            let resp = client
+                .delete(KvDeleteRequest {
+                    version: 1,
+                    key: key.as_bytes().to_vec(),
+                    seq,
+                    client_id: 0,
+                    request_id: seq,
+                    request_create_ms: 1,
+                    group_id: GROUP,
+                })
+                .await
+                .expect("delete rpc")
+                .into_inner();
+            if resp.ok {
+                return;
+            }
+            assert!(resp.error == "not leader", "delete {key} should commit: {resp:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("delete {key} should commit before timeout");
 }
 
 async fn wait_until_deleted_everywhere(cluster: &WalCluster, key: &str, timeout: Duration) -> bool {

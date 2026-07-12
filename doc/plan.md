@@ -62,16 +62,25 @@ Phasing is dependency-ordered, not waterfall. WAL (P2) and Storage (P3) can proc
 
 ---
 
-### P3 — Storage Engine
+### P3 — Storage Engine (crowtree)
 
-| Milestone | Scope | Acceptance |
+The production engine is **crowtree**, a C++ `libcrowtree` (single-writer COW
+B+tree + per-leaf delta chains + epoch GC + versioned root) consumed from Rust
+over a coarse C ABI. Full design: [`design/design-crowtree.md`](design/design-crowtree.md)
+and its sub-docs (core / persistence / snapshot-gc / test). The list below is the
+**high-level** milestone shape; a detailed implementation plan is written before
+each milestone (per §6 / `doc.md` conventions).
+
+| Milestone | Scope (high level) | Acceptance |
 |---|---|---|
-| **M1** | Final `Engine` trait surface (all methods `async`): `apply(slot, batch)`, `get(k) → Option<(slot, value)>`, `scan(range, limit) → impl Stream`, `snapshot_export() → impl Stream<Item=Chunk>`, `snapshot_import(stream)`, `compare(other) → Diff`, `iter_all()`. `InMemoryEngine` (btree-based). Trait generic over `E: Engine` in consensus code. | Compile-time check: `InMemoryEngine` implements trait without warnings. |
-| **M2** | `OrderedFileEngine`: single sorted key-value file with small index. `apply` writes to staging, fsync, atomic swap into active file. `scan` via btree cursor. Uses project async I/O facade (`crowkv::io`). | Unit tests: `compare()` between in-memory and ordered-file after identical ops returns empty diff. |
-| **M3** | `snapshot_export`: serializes `(key, slot, value_or_tombstone)` tuples in key order with versioned header. `snapshot_import`: consumes same format, builds state atomically (no partial-state visibility). Resumable chunk boundaries (default 1 MiB). | Unit tests: export → import round-trip `compare()` equal; resume-from-offset reproduces same state. |
-| **M4** | `CrowtreeEngine` placeholder: struct implements trait, delegates all methods to `InMemoryEngine`. `snapshot_export` contains `todo!("crowtree integration")`. | Compiles; all crowtree tests skipped with `#[ignore]`. |
+| **M1** | Redefined async `KVEngine` + `EngineView` trait surface (`apply`, `get`, `scan`, `snapshot_view`, `last_applied_slot`, `persist_checkpoint`, `set_gc_watermark`, `collect_garbage`, `snapshot_export/import`, `clear`). `InMemKV` migrated to it; learner driven through the new surface. | `InMemKV` implements the trait; existing learner/consensus tests pass on the new surface. |
+| **M2** | `libcrowtree` core (C++): pages, mapping table, slot cell, write path (apply→delta→consolidate→split/merge), epoch GC, versioned root; `InMemoryPageStore`. C API + Rust `CrowtreeEngine` FFI adapter. | C++ unit/integration green; `CrowtreeEngine` passes the shared `KVEngine` suite; parity `compare()` vs `InMemKV` empty. |
+| **M3** | Persistence: `PageStore` backends (`FilePageStore` first; block/RDMA stubs), on-disk page format + IU alignment + CRC, checkpoint, lazy recovery, superblock A/B. | Crash/recovery tests (G2-style) pass; `last_applied_slot` survives restart; torn-page handled. |
+| **M4** | Snapshot + GC flow integration: portable `snapshot_export/import`, watermark-driven tombstone + stale-version GC, learner/consensus-WAL/new-member wiring. | Export→import round-trip `compare()` equal; resume-from-offset deterministic; GC reclaims below watermark; new-member install parity. |
 
-**P3 freeze gates:** Engine trait surface frozen (no additions in P4 without explicit version bump); `compare()` deterministic and cross-engine; snapshot format versioned and self-describing.
+**P3 freeze gates:** `KVEngine`/`EngineView` trait surface frozen (no additions in
+P4 without explicit version bump); `compare()` deterministic and cross-engine;
+snapshot format versioned and self-describing; crowtree C ABI append-only.
 
 ---
 

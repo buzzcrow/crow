@@ -257,25 +257,41 @@ fn sample_kvs() -> Vec<(Vec<u8>, Vec<u8>)> {
 }
 
 async fn commit_writes(cluster: &WalCluster, kvs: &[(Vec<u8>, Vec<u8>)]) {
-    let leader = cluster.elected_leader().expect("leader present");
-    let mut client = cluster.kv_client(leader).await;
     for (i, (key, value)) in kvs.iter().enumerate() {
-        let resp = client
-            .put(KvSetRequest {
-                version: 1,
-                key: key.clone(),
-                value: value.clone(),
-                seq: u64::try_from(i + 1).unwrap(),
-                ttl_ms: 0,
-                client_id: 77,
-                request_id: u64::try_from(i + 1).unwrap(),
-                request_create_ms: 1,
-                group_id: GROUP,
-            })
-            .await
-            .expect("put rpc")
-            .into_inner();
-        assert!(resp.ok, "write {i} should commit on the leader: {resp:?}");
+        let seq = u64::try_from(i + 1).unwrap();
+        let start = Instant::now();
+        loop {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "write {i} should commit on the leader before timeout"
+            );
+            if let Some(leader) = cluster.elected_leader() {
+                let mut client = cluster.kv_client(leader).await;
+                let resp = client
+                    .put(KvSetRequest {
+                        version: 1,
+                        key: key.clone(),
+                        value: value.clone(),
+                        seq,
+                        ttl_ms: 0,
+                        client_id: 77,
+                        request_id: seq,
+                        request_create_ms: 1,
+                        group_id: GROUP,
+                    })
+                    .await
+                    .expect("put rpc")
+                    .into_inner();
+                if resp.ok {
+                    break;
+                }
+                assert!(
+                    resp.error == "not leader",
+                    "write {i} should commit on the leader: {resp:?}"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 }
 

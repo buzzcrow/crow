@@ -220,8 +220,11 @@ fn main() {
     // When this bench is run via `cargo test --all-targets`, skip the heavy
     // timed workload. Criterion-based benches do this automatically, but this
     // custom bench needs an explicit guard to avoid blocking commits.
-    if cfg!(test) {
-        eprintln!("Skipping wal bench in cargo test mode; run `cargo bench --bench wal` for real results.");
+    let force_run = std::env::var("CROWKV_RUN_WAL_BENCH")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if cfg!(test) && !force_run {
+        eprintln!("Skipping wal bench in cargo test mode; set CROWKV_RUN_WAL_BENCH=1 to run real results.");
         return;
     }
 

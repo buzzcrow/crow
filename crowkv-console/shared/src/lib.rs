@@ -21,6 +21,7 @@ pub mod monitor;
 pub mod ops_log;
 pub mod snapshot;
 pub mod ssh;
+pub mod test_ports;
 pub mod topology;
 
 pub use config::{

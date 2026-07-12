@@ -5,6 +5,16 @@ Satisfies: [requirement.md §8.3](requirement.md#83-learner-storage), [requireme
 
 This document specifies the storage engine abstraction used by CrowKV learners. The engine is the **only** consumer of consensus output; it owns the materialized key-value state and serves all reads. The WAL is the durable log; the engine is the materialized projection.
 
+> **P3 redesign note.** The production engine `crowtree` and the redefined
+> (async, snapshot/GC-aware) `KVEngine` abstraction are specified in the crowtree
+> sub-design set: [`design-crowtree.md`](design-crowtree.md) (overview + engine
+> abstraction + language/FFI decisions), [`design-crowtree-core.md`](design-crowtree-core.md)
+> (data structure), [`design-crowtree-persistence.md`](design-crowtree-persistence.md),
+> [`design-crowtree-snapshot-gc.md`](design-crowtree-snapshot-gc.md), and
+> [`design-crowtree-test.md`](design-crowtree-test.md). This document remains the
+> source of truth for the *semantics* (per-key slot, apply, compare, compaction);
+> crowtree docs own the *implementation*.
+
 ## Table of Contents
 
 - [1. Goals and Non-Goals](#1-goals-and-non-goals)
@@ -295,11 +305,17 @@ Three engine implementations satisfy the surface above. Each is appropriate for 
 
 ### 9.3 crowtree
 
-- Backing store: the production btree library (`crowtree`), already developed in this repo.
-- Persistence: yes, through crowtree's native page management.
+- Backing store: the production btree library `crowtree` — a C++ `libcrowtree`
+  (single-writer COW B+tree with per-leaf delta chains, epoch GC, versioned root)
+  consumed from Rust over a coarse C ABI. Full design:
+  [`design-crowtree.md`](design-crowtree.md) and its sub-docs.
+- Persistence: yes, via a pluggable `PageStore` (local file, raw block device,
+  remote/RDMA); checkpoint + consensus replay for recovery (no second op-log).
 - Use cases: production.
-- Snapshot format: native crowtree page dump.
-- Concurrency: crowtree's own concurrency primitives.
+- Snapshot format: portable `(key, slot, cell)` tuples first; native page dump as
+  an optimization.
+- Concurrency: single writer (learner apply) + lock-free immutable-page reads,
+  epoch-based reclamation.
 
 The trait surface is engine-agnostic; switching engines is a configuration choice. All three pass the same `compare`-based equivalence tests.
 

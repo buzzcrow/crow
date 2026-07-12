@@ -1,15 +1,9 @@
 use std::io as std_io;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
-
-/// Per-process random base so parallel test binaries don't collide.
-/// Initialized once from the PID + a random nonce.
-static PORT_BASE: AtomicU16 = AtomicU16::new(0);
-static PORT_NEXT: AtomicU16 = AtomicU16::new(0);
 
 pub struct ServerHandle {
     child: Child,
@@ -68,22 +62,6 @@ impl Drop for ServerHandle {
 }
 
 pub async fn start_test_server(args: &[&str]) -> std_io::Result<ServerHandle> {
-    // Lazily initialize a random base port per process so parallel test
-    // binaries don't collide. Uses the OS ephemeral range (49152–65535)
-    // minus a small budget for sequential allocation within the binary.
-    if PORT_BASE.load(Ordering::Relaxed) == 0 {
-        let pid = u64::from(std::process::id());
-        let now = u64::from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .subsec_nanos(),
-        );
-        // Random-ish base in [49152, 64000) — leaves room for sequential bump.
-        let base = 49152 + ((pid ^ (now * 2_654_435_761)) % 14000) as u16;
-        PORT_BASE.store(base, Ordering::Relaxed);
-    }
-    let port = PORT_BASE.load(Ordering::Relaxed) + PORT_NEXT.fetch_add(1, Ordering::Relaxed);
     let wal_dir = tempfile::tempdir()?;
     let wal_root = wal_dir.path().join("wal");
 
@@ -93,7 +71,7 @@ pub async fn start_test_server(args: &[&str]) -> std_io::Result<ServerHandle> {
         .arg("--management-addr")
         .arg("127.0.0.1")
         .arg("--management-port")
-        .arg(port.to_string())
+        .arg("0")
         .arg("--ports")
         .arg("0")
         .arg("--election-profile")

@@ -767,7 +767,6 @@ async fn e2e_multi_group_isolated_kv() {
 ///     stable through wiring changes,
 ///   - quorum transitions from 3→5→3 replicas.
 #[tokio::test]
-#[ignore = "W9 fixes restart-window quorum=1 self-election; this test still hits a live tenure-cancel race during shrink (post-shrink delete overwritten by stale repair). Needs additional in-flight repair cancellation before re-enable."]
 async fn e2e_kv_after_dynamic_replica_change() {
     let group_id = 1;
     let nodes = start_cluster(&[0, 1, 2, 3, 4], group_id).await;

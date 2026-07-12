@@ -72,6 +72,11 @@ embedded Swagger, V2 deferral list).
 | --- | ---: | --- |
 | `design/design-async-io.md` | ~200 | Async disk I/O backend (`tokio-uring`, `spawn_blocking` fallback), buffer mgmt, runtime topology. |
 | `design/design-console.md` | ~715 | `crowkv-console` design: shared core crate, web (Axum + React) and CLI (`clap`) frontends, two-hierarchy API (physical `/api/racks`,`/api/nodes` vs. logical `/api/stores`), monitor task, SSH lifecycle, Swagger UI hosting. |
+| `design/design-crowtree.md` | ~170 | crowtree overview: P3 decisions (C++ lib + top-boundary FFI, COW B+tree not bw-tree/LSM), architecture, redefined async `KVEngine`/`EngineView` abstraction, FFI boundary, sub-doc map. Read first for storage-engine work. |
+| `design/design-crowtree-core.md` | ~260 | crowtree core data structure: slot cell, pages, mapping table, delta records, write path (apply→delta→consolidate→split/merge), versioned root, epoch GC, read path, concurrency invariants. |
+| `design/design-crowtree-persistence.md` | ~200 | crowtree persistence: `PageStore` (file/block/RDMA), on-disk page format + IU alignment + CRC, page cache, checkpoint, internal-WAL decision (none; checkpoint+replay), recovery, C API. |
+| `design/design-crowtree-snapshot-gc.md` | ~150 | crowtree snapshot/GC flow integration: watermarks, export/import, restart + `last_applied_slot`, GC, consensus-WAL GC coupling, new-member install. |
+| `design/design-crowtree-test.md` | ~150 | crowtree test strategy: layers (C++ unit/integration, crash/recovery, Rust FFI, cross-engine parity, sanitizer), cases, benchmarks, tooling. |
 | `design/design-kv-server.md` | ~350 | `crowkv-server` binary: CLI, HTTP management API, store/group/replica wiring, topology export, lifecycle. |
 | `design/design-leader-election.md` | ~330 | Term/ballot bridge, election protocol, new-leader bulk Phase 1, heartbeats, leader lease, ReadIndex, step-down. |
 | `design/design-parallel-slots.md` | ~325 | Parallel slot pipelining, sliding window, gap detection / repair, safe-slot, per-key resolved-slot. |

@@ -12,10 +12,7 @@ use crowkv_console_shared::ConsoleConfig;
 use crowkv_web::{router, AppState};
 
 fn pick_free_port() -> u16 {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
+    crowkv_console_shared::test_ports::unique_test_port()
 }
 
 struct Upstream {
