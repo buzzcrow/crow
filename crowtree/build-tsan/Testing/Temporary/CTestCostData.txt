@@ -1,0 +1,26 @@
+Cell.PutRoundTrip 1 0.0117925
+Cell.Tombstone 1 0.0119466
+Cell.EmptyValuePut 1 0.0116855
+Cell.SlotBoundaries 1 0.0122525
+Cell.BinaryValueWithNuls 1 0.0113774
+Cell.ReservedBitsIgnoredForTombstone 1 0.0115919
+Cell.HighestSlotWins 1 0.0115169
+LeafPage.BuildAndFind 1 0.0123793
+LeafPage.LookupDecodesCell 1 0.0115804
+LeafPage.Tombstone 1 0.0120372
+LeafPage.OrderedIterationAndBoundaries 1 0.0119698
+LeafPage.LowerBound 1 0.0120285
+LeafPage.RightSibling 1 0.0119395
+LeafPage.BloomTrueNegativeAndFpRate 1 0.0256083
+LeafPage.DataBytesNonZero 1 0.0115241
+MappingTable.AllocStoreGet 1 0.0208852
+MappingTable.InvalidPid 1 0.0195228
+MappingTable.FreeAndRecycle 1 0.0213219
+MappingTable.SegmentGrowth 1 0.0260972
+MappingTable.ConcurrentReadersSingleWriter 1 0.0243703
+Slice.BasicAndCompare 1 0.0120674
+Slice.EmptyAndBinary 1 0.0122312
+Status.Codes 1 0.01146
+Options.Defaults 1 0.012177
+Env.DefaultSingleton 1 0.0120461
+---

@@ -1,0 +1,678 @@
+Start testing: Jun 29 23:31 CST
+----------------------------------------------------------
+1/25 Testing: Cell.PutRoundTrip
+1/25 Test: Cell.PutRoundTrip
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=Cell.PutRoundTrip" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"Cell.PutRoundTrip" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = Cell.PutRoundTrip
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from Cell
+[ RUN      ] Cell.PutRoundTrip
+[       OK ] Cell.PutRoundTrip (0 ms)
+[----------] 1 test from Cell (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"Cell.PutRoundTrip" end time: Jun 29 23:31 CST
+"Cell.PutRoundTrip" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/25 Testing: Cell.Tombstone
+2/25 Test: Cell.Tombstone
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=Cell.Tombstone" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"Cell.Tombstone" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = Cell.Tombstone
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from Cell
+[ RUN      ] Cell.Tombstone
+[       OK ] Cell.Tombstone (0 ms)
+[----------] 1 test from Cell (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"Cell.Tombstone" end time: Jun 29 23:31 CST
+"Cell.Tombstone" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/25 Testing: Cell.EmptyValuePut
+3/25 Test: Cell.EmptyValuePut
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=Cell.EmptyValuePut" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"Cell.EmptyValuePut" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = Cell.EmptyValuePut
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from Cell
+[ RUN      ] Cell.EmptyValuePut
+[       OK ] Cell.EmptyValuePut (0 ms)
+[----------] 1 test from Cell (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"Cell.EmptyValuePut" end time: Jun 29 23:31 CST
+"Cell.EmptyValuePut" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/25 Testing: Cell.SlotBoundaries
+4/25 Test: Cell.SlotBoundaries
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=Cell.SlotBoundaries" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"Cell.SlotBoundaries" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = Cell.SlotBoundaries
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from Cell
+[ RUN      ] Cell.SlotBoundaries
+[       OK ] Cell.SlotBoundaries (0 ms)
+[----------] 1 test from Cell (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"Cell.SlotBoundaries" end time: Jun 29 23:31 CST
+"Cell.SlotBoundaries" time elapsed: 00:00:00
+----------------------------------------------------------
+
+5/25 Testing: Cell.BinaryValueWithNuls
+5/25 Test: Cell.BinaryValueWithNuls
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=Cell.BinaryValueWithNuls" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"Cell.BinaryValueWithNuls" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = Cell.BinaryValueWithNuls
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from Cell
+[ RUN      ] Cell.BinaryValueWithNuls
+[       OK ] Cell.BinaryValueWithNuls (0 ms)
+[----------] 1 test from Cell (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"Cell.BinaryValueWithNuls" end time: Jun 29 23:31 CST
+"Cell.BinaryValueWithNuls" time elapsed: 00:00:00
+----------------------------------------------------------
+
+6/25 Testing: Cell.ReservedBitsIgnoredForTombstone
+6/25 Test: Cell.ReservedBitsIgnoredForTombstone
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=Cell.ReservedBitsIgnoredForTombstone" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"Cell.ReservedBitsIgnoredForTombstone" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = Cell.ReservedBitsIgnoredForTombstone
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from Cell
+[ RUN      ] Cell.ReservedBitsIgnoredForTombstone
+[       OK ] Cell.ReservedBitsIgnoredForTombstone (0 ms)
+[----------] 1 test from Cell (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"Cell.ReservedBitsIgnoredForTombstone" end time: Jun 29 23:31 CST
+"Cell.ReservedBitsIgnoredForTombstone" time elapsed: 00:00:00
+----------------------------------------------------------
+
+7/25 Testing: Cell.HighestSlotWins
+7/25 Test: Cell.HighestSlotWins
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=Cell.HighestSlotWins" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"Cell.HighestSlotWins" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = Cell.HighestSlotWins
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from Cell
+[ RUN      ] Cell.HighestSlotWins
+[       OK ] Cell.HighestSlotWins (0 ms)
+[----------] 1 test from Cell (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"Cell.HighestSlotWins" end time: Jun 29 23:31 CST
+"Cell.HighestSlotWins" time elapsed: 00:00:00
+----------------------------------------------------------
+
+8/25 Testing: LeafPage.BuildAndFind
+8/25 Test: LeafPage.BuildAndFind
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=LeafPage.BuildAndFind" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"LeafPage.BuildAndFind" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = LeafPage.BuildAndFind
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from LeafPage
+[ RUN      ] LeafPage.BuildAndFind
+[       OK ] LeafPage.BuildAndFind (0 ms)
+[----------] 1 test from LeafPage (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"LeafPage.BuildAndFind" end time: Jun 29 23:31 CST
+"LeafPage.BuildAndFind" time elapsed: 00:00:00
+----------------------------------------------------------
+
+9/25 Testing: LeafPage.LookupDecodesCell
+9/25 Test: LeafPage.LookupDecodesCell
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=LeafPage.LookupDecodesCell" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"LeafPage.LookupDecodesCell" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = LeafPage.LookupDecodesCell
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from LeafPage
+[ RUN      ] LeafPage.LookupDecodesCell
+[       OK ] LeafPage.LookupDecodesCell (0 ms)
+[----------] 1 test from LeafPage (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"LeafPage.LookupDecodesCell" end time: Jun 29 23:31 CST
+"LeafPage.LookupDecodesCell" time elapsed: 00:00:00
+----------------------------------------------------------
+
+10/25 Testing: LeafPage.Tombstone
+10/25 Test: LeafPage.Tombstone
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=LeafPage.Tombstone" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"LeafPage.Tombstone" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = LeafPage.Tombstone
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from LeafPage
+[ RUN      ] LeafPage.Tombstone
+[       OK ] LeafPage.Tombstone (0 ms)
+[----------] 1 test from LeafPage (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"LeafPage.Tombstone" end time: Jun 29 23:31 CST
+"LeafPage.Tombstone" time elapsed: 00:00:00
+----------------------------------------------------------
+
+11/25 Testing: LeafPage.OrderedIterationAndBoundaries
+11/25 Test: LeafPage.OrderedIterationAndBoundaries
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=LeafPage.OrderedIterationAndBoundaries" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"LeafPage.OrderedIterationAndBoundaries" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = LeafPage.OrderedIterationAndBoundaries
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from LeafPage
+[ RUN      ] LeafPage.OrderedIterationAndBoundaries
+[       OK ] LeafPage.OrderedIterationAndBoundaries (0 ms)
+[----------] 1 test from LeafPage (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"LeafPage.OrderedIterationAndBoundaries" end time: Jun 29 23:31 CST
+"LeafPage.OrderedIterationAndBoundaries" time elapsed: 00:00:00
+----------------------------------------------------------
+
+12/25 Testing: LeafPage.LowerBound
+12/25 Test: LeafPage.LowerBound
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=LeafPage.LowerBound" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"LeafPage.LowerBound" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = LeafPage.LowerBound
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from LeafPage
+[ RUN      ] LeafPage.LowerBound
+[       OK ] LeafPage.LowerBound (0 ms)
+[----------] 1 test from LeafPage (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"LeafPage.LowerBound" end time: Jun 29 23:31 CST
+"LeafPage.LowerBound" time elapsed: 00:00:00
+----------------------------------------------------------
+
+13/25 Testing: LeafPage.RightSibling
+13/25 Test: LeafPage.RightSibling
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=LeafPage.RightSibling" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"LeafPage.RightSibling" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = LeafPage.RightSibling
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from LeafPage
+[ RUN      ] LeafPage.RightSibling
+[       OK ] LeafPage.RightSibling (0 ms)
+[----------] 1 test from LeafPage (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"LeafPage.RightSibling" end time: Jun 29 23:31 CST
+"LeafPage.RightSibling" time elapsed: 00:00:00
+----------------------------------------------------------
+
+14/25 Testing: LeafPage.BloomTrueNegativeAndFpRate
+14/25 Test: LeafPage.BloomTrueNegativeAndFpRate
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=LeafPage.BloomTrueNegativeAndFpRate" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"LeafPage.BloomTrueNegativeAndFpRate" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = LeafPage.BloomTrueNegativeAndFpRate
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from LeafPage
+[ RUN      ] LeafPage.BloomTrueNegativeAndFpRate
+[       OK ] LeafPage.BloomTrueNegativeAndFpRate (12 ms)
+[----------] 1 test from LeafPage (12 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (13 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"LeafPage.BloomTrueNegativeAndFpRate" end time: Jun 29 23:31 CST
+"LeafPage.BloomTrueNegativeAndFpRate" time elapsed: 00:00:00
+----------------------------------------------------------
+
+15/25 Testing: LeafPage.DataBytesNonZero
+15/25 Test: LeafPage.DataBytesNonZero
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=LeafPage.DataBytesNonZero" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"LeafPage.DataBytesNonZero" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = LeafPage.DataBytesNonZero
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from LeafPage
+[ RUN      ] LeafPage.DataBytesNonZero
+[       OK ] LeafPage.DataBytesNonZero (0 ms)
+[----------] 1 test from LeafPage (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"LeafPage.DataBytesNonZero" end time: Jun 29 23:31 CST
+"LeafPage.DataBytesNonZero" time elapsed: 00:00:00
+----------------------------------------------------------
+
+16/25 Testing: MappingTable.AllocStoreGet
+16/25 Test: MappingTable.AllocStoreGet
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=MappingTable.AllocStoreGet" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"MappingTable.AllocStoreGet" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = MappingTable.AllocStoreGet
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from MappingTable
+[ RUN      ] MappingTable.AllocStoreGet
+[       OK ] MappingTable.AllocStoreGet (9 ms)
+[----------] 1 test from MappingTable (9 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (9 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"MappingTable.AllocStoreGet" end time: Jun 29 23:31 CST
+"MappingTable.AllocStoreGet" time elapsed: 00:00:00
+----------------------------------------------------------
+
+17/25 Testing: MappingTable.InvalidPid
+17/25 Test: MappingTable.InvalidPid
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=MappingTable.InvalidPid" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"MappingTable.InvalidPid" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = MappingTable.InvalidPid
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from MappingTable
+[ RUN      ] MappingTable.InvalidPid
+[       OK ] MappingTable.InvalidPid (8 ms)
+[----------] 1 test from MappingTable (8 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (8 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"MappingTable.InvalidPid" end time: Jun 29 23:31 CST
+"MappingTable.InvalidPid" time elapsed: 00:00:00
+----------------------------------------------------------
+
+18/25 Testing: MappingTable.FreeAndRecycle
+18/25 Test: MappingTable.FreeAndRecycle
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=MappingTable.FreeAndRecycle" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"MappingTable.FreeAndRecycle" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = MappingTable.FreeAndRecycle
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from MappingTable
+[ RUN      ] MappingTable.FreeAndRecycle
+[       OK ] MappingTable.FreeAndRecycle (9 ms)
+[----------] 1 test from MappingTable (9 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (9 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"MappingTable.FreeAndRecycle" end time: Jun 29 23:31 CST
+"MappingTable.FreeAndRecycle" time elapsed: 00:00:00
+----------------------------------------------------------
+
+19/25 Testing: MappingTable.SegmentGrowth
+19/25 Test: MappingTable.SegmentGrowth
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=MappingTable.SegmentGrowth" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"MappingTable.SegmentGrowth" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = MappingTable.SegmentGrowth
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from MappingTable
+[ RUN      ] MappingTable.SegmentGrowth
+[       OK ] MappingTable.SegmentGrowth (13 ms)
+[----------] 1 test from MappingTable (13 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (13 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"MappingTable.SegmentGrowth" end time: Jun 29 23:31 CST
+"MappingTable.SegmentGrowth" time elapsed: 00:00:00
+----------------------------------------------------------
+
+20/25 Testing: MappingTable.ConcurrentReadersSingleWriter
+20/25 Test: MappingTable.ConcurrentReadersSingleWriter
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=MappingTable.ConcurrentReadersSingleWriter" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"MappingTable.ConcurrentReadersSingleWriter" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = MappingTable.ConcurrentReadersSingleWriter
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from MappingTable
+[ RUN      ] MappingTable.ConcurrentReadersSingleWriter
+[       OK ] MappingTable.ConcurrentReadersSingleWriter (12 ms)
+[----------] 1 test from MappingTable (12 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (12 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"MappingTable.ConcurrentReadersSingleWriter" end time: Jun 29 23:31 CST
+"MappingTable.ConcurrentReadersSingleWriter" time elapsed: 00:00:00
+----------------------------------------------------------
+
+21/25 Testing: Slice.BasicAndCompare
+21/25 Test: Slice.BasicAndCompare
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=Slice.BasicAndCompare" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"Slice.BasicAndCompare" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = Slice.BasicAndCompare
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from Slice
+[ RUN      ] Slice.BasicAndCompare
+[       OK ] Slice.BasicAndCompare (0 ms)
+[----------] 1 test from Slice (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"Slice.BasicAndCompare" end time: Jun 29 23:31 CST
+"Slice.BasicAndCompare" time elapsed: 00:00:00
+----------------------------------------------------------
+
+22/25 Testing: Slice.EmptyAndBinary
+22/25 Test: Slice.EmptyAndBinary
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=Slice.EmptyAndBinary" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"Slice.EmptyAndBinary" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = Slice.EmptyAndBinary
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from Slice
+[ RUN      ] Slice.EmptyAndBinary
+[       OK ] Slice.EmptyAndBinary (0 ms)
+[----------] 1 test from Slice (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"Slice.EmptyAndBinary" end time: Jun 29 23:31 CST
+"Slice.EmptyAndBinary" time elapsed: 00:00:00
+----------------------------------------------------------
+
+23/25 Testing: Status.Codes
+23/25 Test: Status.Codes
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=Status.Codes" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"Status.Codes" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = Status.Codes
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from Status
+[ RUN      ] Status.Codes
+[       OK ] Status.Codes (0 ms)
+[----------] 1 test from Status (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"Status.Codes" end time: Jun 29 23:31 CST
+"Status.Codes" time elapsed: 00:00:00
+----------------------------------------------------------
+
+24/25 Testing: Options.Defaults
+24/25 Test: Options.Defaults
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=Options.Defaults" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"Options.Defaults" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = Options.Defaults
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from Options
+[ RUN      ] Options.Defaults
+[       OK ] Options.Defaults (0 ms)
+[----------] 1 test from Options (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"Options.Defaults" end time: Jun 29 23:31 CST
+"Options.Defaults" time elapsed: 00:00:00
+----------------------------------------------------------
+
+25/25 Testing: Env.DefaultSingleton
+25/25 Test: Env.DefaultSingleton
+Command: "/cjdata/cpp/crowkv/crowtree/build-tsan/crowtree_tests" "--gtest_filter=Env.DefaultSingleton" "--gtest_also_run_disabled_tests"
+Directory: /cjdata/cpp/crowkv/crowtree/build-tsan
+"Env.DefaultSingleton" start time: Jun 29 23:31 CST
+Output:
+----------------------------------------------------------
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = Env.DefaultSingleton
+[==========] Running 1 test from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 1 test from Env
+[ RUN      ] Env.DefaultSingleton
+[       OK ] Env.DefaultSingleton (0 ms)
+[----------] 1 test from Env (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 1 test from 1 test suite ran. (0 ms total)
+[  PASSED  ] 1 test.
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"Env.DefaultSingleton" end time: Jun 29 23:31 CST
+"Env.DefaultSingleton" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Jun 29 23:31 CST

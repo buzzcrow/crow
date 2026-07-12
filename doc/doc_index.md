@@ -13,6 +13,7 @@ doc only when a task touches a topic in its row. Line counts are approximate
 | `plan.md` | ~190 | Phases (P1–P5), milestones, dependency order, decision log. Read before picking a task. |
 | `test.md` | ~200 | Test strategy, layer scope definitions, high-level coverage per layer, and feature-dependent test gaps. Read when designing tests or deciding where a test belongs. |
 | `plan-test.md` | ~30 | Unfinished test task backlog with checkboxes. Read when picking the next test to implement. |
+| `plan-core-tree.md` | ~190 | crowtree core (libcrowtree, C++) implementation task backlog: tasks CT1–CT14 with tests, covering `design-crowtree-core.md` (MemTable, pages, mapping table, deltas, write path, consolidation, split/merge, versioned root, epoch GC, read path). Read before implementing the crowtree core. |
 
 Web UI requirements now live in `requirement.md` §15.4.6 (single-page embeddable
 console, two hierarchy views, functional surface mapped to the `crowkv-web` API,
@@ -72,7 +73,7 @@ embedded Swagger, V2 deferral list).
 | --- | ---: | --- |
 | `design/design-async-io.md` | ~200 | Async disk I/O backend (`tokio-uring`, `spawn_blocking` fallback), buffer mgmt, runtime topology. |
 | `design/design-console.md` | ~715 | `crowkv-console` design: shared core crate, web (Axum + React) and CLI (`clap`) frontends, two-hierarchy API (physical `/api/racks`,`/api/nodes` vs. logical `/api/stores`), monitor task, SSH lifecycle, Swagger UI hosting. |
-| `design/design-crowtree.md` | ~170 | crowtree overview: P3 decisions (C++ lib + top-boundary FFI, COW B+tree not bw-tree/LSM), architecture, redefined async `KVEngine`/`EngineView` abstraction, FFI boundary, sub-doc map. Read first for storage-engine work. |
+| `design/design-crowtree.md` | ~360 | crowtree overview: P3 decisions (C++ lib + top-boundary FFI, COW B+tree not bw-tree/LSM), architecture, redefined async `KVEngine`/`EngineView` abstraction, out-of-order apply + two-GC model (§4.1), FFI boundary, sub-doc map, **§7 open decisions Q1–Q4**. Read first for storage-engine work. |
 | `design/design-crowtree-core.md` | ~260 | crowtree core data structure: slot cell, pages, mapping table, delta records, write path (apply→delta→consolidate→split/merge), versioned root, epoch GC, read path, concurrency invariants. |
 | `design/design-crowtree-persistence.md` | ~200 | crowtree persistence: `PageStore` (file/block/RDMA), on-disk page format + IU alignment + CRC, page cache, checkpoint, internal-WAL decision (none; checkpoint+replay), recovery, C API. |
 | `design/design-crowtree-snapshot-gc.md` | ~150 | crowtree snapshot/GC flow integration: watermarks, export/import, restart + `last_applied_slot`, GC, consensus-WAL GC coupling, new-member install. |

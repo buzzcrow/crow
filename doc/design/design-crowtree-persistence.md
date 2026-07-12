@@ -49,13 +49,15 @@ public:
     virtual void flush(IoCb cb) = 0;
 
     // Backend geometry.
-    virtual uint32_t iu_size() const = 0;             // 4K/16K/64K
+    virtual uint32_t iu_size() const = 0;             // 1B (mem/SCM) .. 4K/16K/64K (SSD)
     virtual uint64_t capacity_bytes() const = 0;
 };
 ```
 
 - **IU = Indivisible Unit.** The minimum atomically-writable size. Leaf base
-  pages are padded to a multiple of it so a page write cannot tear (§3).
+  pages are padded to a multiple of it so a page write cannot tear (§3). The IU is
+  backend-configurable and may be as small as **1 byte** for byte-addressable
+  media (in-memory test store, SCM) or a flash page (SSD); see §2.
 - The async signature matches the project I/O model
   (`design-async-io.md`): inside C++ the backend uses io_uring / O_DIRECT / RDMA
   verbs; the Rust FFI adapter bridges to tokio via `spawn_blocking` or a
@@ -67,20 +69,24 @@ public:
 
 ## 2. Backends
 
-| Backend | Medium | Notes |
-| --- | --- | --- |
-| `FilePageStore` | Local file on a filesystem | `pwrite`/`pread` or io_uring; `O_DIRECT` optional; IU defaults to 4 KiB. Dev/default. |
-| `BlockDevicePageStore` | Raw block device | `O_DIRECT`, IU = SSD indivisible unit (16/64 KiB), no filesystem; allocation map owns the whole device. |
-| `RdmaPageStore` | Remote page server | One-sided RDMA read/write to a remote page region; **requires a local page cache** (§4) with pinning + epoch-gated eviction; `flush` waits for remote completion + optional remote fsync. |
+There are **two** `PageStore` implementations (decision D-Q3 in
+`design-crowtree.md §7`): a file store and a block-device store. RDMA is **not** a
+separate backend — a remote page region is just a block device reached over the
+network, served by the same `BlockPageStore` with an RDMA medium driver.
 
-All three implement the same `PageStore`. The backend is selected at `ct_open`
-via `page_tree_options` and lives entirely in C++ (it calls `aioss`
-`chunkio`/`diskio`/`rdmaio` libraries directly — no FFI on the I/O hot path, per
-decision D1).
+| Backend | Medium | IU | Notes |
+| --- | --- | --- | --- |
+| `FilePageStore` | Local file on a filesystem | 4 KiB default | `pwrite`/`pread` or io_uring; `O_DIRECT` optional. Dev/default. |
+| `BlockPageStore` | Raw block device, served by a pluggable medium driver: **SSD** (`O_DIRECT`), **SCM** (byte-addressable), **mem** (test), **RDMA-remote** (one-sided verbs to a remote region) | SSD: 16/64 KiB; SCM/mem: down to **1 byte**; RDMA: the remote region's IU | No filesystem; the allocation map owns the whole device/region. Byte-IU media skip page padding. |
 
-RDMA specifics deferred to a later round (TODO-CONFIRM in
-`design-crowtree.md §7`): cache eviction policy, pin accounting, and remote
-allocation coordination.
+Both implement the same `PageStore`. The backend is selected at `ct_open` via
+options and lives entirely in C++ (it calls `aioss` `chunkio`/`diskio`/`rdmaio`
+directly — no FFI on the I/O hot path, per D1).
+
+**RDMA-remote specifics deferred** (same as any remote block device): it needs a
+local page cache (§4) with pinning + epoch-gated eviction, and remote allocation
+coordination. These land with the block backend in a later milestone; the v1
+target is `FilePageStore` (and the in-memory `BlockPageStore` for tests).
 
 ---
 
@@ -234,8 +240,14 @@ typedef int32_t   ct_status;               // 0 = ok; negative = error code
 ct_status ct_open(const ct_options* opts, ct_tree** out);
 ct_status ct_close(ct_tree*);
 
-// Write: encoded batch (the existing Batch wire format) at a slot.
-ct_status ct_apply(ct_tree*, uint64_t slot, const uint8_t* batch, size_t len);
+// Write: encoded batch (the existing Batch wire format) at a slot, plus the
+// learner's contiguous-applied frontier so the Flusher knows how far it may
+// flush (NoOp/repair slots leave no entry; the frontier must come from the
+// learner, not be inferred from MemTable contents — core doc §6.1).
+ct_status ct_apply(ct_tree*, uint64_t slot, const uint8_t* batch, size_t len,
+                   uint64_t contiguous_slot);
+// Advance the contiguous frontier without a batch (e.g. after NoOp slots).
+ct_status ct_advance_contiguous(ct_tree*, uint64_t contiguous_slot);
 
 // Point read: returns slot + value via out-params; ct_buf is freed by ct_free_buf.
 ct_status ct_get(ct_tree*, const uint8_t* key, size_t klen,

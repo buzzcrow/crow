@@ -97,13 +97,9 @@ Tombstones occupy space until compacted away (§7).
 
 ### 3.2 Why single-version
 
-CrowKV does not provide repeatable reads or time-travel queries. Snapshot reads use the `AtSlot(N)` mode by waiting for the engine's contiguous-applied to reach `N`, then reading the current single version — which equals the value at slot `N` because:
+CrowKV does not provide repeatable reads or time-travel queries. Snapshot reads use the `AtSlot(N)` mode by waiting for the engine's contiguous-applied to reach `N`, then reading the current single version.
 
-- Any later slot writing the same key would have advanced the engine's contiguous-applied past `N` only after applying that later write, and (by the per-key wins-highest-slot rule) the post-apply value is correct for *any* read intending slot `N` because the new value linearizes after `N` anyway. Wait — this is subtle and worth stating precisely.
-
-Strictly: `Scan(AtSlot(N))` returns the engine state *after* applying everything up through the contiguous-applied frontier of the serving replica, which the replica advances to ≥ `N` before serving. If a slot `M > N` has already been applied for some key `k`, the value returned for `k` is the value at `M`, not the value at `N`. This still satisfies linearizability because slot `M` linearizes after slot `N` and the read at "logical instant `N`" is consistent with reading at logical instant `M` (a later linearization point) — both are valid linearization points for a single point in real time as long as they reflect a state that was once true.
-
-In practice this is "single-version reads always reflect the latest applied value" — the `AtSlot(N)` parameter is a lower bound on staleness, not a snapshot pin.
+`Scan(AtSlot(N))` returns the engine state *after* applying everything up through the contiguous-applied frontier of the serving replica, which the replica advances to ≥ `N` before serving. If a slot `M > N` has already been applied for some key `k`, the value returned for `k` is the value at `M`, not the value at `N`. This still satisfies linearizability: slot `M` linearizes after slot `N`, so the read at "logical instant `N`" is consistent with reading at the later linearization point `M` — both are valid linearization points for a single point in real time. `AtSlot(N)` is therefore a *lower bound on freshness*, not a snapshot pin: single-version reads always reflect the latest applied value.
 
 If true historical snapshots are ever required, MVCC is a future extension. The single-version restriction comes from [requirement.md §1 / §5.2](requirement.md#5-data-model-and-client-api).
 

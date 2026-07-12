@@ -1,5 +1,35 @@
 .PHONY: default install coverage loc clean build doc e2e test test-web \
-        ui-dev web reset
+        ui-dev web reset \
+        crowtree crowtree-test crowtree-asan crowtree-tsan crowtree-clean
+
+# ── crowtree (C++ storage engine, libcrowtree) ───────────────────
+CROWTREE_DIR := crowtree
+CROWTREE_BUILD := $(CROWTREE_DIR)/build
+
+# Configure + build the static library and the GoogleTest binary.
+crowtree:
+	cmake -S $(CROWTREE_DIR) -B $(CROWTREE_BUILD) -DCMAKE_BUILD_TYPE=Debug
+	cmake --build $(CROWTREE_BUILD) -j
+
+# Build + run the unit/integration test suite via ctest.
+crowtree-test: crowtree
+	ctest --test-dir $(CROWTREE_BUILD) --output-on-failure
+
+# AddressSanitizer build + tests (separate build dir).
+# `setarch -R` disables ASLR, which sanitizers require on some kernels.
+crowtree-asan:
+	cmake -S $(CROWTREE_DIR) -B $(CROWTREE_BUILD)-asan -DCMAKE_BUILD_TYPE=Debug -DCROWTREE_SANITIZER=address
+	cmake --build $(CROWTREE_BUILD)-asan -j
+	setarch -R ctest --test-dir $(CROWTREE_BUILD)-asan --output-on-failure
+
+# ThreadSanitizer build + tests (separate build dir).
+crowtree-tsan:
+	cmake -S $(CROWTREE_DIR) -B $(CROWTREE_BUILD)-tsan -DCMAKE_BUILD_TYPE=Debug -DCROWTREE_SANITIZER=thread
+	cmake --build $(CROWTREE_BUILD)-tsan -j
+	setarch -R ctest --test-dir $(CROWTREE_BUILD)-tsan --output-on-failure
+
+crowtree-clean:
+	rm -rf $(CROWTREE_BUILD) $(CROWTREE_BUILD)-asan $(CROWTREE_BUILD)-tsan
 
 # Frontend directory
 UI_DIR := crowkv-console/web/ui
