@@ -1,5 +1,5 @@
-//! Real multi-node coverage for the membership-epoch fence
-//! (`design/design-reconfiguration.md` §6): while a membership mutation is
+//! Real multi-node coverage for the membership-epoch fence:
+//! while a membership mutation is
 //! propagating across a real cluster's per-node HTTP fan-out (§2.1), a
 //! leader whose own epoch has already advanced (its own node's mutation
 //! call landed first) must have its writes fenced by any follower that

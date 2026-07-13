@@ -178,7 +178,7 @@ TEST(Persist, CheckpointThenReopenRestoresKeys)
     }
 }
 
-// doc/todo-sm.md G3: clear() must wipe every key and reset watermarks back
+// clear() must wipe every key and reset watermarks back
 // to a fresh empty tree, in-memory only (no persist() call here) -- proving
 // the wipe itself, independent of durability.
 TEST(Persist, ClearWipesLiveTree)

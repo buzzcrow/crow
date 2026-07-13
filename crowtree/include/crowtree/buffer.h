@@ -1,8 +1,6 @@
 // buffer: a move-only byte container that is either OWNED (frees on destruction)
 // or BORROWED (a non-owning view whose lifetime is guaranteed elsewhere — e.g. a
-// resident B+tree frame held alive by an epoch guard). See
-// design-crowtree-memory.md §2. This is plan-tree #5 B1 (the abstraction only;
-// wiring the write/read paths onto it is B2/B3).
+// resident B+tree frame held alive by an epoch guard).
 //
 // Layout of an OWNED allocation created by alloc(capacity, header_reserve):
 //
@@ -14,7 +12,7 @@
 // allocation. data()/size()/slice() span the whole used range; header(off)
 // addresses the reserved prefix.
 //
-// SBO (design §2): an owned buffer whose total length is <= kInlineCap is stored
+// SBO: an owned buffer whose total length is <= kInlineCap is stored
 // INLINE in the object with no malloc (mirrors std::string's SSO), so replacing
 // std::string on the write path never regresses the small-key/small-value case.
 // Because inline bytes live in the object, data() is COMPUTED (not a cached
@@ -40,7 +38,7 @@ class buffer
     };
 
     // Owned buffers whose total length is <= kInlineCap are stored inline (no
-    // malloc), mirroring std::string's SSO (design §2). 24 B holds a 9-byte cell
+    // malloc), mirroring std::string's SSO. 24 B holds a 9-byte cell
     // header + up to 15 B of value inline — the common small-value case.
     static constexpr size_t kInlineCap = 24;
 
@@ -225,7 +223,7 @@ class buffer
     }
 
   private:
-    // Allocator seam (design §2). Step 1 = glibc malloc; a size-classed pool or
+    // Allocator seam. Step 1 = glibc malloc; a size-classed pool or
     // RDMA-pinned allocator slots in here later with no call-site changes. Only used
     // for owned buffers larger than kInlineCap.
     static uint8_t *allocate(size_t n)

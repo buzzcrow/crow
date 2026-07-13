@@ -225,7 +225,7 @@ fn take_buf(mut buf: sys::ct_buf) -> Vec<u8> {
 
 /// Copies a `ct_buf`'s bytes into a `Vec<u8>` *without* freeing it -- unlike
 /// `take_buf`, used only for a `ct_get_async` completion's value, which may
-/// be a borrowed pointer into a still-live frame (design §5's zero-copy
+/// be a borrowed pointer into a still-live frame (zero-copy
 /// fast path, ) that must never be passed to
 /// `ct_free_buf`. The underlying `ct_future` (and, with it, any epoch guard
 /// backing that borrow) is released separately, immediately afterward, via
@@ -531,7 +531,7 @@ impl Crowtree {
     }
 
     /// Evict clean, delta-free resident leaf bases down to at most
-    /// `max_resident_leaves` (design §4.6). Test/ops hook -- forces the
+    /// `max_resident_leaves`. Test/ops hook -- forces the
     /// demand-load path a subsequent `get`/`AsyncCrowtree::get` will have to
     /// take. Returns the number of leaves evicted.
     pub fn evict_clean_leaves(&self, max_resident_leaves: u64) -> u64 {
@@ -545,7 +545,7 @@ impl Crowtree {
         unsafe { sys::ct_evict_clean_inner(self.as_ptr(), max_resident_inner) }
     }
 
-    /// The tree's Reactor eventfd (design §7), or -1 if none is wired (an
+    /// The tree's Reactor eventfd, or -1 if none is wired (an
     /// in-memory tree, or a build without liburing). Reactor-owned -- see
     /// `RawFdView`'s doc comment for why callers must never close it.
     fn reactor_eventfd(&self) -> RawFd {
@@ -793,7 +793,7 @@ fn decode_scan(bytes: &[u8], count: usize) -> Result<Vec<ScanEntry>, CtError> {
 // no spawn_blocking, no OS thread hop. A fast-path completion (get_view's
 // cached L0/L1 hit, or flush's always-in-memory work) resolves on the
 // *first* poll without ever touching the reactor; only a genuine
-// demand-load miss (design §6.3) waits on the tree's eventfd.
+// demand-load miss waits on the tree's eventfd.
 //
 // Fan-out note: this deliberately does *not* have every pending future call
 // `AsyncFd::poll_read_ready` on a shared registration -- that method's
@@ -855,7 +855,7 @@ struct RawOutcome {
 }
 
 /// Which `ct_*_async` call produced a `FutureGuard` -- `ct_future_poll`'s
-/// freeing contract differs for `Get` (, design §5):
+/// freeing contract differs for `Get`:
 /// a resolved kGet future is deliberately *not* freed by `ct_future_poll`
 /// itself (its `out_value` may still borrow from a resident frame, kept
 /// alive by the future's own epoch guard), so the caller must free it
@@ -888,7 +888,7 @@ impl Drop for FutureGuard {
 }
 
 // SAFETY: *mut ct_future is an opaque handle the C++ side documents as
-// freely movable/pollable from any thread (design §7); this narrow impl is
+// freely movable/pollable from any thread; this narrow impl is
 // what lets drive_ct_future's generated future (which holds a FutureGuard
 // across its `.await` points) be Send, without having to bless the
 // non-Send raw ct_buf pointer that only ever lives inside the fully
@@ -929,7 +929,7 @@ fn try_poll_ct_future(guard: &mut FutureGuard, kind: FutureKind) -> Option<Resul
         take_buf(value)
     } else {
         // copy_buf, not take_buf: for a Get, `value` may borrow from a
-        // still-live frame (design §5's zero-copy fast path) and must
+        // still-live frame (zero-copy fast path) and must
         // not be passed to ct_free_buf. Flush/Snapshot never populate
         // `value` at all, so this is a no-op for them either way.
         copy_buf(value)
@@ -1064,7 +1064,7 @@ impl AsyncCrowtree {
 
     /// Drives the engine's io_uring reactor directly (Phase
     /// 3) -- no `spawn_blocking`; the write phase always waits on the
-    /// reactor (design §4's table), unlike `flush`/the fast `get` path.
+    /// reactor, unlike `flush`/the fast `get` path.
     pub async fn snapshot(&self) -> Result<u64, CtError> {
         let fut = unsafe { sys::ct_snapshot_async(self.inner.as_ptr()) };
         Ok(
@@ -1150,7 +1150,7 @@ pub enum GetOutcome {
     Ready(Result<Option<(u64, Vec<u8>)>, CtError>),
     /// A genuine demand-load miss, already registered with the reactor
     /// (or, absent one, that will complete synchronously on the next poll
-    /// regardless -- design §6.3): `.await` this to completion.
+    /// regardless -- `.await` this to completion.
     Pending(Pin<Box<dyn Future<Output = Result<Option<(u64, Vec<u8>)>, CtError>> + Send>>),
 }
 
@@ -1163,6 +1163,6 @@ pub enum ScanOutcome {
     Ready(Result<(Vec<ScanEntry>, bool), CtError>),
     /// A genuine cold-leaf miss, already registered with the reactor (or,
     /// absent one, that will complete synchronously on the next poll
-    /// regardless -- design §6.3): `.await` this to completion.
+    /// regardless -- `.await` this to completion.
     Pending(Pin<Box<dyn Future<Output = Result<(Vec<ScanEntry>, bool), CtError>> + Send>>),
 }

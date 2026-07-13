@@ -58,7 +58,7 @@ fn is_healthy_is_true_on_a_freshly_opened_engine() {
     assert!(open().is_healthy());
 }
 
-/// Regression guard (`design-crowtree-engine.md` §4.5): an in-memory
+/// Regression guard: an in-memory
 /// `CrowtreeEngine` (`opt.path: None`, no page store, no reactor -- see
 /// `CrowtreeOptions::default`) has no I/O path *at all*, so `get`/`scan`/
 /// `apply` must always resolve `Ready` -- proves the "fast path stays fast"
@@ -84,7 +84,7 @@ fn get_scan_apply_always_resolve_ready() {
 /// mirroring `async_get_test.cpp`'s `MissAfterEvictionCompletesViaReactor`
 /// one layer up. Awaiting that `Pending` future still resolves to the
 /// correct value either way (via the reactor on a liburing build, or a
-/// synchronous fallback otherwise -- design §6.3), proving the `Pending`
+/// synchronous fallback otherwise), proving the `Pending`
 /// path is correct, not just that it exists.
 #[tokio::test]
 async fn get_constructs_pending_for_genuine_demand_load_miss() {

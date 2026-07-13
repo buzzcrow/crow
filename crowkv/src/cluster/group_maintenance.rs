@@ -1,5 +1,4 @@
-//! Per-group engine durability + WAL GC maintenance loop
-//! (`design-crowtree-storage.md`).
+//! Per-group engine durability + WAL GC maintenance loop.
 //!
 //! Periodically, for the local replica of one group:
 //!
@@ -19,9 +18,8 @@
 //!    replica is a follower that doesn't track it; see that method's own
 //!    doc — means "nothing yet provably safe to reclaim").
 //!
-//! `set_gc_watermark`'s two inputs are `snapshot_slot` (design §1: state
-//! durable on the leader plus at least one peer) and `safe_slot` (design §1:
-//! state every learner has applied). `snapshot_slot` is
+//! `set_gc_watermark`'s two inputs are `snapshot_slot` (state
+//! durable on the leader plus at least one peer) and `safe_slot` (state every learner has applied). `snapshot_slot` is
 //! [`PxGroup::group_snapshot_slot`]: each replica's own
 //! `WalEngine::snapshot_slot` (updated below, right after `persist_snapshot`
 //! advances it) is gossiped to the leader piggybacked on the same heartbeat

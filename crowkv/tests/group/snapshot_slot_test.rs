@@ -1,8 +1,7 @@
 //! Group durable-snapshot-watermark computation: the
 //! published `group_snapshot_slot` is `min(local WalEngine::snapshot_slot,
 //! max(voting peer durable_snapshot_slot))` -- "durable on the leader plus
-//! at least one peer" (`design-crowtree-snapshot-gc.md` §1
-//! `snapshot_slot`), gossiped piggybacked on the same heartbeat round as
+//! at least one peer" (`snapshot_slot`), gossiped piggybacked on the same heartbeat round as
 //! `group_safe_slot`. Unlike `group_safe_slot` (which takes the *min* over
 //! every voting peer), `group_snapshot_slot` takes the *max* over peers --
 //! only one peer beyond the leader needs to durably have a slot, so a

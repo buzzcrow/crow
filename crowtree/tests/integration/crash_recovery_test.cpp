@@ -87,7 +87,7 @@ TEST(CrashRecovery, FaultInjectedWriteFailureLeavesPreviousGenerationIntact)
 // A dirty mapping-table segment's image is silently lost (as if the write
 // never landed pre-crash) but every *later* write in this generation --
 // including the anchor itself -- still succeeds and commits normally. This
-// is the #14c/#14d-specific corruption class the design's own recovery spec
+// is the #14c/#14d-specific corruption class the recovery spec
 // calls out: "a segment or directory image failing CRC while its anchor was
 // committed indicates media corruption -> fail the node out" (§9), as
 // opposed to the anchor itself being torn (already covered by the

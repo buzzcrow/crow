@@ -39,7 +39,7 @@ fn compare_is_empty_for_identical_state_and_detects_divergence() {
     );
 }
 
-/// Regression guard (`design-crowtree-engine.md` §4.5): `InMemKV` never
+/// Regression guard: `InMemKV` never
 /// needs real I/O, so `get`/`scan`/`apply` must always resolve `Ready` — a
 /// `matches!` check on the raw `KVFuture` *before* unwrapping, so a future
 /// accidental switch to `Pending` fails loudly here first, not just via a

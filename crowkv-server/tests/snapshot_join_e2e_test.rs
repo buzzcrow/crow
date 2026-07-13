@@ -131,7 +131,7 @@ async fn add_remote_replica(
 /// peer): a brand-new replica's *first-ever* remote wiring must land as
 /// one bootstrap batch, since the server only recognizes "this replica
 /// has no remote history yet, so this isn't a membership change" on a
-/// still-empty remote list (`design/design-reconfiguration.md` §6's exact-match
+/// still-empty remote list (the exact-match
 /// epoch fence) -- splitting it into N separate single-entry calls would
 /// let calls 2..N look like genuine post-bootstrap voting-set changes
 /// and bump this replica's epoch out from under it, permanently

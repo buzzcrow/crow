@@ -39,8 +39,7 @@ impl<T> KVFuture<T> {
     /// exists). Panics on `Pending` so the day a real `Pending` future shows
     /// up here, it's a loud, unmissable signal that this call site now needs
     /// converting to real `async`/`.await` instead of a silent wrong answer
-    /// or a hang. See `design-crowtree-engine.md` §4.4 for the deferred
-    /// caller-side conversion this panic is meant to trigger.
+    /// or a hang. The deferred caller-side conversion this panic is meant to trigger.
     ///
     /// # Panics
     /// Panics if `self` is [`KVFuture::Pending`].

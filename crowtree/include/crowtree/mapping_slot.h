@@ -1,6 +1,6 @@
 // Packed 64-bit mapping-table slot word (plan-tree #14a).
 //
-// Design: design-crowtree-mappingtable.md §4. The *same* encoding is used in
+// The *same* encoding is used in
 // memory and on disk, so a persisted segment image is literally the array of
 // packed words and recovery installs them with zero decode:
 //

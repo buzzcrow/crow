@@ -49,7 +49,7 @@ ct_buf make_buf(const void *data, size_t len)
 }
 
 // Unlike make_buf(), does not malloc/copy -- `data` is returned as-is (design
-// §5's zero-copy fast path, plan-tree.md #11 Phase 4). Only for a ct_buf whose
+// §5's zero-copy fast path). Only for a ct_buf whose
 // backing memory the caller separately keeps alive for at least as long as the
 // buffer is in use (ct_future_poll's kGet case: the ct_future_impl's own
 // EpochManager::Guard). The caller must NOT pass this to ct_free_buf.
@@ -101,7 +101,7 @@ struct ct_tree
 #ifdef CROWTREE_HAVE_LIBURING
     // Both null for an in-memory tree, or if opening the async twin failed
     // (see ct_open) -- get_async/flush_async/snapshot_async then fall back
-    // to completing synchronously (design §6.3). Declared so `reactor`
+    // to completing synchronously. Declared so `reactor`
     // outlives `async_store` (FileAsyncPageStore is non-owning re: reactor,
     // mirroring Options' own comment) and both outlive `tree`, which is
     // what actually calls into them.
@@ -120,7 +120,7 @@ struct ct_tree
 // once done, or ct_future_free if abandoned early) and the callback (which
 // always eventually fires -- see Reactor::submit_locked/cancel) have let
 // go of their reference. This is what makes ct_future_free's best-effort
-// cancel-and-free (design §8) safe: it never has to actually reach into
+// cancel-and-free: it never has to actually reach into
 // the reactor to stop anything, and never risks a dangling ct_future_impl*
 // if the I/O completes after the caller has already abandoned the future.
 struct ct_future_impl
@@ -134,8 +134,7 @@ struct ct_future_impl
     std::atomic<bool> done{false};
     ct_status         status = static_cast<ct_status>(Code::kOk);
     // kGet only. May hold a live EpochManager::Guard borrowing a resident
-    // frame's bytes (design §5's zero-copy fast path, plan-tree.md #11
-    // Phase 4) -- released only when this ct_future_impl is destroyed, so
+    // frame's bytes (zero-copy fast path,
     // ct_future_poll deliberately does *not* delete the handle for a kGet
     // future (see its updated doc comment in c_api.h); the caller must
     // always follow up with ct_future_free once done reading out_value.
@@ -212,7 +211,7 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
     if (durable && opt->backend == 1) {
         // plan-tree #22: raw block device (O_DIRECT), no async twin yet --
         // get_async/flush_async/snapshot_async fall back to synchronous
-        // completion (design §6.3), matching a MemPageStore-backed tree's
+        // completion, matching a MemPageStore-backed tree's
         // existing no-async-backend-wired path (o.async_reactor/
         // async_page_store stay null).
         std::unique_ptr<BlockPageStore> bs;
@@ -589,8 +588,7 @@ ct_status ct_future_poll(ct_future *f, int32_t *done, int32_t *out_found, uint64
                 *out_slot = view.slot();
             }
             if (out_value != nullptr) {
-                // Borrowed (design §5's zero-copy fast path, plan-tree.md
-                // #11 Phase 4): points directly at view.value()'s bytes --
+                // Borrowed (zero-copy fast path):
                 // never malloc'd, so the caller must NOT pass this to
                 // ct_free_buf. Valid until ct_future_free destroys `handle`
                 // (and, with it, view's epoch guard) -- see this

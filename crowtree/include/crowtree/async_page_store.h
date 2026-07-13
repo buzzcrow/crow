@@ -1,6 +1,6 @@
 // AsyncPageStore: the async twin of PageStore (page_store.h) -- submits a
 // read/write/fsync and returns immediately; `on_complete` fires later from
-// the Reactor thread with the result (design-crowtree-async.md §6.3).
+// the Reactor thread with the result.
 //
 // FileAsyncPageStore is FilePageStore's async twin: same fd, same byte-
 // offset (PageAddr) addressing, but backed by a Reactor instead of
@@ -9,7 +9,7 @@
 // stack frame (no reactor, no I/O) needs no dedicated type -- see the unit
 // tests for the pattern.
 //
-// Phase 1 (plan-tree.md #11) is fully additive: nothing in the rest of
+// Phase 1 is fully additive: nothing in the rest of
 // crowtree constructs a FileAsyncPageStore yet. A later phase wires this
 // into resident()/flush()/snapshot() alongside the synchronous PageStore
 // path.

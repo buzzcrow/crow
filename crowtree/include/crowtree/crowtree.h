@@ -79,7 +79,7 @@ class GetView
   public:
     GetView() = default;
 
-    // Not defaulted (plan-tree.md #11 Phase 4 found this the hard way, via
+    // Not defaulted (found this the hard way, via
     // ASan): `owned_` (a `buffer`) relocates its bytes on move when small
     // enough to be inline (SBO, buffer::kInlineCap) -- but `value_` is a
     // *separate* field, a plain Slice pointer+len that a defaulted move
@@ -153,7 +153,7 @@ struct GcStats
     uint64_t bytes_freed        = 0; // logical key+cell bytes of the dropped tombstones
 };
 
-// Point-in-time diagnostics snapshot (doc/todo-sm.md Step 6): batches every
+// Point-in-time diagnostics snapshot: batches every
 // cheap (O(1)) internal counter worth exposing to an operator into one
 // struct, so a caller/FFI/console poll costs one call instead of many
 // small ones. Deliberately excludes anything that requires walking the
@@ -183,7 +183,7 @@ struct EngineStats
 // prepare_snapshot_locked() (persist.cpp) so the actual store->write_at()/
 // submit_write() call is a pure I/O op with no further encoding logic --
 // shared by snapshot()'s synchronous writes and snapshot_async()'s async
-// ones (plan-tree.md #11 Phase 2).
+// ones.
 struct PreparedSnapshotWrite
 {
     uint64_t             addr = 0;
@@ -234,7 +234,7 @@ struct PreparedSegmentWrite
 // Output of prepare_snapshot_locked(): every byte this snapshot generation
 // needs written, computed synchronously under write_mutex_ (the segment
 // scan + delta-fold + page/segment-image/directory encode is CPU/memory-only
-// -- see the "Lock scope" note on plan-tree.md #11). The caller writes
+// -- see the "Lock scope" note on #11). The caller writes
 // `page_writes` and `segment_writes` (any order/concurrency) then
 // `directory_write`, then a durability barrier, then `anchor_write` --
 // writing the anchor before that barrier would violate the crash-safety
@@ -288,9 +288,9 @@ class Crowtree
     // non-null). Requires opt.page_store != null.
     Status snapshot(uint64_t *out_last_applied = nullptr);
 
-    // Async twin of snapshot() (plan-tree.md #11 Phase 2). Always genuinely
+    // Async twin of snapshot(). Always genuinely
     // async from *this* caller's perspective when Options::async_reactor/
-    // async_page_store are wired (design §4's table: flush/snapshot are
+    // async_page_store are wired (flush/snapshot are
     // *always* slow-path, unlike get/scan): snapshot_async() returns
     // immediately after kicking off the walk + first I/O submission, and
     // on_done fires later from the Reactor thread with the same result
@@ -322,7 +322,7 @@ class Crowtree
     //
     // Falls back to running the existing synchronous snapshot() in the
     // caller's stack frame (still correct, just not async) when no async
-    // backend is wired -- e.g. a MemPageStore-backed tree; design §6.3.
+    // backend is wired -- e.g. a MemPageStore-backed tree.
     void snapshot_async(std::function<void(Status, uint64_t last_applied)> on_done);
 
     // Ingest a batch at `slot`. The tree internally tracks received slots and
@@ -360,7 +360,7 @@ class Crowtree
     Status del(Slice key);
     Status batch_put(const Batch &batch);
 
-    // Logical retention GC watermark (design-crowtree-snapshot-gc.md §1/§4):
+    // Logical retention GC watermark:
     // stores both slots and computes gc_floor_ = min(snapshot_slot, safe_slot).
     // Tombstones with slot <= gc_floor_ may be dropped, during consolidation or
     // by an explicit collect_garbage() sweep. Using the min of the two (rather
@@ -401,13 +401,13 @@ class Crowtree
     // lost -- see the active_/frozen_ member comment for the full design.
     Status flush();
 
-    // Async twin of flush() (plan-tree.md #11 Phase 2). flush() only drains
+    // Async twin of flush(). flush() only drains
     // L0 (MemTable) into L1 (in-memory B+tree) -- it never touches
     // Options::page_store (only snapshot() writes durable bytes), so unlike
     // snapshot_async() there is no genuine I/O to submit to the reactor
     // here: this always invokes on_done synchronously with flush()'s result
     // before returning. Exists so C API callers have a uniform
-    // ct_flush_async/ct_snapshot_async shape (design §3.3) even though
+    // ct_flush_async/ct_snapshot_async shape even though
     // flush's own fast-path-vs-slow-path split is trivial today.
     void flush_async(std::function<void(Status)> on_done);
 
@@ -420,8 +420,7 @@ class Crowtree
     // from its resident frame instead of copying it out. See GetView's doc.
     [[nodiscard]] GetView get_view(Slice key) const;
 
-    // Async twin of get() (plan-tree.md #11 Phase 2, design-crowtree-async.md
-    // §3/§4/§6.1). Fast path (every page needed to resolve `key` is already
+    // Async twin of get(). Fast path (every page needed to resolve `key` is already
     // resident, or no async backend is wired -- see Options::async_reactor/
     // async_page_store) invokes on_done synchronously, before this call
     // returns, exactly like get(). A genuine miss on the L1 descent (some
@@ -432,15 +431,15 @@ class Crowtree
     // repeats -- on_done fires exactly once regardless, but for a miss it
     // runs on the Reactor thread, not the caller's.
     //
-    // Scope boundary (deliberate, matches design's own miss scenario): only
+    // Scope boundary (deliberate, matches the miss scenario): only
     // the L1 base-page descent is async. A value spilled into an overflow
     // chain (large values, PT11) still resolves its chain synchronously via
     // the existing assemble_overflow_value()/resident() path -- overflow
-    // chains are the less common case and the design doc's own §6.1 miss
+    // chains are the less common case and the miss
     // walkthrough only describes "the leaf page is unloaded", not an
     // overflow page.
     //
-    // Zero-copy fast path (plan-tree.md #11 Phase 4, design §5): `on_done`
+    // Zero-copy fast path: `on_done`
     // receives the resolved `GetView` itself, not a copied-out std::string.
     // For the *first* attempt's synchronous resolution (this call's own
     // thread, no I/O), the GetView's epoch guard is still live -- it's safe
@@ -460,7 +459,7 @@ class Crowtree
     // entries in key order; sets *truncated if more matched beyond the limit.
     Status scan(Slice prefix, size_t limit, std::vector<scan_entry> *out, bool *truncated) const;
 
-    // Async twin of scan() (plan-tree.md #11 follow-up). Unlike get_async,
+    // Async twin of scan(). Unlike get_async,
     // which has exactly one possible miss point (the root->leaf descent for
     // a single key), scan() walks a whole range of leaves via
     // right_sibling and any of them -- or an inner page on the initial
@@ -603,7 +602,7 @@ class Crowtree
 
     // Evict clean, delta-free resident leaf bases down to at most
     // `max_resident_leaves`, re-tagging their slots unloaded and epoch-retiring the
-    // pages (design §4.6); returns the number evicted. Safe against lock-free
+    // pages; returns the number evicted. Safe against lock-free
     // readers (epoch-deferred frame reuse); evicted pages reload on next access.
     [[nodiscard]] size_t evict_clean_leaves(size_t max_resident_leaves);
 
@@ -680,7 +679,7 @@ class Crowtree
     }
 
     // Start the background flush thread if `opt_.background_flush` is set (open-
-    // issue fix, plan-tree.md §C). Safe to call at most once; no-op otherwise.
+    // issue fix, §C). Safe to call at most once; no-op otherwise.
     // Callers that go through a two-phase construction (Crowtree::open()'s
     // construct-then-recover sequence in persist.cpp) must delay this call until
     // *after* recovery finishes, since recovery mutates the freshly-constructed
@@ -691,7 +690,7 @@ class Crowtree
     // eligible on a timer, not only on the size thresholds. Reuses flush()'s
     // existing write_mutex_/MemTable-mutex_ locking — no new synchronization
     // between this thread and the apply()-driving thread (design note in
-    // plan-tree.md Open Issues §C). Also runs collect_garbage() every
+    // Open Issues §C). Also runs collect_garbage() every
     // opt_.gc_interval_ms (plan-tree #21) on this same thread/loop -- no second
     // thread for the periodic GC trigger.
     void background_flush_loop();
@@ -788,12 +787,12 @@ class Crowtree
     size_t evict_clean_inner_locked(size_t max_resident_inner);   // caller holds write_mutex_
     void   maybe_evict_locked(); // capacity-driven auto-evict (caller holds write_mutex_)
     // Resolve a PID to its resident chain head, demand-loading an unloaded slot
-    // (design §4.5). Hot (resident) path is lock-free; the cold path locks
+    // (demand-load). Hot (resident) path is lock-free; the cold path locks
     // load_mutex_ and double-checks. Returns nullptr if the slot is unset.
     [[nodiscard]] PageBase *resident(uint64_t page_id) const;
 
     // Shared by resident()'s synchronous cold path and get_async's async
-    // completion handler (plan-tree.md #11 Phase 2): decodes+validates a
+    // completion handler: decodes+validates a
     // just-read durable blob and installs it as the resident page for
     // `page_id`, exactly like resident()'s cold path did inline before this
     // was factored out. Returns the installed page, or nullptr on a
@@ -829,7 +828,7 @@ class Crowtree
     // get_async's key must survive across an arbitrary number of async
     // round trips, each on a different call stack.
     //
-    // `same_thread` (plan-tree.md #11 Phase 4): true iff this specific
+    // `same_thread`: true iff this specific
     // attempt is guaranteed to resolve (if it resolves at all) on the same
     // thread that will eventually call ct_future_free -- i.e. every call
     // except the one made from inside the io_uring completion callback
@@ -872,7 +871,7 @@ class Crowtree
     void scan_async_attempt(std::shared_ptr<std::string> prefix_owned, size_t limit,
                             std::function<void(Status, std::vector<scan_entry>, bool)> on_done) const;
 
-    // Shared by snapshot() and snapshot_async() (persist.cpp, plan-tree.md
+    // Shared by snapshot() and snapshot_async() (persist.cpp,
     // #11 Phase 2, #14c/#14d): runs the segment scan / delta-fold /
     // page+segment-image+directory+anchor encode that snapshot() used to do
     // inline, but defers every actual write into the returned *out instead
@@ -922,7 +921,7 @@ class Crowtree
                                    std::function<void(Status, uint64_t last_applied)> on_done);
 
     Options opt_;
-    // Base-page frame arena (design §4). shared_ptr because epoch-retired pages
+    // Base-page frame arena. shared_ptr because epoch-retired pages
     // co-own it; the tree-owned EpochManager (epoch_, declared last so it is
     // destroyed first) reclaims those pages before pool_ is destroyed. Declared
     // before mapping_ so it is destroyed after the pages it backs.
@@ -1025,13 +1024,12 @@ class Crowtree
     // own mutex-guarded page_id/CLOCK tracking: wiring every `resident()`
     // hit through that would mean taking a global pool mutex on every page
     // access, regressing the lock-free read path #5 B3/#12/#13 built (see
-    // plan-tree.md #17 for the full reasoning) -- this achieves the same
     // "residency/eviction driven by real access recency, not arbitrary
     // order" goal without that cost.
     mutable std::atomic<uint64_t> touch_tick_{0};
 
     mutable std::mutex write_mutex_; // serializes flush / consolidate / split-merge
-    mutable std::mutex load_mutex_;  // serializes cold-path demand loads (design §4.5)
+    mutable std::mutex load_mutex_;  // serializes cold-path demand loads
     // Serializes snapshot(_async) generations against each other across
     // snapshot_async's async write phase, where write_mutex_ itself can't be
     // held (see acquire_snapshot_slot's doc comment and snapshot_async's).

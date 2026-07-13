@@ -64,8 +64,7 @@ pub fn compute_gc_slot(safe_slot: u64, snapshot_slot: u64) -> u64 {
 /// The GC watermark is `min(safe_slot, snapshot_slot)`, where `safe_slot` is
 /// the highest slot that is known to be contiguously applied *everywhere it
 /// might still be needed* (see
-/// `crate::cluster::group::PxGroup::group_safe_slot` /
-/// `design-crowtree-storage.md §7`) and `snapshot_slot` is the latest
+/// `crate::cluster::group::PxGroup::group_safe_slot`) and `snapshot_slot` is the latest
 /// snapshot slot from the `WalEngine` state. Pass `u64::MAX` for `safe_slot`
 /// to let `snapshot_slot` alone gate GC (e.g. a caller with no group-wide
 /// safe-slot notion).

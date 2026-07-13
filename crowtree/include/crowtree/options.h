@@ -39,7 +39,7 @@ struct Options
     // max(1, inner_max_keys / 4) (well below the post-split size for hysteresis).
     uint32_t inner_merge_keys = 0;
 
-    // ── Overflow pages (design §3 / PT11) ──
+    // ── Overflow pages (PT11) ──
     // A value larger than this spills out of its leaf into a chain of fixed
     // overflow frames; the leaf keeps a small fixed pointer cell, so every base
     // page stays <= frame_bytes (pool-resident + evictable). 0 = derive a default
@@ -54,7 +54,7 @@ struct Options
     // key comfortably within a single leaf/inner frame alongside its cell.
     size_t max_key_size = 0;
 
-    // ── In-frame delta region (design §5A / PT12) ──
+    // ── In-frame delta region (PT12) ──
     // When enabled, a small flush appends its mutations as in-frame deltas via a
     // cheap frame COW (memcpy + append) instead of building a fresh sorted base or
     // a heap delta node; the leaf folds to a fresh base once delta_count reaches
@@ -63,7 +63,7 @@ struct Options
     bool     inframe_delta     = false;
     uint32_t max_inframe_delta = 8;
 
-    // ── MemTable flush triggers (core doc §6.2) ──
+    // ── MemTable flush triggers ──
     size_t   memtable_flush_bytes   = 4ULL * 1024 * 1024; // 4 MiB
     uint32_t memtable_flush_entries = 100000;
     uint64_t flush_interval_ms      = 200; // time-based flush
@@ -93,7 +93,7 @@ struct Options
     uint32_t max_memtable_count = 2;
 
     // ── Mapping table redesign (plan-tree #14) ──
-    // Packed slot words per segment (design-crowtree-mappingtable.md §4).
+    // Packed slot words per segment.
     // Fixed for the lifetime of a tree. Not yet consumed by MappingTable --
     // it still hardcodes MappingTable::kSegmentSize (#14c follow-up: plumb
     // this through as the runtime segment size) -- present now so
@@ -113,21 +113,21 @@ struct Options
     PageStore *page_store = nullptr;
 
 #ifdef CROWTREE_HAVE_LIBURING
-    // ── Async I/O (design-crowtree-async.md, plan-tree.md #11 Phase 2) ──
+    // ── Async I/O ──
     // Both non-owning; the caller (c_api.cpp's ct_open) owns and outlives
     // the Crowtree. Either left null (e.g. a MemPageStore-backed tree, or
     // any tree that never calls the *_async methods) means get_async's
     // genuine-miss case and flush_async/snapshot_async fall back to
     // completing synchronously in the caller's stack frame instead of
-    // touching a reactor -- see design §6.3 (no MemAsyncPageStore needed)
-    // and Crowtree::get_async's doc comment. One Reactor per Crowtree
-    // instance (design §3.1/§9); async_page_store must be backed by the
+    // touching a reactor -- no MemAsyncPageStore needed
+    // (see Crowtree::get_async's doc comment). One Reactor per Crowtree
+    // instance; async_page_store must be backed by the
     // *same* durable file as `page_store` (see FileAsyncPageStore).
     Reactor        *async_reactor    = nullptr;
     AsyncPageStore *async_page_store = nullptr;
 #endif
 
-    // ── Buffer pool (design §4) ──
+    // ── Buffer pool ──
     // The arena that holds base-page frames is a flat array of equal-size frames.
     // `frame_bytes` is that fixed size; a base page larger than a frame (rare;
     // overflow pages are PT11) or built when the pool is full falls back to a
@@ -136,7 +136,7 @@ struct Options
     uint32_t frame_bytes       = 64ULL * 1024;        // fixed arena frame size
     size_t   buffer_pool_bytes = 64ULL * 1024 * 1024; // arena capacity (frames * frame_bytes)
 
-    // ── Page compression (design §3.5/§3.6, PT10) ──
+    // ── Page compression (PT10) ──
     // On-disk only: each durable base page is wrapped in a self-describing blob
     // ([algo][raw_len][stored_len][crc][stored]); the buffer pool always holds
     // uncompressed frames. The algo is recorded per page, so a page is decoded

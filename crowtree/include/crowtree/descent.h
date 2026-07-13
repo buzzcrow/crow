@@ -12,7 +12,7 @@ namespace crowtree
 
 // Returns the leaf PID that should contain `key`, or kInvalidPageId if the tree is
 // empty / malformed. `resolve(page_id)` maps a PID to its resident chain head,
-// demand-loading an unloaded slot (design §4.5); it returns a real PageBase* or
+// demand-loading an unloaded slot; it returns a real PageBase* or
 // nullptr. `max_depth` guards against accidental cycles.
 template <class Resolve>
 [[nodiscard]] inline uint64_t find_leaf_page_id(Resolve &&resolve, uint64_t root_page_id, Slice key, int max_depth = 64)

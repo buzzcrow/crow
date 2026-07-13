@@ -1,5 +1,5 @@
 // PT6d: incremental snapshot writes only dirty pages, retains clean pages'
-// durable addrs, and reopens to identical state (design §5, §4.6).
+// durable addrs, and reopens to identical state.
 #include "crowtree/crowtree.h"
 #include "crowtree/page_store.h"
 

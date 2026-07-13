@@ -88,7 +88,7 @@ async fn propose_with_no_client_id() {
     }
 }
 
-/// Regression for the quorum-counting bug (`design/design-reconfiguration.md` §6.4):
+/// Regression for the quorum-counting bug:
 /// `run_accept_phase` used to count *any* remote's `Accepted` reply toward
 /// quorum, including a non-voting catch-up member's. Here the leader has
 /// one voting remote (deliberately unreachable, so it never acks) and one
@@ -141,8 +141,8 @@ async fn non_voting_remote_accept_does_not_count_toward_quorum() {
     follower_store.join().await;
 }
 
-/// Unit-level coverage for the membership-epoch fence
-/// (`design/design-reconfiguration.md` §6): a leader whose `membership_epoch`
+/// Unit-level coverage for the membership-epoch fence:
+/// a leader whose `membership_epoch`
 /// does not exactly match a voting remote's own epoch must have its
 /// Prepare/Accept rejected by that remote (not silently counted toward
 /// quorum, and not treated as a ballot conflict). The rejection triggers

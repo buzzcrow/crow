@@ -1,19 +1,19 @@
 // Reactor: a dedicated io_uring event-loop thread that submits read/write/
 // fsync SQEs and dispatches CQE completions to per-op callbacks. One
-// instance per `Crowtree` (design-crowtree-async.md §3.1/§9); it runs no
+// instance per `Crowtree`; it runs no
 // application logic of its own -- only kernel I/O completion dispatch.
 //
 // Linux-only (io_uring is a Linux kernel interface): this header is guarded
 // by CROWTREE_HAVE_LIBURING, which crowtree/CMakeLists.txt defines only
 // when liburing was found (never on macOS). Nothing in the rest of crowtree
-// includes this header yet -- Phase 1 (plan-tree.md #11) is fully additive;
+// includes this header yet -- Phase 1 is fully additive;
 // a later phase wires it into resident()/flush()/snapshot() via
 // AsyncPageStore (async_page_store.h).
 #pragma once
 
 #ifndef CROWTREE_HAVE_LIBURING
 #    error \
-        "crowtree/reactor.h requires CROWTREE_HAVE_LIBURING (liburing not found by CMake; io_uring is Linux-only, see design-crowtree-async.md §10)"
+        "crowtree/reactor.h requires CROWTREE_HAVE_LIBURING (liburing not found by CMake; io_uring is Linux-only)"
 #endif
 
 #include <liburing.h>
@@ -45,7 +45,7 @@ class Reactor
 
     // Submit a read/write/fsync. `on_complete` is invoked exactly once from
     // the reactor thread with the raw CQE `res` (see class comment), unless
-    // cancel() removes it first (design §8: best-effort -- the callback is
+    // cancel() removes it first (best-effort -- the callback is
     // simply never invoked; the CQE, if it later arrives, is discarded).
     // Returns an opaque op id usable with cancel(); 0 is never a valid id
     // from a successful submission. If the ring's SQ is exhausted even
@@ -59,13 +59,12 @@ class Reactor
 
     // Best-effort cancellation: drops the registered callback so it will
     // never fire, regardless of whether the kernel eventually completes the
-    // underlying I/O (design §8). A no-op if `op_id` already completed, was
+    // underlying I/O. A no-op if `op_id` already completed, was
     // already cancelled, or is 0.
     void cancel(uint64_t op_id);
 
     // Reactor-owned; Rust wraps this raw fd via tokio::io::AsyncFd without
-    // taking close ownership (design §7 / plan-tree.md #11 Phase 0 note --
-    // documented here now, enforced in the FFI wrapper once Phase 3 lands).
+    // taking close ownership (documented here now, enforced in the FFI wrapper once Phase 3 lands).
     [[nodiscard]] int eventfd() const
     {
         return eventfd_;
@@ -82,7 +81,7 @@ class Reactor
     // Reactor thread body: waits (bounded, so ~Reactor's stopped_ flag is
     // re-checked promptly even with no I/O in flight) for at least one CQE,
     // drains every CQE currently ready, dispatches each to its callback,
-    // then writes to eventfd_ once per drained batch (design §3.1).
+    // then writes to eventfd_ once per drained batch.
     void run();
 
     struct io_uring   ring_{};

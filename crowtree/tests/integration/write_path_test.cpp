@@ -57,8 +57,8 @@ TEST(WritePath, BasePagesLiveInBufferPool)
 }
 
 // plan-tree #18 D5/D6: dirty ("anonymous", durable_addr == kNoAddr) frames
-// are pinned-resident until a snapshot -- design-crowtree-persistence.md
-// §4.3's "a dirty frame is never evicted until written". D5 (model
+// are pinned-resident until a snapshot -- "a dirty frame is never evicted
+// until written". D5 (model
 // reconciliation) is a no-op: the live model (PageBase::durable_addr
 // directly, no separate Pin/PinNew abstraction) already satisfies that
 // invariant -- evict_clean_leaves_locked requires durable_addr != kNoAddr,
@@ -68,7 +68,7 @@ TEST(WritePath, BasePagesLiveInBufferPool)
 // No eager-snapshot-on-memory-pressure trigger actually exists anywhere in
 // the engine (verified by inspection: background_flush_loop only calls
 // flush()/collect_garbage(), never snapshot(); maybe_evict_locked only
-// evicts *clean* frames) -- design §5A's "a write storm that outruns
+// evicts *clean* frames) -- "a write storm that outruns
 // snapshot triggers an eager snapshot" was never implemented, so there is
 // nothing to test *as originally scoped*. What's real and testable without
 // inventing a new feature: for a write storm against a *bounded* key set

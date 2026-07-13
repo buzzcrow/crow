@@ -97,8 +97,7 @@ impl PxLearner {
     /// Live value and its resolved slot for `key`, or `None` if unset or
     /// tombstoned. Convenience wrapper over [`KVEngine::get`].
     ///
-    /// `async fn` (, `design-crowtree-engine.md`
-    /// §4.4): `.await`s the `KVFuture` directly instead of `into_ready` --
+    /// `async fn`: `.await`s the `KVFuture` directly instead of `into_ready` --
     /// [`crate::kv::CrowtreeEngine::get`] can now genuinely construct
     /// `KVFuture::Pending` for a demand-load miss, and `into_ready` would
     /// panic on that case. The fast (`Ready`) path costs nothing extra: a

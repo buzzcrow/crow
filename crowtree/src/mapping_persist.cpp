@@ -105,7 +105,7 @@ Status decode_segment_image(const uint8_t *buf, size_t len, SegmentImageHeader *
     if (crc32c(buf, kImageHeaderBytes - 4) != stored_header_crc) {
         return Status::corruption("segment image: header CRC mismatch");
     }
-    // Clean-break format (design §13 settled decision 1): no older format to
+    // Clean-break format: no older format to
     // accept, so a version mismatch is just corruption/foreign-format, same
     // as a bad magic.
     if (get_u16(buf + 4) != kFormatVersion) {

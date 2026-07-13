@@ -1,5 +1,5 @@
 // On-disk mapping-table formats: segment image + segment directory
-// (plan-tree #14c). Design: design-crowtree-mappingtable.md §7.
+// (plan-tree #14c).
 //
 // Both formats are backend-neutral byte blobs (no fixed file region) --
 // callers allocate/write/read them through PageStore like any other durable
@@ -26,7 +26,7 @@
 namespace crowtree
 {
 
-// ── Segment image (design §7.1) ──────────────────────────────────
+// ── Segment image ─────────────────────────────────────────────
 
 struct SegmentImageHeader
 {
@@ -64,7 +64,7 @@ Status decode_segment_image(const uint8_t *buf, size_t len, SegmentImageHeader *
 // Callers use this to size the allocation before encode_segment_image runs.
 [[nodiscard]] size_t segment_image_encoded_size(uint32_t slot_count);
 
-// ── Segment directory (design §7.2) ──────────────────────────────
+// ── Segment directory ──────────────────────────────────────────
 
 struct DirEntry
 {

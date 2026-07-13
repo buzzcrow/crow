@@ -182,7 +182,7 @@ impl PxElectionConfig {
         bulk_prepare_window: 1024,
         election_driver_disabled: false,
         learner_stream_window_frames: 64,
-        // Matches design-crowtree-storage.md §9's periodic GC trigger cadence.
+        // Matches the periodic GC trigger cadence (30 s).
         maintenance_tick_ms: 30_000,
     };
 

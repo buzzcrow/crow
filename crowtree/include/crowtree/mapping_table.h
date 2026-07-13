@@ -65,7 +65,7 @@ class MappingTable
     void clear(uint64_t page_id);
 
     // Wire the epoch manager used to safely reclaim segments that recycle to
-    // empty (plan-tree #14b / design-crowtree-mappingtable.md §6). Call once,
+    // empty. Call once,
     // before any concurrent readers can observe the table. If never called,
     // recycled segments are `delete`d directly on the writer thread -- fine
     // for a standalone table with no concurrent readers (e.g. unit tests),

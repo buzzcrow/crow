@@ -47,7 +47,7 @@ struct PageBase
     // (== kNoAddr in buffer_pool.h) means dirty/anonymous: the live frame is not
     // yet durable. Set on demand-load (clean) and by snapshot after a write;
     // a freshly built page leaves it dirty. A page is snapshot-clean (and thus
-    // evictable, design §4.6) iff it is a base, has no deltas above it, and
+    // evictable) iff it is a base, has no deltas above it, and
     // durable_addr != ~0ull. Meaningful only for base pages.
     uint64_t durable_addr = ~0ULL;
     uint32_t durable_plen = 0;

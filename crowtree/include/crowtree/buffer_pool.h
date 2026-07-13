@@ -27,7 +27,7 @@ namespace crowtree
 using PageAddr = uint64_t;
 
 // Sentinel addr for an anonymous (not-yet-durable) frame: a freshly built page
-// that no snapshot has assigned a durable location to yet (design §4.5).
+// that no snapshot has assigned a durable location to yet.
 inline constexpr PageAddr kNoAddr = ~0ULL;
 
 class BufferPool;
