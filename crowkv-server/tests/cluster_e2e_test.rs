@@ -83,6 +83,49 @@ fn normalize_topology(mut topo: Value) -> Value {
     topo
 }
 
+enum KvOp {
+    Put(KvSetRequest),
+    Get(KvGetRequest),
+    Delete(KvDeleteRequest),
+    BatchWrite(KvBatchWriteRequest),
+}
+
+/// Execute a KV operation against the current leader, refreshing the leader
+/// and retrying when the RPC returns "not leader". This lets tests keep the
+/// aggressive `test` election profile while tolerating transient leader
+/// churn on the same physical host.
+async fn run_kv_op_with_retry(nodes: &[ServerNode], group_id: u64, op: &KvOp) -> crowkv::rpc::KvResponse {
+    use crowkv::rpc::kv_service_client::KvServiceClient;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut last_err = String::new();
+    while std::time::Instant::now() < deadline {
+        let leader_idx = wait_for_leader(nodes, group_id, std::time::Duration::from_secs(10)).await;
+        let addr = node_endpoint(&topology(&nodes[leader_idx]).await);
+        let mut client = KvServiceClient::connect(format!("http://{addr}"))
+            .await
+            .expect("connect to leader");
+        let result = match op {
+            KvOp::Put(req) => client.put(req.clone()).await,
+            KvOp::Get(req) => client.get(req.clone()).await,
+            KvOp::Delete(req) => client.delete(req.clone()).await,
+            KvOp::BatchWrite(req) => client.batch_write(req.clone()).await,
+        };
+        match result {
+            Ok(resp) => return resp.into_inner(),
+            Err(status) => {
+                last_err = status.message().to_string();
+                assert!(
+                    last_err.to_lowercase().contains("not leader"),
+                    "kv rpc failed: {last_err}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+    }
+    panic!("kv operation timed out waiting for leader: {last_err}");
+}
+
 fn group_endpoint(topo: &Value) -> String {
     topo["stores"][0]["listen_addr"]
         .as_str()
@@ -215,14 +258,10 @@ async fn e2e_three_node_cluster_kv_put_batch_delete() {
         );
     }
 
-    let leader_idx = wait_for_leader(&nodes, group_id, std::time::Duration::from_secs(20)).await;
-    let leader_addr = node_endpoint(&topology(&nodes[leader_idx]).await);
-    let mut kv = KvServiceClient::connect(format!("http://{leader_addr}"))
-        .await
-        .expect("connect to leader");
-
-    let resp = kv
-        .put(KvSetRequest {
+    let resp = run_kv_op_with_retry(
+        &nodes,
+        group_id,
+        &KvOp::Put(KvSetRequest {
             version: 1,
             key: b"hello".to_vec(),
             value: b"world".to_vec(),
@@ -232,18 +271,19 @@ async fn e2e_three_node_cluster_kv_put_batch_delete() {
             request_id: 1001,
             request_create_ms: 10001,
             group_id,
-        })
-        .await
-        .expect("kv put")
-        .into_inner();
+        }),
+    )
+    .await;
     assert!(resp.ok, "put should succeed: {}", resp.error);
 
     // Get: read the value we just wrote through the leader. Verifies the
     // Paxos chosen value reached the local-replica learner store on the
     // node serving the read. The handler returns ok=true with the bytes
     // in `value` for a hit (see `kv_service::get`).
-    let resp = kv
-        .get(KvGetRequest {
+    let resp = run_kv_op_with_retry(
+        &nodes,
+        group_id,
+        &KvOp::Get(KvGetRequest {
             version: 1,
             key: b"hello".to_vec(),
             request_id: 1011,
@@ -251,15 +291,16 @@ async fn e2e_three_node_cluster_kv_put_batch_delete() {
             group_id,
             read_mode: 0,
             client_slot: 0,
-        })
-        .await
-        .expect("kv get")
-        .into_inner();
+        }),
+    )
+    .await;
     assert!(resp.ok, "get should succeed: {}", resp.error);
     assert_eq!(resp.value, b"world");
 
-    let resp = kv
-        .batch_write(KvBatchWriteRequest {
+    let resp = run_kv_op_with_retry(
+        &nodes,
+        group_id,
+        &KvOp::BatchWrite(KvBatchWriteRequest {
             version: 1,
             items: vec![
                 KvBatchItem {
@@ -278,14 +319,15 @@ async fn e2e_three_node_cluster_kv_put_batch_delete() {
             request_id: 1002,
             request_create_ms: 10002,
             group_id,
-        })
-        .await
-        .expect("kv batch")
-        .into_inner();
+        }),
+    )
+    .await;
     assert!(resp.ok, "batch should succeed: {}", resp.error);
 
-    let resp = kv
-        .delete(KvDeleteRequest {
+    let resp = run_kv_op_with_retry(
+        &nodes,
+        group_id,
+        &KvOp::Delete(KvDeleteRequest {
             version: 1,
             key: b"hello".to_vec(),
             seq: 3,
@@ -293,17 +335,18 @@ async fn e2e_three_node_cluster_kv_put_batch_delete() {
             request_id: 1003,
             request_create_ms: 10003,
             group_id,
-        })
-        .await
-        .expect("kv delete")
-        .into_inner();
+        }),
+    )
+    .await;
     assert!(resp.ok, "delete should succeed: {}", resp.error);
 
     // Get-after-Delete: the chosen tombstone propagated to the learner.
     // `kv_get` for a missing key returns `ok=false, not_found=true` (see
     // `PxKvStore::kv_get`); only the `not_found` flag is asserted here.
-    let resp = kv
-        .get(KvGetRequest {
+    let resp = run_kv_op_with_retry(
+        &nodes,
+        group_id,
+        &KvOp::Get(KvGetRequest {
             version: 1,
             key: b"hello".to_vec(),
             request_id: 1013,
@@ -311,10 +354,9 @@ async fn e2e_three_node_cluster_kv_put_batch_delete() {
             group_id,
             read_mode: 0,
             client_slot: 0,
-        })
-        .await
-        .expect("kv get after delete")
-        .into_inner();
+        }),
+    )
+    .await;
     assert!(
         resp.not_found,
         "deleted key must read as not_found: value={:?}",

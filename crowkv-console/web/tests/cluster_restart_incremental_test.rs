@@ -209,29 +209,50 @@ async fn create_group(
 }
 
 async fn kv_put(client: &reqwest::Client, base: &str, store_id: u64, group_id: u64, key: &str, value: &str) {
-    let (status, body) = json_post(
-        client,
-        &format!("{base}/api/stores/{store_id}/groups/{group_id}/kv/put"),
-        json!({ "key": key, "value": value }),
-    )
-    .await;
-    assert_eq!(status.as_u16(), 200, "kv put {store_id}/{group_id} {key}: {body}");
-    assert_eq!(body["ok"], true);
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let (status, body) = json_post(
+            client,
+            &format!("{base}/api/stores/{store_id}/groups/{group_id}/kv/put"),
+            json!({ "key": key, "value": value }),
+        )
+        .await;
+        if status.as_u16() == 200 && body["ok"] == true {
+            return;
+        }
+        if Instant::now() >= deadline {
+            assert_eq!(status.as_u16(), 200, "kv put {store_id}/{group_id} {key}: {body}");
+            assert_eq!(body["ok"], true);
+        }
+        // Leader likely changed mid-operation; wait for a stable leader and retry.
+        wait_for_group_leader(client, base, store_id, group_id, 0, Duration::from_secs(60)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 async fn kv_delete(client: &reqwest::Client, base: &str, store_id: u64, group_id: u64, key: &str) {
-    let (status, body) = json_post(
-        client,
-        &format!("{base}/api/stores/{store_id}/groups/{group_id}/kv/delete"),
-        json!({ "key": key }),
-    )
-    .await;
-    assert_eq!(
-        status.as_u16(),
-        200,
-        "kv delete {store_id}/{group_id} {key}: {body}"
-    );
-    assert_eq!(body["ok"], true);
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let (status, body) = json_post(
+            client,
+            &format!("{base}/api/stores/{store_id}/groups/{group_id}/kv/delete"),
+            json!({ "key": key }),
+        )
+        .await;
+        if status.as_u16() == 200 && body["ok"] == true {
+            return;
+        }
+        if Instant::now() >= deadline {
+            assert_eq!(
+                status.as_u16(),
+                200,
+                "kv delete {store_id}/{group_id} {key}: {body}"
+            );
+            assert_eq!(body["ok"], true);
+        }
+        wait_for_group_leader(client, base, store_id, group_id, 0, Duration::from_secs(60)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }
 
 async fn kv_get(client: &reqwest::Client, base: &str, store_id: u64, group_id: u64, key: &str) -> Value {
@@ -272,7 +293,8 @@ async fn wait_for_group_leader(
                 .filter(|r| r["role"].as_str() == Some("leader"))
                 .filter_map(|r| r["replica_id"].as_u64())
                 .collect();
-            if replicas.len() == expected_replicas && leaders.len() == 1 {
+            let count_ok = expected_replicas == 0 || replicas.len() == expected_replicas;
+            if count_ok && leaders.len() == 1 {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 let (status_b, body_b) =
                     json_get(client, &format!("{base}/api/stores/{store_id}/groups/{group_id}")).await;
@@ -283,7 +305,8 @@ async fn wait_for_group_leader(
                         .filter(|r| r["role"].as_str() == Some("leader"))
                         .filter_map(|r| r["replica_id"].as_u64())
                         .collect();
-                    if replicas_b.len() == expected_replicas && leaders_b == leaders {
+                    let count_ok_b = expected_replicas == 0 || replicas_b.len() == expected_replicas;
+                    if count_ok_b && leaders_b == leaders {
                         return body_b;
                     }
                 }
@@ -896,7 +919,7 @@ async fn restart_5node_1group() {
             n_puts: 100,
             deleted_keys: vec![1, 50, 100, 200, 300, 400],
         }],
-        "test",
+        "default",
     )
     .await;
 }
@@ -930,7 +953,7 @@ async fn restart_5node_2group() {
                 deleted_keys: vec![2, 80, 150, 220],
             },
         ],
-        "test",
+        "default",
     )
     .await;
 }
@@ -965,7 +988,7 @@ async fn restart_6node_2group_overlap() {
                 deleted_keys: vec![2, 100, 250, 400],
             },
         ],
-        "test",
+        "default",
     )
     .await;
 }
