@@ -354,7 +354,7 @@ async fn assert_offline_replay_has_values(node_id: u64, wal_dir: PathBuf, kvs: &
         "restored replica recovered an election term"
     );
     assert_eq!(
-        restored.highest_seen_slot(),
+        restored.accepted_log_tip().0,
         u64::try_from(kvs.len()).expect("kvs length exceeds u64"),
         "offline replay should recover every accepted slot"
     );
