@@ -136,7 +136,7 @@ async fn gc_snapshot_slot_covered_prefix_is_removed() {
     let seg_count_before = wal.index().lock().segments().count();
     assert!(seg_count_before >= 2, "need multiple segments for GC test");
 
-    let unlinked = run_gc_pass(&wal).await.unwrap();
+    let unlinked = run_gc_pass(&wal, u64::MAX).await.unwrap();
     assert!(
         unlinked > 0,
         "snapshot-covered prefix should GC at least one segment"
@@ -149,4 +149,47 @@ async fn gc_snapshot_slot_covered_prefix_is_removed() {
     let result = replay_group(&backend, &disks, 1).await.unwrap();
     assert!(!result.records.is_empty());
     assert_eq!(result.current_term, 1);
+}
+
+/// `run_gc_pass`'s `safe_slot` parameter genuinely gates GC: even with the
+/// snapshot slot covering everything, a `safe_slot` below it must hold GC
+/// back to `min(safe_slot, snapshot_slot)` (a lagging voting member that
+/// hasn't applied past `safe_slot` might still need those segments).
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn gc_pass_is_bounded_by_safe_slot_not_just_snapshot_slot() {
+    let backend = sim_backend();
+    let disks = vec![PathBuf::from("/wal")];
+    let config = WalConfig {
+        wal_disks: disks.clone(),
+        wal_segment_size: 200,
+        ..Default::default()
+    };
+    let wal = WalEngine::create(backend.clone(), config, 1).await.unwrap();
+
+    for slot in 1..=20 {
+        let entry = PxLogEntry {
+            slot,
+            ballot: PxBallot::new(0, 1),
+            term: 1,
+            payload: Bytes::from("data"),
+        };
+        wal.append(&WALRecord::from_accepted(1, &entry)).await.unwrap();
+    }
+    // Snapshot slot covers everything, but a lagging peer has only applied
+    // through slot 3 -- `safe_slot` must be the limiting factor.
+    wal.set_snapshot_slot(20);
+    wal.seal_all().await.unwrap();
+
+    let unlinked_at_low_safe_slot = run_gc_pass(&wal, 3).await.unwrap();
+    assert_eq!(
+        unlinked_at_low_safe_slot, 0,
+        "a low safe_slot must hold GC back even though snapshot_slot covers everything"
+    );
+
+    // Once the lagging peer catches up, the same snapshot_slot now GCs.
+    let unlinked_at_high_safe_slot = run_gc_pass(&wal, 20).await.unwrap();
+    assert!(
+        unlinked_at_high_safe_slot > 0,
+        "raising safe_slot to match snapshot_slot should unblock GC"
+    );
 }

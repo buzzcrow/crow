@@ -1,4 +1,5 @@
 // PT3-PT5: snapshot + recovery + durable round-trip integration tests.
+#include "crowtree/block_page_store.h"
 #include "crowtree/crowtree.h"
 #include "crowtree/page_store.h"
 
@@ -206,7 +207,7 @@ TEST(Persist, CorruptNewestSuperblockFallsBackToPrevious)
 TEST(Persist, FileBackendRoundTrip)
 {
     std::array<char, 29> tmpl{"/tmp/crowtree_persist_XXXXXX"};
-    int  fd     = mkstemp(tmpl.data());
+    int                  fd = mkstemp(tmpl.data());
     ASSERT_GE(fd, 0);
     close(fd);
     std::string path(tmpl.data());
@@ -256,6 +257,76 @@ TEST(Persist, FileBackendRoundTrip)
             EXPECT_EQ(v, kv.second);
         }
         // The snapshot retains tombstones (gc_floor = 0), so compare live entries.
+        auto   snap = t->snapshot_view();
+        size_t live = 0;
+        for (const auto &e : snap->entries()) {
+            if (!CellView{Slice(e.cell)}.is_tombstone()) {
+                ++live;
+            }
+        }
+        EXPECT_EQ(live, oracle.size());
+    }
+    std::remove(path.c_str());
+}
+
+// plan-tree #22: same round-trip as FileBackendRoundTrip, but against the
+// O_DIRECT BlockPageStore -- proves a real Crowtree engine's actual
+// snapshot/recovery write/read pattern (superblocks, manifest, page
+// frames -- whatever offsets/lengths persist.cpp happens to use) round-trips
+// correctly through BlockPageStore's alignment handling, not just the
+// synthetic offsets exercised directly in page_store_test.cpp.
+TEST(Persist, BlockDeviceBackendRoundTrip)
+{
+    std::array<char, 29> tmpl{"/tmp/crowtree_persist_XXXXXX"};
+    int                  fd = mkstemp(tmpl.data());
+    ASSERT_GE(fd, 0);
+    close(fd);
+    std::string path(tmpl.data());
+
+    std::map<std::string, std::string> oracle;
+    {
+        std::unique_ptr<BlockPageStore> store;
+        ASSERT_TRUE(BlockPageStore::open(path, 4096, &store).ok());
+        Options opt;
+        opt.page_store       = store.get();
+        opt.leaf_split_bytes = 256;
+        Crowtree     t(opt);
+        std::mt19937 rng(7);
+        uint64_t     slot = 0;
+        for (int i = 0; i < 200; ++i) {
+            ++slot;
+            std::string k = make_key(static_cast<int>(rng() % 120));
+            if ((rng() % 5) == 0) {
+                ASSERT_TRUE(t.apply(slot, del_one(k)).ok());
+                oracle.erase(k);
+            }
+            else {
+                std::string val = "v" + std::to_string(slot);
+                ASSERT_TRUE(t.apply(slot, put_one(k, val)).ok());
+                oracle[k] = val;
+            }
+            if (i % 9 == 0) {
+                ASSERT_TRUE(t.flush().ok());
+            }
+        }
+        ASSERT_TRUE(t.flush().ok());
+        ASSERT_TRUE(t.snapshot().ok());
+    }
+
+    // Reopen the file in a brand-new store + engine.
+    {
+        std::unique_ptr<BlockPageStore> store;
+        ASSERT_TRUE(BlockPageStore::open(path, 4096, &store).ok());
+        Options opt;
+        opt.page_store = store.get();
+        std::unique_ptr<Crowtree> t;
+        ASSERT_TRUE(Crowtree::open(opt, &t).ok());
+        for (auto &kv : oracle) {
+            std::string v;
+            uint64_t    s;
+            ASSERT_TRUE(t->get(Slice(kv.first), &s, &v)) << "missing " << kv.first;
+            EXPECT_EQ(v, kv.second);
+        }
         auto   snap = t->snapshot_view();
         size_t live = 0;
         for (const auto &e : snap->entries()) {

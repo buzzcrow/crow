@@ -15,6 +15,9 @@ mod learner;
 #[path = "paxos/learner_dedup_test.rs"]
 mod learner_dedup;
 
+#[path = "paxos/learner_async_test.rs"]
+mod learner_async;
+
 #[path = "paxos/roles_test.rs"]
 mod roles;
 

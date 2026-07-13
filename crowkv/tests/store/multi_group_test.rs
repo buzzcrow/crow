@@ -30,11 +30,13 @@ async fn multi_group_routes_to_correct_group() {
         .local_replica()
         .learner
         .engine_get(b"g1-key".as_slice())
+        .await
         .is_some());
     assert!(g1
         .local_replica()
         .learner
         .engine_get(b"g2-key".as_slice())
+        .await
         .is_none());
 
     // Verify isolation: group 2 has only its key
@@ -43,11 +45,13 @@ async fn multi_group_routes_to_correct_group() {
         .local_replica()
         .learner
         .engine_get(b"g2-key".as_slice())
+        .await
         .is_some());
     assert!(g2
         .local_replica()
         .learner
         .engine_get(b"g1-key".as_slice())
+        .await
         .is_none());
 }
 

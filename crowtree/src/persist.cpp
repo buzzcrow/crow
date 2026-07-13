@@ -16,6 +16,7 @@
 // Key work: incremental reachable-page walk, crash-safe free-space reuse,
 // page/manifest framing, superblock A/B commit, best-superblock recovery,
 // lazy mapping-table rebuild.
+#include "crowtree/async_page_store.h"
 #include "crowtree/compressor.h"
 #include "crowtree/crc32c.h"
 #include "crowtree/crowtree.h"
@@ -25,9 +26,13 @@
 #include "crowtree/page_store.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <functional>
 #include <map>
+#include <memory>
+#include <mutex>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -257,13 +262,12 @@ SpaceAllocator build_allocator(std::vector<std::pair<uint64_t, uint64_t>> live, 
 
 } // namespace
 
-Status Crowtree::snapshot(uint64_t *out_last_applied)
+Status Crowtree::prepare_snapshot_locked(PreparedSnapshot *out)
 {
     PageStore *store = opt_.page_store;
     if (store == nullptr) {
         return Status::invalid_argument("snapshot: no page_store");
     }
-    std::lock_guard<std::mutex> lk(write_mutex_);
 
     const uint32_t iu = store->iu_size();
     const uint64_t gc = gc_floor_.load();
@@ -301,23 +305,30 @@ Status Crowtree::snapshot(uint64_t *out_last_applied)
     // durable_plen, so reload (resident) and GC (collect_live_extents) read the
     // exact span.
     auto persist_one = [&](uint64_t the_page_id, PageBase *pg, const uint8_t *frame, uint32_t plen) -> Status {
+        uint64_t this_addr;
+        uint32_t this_len;
         if (pg->durable_addr == kNoAddr) { // dirty: persist the live frame
             std::vector<uint8_t> blob;
             encode_durable_page(frame, plen, opt_.compression, &blob);
             auto     logical = static_cast<uint32_t>(blob.size());
             uint64_t addr    = alloc.alloc(logical);
             blob.resize(round_up_to_iu(logical, iu), 0); // zero-pad to the IU extent (PT9)
-            Status s = store->write_at(addr, blob.data(), blob.size());
-            if (!s.ok()) {
-                return s;
-            }
-            pg->durable_addr = addr;
-            pg->durable_plen = logical; // manifest records the logical (unpadded) length
+            // NOT pg->durable_addr = addr here -- see this function's doc
+            // comment on crowtree.h: that must wait until commit_prepared_
+            // snapshot() confirms the byte write actually landed.
+            out->page_writes.push_back(PreparedPageWrite{
+                .page_id = the_page_id, .page = pg, .addr = addr, .logical_len = logical, .blob = std::move(blob)});
+            this_addr = addr;
+            this_len  = logical; // manifest records the logical (unpadded) length
             ++pages_written;
         }
+        else { // clean: already durable from a prior generation, no rewrite
+            this_addr = pg->durable_addr;
+            this_len  = pg->durable_plen;
+        }
         put_u64(&manifest_body, the_page_id);
-        put_u64(&manifest_body, pg->durable_addr);
-        put_u32(&manifest_body, pg->durable_plen);
+        put_u64(&manifest_body, this_addr);
+        put_u32(&manifest_body, this_len);
         ++page_count;
         return Status::Ok();
     };
@@ -417,16 +428,7 @@ Status Crowtree::snapshot(uint64_t *out_last_applied)
     uint64_t manifest_len  = manifest.size(); // logical (recorded in the superblock)
     uint64_t manifest_addr = alloc.alloc(manifest_len);
     manifest.resize(round_up_to_iu(manifest_len, iu), 0); // pad to the IU extent (PT9)
-    Status ms = store->write_at(manifest_addr, manifest.data(), manifest.size());
-    if (!ms.ok()) {
-        return ms;
-    }
-
-    // Barrier: pages + manifest durable before the superblock that references them.
-    Status sync1 = store->sync();
-    if (!sync1.ok()) {
-        return sync1;
-    }
+    out->manifest_write = PreparedSnapshotWrite{.addr = manifest_addr, .blob = std::move(manifest)};
 
     uint64_t seq = have_prev ? prev.snapshot_seq + 1 : 1;
 
@@ -443,23 +445,218 @@ Status Crowtree::snapshot(uint64_t *out_last_applied)
 
     std::vector<uint8_t> sbuf;
     encode_superblock(sb, sb_slot_bytes, &sbuf);
-    uint64_t sb_slot = (seq & 1) != 0 ? 0 : sb_slot_bytes; // alternate A/B by parity
-    Status   sbw     = store->write_at(sb_slot, sbuf.data(), sbuf.size());
+    uint64_t sb_slot       = (seq & 1) != 0 ? 0 : sb_slot_bytes; // alternate A/B by parity
+    out->superblock_write  = PreparedSnapshotWrite{.addr = sb_slot, .blob = std::move(sbuf)};
+    out->last_applied_slot = sb.last_applied_slot;
+    out->seq               = seq;
+    out->page_count        = page_count;
+    out->pages_written     = pages_written;
+    out->manifest_len      = manifest_len;
+    return Status::Ok();
+}
+
+void Crowtree::commit_prepared_snapshot(const PreparedSnapshot &prepared)
+{
+    {
+        std::lock_guard<std::mutex> lk(write_mutex_);
+        for (const auto &pw : prepared.page_writes) {
+            PageBase *v = mapping_.get(pw.page_id);
+            // Identity check (not just durable_addr == kNoAddr): `v` may be a
+            // *different*, independently-dirty page if a concurrent
+            // consolidate/flush/split replaced this page_id's mapping entry
+            // since prepare_snapshot_locked() ran -- see PreparedPageWrite's
+            // doc comment. A mismatch just skips this entry (harmless).
+            if (v == pw.page && v->durable_addr == kNoAddr) {
+                v->durable_addr = pw.addr;
+                v->durable_plen = pw.logical_len;
+            }
+        }
+    }
+    version_.fetch_add(1);
+    CT_LOG_INFO("snapshot committed: seq={} last_applied={} pages={} written={} manifest_len={}", prepared.seq,
+                prepared.last_applied_slot, prepared.page_count, prepared.pages_written, prepared.manifest_len);
+}
+
+void Crowtree::acquire_snapshot_slot()
+{
+    while (snapshot_inflight_.exchange(true, std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::microseconds(50));
+    }
+}
+
+void Crowtree::release_snapshot_slot()
+{
+    snapshot_inflight_.store(false, std::memory_order_release);
+}
+
+Status Crowtree::snapshot(uint64_t *out_last_applied)
+{
+    if (opt_.page_store == nullptr) {
+        return Status::invalid_argument("snapshot: no page_store");
+    }
+    acquire_snapshot_slot();
+    PreparedSnapshot prepared;
+    Status           ps;
+    {
+        std::lock_guard<std::mutex> lk(write_mutex_);
+        ps = prepare_snapshot_locked(&prepared);
+    }
+    if (!ps.ok()) {
+        release_snapshot_slot();
+        return ps;
+    }
+    for (auto &w : prepared.page_writes) {
+        Status s = opt_.page_store->write_at(w.addr, w.blob.data(), w.blob.size());
+        if (!s.ok()) {
+            release_snapshot_slot();
+            return s;
+        }
+    }
+    Status mw = opt_.page_store->write_at(prepared.manifest_write.addr, prepared.manifest_write.blob.data(),
+                                          prepared.manifest_write.blob.size());
+    if (!mw.ok()) {
+        release_snapshot_slot();
+        return mw;
+    }
+    // Barrier: pages + manifest durable before the superblock that references them.
+    Status sync1 = opt_.page_store->sync();
+    if (!sync1.ok()) {
+        release_snapshot_slot();
+        return sync1;
+    }
+    Status sbw = opt_.page_store->write_at(prepared.superblock_write.addr, prepared.superblock_write.blob.data(),
+                                           prepared.superblock_write.blob.size());
     if (!sbw.ok()) {
+        release_snapshot_slot();
         return sbw;
     }
-    Status sync2 = store->sync();
+    Status sync2 = opt_.page_store->sync();
     if (!sync2.ok()) {
+        release_snapshot_slot();
         return sync2;
     }
 
-    version_.fetch_add(1);
-    CT_LOG_INFO("snapshot committed: seq={} last_applied={} pages={} written={} manifest_len={}", seq,
-                sb.last_applied_slot, page_count, pages_written, manifest_len);
+    commit_prepared_snapshot(prepared);
+    release_snapshot_slot();
     if (out_last_applied != nullptr) {
-        *out_last_applied = sb.last_applied_slot;
+        *out_last_applied = prepared.last_applied_slot;
     }
     return Status::Ok();
+}
+
+void Crowtree::snapshot_async(std::function<void(Status, uint64_t)> on_done)
+{
+    if (opt_.page_store == nullptr) {
+        on_done(Status::invalid_argument("snapshot: no page_store"), 0);
+        return;
+    }
+#ifdef CROWTREE_HAVE_LIBURING
+    if (opt_.async_reactor != nullptr && opt_.async_page_store != nullptr) {
+        acquire_snapshot_slot();
+        auto   prepared = std::make_shared<PreparedSnapshot>();
+        Status ps;
+        {
+            std::lock_guard<std::mutex> lk(write_mutex_);
+            ps = prepare_snapshot_locked(prepared.get());
+        }
+        if (!ps.ok()) {
+            release_snapshot_slot();
+            on_done(ps, 0);
+            return;
+        }
+        snapshot_write_next_async(std::move(prepared), 0, std::move(on_done));
+        return;
+    }
+#endif
+    // No async backend wired (design §6.3) -- run the synchronous path in
+    // this stack frame; still correct, just not genuinely async.
+    uint64_t last_applied = 0;
+    Status   st           = snapshot(&last_applied);
+    on_done(st, last_applied);
+}
+
+void Crowtree::snapshot_write_next_async(std::shared_ptr<PreparedSnapshot> prepared, size_t idx,
+                                         std::function<void(Status, uint64_t)> on_done)
+{
+#ifndef CROWTREE_HAVE_LIBURING
+    // Unreachable: snapshot_async()'s only call site for this helper is
+    // itself #ifdef CROWTREE_HAVE_LIBURING-gated. Kept defined (rather than
+    // #ifdef-ing the whole function out) so the declaration in crowtree.h
+    // stays unconditional, matching get_async_attempt's style.
+    (void)prepared;
+    (void)idx;
+    (void)on_done;
+    return;
+#else
+    // snapshot_inflight_ (acquired by snapshot_async() before
+    // prepare_snapshot_locked()) stays held across this entire async chain
+    // -- see snapshot_async's doc comment on crowtree.h for why an atomic
+    // spin-gate is used here instead of write_mutex_ (which cannot be
+    // unlocked from a different thread than the one that locked it, and
+    // this chain's completions run on the Reactor thread). `prepared` is a
+    // shared_ptr so each hop's lambda can carry it to the next hop after
+    // this call's own stack frame returns.
+    if (idx < prepared->page_writes.size()) {
+        const PreparedPageWrite &w = prepared->page_writes[idx];
+        opt_.async_page_store->submit_write(
+            w.addr, w.blob.data(), w.blob.size(), [this, prepared, idx, on_done](const Status &st) mutable {
+                if (!st.ok()) {
+                    release_snapshot_slot();
+                    on_done(st, 0);
+                    return;
+                }
+                snapshot_write_next_async(std::move(prepared), idx + 1, std::move(on_done));
+            });
+        return;
+    }
+
+    const PreparedSnapshotWrite &mw = prepared->manifest_write;
+    opt_.async_page_store->submit_write(
+        mw.addr, mw.blob.data(), mw.blob.size(), [this, prepared, on_done](const Status &st) mutable {
+            if (!st.ok()) {
+                release_snapshot_slot();
+                on_done(st, 0);
+                return;
+            }
+            // Barrier: pages + manifest durable before the superblock that references them.
+            Status fs1 = opt_.async_page_store->submit_fsync([this, prepared, on_done](const Status &st2) mutable {
+                if (!st2.ok()) {
+                    release_snapshot_slot();
+                    on_done(st2, 0);
+                    return;
+                }
+                const PreparedSnapshotWrite &sbw = prepared->superblock_write;
+                opt_.async_page_store->submit_write(
+                    sbw.addr, sbw.blob.data(), sbw.blob.size(), [this, prepared, on_done](const Status &st3) mutable {
+                        if (!st3.ok()) {
+                            release_snapshot_slot();
+                            on_done(st3, 0);
+                            return;
+                        }
+                        Status fs2 =
+                            opt_.async_page_store->submit_fsync([this, prepared, on_done](const Status &st4) mutable {
+                                if (!st4.ok()) {
+                                    release_snapshot_slot();
+                                    on_done(st4, 0);
+                                    return;
+                                }
+                                commit_prepared_snapshot(*prepared);
+                                uint64_t last_applied = prepared->last_applied_slot;
+                                release_snapshot_slot();
+                                on_done(Status::Ok(), last_applied);
+                            });
+                        if (!fs2.ok()) {
+                            release_snapshot_slot();
+                            on_done(fs2, 0);
+                        }
+                    });
+            });
+            if (!fs1.ok()) {
+                release_snapshot_slot();
+                on_done(fs1, 0);
+            }
+        });
+#endif
 }
 
 Status Crowtree::open(const Options &opt, std::unique_ptr<Crowtree> *out)

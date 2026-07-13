@@ -550,7 +550,7 @@ impl PxLocalReplica {
         };
         for slot in start_slot..=highest {
             if let Some(entry) = replica.acceptor.accepted_at(slot) {
-                replica.learner.learn(entry, None, None);
+                replica.learner.learn(entry, None, None).await;
             }
         }
 
@@ -1031,9 +1031,8 @@ impl PxLocalReplica {
     }
 
     /// Learn a chosen entry (apply to state machine).
-    #[allow(clippy::unused_async)]
     pub async fn learn_chosen(&self, entry: &PxLogEntry, client_id: Option<u64>, seq: Option<u64>) {
-        self.learner.learn(entry.clone(), client_id, seq);
+        self.learner.learn(entry.clone(), client_id, seq).await;
     }
 
     /// Apply locally-accepted entries to the state machine up to `commit_slot`
@@ -1047,14 +1046,13 @@ impl PxLocalReplica {
     /// Idempotent: re-applying an already-applied slot is a no-op in the
     /// learner. Used by followers, which otherwise never apply in steady state
     /// (`on_accept` only persists; `ChosenNotice` only moves the watermark).
-    #[allow(clippy::unused_async)]
     async fn apply_committed_up_to(&self, commit_slot: SlotIndex) {
         let mut next = self.learner.contiguous_applied().saturating_add(1);
         while next <= commit_slot {
             let Some(entry) = self.acceptor.accepted_at(next) else {
                 break;
             };
-            self.learner.learn(entry, None, None);
+            self.learner.learn(entry, None, None).await;
             next += 1;
         }
     }

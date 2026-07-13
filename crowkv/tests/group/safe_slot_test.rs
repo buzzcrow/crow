@@ -12,30 +12,33 @@ use crowkv::paxos::roles::{Learner, PxBallot, PxLogEntry, SlotIndex};
 /// Drive the local learner's contiguous-applied watermark to `upto` by
 /// learning slots `1..=upto` (empty `NoOp` payloads; only the frontier
 /// matters here).
-fn apply_through(replica: &PxLocalReplica, upto: SlotIndex) {
+async fn apply_through(replica: &PxLocalReplica, upto: SlotIndex) {
     for slot in 1..=upto {
-        replica.learner.learn(
-            PxLogEntry {
-                slot,
-                ballot: PxBallot::new(0, 0),
-                term: 0,
-                payload: bytes::Bytes::new(),
-            },
-            None,
-            None,
-        );
+        replica
+            .learner
+            .learn(
+                PxLogEntry {
+                    slot,
+                    ballot: PxBallot::new(0, 0),
+                    term: 0,
+                    payload: bytes::Bytes::new(),
+                },
+                None,
+                None,
+            )
+            .await;
     }
 }
 
-#[test]
-fn group_safe_slot_is_min_applied_across_voting_members() {
+#[tokio::test]
+async fn group_safe_slot_is_min_applied_across_voting_members() {
     let local = PxLocalReplica::new(1, PxLocalReplicaRole::Leader);
     let mut group = PxGroup::new(1, local);
     group.add_remote_replica(PxRemoteReplica::new(2, "127.0.0.1:2".to_string()));
     group.add_remote_replica(PxRemoteReplica::new(3, "127.0.0.1:3".to_string()));
 
     // Local replica is applied up to slot 5.
-    apply_through(group.local_replica(), 5);
+    apply_through(group.local_replica(), 5).await;
 
     // No peer has reported yet: an unheard peer counts as 0, so the
     // safe-slot must not advance past it.

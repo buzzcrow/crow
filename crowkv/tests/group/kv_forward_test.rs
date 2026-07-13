@@ -69,6 +69,7 @@ async fn follower_get_forwards_to_leader_after_local_clear() {
             .local_replica()
             .learner
             .engine_get(b"fk".as_slice())
+            .await
             .is_some(),
         "expected paxos to propagate value to follower's learner"
     );

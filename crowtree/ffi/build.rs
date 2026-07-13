@@ -37,17 +37,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The engine now includes Abseil headers (absl::btree_map in the MemTable,
     // plan-tree #9). Abseil is header-only for btree, so we only need its include
     // path; in the pixi/conda environment it lives under $CONDA_PREFIX/include.
-    if let Ok(prefix) = std::env::var("CONDA_PREFIX") {
-        let inc = PathBuf::from(&prefix).join("include");
+    let conda_prefix = std::env::var("CONDA_PREFIX").ok().map(PathBuf::from);
+    if let Some(prefix) = &conda_prefix {
+        let inc = prefix.join("include");
         if inc.join("absl").is_dir() {
             build.include(&inc);
         }
     }
     println!("cargo:rerun-if-env-changed=CONDA_PREFIX");
 
+    // liburing (io_uring reactor, plan-tree #11 Phase 0/1) -- Linux-only, no
+    // macOS build exists, so reactor.cpp/file_async_page_store.cpp are
+    // excluded from the compiled set entirely when not found, mirroring
+    // crowtree/CMakeLists.txt's CROWTREE_HAVE_LIBURING gate exactly (same
+    // reasoning: design-crowtree-async.md §10's macOS dev-path note).
+    let liburing_dir = conda_prefix.as_ref().filter(|prefix| {
+        prefix.join("include").join("liburing.h").is_file()
+            && (prefix.join("lib").join("liburing.so").is_file()
+                || prefix.join("lib").join("liburing.a").is_file())
+    });
+    if liburing_dir.is_none() {
+        files.retain(|f| {
+            !matches!(
+                f.file_name().and_then(|s| s.to_str()),
+                Some("reactor.cpp") | Some("file_async_page_store.cpp")
+            )
+        });
+    }
+
     for f in &files {
         build.file(f);
         println!("cargo:rerun-if-changed={}", f.display());
+    }
+
+    if let Some(prefix) = liburing_dir {
+        build.include(prefix.join("include"));
+        build.define("CROWTREE_HAVE_LIBURING", "1");
+        println!("cargo:rustc-link-search=native={}", prefix.join("lib").display());
+        println!("cargo:rustc-link-lib=dylib=uring");
     }
 
     let have_lz4 = std::env::var("CROWTREE_LZ4_LIB").ok();

@@ -134,7 +134,7 @@ async fn single_node_crash_restart_preserves_committed_state() {
             "accepted entry for slot {} survives",
             entry.slot
         );
-        let got = restored.learner.engine_get(key);
+        let got = restored.learner.engine_get(key).await;
         assert_eq!(
             got.map(|(_, v)| v),
             Some(value.clone()),

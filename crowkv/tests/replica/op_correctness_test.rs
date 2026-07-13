@@ -76,7 +76,7 @@ async fn put_applies_value_to_kv_engine() {
     replica.learn_chosen(&entry, None, None).await;
 
     assert_eq!(
-        replica.learner.engine_get(b"key").map(|(_, v)| v),
+        replica.learner.engine_get(b"key").await.map(|(_, v)| v),
         Some(b"value".to_vec()),
         "put applies value"
     );
@@ -98,7 +98,7 @@ async fn overwrite_replaces_previous_value() {
     replica.learn_chosen(&e2, None, None).await;
 
     assert_eq!(
-        replica.learner.engine_get(b"k").map(|(_, v)| v),
+        replica.learner.engine_get(b"k").await.map(|(_, v)| v),
         Some(b"v2".to_vec()),
         "latest put wins"
     );
@@ -115,14 +115,17 @@ async fn delete_produces_tombstone() {
     let _ = replica.on_accept(e1.clone()).await;
     replica.learn_chosen(&e1, None, None).await;
 
-    assert!(replica.learner.engine_get(b"k").is_some(), "key exists after put");
+    assert!(
+        replica.learner.engine_get(b"k").await.is_some(),
+        "key exists after put"
+    );
 
     let e2 = entry(2, encode_delete(b"k"));
     let _ = replica.on_accept(e2.clone()).await;
     replica.learn_chosen(&e2, None, None).await;
 
     assert_eq!(
-        replica.learner.engine_get(b"k"),
+        replica.learner.engine_get(b"k").await,
         None,
         "delete produces tombstone — engine_get returns None"
     );
@@ -140,7 +143,7 @@ async fn delete_nonexistent_key_is_noop() {
     replica.learn_chosen(&e1, None, None).await;
 
     assert_eq!(
-        replica.learner.engine_get(b"ghost"),
+        replica.learner.engine_get(b"ghost").await,
         None,
         "deleting non-existent key is a no-op"
     );
@@ -165,15 +168,15 @@ async fn batch_multiple_puts_apply_all() {
     replica.learn_chosen(&e1, None, None).await;
 
     assert_eq!(
-        replica.learner.engine_get(b"k1").map(|(_, v)| v),
+        replica.learner.engine_get(b"k1").await.map(|(_, v)| v),
         Some(b"v1".to_vec())
     );
     assert_eq!(
-        replica.learner.engine_get(b"k2").map(|(_, v)| v),
+        replica.learner.engine_get(b"k2").await.map(|(_, v)| v),
         Some(b"v2".to_vec())
     );
     assert_eq!(
-        replica.learner.engine_get(b"k3").map(|(_, v)| v),
+        replica.learner.engine_get(b"k3").await.map(|(_, v)| v),
         Some(b"v3".to_vec())
     );
     assert_eq!(replica.contiguous_applied(), 1);
@@ -198,7 +201,7 @@ async fn batch_intra_batch_last_wins() {
     replica.learn_chosen(&e1, None, None).await;
 
     assert_eq!(
-        replica.learner.engine_get(b"k"),
+        replica.learner.engine_get(b"k").await,
         None,
         "delete is last op in batch → tombstone wins"
     );
@@ -221,7 +224,7 @@ async fn batch_put_then_delete_same_key() {
     replica.learn_chosen(&e1, None, None).await;
 
     assert_eq!(
-        replica.learner.engine_get(b"k"),
+        replica.learner.engine_get(b"k").await,
         None,
         "delete after put in same batch"
     );
@@ -244,7 +247,7 @@ async fn batch_delete_then_put_same_key() {
     replica.learn_chosen(&e1, None, None).await;
 
     assert_eq!(
-        replica.learner.engine_get(b"k").map(|(_, v)| v),
+        replica.learner.engine_get(b"k").await.map(|(_, v)| v),
         Some(b"v1".to_vec()),
         "put after delete in same batch → value wins"
     );
@@ -265,7 +268,7 @@ async fn empty_batch_is_noop() {
         1,
         "empty batch still advances frontier"
     );
-    assert_eq!(replica.learner.engine_get(b"anything"), None, "no keys");
+    assert_eq!(replica.learner.engine_get(b"anything").await, None, "no keys");
 }
 
 // ── Multiple slots with mixed ops ─────────────────────────────
@@ -299,13 +302,13 @@ async fn multiple_slots_mixed_ops_correctness() {
     replica.learn_chosen(&e3, None, None).await;
 
     assert_eq!(
-        replica.learner.engine_get(b"k1").map(|(_, v)| v),
+        replica.learner.engine_get(b"k1").await.map(|(_, v)| v),
         Some(b"v1b".to_vec()),
         "k1 overwritten"
     );
-    assert_eq!(replica.learner.engine_get(b"k2"), None, "k2 deleted");
+    assert_eq!(replica.learner.engine_get(b"k2").await, None, "k2 deleted");
     assert_eq!(
-        replica.learner.engine_get(b"k3").map(|(_, v)| v),
+        replica.learner.engine_get(b"k3").await.map(|(_, v)| v),
         Some(b"v3".to_vec()),
         "k3 put"
     );

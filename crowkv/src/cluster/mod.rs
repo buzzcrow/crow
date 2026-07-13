@@ -3,6 +3,7 @@
 pub mod group;
 pub mod group_config;
 pub mod group_election;
+pub mod group_maintenance;
 pub mod kv_server;
 pub mod kv_store;
 pub mod learner_stream;

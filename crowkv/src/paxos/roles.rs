@@ -20,10 +20,11 @@ pub trait Acceptor {
     fn trim_slot(&self) -> SlotIndex;
 }
 
+#[allow(async_fn_in_trait)]
 pub trait Learner {
     /// Apply a chosen log entry to the state machine.
     /// `client_id`/`seq` are runtime dedup metadata (not persisted in WAL).
-    fn learn(&self, entry: PxLogEntry, client_id: Option<u64>, seq: Option<u64>);
+    async fn learn(&self, entry: PxLogEntry, client_id: Option<u64>, seq: Option<u64>);
 }
 
 /// Paxos proposal number, ordered first by `round`, then by `leader_id`.

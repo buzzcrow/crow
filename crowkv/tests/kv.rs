@@ -16,3 +16,6 @@ mod crowtree_engine;
 
 #[path = "kv/op_codec_test.rs"]
 mod op_codec;
+
+#[path = "kv/kv_future_test.rs"]
+mod kv_future;

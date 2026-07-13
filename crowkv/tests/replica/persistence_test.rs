@@ -150,12 +150,12 @@ async fn wal_backed_replica_reloads_committed_kv_after_restart() {
     // WAL replay now fully restores the learner: every accepted entry is
     // replayed into the state machine.
     assert_eq!(
-        restored.learner.engine_get(b"alpha").map(|(_, v)| v),
+        restored.learner.engine_get(b"alpha").await.map(|(_, v)| v),
         Some(b"3".to_vec()),
         "alpha = slot-3 value (highest-slot-wins)"
     );
     assert_eq!(
-        restored.learner.engine_get(b"beta").map(|(_, v)| v),
+        restored.learner.engine_get(b"beta").await.map(|(_, v)| v),
         Some(b"2".to_vec()),
         "beta = slot-2 value"
     );
@@ -186,7 +186,11 @@ async fn delete_survives_wal_restart() {
         replica.learn_chosen(&e2, None, None).await;
 
         assert_eq!(replica.contiguous_applied(), 2);
-        assert_eq!(replica.learner.engine_get(b"k1"), None, "key deleted in memory");
+        assert_eq!(
+            replica.learner.engine_get(b"k1").await,
+            None,
+            "key deleted in memory"
+        );
         wal.seal_all().await.expect("seal");
     }
 
@@ -198,7 +202,7 @@ async fn delete_survives_wal_restart() {
 
     // Slot 2 deleted k1 — replay applies both slots, k1 stays deleted.
     assert_eq!(
-        restored.learner.engine_get(b"k1"),
+        restored.learner.engine_get(b"k1").await,
         None,
         "k1 stays deleted after replay"
     );
@@ -232,7 +236,7 @@ async fn put_then_delete_same_key_survives_restart() {
         replica.learn_chosen(&e3, None, None).await;
 
         assert_eq!(replica.contiguous_applied(), 3);
-        assert_eq!(replica.learner.engine_get(b"k"), None, "key deleted");
+        assert_eq!(replica.learner.engine_get(b"k").await, None, "key deleted");
         wal.seal_all().await.expect("seal");
     }
 
@@ -244,7 +248,7 @@ async fn put_then_delete_same_key_survives_restart() {
 
     // Slot 3 deleted k — replay applies all 3 slots, k stays deleted.
     assert_eq!(
-        restored.learner.engine_get(b"k"),
+        restored.learner.engine_get(b"k").await,
         None,
         "k stays deleted after replay"
     );
@@ -280,14 +284,18 @@ async fn batch_with_put_and_delete_survives_restart() {
         replica.learn_chosen(&e2, None, None).await;
 
         assert_eq!(replica.contiguous_applied(), 2);
-        assert_eq!(replica.learner.engine_get(b"k1"), None, "k1 deleted in batch");
         assert_eq!(
-            replica.learner.engine_get(b"k2").map(|(_, v)| v),
+            replica.learner.engine_get(b"k1").await,
+            None,
+            "k1 deleted in batch"
+        );
+        assert_eq!(
+            replica.learner.engine_get(b"k2").await.map(|(_, v)| v),
             Some(b"v2".to_vec()),
             "k2 put in batch"
         );
         assert_eq!(
-            replica.learner.engine_get(b"k3").map(|(_, v)| v),
+            replica.learner.engine_get(b"k3").await.map(|(_, v)| v),
             Some(b"v3".to_vec()),
             "k3 put in slot 2"
         );
@@ -303,17 +311,17 @@ async fn batch_with_put_and_delete_survives_restart() {
     // Replay applies both slots. k1 was deleted in the batch (last-wins),
     // k2 and k3 survive.
     assert_eq!(
-        restored.learner.engine_get(b"k1"),
+        restored.learner.engine_get(b"k1").await,
         None,
         "k1 deleted in batch slot 1"
     );
     assert_eq!(
-        restored.learner.engine_get(b"k2").map(|(_, v)| v),
+        restored.learner.engine_get(b"k2").await.map(|(_, v)| v),
         Some(b"v2".to_vec()),
         "k2 put in batch slot 1"
     );
     assert_eq!(
-        restored.learner.engine_get(b"k3").map(|(_, v)| v),
+        restored.learner.engine_get(b"k3").await.map(|(_, v)| v),
         Some(b"v3".to_vec()),
         "k3 put in slot 2"
     );
@@ -364,23 +372,27 @@ async fn mixed_put_delete_batch_survives_restart() {
 
         // Verify correctness before restart.
         assert_eq!(
-            replica.learner.engine_get(b"k1"),
+            replica.learner.engine_get(b"k1").await,
             None,
             "k1 deleted in batch slot 3"
         );
-        assert_eq!(replica.learner.engine_get(b"k2"), None, "k2 deleted in slot 2");
         assert_eq!(
-            replica.learner.engine_get(b"k3").map(|(_, v)| v),
+            replica.learner.engine_get(b"k2").await,
+            None,
+            "k2 deleted in slot 2"
+        );
+        assert_eq!(
+            replica.learner.engine_get(b"k3").await.map(|(_, v)| v),
             Some(b"v3".to_vec()),
             "k3 survives"
         );
         assert_eq!(
-            replica.learner.engine_get(b"k4").map(|(_, v)| v),
+            replica.learner.engine_get(b"k4").await.map(|(_, v)| v),
             Some(b"v4".to_vec()),
             "k4 put in batch slot 3"
         );
         assert_eq!(
-            replica.learner.engine_get(b"k5").map(|(_, v)| v),
+            replica.learner.engine_get(b"k5").await.map(|(_, v)| v),
             Some(b"v5".to_vec()),
             "k5 put in batch slot 3"
         );
@@ -396,23 +408,27 @@ async fn mixed_put_delete_batch_survives_restart() {
 
     // Replay applies all 3 slots. k1 and k2 are deleted, k3/k4/k5 survive.
     assert_eq!(
-        restored.learner.engine_get(b"k1"),
+        restored.learner.engine_get(b"k1").await,
         None,
         "k1 deleted in batch slot 3"
     );
-    assert_eq!(restored.learner.engine_get(b"k2"), None, "k2 deleted in slot 2");
     assert_eq!(
-        restored.learner.engine_get(b"k3").map(|(_, v)| v),
+        restored.learner.engine_get(b"k2").await,
+        None,
+        "k2 deleted in slot 2"
+    );
+    assert_eq!(
+        restored.learner.engine_get(b"k3").await.map(|(_, v)| v),
         Some(b"v3".to_vec()),
         "k3 survives"
     );
     assert_eq!(
-        restored.learner.engine_get(b"k4").map(|(_, v)| v),
+        restored.learner.engine_get(b"k4").await.map(|(_, v)| v),
         Some(b"v4".to_vec()),
         "k4 put in batch slot 3"
     );
     assert_eq!(
-        restored.learner.engine_get(b"k5").map(|(_, v)| v),
+        restored.learner.engine_get(b"k5").await.map(|(_, v)| v),
         Some(b"v5".to_vec()),
         "k5 put in batch slot 3"
     );

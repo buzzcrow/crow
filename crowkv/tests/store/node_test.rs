@@ -36,7 +36,7 @@ async fn kv_ops_apply_locally_for_single_leader() {
     let group = store.get_group(1).unwrap();
     let replica = group.local_replica();
     assert_eq!(
-        replica.learner.engine_get("k1".as_bytes()).map(|(_, v)| v),
+        replica.learner.engine_get("k1".as_bytes()).await.map(|(_, v)| v),
         Some(b"v1".to_vec())
     );
 
@@ -66,11 +66,11 @@ async fn kv_ops_apply_locally_for_single_leader() {
     let group = store.get_group(1).unwrap();
     let replica = group.local_replica();
     assert_eq!(
-        replica.learner.engine_get("k1".as_bytes()).map(|(_, v)| v),
+        replica.learner.engine_get("k1".as_bytes()).await.map(|(_, v)| v),
         Some(b"v2".to_vec())
     );
     assert_eq!(
-        replica.learner.engine_get("k2".as_bytes()).map(|(_, v)| v),
+        replica.learner.engine_get("k2".as_bytes()).await.map(|(_, v)| v),
         Some(b"v2".to_vec())
     );
 
@@ -79,7 +79,7 @@ async fn kv_ops_apply_locally_for_single_leader() {
 
     let group = store.get_group(1).unwrap();
     let replica = group.local_replica();
-    assert!(replica.learner.engine_get("k1".as_bytes()).is_none());
+    assert!(replica.learner.engine_get("k1".as_bytes()).await.is_none());
 }
 
 #[tokio::test]
@@ -208,7 +208,12 @@ async fn dedup_suppresses_retried_client_seq() {
     assert_eq!(dup.revision, slot1, "duplicate returns the original commit slot");
     let group = store.get_group(1).unwrap();
     assert_eq!(
-        group.local_replica().learner.engine_get(b"dk").map(|(_, v)| v),
+        group
+            .local_replica()
+            .learner
+            .engine_get(b"dk")
+            .await
+            .map(|(_, v)| v),
         Some(b"v1".to_vec()),
         "duplicate (client,seq) must not overwrite the committed value"
     );
@@ -218,7 +223,12 @@ async fn dedup_suppresses_retried_client_seq() {
     assert!(r2.ok);
     assert!(r2.revision > slot1, "higher seq advances to a new slot");
     assert_eq!(
-        group.local_replica().learner.engine_get(b"dk").map(|(_, v)| v),
+        group
+            .local_replica()
+            .learner
+            .engine_get(b"dk")
+            .await
+            .map(|(_, v)| v),
         Some(b"v3".to_vec()),
         "higher seq applies the new value"
     );

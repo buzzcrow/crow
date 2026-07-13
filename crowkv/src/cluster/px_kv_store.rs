@@ -42,7 +42,12 @@ impl KvStore for PxKvStore {
 
         match self.resolve_read_point(&group, read_mode, client_slot).await {
             ReadDecision::Serve { read_slot, safe_slot } => {
-                let value = group.local_replica().learner.engine_get(key).map(|(_slot, v)| v);
+                let value = group
+                    .local_replica()
+                    .learner
+                    .engine_get(key)
+                    .await
+                    .map(|(_slot, v)| v);
                 match value {
                     Some(v) => crate::rpc::KvResponse::ok_value(v, request_id, request_create_ms)
                         .with_read_slots(read_slot, safe_slot),
@@ -157,7 +162,11 @@ impl KvStore for PxKvStore {
         // `limit` smallest matching live keys (no tombstones) in key order
         // plus a `truncated` flag; `limit == 0` means unlimited. Sorted
         // output keeps pagination via `prefix` extension predictable.
-        let (scanned, truncated) = group.local_replica().learner.engine_scan(prefix, limit as usize);
+        let (scanned, truncated) = group
+            .local_replica()
+            .learner
+            .engine_scan(prefix, limit as usize)
+            .await;
         let mut items: Vec<crate::rpc::KvScanItem> = Vec::with_capacity(scanned.len());
         for (key, _slot, value) in scanned {
             items.push(crate::rpc::KvScanItem { key, value });
@@ -380,6 +389,10 @@ impl PxKvStore {
             let arc_for_spawn = arc.clone();
             tokio::spawn(async move {
                 arc_for_spawn.start_election_loop().await;
+            });
+            let arc_for_maintenance = arc.clone();
+            tokio::spawn(async move {
+                arc_for_maintenance.start_engine_maintenance_loop().await;
             });
         }
         // Atomically replace any prior group entry with the new arc and

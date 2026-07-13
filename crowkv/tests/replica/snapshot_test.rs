@@ -62,14 +62,14 @@ async fn clear_wipes_kv_state_but_preserves_accepted_log() {
     }
     assert_eq!(replica.contiguous_applied(), 3);
     assert_eq!(
-        replica.learner.engine_get(b"k1").map(|(_, v)| v),
+        replica.learner.engine_get(b"k1").await.map(|(_, v)| v),
         Some(b"v1".to_vec())
     );
 
     // Clear the engine (snapshot-install reset).
     replica.learner.engine().clear();
-    assert_eq!(replica.learner.engine_get(b"k1"), None);
-    assert_eq!(replica.learner.engine_get(b"k2"), None);
+    assert_eq!(replica.learner.engine_get(b"k1").await, None);
+    assert_eq!(replica.learner.engine_get(b"k2").await, None);
     assert_eq!(replica.learner.live_key_count(), 0);
 
     // The acceptor's accepted log is preserved — we can still read entries.
@@ -91,9 +91,13 @@ async fn re_apply_after_clear_restores_kv_state() {
         replica.learn_chosen(entry, None, None).await;
     }
     assert_eq!(replica.contiguous_applied(), 3);
-    assert_eq!(replica.learner.engine_get(b"k1"), None, "k1 deleted at slot 3");
     assert_eq!(
-        replica.learner.engine_get(b"k2").map(|(_, v)| v),
+        replica.learner.engine_get(b"k1").await,
+        None,
+        "k1 deleted at slot 3"
+    );
+    assert_eq!(
+        replica.learner.engine_get(b"k2").await.map(|(_, v)| v),
         Some(b"v2".to_vec())
     );
 
@@ -106,12 +110,12 @@ async fn re_apply_after_clear_restores_kv_state() {
 
     // KV state is restored correctly, including the delete.
     assert_eq!(
-        replica.learner.engine_get(b"k1"),
+        replica.learner.engine_get(b"k1").await,
         None,
         "delete survives re-apply"
     );
     assert_eq!(
-        replica.learner.engine_get(b"k2").map(|(_, v)| v),
+        replica.learner.engine_get(b"k2").await.map(|(_, v)| v),
         Some(b"v2".to_vec()),
         "put survives re-apply"
     );

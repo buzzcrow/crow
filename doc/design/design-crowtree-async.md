@@ -379,3 +379,292 @@ io_uring is Linux-only. For development on macOS:
 | — | **One reactor thread per `Crowtree`.** | Each tree has its own buffer pool and I/O; a per-tree reactor keeps I/O completions local and avoids cross-tree coordination. The reactor does no application logic — only CQE dispatch. |
 | — | **eventfd for Rust↔C++ notification.** | Simplest kernel-level notification: one `write(8 bytes)` wakes the Tokio `AsyncFd`. Level-triggered, no missed events. Falls back to pipe on macOS. |
 | — | **macOS dev path: in-memory store, no io_uring.** | io_uring is Linux-only. For dev/testing on macOS, the in-memory store completes synchronously (fast path only). Production runs on Linux. |
+
+---
+
+## 13. Detailed Implementation Plan with Test Examples
+
+> Scoped 2026-07-08. Feasibility confirmed: `liburing` 2.14 available via
+> conda-forge (not yet a `crowkv`/`crowtree` pixi dependency — add it), this
+> environment's kernel (6.8) has full io_uring support. See
+> [`design-crowkv-async-kvengine.md`](design-crowkv-async-kvengine.md) for
+> the consumer-side (`KVEngine`/`PxLearner`/gRPC) plan this work needs to
+> actually matter in production — that doc can and should land **before**
+> this one (see its §7 sequencing), since it's independently valuable
+> plumbing-only work and de-risks this larger effort by proving the
+> `KVFuture::Pending` boundary shape *before* a real reactor exists behind it.
+
+Each phase below is independently buildable/testable and should be its own
+PR/session: `crowtree` is ASan+TSan-gated and this is the riskiest
+concurrency surface added since #12/#13, so no phase should skip sanitizer
+runs before moving to the next.
+
+### Phase 0 — Contract cleanup (no code)
+
+Confirm and record (this doc already does the following; treat as done):
+- C ABI stays completion-based (`ct_future`), no coroutines/Folly.
+- `ct_reactor_eventfd()` ownership: the `Reactor` owns and closes the
+  `eventfd`; Rust wraps the raw fd via `AsyncFd` **without** taking close
+  ownership (document this explicitly in the FFI wrapper's safety comment
+  when Phase 3 lands, mirroring how `Crowtree`'s `Drop` already owns
+  `ct_close`).
+- Add `liburing` to `crowtree/CMakeLists.txt` (`find_package` or
+  `pkg-config`) and to the workspace `pixi.toml` `[dependencies]` (matching
+  the sibling `sirius` project's conda-forge `liburing` pin as a reference
+  version).
+
+### Phase 1 — C++ reactor + async `PageStore` (this session's recommended stopping point if only one phase lands)
+
+**New files:** `crowtree/include/crowtree/reactor.h`, `crowtree/src/reactor.cpp`,
+`crowtree/include/crowtree/async_page_store.h`,
+`crowtree/src/file_async_page_store.cpp`.
+**Fully additive:** no existing file changes required for this phase (not
+even `crowtree.h`/`.cpp`) — `Reactor` and `AsyncPageStore` are new,
+free-standing types exercised only by their own unit tests until Phase 2
+wires them into `resident()`/`flush()`/`snapshot()`.
+
+```cpp
+// reactor.h
+namespace crowtree {
+class Reactor {
+  public:
+    explicit Reactor(unsigned ring_entries = 256);
+    ~Reactor(); // stops thread, closes io_uring + eventfd
+
+    Reactor(const Reactor &) = delete;
+    Reactor &operator=(const Reactor &) = delete;
+
+    // Submit a read/write; on_complete(res) receives the raw io_uring CQE
+    // res (>=0 bytes transferred, <0 -errno). Returns an opaque op id
+    // (io_uring SQE user_data) usable with cancel().
+    uint64_t submit_read(int fd, void *buf, size_t len, off_t offset,
+                         std::function<void(int)> on_complete);
+    uint64_t submit_write(int fd, const void *buf, size_t len, off_t offset,
+                          std::function<void(int)> on_complete);
+    uint64_t submit_fsync(int fd, std::function<void(int)> on_complete);
+
+    // Best-effort; see design §8 (already-in-flight CQEs still arrive, the
+    // reactor checks a "cancelled" flag before dispatching).
+    void cancel(uint64_t op_id);
+
+    [[nodiscard]] int eventfd() const { return eventfd_; }
+
+  private:
+    void run(); // io_uring_enter loop; see design §3.1
+    // ...
+};
+}
+```
+
+```cpp
+// async_page_store.h
+namespace crowtree {
+class AsyncPageStore {
+  public:
+    virtual ~AsyncPageStore() = default;
+    virtual uint64_t submit_read(PageAddr addr, void *buf, size_t len,
+                                 std::function<void(Status)> on_complete) = 0;
+    virtual uint64_t submit_write(PageAddr addr, const void *buf, size_t len,
+                                  std::function<void(Status)> on_complete) = 0;
+    virtual Status submit_fsync(std::function<void(Status)> on_complete) = 0;
+    virtual void cancel(uint64_t op_id) = 0;
+};
+
+// FilePageStore's async twin: same fd, Reactor-backed. MemPageStore's async
+// twin is NOT a separate class -- a synchronous "complete in the caller's
+// stack frame, no reactor" implementation is enough for tests (see UT below).
+class FileAsyncPageStore : public AsyncPageStore {
+  public:
+    static Status open(const std::string &path, uint32_t iu_size, Reactor *reactor,
+                       std::unique_ptr<FileAsyncPageStore> *out);
+    // ... submit_read/write/fsync/cancel using reactor_->submit_*
+};
+}
+```
+
+**Unit tests** (`crowtree/tests/unit/reactor_test.cpp`, new):
+
+```cpp
+TEST(Reactor, SubmitReadCompletesViaCallback) {
+    // Write known bytes with a plain pwrite, then submit_read via the
+    // reactor and block (test-only spin/condvar) on the callback firing;
+    // assert bytes match and the callback's `res` == len.
+}
+
+TEST(Reactor, SubmitWriteThenReadRoundTrips) {
+    // submit_write via the reactor, wait for completion, then a plain
+    // pread confirms the bytes landed (proves the reactor thread actually
+    // performed the I/O, not just invoked the callback with fake success).
+}
+
+TEST(Reactor, MultipleConcurrentSubmitsAllComplete) {
+    // Submit N (e.g. 64) reads/writes at distinct offsets before waiting on
+    // any completion; assert all N callbacks eventually fire exactly once,
+    // with the correct per-op bytes (proves the SQE->callback map in
+    // Reactor::run() dispatches to the right callback, not the first one).
+}
+
+TEST(Reactor, CancelBeforeCompletionSuppressesCallback) {
+    // Submit a request, immediately cancel() it, and assert the callback
+    // never fires (best-effort: allow a bounded wait then check a flag,
+    // matching design §8's "check cancelled before dispatch" contract).
+}
+
+TEST(Reactor, DestructorStopsThreadCleanly) {
+    // Construct + immediately destroy a Reactor with no submissions; must
+    // not hang or leak the thread (join in ~Reactor). Run under TSan.
+}
+```
+
+**Sanitizer note:** this phase is the first genuinely new concurrency
+primitive since #12/#13 (a dedicated OS thread doing kernel-level
+completion dispatch into arbitrary callbacks) — run
+`pixi run ct-asan`/`ct-tsan` after every test added here, not just at the
+end of the phase.
+
+### Phase 2 — C API async variants
+
+**Files:** `crowtree/include/crowtree/c_api.h`, `crowtree/src/c_api.cpp`
+(extend, additive — no existing `ct_get`/`ct_flush`/`ct_snapshot` signatures
+change), new `ct_future` opaque struct + `Crowtree::get_view_async`-style
+internal helper in `crowtree.h`/`.cpp` that:
+1. Runs the *exact* fast-path lookup `get_view()` already does (§B3 of
+   `plan-tree.md` — no duplicated logic, this phase should factor the
+   L0-then-L1-resident-hit check into a shared private helper both
+   `get_view()` and this new path call).
+2. On a hit (including L1-resident), fills `ct_future` synchronously,
+   `state = kDone`.
+3. On a genuine miss (page tagged unloaded in `MappingTable`), submits a
+   read via the `Reactor`/`AsyncPageStore` from Phase 1, `state = kPending`.
+
+```c
+// c_api.h additions
+typedef struct ct_future ct_future;
+ct_future *ct_get_async(ct_tree *t, const uint8_t *key, size_t klen);
+ct_future *ct_flush_async(ct_tree *t);
+ct_future *ct_snapshot_async(ct_tree *t);
+ct_status ct_future_poll(ct_future *f, int *done, ct_buf *out_value, uint64_t *out_slot);
+void ct_future_free(ct_future *f);
+int ct_reactor_eventfd(ct_tree *t);
+```
+
+**Unit tests** (`crowtree/tests/integration/async_get_test.cpp`, new;
+`MemPageStore`-backed cases don't need a real reactor since nothing is ever
+`kPending` against pure in-memory storage — use `FilePageStore` "opened as
+async" only for the miss-path tests):
+
+```cpp
+TEST(AsyncGet, FastPathHitCompletesSynchronously) {
+    // apply + flush a key (L1-resident, clean or not -- no eviction here),
+    // ct_get_async returns a future whose FIRST ct_future_poll call has
+    // done=1 -- assert this without ever touching the reactor/eventfd.
+}
+
+TEST(AsyncGet, MissAfterEvictionCompletesViaReactor) {
+    // apply + flush + snapshot + evict_clean_leaves(0) to force the target
+    // key's leaf unloaded, then ct_get_async -> first poll has done=0,
+    // then poll again after a bounded wait (or after reading the eventfd)
+    // -> done=1 with the correct value.
+}
+
+TEST(AsyncGet, FutureFreeBeforeCompletionDoesNotCrashOrLeak) {
+    // Force the miss path, ct_future_free before the reactor completes;
+    // run under ASan to confirm no use-after-free when the CQE later
+    // arrives and the reactor checks liveness before dispatch.
+}
+
+TEST(AsyncFlushSnapshot, AlwaysPendingThenCompletes) {
+    // ct_flush_async / ct_snapshot_async on a dirty tree: first poll is
+    // always done=0 (design §4 table: flush/snapshot are *always* async),
+    // eventual poll is done=1 and matches the synchronous flush()/
+    // snapshot()'s observable effect (last_applied_slot advances, etc.).
+}
+```
+
+### Phase 3 — Rust FFI futures
+
+**Files:** `crowtree/ffi/src/lib.rs` (extend), new `crowtree/ffi/src/sys.rs`
+bindings for the Phase 2 C API additions (bindgen or hand-written, matching
+the existing `sys` module's style).
+
+```rust
+pub struct CtGetFuture {
+    fut: *mut sys::ct_future,
+    tree: Arc<Crowtree>,          // keeps the tree (and its Reactor) alive
+    eventfd: AsyncFd<OwnedFd>,
+}
+// impl Future for CtGetFuture -- see design §3.4 (already fully specified).
+
+pub struct CtVoidFuture { /* flush/snapshot: same shape, Output = Result<u64, CtError> for snapshot */ }
+```
+
+`AsyncCrowtree` (currently 100% `spawn_blocking`, per §1's Problem
+statement) is rewritten method-by-method to construct + `.await` these
+futures instead. **No `spawn_blocking` left anywhere in this file** is the
+phase's exit criterion.
+
+**Unit tests** (`crowtree/ffi/tests/ffi_test.rs`, extend the existing
+`async_bridge_apply_get_snapshot` test + add):
+
+```rust
+#[tokio::test]
+async fn async_get_fast_path_does_not_spawn_blocking() {
+    // Regression guard for the whole point of this phase: wrap the call in
+    // a way that would panic/detect if spawn_blocking's thread pool were
+    // touched (e.g. assert tokio::runtime::Handle::current().metrics()
+    // .num_blocking_threads() is unchanged before/after -- Tokio exposes
+    // this metric; if unavailable in the pinned tokio version, fall back to
+    // timing: a spawn_blocking hop has a measurable floor latency this test
+    // asserts the fast path beats by a wide margin).
+}
+
+#[tokio::test]
+async fn async_get_slow_path_completes_after_eviction() {
+    // File-backed tree; apply+flush+snapshot+evict via the sync Crowtree
+    // handle directly (crowtree_ffi already exposes evict_clean_leaves),
+    // then AsyncCrowtree::get on the now-unloaded key resolves correctly
+    // via the reactor/eventfd path, not spawn_blocking.
+}
+
+#[tokio::test]
+async fn concurrent_async_gets_all_resolve_correctly() {
+    // Spawn N tokio tasks each awaiting AsyncCrowtree::get on a distinct
+    // (evicted) key concurrently; assert all N resolve to the correct
+    // value -- proves the eventfd/AsyncFd wakeup fans out to every pending
+    // future, not just one.
+}
+```
+
+### Phase 4 — Zero-copy fast-path value
+
+Borrowed `ct_buf` pointing into frame bytes, `ct_future` owning the
+`EpochManager::Guard` for the borrow's lifetime (design §5). Reuses the
+`GetView` machinery from `#5 B3` (`plan-tree.md`) directly — `ct_get_async`'s
+fast path should literally call `get_view()` internally rather than
+re-implement the L0/L1 resolution a third time.
+
+**Unit test:** extend Phase 2's `AsyncGet.FastPathHitCompletesSynchronously`
+to additionally assert the returned `ct_buf`'s pointer falls within the
+resident frame's known address range (test-only introspection hook, or
+simply assert no `memcpy` occurred by comparing pointer identity across two
+consecutive `ct_get_async` calls for the same still-resident key).
+
+### Phase 5 — Tests + benchmarks
+
+- Full ASan + TSan pass across every new test file above.
+- `crowtree/bench/` addition: fast-path `get` latency, `AsyncCrowtree::get`
+  (new) vs. today's `spawn_blocking`-based `AsyncCrowtree::get` (keep the
+  old implementation temporarily behind a bench-only flag, or benchmark
+  against a git-stashed baseline) — the whole point of this effort is a
+  measurable latency win here; if there isn't one, that's a finding worth
+  recording before declaring the phase done.
+
+### Phase 6 (new — not in the original 5-phase list) — Wire `CrowtreeEngine`
+
+Once Phase 3 lands, `crowtree/../crowkv/src/kv/crowtree_engine.rs`'s
+`get`/`scan`/`apply` (converted to return `KVFuture<T>` by
+[`design-crowkv-async-kvengine.md`](design-crowkv-async-kvengine.md), which
+should land **before** this phase) construct `KVFuture::Pending(Box::pin(...))`
+wrapping the Phase 3 `CtGetFuture`/equivalent for a genuine miss, instead of
+always returning `KVFuture::Ready(...)`. This is the phase where #11
+actually starts mattering to `crowkv` in production.

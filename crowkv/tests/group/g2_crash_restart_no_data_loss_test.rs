@@ -318,7 +318,7 @@ async fn assert_cluster_reads(cluster: &WalCluster, kvs: &[(Vec<u8>, Vec<u8>)], 
     }
 }
 
-fn assert_restarted_node_has_values(cluster: &WalCluster, node_id: u64, kvs: &[(Vec<u8>, Vec<u8>)]) {
+async fn assert_restarted_node_has_values(cluster: &WalCluster, node_id: u64, kvs: &[(Vec<u8>, Vec<u8>)]) {
     let restarted = cluster
         .nodes
         .iter()
@@ -326,7 +326,7 @@ fn assert_restarted_node_has_values(cluster: &WalCluster, node_id: u64, kvs: &[(
         .expect("restarted node present");
     let restarted_group = restarted.store.get_group(GROUP).expect("restarted group");
     for (key, value) in kvs {
-        let got = restarted_group.local_replica().learner.engine_get(key);
+        let got = restarted_group.local_replica().learner.engine_get(key).await;
         assert_eq!(
             got.map(|(_, v)| v).as_deref(),
             Some(value.as_slice()),
@@ -372,7 +372,7 @@ async fn assert_offline_replay_has_values(node_id: u64, wal_dir: PathBuf, kvs: &
     );
     for (slot, (key, value)) in (1u64..).zip(kvs.iter()) {
         let accepted = restored.accepted_at(slot).await;
-        let got = restored.learner.engine_get(key);
+        let got = restored.learner.engine_get(key).await;
         assert_eq!(
             got.map(|(_, v)| v),
             Some(value.clone()),
@@ -421,7 +421,7 @@ async fn cluster_survives_leader_kill_and_restart_with_no_data_loss() {
         "committed value must remain readable after restart",
     )
     .await;
-    assert_restarted_node_has_values(&cluster, leader_id, &kvs);
+    assert_restarted_node_has_values(&cluster, leader_id, &kvs).await;
     assert_offline_replay_has_values(leader_id, dead_wal_dir_for_offline_replay, &kvs).await;
 
     cluster.shutdown().await;

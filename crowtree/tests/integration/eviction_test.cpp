@@ -7,8 +7,8 @@
 
 #include <gtest/gtest.h>
 
-#include <atomic>
 #include <array>
+#include <atomic>
 #include <map>
 #include <random>
 #include <string>
@@ -40,6 +40,25 @@ void fill_buf(Crowtree *t, int K, std::map<std::string, std::string> *oracle)
         (*oracle)[make_key(i)] = v;
     }
 }
+
+// Counts read_at calls so a test can observe whether a specific page was
+// demand-loaded (evicted, then reloaded) vs. still resident (plan-tree #17
+// recency-ranked eviction).
+class CountingPageStore : public MemPageStore
+{
+  public:
+    explicit CountingPageStore(uint32_t iu_size = 1) : MemPageStore(iu_size)
+    {
+    }
+
+    Status read_at(uint64_t off, uint8_t *buf, size_t len) const override
+    {
+        ++reads;
+        return MemPageStore::read_at(off, buf, len);
+    }
+
+    mutable std::atomic<int> reads{0};
+};
 } // namespace
 
 TEST(Eviction, EvictedLeavesFreeMemoryAndReloadCorrectly)
@@ -148,4 +167,45 @@ TEST(Eviction, ConcurrentReadersWhileEvicting)
         th.join();
     }
     EXPECT_FALSE(fail.load());
+}
+
+// plan-tree #17: evict_clean_leaves ranks its candidates by real access
+// recency (PageBase::last_touch_tick, stamped on every resident() touch)
+// instead of arbitrary DFS order.
+TEST(Eviction, RecentlyTouchedLeafSurvivesEvictionOverColderOnes)
+{
+    CountingPageStore store(1);
+    Options           opt;
+    opt.page_store       = &store;
+    opt.max_delta_len    = 1;
+    opt.leaf_split_bytes = 160;
+    opt.frame_bytes      = 4096;
+    Crowtree t(opt);
+
+    std::map<std::string, std::string> oracle;
+    fill_buf(&t, 200, &oracle);
+    ASSERT_TRUE(t.snapshot(nullptr).ok()); // clean + resident, touch order == snapshot's DFS walk
+
+    // Re-touch the very first key's leaf so it becomes the *most* recently
+    // touched -- recency ranking should keep it resident longer than leaves
+    // nothing has re-read since the snapshot walk.
+    std::string v;
+    uint64_t    s;
+    ASSERT_TRUE(t.get(Slice(make_key(0)), &s, &v));
+
+    int reads_before = store.reads.load();
+    // Aggressive budget: keep only a single resident leaf.
+    size_t evicted = t.evict_clean_leaves(1);
+    EXPECT_GT(evicted, 0U);
+
+    // The just-touched leaf must still be resident: no fresh demand-load.
+    ASSERT_TRUE(t.get(Slice(make_key(0)), &s, &v));
+    EXPECT_EQ(v, oracle[make_key(0)]);
+    EXPECT_EQ(store.reads.load(), reads_before) << "recently-touched leaf should not have been evicted";
+
+    // A leaf nothing re-touched should have been evicted and demand-loads on
+    // next access.
+    ASSERT_TRUE(t.get(Slice(make_key(150)), &s, &v));
+    EXPECT_EQ(v, oracle[make_key(150)]);
+    EXPECT_GT(store.reads.load(), reads_before) << "a colder leaf should have been evicted and reloaded";
 }

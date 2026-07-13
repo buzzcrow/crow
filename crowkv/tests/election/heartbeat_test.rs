@@ -115,7 +115,7 @@ async fn heartbeat_applies_committed_entries_up_to_commit_slot() {
         "follower applies up to commit_slot"
     );
     assert_eq!(
-        replica.learner.engine_get(b"k").map(|(_, v)| v),
+        replica.learner.engine_get(b"k").await.map(|(_, v)| v),
         Some(b"v3".to_vec()),
         "latest value applied"
     );

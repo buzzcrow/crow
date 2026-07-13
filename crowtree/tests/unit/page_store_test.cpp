@@ -1,4 +1,5 @@
-// PT1: PageStore backend tests (MemPageStore + FilePageStore).
+// PT1: PageStore backend tests (MemPageStore + FilePageStore + BlockPageStore).
+#include "crowtree/block_page_store.h"
 #include "crowtree/page_store.h"
 
 #include <gtest/gtest.h>
@@ -16,7 +17,7 @@ namespace
 std::string temp_path()
 {
     std::array<char, 24> tmpl{"/tmp/crowtree_ps_XXXXXX"};
-    int  fd     = mkstemp(tmpl.data());
+    int                  fd = mkstemp(tmpl.data());
     if (fd >= 0) {
         close(fd);
     }
@@ -37,7 +38,7 @@ TEST(PageStore, MemRoundTrip)
 
 TEST(PageStore, MemReadPastEndFails)
 {
-    MemPageStore s(1);
+    MemPageStore           s(1);
     std::array<uint8_t, 4> b{};
     EXPECT_FALSE(s.read_at(0, b.data(), b.size()).ok());
 }
@@ -74,5 +75,89 @@ TEST(PageStore, FileRoundTripAcrossReopen)
         ASSERT_TRUE(s->read_at(8, out.data(), out.size()).ok());
         EXPECT_EQ(in, out);
     }
+    std::remove(path.c_str());
+}
+
+// plan-tree #22: BlockPageStore (O_DIRECT). Backed by a regular
+// pre-allocated file in these tests (no real block device available), which
+// exercises the exact same O_DIRECT alignment path a raw device would.
+TEST(PageStore, BlockDeviceAlignedRoundTripAcrossReopen)
+{
+    std::string path = temp_path();
+    // Heap-allocated: not guaranteed aligned, but offset/len are IU-aligned
+    // (4096) here, so only the buffer-address alignment check can differ
+    // across runs -- either path (direct or bounced) must round-trip.
+    std::vector<uint8_t> in(4096, 0xAB);
+    {
+        std::unique_ptr<BlockPageStore> s;
+        ASSERT_TRUE(BlockPageStore::open(path, 4096, &s).ok());
+        EXPECT_FALSE(s->is_block_device());
+        ASSERT_TRUE(s->write_at(4096, in.data(), in.size()).ok());
+        ASSERT_TRUE(s->sync().ok());
+        EXPECT_EQ(s->iu_size(), 4096U);
+    }
+    {
+        std::unique_ptr<BlockPageStore> s;
+        ASSERT_TRUE(BlockPageStore::open(path, 4096, &s).ok());
+        std::vector<uint8_t> out(in.size(), 0);
+        ASSERT_TRUE(s->read_at(4096, out.data(), out.size()).ok());
+        EXPECT_EQ(in, out);
+    }
+    std::remove(path.c_str());
+}
+
+TEST(PageStore, BlockDeviceUnalignedWriteReadBounces)
+{
+    std::string                     path = temp_path();
+    std::unique_ptr<BlockPageStore> s;
+    ASSERT_TRUE(BlockPageStore::open(path, 4096, &s).ok());
+
+    // Offset 10, length 7: neither aligned to the 4096 IU -- must bounce
+    // through the bounce-buffer read-modify-write path.
+    std::vector<uint8_t> in{1, 2, 3, 4, 5, 6, 7};
+    ASSERT_TRUE(s->write_at(10, in.data(), in.size()).ok());
+
+    std::vector<uint8_t> out(in.size(), 0);
+    ASSERT_TRUE(s->read_at(10, out.data(), out.size()).ok());
+    EXPECT_EQ(in, out);
+    std::remove(path.c_str());
+}
+
+TEST(PageStore, BlockDeviceUnalignedWritePreservesSurroundingBytes)
+{
+    std::string                     path = temp_path();
+    std::unique_ptr<BlockPageStore> s;
+    ASSERT_TRUE(BlockPageStore::open(path, 4096, &s).ok());
+
+    // Fill one full IU with a known pattern (aligned write).
+    std::vector<uint8_t> block(4096, 0xFF);
+    ASSERT_TRUE(s->write_at(0, block.data(), block.size()).ok());
+
+    // Overwrite a small unaligned sub-range in the middle -- the
+    // read-modify-write bounce path must preserve every byte outside
+    // [100, 105) in this IU, not zero-fill the whole span.
+    std::vector<uint8_t> patch{9, 9, 9, 9, 9};
+    ASSERT_TRUE(s->write_at(100, patch.data(), patch.size()).ok());
+
+    std::vector<uint8_t> out(block.size(), 0);
+    ASSERT_TRUE(s->read_at(0, out.data(), out.size()).ok());
+    for (size_t i = 0; i < out.size(); ++i) {
+        if (i >= 100 && i < 105) {
+            EXPECT_EQ(out[i], 9U) << "at " << i;
+        }
+        else {
+            EXPECT_EQ(out[i], 0xFF) << "at " << i;
+        }
+    }
+    std::remove(path.c_str());
+}
+
+TEST(PageStore, BlockDeviceReadPastEndFails)
+{
+    std::string                     path = temp_path();
+    std::unique_ptr<BlockPageStore> s;
+    ASSERT_TRUE(BlockPageStore::open(path, 4096, &s).ok());
+    std::vector<uint8_t> out(16, 0);
+    EXPECT_FALSE(s->read_at(0, out.data(), out.size()).ok());
     std::remove(path.c_str());
 }

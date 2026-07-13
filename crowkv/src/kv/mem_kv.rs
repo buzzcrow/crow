@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use parking_lot::RwLock;
 
 use super::op::Cell;
-use super::{Batch, BatchOp, KVEngine, Op};
+use super::{Batch, BatchOp, KVEngine, KVFuture, Op};
 
 /// In-memory, single-version engine backed by an ordered `BTreeMap` under a
 /// single `RwLock`. The write lock held for the duration of `apply` makes the
@@ -23,7 +23,7 @@ impl InMemKV {
 }
 
 impl KVEngine for InMemKV {
-    fn apply(&self, slot: u64, batch: &Batch) {
+    fn apply(&self, slot: u64, batch: &Batch) -> KVFuture<()> {
         // Collapse intra-batch duplicates first: the last occurrence of a key
         // in batch order wins, so the per-key slot check below is made once
         // against the pre-batch state rather than once per occurrence (which
@@ -45,17 +45,19 @@ impl KVEngine for InMemKV {
             };
             map.insert(key.to_vec(), (slot, cell));
         }
+        KVFuture::ready(())
     }
 
-    fn get(&self, key: &[u8]) -> Option<(u64, Vec<u8>)> {
+    fn get(&self, key: &[u8]) -> KVFuture<Option<(u64, Vec<u8>)>> {
         let map = self.map.read();
-        match map.get(key) {
+        let result = match map.get(key) {
             Some((slot, Cell::Value(v))) => Some((*slot, v.clone())),
             _ => None,
-        }
+        };
+        KVFuture::ready(result)
     }
 
-    fn scan(&self, prefix: &[u8], limit: usize) -> (Vec<(Vec<u8>, u64, Vec<u8>)>, bool) {
+    fn scan(&self, prefix: &[u8], limit: usize) -> KVFuture<(Vec<(Vec<u8>, u64, Vec<u8>)>, bool)> {
         let map = self.map.read();
         let mut items = Vec::new();
         let mut truncated = false;
@@ -74,7 +76,7 @@ impl KVEngine for InMemKV {
             }
             items.push((key.clone(), *slot, v.clone()));
         }
-        (items, truncated)
+        KVFuture::ready((items, truncated))
     }
 
     fn iter_all(&self) -> Vec<(Vec<u8>, u64, Cell)> {

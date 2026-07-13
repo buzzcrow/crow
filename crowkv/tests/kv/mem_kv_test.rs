@@ -39,12 +39,30 @@ fn compare_is_empty_for_identical_state_and_detects_divergence() {
     );
 }
 
+/// Regression guard (`design-crowkv-async-kvengine.md` §6): `InMemKV` never
+/// needs real I/O, so `get`/`scan`/`apply` must always resolve `Ready` — a
+/// `matches!` check on the raw `KVFuture` *before* unwrapping, so a future
+/// accidental switch to `Pending` fails loudly here first, not just via a
+/// wrong unwrapped value.
+#[test]
+fn get_scan_apply_always_resolve_ready() {
+    use crowkv::kv::KVFuture;
+
+    let e = InMemKV::new();
+    assert!(matches!(
+        e.apply(1, &batch(vec![put(b"k", b"v")])),
+        KVFuture::Ready(_)
+    ));
+    assert!(matches!(e.get(b"k"), KVFuture::Ready(_)));
+    assert!(matches!(e.scan(b"", 0), KVFuture::Ready(_)));
+}
+
 #[test]
 fn clear_drops_all_state() {
     let e = InMemKV::new();
-    e.apply(1, &batch(vec![put(b"k", b"v")]));
+    e.apply(1, &batch(vec![put(b"k", b"v")])).into_ready();
     e.clear();
-    assert_eq!(e.get(b"k"), None);
+    assert_eq!(e.get(b"k").into_ready(), None);
     assert_eq!(e.live_key_count(), 0);
     assert!(e.iter_all().is_empty());
 }

@@ -72,6 +72,12 @@ ct_status ct_collect_garbage(ct_tree *t, ct_gc_stats *out_stats);
 int32_t ct_io_failed(const ct_tree *t);
 void    ct_clear_io_error(ct_tree *t);
 
+// Evict clean, delta-free resident leaf bases down to at most
+// `max_resident_leaves` (crowtree::Crowtree::evict_clean_leaves; design §4.6).
+// Test/ops hook -- forces the demand-load path a subsequent ct_get/
+// ct_get_async will have to take. Returns the number of leaves evicted.
+uint64_t ct_evict_clean_leaves(ct_tree *t, uint64_t max_resident_leaves);
+
 // ── Data path ─────────────────────────────────────────────────────
 ct_status ct_apply_put(ct_tree *t, uint64_t slot, const uint8_t *key, size_t klen, const uint8_t *val, size_t vlen);
 ct_status ct_apply_delete(ct_tree *t, uint64_t slot, const uint8_t *key, size_t klen);
@@ -93,6 +99,80 @@ ct_status ct_flush(ct_tree *t);
 
 // Point read. *found is 0/1; on found, *slot and *value (owned) are set.
 ct_status ct_get(ct_tree *t, const uint8_t *key, size_t klen, int32_t *found, uint64_t *slot, ct_buf *value);
+
+// ── Async data path (design-crowtree-async.md, plan-tree.md #11 Phase 2) ──
+//
+// Opaque completion handle returned by the ct_*_async calls below; poll it
+// with ct_future_poll. For ct_flush_async/ct_snapshot_async, a future that
+// ct_future_poll reports done (*done=1) is freed by that same call -- do not
+// also call ct_future_free on it. For ct_get_async specifically, done=1 does
+// *not* free it (plan-tree.md #11 Phase 4, design §5's zero-copy fast path:
+// *out_value may borrow bytes from a resident frame, kept alive by an epoch
+// guard this ct_future owns) -- the caller must always follow up with
+// ct_future_free once done reading *out_value, for both a found and a
+// not-found/errored result. ct_future_free is otherwise only for abandoning
+// a still-pending future early (e.g. the Rust Future was dropped/cancelled
+// before completion); calling it twice, or calling it after ct_future_poll
+// already freed a flush/snapshot future, is undefined behavior.
+using ct_future = struct ct_future;
+
+// Fast path (no demand-load needed): the returned future already reports
+// done=1 on the very first ct_future_poll call. Slow path (page must be
+// loaded): the future stays pending until the tree's Reactor completes the
+// I/O (or, with no Reactor wired -- e.g. an in-memory tree, or a build
+// without liburing -- until it falls back to a synchronous load; still
+// correct, just not genuinely async; design §6.3). Returns null only if
+// `t` is itself null.
+ct_future *ct_get_async(ct_tree *t, const uint8_t *key, size_t klen);
+
+// flush()/snapshot() twins. flush_async's future never has genuine I/O to
+// wait on (flush only touches the in-memory L1, never page_store) so it
+// always completes synchronously, same as the fast path above; it exists
+// so Rust has one uniform ct_future-based shape for all three ops.
+// snapshot_async's future, on completion, carries the durable
+// last_applied_slot in ct_future_poll's *out_slot (mirrors ct_snapshot's
+// own out param); *out_found and *out_value are unused for both.
+ct_future *ct_flush_async(ct_tree *t);
+ct_future *ct_snapshot_async(ct_tree *t);
+
+// Non-blocking poll.
+// *done == 0: still pending; f remains valid, poll again later (e.g. after
+//   the Rust side's AsyncFd wakes on ct_reactor_eventfd()).
+// *done == 1: the returned ct_status is the underlying operation's result
+//   (mirrors what ct_get/ct_flush/ct_snapshot would have returned).
+//   - ct_flush_async/ct_snapshot_async: f has been freed by this call (do
+//     not also call ct_future_free). *out_slot carries snapshot_async's
+//     durable last_applied_slot; *out_found/*out_value are untouched.
+//   - ct_get_async: f is NOT freed by this call -- see ct_future's own doc
+//     comment above. *out_found is 0/1 and, if found, *out_slot and
+//     *out_value are set; *out_value may be a *borrowed* pointer into a
+//     resident frame (do not pass it to ct_free_buf) valid only until the
+//     caller's next ct_future_free call, which must always follow. A
+//     not-found/errored get leaves *out_slot/*out_value untouched (still
+//     requires ct_future_free).
+//   Any of out_found/out_slot/out_value may be null if the caller doesn't
+//   need them.
+ct_status ct_future_poll(ct_future *f, int32_t *done, int32_t *out_found, uint64_t *out_slot, ct_buf *out_value);
+
+// Best-effort cancel + free of a still-pending future (design §8): the
+// underlying I/O (if any is in flight) is not actually interrupted -- it
+// runs to completion in the background and its result is simply discarded
+// -- but `f` itself is safe to drop immediately; a no-op if f is null. Also
+// how the caller *must* release a ct_get_async future once done reading
+// out_value -- see ct_future's own doc comment above. Never call this on a
+// ct_flush_async/ct_snapshot_async future already resolved by
+// ct_future_poll (ct_get_async futures are the one exception: always call
+// this after a resolved poll, never before).
+void ct_future_free(ct_future *f);
+
+// The tree's Reactor eventfd, for the Rust side to register with
+// tokio::io::AsyncFd (design §7): it becomes readable after the Reactor
+// dispatches a batch of completions, so re-polling every pending future at
+// that point will observe any that just finished. Returns -1 if this tree
+// has no Reactor wired (in-memory tree, or a build without liburing) --
+// ct_*_async calls still work in that case, they just always complete
+// synchronously (nothing to wait on). Reactor-owned; do not close it.
+int32_t ct_reactor_eventfd(const ct_tree *t);
 
 // Range scan over `prefix` (empty = whole keyspace), up to `limit` (0 = all).
 // `out_entries` is a packed owned buffer of records:

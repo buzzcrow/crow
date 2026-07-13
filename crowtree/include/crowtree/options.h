@@ -12,6 +12,10 @@ namespace crowtree
 {
 
 class PageStore;
+#ifdef CROWTREE_HAVE_LIBURING
+class Reactor;
+class AsyncPageStore;
+#endif
 
 struct Options
 {
@@ -99,6 +103,21 @@ struct Options
     // snapshot/recovery). When set, snapshot() writes the materialized L1
     // state and open() recovers it.
     PageStore *page_store = nullptr;
+
+#ifdef CROWTREE_HAVE_LIBURING
+    // ── Async I/O (design-crowtree-async.md, plan-tree.md #11 Phase 2) ──
+    // Both non-owning; the caller (c_api.cpp's ct_open) owns and outlives
+    // the Crowtree. Either left null (e.g. a MemPageStore-backed tree, or
+    // any tree that never calls the *_async methods) means get_async's
+    // genuine-miss case and flush_async/snapshot_async fall back to
+    // completing synchronously in the caller's stack frame instead of
+    // touching a reactor -- see design §6.3 (no MemAsyncPageStore needed)
+    // and Crowtree::get_async's doc comment. One Reactor per Crowtree
+    // instance (design §3.1/§9); async_page_store must be backed by the
+    // *same* durable file as `page_store` (see FileAsyncPageStore).
+    Reactor        *async_reactor    = nullptr;
+    AsyncPageStore *async_page_store = nullptr;
+#endif
 
     // ── Buffer pool (design §4) ──
     // The arena that holds base-page frames is a flat array of equal-size frames.

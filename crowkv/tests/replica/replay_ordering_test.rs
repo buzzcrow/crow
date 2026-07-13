@@ -108,7 +108,7 @@ async fn restore_contiguous_slots_all_applied() {
         "all 5 slots applied after replay"
     );
     assert_eq!(
-        restored.learner.engine_get(b"k").map(|(_, v)| v),
+        restored.learner.engine_get(b"k").await.map(|(_, v)| v),
         Some(b"5".to_vec()),
         "k = slot-5 value (highest-slot-wins)"
     );
@@ -159,7 +159,7 @@ async fn restore_stops_at_hole_below_watermark() {
         "contiguous applied stops at hole (slot 4)"
     );
     assert_eq!(
-        restored.learner.engine_get(b"k").map(|(_, v)| v),
+        restored.learner.engine_get(b"k").await.map(|(_, v)| v),
         Some(b"5".to_vec()),
         "k = slot-5 value (highest-slot-wins, out-of-order)"
     );
@@ -212,7 +212,7 @@ async fn restore_out_of_order_accepted_records() {
         "all 3 slots applied after out-of-order replay"
     );
     assert_eq!(
-        restored.learner.engine_get(b"k").map(|(_, v)| v),
+        restored.learner.engine_get(b"k").await.map(|(_, v)| v),
         Some(b"3".to_vec()),
         "k = slot-3 value (highest-slot-wins)"
     );
@@ -255,7 +255,7 @@ async fn restore_does_not_apply_without_snapshot() {
         "all 5 slots applied after replay"
     );
     assert_eq!(
-        restored.learner.engine_get(b"k").map(|(_, v)| v),
+        restored.learner.engine_get(b"k").await.map(|(_, v)| v),
         Some(b"5".to_vec()),
         "k = slot-5 value (highest-slot-wins)"
     );

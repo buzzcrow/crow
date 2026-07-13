@@ -20,12 +20,36 @@ if(CROWTREE_SANITIZER)
   add_link_options(-fsanitize=${CROWTREE_SANITIZER})
 endif()
 
+# ── liburing (io_uring reactor, plan-tree #11 Phase 0/1) ──────────
+# Linux-only kernel interface -- no macOS build exists, so Reactor /
+# AsyncPageStore / FileAsyncPageStore are excluded from the build entirely
+# (not compiled to no-ops) when not found, matching
+# design-crowtree-async.md §10's macOS dev-path note. Probed before the
+# source glob below so the exclusion list can be applied pre-add_library.
+find_path(LIBURING_INCLUDE_DIR liburing.h)
+find_library(LIBURING_LIB NAMES uring)
+
 # ── Library ───────────────────────────────────────────────────────
 file(GLOB_RECURSE CROWTREE_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
+if(NOT (LIBURING_INCLUDE_DIR AND LIBURING_LIB))
+  list(REMOVE_ITEM CROWTREE_SRC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/reactor.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/file_async_page_store.cpp
+  )
+endif()
 add_library(crowtree STATIC ${CROWTREE_SRC})
 target_include_directories(crowtree PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 find_package(Threads REQUIRED)
 target_link_libraries(crowtree PUBLIC Threads::Threads)
+
+if(LIBURING_INCLUDE_DIR AND LIBURING_LIB)
+  message(STATUS "crowtree liburing: ${LIBURING_LIB} (${LIBURING_INCLUDE_DIR})")
+  target_include_directories(crowtree PRIVATE ${LIBURING_INCLUDE_DIR})
+  target_compile_definitions(crowtree PUBLIC CROWTREE_HAVE_LIBURING=1)
+  target_link_libraries(crowtree PUBLIC ${LIBURING_LIB})
+else()
+  message(STATUS "crowtree liburing: not found (io_uring reactor disabled)")
+endif()
 
 # ── Abseil (MemTable ordered map: absl::btree_map, plan-tree #9) ───
 find_package(absl REQUIRED)
@@ -69,6 +93,9 @@ find_package(GTest REQUIRED)
 include(GoogleTest)
 
 file(GLOB_RECURSE CROWTREE_TEST_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp)
+if(NOT (LIBURING_INCLUDE_DIR AND LIBURING_LIB))
+  list(REMOVE_ITEM CROWTREE_TEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/reactor_test.cpp)
+endif()
 add_executable(crowtree_tests ${CROWTREE_TEST_SRC})
 target_link_libraries(crowtree_tests PRIVATE crowtree GTest::gtest GTest::gtest_main)
 # PRE_TEST: enumerate tests at ctest time, not build time. Required so sanitizer

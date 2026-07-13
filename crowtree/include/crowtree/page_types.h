@@ -6,6 +6,7 @@
 
 #include "crowtree/buffer.h"
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 
@@ -50,6 +51,15 @@ struct PageBase
     // durable_addr != ~0ull. Meaningful only for base pages.
     uint64_t durable_addr = ~0ULL;
     uint32_t durable_plen = 0;
+
+    // Logical-clock stamp of this page's last `Crowtree::resident()` touch
+    // (plan-tree #17), used to rank eviction candidates by real recency
+    // instead of arbitrary DFS order. Updated with a single relaxed atomic
+    // store on every access -- no lock, so the lock-free read path stays
+    // lock-free. `0` (never touched since construction) sorts oldest/most
+    // evictable, which is correct: a demand-loaded-but-not-yet-re-read page
+    // should be at least as evictable as one that's actually been used.
+    std::atomic<uint64_t> last_touch_tick{0};
 };
 
 // One leaf entry: key + encoded slot-aware cell payload (see cell.h). The key is

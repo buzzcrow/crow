@@ -7,14 +7,20 @@
 // hand them back to ct_free_buf regardless of allocator details.
 #include "crowtree/c_api.h"
 
+#include "crowtree/async_page_store.h"
 #include "crowtree/crowtree.h"
 #include "crowtree/page_store.h"
 #include "crowtree/snapshot_io.h"
+#ifdef CROWTREE_HAVE_LIBURING
+#    include "crowtree/reactor.h"
+#endif
 
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace crowtree;
@@ -38,6 +44,19 @@ ct_buf make_buf(const void *data, size_t len)
             std::memcpy(b.data, data, len);
         }
     }
+    return b;
+}
+
+// Unlike make_buf(), does not malloc/copy -- `data` is returned as-is (design
+// §5's zero-copy fast path, plan-tree.md #11 Phase 4). Only for a ct_buf whose
+// backing memory the caller separately keeps alive for at least as long as the
+// buffer is in use (ct_future_poll's kGet case: the ct_future_impl's own
+// EpochManager::Guard). The caller must NOT pass this to ct_free_buf.
+ct_buf make_borrowed_buf(const void *data, size_t len)
+{
+    ct_buf b;
+    b.len  = len;
+    b.data = len > 0 ? const_cast<uint8_t *>(static_cast<const uint8_t *>(data)) : nullptr;
     return b;
 }
 
@@ -78,7 +97,52 @@ struct ct_tree
 {
     std::unique_ptr<PageStore> store; // null for pure in-memory engine
     std::unique_ptr<Crowtree>  tree;
+#ifdef CROWTREE_HAVE_LIBURING
+    // Both null for an in-memory tree, or if opening the async twin failed
+    // (see ct_open) -- get_async/flush_async/snapshot_async then fall back
+    // to completing synchronously (design §6.3). Declared so `reactor`
+    // outlives `async_store` (FileAsyncPageStore is non-owning re: reactor,
+    // mirroring Options' own comment) and both outlive `tree`, which is
+    // what actually calls into them.
+    std::unique_ptr<Reactor>            reactor;
+    std::unique_ptr<FileAsyncPageStore> async_store;
+#endif
 };
+
+// ── ct_future: opaque completion handle for the ct_*_async calls ──
+//
+// The public ct_future* handle is really a heap-allocated
+// std::shared_ptr<ct_future_impl>* (see ct_get_async etc.): the completion
+// callback registered with Crowtree::get_async/flush_async/snapshot_async
+// captures its own shared_ptr copy of the same ct_future_impl, so the impl
+// stays alive until *both* the Rust-side handle (freed via ct_future_poll
+// once done, or ct_future_free if abandoned early) and the callback (which
+// always eventually fires -- see Reactor::submit_locked/cancel) have let
+// go of their reference. This is what makes ct_future_free's best-effort
+// cancel-and-free (design §8) safe: it never has to actually reach into
+// the reactor to stop anything, and never risks a dangling ct_future_impl*
+// if the I/O completes after the caller has already abandoned the future.
+struct ct_future_impl
+{
+    enum class Kind { kGet, kFlush, kSnapshot };
+    Kind kind = Kind::kGet;
+    // Written once by the completion callback (release), read once by the
+    // first ct_future_poll that observes it (acquire) -- that acquire/
+    // release pair is the only synchronization the fields below need,
+    // since there is exactly one writer-then-reader handoff per future.
+    std::atomic<bool> done{false};
+    ct_status         status = static_cast<ct_status>(Code::kOk);
+    // kGet only. May hold a live EpochManager::Guard borrowing a resident
+    // frame's bytes (design §5's zero-copy fast path, plan-tree.md #11
+    // Phase 4) -- released only when this ct_future_impl is destroyed, so
+    // ct_future_poll deliberately does *not* delete the handle for a kGet
+    // future (see its updated doc comment in c_api.h); the caller must
+    // always follow up with ct_future_free once done reading out_value.
+    GetView  get_result;
+    uint64_t slot = 0; // kSnapshot only (last_applied_slot)
+};
+
+using ct_future_handle = std::shared_ptr<ct_future_impl>;
 
 struct ct_view
 {
@@ -144,6 +208,22 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
         }
         h->store     = std::move(fs);
         o.page_store = h->store.get();
+#ifdef CROWTREE_HAVE_LIBURING
+        // Best-effort: opening the async twin failure leaves
+        // o.async_reactor/async_page_store null, so get_async/flush_async/
+        // snapshot_async just fall back to synchronous completion (design
+        // §6.3) rather than failing ct_open outright over a durable store
+        // that opened successfully via the (still required) sync path above.
+        h->reactor = std::make_unique<Reactor>();
+        std::unique_ptr<FileAsyncPageStore> afs;
+        Status                              as =
+            FileAsyncPageStore::open(opt->path, opt->iu_size == 0 ? 4096 : opt->iu_size, h->reactor.get(), &afs);
+        if (as.ok()) {
+            h->async_store     = std::move(afs);
+            o.async_reactor    = h->reactor.get();
+            o.async_page_store = h->async_store.get();
+        }
+#endif
         std::unique_ptr<Crowtree> t;
         Status                    os = Crowtree::open(o, &t);
         if (!os.ok()) {
@@ -214,6 +294,14 @@ void ct_clear_io_error(ct_tree *t)
     if (t != nullptr) {
         t->tree->clear_io_error();
     }
+}
+
+uint64_t ct_evict_clean_leaves(ct_tree *t, uint64_t max_resident_leaves)
+{
+    if (t == nullptr) {
+        return 0;
+    }
+    return t->tree->evict_clean_leaves(max_resident_leaves);
 }
 
 // ── Data path ─────────────────────────────────────────────────────
@@ -331,6 +419,120 @@ ct_status ct_get(ct_tree *t, const uint8_t *key, size_t klen, int32_t *found, ui
         *value = make_buf(nullptr, 0);
     }
     return static_cast<ct_status>(Code::kOk);
+}
+
+// ── Async data path ───────────────────────────────────────────────
+
+ct_future *ct_get_async(ct_tree *t, const uint8_t *key, size_t klen)
+{
+    if (t == nullptr) {
+        return nullptr;
+    }
+    auto impl  = std::make_shared<ct_future_impl>();
+    impl->kind = ct_future_impl::Kind::kGet;
+    t->tree->get_async(Slice(reinterpret_cast<const char *>(key), klen), [impl](GetView view) {
+        impl->get_result = std::move(view);
+        impl->done.store(true, std::memory_order_release);
+    });
+    return reinterpret_cast<ct_future *>(new ct_future_handle(std::move(impl)));
+}
+
+ct_future *ct_flush_async(ct_tree *t)
+{
+    if (t == nullptr) {
+        return nullptr;
+    }
+    auto impl  = std::make_shared<ct_future_impl>();
+    impl->kind = ct_future_impl::Kind::kFlush;
+    t->tree->flush_async([impl](Status st) {
+        impl->status = to_status(st);
+        impl->done.store(true, std::memory_order_release);
+    });
+    return reinterpret_cast<ct_future *>(new ct_future_handle(std::move(impl)));
+}
+
+ct_future *ct_snapshot_async(ct_tree *t)
+{
+    if (t == nullptr) {
+        return nullptr;
+    }
+    auto impl  = std::make_shared<ct_future_impl>();
+    impl->kind = ct_future_impl::Kind::kSnapshot;
+    t->tree->snapshot_async([impl](Status st, uint64_t last_applied) {
+        impl->status = to_status(st);
+        impl->slot   = last_applied;
+        impl->done.store(true, std::memory_order_release);
+    });
+    return reinterpret_cast<ct_future *>(new ct_future_handle(std::move(impl)));
+}
+
+ct_status ct_future_poll(ct_future *f, int32_t *done, int32_t *out_found, uint64_t *out_slot, ct_buf *out_value)
+{
+    if (f == nullptr || done == nullptr) {
+        return static_cast<ct_status>(Code::kInvalidArgument);
+    }
+    auto *handle = reinterpret_cast<ct_future_handle *>(f);
+    auto *impl   = handle->get();
+    if (!impl->done.load(std::memory_order_acquire)) {
+        *done = 0;
+        return static_cast<ct_status>(Code::kOk);
+    }
+    *done            = 1;
+    ct_status status = impl->status;
+    if (impl->kind == ct_future_impl::Kind::kGet) {
+        const GetView &view = impl->get_result;
+        if (out_found != nullptr) {
+            *out_found = view.found() ? 1 : 0;
+        }
+        if (view.found()) {
+            if (out_slot != nullptr) {
+                *out_slot = view.slot();
+            }
+            if (out_value != nullptr) {
+                // Borrowed (design §5's zero-copy fast path, plan-tree.md
+                // #11 Phase 4): points directly at view.value()'s bytes --
+                // never malloc'd, so the caller must NOT pass this to
+                // ct_free_buf. Valid until ct_future_free destroys `handle`
+                // (and, with it, view's epoch guard) -- see this
+                // function's updated doc comment in c_api.h.
+                Slice v    = view.value();
+                *out_value = make_borrowed_buf(v.data(), v.size());
+            }
+        }
+        else if (out_value != nullptr) {
+            *out_value = make_borrowed_buf(nullptr, 0);
+        }
+        // Deliberately not `delete handle` here -- see ct_future_impl's
+        // and c_api.h's doc comments. The caller must call ct_future_free.
+        return status;
+    }
+    if (impl->kind == ct_future_impl::Kind::kSnapshot) {
+        if (out_slot != nullptr) {
+            *out_slot = impl->slot;
+        }
+    }
+    delete handle; // Flush/Snapshot: no borrowed state; free immediately.
+    return status;
+}
+
+void ct_future_free(ct_future *f)
+{
+    if (f == nullptr) {
+        return;
+    }
+    delete reinterpret_cast<ct_future_handle *>(f);
+}
+
+int32_t ct_reactor_eventfd(const ct_tree *t)
+{
+#ifdef CROWTREE_HAVE_LIBURING
+    if (t != nullptr && t->reactor != nullptr) {
+        return t->reactor->eventfd();
+    }
+#else
+    (void)t;
+#endif
+    return -1;
 }
 
 ct_status ct_scan(ct_tree *t, const uint8_t *prefix, size_t plen, size_t limit, ct_buf *out_entries,

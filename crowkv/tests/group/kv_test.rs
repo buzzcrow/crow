@@ -27,7 +27,7 @@ async fn kv_mutations_apply_to_all_learners() {
         .into_inner();
     assert!(resp.ok);
 
-    assert_cluster_value(&cluster, b"k1", Some(b"v1"));
+    assert_cluster_value(&cluster, b"k1", Some(b"v1")).await;
 
     // Batch write: update k1, insert k2
     let resp = client
@@ -56,8 +56,8 @@ async fn kv_mutations_apply_to_all_learners() {
         .into_inner();
     assert!(resp.ok);
 
-    assert_cluster_value(&cluster, b"k1", Some(b"v2"));
-    assert_cluster_value(&cluster, b"k2", Some(b"v2"));
+    assert_cluster_value(&cluster, b"k1", Some(b"v2")).await;
+    assert_cluster_value(&cluster, b"k2", Some(b"v2")).await;
 
     // Delete k1
     let resp = client
@@ -75,18 +75,18 @@ async fn kv_mutations_apply_to_all_learners() {
         .into_inner();
     assert!(resp.ok);
 
-    assert_cluster_value(&cluster, b"k1", None);
-    assert_cluster_value(&cluster, b"k2", Some(b"v2"));
+    assert_cluster_value(&cluster, b"k1", None).await;
+    assert_cluster_value(&cluster, b"k2", Some(b"v2")).await;
 
     drop(client);
     cluster.shutdown().await;
 }
 
-fn assert_cluster_value(cluster: &TestCluster, key: &[u8], expected: Option<&[u8]>) {
+async fn assert_cluster_value(cluster: &TestCluster, key: &[u8], expected: Option<&[u8]>) {
     for node in cluster.nodes() {
         let group = node.get_group(1).expect("group exists");
         let replica = group.local_replica();
-        let value = replica.learner.engine_get(key).map(|(_, v)| v);
+        let value = replica.learner.engine_get(key).await.map(|(_, v)| v);
         match expected {
             Some(bytes) => {
                 let stored = value.expect("value missing");

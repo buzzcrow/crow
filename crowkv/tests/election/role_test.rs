@@ -174,8 +174,8 @@ fn new_inheriting_election_state_preserves_term_and_voted_for() {
     assert_eq!(inherited.role(), PxLocalReplicaRole::Candidate);
 }
 
-#[test]
-fn new_inheriting_election_state_shares_acceptor_and_learner() {
+#[tokio::test]
+async fn new_inheriting_election_state_shares_acceptor_and_learner() {
     use bytes::Bytes;
     use crowkv::paxos::roles::{Learner, PxBallot, PxLogEntry};
 
@@ -186,7 +186,7 @@ fn new_inheriting_election_state_shares_acceptor_and_learner() {
         term: 1,
         payload: Bytes::new(),
     };
-    prior.learner.learn(entry, None, None);
+    prior.learner.learn(entry, None, None).await;
 
     let inherited = PxLocalReplica::new_inheriting_election_state(&prior);
     assert_eq!(

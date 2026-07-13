@@ -45,16 +45,20 @@ async fn repair_once_fills_gap_and_advances_frontier() {
 
     // Learn slot 2 directly, leaving slot 1 as an abandoned gap: the
     // contiguous frontier stays at 0 while the highest-seen slot is 2.
-    group.local_replica().learner.learn(
-        PxLogEntry {
-            slot: 2,
-            ballot: PxBallot::new(1, 1),
-            term: 0,
-            payload: bytes::Bytes::from_static(b""),
-        },
-        None,
-        None,
-    );
+    group
+        .local_replica()
+        .learner
+        .learn(
+            PxLogEntry {
+                slot: 2,
+                ballot: PxBallot::new(1, 1),
+                term: 0,
+                payload: bytes::Bytes::from_static(b""),
+            },
+            None,
+            None,
+        )
+        .await;
     assert_eq!(group.local_replica().contiguous_chosen(), 0, "gap below slot 2");
     assert_eq!(group.local_replica().last_chosen_slot(), 2);
 

@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
@@ -44,6 +45,13 @@ pub struct PxGroup {
     /// `shutdown` can `await` it cooperatively without blocking other
     /// readers of `self`.
     pub(crate) driver_handle: AsyncMutex<Option<JoinHandle<()>>>,
+    /// `JoinHandle` of the spawned engine-durability + WAL GC maintenance
+    /// loop ([`crate::cluster::group_maintenance`]), `None` until started.
+    /// Wrapped in an async mutex so `shutdown` can `await` it
+    /// cooperatively, matching `driver_handle`. Shares `tenure_cancel` as
+    /// its cancellation source, so cancelling that (shutdown, or group
+    /// replacement in `PxKvStore`) stops both tasks together.
+    pub(crate) maintenance_handle: AsyncMutex<Option<JoinHandle<()>>>,
     /// Handoff from a freshly elected candidate to the upcoming
     /// `run_leader_state` invocation. Holds `(term, peer_floor,
     /// peer_ceiling)` for bulk Phase 1. Consumed once on Leader-state
@@ -116,6 +124,7 @@ impl PxGroup {
             election_cfg: PxElectionConfig::DEFAULT,
             tenure_cancel: CancellationToken::new(),
             driver_handle: AsyncMutex::new(None),
+            maintenance_handle: AsyncMutex::new(None),
             pending_leader_handoff: parking_lot::Mutex::new(None),
             proposing_term: AtomicU64::new(0),
             leader_read_ready: AtomicBool::new(true),
@@ -140,6 +149,18 @@ impl PxGroup {
     #[must_use]
     pub fn config_store(&self) -> Option<&GroupConfigStore> {
         self.config_store.as_ref()
+    }
+
+    /// Spawn the per-group engine-durability + WAL GC maintenance loop
+    /// ([`crate::cluster::group_maintenance`]).
+    ///
+    /// Must be called after the group is wrapped in an [`Arc`] so the loop
+    /// can hold a [`std::sync::Weak`] back-reference, mirroring
+    /// [`crate::cluster::group_election::LeaderElection::start_election_loop`].
+    /// No-op when `election_cfg.election_driver_disabled` is set or when
+    /// the loop has already been started.
+    pub async fn start_engine_maintenance_loop(self: &Arc<Self>) {
+        crate::cluster::group_maintenance::start(self).await;
     }
 
     // ── Getters ───────────────────────────────────────────────────
@@ -489,9 +510,10 @@ impl PxGroup {
             "PxGroup shutdown starting"
         );
 
-        // 0. Cancel the per-tenure token and await the election driver.
-        //    Driver is cooperative; a 100 ms scaffold tick is
-        //    well within `per_layer_timeout`.
+        // 0. Cancel the per-tenure token and await the election driver +
+        //    engine maintenance loop (both share this same cancel source).
+        //    Both are cooperative; a 100 ms scaffold tick is well within
+        //    `per_layer_timeout`.
         self.tenure_cancel.cancel();
         if let Some(handle) = self.driver_handle.lock().await.take() {
             match tokio::time::timeout(per_layer_timeout, handle).await {
@@ -508,6 +530,25 @@ impl PxGroup {
                         group_id = self.group_id,
                         timeout_ms = per_layer_timeout.as_millis() as u64,
                         "election driver task did not exit within per-layer timeout"
+                    );
+                }
+            }
+        }
+        if let Some(handle) = self.maintenance_handle.lock().await.take() {
+            match tokio::time::timeout(per_layer_timeout, handle).await {
+                Ok(Ok(())) => {}
+                Ok(Err(join_err)) => {
+                    warn!(
+                        group_id = self.group_id,
+                        error = %join_err,
+                        "engine maintenance task panicked during shutdown"
+                    );
+                }
+                Err(_) => {
+                    warn!(
+                        group_id = self.group_id,
+                        timeout_ms = per_layer_timeout.as_millis() as u64,
+                        "engine maintenance task did not exit within per-layer timeout"
                     );
                 }
             }
@@ -1257,6 +1298,14 @@ impl PxGroup {
     /// computation deterministically. Wraps the internal [`Self::note_peer_applied`].
     pub fn note_peer_applied_for_tests(&self, peer_id: PxNodeId, applied: SlotIndex) {
         self.note_peer_applied(peer_id, applied);
+    }
+
+    /// Run one [`crate::cluster::group_maintenance`] pass synchronously,
+    /// without spawning/waiting on the periodic loop's timer, so a test can
+    /// exercise engine-snapshot / GC-watermark / WAL-GC wiring
+    /// deterministically.
+    pub async fn run_maintenance_pass_for_tests(&self) {
+        crate::cluster::group_maintenance::run_pass(self).await;
     }
 }
 

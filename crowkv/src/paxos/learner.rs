@@ -96,16 +96,32 @@ impl PxLearner {
 
     /// Live value and its resolved slot for `key`, or `None` if unset or
     /// tombstoned. Convenience wrapper over [`KVEngine::get`].
+    ///
+    /// `async fn` (plan-tree.md #11 Phase 6, `design-crowkv-async-kvengine.md`
+    /// §5a): `.await`s the `KVFuture` directly instead of `into_ready()` --
+    /// [`crate::kv::CrowtreeEngine::get`] can now genuinely construct
+    /// `KVFuture::Pending` for a demand-load miss, and `into_ready()` would
+    /// panic on that case. The fast (`Ready`) path costs nothing extra: a
+    /// `KVFuture::poll` on `Ready` resolves on the very first poll, so this
+    /// `.await` never actually suspends for it.
     #[must_use]
-    pub fn engine_get(&self, key: &[u8]) -> Option<(SlotIndex, Vec<u8>)> {
-        self.engine.get(key)
+    pub async fn engine_get(&self, key: &[u8]) -> Option<(SlotIndex, Vec<u8>)> {
+        self.engine.get(key).await
     }
 
     /// Ordered prefix scan of live entries; see [`KVEngine::scan`].
+    /// `async fn` for signature uniformity with [`Self::engine_get`], but
+    /// `KVEngine::scan` has no genuine `Pending` path yet (no
+    /// `ct_scan_async` C API -- see `CrowtreeEngine`'s own doc comment), so
+    /// this never actually suspends today either.
     #[must_use]
     #[allow(clippy::type_complexity)]
-    pub fn engine_scan(&self, prefix: &[u8], limit: usize) -> (Vec<(Vec<u8>, SlotIndex, Vec<u8>)>, bool) {
-        self.engine.scan(prefix, limit)
+    pub async fn engine_scan(
+        &self,
+        prefix: &[u8],
+        limit: usize,
+    ) -> (Vec<(Vec<u8>, SlotIndex, Vec<u8>)>, bool) {
+        self.engine.scan(prefix, limit).await
     }
 
     /// Number of live (non-tombstoned) keys in the engine.
@@ -284,18 +300,21 @@ impl PxLearner {
     /// An empty payload (`NoOp` repair fill) decodes to an empty batch and is
     /// a no-op for the engine while still advancing the frontier in `learn`.
     /// Per-key highest-slot-wins is enforced inside [`KVEngine::apply`].
-    fn apply_entry(&self, slot: SlotIndex, payload: &[u8]) {
+    /// `async fn` for the same reason as [`Self::engine_get`]; `KVEngine::apply`
+    /// has no genuine `Pending` path yet either (no async apply C API), so
+    /// this never actually suspends today.
+    async fn apply_entry(&self, slot: SlotIndex, payload: &[u8]) {
         let batch = Batch::decode(payload);
         if batch.ops.is_empty() {
             return;
         }
-        self.engine.apply(slot, &batch);
+        self.engine.apply(slot, &batch).await;
     }
 }
 
 impl Learner for PxLearner {
-    fn learn(&self, entry: PxLogEntry, client_id: Option<u64>, seq: Option<u64>) {
-        self.apply_entry(entry.slot, entry.payload.as_ref());
+    async fn learn(&self, entry: PxLogEntry, client_id: Option<u64>, seq: Option<u64>) {
+        self.apply_entry(entry.slot, entry.payload.as_ref()).await;
         self.update_frontier(entry.slot, entry.term);
         self.record_dedup(client_id, seq, entry.slot);
     }

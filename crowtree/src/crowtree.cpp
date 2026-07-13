@@ -1,15 +1,21 @@
 #include "crowtree/crowtree.h"
 
+#include "crowtree/async_page_store.h"
 #include "crowtree/compressor.h"
 #include "crowtree/delta.h"
 #include "crowtree/descent.h"
 #include "crowtree/log.h"
+#ifdef CROWTREE_HAVE_LIBURING
+#    include "crowtree/reactor.h"
+#endif
 
 #include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <functional>
 #include <map>
+#include <memory>
+#include <vector>
 
 namespace crowtree
 {
@@ -183,6 +189,14 @@ PageBase *Crowtree::resident(uint64_t page_id) const
 {
     PageBase *v = mapping_.get(page_id);
     if (v == nullptr || !MappingTable::is_unloaded(v)) {
+        if (v != nullptr) {
+            // CLOCK-informed eviction ranking (plan-tree #17): stamp this
+            // touch. Relaxed/relaxed: this is a recency *hint*, not a
+            // synchronization point -- ordering across threads doesn't
+            // matter, only that concurrent touches keep advancing the
+            // stamp, which fetch_add guarantees without a lock.
+            v->last_touch_tick.store(touch_tick_.fetch_add(1, std::memory_order_relaxed), std::memory_order_relaxed);
+        }
         return v; // hot path / unset
     }
     // Cold path: demand-load this base page (design §4.5). Serialized by
@@ -211,20 +225,26 @@ PageBase *Crowtree::resident(uint64_t page_id) const
         io_failed_.store(true);
         return nullptr;
     }
+    return install_loaded_page(page_id, u->addr, u->plen, blob);
+}
+
+PageBase *Crowtree::install_loaded_page(uint64_t page_id, uint64_t addr, uint32_t plen,
+                                        const std::vector<uint8_t> &blob) const
+{
     uint32_t raw_len = durable_blob_raw_len(blob.data(), blob.size());
     if (raw_len == 0) {
-        CT_LOG_ERROR("demand-load corrupt blob (raw_len=0): pid={} addr={}", page_id, u->addr);
+        CT_LOG_ERROR("demand-load corrupt blob (raw_len=0): pid={} addr={}", page_id, addr);
         io_failed_.store(true);
         return nullptr;
     }
     std::vector<uint8_t> frame(raw_len);
     if (!decode_durable_page(blob.data(), blob.size(), frame.data(), raw_len).ok()) {
-        CT_LOG_ERROR("demand-load decode failed: pid={} addr={} raw_len={}", page_id, u->addr, raw_len);
+        CT_LOG_ERROR("demand-load decode failed: pid={} addr={} raw_len={}", page_id, addr, raw_len);
         io_failed_.store(true);
         return nullptr;
     }
     if (!frame_validate(frame.data(), raw_len)) {
-        CT_LOG_ERROR("demand-load frame validation failed: pid={} addr={}", page_id, u->addr);
+        CT_LOG_ERROR("demand-load frame validation failed: pid={} addr={}", page_id, addr);
         io_failed_.store(true);
         return nullptr;
     }
@@ -240,8 +260,9 @@ PageBase *Crowtree::resident(uint64_t page_id) const
         page = OverflowBase::from_frame_copy(frame.data(), raw_len, pool_, opt_.frame_bytes);
     }
     page->page_id      = page_id;
-    page->durable_addr = u->addr;                              // loaded from here -> clean (design §4.6)
-    page->durable_plen = u->plen;                              // keep on-disk extent (blob length) for re-tag
+    page->durable_addr = addr; // loaded from here -> clean (design §4.6)
+    page->durable_plen = plen; // keep on-disk extent (blob length) for re-tag
+    page->last_touch_tick.store(touch_tick_.fetch_add(1, std::memory_order_relaxed), std::memory_order_relaxed);
     const_cast<MappingTable &>(mapping_).store(page_id, page); // publish resident
     return page;
 }
@@ -311,8 +332,10 @@ size_t Crowtree::evict_clean_leaves_locked(size_t max_resident_leaves)
     // Collect resident, delta-free, clean leaf pids (the evictable set, §4.6).
     // Descend only into already-resident inner children — never demand-load a page
     // just to evict it.
-    std::vector<uint64_t>         evictable;
-    std::function<void(uint64_t)> dfs = [&](uint64_t page_id) {
+    // (page_id, last_touch_tick) so the candidate set can be ranked by real
+    // access recency below (plan-tree #17) instead of arbitrary DFS order.
+    std::vector<std::pair<uint64_t, uint64_t>> evictable_ranked;
+    std::function<void(uint64_t)>              dfs = [&](uint64_t page_id) {
         PageBase *v = mapping_.get(page_id);
         if (v == nullptr || MappingTable::is_unloaded(v)) {
             return;
@@ -327,7 +350,7 @@ size_t Crowtree::evict_clean_leaves_locked(size_t max_resident_leaves)
         if (base->type == page_type::kLeafBase) {
             // Clean (durable bytes match) and no deltas above (v == base) ⇒ evictable.
             if (v == base && v->durable_addr != kNoAddr) {
-                evictable.push_back(page_id);
+                evictable_ranked.emplace_back(page_id, v->last_touch_tick.load(std::memory_order_relaxed));
             }
             return;
         }
@@ -340,12 +363,16 @@ size_t Crowtree::evict_clean_leaves_locked(size_t max_resident_leaves)
     };
     dfs(root_page_id_.load());
 
-    if (evictable.size() <= max_resident_leaves) {
+    if (evictable_ranked.size() <= max_resident_leaves) {
         return 0;
     }
-    size_t to_evict = evictable.size() - max_resident_leaves;
+    // Oldest-touched first: evict genuinely cold pages ahead of recently
+    // accessed ones, rather than whichever DFS happened to visit first.
+    std::sort(evictable_ranked.begin(), evictable_ranked.end(),
+              [](const auto &a, const auto &b) { return a.second < b.second; });
+    size_t to_evict = evictable_ranked.size() - max_resident_leaves;
     size_t evicted  = 0;
-    for (uint64_t page_id : evictable) {
+    for (const auto &[page_id, tick] : evictable_ranked) {
         if (evicted >= to_evict) {
             break;
         }
@@ -765,6 +792,14 @@ Status Crowtree::flush()
     return Status::Ok();
 }
 
+void Crowtree::flush_async(std::function<void(Status)> on_done)
+{
+    // flush() never touches Options::page_store (only snapshot() writes
+    // durable bytes -- see this method's doc comment on crowtree.h), so
+    // there is no I/O to submit here; always synchronous.
+    on_done(flush());
+}
+
 void Crowtree::consolidate_locked(uint64_t page_id)
 {
     PageBase *head = resident(page_id);
@@ -1103,9 +1138,10 @@ void Crowtree::try_merge_inner_locked(uint64_t inner_page_id, std::vector<uint64
     }
 }
 
-bool Crowtree::get(Slice key, uint64_t *out_slot, std::string *out_value) const
+GetView Crowtree::get_view(Slice key) const
 {
-    EpochManager::Guard guard = epoch_.enter();
+    GetView result;
+    result.guard_ = epoch_.enter();
 
     // L0: check every live MemTable (active_ + any not-yet-drained frozen_
     // buffers) and keep the highest-slot hit. Unlike the single-buffer
@@ -1115,6 +1151,10 @@ bool Crowtree::get(Slice key, uint64_t *out_slot, std::string *out_value) const
     // comment (plan-tree #3) for the full argument. Any key present in ANY
     // live MemTable is still guaranteed strictly newer than L1, so a hit
     // here never needs to fall through to L1.
+    //
+    // An L0 hit is always materialized into result.owned_ (never borrowed):
+    // a MemTable's backing storage isn't kept alive by the epoch guard the
+    // way a resident L1 frame is -- see the active_/frozen_ member comment.
     std::vector<std::shared_ptr<MemTable>> tables = all_memtables();
     bool                                   found  = false;
     std::string                            best_cell;
@@ -1131,36 +1171,259 @@ bool Crowtree::get(Slice key, uint64_t *out_slot, std::string *out_value) const
     if (found) {
         CellView v{Slice(best_cell)};
         if (v.is_tombstone()) {
-            return false;
+            return result; // not found
         }
-        if (out_slot != nullptr) {
-            *out_slot = v.slot();
-        }
-        if (out_value != nullptr) {
-            *out_value = v.value().to_string();
-        }
-        return true;
+        result.found_ = true;
+        result.slot_  = v.slot();
+        result.owned_ = buffer::copy_of(v.value());
+        result.value_ = result.owned_.slice();
+        return result;
     }
 
-    // L1: descend to the leaf and resolve its chain.
+    // L1: descend to the leaf and resolve its chain. A non-overflow cell's
+    // value lives directly in head's frame, which result.guard_ keeps
+    // resident for result's lifetime -- borrow it, no copy.
     uint64_t page_id = find_leaf_page_id([this](uint64_t p) { return resident(p); }, root_page_id_.load(), key);
     if (page_id == kInvalidPageId) {
-        return false;
+        return result;
     }
     PageBase *head = resident(page_id);
     CellView  v;
     if (!resolve_chain(head, key, &v)) {
-        return false;
+        return result;
     }
     if (v.is_tombstone()) {
+        return result;
+    }
+    result.found_ = true;
+    result.slot_  = v.slot();
+    if (v.is_overflow()) {
+        // Assembled from multiple overflow pages -- no single frame to
+        // borrow from, so materialize it like an L0 hit.
+        result.owned_ = buffer::copy_of(assemble_overflow_value(v.overflow_head(), v.overflow_len()));
+        result.value_ = result.owned_.slice();
+    }
+    else {
+        result.value_ = v.value(); // borrowed: lives in head's frame
+    }
+    return result;
+}
+
+bool Crowtree::try_get_view_no_load(Slice key, GetView *result, uint64_t *out_pending_page_id) const
+{
+    result->guard_ = epoch_.enter();
+
+    // L0: identical to get_view() -- never touches the page store, so there
+    // is no I/O to avoid here.
+    std::vector<std::shared_ptr<MemTable>> tables = all_memtables();
+    bool                                   found  = false;
+    std::string                            best_cell;
+    for (auto &mt : tables) {
+        std::string cell;
+        if (!mt->get(key, &cell)) {
+            continue;
+        }
+        if (!found || cell_wins(CellView{Slice(cell)}, CellView{Slice(best_cell)})) {
+            best_cell = std::move(cell);
+            found     = true;
+        }
+    }
+    if (found) {
+        CellView v{Slice(best_cell)};
+        if (v.is_tombstone()) {
+            return true; // resolved: not found
+        }
+        result->found_ = true;
+        result->slot_  = v.slot();
+        result->owned_ = buffer::copy_of(v.value());
+        result->value_ = result->owned_.slice();
+        return true;
+    }
+
+    // L1: same descent as get_view(), but `probe` bails out (returning
+    // nullptr, as if the slot were unset) the moment it sees an unloaded
+    // slot, instead of demand-loading it -- recording *which* page_id via
+    // `blocked_page_id`. Never dereferences the unloaded_page* itself (see
+    // this method's doc comment on crowtree.h): only is_unloaded(), a plain
+    // tag-bit check on the pointer value, which needs no lock.
+    uint64_t blocked_page_id = kInvalidPageId;
+    auto     probe           = [this, &blocked_page_id](uint64_t p) -> PageBase               *{
+        PageBase *v = mapping_.get(p);
+        if (v == nullptr) {
+            return nullptr;
+        }
+        if (MappingTable::is_unloaded(v)) {
+            blocked_page_id = p;
+            return nullptr;
+        }
+        v->last_touch_tick.store(touch_tick_.fetch_add(1, std::memory_order_relaxed), std::memory_order_relaxed);
+        return v;
+    };
+
+    uint64_t page_id = find_leaf_page_id(probe, root_page_id_.load(), key);
+    if (blocked_page_id != kInvalidPageId) {
+        *out_pending_page_id = blocked_page_id;
+        return false; // genuine miss
+    }
+    if (page_id == kInvalidPageId) {
+        return true; // resolved: not found (empty/malformed tree)
+    }
+    // Re-probe the leaf head, mirroring get_view()'s separate resident()
+    // call after find_leaf_page_id -- find_leaf_page_id doesn't return the
+    // resolved pointer, only the page_id, and a fresh probe is cheap
+    // (lock-free) and tolerates a concurrent mutation the same way
+    // get_view() already does.
+    PageBase *head = probe(page_id);
+    if (blocked_page_id != kInvalidPageId) {
+        *out_pending_page_id = blocked_page_id;
+        return false; // genuine miss (raced with a concurrent eviction)
+    }
+    if (head == nullptr) {
+        return true; // resolved: not found
+    }
+    CellView v;
+    if (!resolve_chain(head, key, &v)) {
+        return true; // resolved: not found
+    }
+    if (v.is_tombstone()) {
+        return true; // resolved: not found
+    }
+    result->found_ = true;
+    result->slot_  = v.slot();
+    if (v.is_overflow()) {
+        // Scope boundary (see get_async's doc comment on crowtree.h):
+        // overflow-chain misses stay synchronous.
+        result->owned_ = buffer::copy_of(assemble_overflow_value(v.overflow_head(), v.overflow_len()));
+        result->value_ = result->owned_.slice();
+    }
+    else {
+        result->value_ = v.value(); // borrowed: lives in head's frame
+    }
+    return true; // resolved: found
+}
+
+GetView Crowtree::materialize_owned(GetView &&v)
+{
+    if (v.found_ && v.owned_.empty()) {
+        v.owned_ = buffer::copy_of(v.value_);
+        v.value_ = v.owned_.slice();
+    }
+    // Release on this (the entering) thread before on_done can hand this
+    // GetView off across the FFI boundary to a ct_future_free that might
+    // run on a different one -- see EpochManager::Guard's "do not move
+    // across threads" contract.
+    v.guard_ = EpochManager::Guard();
+    return std::move(v);
+}
+
+void Crowtree::get_async(Slice key, std::function<void(GetView)> on_done) const
+{
+    // Copy the key upfront: unlike get_view()'s Slice (borrowed, valid only
+    // for this one synchronous call), get_async's key must survive across
+    // an arbitrary number of async round trips, each on a different call
+    // stack than this one.
+    get_async_attempt(std::make_shared<std::string>(key.to_string()), std::move(on_done), /*same_thread=*/true);
+}
+
+void Crowtree::get_async_attempt(std::shared_ptr<std::string> key_owned, std::function<void(GetView)> on_done,
+                                 bool same_thread) const
+{
+    GetView  result;
+    uint64_t pending_page_id = kInvalidPageId;
+    if (try_get_view_no_load(Slice(*key_owned), &result, &pending_page_id)) {
+        // same_thread: zero-copy fast path (design §5, plan-tree.md #11
+        // Phase 4) -- hand the GetView straight through, guard and all.
+        // Otherwise this resolved on (or after being handed off from) the
+        // Reactor thread, so materialize_owned() releases the guard here,
+        // on the thread that entered it, before on_done can cross back out.
+        on_done(same_thread ? std::move(result) : materialize_owned(std::move(result)));
+        return;
+    }
+
+#ifdef CROWTREE_HAVE_LIBURING
+    if (opt_.async_reactor != nullptr && opt_.async_page_store != nullptr) {
+        // Re-verify under load_mutex_ before touching the unloaded_page
+        // descriptor's fields (see try_get_view_no_load's doc comment on
+        // crowtree.h): it is freed by a plain `delete` the moment a
+        // concurrent loader installs the resident replacement, not by
+        // epoch-deferred reclamation, so it is unsafe to dereference
+        // without this lock -- mirrors resident()'s own double-checked
+        // locking exactly, just split across the async submission below.
+        uint64_t addr           = 0;
+        uint32_t plen           = 0;
+        bool     still_unloaded = false;
+        {
+            std::lock_guard<std::mutex> lk(load_mutex_);
+            PageBase                   *v = mapping_.get(pending_page_id);
+            if (v != nullptr && MappingTable::is_unloaded(v)) {
+                unloaded_page *u = MappingTable::as_unloaded(v);
+                addr             = u->addr;
+                plen             = u->plen;
+                still_unloaded   = true;
+            }
+        }
+        if (!still_unloaded) {
+            // Another loader (sync resident() or a concurrent get_async)
+            // already resolved this page_id between the lock-free probe
+            // above and this re-check -- just retry, still on this thread.
+            get_async_attempt(std::move(key_owned), std::move(on_done), same_thread);
+            return;
+        }
+        uint32_t iu   = opt_.page_store->iu_size();
+        auto     blob = std::make_shared<std::vector<uint8_t>>(round_up_to_iu(plen, iu));
+        opt_.async_page_store->submit_read(
+            addr, blob->data(), blob->size(),
+            [this, page_id = pending_page_id, addr, plen, blob, key_owned, on_done](Status st) mutable {
+                if (!st.ok()) {
+                    CT_LOG_ERROR("get_async: demand-load I/O fault: pid={} addr={} len={} status={}", page_id, addr,
+                                 plen, st.to_string());
+                    io_failed_.store(true);
+                    on_done(GetView()); // not found; no guard was ever entered
+                    return;
+                }
+                bool installed_ok = true;
+                {
+                    std::lock_guard<std::mutex> lk(load_mutex_);
+                    PageBase                   *v = mapping_.get(page_id);
+                    if (v != nullptr && MappingTable::is_unloaded(v)) {
+                        installed_ok = install_loaded_page(page_id, addr, plen, *blob) != nullptr;
+                    }
+                    // else: another loader already installed it -- retry below.
+                }
+                if (!installed_ok) {
+                    // Decode/CRC/validation failure -- io_failed_ already
+                    // latched by install_loaded_page; matches resident()'s
+                    // own "degrades to a miss" contract.
+                    on_done(GetView()); // not found; no guard was ever entered
+                    return;
+                }
+                // This callback runs on the Reactor's own thread (design's
+                // thread model table) -- everything from here on is *not*
+                // same_thread relative to the original caller.
+                get_async_attempt(std::move(key_owned), std::move(on_done), /*same_thread=*/false);
+            });
+        return;
+    }
+#endif
+    // No async backend wired (e.g. a MemPageStore-backed tree -- design
+    // §6.3: no MemAsyncPageStore, nothing is genuinely pending there) --
+    // fall back to the existing synchronous demand-load and retry, still
+    // on this same thread.
+    (void)resident(pending_page_id);
+    get_async_attempt(std::move(key_owned), std::move(on_done), same_thread);
+}
+
+bool Crowtree::get(Slice key, uint64_t *out_slot, std::string *out_value) const
+{
+    GetView v = get_view(key);
+    if (!v.found()) {
         return false;
     }
     if (out_slot != nullptr) {
         *out_slot = v.slot();
     }
     if (out_value != nullptr) {
-        *out_value =
-            v.is_overflow() ? assemble_overflow_value(v.overflow_head(), v.overflow_len()) : v.value().to_string();
+        *out_value = v.value().to_string(); // clone; v.guard_ releases at end of this function
     }
     return true;
 }

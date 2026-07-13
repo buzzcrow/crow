@@ -16,6 +16,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -26,6 +27,11 @@
 
 namespace crowtree
 {
+
+#ifdef CROWTREE_HAVE_LIBURING
+class Reactor;
+class AsyncPageStore;
+#endif
 
 // One mutation in a batch. All ops in a batch share the batch's slot.
 struct batch_op
@@ -54,12 +60,153 @@ struct get_result
     std::string value;
 };
 
+// Zero-copy point-read result (plan-tree #5 B3 remaining). `value()` is a
+// borrowed `Slice` for an L1 hit resolved to a non-overflow cell -- it
+// points directly into the resident leaf's frame, kept alive for this
+// object's lifetime by the epoch guard it owns (no copy). An L0 hit (the
+// MemTable cell isn't epoch-protected the same way -- see the active_/
+// frozen_ member comment) or an overflow value (assembled from multiple
+// pages, no single frame to borrow) is materialized into an owned `buffer`
+// instead; `value()` is transparent to the caller either way.
+//
+// Move-only (like `EpochManager::Guard`): copying would either double-free
+// the guard or silently let a caller outlive it. `get()`/`multi_get()` are
+// thin wrappers over `get_view()` that clone `value()` into a `std::string`
+// and let the guard drop before returning, preserving their existing owned-
+// copy contract for every other caller.
+class GetView
+{
+  public:
+    GetView() = default;
+
+    // Not defaulted (plan-tree.md #11 Phase 4 found this the hard way, via
+    // ASan): `owned_` (a `buffer`) relocates its bytes on move when small
+    // enough to be inline (SBO, buffer::kInlineCap) -- but `value_` is a
+    // *separate* field, a plain Slice pointer+len that a defaulted move
+    // would blindly copy byte-for-byte, still aliasing the just-moved-from
+    // `owned_`'s old (now-stale, for an inline buffer) storage. Any
+    // resolved GetView whose value is owned (owned_ non-empty) must have
+    // `value_` re-derived from *this* object's own (possibly relocated)
+    // `owned_` after the move -- a borrowed (frame-pointing) value_ is
+    // untouched either way, since it aliases external storage the move
+    // never touches.
+    GetView(GetView &&o) noexcept
+        : guard_(std::move(o.guard_)),
+          found_(o.found_),
+          slot_(o.slot_),
+          value_(o.value_),
+          owned_(std::move(o.owned_))
+    {
+        if (!owned_.empty()) {
+            value_ = owned_.slice();
+        }
+    }
+
+    GetView &operator=(GetView &&o) noexcept
+    {
+        if (this != &o) {
+            guard_ = std::move(o.guard_);
+            found_ = o.found_;
+            slot_  = o.slot_;
+            value_ = o.value_;
+            owned_ = std::move(o.owned_);
+            if (!owned_.empty()) {
+                value_ = owned_.slice();
+            }
+        }
+        return *this;
+    }
+
+    GetView(const GetView &)            = delete;
+    GetView &operator=(const GetView &) = delete;
+
+    [[nodiscard]] bool found() const
+    {
+        return found_;
+    }
+
+    [[nodiscard]] uint64_t slot() const
+    {
+        return slot_;
+    }
+
+    // Valid only while this GetView is alive.
+    [[nodiscard]] Slice value() const
+    {
+        return value_;
+    }
+
+  private:
+    friend class Crowtree;
+    EpochManager::Guard guard_; // keeps an L1 hit's frame resident
+    bool                found_ = false;
+    uint64_t            slot_  = 0;
+    Slice               value_; // borrowed (L1) or owned_.slice() (L0 / overflow)
+    buffer              owned_; // backing storage when the value can't be borrowed
+};
+
 // Result of an explicit collect_garbage() sweep (plan-tree #21).
 struct GcStats
 {
     uint64_t tombstones_dropped = 0; // tombstone cells physically dropped
     uint64_t pages_freed        = 0; // resident pages (deltas + old leaf bases) retired
     uint64_t bytes_freed        = 0; // logical key+cell bytes of the dropped tombstones
+};
+
+// One durable blob to write at a fixed offset, computed ahead of time by
+// prepare_snapshot_locked() (persist.cpp) so the actual store->write_at()/
+// submit_write() call is a pure I/O op with no further encoding logic --
+// shared by snapshot()'s synchronous writes and snapshot_async()'s async
+// ones (plan-tree.md #11 Phase 2).
+struct PreparedSnapshotWrite
+{
+    uint64_t             addr = 0;
+    std::vector<uint8_t> blob; // already IU-padded
+};
+
+// A page write plus enough identity to safely mark the *live* page durable
+// once the write actually lands (see prepare_snapshot_locked's doc comment
+// on why this can't happen eagerly at prepare time for the async path).
+// `page` is never dereferenced except as an opaque identity check under
+// write_mutex_ (mapping_.get(page_id) == page) -- it may have been retired
+// and its frame reused by the time the write completes (a concurrent
+// consolidate/flush/split replaced this page_id's mapping entry with a
+// fresh COW page in the meantime), in which case the identity check simply
+// fails and this write's durable-bookkeeping is skipped (harmless: the old
+// blob is still correctly on disk and referenced by *this* generation's
+// manifest; the fresh page is independently dirty and picked up by the
+// next snapshot).
+struct PreparedPageWrite
+{
+    uint64_t             page_id     = 0;
+    PageBase            *page        = nullptr; // opaque identity only
+    uint64_t             addr        = 0;
+    uint32_t             logical_len = 0; // unpadded; mirrors PageBase::durable_plen
+    std::vector<uint8_t> blob;            // already IU-padded
+};
+
+// Output of prepare_snapshot_locked(): every byte this snapshot generation
+// needs written, computed synchronously under write_mutex_ (the DFS walk +
+// delta-fold + page/manifest encode is CPU/memory-only -- see the "Lock
+// scope" note on plan-tree.md #11). The caller writes `page_writes` (any
+// order/concurrency) then `manifest_write`, then a durability barrier, then
+// `superblock_write` -- writing the superblock before that barrier would
+// violate the crash-safety invariant persist.cpp's header comment documents
+// (a crash mid-snapshot must fall back intact to the last *committed*
+// superblock) -- then commit_prepared_snapshot() to mark each page durable
+// and publish the new version.
+struct PreparedSnapshot
+{
+    std::vector<PreparedPageWrite> page_writes;
+    PreparedSnapshotWrite          manifest_write;
+    PreparedSnapshotWrite          superblock_write;
+    uint64_t                       last_applied_slot = 0;
+    // Diagnostics for the "snapshot committed" log line (matches the
+    // pre-refactor synchronous snapshot()'s log fields exactly).
+    uint64_t seq           = 0;
+    uint64_t page_count    = 0;
+    uint64_t pages_written = 0;
+    uint64_t manifest_len  = 0;
 };
 
 class Crowtree
@@ -80,6 +227,43 @@ class Crowtree
     // then commits the inactive A/B superblock slot. Returns the durable
     // last_applied_slot via out (if non-null). Requires opt.page_store != null.
     Status snapshot(uint64_t *out_last_applied = nullptr);
+
+    // Async twin of snapshot() (plan-tree.md #11 Phase 2). Always genuinely
+    // async from *this* caller's perspective when Options::async_reactor/
+    // async_page_store are wired (design §4's table: flush/snapshot are
+    // *always* slow-path, unlike get/scan): snapshot_async() returns
+    // immediately after kicking off the walk + first I/O submission, and
+    // on_done fires later from the Reactor thread with the same result
+    // snapshot() would have returned.
+    //
+    // Lock discipline (this is the one place in the engine where a
+    // completion legitimately runs on a *different* thread than the one
+    // that started the operation, so it gets its own note): write_mutex_
+    // itself is only ever locked and unlocked on the *same* thread, for the
+    // brief synchronous prepare_snapshot_locked() walk, exactly like every
+    // other writer entry point -- std::mutex has no defined behavior for a
+    // cross-thread unlock, so it is never held across the async write
+    // phase. What *does* span the whole prepare-through-commit sequence is
+    // snapshot_inflight_, a plain std::atomic<bool> spin-gate (a mutex's
+    // "same thread unlocks it" restriction is a pthread_mutex_t property,
+    // not a general lock property -- an atomic has no such restriction):
+    // it serializes this generation's SpaceAllocator against a *second*
+    // overlapping snapshot(_async) call (which would otherwise rebuild an
+    // allocator from the same last-*committed* superblock and could hand
+    // out the same "free" byte range to two different pages -- silent
+    // corruption), without blocking apply()/flush()/evict_clean_leaves(),
+    // which remain free to run concurrently against write_mutex_ as usual.
+    // That safety hinges on prepare_snapshot_locked() never eagerly setting
+    // a dirty page's PageBase::durable_addr -- see its doc comment --
+    // because evict_clean_leaves_locked() treats durable_addr != kNoAddr as
+    // "safe to evict, a durable copy already exists"; commit_prepared_snapshot()
+    // is what actually sets it, one write_mutex_ critical section per page,
+    // only once that page's specific byte write has landed.
+    //
+    // Falls back to running the existing synchronous snapshot() in the
+    // caller's stack frame (still correct, just not async) when no async
+    // backend is wired -- e.g. a MemPageStore-backed tree; design §6.3.
+    void snapshot_async(std::function<void(Status, uint64_t last_applied)> on_done);
 
     // Ingest a batch at `slot`. The tree internally tracks received slots and
     // computes the contiguous prefix (how far the flusher may flush) itself, so
@@ -139,9 +323,56 @@ class Crowtree
     // lost -- see the active_/frozen_ member comment for the full design.
     Status flush();
 
+    // Async twin of flush() (plan-tree.md #11 Phase 2). flush() only drains
+    // L0 (MemTable) into L1 (in-memory B+tree) -- it never touches
+    // Options::page_store (only snapshot() writes durable bytes), so unlike
+    // snapshot_async() there is no genuine I/O to submit to the reactor
+    // here: this always invokes on_done synchronously with flush()'s result
+    // before returning. Exists so C API callers have a uniform
+    // ct_flush_async/ct_snapshot_async shape (design §3.3) even though
+    // flush's own fast-path-vs-slow-path split is trivial today.
+    void flush_async(std::function<void(Status)> on_done);
+
     // Point read (L0 overlay then L1). Returns true if a live value is found;
     // tombstones return false.
     [[nodiscard]] bool get(Slice key, uint64_t *out_slot, std::string *out_value) const;
+
+    // Zero-copy point read (plan-tree #5 B3 remaining): same lookup as
+    // get(), but the returned GetView borrows an L1 hit's value directly
+    // from its resident frame instead of copying it out. See GetView's doc.
+    [[nodiscard]] GetView get_view(Slice key) const;
+
+    // Async twin of get() (plan-tree.md #11 Phase 2, design-crowtree-async.md
+    // §3/§4/§6.1). Fast path (every page needed to resolve `key` is already
+    // resident, or no async backend is wired -- see Options::async_reactor/
+    // async_page_store) invokes on_done synchronously, before this call
+    // returns, exactly like get(). A genuine miss on the L1 descent (some
+    // base page along the root->leaf path is tagged unloaded) submits
+    // exactly one page load via the reactor and resumes automatically; on
+    // completion it either resolves (calls on_done) or, if that page was
+    // itself only a step deeper into the tree, hits another miss and
+    // repeats -- on_done fires exactly once regardless, but for a miss it
+    // runs on the Reactor thread, not the caller's.
+    //
+    // Scope boundary (deliberate, matches design's own miss scenario): only
+    // the L1 base-page descent is async. A value spilled into an overflow
+    // chain (large values, PT11) still resolves its chain synchronously via
+    // the existing assemble_overflow_value()/resident() path -- overflow
+    // chains are the less common case and the design doc's own §6.1 miss
+    // walkthrough only describes "the leaf page is unloaded", not an
+    // overflow page.
+    //
+    // Zero-copy fast path (plan-tree.md #11 Phase 4, design §5): `on_done`
+    // receives the resolved `GetView` itself, not a copied-out std::string.
+    // For the *first* attempt's synchronous resolution (this call's own
+    // thread, no I/O), the GetView's epoch guard is still live -- it's safe
+    // to keep borrowing an L1 hit's frame bytes all the way out to the C
+    // ABI, since ct_future_free (which finally drops the guard) is
+    // guaranteed to run on this same thread too. Any resolution that
+    // crosses to the Reactor thread instead (a genuine miss) materializes
+    // an owned copy and releases its guard before calling on_done -- see
+    // get_async_attempt's `same_thread` parameter and `materialize_owned`.
+    void get_async(Slice key, std::function<void(GetView)> on_done) const;
 
     // Batched point read.
     [[nodiscard]] std::vector<get_result> multi_get(const std::vector<Slice> &keys) const;
@@ -376,6 +607,112 @@ class Crowtree
     // load_mutex_ and double-checks. Returns nullptr if the slot is unset.
     [[nodiscard]] PageBase *resident(uint64_t page_id) const;
 
+    // Shared by resident()'s synchronous cold path and get_async's async
+    // completion handler (plan-tree.md #11 Phase 2): decodes+validates a
+    // just-read durable blob and installs it as the resident page for
+    // `page_id`, exactly like resident()'s cold path did inline before this
+    // was factored out. Returns the installed page, or nullptr on a
+    // decode/CRC/validation failure (io_failed_ is latched first, matching
+    // resident()). Caller holds load_mutex_ and has already re-verified the
+    // slot is still tagged unloaded (double-checked locking, same
+    // requirement resident()'s cold path has).
+    [[nodiscard]] PageBase *install_loaded_page(uint64_t page_id, uint64_t addr, uint32_t plen,
+                                                const std::vector<uint8_t> &blob) const;
+
+    // One attempt at get_view()'s L0-then-L1 resolution, but NEVER performs
+    // I/O: a mapping slot tagged unloaded aborts the attempt immediately
+    // (releasing the epoch guard first, since a genuine miss is about to
+    // hand off to the reactor or fall back to a blocking load -- either way
+    // this attempt is over) instead of demand-loading it, and reports which
+    // page_id blocked via *out_pending_page_id. get_async's orchestration
+    // (get_async_attempt) re-verifies that page_id under load_mutex_ before
+    // touching its unloaded_page descriptor -- see the safety note on
+    // get_async_attempt's definition (mirrors resident()'s double-checked
+    // lock; the descriptor is not epoch-protected, so it is never safe to
+    // dereference outside load_mutex_).
+    //
+    // Returns true if the attempt fully resolved (found or definitively not
+    // found) -- `*result` is populated exactly like get_view() would.
+    // Returns false on a genuine miss -- `*result` must be ignored.
+    [[nodiscard]] bool try_get_view_no_load(Slice key, GetView *result, uint64_t *out_pending_page_id) const;
+
+    // get_async's retry loop: one try_get_view_no_load() attempt, then
+    // either calls on_done (resolved) or resolves the blocked page_id (via
+    // the reactor, or synchronously if no async backend is wired) and
+    // recurses. `key_owned` is a heap copy of the lookup key -- unlike
+    // get_view()'s Slice (borrowed, valid only for one synchronous call),
+    // get_async's key must survive across an arbitrary number of async
+    // round trips, each on a different call stack.
+    //
+    // `same_thread` (plan-tree.md #11 Phase 4): true iff this specific
+    // attempt is guaranteed to resolve (if it resolves at all) on the same
+    // thread that will eventually call ct_future_free -- i.e. every call
+    // except the one made from inside the io_uring completion callback
+    // below, which runs on the Reactor's own thread. Threaded through every
+    // recursive call so it stays correct across an arbitrary number of
+    // hops. Guards whether a resolved GetView's epoch guard may be
+    // deferred (zero-copy) or must be released immediately via
+    // materialize_owned() -- see EpochManager::Guard's "do not move across
+    // threads" contract.
+    void get_async_attempt(std::shared_ptr<std::string> key_owned, std::function<void(GetView)> on_done,
+                           bool same_thread) const;
+
+    // Converts a resolved GetView into a fully-owned copy with its epoch
+    // guard already released on the calling thread -- safe to hand off to
+    // a different thread afterward (get_async_attempt's io_uring
+    // completion path). A borrowed L1 hit is materialized via a fresh
+    // buffer::copy_of(); an already-owned (L0/overflow) or not-found
+    // GetView is untouched except for releasing the guard.
+    static GetView materialize_owned(GetView &&v);
+
+    // Shared by snapshot() and snapshot_async() (persist.cpp, plan-tree.md
+    // #11 Phase 2): runs the exact DFS walk / delta-fold / page+manifest+
+    // superblock encode that snapshot() used to do inline, but defers every
+    // actual write into the returned *out instead of calling
+    // opt_.page_store->write_at() itself -- caller holds write_mutex_ for
+    // just this call, exactly like every other writer entry point (see
+    // snapshot_async's doc comment for the full lock-discipline rationale).
+    // Deliberately does *not* set PageBase::durable_addr for a dirty page
+    // it persists (unlike the pre-refactor inline version): that would let
+    // evict_clean_leaves_locked() -- which only takes write_mutex_, not
+    // snapshot_inflight_ -- evict a page whose bytes aren't durable yet on
+    // the async path, and a subsequent demand-load would then read
+    // whatever garbage/stale content actually occupies that address today.
+    // commit_prepared_snapshot() sets it instead, only once each page's
+    // specific write has actually landed.
+    Status prepare_snapshot_locked(PreparedSnapshot *out);
+
+    // Marks every PreparedSnapshot::page_writes entry durable (see
+    // prepare_snapshot_locked's doc comment) and publishes the new version,
+    // once every byte of this generation is confirmed on disk (both
+    // snapshot() and snapshot_write_next_async() call this at that point,
+    // and only then). Re-resolves each page_id fresh under write_mutex_ and
+    // checks identity (mapping_.get(page_id) == PreparedPageWrite::page)
+    // before touching it -- see PreparedPageWrite's doc comment for why a
+    // mismatch (skip, not an error) is possible and safe.
+    void commit_prepared_snapshot(const PreparedSnapshot &prepared);
+
+    // Cross-thread-safe (unlike write_mutex_) spin-gate serializing this
+    // snapshot generation's prepare-through-commit sequence against a
+    // second overlapping snapshot(_async) call; see snapshot_async's doc
+    // comment. Acquired by snapshot()/snapshot_async() before
+    // prepare_snapshot_locked(), released after commit_prepared_snapshot()
+    // (success) or the first failing step (error) -- from whichever thread
+    // that happens to be, which is exactly why this is an atomic spin-gate
+    // and not a std::mutex.
+    void acquire_snapshot_slot();
+    void release_snapshot_slot();
+
+    // snapshot_async's write-and-commit chain: writes
+    // prepared->page_writes[idx..] one at a time (recursing on each
+    // completion), then the manifest, then a durability barrier, then the
+    // superblock, then a second barrier, then commit_prepared_snapshot() +
+    // release_snapshot_slot(), then fires on_done -- the exact sequence
+    // snapshot() runs inline, just each I/O step dispatched through
+    // opt_.async_page_store instead of blocking.
+    void snapshot_write_next_async(std::shared_ptr<PreparedSnapshot> prepared, size_t idx,
+                                   std::function<void(Status, uint64_t last_applied)> on_done);
+
     Options opt_;
     // Base-page frame arena (design §4). shared_ptr because epoch-retired pages
     // co-own it; the tree-owned EpochManager (epoch_, declared last so it is
@@ -469,8 +806,27 @@ class Crowtree
     std::atomic<uint64_t>     snapshot_pages_written_{0}; // pages written by last snapshot
     mutable std::atomic<bool> io_failed_{false};          // latched demand-load media fault
 
+    // Logical clock for CLOCK-informed eviction ranking (plan-tree #17).
+    // `resident()`'s hot path bumps this and stamps the touched page's own
+    // `PageBase::last_touch_tick` on every access (a single relaxed atomic
+    // fetch_add + store -- no lock, so the existing lock-free read path
+    // stays lock-free). `evict_clean_leaves_locked` then ranks its
+    // DFS-gathered evictable set by that stamp (oldest first) instead of
+    // arbitrary DFS order. This is deliberately *not* `BufferPool::pin`'s
+    // own mutex-guarded page_id/CLOCK tracking: wiring every `resident()`
+    // hit through that would mean taking a global pool mutex on every page
+    // access, regressing the lock-free read path #5 B3/#12/#13 built (see
+    // plan-tree.md #17 for the full reasoning) -- this achieves the same
+    // "residency/eviction driven by real access recency, not arbitrary
+    // order" goal without that cost.
+    mutable std::atomic<uint64_t> touch_tick_{0};
+
     mutable std::mutex write_mutex_; // serializes flush / consolidate / split-merge
     mutable std::mutex load_mutex_;  // serializes cold-path demand loads (design §4.5)
+    // Serializes snapshot(_async) generations against each other across
+    // snapshot_async's async write phase, where write_mutex_ itself can't be
+    // held (see acquire_snapshot_slot's doc comment and snapshot_async's).
+    std::atomic<bool> snapshot_inflight_{false};
 
     // Background flush thread (Options.background_flush / flush_interval_ms),
     // also driving the periodic collect_garbage() sweep (Options.gc_interval_ms,

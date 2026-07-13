@@ -85,7 +85,7 @@ async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
     assert_eq!(replica.accepted_at(2).await, Some(accepted_entry.clone()));
     assert_eq!(replica.promised_at(1).await, Some(PxBallot::new(2, replica_id)));
     assert_eq!(
-        replica.learner.engine_get(b"restore-key").map(|(_, v)| v),
+        replica.learner.engine_get(b"restore-key").await.map(|(_, v)| v),
         Some(b"restore-value".to_vec()),
         "WAL replay applies accepted slot 2 to the learner"
     );
@@ -163,6 +163,7 @@ async fn create_group_with_wal_crowtree_engine_persists_across_restart() {
             .local_replica()
             .learner
             .engine_get(b"ct-key")
+            .await
             .map(|(_, v)| v),
         Some(b"ct-value".to_vec())
     );
@@ -192,6 +193,7 @@ async fn create_group_with_wal_crowtree_engine_persists_across_restart() {
             .local_replica()
             .learner
             .engine_get(b"ct-key")
+            .await
             .map(|(_, v)| v),
         Some(b"ct-value".to_vec()),
         "crowtree-backed KV state must survive a simulated restart"

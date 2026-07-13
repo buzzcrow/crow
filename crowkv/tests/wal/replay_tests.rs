@@ -195,11 +195,11 @@ async fn restore_without_snapshot_does_not_apply_slots() {
 
     // WAL replay applies all accepted entries to the learner.
     assert_eq!(
-        restored.learner.engine_get(b"k1").map(|(_, v)| v),
+        restored.learner.engine_get(b"k1").await.map(|(_, v)| v),
         Some(b"v1".to_vec())
     );
     assert_eq!(
-        restored.learner.engine_get(b"k2").map(|(_, v)| v),
+        restored.learner.engine_get(b"k2").await.map(|(_, v)| v),
         Some(b"v2".to_vec())
     );
     assert_eq!(restored.contiguous_chosen(), 2);
@@ -244,7 +244,7 @@ async fn restore_from_replay_rebuilds_live_replica_state() {
     assert_eq!(restored.contiguous_chosen(), 0);
     assert_eq!(restored.last_chosen_slot(), 2);
     assert_eq!(
-        restored.learner.engine_get(b"restore-key").map(|(_, v)| v),
+        restored.learner.engine_get(b"restore-key").await.map(|(_, v)| v),
         Some(b"restore-value".to_vec())
     );
 }
@@ -289,11 +289,11 @@ async fn restore_from_replay_with_engine_uses_injected_engine() {
     .unwrap();
 
     assert_eq!(
-        restored.learner.engine_get(b"k1").map(|(_, v)| v),
+        restored.learner.engine_get(b"k1").await.map(|(_, v)| v),
         Some(b"v1".to_vec())
     );
     assert_eq!(
-        restored.learner.engine_get(b"k2").map(|(_, v)| v),
+        restored.learner.engine_get(b"k2").await.map(|(_, v)| v),
         Some(b"v2".to_vec())
     );
     assert_eq!(restored.contiguous_chosen(), 2);
@@ -334,7 +334,9 @@ async fn restore_from_replay_with_engine_resumes_from_last_applied_slot() {
     // Pre-apply + flush slot 1 directly, matching what a durably-recovered
     // CrowtreeEngine reports via `resume_from_slot()` on a real restart.
     let engine = CrowtreeEngine::open(&CrowtreeOptions::default()).expect("open crowtree engine");
-    engine.apply(1, &Batch::decode(&encode_put_payload(b"k1", b"v1")));
+    engine
+        .apply(1, &Batch::decode(&encode_put_payload(b"k1", b"v1")))
+        .into_ready();
     engine.handle().flush().expect("flush");
     assert_eq!(
         engine.handle().last_applied_slot(),
@@ -354,15 +356,15 @@ async fn restore_from_replay_with_engine_resumes_from_last_applied_slot() {
     // Full KV state is correct regardless of which path (pre-seeded vs.
     // replayed) applied each key.
     assert_eq!(
-        restored.learner.engine_get(b"k1").map(|(_, v)| v),
+        restored.learner.engine_get(b"k1").await.map(|(_, v)| v),
         Some(b"v1".to_vec())
     );
     assert_eq!(
-        restored.learner.engine_get(b"k2").map(|(_, v)| v),
+        restored.learner.engine_get(b"k2").await.map(|(_, v)| v),
         Some(b"v2".to_vec())
     );
     assert_eq!(
-        restored.learner.engine_get(b"k3").map(|(_, v)| v),
+        restored.learner.engine_get(b"k3").await.map(|(_, v)| v),
         Some(b"v3".to_vec())
     );
     // Frontier state matches what a full learn()-every-slot replay produces.
@@ -411,8 +413,12 @@ async fn restore_from_replay_with_engine_falls_back_when_resume_slot_has_no_acce
     // no independent WAL corroboration (e.g. a lost/truncated WAL record),
     // rather than an outright-impossible-via-the-API state.
     let engine = CrowtreeEngine::open(&CrowtreeOptions::default()).expect("open crowtree engine");
-    engine.apply(1, &Batch::decode(&encode_put_payload(b"phantom1", b"x")));
-    engine.apply(2, &Batch::decode(&encode_put_payload(b"phantom2", b"y")));
+    engine
+        .apply(1, &Batch::decode(&encode_put_payload(b"phantom1", b"x")))
+        .into_ready();
+    engine
+        .apply(2, &Batch::decode(&encode_put_payload(b"phantom2", b"y")))
+        .into_ready();
     engine.handle().flush().expect("flush");
     assert_eq!(
         engine.handle().last_applied_slot(),
@@ -435,9 +441,9 @@ async fn restore_from_replay_with_engine_falls_back_when_resume_slot_has_no_acce
     // silent correctness violation (nothing that was ever safely writable
     // is lost or corrupted). Slot 3, past the skipped prefix, replays
     // normally.
-    assert_eq!(restored.learner.engine_get(b"k1").map(|(_, v)| v), None);
+    assert_eq!(restored.learner.engine_get(b"k1").await.map(|(_, v)| v), None);
     assert_eq!(
-        restored.learner.engine_get(b"k3").map(|(_, v)| v),
+        restored.learner.engine_get(b"k3").await.map(|(_, v)| v),
         Some(b"v3".to_vec())
     );
     // No accepted entry at the resume floor (slot 2) to seed a term from, so

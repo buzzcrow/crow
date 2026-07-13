@@ -2,13 +2,21 @@
 //!
 //! Wraps the opaque `ct_*` handles in RAII types, translates owned `ct_buf`
 //! buffers into `Vec<u8>` (freeing them via `ct_free_buf`), maps `ct_status`
-//! into `Result`, and offers an async facade that bridges the still-synchronous
-//! engine onto Tokio via `spawn_blocking`.
+//! into `Result`, and offers an async facade (`AsyncCrowtree`). `get`/`flush`/
+//! `snapshot` drive the engine's io_uring reactor directly (no OS thread hop,
+//! plan-tree #11 Phase 3); the remaining methods (no async C API twin exists
+//! for them yet -- Phase 2 scoped only get/flush/snapshot) still bridge via
+//! `spawn_blocking`.
 
 use std::ffi::CString;
+use std::future::Future;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::raw::{c_char, c_int};
+use std::pin::Pin;
 use std::ptr::NonNull;
 use std::sync::Arc;
+
+use tokio::io::unix::AsyncFd;
 
 #[allow(non_camel_case_types)]
 mod sys {
@@ -32,6 +40,10 @@ mod sys {
     }
     #[repr(C)]
     pub struct ct_import {
+        _private: [u8; 0],
+    }
+    #[repr(C)]
+    pub struct ct_future {
         _private: [u8; 0],
     }
 
@@ -125,6 +137,21 @@ mod sys {
         pub fn ct_snapshot_import_feed(im: *mut ct_import, chunk: *const u8, len: usize) -> c_int;
         pub fn ct_snapshot_import_finish(im: *mut ct_import, out_at_slot: *mut u64) -> c_int;
         pub fn ct_snapshot_import_end(im: *mut ct_import);
+
+        // ── Async data path (plan-tree #11 Phase 2/3) ──
+        pub fn ct_evict_clean_leaves(t: *mut ct_tree, max_resident_leaves: u64) -> u64;
+        pub fn ct_get_async(t: *mut ct_tree, key: *const u8, klen: usize) -> *mut ct_future;
+        pub fn ct_flush_async(t: *mut ct_tree) -> *mut ct_future;
+        pub fn ct_snapshot_async(t: *mut ct_tree) -> *mut ct_future;
+        pub fn ct_future_poll(
+            f: *mut ct_future,
+            done: *mut c_int,
+            out_found: *mut c_int,
+            out_slot: *mut u64,
+            out_value: *mut ct_buf,
+        ) -> c_int;
+        pub fn ct_future_free(f: *mut ct_future);
+        pub fn ct_reactor_eventfd(t: *const ct_tree) -> i32;
     }
 }
 
@@ -169,6 +196,20 @@ fn take_buf(mut buf: sys::ct_buf) -> Vec<u8> {
     let v = unsafe { std::slice::from_raw_parts(buf.data, buf.len) }.to_vec();
     unsafe { sys::ct_free_buf(&mut buf) };
     v
+}
+
+/// Copies a `ct_buf`'s bytes into a `Vec<u8>` *without* freeing it -- unlike
+/// `take_buf`, used only for a `ct_get_async` completion's value, which may
+/// be a borrowed pointer into a still-live frame (design §5's zero-copy
+/// fast path, plan-tree.md #11 Phase 4) that must never be passed to
+/// `ct_free_buf`. The underlying `ct_future` (and, with it, any epoch guard
+/// backing that borrow) is released separately, immediately afterward, via
+/// `ct_future_free` -- see `try_poll_ct_future`.
+fn copy_buf(buf: sys::ct_buf) -> Vec<u8> {
+    if buf.data.is_null() || buf.len == 0 {
+        return Vec::new();
+    }
+    unsafe { std::slice::from_raw_parts(buf.data, buf.len) }.to_vec()
 }
 
 /// Compression selector.
@@ -243,6 +284,11 @@ pub struct ViewEntry {
 /// writes internally and keeps reads lock-free.
 pub struct Crowtree {
     ptr: NonNull<sys::ct_tree>,
+    // Lazily-spawned eventfd pump for this tree's Reactor eventfd
+    // (plan-tree #11 Phase 3), shared by every concurrently-pending
+    // drive_ct_future call. `None` once resolved means no Reactor is wired
+    // (or the pump failed to spawn); see `eventfd_notify`/`EventfdPump`.
+    eventfd_pump: std::sync::OnceLock<Option<EventfdPump>>,
 }
 
 unsafe impl Send for Crowtree {}
@@ -276,6 +322,7 @@ impl Crowtree {
         check(unsafe { sys::ct_open(&copt, &mut out) })?;
         Ok(Self {
             ptr: NonNull::new(out).ok_or(CtError::Internal)?,
+            eventfd_pump: std::sync::OnceLock::new(),
         })
     }
 
@@ -382,6 +429,56 @@ impl Crowtree {
 
     pub fn clear_io_error(&self) {
         unsafe { sys::ct_clear_io_error(self.as_ptr()) }
+    }
+
+    /// Evict clean, delta-free resident leaf bases down to at most
+    /// `max_resident_leaves` (design §4.6). Test/ops hook -- forces the
+    /// demand-load path a subsequent `get`/`AsyncCrowtree::get` will have to
+    /// take. Returns the number of leaves evicted.
+    pub fn evict_clean_leaves(&self, max_resident_leaves: u64) -> u64 {
+        unsafe { sys::ct_evict_clean_leaves(self.as_ptr(), max_resident_leaves) }
+    }
+
+    /// The tree's Reactor eventfd (design §7), or -1 if none is wired (an
+    /// in-memory tree, or a build without liburing). Reactor-owned -- see
+    /// `RawFdView`'s doc comment for why callers must never close it.
+    fn reactor_eventfd(&self) -> RawFd {
+        unsafe { sys::ct_reactor_eventfd(self.as_ptr()) }
+    }
+
+    /// Lazily spawns (once) and returns the `Notify` fanned out by this
+    /// tree's eventfd pump -- see the module-level fan-out note above
+    /// `RawFdView` for why a single pump task, not a per-future
+    /// registration, is required. `None` if there's no Reactor wired, or
+    /// the pump failed to spawn. Must be called from within a Tokio runtime
+    /// context; every call site is inside an async fn body driven by one,
+    /// so this always holds.
+    fn eventfd_notify(&self) -> Option<Arc<tokio::sync::Notify>> {
+        self.eventfd_pump
+            .get_or_init(|| {
+                let raw_fd = self.reactor_eventfd();
+                if raw_fd < 0 {
+                    return None;
+                }
+                let async_fd = AsyncFd::new(RawFdView(raw_fd)).ok()?;
+                let notify = Arc::new(tokio::sync::Notify::new());
+                let pump_notify = notify.clone();
+                let task = tokio::spawn(async move {
+                    loop {
+                        let mut guard = match async_fd.readable().await {
+                            Ok(g) => g,
+                            Err(_) => return, // I/O driver gone; stop pumping.
+                        };
+                        drain_eventfd(async_fd.as_raw_fd());
+                        guard.clear_ready();
+                        pump_notify.notify_waiters();
+                    }
+                })
+                .abort_handle();
+                Some(EventfdPump { notify, task })
+            })
+            .as_ref()
+            .map(|pump| pump.notify.clone())
     }
 
     /// Point read. Returns `None` for absent / tombstoned keys.
@@ -530,6 +627,13 @@ impl Crowtree {
 
 impl Drop for Crowtree {
     fn drop(&mut self) {
+        // Stop the eventfd pump (if any) before ct_close tears down the
+        // Reactor -- once that happens the eventfd is closed and the raw fd
+        // number may be reused elsewhere in the process, so the pump must
+        // not still be waiting on it.
+        if let Some(Some(pump)) = self.eventfd_pump.get() {
+            pump.task.abort();
+        }
         unsafe { sys::ct_close(self.ptr.as_ptr()) }
     }
 }
@@ -568,8 +672,205 @@ fn decode_scan(bytes: &[u8], count: usize) -> Result<Vec<ScanEntry>, CtError> {
     Ok(out)
 }
 
-/// Async facade: bridges the synchronous engine onto Tokio via `spawn_blocking`.
-/// Cheap to clone (shares one `Arc<Crowtree>`).
+// ── Reactor-driven async futures (plan-tree #11 Phase 3) ───────────
+//
+// AsyncCrowtree::get/flush/snapshot drive drive_ct_future below directly:
+// no spawn_blocking, no OS thread hop. A fast-path completion (get_view()'s
+// cached L0/L1 hit, or flush()'s always-in-memory work) resolves on the
+// *first* poll without ever touching the reactor; only a genuine
+// demand-load miss (design §6.3) waits on the tree's eventfd.
+//
+// Fan-out note: this deliberately does *not* have every pending future call
+// `AsyncFd::poll_read_ready` on a shared registration -- that method's
+// single reserved waker slot only keeps the *most recently polling* task's
+// waker (tokio's own doc comment on `poll_read_ready`), so N concurrently
+// pending gets would silently starve all but the last one to (re)poll,
+// hanging forever. Only one task -- a lazily-spawned pump owned by
+// `Crowtree` -- ever touches the eventfd's `AsyncFd`; every other future
+// waits on a `tokio::sync::Notify` the pump fans out to instead, which does
+// support any number of concurrent waiters.
+
+/// Non-owning view of a raw fd for `AsyncFd` registration. The engine's
+/// `Reactor` owns the eventfd `ct_reactor_eventfd` returns and closes it in
+/// its own destructor (~`Reactor`); per the OQ8 resolution in
+/// `doc/design/design-crowtree-async.md` §"Confirm and record", Rust must
+/// wrap it *without* taking closing ownership -- unlike
+/// `std::os::fd::OwnedFd`, this type's `Drop` is a no-op.
+struct RawFdView(RawFd);
+
+impl AsRawFd for RawFdView {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0
+    }
+}
+
+extern "C" {
+    // libc read(2) -- used only to drain the reactor's eventfd counter
+    // below, nothing to do with the ct_* C ABI.
+    fn read(fd: c_int, buf: *mut u8, count: usize) -> isize;
+}
+
+/// Best-effort drain of the eventfd's accumulated counter back to 0. The
+/// Reactor (`reactor.cpp`) never reads it -- draining is left entirely to
+/// this side, deliberately, so that a later write (a 0 -> nonzero
+/// transition) reliably produces a fresh edge for Tokio's I/O driver to
+/// wake on; without draining, a still-nonzero counter can leave a second
+/// completion's wakeup silently lost.
+fn drain_eventfd(fd: RawFd) {
+    let mut buf = [0u8; 8];
+    unsafe {
+        read(fd, buf.as_mut_ptr(), buf.len());
+    }
+}
+
+/// The tree's lazily-spawned eventfd pump (see the module-level fan-out
+/// note above): `notify` is fanned out to every waiting `drive_ct_future`
+/// call each time the pump observes the eventfd fire; `task` is aborted by
+/// `Crowtree`'s `Drop` before `ct_close` runs (the eventfd itself becomes
+/// invalid once the Reactor is torn down).
+struct EventfdPump {
+    notify: Arc<tokio::sync::Notify>,
+    task: tokio::task::AbortHandle,
+}
+
+/// Decoded (but not yet interpreted) result of one completed `ct_future`.
+struct RawOutcome {
+    found: bool,
+    slot: u64,
+    value: Vec<u8>,
+}
+
+/// Which `ct_*_async` call produced a `FutureGuard` -- `ct_future_poll`'s
+/// freeing contract differs for `Get` (plan-tree.md #11 Phase 4, design §5):
+/// a resolved kGet future is deliberately *not* freed by `ct_future_poll`
+/// itself (its `out_value` may still borrow from a resident frame, kept
+/// alive by the future's own epoch guard), so the caller must free it
+/// explicitly once done reading -- unlike Flush/Snapshot, which
+/// `ct_future_poll` already frees on completion, same as before Phase 4.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FutureKind {
+    Get,
+    Flush,
+    Snapshot,
+}
+
+/// RAII guard for one in-flight `ct_future`: frees it via `ct_future_free`
+/// if dropped before completion (task cancellation while `.await`ing
+/// `drive_ct_future` below). Runs correctly even mid-`.await`: async fn
+/// locals still in scope at a suspension point are dropped normally when
+/// the generated future itself is dropped.
+struct FutureGuard(*mut sys::ct_future);
+
+impl Drop for FutureGuard {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { sys::ct_future_free(self.0) };
+        }
+    }
+}
+
+// SAFETY: *mut ct_future is an opaque handle the C++ side documents as
+// freely movable/pollable from any thread (design §7); this narrow impl is
+// what lets drive_ct_future's generated future (which holds a FutureGuard
+// across its `.await` points) be Send, without having to bless the
+// non-Send raw ct_buf pointer that only ever lives inside the fully
+// synchronous try_poll_ct_future below (never held across a suspension
+// point).
+unsafe impl Send for FutureGuard {}
+
+/// One synchronous `ct_future_poll` attempt. `None` if still pending;
+/// `Some` if done, in which case `guard` has already been nulled out --
+/// either `ct_future_poll` itself freed the underlying `ct_future`
+/// (Flush/Snapshot), or, for a `Get`, this function did so explicitly via
+/// `ct_future_free` right after copying `out_value`'s bytes out (which may
+/// be a *borrowed* pointer into a still-live frame -- see `copy_buf`).
+///
+/// Deliberately synchronous and free of any `.await`: `sys::ct_buf` holds a
+/// raw `*mut u8` which is not `Send`, so it must never be a value held
+/// across a suspension point in `drive_ct_future`'s generated future.
+fn try_poll_ct_future(guard: &mut FutureGuard, kind: FutureKind) -> Option<Result<RawOutcome, CtError>> {
+    let mut done: c_int = 0;
+    let mut found: c_int = 0;
+    let mut slot: u64 = 0;
+    let mut value = sys::ct_buf {
+        data: std::ptr::null_mut(),
+        len: 0,
+    };
+    let rc = unsafe { sys::ct_future_poll(guard.0, &mut done, &mut found, &mut slot, &mut value) };
+    if done == 0 {
+        return None;
+    }
+    let result = match check(rc) {
+        Ok(()) => Ok(RawOutcome {
+            found: found != 0,
+            slot,
+            // copy_buf, not take_buf: for a Get, `value` may borrow from a
+            // still-live frame (design §5's zero-copy fast path) and must
+            // not be passed to ct_free_buf. Flush/Snapshot never populate
+            // `value` at all, so this is a no-op for them either way.
+            value: copy_buf(value),
+        }),
+        Err(e) => Err(e),
+    };
+    if kind == FutureKind::Get {
+        // ct_future_poll deliberately does *not* free a kGet future (see
+        // its doc comment in c_api.h) -- the epoch guard behind a
+        // zero-copy fast-path value must outlive the copy_buf() call above.
+        unsafe { sys::ct_future_free(guard.0) };
+    }
+    // Flush/Snapshot: already freed by ct_future_poll itself. Either way,
+    // the underlying ct_future is gone now -- don't let FutureGuard's Drop
+    // free it again.
+    guard.0 = std::ptr::null_mut();
+    Some(result)
+}
+
+/// Drives one `ct_get_async`/`ct_flush_async`/`ct_snapshot_async` handle to
+/// completion: polls it, and if not yet done, waits for the tree's eventfd
+/// pump to fan out a notification before polling again. A fast-path
+/// completion never reaches the `notified().await` at all.
+async fn drive_ct_future(
+    mut guard: FutureGuard,
+    tree: &Arc<Crowtree>,
+    kind: FutureKind,
+) -> Result<RawOutcome, CtError> {
+    loop {
+        // Construct (but do not yet await) the notification future *before*
+        // checking ct_future_poll below, not after: Notify::notified()
+        // captures the pump's current notify_waiters() call count at
+        // construction time and is guaranteed to fire for any
+        // notify_waiters() after that point even before this is polled --
+        // constructing it only *after* seeing done=0 would leave a window
+        // where a completion + notify racing in right there is silently
+        // missed, hanging until some unrelated later notification (or
+        // forever, if none ever comes).
+        let notify_arc = tree.eventfd_notify();
+        let notified = notify_arc.as_ref().map(|n| n.notified());
+
+        if let Some(result) = try_poll_ct_future(&mut guard, kind) {
+            return result;
+        }
+
+        match notified {
+            Some(n) => n.await,
+            None => {
+                // No reactor wired (or the pump failed to spawn): per
+                // ct_get_async/ct_flush_async/ct_snapshot_async's contract,
+                // no reactor means every op already completes
+                // synchronously, so done=0 here should be unreachable --
+                // yield instead of busy-looping just in case.
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+}
+
+/// Async facade. `get`/`flush`/`snapshot` drive the engine's io_uring
+/// reactor directly via [`drive_ct_future`] -- no thread pool hop. The
+/// remaining methods have no async C API twin yet (Phase 2 scoped only
+/// get/flush/snapshot; see `doc/plan-tree.md` #11 Phase 3's re-scoping note)
+/// and still bridge onto Tokio via `spawn_blocking`. Cheap to clone (shares
+/// one `Arc<Crowtree>`).
 #[derive(Clone, Debug)]
 pub struct AsyncCrowtree {
     inner: Arc<Crowtree>,
@@ -622,24 +923,68 @@ impl AsyncCrowtree {
             .map_err(|_| CtError::Internal)?
     }
 
+    /// Drives the engine's io_uring reactor directly (plan-tree #11 Phase
+    /// 3) -- no `spawn_blocking`, since flush() never touches the page
+    /// store (only the in-memory L1), this always resolves on the very
+    /// first poll.
     pub async fn flush(&self) -> Result<(), CtError> {
-        let t = self.inner.clone();
-        tokio::task::spawn_blocking(move || t.flush())
-            .await
-            .map_err(|_| CtError::Internal)?
+        let fut = unsafe { sys::ct_flush_async(self.inner.as_ptr()) };
+        drive_ct_future(FutureGuard(fut), &self.inner, FutureKind::Flush).await?;
+        Ok(())
     }
 
+    /// Drives the engine's io_uring reactor directly (plan-tree #11 Phase
+    /// 3) -- no `spawn_blocking`; the write phase always waits on the
+    /// reactor (design §4's table), unlike `flush`/the fast `get` path.
     pub async fn snapshot(&self) -> Result<u64, CtError> {
-        let t = self.inner.clone();
-        tokio::task::spawn_blocking(move || t.snapshot())
-            .await
-            .map_err(|_| CtError::Internal)?
+        let fut = unsafe { sys::ct_snapshot_async(self.inner.as_ptr()) };
+        Ok(
+            drive_ct_future(FutureGuard(fut), &self.inner, FutureKind::Snapshot)
+                .await?
+                .slot,
+        )
     }
 
+    /// Drives the engine's io_uring reactor directly (plan-tree #11 Phase
+    /// 3) -- no `spawn_blocking`. Resolves on the very first poll for a
+    /// resident hit (`get_view`'s existing fast path, `#5 B3`); only a
+    /// genuine demand-load miss waits on the reactor.
     pub async fn get(&self, key: Vec<u8>) -> Result<Option<(u64, Vec<u8>)>, CtError> {
-        let t = self.inner.clone();
-        tokio::task::spawn_blocking(move || t.get(&key))
-            .await
-            .map_err(|_| CtError::Internal)?
+        let fut = unsafe { sys::ct_get_async(self.inner.as_ptr(), key.as_ptr(), key.len()) };
+        let out = drive_ct_future(FutureGuard(fut), &self.inner, FutureKind::Get).await?;
+        Ok(out.found.then_some((out.slot, out.value)))
     }
+
+    /// Like [`Self::get`], but never allocates or boxes anything for the
+    /// fast (resident hit/miss) path -- only the genuine demand-load-miss
+    /// path (`GetOutcome::Pending`) does. Lets a caller with its own
+    /// fast-path/slow-path return type (`crowkv`'s `KVFuture`, plan-tree.md
+    /// #11 Phase 6) mirror `ct_get_async`'s own C++-layer split one layer
+    /// up, instead of collapsing it back into a uniform `async fn` (which
+    /// would force boxing on every call, fast path included -- exactly what
+    /// `KVFuture::Ready` exists to avoid).
+    pub fn try_get(&self, key: Vec<u8>) -> GetOutcome {
+        let fut = unsafe { sys::ct_get_async(self.inner.as_ptr(), key.as_ptr(), key.len()) };
+        let mut guard = FutureGuard(fut);
+        if let Some(result) = try_poll_ct_future(&mut guard, FutureKind::Get) {
+            return GetOutcome::Ready(result.map(|out| out.found.then_some((out.slot, out.value))));
+        }
+        let tree = self.inner.clone();
+        GetOutcome::Pending(Box::pin(async move {
+            let out = drive_ct_future(guard, &tree, FutureKind::Get).await?;
+            Ok(out.found.then_some((out.slot, out.value)))
+        }))
+    }
+}
+
+/// Result of [`AsyncCrowtree::try_get`] -- see its doc comment for why this
+/// exists instead of a single uniform `async fn`.
+#[allow(clippy::type_complexity)]
+pub enum GetOutcome {
+    /// Resolved on the very first (and only) poll attempt -- no allocation.
+    Ready(Result<Option<(u64, Vec<u8>)>, CtError>),
+    /// A genuine demand-load miss, already registered with the reactor
+    /// (or, absent one, that will complete synchronously on the next poll
+    /// regardless -- design §6.3): `.await` this to completion.
+    Pending(Pin<Box<dyn Future<Output = Result<Option<(u64, Vec<u8>)>, CtError>> + Send>>),
 }

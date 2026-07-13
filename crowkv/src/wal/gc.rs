@@ -15,23 +15,36 @@ use super::wal_engine::WalEngine;
 
 /// Spawn the GC worker background task.
 ///
+/// `safe_slot` is called once per tick to fetch the current group safe-slot
+/// (`crate::cluster::group::PxGroup::group_safe_slot`, or `u64::MAX` if the
+/// caller has no such notion and wants `snapshot_slot` alone to gate GC) —
+/// kept as a callback rather than a fixed value so callers whose safe-slot
+/// advances over a long-lived worker's lifetime (i.e. every real caller)
+/// don't have to restart the worker to pick up a new value.
+///
 /// The task runs until `cancel` is set to true or the `WalEngine` is dropped.
 pub fn spawn_gc_worker(
     wal: Arc<WalEngine>,
     gc_tick: Duration,
     cancel: Arc<AtomicBool>,
+    safe_slot: impl Fn() -> u64 + Send + Sync + 'static,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(gc_loop(wal, gc_tick, cancel))
+    tokio::spawn(gc_loop(wal, gc_tick, cancel, safe_slot))
 }
 
-async fn gc_loop(wal: Arc<WalEngine>, gc_tick: Duration, cancel: Arc<AtomicBool>) {
+async fn gc_loop(
+    wal: Arc<WalEngine>,
+    gc_tick: Duration,
+    cancel: Arc<AtomicBool>,
+    safe_slot: impl Fn() -> u64,
+) {
     loop {
         tokio::time::sleep(gc_tick).await;
         if cancel.load(Ordering::Acquire) {
             info!(group_id = wal.group_id(), "gc worker shutting down");
             return;
         }
-        if let Err(e) = run_gc_pass(&wal).await {
+        if let Err(e) = run_gc_pass(&wal, safe_slot()).await {
             warn!(group_id = wal.group_id(), error = %e, "gc pass failed");
         }
     }
@@ -48,16 +61,19 @@ pub fn compute_gc_slot(safe_slot: u64, snapshot_slot: u64) -> u64 {
 
 /// Run one GC pass: unlink segments fully below `gc_slot`.
 ///
-/// The GC watermark is `min(safe_slot, snapshot_slot)`, where `safe_slot` is the
-/// highest slot that is known to be contiguously applied and `snapshot_slot` is
-/// the latest snapshot slot from the `WalEngine` state. Without a real `safe_slot`
-/// source the snapshot slot itself is the limiting factor.
+/// The GC watermark is `min(safe_slot, snapshot_slot)`, where `safe_slot` is
+/// the highest slot that is known to be contiguously applied *everywhere it
+/// might still be needed* (see
+/// `crate::cluster::group::PxGroup::group_safe_slot` /
+/// `design-crowtree-snapshot-gc.md §5`) and `snapshot_slot` is the latest
+/// snapshot slot from the `WalEngine` state. Pass `u64::MAX` for `safe_slot`
+/// to let `snapshot_slot` alone gate GC (e.g. a caller with no group-wide
+/// safe-slot notion).
 ///
 /// # Errors
 /// Returns IO error if segment files cannot be unlinked.
-pub async fn run_gc_pass(wal: &WalEngine) -> io::Result<usize> {
+pub async fn run_gc_pass(wal: &WalEngine, safe_slot: u64) -> io::Result<usize> {
     let snapshot_slot = wal.snapshot_slot();
-    let safe_slot = u64::MAX; // TODO: integrate with the group's contiguous_applied.
     let gc_slot = compute_gc_slot(safe_slot, snapshot_slot);
     run_gc_with_watermark(wal, gc_slot).await
 }

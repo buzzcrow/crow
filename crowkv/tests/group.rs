@@ -68,3 +68,7 @@ mod proposer;
 #[cfg(feature = "test-util")]
 #[path = "group/safe_slot_test.rs"]
 mod safe_slot;
+
+#[cfg(feature = "test-util")]
+#[path = "group/maintenance_test.rs"]
+mod maintenance;

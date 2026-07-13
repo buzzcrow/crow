@@ -2,25 +2,26 @@
 //! (FFI adapter over the crowtree C ABI, via `crowtree_ffi`).
 
 use super::op::Cell;
-use super::{Batch, KVEngine, Op};
-use crowtree_ffi::{BatchOp as CtBatchOp, Crowtree, CtError};
+use super::{Batch, KVEngine, KVFuture, Op};
+use crowtree_ffi::{AsyncCrowtree, BatchOp as CtBatchOp, Crowtree, CtError, GetOutcome};
+use std::sync::Arc;
 
 pub use crowtree_ffi::Options as CrowtreeOptions;
 
-/// `KVEngine` backed by [`crowtree_ffi::Crowtree`].
+/// `KVEngine` backed by [`crowtree_ffi::Crowtree`], via [`AsyncCrowtree`].
 ///
-/// Wraps the existing *synchronous* `Crowtree` handle directly behind the
-/// existing *synchronous* `KVEngine` trait, rather than bridging through
-/// `AsyncCrowtree`'s `spawn_blocking` onto an async trait surface. crowtree's
-/// own internals are still fully synchronous today (blocking `PageStore`, no
-/// async I/O reactor yet), so bridging through `spawn_blocking` here would
-/// add a thread-pool hop with no real asynchrony behind it. `PxLearner`
-/// already calls `KVEngine` methods synchronously from within async gRPC
-/// handlers (`PxKvStore::kv_get`/`kv_scan` call `engine_get`/`engine_scan`
-/// inline, not `.await`ed), matching how `parking_lot`/`DashMap` locks are
-/// used elsewhere in this codebase, so a brief synchronous crowtree call in
-/// the same spot is consistent with the existing pattern. Revisit once the
-/// underlying engine I/O is genuinely asynchronous.
+/// `KVEngine::get`/`scan`/`apply` return [`KVFuture`]. `get` genuinely
+/// constructs [`KVFuture::Pending`] for a demand-load miss (plan-tree.md
+/// #11 Phase 6), via [`AsyncCrowtree::try_get`] -- a resident hit/miss
+/// (`try_get`'s `GetOutcome::Ready`, the overwhelmingly common case) still
+/// costs nothing beyond the enum tag, same as before this wiring landed.
+/// `scan`/`apply` stay [`KVFuture::ready`]-only: crowtree has no
+/// `ct_scan_async`/`ct_apply_*_async` C API yet (only `ct_get_async`/
+/// `ct_flush_async`/`ct_snapshot_async` exist -- see
+/// `doc/design/design-crowtree-async.md` §4's table), so neither can
+/// genuinely wait on the reactor today; a synchronous crowtree call in
+/// their place is an unchanged, honest reflection of what the C API
+/// actually offers, not a shortcut taken here.
 ///
 /// **`iter_all`/`compare` caveat:** `get`/`scan` merge crowtree's in-memory
 /// (L0) and durable-tree (L1) state internally, so every `apply` is visible
@@ -32,7 +33,7 @@ pub use crowtree_ffi::Options as CrowtreeOptions;
 /// it. `InMemKV` has no such gap (every apply is immediately visible), so
 /// this is a real, engine-specific difference to be aware of.
 pub struct CrowtreeEngine {
-    inner: Crowtree,
+    inner: AsyncCrowtree,
 }
 
 impl CrowtreeEngine {
@@ -44,24 +45,24 @@ impl CrowtreeEngine {
     /// corrupt or unreadable durable file).
     pub fn open(opt: &CrowtreeOptions) -> Result<Self, CtError> {
         Ok(Self {
-            inner: Crowtree::open(opt)?,
+            inner: AsyncCrowtree::open(opt)?,
         })
     }
 
     /// Borrow the underlying FFI handle for engine-specific operations
     /// (`flush`/`snapshot`/`snapshot_export`/`snapshot_import`/GC watermark)
-    /// that aren't part of the (still-synchronous, pre-#11) [`KVEngine`]
-    /// trait surface.
+    /// that aren't part of the [`KVEngine`] trait surface. Cheap: an `Arc`
+    /// clone, sharing the same tree `get`/`scan`/`apply` above operate on.
     #[must_use]
-    pub fn handle(&self) -> &Crowtree {
-        &self.inner
+    pub fn handle(&self) -> Arc<Crowtree> {
+        self.inner.handle()
     }
 }
 
 impl KVEngine for CrowtreeEngine {
-    fn apply(&self, slot: u64, batch: &Batch) {
+    fn apply(&self, slot: u64, batch: &Batch) -> KVFuture<()> {
         if batch.ops.is_empty() {
-            return;
+            return KVFuture::ready(());
         }
         let ops: Vec<CtBatchOp<'_>> = batch
             .ops
@@ -79,26 +80,37 @@ impl KVEngine for CrowtreeEngine {
         // atomic multi-key apply (ct_apply_batch) so a concurrent reader
         // never observes a partially-applied batch.
         //
-        // Known gap: `apply` returns `()` in the current sync trait, so an
-        // I/O failure surfaced by `apply_batch` (e.g. a synchronous flush
-        // hitting a write error) is swallowed here; it's only observable
-        // out-of-band via `Crowtree::io_failed()`. A future fallible/async
-        // `KVEngine::apply` (returning a `Result`) would close this gap.
-        let _ = self.inner.apply_batch(slot, &ops);
+        // Known gap: `apply` returns `KVFuture<()>`, always `Ready(())` today,
+        // so an I/O failure surfaced by `apply_batch` (e.g. a synchronous
+        // flush hitting a write error) is swallowed here; it's only
+        // observable out-of-band via `Crowtree::io_failed()`. A future
+        // fallible `KVEngine::apply` (returning a `Result`) would close this
+        // gap.
+        let _ = self.inner.handle().apply_batch(slot, &ops);
+        KVFuture::ready(())
     }
 
-    fn get(&self, key: &[u8]) -> Option<(u64, Vec<u8>)> {
-        self.inner.get(key).ok().flatten()
+    fn get(&self, key: &[u8]) -> KVFuture<Option<(u64, Vec<u8>)>> {
+        // AsyncCrowtree::try_get does the same fast-path check
+        // Crowtree::get itself does, first -- a resident hit/miss resolves
+        // right here, no allocation, same as the old always-`Ready` body.
+        // Only a genuine demand-load miss reaches `Pending`, wrapping the
+        // reactor-driven future `try_get` already built for us.
+        match self.inner.try_get(key.to_vec()) {
+            GetOutcome::Ready(result) => KVFuture::ready(result.ok().flatten()),
+            GetOutcome::Pending(fut) => KVFuture::Pending(Box::pin(async move { fut.await.ok().flatten() })),
+        }
     }
 
-    fn scan(&self, prefix: &[u8], limit: usize) -> (Vec<(Vec<u8>, u64, Vec<u8>)>, bool) {
-        match self.inner.scan(prefix, limit) {
+    fn scan(&self, prefix: &[u8], limit: usize) -> KVFuture<(Vec<(Vec<u8>, u64, Vec<u8>)>, bool)> {
+        let result = match self.inner.handle().scan(prefix, limit) {
             Ok((entries, truncated)) => (
                 entries.into_iter().map(|e| (e.key, e.slot, e.value)).collect(),
                 truncated,
             ),
             Err(_) => (Vec::new(), false),
-        }
+        };
+        KVFuture::ready(result)
     }
 
     fn iter_all(&self) -> Vec<(Vec<u8>, u64, Cell)> {
@@ -110,8 +122,8 @@ impl KVEngine for CrowtreeEngine {
         // immediate visibility for the common (in-order) case. A genuine gap
         // (an out-of-order slot still waiting on an earlier one) is still
         // invisible here until it fills in -- see the crate-level docs.
-        let _ = self.inner.flush();
-        match self.inner.snapshot_view() {
+        let _ = self.inner.handle().flush();
+        match self.inner.handle().snapshot_view() {
             Ok((_at_slot, entries)) => entries
                 .into_iter()
                 .map(|e| {
@@ -131,7 +143,10 @@ impl KVEngine for CrowtreeEngine {
         // No dedicated count primitive in the C API; a full unlimited scan
         // already excludes tombstones server-side, matching InMemKV's own
         // O(n) linear-scan cost for this method.
-        self.inner.scan(b"", 0).map_or(0, |(entries, _)| entries.len())
+        self.inner
+            .handle()
+            .scan(b"", 0)
+            .map_or(0, |(entries, _)| entries.len())
     }
 
     fn clear(&self) {
@@ -155,7 +170,27 @@ impl KVEngine for CrowtreeEngine {
         // conservative floor if no such call happened right before the
         // process that wrote this file exited, which is fine (see the trait
         // doc: under-reporting only means more, still-safe, replay work).
-        self.inner.last_applied_slot()
+        self.inner.handle().last_applied_slot()
+    }
+
+    fn persist_snapshot(&self) -> u64 {
+        // `Crowtree::snapshot` persists dirty *L1* pages + a fresh
+        // superblock recording `last_applied_slot` -- but it doesn't drain
+        // L0 itself (that's `flush`'s job; `snapshot` only walks the
+        // already-durable-tree side). Flush first so a snapshot taken right
+        // after a burst of `apply` calls captures them, instead of
+        // silently persisting only whatever an earlier `flush()` already
+        // moved into L1.
+        let _ = self.inner.handle().flush();
+        self.inner.handle().snapshot().unwrap_or(0)
+    }
+
+    fn set_gc_watermark(&self, snapshot_slot: u64, safe_slot: u64) {
+        self.inner.handle().set_gc_watermark(snapshot_slot, safe_slot);
+    }
+
+    fn collect_garbage(&self) {
+        let _ = self.inner.handle().collect_garbage();
     }
 
     // `compare` uses the trait's default implementation (diffs `iter_all()`

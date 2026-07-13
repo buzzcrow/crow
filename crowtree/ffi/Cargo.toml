@@ -11,7 +11,9 @@ name = "crowtree_ffi"
 path = "src/lib.rs"
 
 [dependencies]
-tokio = { version = "1.40", features = ["rt", "rt-multi-thread", "macros"] }
+# "net" is required for tokio::io::unix::AsyncFd, "sync" for tokio::sync::
+# Notify (plan-tree #11 Phase 3's reactor-eventfd wakeup fan-out).
+tokio = { version = "1.40", features = ["rt", "rt-multi-thread", "macros", "net", "sync"] }
 
 [build-dependencies]
 cc = "1"
