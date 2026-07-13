@@ -162,6 +162,13 @@ message HeartbeatResponse {
   uint64 highest_seen_slot = 8;
   uint64 request_id = 9;
   uint64 request_create_ms = 10;
+  // Highest slot durably captured in this follower's own last engine
+  // snapshot (`design-crowtree-snapshot-gc.md` §1 `snapshot_slot`; mirrors
+  // `WalEngine::snapshot_slot()`). The leader aggregates this across voting
+  // peers to compute the group's real "durable on leader + >=1 peer"
+  // watermark (plan-tree #20), instead of approximating it with
+  // `contiguous_applied`/`group_safe_slot`.
+  uint64 durable_snapshot_slot = 11;
 }
 
 // Admin step-down primitive (decision §7.1: strict fence).
@@ -230,4 +237,44 @@ service PxService {
 
   // P1 M3 per-peer bidi stream (steady-state Accept/Heartbeat/Chosen).
   rpc LearnerStream(stream LearnerStreamRequest) returns (stream LearnerStreamResponse);
+}
+
+// ---------------------------------------------------------------------------
+// #20 New-member snapshot install (`design-crowtree-snapshot-gc.md` §6,
+// `design-reconfiguration.md` §4). Layered on the existing per-replica
+// `voting` flag rather than the full joint-consensus reconfiguration state
+// machine (`ConfigChange` log entries, both-quorum evaluation) described in
+// `design-reconfiguration.md` §2-3/5-9, which is not implemented in this
+// codebase: a new/far-lagging member starts non-voting
+// (`PxGroupMember.voting = false`), pulls a snapshot plus the WAL tail via
+// this service, and an operator promotes it to voting once caught up.
+// ---------------------------------------------------------------------------
+
+message SnapshotRequest {
+  uint64 group_id = 1;
+}
+
+// One item of the streamed snapshot transfer. `KVEngine::snapshot_export`'s
+// byte stream is chunked into `data` frames of bounded size; the exported
+// `at_slot` itself is embedded in that byte stream and returned by
+// `KVEngine::snapshot_import`, so it is not repeated here. The **first**
+// item of every response stream is always a `header`, carrying
+// `term_at_slot` -- needed (alongside `at_slot`) to seed the joining
+// replica's learner frontier -- since it cannot be recovered from the
+// exported bytes alone.
+message SnapshotStreamItem {
+  oneof payload {
+    SnapshotHeader header = 1;
+    bytes data = 2;
+  }
+}
+
+message SnapshotHeader {
+  // Term of the log entry chosen at the snapshot's own `at_slot`, read from
+  // the exporting replica's own acceptor (`accepted_at(at_slot)`).
+  uint64 term_at_slot = 1;
+}
+
+service SnapshotService {
+  rpc StreamSnapshot(SnapshotRequest) returns (stream SnapshotStreamItem);
 }

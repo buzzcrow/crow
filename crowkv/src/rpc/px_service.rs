@@ -265,6 +265,7 @@ impl PxService for PxReplicaService {
             highest_seen_slot: reply.highest_seen_slot,
             request_id: req.request_id,
             request_create_ms: req.request_create_ms,
+            durable_snapshot_slot: reply.durable_snapshot_slot,
         }))
     }
 
@@ -517,6 +518,7 @@ async fn handle_heartbeat_inner(
         highest_seen_slot: reply.highest_seen_slot,
         request_id: req.request_id,
         request_create_ms: req.request_create_ms,
+        durable_snapshot_slot: reply.durable_snapshot_slot,
     })
 }
 

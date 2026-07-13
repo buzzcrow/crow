@@ -1297,6 +1297,13 @@ impl PxLocalReplica {
         }
         let (contiguous_chosen, last_chosen_term, highest_seen_slot) = self.frontier_triple();
         let contiguous_applied = self.contiguous_applied();
+        // This replica's own durable-snapshot watermark (`WalEngine::snapshot_slot`,
+        // set by `group_maintenance::run_pass` whenever `KVEngine::persist_snapshot`
+        // advances) -- `0` when there is no WAL (e.g. testkit setups), matching the
+        // always-safe default `KVEngine::persist_snapshot` itself documents. The
+        // leader aggregates this across every voting peer's heartbeat reply into
+        // `PxGroup::group_snapshot_slot` (plan-tree #20).
+        let durable_snapshot_slot = self.wal().map_or(0, |w| w.snapshot_slot());
         trace!(
             replica_l_id = self.id,
             leader_id = req.leader_id,
@@ -1312,6 +1319,7 @@ impl PxLocalReplica {
             last_chosen_term,
             contiguous_applied,
             highest_seen_slot,
+            durable_snapshot_slot,
         }
     }
 

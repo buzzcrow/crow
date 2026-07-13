@@ -40,6 +40,11 @@ fn compare_is_empty_for_identical_state_and_detects_divergence() {
     conformance::compare_is_empty_for_identical_state_and_detects_divergence(&open(), &open());
 }
 
+#[test]
+fn snapshot_export_import_round_trip() {
+    conformance::snapshot_export_import_round_trip(&open(), &open());
+}
+
 /// Regression guard (`design-crowkv-async-kvengine.md` §6): an in-memory
 /// `CrowtreeEngine` (`opt.path: None`, no page store, no reactor -- see
 /// `CrowtreeOptions::default`) has no I/O path *at all*, so `get`/`scan`/

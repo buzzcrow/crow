@@ -85,6 +85,25 @@ pub struct PxGroup {
     /// no follower can contradict. Recomputed at the end of each quorum
     /// heartbeat round. `0` means "not yet established".
     pub(crate) group_safe_slot: AtomicU64,
+    /// Last-known `durable_snapshot_slot` per voting peer, refreshed from
+    /// heartbeat replies alongside `peer_applied`. Peers never heard from
+    /// are absent (treated as `0`). Only meaningful while this replica is
+    /// leader.
+    pub(crate) peer_durable: parking_lot::Mutex<HashMap<PxNodeId, SlotIndex>>,
+    /// Group durable-snapshot watermark: `min(local durable_snapshot_slot,
+    /// max(peer durable_snapshot_slot))` -- the real "durable on leader
+    /// plus at least one peer" watermark (`design-crowtree-snapshot-gc.md`
+    /// §1 `snapshot_slot`, plan-tree #20), gossiped piggybacked on the same
+    /// heartbeat round as `group_safe_slot`. Taking the *max* over peers
+    /// (not `min`, unlike `group_safe_slot`) is deliberate: the design only
+    /// requires *one* peer beyond the leader to durably have a slot, so the
+    /// furthest-along peer alone is always a sufficient witness -- a
+    /// straggler peer must not hold this watermark back the way it holds
+    /// back `group_safe_slot` (which requires *every* member). `0` means
+    /// "not yet established" (no peer has reported, or this replica has no
+    /// local WAL to report its own snapshot progress). Recomputed at the
+    /// end of each quorum heartbeat round.
+    pub(crate) group_snapshot_slot: AtomicU64,
     /// Proposer sliding-window admission gate. Holds `PaxosConfig::proposer_window`
     /// permits; each in-flight `propose` call holds one for its duration, so at
     /// most `window` proposals are allocated-but-not-chosen at once. A proposal
@@ -130,6 +149,8 @@ impl PxGroup {
             leader_read_ready: AtomicBool::new(true),
             peer_applied: parking_lot::Mutex::new(HashMap::new()),
             group_safe_slot: AtomicU64::new(0),
+            peer_durable: parking_lot::Mutex::new(HashMap::new()),
+            group_snapshot_slot: AtomicU64::new(0),
             proposer_window: tokio::sync::Semaphore::new(PaxosConfig::DEFAULT.proposer_window),
             config_store: None,
         };
@@ -200,6 +221,18 @@ impl PxGroup {
         self.group_safe_slot.load(Ordering::Acquire)
     }
 
+    /// Group durable-snapshot-watermark snapshot: state at this slot is
+    /// durable on this (leader) replica **and** at least one voting peer
+    /// (`design-crowtree-snapshot-gc.md` §1 `snapshot_slot`, plan-tree #20).
+    /// `0` until the first quorum heartbeat round establishes it (or if this
+    /// replica has no local WAL). Feeds `set_gc_watermark`'s `snapshot_slot`
+    /// argument in `group_maintenance::run_pass`, replacing the previous
+    /// `group_safe_slot` approximation.
+    #[must_use]
+    pub fn group_snapshot_slot(&self) -> SlotIndex {
+        self.group_snapshot_slot.load(Ordering::Acquire)
+    }
+
     #[must_use]
     pub fn leader_read_ready(&self) -> bool {
         self.leader_read_ready.load(Ordering::Acquire)
@@ -229,17 +262,51 @@ impl PxGroup {
         self.group_safe_slot.fetch_max(safe, Ordering::AcqRel);
     }
 
-    /// Clear all peer-applied tracking and reset the published group safe-slot
-    /// to `0`. Called at the start of every leader tenure: `group_safe_slot`
-    /// only ever advances (via `fetch_max`) *within* a tenure, so without this
-    /// reset a freshly elected leader would inherit the previous tenure's
-    /// elevated safe-slot and stale per-peer watermarks — overstating freshness
-    /// for bounded-stale reads until new heartbeats arrive. After the reset the
-    /// safe-slot stays at `0` until every voting member has reported again,
-    /// which is the conservative guarantee `group_safe_slot`'s docs promise.
+    /// Record a voting peer's reported `durable_snapshot_slot` and recompute
+    /// the group's real "durable on leader + >=1 peer" snapshot watermark
+    /// (`design-crowtree-snapshot-gc.md` §1 `snapshot_slot`, plan-tree #20)
+    /// as `min(local durable_snapshot_slot, max(voting peer
+    /// durable_snapshot_slot))`. A peer that has never reported is treated
+    /// as `0` and simply never wins the max (same "absent = 0" convention as
+    /// `note_peer_applied`) — unlike `group_safe_slot`, only *one* peer
+    /// beyond the leader needs to have a slot durable, so the
+    /// furthest-along peer alone is always a sufficient witness; a
+    /// straggler peer must not hold this watermark back. Called from the
+    /// leader heartbeat round, alongside `note_peer_applied`.
+    pub(crate) fn note_peer_durable(&self, peer_id: PxNodeId, durable: SlotIndex) {
+        let mut peers = self.peer_durable.lock();
+        peers.insert(peer_id, durable);
+        let mut best_peer = 0;
+        for remote in &self.remote_replicas {
+            if let RemoteReplicaKind::Real(r) = remote {
+                if r.voting {
+                    let peer_durable = peers.get(&r.node_id).copied().unwrap_or(0);
+                    best_peer = best_peer.max(peer_durable);
+                }
+            }
+        }
+        drop(peers);
+        let local_durable = self.local_replica.wal().map_or(0, |w| w.snapshot_slot());
+        let snapshot = local_durable.min(best_peer);
+        // Monotonic within a tenure, same rationale as group_safe_slot.
+        self.group_snapshot_slot.fetch_max(snapshot, Ordering::AcqRel);
+    }
+
+    /// Clear all peer-applied/-durable tracking and reset the published
+    /// group safe-slot and snapshot-slot to `0`. Called at the start of
+    /// every leader tenure: both watermarks only ever advance (via
+    /// `fetch_max`) *within* a tenure, so without this reset a freshly
+    /// elected leader would inherit the previous tenure's elevated
+    /// watermarks and stale per-peer state — overstating freshness for
+    /// bounded-stale reads / GC eligibility until new heartbeats arrive.
+    /// After the reset both watermarks stay at `0` until heartbeats
+    /// re-establish them, which is the conservative guarantee their docs
+    /// promise.
     pub(crate) fn reset_safe_slot_tracking(&self) {
         self.peer_applied.lock().clear();
         self.group_safe_slot.store(0, Ordering::Release);
+        self.peer_durable.lock().clear();
+        self.group_snapshot_slot.store(0, Ordering::Release);
     }
 
     /// Number of remote replica slots (including placeholders).
@@ -574,6 +641,84 @@ impl PxGroup {
         report
     }
 
+    // ── New-member snapshot join (plan-tree #20) ────────────────────
+
+    /// New-member snapshot join (`design-crowtree-snapshot-gc.md` §6,
+    /// `design-reconfiguration.md` §4): pull a snapshot for this group from
+    /// `peer_endpoint`'s [`crate::rpc::SnapshotService`], import it into
+    /// the local engine, and seed the local learner's frontier so the
+    /// group's normal repair/heartbeat catch-up only needs to stream the
+    /// WAL tail above the snapshot's `at_slot` -- instead of replaying full
+    /// Paxos history from slot 1.
+    ///
+    /// **Precondition:** must be called before this replica is wired into
+    /// any group's topology (before any peer can send it `Accept`/
+    /// `Heartbeat` RPCs) -- mirrors [`crate::paxos::learner::PxLearner::seed_resume_frontier`]'s
+    /// "before any `learn()` call" precondition. Intended for a
+    /// freshly-constructed, still-empty local replica only; never call this
+    /// on a replica with existing local state.
+    ///
+    /// Returns the snapshot's `at_slot` on success (the frontier this
+    /// replica's learner was seeded to).
+    ///
+    /// # Errors
+    /// Returns an error string on any transport, decode, or engine-import
+    /// failure.
+    pub async fn join_via_snapshot(&self, peer_endpoint: &str) -> Result<u64, String> {
+        use crate::rpc::snapshot_service_client::SnapshotServiceClient;
+        use crate::rpc::{snapshot_stream_item, SnapshotRequest};
+        use tokio_stream::StreamExt;
+
+        let mut client = SnapshotServiceClient::connect(format!("http://{peer_endpoint}"))
+            .await
+            .map_err(|e| format!("snapshot join: connect to {peer_endpoint} failed: {e}"))?;
+
+        let mut stream = client
+            .stream_snapshot(SnapshotRequest {
+                group_id: self.group_id,
+            })
+            .await
+            .map_err(|e| format!("snapshot join: StreamSnapshot rpc failed: {e}"))?
+            .into_inner();
+
+        let mut term_at_slot: Option<u64> = None;
+        let mut bytes = Vec::new();
+        while let Some(item) = stream.next().await {
+            let item = item.map_err(|e| format!("snapshot join: stream error: {e}"))?;
+            match item.payload {
+                Some(snapshot_stream_item::Payload::Header(h)) => {
+                    term_at_slot = Some(h.term_at_slot);
+                }
+                Some(snapshot_stream_item::Payload::Data(chunk)) => {
+                    bytes.extend_from_slice(&chunk);
+                }
+                None => {}
+            }
+        }
+        let term_at_slot =
+            term_at_slot.ok_or_else(|| "snapshot join: stream ended without a header".to_string())?;
+
+        let at_slot = self
+            .local_replica
+            .learner
+            .engine()
+            .snapshot_import(&bytes)
+            .map_err(|e| format!("snapshot join: engine import failed: {e}"))?;
+
+        info!(
+            group_id = self.group_id,
+            peer_endpoint,
+            at_slot,
+            term_at_slot,
+            stream_bytes = bytes.len(),
+            "snapshot join: imported snapshot, seeding learner frontier"
+        );
+        self.local_replica
+            .learner
+            .seed_resume_frontier(at_slot, term_at_slot);
+        Ok(at_slot)
+    }
+
     // ── Add/Remove ────────────────────────────────────────────────
 
     /// Add a remote replica to the group.
@@ -618,12 +763,19 @@ impl PxGroup {
         false
     }
 
-    /// Return info about all real remote replicas: `(node_id, endpoint)`.
-    pub fn remote_replica_info(&self) -> Vec<(PxNodeId, &str)> {
+    /// Return info about all real remote replicas: `(node_id, endpoint,
+    /// voting)`. Callers that rebuild a group (management-API remote
+    /// add/remove) must carry `voting` through to the rebuilt
+    /// [`PxRemoteReplica`] -- dropping it would silently re-promote a
+    /// non-voting (e.g. still-catching-up, plan-tree #20 snapshot-join)
+    /// remote back to voting on the next unrelated rebuild.
+    pub fn remote_replica_info(&self) -> Vec<(PxNodeId, &str, bool)> {
         self.remote_replicas
             .iter()
             .filter_map(|r| match r {
-                RemoteReplicaKind::Real(remote) => Some((remote.node_id, remote.endpoint.as_str())),
+                RemoteReplicaKind::Real(remote) => {
+                    Some((remote.node_id, remote.endpoint.as_str(), remote.voting))
+                }
                 RemoteReplicaKind::Placeholder => None,
             })
             .collect()
@@ -1298,6 +1450,23 @@ impl PxGroup {
     /// computation deterministically. Wraps the internal [`Self::note_peer_applied`].
     pub fn note_peer_applied_for_tests(&self, peer_id: PxNodeId, applied: SlotIndex) {
         self.note_peer_applied(peer_id, applied);
+    }
+
+    /// Inject a peer's reported `durable_snapshot_slot` watermark, normally
+    /// driven by the leader heartbeat round, so a test can exercise
+    /// group-snapshot-slot computation deterministically. Wraps the
+    /// internal [`Self::note_peer_durable`].
+    pub fn note_peer_durable_for_tests(&self, peer_id: PxNodeId, durable: SlotIndex) {
+        self.note_peer_durable(peer_id, durable);
+    }
+
+    /// Clear all peer-applied/-durable tracking and reset the published
+    /// `group_safe_slot`/`group_snapshot_slot` to `0`, so a test can
+    /// exercise the new-leader-tenure reset deterministically without
+    /// driving a real election. Wraps the internal
+    /// [`Self::reset_safe_slot_tracking`].
+    pub fn reset_safe_slot_tracking_for_tests(&self) {
+        self.reset_safe_slot_tracking();
     }
 
     /// Run one [`crate::cluster::group_maintenance`] pass synchronously,

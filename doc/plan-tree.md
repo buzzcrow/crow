@@ -50,7 +50,7 @@ order.
 | #15 | Reject oversized keys at `apply()` entry |
 | #17 | Buffer pool live wiring — recency-ranked eviction via `last_touch_tick`; D3 separate inner-base eviction budget (`evict_clean_inner`) + a real `free_subtree`/teardown leak this exposed, fixed via `free_all_resident_pages`'s segment-scan |
 | #19 | Terminology — `checkpoint`→`snapshot` (code) |
-| #20 | `CrowtreeEngine` wired into `crowkv-server` (boot path, `resume_from_slot`, snapshot/GC maintenance loop, WAL GC); configurable `maintenance_tick_ms` |
+| #20 | `CrowtreeEngine` wired into `crowkv-server` (boot path, `resume_from_slot`, snapshot/GC maintenance loop, WAL GC); configurable `maintenance_tick_ms`; real cross-replica "durable on leader + ≥1 peer" watermark (`PxGroup::group_snapshot_slot`, gossiped on the existing heartbeat round) replacing the old `group_safe_slot` approximation; new-member snapshot install (`KVEngine::snapshot_export`/`import`, `SnapshotService` gRPC, `PxGroup::join_via_snapshot`, mgmt-API `/join`) replacing full-Paxos-history replay for new members |
 | #21 | GC sweep + dual watermark + `GcStats` |
 | #22 | Raw block-device `PageStore` (`BlockPageStore` with `O_DIRECT`), wired end-to-end through `crowtree_ffi`/`crowkv`/`crowkv-server` (`--kv-backend {file,block}`) |
 | #16 | Native frame snapshot format (`kNative`): raw frame-byte export/import, no cell decode/tuple encode/tree-rebuild |
@@ -91,23 +91,106 @@ thread-bound issue (see Open Issues).
 
 ### #20. Wire `CrowtreeEngine` into `crowkv` — Remaining Follow-ups `P2`
 
-- [ ] **New-member install streaming** (`snapshot_export`/`import` ↔ a
-      `SnapshotService`). The crowtree-side half already exists and is
-      unused (`crowtree_ffi::Crowtree::snapshot_export`/`snapshot_import`),
-      but genuinely nothing else does: no streaming RPC/proto exists at all
-      (`pxos.proto`'s own comment: never-implemented), no "pull a snapshot
-      then catch up on just the WAL tail" join flow exists in
-      `crowkv-server` (new members today replay full Paxos history), and
-      correlating the snapshot's `at_slot` with the joining replica's
-      acceptor/learner state is a real cross-layer invariant. A genuine
-      distributed-systems feature, not a wiring exercise — left as a
-      separately-scoped follow-up.
-- [ ] **Cross-replica "durable on leader + ≥1 peer" watermark** — today
-      `group_safe_slot` conservatively approximates it (proven safe, never
-      overstates; see `group_maintenance.rs`'s module doc). The real thing
-      needs a new gossip channel piggybacked on Paxos heartbeats — touches
-      a sensitive, well-tested protocol path for a storage-efficiency-only
-      refinement with no correctness upside. Deferred.
+- [x] **New-member install streaming — ✅ DONE (2026-07-10).**
+      `snapshot_export`/`import` ↔ a real `SnapshotService`, scoped to the
+      snapshot-transfer mechanism itself (**not** the full joint-consensus
+      reconfiguration state machine in `design-reconfiguration.md` §2-3/
+      5-9 — `ConfigChange` log entries, both-quorum evaluation — which
+      remains entirely unimplemented in this codebase and is a separate,
+      much larger epic). Layered on the *existing* per-replica `voting`
+      flag (`PxGroup::recompute_quorum` already only counts voting
+      members), instead:
+      - `KVEngine` gained `snapshot_export`/`snapshot_import` (returns
+        `(at_slot, stream)` / `at_slot`). Real impls: `InMemKV` (a simple
+        length-prefixed binary format) and `CrowtreeEngine` (delegates to
+        `crowtree_ffi::Crowtree::snapshot_export`/`snapshot_import`,
+        parsing `at_slot` straight out of the portable-format stream
+        header rather than a second, racy FFI round-trip). Default
+        (unsupported error) for any future engine kind.
+      - New `SnapshotService` (`pxos.proto`, matching `rpc/mod.rs`'s
+        original P4 forward-declaration): a `StreamSnapshot` server-stream
+        RPC, first item a `SnapshotHeader` (`term_at_slot`, looked up via
+        the exporting replica's own `accepted_at(at_slot)` — the slot
+        itself is embedded in the exported bytes and returned by
+        `snapshot_import`, not repeated on the wire), then chunked `data`
+        frames. Server: `crowkv::rpc::snapshot_service::PxSnapshotService`,
+        wired into the same tonic `Server::builder()` as `PxService`/
+        `KvService` (`cluster::kv_server`).
+      - Client-side: `PxGroup::join_via_snapshot(peer_endpoint)` — streams
+        the snapshot, `snapshot_import`s it into the local engine, then
+        seeds the learner frontier via the *existing*
+        `PxLearner::seed_resume_frontier` (previously restart-replay-only)
+        with `(at_slot, term_at_slot)`. Must run before this replica is
+        wired into any topology (mirrors `seed_resume_frontier`'s "before
+        any `learn()`" precondition) — once wired, the *existing*
+        heartbeat catch-up path (`run_heartbeat_round`'s accept-replay
+        loop) naturally streams only the WAL tail above `at_slot`, no new
+        catch-up mechanism needed.
+      - `crowkv-server` mgmt API: `POST /stores/{sid}/groups/{gid}/join`
+        (`{replica_id, peer_endpoint}`) creates the local group via
+        `create_group_with_wal` and calls `join_via_snapshot` before any
+        remote is wired (same `quorum==1` self-election guard `add_group`
+        already has). `RemoteReplicaInfo` gained a `voting` field
+        (defaults `true`, backward compatible) threaded through
+        `add_remote_replicas`/`batch_add_remote_replicas`/
+        `remove_remote_replica`'s rebuild path (`PxGroup::
+        remote_replica_info` now returns `(id, endpoint, voting)` so a
+        rebuild can't silently re-promote a still-catching-up non-voting
+        remote). Operator flow: `/join`, then wire remotes both ways
+        (existing members as `voting: true` on the new node; the new node
+        as `voting: false` everywhere else), then re-add as `voting: true`
+        once caught up.
+      - Tests: `crowkv/tests/kv/conformance.rs`'s
+        `snapshot_export_import_round_trip` (both engines);
+        `crowkv/tests/group/snapshot_join_test.rs` (real gRPC, library
+        level); `crowkv-server/tests/snapshot_join_e2e_test.rs` (real
+        `crowkv-server` processes: snapshot-only state before any
+        wiring, then WAL-tail catch-up after wiring, end to end through
+        the mgmt HTTP API). Full `crowkv`/`crowkv-server` suites,
+        `cargo clippy`/`cargo fmt --check` clean.
+      - Constraint (documented, not enforced in code): a snapshot is only
+        meaningful between replicas running the **same** `--kv-engine`
+        backend.
+- [x] **Cross-replica "durable on leader + ≥1 peer" watermark — ✅ DONE
+      (2026-07-10).** Previously `group_safe_slot` (applied-everywhere)
+      approximated it (proven safe, never overstates; see
+      `group_maintenance.rs`'s old module doc). Now a real
+      `PxGroup::group_snapshot_slot` tracks it directly, gossiped
+      piggybacked on the *same* heartbeat round as `contiguous_applied`
+      (no new RPC, no new protocol phase):
+      - `HeartbeatReply`/`HeartbeatResponse` (`replica.rs`/`pxos.proto`)
+        gained `durable_snapshot_slot`, populated in
+        `local_replica.rs::handle_heartbeat` from this follower's own
+        `WalEngine::snapshot_slot()` (the same watermark
+        `group_maintenance::run_pass` already updates whenever
+        `KVEngine::persist_snapshot` advances) — `0` when there is no WAL.
+      - `PxGroup::note_peer_durable` (mirrors `note_peer_applied`, called
+        alongside it from `group_election.rs::run_heartbeat_round`) tracks
+        each voting peer's last-known durable slot in a new `peer_durable`
+        map and recomputes `group_snapshot_slot = min(this leader's own
+        durable slot, max(voting peer durable slots))`. The *max* over
+        peers (not `min`, unlike `group_safe_slot`) is deliberate: the
+        design only needs *one* peer beyond the leader to witness a slot's
+        durability, so a straggler peer must not hold this back the way it
+        holds back `group_safe_slot`. Reset alongside `group_safe_slot` on
+        every new leader tenure (`reset_safe_slot_tracking`).
+      - `group_maintenance.rs::run_pass` now feeds `group.group_snapshot_slot()`
+        (not `safe_slot`) as `set_gc_watermark`'s `snapshot_slot` argument —
+        closing the exact gap the old module doc documented. Always `<=`
+        the old approximation (a slot cannot be applied everywhere without
+        first being durably chosen), so this can only make engine-level
+        tombstone/version GC run *more* conservatively than before, never
+        less; the WAL segment GC's own `gc_slot` formula is untouched
+        (a separate, already-correct per-replica-restart concern).
+      - Tests: `crowkv/tests/group/snapshot_slot_test.rs`
+        (`group_snapshot_slot_is_zero_without_a_local_wal`,
+        `group_snapshot_slot_is_min_of_local_and_max_peer_durable`,
+        `group_snapshot_slot_resets_on_new_leader_tenure`), via new
+        `PxGroup::note_peer_durable_for_tests`/
+        `reset_safe_slot_tracking_for_tests` test-util hooks (mirroring
+        `note_peer_applied_for_tests`). Full `crowkv`/`crowkv-server`
+        suites (`cargo test --features test-util`) pass; `cargo clippy`/
+        `cargo fmt --check` clean on every touched file.
 - [x] Configurable maintenance tick — `PxElectionConfig::maintenance_tick_ms`
       replaces the hardcoded constant; test:
       `maintenance_loop_uses_configured_tick_interval`.
@@ -466,8 +549,8 @@ view.
 | 1 | ~~`ct_scan_async`~~ (C API + Rust FFI, mirrors `get_async`'s retry pattern) | P1 | ✅ done (2026-07-10) |
 | 2 | ~~`#17` D3 (separate inner-base eviction budget)~~ | P2 | ✅ done (2026-07-10), plus a real `free_subtree` teardown/leak bug found+fixed along the way |
 | 3 | ~~`#5` B3 (partial): `resolve_chain_sorted` copy avoidance~~ | P2 | ✅ done (2026-07-10) |
-| 4 | `#20` New-member install streaming (`SnapshotService` + join/catch-up flow) | P2 | Deferred — genuine new distributed-systems feature, needs its own session |
-| 5 | `#20` Cross-replica durable watermark (leader + ≥1 peer, vs. today's safe `group_safe_slot` approximation) | P2 | Deferred — touches Paxos heartbeat protocol for a no-correctness-upside refinement |
+| 4 | ~~`#20` Cross-replica durable watermark~~ (`PxGroup::group_snapshot_slot`, gossiped on the existing heartbeat round) | P2 | ✅ done (2026-07-10) |
+| 5 | ~~`#20` New-member install streaming~~ (`SnapshotService` + `PxGroup::join_via_snapshot` + mgmt-API `/join`) | P2 | ✅ done (2026-07-10) — scoped to the snapshot-transfer mechanism, layered on the existing `voting` flag; full joint-consensus reconfiguration (`design-reconfiguration.md`) remains a separate, unimplemented epic |
 | 6 | `#5` B3 (full): borrowed `Slice`s all the way out to `scan`/`collect_in_order`/GC | P2 | Deferred — each of the 3 callers needs its own borrowed-lifetime argument; no profiling data motivating the extra win over the copy-avoidance already landed |
 | 7 | `#5` B4 Step 2 (`ct_alloc`/`ct_free` shared allocator, true zero-copy) | P2 | Re-assessed, still deferred — would need the cell `header_reserve` layout to become a stable, exposed ABI contract; Step 1 already captures most of the win |
 | 8 | `#5` B5/B6 (size-classed pool, RDMA-pinned alloc) | P2 | Re-assessed, still blocked — design doc requires profiling-driven size classes (none exist); no RDMA backend exists at all |
@@ -475,12 +558,15 @@ view.
 
 **Rationale:** all high-risk C++ concurrency work is done (#5 B1–B3 partial,
 #3, #9, #12, #13, #11 including its `ct_scan_async` follow-up), #14 (former
-largest item) and #17 D3 are fully done, and every remaining open item
-(#4–#9) has been concretely re-assessed this session and confirmed
-correctly deferred/blocked — each for a specific, non-mechanical reason
-(a real design decision needed, a missing real-world input like profiling
-data, a missing backend, or a separately-scoped distributed-systems
-feature) rather than simply unattempted.
+largest item), #17 D3, and both of #20's remaining follow-ups (cross-replica
+watermark, new-member snapshot install) are fully done, and every remaining
+open item (#6–#9) has been concretely re-assessed this session and confirmed
+correctly deferred/blocked — each for a specific, non-mechanical reason (a
+real design decision needed, a missing real-world input like profiling
+data, or a missing backend) rather than simply unattempted. The only
+genuinely large item left unstarted is full joint-consensus reconfiguration
+(`design-reconfiguration.md`), which was never itemized in this plan-tree
+to begin with and is its own, separately-scoped epic.
 
 ---
 

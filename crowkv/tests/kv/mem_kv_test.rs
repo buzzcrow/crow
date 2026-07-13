@@ -58,6 +58,11 @@ fn get_scan_apply_always_resolve_ready() {
 }
 
 #[test]
+fn snapshot_export_import_round_trip() {
+    conformance::snapshot_export_import_round_trip(&InMemKV::new(), &InMemKV::new());
+}
+
+#[test]
 fn clear_drops_all_state() {
     let e = InMemKV::new();
     e.apply(1, &batch(vec![put(b"k", b"v")])).into_ready();

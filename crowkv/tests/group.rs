@@ -7,7 +7,8 @@
 //! gRPC, no mocks) as well as single-leader fast paths.
 //!
 //! Layout:
-//! - propose / repair: `group_propose`, `proposer`, `safe_slot`, `kv_slot_retry`
+//! - propose / repair: `group_propose`, `proposer`, `safe_slot`, `snapshot_slot`, `kv_slot_retry`
+//! - new-member snapshot join: `snapshot_join`
 //! - election & step-down: `election`, `g1_step_down_survival`
 //! - KV through the group: `kv`, `kv_forward`
 //! - remote replica transport: `remote_error`, `preemption_retry`, `paxos_error`
@@ -58,6 +59,9 @@ mod g2_crash_restart_no_data_loss;
 #[path = "group/full_restart_delete_test.rs"]
 mod full_restart_delete;
 
+#[path = "group/snapshot_join_test.rs"]
+mod snapshot_join;
+
 // These suites drive crate-internal mechanisms via the `test-util` feature
 // hooks on `PxGroup`; they compile only when that feature is enabled (the
 // crate's self dev-dependency turns it on for `cargo test`).
@@ -68,6 +72,10 @@ mod proposer;
 #[cfg(feature = "test-util")]
 #[path = "group/safe_slot_test.rs"]
 mod safe_slot;
+
+#[cfg(feature = "test-util")]
+#[path = "group/snapshot_slot_test.rs"]
+mod snapshot_slot;
 
 #[cfg(feature = "test-util")]
 #[path = "group/maintenance_test.rs"]

@@ -1,3 +1,5 @@
+#![allow(clippy::cast_possible_truncation)]
+
 use std::collections::BTreeMap;
 
 use parking_lot::RwLock;
@@ -98,4 +100,92 @@ impl KVEngine for InMemKV {
     fn clear(&self) {
         self.map.write().clear();
     }
+
+    fn snapshot_export(&self) -> Result<(u64, Vec<u8>), String> {
+        let map = self.map.read();
+        // `at_slot`: the highest slot for which this engine holds any
+        // evidence of an apply. May under-report by a NoOp-only trailing
+        // range (a repair-filled slot with an empty batch never reaches
+        // `apply` at all -- see `PxLearner::apply_entry`), which is safe
+        // per `KVEngine::resume_from_slot`'s contract: the joining replica
+        // just re-fetches and re-learns a few extra (idempotent) slots.
+        let at_slot = map.values().map(|(slot, _)| *slot).max().unwrap_or(0);
+        let mut out = Vec::new();
+        out.extend_from_slice(&MEM_SNAP_MAGIC.to_le_bytes());
+        out.extend_from_slice(&MEM_SNAP_VERSION.to_le_bytes());
+        out.extend_from_slice(&at_slot.to_le_bytes());
+        out.extend_from_slice(&(map.len() as u64).to_le_bytes());
+        for (key, (slot, cell)) in map.iter() {
+            out.extend_from_slice(&(key.len() as u32).to_le_bytes());
+            out.extend_from_slice(key);
+            out.extend_from_slice(&slot.to_le_bytes());
+            let (tombstone, value): (u8, &[u8]) = match cell {
+                Cell::Tombstone => (1, &[]),
+                Cell::Value(v) => (0, v.as_slice()),
+            };
+            out.push(tombstone);
+            out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+            out.extend_from_slice(value);
+        }
+        Ok((at_slot, out))
+    }
+
+    fn snapshot_import(&self, stream: &[u8]) -> Result<u64, String> {
+        let mut pos = 0usize;
+        let read_u32 = |pos: &mut usize| -> Result<u32, String> {
+            let bytes = stream
+                .get(*pos..*pos + 4)
+                .ok_or_else(|| "InMemKV snapshot import: truncated u32".to_string())?;
+            *pos += 4;
+            Ok(u32::from_le_bytes(bytes.try_into().unwrap()))
+        };
+        let read_u64 = |pos: &mut usize| -> Result<u64, String> {
+            let bytes = stream
+                .get(*pos..*pos + 8)
+                .ok_or_else(|| "InMemKV snapshot import: truncated u64".to_string())?;
+            *pos += 8;
+            Ok(u64::from_le_bytes(bytes.try_into().unwrap()))
+        };
+        let magic = read_u32(&mut pos)?;
+        if magic != MEM_SNAP_MAGIC {
+            return Err(format!("InMemKV snapshot import: bad magic {magic:#x}"));
+        }
+        let version = read_u32(&mut pos)?;
+        if version != MEM_SNAP_VERSION {
+            return Err(format!("InMemKV snapshot import: unsupported version {version}"));
+        }
+        let at_slot = read_u64(&mut pos)?;
+        let entry_count = read_u64(&mut pos)?;
+        let mut new_map = BTreeMap::new();
+        for _ in 0..entry_count {
+            let key_len = read_u32(&mut pos)? as usize;
+            let key = stream
+                .get(pos..pos + key_len)
+                .ok_or_else(|| "InMemKV snapshot import: truncated key".to_string())?
+                .to_vec();
+            pos += key_len;
+            let slot = read_u64(&mut pos)?;
+            let tombstone = *stream
+                .get(pos)
+                .ok_or_else(|| "InMemKV snapshot import: truncated tombstone flag".to_string())?;
+            pos += 1;
+            let value_len = read_u32(&mut pos)? as usize;
+            let value = stream
+                .get(pos..pos + value_len)
+                .ok_or_else(|| "InMemKV snapshot import: truncated value".to_string())?
+                .to_vec();
+            pos += value_len;
+            let cell = if tombstone != 0 {
+                Cell::Tombstone
+            } else {
+                Cell::Value(value)
+            };
+            new_map.insert(key, (slot, cell));
+        }
+        *self.map.write() = new_map;
+        Ok(at_slot)
+    }
 }
+
+const MEM_SNAP_MAGIC: u32 = 0x494D_4B56; // "IMKV"
+const MEM_SNAP_VERSION: u32 = 1;

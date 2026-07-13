@@ -43,6 +43,7 @@ pub fn router(state: RegistryArc) -> Router {
             "/stores/:sid/groups/:gid/remotes/:rid",
             delete(remove_remote_replica),
         )
+        .route("/stores/:sid/groups/:gid/join", post(join_group_via_snapshot))
         .route("/topology", get(export_topology))
         .route("/top", get(export_topology))
         .route("/openapi.json", get(openapi_spec))
@@ -153,10 +154,37 @@ struct AddGroupRequest {
     start_election: Option<bool>,
 }
 
+/// Request body for [`join_group_via_snapshot`]: bootstrap a new/far-lagging
+/// group member by pulling a snapshot from an existing member instead of
+/// replaying full Paxos history (plan-tree #20,
+/// `design-crowtree-snapshot-gc.md` §6).
+#[derive(ToSchema, Deserialize)]
+struct JoinGroupRequest {
+    replica_id: u64,
+    /// gRPC endpoint (`host:port`) of an existing, already-caught-up member
+    /// of this group to pull the snapshot from. Must run the **same**
+    /// `--kv-engine` backend as this store -- `KVEngine::snapshot_import`
+    /// is only ever meaningful fed a stream from the same engine kind's
+    /// `snapshot_export`.
+    peer_endpoint: String,
+}
+
 #[derive(ToSchema, Serialize, Deserialize, Clone)]
 struct RemoteReplicaInfo {
     replica_id: u64,
     endpoint: String,
+    /// Whether this remote counts toward quorum (`PxGroup::recompute_quorum`
+    /// only counts voting members). Defaults to `true` for backward
+    /// compatibility with callers predating plan-tree #20's snapshot-join
+    /// flow. A newly-joined member is typically wired as `false` on its
+    /// peers until it has caught up via [`join_group_via_snapshot`], then
+    /// promoted with a follow-up call that re-adds it as `true`.
+    #[serde(default = "default_voting_true")]
+    voting: bool,
+}
+
+fn default_voting_true() -> bool {
+    true
 }
 
 #[derive(ToSchema, Serialize)]
@@ -195,6 +223,7 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Err
         add_remote_replicas,
         remove_remote_replica,
         batch_add_remote_replicas,
+        join_group_via_snapshot,
         export_topology
     ),
     components(
@@ -210,6 +239,7 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Err
             GroupSummary,
             AddStoreRequest,
             AddGroupRequest,
+            JoinGroupRequest,
             RemoteReplicaInfo,
             RemoteListResponse,
             TopologyResponse,
@@ -585,6 +615,118 @@ async fn add_group(
     Ok(StatusCode::CREATED)
 }
 
+/// `POST /stores/{sid}/groups/{gid}/join` — new-member snapshot join
+/// (plan-tree #20, `design-crowtree-snapshot-gc.md` §6): create this
+/// store's local replica for `gid` and bootstrap its state by pulling a
+/// snapshot from `peer_endpoint` instead of replaying full Paxos history.
+///
+/// The group is added **without** wiring any remotes and **without**
+/// starting its election driver (mirrors `add_group`'s `quorum == 1`
+/// self-election guard) — this replica is not yet part of the group's
+/// topology on either side. The caller's follow-up steps:
+/// 1. `POST .../remotes` on **this** store to wire the group's existing
+///    members as this replica's remotes (`voting: true`, since they're
+///    already established).
+/// 2. `POST .../remotes` on **each existing member** to add this replica
+///    as their remote with `voting: false`, so it starts receiving
+///    heartbeat/repair catch-up for the WAL tail without affecting quorum.
+/// 3. Once caught up, re-add this replica everywhere with `voting: true`
+///    to promote it to a full voting member.
+#[utoipa::path(
+        post,
+        path = "/stores/{sid}/groups/{gid}/join",
+        tag = "management",
+        params(
+            ("sid" = u64, Path, description = "Store id"),
+            ("gid" = u64, Path, description = "Group id")
+        ),
+        request_body = JoinGroupRequest,
+        responses(
+            (status = 201, description = "Group created and snapshot import succeeded"),
+            (status = 404, description = "Store not found", body = ErrorResponse),
+            (status = 409, description = "Group already exists", body = ErrorResponse),
+            (status = 502, description = "Snapshot pull from peer_endpoint failed", body = ErrorResponse)
+        )
+    )]
+async fn join_group_via_snapshot(
+    State(state): State<RegistryArc>,
+    Path((sid, gid)): Path<(u64, u64)>,
+    Json(req): Json<JoinGroupRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+    let store = state
+        .get_store(sid)
+        .ok_or_else(|| err_json(StatusCode::NOT_FOUND, format!("store {sid} not found")))?;
+
+    if store.get_group(gid).is_some() {
+        return Err(err_json(
+            StatusCode::CONFLICT,
+            format!("group {gid} already exists in store {sid}"),
+        ));
+    }
+
+    info!(
+        store_id = sid,
+        group_id = gid,
+        replica_id = req.replica_id,
+        peer_endpoint = %req.peer_endpoint,
+        "joining PxGroup via snapshot pull"
+    );
+    let group = create_group_with_wal(
+        sid,
+        gid,
+        req.replica_id,
+        PxLocalReplicaRole::Follower,
+        state.election_cfg,
+        &state.wal_root,
+        &state.config_root,
+        state.wal_backend.clone(),
+        state.kv_engine,
+        &state.data_root,
+        state.crowtree_backend,
+    )
+    .await
+    .map_err(|e| {
+        err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to create WAL-backed group {gid} in store {sid}: {e}"),
+        )
+    })?;
+
+    let at_slot = group.join_via_snapshot(&req.peer_endpoint).await.map_err(|e| {
+        err_json(
+            StatusCode::BAD_GATEWAY,
+            format!("snapshot join against {} failed: {e}", req.peer_endpoint),
+        )
+    })?;
+    // The frontier moved from 0 to `at_slot` (or further, if a concurrent
+    // catch-up already advanced it) after `create_group_with_wal` computed
+    // `next_slot` from a still-empty replica; recompute so a future
+    // proposal (once this replica becomes leader-eligible) doesn't clash
+    // with an already-applied slot.
+    let next_slot = group
+        .local_replica()
+        .highest_seen_slot()
+        .max(group.local_replica().last_chosen_slot())
+        .max(group.local_replica().contiguous_applied())
+        .saturating_add(1)
+        .max(1);
+    group.set_next_slot(next_slot);
+
+    // No remotes wired yet on either side -- same self-election hazard
+    // `add_group` guards against, so defer the driver (see that handler's
+    // comment for the full reasoning).
+    store.add_group_without_election(group);
+
+    info!(
+        store_id = sid,
+        group_id = gid,
+        replica_id = req.replica_id,
+        at_slot,
+        "PxGroup joined via snapshot; remotes must be wired separately"
+    );
+    Ok(StatusCode::CREATED)
+}
+
 #[utoipa::path(
         delete,
         path = "/stores/{sid}/groups/{gid}",
@@ -656,9 +798,10 @@ async fn list_remote_replicas(
     let remotes: Vec<RemoteReplicaInfo> = group
         .remote_replica_info()
         .into_iter()
-        .map(|(id, endpoint)| RemoteReplicaInfo {
+        .map(|(id, endpoint, voting)| RemoteReplicaInfo {
             replica_id: id,
             endpoint: endpoint.to_string(),
+            voting,
         })
         .collect();
 
@@ -718,9 +861,9 @@ async fn add_remote_replicas(
     // We need to reconstruct and replace the group.
     // Build new remotes list = existing + new
     let mut new_group = rebuild_group_with_same_config(&group);
-    // Re-add existing remotes
-    for (id, endpoint) in group.remote_replica_info() {
-        new_group.add_remote_replica(PxRemoteReplica::new(id, endpoint.to_string()));
+    // Re-add existing remotes, preserving each one's voting flag.
+    for (id, endpoint, voting) in group.remote_replica_info() {
+        new_group.add_remote_replica(PxRemoteReplica::new(id, endpoint.to_string()).with_voting(voting));
     }
     // Add new remotes
     for r in &remotes {
@@ -729,9 +872,11 @@ async fn add_remote_replicas(
             group_id = gid,
             remote_id = r.replica_id,
             endpoint = %r.endpoint,
+            voting = r.voting,
             "adding remote replica"
         );
-        new_group.add_remote_replica(PxRemoteReplica::new(r.replica_id, r.endpoint.clone()));
+        new_group
+            .add_remote_replica(PxRemoteReplica::new(r.replica_id, r.endpoint.clone()).with_voting(r.voting));
     }
     store.add_group(new_group);
     // Re-persist after add_group so the local replica's endpoint is set.
@@ -786,7 +931,7 @@ async fn remove_remote_replica(
     }
 
     // Check if remote exists
-    let exists = group.remote_replica_info().iter().any(|(id, _)| *id == rid);
+    let exists = group.remote_replica_info().iter().any(|(id, _, _)| *id == rid);
     if !exists {
         return Err(err_json(
             StatusCode::NOT_FOUND,
@@ -800,11 +945,11 @@ async fn remove_remote_replica(
         remote_id = rid,
         "removing remote replica via management API"
     );
-    // Reconstruct group without this remote
+    // Reconstruct group without this remote, preserving voting flags.
     let mut new_group = rebuild_group_with_same_config(&group);
-    for (id, endpoint) in group.remote_replica_info() {
+    for (id, endpoint, voting) in group.remote_replica_info() {
         if id != rid {
-            new_group.add_remote_replica(PxRemoteReplica::new(id, endpoint.to_string()));
+            new_group.add_remote_replica(PxRemoteReplica::new(id, endpoint.to_string()).with_voting(voting));
         }
     }
     let current_term = group.local_replica().current_term_snapshot();
@@ -873,6 +1018,7 @@ async fn batch_add_remote_replicas(
                 new_remotes.push(RemoteReplicaInfo {
                     replica_id: topo_group.local_replica_id,
                     endpoint: addr.clone(),
+                    voting: true,
                 });
             }
         }
@@ -894,8 +1040,8 @@ async fn batch_add_remote_replicas(
         "batch adding remote replicas via management API"
     );
     let mut new_group = rebuild_group_with_same_config(&group);
-    for (id, endpoint) in group.remote_replica_info() {
-        new_group.add_remote_replica(PxRemoteReplica::new(id, endpoint.to_string()));
+    for (id, endpoint, voting) in group.remote_replica_info() {
+        new_group.add_remote_replica(PxRemoteReplica::new(id, endpoint.to_string()).with_voting(voting));
     }
     for r in &new_remotes {
         info!(
@@ -903,9 +1049,11 @@ async fn batch_add_remote_replicas(
             group_id = gid,
             remote_id = r.replica_id,
             endpoint = %r.endpoint,
+            voting = r.voting,
             "batch adding remote replica"
         );
-        new_group.add_remote_replica(PxRemoteReplica::new(r.replica_id, r.endpoint.clone()));
+        new_group
+            .add_remote_replica(PxRemoteReplica::new(r.replica_id, r.endpoint.clone()).with_voting(r.voting));
     }
     store.add_group(new_group);
     // Re-persist after add_group so the local replica's endpoint is set.

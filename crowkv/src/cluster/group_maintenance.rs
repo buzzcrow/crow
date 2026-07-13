@@ -19,15 +19,19 @@
 //!    replica is a follower that doesn't track it; see that method's own
 //!    doc — means "nothing yet provably safe to reclaim").
 //!
-//! This treats `snapshot_slot` (design §1: state durable on the leader plus
-//! at least one peer) as `safe_slot` (design §1: state every learner has
-//! applied) for `set_gc_watermark`'s two inputs, since there is no
-//! dedicated "durable on at least one peer" tracker today -- stricter than
-//! the design's ideal (which would let reclaim run slightly ahead of full
-//! `safe_slot`), but always safe: a slot cannot be locally applied
-//! everywhere without having first been durably chosen, so
-//! `group_safe_slot` never overstates what `snapshot_slot` would have
-//! allowed anyway.
+//! `set_gc_watermark`'s two inputs are `snapshot_slot` (design §1: state
+//! durable on the leader plus at least one peer) and `safe_slot` (design §1:
+//! state every learner has applied). `snapshot_slot` is
+//! [`PxGroup::group_snapshot_slot`] (plan-tree #20): each replica's own
+//! `WalEngine::snapshot_slot` (updated below, right after `persist_snapshot`
+//! advances it) is gossiped to the leader piggybacked on the same heartbeat
+//! round as `contiguous_applied` (see `HeartbeatReply::durable_snapshot_slot`
+//! / `PxGroup::note_peer_durable`), which aggregates it into `min(leader's
+//! own durable slot, max(voting peer durable slots))` -- always `<=` what
+//! `group_safe_slot` would have allowed (a slot cannot be locally applied
+//! everywhere without having first been durably chosen), so this can only
+//! let reclaim run *more* conservatively than the old `safe_slot`
+//! approximation, never less.
 
 use std::sync::{Arc, Weak};
 use std::time::Duration;
@@ -86,7 +90,8 @@ pub(crate) async fn run_pass(group: &PxGroup) {
     let engine_snapshot_at = engine.persist_snapshot();
 
     let safe_slot = group.group_safe_slot();
-    engine.set_gc_watermark(safe_slot, safe_slot);
+    let snapshot_slot = group.group_snapshot_slot();
+    engine.set_gc_watermark(snapshot_slot, safe_slot);
     engine.collect_garbage();
 
     let Some(wal) = group.local_replica().wal() else {

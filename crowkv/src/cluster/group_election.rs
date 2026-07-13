@@ -584,6 +584,10 @@ impl PxGroup {
                         // Refresh this peer's applied watermark and recompute
                         // the group safe-slot used by bounded/safe-slot reads.
                         self.note_peer_applied(peer_id, hb.contiguous_applied);
+                        // Refresh this peer's durable-snapshot watermark and
+                        // recompute the group's real "durable on leader +
+                        // >=1 peer" snapshot-slot (plan-tree #20).
+                        self.note_peer_durable(peer_id, hb.durable_snapshot_slot);
                         if acks >= quorum {
                             replica.renew_lease(t_send, cfg);
                             // Keep draining remaining replies; no further

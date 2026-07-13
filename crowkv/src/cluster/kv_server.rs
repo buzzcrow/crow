@@ -13,7 +13,8 @@
 use crate::cluster::px_kv_store::PxKvStore;
 use crate::rpc::kv_service_server::KvServiceServer;
 use crate::rpc::px_service_server::PxServiceServer;
-use crate::rpc::{KvStoreService, PxReplicaService};
+use crate::rpc::snapshot_service_server::SnapshotServiceServer;
+use crate::rpc::{KvStoreService, PxReplicaService, PxSnapshotService};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -74,8 +75,10 @@ impl KvServer for Arc<PxKvStore> {
 
         let px_service = PxReplicaService::new(self.clone());
         let kv_service = KvStoreService::new(self.clone());
+        let snapshot_service = PxSnapshotService::new(self.clone());
         let px_service_server = PxServiceServer::new(px_service);
         let kv_service_server = KvServiceServer::new(kv_service);
+        let snapshot_service_server = SnapshotServiceServer::new(snapshot_service);
 
         let (tx, rx) = tokio::sync::oneshot::channel();
 
@@ -83,6 +86,7 @@ impl KvServer for Arc<PxKvStore> {
             let serve = Server::builder()
                 .add_service(px_service_server)
                 .add_service(kv_service_server)
+                .add_service(snapshot_service_server)
                 .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
 
             tokio::select! {

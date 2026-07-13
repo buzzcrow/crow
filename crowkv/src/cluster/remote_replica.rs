@@ -326,6 +326,7 @@ impl ReplicaClient for PxRemoteReplica {
             last_chosen_term: resp.last_chosen_term,
             contiguous_applied: resp.contiguous_applied,
             highest_seen_slot: resp.highest_seen_slot,
+            durable_snapshot_slot: resp.durable_snapshot_slot,
         })
     }
 

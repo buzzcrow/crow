@@ -110,3 +110,40 @@ pub fn compare_is_empty_for_identical_state_and_detects_divergence(a: &dyn KVEng
     assert_eq!(diff.len(), 1);
     assert_eq!(diff[0].key, b"x".to_vec());
 }
+
+/// `KVEngine::snapshot_export`/`snapshot_import` round trip
+/// (`design-crowtree-snapshot-gc.md` §2/§6, plan-tree #20 new-member join):
+/// exporting `source`'s state and importing it into a fresh `target` of the
+/// same engine kind must reproduce `source`'s exact logical state
+/// (`compare` empty) and report the same `at_slot`. `target` must be freshly
+/// constructed and never previously `apply`ed to (`snapshot_import`'s
+/// documented precondition).
+pub fn snapshot_export_import_round_trip(source: &dyn KVEngine, target: &dyn KVEngine) {
+    source
+        .apply(1, &batch(vec![put(b"a", b"1"), put(b"b", b"2")]))
+        .into_ready();
+    source.apply(2, &batch(vec![del(b"a")])).into_ready();
+    source.apply(3, &batch(vec![put(b"c", b"3")])).into_ready();
+
+    let (export_at_slot, stream) = source.snapshot_export().expect("snapshot_export should succeed");
+    assert_eq!(
+        export_at_slot, 3,
+        "at_slot should reflect the highest applied slot"
+    );
+
+    let import_at_slot = target
+        .snapshot_import(&stream)
+        .expect("snapshot_import should succeed");
+    assert_eq!(
+        import_at_slot, export_at_slot,
+        "import must report the same at_slot as export"
+    );
+
+    assert!(
+        target.compare(source).is_empty(),
+        "imported state must be logically identical to the exporter's"
+    );
+    assert_eq!(target.get(b"a").into_ready(), None, "tombstoned key stays absent");
+    assert_eq!(target.get(b"b").into_ready(), Some((1, b"2".to_vec())));
+    assert_eq!(target.get(b"c").into_ready(), Some((3, b"3".to_vec())));
+}

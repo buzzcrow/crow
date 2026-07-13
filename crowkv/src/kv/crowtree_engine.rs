@@ -194,6 +194,41 @@ impl KVEngine for CrowtreeEngine {
         let _ = self.inner.handle().collect_garbage();
     }
 
+    fn snapshot_export(&self) -> Result<(u64, Vec<u8>), String> {
+        // Flush first so the export reflects every `apply` up to now, not
+        // just whatever an earlier `flush()` already moved into L1 --
+        // same reasoning as `iter_all`/`persist_snapshot` above.
+        let _ = self.inner.handle().flush();
+        let stream = self.inner.handle().snapshot_export().map_err(|e| e.to_string())?;
+        let at_slot = crowtree_snapshot_at_slot(&stream)?;
+        Ok((at_slot, stream))
+    }
+
+    fn snapshot_import(&self, stream: &[u8]) -> Result<u64, String> {
+        self.inner
+            .handle()
+            .snapshot_import(stream)
+            .map_err(|e| e.to_string())
+    }
+
     // `compare` uses the trait's default implementation (diffs `iter_all()`
     // of both sides); no override needed.
+}
+
+/// Parse the `at_slot` field out of a crowtree portable-format snapshot
+/// export stream's header, without waiting on a second FFI round-trip
+/// ([`crowtree_ffi::Crowtree::last_applied_slot`]) that could race a
+/// concurrent `apply`/`flush` between the two calls.
+///
+/// Portable header layout (`crowtree/src/snapshot_io.cpp`'s `kSnapHeader`,
+/// little-endian): `[magic:u32][version:u32][format:u8][at_slot:u64]
+/// [entry_count:u64]`. `ct_snapshot_export_begin` always uses
+/// `snapshot_format::kPortable` (`crowtree/src/c_api.cpp`) -- crowtree's C
+/// API has no format parameter, so this layout is the only one
+/// [`crowtree_ffi::Crowtree::snapshot_export`] can ever produce.
+fn crowtree_snapshot_at_slot(stream: &[u8]) -> Result<u64, String> {
+    stream
+        .get(9..17)
+        .map(|b| u64::from_le_bytes(b.try_into().expect("slice len checked by get(9..17)")))
+        .ok_or_else(|| "crowtree snapshot export: stream too short for header".to_string())
 }
