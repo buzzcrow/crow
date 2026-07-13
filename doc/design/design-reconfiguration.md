@@ -181,6 +181,17 @@ This way, the moment `C_new` is applied, the new leader is already a regular vot
 
 ## 7. Group-0 Special Cases
 
+> **Decision record (2026-07, see `plan-client.md` §6 Issue 1):** `Group-0` as
+> described in this section was never implemented. Topology (per-group
+> memberships, cluster inventory) is operator-managed via the HTTP management
+> API and persisted to per-group config files, not self-hosted in a
+> Paxos-replicated system group — see [`requirement.md` §7.1](../requirement.md#71-groups-and-cluster-topology).
+> There is therefore no cluster-wide `config_version`, no recursive
+> reconfiguration case, and no "Group-0 pauses data-group reconfiguration"
+> rule in the shipped system. Kept below for history/reference only, in case
+> a system embedding `crowkv`'s primitives wants to build its own such
+> metadata group on top.
+
 Group-0 holds the cluster topology (per-group memberships, partitioning rule, `config_version`). Reconfiguring Group-0 itself looks like reconfiguring any other group, but it has two extra constraints.
 
 ### 7.1 Topology vs Group-0 membership

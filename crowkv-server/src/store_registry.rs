@@ -104,7 +104,7 @@ impl KvStoreRegistry {
     ) -> Self {
         let data_root = wal_root
             .parent()
-            .map_or_else(|| PathBuf::from("crowtree"), |p| p.join("crowtree"));
+            .map_or_else(|| PathBuf::from("ctdata"), |p| p.join("ctdata"));
         Self {
             stores: DashMap::new(),
             election_cfg,

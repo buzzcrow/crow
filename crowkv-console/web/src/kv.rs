@@ -1,15 +1,14 @@
-use crate::error::{err_400, err_502, map_err, ErrorBody};
+use crate::error::{err_400, err_502, ErrorBody};
 use crate::mgmt::refresh_node_cache;
 use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use crowkv_console_shared::clients::grpc::{GetOutcome, KvClient, ScanOutcome};
-use crowkv_console_shared::cluster::{GroupHealth, ReplicaRole};
-use crowkv_console_shared::error::Error as SharedError;
+use crowkv_client::{ClientConfig, CrowkvClient, GetOutcome, ReadMode, ScanOutcome};
+use crowkv_console_shared::cluster::GroupHealth;
 use hex;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashSet;
 use tokio::time::{sleep, Duration};
 
 #[derive(Debug, Deserialize)]
@@ -155,42 +154,6 @@ async fn kv_endpoint_for_node(
     }
 }
 
-async fn group_candidate_endpoints(
-    state: &AppState,
-    sid: u64,
-    gid: u64,
-) -> Result<Vec<String>, (StatusCode, Json<ErrorBody>)> {
-    let view = state.monitor_cache.resolve_group(sid, gid).await.ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ErrorBody {
-                error: format!("group {gid} in store {sid} not found or has no replicas"),
-            }),
-        )
-    })?;
-
-    let mut replicas = view.replicas;
-    replicas.sort_by_key(|replica| replica.role != ReplicaRole::Leader);
-
-    let mut seen = HashSet::new();
-    let mut endpoints = Vec::new();
-    for replica in replicas {
-        if let Ok(endpoint) = kv_endpoint_for_node(state, sid, &replica.node_id).await {
-            let canonical = canonical_endpoint(&endpoint);
-            if seen.insert(canonical) {
-                endpoints.push(endpoint);
-            }
-        }
-    }
-
-    if endpoints.is_empty() {
-        return Err(err_502(format!(
-            "group {gid} in store {sid} has no gRPC endpoints configured"
-        )));
-    }
-    Ok(endpoints)
-}
-
 #[derive(Debug, Serialize)]
 pub struct EndpointResponse {
     /// gRPC URL of the group's current leader (`http://host:port`),
@@ -232,50 +195,11 @@ fn host_of(grpc_url: &str) -> String {
     }
 }
 
-fn endpoint_from_hint(hint: &str) -> Option<String> {
-    let trimmed = hint.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
-fn canonical_endpoint(endpoint: &str) -> String {
-    endpoint
-        .strip_prefix("http://")
-        .or_else(|| endpoint.strip_prefix("https://"))
-        .unwrap_or(endpoint)
-        .trim()
-        .to_string()
-}
-
-fn status_is_not_leader(status: &str) -> bool {
-    status.to_ascii_lowercase().contains("not leader")
-}
-
-fn enqueue_back(queue: &mut VecDeque<String>, pending: &mut HashSet<String>, endpoint: String) {
-    let canonical = canonical_endpoint(&endpoint);
-    if pending.insert(canonical) {
-        queue.push_back(endpoint);
-    }
-}
-
-fn enqueue_front(queue: &mut VecDeque<String>, pending: &mut HashSet<String>, endpoint: String) {
-    let canonical = canonical_endpoint(&endpoint);
-    if pending.insert(canonical) {
-        queue.push_front(endpoint);
-    }
-}
-
-/// Refresh the monitor cache for every node hosting a replica of
-/// `(sid, gid)`. Called on `NotLeader` and on initial endpoint resolution so
-/// the next `leader_for` call observes a post-election view. If the cache
-/// has no record for the group yet, fall back to the persisted config
-/// replica list so a restarted web console can still find the nodes to
-/// refresh.
-async fn refresh_group_nodes(state: &AppState, sid: u64, gid: u64) {
-    let node_ids: Vec<String> = if let Some(view) = state.monitor_cache.resolve_group(sid, gid).await {
+/// Node ids hosting a replica of `(sid, gid)`, per the monitor cache, or (if
+/// the cache has no record for the group yet) the persisted config replica
+/// list -- so a restarted web console can still find the nodes to query.
+async fn group_node_ids(state: &AppState, sid: u64, gid: u64) -> Vec<String> {
+    if let Some(view) = state.monitor_cache.resolve_group(sid, gid).await {
         view.replicas.into_iter().map(|r| r.node_id).collect()
     } else {
         let cfg = state.config.read().unwrap();
@@ -284,114 +208,73 @@ async fn refresh_group_nodes(state: &AppState, sid: u64, gid: u64) {
             .find(|g| g.store_id == sid && g.group_id == gid)
             .map(|g| g.replicas.iter().map(|r| r.node_id.clone()).collect())
             .unwrap_or_default()
-    };
-    for node_id in &node_ids {
+    }
+}
+
+/// Refresh the monitor cache for every node hosting a replica of
+/// `(sid, gid)`. Called on initial endpoint resolution so the next
+/// `leader_for` call observes a post-election view.
+async fn refresh_group_nodes(state: &AppState, sid: u64, gid: u64) {
+    for node_id in &group_node_ids(state, sid, gid).await {
         refresh_node_cache(state, node_id).await;
     }
 }
 
-/// Run one KV gRPC operation against the currently-cached leader.
-/// On [`SharedError::NotLeader`], refresh every hosting node's entry
-/// in the monitor cache, re-resolve the endpoint, and retry the op
-/// exactly once. Any other error propagates unchanged.
+/// `crowkv-server` management-API base URLs (`ServerEntry::url`, e.g.
+/// `http://host:mgmt_port`) for every node hosting a replica of `(sid,
+/// gid)`. This is [`CrowkvClient`]'s discovery input (`GET /topology` on
+/// each seed): any one reachable replica's own `/topology` response
+/// carries the real leader's endpoint via its `remotes` list, so seeding
+/// with every known replica's mgmt URL is enough for `CrowkvClient` to
+/// self-heal a stale/dead leader without this module doing any endpoint
+/// bookkeeping itself (`doc/plan-client.md` §5 C1-C2).
 ///
-/// `op` receives a mutable `KvClient` bound to the current leader's
-/// endpoint. It must be re-runnable (idempotent under `(client_id,
-/// seq)` at the upstream, which every KV request is).
-async fn with_leader_retry<F, Fut, T>(
+/// # Errors
+/// `404` if the group is unknown / has no replicas; `502` if none of its
+/// replica nodes have a configured management URL.
+async fn mgmt_seeds_for_group(
     state: &AppState,
     sid: u64,
     gid: u64,
-    mut op: F,
-) -> Result<T, (StatusCode, Json<ErrorBody>)>
-where
-    F: FnMut(KvClient) -> Fut,
-    Fut: std::future::Future<Output = Result<T, SharedError>>,
-{
-    let mut queue = VecDeque::new();
-    let mut pending = HashSet::new();
-    let mut attempt_counts: HashMap<String, usize> = HashMap::new();
-    let mut last_err: Option<SharedError> = None;
-
-    enqueue_back(
-        &mut queue,
-        &mut pending,
-        resolve_kv_endpoint(state, sid, gid).await?,
-    );
-    for endpoint in group_candidate_endpoints(state, sid, gid).await? {
-        enqueue_back(&mut queue, &mut pending, endpoint);
+) -> Result<Vec<String>, (StatusCode, Json<ErrorBody>)> {
+    let node_ids = group_node_ids(state, sid, gid).await;
+    if node_ids.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorBody {
+                error: format!("group {gid} in store {sid} not found or has no replicas"),
+            }),
+        ));
     }
 
-    while let Some(endpoint) = queue.pop_front() {
-        let canonical = canonical_endpoint(&endpoint);
-        pending.remove(&canonical);
-        let count = attempt_counts.entry(canonical.clone()).or_default();
-        if *count >= state.kv_retry.max_attempts_per_endpoint {
-            continue;
-        }
-        *count += 1;
-
-        let client = match KvClient::connect(endpoint.clone()).await {
-            Ok(client) => client,
-            Err(e) => {
-                last_err = Some(e);
-                continue;
+    let cfg = state.config.read().unwrap();
+    let mut seen = HashSet::new();
+    let mut seeds = Vec::new();
+    for node_id in &node_ids {
+        if let Some(server) = cfg.server_for_node(node_id) {
+            if seen.insert(server.url.clone()) {
+                seeds.push(server.url.clone());
             }
-        };
-
-        match op(client).await {
-            Ok(v) => return Ok(v),
-            Err(SharedError::NotLeader { hint }) => {
-                last_err = Some(SharedError::NotLeader { hint: hint.clone() });
-                KvClient::invalidate_cache(&endpoint);
-                refresh_group_nodes(state, sid, gid).await;
-                sleep(Duration::from_millis(state.kv_retry.not_leader_backoff_ms)).await;
-                if let Some(endpoint) = endpoint_from_hint(&hint) {
-                    enqueue_front(&mut queue, &mut pending, endpoint);
-                }
-                if let Ok(endpoints) = group_candidate_endpoints(state, sid, gid).await {
-                    for endpoint in endpoints {
-                        enqueue_back(&mut queue, &mut pending, endpoint);
-                    }
-                }
-            }
-            Err(SharedError::UpstreamRpc { node_id, status }) => {
-                let err = SharedError::UpstreamRpc {
-                    node_id: node_id.clone(),
-                    status: status.clone(),
-                };
-                if node_id == "<grpc>" && !status_is_not_leader(&status) {
-                    return Err(map_err(err));
-                }
-                last_err = Some(err);
-                KvClient::invalidate_cache(&endpoint);
-                refresh_group_nodes(state, sid, gid).await;
-                sleep(Duration::from_millis(state.kv_retry.not_leader_backoff_ms)).await;
-                enqueue_front(&mut queue, &mut pending, endpoint);
-                if let Ok(endpoints) = group_candidate_endpoints(state, sid, gid).await {
-                    for endpoint in endpoints {
-                        enqueue_back(&mut queue, &mut pending, endpoint);
-                    }
-                }
-            }
-            Err(SharedError::NodeUnreachable { node_id, reason }) => {
-                last_err = Some(SharedError::NodeUnreachable { node_id, reason });
-                KvClient::invalidate_cache(&endpoint);
-                refresh_group_nodes(state, sid, gid).await;
-                if let Ok(endpoints) = group_candidate_endpoints(state, sid, gid).await {
-                    for endpoint in endpoints {
-                        enqueue_back(&mut queue, &mut pending, endpoint);
-                    }
-                }
-            }
-            Err(e) => return Err(map_err(e)),
         }
     }
+    drop(cfg);
 
-    Err(map_err(last_err.unwrap_or_else(|| SharedError::UpstreamRpc {
-        node_id: "<grpc>".into(),
-        status: format!("no reachable leader for group {gid} in store {sid}"),
-    })))
+    if seeds.is_empty() {
+        return Err(err_502(format!(
+            "group {gid} in store {sid} has no configured server management URL"
+        )));
+    }
+    Ok(seeds)
+}
+
+/// Map a [`crowkv_client::Error`] to a JSON error response. Every variant
+/// here is either a discovery/transport failure or a retry-budget
+/// exhaustion, which mirrors the old `with_leader_retry`'s uniform "give up
+/// and surface 502" outcome once its own candidate-endpoint queue was
+/// drained -- there is no 4xx case since `mgmt_seeds_for_group` already
+/// rejected an unknown group before a [`CrowkvClient`] is even constructed.
+fn map_kv_client_err(e: crowkv_client::Error) -> (StatusCode, Json<ErrorBody>) {
+    err_502(format!("{e}"))
 }
 
 /// Get a value from the KV store.
@@ -404,11 +287,12 @@ pub async fn http_kv_get(
     Path((sid, gid)): Path<(u64, u64)>,
 ) -> Result<Json<KvGetResponse>, (StatusCode, Json<ErrorBody>)> {
     let key = decode_key(q.key, q.key_hex)?;
-    let outcome = with_leader_retry(&state, sid, gid, |mut client| {
-        let key = key.clone();
-        async move { client.get(gid, &key).await }
-    })
-    .await?;
+    let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
+    let client = CrowkvClient::new(ClientConfig::new(seeds));
+    let outcome = client
+        .get(sid, gid, &key, ReadMode::Linearizable, None)
+        .await
+        .map_err(map_kv_client_err)?;
     match outcome {
         GetOutcome::NotFound => Ok(Json(KvGetResponse {
             found: false,
@@ -472,11 +356,12 @@ pub async fn http_kv_scan(
         (None, None) => Vec::new(),
     };
     let limit = q.limit;
-    let ScanOutcome { items, truncated } = with_leader_retry(&state, sid, gid, |mut client| {
-        let prefix = prefix.clone();
-        async move { client.scan(gid, &prefix, limit).await }
-    })
-    .await?;
+    let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
+    let client = CrowkvClient::new(ClientConfig::new(seeds));
+    let ScanOutcome { items, truncated } = client
+        .scan(sid, gid, &prefix, limit, ReadMode::Linearizable)
+        .await
+        .map_err(map_kv_client_err)?;
     let items = items
         .into_iter()
         .map(|(k, v)| KvScanItemView {
@@ -508,12 +393,12 @@ pub async fn http_kv_put(
     };
     let client_id = body.client_id;
     let seq = body.seq;
-    let out = with_leader_retry(&state, sid, gid, |mut client| {
-        let key = key.clone();
-        let value = value.clone();
-        async move { client.put(gid, &key, &value, client_id, seq).await }
-    })
-    .await?;
+    let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
+    let client = CrowkvClient::new(ClientConfig::new(seeds));
+    let out = client
+        .put(sid, gid, &key, &value, Some((client_id, seq)))
+        .await
+        .map_err(map_kv_client_err)?;
     Ok(Json(KvWriteResponse {
         ok: true,
         revision: out.revision,
@@ -532,11 +417,12 @@ pub async fn http_kv_delete(
     let key = decode_key(body.key, body.key_hex)?;
     let client_id = body.client_id;
     let seq = body.seq;
-    let out = with_leader_retry(&state, sid, gid, |mut client| {
-        let key = key.clone();
-        async move { client.delete(gid, &key, client_id, seq).await }
-    })
-    .await?;
+    let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
+    let client = CrowkvClient::new(ClientConfig::new(seeds));
+    let out = client
+        .delete(sid, gid, &key, Some((client_id, seq)))
+        .await
+        .map_err(map_kv_client_err)?;
     Ok(Json(KvWriteResponse {
         ok: true,
         revision: out.revision,

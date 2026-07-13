@@ -26,7 +26,7 @@ The doc explains **what the system is** and **how it behaves**. It does not pres
   - [6.2 Read-Your-Writes Follower Read](#62-read-your-writes-follower-read)
   - [6.3 Bounded-Stale Follower Read](#63-bounded-stale-follower-read)
   - [6.4 Scan Modes](#64-scan-modes)
-- [7. Cluster Bootstrap and Group-0](#7-cluster-bootstrap-and-group-0)
+- [7. Cluster Bootstrap and Topology Management](#7-cluster-bootstrap-and-topology-management)
 - [8. Cross-Cutting Topics](#8-cross-cutting-topics)
   - [8.1 Leader Election](#81-leader-election)
   - [8.2 Parallel Slot Pipelining](#82-parallel-slot-pipelining)
@@ -58,36 +58,34 @@ The literature backing each choice is collected in [§12 References](#12-referen
 
 ## 2. Architecture Overview
 
-A CrowKV cluster is a set of physical nodes. Each physical node runs one `KvStore`. A `KvStore` may host **multiple** `PxGroup`s — Group-0 (system, holds topology) and any number of data groups. Membership in a group is independent of physical-node identity.
+A CrowKV cluster is a set of physical nodes. Each physical node runs one `KvStore` (a `crowkv-server` process). A `KvStore` may host **multiple** `PxGroup`s. Group creation and membership are **operator-managed** via each node's HTTP management API — there is no self-hosted system group; see [§7](#7-cluster-bootstrap-and-topology-management) and [requirement.md §7.1](requirement.md#71-groups-and-cluster-topology).
 
 ```
                               CrowKV Cluster
    ┌────────────────────────────────────────────────────────────────┐
    │   KvStore A               KvStore B               KvStore C    │
    │   ┌─────────┐             ┌─────────┐             ┌─────────┐  │
-   │   │Group-0 L│  ◄────────► │Group-0 F│  ◄────────► │Group-0 F│  │
-   │   │Group-1 F│             │Group-1 L│             │Group-1 F│  │
-   │   │Group-2 F│             │Group-2 F│             │Group-2 L│  │
+   │   │Group-1 L│  ◄────────► │Group-1 F│  ◄────────► │Group-1 F│  │
+   │   │Group-2 F│             │Group-2 L│             │Group-2 F│  │
    │   └─────────┘             └─────────┘             └─────────┘  │
    │                                                                │
    └─────────▲──────────────────────────────────────────────────────┘
-             │  describe-cluster RPC + per-group writes/reads
+             │  HTTP /topology (mgmt API) + per-group writes/reads (gRPC)
              │
         ┌────┴────┐
-        │ Client  │  sends KV RPC → KvStore selects group by group_id
+        │ Client  │  sends KV RPC with explicit group_id → KvStore routes to that PxGroup
         │ library │
         └─────────┘
 ```
 
-- **Group-0** is a special system group whose log records cluster topology, partitioning rule (`num_groups`), the per-group membership, and the cluster `config_version`. Clients learn this via the describe-cluster RPC at startup.
-- **KvStore** is the KV-facing runtime on one physical node. `KvService` delegates KV operations to `KvStore`; the store selects a `PxGroup` by explicit `group_id` routing hint and drives that group through Paxos.
+- **KvStore** is the KV-facing runtime on one physical node. `KvService` delegates KV operations to `KvStore`; the store selects a `PxGroup` by explicit `group_id` routing hint (supplied by the caller — see [requirement.md §7.4](requirement.md#74-group-routing)) and drives that group through Paxos.
 - **PxGroup** is Paxos-only. It does not depend on KV semantics. It exposes Paxos behavior such as proposing values and running accept/learn processing over opaque log entries.
 - **Local and remote replicas** compose a group on one store. Each `PxGroup` contains exactly one `PxLocalReplica` for the local member and zero or more `PxRemoteReplica` proxies for members on other stores.
 - **PxLocalReplica** plays acceptor and learner roles for one group member. It owns the slot list and learner storage, delegating acceptor state operations to `PxAcceptor` and learned-value application to `PxLearner`.
 - **PxRemoteReplica** is an RPC utility/proxy for a replica on a remote physical node. It owns or uses connection-management facilities for that remote endpoint; the local group communicates with it only through RPC.
-- **Data groups** (`Group-1` … `Group-N`) hold key ranges. The mapping is `group_id = hash(key) % num_groups`, fixed at cluster creation ([requirement.md §7.4](requirement.md#74-sharding)).
-- A node typically participates in Group-0 plus a subset of data groups. Group sizes can differ (e.g. Group-0 = 5, data groups = 3) for higher metadata availability.
-- All inter-node and client-facing communication is gRPC + protobuf, with append-only field numbers for rolling-upgrade compatibility ([requirement.md §9.2](requirement.md#92-rolling-upgrade)).
+- **Groups and their key ranges (if any)** are entirely operator/application-defined; `crowkv` has no `num_groups` or `hash(key) -> group_id` concept of its own ([requirement.md §7.4](requirement.md#74-group-routing)).
+- A node typically hosts whatever subset of groups the operator assigned it via the HTTP management API. Group sizes can differ per group (e.g. one group of 5 for higher-priority data, others of 3).
+- All inter-node and client-facing gRPC communication is protobuf, with append-only field numbers for rolling-upgrade compatibility ([requirement.md §9.2](requirement.md#92-rolling-upgrade)). Topology discovery is HTTP, not gRPC (see [§7](#7-cluster-bootstrap-and-topology-management)).
 
 ---
 
@@ -112,7 +110,7 @@ The `crowkv` library is structured as a small set of cooperating modules. The se
 | **Snapshot** | Takes per-group snapshots; serves snapshot install to lagging peers. | Storage Engine, WAL |
 | **Dedup Cache** | Per-`client_id` last-applied sequence; persisted in the log stream so it survives leader change. | Learner, Storage Engine |
 | **Storage Engine** | Pluggable trait. In-memory tree, ordered file, and crowtree backends share one interface. | Learner, Snapshot |
-| **Topology / Group-0 Client** | Caches cluster topology and the group→leader map; refreshed on `NotLeader`. | RPC |
+| **Topology Client** | Caches cluster topology (via the HTTP management API's `/topology`) and the group→leader map; refreshed on `NotLeader`. | RPC, HTTP mgmt API |
 | **RPC** | Thin gRPC layer with retries and `NotLeader` handling. | (network) |
 
 Single-leader hot path on the leader: **Proposer → WAL → Replicator → Learner → ack to client.** All other modules support this path or recover from its failures.
@@ -170,9 +168,10 @@ Per slot, on an acceptor:
 
 ### 4.4 Group Configuration
 
-`PxGroupConfig` is the membership of one group. Stored in two places:
+`PxGroupConfig` is the membership of one group. There is no cluster-level Group-0 log holding every group's config; each group owns its own configuration:
 
-- The current `PxGroupConfig` lives in **Group-0's log** as a `ConfigChange` entry; this is the cluster-level source of truth.
+- The **initial/static** membership is set by an operator via the HTTP management API and persisted to that group's own config file on each node (`GroupConfigStore`, one file per `(store_id, group_id)`) — this is the durable source of truth today.
+- **Dynamic reconfiguration** (§8.5, joint consensus) appends a `ConfigChange` entry to the *group's own* Paxos log, the same log that carries its `Write` entries — not a separate system group's log.
 - Each member's local state caches the *active* config and, during reconfiguration, the *joint* config (see [§8.5](#85-reconfiguration)).
 
 A config carries: `group_id`, `members[]` (each with `node_id`, `endpoint`, voting flag), `quorum_size`, `config_version`.
@@ -298,24 +297,26 @@ The linearizable mode uses the **leader's own** contiguous frontier, not the cro
 
 ---
 
-## 7. Cluster Bootstrap and Group-0
+## 7. Cluster Bootstrap and Topology Management
 
-A fresh cluster bootstraps through Group-0:
+> **Decision record (2026-07, see `plan-client.md` §6 Issue 1):** this section originally described a self-hosted `Group-0` system group (bootstrapped from a static seed file, self-electing, and the source of truth for `num_groups`/partitioning/membership). That design was never implemented. The operator-managed HTTP model below is the accepted, implemented, and tested replacement; see [requirement.md §7.1](requirement.md#71-groups-and-cluster-topology) for the full rationale.
 
-1. Operator starts each `PxNode` with a static config: own `node_id`, listen endpoint, seed-list, and the initial Group-0 membership.
-2. The Group-0 members run a leader election among themselves. The first leader writes the initial cluster topology entry into Group-0's log: `num_groups`, partitioning rule, per-group membership.
-3. Each `PxNode` reads Group-0 (as a Group-0 follower or as a regular RPC client) to learn which data groups it must host. It then starts the per-group state machines.
-4. Data-group leaders are elected; each leader writes a `NoOp` at slot 1 of its log to assert leadership (this is the standard Raft-style commit-empty-entry pattern adapted to Paxos).
+A fresh cluster bootstraps per-node, per-group, driven by an operator (or an orchestrator like `crowkv-console`) through each node's HTTP management API:
+
+1. Operator starts each `crowkv-server` process (`PxNode`) with its own `node_id`, listen endpoints, and a `--config-root` for persisted group configs.
+2. For each group the operator wants to create, it calls `POST /stores/:sid/groups` on every node that should host a member, supplying that group's membership. Each node persists the group's config to its own config file (`GroupConfigStore`) and starts that group's election driver once membership is wired.
+3. Each group elects its own leader independently (standard Raft-style election, see [§8.1](#81-leader-election)); the leader writes a `NoOp` at slot 1 to assert leadership.
+4. On restart, a node reloads each of its groups' persisted config files and resumes without the operator re-issuing the HTTP calls (see [requirement.md §15.2.3](requirement.md#1523-topology-wiring-workflow)).
 
 Steady-state client discovery:
 
-- The client library is configured with a **seed list** of one or more `PxNode` endpoints.
-- It calls **describe-cluster** on any seed; the response carries the current Group-0 leader and the cached group→leader map.
-- For each subsequent operation, the client hashes the key, finds the group, and sends the request directly to that group's cached leader.
+- The client library is configured with a **seed list** of one or more nodes' HTTP management API endpoints.
+- It polls **`/topology`** on a seed; the response carries every group hosted by that seed's stores, each with its current `leader_id`/`local_replica`/`remotes` (endpoints), from which the client derives a `(store_id, group_id) -> leader_endpoint` cache.
+- For each subsequent operation, the caller supplies an explicit `group_id`; the client sends the request directly to that group's cached leader.
 - On `NotLeader { hint }`, the client retries the hint immediately and refreshes its cache. On unknown leader, it waits 1 s then retries ([requirement.md §10.2](requirement.md#102-retry-and-idempotency)).
-- The client never queries Group-0 on the hot path; it does so only on cache miss, on `NotLeader`, or on a scheduled refresh.
+- The client never re-polls `/topology` on the hot path; it does so only on cache miss, on `NotLeader`, or on a scheduled refresh.
 
-Group-0 vs data groups behave identically with respect to consensus; they differ only in the kinds of payloads they accept (`ConfigChange` for Group-0, `Write` for data groups).
+All groups behave identically with respect to consensus; there is no distinguished system group.
 
 ---
 
@@ -379,7 +380,7 @@ Membership changes use Raft-style **joint consensus** adapted to Paxos:
 - The transition `C_old → C_new` goes through an intermediate joint config `C_old ∪ C_new` where decisions require quorums from *both* old and new memberships.
 - New members first receive a **snapshot install** to bootstrap, then catch up the WAL tail before becoming voting members.
 - Removed members complete their in-flight responsibilities, transfer leadership if needed, and retire after the new config is committed.
-- Group-0 reconfiguration uses the same machinery; the only special case is that Group-0 holds the cluster topology and must serialize topology changes with its own membership changes.
+- There is no system group requiring special-case serialization; every group's reconfiguration follows the same joint-consensus machinery independently.
 
 Supported transitions: 3 ↔ 5 ↔ 7. Larger or smaller groups are not in scope.
 
@@ -473,7 +474,7 @@ of them have since been resolved there:
 | Joint-consensus quorum overlap for asymmetric transitions (e.g. 3 → 5) | [`design-reconfiguration.md §8.3`](design/design-reconfiguration.md#83-asymmetric-transitions-and-open-question) — new members stay non-voting through catch-up in the joint phase. |
 | Compaction policy for the storage engine | [`design-state-machine.md §7`](design/design-state-machine.md#7-compaction-policy) — gated on `min(snapshot_slot, safe_slot)`. |
 | Snapshot transfer chunk size / throttling defaults | [`design-state-machine.md §10`](design/design-state-machine.md#10-tunables-and-defaults) — `snapshot_chunk_bytes` default 1 MiB. |
-| Group-0 special handling during simultaneous topology + Group-0 membership change | [`design-reconfiguration.md §7.2`](design/design-reconfiguration.md#72-serializing-topology-changes-with-group-0-membership-change) — Group-0 membership changes pause data-group topology changes. |
+| Group-0 special handling during simultaneous topology + Group-0 membership change | [`design-reconfiguration.md §7`](design/design-reconfiguration.md#7-group-0-special-cases) — moot: `Group-0` was never built (§7's own decision record); kept for history only. |
 
 No open design questions remain at this level; new ones, if any, should be
 tracked in the relevant sub-topic doc directly rather than here.

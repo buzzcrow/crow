@@ -24,9 +24,7 @@ pub mod ssh;
 pub mod test_ports;
 pub mod topology;
 
-pub use config::{
-    ConsoleConfig, ConsoleConfigEngine, KvRetryConfig, NodeEntry, RackEntry, ServerEntry, TomlFileEngine,
-};
+pub use config::{ConsoleConfig, ConsoleConfigEngine, NodeEntry, RackEntry, ServerEntry, TomlFileEngine};
 pub use snapshot::{
     ClusterSnapshot, GroupView, HealthInfo, KvStoreView, LocalReplicaView, RemoteMetrics, RemoteReplicaView,
     ServerSnapshot, StoreView,
