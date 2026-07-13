@@ -54,6 +54,16 @@ using ct_options = struct
     uint64_t    buffer_pool_bytes; // 0 => default
     uint8_t     compression;       // 0 = none, 1 = lz4
     uint64_t    max_inline_value;  // 0 => default (frame_bytes/4)
+    // plan-tree #22: durable backend selection when `path` is set (ignored
+    // for the in-memory case). 0 = auto (FilePageStore, buffered I/O --
+    // today's only durable option before this field existed). 1 = raw
+    // block device (BlockPageStore, O_DIRECT) for a real SSD/SCM
+    // deployment target; `path` may be a block device node or a
+    // pre-allocated regular file (BlockPageStore works with either).
+    // BlockPageStore has no async twin yet, so get_async/flush_async/
+    // snapshot_async fall back to synchronous completion (design §6.3)
+    // when this is set to 1.
+    uint8_t backend;
 };
 
 // ── Lifecycle + durability ────────────────────────────────────────
@@ -77,6 +87,12 @@ void    ct_clear_io_error(ct_tree *t);
 // Test/ops hook -- forces the demand-load path a subsequent ct_get/
 // ct_get_async will have to take. Returns the number of leaves evicted.
 uint64_t ct_evict_clean_leaves(ct_tree *t, uint64_t max_resident_leaves);
+
+// plan-tree.md #17 D3: same contract, but for resident *inner* bases, down
+// to at most `max_resident_inner` (crowtree::Crowtree::evict_clean_inner) --
+// a genuinely separate ranked budget/pass from ct_evict_clean_leaves, never
+// evicting a leaf. Returns the number of inner bases evicted.
+uint64_t ct_evict_clean_inner(ct_tree *t, uint64_t max_resident_inner);
 
 // ── Data path ─────────────────────────────────────────────────────
 ct_status ct_apply_put(ct_tree *t, uint64_t slot, const uint8_t *key, size_t klen, const uint8_t *val, size_t vlen);
@@ -135,14 +151,33 @@ ct_future *ct_get_async(ct_tree *t, const uint8_t *key, size_t klen);
 ct_future *ct_flush_async(ct_tree *t);
 ct_future *ct_snapshot_async(ct_tree *t);
 
+// scan() twin (plan-tree.md #11 follow-up). Unlike ct_get_async, a single
+// pending scan may need more than one page load (one per cold leaf, plus
+// possibly the initial root->leaf descent) -- each is resolved by retrying
+// the whole scan from scratch (still correct: every retry either resolves
+// or permanently loads one more page, so it always terminates; see
+// Crowtree::scan_async's doc comment). On completion (ct_future_poll),
+// *out_value carries the same packed record format as ct_scan
+// (`[u32 klen][key][u64 slot][u32 vlen][val]*`, always a *malloc'd*, owned
+// buffer -- pass it to ct_free_buf, no zero-copy borrow attempted here,
+// unlike ct_get_async), *out_slot carries the entry count (mirrors
+// ct_scan's *out_count), and *out_found carries the truncated flag (0/1,
+// mirrors ct_scan's *truncated). No borrowed state, so ct_future_poll frees
+// `f` immediately once done, same as flush/snapshot -- do not also call
+// ct_future_free.
+ct_future *ct_scan_async(ct_tree *t, const uint8_t *prefix, size_t plen, size_t limit);
+
 // Non-blocking poll.
 // *done == 0: still pending; f remains valid, poll again later (e.g. after
 //   the Rust side's AsyncFd wakes on ct_reactor_eventfd()).
 // *done == 1: the returned ct_status is the underlying operation's result
-//   (mirrors what ct_get/ct_flush/ct_snapshot would have returned).
-//   - ct_flush_async/ct_snapshot_async: f has been freed by this call (do
-//     not also call ct_future_free). *out_slot carries snapshot_async's
-//     durable last_applied_slot; *out_found/*out_value are untouched.
+//   (mirrors what ct_get/ct_flush/ct_snapshot/ct_scan would have returned).
+//   - ct_flush_async/ct_snapshot_async/ct_scan_async: f has been freed by
+//     this call (do not also call ct_future_free). *out_slot carries
+//     snapshot_async's durable last_applied_slot, or scan_async's entry
+//     count; *out_found carries scan_async's truncated flag; *out_value
+//     carries scan_async's packed, owned entries buffer (pass to
+//     ct_free_buf) -- otherwise untouched.
 //   - ct_get_async: f is NOT freed by this call -- see ct_future's own doc
 //     comment above. *out_found is 0/1 and, if found, *out_slot and
 //     *out_value are set; *out_value may be a *borrowed* pointer into a

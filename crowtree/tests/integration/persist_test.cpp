@@ -6,11 +6,15 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <atomic>
+#include <condition_variable>
 #include <cstdio>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace crowtree;
@@ -36,6 +40,75 @@ std::string make_key(int i)
 
 // Superblock slot size from persist.cc (each A/B slot is 4 KiB).
 constexpr uint64_t kSbBytes = 4096;
+
+// plan-tree #8: blocks the *first* write_at() call until release() is
+// called, then passes every write through unblocked. Lets a test park
+// snapshot()'s I/O phase mid-flight and assert something else (apply()/
+// flush()) can still make progress concurrently -- which is only possible
+// if write_mutex_ was already released before this call.
+class BlockingPageStore : public PageStore
+{
+  public:
+    explicit BlockingPageStore(PageStore *inner) : inner_(inner)
+    {
+    }
+
+    Status write_at(uint64_t off, const uint8_t *buf, size_t len) override
+    {
+        {
+            std::unique_lock<std::mutex> lk(mu_);
+            if (!first_write_seen_) {
+                first_write_seen_ = true;
+                entered_.notify_all();
+                cv_.wait(lk, [this] { return released_; });
+            }
+        }
+        return inner_->write_at(off, buf, len);
+    }
+
+    Status read_at(uint64_t off, uint8_t *buf, size_t len) const override
+    {
+        return inner_->read_at(off, buf, len);
+    }
+
+    Status sync() override
+    {
+        return inner_->sync();
+    }
+
+    [[nodiscard]] uint64_t size() const override
+    {
+        return inner_->size();
+    }
+
+    [[nodiscard]] uint32_t iu_size() const override
+    {
+        return inner_->iu_size();
+    }
+
+    // Blocks the calling thread until the first write_at() call has entered
+    // (and is itself now blocked awaiting release()).
+    void wait_until_blocked()
+    {
+        std::unique_lock<std::mutex> lk(mu_);
+        entered_.wait(lk, [this] { return first_write_seen_; });
+    }
+
+    void release()
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        released_ = true;
+        cv_.notify_all();
+    }
+
+  private:
+    PageStore              *inner_;
+    mutable std::mutex      mu_;
+    std::condition_variable entered_;
+    std::condition_variable cv_;
+    bool                    first_write_seen_ = false;
+    bool                    released_         = false;
+};
 } // namespace
 
 TEST(Persist, LazyRecoveryDemandLoadsOnAccess)
@@ -337,4 +410,42 @@ TEST(Persist, BlockDeviceBackendRoundTrip)
         EXPECT_EQ(live, oracle.size());
     }
     std::remove(path.c_str());
+}
+
+// plan-tree #8: write_mutex_ must be released before snapshot()'s I/O phase
+// (prepare_snapshot_locked's CPU-only walk holds it; the actual
+// write_at/sync calls must not). Park the first write_at() call mid-flight
+// on a background thread, then prove apply()+flush() -- flush() needs
+// write_mutex_ -- still completes on the main thread without waiting for
+// the parked write to unblock. If write_mutex_ were still held across the
+// I/O phase, flush() would deadlock against this test's own timeout.
+TEST(Persist, WriteMutexNotHeldDuringSnapshotIo)
+{
+    MemPageStore      mem(1);
+    BlockingPageStore store(&mem);
+    Options           opt;
+    opt.page_store = &store;
+
+    Crowtree t(opt);
+    ASSERT_TRUE(t.apply(1, put_one("a", "1")).ok());
+    ASSERT_TRUE(t.flush().ok());
+
+    std::thread snap_thread([&] {
+        Status s = t.snapshot(nullptr);
+        EXPECT_TRUE(s.ok());
+    });
+    store.wait_until_blocked(); // snapshot()'s I/O phase is now parked
+
+    // If write_mutex_ were still held here, this would block until
+    // snap_thread's I/O unblocks and commit_prepared_snapshot() releases it
+    // -- defeating the whole point of the async-writable persistence phase.
+    ASSERT_TRUE(t.apply(2, put_one("b", "2")).ok());
+    ASSERT_TRUE(t.flush().ok());
+    std::string v;
+    uint64_t    s;
+    EXPECT_TRUE(t.get(Slice("b"), &s, &v));
+    EXPECT_EQ(v, "2");
+
+    store.release();
+    snap_thread.join();
 }

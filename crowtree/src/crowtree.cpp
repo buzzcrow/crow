@@ -37,15 +37,37 @@ buffer cell_of(Slice s)
 // Resolve a leaf chain (head -> ... -> LeafBase) to key-sorted entries by
 // highest-slot-wins. Tombstones whose slot <= gc_floor are dropped (logical
 // retention GC); all other tombstones are kept.
+//
+// plan-tree #5 B3 (partial copy avoidance): the dedup map below is keyed and
+// valued by *borrowed* Slices, not std::string -- every candidate key/cell
+// here points directly into the chain's own already-resident storage (a
+// BatchDelta node's leaf_entry, or the terminal LeafBase's frame bytes via
+// LeafFrameView), which the caller keeps alive for this whole synchronous
+// call (an epoch guard for scan()/collect_in_order's read paths, direct
+// ownership for a write-path caller). Only the *final* winner per key is
+// ever copied into an owned leaf_entry, in the output loop at the bottom --
+// unlike the old std::map<std::string,std::string>, which re-copied the key
+// on every visit (even ones that don't change the winner) and re-copied the
+// cell on every contested key each time a higher-slot layer superseded an
+// earlier one. This is a mechanical internal optimization only: the
+// function's signature/contract (an owned vector<leaf_entry>) is unchanged,
+// so scan()/try_scan_no_load()/collect_in_order() and GC's live walk (its
+// three callers) need no changes at all. A *fully* zero-copy version --
+// returning borrowed Slices all the way out to those callers -- remains a
+// separate, larger, deferred change (see plan-tree.md #5 B3): it would need
+// each of those three call sites to independently prove out how long their
+// own borrowed results must stay valid, which is a materially bigger change
+// than this one.
 std::vector<leaf_entry> resolve_chain_sorted(PageBase *head, uint64_t gc_floor)
 {
-    std::map<std::string, std::string> resolved; // key -> encoded cell
-    auto                               consider = [&](Slice key, Slice cell) {
-        uint64_t    s  = CellView{cell}.slot();
-        std::string k  = key.to_string();
-        auto        it = resolved.find(k);
-        if (it == resolved.end() || s > CellView{Slice(it->second)}.slot()) {
-            resolved[k] = cell.to_string();
+    std::map<Slice, Slice> resolved; // key -> encoded cell, both borrowed
+    auto                   consider = [&](Slice key, Slice cell) {
+        auto it = resolved.find(key);
+        if (it == resolved.end()) {
+            resolved.emplace(key, cell);
+        }
+        else if (CellView{cell}.slot() > CellView{it->second}.slot()) {
+            it->second = cell;
         }
     };
     for (PageBase *node = head; node != nullptr; node = node->next) {
@@ -67,11 +89,11 @@ std::vector<leaf_entry> resolve_chain_sorted(PageBase *head, uint64_t gc_floor)
     std::vector<leaf_entry> out;
     out.reserve(resolved.size());
     for (auto &kv : resolved) {
-        CellView v{Slice(kv.second)};
+        CellView v{kv.second};
         if (v.is_tombstone() && v.slot() <= gc_floor) {
             continue; // GC drop
         }
-        out.push_back({.key = kv.first, .cell = cell_of(kv.second)});
+        out.push_back({.key = kv.first.to_string(), .cell = cell_of(kv.second)});
     }
     return out;
 }
@@ -140,7 +162,7 @@ Crowtree::~Crowtree()
         flush_thread_.join();
     }
     try {
-        free_subtree(root_page_id_.load(), /*retire=*/false);
+        free_all_resident_pages(/*retire=*/false);
     }
     catch (...) { // NOLINT(bugprone-empty-catch)
         // Destructors must not throw.
@@ -345,6 +367,72 @@ void Crowtree::free_subtree(uint64_t page_id, bool retire)
     }
 }
 
+void Crowtree::free_all_resident_pages(bool retire)
+{
+    // Segment-scan, not a root->children walk (see free_subtree's caution
+    // comment on crowtree.h for why that matters): every present segment's
+    // slots are inspected directly, so a resident leaf/inner/overflow page is
+    // found and freed regardless of whether any of its ancestors -- or, for
+    // an overflow page, the leaf that spilled it -- happen to be unloaded.
+    // This also means, unlike free_subtree, there is no need to separately
+    // walk a leaf's cells to find its overflow chains: every overflow page
+    // has its own mapping slot (spill_value_to_overflow_chain_locked stores
+    // each one under its own allocated PID), so the scan below visits it
+    // directly too.
+    //
+    // Two passes, like prepare_snapshot_locked's own segment scan: pass 1
+    // only *reads* segment_at()/slots[i] to collect (page_id, head) pairs,
+    // never mutating anything, so it can never race MappingSegment recycling
+    // (#14b) -- clearing a slot in pass 2 below can bring a segment's
+    // live_count to 0 and epoch-retire the MappingSegment itself; mutating
+    // while *this* function's own scan is still walking that same segment's
+    // `seg->slots[]` would risk exactly the kind of dangling-segment-pointer
+    // access #14b's own design guards against elsewhere.
+    struct ResidentEntry
+    {
+        uint64_t  page_id;
+        PageBase *head;
+    };
+    std::vector<ResidentEntry> resident;
+    for (uint64_t seg_idx = 0; seg_idx < MappingTable::kMaxSegments; ++seg_idx) {
+        MappingSegment *seg = mapping_.segment_at(seg_idx);
+        if (seg == nullptr) {
+            continue;
+        }
+        for (uint32_t i = 0; i < seg->slot_count; ++i) {
+            uint64_t w = seg->slots[i].load(std::memory_order_relaxed);
+            if (slot_word::is_resident(w)) {
+                resident.push_back(
+                    {.page_id = seg_idx * MappingTable::kSegmentSize + i, .head = slot_word::resident_ptr(w)});
+            }
+        }
+    }
+    for (const auto &e : resident) {
+        if (retire) {
+            // Live tree (install_snapshot(_native)): clear the slot first so a
+            // new reader sees "gone", then epoch-retire each node in the chain
+            // -- same ordering as free_subtree's retire=true path, and for the
+            // same reason (a reader that already loaded a node keeps using it
+            // under its guard; the frame is freed only once that guard drains).
+            mapping_.clear(e.page_id);
+            for (PageBase *n = e.head; n != nullptr;) {
+                PageBase *next = n->next;
+                retire_page(n);
+                n = next;
+            }
+        }
+        else {
+            // Teardown: no concurrent readers, delete the chain immediately.
+            for (PageBase *n = e.head; n != nullptr;) {
+                PageBase *next = n->next;
+                delete n;
+                n = next;
+            }
+            mapping_.clear(e.page_id);
+        }
+    }
+}
+
 size_t Crowtree::evict_clean_leaves_locked(size_t max_resident_leaves)
 {
     // Collect resident, delta-free, clean leaf pids (the evictable set, §4.6).
@@ -428,6 +516,89 @@ size_t Crowtree::evict_clean_leaves(size_t max_resident_leaves)
     return evict_clean_leaves_locked(max_resident_leaves);
 }
 
+// plan-tree #17 D3: inner bases get their *own* ranked budget/pass, entirely
+// separate from evict_clean_leaves_locked's. An earlier attempt shared one
+// combined ranked list between leaves and inner bases and broke
+// Eviction.RecentlyTouchedLeafSurvivesEvictionOverColderOnes: a get() stamps
+// last_touch_tick on every page it walks through, leaf *and* ancestor inner
+// nodes alike, all in the same call -- a single combined budget can rank an
+// ancestor behind some other, unrelated leaf and evict it, forcing an
+// unwanted demand-load on the very next access to a leaf the test expects to
+// stay fully resident with zero extra reads. Keeping the two passes disjoint
+// means the leaf test's shared-budget contention can never happen: this
+// function never evicts a kLeafBase, and evict_clean_leaves_locked never
+// evicts a kInnerBase.
+size_t Crowtree::evict_clean_inner_locked(size_t max_resident_inner)
+{
+    // Same DFS shape as evict_clean_leaves_locked (descend only into already-
+    // resident children -- never demand-load a page just to evict it), but
+    // collecting kInnerBase candidates instead of kLeafBase ones.
+    std::vector<std::pair<uint64_t, uint64_t>> evictable_ranked;
+    std::function<void(uint64_t)>              dfs = [&](uint64_t page_id) {
+        uint64_t wv = mapping_.get_word(page_id);
+        if (slot_word::is_empty(wv) || slot_word::is_unloaded(wv)) {
+            return;
+        }
+        PageBase *v    = slot_word::resident_ptr(wv);
+        PageBase *base = v;
+        while (base != nullptr && base->type == page_type::kBatchDelta) {
+            base = base->next;
+        }
+        if (base == nullptr || base->type != page_type::kInnerBase) {
+            return; // a leaf base: nothing to descend into, nothing to collect here
+        }
+        // Clean (durable bytes match) and no deltas above (v == base) ⇒
+        // evictable. Inner bases are never delta-chained today (split/merge
+        // always mapping_.store()s a fresh consolidated InnerBase), but this
+        // mirrors the leaf pass's check rather than assuming that invariant.
+        if (v == base && v->durable_addr != kNoAddr) {
+            evictable_ranked.emplace_back(page_id, v->last_touch_tick.load(std::memory_order_relaxed));
+        }
+        for (uint64_t c : static_cast<InnerBase *>(base)->children()) {
+            uint64_t cw = mapping_.get_word(c);
+            if (slot_word::is_resident(cw)) {
+                dfs(c);
+            }
+        }
+    };
+    dfs(root_page_id_.load());
+
+    if (evictable_ranked.size() <= max_resident_inner) {
+        return 0;
+    }
+    // Oldest-touched first, same rationale as the leaf pass.
+    std::sort(evictable_ranked.begin(), evictable_ranked.end(),
+              [](const auto &a, const auto &b) { return a.second < b.second; });
+    size_t to_evict = evictable_ranked.size() - max_resident_inner;
+    size_t evicted  = 0;
+    for (const auto &[page_id, tick] : evictable_ranked) {
+        if (evicted >= to_evict) {
+            break;
+        }
+        uint64_t wv = mapping_.get_word(page_id); // re-check (belt-and-suspenders; we hold write_mutex_)
+        if (slot_word::is_empty(wv) || slot_word::is_unloaded(wv)) {
+            continue;
+        }
+        PageBase *v = slot_word::resident_ptr(wv);
+        if (v->type != page_type::kInnerBase || v->durable_addr == kNoAddr) {
+            continue;
+        }
+        // Re-tag the slot unloaded, then epoch-retire the resident page -- same
+        // mechanism as the leaf pass; a reader that already loaded `v` keeps
+        // using it under its guard, a later reader demand-loads.
+        mapping_.store_unloaded(page_id, v->durable_addr, v->durable_plen, opt_.page_store->iu_size());
+        retire_page(v);
+        ++evicted;
+    }
+    return evicted;
+}
+
+size_t Crowtree::evict_clean_inner(size_t max_resident_inner)
+{
+    std::lock_guard<std::mutex> lk(write_mutex_);
+    return evict_clean_inner_locked(max_resident_inner);
+}
+
 void Crowtree::maybe_evict_locked()
 {
     if (!pool_) {
@@ -482,6 +653,17 @@ void Crowtree::recompute_contiguous_locked()
     received_slots_.erase(received_slots_.begin(), received_slots_.upper_bound(cur));
 }
 
+void Crowtree::note_applied_slot(uint64_t slot)
+{
+    {
+        std::lock_guard<std::mutex> lk(slot_mutex_);
+        max_seen_slot_ = std::max(max_seen_slot_, slot);
+        received_slots_.insert(slot);
+        recompute_contiguous_locked();
+    }
+    maybe_swap_active();
+}
+
 Status Crowtree::apply(uint64_t slot, const Batch &batch)
 {
     // Reject oversized keys before any state is mutated (plan-tree #15). A key
@@ -495,13 +677,37 @@ Status Crowtree::apply(uint64_t slot, const Batch &batch)
         }
     }
     apply_batch(slot, batch);
-    {
-        std::lock_guard<std::mutex> lk(slot_mutex_);
-        max_seen_slot_ = std::max(max_seen_slot_, slot);
-        received_slots_.insert(slot);
-        recompute_contiguous_locked();
+    note_applied_slot(slot);
+    return Status::Ok();
+}
+
+Status Crowtree::apply_encoded(uint64_t slot, std::vector<encoded_op> ops)
+{
+    // Same guard as apply() (plan-tree #15): validate every key before any
+    // state is mutated.
+    const size_t key_limit = max_key_size();
+    for (const encoded_op &op : ops) {
+        if (op.key.size() > key_limit) {
+            return Status::invalid_argument("key exceeds max_key_size (" + std::to_string(op.key.size()) + " > " +
+                                            std::to_string(key_limit) + ")");
+        }
     }
-    maybe_swap_active();
+    if (!ops.empty()) {
+        // Intra-batch: last occurrence (vector order) wins, same as
+        // apply_batch. Cells already come in pre-encoded (single alloc at
+        // the caller's boundary, e.g. the C API -- plan-tree #5 B2d) --
+        // move key+cell straight down, no encode_cell_buf call here.
+        std::map<std::string, buffer> latest;
+        for (encoded_op &op : ops) {
+            latest[std::move(op.key)] = std::move(op.cell);
+        }
+        std::shared_ptr<MemTable> active = current_active();
+        while (!latest.empty()) {
+            auto node = latest.extract(latest.begin());
+            active->upsert(Slice(node.key()), slot, std::move(node.mapped()));
+        }
+    }
+    note_applied_slot(slot);
     return Status::Ok();
 }
 
@@ -1618,6 +1824,227 @@ Status Crowtree::scan(Slice prefix, size_t limit, std::vector<scan_entry> *out, 
     return Status::Ok();
 }
 
+bool Crowtree::try_scan_no_load(Slice prefix, size_t limit, std::vector<scan_entry> *out, bool *truncated,
+                                uint64_t *out_pending_page_id) const
+{
+    out->clear();
+    if (truncated != nullptr) {
+        *truncated = false;
+    }
+    EpochManager::Guard guard = epoch_.enter();
+
+    // L0: identical to scan() -- never touches the page store.
+    struct L0Cursor
+    {
+        std::vector<mem_entry> entries;
+        size_t                 idx = 0;
+    };
+    std::vector<L0Cursor> l0;
+    for (auto &mt : all_memtables()) {
+        L0Cursor c;
+        c.entries = mt->snapshot();
+        l0.push_back(std::move(c));
+    }
+
+    // Non-blocking probe (mirrors try_get_view_no_load's `probe`): bails out
+    // on an unloaded slot instead of demand-loading it, recording which
+    // page_id via `blocked_page_id`.
+    uint64_t blocked_page_id = kInvalidPageId;
+    auto     probe           = [this, &blocked_page_id](uint64_t p) -> PageBase * {
+        uint64_t w = mapping_.get_word(p);
+        if (slot_word::is_empty(w)) {
+            return nullptr;
+        }
+        if (slot_word::is_unloaded(w)) {
+            blocked_page_id = p;
+            return nullptr;
+        }
+        PageBase *v = slot_word::resident_ptr(w);
+        v->last_touch_tick.store(touch_tick_.fetch_add(1, std::memory_order_relaxed), std::memory_order_relaxed);
+        return v;
+    };
+
+    uint64_t gc      = gc_floor_.load();
+    uint64_t page_id = root_page_id_.load();
+    if (page_id != kInvalidPageId) {
+        page_id = find_leaf_page_id(probe, page_id, prefix);
+        if (blocked_page_id != kInvalidPageId) {
+            *out_pending_page_id = blocked_page_id;
+            return false; // genuine miss on the initial descent
+        }
+    }
+    std::vector<leaf_entry> l1_leaf;
+    size_t                  j = 0;
+
+    auto refill_l1 = [&]() -> bool {
+        while (j >= l1_leaf.size() && page_id != kInvalidPageId) {
+            PageBase *head = probe(page_id);
+            if (blocked_page_id != kInvalidPageId) {
+                return false; // caller checks blocked_page_id, distinct from "chain exhausted"
+            }
+            if (head == nullptr) {
+                page_id = kInvalidPageId;
+                break;
+            }
+            l1_leaf        = resolve_chain_sorted(head, gc);
+            j              = 0;
+            LeafBase *base = chain_leaf_base(head);
+            page_id        = base != nullptr ? base->right_sibling() : kInvalidPageId;
+        }
+        return j < l1_leaf.size();
+    };
+
+    auto consider = [&](Slice key, Slice cell) -> bool {
+        if (!key.starts_with(prefix)) {
+            return true;
+        }
+        CellView v{cell};
+        if (v.is_tombstone()) {
+            return true;
+        }
+        if (limit != 0 && out->size() >= limit) {
+            if (truncated != nullptr) {
+                *truncated = true;
+            }
+            return false;
+        }
+        std::string val =
+            v.is_overflow() ? assemble_overflow_value(v.overflow_head(), v.overflow_len()) : v.value().to_string();
+        out->push_back({.key = key.to_string(), .slot = v.slot(), .value = std::move(val)});
+        return true;
+    };
+
+    while (true) {
+        bool have_l1 = refill_l1();
+        if (blocked_page_id != kInvalidPageId) {
+            *out_pending_page_id = blocked_page_id;
+            return false; // genuine miss mid-walk
+        }
+        bool  has_any = have_l1;
+        Slice min_key;
+        if (have_l1) {
+            min_key = Slice(l1_leaf[j].key);
+        }
+        for (auto &c : l0) {
+            if (c.idx >= c.entries.size()) {
+                continue;
+            }
+            Slice k = Slice(c.entries[c.idx].key);
+            if (!has_any || k.compare(min_key) < 0) {
+                min_key = k;
+                has_any = true;
+            }
+        }
+        if (!has_any) {
+            break;
+        }
+
+        Slice winner_key = min_key;
+        Slice winner_cell;
+        bool  have_winner = false;
+        if (have_l1 && Slice(l1_leaf[j].key).compare(min_key) == 0) {
+            winner_cell = Slice(l1_leaf[j].cell);
+            have_winner = true;
+            ++j;
+        }
+        for (auto &c : l0) {
+            if (c.idx >= c.entries.size() || Slice(c.entries[c.idx].key).compare(min_key) != 0) {
+                continue;
+            }
+            Slice cand = c.entries[c.idx].cell.slice();
+            if (!have_winner || cell_wins(CellView{cand}, CellView{winner_cell})) {
+                winner_cell = cand;
+                have_winner = true;
+            }
+            ++c.idx;
+        }
+
+        if (!prefix.empty() && !winner_key.starts_with(prefix) && winner_key.compare(prefix) > 0) {
+            break;
+        }
+        if (!consider(winner_key, winner_cell)) {
+            break;
+        }
+    }
+    return true; // fully resolved
+}
+
+void Crowtree::scan_async(Slice prefix, size_t limit,
+                          std::function<void(Status, std::vector<scan_entry>, bool)> on_done) const
+{
+    // Copy the prefix upfront: unlike scan()'s Slice (borrowed, valid only
+    // for this one synchronous call), scan_async's key must survive across
+    // an arbitrary number of async round trips.
+    scan_async_attempt(std::make_shared<std::string>(prefix.to_string()), limit, std::move(on_done));
+}
+
+void Crowtree::scan_async_attempt(std::shared_ptr<std::string> prefix_owned, size_t limit,
+                                  std::function<void(Status, std::vector<scan_entry>, bool)> on_done) const
+{
+    std::vector<scan_entry> out;
+    bool                     truncated        = false;
+    uint64_t                 pending_page_id  = kInvalidPageId;
+    if (try_scan_no_load(Slice(*prefix_owned), limit, &out, &truncated, &pending_page_id)) {
+        on_done(Status::Ok(), std::move(out), truncated);
+        return;
+    }
+
+#ifdef CROWTREE_HAVE_LIBURING
+    if (opt_.async_reactor != nullptr && opt_.async_page_store != nullptr) {
+        uint64_t addr           = 0;
+        uint32_t plen           = 0;
+        bool     still_unloaded = false;
+        {
+            std::lock_guard<std::mutex> lk(load_mutex_);
+            uint64_t                    w = mapping_.get_word(pending_page_id);
+            if (slot_word::is_unloaded(w)) {
+                uint32_t iu    = opt_.page_store->iu_size();
+                addr           = slot_word::unloaded_iu_index(w) * iu;
+                plen           = slot_word::unloaded_iu_count(w) * iu;
+                still_unloaded = true;
+            }
+        }
+        if (!still_unloaded) {
+            // Another loader already resolved this page_id between the
+            // lock-free probe above and this re-check -- retry, still here.
+            scan_async_attempt(std::move(prefix_owned), limit, std::move(on_done));
+            return;
+        }
+        uint32_t iu   = opt_.page_store->iu_size();
+        auto     blob = std::make_shared<std::vector<uint8_t>>(round_up_to_iu(plen, iu));
+        opt_.async_page_store->submit_read(
+            addr, blob->data(), blob->size(),
+            [this, page_id = pending_page_id, addr, plen, blob, prefix_owned, limit, on_done](Status st) mutable {
+                if (!st.ok()) {
+                    CT_LOG_ERROR("scan_async: demand-load I/O fault: pid={} addr={} len={} status={}", page_id, addr,
+                                 plen, st.to_string());
+                    io_failed_.store(true);
+                    on_done(st, {}, false);
+                    return;
+                }
+                bool installed_ok = true;
+                {
+                    std::lock_guard<std::mutex> lk(load_mutex_);
+                    uint64_t                    w = mapping_.get_word(page_id);
+                    if (slot_word::is_unloaded(w)) {
+                        installed_ok = install_loaded_page(page_id, addr, plen, *blob) != nullptr;
+                    }
+                }
+                if (!installed_ok) {
+                    on_done(Status::io_error("scan_async: demand-load decode/CRC failure"), {}, false);
+                    return;
+                }
+                scan_async_attempt(std::move(prefix_owned), limit, std::move(on_done));
+            });
+        return;
+    }
+#endif
+    // No async backend wired -- fall back to the existing synchronous
+    // demand-load and retry, still on this same thread.
+    (void)resident(pending_page_id);
+    scan_async_attempt(std::move(prefix_owned), limit, std::move(on_done));
+}
+
 int Crowtree::height() const
 {
     int      h       = 0;
@@ -1674,7 +2101,7 @@ Status Crowtree::install_snapshot(std::vector<leaf_entry> sorted_entries, uint64
         // place under the write lock; a true staging + RootVersion swap is deferred.)
         // Epoch-retire (not immediate free): lock-free readers may still be walking
         // the old tree under a guard (#13).
-        free_subtree(root_page_id_.load(), /*retire=*/true);
+        free_all_resident_pages(/*retire=*/true);
         uint64_t page_id = mapping_.allocate_page_id();
         mapping_.store(page_id, LeafBase::build({}, kInvalidPageId, pool_, opt_.frame_bytes));
         root_page_id_.store(page_id);
@@ -1710,6 +2137,164 @@ Status Crowtree::install_snapshot(std::vector<leaf_entry> sorted_entries, uint64
     if (at_slot > last_applied_slot_.load()) {
         last_applied_slot_.store(at_slot);
     }
+    return Status::Ok();
+}
+
+Status Crowtree::collect_native_frames(std::vector<NativeFrame> *out, uint64_t *out_root_page_id,
+                                       uint64_t *out_at_slot)
+{
+    std::lock_guard<std::mutex> lk(write_mutex_);
+    uint64_t                    gc = gc_floor_.load();
+
+    // Same DFS shape as the pre-#14c manifest walk: fold any delta chain
+    // into a fresh consolidated base first (a real side effect on the live
+    // tree, same as snapshot()'s prepare phase -- unlike the read-only
+    // snapshot_view()), then dump the resolved base's frame bytes verbatim,
+    // recursing into inner children / leaf overflow chains.
+    std::function<Status(uint64_t)> walk = [&](uint64_t page_id) -> Status {
+        PageBase *head = resident(page_id);
+        if (head == nullptr) {
+            return Status::internal_error("native snapshot: null page in walk");
+        }
+        if (head->type == page_type::kBatchDelta) {
+            PageBase *b = head;
+            while (b != nullptr && b->type == page_type::kBatchDelta) {
+                b = b->next;
+            }
+            if (b == nullptr || b->type != page_type::kLeafBase) {
+                return Status::internal_error("native snapshot: delta chain without leaf base");
+            }
+            uint64_t              right = static_cast<LeafBase *>(b)->right_sibling();
+            std::vector<uint64_t> dead_overflow;
+            LeafBase             *fresh =
+                build_leaf_spilling_locked(resolve_leaf_chain_for_rebuild(head, gc, &dead_overflow), right);
+            mapping_.store(page_id, fresh);
+            for (PageBase *n = head; n != nullptr;) {
+                PageBase *nx = n->next;
+                retire_page(n);
+                n = nx;
+            }
+            for (uint64_t h : dead_overflow) {
+                retire_overflow_chain_locked(h);
+            }
+            head = fresh;
+        }
+        PageBase *base = head; // now a single base (no deltas above it)
+
+        const uint8_t *frame = nullptr;
+        uint32_t       plen  = 0;
+        if (base->type == page_type::kLeafBase) {
+            frame = static_cast<LeafBase *>(base)->frame();
+            plen  = static_cast<LeafBase *>(base)->page_bytes();
+        }
+        else if (base->type == page_type::kInnerBase) {
+            frame = static_cast<InnerBase *>(base)->frame();
+            plen  = static_cast<InnerBase *>(base)->page_bytes();
+        }
+        else {
+            return Status::internal_error("native snapshot: unexpected base type");
+        }
+        out->push_back(NativeFrame{.page_id = page_id, .frame = std::vector<uint8_t>(frame, frame + plen)});
+
+        if (base->type == page_type::kInnerBase) {
+            for (uint64_t child : static_cast<InnerBase *>(base)->children()) {
+                Status cs = walk(child);
+                if (!cs.ok()) {
+                    return cs;
+                }
+            }
+        }
+        else { // leaf: dump its overflow chains too (reachable via cells, PT11)
+            LeafFrameView v = static_cast<LeafBase *>(base)->view();
+            for (uint32_t i = 0; i < v.count(); ++i) {
+                CellView c{v.cell(i)};
+                if (!c.is_overflow()) {
+                    continue;
+                }
+                uint64_t opid = c.overflow_head();
+                while (opid != kInvalidPageId) {
+                    PageBase *op = resident(opid);
+                    if (op == nullptr || op->type != page_type::kOverflowFrame) {
+                        return Status::internal_error("native snapshot: bad overflow page");
+                    }
+                    auto *ov = static_cast<OverflowBase *>(op);
+                    out->push_back(NativeFrame{
+                        .page_id = opid, .frame = std::vector<uint8_t>(ov->frame(), ov->frame() + ov->page_bytes())});
+                    opid = ov->next_page_id();
+                }
+            }
+        }
+        return Status::Ok();
+    };
+
+    out->clear();
+    Status ws = walk(root_page_id_.load());
+    if (!ws.ok()) {
+        return ws;
+    }
+    if (out_root_page_id != nullptr) {
+        *out_root_page_id = root_page_id_.load();
+    }
+    if (out_at_slot != nullptr) {
+        *out_at_slot = last_applied_slot_.load();
+    }
+    return Status::Ok();
+}
+
+Status Crowtree::install_snapshot_native(std::vector<NativeFrame> frames, uint64_t root_page_id, uint64_t at_slot)
+{
+    std::lock_guard<std::mutex> lk(write_mutex_);
+    // Replace L1 exactly like install_snapshot (portable) does: drop the
+    // live tree (epoch-retire, not free -- #13) and reset L0/watermarks.
+    // One continuous critical section (unlike install_snapshot, which
+    // releases write_mutex_ before its flush() call) since everything here
+    // -- including installing every frame -- needs it, and nothing called
+    // below re-acquires it.
+    free_all_resident_pages(/*retire=*/true);
+
+    uint64_t max_page_id = root_page_id;
+    for (NativeFrame &f : frames) {
+        if (f.page_id == kInvalidPageId) {
+            return Status::invalid_argument("native snapshot: invalid page_id");
+        }
+        max_page_id = std::max(max_page_id, f.page_id);
+        if (f.frame.empty() || !frame_validate(f.frame.data(), static_cast<uint32_t>(f.frame.size()))) {
+            return Status::corruption("native snapshot: frame CRC/magic invalid");
+        }
+        page_type ft   = frame_page_type(f.frame.data());
+        auto      plen = static_cast<uint32_t>(f.frame.size());
+        PageBase *page = nullptr;
+        switch (ft) {
+        case page_type::kLeafBase:
+            page = LeafBase::from_frame_copy(f.frame.data(), plen, pool_, opt_.frame_bytes);
+            break;
+        case page_type::kInnerBase:
+            page = InnerBase::from_frame_copy(f.frame.data(), plen, pool_, opt_.frame_bytes);
+            break;
+        case page_type::kOverflowFrame:
+            page = OverflowBase::from_frame_copy(f.frame.data(), plen, pool_, opt_.frame_bytes);
+            break;
+        default:
+            return Status::corruption("native snapshot: unknown frame type");
+        }
+        // Freshly installed on *this* store: not yet durable here (durable_addr
+        // defaults to kNoAddr on construction) -- picked up dirty by the next
+        // snapshot(), same as any other freshly built page.
+        mapping_.store(f.page_id, page);
+    }
+    mapping_.set_next_page_id(max_page_id + 1);
+    root_page_id_.store(root_page_id);
+
+    reset_memtables_locked();
+    last_applied_slot_.store(at_slot);
+    contiguous_slot_.store(at_slot);
+    gc_floor_.store(0);
+    {
+        std::lock_guard<std::mutex> sl(slot_mutex_);
+        received_slots_.clear();
+        max_seen_slot_ = at_slot;
+    }
+    version_.fetch_add(1);
     return Status::Ok();
 }
 

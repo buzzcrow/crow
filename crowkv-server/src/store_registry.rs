@@ -1,5 +1,6 @@
 use crowkv::cluster::px_kv_store::PxKvStore;
 use crowkv::common::config::PxElectionConfig;
+use crowkv::kv::CrowtreeBackend;
 use crowkv::wal::IoBackend;
 use dashmap::DashMap;
 use std::path::PathBuf;
@@ -34,6 +35,17 @@ impl KvEngineKind {
     }
 }
 
+/// Parse the `--kv-backend` CLI value (`clap`'s `value_parser` already
+/// restricts it to `["file", "block"]`) into the FFI's [`CrowtreeBackend`].
+/// Only meaningful when `KvEngineKind::Crowtree` is selected.
+#[must_use]
+pub fn parse_crowtree_backend(s: &str) -> CrowtreeBackend {
+    match s {
+        "block" => CrowtreeBackend::Block,
+        _ => CrowtreeBackend::File,
+    }
+}
+
 pub struct KvStoreRegistry {
     pub stores: DashMap<u64, Arc<PxKvStore>>,
     pub election_cfg: PxElectionConfig,
@@ -44,6 +56,9 @@ pub struct KvStoreRegistry {
     /// Root directory for durable per-group crowtree files. Only read when
     /// `kv_engine == KvEngineKind::Crowtree`.
     pub data_root: PathBuf,
+    /// Durable backend for the crowtree engine (plan-tree #22). Only read
+    /// when `kv_engine == KvEngineKind::Crowtree`.
+    pub crowtree_backend: CrowtreeBackend,
     /// Port pool for KV server listeners, populated from `--ports` CLI arg.
     /// Used by `add_store` as a fallback before `persisted_port_for_store`.
     port_pool: Mutex<Vec<u16>>,
@@ -94,6 +109,7 @@ impl KvStoreRegistry {
             wal_backend,
             kv_engine: KvEngineKind::Memory,
             data_root,
+            crowtree_backend: CrowtreeBackend::File,
             port_pool: Mutex::new(Vec::new()),
         }
     }
@@ -106,6 +122,15 @@ impl KvStoreRegistry {
     pub fn with_kv_engine(mut self, kv_engine: KvEngineKind, data_root: PathBuf) -> Self {
         self.kv_engine = kv_engine;
         self.data_root = data_root;
+        self
+    }
+
+    /// Builder-style setter for [`Self::crowtree_backend`] (plan-tree #22),
+    /// used by `main.rs` right after construction alongside
+    /// [`Self::with_kv_engine`].
+    #[must_use]
+    pub fn with_crowtree_backend(mut self, crowtree_backend: CrowtreeBackend) -> Self {
+        self.crowtree_backend = crowtree_backend;
         self
     }
 

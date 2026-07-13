@@ -231,6 +231,17 @@ struct PreparedSnapshot
     uint64_t segdir_len      = 0;
 };
 
+// One page's raw frame bytes, tagged with its logical PID (plan-tree #16
+// native snapshot format). Unlike the portable format's `leaf_entry`
+// (decoded key/cell tuples), this is the frame verbatim -- no
+// encode/decode, no cell-by-cell rebuild on import, so a leaf/inner/
+// overflow page round-trips as one `memcpy`-equivalent copy.
+struct NativeFrame
+{
+    uint64_t             page_id = kInvalidPageId;
+    std::vector<uint8_t> frame; // raw in-memory frame bytes (page_bytes() length)
+};
+
 class Crowtree
 {
   public:
@@ -293,6 +304,24 @@ class Crowtree
     // callers no longer pass Paxos/learner state. Lands in L0; may trigger a
     // size-based flush. For a slot with no data (a NoOp), call force_advance_slot.
     Status apply(uint64_t slot, const Batch &batch);
+
+    // One already-encoded op for apply_encoded (plan-tree #5 B2d): `cell` is
+    // a slot+kind+value cell already packed via encode_cell_buf. Lets a
+    // caller that owns the raw bytes up front (the C API boundary) allocate
+    // the key and cell buffers exactly once and move them straight down to
+    // MemTable::upsert, instead of building a Batch (plain key/kind/value
+    // strings) that apply_batch would otherwise re-encode into a cell here.
+    struct encoded_op
+    {
+        std::string key;
+        buffer      cell;
+    };
+
+    // Same semantics as apply() (oversized-key rejection, slot bookkeeping,
+    // maybe_swap_active), but for pre-encoded ops -- no encode_cell_buf call
+    // in here, no intermediate Batch/batch_op. Intra-batch: last occurrence
+    // (by vector order) wins, same as apply_batch.
+    Status apply_encoded(uint64_t slot, std::vector<encoded_op> ops);
 
     // Advance the contiguous frontier up to `slot`, filling any intervening slots
     // as NoOps (e.g. after learner NoOp slots or during restore). Explicit and
@@ -405,6 +434,22 @@ class Crowtree
     // entries in key order; sets *truncated if more matched beyond the limit.
     Status scan(Slice prefix, size_t limit, std::vector<scan_entry> *out, bool *truncated) const;
 
+    // Async twin of scan() (plan-tree.md #11 follow-up). Unlike get_async,
+    // which has exactly one possible miss point (the root->leaf descent for
+    // a single key), scan() walks a whole range of leaves via
+    // right_sibling and any of them -- or an inner page on the initial
+    // descent to the first leaf -- can be cold. Rather than a resumable
+    // cursor, a miss simply retries the *whole* scan from scratch once the
+    // blocking page resolves (matches get_async_attempt's own "retry, still
+    // correct, not maximally efficient" trade-off) -- each retry is pure
+    // in-memory work except for exactly one more page becoming permanently
+    // resident, so this always terminates and does no redundant I/O.
+    // on_done fires exactly once, synchronously if the whole scan was
+    // already resident (matching scan()'s cost exactly), or from the
+    // Reactor thread after however many page loads were needed.
+    void scan_async(Slice prefix, size_t limit,
+                    std::function<void(Status, std::vector<scan_entry>, bool truncated)> on_done) const;
+
     // pin a consistent point-in-time view at `last_applied_slot` (the durable L1
     // state). Used for scan-at / compare / iter_all / snapshot export.
     [[nodiscard]] std::shared_ptr<Snapshot> snapshot_view();
@@ -417,6 +462,22 @@ class Crowtree
     // under its guard (it may observe a transient empty/partly-replaced tree — a
     // consistent snapshot swap via a pinned RootVersion is a later refinement).
     Status install_snapshot(std::vector<leaf_entry> sorted_entries, uint64_t at_slot);
+
+    // plan-tree #16: native snapshot format. `collect_native_frames` walks
+    // the reachable tree (root -> inner children -> leaf overflow chains,
+    // folding any delta chain into a fresh consolidated base first -- same
+    // side effect `snapshot()` already has, unlike the read-only
+    // `snapshot_view()`) and returns every base/overflow page's *raw frame
+    // bytes* verbatim, tagged with its PID -- no cell decode, no tuple
+    // encoding. `install_snapshot_native` is the inverse: installs each
+    // frame directly as a resident page under its original PID (via
+    // `from_frame_copy`, the same reconstruction demand-load already uses),
+    // no entry-by-entry tree rebuild. Both intended for crowtree-to-crowtree
+    // transfer (Raft InstallSnapshot); `install_snapshot`/`snapshot_view`'s
+    // portable tuple format remains available for cross-engine scenarios
+    // and testing (comparable against a non-crowtree oracle).
+    Status collect_native_frames(std::vector<NativeFrame> *out, uint64_t *out_root_page_id, uint64_t *out_at_slot);
+    Status install_snapshot_native(std::vector<NativeFrame> frames, uint64_t root_page_id, uint64_t at_slot);
 
     // Reassemble a large value spilled into an overflow chain headed at `head_page_id`
     // (PT11). Walks the chain via resident under the caller's read epoch guard.
@@ -503,9 +564,20 @@ class Crowtree
     // readers (epoch-deferred frame reuse); evicted pages reload on next access.
     [[nodiscard]] size_t evict_clean_leaves(size_t max_resident_leaves);
 
+    // plan-tree #17 D3: same contract as evict_clean_leaves, but for clean,
+    // delta-free resident *inner* bases, ranked and budgeted entirely
+    // separately -- see evict_clean_inner_locked's doc comment (crowtree.cpp)
+    // for why a combined leaf+inner budget is unsafe (breaks the
+    // just-touched-leaf-survives-eviction guarantee). Never evicts a leaf;
+    // evict_clean_leaves never evicts an inner base.
+    [[nodiscard]] size_t evict_clean_inner(size_t max_resident_inner);
+
   private:
     // apply a batch's ops into L0 at `slot` (intra-batch last-op-wins).
     void apply_batch(uint64_t slot, const Batch &batch);
+    // Shared apply()/apply_encoded() tail: slot bookkeeping (max_seen_slot_,
+    // received_slots_, contiguous frontier) then a possible L0 size-based swap.
+    void note_applied_slot(uint64_t slot);
     // Fold newly received slots into the contiguous prefix, then prune the
     // tracker below the new frontier. Caller holds slot_mutex_.
     void recompute_contiguous_locked();
@@ -603,7 +675,27 @@ class Crowtree
     // chain and clears its mapping slot, so a lock-free reader still holding a page
     // under its guard is never freed underneath it (used by install_snapshot on the
     // live tree). Caller holds write_mutex_ for the retire path.
+    //
+    // CAUTION: this is a top-down, root->children walk -- it bails out (nothing to
+    // do) the moment it reaches an *unloaded* slot, which used to be a safe
+    // assumption (a leaf has no descendants, and only leaves were ever
+    // independently evictable) but no longer is now that plan-tree #17 D3's
+    // evict_clean_inner can leave an *inner* page unloaded while a resident
+    // descendant remains fully live underneath it -- that descendant would be
+    // silently skipped (leaked, for retire=false; never epoch-retired, for
+    // retire=true) by a call rooted above it. Only ever call this on a page_id
+    // known to still be resident (e.g. persist.cpp's freshly-built, never-evicted
+    // empty root during open()); everywhere else, use free_all_resident_pages.
     void free_subtree(uint64_t page_id, bool retire);
+    // Drop *every* resident page, regardless of tree reachability: enumerates
+    // MappingTable's present segments/slots directly (same technique
+    // persist.cpp's snapshot uses to discover dirty pages without a
+    // reachable-page walk -- see prepare_snapshot_locked's header comment)
+    // instead of a top-down root->children walk, so it cannot miss a resident
+    // page merely because one of its *ancestors* happens to be unloaded (see
+    // free_subtree's caution above). Same retire=false/true contract as
+    // free_subtree otherwise. Caller holds write_mutex_ for the retire path.
+    void free_all_resident_pages(bool retire);
 
     // Effective overflow spill threshold (opt_.max_inline_value or frame_bytes/4).
     [[nodiscard]] size_t max_inline_value() const
@@ -650,6 +742,7 @@ class Crowtree
     // concurrent readers). Caller holds write_mutex_.
     void   free_overflow_chain(uint64_t head_page_id);
     size_t evict_clean_leaves_locked(size_t max_resident_leaves); // caller holds write_mutex_
+    size_t evict_clean_inner_locked(size_t max_resident_inner);   // caller holds write_mutex_
     void   maybe_evict_locked(); // capacity-driven auto-evict (caller holds write_mutex_)
     // Resolve a PID to its resident chain head, demand-loading an unloaded slot
     // (design §4.5). Hot (resident) path is lock-free; the cold path locks
@@ -713,6 +806,28 @@ class Crowtree
     // buffer::copy_of(); an already-owned (L0/overflow) or not-found
     // GetView is untouched except for releasing the guard.
     static GetView materialize_owned(GetView &&v);
+
+    // scan()'s non-blocking twin: identical logic (same L0 snapshot, same
+    // right_sibling leaf walk, same merge), but the initial descent and
+    // every leaf probe use a non-blocking check (mirrors
+    // try_get_view_no_load's `probe`) instead of resident()'s demand-load.
+    // The moment *any* page along the way is unloaded, bails out
+    // immediately (discarding whatever was collected into *out so far --
+    // scan_async_attempt retries the whole call once that page resolves)
+    // and reports it via *out_pending_page_id. Returns true if the scan
+    // fully resolved with no cold page encountered (*out/*truncated are
+    // then exactly what scan() itself would have produced).
+    [[nodiscard]] bool try_scan_no_load(Slice prefix, size_t limit, std::vector<scan_entry> *out, bool *truncated,
+                                        uint64_t *out_pending_page_id) const;
+
+    // scan_async's retry loop, structurally identical to get_async_attempt:
+    // one try_scan_no_load() attempt, then either calls on_done (resolved)
+    // or resolves the one blocking page_id (via the reactor, or
+    // synchronously if no async backend is wired) and recurses. `prefix`
+    // is a heap copy (unlike scan()'s Slice, must survive across an
+    // arbitrary number of async round trips).
+    void scan_async_attempt(std::shared_ptr<std::string> prefix_owned, size_t limit,
+                            std::function<void(Status, std::vector<scan_entry>, bool)> on_done) const;
 
     // Shared by snapshot() and snapshot_async() (persist.cpp, plan-tree.md
     // #11 Phase 2, #14c/#14d): runs the segment scan / delta-fold /

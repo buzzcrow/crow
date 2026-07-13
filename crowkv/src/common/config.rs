@@ -162,6 +162,12 @@ pub struct PxElectionConfig {
     /// Full mpsc surfaces as `PxPaxosError::Busy` on the proposer side
     /// (already classified `FailRetryable`).
     pub learner_stream_window_frames: usize,
+    /// Tick interval for the per-group engine-durability + WAL-GC
+    /// maintenance loop (plan-tree #20 follow-up; see
+    /// `cluster::group_maintenance`). Previously hardcoded as
+    /// `group_maintenance::DEFAULT_MAINTENANCE_TICK`; now a normal
+    /// per-group tunable like the other fields here.
+    pub maintenance_tick_ms: u64,
 }
 
 impl PxElectionConfig {
@@ -176,6 +182,8 @@ impl PxElectionConfig {
         bulk_prepare_window: 1024,
         election_driver_disabled: false,
         learner_stream_window_frames: 64,
+        // Matches design-crowtree-snapshot-gc.md §4's periodic GC trigger cadence.
+        maintenance_tick_ms: 30_000,
     };
 
     /// Aggressive timings for `#[tokio::test(start_paused = true)]` suites.
@@ -194,6 +202,7 @@ impl PxElectionConfig {
             bulk_prepare_window: 1024,
             election_driver_disabled: false,
             learner_stream_window_frames: 64,
+            maintenance_tick_ms: 20,
         }
     }
 }

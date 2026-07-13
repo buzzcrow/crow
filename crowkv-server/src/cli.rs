@@ -58,6 +58,13 @@ pub struct Cli {
     /// `--kv-engine crowtree`). Default: sibling of `wal_root` named `crowtree`.
     #[arg(long)]
     pub data_root: Option<std::path::PathBuf>,
+
+    /// Durable backend for the crowtree engine (only used when `--kv-engine
+    /// crowtree`). `file` (default) is buffered file I/O; `block` opens
+    /// `data_root`'s per-group file with `O_DIRECT` via `BlockPageStore`
+    /// (plan-tree #22) for a real SSD/SCM deployment target.
+    #[arg(long, default_value = "file", value_parser = ["file", "block"])]
+    pub kv_backend: String,
 }
 
 /// Parse a comma-separated list of numbers and ranges into a `Vec<u64>`.

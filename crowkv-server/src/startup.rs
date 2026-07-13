@@ -7,7 +7,7 @@ use crowkv::cluster::group_config::GroupConfigStore;
 use crowkv::cluster::group_election::LeaderElection;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crowkv::common::config::{PxElectionConfig, WalConfig};
-use crowkv::kv::{CrowtreeEngine, CrowtreeOptions, KVEngine};
+use crowkv::kv::{CrowtreeBackend, CrowtreeEngine, CrowtreeOptions, KVEngine};
 use crowkv::wal::replay::replay_group;
 use crowkv::wal::{IoBackend, WalEngine};
 
@@ -66,6 +66,7 @@ async fn open_crowtree_engine(
     data_root: &Path,
     store_id: u64,
     group_id: u64,
+    backend: CrowtreeBackend,
 ) -> io::Result<Box<dyn KVEngine>> {
     let path = store_crowtree_path(data_root, store_id, group_id);
     if let Some(parent) = path.parent() {
@@ -73,6 +74,7 @@ async fn open_crowtree_engine(
     }
     let opt = CrowtreeOptions {
         path: Some(path.to_string_lossy().into_owned()),
+        backend,
         ..Default::default()
     };
     // `CrowtreeEngine::open` is a synchronous FFI call; called here inline
@@ -107,6 +109,7 @@ pub async fn create_group_with_wal(
     wal_backend: Arc<IoBackend>,
     kv_engine: KvEngineKind,
     data_root: &Path,
+    crowtree_backend: CrowtreeBackend,
 ) -> io::Result<PxGroup> {
     let mut wal_config = WalConfig::with_root(store_wal_root(wal_root, store_id));
     if std::env::var("CROWKV_WAL_TEXT").as_deref() == Ok("1") {
@@ -121,7 +124,7 @@ pub async fn create_group_with_wal(
             PxLocalReplica::restore_from_replay(replica_id, initial_role, &replay).await?
         }
         KvEngineKind::Crowtree => {
-            let engine = open_crowtree_engine(data_root, store_id, group_id).await?;
+            let engine = open_crowtree_engine(data_root, store_id, group_id, crowtree_backend).await?;
             PxLocalReplica::restore_from_replay_with_engine(replica_id, initial_role, &replay, engine).await?
         }
     };

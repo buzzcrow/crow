@@ -339,7 +339,7 @@ TEST(MappingTable, InstallRecoveredSegmentIsNotDirty)
     EXPECT_EQ(seg->image_crc, 0x99U);
 
     // Recovered PID 2*kSegmentSize + 5 reads back as the installed descriptor.
-    uint64_t recovered_pid = 2 * MappingTable::kSegmentSize + 5;
+    uint64_t recovered_pid = (2 * MappingTable::kSegmentSize) + 5;
     uint64_t w             = mt.get_word(recovered_pid);
     EXPECT_TRUE(is_unloaded(w));
     EXPECT_EQ(unloaded_iu_index(w), 42U);

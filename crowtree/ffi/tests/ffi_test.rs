@@ -1,5 +1,5 @@
 // PT8.5: C ABI / Rust integration tests through the safe adapter.
-use crowtree_ffi::{AsyncCrowtree, BatchOp, Crowtree, CtError, Options};
+use crowtree_ffi::{AsyncCrowtree, BatchOp, Crowtree, CtError, Options, PageStoreBackend};
 
 fn key(i: usize) -> Vec<u8> {
     format!("key{i:05}").into_bytes()
@@ -116,6 +116,43 @@ fn file_snapshot_reopen_smoke() {
         path: Some(path.to_string_lossy().into_owned()),
         iu_size: 4096,
         frame_bytes: 4096,
+        ..Default::default()
+    };
+
+    {
+        let t = Crowtree::open(&opt).unwrap();
+        for i in 0..50usize {
+            let v = format!("value{i}").into_bytes();
+            t.apply_put((i + 1) as u64, &key(i), &v).unwrap();
+            t.flush().unwrap();
+        }
+        let durable = t.snapshot().unwrap();
+        assert_eq!(durable, 50);
+    }
+    // Reopen the same file and verify recovery.
+    let t = Crowtree::open(&opt).unwrap();
+    assert_eq!(t.last_applied_slot(), 50);
+    for i in 0..50usize {
+        assert_eq!(
+            t.get(&key(i)).unwrap(),
+            Some(((i + 1) as u64, format!("value{i}").into_bytes()))
+        );
+    }
+}
+
+// plan-tree #22: Options::backend = PageStoreBackend::Block selects
+// BlockPageStore (O_DIRECT) instead of the default FilePageStore -- same
+// round-trip as file_snapshot_reopen_smoke above, just through the
+// raw-block-device backend.
+#[test]
+fn block_device_snapshot_reopen_smoke() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tree.ct");
+    let opt = Options {
+        path: Some(path.to_string_lossy().into_owned()),
+        iu_size: 4096,
+        frame_bytes: 4096,
+        backend: PageStoreBackend::Block,
         ..Default::default()
     };
 
@@ -305,4 +342,100 @@ async fn concurrent_async_gets_all_resolve_correctly() {
         let got = task.await.unwrap().unwrap();
         assert_eq!(got, Some(((i + 1) as u64, format!("v{i}").into_bytes())));
     }
+}
+
+// plan-tree.md #11 follow-up: AsyncCrowtree::scan mirrors async_get_fast_
+// path_completes_on_first_poll's regression shape for scan(), which also
+// has a resident-hit fast path (try_scan_no_load).
+#[tokio::test]
+async fn async_scan_fast_path_completes_on_first_poll() {
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("scan_fast.ct");
+    let opt = Options {
+        path: Some(path.to_string_lossy().into_owned()),
+        iu_size: 4096,
+        frame_bytes: 4096,
+        ..Default::default()
+    };
+    let t = AsyncCrowtree::open(&opt).unwrap();
+    for i in 0..10usize {
+        t.apply_put((i + 1) as u64, key(i), format!("v{i}").into_bytes())
+            .await
+            .unwrap();
+    }
+    t.flush().await.unwrap();
+
+    let mut fut = Box::pin(t.scan(Vec::new(), 0));
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    match fut.as_mut().poll(&mut cx) {
+        Poll::Ready(Ok((entries, truncated))) => {
+            assert_eq!(entries.len(), 10);
+            assert!(!truncated);
+        }
+        other => panic!("expected an immediately-ready resolved scan, got {other:?}"),
+    }
+}
+
+// Mirrors async_get_slow_path_completes_after_eviction for scan(): forcing
+// every leaf unloaded makes scan_async take the demand-load-miss retry loop
+// (scan_async_attempt) instead of resolving on the first poll, and it still
+// produces the full, correct result.
+#[tokio::test]
+async fn async_scan_slow_path_completes_after_eviction() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("scan_slow.ct");
+    let opt = Options {
+        path: Some(path.to_string_lossy().into_owned()),
+        iu_size: 4096,
+        frame_bytes: 4096,
+        ..Default::default()
+    };
+    let t = AsyncCrowtree::open(&opt).unwrap();
+    for i in 0..20usize {
+        t.apply_put((i + 1) as u64, key(i), format!("v{i}").into_bytes())
+            .await
+            .unwrap();
+    }
+    t.flush().await.unwrap();
+    t.snapshot().await.unwrap();
+    t.handle().evict_clean_leaves(0);
+
+    let (entries, truncated) = t.scan(Vec::new(), 0).await.unwrap();
+    assert!(!truncated);
+    assert_eq!(entries.len(), 20);
+    let mut got: std::collections::BTreeMap<Vec<u8>, Vec<u8>> =
+        entries.into_iter().map(|e| (e.key, e.value)).collect();
+    for i in 0..20usize {
+        assert_eq!(got.remove(&key(i)), Some(format!("v{i}").into_bytes()));
+    }
+    assert!(got.is_empty());
+}
+
+// A limit smaller than the matching key count truncates, matching scan()'s
+// own synchronous semantics.
+#[tokio::test]
+async fn async_scan_respects_limit_and_truncated_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("scan_limit.ct");
+    let opt = Options {
+        path: Some(path.to_string_lossy().into_owned()),
+        iu_size: 4096,
+        frame_bytes: 4096,
+        ..Default::default()
+    };
+    let t = AsyncCrowtree::open(&opt).unwrap();
+    for i in 0..15usize {
+        t.apply_put((i + 1) as u64, key(i), format!("v{i}").into_bytes())
+            .await
+            .unwrap();
+    }
+    t.flush().await.unwrap();
+
+    let (entries, truncated) = t.scan(Vec::new(), 5).await.unwrap();
+    assert_eq!(entries.len(), 5);
+    assert!(truncated);
 }

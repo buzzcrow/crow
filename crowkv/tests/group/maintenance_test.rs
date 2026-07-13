@@ -6,10 +6,13 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use crowkv::cluster::group::PxGroup;
+use crowkv::cluster::group_election::LeaderElection;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
+use crowkv::common::config::PxElectionConfig;
 use crowkv::kv::{CrowtreeEngine, CrowtreeOptions};
 use crowkv::paxos::roles::{Learner, PxBallot, PxLogEntry};
 use crowkv::wal::record::WALRecord;
@@ -138,6 +141,67 @@ async fn maintenance_pass_persists_snapshot_and_gcs_wal_segments_once_safe() {
     // Replay after GC should still work (only surviving segments).
     let result = replay_group(&backend, &disks, 1).await.unwrap();
     assert!(!result.records.is_empty());
+}
+
+/// plan-tree #20 follow-up: the maintenance loop's tick interval is a
+/// normal per-group tunable (`PxElectionConfig::maintenance_tick_ms`), not
+/// a hardcoded constant. Configure a very short tick, start the *real*
+/// periodic loop (not `run_maintenance_pass_for_tests`'s direct call), and
+/// confirm a pass actually ran once paused virtual time crosses it.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn maintenance_loop_uses_configured_tick_interval() {
+    let backend = sim_backend();
+    let config = WalConfig {
+        wal_disks: vec![PathBuf::from("/wal")],
+        ..Default::default()
+    };
+    let wal = WalEngine::create(backend.clone(), config, 1).await.unwrap();
+
+    let engine_dir = tempfile::tempdir().unwrap();
+    let engine = open_file_engine(engine_dir.path());
+    let empty_replay = replay_group(&backend, &[PathBuf::from("/empty")], 1)
+        .await
+        .unwrap();
+    let mut replica = PxLocalReplica::restore_from_replay_with_engine(
+        1,
+        PxLocalReplicaRole::Leader,
+        &empty_replay,
+        Box::new(engine),
+    )
+    .await
+    .unwrap();
+    replica.set_wal(wal.clone());
+    apply_through_with_engine(&replica, 15).await;
+
+    let mut group = PxGroup::new(1, replica);
+    group.set_election_config(PxElectionConfig {
+        maintenance_tick_ms: 5,
+        ..PxElectionConfig::for_tests()
+    });
+    group.note_peer_applied_for_tests(999, 999);
+    let group = Arc::new(group);
+
+    assert_eq!(wal.snapshot_slot(), 0, "nothing persisted before the loop runs");
+
+    group.start_engine_maintenance_loop().await;
+    // Let the freshly spawned task actually run up to its `sleep(tick)`
+    // call (registering the timer) before advancing paused virtual time --
+    // `tokio::spawn` only schedules it, it doesn't run synchronously.
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    // Advance past the configured 5ms tick, then yield again so the woken
+    // task actually gets to run its maintenance pass.
+    tokio::time::advance(Duration::from_millis(10)).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(
+        wal.snapshot_slot(),
+        15,
+        "the periodic loop should have run a maintenance pass using the configured tick"
+    );
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]

@@ -39,16 +39,13 @@ use tracing::warn;
 use super::group::PxGroup;
 use crate::wal::gc::run_gc_with_watermark;
 
-/// Default tick for the per-group maintenance loop. Not currently
-/// configurable (a natural follow-up); a conservative interval matching the
-/// cadence `design-crowtree-snapshot-gc.md §4`'s periodic GC trigger
-/// describes.
-pub const DEFAULT_MAINTENANCE_TICK: Duration = Duration::from_secs(30);
-
 /// Start the per-group maintenance loop on `group`, unless already running
 /// or `election_cfg.election_driver_disabled` is set (reused here too:
 /// legacy pinned-leader tests that want no per-group background tasks
-/// already set this).
+/// already set this). Tick interval is `election_cfg.maintenance_tick_ms`
+/// (plan-tree #20 follow-up: previously a hardcoded
+/// `DEFAULT_MAINTENANCE_TICK` constant here, now a normal per-group
+/// tunable alongside the election timings on `PxElectionConfig`).
 pub(crate) async fn start(group: &Arc<PxGroup>) {
     if group.election_cfg.election_driver_disabled {
         return;
@@ -58,7 +55,8 @@ pub(crate) async fn start(group: &Arc<PxGroup>) {
         return;
     }
     let weak = Arc::downgrade(group);
-    *guard = Some(spawn(weak, DEFAULT_MAINTENANCE_TICK, group.tenure_cancel.clone()));
+    let tick = Duration::from_millis(group.election_cfg.maintenance_tick_ms);
+    *guard = Some(spawn(weak, tick, group.tenure_cancel.clone()));
 }
 
 /// Spawn the per-group maintenance loop task directly (used by [`start`]

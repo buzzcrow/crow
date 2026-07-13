@@ -62,10 +62,11 @@ void build_source(Crowtree *t, std::map<std::string, std::string> *live)
 }
 
 // Stream A -> B through small chunks (forces multi-chunk transfer).
-void transfer(Crowtree &a, Crowtree &b, size_t chunk_bytes, uint64_t *at_slot)
+void transfer(Crowtree &a, Crowtree &b, size_t chunk_bytes, uint64_t *at_slot,
+             snapshot_format fmt = snapshot_format::kPortable)
 {
     std::unique_ptr<SnapshotExport> exp;
-    ASSERT_TRUE(snapshot_export_begin(a, snapshot_format::kPortable, chunk_bytes, &exp).ok());
+    ASSERT_TRUE(snapshot_export_begin(a, fmt, chunk_bytes, &exp).ok());
     SnapshotImport imp(b);
     bool           done = false;
     while (!done) {
@@ -255,10 +256,98 @@ TEST(SnapshotExport, CrcTamperRejected)
     EXPECT_EQ(imp.finish(nullptr).code(), Code::kCorruption);
 }
 
-TEST(SnapshotExport, NativeFormatNotSupported)
+// plan-tree #16: native format (raw frame images, no cell decode/tuple
+// encode) must round-trip identically to portable -- same live keys/values,
+// same structural compare via snapshot_view().
+TEST(SnapshotExport, NativeExportImportRoundTrip)
 {
-    Options                         opt;
-    Crowtree                        a(opt);
+    Options                            opt;
+    Crowtree                           a(opt);
+    std::map<std::string, std::string> live;
+    build_source(&a, &live);
+
+    Crowtree b(opt);
+    uint64_t at = 0;
+    transfer(a, b, 4096, &at, snapshot_format::kNative);
+    EXPECT_EQ(at, a.last_applied_slot());
+    EXPECT_EQ(b.last_applied_slot(), a.last_applied_slot());
+
+    auto sa = a.snapshot_view();
+    auto sb = b.snapshot_view();
+    EXPECT_TRUE(sa->compare(*sb).empty());
+    EXPECT_EQ(sa->size(), sb->size());
+
+    for (const auto &kv : live) {
+        std::string v;
+        uint64_t    s;
+        ASSERT_TRUE(b.get(Slice(kv.first), &s, &v)) << "missing " << kv.first;
+        EXPECT_EQ(v, kv.second);
+    }
+    std::string v;
+    uint64_t    s;
+    EXPECT_FALSE(b.get(Slice(make_key(3)), &s, &v)); // deleted in build_source
+}
+
+// Native and portable exports of the *same* source tree must be logically
+// equivalent (both replaying into fresh trees produce the same tree state),
+// even though the wire bytes differ entirely.
+TEST(SnapshotExport, NativeEquivalentToPortable)
+{
+    Options                            opt;
+    Crowtree                           a(opt);
+    std::map<std::string, std::string> live;
+    build_source(&a, &live);
+
+    Crowtree b_native(opt);
+    Crowtree c_portable(opt);
+    uint64_t at_native   = 0;
+    uint64_t at_portable = 0;
+    transfer(a, b_native, 4096, &at_native, snapshot_format::kNative);
+    transfer(a, c_portable, 4096, &at_portable, snapshot_format::kPortable);
+    EXPECT_EQ(at_native, at_portable);
+
+    auto sb = b_native.snapshot_view();
+    auto sc = c_portable.snapshot_view();
+    EXPECT_TRUE(sb->compare(*sc).empty());
+    EXPECT_EQ(sb->size(), sc->size());
+}
+
+// A native export survives a round-trip through a new, otherwise-empty tree
+// (the common new-member-install shape) with no residual state.
+TEST(SnapshotExport, NativeEmptyTreeRoundTrip)
+{
+    Options   opt;
+    Crowtree  a(opt); // never written to -- exports just the empty root leaf
+    Crowtree  b(opt);
+    uint64_t  at = 123; // sentinel to prove it gets overwritten to 0
+    transfer(a, b, kSnapshotChunkBytes, &at, snapshot_format::kNative);
+    EXPECT_EQ(at, 0U);
+    EXPECT_EQ(b.last_applied_slot(), 0U);
+    auto sb = b.snapshot_view();
+    EXPECT_EQ(sb->size(), 0U);
+}
+
+TEST(SnapshotExport, NativeCrcTamperRejected)
+{
+    Options                            opt;
+    Crowtree                           a(opt);
+    std::map<std::string, std::string> live;
+    build_source(&a, &live);
+
     std::unique_ptr<SnapshotExport> exp;
-    EXPECT_EQ(snapshot_export_begin(a, snapshot_format::kNative, 0, &exp).code(), Code::kNotSupported);
+    ASSERT_TRUE(snapshot_export_begin(a, snapshot_format::kNative, kSnapshotChunkBytes, &exp).ok());
+    std::string stream;
+    bool        done = false;
+    while (!done) {
+        std::string c;
+        ASSERT_TRUE(exp->next_chunk(&c, &done).ok());
+        stream += c;
+    }
+    ASSERT_GT(stream.size(), 64U);
+    stream[40] = static_cast<char>(stream[40] ^ 0xff); // flip a byte in the frame body
+
+    Crowtree       b(opt);
+    SnapshotImport imp(b);
+    ASSERT_TRUE(imp.feed(Slice(stream)).ok());
+    EXPECT_EQ(imp.finish(nullptr).code(), Code::kCorruption);
 }

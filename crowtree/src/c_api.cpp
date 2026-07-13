@@ -8,6 +8,7 @@
 #include "crowtree/c_api.h"
 
 #include "crowtree/async_page_store.h"
+#include "crowtree/block_page_store.h"
 #include "crowtree/crowtree.h"
 #include "crowtree/page_store.h"
 #include "crowtree/snapshot_io.h"
@@ -124,7 +125,7 @@ struct ct_tree
 // if the I/O completes after the caller has already abandoned the future.
 struct ct_future_impl
 {
-    enum class Kind { kGet, kFlush, kSnapshot };
+    enum class Kind { kGet, kFlush, kSnapshot, kScan };
     Kind kind = Kind::kGet;
     // Written once by the completion callback (release), read once by the
     // first ct_future_poll that observes it (acquire) -- that acquire/
@@ -140,6 +141,14 @@ struct ct_future_impl
     // always follow up with ct_future_free once done reading out_value.
     GetView  get_result;
     uint64_t slot = 0; // kSnapshot only (last_applied_slot)
+    // kScan only: packed record buffer (same format ct_scan produces),
+    // materialized eagerly in the completion callback -- no borrowed
+    // frame bytes involved (every value is already an owned std::string
+    // by the time scan_async's on_done fires, same as scan() itself), so
+    // unlike kGet there is nothing to keep alive past ct_future_poll.
+    std::string scan_packed;
+    uint64_t    scan_count     = 0;
+    bool        scan_truncated = false;
 };
 
 using ct_future_handle = std::shared_ptr<ct_future_impl>;
@@ -200,7 +209,27 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
     o.compression = opt->compression == 1 ? compress_algo::kLz4 : compress_algo::kNone;
 
     const bool durable = opt->path != nullptr && opt->path[0] != '\0';
-    if (durable) {
+    if (durable && opt->backend == 1) {
+        // plan-tree #22: raw block device (O_DIRECT), no async twin yet --
+        // get_async/flush_async/snapshot_async fall back to synchronous
+        // completion (design §6.3), matching a MemPageStore-backed tree's
+        // existing no-async-backend-wired path (o.async_reactor/
+        // async_page_store stay null).
+        std::unique_ptr<BlockPageStore> bs;
+        Status s = BlockPageStore::open(opt->path, opt->iu_size == 0 ? 4096 : opt->iu_size, &bs);
+        if (!s.ok()) {
+            return to_status(s);
+        }
+        h->store     = std::move(bs);
+        o.page_store = h->store.get();
+        std::unique_ptr<Crowtree> t;
+        Status                    os = Crowtree::open(o, &t);
+        if (!os.ok()) {
+            return to_status(os);
+        }
+        h->tree = std::move(t);
+    }
+    else if (durable) {
         std::unique_ptr<FilePageStore> fs;
         Status                         s = FilePageStore::open(opt->path, opt->iu_size == 0 ? 4096 : opt->iu_size, &fs);
         if (!s.ok()) {
@@ -304,18 +333,31 @@ uint64_t ct_evict_clean_leaves(ct_tree *t, uint64_t max_resident_leaves)
     return t->tree->evict_clean_leaves(max_resident_leaves);
 }
 
+uint64_t ct_evict_clean_inner(ct_tree *t, uint64_t max_resident_inner)
+{
+    if (t == nullptr) {
+        return 0;
+    }
+    return t->tree->evict_clean_inner(max_resident_inner);
+}
+
 // ── Data path ─────────────────────────────────────────────────────
 
+// plan-tree #5 B2d: allocate the key + encoded-cell buffers exactly once,
+// directly from the raw C bytes, and move them straight down into
+// Crowtree::apply_encoded -- no intermediate Batch/batch_op (plain
+// std::string key/kind/value) that apply_batch would otherwise have to
+// re-encode into a cell later. `val`/`vlen` are read via a non-owning
+// Slice, so the value is only ever copied once (by encode_cell_buf itself).
 ct_status ct_apply_put(ct_tree *t, uint64_t slot, const uint8_t *key, size_t klen, const uint8_t *val, size_t vlen)
 {
     if (t == nullptr) {
         return static_cast<ct_status>(Code::kInvalidArgument);
     }
-    Batch b;
-    b.ops.push_back({.key   = std::string(reinterpret_cast<const char *>(key), klen),
-                     .kind  = OpKind::kPut,
-                     .value = std::string(reinterpret_cast<const char *>(val), vlen)});
-    return to_status(t->tree->apply(slot, b));
+    std::vector<Crowtree::encoded_op> ops;
+    ops.push_back({std::string(reinterpret_cast<const char *>(key), klen),
+                   encode_cell_buf(slot, OpKind::kPut, Slice(reinterpret_cast<const char *>(val), vlen))});
+    return to_status(t->tree->apply_encoded(slot, std::move(ops)));
 }
 
 ct_status ct_apply_delete(ct_tree *t, uint64_t slot, const uint8_t *key, size_t klen)
@@ -323,11 +365,10 @@ ct_status ct_apply_delete(ct_tree *t, uint64_t slot, const uint8_t *key, size_t 
     if (t == nullptr) {
         return static_cast<ct_status>(Code::kInvalidArgument);
     }
-    Batch b;
-    b.ops.push_back({.key   = std::string(reinterpret_cast<const char *>(key), klen),
-                     .kind  = OpKind::kDelete,
-                     .value = std::string()});
-    return to_status(t->tree->apply(slot, b));
+    std::vector<Crowtree::encoded_op> ops;
+    ops.push_back(
+        {std::string(reinterpret_cast<const char *>(key), klen), encode_cell_buf(slot, OpKind::kDelete)});
+    return to_status(t->tree->apply_encoded(slot, std::move(ops)));
 }
 
 ct_status ct_apply_batch(ct_tree *t, uint64_t slot, const uint8_t *ops, size_t ops_len, uint64_t count)
@@ -335,9 +376,9 @@ ct_status ct_apply_batch(ct_tree *t, uint64_t slot, const uint8_t *ops, size_t o
     if (t == nullptr || (ops == nullptr && ops_len != 0)) {
         return static_cast<ct_status>(Code::kInvalidArgument);
     }
-    Batch  b;
-    size_t pos = 0;
-    b.ops.reserve(count);
+    std::vector<Crowtree::encoded_op> encoded;
+    size_t                            pos = 0;
+    encoded.reserve(count);
     for (uint64_t i = 0; i < count; ++i) {
         if (pos >= ops_len) {
             return static_cast<ct_status>(Code::kInvalidArgument);
@@ -354,16 +395,17 @@ ct_status ct_apply_batch(ct_tree *t, uint64_t slot, const uint8_t *ops, size_t o
         if (!read_u32(ops, ops_len, &pos, &vlen) || pos + vlen > ops_len) {
             return static_cast<ct_status>(Code::kInvalidArgument);
         }
-        std::string value(reinterpret_cast<const char *>(ops + pos), vlen);
-        pos += vlen;
         if (kind_byte != 0 && kind_byte != 1) {
             return static_cast<ct_status>(Code::kInvalidArgument);
         }
-        b.ops.push_back({.key   = std::move(key),
-                         .kind  = kind_byte == 0 ? OpKind::kPut : OpKind::kDelete,
-                         .value = std::move(value)});
+        // Value bytes go straight from the wire buffer into the encoded cell
+        // (a non-owning Slice into `ops`) -- no intermediate std::string.
+        Slice value_slice(reinterpret_cast<const char *>(ops + pos), vlen);
+        pos += vlen;
+        OpKind kind = kind_byte == 0 ? OpKind::kPut : OpKind::kDelete;
+        encoded.push_back({std::move(key), encode_cell_buf(slot, kind, kind == OpKind::kPut ? value_slice : Slice())});
     }
-    return to_status(t->tree->apply(slot, b));
+    return to_status(t->tree->apply_encoded(slot, std::move(encoded)));
 }
 
 void ct_force_advance_slot(ct_tree *t, uint64_t slot)
@@ -466,6 +508,35 @@ ct_future *ct_snapshot_async(ct_tree *t)
     return reinterpret_cast<ct_future *>(new ct_future_handle(std::move(impl)));
 }
 
+ct_future *ct_scan_async(ct_tree *t, const uint8_t *prefix, size_t plen, size_t limit)
+{
+    if (t == nullptr) {
+        return nullptr;
+    }
+    auto impl  = std::make_shared<ct_future_impl>();
+    impl->kind = ct_future_impl::Kind::kScan;
+    t->tree->scan_async(Slice(reinterpret_cast<const char *>(prefix), plen), limit,
+                       [impl](Status st, std::vector<scan_entry> entries, bool truncated) {
+                           impl->status = to_status(st);
+                           if (st.ok()) {
+                               // Same packed record format as ct_scan (see
+                               // that function): [u32 klen][key][u64
+                               // slot][u32 vlen][val] * count.
+                               for (const auto &e : entries) {
+                                   pack_u32(&impl->scan_packed, static_cast<uint32_t>(e.key.size()));
+                                   impl->scan_packed.append(e.key);
+                                   pack_u64(&impl->scan_packed, e.slot);
+                                   pack_u32(&impl->scan_packed, static_cast<uint32_t>(e.value.size()));
+                                   impl->scan_packed.append(e.value);
+                               }
+                               impl->scan_count     = entries.size();
+                               impl->scan_truncated = truncated;
+                           }
+                           impl->done.store(true, std::memory_order_release);
+                       });
+    return reinterpret_cast<ct_future *>(new ct_future_handle(std::move(impl)));
+}
+
 ct_status ct_future_poll(ct_future *f, int32_t *done, int32_t *out_found, uint64_t *out_slot, ct_buf *out_value)
 {
     if (f == nullptr || done == nullptr) {
@@ -511,7 +582,18 @@ ct_status ct_future_poll(ct_future *f, int32_t *done, int32_t *out_found, uint64
             *out_slot = impl->slot;
         }
     }
-    delete handle; // Flush/Snapshot: no borrowed state; free immediately.
+    else if (impl->kind == ct_future_impl::Kind::kScan) {
+        if (out_slot != nullptr) {
+            *out_slot = impl->scan_count;
+        }
+        if (out_found != nullptr) {
+            *out_found = impl->scan_truncated ? 1 : 0;
+        }
+        if (out_value != nullptr) {
+            *out_value = make_buf(impl->scan_packed.data(), impl->scan_packed.size());
+        }
+    }
+    delete handle; // Flush/Snapshot/Scan: no borrowed state; free immediately.
     return status;
 }
 

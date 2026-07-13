@@ -68,11 +68,13 @@ async fn main() {
             .join("crowtree")
     });
     let kv_engine = KvEngineKind::parse(&args.kv_engine);
+    let crowtree_backend = crowkv_server::store_registry::parse_crowtree_backend(&args.kv_backend);
     let wal_backend = Arc::new(crowkv::wal::IoBackend::detect());
 
     let registry = Arc::new(
         KvStoreRegistry::with_runtime(election_cfg, wal_root, config_root, wal_backend)
-            .with_kv_engine(kv_engine, data_root),
+            .with_kv_engine(kv_engine, data_root)
+            .with_crowtree_backend(crowtree_backend),
     );
 
     // Populate the port pool from `--ports` even when `--stores` is not
@@ -265,6 +267,7 @@ async fn create_and_start_stores(
                 registry.wal_backend.clone(),
                 registry.kv_engine,
                 &registry.data_root,
+                registry.crowtree_backend,
             )
             .await
             {

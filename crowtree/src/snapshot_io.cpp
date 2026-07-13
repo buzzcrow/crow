@@ -18,9 +18,12 @@ namespace
 
 constexpr uint32_t kSnapMagic   = 0x4E535443; // 'CTSN' little-endian
 constexpr uint32_t kSnapVersion = 1;
-// Header: magic + version + format + at_slot + entry_count.
+// Portable header: magic + version + format + at_slot + entry_count.
 constexpr size_t kSnapHeader  = 4 + 4 + 1 + 8 + 8;
 constexpr size_t kSnapTrailer = 4; // whole-stream CRC32C
+
+// Native header: magic + version + format + at_slot + root_page_id + frame_count.
+constexpr size_t kNativeHeader = 4 + 4 + 1 + 8 + 8 + 8;
 
 void put_u32(std::string *o, uint32_t v)
 {
@@ -54,14 +57,8 @@ uint64_t get_u64(const uint8_t *p)
     return v;
 }
 
-} // namespace
-
-Status snapshot_export_begin(Crowtree &tree, snapshot_format fmt, size_t chunk_bytes,
-                             std::unique_ptr<SnapshotExport> *out)
+Status snapshot_export_begin_portable(Crowtree &tree, size_t chunk_bytes, std::unique_ptr<SnapshotExport> *out)
 {
-    if (fmt != snapshot_format::kPortable) {
-        return Status::not_supported("snapshot export: only portable format in v1");
-    }
     // v1 always exports the current durable view (its last_applied_slot is recorded
     // in the stream header). An arbitrary historical pin is deferred until
     // path-copy COW RootVersions exist.
@@ -87,10 +84,57 @@ Status snapshot_export_begin(Crowtree &tree, snapshot_format fmt, size_t chunk_b
     uint32_t crc = crc32c(reinterpret_cast<const uint8_t *>(s.data()), s.size());
     put_u32(&s, crc);
 
-    auto exp      = std::make_unique<SnapshotExport>(std::move(s), chunk_bytes);
-    exp->at_slot_ = slot;
-    *out          = std::move(exp);
+    auto exp = std::make_unique<SnapshotExport>(std::move(s), chunk_bytes, slot);
+    *out     = std::move(exp);
     return Status::Ok();
+}
+
+// plan-tree #16: native format -- raw leaf/inner/overflow frame bytes
+// tagged with their PID, no cell decode/tuple encode. Body:
+// `[u64 page_id][u32 frame_len][frame_len bytes] * frame_count`.
+Status snapshot_export_begin_native(Crowtree &tree, size_t chunk_bytes, std::unique_ptr<SnapshotExport> *out)
+{
+    std::vector<NativeFrame> frames;
+    uint64_t                 root_page_id = 0;
+    uint64_t                 slot         = 0;
+    Status                   cs           = tree.collect_native_frames(&frames, &root_page_id, &slot);
+    if (!cs.ok()) {
+        return cs;
+    }
+
+    std::string s;
+    put_u32(&s, kSnapMagic);
+    put_u32(&s, kSnapVersion);
+    s.push_back(static_cast<char>(snapshot_format::kNative));
+    put_u64(&s, slot);
+    put_u64(&s, root_page_id);
+    put_u64(&s, static_cast<uint64_t>(frames.size()));
+    for (const NativeFrame &f : frames) {
+        put_u64(&s, f.page_id);
+        put_u32(&s, static_cast<uint32_t>(f.frame.size()));
+        s.append(reinterpret_cast<const char *>(f.frame.data()), f.frame.size());
+    }
+    uint32_t crc = crc32c(reinterpret_cast<const uint8_t *>(s.data()), s.size());
+    put_u32(&s, crc);
+
+    auto exp = std::make_unique<SnapshotExport>(std::move(s), chunk_bytes, slot);
+    *out     = std::move(exp);
+    return Status::Ok();
+}
+
+} // namespace
+
+Status snapshot_export_begin(Crowtree &tree, snapshot_format fmt, size_t chunk_bytes,
+                             std::unique_ptr<SnapshotExport> *out)
+{
+    switch (fmt) {
+    case snapshot_format::kPortable:
+        return snapshot_export_begin_portable(tree, chunk_bytes, out);
+    case snapshot_format::kNative:
+        return snapshot_export_begin_native(tree, chunk_bytes, out);
+    default:
+        return Status::not_supported("snapshot export: unknown format");
+    }
 }
 
 Status SnapshotExport::next_chunk(std::string *out, bool *done)
@@ -144,6 +188,53 @@ Status SnapshotImport::feed(Slice chunk)
     return Status::Ok();
 }
 
+Status SnapshotImport::finish_native(const uint8_t *p, size_t len, uint64_t *out_at_slot)
+{
+    if (len < kNativeHeader + kSnapTrailer) {
+        return Status::invalid_argument("snapshot: native stream too short");
+    }
+    // Verify the whole-stream CRC over everything but the trailing 4 bytes.
+    uint32_t want_crc = get_u32(p + (len - kSnapTrailer));
+    if (crc32c(p, len - kSnapTrailer) != want_crc) {
+        return Status::corruption("snapshot: CRC mismatch");
+    }
+
+    uint64_t at_slot      = get_u64(p + 9);
+    uint64_t root_page_id = get_u64(p + 17);
+    uint64_t count        = get_u64(p + 25);
+
+    std::vector<NativeFrame> frames;
+    frames.reserve(count);
+    size_t       pos      = kNativeHeader;
+    const size_t body_end = len - kSnapTrailer;
+    for (uint64_t i = 0; i < count; ++i) {
+        if (pos + 8 + 4 > body_end) {
+            return Status::corruption("snapshot: truncated native frame header");
+        }
+        uint64_t page_id = get_u64(p + pos);
+        pos += 8;
+        uint32_t flen = get_u32(p + pos);
+        pos += 4;
+        if (pos + flen > body_end) {
+            return Status::corruption("snapshot: truncated native frame body");
+        }
+        frames.push_back(NativeFrame{.page_id = page_id, .frame = std::vector<uint8_t>(p + pos, p + pos + flen)});
+        pos += flen;
+    }
+    if (pos != body_end) {
+        return Status::corruption("snapshot: trailing bytes");
+    }
+
+    Status is = tree_.install_snapshot_native(std::move(frames), root_page_id, at_slot);
+    if (!is.ok()) {
+        return is;
+    }
+    if (out_at_slot != nullptr) {
+        *out_at_slot = at_slot;
+    }
+    return Status::Ok();
+}
+
 Status SnapshotImport::finish(uint64_t *out_at_slot)
 {
     const size_t len = buf_.size();
@@ -158,8 +249,12 @@ Status SnapshotImport::finish(uint64_t *out_at_slot)
     if (get_u32(p + 4) != kSnapVersion) {
         return Status::not_supported("snapshot: version");
     }
-    if (static_cast<snapshot_format>(p[8]) != snapshot_format::kPortable) {
-        return Status::not_supported("snapshot: only portable format in v1");
+    auto fmt = static_cast<snapshot_format>(p[8]);
+    if (fmt == snapshot_format::kNative) {
+        return finish_native(p, len, out_at_slot);
+    }
+    if (fmt != snapshot_format::kPortable) {
+        return Status::not_supported("snapshot: unknown format");
     }
     // Verify the whole-stream CRC over everything but the trailing 4 bytes.
     uint32_t want_crc = get_u32(p + (len - kSnapTrailer));

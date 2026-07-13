@@ -68,6 +68,7 @@ mod sys {
         pub buffer_pool_bytes: u64,
         pub compression: u8,
         pub max_inline_value: u64,
+        pub backend: u8,
     }
 
     extern "C" {
@@ -140,9 +141,11 @@ mod sys {
 
         // ── Async data path (plan-tree #11 Phase 2/3) ──
         pub fn ct_evict_clean_leaves(t: *mut ct_tree, max_resident_leaves: u64) -> u64;
+        pub fn ct_evict_clean_inner(t: *mut ct_tree, max_resident_inner: u64) -> u64;
         pub fn ct_get_async(t: *mut ct_tree, key: *const u8, klen: usize) -> *mut ct_future;
         pub fn ct_flush_async(t: *mut ct_tree) -> *mut ct_future;
         pub fn ct_snapshot_async(t: *mut ct_tree) -> *mut ct_future;
+        pub fn ct_scan_async(t: *mut ct_tree, prefix: *const u8, plen: usize, limit: usize) -> *mut ct_future;
         pub fn ct_future_poll(
             f: *mut ct_future,
             done: *mut c_int,
@@ -219,6 +222,20 @@ pub enum Compression {
     Lz4,
 }
 
+/// Durable backend selection (plan-tree #22), mirrors `ct_options::backend`.
+/// Ignored when `Options::path` is `None` (in-memory).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PageStoreBackend {
+    /// Buffered file I/O (`FilePageStore`) -- the default.
+    #[default]
+    File,
+    /// Raw block device (`BlockPageStore`, `O_DIRECT`) for a real SSD/SCM
+    /// deployment target. `path` may be a block device node or a
+    /// pre-allocated regular file. No async twin yet -- `get_async`/
+    /// `flush_async`/`snapshot_async` fall back to synchronous completion.
+    Block,
+}
+
 /// Engine configuration. `path = None` selects an in-memory store.
 #[derive(Debug, Clone, Default)]
 pub struct Options {
@@ -228,6 +245,7 @@ pub struct Options {
     pub buffer_pool_bytes: u64,
     pub compression_lz4: bool,
     pub max_inline_value: u64,
+    pub backend: PageStoreBackend,
 }
 
 /// One record of a multi-key batch passed to [`Crowtree::apply_batch`].
@@ -317,6 +335,10 @@ impl Crowtree {
             buffer_pool_bytes: opt.buffer_pool_bytes,
             compression: u8::from(opt.compression_lz4),
             max_inline_value: opt.max_inline_value,
+            backend: match opt.backend {
+                PageStoreBackend::File => 0,
+                PageStoreBackend::Block => 1,
+            },
         };
         let mut out: *mut sys::ct_tree = std::ptr::null_mut();
         check(unsafe { sys::ct_open(&copt, &mut out) })?;
@@ -437,6 +459,13 @@ impl Crowtree {
     /// take. Returns the number of leaves evicted.
     pub fn evict_clean_leaves(&self, max_resident_leaves: u64) -> u64 {
         unsafe { sys::ct_evict_clean_leaves(self.as_ptr(), max_resident_leaves) }
+    }
+
+    /// plan-tree.md #17 D3: same contract, but for resident *inner* bases --
+    /// a genuinely separate ranked budget/pass from [`Self::evict_clean_leaves`],
+    /// never evicting a leaf. Returns the number of inner bases evicted.
+    pub fn evict_clean_inner(&self, max_resident_inner: u64) -> u64 {
+        unsafe { sys::ct_evict_clean_inner(self.as_ptr(), max_resident_inner) }
     }
 
     /// The tree's Reactor eventfd (design §7), or -1 if none is wired (an
@@ -745,13 +774,17 @@ struct RawOutcome {
 /// a resolved kGet future is deliberately *not* freed by `ct_future_poll`
 /// itself (its `out_value` may still borrow from a resident frame, kept
 /// alive by the future's own epoch guard), so the caller must free it
-/// explicitly once done reading -- unlike Flush/Snapshot, which
+/// explicitly once done reading -- unlike Flush/Snapshot/Scan, which
 /// `ct_future_poll` already frees on completion, same as before Phase 4.
+/// `Scan`'s `out_value` (plan-tree.md #11 follow-up) is always a *malloc'd*
+/// owned buffer (never borrowed, unlike Get) -- `try_poll_ct_future` must
+/// free it via `take_buf`, not `copy_buf`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FutureKind {
     Get,
     Flush,
     Snapshot,
+    Scan,
 }
 
 /// RAII guard for one in-flight `ct_future`: frees it via `ct_future_free`
@@ -800,15 +833,27 @@ fn try_poll_ct_future(guard: &mut FutureGuard, kind: FutureKind) -> Option<Resul
     if done == 0 {
         return None;
     }
+    // Extracted unconditionally, before checking status: for Scan, `value`
+    // is always a malloc'd owned buffer (see FutureKind::Scan's doc
+    // comment) that must be freed via take_buf/ct_free_buf regardless of
+    // whether the underlying op errored (ct_future_poll's kScan branch
+    // populates *out_value with an owned buffer -- possibly empty, but
+    // still malloc'd -- either way; leaving `value` unhandled inside a
+    // match arm that only runs on Ok would leak it on an errored scan).
+    let value_bytes = if kind == FutureKind::Scan {
+        take_buf(value)
+    } else {
+        // copy_buf, not take_buf: for a Get, `value` may borrow from a
+        // still-live frame (design §5's zero-copy fast path) and must
+        // not be passed to ct_free_buf. Flush/Snapshot never populate
+        // `value` at all, so this is a no-op for them either way.
+        copy_buf(value)
+    };
     let result = match check(rc) {
         Ok(()) => Ok(RawOutcome {
             found: found != 0,
             slot,
-            // copy_buf, not take_buf: for a Get, `value` may borrow from a
-            // still-live frame (design §5's zero-copy fast path) and must
-            // not be passed to ct_free_buf. Flush/Snapshot never populate
-            // `value` at all, so this is a no-op for them either way.
-            value: copy_buf(value),
+            value: value_bytes,
         }),
         Err(e) => Err(e),
     };
@@ -974,6 +1019,20 @@ impl AsyncCrowtree {
             let out = drive_ct_future(guard, &tree, FutureKind::Get).await?;
             Ok(out.found.then_some((out.slot, out.value)))
         }))
+    }
+
+    /// Async twin of [`Crowtree::scan`] (plan-tree.md #11 follow-up). Drives
+    /// the reactor directly like `get`/`flush`/`snapshot` -- resolves on the
+    /// first poll whenever every leaf in range is already resident
+    /// (`scan()`'s own fast path), only waiting on the reactor for a
+    /// genuine cold leaf (or the initial root->leaf descent). See
+    /// `Crowtree::scan_async`'s doc comment (crowtree.h) for why a miss
+    /// retries the whole scan rather than resuming a cursor.
+    pub async fn scan(&self, prefix: Vec<u8>, limit: usize) -> Result<(Vec<ScanEntry>, bool), CtError> {
+        let fut = unsafe { sys::ct_scan_async(self.inner.as_ptr(), prefix.as_ptr(), prefix.len(), limit) };
+        let out = drive_ct_future(FutureGuard(fut), &self.inner, FutureKind::Scan).await?;
+        let entries = decode_scan(&out.value, out.slot as usize)?;
+        Ok((entries, out.found))
     }
 }
 

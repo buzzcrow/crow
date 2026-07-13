@@ -7,6 +7,7 @@ use crowtree_ffi::{AsyncCrowtree, BatchOp as CtBatchOp, Crowtree, CtError, GetOu
 use std::sync::Arc;
 
 pub use crowtree_ffi::Options as CrowtreeOptions;
+pub use crowtree_ffi::PageStoreBackend as CrowtreeBackend;
 
 /// `KVEngine` backed by [`crowtree_ffi::Crowtree`], via [`AsyncCrowtree`].
 ///

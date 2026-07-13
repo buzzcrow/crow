@@ -209,3 +209,167 @@ TEST(Eviction, RecentlyTouchedLeafSurvivesEvictionOverColderOnes)
     EXPECT_EQ(v, oracle[make_key(150)]);
     EXPECT_GT(store.reads.load(), reads_before) << "a colder leaf should have been evicted and reloaded";
 }
+
+// plan-tree #17 D3: evict_clean_inner is a genuinely separate pass/budget
+// from evict_clean_leaves -- never touches a leaf, ranked independently.
+TEST(Eviction, EvictCleanInnerNeverTouchesLeaves)
+{
+    CountingPageStore store(1);
+    Options           opt;
+    opt.page_store       = &store;
+    opt.max_delta_len    = 1;
+    opt.leaf_split_bytes = 80; // tiny leaves -> many of them
+    opt.inner_max_keys   = 4;  // low fanout -> multiple inner bases, not just the root
+    opt.frame_bytes      = 4096;
+    Crowtree t(opt);
+
+    std::map<std::string, std::string> oracle;
+    fill_buf(&t, 300, &oracle); // enough keys for several inner levels
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
+
+    int reads_before = store.reads.load();
+    // Aggressive inner budget: keep at most 1 inner base resident. Leaves
+    // must be entirely unaffected -- every value stays readable, and (since
+    // evict_clean_inner never touches leaves) any leaf reads below only
+    // reflect inner-base reloads, never a leaf-base one.
+    size_t evicted = t.evict_clean_inner(1);
+    EXPECT_GT(evicted, 0U) << "300 keys should span more than one inner base";
+
+    for (const auto &kv : oracle) {
+        std::string v;
+        uint64_t    s;
+        ASSERT_TRUE(t.get(Slice(kv.first), &s, &v)) << "missing " << kv.first;
+        EXPECT_EQ(v, kv.second);
+    }
+    EXPECT_GT(store.reads.load(), reads_before) << "evicted inner bases should have demand-loaded again";
+
+    // A second pass with the budget already satisfied evicts nothing more
+    // (mirrors EvictIsIdempotentAndSkipsDirty's leaf-side analog) -- reload
+    // the whole oracle first so every inner base on these paths is resident
+    // and clean again.
+    for (const auto &kv : oracle) {
+        std::string v;
+        uint64_t    s;
+        ASSERT_TRUE(t.get(Slice(kv.first), &s, &v));
+    }
+    EXPECT_EQ(t.evict_clean_inner(300), 0U) << "budget already satisfied for a tree this small";
+}
+
+// plan-tree #17 D3's whole reason for a *separate* pass: recency-ranking
+// leaves and inner bases together would let some unrelated leaf's ranking
+// evict a just-touched key's own ancestor chain, forcing extra reads on the
+// very next access -- see evict_clean_inner_locked's doc comment
+// (crowtree.cpp). With disjoint passes that can never happen: touching a
+// leaf's whole ancestor chain keeps it resident against evict_clean_inner
+// alone, in preference to a colder, unrelated chain -- exactly like
+// RecentlyTouchedLeafSurvivesEvictionOverColderOnes already proves for
+// evict_clean_leaves alone.
+//
+// Deliberately measures key(0)'s own ancestor-chain depth (`depth0` below)
+// rather than assuming a fixed tree shape/depth from `inner_max_keys` and
+// key count: evict_clean_inner(0) evicts *every* resident inner base and
+// returns the count, so re-touching key(0) alone and evicting again with
+// budget 0 yields exactly how many inner bases sit on its path -- whatever
+// that number turns out to be for this tree.
+TEST(Eviction, RecentlyTouchedAncestorChainSurvivesInnerEvictionOverColderOnes)
+{
+    CountingPageStore store(1);
+    Options           opt;
+    opt.page_store       = &store;
+    opt.max_delta_len    = 1;
+    opt.leaf_split_bytes = 80;
+    opt.inner_max_keys   = 4;
+    opt.frame_bytes      = 4096;
+    Crowtree t(opt);
+
+    std::map<std::string, std::string> oracle;
+    fill_buf(&t, 300, &oracle);
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
+
+    std::string v;
+    uint64_t    s;
+
+    // Unload every inner base, then reload only key(0)'s own path by
+    // touching it once -- the resident inner-base set is now exactly that
+    // path, so evicting everything again (budget 0) measures its depth.
+    (void)t.evict_clean_inner(0);
+    ASSERT_TRUE(t.get(Slice(make_key(0)), &s, &v));
+    size_t depth0 = t.evict_clean_inner(0);
+    ASSERT_GT(depth0, 0U) << "key(0) must have at least one inner ancestor (the root)";
+
+    // Reload a different, unrelated key's path first (older ticks), then
+    // key(0)'s path again (newest ticks) -- the resident set is now the
+    // union of both paths (any shared ancestor, e.g. the root, counted once
+    // and stamped with key(0)'s newer touch).
+    ASSERT_TRUE(t.get(Slice(make_key(250)), &s, &v));
+    ASSERT_TRUE(t.get(Slice(make_key(0)), &s, &v));
+
+    int reads_before = store.reads.load();
+    // Budget == key(0)'s own path depth: only key(250)'s ancestors that
+    // aren't shared with key(0)'s path (strictly older ticks) should be
+    // evicted.
+    size_t evicted = t.evict_clean_inner(depth0);
+
+    // key(0)'s whole path must still be fully resident: no fresh demand-load
+    // at all.
+    ASSERT_TRUE(t.get(Slice(make_key(0)), &s, &v));
+    EXPECT_EQ(v, oracle[make_key(0)]);
+    EXPECT_EQ(store.reads.load(), reads_before)
+        << "recently-touched leaf's ancestor chain should not have been evicted";
+
+    // key(250)'s path shares nothing but possibly the (now-preserved) root
+    // with key(0)'s -- if the two diverge below the root at all (very
+    // likely with inner_max_keys this low and keys this far apart), at
+    // least one of its ancestors was colder than key(0)'s and got evicted.
+    if (evicted > 0) {
+        ASSERT_TRUE(t.get(Slice(make_key(250)), &s, &v));
+        EXPECT_EQ(v, oracle[make_key(250)]);
+        EXPECT_GT(store.reads.load(), reads_before) << "a colder inner base should have been evicted and reloaded";
+    }
+}
+
+// Regression: free_subtree's root->children walk (used by ~Crowtree and
+// install_snapshot(_native) to drop the live tree) bails out the moment it
+// reaches an *unloaded* slot -- previously always safe, since only a leaf
+// (no descendants) could ever be independently evicted, but not once
+// evict_clean_inner can unload an *inner* ancestor while its leaf
+// descendants stay fully resident underneath it: a root-rooted walk that
+// bails on the unloaded root would never reach (or free) those leaves at
+// all. Fixed by free_all_resident_pages's segment-scan (crowtree.cpp) --
+// this exercises it via install_snapshot's retire=true path (checkable
+// without a sanitizer, via BufferPool::Stats::used, unlike ~Crowtree's own
+// teardown path, which needs ASan's leak detector to observe from outside).
+TEST(Eviction, InstallSnapshotReclaimsResidentLeavesEvenWhenInnerAncestorWasEvicted)
+{
+    MemPageStore store(1);
+    Options      opt;
+    opt.page_store       = &store;
+    opt.max_delta_len    = 1;
+    opt.leaf_split_bytes = 80;
+    opt.inner_max_keys   = 4;
+    opt.frame_bytes      = 4096;
+    Crowtree t(opt);
+
+    std::map<std::string, std::string> oracle;
+    fill_buf(&t, 300, &oracle);
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
+
+    // Evict every inner base -- every leaf remains fully resident underneath
+    // a now-entirely-unloaded inner chain, including the root itself.
+    size_t inner_evicted = t.evict_clean_inner(0);
+    EXPECT_GT(inner_evicted, 0U);
+
+    uint32_t used_before = t.buffer_pool()->stats().used;
+    EXPECT_GT(used_before, 0U) << "every leaf should still be resident (never evicted)";
+
+    // Replaces the whole live tree -- must reclaim every still-resident
+    // leaf, not just the (already-unloaded) inner ancestors.
+    ASSERT_TRUE(t.install_snapshot({}, 0).ok());
+
+    // No reader guards are open, so the epoch manager reclaims synchronously
+    // (same assumption the leaf-eviction tests above rely on): only the
+    // freshly-built empty root should remain resident.
+    EXPECT_EQ(t.buffer_pool()->stats().used, 1U)
+        << "install_snapshot must reclaim the old tree's still-resident leaves "
+           "even though their ancestor chain was unloaded";
+}

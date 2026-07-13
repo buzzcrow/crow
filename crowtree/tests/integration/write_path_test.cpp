@@ -56,6 +56,75 @@ TEST(WritePath, BasePagesLiveInBufferPool)
     }
 }
 
+// plan-tree #18 D5/D6: dirty ("anonymous", durable_addr == kNoAddr) frames
+// are pinned-resident until a snapshot -- design-crowtree-persistence.md
+// §4.3's "a dirty frame is never evicted until written". D5 (model
+// reconciliation) is a no-op: the live model (PageBase::durable_addr
+// directly, no separate Pin/PinNew abstraction) already satisfies that
+// invariant -- evict_clean_leaves_locked requires durable_addr != kNoAddr,
+// so a dirty page is never a candidate.
+//
+// D6 asks for a "back-pressure test under a write storm (eager snapshot)".
+// No eager-snapshot-on-memory-pressure trigger actually exists anywhere in
+// the engine (verified by inspection: background_flush_loop only calls
+// flush()/collect_garbage(), never snapshot(); maybe_evict_locked only
+// evicts *clean* frames) -- design §5A's "a write storm that outruns
+// snapshot triggers an eager snapshot" was never implemented, so there is
+// nothing to test *as originally scoped*. What's real and testable without
+// inventing a new feature: for a write storm against a *bounded* key set
+// (the design's actual back-pressure concern -- unbounded dirty growth),
+// dirty memory stays bounded on its own, because each repeat write to an
+// existing key replaces that key's *same* dirty leaf via consolidation
+// rather than adding a new one -- never needing a snapshot to bound it.
+TEST(WritePath, WriteStormToBoundedKeySetKeepsDirtyMemoryBounded)
+{
+    Options opt;
+    opt.max_delta_len    = 1;    // consolidate into base frames every write
+    opt.leaf_split_bytes = 4000; // generous -- this test wants zero splits, ever
+    opt.frame_bytes      = 4096;
+    Crowtree t(opt);
+
+    // Fixed-width value so the leaf's serialized byte size truly never
+    // changes round to round (a growing-length value could tip the leaf
+    // over leaf_split_bytes partway through and split -- a one-time
+    // threshold crossing, not the unbounded-growth-with-write-count this
+    // test is checking for).
+    auto fixed_value = [](int round) {
+        std::array<char, 8> b{};
+        snprintf(b.data(), b.size(), "v%06d", round);
+        return std::string(b.data());
+    };
+
+    constexpr int kKeys = 20;
+    for (int i = 0; i < kKeys; ++i) {
+        ASSERT_TRUE(t.apply(i + 1, put_one(key(i), fixed_value(0))).ok());
+    }
+    ASSERT_TRUE(t.flush().ok());
+    uint32_t dirty_after_initial_fill = t.buffer_pool()->stats().dirty;
+    ASSERT_GT(dirty_after_initial_fill, 0U); // never snapshotted -- still all dirty
+    ASSERT_EQ(t.leaf_count(), 1U);           // sanity: this test wants exactly one leaf throughout
+
+    // Write storm: many more rounds over the *same* kKeys keys, no
+    // snapshot() call anywhere in the loop.
+    uint64_t slot = kKeys;
+    for (int round = 1; round <= 500; ++round) {
+        for (int i = 0; i < kKeys; ++i) {
+            ++slot;
+            ASSERT_TRUE(t.apply(slot, put_one(key(i), fixed_value(round))).ok());
+        }
+        ASSERT_TRUE(t.flush().ok());
+    }
+    ASSERT_EQ(t.leaf_count(), 1U); // confirms no split snuck in during the storm
+
+    // Dirty frame count must not have grown with the number of writes --
+    // only with the number of *distinct* keys, which didn't change.
+    EXPECT_EQ(t.buffer_pool()->stats().dirty, dirty_after_initial_fill);
+
+    for (int i = 0; i < kKeys; ++i) {
+        EXPECT_EQ(get_or(t, key(i), "?"), fixed_value(500));
+    }
+}
+
 TEST(WritePath, ApplyThenFlushVisible)
 {
     Crowtree t;
@@ -76,7 +145,8 @@ TEST(WritePath, IntraBatchLastWins)
 {
     Crowtree t;
     Batch    b{
-        {{.key = "k", .kind = OpKind::kPut, .value = "first"}, {.key = "k", .kind = OpKind::kPut, .value = "second"},
+        {{.key = "k", .kind = OpKind::kPut, .value = "first"},
+         {.key = "k", .kind = OpKind::kPut, .value = "second"},
          {.key = "k", .kind = OpKind::kPut, .value = "third"}}
     };
     ASSERT_TRUE(t.apply(1, b).ok());

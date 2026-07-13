@@ -43,16 +43,20 @@ order.
 | #8a | Snapshot export API cleanup — removed `at_slot` |
 | #9 | MemTable map choice — `absl::btree_map` |
 | #10 | C++ logging — `spdlog` (async, rotating, gated by `CROWTREE_HAVE_SPDLOG`) |
-| #11 | Async FFI bridge — io_uring reactor (all 6 phases: reactor, C API async, Rust `Future` pump, zero-copy fast path, `KVFuture::Pending` for demand-load miss, full `PxLearner`/gRPC async conversion) |
+| #11 | Async FFI bridge — io_uring reactor (all 6 phases: reactor, C API async, Rust `Future` pump, zero-copy fast path, `KVFuture::Pending` for demand-load miss, full `PxLearner`/gRPC async conversion); `ct_scan_async`/`AsyncCrowtree::scan` follow-up |
 | #12 | Lock-free EBR for `EpochManager` |
 | #13 | `install_snapshot` epoch-safe (retire instead of immediate delete) |
 | #14 | Mapping table redesign — packed slot word + segment struct + recycling (14a/14b); segment-image + directory + commit-anchor on-disk format replacing the manifest, two-pass segment-scan snapshot/recovery (14c/14d); `FaultyPageStore` + full test coverage (14e) |
 | #15 | Reject oversized keys at `apply()` entry |
-| #17 | Buffer pool live wiring — recency-ranked eviction via `last_touch_tick` |
+| #17 | Buffer pool live wiring — recency-ranked eviction via `last_touch_tick`; D3 separate inner-base eviction budget (`evict_clean_inner`) + a real `free_subtree`/teardown leak this exposed, fixed via `free_all_resident_pages`'s segment-scan |
 | #19 | Terminology — `checkpoint`→`snapshot` (code) |
-| #20 | `CrowtreeEngine` wired into `crowkv-server` (boot path, `resume_from_slot`, snapshot/GC maintenance loop, WAL GC) |
+| #20 | `CrowtreeEngine` wired into `crowkv-server` (boot path, `resume_from_slot`, snapshot/GC maintenance loop, WAL GC); configurable `maintenance_tick_ms` |
 | #21 | GC sweep + dual watermark + `GcStats` |
-| #22 | Raw block-device `PageStore` (`BlockPageStore` with `O_DIRECT`) |
+| #22 | Raw block-device `PageStore` (`BlockPageStore` with `O_DIRECT`), wired end-to-end through `crowtree_ffi`/`crowkv`/`crowkv-server` (`--kv-backend {file,block}`) |
+| #16 | Native frame snapshot format (`kNative`): raw frame-byte export/import, no cell decode/tuple encode/tree-rebuild |
+| #5 B2d/B4-1 | FFI boundary single-alloc: `Crowtree::apply_encoded` — `ct_apply_*` allocate key+cell once, no `Batch` re-encode |
+| #18 D4–D6 | Incremental snapshot dirty-tracking folded into #14d; model reconciliation confirmed no-op; write-storm back-pressure test added (eager-snapshot trigger itself never existed — documented gap) |
+| #5 B3 (partial) | `resolve_chain_sorted` copy avoidance — borrowed-`Slice` dedup map, only the final per-key winner is ever copied |
 
 ---
 
@@ -64,25 +68,49 @@ order.
 
 **Deviation (D-R1):** `snapshot_view()` still does an O(N) materialized
 traversal (epoch-guarded, not `write_mutex_`-guarded), not the design's
-zero-copy pinned `RootVersion`. Fixing that is blocked on the
-`EpochManager::Guard` thread-bound issue (see Open Issues).
+zero-copy pinned `RootVersion`. Blocked on the `EpochManager::Guard`
+thread-bound issue (see Open Issues).
 
-- [ ] Remove `write_mutex_` from `snapshot()`/`create_snapshot()` persistence
-      phase — now unblocked (#11 async `PageStore` landed). Use
-      `snapshot_write_next_async()` (already implemented in #11 Phase 2) to
-      persist dirty pages without holding `write_mutex_`.
-- [ ] Rename `flush()` → `create_snapshot()` — **deliberately skipped** (pure
-      rename, high ripple risk, no functional benefit). Low priority.
+- [x] Remove `write_mutex_` from snapshot persistence I/O — already
+      satisfied; only `prepare_snapshot_locked()`'s CPU-only walk holds it.
+      Regression test: `Persist.WriteMutexNotHeldDuringSnapshotIo`.
+- [ ] Rename `flush()` → `create_snapshot()` — **re-assessed 2026-07-10,
+      still deliberately skipped, for a sharper reason than "pure rename":**
+      `flush()` only drains L0 into the in-memory L1 tree
+      (`drain_memtable_into_l1_locked`) -- it never touches `page_store`, so a
+      plain rename to `create_snapshot()` would actively mislead callers into
+      thinking it durably persists (it doesn't; only the separate `snapshot()`
+      call does that, per `Crowtree::snapshot`/`persist.cpp`). Doing this
+      *correctly* per the design doc's literal intent ("flush *is* snapshot
+      creation") would mean **merging** flush+snapshot into one call -- a real
+      behavioral change, not a rename, and a regression on the `apply()` hot
+      path: `crowtree_engine.rs`'s `apply()` calls `flush()` on *every write*
+      for immediate read visibility (cheap, in-memory only today); folding in
+      `snapshot()`'s disk I/O would make every apply pay a durable-write cost.
+      Confirmed: correctly deferred, not merely low-value.
 
 ### #20. Wire `CrowtreeEngine` into `crowkv` — Remaining Follow-ups `P2`
 
-- [ ] New-member install streaming via `snapshot_export`/`import` wired into
-      the reconfiguration/`SnapshotService` flow (design §§2/6).
-- [ ] Dedicated cross-replica "durable on leader + >= 1 peer" watermark
-      (today `set_gc_watermark`'s `snapshot_slot` is conservatively
-      approximated by `group_safe_slot`).
-- [ ] Configurable maintenance tick (hardcoded
-      `group_maintenance::DEFAULT_MAINTENANCE_TICK` today).
+- [ ] **New-member install streaming** (`snapshot_export`/`import` ↔ a
+      `SnapshotService`). The crowtree-side half already exists and is
+      unused (`crowtree_ffi::Crowtree::snapshot_export`/`snapshot_import`),
+      but genuinely nothing else does: no streaming RPC/proto exists at all
+      (`pxos.proto`'s own comment: never-implemented), no "pull a snapshot
+      then catch up on just the WAL tail" join flow exists in
+      `crowkv-server` (new members today replay full Paxos history), and
+      correlating the snapshot's `at_slot` with the joining replica's
+      acceptor/learner state is a real cross-layer invariant. A genuine
+      distributed-systems feature, not a wiring exercise — left as a
+      separately-scoped follow-up.
+- [ ] **Cross-replica "durable on leader + ≥1 peer" watermark** — today
+      `group_safe_slot` conservatively approximates it (proven safe, never
+      overstates; see `group_maintenance.rs`'s module doc). The real thing
+      needs a new gossip channel piggybacked on Paxos heartbeats — touches
+      a sensitive, well-tested protocol path for a storage-efficiency-only
+      refinement with no correctness upside. Deferred.
+- [x] Configurable maintenance tick — `PxElectionConfig::maintenance_tick_ms`
+      replaces the hardcoded constant; test:
+      `maintenance_loop_uses_configured_tick_interval`.
 
 ---
 
@@ -92,24 +120,63 @@ zero-copy pinned `RootVersion`. Fixing that is blocked on the
 
 **Design:** [`design-crowtree-memory.md`](design/design-crowtree-memory.md), `design-crowtree.md` D-Q8.
 
-**B2d — FFI boundary single-alloc** `P1`
-- [ ] `ct_apply_*` allocs the key/cell `buffer`s once at the C boundary and
-      moves them down (Option A); sets up B4 with no further call-site changes.
+**B2d — FFI boundary single-alloc** `P1` — ✅ DONE (2026-07-10)
+- [x] `Crowtree::encoded_op{key, cell}` + `apply_encoded()`: `ct_apply_*`
+      allocate key+cell exactly once from the raw C bytes and move them
+      straight to `MemTable::upsert` — no intermediate `Batch`/`batch_op`
+      for `apply_batch` to re-encode. `Batch`/`apply()`/`apply_batch()`
+      themselves untouched (no call-site ripple). Test:
+      `CApi.OversizedKeyRejectedThroughEncodedPath`.
 
-**B3 — `scan_view` zero-copy scan** `P2`
-- [ ] `scan()`'s L1 resolution funnels through `resolve_chain_sorted` (owned
-      `vector<leaf_entry>`, materializing to merge delta chains). A genuine
-      zero-copy `scan_view` needs that resolver restructured to return
-      borrowed views — larger blast radius (also used by GC/snapshot walks).
-      `get_view()` covers the point-read case.
+**B3 — `scan_view` zero-copy scan** `P2` — partial win landed 2026-07-10
+- [x] Lock-freedom already done: `scan()` runs under only an
+      `EpochManager::Guard`, one leaf at a time via `right_sibling`.
+- [x] **Copy avoidance within `resolve_chain_sorted` — done.** Its dedup map
+      is now keyed/valued by *borrowed* `Slice`s into the chain's own
+      already-resident storage instead of `std::map<std::string,std::string>`
+      — only the final winner per key is copied (in the output loop), not on
+      every visit/every contested key. Purely internal: the function's
+      signature (an owned `vector<leaf_entry>`) is unchanged, so
+      `scan()`/`try_scan_no_load()`/`collect_in_order()`/GC's live walk
+      needed no changes at all.
+- [ ] **Full zero-copy (borrowed `Slice`s all the way out to those 3
+      callers) remains deferred**, deliberately not attempted in the same
+      pass: each caller would need to independently prove out how long its
+      own borrowed result must stay valid (`scan()`'s multi-leaf walk holds
+      one epoch guard for the *whole* call, so it's likely fine; GC's live
+      walk and `collect_in_order`/`snapshot_view` would need the same
+      argument worked through on their own terms) — a materially bigger,
+      separately-scoped change touching 3 correctness-sensitive paths, not
+      mechanical, still with no profiling data motivating the *extra* win
+      over what the copy-avoidance above already captures.
 
 **B4 — Rust FFI** `P1`
-- [ ] Step 1 (Option A): C API accepts raw ptrs, `buffer::alloc()`+copy at boundary
-- [ ] Step 2 (Option B, future): `ct_alloc`/`ct_free` shared allocator, ownership yield, true end-to-end zero copy
+- [x] Step 1: done as part of B2d (`ffi/src/lib.rs` needed zero changes —
+      already passed raw ptrs straight through).
+- [ ] **Step 2, re-assessed 2026-07-10, still deferred:** `buffer::move_from`
+      (the C++-side half of Option B) already exists (`buffer.h`) — the
+      missing piece is exposing a `ct_alloc`/`ct_free` pair and a "yielding"
+      `ct_apply_*` that wraps the Rust-allocated pointer via `move_from`
+      instead of copying. The blocker isn't the allocator (`std::malloc`/
+      `std::free` are already the same libc functions on both sides of the
+      FFI, so sharing a heap is not itself risky) — it's that `buffer::alloc`'s
+      `header_reserve` convention (cell header written into a reserved prefix
+      *ahead of* the value bytes) would have to become a **stable, exposed
+      ABI contract** Rust must replicate exactly (exact header size/layout)
+      to pre-allocate correctly-shaped memory. That's a real design decision
+      (what's the stable contract, and what breaks if the cell header ever
+      changes shape), not a mechanical wire-up, for a win Step 1 already
+      mostly captured (only the *one remaining* boundary copy is at stake).
+      Left as future, matching the original assessment.
 
-**B5/B6 — future** `P2`
-- [ ] Profile KV size distribution → size-classed memory pool behind the `buffer` seam
-- [ ] RDMA-pinned allocation (with the RDMA backend)
+**B5/B6 — future** `P2` — re-assessed 2026-07-10, still genuinely blocked
+- [ ] **Size-classed memory pool:** the design doc's own rollout plan (§6)
+      is explicit — "Profile first... size classes are chosen from that
+      histogram" — building one with unvalidated, guessed size classes
+      would contradict the design's own stated methodology, not fulfill it.
+      Confirmed still blocked on profiling data that doesn't exist in this
+      repo (not a capability gap — a missing real-world input).
+- [ ] RDMA-pinned allocation: blocked on an RDMA backend, which doesn't exist at all yet.
 
 ---
 
@@ -128,8 +195,45 @@ zero-copy fast-path `ct_future_poll` (borrows from `GetView`, no malloc) →
 conversion. Benchmark: ~20× speedup on resident-hit fast path vs. old
 `spawn_blocking`. 248 C++ tests + full `cargo test --workspace` pass; ASan/TSan/UBSan clean.
 
-**Remaining gap:** `scan`/`apply` stay `Ready`-only — no `ct_scan_async`/
-`ct_apply_*_async` C API yet. Honest, documented gap, not an oversight.
+**Remaining gap, assessed and closed 2026-07-10:** `scan`/`apply` stayed
+`Ready`-only. Split into two genuinely different cases:
+- `apply()` is pure in-memory (`MemTable` upsert, no `page_store` I/O at
+  all) — an `ct_apply_*_async` would have nothing to make async. Not a
+  real gap; left as-is.
+- `scan()` **did** call `resident()`, which synchronously blocks on
+  `page_store->read_at()` for an unloaded page — the exact same cold-miss
+  cost `get_async`/`KVFuture::Pending` already exists to avoid for point
+  reads. **✅ Now done: `ct_scan_async`.**
+  - `Crowtree::try_scan_no_load` (crowtree.h/.cpp): `scan()`'s logic
+    verbatim, but the initial root→leaf descent and every leaf probe use
+    a non-blocking check (mirrors `try_get_view_no_load`'s `probe`)
+    instead of `resident()`'s demand-load; bails out the moment *any*
+    page is unloaded, reporting which one.
+  - `Crowtree::scan_async`/`scan_async_attempt`: mirrors
+    `get_async`/`get_async_attempt`'s retry loop exactly, but since a
+    scan can hit more than one cold page, a miss simply **retries the
+    whole scan from scratch** once the blocking page resolves (documented
+    trade-off: not maximally efficient, but always terminates — every
+    retry either fully resolves or permanently loads one more page — and
+    does no redundant I/O).
+  - C API: `ct_scan_async` + a new `ct_future_impl::Kind::kScan` (packs
+    into the same wire format `ct_scan` already uses; always an owned
+    buffer, freed by `ct_future_poll` itself like flush/snapshot, never
+    borrowed like get).
+  - Rust FFI: `AsyncCrowtree::scan`, a new `FutureKind::Scan` (needed
+    `take_buf` instead of `copy_buf` for its always-owned buffer — fixed
+    a subtle leak-on-error-status edge case caught while implementing
+    this, since the buffer must be freed even when the underlying op
+    errored, not only inside the success branch).
+  - Tests: `crowtree/tests/integration/async_scan_test.cpp`
+    (`AsyncScan.*` — fast path, sync/async output equivalence including
+    truncation, miss-after-eviction, abandon-before-completion, empty
+    tree) + `crowtree/ffi/tests/ffi_test.rs`
+    (`async_scan_fast_path_completes_on_first_poll`,
+    `async_scan_slow_path_completes_after_eviction`,
+    `async_scan_respects_limit_and_truncated_flag`). 294/294
+    `crowtree_tests` + 15/15 `crowtree-ffi` tests + full
+    `crowkv`/`crowkv-server` suites pass.
 
 ---
 
@@ -256,54 +360,89 @@ All dependencies are now satisfied; #14 is unblocked.
 
 ### #17. Buffer Pool — Remaining `P2`
 
-- [ ] **D3 (optional)** — extend eviction to inner/overflow bases (currently
-      clean **leaf** bases only) if profiling shows it matters.
+- [x] **D3 — inner bases — ✅ DONE (2026-07-10).** A first attempt shared
+      `evict_clean_leaves`'s ranked budget between leaves and inner bases and
+      broke `Eviction.RecentlyTouchedLeafSurvivesEvictionOverColderOnes` (a
+      leaf's own recency protects it, but its just-visited ancestor chain
+      could still be evicted from the same shared budget). Fixed with a
+      genuinely **separate** budget/pass: `Crowtree::evict_clean_inner(_locked)`
+      + `ct_evict_clean_inner` (C API) + `Crowtree::evict_clean_inner` (Rust
+      FFI) — never evicts a leaf; `evict_clean_leaves` never evicts an inner
+      base. Tests: `Eviction.EvictCleanInnerNeverTouchesLeaves`,
+      `Eviction.RecentlyTouchedAncestorChainSurvivesInnerEvictionOverColderOnes`
+      (measures a touched key's own ancestor-chain depth via
+      `evict_clean_inner(0)`'s return value rather than assuming a fixed tree
+      shape).
+      - **Real bug found and fixed along the way (ASan-caught):**
+        `free_subtree` (used by `~Crowtree`'s teardown and
+        `install_snapshot(_native)`'s live-tree replacement) is a top-down
+        root→children walk that bails out the moment it reaches an
+        *unloaded* slot — always safe before (only a leaf, with no
+        descendants, could ever be independently evicted) but not once
+        `evict_clean_inner` can unload an *inner* ancestor while its leaf
+        descendants stay fully resident underneath it: such a walk would
+        never reach (or free/retire) those leaves at all. Fixed with
+        `Crowtree::free_all_resident_pages`: a two-pass segment-scan (same
+        technique `persist.cpp`'s snapshot uses to discover pages without a
+        reachable-page walk) that also picks up overflow pages directly
+        (their own mapping slot) instead of needing a leaf to discover them.
+        Regression test: `Eviction.InstallSnapshotReclaimsResidentLeavesEven
+        WhenInnerAncestorWasEvicted` (checkable via `BufferPool::Stats::used`,
+        no sanitizer needed).
+      - Independently evicting **overflow** frames still violates
+        `evict_overflow_chain_locked`'s contiguous-whole-chain assumption —
+        correctly out of scope for D3 (which was about inner bases), left as
+        a separate, still-hypothetical follow-up if ever motivated.
+      - 297/297 `crowtree_tests` across default/ASan/UBSan/TSan builds pass.
 
-### #18. Incremental Snapshot — Remaining `P1`
+### #18. Incremental Snapshot — ✅ DONE (2026-07-10)
 
 **Design:** [`design-crowtree-persistence.md §4.3/§5A`](design/design-crowtree-persistence.md).
 
-Durable per-page addr (`kNoAddr` = dirty) and write-only-dirty-pages are
-already implemented and tested. Remaining:
+- [x] **D4** writer-owned dirty tracking — folded into #14d's segment-level
+      `write_seq`/`is_dirty()`; `snapshot()` no longer DFS-walks the tree,
+      `prepare_snapshot_locked` enumerates dirty segments directly.
+- [x] **D5** model reconciliation — confirmed no-op: `PageBase::durable_addr`
+      already satisfies "a dirty frame is never evicted until written".
+- [x] **D6** back-pressure test — **scoped down with a real finding**: no
+      eager-snapshot-on-memory-pressure trigger exists anywhere in the engine
+      at all (§5A's feature was never built, not a test gap) — building it
+      would also need care around `write_mutex_` re-entrancy (calling
+      `snapshot()` from inside `evict_clean_leaves_locked` would self-deadlock).
+      Added `WritePath.WriteStormToBoundedKeySetKeepsDirtyMemoryBounded`
+      instead: confirms dirty memory tracks distinct-key count, not write
+      count, for the realistic case that doesn't need eager snapshot at all.
+      The genuine eager-snapshot feature remains a documented, unbuilt gap.
 
-- [x] **D4 — writer-owned dirty tracking** — ✅ DONE (2026-07-10), folded straight into #14d's
-      segment-level `write_seq`/`is_dirty()` rather than a separate page-level tracker: `snapshot`
-      no longer DFS-walks the reachable tree at all — `prepare_snapshot_locked` enumerates dirty
-      `MappingSegment`s directly (bounded by `MappingTable::kMaxSegments`, not resident-tree size).
-- [ ] **D5 (model reconciliation)** — likely a no-op given D1's frame model.
-- [ ] **D6 — back-pressure test** under a write storm (eager snapshot).
+### #22. Raw Block-Device `PageStore` — ✅ DONE (2026-07-10)
 
-**Sequencing:** D4 is done; D5/D6 remain, low priority.
-
-### #22. Raw Block-Device `PageStore` — Remaining `P2`
-
-`BlockPageStore` with `O_DIRECT` is done. Not yet wired into
-`crowtree_ffi`/`CrowtreeOptions`/`crowkv-server` (those only select
-`FilePageStore` vs. in-memory today).
-
-- [ ] Expose `BlockPageStore` through `crowtree_ffi`/`CrowtreeOptions`/
-      `crowkv-server` once a real SSD/SCM deployment target needs it.
+`BlockPageStore` (`O_DIRECT`) is now wired end-to-end: `ct_options.backend`
+field (C ABI) → `crowtree_ffi::PageStoreBackend` → `crowkv::kv::CrowtreeBackend`
+→ `crowkv-server --kv-backend {file,block}` CLI flag, threaded through
+`create_group_with_wal`. No async twin for the block backend yet (falls back
+to sync completion, matching the existing in-memory behavior). Tests:
+`CApi.BlockDeviceCheckpointReopen`, `block_device_snapshot_reopen_smoke`,
+`create_group_with_wal_crowtree_block_backend_persists_across_restart`.
 
 ---
 
 ## Snapshot & GC Layer
 
-### #16. Native Frame Snapshot Format `P2`
+### #16. Native Frame Snapshot Format — ✅ DONE (2026-07-10)
 
-**Files:** `snapshot_io.h/.cc`, `c_api.h/.cc`, `ffi/src/lib.rs`
+**Files:** `snapshot_io.h/.cc`, `crowtree.h/.cc`
 
-A `kNative` format that directly streams page frame bytes would be
-significantly faster for crowtree→crowtree transfers (Raft InstallSnapshot
-production path). Currently only `kPortable` (key-value tuple serialization)
-is supported.
-
-- [ ] Define native format: leaf/inner frame images + remapped PID manifest
-- [ ] Export: stream frame bytes directly (no tuple serialization)
-- [ ] Import: load frames directly into mapping table (no entry-by-entry rebuild)
-- [ ] Portable format remains available for testing and cross-engine scenarios
-- [ ] Tests: native export/import round-trip, verify equivalence with portable
-
-**Sequencing:** After #14 — native format shares the segment image concept.
+`kNative` streams raw leaf/inner/overflow frame bytes (`Crowtree::NativeFrame
+{page_id, frame_bytes}`) instead of `kPortable`'s key-value tuple
+serialization — no cell decode/encode, no entry-by-entry tree rebuild on
+import. `collect_native_frames` walks the reachable tree, folding delta
+chains into consolidated bases first (a real side-effect, unlike the
+read-only `snapshot_view()`); `install_snapshot_native` wholesale-replaces
+the tree via `from_frame_copy`, same as demand-load's own reconstruction.
+`kPortable` untouched — still the cross-engine/oracle-comparable path.
+Tests: `NativeExportImportRoundTrip`, `NativeEquivalentToPortable`,
+`NativeEmptyTreeRoundTrip`, `NativeCrcTamperRejected`
+(`snapshot_export_test.cpp`).
 
 ---
 
@@ -315,46 +454,33 @@ overall test strategy.*
 
 ---
 
-## Dependency Graph & Implementation Plan
+## Remaining Work Summary (refined 2026-07-10)
 
-### Dependency graph (✅ = done)
+Everything not listed here is done — see the Completed Tasks table. Every row
+below has already been individually assessed (see its layer section for the
+full reasoning); this table is the current, accurate "what's actually left"
+view.
 
-```
-#1–#22 (core tasks) ......... ✅ (see Completed Tasks table)
-#11 async FFI (all phases) .. ✅
-#14 mapping table redesign .. ✅ done (14a-14e all complete)
-#18 D4 DirtyTracker ......... ✅ done, folded into #14d
-#5 B2d/B4/B5/B6 ............. P1/P2, profile-driven
-#16 native frame snapshot ... unblocked (#14 done)
-#20 follow-ups .............. P2, separable
-#22 FFI/server wiring ....... P2, deployment-driven
-#17 D3 ........................ P2, profiling-driven
-```
+| # | Item | Priority | Status |
+|--:|------|:--------:|--------|
+| 1 | ~~`ct_scan_async`~~ (C API + Rust FFI, mirrors `get_async`'s retry pattern) | P1 | ✅ done (2026-07-10) |
+| 2 | ~~`#17` D3 (separate inner-base eviction budget)~~ | P2 | ✅ done (2026-07-10), plus a real `free_subtree` teardown/leak bug found+fixed along the way |
+| 3 | ~~`#5` B3 (partial): `resolve_chain_sorted` copy avoidance~~ | P2 | ✅ done (2026-07-10) |
+| 4 | `#20` New-member install streaming (`SnapshotService` + join/catch-up flow) | P2 | Deferred — genuine new distributed-systems feature, needs its own session |
+| 5 | `#20` Cross-replica durable watermark (leader + ≥1 peer, vs. today's safe `group_safe_slot` approximation) | P2 | Deferred — touches Paxos heartbeat protocol for a no-correctness-upside refinement |
+| 6 | `#5` B3 (full): borrowed `Slice`s all the way out to `scan`/`collect_in_order`/GC | P2 | Deferred — each of the 3 callers needs its own borrowed-lifetime argument; no profiling data motivating the extra win over the copy-avoidance already landed |
+| 7 | `#5` B4 Step 2 (`ct_alloc`/`ct_free` shared allocator, true zero-copy) | P2 | Re-assessed, still deferred — would need the cell `header_reserve` layout to become a stable, exposed ABI contract; Step 1 already captures most of the win |
+| 8 | `#5` B5/B6 (size-classed pool, RDMA-pinned alloc) | P2 | Re-assessed, still blocked — design doc requires profiling-driven size classes (none exist); no RDMA backend exists at all |
+| 9 | `#8` rename `flush()` → `create_snapshot()` | P2 | Re-assessed, still skipped — not a pure rename (flush never persists); doing it correctly means merging flush+snapshot, a real behavioral change that would regress `apply()`'s hot path |
 
-### Recommended order for what's left
-
-| Step | Item | Priority | Difficulty | Why here | Risk |
-|-----:|------|:--------:|:----------:|----------|------|
-| 1 | **#8 — remove `write_mutex_` from snapshot persistence** | P1 | **Low** | #11 Phase 2 already implemented `snapshot_write_next_async()`; just wire `snapshot()` to use it instead of the synchronous path under `write_mutex_` | Low |
-| 2 | **#5 B2d + B4** — FFI boundary single-alloc + Rust FFI zero-copy | P1 | **Medium** | Profile-driven; B2d is additive (Option A copy at boundary), B4 Step 2 (shared allocator) is more involved | Med |
-| 3 | **#16 native frame snapshot** | P2 | **Medium** | Unblocked (#14 done); shares segment image concept; performance optimization for crowtree→crowtree transfers | Low |
-| 4 | **New-member install streaming** (`snapshot_export`/`import` ↔ `SnapshotService`) | P2 | **Medium** | Separable follow-up from #20; needs the reconfiguration flow | Med |
-| 5 | **#5 B3 `scan_view`** — zero-copy scan | P2 | **Medium** | Needs `resolve_chain_sorted` restructured to return borrowed views; larger blast radius (also used by GC/snapshot walks); `get_view` covers point-read | Med |
-| 6 | **#5 B5/B6** — size-classed memory pool, RDMA-pinned allocation | P2 | **High** | Profile-driven / backend-driven; future | Med |
-| 7 | **#17 D3** — extend eviction to inner/overflow bases | P2 | **Low** | Only if profiling shows leaf-only eviction isn't enough | Low |
-| 8 | **#22 FFI/server wiring** — expose `BlockPageStore` through FFI/server | P2 | **Low** | Only needed once a real SSD/SCM deployment target exists | Low |
-| 9 | **#20 follow-ups** — configurable maintenance tick, cross-replica durability watermark | P2 | **Low** | Operational improvements; not on critical path | Low |
-
-**Difficulty assessment criteria:**
-- **Low:** Small, localized change; no new concurrency surfaces; existing patterns to follow.
-- **Medium:** Multiple files/subsystems; some design decisions needed; moderate test surface.
-- **High:** Large multi-session effort; new on-disk format or concurrency surface; significant test/recovery verification needed.
-
-**Rationale:** All high-risk C++ concurrency work is done (#5 B1–B3, #3, #9, #12,
-#13, #11), and #14 (the former largest remaining item, all of 14a-14e) is now
-fully done. #8's `write_mutex_` removal from snapshot persistence is
-low-hanging fruit since #11 already built the async machinery. Everything else
-is P2 (profile-driven, deployment-driven, or optimization).
+**Rationale:** all high-risk C++ concurrency work is done (#5 B1–B3 partial,
+#3, #9, #12, #13, #11 including its `ct_scan_async` follow-up), #14 (former
+largest item) and #17 D3 are fully done, and every remaining open item
+(#4–#9) has been concretely re-assessed this session and confirmed
+correctly deferred/blocked — each for a specific, non-mechanical reason
+(a real design decision needed, a missing real-world input like profiling
+data, a missing backend, or a separately-scoped distributed-systems
+feature) rather than simply unattempted.
 
 ---
 

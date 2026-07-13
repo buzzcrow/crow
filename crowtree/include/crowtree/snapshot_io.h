@@ -40,9 +40,10 @@ inline constexpr size_t kSnapshotChunkBytes = 1U << 20;
 class SnapshotExport
 {
   public:
-    SnapshotExport(std::string stream, size_t chunk_bytes)
+    SnapshotExport(std::string stream, size_t chunk_bytes, uint64_t at_slot)
         : stream_(std::move(stream)),
-          chunk_bytes_(chunk_bytes == 0 ? kSnapshotChunkBytes : chunk_bytes)
+          chunk_bytes_(chunk_bytes == 0 ? kSnapshotChunkBytes : chunk_bytes),
+          at_slot_(at_slot)
     {
     }
 
@@ -62,18 +63,17 @@ class SnapshotExport
     }
 
   private:
-    friend Status snapshot_export_begin(Crowtree &tree, snapshot_format fmt, size_t chunk_bytes,
-                                        std::unique_ptr<SnapshotExport> *out);
-    std::string   stream_;
-    size_t        pos_ = 0;
-    size_t        chunk_bytes_;
-    uint64_t      at_slot_ = 0;
+    std::string stream_;
+    size_t      pos_ = 0;
+    size_t      chunk_bytes_;
+    uint64_t    at_slot_;
 };
 
 // Begin a snapshot export of `tree`: exports the current durable view (at the
-// engine's last_applied_slot, recorded in the stream header). Only kPortable is
-// supported in v1. (Historical/arbitrary-slot export is deferred until path-copy
-// COW RootVersions exist; there is no slot selector.)
+// engine's last_applied_slot, recorded in the stream header). Both kPortable
+// and kNative (plan-tree #16) are supported. (Historical/arbitrary-slot
+// export is deferred until path-copy COW RootVersions exist; there is no
+// slot selector.)
 Status snapshot_export_begin(Crowtree &tree, snapshot_format fmt, size_t chunk_bytes,
                              std::unique_ptr<SnapshotExport> *out);
 
@@ -97,6 +97,7 @@ class SnapshotImport
     Status finish(uint64_t *out_at_slot);
 
   private:
+    Status      finish_native(const uint8_t *p, size_t len, uint64_t *out_at_slot);
     Crowtree   &tree_;
     std::string buf_;
 };
