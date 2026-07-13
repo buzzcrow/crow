@@ -8,6 +8,8 @@
 
 A distributed key-value engine that takes Multi-Paxos seriously — not as a textbook exercise, but as a deliberate engineering choice to eliminate the sequential commit bottleneck of Raft on the write hot path.
 
+> **Project started July 10, 2026.**
+
 <!-- Demo GIFs — record and replace placeholders -->
 <!-- 
 ![Cluster Lifecycle](doc/assets/demo-cluster.gif)
