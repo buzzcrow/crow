@@ -1,7 +1,6 @@
 //! Topology cache: `(store_id, group_id) -> leader_endpoint`, sourced from
 //! `crowkv-server`'s HTTP management API (`GET /topology`). There is no gRPC
-//! `DescribeCluster` RPC (, `design/design-rpc.md`
-//! §4.2) — this is the only discovery mechanism.
+//! `DescribeCluster` RPC — this is the only discovery mechanism.
 
 use std::sync::RwLock;
 use std::time::{Duration, Instant};

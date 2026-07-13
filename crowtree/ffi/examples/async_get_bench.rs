@@ -77,8 +77,8 @@ fn main() {
     rt.block_on(async_main());
 }
 
-/// `value_len` matters specifically for Phase 4 (design §5's zero-copy fast
-/// path, ): a value small enough to fit `buffer`'s SBO
+/// `value_len` matters specifically for Phase 4 (zero-copy fast
+/// path): a value small enough to Fit `buffer`'s SBO
 /// (`kInlineCap` = 24 B) makes the copies Phase 4 removes cheap regardless
 /// (a few-byte memcpy is noise either way), so the win only shows up
 /// clearly for a value past that threshold -- run both sizes to see it.

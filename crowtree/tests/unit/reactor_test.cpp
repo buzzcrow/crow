@@ -148,7 +148,7 @@ TEST(Reactor, CancelBeforeCompletionSuppressesCallback)
     // A larger buffer than the other tests widens the window between kernel
     // completion and the reactor thread's dispatch, making the immediately-
     // following cancel() reliably win the race in practice (see class
-    // comment on Reactor::cancel / design §8 for why this is best-effort,
+    // comment on Reactor::cancel for why this is best-effort,
     // not a hard guarantee, in general).
     std::vector<uint8_t> buf(1 << 16, 0);
     ASSERT_EQ(::ftruncate(fd, static_cast<off_t>(buf.size())), 0);

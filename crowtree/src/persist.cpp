@@ -1,5 +1,4 @@
-// snapshot and recovery (plan-tree #14c/#14d: mapping-table on-disk format,
-// design-crowtree-mappingtable.md §7-9).
+// snapshot and recovery (plan-tree #14c/#14d: mapping-table on-disk format).
 //
 // On-device layout owned here:
 //   [anchor slot A][anchor slot B][page/segment-image/directory region]
@@ -59,7 +58,7 @@ namespace
 {
 
 constexpr uint32_t kAnchorMagic   = 0x41435443; // 'CTCA' little-endian
-constexpr uint32_t kFormatVersion = 2;          // #14c/#14d: clean-break format (design §13)
+constexpr uint32_t kFormatVersion = 2;          // clean-break format
 // Minimum on-disk anchor slot size. The actual slot is rounded up to the
 // store IU so larger-IU devices (16K/64K SSD) get IU-aligned, IU-sized slots
 // (PT9 geometry); for iu <= 4096 (dividing 4096) it stays 4096.
@@ -80,11 +79,11 @@ inline uint64_t region_base_for(uint32_t iu)
     return superblock_slot_bytes(iu) * 2;
 }
 
-// The commit anchor (design-crowtree-mappingtable.md §7.3): a tiny fixed A/B
+// The commit anchor: a tiny fixed A/B
 // record that is the snapshot's commit point. Ties a snapshot_seq to the
 // segment directory that (transitively, via segment images) locates every
 // live page. Deviation from the design spec's exact field list (documented
-// in plan-tree.md's #14 Open Issues): omits leftmost_leaf_pid and
+// in #14 Open Issues): omits leftmost_leaf_pid and
 // page_alloc_root, neither of which this engine currently has a concrete
 // counterpart for (no leftmost-leaf fast path; SpaceAllocator is rebuilt
 // from live extents each open(), not itself a persistent structure with a
@@ -164,7 +163,7 @@ bool decode_anchor(const uint8_t *buf, CommitAnchor *a)
     a->magic          = get_u32(buf);
     a->format_version = get_u32(buf + 4);
     if (a->format_version != kFormatVersion) {
-        // Clean-break format (design §13): no older format to accept.
+        // Clean-break format: no older format to accept.
         return false;
     }
     a->snapshot_seq      = get_u64(buf + 8);
@@ -721,7 +720,7 @@ void Crowtree::snapshot_async(std::function<void(Status, uint64_t)> on_done)
         return;
     }
 #endif
-    // No async backend wired (design §6.3) -- run the synchronous path in
+    // No async backend wired -- run the synchronous path in
     // this stack frame; still correct, just not genuinely async.
     uint64_t last_applied = 0;
     Status   st           = snapshot(&last_applied);

@@ -182,11 +182,10 @@ message HeartbeatResponse {
   uint64 request_id = 9;
   uint64 request_create_ms = 10;
   // Highest slot durably captured in this follower's own last engine
-  // snapshot (`design-crowtree-storage.md` §6 `snapshot_slot`; mirrors
-  // `WalEngine::snapshot_slot()`). The leader aggregates this across voting
-  // peers to compute the group's real "durable on leader + >=1 peer"
-  // watermark (plan-tree #20), instead of approximating it with
-  // `contiguous_applied`/`group_safe_slot`.
+  // snapshot (`snapshot_slot`; mirrors `WalEngine::snapshot_slot()`).
+  // The leader aggregates this across voting peers to compute the group's
+  // real "durable on leader + >=1 peer" watermark, instead of
+  // approximating it with `contiguous_applied`/`group_safe_slot`.
   uint64 durable_snapshot_slot = 11;
 }
 
@@ -259,14 +258,13 @@ service PxService {
 }
 
 // ---------------------------------------------------------------------------
-// #20 New-member snapshot install (`design-crowtree-storage.md` §10,
-// `design-reconfiguration.md` §4). Layered on the existing per-replica
+// #20 New-member snapshot install. Layered on the existing per-replica
 // `voting` flag rather than the full joint-consensus reconfiguration state
-// machine (`ConfigChange` log entries, both-quorum evaluation) described in
-// `design-reconfiguration.md` §2-3/5-9, which is not implemented in this
-// codebase: a new/far-lagging member starts non-voting
-// (`PxGroupMember.voting = false`), pulls a snapshot plus the WAL tail via
-// this service, and an operator promotes it to voting once caught up.
+// machine (`ConfigChange` log entries, both-quorum evaluation), which is
+// not implemented in this codebase: a new/far-lagging member starts
+// non-voting (`PxGroupMember.voting = false`), pulls a snapshot plus the
+// WAL tail via this service, and an operator promotes it to voting once
+// caught up.
 // ---------------------------------------------------------------------------
 
 message SnapshotRequest {

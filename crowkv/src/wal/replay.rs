@@ -34,7 +34,7 @@ pub struct ReplayResult {
 
 /// Replay all WAL segments for a group across all disk paths.
 ///
-/// ## Procedure (design-wal.md §6.1)
+/// ## Procedure
 ///
 /// 1. Discover `disk/groupN/seg-*.log`, order by `segment_id`.
 /// 2. Walk records, verify magic/version/CRC.

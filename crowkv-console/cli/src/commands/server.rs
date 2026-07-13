@@ -23,7 +23,7 @@ pub enum ServerVerb {
     },
     /// Restart the `crowkv-server` on a node: stop the tracked
     /// process (if any) and re-deploy on the same recorded ports.
-    /// Aliased as `start` for parity with `design-console.md` §6.3.4.
+    /// Aliased as `start` for backward compatibility.
     #[command(alias = "start")]
     Restart {
         #[arg(long)]

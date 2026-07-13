@@ -1,5 +1,5 @@
 //! Tonic `SnapshotService` implementation (new-member
-//! snapshot install, `design-crowtree-storage.md` §10).
+//! snapshot install).
 //!
 //! Serves this replica's local `KVEngine::snapshot_export` as a chunked
 //! stream: a single leading `SnapshotHeader` frame (carrying the term of

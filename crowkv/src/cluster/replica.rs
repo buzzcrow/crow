@@ -68,7 +68,7 @@ pub struct HeartbeatReply {
     pub contiguous_applied: SlotIndex,
     pub highest_seen_slot: SlotIndex,
     /// Highest slot durably captured in this follower's own last engine
-    /// snapshot (`design-crowtree-storage.md` §6 `snapshot_slot`).
+    /// snapshot (`snapshot_slot`).
     /// The leader aggregates this across voting peers to track the group's
     /// real "durable on leader + >=1 peer" watermark.
     pub durable_snapshot_slot: SlotIndex,

@@ -22,7 +22,7 @@
 namespace crowtree
 {
 
-// Backing bytes for a base page (design §4.5). Either a buffer-pool frame (the
+// Backing bytes for a base page. Either a buffer-pool frame (the
 // page co-owns the pool via shared_ptr so the frame is valid even when the page
 // is freed late by the env-level epoch manager) or a heap buffer (used by
 // standalone/unit construction, recovery, oversized pages, or pool exhaustion).

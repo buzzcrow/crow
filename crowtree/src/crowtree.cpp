@@ -54,7 +54,7 @@ buffer cell_of(Slice s)
 // so scan()/try_scan_no_load()/collect_in_order() and GC's live walk (its
 // three callers) need no changes at all. A *fully* zero-copy version --
 // returning borrowed Slices all the way out to those callers -- remains a
-// separate, larger, deferred change (see plan-tree.md #5 B3): it would need
+// separate, larger, deferred change: it would need
 // each of those three call sites to independently prove out how long their
 // own borrowed results must stay valid, which is a materially bigger change
 // than this one.
@@ -236,7 +236,7 @@ PageBase *Crowtree::resident(uint64_t page_id) const
         }
         return nullptr; // hot path / unset
     }
-    // Cold path: demand-load this base page (design §4.5). Serialized by
+    // Cold path: demand-load this base page. Serialized by
     // load_mutex_; double-checked so only one loader installs. The unloaded
     // descriptor is inline in the slot word (no heap allocation), so there is
     // no descriptor to free -- just re-read and check.
@@ -295,7 +295,7 @@ PageBase *Crowtree::install_loaded_page(uint64_t page_id, uint64_t addr, uint32_
         page = OverflowBase::from_frame_copy(frame.data(), raw_len, pool_, opt_.frame_bytes);
     }
     page->page_id      = page_id;
-    page->durable_addr = addr; // loaded from here -> clean (design §4.6)
+    page->durable_addr = addr; // loaded from here -> clean
     // durable_plen is the logical (unpadded) blob length, recovered from the
     // blob header rather than the IU-padded physical extent `plen` (which is
     // iu_count * iu from the packed slot word). This is what the manifest
@@ -1016,7 +1016,7 @@ Status Crowtree::flush()
 
     last_applied_slot_.store(cs);
     version_.fetch_add(1);
-    maybe_evict_locked(); // keep cache bounded (design §4.6); only clean bases go
+    maybe_evict_locked(); // keep cache bounded; only clean bases go
     return Status::Ok();
 }
 
@@ -1266,7 +1266,7 @@ void Crowtree::try_merge_leaf_locked(uint64_t leaf_page_id, const std::vector<ui
     // 3. The leaf is now unreachable by new readers. retire_orphaned_page
     //    epoch-retires it (stragglers holding an old parent are protected by
     //    their epoch guard) and clears its mapping slot once that's safe
-    //    (plan-tree #14b/mapping-table design §6) -- deferred, not
+    //    -- deferred, not
     //    immediate, so it can never race a straggler still walking in via a
     //    stale parent from before this retirement (see retire_orphaned_
     //    page's doc comment). The PID itself is never recycled (D1).
@@ -1568,8 +1568,7 @@ void Crowtree::get_async_attempt(std::shared_ptr<std::string> key_owned, std::fu
     GetView  result;
     uint64_t pending_page_id = kInvalidPageId;
     if (try_get_view_no_load(Slice(*key_owned), &result, &pending_page_id)) {
-        // same_thread: zero-copy fast path (design §5, plan-tree.md #11
-        // Phase 4) -- hand the GetView straight through, guard and all.
+        // same_thread: zero-copy fast path -- hand the GetView straight through, guard and all.
         // Otherwise this resolved on (or after being handed off from) the
         // Reactor thread, so materialize_owned() releases the guard here,
         // on the thread that entered it, before on_done can cross back out.

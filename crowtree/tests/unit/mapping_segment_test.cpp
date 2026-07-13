@@ -51,7 +51,7 @@ TEST(MappingSegment, GenerationBumpsIndependentlyOfSlots)
 
 TEST(MappingSegment, DefaultSizeMatchesOptionsDefault)
 {
-    // Options.mapping_segment_slots default is 1024 (design-crowtree-mappingtable.md §4).
+    // Options.mapping_segment_slots default is 1024.
     MappingSegment seg(1024);
     EXPECT_EQ(seg.slot_count, 1024U);
 }

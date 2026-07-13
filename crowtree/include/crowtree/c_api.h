@@ -83,7 +83,7 @@ using ct_options = struct
     // deployment target; `path` may be a block device node or a
     // pre-allocated regular file (BlockPageStore works with either).
     // BlockPageStore has no async twin yet, so get_async/flush_async/
-    // snapshot_async fall back to synchronous completion (design §6.3)
+    // snapshot_async fall back to synchronous completion
     // when this is set to 1.
     uint8_t backend;
 };
@@ -117,12 +117,12 @@ ct_status ct_clear(ct_tree *t);
 void ct_get_stats(const ct_tree *t, ct_stats *out);
 
 // Evict clean, delta-free resident leaf bases down to at most
-// `max_resident_leaves` (crowtree::Crowtree::evict_clean_leaves; design §4.6).
+// `max_resident_leaves` (crowtree::Crowtree::evict_clean_leaves).
 // Test/ops hook -- forces the demand-load path a subsequent ct_get/
 // ct_get_async will have to take. Returns the number of leaves evicted.
 uint64_t ct_evict_clean_leaves(ct_tree *t, uint64_t max_resident_leaves);
 
-// plan-tree.md #17 D3: same contract, but for resident *inner* bases, down
+// #17 D3: same contract, but for resident *inner* bases, down
 // to at most `max_resident_inner` (crowtree::Crowtree::evict_clean_inner) --
 // a genuinely separate ranked budget/pass from ct_evict_clean_leaves, never
 // evicting a leaf. Returns the number of inner bases evicted.
@@ -150,13 +150,13 @@ ct_status ct_flush(ct_tree *t);
 // Point read. *found is 0/1; on found, *slot and *value (owned) are set.
 ct_status ct_get(ct_tree *t, const uint8_t *key, size_t klen, int32_t *found, uint64_t *slot, ct_buf *value);
 
-// ── Async data path (design-crowtree-async.md, plan-tree.md #11 Phase 2) ──
+// ── Async data path ──
 //
 // Opaque completion handle returned by the ct_*_async calls below; poll it
 // with ct_future_poll. For ct_flush_async/ct_snapshot_async, a future that
 // ct_future_poll reports done (*done=1) is freed by that same call -- do not
 // also call ct_future_free on it. For ct_get_async specifically, done=1 does
-// *not* free it (plan-tree.md #11 Phase 4, design §5's zero-copy fast path:
+// *not* free it (zero-copy fast path:
 // *out_value may borrow bytes from a resident frame, kept alive by an epoch
 // guard this ct_future owns) -- the caller must always follow up with
 // ct_future_free once done reading *out_value, for both a found and a
@@ -171,7 +171,7 @@ using ct_future = struct ct_future;
 // loaded): the future stays pending until the tree's Reactor completes the
 // I/O (or, with no Reactor wired -- e.g. an in-memory tree, or a build
 // without liburing -- until it falls back to a synchronous load; still
-// correct, just not genuinely async; design §6.3). Returns null only if
+// correct, just not genuinely async). Returns null only if
 // `t` is itself null.
 ct_future *ct_get_async(ct_tree *t, const uint8_t *key, size_t klen);
 
@@ -185,7 +185,7 @@ ct_future *ct_get_async(ct_tree *t, const uint8_t *key, size_t klen);
 ct_future *ct_flush_async(ct_tree *t);
 ct_future *ct_snapshot_async(ct_tree *t);
 
-// scan() twin (plan-tree.md #11 follow-up). Unlike ct_get_async, a single
+// scan() twin. Unlike ct_get_async, a single
 // pending scan may need more than one page load (one per cold leaf, plus
 // possibly the initial root->leaf descent) -- each is resolved by retrying
 // the whole scan from scratch (still correct: every retry either resolves
@@ -223,7 +223,7 @@ ct_future *ct_scan_async(ct_tree *t, const uint8_t *prefix, size_t plen, size_t 
 //   need them.
 ct_status ct_future_poll(ct_future *f, int32_t *done, int32_t *out_found, uint64_t *out_slot, ct_buf *out_value);
 
-// Best-effort cancel + free of a still-pending future (design §8): the
+// Best-effort cancel + free of a still-pending future: the
 // underlying I/O (if any is in flight) is not actually interrupted -- it
 // runs to completion in the background and its result is simply discarded
 // -- but `f` itself is safe to drop immediately; a no-op if f is null. Also
@@ -235,7 +235,7 @@ ct_status ct_future_poll(ct_future *f, int32_t *done, int32_t *out_found, uint64
 void ct_future_free(ct_future *f);
 
 // The tree's Reactor eventfd, for the Rust side to register with
-// tokio::io::AsyncFd (design §7): it becomes readable after the Reactor
+// tokio::io::AsyncFd: it becomes readable after the Reactor
 // dispatches a batch of completions, so re-polling every pending future at
 // that point will observe any that just finished. Returns -1 if this tree
 // has no Reactor wired (in-memory tree, or a build without liburing) --

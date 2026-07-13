@@ -118,7 +118,7 @@ void MappingTable::store_word(uint64_t page_id, uint64_t word)
         return;
     }
     // Transitioning to not-live. If this was the segment's last live slot,
-    // it becomes recyclable (plan-tree #14b / mappingtable design §6).
+    // it becomes recyclable.
     uint32_t prev_live = seg->live_count.fetch_sub(1, std::memory_order_acq_rel);
     if (prev_live == 1) {
         recycle_segment_if_empty(seg_idx, seg);

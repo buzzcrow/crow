@@ -1,15 +1,15 @@
-// Phase 2 (design-crowtree-async.md, plan-tree.md #11): exercise the async
+// Phase 2: exercise the async
 // C API surface (ct_get_async/ct_flush_async/ct_snapshot_async,
 // ct_future_poll/ct_future_free, ct_reactor_eventfd) end to end, not just
 // the underlying Crowtree::*_async methods -- these are the four cases
-// design-crowtree-async.md §13 Phase 2 calls out for this file.
+// called out for this file.
 //
 // Runs against a durable (file-backed) ct_tree so ct_evict_clean_leaves can
 // force the demand-load ("slow path") that ct_get_async's retry loop exists
 // for. On a build with liburing (CROWTREE_HAVE_LIBURING), ct_open wires a
 // real Reactor + FileAsyncPageStore, so the slow path genuinely completes
 // off the Reactor thread; without liburing (or for an in-memory tree) it
-// falls back to completing synchronously (design §6.3) -- every assertion
+// falls back to completing synchronously -- every assertion
 // below is written to hold either way (poll-until-done with a bounded
 // retry), except where a test specifically distinguishes the two.
 #include "crowtree/c_api.h"
@@ -82,7 +82,7 @@ struct TempPath
 
 } // namespace
 
-// Case 1 (design §13 Phase 2): a resident L1 hit's future is already done on
+// Case 1: a resident L1 hit's future is already done on
 // the very first ct_future_poll call -- no reactor round trip needed.
 TEST(AsyncGet, FastPathHitCompletesSynchronously)
 {
@@ -104,7 +104,7 @@ TEST(AsyncGet, FastPathHitCompletesSynchronously)
     EXPECT_EQ(done, 1) << "L1-resident hit must complete on the first poll";
     EXPECT_EQ(found, 1);
     EXPECT_EQ(std::string(reinterpret_cast<char *>(val.data), val.len), "hello");
-    // Plan-tree.md #11 Phase 4 (design §5's zero-copy fast path): `val` may
+    // zero-copy fast path: `val` may
     // now borrow directly from a resident frame -- passing it to
     // ct_free_buf would be a bad-free (ASan-caught: not malloc()-ed). The
     // future itself, not the buffer, is what must be released, and only
@@ -147,7 +147,7 @@ TEST(AsyncGet, FastPathValueSurvivesRepeatedPollsUntilExplicitFree)
     ct_close(t);
 }
 
-// Case 2 (design §13 Phase 2): evict the key's leaf, forcing ct_get_async
+// Case 2: evict the key's leaf, forcing ct_get_async
 // onto the miss path; the future eventually completes (via the Reactor
 // thread on a liburing build, or synchronously as a fallback) with the
 // correct value.
@@ -182,7 +182,7 @@ TEST(AsyncGet, MissAfterEvictionCompletesViaReactor)
     ASSERT_EQ(st, 0);
     EXPECT_EQ(found, 1);
     EXPECT_EQ(std::string(reinterpret_cast<char *>(val.data), val.len), "val5");
-    // Plan-tree.md #11 Phase 4: a miss resolved via the Reactor always
+    // A miss resolved via the Reactor always
     // materializes an owned copy (materialize_owned(), crowtree.cpp --
     // never a cross-thread-borrowed frame pointer), but ct_get_async's
     // handle is still only freed via ct_future_free, uniformly for both
@@ -202,10 +202,10 @@ TEST(AsyncGet, MissAfterEvictionCompletesViaReactor)
     ct_close(t);
 }
 
-// Case 3 (design §13 Phase 2): abandoning a still-(possibly-)pending future
+// Case 3: abandoning a still-(possibly-)pending future
 // via ct_future_free must not crash or leak, regardless of whether the
 // underlying I/O has already completed in the background by the time this
-// runs (best-effort cancel; design §8). Run under ASan for the strongest
+// runs (best-effort cancel). Run under ASan for the strongest
 // signal (see the /coding sanitizer pass in this session's plan).
 TEST(AsyncGet, FutureFreeBeforeCompletionDoesNotCrashOrLeak)
 {
@@ -236,9 +236,9 @@ TEST(AsyncGet, FutureFreeBeforeCompletionDoesNotCrashOrLeak)
     ct_close(t);
 }
 
-// Case 4 (design §13 Phase 2): flush_async and snapshot_async both resolve
+// Case 4: flush_async and snapshot_async both resolve
 // to the same result their synchronous twins would. snapshot_async does
-// genuine I/O (design §4: "flush / snapshot ... Always: write dirty pages
+// genuine I/O ("flush / snapshot ... Always: write dirty pages
 // to disk") and is pending on its first poll whenever a Reactor is wired.
 // flush_async, in *this* engine, only drains the in-memory MemTable into
 // L1 (Crowtree::flush() never touches page_store -- see its doc comment on

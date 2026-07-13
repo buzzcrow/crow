@@ -51,7 +51,6 @@ pub fn router(state: RegistryArc) -> Router {
         .with_state(state)
 }
 
-#[allow(unused_imports)]
 use crowkv::cluster::status::{GroupStatus, RemoteStatus, ReplicaStatus, StatusLevel, StoreStatus};
 
 // ── JSON types ──────────────────────────────────────────────
@@ -157,8 +156,7 @@ struct AddGroupRequest {
 
 /// Request body for [`join_group_via_snapshot`]: bootstrap a new/far-lagging
 /// group member by pulling a snapshot from an existing member instead of
-/// replaying full Paxos history (,
-/// `design-crowtree-snapshot-gc.md` §6).
+/// replaying full Paxos history.
 #[derive(ToSchema, Deserialize)]
 struct JoinGroupRequest {
     replica_id: u64,
@@ -1149,8 +1147,8 @@ async fn export_topology(State(state): State<RegistryArc>) -> impl IntoResponse 
 }
 
 /// Rebuild `group` with `new_remotes` merged into its remote list,
-/// applying the membership-epoch bump correctly
-/// (`design/design-reconfiguration.md` §6). Shared by `add_remote_replicas` and
+/// applying the membership-epoch bump correctly.
+/// Shared by `add_remote_replicas` and
 /// `batch_add_remote_replicas` -- both need the exact same bootstrap
 /// handling, and having it live in one place (rather than duplicated
 /// per-handler) is what actually keeps them consistent; a previous

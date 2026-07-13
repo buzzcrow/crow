@@ -31,7 +31,7 @@ enum class snapshot_format : uint8_t {
     kNative   = 1, // deferred: raw frame images + remapped manifest
 };
 
-// default_env export chunk size (design §9.1: fixed ≤1 MiB chunks).
+// default_env export chunk size (fixed ≤1 MiB chunks).
 inline constexpr size_t kSnapshotChunkBytes = 1U << 20;
 
 // A resumable, chunked export over an immutable point-in-time view. The whole

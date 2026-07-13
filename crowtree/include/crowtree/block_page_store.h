@@ -1,6 +1,6 @@
 // Raw block-device / O_DIRECT-file backend (plan-tree #22): completes the
 // PageStore backend matrix alongside MemPageStore (tests) and FilePageStore
-// (buffered local file) -- see design-crowtree-persistence.md §2.
+// (buffered local file).
 //
 // Opens a raw block device or a pre-allocated regular file with O_DIRECT,
 // bypassing the page cache for direct control over durability and to match

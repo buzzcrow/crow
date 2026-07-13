@@ -1,6 +1,6 @@
 // Standalone mapping-table segment struct (plan-tree #14a).
 //
-// Design: design-crowtree-mappingtable.md §4/§6. Holds `slot_count` packed
+// Holds `slot_count` packed
 // slot words (crowtree::slot_word encoding, see mapping_slot.h) plus the
 // per-segment bookkeeping segment recycling (#14b, done) and incremental
 // persistence (#14c/#14d) need: a live-slot count (0 => recyclable), a

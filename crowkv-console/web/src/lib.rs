@@ -30,10 +30,10 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/healthz", get(health::healthz))
         // Swagger UI static bundle.
         //
-        // Note: the legacy `/api/cluster/snapshot` aggregator was retired per
-        // design-console.md §6.1. The SPA reads per-resource live endpoints
+        // Note: the legacy `/api/cluster/snapshot` aggregator was retired.
+        // The SPA reads per-resource live endpoints
         // (`/api/racks`, `/api/nodes`, `/api/stores`, `/api/nodes/:id/stores`)
-        // which are all served from the monitor cache (§4.2) and compose into
+        // which are all served from the monitor cache and compose into
         // an equivalent topology view at lower latency.
         .nest_service(
             "/api/swagger",

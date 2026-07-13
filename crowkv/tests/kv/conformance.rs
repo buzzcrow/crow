@@ -118,8 +118,7 @@ pub fn compare_is_empty_for_identical_state_and_detects_divergence(a: &dyn KVEng
 }
 
 /// `KVEngine::snapshot_export`/`snapshot_import` round trip
-/// (`design-crowtree-snapshot-gc.md` §2/§6
-/// exporting `source`'s state and importing it into a fresh `target` of the
+/// (exporting `source`'s state and importing it into a fresh `target` of the
 /// same engine kind must reproduce `source`'s exact logical state
 /// (`compare` empty) and report the same `at_slot`. `target` must be freshly
 /// constructed and never previously `apply`ed to (`snapshot_import`'s

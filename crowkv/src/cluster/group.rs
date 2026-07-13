@@ -94,8 +94,8 @@ pub struct PxGroup {
     pub(crate) peer_durable: parking_lot::Mutex<HashMap<PxNodeId, SlotIndex>>,
     /// Group durable-snapshot watermark: `min(local durable_snapshot_slot,
     /// max(peer durable_snapshot_slot))` -- the real "durable on leader
-    /// plus at least one peer" watermark (`design-crowtree-storage.md`
-    /// §6 `snapshot_slot`, gossiped piggybacked on the same
+    /// plus at least one peer" watermark (`snapshot_slot`,
+    /// gossiped piggybacked on the same
     /// heartbeat round as `group_safe_slot`. Taking the *max* over peers
     /// (not `min`, unlike `group_safe_slot`) is deliberate: the design only
     /// requires *one* peer beyond the leader to durably have a slot, so the
@@ -314,7 +314,7 @@ impl PxGroup {
 
     /// Group durable-snapshot-watermark snapshot: state at this slot is
     /// durable on this (leader) replica **and** at least one voting peer
-    /// (`design-crowtree-storage.md` §6 `snapshot_slot`
+    /// (`snapshot_slot`
     /// `0` until the first quorum heartbeat round establishes it (or if this
     /// replica has no local WAL). Feeds `set_gc_watermark`'s `snapshot_slot`
     /// argument in `group_maintenance::run_pass`, replacing the previous
@@ -355,7 +355,7 @@ impl PxGroup {
 
     /// Record a voting peer's reported `durable_snapshot_slot` and recompute
     /// the group's real "durable on leader + >=1 peer" snapshot watermark
-    /// (`design-crowtree-storage.md` §6 `snapshot_slot`
+    /// (`snapshot_slot`
     /// as `min(local durable_snapshot_slot, max(voting peer
     /// durable_snapshot_slot))`. A peer that has never reported is treated
     /// as `0` and simply never wins the max (same "absent = 0" convention as
@@ -737,8 +737,7 @@ impl PxGroup {
 
     // ── New-member snapshot join ────────────────────
 
-    /// New-member snapshot join (`design-crowtree-storage.md` §10,
-    /// `design-reconfiguration.md` §4): pull a snapshot for this group from
+    /// New-member snapshot join: pull a snapshot for this group from
     /// `peer_endpoint`'s [`crate::rpc::SnapshotService`], import it into
     /// the local engine, and seed the local learner's frontier so the
     /// group's normal repair/heartbeat catch-up only needs to stream the

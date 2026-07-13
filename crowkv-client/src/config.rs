@@ -1,5 +1,5 @@
 //! Client configuration. Retry-policy defaults mirror the client
-//! interaction spec (retry on NotLeaderHint, 1s-then-retry on unknown
+//! interaction spec (retry on `NotLeaderHint`, 1s-then-retry on unknown
 //! leader, exponential backoff on transport errors).
 
 use std::time::Duration;

@@ -98,7 +98,7 @@ pub trait KVEngine: Send + Sync {
         0
     }
 
-    /// Persist a durable snapshot now (`design-crowtree-storage.md §6`).
+    /// Persist a durable snapshot now.
     /// Returns the slot the snapshot covers (everything in `[1, slot]` is
     /// now durably reflected — the same contract [`Self::resume_from_slot`]
     /// documents), or `0` if nothing was persisted (default: `InMemKV` has
@@ -109,8 +109,7 @@ pub trait KVEngine: Send + Sync {
         0
     }
 
-    /// Set the logical retention watermark
-    /// (`design-crowtree-storage.md §6/§9`): `gc_slot =
+    /// Set the logical retention watermark: `gc_slot =
     /// min(snapshot_slot, safe_slot)`. Tombstones and stale versions with
     /// slot `<= gc_slot` become eligible for reclamation on the next
     /// [`Self::collect_garbage`] call. Default is a no-op (`InMemKV` does
@@ -124,8 +123,7 @@ pub trait KVEngine: Send + Sync {
     fn collect_garbage(&self) {}
 
     /// Export this engine's entire current state as an opaque,
-    /// engine-specific byte stream (`design-crowtree-storage.md` §6/§10,
-    /// ), for the new-member join flow: a fresh/far-lagging
+    /// engine-specific byte stream, for the new-member join flow: a fresh/far-lagging
     /// replica pulls this over [`crate::rpc::SnapshotService`] instead of
     /// replaying full Paxos history. Returns `(at_slot, stream)`: `at_slot`
     /// is the highest slot durably reflected in `stream` (same contract as

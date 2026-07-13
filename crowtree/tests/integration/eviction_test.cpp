@@ -1,4 +1,4 @@
-// PT6c-5.4: writer-driven eviction of clean resident bases (design §4.6). An
+// PT6c-5.4: writer-driven eviction of clean resident bases. An
 // evicted leaf re-tags its mapping slot `unloaded` and epoch-retires the page;
 // the next access demand-loads it. Run under TSan for the eviction-vs-reader
 // race (epoch-deferred frame reuse).
