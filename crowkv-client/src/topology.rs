@@ -42,7 +42,11 @@ impl TopologyCache {
             leaders: DashMap::new(),
             min_refresh_interval,
             // Far enough in the past that the first `refresh()` always fetches.
-            refresh_gate: AsyncMutex::new(Instant::now() - Duration::from_secs(3600)),
+            refresh_gate: AsyncMutex::new(
+                Instant::now()
+                    .checked_sub(Duration::from_secs(3600))
+                    .unwrap_or_else(Instant::now),
+            ),
         }
     }
 

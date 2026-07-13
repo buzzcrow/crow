@@ -14,9 +14,12 @@ use crowkv_console_shared::cluster::{GroupSummary, GroupView, ReplicaView, Store
 use crowkv_console_shared::config::{GroupEntry, NodeEntry, ReplicaEntry, ServerEntry, StoreEntry};
 use crowkv_console_shared::error::Error as SharedError;
 use crowkv_console_shared::lifecycle::{self, DeployRequest};
-use crowkv_console_shared::mgmt::{AddGroupInitialRole, AddGroupRequest, AddStoreRequest, RemoteReplicaInfo};
+use crowkv_console_shared::mgmt::{
+    AddGroupInitialRole, AddGroupRequest, AddStoreRequest, RemoteReplicaInfo, StepDownRequest,
+};
 use serde::Deserialize;
 use std::collections::HashSet;
+use std::time::Duration;
 
 use crate::expand::Recursive;
 use tracing::{info, warn};
@@ -35,6 +38,41 @@ fn build_server_client(url: String) -> Result<ServerClient, (StatusCode, Json<Er
     ServerClient::new(url).map_err(|e| err_500(format!("client build: {e}")))
 }
 
+/// Poll `mgmt_url`'s `/stores/{sid}` until `(sid, gid)` reports a leader
+/// other than `excluded_leader_id` (the node being stepped down/removed),
+/// or the timeout elapses. Deliberately stricter than
+/// `lifecycle::wait_for_leader`, which only checks for a *non-zero*
+/// leader -- a survivor can still be reporting the stale, just-stepped-
+/// down leader until its own election timeout fires. Best-effort: a
+/// `false` return does not block the caller, it only means the leader-
+/// less window will close via lease expiry instead of immediately.
+async fn wait_for_new_leader(
+    mgmt_url: &str,
+    sid: u64,
+    gid: u64,
+    excluded_leader_id: u64,
+    timeout: Duration,
+) -> bool {
+    let Ok(client) = ServerClient::new(mgmt_url.to_string()) else {
+        return false;
+    };
+    let deadline = tokio::time::Instant::now() + timeout;
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(detail) = client.get_store(sid).await {
+            if detail
+                .groups
+                .iter()
+                .find(|g| g.group_id == gid)
+                .is_some_and(|g| g.leader_id != 0 && g.leader_id != excluded_leader_id)
+            {
+                return true;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    false
+}
+
 pub(crate) async fn refresh_node_cache(state: &AppState, node_id: &str) {
     let url = {
         let cfg = state.config.read().unwrap();
@@ -42,18 +80,36 @@ pub(crate) async fn refresh_node_cache(state: &AppState, node_id: &str) {
     };
     if let Some(url) = url {
         if let Ok(client) = ServerClient::new(url) {
-            if let Ok(stores) = client.topology().await {
-                let rec = crowkv_console_shared::monitor::NodeRecord {
-                    health: crowkv_console_shared::cluster::NodeHealth::Up,
-                    last_seen_ms: 1,
-                    stores: crowkv_console_shared::monitor::legacy_topology_to_node_stores(node_id, &stores),
-                    last_error: None,
-                };
-                state
-                    .monitor_cache
-                    .set_node_report(node_id.to_string(), rec)
-                    .await;
+            match client.topology().await {
+                Ok(stores) => {
+                    let rec = crowkv_console_shared::monitor::NodeRecord {
+                        health: crowkv_console_shared::cluster::NodeHealth::Up,
+                        last_seen_ms: 1,
+                        stores: crowkv_console_shared::monitor::legacy_topology_to_node_stores(
+                            node_id, &stores,
+                        ),
+                        last_error: None,
+                    };
+                    state
+                        .monitor_cache
+                        .set_node_report(node_id.to_string(), rec)
+                        .await;
+                }
+                Err(e) => {
+                    // Node is unreachable — mark it down so leader_for
+                    // skips its stale leader record instead of routing
+                    // KV traffic to a dead endpoint.
+                    state
+                        .monitor_cache
+                        .mark_down(node_id, format!("topology fetch failed: {e}"))
+                        .await;
+                }
             }
+        } else {
+            state
+                .monitor_cache
+                .mark_down(node_id, "server client construction failed")
+                .await;
         }
     }
 }
@@ -1188,6 +1244,59 @@ pub async fn http_remove_replica(
             )
         })?;
     let target_node = target.node_id.clone();
+
+    // Step 0: if the replica being removed is currently the leader, ask
+    // it to step down first and wait (bounded) for a survivor to win a
+    // fresh election, instead of leaving the group leaderless until the
+    // old leader's lease expires. Best-effort: a timeout here doesn't
+    // block the removal -- the lease-expiry fallback still applies.
+    if view.leader_id() == Some(rid) {
+        if let Ok(url) = mgmt_url_for_node(&state, &target_node) {
+            if let Ok(client) = build_server_client(url) {
+                match client
+                    .step_down(
+                        sid,
+                        gid,
+                        &StepDownRequest {
+                            reason: format!("replica {rid} removal"),
+                        },
+                    )
+                    .await
+                {
+                    Ok(result) if result.accepted => {
+                        if let Some(survivor) = view.replicas.iter().find(|r| r.replica_id != rid) {
+                            if let Ok(survivor_url) = mgmt_url_for_node(&state, &survivor.node_id) {
+                                if !wait_for_new_leader(&survivor_url, sid, gid, rid, Duration::from_secs(5))
+                                    .await
+                                {
+                                    warn!(
+                                        store_id = sid,
+                                        group_id = gid,
+                                        replica_id = rid,
+                                        "leader step-down accepted but no new leader observed within timeout; proceeding anyway"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        // Not leader anymore by the time the call landed
+                        // (already stepped down / re-elected away) -- fine,
+                        // nothing to wait for.
+                    }
+                    Err(e) => {
+                        warn!(
+                            store_id = sid,
+                            group_id = gid,
+                            replica_id = rid,
+                            error = %e,
+                            "step-down request failed; proceeding with removal, leader-less window will close via lease expiry"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     // Step 1: Deregister this replica as a remote from every peer.
     for peer in &view.replicas {

@@ -53,6 +53,7 @@ async fn prepare_rejection_blocks_low_ballot_until_retry_uses_higher_ballot() {
                 request_create_ms: 0,
                 group_id: 1,
                 term: 0,
+                membership_epoch: 0,
             })
             .await
             .expect("prepare request")
@@ -93,6 +94,7 @@ async fn malformed_accept_request_is_rejected_by_grpc_boundary() {
             client_id: 0,
             seq: 0,
             group_id: 1,
+            membership_epoch: 0,
         })
         .await
         .expect_err("missing value should be rejected");

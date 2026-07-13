@@ -46,7 +46,7 @@ pub enum BatchOp {
     Delete { key: Vec<u8> },
 }
 
-/// Standalone CrowKV client: topology discovery over the HTTP management
+/// Standalone `CrowKV` client: topology discovery over the HTTP management
 /// API, per-group leader cache, retry loop reusing `(client_id, seq)` across
 /// retries of one logical write, and `ReadMode` routing including
 /// `ReadYourWrites` client-side slot tracking. See `doc/plan-client.md` §5.
@@ -132,7 +132,7 @@ impl CrowkvClient {
                 return Ok(ep);
             }
             attempts += 1;
-            if attempts > self.retry.max_retries {
+            if self.retry.single_attempt || attempts > self.retry.max_retries {
                 return Err(Error::NoLeader { store_id, group_id });
             }
             tokio::time::sleep(self.retry.unknown_leader_wait).await;
@@ -212,9 +212,11 @@ impl CrowkvClient {
                     }
                 }
                 Err(status) => {
-                    endpoint = self
-                        .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
-                        .await;
+                    if !self.retry.single_attempt {
+                        endpoint = self
+                            .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
+                            .await;
+                    }
                     attempts = self.count_other(attempts, &status.to_string())?;
                 }
             }
@@ -270,9 +272,11 @@ impl CrowkvClient {
                     }
                 }
                 Err(status) => {
-                    endpoint = self
-                        .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
-                        .await;
+                    if !self.retry.single_attempt {
+                        endpoint = self
+                            .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
+                            .await;
+                    }
                     attempts = self.count_other(attempts, &status.to_string())?;
                 }
             }
@@ -334,9 +338,11 @@ impl CrowkvClient {
                     }
                 }
                 Err(status) => {
-                    endpoint = self
-                        .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
-                        .await;
+                    if !self.retry.single_attempt {
+                        endpoint = self
+                            .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
+                            .await;
+                    }
                     attempts = self.count_other(attempts, &status.to_string())?;
                 }
             }
@@ -398,9 +404,11 @@ impl CrowkvClient {
                     }
                 }
                 Err(status) => {
-                    endpoint = self
-                        .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
-                        .await;
+                    if !self.retry.single_attempt {
+                        endpoint = self
+                            .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
+                            .await;
+                    }
                     attempts = self.count_other(attempts, &status.to_string())?;
                 }
             }
@@ -449,9 +457,11 @@ impl CrowkvClient {
                     attempts = self.count_other(attempts, &resp.error)?;
                 }
                 Err(status) => {
-                    endpoint = self
-                        .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
-                        .await;
+                    if !self.retry.single_attempt {
+                        endpoint = self
+                            .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
+                            .await;
+                    }
                     attempts = self.count_other(attempts, &status.to_string())?;
                 }
             }
@@ -486,6 +496,12 @@ impl CrowkvClient {
         }
         self.topology
             .set_leader(store_id, group_id, resp.not_leader_hint.clone());
+        if self.retry.single_attempt {
+            // Still worth caching the real leader for the *next* call, but
+            // this call itself must not silently redirect -- see
+            // `RetryConfig::single_attempt`.
+            return None;
+        }
         Some(resp.not_leader_hint.clone())
     }
 
@@ -537,7 +553,7 @@ impl CrowkvClient {
     /// `Error::RetriesExhausted` once `attempts` exceeds the budget.
     fn count_other(&self, attempts: u32, last: &str) -> Result<u32> {
         let attempts = attempts + 1;
-        if attempts > self.retry.max_retries {
+        if self.retry.single_attempt || attempts > self.retry.max_retries {
             return Err(Error::RetriesExhausted {
                 attempts,
                 last: last.to_string(),

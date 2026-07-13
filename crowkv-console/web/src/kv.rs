@@ -98,9 +98,16 @@ pub async fn resolve_kv_endpoint(
 ) -> Result<String, (StatusCode, Json<ErrorBody>)> {
     for attempt in 0..5 {
         if let Some(view) = state.monitor_cache.resolve_group(sid, gid).await {
-            if view.state == GroupHealth::Healthy {
-                if let Some(leader) = view.leader() {
-                    return kv_endpoint_for_node(state, sid, &leader.node_id).await;
+            // A degraded group (one node down in a 3-node cluster) can still
+            // make progress as long as a quorum and a leader exist. Route to
+            // the leader whenever we know one; only refuse if the group is
+            // unavailable (lost quorum) or has no leader at all.
+            if view.state != GroupHealth::Unavailable && view.state != GroupHealth::Unknown {
+                // Use leader_for (not view.leader) so stale leader records
+                // from dead nodes are skipped — leader_for checks node
+                // health and falls back to the first Up replica.
+                if let Some((_rid, node_id)) = state.monitor_cache.leader_for(sid, gid).await {
+                    return kv_endpoint_for_node(state, sid, &node_id).await;
                 }
             }
         }
@@ -273,6 +280,7 @@ async fn mgmt_seeds_for_group(
 /// and surface 502" outcome once its own candidate-endpoint queue was
 /// drained -- there is no 4xx case since `mgmt_seeds_for_group` already
 /// rejected an unknown group before a [`CrowkvClient`] is even constructed.
+#[allow(clippy::needless_pass_by_value)]
 fn map_kv_client_err(e: crowkv_client::Error) -> (StatusCode, Json<ErrorBody>) {
     err_502(format!("{e}"))
 }
@@ -289,6 +297,9 @@ pub async fn http_kv_get(
     let key = decode_key(q.key, q.key_hex)?;
     let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
     let client = CrowkvClient::new(ClientConfig::new(seeds));
+    if let Ok(endpoint) = resolve_kv_endpoint(&state, sid, gid).await {
+        client.seed_leader(sid, gid, endpoint);
+    }
     let outcome = client
         .get(sid, gid, &key, ReadMode::Linearizable, None)
         .await
@@ -395,6 +406,9 @@ pub async fn http_kv_put(
     let seq = body.seq;
     let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
     let client = CrowkvClient::new(ClientConfig::new(seeds));
+    if let Ok(endpoint) = resolve_kv_endpoint(&state, sid, gid).await {
+        client.seed_leader(sid, gid, endpoint);
+    }
     let out = client
         .put(sid, gid, &key, &value, Some((client_id, seq)))
         .await
@@ -419,6 +433,9 @@ pub async fn http_kv_delete(
     let seq = body.seq;
     let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
     let client = CrowkvClient::new(ClientConfig::new(seeds));
+    if let Ok(endpoint) = resolve_kv_endpoint(&state, sid, gid).await {
+        client.seed_leader(sid, gid, endpoint);
+    }
     let out = client
         .delete(sid, gid, &key, Some((client_id, seq)))
         .await

@@ -89,6 +89,11 @@ pub enum PxPrepareReply {
     /// adopt `new_term`. Two-fence rule, see
     /// `doc/design/design-leader-election.md` §2.3 + §9 term fencing.
     TermStale { slot: SlotIndex, new_term: u64 },
+    /// The proposer's `membership_epoch` does not exactly match the
+    /// responder's own. Distinct from `Rejected`: this is not a ballot
+    /// conflict, so the proposer must not bump its ballot/round in
+    /// response, only refresh its view of the group's membership.
+    EpochMismatch { responder_epoch: u64 },
 }
 
 /// Reply to a Phase-2 `Accept`.
@@ -103,4 +108,6 @@ pub enum PxAcceptReply {
     },
     /// Term-fence rejection. See [`PxPrepareReply::TermStale`].
     TermStale { slot: SlotIndex, new_term: u64 },
+    /// Epoch-fence rejection. See [`PxPrepareReply::EpochMismatch`].
+    EpochMismatch { responder_epoch: u64 },
 }

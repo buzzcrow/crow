@@ -2,11 +2,15 @@
 //!
 //! - `http`: low-level management API on a single `crowkv-server`.
 //!   Used by `crowkv-web` to fan out per-node primitives.
-//! - `grpc`: KV / health gRPC clients to `crowkv-server`'s data plane.
-//!   Used by `crowkv-web`'s KV handlers.
 //! - `console`: high-level two-tree API on a `crowkv-web`. Used by
 //!   the CLI, which never talks to a `crowkv-server` directly.
+//!
+//! KV data-plane gRPC access used to live here too (`grpc::KvClient`,
+//! C6). It's gone: `crowkv-web`'s KV handlers and `crowkv-cli`'s `kv`
+//! commands and bench runner all depend on the standalone `crowkv-client`
+//! crate instead (`doc/plan-client.md` §5/§6 Issue 4) for topology
+//! discovery, retry, and connection pooling on top of the same generated
+//! `crowkv::rpc` types.
 
 pub mod console;
-pub mod grpc;
 pub mod http;

@@ -17,6 +17,15 @@ pub enum PxPaxosError {
     QuorumUnavailable {
         phase: PxPaxosPhase,
     },
+    /// At least one voting peer rejected the request because its
+    /// `membership_epoch` didn't exactly match the proposer's -- e.g. an
+    /// in-flight membership mutation hasn't fully propagated yet.
+    /// Distinct from `QuorumUnavailable` purely for diagnostics (same
+    /// retry action: same slot, no ballot bump); this is an expected,
+    /// bounded, self-healing stall, not a ballot conflict.
+    MembershipEpochMismatch {
+        responder_epoch: u64,
+    },
     TransportFailure {
         phase: PxPaxosPhase,
         message: String,
@@ -77,7 +86,9 @@ impl PxPaxosError {
                 force_prepare: true,
             },
             Self::ForeignValueChosen { .. } => PxRetryAction::RetryNextSlot,
-            Self::QuorumUnavailable { .. } | Self::TransportFailure { .. } => PxRetryAction::RetrySameSlot {
+            Self::QuorumUnavailable { .. }
+            | Self::TransportFailure { .. }
+            | Self::MembershipEpochMismatch { .. } => PxRetryAction::RetrySameSlot {
                 min_round: None,
                 force_prepare: false,
             },
@@ -96,6 +107,7 @@ impl PxPaxosError {
             Self::AcceptRejected { .. } => "accept_rejected",
             Self::ForeignValueChosen { .. } => "foreign_value_chosen",
             Self::QuorumUnavailable { .. } => "quorum_unavailable",
+            Self::MembershipEpochMismatch { .. } => "membership_epoch_mismatch",
             Self::TransportFailure { .. } => "transport_failure",
             Self::Busy => "busy",
             Self::TermStale { .. } => "term_stale",

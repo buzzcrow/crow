@@ -161,18 +161,22 @@ impl MonitorCache {
         })
     }
 
-    /// Resolve `(replica_id, node_id)` for the current leader. When no
-    /// replica self-reports as leader, falls back to the first replica
-    /// whose hosting node is observed `Up`. Returns `None` if no replica
-    /// matches.
+    /// Resolve `(replica_id, node_id)` for the current leader. Prefer a
+    /// replica that self-reports as `Leader` and whose hosting node is
+    /// observed `Up`; this avoids routing to a stale leader record left by
+    /// a dead node. Falls back to the first `Up` replica, then the first
+    /// replica overall. Returns `None` if no replica matches.
     pub async fn leader_for(&self, store_id: StoreId, group_id: u64) -> Option<(ReplicaId, NodeId)> {
         let view = self.resolve_group(store_id, group_id).await?;
-        if let Some(r) = view.leader() {
+        let guard = self.nodes.read().await;
+        // Prefer a leader whose node is Up.
+        if let Some(r) = view.replicas.iter().find(|r| {
+            r.role == ReplicaRole::Leader && guard.get(&r.node_id).is_some_and(|n| n.health == NodeHealth::Up)
+        }) {
             return Some((r.replica_id, r.node_id.clone()));
         }
         // First-healthy fallback. Health is read from the per-node
         // record because `ReplicaView` does not carry node health.
-        let guard = self.nodes.read().await;
         for r in &view.replicas {
             if guard.get(&r.node_id).is_some_and(|n| n.health == NodeHealth::Up) {
                 return Some((r.replica_id, r.node_id.clone()));

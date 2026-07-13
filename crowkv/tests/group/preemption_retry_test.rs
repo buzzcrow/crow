@@ -25,6 +25,7 @@ async fn integration_accept_preemption_then_ballot_bump_retry() {
                 request_create_ms: 0,
                 group_id: 1,
                 term: 0,
+                membership_epoch: 0,
             })
             .await
             .expect("prepare request")

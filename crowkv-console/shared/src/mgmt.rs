@@ -90,6 +90,22 @@ struct RemoteListResponse {
     remotes: Vec<RemoteReplicaInfo>,
 }
 
+/// `POST /stores/{sid}/groups/{gid}/step-down` body.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StepDownRequest {
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// `POST /stores/{sid}/groups/{gid}/step-down` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StepDownResult {
+    /// `false` when the target node was not leader (no-op fence miss).
+    pub accepted: bool,
+    pub current_term: u64,
+    pub current_leader_id: u64,
+}
+
 // ── Client methods ─────────────────────────────────────────────────
 
 impl ServerClient {
@@ -179,6 +195,19 @@ impl ServerClient {
     /// Transport / non-2xx status codes surface as `Error::UpstreamRpc`.
     pub async fn remove_remote_replica(&self, sid: u64, gid: u64, rid: u64) -> Result<()> {
         self.delete_path(&format!("/stores/{sid}/groups/{gid}/remotes/{rid}"))
+            .await
+    }
+
+    /// `POST /stores/{sid}/groups/{gid}/step-down`. Asks the node hosting
+    /// this group to step down if it is currently leader. `accepted:
+    /// false` in the result means the target was not leader (not an
+    /// error) -- callers should treat that as "nothing to do" rather
+    /// than retry.
+    ///
+    /// # Errors
+    /// Transport / non-2xx status codes surface as `Error::UpstreamRpc`.
+    pub async fn step_down(&self, sid: u64, gid: u64, req: &StepDownRequest) -> Result<StepDownResult> {
+        self.post_json(&format!("/stores/{sid}/groups/{gid}/step-down"), req)
             .await
     }
 

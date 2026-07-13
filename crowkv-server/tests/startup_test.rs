@@ -151,7 +151,8 @@ async fn crowtree_engine_persists_across_restart(crowtree_backend: CrowtreeBacke
     let ct_path = crowkv_server::startup::store_crowtree_path(&data_root, store_id, group_id);
     assert!(
         ct_path.exists(),
-        "expected a durable crowtree file at {ct_path:?}"
+        "expected a durable crowtree file at {}",
+        ct_path.display()
     );
 
     group.local_replica().become_leader();

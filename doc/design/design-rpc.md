@@ -194,7 +194,7 @@ The unary `Accept` RPC is kept during the P1 M3 → M4 migration window. Once al
 
 ### 4.2 Cluster Discovery — HTTP, not gRPC
 
-> **Decision record (2026-07, see [`plan-client.md`](../plan-client.md) §6 Issue 3):** a gRPC `AdminService.DescribeCluster` RPC was sketched here but never implemented. **Rejected, not deferred** — cluster/topology discovery is served by `crowkv-server`'s existing HTTP management API (`GET /topology`, `crowkv-server/src/mgmt_api.rs::export_topology`), which every client (gRPC-only or not) is expected to poll for `(store_id, group_id) -> leader_endpoint` discovery. See [requirement.md §10.1](../requirement.md#101-client-discovery) and [requirement.md §7.1](../requirement.md#71-groups-and-cluster-topology). No `AdminService` gRPC service exists or is planned.
+> **Decision record (2026-07):** a gRPC `AdminService.DescribeCluster` RPC was sketched here but never implemented. **Rejected, not deferred** — cluster/topology discovery is served by `crowkv-server`'s existing HTTP management API (`GET /topology`, `crowkv-server/src/mgmt_api.rs::export_topology`), which every client (gRPC-only or not) is expected to poll for `(store_id, group_id) -> leader_endpoint` discovery. See [requirement.md §10.1](../requirement.md#101-client-discovery) and [requirement.md §7.1](../requirement.md#71-groups-and-cluster-topology). No `AdminService` gRPC service exists or is planned.
 
 ---
 

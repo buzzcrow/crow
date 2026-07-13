@@ -13,7 +13,7 @@ doc only when a task touches a topic in its row. Line counts are approximate
 | `plan.md` | ~190 | Phases (P1–P5), milestones, dependency order, decision log. Read before picking a task. |
 | `test.md` | ~200 | Test strategy, layer scope definitions, high-level coverage per layer, and feature-dependent test gaps. Read when designing tests or deciding where a test belongs. |
 | `plan-test.md` | ~30 | Unfinished test task backlog with checkboxes. Read when picking the next test to implement. |
-| `plan-client.md` | ~215 | P4 (RPC/Client) gap analysis and milestones (C1-C3): topology cache, retry, read modes. Documents the Model B decision (operator/HTTP-managed topology, no Group-0/DescribeCluster) and the `crowkv-client` crate design. Read before touching the client library. |
+| `procedures.md` | ~450 | Operator-facing procedures for a standard CrowKV cluster: bootstrap, rolling upgrade, node replacement, replica add/remove, quorum-loss handling, health checks, backup, full API reference. Uses `crowkv-server` and the console HTTP API as examples. |
 | `todo_code.md` | ~50 | Forward-looking code-level TODO backlog (open implementation items, blocked/deferred work with rationale). Read before picking up crowtree/crowkv follow-up work. |
 
 Web UI requirements now live in `requirement.md` §15.4.6 (single-page embeddable
@@ -83,7 +83,7 @@ embedded Swagger, V2 deferral list).
 | `design/design-leader-election.md` | ~330 | Term/ballot bridge, election protocol, new-leader bulk Phase 1, heartbeats, leader lease, ReadIndex, step-down. |
 | `design/design-parallel-slots.md` | ~325 | Parallel slot pipelining, sliding window, gap detection / repair, safe-slot, per-key resolved-slot. |
 | `design/design-paxos-error.md` | ~55 | Paxos error categories, retry rules, RPC mapping. |
-| `design/design-reconfiguration.md` | ~280 | Joint consensus, member add/remove, leader transfer, quorum-overlap safety. |
+| `design/design-reconfiguration.md` | ~310 | Direct per-node mutation model, member add/remove, leader transfer, `membership_epoch` fence, safety argument, design history. |
 | `design/design-rpc.md` | ~265 | Wire protocol: classic Paxos messages, PeerStream bidi stream (frames, flow control, parallelism), PxService, Rust mapping. Cluster discovery is HTTP (`plan-client.md`), not gRPC. |
 | `design/design-slot.md` | ~650 | `PxSlotList` / `PxSlotNode`: chunk layout, insert/get/trim, reclamation, performance model, future evolution. |
 | `design/design-state-machine.md` | ~310 | Storage plug-in: per-key slot tracking, apply semantics, snapshot, compaction, compare, engine impls. |
