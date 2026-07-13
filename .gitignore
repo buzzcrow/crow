@@ -30,15 +30,19 @@ test-logs/
 crowkv-server/wal/
 crowkv-server/conf/
 crowkv-server/log/
+crowkv-server/ctdata/
 crowkv-console/cli/wal/
 crowkv-console/cli/conf/
 crowkv-console/cli/log/
+crowkv-console/cli/ctdata/
 crowkv-console/shared/wal/
 crowkv-console/shared/conf/
 crowkv-console/shared/log/
+crowkv-console/shared/ctdata/
 crowkv-console/web/wal/
 crowkv-console/web/conf/
 crowkv-console/web/log/
+crowkv-console/web/ctdata/
 
 # ── IDE / OS ────────────────────────────────────────────────────
 .idea/

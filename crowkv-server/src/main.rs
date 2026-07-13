@@ -65,7 +65,7 @@ async fn main() {
         wal_root
             .parent()
             .unwrap_or_else(|| Path::new(""))
-            .join("crowtree")
+            .join("ctdata")
     });
     let kv_engine = KvEngineKind::parse(&args.kv_engine);
     let crowtree_backend = crowkv_server::store_registry::parse_crowtree_backend(&args.kv_backend);

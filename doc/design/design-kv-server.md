@@ -87,7 +87,7 @@ On startup:
 ### 3.3 KV Engine Selection
 
 `--kv-engine` chooses the `crowkv::kv::KVEngine` implementation every group's learner is created with, applied consistently at both the CLI bootstrap path (`main.rs`) and the runtime `POST /stores/:sid/groups` path (`mgmt_api.rs::add_group`) via `KvStoreRegistry::kv_engine`:
-- `crowtree` (default) — durable, file-backed; each group gets its own file under `--data-root` (default: sibling of `--wal-root` named `crowtree`), recovered by replaying the WAL through it on restart.
+- `crowtree` (default) — durable, file-backed; each group gets its own file under `--data-root` (default: sibling of `--wal-root` named `ctdata`), recovered by replaying the WAL through it on restart.
 - `memory` — in-memory, non-durable `InMemKV`; explicit low-durability/test/dev choice.
 
 `--kv-backend` (`file` default, or `block` for `O_DIRECT` via `BlockPageStore`) only applies when `--kv-engine crowtree` is selected.

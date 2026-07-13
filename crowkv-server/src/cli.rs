@@ -56,7 +56,7 @@ pub struct Cli {
     pub kv_engine: String,
 
     /// Root directory for durable per-group crowtree files (only used when
-    /// `--kv-engine crowtree`). Default: sibling of `wal_root` named `crowtree`.
+    /// `--kv-engine crowtree`). Default: sibling of `wal_root` named `ctdata`.
     #[arg(long)]
     pub data_root: Option<std::path::PathBuf>,
 
