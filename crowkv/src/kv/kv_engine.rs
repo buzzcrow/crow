@@ -9,10 +9,11 @@ use super::Batch;
 /// the common case (in-memory hit / no I/O) resolves immediately at zero
 /// cost via [`KVFuture::ready`], while a genuine I/O path (crowtree
 /// demand-load miss, via the io_uring reactor — `design-crowtree-engine.md
-/// §3`) returns a real `Pending` future. [`super::CrowtreeEngine::get`] is
-/// the one impl that constructs `Pending` today (via
-/// `crowtree_ffi::AsyncCrowtree::try_get`); `InMemKV` and
-/// `CrowtreeEngine::scan`/`apply` always resolve `Ready`. See
+/// §3`) returns a real `Pending` future. [`super::CrowtreeEngine::get`] and
+/// [`super::CrowtreeEngine::scan`] both construct `Pending` for a genuine
+/// cold-leaf miss (via `crowtree_ffi::AsyncCrowtree::try_get`/`try_scan`);
+/// `InMemKV` and `CrowtreeEngine::apply` always resolve `Ready` (no
+/// `ct_apply_*_async` C API exists yet). See
 /// `doc/design/design-crowkv-async-kvengine.md` for the full design
 /// rationale (the `dyn`-compatibility tension that led to this shape) and
 /// migration history.
@@ -20,7 +21,15 @@ pub trait KVEngine: Send + Sync {
     /// Apply `batch` at `slot`. Atomic to readers and idempotent: an op for
     /// key `k` is skipped when `slot <= resolved_slot(k)`. The last occurrence
     /// of a repeated key within the batch wins.
-    fn apply(&self, slot: u64, batch: &Batch) -> KVFuture<()>;
+    ///
+    /// # Errors
+    /// Returns an error string if the underlying write fails (e.g. a durable
+    /// I/O error on a [`super::CrowtreeEngine`]). The value is still
+    /// Paxos-chosen even on an `Err` here -- this reports a *local* apply/
+    /// durability failure, not a consensus outcome, so callers must not
+    /// treat it as "not applied" for consensus purposes. `InMemKV` has no
+    /// I/O path and always returns `Ok(())`.
+    fn apply(&self, slot: u64, batch: &Batch) -> KVFuture<Result<(), String>>;
 
     /// Live value and its resolved slot, or `None` if unset or tombstoned.
     fn get(&self, key: &[u8]) -> KVFuture<Option<(u64, Vec<u8>)>>;
@@ -40,6 +49,36 @@ pub trait KVEngine: Send + Sync {
     /// Drop all state. Used by snapshot-install reset (before importing a
     /// peer's snapshot) and by tests that need to simulate a wiped replica.
     fn clear(&self);
+
+    /// Type-erased downcast escape hatch. Lets a caller holding only
+    /// `&dyn KVEngine` (e.g. `PxLearner::engine`) recover the concrete
+    /// engine type for an operation deliberately kept off this trait
+    /// because it's meaningful for only one engine kind -- e.g.
+    /// [`super::CrowtreeEngine::stats`] (doc/todo-sm.md Step 6): `InMemKV`
+    /// has no comparable internals, so putting `stats` on the trait itself
+    /// would mean a dummy/`Option`-wrapped implementation for it, the same
+    /// reasoning that already keeps [`super::CrowtreeEngine::handle`] off
+    /// this trait. Every implementor's body is just `self`.
+    fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Whether this engine's underlying storage is currently healthy enough
+    /// to trust for durable reads/writes. Distinct from a single failed
+    /// [`Self::apply`] call (a point-in-time event, already logged by the
+    /// caller): this reflects a *latched* fault condition a caller can poll
+    /// independently of any particular operation, e.g. to decide whether
+    /// this replica should be failed out of its group -- the same fail-out
+    /// semantics `doc/design/design-wal.md §8.1` specifies for a WAL disk
+    /// failure, extended here to an engine-level fault (note: as of this
+    /// writing there is no automatic step-out trigger wired to *either*
+    /// signal yet, only the manual admin remove-replica path; see
+    /// `doc/todo-sm.md` G2).
+    ///
+    /// Default `true` (`InMemKV` has no I/O path to fail).
+    /// [`super::CrowtreeEngine::is_healthy`] overrides this with
+    /// `!Crowtree::io_failed()`.
+    fn is_healthy(&self) -> bool {
+        true
+    }
 
     /// Highest slot `S` such that every slot in `[1, S]` is durably reflected
     /// in this engine already — i.e. a caller rebuilding state from a WAL can

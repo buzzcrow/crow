@@ -325,6 +325,36 @@ void ct_clear_io_error(ct_tree *t)
     }
 }
 
+ct_status ct_clear(ct_tree *t)
+{
+    if (t == nullptr) {
+        return static_cast<ct_status>(Code::kInvalidArgument);
+    }
+    return to_status(t->tree->clear());
+}
+
+void ct_get_stats(const ct_tree *t, ct_stats *out)
+{
+    if (t == nullptr || out == nullptr) {
+        return;
+    }
+    EngineStats s                    = t->tree->stats();
+    out->last_applied_slot           = s.last_applied_slot;
+    out->contiguous_slot             = s.contiguous_slot;
+    out->gc_watermark                = s.gc_watermark;
+    out->io_failed                   = s.io_failed ? 1 : 0;
+    out->snapshot_pages_written      = s.snapshot_pages_written;
+    out->snapshot_segments_written   = s.snapshot_segments_written;
+    out->buffer_pool_hits            = s.buffer_pool_hits;
+    out->buffer_pool_misses          = s.buffer_pool_misses;
+    out->buffer_pool_evictions       = s.buffer_pool_evictions;
+    out->buffer_pool_writebacks      = s.buffer_pool_writebacks;
+    out->buffer_pool_resident        = s.buffer_pool_resident;
+    out->buffer_pool_dirty           = s.buffer_pool_dirty;
+    out->buffer_pool_used            = s.buffer_pool_used;
+    out->buffer_pool_num_frames      = s.buffer_pool_num_frames;
+}
+
 uint64_t ct_evict_clean_leaves(ct_tree *t, uint64_t max_resident_leaves)
 {
     if (t == nullptr) {

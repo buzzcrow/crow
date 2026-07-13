@@ -137,6 +137,8 @@ impl MonitorCache {
                 node_id: node_id.clone(),
                 role: g.local.role,
                 state: g.local.state,
+                engine_healthy: g.local.engine_healthy,
+                crowtree_stats: g.local.crowtree_stats,
             });
         }
         if replicas.is_empty() {
@@ -404,6 +406,8 @@ pub fn legacy_topology_to_node_stores(
                 } else {
                     ReplicaState::Running
                 },
+                engine_healthy: g.local_replica.kv_store.engine_healthy,
+                crowtree_stats: g.local_replica.kv_store.crowtree_stats,
             };
             let remotes = g
                 .remotes
@@ -490,6 +494,8 @@ mod tests {
                     replica_id: replica,
                     role,
                     state: ReplicaState::Running,
+                    engine_healthy: true,
+                    crowtree_stats: None,
                 },
                 remotes: vec![],
                 leader_hint,

@@ -303,12 +303,28 @@ impl PxLearner {
     /// `async fn` for the same reason as [`Self::engine_get`]; `KVEngine::apply`
     /// has no genuine `Pending` path yet either (no async apply C API), so
     /// this never actually suspends today.
+    ///
+    /// A local apply failure (e.g. a durable I/O error on a
+    /// `CrowtreeEngine`) is logged at `ERROR` and otherwise swallowed here:
+    /// the value is still Paxos-chosen (this is a local durability fault,
+    /// not a consensus outcome), so it must not be treated as "not applied"
+    /// or re-proposed. Detecting and reacting to a persistently-unhealthy
+    /// local engine is [`KVEngine::apply`]'s caller's job at a layer that
+    /// can see engine health across calls, not a single failed apply.
     async fn apply_entry(&self, slot: SlotIndex, payload: &[u8]) {
         let batch = Batch::decode(payload);
         if batch.ops.is_empty() {
             return;
         }
-        self.engine.apply(slot, &batch).await;
+        if let Err(error) = self.engine.apply(slot, &batch).await {
+            tracing::error!(
+                slot,
+                error = %error,
+                "critical: KVEngine::apply failed -- this slot is Paxos-chosen but may not be \
+                 durably reflected in the local engine; next step: check engine health and \
+                 consider failing this node out of the group"
+            );
+        }
     }
 }
 

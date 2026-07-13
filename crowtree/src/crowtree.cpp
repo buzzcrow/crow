@@ -2298,6 +2298,51 @@ Status Crowtree::install_snapshot_native(std::vector<NativeFrame> frames, uint64
     return Status::Ok();
 }
 
+Status Crowtree::clear()
+{
+    std::lock_guard<std::mutex> lk(write_mutex_);
+    // Identical wipe sequence to install_snapshot's first block (see its
+    // comment for the retire=true rationale) -- clear() is exactly that
+    // wipe with nothing loaded afterward.
+    free_all_resident_pages(/*retire=*/true);
+    uint64_t page_id = mapping_.allocate_page_id();
+    mapping_.store(page_id, LeafBase::build({}, kInvalidPageId, pool_, opt_.frame_bytes));
+    root_page_id_.store(page_id);
+    reset_memtables_locked();
+    last_applied_slot_.store(0);
+    contiguous_slot_.store(0);
+    gc_floor_.store(0);
+    {
+        std::lock_guard<std::mutex> sl(slot_mutex_);
+        received_slots_.clear();
+        max_seen_slot_ = 0;
+    }
+    version_.fetch_add(1);
+    return Status::Ok();
+}
+
+EngineStats Crowtree::stats() const
+{
+    EngineStats s;
+    s.last_applied_slot         = last_applied_slot_.load();
+    s.contiguous_slot           = contiguous_slot_.load();
+    s.gc_watermark               = gc_floor_.load();
+    s.io_failed                  = io_failed_.load();
+    s.snapshot_pages_written    = snapshot_pages_written_.load();
+    s.snapshot_segments_written = snapshot_segments_written_.load();
+
+    BufferPool::Stats bp     = pool_->stats();
+    s.buffer_pool_hits       = bp.hits;
+    s.buffer_pool_misses     = bp.misses;
+    s.buffer_pool_evictions  = bp.evictions;
+    s.buffer_pool_writebacks = bp.writebacks;
+    s.buffer_pool_resident   = bp.resident;
+    s.buffer_pool_dirty      = bp.dirty;
+    s.buffer_pool_used       = bp.used;
+    s.buffer_pool_num_frames = bp.num_frames;
+    return s;
+}
+
 std::shared_ptr<Snapshot> Crowtree::snapshot_view()
 {
     // Materialize the L1 tree into an independent copy for a consistent

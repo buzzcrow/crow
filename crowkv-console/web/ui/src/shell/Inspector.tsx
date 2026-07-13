@@ -147,6 +147,19 @@ function DetailsTab({ entity, nodes, servers, stores, selectEntity, setViewMode 
   const mgmtPort = server?.mgmt_port ?? null;
   const grpcPort = server?.grpc_port ?? null;
 
+  // Logical Replica: dig the full ReplicaView (role/state/engine_healthy/
+  // crowtree_stats) out of `stores`, whose `groups[].replicas` carry it
+  // even though StoreView's declared type is summary-only (the runtime
+  // object is enriched -- same `as any` pattern used by buildFlow.ts/
+  // Sidebar.tsx for the same reason).
+  const replica =
+    entity.type === 'Replica' && entity.viewMode === ViewMode.Logical
+      ? (stores as any[])
+          .find((s) => String(s.store_id) === entity.parentIds?.store_id)
+          ?.groups?.find((g: any) => String(g.group_id) === entity.parentIds?.group_id)
+          ?.replicas?.find((r: any) => String(r.replica_id) === entity.id)
+      : undefined;
+
   const fields: { label: string; value: string }[] = [
     { label: 'Type', value: displayType },
     { label: 'ID', value: displayId },
@@ -156,6 +169,26 @@ function DetailsTab({ entity, nodes, servers, stores, selectEntity, setViewMode 
     ...Object.entries(entity.parentIds || {})
       .filter(([, v]) => v)
       .map(([k, v]) => ({ label: `Parent: ${k}`, value: v })),
+    ...(replica && typeof replica.engine_healthy === 'boolean'
+      ? [{ label: 'Engine Healthy', value: replica.engine_healthy ? 'Yes' : 'No' }]
+      : []),
+    ...(replica?.crowtree_stats
+      ? [
+          { label: 'Last Applied Slot', value: String(replica.crowtree_stats.last_applied_slot) },
+          { label: 'Contiguous Slot', value: String(replica.crowtree_stats.contiguous_slot) },
+          { label: 'GC Watermark', value: String(replica.crowtree_stats.gc_watermark) },
+          { label: 'Snapshot Pages Written', value: String(replica.crowtree_stats.snapshot_pages_written) },
+          { label: 'Snapshot Segments Written', value: String(replica.crowtree_stats.snapshot_segments_written) },
+          {
+            label: 'Buffer Pool Hit Rate',
+            value: bufferPoolHitRate(replica.crowtree_stats.buffer_pool_hits, replica.crowtree_stats.buffer_pool_misses),
+          },
+          {
+            label: 'Buffer Pool Resident/Used/Frames',
+            value: `${replica.crowtree_stats.buffer_pool_resident}/${replica.crowtree_stats.buffer_pool_used}/${replica.crowtree_stats.buffer_pool_num_frames}`,
+          },
+        ]
+      : []),
   ];
 
   // Single cross-jump per design §3.1.
@@ -185,6 +218,13 @@ function DetailsTab({ entity, nodes, servers, stores, selectEntity, setViewMode 
       )}
     </div>
   );
+}
+
+/** `hits / (hits + misses)` as a percentage string; `"n/a"` with no accesses yet. */
+function bufferPoolHitRate(hits: number, misses: number): string {
+  const total = hits + misses;
+  if (total === 0) return 'n/a';
+  return `${((hits / total) * 100).toFixed(1)}%`;
 }
 
 /** Build the single most useful cross-jump for the current selection. */

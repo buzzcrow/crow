@@ -3,26 +3,28 @@
 
 use super::op::Cell;
 use super::{Batch, KVEngine, KVFuture, Op};
-use crowtree_ffi::{AsyncCrowtree, BatchOp as CtBatchOp, Crowtree, CtError, GetOutcome};
+use crowtree_ffi::{AsyncCrowtree, BatchOp as CtBatchOp, Crowtree, CtError, GetOutcome, ScanOutcome};
 use std::sync::Arc;
 
 pub use crowtree_ffi::Options as CrowtreeOptions;
 pub use crowtree_ffi::PageStoreBackend as CrowtreeBackend;
+pub use crowtree_ffi::Stats as CrowtreeStats;
 
 /// `KVEngine` backed by [`crowtree_ffi::Crowtree`], via [`AsyncCrowtree`].
 ///
-/// `KVEngine::get`/`scan`/`apply` return [`KVFuture`]. `get` genuinely
-/// constructs [`KVFuture::Pending`] for a demand-load miss (plan-tree.md
-/// #11 Phase 6), via [`AsyncCrowtree::try_get`] -- a resident hit/miss
-/// (`try_get`'s `GetOutcome::Ready`, the overwhelmingly common case) still
-/// costs nothing beyond the enum tag, same as before this wiring landed.
-/// `scan`/`apply` stay [`KVFuture::ready`]-only: crowtree has no
-/// `ct_scan_async`/`ct_apply_*_async` C API yet (only `ct_get_async`/
+/// `KVEngine::get`/`scan`/`apply` return [`KVFuture`]. `get` and `scan` both
+/// genuinely construct [`KVFuture::Pending`] for a cold-leaf miss
+/// (plan-tree.md #11 Phase 6), via [`AsyncCrowtree::try_get`]/
+/// [`AsyncCrowtree::try_scan`] respectively -- a resident hit/miss
+/// (`GetOutcome`/`ScanOutcome`'s `Ready` variant, the overwhelmingly common
+/// case) still costs nothing beyond the enum tag, same as before this
+/// wiring landed. `apply` stays [`KVFuture::ready`]-only: crowtree has no
+/// `ct_apply_*_async` C API yet (only `ct_get_async`/`ct_scan_async`/
 /// `ct_flush_async`/`ct_snapshot_async` exist -- see
-/// `doc/design/design-crowtree-async.md` §4's table), so neither can
-/// genuinely wait on the reactor today; a synchronous crowtree call in
-/// their place is an unchanged, honest reflection of what the C API
-/// actually offers, not a shortcut taken here.
+/// `doc/design/design-crowtree-async.md` §4's table), so it can't
+/// genuinely wait on the reactor today; a synchronous crowtree call in its
+/// place is an unchanged, honest reflection of what the C API actually
+/// offers, not a shortcut taken here.
 ///
 /// **`iter_all`/`compare` caveat:** `get`/`scan` merge crowtree's in-memory
 /// (L0) and durable-tree (L1) state internally, so every `apply` is visible
@@ -58,12 +60,27 @@ impl CrowtreeEngine {
     pub fn handle(&self) -> Arc<Crowtree> {
         self.inner.handle()
     }
+
+    /// Batched diagnostics snapshot (doc/todo-sm.md Step 6): durable/GC
+    /// watermarks, `io_failed`, last-snapshot page/segment counts, and
+    /// buffer-pool occupancy/hit-rate counters. Engine-specific (like
+    /// [`Self::handle`]) rather than on the generic [`KVEngine`] trait --
+    /// `InMemKV` has no comparable internals to report. O(1); safe to poll
+    /// periodically for metrics/console display.
+    #[must_use]
+    pub fn stats(&self) -> CrowtreeStats {
+        self.inner.handle().stats()
+    }
 }
 
 impl KVEngine for CrowtreeEngine {
-    fn apply(&self, slot: u64, batch: &Batch) -> KVFuture<()> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn apply(&self, slot: u64, batch: &Batch) -> KVFuture<Result<(), String>> {
         if batch.ops.is_empty() {
-            return KVFuture::ready(());
+            return KVFuture::ready(Ok(()));
         }
         let ops: Vec<CtBatchOp<'_>> = batch
             .ops
@@ -80,15 +97,12 @@ impl KVEngine for CrowtreeEngine {
         // own resolved state, same contract InMemKV enforces itself, via one
         // atomic multi-key apply (ct_apply_batch) so a concurrent reader
         // never observes a partially-applied batch.
-        //
-        // Known gap: `apply` returns `KVFuture<()>`, always `Ready(())` today,
-        // so an I/O failure surfaced by `apply_batch` (e.g. a synchronous
-        // flush hitting a write error) is swallowed here; it's only
-        // observable out-of-band via `Crowtree::io_failed()`. A future
-        // fallible `KVEngine::apply` (returning a `Result`) would close this
-        // gap.
-        let _ = self.inner.handle().apply_batch(slot, &ops);
-        KVFuture::ready(())
+        let result = self
+            .inner
+            .handle()
+            .apply_batch(slot, &ops)
+            .map_err(|e| e.to_string());
+        KVFuture::ready(result)
     }
 
     fn get(&self, key: &[u8]) -> KVFuture<Option<(u64, Vec<u8>)>> {
@@ -104,14 +118,18 @@ impl KVEngine for CrowtreeEngine {
     }
 
     fn scan(&self, prefix: &[u8], limit: usize) -> KVFuture<(Vec<(Vec<u8>, u64, Vec<u8>)>, bool)> {
-        let result = match self.inner.handle().scan(prefix, limit) {
-            Ok((entries, truncated)) => (
-                entries.into_iter().map(|e| (e.key, e.slot, e.value)).collect(),
-                truncated,
-            ),
-            Err(_) => (Vec::new(), false),
-        };
-        KVFuture::ready(result)
+        // AsyncCrowtree::try_scan does the same fast-path check
+        // Crowtree::scan itself does, first -- a scan whose whole range is
+        // already resident resolves right here, no allocation beyond the
+        // returned entries, same as the old always-`Ready` body. Only a
+        // genuine cold-leaf miss reaches `Pending`, wrapping the
+        // reactor-driven future `try_scan` already built for us.
+        match self.inner.try_scan(prefix.to_vec(), limit) {
+            ScanOutcome::Ready(result) => KVFuture::ready(decode_scan_result(result)),
+            ScanOutcome::Pending(fut) => {
+                KVFuture::Pending(Box::pin(async move { decode_scan_result(fut.await) }))
+            }
+        }
     }
 
     fn iter_all(&self) -> Vec<(Vec<u8>, u64, Cell)> {
@@ -151,13 +169,30 @@ impl KVEngine for CrowtreeEngine {
     }
 
     fn clear(&self) {
-        // No native wipe/reset primitive exists in crowtree's C API today (no
-        // `ct_clear`). Not currently reachable from any production call site
-        // (`KVEngine::clear` has no caller yet in this codebase), so a
-        // deliberate panic here surfaces the gap immediately to whoever wires
-        // up the first real caller (e.g. snapshot-install reset) instead of
-        // silently doing the wrong thing for a file-backed engine.
-        unimplemented!("CrowtreeEngine::clear: crowtree has no native reset/wipe primitive yet")
+        // `Crowtree::clear` (crowtree/ffi) wraps the new `ct_clear` C API
+        // entry point, which duplicates the same wipe sequence (epoch-safe
+        // resident-page retire + fresh empty root + memtable/watermark
+        // reset) `Crowtree::install_snapshot` already performs on a live
+        // tree before loading imported entries -- not a bespoke reset.
+        // Not durable by itself: a caller that needs the wipe to survive a
+        // crash must still call `persist_snapshot`/`handle().flush()`
+        // afterward, same as `snapshot_import`'s own contract.
+        //
+        // `unwrap`: the only failure mode `Crowtree::clear` has is an
+        // invalid-argument on a null tree pointer, which can't happen
+        // through this safe wrapper -- matches this trait method's
+        // infallible signature.
+        self.inner.handle().clear().expect("CrowtreeEngine::clear should never fail through the safe FFI wrapper");
+    }
+
+    fn is_healthy(&self) -> bool {
+        // `io_failed()` is a latched flag set when a demand-load hit an I/O
+        // error or CRC mismatch on a committed page; it stays set until an
+        // explicit `clear_io_error()`, which nothing in this codebase calls
+        // yet -- so once tripped, this stays `false` for the engine's
+        // lifetime, which is the intended "fail out, don't silently retry"
+        // semantics for a durable-storage fault.
+        !self.inner.handle().io_failed()
     }
 
     fn resume_from_slot(&self) -> u64 {
@@ -213,6 +248,23 @@ impl KVEngine for CrowtreeEngine {
 
     // `compare` uses the trait's default implementation (diffs `iter_all()`
     // of both sides); no override needed.
+}
+
+/// Shared tail of [`CrowtreeEngine::scan`]'s `Ready`/`Pending` arms:
+/// converts a raw `crowtree_ffi::ScanEntry` result into the
+/// `KVEngine::scan` return shape, collapsing an error to an empty,
+/// non-truncated result (matching the prior always-synchronous body's
+/// error handling).
+fn decode_scan_result(
+    result: Result<(Vec<crowtree_ffi::ScanEntry>, bool), CtError>,
+) -> (Vec<(Vec<u8>, u64, Vec<u8>)>, bool) {
+    match result {
+        Ok((entries, truncated)) => (
+            entries.into_iter().map(|e| (e.key, e.slot, e.value)).collect(),
+            truncated,
+        ),
+        Err(_) => (Vec::new(), false),
+    }
 }
 
 /// Parse the `at_slot` field out of a crowtree portable-format snapshot

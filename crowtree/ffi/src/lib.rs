@@ -61,6 +61,25 @@ mod sys {
     }
 
     #[repr(C)]
+    #[derive(Default)]
+    pub struct ct_stats {
+        pub last_applied_slot: u64,
+        pub contiguous_slot: u64,
+        pub gc_watermark: u64,
+        pub io_failed: c_int,
+        pub snapshot_pages_written: u64,
+        pub snapshot_segments_written: u64,
+        pub buffer_pool_hits: u64,
+        pub buffer_pool_misses: u64,
+        pub buffer_pool_evictions: u64,
+        pub buffer_pool_writebacks: u64,
+        pub buffer_pool_resident: u32,
+        pub buffer_pool_dirty: u32,
+        pub buffer_pool_used: u32,
+        pub buffer_pool_num_frames: u32,
+    }
+
+    #[repr(C)]
     pub struct ct_options {
         pub path: *const c_char,
         pub iu_size: u32,
@@ -81,6 +100,8 @@ mod sys {
         pub fn ct_collect_garbage(t: *mut ct_tree, out_stats: *mut ct_gc_stats) -> c_int;
         pub fn ct_io_failed(t: *const ct_tree) -> c_int;
         pub fn ct_clear_io_error(t: *mut ct_tree);
+        pub fn ct_clear(t: *mut ct_tree) -> c_int;
+        pub fn ct_get_stats(t: *const ct_tree, out: *mut ct_stats);
         pub fn ct_apply_put(
             t: *mut ct_tree,
             slot: u64,
@@ -261,6 +282,27 @@ pub struct GcStats {
     pub tombstones_dropped: u64,
     pub pages_freed: u64,
     pub bytes_freed: u64,
+}
+
+/// Point-in-time diagnostics snapshot; see [`Crowtree::stats`]. Every field
+/// is O(1) on the C++ side (an already-tracked atomic counter or
+/// `BufferPool::stats()`), so this is safe to poll periodically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Stats {
+    pub last_applied_slot: u64,
+    pub contiguous_slot: u64,
+    pub gc_watermark: u64,
+    pub io_failed: bool,
+    pub snapshot_pages_written: u64,
+    pub snapshot_segments_written: u64,
+    pub buffer_pool_hits: u64,
+    pub buffer_pool_misses: u64,
+    pub buffer_pool_evictions: u64,
+    pub buffer_pool_writebacks: u64,
+    pub buffer_pool_resident: u32,
+    pub buffer_pool_dirty: u32,
+    pub buffer_pool_used: u32,
+    pub buffer_pool_num_frames: u32,
 }
 
 /// Encode `ops` into `ct_apply_batch`'s packed wire format:
@@ -451,6 +493,40 @@ impl Crowtree {
 
     pub fn clear_io_error(&self) {
         unsafe { sys::ct_clear_io_error(self.as_ptr()) }
+    }
+
+    /// Wipe every key/value back to a fresh, empty tree (the same wipe
+    /// `snapshot_import` performs before loading imported entries, exposed
+    /// standalone for a caller with nothing to load afterward -- e.g.
+    /// resetting a diverged/corrupted replica in place before a later
+    /// snapshot import). Not durable by itself -- an explicit `snapshot`/
+    /// `flush` afterward is required to persist the wipe to a file-backed
+    /// store.
+    pub fn clear(&self) -> Result<(), CtError> {
+        check(unsafe { sys::ct_clear(self.as_ptr()) })
+    }
+
+    /// Batched diagnostics snapshot (design-todo-sm.md Step 6). O(1) --
+    /// safe to poll periodically for metrics/console display.
+    pub fn stats(&self) -> Stats {
+        let mut raw = sys::ct_stats::default();
+        unsafe { sys::ct_get_stats(self.as_ptr(), &mut raw) };
+        Stats {
+            last_applied_slot: raw.last_applied_slot,
+            contiguous_slot: raw.contiguous_slot,
+            gc_watermark: raw.gc_watermark,
+            io_failed: raw.io_failed != 0,
+            snapshot_pages_written: raw.snapshot_pages_written,
+            snapshot_segments_written: raw.snapshot_segments_written,
+            buffer_pool_hits: raw.buffer_pool_hits,
+            buffer_pool_misses: raw.buffer_pool_misses,
+            buffer_pool_evictions: raw.buffer_pool_evictions,
+            buffer_pool_writebacks: raw.buffer_pool_writebacks,
+            buffer_pool_resident: raw.buffer_pool_resident,
+            buffer_pool_dirty: raw.buffer_pool_dirty,
+            buffer_pool_used: raw.buffer_pool_used,
+            buffer_pool_num_frames: raw.buffer_pool_num_frames,
+        }
     }
 
     /// Evict clean, delta-free resident leaf bases down to at most
@@ -1034,6 +1110,29 @@ impl AsyncCrowtree {
         let entries = decode_scan(&out.value, out.slot as usize)?;
         Ok((entries, out.found))
     }
+
+    /// Like [`Self::try_get`], but for [`Self::scan`]: never allocates or
+    /// boxes anything for the fast (all-leaves-resident) path -- only a
+    /// genuine cold-leaf miss (`ScanOutcome::Pending`) does. Same
+    /// motivation as `try_get`'s doc comment: lets a caller with its own
+    /// fast-path/slow-path return type mirror `ct_scan_async`'s own
+    /// C++-layer split one layer up instead of forcing a box on every call.
+    pub fn try_scan(&self, prefix: Vec<u8>, limit: usize) -> ScanOutcome {
+        let fut = unsafe { sys::ct_scan_async(self.inner.as_ptr(), prefix.as_ptr(), prefix.len(), limit) };
+        let mut guard = FutureGuard(fut);
+        if let Some(result) = try_poll_ct_future(&mut guard, FutureKind::Scan) {
+            return ScanOutcome::Ready(result.and_then(|out| {
+                let entries = decode_scan(&out.value, out.slot as usize)?;
+                Ok((entries, out.found))
+            }));
+        }
+        let tree = self.inner.clone();
+        ScanOutcome::Pending(Box::pin(async move {
+            let out = drive_ct_future(guard, &tree, FutureKind::Scan).await?;
+            let entries = decode_scan(&out.value, out.slot as usize)?;
+            Ok((entries, out.found))
+        }))
+    }
 }
 
 /// Result of [`AsyncCrowtree::try_get`] -- see its doc comment for why this
@@ -1046,4 +1145,17 @@ pub enum GetOutcome {
     /// (or, absent one, that will complete synchronously on the next poll
     /// regardless -- design §6.3): `.await` this to completion.
     Pending(Pin<Box<dyn Future<Output = Result<Option<(u64, Vec<u8>)>, CtError>> + Send>>),
+}
+
+/// Result of [`AsyncCrowtree::try_scan`] -- see its doc comment for why
+/// this exists instead of a single uniform `async fn`.
+#[allow(clippy::type_complexity)]
+pub enum ScanOutcome {
+    /// Resolved on the very first (and only) poll attempt -- no allocation
+    /// beyond the returned entries themselves.
+    Ready(Result<(Vec<ScanEntry>, bool), CtError>),
+    /// A genuine cold-leaf miss, already registered with the reactor (or,
+    /// absent one, that will complete synchronously on the next poll
+    /// regardless -- design §6.3): `.await` this to completion.
+    Pending(Pin<Box<dyn Future<Output = Result<(Vec<ScanEntry>, bool), CtError>> + Send>>),
 }

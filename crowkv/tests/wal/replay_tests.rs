@@ -336,7 +336,8 @@ async fn restore_from_replay_with_engine_resumes_from_last_applied_slot() {
     let engine = CrowtreeEngine::open(&CrowtreeOptions::default()).expect("open crowtree engine");
     engine
         .apply(1, &Batch::decode(&encode_put_payload(b"k1", b"v1")))
-        .into_ready();
+        .into_ready()
+        .unwrap();
     engine.handle().flush().expect("flush");
     assert_eq!(
         engine.handle().last_applied_slot(),
@@ -415,10 +416,12 @@ async fn restore_from_replay_with_engine_falls_back_when_resume_slot_has_no_acce
     let engine = CrowtreeEngine::open(&CrowtreeOptions::default()).expect("open crowtree engine");
     engine
         .apply(1, &Batch::decode(&encode_put_payload(b"phantom1", b"x")))
-        .into_ready();
+        .into_ready()
+        .unwrap();
     engine
         .apply(2, &Batch::decode(&encode_put_payload(b"phantom2", b"y")))
-        .into_ready();
+        .into_ready()
+        .unwrap();
     engine.handle().flush().expect("flush");
     assert_eq!(
         engine.handle().last_applied_slot(),

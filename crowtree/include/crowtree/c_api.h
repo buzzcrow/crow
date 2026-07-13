@@ -44,6 +44,28 @@ using ct_gc_stats = struct
     uint64_t bytes_freed;
 };
 
+// Batched diagnostics snapshot; mirrors crowtree::EngineStats. Every field
+// is O(1) (an already-tracked atomic counter or BufferPool::stats()), so
+// ct_get_stats is safe to poll periodically (metrics scrape / console
+// panel refresh) without touching the tree itself.
+using ct_stats = struct
+{
+    uint64_t last_applied_slot;
+    uint64_t contiguous_slot;
+    uint64_t gc_watermark;
+    int32_t  io_failed; // 0/1
+    uint64_t snapshot_pages_written;
+    uint64_t snapshot_segments_written;
+    uint64_t buffer_pool_hits;
+    uint64_t buffer_pool_misses;
+    uint64_t buffer_pool_evictions;
+    uint64_t buffer_pool_writebacks;
+    uint32_t buffer_pool_resident;
+    uint32_t buffer_pool_dirty;
+    uint32_t buffer_pool_used;
+    uint32_t buffer_pool_num_frames;
+};
+
 // Backend / engine configuration. `path` null or empty selects an in-memory
 // store. Zero numeric fields take engine defaults.
 using ct_options = struct
@@ -81,6 +103,18 @@ ct_status ct_collect_garbage(ct_tree *t, ct_gc_stats *out_stats);
 // on a committed page (the read degraded to a miss). ct_clear_io_error resets it.
 int32_t ct_io_failed(const ct_tree *t);
 void    ct_clear_io_error(ct_tree *t);
+
+// Wipe every key/value back to a fresh, empty tree (crowtree::Crowtree::clear;
+// the same wipe ct_snapshot_import_finish performs before loading imported
+// entries, exposed standalone for a caller with nothing to load afterward).
+// Not durable by itself -- call ct_snapshot separately to persist the wipe to
+// a file-backed store.
+ct_status ct_clear(ct_tree *t);
+
+// Batched diagnostics snapshot (crowtree::Crowtree::stats; see ct_stats's
+// own doc comment). `out` must be non-null; a no-op (out left untouched)
+// if `t` is null.
+void ct_get_stats(const ct_tree *t, ct_stats *out);
 
 // Evict clean, delta-free resident leaf bases down to at most
 // `max_resident_leaves` (crowtree::Crowtree::evict_clean_leaves; design §4.6).

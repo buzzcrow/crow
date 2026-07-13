@@ -82,6 +82,60 @@ pub struct KvStoreStatus {
     /// O(1) read of the in-memory map length. Cheap; safe to call from
     /// `/topology` per-request.
     pub key_count: u64,
+    /// [`crate::kv::KVEngine::is_healthy`] as of this call. `true` for
+    /// `InMemKV` always; for a `CrowtreeEngine`, `false` once a durable I/O
+    /// fault has latched (`Crowtree::io_failed`).
+    #[serde(default = "default_true")]
+    pub engine_healthy: bool,
+    /// [`crate::kv::CrowtreeEngine::stats`] as of this call, or `None` for
+    /// `InMemKV` (no comparable internals). Populated by downcasting
+    /// `PxLearner::engine()` via [`crate::kv::KVEngine::as_any`] --
+    /// doc/todo-sm.md Step 6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crowtree_stats: Option<CrowtreeStatsView>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Wire-serializable mirror of [`crate::kv::CrowtreeStats`] (that type lives
+/// in `crowtree_ffi` and isn't `Serialize`), for `/topology`/`/api/health`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CrowtreeStatsView {
+    pub last_applied_slot: u64,
+    pub contiguous_slot: u64,
+    pub gc_watermark: u64,
+    pub snapshot_pages_written: u64,
+    pub snapshot_segments_written: u64,
+    pub buffer_pool_hits: u64,
+    pub buffer_pool_misses: u64,
+    pub buffer_pool_evictions: u64,
+    pub buffer_pool_writebacks: u64,
+    pub buffer_pool_resident: u32,
+    pub buffer_pool_dirty: u32,
+    pub buffer_pool_used: u32,
+    pub buffer_pool_num_frames: u32,
+}
+
+impl From<crate::kv::CrowtreeStats> for CrowtreeStatsView {
+    fn from(s: crate::kv::CrowtreeStats) -> Self {
+        Self {
+            last_applied_slot: s.last_applied_slot,
+            contiguous_slot: s.contiguous_slot,
+            gc_watermark: s.gc_watermark,
+            snapshot_pages_written: s.snapshot_pages_written,
+            snapshot_segments_written: s.snapshot_segments_written,
+            buffer_pool_hits: s.buffer_pool_hits,
+            buffer_pool_misses: s.buffer_pool_misses,
+            buffer_pool_evictions: s.buffer_pool_evictions,
+            buffer_pool_writebacks: s.buffer_pool_writebacks,
+            buffer_pool_resident: s.buffer_pool_resident,
+            buffer_pool_dirty: s.buffer_pool_dirty,
+            buffer_pool_used: s.buffer_pool_used,
+            buffer_pool_num_frames: s.buffer_pool_num_frames,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]

@@ -25,7 +25,11 @@ impl InMemKV {
 }
 
 impl KVEngine for InMemKV {
-    fn apply(&self, slot: u64, batch: &Batch) -> KVFuture<()> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn apply(&self, slot: u64, batch: &Batch) -> KVFuture<Result<(), String>> {
         // Collapse intra-batch duplicates first: the last occurrence of a key
         // in batch order wins, so the per-key slot check below is made once
         // against the pre-batch state rather than once per occurrence (which
@@ -47,7 +51,8 @@ impl KVEngine for InMemKV {
             };
             map.insert(key.to_vec(), (slot, cell));
         }
-        KVFuture::ready(())
+        // No I/O path -- an in-memory apply can never fail.
+        KVFuture::ready(Ok(()))
     }
 
     fn get(&self, key: &[u8]) -> KVFuture<Option<(u64, Vec<u8>)>> {

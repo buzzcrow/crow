@@ -22,7 +22,7 @@ mod kv_future;
 mod mem_kv;
 mod op;
 
-pub use crowtree_engine::{CrowtreeBackend, CrowtreeEngine, CrowtreeOptions};
+pub use crowtree_engine::{CrowtreeBackend, CrowtreeEngine, CrowtreeOptions, CrowtreeStats};
 pub use kv_engine::KVEngine;
 pub use kv_future::KVFuture;
 pub use mem_kv::InMemKV;

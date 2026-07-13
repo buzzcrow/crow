@@ -62,6 +62,38 @@ pub struct LocalReplicaView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvStoreView {
     pub key_count: u64,
+    /// Mirrors `crowkv`'s `KvStoreStatus::engine_healthy` (doc/todo-sm.md
+    /// Step 2/6). `true` for `InMemKV` always; `false` once a
+    /// `CrowtreeEngine`'s durable I/O fault has latched.
+    #[serde(default = "default_engine_healthy")]
+    pub engine_healthy: bool,
+    /// Mirrors `crowkv`'s `KvStoreStatus::crowtree_stats`; `None` when the
+    /// group's engine isn't `CrowtreeEngine` (e.g. `InMemKV`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crowtree_stats: Option<CrowtreeStatsSnapshot>,
+}
+
+fn default_engine_healthy() -> bool {
+    true
+}
+
+/// Mirrors `crowkv`'s `CrowtreeStatsView` (doc/todo-sm.md Step 6) --
+/// batched crowtree engine diagnostics for a single group's local replica.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CrowtreeStatsSnapshot {
+    pub last_applied_slot: u64,
+    pub contiguous_slot: u64,
+    pub gc_watermark: u64,
+    pub snapshot_pages_written: u64,
+    pub snapshot_segments_written: u64,
+    pub buffer_pool_hits: u64,
+    pub buffer_pool_misses: u64,
+    pub buffer_pool_evictions: u64,
+    pub buffer_pool_writebacks: u64,
+    pub buffer_pool_resident: u32,
+    pub buffer_pool_dirty: u32,
+    pub buffer_pool_used: u32,
+    pub buffer_pool_num_frames: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

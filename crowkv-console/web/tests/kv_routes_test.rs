@@ -248,6 +248,8 @@ async fn kv_get_returns_502_when_leader_unreachable() {
                     replica_id: 1,
                     role: ReplicaRole::Leader,
                     state: ReplicaState::Running,
+                    engine_healthy: true,
+                    crowtree_stats: None,
                 },
                 remotes: vec![],
                 leader_hint: Some(1),

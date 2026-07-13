@@ -178,6 +178,81 @@ TEST(Persist, CheckpointThenReopenRestoresKeys)
     }
 }
 
+// doc/todo-sm.md G3: clear() must wipe every key and reset watermarks back
+// to a fresh empty tree, in-memory only (no persist() call here) -- proving
+// the wipe itself, independent of durability.
+TEST(Persist, ClearWipesLiveTree)
+{
+    MemPageStore store(1);
+    Options      opt;
+    opt.page_store = &store;
+    Crowtree     t(opt);
+
+    for (int i = 0; i < 20; ++i) {
+        ASSERT_TRUE(t.apply(i + 1, put_one(make_key(i), "v" + std::to_string(i))).ok());
+    }
+    ASSERT_TRUE(t.flush().ok());
+    EXPECT_EQ(t.last_applied_slot(), 20U);
+
+    ASSERT_TRUE(t.clear().ok());
+
+    EXPECT_EQ(t.last_applied_slot(), 0U);
+    EXPECT_EQ(t.contiguous_slot(), 0U);
+    for (int i = 0; i < 20; ++i) {
+        std::string v;
+        uint64_t    s;
+        EXPECT_FALSE(t.get(Slice(make_key(i)), &s, &v)) << "key " << make_key(i) << " should be gone after clear()";
+    }
+
+    // The wiped tree is a genuinely fresh tree, not just "empty of these
+    // particular keys": re-applying a slot number already seen before the
+    // wipe must succeed (received_slots_/max_seen_slot_ reset too), and a
+    // brand-new key is visible immediately.
+    ASSERT_TRUE(t.apply(1, put_one("after-clear", "x")).ok());
+    std::string v;
+    uint64_t    s;
+    ASSERT_TRUE(t.get(Slice("after-clear"), &s, &v));
+    EXPECT_EQ(v, "x");
+    EXPECT_EQ(s, 1U);
+}
+
+// clear() alone is not durable (matching install_snapshot's own contract) --
+// only an explicit flush()+snapshot() after it persists the wipe. This is
+// the crash-safety-relevant half of G3: a close + reopen after that persist
+// must not resurrect the pre-clear keys.
+TEST(Persist, ClearThenSnapshotReopenIsEmpty)
+{
+    MemPageStore store(1);
+    Options      opt;
+    opt.page_store = &store;
+
+    {
+        Crowtree t(opt);
+        for (int i = 0; i < 20; ++i) {
+            ASSERT_TRUE(t.apply(i + 1, put_one(make_key(i), "v" + std::to_string(i))).ok());
+        }
+        ASSERT_TRUE(t.flush().ok());
+        uint64_t durable = 0;
+        ASSERT_TRUE(t.snapshot(&durable).ok());
+        EXPECT_EQ(durable, 20U);
+
+        ASSERT_TRUE(t.clear().ok());
+        durable = 123; // sentinel; snapshot() on an empty tree must overwrite it with 0
+        ASSERT_TRUE(t.snapshot(&durable).ok());
+        EXPECT_EQ(durable, 0U);
+    }
+
+    std::unique_ptr<Crowtree> t2;
+    ASSERT_TRUE(Crowtree::open(opt, &t2).ok());
+    EXPECT_EQ(t2->last_applied_slot(), 0U);
+    for (int i = 0; i < 20; ++i) {
+        std::string v;
+        uint64_t    s;
+        EXPECT_FALSE(t2->get(Slice(make_key(i)), &s, &v))
+            << "key " << make_key(i) << " must not survive clear() + snapshot() + reopen";
+    }
+}
+
 TEST(Persist, MultiLevelTreeSurvivesAndComparesEqual)
 {
     MemPageStore store(1);

@@ -12,6 +12,7 @@ Satisfies: [`requirement.md`](../requirement.md) §15.2
 - [3. CLI Parsing](#3-cli-parsing)
   - [3.1 Port Pool Parser](#31-port-pool-parser)
   - [3.2 Argument Validation](#32-argument-validation)
+  - [3.3 KV Engine Selection](#33-kv-engine-selection)
 - [4. Server Architecture](#4-server-architecture)
   - [4.1 Component Diagram](#41-component-diagram)
   - [4.2 Shared State](#42-shared-state)
@@ -82,6 +83,14 @@ On startup:
 1. Parse `--ports` (if provided) into the port pool.
 2. If `--stores` > port pool size and ports were explicitly provided, exit with error.
 3. If `--ports` is omitted, generate a pool of `--stores` zeros (OS-assigned).
+
+### 3.3 KV Engine Selection
+
+`--kv-engine` chooses the `crowkv::kv::KVEngine` implementation every group's learner is created with, applied consistently at both the CLI bootstrap path (`main.rs`) and the runtime `POST /stores/:sid/groups` path (`mgmt_api.rs::add_group`) via `KvStoreRegistry::kv_engine`:
+- `crowtree` (default) — durable, file-backed; each group gets its own file under `--data-root` (default: sibling of `--wal-root` named `crowtree`), recovered by replaying the WAL through it on restart.
+- `memory` — in-memory, non-durable `InMemKV`; explicit low-durability/test/dev choice.
+
+`--kv-backend` (`file` default, or `block` for `O_DIRECT` via `BlockPageStore`) only applies when `--kv-engine crowtree` is selected.
 
 ## 4. Server Architecture
 

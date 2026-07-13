@@ -153,6 +153,32 @@ struct GcStats
     uint64_t bytes_freed        = 0; // logical key+cell bytes of the dropped tombstones
 };
 
+// Point-in-time diagnostics snapshot (doc/todo-sm.md Step 6): batches every
+// cheap (O(1)) internal counter worth exposing to an operator into one
+// struct, so a caller/FFI/console poll costs one call instead of many
+// small ones. Deliberately excludes anything that requires walking the
+// tree (height()/leaf_count()) or the full keyspace (live key count,
+// already exposed separately via KVEngine::live_key_count) -- every field
+// here is already an atomic counter or BufferPool::stats(), also O(1).
+struct EngineStats
+{
+    uint64_t last_applied_slot         = 0; // durable watermark (see last_applied_slot())
+    uint64_t contiguous_slot           = 0; // gap-free-applied watermark (see contiguous_slot())
+    uint64_t gc_watermark              = 0; // min(snapshot_slot, safe_slot) (see gc_watermark())
+    bool     io_failed                 = false; // latched media fault (see io_failed())
+    uint64_t snapshot_pages_written    = 0; // last snapshot()'s dirty base pages written
+    uint64_t snapshot_segments_written = 0; // last snapshot()'s dirty mapping segments written
+    // BufferPool::Stats as of this call -- see buffer_pool.h.
+    uint64_t buffer_pool_hits          = 0;
+    uint64_t buffer_pool_misses        = 0;
+    uint64_t buffer_pool_evictions     = 0;
+    uint64_t buffer_pool_writebacks    = 0;
+    uint32_t buffer_pool_resident      = 0;
+    uint32_t buffer_pool_dirty         = 0;
+    uint32_t buffer_pool_used          = 0;
+    uint32_t buffer_pool_num_frames    = 0;
+};
+
 // One durable blob to write at a fixed offset, computed ahead of time by
 // prepare_snapshot_locked() (persist.cpp) so the actual store->write_at()/
 // submit_write() call is a pure I/O op with no further encoding logic --
@@ -479,6 +505,17 @@ class Crowtree
     Status collect_native_frames(std::vector<NativeFrame> *out, uint64_t *out_root_page_id, uint64_t *out_at_slot);
     Status install_snapshot_native(std::vector<NativeFrame> frames, uint64_t root_page_id, uint64_t at_slot);
 
+    // Wipe every key/value and reset watermarks back to a fresh, empty tree
+    // (the same wipe `install_snapshot` performs on the live tree before
+    // loading imported entries, factored out for a caller that wants an
+    // empty tree with nothing to load afterward -- e.g. resetting a
+    // diverged/corrupted replica in place before a snapshot import).
+    // Serialized against other writers by write_mutex_; concurrent
+    // lock-free readers are safe (#13), same as `install_snapshot`. Not
+    // durable by itself -- an explicit `snapshot()`/`flush()` afterward is
+    // required to persist the wipe to a file-backed store.
+    Status clear();
+
     // Reassemble a large value spilled into an overflow chain headed at `head_page_id`
     // (PT11). Walks the chain via resident under the caller's read epoch guard.
     [[nodiscard]] std::string assemble_overflow_value(uint64_t head_page_id, uint64_t total_len) const;
@@ -557,6 +594,12 @@ class Crowtree
     {
         return snapshot_segments_written_.load();
     }
+
+    // Batched diagnostics snapshot -- see EngineStats. O(1): every field
+    // reads an already-tracked atomic counter or BufferPool::stats() (also
+    // O(1)), so this is safe to poll periodically (e.g. from a metrics
+    // scrape or console panel refresh).
+    [[nodiscard]] EngineStats stats() const;
 
     // Evict clean, delta-free resident leaf bases down to at most
     // `max_resident_leaves`, re-tagging their slots unloaded and epoch-retiring the

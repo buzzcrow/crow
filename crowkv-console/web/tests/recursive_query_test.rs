@@ -158,6 +158,8 @@ async fn spawn_web_with_seeded_physical_tree() -> SocketAddr {
                     replica_id: 100,
                     role: ReplicaRole::Leader,
                     state: ReplicaState::Running,
+                    engine_healthy: true,
+                    crowtree_stats: None,
                 },
                 remotes: vec![],
                 leader_hint: Some(100),

@@ -7,7 +7,7 @@ use crate::cluster::replica::{
     HeartbeatReply, HeartbeatRequestPayload, PxReplicaError, Replica, ReplicaHandler, StepDownReply,
     StepDownRequestPayload, VoteReply, VoteRequestPayload,
 };
-use crate::cluster::status::{KvStoreStatus, ReplicaStatus, StatusLevel};
+use crate::cluster::status::{CrowtreeStatsView, KvStoreStatus, ReplicaStatus, StatusLevel};
 use crate::common::metrics::{ElectionMetrics, ElectionMetricsSnapshot};
 use crate::common::report::OperationReport;
 use crate::common::time::{anchor_ms_to_instant, instant_to_anchor_ms};
@@ -936,6 +936,20 @@ impl PxLocalReplica {
             status = StatusLevel::Unhealthy;
             messages.push(format!("local replica {} has been shut down", self.id));
         }
+        let engine_healthy = self.learner.engine().is_healthy();
+        if !engine_healthy {
+            status = StatusLevel::Unhealthy;
+            messages.push(format!(
+                "local replica {}'s KV engine reports unhealthy (durable I/O fault latched)",
+                self.id
+            ));
+        }
+        let crowtree_stats = self
+            .learner
+            .engine()
+            .as_any()
+            .downcast_ref::<crate::kv::CrowtreeEngine>()
+            .map(|e| CrowtreeStatsView::from(e.stats()));
         let role = match self.role() {
             PxLocalReplicaRole::Leader => "leader",
             PxLocalReplicaRole::Follower => "follower",
@@ -950,6 +964,8 @@ impl PxLocalReplica {
             messages,
             kv_store: KvStoreStatus {
                 key_count: self.learner.live_key_count() as u64,
+                engine_healthy,
+                crowtree_stats,
             },
         }
     }

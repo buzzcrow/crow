@@ -38,7 +38,7 @@ use std::time::Duration;
 
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::warn;
+use tracing::{error, warn};
 
 use super::group::PxGroup;
 use crate::wal::gc::run_gc_with_watermark;
@@ -87,6 +87,21 @@ async fn maintenance_loop(group: Weak<PxGroup>, tick: Duration, cancel: Cancella
 /// single deterministic pass without waiting on the periodic loop's timer.
 pub(crate) async fn run_pass(group: &PxGroup) {
     let engine = group.local_replica().learner.engine();
+    if !engine.is_healthy() {
+        // No automatic step-out trigger exists yet (`doc/todo-sm.md` G2) --
+        // this is the observability half of that gap: a persistently
+        // unhealthy engine is now at least loudly, repeatedly logged on
+        // every maintenance tick instead of being silently invisible
+        // outside of an explicit health-check call.
+        error!(
+            group_id = group.group_id(),
+            replica_id = group.local_replica().id,
+            "engine maintenance: KV engine reports unhealthy (durable I/O fault latched); \
+             next step: this replica's local state may be missing durably-committed writes -- \
+             investigate the underlying storage and consider removing this replica from the \
+             group via the admin API"
+        );
+    }
     let engine_snapshot_at = engine.persist_snapshot();
 
     let safe_slot = group.group_safe_slot();

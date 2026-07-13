@@ -15,7 +15,11 @@ use std::sync::Mutex;
 /// so the two paths can never disagree on which engine a fresh group gets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KvEngineKind {
-    /// In-memory, non-durable `InMemKV` (default).
+    /// In-memory, non-durable `InMemKV`. No longer the `--kv-engine` CLI
+    /// default (flipped to `Crowtree` in `doc/todo-sm.md` Step 5) — kept as
+    /// the explicit low-durability/test/dev choice, and as the placeholder
+    /// value here before `KvStoreRegistry::with_kv_engine` applies the
+    /// CLI-parsed choice.
     Memory,
     /// Durable crowtree file under the registry's `data_root`, one file per
     /// `(store_id, group_id)` — see `startup::store_crowtree_path`.

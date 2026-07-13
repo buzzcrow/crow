@@ -15,6 +15,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::snapshot::CrowtreeStatsSnapshot;
+
 pub type RackId = String;
 pub type NodeId = String;
 pub type StoreId = u64;
@@ -146,6 +148,18 @@ pub struct LocalReplicaInfo {
     pub replica_id: ReplicaId,
     pub role: ReplicaRole,
     pub state: ReplicaState,
+    /// Mirrors `crowkv`'s `KvStoreStatus::engine_healthy` (doc/todo-sm.md
+    /// Step 2/6), threaded through from `crate::snapshot::KvStoreView` by
+    /// `crate::monitor::legacy_topology_to_node_stores`.
+    #[serde(default = "default_engine_healthy")]
+    pub engine_healthy: bool,
+    /// Mirrors `KvStoreStatus::crowtree_stats`; `None` for `InMemKV`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crowtree_stats: Option<CrowtreeStatsSnapshot>,
+}
+
+fn default_engine_healthy() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,6 +270,13 @@ pub struct ReplicaView {
     pub node_id: NodeId,
     pub role: ReplicaRole,
     pub state: ReplicaState,
+    /// See [`LocalReplicaInfo::engine_healthy`]; forwarded verbatim by
+    /// [`crate::monitor::Monitor::resolve_group`].
+    #[serde(default = "default_engine_healthy")]
+    pub engine_healthy: bool,
+    /// See [`LocalReplicaInfo::crowtree_stats`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crowtree_stats: Option<CrowtreeStatsSnapshot>,
 }
 
 #[cfg(test)]
@@ -291,6 +312,8 @@ mod tests {
                 node_id: "n1".into(),
                 role: ReplicaRole::Leader,
                 state: ReplicaState::Running,
+                engine_healthy: true,
+                crowtree_stats: None,
             }],
             state: GroupHealth::Healthy,
         };

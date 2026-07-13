@@ -45,6 +45,19 @@ fn snapshot_export_import_round_trip() {
     conformance::snapshot_export_import_round_trip(&open(), &open());
 }
 
+/// No FFI fault-injection hook exists yet to genuinely trip
+/// `Crowtree::io_failed()` from Rust (the C++ side's own fault-injection
+/// coverage lives in `crowtree/tests/integration/crash_recovery_test.cpp`),
+/// so this only guards the clean-state default -- that `is_healthy` is
+/// wired to a real call, not hardcoded `true` on `CrowtreeEngine` the way
+/// the trait default is.
+#[test]
+fn is_healthy_is_true_on_a_freshly_opened_engine() {
+    use crowkv::kv::KVEngine;
+
+    assert!(open().is_healthy());
+}
+
 /// Regression guard (`design-crowkv-async-kvengine.md` §6): an in-memory
 /// `CrowtreeEngine` (`opt.path: None`, no page store, no reactor -- see
 /// `CrowtreeOptions::default`) has no I/O path *at all*, so `get`/`scan`/
@@ -85,7 +98,8 @@ async fn get_constructs_pending_for_genuine_demand_load_miss() {
     .expect("open durable engine");
 
     e.apply(1, &conformance::batch(vec![conformance::put(b"k", b"v")]))
-        .into_ready();
+        .into_ready()
+        .unwrap();
     e.handle().flush().expect("flush");
     e.handle().snapshot().expect("snapshot");
     let evicted = e.handle().evict_clean_leaves(0);
@@ -100,6 +114,128 @@ async fn get_constructs_pending_for_genuine_demand_load_miss() {
             assert_eq!(fut.await, Some((1, b"v".to_vec())));
         }
     }
+}
+
+/// Same regression guard as
+/// [`get_constructs_pending_for_genuine_demand_load_miss`], for `scan`:
+/// `CrowtreeEngine::scan` now goes through `AsyncCrowtree::try_scan`
+/// (`doc/todo-sm.md` G4) instead of the old always-synchronous
+/// `Crowtree::scan`, so a scan over an evicted leaf must genuinely
+/// construct `KVFuture::Pending` too, not just `get`.
+#[tokio::test]
+async fn scan_constructs_pending_for_genuine_demand_load_miss() {
+    use crowkv::kv::{KVEngine, KVFuture};
+
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    let e = CrowtreeEngine::open(&CrowtreeOptions {
+        path: Some(tmp.path().to_string_lossy().into_owned()),
+        ..Default::default()
+    })
+    .expect("open durable engine");
+
+    e.apply(1, &conformance::batch(vec![conformance::put(b"k", b"v")]))
+        .into_ready()
+        .unwrap();
+    e.handle().flush().expect("flush");
+    e.handle().snapshot().expect("snapshot");
+    let evicted = e.handle().evict_clean_leaves(0);
+    assert!(
+        evicted > 0,
+        "snapshot should have made the leaf clean and evictable"
+    );
+
+    match e.scan(b"", 0) {
+        KVFuture::Ready(_) => panic!("expected a genuine Pending after evicting the resident leaf"),
+        KVFuture::Pending(fut) => {
+            let (items, truncated) = fut.await;
+            assert_eq!(items, vec![(b"k".to_vec(), 1, b"v".to_vec())]);
+            assert!(!truncated);
+        }
+    }
+}
+
+/// `KVEngine::clear` (`doc/todo-sm.md` G3): mirrors `mem_kv_test.rs`'s
+/// `clear_drops_all_state` for the crowtree-backed engine now that
+/// `CrowtreeEngine::clear` is wired to `Crowtree::clear` instead of
+/// panicking.
+#[test]
+fn clear_drops_all_state() {
+    use crowkv::kv::KVEngine;
+
+    let e = open();
+    e.apply(1, &conformance::batch(vec![conformance::put(b"k", b"v")]))
+        .into_ready()
+        .unwrap();
+    e.clear();
+    assert_eq!(e.get(b"k").into_ready(), None);
+    assert_eq!(e.live_key_count(), 0);
+    assert!(e.iter_all().is_empty());
+}
+
+/// `clear()` must reset per-slot bookkeeping (`received_slots_`/
+/// `max_seen_slot_`), not just the key/value data -- otherwise re-applying
+/// a slot number that was already seen before the wipe (e.g. slot 1, on a
+/// freshly-reset replica about to re-learn its whole log from scratch)
+/// would be silently ignored by `apply`'s idempotency check, even though
+/// this is logically a brand-new tree.
+#[test]
+fn apply_after_clear_accepts_the_same_slot_number_again() {
+    use crowkv::kv::KVEngine;
+
+    let e = open();
+    e.apply(1, &conformance::batch(vec![conformance::put(b"k", b"v1")]))
+        .into_ready()
+        .unwrap();
+    e.clear();
+    e.apply(1, &conformance::batch(vec![conformance::put(b"k", b"v2")]))
+        .into_ready()
+        .unwrap();
+    assert_eq!(e.get(b"k").into_ready(), Some((1, b"v2".to_vec())));
+}
+
+/// Crash-safety-adjacent check for a *durable* (file-backed) engine:
+/// `clear()` alone is not durable (matching `snapshot_import`'s own
+/// contract), but once followed by an explicit `persist_snapshot`, the
+/// wipe must survive a close + reopen -- proving `clear()` actually
+/// updates the on-disk commit anchor via the normal snapshot path, not
+/// just the in-memory tree.
+#[tokio::test]
+async fn clear_then_persist_survives_reopen() {
+    use crowkv::kv::KVEngine;
+
+    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    let opt = CrowtreeOptions {
+        path: Some(tmp.path().to_string_lossy().into_owned()),
+        ..Default::default()
+    };
+
+    let e = CrowtreeEngine::open(&opt).expect("open durable engine");
+    e.apply(1, &conformance::batch(vec![conformance::put(b"k", b"v")]))
+        .into_ready()
+        .unwrap();
+    assert_eq!(e.persist_snapshot(), 1, "sanity: pre-clear state persisted");
+    e.clear();
+    assert_eq!(
+        e.persist_snapshot(),
+        0,
+        "an empty tree has nothing applied to report as its resume floor"
+    );
+    drop(e);
+
+    let reopened = CrowtreeEngine::open(&opt).expect("reopen durable engine");
+    // `.await`, not `.into_ready()`: a just-reopened durable tree's root is
+    // installed as an *unloaded* descriptor (lazy recovery -- see
+    // `Crowtree::open`'s doc comment in persist.cpp), so this first read
+    // may genuinely demand-load it, constructing `KVFuture::Pending` --
+    // exactly like `get_constructs_pending_for_genuine_demand_load_miss`,
+    // just incidentally rather than via a forced eviction.
+    assert_eq!(
+        reopened.get(b"k").await,
+        None,
+        "clear() + persist must not resurrect the pre-clear key after reopen"
+    );
+    assert_eq!(reopened.live_key_count(), 0);
+    assert_eq!(reopened.resume_from_slot(), 0);
 }
 
 /// Cross-engine parity (design's strongest correctness gate): apply the same
@@ -120,8 +256,8 @@ fn parity_with_in_mem_kv_after_identical_op_stream() {
             let value = format!("v{round}").into_bytes();
             conformance::batch(vec![conformance::put(&key, &value)])
         };
-        mem.apply(slot, &b).into_ready();
-        ct.apply(slot, &b).into_ready();
+        mem.apply(slot, &b).into_ready().unwrap();
+        ct.apply(slot, &b).into_ready().unwrap();
         assert!(mem.compare(&ct).is_empty(), "diverged after round {round}");
     }
 }

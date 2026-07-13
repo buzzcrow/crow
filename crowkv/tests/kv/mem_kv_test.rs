@@ -63,9 +63,15 @@ fn snapshot_export_import_round_trip() {
 }
 
 #[test]
+fn is_healthy_defaults_to_true() {
+    let e = InMemKV::new();
+    assert!(e.is_healthy(), "InMemKV has no I/O path to fail");
+}
+
+#[test]
 fn clear_drops_all_state() {
     let e = InMemKV::new();
-    e.apply(1, &batch(vec![put(b"k", b"v")])).into_ready();
+    e.apply(1, &batch(vec![put(b"k", b"v")])).into_ready().unwrap();
     e.clear();
     assert_eq!(e.get(b"k").into_ready(), None);
     assert_eq!(e.live_key_count(), 0);
