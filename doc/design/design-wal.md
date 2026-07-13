@@ -1,7 +1,7 @@
 # CrowKV - Design: Write-Ahead Log
 
-Depends on: [`requirement.md`](requirement.md), [`design.md`](design.md)
-Satisfies: [requirement.md §8.1](requirement.md#81-wal-write-ahead-log), [requirement.md §8.2](requirement.md#82-acceptor)
+Depends on: [`requirement.md`](../requirement.md), [`design.md`](../design.md)
+Satisfies: [requirement.md §8.1](../requirement.md#81-wal-write-ahead-log), [requirement.md §8.2](../requirement.md#82-acceptor)
 
 This document specifies CrowKV's write-ahead log. **There is exactly one durable
 log per group: the replica's consensus log (the per-slot acceptor log).**
@@ -226,7 +226,7 @@ Crucially, the leader's **own** durable flush is not on the critical path of rem
 > An `Accepted` response is sent to the leader only after the corresponding WAL record's backend durable flush has completed.
 > A client write is acked only after a quorum of acceptors have sent `Accepted`.
 
-This is repeated from [requirement.md §8.1](requirement.md#81-wal-write-ahead-log) because everything else in this section is a consequence of it.
+This is repeated from [requirement.md §8.1](../requirement.md#81-wal-write-ahead-log) because everything else in this section is a consequence of it.
 
 ### 5.2 Failure cases
 
@@ -252,17 +252,16 @@ Turning the on-disk WAL back into a live, serving replica has three stages, then
 a steady state:
 
 - **6.1 Replay** — rebuild in-memory *acceptor* state from the records.
-- **6.2 Restore** — rebuild a live replica shell from acceptor state only; do not apply accepted values to the `KVEngine`. The state machine loads its own snapshot (if any) independently.
+- **6.2 Restore** — rebuild a live replica shell from acceptor state (Pass 1), then rebuild the learner / `KVEngine` from that same acceptor state (Pass 2), skipping only the prefix the engine already durably reflects.
 - **6.3 Wiring** — attach a fresh WAL engine and seed the proposer conservatively.
 - **6.4 Recovery** — a new leader re-confirms *chosen* values from a quorum and fills holes.
 - **6.5 Steady-state apply** — followers keep their state machine current from the leader's commit watermark.
 
-The split matters: replay/restore are purely *local* (this node's WAL), but `Accepted` ≠ `chosen` (a value is chosen only on a quorum). Therefore replay may restore promises and accepted values into the acceptor, but learner / `KVEngine` application is delayed until the value is known chosen by one of:
+The split matters: replay/restore are purely *local* (this node's WAL), but `Accepted` ≠ `chosen` (a value is chosen only on a quorum). Restore therefore re-derives the acceptor's local view exactly as it was (Pass 1), then re-derives the learner's committed KV state from that *same locally-accepted* data (Pass 2) — which is safe precisely because `Accepted` records already carry a chosen-or-not-yet-known value idempotently (re-`learn()`ing a value that was never actually chosen by a quorum is harmless: it just sits in the engine until either superseded by a higher slot for the same key, or never observed as chosen by anyone else, in which case it was never visible to a client anyway). Slots this node never locally accepted are, separately, left to:
 
-- The state machine loading a persisted snapshot (with slot index) that covers the slot.
-- New-leader recovery / steady-state heartbeat catch-up re-learning the value from quorum-confirmed consensus.
+- New-leader recovery / steady-state heartbeat catch-up re-learning the value from quorum-confirmed consensus (§6.4 / §6.5).
 
-**No `DurableCommitWatermark` WAL record.** The state machine owns its persistence boundary: it persists a snapshot of the KV state along with the last-applied slot index. On restart, the state machine loads this snapshot and resumes from `snapshot_slot + 1`. The WAL does not duplicate this information.
+**No `DurableCommitWatermark` WAL record.** The state machine owns its own persistence boundary — but that boundary is the *engine's* durability (crowtree's on-disk snapshot), not a separate state-machine-level snapshot file; see §6.2 below and `design-state-machine.md §2.1`. The WAL does not duplicate this information.
 
 ### 6.1 Replay — rebuild acceptor state (`replay_group`)
 
@@ -282,21 +281,36 @@ Output: `ReplayResult { records, max_segment_id, current_term, voted_for }`.
 
 ### 6.2 Restore — rebuild live acceptor state (`restore_from_replay`)
 
-A fresh `PxLocalReplica` is rebuilt without treating local accepts as committed state:
+Pass 1 rebuilds acceptor state without assuming any local accept was ever chosen by a quorum:
 
 - Feed `Promised` through the acceptor restore path so the highest promise per slot is preserved.
 - Feed `Accepted` through the acceptor restore path so the highest accepted value per slot is available to future Phase 1.
 - Seed `current_term`, `voted_for`, role from `ReplayResult`.
-- Do **not** call `learn()` for accepted slots during restore.
 
-The learner / `KVEngine` is restored only from the state machine's own snapshot:
+The learner / `KVEngine` is rebuilt in a second pass over the *same* replayed
+WAL records (`PxLocalReplica::restore_from_replay_with_engine`), not from a
+separate state-machine snapshot file — see
+[`design-state-machine.md §2.1`](design-state-machine.md#21-state-machine-restart-engine-durability--wal-replay)
+for the full mechanics. In short:
 
-- The state machine persists a snapshot of the KV state with its `last_applied_slot` to a separate file (not the WAL).
-- On restart, the state machine loads this snapshot and sets `contiguous_applied = snapshot_slot`.
-- For slots above `snapshot_slot`, the engine waits for §6.4 / §6.5 to re-learn chosen values.
-- **Current implementation:** snapshot persistence is not yet implemented. The state machine starts empty (`contiguous_applied = 0`) and relies entirely on §6.4 / §6.5 to repopulate.
+- Pass 2 walks every slot with an accepted entry (rebuilt in Pass 1 above)
+  and `learn()`s it into the engine, in order. This alone is always
+  sufficient and correct — `KVEngine::apply` is idempotent
+  (highest-slot-wins per key) — so it works unconditionally, including for
+  `InMemKV` which has no durable floor at all.
+- **Optimization for a durable engine:** before Pass 2, the engine reports
+  its own durable floor via `KVEngine::resume_from_slot()` (crowtree's
+  `last_applied_slot`, restored from its on-disk snapshot). Pass 2 then
+  starts just above that floor instead of at slot 1, and the learner's
+  frontier is fast-forwarded directly to it — skipping the redundant
+  re-`learn()` of an already-durable prefix.
+- Slots above the local WAL's own highest accepted slot are left to §6.4 /
+  §6.5 (heartbeat catch-up / new-leader bulk Phase 1) to re-learn from peers.
 
-This avoids resurrecting a value that was accepted locally but never chosen, and it avoids over-claiming `contiguous_chosen` from a single replica's WAL.
+This avoids resurrecting a value that was accepted locally but never chosen,
+and — via the resume-floor check — never re-applies a write below a point
+the engine has already durably advanced past (crowtree rejects such writes
+outright; see `design-crowtree-engine.md`).
 
 ### 6.3 Wiring a live group (`create_group_with_wal`)
 
@@ -385,7 +399,7 @@ The watermark for a group's WAL GC is:
    gc_slot = min(safe_slot, snapshot_slot)
 ```
 
-Records with `slot < gc_slot` are eligible for GC. The two-watermark rule is justified in [`design-parallel-slots.md`](design/design-parallel-slots.md) §11.
+Records with `slot < gc_slot` are eligible for GC. The two-watermark rule is justified in [`design-parallel-slots.md`](design-parallel-slots.md) §11.
 
 ### 7.2 GC granularity
 
@@ -417,9 +431,9 @@ When the backend durable-flush operation returns an error, the OS reports the di
 1. Stop using the disk for new writes.
 2. Mark the group affected (a multi-disk WAL with one disk lost has incomplete state for slots that landed on the lost disk).
 3. **Fail the node out of the group:** the node sends a step-out RPC to the leader, the leader records the failed acceptor as not-eligible, and (if necessary) triggers a reconfiguration to maintain quorum.
-4. Rebuild from peers via **snapshot install** ([§8.4 of design.md](design.md#84-snapshot-and-install)).
+4. Rebuild from peers via **snapshot install** ([§8.4 of design.md](../design.md#84-snapshot-and-install)).
 
-This is the **fail-out semantics** decided in [requirement.md §8.1](requirement.md#81-wal-write-ahead-log). We do not try to keep operating with partial WAL state on the surviving disks; that path requires per-slot replication across disks and adds disproportionate complexity.
+This is the **fail-out semantics** decided in [requirement.md §8.1](../requirement.md#81-wal-write-ahead-log). We do not try to keep operating with partial WAL state on the surviving disks; that path requires per-slot replication across disks and adds disproportionate complexity.
 
 ### 8.2 All-disk failure
 

@@ -1,7 +1,7 @@
 # CrowKV - Design: Parallel Slot Pipelining
 
-Depends on: [`requirement.md`](requirement.md), [`design.md`](design.md)
-Satisfies: [requirement.md §6.5](requirement.md#65-parallel-slot-linearizability-analysis), [requirement.md §7.3](requirement.md#73-parallel-slot-processing), [requirement.md §7.3.1](requirement.md#731-correctness-analysis-for-parallel-slot-writes)
+Depends on: [`requirement.md`](../requirement.md), [`design.md`](../design.md)
+Satisfies: [requirement.md §6.5](../requirement.md#65-parallel-slot-linearizability-analysis), [requirement.md §7.3](../requirement.md#73-parallel-slot-processing), [requirement.md §7.3.1](../requirement.md#731-correctness-analysis-for-parallel-slot-writes)
 
 This document specifies the design of parallel-slot Multi-Paxos consensus — the feature that distinguishes CrowKV from Raft-based KV systems. It defines how the leader pipelines proposals, how gaps are detected and repaired, how the safe-slot is maintained, and how the system stays correct under concurrent in-flight slots.
 
@@ -31,7 +31,7 @@ CrowKV exploits this by running many slots in parallel on the leader. Throughput
 - **Gaps.** A slot may remain undecided long after later slots are decided. We need a mechanism to resolve gaps without stalling the hot path.
 - **Conservative cross-key reads.** A `Scan` must wait for a no-gap prefix; point reads do not.
 
-The blind-ops premise from [requirement.md §5.2](requirement.md#52-operations) makes the trade-off cheap: out-of-order *apply* is safe because no operation reads before writing.
+The blind-ops premise from [requirement.md §5.2](../requirement.md#52-operations) makes the trade-off cheap: out-of-order *apply* is safe because no operation reads before writing.
 
 Mature inspirations:
 
@@ -48,9 +48,9 @@ EPaxos generalizes pipelining further (per-command dependency tracking) but at c
 The design depends on a small set of invariants. Every other rule in this document follows from them.
 
 - **I1 — Single slot counter.** On a leader, slot assignment is performed by exactly one logical worker. Two writes never receive the same slot, and no two slots are assigned out of arrival order.
-- **I2 — Slot determines linearization.** The slot number assigned to an op is the op's position in the global linearization order ([requirement.md §6.1](requirement.md#61-write-guarantee)).
+- **I2 — Slot determines linearization.** The slot number assigned to an op is the op's position in the global linearization order ([requirement.md §6.1](../requirement.md#61-write-guarantee)).
 - **I3 — Quorum-fsync before ack.** A client write is acked only after a quorum of acceptors (including the leader) have fsynced their `Accepted(slot, ballot, value)` records. This is the durability hook that makes I2 robust to failures.
-- **I4 — Apply-order independence for blind ops.** For any key *k*, the engine's final value is `value(max{ slot | slot writes k })`. Apply order between non-overlapping keys is irrelevant; for the same key, the higher slot wins regardless of arrival order ([requirement.md §7.3.1](requirement.md#731-correctness-analysis-for-parallel-slot-writes)).
+- **I4 — Apply-order independence for blind ops.** For any key *k*, the engine's final value is `value(max{ slot | slot writes k })`. Apply order between non-overlapping keys is irrelevant; for the same key, the higher slot wins regardless of arrival order ([requirement.md §7.3.1](../requirement.md#731-correctness-analysis-for-parallel-slot-writes)).
 - **I5 — Per-key resolved-slot is monotone.** A learner's per-key tracker only ever advances. This is the basis for read-your-writes from followers.
 - **I6 — Safe-slot is contiguous.** The cluster-wide safe-slot is the maximum N such that *every* slot ≤ N is chosen and applied on every learner. It is by definition gap-free.
 
@@ -70,7 +70,7 @@ The proposer maintains a small in-memory record per in-flight slot. It transitio
 | `Applied` | learner.apply() returned | terminal | Used by metrics; safe to evict |
 | `OrphanRepair` | leader changed before reaching `Chosen`; repair task takes over | `Chosen` (via repair) | New leader's responsibility |
 
-**When does the ack happen?** When the slot reaches `Chosen` *and* the leader's own learner has applied it. The leader's own learner application is required so that an immediately-following `Get` on the leader sees the new value (see [§6.1 of design.md](design.md#61-linearizable-leader-read)).
+**When does the ack happen?** When the slot reaches `Chosen` *and* the leader's own learner has applied it. The leader's own learner application is required so that an immediately-following `Get` on the leader sees the new value (see [§6.1 of design.md](../design.md#61-linearizable-leader-read)).
 
 **Eviction.** Once a slot's record is `Applied` *and* its slot number is below the safe-slot, it can be dropped from the in-memory map. The WAL record stays until WAL GC catches up.
 
@@ -94,7 +94,7 @@ Why a window?
 
 **The leader never blocks indefinitely.** No client request waits longer than `admit_queue_timeout` (default 100 ms) before either being admitted or being rejected with `Busy`. This bounds tail latency under overload.
 
-`Busy` and queue-fullness are first-class metrics ([§13.2 of requirement.md](requirement.md#132-mandatory-observability-signals)). Sustained `Busy` indicates either an undersized window or a downstream bottleneck (slow follower, full disk).
+`Busy` and queue-fullness are first-class metrics ([§13.2 of requirement.md](../requirement.md#132-mandatory-observability-signals)). Sustained `Busy` indicates either an undersized window or a downstream bottleneck (slow follower, full disk).
 
 ---
 
@@ -118,12 +118,12 @@ Fanout means: as soon as the leader has fsynced its own copy of slot N, it sends
 
 Each learner maintains, per key it has applied, the highest slot that has touched that key. This is exposed to read traffic in two ways:
 
-- **Read-your-writes** ([§6.2 of design.md](design.md#62-read-your-writes-follower-read)): a follower can serve a `Get(k, slot=N)` as soon as `resolved_slot[k] ≥ N`, even if other slots in the gap are still pending.
-- **Linearizability sketch** ([§6.5 of requirement.md](requirement.md#65-parallel-slot-linearizability-analysis)): per-key tracking is what makes "highest slot wins" correct in the presence of out-of-order apply.
+- **Read-your-writes** ([§6.2 of design.md](../design.md#62-read-your-writes-follower-read)): a follower can serve a `Get(k, slot=N)` as soon as `resolved_slot[k] ≥ N`, even if other slots in the gap are still pending.
+- **Linearizability sketch** ([§6.5 of requirement.md](../requirement.md#65-parallel-slot-linearizability-analysis)): per-key tracking is what makes "highest slot wins" correct in the presence of out-of-order apply.
 
-**Storage.** The engine stores `(slot, value)` per live key (one version, since CrowKV is single-version per key — [§8.7 of design.md](design.md#87-storage-engine-plug-in)). Tombstones for deletions also carry their slot.
+**Storage.** The engine stores `(slot, value)` per live key (one version, since CrowKV is single-version per key — [§8.7 of design.md](../design.md#87-storage-engine-plug-in)). Tombstones for deletions also carry their slot.
 
-**Memory cost.** O(live keys) per learner. Accepted as a design cost in [requirement.md §7.3.1](requirement.md#731-correctness-analysis-for-parallel-slot-writes).
+**Memory cost.** O(live keys) per learner. Accepted as a design cost in [requirement.md §7.3.1](../requirement.md#731-correctness-analysis-for-parallel-slot-writes).
 
 **Update rule.** On `apply(slot, batch)`:
 
@@ -137,7 +137,7 @@ This three-step apply is the only place out-of-order slots collapse into a deter
 
 ## 7. Safe-Slot Computation and Propagation
 
-The safe-slot is the cluster-wide **contiguous applied frontier**: the maximum N such that every slot ≤ N has been chosen and applied on every learner. It is the foundation of follower reads ([§6.3 of design.md](design.md#63-bounded-stale-follower-read)).
+The safe-slot is the cluster-wide **contiguous applied frontier**: the maximum N such that every slot ≤ N has been chosen and applied on every learner. It is the foundation of follower reads ([§6.3 of design.md](../design.md#63-bounded-stale-follower-read)).
 
 **Per-learner contribution.** Each learner maintains its own `contiguous_applied` watermark — the largest N such that every slot in `[1, N]` has been applied. A learner advances this watermark whenever apply completes for the slot just above it, possibly cascading through cached higher slots.
 
@@ -162,7 +162,7 @@ Followers that are persistently lagging beyond `lagging_threshold` (default 4 ×
 - May pause (not advance) while a gap is being repaired.
 - Always ≤ leader's own contiguous frontier (because the leader is one of the learners).
 
-This is why `Scan(Linearizable)` uses the leader's *own* contiguous frontier rather than the safe-slot — it is strictly ≥ safe-slot at all times ([§6.4 of design.md](design.md#64-scan-modes)).
+This is why `Scan(Linearizable)` uses the leader's *own* contiguous frontier rather than the safe-slot — it is strictly ≥ safe-slot at all times ([§6.4 of design.md](../design.md#64-scan-modes)).
 
 ---
 
@@ -183,7 +183,7 @@ A "gap" is a slot N < max-chosen-slot for which the leader has no `Chosen` decis
 3. Manual: admin RPC.
 4. On leader change: the new leader runs a single Phase-1 round over the entire `[contiguous_chosen+1, max_chosen]` interval; this is one bulk repair, not many small ones.
 
-The repair task (a single async loop, see [`plan.md`](plan.md) §5) runs at a configurable cadence (default 50 ms tick) and respects a `max_concurrent_repairs` cap (default 4) so it does not contend with the hot path.
+The repair task (a single async loop, see [`plan.md`](../plan.md) §5) runs at a configurable cadence (default 50 ms tick) and respects a `max_concurrent_repairs` cap (default 4) so it does not contend with the hot path.
 
 ---
 
@@ -296,13 +296,13 @@ Parallel slots interact with WAL GC through two watermarks:
 
 **Repair-time safety:** repair never needs to read GC'd slots, because by definition every slot ≤ safe_slot is *already chosen* on every learner, so it cannot be a gap.
 
-This is detailed further in [`design-wal.md`](design/design-wal.md) §4.
+This is detailed further in [`design-wal.md`](design-wal.md) §4.
 
 ---
 
 ## 12. Tunables and Defaults
 
-Numbers below are starting points based on [requirement.md §12.1](requirement.md#121-performance-targets) and standard practice. Real values will be fine-tuned in operations.
+Numbers below are starting points based on [requirement.md §12.1](../requirement.md#121-performance-targets) and standard practice. Real values will be fine-tuned in operations.
 
 | Parameter | Default | Range | Where it lives |
 | --- | --- | --- | --- |

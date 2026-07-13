@@ -1,7 +1,7 @@
 # CrowKV - Design: RPC Wire Protocol
 
-Depends on: [`requirement.md`](requirement.md) §3, §9.2, §10, [`design.md`](design.md) §2, §3, [`plan.md`](plan.md) §1 M2
-Satisfies: [requirement.md §3](requirement.md#3-dependencies-and-assumptions), [requirement.md §9.2](requirement.md#92-rolling-upgrade), [requirement.md §10.1](requirement.md#101-client-discovery)
+Depends on: [`requirement.md`](../requirement.md) §3, §9.2, §10, [`design.md`](../design.md) §2, §3, [`plan.md`](../plan.md) §1 M2
+Satisfies: [requirement.md §3](../requirement.md#3-dependencies-and-assumptions), [requirement.md §9.2](../requirement.md#92-rolling-upgrade), [requirement.md §10.1](../requirement.md#101-client-discovery)
 
 This document defines the wire-serialization contract for all node-to-node and client-to-node RPC communication. The implementation uses **gRPC with protobuf** (tonic + prost). Every message carries a `version: u32` field at fixed protobuf tag 1 for forward/backward compatibility; no `required` fields; field numbers are append-only.
 
@@ -32,8 +32,8 @@ This document defines the wire-serialization contract for all node-to-node and c
 1. **One bidirectional stream per peer pair.** All steady-state node-to-node traffic (`Accept`, `Heartbeat`, `Chosen`) multiplexes over a single gRPC bidi stream keyed by `(group_id, peer_node_id)`. One-shot messages (`Prepare`, `PreVote`, `RequestVote`, `StepDown`) remain unary RPCs. This reduces connection count for the hot path while keeping election messages unblocked.
 2. **Frame multiplexing.** Each `PeerStreamRequest` / `PeerStreamResponse` is a protobuf `oneof` frame; the concrete message type (`AcceptRequest`, `HeartbeatRequest`, etc.) carries its own `group_id`, `version`, and correlation fields. New steady-state message types add new oneof arms without changing existing field numbers.
 3. **No `required` fields.** All protobuf fields are `optional` or have sensible defaults. A missing `version` field defaults to `0` (meaning "pre-versioning, treat as earliest").
-4. **Field numbers are append-only.** Once assigned, a field number is never reused for a different semantic meaning. This is a hard rule for rolling upgrades ([requirement.md §9.2](requirement.md#92-rolling-upgrade)).
-5. **Plaintext in P1/P4; TLS hooks reserved.** The transport layer is plaintext TCP loopback in tests and P1/P4 integration. TLS config slots exist in the service builder but are unimplemented ([requirement.md §11](requirement.md#11-security)).
+4. **Field numbers are append-only.** Once assigned, a field number is never reused for a different semantic meaning. This is a hard rule for rolling upgrades ([requirement.md §9.2](../requirement.md#92-rolling-upgrade)).
+5. **Plaintext in P1/P4; TLS hooks reserved.** The transport layer is plaintext TCP loopback in tests and P1/P4 integration. TLS config slots exist in the service builder but are unimplemented ([requirement.md §11](../requirement.md#11-security)).
 
 ---
 
@@ -194,7 +194,7 @@ The unary `Accept` RPC is kept during the P1 M3 → M4 migration window. Once al
 
 ### 4.2 AdminService (client / operator)
 
-Not needed in P1. Defined in P4 per [`plan.md`](plan.md) §1 P4 M3/M4:
+Not needed in P1. Defined in P4 per [`plan.md`](../plan.md) §1 P4 M3/M4:
 
 ```protobuf
 service AdminService {
@@ -263,5 +263,5 @@ The `PeerStream` design directly enables the parallel-slot pipelining described 
 - [prost — Protocol Buffers implementation for the Rust Language](https://github.com/tokio-rs/prost)
 - [`design-leader-election.md`](design-leader-election.md) §6 — heartbeat/lease interaction with stream ordering
 - [`design-parallel-slots.md`](design-parallel-slots.md) §5 — pipelined fanout and per-peer flow control
-- [`plan.md`](plan.md) §1 P1 M3 — leader election + bidi stream milestone
-- [`plan.md`](plan.md) §1 P1 M4 — parallel proposer milestone
+- [`plan.md`](../plan.md) §1 P1 M3 — leader election + bidi stream milestone
+- [`plan.md`](../plan.md) §1 P1 M4 — parallel proposer milestone

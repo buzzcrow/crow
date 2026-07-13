@@ -7,12 +7,15 @@ use super::Batch;
 ///
 /// `apply`/`get`/`scan` return [`KVFuture`] rather than their value directly:
 /// the common case (in-memory hit / no I/O) resolves immediately at zero
-/// cost via [`KVFuture::ready`], while a future engine's genuine I/O path
-/// (crowtree demand-load miss, once `design-crowtree-async.md`'s reactor
-/// exists) can return a real `Pending` future instead. No [`KVEngine`] impl
-/// in this codebase constructs `Pending` yet — see
-/// `doc/design/design-crowkv-async-kvengine.md` for the full design and the
-/// deferred caller-side conversion plan.
+/// cost via [`KVFuture::ready`], while a genuine I/O path (crowtree
+/// demand-load miss, via the io_uring reactor — `design-crowtree-engine.md
+/// §3`) returns a real `Pending` future. [`super::CrowtreeEngine::get`] is
+/// the one impl that constructs `Pending` today (via
+/// `crowtree_ffi::AsyncCrowtree::try_get`); `InMemKV` and
+/// `CrowtreeEngine::scan`/`apply` always resolve `Ready`. See
+/// `doc/design/design-crowkv-async-kvengine.md` for the full design
+/// rationale (the `dyn`-compatibility tension that led to this shape) and
+/// migration history.
 pub trait KVEngine: Send + Sync {
     /// Apply `batch` at `slot`. Atomic to readers and idempotent: an op for
     /// key `k` is skipped when `slot <= resolved_slot(k)`. The last occurrence

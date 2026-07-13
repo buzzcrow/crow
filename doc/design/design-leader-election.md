@@ -1,7 +1,7 @@
 # CrowKV - Design: Leader Election, Term, and Lease
 
-Depends on: [`requirement.md`](requirement.md), [`design.md`](design.md)
-Satisfies: [requirement.md §3 Dependencies](requirement.md#3-dependencies-and-assumptions), [requirement.md §4.2](requirement.md#42-paxos-core), [requirement.md §6.2](requirement.md#62-leader-read-fencing), implicit prerequisites of [requirement.md §7](requirement.md#7-consensus-architecture)
+Depends on: [`requirement.md`](../requirement.md), [`design.md`](../design.md)
+Satisfies: [requirement.md §3 Dependencies](../requirement.md#3-dependencies-and-assumptions), [requirement.md §4.2](../requirement.md#42-paxos-core), [requirement.md §6.2](../requirement.md#62-leader-read-fencing), implicit prerequisites of [requirement.md §7](../requirement.md#7-consensus-architecture)
 
 This document specifies leader election, term management, the `PxBallot`/`PxTerm` separation, and the leader lease used for fast linearizable reads. The design follows Raft very closely; only the per-slot Paxos parts differ.
 
@@ -138,7 +138,7 @@ These re-Accepts are pipelined; the new leader does not wait for any one to be c
 
 ### 4.4 Steady state begins
 
-Once the bulk Phase 1 has been *issued* (not necessarily completed), the leader is free to start assigning new slots starting at `ceiling + 1`. The repair work for `[floor+1, ceiling]` proceeds in parallel and reuses the same machinery as routine gap repair (see [`design-parallel-slots.md`](design/design-parallel-slots.md) §9).
+Once the bulk Phase 1 has been *issued* (not necessarily completed), the leader is free to start assigning new slots starting at `ceiling + 1`. The repair work for `[floor+1, ceiling]` proceeds in parallel and reuses the same machinery as routine gap repair (see [`design-parallel-slots.md`](design-parallel-slots.md) §9).
 
 ---
 
@@ -173,14 +173,14 @@ Followers respond with their own `term`, `contiguous_chosen`, and `contiguous_ap
 
 ## 6. Leader Lease
 
-A lease lets the leader serve `Get(mode=Linearizable)` without a per-read quorum round-trip ([§6.1 of design.md](design.md#61-linearizable-leader-read)). The lease is the standard Raft-style approach with a clock-skew bound.
+A lease lets the leader serve `Get(mode=Linearizable)` without a per-read quorum round-trip ([§6.1 of design.md](../design.md#61-linearizable-leader-read)). The lease is the standard Raft-style approach with a clock-skew bound.
 
 ### 6.1 What the lease grants
 
 While its lease is valid, a leader may serve linearizable reads from local state under two assumptions:
 
 - No other node was elected leader during the lease window.
-- The leader's `contiguous_applied` slot reflects all writes acked through this leader (which is true by Invariant I3 from [`design-parallel-slots.md`](design/design-parallel-slots.md) §2).
+- The leader's `contiguous_applied` slot reflects all writes acked through this leader (which is true by Invariant I3 from [`design-parallel-slots.md`](design-parallel-slots.md) §2).
 
 The first assumption is enforced by:
 
@@ -200,7 +200,7 @@ With the default `heartbeat_interval = 500 ms` and `lease_duration = 9 × heartb
 
 ### 6.3 Clock-skew assumption
 
-[requirement.md §3](requirement.md#3-dependencies-and-assumptions) caps clock skew at `max_clock_skew` (default `500 ms`, see §10) per heartbeat interval. The lease formula is:
+[requirement.md §3](../requirement.md#3-dependencies-and-assumptions) caps clock skew at `max_clock_skew` (default `500 ms`, see §10) per heartbeat interval. The lease formula is:
 
 ```
   effective_lease = lease_duration - max_clock_skew
@@ -315,7 +315,7 @@ If the clock-skew assumption is *violated*, lease-based reads can return stale d
 | `heartbeat_interval` | 500 ms | 10 ms – 30 s | Should be ≪ `lease_duration` |
 | `lease_duration` | 4500 ms | 100 ms – 60 s | Should be ≫ `heartbeat_interval` + `max_clock_skew` (rule of thumb: `9 × heartbeat_interval`) |
 | `effective_lease` | derived | — | `= lease_duration - max_clock_skew` |
-| `max_clock_skew` | 500 ms | 1 ms – 5 s | Architectural bound from [requirement.md §3](requirement.md#3-dependencies-and-assumptions) |
+| `max_clock_skew` | 500 ms | 1 ms – 5 s | Architectural bound from [requirement.md §3](../requirement.md#3-dependencies-and-assumptions) |
 | `election_min` | 4000 ms | ≥ 8 × `heartbeat_interval` | Avoid spurious elections |
 | `election_max` | 8000 ms | ≤ 60 s | Bounds time to elect after leader loss |
 | `readindex_batch_window` | 1 ms | 0 – 100 ms | Latency vs network amortization |

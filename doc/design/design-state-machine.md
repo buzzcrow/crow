@@ -1,16 +1,16 @@
 # CrowKV - Design: State Machine
 
-Depends on: [`requirement.md`](requirement.md), [`design.md`](design.md)
-Satisfies: [requirement.md §8.3](requirement.md#83-learner-storage), [requirement.md §8.4 import/export](requirement.md#84-snapshot-and-install), implementation prerequisites of [requirement.md §14.1 crowbench `compare`](requirement.md#141-correctness-criteria-for-crowbench)
+Depends on: [`requirement.md`](../requirement.md), [`design.md`](../design.md)
+Satisfies: [requirement.md §8.3](../requirement.md#83-learner-storage), [requirement.md §8.4 import/export](../requirement.md#84-snapshot-and-install), implementation prerequisites of [requirement.md §14.1 crowbench `compare`](../requirement.md#141-correctness-criteria-for-crowbench)
 
 This document specifies the storage engine abstraction used by CrowKV learners. The engine is the **only** consumer of consensus output; it owns the materialized key-value state and serves all reads. The WAL is the durable log; the engine is the materialized projection.
 
 > **P3 redesign note.** The production engine `crowtree` and the redefined
 > (async, snapshot/GC-aware) `KVEngine` abstraction are specified in the crowtree
 > sub-design set: [`design-crowtree.md`](design-crowtree.md) (overview + engine
-> abstraction + language/FFI decisions), [`design-crowtree-core.md`](design-crowtree-core.md)
-> (data structure), [`design-crowtree-persistence.md`](design-crowtree-persistence.md),
-> [`design-crowtree-snapshot-gc.md`](design-crowtree-snapshot-gc.md), and
+> abstraction + language/FFI decisions), [`design-crowtree-engine.md`](design-crowtree-engine.md)
+> (in-memory engine + memory model + async FFI), [`design-crowtree-storage.md`](design-crowtree-storage.md)
+> (durable storage + mapping table + snapshot/GC flow), and
 > [`design-crowtree-test.md`](design-crowtree-test.md). This document remains the
 > source of truth for the *semantics* (per-key slot, apply, compare, compaction);
 > crowtree docs own the *implementation*.
@@ -65,18 +65,40 @@ The engine encapsulates everything below the consensus / learner layer:
 
 The engine does **not** know about Paxos, terms, ballots, leaders, or the network. It receives `(slot, batch)` and applies; that is the entire write contract.
 
-### 2.1 State Machine Snapshot and Slot Index
+### 2.1 State Machine Restart: Engine Durability + WAL Replay
 
-The state machine (engine + learner) owns its own persistence boundary, separate from the WAL. This replaces the former `DurableCommitWatermark` WAL record design.
+The state machine's persistence boundary is separate from the WAL — but it is
+not a dedicated "state-machine snapshot file" either. It is whatever the
+*engine itself* durably persists (crowtree's own snapshot pipeline,
+[`design-crowtree-storage.md §6`](design-crowtree-storage.md#6-snapshot-recovery-and-exportimport)),
+queried through `KVEngine::resume_from_slot()`. This replaces the former
+`DurableCommitWatermark` WAL record design.
 
-**Snapshot file:** The engine periodically (or on demand) writes a snapshot of its KV state to a file, along with the `last_applied_slot` (the highest slot contiguously applied to the engine). This file is separate from the WAL.
+**Restart behavior** (`PxLocalReplica::restore_from_replay_with_engine`,
+`crowkv/src/cluster/local_replica.rs`):
 
-**Restart behavior:**
-1. WAL replay rebuilds acceptor state only (`Promised`, `Accepted`, `VoteGranted`).
-2. The state machine loads its snapshot file and sets `contiguous_applied = snapshot_slot`.
-3. Slots above `snapshot_slot` are re-learned via new-leader recovery (bulk Phase 1) or steady-state heartbeat catch-up.
+1. WAL replay rebuilds acceptor state (`Promised`, `Accepted`, `VoteGranted`) — Pass 1, unconditional.
+2. The engine reports `resume_from = resume_from_slot()`: the highest slot it
+   already durably reflects (always `0` for `InMemKV`; crowtree's
+   `last_applied_slot`, restored from its on-disk commit anchor, for a
+   durable engine that was cleanly snapshotted before the crash/restart).
+3. Pass 2 `learn()`s every WAL-accepted slot in `(resume_from, highest_local]`
+   into the engine, in order, and fast-forwards the learner's frontier
+   (`contiguous_chosen`/`contiguous_applied`/`last_chosen_term`) directly to
+   `resume_from` via `seed_resume_frontier` — skipping the now-redundant
+   re-`learn()` of the already-durable prefix.
+4. Slots above the local WAL's own highest accepted slot are re-learned via
+   new-leader recovery (bulk Phase 1) or steady-state heartbeat catch-up (§6
+   of this doc's parent flows, `design-parallel-slots.md`).
 
-**Current implementation:** Snapshot persistence is not yet implemented. The state machine starts empty on restart (`contiguous_applied = 0`) and relies entirely on consensus recovery to repopulate. A placeholder `snapshot_slot = 0` is used.
+Step 3's skip is a pure **optimization**, not a correctness requirement:
+`KVEngine::apply` is idempotent (highest-slot-wins per key) and
+`update_frontier` tolerates out-of-order slots, so replaying the *entire*
+local WAL through `learn()` (`resume_from = 0`, `InMemKV`'s permanent case)
+always converges to the same correct state — it's just extra, safe, no-op
+work. `persist_snapshot()` (called periodically by the group's maintenance
+loop, `crowkv/src/cluster/group_maintenance.rs::run_pass`) is what advances
+the durable floor `resume_from_slot()` will report on the *next* restart.
 
 ---
 
@@ -101,11 +123,11 @@ CrowKV does not provide repeatable reads or time-travel queries. Snapshot reads 
 
 `Scan(AtSlot(N))` returns the engine state *after* applying everything up through the contiguous-applied frontier of the serving replica, which the replica advances to ≥ `N` before serving. If a slot `M > N` has already been applied for some key `k`, the value returned for `k` is the value at `M`, not the value at `N`. This still satisfies linearizability: slot `M` linearizes after slot `N`, so the read at "logical instant `N`" is consistent with reading at the later linearization point `M` — both are valid linearization points for a single point in real time. `AtSlot(N)` is therefore a *lower bound on freshness*, not a snapshot pin: single-version reads always reflect the latest applied value.
 
-If true historical snapshots are ever required, MVCC is a future extension. The single-version restriction comes from [requirement.md §1 / §5.2](requirement.md#5-data-model-and-client-api).
+If true historical snapshots are ever required, MVCC is a future extension. The single-version restriction comes from [requirement.md §1 / §5.2](../requirement.md#5-data-model-and-client-api).
 
 ### 3.3 Resolved-slot is monotone per key
 
-The engine never accepts a write at slot `s` for key `k` if `s ≤ resolved_slot(k)`. This is the runtime expression of [Invariant I5 in `design-parallel-slots.md`](design/design-parallel-slots.md#2-concepts-and-invariants).
+The engine never accepts a write at slot `s` for key `k` if `s ≤ resolved_slot(k)`. This is the runtime expression of [Invariant I5 in `design-parallel-slots.md`](design-parallel-slots.md#2-concepts-and-invariants).
 
 Implication: replays and out-of-order applies are naturally idempotent. If WAL replay tries to apply slot 7 for key `k` and `resolved_slot(k)` is already 9, the apply is a no-op for `k` — consistent with the parallel-slot semantics.
 
@@ -139,7 +161,7 @@ In-memory engines can hold a write lock for the duration of the batch. File-base
 
 ### 4.4 Intra-batch order
 
-For a key `k` appearing multiple times in a batch (rare but legal — see [requirement.md §7.3.1](requirement.md#731-correctness-analysis-for-parallel-slot-writes)), the *last* occurrence in batch order wins. The earlier ones are folded into the apply procedure naturally (each tuple in turn updates `current`; the loop's final state is what persists).
+For a key `k` appearing multiple times in a batch (rare but legal — see [requirement.md §7.3.1](../requirement.md#731-correctness-analysis-for-parallel-slot-writes)), the *last* occurrence in batch order wins. The earlier ones are folded into the apply procedure naturally (each tuple in turn updates `current`; the loop's final state is what persists).
 
 ### 4.5 Failure during apply
 
@@ -181,7 +203,7 @@ This minimal surface keeps multi-engine compatibility easy.
 
 ### 6.1 Purpose
 
-Snapshot install ([§8.4 of design.md](design.md#84-snapshot-and-install)) is the bootstrap path for new or far-lagging members. The engine provides export/import primitives that the snapshot module wraps in a chunked, resumable, throttled transfer.
+Snapshot install ([§8.4 of design.md](../design.md#84-snapshot-and-install)) is the bootstrap path for new or far-lagging members. The engine provides export/import primitives that the snapshot module wraps in a chunked, resumable, throttled transfer.
 
 In addition to peer transfer, the engine uses snapshot export to persist its own state locally (see §2.1). The local snapshot file stores the KV state and `last_applied_slot`, enabling fast restart without re-applying the entire WAL.
 
@@ -253,7 +275,7 @@ When a key `k` is overwritten with a higher slot value, the old value is immedia
 
 ## 8. Compare for Cross-Learner Validation
 
-A `compare(other) -> diff` operation is required so that `crowbench` can verify state equality across learners after a test run ([requirement.md §14.1](requirement.md#141-correctness-criteria-for-crowbench)).
+A `compare(other) -> diff` operation is required so that `crowbench` can verify state equality across learners after a test run ([requirement.md §14.1](../requirement.md#141-correctness-criteria-for-crowbench)).
 
 ### 8.1 Semantics
 
@@ -333,4 +355,4 @@ The trait surface is engine-agnostic; switching engines is a configuration choic
 - Manual debugging or operations exercises → ordered file.
 - Production → crowtree.
 
-**Per-key memory cost considerations:** the per-key resolved-slot adds 8 bytes per live key. For 10⁹ live keys this is 8 GiB on every learner, accepted in the requirement ([§7.3.1](requirement.md#731-correctness-analysis-for-parallel-slot-writes)). If memory pressure dictates, a future optimization could compress recently-applied resolved-slots into a "below safe-slot" bit (a single bit replacing the 8 bytes when the per-key slot is no longer needed for read-your-writes).
+**Per-key memory cost considerations:** the per-key resolved-slot adds 8 bytes per live key. For 10⁹ live keys this is 8 GiB on every learner, accepted in the requirement ([§7.3.1](../requirement.md#731-correctness-analysis-for-parallel-slot-writes)). If memory pressure dictates, a future optimization could compress recently-applied resolved-slots into a "below safe-slot" bit (a single bit replacing the 8 bytes when the per-key slot is no longer needed for read-your-writes).

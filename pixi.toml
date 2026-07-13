@@ -40,10 +40,10 @@ zstd = ">=1.5.7,<2"
 bzip2 = ">=1.0.8,<2"
 snappy = ">=1.2.2,<2"
 
-# io_uring reactor (plan-tree #11 Phase 0/1, crowtree/include/crowtree/reactor.h).
+# io_uring reactor (crowtree/include/crowtree/reactor.h).
 # Linux-only kernel interface -- no osx-arm64 conda-forge build exists, so this
 # must be a per-platform target dependency, not a top-level one (design doc
-# design-crowtree-async.md §10: the reactor itself is excluded from macOS
+# design-crowtree-engine.md §3.5: the reactor itself is excluded from macOS
 # builds; see crowtree/CMakeLists.txt's CROWTREE_HAVE_LIBURING gate).
 [target.linux-64.dependencies]
 liburing = "*"

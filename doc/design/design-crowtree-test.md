@@ -1,7 +1,7 @@
 # CrowKV - Design: crowtree Test Strategy
 
 Parent: [`design-crowtree.md`](design-crowtree.md)
-Depends on: [`test.md`](../test.md), [`design-crowtree-core.md`](design-crowtree-core.md), [`design-crowtree-persistence.md`](design-crowtree-persistence.md), [`design-crowtree-snapshot-gc.md`](design-crowtree-snapshot-gc.md)
+Depends on: [`test.md`](../test.md), [`design-crowtree-engine.md`](design-crowtree-engine.md), [`design-crowtree-storage.md`](design-crowtree-storage.md)
 
 This document defines the test scope and cases for crowtree across its layers:
 C++ unit, C++ integration (with sanitizers), Rust FFI adapter, cross-engine
@@ -54,7 +54,7 @@ op sequence, the two engines' `EngineView::iter_all` must be byte-for-byte equal
   (empty / resident `PageBase*` / unloaded `(iu_index, iu_count)`); **segment
   recycling** (live_count → 0 frees segment; freed interior segment never
   re-created); **image/directory/anchor** serialize+CRC round-trip. See
-  `design-crowtree-mappingtable.md` (task #14).
+  [`design-crowtree-storage.md §8`](design-crowtree-storage.md#8-mapping-table).
 - **Epoch manager** — retire not freed while a guard is open; freed after all
   guards in the epoch drop; advance/reclaim.
 - **Split point** — by-bytes split index; fallback to count median; hysteresis

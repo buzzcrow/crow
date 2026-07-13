@@ -1,5 +1,5 @@
 # CrowKV - Design: Paxos Error Model
-Depends on: [`../requirement.md`](../requirement.md), [`../design.md`](../design.md), [`design-rpc.md`](design-rpc.md), [`../todo_plan.md`](../todo_plan.md)
+Depends on: [`../requirement.md`](../requirement.md), [`../design.md`](../design.md), [`design-rpc.md`](design-rpc.md)
 Satisfies: [../requirement.md §6.1](../requirement.md#61-write-guarantee), [../requirement.md §10.2](../requirement.md#102-retry-and-idempotency), [../requirement.md §13.2](../requirement.md#132-mandatory-observability-signals), [../requirement.md §14](../requirement.md#14-testing-requirements)
 
 ## 1. Goal

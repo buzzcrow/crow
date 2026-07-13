@@ -1,7 +1,7 @@
 # CrowKV - Design: Async Local Disk I/O
 
-Depends on: [`design.md`](design.md), [`requirement.md`](requirement.md), [`plan.md`](plan.md) §5 (Concurrency Model)
-Satisfies: [requirement.md §8.1](requirement.md#81-wal-write-ahead-log) (durability contract), and underpins [`design-wal.md`](design/design-wal.md), [`design-state-machine.md`](design/design-state-machine.md)
+Depends on: [`design.md`](../design.md), [`requirement.md`](../requirement.md), [`plan.md`](../plan.md) §5 (Concurrency Model)
+Satisfies: [requirement.md §8.1](../requirement.md#81-wal-write-ahead-log) (durability contract), and underpins [`design-wal.md`](design-wal.md), [`design-state-machine.md`](design-state-machine.md)
 
 This document specifies the project-wide async local disk I/O abstraction. It is shared infrastructure: WAL fsync, ordered-file engine writes, snapshot file I/O, and any future on-disk subsystem all use it.
 
@@ -26,7 +26,7 @@ This document specifies the project-wide async local disk I/O abstraction. It is
 **Goals:**
 
 - Provide a single async I/O facade for all local disk operations: `open`, `read_at`, `write_at`, `fsync`/`fdatasync`, `close`.
-- Avoid blocking the consensus async tasks on disk syscalls, in line with [`plan.md`](plan.md) §5 rule 1.
+- Avoid blocking the consensus async tasks on disk syscalls, in line with [`plan.md`](../plan.md) §5 rule 1.
 - On Linux ≥ 5.11, exploit io_uring for true async syscalls (kernel-side completion).
 - Run on any environment with a working POSIX filesystem (CI, dev laptops, older kernels) via a transparent fallback.
 - Single common API surface — callers do not branch on backend.
@@ -35,14 +35,14 @@ This document specifies the project-wide async local disk I/O abstraction. It is
 
 - Network I/O (handled by `tonic` / `tokio` directly).
 - Block-device direct I/O / O_DIRECT (deferred until measured to be needed).
-- Cross-platform completion-based I/O (Windows IOCP, macOS kqueue) — Linux is the only target per [requirement.md §3](requirement.md#3-dependencies-and-assumptions).
+- Cross-platform completion-based I/O (Windows IOCP, macOS kqueue) — Linux is the only target per [requirement.md §3](../requirement.md#3-dependencies-and-assumptions).
 - Process-wide buffer pool tuning (revisit if profiling shows need).
 
 ---
 
 ## 2. Why a Dedicated Abstraction
 
-Per [`plan.md`](plan.md) §5, every business-logic path in CrowKV is `async`. Disk syscalls (`fdatasync`, `pwrite`, `pread`) are blocking. Two options to bridge:
+Per [`plan.md`](../plan.md) §5, every business-logic path in CrowKV is `async`. Disk syscalls (`fdatasync`, `pwrite`, `pread`) are blocking. Two options to bridge:
 
 1. **`tokio::task::spawn_blocking` everywhere.** Simple. Pays one thread-pool hop per syscall (typically 5–20 μs on a healthy host). Tail latency under load suffers because the blocking pool is a shared resource and one slow disk can stall others.
 2. **io_uring.** Kernel-side completion queue. No per-syscall thread hop. Lower tail latency under contention. Requires Linux ≥ 5.6 (basic) / 5.11 (mature feature set). Single ring per thread.
@@ -129,7 +129,7 @@ pub async fn read_dir(path: &Path) -> io::Result<impl Stream<Item = io::Result<D
 
 - One io_uring thread per WAL disk plus one for the engine.
 - Eliminates contention between disks at the kernel level.
-- Pros: matches the parallelism story of [`design-wal.md`](design/design-wal.md) §3.
+- Pros: matches the parallelism story of [`design-wal.md`](design-wal.md) §3.
 - Cons: more threads; more complexity in routing operations.
 
 **Selected: Topology A for V1; revisit Topology B if benchmarks show single-thread io_uring becomes the bottleneck.** Topology A still gets per-disk parallelism *inside* the ring (multiple SQEs in flight to different fds in parallel).
@@ -157,7 +157,7 @@ io_uring's safety contract: while a SQE is in flight, the buffer must not be rea
 
 **Project rule:** all callers use the same owned-buffer pattern even on the fallback backend. This means the WAL `Segment::write` accepts `Vec<u8>` and gets it back; no `&[u8]` passed across an `await` boundary.
 
-**Pool reuse.** A small per-disk free-list of fixed-size 64 KiB buffers is sufficient for WAL durable-flush coalescing (matches `wal_flush_batch_bytes` default in [`design-wal.md`](design/design-wal.md) §4.3). The engine snapshot path uses 1 MiB buffers (matches snapshot chunk size). No global pool — each subsystem owns its own.
+**Pool reuse.** A small per-disk free-list of fixed-size 64 KiB buffers is sufficient for WAL durable-flush coalescing (matches `wal_flush_batch_bytes` default in [`design-wal.md`](design-wal.md) §4.3). The engine snapshot path uses 1 MiB buffers (matches snapshot chunk size). No global pool — each subsystem owns its own.
 
 **Fixed buffers (registered).** `IORING_REGISTER_BUFFERS` lets us pre-register buffers for zero-copy submission. **Deferred to V2** unless profiling shows submission overhead is a bottleneck.
 
@@ -168,7 +168,7 @@ io_uring's safety contract: while a SQE is in flight, the buffer must not be rea
 All `AsyncFile` operations return `std::io::Result<T>`. io_uring CQE error codes are mapped to `io::Error` with the same `ErrorKind` as the equivalent blocking syscall. Callers (WAL, engine) cannot distinguish backend from the error.
 
 Specific cases:
-- **EIO from fdatasync.** Bubbles up. WAL fsync worker treats this as "disk failed" per [`design-wal.md`](design/design-wal.md) §8.1.
+- **EIO from fdatasync.** Bubbles up. WAL fsync worker treats this as "disk failed" per [`design-wal.md`](design-wal.md) §8.1.
 - **ENOSPC.** Treated as "disk full"; WAL acceptor stops fsync; same recovery path as EIO.
 - **Cancellation.** If the future is dropped before completion on the io_uring backend, `tokio-uring` issues an `IORING_OP_ASYNC_CANCEL`. The buffer is held until the cancel completes (no premature drop).
 
@@ -193,4 +193,4 @@ The simulated backend supports failure injection: `SimDisk::set_full()`, `SimDis
 - **Fixed buffer registration**: defer to V2 unless WAL p99 fsync latency benchmark shows submission-side overhead.
 - **Direct I/O (O_DIRECT)**: not pursued; the kernel page cache is acceptable for WAL given we always `fdatasync` before ack.
 - **Submission batching (SQE link chains)**: io_uring supports linking multiple SQEs (e.g. `write` then `fsync`) into one submission. Could shave a hop on the WAL hot path. Defer to V2; measure first.
-- **Per-disk topology B**: revisit once we have multi-disk benchmark numbers from [`plan.md`](plan.md) §1 P2 M3.
+- **Per-disk topology B**: revisit once we have multi-disk benchmark numbers from [`plan.md`](../plan.md) §1 P2 M3.

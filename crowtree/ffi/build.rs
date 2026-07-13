@@ -61,11 +61,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("cargo:rerun-if-env-changed=CONDA_PREFIX");
 
-    // liburing (io_uring reactor, plan-tree #11 Phase 0/1) -- Linux-only, no
+    // liburing (io_uring reactor) -- Linux-only, no
     // macOS build exists, so reactor.cpp/file_async_page_store.cpp are
     // excluded from the compiled set entirely when not found, mirroring
     // crowtree/CMakeLists.txt's CROWTREE_HAVE_LIBURING gate exactly (same
-    // reasoning: design-crowtree-async.md §10's macOS dev-path note).
+    // reasoning: design-crowtree-engine.md §3.5's macOS dev-path note).
     let liburing_dir = conda_prefix.as_ref().filter(|prefix| {
         prefix.join("include").join("liburing.h").is_file()
             && (prefix.join("lib").join("liburing.so").is_file()

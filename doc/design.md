@@ -462,17 +462,21 @@ The metric and log signals required by [requirement.md §13.2](requirement.md#13
 
 ## 11. Open Design Questions
 
-These are intentional gaps left for sub-topic docs or for a future iteration. They are not requirement gaps.
+This section originally listed gaps left for the sub-topic docs to fill in. All
+of them have since been resolved there:
 
-- **Exact lease duration formula.** Should be a function of heartbeat interval, observed skew, and a safety margin. To be specified in [`design-leader-election.md`](design/design-leader-election.md).
-- **Repair-task cadence and trigger heuristics.** Default scan period, gap-age threshold, batch size. To be specified in [`design-parallel-slots.md`](design/design-parallel-slots.md).
-- **WAL segment rotation policy.** Size threshold and retention policy. To be specified in [`design-wal.md`](design/design-wal.md).
-- **Joint-consensus quorum overlap proof for asymmetric transitions.** E.g. when going 3 → 5 with the new two members not yet caught up, what is the safe ordering of catch-up vs vote-eligibility? To be specified in [`design-reconfiguration.md`](design/design-reconfiguration.md).
-- **Compaction policy for the storage engine.** When are tombstones safe to drop? Two watermarks (snapshot-slot and safe-slot) must both pass. Exact policy to be specified in [`design-state-machine.md`](design/design-state-machine.md).
-- **Snapshot transfer chunk size and throttling defaults.** Network-friendly defaults; pluggable.
-- **Group-0 special handling during simultaneous topology + Group-0 membership change.** Likely serialized by holding a Group-0 leader lease, but the sequencing must be made explicit.
+| Question | Resolved in |
+| --- | --- |
+| Exact lease duration formula | [`design-leader-election.md §6.3/§10`](design/design-leader-election.md#63-clock-skew-assumption) — `effective_lease = lease_duration - max_clock_skew`, with tuned defaults per deployment profile. |
+| Repair-task cadence and trigger heuristics | [`design-parallel-slots.md`](design/design-parallel-slots.md) — `gap_age_threshold` (200 ms), `gap_count_threshold` (0.5×window), `repair_tick` (50 ms), `max_concurrent_repairs` (4). |
+| WAL segment rotation policy | [`design-wal.md §3.4`](design/design-wal.md#34-segment-rotation) — size/slot-count triggers. |
+| Joint-consensus quorum overlap for asymmetric transitions (e.g. 3 → 5) | [`design-reconfiguration.md §8.3`](design/design-reconfiguration.md#83-asymmetric-transitions-and-open-question) — new members stay non-voting through catch-up in the joint phase. |
+| Compaction policy for the storage engine | [`design-state-machine.md §7`](design/design-state-machine.md#7-compaction-policy) — gated on `min(snapshot_slot, safe_slot)`. |
+| Snapshot transfer chunk size / throttling defaults | [`design-state-machine.md §10`](design/design-state-machine.md#10-tunables-and-defaults) — `snapshot_chunk_bytes` default 1 MiB. |
+| Group-0 special handling during simultaneous topology + Group-0 membership change | [`design-reconfiguration.md §7.2`](design/design-reconfiguration.md#72-serializing-topology-changes-with-group-0-membership-change) — Group-0 membership changes pause data-group topology changes. |
 
-None of these block design completeness; they refine numbers and corner-case ordering.
+No open design questions remain at this level; new ones, if any, should be
+tracked in the relevant sub-topic doc directly rather than here.
 
 ---
 

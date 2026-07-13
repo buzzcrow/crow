@@ -1,7 +1,7 @@
 # CrowKV - Design: Reconfiguration
 
-Depends on: [`requirement.md`](requirement.md), [`design.md`](design.md), [`design-leader-election.md`](design/design-leader-election.md)
-Satisfies: [requirement.md §9.1](requirement.md#91-reconfiguration), prerequisites of [requirement.md §9.2](requirement.md#92-rolling-upgrade)
+Depends on: [`requirement.md`](../requirement.md), [`design.md`](../design.md), [`design-leader-election.md`](design-leader-election.md)
+Satisfies: [requirement.md §9.1](../requirement.md#91-reconfiguration), prerequisites of [requirement.md §9.2](../requirement.md#92-rolling-upgrade)
 
 This document specifies how a CrowKV group safely changes its membership while preserving consensus safety. The design is Raft-style joint consensus, adapted to CrowKV's Multi-Paxos log.
 
@@ -28,7 +28,7 @@ CrowKV supports membership changes within a single group. Specifically:
 - **Replace a member.** Implemented as add-then-remove (or vice versa), each as a single-member change.
 - **Change the leadership of the group.** Triggered as a side effect when removing the current leader.
 
-Out of scope ([requirement.md §2](requirement.md#2-non-goals-out-of-scope)):
+Out of scope ([requirement.md §2](../requirement.md#2-non-goals-out-of-scope)):
 
 - Changing `num_groups` (the total number of groups in the cluster) — fixed at cluster creation.
 - Splitting or merging groups — not supported.
@@ -112,7 +112,7 @@ By requiring catch-up *before* proposing the final `ConfigChange`, we ensure tha
 
 ### 4.3 Snapshot install protocol
 
-Defined in [§8.4 of design.md](design.md#84-snapshot-and-install) and `design-state-machine.md` §6 (snapshot import). Resumable, throttled, end-to-end CRC.
+Defined in [§8.4 of design.md](../design.md#84-snapshot-and-install) and `design-state-machine.md` §6 (snapshot import). Resumable, throttled, end-to-end CRC.
 
 ### 4.4 Catch-up termination criterion
 
@@ -163,7 +163,7 @@ Transferring leadership is needed in two scenarios:
 2. Leader sends a special `TimeoutNow` RPC to `T`. This tells `T` to start an election immediately at `term + 1`.
 3. Old leader stops accepting new client writes; responds `NotLeader { hint = T }` for in-flight requests.
 4. `T` runs election, wins (since it is up-to-date and others see its higher term), runs bulk Phase-1, becomes leader.
-5. Old leader, on observing the new term in any RPC response, steps down ([§8 of design-leader-election.md](design/design-leader-election.md#8-step-down-triggers)).
+5. Old leader, on observing the new term in any RPC response, steps down ([§8 of design-leader-election.md](design-leader-election.md#8-step-down-triggers)).
 
 This is the same `TransferLeadership` pattern as in Raft. It avoids the latency of a normal randomized-timeout election.
 
@@ -241,7 +241,7 @@ The argument is the same as Raft 2014's. CrowKV's per-slot Paxos and Raft's mono
 
 ### 8.3 Asymmetric transitions and "open question"
 
-The case 3 → 5 with the new two members not yet caught up was flagged as an open question in [§11 of design.md](design.md#11-open-design-questions). The answer above resolves it: catch-up happens during the joint phase, while the new members are non-voting; only after catch-up is the final `ConfigChange(C_new)` proposed, at which point new members are voting and the both-quorum invariant has been preserved throughout.
+The case 3 → 5 with the new two members not yet caught up was flagged as an open question in [§11 of design.md](../design.md#11-open-design-questions). The answer above resolves it: catch-up happens during the joint phase, while the new members are non-voting; only after catch-up is the final `ConfigChange(C_new)` proposed, at which point new members are voting and the both-quorum invariant has been preserved throughout.
 
 ---
 
