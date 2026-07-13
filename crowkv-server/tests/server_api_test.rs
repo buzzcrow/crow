@@ -340,6 +340,124 @@ async fn remove_remote_not_found() {
 }
 
 #[tokio::test]
+async fn step_down_via_api_flips_leader_to_follower() {
+    let server = start_server().await;
+
+    // Single-voter group (quorum 1) should self-elect quickly.
+    let mut leader_id = 0u64;
+    for _ in 0..40 {
+        let topo: Value = client()
+            .get(format!("{}/topology", server.base_url()))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        leader_id = topo["stores"][0]["groups"][0]["leader_id"].as_u64().unwrap_or(0);
+        if leader_id != 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(leader_id, 1, "single replica should self-elect as leader");
+
+    let resp: Value = client()
+        .post(format!("{}/stores/0/groups/1/step-down", server.base_url()))
+        .json(&serde_json::json!({"reason": "test"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp["accepted"], true,
+        "leader should accept its own step-down: {resp}"
+    );
+    assert_eq!(resp["current_leader_id"], 1);
+
+    let topo: Value = client()
+        .get(format!("{}/topology", server.base_url()))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let role = topo["stores"][0]["groups"][0]["local_replica"]["role"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        role, "follower",
+        "role should flip immediately, before the election driver re-elects"
+    );
+}
+
+#[tokio::test]
+async fn step_down_rejects_when_not_leader() {
+    let server = start_server().await;
+
+    // Wait for the single-voter group to self-elect before the first
+    // step-down, so this test isn't racing the election driver's first
+    // tick.
+    for _ in 0..40 {
+        let topo: Value = client()
+            .get(format!("{}/topology", server.base_url()))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if topo["stores"][0]["groups"][0]["leader_id"].as_u64().unwrap_or(0) != 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    // First step-down succeeds (self-elected leader) and flips to follower.
+    let resp: Value = client()
+        .post(format!("{}/stores/0/groups/1/step-down", server.base_url()))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(resp["accepted"], true);
+
+    // Immediately retrying while still a follower must be rejected by
+    // the strict fence (not leader).
+    let resp: Value = client()
+        .post(format!("{}/stores/0/groups/1/step-down", server.base_url()))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp["accepted"], false,
+        "a follower must reject step-down: {resp}"
+    );
+}
+
+#[tokio::test]
+async fn step_down_group_not_found() {
+    let server = start_server().await;
+    let resp = client()
+        .post(format!("{}/stores/0/groups/99/step-down", server.base_url()))
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
 async fn topology_export() {
     let server = start_server().await;
     let resp: Value = client()

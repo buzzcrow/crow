@@ -1,10 +1,12 @@
 //! C6 end-to-end: spawn `crowkv-server`, create a store/group through the
-//! management API, then via the gRPC `KvClient` exercise put → get →
-//! delete → get-not-found.
+//! management API, then via `crowkv-client`'s `CrowkvClient` exercise
+//! put → get → delete → get-not-found → scan. (C6's own gRPC `KvClient`
+//! wrapper is gone -- see `doc/plan-client.md` §5/§6 Issue 4 -- so this
+//! now exercises the real client library `crowkv-web`/`crowkv-cli` use.)
 
 use std::time::Duration;
 
-use crowkv_console_shared::clients::grpc::{GetOutcome, KvClient};
+use crowkv_client::{ClientConfig, CrowkvClient, GetOutcome, ReadMode};
 use crowkv_console_shared::clients::http::ServerClient;
 use crowkv_console_shared::config::NodeEntry;
 use crowkv_console_shared::lifecycle::{self, crowkv_server_bin, DeployRequest};
@@ -48,6 +50,7 @@ async fn store_grpc_endpoint(mgmt_url: &str, store_id: u64) -> String {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn put_get_delete_cycle() {
     let Some((pid, mgmt_url)) = spawn_server().await else {
         eprintln!("skipping: crowkv-server binary not built");
@@ -77,44 +80,62 @@ async fn put_get_delete_cycle() {
         .expect("wait_for_leader");
 
     let endpoint = store_grpc_endpoint(&mgmt_url, store_id).await;
-    let mut kv = KvClient::connect(endpoint).await.expect("connect");
-
-    // Use the group created explicitly via the management API.
+    // `CrowkvClient` normally discovers leaders via `/topology`; here we
+    // already know the endpoint (just resolved it above), so seed it
+    // directly rather than standing up topology discovery for a
+    // single-node test.
+    let kv = CrowkvClient::new(ClientConfig::new(Vec::new()));
+    kv.seed_leader(store_id, group_id, endpoint.clone());
 
     // Put.
-    let out = kv.put(group_id, b"hello", b"world", 0, 0).await.expect("put");
+    let out = kv
+        .put(store_id, group_id, b"hello", b"world", None)
+        .await
+        .expect("put");
     assert_ne!(out.request_id, 0);
 
     // Get → Found.
-    let got = kv.get(group_id, b"hello").await.expect("get");
+    let got = kv
+        .get(store_id, group_id, b"hello", ReadMode::Linearizable, None)
+        .await
+        .expect("get");
     match got {
         GetOutcome::Found { value, .. } => assert_eq!(value, b"world"),
         GetOutcome::NotFound => panic!("expected Found"),
     }
 
     // Delete.
-    let _ = kv.delete(group_id, b"hello", 0, 0).await.expect("delete");
+    let _ = kv
+        .delete(store_id, group_id, b"hello", None)
+        .await
+        .expect("delete");
 
     // Get → NotFound.
-    let got = kv.get(group_id, b"hello").await.expect("get after delete");
+    let got = kv
+        .get(store_id, group_id, b"hello", ReadMode::Linearizable, None)
+        .await
+        .expect("get after delete");
     assert!(matches!(got, GetOutcome::NotFound));
 
     // Scan now goes through the real RPC. Seed three keys, scan with
     // a prefix, and assert sorted output + correct truncation.
     let _ = kv
-        .put(group_id, b"alpha/1", b"a1", 0, 0)
+        .put(store_id, group_id, b"alpha/1", b"a1", None)
         .await
         .expect("seed alpha/1");
     let _ = kv
-        .put(group_id, b"alpha/2", b"a2", 0, 0)
+        .put(store_id, group_id, b"alpha/2", b"a2", None)
         .await
         .expect("seed alpha/2");
     let _ = kv
-        .put(group_id, b"beta/1", b"b1", 0, 0)
+        .put(store_id, group_id, b"beta/1", b"b1", None)
         .await
         .expect("seed beta/1");
 
-    let out = kv.scan(group_id, b"alpha/", 0).await.expect("scan");
+    let out = kv
+        .scan(store_id, group_id, b"alpha/", 0, ReadMode::Linearizable)
+        .await
+        .expect("scan");
     assert!(!out.truncated);
     assert_eq!(out.items.len(), 2);
     assert_eq!(out.items[0].0, b"alpha/1");
@@ -122,40 +143,53 @@ async fn put_get_delete_cycle() {
     assert_eq!(out.items[1].0, b"alpha/2");
 
     // Truncation: limit < matching count.
-    let out = kv.scan(group_id, b"alpha/", 1).await.expect("scan limit=1");
+    let out = kv
+        .scan(store_id, group_id, b"alpha/", 1, ReadMode::Linearizable)
+        .await
+        .expect("scan limit=1");
     assert!(out.truncated);
     assert_eq!(out.items.len(), 1);
     assert_eq!(out.items[0].0, b"alpha/1");
 
     // Empty prefix returns everything; limit=0 means "no limit".
-    let out = kv.scan(group_id, b"", 0).await.expect("scan all");
+    let out = kv
+        .scan(store_id, group_id, b"", 0, ReadMode::Linearizable)
+        .await
+        .expect("scan all");
     assert!(out.items.iter().any(|(k, _)| k == b"beta/1"));
     assert!(!out.truncated);
 
     // Unknown group surfaces ok=false → Err with "group ... not found".
-    let err = kv.scan(9999, b"", 0).await.expect_err("scan missing group");
+    // Seeded at the same real endpoint so the RPC actually reaches the
+    // server and is rejected there (rather than failing client-side on
+    // leader discovery for a group the client never learned about).
+    kv.seed_leader(store_id, 9999, endpoint.clone());
+    let err = kv
+        .scan(store_id, 9999, b"", 0, ReadMode::Linearizable)
+        .await
+        .expect_err("scan missing group");
     assert!(format!("{err}").contains("not found"), "got: {err}");
 
-    // A second connect to the same endpoint must succeed quickly even
-    // after the upstream is briefly idle — this exercises the
-    // process-wide channel cache. We don't measure timing (CI is
-    // flaky); we only assert the call still works and a put + get on
-    // the cached client round-trips.
-    let endpoint = store_grpc_endpoint(&mgmt_url, store_id).await;
-    let mut kv2 = KvClient::connect(&endpoint).await.expect("reconnect (cached)");
+    // A second, independently-constructed `CrowkvClient` seeded at the
+    // same endpoint must also work end-to-end (no shared process-wide
+    // state to warm up -- `crowkv-client`'s connection pool is
+    // per-instance and lazily connected).
+    let kv2 = CrowkvClient::new(ClientConfig::new(Vec::new()));
+    kv2.seed_leader(store_id, group_id, endpoint.clone());
     let _ = kv2
-        .put(group_id, b"cached", b"hit", 0, 0)
+        .put(store_id, group_id, b"cached", b"hit", None)
         .await
-        .expect("put on cached client");
-    match kv2.get(group_id, b"cached").await.expect("get on cached client") {
+        .expect("put on second client");
+    match kv2
+        .get(store_id, group_id, b"cached", ReadMode::Linearizable, None)
+        .await
+        .expect("get on second client")
+    {
         GetOutcome::Found { value, .. } => assert_eq!(value, b"hit"),
-        GetOutcome::NotFound => panic!("expected Found via cached channel"),
+        GetOutcome::NotFound => panic!("expected Found via second client"),
     }
 
     // Cleanup.
     let _ = lifecycle::stop_pid(pid);
     tokio::time::sleep(Duration::from_millis(50)).await;
-    // Drop the cached channel so subsequent runs of the same test
-    // process don't reuse a dead connection.
-    KvClient::invalidate_cache(&endpoint);
 }

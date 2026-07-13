@@ -90,6 +90,7 @@ impl ReplicaClient for PxRemoteReplica {
         ballot: PxBallot,
         term: crate::paxos::PxTerm,
         group_id: u64,
+        membership_epoch: u64,
     ) -> Result<PxPrepareReply, PxReplicaError> {
         let mut client = match self.get_client().await {
             Ok(c) => c.clone(),
@@ -109,6 +110,7 @@ impl ReplicaClient for PxRemoteReplica {
                 request_create_ms: 0,
                 group_id,
                 term,
+                membership_epoch,
             })
             .await
         {
@@ -121,7 +123,11 @@ impl ReplicaClient for PxRemoteReplica {
         #[allow(clippy::cast_possible_truncation)]
         self.metrics.record_ok(started.elapsed().as_millis() as u64);
 
-        if resp.term_stale {
+        if resp.epoch_mismatch {
+            Ok(PxPrepareReply::EpochMismatch {
+                responder_epoch: resp.membership_epoch,
+            })
+        } else if resp.term_stale {
             Ok(PxPrepareReply::TermStale {
                 slot: resp.slot,
                 new_term: resp.term,
@@ -145,6 +151,7 @@ impl ReplicaClient for PxRemoteReplica {
         client_id: Option<u64>,
         seq: Option<u64>,
         group_id: u64,
+        membership_epoch: u64,
     ) -> Result<PxAcceptReply, PxReplicaError> {
         // Route `Accept` through the per-peer bidi PxLearnerStream rather
         // than a one-shot unary RPC. The wire-level conversion
@@ -171,6 +178,7 @@ impl ReplicaClient for PxRemoteReplica {
             client_id: client_id.unwrap_or(0),
             seq: seq.unwrap_or(0),
             group_id,
+            membership_epoch,
         };
 
         let started = Instant::now();
@@ -184,7 +192,11 @@ impl ReplicaClient for PxRemoteReplica {
         #[allow(clippy::cast_possible_truncation)]
         self.metrics.record_ok(started.elapsed().as_millis() as u64);
 
-        if resp.term_stale {
+        if resp.epoch_mismatch {
+            Ok(PxAcceptReply::EpochMismatch {
+                responder_epoch: resp.membership_epoch,
+            })
+        } else if resp.term_stale {
             Ok(PxAcceptReply::TermStale {
                 slot: resp.slot,
                 new_term: resp.term,

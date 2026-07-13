@@ -1,4 +1,4 @@
-//! Standalone client library for CrowKV.
+//! Standalone client library for `CrowKV`.
 //!
 //! Wraps `crowkv`'s generated `KvService` gRPC client with the pieces
 //! `requirement.md` §10 and `doc/plan-client.md` §5 (C1-C3) call for:

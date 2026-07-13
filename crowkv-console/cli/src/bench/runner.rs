@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use crowkv_console_shared::clients::grpc::{GetOutcome, KvClient, WriteOutcome};
+use crowkv_client::{ClientConfig, CrowkvClient, GetOutcome, ReadMode, WriteOutcome};
 use crowkv_console_shared::error::{Error, Result};
 use tracing::{debug, info, warn};
 
@@ -146,19 +146,26 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
         "bench: starting"
     );
 
-    // Build connection pool. Each entry is a base `KvClient` whose inner
-    // tonic `Channel` is cheap to clone per worker.
-    let mut pool: Vec<KvClient> = Vec::with_capacity(cfg.connections as usize);
-    for i in 0..cfg.connections {
-        match KvClient::connect(cfg.endpoint.clone()).await {
-            Ok(c) => pool.push(c),
-            Err(e) => {
-                warn!(idx = i, error = %e, "bench: connection failed; aborting");
-                return Err(e);
-            }
-        }
-    }
-    let pool = Arc::new(pool);
+    // Single `CrowkvClient`, seeded directly at `cfg.endpoint` (bench
+    // targets one already-known leader, no `/topology` discovery needed --
+    // an empty mgmt-seed list is fine). `pool_size_per_endpoint` reproduces
+    // the old runner's "N independent gRPC channels, round-robined" pool
+    // via the client's own per-endpoint channel pool, so every worker
+    // shares one client and its internal pool rather than owning a
+    // channel directly.
+    //
+    // `single_attempt` is mandatory here, not a knob: bench measures raw
+    // per-RPC latency/error-rate against one specific endpoint. Any
+    // client-side retry/redirect (the default, resilient behavior every
+    // other `CrowkvClient` caller wants) would silently convert a real
+    // `NotLeaderHint`/timeout into a slower success, corrupting exactly
+    // the numbers this tool exists to produce.
+    let mut client_config = ClientConfig::new(Vec::new());
+    client_config.pool_size_per_endpoint = cfg.connections as usize;
+    client_config.retry.single_attempt = true;
+    let client = CrowkvClient::new(client_config);
+    client.seed_leader(cfg.store_id, cfg.group_id, cfg.endpoint.clone());
+    let client = Arc::new(client);
 
     let started_at = Utc::now();
     let started_instant = Instant::now();
@@ -189,13 +196,10 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
 
     let mut handles = Vec::with_capacity(cfg.threads as usize);
     for worker_id in 0..cfg.threads {
-        let pool = pool.clone();
+        let client = client.clone();
         let cfg2 = cfg.clone();
         let counters = counters[worker_id as usize].clone();
         let handle = tokio::spawn(async move {
-            // Each worker clones its assigned base client (per-worker
-            // Channel is multiplexed; cloning is cheap).
-            let mut kv = pool[worker_id as usize % pool.len()].clone();
             // Per-worker rng seed = worker_id for determinism.
             let mut gen = OpGen::new(
                 u64::from(worker_id) ^ 0x9E37_79B9_7F4A_7C15,
@@ -203,7 +207,7 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
                 cfg2.value_size,
             );
             run_worker(
-                &mut kv,
+                &client,
                 &mut gen,
                 &cfg2,
                 measure_start,
@@ -306,7 +310,7 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
 /// ordering doesn't matter since the snapshotter only sums and prints,
 /// and the final report is computed from the returned `OpStats`.
 async fn run_worker(
-    kv: &mut KvClient,
+    kv: &CrowkvClient,
     gen: &mut OpGen,
     cfg: &BenchConfig,
     measure_start: Instant,
@@ -338,7 +342,10 @@ async fn run_worker(
         let key = gen.next_key();
         let t0 = Instant::now();
         let (ok, not_found) = match kind {
-            OpKind::Read => match kv.get(cfg.group_id, &key).await {
+            OpKind::Read => match kv
+                .get(cfg.store_id, cfg.group_id, &key, ReadMode::Linearizable, None)
+                .await
+            {
                 Ok(GetOutcome::Found { .. }) => (true, false),
                 Ok(GetOutcome::NotFound) => (true, true),
                 Err(_) => (false, false),
@@ -346,19 +353,28 @@ async fn run_worker(
             OpKind::Write => {
                 let value = gen.make_value();
                 let client_id = u64::from(worker_id) + 1;
-                match kv.put(cfg.group_id, &key, &value, client_id, iter).await {
+                match kv
+                    .put(cfg.store_id, cfg.group_id, &key, &value, Some((client_id, iter)))
+                    .await
+                {
                     Ok(WriteOutcome { .. }) => (true, false),
                     Err(_) => (false, false),
                 }
             }
             OpKind::Delete => {
                 let client_id = u64::from(worker_id) + 1;
-                match kv.delete(cfg.group_id, &key, client_id, iter).await {
+                match kv
+                    .delete(cfg.store_id, cfg.group_id, &key, Some((client_id, iter)))
+                    .await
+                {
                     Ok(_) => (true, false),
                     Err(_) => (false, false),
                 }
             }
-            OpKind::List => match kv.scan(cfg.group_id, b"", 1).await {
+            OpKind::List => match kv
+                .scan(cfg.store_id, cfg.group_id, b"", 1, ReadMode::Linearizable)
+                .await
+            {
                 Ok(_) => (true, false),
                 Err(_) => (false, false),
             },

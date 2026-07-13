@@ -25,6 +25,7 @@ fn roundtrip_config() {
                 voting: true,
             },
         ],
+        ..Default::default()
     };
     let encoded = cfg.encode();
     let decoded = PxGroupConfig::decode(&encoded).expect("decode");
@@ -51,6 +52,7 @@ async fn store_save_then_load_roundtrip() {
                 voting: true,
             },
         ],
+        ..Default::default()
     };
 
     store.save(&cfg).await.expect("save");
@@ -79,6 +81,7 @@ async fn store_save_overwrites_previous_config() {
             endpoint: String::new(),
             voting: true,
         }],
+        ..Default::default()
     };
     store.save(&cfg1).await.expect("save 1");
 
@@ -97,6 +100,7 @@ async fn store_save_overwrites_previous_config() {
                 voting: true,
             },
         ],
+        ..Default::default()
     };
     store.save(&cfg2).await.expect("save 2");
 
@@ -119,6 +123,7 @@ async fn store_isolates_groups_by_store_and_group_id() {
             endpoint: String::new(),
             voting: true,
         }],
+        ..Default::default()
     };
     store_a.save(&cfg_a).await.expect("save a");
 

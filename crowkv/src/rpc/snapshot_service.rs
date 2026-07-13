@@ -82,6 +82,7 @@ impl SnapshotService for PxSnapshotService {
         let mut items = vec![SnapshotStreamItem {
             payload: Some(snapshot_stream_item::Payload::Header(SnapshotHeader {
                 term_at_slot,
+                membership_epoch: group.membership_epoch(),
             })),
         }];
         items.extend(

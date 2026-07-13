@@ -40,6 +40,15 @@ pub struct PxGroupConfig {
     pub group_id: PxGroupId,
     pub term: PxTerm,
     pub members: Vec<PxGroupMember>,
+    /// Membership-epoch fence counter (`PxGroup::membership_epoch`),
+    /// persisted so a restarted node resumes at the same epoch it left
+    /// off at rather than falling back to `0` and rejecting every
+    /// `Prepare`/`Accept` from peers who are already past `0`. Absent in
+    /// config files written before this field existed; defaults to `0`
+    /// via `#[serde(default)]`, matching a group that has never had a
+    /// voting-set change.
+    #[serde(default)]
+    pub membership_epoch: u64,
 }
 
 impl PxGroupConfig {

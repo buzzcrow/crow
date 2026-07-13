@@ -61,12 +61,10 @@ async fn main() {
         .config_root
         .clone()
         .unwrap_or_else(|| wal_root.parent().unwrap_or_else(|| Path::new("")).join("conf"));
-    let data_root = args.data_root.clone().unwrap_or_else(|| {
-        wal_root
-            .parent()
-            .unwrap_or_else(|| Path::new(""))
-            .join("ctdata")
-    });
+    let data_root = args
+        .data_root
+        .clone()
+        .unwrap_or_else(|| wal_root.parent().unwrap_or_else(|| Path::new("")).join("ctdata"));
     let kv_engine = KvEngineKind::parse(&args.kv_engine);
     let crowtree_backend = crowkv_server::store_registry::parse_crowtree_backend(&args.kv_backend);
     let wal_backend = Arc::new(crowkv::wal::IoBackend::detect());

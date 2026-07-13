@@ -45,3 +45,4 @@ Do not leave empty or fully-completed TODO files in the repo.
 4. **Traceability** — every doc links upstream via section anchors.
 5. **Sub-topic split** — when a design topic exceeds ~200 lines or has independent phases, create `design/design-xxx.md` and add a row to `doc_index.md`.
 6. **TODO hygiene** — delete `todo_plan.md` when all tasks are complete (and remove from `doc_index.md`).
+7. **Raw-readable formatting** — docs are read as raw markdown in most timeß, not rendered. Avoid tables; use definition lists (`- **term**: description`) or nested bullet lists instead. Tables are only acceptable in `doc_index.md` (which is a reference index, not prose). 

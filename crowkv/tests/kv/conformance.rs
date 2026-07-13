@@ -42,9 +42,13 @@ pub fn highest_slot_wins_regardless_of_apply_order(e: &dyn KVEngine) {
 }
 
 pub fn equal_slot_is_idempotent_noop(e: &dyn KVEngine) {
-    e.apply(4, &batch(vec![put(b"k", b"first")])).into_ready().unwrap();
+    e.apply(4, &batch(vec![put(b"k", b"first")]))
+        .into_ready()
+        .unwrap();
     // Re-applying the same slot must not change the stored value.
-    e.apply(4, &batch(vec![put(b"k", b"second")])).into_ready().unwrap();
+    e.apply(4, &batch(vec![put(b"k", b"second")]))
+        .into_ready()
+        .unwrap();
     assert_eq!(e.get(b"k").into_ready(), Some((4, b"first".to_vec())));
 }
 
@@ -126,7 +130,10 @@ pub fn snapshot_export_import_round_trip(source: &dyn KVEngine, target: &dyn KVE
         .into_ready()
         .unwrap();
     source.apply(2, &batch(vec![del(b"a")])).into_ready().unwrap();
-    source.apply(3, &batch(vec![put(b"c", b"3")])).into_ready().unwrap();
+    source
+        .apply(3, &batch(vec![put(b"c", b"3")]))
+        .into_ready()
+        .unwrap();
 
     let (export_at_slot, stream) = source.snapshot_export().expect("snapshot_export should succeed");
     assert_eq!(

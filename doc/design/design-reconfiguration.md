@@ -3,20 +3,21 @@
 Depends on: [`requirement.md`](../requirement.md), [`design.md`](../design.md), [`design-leader-election.md`](design-leader-election.md)
 Satisfies: [requirement.md §9.1](../requirement.md#91-reconfiguration), prerequisites of [requirement.md §9.2](../requirement.md#92-rolling-upgrade)
 
-This document specifies how a CrowKV group safely changes its membership while preserving consensus safety. The design is Raft-style joint consensus, adapted to CrowKV's Multi-Paxos log.
+This document specifies how a CrowKV group safely changes its membership while preserving consensus safety. The **shipped** mechanism is direct per-node HTTP mutation of each replica's remote-replica list, persisted to the local `GroupConfigStore`, with a `membership_epoch` exact-match fence. The original Raft-style joint-consensus design (§7) is preserved as a historical decision record.
 
 ## Table of Contents
 
 - [1. Scope and Supported Transitions](#1-scope-and-supported-transitions)
-- [2. The Joint-Consensus Pattern](#2-the-joint-consensus-pattern)
-- [3. Reconfiguration State Machine](#3-reconfiguration-state-machine)
-- [4. New-Member Bootstrap](#4-new-member-bootstrap)
-- [5. Member Removal](#5-member-removal)
-- [6. Leader Transfer](#6-leader-transfer)
-- [7. Group-0 Special Cases](#7-group-0-special-cases)
-- [8. Quorum-Overlap Safety Argument](#8-quorum-overlap-safety-argument)
+- [2. Direct Per-Node Mutation Model](#2-direct-per-node-mutation-model)
+- [3. New-Member Bootstrap](#3-new-member-bootstrap)
+- [4. Member Removal](#4-member-removal)
+- [5. Leader Transfer](#5-leader-transfer)
+- [6. The `membership_epoch` Fence](#6-the-membership_epoch-fence)
+- [7. Group-0 Special Cases (historical)](#7-group-0-special-cases-historical)
+- [8. Safety Argument](#8-safety-argument)
 - [9. Failure During Reconfiguration](#9-failure-during-reconfiguration)
 - [10. Tunables and Defaults](#10-tunables-and-defaults)
+- [11. Design History](#11-design-history)
 
 ---
 
@@ -35,151 +36,141 @@ Out of scope ([requirement.md §2](../requirement.md#2-non-goals-out-of-scope)):
 - Going below 3 voting members — not supported (a 1-member group has no fault tolerance).
 - Going above 7 voting members — not in the initial scope; quorum size grows linearly with membership and the marginal availability gain past 7 is small.
 
-**Granularity:** every reconfiguration moves *exactly one member* in or out at a time. To go 3 → 5, do two single-member additions in sequence. This keeps the safety argument simple and matches Raft 2014's recommendation.
+**Granularity:** every reconfiguration moves *exactly one member* in or out at a time. To go 3 → 5, do two single-member additions in sequence. Under the exact-match `membership_epoch` fence (§6) this single-member-at-a-time rule is no longer required for safety, but it is still recommended because it minimizes the propagation window during which writes stall.
 
 ---
 
-## 2. The Joint-Consensus Pattern
+## 2. Direct Per-Node Mutation Model
 
-The naive idea — "the leader writes a single `ConfigChange` log entry that swaps the members" — is unsafe. Between the moment the new config is *chosen* and the moment every member has *applied* it, there is a window where different members disagree about who is in the quorum, and two disjoint majorities could both make decisions.
+The shipped design does not use `ConfigChange` log entries or a joint configuration. Instead, the operator (or `crowkv-console`) mutates the remote-replica list on each node independently through the HTTP management API:
 
-Joint consensus closes this window by passing through an intermediate **joint configuration** `C_old ∪ C_new`:
+- `POST /stores/:sid/groups/:gid/remotes` — add one or more remote replicas.
+- `DELETE /stores/:sid/groups/:gid/remotes/:rid` — remove a remote replica.
 
-```
-   C_old ────► C_old ∪ C_new ────► C_new
-              (joint config)
-```
+Each call is atomically persisted to the local `GroupConfigStore` config file (atomic `tmp` + `fsync` + rename) and applied synchronously to the in-memory `PxGroup`. `membership_epoch` is bumped by exactly one when the call changes the voting set. A non-voting member addition/removal does **not** change the epoch or the quorum size.
 
-While the joint config is in effect, **every** decision (write, leader election) requires:
+Because there is no cluster-wide `ConfigChange` log, the quorum view is local to each node. This is safe because the `membership_epoch` fence (§6) forces all `Prepare`/`Accept` RPCs to be evaluated at the same epoch before their replies can count toward a quorum. A leader whose local epoch differs from a peer's rejects that peer's reply and converges upward (§6.3).
 
-- A quorum from `C_old`, **and**
-- A quorum from `C_new`.
+### 2.1 Propagation window and write stalls
 
-This is "two quorums in series" and it is what guarantees safety. Two majorities under `C_old ∪ C_new` always intersect with both `C_old`-majorities and `C_new`-majorities, so no two disjoint decisions can be made even during the transition.
+A membership mutation is applied to one node per HTTP call. Between the first node's call and the last node's call, different nodes transiently disagree on the `membership_epoch`. During this window a leader that has already adopted the new epoch will see `epoch_mismatch` from nodes that have not yet adopted it. Writes are rejected by the acceptors and the leader's `propose` loop self-heals by adopting the responder's higher epoch (up to `max(own, peer)`) and retrying the same slot.
 
-CrowKV uses exactly this pattern, encoded as two `ConfigChange` entries in the log:
-
-1. `ConfigChange(joint = C_old ∪ C_new)` — enters joint mode.
-2. `ConfigChange(C_new)` — exits joint mode, only the new config is active.
-
-Both entries flow through normal consensus (i.e. each is a slot in the WAL and goes through Phase 2). The reconfiguration is *complete* when entry 2 is **applied**, not when it is *chosen* — see §8.
+This is a deliberate availability/safety trade-off: writes stall for the cluster-wide duration of the fan-out (one HTTP round-trip per node), then resume immediately. The stall is bounded, self-healing, and loudly visible in the `epoch_mismatch` response bit rather than silently using a stale quorum.
 
 ---
 
-## 3. Reconfiguration State Machine
-
-The leader drives a small state machine for each in-progress reconfiguration. Followers simply observe the log entries and react.
-
-| State | Triggered by | Allowed actions | Exit on |
-| --- | --- | --- | --- |
-| `Idle` | initial / steady state | Normal writes only | `ProposeJoint` (admin RPC) |
-| `Proposing Joint` | admin issues `ConfigChange(joint)` | Bulk Phase-1 if needed; then Accept the joint entry | Joint entry applied → `JointActive` |
-| `JointActive` | joint entry applied | New writes require both-quorums; new members may be added as non-voting catch-up readers | Catch-up done → `ProposeFinal` |
-| `Proposing Final` | leader proposes `ConfigChange(C_new)` | Same as `Proposing Joint` but with `C_new` payload | Final entry applied → `Idle` |
-
-**Why do we wait for the joint entry to be *applied* (not just *chosen*) before accepting catch-up of new members?**
-
-Because applying the joint entry is the moment the leader's local state machine starts requiring both-quorums for subsequent decisions. If we let the new member become a voting peer earlier, a quorum could be formed using new-side voters before old-side voters had observed the joint config.
-
-Application happens automatically after `Chosen`, with no special handling: the learner sees a `ConfigChange` payload and switches its quorum-eval logic.
-
----
-
-## 4. New-Member Bootstrap
+## 3. New-Member Bootstrap
 
 A new member joining a group has empty WAL and empty engine state. It must be brought up to date before it can vote.
 
-### 4.1 Phases
+### 3.1 Phases
 
 ```
-   1. ConfigChange(joint) is chosen and applied on the leader.
-   2. New member starts as non-voting "learner" (not part of either quorum yet).
-   3. Snapshot install: leader sends a snapshot at slot S.
-   4. WAL catch-up: leader streams WAL records [S+1, current_max_chosen].
-   5. New member reaches `contiguous_applied = current_max_chosen`.
-   6. Leader proposes `ConfigChange(C_new)`. New member is now in `C_new` and voting.
-   7. C_new entry is chosen with both-quorums and applied.
-   8. Reconfiguration complete; group is now in C_new.
+   1. Console ensures the new node hosts the store and places the group on it.
+   2. The new member is added as `voting: false` on every existing node.
+   3. The new member is added as `voting: false` on itself (so it learns remotes).
+   4. Snapshot install: a caught-up peer streams a snapshot to the new member.
+   5. WAL catch-up: the new member follows the leader via normal replication.
+   6. The new member is re-registered with `voting: true` on every node.
+   7. `membership_epoch` is bumped on every node; the new member is now a voting peer.
 ```
 
-Step 6 is allowed because the new member is in `C_new` *but not yet `C_old`*. The both-quorum rule for the C_new entry itself uses the joint config, which includes the new member only on the C_new side.
+### 3.2 Why pre-load before voting
 
-### 4.2 Why pre-load before adding to C_new
+If a new member were added directly with `voting: true` while still empty, then a quorum could form with its empty-state vote. A subsequent leader election under that quorum could elect a leader that has not seen older committed writes — violating Paxos safety.
 
-If a new member were added directly to `C_new` while still empty, then a quorum of `C_new` could form with the new member's vote, even though the new member has none of the previously-decided values. A subsequent leader election under that quorum could elect a leader that has not seen older committed writes — violating Paxos safety.
+By requiring catch-up while the member is non-voting, we ensure that when it first becomes a voting peer it already has all chosen values up to the current `max_chosen`.
 
-By requiring catch-up *before* proposing the final `ConfigChange`, we ensure that when the new member first becomes a voting peer, it already has all chosen values up to `current_max_chosen`.
-
-### 4.3 Snapshot install protocol
+### 3.3 Snapshot install protocol
 
 Defined in [§8.4 of design.md](../design.md#84-snapshot-and-install) and `design-state-machine.md` §6 (snapshot import). Resumable, throttled, end-to-end CRC.
 
-### 4.4 Catch-up termination criterion
+### 3.4 Catch-up termination criterion
 
-The leader continues streaming WAL until the new member's `contiguous_applied` is within `catchup_slack` (default 100 slots) of the leader's `max_chosen`. At that point the leader proposes `ConfigChange(C_new)` and the new member is expected to keep up via normal replication once it becomes voting.
+The leader continues streaming WAL until the new member's `contiguous_applied` is within `catchup_slack` (default 100 slots) of the leader's `max_chosen`. At that point the operator re-adds the member as `voting: true` and the new member is expected to keep up via normal replication once it becomes voting.
 
-If the new member cannot keep up (e.g. slow disk), reconfiguration aborts (§9) and the operator is alerted.
+If the new member cannot keep up (e.g. slow disk), the operator can abort by removing it before flipping the `voting` flag.
 
 ---
 
-## 5. Member Removal
+## 4. Member Removal
 
 Removing a member is simpler than adding one because there is no catch-up to wait for.
 
-### 5.1 Procedure
+### 4.1 Procedure
 
 ```
-   1. ConfigChange(joint = C_old ∪ C_new) where C_new = C_old \ { member_X }.
-   2. Joint applied.
-   3. Member X stops counting in C_new but still counts in C_old; both-quorums still reach without X for any C_new vote.
-   4. ConfigChange(C_new) proposed with both-quorums.
-   5. C_new applied. Member X is no longer in any active config.
-   6. Member X stops sending Accepts, drains in-flight responsibilities, sends step-out RPC to leader.
-   7. Member X may be powered off.
+   1. If the removed member is the current leader, ask it to StepDown first.
+   2. Delete the removed replica as a remote from every surviving peer.
+   3. Delete the local `PxGroup` on the removed member's node.
+   4. The `membership_epoch` is bumped on every node where the voting set changed.
 ```
 
-### 5.2 If the removed member is the leader
+### 4.2 If the removed member is the leader
 
-Leader transfer must happen before the final `ConfigChange(C_new)` is applied; see §6. Otherwise the group can find itself momentarily without a leader at the worst possible moment.
+The console's `DELETE /api/stores/:sid/groups/:gid/replicas/:rid` handler calls `POST /stores/:sid/groups/:gid/step-down` on the leader node first. The leader rejects further proposals, the survivors run a normal election, and only after a new leader is observed does the removal proceed. If the step-down call fails (network partition, crashed process), the console proceeds anyway and the survivors' lease-unrenewable logic eventually elects a new leader.
 
-### 5.3 If the removed member is unreachable
+### 4.3 If the removed member is unreachable
 
-Removal works regardless of reachability: the joint entry only requires a quorum *of those still reachable*. As long as `C_old` still has a quorum without member X (which is true when removing one member from 5 → 4 → ...), reconfiguration proceeds. After C_new applies, member X is irrelevant.
-
-This is how "remove a dead node" is implemented operationally.
+Removal works regardless of reachability. The surviving peers delete the dead replica from their remote lists, and the dead replica's local group is removed if the node is still reachable. The `membership_epoch` bump on each survivor ensures the remaining voters cannot be confused by delayed heartbeat/accept traffic from the removed node once it comes back. The removed node is then absent from every survivor's `remote_replica_info()`.
 
 ---
 
-## 6. Leader Transfer
+## 5. Leader Transfer
 
-Transferring leadership is needed in two scenarios:
+Transferring leadership is needed when:
 
 - The current leader is being removed by reconfiguration.
 - An admin wants to drain a node for maintenance.
 
-### 6.1 Procedure
+### 5.1 Procedure
 
-1. Leader identifies a target follower `T` that is fully caught up (`contiguous_applied = leader's max_chosen`).
-2. Leader sends a special `TimeoutNow` RPC to `T`. This tells `T` to start an election immediately at `term + 1`.
-3. Old leader stops accepting new client writes; responds `NotLeader { hint = T }` for in-flight requests.
-4. `T` runs election, wins (since it is up-to-date and others see its higher term), runs bulk Phase-1, becomes leader.
-5. Old leader, on observing the new term in any RPC response, steps down ([§8 of design-leader-election.md](design-leader-election.md#8-step-down-triggers)).
+1. Admin or console calls `POST /stores/:sid/groups/:gid/step-down` on the leader node.
+2. The leader strictly-fences the request (`self.id == target_leader_id && current term`) and calls `handle_step_down`, becoming a follower.
+3. The old leader stops accepting new client writes; in-flight requests are handled by the new leader once elected.
+4. Followers run a normal randomized-timeout election. The first up-to-date candidate to reach a quorum of the current voting set wins.
+5. The old leader, on observing the new term in any RPC response, steps down.
 
-This is the same `TransferLeadership` pattern as in Raft. It avoids the latency of a normal randomized-timeout election.
+This is not Raft's `TimeoutNow` fast transfer. It avoids the complexity of target-precondition checking and is accepted as sufficient because membership changes are operator-driven.
 
-### 6.2 During reconfiguration
+### 5.2 During reconfiguration
 
 When removing the current leader:
 
-1. Joint config is chosen and applied as usual.
-2. Before proposing `ConfigChange(C_new)`, the leader runs leader transfer to a member that will remain in `C_new`.
-3. The new leader proposes and finalizes `ConfigChange(C_new)`.
-
-This way, the moment `C_new` is applied, the new leader is already a regular voting member in `C_new` and the old leader can cleanly retire.
+1. The console calls step-down on the leader before issuing the removal.
+2. The console waits (bounded, 5 s) for a survivor to report a leader *other than* the removed replica.
+3. The removal proceeds; the new leader's `membership_epoch` now governs the group.
 
 ---
 
-## 7. Group-0 Special Cases
+## 6. The `membership_epoch` Fence
+
+Every `Prepare`/`Accept` RPC carries the proposer's current `membership_epoch`. The acceptor compares it to its own local `membership_epoch`. If they do not match exactly, the acceptor rejects the request with `epoch_mismatch: true` and attaches its own epoch. The proposer then adopts `max(own_epoch, responder_epoch)` and retries the same slot.
+
+### 6.1 Why exact match, not "within 1"
+
+Single-degree membership changes (old/new configs differing by exactly one voting member) have a proven quorum-overlap guarantee: any majority of `N` and any majority of `N±1` always share at least one member. That guarantee does **not** chain transitively across two sequential changes unless the first one fully converges everywhere. A counter-example: `C1 = {1,2,3}` (quorum 2) and `C3 = {1,2,3,4,5}` (quorum 3) have majorities `{2,3}` and `{1,4,5}` that do not intersect. So "one epoch behind is safe" is false in general. The only airtight rule is **exact epoch match**.
+
+### 6.2 What exact match buys
+
+Since a quorum decision can never straddle two epochs, the single-degree-at-a-time restriction stops being a safety requirement. A batch membership change (same voting set delta applied to multiple nodes in one fan-out) is just as safe as a single-member change; it only takes longer to converge.
+
+### 6.3 Convergence and self-healing
+
+Both the proposer and the acceptor converge upward to `max(own, peer)`:
+
+- **Proposer (`PxGroup::propose`):** on `MembershipEpochMismatch`, adopts `responder_epoch` and retries the same slot.
+- **Acceptor (`PxLocalReplica::on_prepare`/`on_accept`, heartbeat catch-up):** on `epoch_mismatch`, adopts `max(own, proposer_epoch)` before returning the rejection.
+
+This bidirectional convergence ensures that even if the leader starts behind, it catches up within the same `propose()` call and the write succeeds as soon as the last straggler adopts the new epoch. The only cost is the bounded fan-out stall (§2.1).
+
+### 6.4 Non-voting members must not count toward quorum
+
+A non-voting catch-up member physically accepts and promises so it can follow the log, but its reply must not count toward the voting quorum. `PxGroup::run_prepare_phase` and `PxGroup::run_accept_phase` only increment `promised`/`accepted` for `RemoteReplicaKind::Real(remote)` when `remote.voting` is true. The local self-count is gated on `replica.voting()`. `PxGroup::propose` and `run_bulk_phase1` reuse `self.quorum()` (voting-only) rather than computing a voting-agnostic threshold.
+
+---
+
+## 7. Group-0 Special Cases (historical)
 
 > **Decision record (2026-07, see `plan-client.md` §6 Issue 1):** `Group-0` as
 > described in this section was never implemented. Topology (per-group
@@ -188,86 +179,46 @@ This way, the moment `C_new` is applied, the new leader is already a regular vot
 > Paxos-replicated system group — see [`requirement.md` §7.1](../requirement.md#71-groups-and-cluster-topology).
 > There is therefore no cluster-wide `config_version`, no recursive
 > reconfiguration case, and no "Group-0 pauses data-group reconfiguration"
-> rule in the shipped system. Kept below for history/reference only, in case
-> a system embedding `crowkv`'s primitives wants to build its own such
-> metadata group on top.
+> rule in the shipped system. The original joint-consensus proposal in this
+> document was also never implemented; see §11 for the design history and the
+> rationale for choosing the shipped model. Kept below for history/reference only.
 
-Group-0 holds the cluster topology (per-group memberships, partitioning rule, `config_version`). Reconfiguring Group-0 itself looks like reconfiguring any other group, but it has two extra constraints.
-
-### 7.1 Topology vs Group-0 membership
-
-A `ConfigChange(joint)` for a *data* group is a write to *Group-0's log* (because Group-0 owns topology). So:
-
-- Reconfiguring data group K → committing two log entries in **Group-0**.
-- Reconfiguring **Group-0 itself** → committing two log entries in Group-0 *and* using joint-consensus for those very entries.
-
-The recursion is well-defined: Group-0's joint-consensus operates on its own membership, exactly like any other group. There is no infinite regress because Group-0 always has *some* current membership; only Group-0 modifies that membership.
-
-### 7.2 Serializing topology changes with Group-0 membership change
-
-If we are simultaneously (a) changing data group K's membership and (b) changing Group-0's own membership, we must serialize these so that observers cannot see an inconsistent topology.
-
-The rule: **Group-0 membership changes pause topology changes.** While Group-0 is in joint mode for its own membership, no `ConfigChange(joint)` for any data group is admitted to its log. Pending data-group reconfigurations wait until Group-0 has exited its own joint mode.
-
-This is conservative and easy to reason about. Throughput cost: minor — Group-0 reconfigurations are rare.
-
-### 7.3 `config_version`
-
-Each topology change increments `config_version` in Group-0. Clients piggy-back this version on every request; if a server sees an older version from a client (or vice versa), it returns the up-to-date one in the response so the client refreshes its cache.
-
-This prevents clients from acting on a stale view of the cluster while topology is changing.
+The original design described Raft-style joint consensus with `C_old ∪ C_new` intermediate configurations, two `ConfigChange` log entries per membership change, and `TimeoutNow` fast leader transfer. The shipped system uses direct per-node HTTP mutation and `membership_epoch` fencing instead. A system embedding `crowkv`'s primitives may still choose to build a joint-consensus layer on top of the `membership_epoch` fence.
 
 ---
 
-## 8. Quorum-Overlap Safety Argument
+## 8. Safety Argument
 
 The safety property we must preserve through reconfiguration is:
 
 > **No two values can be chosen at the same slot.**
 
-Standard Paxos guarantees this when all decisions are evaluated against the same membership. Reconfiguration introduces the risk that two decisions are evaluated against *different* memberships, which could both succeed without overlap. Joint consensus closes that risk.
+### 8.1 The single-epoch case
 
-### 8.1 The single-membership case
-
-For a single fixed membership `M`, Paxos safety says: any two majorities of `M` intersect. Therefore no two distinct values can both be chosen at the same slot.
+For a single fixed `membership_epoch`, standard Paxos safety applies: any two majorities of the voting set intersect. Therefore no two distinct values can both be chosen at the same slot.
 
 ### 8.2 The transition case
 
-Consider a slot `s` and two candidate values `v` and `v'`. Suppose `v` is chosen under `C_old` and `v'` under `C_new`. We must show this cannot happen.
+The only way two different values could be chosen at the same slot is if two disjoint quorums from different epochs both accepted. The `membership_epoch` fence prevents this: a `Prepare`/`Accept` reply is only counted toward quorum if the request's epoch exactly matches the acceptor's epoch. Two quorums can never be formed at different epochs for the same slot, because at least one of them would have required an epoch-mismatched reply and that reply would be rejected.
 
-The key observation: between `C_old` being the *active* config and `C_new` being the *active* config, the **joint** config is the active config. Every decision during the joint phase requires a both-majorities quorum.
+### 8.3 Why the fan-out window is safe
 
-Consider the following exhaustive cases for slot `s`:
+During the fan-out, nodes may transiently disagree on the epoch. A leader whose epoch is ahead sends `Prepare`/`Accept` with the higher epoch. Acceptor nodes still on the old epoch reject with `epoch_mismatch` and adopt the higher epoch. The leader's quorum count is therefore stalled until enough nodes have adopted the new epoch. The moment a quorum with the new epoch is reached, all nodes in that quorum share the same membership view, and Paxos safety holds.
 
-- **Both `v` and `v'` chosen under `C_old`.** Impossible by `C_old` quorum overlap.
-- **Both chosen under `C_new`.** Impossible by `C_new` quorum overlap.
-- **Both chosen under joint.** Impossible because joint requires both `C_old` and `C_new` majorities; the `C_old` overlap kills it.
-- **`v` under `C_old`, `v'` under `C_new`.** For `v'` to be chosen under `C_new`, the `ConfigChange(C_new)` entry must already have been chosen. Per the joint-consensus rule, that entry was chosen under both-quorums, which means a `C_old`-majority was reached at the moment of the joint→C_new transition. This `C_old`-majority intersects the `C_old`-majority that chose `v`. The intersecting acceptor would have had to accept both `v` (at slot `s`) and the eventual no-op-or-replay at slot `s` under the new term — Paxos's per-slot rule (highest-ballot-accepted-value wins) requires that the new leader re-propose `v`, not `v'`. Contradiction.
-- **`v` under `C_old`, `v'` under joint.** Similar reasoning; the joint phase requires `C_old`-quorum, which intersects the `C_old`-quorum that chose `v`.
-- **`v` under joint, `v'` under `C_new`.** Both `C_new`-majorities; quorum overlap.
+### 8.4 Asymmetric transitions
 
-In every case, two disjoint chosen values are impossible.
-
-The argument is the same as Raft 2014's. CrowKV's per-slot Paxos and Raft's monotonic log are equivalent at the membership-change layer.
-
-### 8.3 Asymmetric transitions and "open question"
-
-The case 3 → 5 with the new two members not yet caught up was flagged as an open question in [§11 of design.md](../design.md#11-open-design-questions). The answer above resolves it: catch-up happens during the joint phase, while the new members are non-voting; only after catch-up is the final `ConfigChange(C_new)` proposed, at which point new members are voting and the both-quorum invariant has been preserved throughout.
+The single-degree-at-a-time recommendation is not a safety requirement under the exact-match fence. Even a batch change (multiple voting members added or removed in one fan-out) is safe because the fence only permits quorums within one epoch. The trade-off is a longer propagation window and a correspondingly longer write stall.
 
 ---
 
 ## 9. Failure During Reconfiguration
 
-Reconfiguration is itself a sequence of Paxos decisions, so it is robust to failure at any step. Recovery rules:
+Because membership is persisted per node and not via a consensus log, failure recovery is simpler than in the original joint-consensus design:
 
-- **Leader crashes during `Proposing Joint`.** New leader sees no `ConfigChange(joint)` in its log; no joint mode is active. Operator may retry the reconfiguration. (If the joint entry was *Accepted* but not yet *Chosen*, the new leader's bulk Phase-1 will resolve it like any other open slot.)
-- **Leader crashes during `JointActive`.** The new leader runs election under the joint config (both-quorums needed for the election itself). Reconfiguration resumes from `JointActive`, awaiting catch-up or final propose.
-- **Leader crashes during `Proposing Final`.** Same as above; if the entry is not chosen, the new leader either retries or, if it determines the operation should be aborted, proposes `ConfigChange(C_old)` to revert.
-- **Catch-up of new member fails (timeout).** Reconfiguration aborts: the leader proposes `ConfigChange(C_old)` to revert from joint mode. The new member is removed from any cached state and the operator is alerted.
-- **Network partition during reconfiguration.** Joint mode requires both-quorums. If either side of the prospective new membership cannot form a quorum, reconfiguration stalls until the partition heals.
-- **Group-0 reconfiguration interrupts data-group reconfiguration.** Per §7.2, data-group reconfigurations pause; they resume after Group-0 settles.
-
-In all cases, the group does not lose data; the worst outcome is a stalled or rolled-back reconfiguration with operator intervention.
+- **Leader crashes after the first node has been mutated but before the fan-out completes.** The remaining nodes may have different epochs. The new leader, once elected, adopts the highest epoch it observes from any peer and continues the fan-out from the console. Writes self-heal as epochs converge.
+- **A new member fails during catch-up.** The operator removes it before flipping `voting` to `true`. Because the member is non-voting, its failure cannot affect quorum safety.
+- **Network partition during reconfiguration.** The partition side that cannot reach a quorum of the current voting set cannot choose values. The side with the newer epoch may stall until enough nodes adopt it. The partition heals; no split-brain is possible because the epoch fence prevents cross-epoch quorums.
+- **Console crashes mid-fan-out.** The operator re-runs the same mutation on the remaining nodes. The `membership_epoch` bump is idempotent because it is a synchronous local increment; applying the same mutation twice leaves the epoch at the same value.
 
 ---
 
@@ -275,15 +226,84 @@ In all cases, the group does not lose data; the worst outcome is a stalled or ro
 
 | Parameter | Default | Range | Notes |
 | --- | --- | --- | --- |
-| `catchup_slack` | 100 slots | 10 – 10 000 | How close to leader's max_chosen the new member must be |
-| `catchup_timeout` | 10 min | 1 min – 24 h | Abort threshold for catch-up |
-| `reconfig_grace` | 5 s | 0 – 60 s | Wait between joint-applied and final-propose, useful for test reproducibility |
-| `leader_transfer_timeout` | 5 s | 100 ms – 60 s | Max wait for `TimeoutNow` target to win election |
+| `catchup_slack` | 100 slots | 10 – 10 000 | How close to leader's `max_chosen` the new member must be before flipping `voting` |
+| `catchup_timeout` | 10 min | 1 min – 24 h | Operator abort threshold for catch-up |
+| `lease_duration_ms` | election-profile dependent | — | How long a removed/unreachable leader can remain leader before survivors re-elect |
+| `step_down_timeout` | 5 s | 1 s – 60 s | How long the console waits for a new leader after step-down before proceeding |
 
 **Operational guidance:**
 
-- Add members one at a time. Wait for `JointActive → Idle` before starting the next.
+- Add members one at a time. Wait for the catch-up to finish and `voting` to flip before starting the next member.
 - For 3 → 5: do two single-add reconfigurations.
 - For 7 → 3: do four single-remove reconfigurations.
-- Always leader-transfer off a node before removing it (the system will do this automatically via §6.2 but admins can do it explicitly to control the new leader choice).
-- Monitor `safe_slot` during reconfiguration — a stalled `safe_slot` is a sign that catch-up is not progressing.
+- Always step-down a leader before removing it. If the leader is unreachable, proceed and rely on the lease-unrenewable fallback.
+- Monitor `epoch_mismatch` responses and `membership_epoch` values during reconfiguration — a sustained `epoch_mismatch` is a sign that the fan-out is still in progress.
+
+---
+
+## 11. Design History
+
+This section records how the shipped reconfiguration model was chosen and
+hardened, preserving the decision rationale from the original gap analysis.
+
+### 11.1 What was designed vs what shipped
+
+The original `design-reconfiguration.md` (§7, now historical) specified
+Raft-style joint consensus: two `ConfigChange` log entries per membership
+change (`joint = C_old ∪ C_new`, then `C_new`), both-quorum evaluation gated
+on *apply* not *chosen*, non-voting catch-up, `TimeoutNow` leader transfer,
+and Group-0-specific serialization rules. `crowkv/src/reconfig/mod.rs` was a
+skeleton stub — no joint-consensus code, no `ConfigChange` log-entry kind, no
+`TimeoutNow` RPC were ever built.
+
+What shipped instead (Model B, same operator-driven-simplicity spirit as P4's
+topology decision): **direct, per-node HTTP mutation** of each replica's
+remote-replica list (`crowkv-server/src/mgmt_api.rs`), persisted to the local
+`GroupConfigStore` config file, with a non-voting-then-voting dance for
+new-member catch-up and no consensus-log involvement at all.
+
+### 11.2 The safety decision
+
+A code-level gap analysis (2026-07) identified that the shipped
+direct-mutation model had no written safety argument for the transient
+quorum-size disagreement window during fan-out: each node computes quorum
+from its own local voting-member count, and between the first and last HTTP
+calls for the same logical change, different nodes transiently disagree.
+
+Three options were evaluated:
+
+- **(a) Accept as documented risk.** Rejected: the window is real and
+  reachable during every membership addition, not just an edge case.
+- **(b) Lightweight epoch fence.** Chosen. Add a `membership_epoch` field
+  to `PxGroupConfig`, require exact match on `Prepare`/`Accept`, reject with
+  `epoch_mismatch` carrying the responder's epoch, and converge bidirectionally
+  to `max(own, peer)`. This converts the silent risk into a loud, bounded,
+  self-healing write stall during fan-out. No new propagation mechanism needed
+  — the console's existing all-nodes HTTP fan-out already delivers the epoch
+  bump to every node.
+- **(c) Full joint consensus.** Out of scope — would need its own design and
+  implementation plan. A system embedding `crowkv`'s primitives may still
+  choose to build a joint-consensus layer on top of the `membership_epoch`
+  fence.
+
+### 11.3 Bug found during the analysis
+
+While designing the epoch fence, an independent correctness bug was found in
+the already-shipped code: non-voting members' `Accepted`/`Promised` replies
+were counted toward quorum (both in `run_accept_phase`/`run_prepare_phase` and
+in `PxGroup::propose`/`run_bulk_phase1`, which computed their own
+voting-agnostic quorum instead of reusing `self.quorum()`). During the
+non-voting catch-up window that every membership addition goes through, a
+value could be marked `Chosen` with fewer true voting-majority acks than
+required. This was fixed before the epoch fence was built on top of it
+(§6.4).
+
+### 11.4 Rolling upgrade compatibility
+
+Rolling upgrade testing verified that a mixed-version 3-node cluster (two
+nodes on one build, one on another) serves KV workload without divergence.
+The `membership_epoch` protobuf field (added by the fence) is itself a
+version-compat surface — an old binary without it defaults to `0` (protobuf3
+scalar default), which is correct because the initial epoch is `0`.
+Operational procedures for rolling upgrades are documented in
+[`procedures.md`](../procedures.md).

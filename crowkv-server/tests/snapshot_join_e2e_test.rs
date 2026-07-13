@@ -121,20 +121,42 @@ async fn add_remote_replica(
     endpoint: &str,
     voting: bool,
 ) {
+    add_remote_replicas(target, group_id, &[(replica_id, endpoint, voting)]).await;
+}
+
+/// Batched `POST .../remotes` with every entry in one HTTP call -- the
+/// convention `crowkv-console/web/src/mgmt.rs::http_add_replica` uses to
+/// wire a freshly-joined replica's own view of every already-established
+/// peer in a single request (mirrored here rather than one call per
+/// peer): a brand-new replica's *first-ever* remote wiring must land as
+/// one bootstrap batch, since the server only recognizes "this replica
+/// has no remote history yet, so this isn't a membership change" on a
+/// still-empty remote list (`design/design-reconfiguration.md` §6's exact-match
+/// epoch fence) -- splitting it into N separate single-entry calls would
+/// let calls 2..N look like genuine post-bootstrap voting-set changes
+/// and bump this replica's epoch out from under it, permanently
+/// desyncing it from peers that never bump for a non-voting add.
+async fn add_remote_replicas(target: &ServerNode, group_id: u64, remotes: &[(u64, &str, bool)]) {
+    let body: Vec<Value> = remotes
+        .iter()
+        .map(|(replica_id, endpoint, voting)| {
+            serde_json::json!({ "replica_id": replica_id, "endpoint": endpoint, "voting": voting })
+        })
+        .collect();
     let resp = client()
         .post(format!(
             "{}/stores/{}/groups/{group_id}/remotes",
             target.mgmt_base(),
             target.node_id
         ))
-        .json(&serde_json::json!([{ "replica_id": replica_id, "endpoint": endpoint, "voting": voting }]))
+        .json(&body)
         .send()
         .await
         .unwrap();
     assert_eq!(
         resp.status(),
         200,
-        "add_remote_replica failed on node {}",
+        "add_remote_replicas failed on node {}",
         target.node_id
     );
 }
@@ -281,9 +303,19 @@ async fn e2e_new_member_joins_via_snapshot_then_catches_up_wal_tail() {
     // member (plan-tree #20's design: catch up before promoting to
     // voting).
     let new_addr = node_endpoint(&topology(&new_node).await);
+    let mut existing_addrs = Vec::new();
     for existing in &nodes {
-        let existing_addr = node_endpoint(&topology(existing).await);
-        add_remote_replica(&new_node, group_id, existing.replica_id, &existing_addr, true).await;
+        existing_addrs.push((existing.replica_id, node_endpoint(&topology(existing).await)));
+    }
+    // One batched call, not one per peer -- see `add_remote_replicas`'s
+    // doc comment for why splitting this into N single-entry calls would
+    // desync the new replica's epoch from the rest of the cluster.
+    let new_node_remotes: Vec<(u64, &str, bool)> = existing_addrs
+        .iter()
+        .map(|(rid, addr)| (*rid, addr.as_str(), true))
+        .collect();
+    add_remote_replicas(&new_node, group_id, &new_node_remotes).await;
+    for existing in &nodes {
         add_remote_replica(existing, group_id, new_node.replica_id, &new_addr, false).await;
     }
 

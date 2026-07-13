@@ -43,6 +43,7 @@ pub fn router(state: RegistryArc) -> Router {
             "/stores/:sid/groups/:gid/remotes/:rid",
             delete(remove_remote_replica),
         )
+        .route("/stores/:sid/groups/:gid/step-down", post(step_down))
         .route("/stores/:sid/groups/:gid/join", post(join_group_via_snapshot))
         .route("/topology", get(export_topology))
         .route("/top", get(export_topology))
@@ -223,6 +224,7 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Err
         add_remote_replicas,
         remove_remote_replica,
         batch_add_remote_replicas,
+        step_down,
         join_group_via_snapshot,
         export_topology
     ),
@@ -243,6 +245,8 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Err
             RemoteReplicaInfo,
             RemoteListResponse,
             TopologyResponse,
+            StepDownBody,
+            StepDownResult,
             ErrorResponse
         )
     ),
@@ -857,15 +861,6 @@ async fn add_remote_replicas(
         count = remotes.len(),
         "adding remote replicas via management API"
     );
-    // PxGroup::add_remote_replica requires &mut self, but the group is behind Arc.
-    // We need to reconstruct and replace the group.
-    // Build new remotes list = existing + new
-    let mut new_group = rebuild_group_with_same_config(&group);
-    // Re-add existing remotes, preserving each one's voting flag.
-    for (id, endpoint, voting) in group.remote_replica_info() {
-        new_group.add_remote_replica(PxRemoteReplica::new(id, endpoint.to_string()).with_voting(voting));
-    }
-    // Add new remotes
     for r in &remotes {
         info!(
             store_id = sid,
@@ -875,9 +870,12 @@ async fn add_remote_replicas(
             voting = r.voting,
             "adding remote replica"
         );
-        new_group
-            .add_remote_replica(PxRemoteReplica::new(r.replica_id, r.endpoint.clone()).with_voting(r.voting));
     }
+    let new_remotes: Vec<(u64, String, bool)> = remotes
+        .iter()
+        .map(|r| (r.replica_id, r.endpoint.clone(), r.voting))
+        .collect();
+    let new_group = rebuild_group_with_new_remotes(&group, &new_remotes);
     store.add_group(new_group);
     // Re-persist after add_group so the local replica's endpoint is set.
     if let Some(g) = store.get_group(gid) {
@@ -946,12 +944,21 @@ async fn remove_remote_replica(
         "removing remote replica via management API"
     );
     // Reconstruct group without this remote, preserving voting flags.
+    // Carry every existing remote over verbatim (bulk, non-bumping
+    // `set_remote_replicas`, including `rid` itself for now), then remove
+    // `rid` through the bump-aware `remove_remote_replica` -- see the
+    // matching comment in `add_remote_replicas` for why a loop of
+    // `add_remote_replica` calls over the *surviving* members would bump
+    // the epoch once per survivor instead of once for the actual removal.
     let mut new_group = rebuild_group_with_same_config(&group);
-    for (id, endpoint, voting) in group.remote_replica_info() {
-        if id != rid {
-            new_group.add_remote_replica(PxRemoteReplica::new(id, endpoint.to_string()).with_voting(voting));
-        }
-    }
+    new_group.set_remote_replicas(
+        group
+            .remote_replica_info()
+            .into_iter()
+            .map(|(id, endpoint, voting)| PxRemoteReplica::new(id, endpoint.to_string()).with_voting(voting))
+            .collect(),
+    );
+    new_group.remove_remote_replica(rid);
     let current_term = group.local_replica().current_term_snapshot();
     if new_group.quorum() == 1 {
         new_group.local_replica().become_leader();
@@ -974,6 +981,64 @@ async fn remove_remote_replica(
         "remote replica removed via management API"
     );
     Ok(StatusCode::OK)
+}
+
+#[derive(Debug, Clone, Deserialize, ToSchema)]
+struct StepDownBody {
+    /// Free-text reason surfaced in the replica's own logs; purely
+    /// diagnostic, no effect on the strict-fence decision.
+    #[serde(default)]
+    reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+struct StepDownResult {
+    accepted: bool,
+    current_term: u64,
+    current_leader_id: u64,
+}
+
+#[utoipa::path(
+        post,
+        path = "/stores/{sid}/groups/{gid}/step-down",
+        tag = "management",
+        params(
+            ("sid" = u64, Path, description = "Store id"),
+            ("gid" = u64, Path, description = "Group id")
+        ),
+        request_body = StepDownBody,
+        responses(
+            (status = 200, description = "Step-down attempted; `accepted` is false if this node was not leader", body = StepDownResult),
+            (status = 404, description = "Store or group not found", body = ErrorResponse)
+        )
+    )]
+async fn step_down(
+    State(state): State<RegistryArc>,
+    Path((sid, gid)): Path<(u64, u64)>,
+    Json(body): Json<StepDownBody>,
+) -> Result<Json<StepDownResult>, (StatusCode, Json<ErrorResponse>)> {
+    let store = state
+        .get_store(sid)
+        .ok_or_else(|| err_json(StatusCode::NOT_FOUND, format!("store {sid} not found")))?;
+    let group = store.get_group(gid).ok_or_else(|| {
+        err_json(
+            StatusCode::NOT_FOUND,
+            format!("group {gid} not found in store {sid}"),
+        )
+    })?;
+
+    let reply = group.step_down_if_leader(&body.reason);
+    info!(
+        store_id = sid,
+        group_id = gid,
+        accepted = reply.accepted,
+        "step-down requested via management API"
+    );
+    Ok(Json(StepDownResult {
+        accepted: reply.accepted,
+        current_term: reply.current_term,
+        current_leader_id: reply.current_leader_id,
+    }))
 }
 
 #[utoipa::path(
@@ -1039,10 +1104,6 @@ async fn batch_add_remote_replicas(
         count = new_remotes.len(),
         "batch adding remote replicas via management API"
     );
-    let mut new_group = rebuild_group_with_same_config(&group);
-    for (id, endpoint, voting) in group.remote_replica_info() {
-        new_group.add_remote_replica(PxRemoteReplica::new(id, endpoint.to_string()).with_voting(voting));
-    }
     for r in &new_remotes {
         info!(
             store_id = sid,
@@ -1052,9 +1113,12 @@ async fn batch_add_remote_replicas(
             voting = r.voting,
             "batch adding remote replica"
         );
-        new_group
-            .add_remote_replica(PxRemoteReplica::new(r.replica_id, r.endpoint.clone()).with_voting(r.voting));
     }
+    let remotes_tuple: Vec<(u64, String, bool)> = new_remotes
+        .iter()
+        .map(|r| (r.replica_id, r.endpoint.clone(), r.voting))
+        .collect();
+    let new_group = rebuild_group_with_new_remotes(&group, &remotes_tuple);
     store.add_group(new_group);
     // Re-persist after add_group so the local replica's endpoint is set.
     if let Some(g) = store.get_group(gid) {
@@ -1082,6 +1146,67 @@ async fn export_topology(State(state): State<RegistryArc>) -> impl IntoResponse 
     let stores: Vec<StoreStatus> = state.stores.iter().map(|entry| entry.value().status()).collect();
     let body = serde_json::to_string_pretty(&TopologyResponse { stores }).unwrap();
     ([("content-type", "application/json")], body)
+}
+
+/// Rebuild `group` with `new_remotes` merged into its remote list,
+/// applying the membership-epoch bump correctly
+/// (`design/design-reconfiguration.md` §6). Shared by `add_remote_replicas` and
+/// `batch_add_remote_replicas` -- both need the exact same bootstrap
+/// handling, and having it live in one place (rather than duplicated
+/// per-handler) is what actually keeps them consistent; a previous
+/// version of this fix only special-cased one of the two call sites and
+/// broke a real multi-node test that fans out through the other.
+///
+/// Existing remotes are carried over via the bulk, non-bumping
+/// `set_remote_replicas` -- never through the bump-aware
+/// `add_remote_replica`, which would treat every replay of an
+/// already-known member as a fresh voting-set change and bump once per
+/// *existing* member on every single mutation call.
+///
+/// If `group` currently has **no** remotes at all -- a freshly-joined
+/// replica's first-ever wiring (`join_group_via_snapshot`'s step 1:
+/// "wire the group's existing members as this replica's remotes") --
+/// every entry in `new_remotes` is folded into that same bulk seed
+/// instead of going through `add_remote_replica`: bootstrapping a brand
+/// new replica to match an already-agreed cluster state is not a
+/// membership *change*, no matter what `voting` flags it carries, and
+/// bumping here would desync its epoch from peers who never bump for a
+/// non-voting add of that same replica. This only checks "is the
+/// **target's own** remote list currently empty", so the caller is
+/// responsible for landing a freshly-joined replica's entire bootstrap
+/// wiring in one call (as `crowkv-console/web/src/mgmt.rs::http_add_replica`
+/// already does) -- splitting it into several single-entry calls would
+/// only protect the first one.
+///
+/// Otherwise, each entry in `new_remotes` goes through the bump-aware
+/// `add_remote_replica`, so only genuine voting-set changes (new
+/// member, promotion, demotion) bump the epoch.
+fn rebuild_group_with_new_remotes(group: &PxGroup, new_remotes: &[(u64, String, bool)]) -> PxGroup {
+    let mut new_group = rebuild_group_with_same_config(group);
+    let existing = group.remote_replica_info();
+    if existing.is_empty() {
+        new_group.set_remote_replicas(
+            new_remotes
+                .iter()
+                .map(|(id, endpoint, voting)| {
+                    PxRemoteReplica::new(*id, endpoint.clone()).with_voting(*voting)
+                })
+                .collect(),
+        );
+    } else {
+        new_group.set_remote_replicas(
+            existing
+                .into_iter()
+                .map(|(id, endpoint, voting)| {
+                    PxRemoteReplica::new(id, endpoint.to_string()).with_voting(voting)
+                })
+                .collect(),
+        );
+        for (id, endpoint, voting) in new_remotes {
+            new_group.add_remote_replica(PxRemoteReplica::new(*id, endpoint.clone()).with_voting(*voting));
+        }
+    }
+    new_group
 }
 
 /// Rebuild a `PxGroup` with the same config (`group_id`, `local_replica`,
@@ -1113,6 +1238,13 @@ fn rebuild_group_with_same_config(group: &PxGroup) -> PxGroup {
     // even though the replica is still Leader, because the fresh
     // `PxGroup` starts with `proposing_term = 0`.
     new_group.stamp_proposing_term(group.proposing_term());
+    // Carry the membership epoch forward. Without this, every rebuild
+    // (every add/remove/promote call) would silently reset it to 0 and
+    // re-bump from there, making the epoch reflect only "did the last
+    // mutation change the voting set" instead of a true count across
+    // the group's whole history -- defeating the exact-match fence the
+    // very next time two mutations land close together.
+    new_group.set_membership_epoch(group.membership_epoch());
     if group.force_classic() {
         new_group.set_force_classic(true);
     }

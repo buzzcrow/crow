@@ -19,6 +19,7 @@
 //! (matches the pattern in `mgmt_routes_test.rs` / `kv_routes_test.rs`).
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crowkv_console_shared::clients::http::ServerClient;
@@ -41,7 +42,23 @@ struct Upstream {
     grpc_url: String,
 }
 
-async fn spawn_upstream(node_id: &str) -> Option<Upstream> {
+fn tempdir(tag: &str) -> PathBuf {
+    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("test-logs");
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let dir = base.join(format!("{tag}-{millis}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+async fn spawn_upstream(node_id: &str, workspace: &std::path::Path) -> Option<Upstream> {
     let bin = crowkv_server_bin()?;
     if !bin.exists() {
         return None;
@@ -62,7 +79,12 @@ async fn spawn_upstream(node_id: &str) -> Option<Upstream> {
         election_profile: Some("test".into()),
         binary: Some(bin),
     };
-    let deployed = lifecycle::deploy_local(&req, &node).await.expect("deploy_local");
+    let node_dir = workspace.join(node_id);
+    std::fs::create_dir_all(node_dir.join("bin")).unwrap();
+    std::fs::create_dir_all(node_dir.join("log")).unwrap();
+    let deployed = lifecycle::deploy_local_in_dir(&req, &node, &node_dir)
+        .await
+        .expect("deploy_local_in_dir");
     Some(Upstream {
         node_id: node_id.into(),
         pid: deployed.pid,
@@ -132,11 +154,12 @@ async fn spawn_web(upstreams: &[Upstream]) -> SocketAddr {
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
 async fn replica_add_remove_wires_peers_bidirectionally() {
-    let Some(n1) = spawn_upstream("n1").await else {
+    let workspace = tempdir("replica_routes");
+    let Some(n1) = spawn_upstream("n1", &workspace).await else {
         eprintln!("skipping: crowkv-server binary not built");
         return;
     };
-    let Some(n2) = spawn_upstream("n2").await else {
+    let Some(n2) = spawn_upstream("n2", &workspace).await else {
         let _ = lifecycle::stop_pid(n1.pid);
         eprintln!("skipping: crowkv-server binary not built");
         return;

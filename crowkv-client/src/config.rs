@@ -22,6 +22,16 @@ pub struct RetryConfig {
     /// timeout). Doubles each attempt up to `backoff_max`.
     pub backoff_base: Duration,
     pub backoff_max: Duration,
+    /// When `true`, disables *all* client-side resilience -- including the
+    /// normally-uncounted, unconditional `NotLeaderHint` follow -- so every
+    /// call makes exactly one RPC and returns whatever that single attempt
+    /// produced (success, application error, or transport error) with no
+    /// wait, no topology refresh, and no redirect. For latency/error-rate
+    /// benchmarking callers (e.g. `crowkv-cli`'s bench runner) where any
+    /// client-side retry would silently convert a real failure into a
+    /// slower success and corrupt the measurement. Default `false` (normal
+    /// resilient behavior) for every other caller.
+    pub single_attempt: bool,
 }
 
 impl Default for RetryConfig {
@@ -31,6 +41,7 @@ impl Default for RetryConfig {
             unknown_leader_wait: Duration::from_secs(1),
             backoff_base: Duration::from_millis(100),
             backoff_max: Duration::from_secs(5),
+            single_attempt: false,
         }
     }
 }

@@ -182,7 +182,10 @@ impl KVEngine for CrowtreeEngine {
         // invalid-argument on a null tree pointer, which can't happen
         // through this safe wrapper -- matches this trait method's
         // infallible signature.
-        self.inner.handle().clear().expect("CrowtreeEngine::clear should never fail through the safe FFI wrapper");
+        self.inner
+            .handle()
+            .clear()
+            .expect("CrowtreeEngine::clear should never fail through the safe FFI wrapper");
     }
 
     fn is_healthy(&self) -> bool {
@@ -255,9 +258,9 @@ impl KVEngine for CrowtreeEngine {
 /// `KVEngine::scan` return shape, collapsing an error to an empty,
 /// non-truncated result (matching the prior always-synchronous body's
 /// error handling).
-fn decode_scan_result(
-    result: Result<(Vec<crowtree_ffi::ScanEntry>, bool), CtError>,
-) -> (Vec<(Vec<u8>, u64, Vec<u8>)>, bool) {
+type ScanResult = (Vec<(Vec<u8>, u64, Vec<u8>)>, bool);
+
+fn decode_scan_result(result: Result<(Vec<crowtree_ffi::ScanEntry>, bool), CtError>) -> ScanResult {
     match result {
         Ok((entries, truncated)) => (
             entries.into_iter().map(|e| (e.key, e.slot, e.value)).collect(),

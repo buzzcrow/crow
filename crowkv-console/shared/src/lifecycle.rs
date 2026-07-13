@@ -51,7 +51,7 @@ pub struct DeployedServer {
 /// Returns `Error::Validation` for bad inputs and `Error::Io` for spawn
 /// or readiness failures.
 pub async fn deploy_local(req: &DeployRequest, node: &NodeEntry) -> Result<DeployedServer> {
-    deploy_local_in_workspace(req, node, None).await
+    deploy_local_in_workspace(req, node, None, &[]).await
 }
 
 /// Deploys a server in a specific workspace directory.
@@ -65,13 +65,32 @@ pub async fn deploy_local_in_dir(
     node: &NodeEntry,
     workspace_dir: &std::path::Path,
 ) -> Result<DeployedServer> {
-    deploy_local_in_workspace(req, node, Some(workspace_dir)).await
+    deploy_local_in_workspace(req, node, Some(workspace_dir), &[]).await
+}
+
+/// Deploys a server in a specific workspace directory, passing extra
+/// CLI arguments to the spawned `crowkv-server` binary. Used by tests
+/// to bootstrap previously-created stores/groups on restart so the
+/// server recovers from WAL and rejoins the cluster.
+///
+/// # Errors
+///
+/// Returns `Error::Validation` for bad inputs and `Error::Io` for spawn
+/// or readiness failures.
+pub async fn deploy_local_in_dir_with_extra_args(
+    req: &DeployRequest,
+    node: &NodeEntry,
+    workspace_dir: &std::path::Path,
+    extra_args: &[String],
+) -> Result<DeployedServer> {
+    deploy_local_in_workspace(req, node, Some(workspace_dir), extra_args).await
 }
 
 async fn deploy_local_in_workspace(
     req: &DeployRequest,
     node: &NodeEntry,
     workspace_dir: Option<&std::path::Path>,
+    extra_args: &[String],
 ) -> Result<DeployedServer> {
     if req.mgmt_port == 0 || req.grpc_port == 0 {
         return Err(Error::Validation {
@@ -118,6 +137,9 @@ async fn deploy_local_in_workspace(
                 .unwrap_or_else(|| "default".into()),
         )
         .kill_on_drop(false);
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
     if let Some(dir) = workspace_dir {
         cmd.arg("--wal-root").arg("wal");
         // Merge stdout and stderr into one file. We open a temp file before

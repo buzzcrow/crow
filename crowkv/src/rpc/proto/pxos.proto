@@ -18,6 +18,11 @@ message PrepareRequest {
   uint64 group_id = 7;
   // P1 M3: leader's current term for the two-fence rule.
   uint64 term = 8;
+  // P5 M2: leader's current membership_epoch for the exact-match
+  // membership-epoch fence. Absent/0 from an old binary is treated as
+  // epoch 0, matching a freshly-created group that has never had a
+  // membership mutation.
+  uint64 membership_epoch = 9;
 }
 
 message AcceptedValue {
@@ -45,6 +50,14 @@ message PromiseResponse {
   // P1 M3: responder echoes back TermStale when the prepare's term is lower
   // than its own. Carries `term` as the new term to adopt.
   bool term_stale = 12;
+  // P5 M2: responder's own membership_epoch, always populated (not just
+  // on mismatch) so the proposer can log/compare even when it matches.
+  uint64 membership_epoch = 13;
+  // P5 M2: set when the proposer's membership_epoch did not exactly
+  // match `membership_epoch` above. Distinct from `rejected`/`term_stale`
+  // -- the proposer must not bump its ballot in response, only refresh
+  // its membership view.
+  bool epoch_mismatch = 14;
 }
 
 message AcceptRequest {
@@ -59,6 +72,8 @@ message AcceptRequest {
   uint64 client_id = 9;
   uint64 seq = 10;
   uint64 group_id = 11;
+  // P5 M2: see PrepareRequest.membership_epoch.
+  uint64 membership_epoch = 12;
 }
 
 message AcceptedResponse {
@@ -75,6 +90,10 @@ message AcceptedResponse {
   uint64 term = 10;
   // P1 M3: term-stale rejection (see PromiseResponse.term_stale).
   bool term_stale = 11;
+  // P5 M2: see PromiseResponse.membership_epoch.
+  uint64 membership_epoch = 12;
+  // P5 M2: see PromiseResponse.epoch_mismatch.
+  bool epoch_mismatch = 13;
 }
 
 // ---------------------------------------------------------------------------
@@ -273,6 +292,13 @@ message SnapshotHeader {
   // Term of the log entry chosen at the snapshot's own `at_slot`, read from
   // the exporting replica's own acceptor (`accepted_at(at_slot)`).
   uint64 term_at_slot = 1;
+  // P5 M2: the exporting replica's current membership_epoch, so a
+  // freshly-joining replica seeds its own epoch fence from this instead
+  // of starting at 0 -- otherwise it could never receive a Prepare/Accept
+  // (even as a non-voting catch-up learner) from a group that has ever
+  // had a membership change, since every such request is stamped with
+  // the leader's *current* (non-zero) epoch.
+  uint64 membership_epoch = 2;
 }
 
 service SnapshotService {

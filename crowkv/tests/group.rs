@@ -62,6 +62,9 @@ mod full_restart_delete;
 #[path = "group/snapshot_join_test.rs"]
 mod snapshot_join;
 
+#[path = "group/membership_epoch_fence_test.rs"]
+mod membership_epoch_fence;
+
 // These suites drive crate-internal mechanisms via the `test-util` feature
 // hooks on `PxGroup`; they compile only when that feature is enabled (the
 // crate's self dev-dependency turns it on for `cargo test`).

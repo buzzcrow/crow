@@ -16,7 +16,9 @@ use crate::cluster::group_config::{GroupConfigStore, PxGroupConfig, PxGroupMembe
 use crate::cluster::group_election::PendingLeaderHandoff;
 use crate::cluster::local_replica::PxLocalReplica;
 use crate::cluster::remote_replica::PxRemoteReplica;
-use crate::cluster::replica::{Replica, ReplicaClient, ReplicaHandler};
+use crate::cluster::replica::{
+    Replica, ReplicaClient, ReplicaHandler, StepDownReply, StepDownRequestPayload,
+};
 use crate::cluster::status::{GroupStatus, StatusLevel};
 use crate::common::config::{PaxosConfig, PxElectionConfig};
 use crate::common::report::OperationReport;
@@ -115,6 +117,16 @@ pub struct PxGroup {
     /// When set, [`Self::persist_config`] writes to the config file instead
     /// of the WAL metadata lane.
     pub(crate) config_store: Option<GroupConfigStore>,
+    /// Monotonic counter bumped by exactly 1 whenever a mutation changes
+    /// the *voting set* (a voting member added/removed, or an existing
+    /// remote's voting flag flips) -- never for a non-voting add/remove,
+    /// since that cannot affect quorum size. Stamped on outgoing
+    /// `Prepare`/`Accept` and checked for an exact match on the receiving
+    /// side: any two adjacent single-degree membership configs are only
+    /// guaranteed to have overlapping quorums, not any two arbitrary
+    /// configs separated by more than one change, so "close enough"
+    /// epoch matching is not safe -- only exact match is.
+    pub(crate) membership_epoch: AtomicU64,
 }
 
 impl std::fmt::Debug for PxGroup {
@@ -153,6 +165,7 @@ impl PxGroup {
             group_snapshot_slot: AtomicU64::new(0),
             proposer_window: tokio::sync::Semaphore::new(PaxosConfig::DEFAULT.proposer_window),
             config_store: None,
+            membership_epoch: AtomicU64::new(0),
         };
         group.recompute_quorum();
         group
@@ -210,6 +223,84 @@ impl PxGroup {
 
     pub fn quorum(&self) -> usize {
         self.cached_quorum
+    }
+
+    /// Current membership-epoch fence value. Stamped on outgoing
+    /// `Prepare`/`Accept` and checked for an exact match on the receiving
+    /// side (`rpc::px_service`).
+    #[must_use]
+    pub fn membership_epoch(&self) -> u64 {
+        self.membership_epoch.load(Ordering::Acquire)
+    }
+
+    /// Seed the membership epoch from a persisted/prior value, without
+    /// going through the bump logic in [`Self::add_remote_replica`] /
+    /// [`Self::remove_remote_replica`]. Used by restart-from-disk restore
+    /// (`apply_config`) and by the management-API rebuild pattern that
+    /// reconstructs a fresh `PxGroup` and replays its prior remotes.
+    pub fn set_membership_epoch(&self, epoch: u64) {
+        self.membership_epoch.store(epoch, Ordering::Release);
+    }
+
+    /// Adopt `epoch` if it is higher than the current membership epoch,
+    /// using a compare-and-swap loop so concurrent callers don't clobber
+    /// each other. Returns the epoch now in effect.
+    ///
+    /// This is the "refresh its membership view" action the proto comment
+    /// on `epoch_mismatch` prescribes: when a peer reports a higher epoch
+    /// (because it observed a voting-set change we haven't seen yet), we
+    /// converge upward so the next Prepare/Accept matches. We never lower
+    /// the epoch — a stale proposer must not drag an acceptor backwards.
+    pub fn adopt_membership_epoch(&self, epoch: u64) -> u64 {
+        let mut current = self.membership_epoch.load(Ordering::Acquire);
+        while epoch > current {
+            match self
+                .membership_epoch
+                .compare_exchange(current, epoch, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => {
+                    info!(
+                        group_id = self.group_id,
+                        old_epoch = current,
+                        new_epoch = epoch,
+                        "membership epoch adopted from peer (converging upward)"
+                    );
+                    return epoch;
+                }
+                Err(actual) => current = actual,
+            }
+        }
+        current
+    }
+
+    /// Bump the membership epoch by exactly 1. Called from
+    /// [`Self::add_remote_replica`] / [`Self::remove_remote_replica`]
+    /// only when the mutation actually changes the *voting set* --
+    /// see the field doc on `membership_epoch` for why non-voting
+    /// changes must not bump it.
+    fn bump_membership_epoch(&self) {
+        let new_epoch = self.membership_epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        info!(
+            group_id = self.group_id,
+            new_epoch, "membership epoch bumped (voting set changed)"
+        );
+    }
+
+    /// Ask the local replica to step down as leader, if it currently is
+    /// one. Self-targeted and self-termed: reads the replica's own live
+    /// role/term rather than trusting an external caller's snapshot of
+    /// them (which could be stale by the time the call lands), so no
+    /// term needs to be threaded through from outside this process.
+    /// Delegates to the strict-fence `handle_step_down` — a no-op
+    /// (`accepted: false`) if this replica is not currently leader.
+    pub fn step_down_if_leader(&self, reason: &str) -> StepDownReply {
+        let replica = self.local_replica();
+        let term = replica.current_term_snapshot();
+        replica.handle_step_down(&StepDownRequestPayload {
+            term,
+            target_leader_id: replica.id,
+            reason: reason.to_string(),
+        })
     }
 
     /// Group safe-slot snapshot: the highest slot known to be applied on the
@@ -435,13 +526,15 @@ impl PxGroup {
             .members
             .iter()
             .filter(|m| m.replica_id != local_id)
-            .map(|m| PxRemoteReplica::new(m.replica_id, m.endpoint.clone()))
+            .map(|m| PxRemoteReplica::new(m.replica_id, m.endpoint.clone()).with_voting(m.voting))
             .collect();
         self.set_remote_replicas(remotes);
+        self.set_membership_epoch(config.membership_epoch);
         info!(
             group_id = self.group_id,
             local_id,
             member_count = config.members.len(),
+            membership_epoch = config.membership_epoch,
             "applied persisted group config"
         );
     }
@@ -472,6 +565,7 @@ impl PxGroup {
             group_id: self.group_id,
             term,
             members,
+            membership_epoch: self.membership_epoch(),
         };
         if let Some(store) = &self.config_store {
             if let Err(e) = store.save(&config).await {
@@ -681,13 +775,13 @@ impl PxGroup {
             .map_err(|e| format!("snapshot join: StreamSnapshot rpc failed: {e}"))?
             .into_inner();
 
-        let mut term_at_slot: Option<u64> = None;
+        let mut header: Option<(u64, u64)> = None;
         let mut bytes = Vec::new();
         while let Some(item) = stream.next().await {
             let item = item.map_err(|e| format!("snapshot join: stream error: {e}"))?;
             match item.payload {
                 Some(snapshot_stream_item::Payload::Header(h)) => {
-                    term_at_slot = Some(h.term_at_slot);
+                    header = Some((h.term_at_slot, h.membership_epoch));
                 }
                 Some(snapshot_stream_item::Payload::Data(chunk)) => {
                     bytes.extend_from_slice(&chunk);
@@ -695,8 +789,8 @@ impl PxGroup {
                 None => {}
             }
         }
-        let term_at_slot =
-            term_at_slot.ok_or_else(|| "snapshot join: stream ended without a header".to_string())?;
+        let (term_at_slot, membership_epoch) =
+            header.ok_or_else(|| "snapshot join: stream ended without a header".to_string())?;
 
         let at_slot = self
             .local_replica
@@ -710,12 +804,18 @@ impl PxGroup {
             peer_endpoint,
             at_slot,
             term_at_slot,
+            membership_epoch,
             stream_bytes = bytes.len(),
             "snapshot join: imported snapshot, seeding learner frontier"
         );
         self.local_replica
             .learner
             .seed_resume_frontier(at_slot, term_at_slot);
+        // Seed the epoch fence from the exporting peer's current value --
+        // without this, a fresh join always starts at epoch 0 and could
+        // never receive a Prepare/Accept (even as a non-voting catch-up
+        // learner) from a group that has ever had a membership change.
+        self.set_membership_epoch(membership_epoch);
         Ok(at_slot)
     }
 
@@ -736,6 +836,11 @@ impl PxGroup {
             self.remote_replicas.push(RemoteReplicaKind::Placeholder);
         }
 
+        // Snapshot whether this node_id was already a voting member,
+        // to decide below whether this mutation changes the voting set.
+        let was_voting = matches!(&self.remote_replicas[idx], RemoteReplicaKind::Real(prev) if prev.voting);
+        let new_voting = remote.voting;
+
         // Check if this was a placeholder before
         if matches!(self.remote_replicas[idx], RemoteReplicaKind::Placeholder) {
             self.valid_replica_count += 1;
@@ -743,24 +848,36 @@ impl PxGroup {
 
         self.remote_replicas[idx] = RemoteReplicaKind::Real(remote);
         self.recompute_quorum();
+
+        // Bump the epoch iff this mutation actually changes the voting
+        // set (new voting member, promotion, demotion) -- not for a
+        // plain non-voting add/re-add or an idempotent re-add at the
+        // same voting status (e.g. an endpoint-only update).
+        if was_voting != new_voting {
+            self.bump_membership_epoch();
+        }
     }
 
     /// Remove a remote replica by node ID. Returns true if it was present.
     pub fn remove_remote_replica(&mut self, node_id: PxNodeId) -> bool {
         let idx = node_id as usize;
-        if idx < self.remote_replicas.len() && matches!(self.remote_replicas[idx], RemoteReplicaKind::Real(_))
-        {
-            info!(
-                group_id = self.group_id,
-                remote_id = node_id,
-                "removed remote replica from group"
-            );
-            self.remote_replicas[idx] = RemoteReplicaKind::Placeholder;
-            self.valid_replica_count -= 1;
-            self.recompute_quorum();
-            return true;
+        let was_voting = match self.remote_replicas.get(idx) {
+            Some(RemoteReplicaKind::Real(prev)) => prev.voting,
+            _ => return false,
+        };
+        info!(
+            group_id = self.group_id,
+            remote_id = node_id,
+            "removed remote replica from group"
+        );
+        self.remote_replicas[idx] = RemoteReplicaKind::Placeholder;
+        self.valid_replica_count -= 1;
+        self.recompute_quorum();
+        // Removing a non-voting member never changes the voting set.
+        if was_voting {
+            self.bump_membership_epoch();
         }
-        false
+        true
     }
 
     /// Return info about all real remote replicas: `(node_id, endpoint,
@@ -847,8 +964,13 @@ impl PxGroup {
         };
 
         let group_id = self.group_id;
-        let total = self.valid_replica_count + 1;
-        let quorum = total / 2 + 1;
+        // Voting-only quorum (`self.quorum()`/`cached_quorum`), *not*
+        // `valid_replica_count + 1` -- the latter counts non-voting
+        // catch-up members too and would inflate the threshold (and,
+        // combined with unfiltered ack-counting, could also let
+        // non-voting acks satisfy it -- see `run_accept_phase`'s
+        // `remote.voting` guard).
+        let quorum = self.quorum();
         let mut slot = self.next_slot.fetch_add(1, Ordering::Relaxed);
         let mut last_error = String::new();
 
@@ -858,7 +980,6 @@ impl PxGroup {
             client_id = ?client_id,
             seq = ?seq,
             peer_count = self.valid_replica_count,
-            total,
             quorum,
             "start paxos proposal"
         );
@@ -916,6 +1037,20 @@ impl PxGroup {
                                 return ProposeResult::NotLeader {
                                     leader_hint: self.leader_endpoint().unwrap_or_default(),
                                 };
+                            }
+                            if let PxPaxosError::MembershipEpochMismatch { responder_epoch } = &error {
+                                let adopted = self.adopt_membership_epoch(*responder_epoch);
+                                warn!(
+                                    group_id,
+                                    slot,
+                                    attempt,
+                                    responder_epoch,
+                                    adopted_epoch = adopted,
+                                    "prepare epoch mismatch; adopted responder epoch, retrying same slot"
+                                );
+                                last_error = error.keyword().to_string();
+                                sleep(Self::retry_backoff(attempt)).await;
+                                continue;
                             }
                             last_error = error.keyword().to_string();
                             break;
@@ -985,6 +1120,20 @@ impl PxGroup {
                             return ProposeResult::NotLeader {
                                 leader_hint: self.leader_endpoint().unwrap_or_default(),
                             };
+                        }
+                        if let PxPaxosError::MembershipEpochMismatch { responder_epoch } = &error {
+                            let adopted = self.adopt_membership_epoch(*responder_epoch);
+                            warn!(
+                                group_id,
+                                slot,
+                                attempt,
+                                responder_epoch,
+                                adopted_epoch = adopted,
+                                "accept epoch mismatch; adopted responder epoch, retrying same slot"
+                            );
+                            last_error = error.keyword().to_string();
+                            sleep(Self::retry_backoff(attempt)).await;
+                            continue;
                         }
                         last_error = error.keyword().to_string();
                         break;
@@ -1138,11 +1287,18 @@ impl PxGroup {
         let mut promised = 0usize;
         let mut highest_rejected_round: Option<u64> = None;
         let mut highest_seen_term: Option<u64> = None;
+        let mut epoch_mismatch: Option<u64> = None;
         let mut adopted: Option<PxLogEntry> = None;
 
         match <PxLocalReplica as ReplicaHandler>::on_prepare(replica, slot, ballot, term, group_id).await {
             Ok(PxPrepareReply::Promised { accepted, .. }) => {
-                promised += 1;
+                // A non-voting local replica should never reach this
+                // method as leader/candidate in the first place (see the
+                // election-side voting guard), but gate the self-count
+                // defensively too rather than relying solely on that.
+                if replica.voting() {
+                    promised += 1;
+                }
                 if let Some(prev) = accepted {
                     Self::consider_accepted(&mut adopted, prev);
                 }
@@ -1152,6 +1308,13 @@ impl PxGroup {
             }
             Ok(PxPrepareReply::TermStale { new_term, .. }) => {
                 highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
+            }
+            Ok(PxPrepareReply::EpochMismatch { .. }) => {
+                // The local in-process acceptor path never produces this
+                // (it's a wire-response-only fence check made before
+                // calling `on_prepare` at all); unreachable for a local
+                // self-call.
+                unreachable!("local on_prepare does not produce EpochMismatch")
             }
             Err(error) => {
                 error!(
@@ -1166,9 +1329,18 @@ impl PxGroup {
 
         for remote in &self.remote_replicas {
             if let RemoteReplicaKind::Real(remote) = remote {
-                match remote.send_prepare(slot, ballot, term, group_id).await {
+                match remote
+                    .send_prepare(slot, ballot, term, group_id, self.membership_epoch())
+                    .await
+                {
                     Ok(PxPrepareReply::Promised { accepted, .. }) => {
-                        promised += 1;
+                        // Non-voting members (catch-up readers) physically
+                        // promise/accept so they can learn chosen values,
+                        // but their reply must not count toward quorum --
+                        // `quorum` above is sized from voting members only.
+                        if remote.voting {
+                            promised += 1;
+                        }
                         if let Some(prev) = accepted {
                             Self::consider_accepted(&mut adopted, prev);
                         }
@@ -1180,6 +1352,17 @@ impl PxGroup {
                     }
                     Ok(PxPrepareReply::TermStale { new_term, .. }) => {
                         highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
+                    }
+                    Ok(PxPrepareReply::EpochMismatch { responder_epoch }) => {
+                        warn!(
+                            group_id,
+                            slot,
+                            remote_id = remote.node_id,
+                            proposer_epoch = self.membership_epoch(),
+                            responder_epoch,
+                            "prepare rejected by membership-epoch fence"
+                        );
+                        epoch_mismatch = Some(responder_epoch);
                     }
                     Err(error) => {
                         error!(
@@ -1222,6 +1405,11 @@ impl PxGroup {
                     error,
                 };
             }
+            if let Some(responder_epoch) = epoch_mismatch {
+                return PrepareAttempt::Fail {
+                    error: PxPaxosError::MembershipEpochMismatch { responder_epoch },
+                };
+            }
             return PrepareAttempt::Fail {
                 error: PxPaxosError::QuorumUnavailable {
                     phase: PxPaxosPhase::Prepare,
@@ -1257,6 +1445,7 @@ impl PxGroup {
         let mut accepted = 0usize;
         let mut highest_rejected_round: Option<u64> = None;
         let mut highest_seen_term: Option<u64> = None;
+        let mut epoch_mismatch: Option<u64> = None;
         let group_id = self.group_id;
         trace!(
             group_id,
@@ -1269,13 +1458,21 @@ impl PxGroup {
 
         match <PxLocalReplica as ReplicaHandler>::on_accept(replica, entry.clone(), group_id).await {
             Ok(PxAcceptReply::Accepted { .. }) => {
-                accepted += 1;
+                // See the matching guard in `run_prepare_phase` above.
+                if replica.voting() {
+                    accepted += 1;
+                }
             }
             Ok(PxAcceptReply::Rejected { current_promised, .. }) => {
                 highest_rejected_round = Some(current_promised.round);
             }
             Ok(PxAcceptReply::TermStale { new_term, .. }) => {
                 highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
+            }
+            Ok(PxAcceptReply::EpochMismatch { .. }) => {
+                // See the matching unreachable arm in `run_prepare_phase`
+                // above -- the local in-process path never produces this.
+                unreachable!("local on_accept does not produce EpochMismatch")
             }
             Err(error) => {
                 error!(
@@ -1290,9 +1487,16 @@ impl PxGroup {
 
         for remote in &self.remote_replicas {
             if let RemoteReplicaKind::Real(remote) = remote {
-                match remote.send_accept(entry, client_id, seq, group_id).await {
+                match remote
+                    .send_accept(entry, client_id, seq, group_id, self.membership_epoch())
+                    .await
+                {
                     Ok(PxAcceptReply::Accepted { .. }) => {
-                        accepted += 1;
+                        // Same non-voting-doesn't-count rule as
+                        // `run_prepare_phase` above.
+                        if remote.voting {
+                            accepted += 1;
+                        }
                     }
                     Ok(PxAcceptReply::Rejected { current_promised, .. }) => {
                         let candidate = current_promised.round;
@@ -1301,6 +1505,17 @@ impl PxGroup {
                     }
                     Ok(PxAcceptReply::TermStale { new_term, .. }) => {
                         highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
+                    }
+                    Ok(PxAcceptReply::EpochMismatch { responder_epoch }) => {
+                        warn!(
+                            group_id,
+                            slot = entry.slot,
+                            remote_id = remote.node_id,
+                            proposer_epoch = self.membership_epoch(),
+                            responder_epoch,
+                            "accept rejected by membership-epoch fence"
+                        );
+                        epoch_mismatch = Some(responder_epoch);
                     }
                     Err(error) => {
                         error!(
@@ -1342,6 +1557,11 @@ impl PxGroup {
             return AcceptAttempt::Retry {
                 next_min_round,
                 error,
+            };
+        }
+        if let Some(responder_epoch) = epoch_mismatch {
+            return AcceptAttempt::Fail {
+                error: PxPaxosError::MembershipEpochMismatch { responder_epoch },
             };
         }
         AcceptAttempt::Fail {

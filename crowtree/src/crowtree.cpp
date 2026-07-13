@@ -393,6 +393,7 @@ void Crowtree::free_all_resident_pages(bool retire)
         uint64_t  page_id;
         PageBase *head;
     };
+
     std::vector<ResidentEntry> resident;
     for (uint64_t seg_idx = 0; seg_idx < MappingTable::kMaxSegments; ++seg_idx) {
         MappingSegment *seg = mapping_.segment_at(seg_idx);
@@ -1839,6 +1840,7 @@ bool Crowtree::try_scan_no_load(Slice prefix, size_t limit, std::vector<scan_ent
         std::vector<mem_entry> entries;
         size_t                 idx = 0;
     };
+
     std::vector<L0Cursor> l0;
     for (auto &mt : all_memtables()) {
         L0Cursor c;
@@ -1850,7 +1852,7 @@ bool Crowtree::try_scan_no_load(Slice prefix, size_t limit, std::vector<scan_ent
     // on an unloaded slot instead of demand-loading it, recording which
     // page_id via `blocked_page_id`.
     uint64_t blocked_page_id = kInvalidPageId;
-    auto     probe           = [this, &blocked_page_id](uint64_t p) -> PageBase * {
+    auto     probe           = [this, &blocked_page_id](uint64_t p) -> PageBase               *{
         uint64_t w = mapping_.get_word(p);
         if (slot_word::is_empty(w)) {
             return nullptr;
@@ -1982,8 +1984,8 @@ void Crowtree::scan_async_attempt(std::shared_ptr<std::string> prefix_owned, siz
                                   std::function<void(Status, std::vector<scan_entry>, bool)> on_done) const
 {
     std::vector<scan_entry> out;
-    bool                     truncated        = false;
-    uint64_t                 pending_page_id  = kInvalidPageId;
+    bool                    truncated       = false;
+    uint64_t                pending_page_id = kInvalidPageId;
     if (try_scan_no_load(Slice(*prefix_owned), limit, &out, &truncated, &pending_page_id)) {
         on_done(Status::Ok(), std::move(out), truncated);
         return;
@@ -2140,8 +2142,7 @@ Status Crowtree::install_snapshot(std::vector<leaf_entry> sorted_entries, uint64
     return Status::Ok();
 }
 
-Status Crowtree::collect_native_frames(std::vector<NativeFrame> *out, uint64_t *out_root_page_id,
-                                       uint64_t *out_at_slot)
+Status Crowtree::collect_native_frames(std::vector<NativeFrame> *out, uint64_t *out_root_page_id, uint64_t *out_at_slot)
 {
     std::lock_guard<std::mutex> lk(write_mutex_);
     uint64_t                    gc = gc_floor_.load();
@@ -2326,8 +2327,8 @@ EngineStats Crowtree::stats() const
     EngineStats s;
     s.last_applied_slot         = last_applied_slot_.load();
     s.contiguous_slot           = contiguous_slot_.load();
-    s.gc_watermark               = gc_floor_.load();
-    s.io_failed                  = io_failed_.load();
+    s.gc_watermark              = gc_floor_.load();
+    s.io_failed                 = io_failed_.load();
     s.snapshot_pages_written    = snapshot_pages_written_.load();
     s.snapshot_segments_written = snapshot_segments_written_.load();
 

@@ -16,6 +16,7 @@ use crate::cluster::replica::{
 };
 use crate::common::optional_u64;
 use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
+use crate::paxos::PxTerm;
 
 use crate::rpc::px_service_server::PxService;
 use crate::rpc::{
@@ -24,6 +25,57 @@ use crate::rpc::{
     PreVoteResponse, PrepareRequest, PromiseResponse, RequestVoteRequest, RequestVoteResponse,
     StepDownRequest, StepDownResponse,
 };
+
+/// Build an epoch-mismatch `PromiseResponse` for the Prepare fence.
+fn epoch_mismatch_prepare_response(
+    req: &PrepareRequest,
+    term: PxTerm,
+    responder_epoch: u64,
+) -> PromiseResponse {
+    PromiseResponse {
+        version: 1,
+        slot: req.slot,
+        round: req.round,
+        leader_id: req.leader_id,
+        previously_accepted: None,
+        rejected: false,
+        rejected_round: 0,
+        rejected_leader_id: 0,
+        request_id: req.request_id,
+        request_create_ms: req.request_create_ms,
+        term,
+        term_stale: false,
+        membership_epoch: responder_epoch,
+        epoch_mismatch: true,
+    }
+}
+
+/// Build an epoch-mismatch `AcceptedResponse` for the Accept fence.
+fn epoch_mismatch_accept_response(
+    slot: u64,
+    round: u64,
+    leader_id: u64,
+    request_id: u64,
+    request_create_ms: u64,
+    term: PxTerm,
+    responder_epoch: u64,
+) -> AcceptedResponse {
+    AcceptedResponse {
+        version: 1,
+        slot,
+        round,
+        leader_id,
+        rejected: false,
+        rejected_round: 0,
+        rejected_leader_id: 0,
+        request_id,
+        request_create_ms,
+        term,
+        term_stale: false,
+        membership_epoch: responder_epoch,
+        epoch_mismatch: true,
+    }
+}
 
 /// gRPC adapter for the in-process [`PxReplicaError`] enum.
 impl From<PxReplicaError> for Status {
@@ -48,6 +100,7 @@ impl PxReplicaService {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 #[tonic::async_trait]
 impl PxService for PxReplicaService {
     async fn prepare(&self, request: Request<PrepareRequest>) -> Result<Response<PromiseResponse>, Status> {
@@ -70,6 +123,26 @@ impl PxService for PxReplicaService {
             .get_group(req.group_id)
             .ok_or_else(|| Status::not_found("px group not found"))?;
         let replica = group.local_replica();
+
+        let responder_epoch = group.membership_epoch();
+        if req.membership_epoch != responder_epoch {
+            let converged_epoch = group.adopt_membership_epoch(req.membership_epoch);
+            warn!(
+                store_id = self.store.store_id,
+                group_id = req.group_id,
+                request_id = req.request_id,
+                proposer_epoch = req.membership_epoch,
+                responder_epoch,
+                converged_epoch,
+                "prepare rejected by membership-epoch fence; adopting higher epoch from proposer"
+            );
+            return Ok(Response::new(epoch_mismatch_prepare_response(
+                &req,
+                replica.current_term_snapshot(),
+                responder_epoch,
+            )));
+        }
+
         let reply = <crate::cluster::local_replica::PxLocalReplica as ReplicaHandler>::on_prepare(
             replica,
             req.slot,
@@ -93,6 +166,8 @@ impl PxService for PxReplicaService {
                 request_create_ms: req.request_create_ms,
                 term: replica.current_term_snapshot(),
                 term_stale: false,
+                membership_epoch: responder_epoch,
+                epoch_mismatch: false,
             },
             PxPrepareReply::TermStale { slot, new_term } => PromiseResponse {
                 version: 1,
@@ -107,6 +182,8 @@ impl PxService for PxReplicaService {
                 request_create_ms: req.request_create_ms,
                 term: new_term,
                 term_stale: true,
+                membership_epoch: responder_epoch,
+                epoch_mismatch: false,
             },
             PxPrepareReply::Rejected {
                 slot,
@@ -134,7 +211,15 @@ impl PxService for PxReplicaService {
                     request_create_ms: req.request_create_ms,
                     term: replica.current_term_snapshot(),
                     term_stale: false,
+                    membership_epoch: responder_epoch,
+                    epoch_mismatch: false,
                 }
+            }
+            PxPrepareReply::EpochMismatch { .. } => {
+                // on_prepare (the in-process acceptor path) never produces
+                // this variant itself; it only exists on the wire-response
+                // side, constructed by the early-return fence check above.
+                unreachable!("on_prepare does not produce EpochMismatch")
             }
         };
 
@@ -397,6 +482,7 @@ impl PxService for PxReplicaService {
 /// Inner `Accept` handler shared by the unary `Accept` RPC and the
 /// `LearnerStream` bidi. Wire-format → in-memory conversion + delegation
 /// to [`ReplicaHandler::on_accept`] + response build.
+#[allow(clippy::too_many_lines)]
 async fn handle_accept_inner(store: &Arc<PxKvStore>, req: AcceptRequest) -> Result<AcceptedResponse, Status> {
     let value = req.value.ok_or_else(|| {
         warn!(
@@ -424,6 +510,30 @@ async fn handle_accept_inner(store: &Arc<PxKvStore>, req: AcceptRequest) -> Resu
         .get_group(req.group_id)
         .ok_or_else(|| Status::not_found("px group not found"))?;
     let replica = group.local_replica();
+
+    let responder_epoch = group.membership_epoch();
+    if req.membership_epoch != responder_epoch {
+        let converged_epoch = group.adopt_membership_epoch(req.membership_epoch);
+        warn!(
+            store_id = store.store_id,
+            group_id = req.group_id,
+            request_id = req.request_id,
+            proposer_epoch = req.membership_epoch,
+            responder_epoch,
+            converged_epoch,
+            "accept rejected by membership-epoch fence; adopting higher epoch from proposer"
+        );
+        return Ok(epoch_mismatch_accept_response(
+            req.slot,
+            req.round,
+            req.leader_id,
+            req.request_id,
+            req.request_create_ms,
+            replica.current_term_snapshot(),
+            responder_epoch,
+        ));
+    }
+
     let reply = <crate::cluster::local_replica::PxLocalReplica as ReplicaHandler>::on_accept(
         replica,
         entry.clone(),
@@ -465,6 +575,12 @@ async fn handle_accept_inner(store: &Arc<PxKvStore>, req: AcceptRequest) -> Resu
             );
             (false, 0, 0, true, new_term)
         }
+        PxAcceptReply::EpochMismatch { .. } => {
+            // on_accept (the in-process acceptor path) never produces this
+            // variant itself; it only exists on the wire-response side,
+            // constructed by the early-return fence check above.
+            unreachable!("on_accept does not produce EpochMismatch")
+        }
     };
 
     Ok(AcceptedResponse {
@@ -479,6 +595,8 @@ async fn handle_accept_inner(store: &Arc<PxKvStore>, req: AcceptRequest) -> Resu
         request_create_ms: req.request_create_ms,
         term: reply_term,
         term_stale,
+        membership_epoch: responder_epoch,
+        epoch_mismatch: false,
     })
 }
 

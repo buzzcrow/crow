@@ -338,21 +338,21 @@ void ct_get_stats(const ct_tree *t, ct_stats *out)
     if (t == nullptr || out == nullptr) {
         return;
     }
-    EngineStats s                    = t->tree->stats();
-    out->last_applied_slot           = s.last_applied_slot;
-    out->contiguous_slot             = s.contiguous_slot;
-    out->gc_watermark                = s.gc_watermark;
-    out->io_failed                   = s.io_failed ? 1 : 0;
-    out->snapshot_pages_written      = s.snapshot_pages_written;
-    out->snapshot_segments_written   = s.snapshot_segments_written;
-    out->buffer_pool_hits            = s.buffer_pool_hits;
-    out->buffer_pool_misses          = s.buffer_pool_misses;
-    out->buffer_pool_evictions       = s.buffer_pool_evictions;
-    out->buffer_pool_writebacks      = s.buffer_pool_writebacks;
-    out->buffer_pool_resident        = s.buffer_pool_resident;
-    out->buffer_pool_dirty           = s.buffer_pool_dirty;
-    out->buffer_pool_used            = s.buffer_pool_used;
-    out->buffer_pool_num_frames      = s.buffer_pool_num_frames;
+    EngineStats s                  = t->tree->stats();
+    out->last_applied_slot         = s.last_applied_slot;
+    out->contiguous_slot           = s.contiguous_slot;
+    out->gc_watermark              = s.gc_watermark;
+    out->io_failed                 = s.io_failed ? 1 : 0;
+    out->snapshot_pages_written    = s.snapshot_pages_written;
+    out->snapshot_segments_written = s.snapshot_segments_written;
+    out->buffer_pool_hits          = s.buffer_pool_hits;
+    out->buffer_pool_misses        = s.buffer_pool_misses;
+    out->buffer_pool_evictions     = s.buffer_pool_evictions;
+    out->buffer_pool_writebacks    = s.buffer_pool_writebacks;
+    out->buffer_pool_resident      = s.buffer_pool_resident;
+    out->buffer_pool_dirty         = s.buffer_pool_dirty;
+    out->buffer_pool_used          = s.buffer_pool_used;
+    out->buffer_pool_num_frames    = s.buffer_pool_num_frames;
 }
 
 uint64_t ct_evict_clean_leaves(ct_tree *t, uint64_t max_resident_leaves)
@@ -396,8 +396,7 @@ ct_status ct_apply_delete(ct_tree *t, uint64_t slot, const uint8_t *key, size_t 
         return static_cast<ct_status>(Code::kInvalidArgument);
     }
     std::vector<Crowtree::encoded_op> ops;
-    ops.push_back(
-        {std::string(reinterpret_cast<const char *>(key), klen), encode_cell_buf(slot, OpKind::kDelete)});
+    ops.push_back({std::string(reinterpret_cast<const char *>(key), klen), encode_cell_buf(slot, OpKind::kDelete)});
     return to_status(t->tree->apply_encoded(slot, std::move(ops)));
 }
 
@@ -546,24 +545,24 @@ ct_future *ct_scan_async(ct_tree *t, const uint8_t *prefix, size_t plen, size_t 
     auto impl  = std::make_shared<ct_future_impl>();
     impl->kind = ct_future_impl::Kind::kScan;
     t->tree->scan_async(Slice(reinterpret_cast<const char *>(prefix), plen), limit,
-                       [impl](Status st, std::vector<scan_entry> entries, bool truncated) {
-                           impl->status = to_status(st);
-                           if (st.ok()) {
-                               // Same packed record format as ct_scan (see
-                               // that function): [u32 klen][key][u64
-                               // slot][u32 vlen][val] * count.
-                               for (const auto &e : entries) {
-                                   pack_u32(&impl->scan_packed, static_cast<uint32_t>(e.key.size()));
-                                   impl->scan_packed.append(e.key);
-                                   pack_u64(&impl->scan_packed, e.slot);
-                                   pack_u32(&impl->scan_packed, static_cast<uint32_t>(e.value.size()));
-                                   impl->scan_packed.append(e.value);
-                               }
-                               impl->scan_count     = entries.size();
-                               impl->scan_truncated = truncated;
-                           }
-                           impl->done.store(true, std::memory_order_release);
-                       });
+                        [impl](Status st, std::vector<scan_entry> entries, bool truncated) {
+                            impl->status = to_status(st);
+                            if (st.ok()) {
+                                // Same packed record format as ct_scan (see
+                                // that function): [u32 klen][key][u64
+                                // slot][u32 vlen][val] * count.
+                                for (const auto &e : entries) {
+                                    pack_u32(&impl->scan_packed, static_cast<uint32_t>(e.key.size()));
+                                    impl->scan_packed.append(e.key);
+                                    pack_u64(&impl->scan_packed, e.slot);
+                                    pack_u32(&impl->scan_packed, static_cast<uint32_t>(e.value.size()));
+                                    impl->scan_packed.append(e.value);
+                                }
+                                impl->scan_count     = entries.size();
+                                impl->scan_truncated = truncated;
+                            }
+                            impl->done.store(true, std::memory_order_release);
+                        });
     return reinterpret_cast<ct_future *>(new ct_future_handle(std::move(impl)));
 }
 

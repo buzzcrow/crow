@@ -186,8 +186,9 @@ impl LeaderElection for PxGroup {
     ) {
         let replica = self.local_replica();
         let group_id = self.group_id;
-        let total = self.valid_replica_count + 1;
-        let quorum = total / 2 + 1;
+        // Voting-only quorum -- see the matching fix/comment on
+        // `PxGroup::propose` in `group.rs`.
+        let quorum = self.quorum();
 
         // Floor is the leader's OWN committed frontier — deliberately NOT maxed
         // with `peer_contiguous_chosen_max`. After a restart a replica can win
@@ -528,7 +529,16 @@ impl PxGroup {
                                     // converges and persists a durable `Accepted` record.
                                     let mut caught_up = false;
                                     for catchup_attempt in 0..2u8 {
-                                        match remote.send_accept(&entry, None, None, group_id).await {
+                                        match remote
+                                            .send_accept(
+                                                &entry,
+                                                None,
+                                                None,
+                                                group_id,
+                                                self.membership_epoch(),
+                                            )
+                                            .await
+                                        {
                                             Ok(crate::paxos::roles::PxAcceptReply::Accepted { .. }) => {
                                                 caught_up = true;
                                                 break;
@@ -566,6 +576,20 @@ impl PxGroup {
                                                     slot,
                                                     new_term,
                                                     "heartbeat catch-up: peer reported higher term during replay"
+                                                );
+                                                break;
+                                            }
+                                            Ok(crate::paxos::roles::PxAcceptReply::EpochMismatch {
+                                                responder_epoch,
+                                            }) => {
+                                                self.adopt_membership_epoch(responder_epoch);
+                                                debug!(
+                                                    group_id,
+                                                    peer_id,
+                                                    slot,
+                                                    proposer_epoch = self.membership_epoch(),
+                                                    responder_epoch,
+                                                    "heartbeat catch-up: peer rejected by membership-epoch fence; adopted responder epoch"
                                                 );
                                                 break;
                                             }
@@ -699,7 +723,11 @@ impl PxGroup {
 
         let voting_peers = self.voting_remote_ids();
         let quorum = self.quorum();
-        let mut grants: usize = 1;
+        // Self-vote only counts if the local replica is itself a voting
+        // member -- `quorum` is sized from voting members only, and a
+        // non-voting replica has no vote to cast (mirrors the
+        // remote-side `voting_remote_ids()` filter just above).
+        let mut grants: usize = usize::from(replica.voting);
 
         debug!(
             group_id,
@@ -712,9 +740,10 @@ impl PxGroup {
         );
 
         // Trivial-cluster fast path: only win without contacting peers when the
-        // group is truly a singleton (no configured voting peers). See the
-        // matching gate in `run_candidate_election`.
-        if voting_peers.is_empty() {
+        // group is truly a singleton (no configured voting peers) *and* the
+        // local replica is itself voting -- a non-voting singleton has no
+        // vote to cast and cannot self-elect.
+        if voting_peers.is_empty() && replica.voting {
             return PreVoteOutcome::Won { proposed_term };
         }
 
@@ -789,8 +818,10 @@ impl PxGroup {
 
         let voting_peers = self.voting_remote_ids();
         let quorum = self.quorum();
-        // Local replica votes for itself in `become_candidate`.
-        let mut grants: usize = 1;
+        // Local replica votes for itself in `become_candidate`, but only
+        // if it is itself a voting member -- see the matching guard in
+        // `run_prevote_round`.
+        let mut grants: usize = usize::from(replica.voting);
         let mut peer_floor: u64 = replica.contiguous_chosen();
         let mut peer_ceiling: u64 = replica.highest_seen_slot();
 
@@ -804,12 +835,15 @@ impl PxGroup {
         );
 
         // Trivial-cluster fast path: local replica alone constitutes quorum.
-        // Only self-elect when there are no configured voting peers. A
-        // restarted node that has recovered a multi-replica persisted config
-        // (W9) will have voting peers, so it must actually contact them before
-        // becoming leader and running bulk Phase 1. This prevents a quorum=1
-        // self-election in the restore window from overwriting committed data.
-        if voting_peers.is_empty() {
+        // Only self-elect when there are no configured voting peers *and*
+        // the local replica is itself voting (a non-voting replica has no
+        // vote to cast and cannot self-elect, mirroring `run_prevote_round`).
+        // A restarted node that has recovered a multi-replica persisted
+        // config (W9) will have voting peers, so it must actually contact
+        // them before becoming leader and running bulk Phase 1. This
+        // prevents a quorum=1 self-election in the restore window from
+        // overwriting committed data.
+        if voting_peers.is_empty() && replica.voting {
             self.finalize_leader(term, peer_floor, peer_ceiling);
             return;
         }

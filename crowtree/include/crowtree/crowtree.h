@@ -162,21 +162,21 @@ struct GcStats
 // here is already an atomic counter or BufferPool::stats(), also O(1).
 struct EngineStats
 {
-    uint64_t last_applied_slot         = 0; // durable watermark (see last_applied_slot())
-    uint64_t contiguous_slot           = 0; // gap-free-applied watermark (see contiguous_slot())
-    uint64_t gc_watermark              = 0; // min(snapshot_slot, safe_slot) (see gc_watermark())
+    uint64_t last_applied_slot         = 0;     // durable watermark (see last_applied_slot())
+    uint64_t contiguous_slot           = 0;     // gap-free-applied watermark (see contiguous_slot())
+    uint64_t gc_watermark              = 0;     // min(snapshot_slot, safe_slot) (see gc_watermark())
     bool     io_failed                 = false; // latched media fault (see io_failed())
-    uint64_t snapshot_pages_written    = 0; // last snapshot()'s dirty base pages written
-    uint64_t snapshot_segments_written = 0; // last snapshot()'s dirty mapping segments written
+    uint64_t snapshot_pages_written    = 0;     // last snapshot()'s dirty base pages written
+    uint64_t snapshot_segments_written = 0;     // last snapshot()'s dirty mapping segments written
     // BufferPool::Stats as of this call -- see buffer_pool.h.
-    uint64_t buffer_pool_hits          = 0;
-    uint64_t buffer_pool_misses        = 0;
-    uint64_t buffer_pool_evictions     = 0;
-    uint64_t buffer_pool_writebacks    = 0;
-    uint32_t buffer_pool_resident      = 0;
-    uint32_t buffer_pool_dirty         = 0;
-    uint32_t buffer_pool_used          = 0;
-    uint32_t buffer_pool_num_frames    = 0;
+    uint64_t buffer_pool_hits       = 0;
+    uint64_t buffer_pool_misses     = 0;
+    uint64_t buffer_pool_evictions  = 0;
+    uint64_t buffer_pool_writebacks = 0;
+    uint32_t buffer_pool_resident   = 0;
+    uint32_t buffer_pool_dirty      = 0;
+    uint32_t buffer_pool_used       = 0;
+    uint32_t buffer_pool_num_frames = 0;
 };
 
 // One durable blob to write at a fixed offset, computed ahead of time by

@@ -410,7 +410,15 @@ Support adding new nodes to a group and removing old nodes. Specifically:
 - Extend: 3 → 5 → 7 nodes.
 - Reduce: 7 → 5 → 3 nodes.
 
-Reconfiguration design (Raft-style joint consensus) will be detailed in `plan.md`. This doc states the requirement only.
+**Shipped mechanism:** per-node HTTP mutation of each replica's remote-replica list, persisted to the local `GroupConfigStore` config file, with a `membership_epoch` fence (exact-match on `Prepare`/`Accept`) and a non-voting-then-voting catch-up dance. This is intentionally not the original Raft-style joint-consensus design described in `design/design-reconfiguration.md` §7 (historical); see `design/design-reconfiguration.md` §11 for the design history and safety rationale. Requirements:
+
+- `add_remote_replicas` and `remove_remote_replica` must be applied to every node in the group (console orchestrates the fan-out).
+- A new member is added as `voting: false`, brought up to date via `SnapshotService` streaming, then re-added as `voting: true`.
+- Removing the current leader triggers `StepDown` on the leader node first; if the leader is unreachable, survivors elect a new leader via the normal lease-expiry path.
+- `membership_epoch` is bumped on every voting-set change and is required to match exactly between a leader's `Prepare`/`Accept` and an acceptor's local epoch; an `epoch_mismatch` reply carries the responder's epoch and self-heals to `max(own, peer)`.
+- Writes may stall during the propagation window while the epoch fan-out is in progress; the stall is bounded and self-heals once the last node adopts the new epoch.
+
+Reconfiguration design is detailed in `design/design-reconfiguration.md` (§§1-6, 8-11).
 
 ### 9.2 Rolling Upgrade
 

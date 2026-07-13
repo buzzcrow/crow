@@ -7,6 +7,5 @@ pub mod cluster;
 pub mod common;
 pub mod kv;
 pub mod paxos;
-pub mod reconfig;
 pub mod rpc;
 pub mod wal;

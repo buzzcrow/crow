@@ -22,12 +22,11 @@ tracing = { workspace = true }
 dirs = "5"
 russh = "0.45"
 async-trait = "0.1"
-# C6: gRPC KV client. We depend on `crowkv` for its already-built tonic
-# proto types (`crowkv::rpc::*`). This pulls in more than we need at
-# the moment, but avoids re-running tonic-build in this crate.
-crowkv = { path = "../../crowkv" }
-tonic = "0.12"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net"] }
 axum = "0.7"
+# KV data-plane gRPC client for `tests/kv_e2e_test.rs` (C6's own gRPC
+# `KvClient` wrapper is gone; that test now exercises the real
+# `crowkv-client` crate end-to-end instead).
+crowkv-client = { path = "../../crowkv-client" }

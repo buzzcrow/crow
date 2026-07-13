@@ -166,7 +166,8 @@ mod sys {
         pub fn ct_get_async(t: *mut ct_tree, key: *const u8, klen: usize) -> *mut ct_future;
         pub fn ct_flush_async(t: *mut ct_tree) -> *mut ct_future;
         pub fn ct_snapshot_async(t: *mut ct_tree) -> *mut ct_future;
-        pub fn ct_scan_async(t: *mut ct_tree, prefix: *const u8, plen: usize, limit: usize) -> *mut ct_future;
+        pub fn ct_scan_async(t: *mut ct_tree, prefix: *const u8, plen: usize, limit: usize)
+            -> *mut ct_future;
         pub fn ct_future_poll(
             f: *mut ct_future,
             done: *mut c_int,

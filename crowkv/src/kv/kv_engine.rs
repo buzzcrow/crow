@@ -8,7 +8,7 @@ use super::Batch;
 /// `apply`/`get`/`scan` return [`KVFuture`] rather than their value directly:
 /// the common case (in-memory hit / no I/O) resolves immediately at zero
 /// cost via [`KVFuture::ready`], while a genuine I/O path (crowtree
-/// demand-load miss, via the io_uring reactor — `design-crowtree-engine.md
+/// demand-load miss, via the `io_uring` reactor — `design-crowtree-engine.md
 /// §3`) returns a real `Pending` future. [`super::CrowtreeEngine::get`] and
 /// [`super::CrowtreeEngine::scan`] both construct `Pending` for a genuine
 /// cold-leaf miss (via `crowtree_ffi::AsyncCrowtree::try_get`/`try_scan`);
