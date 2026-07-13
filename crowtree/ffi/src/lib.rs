@@ -552,6 +552,15 @@ impl Crowtree {
         unsafe { sys::ct_reactor_eventfd(self.as_ptr()) }
     }
 
+    /// True when the tree was opened with a durable path and the build has
+    /// an io_uring reactor wired. In-memory trees and non-Linux/liburing
+    /// builds return `false`; `ct_get_async`/`ct_scan_async` then complete
+    /// synchronously, so callers cannot observe a genuine `Pending` future.
+    #[must_use]
+    pub fn is_reactor_available(&self) -> bool {
+        self.reactor_eventfd() >= 0
+    }
+
     /// Lazily spawns (once) and returns the `Notify` fanned out by this
     /// tree's eventfd pump -- see the module-level fan-out note above
     /// `RawFdView` for why a single pump task, not a per-future

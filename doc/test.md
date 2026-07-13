@@ -205,6 +205,26 @@ Fill gaps bottom-up so a new failure is always attributable to the lowest layer:
 3. Group reconfiguration + PeerStream.
 4. Multi-node store and deployment re-enables, after repair-correctness fixes tracked in `plan-test.md`.
 
+## Suite Timing
+
+Measured on 2026-07-12 on the current development machine. All six suites passed
+with zero failures. Times are the wall-clock duration of `pixi run <suite>`
+(including build/compile overhead where applicable).
+
+| Suite | Result | Tests | Real time |
+| --- | --- | --- | --- |
+| `test-ct` | pass | 291/291 | 8.05 s |
+| `test-core` | pass | all green | 8.18 s |
+| `test-server` | pass | all green | 8.08 s |
+| `test-cli` | pass | all green | 8.94 s |
+| `test-web` | pass | all green | 34.55 s |
+| `test-ui` | pass | 23/23 | 33.19 s |
+| **Total** | **pass** | — | **~101 s** |
+
+The C++ Crowtree tests (`test-ct`) and the Rust core tests (`test-core`) are
+the fastest. The console/web suites dominate total wall time because they boot
+real browser and server processes.
+
 ## Feature-Dependent Test Gaps
 
 These gaps require **new feature implementation** before tests can be written.

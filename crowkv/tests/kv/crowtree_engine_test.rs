@@ -108,6 +108,15 @@ async fn get_constructs_pending_for_genuine_demand_load_miss() {
         "snapshot should have made the leaf clean and evictable"
     );
 
+    // On builds/platforms without the io_uring reactor (e.g. macOS, or Linux
+    // without liburing) ct_get_async completes synchronously, so there is no
+    // genuine Pending path to observe. Verify the value is still correct and
+    // skip the Pending-only assertion in that case.
+    if !e.handle().is_reactor_available() {
+        assert_eq!(e.get(b"k").into_ready(), Some((1, b"v".to_vec())));
+        return;
+    }
+
     match e.get(b"k") {
         KVFuture::Ready(_) => panic!("expected a genuine Pending after evicting the resident leaf"),
         KVFuture::Pending(fut) => {
@@ -143,6 +152,13 @@ async fn scan_constructs_pending_for_genuine_demand_load_miss() {
         evicted > 0,
         "snapshot should have made the leaf clean and evictable"
     );
+
+    if !e.handle().is_reactor_available() {
+        let (items, truncated) = e.scan(b"", 0).into_ready();
+        assert_eq!(items, vec![(b"k".to_vec(), 1, b"v".to_vec())]);
+        assert!(!truncated);
+        return;
+    }
 
     match e.scan(b"", 0) {
         KVFuture::Ready(_) => panic!("expected a genuine Pending after evicting the resident leaf"),

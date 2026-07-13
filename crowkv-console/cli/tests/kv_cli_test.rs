@@ -136,53 +136,80 @@ async fn kv_put_get_delete_round_trip() {
     assert!(stdout.contains("not found"));
 
     // scan/list now returns real key/value rows. Seed two keys, then
-    // scan with a prefix that captures only one of them.
-    let _ = run(
-        &cli,
-        &console_url,
-        &[
-            "kv",
-            "put",
-            "--store-id",
-            "1",
-            "--group-id",
-            "1",
-            "--key",
-            "scan/a",
-            "--value",
-            "1",
-        ],
-    );
-    let _ = run(
-        &cli,
-        &console_url,
-        &[
-            "kv",
-            "put",
-            "--store-id",
-            "1",
-            "--group-id",
-            "1",
-            "--key",
-            "scan/b",
-            "--value",
-            "2",
-        ],
-    );
-    let (code, stdout, stderr) = run(
-        &cli,
-        &console_url,
-        &[
-            "kv",
-            "list",
-            "--store-id",
-            "1",
-            "--group-id",
-            "1",
-            "--prefix",
-            "scan/",
-        ],
-    );
+    // scan with a prefix that captures only one of them. Retry the seed
+    // puts and the list under the aggressive `test` election profile, whose
+    // 25 ms lease can expire during CLI command scheduling.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let (code, _, stderr) = loop {
+        let result = run(
+            &cli,
+            &console_url,
+            &[
+                "kv",
+                "put",
+                "--store-id",
+                "1",
+                "--group-id",
+                "1",
+                "--key",
+                "scan/a",
+                "--value",
+                "1",
+            ],
+        );
+        if result.0 == 0 || tokio::time::Instant::now() >= deadline {
+            break result;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert_eq!(code, 0, "stderr={stderr}");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let (code, _, stderr) = loop {
+        let result = run(
+            &cli,
+            &console_url,
+            &[
+                "kv",
+                "put",
+                "--store-id",
+                "1",
+                "--group-id",
+                "1",
+                "--key",
+                "scan/b",
+                "--value",
+                "2",
+            ],
+        );
+        if result.0 == 0 || tokio::time::Instant::now() >= deadline {
+            break result;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert_eq!(code, 0, "stderr={stderr}");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let (code, stdout, stderr) = loop {
+        let result = run(
+            &cli,
+            &console_url,
+            &[
+                "kv",
+                "list",
+                "--store-id",
+                "1",
+                "--group-id",
+                "1",
+                "--prefix",
+                "scan/",
+            ],
+        );
+        if result.0 == 0 || tokio::time::Instant::now() >= deadline {
+            break result;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
     assert_eq!(code, 0, "stderr={stderr}");
     assert!(stdout.contains("scan/a\t1"), "stdout={stdout}");
     assert!(stdout.contains("scan/b\t2"), "stdout={stdout}");

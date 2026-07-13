@@ -59,6 +59,17 @@ pub struct Upstream {
     pub pid: u32,
     pub mgmt_url: String,
     pub grpc_url: String,
+    workspace: std::path::PathBuf,
+}
+
+impl Drop for Upstream {
+    fn drop(&mut self) {
+        let _ = Command::new("kill")
+            .arg("-KILL")
+            .arg(self.pid.to_string())
+            .status();
+        let _ = std::fs::remove_dir_all(&self.workspace);
+    }
 }
 
 /// A local-fork (no-SSH) node entry on `127.0.0.1`.
@@ -82,6 +93,18 @@ pub async fn spawn_upstream() -> Option<Upstream> {
     if !bin.exists() {
         return None;
     }
+    let workspace = std::env::temp_dir().join(format!(
+        "crowkv-cli-test-{}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+        pick_free_port()
+    ));
+    std::fs::create_dir_all(&workspace).ok()?;
+    std::fs::create_dir_all(workspace.join("bin")).ok()?;
+    std::fs::create_dir_all(workspace.join("log")).ok()?;
     let (mgmt_port, grpc_port) = pick_two_distinct_free_ports();
     let req = DeployRequest {
         server_id: "n1".into(),
@@ -90,13 +113,14 @@ pub async fn spawn_upstream() -> Option<Upstream> {
         election_profile: Some("test".into()),
         binary: Some(bin),
     };
-    let deployed = lifecycle::deploy_local(&req, &local_node("n1", "r1"))
+    let deployed = lifecycle::deploy_local_in_dir(&req, &local_node("n1", "r1"), &workspace)
         .await
-        .expect("deploy_local");
+        .expect("deploy_local_in_dir");
     Some(Upstream {
         pid: deployed.pid,
         mgmt_url: deployed.mgmt_url,
         grpc_url: deployed.grpc_url,
+        workspace,
     })
 }
 

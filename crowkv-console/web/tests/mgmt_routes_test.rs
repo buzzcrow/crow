@@ -4,6 +4,7 @@
 //! the `crowkv-server` binary is not built.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crowkv_console_shared::config::{NodeEntry, RackEntry, ServerEntry};
@@ -20,6 +21,17 @@ struct Upstream {
     pid: u32,
     mgmt_url: String,
     grpc_url: String,
+    workspace: PathBuf,
+}
+
+impl Drop for Upstream {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("kill")
+            .arg("-KILL")
+            .arg(self.pid.to_string())
+            .status();
+        let _ = std::fs::remove_dir_all(&self.workspace);
+    }
 }
 
 async fn spawn_upstream() -> Option<Upstream> {
@@ -27,6 +39,18 @@ async fn spawn_upstream() -> Option<Upstream> {
     if !bin.exists() {
         return None;
     }
+    let workspace = std::env::temp_dir().join(format!(
+        "crowkv-mgmt-routes-test-{}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+        pick_free_port()
+    ));
+    std::fs::create_dir_all(&workspace).ok()?;
+    std::fs::create_dir_all(workspace.join("bin")).ok()?;
+    std::fs::create_dir_all(workspace.join("log")).ok()?;
     let node = NodeEntry {
         id: "n1".into(),
         rack_id: "r1".into(),
@@ -43,11 +67,14 @@ async fn spawn_upstream() -> Option<Upstream> {
         election_profile: Some("test".into()),
         binary: Some(bin),
     };
-    let deployed = lifecycle::deploy_local(&req, &node).await.expect("deploy_local");
+    let deployed = lifecycle::deploy_local_in_dir(&req, &node, &workspace)
+        .await
+        .expect("deploy_local_in_dir");
     Some(Upstream {
         pid: deployed.pid,
         mgmt_url: deployed.mgmt_url,
         grpc_url: deployed.grpc_url,
+        workspace,
     })
 }
 
