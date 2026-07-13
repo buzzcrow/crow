@@ -42,6 +42,13 @@ mod sys {
     }
 
     #[repr(C)]
+    pub struct ct_gc_stats {
+        pub tombstones_dropped: u64,
+        pub pages_freed: u64,
+        pub bytes_freed: u64,
+    }
+
+    #[repr(C)]
     pub struct ct_options {
         pub path: *const c_char,
         pub iu_size: u32,
@@ -57,8 +64,8 @@ mod sys {
         pub fn ct_close(t: *mut ct_tree);
         pub fn ct_snapshot(t: *mut ct_tree, out_last_applied: *mut u64) -> c_int;
         pub fn ct_last_applied_slot(t: *const ct_tree) -> u64;
-        pub fn ct_set_gc_watermark(t: *mut ct_tree, safe_slot: u64);
-        pub fn ct_collect_garbage(t: *mut ct_tree) -> c_int;
+        pub fn ct_set_gc_watermark(t: *mut ct_tree, snapshot_slot: u64, safe_slot: u64);
+        pub fn ct_collect_garbage(t: *mut ct_tree, out_stats: *mut ct_gc_stats) -> c_int;
         pub fn ct_io_failed(t: *const ct_tree) -> c_int;
         pub fn ct_clear_io_error(t: *mut ct_tree);
         pub fn ct_apply_put(
@@ -69,12 +76,7 @@ mod sys {
             val: *const u8,
             vlen: usize,
         ) -> c_int;
-        pub fn ct_apply_delete(
-            t: *mut ct_tree,
-            slot: u64,
-            key: *const u8,
-            klen: usize,
-        ) -> c_int;
+        pub fn ct_apply_delete(t: *mut ct_tree, slot: u64, key: *const u8, klen: usize) -> c_int;
         pub fn ct_apply_batch(
             t: *mut ct_tree,
             slot: u64,
@@ -83,13 +85,7 @@ mod sys {
             count: u64,
         ) -> c_int;
         pub fn ct_force_advance_slot(t: *mut ct_tree, slot: u64);
-        pub fn ct_put(
-            t: *mut ct_tree,
-            key: *const u8,
-            klen: usize,
-            val: *const u8,
-            vlen: usize,
-        ) -> c_int;
+        pub fn ct_put(t: *mut ct_tree, key: *const u8, klen: usize, val: *const u8, vlen: usize) -> c_int;
         pub fn ct_del(t: *mut ct_tree, key: *const u8, klen: usize) -> c_int;
         pub fn ct_flush(t: *mut ct_tree) -> c_int;
         pub fn ct_get(
@@ -200,6 +196,14 @@ pub enum BatchOp<'a> {
     Delete { key: &'a [u8] },
 }
 
+/// Result of an explicit [`Crowtree::collect_garbage`] sweep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GcStats {
+    pub tombstones_dropped: u64,
+    pub pages_freed: u64,
+    pub bytes_freed: u64,
+}
+
 /// Encode `ops` into `ct_apply_batch`'s packed wire format:
 /// `[u8 kind][u32 klen][key][u32 vlen][value] * count` (kind 0=put, 1=delete).
 fn encode_batch(ops: &[BatchOp<'_>]) -> Vec<u8> {
@@ -302,7 +306,13 @@ impl Crowtree {
     pub fn apply_batch(&self, slot: u64, ops: &[BatchOp<'_>]) -> Result<(), CtError> {
         let packed = encode_batch(ops);
         check(unsafe {
-            sys::ct_apply_batch(self.as_ptr(), slot, packed.as_ptr(), packed.len(), ops.len() as u64)
+            sys::ct_apply_batch(
+                self.as_ptr(),
+                slot,
+                packed.as_ptr(),
+                packed.len(),
+                ops.len() as u64,
+            )
         })
     }
 
@@ -342,12 +352,26 @@ impl Crowtree {
         unsafe { sys::ct_last_applied_slot(self.as_ptr()) }
     }
 
-    pub fn set_gc_watermark(&self, safe_slot: u64) {
-        unsafe { sys::ct_set_gc_watermark(self.as_ptr(), safe_slot) }
+    /// Logical retention GC watermark: `gc_slot = min(snapshot_slot, safe_slot)`.
+    /// See `crowtree::Crowtree::set_gc_watermark`.
+    pub fn set_gc_watermark(&self, snapshot_slot: u64, safe_slot: u64) {
+        unsafe { sys::ct_set_gc_watermark(self.as_ptr(), snapshot_slot, safe_slot) }
     }
 
-    pub fn collect_garbage(&self) -> Result<(), CtError> {
-        check(unsafe { sys::ct_collect_garbage(self.as_ptr()) })
+    /// Explicit in-memory tombstone-retention sweep; does not persist. See
+    /// `crowtree::Crowtree::collect_garbage`.
+    pub fn collect_garbage(&self) -> Result<GcStats, CtError> {
+        let mut stats = sys::ct_gc_stats {
+            tombstones_dropped: 0,
+            pages_freed: 0,
+            bytes_freed: 0,
+        };
+        check(unsafe { sys::ct_collect_garbage(self.as_ptr(), &mut stats) })?;
+        Ok(GcStats {
+            tombstones_dropped: stats.tombstones_dropped,
+            pages_freed: stats.pages_freed,
+            bytes_freed: stats.bytes_freed,
+        })
     }
 
     /// True if a demand-load hit an I/O error or CRC mismatch on a committed
@@ -568,12 +592,7 @@ impl AsyncCrowtree {
         Arc::clone(&self.inner)
     }
 
-    pub async fn apply_put(
-        &self,
-        slot: u64,
-        key: Vec<u8>,
-        value: Vec<u8>,
-    ) -> Result<(), CtError> {
+    pub async fn apply_put(&self, slot: u64, key: Vec<u8>, value: Vec<u8>) -> Result<(), CtError> {
         let t = self.inner.clone();
         tokio::task::spawn_blocking(move || t.apply_put(slot, &key, &value))
             .await

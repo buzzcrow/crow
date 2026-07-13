@@ -31,13 +31,52 @@ fn mem_apply_get_scan() {
 }
 
 #[test]
+fn mem_gc_watermark_and_collect_garbage() {
+    let t = Crowtree::open(&Options::default()).unwrap();
+    t.apply_put(1, b"a", b"A").unwrap();
+    t.apply_delete(2, b"a").unwrap();
+    t.flush().unwrap();
+    assert_eq!(t.get(b"a").unwrap(), None);
+
+    // Below the (default zero) watermark: nothing eligible yet.
+    let stats = t.collect_garbage().unwrap();
+    assert_eq!(stats, crowtree_ffi::GcStats::default());
+
+    // gc_slot = min(snapshot_slot, safe_slot): a low snapshot_slot still holds
+    // the floor down even though safe_slot alone would allow the drop.
+    t.set_gc_watermark(0, 2);
+    let stats = t.collect_garbage().unwrap();
+    assert_eq!(stats, crowtree_ffi::GcStats::default());
+
+    t.set_gc_watermark(2, 2);
+    let stats = t.collect_garbage().unwrap();
+    assert_eq!(stats.tombstones_dropped, 1);
+    assert!(stats.pages_freed >= 1);
+    assert!(stats.bytes_freed > 0);
+
+    // Idempotent: nothing left to reclaim on a second sweep.
+    let stats2 = t.collect_garbage().unwrap();
+    assert_eq!(stats2, crowtree_ffi::GcStats::default());
+
+    // The tombstone drop is a physical/resident-only change; the logical read
+    // path (already gc_floor-filtered) is unaffected either way.
+    assert_eq!(t.get(b"a").unwrap(), None);
+}
+
+#[test]
 fn mem_apply_batch_multi_key_and_dup_last_wins() {
     let t = Crowtree::open(&Options::default()).unwrap();
     t.apply_batch(
         1,
         &[
-            BatchOp::Put { key: b"a", value: b"va" },
-            BatchOp::Put { key: b"b", value: b"vb" },
+            BatchOp::Put {
+                key: b"a",
+                value: b"va",
+            },
+            BatchOp::Put {
+                key: b"b",
+                value: b"vb",
+            },
             BatchOp::Delete { key: b"c" },
         ],
     )
@@ -51,8 +90,14 @@ fn mem_apply_batch_multi_key_and_dup_last_wins() {
     t.apply_batch(
         2,
         &[
-            BatchOp::Put { key: b"d", value: b"first" },
-            BatchOp::Put { key: b"d", value: b"second" },
+            BatchOp::Put {
+                key: b"d",
+                value: b"first",
+            },
+            BatchOp::Put {
+                key: b"d",
+                value: b"second",
+            },
         ],
     )
     .unwrap();
@@ -99,12 +144,8 @@ fn file_snapshot_reopen_smoke() {
 fn snapshot_export_import_round_trip() {
     let a = Crowtree::open(&Options::default()).unwrap();
     for i in 0..30usize {
-        a.apply_put(
-            (i + 1) as u64,
-            &key(i),
-            format!("v{i}").as_bytes(),
-        )
-        .unwrap();
+        a.apply_put((i + 1) as u64, &key(i), format!("v{i}").as_bytes())
+            .unwrap();
         a.flush().unwrap();
     }
     let stream = a.snapshot_export().unwrap();
@@ -131,8 +172,7 @@ fn snapshot_export_import_round_trip() {
 fn io_failed_clean_on_healthy_engine() {
     let t = Crowtree::open(&Options::default()).unwrap();
     for i in 0..10usize {
-        t.apply_put((i + 1) as u64, &key(i), b"v")
-            .unwrap();
+        t.apply_put((i + 1) as u64, &key(i), b"v").unwrap();
         t.flush().unwrap();
     }
     for i in 0..10usize {
@@ -164,13 +204,9 @@ async fn async_bridge_apply_get_snapshot() {
     };
     let t = AsyncCrowtree::open(&opt).unwrap();
     for i in 0..20usize {
-        t.apply_put(
-            (i + 1) as u64,
-            key(i),
-            format!("a{i}").into_bytes(),
-        )
-        .await
-        .unwrap();
+        t.apply_put((i + 1) as u64, key(i), format!("a{i}").into_bytes())
+            .await
+            .unwrap();
         t.flush().await.unwrap();
     }
     let durable = t.snapshot().await.unwrap();

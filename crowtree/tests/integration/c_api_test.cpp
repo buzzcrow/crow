@@ -45,7 +45,8 @@ TEST(CApi, MemOpenApplyGetScan)
     int32_t  found = 0;
     uint64_t slot  = 0;
     ct_buf   val   = {};
-    ASSERT_EQ(ct_get(t, reinterpret_cast<const uint8_t *>(make_key(5).data()), make_key(5).size(), &found, &slot, &val), 0);
+    ASSERT_EQ(ct_get(t, reinterpret_cast<const uint8_t *>(make_key(5).data()), make_key(5).size(), &found, &slot, &val),
+              0);
     ASSERT_EQ(found, 1);
     EXPECT_EQ(std::string(reinterpret_cast<char *>(val.data), val.len), "v5");
     ct_free_buf(&val);
@@ -101,7 +102,10 @@ TEST(CApi, ApplyBatchAtomicMultiKey)
     ASSERT_EQ(ct_apply_batch(t, 1, reinterpret_cast<const uint8_t *>(packed.data()), packed.size(), 3), 0);
     ASSERT_EQ(ct_flush(t), 0);
 
-    for (const auto &kv : std::vector<std::pair<std::string, std::string>>{{"a", "va"}, {"b", "vb"}}) {
+    for (const auto &kv : std::vector<std::pair<std::string, std::string>>{
+             {"a", "va"},
+             {"b", "vb"}
+    }) {
         int32_t  found = 0;
         uint64_t slot  = 0;
         ct_buf   val   = {};
@@ -139,7 +143,7 @@ TEST(CApi, ApplyBatchAtomicMultiKey)
 TEST(CApi, FileCheckpointReopen)
 {
     std::array<char, 26> tmpl{"/tmp/crowtree_capi_XXXXXX"};
-    int  fd     = mkstemp(tmpl.data());
+    int                  fd = mkstemp(tmpl.data());
     ASSERT_GE(fd, 0);
     close(fd);
     std::string path(tmpl.data());
@@ -198,7 +202,7 @@ TEST(CApi, SnapshotViewIterate)
     ASSERT_EQ(ct_view_iter(v, &it), 0);
     int seen = 0;
     while (true) {
-        ct_buf   key = {};
+        ct_buf   key   = {};
         ct_buf   val   = {};
         uint64_t slot  = 0;
         uint8_t  kind  = 0;

@@ -2,6 +2,7 @@
 
 use bytes::Bytes;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
+use crowkv::kv::{Batch, CrowtreeEngine, CrowtreeOptions, KVEngine};
 use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 use crowkv::wal::record::WALRecord;
 use crowkv::wal::replay::replay_group;
@@ -246,4 +247,203 @@ async fn restore_from_replay_rebuilds_live_replica_state() {
         restored.learner.engine_get(b"restore-key").map(|(_, v)| v),
         Some(b"restore-value".to_vec())
     );
+}
+
+/// `restore_from_replay_with_engine` replays the full WAL into a
+/// caller-supplied engine (here an in-memory `CrowtreeEngine`, standing in
+/// for the durable file-backed one `crowkv-server` uses), not just the
+/// default `InMemKV`. Otherwise identical restore semantics to
+/// `restore_from_replay` (same term/voted-for/acceptor state, same
+/// contiguous-chosen advance) -- the only difference is which `KVEngine`
+/// ends up behind `learner.engine_get`.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn restore_from_replay_with_engine_uses_injected_engine() {
+    let backend = sim_backend();
+    let disks = vec![PathBuf::from("/wal")];
+    let config = test_config(&disks);
+    let wal = WalEngine::create(backend.clone(), config, 1).await.unwrap();
+
+    for (slot, key, value) in [(1u64, b"k1".as_slice(), b"v1".as_slice()), (2, b"k2", b"v2")] {
+        let entry = PxLogEntry {
+            slot,
+            ballot: PxBallot::new(0, 1),
+            term: 1,
+            payload: Bytes::from(encode_put_payload(key, value)),
+        };
+        wal.append(&WALRecord::from_accepted(1, &entry)).await.unwrap();
+    }
+    wal.seal_all().await.unwrap();
+
+    let replay = replay_group(&backend, &disks, 1).await.unwrap();
+
+    // `path: None` selects an in-memory crowtree store -- same restore path
+    // crowkv-server's `--kv-engine crowtree` uses, minus the on-disk file.
+    let engine = CrowtreeEngine::open(&CrowtreeOptions::default()).expect("open in-memory crowtree engine");
+    let restored = PxLocalReplica::restore_from_replay_with_engine(
+        7,
+        PxLocalReplicaRole::Follower,
+        &replay,
+        Box::new(engine),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        restored.learner.engine_get(b"k1").map(|(_, v)| v),
+        Some(b"v1".to_vec())
+    );
+    assert_eq!(
+        restored.learner.engine_get(b"k2").map(|(_, v)| v),
+        Some(b"v2".to_vec())
+    );
+    assert_eq!(restored.contiguous_chosen(), 2);
+    assert!(restored.accepted_at(1).await.is_some());
+    assert!(restored.accepted_at(2).await.is_some());
+}
+
+/// `resume_from_slot() > 0`: an engine that already durably reflects a
+/// prefix of the WAL (here, slot 1 pre-applied and `flush()`ed before the
+/// engine is handed to `restore_from_replay_with_engine`, simulating what a
+/// real restart sees from a durable `CrowtreeEngine`) skips re-`learn()`ing
+/// that prefix, but must land at the exact same `contiguous_chosen` /
+/// `contiguous_applied` / `last_chosen_slot` / `last_chosen_term` state (and
+/// the same final KV contents) a full sequential replay would have produced.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn restore_from_replay_with_engine_resumes_from_last_applied_slot() {
+    let backend = sim_backend();
+    let disks = vec![PathBuf::from("/wal")];
+    let config = test_config(&disks);
+    let wal = WalEngine::create(backend.clone(), config, 1).await.unwrap();
+
+    for (slot, key, value, term) in [
+        (1u64, b"k1".as_slice(), b"v1".as_slice(), 1u64),
+        (2, b"k2", b"v2", 1),
+        (3, b"k3", b"v3", 2),
+    ] {
+        let entry = PxLogEntry {
+            slot,
+            ballot: PxBallot::new(0, 1),
+            term,
+            payload: Bytes::from(encode_put_payload(key, value)),
+        };
+        wal.append(&WALRecord::from_accepted(1, &entry)).await.unwrap();
+    }
+    wal.seal_all().await.unwrap();
+    let replay = replay_group(&backend, &disks, 1).await.unwrap();
+
+    // Pre-apply + flush slot 1 directly, matching what a durably-recovered
+    // CrowtreeEngine reports via `resume_from_slot()` on a real restart.
+    let engine = CrowtreeEngine::open(&CrowtreeOptions::default()).expect("open crowtree engine");
+    engine.apply(1, &Batch::decode(&encode_put_payload(b"k1", b"v1")));
+    engine.handle().flush().expect("flush");
+    assert_eq!(
+        engine.handle().last_applied_slot(),
+        1,
+        "sanity: engine reports a resume floor of 1"
+    );
+
+    let restored = PxLocalReplica::restore_from_replay_with_engine(
+        7,
+        PxLocalReplicaRole::Follower,
+        &replay,
+        Box::new(engine),
+    )
+    .await
+    .unwrap();
+
+    // Full KV state is correct regardless of which path (pre-seeded vs.
+    // replayed) applied each key.
+    assert_eq!(
+        restored.learner.engine_get(b"k1").map(|(_, v)| v),
+        Some(b"v1".to_vec())
+    );
+    assert_eq!(
+        restored.learner.engine_get(b"k2").map(|(_, v)| v),
+        Some(b"v2".to_vec())
+    );
+    assert_eq!(
+        restored.learner.engine_get(b"k3").map(|(_, v)| v),
+        Some(b"v3".to_vec())
+    );
+    // Frontier state matches what a full learn()-every-slot replay produces.
+    assert_eq!(restored.contiguous_chosen(), 3);
+    assert_eq!(restored.contiguous_applied(), 3);
+    assert_eq!(restored.last_chosen_slot(), 3);
+    assert_eq!(restored.last_chosen_term(), 2);
+    assert!(restored.accepted_at(1).await.is_some());
+    assert!(restored.accepted_at(2).await.is_some());
+    assert!(restored.accepted_at(3).await.is_some());
+}
+
+/// Defensive fallback: if the engine's resume floor doesn't line up with an
+/// accepted entry in the WAL-rebuilt acceptor (not expected in practice --
+/// an engine can only durably apply a slot that was itself accepted and
+/// WAL-logged -- but not a correctness invariant this restore path should
+/// ever trust blindly), restore still skips straight to `resume_from + 1`
+/// (never re-attempts the skipped prefix -- see the "no safe fallback"
+/// rationale on `restore_from_replay_with_engine`) but leaves the frontier
+/// at its conservative fresh-learner default instead of guessing a term.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn restore_from_replay_with_engine_falls_back_when_resume_slot_has_no_accepted_entry() {
+    let backend = sim_backend();
+    let disks = vec![PathBuf::from("/wal")];
+    let config = test_config(&disks);
+    let wal = WalEngine::create(backend.clone(), config, 1).await.unwrap();
+
+    // WAL has slots 1 and 3 accepted; slot 2 is a gap in the accepted log.
+    for (slot, key, value) in [(1u64, b"k1".as_slice(), b"v1".as_slice()), (3, b"k3", b"v3")] {
+        let entry = PxLogEntry {
+            slot,
+            ballot: PxBallot::new(0, 1),
+            term: 1,
+            payload: Bytes::from(encode_put_payload(key, value)),
+        };
+        wal.append(&WALRecord::from_accepted(1, &entry)).await.unwrap();
+    }
+    wal.seal_all().await.unwrap();
+    let replay = replay_group(&backend, &disks, 1).await.unwrap();
+
+    // Engine reports a resume floor (slot 2) the WAL-rebuilt acceptor has no
+    // accepted entry for. `last_applied_slot()` is itself a contiguous
+    // watermark (crowtree folds `received_slots_` forward from its own
+    // frontier), so reaching floor 2 legitimately requires applying slot 1
+    // too -- modeling an engine that durably has extra data at slot 2 with
+    // no independent WAL corroboration (e.g. a lost/truncated WAL record),
+    // rather than an outright-impossible-via-the-API state.
+    let engine = CrowtreeEngine::open(&CrowtreeOptions::default()).expect("open crowtree engine");
+    engine.apply(1, &Batch::decode(&encode_put_payload(b"phantom1", b"x")));
+    engine.apply(2, &Batch::decode(&encode_put_payload(b"phantom2", b"y")));
+    engine.handle().flush().expect("flush");
+    assert_eq!(
+        engine.handle().last_applied_slot(),
+        2,
+        "sanity: engine reports a resume floor of 2"
+    );
+
+    let restored = PxLocalReplica::restore_from_replay_with_engine(
+        7,
+        PxLocalReplicaRole::Follower,
+        &replay,
+        Box::new(engine),
+    )
+    .await
+    .unwrap();
+
+    // Slots 1 and 2 are skipped outright (never re-attempted -- see the
+    // rationale above), so slot 1's WAL value is *not* recovered here: an
+    // honest, safe degradation for this assumed-impossible mismatch, not a
+    // silent correctness violation (nothing that was ever safely writable
+    // is lost or corrupted). Slot 3, past the skipped prefix, replays
+    // normally.
+    assert_eq!(restored.learner.engine_get(b"k1").map(|(_, v)| v), None);
+    assert_eq!(
+        restored.learner.engine_get(b"k3").map(|(_, v)| v),
+        Some(b"v3".to_vec())
+    );
+    // No accepted entry at the resume floor (slot 2) to seed a term from, so
+    // the frontier stays at the fresh-learner default until slot 3's
+    // out-of-order `learn()` bumps the max-ever-seen high-water mark.
+    assert_eq!(restored.contiguous_chosen(), 0);
+    assert_eq!(restored.last_chosen_slot(), 3);
+    assert_eq!(restored.last_chosen_term(), 1);
 }

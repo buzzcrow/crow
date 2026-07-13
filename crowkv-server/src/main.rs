@@ -21,7 +21,7 @@ use crowkv::common::config::{PxElectionConfig, ServerConfig};
 use crowkv_server::cli::{parse_id_list, parse_port_list, Cli};
 use crowkv_server::mgmt_api::{self, persisted_port_for_store};
 use crowkv_server::startup::create_group_with_wal;
-use crowkv_server::store_registry::KvStoreRegistry;
+use crowkv_server::store_registry::{KvEngineKind, KvStoreRegistry};
 
 #[tokio::main]
 async fn main() {
@@ -61,14 +61,19 @@ async fn main() {
         .config_root
         .clone()
         .unwrap_or_else(|| wal_root.parent().unwrap_or_else(|| Path::new("")).join("conf"));
+    let data_root = args.data_root.clone().unwrap_or_else(|| {
+        wal_root
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join("crowtree")
+    });
+    let kv_engine = KvEngineKind::parse(&args.kv_engine);
     let wal_backend = Arc::new(crowkv::wal::IoBackend::detect());
 
-    let registry = Arc::new(KvStoreRegistry::with_runtime(
-        election_cfg,
-        wal_root,
-        config_root,
-        wal_backend,
-    ));
+    let registry = Arc::new(
+        KvStoreRegistry::with_runtime(election_cfg, wal_root, config_root, wal_backend)
+            .with_kv_engine(kv_engine, data_root),
+    );
 
     // Populate the port pool from `--ports` even when `--stores` is not
     // provided, so stores created later via the management API can use
@@ -258,6 +263,8 @@ async fn create_and_start_stores(
                 &registry.wal_root,
                 &registry.config_root,
                 registry.wal_backend.clone(),
+                registry.kv_engine,
+                &registry.data_root,
             )
             .await
             {

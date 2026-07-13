@@ -7,8 +7,11 @@ use crowkv::cluster::group_config::GroupConfigStore;
 use crowkv::cluster::group_election::LeaderElection;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crowkv::common::config::{PxElectionConfig, WalConfig};
+use crowkv::kv::{CrowtreeEngine, CrowtreeOptions, KVEngine};
 use crowkv::wal::replay::replay_group;
 use crowkv::wal::{IoBackend, WalEngine};
+
+use crate::store_registry::KvEngineKind;
 
 /// Load persisted group config from the config file and apply it to the group.
 ///
@@ -42,6 +45,47 @@ pub fn store_wal_root(wal_root: &Path, store_id: u64) -> PathBuf {
     wal_root.join(format!("store{store_id}"))
 }
 
+/// Durable per-group crowtree file path: `{data_root}/store{store_id}/group{group_id}.ctdb`.
+/// Only used when `--kv-engine crowtree` is selected.
+#[must_use]
+pub fn store_crowtree_path(data_root: &Path, store_id: u64, group_id: u64) -> PathBuf {
+    data_root
+        .join(format!("store{store_id}"))
+        .join(format!("group{group_id}.ctdb"))
+}
+
+/// Open (creating on first boot) the durable crowtree engine backing
+/// `(store_id, group_id)`'s learner, boxed for [`PxLearner::with_engine`]
+/// via [`PxLocalReplica::restore_from_replay_with_engine`].
+///
+/// # Errors
+///
+/// Returns an I/O error if the parent directory cannot be created, or if
+/// `CrowtreeEngine::open` fails (e.g. a corrupt or unreadable file).
+async fn open_crowtree_engine(
+    data_root: &Path,
+    store_id: u64,
+    group_id: u64,
+) -> io::Result<Box<dyn KVEngine>> {
+    let path = store_crowtree_path(data_root, store_id, group_id);
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let opt = CrowtreeOptions {
+        path: Some(path.to_string_lossy().into_owned()),
+        ..Default::default()
+    };
+    // `CrowtreeEngine::open` is a synchronous FFI call; called here inline
+    // (not `spawn_blocking`) consistent with `CrowtreeEngine`'s own
+    // documented policy of calling the still-fully-synchronous crowtree
+    // core directly rather than adding a thread-pool hop with no genuine
+    // asynchrony behind it (see `crowkv::kv::CrowtreeEngine`'s docs). This
+    // runs once per group at boot, not on a hot path.
+    let engine = CrowtreeEngine::open(&opt)
+        .map_err(|e| io::Error::other(format!("CrowtreeEngine::open({}) failed: {e:?}", path.display())))?;
+    Ok(Box::new(engine))
+}
+
 /// Create a live group by replaying any existing WAL, restoring the local
 /// replica state, attaching a fresh `WalEngine`, and seeding the next proposal
 /// slot / segment id.
@@ -49,7 +93,8 @@ pub fn store_wal_root(wal_root: &Path, store_id: u64) -> PathBuf {
 /// # Errors
 ///
 /// Returns any I/O or replay/restore error encountered while scanning the
-/// existing WAL, creating the new WAL engine, or rebuilding the local replica.
+/// existing WAL, creating the new WAL engine, opening the durable crowtree
+/// engine (when selected), or rebuilding the local replica.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_group_with_wal(
     store_id: u64,
@@ -60,6 +105,8 @@ pub async fn create_group_with_wal(
     wal_root: &Path,
     config_root: &Path,
     wal_backend: Arc<IoBackend>,
+    kv_engine: KvEngineKind,
+    data_root: &Path,
 ) -> io::Result<PxGroup> {
     let mut wal_config = WalConfig::with_root(store_wal_root(wal_root, store_id));
     if std::env::var("CROWKV_WAL_TEXT").as_deref() == Ok("1") {
@@ -69,7 +116,15 @@ pub async fn create_group_with_wal(
     let wal = WalEngine::create(wal_backend, wal_config, group_id).await?;
     wal.set_next_segment_id(replay.max_segment_id.saturating_add(1).max(1));
 
-    let mut local_replica = PxLocalReplica::restore_from_replay(replica_id, initial_role, &replay).await?;
+    let mut local_replica = match kv_engine {
+        KvEngineKind::Memory => {
+            PxLocalReplica::restore_from_replay(replica_id, initial_role, &replay).await?
+        }
+        KvEngineKind::Crowtree => {
+            let engine = open_crowtree_engine(data_root, store_id, group_id).await?;
+            PxLocalReplica::restore_from_replay_with_engine(replica_id, initial_role, &replay, engine).await?
+        }
+    };
     local_replica.set_wal(wal);
 
     let mut group = PxGroup::new(group_id, local_replica);

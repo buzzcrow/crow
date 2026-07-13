@@ -15,9 +15,11 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <set>
+#include <shared_mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -50,6 +52,14 @@ struct get_result
     bool        found = false;
     uint64_t    slot  = 0;
     std::string value;
+};
+
+// Result of an explicit collect_garbage() sweep (plan-tree #21).
+struct GcStats
+{
+    uint64_t tombstones_dropped = 0; // tombstone cells physically dropped
+    uint64_t pages_freed        = 0; // resident pages (deltas + old leaf bases) retired
+    uint64_t bytes_freed        = 0; // logical key+cell bytes of the dropped tombstones
 };
 
 class Crowtree
@@ -88,16 +98,45 @@ class Crowtree
     Status del(Slice key);
     Status batch_put(const Batch &batch);
 
-    // Logical retention GC watermark: tombstones with slot <= safe_slot may be
-    // dropped during consolidation once consensus no longer needs them.
-    void set_gc_watermark(uint64_t safe_slot);
+    // Logical retention GC watermark (design-crowtree-snapshot-gc.md §1/§4):
+    // stores both slots and computes gc_floor_ = min(snapshot_slot, safe_slot).
+    // Tombstones with slot <= gc_floor_ may be dropped, during consolidation or
+    // by an explicit collect_garbage() sweep. Using the min of the two (rather
+    // than safe_slot alone) is what makes it safe to call this before #20's
+    // learner wiring: a tombstone whose deletion isn't yet durable on a quorum
+    // (snapshot_slot) is never dropped early just because every member has
+    // locally applied it (safe_slot). Monotonic: gc_floor_ never regresses even
+    // if a later call passes a smaller min.
+    void set_gc_watermark(uint64_t snapshot_slot, uint64_t safe_slot);
 
     [[nodiscard]] uint64_t gc_watermark() const
     {
         return gc_floor_.load();
     }
 
-    // Drain the contiguous-applied prefix of L0 into L1 and publish a new root.
+    // Explicit tombstone-retention GC sweep (plan-tree #21). Force-consolidates
+    // every *resident* leaf holding a tombstone <= gc_watermark(), independent
+    // of the delta-chain-length/bytes consolidation trigger and of snapshot()'s
+    // dirty-only rebuild -- both of those only touch a leaf that's already
+    // dirty, so a leaf that receives a delete and then no further writes would
+    // otherwise keep its tombstone past gc_floor_ indefinitely. Skips a leaf
+    // whose resolved state has no tombstone to drop (cheap no-op sweep once the
+    // tree is fully swept), and skips evicted (demand-load-unloaded) leaves
+    // without paging them back in -- a background sweep must not defeat
+    // eviction (#17); a cold leaf becomes eligible again once next reloaded.
+    // Same retire_page()/epoch-guard mechanism as consolidate(), so it is safe
+    // to run concurrently with lock-free readers (get/scan/snapshot_view).
+    // Serialized against writers by write_mutex_.
+    GcStats collect_garbage();
+
+    // Drain the contiguous-applied prefix of every live MemTable (active_ +
+    // any queued frozen_ buffers, plan-tree #3) into L1 and publish the
+    // result. Always freezes whatever is currently in active_ first (even if
+    // it hasn't crossed the size/entry threshold) so a single flush() call
+    // fully drains all pending writes, same contract as before double
+    // buffering. Non-contiguous leftovers (slot above the current contiguous
+    // frontier) are relocated onto the live active_ MemTable rather than
+    // lost -- see the active_/frozen_ member comment for the full design.
     Status flush();
 
     // Point read (L0 overlay then L1). Returns true if a live value is found;
@@ -164,11 +203,9 @@ class Crowtree
         io_failed_.store(false);
     }
 
-    // Diagnostics.
-    [[nodiscard]] size_t memtable_count() const
-    {
-        return memtable_.count();
-    }
+    // Diagnostics: total entries across every live MemTable (active_ + any
+    // not-yet-drained frozen_ buffers), not just active_.
+    [[nodiscard]] size_t memtable_count() const;
 
     MappingTable &mapping()
     {
@@ -208,7 +245,38 @@ class Crowtree
     // Fold newly received slots into the contiguous prefix, then prune the
     // tracker below the new frontier. Caller holds slot_mutex_.
     void recompute_contiguous_locked();
-    void maybe_flush();
+
+    // -- MemTable double buffering (plan-tree #3); see the active_/frozen_
+    // member comment below for the full design. --
+    // Snapshot the current active_ pointer (shared_lock on memtable_mutex_;
+    // O(1), just bumps the shared_ptr refcount).
+    [[nodiscard]] std::shared_ptr<MemTable> current_active() const;
+    // Snapshot every live MemTable (frozen_ oldest-first, then active_ last)
+    // as a list of shared_ptrs so get()/scan() can read them after releasing
+    // memtable_mutex_ -- the shared_ptrs keep each table alive even if it is
+    // concurrently drained-to-empty-and-dropped from frozen_ by a flush() on
+    // another thread (drain empties a table's *contents*; it does not free
+    // the MemTable object out from under a reader still holding a ref).
+    [[nodiscard]] std::vector<std::shared_ptr<MemTable>> all_memtables() const;
+    // If active_ meets the size/entry threshold (or `force`), freeze it
+    // (push onto frozen_) and install a fresh active_. `force` also bypasses
+    // the max_memtable_count cap on the frozen_ queue depth (flush() always
+    // needs to freeze+drain whatever is pending, regardless of size) but
+    // still no-ops on an empty active_. Returns true if a freeze happened.
+    bool maybe_freeze_active(bool force);
+    // Threshold-triggered swap only (no drain) -- called after every
+    // apply()/force_advance_slot(). Draining is the separate, explicit job
+    // of flush() (background thread or caller-invoked).
+    void maybe_swap_active();
+    // Drain `mt`'s slot <= cs eligible entries into L1 via the normal
+    // per-leaf delta-append path (same mechanism regardless of which
+    // MemTable -- active_ or a frozen_ entry -- they came from). Returns
+    // true if anything was written. Caller holds write_mutex_.
+    bool drain_memtable_into_l1_locked(MemTable *mt, uint64_t cs);
+    // Snapshot import (install_snapshot): drop every live MemTable's content
+    // and install one fresh, empty active_. Caller holds write_mutex_.
+    void reset_memtables_locked();
+
     void consolidate_locked(uint64_t page_id);          // caller holds write_mutex_
     void maybe_split_or_merge_locked(uint64_t page_id); // dispatch on leaf size
     // Inner PIDs from root down to (but excluding) the leaf `target_page_id`.
@@ -244,7 +312,9 @@ class Crowtree
     // eligible on a timer, not only on the size thresholds. Reuses flush()'s
     // existing write_mutex_/MemTable-mutex_ locking — no new synchronization
     // between this thread and the apply()-driving thread (design note in
-    // plan-tree.md Open Issues §C).
+    // plan-tree.md Open Issues §C). Also runs collect_garbage() every
+    // opt_.gc_interval_ms (plan-tree #21) on this same thread/loop -- no second
+    // thread for the periodic GC trigger.
     void background_flush_loop();
 
     void retire_page(PageBase *p);
@@ -272,9 +342,15 @@ class Crowtree
     // highest-slot-wins, dropping tombstones with slot <= gc_floor. Overflow
     // pointer cells are carried forward unchanged; any overflow chain that a
     // higher-slot write supersedes is appended to *dead_overflow (if non-null) so
-    // the caller can retire it. Caller holds write_mutex_.
-    [[nodiscard]] static std::vector<leaf_entry> resolve_leaf_chain_for_rebuild(PageBase *head, uint64_t gc_floor,
-                                                                                std::vector<uint64_t> *dead_overflow);
+    // the caller can retire it. If out_tombstones_dropped/out_bytes_dropped are
+    // non-null, they are set to the number of tombstones dropped and their total
+    // key+cell byte size (collect_garbage() uses the count to skip rebuilding a
+    // leaf that has nothing to reclaim, and the bytes for GcStats::bytes_freed --
+    // the resident *frame* size is a poor proxy since pool-backed frames are
+    // fixed-size regardless of live content). Caller holds write_mutex_.
+    [[nodiscard]] static std::vector<leaf_entry>
+    resolve_leaf_chain_for_rebuild(PageBase *head, uint64_t gc_floor, std::vector<uint64_t> *dead_overflow,
+                                   size_t *out_tombstones_dropped = nullptr, size_t *out_bytes_dropped = nullptr);
     // Spill `value` into a fresh overflow page chain; returns the head PID. Caller
     // holds write_mutex_.
     [[nodiscard]] uint64_t spill_value_to_overflow_chain_locked(const std::string &value);
@@ -307,7 +383,74 @@ class Crowtree
     // before mapping_ so it is destroyed after the pages it backs.
     std::shared_ptr<BufferPool> pool_;
     MappingTable                mapping_;
-    MemTable                    memtable_;
+
+    // -- MemTable double buffering (plan-tree #3) --
+    //
+    // active_ is the single MemTable that apply()/apply_batch() writes land
+    // in. Once it crosses opt_.memtable_flush_bytes/_entries,
+    // maybe_swap_active() freezes it (pushes it onto frozen_, no longer
+    // reachable for new writes) and installs a fresh, empty MemTable as
+    // active_ -- a fast, memtable_mutex_-only pointer swap, decoupled from
+    // the (potentially much slower) B+tree drain. frozen_ holds zero or more
+    // frozen, write-closed MemTables awaiting drain into L1, oldest first;
+    // it normally holds at most one entry (drained to empty by the very next
+    // flush() call) but can hold up to (opt_.max_memtable_count - 1) if
+    // writes keep tripping the threshold faster than flush() (explicit call
+    // or the background thread) drains them -- see max_memtable_count's
+    // comment in options.h for the capacity/back-pressure behavior.
+    //
+    // Both members are guarded by memtable_mutex_, but *only* for the
+    // pointer/queue values themselves -- MemTable has its own internal
+    // mutex, so once a caller has copied out a shared_ptr<MemTable> (via
+    // current_active()/all_memtables()) it reads/writes/drains that table
+    // without holding memtable_mutex_ at all. This means apply_batch()
+    // (writer) and get()/scan() (lock-free readers, epoch-guarded) never
+    // contend with each other OR with an in-progress flush() drain on a
+    // *different* table -- the concurrency benefit double buffering is for.
+    //
+    // Read-side correctness (get()/scan()): because slots can arrive
+    // out of order (a Paxos-style caller may apply() a higher slot before a
+    // lower one that fills an earlier gap), the SAME key can legitimately be
+    // resident in more than one live MemTable at once with *different*
+    // slots when a freeze happens to land between two out-of-order writes to
+    // that key. Unlike the pre-#3 single-buffer design (where upsert()'s
+    // highest-slot-wins dedup made "the" MemTable hit unambiguous), reads
+    // must check every live table (active_ + all of frozen_, any order) and
+    // keep the highest-slot cell -- see get()'s and scan()'s implementation.
+    // Every live table's cell for a key is still guaranteed strictly newer
+    // than L1's (each table's durable_floor_ rejects writes for slots
+    // already folded into L1), so a hit in any live table never needs an L1
+    // fallback.
+    //
+    // Write-side correctness (flush()/drain_memtable_into_l1_locked()): a
+    // drained key is appended to its target leaf's delta chain, never
+    // written in place, and every reader of that chain (resolve_chain /
+    // resolve_chain_sorted) resolves highest-slot-wins across the *whole*
+    // chain regardless of append order -- so draining two frozen tables that
+    // happen to hold different slots for the same key, in either order, is
+    // safe: L1 always converges to the higher slot once both are drained
+    // (see resolve_chain's header comment in delta.h).
+    //
+    // Non-contiguous slots (documented per an explicit design requirement --
+    // do not lose track of this): when a frozen table is drained
+    // (drain_up_to(cs)), any entries with slot > cs are stuck behind a gap
+    // that hasn't become contiguous yet and are NOT written to L1. Rather
+    // than leaving that frozen table sitting half-drained in the queue
+    // indefinitely (which would both leak a MemTable object and prevent the
+    // queue from ever shrinking back down), flush() extracts those leftover
+    // entries and re-upserts them into the *current* active_ MemTable, then
+    // discards the now-fully-vacated frozen table. upsert()'s highest-slot-
+    // wins makes this safe even if active_ has independently received a
+    // newer (or, for that matter, older) write for the same key in the
+    // meantime. The relocated entries simply ride along in whichever table
+    // is active_ until a later flush() (once contiguous_slot_ has advanced
+    // past their slot) finally drains them for real -- they may bounce
+    // through several freeze/relocate cycles under a sustained out-of-order
+    // write pattern, which is expected and bounded by how long the
+    // underlying gap stays open, not by this mechanism.
+    mutable std::shared_mutex             memtable_mutex_;
+    std::shared_ptr<MemTable>             active_{std::make_shared<MemTable>()};
+    std::deque<std::shared_ptr<MemTable>> frozen_;
 
     // internal_error slot tracker (replaces the caller-supplied contiguous_slot). Holds
     // received-but-not-yet-contiguous slots above contiguous_slot_; the contiguous
@@ -329,14 +472,15 @@ class Crowtree
     mutable std::mutex write_mutex_; // serializes flush / consolidate / split-merge
     mutable std::mutex load_mutex_;  // serializes cold-path demand loads (design §4.5)
 
-    // Background flush thread (Options.background_flush / flush_interval_ms).
-    // Not started unless opt_.background_flush is set; see
+    // Background flush thread (Options.background_flush / flush_interval_ms),
+    // also driving the periodic collect_garbage() sweep (Options.gc_interval_ms,
+    // plan-tree #21). Not started unless opt_.background_flush is set; see
     // start_background_flush_thread(). Joined in ~Crowtree before the tree is
     // torn down.
-    std::thread            flush_thread_;
-    std::mutex             flush_thread_mu_;
+    std::thread             flush_thread_;
+    std::mutex              flush_thread_mu_;
     std::condition_variable flush_thread_cv_;
-    std::atomic<bool>      stop_flush_thread_{false};
+    std::atomic<bool>       stop_flush_thread_{false};
 
     // Tree-owned epoch-based reclamation (plan-tree #7; formerly on CrowtreeEnv).
     // Declared last so it is destroyed first: ~Crowtree frees the live tree via

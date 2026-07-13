@@ -45,6 +45,19 @@ pub struct Cli {
 
     #[arg(long, default_value = "default", value_parser = ["default", "test"])]
     pub election_profile: String,
+
+    /// KV storage engine backing each group's learner. `memory` (default) is
+    /// the in-memory, non-durable `InMemKV`; `crowtree` durably persists each
+    /// group's state to its own file under `--data-root` (recovered by
+    /// replaying the WAL through it on every restart — see
+    /// `PxLocalReplica::restore_from_replay_with_engine`).
+    #[arg(long, default_value = "memory", value_parser = ["memory", "crowtree"])]
+    pub kv_engine: String,
+
+    /// Root directory for durable per-group crowtree files (only used when
+    /// `--kv-engine crowtree`). Default: sibling of `wal_root` named `crowtree`.
+    #[arg(long)]
+    pub data_root: Option<std::path::PathBuf>,
 }
 
 /// Parse a comma-separated list of numbers and ranges into a `Vec<u64>`.

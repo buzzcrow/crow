@@ -484,9 +484,9 @@ Status Crowtree::open(const Options &opt, std::unique_ptr<Crowtree> *out)
     // single-threaded assumption — see start_background_flush_thread()'s
     // comment). Construct with it disabled, then start it explicitly once
     // recovery (or the no-snapshot fast path) has finished.
-    Options ctor_opt          = opt;
-    ctor_opt.background_flush = false;
-    auto tree                 = std::make_unique<Crowtree>(ctor_opt);
+    Options ctor_opt            = opt;
+    ctor_opt.background_flush   = false;
+    auto tree                   = std::make_unique<Crowtree>(ctor_opt);
     tree->opt_.background_flush = opt.background_flush;
 
     Superblock sb;

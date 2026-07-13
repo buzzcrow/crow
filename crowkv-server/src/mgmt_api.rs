@@ -528,6 +528,8 @@ async fn add_group(
         &state.wal_root,
         &state.config_root,
         state.wal_backend.clone(),
+        state.kv_engine,
+        &state.data_root,
     )
     .await
     .map_err(|e| {

@@ -220,6 +220,25 @@ impl PxLearner {
         }
     }
 
+    /// Fast-forward the chosen-slot frontier directly to `(slot, term)`,
+    /// bypassing `update_frontier`'s sequential/out-of-order-map advance.
+    ///
+    /// Only safe to call once, before any `learn()` call, on a
+    /// freshly-constructed learner (does not merge with existing
+    /// out-of-order state) — used exclusively by
+    /// [`crate::cluster::local_replica::PxLocalReplica::restore_from_replay_with_engine`]
+    /// to skip re-`learn()`ing a WAL prefix the injected engine already
+    /// durably reflects ([`crate::kv::KVEngine::resume_from_slot`]), while
+    /// still landing at the same `contiguous_chosen`/`contiguous_applied`/
+    /// `last_chosen_slot`/`last_chosen_term` state a full sequential replay
+    /// through `learn()` up to `slot` would have produced.
+    pub(crate) fn seed_resume_frontier(&self, slot: SlotIndex, term: PxTerm) {
+        self.contiguous_chosen.store(slot, Ordering::Release);
+        self.contiguous_applied.store(slot, Ordering::Release);
+        self.last_chosen_slot.store(slot, Ordering::Release);
+        self.last_chosen_term.store(term, Ordering::Release);
+    }
+
     /// Idempotency lookup: if `client_id`'s highest applied sequence number is
     /// `>= seq`, the request was already committed; return the commit slot of
     /// that client's latest applied request so the proposer can reply without

@@ -83,7 +83,7 @@ TEST(SplitMerge, MergeAndRootCollapse)
     EXPECT_GT(leaves_before, 1U);
 
     // Allow tombstone GC so deletes actually shrink leaves.
-    t.set_gc_watermark(1000000);
+    t.set_gc_watermark(1000000, 1000000);
     // Delete all but the first two keys.
     for (int i = 2; i < N; ++i) {
         ++slot;

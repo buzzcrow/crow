@@ -144,6 +144,20 @@ impl KVEngine for CrowtreeEngine {
         unimplemented!("CrowtreeEngine::clear: crowtree has no native reset/wipe primitive yet")
     }
 
+    fn resume_from_slot(&self) -> u64 {
+        // `Crowtree::last_applied_slot` is `contiguous_slot_` as of the last
+        // `flush()` (see `Crowtree::apply`/`flush`/`recompute_contiguous_locked`
+        // in crowtree.cpp) -- a durable, gap-free watermark, not just "the max
+        // slot ever seen". On a fresh in-memory engine (`path: None`) or an
+        // empty durable file this is `0`. On a recovered durable file it's
+        // whatever the on-disk superblock last recorded (`persist.cpp`),
+        // which only advances via an explicit `snapshot()`/persist -- a
+        // conservative floor if no such call happened right before the
+        // process that wrote this file exited, which is fine (see the trait
+        // doc: under-reporting only means more, still-safe, replay work).
+        self.inner.last_applied_slot()
+    }
+
     // `compare` uses the trait's default implementation (diffs `iter_all()`
     // of both sides); no override needed.
 }

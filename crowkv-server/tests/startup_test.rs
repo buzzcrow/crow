@@ -10,6 +10,7 @@ use crowkv::wal::record::WALRecord;
 use crowkv::wal::replay::replay_group;
 use crowkv::wal::{IoBackend, WalEngine};
 use crowkv_server::startup::{create_group_with_wal, store_wal_root};
+use crowkv_server::store_registry::KvEngineKind;
 
 fn encode_put_payload(key: &[u8], value: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -62,6 +63,7 @@ async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
         .unwrap();
     wal.seal_all().await.unwrap();
 
+    let data_root = temp.path().join("data-root");
     let group = create_group_with_wal(
         store_id,
         group_id,
@@ -71,6 +73,8 @@ async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
         &wal_root,
         &config_root,
         backend.clone(),
+        KvEngineKind::Memory,
+        &data_root,
     )
     .await
     .unwrap();
@@ -101,4 +105,95 @@ async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
     assert!(replay.records.iter().any(|record| {
         record.slot == 3 && matches!(record.record_type, crowkv::wal::record::RecordType::Accepted)
     }));
+}
+
+/// `--kv-engine crowtree` end-to-end: a group backed by a durable
+/// `CrowtreeEngine` file survives a simulated process restart (drop the
+/// group, then call `create_group_with_wal` again against the same
+/// `wal_root`/`data_root`) with its KV state intact -- via full WAL replay
+/// into a fresh `CrowtreeEngine::open()` at the same file
+/// (`PxLocalReplica::restore_from_replay_with_engine`), not by any
+/// resume-from-last-applied-slot shortcut (not implemented; see plan-tree.md
+/// #20's note on why that needs separate, careful frontier-seeding work).
+#[tokio::test]
+async fn create_group_with_wal_crowtree_engine_persists_across_restart() {
+    let temp = tempfile::tempdir().unwrap();
+    let wal_root = temp.path().join("wal-root");
+    let config_root = temp.path().join("conf-root");
+    let data_root = temp.path().join("data-root");
+    let backend = Arc::new(IoBackend::detect());
+    let store_id = 21;
+    let group_id = 5;
+    let replica_id = 1;
+
+    let group = create_group_with_wal(
+        store_id,
+        group_id,
+        replica_id,
+        PxLocalReplicaRole::Leader,
+        PxElectionConfig::for_tests(),
+        &wal_root,
+        &config_root,
+        backend.clone(),
+        KvEngineKind::Crowtree,
+        &data_root,
+    )
+    .await
+    .unwrap();
+
+    // The durable crowtree file was created under data_root, not left at the
+    // default in-memory (no file) path.
+    let ct_path = crowkv_server::startup::store_crowtree_path(&data_root, store_id, group_id);
+    assert!(
+        ct_path.exists(),
+        "expected a durable crowtree file at {ct_path:?}"
+    );
+
+    group.local_replica().become_leader();
+    group.stamp_proposing_term(group.local_replica().current_term());
+    let result = group
+        .propose(encode_put_payload(b"ct-key", b"ct-value"), Some(1), Some(1))
+        .await;
+    match result {
+        ProposeResult::Chosen { slot } => assert_eq!(slot, 1),
+        other => panic!("expected chosen proposal, got {other:?}"),
+    }
+    assert_eq!(
+        group
+            .local_replica()
+            .learner
+            .engine_get(b"ct-key")
+            .map(|(_, v)| v),
+        Some(b"ct-value".to_vec())
+    );
+
+    // Simulate a process restart: drop the group (closes the crowtree file
+    // handle via `Crowtree`'s `Drop`), then rebuild from the same WAL +
+    // crowtree file.
+    drop(group);
+
+    let restarted = create_group_with_wal(
+        store_id,
+        group_id,
+        replica_id,
+        PxLocalReplicaRole::Leader,
+        PxElectionConfig::for_tests(),
+        &wal_root,
+        &config_root,
+        backend.clone(),
+        KvEngineKind::Crowtree,
+        &data_root,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        restarted
+            .local_replica()
+            .learner
+            .engine_get(b"ct-key")
+            .map(|(_, v)| v),
+        Some(b"ct-value".to_vec()),
+        "crowtree-backed KV state must survive a simulated restart"
+    );
 }

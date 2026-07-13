@@ -6,12 +6,44 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+/// Which [`crowkv::kv::KVEngine`] backend new groups are created with.
+///
+/// Selected once at server startup via `--kv-engine` and stored on the
+/// registry; both the CLI bootstrap path (`main.rs`) and the management-API
+/// dynamic group-creation path (`mgmt_api.rs::add_group`) read it from there
+/// so the two paths can never disagree on which engine a fresh group gets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KvEngineKind {
+    /// In-memory, non-durable `InMemKV` (default).
+    Memory,
+    /// Durable crowtree file under the registry's `data_root`, one file per
+    /// `(store_id, group_id)` — see `startup::store_crowtree_path`.
+    Crowtree,
+}
+
+impl KvEngineKind {
+    /// Parse the `--kv-engine` CLI value (`clap`'s `value_parser` already
+    /// restricts it to `["memory", "crowtree"]`, so any other input is a
+    /// caller bug, not a user-facing error path).
+    #[must_use]
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "crowtree" => Self::Crowtree,
+            _ => Self::Memory,
+        }
+    }
+}
+
 pub struct KvStoreRegistry {
     pub stores: DashMap<u64, Arc<PxKvStore>>,
     pub election_cfg: PxElectionConfig,
     pub wal_root: PathBuf,
     pub config_root: PathBuf,
     pub wal_backend: Arc<IoBackend>,
+    pub kv_engine: KvEngineKind,
+    /// Root directory for durable per-group crowtree files. Only read when
+    /// `kv_engine == KvEngineKind::Crowtree`.
+    pub data_root: PathBuf,
     /// Port pool for KV server listeners, populated from `--ports` CLI arg.
     /// Used by `add_store` as a fallback before `persisted_port_for_store`.
     port_pool: Mutex<Vec<u16>>,
@@ -51,14 +83,30 @@ impl KvStoreRegistry {
         config_root: PathBuf,
         wal_backend: Arc<IoBackend>,
     ) -> Self {
+        let data_root = wal_root
+            .parent()
+            .map_or_else(|| PathBuf::from("crowtree"), |p| p.join("crowtree"));
         Self {
             stores: DashMap::new(),
             election_cfg,
             wal_root,
             config_root,
             wal_backend,
+            kv_engine: KvEngineKind::Memory,
+            data_root,
             port_pool: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Builder-style setter for [`Self::kv_engine`] / [`Self::data_root`],
+    /// used by `main.rs` right after construction (mirrors
+    /// [`Self::set_port_pool`]'s pattern of a post-construction CLI-driven
+    /// override rather than a longer `with_runtime` parameter list).
+    #[must_use]
+    pub fn with_kv_engine(mut self, kv_engine: KvEngineKind, data_root: PathBuf) -> Self {
+        self.kv_engine = kv_engine;
+        self.data_root = data_root;
+        self
     }
 
     /// Set the port pool (from `--ports` CLI argument).

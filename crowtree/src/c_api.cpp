@@ -183,20 +183,25 @@ uint64_t ct_last_applied_slot(const ct_tree *t)
     return t == nullptr ? 0 : t->tree->last_applied_slot();
 }
 
-void ct_set_gc_watermark(ct_tree *t, uint64_t safe_slot)
+void ct_set_gc_watermark(ct_tree *t, uint64_t snapshot_slot, uint64_t safe_slot)
 {
     if (t != nullptr) {
-        t->tree->set_gc_watermark(safe_slot);
+        t->tree->set_gc_watermark(snapshot_slot, safe_slot);
     }
 }
 
-ct_status ct_collect_garbage(ct_tree *t)
+ct_status ct_collect_garbage(ct_tree *t, ct_gc_stats *out_stats)
 {
     if (t == nullptr) {
         return static_cast<ct_status>(Code::kInvalidArgument);
     }
-    // Durable free-space GC runs as part of snapshot (it reuses dead extents).
-    return to_status(t->tree->snapshot(nullptr));
+    GcStats stats = t->tree->collect_garbage();
+    if (out_stats != nullptr) {
+        out_stats->tombstones_dropped = stats.tombstones_dropped;
+        out_stats->pages_freed        = stats.pages_freed;
+        out_stats->bytes_freed        = stats.bytes_freed;
+    }
+    return static_cast<ct_status>(Code::kOk);
 }
 
 int32_t ct_io_failed(const ct_tree *t)

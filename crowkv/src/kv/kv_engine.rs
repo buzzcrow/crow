@@ -28,6 +28,29 @@ pub trait KVEngine: Send + Sync {
     /// peer's snapshot) and by tests that need to simulate a wiped replica.
     fn clear(&self);
 
+    /// Highest slot `S` such that every slot in `[1, S]` is durably reflected
+    /// in this engine already — i.e. a caller rebuilding state from a WAL can
+    /// safely skip re-`apply`ing slots `<= S` and start at `S + 1`. Must be
+    /// contiguous (no gaps): `S` itself, and every earlier slot, has to
+    /// actually be applied, not just "some slot `<= S` was seen".
+    ///
+    /// The default (`0`) is always correct for a fresh/non-durable engine
+    /// ([`super::InMemKV`], or a `CrowtreeEngine` opened with `path: None`) —
+    /// it just means "nothing to skip, replay everything". A durable engine
+    /// that overrides this (e.g. [`super::CrowtreeEngine`], via
+    /// `crowtree_ffi::Crowtree::last_applied_slot`) lets
+    /// [`crate::cluster::local_replica::PxLocalReplica::restore_from_replay_with_engine`]
+    /// skip re-walking an already-durable WAL prefix. Only meaningful to call
+    /// once, right after opening a freshly-recovered engine and before any
+    /// `apply` calls in the current process — an engine that has taken live
+    /// applies since its last durable checkpoint may report a value staler
+    /// than its true in-memory state (safe: callers only use this to decide
+    /// what to *skip*, so under-reporting just means more (harmless,
+    /// idempotent) replay work, never less).
+    fn resume_from_slot(&self) -> u64 {
+        0
+    }
+
     /// Logical diff against `other`, sorted by key. Empty means the two
     /// engines hold the same `(slot, cell)` for every key. Compared exactly,
     /// including resolved-slot and tombstones.

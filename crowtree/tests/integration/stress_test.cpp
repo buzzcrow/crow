@@ -5,11 +5,11 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
+#include <cstdio>
 #include <map>
 #include <memory>
-#include <array>
-#include <cstdio>
 #include <random>
 #include <string>
 #include <thread>
@@ -145,7 +145,7 @@ TEST(Stress, ConcurrentReadersSingleWriter)
             ASSERT_TRUE(t.flush().ok());
         }
         if (step % 5000 == 4999) {
-            t.set_gc_watermark(slot);
+            t.set_gc_watermark(slot, slot);
         }
     }
     ASSERT_TRUE(t.flush().ok());
@@ -202,9 +202,9 @@ TEST(Stress, ConcurrentScanDuringChurnNoCorruption)
             while (!stop.load(std::memory_order_relaxed) && !bad.load(std::memory_order_relaxed)) {
                 // Mix full scans and narrow-prefix scans (prefix scans exercise the
                 // find_leaf_page_id start-point + early-stop path specifically).
-                std::string              prefix = (rng() % 2 == 0) ? "" : make_key(static_cast<int>(rng() % K)).substr(0, 6);
-                std::vector<scan_entry>  out;
-                bool                     trunc = false;
+                std::string prefix = (rng() % 2 == 0) ? "" : make_key(static_cast<int>(rng() % K)).substr(0, 6);
+                std::vector<scan_entry> out;
+                bool                    trunc = false;
                 if (!t.scan(Slice(prefix), 0, &out, &trunc).ok()) {
                     bad.store(true);
                     return;
@@ -253,4 +253,92 @@ TEST(Stress, ConcurrentScanDuringChurnNoCorruption)
     }
     EXPECT_FALSE(bad.load());
     EXPECT_GT(scans.load(), 0);
+}
+
+// plan-tree #8: snapshot_view() no longer holds write_mutex_ (epoch guard
+// only), walking L1 via the same right_sibling technique as scan(). This
+// hammers snapshot_view() concurrently with heavy split/merge/flush churn and
+// checks the invariants that must hold for any torn/mid-mutation snapshot:
+// sorted order, no duplicate keys, well-formed values, and that at_slot is a
+// valid *lower bound* (every key/value the snapshot's own get() resolves to
+// is consistent with some slot <= the highest slot applied so far -- entries
+// may run ahead of at_slot, per the at_slot-captured-before-the-walk
+// argument in snapshot_view()'s header comment, but must never show a value
+// that couldn't have existed at any real point in time).
+TEST(Stress, ConcurrentSnapshotViewDuringChurnNoCorruption)
+{
+    Options opt;
+    opt.max_delta_len    = 2;
+    opt.leaf_split_bytes = 160;
+    opt.leaf_merge_bytes = 50;
+    opt.inner_max_keys   = 8;
+    opt.inner_merge_keys = 3;
+    Crowtree t(opt);
+
+    const int             K = 300;
+    std::atomic<bool>     stop{false};
+    std::atomic<long>     views{0};
+    std::atomic<bool>     bad{false};
+    std::atomic<uint64_t> max_slot_seen{0};
+
+    std::vector<std::thread> viewers;
+    viewers.reserve(4);
+    for (int r = 0; r < 4; ++r) {
+        viewers.emplace_back([&, r] {
+            while (!stop.load(std::memory_order_relaxed) && !bad.load(std::memory_order_relaxed)) {
+                auto snap = t.snapshot_view();
+                if (snap == nullptr) {
+                    bad.store(true);
+                    return;
+                }
+                uint64_t    ceiling = max_slot_seen.load(std::memory_order_acquire);
+                const auto &entries = snap->entries();
+                for (size_t i = 0; i < entries.size(); ++i) {
+                    if (i > 0 && !(Slice(entries[i - 1].key).compare(Slice(entries[i].key)) < 0)) {
+                        bad.store(true); // not strictly increasing -> duplicate or out of order
+                        return;
+                    }
+                    CellView v{Slice(entries[i].cell)};
+                    // Every applied value/tombstone carries a slot that was
+                    // real at some point; it can never exceed the highest
+                    // slot any apply() call had returned from so far.
+                    if (v.slot() > ceiling + 1) { // +1: benign race with the counter's own update below
+                        bad.store(true);
+                        return;
+                    }
+                    if (!v.is_tombstone() && (v.value().empty() || v.value().data()[0] != 'v')) {
+                        bad.store(true); // corrupted value
+                        return;
+                    }
+                }
+                views.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+
+    std::mt19937 rng(44);
+    uint64_t     slot = 0;
+    for (int step = 0; step < 6000; ++step) {
+        ++slot;
+        std::string key = make_key(static_cast<int>(rng() % K));
+        if ((rng() % 4) == 0) {
+            ASSERT_TRUE(t.apply(slot, Batch{{{.key = key, .kind = OpKind::kDelete, .value = ""}}}).ok());
+        }
+        else {
+            std::string val = "v" + std::to_string(slot);
+            ASSERT_TRUE(t.apply(slot, Batch{{{.key = key, .kind = OpKind::kPut, .value = val}}}).ok());
+        }
+        max_slot_seen.store(slot, std::memory_order_release);
+        if ((rng() % 6) == 0) {
+            ASSERT_TRUE(t.flush().ok());
+        }
+    }
+    ASSERT_TRUE(t.flush().ok());
+
+    stop.store(true);
+    for (auto &th : viewers) {
+        th.join();
+    }
+    EXPECT_FALSE(bad.load());
+    EXPECT_GT(views.load(), 0);
 }

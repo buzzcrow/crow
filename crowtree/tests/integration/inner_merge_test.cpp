@@ -70,7 +70,7 @@ TEST(InnerMerge, DeleteHeavyCollapsesTreeAndReopens)
         ASSERT_GE(tall_height, 3); // genuinely multi-level
 
         // Allow tombstone GC so deleted leaves shrink + merge away.
-        t.set_gc_watermark(1000000);
+        t.set_gc_watermark(1000000, 1000000);
         // Delete all but a sparse handful, driving leaf merges -> inner underflow.
         for (int i = 0; i < N; ++i) {
             if (i % 50 == 0) {
@@ -150,7 +150,7 @@ TEST(InnerMerge, RandomizedInsertDeleteParity)
             ASSERT_TRUE(t.flush().ok());
         }
         if (round % 500 == 499) {
-            t.set_gc_watermark(slot);
+            t.set_gc_watermark(slot, slot);
         }
     }
     ASSERT_TRUE(t.flush().ok());

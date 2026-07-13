@@ -69,28 +69,36 @@ std::vector<leaf_entry> resolve_chain_sorted(PageBase *head, uint64_t gc_floor)
     return out;
 }
 
-// Collect all live entries in key order by an in-order walk of the L1 tree.
+// Collect all live entries in key order by walking the leaf chain via
+// right_sibling, starting at the leftmost leaf (found the same way scan()'s
+// range walk does: find_leaf_page_id with an empty key, which compares less
+// than every real key). This is a full-tree equivalent of scan()'s
+// right-sibling walk, so it inherits the same concurrency-safety argument
+// (see scan()'s header comment) -- it does NOT do a top-down parent/children
+// DFS, so it is safe to run under only an epoch guard (no write_mutex_)
+// concurrently with a split or merge: split_leaf_locked publishes the new
+// right half and repoints the parent *before* shrinking the original PID,
+// and try_merge_leaf_locked gives the merged page the removed leaf's old
+// right_sibling, so a leaf read at any point mid-SMO either still holds its
+// full pre-SMO entry set (old right_sibling, no gap) or the new content with
+// right_sibling already repointed correctly (no gap, no duplicate).
 template <class Resolve>
-void collect_in_order(Resolve &&resolve, uint64_t page_id, uint64_t gc_floor, std::vector<leaf_entry> *out)
+void collect_in_order(Resolve &&resolve, uint64_t root_page_id, uint64_t gc_floor, std::vector<leaf_entry> *out)
 {
-    PageBase *head = resolve(page_id);
-    if (head == nullptr) {
+    if (root_page_id == kInvalidPageId) {
         return;
     }
-    PageBase *base = head;
-    while (base != nullptr && base->type == page_type::kBatchDelta) {
-        base = base->next;
-    }
-    if (base != nullptr && base->type == page_type::kInnerBase) {
-        for (uint64_t child : static_cast<InnerBase *>(base)->children()) {
-            collect_in_order(resolve, child, gc_floor, out);
+    uint64_t page_id = find_leaf_page_id(resolve, root_page_id, Slice());
+    while (page_id != kInvalidPageId) {
+        PageBase *head = resolve(page_id);
+        if (head == nullptr) {
+            return;
         }
-    }
-    else {
-        std::vector<leaf_entry> leaf = resolve_chain_sorted(head, gc_floor);
-        for (auto &e : leaf) {
+        for (auto &e : resolve_chain_sorted(head, gc_floor)) {
             out->push_back(std::move(e));
         }
+        LeafBase *base = chain_leaf_base(head);
+        page_id        = base != nullptr ? base->right_sibling() : kInvalidPageId;
     }
 }
 
@@ -139,6 +147,7 @@ void Crowtree::start_background_flush_thread()
 void Crowtree::background_flush_loop()
 {
     std::unique_lock<std::mutex> lk(flush_thread_mu_);
+    auto                         last_gc = std::chrono::steady_clock::now();
     while (!stop_flush_thread_.load()) {
         flush_thread_cv_.wait_for(lk, std::chrono::milliseconds(opt_.flush_interval_ms));
         if (stop_flush_thread_.load()) {
@@ -149,6 +158,18 @@ void Crowtree::background_flush_loop()
         // (see flush()'s early-return path) and shares its existing locking with
         // the apply()-driving thread, so no new synchronization is introduced.
         (void)flush();
+        // plan-tree #21: reuse this same thread/loop for the periodic
+        // collect_garbage() sweep trigger instead of adding a second thread.
+        // Disabled (opt_.gc_interval_ms == 0) by default; collect_garbage()'s
+        // own leaf-level dropped-count check keeps a no-op tick cheap.
+        if (opt_.gc_interval_ms > 0) {
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_gc).count() >=
+                static_cast<int64_t>(opt_.gc_interval_ms)) {
+                (void)collect_garbage();
+                last_gc = now;
+            }
+        }
         lk.lock();
     }
 }
@@ -388,10 +409,15 @@ void Crowtree::apply_batch(uint64_t slot, const Batch &batch)
     for (const auto &op : batch.ops) {
         latest[op.key] = encode_cell_buf(slot, op.kind, Slice(op.value));
     }
-    // Move each deduped cell into L0 (the key is copied once into a buffer).
+    // Snapshot the current active_ pointer once, then move every deduped
+    // cell into it (no memtable_mutex_ held while upserting -- MemTable has
+    // its own internal mutex; this is what lets concurrent apply() callers
+    // never contend with an in-progress flush() drain on a *different*,
+    // already-frozen table, see the active_/frozen_ member comment).
+    std::shared_ptr<MemTable> active = current_active();
     while (!latest.empty()) {
         auto node = latest.extract(latest.begin());
-        memtable_.upsert(Slice(node.key()), slot, std::move(node.mapped()));
+        active->upsert(Slice(node.key()), slot, std::move(node.mapped()));
     }
 }
 
@@ -428,7 +454,7 @@ Status Crowtree::apply(uint64_t slot, const Batch &batch)
         received_slots_.insert(slot);
         recompute_contiguous_locked();
     }
-    maybe_flush();
+    maybe_swap_active();
     return Status::Ok();
 }
 
@@ -444,14 +470,83 @@ void Crowtree::force_advance_slot(uint64_t slot)
         }
         recompute_contiguous_locked();
     }
-    maybe_flush();
+    maybe_swap_active();
 }
 
-void Crowtree::set_gc_watermark(uint64_t safe_slot)
+void Crowtree::set_gc_watermark(uint64_t snapshot_slot, uint64_t safe_slot)
 {
-    uint64_t prev = gc_floor_.load();
-    while (safe_slot > prev && !gc_floor_.compare_exchange_weak(prev, safe_slot)) {
+    uint64_t floor = std::min(snapshot_slot, safe_slot);
+    uint64_t prev  = gc_floor_.load();
+    while (floor > prev && !gc_floor_.compare_exchange_weak(prev, floor)) {
     }
+}
+
+GcStats Crowtree::collect_garbage()
+{
+    std::lock_guard<std::mutex> lk(write_mutex_);
+    GcStats                     stats;
+    uint64_t                    gc = gc_floor_.load();
+
+    std::function<void(uint64_t)> walk = [&](uint64_t page_id) {
+        // Peek without demand-loading (MappingTable::get, not resident()): only
+        // leaves are ever evicted, so a tagged-unloaded slot here means a cold
+        // leaf. A periodic background sweep must not page it back in just to
+        // check GC eligibility -- that would defeat eviction (#17). It becomes
+        // eligible again next sweep after it's next touched/reloaded.
+        PageBase *head = mapping_.get(page_id);
+        if (head == nullptr || MappingTable::is_unloaded(head)) {
+            return;
+        }
+        PageBase *base = head;
+        while (base != nullptr && base->type == page_type::kBatchDelta) {
+            base = base->next;
+        }
+        if (base == nullptr) {
+            return; // malformed chain (delta-only, no terminal base); should not happen
+        }
+        if (base->type == page_type::kInnerBase) {
+            for (uint64_t child : static_cast<InnerBase *>(base)->children()) {
+                walk(child);
+            }
+            return;
+        }
+
+        // Leaf: check whether the resolved (highest-slot-wins) state actually
+        // has a tombstone to drop before paying for a rebuild -- most leaves on
+        // most sweeps have nothing to reclaim, and rebuilding unconditionally
+        // would allocate + retire a fresh LeafBase for every resident leaf on
+        // every sweep for no reason.
+        size_t                  dropped       = 0;
+        size_t                  dropped_bytes = 0;
+        std::vector<uint64_t>   dead_overflow;
+        std::vector<leaf_entry> fresh =
+            resolve_leaf_chain_for_rebuild(head, gc, &dead_overflow, &dropped, &dropped_bytes);
+        if (dropped == 0) {
+            return;
+        }
+        uint64_t  right    = static_cast<LeafBase *>(base)->right_sibling();
+        LeafBase *new_leaf = build_leaf_spilling_locked(std::move(fresh), right);
+        mapping_.store(page_id, new_leaf);
+
+        uint64_t freed = 0;
+        for (PageBase *n = head; n != nullptr;) {
+            PageBase *nx = n->next;
+            retire_page(n);
+            ++freed;
+            n = nx;
+        }
+        for (uint64_t h : dead_overflow) {
+            retire_overflow_chain_locked(h);
+        }
+
+        stats.tombstones_dropped += dropped;
+        stats.pages_freed += freed;
+        stats.bytes_freed += dropped_bytes;
+    };
+    if (root_page_id_.load() != kInvalidPageId) {
+        walk(root_page_id_.load());
+    }
+    return stats;
 }
 
 Status Crowtree::put(Slice key, Slice value)
@@ -475,27 +570,83 @@ Status Crowtree::batch_put(const Batch &batch)
     return apply(auto_slot_.fetch_add(1) + 1, batch);
 }
 
-void Crowtree::maybe_flush()
+std::shared_ptr<MemTable> Crowtree::current_active() const
 {
-    if (memtable_.approx_bytes() >= opt_.memtable_flush_bytes || memtable_.count() >= opt_.memtable_flush_entries) {
-        flush();
-    }
+    std::shared_lock<std::shared_mutex> lk(memtable_mutex_);
+    return active_;
 }
 
-Status Crowtree::flush()
+std::vector<std::shared_ptr<MemTable>> Crowtree::all_memtables() const
 {
-    std::lock_guard<std::mutex> lk(write_mutex_);
-    uint64_t                    cs = contiguous_slot_.load();
-    // Reject further writes <= cs *before* draining so L0 stays strictly newer
-    // than L1 (correctness of L0-first reads).
-    memtable_.set_durable_floor(cs);
-    std::vector<mem_entry> drained = memtable_.drain_up_to(cs);
-    if (drained.empty()) {
-        // Still advance the durable watermark/version so snapshots see progress.
-        if (cs > last_applied_slot_.load()) {
-            last_applied_slot_.store(cs);
+    std::shared_lock<std::shared_mutex>    lk(memtable_mutex_);
+    std::vector<std::shared_ptr<MemTable>> out;
+    out.reserve(frozen_.size() + 1);
+    out.insert(out.end(), frozen_.begin(), frozen_.end());
+    out.push_back(active_);
+    return out;
+}
+
+bool Crowtree::maybe_freeze_active(bool force)
+{
+    std::shared_ptr<MemTable> active = current_active();
+    if (!force && active->approx_bytes() < opt_.memtable_flush_bytes && active->count() < opt_.memtable_flush_entries) {
+        return false;
+    }
+    std::unique_lock<std::shared_mutex> lk(memtable_mutex_);
+    // Re-check under the exclusive lock: another thread may have already
+    // frozen this exact active_ (or installed a fresh, still-small one)
+    // between the check above and taking the lock.
+    if (active_ != active || active_->empty()) {
+        return false;
+    }
+    if (!force) {
+        size_t max_frozen = opt_.max_memtable_count > 1 ? static_cast<size_t>(opt_.max_memtable_count) - 1 : 1;
+        if (frozen_.size() >= max_frozen) {
+            // At capacity: no free buffer slot. Let active_ keep growing past
+            // its threshold rather than stall the writer -- an explicit
+            // flush()/the background thread is expected to drain a slot free
+            // (documented in Options::max_memtable_count).
+            return false;
         }
-        return Status::Ok();
+    }
+    frozen_.push_back(active_);
+    active_ = std::make_shared<MemTable>();
+    // Propagate the known-durable floor to the fresh table immediately (not
+    // just on its first flush()) so a stale re-apply landing in it before
+    // its own first drain is still correctly rejected.
+    active_->set_durable_floor(last_applied_slot_.load());
+    return true;
+}
+
+void Crowtree::maybe_swap_active()
+{
+    maybe_freeze_active(/*force=*/false);
+}
+
+void Crowtree::reset_memtables_locked()
+{
+    std::unique_lock<std::shared_mutex> lk(memtable_mutex_);
+    frozen_.clear();
+    active_ = std::make_shared<MemTable>();
+}
+
+size_t Crowtree::memtable_count() const
+{
+    size_t n = 0;
+    for (auto &mt : all_memtables()) {
+        n += mt->count();
+    }
+    return n;
+}
+
+bool Crowtree::drain_memtable_into_l1_locked(MemTable *mt, uint64_t cs)
+{
+    // Reject further writes <= cs *before* draining so this table's cells
+    // stay strictly newer than L1 (correctness of L0-first reads).
+    mt->set_durable_floor(cs);
+    std::vector<mem_entry> drained = mt->drain_up_to(cs);
+    if (drained.empty()) {
+        return false;
     }
 
     size_t i = 0;
@@ -545,6 +696,67 @@ Status Crowtree::flush()
         if (delta->delta_len > opt_.max_delta_len || delta->chain_bytes > opt_.max_delta_bytes) {
             consolidate_locked(page_id);
         }
+    }
+    return true;
+}
+
+Status Crowtree::flush()
+{
+    std::lock_guard<std::mutex> lk(write_mutex_);
+    uint64_t                    cs = contiguous_slot_.load();
+
+    // Always freeze whatever is in active_ right now (even below threshold)
+    // so an explicit flush() call (or the periodic background-thread tick)
+    // fully drains all pending writes, matching the pre-double-buffering
+    // flush() contract that tests / install_snapshot() / snapshot() rely on.
+    // Automatic, threshold-triggered freezes already happen out-of-band on
+    // the apply() path via maybe_swap_active(); this just catches whatever
+    // is left in the live active_ table (a no-op if it's already empty).
+    maybe_freeze_active(/*force=*/true);
+
+    // Move the frozen_ queue into a local variable under a brief exclusive
+    // lock, then process it lock-free from here on: this is what makes it
+    // safe to iterate/erase without racing a concurrent maybe_swap_active()
+    // (called from other threads' apply(), without write_mutex_) that only
+    // ever *pushes* onto the (now-empty) live frozen_ member from this point
+    // on -- flush() never touches the live frozen_ member again this call.
+    std::deque<std::shared_ptr<MemTable>> to_drain;
+    {
+        std::unique_lock<std::shared_mutex> mlk(memtable_mutex_);
+        to_drain.swap(frozen_);
+    }
+
+    std::shared_ptr<MemTable> active    = current_active();
+    bool                      wrote_any = false;
+    for (auto &mt : to_drain) {
+        if (drain_memtable_into_l1_locked(mt.get(), cs)) {
+            wrote_any = true;
+        }
+        if (mt->empty()) {
+            continue;
+        }
+        // This table still holds entries with slot > cs: stuck behind a gap
+        // that hasn't become contiguous yet. Relocate the remainder onto the
+        // live active_ table (rather than leaving a half-drained table
+        // sitting around, or worse pushing it back onto frozen_ and risking
+        // an unbounded queue) -- see the active_/frozen_ member comment
+        // (plan-tree #3) for the full rationale. upsert()'s highest-slot-
+        // wins keeps this correct even if active_ has since received an
+        // independent write for the same key.
+        for (auto &e : mt->drain_up_to(UINT64_MAX)) {
+            active->upsert(Slice(e.key), e.slot, std::move(e.cell));
+        }
+    }
+    // Keep the live active_ table's durable floor current even when nothing
+    // above needed freezing/draining (e.g. an idle background-timer tick).
+    active->set_durable_floor(cs);
+
+    if (!wrote_any) {
+        // Still advance the durable watermark/version so snapshots see progress.
+        if (cs > last_applied_slot_.load()) {
+            last_applied_slot_.store(cs);
+        }
+        return Status::Ok();
     }
 
     last_applied_slot_.store(cs);
@@ -895,10 +1107,29 @@ bool Crowtree::get(Slice key, uint64_t *out_slot, std::string *out_value) const
 {
     EpochManager::Guard guard = epoch_.enter();
 
-    // L0 first: any key present in L0 is strictly newer than L1.
-    std::string cell;
-    if (memtable_.get(key, &cell)) {
-        CellView v{Slice(cell)};
+    // L0: check every live MemTable (active_ + any not-yet-drained frozen_
+    // buffers) and keep the highest-slot hit. Unlike the single-buffer
+    // design, a key can legitimately be present in more than one live
+    // MemTable at once with *different* slots (out-of-order slot delivery
+    // can straddle a freeze boundary) -- see the active_/frozen_ member
+    // comment (plan-tree #3) for the full argument. Any key present in ANY
+    // live MemTable is still guaranteed strictly newer than L1, so a hit
+    // here never needs to fall through to L1.
+    std::vector<std::shared_ptr<MemTable>> tables = all_memtables();
+    bool                                   found  = false;
+    std::string                            best_cell;
+    for (auto &mt : tables) {
+        std::string cell;
+        if (!mt->get(key, &cell)) {
+            continue;
+        }
+        if (!found || cell_wins(CellView{Slice(cell)}, CellView{Slice(best_cell)})) {
+            best_cell = std::move(cell);
+            found     = true;
+        }
+    }
+    if (found) {
+        CellView v{Slice(best_cell)};
         if (v.is_tombstone()) {
             return false;
         }
@@ -970,8 +1201,25 @@ Status Crowtree::scan(Slice prefix, size_t limit, std::vector<scan_entry> *out, 
     // try_merge_leaf_locked for the exact ordering this relies on.
     EpochManager::Guard guard = epoch_.enter();
 
-    std::vector<mem_entry> l0 = memtable_.snapshot();
-    size_t                 i  = 0; // l0 cursor
+    // L0: one sorted-by-key snapshot per live MemTable (active_ + any
+    // not-yet-drained frozen_ buffers). Unlike the single-buffer design,
+    // more than one of these can hold the same key with a *different* slot
+    // (out-of-order slot delivery can straddle a freeze boundary -- see the
+    // active_/frozen_ member comment, plan-tree #3), so the merge below
+    // picks the highest-slot cell among whichever sources tie on a key,
+    // instead of unconditionally preferring "the" L0 stream.
+    struct L0Cursor
+    {
+        std::vector<mem_entry> entries;
+        size_t                 idx = 0;
+    };
+
+    std::vector<L0Cursor> l0;
+    for (auto &mt : all_memtables()) {
+        L0Cursor c;
+        c.entries = mt->snapshot();
+        l0.push_back(std::move(c));
+    }
 
     uint64_t gc      = gc_floor_.load();
     uint64_t page_id = root_page_id_.load();
@@ -1019,47 +1267,59 @@ Status Crowtree::scan(Slice prefix, size_t limit, std::vector<scan_entry> *out, 
         return true;
     };
 
-    // Merge the two key-sorted streams; on a tie L0 (newer) wins.
+    // Merge every L0 stream + the L1 stream. On a key collision across
+    // multiple sources (possible across L0 streams -- see the L0Cursor
+    // comment above; L1 only ever collides with L0, never with itself), the
+    // highest-slot cell (cell_wins) wins and every cursor sitting on that
+    // key is advanced, so a key present in more than one source still
+    // yields exactly one output entry.
     while (true) {
-        bool have_l1 = refill_l1();
-        bool have_l0 = i < l0.size();
-        if (!have_l0 && !have_l1) {
+        bool  have_l1 = refill_l1();
+        bool  has_any = have_l1;
+        Slice min_key;
+        if (have_l1) {
+            min_key = Slice(l1_leaf[j].key);
+        }
+        for (auto &c : l0) {
+            if (c.idx >= c.entries.size()) {
+                continue;
+            }
+            Slice k = Slice(c.entries[c.idx].key);
+            if (!has_any || k.compare(min_key) < 0) {
+                min_key = k;
+                has_any = true;
+            }
+        }
+        if (!has_any) {
             break;
         }
-        int cmp;
-        if (!have_l0) {
-            cmp = 1;
-        }
-        else if (!have_l1) {
-            cmp = -1;
-        }
-        else {
-            cmp = Slice(l0[i].key).compare(Slice(l1_leaf[j].key));
-        }
-        Slice key;
-        Slice cell;
-        if (cmp < 0) {
-            key  = Slice(l0[i].key);
-            cell = l0[i].cell.slice();
-            ++i;
-        }
-        else if (cmp > 0) {
-            key  = Slice(l1_leaf[j].key);
-            cell = Slice(l1_leaf[j].cell);
+
+        Slice winner_key = min_key;
+        Slice winner_cell;
+        bool  have_winner = false;
+        if (have_l1 && Slice(l1_leaf[j].key).compare(min_key) == 0) {
+            winner_cell = Slice(l1_leaf[j].cell);
+            have_winner = true;
             ++j;
         }
-        else {
-            key  = Slice(l0[i].key);
-            cell = l0[i].cell.slice();
-            ++i;
-            ++j; // drop the L1 copy; L0 wins
+        for (auto &c : l0) {
+            if (c.idx >= c.entries.size() || Slice(c.entries[c.idx].key).compare(min_key) != 0) {
+                continue;
+            }
+            Slice cand = c.entries[c.idx].cell.slice();
+            if (!have_winner || cell_wins(CellView{cand}, CellView{winner_cell})) {
+                winner_cell = cand;
+                have_winner = true;
+            }
+            ++c.idx;
         }
-        // Early stop: both streams are non-decreasing, so once a key has moved
+
+        // Early stop: every stream is non-decreasing, so once a key has moved
         // past the prefix range (not merely before it), no later key can match.
-        if (!prefix.empty() && !key.starts_with(prefix) && key.compare(prefix) > 0) {
+        if (!prefix.empty() && !winner_key.starts_with(prefix) && winner_key.compare(prefix) > 0) {
             break;
         }
-        if (!consider(key, cell)) {
+        if (!consider(winner_key, winner_cell)) {
             break;
         }
     }
@@ -1127,7 +1387,7 @@ Status Crowtree::install_snapshot(std::vector<leaf_entry> sorted_entries, uint64
         mapping_.store(page_id, LeafBase::build({}, kInvalidPageId, pool_, opt_.frame_bytes));
         root_page_id_.store(page_id);
         // Replace L0 and reset the durable watermarks so the imported slots apply.
-        memtable_.reset();
+        reset_memtables_locked();
         last_applied_slot_.store(0);
         contiguous_slot_.store(0);
         gc_floor_.store(0);
@@ -1138,12 +1398,14 @@ Status Crowtree::install_snapshot(std::vector<leaf_entry> sorted_entries, uint64
         }
     }
 
-    // Load the imported entries into L0, then flush into L1 (reuses the normal
-    // grouping / consolidation / split machinery). Entries carry their original
-    // slot+kind in the encoded cell, so tombstones survive as tombstones.
+    // Load the imported entries into L0 (active_, freshly reset above), then
+    // flush into L1 (reuses the normal grouping / consolidation / split
+    // machinery). Entries carry their original slot+kind in the encoded
+    // cell, so tombstones survive as tombstones.
+    std::shared_ptr<MemTable> active = current_active();
     for (leaf_entry &e : sorted_entries) {
         uint64_t s = CellView{Slice(e.cell)}.slot();
-        memtable_.upsert(Slice(e.key), s, std::move(e.cell)); // move the imported cell buffer
+        active->upsert(Slice(e.key), s, std::move(e.cell)); // move the imported cell buffer
     }
     force_advance_slot(at_slot);
     Status fs = flush();
@@ -1161,10 +1423,28 @@ Status Crowtree::install_snapshot(std::vector<leaf_entry> sorted_entries, uint64
 
 std::shared_ptr<Snapshot> Crowtree::snapshot_view()
 {
-    // Materialize the L1 tree under the write lock for a consistent point-in-time
-    // copy. (Deviation from zero-copy COW; see snapshot.h / plan log.)
-    std::lock_guard<std::mutex> lk(write_mutex_);
-    std::vector<leaf_entry>     entries;
+    // Materialize the L1 tree into an independent copy for a consistent
+    // point-in-time view. (Deviation from a true zero-copy pinned-root COW
+    // snapshot; see snapshot.h.) Unlike the old implementation, this no
+    // longer holds write_mutex_ for the O(N) walk: collect_in_order walks the
+    // leaf chain via right_sibling (same technique and safety argument as
+    // scan()) under a single epoch guard held for this whole call, so a
+    // concurrent split/merge/flush is never blocked. The guard is entered and
+    // released on this same thread within this one function call, so it
+    // respects EpochManager::Guard's thread-bound contract even though the
+    // returned Snapshot (a plain materialized copy, not a live guard) can
+    // freely cross threads afterwards.
+    //
+    // at_slot is captured *before* the walk, not after: flush() only bumps
+    // last_applied_slot_ once it has finished publishing every leaf it
+    // touched (highest-slot-wins, monotonic -- a flush never removes
+    // already-durable data), so a concurrent flush racing the walk can only
+    // make the walk see *more* than at_slot promises, never less. Capturing
+    // after the walk would risk the opposite (a tag claiming a slot whose
+    // data the walk started collecting before that slot's flush finished).
+    EpochManager::Guard     guard   = epoch_.enter();
+    uint64_t                at_slot = last_applied_slot_.load();
+    std::vector<leaf_entry> entries;
     collect_in_order([this](uint64_t p) { return resident(p); }, root_page_id_.load(), gc_floor_.load(), &entries);
     // Materialize overflow pointer cells into inline cells so the Snapshot is
     // self-contained (compare / export / get need the actual value bytes).
@@ -1175,7 +1455,7 @@ std::shared_ptr<Snapshot> Crowtree::snapshot_view()
                                      Slice(assemble_overflow_value(v.overflow_head(), v.overflow_len())));
         }
     }
-    return std::make_shared<Snapshot>(last_applied_slot_.load(), std::move(entries));
+    return std::make_shared<Snapshot>(at_slot, std::move(entries));
 }
 
 std::string Crowtree::assemble_overflow_value(uint64_t head_page_id, uint64_t total_len) const
@@ -1200,7 +1480,9 @@ std::string Crowtree::assemble_overflow_value(uint64_t head_page_id, uint64_t to
 }
 
 std::vector<leaf_entry> Crowtree::resolve_leaf_chain_for_rebuild(PageBase *head, uint64_t gc_floor,
-                                                                 std::vector<uint64_t> *dead_overflow)
+                                                                 std::vector<uint64_t> *dead_overflow,
+                                                                 size_t                *out_tombstones_dropped,
+                                                                 size_t                *out_bytes_dropped)
 {
     std::map<std::string, std::string> resolved; // key -> encoded storage cell
     auto                               consider = [&](Slice key, Slice cell) {
@@ -1241,12 +1523,22 @@ std::vector<leaf_entry> Crowtree::resolve_leaf_chain_for_rebuild(PageBase *head,
     }
     std::vector<leaf_entry> out;
     out.reserve(resolved.size());
+    size_t dropped       = 0;
+    size_t dropped_bytes = 0;
     for (auto &kv : resolved) {
         CellView v{Slice(kv.second)};
         if (v.is_tombstone() && v.slot() <= gc_floor) {
+            ++dropped;
+            dropped_bytes += kv.first.size() + kv.second.size();
             continue; // GC drop
         }
         out.push_back({.key = kv.first, .cell = cell_of(kv.second)});
+    }
+    if (out_tombstones_dropped != nullptr) {
+        *out_tombstones_dropped = dropped;
+    }
+    if (out_bytes_dropped != nullptr) {
+        *out_bytes_dropped = dropped_bytes;
     }
     return out;
 }

@@ -106,7 +106,7 @@ TEST(Parity, InOrderRandomOpsWithPeriodicCompare)
         }
         if (step % 2000 == 1999) {
             ASSERT_TRUE(t.flush().ok());
-            t.set_gc_watermark(slot);
+            t.set_gc_watermark(slot, slot);
             expect_parity(t, oracle);
         }
     }
