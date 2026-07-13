@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 import { Suspense, useState, useCallback, useMemo, lazy, useEffect } from 'react';
 import { Server, Database, Plus, Trash2, Activity, RotateCw, Square } from 'lucide-react';
 import { ViewModeProvider, useViewMode } from './contexts/ViewModeContext';

@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! WAL GC worker (P2 W14).
 //!
 //! Periodically unlinks segments whose records are all below the GC watermark.

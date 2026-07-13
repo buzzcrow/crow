@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Election metrics tests for `PxLocalReplica`.
 //!
 //! Moved from `replica/election_metrics_test.rs` to the election unit binary.

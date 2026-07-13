@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Smoke test: bind ephemeral port, hit `/healthz`, assert 200 + body.
 
 use std::net::SocketAddr;

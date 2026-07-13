@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Integration coverage for the physical tree (A3) routes: rack + node
 //! CRUD, rack detail, rack-scoped node add, node detail, node-addressed
 //! server lifecycle. The CRUD path runs without any upstream server.

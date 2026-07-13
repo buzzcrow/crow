@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // Phase 2: exercise the async
 // C API surface (ct_get_async/ct_flush_async/ct_snapshot_async,
 // ct_future_poll/ct_future_free, ct_reactor_eventfd) end to end, not just

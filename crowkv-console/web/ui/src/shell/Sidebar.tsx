@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 import { useState, useMemo } from 'react';
 import { Search, FolderTree, Monitor, Database, Boxes, HardDrive, RadioTower, Cog, Plus } from 'lucide-react';
 import { useViewMode } from '../contexts/ViewModeContext';

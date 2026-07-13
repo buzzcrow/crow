@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! `crowkv-server` library — exposes the binary's modules so integration
 //! tests under `tests/` can exercise CLI parsing, the management router,
 //! and the registry without spawning a process.

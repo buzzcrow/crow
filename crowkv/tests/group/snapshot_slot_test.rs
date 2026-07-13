@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Group durable-snapshot-watermark computation: the
 //! published `group_snapshot_slot` is `min(local WalEngine::snapshot_slot,
 //! max(voting peer durable_snapshot_slot))` -- "durable on the leader plus

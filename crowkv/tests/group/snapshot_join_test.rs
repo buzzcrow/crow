@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! New-member snapshot join (`PxGroup::join_via_snapshot`):
 //! a fresh, still-empty replica pulls
 //! a snapshot from an existing cluster's leader over the real

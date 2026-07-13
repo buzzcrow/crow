@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Logical tree: store and group planes (A5/A6).
 //!
 //! Key work: orchestrated store create/delete and group create/delete

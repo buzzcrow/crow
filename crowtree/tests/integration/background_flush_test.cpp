@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // Open issue: Options.background_flush /
 // flush_interval_ms existed but were never wired up (maybe_flush() only ever
 // checked the size thresholds). This exercises the background flush thread

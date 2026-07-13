@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Client configuration. Retry-policy defaults mirror the client
 //! interaction spec (retry on `NotLeaderHint`, 1s-then-retry on unknown
 //! leader, exponential backoff on transport errors).

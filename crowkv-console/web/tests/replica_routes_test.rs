@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! A7 web e2e: exercise the orchestrated replica plane against two
 //! real `crowkv-server` upstreams via the console web backend.
 //!

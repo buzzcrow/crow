@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Cascade shutdown tests for `PxKvStore`. Covers:
 //! - normal cascade returns clean report
 //! - second `shutdown` call is a clean no-op (idempotency)

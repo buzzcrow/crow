@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! `CrowKV` storage engine.
 //!
 //! The engine is the sole consumer of consensus output: it owns the

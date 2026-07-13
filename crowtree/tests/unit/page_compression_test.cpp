@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // PT10: page compression (LZ4 default, identity fallback).
 #include "crowtree/cell.h"
 #include "crowtree/compressor.h"

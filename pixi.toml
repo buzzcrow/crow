@@ -56,6 +56,8 @@ ct-fmt = '''
 find crowtree/src crowtree/include crowtree/tests crowtree/bench -type f \( -name '*.cpp' -o -name '*.h' \) -print0 | xargs -0 clang-format -i
 '''
 ct-lint = "python3 tools/ct_lint.py"
+rs-fmt = "cargo fmt --all"
+rs-lint = "cargo clippy --all-targets -- -D warnings"
 install-web-deps = "test -d crowkv-console/web/ui/node_modules || (cd crowkv-console/web/ui && npm ci)"
 build = { cmd = "cmake -S crowtree -B crowtree/build -DCMAKE_BUILD_TYPE=Release && cmake --build crowtree/build -j && cargo build --release && cd crowkv-console/web/ui && npm run build", depends-on = ["install-web-deps"] }
 default = { depends-on = ["build"] }
@@ -82,7 +84,7 @@ pixi run test-ui & p6=$!
 wait $p1 && wait $p2 && wait $p3 && wait $p4 && wait $p5 && wait $p6
 '
 ''', depends-on = ["build", "install-web-deps"] }
-test-s = { cmd = '''
+test-suite = { cmd = '''
 bash -c '
 set -e
 pixi run test-ct

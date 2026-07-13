@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 import { createContext, useContext, useState, useCallback, ReactNode } from 'react';
 import { nextId } from '../utils/ids';
 

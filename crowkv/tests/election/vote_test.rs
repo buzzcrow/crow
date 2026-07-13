@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Vote granting tests: `PreVote` and `RequestVote` decision logic.
 //!
 //! These tests exercise `handle_pre_vote` and `handle_request_vote` on a

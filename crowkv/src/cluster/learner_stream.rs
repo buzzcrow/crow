@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Per-peer bidi `LearnerStream` client.
 //!
 //! Multiplexes `Accept`, `Heartbeat`, and `ChosenNotification` frames over a

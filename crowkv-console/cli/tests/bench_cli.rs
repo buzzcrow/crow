@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! CLI e2e smoke for `bench run`: resolve the gRPC endpoint via the
 //! console, drive a 1 s write workload, and assert a report is written.
 

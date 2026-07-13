@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // Page compression for durable page blobs.
 //
 // Compression is on-disk only: a frame body is compressed at write_page time and

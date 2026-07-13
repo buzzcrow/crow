@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // C ABI implementation.
 //
 // Wraps the C++ engine behind opaque handles and an exception-free surface.

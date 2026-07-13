@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! acceptance test: "client survives a forced leader
 //! step-down mid-request with auto-retry, returns the same result."
 //!

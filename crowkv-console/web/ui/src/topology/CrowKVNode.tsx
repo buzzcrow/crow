@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 import { memo } from 'react';
 import { Handle, NodeProps, Position } from 'reactflow';
 import { FolderTree, Monitor, Database, Boxes, HardDrive, RadioTower, Cog, Crown, AlertTriangle } from 'lucide-react';

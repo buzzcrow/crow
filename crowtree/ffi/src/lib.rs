@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Safe Rust adapter over the crowtree C ABI (`c_api.h`, PT8).
 //!
 //! Wraps the opaque `ct_*` handles in RAII types, translates owned `ct_buf`

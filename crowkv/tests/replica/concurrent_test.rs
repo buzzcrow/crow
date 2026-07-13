@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Concurrent `learn_chosen` + `on_accept` race tests on the same slot.
 //!
 //! `learn_chosen` applies an entry to the learner (KV engine + frontier

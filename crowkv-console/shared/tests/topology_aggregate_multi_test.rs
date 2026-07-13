@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! C2: aggregator over multiple servers; kill one and assert the surviving
 //! server is still reported with one error entry.
 

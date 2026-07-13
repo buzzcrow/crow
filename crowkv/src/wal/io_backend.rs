@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! I/O backend selection and capability probe.
 //!
 //! The backend is chosen once at startup and fixed for the process lifetime.

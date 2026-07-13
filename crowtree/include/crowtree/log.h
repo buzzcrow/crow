@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // Crowtree logging facade (plan-tree #10).
 //
 // The engine logs through the CT_LOG_* macros below. When the library is built

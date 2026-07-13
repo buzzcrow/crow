@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Shared `KVEngine` conformance suite, parametrized over any implementation
 //! (`InMemKV`, `CrowtreeEngine`) so both get identical behavioral coverage:
 //! per-key highest-slot-wins apply, tombstones, apply idempotency, ordered

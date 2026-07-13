@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Topology status tests for `PxKvStore::status()`. Covers composition
 //! of per-layer statuses, cheap kv-store stats, and per-remote metrics surface.
 

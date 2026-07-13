@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Error type for [`crate::CrowkvClient`].
 
 /// Errors surfaced by the client library. Transport/server errors that the

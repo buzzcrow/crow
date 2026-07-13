@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Replica-layer tests (`PxLocalReplica`).
 //!
 //! A local replica wires together the acceptor, learner, election state, and

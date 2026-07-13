@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // PT6d: incremental snapshot writes only dirty pages, retains clean pages'
 // durable addrs, and reopens to identical state.
 #include "crowtree/crowtree.h"

@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // plan-tree #10: file-logging integration test. Enables the async rotating file
 // logger via Options, runs a few ops through open()/snapshot(), then flushes
 // (shutdown_logging) and asserts the log file exists and carries the expected

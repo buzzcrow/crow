@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! CLI e2e for the physical lifecycle verbs: `rack`, `node`, and
 //! `server` round-trips through `--console` against an empty,
 //! temp-rooted console (local-fork server deploy).

@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Cross-cutting utilities shared by the `cluster`, `paxos`, and `rpc`
 //! modules: static configuration profiles, per-layer metrics counters,
 //! shutdown / multi-step operation reporting, monotonic-time helpers,

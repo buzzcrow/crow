@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // CT10: consolidation tests (fold by highest slot, triggers, tombstone keep,
 // old-chain retirement via the epoch manager).
 #include "crowtree/crowtree.h"

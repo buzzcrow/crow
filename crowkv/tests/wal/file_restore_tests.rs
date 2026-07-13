@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! WAL durability round-trip over the real `File` backend.
 //!
 //! The user-facing contract: once records are durably appended, closing the

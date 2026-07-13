@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // CT7: MemTable (L0) tests.
 #include "crowtree/cell.h"
 #include "crowtree/memtable.h"

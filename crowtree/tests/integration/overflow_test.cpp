@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // PT11: overflow pages. Large values spill out of leaves into fixed-size
 // overflow frame chains; leaves keep small pointer cells. Covers multi-frame
 // chains, get/scan/delete, reopen, eviction-reload, overwrite (chain retire),

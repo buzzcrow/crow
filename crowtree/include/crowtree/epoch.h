@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // Epoch-based reclamation (plan-tree #12: lock-free reader fast path).
 //
 // Readers take a Guard for the duration of a lock-free page walk. The single

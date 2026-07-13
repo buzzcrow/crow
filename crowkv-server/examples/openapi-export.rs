@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Dump the in-process `OpenAPI` document to `target/openapi.json`. The
 //! Swagger UI bundle that consumes it now lives in the console
 //! (`crowkv-console/static/swagger-ui/`), so this binary is just a

@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! [`KVEngine`] implementation backed by the crowtree C++ storage engine
 //! (FFI adapter over the crowtree C ABI, via `crowtree_ffi`).
 

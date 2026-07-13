@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 /// A single mutation within a batch: set a value or delete (tombstone) a key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Op {

@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! C8 smoke: console web boots, the vendored Swagger UI is served at
 //! `/api/swagger/`, and `/api/nodes/:id/openapi.json` proxies the
 //! upstream `crowkv-server`'s `OpenAPI` document.

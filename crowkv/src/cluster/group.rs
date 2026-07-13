@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::missing_fields_in_debug)]

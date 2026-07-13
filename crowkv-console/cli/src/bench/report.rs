@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! JSON-serializable bench report.
 //!
 //! Key work: percentile extraction from `hdrhistogram::Histogram<u64>`,

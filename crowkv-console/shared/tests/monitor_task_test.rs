@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! `MonitorTask` integration test against three in-process fake servers.
 //!
 //! Brings up three mini axum HTTP servers each exposing the legacy

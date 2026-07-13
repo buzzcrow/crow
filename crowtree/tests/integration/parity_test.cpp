@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // CT14: randomized parity against a std::map oracle (in-order + out-of-order),
 // exercising flush / consolidate / split / merge.
 #include "crowtree/crowtree.h"

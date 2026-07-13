@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Concurrent stress tests for `PxSlotList`.
 //!
 //! These tests exercise the lock-free chunked slot list under multi-thread

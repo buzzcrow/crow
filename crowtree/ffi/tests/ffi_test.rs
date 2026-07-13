@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // PT8.5: C ABI / Rust integration tests through the safe adapter.
 use crowtree_ffi::{AsyncCrowtree, BatchOp, Crowtree, CtError, Options, PageStoreBackend};
 

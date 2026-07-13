@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Classic Paxos prepare/accept tracking on a bare `PxLocalReplica`.
 //!
 //! These tests exercise the full Phase-1 + Phase-2 cycle on a single replica

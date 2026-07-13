@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // Shared page primitives: the page-type tag, the
 // common chain header, and the leaf entry. Split out of page.h so the frame
 // format (frame_page.h) and the page classes (page.h) can both depend on these

@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 import { useMemo, useRef, useState, useEffect } from 'react';
 import { Dialog } from '../Dialog';
 import { Input } from '../ui/Input';

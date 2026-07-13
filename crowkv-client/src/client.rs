@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! [`CrowkvClient`]: the C1-C3 client library (—
 //! topology cache, retry/idempotency, and `ReadMode` routing on top of
 //! `crowkv`'s generated `KvService` client.

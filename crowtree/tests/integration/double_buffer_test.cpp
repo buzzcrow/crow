@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // plan-tree #3: MemTable double buffering (active_ + frozen_). See the
 // active_/frozen_ member comment in crowtree.h for the full design.
 #include "crowtree/crowtree.h"

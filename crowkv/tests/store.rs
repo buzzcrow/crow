@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Store-layer tests (`PxKvStore`).
 //!
 //! A store hosts multiple groups behind one node identity and the shared gRPC

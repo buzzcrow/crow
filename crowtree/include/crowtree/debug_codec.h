@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // Readable debug codec for page frames.
 //
 // Renders a page frame to a human-readable text form and back to the exact

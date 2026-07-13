@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // PT10.3: end-to-end page compression. snapshot writes compressed durable
 // blobs; reopen/demand-load/eviction decode them transparently; a tampered
 // stored byte fails CRC on reload.

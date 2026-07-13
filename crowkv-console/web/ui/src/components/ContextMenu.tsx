@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 import { ReactNode, useRef, useEffect, useState, useCallback } from 'react';
 import { cn } from '../utils/cn';
 

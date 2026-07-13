@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Standalone unit tests for `PxLearner` dedup cache and watermark tracking.
 //!
 //! The existing `learner_test.rs` covers `note_chosen` (the peer-notice path).

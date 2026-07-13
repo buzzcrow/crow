@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Engine-durability + WAL GC maintenance loop (`group_maintenance`)
 //! integration test: verifies `PxGroup::run_maintenance_pass_for_tests`
 //! wires a real `CrowtreeEngine`'s `persist_snapshot` into the group's WAL

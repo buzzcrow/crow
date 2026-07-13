@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 'use client';
 import { X, CheckCircle2, AlertTriangle, XCircle, Info } from 'lucide-react';
 import { useToast } from '../contexts/ToastContext';

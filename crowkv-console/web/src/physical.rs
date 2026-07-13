@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Per-node store / group / remote primitives (A4).
 //!
 //! Key work: read endpoints served from the monitor cache, low-level

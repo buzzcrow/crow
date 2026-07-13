@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! CLI argument parsing tests. Migrated from the inline `#[cfg(test)] mod
 //! tests` in `crowkv-server/src/cli.rs` per `.windsurf/workflows/coding.md`
 //! §3 ("integration tests only — do not add new inline test modules").

@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // snapshot and recovery (plan-tree #14c/#14d: mapping-table on-disk format).
 //
 // On-device layout owned here:

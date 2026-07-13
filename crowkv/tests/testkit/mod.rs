@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Shared deterministic test harness for `crowkv` integration tests.
 //!
 //! Real content lands incrementally with each phase:

@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! M5 rolling-upgrade version-compat test: exercise a 3-node cluster with
 //! two different `crowkv-server` binary builds and verify a KV workload
 //! does not diverge.

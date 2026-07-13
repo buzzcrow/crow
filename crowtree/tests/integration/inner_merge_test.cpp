@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // Inner-node underflow merge: a delete-heavy workload must collapse the upper
 // tree (merge underfull inner pages, dropping height) while preserving data,
 // across reopen, and stay parity-correct vs an in-mem oracle.

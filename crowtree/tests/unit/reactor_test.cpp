@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // plan-tree #11 Phase 1: Reactor (io_uring event loop) + FileAsyncPageStore.
 // Only built when CMake found liburing (see CMakeLists.txt's
 // CROWTREE_HAVE_LIBURING gate) -- io_uring is Linux-only.

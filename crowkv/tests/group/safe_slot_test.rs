@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Group safe-slot computation: the published safe-slot is the minimum
 //! contiguous-applied across the local replica and every voting peer that has
 //! reported, and it only advances (never regresses) within a tenure.

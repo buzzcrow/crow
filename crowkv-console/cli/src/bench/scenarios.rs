@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Predefined `crowkv bench stress <name>` scenarios.
 //!
 //! These are opinionated knob bundles meant to make demos and CI runs

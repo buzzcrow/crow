@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! A3 — single-node crash/restart no-data-loss (real fsync).
 //!
 //! Drives the durable WAL path over the real `File` backend rooted in a

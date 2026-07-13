@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! G1 (P1 exit criterion, / a value written
 //! to a 3-node cluster survives a forced leader step-down — after a new leader
 //! is elected, the committed write is still readable.

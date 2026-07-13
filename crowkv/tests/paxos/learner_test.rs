@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! `PxLearner::note_chosen` (Step 10.6a) — peer-side `ChosenNotice`
 //! receipt should advance `last_chosen_slot` / `last_chosen_term` only,
 //! never the contiguous watermarks.

@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! HTTP client for `crowkv-web`'s two-tree API contract.
 //!
 //! `ServerClient` (sibling) targets a single `crowkv-server`'s

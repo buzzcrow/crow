@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // Combined stress: compression + overflow + in-frame deltas + a small buffer
 // pool (forces eviction) + periodic snapshots, validated against an in-mem
 // oracle live and after reopen. Plus a focused test that an overflow chain whose

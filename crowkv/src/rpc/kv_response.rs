@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Constructor helpers for the prost-generated [`KvResponse`].
 //!
 //! Centralizes the otherwise-repeated `KvResponse { version: 1, ok, …,

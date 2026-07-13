@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! `KVFuture<T>` contract tests: the zero-allocation `Ready` fast path,
 //! the `into_ready()` synchronous unwrap used by `PxLearner` today, and
 //! that a genuine `Pending` future (not constructed by any `KVEngine` impl

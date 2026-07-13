@@ -1,3 +1,6 @@
+<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Licensed under the Apache License, Version 2.0. -->
+
 # CrowKV Operational Procedures
 
 This doc describes common day-to-day and infrequent operational procedures for a
@@ -443,3 +446,68 @@ server with the matching `--stores`/`--groups`/`--replica` bootstrap args.
 
 See `design/design-kv-server.md` and `design/design-reconfiguration.md` for the
 underlying protocol and safety model details.
+
+---
+
+## Appendix A: SSH loopback dev setup
+
+To test SSH transport on a dev box (loopback to localhost):
+
+```bash
+# 1. Generate SSH key if missing
+ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519
+
+# 2. Authorize the key
+cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
+
+# 3. Ensure sshd is running
+systemctl status sshd
+
+# 4. Test loopback SSH
+ssh $USER@127.0.0.1 echo ok
+
+# 5. Run SSH tests (CI skips these by default)
+CROWKV_TEST_SSH=1 pixi run test-cli
+```
+
+SSH host keys are persisted in a `known_hosts` file (`$CROWKV_KNOWN_HOSTS` or
+`~/.crowkv/known_hosts`). On key mismatch the connection is refused; delete the
+offending line to recover.
+
+## Appendix B: Console registry format
+
+The console registry is stored in `~/.crowkv/console.toml` (or
+`$CROWKV_CONSOLE_CONFIG`):
+
+```toml
+[[racks]]
+id = "my-rack"
+name = "Production Rack"
+
+[[nodes]]
+id = "node-1"
+rack_id = "my-rack"
+host = "127.0.0.1"
+ssh_port = 22
+ssh_user = ""
+ssh_key = null
+ssh_password = null
+
+[[nodes]]
+id = "node-2"
+rack_id = "my-rack"
+host = "10.0.0.1"
+ssh_port = 2222
+ssh_user = "ubuntu"
+ssh_key = "/home/ubuntu/.ssh/id_rsa"
+ssh_password = null
+
+[bench.stress.burst]
+workload = "write"
+threads = 64
+connections = 16
+duration_secs = 10
+key_space = 10000
+value_size = 128
+```

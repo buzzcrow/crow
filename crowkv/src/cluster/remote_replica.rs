@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! `PxRemoteReplica` — gRPC adapter for a peer replica in a Paxos group.
 //!
 //! Wraps a lazy gRPC client, a per-peer bidi `PxLearnerStream` (for

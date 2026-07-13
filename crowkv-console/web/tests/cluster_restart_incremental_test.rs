@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Incremental restart-recovery tests, each with explicit verification steps:
 //! 1. Seed KV data and wait for convergence
 //! 2. Verify WAL contents (Accepted records, slot count)

@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // Edge-case durability: empty values, binary keys/values with NULs, an oversized
 // key (heap fallback), and zero/boundary-sized overflow values — all through the
 // compression + overflow + snapshot + reopen path.

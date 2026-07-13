@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Load testing engine for the `CrowKV` Console CLI (`crowkv bench ...`).
 //!
 //! Key work: workload kinds (read / write / list / mix), connection

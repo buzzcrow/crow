@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // MemTable ordered-container microbenchmark (plan-tree #9 / Q2).
 //
 // Compares the containers considered for the MemTable (L0) against the workload

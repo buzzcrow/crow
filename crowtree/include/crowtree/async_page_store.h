@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // AsyncPageStore: the async twin of PageStore (page_store.h) -- submits a
 // read/write/fsync and returns immediately; `on_complete` fires later from
 // the Reactor thread with the result.
