@@ -78,6 +78,16 @@ impl PxLearner {
         Self::default()
     }
 
+    /// Construct a learner with a caller-supplied engine backend (e.g.
+    /// [`crate::kv::CrowtreeEngine`]) instead of the default [`InMemKV`].
+    #[must_use]
+    pub fn with_engine(engine: Box<dyn KVEngine>) -> Self {
+        Self {
+            engine,
+            ..Self::default()
+        }
+    }
+
     /// Borrow the materialized state engine (point/range reads, `compare`).
     #[must_use]
     pub fn engine(&self) -> &dyn KVEngine {

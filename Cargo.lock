@@ -609,6 +609,7 @@ dependencies = [
  "criterion",
  "crossbeam-skiplist",
  "crowkv",
+ "crowtree-ffi",
  "dashmap",
  "parking_lot",
  "prost",
@@ -706,6 +707,15 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "crowtree-ffi"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

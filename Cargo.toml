@@ -6,10 +6,17 @@ members = [
     "crowkv-console/shared",
     "crowkv-console/web",
     "crowkv-console/cli",
+    "crowtree/ffi",
 ]
-# Standalone C++/FFI bridge crate: built + tested on its own (it links the
-# crowtree C ABI and needs unsafe), kept out of the main async workspace build.
-exclude = ["crowtree/ffi"]
+# plan-tree #20: crowtree/ffi moved from `exclude` into `members` now that
+# crowkv depends on it (CrowtreeEngine) -- building crowkv already triggers
+# the C++ build step via crowtree-ffi's build.rs regardless of workspace
+# membership, so the original "keep the C build out of the main workspace"
+# rationale for excluding it no longer holds; membership instead unifies
+# Cargo.lock resolution (one tokio version tree) across the workspace.
+# crowtree-ffi does not opt into `[lints] workspace = true`, so its
+# FFI-necessitated `unsafe` is unaffected by this workspace's
+# `unsafe_code = "deny"`.
 
 [workspace.package]
 version = "0.1.0"

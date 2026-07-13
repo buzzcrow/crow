@@ -1,115 +1,42 @@
-//! `InMemKV` behavior: per-key highest-slot-wins apply, tombstones,
-//! apply idempotency, ordered prefix scan with truncation, and cross-engine
-//! `compare`.
+//! `InMemKV` behavior: shared `KVEngine` conformance suite (see
+//! `conformance.rs`) plus `InMemKV`-only cases (`clear`, wire-format decode).
 
-use crowkv::kv::{Batch, BatchOp, Cell, InMemKV, KVEngine, Op};
+use crowkv::kv::{Batch, InMemKV, KVEngine};
 
-fn put(key: &[u8], value: &[u8]) -> BatchOp {
-    BatchOp {
-        key: key.to_vec(),
-        op: Op::Put(value.to_vec()),
-    }
-}
-
-fn del(key: &[u8]) -> BatchOp {
-    BatchOp {
-        key: key.to_vec(),
-        op: Op::Delete,
-    }
-}
-
-fn batch(ops: Vec<BatchOp>) -> Batch {
-    Batch { ops }
-}
+use super::conformance;
+use super::conformance::{batch, del, put};
 
 #[test]
 fn highest_slot_wins_regardless_of_apply_order() {
-    let e = InMemKV::new();
-    // Apply the higher slot first, then a lower slot for the same key.
-    e.apply(5, &batch(vec![put(b"k", b"v5")]));
-    e.apply(3, &batch(vec![put(b"k", b"v3")]));
-    assert_eq!(
-        e.get(b"k"),
-        Some((5, b"v5".to_vec())),
-        "lower slot must not overwrite"
-    );
-
-    // A strictly higher slot wins.
-    e.apply(7, &batch(vec![put(b"k", b"v7")]));
-    assert_eq!(e.get(b"k"), Some((7, b"v7".to_vec())));
+    conformance::highest_slot_wins_regardless_of_apply_order(&InMemKV::new());
 }
 
 #[test]
 fn equal_slot_is_idempotent_noop() {
-    let e = InMemKV::new();
-    e.apply(4, &batch(vec![put(b"k", b"first")]));
-    // Re-applying the same slot must not change the stored value.
-    e.apply(4, &batch(vec![put(b"k", b"second")]));
-    assert_eq!(e.get(b"k"), Some((4, b"first".to_vec())));
+    conformance::equal_slot_is_idempotent_noop(&InMemKV::new());
 }
 
 #[test]
 fn delete_writes_tombstone() {
-    let e = InMemKV::new();
-    e.apply(1, &batch(vec![put(b"k", b"v")]));
-    e.apply(2, &batch(vec![del(b"k")]));
-    assert_eq!(e.get(b"k"), None, "tombstoned key is not live");
-    assert_eq!(e.live_key_count(), 0);
-    // The tombstone is retained internally (visible via iter_all) at its slot.
-    let all = e.iter_all();
-    assert_eq!(all, vec![(b"k".to_vec(), 2, Cell::Tombstone)]);
+    conformance::delete_writes_tombstone(&InMemKV::new());
 }
 
 #[test]
 fn intra_batch_last_occurrence_wins() {
-    let e = InMemKV::new();
-    e.apply(1, &batch(vec![put(b"k", b"a"), del(b"k"), put(b"k", b"final")]));
-    assert_eq!(e.get(b"k"), Some((1, b"final".to_vec())));
+    conformance::intra_batch_last_occurrence_wins(&InMemKV::new());
 }
 
 #[test]
 fn scan_is_ordered_prefix_filtered_and_truncates() {
-    let e = InMemKV::new();
-    e.apply(
-        1,
-        &batch(vec![put(b"a:1", b"1"), put(b"a:2", b"2"), put(b"a:3", b"3")]),
-    );
-    e.apply(2, &batch(vec![put(b"b:1", b"x")]));
-    e.apply(3, &batch(vec![del(b"a:2")]));
-
-    // Unlimited: only live "a:" keys, in order, tombstone excluded.
-    let (items, truncated) = e.scan(b"a:", 0);
-    let keys: Vec<Vec<u8>> = items.iter().map(|(k, _, _)| k.clone()).collect();
-    assert_eq!(keys, vec![b"a:1".to_vec(), b"a:3".to_vec()]);
-    assert!(!truncated);
-
-    // Limit smaller than the match count sets truncated.
-    let (items, truncated) = e.scan(b"a:", 1);
-    assert_eq!(items.len(), 1);
-    assert_eq!(items[0].0, b"a:1".to_vec());
-    assert!(truncated);
-
-    // Empty prefix scans everything live.
-    let (all, _) = e.scan(b"", 0);
-    assert_eq!(all.len(), 3); // a:1, a:3, b:1
+    conformance::scan_is_ordered_prefix_filtered_and_truncates(&InMemKV::new());
 }
 
 #[test]
 fn compare_is_empty_for_identical_state_and_detects_divergence() {
-    let a = InMemKV::new();
-    let b = InMemKV::new();
-    // Same ops, different apply order — must converge to identical state.
-    a.apply(2, &batch(vec![put(b"x", b"2")]));
-    a.apply(1, &batch(vec![put(b"y", b"1")]));
-    b.apply(1, &batch(vec![put(b"y", b"1")]));
-    b.apply(2, &batch(vec![put(b"x", b"2")]));
-    assert!(a.compare(&b).is_empty(), "identical logical state");
-
-    // Divergent resolved-slot for the same value is a difference.
-    b.apply(9, &batch(vec![put(b"x", b"2")]));
-    let diff = a.compare(&b);
-    assert_eq!(diff.len(), 1);
-    assert_eq!(diff[0].key, b"x".to_vec());
+    conformance::compare_is_empty_for_identical_state_and_detects_divergence(
+        &InMemKV::new(),
+        &InMemKV::new(),
+    );
 }
 
 #[test]

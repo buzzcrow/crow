@@ -113,26 +113,60 @@ same trait.
 `crowkv/src/kv/mem_kv.rs`, new `crowkv/src/kv/crowtree_engine.rs`, the learner,
 `crowtree/ffi/src/lib.rs`.
 
-- [ ] Move `crowtree/ffi` from `[workspace] exclude` into `members` (or keep it
-      standalone and add a thin path-dependency from `crowkv/Cargo.toml`) —
-      decide based on whether the C build step is acceptable in the main
-      workspace's `cargo build`.
-- [ ] Upgrade `KVEngine` to the async trait in `design-crowtree.md §4`
-      (`apply`/`get`/`scan` become `async fn` returning `Result<_, EngineError>`;
-      add `snapshot_view`/`EngineView`, `last_applied_slot`, `persist_snapshot`,
-      `set_gc_watermark`, `collect_garbage`, `snapshot_export`/`snapshot_import`,
-      `clear`). Migrate `InMemKV` to it first so the trait change is verified
-      against the existing test suite before crowtree lands.
-- [ ] Add `crowkv/src/kv/crowtree_engine.rs`: `CrowtreeEngine` wraps
-      `crowtree::AsyncCrowtree` and implements the upgraded `KVEngine` trait.
-      Map `CtError` → `EngineError`. `InMemKV` and `CrowtreeEngine` are the two
-      engines behind `Box<dyn KVEngine>`.
-- [ ] Wire the learner to drive `Box<dyn KVEngine>` through the new async
-      surface; thread `contiguous_applied` → `force_advance_slot`-equivalent
-      per `design-crowtree.md §4.1`.
-- [ ] Cross-engine parity test: shared parametrized `KVEngine` test suite run
-      against both `InMemKV` and `CrowtreeEngine` (`design-crowtree-test.md
-      §5`); `compare()` empty after an identical random op stream.
+- [x] **Move `crowtree/ffi` from `[workspace] exclude` into `members` — DONE
+      (2026-07-08).** Building `crowkv` already triggers the C++ build step
+      via `crowtree-ffi`'s `build.rs` regardless of workspace membership, so
+      the original exclude rationale no longer applied once `crowkv` actually
+      depends on it; membership instead unifies `Cargo.lock` resolution.
+      `crowkv/Cargo.toml` takes a normal path dependency on `crowtree-ffi`.
+- [x] **Add `ct_apply_batch` C API — DONE (2026-07-08, prereq, not originally
+      listed here).** `KVEngine::apply`'s contract is atomic-to-readers for a
+      whole batch; the only existing entry points (`ct_apply_put`/
+      `ct_apply_delete`) apply one key at a time, which would break that
+      contract if looped. Added a packed multi-record `ct_apply_batch` (one
+      call into `Crowtree::apply`, already batch-atomic in the C++ core) +
+      Rust `Crowtree::apply_batch`/`BatchOp`. New `CApi.ApplyBatchAtomicMultiKey`
+      (C++) + `mem_apply_batch_multi_key_and_dup_last_wins` (Rust FFI) tests.
+- [x] **Add `crowkv/src/kv/crowtree_engine.rs` — DONE (2026-07-08), sync
+      scope (see below).** `CrowtreeEngine` wraps the *synchronous*
+      `crowtree_ffi::Crowtree` (not `AsyncCrowtree`) and implements the
+      *existing, unchanged* synchronous `KVEngine` trait. `PxLearner::
+      with_engine(Box<dyn KVEngine>)` added so a caller can inject it instead
+      of the `Default` `InMemKV`. Documented, real caveat: `get`/`scan`
+      already merge crowtree's L0 (MemTable) + L1 (durable tree) so every
+      `apply` is visible immediately, but `iter_all`/`compare` read
+      `snapshot_view()` (L1-only), so `iter_all` flushes the
+      contiguous-applied prefix first — a slot still stuck behind an
+      out-of-order gap stays invisible to `iter_all`/`compare` until the gap
+      fills, unlike `InMemKV` (no such gap). `clear()` is `unimplemented!()`
+      (crowtree has no native wipe/reset primitive yet; `KVEngine::clear` has
+      no caller anywhere in the codebase today, so this is a deliberate
+      "surface the gap on first real use" choice, not a silent correctness
+      bug).
+- [x] **Cross-engine parity test — DONE (2026-07-08).** Refactored
+      `mem_kv_test.rs`'s engine-behavior cases into a shared, parametrized
+      `tests/kv/conformance.rs` `KVEngine` suite; added `crowtree_engine_test.rs`
+      running the identical suite against `CrowtreeEngine`, plus a parity test
+      applying an identical op stream to both engines and asserting
+      `compare()` is empty after every op. 27/27 `kv` tests pass; full
+      `crowkv` suite (10 test binaries) unaffected; clippy + fmt clean.
+- [ ] **Scope decision — deferred, not done (2026-07-08 session):** upgrading
+      `KVEngine` to the async trait in `design-crowtree.md §4` and wiring the
+      learner through it. crowtree's own internals have no real async I/O yet
+      (io_uring is `#11`, not implemented), so today this would only add a
+      `spawn_blocking` hop with no genuine asynchrony behind it, for a large,
+      real ripple risk (every `KVEngine`/`PxLearner` call site across the
+      Paxos learner + `PxKvStore` gRPC handlers). Revisit once `#11` lands.
+      See this file's Open Issues section for the full writeup.
+- [ ] **Not done: wire `CrowtreeEngine` into the actual `crowkv-server` boot
+      path** (CLI/config engine selection, per-group durable crowtree file
+      under the store's data dir). `CrowtreeEngine` is implemented and
+      pluggable (`PxLearner::with_engine`) but nothing constructs one outside
+      tests yet. Naively replaying the full WAL into a fresh `CrowtreeEngine`
+      on every restart would be correct (idempotent) but wastes crowtree's own
+      durability; doing this properly (resume from `CrowtreeEngine::
+      last_applied_slot()`, GC watermark wiring) needs #21 first, same as the
+      snapshot/GC wiring item below.
 - [ ] Snapshot/GC wiring per `design-crowtree-snapshot-gc.md` (restart resume,
       new-member install via `snapshot_export`/`import`) — plan.md P3 M4;
       depends on the above landing first, and on #21 (dual GC watermark).
