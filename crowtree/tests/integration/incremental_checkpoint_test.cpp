@@ -92,6 +92,73 @@ TEST(IncrementalCheckpoint, SingleKeyEditRewritesOnlyItsPath)
     EXPECT_LT(rewritten, total); // unchanged leaves/inners were retained
 }
 
+// Regression (plan-tree #14c/#14d/#18 D4): snapshot's dirty-tracking is
+// segment-level, not page-level -- confirm only the *dirty* segment(s) get a
+// fresh image written, not every present segment. With kSegmentSize == 1024
+// PIDs, a 200-key tree comfortably fits in one segment, so this also
+// exercises the single-segment steady-state case explicitly.
+TEST(IncrementalCheckpoint, OnlyDirtySegmentsAreRewritten)
+{
+    MemPageStore store(1);
+    Options      opt;
+    opt.page_store       = &store;
+    opt.max_delta_len    = 1;
+    opt.leaf_split_bytes = 160;
+    opt.frame_bytes      = 4096;
+    Crowtree t(opt);
+
+    std::map<std::string, std::string> oracle;
+    fill(&t, 200, &oracle);
+
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    uint64_t first_segments = t.last_snapshot_segments_written();
+    EXPECT_GE(first_segments, 1U); // first snapshot: at least the one segment in use
+
+    // No mutations -> no segment should need re-imaging.
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    EXPECT_EQ(t.last_snapshot_segments_written(), 0U);
+
+    // A single-key edit still only touches PIDs within one segment (this
+    // tree never grows past kSegmentSize PIDs) -- expect exactly that one
+    // segment re-imaged, not zero and not "every segment".
+    uint64_t slot = 100000;
+    ASSERT_TRUE(t.apply(slot, put_one(key(7), "updated")).ok());
+    t.force_advance_slot(slot);
+    ASSERT_TRUE(t.flush().ok());
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    EXPECT_EQ(t.last_snapshot_segments_written(), 1U);
+}
+
+// Same regression, but with a tree big enough (kSegmentSize == 1024 PIDs per
+// segment) to actually span multiple mapping-table segments: a single-key
+// edit must re-image only the one segment holding the touched leaf's PID,
+// leaving every other segment's image/generation untouched.
+TEST(IncrementalCheckpoint, MultiSegmentTreeOnlyRewritesTouchedSegment)
+{
+    MemPageStore store(1);
+    Options      opt;
+    opt.page_store       = &store;
+    opt.max_delta_len    = 1;
+    opt.leaf_split_bytes = 160;
+    opt.frame_bytes      = 4096;
+    Crowtree t(opt);
+
+    std::map<std::string, std::string> oracle;
+    fill(&t, 3000, &oracle); // enough splits to allocate well past 1024 PIDs
+
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    size_t total_segments = t.mapping().segments_allocated();
+    ASSERT_GT(total_segments, 1U) << "test needs a multi-segment tree to be meaningful";
+
+    uint64_t slot = 1000000;
+    ASSERT_TRUE(t.apply(slot, put_one(key(7), "updated")).ok());
+    t.force_advance_slot(slot);
+    ASSERT_TRUE(t.flush().ok());
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    EXPECT_EQ(t.last_snapshot_segments_written(), 1U);
+    EXPECT_LT(t.last_snapshot_segments_written(), total_segments);
+}
+
 TEST(IncrementalCheckpoint, SpaceIsReusedAcrossManyCheckpoints)
 {
     MemPageStore store(1);

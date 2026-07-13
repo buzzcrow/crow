@@ -92,6 +92,14 @@ struct Options
     // drained.
     uint32_t max_memtable_count = 2;
 
+    // ── Mapping table redesign (plan-tree #14) ──
+    // Packed slot words per segment (design-crowtree-mappingtable.md §4).
+    // Fixed for the lifetime of a tree. Not yet consumed by MappingTable --
+    // it still hardcodes MappingTable::kSegmentSize (#14c follow-up: plumb
+    // this through as the runtime segment size) -- present now so
+    // callers/tests can start tuning it ahead of that wiring.
+    uint32_t mapping_segment_slots = 1024;
+
     // ── Retention GC (plan-tree #21) ──
     // Periodic collect_garbage() sweep cadence on the same background thread as
     // background_flush (no second thread). 0 = disabled: collect_garbage() then

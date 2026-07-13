@@ -44,6 +44,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             build.include(&inc);
         }
     }
+    // Fallback: when CONDA_PREFIX is not set (e.g., the pre-commit hook runs in a
+    // bare shell), try common system install locations for Abseil headers.
+    #[cfg(target_os = "macos")]
+    {
+        let homebrew = PathBuf::from("/opt/homebrew/include");
+        if homebrew.join("absl").is_dir() {
+            build.include(&homebrew);
+        }
+    }
+    {
+        let local = PathBuf::from("/usr/local/include");
+        if local.join("absl").is_dir() {
+            build.include(&local);
+        }
+    }
     println!("cargo:rerun-if-env-changed=CONDA_PREFIX");
 
     // liburing (io_uring reactor, plan-tree #11 Phase 0/1) -- Linux-only, no

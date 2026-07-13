@@ -85,6 +85,15 @@ uint32_t durable_blob_raw_len(const uint8_t *blob, size_t blob_len)
     return get_u32(blob + 1);
 }
 
+uint32_t durable_blob_logical_len(const uint8_t *blob, size_t blob_len)
+{
+    if (blob_len < kDurableBlobHeader) {
+        return 0;
+    }
+    uint32_t stored_len = get_u32(blob + 5);
+    return static_cast<uint32_t>(kDurableBlobHeader) + stored_len;
+}
+
 Status decode_durable_page(const uint8_t *blob, size_t blob_len, uint8_t *frame_out, uint32_t page_bytes)
 {
     if (blob_len < kDurableBlobHeader) {

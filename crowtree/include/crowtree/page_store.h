@@ -13,6 +13,7 @@
 
 #include "crowtree/status.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -127,6 +128,122 @@ class DebugPageStore : public PageStore
   private:
     PageStore *inner_;
     uint64_t   writes_ = 0;
+};
+
+// Fault-injection wrapper (plan-tree #14e) for crash-recovery tests: lets a
+// test declaratively arm a fault on some future write_at/sync() call instead
+// of hand-computing byte offsets to corrupt after the fact (the pattern
+// crash_recovery_test.cpp/persist_test.cpp otherwise use). Delegates
+// everything to `inner_` except the armed call, which never reaches it in
+// kDrop mode, is truncated in kTear mode, or short-circuits with an error in
+// kFail mode -- all three are what a real crash can do to an in-flight,
+// not-yet-synced write. Not thread-safe (tests only, single-writer usage
+// matches every other PageStore backend's actual caller discipline).
+class FaultyPageStore : public PageStore
+{
+  public:
+    enum class Fault {
+        kNone,
+        kDrop, // the write never reaches `inner_` at all (as if lost pre-crash)
+        kTear, // only the first `tear_len` bytes of this write land
+        kFail, // the call returns io_error(); `inner_` is never touched
+    };
+
+    explicit FaultyPageStore(PageStore *inner) : inner_(inner)
+    {
+    }
+
+    // Arm a fault on the `n`th (0-indexed) future write_at call. `tear_len`
+    // is only meaningful for Fault::kTear. Call before triggering the
+    // sequence of writes under test; disarms itself once triggered (a
+    // second matching call won't refire without re-arming).
+    void arm_write_fault(int n, Fault kind, size_t tear_len = 0)
+    {
+        fault_write_idx_  = n;
+        fault_write_kind_ = kind;
+        tear_len_         = tear_len;
+    }
+
+    // Arm a fault on the `n`th (0-indexed) future sync() call. Only
+    // Fault::kFail is meaningful here (kDrop/kTear don't apply to a
+    // barrier call).
+    void arm_sync_fault(int n, Fault kind)
+    {
+        fault_sync_idx_  = n;
+        fault_sync_kind_ = kind;
+    }
+
+    Status write_at(uint64_t off, const uint8_t *buf, size_t len) override
+    {
+        int idx = write_count_++;
+        if (idx == fault_write_idx_) {
+            Fault kind        = fault_write_kind_;
+            fault_write_idx_  = -1; // one-shot
+            fault_write_kind_ = Fault::kNone;
+            switch (kind) {
+            case Fault::kDrop:
+                return Status::Ok(); // silently lost -- inner_ never sees it
+            case Fault::kTear:
+                return inner_->write_at(off, buf, std::min(len, tear_len_));
+            case Fault::kFail:
+                return Status::io_error("FaultyPageStore: armed write fault");
+            case Fault::kNone:
+                break;
+            }
+        }
+        return inner_->write_at(off, buf, len);
+    }
+
+    Status read_at(uint64_t off, uint8_t *buf, size_t len) const override
+    {
+        return inner_->read_at(off, buf, len);
+    }
+
+    Status sync() override
+    {
+        int idx = sync_count_++;
+        if (idx == fault_sync_idx_) {
+            Fault kind       = fault_sync_kind_;
+            fault_sync_idx_  = -1; // one-shot
+            fault_sync_kind_ = Fault::kNone;
+            if (kind == Fault::kFail) {
+                return Status::io_error("FaultyPageStore: armed sync fault");
+            }
+        }
+        return inner_->sync();
+    }
+
+    [[nodiscard]] uint64_t size() const override
+    {
+        return inner_->size();
+    }
+
+    [[nodiscard]] uint32_t iu_size() const override
+    {
+        return inner_->iu_size();
+    }
+
+    [[nodiscard]] int write_count() const
+    {
+        return write_count_;
+    }
+
+    [[nodiscard]] int sync_count() const
+    {
+        return sync_count_;
+    }
+
+  private:
+    PageStore *inner_;
+    int        write_count_ = 0;
+    int        sync_count_  = 0;
+
+    int    fault_write_idx_  = -1;
+    Fault  fault_write_kind_ = Fault::kNone;
+    size_t tear_len_         = 0;
+
+    int   fault_sync_idx_  = -1;
+    Fault fault_sync_kind_ = Fault::kNone;
 };
 
 // Local-file backend: pread/pwrite with fdatasync as the durability barrier.

@@ -39,6 +39,11 @@ void encode_durable_page(const uint8_t *frame, uint32_t page_bytes, compress_alg
 // frame geometry up front. Returns 0 if the blob is shorter than the header.
 [[nodiscard]] uint32_t durable_blob_raw_len(const uint8_t *blob, size_t blob_len);
 
+// Read the logical (unpadded) on-disk blob length = header + stored payload.
+// This is the value the manifest records and store_unloaded re-tags. Returns 0
+// if the blob is shorter than the header.
+[[nodiscard]] uint32_t durable_blob_logical_len(const uint8_t *blob, size_t blob_len);
+
 // Decode a durable blob back into exactly `page_bytes` at `frame_out`. Verifies
 // the stored-bytes CRC and the decompressed length. Returns corruption on any
 // mismatch, kInvalidArgument on a short/garbled header.

@@ -18,7 +18,7 @@ Batch put_one(const std::string &k, const std::string &v)
 
 page_type head_type(Crowtree &t)
 {
-    return t.mapping().get(t.root_page_id())->type;
+    return t.mapping().get_resident(t.root_page_id())->type;
 }
 } // namespace
 

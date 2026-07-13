@@ -12,8 +12,7 @@
 //                                     bit  [0]     tag = 1
 //
 // Resident pointers are never persisted; on disk a slot is only `0` or a tagged
-// unloaded descriptor. These are pure, standalone helpers — the live mapping
-// table adopts them in #14b (needs #5 B3 lock-free readers + #13).
+// unloaded descriptor. Adopted by the live `MappingTable` (mapping_table.h).
 #pragma once
 
 #include "crowtree/page_types.h" // PageBase

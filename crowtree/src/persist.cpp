@@ -1,27 +1,42 @@
-// snapshot and recovery.
+// snapshot and recovery (plan-tree #14c/#14d: mapping-table on-disk format,
+// design-crowtree-mappingtable.md §7-9).
 //
 // On-device layout owned here:
-//   [superblock slot A][superblock slot B][page/manifest region]
-// Each superblock slot is at least 4 KiB and rounded up to the store IU; the
-// page/manifest region begins after the two A/B slots.
+//   [anchor slot A][anchor slot B][page/segment-image/directory region]
+// Each anchor slot is at least 4 KiB and rounded up to the store IU; the
+// region begins after the two A/B slots.
 // Each snapshot writes only *dirty* base pages (clean pages keep their prior
-// addr) plus a fresh manifest listing every reachable page's (page_id,addr,len),
-// then commits by writing the inactive superblock slot (chosen by seq parity) and
-// syncing. New writes land in space that is **dead w.r.t. the committed
-// snapshot** (reused gaps) or appended past EOF — never over the committed
-// image, so a crash mid-snapshot falls back intact to the last committed
-// superblock. Space freed by the committed snapshot becomes reusable only after
-// the next snapshot commits (two-generation safety).
+// addr) plus a fresh image for each *dirty* mapping-table segment (empty/
+// unloaded/resident slots packed verbatim; a resident slot converts to an
+// unloaded descriptor at its durable addr -- resident pointers are never
+// persisted) plus a fresh segment directory (every present segment's latest
+// generation + image location), then commits by writing the inactive anchor
+// slot (chosen by seq parity) and syncing. New writes land in space that is
+// **dead w.r.t. the committed snapshot** (reused gaps) or appended past EOF —
+// never over the committed image, so a crash mid-snapshot falls back intact
+// to the last committed anchor. Space freed by the committed snapshot
+// becomes reusable only after the next snapshot commits (two-generation
+// safety).
 //
-// Key work: incremental reachable-page walk, crash-safe free-space reuse,
-// page/manifest framing, superblock A/B commit, best-superblock recovery,
-// lazy mapping-table rebuild.
+// Unlike the pre-#14c manifest scheme, there is no reachable-page tree walk
+// here: prepare_snapshot_locked() discovers dirty pages/segments by
+// enumerating MappingTable's present segments directly (bounded by
+// MappingTable::kMaxSegments, not resident-tree size) and inspecting each
+// dirty segment's own slot words -- a page's *own* segment is dirty exactly
+// when the page was created/mutated/retired (every mapping_.store*/clear
+// call bumps its segment's write_seq), so this is complete without walking
+// PID structural references (root -> children -> overflow chains) at all.
+//
+// Key work: segment-scan-driven dirty-page/segment discovery, crash-safe
+// free-space reuse, page/segment-image/directory framing, anchor A/B
+// commit, best-anchor recovery, lazy mapping-table rebuild.
 #include "crowtree/async_page_store.h"
 #include "crowtree/compressor.h"
 #include "crowtree/crc32c.h"
 #include "crowtree/crowtree.h"
 #include "crowtree/delta.h"
 #include "crowtree/log.h"
+#include "crowtree/mapping_persist.h"
 #include "crowtree/page_codec.h"
 #include "crowtree/page_store.h"
 
@@ -33,6 +48,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -42,19 +58,21 @@ namespace crowtree
 namespace
 {
 
-constexpr uint32_t kSuperMagic    = 0x42535443; // 'CTSB' little-endian
-constexpr uint32_t kFormatVersion = 1;
-// Minimum on-disk superblock slot size. The actual slot is rounded up to the
+constexpr uint32_t kAnchorMagic   = 0x41435443; // 'CTCA' little-endian
+constexpr uint32_t kFormatVersion = 2;          // #14c/#14d: clean-break format (design §13)
+// Minimum on-disk anchor slot size. The actual slot is rounded up to the
 // store IU so larger-IU devices (16K/64K SSD) get IU-aligned, IU-sized slots
 // (PT9 geometry); for iu <= 4096 (dividing 4096) it stays 4096.
-constexpr uint64_t kSuperblockBytes  = 4096;
-constexpr size_t   kSuperFixedFields = 4 + 4 + (8 * 7) + 4; // magic..page_count,crc
+constexpr uint64_t kAnchorBytes = 4096;
+// magic,format_version,snapshot_seq,root_page_id,last_applied_slot,
+// next_page_id,segment_slots,segdir_addr,segdir_len,segdir_crc,anchor_crc.
+constexpr size_t kAnchorFixedFields = 4 + 4 + (8 * 4) + 4 + 8 + 4 + 4 + 4;
 
-// Per-store superblock slot size and the byte offset where the page region
-// begins (two A/B superblock slots precede it).
+// Per-store anchor slot size and the byte offset where the page/segment
+// region begins (two A/B anchor slots precede it).
 inline uint64_t superblock_slot_bytes(uint32_t iu)
 {
-    return round_up_to_iu(kSuperblockBytes, iu);
+    return round_up_to_iu(kAnchorBytes, iu);
 }
 
 inline uint64_t region_base_for(uint32_t iu)
@@ -62,7 +80,16 @@ inline uint64_t region_base_for(uint32_t iu)
     return superblock_slot_bytes(iu) * 2;
 }
 
-struct Superblock
+// The commit anchor (design-crowtree-mappingtable.md §7.3): a tiny fixed A/B
+// record that is the snapshot's commit point. Ties a snapshot_seq to the
+// segment directory that (transitively, via segment images) locates every
+// live page. Deviation from the design spec's exact field list (documented
+// in plan-tree.md's #14 Open Issues): omits leftmost_leaf_pid and
+// page_alloc_root, neither of which this engine currently has a concrete
+// counterpart for (no leftmost-leaf fast path; SpaceAllocator is rebuilt
+// from live extents each open(), not itself a persistent structure with a
+// root to save/restore).
+struct CommitAnchor
 {
     uint32_t magic             = 0;
     uint32_t format_version    = 0;
@@ -70,9 +97,10 @@ struct Superblock
     uint64_t root_page_id      = 0;
     uint64_t last_applied_slot = 0;
     uint64_t next_page_id      = 0;
-    uint64_t manifest_addr     = 0;
-    uint64_t manifest_len      = 0;
-    uint64_t page_count        = 0;
+    uint32_t segment_slots     = 0; // MappingTable::kSegmentSize at persist time (format guard)
+    uint64_t segdir_addr       = 0;
+    uint32_t segdir_len        = 0;
+    uint32_t segdir_crc        = 0;
 };
 
 void put_u32(std::vector<uint8_t> *out, uint32_t v)
@@ -107,46 +135,52 @@ uint64_t get_u64(const uint8_t *p)
     return v;
 }
 
-void encode_superblock(const Superblock &sb, uint64_t slot_bytes, std::vector<uint8_t> *buf)
+void encode_anchor(const CommitAnchor &a, uint64_t slot_bytes, std::vector<uint8_t> *buf)
 {
-    put_u32(buf, sb.magic);
-    put_u32(buf, sb.format_version);
-    put_u64(buf, sb.snapshot_seq);
-    put_u64(buf, sb.root_page_id);
-    put_u64(buf, sb.last_applied_slot);
-    put_u64(buf, sb.next_page_id);
-    put_u64(buf, sb.manifest_addr);
-    put_u64(buf, sb.manifest_len);
-    put_u64(buf, sb.page_count);
+    put_u32(buf, a.magic);
+    put_u32(buf, a.format_version);
+    put_u64(buf, a.snapshot_seq);
+    put_u64(buf, a.root_page_id);
+    put_u64(buf, a.last_applied_slot);
+    put_u64(buf, a.next_page_id);
+    put_u32(buf, a.segment_slots);
+    put_u64(buf, a.segdir_addr);
+    put_u32(buf, a.segdir_len);
+    put_u32(buf, a.segdir_crc);
     uint32_t crc = crc32c(buf->data(), buf->size());
     put_u32(buf, crc);
     buf->resize(slot_bytes, 0); // zero pad to the IU-aligned slot size
 }
 
-bool decode_superblock(const uint8_t *buf, Superblock *sb)
+bool decode_anchor(const uint8_t *buf, CommitAnchor *a)
 {
-    if (get_u32(buf) != kSuperMagic) {
+    if (get_u32(buf) != kAnchorMagic) {
         return false;
     }
-    uint32_t stored_crc = get_u32(buf + (kSuperFixedFields - 4));
-    if (crc32c(buf, kSuperFixedFields - 4) != stored_crc) {
+    uint32_t stored_crc = get_u32(buf + (kAnchorFixedFields - 4));
+    if (crc32c(buf, kAnchorFixedFields - 4) != stored_crc) {
         return false;
     }
-    sb->magic             = get_u32(buf);
-    sb->format_version    = get_u32(buf + 4);
-    sb->snapshot_seq      = get_u64(buf + 8);
-    sb->root_page_id      = get_u64(buf + 16);
-    sb->last_applied_slot = get_u64(buf + 24);
-    sb->next_page_id      = get_u64(buf + 32);
-    sb->manifest_addr     = get_u64(buf + 40);
-    sb->manifest_len      = get_u64(buf + 48);
-    sb->page_count        = get_u64(buf + 56);
+    a->magic          = get_u32(buf);
+    a->format_version = get_u32(buf + 4);
+    if (a->format_version != kFormatVersion) {
+        // Clean-break format (design §13): no older format to accept.
+        return false;
+    }
+    a->snapshot_seq      = get_u64(buf + 8);
+    a->root_page_id      = get_u64(buf + 16);
+    a->last_applied_slot = get_u64(buf + 24);
+    a->next_page_id      = get_u64(buf + 32);
+    a->segment_slots     = get_u32(buf + 40);
+    a->segdir_addr       = get_u64(buf + 44);
+    a->segdir_len        = get_u32(buf + 52);
+    a->segdir_crc        = get_u32(buf + 56);
     return true;
 }
 
-// Returns true and fills *best with the highest-seq valid superblock. Reads the
+// Returns true and fills *best with the highest-seq valid anchor. Reads the
 // two IU-sized A/B slots at offsets 0 and superblock_slot_bytes(iu).
-bool read_best_superblock(const PageStore &store, uint32_t iu, Superblock *best)
+bool read_best_anchor(const PageStore &store, uint32_t iu, CommitAnchor *best)
 {
     const uint64_t slot_bytes = superblock_slot_bytes(iu);
     bool           found      = false;
@@ -158,12 +192,12 @@ bool read_best_superblock(const PageStore &store, uint32_t iu, Superblock *best)
         if (!store.read_at(slot, buf.data(), buf.size()).ok()) {
             continue;
         }
-        Superblock sb;
-        if (!decode_superblock(buf.data(), &sb)) {
+        CommitAnchor a;
+        if (!decode_anchor(buf.data(), &a)) {
             continue;
         }
-        if (!found || sb.snapshot_seq > best->snapshot_seq) {
-            *best = sb;
+        if (!found || a.snapshot_seq > best->snapshot_seq) {
+            *best = a;
             found = true;
         }
     }
@@ -197,42 +231,48 @@ struct SpaceAllocator
     }
 };
 
-// Live byte ranges of the committed snapshot `sb`: every reachable page frame
-// plus the manifest itself. These must never be overwritten (they are the crash
-// fallback). Returns false if the manifest can't be read/validated.
-bool collect_live_extents(const PageStore &store, const Superblock &sb, uint32_t iu,
-                          std::vector<std::pair<uint64_t, uint64_t>> *out)
+// Live byte ranges of the committed snapshot `anchor`: the directory image,
+// every live segment's image, and every *unloaded* (durable, on-disk) slot's
+// page frame described by those images. These must never be overwritten
+// (they are the crash fallback). Returns false if the directory or any
+// segment image can't be read/validated.
+bool collect_live_extents_from_directory(const PageStore &store, const CommitAnchor &anchor, uint32_t iu,
+                                         std::vector<std::pair<uint64_t, uint64_t>> *out)
 {
-    std::vector<uint8_t> mbuf(round_up_to_iu(sb.manifest_len, iu));
-    if (!store.read_at(sb.manifest_addr, mbuf.data(), mbuf.size()).ok()) {
+    std::vector<uint8_t> dbuf(round_up_to_iu(anchor.segdir_len, iu));
+    if (!store.read_at(anchor.segdir_addr, dbuf.data(), dbuf.size()).ok()) {
         return false;
     }
-    if (mbuf.size() < kPageFrameHeaderSize) {
+    std::vector<DirEntry> entries;
+    if (!decode_segment_directory(dbuf.data(), dbuf.size(), &entries).ok()) {
         return false;
     }
-    uint32_t mlen = get_u32(mbuf.data());
-    uint32_t mcrc = get_u32(mbuf.data() + 4);
-    if (kPageFrameHeaderSize + mlen > mbuf.size()) {
-        return false;
-    }
-    const uint8_t *mbody = mbuf.data() + kPageFrameHeaderSize;
-    if (crc32c(mbody, mlen) != mcrc) {
-        return false;
-    }
-    uint64_t count = get_u64(mbody);
-    size_t   pos   = 8;
-    for (uint64_t i = 0; i < count; ++i) {
-        if (pos + 20 > mlen) {
+    out->emplace_back(anchor.segdir_addr, round_up_to_iu(anchor.segdir_len, iu));
+
+    for (const DirEntry &e : entries) {
+        out->emplace_back(e.image_addr, round_up_to_iu(e.image_len, iu));
+
+        std::vector<uint8_t> ibuf(round_up_to_iu(e.image_len, iu));
+        if (!store.read_at(e.image_addr, ibuf.data(), ibuf.size()).ok()) {
             return false;
         }
-        uint64_t addr = get_u64(mbody + pos + 8);
-        uint32_t plen = get_u32(mbody + pos + 16);
-        pos += 20;
-        // The physical reservation is the IU-rounded logical length (PT9); protect
-        // the whole padded extent so the allocator never reuses the padding.
-        out->emplace_back(addr, round_up_to_iu(plen, iu));
+        SegmentImageHeader    hdr;
+        std::vector<uint64_t> words;
+        if (!decode_segment_image(ibuf.data(), ibuf.size(), &hdr, &words).ok()) {
+            return false;
+        }
+        if (hdr.body_crc != e.image_crc) {
+            return false; // directory entry points at the wrong/stale image
+        }
+        for (uint64_t w : words) {
+            if (!slot_word::is_unloaded(w)) {
+                continue; // empty, or (impossible on disk) resident
+            }
+            uint64_t addr = slot_word::unloaded_iu_index(w) * iu;
+            uint32_t plen = slot_word::unloaded_iu_count(w) * iu; // already IU-rounded (store_unloaded's encoding)
+            out->emplace_back(addr, plen);
+        }
     }
-    out->emplace_back(sb.manifest_addr, round_up_to_iu(sb.manifest_len, iu));
     return true;
 }
 
@@ -271,42 +311,37 @@ Status Crowtree::prepare_snapshot_locked(PreparedSnapshot *out)
 
     const uint32_t iu = store->iu_size();
     const uint64_t gc = gc_floor_.load();
-    // Geometry (PT9 §9.2): the pool frame must be IU-aligned. The superblock slot
-    // is rounded up to the IU (superblock_slot_bytes), so larger-IU stores are now
-    // supported (16/64 KiB etc.) — no fixed 4096 cap.
+    // Geometry (PT9 §9.2): the pool frame must be IU-aligned. The anchor slot
+    // is rounded up to the IU (superblock_slot_bytes), so larger-IU stores are
+    // now supported (16/64 KiB etc.) — no fixed 4096 cap.
     if (iu > 1 && (opt_.frame_bytes % iu != 0)) {
         return Status::invalid_argument("snapshot: frame_bytes must be IU-aligned");
     }
-    const uint64_t sb_slot_bytes = superblock_slot_bytes(iu);
-    const uint64_t region_base   = region_base_for(iu);
+    const uint64_t region_base = region_base_for(iu);
 
     // build the crash-safe allocator from the committed snapshot: its page
-    // frames and manifest are off-limits (the crash fallback); every other byte in
-    // the file is dead and reusable. The first snapshot (no committed sb) just
-    // appends. Reusing only committed-dead space gives two-generation safety.
-    Superblock                                 prev;
-    bool                                       have_prev = read_best_superblock(*store, iu, &prev);
+    // frames, segment images, and directory are off-limits (the crash
+    // fallback); every other byte in the file is dead and reusable. The
+    // first snapshot (no committed anchor) just appends. Reusing only
+    // committed-dead space gives two-generation safety.
+    CommitAnchor                               prev;
+    bool                                       have_prev = read_best_anchor(*store, iu, &prev);
     std::vector<std::pair<uint64_t, uint64_t>> live;
-    if (have_prev && !collect_live_extents(*store, prev, iu, &live)) {
-        return Status::corruption("snapshot: committed manifest unreadable");
+    if (have_prev && !collect_live_extents_from_directory(*store, prev, iu, &live)) {
+        return Status::corruption("snapshot: committed segment directory unreadable");
     }
     SpaceAllocator alloc = build_allocator(std::move(live), store->size(), iu, region_base);
 
-    std::vector<uint8_t> manifest_body; // page_count then (page_id, addr, len)*
-    uint64_t             page_count    = 0;
-    uint64_t             pages_written = 0;
+    uint64_t pages_written = 0;
 
-    // DFS the reachable tree. Incremental snapshotting: each base page persists
-    // its *live* frame verbatim, but only when **dirty** (durable_addr == kNoAddr);
-    // clean pages keep their prior durable addr (no rewrite). The manifest lists
-    // every reachable page's (page_id, addr, len) so recovery can demand-load it.
-    // Persist one page (write its blob only when dirty, PT10), then add its
-    // (page_id, addr, len) to the manifest. The on-disk extent (blob length) is the
-    // durable_plen, so reload (resident) and GC (collect_live_extents) read the
-    // exact span.
-    auto persist_one = [&](uint64_t the_page_id, PageBase *pg, const uint8_t *frame, uint32_t plen) -> Status {
-        uint64_t this_addr;
-        uint32_t this_len;
+    // Persist one page's content (write its blob only when dirty, PT10).
+    // Returns the (addr, logical_len) to encode into the owning segment's
+    // image -- either a freshly queued write's address, or the page's
+    // existing durable location if it's already clean. The on-disk extent
+    // (blob length) is the durable_plen, so reload (resident) and GC
+    // (collect_live_extents_from_directory) read the exact span.
+    auto persist_one = [&](uint64_t the_page_id, PageBase *pg, const uint8_t *frame, uint32_t plen, uint64_t *out_addr,
+                           uint32_t *out_len) -> Status {
         if (pg->durable_addr == kNoAddr) { // dirty: persist the live frame
             std::vector<uint8_t> blob;
             encode_durable_page(frame, plen, opt_.compression, &blob);
@@ -318,140 +353,242 @@ Status Crowtree::prepare_snapshot_locked(PreparedSnapshot *out)
             // snapshot() confirms the byte write actually landed.
             out->page_writes.push_back(PreparedPageWrite{
                 .page_id = the_page_id, .page = pg, .addr = addr, .logical_len = logical, .blob = std::move(blob)});
-            this_addr = addr;
-            this_len  = logical; // manifest records the logical (unpadded) length
+            *out_addr = addr;
+            *out_len  = logical;
             ++pages_written;
         }
         else { // clean: already durable from a prior generation, no rewrite
-            this_addr = pg->durable_addr;
-            this_len  = pg->durable_plen;
-        }
-        put_u64(&manifest_body, the_page_id);
-        put_u64(&manifest_body, this_addr);
-        put_u32(&manifest_body, this_len);
-        ++page_count;
-        return Status::Ok();
-    };
-
-    std::function<Status(uint64_t)> walk = [&](uint64_t page_id) -> Status {
-        PageBase *head = resident(page_id);
-        if (head == nullptr) {
-            return Status::internal_error("snapshot: null page in walk");
-        }
-
-        // Fold any delta chain into a fresh consolidated base, so the live page is a
-        // single base whose frame we persist as-is (deltas only stack on leaves).
-        // The fresh base is dirty (no durable addr) and replaces the chain in-tree;
-        // the old chain is epoch-retired (frame returns to the pool once safe).
-        // Large new values spill into overflow chains; superseded ones are retired.
-        if (head->type == page_type::kBatchDelta) {
-            PageBase *b = head;
-            while (b != nullptr && b->type == page_type::kBatchDelta) {
-                b = b->next;
-            }
-            if (b == nullptr || b->type != page_type::kLeafBase) {
-                return Status::internal_error("snapshot: delta chain without leaf base");
-            }
-            uint64_t              right = static_cast<LeafBase *>(b)->right_sibling();
-            std::vector<uint64_t> dead_overflow;
-            LeafBase             *fresh =
-                build_leaf_spilling_locked(resolve_leaf_chain_for_rebuild(head, gc, &dead_overflow), right);
-            mapping_.store(page_id, fresh);
-            for (PageBase *n = head; n != nullptr;) {
-                PageBase *nx = n->next;
-                retire_page(n);
-                n = nx;
-            }
-            for (uint64_t h : dead_overflow) {
-                retire_overflow_chain_locked(h);
-            }
-            head = fresh;
-        }
-        PageBase *base = head; // now a single base (no deltas above it)
-
-        const uint8_t *frame = base->type == page_type::kLeafBase ? static_cast<LeafBase *>(base)->frame()
-                                                                  : static_cast<InnerBase *>(base)->frame();
-        uint32_t       plen  = base->type == page_type::kLeafBase ? static_cast<LeafBase *>(base)->page_bytes()
-                                                                  : static_cast<InnerBase *>(base)->page_bytes();
-        Status         ps    = persist_one(page_id, base, frame, plen);
-        if (!ps.ok()) {
-            return ps;
-        }
-
-        if (base->type == page_type::kInnerBase) {
-            for (uint64_t child : static_cast<InnerBase *>(base)->children()) {
-                Status cs = walk(child);
-                if (!cs.ok()) {
-                    return cs;
-                }
-            }
-        }
-        else { // leaf: persist its overflow chains too (reachable via cells, PT11)
-            LeafFrameView v = static_cast<LeafBase *>(base)->view();
-            for (uint32_t i = 0; i < v.count(); ++i) {
-                CellView c{v.cell(i)};
-                if (!c.is_overflow()) {
-                    continue;
-                }
-                uint64_t opid = c.overflow_head();
-                while (opid != kInvalidPageId) {
-                    PageBase *op = resident(opid);
-                    if (op == nullptr || op->type != page_type::kOverflowFrame) {
-                        return Status::internal_error("snapshot: bad overflow page");
-                    }
-                    auto  *ov = static_cast<OverflowBase *>(op);
-                    Status os = persist_one(opid, op, ov->frame(), ov->page_bytes());
-                    if (!os.ok()) {
-                        return os;
-                    }
-                    opid = ov->next_page_id();
-                }
-            }
+            *out_addr = pg->durable_addr;
+            *out_len  = pg->durable_plen;
         }
         return Status::Ok();
     };
-    Status ws = walk(root_page_id_.load());
-    if (!ws.ok()) {
-        return ws;
+
+    // Dispatch a resolved (non-delta) resident page to its frame+length,
+    // shared by pass 1's content persist and (indirectly, via `pg->frame()`
+    // itself) nothing else -- both Leaf/Inner (design's "base") and
+    // Overflow frames are persisted identically byte-wise.
+    auto frame_of = [](PageBase *pg, const uint8_t **frame, uint32_t *plen) -> Status {
+        switch (pg->type) {
+        case page_type::kLeafBase:
+            *frame = static_cast<LeafBase *>(pg)->frame();
+            *plen  = static_cast<LeafBase *>(pg)->page_bytes();
+            return Status::Ok();
+        case page_type::kInnerBase:
+            *frame = static_cast<InnerBase *>(pg)->frame();
+            *plen  = static_cast<InnerBase *>(pg)->page_bytes();
+            return Status::Ok();
+        case page_type::kOverflowFrame:
+            *frame = static_cast<OverflowBase *>(pg)->frame();
+            *plen  = static_cast<OverflowBase *>(pg)->page_bytes();
+            return Status::Ok();
+        default:
+            return Status::internal_error("snapshot: unexpected resident page type");
+        }
+    };
+
+    // pending_addr remembers *this round's* freshly assigned (addr, len) for
+    // a page whose content persist_one just queued -- PageBase::durable_addr
+    // stays kNoAddr until commit_prepared_snapshot() confirms the byte write
+    // landed (see persist_one's doc comment), so pass 2 (below) can't read
+    // it from the page itself yet.
+    std::unordered_map<uint64_t, std::pair<uint64_t, uint32_t>> pending_addr;
+
+    // Pass 1: fold delta chains and persist dirty page content, discovered
+    // by scanning every *dirty* mapping-table segment directly (no
+    // reachable-page tree walk -- see this file's header comment). A
+    // segment is dirty exactly when some page in its PID range was
+    // created/mutated/retired since the last snapshot (every mapping_.
+    // store*/clear call bumps its segment's write_seq), so this is complete.
+    //
+    // Ascending seg_idx/slot order matters here: PIDs are allocated
+    // strictly monotonically (D1), so any *new* page a fold creates always
+    // lands at-or-after the current scan position and is naturally
+    // discovered later in this same pass -- but a fold's dead_overflow
+    // retire can *clear* a slot in an *already-visited* (lower-index)
+    // segment. Building each segment's final image is therefore deferred
+    // to pass 2, after every segment's folding/retiring side effects (in
+    // any order) have fully settled.
+    for (uint64_t seg_idx = 0; seg_idx < MappingTable::kMaxSegments; ++seg_idx) {
+        MappingSegment *seg = mapping_.segment_at(seg_idx);
+        if (seg == nullptr || !seg->is_dirty()) {
+            continue;
+        }
+        for (uint32_t i = 0; i < seg->slot_count; ++i) {
+            uint64_t page_id = (seg_idx * MappingTable::kSegmentSize) + i;
+            uint64_t w       = seg->slots[i].load(std::memory_order_relaxed);
+            if (!slot_word::is_resident(w)) {
+                continue; // empty or already an on-disk descriptor: nothing to fold/persist
+            }
+            PageBase *page = slot_word::resident_ptr(w);
+            if (page->type == page_type::kBatchDelta) {
+                // Fold into a fresh consolidated base (deltas only stack on
+                // leaves); the fresh base is dirty and replaces the chain
+                // in-tree, the old chain epoch-retires. Large new values
+                // spill into overflow chains; superseded ones retire too.
+                PageBase *b = page;
+                while (b != nullptr && b->type == page_type::kBatchDelta) {
+                    b = b->next;
+                }
+                if (b == nullptr || b->type != page_type::kLeafBase) {
+                    return Status::internal_error("snapshot: delta chain without leaf base");
+                }
+                uint64_t              right = static_cast<LeafBase *>(b)->right_sibling();
+                std::vector<uint64_t> dead_overflow;
+                LeafBase             *fresh =
+                    build_leaf_spilling_locked(resolve_leaf_chain_for_rebuild(page, gc, &dead_overflow), right);
+                mapping_.store(page_id, fresh);
+                for (PageBase *n = page; n != nullptr;) {
+                    PageBase *nx = n->next;
+                    retire_page(n);
+                    n = nx;
+                }
+                for (uint64_t h : dead_overflow) {
+                    retire_overflow_chain_locked(h);
+                }
+                page = fresh;
+            }
+            const uint8_t *frame = nullptr;
+            uint32_t       plen  = 0;
+            Status         fs    = frame_of(page, &frame, &plen);
+            if (!fs.ok()) {
+                return fs;
+            }
+            uint64_t addr;
+            uint32_t len;
+            Status   ps = persist_one(page_id, page, frame, plen, &addr, &len);
+            if (!ps.ok()) {
+                return ps;
+            }
+            if (page->durable_addr == kNoAddr) {
+                pending_addr[page_id] = {addr, len};
+            }
+        }
     }
     snapshot_pages_written_.store(pages_written);
+    uint64_t segments_written = 0;
 
-    // Prepend the count, then frame the manifest like a page (logical_len + CRC).
-    std::vector<uint8_t> counted;
-    put_u64(&counted, page_count);
-    counted.insert(counted.end(), manifest_body.begin(), manifest_body.end());
-    std::vector<uint8_t> manifest;
-    put_u32(&manifest, static_cast<uint32_t>(counted.size()));
-    put_u32(&manifest, crc32c(counted.data(), counted.size()));
-    manifest.insert(manifest.end(), counted.begin(), counted.end());
+    // Pass 2: build a fresh image for every segment still dirty after pass
+    // 1 settled (an unchanged segment reuses its already-durable image/
+    // generation as-is), and assemble the full directory (every present
+    // segment, dirty or not).
+    std::vector<DirEntry> directory_entries;
+    uint64_t              live_page_count = 0;
+    for (uint64_t seg_idx = 0; seg_idx < MappingTable::kMaxSegments; ++seg_idx) {
+        MappingSegment *seg = mapping_.segment_at(seg_idx);
+        if (seg == nullptr) {
+            continue;
+        }
+        if (!seg->is_dirty()) {
+            directory_entries.push_back(DirEntry{.seg_idx    = static_cast<uint32_t>(seg_idx),
+                                                 .generation = seg->generation.load(std::memory_order_relaxed),
+                                                 .image_addr = seg->image_addr,
+                                                 .image_len  = seg->image_len,
+                                                 .image_crc  = seg->image_crc});
+            continue;
+        }
 
-    uint64_t manifest_len  = manifest.size(); // logical (recorded in the superblock)
-    uint64_t manifest_addr = alloc.alloc(manifest_len);
-    manifest.resize(round_up_to_iu(manifest_len, iu), 0); // pad to the IU extent (PT9)
-    out->manifest_write = PreparedSnapshotWrite{.addr = manifest_addr, .blob = std::move(manifest)};
+        std::vector<uint64_t> words(seg->slot_count);
+        uint32_t              live = 0;
+        for (uint32_t i = 0; i < seg->slot_count; ++i) {
+            uint64_t page_id = (seg_idx * MappingTable::kSegmentSize) + i;
+            uint64_t w       = seg->slots[i].load(std::memory_order_relaxed);
+            if (slot_word::is_empty(w)) {
+                words[i] = slot_word::kEmpty;
+                continue;
+            }
+            if (slot_word::is_unloaded(w)) {
+                words[i] = w; // already a durable descriptor -- unchanged
+                ++live;
+                continue;
+            }
+            PageBase *page = slot_word::resident_ptr(w);
+            uint64_t  addr;
+            uint32_t  plen;
+            if (page->durable_addr != kNoAddr) {
+                addr = page->durable_addr;
+                plen = page->durable_plen;
+            }
+            else {
+                auto it = pending_addr.find(page_id);
+                if (it == pending_addr.end()) {
+                    return Status::internal_error("snapshot: dirty resident page missing pending write");
+                }
+                addr = it->second.first;
+                plen = it->second.second;
+            }
+            uint64_t iu_index = addr / iu;
+            auto     iu_count = static_cast<uint32_t>(round_up_to_iu(plen, iu) / iu);
+            if (!slot_word::fits_unloaded(iu_index, iu_count)) {
+                return Status::internal_error("snapshot: page addr/len too large for the unloaded descriptor");
+            }
+            words[i] = slot_word::pack_unloaded(iu_index, iu_count);
+            ++live;
+        }
+
+        uint64_t seen_write_seq = seg->write_seq.load(std::memory_order_relaxed);
+        uint64_t new_generation = seg->generation.load(std::memory_order_relaxed) + 1;
+
+        SegmentImageHeader hdr;
+        hdr.seg_idx    = static_cast<uint32_t>(seg_idx);
+        hdr.generation = new_generation;
+        hdr.slot_count = seg->slot_count;
+        hdr.live_count = live;
+        std::vector<uint8_t> image;
+        uint32_t             body_crc = 0;
+        encode_segment_image(hdr, words, &image, &body_crc);
+        auto     image_logical_len = static_cast<uint32_t>(image.size());
+        uint64_t image_addr        = alloc.alloc(image_logical_len);
+        image.resize(round_up_to_iu(image_logical_len, iu), 0); // pad to the IU extent (PT9)
+
+        out->segment_writes.push_back(PreparedSegmentWrite{.seg_idx        = seg_idx,
+                                                           .seg            = seg,
+                                                           .seen_write_seq = seen_write_seq,
+                                                           .new_generation = new_generation,
+                                                           .addr           = image_addr,
+                                                           .logical_len    = image_logical_len,
+                                                           .image_crc      = body_crc,
+                                                           .blob           = std::move(image)});
+        ++segments_written;
+        directory_entries.push_back(DirEntry{.seg_idx    = static_cast<uint32_t>(seg_idx),
+                                             .generation = new_generation,
+                                             .image_addr = image_addr,
+                                             .image_len  = image_logical_len,
+                                             .image_crc  = body_crc});
+        live_page_count += live;
+    }
+
+    std::vector<uint8_t> directory;
+    encode_segment_directory(directory_entries, &directory);
+    uint64_t segdir_len  = directory.size(); // logical (recorded in the anchor)
+    uint64_t segdir_addr = alloc.alloc(segdir_len);
+    directory.resize(round_up_to_iu(segdir_len, iu), 0); // pad to the IU extent (PT9)
+    out->directory_write = PreparedSnapshotWrite{.addr = segdir_addr, .blob = std::move(directory)};
 
     uint64_t seq = have_prev ? prev.snapshot_seq + 1 : 1;
 
-    Superblock sb;
-    sb.magic             = kSuperMagic;
-    sb.format_version    = kFormatVersion;
-    sb.snapshot_seq      = seq;
-    sb.root_page_id      = root_page_id_.load();
-    sb.last_applied_slot = last_applied_slot_.load();
-    sb.next_page_id      = mapping_.next_page_id();
-    sb.manifest_addr     = manifest_addr;
-    sb.manifest_len      = manifest_len; // logical length (read sites use this)
-    sb.page_count        = page_count;
+    CommitAnchor anchor;
+    anchor.magic             = kAnchorMagic;
+    anchor.format_version    = kFormatVersion;
+    anchor.snapshot_seq      = seq;
+    anchor.root_page_id      = root_page_id_.load();
+    anchor.last_applied_slot = last_applied_slot_.load();
+    anchor.next_page_id      = mapping_.next_page_id();
+    anchor.segment_slots     = static_cast<uint32_t>(MappingTable::kSegmentSize);
+    anchor.segdir_addr       = segdir_addr;
+    anchor.segdir_len        = static_cast<uint32_t>(segdir_len);
+    anchor.segdir_crc        = crc32c(out->directory_write.blob.data(), segdir_len);
 
-    std::vector<uint8_t> sbuf;
-    encode_superblock(sb, sb_slot_bytes, &sbuf);
-    uint64_t sb_slot       = (seq & 1) != 0 ? 0 : sb_slot_bytes; // alternate A/B by parity
-    out->superblock_write  = PreparedSnapshotWrite{.addr = sb_slot, .blob = std::move(sbuf)};
-    out->last_applied_slot = sb.last_applied_slot;
+    std::vector<uint8_t> abuf;
+    encode_anchor(anchor, superblock_slot_bytes(iu), &abuf);
+    uint64_t anchor_slot   = (seq & 1) != 0 ? 0 : superblock_slot_bytes(iu); // alternate A/B by parity
+    out->anchor_write      = PreparedSnapshotWrite{.addr = anchor_slot, .blob = std::move(abuf)};
+    out->last_applied_slot = anchor.last_applied_slot;
     out->seq               = seq;
-    out->page_count        = page_count;
+    out->live_page_count   = live_page_count;
     out->pages_written     = pages_written;
-    out->manifest_len      = manifest_len;
+    out->segdir_len        = segdir_len;
+    snapshot_segments_written_.store(segments_written);
     return Status::Ok();
 }
 
@@ -460,7 +597,7 @@ void Crowtree::commit_prepared_snapshot(const PreparedSnapshot &prepared)
     {
         std::lock_guard<std::mutex> lk(write_mutex_);
         for (const auto &pw : prepared.page_writes) {
-            PageBase *v = mapping_.get(pw.page_id);
+            PageBase *v = mapping_.get_resident(pw.page_id);
             // Identity check (not just durable_addr == kNoAddr): `v` may be a
             // *different*, independently-dirty page if a concurrent
             // consolidate/flush/split replaced this page_id's mapping entry
@@ -471,10 +608,18 @@ void Crowtree::commit_prepared_snapshot(const PreparedSnapshot &prepared)
                 v->durable_plen = pw.logical_len;
             }
         }
+        for (const auto &sw : prepared.segment_writes) {
+            // commit_segment_persist() re-checks identity *and* write_seq --
+            // see PreparedSegmentWrite's doc comment for why a segment needs
+            // both, not just identity like a page write. A refusal just
+            // leaves the segment dirty for the next snapshot (harmless).
+            mapping_.commit_segment_persist(sw.seg_idx, sw.seg, sw.seen_write_seq, sw.new_generation, sw.addr,
+                                            sw.logical_len, sw.image_crc);
+        }
     }
     version_.fetch_add(1);
-    CT_LOG_INFO("snapshot committed: seq={} last_applied={} pages={} written={} manifest_len={}", prepared.seq,
-                prepared.last_applied_slot, prepared.page_count, prepared.pages_written, prepared.manifest_len);
+    CT_LOG_INFO("snapshot committed: seq={} last_applied={} live_pages={} written={} segdir_len={}", prepared.seq,
+                prepared.last_applied_slot, prepared.live_page_count, prepared.pages_written, prepared.segdir_len);
 }
 
 void Crowtree::acquire_snapshot_slot()
@@ -512,23 +657,31 @@ Status Crowtree::snapshot(uint64_t *out_last_applied)
             return s;
         }
     }
-    Status mw = opt_.page_store->write_at(prepared.manifest_write.addr, prepared.manifest_write.blob.data(),
-                                          prepared.manifest_write.blob.size());
-    if (!mw.ok()) {
-        release_snapshot_slot();
-        return mw;
+    for (auto &sw : prepared.segment_writes) {
+        Status s = opt_.page_store->write_at(sw.addr, sw.blob.data(), sw.blob.size());
+        if (!s.ok()) {
+            release_snapshot_slot();
+            return s;
+        }
     }
-    // Barrier: pages + manifest durable before the superblock that references them.
+    Status dw = opt_.page_store->write_at(prepared.directory_write.addr, prepared.directory_write.blob.data(),
+                                          prepared.directory_write.blob.size());
+    if (!dw.ok()) {
+        release_snapshot_slot();
+        return dw;
+    }
+    // Barrier: pages + segment images + directory durable before the anchor
+    // that references them.
     Status sync1 = opt_.page_store->sync();
     if (!sync1.ok()) {
         release_snapshot_slot();
         return sync1;
     }
-    Status sbw = opt_.page_store->write_at(prepared.superblock_write.addr, prepared.superblock_write.blob.data(),
-                                           prepared.superblock_write.blob.size());
-    if (!sbw.ok()) {
+    Status aw = opt_.page_store->write_at(prepared.anchor_write.addr, prepared.anchor_write.blob.data(),
+                                          prepared.anchor_write.blob.size());
+    if (!aw.ok()) {
         release_snapshot_slot();
-        return sbw;
+        return aw;
     }
     Status sync2 = opt_.page_store->sync();
     if (!sync2.ok()) {
@@ -609,25 +762,40 @@ void Crowtree::snapshot_write_next_async(std::shared_ptr<PreparedSnapshot> prepa
             });
         return;
     }
+    size_t seg_idx_in_list = idx - prepared->page_writes.size();
+    if (seg_idx_in_list < prepared->segment_writes.size()) {
+        const PreparedSegmentWrite &sw = prepared->segment_writes[seg_idx_in_list];
+        opt_.async_page_store->submit_write(
+            sw.addr, sw.blob.data(), sw.blob.size(), [this, prepared, idx, on_done](const Status &st) mutable {
+                if (!st.ok()) {
+                    release_snapshot_slot();
+                    on_done(st, 0);
+                    return;
+                }
+                snapshot_write_next_async(std::move(prepared), idx + 1, std::move(on_done));
+            });
+        return;
+    }
 
-    const PreparedSnapshotWrite &mw = prepared->manifest_write;
+    const PreparedSnapshotWrite &dw = prepared->directory_write;
     opt_.async_page_store->submit_write(
-        mw.addr, mw.blob.data(), mw.blob.size(), [this, prepared, on_done](const Status &st) mutable {
+        dw.addr, dw.blob.data(), dw.blob.size(), [this, prepared, on_done](const Status &st) mutable {
             if (!st.ok()) {
                 release_snapshot_slot();
                 on_done(st, 0);
                 return;
             }
-            // Barrier: pages + manifest durable before the superblock that references them.
+            // Barrier: pages + segment images + directory durable before the anchor
+            // that references them.
             Status fs1 = opt_.async_page_store->submit_fsync([this, prepared, on_done](const Status &st2) mutable {
                 if (!st2.ok()) {
                     release_snapshot_slot();
                     on_done(st2, 0);
                     return;
                 }
-                const PreparedSnapshotWrite &sbw = prepared->superblock_write;
+                const PreparedSnapshotWrite &aw = prepared->anchor_write;
                 opt_.async_page_store->submit_write(
-                    sbw.addr, sbw.blob.data(), sbw.blob.size(), [this, prepared, on_done](const Status &st3) mutable {
+                    aw.addr, aw.blob.data(), aw.blob.size(), [this, prepared, on_done](const Status &st3) mutable {
                         if (!st3.ok()) {
                             release_snapshot_slot();
                             on_done(st3, 0);
@@ -686,62 +854,77 @@ Status Crowtree::open(const Options &opt, std::unique_ptr<Crowtree> *out)
     auto tree                   = std::make_unique<Crowtree>(ctor_opt);
     tree->opt_.background_flush = opt.background_flush;
 
-    Superblock sb;
-    if (!read_best_superblock(*store, iu, &sb)) {
+    CommitAnchor anchor;
+    if (!read_best_anchor(*store, iu, &anchor)) {
         // No valid snapshot: fresh empty tree (already constructed).
-        CT_LOG_INFO("open: no committed superblock; starting empty");
+        CT_LOG_INFO("open: no committed anchor; starting empty");
         tree->start_background_flush_thread();
         *out = std::move(tree);
         return Status::Ok();
     }
+    if (anchor.segment_slots != MappingTable::kSegmentSize) {
+        return Status::corruption("open: anchor segment_slots does not match this build's MappingTable::kSegmentSize");
+    }
 
-    // Read + verify the manifest frame. The physical extent is IU-padded (PT9);
-    // read the rounded span but parse over the logical length.
-    std::vector<uint8_t> mbuf(round_up_to_iu(sb.manifest_len, iu));
-    Status               mr = store->read_at(sb.manifest_addr, mbuf.data(), mbuf.size());
-    if (!mr.ok()) {
-        return mr;
+    // Read + verify the segment directory. The physical extent is IU-padded
+    // (PT9); read the rounded span but parse over the logical length.
+    std::vector<uint8_t> dbuf(round_up_to_iu(anchor.segdir_len, iu));
+    Status               dr = store->read_at(anchor.segdir_addr, dbuf.data(), dbuf.size());
+    if (!dr.ok()) {
+        return dr;
     }
-    if (mbuf.size() < kPageFrameHeaderSize) {
-        return Status::corruption("manifest short");
+    if (crc32c(dbuf.data(), anchor.segdir_len) != anchor.segdir_crc) {
+        return Status::corruption("open: segment directory CRC mismatch");
     }
-    uint32_t mlen = get_u32(mbuf.data());
-    uint32_t mcrc = get_u32(mbuf.data() + 4);
-    if (kPageFrameHeaderSize + mlen > mbuf.size()) {
-        return Status::corruption("manifest len");
+    std::vector<DirEntry> entries;
+    Status                dds = decode_segment_directory(dbuf.data(), dbuf.size(), &entries);
+    if (!dds.ok()) {
+        return dds;
     }
-    const uint8_t *mbody = mbuf.data() + kPageFrameHeaderSize;
-    if (crc32c(mbody, mlen) != mcrc) {
-        return Status::corruption("manifest CRC");
-    }
-    uint64_t count = get_u64(mbody);
 
-    // Drop the freshly-built empty root before installing recovered tags. open() is
-    // single-threaded (the tree is not yet published), so free immediately.
+    // Drop the freshly-built empty root before installing recovered
+    // segments. open() is single-threaded (the tree is not yet published),
+    // so free immediately.
     tree->free_subtree(tree->root_page_id_.load(), /*retire=*/false);
 
-    // Lazy recovery: record page_id->(addr,len) tags only; base pages are
-    // demand-loaded (and CRC-checked) on first access via resident().
-    size_t pos = 8;
-    for (uint64_t i = 0; i < count; ++i) {
-        if (pos + 20 > mlen) {
-            return Status::corruption("manifest entry");
+    // Lazy recovery: install each segment's packed words verbatim (zero
+    // decode -- design's point: the mapping table IS the persistent
+    // structure). Base pages are demand-loaded (and CRC-checked) on first
+    // access via resident().
+    for (const DirEntry &e : entries) {
+        std::vector<uint8_t> ibuf(round_up_to_iu(e.image_len, iu));
+        Status               ir = store->read_at(e.image_addr, ibuf.data(), ibuf.size());
+        if (!ir.ok()) {
+            return ir;
         }
-        uint64_t page_id = get_u64(mbody + pos);
-        uint64_t addr    = get_u64(mbody + pos + 8);
-        uint32_t plen    = get_u32(mbody + pos + 16);
-        pos += 20;
-        tree->mapping_.store_unloaded(page_id, addr, plen);
+        SegmentImageHeader    hdr;
+        std::vector<uint64_t> words;
+        Status                ids = decode_segment_image(ibuf.data(), ibuf.size(), &hdr, &words);
+        if (!ids.ok()) {
+            return ids;
+        }
+        // Cross-check the directory's copy of this image's body CRC against
+        // what was actually read -- catches a directory entry pointing at
+        // the wrong/stale address (a self-consistent-but-different image
+        // would otherwise decode cleanly).
+        if (hdr.body_crc != e.image_crc) {
+            return Status::corruption("open: segment image CRC does not match its directory entry");
+        }
+        if (hdr.slot_count != MappingTable::kSegmentSize) {
+            return Status::corruption("open: segment image slot_count does not match kSegmentSize");
+        }
+        tree->mapping_.install_recovered_segment(e.seg_idx, hdr.generation, hdr.live_count, words, e.image_addr,
+                                                 e.image_len, e.image_crc);
     }
 
-    tree->mapping_.set_next_page_id(sb.next_page_id);
-    tree->root_page_id_.store(sb.root_page_id);
-    tree->last_applied_slot_.store(sb.last_applied_slot);
-    tree->contiguous_slot_.store(sb.last_applied_slot);
-    tree->version_.store(sb.snapshot_seq);
+    tree->mapping_.set_next_page_id(anchor.next_page_id);
+    tree->root_page_id_.store(anchor.root_page_id);
+    tree->last_applied_slot_.store(anchor.last_applied_slot);
+    tree->contiguous_slot_.store(anchor.last_applied_slot);
+    tree->version_.store(anchor.snapshot_seq);
 
-    CT_LOG_INFO("open: recovered seq={} last_applied={} root_pid={} pages={}", sb.snapshot_seq, sb.last_applied_slot,
-                sb.root_page_id, count);
+    CT_LOG_INFO("open: recovered seq={} last_applied={} root_pid={} segments={}", anchor.snapshot_seq,
+                anchor.last_applied_slot, anchor.root_page_id, entries.size());
     tree->start_background_flush_thread();
     *out = std::move(tree);
     return Status::Ok();

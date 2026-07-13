@@ -284,7 +284,7 @@ TEST(Stress, ConcurrentSnapshotViewDuringChurnNoCorruption)
     std::vector<std::thread> viewers;
     viewers.reserve(4);
     for (int r = 0; r < 4; ++r) {
-        viewers.emplace_back([&, r] {
+        viewers.emplace_back([&] {
             while (!stop.load(std::memory_order_relaxed) && !bad.load(std::memory_order_relaxed)) {
                 auto snap = t.snapshot_view();
                 if (snap == nullptr) {

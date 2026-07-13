@@ -1,5 +1,6 @@
 // CT12: page split & merge integration tests.
 #include "crowtree/crowtree.h"
+#include "crowtree/page_store.h"
 
 #include <gtest/gtest.h>
 
@@ -105,6 +106,53 @@ TEST(SplitMerge, MergeAndRootCollapse)
     }
     auto snap = t.snapshot_view();
     EXPECT_EQ(snap->size(), 2U);
+}
+
+// Regression (plan-tree #14c/#14d): a merged-away leaf/inner's own PID is
+// orphaned (its mapping slot never gets a replacement store()) -- see
+// Crowtree::retire_orphaned_page's doc comment. snapshot() discovers dirty
+// pages/segments by scanning every mapping-table slot directly (no
+// reachable-page tree walk), so a stale slot left pointing at a since-freed
+// page is a use-after-free the moment a merge-heavy tree gets snapshotted.
+TEST(SplitMerge, SnapshotSucceedsAfterHeavyMergeAndRootCollapse)
+{
+    MemPageStore store(1);
+    Options      opt;
+    opt.page_store       = &store;
+    opt.max_delta_len    = 0; // consolidate (and check merge) on every flush
+    opt.leaf_split_bytes = 200;
+    opt.leaf_merge_bytes = 60;
+    opt.inner_max_keys   = 4; // force inner splits/merges too, not just leaves
+    Crowtree t(opt);
+
+    const int N    = 200;
+    uint64_t  slot = 0;
+    for (int i = 0; i < N; ++i) {
+        ++slot;
+        ASSERT_TRUE(t.apply(slot, put_one(make_key(i), "payload" + std::to_string(i))).ok());
+        ASSERT_TRUE(t.flush().ok());
+    }
+    ASSERT_GT(t.height(), 1);
+
+    t.set_gc_watermark(1000000, 1000000);
+    for (int i = 2; i < N; ++i) {
+        ++slot;
+        ASSERT_TRUE(t.apply(slot, del_one(make_key(i))).ok());
+        ASSERT_TRUE(t.flush().ok());
+    }
+    EXPECT_GT(t.leaf_count(), 0U); // sanity: still a valid tree after the merge storm
+
+    ASSERT_TRUE(t.snapshot().ok());
+
+    std::unique_ptr<Crowtree> t2;
+    ASSERT_TRUE(Crowtree::open(opt, &t2).ok());
+    std::string v;
+    uint64_t    s;
+    EXPECT_TRUE(t2->get(Slice(make_key(0)), &s, &v));
+    EXPECT_TRUE(t2->get(Slice(make_key(1)), &s, &v));
+    for (int i = 2; i < N; ++i) {
+        EXPECT_FALSE(t2->get(Slice(make_key(i)), &s, &v)) << "should be deleted: " << make_key(i);
+    }
 }
 
 TEST(SplitMerge, LargeFlushSpanningLeavesSplitsMidFlush)

@@ -128,7 +128,14 @@ class EpochManager
     std::atomic<uint64_t>      global_epoch_{1};
     std::atomic<Participant *> participants_{nullptr}; // lock-free push list head
 
-    std::mutex           reclaim_mu_; // guards retired_ (writer side)
+    // Recursive: a retired object's deleter can legitimately trigger another
+    // retire() on this *same* EpochManager before this call's reclaim_locked()
+    // returns (e.g. retire_orphaned_page's deferred mapping_.clear() can, as
+    // its very last live slot empties, recycle the owning MappingSegment via
+    // recycle_segment_if_empty() -> epoch.retire_object(seg) -- crowtree.cpp/
+    // mapping_table.cpp share this one EpochManager). A plain mutex would
+    // deadlock on that same-thread re-entry.
+    std::recursive_mutex reclaim_mu_; // guards retired_ (writer side)
     std::vector<Retired> retired_;
 };
 

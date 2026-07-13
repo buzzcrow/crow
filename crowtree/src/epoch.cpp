@@ -72,18 +72,25 @@ EpochManager::EpochManager() : id_(g_epoch_mgr_id.fetch_add(1, std::memory_order
 EpochManager::~EpochManager()
 {
     // By destruction time no guards must remain. Free anything still pending, then
-    // free the participant nodes.
+    // free the participant nodes. Drain in a loop (not once): a deleter can
+    // retire something else on this same manager (see reclaim_locked()'s doc
+    // comment), which re-populates retired_ -- keep detaching+running until
+    // nothing's left, so a nested retirement's deleter still runs instead of
+    // being silently dropped.
     {
-        std::lock_guard<std::mutex> lk(reclaim_mu_);
-        for (auto &r : retired_) {
-            try {
-                r.deleter(r.ptr);
-            }
-            catch (...) { // NOLINT(bugprone-empty-catch)
-                // Destructors must not throw; swallow deleter exceptions.
+        std::lock_guard<std::recursive_mutex> lk(reclaim_mu_);
+        while (!retired_.empty()) {
+            std::vector<Retired> pending;
+            pending.swap(retired_);
+            for (auto &r : pending) {
+                try {
+                    r.deleter(r.ptr);
+                }
+                catch (...) { // NOLINT(bugprone-empty-catch)
+                    // Destructors must not throw; swallow deleter exceptions.
+                }
             }
         }
-        retired_.clear();
     }
     Participant *p = participants_.load(std::memory_order_acquire);
     while (p != nullptr) {
@@ -109,7 +116,7 @@ uint64_t EpochManager::min_active_epoch()
 
 void EpochManager::retire(void *ptr, Deleter deleter)
 {
-    std::lock_guard<std::mutex> lk(reclaim_mu_);
+    std::lock_guard<std::recursive_mutex> lk(reclaim_mu_);
     // New retirements belong to the current epoch; bump so a fresh guard entering
     // after this cannot claim to predate the retirement.
     retired_.push_back(
@@ -120,32 +127,42 @@ void EpochManager::retire(void *ptr, Deleter deleter)
 
 size_t EpochManager::reclaim_locked()
 {
-    uint64_t             min_active = min_active_epoch();
-    size_t               freed      = 0;
-    std::vector<Retired> keep;
-    keep.reserve(retired_.size());
-    for (auto &r : retired_) {
+    uint64_t min_active = min_active_epoch();
+    // Detach the current retired list *before* running any deleter: a
+    // deleter can legitimately call retire() again on this same manager
+    // (e.g. retire_orphaned_page's deferred mapping_.clear() recycling its
+    // now-empty MappingSegment via epoch.retire_object(seg)) -- reclaim_mu_
+    // being recursive lets that nested call proceed on the same thread, but
+    // it would still corrupt an in-progress `for (auto &r : retired_)` (the
+    // nested call's own push_back/swap reallocates or replaces the very
+    // vector this loop is iterating). Iterating a local, already-swapped-out
+    // copy instead means a nested call only ever touches `retired_` itself
+    // (empty at that point, plus whatever this loop has re-added so far),
+    // never this loop's iteration state.
+    std::vector<Retired> pending;
+    pending.swap(retired_);
+    size_t freed = 0;
+    for (auto &r : pending) {
         if (r.epoch < min_active) {
             r.deleter(r.ptr);
             ++freed;
         }
         else {
-            keep.push_back(std::move(r));
+            retired_.push_back(std::move(r));
         }
     }
-    retired_.swap(keep);
     return freed;
 }
 
 size_t EpochManager::try_reclaim()
 {
-    std::lock_guard<std::mutex> lk(reclaim_mu_);
+    std::lock_guard<std::recursive_mutex> lk(reclaim_mu_);
     return reclaim_locked();
 }
 
 size_t EpochManager::pending_retired()
 {
-    std::lock_guard<std::mutex> lk(reclaim_mu_);
+    std::lock_guard<std::recursive_mutex> lk(reclaim_mu_);
     return retired_.size();
 }
 

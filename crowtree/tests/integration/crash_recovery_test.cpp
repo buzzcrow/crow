@@ -41,6 +41,92 @@ std::string big_val(size_t n, char c)
 constexpr uint64_t kSbBytes = 4096;
 } // namespace
 
+// plan-tree #14e: FaultyPageStore-driven crash injection (declarative, in
+// place of hand-computed byte offsets). A write failing mid-snapshot must
+// leave the previous generation fully recoverable -- snapshot() itself
+// reports the failure, and no anchor for the failed generation is ever
+// written.
+TEST(CrashRecovery, FaultInjectedWriteFailureLeavesPreviousGenerationIntact)
+{
+    MemPageStore    mem(1);
+    FaultyPageStore store(&mem);
+    Options         opt;
+    opt.page_store = &store;
+
+    std::unique_ptr<Crowtree> t;
+    ASSERT_TRUE(Crowtree::open(opt, &t).ok());
+    for (int i = 0; i < 20; ++i) {
+        ASSERT_TRUE(t->apply(i + 1, put_one(make_key(i), "gen1-" + std::to_string(i))).ok());
+    }
+    ASSERT_TRUE(t->flush().ok());
+    ASSERT_TRUE(t->snapshot(nullptr).ok()); // gen1 commits
+
+    int gen1_writes = store.write_count();
+
+    for (int i = 0; i < 20; ++i) {
+        ASSERT_TRUE(t->apply(100 + i, put_one(make_key(i), "gen2-" + std::to_string(i))).ok());
+    }
+    t->force_advance_slot(119); // slots 100..119 are non-contiguous with gen1's 1..20
+    ASSERT_TRUE(t->flush().ok());
+    // Fail the very first byte this snapshot generation tries to write.
+    store.arm_write_fault(gen1_writes, FaultyPageStore::Fault::kFail);
+    EXPECT_FALSE(t->snapshot(nullptr).ok()); // gen2 must fail, not silently succeed
+
+    // gen2's anchor was never written -- gen1 is still the last committed
+    // generation. Reopen (fault already disarmed -- one-shot) and confirm.
+    std::unique_ptr<Crowtree> t2;
+    ASSERT_TRUE(Crowtree::open(opt, &t2).ok());
+    for (int i = 0; i < 20; ++i) {
+        std::string v;
+        uint64_t    s;
+        ASSERT_TRUE(t2->get(Slice(make_key(i)), &s, &v));
+        EXPECT_EQ(v, "gen1-" + std::to_string(i));
+    }
+}
+
+// A dirty mapping-table segment's image is silently lost (as if the write
+// never landed pre-crash) but every *later* write in this generation --
+// including the anchor itself -- still succeeds and commits normally. This
+// is the #14c/#14d-specific corruption class the design's own recovery spec
+// calls out: "a segment or directory image failing CRC while its anchor was
+// committed indicates media corruption -> fail the node out" (§9), as
+// opposed to the anchor itself being torn (already covered by the
+// byte-corruption tests above, and by construction unaffected by #14c/#14d
+// since the anchor keeps the same A/B slot geometry).
+TEST(CrashRecovery, DroppedSegmentImageFailsReopenEvenThoughAnchorCommitted)
+{
+    MemPageStore    mem(1);
+    FaultyPageStore store(&mem);
+    Options         opt;
+    opt.page_store = &store;
+
+    std::unique_ptr<Crowtree> t;
+    ASSERT_TRUE(Crowtree::open(opt, &t).ok());
+    for (int i = 0; i < 5; ++i) {
+        ASSERT_TRUE(t->apply(i + 1, put_one(make_key(i), "gen1-" + std::to_string(i))).ok());
+    }
+    ASSERT_TRUE(t->flush().ok());
+    ASSERT_TRUE(t->snapshot(nullptr).ok()); // gen1 commits; small tree -> exactly 1 segment
+
+    // A single-key edit (no split) dirties exactly one page and one segment;
+    // this generation's write sequence is [page write, segment write,
+    // directory write]. Drop write #1 (the segment image) specifically.
+    int      gen1_writes = store.write_count();
+    uint64_t slot        = 100;
+    ASSERT_TRUE(t->apply(slot, put_one(make_key(0), "gen2-updated")).ok());
+    t->force_advance_slot(slot); // slot 100 is non-contiguous with gen1's 1..5
+    ASSERT_TRUE(t->flush().ok());
+    store.arm_write_fault(gen1_writes + 1, FaultyPageStore::Fault::kDrop);
+    ASSERT_TRUE(t->snapshot(nullptr).ok()) << "the drop is silent -- snapshot() itself must still report success";
+    ASSERT_EQ(t->last_snapshot_segments_written(), 1U) << "expected exactly the touched segment to be re-imaged";
+
+    // The anchor now points at a segment image address whose bytes were
+    // never actually written -- reopen must detect this as corruption, not
+    // silently fall back or (worse) serve wrong data.
+    std::unique_ptr<Crowtree> t2;
+    EXPECT_FALSE(Crowtree::open(opt, &t2).ok());
+}
+
 // ckpt1 (large overflow values + compression) commits; a second snapshot then
 // commits new values; corrupting the newest superblock must fall back to ckpt1's
 // fully-intact image, including the multi-frame overflow values.
@@ -183,7 +269,7 @@ TEST(CrashRecovery, DemandLoadCorruptionLatched)
 TEST(CrashRecovery, FileTornSuperblockFallsBack)
 {
     std::array<char, 27> tmpl{"/tmp/crowtree_crash_XXXXXX"};
-    int  fd     = mkstemp(tmpl.data());
+    int                  fd = mkstemp(tmpl.data());
     ASSERT_GE(fd, 0);
     close(fd);
     std::string path(tmpl.data());

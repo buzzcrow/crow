@@ -5,6 +5,7 @@
 #include "crowtree/delta.h"
 #include "crowtree/descent.h"
 #include "crowtree/log.h"
+#include "crowtree/mapping_slot.h"
 #ifdef CROWTREE_HAVE_LIBURING
 #    include "crowtree/reactor.h"
 #endif
@@ -113,6 +114,10 @@ void collect_in_order(Resolve &&resolve, uint64_t root_page_id, uint64_t gc_floo
 Crowtree::Crowtree(Options opt) : opt_(std::move(opt))
 {
     pool_ = std::make_shared<BufferPool>(opt_.buffer_pool_bytes, opt_.frame_bytes, opt_.page_store);
+    // Segment recycling (#14b) hands emptied segments to the tree-owned epoch
+    // manager so a lock-free reader that already loaded a segment pointer
+    // keeps a valid one until its guard drains.
+    mapping_.set_epoch_manager(&epoch_);
     // Initialize with a single empty leaf as the root.
     uint64_t page_id = mapping_.allocate_page_id();
     mapping_.store(page_id, LeafBase::build({}, kInvalidPageId, pool_, opt_.frame_bytes));
@@ -185,50 +190,58 @@ void Crowtree::retire_page(PageBase *p)
     epoch_.retire_object(p);
 }
 
+void Crowtree::retire_orphaned_page(uint64_t page_id, PageBase *p)
+{
+    epoch_.retire(p, [this, page_id](void *ptr) {
+        mapping_.clear(page_id);
+        delete static_cast<PageBase *>(ptr);
+    });
+}
+
 PageBase *Crowtree::resident(uint64_t page_id) const
 {
-    PageBase *v = mapping_.get(page_id);
-    if (v == nullptr || !MappingTable::is_unloaded(v)) {
-        if (v != nullptr) {
+    uint64_t w = mapping_.get_word(page_id);
+    if (slot_word::is_empty(w) || !slot_word::is_unloaded(w)) {
+        if (slot_word::is_resident(w)) {
+            PageBase *v = slot_word::resident_ptr(w);
             // CLOCK-informed eviction ranking (plan-tree #17): stamp this
             // touch. Relaxed/relaxed: this is a recency *hint*, not a
             // synchronization point -- ordering across threads doesn't
             // matter, only that concurrent touches keep advancing the
             // stamp, which fetch_add guarantees without a lock.
             v->last_touch_tick.store(touch_tick_.fetch_add(1, std::memory_order_relaxed), std::memory_order_relaxed);
+            return v;
         }
-        return v; // hot path / unset
+        return nullptr; // hot path / unset
     }
     // Cold path: demand-load this base page (design §4.5). Serialized by
-    // load_mutex_; double-checked so only one loader installs. Lock-free readers
-    // never dereference the tagged descriptor without first taking this lock and
-    // re-reading the slot, so freeing it here is safe without epoch deferral.
+    // load_mutex_; double-checked so only one loader installs. The unloaded
+    // descriptor is inline in the slot word (no heap allocation), so there is
+    // no descriptor to free -- just re-read and check.
     std::lock_guard<std::mutex> lk(load_mutex_);
-    v = mapping_.get(page_id);
-    if (v == nullptr || !MappingTable::is_unloaded(v)) {
-        return v; // another loader won
+    w = mapping_.get_word(page_id);
+    if (slot_word::is_empty(w) || !slot_word::is_unloaded(w)) {
+        return slot_word::is_resident(w) ? slot_word::resident_ptr(w) : nullptr; // another loader won
     }
-    unloaded_page *u = MappingTable::as_unloaded(v);
-    // u->plen is the logical durable blob length (PT10). The physical extent is
-    // padded to the store IU (PT9), so read round_up_to_iu(plen, iu) for aligned
-    // media; the trailing padding is ignored by decode. The blob header records
+    uint32_t iu       = opt_.page_store->iu_size();
+    uint64_t addr     = slot_word::unloaded_iu_index(w) * iu;
+    uint32_t phys_len = slot_word::unloaded_iu_count(w) * iu;
+    // phys_len is the IU-padded physical extent (PT9). The blob header records
     // the raw frame length so we size the decoded frame without other state.
-    uint32_t             iu = opt_.page_store->iu_size();
-    std::vector<uint8_t> blob(round_up_to_iu(u->plen, iu));
-    Status               s = opt_.page_store->read_at(u->addr, blob.data(), blob.size());
+    std::vector<uint8_t> blob(phys_len);
+    Status               s = opt_.page_store->read_at(addr, blob.data(), blob.size());
     // A demand-load failure (I/O error or CRC mismatch) is a hard media fault for
     // a committed page; latch it so callers can detect it (the read still degrades
     // to a miss, since the lock-free path can't propagate a Status).
     if (!s.ok()) {
-        CT_LOG_ERROR("demand-load I/O fault: pid={} addr={} len={} status={}", page_id, u->addr, u->plen,
-                     s.to_string());
+        CT_LOG_ERROR("demand-load I/O fault: pid={} addr={} len={} status={}", page_id, addr, phys_len, s.to_string());
         io_failed_.store(true);
         return nullptr;
     }
-    return install_loaded_page(page_id, u->addr, u->plen, blob);
+    return install_loaded_page(page_id, addr, phys_len, blob);
 }
 
-PageBase *Crowtree::install_loaded_page(uint64_t page_id, uint64_t addr, uint32_t plen,
+PageBase *Crowtree::install_loaded_page(uint64_t page_id, uint64_t addr, uint32_t /*plen*/,
                                         const std::vector<uint8_t> &blob) const
 {
     uint32_t raw_len = durable_blob_raw_len(blob.data(), blob.size());
@@ -261,7 +274,11 @@ PageBase *Crowtree::install_loaded_page(uint64_t page_id, uint64_t addr, uint32_
     }
     page->page_id      = page_id;
     page->durable_addr = addr; // loaded from here -> clean (design §4.6)
-    page->durable_plen = plen; // keep on-disk extent (blob length) for re-tag
+    // durable_plen is the logical (unpadded) blob length, recovered from the
+    // blob header rather than the IU-padded physical extent `plen` (which is
+    // iu_count * iu from the packed slot word). This is what the manifest
+    // records and what store_unloaded re-tags.
+    page->durable_plen = durable_blob_logical_len(blob.data(), blob.size());
     page->last_touch_tick.store(touch_tick_.fetch_add(1, std::memory_order_relaxed), std::memory_order_relaxed);
     const_cast<MappingTable &>(mapping_).store(page_id, page); // publish resident
     return page;
@@ -269,12 +286,13 @@ PageBase *Crowtree::install_loaded_page(uint64_t page_id, uint64_t addr, uint32_
 
 void Crowtree::free_subtree(uint64_t page_id, bool retire)
 {
-    PageBase *head = mapping_.get(page_id);
+    uint64_t w = mapping_.get_word(page_id);
     // Skip unset and *unloaded* slots: an unloaded slot has no heap page to free
-    // (the descriptor is freed by ~MappingTable); its subtree was never loaded.
-    if (head == nullptr || MappingTable::is_unloaded(head)) {
+    // (the descriptor is inline in the word); its subtree was never loaded.
+    if (slot_word::is_empty(w) || slot_word::is_unloaded(w)) {
         return;
     }
+    PageBase *head = slot_word::resident_ptr(w);
     // Resolve to the base node to learn the page kind / children.
     PageBase *base = head;
     while (base != nullptr && base->type == page_type::kBatchDelta) {
@@ -307,7 +325,7 @@ void Crowtree::free_subtree(uint64_t page_id, bool retire)
         // "gone", then epoch-retire each node in the chain. A reader that already
         // loaded a node keeps using it under its guard; the frame is freed only once
         // that guard drains.
-        mapping_.store(page_id, nullptr);
+        mapping_.clear(page_id);
         PageBase *n = head;
         while (n != nullptr) {
             PageBase *next = n->next;
@@ -323,7 +341,7 @@ void Crowtree::free_subtree(uint64_t page_id, bool retire)
             delete n;
             n = next;
         }
-        mapping_.store(page_id, nullptr);
+        mapping_.clear(page_id);
     }
 }
 
@@ -336,10 +354,11 @@ size_t Crowtree::evict_clean_leaves_locked(size_t max_resident_leaves)
     // access recency below (plan-tree #17) instead of arbitrary DFS order.
     std::vector<std::pair<uint64_t, uint64_t>> evictable_ranked;
     std::function<void(uint64_t)>              dfs = [&](uint64_t page_id) {
-        PageBase *v = mapping_.get(page_id);
-        if (v == nullptr || MappingTable::is_unloaded(v)) {
+        uint64_t wv = mapping_.get_word(page_id);
+        if (slot_word::is_empty(wv) || slot_word::is_unloaded(wv)) {
             return;
         }
+        PageBase *v    = slot_word::resident_ptr(wv);
         PageBase *base = v;
         while (base != nullptr && base->type == page_type::kBatchDelta) {
             base = base->next;
@@ -355,8 +374,8 @@ size_t Crowtree::evict_clean_leaves_locked(size_t max_resident_leaves)
             return;
         }
         for (uint64_t c : static_cast<InnerBase *>(base)->children()) {
-            PageBase *cv = mapping_.get(c);
-            if (cv != nullptr && !MappingTable::is_unloaded(cv)) {
+            uint64_t cw = mapping_.get_word(c);
+            if (slot_word::is_resident(cw)) {
                 dfs(c);
             }
         }
@@ -376,10 +395,11 @@ size_t Crowtree::evict_clean_leaves_locked(size_t max_resident_leaves)
         if (evicted >= to_evict) {
             break;
         }
-        PageBase *v = mapping_.get(page_id); // re-check (belt-and-suspenders; we hold write_mutex_)
-        if (v == nullptr || MappingTable::is_unloaded(v)) {
+        uint64_t wv = mapping_.get_word(page_id); // re-check (belt-and-suspenders; we hold write_mutex_)
+        if (slot_word::is_empty(wv) || slot_word::is_unloaded(wv)) {
             continue;
         }
+        PageBase *v = slot_word::resident_ptr(wv);
         if (v->type != page_type::kLeafBase || v->durable_addr == kNoAddr) {
             continue;
         }
@@ -395,7 +415,7 @@ size_t Crowtree::evict_clean_leaves_locked(size_t max_resident_leaves)
         // Re-tag the slot unloaded, then epoch-retire the resident page. A reader
         // that already loaded `v` keeps using it under its guard (frame freed only
         // once that guard drains); a later reader sees the tag and demand-loads.
-        mapping_.store_unloaded(page_id, v->durable_addr, v->durable_plen);
+        mapping_.store_unloaded(page_id, v->durable_addr, v->durable_plen, opt_.page_store->iu_size());
         retire_page(v);
         ++evicted;
     }
@@ -515,15 +535,16 @@ GcStats Crowtree::collect_garbage()
     uint64_t                    gc = gc_floor_.load();
 
     std::function<void(uint64_t)> walk = [&](uint64_t page_id) {
-        // Peek without demand-loading (MappingTable::get, not resident()): only
-        // leaves are ever evicted, so a tagged-unloaded slot here means a cold
+        // Peek without demand-loading (mapping_.get_word, not resident()): only
+        // leaves are ever evicted, so an unloaded slot here means a cold
         // leaf. A periodic background sweep must not page it back in just to
         // check GC eligibility -- that would defeat eviction (#17). It becomes
         // eligible again next sweep after it's next touched/reloaded.
-        PageBase *head = mapping_.get(page_id);
-        if (head == nullptr || MappingTable::is_unloaded(head)) {
+        uint64_t w = mapping_.get_word(page_id);
+        if (slot_word::is_empty(w) || slot_word::is_unloaded(w)) {
             return;
         }
+        PageBase *head = slot_word::resident_ptr(w);
         PageBase *base = head;
         while (base != nullptr && base->type == page_type::kBatchDelta) {
             base = base->next;
@@ -1023,8 +1044,9 @@ void Crowtree::try_merge_leaf_locked(uint64_t leaf_page_id, const std::vector<ui
     bool parent_underfull = false;
     if (children.size() == 1 && parent_page_id == root_page_id_.load()) {
         // Root now has a single child: collapse the root one level down.
+        // `parent`'s own PID gets no replacement store() -- orphaned.
         root_page_id_.store(children[0]);
-        retire_page(parent);
+        retire_orphaned_page(parent_page_id, parent);
     }
     else {
         size_t parent_seps = seps.size();
@@ -1034,11 +1056,14 @@ void Crowtree::try_merge_leaf_locked(uint64_t leaf_page_id, const std::vector<ui
         parent_underfull = parent_page_id != root_page_id_.load() && parent_seps < inner_merge_keys();
     }
 
-    // 3. The leaf is now unreachable by new readers. retire its page (stragglers
-    //    holding an old parent are protected by their epoch guard). We do NOT null
-    //    its mapping slot or recycle the PID, to avoid a nullptr race window; the
-    //    PID is leaked (acceptable in v1). See plan implementation log.
-    retire_page(leaf);
+    // 3. The leaf is now unreachable by new readers. retire_orphaned_page
+    //    epoch-retires it (stragglers holding an old parent are protected by
+    //    their epoch guard) and clears its mapping slot once that's safe
+    //    (plan-tree #14b/mapping-table design §6) -- deferred, not
+    //    immediate, so it can never race a straggler still walking in via a
+    //    stale parent from before this retirement (see retire_orphaned_
+    //    page's doc comment). The PID itself is never recycled (D1).
+    retire_orphaned_page(leaf_page_id, leaf);
 
     // 4. Inner-node underflow: if the parent dropped below the merge threshold,
     //    merge it with its left sibling (recurses up, may collapse the root).
@@ -1115,8 +1140,10 @@ void Crowtree::try_merge_inner_locked(uint64_t inner_page_id, std::vector<uint64
 
     bool gp_underfull = false;
     if (gchildren.size() == 1 && gp_page_id == root_page_id_.load()) {
-        root_page_id_.store(gchildren[0]); // collapse the root one level down
-        retire_page(gp);
+        // Root now has a single child: collapse one level down. `gp`'s own
+        // PID gets no replacement store() -- orphaned.
+        root_page_id_.store(gchildren[0]);
+        retire_orphaned_page(gp_page_id, gp);
     }
     else {
         size_t gp_seps = gseps.size();
@@ -1126,10 +1153,12 @@ void Crowtree::try_merge_inner_locked(uint64_t inner_page_id, std::vector<uint64
         gp_underfull = gp_page_id != root_page_id_.load() && gp_seps < inner_merge_keys();
     }
 
-    // 3. The merged-away inner is unreachable by new readers; retire it (epoch-safe
-    //    for stragglers). Its children are now owned by merged-left, so retiring
-    //    this single page does not free them. PID not recycled (nullptr-race v1).
-    retire_page(inner);
+    // 3. The merged-away inner is unreachable by new readers; retire_orphaned_page
+    //    epoch-retires it (safe for stragglers) and clears its mapping slot once
+    //    that's safe (deferred, not immediate -- see that method's doc comment).
+    //    Its children are now owned by merged-left, so retiring this single page
+    //    does not free them. PID itself never recycled (D1).
+    retire_orphaned_page(inner_page_id, inner);
 
     // 4. Recurse: the grandparent may now be underfull.
     if (gp_underfull) {
@@ -1243,19 +1272,20 @@ bool Crowtree::try_get_view_no_load(Slice key, GetView *result, uint64_t *out_pe
     // L1: same descent as get_view(), but `probe` bails out (returning
     // nullptr, as if the slot were unset) the moment it sees an unloaded
     // slot, instead of demand-loading it -- recording *which* page_id via
-    // `blocked_page_id`. Never dereferences the unloaded_page* itself (see
-    // this method's doc comment on crowtree.h): only is_unloaded(), a plain
-    // tag-bit check on the pointer value, which needs no lock.
+    // `blocked_page_id`. Never unpacks the unloaded descriptor (see this
+    // method's doc comment on crowtree.h): only slot_word::is_unloaded(), a
+    // plain tag-bit check on the packed word, which needs no lock.
     uint64_t blocked_page_id = kInvalidPageId;
     auto     probe           = [this, &blocked_page_id](uint64_t p) -> PageBase               *{
-        PageBase *v = mapping_.get(p);
-        if (v == nullptr) {
+        uint64_t w = mapping_.get_word(p);
+        if (slot_word::is_empty(w)) {
             return nullptr;
         }
-        if (MappingTable::is_unloaded(v)) {
+        if (slot_word::is_unloaded(w)) {
             blocked_page_id = p;
             return nullptr;
         }
+        PageBase *v = slot_word::resident_ptr(w);
         v->last_touch_tick.store(touch_tick_.fetch_add(1, std::memory_order_relaxed), std::memory_order_relaxed);
         return v;
     };
@@ -1342,24 +1372,23 @@ void Crowtree::get_async_attempt(std::shared_ptr<std::string> key_owned, std::fu
 
 #ifdef CROWTREE_HAVE_LIBURING
     if (opt_.async_reactor != nullptr && opt_.async_page_store != nullptr) {
-        // Re-verify under load_mutex_ before touching the unloaded_page
-        // descriptor's fields (see try_get_view_no_load's doc comment on
-        // crowtree.h): it is freed by a plain `delete` the moment a
-        // concurrent loader installs the resident replacement, not by
-        // epoch-deferred reclamation, so it is unsafe to dereference
-        // without this lock -- mirrors resident()'s own double-checked
-        // locking exactly, just split across the async submission below.
+        // Re-verify under load_mutex_ before unpacking the unloaded
+        // descriptor from the slot word (see try_get_view_no_load's doc
+        // comment on crowtree.h): the word may be concurrently replaced by
+        // a loader installing the resident replacement, so re-read under
+        // the lock -- mirrors resident()'s own double-checked locking
+        // exactly, just split across the async submission below.
         uint64_t addr           = 0;
         uint32_t plen           = 0;
         bool     still_unloaded = false;
         {
             std::lock_guard<std::mutex> lk(load_mutex_);
-            PageBase                   *v = mapping_.get(pending_page_id);
-            if (v != nullptr && MappingTable::is_unloaded(v)) {
-                unloaded_page *u = MappingTable::as_unloaded(v);
-                addr             = u->addr;
-                plen             = u->plen;
-                still_unloaded   = true;
+            uint64_t                    w = mapping_.get_word(pending_page_id);
+            if (slot_word::is_unloaded(w)) {
+                uint32_t iu    = opt_.page_store->iu_size();
+                addr           = slot_word::unloaded_iu_index(w) * iu;
+                plen           = slot_word::unloaded_iu_count(w) * iu;
+                still_unloaded = true;
             }
         }
         if (!still_unloaded) {
@@ -1384,8 +1413,8 @@ void Crowtree::get_async_attempt(std::shared_ptr<std::string> key_owned, std::fu
                 bool installed_ok = true;
                 {
                     std::lock_guard<std::mutex> lk(load_mutex_);
-                    PageBase                   *v = mapping_.get(page_id);
-                    if (v != nullptr && MappingTable::is_unloaded(v)) {
+                    uint64_t                    w = mapping_.get_word(page_id);
+                    if (slot_word::is_unloaded(w)) {
                         installed_ok = install_loaded_page(page_id, addr, plen, *blob) != nullptr;
                     }
                     // else: another loader already installed it -- retry below.
@@ -1856,11 +1885,11 @@ void Crowtree::retire_overflow_chain_locked(uint64_t head_page_id)
         // order write_mutex_ -> load_mutex_ holds (caller holds write_mutex_).
         PageBase *p = resident(page_id);
         if (p == nullptr || p->type != page_type::kOverflowFrame) {
-            mapping_.store(page_id, nullptr); // free a stray descriptor if any
+            mapping_.clear(page_id); // clear a stray slot if any
             break;
         }
         uint64_t next = static_cast<OverflowBase *>(p)->next_page_id();
-        mapping_.store(page_id, nullptr); // unlink before retiring
+        mapping_.clear(page_id); // unlink before retiring
         retire_page(p);
         page_id = next;
     }
@@ -1870,18 +1899,19 @@ void Crowtree::evict_overflow_chain_locked(uint64_t head_page_id)
 {
     uint64_t page_id = head_page_id;
     for (int guard = 0; page_id != kInvalidPageId && guard < (1 << 24); ++guard) {
-        PageBase *p = mapping_.get(page_id);
+        uint64_t w = mapping_.get_word(page_id);
         // Stop at an already-unloaded link: chains evict whole, so the tail is
         // already unloaded (and not leaking). A dirty page (no durable addr) can't
         // be evicted; leave it resident.
-        if (p == nullptr || MappingTable::is_unloaded(p)) {
+        if (slot_word::is_empty(w) || slot_word::is_unloaded(w)) {
             break;
         }
+        PageBase *p = slot_word::resident_ptr(w);
         if (p->type != page_type::kOverflowFrame || p->durable_addr == kNoAddr) {
             break;
         }
         uint64_t next = static_cast<OverflowBase *>(p)->next_page_id();
-        mapping_.store_unloaded(page_id, p->durable_addr, p->durable_plen);
+        mapping_.store_unloaded(page_id, p->durable_addr, p->durable_plen, opt_.page_store->iu_size());
         retire_page(p);
         page_id = next;
     }
@@ -1891,16 +1921,17 @@ void Crowtree::free_overflow_chain(uint64_t head_page_id)
 {
     uint64_t page_id = head_page_id;
     for (int guard = 0; page_id != kInvalidPageId && guard < (1 << 24); ++guard) {
-        PageBase *p = mapping_.get(page_id);
-        if (p == nullptr || MappingTable::is_unloaded(p)) {
-            mapping_.store(page_id, nullptr); // free any unloaded descriptor
+        uint64_t w = mapping_.get_word(page_id);
+        if (slot_word::is_empty(w) || slot_word::is_unloaded(w)) {
+            mapping_.clear(page_id); // clear any unloaded descriptor
             break;
         }
+        PageBase *p = slot_word::resident_ptr(w);
         if (p->type != page_type::kOverflowFrame) {
             break;
         }
         uint64_t next = static_cast<OverflowBase *>(p)->next_page_id();
-        mapping_.store(page_id, nullptr);
+        mapping_.clear(page_id);
         delete p; // teardown / clear: no concurrent readers
         page_id = next;
     }

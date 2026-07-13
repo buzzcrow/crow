@@ -26,7 +26,7 @@ Batch del_one(const std::string &k)
 
 page_type head_type(Crowtree &t)
 {
-    return t.mapping().get(t.root_page_id())->type;
+    return t.mapping().get_resident(t.root_page_id())->type;
 }
 } // namespace
 
@@ -155,7 +155,7 @@ TEST(Gc, PeriodicSweepReclaimsInBackground)
     ASSERT_TRUE(t->apply(5, del_one("k1")).ok());
     ASSERT_TRUE(t->flush().ok());
     ASSERT_EQ(head_type(*t), page_type::kLeafBase);
-    PageBase *before = t->mapping().get(t->root_page_id());
+    PageBase *before = t->mapping().get_resident(t->root_page_id());
 
     t->set_gc_watermark(5, 5);
 
@@ -165,7 +165,7 @@ TEST(Gc, PeriodicSweepReclaimsInBackground)
     bool swept = false;
     for (int i = 0; i < 100 && !swept; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        swept = t->mapping().get(t->root_page_id()) != before;
+        swept = t->mapping().get_resident(t->root_page_id()) != before;
     }
     EXPECT_TRUE(swept) << "background GC thread never swept the stale tombstone";
 

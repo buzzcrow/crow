@@ -35,7 +35,21 @@ fi
 # Run clang-tidy (C++ lint)
 echo "Running clang-tidy..."
 if [ -d crowtree/build ]; then
-    pixi run clang-tidy crowtree/src/*.cpp -p crowtree/build 2>&1
+    # Mirror CMake's liburing gate: reactor.cpp and file_async_page_store.cpp require
+    # liburing headers; on macOS (and anywhere liburing is missing) they are excluded
+    # from the build, so clang-tidy must skip them too.
+    cpp_files=()
+    for f in crowtree/src/*.cpp; do
+        case "$f" in
+            */reactor.cpp | */file_async_page_store.cpp)
+                if [ -f /opt/homebrew/include/liburing.h ] || [ -f /usr/local/include/liburing.h ] || [ -f /usr/include/liburing.h ]; then
+                    cpp_files+=("$f")
+                fi
+                ;;
+            *) cpp_files+=("$f") ;;
+        esac
+    done
+    pixi run clang-tidy "${cpp_files[@]}" -p crowtree/build 2>&1
     if [ $? -ne 0 ]; then
         echo "❌ clang-tidy failed. Fix warnings before committing."
         exit 1

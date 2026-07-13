@@ -161,3 +161,85 @@ TEST(PageStore, BlockDeviceReadPastEndFails)
     EXPECT_FALSE(s->read_at(0, out.data(), out.size()).ok());
     std::remove(path.c_str());
 }
+
+// plan-tree #14e: FaultyPageStore fault-injection wrapper.
+TEST(FaultyPageStore, PassesThroughWithNoFaultArmed)
+{
+    MemPageStore    inner(1);
+    FaultyPageStore s(&inner);
+
+    std::vector<uint8_t> in{1, 2, 3, 4};
+    ASSERT_TRUE(s.write_at(0, in.data(), in.size()).ok());
+    ASSERT_TRUE(s.sync().ok());
+    std::vector<uint8_t> out(in.size(), 0);
+    ASSERT_TRUE(s.read_at(0, out.data(), out.size()).ok());
+    EXPECT_EQ(in, out);
+    EXPECT_EQ(s.write_count(), 1);
+    EXPECT_EQ(s.sync_count(), 1);
+}
+
+TEST(FaultyPageStore, DropWriteNeverReachesInner)
+{
+    MemPageStore    inner(1);
+    FaultyPageStore s(&inner);
+
+    std::vector<uint8_t> a{1, 2, 3};
+    ASSERT_TRUE(s.write_at(0, a.data(), a.size()).ok()); // write #0: unarmed, lands
+
+    s.arm_write_fault(1, FaultyPageStore::Fault::kDrop);
+    std::vector<uint8_t> b{9, 9, 9};
+    ASSERT_TRUE(s.write_at(0, b.data(), b.size()).ok()); // write #1: dropped, reports Ok anyway
+
+    std::vector<uint8_t> out(3, 0);
+    ASSERT_TRUE(inner.read_at(0, out.data(), out.size()).ok());
+    EXPECT_EQ(out, a) << "dropped write must never reach inner_";
+
+    // One-shot: a third write is unarmed again.
+    std::vector<uint8_t> c{5, 5, 5};
+    ASSERT_TRUE(s.write_at(0, c.data(), c.size()).ok());
+    ASSERT_TRUE(inner.read_at(0, out.data(), out.size()).ok());
+    EXPECT_EQ(out, c);
+}
+
+TEST(FaultyPageStore, TearWriteTruncatesToTearLen)
+{
+    MemPageStore    inner(1);
+    FaultyPageStore s(&inner);
+    inner.write_at(0, std::vector<uint8_t>(6, 0xAA).data(), 6); // pre-fill
+
+    s.arm_write_fault(0, FaultyPageStore::Fault::kTear, /*tear_len=*/3);
+    std::vector<uint8_t> in{1, 2, 3, 4, 5, 6};
+    ASSERT_TRUE(s.write_at(0, in.data(), in.size()).ok());
+
+    std::vector<uint8_t> out(6, 0);
+    ASSERT_TRUE(inner.read_at(0, out.data(), out.size()).ok());
+    EXPECT_EQ(out[0], 1);
+    EXPECT_EQ(out[1], 2);
+    EXPECT_EQ(out[2], 3);
+    // Bytes past tear_len keep whatever was there before (the pre-fill) --
+    // a torn write, not a truncated-then-zero-filled one.
+    EXPECT_EQ(out[3], 0xAA);
+    EXPECT_EQ(out[4], 0xAA);
+    EXPECT_EQ(out[5], 0xAA);
+}
+
+TEST(FaultyPageStore, FailWriteReturnsErrorWithoutTouchingInner)
+{
+    MemPageStore    inner(1);
+    FaultyPageStore s(&inner);
+    s.arm_write_fault(0, FaultyPageStore::Fault::kFail);
+
+    std::vector<uint8_t> in{1, 2, 3};
+    EXPECT_FALSE(s.write_at(0, in.data(), in.size()).ok());
+    EXPECT_EQ(inner.size(), 0U);
+}
+
+TEST(FaultyPageStore, FailSyncReturnsError)
+{
+    MemPageStore    inner(1);
+    FaultyPageStore s(&inner);
+    ASSERT_TRUE(s.sync().ok()); // sync #0: unarmed
+    s.arm_sync_fault(1, FaultyPageStore::Fault::kFail);
+    EXPECT_FALSE(s.sync().ok()); // sync #1: armed, fails
+    EXPECT_TRUE(s.sync().ok());  // sync #2: one-shot, back to normal
+}

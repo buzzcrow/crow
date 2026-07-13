@@ -168,14 +168,14 @@ struct PreparedSnapshotWrite
 // once the write actually lands (see prepare_snapshot_locked's doc comment
 // on why this can't happen eagerly at prepare time for the async path).
 // `page` is never dereferenced except as an opaque identity check under
-// write_mutex_ (mapping_.get(page_id) == page) -- it may have been retired
+// write_mutex_ (mapping_.get_resident(page_id) == page) -- it may have been retired
 // and its frame reused by the time the write completes (a concurrent
 // consolidate/flush/split replaced this page_id's mapping entry with a
 // fresh COW page in the meantime), in which case the identity check simply
 // fails and this write's durable-bookkeeping is skipped (harmless: the old
 // blob is still correctly on disk and referenced by *this* generation's
-// manifest; the fresh page is independently dirty and picked up by the
-// next snapshot).
+// segment image; the fresh page is independently dirty and picked up by
+// the next snapshot).
 struct PreparedPageWrite
 {
     uint64_t             page_id     = 0;
@@ -185,28 +185,50 @@ struct PreparedPageWrite
     std::vector<uint8_t> blob;            // already IU-padded
 };
 
+// A dirty MappingSegment's fresh image write, plus enough identity to
+// safely mark it durable at commit time (mirrors PreparedPageWrite's
+// identity-check pattern, extended with `seen_write_seq` -- see
+// MappingSegment's doc comment on why a segment needs a seq check, not just
+// a pointer identity check: unlike a page, whose whole *pointer* is
+// replaced on any change, a segment's pointer stays the same across a
+// slot mutation, so identity alone can't detect "written again during the
+// prepare-to-commit gap").
+struct PreparedSegmentWrite
+{
+    uint64_t             seg_idx        = 0;
+    MappingSegment      *seg            = nullptr; // opaque identity only
+    uint64_t             seen_write_seq = 0;
+    uint64_t             new_generation = 0;
+    uint64_t             addr           = 0;
+    uint32_t             logical_len    = 0; // unpadded
+    uint32_t             image_crc      = 0; // body-only CRC, matches the directory entry prepare wrote
+    std::vector<uint8_t> blob;               // already IU-padded
+};
+
 // Output of prepare_snapshot_locked(): every byte this snapshot generation
-// needs written, computed synchronously under write_mutex_ (the DFS walk +
-// delta-fold + page/manifest encode is CPU/memory-only -- see the "Lock
-// scope" note on plan-tree.md #11). The caller writes `page_writes` (any
-// order/concurrency) then `manifest_write`, then a durability barrier, then
-// `superblock_write` -- writing the superblock before that barrier would
-// violate the crash-safety invariant persist.cpp's header comment documents
-// (a crash mid-snapshot must fall back intact to the last *committed*
-// superblock) -- then commit_prepared_snapshot() to mark each page durable
-// and publish the new version.
+// needs written, computed synchronously under write_mutex_ (the segment
+// scan + delta-fold + page/segment-image/directory encode is CPU/memory-only
+// -- see the "Lock scope" note on plan-tree.md #11). The caller writes
+// `page_writes` and `segment_writes` (any order/concurrency) then
+// `directory_write`, then a durability barrier, then `anchor_write` --
+// writing the anchor before that barrier would violate the crash-safety
+// invariant persist.cpp's header comment documents (a crash mid-snapshot
+// must fall back intact to the last *committed* anchor) -- then
+// commit_prepared_snapshot() to mark each page/segment durable and publish
+// the new version.
 struct PreparedSnapshot
 {
-    std::vector<PreparedPageWrite> page_writes;
-    PreparedSnapshotWrite          manifest_write;
-    PreparedSnapshotWrite          superblock_write;
-    uint64_t                       last_applied_slot = 0;
+    std::vector<PreparedPageWrite>    page_writes;
+    std::vector<PreparedSegmentWrite> segment_writes;
+    PreparedSnapshotWrite             directory_write;
+    PreparedSnapshotWrite             anchor_write;
+    uint64_t                          last_applied_slot = 0;
     // Diagnostics for the "snapshot committed" log line (matches the
     // pre-refactor synchronous snapshot()'s log fields exactly).
-    uint64_t seq           = 0;
-    uint64_t page_count    = 0;
-    uint64_t pages_written = 0;
-    uint64_t manifest_len  = 0;
+    uint64_t seq             = 0;
+    uint64_t live_page_count = 0; // live slots across every present segment
+    uint64_t pages_written   = 0;
+    uint64_t segdir_len      = 0;
 };
 
 class Crowtree
@@ -222,10 +244,11 @@ class Crowtree
     // snapshot exists; otherwise start empty. Requires opt.page_store != null.
     static Status open(const Options &opt, std::unique_ptr<Crowtree> *out);
 
-    // Persist the materialized L1 state durably. Folds delta chains, appends the
-    // reachable base pages + a manifest past the current end of the page store,
-    // then commits the inactive A/B superblock slot. Returns the durable
-    // last_applied_slot via out (if non-null). Requires opt.page_store != null.
+    // Persist the materialized L1 state durably. Folds delta chains, writes
+    // dirty base pages plus a fresh image for each dirty mapping-table
+    // segment and the segment directory, then commits the inactive A/B
+    // anchor slot. Returns the durable last_applied_slot via out (if
+    // non-null). Requires opt.page_store != null.
     Status snapshot(uint64_t *out_last_applied = nullptr);
 
     // Async twin of snapshot() (plan-tree.md #11 Phase 2). Always genuinely
@@ -249,7 +272,7 @@ class Crowtree
     // not a general lock property -- an atomic has no such restriction):
     // it serializes this generation's SpaceAllocator against a *second*
     // overlapping snapshot(_async) call (which would otherwise rebuild an
-    // allocator from the same last-*committed* superblock and could hand
+    // allocator from the same last-*committed* anchor and could hand
     // out the same "free" byte range to two different pages -- silent
     // corruption), without blocking apply()/flush()/evict_clean_leaves(),
     // which remain free to run concurrently against write_mutex_ as usual.
@@ -464,6 +487,16 @@ class Crowtree
         return snapshot_pages_written_.load();
     }
 
+    // # of mapping-table segment images physically written by the most
+    // recent snapshot (plan-tree #14c/#14d: the rest were !is_dirty() and
+    // reused their existing image_addr/generation as-is). For
+    // incremental-snapshot tests -- the segment-level analogue of
+    // last_snapshot_pages_written().
+    [[nodiscard]] uint64_t last_snapshot_segments_written() const
+    {
+        return snapshot_segments_written_.load();
+    }
+
     // Evict clean, delta-free resident leaf bases down to at most
     // `max_resident_leaves`, re-tagging their slots unloaded and epoch-retiring the
     // pages (design §4.6); returns the number evicted. Safe against lock-free
@@ -549,6 +582,22 @@ class Crowtree
     void background_flush_loop();
 
     void retire_page(PageBase *p);
+    // Retire a page that becomes entirely unreachable by new readers with no
+    // replacement under its own PID (a merged-away leaf/inner, or a
+    // root-collapse's old root) -- as opposed to retire_page()'s usual
+    // "superseded by a fresh mapping_.store() under the same page_id"
+    // pattern, which needs no slot update at all. Clears `page_id`'s mapping
+    // slot to empty *inside the epoch deleter*, at the same deferred point
+    // `p` itself becomes safe to delete (plan-tree #14b/mapping-table design
+    // §6's "slot clearing runs in the epoch deleter") -- not immediately,
+    // which would race a straggler reader still walking in via a stale
+    // parent reference from before this retirement (see this method's call
+    // sites for the full argument on why the deferred point is race-free).
+    // Without this, the PID's slot keeps a dangling pointer once `p` is
+    // freed -- harmless for the old root-walk-based snapshot (which only
+    // ever visits tree-reachable PIDs) but a use-after-free for #14c/#14d's
+    // segment-scan-driven snapshot, which reads every slot directly.
+    void retire_orphaned_page(uint64_t page_id, PageBase *p);
     // Recursively drop a subtree. `retire=false` frees pages immediately (teardown
     // / no concurrent readers). `retire=true` epoch-retires each page and overflow
     // chain and clears its mapping slot, so a lock-free reader still holding a page
@@ -626,10 +675,10 @@ class Crowtree
     // this attempt is over) instead of demand-loading it, and reports which
     // page_id blocked via *out_pending_page_id. get_async's orchestration
     // (get_async_attempt) re-verifies that page_id under load_mutex_ before
-    // touching its unloaded_page descriptor -- see the safety note on
+    // touching its unloaded slot-word descriptor -- see the safety note on
     // get_async_attempt's definition (mirrors resident()'s double-checked
-    // lock; the descriptor is not epoch-protected, so it is never safe to
-    // dereference outside load_mutex_).
+    // lock; the descriptor is inline in the atomic word, not epoch-protected,
+    // so it is never safe to unpack outside load_mutex_).
     //
     // Returns true if the attempt fully resolved (found or definitively not
     // found) -- `*result` is populated exactly like get_view() would.
@@ -666,12 +715,13 @@ class Crowtree
     static GetView materialize_owned(GetView &&v);
 
     // Shared by snapshot() and snapshot_async() (persist.cpp, plan-tree.md
-    // #11 Phase 2): runs the exact DFS walk / delta-fold / page+manifest+
-    // superblock encode that snapshot() used to do inline, but defers every
-    // actual write into the returned *out instead of calling
-    // opt_.page_store->write_at() itself -- caller holds write_mutex_ for
-    // just this call, exactly like every other writer entry point (see
-    // snapshot_async's doc comment for the full lock-discipline rationale).
+    // #11 Phase 2, #14c/#14d): runs the segment scan / delta-fold /
+    // page+segment-image+directory+anchor encode that snapshot() used to do
+    // inline, but defers every actual write into the returned *out instead
+    // of calling opt_.page_store->write_at() itself -- caller holds
+    // write_mutex_ for just this call, exactly like every other writer
+    // entry point (see snapshot_async's doc comment for the full
+    // lock-discipline rationale).
     // Deliberately does *not* set PageBase::durable_addr for a dirty page
     // it persists (unlike the pre-refactor inline version): that would let
     // evict_clean_leaves_locked() -- which only takes write_mutex_, not
@@ -682,14 +732,13 @@ class Crowtree
     // specific write has actually landed.
     Status prepare_snapshot_locked(PreparedSnapshot *out);
 
-    // Marks every PreparedSnapshot::page_writes entry durable (see
-    // prepare_snapshot_locked's doc comment) and publishes the new version,
-    // once every byte of this generation is confirmed on disk (both
-    // snapshot() and snapshot_write_next_async() call this at that point,
-    // and only then). Re-resolves each page_id fresh under write_mutex_ and
-    // checks identity (mapping_.get(page_id) == PreparedPageWrite::page)
-    // before touching it -- see PreparedPageWrite's doc comment for why a
-    // mismatch (skip, not an error) is possible and safe.
+    // Marks every PreparedSnapshot::page_writes/segment_writes entry
+    // durable (see prepare_snapshot_locked's doc comment) and publishes the
+    // new version, once every byte of this generation is confirmed on disk.
+    // Re-resolves each page_id fresh under write_mutex_ and checks identity
+    // before touching it -- see PreparedPageWrite/PreparedSegmentWrite's
+    // doc comments for why a mismatch (skip, not an error) is possible and
+    // safe.
     void commit_prepared_snapshot(const PreparedSnapshot &prepared);
 
     // Cross-thread-safe (unlike write_mutex_) spin-gate serializing this
@@ -704,12 +753,13 @@ class Crowtree
     void release_snapshot_slot();
 
     // snapshot_async's write-and-commit chain: writes
-    // prepared->page_writes[idx..] one at a time (recursing on each
-    // completion), then the manifest, then a durability barrier, then the
-    // superblock, then a second barrier, then commit_prepared_snapshot() +
-    // release_snapshot_slot(), then fires on_done -- the exact sequence
-    // snapshot() runs inline, just each I/O step dispatched through
-    // opt_.async_page_store instead of blocking.
+    // prepared->page_writes[idx..] then prepared->segment_writes[idx..]
+    // one at a time (recursing on each completion), then the directory,
+    // then a durability barrier, then the anchor, then a second barrier,
+    // then commit_prepared_snapshot() + release_snapshot_slot(), then
+    // fires on_done -- the exact sequence snapshot() runs inline, just
+    // each I/O step dispatched through opt_.async_page_store instead of
+    // blocking.
     void snapshot_write_next_async(std::shared_ptr<PreparedSnapshot> prepared, size_t idx,
                                    std::function<void(Status, uint64_t last_applied)> on_done);
 
@@ -803,8 +853,9 @@ class Crowtree
     std::atomic<uint64_t>     last_applied_slot_{0};
     std::atomic<uint64_t>     version_{0};
     std::atomic<uint64_t>     gc_floor_{0};
-    std::atomic<uint64_t>     snapshot_pages_written_{0}; // pages written by last snapshot
-    mutable std::atomic<bool> io_failed_{false};          // latched demand-load media fault
+    std::atomic<uint64_t>     snapshot_pages_written_{0};    // pages written by last snapshot
+    std::atomic<uint64_t>     snapshot_segments_written_{0}; // segment images written by last snapshot
+    mutable std::atomic<bool> io_failed_{false};             // latched demand-load media fault
 
     // Logical clock for CLOCK-informed eviction ranking (plan-tree #17).
     // `resident()`'s hot path bumps this and stamps the touched page's own
