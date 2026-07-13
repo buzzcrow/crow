@@ -3,9 +3,9 @@
 Depends on: [`requirement.md`](requirement.md)
 Satisfies: all of [`requirement.md`](requirement.md) (this is the root design doc)
 
-This is the master design document. It establishes the conceptual model, module decomposition, and cross-cutting flows. Deep dives for the heavy areas live in sibling sub-topic docs (`design-parallel-slots.md`, `design-leader-election.md`, `design-wal.md`, `design-reconfiguration.md`, `design-state-machine.md`, `design-async-io.md`, `design-rpc.md`).
+This is the master design document. It establishes the conceptual model, module decomposition, and cross-cutting flows. Deep dives for the heavy areas live in sibling sub-topic docs (`design-slot.md`, `design-leader-election.md`, `design-wal.md`, `design-reconfiguration.md`, `design-state-machine.md`, `design-rpc.md`). Test strategy and layer scope definitions are in [`design-test.md`](design/design-test.md).
 
-The doc explains **what the system is** and **how it behaves**. It does not prescribe an implementation phasing (that lives in `plan.md`) and does not enumerate test scenarios.
+The doc explains **what the system is** and **how it behaves**. It does not enumerate test scenarios — see `design-test.md` for those.
 
 ## Table of Contents
 
@@ -37,8 +37,10 @@ The doc explains **what the system is** and **how it behaves**. It does not pres
   - [8.7 Storage Engine Plug-In](#87-storage-engine-plug-in)
 - [9. Failure Mode Catalogue](#9-failure-mode-catalogue)
 - [10. Observability Hooks](#10-observability-hooks)
-- [11. Open Design Questions](#11-open-design-questions)
-- [12. References](#12-references)
+- [11. Crate Layout](#11-crate-layout)
+- [12. Concurrency Model](#12-concurrency-model)
+- [13. Open Design Questions](#13-open-design-questions)
+- [14. References](#14-references)
 
 ---
 
@@ -50,9 +52,9 @@ CrowKV is engineered as **"Raft for everything that doesn't matter for performan
 - **Diverge from Raft only on the hot path.** A Raft leader cannot acknowledge slot N+1 until slot N has been committed; the log is contiguous by construction. Multi-Paxos lifts that constraint: each slot is an independent Paxos instance and may be decided in any order. Under load this is the difference between a sequential bottleneck and a fully pipelined commit path. We pay for it with extra complexity around gap repair and a slightly more conservative cross-key read frontier (see [§6.4](#64-scan-modes), [§8.2](#82-parallel-slot-pipelining)).
 - **Blind operations only.** `Put` and `Delete` do not depend on the current value, so out-of-order apply is safe. This is the enabling premise; it is why `CAS` and `Increment` are excluded ([requirement.md §5.2](requirement.md#52-operations)).
 - **Linearizability for the leader; explicit weaker modes for followers.** Clients that want strong reads pay for them; clients that want low-latency stale reads can opt in. The system never silently gives weaker semantics than the client asked for.
-- **Pluggable storage; persistent log is the source of truth.** The Acceptor's WAL is durable; the learner's btree is a derived projection. The engine can be swapped (in-memory, ordered file, crowtree) without changing consensus semantics.
+- **Pluggable storage; persistent log is the source of truth.** The Acceptor's WAL is durable; the learner's btree is a derived projection. The engine can be swapped (in-memory, crowtree) without changing consensus semantics.
 
-The literature backing each choice is collected in [§12 References](#12-references).
+The literature backing each choice is collected in [§14 References](#14-references).
 
 ---
 
@@ -104,14 +106,11 @@ The `crowkv` library is structured as a small set of cooperating modules. The se
 | **PxLocalReplica** | Local group member; plays acceptor and learner; owns slot list and learner storage. | Acceptor, Learner |
 | **PxRemoteReplica** | RPC proxy/connection utility for a group member on another physical node. | RPC |
 | **Replicator** | Streams `Accept` and `Chosen` messages from leader to peers; handles backpressure. | Proposer, Learner, RPC |
-| **Leader Elector** | Raft-style election; manages `PxTerm`; emits leader-change events. | RPC |
-| **Lease** | Holds and renews the leader lease used for fast linearizable reads; falls back to ReadIndex on demand. | Leader Elector |
+| **Leader Elector** | Raft-style election; manages `PxTerm`; emits leader-change events. Lease management is integrated here. | RPC |
 | **Repair** | Background async task that detects and resolves slot gaps via classic Paxos. | Proposer, Acceptor |
 | **Snapshot** | Takes per-group snapshots; serves snapshot install to lagging peers. | Storage Engine, WAL |
-| **Dedup Cache** | Per-`client_id` last-applied sequence; persisted in the log stream so it survives leader change. | Learner, Storage Engine |
-| **Storage Engine** | Pluggable trait. In-memory tree, ordered file, and crowtree backends share one interface. | Learner, Snapshot |
-| **Topology Client** | Caches cluster topology (via the HTTP management API's `/topology`) and the group→leader map; refreshed on `NotLeader`. | RPC, HTTP mgmt API |
-| **RPC** | Thin gRPC layer with retries and `NotLeader` handling. | (network) |
+| **Storage Engine** | Pluggable trait (`KVEngine`). In-memory (`InMemKV`) and crowtree (`CrowtreeEngine`) backends. | Learner, Snapshot |
+| **RPC** | gRPC layer: `PxReplicaService`, `KvStoreService`, `PxSnapshotService`. Client library with topology cache and `NotLeader` handling lives in `crowkv-client`. | (network) |
 
 Single-leader hot path on the leader: **Proposer → WAL → Replicator → Learner → ack to client.** All other modules support this path or recover from its failures.
 
@@ -128,10 +127,9 @@ A single durable record at one slot. Conceptually a tuple of:
 - `slot` — monotonically increasing, gap-free in *intent*, may temporarily have gaps in *resolution*.
 - `ballot` — the `(round, leader_id)` pair under which this value was accepted (Paxos Phase 2 semantics).
 - `term` — the leader's `PxTerm` at the time of proposal (used for fencing; see [§8.1](#81-leader-election)).
-- `kind` — one of `{ Write, NoOp, ConfigChange, DedupCheckpoint }`.
-- `payload` — for `Write`, the batch of `(key, op, value?)` tuples; for `NoOp`, empty (used to fill gaps); for `ConfigChange`, the new group membership; for `DedupCheckpoint`, a snapshot of the dedup cache.
-- `client_id` + `seq` — for `Write` only, used by the Dedup Cache.
-- `crc` — record-level checksum.
+- `payload` — `Bytes` buffer. Empty payload = `NoOp` (gap fill); non-empty = serialized batch of `(key, op, value?)` tuples. `ConfigChange` and `DedupCheckpoint` kinds are designed but not yet implemented.
+- `client_id` + `seq` — carried alongside `Write` entries at the RPC layer for dedup; not stored as fields on `PxLogEntry` itself.
+- `crc` — record-level checksum, added by the WAL codec (`WALRecord`), not on the in-memory `PxLogEntry`.
 
 ### 4.2 Ballot and Term
 
@@ -203,12 +201,12 @@ This is the hot path that the design optimizes. Multiple writes are in flight at
 
 Key properties:
 
-- **Slot assignment is the linearization point** ([requirement.md §6.1](requirement.md#61-write-guarantee)). The counter is owned by a single async task on the leader (serial assignment, no shared mutex); assignment happens before any I/O. See [`plan.md`](plan.md) §5 for the project-wide concurrency model.
+- **Slot assignment is the linearization point** ([requirement.md §6.1](requirement.md#61-write-guarantee)). The counter is owned by a single async task on the leader (serial assignment, no shared mutex); assignment happens before any I/O. See [§12 Concurrency Model](#12-concurrency-model) for the project-wide concurrency model.
 - **Ack contract**: the leader ack to the client requires (a) leader's own WAL durable flush completed and (b) a quorum of acceptors have responded `Accepted` after their durable flush. Until both, the leader does not respond.
 - **Parallelism**: slots N, N+1, N+2 may be in any of `Proposed` / `Accepted` / `Chosen` / `Applied` independently. The leader does not wait for slot N to apply before assigning N+1.
-- **Backpressure**: if the in-flight window is full, the leader admits to a bounded queue and beyond that returns `Busy` ([requirement.md §7.3](requirement.md#73-parallel-slot-processing)). The leader never blocks indefinitely.
+- **Backpressure**: if the in-flight window is full, the leader immediately returns `Busy` — a retryable error. No queuing; the client backs off and retries ([requirement.md §7.3](requirement.md#73-parallel-slot-processing)).
 
-The mechanics — sliding window, fanout, gap detection — are detailed in [`design-parallel-slots.md`](design/design-parallel-slots.md).
+The mechanics — sliding window, fanout, gap detection — are detailed in [`design-slot.md`](design/design-slot.md).
 
 ### 5.2 Cold-Start / New-Leader Write
 
@@ -233,7 +231,7 @@ This recovery step is bounded by the open-slot range, which is bounded by the pa
 
 ### 5.3 Batched Write
 
-A `BatchPut` / `BatchDelete` arrives as one client request. The proposer assigns it **one** slot. The payload carries multiple `(key, op, value?)` tuples. Intra-batch order is "as written by the client" ([requirement.md §7.3.1](requirement.md#731-correctness-analysis-for-parallel-slot-writes)). On apply, the learner walks the tuples in order and updates per-key `(slot, value)` for each.
+A `BatchPut` / `BatchDelete` arrives as one client request. The proposer assigns it **one** slot. The payload carries multiple `(key, op, value?)` tuples. Intra-batch order is "as written by the client" ([`design-slot.md` §13](design/design-slot.md#13-correctness-analysis-for-parallel-slot-writes-moved-from-requirementmd-731)). On apply, the learner walks the tuples in order and updates per-key `(slot, value)` for each.
 
 Batching is preferred for high-throughput clients; per-op overhead drops to a fraction of an unbatched write. The optimization is described in [requirement.md §12.2](requirement.md#122-batch-operations).
 
@@ -293,20 +291,20 @@ Details of lease and ReadIndex live in [`design-leader-election.md`](design/desi
 | `SafeSlot` | Any follower | Follower's applied slot ≥ group `safe-slot` | Bounded-stale, zero-wait analytics-style scans |
 | `AtSlot(N)` | Any replica with applied ≥ `N` | applied ≥ `N` | Repeating a previous snapshot read at the same logical instant |
 
-The linearizable mode uses the **leader's own** contiguous frontier, not the cross-learner safe-slot, because the leader's learner is always at-or-ahead of safe-slot. This is strictly faster than a safe-slot wait while preserving linearizability ([requirement.md §6.5](requirement.md#65-parallel-slot-linearizability-analysis)).
+The linearizable mode uses the **leader's own** contiguous frontier, not the cross-learner safe-slot, because the leader's learner is always at-or-ahead of safe-slot. This is strictly faster than a safe-slot wait while preserving linearizability ([`design-slot.md` §14](design/design-slot.md#14-parallel-slot-linearizability-analysis-moved-from-requirementmd-65)).
 
 ---
 
 ## 7. Cluster Bootstrap and Topology Management
 
-> **Decision record (2026-07, see `plan-client.md` §6 Issue 1):** this section originally described a self-hosted `Group-0` system group (bootstrapped from a static seed file, self-electing, and the source of truth for `num_groups`/partitioning/membership). That design was never implemented. The operator-managed HTTP model below is the accepted, implemented, and tested replacement; see [requirement.md §7.1](requirement.md#71-groups-and-cluster-topology) for the full rationale.
+> **Decision record (2026-07):** this section originally described a self-hosted `Group-0` system group (bootstrapped from a static seed file, self-electing, and the source of truth for `num_groups`/partitioning/membership). That design was never implemented. The operator-managed HTTP model below is the accepted, implemented, and tested replacement; see [requirement.md §7.1](requirement.md#71-groups-and-cluster-topology) for the full rationale.
 
 A fresh cluster bootstraps per-node, per-group, driven by an operator (or an orchestrator like `crowkv-console`) through each node's HTTP management API:
 
 1. Operator starts each `crowkv-server` process (`PxNode`) with its own `node_id`, listen endpoints, and a `--config-root` for persisted group configs.
 2. For each group the operator wants to create, it calls `POST /stores/:sid/groups` on every node that should host a member, supplying that group's membership. Each node persists the group's config to its own config file (`GroupConfigStore`) and starts that group's election driver once membership is wired.
 3. Each group elects its own leader independently (standard Raft-style election, see [§8.1](#81-leader-election)); the leader writes a `NoOp` at slot 1 to assert leadership.
-4. On restart, a node reloads each of its groups' persisted config files and resumes without the operator re-issuing the HTTP calls (see [requirement.md §15.2.3](requirement.md#1523-topology-wiring-workflow)).
+4. On restart, a node reloads each of its groups' persisted config files and resumes without the operator re-issuing the HTTP calls (see [`design/design-kv-server.md`](design/design-kv-server.md)).
 
 Steady-state client discovery:
 
@@ -342,13 +340,13 @@ The defining feature of CrowKV. Within a group:
 
 - A **sliding window** caps in-flight slots at a configurable size (default 16). Smaller windows reduce gap-repair work; larger windows raise throughput but worst-case latency.
 - The leader **pipelines** Phase-2 messages: it does not wait for slot N's `Accepted` quorum before fanning out slot N+1.
-- A **background repair async task** scans for stale undecided slots (e.g. older than a threshold or below a moving median) and runs classic Paxos to resolve them. If no acceptor has a value, the repair fills with a `NoOp`.
+- **Opportunistic gap repair** runs after each heartbeat round: the leader checks for the lowest gap and runs classic Paxos to resolve it. If no acceptor has a value, the repair fills with a `NoOp`.
 - The **safe-slot** is computed as `min(per-learner contiguous-applied)`; it is the cluster's no-gap frontier and the basis for follower read modes.
 - The leader's own **contiguous applied frontier** is maintained separately and used by `Scan(Linearizable)` because it is strictly ≥ safe-slot.
 
 Correctness rests on the blind-ops premise: out-of-order apply is safe when no operation reads before writing.
 
-→ Full design: [`design-parallel-slots.md`](design/design-parallel-slots.md).
+→ Full design: [`design-slot.md`](design/design-slot.md).
 
 ### 8.3 Durability and WAL
 
@@ -360,7 +358,7 @@ The Acceptor's WAL is the only persistent log. Properties:
 - **Ack contract**: an `Accepted` is sent only after that record's durable flush completes. A client write is acked only after a quorum of `Accepted`s ([requirement.md §8.1](requirement.md#81-wal-write-ahead-log)).
 - **Disk loss** → the node fails itself out of that group and rebuilds from peers via snapshot install.
 
-→ Full design: [`design-wal.md`](design/design-wal.md). The async disk-I/O substrate (io_uring + fallback) is specified in [`design-async-io.md`](design/design-async-io.md).
+→ Full design: [`design-wal.md`](design/design-wal.md). The async disk-I/O substrate (io_uring + fallback) is specified in [§12.1](#121-async-disk-io-substrate-moved-from-design-async-iomd).
 
 ### 8.4 Snapshot and Install
 
@@ -384,6 +382,8 @@ Membership changes use Raft-style **joint consensus** adapted to Paxos:
 
 Supported transitions: 3 ↔ 5 ↔ 7. Larger or smaller groups are not in scope.
 
+> **Implementation status:** The full joint-consensus state machine (`ConfigChange` log entries, both-quorum evaluation) is designed but not yet implemented. The current codebase supports a simpler model: new/far-lagging members start non-voting (`PxGroupMember.voting = false`), pull a snapshot plus the WAL tail via `learner_stream`, and are promoted to voting once caught up. See [`design-reconfiguration.md`](design/design-reconfiguration.md) for the full design.
+
 → Full design: [`design-reconfiguration.md`](design/design-reconfiguration.md).
 
 ### 8.6 Idempotency / Dedup Cache
@@ -391,14 +391,14 @@ Supported transitions: 3 ↔ 5 ↔ 7. Larger or smaller groups are not in scope.
 To make retries safe, the leader maintains a per-`client_id` dedup cache of last-applied `(seq, result)`. To survive leader change, the cache is **persisted into the log stream**:
 
 - Each `Write` log entry carries `(client_id, seq)`. On apply, the learner updates the in-memory dedup map.
-- Periodically (or on size threshold) the leader appends a `DedupCheckpoint` entry that snapshots the cache. After a leader change, the new leader rebuilds the cache by scanning back from the latest checkpoint.
+- `DedupCheckpoint` entries (periodic cache snapshots for fast rebuild after leader change) are designed but not yet implemented; the current cache is in-memory only.
 - Retention is bounded: at least *N* requests per active client and *T* seconds, evicted by LRU after that. Outside the window, retries are no longer guaranteed idempotent ([requirement.md §10.2](requirement.md#102-retry-and-idempotency)).
 
 This puts dedup state in the same fault domain as the data, so it cannot diverge.
 
 ### 8.7 Storage Engine Plug-In
 
-The Learner talks to a single engine trait. Three engines satisfy it: in-memory tree (testing), local ordered file (testing / debug), crowtree (production). The trait surface exposes:
+The Learner talks to a single engine trait (`KVEngine`). Two engines satisfy it: in-memory (`InMemKV`, for testing) and crowtree (`CrowtreeEngine`, for production). The trait surface exposes:
 
 - `apply(slot, batch)` — atomic apply of one batch with its slot.
 - `get(key) -> (slot, value)?` — point read with per-key resolved-slot.
@@ -461,7 +461,61 @@ The metric and log signals required by [requirement.md §13.2](requirement.md#13
 
 ---
 
-## 11. Open Design Questions
+## 11. Crate Layout
+
+```
+crowkv              (core library: consensus, engine, wal, rpc, cluster)
+crowkv-client       (client library: topology cache, retry, NotLeader handling)
+crowkv-server       (binary: CLI, HTTP mgmt API, store/group wiring)
+crowkv-console/shared  (console core: API client, models)
+crowkv-console/web     (Axum web server + React SPA)
+crowkv-console/cli     (CLI binary: crowkv command)
+crowtree/ffi        (C++ B+tree engine, FFI bridge to Rust)
+```
+
+Test infrastructure lives in `crowkv/tests/testkit/` (not a separate crate — a shared test-helper module used via `#[path]` in integration tests).
+
+---
+
+## 12. Concurrency Model
+
+All public and inter-module APIs are `async`. Runtime is `tokio` (single-threaded `current_thread` for unit tests; multi-threaded for production).
+
+**Rules:**
+1. No blocking calls in business-logic paths.
+2. Blocking syscalls (`fdatasync`, etc.) go through the project I/O facade (§12.1 below).
+3. No `std::sync::Mutex` in async paths; use `tokio::sync::{Mutex, RwLock, Notify, mpsc, oneshot}`.
+4. No `std::thread::sleep`; use `tokio::time::sleep`.
+5. Tests use `#[tokio::test(flavor = "current_thread", start_paused = true)]` for determinism.
+
+### 12.1 Async Disk I/O Substrate (moved from `design-async-io.md`)
+
+> **Moved 2026-07.** Originally a standalone sub-design; merged here because
+> async I/O is a thin cross-cutting facade, not a standalone subsystem.
+
+**What.** A single async facade (`AsyncFile`) for all local disk operations: `open`, `read_at`, `write_at`, `fsync`/`fdatasync`, `close`, plus `rename`/`unlink`/`read_dir`. All operations are `async fn` returning `io::Result<T>`. Lives in `io/mod.rs`.
+
+**Why.** Disk syscalls are blocking; business-logic paths must not block (rule 1). `tokio::task::spawn_blocking` works but adds a thread-pool hop per syscall and suffers tail latency under contention. io_uring eliminates the hop.
+
+**Selected backend.** `tokio-uring` on Linux ≥ 5.11; `tokio::fs` (`spawn_blocking`) fallback otherwise. Runtime detection at startup (kernel version + `io_uring_setup` probe + op availability). No compile-time `cfg` — same binary runs on both. Thread-per-core runtimes (`monoio`, `glommio`) were rejected because they conflict with the `tokio`/`tonic` stack.
+
+**Runtime topology.** One dedicated I/O thread running `tokio-uring`; all `AsyncFile` ops submitted via command channel. Per-disk topology (Topology B) deferred to V2 if benchmarks warrant.
+
+**Buffer ownership.** io_uring requires the kernel to hold buffers for the duration of the operation. `read_at` consumes `BufMut` (returned with result); `write_at` consumes `Buf`. All callers use this owned-buffer pattern even on the fallback backend — no `&[u8]` across `await`. Per-subsystem buffer pools (64 KiB for WAL, 1 MiB for snapshot); no global pool.
+
+**Error model.** All ops return `std::io::Result<T>`; callers cannot distinguish backend. EIO/ENOSPC bubble up to the WAL worker (see [`design-wal.md`](design/design-wal.md) §8.1). Cancellation on io_uring issues `IORING_OP_ASYNC_CANCEL`; buffer held until cancel completes.
+
+**Testing.** `testkit` provides `SimDisk` — an in-memory `BTreeMap` backend with failure injection (`set_full`, `inject_io_error`, `corrupt_at_offset`). Completes immediately for deterministic test scheduling under `start_paused = true`. Real io_uring used only in integration tests.
+
+**Open questions (all deferred to V2):**
+- Fixed buffer registration (`IORING_REGISTER_BUFFERS`) — measure first.
+- Direct I/O (`O_DIRECT`) — kernel page cache acceptable given we always `fdatasync` before ack.
+- SQE link chains (write→fsync in one submission) — measure first.
+- Per-disk topology B — revisit with multi-disk benchmarks.
+
+---
+
+## 13. Open Design Questions
 
 This section originally listed gaps left for the sub-topic docs to fill in. All
 of them have since been resolved there:
@@ -469,7 +523,7 @@ of them have since been resolved there:
 | Question | Resolved in |
 | --- | --- |
 | Exact lease duration formula | [`design-leader-election.md §6.3/§10`](design/design-leader-election.md#63-clock-skew-assumption) — `effective_lease = lease_duration - max_clock_skew`, with tuned defaults per deployment profile. |
-| Repair-task cadence and trigger heuristics | [`design-parallel-slots.md`](design/design-parallel-slots.md) — `gap_age_threshold` (200 ms), `gap_count_threshold` (0.5×window), `repair_tick` (50 ms), `max_concurrent_repairs` (4). |
+| Repair-task cadence and trigger heuristics | [`design-slot.md`](design/design-slot.md) §8 — opportunistic `repair_once()` after each heartbeat round; no separate repair task. |
 | WAL segment rotation policy | [`design-wal.md §3.4`](design/design-wal.md#34-segment-rotation) — size/slot-count triggers. |
 | Joint-consensus quorum overlap for asymmetric transitions (e.g. 3 → 5) | [`design-reconfiguration.md §8.3`](design/design-reconfiguration.md#83-asymmetric-transitions-and-open-question) — new members stay non-voting through catch-up in the joint phase. |
 | Compaction policy for the storage engine | [`design-state-machine.md §7`](design/design-state-machine.md#7-compaction-policy) — gated on `min(snapshot_slot, safe_slot)`. |
@@ -481,7 +535,7 @@ tracked in the relevant sub-topic doc directly rather than here.
 
 ---
 
-## 12. References
+## 14. References
 
 - Lamport, *The Part-Time Parliament* (1998); *Paxos Made Simple* (2001); *Paxos Made Live* with Chandra & Griesemer (2007). The classical and practical Paxos foundations.
 - Ongaro & Ousterhout, *In Search of an Understandable Consensus Algorithm (Raft)* (2014). Source of the leader election, lease, and joint-consensus reconfiguration patterns CrowKV reuses.

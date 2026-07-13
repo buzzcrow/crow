@@ -16,7 +16,6 @@ section. Open detailed docs only when the index row matches the task.
 ```
 doc_index.md            (table of contents for all docs below)
 requirement.md
-    ├── plan.md
     └── design/design-xxx.md
 ```
 
@@ -41,7 +40,7 @@ Do not leave empty or fully-completed TODO files in the repo.
 
 1. **Index first** — read `doc_index.md` before opening any other doc, and update it in the same commit when you add, rename, delete, or materially re-scope a doc (top-level or sub-design). Keep one row per doc, one line per `##` section.
 2. **No upstream violations** — fix `requirement.md` first if a gap is found.
-3. **Single source of truth** — requirements only in `requirement.md`, design in `design/design-xxx.md`, plans in `plan.md`.
+3. **Single source of truth** — requirements only in `requirement.md`, design in `design/design-xxx.md`.
 4. **Traceability** — every doc links upstream via section anchors.
 5. **Sub-topic split** — when a design topic exceeds ~200 lines or has independent phases, create `design/design-xxx.md` and add a row to `doc_index.md`.
 6. **TODO hygiene** — delete `todo_plan.md` when all tasks are complete (and remove from `doc_index.md`).

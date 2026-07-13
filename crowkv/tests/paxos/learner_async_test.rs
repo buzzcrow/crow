@@ -1,4 +1,4 @@
-//! Regression gate for `design-crowkv-async-kvengine.md` §6/§7's deferred
+//! Regression gate for `design-crowtree-engine.md` §4.5's deferred
 //! caller-side conversion: proves `PxLearner::engine_get` genuinely awaits
 //! through a real `KVFuture::Pending` end-to-end, not just that
 //! `CrowtreeEngine::get` constructs one in isolation

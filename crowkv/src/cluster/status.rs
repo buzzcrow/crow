@@ -89,8 +89,7 @@ pub struct KvStoreStatus {
     pub engine_healthy: bool,
     /// [`crate::kv::CrowtreeEngine::stats`] as of this call, or `None` for
     /// `InMemKV` (no comparable internals). Populated by downcasting
-    /// `PxLearner::engine()` via [`crate::kv::KVEngine::as_any`] --
-    /// doc/todo-sm.md Step 6.
+    /// `PxLearner::engine()` via [`crate::kv::KVEngine::as_any`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crowtree_stats: Option<CrowtreeStatsView>,
 }

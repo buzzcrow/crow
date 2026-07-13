@@ -140,7 +140,7 @@ fn file_snapshot_reopen_smoke() {
     }
 }
 
-// plan-tree #22: Options::backend = PageStoreBackend::Block selects
+// : Options::backend = PageStoreBackend::Block selects
 // BlockPageStore (O_DIRECT) instead of the default FilePageStore -- same
 // round-trip as file_snapshot_reopen_smoke above, just through the
 // raw-block-device backend.
@@ -252,7 +252,7 @@ async fn async_bridge_apply_get_snapshot() {
     assert_eq!(t.get(key(999)).await.unwrap(), None);
 }
 
-// Phase 3 (plan-tree.md #11): AsyncCrowtree::get/flush/snapshot now drive the
+// Phase 3 : AsyncCrowtree::get/flush/snapshot now drive the
 // engine's io_uring reactor directly (CtGetFuture/CtFlushFuture/
 // CtSnapshotFuture) -- no spawn_blocking. Regression guard for the whole
 // point of this phase: manually poll the returned future exactly once with a
@@ -344,8 +344,8 @@ async fn concurrent_async_gets_all_resolve_correctly() {
     }
 }
 
-// plan-tree.md #11 follow-up: AsyncCrowtree::scan mirrors async_get_fast_
-// path_completes_on_first_poll's regression shape for scan(), which also
+// follow-up: AsyncCrowtree::scan mirrors async_get_fast_
+// path_completes_on_first_poll's regression shape for scan, which also
 // has a resident-hit fast path (try_scan_no_load).
 #[tokio::test]
 async fn async_scan_fast_path_completes_on_first_poll() {
@@ -380,7 +380,7 @@ async fn async_scan_fast_path_completes_on_first_poll() {
     }
 }
 
-// Mirrors async_get_slow_path_completes_after_eviction for scan(): forcing
+// Mirrors async_get_slow_path_completes_after_eviction for scan: forcing
 // every leaf unloaded makes scan_async take the demand-load-miss retry loop
 // (scan_async_attempt) instead of resolving on the first poll, and it still
 // produces the full, correct result.
@@ -415,7 +415,7 @@ async fn async_scan_slow_path_completes_after_eviction() {
     assert!(got.is_empty());
 }
 
-// A limit smaller than the matching key count truncates, matching scan()'s
+// A limit smaller than the matching key count truncates, matching scan's
 // own synchronous semantics.
 #[tokio::test]
 async fn async_scan_respects_limit_and_truncated_flag() {

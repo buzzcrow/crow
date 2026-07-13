@@ -46,8 +46,8 @@ pub struct Cli {
     #[arg(long, default_value = "default", value_parser = ["default", "test"])]
     pub election_profile: String,
 
-    /// KV storage engine backing each group's learner. `crowtree` (default,
-    /// `doc/todo-sm.md` Step 5) durably persists each group's state to its
+    /// KV storage engine backing each group's learner. `crowtree` (default)
+    /// durably persists each group's state to its
     /// own file under `--data-root` (recovered by replaying the WAL through
     /// it on every restart — see `PxLocalReplica::restore_from_replay_with_engine`);
     /// `memory` is the in-memory, non-durable `InMemKV`, kept available as
@@ -63,7 +63,7 @@ pub struct Cli {
     /// Durable backend for the crowtree engine (only used when `--kv-engine
     /// crowtree`). `file` (default) is buffered file I/O; `block` opens
     /// `data_root`'s per-group file with `O_DIRECT` via `BlockPageStore`
-    /// (plan-tree #22) for a real SSD/SCM deployment target.
+    /// for a real SSD/SCM deployment target.
     #[arg(long, default_value = "file", value_parser = ["file", "block"])]
     pub kv_backend: String,
 }

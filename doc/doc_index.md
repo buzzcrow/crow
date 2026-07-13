@@ -8,17 +8,11 @@ doc only when a task touches a topic in its row. Line counts are approximate
 
 | Doc | Lines | When to read |
 | --- | ---: | --- |
-| `requirement.md` | ~900 | Source of truth for what must be built. Any feature gap → fix here first. UI requirements live in §15.4.6. |
-| `design.md` | ~490 | Master design: cross-cutting architecture, write/read flows, module decomposition. Read for scope-spanning questions. |
-| `plan.md` | ~190 | Phases (P1–P5), milestones, dependency order, decision log. Read before picking a task. |
-| `test.md` | ~200 | Test strategy, layer scope definitions, high-level coverage per layer, and feature-dependent test gaps. Read when designing tests or deciding where a test belongs. |
+| `requirement.md` | ~600 | Source of truth for what must be built. Any feature gap → fix here first. Design-level detail (linearizability proof, CLI tree, Web UI spec, server API) has been moved to sub-design docs; pointers remain in-place. |
+| `design.md` | ~560 | Master design: cross-cutting architecture, write/read flows, module decomposition, crate layout, concurrency model (§12) with async disk I/O substrate (§12.1, merged from design-async-io.md). Read for scope-spanning questions. |
 | `plan-test.md` | ~30 | Unfinished test task backlog with checkboxes. Read when picking the next test to implement. |
 | `procedures.md` | ~450 | Operator-facing procedures for a standard CrowKV cluster: bootstrap, rolling upgrade, node replacement, replica add/remove, quorum-loss handling, health checks, backup, full API reference. Uses `crowkv-server` and the console HTTP API as examples. |
 | `todo_code.md` | ~50 | Forward-looking code-level TODO backlog (open implementation items, blocked/deferred work with rationale). Read before picking up crowtree/crowkv follow-up work. |
-
-Web UI requirements now live in `requirement.md` §15.4.6 (single-page embeddable
-console, two hierarchy views, functional surface mapped to the `crowkv-web` API,
-embedded Swagger, V2 deferral list).
 
 ## `requirement.md` Sections
 
@@ -54,41 +48,47 @@ embedded Swagger, V2 deferral list).
 | 8 | Cross-Cutting Topics |
 | 9 | Failure Mode Catalogue |
 | 10 | Observability Hooks |
-| 11 | Open Design Questions |
-| 12 | References |
-
-## `plan.md` Sections
-
-| § | Topic |
-| --- | --- |
-| 1 | Phase Overview |
-| 2 | Cross-Stream Dependencies |
-| 3 | Global Milestones |
-| 4 | Test Pairing Rule |
-| 5 | Concurrency Model |
-| 6 | Decision Log |
+| 11 | Crate Layout |
+| 12 | Concurrency Model |
+| 13 | Open Design Questions |
+| 14 | References |
 
 ## Sub-Designs (`design/design-xxx.md`)
 
+Grouped by topic area. Open the most specific doc for the task at hand.
+
+### Consensus
+
 | Doc | Lines | Read when working on |
 | --- | ---: | --- |
-| `design/design-async-io.md` | ~200 | Async disk I/O backend (`tokio-uring`, `spawn_blocking` fallback), buffer mgmt, runtime topology. |
-| `design/design-console.md` | ~715 | `crowkv-console` design: shared core crate, web (Axum + React) and CLI (`clap`) frontends, two-hierarchy API (physical `/api/racks`,`/api/nodes` vs. logical `/api/stores`), monitor task, SSH lifecycle, Swagger UI hosting. |
-| `design/design-crowkv-async-kvengine.md` | ~85 | Rust-side `KVEngine` trait async shape: `KVFuture<T>` (zero-alloc `Ready` / boxed `Pending`), the `dyn KVEngine` vs. native-`async-fn` tension and why `async-trait` was rejected, caller-side wiring (`PxLearner`, `PxKvStore`). Implemented; kept as rationale record. |
-| `design/design-crowtree.md` | ~240 | crowtree overview: goals/non-goals, architecture, `KVEngine`/`EngineView` abstraction, out-of-order apply + two-GC model, FFI boundary, sub-doc map, full decision log (D1-D19). Read first for storage-engine work. |
-| `design/design-crowtree-engine.md` | ~330 | crowtree in-memory engine: slot cell, pages/delta records, write path (apply→delta→consolidate→split/merge), versioned root (`RootVersion`), tree-owned lock-free epoch reclamation, read path, concurrency invariants; the `buffer` memory-ownership model (owned/borrowed, SBO, zero-copy write/read pipelines); the io_uring async FFI bridge (reactor, `ct_future`, fast/slow path). |
-| `design/design-crowtree-storage.md` | ~350 | crowtree durable storage: `PageStore` (file/block/RDMA), zero-copy slotted frame format, buffer pool (frame arena, CLOCK eviction, epoch-safe reuse), internal-WAL decision, snapshot pipeline + recovery + export/import, mapping table (PID indirection, segment persistence/recycling), GC watermarks + consensus-WAL GC coupling, new-member install. |
-| `design/design-crowtree-test.md` | ~150 | crowtree test strategy: layers (C++ unit/integration, crash/recovery, Rust FFI, cross-engine parity, sanitizer), cases, benchmarks, tooling. |
-| `design/design-kv-server.md` | ~350 | `crowkv-server` binary: CLI, HTTP management API, store/group/replica wiring, topology export, lifecycle. |
 | `design/design-leader-election.md` | ~330 | Term/ballot bridge, election protocol, new-leader bulk Phase 1, heartbeats, leader lease, ReadIndex, step-down. |
-| `design/design-parallel-slots.md` | ~325 | Parallel slot pipelining, sliding window, gap detection / repair, safe-slot, per-key resolved-slot. |
-| `design/design-paxos-error.md` | ~55 | Paxos error categories, retry rules, RPC mapping. |
+| `design/design-slot.md` | ~470 | Parallel slot pipelining (§1–§14): sliding window, gap detection/repair, safe-slot, per-key resolved-slot, correctness analysis, linearizability proof. Concurrent sparse slot list (§15–§22): `SlotList<T>`, chunk layout, trim/GC, reclamation. |
+| `design/design-rpc.md` | ~330 | Wire protocol: classic Paxos messages, LearnerStream bidi stream (frames, flow control, parallelism), PxService, Rust mapping, Paxos error model (§8). Cluster discovery is HTTP, not gRPC. |
 | `design/design-reconfiguration.md` | ~310 | Direct per-node mutation model, member add/remove, leader transfer, `membership_epoch` fence, safety argument, design history. |
-| `design/design-rpc.md` | ~265 | Wire protocol: classic Paxos messages, PeerStream bidi stream (frames, flow control, parallelism), PxService, Rust mapping. Cluster discovery is HTTP (`plan-client.md`), not gRPC. |
-| `design/design-slot.md` | ~650 | `PxSlotList` / `PxSlotNode`: chunk layout, insert/get/trim, reclamation, performance model, future evolution. |
 | `design/design-state-machine.md` | ~310 | Storage plug-in: per-key slot tracking, apply semantics, snapshot, compaction, compare, engine impls. |
-| `design/design-ui.md` | ~270 | Web UI design (v1 lean rewrite): 3-pane shell, two hierarchy views, slim React Flow canvas, inspector (Details/KV/Activity), embedded Swagger, minimal embedding contract. |
+
+### Storage
+
+| Doc | Lines | Read when working on |
+| --- | ---: | --- |
 | `design/design-wal.md` | ~470 | Write-ahead log: multi-disk segments, backend-neutral durable flush, ack contract, replay/restore/recovery, GC, disk loss. |
+| `design/design-crowtree.md` | ~240 | crowtree overview: goals/non-goals, architecture, `KVEngine`/`EngineView` abstraction, out-of-order apply + two-GC model, FFI boundary, sub-doc map, full decision log (D1-D19). Read first for storage-engine work. |
+| `design/design-crowtree-engine.md` | ~635 | crowtree in-memory engine: slot cell, pages/delta records, write path (apply→delta→consolidate→split/merge), versioned root (`RootVersion`), tree-owned lock-free epoch reclamation, read path, concurrency invariants; the `buffer` memory-ownership model (owned/borrowed, SBO, zero-copy write/read pipelines); the io_uring async FFI bridge (reactor, `ct_future`, fast/slow path); Rust-side `KVEngine` async trait shape (`KVFuture<T>`, §4). |
+| `design/design-crowtree-storage.md` | ~350 | crowtree durable storage: `PageStore` (file/block/RDMA), zero-copy slotted frame format, buffer pool (frame arena, CLOCK eviction, epoch-safe reuse), internal-WAL decision, snapshot pipeline + recovery + export/import, mapping table (PID indirection, segment persistence/recycling), GC watermarks + consensus-WAL GC coupling, new-member install. |
+
+### Operations / UI
+
+| Doc | Lines | Read when working on |
+| --- | ---: | --- |
+| `design/design-console.md` | ~830 | `crowkv-console` design: shared core crate, web (Axum + React) and CLI (`clap`) frontends, two-hierarchy API (physical `/api/racks`,`/api/nodes` vs. logical `/api/stores`), monitor task, SSH lifecycle, Swagger UI hosting; CLI command hierarchy (§12, moved from requirement.md). |
+| `design/design-ui.md` | ~390 | Web UI design (v1 lean rewrite): 3-pane shell, two hierarchy views, slim React Flow canvas, inspector (Details/KV/Activity), embedded Swagger, minimal embedding contract; Web UI requirements spec (§13, moved from requirement.md). |
+| `design/design-kv-server.md` | ~350 | `crowkv-server` binary: CLI, HTTP management API, store/group/replica wiring, topology export, lifecycle. |
+
+### Cross-Cutting
+
+| Doc | Lines | Read when working on |
+| --- | ---: | --- |
+| `design/design-test.md` | ~320 | Test strategy, layer scope definitions, high-level coverage per layer, crowtree C++ test layers, feature-dependent test gaps. Read when designing tests or deciding where a test belongs. |
 
 ## How AI Should Use This Index
 

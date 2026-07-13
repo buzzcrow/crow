@@ -1,4 +1,4 @@
-//! Group durable-snapshot-watermark computation (plan-tree #20): the
+//! Group durable-snapshot-watermark computation: the
 //! published `group_snapshot_slot` is `min(local WalEngine::snapshot_slot,
 //! max(voting peer durable_snapshot_slot))` -- "durable on the leader plus
 //! at least one peer" (`design-crowtree-snapshot-gc.md` §1
@@ -24,8 +24,8 @@ fn sim_backend() -> Arc<IoBackend> {
     Arc::new(IoBackend::BlockDevice(BlockDevice::new()))
 }
 
-/// A minimal real `WalEngine`, just so `PxLocalReplica::wal()` is `Some` and
-/// `WalEngine::snapshot_slot()`'s getter/setter (plain atomics) are
+/// A minimal real `WalEngine`, just so `PxLocalReplica::wal` is `Some` and
+/// `WalEngine::snapshot_slot`'s getter/setter (plain atomics) are
 /// exercised for real, matching what `group_maintenance::run_pass` writes
 /// to in production -- no segments/replay needed for this test.
 async fn wal_with_snapshot_slot(replica_id: u64, slot: u64) -> Arc<WalEngine> {
@@ -57,7 +57,7 @@ async fn group_snapshot_slot_is_zero_without_a_local_wal() {
 async fn group_snapshot_slot_is_min_of_local_and_max_peer_durable() {
     // Local WAL durably caught up through slot 5, attached before the
     // replica is wrapped in a group (`set_wal` needs `&mut PxLocalReplica`;
-    // `PxGroup::local_replica()` only ever hands out `&PxLocalReplica`).
+    // `PxGroup::local_replica` only ever hands out `&PxLocalReplica`).
     let mut local = PxLocalReplica::new(1, PxLocalReplicaRole::Leader);
     local.set_wal(wal_with_snapshot_slot(1, 5).await);
     let mut group = PxGroup::new(1, local);

@@ -8,15 +8,11 @@ use super::Batch;
 /// `apply`/`get`/`scan` return [`KVFuture`] rather than their value directly:
 /// the common case (in-memory hit / no I/O) resolves immediately at zero
 /// cost via [`KVFuture::ready`], while a genuine I/O path (crowtree
-/// demand-load miss, via the `io_uring` reactor — `design-crowtree-engine.md
-/// §3`) returns a real `Pending` future. [`super::CrowtreeEngine::get`] and
+/// demand-load miss, via the `io_uring` reactor) returns a real `Pending` future. [`super::CrowtreeEngine::get`] and
 /// [`super::CrowtreeEngine::scan`] both construct `Pending` for a genuine
 /// cold-leaf miss (via `crowtree_ffi::AsyncCrowtree::try_get`/`try_scan`);
 /// `InMemKV` and `CrowtreeEngine::apply` always resolve `Ready` (no
-/// `ct_apply_*_async` C API exists yet). See
-/// `doc/design/design-crowkv-async-kvengine.md` for the full design
-/// rationale (the `dyn`-compatibility tension that led to this shape) and
-/// migration history.
+/// `ct_apply_*_async` C API exists yet).
 pub trait KVEngine: Send + Sync {
     /// Apply `batch` at `slot`. Atomic to readers and idempotent: an op for
     /// key `k` is skipped when `slot <= resolved_slot(k)`. The last occurrence
@@ -28,7 +24,7 @@ pub trait KVEngine: Send + Sync {
     /// Paxos-chosen even on an `Err` here -- this reports a *local* apply/
     /// durability failure, not a consensus outcome, so callers must not
     /// treat it as "not applied" for consensus purposes. `InMemKV` has no
-    /// I/O path and always returns `Ok(())`.
+    /// I/O path and always returns `Ok()`.
     fn apply(&self, slot: u64, batch: &Batch) -> KVFuture<Result<(), String>>;
 
     /// Live value and its resolved slot, or `None` if unset or tombstoned.
@@ -54,7 +50,7 @@ pub trait KVEngine: Send + Sync {
     /// `&dyn KVEngine` (e.g. `PxLearner::engine`) recover the concrete
     /// engine type for an operation deliberately kept off this trait
     /// because it's meaningful for only one engine kind -- e.g.
-    /// [`super::CrowtreeEngine::stats`] (doc/todo-sm.md Step 6): `InMemKV`
+    /// [`super::CrowtreeEngine::stats`]: `InMemKV`
     /// has no comparable internals, so putting `stats` on the trait itself
     /// would mean a dummy/`Option`-wrapped implementation for it, the same
     /// reasoning that already keeps [`super::CrowtreeEngine::handle`] off
@@ -67,15 +63,14 @@ pub trait KVEngine: Send + Sync {
     /// caller): this reflects a *latched* fault condition a caller can poll
     /// independently of any particular operation, e.g. to decide whether
     /// this replica should be failed out of its group -- the same fail-out
-    /// semantics `doc/design/design-wal.md §8.1` specifies for a WAL disk
-    /// failure, extended here to an engine-level fault (note: as of this
-    /// writing there is no automatic step-out trigger wired to *either*
-    /// signal yet, only the manual admin remove-replica path; see
-    /// `doc/todo-sm.md` G2).
+    /// semantics specified for a WAL disk failure, extended here to an
+    /// engine-level fault (note: as of this writing there is no automatic
+    /// step-out trigger wired to *either* signal yet, only the manual admin
+    /// remove-replica path).
     ///
     /// Default `true` (`InMemKV` has no I/O path to fail).
     /// [`super::CrowtreeEngine::is_healthy`] overrides this with
-    /// `!Crowtree::io_failed()`.
+    /// `!Crowtree::io_failed`.
     fn is_healthy(&self) -> bool {
         true
     }
@@ -103,7 +98,7 @@ pub trait KVEngine: Send + Sync {
         0
     }
 
-    /// Persist a durable snapshot now (`design-crowtree-snapshot-gc.md §3`).
+    /// Persist a durable snapshot now (`design-crowtree-storage.md §6`).
     /// Returns the slot the snapshot covers (everything in `[1, slot]` is
     /// now durably reflected — the same contract [`Self::resume_from_slot`]
     /// documents), or `0` if nothing was persisted (default: `InMemKV` has
@@ -115,7 +110,7 @@ pub trait KVEngine: Send + Sync {
     }
 
     /// Set the logical retention watermark
-    /// (`design-crowtree-snapshot-gc.md §1/§4`): `gc_slot =
+    /// (`design-crowtree-storage.md §6/§9`): `gc_slot =
     /// min(snapshot_slot, safe_slot)`. Tombstones and stale versions with
     /// slot `<= gc_slot` become eligible for reclamation on the next
     /// [`Self::collect_garbage`] call. Default is a no-op (`InMemKV` does
@@ -129,8 +124,8 @@ pub trait KVEngine: Send + Sync {
     fn collect_garbage(&self) {}
 
     /// Export this engine's entire current state as an opaque,
-    /// engine-specific byte stream (`design-crowtree-snapshot-gc.md` §2/§6,
-    /// plan-tree #20), for the new-member join flow: a fresh/far-lagging
+    /// engine-specific byte stream (`design-crowtree-storage.md` §6/§10,
+    /// ), for the new-member join flow: a fresh/far-lagging
     /// replica pulls this over [`crate::rpc::SnapshotService`] instead of
     /// replaying full Paxos history. Returns `(at_slot, stream)`: `at_slot`
     /// is the highest slot durably reflected in `stream` (same contract as

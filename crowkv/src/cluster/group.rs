@@ -94,8 +94,8 @@ pub struct PxGroup {
     pub(crate) peer_durable: parking_lot::Mutex<HashMap<PxNodeId, SlotIndex>>,
     /// Group durable-snapshot watermark: `min(local durable_snapshot_slot,
     /// max(peer durable_snapshot_slot))` -- the real "durable on leader
-    /// plus at least one peer" watermark (`design-crowtree-snapshot-gc.md`
-    /// §1 `snapshot_slot`, plan-tree #20), gossiped piggybacked on the same
+    /// plus at least one peer" watermark (`design-crowtree-storage.md`
+    /// §6 `snapshot_slot`, gossiped piggybacked on the same
     /// heartbeat round as `group_safe_slot`. Taking the *max* over peers
     /// (not `min`, unlike `group_safe_slot`) is deliberate: the design only
     /// requires *one* peer beyond the leader to durably have a slot, so the
@@ -314,7 +314,7 @@ impl PxGroup {
 
     /// Group durable-snapshot-watermark snapshot: state at this slot is
     /// durable on this (leader) replica **and** at least one voting peer
-    /// (`design-crowtree-snapshot-gc.md` §1 `snapshot_slot`, plan-tree #20).
+    /// (`design-crowtree-storage.md` §6 `snapshot_slot`
     /// `0` until the first quorum heartbeat round establishes it (or if this
     /// replica has no local WAL). Feeds `set_gc_watermark`'s `snapshot_slot`
     /// argument in `group_maintenance::run_pass`, replacing the previous
@@ -355,7 +355,7 @@ impl PxGroup {
 
     /// Record a voting peer's reported `durable_snapshot_slot` and recompute
     /// the group's real "durable on leader + >=1 peer" snapshot watermark
-    /// (`design-crowtree-snapshot-gc.md` §1 `snapshot_slot`, plan-tree #20)
+    /// (`design-crowtree-storage.md` §6 `snapshot_slot`
     /// as `min(local durable_snapshot_slot, max(voting peer
     /// durable_snapshot_slot))`. A peer that has never reported is treated
     /// as `0` and simply never wins the max (same "absent = 0" convention as
@@ -735,9 +735,9 @@ impl PxGroup {
         report
     }
 
-    // ── New-member snapshot join (plan-tree #20) ────────────────────
+    // ── New-member snapshot join ────────────────────
 
-    /// New-member snapshot join (`design-crowtree-snapshot-gc.md` §6,
+    /// New-member snapshot join (`design-crowtree-storage.md` §10,
     /// `design-reconfiguration.md` §4): pull a snapshot for this group from
     /// `peer_endpoint`'s [`crate::rpc::SnapshotService`], import it into
     /// the local engine, and seed the local learner's frontier so the
@@ -748,7 +748,7 @@ impl PxGroup {
     /// **Precondition:** must be called before this replica is wired into
     /// any group's topology (before any peer can send it `Accept`/
     /// `Heartbeat` RPCs) -- mirrors [`crate::paxos::learner::PxLearner::seed_resume_frontier`]'s
-    /// "before any `learn()` call" precondition. Intended for a
+    /// "before any `learn` call" precondition. Intended for a
     /// freshly-constructed, still-empty local replica only; never call this
     /// on a replica with existing local state.
     ///
@@ -884,7 +884,7 @@ impl PxGroup {
     /// voting)`. Callers that rebuild a group (management-API remote
     /// add/remove) must carry `voting` through to the rebuilt
     /// [`PxRemoteReplica`] -- dropping it would silently re-promote a
-    /// non-voting (e.g. still-catching-up, plan-tree #20 snapshot-join)
+    /// non-voting (e.g. still-catching-up
     /// remote back to voting on the next unrelated rebuild.
     pub fn remote_replica_info(&self) -> Vec<(PxNodeId, &str, bool)> {
         self.remote_replicas
@@ -917,7 +917,7 @@ impl PxGroup {
         //     the local replica advanced into a new term (became
         //     follower under HigherTerm, then re-elected) without the
         //     proposing tenure having stamped the new term yet.
-        // Either miss surfaces as `NotLeader { hint: leader_endpoint() }`
+        // Either miss surfaces as `NotLeader { hint: leader_endpoint }`
         // before slot allocation, draining in-flight client proposals.
         let role_is_leader = replica.role() == crate::cluster::local_replica::PxLocalReplicaRole::Leader;
         let current_term = replica.current_term_snapshot();
@@ -935,7 +935,7 @@ impl PxGroup {
 
         // Idempotency: a retried `(client_id, seq)` that the learner has
         // already applied returns its prior commit slot without re-running
-        // Paxos (exactly-once writes, `requirement.md` §10.2). Checked before
+        // Paxos (exactly-once writes, idempotent retry). Checked before
         // window admission so duplicates never consume a window permit.
         if let (Some(cid), Some(s)) = (client_id, seq) {
             if let Some(cached_slot) = replica.learner.dedup_lookup(cid, s) {
@@ -964,7 +964,7 @@ impl PxGroup {
         };
 
         let group_id = self.group_id;
-        // Voting-only quorum (`self.quorum()`/`cached_quorum`), *not*
+        // Voting-only quorum (`self.quorum`/`cached_quorum`), *not*
         // `valid_replica_count + 1` -- the latter counts non-voting
         // catch-up members too and would inflate the threshold (and,
         // combined with unfiltered ack-counting, could also let

@@ -182,7 +182,7 @@ message HeartbeatResponse {
   uint64 request_id = 9;
   uint64 request_create_ms = 10;
   // Highest slot durably captured in this follower's own last engine
-  // snapshot (`design-crowtree-snapshot-gc.md` §1 `snapshot_slot`; mirrors
+  // snapshot (`design-crowtree-storage.md` §6 `snapshot_slot`; mirrors
   // `WalEngine::snapshot_slot()`). The leader aggregates this across voting
   // peers to compute the group's real "durable on leader + >=1 peer"
   // watermark (plan-tree #20), instead of approximating it with
@@ -259,7 +259,7 @@ service PxService {
 }
 
 // ---------------------------------------------------------------------------
-// #20 New-member snapshot install (`design-crowtree-snapshot-gc.md` §6,
+// #20 New-member snapshot install (`design-crowtree-storage.md` §10,
 // `design-reconfiguration.md` §4). Layered on the existing per-replica
 // `voting` flag rather than the full joint-consensus reconfiguration state
 // machine (`ConfigChange` log entries, both-quorum evaluation) described in

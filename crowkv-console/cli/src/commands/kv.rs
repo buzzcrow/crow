@@ -54,7 +54,7 @@ pub enum KvVerb {
         seq: u64,
     },
     /// Prefix scan. Prints up to `--limit` matching key/value rows; when
-    /// more keys exist past the limit a `(truncated: ...)` note is written
+    /// more keys exist past the limit a `(truncated:...)` note is written
     /// to stderr (raise `--limit` to see them).
     List {
         #[arg(long)]
@@ -146,7 +146,7 @@ struct KvPutArgs<'a> {
 /// [`CrowkvClient`] pre-seeded with that endpoint via `seed_leader`. This
 /// keeps the CLI's existing console-routed discovery unchanged while
 /// gaining `CrowkvClient`'s retry/backoff and connection pooling on the
-/// actual RPC call (`doc/plan-client.md` §5 C1-C3). An empty mgmt-seed list
+/// actual RPC call (C1-C3). An empty mgmt-seed list
 /// is fine here: the CLI is a one-shot process that already knows the
 /// leader; `CrowkvClient` only falls back to polling `/topology` if that
 /// seeded endpoint later returns `NotLeaderHint` or a transport error.

@@ -259,15 +259,17 @@ signatures):
 
 ## 5. Sub-Design Document Map
 
-The crowtree design is split into three self-contained documents plus a test
-strategy doc:
+The crowtree design is split into two self-contained documents:
 
 | Doc | Covers |
 | --- | --- |
 | `design-crowtree.md` (this) | Goals, architecture, `KVEngine` trait, FFI boundary, decision log. |
 | [`design-crowtree-engine.md`](design-crowtree-engine.md) | **In-memory engine.** MemTable (L0) + COW B+tree (L1), slot-aware value cell, delta records + consolidation, split/merge, versioned root (MVCC snapshots), epoch-based reclamation, read path; the `buffer` memory-ownership model (zero-copy write/read pipelines); the io_uring async FFI bridge. |
 | [`design-crowtree-storage.md`](design-crowtree-storage.md) | **Durable storage.** `PageStore` backends, on-disk zero-copy frame format, buffer pool (frame cache) + eviction safety, snapshot + internal-WAL decision + recovery, snapshot export/import; the mapping table (PID indirection, segment persistence, recycling); snapshot/GC flow integration with the learner and consensus WAL. |
-| [`design-crowtree-test.md`](design-crowtree-test.md) | Test strategy: layers (C++ unit, C++ integration, Rust FFI, cross-engine parity, crash/recovery). |
+
+Test strategy for crowtree (C++ unit, integration, crash/recovery, Rust FFI,
+cross-engine parity, sanitizer) is documented in [`design-test.md`](design-test.md) §
+"crowtree C++ Test Layers".
 
 ---
 

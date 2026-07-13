@@ -9,7 +9,7 @@ members = [
     "crowkv-console/cli",
     "crowtree/ffi",
 ]
-# plan-tree #20: crowtree/ffi moved from `exclude` into `members` now that
+# : crowtree/ffi moved from `exclude` into `members` now that
 # crowkv depends on it (CrowtreeEngine) -- building crowkv already triggers
 # the C++ build step via crowtree-ffi's build.rs regardless of workspace
 # membership, so the original "keep the C build out of the main workspace"

@@ -1,7 +1,7 @@
 //! Real-process end-to-end test for the new-member snapshot-join mgmt API
-//! (plan-tree #20, `design-crowtree-snapshot-gc.md` §6): a brand-new store
+//!: a brand-new store
 //! joins an already-populated group by pulling a snapshot via
-//! `POST .../join`, instead of replaying full Paxos history from slot 1.
+//! `POST.../join`, instead of replaying full Paxos history from slot 1.
 
 mod testkit;
 
@@ -79,7 +79,7 @@ async fn start_cluster_with_group(node_ids: &[u64], group_id: u64) -> Vec<Server
 
 /// Start a store with **no** group -- mirrors `main.rs`'s "`--stores`
 /// without `--groups`" empty-boot path, so the group for `join_group_id`
-/// gets created entirely through `POST .../join` instead.
+/// gets created entirely through `POST.../join` instead.
 async fn start_bare_store(node_id: u64) -> ServerNode {
     let handle = start_test_server(&["--stores", &node_id.to_string()])
         .await
@@ -124,7 +124,7 @@ async fn add_remote_replica(
     add_remote_replicas(target, group_id, &[(replica_id, endpoint, voting)]).await;
 }
 
-/// Batched `POST .../remotes` with every entry in one HTTP call -- the
+/// Batched `POST.../remotes` with every entry in one HTTP call -- the
 /// convention `crowkv-console/web/src/mgmt.rs::http_add_replica` uses to
 /// wire a freshly-joined replica's own view of every already-established
 /// peer in a single request (mirrored here rather than one call per
@@ -300,7 +300,7 @@ async fn e2e_new_member_joins_via_snapshot_then_catches_up_wal_tail() {
 
     // Wire the new member into the topology: existing members as its
     // voting remotes, and itself as a non-voting remote on every existing
-    // member (plan-tree #20's design: catch up before promoting to
+    // member (design: catch up before promoting to
     // voting).
     let new_addr = node_endpoint(&topology(&new_node).await);
     let mut existing_addrs = Vec::new();

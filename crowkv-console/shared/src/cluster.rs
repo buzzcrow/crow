@@ -148,8 +148,8 @@ pub struct LocalReplicaInfo {
     pub replica_id: ReplicaId,
     pub role: ReplicaRole,
     pub state: ReplicaState,
-    /// Mirrors `crowkv`'s `KvStoreStatus::engine_healthy` (doc/todo-sm.md
-    /// Step 2/6), threaded through from `crate::snapshot::KvStoreView` by
+    /// Mirrors `crowkv`'s `KvStoreStatus::engine_healthy`, threaded through
+    /// from `crate::snapshot::KvStoreView` by
     /// `crate::monitor::legacy_topology_to_node_stores`.
     #[serde(default = "default_engine_healthy")]
     pub engine_healthy: bool,

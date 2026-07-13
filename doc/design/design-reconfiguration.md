@@ -172,7 +172,7 @@ A non-voting catch-up member physically accepts and promises so it can follow th
 
 ## 7. Group-0 Special Cases (historical)
 
-> **Decision record (2026-07, see `plan-client.md` §6 Issue 1):** `Group-0` as
+> **Decision record (2026-07):** `Group-0` as
 > described in this section was never implemented. Topology (per-group
 > memberships, cluster inventory) is operator-managed via the HTTP management
 > API and persisted to per-group config files, not self-hosted in a

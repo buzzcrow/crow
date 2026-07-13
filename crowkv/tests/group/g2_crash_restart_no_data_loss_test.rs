@@ -1,4 +1,4 @@
-//! A5 / G2 (`plan.md` §3 freeze gate): multi-node kill/restart/re-elect with
+//! A5 / G2 (freeze gate): multi-node kill/restart/re-elect with
 //! no data loss.
 //!
 //! Spins up a 3-node cluster whose replicas each own a per-node `tempfile` WAL
@@ -203,7 +203,7 @@ impl WalCluster {
         let idx = self.nodes.iter().position(|n| n.id == id).expect("node present");
         let node = self.nodes.remove(idx);
         // Full cascade shutdown: stops the gRPC server *and* cancels the
-        // election driver / heartbeat loop. A bare `stop()` would leave the
+        // election driver / heartbeat loop. A bare `stop` would leave the
         // driver heartbeating forever, starving the survivors' election
         // deadline so they could never re-elect.
         node.store.shutdown(Duration::from_secs(2)).await;

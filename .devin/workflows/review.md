@@ -22,7 +22,7 @@ Hot paths: `propose`, `accept`, `learn`, `kv_get`, `kv_put`, `kv_delete`, `kv_ba
    - Default to exposing useful internal state (internal UI, no security concerns)
 2. **Comments** — ensure code comments follow conventions:
    - Module-level comments (`//!`) summarize purpose, explain why, list key work areas
-   - No doc references (`doc/`, `plan.md`, etc.) in code comments
+   - No doc references (`doc/`, `design.md`, etc.) in code comments
    - Function/struct comments (`///`) describe what and why
    - Inline comments explain non-obvious logic, invariants, trade-offs
    - TODO/FIXME markers tracked in `doc/todo_code.md`

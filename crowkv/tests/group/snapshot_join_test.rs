@@ -1,4 +1,4 @@
-//! New-member snapshot join (`PxGroup::join_via_snapshot`, plan-tree #20,
+//! New-member snapshot join (`PxGroup::join_via_snapshot`,
 //! `design-crowtree-snapshot-gc.md` §6): a fresh, still-empty replica pulls
 //! a snapshot from an existing cluster's leader over the real
 //! `SnapshotService` gRPC, instead of replaying full Paxos history from

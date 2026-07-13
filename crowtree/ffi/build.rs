@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 fn collect_cc(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
-        // Engine sources use the .cpp extension (renamed from .cc in the STL
+        // Engine sources use the.cpp extension (renamed from.cc in the STL
         // rename task); accept both so the crate builds regardless.
         match path.extension().and_then(|s| s.to_str()) {
             Some("cpp") | Some("cc") => out.push(path),
@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     build.cpp(true).std("c++20").include(&include).warnings(false);
 
     // The engine now includes Abseil headers (absl::btree_map in the MemTable,
-    // plan-tree #9). Abseil is header-only for btree, so we only need its include
+    // ). Abseil is header-only for btree, so we only need its include
     // path; in the pixi/conda environment it lives under $CONDA_PREFIX/include.
     let conda_prefix = std::env::var("CONDA_PREFIX").ok().map(PathBuf::from);
     if let Some(prefix) = &conda_prefix {

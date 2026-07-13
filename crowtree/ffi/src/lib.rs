@@ -4,7 +4,7 @@
 //! buffers into `Vec<u8>` (freeing them via `ct_free_buf`), maps `ct_status`
 //! into `Result`, and offers an async facade (`AsyncCrowtree`). `get`/`flush`/
 //! `snapshot` drive the engine's io_uring reactor directly (no OS thread hop,
-//! plan-tree #11 Phase 3); the remaining methods (no async C API twin exists
+//! Phase 3); the remaining methods (no async C API twin exists
 //! for them yet -- Phase 2 scoped only get/flush/snapshot) still bridge via
 //! `spawn_blocking`.
 
@@ -160,7 +160,7 @@ mod sys {
         pub fn ct_snapshot_import_finish(im: *mut ct_import, out_at_slot: *mut u64) -> c_int;
         pub fn ct_snapshot_import_end(im: *mut ct_import);
 
-        // ── Async data path (plan-tree #11 Phase 2/3) ──
+        // ── Async data path ──
         pub fn ct_evict_clean_leaves(t: *mut ct_tree, max_resident_leaves: u64) -> u64;
         pub fn ct_evict_clean_inner(t: *mut ct_tree, max_resident_inner: u64) -> u64;
         pub fn ct_get_async(t: *mut ct_tree, key: *const u8, klen: usize) -> *mut ct_future;
@@ -226,7 +226,7 @@ fn take_buf(mut buf: sys::ct_buf) -> Vec<u8> {
 /// Copies a `ct_buf`'s bytes into a `Vec<u8>` *without* freeing it -- unlike
 /// `take_buf`, used only for a `ct_get_async` completion's value, which may
 /// be a borrowed pointer into a still-live frame (design §5's zero-copy
-/// fast path, plan-tree.md #11 Phase 4) that must never be passed to
+/// fast path, ) that must never be passed to
 /// `ct_free_buf`. The underlying `ct_future` (and, with it, any epoch guard
 /// backing that borrow) is released separately, immediately afterward, via
 /// `ct_future_free` -- see `try_poll_ct_future`.
@@ -244,7 +244,7 @@ pub enum Compression {
     Lz4,
 }
 
-/// Durable backend selection (plan-tree #22), mirrors `ct_options::backend`.
+/// Durable backend selection, mirrors `ct_options::backend`.
 /// Ignored when `Options::path` is `None` (in-memory).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PageStoreBackend {
@@ -287,7 +287,7 @@ pub struct GcStats {
 
 /// Point-in-time diagnostics snapshot; see [`Crowtree::stats`]. Every field
 /// is O(1) on the C++ side (an already-tracked atomic counter or
-/// `BufferPool::stats()`), so this is safe to poll periodically.
+/// `BufferPool::stats`), so this is safe to poll periodically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Stats {
     pub last_applied_slot: u64,
@@ -346,7 +346,7 @@ pub struct ViewEntry {
 pub struct Crowtree {
     ptr: NonNull<sys::ct_tree>,
     // Lazily-spawned eventfd pump for this tree's Reactor eventfd
-    // (plan-tree #11 Phase 3), shared by every concurrently-pending
+    //, shared by every concurrently-pending
     // drive_ct_future call. `None` once resolved means no Reactor is wired
     // (or the pump failed to spawn); see `eventfd_notify`/`EventfdPump`.
     eventfd_pump: std::sync::OnceLock<Option<EventfdPump>>,
@@ -507,8 +507,8 @@ impl Crowtree {
         check(unsafe { sys::ct_clear(self.as_ptr()) })
     }
 
-    /// Batched diagnostics snapshot (design-todo-sm.md Step 6). O(1) --
-    /// safe to poll periodically for metrics/console display.
+    /// Batched diagnostics snapshot. O(1) -- safe to poll periodically for
+    /// metrics/console display.
     pub fn stats(&self) -> Stats {
         let mut raw = sys::ct_stats::default();
         unsafe { sys::ct_get_stats(self.as_ptr(), &mut raw) };
@@ -538,7 +538,7 @@ impl Crowtree {
         unsafe { sys::ct_evict_clean_leaves(self.as_ptr(), max_resident_leaves) }
     }
 
-    /// plan-tree.md #17 D3: same contract, but for resident *inner* bases --
+    /// D3: same contract, but for resident *inner* bases --
     /// a genuinely separate ranked budget/pass from [`Self::evict_clean_leaves`],
     /// never evicting a leaf. Returns the number of inner bases evicted.
     pub fn evict_clean_inner(&self, max_resident_inner: u64) -> u64 {
@@ -787,11 +787,11 @@ fn decode_scan(bytes: &[u8], count: usize) -> Result<Vec<ScanEntry>, CtError> {
     Ok(out)
 }
 
-// ── Reactor-driven async futures (plan-tree #11 Phase 3) ───────────
+// ── Reactor-driven async futures ───────────
 //
 // AsyncCrowtree::get/flush/snapshot drive drive_ct_future below directly:
-// no spawn_blocking, no OS thread hop. A fast-path completion (get_view()'s
-// cached L0/L1 hit, or flush()'s always-in-memory work) resolves on the
+// no spawn_blocking, no OS thread hop. A fast-path completion (get_view's
+// cached L0/L1 hit, or flush's always-in-memory work) resolves on the
 // *first* poll without ever touching the reactor; only a genuine
 // demand-load miss (design §6.3) waits on the tree's eventfd.
 //
@@ -807,10 +807,9 @@ fn decode_scan(bytes: &[u8], count: usize) -> Result<Vec<ScanEntry>, CtError> {
 
 /// Non-owning view of a raw fd for `AsyncFd` registration. The engine's
 /// `Reactor` owns the eventfd `ct_reactor_eventfd` returns and closes it in
-/// its own destructor (~`Reactor`); per the OQ8 resolution in
-/// `doc/design/design-crowtree-async.md` §"Confirm and record", Rust must
-/// wrap it *without* taking closing ownership -- unlike
-/// `std::os::fd::OwnedFd`, this type's `Drop` is a no-op.
+/// its own destructor (~`Reactor`); Rust must wrap it *without* taking
+/// closing ownership -- unlike `std::os::fd::OwnedFd`, this type's `Drop`
+/// is a no-op.
 struct RawFdView(RawFd);
 
 impl AsRawFd for RawFdView {
@@ -856,13 +855,13 @@ struct RawOutcome {
 }
 
 /// Which `ct_*_async` call produced a `FutureGuard` -- `ct_future_poll`'s
-/// freeing contract differs for `Get` (plan-tree.md #11 Phase 4, design §5):
+/// freeing contract differs for `Get` (, design §5):
 /// a resolved kGet future is deliberately *not* freed by `ct_future_poll`
 /// itself (its `out_value` may still borrow from a resident frame, kept
 /// alive by the future's own epoch guard), so the caller must free it
 /// explicitly once done reading -- unlike Flush/Snapshot/Scan, which
 /// `ct_future_poll` already frees on completion, same as before Phase 4.
-/// `Scan`'s `out_value` (plan-tree.md #11 follow-up) is always a *malloc'd*
+/// `Scan`'s `out_value` (follow-up) is always a *malloc'd*
 /// owned buffer (never borrowed, unlike Get) -- `try_poll_ct_future` must
 /// free it via `take_buf`, not `copy_buf`.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -946,7 +945,7 @@ fn try_poll_ct_future(guard: &mut FutureGuard, kind: FutureKind) -> Option<Resul
     if kind == FutureKind::Get {
         // ct_future_poll deliberately does *not* free a kGet future (see
         // its doc comment in c_api.h) -- the epoch guard behind a
-        // zero-copy fast-path value must outlive the copy_buf() call above.
+        // zero-copy fast-path value must outlive the copy_buf call above.
         unsafe { sys::ct_future_free(guard.0) };
     }
     // Flush/Snapshot: already freed by ct_future_poll itself. Either way,
@@ -959,7 +958,7 @@ fn try_poll_ct_future(guard: &mut FutureGuard, kind: FutureKind) -> Option<Resul
 /// Drives one `ct_get_async`/`ct_flush_async`/`ct_snapshot_async` handle to
 /// completion: polls it, and if not yet done, waits for the tree's eventfd
 /// pump to fan out a notification before polling again. A fast-path
-/// completion never reaches the `notified().await` at all.
+/// completion never reaches the `notified.await` at all.
 async fn drive_ct_future(
     mut guard: FutureGuard,
     tree: &Arc<Crowtree>,
@@ -967,10 +966,10 @@ async fn drive_ct_future(
 ) -> Result<RawOutcome, CtError> {
     loop {
         // Construct (but do not yet await) the notification future *before*
-        // checking ct_future_poll below, not after: Notify::notified()
-        // captures the pump's current notify_waiters() call count at
+        // checking ct_future_poll below, not after: Notify::notified
+        // captures the pump's current notify_waiters call count at
         // construction time and is guaranteed to fire for any
-        // notify_waiters() after that point even before this is polled --
+        // notify_waiters after that point even before this is polled --
         // constructing it only *after* seeing done=0 would leave a window
         // where a completion + notify racing in right there is silently
         // missed, hanging until some unrelated later notification (or
@@ -999,8 +998,7 @@ async fn drive_ct_future(
 /// Async facade. `get`/`flush`/`snapshot` drive the engine's io_uring
 /// reactor directly via [`drive_ct_future`] -- no thread pool hop. The
 /// remaining methods have no async C API twin yet (Phase 2 scoped only
-/// get/flush/snapshot; see `doc/plan-tree.md` #11 Phase 3's re-scoping note)
-/// and still bridge onto Tokio via `spawn_blocking`. Cheap to clone (shares
+/// get/flush/snapshot) and still bridge onto Tokio via `spawn_blocking`. Cheap to clone (shares
 /// one `Arc<Crowtree>`).
 #[derive(Clone, Debug)]
 pub struct AsyncCrowtree {
@@ -1054,8 +1052,8 @@ impl AsyncCrowtree {
             .map_err(|_| CtError::Internal)?
     }
 
-    /// Drives the engine's io_uring reactor directly (plan-tree #11 Phase
-    /// 3) -- no `spawn_blocking`, since flush() never touches the page
+    /// Drives the engine's io_uring reactor directly (Phase
+    /// 3) -- no `spawn_blocking`, since flush never touches the page
     /// store (only the in-memory L1), this always resolves on the very
     /// first poll.
     pub async fn flush(&self) -> Result<(), CtError> {
@@ -1064,7 +1062,7 @@ impl AsyncCrowtree {
         Ok(())
     }
 
-    /// Drives the engine's io_uring reactor directly (plan-tree #11 Phase
+    /// Drives the engine's io_uring reactor directly (Phase
     /// 3) -- no `spawn_blocking`; the write phase always waits on the
     /// reactor (design §4's table), unlike `flush`/the fast `get` path.
     pub async fn snapshot(&self) -> Result<u64, CtError> {
@@ -1076,7 +1074,7 @@ impl AsyncCrowtree {
         )
     }
 
-    /// Drives the engine's io_uring reactor directly (plan-tree #11 Phase
+    /// Drives the engine's io_uring reactor directly (Phase
     /// 3) -- no `spawn_blocking`. Resolves on the very first poll for a
     /// resident hit (`get_view`'s existing fast path, `#5 B3`); only a
     /// genuine demand-load miss waits on the reactor.
@@ -1089,8 +1087,7 @@ impl AsyncCrowtree {
     /// Like [`Self::get`], but never allocates or boxes anything for the
     /// fast (resident hit/miss) path -- only the genuine demand-load-miss
     /// path (`GetOutcome::Pending`) does. Lets a caller with its own
-    /// fast-path/slow-path return type (`crowkv`'s `KVFuture`, plan-tree.md
-    /// #11 Phase 6) mirror `ct_get_async`'s own C++-layer split one layer
+    /// fast-path/slow-path return type (`crowkv`'s `KVFuture`,     /// #11 Phase 6) mirror `ct_get_async`'s own C++-layer split one layer
     /// up, instead of collapsing it back into a uniform `async fn` (which
     /// would force boxing on every call, fast path included -- exactly what
     /// `KVFuture::Ready` exists to avoid).
@@ -1107,10 +1104,10 @@ impl AsyncCrowtree {
         }))
     }
 
-    /// Async twin of [`Crowtree::scan`] (plan-tree.md #11 follow-up). Drives
+    /// Async twin of [`Crowtree::scan`] (follow-up). Drives
     /// the reactor directly like `get`/`flush`/`snapshot` -- resolves on the
     /// first poll whenever every leaf in range is already resident
-    /// (`scan()`'s own fast path), only waiting on the reactor for a
+    /// (`scan`'s own fast path), only waiting on the reactor for a
     /// genuine cold leaf (or the initial root->leaf descent). See
     /// `Crowtree::scan_async`'s doc comment (crowtree.h) for why a miss
     /// retries the whole scan rather than resuming a cursor.

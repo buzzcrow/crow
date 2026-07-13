@@ -1,6 +1,6 @@
 # CrowKV Console Web UI Design (v1, lean)
 
-Upstream: `doc/requirement.md` §15.4.6. Sibling: `doc/design/design-console.md`
+Upstream: [§13](#13-requirements-moved-from-requirementmd-1546) (requirements, moved from `requirement.md`). Sibling: `doc/design/design-console.md`
 (backend Axum routes, registry, SSH lifecycle, Swagger asset hosting).
 
 This document covers the **frontend SPA only**. Backend-API contracts are
@@ -266,3 +266,122 @@ src/
 - The Playwright real-backend E2E suite (`crowkv-console/web/ui/e2e/`)
   targets this lean SPA; selectors track the rewritten DOM. The full
   chain rack→node→deploy→store→group→replica→KV is the acceptance bar.
+
+---
+
+## 13. Requirements (moved from `requirement.md` §15.4.6)
+
+> **Moved 2026-07.** This section is the authoritative, requirements-only
+> spec for the Web UI (the *what*). All sizing, color tokens, component
+> libraries, and React module layout (the *how*) live in §1–12 above.
+
+**Goals.** The Web UI is a **single-page, embeddable cluster console**:
+
+- **Single page** — one SPA shell, no full-page navigation. Every
+  workflow (topology, hardware lifecycle, KV ops, Swagger, logs) is
+  reached by switching panels or overlays in the same page.
+- **Embeddable** — mountable as a sub-component of a larger product
+  that links `crowkv` and exposes the `crowkv-server` API surface via
+  `crowkv-web` (or an API-compatible facade), without forking the SPA.
+- **Demo-grade aesthetics** — feels like a finished product.
+- **Operator-grade utility** — every CLI-reachable cluster operation
+  (rack/node/server lifecycle, store/group/replica wiring, KV data
+  plane, Swagger) is reachable in one to three clicks.
+
+**Non-goals.** No authn/authz/RBAC; no mobile form factor (tablet
+≥ 768 px best-effort, desktop ≥ 1200 px is the target); no SSR (static
+bundle); no WebSocket/SSE streaming (polling on a configurable interval
+matches the HTTP-only API); no multi-tenant views, audit logs, or
+billing.
+
+**Two hierarchy views (§3 of `design-console.md`).** The UI
+surfaces the same entities through two first-class views; a user can
+toggle between them and never sees a single flattened tree mixing the
+two:
+
+- **Physical (deployment / debugging) view** — rooted at
+  `Rack → Node → Server → PxStore → PxGroup → { LocalReplica,
+  RemoteReplica… }`. Identity is the parent chain
+  `(rack_id, node_id, store_id, group_id, replica_id)`. Renders
+  Local vs Remote replicas with distinct visual treatment so peer-list
+  mis-wirings are visible; the current leader is distinguishable.
+- **Logical (usage) view** — rooted at
+  `Cluster → Store → Group → Replica…` with a **unified** replica list
+  (each tagged with its `node_id`, no local/remote split). Identity is
+  `(store_id[, group_id[, replica_id]])`.
+
+A **view-mode toggle** drives the sidebar tree, topology canvas, and
+inspector simultaneously; cross-jumping between a logical replica and
+its physical detail is one click. There is **no aggregate
+`/api/cluster/snapshot`** — both views refresh from per-resource live
+endpoints (served from the backend monitor cache) on a configurable
+poll interval. Each replica in the logical view maps to one
+`LocalReplica` plus N−1 `RemoteReplica` proxies; each logical Store /
+Group is the aggregate of the per-node `PxStore` / `PxGroup` records.
+
+**Functional surface.** Every endpoint the UI assumes is already
+exposed by `crowkv-web` (`crowkv-console/web/src/lib.rs`). Forms
+validate against the same constraints the backend enforces and surface
+server-side validation errors inline.
+
+- **Cluster observation** — per-component status
+  (`Healthy / Degraded / Failed / Unknown`) on every node, server,
+  store, group, and replica; a cluster health summary visible at all
+  times (view-independent); an interactive topology canvas (drag to
+  pan, click to select) reflecting the active view.
+- **Hardware lifecycle (physical tree)** — rack/node CRUD, node ping,
+  deploy/restart/stop the node's `crowkv-server`, deployment-record
+  get/drop, OpenAPI proxy. Servers are addressed by hosting node (one
+  `crowkv-server` per node by console convention).
+- **Cluster management (logical tree)** — store/group/replica CRUD via
+  `/api/stores/...`. Replica add/remove is orchestrated server-side
+  (creates the local `PxGroup`, wires it bidirectionally with peers,
+  rolls back on partial failure). A per-node "inspect" action exposes
+  `local` + `remotes` detail via `/api/nodes/:n/stores/:s/groups/:g`.
+- **KV data plane** — scan (prefix + limit), get (value + size shown
+  verbatim), put (idempotent overwrite), delete (with confirmation),
+  rooted at `/api/stores/:s/groups/:g/kv/...`. Leader resolution is
+  server-side; the UI passes no node/server hint. Success/failure is
+  reported inline with the server-supplied error.
+- **Swagger inspection** — embedded panel inside the SPA (no new tab).
+  Picks a registered node and loads its OpenAPI doc via
+  `/api/swagger/?url=/api/nodes/:node_id/openapi.json`; the Swagger
+  bundle is served offline from `crowkv-console/web/swagger-ui/`. Loads
+  lazily.
+- **Operation visibility** — readable errors (no opaque 500 traces),
+  toast notifications for success/failure, real-time inline form
+  validation, and a client-side recent-operations view (timestamp,
+  action, target, outcome).
+- **Navigation** — sidebar tree (click to select, disclosure arrow to
+  expand/collapse), right-click context-menu mutations, single text
+  tree filter.
+
+**API routing rule (normative).** Two parallel URL trees, no route
+crosses trees: **physical** (`/api/racks`, `/api/nodes`) addressed by
+the parent chain; **logical** (`/api/stores`) addressed by
+`(store_id, group_id, replica_id)`. The SPA never passes
+`?server=<url>` (that contract is removed; old `/api/servers/:sid/...`
+URLs return `404`); upstream servers are addressed by `node_id`, which
+the backend resolves to `mgmt_url` from `~/.crowkv/console.toml`. The
+header node selector is consumed only by the Swagger panel. Every `GET`
+accepts `?recursive=<depth|all>`.
+
+**Embeddability.** A single mountable component with a stable public
+interface, configurable at mount time with at least: `apiPrefix`
+(default `/api`), `basePath`, `readonly` (hide/disable all mutations),
+`modules` (opt-out of feature areas: snapshot, racks, nodes, stores,
+groups, replicas, kv, swagger, logs — server lifecycle is part of
+`nodes`), and `theme`. The UI must enforce style isolation (no global
+CSS leakage), routing isolation (no control of the top-level URL),
+and asset isolation (self-contained bundle, never a third-party CDN).
+It must also run standalone under `crowkv-web` for dev/demos. v1 ships
+a single built-in dark theme.
+
+**Read-only mode and safety.** With `readonly=true`, every mutating
+control is hidden and no view breaks. All destructive operations
+require explicit confirmation. The UI never silently retries a failed
+destructive operation.
+
+**Performance / robustness.** The SPA stays responsive during in-flight
+polls; an unreachable backend surfaces a visible error and recovers
+without a manual reload; the Swagger panel loads lazily.

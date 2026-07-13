@@ -1,8 +1,7 @@
-//! `KVFuture<T>` contract tests (`doc/design/design-crowkv-async-kvengine.md`
-//! §4/§6): the zero-allocation `Ready` fast path, the `into_ready()`
-//! synchronous unwrap used by `PxLearner` today, and that a genuine
-//! `Pending` future (not constructed by any `KVEngine` impl yet, but
-//! exercised here directly) still polls/awaits through correctly.
+//! `KVFuture<T>` contract tests: the zero-allocation `Ready` fast path,
+//! the `into_ready()` synchronous unwrap used by `PxLearner` today, and
+//! that a genuine `Pending` future (not constructed by any `KVEngine` impl
+//! yet, but exercised here directly) still polls/awaits through correctly.
 
 use crowkv::kv::KVFuture;
 

@@ -2,7 +2,7 @@
 //! lifecycle, and per-group leader-election / heartbeat / lease tunables.
 //!
 //! All values here are compile-time `const`s exposed via `DEFAULT`
-//! constants and `for_tests()` constructors; runtime overrides happen at
+//! constants and `for_tests` constructors; runtime overrides happen at
 //! the call sites (`crowkv-server` CLI, testkit harness) before the
 //! group is wrapped in an `Arc`.
 
@@ -21,7 +21,7 @@ pub struct PaxosConfig {
     /// the leader admits concurrently. A proposal that cannot acquire a window
     /// permit fails fast with `PxPaxosError::Busy` (retryable) rather than
     /// blocking, so the leader never stalls behind a saturated pipeline
-    /// (`requirement.md` §7.3 / §12.1).
+    /// (parallel-slot window / performance targets).
     pub proposer_window: usize,
 }
 
@@ -134,8 +134,8 @@ impl Default for WalConfig {
 /// converts to `Duration` at the consumption site.
 ///
 /// Defaults target a single-datacenter deployment with NTP-disciplined
-/// clocks. See `doc/design/design-leader-election.md` §10 ("Tunables and
-/// defaults") for the rationale and the cross-DC / WAN override profile.
+/// clocks. Rationale and cross-DC / WAN override profile documented
+/// in the leader-election sub-design.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PxElectionConfig {
     /// Whether `PreVote` rounds protect against partition-rejoin disruption.
@@ -163,7 +163,7 @@ pub struct PxElectionConfig {
     /// (already classified `FailRetryable`).
     pub learner_stream_window_frames: usize,
     /// Tick interval for the per-group engine-durability + WAL-GC
-    /// maintenance loop (plan-tree #20 follow-up; see
+    /// maintenance loop (follow-up; see
     /// `cluster::group_maintenance`). Previously hardcoded as
     /// `group_maintenance::DEFAULT_MAINTENANCE_TICK`; now a normal
     /// per-group tunable like the other fields here.
@@ -171,7 +171,7 @@ pub struct PxElectionConfig {
 }
 
 impl PxElectionConfig {
-    /// Production / single-DC default. See `doc/design/design-leader-election.md` §10.
+    /// Production / single-DC default.
     pub const DEFAULT: Self = Self {
         prevote_enabled: true,
         heartbeat_interval_ms: 500,
@@ -182,7 +182,7 @@ impl PxElectionConfig {
         bulk_prepare_window: 1024,
         election_driver_disabled: false,
         learner_stream_window_frames: 64,
-        // Matches design-crowtree-snapshot-gc.md §4's periodic GC trigger cadence.
+        // Matches design-crowtree-storage.md §9's periodic GC trigger cadence.
         maintenance_tick_ms: 30_000,
     };
 

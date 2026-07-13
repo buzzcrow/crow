@@ -1,9 +1,10 @@
-//! Client configuration. See `doc/plan-client.md` §5 (C1/C2) and
-//! `requirement.md` §10.2 for the retry-policy defaults this mirrors.
+//! Client configuration. Retry-policy defaults mirror the client
+//! interaction spec (retry on NotLeaderHint, 1s-then-retry on unknown
+//! leader, exponential backoff on transport errors).
 
 use std::time::Duration;
 
-/// Retry policy, per `requirement.md` §10.2:
+/// Retry policy:
 /// - `NotLeaderHint` with a hint: retried immediately, uncounted (forward
 ///   progress toward the real leader).
 /// - Unknown leader / transport error: counted against `max_retries`, with
@@ -50,7 +51,7 @@ impl Default for RetryConfig {
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
     /// HTTP management-API endpoints (`http://host:port`) used to bootstrap
-    /// and refresh the topology cache (`requirement.md` §10.1). At least one
+    /// and refresh the topology cache. At least one
     /// must be reachable for the client to discover any group leader.
     pub mgmt_seeds: Vec<String>,
     /// Number of `tonic::Channel`s kept per gRPC endpoint, round-robined.
@@ -60,7 +61,7 @@ pub struct ClientConfig {
     pub pool_size_per_endpoint: usize,
     /// Minimum interval between two *actual* topology HTTP fetches; bursts
     /// of concurrent refresh requests within this window coalesce into one
-    /// fetch (`plan-client.md` C1 acceptance: "not a storm").
+    /// fetch.
     pub topology_min_refresh_interval: Duration,
     pub retry: RetryConfig,
 }

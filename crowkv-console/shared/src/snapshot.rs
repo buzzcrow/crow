@@ -62,8 +62,8 @@ pub struct LocalReplicaView {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvStoreView {
     pub key_count: u64,
-    /// Mirrors `crowkv`'s `KvStoreStatus::engine_healthy` (doc/todo-sm.md
-    /// Step 2/6). `true` for `InMemKV` always; `false` once a
+    /// Mirrors `crowkv`'s `KvStoreStatus::engine_healthy`. `true` for
+    /// `InMemKV` always; `false` once a
     /// `CrowtreeEngine`'s durable I/O fault has latched.
     #[serde(default = "default_engine_healthy")]
     pub engine_healthy: bool,
@@ -77,7 +77,7 @@ fn default_engine_healthy() -> bool {
     true
 }
 
-/// Mirrors `crowkv`'s `CrowtreeStatsView` (doc/todo-sm.md Step 6) --
+/// Mirrors `crowkv`'s `CrowtreeStatsView` --
 /// batched crowtree engine diagnostics for a single group's local replica.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct CrowtreeStatsSnapshot {

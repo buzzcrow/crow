@@ -1,7 +1,7 @@
 //! C6 end-to-end: spawn `crowkv-server`, create a store/group through the
 //! management API, then via `crowkv-client`'s `CrowkvClient` exercise
 //! put → get → delete → get-not-found → scan. (C6's own gRPC `KvClient`
-//! wrapper is gone -- see `doc/plan-client.md` §5/§6 Issue 4 -- so this
+//! wrapper is gone -- see -- so this
 //! now exercises the real client library `crowkv-web`/`crowkv-cli` use.)
 
 use std::time::Duration;
@@ -159,7 +159,7 @@ async fn put_get_delete_cycle() {
     assert!(out.items.iter().any(|(k, _)| k == b"beta/1"));
     assert!(!out.truncated);
 
-    // Unknown group surfaces ok=false → Err with "group ... not found".
+    // Unknown group surfaces ok=false → Err with "group... not found".
     // Seeded at the same real endpoint so the RPC actually reaches the
     // server and is rejected there (rather than failing client-side on
     // leader discovery for a group the client never learned about).

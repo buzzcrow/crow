@@ -148,12 +148,10 @@ Because apply order is determined by the slot index in memory, the *physical* or
 
 ### 3.4 Segment rotation
 
-A segment is rotated (sealed and a new one opened) when:
-
-- It reaches `wal_segment_size`.
-- Its slot range crosses a major boundary (configurable; helps with GC granularity).
-- An admin command requests it.
-- A group's leader changes (optional; helps with debugging).
+A segment is rotated (sealed and a new one opened) when it reaches
+`wal_segment_size`. (Future: slot-range boundary rotation for GC granularity,
+admin force-rotate, and leader-change rotation are design options not yet
+implemented.)
 
 Sealed segments are immutable.
 
@@ -197,11 +195,10 @@ This gives low latency for a single record while still aggregating bursts natura
 
 The flush worker flushes when any of:
 
-- It is woken by a transition from empty queue to non-empty queue.
-- Pending bytes ≥ `wal_flush_batch_bytes` (default 64 KiB).
-- Optional coalescing budget expires (`wal_flush_coalesce_us`, default 0 µs). This is a microsecond-scale burst-aggregation hint, not a mandatory millisecond delay.
-- Watchdog timer (default 100 ms): protects against bugs where notifications or thresholds are missed.
-- Admin force-flush.
+- It is woken by a transition from empty queue to non-empty queue (`rx.recv().await`).
+- Pending bytes ≥ `wal_flush_batch_bytes` (default 64 KiB) — breaks the drain loop early.
+- Optional coalescing budget (`wal_flush_coalesce_us`, default 0 µs). When non-zero, the writer waits up to `min(coalesce, watchdog)` for more records before flushing.
+- The watchdog (`wal_flush_watchdog_ms`, default 100 ms) caps the coalescing window so the writer never waits longer than that for more records. When coalescing is 0 (default), the watchdog is not used — the writer drains and flushes immediately.
 
 Default behavior is therefore **wake-drain-flush**: a lone record does not wait for 1 ms, while a concurrent burst gets batched because the worker drains all immediately-ready records before issuing I/O. Higher `wal_flush_coalesce_us` values may be enabled for throughput benchmarks, but they are not required for correctness.
 
@@ -339,7 +336,7 @@ On winning election a leader sweeps slots `(floor, ceiling]`:
   is **re-confirmed, not overwritten**. This repairs a leader that restored an
   incomplete or merely-accepted prefix.
 
-(Steady-state gap repair below the frontier uses the same adopt-from-quorum logic, one slot at a time — see [`design-parallel-slots.md`](design-parallel-slots.md).)
+(Steady-state gap repair below the frontier uses the same adopt-from-quorum logic, one slot at a time — see [`design-slot.md`](design-slot.md).)
 
 Parallel slot assignment means holes are normal after crash / restart. Recovery resolves every slot in `(floor, ceiling]` independently:
 
@@ -399,7 +396,7 @@ The watermark for a group's WAL GC is:
    gc_slot = min(safe_slot, snapshot_slot)
 ```
 
-Records with `slot < gc_slot` are eligible for GC. The two-watermark rule is justified in [`design-parallel-slots.md`](design-parallel-slots.md) §11.
+Records with `slot < gc_slot` are eligible for GC. The two-watermark rule is justified in [`design-slot.md`](design-slot.md) §11.
 
 ### 7.2 GC granularity
 
@@ -410,7 +407,7 @@ GC runs at **segment granularity**, not record granularity. A whole segment is u
 GC is triggered by:
 
 - Periodic tick (default 30 s) — the GC worker checks each disk and unlinks eligible segments.
-- Disk-pressure signal — if any WAL disk's usage exceeds `wal_disk_high_watermark` (default 80%), GC runs immediately and may also force a snapshot to advance `snapshot_slot`.
+- Disk-pressure signal (not yet implemented) — if any WAL disk's usage exceeds `wal_disk_high_watermark` (default 80%), GC would run immediately and may also force a snapshot to advance `snapshot_slot`.
 
 ### 7.4 Interaction with leader change
 
@@ -418,7 +415,7 @@ After leader change, the new leader may temporarily not know other acceptors' `c
 
 ### 7.5 Force-retain window
 
-A configurable `wal_min_retention` (default 1 hour, optional) keeps even GC-eligible segments around for a grace period to support post-incident debugging. This is a forensics aid, not a correctness mechanism.
+A configurable `wal_min_retention` (default 1 hour, optional) would keep even GC-eligible segments around for a grace period to support post-incident debugging. **Not yet implemented** — the GC worker currently skips the retention check (V1 simplification).
 
 ---
 
@@ -428,9 +425,9 @@ A configurable `wal_min_retention` (default 1 hour, optional) keeps even GC-elig
 
 When the backend durable-flush operation returns an error, the OS reports the disk read-only, or repeated I/O errors exceed a threshold, the acceptor declares the disk failed:
 
-1. Stop using the disk for new writes.
+1. Stop using the disk for new writes (the `failed` AtomicBool is set; all subsequent `append` calls return `Err`).
 2. Mark the group affected (a multi-disk WAL with one disk lost has incomplete state for slots that landed on the lost disk).
-3. **Fail the node out of the group:** the node sends a step-out RPC to the leader, the leader records the failed acceptor as not-eligible, and (if necessary) triggers a reconfiguration to maintain quorum.
+3. **Fail the node out of the group** (not yet implemented): the node would send a step-out RPC to the leader, the leader records the failed acceptor as not-eligible, and (if necessary) triggers a reconfiguration to maintain quorum.
 4. Rebuild from peers via **snapshot install** ([§8.4 of design.md](../design.md#84-snapshot-and-install)).
 
 This is the **fail-out semantics** decided in [requirement.md §8.1](../requirement.md#81-wal-write-ahead-log). We do not try to keep operating with partial WAL state on the surviving disks; that path requires per-slot replication across disks and adds disproportionate complexity.
@@ -451,16 +448,19 @@ The WAL is per-node. Inter-node consistency is the consensus layer's job. If a n
 
 ## 9. Tunables and Defaults
 
-| Parameter | Default | Range | Notes |
+| Parameter | Field in `WalConfig` | Default | Notes |
 | --- | --- | --- | --- |
-| `wal_disks` | required | ≥ 1 | More → higher throughput |
-| `wal_segment_size` | 64 MiB | 1 MiB – 4 GiB | Trade GC granularity vs file count |
-| `wal_flush_batch_bytes` | 64 KiB | 0 – 16 MiB | Batch cap per durable flush |
-| `wal_flush_coalesce_us` | 0 µs | 0 – 1000 µs | Optional micro coalescing; default wake-drain-flush |
-| `wal_flush_watchdog` | 100 ms | ≥ coalesce budget | Catches batch-stuck bugs |
-| `wal_disk_high_watermark` | 80% | 50% – 95% | Triggers eager GC + snapshot |
-| `wal_min_retention` | 1 h | 0 – 30 d | Forensics retention |
-| `gc_tick` | 30 s | 1 s – 10 min | GC scan cadence |
+| `wal_disks` | `wal_disks` | required | ≥ 1; more → higher throughput |
+| `wal_segment_size` | `wal_segment_size` | 64 MiB | Trade GC granularity vs file count |
+| `wal_flush_batch_bytes` | `wal_flush_batch_bytes` | 64 KiB | Batch cap per durable flush |
+| `wal_flush_coalesce_us` | `wal_flush_coalesce_us` | 0 µs | Optional micro coalescing; default wake-drain-flush |
+| `wal_flush_watchdog_ms` | `wal_flush_watchdog_ms` | 100 ms | Caps coalescing window |
+| `wal_disk_high_watermark_pct` | `wal_disk_high_watermark_pct` | 80% | Triggers eager GC (not yet implemented) |
+| `wal_min_retention_secs` | `wal_min_retention_secs` | 3600 (1 h) | Forensics retention (not yet implemented) |
+| `gc_tick_secs` | `gc_tick_secs` | 30 s | GC scan cadence |
+| `wal_aligned` | `wal_aligned` | false | Selects block-aligned I/O backend |
+| `wal_io_unit_bytes` | `wal_io_unit_bytes` | 4096 | IU size when `wal_aligned` is true |
+| `wal_record_format` | `wal_record_format` | Auto | Binary (zero-copy) or text-line |
 
 **Choosing durable-flush batching:**
 
@@ -484,7 +484,10 @@ The WAL is per-node. Inter-node consistency is the consensus layer's job. If a n
 
 ## 10. Follow-up Implementation Scope
 
-The design deltas above have been implemented. Remaining pending test tasks are tracked in [`plan-test.md`](../plan-test.md):
+Most of the design above has been implemented. The following items are **not yet
+implemented**: disk-pressure-triggered eager GC (§7.3), retention window (§7.5),
+and the full fail-out procedure with step-out RPC and reconfiguration (§8.1).
+Remaining pending test tasks are tracked in [`plan-test.md`](../plan-test.md):
 
 - Slot-affinity WAL placement instead of per-record round-robin.
 - Backend-specific durable flush and alignment semantics.

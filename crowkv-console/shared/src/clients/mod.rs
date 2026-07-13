@@ -8,7 +8,7 @@
 //! KV data-plane gRPC access used to live here too (`grpc::KvClient`,
 //! C6). It's gone: `crowkv-web`'s KV handlers and `crowkv-cli`'s `kv`
 //! commands and bench runner all depend on the standalone `crowkv-client`
-//! crate instead (`doc/plan-client.md` §5/§6 Issue 4) for topology
+//! crate instead for topology
 //! discovery, retry, and connection pooling on top of the same generated
 //! `crowkv::rpc` types.
 

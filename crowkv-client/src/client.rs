@@ -1,4 +1,4 @@
-//! [`CrowkvClient`]: the C1-C3 client library (`doc/plan-client.md` §5) —
+//! [`CrowkvClient`]: the C1-C3 client library (—
 //! topology cache, retry/idempotency, and `ReadMode` routing on top of
 //! `crowkv`'s generated `KvService` client.
 
@@ -49,7 +49,7 @@ pub enum BatchOp {
 /// Standalone `CrowKV` client: topology discovery over the HTTP management
 /// API, per-group leader cache, retry loop reusing `(client_id, seq)` across
 /// retries of one logical write, and `ReadMode` routing including
-/// `ReadYourWrites` client-side slot tracking. See `doc/plan-client.md` §5.
+/// `ReadYourWrites` client-side slot tracking.
 pub struct CrowkvClient {
     topology: TopologyCache,
     pool: ConnectionPool,
@@ -59,7 +59,7 @@ pub struct CrowkvClient {
     /// Per-`(store_id, group_id)` high-watermark of the last write's
     /// `revision`, auto-attached as `client_slot` on `ReadYourWrites` reads.
     /// Bounded by the number of groups this client has written to, not by
-    /// keyspace size (`doc/plan-client.md` §6 Issue 5).
+    /// keyspace size.
     write_watermark: DashMap<(u64, u64), u64>,
 }
 
@@ -76,7 +76,7 @@ impl CrowkvClient {
         }
     }
 
-    /// This client session's opaque `client_id` (`requirement.md` §10.2).
+    /// This client session's opaque `client_id`.
     #[must_use]
     pub fn client_id(&self) -> u64 {
         self.client_id
@@ -110,8 +110,8 @@ impl CrowkvClient {
     }
 
     /// Resolve the current leader endpoint for `(store_id, group_id)`,
-    /// retrying an "unknown leader" outcome per `requirement.md` §10.2
-    /// ("Unknown leader: 1s-then-retry") rather than failing on the first
+    /// retrying an "unknown leader" outcome ("Unknown leader:
+    /// 1s-then-retry") rather than failing on the first
     /// miss. A single failed/empty `/topology` fetch is not conclusive: the
     /// group may simply be mid-election (a real, common case right after a
     /// node restart) or the seed just queried may be transiently down while
@@ -160,12 +160,11 @@ impl CrowkvClient {
     /// idempotency keys (e.g. `crowkv-console`'s HTTP API, which lets an
     /// external caller supply these explicitly); `None` auto-generates and
     /// reuses this client's own `client_id` plus a fresh `seq` across all
-    /// retries of this call (`requirement.md` §10.2).
+    /// retries of this call.
     ///
     /// # Errors
-    /// See [`Error`]. Retries transparently per `requirement.md` §10.2;
-    /// returns `Err` only once the retry budget is exhausted or discovery
-    /// fails outright.
+    /// See [`Error`]. Retries transparently; returns `Err` only once the
+    /// retry budget is exhausted or discovery fails outright.
     pub async fn put(
         &self,
         store_id: u64,
@@ -284,7 +283,7 @@ impl CrowkvClient {
     }
 
     /// `Delete` a single key. `not_found` is reported as a benign
-    /// `WriteOutcome { revision: 0, .. }`, matching `Put`'s idempotent-retry
+    /// `WriteOutcome { revision: 0,.. }`, matching `Put`'s idempotent-retry
     /// shape. `ids` overrides `(client_id, seq)`; see [`Self::put`].
     ///
     /// # Errors
@@ -516,7 +515,7 @@ impl CrowkvClient {
     /// After an [`Self::is_unknown_leader`] failure, give the election a
     /// chance to converge and pick up whatever leader the cache learns in
     /// the meantime, instead of busy-retrying the same non-answering
-    /// replica (`requirement.md` §10.2: "Unknown leader: 1s-then-retry").
+    /// replica ("Unknown leader: 1s-then-retry").
     async fn wait_and_refresh_leader(&self, store_id: u64, group_id: u64, endpoint: &str) -> String {
         let _ = self.topology.refresh().await;
         tokio::time::sleep(self.retry.unknown_leader_wait).await;
@@ -576,8 +575,8 @@ fn next_request_id() -> u64 {
     u64::try_from(nanos).unwrap_or(u64::MAX)
 }
 
-/// A `client_id` unique enough for one client session (`requirement.md`
-/// §10.2: "opaque, assigned once per client session"). Derived from the
+/// A `client_id` unique enough for one client session ("opaque, assigned
+/// once per client session"). Derived from the
 /// process start time in nanoseconds; not a cryptographic identifier.
 fn new_client_id() -> u64 {
     next_request_id()

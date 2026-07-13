@@ -157,7 +157,7 @@ struct AddGroupRequest {
 
 /// Request body for [`join_group_via_snapshot`]: bootstrap a new/far-lagging
 /// group member by pulling a snapshot from an existing member instead of
-/// replaying full Paxos history (plan-tree #20,
+/// replaying full Paxos history (,
 /// `design-crowtree-snapshot-gc.md` §6).
 #[derive(ToSchema, Deserialize)]
 struct JoinGroupRequest {
@@ -176,7 +176,7 @@ struct RemoteReplicaInfo {
     endpoint: String,
     /// Whether this remote counts toward quorum (`PxGroup::recompute_quorum`
     /// only counts voting members). Defaults to `true` for backward
-    /// compatibility with callers predating plan-tree #20's snapshot-join
+    /// compatibility with callers predating snapshot-join
     /// flow. A newly-joined member is typically wired as `false` on its
     /// peers until it has caught up via [`join_group_via_snapshot`], then
     /// promoted with a follow-up call that re-adds it as `true`.
@@ -620,7 +620,7 @@ async fn add_group(
 }
 
 /// `POST /stores/{sid}/groups/{gid}/join` — new-member snapshot join
-/// (plan-tree #20, `design-crowtree-snapshot-gc.md` §6): create this
+///: create this
 /// store's local replica for `gid` and bootstrap its state by pulling a
 /// snapshot from `peer_endpoint` instead of replaying full Paxos history.
 ///
@@ -628,10 +628,10 @@ async fn add_group(
 /// starting its election driver (mirrors `add_group`'s `quorum == 1`
 /// self-election guard) — this replica is not yet part of the group's
 /// topology on either side. The caller's follow-up steps:
-/// 1. `POST .../remotes` on **this** store to wire the group's existing
+/// 1. `POST.../remotes` on **this** store to wire the group's existing
 ///    members as this replica's remotes (`voting: true`, since they're
 ///    already established).
-/// 2. `POST .../remotes` on **each existing member** to add this replica
+/// 2. `POST.../remotes` on **each existing member** to add this replica
 ///    as their remote with `voting: false`, so it starts receiving
 ///    heartbeat/repair catch-up for the WAL tail without affecting quorum.
 /// 3. Once caught up, re-add this replica everywhere with `voting: true`

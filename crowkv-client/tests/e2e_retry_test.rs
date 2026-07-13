@@ -1,4 +1,4 @@
-//! `plan-client.md` C2 acceptance test: "client survives a forced leader
+//! acceptance test: "client survives a forced leader
 //! step-down mid-request with auto-retry, returns the same result."
 //!
 //! Standing up a live election (kill leader, wait for re-vote) inside a
@@ -15,7 +15,7 @@
 //! which is not a public dependency of this crate): node 1 pinned `Leader`,
 //! node 2 pinned `Follower` with `believed_leader` set to node 1, both with
 //! real bound gRPC endpoints wired into each other's `remote_replicas` so
-//! `PxGroup::leader_endpoint()` can produce a real `not_leader_hint`.
+//! `PxGroup::leader_endpoint` can produce a real `not_leader_hint`.
 
 use std::sync::Arc;
 
@@ -56,7 +56,7 @@ async fn start_two_node_cluster() -> (Arc<PxKvStore>, Arc<PxKvStore>) {
         let server = Arc::new(store);
 
         // Placeholder remote endpoints -- real ones aren't known until
-        // `start()` binds the ephemeral port below.
+        // `start` binds the ephemeral port below.
         let remote_replicas: Vec<PxRemoteReplica> = ids
             .iter()
             .filter(|&&other_id| other_id != id)
@@ -146,7 +146,7 @@ async fn client_follows_not_leader_hint_to_real_leader() {
     // `CrowkvClient` is seeded (deliberately, out-of-band from `/topology`)
     // at the follower, simulating a client whose cached leader just
     // stepped down. `put` must transparently follow the hint and complete
-    // at the real leader, per `requirement.md` §10.2 / `plan-client.md` C2.
+    // at the real leader (transparent NotLeaderHint follow + retry).
     let client = CrowkvClient::new(ClientConfig::new(Vec::new()));
     client.seed_leader(STORE_ID, GROUP_ID, follower_addr);
 

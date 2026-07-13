@@ -60,7 +60,7 @@ pub trait LeaderElection {
     fn tenure_cancel(&self) -> CancellationToken;
 
     /// Stamp the term under which this group accepts proposals. Called
-    /// by the election driver on `become_leader()`.
+    /// by the election driver on `become_leader`.
     fn stamp_proposing_term(&self, term: u64);
 
     /// Current value of [`Self::stamp_proposing_term`].
@@ -360,7 +360,7 @@ impl PxGroup {
     /// 4. Reset election deadline (done by the outer driver loop on
     ///    return).
     /// 5. Expire `LeaseState` (`become_follower` already calls
-    ///    `LeaseState::expired()`).
+    ///    `LeaseState::expired`).
     /// 6. Drain in-flight proposals via the propose leadership gate.
     pub(crate) fn step_down(&self, tenure_cancel: &CancellationToken, my_term: u64, reason: StepDownReason) {
         info!(
@@ -382,7 +382,7 @@ impl PxGroup {
             StepDownReason::LeaseUnrenewable | StepDownReason::Admin => my_term,
         };
         // `become_follower` clears the local replica's believed leader id
-        // so observers reading `group.leader_id()` after this point see
+        // so observers reading `group.leader_id` after this point see
         // the "unknown" sentinel until the next heartbeat / vote round.
         self.local_replica().become_follower(target_term);
     }
@@ -610,7 +610,7 @@ impl PxGroup {
                         self.note_peer_applied(peer_id, hb.contiguous_applied);
                         // Refresh this peer's durable-snapshot watermark and
                         // recompute the group's real "durable on leader +
-                        // >=1 peer" snapshot-slot (plan-tree #20).
+                        // >=1 peer" snapshot-slot.
                         self.note_peer_durable(peer_id, hb.durable_snapshot_slot);
                         if acks >= quorum {
                             replica.renew_lease(t_send, cfg);
@@ -634,7 +634,7 @@ impl PxGroup {
     ///
     /// Returns the slot at which a local read is safe to serve (the commit
     /// index captured up-front; under V1 apply==learn it is already applied).
-    /// Two paths, mirroring `requirement.md` §6.2:
+    /// Two paths, mirroring the leader-read fencing model:
     /// - **Lease fast path:** if the read lease is still valid the leader is
     ///   guaranteed to be the only one that could have committed anything, so
     ///   the local applied state is linearizable with no round-trip.
@@ -726,7 +726,7 @@ impl PxGroup {
         // Self-vote only counts if the local replica is itself a voting
         // member -- `quorum` is sized from voting members only, and a
         // non-voting replica has no vote to cast (mirrors the
-        // remote-side `voting_remote_ids()` filter just above).
+        // remote-side `voting_remote_ids` filter just above).
         let mut grants: usize = usize::from(replica.voting);
 
         debug!(
@@ -953,7 +953,7 @@ impl PxGroup {
 /// [`PxGroup::shutdown`] can `cancel` and `await` it deterministically.
 ///
 /// `group` is held weakly inside the task so a forgotten/dropped group
-/// does not leak the driver — the task exits the first time `upgrade()`
+/// does not leak the driver — the task exits the first time `upgrade`
 /// fails.
 #[must_use]
 pub fn spawn(group: Weak<PxGroup>, cfg: PxElectionConfig, cancel: CancellationToken) -> JoinHandle<()> {

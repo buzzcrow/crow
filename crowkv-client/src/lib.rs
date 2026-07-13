@@ -1,10 +1,9 @@
 //! Standalone client library for `CrowKV`.
 //!
-//! Wraps `crowkv`'s generated `KvService` gRPC client with the pieces
-//! `requirement.md` §10 and `doc/plan-client.md` §5 (C1-C3) call for:
+//! Wraps `crowkv`'s generated `KvService` gRPC client with:
 //! - **Topology cache** (`(store_id, group_id) -> leader_endpoint`) sourced
 //!   from `crowkv-server`'s HTTP management API `/topology` (no gRPC
-//!   `DescribeCluster` — see `doc/design/design-rpc.md` §4.2).
+//!   `DescribeCluster`).
 //! - **Retry policy** on `NotLeaderHint` / timeout / other errors, reusing
 //!   the same `(client_id, seq)` across retries of one logical write so the
 //!   server's dedup cache can do its job.
@@ -13,7 +12,7 @@
 //! - A per-endpoint `tonic::Channel` pool.
 //!
 //! `crowkv-console` is expected to depend on this crate rather than rolling
-//! its own gRPC client (`doc/plan-client.md` §6 Issue 4).
+//! its own gRPC client.
 
 mod client;
 mod config;

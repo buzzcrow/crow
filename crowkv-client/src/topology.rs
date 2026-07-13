@@ -1,6 +1,6 @@
 //! Topology cache: `(store_id, group_id) -> leader_endpoint`, sourced from
 //! `crowkv-server`'s HTTP management API (`GET /topology`). There is no gRPC
-//! `DescribeCluster` RPC (`doc/plan-client.md` §6 Issue 3, `design/design-rpc.md`
+//! `DescribeCluster` RPC (, `design/design-rpc.md`
 //! §4.2) — this is the only discovery mechanism.
 
 use std::sync::RwLock;
@@ -27,9 +27,9 @@ pub struct TopologyCache {
     leaders: DashMap<(u64, u64), String>,
     min_refresh_interval: Duration,
     /// Single-flight guard: while held, a fetch is either in flight or was
-    /// just completed within `min_refresh_interval`. Concurrent `refresh()`
+    /// just completed within `min_refresh_interval`. Concurrent `refresh`
     /// callers queue on this lock rather than each issuing their own HTTP
-    /// request (`plan-client.md` C1: "not a storm").
+    /// request (: "not a storm").
     refresh_gate: AsyncMutex<Instant>,
 }
 
@@ -41,7 +41,7 @@ impl TopologyCache {
             http: reqwest::Client::new(),
             leaders: DashMap::new(),
             min_refresh_interval,
-            // Far enough in the past that the first `refresh()` always fetches.
+            // Far enough in the past that the first `refresh` always fetches.
             refresh_gate: AsyncMutex::new(
                 Instant::now()
                     .checked_sub(Duration::from_secs(3600))
@@ -215,8 +215,7 @@ mod tests {
         }
 
         // All 8 concurrent refreshes land within the 5s coalescing window,
-        // so exactly one HTTP fetch should have happened (plan-client.md
-        // C1: "not a storm").
+        // so exactly one HTTP fetch should have happened.
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
