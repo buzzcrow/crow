@@ -226,11 +226,11 @@ pub struct PxLocalReplica {
     shutdown_started: AtomicBool,
     /// Per-replica leader-election counters. Cheap `Relaxed` atomic
     /// increments on the election hot path; consumed by
-    /// `election_metrics_snapshot()` for health / management API.
+    /// `election_metrics_snapshot` for health / management API.
     election_metrics: ElectionMetrics,
     /// Wall-clock-monotonic instant of the most recent accepted
     /// heartbeat (follower side; `None` before the first one). Read
-    /// by `election_metrics_snapshot()` to compute
+    /// by `election_metrics_snapshot` to compute
     /// `last_heartbeat_age_ms`.
     last_heartbeat_at: Mutex<Option<Instant>>,
 }
@@ -445,7 +445,7 @@ impl PxLocalReplica {
     /// so restored state follows the same invariants as live traffic. A
     /// durable engine that reports a non-zero [`KVEngine::resume_from_slot`]
     /// (e.g. [`crate::kv::CrowtreeEngine`] recovered from an on-disk snapshot)
-    /// skips re-`learn()`ing that already-durable prefix — see Pass 2 below
+    /// skips re-`learn`ing that already-durable prefix — see Pass 2 below
     /// for how the learner's frontier is seeded to match what a full replay
     /// would have produced.
     ///
@@ -500,7 +500,7 @@ impl PxLocalReplica {
         //
         // The acceptor was fully rebuilt in Pass 1 (highest-ballot-per-slot
         // wins).  Now we walk every slot that has an accepted entry and
-        // `learn()` it into the state machine.  This is safe because:
+        // `learn` it into the state machine.  This is safe because:
         //
         // - `KVEngine::apply` is idempotent: an op is skipped when
         //   `slot <= resolved_slot(key)`, so re-applying the same slot is a
@@ -514,12 +514,12 @@ impl PxLocalReplica {
         //   do not corrupt the KV state.
         //
         // If the engine reported a resume floor (`resume_from > 0`), skip
-        // re-`learn()`ing that prefix and start the walk at `resume_from +
+        // re-`learn`ing that prefix and start the walk at `resume_from +
         // 1` -- always, even if the term at `resume_from` can't be
         // recovered below. This is not just an optimization: an engine with
         // its own internal durable-floor gate (e.g. crowtree's
         // `MemTable::durable_floor`, set from `resume_from_slot`'s exact
-        // value at `flush()` time) rejects *any* write at `slot <= floor`
+        // value at `flush` time) rejects *any* write at `slot <= floor`
         // regardless of key -- stronger than the per-key highest-slot-wins
         // `KVEngine::apply` documents -- so re-attempting a write below the
         // floor isn't just redundant, it can silently no-op a key that slot
@@ -926,7 +926,7 @@ impl PxLocalReplica {
     }
 
     /// Point-in-time status for the topology endpoint. Exposes only cheap
-    /// (`O(1)`) data: the kv-store key count via `DashMap::len()`.
+    /// (`O(1)`) data: the kv-store key count via `DashMap::len`.
     #[allow(clippy::cast_possible_truncation)]
     #[must_use]
     pub fn status(&self) -> ReplicaStatus {
@@ -1055,7 +1055,7 @@ impl PxLocalReplica {
     /// (the leader's committed/chosen frontier, carried on each heartbeat).
     ///
     /// Walks the contiguous-applied prefix forward: for each next slot it reads
-    /// the highest-ballot value the acceptor holds and `learn()`s it. Stops at
+    /// the highest-ballot value the acceptor holds and `learn`s it. Stops at
     /// the first gap (a slot this replica has not accepted yet) — the prefix is
     /// contiguous by construction, and the leader's heartbeat catch-up
     /// re-sends the missing `Accepted` so the next heartbeat can continue.
@@ -1318,7 +1318,7 @@ impl PxLocalReplica {
         // advances) -- `0` when there is no WAL (e.g. testkit setups), matching the
         // always-safe default `KVEngine::persist_snapshot` itself documents. The
         // leader aggregates this across every voting peer's heartbeat reply into
-        // `PxGroup::group_snapshot_slot` (plan-tree #20).
+        // `PxGroup::group_snapshot_slot`.
         let durable_snapshot_slot = self.wal().map_or(0, |w| w.snapshot_slot());
         trace!(
             replica_l_id = self.id,
@@ -1340,7 +1340,7 @@ impl PxLocalReplica {
     }
 
     /// `StepDown` handler. Strict-fence policy:
-    /// accept iff `self.is_leader() && self.id == req.target_leader_id &&
+    /// accept iff `self.is_leader && self.id == req.target_leader_id &&
     /// req.term == current_term`. On accept the replica becomes a follower in
     /// the same term; the election driver picks up the role change
     /// on its next tick and runs the full step-down sequence (cancel bulk

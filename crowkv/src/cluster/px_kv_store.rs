@@ -436,7 +436,7 @@ impl PxKvStore {
 
     /// Resolve the consistency discipline for a read on `group` and, when the
     /// read may be served locally, the slot it is served at. Mirrors
-    /// `requirement.md` §6.4:
+    /// the consistency model:
     ///
     /// * **Linearizable** — on the leader, run the lease / `ReadIndex` barrier
     ///   ([`PxGroup::linearizable_read_barrier`]). A non-leader (or a leader

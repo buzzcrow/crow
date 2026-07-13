@@ -1,7 +1,7 @@
 # CrowKV Test Task Backlog
 
 Unfinished test tasks, grouped by layer. Each task has a checkbox for tracking.
-For test strategy, layer scope, and coverage details, see `test.md`.
+For test strategy, layer scope, and coverage details, see [`design/design-test.md`](design/design-test.md).
 
 ## Election Unit
 
@@ -16,8 +16,8 @@ For test strategy, layer scope, and coverage details, see `test.md`.
 
 ## Group
 
-- [ ] **KV operation correctness**: all op types and orderings through group `propose` — Put, overwrite, Delete, delete non-existent, batch with multiple puts, intra-batch last-wins, put-then-delete, delete-then-put, empty batch, mixed ops across slots. Verify via `engine_get` on all replicas (see `test.md` KV op correctness rule).
-- [ ] **PeerStream** (`cluster/peer_stream.rs`): bidi-stream framing, flow control, parallel in-flight slots, stream re-establish after drop.
+- [ ] **KV operation correctness**: all op types and orderings through group `propose` — Put, overwrite, Delete, delete non-existent, batch with multiple puts, intra-batch last-wins, put-then-delete, delete-then-put, empty batch, mixed ops across slots. Verify via `engine_get` on all replicas (see [`design/design-test.md`](design/design-test.md) KV op correctness rule).
+- [ ] **LearnerStream** (`cluster/learner_stream.rs`): bidi-stream framing, flow control, parallel in-flight slots, stream re-establish after drop.
 - [ ] **Recovery above the durable-commit watermark** via bulk Phase 1 / heartbeat catch-up on a fresh follower.
 - [ ] **Leader-kill + restart no-data-loss** at full speed (blocked by repair-correctness).
 - [ ] Two-replica even-quorum behaviour (no progress without both up) as an explicit assertion.
@@ -25,7 +25,7 @@ For test strategy, layer scope, and coverage details, see `test.md`.
 
 ## Store
 
-- [ ] **KV operation correctness**: all op types and orderings through `PxKvStore` public API (`kv_put`, `kv_delete`, `kv_batch_write`) — same checklist as group layer. Verify via `kv_get` and `engine_get` (see `test.md` KV op correctness rule).
+- [ ] **KV operation correctness**: all op types and orderings through `PxKvStore` public API (`kv_put`, `kv_delete`, `kv_batch_write`) — same checklist as group layer. Verify via `kv_get` and `engine_get` (see [`design/design-test.md`](design/design-test.md) KV op correctness rule).
 - [ ] **Multi-node, multi-group store**: ≥3 nodes each hosting the same set of groups; assert per-group isolation and independent leadership.
 - [ ] Per-group WAL-root isolation on one node (no cross-group slot/key bleed) at the store layer.
 - [ ] Store-wide graceful shutdown with multiple active groups under load.

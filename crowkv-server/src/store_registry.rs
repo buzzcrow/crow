@@ -16,8 +16,8 @@ use std::sync::Mutex;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KvEngineKind {
     /// In-memory, non-durable `InMemKV`. No longer the `--kv-engine` CLI
-    /// default (flipped to `Crowtree` in `doc/todo-sm.md` Step 5) — kept as
-    /// the explicit low-durability/test/dev choice, and as the placeholder
+    /// default (flipped to `Crowtree`) — kept as the explicit
+    /// low-durability/test/dev choice, and as the placeholder
     /// value here before `KvStoreRegistry::with_kv_engine` applies the
     /// CLI-parsed choice.
     Memory,
@@ -60,7 +60,7 @@ pub struct KvStoreRegistry {
     /// Root directory for durable per-group crowtree files. Only read when
     /// `kv_engine == KvEngineKind::Crowtree`.
     pub data_root: PathBuf,
-    /// Durable backend for the crowtree engine (plan-tree #22). Only read
+    /// Durable backend for the crowtree engine. Only read
     /// when `kv_engine == KvEngineKind::Crowtree`.
     pub crowtree_backend: CrowtreeBackend,
     /// Port pool for KV server listeners, populated from `--ports` CLI arg.
@@ -129,7 +129,7 @@ impl KvStoreRegistry {
         self
     }
 
-    /// Builder-style setter for [`Self::crowtree_backend`] (plan-tree #22),
+    /// Builder-style setter for [`Self::crowtree_backend`],
     /// used by `main.rs` right after construction alongside
     /// [`Self::with_kv_engine`].
     #[must_use]

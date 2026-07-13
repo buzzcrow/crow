@@ -86,8 +86,8 @@ pub enum PxPrepareReply {
     },
     /// The request's election term is lower than the responder's
     /// `current_term`. The proposer (a stale leader) must step down and
-    /// adopt `new_term`. Two-fence rule, see
-    /// `doc/design/design-leader-election.md` §2.3 + §9 term fencing.
+    /// adopt `new_term`. Two-fence rule: term fencing on both election
+    /// and Paxos ballot.
     TermStale { slot: SlotIndex, new_term: u64 },
     /// The proposer's `membership_epoch` does not exactly match the
     /// responder's own. Distinct from `Rejected`: this is not a ballot

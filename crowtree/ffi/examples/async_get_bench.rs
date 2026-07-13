@@ -1,5 +1,5 @@
-//! Manual latency comparison for plan-tree #11 Phase 5: `AsyncCrowtree`'s
-//! reactor-driven `get()` (Phase 3) vs. the `spawn_blocking` bridge it
+//! Manual latency comparison for Phase 5: `AsyncCrowtree`'s
+//! reactor-driven `get` (Phase 3) vs. the `spawn_blocking` bridge it
 //! replaced, for both the fast (resident hit) and slow (demand-load miss)
 //! paths.
 //!
@@ -34,7 +34,7 @@ fn report(label: &str, mut samples: Vec<Duration>) {
     );
 }
 
-/// The new path (plan-tree #11 Phase 3): drives the reactor directly.
+/// The new path: drives the reactor directly.
 async fn bench_new(tree: &AsyncCrowtree, keys: &[Vec<u8>], evict_each: bool) -> Vec<Duration> {
     let mut samples = Vec::with_capacity(keys.len());
     for k in keys {
@@ -78,7 +78,7 @@ fn main() {
 }
 
 /// `value_len` matters specifically for Phase 4 (design §5's zero-copy fast
-/// path, plan-tree.md #11): a value small enough to fit `buffer`'s SBO
+/// path, ): a value small enough to fit `buffer`'s SBO
 /// (`kInlineCap` = 24 B) makes the copies Phase 4 removes cheap regardless
 /// (a few-byte memcpy is noise either way), so the win only shows up
 /// clearly for a value past that threshold -- run both sizes to see it.

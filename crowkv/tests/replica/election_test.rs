@@ -11,8 +11,8 @@ use crowkv::paxos::learner::PxLearner;
 use crowkv::paxos::roles::{Learner, PxAcceptReply, PxBallot, PxLogEntry};
 
 /// A `NoOp` entry should advance the chosen / applied
-/// watermarks without inserting any key into the store. (See
-/// `doc/design/design-leader-election.md` §4 bulk Phase-1 gap fill.)
+/// watermarks without inserting any key into the store. (Bulk Phase-1
+/// gap fill: a NoOp entry advances chosen/applied without a KV mutation.)
 #[test]
 fn noop_apply_path() {
     let learner = PxLearner::new();

@@ -34,8 +34,8 @@ pub enum PxPaxosError {
     /// Stale leader detected by a peer (peer's `current_term > req.term`).
     /// The proposer must step down to follower and adopt `current_term`.
     /// Classified `FailFatal` for the in-flight proposal; the group-level
-    /// driver triggers `become_follower(current_term)`. See
-    /// `doc/design/design-leader-election.md` §2.3 + §9 term fencing.
+    /// driver triggers `become_follower(current_term)`. Two-fence rule:
+    /// term fencing on both election and Paxos ballot.
     TermStale {
         current_term: u64,
     },

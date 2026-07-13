@@ -1,5 +1,5 @@
 //! Per-group engine durability + WAL GC maintenance loop
-//! (`design-crowtree-snapshot-gc.md`).
+//! (`design-crowtree-storage.md`).
 //!
 //! Periodically, for the local replica of one group:
 //!
@@ -7,7 +7,7 @@
 //!    ([`KVEngine::persist_snapshot`](crate::kv::KVEngine::persist_snapshot))
 //!    -- a no-op for `InMemKV`; for `CrowtreeEngine` this is what makes
 //!    [`KVEngine::resume_from_slot`](crate::kv::KVEngine::resume_from_slot)
-//!    non-zero on a real restart (plan-tree #20). Purely local: every
+//!    non-zero on a real restart. Purely local: every
 //!    replica (leader or follower) does this independently of group-wide
 //!    agreement, gated only on its own applied progress.
 //! 2. Advances the engine's GC retention watermark and sweeps it
@@ -22,7 +22,7 @@
 //! `set_gc_watermark`'s two inputs are `snapshot_slot` (design §1: state
 //! durable on the leader plus at least one peer) and `safe_slot` (design §1:
 //! state every learner has applied). `snapshot_slot` is
-//! [`PxGroup::group_snapshot_slot`] (plan-tree #20): each replica's own
+//! [`PxGroup::group_snapshot_slot`]: each replica's own
 //! `WalEngine::snapshot_slot` (updated below, right after `persist_snapshot`
 //! advances it) is gossiped to the leader piggybacked on the same heartbeat
 //! round as `contiguous_applied` (see `HeartbeatReply::durable_snapshot_slot`
@@ -47,7 +47,7 @@ use crate::wal::gc::run_gc_with_watermark;
 /// or `election_cfg.election_driver_disabled` is set (reused here too:
 /// legacy pinned-leader tests that want no per-group background tasks
 /// already set this). Tick interval is `election_cfg.maintenance_tick_ms`
-/// (plan-tree #20 follow-up: previously a hardcoded
+/// (follow-up: previously a hardcoded
 /// `DEFAULT_MAINTENANCE_TICK` constant here, now a normal per-group
 /// tunable alongside the election timings on `PxElectionConfig`).
 pub(crate) async fn start(group: &Arc<PxGroup>) {
@@ -65,7 +65,7 @@ pub(crate) async fn start(group: &Arc<PxGroup>) {
 
 /// Spawn the per-group maintenance loop task directly (used by [`start`]
 /// and available to tests that want a non-default tick). Held weakly so a
-/// dropped group does not leak the task; exits the first time `upgrade()`
+/// dropped group does not leak the task; exits the first time `upgrade`
 /// fails or `cancel` fires.
 #[must_use]
 pub fn spawn(group: Weak<PxGroup>, tick: Duration, cancel: CancellationToken) -> JoinHandle<()> {
@@ -88,8 +88,8 @@ async fn maintenance_loop(group: Weak<PxGroup>, tick: Duration, cancel: Cancella
 pub(crate) async fn run_pass(group: &PxGroup) {
     let engine = group.local_replica().learner.engine();
     if !engine.is_healthy() {
-        // No automatic step-out trigger exists yet (`doc/todo-sm.md` G2) --
-        // this is the observability half of that gap: a persistently
+        // No automatic step-out trigger exists yet -- this is the
+        // observability half of that gap: a persistently
         // unhealthy engine is now at least loudly, repeatedly logged on
         // every maintenance tick instead of being silently invisible
         // outside of an explicit health-check call.

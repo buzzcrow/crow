@@ -149,7 +149,10 @@ struct Rack  { id: RackId,  name: Option<String>, nodes: Vec<NodeId> }
 struct Node {
     id: NodeId, rack_id: RackId,
     host: String,                         // 127.0.0.1 by default
-    ssh: SshCreds,                        // user + (password|key)
+    ssh_port: u16,                        // default 22
+    ssh_user: String,                     // empty = local-fork lifecycle (no SSH)
+    ssh_key: Option<PathBuf>,             // None = ~/.ssh/id_ed25519 then id_rsa
+    ssh_password: Option<String>,         // mutually exclusive with ssh_key
     server: Option<ServerProcess>,        // 0 or 1, console-enforced
 }
 
@@ -157,12 +160,15 @@ struct ServerProcess {
     mgmt_url: String,                     // intended endpoint; persisted
     grpc_url: String,                     // intended endpoint; persisted
     pid: Option<u32>,                     // live cache; refreshed by monitor
-    state: ProcState,                     // live cache: Stopped|Starting|Running|Failed
+    state: ProcState,                     // live cache: Unknown|Stopped|Starting|Running|Failed
     health: NodeHealth,                   // live cache: Up|Down|Unknown
     last_seen_ms: u64,                    // live cache
 }
 
 enum SshCreds {
+    // Not a separate enum in the implementation; NodeEntry carries
+    // flat fields (ssh_user, ssh_key, ssh_password). When ssh_user is
+    // empty, the node uses local-fork lifecycle instead of SSH.
     KeyDefault { user },
     KeyPath    { user, key_path },
     Password   { user, pass },
@@ -257,8 +263,7 @@ struct ReplicaView {
 
 ### 4.1 Persisted state (config file)
 
-- Single TOML file: `log/crowkv-console-db.toml` in the project root
-  (override with `$CROWKV_CONSOLE_CONFIG`).
+- Single TOML file: `~/.crowkv/console.toml` (override with `$CROWKV_CONSOLE_CONFIG`).
 - Contents:
   - `rack` / `node` entries (id, rack_id, host, SSH creds).
   - Optional per-node server deployment record: management endpoint,
@@ -314,13 +319,27 @@ long-running monitor task that owns the live cache:
 
 
 ### 5.3 Process lifecycle (deploy / start / stop)
-1. SSH into node.
-2. Ensure binary exists at `/opt/crowkv/bin/crowkv-server` (scp on first deploy).
-3. Render config template; write to `/opt/crowkv/etc/<node-id>.toml`.
-4. `nohup crowkv-server --config ... &`; capture pid; record in the persisted node server entry.
-5. Health-check via the new server's HTTP `/health` until ready or timeout.
 
-`server start` and `server stop` address a node. There is no separate
+**SSH path** (`ssh_user` non-empty):
+1. SSH into node (`russh` crate, pure Rust async).
+2. `nohup crowkv-server --management-addr 127.0.0.1 --management-port <p> --ports <gp> &`;
+   capture pid via `echo $!`; record in the persisted node server entry.
+3. Health-check via the new server's HTTP `/health` until ready or timeout (10 s).
+
+**Local-fork path** (`ssh_user` empty, for tests/dev on `127.0.0.1`):
+1. `tokio::process::Command::new(crowkv-server)` with the same args.
+2. Stage the binary into a per-node workspace directory (`runtime-data/N-<node_id>/`).
+3. Detach the child (do not kill on drop); track the pid.
+4. Health-check via `/health`.
+
+Binary resolution: `$CROWKV_SERVER_BIN` → sibling of current executable →
+`$PATH` lookup for `crowkv-server`.
+
+(Future: scp the binary to the remote host on first deploy and render
+a config template. Not yet implemented — the SSH path assumes the
+binary is already present on the remote host.)
+
+`server deploy`, `server restart`, and `server stop` address a node. There is no separate
 server id namespace in the console API.
 
 ## 6. Web UI Backend (Axum)
@@ -428,8 +447,8 @@ out in §3.1.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET    | `/api/nodes/:node_id/server`         | Runtime info (`mgmt_url`, `grpc_url`, `pid`, `state`, `health`); 404 if not deployed. |
-| POST   | `/api/nodes/:node_id/server/deploy`  | Deploy and start. Body `{ mgmt_port, grpc_port, binary? }`. Idempotent — returns the existing process if already deployed and matches. |
-| POST   | `/api/nodes/:node_id/server/start`   | Start (re-start) an already-deployed process. |
+| POST   | `/api/nodes/:node_id/server/deploy`  | Deploy and start. Body `{ mgmt_port, grpc_port, binary? }`. Returns 409 if already deployed. |
+| POST   | `/api/nodes/:node_id/server/restart` | Stop (if running) and re-deploy on the same ports. Idempotent — works even if the process crashed out-of-band. |
 | POST   | `/api/nodes/:node_id/server/stop`    | Stop the process. The deploy artefacts remain. |
 | DELETE | `/api/nodes/:node_id/server`         | Stop and remove the deployment record (409 if replicas still live there). |
 | GET    | `/api/nodes/:node_id/openapi.json`   | Reverse-proxy that node's `/openapi.json`. |
@@ -613,10 +632,10 @@ embedding contract, panel layout, polling model) lives in
 
 - Binary: `crowkv` (the noun-verb command structure is self-explanatory).
 - Parser: `clap` derive; one module per top-level group, each verb a subcommand struct.
-- Output: pretty table (`comfy-table`) by default; `--json` global flag for scripting.
+- Output: JSON via `serde_json::to_string_pretty` by default; `--json` global flag is a no-op (output is always JSON for scripting). Human-readable table formatting is a future enhancement.
 - Global flags: `--console <url>` (default `http://127.0.0.1:9920`),
   `--config <path>`, `--json`, `-v` / `-vv`.
-- Command hierarchy as defined in `requirement.md` §15.4.5 ("CLI Command Hierarchy").
+- Command hierarchy as defined in [§12](#12-cli-command-hierarchy-moved-from-requirementmd-1545) ("CLI Command Hierarchy").
 - **One call path.** Every verb — including cluster observation
   (`cluster status/topology/inspect`) and `bench` — routes through
   `ConsoleClient` against `crowkv-web`. The CLI never talks to a
@@ -747,3 +766,80 @@ This makes any failed operation reproducible by copy-pasting the recorded comman
 - **Frontend bundle**: built on demand during development. The `web/ui/` directory is the source; `npm run build` produces `dist/` which the Axum server serves. The committed repo does **not** include `web/dist/`. Production / release builds run `npm ci && npm run build` as part of `make`.
 - **Credentials storage**: plaintext TOML, accessed only through the `ConsoleConfig` struct so the source can change later without touching call sites.
 - **Multiple servers per node**: UI and console operations enforce one. The data model and `crowkv-server` itself remain unrestricted; lower-layer tests can still spawn many.
+
+---
+
+## 12. CLI Command Hierarchy (moved from `requirement.md` §15.4.5)
+
+> **Moved 2026-07.** The CLI uses a two-layer command structure:
+> `crowkv <group> <verb> [options]`. Top-level groups separate concerns;
+> verbs are consistent within a group.
+
+```
+crowkv
+├── cluster              # observation
+│   ├── status           # high-level health summary
+│   ├── topology         # print full hierarchy
+│   └── inspect <id>     # detailed view of one entity
+│
+├── rack                 # simulated hardware: racks
+│   ├── add <name>
+│   ├── remove <name>
+│   └── list
+│
+├── node                 # simulated hardware: nodes
+│   ├── add --rack <r> --host <addr> --ssh-user <u> [--ssh-pass | --ssh-key]
+│   ├── remove <node>
+│   ├── list
+│   └── ping <node>      # SSH + HTTP reachability
+│
+├── server               # crowkv-server lifecycle on a node
+│   ├── deploy --node-id <n> [--mgmt-port <p> --grpc-port <p>]
+│   ├── restart --node-id <n>
+│   ├── stop --node-id <n>
+│   └── list
+│
+├── store                # store mgmt (logical, cluster-wide)
+│   ├── add --store-id <id> --nodes <n1,n2,...>
+│   ├── remove --store-id <id>
+│   └── list
+│
+├── group                # paxos group mgmt
+│   ├── add --store-id <s> --group-id <id> --replica-id <r> --nodes <n1,n2,...>
+│   ├── remove --store-id <s> --group-id <id>
+│   ├── list --store-id <s>
+│   └── inspect --store-id <s> --group-id <id>
+│
+├── replica              # add/remove individual replicas
+│   ├── add --store-id <s> --group-id <g> --node <n> [--replica-id <r>]
+│   └── remove --store-id <s> --group-id <g> --replica-id <r>
+│
+├── kv                   # data plane
+│   ├── put --store-id <s> --group-id <g> <key> <value>
+│   ├── get --store-id <s> --group-id <g> <key>
+│   ├── delete --store-id <s> --group-id <g> <key>
+│   ├── scan --store-id <s> --group-id <g> [--prefix <p>] [--limit N]
+│   └── list --store-id <s> --group-id <g> [--prefix <p>]
+│
+└── bench                # load testing (CLI-only)
+    ├── run --workload <name> [--qps N --duration T ...]
+    ├── stress --duration T --target-qps N
+    └── report <run-id>
+```
+
+Design rules:
+- **Two layers max** — `crowkv <group> <verb>`. No three-level chains.
+- Verb vocabulary stays consistent: `add / remove / list / inspect`.
+  Lifecycle verbs (`deploy / start / stop`) are reserved for `server`;
+  data verbs (`put / get / delete / scan / list`) for `kv`.
+- Every command targets the same shared core library; CLI is a thin
+  argument-parsing layer.
+- Output: human-friendly table by default, `--json` flag for scripting.
+- **Logical entity addressing**: store/group/replica/KV commands use
+  `--store-id` / `--group-id` (cluster-wide logical ids); the backend
+  resolves placement from topology. Server lifecycle uses `--node-id`
+  (one server per node).
+- **Leaders are elected, not assigned.** `group add` takes no `--leader`
+  flag: group leadership is decided by Paxos election among the replicas,
+  and the console exposes no forced-leadership control. Operators observe
+  the elected leader via `group inspect` / `cluster inspect`.

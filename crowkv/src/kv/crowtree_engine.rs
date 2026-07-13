@@ -14,14 +14,13 @@ pub use crowtree_ffi::Stats as CrowtreeStats;
 ///
 /// `KVEngine::get`/`scan`/`apply` return [`KVFuture`]. `get` and `scan` both
 /// genuinely construct [`KVFuture::Pending`] for a cold-leaf miss
-/// (plan-tree.md #11 Phase 6), via [`AsyncCrowtree::try_get`]/
+/// , via [`AsyncCrowtree::try_get`]/
 /// [`AsyncCrowtree::try_scan`] respectively -- a resident hit/miss
 /// (`GetOutcome`/`ScanOutcome`'s `Ready` variant, the overwhelmingly common
 /// case) still costs nothing beyond the enum tag, same as before this
 /// wiring landed. `apply` stays [`KVFuture::ready`]-only: crowtree has no
 /// `ct_apply_*_async` C API yet (only `ct_get_async`/`ct_scan_async`/
-/// `ct_flush_async`/`ct_snapshot_async` exist -- see
-/// `doc/design/design-crowtree-async.md` §4's table), so it can't
+/// `ct_flush_async`/`ct_snapshot_async` exist), so it can't
 /// genuinely wait on the reactor today; a synchronous crowtree call in its
 /// place is an unchanged, honest reflection of what the C API actually
 /// offers, not a shortcut taken here.
@@ -61,7 +60,7 @@ impl CrowtreeEngine {
         self.inner.handle()
     }
 
-    /// Batched diagnostics snapshot (doc/todo-sm.md Step 6): durable/GC
+    /// Batched diagnostics snapshot: durable/GC
     /// watermarks, `io_failed`, last-snapshot page/segment counts, and
     /// buffer-pool occupancy/hit-rate counters. Engine-specific (like
     /// [`Self::handle`]) rather than on the generic [`KVEngine`] trait --
@@ -175,7 +174,7 @@ impl KVEngine for CrowtreeEngine {
         // reset) `Crowtree::install_snapshot` already performs on a live
         // tree before loading imported entries -- not a bespoke reset.
         // Not durable by itself: a caller that needs the wipe to survive a
-        // crash must still call `persist_snapshot`/`handle().flush()`
+        // crash must still call `persist_snapshot`/`handle.flush`
         // afterward, same as `snapshot_import`'s own contract.
         //
         // `unwrap`: the only failure mode `Crowtree::clear` has is an
@@ -189,9 +188,9 @@ impl KVEngine for CrowtreeEngine {
     }
 
     fn is_healthy(&self) -> bool {
-        // `io_failed()` is a latched flag set when a demand-load hit an I/O
+        // `io_failed` is a latched flag set when a demand-load hit an I/O
         // error or CRC mismatch on a committed page; it stays set until an
-        // explicit `clear_io_error()`, which nothing in this codebase calls
+        // explicit `clear_io_error`, which nothing in this codebase calls
         // yet -- so once tripped, this stays `false` for the engine's
         // lifetime, which is the intended "fail out, don't silently retry"
         // semantics for a durable-storage fault.
@@ -200,12 +199,12 @@ impl KVEngine for CrowtreeEngine {
 
     fn resume_from_slot(&self) -> u64 {
         // `Crowtree::last_applied_slot` is `contiguous_slot_` as of the last
-        // `flush()` (see `Crowtree::apply`/`flush`/`recompute_contiguous_locked`
+        // `flush` (see `Crowtree::apply`/`flush`/`recompute_contiguous_locked`
         // in crowtree.cpp) -- a durable, gap-free watermark, not just "the max
         // slot ever seen". On a fresh in-memory engine (`path: None`) or an
         // empty durable file this is `0`. On a recovered durable file it's
         // whatever the on-disk superblock last recorded (`persist.cpp`),
-        // which only advances via an explicit `snapshot()`/persist -- a
+        // which only advances via an explicit `snapshot`/persist -- a
         // conservative floor if no such call happened right before the
         // process that wrote this file exited, which is fine (see the trait
         // doc: under-reporting only means more, still-safe, replay work).
@@ -218,7 +217,7 @@ impl KVEngine for CrowtreeEngine {
         // L0 itself (that's `flush`'s job; `snapshot` only walks the
         // already-durable-tree side). Flush first so a snapshot taken right
         // after a burst of `apply` calls captures them, instead of
-        // silently persisting only whatever an earlier `flush()` already
+        // silently persisting only whatever an earlier `flush` already
         // moved into L1.
         let _ = self.inner.handle().flush();
         self.inner.handle().snapshot().unwrap_or(0)
@@ -234,7 +233,7 @@ impl KVEngine for CrowtreeEngine {
 
     fn snapshot_export(&self) -> Result<(u64, Vec<u8>), String> {
         // Flush first so the export reflects every `apply` up to now, not
-        // just whatever an earlier `flush()` already moved into L1 --
+        // just whatever an earlier `flush` already moved into L1 --
         // same reasoning as `iter_all`/`persist_snapshot` above.
         let _ = self.inner.handle().flush();
         let stream = self.inner.handle().snapshot_export().map_err(|e| e.to_string())?;
@@ -249,7 +248,7 @@ impl KVEngine for CrowtreeEngine {
             .map_err(|e| e.to_string())
     }
 
-    // `compare` uses the trait's default implementation (diffs `iter_all()`
+    // `compare` uses the trait's default implementation (diffs `iter_all`
     // of both sides); no override needed.
 }
 

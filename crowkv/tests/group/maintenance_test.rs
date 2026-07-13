@@ -126,7 +126,7 @@ async fn maintenance_pass_persists_snapshot_and_gcs_wal_segments_once_safe() {
     group.run_maintenance_pass_for_tests().await;
 
     // `persist_snapshot` durably covers exactly the 15 slots that were
-    // `learn()`ed with real payloads, and that's what gets fed into the
+    // `learn`ed with real payloads, and that's what gets fed into the
     // WAL's own snapshot_slot marker.
     assert_eq!(wal.snapshot_slot(), 15);
 
@@ -143,7 +143,7 @@ async fn maintenance_pass_persists_snapshot_and_gcs_wal_segments_once_safe() {
     assert!(!result.records.is_empty());
 }
 
-/// plan-tree #20 follow-up: the maintenance loop's tick interval is a
+/// follow-up: the maintenance loop's tick interval is a
 /// normal per-group tunable (`PxElectionConfig::maintenance_tick_ms`), not
 /// a hardcoded constant. Configure a very short tick, start the *real*
 /// periodic loop (not `run_maintenance_pass_for_tests`'s direct call), and
@@ -259,7 +259,7 @@ async fn maintenance_pass_does_not_gc_wal_when_safe_slot_lags_snapshot() {
     // The engine still persists its own snapshot regardless (purely local
     // decision)...
     assert_eq!(wal.snapshot_slot(), 15);
-    // ...but WAL GC stays fully blocked by the lagging peer's safe_slot.
+    //...but WAL GC stays fully blocked by the lagging peer's safe_slot.
     let seg_count_after = wal.index().lock().segments().count();
     assert_eq!(
         seg_count_after, seg_count_before,

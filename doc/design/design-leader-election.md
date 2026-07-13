@@ -76,7 +76,8 @@ The protocol matches Raft's leader election with adaptations for the bulk Phase-
 Each member is exactly one of:
 
 - **Follower** — accepts heartbeats and `Accept`s from a leader.
-- **Candidate** — has timed out and is collecting votes.
+- **PreCandidate** — running a `PreVote` round (see §3.2a); has not yet bumped `current_term`.
+- **Candidate** — has bumped `current_term` and is collecting votes.
 - **Leader** — won the latest election; serves writes.
 
 ### 3.2 Election trigger
@@ -85,10 +86,12 @@ A follower starts an election when its **election timer** expires. The timer is 
 
 When the timer fires:
 
-1. Follower transitions to candidate.
-2. Increments `current_term`, persists.
+1. (PreVote, enabled by default) Follower transitions to PreCandidate and sends `PreVote(proposed_term, candidate_id, accepted_log_tip_slot, accepted_log_tip_term)` to all peers *without* bumping `current_term`. If a quorum grants, proceeds to step 2. If a peer reports a higher term, reverts to follower. If quorum is not reached, reverts to follower and waits for the next deadline.
+2. Follower transitions to Candidate, bumps `current_term` to `proposed_term`, persists (`VoteGranted` WAL record).
 3. Votes for itself.
-4. Sends `RequestVote(term, candidate_id, last_chosen_slot, last_chosen_term)` to all peers.
+4. Sends `RequestVote(term, candidate_id, accepted_log_tip_slot, accepted_log_tip_term)` to all peers.
+
+> **PreVote** (Raft optimization, ON by default): avoids spurious term increments from a partitioned-and-rejoined node. A node that was partitioned can rejoin and ask "would you vote for me?" without disrupting the current leader's term.
 
 ### 3.3 Vote rules (matching Raft)
 
@@ -96,7 +99,8 @@ A peer grants its vote iff:
 
 - The request's `term` is ≥ peer's `current_term`. If higher, peer adopts the new term and reverts to follower first.
 - The peer has not already voted in this term, or already voted for the same candidate.
-- The candidate's log is **at least as up-to-date** as the peer's, where up-to-date is the lexicographic comparison `(last_chosen_term, last_chosen_slot)`.
+- The candidate's acceptor log is **at least as up-to-date** as the peer's, where up-to-date is the lexicographic comparison `(accepted_log_tip_term, accepted_log_tip_slot)`.
+- The peer's `vote_lockout_until` has passed (no active lease promise from a heartbeat).
 
 The "log up-to-date" check is the safety property that prevents a stale leader from being elected.
 
@@ -116,14 +120,14 @@ A freshly elected leader does not immediately serve client writes. It first runs
 
 When the leader takes office, it computes:
 
-- `floor = max(its own contiguous_chosen, peers' contiguous_chosen seen during election)`.
-- `ceiling = max(slot ever seen in any state on this leader's persistent state)`.
+- `floor = its own contiguous_chosen` (deliberately NOT maxed with peers' `contiguous_chosen`). After a restart, a replica can win election while missing committed slots it never received (the value lived only as a `ChosenNotice` watermark, which carries no payload). Maxing with peers' commit point would skip exactly those slots, leaving the new leader serving a stale value for a committed key. Sweeping from the leader's own frontier forces Phase 1 to re-derive every higher slot from the quorum.
+- `ceiling = max(local highest_seen_slot, next_slot - 1, peers' highest_seen_slot from election replies)`.
 
 The open prefix is `[floor + 1, ceiling]`. If a previous leader had assigned slots beyond what any current acceptor knows about, those slots are simply not in this set; their values are unrecoverable but also un-acked, so no client expects them to exist.
 
 ### 4.2 Bulk Prepare
 
-The leader sends a single `Prepare(ballot=(0, me), term=T, range=[floor+1, ceiling])` to all peers. Each acceptor responds with `Promise` carrying, for every slot in the range that has any state, the highest `(accepted_ballot, accepted_value)` if any.
+The leader runs Phase-1 `Prepare` **per slot** over `[floor+1, ceiling]`, batched by `bulk_prepare_window` (default 1024) with a `yield_now()` between batches to avoid starving other tasks. For each slot, `Prepare(ballot=(0, me), term=T)` is sent to all peers. Each acceptor responds with `Promise` carrying the highest `(accepted_ballot, accepted_value)` if any.
 
 The ballot used here is `(0, me)`. Because acceptors fence on `term` first, this ballot is "fresh" for the new term; we don't need a higher round.
 
@@ -138,7 +142,7 @@ These re-Accepts are pipelined; the new leader does not wait for any one to be c
 
 ### 4.4 Steady state begins
 
-Once the bulk Phase 1 has been *issued* (not necessarily completed), the leader is free to start assigning new slots starting at `ceiling + 1`. The repair work for `[floor+1, ceiling]` proceeds in parallel and reuses the same machinery as routine gap repair (see [`design-parallel-slots.md`](design-parallel-slots.md) §9).
+Once the bulk Phase 1 has been *issued* (not necessarily completed), the leader is free to start assigning new slots starting at `ceiling + 1`. The repair work for `[floor+1, ceiling]` proceeds in parallel and reuses the same machinery as routine gap repair (see [`design-slot.md`](design-slot.md) §9).
 
 ---
 
@@ -153,8 +157,10 @@ Every heartbeat carries:
 - `term`, `leader_id`.
 - `committed_safe_slot` (latest known safe-slot).
 - `lease_grant_until` (monotonic-time deadline; see §6).
-- `prev_log_slot, prev_log_term` (Raft-style consistency check, used to detect a stale follower).
-- Optional: piggy-backed `Chosen(slot)` notifications and `Accept`s if any are pending for that peer.
+- `prev_log_slot, prev_log_term` (Raft-style consistency check).
+- `t_send_ms_mono` (monotonic timestamp for lease grant calculation).
+
+`Chosen(slot)` notifications and `Accept`s are sent through separate `learner_stream` paths, not piggy-backed on heartbeats.
 
 ### 5.2 Heartbeat cadence
 
@@ -163,7 +169,7 @@ Every heartbeat carries:
 
 ### 5.3 Heartbeat response
 
-Followers respond with their own `term`, `contiguous_chosen`, and `contiguous_applied`. The leader uses these to:
+Followers respond with their own `term`, `success` (false if the follower's term is higher), `contiguous_chosen`, `last_chosen_term`, `contiguous_applied`, `highest_seen_slot`, and `durable_snapshot_slot`. The leader uses these to:
 
 - Detect a stale leader's continued existence (if any response carries a higher term, the leader steps down — §8).
 - Maintain peer state (used by replicator and gap detection).
@@ -180,7 +186,7 @@ A lease lets the leader serve `Get(mode=Linearizable)` without a per-read quorum
 While its lease is valid, a leader may serve linearizable reads from local state under two assumptions:
 
 - No other node was elected leader during the lease window.
-- The leader's `contiguous_applied` slot reflects all writes acked through this leader (which is true by Invariant I3 from [`design-parallel-slots.md`](design-parallel-slots.md) §2).
+- The leader's `contiguous_applied` slot reflects all writes acked through this leader (which is true by Invariant I3 from [`design-slot.md`](design-slot.md) §2).
 
 The first assumption is enforced by:
 
@@ -235,13 +241,7 @@ The cost is one network round-trip per ReadIndex (or per batch of reads). No fsy
 
 ### 7.2 Batching
 
-Multiple linearizable reads arriving in a window can share one ReadIndex round-trip:
-
-- Reads accumulate into a batch.
-- A single heartbeat-quorum is performed.
-- All reads in the batch are served once the quorum responds.
-
-Default batch window: 1 ms. Too long → latency. Too short → wasted heartbeats.
+> **Not yet implemented.** The current `linearizable_read_barrier` serves one read at a time. Batching multiple reads into a single heartbeat-quorum round is a planned optimization.
 
 ### 7.3 When to choose ReadIndex over lease
 
@@ -261,16 +261,15 @@ A leader steps down (transitions to follower) on any of:
 - **Higher term seen.** Any RPC response carrying `term > current_term` causes the leader to adopt the new term and revert to follower.
 - **Lease unrenewable.** The leader has been unable to obtain a heartbeat-quorum response for longer than `lease_duration`. It cannot refresh its lease and assumes a partition or majority loss.
 - **Admin step-down RPC.** Operator forces it for testing, planned maintenance, or rolling upgrade.
-- **Removed from group.** A `ConfigChange` that removes this leader from the group commits; it steps down before the change takes effect on it.
+- **Removed from group.** Designed but not yet implemented (`ConfigChange` log entries are not yet supported).
 
 On step-down:
 
-1. Stop accepting new client writes; respond `NotLeader` to in-flight client requests.
-2. Stop heartbeats.
-3. Persist `current_term`.
-4. Notify the lease module to mark its grant as expired.
-5. Cancel any in-flight bulk Phase-1 repair (the next leader will redo it).
-6. Drain its replicator queues but do not send `Accept`s for slots where it has not received a quorum yet (those must be reconsidered by the next leader's bulk Phase-1).
+1. Cancel the per-tenure `CancellationToken` — aborts in-flight bulk Phase 1 and any tenure-bound work.
+2. Stop heartbeats (the leader-state loop returns on step-down).
+3. Set `role = Follower`; adopt the higher term if the trigger was `HigherTerm`.
+4. Expire `LeaseState` (`become_follower` clears leader id).
+5. In-flight proposals see `NotLeader` via the propose leadership gate (proposing_term check).
 
 ---
 
@@ -318,14 +317,16 @@ If the clock-skew assumption is *violated*, lease-based reads can return stale d
 | `max_clock_skew` | 500 ms | 1 ms – 5 s | Architectural bound from [requirement.md §3](../requirement.md#3-dependencies-and-assumptions) |
 | `election_min` | 4000 ms | ≥ 8 × `heartbeat_interval` | Avoid spurious elections |
 | `election_max` | 8000 ms | ≤ 60 s | Bounds time to elect after leader loss |
-| `readindex_batch_window` | 1 ms | 0 – 100 ms | Latency vs network amortization |
 | `prevote_enabled` | true | bool | Reduces disruption from rejoining nodes |
+| `bulk_prepare_window` | 1024 | 1 – 65536 | Slots per yield batch in bulk Phase-1 repair |
+| `learner_stream_window_frames` | 64 | 8 – 1024 | Per-peer `PxLearnerStream` outbound mpsc capacity; full mpsc surfaces as `Busy` |
+| `maintenance_tick_ms` | 30 000 | 1 000 – 300 000 | Engine-durability + WAL-GC maintenance loop interval |
 
 Notes:
 
 - **PreVote** (Raft optimization, ON by default): a candidate first asks "would you vote for me?" without bumping the term. This avoids spurious term increments from a partitioned-and-rejoined node.
 - **Pre-emptive step-down on heartbeat loss** is governed by `lease_duration`, not `election_min`. A leader that loses contact with quorum gives up its lease at `lease_duration` and stops serving fast reads even before any follower starts an election.
-- **Default choice rationale.** The defaults above are tuned for general-purpose deployments (mix of single-DC and modest cross-AZ latency). They give ~5–8 s failover detection, which matches the operational expectations of most online KV workloads while keeping heartbeat chatter low. See [`plan.md`](../plan.md#6-decision-log) decision log for the analysis.
+- **Default choice rationale.** The defaults above are tuned for general-purpose deployments (mix of single-DC and modest cross-AZ latency). They give ~5–8 s failover detection, which matches the operational expectations of most online KV workloads while keeping heartbeat chatter low. See [`design.md`](../design.md) §13 (Open Design Questions) for the analysis.
 - **Operational profiles:**
   - *Low-latency single datacenter:* `heartbeat_interval = 100 ms`, `election_min/max = 800/1500 ms`, `lease_duration = 900 ms`, `max_clock_skew = 100 ms`. Sub-second failover; higher message rate.
   - *Cross-region / WAN:* `heartbeat_interval = 3 s`, `election_min/max = 24/48 s`, `lease_duration = 27 s`. Matches CockroachDB-style geo-replicated tunings; tolerates wider RTT variance at the cost of failover latency.

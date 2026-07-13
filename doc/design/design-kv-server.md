@@ -46,10 +46,12 @@ The server does **not** contain business logic — all consensus, KV operations,
 
 ```
 crowkv-server/src/
-  main.rs          — entry point, CLI parsing, server bootstrap
-  cli.rs           — argument parsing and port pool parser
-  management.rs    — HTTP management API handlers
-  state.rs         — shared server state (AppState)
+  main.rs          — entry point, CLI parsing, server bootstrap, shutdown
+  cli.rs           — argument parsing and port/id list parser
+  mgmt_api.rs      — HTTP management API handlers + router
+  startup.rs       — store/group creation with WAL and KV engine
+  store_registry.rs — KvStoreRegistry (shared state: stores, config, WAL backend)
+  lib.rs           — library re-exports for integration tests
 ```
 
 ## 3. CLI Parsing
@@ -67,13 +69,13 @@ Grammar:
 ```
 port_list  = port_spec (',' port_spec)*
 port_spec  = port_range | single_port
-port_range = u16 '..' u16          // half-open [start, end)
+port_range = u16 '..' u16          // inclusive [start, end]
 single_port = u16
 ```
 
 Validation rules:
 - Each port must be in range 0–65535.
-- Range start must be < end.
+- Range start must be <= end (a single-value range like `40..40` is valid).
 - Duplicate ports are silently deduplicated.
 - If `--stores` > available ports in pool, exit with error.
 
@@ -119,17 +121,25 @@ On startup:
 ### 4.2 Shared State
 
 ```rust
-struct AppState {
+struct KvStoreRegistry {
     stores: DashMap<u64, Arc<PxKvStore>>,
+    election_cfg: PxElectionConfig,
+    wal_root: PathBuf,
+    config_root: PathBuf,
+    wal_backend: Arc<IoBackend>,
+    kv_engine: KvEngineKind,       // crowtree (default) | memory
+    data_root: PathBuf,            // crowtree file root
+    crowtree_backend: CrowtreeBackend, // file (default) | block
+    port_pool: Mutex<Vec<u16>>,   // from --ports CLI arg
 }
 ```
 
-The `AppState` is created at startup and shared with the HTTP management handlers via `axum::State`. Individual `PxKvStore` instances are `Arc`-wrapped and thread-safe (internal `DashMap` for groups, `Mutex` for server state).
+The `KvStoreRegistry` is created at startup, wrapped in `Arc`, and shared with the HTTP management handlers via `axum::State`. Individual `PxKvStore` instances are `Arc`-wrapped and thread-safe (internal `DashMap` for groups, `Mutex` for server state).
 
 Stores are keyed by `store_id` (u64). The `DashMap` allows dynamic add/remove of stores at runtime via the management API.
 
 No additional synchronization is needed because:
-- `AppState::stores` uses `DashMap` (lock-free concurrent map).
+- `KvStoreRegistry::stores` uses `DashMap` (lock-free concurrent map).
 - `PxKvStore::add_group` / `remove_group` use `DashMap`.
 - `PxGroup` supports `add_remote_replica` / `remove_remote_replica` for mutable remote replica management.
 
@@ -137,30 +147,29 @@ No additional synchronization is needed because:
 
 ```
 1. init_file_logging()
-2. parse CLI args (--stores, --groups, --replicas, --ports)
+2. parse CLI args (--stores, --groups, --replica, --ports, --wal-root,
+   --config-root, --data-root, --election-profile, --kv-engine,
+   --kv-backend, --management-addr, --management-port)
 3. validate: if --ports given, count must >= store count
-4. for each store_id in --stores:
-   a. PxKvStore::new(addr)  // addr from --ports or 0.0.0.0:0
-   b. Arc::new(store)
-   c. for each group_id in --groups:
-      - create PxLocalReplica::new(replica_id, Follower)
-      - create PxGroup::new(group_id, local_replica)
-      - store.add_group(group)
-   d. store.start().await    // binds gRPC listener
-   e. log bound address
-5. build AppState { stores: DashMap } with store_id keys
-6. build axum Router with state
+4. build KvStoreRegistry (election config, WAL root, KV engine, backend)
+5. populate port pool from --ports
+6. build axum Router from registry
 7. bind HTTP management listener on --management-addr:--management-port
-8. tokio::select! { management_server, ctrl_c signal }
+8. if --stores provided: create and start stores + groups (bootstrap)
+9. serve with graceful shutdown (SIGINT / SIGTERM)
 ```
+
+The management API starts **before** stores so the server is observable
+even if store creation fails. When `--stores` is omitted, the server
+boots empty and stores are created via the management API.
 
 ### 4.4 Shutdown Sequence
 
 On SIGINT/SIGTERM:
-1. Stop accepting new HTTP requests.
-2. For each store: `store.stop()` (sends shutdown signal to gRPC task).
-3. For each store: `store.join().await` (waits for gRPC task to finish).
-4. Log "server shut down cleanly".
+1. Axum's `with_graceful_shutdown` stops accepting new HTTP requests.
+2. `graceful_shutdown(registry)` cascades: for each store, `store.stop()`
+   then `store.join().await` (waits for gRPC tasks to finish).
+3. Log "server shut down cleanly".
 
 ## 5. HTTP Management API
 
@@ -188,8 +197,11 @@ All endpoints return JSON. Content-Type: `application/json`.
 | `POST` | `/stores/:sid/groups/:gid/remotes` | `add_remotes` | Add remote replicas |
 | `DELETE` | `/stores/:sid/groups/:gid/remotes/:rid` | `remove_remote` | Remove remote replica |
 | `POST` | `/stores/:sid/groups/:gid/remotes/batch` | `batch_add_remotes` | Batch-add from topology export |
+| `POST` | `/stores/:sid/groups/:gid/step-down` | `step_down` | Force leader step-down (admin fencing) |
+| `POST` | `/stores/:sid/groups/:gid/join` | `join_group_via_snapshot` | New-member snapshot join |
 | `GET` | `/topology` | `export_topology` | Full topology export |
 | `GET` | `/top` | `export_topology` | Alias for `/topology` |
+| `GET` | `/openapi.json` | `openapi_spec` | OpenAPI spec (utoipa-generated) |
 
 ### 5.3 JSON Schema
 

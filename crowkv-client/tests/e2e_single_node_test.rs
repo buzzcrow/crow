@@ -1,9 +1,9 @@
 //! End-to-end test against a real single-node `PxKvStore` + `KvService`
 //! (no mocks): topology discovery over a small `/topology` HTTP server
-//! backed by the store's real `status()`, then `put`/`get`/`delete`/
+//! backed by the store's real `status`, then `put`/`get`/`delete`/
 //! `batch_write`/`scan` through [`crowkv_client::CrowkvClient`], covering
 //! `ReadMode` routing and the `ReadYourWrites` watermark
-//! (`doc/plan-client.md` §5 C1-C3).
+//! (C1-C3).
 
 use std::sync::Arc;
 
@@ -35,7 +35,7 @@ async fn start_single_node_store() -> Arc<PxKvStore> {
     server
 }
 
-/// Serves `GET /topology` returning the live `store.status()` each time,
+/// Serves `GET /topology` returning the live `store.status` each time,
 /// so the client's cache reflects whatever this store currently knows.
 async fn spawn_topology_server(store: Arc<PxKvStore>) -> String {
     async fn handler(State(store): State<Arc<PxKvStore>>) -> Json<serde_json::Value> {
@@ -144,8 +144,7 @@ async fn read_your_writes_uses_auto_tracked_watermark() {
     assert_eq!(client.read_your_writes_slot(STORE_ID, GROUP_ID), write.revision);
 
     // No explicit `client_slot` -- the client auto-attaches its own
-    // last-write watermark for `ReadYourWrites` (doc/plan-client.md §6
-    // Issue 5).
+    // last-write watermark for `ReadYourWrites`.
     match client
         .get(STORE_ID, GROUP_ID, b"session:42", ReadMode::ReadYourWrites, None)
         .await

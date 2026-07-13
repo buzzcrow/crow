@@ -234,7 +234,7 @@ async fn refresh_group_nodes(state: &AppState, sid: u64, gid: u64) {
 /// carries the real leader's endpoint via its `remotes` list, so seeding
 /// with every known replica's mgmt URL is enough for `CrowkvClient` to
 /// self-heal a stale/dead leader without this module doing any endpoint
-/// bookkeeping itself (`doc/plan-client.md` §5 C1-C2).
+/// bookkeeping itself (C1-C2).
 ///
 /// # Errors
 /// `404` if the group is unknown / has no replicas; `502` if none of its

@@ -40,7 +40,7 @@ Defaults: file=`debug`, console (`-l`)=`info`. Override via `RUST_LOG`. See `cro
 ## 3. Comments
 
 - **Module-level comments** (`//!`): summarize the module's purpose, explain why it exists, and list key work areas for searchability.
-  - Do **not** reference external docs (`doc/`, `plan.md`, `design.md`, etc.) in code comments.
+  - Do **not** reference external docs (`doc/`, `design.md`, etc.) in code comments.
   - Example: "Key work: AsyncFile API, io_uring integration, fallback mode, SimDisk."
 - **Function/struct comments** (`///`): describe what the item does and why it's needed.
 - **Inline comments**: explain non-obvious logic, invariants, or trade-offs.
@@ -140,7 +140,7 @@ Do not bypass.
 ## 6. Commit & Push
 
 - One logical change per commit. Subject ≤72 chars, imperative.
-- Reference upstream doc (`plan-paxos.md M2`) in the body.
+- Reference upstream doc (`design-xxx.md §N`) in the body.
 - Run `/review` before push for non-trivial changes.
 
 ## Pitfalls
@@ -149,4 +149,4 @@ Do not bypass.
 - IDs in message string instead of structured fields → unfilterable.
 - Silent guess on ambiguous design → discuss with user instead.
 - `error!` for what is really `critical:` → mis-routed alerts.
-- Doc references in comments (`doc/`, `plan.md`, etc.) → keep docs in docs, not code.
+- Doc references in comments (`doc/`, `design.md`, etc.) → keep docs in docs, not code.

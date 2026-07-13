@@ -1,6 +1,6 @@
 # CrowKV - Requirements
 
-This is the authoritative requirements document. All other documents (`design.md`, `plan.md`) must follow definitions and conclusions from this document.
+This is the authoritative requirements document. All other documents (`design.md`, sub-design docs) must follow definitions and conclusions from this document.
 
 Conventions:
 - **Decision record** callouts (`> **Decision record:** ...`) capture the `Suggest → Confirm` resolution for traceability. They are informational; the surrounding prose is normative.
@@ -31,7 +31,6 @@ Conventions:
   - [7.1 Groups and Cluster Topology](#71-groups-and-cluster-topology)
   - [7.2 Leader Election and Terms](#72-leader-election-and-terms)
   - [7.3 Parallel Slot Processing](#73-parallel-slot-processing)
-    - [7.3.1 Correctness Analysis for Parallel Slot Writes](#731-correctness-analysis-for-parallel-slot-writes)
   - [7.4 Group Routing](#74-group-routing)
   - [7.5 Partition and Availability Behavior](#75-partition-and-availability-behavior)
 - [8. Storage and Durability](#8-storage-and-durability)
@@ -60,12 +59,6 @@ Conventions:
 - [15. Components](#15-components)
   - [15.1 `crowkv` library (core)](#151-crowkv-library-core)
   - [15.2 `crowkv-server`](#152-crowkv-server)
-    - [15.2.1 CLI Interface](#1521-cli-interface)
-    - [15.2.2 HTTP Management API](#1522-http-management-api)
-    - [15.2.3 Topology Wiring Workflow](#1523-topology-wiring-workflow)
-    - [15.2.4 Non-Goals](#1524-non-goals)
-    - [15.2.5 Error Handling](#1525-error-handling)
-    - [15.2.6 Logging](#1526-logging)
   - [15.3 `crowbench`](#153-crowbench)
   - [15.4 `crowkv-console`](#154-crowkv-console)
   - [15.5 RPC and Communication](#155-rpc-and-communication)
@@ -227,43 +220,7 @@ A linearizable read served by the leader is only correct if the leader proves it
 
 ### 6.5 Parallel-Slot Linearizability Analysis
 
-Parallel-slot Paxos is the reason CrowKV chooses Multi-Paxos over Raft. This section shows that linearizability is preserved under parallel consensus, given the rest of the design constraints. It also records the one latency cost (Scan) that follows from the parallelism.
-
-**Premises (all stated elsewhere, restated here for the proof):**
-1. Only **blind ops** (`Put`, `Delete`, and their batch forms) are supported ([§5.2](#52-operations)). No `CAS` / `Increment`.
-2. The leader **serializes slot assignment** via a single monotonic counter ([§6.1](#61-write-guarantee)).
-3. A client write is acknowledged only after a **quorum of acceptors has durably flushed** the chosen value at its slot ([§8.1](#81-wal-write-ahead-log)).
-4. Learners track `(slot, value)` **per key** and only accept writes where `slot > current_slot` for that key ([§7.3.1](#731-correctness-analysis-for-parallel-slot-writes), [§8.3](#83-learner-storage)).
-5. Leader reads are fenced by lease or ReadIndex ([§6.2](#62-leader-read-fencing)).
-
-**Claim:** The assigned slot number is a valid linearization point for every `Put`, `Delete`, `Get`, and batch op.
-
-**Sketch of why it holds:**
-
-- **Real-time order → slot order.** If `ack(A)` completes before `invoke(B)` in real time, then by the time the leader sees B, the counter has already advanced past `slot(A)`, so `slot(A) < slot(B)`. Concurrent operations may appear in either order, which linearizability allows.
-- **Blind apply-order independence.** For any key *k*, the final value is determined solely by `max{ slot | slot writes k }`. An undecided earlier slot that also writes *k* will, when eventually chosen, be ordered earlier in the linearization and immediately overwritten by the later slot's value — so observers never see an inconsistent final state for *k*.
-- **Durability before visibility.** The ack contract (quorum durable-flush before ack) ensures that a client-observed write cannot be lost by a leader change. Classic-Paxos gap repair is guaranteed to re-choose the same value for any slot where at least one acceptor persisted it.
-- **Leader read correctness.** The leader's learner has applied slot N to its per-key state before acking slot N. For any subsequent `Get(k)` on the leader, the returned `(slot, value)` reflects the highest slot that has written k *and that has been chosen*. Any earlier in-flight slot writing k, when resolved, will be ordered before the returned value in the linearization and immediately overwritten — so the returned value is the correct one in the total order.
-- **Follower read correctness.** Read-your-writes uses the per-key resolved-slot to wait for exactly the client's slot; bounded-stale uses the global `safe-slot` which is by construction gap-free.
-
-**Single remaining cost — linearizable `Scan`.**
-
-A cross-key read at "now" must reflect a consistent prefix of the total order. Because the leader's max-chosen slot may have gaps (e.g. slot 5 chosen while slot 3 is still in flight), linearizable `Scan` must wait for the leader's **contiguous applied frontier** to cover the target. Under heavy parallel-write load this adds latency bounded by (parallel-slot window size) × (slot-resolution time). In Raft this cost is hidden because its log is contiguous by construction; in CrowKV it is exposed and bounded by the window size.
-
-API mitigation ([§5.2](#52-operations), [§6.4](#64-client-read-modes)): clients that cannot tolerate this wait use `Scan(mode = SafeSlot)` (bounded stale, zero wait) or `Scan(mode = AtSlot(N))` for repeat reads of a known snapshot. Point `Get`s are **not** affected — they bypass the gap entirely (see leader-read correctness above).
-
-Note that the linearizable `Scan` uses the *leader's own contiguous applied frontier*, not the cross-learner `safe-slot`. The leader's learner always leads or matches the global `safe-slot`, so this choice strictly dominates in latency while preserving linearizability.
-
-**Why `CAS` / `Increment` would break this.** Read-modify-write ops must read the *current* value of a key before proposing the new value. With gaps, the current value is unknown until all earlier slots for that key are resolved. Supporting them would require either (a) forcing slot consensus to be sequential (erasing the parallelism) or (b) per-key dependency tracking at the leader. Neither is in scope for the initial design. This is why giving them up is the enabling trade.
-
-**Implementation invariants this analysis depends on (must be enforced by the code):**
-- Slot assignment is a single point (no parallel counter increments).
-- `Accepted` responses are not sent before durable flush of the WAL record.
-- Classic-Paxos recovery never discards an already-accepted value at a slot.
-- Leader lease / ReadIndex fencing is applied on every linearizable read before returning.
-- Per-key slot comparison on apply (`slot > current_slot`) is atomic with the write.
-
-A violation of any of these invariants breaks linearizability independently of the parallel-slot design; they are standard Paxos/Raft correctness invariants.
+Parallel-slot Paxos is the reason CrowKV chooses Multi-Paxos over Raft. The full linearizability proof — premises, claim, sketch, the single remaining cost (linearizable `Scan`), and why `CAS`/`Increment` would break it — lives in [`design/design-slot.md`](design/design-slot.md) §14.
 
 ## 7. Consensus Architecture
 
@@ -275,11 +232,11 @@ Each `PxGroup` is an independent Paxos ensemble and can define a different membe
 
 > **Decision record (supersedes the original Group-0 design in `design.md` §7 for history):**
 > - *Original suggestion:* a self-hosted system group (`Group-0`) whose Paxos log is the source of truth for the node registry, per-group membership, a fixed `num_groups`, and the `hash(key) -> group_id` partitioning rule, bootstrapped from a static seed file.
-> - *Confirmed (2026-07, see `plan-client.md` §6 Issue 1):* **not built** — operator-managed topology (below) is the accepted, implemented, and tested model instead. `Group-0` never had any implementation; this decision retires the design rather than deviating from a shipped one.
+> - *Confirmed (2026-07):* **not built** — operator-managed topology (below) is the accepted, implemented, and tested model instead. `Group-0` never had any implementation; this decision retires the design rather than deviating from a shipped one.
 
 **Topology model actually built and in use:**
 - Each physical node runs one `crowkv-server` process, exposing an **HTTP management API** (`crowkv-server/src/mgmt_api.rs`) for creating/removing stores and groups (`POST/DELETE /stores`, `POST/DELETE /stores/:sid/groups`, `POST/DELETE /stores/:sid/groups/:gid/remotes/...`).
-- Every group's membership is **persisted to a config file** on that node — one file per `(store_id, group_id)` under `--config-root` (`GroupConfigStore`, see [§15.2.3](#1523-topology-wiring-workflow)) — so a restarted node recovers its own groups' membership without re-issuing the HTTP calls.
+- Every group's membership is **persisted to a config file** on that node — one file per `(store_id, group_id)` under `--config-root` (`GroupConfigStore`, see [`design/design-kv-server.md`](design/design-kv-server.md)) — so a restarted node recovers its own groups' membership without re-issuing the HTTP calls.
 - There is no cluster-wide `num_groups` or `hash(key) -> group_id` rule owned by `crowkv` itself. Every KV RPC takes an explicit `group_id` ([§7.4](#74-group-routing)); routing/sharding policy, if any, lives in the calling application, not in the core library.
 - An operator, or a higher-level orchestrator (`crowkv-console` today) is responsible for creating groups consistently across the nodes that host their members, and for tracking the resulting cluster-wide store/group inventory (`crowkv-console`'s own declarative config file is one such orchestrator-level implementation; it is not part of `crowkv`/`crowkv-server`).
 - **Nothing prevents another system built on top of `crowkv`'s group/replica primitives from implementing its own self-hosted "Group-0"-style metadata group** if it needs one (e.g. for fully decentralized topology management without an external orchestrator) — that would be a feature of the embedding system's design, not a requirement `crowkv` itself takes on.
@@ -315,23 +272,7 @@ Multi-Paxos supports parallel writes on different PxSlots within the same group,
 
 #### 7.3.1 Correctness Analysis for Parallel Slot Writes
 
-**Key insight:** Parallel slot writes are safe because we only support **blind operations** (`Put`, `Delete`). These operations do NOT depend on the current value of the key.
-
-- **Consensus phase (parallel):** The leader can propose `PxSlot` 3, 5, 7 simultaneously. Each `PxSlot` is an independent Paxos instance. They can be decided (chosen) in any order.
-- **Apply phase (per-key slot tracking):** `PxLearner`s store `(slot, value)` per key and only accept writes where `slot > current_slot` for that key.
-  - `Put(k, v)` at slot 3 and `Put(k, v2)` at slot 5 — regardless of apply order, the highest slot wins. Final state is deterministic.
-  - `Delete(k)` at slot 3 and `Put(k, v)` at slot 5 — same logic, highest slot determines the final value.
-  - A batch operation (multiple `Put`/`Delete` at one slot) uses the batch's slot for each key.
-- **Why gaps are not blocking for point reads:** An undecided slot 3 does not block `Get(k)` if slot 5 for key `k` is already applied. The gap only blocks:
-  - Cross-key consistent snapshots / range scans at a specific log position.
-  - WAL truncation (can't truncate before the minimum applied slot across all keys).
-- **This is why blind ops are sufficient:** No operation reads current state before writing. The final value of each key is determined solely by the highest slot that touched it.
-
-**Note:** This would NOT be safe for `CAS` or `Increment`, which read current state. Those require all prior slots resolved before the leader can reliably read. Not supported in the initial design (see [§5.2](#52-operations)).
-
-**Resolved edge cases:**
-- Batches that mix `Put` and `Delete` on the same key within one slot: intra-batch order is **as written by the client**.
-- Per-key resolved-slot is required for read-your-writes; its memory cost (one slot per live key on every learner) is accepted (see [§6](#6-consistency-and-read-model) and [§8.3](#83-learner-storage)).
+Parallel slot writes are safe because only blind operations (`Put`, `Delete`) are supported — the final value of each key is determined solely by the highest slot that touched it. The full correctness analysis, including per-key slot tracking, gap handling, and resolved edge cases, lives in [`design/design-slot.md`](design/design-slot.md) §13.
 
 ### 7.4 Group Routing
 
@@ -559,72 +500,7 @@ Reference server that wraps the `crowkv` library into a runnable daemon. It prov
 - An HTTP management API for runtime inspection and topology wiring.
 - A complete deployment unit that can form a CrowKV cluster with other `crowkv-server` instances.
 
-#### 15.2.1 CLI Interface
-
-| Argument | Required | Default | Description |
-|---|---|---|---|
-| `--management-port` | No | `9910` | HTTP management API listen port. |
-| `--management-addr` | No | `0.0.0.0` | HTTP management API bind address. |
-| `--ports` | No | (OS-assigned) | Port pool for gRPC `PxKvStore` listeners. Comma/range format. |
-| `--stores` | No | `0` | Store ID list (comma/range). |
-| `--groups` | No | `1` | Group ID list (comma/range). Each store gets all listed groups. |
-| `--replicas` | No | `0` | Local replica ID (single value). Used as the local replica for every group in every store. Max 128. |
-
-When `--ports` is omitted, the server uses port `0` for each `PxKvStore` and lets the OS assign ephemeral ports.
-
-#### 15.2.2 HTTP Management API
-
-The management API is a lightweight HTTP/JSON service for operational control.
-
-**Health:** `GET /health` → `{"status": "ok"}`.
-
-**Store management:**
-- `GET /stores` — list all stores with bound addresses and group counts.
-- `GET /stores/:sid` — store detail (address, groups, replicas).
-- `POST /stores` — add a new store (requires `store_id`, `group_id`, `replica_id`).
-- `DELETE /stores/:sid` — remove a store and all its groups.
-
-**Group management:**
-- `GET /stores/:sid/groups` — list groups in a store.
-- `POST /stores/:sid/groups` — add a group (requires `group_id`, `replica_id`).
-- `DELETE /stores/:sid/groups/:gid` — remove a group.
-
-**Remote replica management:**
-- `GET /stores/:sid/groups/:gid/remotes` — list remote replicas.
-- `POST /stores/:sid/groups/:gid/remotes` — add remote replicas.
-- `DELETE /stores/:sid/groups/:gid/remotes/:rid` — remove a remote replica.
-- `POST /stores/:sid/groups/:gid/remotes/batch` — batch-add from topology export.
-
-Adding or deleting a **local** replica is not supported — local replicas are created/destroyed with the group.
-
-**Topology:** `GET /topology` (alias `GET /top`) — export full server topology as JSON.
-
-#### 15.2.3 Topology Wiring Workflow
-
-To form a cluster from multiple `crowkv-server` instances:
-1. Start each server (each creates its stores with groups).
-2. Export topology from each server via `GET /topology`.
-3. On each server, batch-add other servers' replicas via `POST .../remotes/batch`.
-4. Assign leaders for each group.
-
-#### 15.2.4 Non-Goals
-
-- **Persistent configuration** — the server is stateless; topology is wired via the management API each time.
-- **Automatic leader election** — leader assignment is explicit until leader election is integrated.
-- **Authentication/TLS on management API** — trusted-network assumption per [§11](#11-security).
-
-#### 15.2.5 Error Handling
-
-- Invalid CLI arguments → exit with descriptive error message.
-- Port already in use → log error, skip that store, continue.
-- Management API errors → appropriate HTTP status codes (400, 404, 409, 500) with JSON error body.
-
-#### 15.2.6 Logging
-
-- Use `tracing` with file-based logging (via `crowkv::common::logging`).
-- Log bound addresses for all stores and the management endpoint at startup.
-- Log all management API mutations at INFO level.
-- All log messages in the `crowkv` library include `store_id` and `group_id` where applicable.
+CLI arguments, HTTP management API endpoints, topology wiring workflow, error handling, and logging details are specified in [`design/design-kv-server.md`](design/design-kv-server.md).
 
 ### 15.3 `crowbench`
 
@@ -642,9 +518,8 @@ CLI (`bench` subcommand) under `crowkv-console`; see [§15.4](#154-crowkv-consol
 operating CrowKV clusters. It ships two frontends sharing the same
 operation core:
 
-- **Web UI** — a single-page, embeddable cluster console. UI
-  requirements are normative in [§15.4.6](#1546-web-ui-requirements);
-  the design lives in `design/design-ui.md`.
+- **Web UI** — a single-page, embeddable cluster console. Requirements
+  and design live in [`design/design-ui.md`](design/design-ui.md) §13.
 - **CLI** — scripting, automation, CI/CD, and load testing.
 
 All cluster access goes through `crowkv-server` public endpoints (HTTP
@@ -707,195 +582,11 @@ the selected upstream server. `crowkv-server` keeps `ToSchema` derives
 
 #### 15.4.5 CLI Command Hierarchy
 
-The CLI uses a two-layer command structure: `crowkv <group> <verb>
-[options]`. Top-level groups separate concerns; verbs are consistent
-within a group.
-
-```
-crowkv
-├── cluster              # observation
-│   ├── status           # high-level health summary
-│   ├── topology         # print full hierarchy
-│   └── inspect <id>     # detailed view of one entity
-│
-├── rack                 # simulated hardware: racks
-│   ├── add <name>
-│   ├── remove <name>
-│   └── list
-│
-├── node                 # simulated hardware: nodes
-│   ├── add --rack <r> --host <addr> --ssh-user <u> [--ssh-pass | --ssh-key]
-│   ├── remove <node>
-│   ├── list
-│   └── ping <node>      # SSH + HTTP reachability
-│
-├── server               # crowkv-server lifecycle on a node
-│   ├── deploy --node-id <n> [--mgmt-port <p> --grpc-port <p>]
-│   ├── start --node-id <n>
-│   ├── stop --node-id <n>
-│   └── list
-│
-├── store                # store mgmt (logical, cluster-wide)
-│   ├── add --store-id <id> --nodes <n1,n2,...>
-│   ├── remove --store-id <id>
-│   └── list
-│
-├── group                # paxos group mgmt
-│   ├── add --store-id <s> --group-id <id> --replica-id <r> --nodes <n1,n2,...>
-│   ├── remove --store-id <s> --group-id <id>
-│   ├── list --store-id <s>
-│   └── inspect --store-id <s> --group-id <id>
-│
-├── replica              # add/remove individual replicas
-│   ├── add --store-id <s> --group-id <g> --node <n> [--replica-id <r>]
-│   └── remove --store-id <s> --group-id <g> --replica-id <r>
-│
-├── kv                   # data plane
-│   ├── put --store-id <s> --group-id <g> <key> <value>
-│   ├── get --store-id <s> --group-id <g> <key>
-│   ├── delete --store-id <s> --group-id <g> <key>
-│   ├── scan --store-id <s> --group-id <g> [--prefix <p>] [--limit N]
-│   └── list --store-id <s> --group-id <g> [--prefix <p>]
-│
-└── bench                # load testing (CLI-only)
-    ├── run --workload <name> [--qps N --duration T ...]
-    ├── stress --duration T --target-qps N
-    └── report <run-id>
-```
-
-Design rules:
-- **Two layers max** — `crowkv <group> <verb>`. No three-level chains.
-- Verb vocabulary stays consistent: `add / remove / list / inspect`.
-  Lifecycle verbs (`deploy / start / stop`) are reserved for `server`;
-  data verbs (`put / get / delete / scan / list`) for `kv`.
-- Every command targets the same shared core library; CLI is a thin
-  argument-parsing layer.
-- Output: human-friendly table by default, `--json` flag for scripting.
-- **Logical entity addressing**: store/group/replica/KV commands use
-  `--store-id` / `--group-id` (cluster-wide logical ids); the backend
-  resolves placement from topology. Server lifecycle uses `--node-id`
-  (one server per node).
-- **Leaders are elected, not assigned.** `group add` takes no `--leader`
-  flag: group leadership is decided by Paxos election among the replicas,
-  and the console exposes no forced-leadership control. Operators observe
-  the elected leader via `group inspect` / `cluster inspect`.
+The CLI uses a two-layer structure (`crowkv <group> <verb> [options]`) covering cluster observation, hardware lifecycle, store/group/replica management, KV data plane, and load testing. The full command tree and design rules live in [`design/design-console.md`](design/design-console.md) §12.
 
 #### 15.4.6 Web UI Requirements
 
-This section is the authoritative, requirements-only spec for the Web
-UI (the *what*). All sizing, color tokens, component libraries, and
-React module layout (the *how*) live in `design/design-ui.md`.
-
-**Goals.** The Web UI is a **single-page, embeddable cluster console**:
-
-- **Single page** — one SPA shell, no full-page navigation. Every
-  workflow (topology, hardware lifecycle, KV ops, Swagger, logs) is
-  reached by switching panels or overlays in the same page.
-- **Embeddable** — mountable as a sub-component of a larger product
-  that links `crowkv` and exposes the `crowkv-server` API surface via
-  `crowkv-web` (or an API-compatible facade), without forking the SPA.
-- **Demo-grade aesthetics** — feels like a finished product.
-- **Operator-grade utility** — every CLI-reachable cluster operation
-  (rack/node/server lifecycle, store/group/replica wiring, KV data
-  plane, Swagger) is reachable in one to three clicks.
-
-**Non-goals.** No authn/authz/RBAC; no mobile form factor (tablet
-≥ 768 px best-effort, desktop ≥ 1200 px is the target); no SSR (static
-bundle); no WebSocket/SSE streaming (polling on a configurable interval
-matches the HTTP-only API); no multi-tenant views, audit logs, or
-billing.
-
-**Two hierarchy views (§3 of `design/design-console.md`).** The UI
-surfaces the same entities through two first-class views; a user can
-toggle between them and never sees a single flattened tree mixing the
-two:
-
-- **Physical (deployment / debugging) view** — rooted at
-  `Rack → Node → Server → PxStore → PxGroup → { LocalReplica,
-  RemoteReplica… }`. Identity is the parent chain
-  `(rack_id, node_id, store_id, group_id, replica_id)`. Renders
-  Local vs Remote replicas with distinct visual treatment so peer-list
-  mis-wirings are visible; the current leader is distinguishable.
-- **Logical (usage) view** — rooted at
-  `Cluster → Store → Group → Replica…` with a **unified** replica list
-  (each tagged with its `node_id`, no local/remote split). Identity is
-  `(store_id[, group_id[, replica_id]])`.
-
-A **view-mode toggle** drives the sidebar tree, topology canvas, and
-inspector simultaneously; cross-jumping between a logical replica and
-its physical detail is one click. There is **no aggregate
-`/api/cluster/snapshot`** — both views refresh from per-resource live
-endpoints (served from the backend monitor cache) on a configurable
-poll interval. Each replica in the logical view maps to one
-`LocalReplica` plus N−1 `RemoteReplica` proxies; each logical Store /
-Group is the aggregate of the per-node `PxStore` / `PxGroup` records.
-
-**Functional surface.** Every endpoint the UI assumes is already
-exposed by `crowkv-web` (`crowkv-console/web/src/lib.rs`). Forms
-validate against the same constraints the backend enforces and surface
-server-side validation errors inline.
-
-- **Cluster observation** — per-component status
-  (`Healthy / Degraded / Failed / Unknown`) on every node, server,
-  store, group, and replica; a cluster health summary visible at all
-  times (view-independent); an interactive topology canvas (drag to
-  pan, click to select) reflecting the active view.
-- **Hardware lifecycle (physical tree)** — rack/node CRUD, node ping,
-  deploy/start/stop the node's `crowkv-server`, deployment-record
-  get/drop, OpenAPI proxy. Servers are addressed by hosting node (one
-  `crowkv-server` per node by console convention).
-- **Cluster management (logical tree)** — store/group/replica CRUD via
-  `/api/stores/...`. Replica add/remove is orchestrated server-side
-  (creates the local `PxGroup`, wires it bidirectionally with peers,
-  rolls back on partial failure). A per-node "inspect" action exposes
-  `local` + `remotes` detail via `/api/nodes/:n/stores/:s/groups/:g`.
-- **KV data plane** — scan (prefix + limit), get (value + size shown
-  verbatim), put (idempotent overwrite), delete (with confirmation),
-  rooted at `/api/stores/:s/groups/:g/kv/...`. Leader resolution is
-  server-side; the UI passes no node/server hint. Success/failure is
-  reported inline with the server-supplied error.
-- **Swagger inspection** — embedded panel inside the SPA (no new tab).
-  Picks a registered node and loads its OpenAPI doc via
-  `/api/swagger/?url=/api/nodes/:node_id/openapi.json`; the Swagger
-  bundle is served offline from `crowkv-console/web/swagger-ui/`. Loads
-  lazily.
-- **Operation visibility** — readable errors (no opaque 500 traces),
-  toast notifications for success/failure, real-time inline form
-  validation, and a client-side recent-operations view (timestamp,
-  action, target, outcome).
-- **Navigation** — sidebar tree (click to select, disclosure arrow to
-  expand/collapse), right-click context-menu mutations, single text
-  tree filter.
-
-**API routing rule (normative).** Two parallel URL trees, no route
-crosses trees: **physical** (`/api/racks`, `/api/nodes`) addressed by
-the parent chain; **logical** (`/api/stores`) addressed by
-`(store_id, group_id, replica_id)`. The SPA never passes
-`?server=<url>` (that contract is removed; old `/api/servers/:sid/...`
-URLs return `404`); upstream servers are addressed by `node_id`, which
-the backend resolves to `mgmt_url` from `~/.crowkv/console.toml`. The
-header node selector is consumed only by the Swagger panel. Every `GET`
-accepts `?recursive=<depth|all>`.
-
-**Embeddability.** A single mountable component with a stable public
-interface, configurable at mount time with at least: `apiPrefix`
-(default `/api`), `basePath`, `readonly` (hide/disable all mutations),
-`modules` (opt-out of feature areas: snapshot, racks, nodes, stores,
-groups, replicas, kv, swagger, logs — server lifecycle is part of
-`nodes`), and `theme`. The UI must enforce style isolation (no global
-CSS leakage), routing isolation (no control of the top-level URL),
-and asset isolation (self-contained bundle, never a third-party CDN).
-It must also run standalone under `crowkv-web` for dev/demos. v1 ships
-a single built-in dark theme.
-
-**Read-only mode and safety.** With `readonly=true`, every mutating
-control is hidden and no view breaks. All destructive operations
-require explicit confirmation. The UI never silently retries a failed
-destructive operation.
-
-**Performance / robustness.** The SPA stays responsive during in-flight
-polls; an unreachable backend surfaces a visible error and recovers
-without a manual reload; the Swagger panel loads lazily.
+The Web UI is a single-page, embeddable cluster console with two hierarchy views (physical and logical), full operator surface (rack/node/server lifecycle, store/group/replica CRUD, KV data plane, embedded Swagger), and style/routing/asset isolation for embedding. The authoritative requirements spec lives in [`design/design-ui.md`](design/design-ui.md) §13.
 
 ### 15.5 RPC and Communication
 

@@ -12,7 +12,7 @@ This document defines the **test strategy**, **scope of each layer**, and
 when implementing features or components — consult this doc to determine
 which layer a new test belongs to and what it should cover.
 
-For the live task backlog (unfinished test gaps), see `plan-test.md`.
+For the live task backlog (unfinished test gaps), see [`plan-test.md`](../plan-test.md).
 
 ## Architecture Stack
 
@@ -36,7 +36,7 @@ deployment (crowkv-server binary + HTTP mgmt API + multi-process)  <- crowkv-ser
 | `crowkv/tests/wal.rs` | subsystem | `WalEngine` append/replay/gc/segment + record codec + backends | `wal/*` |
 | `crowkv/tests/slot.rs` | subsystem | `PxSlotList` / `PxSlotNode` | `paxos/{slot_list,slot_node}.rs` |
 | `crowkv/tests/replica.rs` | replica | single `PxLocalReplica` (no peers) | `cluster/local_replica.rs`, `paxos/*` |
-| `crowkv/tests/group.rs` | group | `PxGroup` multi-node clusters (real loopback gRPC, no mocks) | `cluster/{group,group_election,remote_replica,peer_stream}.rs` |
+| `crowkv/tests/group.rs` | group | `PxGroup` multi-node clusters (real loopback gRPC, no mocks) | `cluster/{group,group_election,remote_replica,learner_stream}.rs` |
 | `crowkv/tests/store.rs` | store | `PxKvStore` routing / lifecycle / status / health | `cluster/{px_kv_store,kv_store,kv_server,status}.rs` |
 | `crowkv-server/tests/*` | deployment | server binary + HTTP API, multi-process clusters, CLI, startup | `crowkv-server/src/*` |
 
@@ -124,6 +124,7 @@ replay, GC, I/O backends, pipeline writer. Tests use real temp filesystems
 - `gc` — remove-below-watermark, zero-watermark no-op, replay-after-gc, snapshot-slot prefix.
 - `block_backend` / `pipeline_backend` — alignment, RMW, amplification accounting.
 - `file_backend` — real-filesystem fallback path (open/append/flush/fsync/truncate) via `IoBackend::File` / `AsyncFile`.
+- `file_restore` — durability round-trip over real `File` backend: close + reopen recovers all records, term/vote/watermark, and resume-append works.
 - `io_backend` — `IoBackend::detect()` selection, `open`/`rename`/`unlink`/`read_dir`/`create_dir_all`/`exists`.
 - `index` — in-memory segment index (insert/locate, register/remove segment, rebuild-from-scans, slot_count).
 - `pipeline_writer` — batch coalescing, ack ordering, seal, index updates, batch stats (via `WalEngine` public API).
@@ -170,10 +171,12 @@ through the group, durability under crash/restart.
 - Single-leader propose, sequential slot allocation, follower rejects, classic propose.
 - Proposer window full → busy; repair fills gap and advances frontier.
 - Election: 1–7 replica counts elect a single leader, driver scaffold, step-down, propose-after-step-down.
-- KV through the group: Put + BatchWrite (puts) + Delete apply to all learners, follower forwards Get/Scan, forward loop-guard. **Gap:** full op correctness checklist not yet covered (see `plan-test.md`).
+- KV through the group: Put + BatchWrite (puts) + Delete apply to all learners, follower forwards Get/Scan, forward loop-guard. **Gap:** full op correctness checklist not yet covered (see [`plan-test.md`](../plan-test.md)).
 - Remote replica transport: unreachable/invalid endpoint returns error.
 - Preemption retry, kv-slot retry on prior accepted value.
 - Durability: single-node crash/restart, full-cluster restart keeps deletes.
+- New-member snapshot join: pull a snapshot from an existing group to bootstrap a fresh replica.
+- Membership epoch fencing: stale-member accept/reject behavior across membership changes.
 
 ### Store Layer
 
@@ -184,7 +187,7 @@ management, topology status. Tests use embedded gRPC server via
 **Covered:**
 - Single-node KV / read modes, follower redirect hint, dedup.
 - Multi-group routing within one node, dynamic add/remove group, missing-group error.
-- KV ops: Put + BatchWrite (puts) + Delete via `kv_put`/`kv_delete`/`kv_batch_write`, persistence round-trip (put/overwrite/delete survive restart). **Gap:** full op correctness checklist not yet covered (see `plan-test.md`).
+- KV ops: Put + BatchWrite (puts) + Delete via `kv_put`/`kv_delete`/`kv_batch_write`, persistence round-trip (put/overwrite/delete survive restart). **Gap:** full op correctness checklist not yet covered (see [`plan-test.md`](../plan-test.md)).
 - Topology `status` composition, `health` levels, `shutdown` cascade + idempotency.
 
 ### Deployment Layer
@@ -196,14 +199,40 @@ clusters. Tests boot real processes and exercise the HTTP API end-to-end.
 - HTTP management API (health, openapi, stores/groups CRUD, conflicts).
 - Real-process 3-node cluster KV + topology + dynamic group mgmt.
 - CLI parsing, startup WAL restore/resume.
+- New-member snapshot join via HTTP API (end-to-end).
+
+## crowtree C++ Test Layers
+
+The C++ crowtree library (`libcrowtree`) has its own test layers, separate from
+the Rust test binaries above. They run as `test-ct` in CI (291 tests, ~8 s).
+
+| Layer | Where | What it proves |
+| --- | --- | --- |
+| C++ unit | `libcrowtree/tests/unit` | Single component correctness: cell encoding, leaf page build/read, delta replay, consolidation triggers, mapping table, epoch manager, split point. |
+| C++ integration | `libcrowtree/tests/integration` | Multi-component flows over `InMemoryPageStore` and `FilePageStore`: basic CRUD, batch apply, scan, split/merge, consistent view, snapshot roundtrip, GC. |
+| Crash/recovery | `libcrowtree/tests/recovery` | Durability: snapshot + recover, torn-page, superblock A/B, double-apply idempotency. Uses a `FaultyPageStore` with fault points (drop-write, tear, flip-bytes, reorder) for the FI matrix. |
+| Rust FFI | `crowkv` `tests/` | `CrowtreeEngine` trait conformance (shared parametrized tests with `InMemKV`), async bridge, buffer ownership, error mapping. |
+| Cross-engine parity | `crowkv` `tests/` | `InMemKV` and `CrowtreeEngine` produce identical state via `compare()` after random op streams, snapshot export/import round-trips, and mid-stream restart. |
+| Concurrency | sanitizer CI | No data races / UAF under reader+writer load (TSan/ASan/UBSan); epoch reclamation under load; version pin + GC. |
+
+The authoritative correctness oracle is **`compare()` against `InMemKV`**: for
+any op sequence, the two engines' `EngineView::iter_all` must be byte-for-byte
+equal (same key set, same `(slot, cell)`).
+
+Benchmarks (Google Benchmark C++ + criterion Rust): point read, batch apply
+throughput, range scan rate, snapshot cost, delta+consolidate vs pure COW
+comparison.
+
+Tooling: `FaultyPageStore` decorator for FI matrix, seeded RNG op-stream
+generator shared by parity and property tests, `InMemKV` as reference oracle.
 
 ## Sequencing
 
 Fill gaps bottom-up so a new failure is always attributable to the lowest layer:
 1. Unit + WAL/slot + Election — cheap, deterministic.
 2. Replica layer — highest-value gap; unblocks confident group debugging.
-3. Group reconfiguration + PeerStream.
-4. Multi-node store and deployment re-enables, after repair-correctness fixes tracked in `plan-test.md`.
+3. Group reconfiguration + LearnerStream.
+4. Multi-node store and deployment re-enables, after repair-correctness fixes tracked in [`plan-test.md`](../plan-test.md).
 
 ## Suite Timing
 
@@ -224,6 +253,16 @@ with zero failures. Times are the wall-clock duration of `pixi run <suite>`
 The C++ Crowtree tests (`test-ct`) and the Rust core tests (`test-core`) are
 the fastest. The console/web suites dominate total wall time because they boot
 real browser and server processes.
+
+## Test Pairing Rule
+
+Every feature or component milestone includes:
+
+1. **Unit invariants** from the matching test design area (property-based or deterministic).
+2. **Failure-injection** matching [`design.md`](../design.md) §9 scenarios.
+3. **crowbench** integration test (end-to-end correctness) once the RPC/client layer is reached.
+
+See [`plan-test.md`](../plan-test.md) for pending test task tracking.
 
 ## Feature-Dependent Test Gaps
 
@@ -255,7 +294,7 @@ tests for these features.
 | Attribute | Value |
 | --- | --- |
 | Design doc | — |
-| Depends on | Wire group's `contiguous_applied` into WAL GC watermark instead of `u64::MAX`; see `plan-test.md` WAL GC safe slot integration |
+| Depends on | Wire group's `contiguous_applied` into WAL GC watermark instead of `u64::MAX`; see [`plan-test.md`](../plan-test.md) WAL GC safe slot integration |
 | Target layer | WAL → Group |
 | Description | Today WAL GC uses `u64::MAX` as the watermark, meaning it never trims. The group's `contiguous_applied` (the highest slot chosen by quorum) should bound GC. Tests will cover: GC trims below `contiguous_applied`, replay after GC still recovers chosen entries, GC does not trim unchosen slots. |
 

@@ -1,7 +1,7 @@
 # CrowKV - Design: crowtree Durable Storage
 
 Parent: [`design-crowtree.md`](design-crowtree.md)
-Depends on: [`design-crowtree-engine.md`](design-crowtree-engine.md), [`design-async-io.md`](design-async-io.md), [`design-state-machine.md`](design-state-machine.md), [`design-wal.md`](design-wal.md), [`design-reconfiguration.md`](design-reconfiguration.md)
+Depends on: [`design-crowtree-engine.md`](design-crowtree-engine.md), [`design.md`](../design.md) §12.1, [`design-state-machine.md`](design-state-machine.md), [`design-wal.md`](design-wal.md), [`design-reconfiguration.md`](design-reconfiguration.md)
 
 This document specifies how crowtree pages reach durable media and how that
 durability composes with the rest of CrowKV: the `PageStore` backend
@@ -32,7 +32,7 @@ crowtree's tree logic references pages by `PID` and is unaware of the storage
 medium. A `PageStore` maps a durable page slot to bytes — it is the only part
 of crowtree that does I/O, and it is page-granular and asynchronous
 (`read_page`/`write_page` complete via callback/future, matching
-[`design-async-io.md`](design-async-io.md); inside C++ the backend uses
+[`design.md` §12.1](../design.md#121-async-disk-io-substrate-moved-from-design-async-iomd); inside C++ the backend uses
 io_uring / `O_DIRECT` / RDMA verbs directly, no FFI on the I/O hot path).
 
 **IU = Indivisible Unit.** The minimum atomically-writable size. Leaf base

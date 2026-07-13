@@ -2,7 +2,7 @@
 //! multiplexes concurrent requests, so `pool_size == 1` (the default) is
 //! sufficient for most workloads; the pool exists so a deployment that
 //! profiles a single-channel bottleneck can raise it without any API change
-//! (`doc/plan-client.md` §6 Issue 4).
+//!.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 

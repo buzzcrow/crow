@@ -10,7 +10,7 @@ use crate::paxos::PxTerm;
 
 /// Per-client dedup record: the highest applied client sequence number and the
 /// commit slot it landed at. Stored one-per-client (latest wins); a retry of
-/// any `seq <= last_seq` is treated as already-applied (`requirement.md` §10.2).
+/// any `seq <= last_seq` is treated as already-applied (idempotent retry).
 #[derive(Clone, Copy, Debug)]
 struct DedupEntry {
     last_seq: u64,
@@ -37,7 +37,7 @@ pub struct PxLearner {
     /// Highest slot S such that every slot in `[1, S]` has been learned.
     contiguous_chosen: AtomicU64,
     /// Highest slot S such that every slot in `[1, S]` has been applied to
-    /// the KV store. In V1 every `learn()` call applies synchronously so this
+    /// the KV store. In V1 every `learn` call applies synchronously so this
     /// tracks `contiguous_chosen`; a future async-apply path will let them
     /// diverge.
     contiguous_applied: AtomicU64,
@@ -97,10 +97,10 @@ impl PxLearner {
     /// Live value and its resolved slot for `key`, or `None` if unset or
     /// tombstoned. Convenience wrapper over [`KVEngine::get`].
     ///
-    /// `async fn` (plan-tree.md #11 Phase 6, `design-crowkv-async-kvengine.md`
-    /// §5a): `.await`s the `KVFuture` directly instead of `into_ready()` --
+    /// `async fn` (, `design-crowtree-engine.md`
+    /// §4.4): `.await`s the `KVFuture` directly instead of `into_ready` --
     /// [`crate::kv::CrowtreeEngine::get`] can now genuinely construct
-    /// `KVFuture::Pending` for a demand-load miss, and `into_ready()` would
+    /// `KVFuture::Pending` for a demand-load miss, and `into_ready` would
     /// panic on that case. The fast (`Ready`) path costs nothing extra: a
     /// `KVFuture::poll` on `Ready` resolves on the very first poll, so this
     /// `.await` never actually suspends for it.
@@ -239,15 +239,15 @@ impl PxLearner {
     /// Fast-forward the chosen-slot frontier directly to `(slot, term)`,
     /// bypassing `update_frontier`'s sequential/out-of-order-map advance.
     ///
-    /// Only safe to call once, before any `learn()` call, on a
+    /// Only safe to call once, before any `learn` call, on a
     /// freshly-constructed learner (does not merge with existing
     /// out-of-order state) — used exclusively by
     /// [`crate::cluster::local_replica::PxLocalReplica::restore_from_replay_with_engine`]
-    /// to skip re-`learn()`ing a WAL prefix the injected engine already
+    /// to skip re-`learn`ing a WAL prefix the injected engine already
     /// durably reflects ([`crate::kv::KVEngine::resume_from_slot`]), while
     /// still landing at the same `contiguous_chosen`/`contiguous_applied`/
     /// `last_chosen_slot`/`last_chosen_term` state a full sequential replay
-    /// through `learn()` up to `slot` would have produced.
+    /// through `learn` up to `slot` would have produced.
     pub(crate) fn seed_resume_frontier(&self, slot: SlotIndex, term: PxTerm) {
         self.contiguous_chosen.store(slot, Ordering::Release);
         self.contiguous_applied.store(slot, Ordering::Release);

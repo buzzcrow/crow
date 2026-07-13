@@ -1,4 +1,4 @@
-//! G1 (P1 exit criterion, `plan.md` §3 / `plan-core.md` §3): a value written
+//! G1 (P1 exit criterion, / a value written
 //! to a 3-node cluster survives a forced leader step-down — after a new leader
 //! is elected, the committed write is still readable.
 

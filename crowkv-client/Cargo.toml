@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Standalone client library for CrowKV: topology cache, retry/idempotency, read-mode routing. See doc/plan-client.md."
+description = "Standalone client library for CrowKV: topology cache, retry/idempotency, read-mode routing."
 
 [lints]
 workspace = true
@@ -14,7 +14,7 @@ workspace = true
 # `crowkv` gives us the generated tonic KV proto types (`crowkv::rpc::*`) and
 # the `/topology` response shape (`crowkv::cluster::status::*`, already
 # `Serialize`/`Deserialize`) without depending on `crowkv-server` or
-# `crowkv-console` (see doc/plan-client.md §5).
+# `crowkv-console` (see doc/.
 crowkv = { path = "../crowkv" }
 tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
 tonic = { workspace = true }

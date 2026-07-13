@@ -46,7 +46,7 @@ fn snapshot_export_import_round_trip() {
 }
 
 /// No FFI fault-injection hook exists yet to genuinely trip
-/// `Crowtree::io_failed()` from Rust (the C++ side's own fault-injection
+/// `Crowtree::io_failed` from Rust (the C++ side's own fault-injection
 /// coverage lives in `crowtree/tests/integration/crash_recovery_test.cpp`),
 /// so this only guards the clean-state default -- that `is_healthy` is
 /// wired to a real call, not hardcoded `true` on `CrowtreeEngine` the way
@@ -58,7 +58,7 @@ fn is_healthy_is_true_on_a_freshly_opened_engine() {
     assert!(open().is_healthy());
 }
 
-/// Regression guard (`design-crowkv-async-kvengine.md` §6): an in-memory
+/// Regression guard (`design-crowtree-engine.md` §4.5): an in-memory
 /// `CrowtreeEngine` (`opt.path: None`, no page store, no reactor -- see
 /// `CrowtreeOptions::default`) has no I/O path *at all*, so `get`/`scan`/
 /// `apply` must always resolve `Ready` -- proves the "fast path stays fast"
@@ -77,7 +77,7 @@ fn get_scan_apply_always_resolve_ready() {
     assert!(matches!(e.scan(b"", 0), KVFuture::Ready(_)));
 }
 
-/// Regression guard (plan-tree.md #11 Phase 6): unlike the in-memory case
+/// Regression guard : unlike the in-memory case
 /// above, a *durable* (file-backed) `CrowtreeEngine`'s `get` genuinely
 /// constructs `KVFuture::Pending` for a demand-load miss -- evict the
 /// key's leaf (forcing it unloaded) after a snapshot has made it clean,
@@ -128,7 +128,7 @@ async fn get_constructs_pending_for_genuine_demand_load_miss() {
 /// Same regression guard as
 /// [`get_constructs_pending_for_genuine_demand_load_miss`], for `scan`:
 /// `CrowtreeEngine::scan` now goes through `AsyncCrowtree::try_scan`
-/// (`doc/todo-sm.md` G4) instead of the old always-synchronous
+/// instead of the old always-synchronous
 /// `Crowtree::scan`, so a scan over an evicted leaf must genuinely
 /// construct `KVFuture::Pending` too, not just `get`.
 #[tokio::test]
@@ -170,7 +170,7 @@ async fn scan_constructs_pending_for_genuine_demand_load_miss() {
     }
 }
 
-/// `KVEngine::clear` (`doc/todo-sm.md` G3): mirrors `mem_kv_test.rs`'s
+/// `KVEngine::clear`: mirrors `mem_kv_test.rs`'s
 /// `clear_drops_all_state` for the crowtree-backed engine now that
 /// `CrowtreeEngine::clear` is wired to `Crowtree::clear` instead of
 /// panicking.
@@ -188,7 +188,7 @@ fn clear_drops_all_state() {
     assert!(e.iter_all().is_empty());
 }
 
-/// `clear()` must reset per-slot bookkeeping (`received_slots_`/
+/// `clear` must reset per-slot bookkeeping (`received_slots_`/
 /// `max_seen_slot_`), not just the key/value data -- otherwise re-applying
 /// a slot number that was already seen before the wipe (e.g. slot 1, on a
 /// freshly-reset replica about to re-learn its whole log from scratch)
@@ -210,9 +210,9 @@ fn apply_after_clear_accepts_the_same_slot_number_again() {
 }
 
 /// Crash-safety-adjacent check for a *durable* (file-backed) engine:
-/// `clear()` alone is not durable (matching `snapshot_import`'s own
+/// `clear` alone is not durable (matching `snapshot_import`'s own
 /// contract), but once followed by an explicit `persist_snapshot`, the
-/// wipe must survive a close + reopen -- proving `clear()` actually
+/// wipe must survive a close + reopen -- proving `clear` actually
 /// updates the on-disk commit anchor via the normal snapshot path, not
 /// just the in-memory tree.
 #[tokio::test]
@@ -239,7 +239,7 @@ async fn clear_then_persist_survives_reopen() {
     drop(e);
 
     let reopened = CrowtreeEngine::open(&opt).expect("reopen durable engine");
-    // `.await`, not `.into_ready()`: a just-reopened durable tree's root is
+    // `.await`, not `.into_ready`: a just-reopened durable tree's root is
     // installed as an *unloaded* descriptor (lazy recovery -- see
     // `Crowtree::open`'s doc comment in persist.cpp), so this first read
     // may genuinely demand-load it, constructing `KVFuture::Pending` --
@@ -255,7 +255,7 @@ async fn clear_then_persist_survives_reopen() {
 }
 
 /// Cross-engine parity (design's strongest correctness gate): apply the same
-/// op stream to `InMemKV` and `CrowtreeEngine`, `compare()` must be empty.
+/// op stream to `InMemKV` and `CrowtreeEngine`, `compare` must be empty.
 #[test]
 fn parity_with_in_mem_kv_after_identical_op_stream() {
     use crowkv::kv::{InMemKV, KVEngine};

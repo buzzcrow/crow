@@ -5,7 +5,7 @@ use std::task::{Context, Poll};
 /// Fast-path-or-real-future result for a [`super::KVEngine`] operation that is
 /// usually synchronous (in-memory hit / no I/O) but occasionally needs to
 /// wait on real I/O (a crowtree demand-load miss, or a write that triggers a
-/// flush) once `design-crowtree-async.md`'s `io_uring` reactor lands.
+/// flush) once the `io_uring` reactor lands.
 ///
 /// `Ready` costs nothing beyond the enum tag + inline value — no allocation,
 /// no `Pin<Box<..>>>` — so a [`super::KVEngine`] that never needs real I/O
@@ -14,9 +14,8 @@ use std::task::{Context, Poll};
 /// never pays anything for being "async-capable". Only the genuine I/O path
 /// boxes a future.
 ///
-/// See `doc/design/design-crowkv-async-kvengine.md` §4 for the design
-/// rationale (in particular why this shape, rather than `async fn` in
-/// [`super::KVEngine`], which isn't `dyn`-compatible).
+/// The shape exists because `async fn` in a trait is not `dyn`-compatible,
+/// so a custom future enum is the zero-cost alternative.
 #[must_use = "a KVFuture does nothing unless polled/awaited or unwrapped via into_ready()"]
 pub enum KVFuture<T> {
     /// `Some` until first polled; `take()`n on completion so polling an
@@ -40,7 +39,7 @@ impl<T> KVFuture<T> {
     /// exists). Panics on `Pending` so the day a real `Pending` future shows
     /// up here, it's a loud, unmissable signal that this call site now needs
     /// converting to real `async`/`.await` instead of a silent wrong answer
-    /// or a hang. See `design-crowkv-async-kvengine.md` §5 for the deferred
+    /// or a hang. See `design-crowtree-engine.md` §4.4 for the deferred
     /// caller-side conversion this panic is meant to trigger.
     ///
     /// # Panics

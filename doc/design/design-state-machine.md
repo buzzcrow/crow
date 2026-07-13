@@ -10,8 +10,7 @@ This document specifies the storage engine abstraction used by CrowKV learners. 
 > sub-design set: [`design-crowtree.md`](design-crowtree.md) (overview + engine
 > abstraction + language/FFI decisions), [`design-crowtree-engine.md`](design-crowtree-engine.md)
 > (in-memory engine + memory model + async FFI), [`design-crowtree-storage.md`](design-crowtree-storage.md)
-> (durable storage + mapping table + snapshot/GC flow), and
-> [`design-crowtree-test.md`](design-crowtree-test.md). This document remains the
+> (durable storage + mapping table + snapshot/GC flow). This document remains the
 > source of truth for the *semantics* (per-key slot, apply, compare, compaction);
 > crowtree docs own the *implementation*.
 
@@ -34,7 +33,7 @@ This document specifies the storage engine abstraction used by CrowKV learners. 
 
 **Goals:**
 
-- Define one engine surface so the same learner code drives any backend (in-memory, file, crowtree).
+- Define one engine surface so the same learner code drives any backend (in-memory, crowtree).
 - Encode the per-key resolved-slot semantics that make parallel-slot consensus correct.
 - Provide a deterministic state-equality check (`compare`) for cross-learner test verification.
 - Provide a streamable snapshot import/export usable by snapshot install.
@@ -89,7 +88,7 @@ queried through `KVEngine::resume_from_slot()`. This replaces the former
    re-`learn()` of the already-durable prefix.
 4. Slots above the local WAL's own highest accepted slot are re-learned via
    new-leader recovery (bulk Phase 1) or steady-state heartbeat catch-up (§6
-   of this doc's parent flows, `design-parallel-slots.md`).
+   of this doc's parent flows, `design-slot.md`).
 
 Step 3's skip is a pure **optimization**, not a correctness requirement:
 `KVEngine::apply` is idempotent (highest-slot-wins per key) and
@@ -127,7 +126,7 @@ If true historical snapshots are ever required, MVCC is a future extension. The 
 
 ### 3.3 Resolved-slot is monotone per key
 
-The engine never accepts a write at slot `s` for key `k` if `s ≤ resolved_slot(k)`. This is the runtime expression of [Invariant I5 in `design-parallel-slots.md`](design-parallel-slots.md#2-concepts-and-invariants).
+The engine never accepts a write at slot `s` for key `k` if `s ≤ resolved_slot(k)`. This is the runtime expression of [Invariant I5 in `design-slot.md`](design-slot.md#2-concepts-and-invariants).
 
 Implication: replays and out-of-order applies are naturally idempotent. If WAL replay tries to apply slot 7 for key `k` and `resolved_slot(k)` is already 9, the apply is a no-op for `k` — consistent with the parallel-slot semantics.
 
@@ -161,7 +160,7 @@ In-memory engines can hold a write lock for the duration of the batch. File-base
 
 ### 4.4 Intra-batch order
 
-For a key `k` appearing multiple times in a batch (rare but legal — see [requirement.md §7.3.1](../requirement.md#731-correctness-analysis-for-parallel-slot-writes)), the *last* occurrence in batch order wins. The earlier ones are folded into the apply procedure naturally (each tuple in turn updates `current`; the loop's final state is what persists).
+For a key `k` appearing multiple times in a batch (rare but legal — see [`design-slot.md` §13](design-slot.md#13-correctness-analysis-for-parallel-slot-writes-moved-from-requirementmd-731)), the *last* occurrence in batch order wins. The earlier ones are folded into the apply procedure naturally (each tuple in turn updates `current`; the loop's final state is what persists).
 
 ### 4.5 Failure during apply
 
@@ -268,7 +267,6 @@ When a key `k` is overwritten with a higher slot value, the old value is immedia
 ### 7.4 Engine-specific compaction
 
 - In-memory: tombstones are simply removed from the map.
-- Ordered file: the file is rewritten without the tombstones. The rewrite is atomic via swap.
 - crowtree: leverages crowtree's internal compaction. The sweeper hands crowtree a "tombstones below slot S are safe to drop" hint and crowtree merges that into its compaction policy.
 
 ---
@@ -281,7 +279,7 @@ A `compare(other) -> diff` operation is required so that `crowbench` can verify 
 
 `compare(other)` returns a diff describing the keys that differ in `(slot, value)` between `self` and `other`. If the engines are in the same logical state (same set of live keys, same `(slot, value)` per key), the diff is empty.
 
-The compare is **logical**, not byte-level. Two engines may have different physical layouts (e.g. one in-memory tree and one ordered file) yet be logically equal. Compare must succeed across engine types.
+The compare is **logical**, not byte-level. Two engines may have different physical layouts (e.g. one in-memory and one crowtree) yet be logically equal. Compare must succeed across engine types.
 
 ### 8.2 Required behavior
 
@@ -303,7 +301,7 @@ For very large states, a Merkle-tree-style digest could be added later; not requ
 
 ## 9. Engine Implementations
 
-Three engine implementations satisfy the surface above. Each is appropriate for a specific phase of development or workload.
+Two engine implementations satisfy the surface above. Each is appropriate for a specific phase of development or workload.
 
 ### 9.1 In-Memory Tree
 
@@ -313,15 +311,7 @@ Three engine implementations satisfy the surface above. Each is appropriate for 
 - Snapshot format: serialized sorted (key, slot, value-or-tombstone) tuples.
 - Concurrency: read-write lock over the whole map for `apply`; concurrent reads via a snapshot pointer.
 
-### 9.2 Ordered File
-
-- Backing store: a single sorted key-value file with a small index.
-- Persistence: yes (via the engine's own fsync, separate from the WAL).
-- Use cases: testing without WAL replay surprises, debugging on a single machine, lightweight production use cases that don't need crowtree's features.
-- Snapshot format: a copy of the file plus its index.
-- Concurrency: write-aside-then-swap; readers see a stable file pointer.
-
-### 9.3 crowtree
+### 9.2 crowtree
 
 - Backing store: the production btree library `crowtree` — a C++ `libcrowtree`
   (single-writer COW B+tree with per-leaf delta chains, epoch GC, versioned root)
@@ -335,7 +325,7 @@ Three engine implementations satisfy the surface above. Each is appropriate for 
 - Concurrency: single writer (learner apply) + lock-free immutable-page reads,
   epoch-based reclamation.
 
-The trait surface is engine-agnostic; switching engines is a configuration choice. All three pass the same `compare`-based equivalence tests.
+The trait surface is engine-agnostic; switching engines is a configuration choice. Both pass the same `compare`-based equivalence tests.
 
 ---
 

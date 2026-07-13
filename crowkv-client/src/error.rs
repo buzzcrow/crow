@@ -1,8 +1,8 @@
 //! Error type for [`crate::CrowkvClient`].
 
 /// Errors surfaced by the client library. Transport/server errors that the
-/// retry loop (`requirement.md` §10.2) can recover from are handled
-/// internally and never reach the caller unless retries are exhausted.
+/// retry loop can recover from are handled internally and never reach the
+/// caller unless retries are exhausted.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("transport error to {endpoint}: {status}")]
