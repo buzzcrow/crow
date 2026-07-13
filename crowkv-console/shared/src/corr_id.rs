@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Correlation-id propagation for console-issued operations.
 //!
 //! Every console request (CLI invocation, web handler call) runs inside

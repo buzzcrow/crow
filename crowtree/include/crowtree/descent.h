@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // Tree descent: walk inner pages from the
 // root PID down to the leaf PID whose key range contains `key`. Leaf chains
 // (deltas) are resolved by the caller; descent only follows base inner pages.

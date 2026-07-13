@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { listRacks, listNodes, listNodeStores, pingNode } from '../api';
 import { NodeHealth } from '../types';

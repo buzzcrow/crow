@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Manual latency comparison for Phase 5: `AsyncCrowtree`'s
 //! reactor-driven `get` (Phase 3) vs. the `spawn_blocking` bridge it
 //! replaced, for both the fast (resident hit) and slow (demand-load miss)

@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Snapshot install / truncate-and-resume on a single replica.
 //!
 //! The `KVEngine::clear` method is the reset hook used by snapshot-install

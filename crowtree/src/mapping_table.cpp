@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 #include "crowtree/mapping_table.h"
 
 #include "crowtree/page_store.h" // round_up_to_iu

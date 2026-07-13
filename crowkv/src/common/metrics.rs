@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Lightweight per-layer counters for the cluster hierarchy.
 //!
 //! V1: cheap atomic counters intended to be consumed by the topology endpoint

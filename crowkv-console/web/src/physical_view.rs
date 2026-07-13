@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Depth-bounded "expanded" views for the physical-tree GET handlers.
 //!
 //! Key work: view structs that inline nodes / stores / groups under a

@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Bench runner: connection pool + worker tasks + stats aggregation.
 //!
 //! Key work: build N gRPC channels (the connection pool), spawn M

@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // CT13: read path (get, multi_get, scan with L0 overlay, iter_all via snapshot).
 #include "crowtree/crowtree.h"
 #include "crowtree/page_store.h"

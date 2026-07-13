@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! WAL pipeline benchmark — multi-threaded load through a single WAL pipeline.
 //!
 //! Measures append throughput with N concurrent loader tasks, each writing KV

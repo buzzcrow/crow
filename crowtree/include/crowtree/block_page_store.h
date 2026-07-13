@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // Raw block-device / O_DIRECT-file backend (plan-tree #22): completes the
 // PageStore backend matrix alongside MemPageStore (tests) and FilePageStore
 // (buffered local file).

@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! A2: `?recursive=` validation is honoured by every two-tree GET.
 //!
 //! The handlers currently embed their natural immediate children

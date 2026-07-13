@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 use crate::error::{err_400, err_500, err_502, map_config_err, map_persist_err, ErrorBody};
 use crate::expand::Recursive;
 use crate::physical_view::PhysicalBuilder;

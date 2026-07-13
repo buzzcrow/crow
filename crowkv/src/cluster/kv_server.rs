@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! gRPC server lifecycle for a `PxKvStore`.
 //!
 //! Defines the [`KvServer`] trait (start / join / stop / `listen_addr`)

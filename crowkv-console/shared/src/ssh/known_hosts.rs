@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Persistent SSH host-key store used by the console's TOFU policy.
 //!
 //! Format: one record per non-blank / non-`#` line, whitespace-

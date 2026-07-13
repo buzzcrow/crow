@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Per-pipeline dedicated writer task (W3).
 //!
 //! Each pipeline has one long-running async task that owns the active

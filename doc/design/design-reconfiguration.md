@@ -1,3 +1,6 @@
+<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Licensed under the Apache License, Version 2.0. -->
+
 # CrowKV - Design: Reconfiguration
 
 Depends on: [`requirement.md`](../requirement.md), [`design.md`](../design.md), [`design-leader-election.md`](design-leader-election.md)

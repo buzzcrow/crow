@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Console data model placeholders. Real fields land in C1 (snapshot) and
 //! C2 (registry); kept minimal here so downstream crates have stable names.
 

@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Console-side cluster model — the two-tree data types.
 //!
 //! Key work: rack/node entities, deployed server process, per-node

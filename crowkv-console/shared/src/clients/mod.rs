@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Transport clients used across the console.
 //!
 //! - `http`: low-level management API on a single `crowkv-server`.

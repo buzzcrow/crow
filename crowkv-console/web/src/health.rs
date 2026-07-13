@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Liveness probe for the console web binary.
 //!
 //! The pre-A12 `/api/cluster/snapshot` aggregator that lived here has

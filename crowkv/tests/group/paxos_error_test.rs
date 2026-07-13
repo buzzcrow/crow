@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Group-layer Paxos error propagation: not-leader hint surfacing, preemption
 //! retry through `PxGroup::propose`, and gRPC boundary rejection. The pure
 //! error-classifier unit tests live at `tests/paxos/error_test.rs`.

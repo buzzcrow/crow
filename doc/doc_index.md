@@ -18,6 +18,16 @@ doc only when a task touches a topic in its row. Line counts are approximate
 | `procedures.md` | ~450 | Operator-facing procedures for a standard CrowKV cluster: bootstrap, rolling upgrade, node replacement, replica add/remove, quorum-loss handling, health checks, backup, full API reference. Uses `crowkv-server` and the console HTTP API as examples. |
 | `todo_code.md` | ~50 | Forward-looking code-level TODO backlog (open implementation items, blocked/deferred work with rationale). Read before picking up crowtree/crowkv follow-up work. |
 
+## Project Files (repo root)
+
+| File | When to read |
+| --- | --- |
+| `AGENTS.md` | Always — project overview + dispatch table for AI agents |
+| `CONTRIBUTING.md` | Before opening a PR — setup, conventions, process |
+| `CHANGELOG.md` | When releasing or checking what changed between versions |
+| `SECURITY.md` | When reporting or handling a security vulnerability |
+| `CODE_OF_CONDUCT.md` | Community behavior guidelines |
+
 ## `requirement.md` Sections
 
 | § | Topic |

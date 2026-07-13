@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // Status: coarse result code + optional message. Public API returns Status
 // instead of throwing, so the future C ABI can map it to ct_status directly.
 #pragma once

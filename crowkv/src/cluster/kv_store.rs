@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! [`KvStore`] trait — the gRPC-facing surface of a single
 //! `PxKvStore` instance. Methods mirror the wire protocol (`KvGet`,
 //! `KvPut`, `KvDelete`, `KvBatchWrite`, `KvScan`) and return the

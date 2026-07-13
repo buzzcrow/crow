@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // plan-tree #15: apply() rejects oversized keys with kInvalidArgument.
 #include "crowtree/crowtree.h"
 

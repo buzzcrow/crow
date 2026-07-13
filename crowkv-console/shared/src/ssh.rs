@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! SSH transport for the `CrowKV` Console.
 //!
 //! Wraps `russh` 0.45 in a small synchronous-feeling helper used by the

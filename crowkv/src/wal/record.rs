@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! WAL record codec — **FREEZE GATE** (P2 W2).
 //!
 //! After this module lands the byte layout and `version` are frozen.

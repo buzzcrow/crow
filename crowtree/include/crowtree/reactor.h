@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // Reactor: a dedicated io_uring event-loop thread that submits read/write/
 // fsync SQEs and dispatches CQE completions to per-op callbacks. One
 // instance per `Crowtree`; it runs no
@@ -12,8 +15,7 @@
 #pragma once
 
 #ifndef CROWTREE_HAVE_LIBURING
-#    error \
-        "crowtree/reactor.h requires CROWTREE_HAVE_LIBURING (liburing not found by CMake; io_uring is Linux-only)"
+#    error "crowtree/reactor.h requires CROWTREE_HAVE_LIBURING (liburing not found by CMake; io_uring is Linux-only)"
 #endif
 
 #include <liburing.h>

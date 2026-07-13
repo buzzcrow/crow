@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! CLI e2e for cluster observation: `cluster status / topology /
 //! inspect` route entirely through `--console` (no `--server`), against
 //! a web-managed cluster with no persisted registry.

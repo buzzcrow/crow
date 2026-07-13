@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Persisted group membership configuration.
 //!
 //! `PxGroupConfig` is the durable, consensus-independent snapshot of a group's

@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! A8 web e2e: spawn `crowkv-server` + console web, then drive
 //! `/api/stores/{sid}/groups/{gid}/kv/{put,get,delete}` over HTTP.
 //! Leader resolution now uses the monitor cache (no `?server=`).

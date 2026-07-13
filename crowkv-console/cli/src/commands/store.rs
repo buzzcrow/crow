@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 use clap::Subcommand;
 use crowkv_console_shared::clients::console::CreateStoreBody;
 use std::process::ExitCode;

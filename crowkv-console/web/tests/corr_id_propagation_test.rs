@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Verify `x-crowkv-corr-id` propagates inbound → handler → response.
 //!
 //! Each test spins up the real `crowkv-web` router. The middleware

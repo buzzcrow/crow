@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! A5/A6 web e2e: spin up a real `crowkv-server` plus the console web
 //! backend, then exercise the orchestrated `/api/stores` and
 //! `/api/stores/:sid/groups` routes through HTTP. Skips silently when

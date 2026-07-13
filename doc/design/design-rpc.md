@@ -1,3 +1,6 @@
+<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Licensed under the Apache License, Version 2.0. -->
+
 # CrowKV - Design: RPC Wire Protocol
 
 Depends on: [`requirement.md`](../requirement.md) §3, §9.2, §10, [`design.md`](../design.md) §2, §3

@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 import { Node, Edge, MarkerType } from 'reactflow';
 import { Rack, Node as NodeEntity, StoreView, NodeStore, ViewMode, CrowKVServerView, NodeHealth, ReplicaState } from '../types';
 import type { SelectedEntity } from '../contexts/SelectionContext';

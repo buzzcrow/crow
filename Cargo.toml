@@ -25,6 +25,8 @@ edition = "2021"
 rust-version = "1.75"
 license = "Apache-2.0"
 repository = "https://github.com/buzzcrow/crowkv"
+keywords = ["distributed", "kv-store", "paxos", "consensus", "database"]
+categories = ["database-implementations", "distributed-systems"]
 
 [workspace.dependencies]
 tokio = { version = "1.40", default-features = false }

@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // buffer: a move-only byte container that is either OWNED (frees on destruction)
 // or BORROWED (a non-owning view whose lifetime is guaranteed elsewhere — e.g. a
 // resident B+tree frame held alive by an epoch guard).

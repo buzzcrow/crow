@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! `CrowtreeEngine` behavior: same shared `KVEngine` conformance suite as
 //! `mem_kv_test.rs` (see `conformance.rs`), proving `CrowtreeEngine` and
 //! `InMemKV` satisfy the identical `KVEngine` contract.

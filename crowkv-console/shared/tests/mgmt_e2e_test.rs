@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! C5 end-to-end: spawn a real `crowkv-server`, drive the full
 //! store → group → remote lifecycle through the `mgmt` client, and
 //! verify each call's side effect via the corresponding `GET`.

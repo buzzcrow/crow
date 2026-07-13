@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Per-endpoint `tonic::Channel` pool. A single HTTP/2 channel already
 //! multiplexes concurrent requests, so `pool_size == 1` (the default) is
 //! sufficient for most workloads; the pool exists so a deployment that

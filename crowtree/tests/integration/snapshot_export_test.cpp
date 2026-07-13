@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // PT7: snapshot export / import (portable stream + file wrappers).
 #include "crowtree/crowtree.h"
 #include "crowtree/snapshot_io.h"

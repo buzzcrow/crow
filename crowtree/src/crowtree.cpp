@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 #include "crowtree/crowtree.h"
 
 #include "crowtree/async_page_store.h"

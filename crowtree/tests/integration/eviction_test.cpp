@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // PT6c-5.4: writer-driven eviction of clean resident bases. An
 // evicted leaf re-tags its mapping slot `unloaded` and epoch-retires the page;
 // the next access demand-loads it. Run under TSan for the eviction-vs-reader

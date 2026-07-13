@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // Mapping table.
 //
 // PID -> atomic<uint64_t> packed slot word (plan-tree #14b). All structural

@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // KV mutation messages for P4.
 //
 // Separated from pxos.proto so the Paxos wire contract can freeze

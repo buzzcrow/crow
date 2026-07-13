@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! WAL replay engine (P2 W10–W13).
 //!
 //! Discovers segments, scans records with CRC verification, truncates on

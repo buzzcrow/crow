@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! End-to-end test against a real single-node `PxKvStore` + `KvService`
 //! (no mocks): topology discovery over a small `/topology` HTTP server
 //! backed by the store's real `status`, then `put`/`get`/`delete`/

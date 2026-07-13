@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Per-slot Paxos machinery: acceptor (P1 M1), minimal proposer + RPC integration (P1 M2),
 //! full proposer / replicator / repair (P1 M4).
 

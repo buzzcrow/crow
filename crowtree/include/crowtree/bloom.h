@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // A small Bloom filter for leaf pages: a fast
 // negative check before scanning a leaf's entries. Double-hashing scheme.
 #pragma once

@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! `handle_step_down` tests: strict-fence policy.
 //!
 //! The handler accepts a step-down request only if the replica is currently

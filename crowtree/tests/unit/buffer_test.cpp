@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // #5 B1: buffer abstraction (owned/borrowed, move-only, header reserve, clone).
 #include "crowtree/buffer.h"
 

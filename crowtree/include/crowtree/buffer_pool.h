@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // Buffer pool: crowtree's bounded, explicitly-managed cache of page frames.
 // The pool is the only holder of base-page
 // memory: a single contiguous arena of equal-size frames plus an

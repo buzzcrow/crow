@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! A5 / G2 (freeze gate): multi-node kill/restart/re-elect with
 //! no data loss.
 //!

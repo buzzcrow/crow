@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Real-process end-to-end test for the new-member snapshot-join mgmt API
 //!: a brand-new store
 //! joins an already-populated group by pulling a snapshot via

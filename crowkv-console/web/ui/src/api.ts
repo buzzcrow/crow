@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // Thin typed wrappers over the crowkv-web HTTP API.
 // Separated into physical (infrastructure) and logical (cluster) endpoints as per design-console.md
 import type {

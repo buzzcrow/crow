@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! [`OperationReport`] — aggregated `critical:` errors from a multi-step
 //! cascade (e.g. layered shutdown across `PxKvStore` → `PxGroup` →
 //! replicas). Layers continue on errors and push messages here so the

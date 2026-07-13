@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // CT14: concurrent readers while a single writer applies/flushes/splits/merges.
 // Run under TSan/ASan to catch races and use-after-free in epoch reclamation.
 #include "crowtree/crowtree.h"

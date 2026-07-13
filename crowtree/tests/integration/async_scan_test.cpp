@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // ct_scan_async, scan()'s async twin.
 // scan() calls resident() per leaf (and for the initial root->leaf descent),
 // which blocks synchronously on page_store->read_at() for a cold/unloaded

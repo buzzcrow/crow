@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // Implementation of the crowtree logging facade (plan-tree #10). See log.h for
 // the contract. Split into an spdlog-backed build and a no-op build so the Rust
 // FFI `cc` build (no spdlog) still compiles this translation unit cleanly.

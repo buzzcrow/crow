@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Tiny monotonic id generator for client-only ephemeral keys (toasts,
 //! activity entries). Avoids a uuid dependency; ids are unique per session.
 

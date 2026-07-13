@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // PageStore: the byte-addressable durable medium under crowtree's persistence
 // layer. The tree logic is unaware of the medium; the snapshot/recovery code
 // (persist.cc) owns the on-device layout (superblocks + ping-pong regions +

@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! M3 leader-removal coverage: remove the current leader from a group with
 //! ≥ 3 remaining voters, exercising both the graceful `StepDown` path and
 //! the lease-expiry fallback when the leader is unreachable.

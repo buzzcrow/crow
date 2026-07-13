@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! C6 end-to-end: spawn `crowkv-server`, create a store/group through the
 //! management API, then via `crowkv-client`'s `CrowkvClient` exercise
 //! put → get → delete → get-not-found → scan. (C6's own gRPC `KvClient`

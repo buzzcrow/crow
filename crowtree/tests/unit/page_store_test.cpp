@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // PT1: PageStore backend tests (MemPageStore + FilePageStore + BlockPageStore).
 #include "crowtree/block_page_store.h"
 #include "crowtree/page_store.h"

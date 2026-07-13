@@ -1,3 +1,6 @@
+<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
+<!-- Licensed under the Apache License, Version 2.0. -->
+
 # CrowKV - Requirements
 
 This is the authoritative requirements document. All other documents (`design.md`, sub-design docs) must follow definitions and conclusions from this document.

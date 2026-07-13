@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Shared CLI e2e harness: spawn a real `crowkv-server` (local fork),
 //! an in-process `crowkv-web` console bound to a random port, and run
 //! the compiled `crowkv` binary against it with `--console`.

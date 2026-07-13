@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // Stable C ABI for crowtree.
 //
 // A thin, exception-free C surface over the C++ engine so Rust (and any C

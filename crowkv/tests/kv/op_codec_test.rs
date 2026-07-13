@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Isolated unit tests for `kv/op` wire-format encode/decode.
 //!
 //! `mem_kv_test.rs` exercises `Batch::decode` indirectly through `InMemKV::apply`.

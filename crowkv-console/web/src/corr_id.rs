@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Axum middleware that propagates the `x-crowkv-corr-id` header.
 //!
 //! For every inbound request:

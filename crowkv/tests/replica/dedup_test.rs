@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Dedup suppression at the replica level.
 //!
 //! When a client retries a `(client_id, seq)` that has already been committed,

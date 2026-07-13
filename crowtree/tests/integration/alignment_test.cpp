@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // PT9: IU block alignment (9.1-9.3) + debug store/codec on real frames (9.5).
 #include "crowtree/crowtree.h"
 #include "crowtree/debug_codec.h"

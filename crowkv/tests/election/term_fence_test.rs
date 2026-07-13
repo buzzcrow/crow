@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Term fencing tests: `on_prepare` and `on_accept` reject stale-term
 //! requests and adopt higher terms.
 //!

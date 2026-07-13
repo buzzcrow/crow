@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // PT12: in-frame delta region (opt-in). Verifies correctness (reads overlay
 // in-frame deltas, fold at cap, reopen-equals, parity vs oracle) and a small
 // microbenchmark vs plain COW-rebuild (both must agree).

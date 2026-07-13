@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // Consistent point-in-time view. A Snapshot is an immutable, key-sorted materialization of the
 // L1 tree at a given slot, used for scan-at / compare / iter_all / export.
 //

@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 // Compile the crowtree C++ engine (including the C ABI) into a static lib and
 // link it into this crate. LZ4 is optional: set CROWTREE_LZ4_LIB=/path/to/dir
 // containing liblz4 to enable on-disk compression; otherwise the codec degrades

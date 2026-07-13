@@ -1,3 +1,6 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
 //! Segment index: maps slot → (`disk_idx`, `segment_id`, `file_offset`).
 //!
 //! In-memory lookup; persisted as a small auxiliary file per group but
