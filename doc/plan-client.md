@@ -10,18 +10,17 @@ code, not just design docs, on 2026-07-11 — same method as the just-closed
 
 ## 0. tl;dr
 
-**P4 is much further along than `plan.md`'s phase table suggests — M1/M2/M4 are
-essentially done, built ahead of schedule alongside P1/P2/P3.** M3 ("client
-library") is the real gap, and it is bigger than "write a client crate": the
-client-discovery model `requirement.md §7.1/§7.4` and `design.md §7` specify
-(**Group-0** system group, static `num_groups`, `hash(key) -> group_id`,
-`DescribeCluster` RPC) has **zero implementation** — not partially done, not
-stubbed, just absent. What exists instead is a different, already-working,
-already-tested model: an operator-driven HTTP management API
+**Resolved (2026-07): Model B.** `requirement.md`/`design.md`/`design/design-rpc.md`
+described a **Group-0** system group (static `num_groups`, `hash(key) -> group_id`,
+`DescribeCluster` RPC) that had **zero implementation**. What was actually built
+and tested is a different model: an operator-driven HTTP management API
 (`crowkv-server/src/mgmt_api.rs`) for creating stores/groups, with every KV RPC
-taking an explicit `group_id`. These two models were never reconciled. See §3
-for why this matters and §6 for the decision this plan needs from you before
-any code gets written.
+taking an explicit `group_id`, and per-group config files for persistence. §6
+records the decision to keep that model and retire the Group-0 design; the
+core docs have been amended accordingly. §5 has the resulting milestones
+(C1-C3) and the new `crowkv-client` crate design. M1/M2/M4 were already done
+ahead of schedule (§1); M3 ("client library") is the remaining work, now in
+progress against this plan.
 
 ---
 
@@ -117,52 +116,127 @@ This is the single biggest thing this plan needs from you — see Issue 1 in §6
 
 ## 4. Do we need a new design doc first?
 
-**No new *design* document, conditional on the answer to Issue 1 (§6).**
+**No new *design* document — resolved by §6 Issue 1: Model B.**
 
-- The wire protocol is already designed (`design/design-rpc.md`) and mostly
-  implemented (§1) — no rework needed there beyond appending `DescribeCluster`'s
-  messages (append-only field numbers, same as everything else in that doc).
+- The wire protocol is already designed (`design/design-rpc.md`) and fully
+  implemented (§1) — the `AdminService`/`DescribeCluster` stub was removed
+  from that doc rather than built (§6 Issue 3).
 - The consistency/read-routing model the client needs to respect is already
   fully designed *and implemented* (`design/design-leader-election.md`,
   `requirement.md` §6.4, §1 above) — the client library consumes it, doesn't
   design it.
-- If the answer to Issue 1 is **Model B** (keep the operator-managed HTTP model,
-  scope the client library to explicit `group_id` + retry/topology-cache over
-  the existing HTTP API for discovery): this is a bounded, well-understood
+- Model B (operator-managed HTTP model, explicit `group_id` + retry/topology-cache
+  over the existing HTTP API for discovery) is a bounded, well-understood
   client-side state-machine (topology cache + retry loop) layered on
-  already-solid, already-tested foundations. A design *section* in this plan
-  (§5 below) is enough; a whole new `design-client.md` would be overkill for
-  what's fundamentally a caching/retry wrapper.
-- If the answer is **Model A** (build Group-0 for real): that *is* new
-  architecture — a new log-entry kind, a bootstrap sequencing protocol, a
-  reconciliation with the existing HTTP mgmt API — and would deserve a proper
-  `design/design-group0.md` before any milestone plan, the same way crowtree got
-  `design/design-crowtree.md` before its plan-tree milestones. I have **not**
-  written that doc; I'd want your read on Issue 1 first, since it changes
-  whether that document needs to exist at all.
+  already-solid, already-tested foundations. The design *section* below (§5)
+  is the design doc for this milestone; `requirement.md` §7.1/§7.4/§10.1 and
+  `design.md` §2/§7 have been amended in place to describe Model B as the
+  accepted architecture (no more "aspirational Group-0" text).
 
 ---
 
-## 5. Proposed milestones (Model B scope — pending your answer to Issue 1)
+## 5. Proposed milestones (Model B, resolved)
 
-Written against Model B (explicit `group_id`, operator/HTTP-driven topology)
-since it requires no new server-side architecture and everything it needs
-already exists and is tested. If you pick Model A instead, this section gets
-replaced, not patched.
+Written against Model B (explicit `group_id`, operator/HTTP-driven topology).
+C4 (`DescribeCluster`) is dropped per §6 Issue 3 — the HTTP `/topology`
+endpoint is the permanent discovery mechanism.
+
+**Crate:** new standalone `crowkv-client` (workspace member), depending only
+on `crowkv` (proto/RPC types + `crowkv::cluster::status::{StoreStatus, GroupStatus,
+ReplicaStatus, RemoteStatus}` for deserializing `/topology`, which is already a
+public `crowkv` type — no dependency on `crowkv-server` or `crowkv-console`
+needed). `crowkv-console/shared/src/clients/grpc.rs::KvClient` is deleted;
+`crowkv-console` depends on `crowkv-client` instead (§6 Issue 4).
 
 | Milestone | Scope | Acceptance |
 |---|---|---|
-| **C1** | New `crowkv-client` crate (or a promoted/generalized `crowkv-console/shared/src/clients/grpc.rs`, see Issue 4): topology cache keyed by `(store_id, group_id) -> leader_endpoint`, seeded from the HTTP mgmt API's `/topology` (reusing `crowkv-console/shared`'s existing deserialization types rather than re-inventing them), refreshed on `NotLeaderHint` and on a configurable interval. | Cache hit avoids the HTTP round-trip; cache miss/`NotLeaderHint` triggers exactly one refresh, not a storm. |
-| **C2** | Retry policy per `requirement.md` §10.2: immediate retry on `NotLeaderHint` (follow the hint), 1s-then-retry on unknown leader, exponential backoff on timeout, 3-retry cap on other errors, all configurable. Applied uniformly to `Put`/`Delete`/`BatchWrite` (today only `Get`/`Scan` get any redirect at all, and that's server-side). | Client survives a forced leader step-down mid-request with auto-retry, returns the same result; retry counts/intervals configurable and covered by a fake-leader-change test. |
-| **C3** | `safe_slot`/`read_slot` caching per response; expose the four `ReadMode`s on the client API (today `crowkv-cli`/bench hard-code `Linearizable` implicitly via default `0`). | Round-trip test exercising all four modes against a 3-node cluster; `ReadYourWrites` honors a cached `client_slot`. |
-| **C4** | `DescribeCluster`-equivalent: **either** a real gRPC RPC backed by the HTTP mgmt API's existing topology data (thin gRPC facade, no Group-0 needed) **or** deferred entirely in favor of the HTTP `/topology` endpoint the client already has to hit anyway (Issue 3). | Depends on Issue 3's answer. |
+| **C1** | `crowkv-client` crate skeleton + topology cache: `(store_id, group_id) -> leader_endpoint`, seeded/refreshed from HTTP `/topology` on any seed, refreshed on `NotLeaderHint` and on a configurable interval. Per-endpoint connection pool (`tonic::Channel`, configurable pool size per endpoint, round-robin — §6 Issue 4) replacing the single-channel cache in the old `KvClient`. | Cache hit avoids the HTTP round-trip; cache miss/`NotLeaderHint` triggers exactly one refresh, not a storm. |
+| **C2** | Retry policy per `requirement.md` §10.2: immediate retry on `NotLeaderHint` (follow the hint), 1s-then-retry on unknown leader, exponential backoff on timeout, 3-retry cap on other errors, all configurable. Applied uniformly to `Put`/`Delete`/`BatchWrite` (today only `Get`/`Scan` get any redirect at all, and that's server-side). Client mints one `(client_id, seq)` per logical write and reuses it across all retries of that write (§6 Issue 6). | Client survives a forced leader step-down mid-request with auto-retry, returns the same result; retry counts/intervals configurable and covered by a fake-leader-change test. |
+| **C3** | Expose all four `ReadMode`s on the client API (today `crowkv-cli`/bench hard-code `Linearizable` implicitly via default `0`). `ReadYourWrites` support: client tracks a per-`(store_id, group_id)` last-write-slot watermark (bounded — one `u64` per group ever written to, not per key; see §6 Issue 5), auto-attached as `client_slot` on `Get`/`Scan` unless the caller overrides it explicitly. | Round-trip test exercising all four modes against a 3-node cluster; a `ReadYourWrites` read immediately after a `Put` to the same client observes the write on a replica the caller didn't pin, without an explicit `client_slot` argument. |
 
 **Freeze gate (unchanged from `plan.md`):** `.proto` schema append-only,
-version at tag 1 — already the case for everything added in C1-C4.
+version at tag 1 — already the case for everything added in C1-C3.
+
+**Status (2026-07): C1-C3 implemented in `crowkv-client`**, with unit tests
+(`topology.rs`) and two real e2e suites:
+`crowkv-client/tests/e2e_single_node_test.rs` (put/get/delete/batch_write/
+scan, topology-cache-driven discovery, `ReadYourWrites` auto-watermark) and
+`crowkv-client/tests/e2e_retry_test.rs` (C2's own acceptance line — a real
+2-node group, `put` seeded at the follower on purpose, asserts the raw
+gRPC response really carries a `not_leader_hint` pointing at the real
+leader, then asserts `CrowkvClient::put` transparently follows it and
+completes). A live kill/re-elect step-down is flakier than this
+deterministic variant and exercises the identical `follow_not_leader` code
+path, so it was preferred over standing up a real election timer in the
+e2e suite. `crowkv-client::CrowkvClient::put`/`delete` also accept an
+`ids: Option<(client_id, seq)>` override (needed by callers that expose
+explicit idempotency keys to their own users) and `set_mgmt_seeds`/
+`seed_leader` for callers with their own discovery path.
+
+**Consumer migration — scoped narrower than "delete `KvClient`" (§6 Issue 4's
+original framing):**
+- **`crowkv-cli` (`commands/kv.rs`) — migrated.** Endpoint resolution still
+  goes through the console (`ConsoleClient::resolve_endpoint` — the CLI has
+  no direct `crowkv-server` mgmt connection and isn't meant to); the raw
+  `KvClient` dial+call is replaced by a `CrowkvClient` pre-seeded with that
+  one endpoint via `seed_leader`, gaining pooling/retry for free. All
+  `crowkv-cli`/`crowkv-console-shared` tests pass unchanged
+  (`kv_cli_test.rs::kv_put_get_delete_round_trip` exercises this live).
+- **`crowkv-cli`'s bench runner (`bench/runner.rs`) — deliberately left on
+  `KvClient`.** Its entire purpose is single-attempt latency/error-rate
+  measurement (`t0 = Instant::now()`, one RPC, no retry) — exactly what
+  `requirement.md` §10.2's retry policy and `CrowkvClient`'s internal retry
+  loop would corrupt (a transient `NotLeaderHint` would silently become a
+  slower success instead of a counted error). This is a real, structural
+  mismatch, not a migration gap: a benchmark tool and a resilient client
+  library want opposite behavior on the same RPC.
+- **`crowkv-web` (`src/kv.rs`) — migrated.** `with_leader_retry`'s whole
+  candidate-endpoint queue (`monitor_cache` lookup, `NotLeader`/transport
+  branching, per-endpoint attempt caps) is deleted; each request builds a
+  `CrowkvClient` seeded with the group's replica nodes' *management* URLs
+  (`ServerEntry::url`, not `grpc_url`) via a new `mgmt_seeds_for_group`
+  helper, and lets `CrowkvClient` do all discovery/retry itself. Any one
+  reachable replica's own `/topology` carries the real leader's endpoint
+  via its `remotes` list (`design/design-rpc.md`), so this needs no
+  `monitor_cache`-specific bookkeeping. `AppState.kv_retry`/
+  `KvRetryConfig` (only ever used by `with_leader_retry`) are deleted.
+  `http_kv_endpoint` (the CLI bench's raw-endpoint-discovery route) is
+  untouched -- it never used `KvClient` and still resolves via
+  `monitor_cache` directly, which is correct for that use case (see
+  `bench/runner.rs` note below).
+
+  Fixing this migration surfaced two real `crowkv-client` bugs (not
+  console-specific workarounds -- fixed at the root in `src/client.rs`),
+  both found via `crowkv-web/tests/cluster_restart_incremental_test.rs`'s
+  real multi-node restart-and-reconverge scenarios:
+  1. `resolve_leader` never retried an "unknown leader" outcome -- it
+     fetched `/topology` exactly once and gave up permanently if the
+     group had no leader yet (e.g. a live election right after a
+     restart), even though `RetryConfig::unknown_leader_wait` and
+     `requirement.md` §10.2 both specify this case should retry with
+     backoff. Now retries up to `max_retries` times.
+  2. A `not leader` response with an *empty* hint (the responding
+     replica doesn't know who's leader either) fell through to the
+     generic `count_other` retry with **no** wait and **no** endpoint
+     change -- a zero-delay busy-loop against the same non-answering
+     replica that could never let an in-flight election converge before
+     exhausting the retry budget. Added `is_unknown_leader` +
+     `wait_and_refresh_leader` to give this case the same
+     `unknown_leader_wait` backoff + topology refresh as the initial
+     resolve.
+
+  Both fixes are covered by the now-passing `cluster_restart_incremental_test.rs`
+  (5/5 tests: 1/3/5/6-node restarts, single- and multi-group).
+
+`KvClient` stays in `crowkv-console-shared` for one remaining call site
+(`crowkv-cli`'s bench runner, deliberately, per above) and is not yet fully
+retired from that crate.
 
 ---
 
-## 6. Open issues — need your decision before implementation starts
+## 6. Open issues — resolved (2026-07)
+
+All six resolved via the `ai-todo` answers below; kept verbatim as the decision record. Docs (`requirement.md`, `design.md`, `design/design-rpc.md`, `plan.md`) have been amended accordingly.
 
 1. **Model A vs. Model B (§3).** Do we (a) build Group-0 + hash-partitioning for
    real, matching `requirement.md`/`design.md` literally, or (b) treat the
@@ -194,6 +268,8 @@ version at tag 1 — already the case for everything added in C1-C4.
    to the console's crate, which today is scoped/named as console-internal)?
    ai-todo: we should provide a standard alone crowkv-client  and let crowkv-console code use it. The client lib can do some connection pool and aggregation to improve the performance. And let other componet easy to use kv cluster.  What's your suggestion? 
 
+   **Resolved:** standalone `crowkv-client` crate, `crowkv-console` becomes a consumer (§5). Connection pool: kept, sized per-endpoint (configurable, default 1 — a single `tonic::Channel` already multiplexes HTTP/2 concurrently; the pool knob exists for perf testing to find where that stops being true). Aggregation/batching: **dropped**, per your follow-up ("don't need do extra batch, remove it") — `BatchWrite` remains available for callers to invoke directly; the client does not auto-coalesce independent callers' writes (that would change per-caller failure semantics for no proven benefit yet).
+
 5. **Read-your-writes client_slot plumbing.** `ReadMode::ReadYourWrites` needs
    the client to remember `revision` from its last write per key (or globally)
    to pass as `client_slot`. Per-key tracking is more correct but is unbounded
@@ -201,6 +277,21 @@ version at tag 1 — already the case for everything added in C1-C4.
    simpler but stricter than necessary. Which default, and is it configurable?
    ai-todo: do we need it? please explain to me with examples. 
 
+   **Resolved:** yes, needed, implemented now (not deferred, per your follow-up).
+   Example: client `Put("session:42", "active")` gets back `revision = 105`.
+   An immediate `Get("session:42")` load-balanced to a follower still at slot
+   103 would return stale/missing data under `BestEffort`, and would pay a
+   full leader round-trip under `Linearizable` even though the client only
+   needs to see *its own* write. `ReadYourWrites { client_slot: 105 }` lets
+   that follower serve locally once it reaches slot 105 — cheap and correct
+   for the common "read what I just wrote" pattern (session stores, UI
+   post-write confirmation, etc).
+   **Default chosen:** per-`(store_id, group_id)` last-write-slot watermark
+   (bounded — one `u64` per group the client has written to, not one per key,
+   avoiding the unbounded-keyspace memory problem). `CrowkvClient` updates
+   this watermark on every successful `Put`/`Delete`/`BatchWrite` response and
+   auto-attaches it as `client_slot` on a `ReadYourWrites` `Get`/`Scan` unless
+   the caller passes an explicit override. Landed in C3.
 
 6. **Retry idempotency below the RPC layer.** `client_id`/`seq` dedup already
    exists server-side (`design.md §3` Dedup Cache, wired). Confirming: the new

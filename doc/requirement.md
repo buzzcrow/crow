@@ -28,11 +28,11 @@ Conventions:
   - [6.4 Client Read Modes](#64-client-read-modes)
   - [6.5 Parallel-Slot Linearizability Analysis](#65-parallel-slot-linearizability-analysis)
 - [7. Consensus Architecture](#7-consensus-architecture)
-  - [7.1 Groups and System Group (Group-0)](#71-groups-and-system-group-group-0)
+  - [7.1 Groups and Cluster Topology](#71-groups-and-cluster-topology)
   - [7.2 Leader Election and Terms](#72-leader-election-and-terms)
   - [7.3 Parallel Slot Processing](#73-parallel-slot-processing)
     - [7.3.1 Correctness Analysis for Parallel Slot Writes](#731-correctness-analysis-for-parallel-slot-writes)
-  - [7.4 Sharding](#74-sharding)
+  - [7.4 Group Routing](#74-group-routing)
   - [7.5 Partition and Availability Behavior](#75-partition-and-availability-behavior)
 - [8. Storage and Durability](#8-storage-and-durability)
   - [8.1 WAL (Write-Ahead Log)](#81-wal-write-ahead-log)
@@ -93,8 +93,8 @@ These are intentionally excluded from the initial design:
 - **Read-modify-write operations (`CAS`, `Increment`)** — These require leader state reads and are not supported in the initial design. Future extension: key-level dependency tracking or leader-read-after-catch-up.
 - **Full Jepsen-style linearizability checking** — Testing verifies same-state comparison and controlled-order verification. Full formal linearizability checking is a future enhancement.
 - **Client-managed transaction boundaries** — No multi-operation transactions from the client. Each request is independent and idempotent.
-- **Dynamic workload-based rebalancing** — Hash partitioning is static; no automatic key migration between groups based on load.
-- **Changing `num_groups` after cluster creation** — Because sharding is `hash(key) % num_groups`, the group count is **fixed at cluster creation forever**. Operators can only change *membership inside* a group (see [§9.1 Reconfiguration](#91-reconfiguration)), not the number of groups. Sizing must be done up front.
+- **Dynamic workload-based rebalancing** — Group membership and count are operator-managed (see [§7.1](#71-groups-and-cluster-topology)); no automatic key migration between groups based on load.
+- **Client-side hash partitioning as a core-library feature** — `crowkv` itself does not compute `group_id` from a key; every KV RPC takes an explicit `group_id` ([§7.4](#74-group-routing)). An application layer built on top of `crowkv` is free to implement its own `hash(key) -> group_id` convention, but that convention is outside this document's scope.
 
 ## 3. Dependencies and Assumptions
 
@@ -269,24 +269,22 @@ A violation of any of these invariants breaks linearizability independently of t
 
 Raft is a mature design. We reuse most proven Raft patterns except for **parallel slot writes**, which is the key performance advantage of Multi-Paxos over Raft. This creates some conflicts with Raft design that must be raised and resolved.
 
-### 7.1 Groups and System Group (Group-0)
+### 7.1 Groups and Cluster Topology
 
-Each group can define different member counts. Example:
-- **Group-0 (system group):** 5 members, used for cluster metadata.
-- **Group-1 to Group-N (data groups):** 3 members each, used for the partitioned KV cluster.
+Each `PxGroup` is an independent Paxos ensemble and can define a different member count (e.g. 3, 5, 7). There is no special system group — topology (which groups exist, their membership, and where they run) is **operator-managed via an HTTP management API**, not self-hosted inside a Paxos-replicated "Group-0".
 
-**Group-0 contents** — the cluster's source of truth for topology:
-- The full `PxNode` registry (`node_id`, addresses, status).
-- The `PxGroup` table: for each group, its `group_id`, member list, and current leader hint.
-- The fixed `num_groups` value and the `hash(key) -> group_id` partitioning rule.
-- Cluster-level `config_version` (for rolling-upgrade compatibility checks).
+> **Decision record (supersedes the original Group-0 design in `design.md` §7 for history):**
+> - *Original suggestion:* a self-hosted system group (`Group-0`) whose Paxos log is the source of truth for the node registry, per-group membership, a fixed `num_groups`, and the `hash(key) -> group_id` partitioning rule, bootstrapped from a static seed file.
+> - *Confirmed (2026-07, see `plan-client.md` §6 Issue 1):* **not built** — operator-managed topology (below) is the accepted, implemented, and tested model instead. `Group-0` never had any implementation; this decision retires the design rather than deviating from a shipped one.
 
-**Bootstrap procedure** (architectural; details in `design.md`):
-1. Operator provides a static seed file listing the initial Group-0 members on every node at first start.
-2. Group-0 elects a leader via the normal Raft-style election; once elected, it writes the initial topology (registered nodes, data-group memberships) into its own log.
-3. Data groups (Group-1..N) start only after Group-0 has chosen and broadcast their membership.
+**Topology model actually built and in use:**
+- Each physical node runs one `crowkv-server` process, exposing an **HTTP management API** (`crowkv-server/src/mgmt_api.rs`) for creating/removing stores and groups (`POST/DELETE /stores`, `POST/DELETE /stores/:sid/groups`, `POST/DELETE /stores/:sid/groups/:gid/remotes/...`).
+- Every group's membership is **persisted to a config file** on that node — one file per `(store_id, group_id)` under `--config-root` (`GroupConfigStore`, see [§15.2.3](#1523-topology-wiring-workflow)) — so a restarted node recovers its own groups' membership without re-issuing the HTTP calls.
+- There is no cluster-wide `num_groups` or `hash(key) -> group_id` rule owned by `crowkv` itself. Every KV RPC takes an explicit `group_id` ([§7.4](#74-group-routing)); routing/sharding policy, if any, lives in the calling application, not in the core library.
+- An operator, or a higher-level orchestrator (`crowkv-console` today) is responsible for creating groups consistently across the nodes that host their members, and for tracking the resulting cluster-wide store/group inventory (`crowkv-console`'s own declarative config file is one such orchestrator-level implementation; it is not part of `crowkv`/`crowkv-server`).
+- **Nothing prevents another system built on top of `crowkv`'s group/replica primitives from implementing its own self-hosted "Group-0"-style metadata group** if it needs one (e.g. for fully decentralized topology management without an external orchestrator) — that would be a feature of the embedding system's design, not a requirement `crowkv` itself takes on.
 
-**Failure mode:** if Group-0 loses quorum, the whole cluster stops accepting writes. Data groups can keep serving reads from learners until their leader leases expire, then they also stop. Default: **fail-stop for writes; bounded-stale reads continue until leases expire**.
+**Failure mode:** each group fails independently — if a group loses quorum, only that group stops accepting writes; other groups on the same or different nodes are unaffected. There is no cluster-wide single point of failure analogous to a lost Group-0 quorum, since no such group exists.
 
 ### 7.2 Leader Election and Terms
 
@@ -335,11 +333,13 @@ Multi-Paxos supports parallel writes on different PxSlots within the same group,
 - Batches that mix `Put` and `Delete` on the same key within one slot: intra-batch order is **as written by the client**.
 - Per-key resolved-slot is required for read-your-writes; its memory cost (one slot per live key on every learner) is accepted (see [§6](#6-consistency-and-read-model) and [§8.3](#83-learner-storage)).
 
-### 7.4 Sharding
+### 7.4 Group Routing
 
-Hash partitioning on key → `PxGroup` ID: `group_id = hash(key) % num_groups`. Static mapping loaded from Group-0 at startup. The single system group (Group-0) holds the cluster topology and the partitioning rule; clients learn both via the describe-cluster RPC (see [§10.1 Client Discovery](#101-client-discovery)).
+Every KV RPC (`Put`/`Get`/`Delete`/`BatchWrite`/`Scan`) carries an explicit `group_id` field ([`design/design-rpc.md`](design/design-rpc.md) §2, `kv.proto`). `crowkv` performs no key-to-group mapping itself; the caller supplies `group_id` directly.
 
-> **Decision record:** Confirmed — hash partitioning, static `num_groups` (see [§2 Non-Goals](#2-non-goals-out-of-scope)).
+An application built on `crowkv` (e.g. a client library) is free to implement its own `group_id` selection policy — static hash partitioning (`hash(key) % num_groups`), range partitioning, or a fixed single group — but that policy is layered on top of, not inside, the core library. Clients learn the current set of groups and their leaders via the HTTP management API's `/topology` endpoint (see [§10.1 Client Discovery](#101-client-discovery)), not a `DescribeCluster` gRPC call.
+
+> **Decision record:** Confirmed (2026-07, supersedes the original hash-partitioning/static-`num_groups` design) — explicit `group_id` on every RPC; no core-library sharding rule.
 
 ### 7.5 Partition and Availability Behavior
 
@@ -434,10 +434,10 @@ The cluster must support rolling upgrade: nodes are restarted one at a time, gro
 
 Clients must be able to find the cluster without knowing per-group leaders.
 
-- **Seed list:** clients are configured with a list of one or more `PxNode` endpoints (any node, any group). Mechanism: static config.
-- **Describe-cluster RPC:** every `PxNode` exposes a read-only RPC that returns the current Group-0 leader and the cached group→leader map. Clients use it once at startup and then refresh on `NotLeader` or on a configurable interval.
-- **Routing:** the client library hashes the key to pick the data group, then sends the request to that group's cached leader; falls back to any group member, which responds with `NotLeader { hint }` if needed.
-- The client never queries Group-0 on the hot path — only on cache miss, `NotLeader`, or scheduled refresh.
+- **Seed list:** clients are configured with a list of one or more `crowkv-server` **HTTP management API** endpoints. Mechanism: static config.
+- **Topology discovery over HTTP:** the client library polls a seed's `/topology` endpoint (`crowkv-server/src/mgmt_api.rs::export_topology`) to build a `(store_id, group_id) -> leader_endpoint` cache. There is no gRPC `DescribeCluster` RPC (see [§7.1](#71-groups-and-cluster-topology), [§7.4](#74-group-routing)) — gRPC-only clients depend on this one HTTP call for discovery, the same way `crowkv-console` already does.
+- **Routing:** the caller supplies an explicit `group_id` ([§7.4](#74-group-routing)); the client library sends the request to that group's cached leader endpoint, falling back to any known group member, which responds with `NotLeader { hint }` if needed.
+- The client never re-polls `/topology` on the hot path — only on cache miss, `NotLeader`, or a scheduled refresh interval.
 
 ### 10.2 Retry and Idempotency
 

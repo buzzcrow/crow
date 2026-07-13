@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use crate::utils::{client::console_client, print_json};
 use crate::Cli;
-use crowkv_console_shared::clients::grpc::{GetOutcome, KvClient};
+use crowkv_client::{ClientConfig, CrowkvClient, GetOutcome, ReadMode};
 
 #[derive(Subcommand, Debug)]
 pub enum KvVerb {
@@ -140,7 +140,17 @@ struct KvPutArgs<'a> {
     seq: u64,
 }
 
-async fn resolve_kv_client(cli: &Cli, store_id: u64, group_id: u64) -> Result<KvClient, ExitCode> {
+/// Resolve the group's current leader endpoint via the console (the CLI
+/// never talks to a `crowkv-server` mgmt API directly -- see
+/// `crate::utils::client::console_client`), then hand it to a fresh
+/// [`CrowkvClient`] pre-seeded with that endpoint via `seed_leader`. This
+/// keeps the CLI's existing console-routed discovery unchanged while
+/// gaining `CrowkvClient`'s retry/backoff and connection pooling on the
+/// actual RPC call (`doc/plan-client.md` §5 C1-C3). An empty mgmt-seed list
+/// is fine here: the CLI is a one-shot process that already knows the
+/// leader; `CrowkvClient` only falls back to polling `/topology` if that
+/// seeded endpoint later returns `NotLeaderHint` or a transport error.
+async fn resolve_kv_client(cli: &Cli, store_id: u64, group_id: u64) -> Result<CrowkvClient, ExitCode> {
     let client = match console_client(cli) {
         Ok(c) => c,
         Err(c) => return Err(c),
@@ -152,10 +162,9 @@ async fn resolve_kv_client(cli: &Cli, store_id: u64, group_id: u64) -> Result<Kv
             return Err(ExitCode::from(2));
         }
     };
-    KvClient::connect(endpoint).await.map_err(|e| {
-        eprintln!("error: connect kv endpoint for store {store_id} group {group_id}: {e}");
-        ExitCode::from(2)
-    })
+    let kv = CrowkvClient::new(ClientConfig::new(Vec::new()));
+    kv.seed_leader(store_id, group_id, endpoint);
+    Ok(kv)
 }
 
 async fn kv_put(cli: &Cli, store_id: u64, group_id: u64, args: KvPutArgs<'_>) -> ExitCode {
@@ -174,17 +183,17 @@ async fn kv_put(cli: &Cli, store_id: u64, group_id: u64, args: KvPutArgs<'_>) ->
         }
         (Some(_), Some(_)) => unreachable!("clap conflicts_with"),
     };
-    let mut client = match resolve_kv_client(cli, store_id, group_id).await {
+    let client = match resolve_kv_client(cli, store_id, group_id).await {
         Ok(c) => c,
         Err(c) => return c,
     };
     match client
         .put(
+            store_id,
             group_id,
             args.key.as_bytes(),
             &value_bytes,
-            args.client_id,
-            args.seq,
+            Some((args.client_id, args.seq)),
         )
         .await
     {
@@ -207,11 +216,14 @@ async fn kv_put(cli: &Cli, store_id: u64, group_id: u64, args: KvPutArgs<'_>) ->
 }
 
 async fn kv_get(cli: &Cli, store_id: u64, group_id: u64, key: &str, hex_out: bool) -> ExitCode {
-    let mut client = match resolve_kv_client(cli, store_id, group_id).await {
+    let client = match resolve_kv_client(cli, store_id, group_id).await {
         Ok(c) => c,
         Err(c) => return c,
     };
-    match client.get(group_id, key.as_bytes()).await {
+    match client
+        .get(store_id, group_id, key.as_bytes(), ReadMode::Linearizable, None)
+        .await
+    {
         Ok(GetOutcome::NotFound) => {
             if cli.json {
                 return print_json(&serde_json::json!({"found": false}));
@@ -247,11 +259,14 @@ async fn kv_get(cli: &Cli, store_id: u64, group_id: u64, key: &str, hex_out: boo
 }
 
 async fn kv_delete(cli: &Cli, store_id: u64, group_id: u64, key: &str, client_id: u64, seq: u64) -> ExitCode {
-    let mut client = match resolve_kv_client(cli, store_id, group_id).await {
+    let client = match resolve_kv_client(cli, store_id, group_id).await {
         Ok(c) => c,
         Err(c) => return c,
     };
-    match client.delete(group_id, key.as_bytes(), client_id, seq).await {
+    match client
+        .delete(store_id, group_id, key.as_bytes(), Some((client_id, seq)))
+        .await
+    {
         Ok(out) => {
             if cli.json {
                 return print_json(&serde_json::json!({"ok": true, "revision": out.revision}));
@@ -267,11 +282,20 @@ async fn kv_delete(cli: &Cli, store_id: u64, group_id: u64, key: &str, client_id
 }
 
 async fn kv_scan(cli: &Cli, store_id: u64, group_id: u64, prefix: &str, limit: u32) -> ExitCode {
-    let mut client = match resolve_kv_client(cli, store_id, group_id).await {
+    let client = match resolve_kv_client(cli, store_id, group_id).await {
         Ok(c) => c,
         Err(c) => return c,
     };
-    match client.scan(group_id, prefix.as_bytes(), limit).await {
+    match client
+        .scan(
+            store_id,
+            group_id,
+            prefix.as_bytes(),
+            limit,
+            ReadMode::Linearizable,
+        )
+        .await
+    {
         Ok(out) => {
             if cli.json {
                 let items: Vec<serde_json::Value> = out

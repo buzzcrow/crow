@@ -19,7 +19,7 @@ This document defines the wire-serialization contract for all node-to-node and c
   - [3.3 What stays unary](#33-what-stays-unary)
 - [4. Service Definitions](#4-service-definitions)
   - [4.1 PxService (node-to-node)](#41-pxservice-node-to-node)
-  - [4.2 AdminService (client / operator)](#42-adminservice-client--operator)
+  - [4.2 Cluster Discovery — HTTP, not gRPC](#42-cluster-discovery--http-not-grpc)
 - [5. Rust Mapping](#5-rust-mapping)
 - [6. Version Compatibility Rules](#6-version-compatibility-rules)
 - [7. Flow Control and Parallelism](#7-flow-control-and-parallelism)
@@ -192,15 +192,9 @@ service PxService {
 
 The unary `Accept` RPC is kept during the P1 M3 → M4 migration window. Once all `Accept` traffic flows through `PeerStream` (P1 M4), the unary handler may be deprecated (kept for one release for binary compatibility) and eventually removed.
 
-### 4.2 AdminService (client / operator)
+### 4.2 Cluster Discovery — HTTP, not gRPC
 
-Not needed in P1. Defined in P4 per [`plan.md`](../plan.md) §1 P4 M3/M4:
-
-```protobuf
-service AdminService {
-  rpc DescribeCluster(google.protobuf.Empty) returns (DescribeClusterResponse);
-}
-```
+> **Decision record (2026-07, see [`plan-client.md`](../plan-client.md) §6 Issue 3):** a gRPC `AdminService.DescribeCluster` RPC was sketched here but never implemented. **Rejected, not deferred** — cluster/topology discovery is served by `crowkv-server`'s existing HTTP management API (`GET /topology`, `crowkv-server/src/mgmt_api.rs::export_topology`), which every client (gRPC-only or not) is expected to poll for `(store_id, group_id) -> leader_endpoint` discovery. See [requirement.md §10.1](../requirement.md#101-client-discovery) and [requirement.md §7.1](../requirement.md#71-groups-and-cluster-topology). No `AdminService` gRPC service exists or is planned.
 
 ---
 

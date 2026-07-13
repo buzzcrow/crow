@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crowkv",
+    "crowkv-client",
     "crowkv-server",
     "crowkv-console/shared",
     "crowkv-console/web",
