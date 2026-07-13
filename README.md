@@ -8,7 +8,11 @@
 
 A distributed key-value engine that takes Multi-Paxos seriously — not as a textbook exercise, but as a deliberate engineering choice to eliminate the sequential commit bottleneck of Raft on the write hot path.
 
-> **Project started July 10, 2026.**
+## Why This Project
+
+From past experience building storage systems, a high-performance distributed KV store is the natural foundation layer: putting one underneath a larger storage system greatly simplifies its overall architecture. But that only works with full control over the KV itself — the freedom to make targeted optimizations as workloads demand. Off-the-shelf components don't offer that, so this project builds one from scratch. And since future performance gains are increasingly tied to hardware (io_uring, NVMe, CPU cache behavior), the implementation is Rust + C++, keeping the hot paths close to the metal.
+
+> **Project started July 10, 2026.** Built by a single developer working with AI.
 
 <!-- Demo GIFs — record and replace placeholders -->
 <!-- 
@@ -90,6 +94,10 @@ The full design lives in [`doc/`](doc/). Start with:
 - [**Requirements**](doc/requirement.md) — what the system must do
 - [**Design**](doc/design.md) — how it works, from philosophy to module decomposition to concurrency model
 - [**Doc Index**](doc/doc_index.md) — a navigable map to every design doc and sub-topic
+
+## Notes on AI-Assisted Development
+
+This project was built entirely with AI — every substantive line of code was AI-generated, with human steering and review. I wrote about the experience, what worked, where AI fails, and what it means for the future of software engineering: [**Building Infrastructure Software with AI**](doc/article/ai-assisted-development.md).
 
 ## License
 
