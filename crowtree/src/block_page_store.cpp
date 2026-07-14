@@ -711,4 +711,32 @@ Status dump_block_file(const std::string &path, uint32_t iu_size, std::string *o
     return Status::Ok();
 }
 
+int BlockPageStore::fd_for_offset(uint64_t off, uint64_t *out_local) const
+{
+    if (extents_.empty()) {
+        // Single-medium mode: only works if the medium is a FileMedium
+        auto *fm = dynamic_cast<FileMedium *>(medium_.get());
+        if (fm == nullptr) {
+            return -1;
+        }
+        *out_local = off;
+        return fm->fd();
+    }
+    // Array-of-blocks mode
+    uint64_t extent_idx = off / block_size_;
+    if (extent_idx >= extents_.size()) {
+        return -1;
+    }
+    const auto &ext = extents_[extent_idx];
+    if (ext.deleted) {
+        return -1;
+    }
+    auto *fm = dynamic_cast<FileMedium *>(ext.medium.get());
+    if (fm == nullptr) {
+        return -1;
+    }
+    *out_local = off - ext.base_offset;
+    return fm->fd();
+}
+
 } // namespace crowtree

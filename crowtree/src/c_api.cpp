@@ -106,11 +106,11 @@ struct ct_tree
     // Both null for an in-memory tree, or if opening the async twin failed
     // (see ct_open) -- get_async/flush_async/snapshot_async then fall back
     // to completing synchronously. Declared so `reactor`
-    // outlives `async_store` (FileAsyncPageStore is non-owning re: reactor,
+    // outlives `async_store` (async_store is non-owning re: reactor,
     // mirroring Options' own comment) and both outlive `tree`, which is
     // what actually calls into them.
-    std::unique_ptr<Reactor>            reactor;
-    std::unique_ptr<FileAsyncPageStore> async_store;
+    std::unique_ptr<Reactor>        reactor;
+    std::unique_ptr<AsyncPageStore> async_store;
 #endif
 };
 
@@ -274,6 +274,17 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
         bs->set_sync_mode(sm);
         h->store     = std::move(bs);
         o.page_store = h->store.get();
+#ifdef CROWTREE_HAVE_LIBURING
+        // Wire a Reactor + BlockAsyncPageStore so get_async's demand-load
+        // miss path completes off the Reactor thread instead of blocking
+        // the caller. The async_store borrows both the store (h->store)
+        // and the reactor (h->reactor), both owned by h and outliving tree.
+        h->reactor = std::make_unique<Reactor>();
+        h->async_store =
+            std::make_unique<BlockAsyncPageStore>(static_cast<BlockPageStore *>(h->store.get()), h->reactor.get());
+        o.async_reactor    = h->reactor.get();
+        o.async_page_store = h->async_store.get();
+#endif
         std::unique_ptr<Crowtree> t;
         Status                    os = Crowtree::open(o, &t);
         if (!os.ok()) {

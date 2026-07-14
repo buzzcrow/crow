@@ -72,7 +72,7 @@ test-server = { cmd = "cargo test -p crowkv-server --all-targets", depends-on = 
 test-cli = { cmd = "cargo test -p crowkv-console-shared -p crowkv-cli --all-targets", depends-on = ["build"] }
 test-web = { cmd = "cargo test -p crowkv-web --all-targets", depends-on = ["build"] }
 install-playwright = "cd crowkv-console/web/ui && npx playwright install chromium"
-test-ui = { cmd = "rm -rf test-logs && cargo build -p crowkv-server && export CROWKV_SERVER_BINARY=$(pwd)/target/debug/crowkv-server && cd crowkv-console/web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-web-deps", "install-playwright"] }
+test-ui = { cmd = "rm -rf test-logs && cargo build -p crowkv-server && export CROWKV_SERVER_BINARY=$(pwd)/target/debug/crowkv-server && cd crowkv-console/web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-web-deps"] }
 test = { cmd = '''
 bash -c '
 pixi run test-ct & p1=$!

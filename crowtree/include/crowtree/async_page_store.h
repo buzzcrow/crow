@@ -92,4 +92,30 @@ class FileAsyncPageStore : public AsyncPageStore
     Reactor *reactor_; // non-owning
 };
 
+// BlockPageStore's async twin: delegates submit_read to the Reactor using
+// BlockPageStore::fd_for_offset() to map a global byte offset to the
+// underlying per-extent fd + local offset. write/fsync are not needed for
+// the demand-load miss path (reads only), so they return invalid_argument.
+class BlockPageStore;
+
+class BlockAsyncPageStore : public AsyncPageStore
+{
+  public:
+    BlockAsyncPageStore(const BlockAsyncPageStore &)            = delete;
+    BlockAsyncPageStore &operator=(const BlockAsyncPageStore &) = delete;
+
+    // `store` and `reactor` are both non-owning; caller must keep them alive
+    // for at least as long as this object.
+    BlockAsyncPageStore(BlockPageStore *store, Reactor *reactor);
+
+    uint64_t submit_read(PageAddr addr, void *buf, size_t len, std::function<void(Status)> on_complete) override;
+    uint64_t submit_write(PageAddr addr, const void *buf, size_t len, std::function<void(Status)> on_complete) override;
+    Status   submit_fsync(std::function<void(Status)> on_complete) override;
+    void     cancel(uint64_t op_id) override;
+
+  private:
+    BlockPageStore *store_;
+    Reactor        *reactor_;
+};
+
 } // namespace crowtree

@@ -16,13 +16,14 @@ Rust workspace + C++ storage engine (via FFI).
 
 ## Hard Constraints
 
+- All build/test/format commands run under **pixi** (`pixi run cargo ...`, `pixi exec clang-format ...`, `pixi run test-ct`, etc.) — never call bare `cargo` or `clang-format`.
 - `unsafe_code = deny` (except `crowtree-ffi`). Clippy `pedantic = warn`.
 - `test-util` feature auto-enabled for tests via self dev-dependency — `cargo test` needs no flags.
 - Commit messages: single line, no doc references or task numbers. Code comments: same rule.
 - **Pre-commit quality gate — do not skip:**
-  - `cargo fmt --all -- --check` and `cargo clippy --all-targets -- -D warnings` must pass.
-  - `clang-format --dry-run --Werror` on changed `.cpp`/`.h` files must pass.
-  - Run tests relevant to the changed code (Rust or C++ `crowtree_tests`), not the entire suite.
+  - `pixi run cargo fmt --all -- --check` and `pixi run cargo clippy --all-targets -- -D warnings` must pass.
+  - `pixi exec clang-format --dry-run --Werror` on changed `.cpp`/`.h` files must pass.
+  - Run tests relevant to the changed code (Rust or C++ `pixi run test-ct`), not the entire suite.
   - Only skip if the toolchain is broken and unfixable — state the reason explicitly.
 
 ## Dispatch — Read Before Acting
@@ -33,5 +34,6 @@ Rust workspace + C++ storage engine (via FFI).
 | Design or architecture question | `doc/doc_index.md` → match row → open only that doc, grep for `##` section |
 | Write/modify docs | `/doc` workflow (hierarchy, naming, formatting rules) |
 | Commit changes | Hard Constraints above — no extra doc needed |
+| Debug a test failure | `/debug-test` workflow (env check, log-first, data-first, add missing logs) |
 | Pre-push review | `/review` workflow (checklist, hot-path rules, clippy exceptions) |
 | Operator procedures | `doc/procedures.md` (bootstrap, upgrade, replacement, API) |
