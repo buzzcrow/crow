@@ -43,13 +43,13 @@ impl KvEngineKind {
 }
 
 /// Parse the `--kv-backend` CLI value (`clap`'s `value_parser` already
-/// restricts it to `["file", "block"]`) into the FFI's [`CrowtreeBackend`].
+/// restricts it to `["text", "block"]`) into the FFI's [`CrowtreeBackend`].
 /// Only meaningful when `KvEngineKind::Crowtree` is selected.
 #[must_use]
 pub fn parse_crowtree_backend(s: &str) -> CrowtreeBackend {
     match s {
         "block" => CrowtreeBackend::Block,
-        _ => CrowtreeBackend::File,
+        _ => CrowtreeBackend::Text,
     }
 }
 
@@ -116,7 +116,7 @@ impl KvStoreRegistry {
             wal_backend,
             kv_engine: KvEngineKind::Memory,
             data_root,
-            crowtree_backend: CrowtreeBackend::File,
+            crowtree_backend: CrowtreeBackend::Text,
             port_pool: Mutex::new(Vec::new()),
         }
     }

@@ -30,9 +30,10 @@ fn sim_backend() -> Arc<IoBackend> {
 /// A file-backed `CrowtreeEngine`: `persist_snapshot` (`Crowtree::snapshot`)
 /// requires a real `page_store` and fails (`invalid_argument: no
 /// page_store`) for the default in-memory (`path: None`) engine, so tests
-/// exercising it need a real durable file.
+/// exercising it need a real durable backend.
 fn open_file_engine(dir: &std::path::Path) -> CrowtreeEngine {
-    let path = dir.join("data.ctdb");
+    let path = dir.join("data");
+    std::fs::create_dir_all(&path).unwrap();
     CrowtreeEngine::open(&CrowtreeOptions {
         path: Some(path.display().to_string()),
         ..Default::default()

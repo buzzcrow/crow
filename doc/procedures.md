@@ -390,7 +390,7 @@ WAL root). For disaster recovery, back up:
 
 - `{wal-root}/store{store_id}/` for each store
 - `{config-root}/store{store_id}_group{group_id}.json` for each group
-- `{data-root}/store{store_id}/group{group_id}.ctdb` if using the crowtree
+- `{data-root}/store{store_id}/group{group_id}/` if using the crowtree
   durable KV engine
 
 Restore by placing these directories on the replacement node and starting the
