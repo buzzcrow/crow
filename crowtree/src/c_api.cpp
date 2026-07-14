@@ -211,6 +211,14 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
     }
     o.compression = opt->compression == 1 ? compress_algo::kLz4 : compress_algo::kNone;
 
+    // Map ct_sync_mode → SyncMode
+    SyncMode sm = SyncMode::kFull;
+    switch (opt->sync_mode) {
+    case CT_SYNC_SKIP:  sm = SyncMode::kSkip; break;
+    case CT_SYNC_BATCH: sm = SyncMode::kBatch; break;
+    default:            sm = SyncMode::kFull; break;
+    }
+
     const bool durable = opt->path != nullptr && opt->path[0] != '\0';
     if (!durable) {
         // In-memory: BlockPageStore::open_mem with IU=1
@@ -219,6 +227,7 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
         if (!s.ok()) {
             return to_status(s);
         }
+        bs->set_sync_mode(sm);
         h->store     = std::move(bs);
         o.page_store = h->store.get();
         std::unique_ptr<Crowtree> t;
@@ -237,6 +246,7 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
         if (!s.ok()) {
             return to_status(s);
         }
+        ts->set_sync_mode(sm);
         h->store     = std::move(ts);
         o.page_store = h->store.get();
         std::unique_ptr<Crowtree> t;
@@ -256,6 +266,7 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
         if (!s.ok()) {
             return to_status(s);
         }
+        bs->set_sync_mode(sm);
         h->store     = std::move(bs);
         o.page_store = h->store.get();
         std::unique_ptr<Crowtree> t;

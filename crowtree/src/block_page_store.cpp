@@ -573,6 +573,14 @@ Status BlockPageStore::read_at(uint64_t off, uint8_t *buf, size_t len) const
 
 Status BlockPageStore::sync()
 {
+    // CT_SYNC_SKIP: no fsync at all (tests/CI only)
+    if (sync_mode_ == SyncMode::kSkip) {
+        return Status::Ok();
+    }
+    // CT_SYNC_FULL and CT_SYNC_BATCH both fsync here. In BATCH mode,
+    // persist.cpp's snapshot() calls sync() only at the two barrier points
+    // (before and after the anchor write), so the batching is already
+    // handled by the caller not calling sync() per-page.
     // Array-of-blocks mode: fsync all dirty extents
     if (!extents_.empty()) {
         for (auto &ext : extents_) {
