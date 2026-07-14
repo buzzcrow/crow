@@ -262,7 +262,7 @@ async fn auto_format_unaligned_engine_replays_binary_records() {
 
     // Auto now resolves to Binary on all backends. Verify the segment
     // contains binary framing (magic bytes), not text-line encoding.
-    let segment_path = disk.join(format!("group{group_id}")).join("seg-0000001.log");
+    let segment_path = disk.join(format!("group{group_id}")).join("seg-0000001.ck");
 
     let replay = replay_group(&backend, &[disk], group_id).await.unwrap();
     assert_eq!(replay.records, vec![record]);

@@ -599,7 +599,7 @@ Task 1 (IoEngine + async) ──┐
 - [x] **Task 2** — BlockPageStore Medium abstraction + IU=1 mode (builds on Task 1)
 - [x] **Task 3** — Array-of-blocks growth + dump utility (builds on Task 2)
 - [x] **Task 4** — TextPageStore + text codecs (builds on Task 1)
-- [ ] **Task 5** — WAL `.log` → `.ck` extension (standalone, no dependencies)
+- [x] **Task 5** — WAL `.log` → `.ck` extension (standalone, no dependencies)
 - [ ] **Task 6** — persist.cpp adaptation + async migration (builds on Task 3)
 - [ ] **Task 7** — c_api update + backend selection (builds on Tasks 3 + 4)
 - [ ] **Task 8** — FFI bindings (builds on Task 7)
