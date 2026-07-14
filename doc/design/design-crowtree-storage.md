@@ -292,9 +292,11 @@ leaf mutation already produces a fresh frame anyway).
 - **`logical_len` + CRC32C trailer.** `logical_len` lets a reader ignore IU
   zero padding; CRC32C covers `[0, logical_len)`. A CRC mismatch means a torn
   page, and recovery falls back to the previous snapshot (§6).
-- **Alignment.** Aligned block devices already write the frame as an IU
-  multiple. Unaligned/file-debug media may write without padding, carrying an
-  explicit length prefix instead.
+- **Alignment.** `BlockPageStore` with `iu_size > 1` (e.g. 4096 for NVMe)
+  writes frames as IU multiples with bounce-buffer read-modify-write for
+  unaligned offsets. `TextPageStore` always uses IU=1 (byte-addressable, no
+  alignment) since it writes human-readable text files. `BlockPageStore::open_mem`
+  also uses IU=1 for in-memory/SCM.
 - **Compression is per-page, on-disk only.** The frame body is optionally
   compressed with LZ4 (a flag bit + algorithm id in the header), decompressed
   into a full frame on load so in-memory access stays zero-copy and uniform.
