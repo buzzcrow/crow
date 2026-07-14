@@ -665,7 +665,7 @@ describe('Add Replica dialog', () => {
       { wrapper },
     );
 
-    fireEvent.click(screen.getByLabelText(/^n2/));
+    fireEvent.change(screen.getByLabelText('Node'), { target: { value: 'n2' } });
     fireEvent.change(screen.getByLabelText('Replica ID (optional)'), { target: { value: '2' } });
     fireEvent.click(screen.getByRole('button', { name: /add replica/i }));
 
@@ -690,7 +690,7 @@ describe('Add Replica dialog', () => {
       { wrapper },
     );
 
-    fireEvent.click(screen.getByLabelText(/^n2/));
+    fireEvent.change(screen.getByLabelText('Node'), { target: { value: 'n2' } });
     fireEvent.click(screen.getByRole('button', { name: /add replica/i }));
 
     await waitFor(() => expect(captured.length).toBe(1));
