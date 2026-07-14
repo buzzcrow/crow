@@ -92,7 +92,7 @@ Key findings from reviewing `persist.cpp`, `block_page_store.cpp`, `block_page_s
   - `block_page_store.cpp`: close fd, remove file from `extents_`, unlink `.blk-{NNNN}` file
   - Safe only after snapshot commit confirms zero live pages in the block
 
-- [ ] **2d**: Integrate block deletion into snapshot commit path
+- [x] **2d**: Integrate block deletion into snapshot commit path
   - `persist.cpp`: after `commit_prepared_snapshot()`, scan segment directory for per-block live page count
   - Track blocks with zero live pages across two snapshots (two-generation rule)
   - Call `BlockPageStore::delete_block()` for blocks empty in both current and previous snapshot
