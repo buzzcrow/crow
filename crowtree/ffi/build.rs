@@ -40,11 +40,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The engine now includes Abseil headers (absl::btree_map in the MemTable,
     // ). Abseil is header-only for btree, so we only need its include
     // path; in the pixi/conda environment it lives under $CONDA_PREFIX/include.
+    // Use -isystem (not -I) for third-party headers so -Wall -Wextra skips them.
     let conda_prefix = std::env::var("CONDA_PREFIX").ok().map(PathBuf::from);
     if let Some(prefix) = &conda_prefix {
         let inc = prefix.join("include");
         if inc.join("absl").is_dir() {
-            build.include(&inc);
+            build.flag(format!("-isystem{}", inc.display()));
         }
     }
     // Fallback: when CONDA_PREFIX is not set (e.g., the pre-commit hook runs in a
@@ -53,13 +54,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let homebrew = PathBuf::from("/opt/homebrew/include");
         if homebrew.join("absl").is_dir() {
-            build.include(&homebrew);
+            build.flag(format!("-isystem{}", homebrew.display()));
         }
     }
     {
         let local = PathBuf::from("/usr/local/include");
         if local.join("absl").is_dir() {
-            build.include(&local);
+            build.flag(format!("-isystem{}", local.display()));
         }
     }
     println!("cargo:rerun-if-env-changed=CONDA_PREFIX");
@@ -89,7 +90,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(prefix) = liburing_dir {
-        build.include(prefix.join("include"));
+        let inc = prefix.join("include");
+        build.flag(format!("-isystem{}", inc.display()));
         build.define("CROWTREE_HAVE_LIBURING", "1");
         println!("cargo:rustc-link-search=native={}", prefix.join("lib").display());
         println!("cargo:rustc-link-lib=dylib=uring");
