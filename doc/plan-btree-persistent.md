@@ -605,7 +605,7 @@ Task 1 (IoEngine + async) ──┐
 - [x] **Task 8** — FFI bindings (builds on Task 7)
 - [x] **Task 9** — Configurable fsync policy (builds on Task 7, crowtree + WAL)
 - [x] **Task 10** — Test updates (builds on all above)
-- [ ] **Task 11** — Delete old code + cleanup sync API (builds on Task 10)
+- [x] **Task 11** — Delete old code + cleanup sync API (builds on Task 10)
 - [ ] **Task 12** — Documentation (last)
 - [ ] **Task 13** — IoUringEngine (Stage 2, Linux only, builds on Task 1)
 - [ ] **Task 14** — Block compaction / merge analysis & design (no implementation, builds on Task 3)

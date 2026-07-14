@@ -7,7 +7,7 @@
 // manifest + pages) and uses this interface only to read/write/sync bytes.
 //
 // v1 backends are synchronous: MemPageStore (in-memory block device, for tests)
-// and FilePageStore (local file via pread/pwrite + fdatasync). Rust async callers
+// and BlockPageStore (array-of-blocks / O_DIRECT file). Rust async callers
 // use the FFI spawn-blocking bridge; a native async PageStore is deferred.
 //
 // Key work: byte device abstraction, in-memory backend, file backend, IU
@@ -303,34 +303,6 @@ class FaultyPageStore : public PageStore
 
     int   fault_sync_idx_  = -1;
     Fault fault_sync_kind_ = Fault::kNone;
-};
-
-// Local-file backend: pread/pwrite with fdatasync as the durability barrier.
-class FilePageStore : public PageStore
-{
-  public:
-    ~FilePageStore() override;
-
-    // open (creating if absent) the backing file. Returns io_error on failure.
-    static Status open(const std::string &path, uint32_t iu_size, std::unique_ptr<FilePageStore> *out);
-
-    Status                 write_at(uint64_t off, const uint8_t *buf, size_t len) override;
-    Status                 read_at(uint64_t off, uint8_t *buf, size_t len) const override;
-    Status                 sync() override;
-    [[nodiscard]] uint64_t size() const override;
-
-    [[nodiscard]] uint32_t iu_size() const override
-    {
-        return iu_size_;
-    }
-
-  private:
-    FilePageStore(int fd, uint32_t iu_size) : fd_(fd), iu_size_(iu_size)
-    {
-    }
-
-    int      fd_      = -1;
-    uint32_t iu_size_ = 4096;
 };
 
 } // namespace crowtree
