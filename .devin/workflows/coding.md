@@ -2,7 +2,7 @@
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ---
-description: CrowKV coding flow — conventions, doc-first, pre-commit, commit
+description: CrowKV coding flow — conventions, doc-first
 ---
 
 # CrowKV - Coding Flow
@@ -52,23 +52,3 @@ When adding internal state to `crowkv` lib:
 - Mid-impl decision:
   - **Simple/local** → decide, note in commit msg.
   - **Ambiguous / needs review** → discuss with the user. Do not silently guess.
-
-## Pre-Commit (auto via `.githooks/pre-commit`)
-
-// turbo
-```bash
-cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings
-```
-
-Do not bypass. `--no-verify` is forbidden except when the toolchain is broken and unfixable — state the reason explicitly.
-
-- **DO fix clippy errors** — resolve them before committing.
-- **DO fix clang-format violations** — run `clang-format -i` on changed `.cpp`/`.h` files.
-- **DO run relevant tests** — only tests related to the changed code (Rust or C++ `crowtree_tests`), not the entire suite.
-- Use pixi env (`PATH=$PIXI_ENV/bin:$PATH`) when system cargo is too old.
-
-## Commit & Push
-
-- One logical change per commit. Subject ≤72 chars, imperative.
-- Reference upstream doc (`design-xxx.md §N`) in the body.
-- Run `/review` before push for non-trivial changes.

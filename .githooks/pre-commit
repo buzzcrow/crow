@@ -4,10 +4,10 @@ echo "Running pre-commit checks..."
 
 # Check Rust formatting
 echo "Checking Rust formatting..."
-if ! cargo fmt --all -- --check; then
+if ! pixi run cargo fmt --all -- --check; then
     echo "⚠️  Formatting issues found. Running 'cargo fmt' to fix..."
-    cargo fmt --all
-    if ! cargo fmt --all -- --check; then
+    pixi run cargo fmt --all
+    if ! pixi run cargo fmt --all -- --check; then
         echo "❌ Formatting still failing after 'cargo fmt'. Fix manually before committing."
         exit 1
     fi
@@ -15,31 +15,37 @@ if ! cargo fmt --all -- --check; then
     exit 1
 fi
 
-# Check C++ formatting
-echo "Checking C++ formatting..."
-if ! pixi run clang-format --dry-run --Werror crowtree/src/*.cpp crowtree/include/crowtree/*.h 2>/dev/null; then
-    echo "⚠️  C++ formatting issues found. Running 'clang-format -i' to fix..."
-    pixi run clang-format -i crowtree/src/*.cpp crowtree/include/crowtree/*.h
-    echo "✅ C++ formatting auto-fixed. Review and re-stage the changes, then commit again."
-    exit 1
+# Collect staged C++ files
+staged_cpp=$(git diff --cached --name-only --diff-filter=ACM -- 'crowtree/src/*.cpp' 'crowtree/include/crowtree/*.h')
+
+# Check C++ formatting (only staged files)
+if [ -n "$staged_cpp" ]; then
+    echo "Checking C++ formatting..."
+    if ! pixi run clang-format --dry-run --Werror $staged_cpp 2>/dev/null; then
+        echo "⚠️  C++ formatting issues found. Running 'clang-format -i' to fix..."
+        pixi run clang-format -i $staged_cpp
+        echo "✅ C++ formatting auto-fixed. Review and re-stage the changes, then commit again."
+        exit 1
+    fi
 fi
 
 # Run clippy (Rust lint)
 echo "Running clippy..."
-cargo clippy --all-targets -- -D warnings
+pixi run cargo clippy --all-targets -- -D warnings
 if [ $? -ne 0 ]; then
     echo "❌ Clippy failed. Fix warnings before committing."
     exit 1
 fi
 
-# Run clang-tidy (C++ lint)
-echo "Running clang-tidy..."
-if [ -d crowtree/build ]; then
+# Run clang-tidy (only on staged .cpp files)
+staged_cpp_src=$(git diff --cached --name-only --diff-filter=ACM -- 'crowtree/src/*.cpp')
+if [ -n "$staged_cpp_src" ] && [ -d crowtree/build ]; then
+    echo "Running clang-tidy on staged C++ files..."
     # Mirror CMake's liburing gate: reactor.cpp and file_async_page_store.cpp require
     # liburing headers; on macOS (and anywhere liburing is missing) they are excluded
     # from the build, so clang-tidy must skip them too.
     cpp_files=()
-    for f in crowtree/src/*.cpp; do
+    for f in $staged_cpp_src; do
         case "$f" in
             */reactor.cpp | */file_async_page_store.cpp)
                 if [ -f /opt/homebrew/include/liburing.h ] || [ -f /usr/local/include/liburing.h ] || [ -f /usr/include/liburing.h ]; then
@@ -49,12 +55,28 @@ if [ -d crowtree/build ]; then
             *) cpp_files+=("$f") ;;
         esac
     done
-    pixi run clang-tidy "${cpp_files[@]}" -p crowtree/build 2>&1
-    if [ $? -ne 0 ]; then
-        echo "❌ clang-tidy failed. Fix warnings before committing."
-        exit 1
+    if [ ${#cpp_files[@]} -gt 0 ]; then
+        tmpdir=$(mktemp -d)
+        fail=0
+        for f in "${cpp_files[@]}"; do
+            base=$(basename "$f")
+            (pixi run clang-tidy "$f" -p crowtree/build 2>&1 | grep -E '^(error:|warning:|/.*: error:|/.*: warning:)' > "$tmpdir/$base.out") &
+        done
+        wait
+        for f in "${cpp_files[@]}"; do
+            base=$(basename "$f")
+            if [ -s "$tmpdir/$base.out" ]; then
+                cat "$tmpdir/$base.out"
+                fail=1
+            fi
+        done
+        rm -rf "$tmpdir"
+        if [ $fail -ne 0 ]; then
+            echo "❌ clang-tidy failed. Fix warnings before committing."
+            exit 1
+        fi
     fi
-else
+elif [ -n "$staged_cpp_src" ] && [ ! -d crowtree/build ]; then
     echo "⚠️  Skipping clang-tidy: crowtree/build not found. Run 'pixi run build' first."
 fi
 

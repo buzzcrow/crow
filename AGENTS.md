@@ -29,8 +29,9 @@ Rust workspace + C++ storage engine (via FFI).
 
 | Action | Read first |
 | --- | --- |
-| Write/modify code | `/coding` workflow (conventions, doc-first, pre-commit, commit) |
+| Write/modify code | `/coding` workflow (conventions, doc-first) |
 | Design or architecture question | `doc/doc_index.md` → match row → open only that doc, grep for `##` section |
 | Write/modify docs | `/doc` workflow (hierarchy, naming, formatting rules) |
+| Commit changes | Hard Constraints above — no extra doc needed |
 | Pre-push review | `/review` workflow (checklist, hot-path rules, clippy exceptions) |
 | Operator procedures | `doc/procedures.md` (bootstrap, upgrade, replacement, API) |
