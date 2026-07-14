@@ -73,7 +73,7 @@ Key findings from reviewing `persist.cpp`, `block_page_store.cpp`, `block_page_s
 
 #### Task Breakdown
 
-- [ ] **2a**: Add §2.5 "Block Compaction" to `doc/design/design-crowtree-storage.md`
+- [x] **2a**: Add §2.5 "Block Compaction" to `doc/design/design-crowtree-storage.md`
   - Sparse block detection: per-block free ratio from gap list, threshold (70%)
   - Gap filtering in `SpaceAllocator`: exclude gaps in sparse blocks during `build_allocator()`
   - Block deletion: two-generation rule, per-block live page count from segment directory

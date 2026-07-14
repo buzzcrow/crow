@@ -22,6 +22,7 @@ consensus WAL.
   - [2.2 BlockPageStore — On-Disk Layout (Production)](#22-blockpagestore--on-disk-layout-production)
   - [2.3 I/O Engines](#23-io-engines)
   - [2.4 fsync Policy](#24-fsync-policy)
+  - [2.5 Block Compaction](#25-block-compaction)
 - [3. On-Disk Page Format (Zero-Copy Frame)](#3-on-disk-page-format-zero-copy-frame)
 - [4. Buffer Pool (Frame Cache)](#4-buffer-pool-frame-cache)
 - [5. Internal WAL Decision](#5-internal-wal-decision)
@@ -113,6 +114,85 @@ file sync (see `design-wal.md`).
 page cache (§4) with pinning + epoch-gated eviction, and remote allocation
 coordination. The v1 target is `TextPageStore` for debugging and
 `BlockPageStore` (in-memory and SSD) for production/tests.
+
+### 2.5 Block Compaction
+
+After GC retires dead pages, their addresses become gaps in `SpaceAllocator`.
+Over time, a block file (`.blk-{NNNN}`) may accumulate so many gaps that most
+of its physical space is free. **Online block compaction** reclaims this space
+without a separate compaction pass by controlling *where* new allocations land
+during snapshot.
+
+**Mechanism — gap filtering in `SpaceAllocator`.**
+
+`SpaceAllocator` is rebuilt every snapshot from the committed anchor's live
+extents (`build_allocator()` in `persist.cpp`). Its gap list is the complement
+of live extents within `[region_base, file_size)`. The compaction mechanism is
+simple: when `block_size > 0` (array-of-blocks mode), compute each block's free
+ratio (`gap_bytes / block_size`) and **exclude gaps in blocks above a
+threshold** (compile-time constant, 70%) from the allocator's gap list.
+
+Filtered-out gaps are invisible to `alloc()`, so new writes never reuse space
+in sparse blocks. They land in dense blocks' gaps or append past EOF (which
+may trigger `allocate_new_block()`). Over successive snapshots, as dirty pages
+are rewritten, sparse blocks lose their live pages.
+
+**What gets relocated.**
+
+Only **dirty pages** are rewritten during snapshot — clean pages keep their
+existing durable address. So a single snapshot only relocates pages modified
+since the last snapshot. Over multiple snapshots, as pages are touched and
+rewritten, sparse blocks gradually drain. For high-churn workloads, this is
+fast (most pages are dirty each snapshot). For low-churn workloads, blocks are
+aturally dense — compaction rarely needed.
+
+**Block deletion.**
+
+After snapshot commit, compute per-block live page count from the
+`PreparedSnapshot` (in-memory, no disk re-read). A block with zero live pages
+is a deletion candidate. Deletion follows the **two-generation rule** (same
+as old image cleanup, §6): a block is only deleted after it has zero live
+pages in **both** the current snapshot and the previous one. This ensures a
+crash mid-deletion falls back to the prior anchor, which still references the
+block.
+
+`BlockPageStore::delete_block(idx)` closes the fd, removes the `BlockExtent`
+from `extents_`, and unlinks the `.blk-{NNNN}` file. The global address space
+shrinks — future `write_at` / `read_at` calls never target the deleted block.
+On reopen, `open_blocks()` scans the directory; the deleted file is gone and
+its index is not re-opened.
+
+**Crash safety.**
+
+Identical to normal snapshot crash safety. If the process dies mid-snapshot:
+- Old blocks still exist → old addresses still valid.
+- New block has copied pages → new addresses valid.
+- Recovery uses the anchor's snapshot to determine which addresses are live.
+
+Block deletion is safe because it only happens after two consecutive snapshots
+confirm zero live pages — the crash fallback anchor always references the
+block.
+
+**Cost.**
+
+- Zero additional I/O beyond what snapshot already does. The page would be
+  written anyway — we just choose a different destination address.
+- O(gaps) for per-block free ratio computation during `build_allocator()`.
+- O(live_pages) for per-block live page counting after commit.
+
+**Scope.**
+
+Only applies to `BlockPageStore` in array-of-blocks mode (`open_blocks`).
+Single-medium mode (`open`, `open_mem`) and `TextPageStore` have no multiple
+blocks — `block_size()` returns 0, gap filtering is skipped, behavior is
+unchanged.
+
+**Future extension — explicit compaction.**
+
+If disk space is urgent and natural drain is too slow, an explicit
+`compact_blocks()` API can force-rewrite all live pages from sparse blocks
+(not just dirty ones) in a single snapshot. This is higher I/O burst and more
+complex. Deferred — the online mechanism handles the common case.
 
 ### 2.1 TextPageStore — On-Disk Layout (Debug)
 
