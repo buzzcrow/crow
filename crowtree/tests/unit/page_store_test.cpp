@@ -246,3 +246,67 @@ TEST(FaultyPageStore, FailSyncReturnsError)
     EXPECT_FALSE(s.sync().ok()); // sync #1: armed, fails
     EXPECT_TRUE(s.sync().ok());  // sync #2: one-shot, back to normal
 }
+
+// Task 2: BlockPageStore::open_mem() — MemoryMedium with IU=1.
+TEST(BlockPageStoreMem, RoundTrip)
+{
+    std::unique_ptr<BlockPageStore> s;
+    ASSERT_TRUE(BlockPageStore::open_mem(1, &s).ok());
+    EXPECT_EQ(s->iu_size(), 1U);
+    EXPECT_FALSE(s->is_block_device());
+
+    std::vector<uint8_t> in{1, 2, 3, 4, 5};
+    ASSERT_TRUE(s->write_at(100, in.data(), in.size()).ok());
+    std::vector<uint8_t> out(in.size(), 0);
+    ASSERT_TRUE(s->read_at(100, out.data(), out.size()).ok());
+    EXPECT_EQ(in, out);
+    EXPECT_GE(s->size(), 105U);
+}
+
+TEST(BlockPageStoreMem, Overwrite)
+{
+    std::unique_ptr<BlockPageStore> s;
+    ASSERT_TRUE(BlockPageStore::open_mem(1, &s).ok());
+
+    std::vector<uint8_t> a{9, 9, 9};
+    ASSERT_TRUE(s->write_at(0, a.data(), a.size()).ok());
+    std::vector<uint8_t> b{1, 2};
+    ASSERT_TRUE(s->write_at(0, b.data(), b.size()).ok());
+    std::vector<uint8_t> out(3, 0);
+    ASSERT_TRUE(s->read_at(0, out.data(), out.size()).ok());
+    EXPECT_EQ(out[0], 1);
+    EXPECT_EQ(out[1], 2);
+    EXPECT_EQ(out[2], 9);
+}
+
+TEST(BlockPageStoreMem, ReadPastEndFails)
+{
+    std::unique_ptr<BlockPageStore> s;
+    ASSERT_TRUE(BlockPageStore::open_mem(1, &s).ok());
+    std::array<uint8_t, 4> b{};
+    EXPECT_FALSE(s->read_at(0, b.data(), b.size()).ok());
+}
+
+TEST(BlockPageStoreMem, SyncIsNoOp)
+{
+    std::unique_ptr<BlockPageStore> s;
+    ASSERT_TRUE(BlockPageStore::open_mem(1, &s).ok());
+    EXPECT_TRUE(s->sync().ok());
+}
+
+TEST(BlockPageStoreMem, ContentVerification)
+{
+    std::unique_ptr<BlockPageStore> s;
+    ASSERT_TRUE(BlockPageStore::open_mem(1, &s).ok());
+
+    std::vector<uint8_t> in{0xAA, 0xBB, 0xCC};
+    ASSERT_TRUE(s->write_at(50, in.data(), in.size()).ok());
+
+    auto *mem = dynamic_cast<MemoryMedium *>(s->medium());
+    ASSERT_NE(mem, nullptr);
+    const auto &data = mem->data();
+    EXPECT_EQ(data.size(), 53U);
+    EXPECT_EQ(data[50], 0xAA);
+    EXPECT_EQ(data[51], 0xBB);
+    EXPECT_EQ(data[52], 0xCC);
+}
