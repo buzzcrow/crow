@@ -5,27 +5,6 @@
 
 Parent: [`design-crowtree-storage.md`](design/design-crowtree-storage.md)
 
-## Completed (Stage 1)
-
-Tasks 1–12 are done. Summary of what was built:
-
-- **IoEngine + DirectIoEngine** — async I/O interface, blocking-IO-as-ready-completion (Task 1)
-- **BlockPageStore Medium abstraction + IU=1** — `MemoryMedium`/`FileMedium`, byte-aligned fast path (Task 2)
-- **Array-of-blocks growth** — `open_blocks()`, auto-allocating `.blk-{NNNN}` files, dump utility (Task 3)
-- **TextPageStore + text codecs** — human-readable `.ck` debug backend, anchor/segimage/segdir text codecs (Task 4)
-- **WAL `.log` → `.ck`** — file extension alignment (Task 5)
-- **persist.cpp async migration** — snapshot/recovery via async API (Task 6)
-- **c_api + ct_options** — `backend`, `block_size`, `store_id`, `partition_id`, `sync_mode` fields (Task 7)
-- **FFI bindings** — Rust `PageStoreBackend::Text`/`Block`, `SyncMode`, new `Options` fields (Task 8)
-- **Configurable fsync policy** — `SyncMode::kFull`/`kSkip`/`kBatch` in C++ backends (Task 9)
-- **Test updates** — `FilePageStore` → `BlockPageStore::open_blocks` in all tests (Task 10)
-- **Dead code removal** — `FilePageStore` class deleted (Task 11)
-- **Documentation** — design docs, doc_index, alignment section updated (Task 12)
-
-307 C++ tests pass (async tests excluded — `liburing` unavailable on macOS).
-
----
-
 ## Remaining Tasks
 
 ### Task 1: IoUringEngine (Stage 2 — Linux only)
@@ -148,14 +127,3 @@ Merging blocks requires moving live pages to new locations. This changes page ad
 - [ ] **Task 1** — IoUringEngine (Stage 2, Linux only, builds on Stage 1 IoEngine)
 - [ ] **Task 2** — Block compaction / merge analysis & design (no implementation, builds on Stage 1 array-of-blocks)
 
-## Notes
-
-- **WAL alignment**: WAL uses `WalBlockAlignment::Unaligned` (IU=1, byte-addressable) vs `Aligned { io_unit_bytes }` (SSD). crowtree's `BlockPageStore` follows the same model: `iu_size=1` for mem/SCM, `iu_size=4096+` for NVMe.
-- **WAL segment rotation**: WAL creates `seg-{NNNNNNN}.ck` files on rotation. crowtree's array-of-blocks creates `{store_id}-{partition_id}.blk-{NNNN}` files on growth. Same pattern, with self-identifying names and CrowKV-specific extensions.
-- **WAL text encoding**: WAL uses `CROW_WAL_TEXT` prefix with `key=value` fields + CRC32C. crowtree's `TextPageStore` uses `CROW_CT_ANCHOR` prefix for anchors and `debug_codec` for page frames. Same pattern.
-- **Compression**: `TextPageStore` always uses `compression = kNone` (text mode is for debugging). `BlockPageStore` supports LZ4 compression as before.
-- **Async I/O**: Upper layer always uses async API. `DirectIoEngine` (Stage 1, all platforms) wraps blocking I/O as immediately-ready async. `IoUringEngine` (Stage 2, Linux) uses `io_uring` via `Reactor`. `FilePageStore` and `FileAsyncPageStore` removed in Stage 1.
-- **fsync**: Configurable `sync_mode` (`CT_SYNC_FULL`/`CT_SYNC_SKIP`/`CT_SYNC_BATCH`). macOS `fsync` ~3ms; `CT_SYNC_SKIP`/`CT_SYNC_BATCH` for tests/CI. Same policy applies to WAL.
-- **Text codecs**: anchor/segimage/segdir text codecs are in Stage 1 (merged with TextPageStore). `debug_codec` handles page frames.
-
----
