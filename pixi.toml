@@ -24,7 +24,7 @@ clang-format = ">=19.0.0"
 clang-tools = "*"
 folly = "*"
 # Rust toolchain (crowkv)
-rust = ">=1.75"
+rust = ">=1.96"
 protobuf = "*"
 openssl = "*"
 pkg-config = "*"
