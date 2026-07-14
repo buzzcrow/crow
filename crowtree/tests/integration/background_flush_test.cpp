@@ -32,7 +32,7 @@ TEST(BackgroundFlush, DisabledByDefaultNoAutoFlush)
 {
     MemPageStore store(1);
     Options      opt;
-    opt.page_store       = &store;
+    opt.page_store        = &store;
     opt.flush_interval_ms = 20; // short, but background_flush stays false (default)
 
     std::unique_ptr<Crowtree> t;
@@ -69,7 +69,7 @@ TEST(BackgroundFlush, PeriodicFlushDrainsMemTableWithoutExplicitCall)
     EXPECT_TRUE(settled) << "background flush thread never advanced last_applied_slot";
     EXPECT_EQ(t->memtable_count(), 0U);
 
-    uint64_t slot = 0;
+    uint64_t    slot = 0;
     std::string value;
     EXPECT_TRUE(t->get("a", &slot, &value));
     EXPECT_EQ(value, "1");
@@ -100,7 +100,7 @@ TEST(BackgroundFlush, SafeAcrossOpenRecovery)
         opt.flush_interval_ms = 1; // as aggressive as possible
         std::unique_ptr<Crowtree> t;
         ASSERT_TRUE(Crowtree::open(opt, &t).ok());
-        uint64_t slot = 0;
+        uint64_t    slot = 0;
         std::string value;
         EXPECT_TRUE(t->get("k", &slot, &value));
         EXPECT_EQ(value, "v");

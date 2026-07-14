@@ -58,7 +58,7 @@ TEST(KitchenSink, AllFeaturesRandomizedReopen)
     opt.compression       = compress_algo::kLz4;
     opt.frame_bytes       = 4096;
     opt.buffer_pool_bytes = static_cast<size_t>(64) * 1024; // ~16 frames -> eviction under pressure
-    opt.max_inline_value  = 80;        // mix inline + overflow
+    opt.max_inline_value  = 80;                             // mix inline + overflow
     opt.inframe_delta     = true;
     opt.max_inframe_delta = 6;
     opt.max_delta_len     = 3;
@@ -79,7 +79,8 @@ TEST(KitchenSink, AllFeaturesRandomizedReopen)
             }
             else {
                 // ~1/3 large (overflow), else small (inline / in-frame delta).
-                size_t      n = ((rng() % 3) == 0) ? (200 + static_cast<size_t>(rng() % 9000)) : (1 + static_cast<size_t>(rng() % 60));
+                size_t      n = ((rng() % 3) == 0) ? (200 + static_cast<size_t>(rng() % 9000))
+                                                   : (1 + static_cast<size_t>(rng() % 60));
                 std::string v = make_val(n, static_cast<uint32_t>(slot));
                 ASSERT_TRUE(t.apply(slot, put_one(key, v)).ok());
                 oracle[key] = v;

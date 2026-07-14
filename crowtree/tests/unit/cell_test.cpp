@@ -56,8 +56,8 @@ TEST(Cell, SlotBoundaries)
 TEST(Cell, BinaryValueWithNuls)
 {
     const std::array<uint8_t, 4> raw = {0x00, 0xff, 0x00, 0x10};
-    std::string   enc   = encode_cell(9, OpKind::kPut, Slice(raw.data(), raw.size()));
-    CellView      v{Slice(enc)};
+    std::string                  enc = encode_cell(9, OpKind::kPut, Slice(raw.data(), raw.size()));
+    CellView                     v{Slice(enc)};
     EXPECT_EQ(v.value().size(), 4U);
     EXPECT_EQ(static_cast<uint8_t>(v.value().data()[1]), 0xff);
 }

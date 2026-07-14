@@ -27,16 +27,18 @@ TEST(MappingSlot, UnloadedRoundTrip)
         uint32_t iu_count;
     };
 
-    const std::array<Case, 8> cases = {{
-        {.iu_index = 0,           .iu_count = 0          },
-        {.iu_index = 0,           .iu_count = 1          },
-        {.iu_index = 1,           .iu_count = 0          },
-        {.iu_index = 1,           .iu_count = 1          },
-        {.iu_index = 12345,       .iu_count = 7          },
-        {.iu_index = kMaxIuIndex, .iu_count = 1          },
-        {.iu_index = 5,           .iu_count = kMaxIuCount},
-        {.iu_index = kMaxIuIndex, .iu_count = kMaxIuCount},
-    }};
+    const std::array<Case, 8> cases = {
+        {
+         {.iu_index = 0, .iu_count = 0},
+         {.iu_index = 0, .iu_count = 1},
+         {.iu_index = 1, .iu_count = 0},
+         {.iu_index = 1, .iu_count = 1},
+         {.iu_index = 12345, .iu_count = 7},
+         {.iu_index = kMaxIuIndex, .iu_count = 1},
+         {.iu_index = 5, .iu_count = kMaxIuCount},
+         {.iu_index = kMaxIuIndex, .iu_count = kMaxIuCount},
+         }
+    };
     for (const auto &c : cases) {
         ASSERT_TRUE(fits_unloaded(c.iu_index, c.iu_count));
         uint64_t w = pack_unloaded(c.iu_index, c.iu_count);

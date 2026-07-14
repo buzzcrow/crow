@@ -114,7 +114,7 @@ TEST(PageCodec, BitFlipFailsCrc)
 
 TEST(PageCodec, ShortBufferRejected)
 {
-    std::array<uint8_t, 4> b = {0, 0, 0, 0};
-    PageBase *out  = nullptr;
+    std::array<uint8_t, 4> b   = {0, 0, 0, 0};
+    PageBase              *out = nullptr;
     EXPECT_EQ(PageCodec::decode(b.data(), b.size(), &out).code(), Code::kInvalidArgument);
 }

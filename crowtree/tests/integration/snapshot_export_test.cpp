@@ -67,7 +67,7 @@ void build_source(Crowtree *t, std::map<std::string, std::string> *live)
 
 // Stream A -> B through small chunks (forces multi-chunk transfer).
 void transfer(Crowtree &a, Crowtree &b, size_t chunk_bytes, uint64_t *at_slot,
-             snapshot_format fmt = snapshot_format::kPortable)
+              snapshot_format fmt = snapshot_format::kPortable)
 {
     std::unique_ptr<SnapshotExport> exp;
     ASSERT_TRUE(snapshot_export_begin(a, fmt, chunk_bytes, &exp).ok());
@@ -318,10 +318,10 @@ TEST(SnapshotExport, NativeEquivalentToPortable)
 // (the common new-member-install shape) with no residual state.
 TEST(SnapshotExport, NativeEmptyTreeRoundTrip)
 {
-    Options   opt;
-    Crowtree  a(opt); // never written to -- exports just the empty root leaf
-    Crowtree  b(opt);
-    uint64_t  at = 123; // sentinel to prove it gets overwritten to 0
+    Options  opt;
+    Crowtree a(opt); // never written to -- exports just the empty root leaf
+    Crowtree b(opt);
+    uint64_t at = 123; // sentinel to prove it gets overwritten to 0
     transfer(a, b, kSnapshotChunkBytes, &at, snapshot_format::kNative);
     EXPECT_EQ(at, 0U);
     EXPECT_EQ(b.last_applied_slot(), 0U);

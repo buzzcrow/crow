@@ -38,7 +38,7 @@ std::string temp_dir()
 
 std::string read_file(const std::string &path)
 {
-    std::ifstream ifs(path, std::ios::binary);
+    std::ifstream      ifs(path, std::ios::binary);
     std::ostringstream oss;
     oss << ifs.rdbuf();
     return oss.str();
@@ -52,15 +52,33 @@ TEST(TextCodec, AnchorRoundTrip)
     // Build a minimal anchor blob (60 bytes fixed fields + 4 CRC + padding)
     std::vector<uint8_t> anchor(64, 0);
     // magic = 0x41435443 (CTCA)
-    anchor[0] = 0x43; anchor[1] = 0x54; anchor[2] = 0x43; anchor[3] = 0x41;
+    anchor[0] = 0x43;
+    anchor[1] = 0x54;
+    anchor[2] = 0x43;
+    anchor[3] = 0x41;
     // format_version = 2
-    anchor[4] = 2; anchor[5] = 0; anchor[6] = 0; anchor[7] = 0;
+    anchor[4] = 2;
+    anchor[5] = 0;
+    anchor[6] = 0;
+    anchor[7] = 0;
     // snapshot_seq = 123
-    anchor[8] = 123; anchor[9] = 0; anchor[10] = 0; anchor[11] = 0;
-    anchor[12] = 0; anchor[13] = 0; anchor[14] = 0; anchor[15] = 0;
+    anchor[8]  = 123;
+    anchor[9]  = 0;
+    anchor[10] = 0;
+    anchor[11] = 0;
+    anchor[12] = 0;
+    anchor[13] = 0;
+    anchor[14] = 0;
+    anchor[15] = 0;
     // root_page_id = 42
-    anchor[16] = 42; anchor[17] = 0; anchor[18] = 0; anchor[19] = 0;
-    anchor[20] = 0; anchor[21] = 0; anchor[22] = 0; anchor[23] = 0;
+    anchor[16] = 42;
+    anchor[17] = 0;
+    anchor[18] = 0;
+    anchor[19] = 0;
+    anchor[20] = 0;
+    anchor[21] = 0;
+    anchor[22] = 0;
+    anchor[23] = 0;
 
     std::string text = encode_anchor_text(anchor.data(), anchor.size());
     EXPECT_NE(text.find("CROW_CT_ANCHOR"), std::string::npos);
@@ -77,7 +95,10 @@ TEST(TextCodec, SegImageRoundTrip)
     // Build a minimal segment image blob
     std::vector<uint8_t> img(32, 0);
     // magic = 0x534D5443 (CTMS)
-    img[0] = 0x43; img[1] = 0x54; img[2] = 0x4D; img[3] = 0x53;
+    img[0] = 0x43;
+    img[1] = 0x54;
+    img[2] = 0x4D;
+    img[3] = 0x53;
 
     std::string text = encode_seg_image_text(img.data(), img.size());
     EXPECT_NE(text.find("CROW_CT_SEGIMG"), std::string::npos);
@@ -92,7 +113,10 @@ TEST(TextCodec, SegDirRoundTrip)
     // Build a minimal segment directory blob
     std::vector<uint8_t> dir(16, 0);
     // magic = 0x44535443 (CTSD)
-    dir[0] = 0x43; dir[1] = 0x54; dir[2] = 0x53; dir[3] = 0x44;
+    dir[0] = 0x43;
+    dir[1] = 0x54;
+    dir[2] = 0x53;
+    dir[3] = 0x44;
 
     std::string text = encode_segdir_text(dir.data(), dir.size());
     EXPECT_NE(text.find("CROW_CT_SEGDIR"), std::string::npos);
@@ -105,7 +129,10 @@ TEST(TextCodec, SegDirRoundTrip)
 TEST(TextCodec, AllOutputsAreHumanReadable)
 {
     std::vector<uint8_t> blob(64, 0x41);
-    blob[0] = 0x43; blob[1] = 0x54; blob[2] = 0x43; blob[3] = 0x41; // anchor magic
+    blob[0] = 0x43;
+    blob[1] = 0x54;
+    blob[2] = 0x43;
+    blob[3] = 0x41; // anchor magic
 
     std::string text = encode_anchor_text(blob.data(), blob.size());
     // No null bytes in the text output
@@ -116,7 +143,7 @@ TEST(TextCodec, AllOutputsAreHumanReadable)
 
 TEST(TextPageStore, WritePageCreatesFile)
 {
-    std::string base = temp_dir();
+    std::string                    base = temp_dir();
     std::unique_ptr<TextPageStore> s;
     ASSERT_TRUE(TextPageStore::open(base, 0, 0, &s).ok());
 
@@ -134,14 +161,17 @@ TEST(TextPageStore, WritePageCreatesFile)
 
 TEST(TextPageStore, WriteAnchorCreatesFile)
 {
-    std::string base = temp_dir();
+    std::string                    base = temp_dir();
     std::unique_ptr<TextPageStore> s;
     ASSERT_TRUE(TextPageStore::open(base, 0, 0, &s).ok());
 
     // Write an anchor blob at addr 0 (slot A)
     std::vector<uint8_t> anchor(64, 0);
-    anchor[0] = 0x43; anchor[1] = 0x54; anchor[2] = 0x43; anchor[3] = 0x41; // CTCA magic
-    anchor[4] = 2; // format_version
+    anchor[0] = 0x43;
+    anchor[1] = 0x54;
+    anchor[2] = 0x43;
+    anchor[3] = 0x41; // CTCA magic
+    anchor[4] = 2;    // format_version
 
     ASSERT_TRUE(s->write_at(0, anchor.data(), anchor.size()).ok());
     ASSERT_TRUE(s->sync().ok());
@@ -152,7 +182,7 @@ TEST(TextPageStore, WriteAnchorCreatesFile)
 
 TEST(TextPageStore, RoundTripReopen)
 {
-    std::string base = temp_dir();
+    std::string          base = temp_dir();
     std::vector<uint8_t> page_data(64, 0x55);
 
     {
@@ -172,7 +202,7 @@ TEST(TextPageStore, RoundTripReopen)
 
 TEST(TextPageStore, ManifestMapsMultipleBlobs)
 {
-    std::string base = temp_dir();
+    std::string                    base = temp_dir();
     std::unique_ptr<TextPageStore> s;
     ASSERT_TRUE(TextPageStore::open(base, 0, 0, &s).ok());
 
@@ -191,7 +221,7 @@ TEST(TextPageStore, ManifestMapsMultipleBlobs)
 
 TEST(TextPageStore, SizeReturnsMaxAddr)
 {
-    std::string base = temp_dir();
+    std::string                    base = temp_dir();
     std::unique_ptr<TextPageStore> s;
     ASSERT_TRUE(TextPageStore::open(base, 0, 0, &s).ok());
 
@@ -205,7 +235,7 @@ TEST(TextPageStore, SizeReturnsMaxAddr)
 
 TEST(TextPageStore, IuIsAlways1)
 {
-    std::string base = temp_dir();
+    std::string                    base = temp_dir();
     std::unique_ptr<TextPageStore> s;
     ASSERT_TRUE(TextPageStore::open(base, 0, 0, &s).ok());
     EXPECT_EQ(s->iu_size(), 1U);
