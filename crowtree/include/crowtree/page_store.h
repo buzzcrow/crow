@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -53,6 +54,38 @@ class PageStore
     // padded to a multiple of it so a page write cannot tear. 1 for byte-
     // addressable media (mem/SCM), a flash page for SSD.
     [[nodiscard]] virtual uint32_t iu_size() const = 0;
+
+    // ── Async API (plan-btree-persistent Task 1) ──────────────────────
+    // submit_read/submit_write/submit_fsync return an opaque op id usable
+    // with cancel(). The callback fires exactly once with the outcome.
+    // Default implementations delegate to the sync methods and invoke the
+    // callback immediately (ready completion). Backends with a real async
+    // engine (IoUring) override these.
+
+    virtual uint64_t submit_read(uint64_t off, void *buf, size_t len,
+                                 std::function<void(Status)> on_complete)
+    {
+        on_complete(read_at(off, static_cast<uint8_t *>(buf), len));
+        return 0;
+    }
+
+    virtual uint64_t submit_write(uint64_t off, const void *buf, size_t len,
+                                  std::function<void(Status)> on_complete)
+    {
+        on_complete(write_at(off, static_cast<const uint8_t *>(buf), len));
+        return 0;
+    }
+
+    virtual Status submit_fsync(std::function<void(Status)> on_complete)
+    {
+        on_complete(sync());
+        return Status::Ok();
+    }
+
+    virtual void cancel(uint64_t /*op_id*/)
+    {
+        // No-op for sync backends: the callback has already fired.
+    }
 };
 
 // In-memory block device. Durable only for the lifetime of the object; used by
