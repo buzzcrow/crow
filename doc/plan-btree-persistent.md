@@ -105,19 +105,15 @@ Key findings from reviewing `persist.cpp`, `block_page_store.cpp`, `block_page_s
   - Crash recovery test: verify no reference to deleted block after reopen
   - Verify single-medium and TextPageStore paths are unaffected
 
-#### Gaps (need discussion)
+#### Gaps (resolved)
 
-**Gap 1: `SpaceAllocator` is in `persist.cpp` anonymous namespace, `BlockPageStore` is separate**
-`build_allocator()` is a free function in `persist.cpp`. It needs `block_size` from `BlockPageStore`. Options: (a) pass `block_size` as parameter (simple), (b) virtual method on `PageStore` (overengineered). **Recommendation**: (a) — pass `block_size` from `opt_.page_store->block_size()` if available, else 0.
+**Gap 1**: ~~`SpaceAllocator` is in `persist.cpp` anonymous namespace~~ — **Resolved**: pass `block_size` as parameter to `build_allocator()`. 0 = no filtering.
 
-**Gap 2: `PageStore` base class doesn't expose `block_size()`**
-`block_size()` is only on `BlockPageStore`. Need either: (a) add `virtual uint64_t block_size() const { return 0; }` to `PageStore` (overridden by `BlockPageStore`), or (b) `dynamic_cast<BlockPageStore*>` in `persist.cpp`. **Recommendation**: (a) — simple virtual with default 0.
+**Gap 2**: ~~`PageStore` base class doesn't expose `block_size()`~~ — **Resolved**: add `virtual uint64_t block_size() const { return 0; }` to `PageStore`, overridden by `BlockPageStore`.
 
-**Gap 3: Threshold configurability**
-Should the 70% sparse threshold be hardcoded, configurable via `ct_options`, or a compile-time constant? **Recommendation**: compile-time constant for now, configurable later if needed.
+**Gap 3**: ~~Threshold configurability~~ — **Resolved**: compile-time constant for now.
 
-**Gap 4: Per-block live page counting requires reading segment directory after commit**
-`commit_prepared_snapshot()` has the `PreparedSnapshot` with all segment images. The per-block count can be computed from `pending_addr` + existing durable addresses without re-reading from disk. **No gap** — just needs implementation.
+**Gap 4**: ~~Per-block live page counting~~ — **No gap**: compute from `PreparedSnapshot` in-memory, no disk re-read.
 
 ---
 
