@@ -158,6 +158,11 @@ class BlockPageStore : public PageStore
         return block_size_;
     }
 
+    // Delete a block file (array-of-blocks mode only). Closes the fd,
+    // removes the BlockExtent, and unlinks the .blk-{NNNN} file.
+    // Safe only after snapshot commit confirms zero live pages in the block.
+    Status delete_block(uint32_t block_idx);
+
     [[nodiscard]] bool is_block_device() const
     {
         return is_block_device_;

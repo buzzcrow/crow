@@ -87,7 +87,7 @@ Key findings from reviewing `persist.cpp`, `block_page_store.cpp`, `block_page_s
   - Exclude gaps in blocks above threshold from the allocator's gap list
   - When `block_size == 0` (single-medium, TextPageStore), no filtering — current behavior unchanged
 
-- [ ] **2c**: Add `delete_block()` to `BlockPageStore`
+- [x] **2c**: Add `delete_block()` to `BlockPageStore`
   - `block_page_store.h`: `Status delete_block(uint32_t block_idx)`
   - `block_page_store.cpp`: close fd, remove file from `extents_`, unlink `.blk-{NNNN}` file
   - Safe only after snapshot commit confirms zero live pages in the block

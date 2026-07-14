@@ -368,6 +368,24 @@ Status BlockPageStore::allocate_new_block()
     return Status::Ok();
 }
 
+Status BlockPageStore::delete_block(uint32_t block_idx)
+{
+    if (block_idx >= extents_.size()) {
+        return Status::invalid_argument("delete_block: block index out of range");
+    }
+
+    char name[64];
+    std::snprintf(name, sizeof(name), "%u-%u.blk-%04u", store_id_, partition_id_, block_idx);
+    std::string path = dir_ + "/" + name;
+
+    if (::unlink(path.c_str()) < 0 && errno != ENOENT) {
+        return Status::io_error(std::string("unlink: ") + std::strerror(errno));
+    }
+
+    extents_.erase(extents_.begin() + static_cast<ptrdiff_t>(block_idx));
+    return Status::Ok();
+}
+
 Status BlockPageStore::write_at_extents(uint64_t off, const uint8_t *buf, size_t len)
 {
     // Ensure enough extents are allocated
