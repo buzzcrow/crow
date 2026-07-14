@@ -596,7 +596,7 @@ Task 1 (IoEngine + async) ──┐
 ## Execution Order
 
 - [x] **Task 1** — IoEngine interface + DirectIoEngine (async foundation, first)
-- [ ] **Task 2** — BlockPageStore Medium abstraction + IU=1 mode (builds on Task 1)
+- [x] **Task 2** — BlockPageStore Medium abstraction + IU=1 mode (builds on Task 1)
 - [ ] **Task 3** — Array-of-blocks growth + dump utility (builds on Task 2)
 - [ ] **Task 4** — TextPageStore + text codecs (builds on Task 1)
 - [ ] **Task 5** — WAL `.log` → `.ck` extension (standalone, no dependencies)
