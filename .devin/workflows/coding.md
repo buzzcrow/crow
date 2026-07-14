@@ -57,14 +57,15 @@ When adding internal state to `crowkv` lib:
 
 // turbo
 ```bash
-cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test
+cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
-Do not bypass.
+Do not bypass. `--no-verify` is forbidden except when the toolchain itself is broken (e.g. cargo too old to download deps) and no fix is available — state the reason explicitly in the commit message or PR.
 
-- **Do NOT fix clippy errors** — leave for the user.
-- **DO fix test issues** — ensure tests pass.
-- Leave code changes in place; user will fix clippy and commit.
+- **DO fix clippy errors** — resolve them before committing.
+- **DO fix clang-format violations** — run `clang-format -i` on changed `.cpp`/`.h` files.
+- **DO fix test issues** — ensure all tests pass.
+- Use the pixi env toolchain (`PATH=$PIXI_ENV/bin:$PATH`) when the system cargo is too old.
 
 ## Commit & Push
 

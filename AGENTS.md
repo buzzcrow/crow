@@ -19,6 +19,13 @@ Rust workspace + C++ storage engine (via FFI).
 - `unsafe_code = deny` (except `crowtree-ffi`). Clippy `pedantic = warn`.
 - `test-util` feature auto-enabled for tests via self dev-dependency — `cargo test` needs no flags.
 - Commit messages: single line, no doc references or task numbers. Code comments: same rule.
+- **Pre-commit quality gate — do not skip:**
+  - `cargo fmt --all -- --check` must pass.
+  - `cargo clippy --all-targets -- -D warnings` must pass.
+  - `clang-format --dry-run --Werror` on all changed `.cpp`/`.h` files must pass.
+  - C++ tests (`crowtree_tests`) must pass.
+  - Only skip if the toolchain itself is broken (e.g. cargo too old to download deps) and no fix is available — state the reason explicitly.
+  - Use the pixi env toolchain (`PATH=$PIXI_ENV/bin:$PATH`) when the system cargo is too old.
 
 ## Dispatch — Read Before Acting
 
