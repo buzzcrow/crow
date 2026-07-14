@@ -441,9 +441,9 @@ crowtree already has a **debug codec** (`crowtree/include/crowtree/debug_codec.h
 - [x] `doc/design/design-crowtree-storage.md` §2.1 (TextPageStore Layout): Added directory layout, manifest file, anchor/page/segimage/segdir text formats.
 - [x] `doc/design/design-crowtree-storage.md` §2.2 (BlockPageStore Layout): Added array-of-blocks design, block file naming, binary on-disk layout diagram, anchor/page/segment/gap descriptions, recovery and sync.
 - [x] `doc/design/design-crowtree-storage.md` §8 (Mapping Table): Updated on-disk format to reference both binary (§2.2) and text (§2.1) layouts. Fixed anchor field list to match actual `CommitAnchor` struct.
-- [ ] `doc/design/design-crowtree-storage.md` §3.3 (Alignment): Update to mention `TextPageStore` always uses IU=1 (no alignment).
-- [ ] `doc/doc_index.md`: Update the storage design row if scope changes.
-- [ ] `doc/todo_code.md`: Remove any items related to this refactor.
+- [x] `doc/design/design-crowtree-storage.md` §3.3 (Alignment): Update to mention `TextPageStore` always uses IU=1 (no alignment).
+- [x] `doc/doc_index.md`: Update the storage design row if scope changes.
+- [x] `doc/todo_code.md`: No items related to this refactor (confirmed, no changes needed).
 
 **Files**:
 - `doc/design/design-crowtree-storage.md`
@@ -606,7 +606,7 @@ Task 1 (IoEngine + async) ──┐
 - [x] **Task 9** — Configurable fsync policy (builds on Task 7, crowtree + WAL)
 - [x] **Task 10** — Test updates (builds on all above)
 - [x] **Task 11** — Delete old code + cleanup sync API (builds on Task 10)
-- [ ] **Task 12** — Documentation (last)
+- [x] **Task 12** — Documentation (last)
 - [ ] **Task 13** — IoUringEngine (Stage 2, Linux only, builds on Task 1)
 - [ ] **Task 14** — Block compaction / merge analysis & design (no implementation, builds on Task 3)
 
