@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-// PT1: PageStore backend tests (MemPageStore + FilePageStore + BlockPageStore).
+// PT1: PageStore backend tests (MemPageStore + BlockPageStore).
 #include "crowtree/block_page_store.h"
 #include "crowtree/page_store.h"
 
@@ -62,23 +62,24 @@ TEST(PageStore, MemOverwrite)
 
 TEST(PageStore, FileRoundTripAcrossReopen)
 {
-    std::string          path = temp_path();
+    std::string          dir = temp_path();
+    std::remove(dir.c_str());
+    ASSERT_EQ(::mkdir(dir.c_str(), 0755), 0);
     std::vector<uint8_t> in{10, 20, 30, 40};
     {
-        std::unique_ptr<FilePageStore> s;
-        ASSERT_TRUE(FilePageStore::open(path, 4096, &s).ok());
+        std::unique_ptr<BlockPageStore> s;
+        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, 4096, 1, &s).ok());
         ASSERT_TRUE(s->write_at(8, in.data(), in.size()).ok());
         ASSERT_TRUE(s->sync().ok());
-        EXPECT_EQ(s->iu_size(), 4096U);
+        EXPECT_EQ(s->iu_size(), 1U);
     }
     {
-        std::unique_ptr<FilePageStore> s;
-        ASSERT_TRUE(FilePageStore::open(path, 4096, &s).ok());
+        std::unique_ptr<BlockPageStore> s;
+        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, 4096, 1, &s).ok());
         std::vector<uint8_t> out(in.size(), 0);
         ASSERT_TRUE(s->read_at(8, out.data(), out.size()).ok());
         EXPECT_EQ(in, out);
     }
-    std::remove(path.c_str());
 }
 
 // plan-tree #22: BlockPageStore (O_DIRECT). Backed by a regular

@@ -243,9 +243,9 @@ TEST(CApi, FileCheckpointReopen)
     }
 }
 
-// plan-tree #22: ct_options.backend=1 selects BlockPageStore (O_DIRECT)
-// instead of the default FilePageStore -- same round-trip as
-// FileCheckpointReopen above, just through the raw-block-device backend.
+// plan-tree #22: ct_options.backend=CT_BACKEND_BLOCK selects BlockPageStore
+// instead of the default TextPageStore -- same round-trip as
+// FileCheckpointReopen above, just through the block-device backend.
 TEST(CApi, BlockDeviceCheckpointReopen)
 {
     std::array<char, 32> tmpl{"/tmp/crowtree_capi_XXXXXX"};

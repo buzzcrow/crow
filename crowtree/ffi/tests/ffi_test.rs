@@ -144,9 +144,9 @@ fn file_snapshot_reopen_smoke() {
 }
 
 // : Options::backend = PageStoreBackend::Block selects
-// BlockPageStore (O_DIRECT) instead of the default FilePageStore -- same
+// BlockPageStore instead of the default TextPageStore -- same
 // round-trip as file_snapshot_reopen_smoke above, just through the
-// raw-block-device backend.
+// block-device backend.
 #[test]
 fn block_device_snapshot_reopen_smoke() {
     let dir = tempfile::tempdir().unwrap();
