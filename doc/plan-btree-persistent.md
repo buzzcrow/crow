@@ -81,7 +81,7 @@ Key findings from reviewing `persist.cpp`, `block_page_store.cpp`, `block_page_s
   - Cost: zero extra I/O, O(gaps) for free ratio computation, O(live_pages) for deletion check
   - Scope: array-of-blocks mode only
 
-- [ ] **2b**: Add `block_size` parameter to `build_allocator()` and sparse-block gap filtering
+- [x] **2b**: Add `block_size` parameter to `build_allocator()` and sparse-block gap filtering
   - `persist.cpp`: `build_allocator()` takes optional `block_size` (0 = no filtering)
   - Compute per-block free ratio from gap list
   - Exclude gaps in blocks above threshold from the allocator's gap list

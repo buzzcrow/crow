@@ -278,10 +278,16 @@ bool collect_live_extents_from_directory(const PageStore &store, const CommitAnc
     return true;
 }
 
+// Sparse-block threshold: blocks with >70% gap space are excluded from gap
+// reuse so new writes land in dense blocks instead (online compaction).
+constexpr double kSparseBlockThreshold = 0.70;
+
 // build the allocator: free = the complement of `live` within
-// [kRegionBase, file_size); append grows past EOF.
+// [kRegionBase, file_size); append grows past EOF. When block_size > 0
+// (array-of-blocks mode), gaps in sparse blocks (>70% free) are excluded
+// from the gap list so new writes don't reuse space in nearly-empty blocks.
 SpaceAllocator build_allocator(std::vector<std::pair<uint64_t, uint64_t>> live, uint64_t file_size, uint32_t iu,
-                               uint64_t region_base)
+                               uint64_t region_base, uint64_t block_size)
 {
     SpaceAllocator a;
     a.iu = iu;
@@ -299,6 +305,21 @@ SpaceAllocator build_allocator(std::vector<std::pair<uint64_t, uint64_t>> live, 
         a.gaps.emplace_back(prev_end, eof - prev_end); // dead tail
     }
     a.append = eof;
+
+    if (block_size > 0 && !a.gaps.empty()) {
+        std::vector<std::pair<uint64_t, uint64_t>> filtered;
+        filtered.reserve(a.gaps.size());
+        for (const auto &g : a.gaps) {
+            uint64_t blk_start = (g.first / block_size) * block_size;
+            uint64_t blk_end   = blk_start + block_size;
+            uint64_t gap_in_blk = std::min(g.first + g.second, blk_end) - g.first;
+            if (static_cast<double>(gap_in_blk) / static_cast<double>(block_size) <= kSparseBlockThreshold) {
+                filtered.push_back(g);
+            }
+        }
+        a.gaps = std::move(filtered);
+    }
+
     return a;
 }
 
@@ -332,7 +353,7 @@ Status Crowtree::prepare_snapshot_locked(PreparedSnapshot *out)
     if (have_prev && !collect_live_extents_from_directory(*store, prev, iu, &live)) {
         return Status::corruption("snapshot: committed segment directory unreadable");
     }
-    SpaceAllocator alloc = build_allocator(std::move(live), store->size(), iu, region_base);
+    SpaceAllocator alloc = build_allocator(std::move(live), store->size(), iu, region_base, store->block_size());
 
     uint64_t pages_written = 0;
 
