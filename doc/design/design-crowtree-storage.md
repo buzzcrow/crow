@@ -20,7 +20,7 @@ consensus WAL.
 - [2. Backends](#2-backends)
   - [2.1 TextPageStore — On-Disk Layout (Debug)](#21-textpagestore--on-disk-layout-debug)
   - [2.2 BlockPageStore — On-Disk Layout (Production)](#22-blockpagestore--on-disk-layout-production)
-  - [2.3 I/O Engines](#23-io-engines)
+  - [2.3 Async I/O Architecture](#23-async-io-architecture)
   - [2.4 fsync Policy](#24-fsync-policy)
   - [2.5 Block Compaction](#25-block-compaction)
 - [3. On-Disk Page Format (Zero-Copy Frame)](#3-on-disk-page-format-zero-copy-frame)
@@ -42,10 +42,12 @@ of crowtree that does I/O, and it is page-granular and **always asynchronous**
 (`read_page`/`write_page` complete via callback/future, matching
 [`design.md` §12.1](../design.md#121-async-disk-io-substrate-moved-from-design-async-iomd)).
 The upper layer always uses the async API — regardless of whether the
-underlying engine is `io_uring` (Linux) or direct I/O (`pwrite`/`pread` +
-`O_DIRECT`, macOS/fallback). The direct I/O engine wraps blocking calls as
-immediately-ready async completions, so the upper layer has a **unified async
-interface** with no sync/async split. No FFI on the I/O hot path.
+underlying platform has `io_uring` (Linux) or not (macOS/fallback). On
+Linux, `BlockAsyncPageStore` + `Reactor` submit genuine `io_uring` SQEs;
+on macOS or without liburing, the `*_async` methods fall back to
+synchronous blocking I/O wrapped as immediately-ready completions, so the
+upper layer has a **unified async interface** with no sync/async split.
+No FFI on the I/O hot path.
 
 **IU = Indivisible Unit.** The minimum atomically-writable size. Leaf base
 pages are padded to a multiple of it so a page write cannot tear (§3). The IU
@@ -72,29 +74,36 @@ Both implement the same async `PageStore`. The backend is selected at `ct_open`
 via `ct_options.backend` (0 = text debug, 1 = block). When `path` is
 null/empty, an in-memory `BlockPageStore` with IU=1 is used (test path).
 
-### 2.3 I/O Engines
+### 2.3 Async I/O Architecture
 
-`BlockPageStore` supports two pluggable I/O engines, both exposed as async:
+`BlockPageStore` has an async twin, `BlockAsyncPageStore`, that submits all
+I/O through a `Reactor` (io_uring event loop). The async path is used by
+`ct_get_async`, `ct_flush_async`, and `ct_snapshot_async`.
 
-| Engine | Platform | Mechanism | Status |
-| --- | --- | --- | --- |
-| `DirectIoEngine` | All (macOS, Linux fallback) | `pwrite`/`pread` + `O_DIRECT`, wrapped as immediately-ready async completions | Stage 1 |
-| `IoUringEngine` | Linux only | `io_uring` submissions via `Reactor` event loop | Stage 2 |
+| Platform | Mechanism | Status |
+| --- | --- | --- |
+| Linux (liburing) | `BlockAsyncPageStore` + `Reactor` (io_uring SQE/CQE) | Production |
+| macOS / no liburing | Synchronous fallback (blocking `pwrite`/`pread`/`fdatasync` wrapped as immediately-ready completions) | Dev |
 
-**DirectIoEngine**: Blocking `pwrite`/`pread` calls are wrapped as async
-completions that resolve immediately (the call completes before returning).
-This is not truly concurrent, but gives a unified async API on platforms
-without `io_uring`. `O_DIRECT` is used when `iu_size > 1` (SSD); for
-`iu_size = 1` (mem/SCM), regular buffered I/O is used.
+**Linux (liburing)**: `BlockAsyncPageStore` maps global byte offsets to
+per-extent fds via `BlockPageStore::fd_for_offset()`, then submits
+`io_uring` SQEs through the `Reactor`. Writes spanning multiple extents are
+split and chained; fsync chains across all dirty extent fds. Requires
+`CROWTREE_HAVE_LIBURING` build flag.
 
-**IoUringEngine**: Submits `io_uring` SQEs for read/write/fsync, completions
-arrive via CQ polling in the `Reactor` event loop. This is the production
-Linux engine. Requires `CROWTREE_HAVE_LIBURING` build flag.
+**macOS / no liburing**: `CROWTREE_HAVE_LIBURING` is not defined. `ct_open`
+does not wire a `Reactor` or `AsyncPageStore`. The `*_async` C API methods
+fall back to completing synchronously (blocking I/O wrapped as an
+immediately-ready completion). The upper-layer API is identical regardless
+of platform.
 
-**`FilePageStore` and `FileAsyncPageStore` are removed.** The old sync
-`FilePageStore` was only used for testing; `TextPageStore` now serves that
-role. The old `FileAsyncPageStore` (single-file `io_uring`) is superseded by
-`BlockPageStore` + `IoUringEngine` (array-of-blocks `io_uring`).
+**`FilePageStore`, `FileAsyncPageStore`, `IoEngine`, and `DirectIoEngine`
+are removed.** The old sync `FilePageStore` was only used for testing;
+`TextPageStore` now serves that role. The old `FileAsyncPageStore`
+(single-file `io_uring`) is superseded by `BlockAsyncPageStore`
+(array-of-blocks `io_uring`). The old `IoEngine`/`DirectIoEngine`
+abstraction (blocking calls wrapped as async) is replaced by the
+platform-level fallback described above.
 
 ### 2.4 fsync Policy
 

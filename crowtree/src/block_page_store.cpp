@@ -739,4 +739,59 @@ int BlockPageStore::fd_for_offset(uint64_t off, uint64_t *out_local) const
     return fm->fd();
 }
 
+Status BlockPageStore::ensure_extents(uint64_t off, size_t len)
+{
+    if (extents_.empty()) {
+        // Single-medium mode: no block allocation needed
+        return Status::Ok();
+    }
+    // Allocate blocks until the range [off, off+len) is covered
+    uint64_t end = off + len;
+    while (extents_.back().base_offset + block_size_ < end) {
+        Status s = allocate_new_block();
+        if (!s.ok()) {
+            return s;
+        }
+    }
+    // Mark covered extents as dirty
+    uint64_t cur = off;
+    while (cur < end) {
+        uint64_t extent_idx = cur / block_size_;
+        if (extent_idx < extents_.size()) {
+            extents_[extent_idx].dirty = true;
+        }
+        uint64_t next_boundary = (extent_idx + 1) * block_size_;
+        cur                    = std::min(end, next_boundary);
+    }
+    return Status::Ok();
+}
+
+std::vector<int> BlockPageStore::dirty_fds()
+{
+    std::vector<int> fds;
+    if (sync_mode_ == SyncMode::kSkip) {
+        return fds;
+    }
+    if (extents_.empty()) {
+        // Single-medium mode
+        auto *fm = dynamic_cast<FileMedium *>(medium_.get());
+        if (fm != nullptr && fm->fd() >= 0) {
+            fds.push_back(fm->fd());
+        }
+        return fds;
+    }
+    // Array-of-blocks mode: collect dirty, non-deleted extent fds
+    for (auto &ext : extents_) {
+        if (ext.deleted || !ext.dirty) {
+            continue;
+        }
+        auto *fm = dynamic_cast<FileMedium *>(ext.medium.get());
+        if (fm != nullptr && fm->fd() >= 0) {
+            fds.push_back(fm->fd());
+            ext.dirty = false;
+        }
+    }
+    return fds;
+}
+
 } // namespace crowtree
