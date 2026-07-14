@@ -133,6 +133,13 @@ class BlockPageStore : public PageStore
     // sector size.
     static Status open(const std::string &path, uint32_t iu_size, std::unique_ptr<BlockPageStore> *out);
 
+    // Open an array-of-blocks store. Creates `{dir}/{store_id}-{partition_id}.blk-{NNNN}`
+    // files on demand when the current block fills up. On reopen, scans the
+    // directory for existing block files and opens them all.
+    static Status open_blocks(const std::string &dir, uint32_t store_id, uint32_t partition_id,
+                              uint64_t block_size, uint32_t iu_size,
+                              std::unique_ptr<BlockPageStore> *out);
+
     // Open an in-memory store (MemoryMedium, iu_size=1). Replaces MemPageStore.
     static Status open_mem(uint32_t iu_size, std::unique_ptr<BlockPageStore> *out);
 
@@ -151,13 +158,25 @@ class BlockPageStore : public PageStore
         return is_block_device_;
     }
 
-    // Access the underlying medium (for content verification tests).
+    // Access the underlying medium (for single-medium stores only).
     [[nodiscard]] BlockPageStoreMedium *medium() const
     {
         return medium_.get();
     }
 
+    // Number of block files in an array-of-blocks store (0 for single-medium).
+    [[nodiscard]] size_t num_extents() const
+    {
+        return extents_.size();
+    }
+
+    [[nodiscard]] uint64_t block_size() const
+    {
+        return block_size_;
+    }
+
   private:
+    // Single-medium constructor (open / open_mem)
     BlockPageStore(std::unique_ptr<BlockPageStoreMedium> medium, uint32_t iu_size, bool is_block_device)
         : medium_(std::move(medium)),
           iu_size_(iu_size),
@@ -165,12 +184,49 @@ class BlockPageStore : public PageStore
     {
     }
 
+    // Array-of-blocks constructor
+    BlockPageStore(std::string dir, uint32_t store_id, uint32_t partition_id,
+                   uint64_t block_size, uint32_t iu_size)
+        : iu_size_(iu_size),
+          is_block_device_(false),
+          block_size_(block_size),
+          store_id_(store_id),
+          partition_id_(partition_id),
+          dir_(std::move(dir))
+    {
+    }
+
     int      fd() const; // returns -1 if no FileMedium
     uint64_t capacity_ = 0; // probed fixed device size; 0 = unknown
 
-    std::unique_ptr<BlockPageStoreMedium> medium_;
+    // Array-of-blocks management
+    Status allocate_new_block();
+    Status write_at_extents(uint64_t off, const uint8_t *buf, size_t len);
+    Status read_at_extents(uint64_t off, uint8_t *buf, size_t len) const;
+
+    struct BlockExtent
+    {
+        std::unique_ptr<FileMedium> medium;
+        uint64_t                    base_offset = 0; // block_idx * block_size
+        uint64_t                    used        = 0; // high-water mark
+        bool                        dirty       = false;
+    };
+
+    std::unique_ptr<BlockPageStoreMedium> medium_;  // single-medium mode
     uint32_t                              iu_size_;
     bool                                  is_block_device_;
+
+    // Array-of-blocks mode
+    uint64_t                 block_size_   = 0;
+    uint32_t                 store_id_     = 0;
+    uint32_t                 partition_id_ = 0;
+    std::string              dir_;
+    std::vector<BlockExtent> extents_;
 };
+
+// Dump utility: annotated hex dump of a block file. Parses known structures
+// at fixed offsets (anchor at offset 0, page blob envelopes) and renders them
+// as human-readable text. Unknown regions shown as hex.
+Status dump_block_file(const std::string &path, uint32_t iu_size, std::string *out);
 
 } // namespace crowtree

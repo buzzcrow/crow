@@ -5,10 +5,15 @@
 
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <dirent.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
+#include <iomanip>
+#include <sstream>
 
 #if defined(__linux__)
 #    include <linux/fs.h>
@@ -254,12 +259,241 @@ Status BlockPageStore::open_mem(uint32_t iu_size, std::unique_ptr<BlockPageStore
     return Status::Ok();
 }
 
+namespace
+{
+// Parse a block filename like "1-3.blk-0007" → (store_id=1, partition_id=3, idx=7).
+// Returns false if the filename doesn't match the pattern.
+bool parse_block_filename(const std::string &name, uint32_t &out_store, uint32_t &out_part, uint32_t &out_idx)
+{
+    auto dot = name.find('.');
+    if (dot == std::string::npos) {
+        return false;
+    }
+    if (name.substr(dot + 1, 4) != "blk-") {
+        return false;
+    }
+    auto dash = name.find('-');
+    if (dash == std::string::npos || dash >= dot) {
+        return false;
+    }
+    try {
+        out_store = static_cast<uint32_t>(std::stoul(name.substr(0, dash)));
+        out_part  = static_cast<uint32_t>(std::stoul(name.substr(dash + 1, dot - dash - 1)));
+        out_idx   = static_cast<uint32_t>(std::stoul(name.substr(dot + 5)));
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+} // namespace
+
+Status BlockPageStore::open_blocks(const std::string &dir, uint32_t store_id, uint32_t partition_id,
+                                   uint64_t block_size, uint32_t iu_size,
+                                   std::unique_ptr<BlockPageStore> *out)
+{
+    if (block_size == 0) {
+        return Status::invalid_argument("open_blocks: block_size must be > 0");
+    }
+
+    auto *store = new BlockPageStore(dir, store_id, partition_id, block_size,
+                                     iu_size == 0 ? 4096 : iu_size);
+
+    // Scan directory for existing block files matching {store_id}-{partition_id}.blk-*
+    DIR *d = ::opendir(dir.c_str());
+    if (d != nullptr) {
+        struct dirent *ent;
+        while ((ent = ::readdir(d)) != nullptr) {
+            uint32_t s_id = 0, p_id = 0, idx = 0;
+            if (!parse_block_filename(ent->d_name, s_id, p_id, idx)) {
+                continue;
+            }
+            if (s_id != store_id || p_id != partition_id) {
+                continue;
+            }
+            // Open the existing block file
+            std::string path = dir + "/" + ent->d_name;
+            std::unique_ptr<FileMedium> fm;
+            Status s = FileMedium::open(path, store->iu_size_ > 1, &fm);
+            if (!s.ok()) {
+                ::closedir(d);
+                delete store;
+                return s;
+            }
+            BlockExtent ext;
+            ext.medium      = std::move(fm);
+            ext.base_offset = static_cast<uint64_t>(idx) * block_size;
+            ext.used        = ext.medium->size();
+            ext.dirty       = false;
+            store->extents_.push_back(std::move(ext));
+        }
+        ::closedir(d);
+    }
+
+    // Sort extents by base_offset (which is idx * block_size)
+    std::sort(store->extents_.begin(), store->extents_.end(),
+              [](const BlockExtent &a, const BlockExtent &b) { return a.base_offset < b.base_offset; });
+
+    // If no blocks exist, allocate the first one
+    if (store->extents_.empty()) {
+        Status s = store->allocate_new_block();
+        if (!s.ok()) {
+            delete store;
+            return s;
+        }
+    }
+
+    out->reset(store);
+    return Status::Ok();
+}
+
+Status BlockPageStore::allocate_new_block()
+{
+    uint32_t idx = static_cast<uint32_t>(extents_.size());
+    char     name[64];
+    std::snprintf(name, sizeof(name), "%u-%u.blk-%04u", store_id_, partition_id_, idx);
+    std::string path = dir_ + "/" + name;
+
+    std::unique_ptr<FileMedium> fm;
+    Status                       s = FileMedium::open(path, iu_size_ > 1, &fm);
+    if (!s.ok()) {
+        return s;
+    }
+
+    BlockExtent ext;
+    ext.medium      = std::move(fm);
+    ext.base_offset = static_cast<uint64_t>(idx) * block_size_;
+    ext.used        = 0;
+    ext.dirty       = false;
+    extents_.push_back(std::move(ext));
+    return Status::Ok();
+}
+
+Status BlockPageStore::write_at_extents(uint64_t off, const uint8_t *buf, size_t len)
+{
+    // Ensure enough extents are allocated
+    uint64_t end = off + len;
+    while (extents_.back().base_offset + block_size_ < end) {
+        Status s = allocate_new_block();
+        if (!s.ok()) {
+            return s;
+        }
+    }
+
+    // Split write across extent boundaries
+    size_t   done  = 0;
+    uint64_t cur   = off;
+    while (done < len) {
+        // Find the extent containing `cur`
+        uint64_t extent_idx = cur / block_size_;
+        if (extent_idx >= extents_.size()) {
+            return Status::io_error("BlockPageStore: extent index out of range");
+        }
+        auto &ext      = extents_[extent_idx];
+        uint64_t local = cur - ext.base_offset;
+        uint64_t avail = block_size_ - local;
+        size_t   chunk = std::min(static_cast<uint64_t>(len - done), avail);
+
+        // For IU=1, write directly. For IU>1, use the bounce path via medium.
+        Status s;
+        if (iu_size_ <= 1) {
+            s = ext.medium->pwrite_at(local, buf + done, chunk);
+        } else {
+            // Use the same alignment logic as single-medium mode
+            bool aligned = (local % iu_size_ == 0) && (chunk % iu_size_ == 0) &&
+                           (reinterpret_cast<uintptr_t>(buf + done) % kDirectBufAlign == 0);
+            if (aligned) {
+                s = ext.medium->pwrite_at(local, buf + done, chunk);
+            } else {
+                uint64_t      start = (local / iu_size_) * iu_size_;
+                uint64_t      e     = align_up(local + chunk, iu_size_);
+                size_t        span  = e - start;
+                AlignedBuffer scratch(span, iu_size_);
+                if (!scratch.ok()) {
+                    return Status::io_error("BlockPageStore: aligned scratch allocation failed");
+                }
+                size_t got = 0;
+                s = ext.medium->pread_partial(start, scratch.data(), span, &got);
+                if (s.ok()) {
+                    if (got < span) {
+                        std::memset(scratch.data() + got, 0, span - got);
+                    }
+                    std::memcpy(scratch.data() + (local - start), buf + done, chunk);
+                    s = ext.medium->pwrite_at(start, scratch.data(), span);
+                }
+            }
+        }
+        if (!s.ok()) {
+            return s;
+        }
+        ext.used   = std::max(ext.used, local + chunk);
+        ext.dirty  = true;
+        done      += chunk;
+        cur       += chunk;
+    }
+    return Status::Ok();
+}
+
+Status BlockPageStore::read_at_extents(uint64_t off, uint8_t *buf, size_t len) const
+{
+    size_t   done = 0;
+    uint64_t cur  = off;
+    while (done < len) {
+        uint64_t extent_idx = cur / block_size_;
+        if (extent_idx >= extents_.size()) {
+            return Status::io_error("BlockPageStore: read past end (no extent)");
+        }
+        const auto &ext   = extents_[extent_idx];
+        uint64_t    local = cur - ext.base_offset;
+        uint64_t    avail = block_size_ - local;
+        size_t      chunk = std::min(static_cast<uint64_t>(len - done), avail);
+
+        Status s;
+        if (iu_size_ <= 1) {
+            s = ext.medium->pread_at(local, buf + done, chunk);
+        } else {
+            bool aligned = (local % iu_size_ == 0) && (chunk % iu_size_ == 0) &&
+                           (reinterpret_cast<uintptr_t>(buf + done) % kDirectBufAlign == 0);
+            if (aligned) {
+                s = ext.medium->pread_at(local, buf + done, chunk);
+            } else {
+                uint64_t      start = (local / iu_size_) * iu_size_;
+                uint64_t      e     = align_up(local + chunk, iu_size_);
+                size_t        span  = e - start;
+                AlignedBuffer scratch(span, iu_size_);
+                if (!scratch.ok()) {
+                    return Status::io_error("BlockPageStore: aligned scratch allocation failed");
+                }
+                size_t got = 0;
+                s = ext.medium->pread_partial(start, scratch.data(), span, &got);
+                if (s.ok()) {
+                    if (got < (local - start) + chunk) {
+                        return Status::io_error("BlockPageStore: read past end");
+                    }
+                    std::memcpy(buf + done, scratch.data() + (local - start), chunk);
+                }
+            }
+        }
+        if (!s.ok()) {
+            return s;
+        }
+        done += chunk;
+        cur  += chunk;
+    }
+    return Status::Ok();
+}
+
 Status BlockPageStore::write_at(uint64_t off, const uint8_t *buf, size_t len)
 {
     if (len == 0) {
         return Status::Ok();
     }
 
+    // Array-of-blocks mode
+    if (!extents_.empty()) {
+        return write_at_extents(off, buf, len);
+    }
+
+    // Single-medium mode
     // IU=1 (byte-aligned): no alignment checks, no bounce buffer.
     if (iu_size_ <= 1) {
         return medium_->pwrite_at(off, buf, len);
@@ -301,6 +535,12 @@ Status BlockPageStore::read_at(uint64_t off, uint8_t *buf, size_t len) const
         return Status::Ok();
     }
 
+    // Array-of-blocks mode
+    if (!extents_.empty()) {
+        return read_at_extents(off, buf, len);
+    }
+
+    // Single-medium mode
     // IU=1 (byte-aligned): no alignment checks, no bounce buffer.
     if (iu_size_ <= 1) {
         return medium_->pread_at(off, buf, len);
@@ -333,15 +573,78 @@ Status BlockPageStore::read_at(uint64_t off, uint8_t *buf, size_t len) const
 
 Status BlockPageStore::sync()
 {
+    // Array-of-blocks mode: fsync all dirty extents
+    if (!extents_.empty()) {
+        for (auto &ext : extents_) {
+            if (ext.dirty) {
+                Status s = ext.medium->fsync();
+                if (!s.ok()) {
+                    return s;
+                }
+                ext.dirty = false;
+            }
+        }
+        return Status::Ok();
+    }
+
+    // Single-medium mode
     return medium_->fsync();
 }
 
 uint64_t BlockPageStore::size() const
 {
+    // Array-of-blocks mode: logical high-water mark
+    if (!extents_.empty()) {
+        uint64_t total = 0;
+        for (const auto &ext : extents_) {
+            total = std::max(total, ext.base_offset + ext.used);
+        }
+        return total;
+    }
+
+    // Single-medium mode
     if (is_block_device_ && capacity_ > 0) {
         return capacity_;
     }
     return medium_->size();
+}
+
+// ── Dump utility ───────────────────────────────────────────────────
+
+Status dump_block_file(const std::string &path, uint32_t iu_size, std::string *out)
+{
+    std::unique_ptr<FileMedium> fm;
+    Status s = FileMedium::open(path, false, &fm);
+    if (!s.ok()) {
+        return s;
+    }
+
+    uint64_t file_size = fm->size();
+    std::ostringstream oss;
+    oss << "=== Block file: " << path << " ===\n";
+    oss << "Size: " << file_size << " bytes, IU: " << iu_size << "\n\n";
+
+    // Dump first 512 bytes as hex (anchor region)
+    size_t dump_len = std::min(static_cast<uint64_t>(512), file_size);
+    std::vector<uint8_t> buf(dump_len, 0);
+    size_t got = 0;
+    s = fm->pread_partial(0, buf.data(), dump_len, &got);
+    if (!s.ok()) {
+        return s;
+    }
+
+    oss << "--- First " << got << " bytes (anchor region) ---\n";
+    for (size_t i = 0; i < got; i += 16) {
+        oss << std::setfill('0') << std::hex << std::setw(8) << i << ": ";
+        for (size_t j = 0; j < 16 && i + j < got; ++j) {
+            oss << std::setw(2) << static_cast<unsigned>(buf[i + j]) << ' ';
+        }
+        oss << '\n';
+    }
+    oss << std::dec;
+
+    *out = oss.str();
+    return Status::Ok();
 }
 
 } // namespace crowtree
