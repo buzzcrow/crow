@@ -95,7 +95,7 @@ On startup:
 - `crowtree` (default) — durable, file-backed; each group gets its own file under `--data-root` (default: sibling of `--wal-root` named `ctdata`), recovered by replaying the WAL through it on restart.
 - `memory` — in-memory, non-durable `InMemKV`; explicit low-durability/test/dev choice.
 
-`--kv-backend` (`file` default, or `block` for `O_DIRECT` via `BlockPageStore`) only applies when `--kv-engine crowtree` is selected.
+`--kv-backend` (`text` default, or `block` for `O_DIRECT` via `BlockPageStore`) only applies when `--kv-engine crowtree` is selected.
 
 ## 4. Server Architecture
 
