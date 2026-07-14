@@ -46,7 +46,7 @@ class BlockPageStoreMedium
     Status pread_at(uint64_t off, uint8_t *buf, size_t len) const
     {
         size_t got = 0;
-        Status  s   = pread_partial(off, buf, len, &got);
+        Status s   = pread_partial(off, buf, len, &got);
         if (!s.ok()) {
             return s;
         }
@@ -70,9 +70,9 @@ class MemoryMedium : public BlockPageStoreMedium
   public:
     MemoryMedium() = default;
 
-    Status pwrite_at(uint64_t off, const uint8_t *buf, size_t len) override;
-    Status pread_partial(uint64_t off, uint8_t *buf, size_t len, size_t *out_read) const override;
-    Status fsync() override;
+    Status                 pwrite_at(uint64_t off, const uint8_t *buf, size_t len) override;
+    Status                 pread_partial(uint64_t off, uint8_t *buf, size_t len, size_t *out_read) const override;
+    Status                 fsync() override;
     [[nodiscard]] uint64_t size() const override;
 
     // Direct access to the underlying buffer (for content verification tests).
@@ -100,9 +100,9 @@ class FileMedium : public BlockPageStoreMedium
     // on Linux / F_NOCACHE on macOS.
     static Status open(const std::string &path, bool o_direct, std::unique_ptr<FileMedium> *out);
 
-    Status pwrite_at(uint64_t off, const uint8_t *buf, size_t len) override;
-    Status pread_partial(uint64_t off, uint8_t *buf, size_t len, size_t *out_read) const override;
-    Status fsync() override;
+    Status                 pwrite_at(uint64_t off, const uint8_t *buf, size_t len) override;
+    Status                 pread_partial(uint64_t off, uint8_t *buf, size_t len, size_t *out_read) const override;
+    Status                 fsync() override;
     [[nodiscard]] uint64_t size() const override;
 
     [[nodiscard]] int fd() const
@@ -136,9 +136,8 @@ class BlockPageStore : public PageStore
     // Open an array-of-blocks store. Creates `{dir}/{store_id}-{partition_id}.blk-{NNNN}`
     // files on demand when the current block fills up. On reopen, scans the
     // directory for existing block files and opens them all.
-    static Status open_blocks(const std::string &dir, uint32_t store_id, uint32_t partition_id,
-                              uint64_t block_size, uint32_t iu_size,
-                              std::unique_ptr<BlockPageStore> *out);
+    static Status open_blocks(const std::string &dir, uint32_t store_id, uint32_t partition_id, uint64_t block_size,
+                              uint32_t iu_size, std::unique_ptr<BlockPageStore> *out);
 
     // Open an in-memory store (MemoryMedium, iu_size=1). Replaces MemPageStore.
     static Status open_mem(uint32_t iu_size, std::unique_ptr<BlockPageStore> *out);
@@ -174,10 +173,16 @@ class BlockPageStore : public PageStore
         return medium_.get();
     }
 
-    // Number of block files in an array-of-blocks store (0 for single-medium).
+    // Number of live block files in an array-of-blocks store (0 for single-medium).
     [[nodiscard]] size_t num_extents() const
     {
-        return extents_.size();
+        size_t n = 0;
+        for (const auto &ext : extents_) {
+            if (!ext.deleted) {
+                ++n;
+            }
+        }
+        return n;
     }
 
   private:
@@ -190,8 +195,7 @@ class BlockPageStore : public PageStore
     }
 
     // Array-of-blocks constructor
-    BlockPageStore(std::string dir, uint32_t store_id, uint32_t partition_id,
-                   uint64_t block_size, uint32_t iu_size)
+    BlockPageStore(std::string dir, uint32_t store_id, uint32_t partition_id, uint64_t block_size, uint32_t iu_size)
         : iu_size_(iu_size),
           is_block_device_(false),
           block_size_(block_size),
@@ -201,7 +205,7 @@ class BlockPageStore : public PageStore
     {
     }
 
-    int      fd() const; // returns -1 if no FileMedium
+    int      fd() const;    // returns -1 if no FileMedium
     uint64_t capacity_ = 0; // probed fixed device size; 0 = unknown
 
     // Array-of-blocks management
@@ -215,9 +219,10 @@ class BlockPageStore : public PageStore
         uint64_t                    base_offset = 0; // block_idx * block_size
         uint64_t                    used        = 0; // high-water mark
         bool                        dirty       = false;
+        bool                        deleted     = false; // block file unlinked, extent kept for index stability
     };
 
-    std::unique_ptr<BlockPageStoreMedium> medium_;  // single-medium mode
+    std::unique_ptr<BlockPageStoreMedium> medium_; // single-medium mode
     uint32_t                              iu_size_;
     bool                                  is_block_device_;
 

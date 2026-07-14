@@ -5,6 +5,7 @@
 #include "crowtree/block_page_store.h"
 #include "crowtree/crowtree.h"
 #include "crowtree/page_store.h"
+#include "test_tmp.h"
 
 #include <gtest/gtest.h>
 
@@ -357,10 +358,9 @@ TEST(Persist, CorruptNewestSuperblockFallsBackToPrevious)
 
 TEST(Persist, FileBackendRoundTrip)
 {
-    std::array<char, 32> tmpl{"/tmp/crowtree_persist_XXXXXX"};
-    char                *d = mkdtemp(tmpl.data());
-    ASSERT_NE(d, nullptr);
-    std::string path(d);
+    crowtree_test::TempDir tmp("persist_");
+    ASSERT_FALSE(tmp.path.empty());
+    std::string path = tmp.path;
 
     std::map<std::string, std::string> oracle;
     {
@@ -426,10 +426,9 @@ TEST(Persist, FileBackendRoundTrip)
 // synthetic offsets exercised directly in page_store_test.cpp.
 TEST(Persist, BlockDeviceBackendRoundTrip)
 {
-    std::array<char, 32> tmpl{"/tmp/crowtree_persist_XXXXXX"};
-    char                *d = mkdtemp(tmpl.data());
-    ASSERT_NE(d, nullptr);
-    std::string path(d);
+    crowtree_test::TempDir tmp("persist_");
+    ASSERT_FALSE(tmp.path.empty());
+    std::string path = tmp.path;
 
     std::map<std::string, std::string> oracle;
     {
@@ -530,10 +529,9 @@ TEST(Persist, WriteMutexNotHeldDuringSnapshotIo)
 // modest data volume.
 TEST(Persist, ArrayOfBlocksSnapshotReopenRecover)
 {
-    std::array<char, 32> tmpl{"/tmp/crowtree_blkarr_XXXXXX"};
-    char                *d = mkdtemp(tmpl.data());
-    ASSERT_NE(d, nullptr);
-    std::string dir(d);
+    crowtree_test::TempDir tmp("blkarr_");
+    ASSERT_FALSE(tmp.path.empty());
+    std::string dir = tmp.path;
 
     constexpr uint64_t blk = 8 * 1024; // 8 KiB blocks
     std::map<std::string, std::string> oracle;
@@ -595,10 +593,9 @@ TEST(Persist, ArrayOfBlocksSnapshotReopenRecover)
 // Task 6: Array-of-blocks with dump utility content verification.
 TEST(Persist, ArrayOfBlocksDumpVerification)
 {
-    std::array<char, 32> tmpl{"/tmp/crowtree_blkdump_XXXXXX"};
-    char                *d = mkdtemp(tmpl.data());
-    ASSERT_NE(d, nullptr);
-    std::string dir(d);
+    crowtree_test::TempDir tmp("blkdump_");
+    ASSERT_FALSE(tmp.path.empty());
+    std::string dir = tmp.path;
 
     constexpr uint64_t blk = 8 * 1024;
     {
@@ -620,4 +617,189 @@ TEST(Persist, ArrayOfBlocksDumpVerification)
     EXPECT_NE(dump.find("Block file"), std::string::npos);
     // The anchor magic bytes (0x41435443 = 'CTCA') should appear in the hex dump
     EXPECT_NE(dump.find("43 54 43 41"), std::string::npos);
+}
+
+// Block compaction: write data across multiple blocks, delete most keys,
+// snapshot repeatedly, and verify data integrity is preserved throughout.
+TEST(Persist, BlockCompactionSparseBlockDeleted)
+{
+    crowtree_test::TempDir tmp("blkcmp_");
+    ASSERT_FALSE(tmp.path.empty());
+    std::string dir = tmp.path;
+
+    constexpr uint64_t blk = 8 * 1024; // 8 KiB blocks — small to force multi-block
+    std::map<std::string, std::string> oracle;
+
+    // Phase 1: write enough data to fill 3+ blocks
+    {
+        std::unique_ptr<BlockPageStore> store;
+        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, blk, 1, &store).ok());
+        Options opt;
+        opt.page_store       = store.get();
+        opt.leaf_split_bytes = 256;
+        Crowtree t(opt);
+        uint64_t slot = 0;
+        for (int i = 0; i < 300; ++i) {
+            ++slot;
+            std::string k = make_key(i);
+            std::string v = "val" + std::to_string(i);
+            ASSERT_TRUE(t.apply(slot, put_one(k, v)).ok());
+            oracle[k] = v;
+            if (i % 10 == 0) {
+                ASSERT_TRUE(t.flush().ok());
+            }
+        }
+        ASSERT_TRUE(t.flush().ok());
+        ASSERT_TRUE(t.snapshot().ok());
+        EXPECT_GE(store->num_extents(), 3U);
+    }
+
+    // Phase 2: reopen, delete most keys, snapshot multiple times to drain blocks
+    std::set<std::string> kept_keys;
+    for (int i = 0; i < 300; i += 10) {
+        kept_keys.insert(make_key(i));
+    }
+
+    {
+        std::unique_ptr<BlockPageStore> store;
+        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, blk, 1, &store).ok());
+        Options opt;
+        opt.page_store       = store.get();
+        opt.leaf_split_bytes = 256;
+        std::unique_ptr<Crowtree> t;
+        ASSERT_TRUE(Crowtree::open(opt, &t).ok());
+
+        // Delete 90% of keys
+        uint64_t slot = 1000;
+        for (int i = 0; i < 300; ++i) {
+            if (i % 10 != 0) {
+                ++slot;
+                ASSERT_TRUE(t->apply(slot, del_one(make_key(i))).ok());
+            }
+        }
+        ASSERT_TRUE(t->flush().ok());
+        // Snapshot multiple times — each snapshot relocates dirty pages
+        // away from sparse blocks and eventually drains them.
+        for (int snap = 0; snap < 4; ++snap) {
+            ASSERT_TRUE(t->snapshot().ok()) << "snapshot " << snap << " failed";
+        }
+
+        // Verify remaining data is intact
+        for (const auto &k : kept_keys) {
+            std::string v;
+            uint64_t    s;
+            EXPECT_TRUE(t->get(Slice(k), &s, &v)) << "missing " << k;
+            EXPECT_EQ(v, oracle[k]);
+        }
+    }
+
+    // Phase 3: reopen and verify data integrity
+    {
+        std::unique_ptr<BlockPageStore> store;
+        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, blk, 1, &store).ok());
+        Options opt;
+        opt.page_store = store.get();
+        std::unique_ptr<Crowtree> t;
+        ASSERT_TRUE(Crowtree::open(opt, &t).ok());
+
+        for (const auto &k : kept_keys) {
+            std::string v;
+            uint64_t    s;
+            EXPECT_TRUE(t->get(Slice(k), &s, &v)) << "missing " << k << " after reopen";
+            EXPECT_EQ(v, oracle[k]);
+        }
+    }
+}
+
+// Block compaction: verify gap filtering — after deleting keys and snapshotting,
+// new writes should NOT land in sparse blocks' gap space.
+TEST(Persist, BlockCompactionGapFiltering)
+{
+    crowtree_test::TempDir tmp("blkgap_");
+    ASSERT_FALSE(tmp.path.empty());
+    std::string dir = tmp.path;
+
+    constexpr uint64_t blk = 8 * 1024;
+
+    // Write data, snapshot, then delete most and snapshot again
+    {
+        std::unique_ptr<BlockPageStore> store;
+        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, blk, 1, &store).ok());
+        Options opt;
+        opt.page_store       = store.get();
+        opt.leaf_split_bytes = 256;
+        Crowtree t(opt);
+
+        // Fill a few blocks
+        uint64_t slot = 0;
+        for (int i = 0; i < 200; ++i) {
+            ++slot;
+            ASSERT_TRUE(t.apply(slot, put_one(make_key(i), "v" + std::to_string(i))).ok());
+        }
+        ASSERT_TRUE(t.flush().ok());
+        ASSERT_TRUE(t.snapshot().ok());
+        size_t extents_before = store->num_extents();
+        EXPECT_GE(extents_before, 2U);
+
+        // Delete most keys to create sparse blocks
+        for (int i = 0; i < 200; ++i) {
+            if (i % 20 != 0) {
+                ++slot;
+                ASSERT_TRUE(t.apply(slot, del_one(make_key(i))).ok());
+            }
+        }
+        ASSERT_TRUE(t.flush().ok());
+        t.collect_garbage();
+        ASSERT_TRUE(t.snapshot().ok());
+
+        // Write new keys — they should go to dense blocks or new blocks,
+        // not reuse gaps in sparse blocks
+        for (int i = 0; i < 50; ++i) {
+            ++slot;
+            ASSERT_TRUE(t.apply(slot, put_one("new" + std::to_string(i), "nv" + std::to_string(i))).ok());
+        }
+        ASSERT_TRUE(t.flush().ok());
+        ASSERT_TRUE(t.snapshot().ok());
+
+        // Verify data integrity for surviving keys
+        for (int i = 0; i < 200; i += 20) {
+            std::string v;
+            uint64_t    s;
+            EXPECT_TRUE(t.get(Slice(make_key(i)), &s, &v)) << "missing key" << i;
+            EXPECT_EQ(v, "v" + std::to_string(i));
+        }
+        for (int i = 0; i < 50; ++i) {
+            std::string v;
+            uint64_t    s;
+            EXPECT_TRUE(t.get(Slice("new" + std::to_string(i)), &s, &v));
+            EXPECT_EQ(v, "nv" + std::to_string(i));
+        }
+    }
+}
+
+// Block compaction: single-medium (open_mem) should be unaffected — no
+// block_size, no gap filtering, no block deletion.
+TEST(Persist, BlockCompactionSingleMediumUnaffected)
+{
+    std::unique_ptr<BlockPageStore> store;
+    ASSERT_TRUE(BlockPageStore::open_mem(1, &store).ok());
+    EXPECT_EQ(store->block_size(), 0U); // single-medium: no block concept
+
+    Options opt;
+    opt.page_store       = store.get();
+    opt.leaf_split_bytes = 256;
+    Crowtree t(opt);
+
+    ASSERT_TRUE(t.apply(1, put_one("a", "1")).ok());
+    ASSERT_TRUE(t.apply(2, put_one("b", "2")).ok());
+    ASSERT_TRUE(t.flush().ok());
+    ASSERT_TRUE(t.snapshot().ok());
+
+    // Verify data
+    std::string v;
+    uint64_t    s;
+    EXPECT_TRUE(t.get(Slice("a"), &s, &v));
+    EXPECT_EQ(v, "1");
+    EXPECT_TRUE(t.get(Slice("b"), &s, &v));
+    EXPECT_EQ(v, "2");
 }
