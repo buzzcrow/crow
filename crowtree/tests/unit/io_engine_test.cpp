@@ -5,15 +5,15 @@
 #include "crowtree/io_engine.h"
 #include "test_tmp.h"
 
+#include <fcntl.h>
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <array>
 #include <cstdio>
 #include <cstring>
-#include <fcntl.h>
 #include <filesystem>
 #include <string>
-#include <unistd.h>
 #include <vector>
 
 using namespace crowtree;
@@ -48,7 +48,7 @@ TEST(IoEngine, DirectReadRoundTrip)
     engine.submit_write(fd, in.data(), in.size(), 0, [&write_st](Status s) { write_st = s; });
     EXPECT_TRUE(write_st.ok()) << write_st.to_string();
 
-    Status               fsync_st;
+    Status fsync_st;
     engine.submit_fsync(fd, [&fsync_st](Status s) { fsync_st = s; });
     EXPECT_TRUE(fsync_st.ok()) << fsync_st.to_string();
 

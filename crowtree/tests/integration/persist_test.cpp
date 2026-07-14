@@ -190,7 +190,7 @@ TEST(Persist, ClearWipesLiveTree)
     MemPageStore store(1);
     Options      opt;
     opt.page_store = &store;
-    Crowtree     t(opt);
+    Crowtree t(opt);
 
     for (int i = 0; i < 20; ++i) {
         ASSERT_TRUE(t.apply(i + 1, put_one(make_key(i), "v" + std::to_string(i))).ok());
@@ -533,7 +533,7 @@ TEST(Persist, ArrayOfBlocksSnapshotReopenRecover)
     ASSERT_FALSE(tmp.path.empty());
     std::string dir = tmp.path;
 
-    constexpr uint64_t blk = 8 * 1024; // 8 KiB blocks
+    constexpr uint64_t                 blk = 8 * 1024; // 8 KiB blocks
     std::map<std::string, std::string> oracle;
     {
         std::unique_ptr<BlockPageStore> store;
@@ -550,7 +550,8 @@ TEST(Persist, ArrayOfBlocksSnapshotReopenRecover)
             if ((rng() % 5) == 0) {
                 ASSERT_TRUE(t.apply(slot, del_one(k)).ok());
                 oracle.erase(k);
-            } else {
+            }
+            else {
                 std::string val = "v" + std::to_string(slot);
                 ASSERT_TRUE(t.apply(slot, put_one(k, val)).ok());
                 oracle[k] = val;
@@ -602,7 +603,7 @@ TEST(Persist, ArrayOfBlocksDumpVerification)
         std::unique_ptr<BlockPageStore> store;
         ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, blk, 1, &store).ok());
         Options opt;
-        opt.page_store = store.get();
+        opt.page_store       = store.get();
         opt.leaf_split_bytes = 256;
         Crowtree t(opt);
         ASSERT_TRUE(t.apply(1, put_one("a", "1")).ok());
@@ -627,7 +628,7 @@ TEST(Persist, BlockCompactionSparseBlockDeleted)
     ASSERT_FALSE(tmp.path.empty());
     std::string dir = tmp.path;
 
-    constexpr uint64_t blk = 8 * 1024; // 8 KiB blocks — small to force multi-block
+    constexpr uint64_t                 blk = 8 * 1024; // 8 KiB blocks — small to force multi-block
     std::map<std::string, std::string> oracle;
 
     // Phase 1: write enough data to fill 3+ blocks

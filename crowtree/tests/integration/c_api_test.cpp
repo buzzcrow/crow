@@ -153,20 +153,19 @@ TEST(CApi, ApplyBatchAtomicMultiKey)
 // writes) after the refactor.
 TEST(CApi, OversizedKeyRejectedThroughEncodedPath)
 {
-    ct_options opt   = {};
-    opt.frame_bytes  = 4096; // default limit = frame_bytes / 2 = 2048
-    ct_tree     *t   = nullptr;
+    ct_options opt  = {};
+    opt.frame_bytes = 4096; // default limit = frame_bytes / 2 = 2048
+    ct_tree *t      = nullptr;
     ASSERT_EQ(ct_open(&opt, &t), 0);
 
     std::string big_key(3000, 'x');
     std::string ok_key = "ok";
 
     EXPECT_EQ(ct_apply_put(t, 1, reinterpret_cast<const uint8_t *>(big_key.data()), big_key.size(),
-                          reinterpret_cast<const uint8_t *>("v"), 1),
-             static_cast<ct_status>(-2)); // kInvalidArgument
-    EXPECT_EQ(
-        ct_apply_delete(t, 1, reinterpret_cast<const uint8_t *>(big_key.data()), big_key.size()),
-        static_cast<ct_status>(-2));
+                           reinterpret_cast<const uint8_t *>("v"), 1),
+              static_cast<ct_status>(-2)); // kInvalidArgument
+    EXPECT_EQ(ct_apply_delete(t, 1, reinterpret_cast<const uint8_t *>(big_key.data()), big_key.size()),
+              static_cast<ct_status>(-2));
 
     auto pack_record = [](std::string *o, uint8_t kind, const std::string &k, const std::string &v) {
         o->push_back(static_cast<char>(kind));
@@ -180,10 +179,10 @@ TEST(CApi, OversizedKeyRejectedThroughEncodedPath)
         o->append(v);
     };
     std::string packed;
-    pack_record(&packed, 0, ok_key, "v1");    // fine on its own
-    pack_record(&packed, 0, big_key, "v2");   // poisons the whole batch
+    pack_record(&packed, 0, ok_key, "v1");  // fine on its own
+    pack_record(&packed, 0, big_key, "v2"); // poisons the whole batch
     EXPECT_EQ(ct_apply_batch(t, 1, reinterpret_cast<const uint8_t *>(packed.data()), packed.size(), 2),
-             static_cast<ct_status>(-2));
+              static_cast<ct_status>(-2));
 
     // All-or-nothing: the batch's *other*, otherwise-valid key must not have
     // landed either.

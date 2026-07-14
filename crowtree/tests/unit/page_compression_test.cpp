@@ -105,7 +105,7 @@ TEST(PageCompression, CrcTamperRejected)
 
 TEST(PageCompression, ShortBlobRejected)
 {
-    std::array<uint8_t, 4>              b = {0};
-    std::vector<uint8_t> back(kPb);
+    std::array<uint8_t, 4> b = {0};
+    std::vector<uint8_t>   back(kPb);
     EXPECT_EQ(decode_durable_page(b.data(), b.size(), back.data(), kPb).code(), Code::kInvalidArgument);
 }

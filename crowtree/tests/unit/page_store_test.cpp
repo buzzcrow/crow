@@ -7,13 +7,13 @@
 #include "test_tmp.h"
 
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
-#include <unistd.h>
 #include <vector>
 
 using namespace crowtree;
@@ -70,7 +70,7 @@ TEST(PageStore, MemOverwrite)
 
 TEST(PageStore, FileRoundTripAcrossReopen)
 {
-    std::string          dir = temp_path();
+    std::string dir = temp_path();
     std::remove(dir.c_str());
     ASSERT_EQ(::mkdir(dir.c_str(), 0755), 0);
     std::vector<uint8_t> in{10, 20, 30, 40};
@@ -341,7 +341,7 @@ std::string temp_dir()
 
 TEST(BlockArray, WriteWithinFirstBlock)
 {
-    std::string dir = temp_dir();
+    std::string                     dir = temp_dir();
     std::unique_ptr<BlockPageStore> s;
     ASSERT_TRUE(BlockPageStore::open_blocks(dir, 1, 0, 4096, 1, &s).ok());
     EXPECT_EQ(s->num_extents(), 1U);
@@ -357,9 +357,9 @@ TEST(BlockArray, WriteWithinFirstBlock)
 
 TEST(BlockArray, WriteExceedsOneBlockCreatesSecond)
 {
-    std::string dir = temp_dir();
+    std::string                     dir = temp_dir();
     std::unique_ptr<BlockPageStore> s;
-    constexpr uint64_t blk = 4096;
+    constexpr uint64_t              blk = 4096;
     ASSERT_TRUE(BlockPageStore::open_blocks(dir, 1, 0, blk, 1, &s).ok());
 
     // Write 100 bytes starting at offset blk-50 → spans into block 1
@@ -374,9 +374,9 @@ TEST(BlockArray, WriteExceedsOneBlockCreatesSecond)
 
 TEST(BlockArray, Write20MiBWith8MiBBlocks)
 {
-    std::string dir = temp_dir();
+    std::string                     dir = temp_dir();
     std::unique_ptr<BlockPageStore> s;
-    constexpr uint64_t blk = 8 * 1024 * 1024;
+    constexpr uint64_t              blk = 8 * 1024 * 1024;
     ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, blk, 1, &s).ok());
 
     // Write 20 MiB of data
@@ -391,8 +391,8 @@ TEST(BlockArray, Write20MiBWith8MiBBlocks)
 
 TEST(BlockArray, ReopenAfterWrites)
 {
-    std::string dir = temp_dir();
-    constexpr uint64_t blk = 4096;
+    std::string          dir = temp_dir();
+    constexpr uint64_t   blk = 4096;
     std::vector<uint8_t> in(100, 0x77);
 
     {
@@ -418,7 +418,7 @@ TEST(BlockArray, ReopenAfterWrites)
 
 TEST(BlockArray, DumpUtility)
 {
-    std::string dir = temp_dir();
+    std::string                     dir = temp_dir();
     std::unique_ptr<BlockPageStore> s;
     ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, 4096, 1, &s).ok());
 

@@ -95,7 +95,7 @@ TEST(BufferPool, PinnedFramesAreNotEvicted)
     BufferPool   pool(static_cast<size_t>(2) * kPb, kPb, &store); // 2 frames
     FrameRef     a;
     ASSERT_TRUE(pool.pin_new(0, addr(0), &a).ok());
-    FrameRef     b;
+    FrameRef b;
     ASSERT_TRUE(pool.pin_new(1, addr(1), &b).ok());
     FrameRef c;
     Status   s = pool.pin_new(2, addr(2), &c);
@@ -168,7 +168,7 @@ TEST(BufferPool, AcquireFrameFailsWhenFull)
     uint32_t   i1 = 0;
     uint32_t   i2 = 0;
     uint32_t   i3 = 0;
-    uint8_t   *b = nullptr;
+    uint8_t   *b  = nullptr;
     ASSERT_TRUE(pool.acquire_frame(&i1, &b).ok());
     ASSERT_TRUE(pool.acquire_frame(&i2, &b).ok());
     // Both frames pinned-resident: a third acquire must fail (caller falls back
