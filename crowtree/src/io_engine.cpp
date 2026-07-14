@@ -3,9 +3,10 @@
 
 #include "crowtree/io_engine.h"
 
+#include <unistd.h>
+
 #include <cerrno>
 #include <cstring>
-#include <unistd.h>
 
 namespace crowtree
 {
@@ -33,7 +34,8 @@ static Status do_pwrite(int fd, const void *buf, size_t len, off_t offset)
 {
     size_t done = 0;
     while (done < len) {
-        ssize_t n = ::pwrite(fd, static_cast<const uint8_t *>(buf) + done, len - done, offset + static_cast<off_t>(done));
+        ssize_t n =
+            ::pwrite(fd, static_cast<const uint8_t *>(buf) + done, len - done, offset + static_cast<off_t>(done));
         if (n < 0) {
             if (errno == EINTR) {
                 continue;
@@ -59,14 +61,12 @@ static Status do_fsync(int fd)
     return Status::Ok();
 }
 
-void DirectIoEngine::submit_read(int fd, void *buf, size_t len, off_t offset,
-                                 std::function<void(Status)> cb)
+void DirectIoEngine::submit_read(int fd, void *buf, size_t len, off_t offset, std::function<void(Status)> cb)
 {
     cb(do_pread(fd, buf, len, offset));
 }
 
-void DirectIoEngine::submit_write(int fd, const void *buf, size_t len, off_t offset,
-                                  std::function<void(Status)> cb)
+void DirectIoEngine::submit_write(int fd, const void *buf, size_t len, off_t offset, std::function<void(Status)> cb)
 {
     cb(do_pwrite(fd, buf, len, offset));
 }

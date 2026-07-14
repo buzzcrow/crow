@@ -80,10 +80,10 @@ class TextPageStore : public PageStore
     // Decode a text file back to binary.
     Status decode_file(const std::string &filename, std::vector<uint8_t> *out) const;
 
-    std::string                         dir_;
-    std::vector<ManifestEntry>          entries_;
+    std::string                          dir_;
+    std::vector<ManifestEntry>           entries_;
     std::unordered_map<uint64_t, size_t> addr_index_; // addr → index in entries_
-    bool                                manifest_dirty_ = false;
+    bool                                 manifest_dirty_ = false;
 };
 
 } // namespace crowtree

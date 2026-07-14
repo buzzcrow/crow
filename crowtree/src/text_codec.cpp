@@ -35,12 +35,15 @@ bool from_hex(const std::string &hex, std::vector<uint8_t> *out)
     out->clear();
     out->reserve(hex.size() / 2);
     for (size_t i = 0; i < hex.size(); i += 2) {
-        auto hi = hex[i];
-        auto lo = hex[i + 1];
+        auto hi  = hex[i];
+        auto lo  = hex[i + 1];
         auto val = [](char c) -> int {
-            if (c >= '0' && c <= '9') return c - '0';
-            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
-            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            if (c >= '0' && c <= '9')
+                return c - '0';
+            if (c >= 'a' && c <= 'f')
+                return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F')
+                return c - 'A' + 10;
             return -1;
         };
         int h = val(hi);
@@ -56,17 +59,17 @@ bool from_hex(const std::string &hex, std::vector<uint8_t> *out)
 // Read a little-endian u32 from a byte buffer.
 uint32_t get_u32(const uint8_t *p)
 {
-    return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
-           (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+    return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) | (static_cast<uint32_t>(p[2]) << 16) |
+           (static_cast<uint32_t>(p[3]) << 24);
 }
 
 // Read a little-endian u64 from a byte buffer.
 uint64_t get_u64(const uint8_t *p)
 {
-    return static_cast<uint64_t>(p[0]) | (static_cast<uint64_t>(p[1]) << 8) |
-           (static_cast<uint64_t>(p[2]) << 16) | (static_cast<uint64_t>(p[3]) << 24) |
-           (static_cast<uint64_t>(p[4]) << 32) | (static_cast<uint64_t>(p[5]) << 40) |
-           (static_cast<uint64_t>(p[6]) << 48) | (static_cast<uint64_t>(p[7]) << 56);
+    return static_cast<uint64_t>(p[0]) | (static_cast<uint64_t>(p[1]) << 8) | (static_cast<uint64_t>(p[2]) << 16) |
+           (static_cast<uint64_t>(p[3]) << 24) | (static_cast<uint64_t>(p[4]) << 32) |
+           (static_cast<uint64_t>(p[5]) << 40) | (static_cast<uint64_t>(p[6]) << 48) |
+           (static_cast<uint64_t>(p[7]) << 56);
 }
 
 // Generic text codec: produce a header line with magic + type name, then a
@@ -174,8 +177,8 @@ std::string encode_segdir_text(const uint8_t *buf, size_t len)
     if (len < 12) {
         return encode_generic_text("SEGDIR", 0, buf, len);
     }
-    uint32_t magic    = get_u32(buf);
-    uint32_t count    = get_u32(buf + 4);
+    uint32_t magic = get_u32(buf);
+    uint32_t count = get_u32(buf + 4);
 
     std::ostringstream oss;
     oss << "CROW_CT_SEGDIR magic=0x" << to_hex(reinterpret_cast<const uint8_t *>(&magic), 4);

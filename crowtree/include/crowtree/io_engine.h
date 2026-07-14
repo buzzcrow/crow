@@ -21,9 +21,10 @@
 
 #include "crowtree/status.h"
 
+#include <sys/types.h> // off_t
+
 #include <cstddef>
 #include <functional>
-#include <sys/types.h> // off_t
 
 namespace crowtree
 {
@@ -35,13 +36,11 @@ class IoEngine
 
     // Submit an async read of `len` bytes at `offset` on file descriptor
     // `fd` into `buf`. `cb` fires exactly once with the outcome.
-    virtual void submit_read(int fd, void *buf, size_t len, off_t offset,
-                             std::function<void(Status)> cb) = 0;
+    virtual void submit_read(int fd, void *buf, size_t len, off_t offset, std::function<void(Status)> cb) = 0;
 
     // Submit an async write of `len` bytes at `offset` on file descriptor
     // `fd` from `buf`. `cb` fires exactly once with the outcome.
-    virtual void submit_write(int fd, const void *buf, size_t len, off_t offset,
-                              std::function<void(Status)> cb) = 0;
+    virtual void submit_write(int fd, const void *buf, size_t len, off_t offset, std::function<void(Status)> cb) = 0;
 
     // Submit an async fsync on file descriptor `fd`. `cb` fires exactly
     // once with the outcome.
@@ -55,10 +54,8 @@ class DirectIoEngine : public IoEngine
   public:
     DirectIoEngine() = default;
 
-    void submit_read(int fd, void *buf, size_t len, off_t offset,
-                     std::function<void(Status)> cb) override;
-    void submit_write(int fd, const void *buf, size_t len, off_t offset,
-                      std::function<void(Status)> cb) override;
+    void submit_read(int fd, void *buf, size_t len, off_t offset, std::function<void(Status)> cb) override;
+    void submit_write(int fd, const void *buf, size_t len, off_t offset, std::function<void(Status)> cb) override;
     void submit_fsync(int fd, std::function<void(Status)> cb) override;
 };
 

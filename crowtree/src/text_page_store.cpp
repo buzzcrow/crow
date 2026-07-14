@@ -31,8 +31,8 @@ constexpr uint32_t kSegDirMagic = 0x44535443; // 'CTSD' little-endian
 
 uint32_t get_u32(const uint8_t *p)
 {
-    return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
-           (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+    return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) | (static_cast<uint32_t>(p[2]) << 16) |
+           (static_cast<uint32_t>(p[3]) << 24);
 }
 
 bool dir_exists(const std::string &path)
@@ -87,8 +87,8 @@ Status TextPageStore::open(const std::string &path, uint32_t store_id, uint32_t 
             return s;
         }
     }
-    auto *store = new TextPageStore(dir);
-    Status s    = store->load_manifest();
+    auto  *store = new TextPageStore(dir);
+    Status s     = store->load_manifest();
     if (!s.ok()) {
         delete store;
         return s;
@@ -101,7 +101,7 @@ Status TextPageStore::load_manifest()
 {
     std::string manifest_path = dir_ + "/manifest.ck";
     std::string content;
-    Status       s = read_file(manifest_path, &content);
+    Status      s = read_file(manifest_path, &content);
     if (!s.ok()) {
         // No manifest = fresh store
         return Status::Ok();
@@ -113,15 +113,17 @@ Status TextPageStore::load_manifest()
             continue;
         }
         // Format: addr=N len=N file=filename
-        ManifestEntry entry;
+        ManifestEntry      entry;
         std::istringstream liss(line);
         std::string        tok;
         while (liss >> tok) {
             if (tok.substr(0, 5) == "addr=") {
                 entry.addr = std::stoull(tok.substr(5));
-            } else if (tok.substr(0, 4) == "len=") {
+            }
+            else if (tok.substr(0, 4) == "len=") {
                 entry.len = std::stoull(tok.substr(4));
-            } else if (tok.substr(0, 5) == "file=") {
+            }
+            else if (tok.substr(0, 5) == "file=") {
                 entry.filename = tok.substr(5);
             }
         }
@@ -195,7 +197,7 @@ std::string TextPageStore::encode_blob(const uint8_t *buf, size_t len) const
 Status TextPageStore::decode_file(const std::string &filename, std::vector<uint8_t> *out) const
 {
     std::string content;
-    Status       s = read_file(dir_ + "/" + filename, &content);
+    Status      s = read_file(dir_ + "/" + filename, &content);
     if (!s.ok()) {
         return s;
     }
@@ -222,7 +224,7 @@ Status TextPageStore::write_at(uint64_t off, const uint8_t *buf, size_t len)
 
     std::string filename = filename_for(off, buf, len);
     std::string text     = encode_blob(buf, len);
-    Status       s        = write_file(dir_ + "/" + filename, text);
+    Status      s        = write_file(dir_ + "/" + filename, text);
     if (!s.ok()) {
         return s;
     }
@@ -232,7 +234,8 @@ Status TextPageStore::write_at(uint64_t off, const uint8_t *buf, size_t len)
     if (it != addr_index_.end()) {
         entries_[it->second].len      = len;
         entries_[it->second].filename = filename;
-    } else {
+    }
+    else {
         addr_index_[off] = entries_.size();
         entries_.push_back(ManifestEntry{.addr = off, .len = len, .filename = filename});
     }
@@ -251,7 +254,7 @@ Status TextPageStore::read_at(uint64_t off, uint8_t *buf, size_t len) const
         return Status::io_error("TextPageStore: no file at addr " + std::to_string(off));
     }
 
-    const auto &entry = entries_[it->second];
+    const auto          &entry = entries_[it->second];
     std::vector<uint8_t> decoded;
     Status               s = decode_file(entry.filename, &decoded);
     if (!s.ok()) {

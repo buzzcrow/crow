@@ -214,16 +214,22 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
     // Map ct_sync_mode → SyncMode
     SyncMode sm = SyncMode::kFull;
     switch (opt->sync_mode) {
-    case CT_SYNC_SKIP:  sm = SyncMode::kSkip; break;
-    case CT_SYNC_BATCH: sm = SyncMode::kBatch; break;
-    default:            sm = SyncMode::kFull; break;
+    case CT_SYNC_SKIP:
+        sm = SyncMode::kSkip;
+        break;
+    case CT_SYNC_BATCH:
+        sm = SyncMode::kBatch;
+        break;
+    default:
+        sm = SyncMode::kFull;
+        break;
     }
 
     const bool durable = opt->path != nullptr && opt->path[0] != '\0';
     if (!durable) {
         // In-memory: BlockPageStore::open_mem with IU=1
         std::unique_ptr<BlockPageStore> bs;
-        Status s = BlockPageStore::open_mem(opt->iu_size == 0 ? 1 : opt->iu_size, &bs);
+        Status                          s = BlockPageStore::open_mem(opt->iu_size == 0 ? 1 : opt->iu_size, &bs);
         if (!s.ok()) {
             return to_status(s);
         }
@@ -239,10 +245,10 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
     }
     else if (opt->backend == CT_BACKEND_TEXT) {
         // Text debug backend: human-readable .ck files
-        uint32_t store_id     = opt->store_id;
-        uint32_t partition_id = opt->partition_id;
+        uint32_t                       store_id     = opt->store_id;
+        uint32_t                       partition_id = opt->partition_id;
         std::unique_ptr<TextPageStore> ts;
-        Status s = TextPageStore::open(opt->path, store_id, partition_id, &ts);
+        Status                         s = TextPageStore::open(opt->path, store_id, partition_id, &ts);
         if (!s.ok()) {
             return to_status(s);
         }
@@ -258,11 +264,10 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
     }
     else {
         // CT_BACKEND_BLOCK: array-of-blocks BlockPageStore
-        uint64_t block_size = opt->block_size == 0 ? (64 * 1024 * 1024) : opt->block_size;
-        uint32_t iu         = opt->iu_size == 0 ? 4096 : opt->iu_size;
+        uint64_t                        block_size = opt->block_size == 0 ? (64 * 1024 * 1024) : opt->block_size;
+        uint32_t                        iu         = opt->iu_size == 0 ? 4096 : opt->iu_size;
         std::unique_ptr<BlockPageStore> bs;
-        Status s = BlockPageStore::open_blocks(opt->path, opt->store_id, opt->partition_id,
-                                               block_size, iu, &bs);
+        Status s = BlockPageStore::open_blocks(opt->path, opt->store_id, opt->partition_id, block_size, iu, &bs);
         if (!s.ok()) {
             return to_status(s);
         }
