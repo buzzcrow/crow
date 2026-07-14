@@ -931,3 +931,142 @@ pub async fn http_node_openapi_proxy(
 
     Ok(Json(value))
 }
+
+/// `POST /internal/reset`. Tear down the entire cluster in dependency
+/// order: groups → stores → server processes → nodes → racks, then
+/// clear workspace dirs and caches. Intended for E2E test fixtures;
+/// never exposed in the public API surface.
+///
+/// # Panics
+/// Panics if the `RwLock` or `Mutex` is poisoned.
+///
+/// # Errors
+/// Returns an error if workspace cleanup or config persistence fails.
+pub async fn http_internal_reset(
+    State(state): State<AppState>,
+) -> Result<Json<ResetResult>, (StatusCode, Json<ErrorBody>)> {
+    use crowkv_console_shared::lifecycle;
+
+    // 1. List all stores from the monitor cache.
+    let stores: Vec<u64> = {
+        let snap = state.monitor_cache.snapshot().await;
+        let mut ids: Vec<u64> = snap.values().flat_map(|rec| rec.stores.keys().copied()).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    };
+
+    let mut stopped: Vec<String> = Vec::new();
+
+    // 2. For each store: list & remove all groups, then remove the store.
+    for sid in &stores {
+        // List groups for this store.
+        if let Some(view) = state.monitor_cache.resolve_store(*sid).await {
+            let group_ids: Vec<u64> = view.groups.iter().map(|g| g.group_id).collect();
+            for gid in group_ids {
+                // Remove group: RPC to each node + config cleanup.
+                if let Some(gv) = state.monitor_cache.resolve_group(*sid, gid).await {
+                    let node_ids: Vec<String> = gv.replicas.iter().map(|r| r.node_id.clone()).collect();
+                    for nid in &node_ids {
+                        if let Ok(url) = crate::mgmt::mgmt_url_for_node(&state, nid) {
+                            if let Ok(client) = crate::mgmt::build_server_client(url) {
+                                let _ = client.remove_group(*sid, gid).await;
+                            }
+                        }
+                    }
+                    for nid in &node_ids {
+                        crate::mgmt::refresh_node_cache(&state, nid).await;
+                    }
+                }
+                {
+                    let mut cfg = state.config.write().unwrap();
+                    cfg.remove_group_record(*sid, gid);
+                }
+            }
+        }
+
+        // Remove the store from each node.
+        if let Some(view) = state.monitor_cache.resolve_store(*sid).await {
+            for nid in &view.nodes {
+                if let Ok(url) = crate::mgmt::mgmt_url_for_node(&state, nid) {
+                    if let Ok(client) = crate::mgmt::build_server_client(url) {
+                        let _ = client.remove_store(*sid).await;
+                    }
+                }
+            }
+            for nid in &view.nodes {
+                crate::mgmt::refresh_node_cache(&state, nid).await;
+            }
+        }
+        {
+            let mut cfg = state.config.write().unwrap();
+            cfg.remove_store_record(*sid);
+        }
+    }
+
+    // 3. List all nodes, stop their servers, then remove them.
+    let node_ids: Vec<String> = {
+        let cfg = state.config.read().unwrap();
+        cfg.nodes.iter().map(|n| n.id.clone()).collect()
+    };
+
+    for nid in &node_ids {
+        // Stop the server process if a PID is tracked.
+        if let Some(pid) = state.runtime_pid(nid) {
+            let ssh = state
+                .config
+                .read()
+                .unwrap()
+                .node(nid)
+                .is_some_and(crowkv_console_shared::config::NodeEntry::ssh_enabled);
+            let sent = if ssh {
+                false
+            } else {
+                matches!(
+                    tokio::task::spawn_blocking(move || lifecycle::stop_pid(pid)).await,
+                    Ok(Ok(true))
+                )
+            };
+            if sent {
+                stopped.push(nid.clone());
+            }
+            state.clear_runtime_pid(nid);
+        }
+
+        // Remove the server entry + purge topology from config.
+        {
+            let mut cfg = state.config.write().unwrap();
+            let _ = cfg.remove_server_for_node(nid);
+            cfg.purge_node_topology(nid);
+            let _ = cfg.remove_node(nid);
+        }
+
+        state.monitor_cache.drop_node(nid).await;
+    }
+
+    // 4. Remove all racks.
+    let rack_ids: Vec<String> = {
+        let cfg = state.config.read().unwrap();
+        cfg.racks.iter().map(|r| r.id.clone()).collect()
+    };
+    {
+        let mut cfg = state.config.write().unwrap();
+        for rid in &rack_ids {
+            let _ = cfg.remove_rack(rid);
+        }
+    }
+
+    // 5. Clear caches and workspace directories.
+    state.openapi_cache.lock().unwrap().clear();
+    state
+        .clear_workspaces()
+        .map_err(|e| err_500(format!("clear workspaces: {e}")))?;
+    state.persist().map_err(map_persist_err)?;
+
+    Ok(Json(ResetResult { stopped }))
+}
+
+#[derive(Serialize)]
+pub struct ResetResult {
+    pub stopped: Vec<String>,
+}

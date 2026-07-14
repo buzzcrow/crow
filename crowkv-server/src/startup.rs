@@ -48,13 +48,16 @@ pub fn store_wal_root(wal_root: &Path, store_id: u64) -> PathBuf {
     wal_root.join(format!("store{store_id}"))
 }
 
-/// Durable per-group crowtree file path: `{data_root}/store{store_id}/group{group_id}.ctdb`.
-/// Only used when `--kv-engine crowtree` is selected.
+/// Durable per-group crowtree directory path: `{data_root}/store{store_id}/group{group_id}`.
+/// Only used when `--kv-engine crowtree` is selected. Both `TextPageStore` and
+/// `BlockPageStore` expect a directory path (`TextPageStore` creates a subdirectory
+/// `{path}/{store_id}-{partition_id}/`, `BlockPageStore` creates `.blk-*` files
+/// directly in `path`).
 #[must_use]
 pub fn store_crowtree_path(data_root: &Path, store_id: u64, group_id: u64) -> PathBuf {
     data_root
         .join(format!("store{store_id}"))
-        .join(format!("group{group_id}.ctdb"))
+        .join(format!("group{group_id}"))
 }
 
 /// Open (creating on first boot) the durable crowtree engine backing
@@ -75,9 +78,12 @@ async fn open_crowtree_engine(
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
+    tokio::fs::create_dir_all(&path).await?;
     let opt = CrowtreeOptions {
         path: Some(path.to_string_lossy().into_owned()),
         backend,
+        store_id: u32::try_from(store_id).unwrap_or(0),
+        partition_id: u32::try_from(group_id).unwrap_or(0),
         ..Default::default()
     };
     // `CrowtreeEngine::open` is a synchronous FFI call; called here inline

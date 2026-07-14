@@ -17,23 +17,34 @@
 <script src="swagger-ui-bundle.js" charset="UTF-8"></script>
 <script src="swagger-ui-standalone-preset.js" charset="UTF-8"></script>
 <script>
-// Resolve the upstream OpenAPI document via the console's proxy.
-// The OpenAPI spec is identical across all server instances, so
-// no server selection is needed. The proxy uses the first registered
-// server from the console's configuration.
+// Resolve the upstream OpenAPI document via the console's per-node proxy.
+// The SwaggerPanel passes ?url=<encoded specUrl> which points at
+// /api/nodes/<nodeId>/openapi.json, and ?serverUrl=<mgmtUrl> so that
+// try-it-out requests route to the correct crowkv-server instance.
 function buildOpenApiUrl() {
-    return '/api/openapi.json';
+    const params = new URLSearchParams(window.location.search);
+    const url = params.get('url');
+    return url || '/api/openapi.json';
+}
+
+function buildServers() {
+    const params = new URLSearchParams(window.location.search);
+    const serverUrl = params.get('serverUrl');
+    return serverUrl ? [{ url: serverUrl }] : undefined;
 }
 
 window.onload = function () {
-    window.ui = SwaggerUIBundle({
+    const config = {
         url: buildOpenApiUrl(),
         dom_id: '#swagger-ui',
         deepLinking: true,
         presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
         plugins: [SwaggerUIBundle.plugins.DownloadUrl],
         layout: 'StandaloneLayout'
-    });
+    };
+    const servers = buildServers();
+    if (servers) config.servers = servers;
+    window.ui = SwaggerUIBundle(config);
 };
 </script>
 </body>

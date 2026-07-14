@@ -32,7 +32,7 @@ fn encode_put_payload(key: &[u8], value: &[u8]) -> Vec<u8> {
 /// actually still legal to call that (the `Ready` case).
 #[tokio::test]
 async fn engine_get_resolves_correctly_across_both_ready_and_pending() {
-    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    let tmp = tempfile::tempdir().expect("tempdir");
     let engine = CrowtreeEngine::open(&CrowtreeOptions {
         path: Some(tmp.path().to_string_lossy().into_owned()),
         ..Default::default()

@@ -156,3 +156,12 @@ export async function createStore(baseURL: string, storeId: number, groupId: num
     await api.dispose();
   }
 }
+
+export async function resetAll(baseURL: string) {
+  const api = await apiContext(baseURL);
+  try {
+    await api.post('/internal/reset');
+  } finally {
+    await api.dispose();
+  }
+}

@@ -9,6 +9,7 @@
 // (fast path, miss-after-eviction, abandon-before-completion), plus a
 // dedicated equivalence check against ct_scan's own packed output.
 #include "crowtree/c_api.h"
+#include "test_tmp.h"
 
 #include <gtest/gtest.h>
 #include <unistd.h>
@@ -61,9 +62,9 @@ ct_status poll_scan_until_done(ct_future *f, int32_t *out_truncated, uint64_t *o
 std::map<std::string, std::string> unpack_entries(const ct_buf &buf, uint64_t count)
 {
     std::map<std::string, std::string> out;
-    const auto                        *p   = reinterpret_cast<const uint8_t *>(buf.data);
-    size_t                              pos = 0;
-    auto                                get_u32 = [&]() {
+    const auto                        *p       = reinterpret_cast<const uint8_t *>(buf.data);
+    size_t                             pos     = 0;
+    auto                               get_u32 = [&]() {
         uint32_t v = 0;
         for (int i = 0; i < 4; ++i) {
             v |= static_cast<uint32_t>(p[pos + i]) << (8 * i);
@@ -80,37 +81,17 @@ std::map<std::string, std::string> unpack_entries(const ct_buf &buf, uint64_t co
         return v;
     };
     for (uint64_t i = 0; i < count; ++i) {
-        uint32_t klen = get_u32();
+        uint32_t    klen = get_u32();
         std::string key(reinterpret_cast<const char *>(p + pos), klen);
         pos += klen;
         (void)get_u64(); // slot, unused by these tests
-        uint32_t vlen = get_u32();
+        uint32_t    vlen = get_u32();
         std::string val(reinterpret_cast<const char *>(p + pos), vlen);
         pos += vlen;
         out[key] = val;
     }
     return out;
 }
-
-struct TempPath
-{
-    std::string path;
-
-    TempPath()
-    {
-        std::array<char, 32> tmpl{"/tmp/crowtree_ascan_XXXXXX"};
-        int                  fd = mkstemp(tmpl.data());
-        if (fd >= 0) {
-            close(fd);
-        }
-        path = tmpl.data();
-    }
-
-    ~TempPath()
-    {
-        std::remove(path.c_str());
-    }
-};
 
 } // namespace
 
@@ -171,8 +152,8 @@ TEST(AsyncScan, MatchesSyncScanOutputIncludingTruncation)
 
     ct_future *f = ct_scan_async(t, nullptr, 0, 12);
     ASSERT_NE(f, nullptr);
-    int32_t  async_trunc = 0;
-    uint64_t async_count = 0;
+    int32_t  async_trunc   = 0;
+    uint64_t async_count   = 0;
     ct_buf   async_entries = {};
     ASSERT_EQ(poll_scan_until_done(f, &async_trunc, &async_count, &async_entries), 0);
     auto async_map = unpack_entries(async_entries, async_count);
@@ -193,12 +174,12 @@ TEST(AsyncScan, MatchesSyncScanOutputIncludingTruncation)
 // across however many cold leaves this range spans.
 TEST(AsyncScan, MissAfterEvictionCompletesViaReactor)
 {
-    TempPath   tmp;
-    ct_options opt  = {};
-    opt.path        = tmp.path.c_str();
-    opt.iu_size     = 4096;
-    opt.frame_bytes = 4096;
-    ct_tree *t      = nullptr;
+    crowtree_test::TempDir tmp;
+    ct_options             opt = {};
+    opt.path                   = tmp.path.c_str();
+    opt.iu_size                = 4096;
+    opt.frame_bytes            = 4096;
+    ct_tree *t                 = nullptr;
     ASSERT_EQ(ct_open(&opt, &t), 0);
 
     for (int i = 0; i < 40; ++i) {
@@ -214,10 +195,10 @@ TEST(AsyncScan, MissAfterEvictionCompletesViaReactor)
     ct_future *f = ct_scan_async(t, nullptr, 0, 0);
     ASSERT_NE(f, nullptr);
 
-    int32_t  truncated = 0;
-    uint64_t count     = 0;
-    ct_buf   entries   = {};
-    ct_status st       = poll_scan_until_done(f, &truncated, &count, &entries);
+    int32_t   truncated = 0;
+    uint64_t  count     = 0;
+    ct_buf    entries   = {};
+    ct_status st        = poll_scan_until_done(f, &truncated, &count, &entries);
     ASSERT_EQ(st, 0);
     EXPECT_EQ(truncated, 0);
     ASSERT_EQ(count, 40U);
@@ -235,12 +216,12 @@ TEST(AsyncScan, MissAfterEvictionCompletesViaReactor)
 // completed in the background by the time this runs (best-effort cancel).
 TEST(AsyncScan, FutureFreeBeforeCompletionDoesNotCrashOrLeak)
 {
-    TempPath   tmp;
-    ct_options opt  = {};
-    opt.path        = tmp.path.c_str();
-    opt.iu_size     = 4096;
-    opt.frame_bytes = 4096;
-    ct_tree *t      = nullptr;
+    crowtree_test::TempDir tmp;
+    ct_options             opt = {};
+    opt.path                   = tmp.path.c_str();
+    opt.iu_size                = 4096;
+    opt.frame_bytes            = 4096;
+    ct_tree *t                 = nullptr;
     ASSERT_EQ(ct_open(&opt, &t), 0);
 
     for (int i = 0; i < 40; ++i) {
@@ -268,9 +249,9 @@ TEST(AsyncScan, EmptyTreeResolvesImmediately)
 
     ct_future *f = ct_scan_async(t, nullptr, 0, 0);
     ASSERT_NE(f, nullptr);
-    int32_t   done      = 0;
-    uint64_t  count     = 0;
-    ct_status st        = ct_future_poll(f, &done, nullptr, &count, nullptr);
+    int32_t   done  = 0;
+    uint64_t  count = 0;
+    ct_status st    = ct_future_poll(f, &done, nullptr, &count, nullptr);
     ASSERT_EQ(st, 0);
     EXPECT_EQ(done, 1);
     EXPECT_EQ(count, 0U);

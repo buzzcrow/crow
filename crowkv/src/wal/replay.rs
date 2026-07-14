@@ -39,7 +39,7 @@ pub struct ReplayResult {
 ///
 /// ## Procedure
 ///
-/// 1. Discover `disk/groupN/seg-*.log`, order by `segment_id`.
+/// 1. Discover `disk/groupN/seg-*.ck`, order by `segment_id`.
 /// 2. Walk records, verify magic/version/CRC.
 /// 3. On corruption in the *last* (unsealed) segment: truncate at the bad offset.
 ///    On corruption in a *sealed* segment: abort with critical error.

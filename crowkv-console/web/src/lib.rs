@@ -145,6 +145,8 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/api/stores/:sid/groups/:gid/kv/scan", get(kv::http_kv_scan))
         .route("/api/stores/:sid/groups/:gid/kv/put", post(kv::http_kv_put))
         .route("/api/stores/:sid/groups/:gid/kv/delete", post(kv::http_kv_delete))
+        // ── Internal: E2E test reset ─────────────────────────────────
+        .route("/internal/reset", post(lifecycle::http_internal_reset))
         // React SPA fallback.
         .fallback(spa::spa_fallback)
         .with_state(state)

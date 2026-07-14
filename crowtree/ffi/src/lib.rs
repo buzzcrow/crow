@@ -91,6 +91,10 @@ mod sys {
         pub compression: u8,
         pub max_inline_value: u64,
         pub backend: u8,
+        pub block_size: u64,
+        pub store_id: u32,
+        pub partition_id: u32,
+        pub sync_mode: u8,
     }
 
     extern "C" {
@@ -251,14 +255,34 @@ pub enum Compression {
 /// Ignored when `Options::path` is `None` (in-memory).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PageStoreBackend {
-    /// Buffered file I/O (`FilePageStore`) -- the default.
+    /// TextPageStore -- debug backend with human-readable `.ck` files.
     #[default]
-    File,
-    /// Raw block device (`BlockPageStore`, `O_DIRECT`) for a real SSD/SCM
-    /// deployment target. `path` may be a block device node or a
-    /// pre-allocated regular file. No async twin yet -- `get_async`/
-    /// `flush_async`/`snapshot_async` fall back to synchronous completion.
+    Text,
+    /// BlockPageStore -- production array-of-blocks backend with
+    /// `O_DIRECT` for a real SSD/SCM deployment target.
     Block,
+}
+
+/// Durability barrier policy, mirrors `ct_sync_mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SyncMode {
+    /// fdatasync after every flush (default, production).
+    #[default]
+    Full,
+    /// No fsync (tests/CI only).
+    Skip,
+    /// fsync once per snapshot commit.
+    Batch,
+}
+
+impl SyncMode {
+    fn as_u8(self) -> u8 {
+        match self {
+            Self::Full => 0,
+            Self::Skip => 1,
+            Self::Batch => 2,
+        }
+    }
 }
 
 /// Engine configuration. `path = None` selects an in-memory store.
@@ -271,6 +295,14 @@ pub struct Options {
     pub compression_lz4: bool,
     pub max_inline_value: u64,
     pub backend: PageStoreBackend,
+    /// Block size for array-of-blocks mode (0 = default 64 MiB).
+    pub block_size: u64,
+    /// Store ID for block file naming.
+    pub store_id: u32,
+    /// Partition ID, maps to PxGroupId in CrowKV.
+    pub partition_id: u32,
+    /// Durability barrier policy.
+    pub sync_mode: SyncMode,
 }
 
 /// One record of a multi-key batch passed to [`Crowtree::apply_batch`].
@@ -382,9 +414,13 @@ impl Crowtree {
             compression: u8::from(opt.compression_lz4),
             max_inline_value: opt.max_inline_value,
             backend: match opt.backend {
-                PageStoreBackend::File => 0,
+                PageStoreBackend::Text => 0,
                 PageStoreBackend::Block => 1,
             },
+            block_size: opt.block_size,
+            store_id: opt.store_id,
+            partition_id: opt.partition_id,
+            sync_mode: opt.sync_mode.as_u8(),
         };
         let mut out: *mut sys::ct_tree = std::ptr::null_mut();
         check(unsafe { sys::ct_open(&copt, &mut out) })?;

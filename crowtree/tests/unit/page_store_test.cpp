@@ -1,15 +1,18 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-// PT1: PageStore backend tests (MemPageStore + FilePageStore + BlockPageStore).
+// PT1: PageStore backend tests (MemPageStore + BlockPageStore).
 #include "crowtree/block_page_store.h"
 #include "crowtree/page_store.h"
+#include "test_tmp.h"
 
 #include <gtest/gtest.h>
+#include <unistd.h>
 
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -19,12 +22,17 @@ namespace
 {
 std::string temp_path()
 {
-    std::array<char, 24> tmpl{"/tmp/crowtree_ps_XXXXXX"};
-    int                  fd = mkstemp(tmpl.data());
+    std::string root = crowtree_test::test_tmp_root();
+    std::filesystem::create_directories(root);
+    std::array<char, 128> tmpl{};
+    std::snprintf(tmpl.data(), tmpl.size(), "%s/ps_XXXXXX", root.c_str());
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    int fd = mkstemp(buf.data());
     if (fd >= 0) {
         close(fd);
     }
-    return tmpl.data();
+    return buf.data();
 }
 } // namespace
 
@@ -62,23 +70,24 @@ TEST(PageStore, MemOverwrite)
 
 TEST(PageStore, FileRoundTripAcrossReopen)
 {
-    std::string          path = temp_path();
+    std::string dir = temp_path();
+    std::remove(dir.c_str());
+    ASSERT_EQ(::mkdir(dir.c_str(), 0755), 0);
     std::vector<uint8_t> in{10, 20, 30, 40};
     {
-        std::unique_ptr<FilePageStore> s;
-        ASSERT_TRUE(FilePageStore::open(path, 4096, &s).ok());
+        std::unique_ptr<BlockPageStore> s;
+        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, 4096, 1, &s).ok());
         ASSERT_TRUE(s->write_at(8, in.data(), in.size()).ok());
         ASSERT_TRUE(s->sync().ok());
-        EXPECT_EQ(s->iu_size(), 4096U);
+        EXPECT_EQ(s->iu_size(), 1U);
     }
     {
-        std::unique_ptr<FilePageStore> s;
-        ASSERT_TRUE(FilePageStore::open(path, 4096, &s).ok());
+        std::unique_ptr<BlockPageStore> s;
+        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, 4096, 1, &s).ok());
         std::vector<uint8_t> out(in.size(), 0);
         ASSERT_TRUE(s->read_at(8, out.data(), out.size()).ok());
         EXPECT_EQ(in, out);
     }
-    std::remove(path.c_str());
 }
 
 // plan-tree #22: BlockPageStore (O_DIRECT). Backed by a regular
@@ -245,4 +254,180 @@ TEST(FaultyPageStore, FailSyncReturnsError)
     s.arm_sync_fault(1, FaultyPageStore::Fault::kFail);
     EXPECT_FALSE(s.sync().ok()); // sync #1: armed, fails
     EXPECT_TRUE(s.sync().ok());  // sync #2: one-shot, back to normal
+}
+
+// Task 2: BlockPageStore::open_mem() — MemoryMedium with IU=1.
+TEST(BlockPageStoreMem, RoundTrip)
+{
+    std::unique_ptr<BlockPageStore> s;
+    ASSERT_TRUE(BlockPageStore::open_mem(1, &s).ok());
+    EXPECT_EQ(s->iu_size(), 1U);
+    EXPECT_FALSE(s->is_block_device());
+
+    std::vector<uint8_t> in{1, 2, 3, 4, 5};
+    ASSERT_TRUE(s->write_at(100, in.data(), in.size()).ok());
+    std::vector<uint8_t> out(in.size(), 0);
+    ASSERT_TRUE(s->read_at(100, out.data(), out.size()).ok());
+    EXPECT_EQ(in, out);
+    EXPECT_GE(s->size(), 105U);
+}
+
+TEST(BlockPageStoreMem, Overwrite)
+{
+    std::unique_ptr<BlockPageStore> s;
+    ASSERT_TRUE(BlockPageStore::open_mem(1, &s).ok());
+
+    std::vector<uint8_t> a{9, 9, 9};
+    ASSERT_TRUE(s->write_at(0, a.data(), a.size()).ok());
+    std::vector<uint8_t> b{1, 2};
+    ASSERT_TRUE(s->write_at(0, b.data(), b.size()).ok());
+    std::vector<uint8_t> out(3, 0);
+    ASSERT_TRUE(s->read_at(0, out.data(), out.size()).ok());
+    EXPECT_EQ(out[0], 1);
+    EXPECT_EQ(out[1], 2);
+    EXPECT_EQ(out[2], 9);
+}
+
+TEST(BlockPageStoreMem, ReadPastEndFails)
+{
+    std::unique_ptr<BlockPageStore> s;
+    ASSERT_TRUE(BlockPageStore::open_mem(1, &s).ok());
+    std::array<uint8_t, 4> b{};
+    EXPECT_FALSE(s->read_at(0, b.data(), b.size()).ok());
+}
+
+TEST(BlockPageStoreMem, SyncIsNoOp)
+{
+    std::unique_ptr<BlockPageStore> s;
+    ASSERT_TRUE(BlockPageStore::open_mem(1, &s).ok());
+    EXPECT_TRUE(s->sync().ok());
+}
+
+TEST(BlockPageStoreMem, ContentVerification)
+{
+    std::unique_ptr<BlockPageStore> s;
+    ASSERT_TRUE(BlockPageStore::open_mem(1, &s).ok());
+
+    std::vector<uint8_t> in{0xAA, 0xBB, 0xCC};
+    ASSERT_TRUE(s->write_at(50, in.data(), in.size()).ok());
+
+    auto *mem = dynamic_cast<MemoryMedium *>(s->medium());
+    ASSERT_NE(mem, nullptr);
+    const auto &data = mem->data();
+    EXPECT_EQ(data.size(), 53U);
+    EXPECT_EQ(data[50], 0xAA);
+    EXPECT_EQ(data[51], 0xBB);
+    EXPECT_EQ(data[52], 0xCC);
+}
+
+// Task 3: Array-of-blocks tests
+namespace
+{
+std::string temp_dir()
+{
+    std::string root = crowtree_test::test_tmp_root();
+    std::filesystem::create_directories(root);
+    std::array<char, 128> tmpl{};
+    std::snprintf(tmpl.data(), tmpl.size(), "%s/blk_XXXXXX", root.c_str());
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    char *d = mkdtemp(buf.data());
+    if (d == nullptr) {
+        return root + "/blk_fallback";
+    }
+    return d;
+}
+} // namespace
+
+TEST(BlockArray, WriteWithinFirstBlock)
+{
+    std::string                     dir = temp_dir();
+    std::unique_ptr<BlockPageStore> s;
+    ASSERT_TRUE(BlockPageStore::open_blocks(dir, 1, 0, 4096, 1, &s).ok());
+    EXPECT_EQ(s->num_extents(), 1U);
+    EXPECT_EQ(s->block_size(), 4096U);
+
+    std::vector<uint8_t> in{1, 2, 3, 4, 5};
+    ASSERT_TRUE(s->write_at(100, in.data(), in.size()).ok());
+    std::vector<uint8_t> out(in.size(), 0);
+    ASSERT_TRUE(s->read_at(100, out.data(), out.size()).ok());
+    EXPECT_EQ(in, out);
+    EXPECT_EQ(s->num_extents(), 1U);
+}
+
+TEST(BlockArray, WriteExceedsOneBlockCreatesSecond)
+{
+    std::string                     dir = temp_dir();
+    std::unique_ptr<BlockPageStore> s;
+    constexpr uint64_t              blk = 4096;
+    ASSERT_TRUE(BlockPageStore::open_blocks(dir, 1, 0, blk, 1, &s).ok());
+
+    // Write 100 bytes starting at offset blk-50 → spans into block 1
+    std::vector<uint8_t> in(100, 0x42);
+    ASSERT_TRUE(s->write_at(blk - 50, in.data(), in.size()).ok());
+    EXPECT_EQ(s->num_extents(), 2U);
+
+    std::vector<uint8_t> out(in.size(), 0);
+    ASSERT_TRUE(s->read_at(blk - 50, out.data(), out.size()).ok());
+    EXPECT_EQ(in, out);
+}
+
+TEST(BlockArray, Write20MiBWith8MiBBlocks)
+{
+    std::string                     dir = temp_dir();
+    std::unique_ptr<BlockPageStore> s;
+    constexpr uint64_t              blk = 8 * 1024 * 1024;
+    ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, blk, 1, &s).ok());
+
+    // Write 20 MiB of data
+    std::vector<uint8_t> in(20 * 1024 * 1024, 0xAB);
+    ASSERT_TRUE(s->write_at(0, in.data(), in.size()).ok());
+    EXPECT_EQ(s->num_extents(), 3U); // 8+8+4 MiB → 3 blocks
+
+    std::vector<uint8_t> out(in.size(), 0);
+    ASSERT_TRUE(s->read_at(0, out.data(), out.size()).ok());
+    EXPECT_EQ(in, out);
+}
+
+TEST(BlockArray, ReopenAfterWrites)
+{
+    std::string          dir = temp_dir();
+    constexpr uint64_t   blk = 4096;
+    std::vector<uint8_t> in(100, 0x77);
+
+    {
+        std::unique_ptr<BlockPageStore> s;
+        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 2, 3, blk, 1, &s).ok());
+        ASSERT_TRUE(s->write_at(0, in.data(), in.size()).ok());
+        ASSERT_TRUE(s->write_at(blk + 10, in.data(), in.size()).ok());
+        ASSERT_TRUE(s->sync().ok());
+        EXPECT_EQ(s->num_extents(), 2U);
+    }
+    {
+        std::unique_ptr<BlockPageStore> s;
+        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 2, 3, blk, 1, &s).ok());
+        EXPECT_EQ(s->num_extents(), 2U);
+
+        std::vector<uint8_t> out(in.size(), 0);
+        ASSERT_TRUE(s->read_at(0, out.data(), out.size()).ok());
+        EXPECT_EQ(in, out);
+        ASSERT_TRUE(s->read_at(blk + 10, out.data(), out.size()).ok());
+        EXPECT_EQ(in, out);
+    }
+}
+
+TEST(BlockArray, DumpUtility)
+{
+    std::string                     dir = temp_dir();
+    std::unique_ptr<BlockPageStore> s;
+    ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, 4096, 1, &s).ok());
+
+    std::vector<uint8_t> in{0xDE, 0xAD, 0xBE, 0xEF};
+    ASSERT_TRUE(s->write_at(0, in.data(), in.size()).ok());
+    ASSERT_TRUE(s->sync().ok());
+
+    std::string dump;
+    ASSERT_TRUE(dump_block_file(dir + "/0-0.blk-0000", 1, &dump).ok());
+    EXPECT_NE(dump.find("Block file"), std::string::npos);
+    EXPECT_NE(dump.find("de ad be ef"), std::string::npos);
 }

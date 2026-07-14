@@ -1,11 +1,13 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-// plan-tree #11 Phase 1: Reactor (io_uring event loop) + FileAsyncPageStore.
+// plan-tree #11: Reactor (io_uring event loop) + BlockAsyncPageStore.
 // Only built when CMake found liburing (see CMakeLists.txt's
 // CROWTREE_HAVE_LIBURING gate) -- io_uring is Linux-only.
 #include "crowtree/async_page_store.h"
+#include "crowtree/block_page_store.h"
 #include "crowtree/reactor.h"
+#include "test_tmp.h"
 
 #include <fcntl.h>
 #include <gtest/gtest.h>
@@ -15,6 +17,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <string>
 #include <thread>
 #include <utility>
@@ -26,12 +29,17 @@ namespace
 {
 std::string temp_path()
 {
-    std::array<char, 24> tmpl{"/tmp/crowtree_rx_XXXXXX"};
-    int                  fd = mkstemp(tmpl.data());
+    std::string root = crowtree_test::test_tmp_root();
+    std::filesystem::create_directories(root);
+    std::array<char, 128> tmpl{};
+    std::snprintf(tmpl.data(), tmpl.size(), "%s/rx_XXXXXX", root.c_str());
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    int fd = mkstemp(buf.data());
     if (fd >= 0) {
         close(fd);
     }
-    return tmpl.data();
+    return buf.data();
 }
 
 // Bounded poll for a background-thread-set flag, matching the style already
@@ -179,19 +187,24 @@ TEST(Reactor, DestructorStopsThreadCleanly)
     SUCCEED();
 }
 
-// ── FileAsyncPageStore (this phase's PageStore twin) ───────────────
+// ── BlockAsyncPageStore (async twin of BlockPageStore) ───────────
 
-TEST(FileAsyncPageStore, WriteThenReadRoundTrips)
+TEST(BlockAsyncPageStore, WriteThenReadRoundTrips)
 {
-    std::string                         path = temp_path();
-    Reactor                             r;
-    std::unique_ptr<FileAsyncPageStore> s;
-    ASSERT_TRUE(FileAsyncPageStore::open(path, 4096, &r, &s).ok());
+    std::string                     path = temp_path();
+    Reactor                         r;
+    std::unique_ptr<BlockPageStore> bs;
+    ASSERT_TRUE(BlockPageStore::open(path, 4096, &bs).ok());
+    BlockAsyncPageStore s(bs.get(), &r);
 
-    std::vector<uint8_t> in{9, 8, 7, 6, 5};
-    std::atomic<bool>    write_done{false};
-    Status               write_status;
-    s->submit_write(200, in.data(), in.size(), [&](Status st) {
+    // O_DIRECT requires aligned offset/length/buffer; use 4096-aligned I/O.
+    std::vector<uint8_t> in(4096, 0);
+    for (size_t i = 0; i < in.size(); ++i) {
+        in[i] = static_cast<uint8_t>(i & 0xFF);
+    }
+    std::atomic<bool> write_done{false};
+    Status            write_status;
+    s.submit_write(0, in.data(), in.size(), [&](Status st) {
         write_status = std::move(st);
         write_done.store(true, std::memory_order_release);
     });
@@ -201,7 +214,7 @@ TEST(FileAsyncPageStore, WriteThenReadRoundTrips)
     std::vector<uint8_t> out(in.size(), 0);
     std::atomic<bool>    read_done{false};
     Status               read_status;
-    s->submit_read(200, out.data(), out.size(), [&](Status st) {
+    s.submit_read(0, out.data(), out.size(), [&](Status st) {
         read_status = std::move(st);
         read_done.store(true, std::memory_order_release);
     });
@@ -212,17 +225,20 @@ TEST(FileAsyncPageStore, WriteThenReadRoundTrips)
     std::remove(path.c_str());
 }
 
-TEST(FileAsyncPageStore, ReadPastEndSurfacesAsError)
+TEST(BlockAsyncPageStore, ReadPastEndSurfacesAsError)
 {
-    std::string                         path = temp_path();
-    Reactor                             r;
-    std::unique_ptr<FileAsyncPageStore> s;
-    ASSERT_TRUE(FileAsyncPageStore::open(path, 4096, &r, &s).ok());
+    std::string                     path = temp_path();
+    Reactor                         r;
+    std::unique_ptr<BlockPageStore> bs;
+    ASSERT_TRUE(BlockPageStore::open(path, 4096, &bs).ok());
+    BlockAsyncPageStore s(bs.get(), &r);
 
-    std::vector<uint8_t> out(16, 0);
+    // Read from an offset far past the file end (aligned to keep O_DIRECT happy
+    // for the offset, but there's no data there).
+    std::vector<uint8_t> out(4096, 0);
     std::atomic<bool>    done{false};
     Status               status;
-    s->submit_read(0, out.data(), out.size(), [&](Status st) {
+    s.submit_read(1 << 20, out.data(), out.size(), [&](Status st) {
         status = std::move(st);
         done.store(true, std::memory_order_release);
     });
@@ -232,16 +248,23 @@ TEST(FileAsyncPageStore, ReadPastEndSurfacesAsError)
     std::remove(path.c_str());
 }
 
-TEST(FileAsyncPageStore, FsyncCompletes)
+TEST(BlockAsyncPageStore, FsyncCompletes)
 {
-    std::string                         path = temp_path();
-    Reactor                             r;
-    std::unique_ptr<FileAsyncPageStore> s;
-    ASSERT_TRUE(FileAsyncPageStore::open(path, 4096, &r, &s).ok());
+    std::string                     path = temp_path();
+    Reactor                         r;
+    std::unique_ptr<BlockPageStore> bs;
+    ASSERT_TRUE(BlockPageStore::open(path, 4096, &bs).ok());
+    BlockAsyncPageStore s(bs.get(), &r);
+
+    // Write something first so the single-medium fd is dirty
+    std::vector<uint8_t> in(4096, 0xAB);
+    std::atomic<bool>    write_done{false};
+    s.submit_write(0, in.data(), in.size(), [&](Status) { write_done.store(true, std::memory_order_release); });
+    ASSERT_TRUE(wait_for([&] { return write_done.load(std::memory_order_acquire); }));
 
     std::atomic<bool> done{false};
     Status            status;
-    Status            submit_status = s->submit_fsync([&](Status st) {
+    Status            submit_status = s.submit_fsync([&](Status st) {
         status = std::move(st);
         done.store(true, std::memory_order_release);
     });

@@ -14,6 +14,7 @@ export interface AddReplicaDialogProps {
   storeId: string;
   groupId: string;
   nodes: Node[];
+  usedNodeIds?: Set<string>;
   defaultNodeId?: string;
   defaultReplicaId?: string;
   onSuccess?: () => void | Promise<void>;
@@ -28,6 +29,7 @@ export function AddReplicaDialog({
   storeId,
   groupId,
   nodes,
+  usedNodeIds = new Set(),
   defaultNodeId = '',
   defaultReplicaId = '',
   onSuccess,
@@ -39,10 +41,11 @@ export function AddReplicaDialog({
   const { success, error } = useToast();
 
   const replicaIdValid = replicaId.trim() === '' || /^\d+$/.test(replicaId.trim());
-  const hasAvailableNodes = nodes.length > 0;
-  const resolvedDefaultNodeId = defaultNodeId && nodes.some((node) => node.id === defaultNodeId)
+  const availableNodes = nodes.filter((node) => !usedNodeIds.has(node.id));
+  const hasAvailableNodes = availableNodes.length > 0;
+  const resolvedDefaultNodeId = defaultNodeId && availableNodes.some((node) => node.id === defaultNodeId)
     ? defaultNodeId
-    : (nodes[0]?.id || '');
+    : (availableNodes[0]?.id || '');
 
   useEffect(() => {
     if (isOpen && !wasOpenRef.current) {
@@ -54,9 +57,9 @@ export function AddReplicaDialog({
 
   useEffect(() => {
     if (!isOpen) return;
-    if (nodeId && nodes.some((node) => node.id === nodeId)) return;
+    if (nodeId && availableNodes.some((node) => node.id === nodeId)) return;
     setNodeId(resolvedDefaultNodeId);
-  }, [isOpen, nodeId, nodes, resolvedDefaultNodeId]);
+  }, [isOpen, nodeId, availableNodes, resolvedDefaultNodeId]);
 
   const handleSubmit = async () => {
     if (!hasAvailableNodes || !nodeId || !replicaIdValid) return;
@@ -99,21 +102,29 @@ export function AddReplicaDialog({
       confirmLoading={isLoading}
     >
       <div className="tw-space-y-4">
-        {hasAvailableNodes ? (
+        {nodes.length === 0 ? (
+          <div className="tw-text-sm tw-text-muted">
+            No nodes available.
+          </div>
+        ) : (
           <Select
             label="Node"
             value={nodeId}
             onChange={(e) => setNodeId(e.target.value)}
-            autoFocus
+            disabled={!hasAvailableNodes}
           >
-            <option value="" disabled>Select a node</option>
-            {nodes.map((node) => (
-              <option key={node.id} value={node.id}>
-                {node.id} ({node.host})
-              </option>
-            ))}
+            {availableNodes.length === 0 ? (
+              <option value="" disabled>No available node</option>
+            ) : (
+              availableNodes.map((node) => (
+                <option key={node.id} value={node.id}>
+                  {node.id} ({node.host})
+                </option>
+              ))
+            )}
           </Select>
-        ) : (
+        )}
+        {!hasAvailableNodes && nodes.length > 0 && (
           <div className="tw-text-sm tw-text-muted">
             No available node. Every node already has a replica in this group.
           </div>

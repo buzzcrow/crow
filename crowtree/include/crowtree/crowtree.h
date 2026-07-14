@@ -254,10 +254,11 @@ struct PreparedSnapshot
     uint64_t                          last_applied_slot = 0;
     // Diagnostics for the "snapshot committed" log line (matches the
     // pre-refactor synchronous snapshot()'s log fields exactly).
-    uint64_t seq             = 0;
-    uint64_t live_page_count = 0; // live slots across every present segment
-    uint64_t pages_written   = 0;
-    uint64_t segdir_len      = 0;
+    uint64_t           seq             = 0;
+    uint64_t           live_page_count = 0; // live slots across every present segment
+    uint64_t           pages_written   = 0;
+    uint64_t           segdir_len      = 0;
+    std::set<uint32_t> empty_blocks; // block indices with zero live bytes (block compaction)
 };
 
 // One page's raw frame bytes, tagged with its logical PID (plan-tree #16
@@ -1037,6 +1038,11 @@ class Crowtree
     // snapshot_async's async write phase, where write_mutex_ itself can't be
     // held (see acquire_snapshot_slot's doc comment and snapshot_async's).
     std::atomic<bool> snapshot_inflight_{false};
+
+    // Block indices that were empty in the previous snapshot (two-generation
+    // rule for block deletion). A block is only deleted after it's empty in
+    // two consecutive snapshots — the crash fallback anchor still references it.
+    std::set<uint32_t> prev_empty_blocks_;
 
     // Background flush thread (Options.background_flush / flush_interval_ms),
     // also driving the periodic collect_garbage() sweep (Options.gc_interval_ms,

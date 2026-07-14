@@ -10,12 +10,13 @@
 // Runs against a durable (file-backed) ct_tree so ct_evict_clean_leaves can
 // force the demand-load ("slow path") that ct_get_async's retry loop exists
 // for. On a build with liburing (CROWTREE_HAVE_LIBURING), ct_open wires a
-// real Reactor + FileAsyncPageStore, so the slow path genuinely completes
+// real Reactor + BlockAsyncPageStore, so the slow path genuinely completes
 // off the Reactor thread; without liburing (or for an in-memory tree) it
 // falls back to completing synchronously -- every assertion
 // below is written to hold either way (poll-until-done with a bounded
 // retry), except where a test specifically distinguishes the two.
 #include "crowtree/c_api.h"
+#include "test_tmp.h"
 
 #include <gtest/gtest.h>
 #include <unistd.h>
@@ -61,27 +62,6 @@ ct_status poll_until_done(ct_future *f, int32_t *out_found, uint64_t *out_slot, 
     ADD_FAILURE() << "future never completed";
     return static_cast<ct_status>(-1);
 }
-
-// RAII temp file path (mkstemp), mirroring c_api_test.cpp's FileCheckpointReopen.
-struct TempPath
-{
-    std::string path;
-
-    TempPath()
-    {
-        std::array<char, 32> tmpl{"/tmp/crowtree_async_XXXXXX"};
-        int                  fd = mkstemp(tmpl.data());
-        if (fd >= 0) {
-            close(fd);
-        }
-        path = tmpl.data();
-    }
-
-    ~TempPath()
-    {
-        std::remove(path.c_str());
-    }
-};
 
 } // namespace
 
@@ -156,12 +136,13 @@ TEST(AsyncGet, FastPathValueSurvivesRepeatedPollsUntilExplicitFree)
 // correct value.
 TEST(AsyncGet, MissAfterEvictionCompletesViaReactor)
 {
-    TempPath   tmp;
-    ct_options opt  = {};
-    opt.path        = tmp.path.c_str();
-    opt.iu_size     = 4096;
-    opt.frame_bytes = 4096;
-    ct_tree *t      = nullptr;
+    crowtree_test::TempDir tmp;
+    ct_options             opt = {};
+    opt.path                   = tmp.path.c_str();
+    opt.backend                = CT_BACKEND_BLOCK;
+    opt.iu_size                = 4096;
+    opt.frame_bytes            = 4096;
+    ct_tree *t                 = nullptr;
     ASSERT_EQ(ct_open(&opt, &t), 0);
 
     for (int i = 0; i < 20; ++i) {
@@ -212,12 +193,12 @@ TEST(AsyncGet, MissAfterEvictionCompletesViaReactor)
 // signal (see the /coding sanitizer pass in this session's plan).
 TEST(AsyncGet, FutureFreeBeforeCompletionDoesNotCrashOrLeak)
 {
-    TempPath   tmp;
-    ct_options opt  = {};
-    opt.path        = tmp.path.c_str();
-    opt.iu_size     = 4096;
-    opt.frame_bytes = 4096;
-    ct_tree *t      = nullptr;
+    crowtree_test::TempDir tmp;
+    ct_options             opt = {};
+    opt.path                   = tmp.path.c_str();
+    opt.iu_size                = 4096;
+    opt.frame_bytes            = 4096;
+    ct_tree *t                 = nullptr;
     ASSERT_EQ(ct_open(&opt, &t), 0);
 
     for (int i = 0; i < 20; ++i) {
@@ -251,12 +232,12 @@ TEST(AsyncGet, FutureFreeBeforeCompletionDoesNotCrashOrLeak)
 // Crowtree::flush() implementation, not assumed).
 TEST(AsyncFlushSnapshot, FlushCompletesImmediatelySnapshotEventually)
 {
-    TempPath   tmp;
-    ct_options opt  = {};
-    opt.path        = tmp.path.c_str();
-    opt.iu_size     = 4096;
-    opt.frame_bytes = 4096;
-    ct_tree *t      = nullptr;
+    crowtree_test::TempDir tmp;
+    ct_options             opt = {};
+    opt.path                   = tmp.path.c_str();
+    opt.iu_size                = 4096;
+    opt.frame_bytes            = 4096;
+    ct_tree *t                 = nullptr;
     ASSERT_EQ(ct_open(&opt, &t), 0);
 
     ASSERT_EQ(ct_apply_put(t, 1, reinterpret_cast<const uint8_t *>("a"), 1, reinterpret_cast<const uint8_t *>("va"), 2),
@@ -286,6 +267,69 @@ TEST(AsyncFlushSnapshot, FlushCompletesImmediatelySnapshotEventually)
     ASSERT_EQ(found, 1);
     EXPECT_EQ(std::string(reinterpret_cast<char *>(val.data), val.len), "va");
     ct_free_buf(&val);
+
+    ct_close(t);
+}
+
+// Block-backend async snapshot: exercises BlockAsyncPageStore::submit_write
+// + submit_fsync through the Reactor's io_uring on Linux (CROWTREE_HAVE_LIBURING).
+// On non-liburing builds, snapshot_async falls back to the sync path — the
+// assertions hold either way (poll-until-done).
+TEST(AsyncSnapshot, BlockBackendAsyncSnapshotRoundTrip)
+{
+    crowtree_test::TempDir tmp;
+    ct_options             opt = {};
+    opt.path                   = tmp.path.c_str();
+    opt.backend                = CT_BACKEND_BLOCK;
+    opt.iu_size                = 4096;
+    opt.frame_bytes            = 4096;
+    opt.block_size             = 8 * 1024; // small blocks to force multi-extent
+    ct_tree *t                 = nullptr;
+    ASSERT_EQ(ct_open(&opt, &t), 0);
+
+    // Write enough data to fill at least one block and exercise the write path.
+    for (int i = 0; i < 30; ++i) {
+        ASSERT_EQ(put_flush(t, i + 1, make_key(i), "val" + std::to_string(i)), 0);
+    }
+
+    // Async snapshot — on liburing builds this chains submit_write → ... →
+    // submit_fsync → anchor write → submit_fsync → commit, all via io_uring.
+    ct_future *sf = ct_snapshot_async(t);
+    ASSERT_NE(sf, nullptr);
+    uint64_t  slot = 0;
+    ct_status sst  = poll_until_done(sf, nullptr, &slot, nullptr);
+    EXPECT_EQ(sst, 0);
+    EXPECT_EQ(slot, 30U);
+
+    // sf is already freed by ct_future_poll (snapshot futures are freed on
+    // done — see c_api.cpp line 646). Do NOT call ct_future_free here.
+
+    // Verify data is readable after async snapshot.
+    for (int i = 0; i < 30; ++i) {
+        std::string k     = make_key(i);
+        int32_t     found = 0;
+        uint64_t    gslot = 0;
+        ct_buf      val   = {};
+        ASSERT_EQ(ct_get(t, reinterpret_cast<const uint8_t *>(k.data()), k.size(), &found, &gslot, &val), 0);
+        ASSERT_EQ(found, 1);
+        EXPECT_EQ(std::string(reinterpret_cast<char *>(val.data), val.len), "val" + std::to_string(i));
+        ct_free_buf(&val);
+    }
+
+    // Reopen and verify durability.
+    ct_close(t);
+    t = nullptr;
+    ASSERT_EQ(ct_open(&opt, &t), 0);
+    for (int i = 0; i < 30; ++i) {
+        std::string k     = make_key(i);
+        int32_t     found = 0;
+        uint64_t    gslot = 0;
+        ct_buf      val   = {};
+        ASSERT_EQ(ct_get(t, reinterpret_cast<const uint8_t *>(k.data()), k.size(), &found, &gslot, &val), 0);
+        ASSERT_EQ(found, 1);
+        EXPECT_EQ(std::string(reinterpret_cast<char *>(val.data), val.len), "val" + std::to_string(i));
+        ct_free_buf(&val);
+    }
 
     ct_close(t);
 }

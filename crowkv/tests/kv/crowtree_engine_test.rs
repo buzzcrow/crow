@@ -93,7 +93,7 @@ fn get_scan_apply_always_resolve_ready() {
 async fn get_constructs_pending_for_genuine_demand_load_miss() {
     use crowkv::kv::{KVEngine, KVFuture};
 
-    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    let tmp = tempfile::tempdir().expect("tempdir");
     let e = CrowtreeEngine::open(&CrowtreeOptions {
         path: Some(tmp.path().to_string_lossy().into_owned()),
         ..Default::default()
@@ -138,7 +138,7 @@ async fn get_constructs_pending_for_genuine_demand_load_miss() {
 async fn scan_constructs_pending_for_genuine_demand_load_miss() {
     use crowkv::kv::{KVEngine, KVFuture};
 
-    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    let tmp = tempfile::tempdir().expect("tempdir");
     let e = CrowtreeEngine::open(&CrowtreeOptions {
         path: Some(tmp.path().to_string_lossy().into_owned()),
         ..Default::default()
@@ -222,7 +222,7 @@ fn apply_after_clear_accepts_the_same_slot_number_again() {
 async fn clear_then_persist_survives_reopen() {
     use crowkv::kv::KVEngine;
 
-    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    let tmp = tempfile::tempdir().expect("tempdir");
     let opt = CrowtreeOptions {
         path: Some(tmp.path().to_string_lossy().into_owned()),
         ..Default::default()

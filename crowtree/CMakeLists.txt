@@ -22,7 +22,7 @@ endif()
 
 # ── liburing (io_uring reactor, plan-tree #11 Phase 0/1) ──────────
 # Linux-only kernel interface -- no macOS build exists, so Reactor /
-# AsyncPageStore / FileAsyncPageStore are excluded from the build entirely
+# AsyncPageStore / BlockAsyncPageStore are excluded from the build entirely
 # (not compiled to no-ops) when not found, matching
 # design-crowtree-async.md §10's macOS dev-path note. Probed before the
 # source glob below so the exclusion list can be applied pre-add_library.
@@ -34,7 +34,7 @@ file(GLOB_RECURSE CROWTREE_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src
 if(NOT (LIBURING_INCLUDE_DIR AND LIBURING_LIB))
   list(REMOVE_ITEM CROWTREE_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/reactor.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/file_async_page_store.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/block_async_page_store.cpp
   )
 endif()
 add_library(crowtree STATIC ${CROWTREE_SRC})
@@ -44,7 +44,7 @@ target_link_libraries(crowtree PUBLIC Threads::Threads)
 
 if(LIBURING_INCLUDE_DIR AND LIBURING_LIB)
   message(STATUS "crowtree liburing: ${LIBURING_LIB} (${LIBURING_INCLUDE_DIR})")
-  target_include_directories(crowtree PRIVATE ${LIBURING_INCLUDE_DIR})
+  target_include_directories(crowtree SYSTEM PRIVATE ${LIBURING_INCLUDE_DIR})
   target_compile_definitions(crowtree PUBLIC CROWTREE_HAVE_LIBURING=1)
   target_link_libraries(crowtree PUBLIC ${LIBURING_LIB})
 else()
@@ -80,7 +80,7 @@ find_path(LZ4_INCLUDE_DIR lz4.h)
 find_library(LZ4_LIB NAMES lz4)
 if(LZ4_INCLUDE_DIR AND LZ4_LIB)
   message(STATUS "crowtree LZ4: system ${LZ4_LIB} (${LZ4_INCLUDE_DIR})")
-  target_include_directories(crowtree PRIVATE ${LZ4_INCLUDE_DIR})
+  target_include_directories(crowtree SYSTEM PRIVATE ${LZ4_INCLUDE_DIR})
   target_compile_definitions(crowtree PUBLIC CROWTREE_HAVE_LZ4=1)
   target_link_libraries(crowtree PUBLIC ${LZ4_LIB})
 else()
@@ -97,6 +97,7 @@ if(NOT (LIBURING_INCLUDE_DIR AND LIBURING_LIB))
   list(REMOVE_ITEM CROWTREE_TEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/reactor_test.cpp)
 endif()
 add_executable(crowtree_tests ${CROWTREE_TEST_SRC})
+target_include_directories(crowtree_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 target_link_libraries(crowtree_tests PRIVATE crowtree GTest::gtest GTest::gtest_main)
 # PRE_TEST: enumerate tests at ctest time, not build time. Required so sanitizer
 # builds (which can't run the binary at build time under restrictive ASLR) build

@@ -11,6 +11,7 @@
 #    include <spdlog/async_logger.h>
 #    include <spdlog/details/thread_pool.h>
 #    include <spdlog/sinks/rotating_file_sink.h>
+#    include <spdlog/sinks/stdout_color_sinks.h>
 #    include <spdlog/spdlog.h>
 
 #    include <atomic>
@@ -24,7 +25,7 @@ namespace
 {
 // Process-global enabled flag (see log.h lifetime notes). Relaxed is fine: the
 // macros only need eventual visibility, and init/shutdown are not on a hot path.
-std::atomic<bool> g_enabled{false};
+std::atomic<bool> g_enabled{true};
 
 // We OWN the async logger and its thread pool (rather than using spdlog's global
 // registry/thread pool) so that shutdown can join the worker BEFORE the logger's
@@ -61,14 +62,21 @@ void shutdown_logging()
 
 void init_logging(const std::string &log_dir, const std::string &level, size_t max_file_mb, size_t max_files)
 {
-    if (log_dir.empty()) {
-        return; // logging disabled by configuration
-    }
     // Reset any prior logger so a fresh init (e.g. a second open() with a
     // different dir) rebinds cleanly.
     shutdown_logging();
     std::lock_guard<std::mutex> lk(g_log_mu);
     try {
+        if (log_dir.empty()) {
+            // No log dir configured: log to stderr so output is visible (tests, CLI).
+            auto sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
+            g_logger  = std::make_shared<spdlog::logger>("crowtree", sink);
+            g_logger->set_pattern("[%l] %v");
+            g_logger->set_level(spdlog::level::from_str(level));
+            spdlog::set_default_logger(g_logger);
+            g_enabled.store(true, std::memory_order_relaxed);
+            return;
+        }
         // Async logger over our own thread pool: fixed-size ring buffer, block on
         // overflow so no message is dropped under bursty load.
         g_tp                   = std::make_shared<spdlog::details::thread_pool>(8192, 1);

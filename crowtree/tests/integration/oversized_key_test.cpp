@@ -70,7 +70,7 @@ TEST(OversizedKey, BatchRejectedAtomicallyIfAnyKeyTooLarge)
 
     const std::string big(9, 'z');
     Batch             b{
-        {{.key = "small", .kind = OpKind::kPut, .value = "a"}, {.key = big, .kind = OpKind::kPut, .value = "b"}}
+                    {{.key = "small", .kind = OpKind::kPut, .value = "a"}, {.key = big, .kind = OpKind::kPut, .value = "b"}}
     };
     EXPECT_EQ(t.apply(1, b).code(), Code::kInvalidArgument);
     // No op from the rejected batch landed, not even the small one.

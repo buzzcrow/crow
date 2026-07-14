@@ -42,9 +42,9 @@ grep -rn 'Arc<' src/
 grep -rn '\.unwrap()' src/
 grep -rn 'fn .*(&self' src/
 grep -rn '#\[cfg\(test\)\]' src/
-cargo clippy --all-targets -- -D warnings
-cargo build && cargo test
 ```
+
+Pre-commit gate (AGENTS.md Hard Constraints) must have already passed — fmt, clippy, clang-format, relevant tests.
 
 ## Clippy Exceptions
 

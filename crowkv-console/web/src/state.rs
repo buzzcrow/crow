@@ -123,6 +123,26 @@ impl AppState {
         self.runtime_root.join(format!("N-{node_id}"))
     }
 
+    /// Remove all node workspace directories under `runtime_root`.
+    /// Called by the internal reset endpoint after stopping servers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a directory cannot be removed.
+    pub fn clear_workspaces(&self) -> Result<()> {
+        if !self.runtime_root.exists() {
+            return Ok(());
+        }
+        for entry in std::fs::read_dir(&*self.runtime_root).map_err(Error::Io)? {
+            let entry = entry.map_err(Error::Io)?;
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with("N-") {
+                std::fs::remove_dir_all(entry.path()).map_err(Error::Io)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Prepares the workspace directory for a node.
     ///
     /// # Errors
@@ -133,7 +153,6 @@ impl AppState {
         std::fs::create_dir_all(&base).map_err(Error::Io)?;
         std::fs::create_dir_all(base.join("bin")).map_err(Error::Io)?;
         std::fs::create_dir_all(base.join("log")).map_err(Error::Io)?;
-        std::fs::create_dir_all(base.join("data")).map_err(Error::Io)?;
         std::fs::create_dir_all(base.join("wal")).map_err(Error::Io)?;
         std::fs::canonicalize(base).map_err(Error::Io)
     }
@@ -184,7 +203,6 @@ mod tests {
         assert!(workspace.ends_with(PathBuf::from("runtime-data/N-n1")));
         assert!(workspace.join("bin").is_dir());
         assert!(workspace.join("log").is_dir());
-        assert!(workspace.join("data").is_dir());
         assert!(workspace.join("wal").is_dir());
 
         std::env::set_current_dir(original_cwd).unwrap();

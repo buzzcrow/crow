@@ -91,17 +91,17 @@ TEST(Logging, WritesFormattedFileOnOpenAndSnapshot)
     EXPECT_NE(body.find("snapshot committed:"), std::string::npos);
 }
 
-TEST(Logging, DisabledWhenNoLogDir)
+TEST(Logging, StderrWhenNoLogDir)
 {
     // Make sure a prior test's logger is torn down first.
     shutdown_logging();
     MemPageStore store(1);
     Options      opt;
     opt.page_store = &store;
-    // opt.log_dir left empty -> logging stays disabled, no file written anywhere.
+    // opt.log_dir left empty -> logging defaults to stderr (enabled, no file).
     std::unique_ptr<Crowtree> t;
     ASSERT_TRUE(Crowtree::open(opt, &t).ok());
-    EXPECT_FALSE(logging_enabled());
+    EXPECT_TRUE(logging_enabled());
     ASSERT_TRUE(t->apply(1, put_one("k", "v")).ok());
     ASSERT_TRUE(t->flush().ok());
 }

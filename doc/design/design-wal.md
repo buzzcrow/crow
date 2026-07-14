@@ -114,11 +114,11 @@ Each acceptor configures `wal_disks = [path_1, path_2, ...]`. Each disk holds a 
 With multiple disks, global slot order and physical record order intentionally diverge:
 
 ```
-   /wal_disk_1/groupN/seg-0000001.log   slots {1,4,7,...}
-   /wal_disk_1/groupN/seg-0000004.log   slots {361,364,367,...}
-   /wal_disk_2/groupN/seg-0000002.log   slots {2,5,8,...}
-   /wal_disk_2/groupN/seg-0000005.log   slots {362,365,368,...}
-   /wal_disk_3/groupN/seg-0000003.log   slots {3,6,9,...}
+   /wal_disk_1/groupN/seg-0000001.ck   slots {1,4,7,...}
+   /wal_disk_1/groupN/seg-0000004.ck   slots {361,364,367,...}
+   /wal_disk_2/groupN/seg-0000002.ck   slots {2,5,8,...}
+   /wal_disk_2/groupN/seg-0000005.ck   slots {362,365,368,...}
+   /wal_disk_3/groupN/seg-0000003.ck   slots {3,6,9,...}
 ```
 
 - Each segment is named with a monotonic `segment_id` within the group.
@@ -265,7 +265,7 @@ The split matters: replay/restore are purely *local* (this node's WAL), but `Acc
 
 ### 6.1 Replay — rebuild acceptor state (`replay_group`)
 
-1. Discover all segments under `<wal_disk>/group<gid>/seg-*.log`, order by `segment_id`.
+1. Discover all segments under `<wal_disk>/group<gid>/seg-*.ck`, order by `segment_id`.
 2. Walk each segment's records in order; verify `magic`, `version`, `crc32c`.
    On the first failure, **truncate that segment at the offset and stop** (a torn
    tail from a crash mid-write); later segments are still processed.

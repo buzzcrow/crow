@@ -29,7 +29,10 @@ use tracing::{info, warn};
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
-fn mgmt_url_for_node(state: &AppState, node_id: &str) -> Result<String, (StatusCode, Json<ErrorBody>)> {
+pub(crate) fn mgmt_url_for_node(
+    state: &AppState,
+    node_id: &str,
+) -> Result<String, (StatusCode, Json<ErrorBody>)> {
     let cfg = state.config.read().unwrap();
     let entry = cfg
         .server_for_node(node_id)
@@ -37,7 +40,7 @@ fn mgmt_url_for_node(state: &AppState, node_id: &str) -> Result<String, (StatusC
     Ok(entry.url.clone())
 }
 
-fn build_server_client(url: String) -> Result<ServerClient, (StatusCode, Json<ErrorBody>)> {
+pub(crate) fn build_server_client(url: String) -> Result<ServerClient, (StatusCode, Json<ErrorBody>)> {
     ServerClient::new(url).map_err(|e| err_500(format!("client build: {e}")))
 }
 

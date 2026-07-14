@@ -36,7 +36,7 @@ TEST(Slice, EmptyAndBinary)
     Slice e;
     EXPECT_TRUE(e.empty());
     const std::array<uint8_t, 4> raw = {0x00, 0x01, 0x00, 0xff};
-    Slice         s(raw.data(), raw.size());
+    Slice                        s(raw.data(), raw.size());
     EXPECT_EQ(s.size(), 4U);
     EXPECT_EQ(s.to_string().size(), 4U);
     EXPECT_EQ(static_cast<uint8_t>(s.data()[3]), 0xff);
