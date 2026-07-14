@@ -601,7 +601,7 @@ Task 1 (IoEngine + async) ──┐
 - [x] **Task 4** — TextPageStore + text codecs (builds on Task 1)
 - [x] **Task 5** — WAL `.log` → `.ck` extension (standalone, no dependencies)
 - [x] **Task 6** — persist.cpp adaptation + async migration (builds on Task 3)
-- [ ] **Task 7** — c_api update + backend selection (builds on Tasks 3 + 4)
+- [x] **Task 7** — c_api update + backend selection (builds on Tasks 3 + 4)
 - [ ] **Task 8** — FFI bindings (builds on Task 7)
 - [ ] **Task 9** — Configurable fsync policy (builds on Task 7, crowtree + WAL)
 - [ ] **Task 10** — Test updates (builds on all above)
