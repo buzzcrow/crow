@@ -357,16 +357,15 @@ TEST(Persist, CorruptNewestSuperblockFallsBackToPrevious)
 
 TEST(Persist, FileBackendRoundTrip)
 {
-    std::array<char, 29> tmpl{"/tmp/crowtree_persist_XXXXXX"};
-    int                  fd = mkstemp(tmpl.data());
-    ASSERT_GE(fd, 0);
-    close(fd);
-    std::string path(tmpl.data());
+    std::array<char, 32> tmpl{"/tmp/crowtree_persist_XXXXXX"};
+    char                *d = mkdtemp(tmpl.data());
+    ASSERT_NE(d, nullptr);
+    std::string path(d);
 
     std::map<std::string, std::string> oracle;
     {
-        std::unique_ptr<FilePageStore> store;
-        ASSERT_TRUE(FilePageStore::open(path, 4096, &store).ok());
+        std::unique_ptr<BlockPageStore> store;
+        ASSERT_TRUE(BlockPageStore::open_blocks(path, 0, 0, 8 * 1024 * 1024, 1, &store).ok());
         Options opt;
         opt.page_store       = store.get();
         opt.leaf_split_bytes = 256;
@@ -393,10 +392,10 @@ TEST(Persist, FileBackendRoundTrip)
         ASSERT_TRUE(t.snapshot().ok());
     }
 
-    // Reopen the file in a brand-new store + engine.
+    // Reopen in a brand-new store + engine.
     {
-        std::unique_ptr<FilePageStore> store;
-        ASSERT_TRUE(FilePageStore::open(path, 4096, &store).ok());
+        std::unique_ptr<BlockPageStore> store;
+        ASSERT_TRUE(BlockPageStore::open_blocks(path, 0, 0, 8 * 1024 * 1024, 1, &store).ok());
         Options opt;
         opt.page_store = store.get();
         std::unique_ptr<Crowtree> t;
@@ -417,7 +416,6 @@ TEST(Persist, FileBackendRoundTrip)
         }
         EXPECT_EQ(live, oracle.size());
     }
-    std::remove(path.c_str());
 }
 
 // plan-tree #22: same round-trip as FileBackendRoundTrip, but against the
@@ -428,16 +426,15 @@ TEST(Persist, FileBackendRoundTrip)
 // synthetic offsets exercised directly in page_store_test.cpp.
 TEST(Persist, BlockDeviceBackendRoundTrip)
 {
-    std::array<char, 29> tmpl{"/tmp/crowtree_persist_XXXXXX"};
-    int                  fd = mkstemp(tmpl.data());
-    ASSERT_GE(fd, 0);
-    close(fd);
-    std::string path(tmpl.data());
+    std::array<char, 32> tmpl{"/tmp/crowtree_persist_XXXXXX"};
+    char                *d = mkdtemp(tmpl.data());
+    ASSERT_NE(d, nullptr);
+    std::string path(d);
 
     std::map<std::string, std::string> oracle;
     {
         std::unique_ptr<BlockPageStore> store;
-        ASSERT_TRUE(BlockPageStore::open(path, 4096, &store).ok());
+        ASSERT_TRUE(BlockPageStore::open_blocks(path, 0, 0, 8 * 1024 * 1024, 4096, &store).ok());
         Options opt;
         opt.page_store       = store.get();
         opt.leaf_split_bytes = 256;
@@ -464,10 +461,10 @@ TEST(Persist, BlockDeviceBackendRoundTrip)
         ASSERT_TRUE(t.snapshot().ok());
     }
 
-    // Reopen the file in a brand-new store + engine.
+    // Reopen in a brand-new store + engine.
     {
         std::unique_ptr<BlockPageStore> store;
-        ASSERT_TRUE(BlockPageStore::open(path, 4096, &store).ok());
+        ASSERT_TRUE(BlockPageStore::open_blocks(path, 0, 0, 8 * 1024 * 1024, 4096, &store).ok());
         Options opt;
         opt.page_store = store.get();
         std::unique_ptr<Crowtree> t;
@@ -487,7 +484,6 @@ TEST(Persist, BlockDeviceBackendRoundTrip)
         }
         EXPECT_EQ(live, oracle.size());
     }
-    std::remove(path.c_str());
 }
 
 // plan-tree #8: write_mutex_ must be released before snapshot()'s I/O phase

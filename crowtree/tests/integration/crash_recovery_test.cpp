@@ -5,6 +5,7 @@
 // IU alignment). Verifies two-generation fallback (a corrupted newest snapshot
 // falls back intact to the previous committed image) and that demand-load
 // corruption of the committed image is surfaced via the latched io_failed flag.
+#include "crowtree/block_page_store.h"
 #include "crowtree/crowtree.h"
 #include "crowtree/page_store.h"
 
@@ -271,16 +272,15 @@ TEST(CrashRecovery, DemandLoadCorruptionLatched)
 // must fall back to gen1's committed image, fully intact, on a real file.
 TEST(CrashRecovery, FileTornSuperblockFallsBack)
 {
-    std::array<char, 27> tmpl{"/tmp/crowtree_crash_XXXXXX"};
-    int                  fd = mkstemp(tmpl.data());
-    ASSERT_GE(fd, 0);
-    close(fd);
-    std::string path(tmpl.data());
+    std::array<char, 32> tmpl{"/tmp/crowtree_crash_XXXXXX"};
+    char                *d = mkdtemp(tmpl.data());
+    ASSERT_NE(d, nullptr);
+    std::string path(d);
 
     std::map<std::string, std::string> gen1;
     {
-        std::unique_ptr<FilePageStore> store;
-        ASSERT_TRUE(FilePageStore::open(path, 4096, &store).ok());
+        std::unique_ptr<BlockPageStore> store;
+        ASSERT_TRUE(BlockPageStore::open_blocks(path, 0, 0, 8 * 1024 * 1024, 1, &store).ok());
         Options opt;
         opt.page_store       = store.get();
         opt.frame_bytes      = 4096;
@@ -304,16 +304,16 @@ TEST(CrashRecovery, FileTornSuperblockFallsBack)
 
     // Tear the gen2 superblock (slot B at offset 4096) as a crash would.
     {
-        std::unique_ptr<FilePageStore> store;
-        ASSERT_TRUE(FilePageStore::open(path, 4096, &store).ok());
+        std::unique_ptr<BlockPageStore> store;
+        ASSERT_TRUE(BlockPageStore::open_blocks(path, 0, 0, 8 * 1024 * 1024, 1, &store).ok());
         std::vector<uint8_t> garbage(4096, 0x77);
         ASSERT_TRUE(store->write_at(4096, garbage.data(), garbage.size()).ok());
         ASSERT_TRUE(store->sync().ok());
     }
 
     {
-        std::unique_ptr<FilePageStore> store;
-        ASSERT_TRUE(FilePageStore::open(path, 4096, &store).ok());
+        std::unique_ptr<BlockPageStore> store;
+        ASSERT_TRUE(BlockPageStore::open_blocks(path, 0, 0, 8 * 1024 * 1024, 1, &store).ok());
         Options opt;
         opt.page_store  = store.get();
         opt.frame_bytes = 4096;
@@ -328,5 +328,4 @@ TEST(CrashRecovery, FileTornSuperblockFallsBack)
         }
         EXPECT_FALSE(t->io_failed());
     }
-    std::remove(path.c_str());
 }
