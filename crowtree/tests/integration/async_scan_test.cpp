@@ -9,6 +9,7 @@
 // (fast path, miss-after-eviction, abandon-before-completion), plus a
 // dedicated equivalence check against ct_scan's own packed output.
 #include "crowtree/c_api.h"
+#include "test_tmp.h"
 
 #include <gtest/gtest.h>
 #include <unistd.h>
@@ -92,26 +93,6 @@ std::map<std::string, std::string> unpack_entries(const ct_buf &buf, uint64_t co
     return out;
 }
 
-struct TempPath
-{
-    std::string path;
-
-    TempPath()
-    {
-        std::array<char, 32> tmpl{"/tmp/crowtree_ascan_XXXXXX"};
-        int                  fd = mkstemp(tmpl.data());
-        if (fd >= 0) {
-            close(fd);
-        }
-        path = tmpl.data();
-    }
-
-    ~TempPath()
-    {
-        std::remove(path.c_str());
-    }
-};
-
 } // namespace
 
 // Fast path: every leaf already resident -- the future is done on the very
@@ -193,7 +174,7 @@ TEST(AsyncScan, MatchesSyncScanOutputIncludingTruncation)
 // across however many cold leaves this range spans.
 TEST(AsyncScan, MissAfterEvictionCompletesViaReactor)
 {
-    TempPath   tmp;
+    crowtree_test::TempDir   tmp;
     ct_options opt  = {};
     opt.path        = tmp.path.c_str();
     opt.iu_size     = 4096;
@@ -235,7 +216,7 @@ TEST(AsyncScan, MissAfterEvictionCompletesViaReactor)
 // completed in the background by the time this runs (best-effort cancel).
 TEST(AsyncScan, FutureFreeBeforeCompletionDoesNotCrashOrLeak)
 {
-    TempPath   tmp;
+    crowtree_test::TempDir   tmp;
     ct_options opt  = {};
     opt.path        = tmp.path.c_str();
     opt.iu_size     = 4096;

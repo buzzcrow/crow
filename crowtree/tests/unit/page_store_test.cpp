@@ -4,13 +4,16 @@
 // PT1: PageStore backend tests (MemPageStore + BlockPageStore).
 #include "crowtree/block_page_store.h"
 #include "crowtree/page_store.h"
+#include "test_tmp.h"
 
 #include <gtest/gtest.h>
 
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 using namespace crowtree;
@@ -19,12 +22,17 @@ namespace
 {
 std::string temp_path()
 {
-    std::array<char, 24> tmpl{"/tmp/crowtree_ps_XXXXXX"};
-    int                  fd = mkstemp(tmpl.data());
+    std::string root = crowtree_test::test_tmp_root();
+    std::filesystem::create_directories(root);
+    std::array<char, 128> tmpl{};
+    std::snprintf(tmpl.data(), tmpl.size(), "%s/ps_XXXXXX", root.c_str());
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    int fd = mkstemp(buf.data());
     if (fd >= 0) {
         close(fd);
     }
-    return tmpl.data();
+    return buf.data();
 }
 } // namespace
 
@@ -317,10 +325,15 @@ namespace
 {
 std::string temp_dir()
 {
-    std::array<char, 32> tmpl{"/tmp/crowtree_blk_XXXXXX"};
-    char                *d = mkdtemp(tmpl.data());
+    std::string root = crowtree_test::test_tmp_root();
+    std::filesystem::create_directories(root);
+    std::array<char, 128> tmpl{};
+    std::snprintf(tmpl.data(), tmpl.size(), "%s/blk_XXXXXX", root.c_str());
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    char *d = mkdtemp(buf.data());
     if (d == nullptr) {
-        return "/tmp/crowtree_blk_fallback";
+        return root + "/blk_fallback";
     }
     return d;
 }

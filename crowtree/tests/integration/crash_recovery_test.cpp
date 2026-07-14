@@ -8,6 +8,7 @@
 #include "crowtree/block_page_store.h"
 #include "crowtree/crowtree.h"
 #include "crowtree/page_store.h"
+#include "test_tmp.h"
 
 #include <gtest/gtest.h>
 #include <sys/stat.h>
@@ -272,10 +273,9 @@ TEST(CrashRecovery, DemandLoadCorruptionLatched)
 // must fall back to gen1's committed image, fully intact, on a real file.
 TEST(CrashRecovery, FileTornSuperblockFallsBack)
 {
-    std::array<char, 32> tmpl{"/tmp/crowtree_crash_XXXXXX"};
-    char                *d = mkdtemp(tmpl.data());
-    ASSERT_NE(d, nullptr);
-    std::string path(d);
+    crowtree_test::TempDir tmp("crash_");
+    ASSERT_FALSE(tmp.path.empty());
+    std::string path = tmp.path;
 
     std::map<std::string, std::string> gen1;
     {

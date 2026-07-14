@@ -15,6 +15,7 @@ crowtree/build-tsan/
 crowtree/build-bench/
 crowtree/build*/
 crowtree/.cache/
+crowtree/.test-tmp/
 
 # ── Frontend (crowkv-console/web/ui) ────────────────────────────
 crowkv-console/web/ui/node_modules/

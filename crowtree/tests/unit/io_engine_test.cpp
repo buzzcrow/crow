@@ -3,6 +3,7 @@
 
 // Task 1: IoEngine + DirectIoEngine tests.
 #include "crowtree/io_engine.h"
+#include "test_tmp.h"
 
 #include <gtest/gtest.h>
 
@@ -10,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
+#include <filesystem>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -20,12 +22,17 @@ namespace
 {
 std::string temp_path()
 {
-    std::array<char, 24> tmpl{"/tmp/crowtree_io_XXXXXX"};
-    int                  fd = mkstemp(tmpl.data());
+    std::string root = crowtree_test::test_tmp_root();
+    std::filesystem::create_directories(root);
+    std::array<char, 128> tmpl{};
+    std::snprintf(tmpl.data(), tmpl.size(), "%s/io_XXXXXX", root.c_str());
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    int fd = mkstemp(buf.data());
     if (fd >= 0) {
         close(fd);
     }
-    return tmpl.data();
+    return buf.data();
 }
 } // namespace
 
