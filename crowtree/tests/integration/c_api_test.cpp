@@ -199,17 +199,17 @@ TEST(CApi, OversizedKeyRejectedThroughEncodedPath)
 
 TEST(CApi, FileCheckpointReopen)
 {
-    std::array<char, 26> tmpl{"/tmp/crowtree_capi_XXXXXX"};
-    int                  fd = mkstemp(tmpl.data());
-    ASSERT_GE(fd, 0);
-    close(fd);
-    std::string path(tmpl.data());
+    std::array<char, 32> tmpl{"/tmp/crowtree_capi_XXXXXX"};
+    char                *d = mkdtemp(tmpl.data());
+    ASSERT_NE(d, nullptr);
+    std::string path(d);
 
     ct_options opt  = {};
     opt.path        = path.c_str();
-    opt.iu_size     = 4096;
+    opt.iu_size     = 1;
     opt.frame_bytes = 4096;
     opt.compression = 1; // lz4 (falls back to stored-raw if unavailable)
+    // Default backend is CT_BACKEND_TEXT (TextPageStore debug backend)
 
     std::map<std::string, std::string> oracle;
     {
@@ -241,7 +241,6 @@ TEST(CApi, FileCheckpointReopen)
         }
         ct_close(t);
     }
-    std::remove(path.c_str());
 }
 
 // plan-tree #22: ct_options.backend=1 selects BlockPageStore (O_DIRECT)
@@ -249,17 +248,17 @@ TEST(CApi, FileCheckpointReopen)
 // FileCheckpointReopen above, just through the raw-block-device backend.
 TEST(CApi, BlockDeviceCheckpointReopen)
 {
-    std::array<char, 26> tmpl{"/tmp/crowtree_capi_XXXXXX"};
-    int                  fd = mkstemp(tmpl.data());
-    ASSERT_GE(fd, 0);
-    close(fd);
-    std::string path(tmpl.data());
+    std::array<char, 32> tmpl{"/tmp/crowtree_capi_XXXXXX"};
+    char                *d = mkdtemp(tmpl.data());
+    ASSERT_NE(d, nullptr);
+    std::string path(d);
 
     ct_options opt  = {};
     opt.path        = path.c_str();
-    opt.iu_size     = 4096;
+    opt.iu_size     = 1;
     opt.frame_bytes = 4096;
-    opt.backend     = 1; // BlockPageStore
+    opt.backend     = CT_BACKEND_BLOCK; // BlockPageStore
+    opt.block_size  = 8 * 1024;         // 8 KiB blocks for testing
 
     std::map<std::string, std::string> oracle;
     {
@@ -291,7 +290,6 @@ TEST(CApi, BlockDeviceCheckpointReopen)
         }
         ct_close(t);
     }
-    std::remove(path.c_str());
 }
 
 TEST(CApi, SnapshotViewIterate)

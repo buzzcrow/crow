@@ -69,6 +69,21 @@ using ct_stats = struct
     uint32_t buffer_pool_num_frames;
 };
 
+// Backend selection for durable storage.
+enum ct_backend : uint8_t
+{
+    CT_BACKEND_TEXT  = 0, // TextPageStore (debug, human-readable text files)
+    CT_BACKEND_BLOCK = 1, // BlockPageStore (production, array-of-blocks)
+};
+
+// Durability barrier policy.
+enum ct_sync_mode : uint8_t
+{
+    CT_SYNC_FULL  = 0, // fdatasync after every flush (default)
+    CT_SYNC_SKIP  = 1, // no fsync (tests/CI)
+    CT_SYNC_BATCH = 2, // fsync once per snapshot commit
+};
+
 // Backend / engine configuration. `path` null or empty selects an in-memory
 // store. Zero numeric fields take engine defaults.
 using ct_options = struct
@@ -79,16 +94,11 @@ using ct_options = struct
     uint64_t    buffer_pool_bytes; // 0 => default
     uint8_t     compression;       // 0 = none, 1 = lz4
     uint64_t    max_inline_value;  // 0 => default (frame_bytes/4)
-    // plan-tree #22: durable backend selection when `path` is set (ignored
-    // for the in-memory case). 0 = auto (FilePageStore, buffered I/O --
-    // today's only durable option before this field existed). 1 = raw
-    // block device (BlockPageStore, O_DIRECT) for a real SSD/SCM
-    // deployment target; `path` may be a block device node or a
-    // pre-allocated regular file (BlockPageStore works with either).
-    // BlockPageStore has no async twin yet, so get_async/flush_async/
-    // snapshot_async fall back to synchronous completion
-    // when this is set to 1.
-    uint8_t backend;
+    enum ct_backend backend;       // default CT_BACKEND_BLOCK; ignored for in-memory
+    uint64_t        block_size;    // 0 => default 64 MiB; ignored for text
+    uint32_t        store_id;      // default 0; block file naming
+    uint32_t        partition_id;  // default 0; maps to PxGroupId in CrowKV
+    enum ct_sync_mode sync_mode;   // default CT_SYNC_FULL
 };
 
 // ── Lifecycle + durability ────────────────────────────────────────

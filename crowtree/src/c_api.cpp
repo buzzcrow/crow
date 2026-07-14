@@ -15,6 +15,7 @@
 #include "crowtree/crowtree.h"
 #include "crowtree/page_store.h"
 #include "crowtree/snapshot_io.h"
+#include "crowtree/text_page_store.h"
 #ifdef CROWTREE_HAVE_LIBURING
 #    include "crowtree/reactor.h"
 #endif
@@ -211,14 +212,10 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
     o.compression = opt->compression == 1 ? compress_algo::kLz4 : compress_algo::kNone;
 
     const bool durable = opt->path != nullptr && opt->path[0] != '\0';
-    if (durable && opt->backend == 1) {
-        // plan-tree #22: raw block device (O_DIRECT), no async twin yet --
-        // get_async/flush_async/snapshot_async fall back to synchronous
-        // completion, matching a MemPageStore-backed tree's
-        // existing no-async-backend-wired path (o.async_reactor/
-        // async_page_store stay null).
+    if (!durable) {
+        // In-memory: BlockPageStore::open_mem with IU=1
         std::unique_ptr<BlockPageStore> bs;
-        Status s = BlockPageStore::open(opt->path, opt->iu_size == 0 ? 4096 : opt->iu_size, &bs);
+        Status s = BlockPageStore::open_mem(opt->iu_size == 0 ? 1 : opt->iu_size, &bs);
         if (!s.ok()) {
             return to_status(s);
         }
@@ -231,30 +228,17 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
         }
         h->tree = std::move(t);
     }
-    else if (durable) {
-        std::unique_ptr<FilePageStore> fs;
-        Status                         s = FilePageStore::open(opt->path, opt->iu_size == 0 ? 4096 : opt->iu_size, &fs);
+    else if (opt->backend == CT_BACKEND_TEXT) {
+        // Text debug backend: human-readable .ck files
+        uint32_t store_id     = opt->store_id;
+        uint32_t partition_id = opt->partition_id;
+        std::unique_ptr<TextPageStore> ts;
+        Status s = TextPageStore::open(opt->path, store_id, partition_id, &ts);
         if (!s.ok()) {
             return to_status(s);
         }
-        h->store     = std::move(fs);
+        h->store     = std::move(ts);
         o.page_store = h->store.get();
-#ifdef CROWTREE_HAVE_LIBURING
-        // Best-effort: opening the async twin failure leaves
-        // o.async_reactor/async_page_store null, so get_async/flush_async/
-        // snapshot_async just fall back to synchronous completion (design
-        // §6.3) rather than failing ct_open outright over a durable store
-        // that opened successfully via the (still required) sync path above.
-        h->reactor = std::make_unique<Reactor>();
-        std::unique_ptr<FileAsyncPageStore> afs;
-        Status                              as =
-            FileAsyncPageStore::open(opt->path, opt->iu_size == 0 ? 4096 : opt->iu_size, h->reactor.get(), &afs);
-        if (as.ok()) {
-            h->async_store     = std::move(afs);
-            o.async_reactor    = h->reactor.get();
-            o.async_page_store = h->async_store.get();
-        }
-#endif
         std::unique_ptr<Crowtree> t;
         Status                    os = Crowtree::open(o, &t);
         if (!os.ok()) {
@@ -263,7 +247,16 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
         h->tree = std::move(t);
     }
     else {
-        h->store     = std::make_unique<MemPageStore>(opt->iu_size == 0 ? 1 : opt->iu_size);
+        // CT_BACKEND_BLOCK: array-of-blocks BlockPageStore
+        uint64_t block_size = opt->block_size == 0 ? (64 * 1024 * 1024) : opt->block_size;
+        uint32_t iu         = opt->iu_size == 0 ? 4096 : opt->iu_size;
+        std::unique_ptr<BlockPageStore> bs;
+        Status s = BlockPageStore::open_blocks(opt->path, opt->store_id, opt->partition_id,
+                                               block_size, iu, &bs);
+        if (!s.ok()) {
+            return to_status(s);
+        }
+        h->store     = std::move(bs);
         o.page_store = h->store.get();
         std::unique_ptr<Crowtree> t;
         Status                    os = Crowtree::open(o, &t);
