@@ -16,6 +16,7 @@
 // below is written to hold either way (poll-until-done with a bounded
 // retry), except where a test specifically distinguishes the two.
 #include "crowtree/c_api.h"
+#include "test_tmp.h"
 
 #include <gtest/gtest.h>
 #include <unistd.h>
@@ -61,27 +62,6 @@ ct_status poll_until_done(ct_future *f, int32_t *out_found, uint64_t *out_slot, 
     ADD_FAILURE() << "future never completed";
     return static_cast<ct_status>(-1);
 }
-
-// RAII temp file path (mkstemp), mirroring c_api_test.cpp's FileCheckpointReopen.
-struct TempPath
-{
-    std::string path;
-
-    TempPath()
-    {
-        std::array<char, 32> tmpl{"/tmp/crowtree_async_XXXXXX"};
-        int                  fd = mkstemp(tmpl.data());
-        if (fd >= 0) {
-            close(fd);
-        }
-        path = tmpl.data();
-    }
-
-    ~TempPath()
-    {
-        std::remove(path.c_str());
-    }
-};
 
 } // namespace
 
@@ -156,7 +136,7 @@ TEST(AsyncGet, FastPathValueSurvivesRepeatedPollsUntilExplicitFree)
 // correct value.
 TEST(AsyncGet, MissAfterEvictionCompletesViaReactor)
 {
-    TempPath   tmp;
+    crowtree_test::TempDir   tmp;
     ct_options opt  = {};
     opt.path        = tmp.path.c_str();
     opt.iu_size     = 4096;
@@ -212,7 +192,7 @@ TEST(AsyncGet, MissAfterEvictionCompletesViaReactor)
 // signal (see the /coding sanitizer pass in this session's plan).
 TEST(AsyncGet, FutureFreeBeforeCompletionDoesNotCrashOrLeak)
 {
-    TempPath   tmp;
+    crowtree_test::TempDir   tmp;
     ct_options opt  = {};
     opt.path        = tmp.path.c_str();
     opt.iu_size     = 4096;
@@ -251,7 +231,7 @@ TEST(AsyncGet, FutureFreeBeforeCompletionDoesNotCrashOrLeak)
 // Crowtree::flush() implementation, not assumed).
 TEST(AsyncFlushSnapshot, FlushCompletesImmediatelySnapshotEventually)
 {
-    TempPath   tmp;
+    crowtree_test::TempDir   tmp;
     ct_options opt  = {};
     opt.path        = tmp.path.c_str();
     opt.iu_size     = 4096;

@@ -97,6 +97,7 @@ if(NOT (LIBURING_INCLUDE_DIR AND LIBURING_LIB))
   list(REMOVE_ITEM CROWTREE_TEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/tests/unit/reactor_test.cpp)
 endif()
 add_executable(crowtree_tests ${CROWTREE_TEST_SRC})
+target_include_directories(crowtree_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 target_link_libraries(crowtree_tests PRIVATE crowtree GTest::gtest GTest::gtest_main)
 # PRE_TEST: enumerate tests at ctest time, not build time. Required so sanitizer
 # builds (which can't run the binary at build time under restrictive ASLR) build

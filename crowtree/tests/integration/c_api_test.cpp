@@ -4,6 +4,7 @@
 // PT8: exercise the stable C ABI surface (open/apply/get/scan/snapshot/reopen,
 // snapshot view iteration, and export/import round-trip).
 #include "crowtree/c_api.h"
+#include "test_tmp.h"
 
 #include <gtest/gtest.h>
 
@@ -199,10 +200,9 @@ TEST(CApi, OversizedKeyRejectedThroughEncodedPath)
 
 TEST(CApi, FileCheckpointReopen)
 {
-    std::array<char, 32> tmpl{"/tmp/crowtree_capi_XXXXXX"};
-    char                *d = mkdtemp(tmpl.data());
-    ASSERT_NE(d, nullptr);
-    std::string path(d);
+    crowtree_test::TempDir tmp("capi_");
+    ASSERT_FALSE(tmp.path.empty());
+    std::string path = tmp.path;
 
     ct_options opt  = {};
     opt.path        = path.c_str();
@@ -248,10 +248,9 @@ TEST(CApi, FileCheckpointReopen)
 // FileCheckpointReopen above, just through the block-device backend.
 TEST(CApi, BlockDeviceCheckpointReopen)
 {
-    std::array<char, 32> tmpl{"/tmp/crowtree_capi_XXXXXX"};
-    char                *d = mkdtemp(tmpl.data());
-    ASSERT_NE(d, nullptr);
-    std::string path(d);
+    crowtree_test::TempDir tmp("capi_");
+    ASSERT_FALSE(tmp.path.empty());
+    std::string path = tmp.path;
 
     ct_options opt  = {};
     opt.path        = path.c_str();
@@ -379,10 +378,9 @@ TEST(CApi, SnapshotExportImport)
 // because the OS page cache is still warm (no kill -9).
 TEST(CApi, SyncSkipSnapshotReopen)
 {
-    std::array<char, 32> tmpl{"/tmp/crowtree_sync_XXXXXX"};
-    char                *d = mkdtemp(tmpl.data());
-    ASSERT_NE(d, nullptr);
-    std::string path(d);
+    crowtree_test::TempDir tmp("sync_");
+    ASSERT_FALSE(tmp.path.empty());
+    std::string path = tmp.path;
 
     ct_options opt  = {};
     opt.path        = path.c_str();

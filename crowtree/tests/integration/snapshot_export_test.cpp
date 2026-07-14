@@ -4,6 +4,7 @@
 // PT7: snapshot export / import (portable stream + file wrappers).
 #include "crowtree/crowtree.h"
 #include "crowtree/snapshot_io.h"
+#include "test_tmp.h"
 
 #include <gtest/gtest.h>
 
@@ -184,11 +185,9 @@ TEST(SnapshotExport, FileDumpLoadRoundTrip)
     std::map<std::string, std::string> live;
     build_source(&a, &live);
 
-    std::array<char, 26> tmpl{"/tmp/crowtree_snap_XXXXXX"};
-    int  fd     = mkstemp(tmpl.data());
-    ASSERT_GE(fd, 0);
-    close(fd);
-    std::string path(tmpl.data());
+    crowtree_test::TempFile tmp("snap_");
+    ASSERT_FALSE(tmp.path.empty());
+    std::string path = tmp.path;
 
     ASSERT_TRUE(snapshot_dump_to_file(a, snapshot_format::kPortable, path).ok());
 

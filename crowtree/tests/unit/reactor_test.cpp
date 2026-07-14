@@ -6,6 +6,7 @@
 // CROWTREE_HAVE_LIBURING gate) -- io_uring is Linux-only.
 #include "crowtree/async_page_store.h"
 #include "crowtree/reactor.h"
+#include "test_tmp.h"
 
 #include <fcntl.h>
 #include <gtest/gtest.h>
@@ -15,6 +16,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <filesystem>
 #include <string>
 #include <thread>
 #include <utility>
@@ -26,12 +28,17 @@ namespace
 {
 std::string temp_path()
 {
-    std::array<char, 24> tmpl{"/tmp/crowtree_rx_XXXXXX"};
-    int                  fd = mkstemp(tmpl.data());
+    std::string root = crowtree_test::test_tmp_root();
+    std::filesystem::create_directories(root);
+    std::array<char, 128> tmpl{};
+    std::snprintf(tmpl.data(), tmpl.size(), "%s/rx_XXXXXX", root.c_str());
+    std::vector<char> buf(tmpl.begin(), tmpl.end());
+    buf.push_back('\0');
+    int fd = mkstemp(buf.data());
     if (fd >= 0) {
         close(fd);
     }
-    return tmpl.data();
+    return buf.data();
 }
 
 // Bounded poll for a background-thread-set flag, matching the style already
