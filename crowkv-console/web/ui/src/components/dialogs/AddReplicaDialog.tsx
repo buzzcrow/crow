@@ -3,7 +3,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Dialog } from '../Dialog';
-import { Input } from '../ui/Input';
+import { Input, Select } from '../ui/Input';
 import { useToast } from '../../contexts/ToastContext';
 import { addReplica } from '../../api';
 import { Node } from '../../types';
@@ -102,59 +102,33 @@ export function AddReplicaDialog({
       confirmLoading={isLoading}
     >
       <div className="tw-space-y-4">
-        <div className="tw-space-y-2">
-          <label className="tw-text-xs tw-font-medium tw-text-text">
-            Node
-          </label>
-          {nodes.length === 0 ? (
-            <div className="tw-text-sm tw-text-muted">
-              No nodes available.
-            </div>
-          ) : (
-            <div className="tw-max-h-40 tw-overflow-y-auto tw-border tw-border-border tw-rounded-md tw-p-2 tw-space-y-1">
-              {availableNodes.map((node) => (
-                <label
-                  key={node.id}
-                  className="tw-flex tw-items-center tw-gap-2 tw-p-2 tw-rounded tw-cursor-pointer hover:tw-bg-bg"
-                >
-                  <input
-                    type="radio"
-                    name="replica-node"
-                    checked={nodeId === node.id}
-                    onChange={() => setNodeId(node.id)}
-                    className="tw-h-4 tw-w-4 tw-rounded-full tw-border-border tw-text-accent focus:tw-ring-accent"
-                  />
-                  <span className="tw-text-sm tw-text-text">
-                    {node.id}
-                    <span className="tw-text-xs tw-text-muted tw-ml-1">({node.host})</span>
-                  </span>
-                </label>
-              ))}
-              {nodes.filter((node) => usedNodeIds.has(node.id)).map((node) => (
-                <label
-                  key={node.id}
-                  className="tw-flex tw-items-center tw-gap-2 tw-p-2 tw-rounded tw-cursor-not-allowed tw-opacity-50"
-                >
-                  <input
-                    type="radio"
-                    name="replica-node"
-                    disabled
-                    className="tw-h-4 tw-w-4 tw-rounded-full tw-border-border tw-text-accent"
-                  />
-                  <span className="tw-text-sm tw-text-text">
-                    {node.id}
-                    <span className="tw-text-xs tw-text-muted tw-ml-1">({node.host}) — already has a replica</span>
-                  </span>
-                </label>
-              ))}
-            </div>
-          )}
-          {!hasAvailableNodes && nodes.length > 0 && (
-            <div className="tw-text-sm tw-text-muted">
-              No available node. Every node already has a replica in this group.
-            </div>
-          )}
-        </div>
+        {nodes.length === 0 ? (
+          <div className="tw-text-sm tw-text-muted">
+            No nodes available.
+          </div>
+        ) : (
+          <Select
+            label="Node"
+            value={nodeId}
+            onChange={(e) => setNodeId(e.target.value)}
+            disabled={!hasAvailableNodes}
+          >
+            {availableNodes.length === 0 ? (
+              <option value="" disabled>No available node</option>
+            ) : (
+              availableNodes.map((node) => (
+                <option key={node.id} value={node.id}>
+                  {node.id} ({node.host})
+                </option>
+              ))
+            )}
+          </Select>
+        )}
+        {!hasAvailableNodes && nodes.length > 0 && (
+          <div className="tw-text-sm tw-text-muted">
+            No available node. Every node already has a replica in this group.
+          </div>
+        )}
         <Input
           label="Replica ID (optional)"
           placeholder="Leave empty for auto-generated"
