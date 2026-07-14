@@ -28,8 +28,7 @@ namespace crowtree
 {
 
 // Durability barrier policy. Mirrors ct_sync_mode in c_api.h.
-enum class SyncMode : uint8_t
-{
+enum class SyncMode : uint8_t {
     kFull  = 0, // fdatasync after every flush (default, production)
     kSkip  = 1, // no fsync (tests/CI only)
     kBatch = 2, // fsync once per snapshot commit
@@ -77,15 +76,13 @@ class PageStore
     // callback immediately (ready completion). Backends with a real async
     // engine (IoUring) override these.
 
-    virtual uint64_t submit_read(uint64_t off, void *buf, size_t len,
-                                 std::function<void(Status)> on_complete)
+    virtual uint64_t submit_read(uint64_t off, void *buf, size_t len, std::function<void(Status)> on_complete)
     {
         on_complete(read_at(off, static_cast<uint8_t *>(buf), len));
         return 0;
     }
 
-    virtual uint64_t submit_write(uint64_t off, const void *buf, size_t len,
-                                  std::function<void(Status)> on_complete)
+    virtual uint64_t submit_write(uint64_t off, const void *buf, size_t len, std::function<void(Status)> on_complete)
     {
         on_complete(write_at(off, static_cast<const uint8_t *>(buf), len));
         return 0;

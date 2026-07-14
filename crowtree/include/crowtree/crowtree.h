@@ -254,10 +254,10 @@ struct PreparedSnapshot
     uint64_t                          last_applied_slot = 0;
     // Diagnostics for the "snapshot committed" log line (matches the
     // pre-refactor synchronous snapshot()'s log fields exactly).
-    uint64_t seq             = 0;
-    uint64_t live_page_count = 0; // live slots across every present segment
-    uint64_t pages_written   = 0;
-    uint64_t segdir_len      = 0;
+    uint64_t           seq             = 0;
+    uint64_t           live_page_count = 0; // live slots across every present segment
+    uint64_t           pages_written   = 0;
+    uint64_t           segdir_len      = 0;
     std::set<uint32_t> empty_blocks; // block indices with zero live bytes (block compaction)
 };
 
