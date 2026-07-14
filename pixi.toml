@@ -24,7 +24,7 @@ clang-format = ">=19.0.0"
 clang-tools = "*"
 folly = "*"
 # Rust toolchain (crowkv)
-rust = ">=1.75"
+rust = ">=1.96"
 protobuf = "*"
 openssl = "*"
 pkg-config = "*"
@@ -63,7 +63,7 @@ build = { cmd = "cmake -S crowtree -B crowtree/build -DCMAKE_BUILD_TYPE=Release 
 default = { depends-on = ["build"] }
 
 # ── Run ──────────────────────────────────────────────────────────
-web = { cmd = "cargo run --release -p crowkv-web", depends-on = ["build"] }
+web = { cmd = "echo 'CrowKV console starting at: http://127.0.0.1:9920/' && cargo run --release -p crowkv-web", depends-on = ["build"] }
 
 # ── Test ─────────────────────────────────────────────────────────
 test-ct = { cmd = "ctest --test-dir crowtree/build --output-on-failure", depends-on = ["build"] }
@@ -72,7 +72,7 @@ test-server = { cmd = "cargo test -p crowkv-server --all-targets", depends-on = 
 test-cli = { cmd = "cargo test -p crowkv-console-shared -p crowkv-cli --all-targets", depends-on = ["build"] }
 test-web = { cmd = "cargo test -p crowkv-web --all-targets", depends-on = ["build"] }
 install-playwright = "cd crowkv-console/web/ui && npx playwright install chromium"
-test-ui = { cmd = "rm -rf test-logs && cargo build -p crowkv-server && export CROWKV_SERVER_BINARY=$(pwd)/target/debug/crowkv-server && cd crowkv-console/web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-web-deps", "install-playwright"] }
+test-ui = { cmd = "rm -rf test-logs && cargo build -p crowkv-server && export CROWKV_SERVER_BINARY=$(pwd)/target/debug/crowkv-server && cd crowkv-console/web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-web-deps"] }
 test = { cmd = '''
 bash -c '
 pixi run test-ct & p1=$!

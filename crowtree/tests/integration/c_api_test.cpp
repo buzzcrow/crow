@@ -4,6 +4,7 @@
 // PT8: exercise the stable C ABI surface (open/apply/get/scan/snapshot/reopen,
 // snapshot view iteration, and export/import round-trip).
 #include "crowtree/c_api.h"
+#include "test_tmp.h"
 
 #include <gtest/gtest.h>
 
@@ -152,20 +153,19 @@ TEST(CApi, ApplyBatchAtomicMultiKey)
 // writes) after the refactor.
 TEST(CApi, OversizedKeyRejectedThroughEncodedPath)
 {
-    ct_options opt   = {};
-    opt.frame_bytes  = 4096; // default limit = frame_bytes / 2 = 2048
-    ct_tree     *t   = nullptr;
+    ct_options opt  = {};
+    opt.frame_bytes = 4096; // default limit = frame_bytes / 2 = 2048
+    ct_tree *t      = nullptr;
     ASSERT_EQ(ct_open(&opt, &t), 0);
 
     std::string big_key(3000, 'x');
     std::string ok_key = "ok";
 
     EXPECT_EQ(ct_apply_put(t, 1, reinterpret_cast<const uint8_t *>(big_key.data()), big_key.size(),
-                          reinterpret_cast<const uint8_t *>("v"), 1),
-             static_cast<ct_status>(-2)); // kInvalidArgument
-    EXPECT_EQ(
-        ct_apply_delete(t, 1, reinterpret_cast<const uint8_t *>(big_key.data()), big_key.size()),
-        static_cast<ct_status>(-2));
+                           reinterpret_cast<const uint8_t *>("v"), 1),
+              static_cast<ct_status>(-2)); // kInvalidArgument
+    EXPECT_EQ(ct_apply_delete(t, 1, reinterpret_cast<const uint8_t *>(big_key.data()), big_key.size()),
+              static_cast<ct_status>(-2));
 
     auto pack_record = [](std::string *o, uint8_t kind, const std::string &k, const std::string &v) {
         o->push_back(static_cast<char>(kind));
@@ -179,10 +179,10 @@ TEST(CApi, OversizedKeyRejectedThroughEncodedPath)
         o->append(v);
     };
     std::string packed;
-    pack_record(&packed, 0, ok_key, "v1");    // fine on its own
-    pack_record(&packed, 0, big_key, "v2");   // poisons the whole batch
+    pack_record(&packed, 0, ok_key, "v1");  // fine on its own
+    pack_record(&packed, 0, big_key, "v2"); // poisons the whole batch
     EXPECT_EQ(ct_apply_batch(t, 1, reinterpret_cast<const uint8_t *>(packed.data()), packed.size(), 2),
-             static_cast<ct_status>(-2));
+              static_cast<ct_status>(-2));
 
     // All-or-nothing: the batch's *other*, otherwise-valid key must not have
     // landed either.
@@ -199,17 +199,16 @@ TEST(CApi, OversizedKeyRejectedThroughEncodedPath)
 
 TEST(CApi, FileCheckpointReopen)
 {
-    std::array<char, 26> tmpl{"/tmp/crowtree_capi_XXXXXX"};
-    int                  fd = mkstemp(tmpl.data());
-    ASSERT_GE(fd, 0);
-    close(fd);
-    std::string path(tmpl.data());
+    crowtree_test::TempDir tmp("capi_");
+    ASSERT_FALSE(tmp.path.empty());
+    std::string path = tmp.path;
 
     ct_options opt  = {};
     opt.path        = path.c_str();
-    opt.iu_size     = 4096;
+    opt.iu_size     = 1;
     opt.frame_bytes = 4096;
     opt.compression = 1; // lz4 (falls back to stored-raw if unavailable)
+    // Default backend is CT_BACKEND_TEXT (TextPageStore debug backend)
 
     std::map<std::string, std::string> oracle;
     {
@@ -241,25 +240,23 @@ TEST(CApi, FileCheckpointReopen)
         }
         ct_close(t);
     }
-    std::remove(path.c_str());
 }
 
-// plan-tree #22: ct_options.backend=1 selects BlockPageStore (O_DIRECT)
-// instead of the default FilePageStore -- same round-trip as
-// FileCheckpointReopen above, just through the raw-block-device backend.
+// plan-tree #22: ct_options.backend=CT_BACKEND_BLOCK selects BlockPageStore
+// instead of the default TextPageStore -- same round-trip as
+// FileCheckpointReopen above, just through the block-device backend.
 TEST(CApi, BlockDeviceCheckpointReopen)
 {
-    std::array<char, 26> tmpl{"/tmp/crowtree_capi_XXXXXX"};
-    int                  fd = mkstemp(tmpl.data());
-    ASSERT_GE(fd, 0);
-    close(fd);
-    std::string path(tmpl.data());
+    crowtree_test::TempDir tmp("capi_");
+    ASSERT_FALSE(tmp.path.empty());
+    std::string path = tmp.path;
 
     ct_options opt  = {};
     opt.path        = path.c_str();
-    opt.iu_size     = 4096;
+    opt.iu_size     = 1;
     opt.frame_bytes = 4096;
-    opt.backend     = 1; // BlockPageStore
+    opt.backend     = CT_BACKEND_BLOCK; // BlockPageStore
+    opt.block_size  = 8 * 1024;         // 8 KiB blocks for testing
 
     std::map<std::string, std::string> oracle;
     {
@@ -291,7 +288,6 @@ TEST(CApi, BlockDeviceCheckpointReopen)
         }
         ct_close(t);
     }
-    std::remove(path.c_str());
 }
 
 TEST(CApi, SnapshotViewIterate)
@@ -375,4 +371,45 @@ TEST(CApi, SnapshotExportImport)
     }
     ct_close(a);
     ct_close(b);
+}
+
+// Task 9: CT_SYNC_SKIP — snapshot + reopen with no fsync. Data survives
+// because the OS page cache is still warm (no kill -9).
+TEST(CApi, SyncSkipSnapshotReopen)
+{
+    crowtree_test::TempDir tmp("sync_");
+    ASSERT_FALSE(tmp.path.empty());
+    std::string path = tmp.path;
+
+    ct_options opt  = {};
+    opt.path        = path.c_str();
+    opt.iu_size     = 1;
+    opt.frame_bytes = 4096;
+    opt.backend     = CT_BACKEND_BLOCK;
+    opt.block_size  = 8 * 1024;
+    opt.sync_mode   = CT_SYNC_SKIP;
+
+    {
+        ct_tree *t = nullptr;
+        ASSERT_EQ(ct_open(&opt, &t), 0);
+        ASSERT_EQ(put_flush(t, 1, "key1", "val1"), 0);
+        ASSERT_EQ(put_flush(t, 2, "key2", "val2"), 0);
+        uint64_t durable = 0;
+        ASSERT_EQ(ct_snapshot(t, &durable), 0);
+        EXPECT_EQ(durable, 2U);
+        ct_close(t);
+    }
+    {
+        ct_tree *t = nullptr;
+        ASSERT_EQ(ct_open(&opt, &t), 0);
+        EXPECT_EQ(ct_last_applied_slot(t), 2U);
+        int32_t  found = 0;
+        uint64_t slot  = 0;
+        ct_buf   val   = {};
+        ASSERT_EQ(ct_get(t, reinterpret_cast<const uint8_t *>("key1"), 4, &found, &slot, &val), 0);
+        EXPECT_EQ(found, 1);
+        EXPECT_EQ(std::string(reinterpret_cast<char *>(val.data), val.len), "val1");
+        ct_free_buf(&val);
+        ct_close(t);
+    }
 }

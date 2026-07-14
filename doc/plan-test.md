@@ -6,6 +6,32 @@
 Unfinished test tasks, grouped by layer. Each task has a checkbox for tracking.
 For test strategy, layer scope, and coverage details, see [`design/design-test.md`](design/design-test.md).
 
+## Suite Timing
+
+Measured on 2026-07-15. All six suites passed with zero failures. Times are
+the wall-clock duration of `pixi run <suite>` (including incremental
+build/compile overhead). macOS times are from the original development
+machine; Linux times are from a Linux dev box (same date).
+
+| Suite | Result | Tests | macOS | Linux |
+| --- | --- | --- | --- | --- |
+| `test-ct` | pass | 328/328 | 8.3 s | 17.6 s |
+| `test-core` | pass | 404 | 8.9 s | 10.6 s |
+| `test-server` | pass | 47 | 9.4 s | 10.6 s |
+| `test-cli` | pass | 56 | 9.6 s | 11.4 s |
+| `test-web` | pass | 49 | 39.1 s | 28.1 s |
+| `test-ui` | pass | 23/23 | 32.7 s | 41.3 s |
+| **Total** | **pass** | — | **~108 s** | **~120 s** |
+
+The C++ Crowtree tests (`test-ct`) and the Rust core tests (`test-core`) are
+the fastest. The console/web suite (`test-web`) dominates wall time because it
+boots real server processes and runs integration-level API tests. The E2E suite
+(`test-ui`) launches a headless browser against a real backend (system chromium
+at `/snap/bin/chromium` on Linux). Note: `test-ct` is slower on Linux (17.6 s
+vs 8.3 s) due to C++ rebuild overhead; `test-core` is now faster on Linux (10.6 s
+vs 8.9 s) with warm incremental builds; `test-web` is faster on Linux (28.1 s
+vs 39.1 s) possibly due to faster process spawning.
+
 ## Election Unit
 
 - [x] `on_step_down` handler: strict-fence policy (only accepts if still leader at requested term) (`step_down_test.rs`).

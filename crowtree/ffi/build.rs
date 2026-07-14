@@ -40,11 +40,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The engine now includes Abseil headers (absl::btree_map in the MemTable,
     // ). Abseil is header-only for btree, so we only need its include
     // path; in the pixi/conda environment it lives under $CONDA_PREFIX/include.
+    // Use -isystem (not -I) for third-party headers so -Wall -Wextra skips them.
     let conda_prefix = std::env::var("CONDA_PREFIX").ok().map(PathBuf::from);
     if let Some(prefix) = &conda_prefix {
         let inc = prefix.join("include");
         if inc.join("absl").is_dir() {
-            build.include(&inc);
+            build.flag(format!("-isystem{}", inc.display()));
         }
     }
     // Fallback: when CONDA_PREFIX is not set (e.g., the pre-commit hook runs in a
@@ -53,19 +54,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let homebrew = PathBuf::from("/opt/homebrew/include");
         if homebrew.join("absl").is_dir() {
-            build.include(&homebrew);
+            build.flag(format!("-isystem{}", homebrew.display()));
         }
     }
     {
         let local = PathBuf::from("/usr/local/include");
         if local.join("absl").is_dir() {
-            build.include(&local);
+            build.flag(format!("-isystem{}", local.display()));
         }
     }
     println!("cargo:rerun-if-env-changed=CONDA_PREFIX");
 
     // liburing (io_uring reactor) -- Linux-only, no
-    // macOS build exists, so reactor.cpp/file_async_page_store.cpp are
+    // macOS build exists, so reactor.cpp/block_async_page_store.cpp are
     // excluded from the compiled set entirely when not found, mirroring
     // crowtree/CMakeLists.txt's CROWTREE_HAVE_LIBURING gate exactly (same
     // reasoning: macOS dev-path note).
@@ -78,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         files.retain(|f| {
             !matches!(
                 f.file_name().and_then(|s| s.to_str()),
-                Some("reactor.cpp") | Some("file_async_page_store.cpp")
+                Some("reactor.cpp") | Some("block_async_page_store.cpp")
             )
         });
     }
@@ -89,7 +90,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Some(prefix) = liburing_dir {
-        build.include(prefix.join("include"));
+        let inc = prefix.join("include");
+        build.flag(format!("-isystem{}", inc.display()));
         build.define("CROWTREE_HAVE_LIBURING", "1");
         println!("cargo:rustc-link-search=native={}", prefix.join("lib").display());
         println!("cargo:rustc-link-lib=dylib=uring");

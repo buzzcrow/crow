@@ -2,7 +2,7 @@
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ---
-description: CrowKV coding flow — conventions, doc-first, pre-commit, commit
+description: CrowKV coding flow — conventions, doc-first
 ---
 
 # CrowKV - Coding Flow
@@ -52,22 +52,3 @@ When adding internal state to `crowkv` lib:
 - Mid-impl decision:
   - **Simple/local** → decide, note in commit msg.
   - **Ambiguous / needs review** → discuss with the user. Do not silently guess.
-
-## Pre-Commit (auto via `.githooks/pre-commit`)
-
-// turbo
-```bash
-cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test
-```
-
-Do not bypass.
-
-- **Do NOT fix clippy errors** — leave for the user.
-- **DO fix test issues** — ensure tests pass.
-- Leave code changes in place; user will fix clippy and commit.
-
-## Commit & Push
-
-- One logical change per commit. Subject ≤72 chars, imperative.
-- Reference upstream doc (`design-xxx.md §N`) in the body.
-- Run `/review` before push for non-trivial changes.

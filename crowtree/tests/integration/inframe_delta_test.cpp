@@ -9,8 +9,8 @@
 
 #include <gtest/gtest.h>
 
-#include <chrono>
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <map>
 #include <memory>

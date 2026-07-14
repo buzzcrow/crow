@@ -226,7 +226,8 @@ TEST(Overflow, ParityVsOracle)
             oracle.erase(key);
         }
         else {
-            size_t      n = ((rng() % 3) == 0) ? (200 + static_cast<size_t>(rng() % 9000)) : (1 + static_cast<size_t>(rng() % 40));
+            size_t n =
+                ((rng() % 3) == 0) ? (200 + static_cast<size_t>(rng() % 9000)) : (1 + static_cast<size_t>(rng() % 40));
             std::string v = big_val(n, static_cast<uint32_t>(slot));
             ASSERT_TRUE(t.apply(slot, put_one(key, v)).ok());
             oracle[key] = v;

@@ -64,10 +64,10 @@ pub struct Cli {
     pub data_root: Option<std::path::PathBuf>,
 
     /// Durable backend for the crowtree engine (only used when `--kv-engine
-    /// crowtree`). `file` (default) is buffered file I/O; `block` opens
-    /// `data_root`'s per-group file with `O_DIRECT` via `BlockPageStore`
-    /// for a real SSD/SCM deployment target.
-    #[arg(long, default_value = "file", value_parser = ["file", "block"])]
+    /// crowtree`). `text` (default) is the debug text-file backend; `block`
+    /// opens `data_root`'s per-group directory with `BlockPageStore`
+    /// (array-of-blocks, `O_DIRECT`) for a real SSD/SCM deployment target.
+    #[arg(long, default_value = "text", value_parser = ["text", "block"])]
     pub kv_backend: String,
 }
 

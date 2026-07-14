@@ -101,7 +101,7 @@ pub async fn run_gc_with_watermark(wal: &WalEngine, gc_slot: u64) -> io::Result<
             .filter(|meta| meta.max_slot > 0 && meta.max_slot < gc_slot)
             .map(|meta| {
                 let dir = &disk_paths[meta.disk_idx];
-                let filename = format!("seg-{:07}.log", meta.segment_id);
+                let filename = format!("seg-{:07}.ck", meta.segment_id);
                 let path = dir.join(filename);
                 (meta.segment_id, meta.disk_idx, path)
             })

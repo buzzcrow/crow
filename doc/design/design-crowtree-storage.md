@@ -18,6 +18,11 @@ consensus WAL.
 
 - [1. PageStore Abstraction](#1-pagestore-abstraction)
 - [2. Backends](#2-backends)
+  - [2.1 TextPageStore — On-Disk Layout (Debug)](#21-textpagestore--on-disk-layout-debug)
+  - [2.2 BlockPageStore — On-Disk Layout (Production)](#22-blockpagestore--on-disk-layout-production)
+  - [2.3 Async I/O Architecture](#23-async-io-architecture)
+  - [2.4 fsync Policy](#24-fsync-policy)
+  - [2.5 Block Compaction](#25-block-compaction)
 - [3. On-Disk Page Format (Zero-Copy Frame)](#3-on-disk-page-format-zero-copy-frame)
 - [4. Buffer Pool (Frame Cache)](#4-buffer-pool-frame-cache)
 - [5. Internal WAL Decision](#5-internal-wal-decision)
@@ -33,10 +38,16 @@ consensus WAL.
 
 crowtree's tree logic references pages by `PID` and is unaware of the storage
 medium. A `PageStore` maps a durable page slot to bytes — it is the only part
-of crowtree that does I/O, and it is page-granular and asynchronous
+of crowtree that does I/O, and it is page-granular and **always asynchronous**
 (`read_page`/`write_page` complete via callback/future, matching
-[`design.md` §12.1](../design.md#121-async-disk-io-substrate-moved-from-design-async-iomd); inside C++ the backend uses
-io_uring / `O_DIRECT` / RDMA verbs directly, no FFI on the I/O hot path).
+[`design.md` §12.1](../design.md#121-async-disk-io-substrate-moved-from-design-async-iomd)).
+The upper layer always uses the async API — regardless of whether the
+underlying platform has `io_uring` (Linux) or not (macOS/fallback). On
+Linux, `BlockAsyncPageStore` + `Reactor` submit genuine `io_uring` SQEs;
+on macOS or without liburing, the `*_async` methods fall back to
+synchronous blocking I/O wrapped as immediately-ready completions, so the
+upper layer has a **unified async interface** with no sync/async split.
+No FFI on the I/O hot path.
 
 **IU = Indivisible Unit.** The minimum atomically-writable size. Leaf base
 pages are padded to a multiple of it so a page write cannot tear (§3). The IU
@@ -49,23 +60,259 @@ alongside the root pointer in the commit anchor (§6).
 
 ## 2. Backends
 
-There are **two** `PageStore` implementations — a file store and a
-block-device store. RDMA is **not** a separate backend: a remote page region
-is just a block device reached over the network, served by the same
+There are **two** `PageStore` implementations — a text-encoded debug store
+and a block-device store. RDMA is **not** a separate backend: a remote page
+region is just a block device reached over the network, served by the same
 `BlockPageStore` with an RDMA medium driver.
 
 | Backend | Medium | IU | Notes |
 | --- | --- | --- | --- |
-| `FilePageStore` | Local file on a filesystem | 4 KiB default | `pwrite`/`pread` or io_uring; `O_DIRECT` optional. Dev/default. |
-| `BlockPageStore` | Raw block device, served by a pluggable medium driver: **SSD** (`O_DIRECT`), **SCM** (byte-addressable), **mem** (test), **RDMA-remote** (one-sided verbs to a remote region) | SSD: 16/64 KiB; SCM/mem: down to **1 byte**; RDMA: the remote region's IU | No filesystem; the allocation map owns the whole device/region. Byte-IU media skip page padding. |
+| `TextPageStore` | Local filesystem directory | 1 byte (always) | Debug/test backend. Each page, anchor, and segment image is a separate human-readable text file. No compression. Implements `PageStore` with `iu_size()=1`; internally maps addresses to filenames. |
+| `BlockPageStore` | Raw block device or regular file, served by a pluggable medium driver: **SSD** (`O_DIRECT`), **SCM** (byte-addressable), **mem** (test), **RDMA-remote** (one-sided verbs to a remote region) | SSD: 16/64 KiB; SCM/mem: down to **1 byte**; RDMA: the remote region's IU | Production backend. Array-of-blocks growth: a group owns multiple fixed-size block files (`{path}.blk-{NNNN}`), allocated on demand. No filesystem; the allocation map owns the whole device/region. Byte-IU media skip page padding. |
 
-Both implement the same `PageStore`. The backend is selected at `ct_open` via
-options.
+Both implement the same async `PageStore`. The backend is selected at `ct_open`
+via `ct_options.backend` (0 = text debug, 1 = block). When `path` is
+null/empty, an in-memory `BlockPageStore` with IU=1 is used (test path).
+
+### 2.3 Async I/O Architecture
+
+`BlockPageStore` has an async twin, `BlockAsyncPageStore`, that submits all
+I/O through a `Reactor` (io_uring event loop). The async path is used by
+`ct_get_async`, `ct_flush_async`, and `ct_snapshot_async`.
+
+| Platform | Mechanism | Status |
+| --- | --- | --- |
+| Linux (liburing) | `BlockAsyncPageStore` + `Reactor` (io_uring SQE/CQE) | Production |
+| macOS / no liburing | Synchronous fallback (blocking `pwrite`/`pread`/`fdatasync` wrapped as immediately-ready completions) | Dev |
+
+**Linux (liburing)**: `BlockAsyncPageStore` maps global byte offsets to
+per-extent fds via `BlockPageStore::fd_for_offset()`, then submits
+`io_uring` SQEs through the `Reactor`. Writes spanning multiple extents are
+split and chained; fsync chains across all dirty extent fds. Requires
+`CROWTREE_HAVE_LIBURING` build flag.
+
+**macOS / no liburing**: `CROWTREE_HAVE_LIBURING` is not defined. `ct_open`
+does not wire a `Reactor` or `AsyncPageStore`. The `*_async` C API methods
+fall back to completing synchronously (blocking I/O wrapped as an
+immediately-ready completion). The upper-layer API is identical regardless
+of platform.
+
+**`FilePageStore`, `FileAsyncPageStore`, `IoEngine`, and `DirectIoEngine`
+are removed.** The old sync `FilePageStore` was only used for testing;
+`TextPageStore` now serves that role. The old `FileAsyncPageStore`
+(single-file `io_uring`) is superseded by `BlockAsyncPageStore`
+(array-of-blocks `io_uring`). The old `IoEngine`/`DirectIoEngine`
+abstraction (blocking calls wrapped as async) is replaced by the
+platform-level fallback described above.
+
+### 2.4 fsync Policy
+
+`fsync`/`fdatasync` is **configurable** via `ct_options.sync_mode`:
+
+| Mode | Behavior | Use case |
+| --- | --- | --- |
+| `FullSync` (default) | `fdatasync` after every flush | Production durability |
+| `SkipSync` | No fsync — writes are flushed by OS page cache only | Testing/benchmarks |
+| `BatchSync` | fsync once per snapshot, not per flush | Throughput-sensitive testing |
+
+On macOS, `fsync` costs ~3ms per call (stable). `SkipSync` or `BatchSync`
+eliminates this overhead for test/CI runs. The same policy applies to WAL
+file sync (see `design-wal.md`).
 
 **RDMA-remote is deferred**, like any remote block device: it needs a local
 page cache (§4) with pinning + epoch-gated eviction, and remote allocation
-coordination. The v1 target is `FilePageStore` (and the in-memory
-`BlockPageStore` for tests).
+coordination. The v1 target is `TextPageStore` for debugging and
+`BlockPageStore` (in-memory and SSD) for production/tests.
+
+### 2.5 Block Compaction
+
+After GC retires dead pages, their addresses become gaps in `SpaceAllocator`.
+Over time, a block file (`.blk-{NNNN}`) may accumulate so many gaps that most
+of its physical space is free. **Online block compaction** reclaims this space
+without a separate compaction pass by controlling *where* new allocations land
+during snapshot.
+
+**Mechanism — gap filtering in `SpaceAllocator`.**
+
+`SpaceAllocator` is rebuilt every snapshot from the committed anchor's live
+extents (`build_allocator()` in `persist.cpp`). Its gap list is the complement
+of live extents within `[region_base, file_size)`. The compaction mechanism is
+simple: when `block_size > 0` (array-of-blocks mode), compute each block's free
+ratio (`gap_bytes / block_size`) and **exclude gaps in blocks above a
+threshold** (compile-time constant, 70%) from the allocator's gap list.
+
+Filtered-out gaps are invisible to `alloc()`, so new writes never reuse space
+in sparse blocks. They land in dense blocks' gaps or append past EOF (which
+may trigger `allocate_new_block()`). Over successive snapshots, as dirty pages
+are rewritten, sparse blocks lose their live pages.
+
+**What gets relocated.**
+
+Only **dirty pages** are rewritten during snapshot — clean pages keep their
+existing durable address. So a single snapshot only relocates pages modified
+since the last snapshot. Over multiple snapshots, as pages are touched and
+rewritten, sparse blocks gradually drain. For high-churn workloads, this is
+fast (most pages are dirty each snapshot). For low-churn workloads, blocks are
+aturally dense — compaction rarely needed.
+
+**Block deletion.**
+
+After snapshot commit, compute per-block live page count from the
+`PreparedSnapshot` (in-memory, no disk re-read). A block with zero live pages
+is a deletion candidate. Deletion follows the **two-generation rule** (same
+as old image cleanup, §6): a block is only deleted after it has zero live
+pages in **both** the current snapshot and the previous one. This ensures a
+crash mid-deletion falls back to the prior anchor, which still references the
+block.
+
+`BlockPageStore::delete_block(idx)` closes the fd, removes the `BlockExtent`
+from `extents_`, and unlinks the `.blk-{NNNN}` file. The global address space
+shrinks — future `write_at` / `read_at` calls never target the deleted block.
+On reopen, `open_blocks()` scans the directory; the deleted file is gone and
+its index is not re-opened.
+
+**Crash safety.**
+
+Identical to normal snapshot crash safety. If the process dies mid-snapshot:
+- Old blocks still exist → old addresses still valid.
+- New block has copied pages → new addresses valid.
+- Recovery uses the anchor's snapshot to determine which addresses are live.
+
+Block deletion is safe because it only happens after two consecutive snapshots
+confirm zero live pages — the crash fallback anchor always references the
+block.
+
+**Cost.**
+
+- Zero additional I/O beyond what snapshot already does. The page would be
+  written anyway — we just choose a different destination address.
+- O(gaps) for per-block free ratio computation during `build_allocator()`.
+- O(live_pages) for per-block live page counting after commit.
+
+**Scope.**
+
+Only applies to `BlockPageStore` in array-of-blocks mode (`open_blocks`).
+Single-medium mode (`open`, `open_mem`) and `TextPageStore` have no multiple
+blocks — `block_size()` returns 0, gap filtering is skipped, behavior is
+unchanged.
+
+**Future extension — explicit compaction.**
+
+If disk space is urgent and natural drain is too slow, an explicit
+`compact_blocks()` API can force-rewrite all live pages from sparse blocks
+(not just dirty ones) in a single snapshot. This is higher I/O burst and more
+complex. Deferred — the online mechanism handles the common case.
+
+### 2.1 TextPageStore — On-Disk Layout (Debug)
+
+`TextPageStore` writes a directory of human-readable text files, one per
+durable object. The directory layout at `{path}/{store_id}-{partition_id}/`:
+
+```
+{path}/{store_id}-{partition_id}/
+  manifest.ck       # addr → (type, filename) mapping (text, one line per entry)
+  anchor-A.ck       # CommitAnchor A (text key=value format)
+  anchor-B.ck       # CommitAnchor B (text key=value format)
+  page-{addr}.ck    # One file per B-tree page blob (debug_codec annotated text)
+  seg-{N}.ck        # One file per mapping-table segment image (text)
+  segdir.ck         # Segment directory (text, one line per DirEntry)
+```
+
+All files use the `.ck` extension — the CrowKV-specific file suffix. The
+filename prefix (`anchor-`, `page-`, `seg-`, `segdir`, `manifest`) distinguishes
+the type; the `.ck` suffix identifies the file as CrowKV-owned. Editors open
+`.ck` files as text by default.
+
+**Manifest file**: lists `(addr, len, type, filename)` for every blob written.
+On open, `TextPageStore` reads the manifest to reconstruct the addr→file
+mapping. The manifest itself is human-readable text.
+
+**Anchor text format** (mirrors WAL's text segment header):
+```
+CROW_CT_ANCHOR magic=0x41435443 format_version=2 snapshot_seq=123 root_page_id=42
+last_applied_slot=99 next_page_id=100 segment_slots=1024 segdir_addr=4096
+segdir_len=2048 segdir_crc=deadbeef anchor_crc=cafebabe
+```
+
+**Page text format**: uses existing `encode_frame_text()` / `decode_frame_text()`
+from `debug_codec.h`. Each `page-{addr}` file contains the annotated frame text
+with `crowtree-frame-text` header, `type leaf`/`type inner`/`type overflow`,
+per-slot fields, and a raw hex line for exact reconstruction.
+
+**Segment image text format**: `CROW_CT_SEGIMG` header with `seg_idx`,
+`generation`, `slot_count`, `live_count`, followed by one line per slot word
+(`slot[N] = (iu_index, iu_count)` or `empty`).
+
+**Segment directory text format**: `CROW_CT_SEGDIR` header, followed by one
+line per `DirEntry`: `seg_idx=N generation=G image_addr=A image_len=L
+crc=C`.
+
+**Limitations**: Compression is always `kNone` (text mode is for debugging).
+The `debug_codec` operates on uncompressed frames, so compressed blobs cannot
+round-trip through text.
+
+### 2.2 BlockPageStore — On-Disk Layout (Production)
+
+A group's storage is an **array of fixed-size block files**, not one
+pre-allocated file. When the current block fills up, `allocate_new_block()`
+creates the next file.
+
+**Block file naming**: `{store_id}-{partition_id}.blk-{NNNN}` (e.g.,
+`1-3.blk-0000`, `1-3.blk-0001`). `store_id` and `partition_id` are passed
+via `ct_options`. Block files use the `.blk` extension (binary, fixed-size);
+text/debug files use `.ck` (see §2.1).
+
+**Internal state**:
+```
+struct BlockExtent {
+    std::unique_ptr<FileMedium> medium;  // one FileMedium per block file
+    uint64_t base_offset;   // global offset = block_idx * block_size
+    uint64_t used;          // high-water mark within this block
+    bool     dirty;
+};
+std::vector<BlockExtent> extents_;
+```
+
+**Address space**: The global address space is linear —
+`global_off = block_idx * block_size + local_off`. `write_at(global_off, buf,
+len)` maps to `(extent_idx, local_off)`, splitting writes that cross extent
+boundaries. If `global_off + len > total_capacity`, `allocate_new_block()` is
+called first.
+
+**On-disk binary layout** (within each `.blk-*` file):
+```
+block file (block_size bytes):
++--------------------------------------------------+ 0
+| [Anchor A slot]  (superblock_slot_bytes, IU-aligned) |
++--------------------------------------------------+ slot_bytes
+| [Anchor B slot]  (superblock_slot_bytes, IU-aligned) |
++--------------------------------------------------+ 2 * slot_bytes
+| [Page/Segment image region]                       |
+|   ... page blobs, segment images, segment dir ... |
+|   ... allocated by SpaceAllocator, may have gaps ..|
++--------------------------------------------------+ block_size
+```
+
+- **Anchor A/B**: Two IU-aligned slots at offsets 0 and `superblock_slot_bytes`.
+  Binary `CommitAnchor` struct (10 fields + CRC32C), zero-padded to IU boundary.
+  Alternating A/B by `snapshot_seq` parity.
+- **Page blobs**: Durable page frames (optionally LZ4-compressed), written at
+  addresses allocated by `SpaceAllocator`. Each blob is `[plen u32][payload]
+  [crc32c u32]`.
+- **Segment images**: `SegmentImageHeader` + packed slot words + CRC.
+- **Segment directory**: `DirEntry[]` + header + CRC.
+- **Gaps**: Free space between live extents. Reused by `SpaceAllocator` for
+  future allocations.
+
+**Recovery**: On `open()`, scan the directory for `{store_id}-{partition_id}.blk-*`
+files, sort by index, open all. The anchor in block 0 determines which blocks
+are live (via segment directory → segment images → page addresses).
+
+**Sync**: `fdatasync`/`fsync` all dirty extents (tracked per-extent dirty flag).
+
+**Garbage collection**: Dead pages mark gaps in `SpaceAllocator` but block
+files are not deleted (deferred optimization — see plan Task 14, block
+compaction design).
 
 ---
 
@@ -134,9 +381,11 @@ leaf mutation already produces a fresh frame anyway).
 - **`logical_len` + CRC32C trailer.** `logical_len` lets a reader ignore IU
   zero padding; CRC32C covers `[0, logical_len)`. A CRC mismatch means a torn
   page, and recovery falls back to the previous snapshot (§6).
-- **Alignment.** Aligned block devices already write the frame as an IU
-  multiple. Unaligned/file-debug media may write without padding, carrying an
-  explicit length prefix instead.
+- **Alignment.** `BlockPageStore` with `iu_size > 1` (e.g. 4096 for NVMe)
+  writes frames as IU multiples with bounce-buffer read-modify-write for
+  unaligned offsets. `TextPageStore` always uses IU=1 (byte-addressable, no
+  alignment) since it writes human-readable text files. `BlockPageStore::open_mem`
+  also uses IU=1 for in-memory/SCM.
 - **Compression is per-page, on-disk only.** The frame body is optionally
   compressed with LZ4 (a flag bit + algorithm id in the header), decompressed
   into a full frame on load so in-memory access stays zero-copy and uniform.
@@ -417,11 +666,21 @@ the raw packed-word array, ~8 KB for 1024 slots); a **segment directory
 image**, rewritten whenever any segment's generation changes, mapping
 `seg_idx -> (generation, image_addr, image_len)`; and a **commit anchor**
 (fixed size, A/B double-buffered at reserved IU 0/1) holding
-`{snapshot_seq, root_pid, leftmost_leaf_pid, last_applied_slot,
-next_page_id, segdir_addr/len, page_alloc_root}` plus a CRC. The anchor is
-the commit point — its small fixed size makes the A/B swap atomic on every
-backend, and a snapshot always writes to the slot *not* named by the current
-highest-seq anchor, so a torn write never destroys the last committed one.
+`{snapshot_seq, root_pid, last_applied_slot, next_page_id, segment_slots,
+segdir_addr/len/crc}` plus a CRC. The anchor is the commit point — its small
+fixed size makes the A/B swap atomic on every backend, and a snapshot always
+writes to the slot *not* named by the current highest-seq anchor, so a torn
+write never destroys the last committed one.
+
+**Binary layout** (BlockPageStore, see §2.2): The anchor, segment images,
+and segment directory are stored as binary blobs at addresses allocated by
+`SpaceAllocator` within `.blk-*` files. The anchor occupies IU slots 0 and 1
+in block 0.
+
+**Text layout** (TextPageStore, see §2.1): The anchor is stored as
+`anchor-A.ck`/`anchor-B.ck` text files. Segment images are `seg-{N}.ck` text
+files. The segment directory is a `segdir.ck` text file. A `manifest.ck` file
+maps addresses to filenames. All are human-readable for debugging.
 
 **Snapshot** integrates with §6's pipeline: write dirty frames and assign
 durable addresses, serialize each dirty segment (pack `unloaded` or the

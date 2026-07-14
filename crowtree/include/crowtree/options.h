@@ -125,7 +125,7 @@ struct Options
     // touching a reactor -- no MemAsyncPageStore needed
     // (see Crowtree::get_async's doc comment). One Reactor per Crowtree
     // instance; async_page_store must be backed by the
-    // *same* durable file as `page_store` (see FileAsyncPageStore).
+    // *same* durable store as `page_store` (see BlockAsyncPageStore).
     Reactor        *async_reactor    = nullptr;
     AsyncPageStore *async_page_store = nullptr;
 #endif

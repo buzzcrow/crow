@@ -44,9 +44,9 @@ TEST(DebugCodec, InnerRoundTripExact)
     const uint32_t        pb = 4096;
     std::vector<uint8_t>  frame(pb);
     std::vector<uint64_t> children = {10, 11, 12};
-    std::string           s0 = "m";
-    std::string           s1 = "t";
-    std::vector<Slice>    seps = {Slice(s0), Slice(s1)};
+    std::string           s0       = "m";
+    std::string           s1       = "t";
+    std::vector<Slice>    seps     = {Slice(s0), Slice(s1)};
     ASSERT_TRUE(inner_frame_build(frame.data(), pb, 3, children, seps));
 
     std::string text = encode_frame_text(frame.data(), pb);

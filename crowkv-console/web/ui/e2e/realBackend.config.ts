@@ -4,14 +4,26 @@ import { defineConfig, devices } from '@playwright/test';
 const port = Number(process.env.CROWKV_WEB_E2E_PORT ?? 4193);
 const baseURL = `http://127.0.0.1:${port}`;
 
-// Chromium selection, in priority order:
-//   1. PLAYWRIGHT_CHANNEL (e.g. "chrome"/"msedge") — handled in the project.
-//   2. PLAYWRIGHT_CHROMIUM_EXECUTABLE — explicit binary path.
-//   3. A local /snap/bin/chromium if present (dev convenience).
-//   4. Playwright's bundled Chromium (CI after `npx playwright install`).
+// Browser selection, in priority order:
+//   1. PLAYWRIGHT_CHANNEL (e.g. "chrome"/"msedge") — use Playwright's channel support.
+//   2. PLAYWRIGHT_CHROMIUM_EXECUTABLE — explicit binary path override.
+//   3. Local Chromium (Linux snap, Linux apt, macOS app).
+//   4. Local Microsoft Edge (Linux /usr/bin, macOS app).
+//   5. macOS Google Chrome (common dev install; Safari is the macOS default
+//      but Playwright cannot drive it directly — no CDP support).
+//   6. Playwright's bundled Chromium (CI after `npx playwright install`).
 const explicitExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE;
-const snapChromium = '/snap/bin/chromium';
-const executablePath = explicitExecutable ?? (existsSync(snapChromium) ? snapChromium : undefined);
+const localBrowsers = [
+  '/snap/bin/chromium',
+  '/usr/bin/chromium',
+  '/usr/bin/chromium-browser',
+  '/Applications/Chromium.app/Contents/MacOS/Chromium',
+  '/usr/bin/microsoft-edge',
+  '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+];
+const executablePath = explicitExecutable
+  ?? localBrowsers.find((p) => existsSync(p));
 
 const chromiumUse = process.env.PLAYWRIGHT_CHANNEL
   ? { ...devices['Desktop Chrome'], channel: process.env.PLAYWRIGHT_CHANNEL }
