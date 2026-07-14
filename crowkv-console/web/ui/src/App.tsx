@@ -396,7 +396,8 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
   );
 
   const storeDialogDefaults = useMemo(() => {
-    const defaultNodeIds = servers.filter((server) => isCrowKVServerAvailable(server)).slice(0, 1).map((server) => server.node_id);
+    const availableNodeIds = servers.filter((server) => isCrowKVServerAvailable(server)).map((server) => server.node_id);
+    const defaultNodeIds = availableNodeIds.length <= 7 ? availableNodeIds : availableNodeIds.slice(0, 3);
     return {
       storeId: nextNumericId(stores.map((s) => String(s.store_id)), 1),
       nodeIds: defaultNodeIds.length > 0 ? defaultNodeIds : (nodes[0] ? [nodes[0].id] : []),
@@ -450,16 +451,16 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
     return defaults;
   }, [groups, nodes, servers]);
 
-  const replicaDialogAvailableNodes = useMemo(() => {
-    const available: Record<string, typeof nodes> = {};
+  const replicaDialogNodeInfo = useMemo(() => {
+    const info: Record<string, { allNodes: typeof nodes; usedNodeIds: Set<string> }> = {};
 
     for (const group of groups) {
       const key = `${group.store_id}:${group.group_id}`;
       const usedNodeIds = new Set((group.replicas || []).map((replica) => String(replica.node_id || '')));
-      available[key] = nodes.filter((node) => !usedNodeIds.has(node.id));
+      info[key] = { allNodes: nodes, usedNodeIds };
     }
 
-    return available;
+    return info;
   }, [groups, nodes]);
 
   return (
@@ -513,7 +514,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
       >
         <Suspense fallback={<BodyFallback />}>
           {showSwagger && swaggerEnabled ? (
-            <SwaggerPanel nodeId={apiTargetNodeId} apiPrefix={apiPrefix} />
+            <SwaggerPanel nodeId={apiTargetNodeId} apiPrefix={apiPrefix} servers={servers} />
           ) : (
             <TopologyCanvas
               racks={racks}
@@ -594,7 +595,8 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           onClose={closeDialogs}
           storeId={dialog.addReplica.storeId}
           groupId={dialog.addReplica.groupId}
-          nodes={replicaDialogAvailableNodes[`${dialog.addReplica.storeId}:${dialog.addReplica.groupId}`] || []}
+          nodes={replicaDialogNodeInfo[`${dialog.addReplica.storeId}:${dialog.addReplica.groupId}`]?.allNodes || []}
+          usedNodeIds={replicaDialogNodeInfo[`${dialog.addReplica.storeId}:${dialog.addReplica.groupId}`]?.usedNodeIds || new Set()}
           defaultNodeId={replicaDialogDefaults[`${dialog.addReplica.storeId}:${dialog.addReplica.groupId}`]?.nodeId || ''}
           defaultReplicaId={replicaDialogDefaults[`${dialog.addReplica.storeId}:${dialog.addReplica.groupId}`]?.replicaId || ''}
           onSuccess={handleRefresh}

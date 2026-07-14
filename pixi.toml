@@ -63,7 +63,7 @@ build = { cmd = "cmake -S crowtree -B crowtree/build -DCMAKE_BUILD_TYPE=Release 
 default = { depends-on = ["build"] }
 
 # ── Run ──────────────────────────────────────────────────────────
-web = { cmd = "cargo run --release -p crowkv-web", depends-on = ["build"] }
+web = { cmd = "echo 'CrowKV console starting at: http://127.0.0.1:9920/' && cargo run --release -p crowkv-web", depends-on = ["build"] }
 
 # ── Test ─────────────────────────────────────────────────────────
 test-ct = { cmd = "ctest --test-dir crowtree/build --output-on-failure", depends-on = ["build"] }

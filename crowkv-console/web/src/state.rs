@@ -133,7 +133,6 @@ impl AppState {
         std::fs::create_dir_all(&base).map_err(Error::Io)?;
         std::fs::create_dir_all(base.join("bin")).map_err(Error::Io)?;
         std::fs::create_dir_all(base.join("log")).map_err(Error::Io)?;
-        std::fs::create_dir_all(base.join("data")).map_err(Error::Io)?;
         std::fs::create_dir_all(base.join("wal")).map_err(Error::Io)?;
         std::fs::canonicalize(base).map_err(Error::Io)
     }
@@ -184,7 +183,6 @@ mod tests {
         assert!(workspace.ends_with(PathBuf::from("runtime-data/N-n1")));
         assert!(workspace.join("bin").is_dir());
         assert!(workspace.join("log").is_dir());
-        assert!(workspace.join("data").is_dir());
         assert!(workspace.join("wal").is_dir());
 
         std::env::set_current_dir(original_cwd).unwrap();
