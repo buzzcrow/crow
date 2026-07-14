@@ -47,72 +47,59 @@ Parent: [`design-crowtree-storage.md`](design/design-crowtree-storage.md)
 
 ---
 
-### Task 2: Block compaction / merge — analysis & design (no implementation)
+### Task 2: Online block compaction via snapshot relocation — design only
 
-**Goal**: Analyze whether and how block files should be merged/compacted after GC creates significant free space within blocks. Produce a design document, not code. This is a follow-up to the array-of-blocks design (Stage 1, Task 3).
+**Goal**: Design how block files are compacted by integrating page relocation into the normal snapshot path. No standalone compaction pass — sparse blocks drain naturally as dirty pages are rewritten during snapshots. Produce a design document, not code.
 
-**Problem statement**:
+**Problem**:
 
-After GC runs (`collect_garbage` in `crowtree.cpp`), dead pages are retired and their addresses become gaps in `SpaceAllocator`. Over time, a block file may have most of its space as gaps — logically free but physically occupying disk. The question is: should we merge sparsely-used blocks into denser ones, and if so, how?
+After GC runs (`collect_garbage` in `crowtree.cpp`), dead pages become gaps in `SpaceAllocator`. Over time, a block file may have most of its space as gaps — physically occupying disk but logically free. The question is: how to reclaim this space without a separate compaction operation.
 
-**Core challenge — page relocation**:
+**Chosen approach — online relocation during snapshot**:
 
-Merging blocks requires moving live pages to new locations. This changes page addresses, which are stored in the mapping table's slot words (`slot_word::unloaded_iu_index`). Every relocated page's slot word must be updated. This is not a simple file-level operation — it touches the entire mapping table.
+Snapshot already does what compaction needs: it holds `write_mutex_`, writes pages to `PageStore`, updates mapping table slot words, and commits atomically via anchor + segment images + segment directory. The key insight is that compaction is just *choosing where pages land* during snapshot.
 
-**Design analysis**:
+**Design**:
 
-1. **When to trigger compaction**:
+1. **Sparse block detection**:
    - After GC, compute per-block free ratio: `gaps / block_size`.
-   - If a block's free ratio exceeds a threshold (e.g., 70%), it's a compaction candidate.
-   - Compaction should be batched — don't compact one block at a time. Collect N sparse blocks, allocate one new dense block, copy live pages, update mapping table, then delete old blocks.
+   - Blocks with free ratio above a threshold (e.g., 70%) are marked as relocation candidates.
 
-2. **Page relocation mechanics**:
-   - For each live page in a candidate block:
-     a. Allocate new address in `SpaceAllocator` (in the new dense block).
-     b. `read_at(old_addr)` → `write_at(new_addr)` — copy the page blob.
-     c. Update the mapping table slot word: `slot_word::unloaded_iu_index` → new address.
-     d. The old address becomes a gap.
-   - Segment images and segment directory may also need relocation if they reside in candidate blocks.
+2. **Relocation during snapshot write**:
+   - When the snapshot path writes a dirty page, check if the page's current block is a relocation candidate.
+   - If yes, allocate a new address in a fresh (dense) block via `SpaceAllocator` instead of reusing the old address.
+   - The page is written to the new location; the old address becomes a gap.
+   - The mapping table slot word is updated to the new address — same as a normal snapshot write, just to a different address.
 
-3. **Mapping table update**:
-   - The mapping table (`mapping_`) stores slot words in segments. Each slot word encodes `(iu_index, iu_count)` for unloaded pages.
-   - Relocating a page means updating its slot word's `iu_index` to the new address.
-   - If the page is resident (in-memory), the slot word holds a pointer — no address change needed until eviction.
-   - **This is the expensive part**: scanning all segments to find and update slot words for relocated pages.
-   - Optimization: build a relocation map `{old_addr → new_addr}` before starting, then walk segments once.
+3. **What gets relocated**:
+   - Only **dirty pages** are rewritten during snapshot. Clean pages keep their old address.
+   - This means single snapshot only compacts pages that were modified since last snapshot.
+   - Over multiple snapshots, as pages are touched and rewritten, sparse blocks gradually drain.
+   - For high-churn workloads, compaction is fast (most pages are dirty each snapshot).
+   - For low-churn workloads, blocks are naturally dense — compaction rarely needed.
 
-4. **Crash safety**:
-   - Compaction must be crash-safe. If the process dies mid-compaction:
-     - Old blocks still exist (not yet deleted) → old addresses still valid.
+4. **Block deletion**:
+   - After snapshot commit, check if any block has zero live pages (all gaps).
+   - If so, delete the block file. This is safe — the snapshot is durable, all live pages have new addresses.
+   - `SpaceAllocator` already tracks gaps; a per-block live-page count can be derived from the gap map.
+
+5. **Crash safety**:
+   - Identical to normal snapshot crash safety. If the process dies mid-snapshot:
+     - Old blocks still exist → old addresses still valid.
      - New block has copied pages → new addresses valid.
-     - The mapping table may have a mix of old and new addresses.
-     - On recovery, the anchor's snapshot determines which addresses are live. If compaction wasn't committed (no new snapshot), old addresses are used.
-   - **Approach**: compaction is a multi-step operation that completes atomically with a new snapshot:
-     1. Copy live pages to new block.
-     2. Update mapping table slot words.
-     3. Write new snapshot (anchor + segment images + segment directory).
-     4. After snapshot is durable, delete old blocks.
-   - Steps 1-3 are the same as a normal snapshot — the compaction just changes *where* pages live before snapshotting.
+     - Recovery uses the anchor's snapshot to determine which addresses are live.
+   - No additional crash safety logic needed — relocation is just a normal snapshot write to a different address.
 
-5. **Interaction with ongoing I/O**:
-   - Compaction should hold `write_mutex_` (same as GC and snapshot).
-   - Resident pages are unaffected — they're in memory. Only unloaded (on-disk) pages have addresses that change.
-   - After compaction, resident pages' eventual eviction writes to the new address (slot word already updated).
+6. **Cost**:
+   - Zero additional I/O beyond what snapshot already does. The page would be written anyway — we just choose a different destination address.
+   - The only overhead is the sparse-block check (a set lookup per dirty page).
 
-6. **Cost vs benefit**:
-   - Compaction reads all live pages from sparse blocks + writes them to a dense block = I/O cost proportional to live data.
-   - Benefit: frees disk space (deletes sparse block files).
-   - For write-heavy workloads with high churn, compaction reclaims significant space.
-   - For read-heavy or append-mostly workloads, blocks are naturally dense — compaction rarely needed.
-   - **Recommendation**: implement as an explicit operator-triggered operation (not automatic), similar to LSM compaction triggers. Add a `compact_blocks()` API that the operator calls when disk usage is high.
+7. **Supplement — explicit compaction for immediate space reclaim**:
+   - If disk space is urgent and waiting for natural drain is too slow, an explicit `compact_blocks()` API can be added later.
+   - It would force-rewrite all live pages from sparse blocks (not just dirty ones) in a single snapshot.
+   - This is a future extension, not part of the initial design.
 
-7. **Alternative: online relocation during snapshot**:
-   - Instead of a separate compaction pass, integrate relocation into the normal snapshot path.
-   - During snapshot, if a page's current block is sparse, relocate it to a denser block as part of the snapshot write.
-   - This amortizes compaction cost across snapshots — no separate I/O burst.
-   - Risk: increases snapshot latency unpredictably. Better as a follow-up optimization.
-
-**Deliverable**: A design section in `doc/design/design-crowtree-storage.md` (new §2.5 "Block Compaction") documenting the analysis above. No code changes in this plan.
+**Deliverable**: A design section in `doc/design/design-crowtree-storage.md` (new §2.5 "Block Compaction") documenting the online relocation approach. No code changes.
 
 **Files**:
 - `doc/design/design-crowtree-storage.md` (add §2.5)
@@ -125,5 +112,5 @@ Merging blocks requires moving live pages to new locations. This changes page ad
 ## Execution Order
 
 - [ ] **Task 1** — IoUringEngine (Stage 2, Linux only, builds on Stage 1 IoEngine)
-- [ ] **Task 2** — Block compaction / merge analysis & design (no implementation, builds on Stage 1 array-of-blocks)
+- [ ] **Task 2** — Online block compaction via snapshot relocation (design only, builds on Stage 1 array-of-blocks)
 
