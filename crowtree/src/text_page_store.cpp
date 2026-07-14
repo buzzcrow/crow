@@ -270,6 +270,11 @@ Status TextPageStore::sync()
     if (!s.ok()) {
         return s;
     }
+    // CT_SYNC_SKIP: no fsync (tests/CI only). Manifest is still flushed
+    // to the OS page cache via ofstream above.
+    if (sync_mode_ == SyncMode::kSkip) {
+        return Status::Ok();
+    }
     // fsync the directory to persist manifest changes
     int fd = ::open(dir_.c_str(), O_RDONLY, 0);
     if (fd >= 0) {

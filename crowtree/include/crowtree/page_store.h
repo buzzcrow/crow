@@ -27,6 +27,14 @@
 namespace crowtree
 {
 
+// Durability barrier policy. Mirrors ct_sync_mode in c_api.h.
+enum class SyncMode : uint8_t
+{
+    kFull  = 0, // fdatasync after every flush (default, production)
+    kSkip  = 1, // no fsync (tests/CI only)
+    kBatch = 2, // fsync once per snapshot commit
+};
+
 // Round `v` up to a multiple of the indivisible unit `iu` (PT9 alignment). For
 // byte-addressable media (iu <= 1) this is the identity.
 inline uint64_t round_up_to_iu(uint64_t v, uint32_t iu)
@@ -86,6 +94,21 @@ class PageStore
     {
         // No-op for sync backends: the callback has already fired.
     }
+
+    // Set the durability barrier policy. CT_SYNC_SKIP makes sync() a no-op
+    // (tests/CI), CT_SYNC_BATCH defers to snapshot commit.
+    void set_sync_mode(SyncMode mode)
+    {
+        sync_mode_ = mode;
+    }
+
+    [[nodiscard]] SyncMode sync_mode() const
+    {
+        return sync_mode_;
+    }
+
+  protected:
+    SyncMode sync_mode_ = SyncMode::kFull;
 };
 
 // In-memory block device. Durable only for the lifetime of the object; used by

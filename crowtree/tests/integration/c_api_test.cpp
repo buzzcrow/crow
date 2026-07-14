@@ -374,3 +374,45 @@ TEST(CApi, SnapshotExportImport)
     ct_close(a);
     ct_close(b);
 }
+
+// Task 9: CT_SYNC_SKIP — snapshot + reopen with no fsync. Data survives
+// because the OS page cache is still warm (no kill -9).
+TEST(CApi, SyncSkipSnapshotReopen)
+{
+    std::array<char, 32> tmpl{"/tmp/crowtree_sync_XXXXXX"};
+    char                *d = mkdtemp(tmpl.data());
+    ASSERT_NE(d, nullptr);
+    std::string path(d);
+
+    ct_options opt  = {};
+    opt.path        = path.c_str();
+    opt.iu_size     = 1;
+    opt.frame_bytes = 4096;
+    opt.backend     = CT_BACKEND_BLOCK;
+    opt.block_size  = 8 * 1024;
+    opt.sync_mode   = CT_SYNC_SKIP;
+
+    {
+        ct_tree *t = nullptr;
+        ASSERT_EQ(ct_open(&opt, &t), 0);
+        ASSERT_EQ(put_flush(t, 1, "key1", "val1"), 0);
+        ASSERT_EQ(put_flush(t, 2, "key2", "val2"), 0);
+        uint64_t durable = 0;
+        ASSERT_EQ(ct_snapshot(t, &durable), 0);
+        EXPECT_EQ(durable, 2U);
+        ct_close(t);
+    }
+    {
+        ct_tree *t = nullptr;
+        ASSERT_EQ(ct_open(&opt, &t), 0);
+        EXPECT_EQ(ct_last_applied_slot(t), 2U);
+        int32_t  found = 0;
+        uint64_t slot  = 0;
+        ct_buf   val   = {};
+        ASSERT_EQ(ct_get(t, reinterpret_cast<const uint8_t *>("key1"), 4, &found, &slot, &val), 0);
+        EXPECT_EQ(found, 1);
+        EXPECT_EQ(std::string(reinterpret_cast<char *>(val.data), val.len), "val1");
+        ct_free_buf(&val);
+        ct_close(t);
+    }
+}
