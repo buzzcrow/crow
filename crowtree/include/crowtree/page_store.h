@@ -63,6 +63,13 @@ class PageStore
     // addressable media (mem/SCM), a flash page for SSD.
     [[nodiscard]] virtual uint32_t iu_size() const = 0;
 
+    // Block size for array-of-blocks backends (BlockPageStore::open_blocks).
+    // 0 for single-medium / TextPageStore — no block-level compaction.
+    [[nodiscard]] virtual uint64_t block_size() const
+    {
+        return 0;
+    }
+
     // ── Async API (plan-btree-persistent Task 1) ──────────────────────
     // submit_read/submit_write/submit_fsync return an opaque op id usable
     // with cancel(). The callback fires exactly once with the outcome.

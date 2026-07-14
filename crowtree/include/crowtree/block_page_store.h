@@ -153,6 +153,11 @@ class BlockPageStore : public PageStore
         return iu_size_;
     }
 
+    [[nodiscard]] uint64_t block_size() const override
+    {
+        return block_size_;
+    }
+
     [[nodiscard]] bool is_block_device() const
     {
         return is_block_device_;
@@ -168,11 +173,6 @@ class BlockPageStore : public PageStore
     [[nodiscard]] size_t num_extents() const
     {
         return extents_.size();
-    }
-
-    [[nodiscard]] uint64_t block_size() const
-    {
-        return block_size_;
     }
 
   private:
