@@ -527,3 +527,101 @@ TEST(Persist, WriteMutexNotHeldDuringSnapshotIo)
     store.release();
     snap_thread.join();
 }
+
+// Task 6: Array-of-blocks BlockPageStore integration test. Snapshot with
+// enough data to span multiple block files, reopen, recover, and verify all
+// data is intact. Uses small block_size (8 KiB) to force multi-block with
+// modest data volume.
+TEST(Persist, ArrayOfBlocksSnapshotReopenRecover)
+{
+    std::array<char, 32> tmpl{"/tmp/crowtree_blkarr_XXXXXX"};
+    char                *d = mkdtemp(tmpl.data());
+    ASSERT_NE(d, nullptr);
+    std::string dir(d);
+
+    constexpr uint64_t blk = 8 * 1024; // 8 KiB blocks
+    std::map<std::string, std::string> oracle;
+    {
+        std::unique_ptr<BlockPageStore> store;
+        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, blk, 1, &store).ok());
+        Options opt;
+        opt.page_store       = store.get();
+        opt.leaf_split_bytes = 256;
+        Crowtree     t(opt);
+        std::mt19937 rng(42);
+        uint64_t     slot = 0;
+        for (int i = 0; i < 300; ++i) {
+            ++slot;
+            std::string k = make_key(static_cast<int>(rng() % 200));
+            if ((rng() % 5) == 0) {
+                ASSERT_TRUE(t.apply(slot, del_one(k)).ok());
+                oracle.erase(k);
+            } else {
+                std::string val = "v" + std::to_string(slot);
+                ASSERT_TRUE(t.apply(slot, put_one(k, val)).ok());
+                oracle[k] = val;
+            }
+            if (i % 10 == 0) {
+                ASSERT_TRUE(t.flush().ok());
+            }
+        }
+        ASSERT_TRUE(t.flush().ok());
+        ASSERT_TRUE(t.snapshot().ok());
+        // Verify multiple blocks were created
+        EXPECT_GE(store->num_extents(), 2U);
+    }
+
+    // Reopen with a fresh store + engine, verify all data
+    {
+        std::unique_ptr<BlockPageStore> store;
+        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, blk, 1, &store).ok());
+        Options opt;
+        opt.page_store = store.get();
+        std::unique_ptr<Crowtree> t;
+        ASSERT_TRUE(Crowtree::open(opt, &t).ok());
+        for (auto &kv : oracle) {
+            std::string v;
+            uint64_t    s;
+            ASSERT_TRUE(t->get(Slice(kv.first), &s, &v)) << "missing " << kv.first;
+            EXPECT_EQ(v, kv.second);
+        }
+        auto   snap = t->snapshot_view();
+        size_t live = 0;
+        for (const auto &e : snap->entries()) {
+            if (!CellView{Slice(e.cell)}.is_tombstone()) {
+                ++live;
+            }
+        }
+        EXPECT_EQ(live, oracle.size());
+    }
+}
+
+// Task 6: Array-of-blocks with dump utility content verification.
+TEST(Persist, ArrayOfBlocksDumpVerification)
+{
+    std::array<char, 32> tmpl{"/tmp/crowtree_blkdump_XXXXXX"};
+    char                *d = mkdtemp(tmpl.data());
+    ASSERT_NE(d, nullptr);
+    std::string dir(d);
+
+    constexpr uint64_t blk = 8 * 1024;
+    {
+        std::unique_ptr<BlockPageStore> store;
+        ASSERT_TRUE(BlockPageStore::open_blocks(dir, 0, 0, blk, 1, &store).ok());
+        Options opt;
+        opt.page_store = store.get();
+        opt.leaf_split_bytes = 256;
+        Crowtree t(opt);
+        ASSERT_TRUE(t.apply(1, put_one("a", "1")).ok());
+        ASSERT_TRUE(t.apply(2, put_one("b", "2")).ok());
+        ASSERT_TRUE(t.flush().ok());
+        ASSERT_TRUE(t.snapshot().ok());
+    }
+
+    // Verify block 0 exists and dump contains anchor data
+    std::string dump;
+    ASSERT_TRUE(dump_block_file(dir + "/0-0.blk-0000", 1, &dump).ok());
+    EXPECT_NE(dump.find("Block file"), std::string::npos);
+    // The anchor magic bytes (0x41435443 = 'CTCA') should appear in the hex dump
+    EXPECT_NE(dump.find("43 54 43 41"), std::string::npos);
+}
