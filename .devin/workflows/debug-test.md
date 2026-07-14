@@ -2,199 +2,131 @@
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ---
-description: Debug a failing unit/integration test — log-first, data-first methodology
+description: Debug a failing test — log-first, data-first methodology
 ---
 
-# CrowKV - Debug Test Failure Flow
+# Debug Test Failure Flow
 
-Companion workflows: `/coding` (conventions), `/review` (pre-push).
+Companion workflows: `/coding`, `/review`.
 
-## Step 0 — Environment Check (do this first)
+## Step 0 — Environment Check
 
-Many test failures are environment issues, not code bugs. Check before diving
-into logs:
+Many failures are environmental, not code bugs. Check first:
 
-- **Proxy env vars**: `env | grep -i proxy` — if `http_proxy`/`https_proxy`/
-  `all_proxy` are set, reqwest and curl will route localhost requests through
-  the proxy, causing connection failures and timeouts. Fix:
-  ```bash
-  no_proxy='*' http_proxy='' https_proxy='' all_proxy='' pixi run test-<suite>
-  ```
-- **Lingering processes**: `ps aux | grep crowkv-server | grep -v grep` —
-  previous test runs may have left orphaned server processes holding ports.
-  Fix: `pkill -9 -f 'crowkv-server.*test-logs'`.
-- **Stale test-logs**: `rm -rf test-logs/*` before rerunning web/server suites.
-- **Stale build artifacts**: if tests fail to compile, `pixi run cargo clean`
-  and rebuild.
+- **Proxy env vars**: `env | grep -i proxy` — reqwest/curl route localhost through
+  proxy → connection failures. Fix: `no_proxy='*' http_proxy='' https_proxy='' all_proxy=''`
+- **Lingering processes**: `ps aux | grep crowkv-server | grep -v grep` →
+  `pkill -9 -f 'crowkv-server.*test-logs'`
+- **Stale test-logs**: `rm -rf test-logs/*` before rerunning web/server suites
+- **Stale build artifacts**: `pixi run cargo clean` if compilation fails
 
-If the failure disappears after environment cleanup, it was environmental —
-note it in the Debug Techniques section below and move on.
+If the failure disappears after cleanup → environmental, note in Debug Techniques below.
 
 ## Step 1 — Reproduce and Isolate
 
-1. Run the single failing test, not the whole suite:
-   ```bash
-   # Rust
-   no_proxy='*' pixi run cargo test -p <crate> --test <file> <test_name> -- --nocapture
-   # C++
-   pixi run test-ct  # then filter via ctest -R <pattern>
-   ```
-2. If it passes alone but fails in-suite → likely a port conflict or
-   lingering-process issue (see Step 0).
-3. If it fails alone → proceed to Step 2.
+Run the single failing test, not the whole suite:
 
-## Step 2 — Read the Server Log
+```bash
+# Rust
+no_proxy='*' pixi run cargo test -p <crate> --test <file> <test_name> -- --nocapture
+# C++ — via ctest filter
+pixi run ctest -R '<pattern>' --output-on-failure
+# C++ — via gtest_filter (more precise, runs inside the test binary)
+./build/crowtree_tests --gtest_filter='<TestSuite.TestName>'
+```
 
- crowkv-server writes structured logs to `log/crowkv-server-<timestamp>-<pid>.log`
- by default. For web-managed nodes, logs are under
- `runtime-data/N-<node_id>/log/`. For test-spawned servers, check
- `test-logs/<test-name>-<run-id>/`.
+- Passes alone, fails in-suite → port conflict or lingering process (Step 0)
+- Fails alone → proceed to Step 2
 
-1. Find the most recent log file:
-   ```bash
-   ls -t log/crowkv-server-*.log | head -1
-   # or for web tests:
-   find test-logs -name '*.log' -newer <test-start-time> | head
-   ```
-2. Read the full log — look for:
-   - `INFO` lines showing startup sequence (store creation, WAL replay,
-     election, leader state).
-   - `WARN`/`ERROR` lines indicating what went wrong.
-   - The last line before exit/crash — this is usually the trigger.
-   - `SIGTERM`/`SIGINT` → external kill (check who sent it).
-   - `panic` → Rust panic (check backtrace with `RUST_BACKTRACE=1`).
+## Step 2 — Read the Logs
 
-3. Compare the log timeline to what the test expects. Example:
-   - Test expects `/health` to return 200 within 10s.
-   - Log shows server started at T+0, election won at T+0.05.
-   - But `/health` returns 000 (connection refused) → check if server is
-     even listening on the expected port (`ss -tlnp | grep <pid>`).
+**Rust (crowkv-server)**: `log/crowkv-server-<timestamp>-<pid>.log` by default.
+Web-managed nodes: `runtime-data/N-<node_id>/log/`. Test-spawned: `test-logs/<test-name>-<run-id>/`.
+
+```bash
+ls -t log/crowkv-server-*.log | head -1
+find test-logs -name '*.log' -newer <test-start-time> | head
+```
+
+Look for: startup sequence (store/WAL/election), `WARN`/`ERROR` lines, last line
+before exit, `SIGTERM`/`SIGINT` (external kill), `panic` (use `RUST_BACKTRACE=full`
+for complete async backtraces).
+
+**C++ (crowtree)**: Set `log_dir` in `ct_options`/`Options` to enable spdlog output
+(`<log_dir>/crowtree.log`). Control verbosity via `log_level` (`trace`/`debug`/`info`).
+No-op if built without spdlog. Example:
+```cpp
+ct_options opt = {};
+opt.log_dir = "/tmp/ct-debug";
+opt.log_level = "debug";
+```
+
+Compare log timeline to test expectations. E.g. server started at T+0, election
+won at T+0.05, but `/health` returns 000 → check `ss -tlnp | grep <pid>`.
 
 ## Step 3 — Inspect On-Disk Data
 
- crowkv-server stores data in two readable formats:
+- **WAL segments**: `<wal-root>/group<gid>/seg-NNNNNNN.ck` — binary frames
+  (or text-line if `wal_record_format=TextLine`). Inspect with `hexdump -C` or
+  the WAL replay tool. Check: expected slots present? record types correct?
+- **crowtree files**: `<data-root>/` — block files (`*.blk-NNNN`) or text files
+  (`.ck`). Use `ct_debug_dump` C API or `crowtree/tests/integration/` helpers.
 
-- **WAL segments**: `<wal-root>/store<sid>/group<gid>/seg-NNNNNNN.ck` —
-  binary but structured. Use the WAL replay tool or `hexdump -C` to inspect
-  record types (Promised/Accepted/VoteGranted) and slot ranges.
-- **crowtree (btree) files**: `<data-root>/` — block files or text files
-  depending on backend. Block files are binary; text files (`.ck`) are
-  human-readable. Use `crowtree/tests/integration/` helpers or the
-  `ct_debug_dump` C API to inspect page contents.
-
-Check:
-- Does the WAL contain the expected slots? (replay should show them)
-- Does the btree have the expected keys? (scan or dump)
-- Are file sizes non-zero? (empty files = nothing was written/flushed)
-- Are there unexpected files? (stale segments, orphaned blocks)
+Check: file sizes non-zero? unexpected stale files? WAL replay shows expected slots?
 
 ## Step 4 — Add Missing Logs
 
-If the existing logs don't reveal the cause, add targeted `debug!`/`trace!`
-logs at the decision points in the code path:
+If existing logs don't reveal the cause, add targeted logs at decision points:
 
-1. Identify the function where the failure occurs (from the panic
-   backtrace or the last log line before the error).
-2. Add `tracing::debug!` at each branch/decision point in that function.
-3. Rebuild and rerun with `RUST_LOG=debug` (or `CROWKV_TEST_LOG=1` for
-   test-initiated tracing).
-4. Read the new log output — the added logs should reveal which branch
-   was taken and why.
-
-Rules for adding debug logs:
-- Use `debug!` (not `println!`) — follows the `/coding` logging convention.
-- Include structured fields: `store_id`, `group_id`, `replica_l_id`, `slot`.
-- Remove the debug logs once the issue is fixed (or keep them if they're
-  generally useful — convert to `trace!` if hot-path).
+1. Find the failing function from backtrace or last log line.
+2. Rust: add `tracing::debug!` with structured fields (`store_id`, `group_id`,
+   `slot`). C++: add `CT_LOG_DEBUG(...)`.
+3. Rebuild, rerun with `RUST_LOG=debug` (Rust) or `log_level="debug"` (C++).
+4. Remove debug logs once fixed (or keep as `trace!`/`CT_LOG_TRACE` if useful).
 
 ## Step 5 — Fix and Verify
 
-1. Make the minimal fix (upstream root cause, not downstream workaround).
-2. Rerun the failing test alone — must pass.
-3. Rerun the full suite for the affected crate — must pass.
-4. Run `pixi run cargo fmt --all -- --check` and
-   `pixi exec clang-format --dry-run --Werror` on changed files.
-5. Add a regression test if the failure was a real bug (not environmental).
+1. Minimal upstream root-cause fix (not downstream workaround).
+2. Rerun failing test alone → must pass.
+3. Rerun full suite for affected crate → must pass.
+4. Quality gate: `pixi run cargo fmt --all -- --check`,
+   `pixi run cargo clippy --all-targets -- -D warnings`,
+   `pixi exec clang-format --dry-run --Werror` on changed `.cpp`/`.h`.
+5. Add regression test if real bug (not environmental).
 
 ## Debug Techniques (append new findings here)
 
 ### Proxy environment variables (2026-07-14)
 
-**Symptom**: `test-server` `cluster_e2e_test` — all 6 tests fail with
-"server was not ready before timeout". Server starts, prints
-`management_addr=`, but `/health` returns 000 (connection refused).
+**Symptom**: `cluster_e2e_test` — all tests fail with "server was not ready
+before timeout". `/health` returns 000.
 
-**Root cause**: `http_proxy`/`https_proxy`/`all_proxy` env vars were set
-in the shell (from a previous Playwright download attempt). reqwest honors
-these by default, routing localhost HTTP requests through an unreachable
-proxy at `192.168.1.116:7897`.
+**Root cause**: `http_proxy`/`https_proxy`/`all_proxy` set in shell. reqwest
+routes localhost through unreachable proxy.
 
-**Fix**: `unset http_proxy https_proxy all_proxy` or prefix test commands
-with `no_proxy='*' http_proxy='' https_proxy='' all_proxy=''`.
+**Fix**: `unset http_proxy https_proxy all_proxy` or prefix with
+`no_proxy='*' http_proxy='' https_proxy='' all_proxy=''`.
 
 **Detection**: `curl -v http://127.0.0.1:<port>/health` shows
-`Uses proxy env variable http_proxy == ...` in the verbose output.
-
-### Server stdout pipe closure (potential)
-
-If `start_test_server`'s stdout reader thread breaks after reading
-`management_addr=`, the pipe read-end drops. If the server writes to
-stdout again (e.g. a tracing log to stdout), it may receive SIGPIPE.
-Rust's default SIGPIPE handling varies by runtime — if you see unexplained
-server exits with no SIGTERM in the log, check for SIGPIPE by adding
-`signal(SIGPIPE, SIG_IGN)` or investigating stdout writes.
+`Uses proxy env variable http_proxy == ...`.
 
 ### Flaky web tests — parallel CPU contention + process leakage (2026-07-15)
 
 **Symptom**: `pixi run test-web` fails with "did not become healthy within
-timeout" (from `wait_for_ready` in `shared/src/lifecycle.rs`). The failing
-test file and test name differ each run — classic resource-contention
-signature, not a deterministic code bug.
+timeout". Failing test varies each run — resource-contention signature.
 
-**Root cause — two compounding factors**:
-
-1. **Parallel CPU contention**: `cargo test -p crowkv-web --all-targets`
-   runs all test binaries concurrently. Each spawns real `crowkv-server`
-   processes. Peak load can reach 20–30 live processes. The 10 s
-   `wait_for_ready` timeout is insufficient under this load — some
-   processes cannot finish startup + WAL replay + HTTP bind in time.
-
-2. **Process leakage on panic**: `deploy_local_in_workspace` calls
-   `std::mem::forget(child)` to detach the child process. If the test
-   panics *after* `mem::forget` but *before* the PID is stored in
-   `ProcessGuard` (exactly the window where `wait_for_ready` times out),
-   the orphaned `crowkv-server` keeps running, consuming CPU and holding
-   ports. This creates a snowball: leaked processes make subsequent tests
-   more likely to time out.
-
-**Why single-test runs pass**: running one test binary alone (e.g.
-`cargo test -p crowkv-web --test cluster_restart_incremental_test`) has
-at most 6 concurrent `crowkv-server` processes — well within the 10 s
-window.
-
-**Reproduction**: `pixi run test-web` on a loaded machine. Failure rate
-increases with CPU contention (e.g. other builds running in parallel).
+**Root cause**: (1) Parallel test binaries spawn 20–30 `crowkv-server` processes,
+10s `wait_for_ready` insufficient under load. (2) `deploy_local_in_workspace`
+calls `mem::forget(child)` — panic before PID stored in `ProcessGuard` leaks the
+process, snowballing CPU contention.
 
 **Mitigation (do NOT increase timeout)**:
-- 10 s is more than enough for local testing. If a test fails with
-  "did not become healthy within timeout", the problem is **not** the
-  timeout value — it is environment contamination (leaked processes,
-  CPU contention from parallel runs). Do NOT increase the timeout to
-  mask the real issue.
-- Clean environment before rerunning:
-  ```bash
-  pkill -9 -f crowkv-server; rm -rf test-logs runtime-data; sleep 2
-  pixi run test-web
-  ```
-- If still flaky, run with single thread to eliminate parallel contention:
-  ```bash
-  pixi run cargo test -p crowkv-web --all-targets -- --test-threads=1
-  ```
-- Rule of thumb: for local testing, any timeout in the seconds range is
-  sufficient. If a server can't start in 10 s on a dev machine, something
-  else is wrong (orphaned processes, port conflicts, proxy env vars).
-  Fix the environment, not the timeout.
+```bash
+pkill -9 -f crowkv-server; rm -rf test-logs runtime-data; sleep 2
+pixi run test-web
+# or single-threaded:
+pixi run cargo test -p crowkv-web --all-targets -- --test-threads=1
+```
 
-**Proper fix direction**: register the PID in `ProcessGuard` *before*
-`wait_for_ready` so a timeout panic still cleans up the orphaned process.
-This prevents the snowball effect without touching timeout values.
+**Proper fix direction**: register PID in `ProcessGuard` *before* `wait_for_ready`
+so timeout panic still cleans up.

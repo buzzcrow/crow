@@ -22,7 +22,7 @@ endif()
 
 # ── liburing (io_uring reactor, plan-tree #11 Phase 0/1) ──────────
 # Linux-only kernel interface -- no macOS build exists, so Reactor /
-# AsyncPageStore / FileAsyncPageStore are excluded from the build entirely
+# AsyncPageStore / BlockAsyncPageStore are excluded from the build entirely
 # (not compiled to no-ops) when not found, matching
 # design-crowtree-async.md §10's macOS dev-path note. Probed before the
 # source glob below so the exclusion list can be applied pre-add_library.
@@ -34,7 +34,7 @@ file(GLOB_RECURSE CROWTREE_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src
 if(NOT (LIBURING_INCLUDE_DIR AND LIBURING_LIB))
   list(REMOVE_ITEM CROWTREE_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/reactor.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/file_async_page_store.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/block_async_page_store.cpp
   )
 endif()
 add_library(crowtree STATIC ${CROWTREE_SRC})

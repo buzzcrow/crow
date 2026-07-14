@@ -66,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=CONDA_PREFIX");
 
     // liburing (io_uring reactor) -- Linux-only, no
-    // macOS build exists, so reactor.cpp/file_async_page_store.cpp are
+    // macOS build exists, so reactor.cpp/block_async_page_store.cpp are
     // excluded from the compiled set entirely when not found, mirroring
     // crowtree/CMakeLists.txt's CROWTREE_HAVE_LIBURING gate exactly (same
     // reasoning: macOS dev-path note).
@@ -79,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         files.retain(|f| {
             !matches!(
                 f.file_name().and_then(|s| s.to_str()),
-                Some("reactor.cpp") | Some("file_async_page_store.cpp")
+                Some("reactor.cpp") | Some("block_async_page_store.cpp")
             )
         });
     }

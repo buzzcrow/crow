@@ -69,7 +69,7 @@ class PageStore
         return 0;
     }
 
-    // ── Async API (plan-btree-persistent Task 1) ──────────────────────
+    // ── Async API ────────────────────────────────────────────────────
     // submit_read/submit_write/submit_fsync return an opaque op id usable
     // with cancel(). The callback fires exactly once with the outcome.
     // Default implementations delegate to the sync methods and invoke the

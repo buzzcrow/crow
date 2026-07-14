@@ -179,6 +179,19 @@ class BlockPageStore : public PageStore
     // (e.g. MemoryMedium). Used by BlockAsyncPageStore.
     int fd_for_offset(uint64_t off, uint64_t *out_local) const;
 
+    // Ensures block files are allocated for the byte range [off, off+len),
+    // mirroring write_at_extents' allocation logic without writing any data.
+    // Also marks the covered extents as dirty. Call before fd_for_offset()
+    // in the async write path so the fd exists.
+    Status ensure_extents(uint64_t off, size_t len);
+
+    // Returns fds of all dirty, non-deleted extents (array-of-blocks) or the
+    // single medium's fd (single-file mode), for async fsync via Reactor.
+    // Clears the dirty flag on each returned extent (mirroring sync()).
+    // Returns an empty vector if no fd is fsync-able (e.g. MemoryMedium or
+    // SyncMode::kSkip).
+    std::vector<int> dirty_fds();
+
     // Number of live block files in an array-of-blocks store (0 for single-medium).
     [[nodiscard]] size_t num_extents() const
     {
