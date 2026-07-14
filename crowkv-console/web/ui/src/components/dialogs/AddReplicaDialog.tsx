@@ -3,7 +3,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { Dialog } from '../Dialog';
-import { Input, Select } from '../ui/Input';
+import { Input } from '../ui/Input';
 import { useToast } from '../../contexts/ToastContext';
 import { addReplica } from '../../api';
 import { Node } from '../../types';
@@ -14,6 +14,7 @@ export interface AddReplicaDialogProps {
   storeId: string;
   groupId: string;
   nodes: Node[];
+  usedNodeIds?: Set<string>;
   defaultNodeId?: string;
   defaultReplicaId?: string;
   onSuccess?: () => void | Promise<void>;
@@ -28,6 +29,7 @@ export function AddReplicaDialog({
   storeId,
   groupId,
   nodes,
+  usedNodeIds = new Set(),
   defaultNodeId = '',
   defaultReplicaId = '',
   onSuccess,
@@ -39,10 +41,11 @@ export function AddReplicaDialog({
   const { success, error } = useToast();
 
   const replicaIdValid = replicaId.trim() === '' || /^\d+$/.test(replicaId.trim());
-  const hasAvailableNodes = nodes.length > 0;
-  const resolvedDefaultNodeId = defaultNodeId && nodes.some((node) => node.id === defaultNodeId)
+  const availableNodes = nodes.filter((node) => !usedNodeIds.has(node.id));
+  const hasAvailableNodes = availableNodes.length > 0;
+  const resolvedDefaultNodeId = defaultNodeId && availableNodes.some((node) => node.id === defaultNodeId)
     ? defaultNodeId
-    : (nodes[0]?.id || '');
+    : (availableNodes[0]?.id || '');
 
   useEffect(() => {
     if (isOpen && !wasOpenRef.current) {
@@ -54,9 +57,9 @@ export function AddReplicaDialog({
 
   useEffect(() => {
     if (!isOpen) return;
-    if (nodeId && nodes.some((node) => node.id === nodeId)) return;
+    if (nodeId && availableNodes.some((node) => node.id === nodeId)) return;
     setNodeId(resolvedDefaultNodeId);
-  }, [isOpen, nodeId, nodes, resolvedDefaultNodeId]);
+  }, [isOpen, nodeId, availableNodes, resolvedDefaultNodeId]);
 
   const handleSubmit = async () => {
     if (!hasAvailableNodes || !nodeId || !replicaIdValid) return;
@@ -99,25 +102,59 @@ export function AddReplicaDialog({
       confirmLoading={isLoading}
     >
       <div className="tw-space-y-4">
-        {hasAvailableNodes ? (
-          <Select
-            label="Node"
-            value={nodeId}
-            onChange={(e) => setNodeId(e.target.value)}
-            autoFocus
-          >
-            <option value="" disabled>Select a node</option>
-            {nodes.map((node) => (
-              <option key={node.id} value={node.id}>
-                {node.id} ({node.host})
-              </option>
-            ))}
-          </Select>
-        ) : (
-          <div className="tw-text-sm tw-text-muted">
-            No available node. Every node already has a replica in this group.
-          </div>
-        )}
+        <div className="tw-space-y-2">
+          <label className="tw-text-xs tw-font-medium tw-text-text">
+            Node
+          </label>
+          {nodes.length === 0 ? (
+            <div className="tw-text-sm tw-text-muted">
+              No nodes available.
+            </div>
+          ) : (
+            <div className="tw-max-h-40 tw-overflow-y-auto tw-border tw-border-border tw-rounded-md tw-p-2 tw-space-y-1">
+              {availableNodes.map((node) => (
+                <label
+                  key={node.id}
+                  className="tw-flex tw-items-center tw-gap-2 tw-p-2 tw-rounded tw-cursor-pointer hover:tw-bg-bg"
+                >
+                  <input
+                    type="radio"
+                    name="replica-node"
+                    checked={nodeId === node.id}
+                    onChange={() => setNodeId(node.id)}
+                    className="tw-h-4 tw-w-4 tw-rounded-full tw-border-border tw-text-accent focus:tw-ring-accent"
+                  />
+                  <span className="tw-text-sm tw-text-text">
+                    {node.id}
+                    <span className="tw-text-xs tw-text-muted tw-ml-1">({node.host})</span>
+                  </span>
+                </label>
+              ))}
+              {nodes.filter((node) => usedNodeIds.has(node.id)).map((node) => (
+                <label
+                  key={node.id}
+                  className="tw-flex tw-items-center tw-gap-2 tw-p-2 tw-rounded tw-cursor-not-allowed tw-opacity-50"
+                >
+                  <input
+                    type="radio"
+                    name="replica-node"
+                    disabled
+                    className="tw-h-4 tw-w-4 tw-rounded-full tw-border-border tw-text-accent"
+                  />
+                  <span className="tw-text-sm tw-text-text">
+                    {node.id}
+                    <span className="tw-text-xs tw-text-muted tw-ml-1">({node.host}) — already has a replica</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          )}
+          {!hasAvailableNodes && nodes.length > 0 && (
+            <div className="tw-text-sm tw-text-muted">
+              No available node. Every node already has a replica in this group.
+            </div>
+          )}
+        </div>
         <Input
           label="Replica ID (optional)"
           placeholder="Leave empty for auto-generated"
