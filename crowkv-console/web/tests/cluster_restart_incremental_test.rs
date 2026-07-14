@@ -382,7 +382,7 @@ async fn read_wal_records(wal_dir: &Path, store_id: u64, group_id: u64) -> Vec<W
             let name = name.to_string_lossy();
             if let Some(seg_id) = name
                 .strip_prefix("seg-")
-                .and_then(|s| s.strip_suffix(".log"))
+                .and_then(|s| s.strip_suffix(".ck"))
                 .and_then(|s| s.parse::<u64>().ok())
             {
                 segments.push((seg_id, entry.path()));
