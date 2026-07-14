@@ -49,57 +49,13 @@ Parent: [`design-crowtree-storage.md`](design/design-crowtree-storage.md)
 
 ### Task 2: Online block compaction via snapshot relocation — design only
 
-**Goal**: Design how block files are compacted by integrating page relocation into the normal snapshot path. No standalone compaction pass — sparse blocks drain naturally as dirty pages are rewritten during snapshots. Produce a design document, not code.
+**Goal**: Design how sparse block files are reclaimed by relocating dirty pages to dense blocks during normal snapshot writes. No standalone compaction pass.
 
-**Problem**:
+**Approach**: Online relocation during snapshot — when writing a dirty page, if its current block is sparse (>70% gaps), allocate a new address in a fresh block instead of reusing the old one. Zero extra I/O; crash safety identical to normal snapshot. Sparse blocks drain gradually over multiple snapshots as pages are touched. Empty blocks are deleted after snapshot commit.
 
-After GC runs (`collect_garbage` in `crowtree.cpp`), dead pages become gaps in `SpaceAllocator`. Over time, a block file may have most of its space as gaps — physically occupying disk but logically free. The question is: how to reclaim this space without a separate compaction operation.
+**Rejected alternative**: Explicit `compact_blocks()` API that force-rewrites all live pages from sparse blocks in a single snapshot. Higher I/O burst, more complex. Kept as future extension only.
 
-**Chosen approach — online relocation during snapshot**:
-
-Snapshot already does what compaction needs: it holds `write_mutex_`, writes pages to `PageStore`, updates mapping table slot words, and commits atomically via anchor + segment images + segment directory. The key insight is that compaction is just *choosing where pages land* during snapshot.
-
-**Design**:
-
-1. **Sparse block detection**:
-   - After GC, compute per-block free ratio: `gaps / block_size`.
-   - Blocks with free ratio above a threshold (e.g., 70%) are marked as relocation candidates.
-
-2. **Relocation during snapshot write**:
-   - When the snapshot path writes a dirty page, check if the page's current block is a relocation candidate.
-   - If yes, allocate a new address in a fresh (dense) block via `SpaceAllocator` instead of reusing the old address.
-   - The page is written to the new location; the old address becomes a gap.
-   - The mapping table slot word is updated to the new address — same as a normal snapshot write, just to a different address.
-
-3. **What gets relocated**:
-   - Only **dirty pages** are rewritten during snapshot. Clean pages keep their old address.
-   - This means single snapshot only compacts pages that were modified since last snapshot.
-   - Over multiple snapshots, as pages are touched and rewritten, sparse blocks gradually drain.
-   - For high-churn workloads, compaction is fast (most pages are dirty each snapshot).
-   - For low-churn workloads, blocks are naturally dense — compaction rarely needed.
-
-4. **Block deletion**:
-   - After snapshot commit, check if any block has zero live pages (all gaps).
-   - If so, delete the block file. This is safe — the snapshot is durable, all live pages have new addresses.
-   - `SpaceAllocator` already tracks gaps; a per-block live-page count can be derived from the gap map.
-
-5. **Crash safety**:
-   - Identical to normal snapshot crash safety. If the process dies mid-snapshot:
-     - Old blocks still exist → old addresses still valid.
-     - New block has copied pages → new addresses valid.
-     - Recovery uses the anchor's snapshot to determine which addresses are live.
-   - No additional crash safety logic needed — relocation is just a normal snapshot write to a different address.
-
-6. **Cost**:
-   - Zero additional I/O beyond what snapshot already does. The page would be written anyway — we just choose a different destination address.
-   - The only overhead is the sparse-block check (a set lookup per dirty page).
-
-7. **Supplement — explicit compaction for immediate space reclaim**:
-   - If disk space is urgent and waiting for natural drain is too slow, an explicit `compact_blocks()` API can be added later.
-   - It would force-rewrite all live pages from sparse blocks (not just dirty ones) in a single snapshot.
-   - This is a future extension, not part of the initial design.
-
-**Deliverable**: A design section in `doc/design/design-crowtree-storage.md` (new §2.5 "Block Compaction") documenting the online relocation approach. No code changes.
+**Deliverable**: Design section in `doc/design/design-crowtree-storage.md` (§2.5 "Block Compaction") covering sparse detection, relocation mechanics, block deletion, crash safety, and cost analysis.
 
 **Files**:
 - `doc/design/design-crowtree-storage.md` (add §2.5)
