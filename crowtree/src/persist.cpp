@@ -33,6 +33,7 @@
 // free-space reuse, page/segment-image/directory framing, anchor A/B
 // commit, best-anchor recovery, lazy mapping-table rebuild.
 #include "crowtree/async_page_store.h"
+#include "crowtree/block_page_store.h"
 #include "crowtree/compressor.h"
 #include "crowtree/crc32c.h"
 #include "crowtree/crowtree.h"
@@ -215,6 +216,7 @@ struct SpaceAllocator
     std::vector<std::pair<uint64_t, uint64_t>> gaps;       // (addr, len), sorted by addr
     uint64_t                                   append = 0; // set by build_allocator (region base or EOF)
     uint32_t                                   iu     = 1; // every extent is IU-aligned + IU-sized (PT9)
+    std::set<uint32_t>                         empty_blocks; // block indices with zero live bytes (block compaction)
 
     uint64_t alloc(uint64_t len)
     {
@@ -286,6 +288,7 @@ constexpr double kSparseBlockThreshold = 0.70;
 // [kRegionBase, file_size); append grows past EOF. When block_size > 0
 // (array-of-blocks mode), gaps in sparse blocks (>70% free) are excluded
 // from the gap list so new writes don't reuse space in nearly-empty blocks.
+// Also populates `empty_blocks` with block indices that have zero live bytes.
 SpaceAllocator build_allocator(std::vector<std::pair<uint64_t, uint64_t>> live, uint64_t file_size, uint32_t iu,
                                uint64_t region_base, uint64_t block_size)
 {
@@ -306,18 +309,34 @@ SpaceAllocator build_allocator(std::vector<std::pair<uint64_t, uint64_t>> live, 
     }
     a.append = eof;
 
-    if (block_size > 0 && !a.gaps.empty()) {
-        std::vector<std::pair<uint64_t, uint64_t>> filtered;
-        filtered.reserve(a.gaps.size());
-        for (const auto &g : a.gaps) {
-            uint64_t blk_start = (g.first / block_size) * block_size;
-            uint64_t blk_end   = blk_start + block_size;
-            uint64_t gap_in_blk = std::min(g.first + g.second, blk_end) - g.first;
-            if (static_cast<double>(gap_in_blk) / static_cast<double>(block_size) <= kSparseBlockThreshold) {
-                filtered.push_back(g);
+    if (block_size > 0) {
+        // Compute per-block live bytes to identify empty blocks.
+        std::map<uint32_t, uint64_t> live_per_block;
+        for (const auto &e : live) {
+            uint32_t blk = static_cast<uint32_t>(e.first / block_size);
+            live_per_block[blk] += e.second;
+        }
+        uint32_t max_blk = static_cast<uint32_t>(eof / block_size);
+        for (uint32_t i = 0; i <= max_blk; ++i) {
+            if (live_per_block.find(i) == live_per_block.end()) {
+                a.empty_blocks.insert(i);
             }
         }
-        a.gaps = std::move(filtered);
+
+        // Exclude gaps in sparse blocks from the gap list.
+        if (!a.gaps.empty()) {
+            std::vector<std::pair<uint64_t, uint64_t>> filtered;
+            filtered.reserve(a.gaps.size());
+            for (const auto &g : a.gaps) {
+                uint64_t blk_start = (g.first / block_size) * block_size;
+                uint64_t blk_end   = blk_start + block_size;
+                uint64_t gap_in_blk = std::min(g.first + g.second, blk_end) - g.first;
+                if (static_cast<double>(gap_in_blk) / static_cast<double>(block_size) <= kSparseBlockThreshold) {
+                    filtered.push_back(g);
+                }
+            }
+            a.gaps = std::move(filtered);
+        }
     }
 
     return a;
@@ -354,6 +373,7 @@ Status Crowtree::prepare_snapshot_locked(PreparedSnapshot *out)
         return Status::corruption("snapshot: committed segment directory unreadable");
     }
     SpaceAllocator alloc = build_allocator(std::move(live), store->size(), iu, region_base, store->block_size());
+    out->empty_blocks = alloc.empty_blocks;
 
     uint64_t pages_written = 0;
 
@@ -713,6 +733,31 @@ Status Crowtree::snapshot(uint64_t *out_last_applied)
     }
 
     commit_prepared_snapshot(prepared);
+
+    // Block compaction: delete blocks that are empty in both this snapshot
+    // and the previous one (two-generation rule). The crash fallback anchor
+    // still references blocks that were live in the prior snapshot, so a
+    // block must be empty in two consecutive snapshots before deletion.
+    if (opt_.page_store->block_size() > 0 && !prepared.empty_blocks.empty()) {
+        auto *bps = dynamic_cast<BlockPageStore *>(opt_.page_store);
+        if (bps != nullptr) {
+            std::vector<uint32_t> to_delete;
+            for (uint32_t blk : prepared.empty_blocks) {
+                if (prev_empty_blocks_.contains(blk)) {
+                    to_delete.push_back(blk);
+                }
+            }
+            for (uint32_t blk : to_delete) {
+                CT_LOG_INFO("block compaction: deleting empty block {}", blk);
+                Status ds = bps->delete_block(blk);
+                if (!ds.ok()) {
+                    CT_LOG_WARN("block compaction: delete_block({}) failed: {}", blk, ds.to_string());
+                }
+            }
+        }
+    }
+    prev_empty_blocks_ = std::move(prepared.empty_blocks);
+
     release_snapshot_slot();
     if (out_last_applied != nullptr) {
         *out_last_applied = prepared.last_applied_slot;
