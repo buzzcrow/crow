@@ -6,6 +6,27 @@
 Unfinished test tasks, grouped by layer. Each task has a checkbox for tracking.
 For test strategy, layer scope, and coverage details, see [`design/design-test.md`](design/design-test.md).
 
+## Suite Timing
+
+Measured on 2026-07-14 on the current development machine. All six suites passed
+with zero failures. Times are the wall-clock duration of `pixi run <suite>`
+(including incremental build/compile overhead).
+
+| Suite | Result | Tests | Real time |
+| --- | --- | --- | --- |
+| `test-ct` | pass | 320/320 | 8.3 s |
+| `test-core` | pass | 404 | 8.9 s |
+| `test-server` | pass | 15 | 9.4 s |
+| `test-cli` | pass | 56 | 9.6 s |
+| `test-web` | pass | 49 | 39.1 s |
+| `test-ui` | pass | 23/23 | 32.7 s |
+| **Total** | **pass** | — | **~108 s** |
+
+The C++ Crowtree tests (`test-ct`) and the Rust core tests (`test-core`) are
+the fastest. The console/web suite (`test-web`) dominates wall time because it
+boots real server processes and runs integration-level API tests. The E2E suite
+(`test-ui`) launches a headless browser against a real backend.
+
 ## Election Unit
 
 - [x] `on_step_down` handler: strict-fence policy (only accepts if still leader at requested term) (`step_down_test.rs`).

@@ -2,12 +2,13 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, DEFAULT_SERVER_BINARY, deployNodeServer, stopNodeServer } from '../fixtures/consoleSetup';
+import { apiContext, DEFAULT_SERVER_BINARY, deployNodeServer, stopNodeServer, resetAll } from '../fixtures/consoleSetup';
 
 test.describe('E2E-18 full chain', () => {
   test('creates rack, node, server, store, group, and replica entirely through the UI', async ({ page, baseURL }) => {
     const api = await apiContext(baseURL!);
     try {
+      await resetAll(baseURL!);
       await page.goto('/');
       await expect(page.getByRole('button', { name: 'Physical' })).toBeVisible({ timeout: 15_000 });
       await page.getByRole('button', { name: 'Physical' }).click();
@@ -89,6 +90,7 @@ test.describe('E2E-18 full chain', () => {
       await expect(page.getByRole('dialog', { name: 'Add Group' })).toBeVisible();
       await page.getByLabel('Group ID (numeric)').fill('1880');
       await page.getByLabel('Starting Replica ID (numeric)').fill('18800');
+      await page.getByLabel(/^n18b/).uncheck();
       await page.getByLabel(/^n18a/).check();
       await page.getByRole('button', { name: /create group/i }).click();
       await expect(page.getByText(/Group 1880 created successfully/)).toBeVisible({ timeout: 30_000 });
