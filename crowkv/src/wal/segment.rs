@@ -84,7 +84,7 @@ impl WalSegment {
         group_id: PxGroupId,
         record_format: WalRecordFormat,
     ) -> io::Result<Self> {
-        let filename = format!("seg-{segment_id:07}.log");
+        let filename = format!("seg-{segment_id:07}.ck");
         let path = dir.join(filename);
         backend.create_dir_all(dir).await?;
         let mut file = backend.open(&path, OpenOptions::create_rw()).await?;
@@ -629,9 +629,9 @@ fn decode_footer(buf: &[u8; FOOTER_LEN]) -> Option<SegmentFooter> {
 }
 
 /// Parse a segment filename to extract the `segment_id`.
-/// Expected format: `seg-NNNNNNN.log`
+/// Expected format: `seg-NNNNNNN.ck`
 #[must_use]
 pub fn parse_segment_filename(name: &str) -> Option<u64> {
-    let name = name.strip_prefix("seg-")?.strip_suffix(".log")?;
+    let name = name.strip_prefix("seg-")?.strip_suffix(".ck")?;
     name.parse().ok()
 }
