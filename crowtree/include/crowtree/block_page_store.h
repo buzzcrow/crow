@@ -173,6 +173,12 @@ class BlockPageStore : public PageStore
         return medium_.get();
     }
 
+    // For async I/O: maps a global byte offset to the underlying fd and
+    // local offset within that fd's file. Returns -1 if no extent covers
+    // this offset, the extent is deleted, or the medium is not a FileMedium
+    // (e.g. MemoryMedium). Used by BlockAsyncPageStore.
+    int fd_for_offset(uint64_t off, uint64_t *out_local) const;
+
     // Number of live block files in an array-of-blocks store (0 for single-medium).
     [[nodiscard]] size_t num_extents() const
     {

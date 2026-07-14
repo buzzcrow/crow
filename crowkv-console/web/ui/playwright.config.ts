@@ -1,4 +1,32 @@
+import { existsSync } from 'node:fs';
 import { defineConfig, devices } from '@playwright/test';
+
+// Browser selection, in priority order:
+//   1. PLAYWRIGHT_CHANNEL (e.g. "chrome"/"msedge") — use Playwright's channel support.
+//   2. PLAYWRIGHT_CHROMIUM_EXECUTABLE — explicit binary path override.
+//   3. Local Chromium (Linux snap, Linux apt, macOS app).
+//   4. Local Microsoft Edge (Linux /usr/bin, macOS app).
+//   5. macOS Google Chrome (common dev install; Safari is the macOS default
+//      but Playwright cannot drive it directly — no CDP support).
+//   6. Playwright's bundled Chromium (CI after `npx playwright install`).
+const explicitExecutable = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE;
+const localBrowsers = [
+  '/snap/bin/chromium',
+  '/usr/bin/chromium',
+  '/usr/bin/chromium-browser',
+  '/Applications/Chromium.app/Contents/MacOS/Chromium',
+  '/usr/bin/microsoft-edge',
+  '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+];
+const executablePath = explicitExecutable
+  ?? localBrowsers.find((p) => existsSync(p));
+
+const chromiumUse = process.env.PLAYWRIGHT_CHANNEL
+  ? { ...devices['Desktop Chrome'], channel: process.env.PLAYWRIGHT_CHANNEL }
+  : executablePath
+    ? { ...devices['Desktop Chrome'], launchOptions: { executablePath } }
+    : { ...devices['Desktop Chrome'] };
 
 /**
  * Playwright config for in-browser audits (axe-core + interaction smoke).
@@ -21,12 +49,7 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
-      // If Playwright's bundled Chromium download is unavailable, point
-      // PLAYWRIGHT_CHANNEL=msedge to use the system Microsoft Edge install
-      // (which is also Chromium-based) without any download.
-      use: process.env.PLAYWRIGHT_CHANNEL
-        ? { ...devices['Desktop Chrome'], channel: process.env.PLAYWRIGHT_CHANNEL }
-        : { ...devices['Desktop Chrome'] },
+      use: chromiumUse,
     },
   ],
   webServer: {
