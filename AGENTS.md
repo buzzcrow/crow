@@ -20,6 +20,7 @@ Rust workspace + C++ storage engine (via FFI).
 - `Px` prefix for Paxos types (e.g. `PxGroupId`, `PxReplicaService`).
 - WAL record byte layout is frozen (v1) — `crowkv/src/wal/record.rs`. No change without version bump.
 - `test-util` feature auto-enabled for tests via self dev-dependency — `cargo test` needs no flags.
+- Commit messages: single line, no doc references or task numbers. Code comments: same rule.
 
 ## Dispatch — Read Before Acting
 
