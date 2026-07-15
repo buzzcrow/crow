@@ -745,9 +745,12 @@ export async function kvScan(
   groupId: string,
   prefix: string = '',
   limit: number = 100,
+  startAfter?: string,
   options?: RequestOptions
 ): Promise<KvScanResponse> {
-  const url = `/api/stores/${encodeURIComponent(storeId)}/groups/${encodeURIComponent(groupId)}/kv/scan${qs({ prefix, limit })}`;
+  const params: Record<string, string | number> = { prefix, limit };
+  if (startAfter) params.start_after = startAfter;
+  const url = `/api/stores/${encodeURIComponent(storeId)}/groups/${encodeURIComponent(groupId)}/kv/scan${qs(params)}`;
   return jsonOrThrow(await fetchWithOptions(url, { ...options, method: 'GET' }));
 }
 

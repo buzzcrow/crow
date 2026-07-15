@@ -127,20 +127,55 @@ Remove the KV tab from `Inspector.tsx`. The Inspector keeps Details and
 Activity tabs only. This avoids duplication — all KV operations live in the
 center panel.
 
-### 6. Backend: HTTP batch write endpoint (optional optimization)
+### 6. Scan pagination (start_after token)
 
-The demo inject currently needs N sequential HTTP calls. For N=1000 this is
-slow. Options:
+**Problem**: The scan endpoint returns at most `limit` (default 100) items
+with a `truncated` flag, but offers no way to fetch the next page. The user
+must re-scan with a higher limit or a narrower prefix — impractical for
+large keyspaces.
 
-- **Option A (simple)**: Sequential `kvPut` calls from the frontend. For
-  demo purposes (N ≤ 1000) this is acceptable — each call is ~1ms locally.
-- **Option B (optimized)**: Add `POST /api/stores/:sid/groups/:gid/kv/batch`
-  wrapping the existing gRPC `batch_write`. Reduces to one HTTP call but
-  requires a new route, body schema, and client function.
+**Design**: Add a `start_after` parameter to the scan API, analogous to S3
+ListObjectsV2's `start-after`. The caller passes the last key from the
+previous batch; the engine returns keys strictly greater than `start_after`
+that still match the prefix. No total count is needed — the UI uses
+`truncated` to show a "Load more" button.
 
-**Recommendation**: Start with Option A. If performance is an issue, add
-Option B later. The frontend `kvPut` loop can be easily replaced with a
-batch call.
+**Protocol changes** (all layers, all optional/default-empty):
+
+- **gRPC** `KvScanRequest`: add `bytes start_after = 8;` (field 8, next
+  available after `read_mode = 7`). Empty means "start from the beginning".
+- **Rust engine trait** `KvEngine::scan`: add `start_after: &[u8]` parameter.
+- **`MemKv`**: change `map.range(prefix.to_vec()..)` to
+  `map.range(start_after.to_vec()..)` and keep the prefix filter. This is
+  correct because BTreeMap range is inclusive-start exclusive-end in key
+  order; `start_after` gives us the exclusive lower bound.
+- **`CrowtreeEngine`**: pass `start_after` through to the FFI layer. The
+  C++ `Crowtree::scan` needs a new `start_after` parameter (or a wrapper
+  that filters post-scan — less efficient but simpler for a first cut).
+  **Decision**: For the first implementation, `CrowtreeEngine` will
+  over-fetch (scan with the original prefix, then filter out keys ≤
+  `start_after` in Rust before applying the limit). This avoids C++ changes.
+  If the prefix range is large and `start_after` is deep, this is
+  inefficient — a follow-up can push `start_after` into the C++ engine.
+- **HTTP** `KvScanQuery`: add `#[serde(default)] start_after: Option<String>`
+  and `start_after_hex: Option<String>` (mirrors the prefix/prefix_hex
+  pattern).
+- **HTTP response** `KvScanResponseView`: no change — already has
+  `truncated`.
+- **Client** `crowkv-client`: `scan()` gains a `start_after: &[u8]` param.
+- **Frontend** `api.ts`: `kvScan()` gains an optional `startAfter` param.
+- **Frontend** `KvOperatorPanel`: after a scan, if `truncated`, show a
+  "Load more" button. Clicking it calls `kvScan` with `startAfter` set to
+  the last key in the current results. New rows are appended, not replaced.
+  "Load more" is per-group for All Groups mode (each group tracks its own
+  last key and truncated state).
+
+**UI interaction**:
+- Initial scan: `startAfter` = empty, `limit` = 100.
+- "Load more" button appears when `truncated` is true.
+- Click → fetch next batch with `startAfter` = last key of current batch.
+- Results accumulate (append, not replace).
+- Changing store/group/prefix resets to a fresh scan.
 
 ### 7. ViewMode interaction
 
@@ -159,8 +194,24 @@ when the topology canvas shows the physical view.
 - `web/ui/src/panels/KvPanel.tsx` — logic absorbed into KvOperatorPanel;
   file can be deleted or kept as a thin wrapper if reused elsewhere.
 - `web/ui/src/shell/Inspector.tsx` — remove KV tab.
-- `web/ui/src/api.ts` — no changes needed for Option A.
-- `web/src/lib.rs` — no changes needed for Option A.
+- `web/ui/src/api.ts` — add `startAfter` param to `kvScan`.
+- `crowkv/src/rpc/proto/kv.proto` — add `start_after` field to
+  `KvScanRequest`.
+- `crowkv/src/rpc/kv_service.rs` — pass `start_after` through to
+  `kv_scan`.
+- `crowkv/src/cluster/kv_store.rs` — add `start_after` to `kv_scan`
+  trait method.
+- `crowkv/src/cluster/px_kv_store.rs` — pass `start_after` to
+  `engine_scan`.
+- `crowkv/src/paxos/learner.rs` — pass `start_after` to engine `scan`.
+- `crowkv/src/kv/kv_engine.rs` — add `start_after` to `scan` trait
+  method.
+- `crowkv/src/kv/mem_kv.rs` — use `start_after` as range lower bound.
+- `crowkv/src/kv/crowtree_engine.rs` — filter by `start_after`
+  post-scan (over-fetch + filter, no C++ change).
+- `crowkv-client/src/client.rs` — add `start_after` param to `scan`.
+- `crowkv-console/web/src/kv.rs` — add `start_after` query params to
+  `KvScanQuery`, pass through to client.
 
 ## Alternatives Considered
 
@@ -186,8 +237,12 @@ when the topology canvas shows the physical view.
   verify cleaned up.
 - E2E: select All Groups, scan, verify results from multiple groups.
 - E2E: Inspector no longer shows KV tab.
+- E2E: inject 150 keys, scan (limit 100), verify "Load more" button
+  appears, click it, verify remaining 50 keys appended.
 - Unit: store/group selector defaults to first store+group when no entity
   selected.
 - Unit: store/group selector follows selected entity when a logical Group
   is selected.
 - Unit: All Groups scan merges results from all groups in the store.
+- Unit: scan with start_after returns keys strictly greater than
+  start_after.

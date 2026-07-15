@@ -126,10 +126,12 @@ impl KvStore for PxKvStore {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn kv_scan(
         &self,
         group_id: u64,
         prefix: &[u8],
+        start_after: &[u8],
         limit: u32,
         read_mode: i32,
         request_id: u64,
@@ -165,7 +167,7 @@ impl KvStore for PxKvStore {
         let (scanned, truncated) = group
             .local_replica()
             .learner
-            .engine_scan(prefix, limit as usize)
+            .engine_scan(prefix, start_after, limit as usize)
             .await;
         let mut items: Vec<crate::rpc::KvScanItem> = Vec::with_capacity(scanned.len());
         for (key, _slot, value) in scanned {

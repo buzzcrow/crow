@@ -67,15 +67,30 @@ impl KVEngine for InMemKV {
         KVFuture::ready(result)
     }
 
-    fn scan(&self, prefix: &[u8], limit: usize) -> KVFuture<(Vec<(Vec<u8>, u64, Vec<u8>)>, bool)> {
+    fn scan(
+        &self,
+        prefix: &[u8],
+        start_after: &[u8],
+        limit: usize,
+    ) -> KVFuture<(Vec<(Vec<u8>, u64, Vec<u8>)>, bool)> {
         let map = self.map.read();
         let mut items = Vec::new();
         let mut truncated = false;
-        // BTreeMap is key-ordered; iterate from the prefix and stop once keys
-        // no longer share it.
-        for (key, (slot, cell)) in map.range(prefix.to_vec()..) {
+        // BTreeMap is key-ordered; iterate from the lower bound and stop
+        // once keys no longer share the prefix. When `start_after` is
+        // empty, start from the prefix itself (avoids scanning
+        // non-matching keys before the prefix range).
+        let lower = if start_after.is_empty() {
+            prefix.to_vec()
+        } else {
+            start_after.to_vec()
+        };
+        for (key, (slot, cell)) in map.range(lower..) {
             if !key.starts_with(prefix) {
                 break;
+            }
+            if !start_after.is_empty() && key.as_slice() <= start_after {
+                continue;
             }
             let Cell::Value(v) = cell else { continue };
             // Reaching the cap with another live match pending means the

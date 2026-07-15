@@ -34,6 +34,8 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
   const [scanRows, setScanRows] = useState<ScanRow[]>([]);
   const [scanTruncated, setScanTruncated] = useState(false);
   const [scanLoading, setScanLoading] = useState(false);
+  const [scanCursors, setScanCursors] = useState<Map<string, { lastKey: string; truncated: boolean }>>(new Map());
+  const [loadingMore, setLoadingMore] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const [getKey, setGetKey] = useState('');
@@ -110,18 +112,28 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
     try {
       if (groupId === ALL_GROUPS) {
         const allRows: ScanRow[] = [];
-        let truncated = false;
+        const cursors = new Map<string, { lastKey: string; truncated: boolean }>();
+        let anyTruncated = false;
         for (const gid of groupIdsInStore) {
           const result = await kvScan(storeId, gid, scanPrefix);
           allRows.push(...result.items.map((item) => ({ ...item, groupId: gid, selected: false })));
-          if (result.truncated) truncated = true;
+          if (result.items.length > 0) {
+            cursors.set(gid, { lastKey: result.items[result.items.length - 1].key_utf8, truncated: result.truncated });
+          }
+          if (result.truncated) anyTruncated = true;
         }
         setScanRows(allRows);
-        setScanTruncated(truncated);
+        setScanTruncated(anyTruncated);
+        setScanCursors(cursors);
       } else {
         const result = await kvScan(storeId, groupId, scanPrefix);
         setScanRows(result.items.map((item) => ({ ...item, groupId, selected: false })));
         setScanTruncated(result.truncated);
+        const cursors = new Map<string, { lastKey: string; truncated: boolean }>();
+        if (result.items.length > 0) {
+          cursors.set(groupId, { lastKey: result.items[result.items.length - 1].key_utf8, truncated: result.truncated });
+        }
+        setScanCursors(cursors);
       }
       log({ action: 'KV Scan', target: targetLabel, status: 'Success', message: `Found ${scanRows.length} keys` });
       success(`Scanned ${scanRows.length} keys`);
@@ -134,6 +146,42 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
       setScanLoading(false);
     }
   }, [storeId, groupId, scanPrefix, groupIdsInStore, targetLabel, log, success, error, scanRows.length]);
+
+  const handleLoadMore = useCallback(async () => {
+    if (!storeId || !groupId || scanCursors.size === 0) return;
+    setLoadingMore(true);
+    setErrorMsg(null);
+    try {
+      const gids = groupId === ALL_GROUPS ? groupIdsInStore : [groupId];
+      const newRows: ScanRow[] = [];
+      const updatedCursors = new Map(scanCursors);
+      let anyTruncated = false;
+      for (const gid of gids) {
+        const cursor = updatedCursors.get(gid);
+        if (!cursor || !cursor.truncated) continue;
+        const result = await kvScan(storeId, gid, scanPrefix, 100, cursor.lastKey);
+        newRows.push(...result.items.map((item) => ({ ...item, groupId: gid, selected: false })));
+        if (result.items.length > 0) {
+          updatedCursors.set(gid, { lastKey: result.items[result.items.length - 1].key_utf8, truncated: result.truncated });
+        } else {
+          updatedCursors.set(gid, { lastKey: cursor.lastKey, truncated: false });
+        }
+        if (result.truncated) anyTruncated = true;
+      }
+      setScanRows((prev) => [...prev, ...newRows]);
+      setScanTruncated(anyTruncated);
+      setScanCursors(updatedCursors);
+      log({ action: 'KV Scan', target: targetLabel, status: 'Success', message: `Loaded ${newRows.length} more keys` });
+      success(`Loaded ${newRows.length} more keys`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Load more failed';
+      setErrorMsg(msg);
+      log({ action: 'KV Scan', target: targetLabel, status: 'Failed', message: msg });
+      error(msg);
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [storeId, groupId, scanCursors, groupIdsInStore, scanPrefix, targetLabel, log, success, error]);
 
   const handleGet = useCallback(async () => {
     if (!getKey || !storeId || !groupId || groupId === ALL_GROUPS) return;
@@ -612,6 +660,15 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
                 </tbody>
               </table>
             </div>
+            {scanTruncated && (
+              <button
+                onClick={handleLoadMore}
+                disabled={loadingMore}
+                className="tw-w-full tw-py-1.5 tw-text-xs tw-text-muted tw-border tw-border-border tw-rounded hover:tw-bg-panel tw-transition-colors disabled:tw-opacity-50"
+              >
+                {loadingMore ? 'Loading...' : 'Load more'}
+              </button>
+            )}
           </div>
         )}
 

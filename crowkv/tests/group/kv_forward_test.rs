@@ -163,6 +163,7 @@ async fn follower_scan_forwards_to_leader_after_local_clear() {
             request_id: 201,
             request_create_ms: 1101,
             read_mode: 0,
+            start_after: Vec::new(),
         })
         .await
         .expect("kv scan on follower")

@@ -122,7 +122,7 @@ async fn batch_write_and_scan() {
         .expect("batch_write");
 
     let scanned = client
-        .scan(STORE_ID, GROUP_ID, b"a", 0, ReadMode::BestEffort)
+        .scan(STORE_ID, GROUP_ID, b"a", &[], 0, ReadMode::BestEffort)
         .await
         .expect("scan");
     assert_eq!(scanned.items.len(), 2);

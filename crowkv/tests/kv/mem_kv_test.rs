@@ -57,7 +57,7 @@ fn get_scan_apply_always_resolve_ready() {
         KVFuture::Ready(_)
     ));
     assert!(matches!(e.get(b"k"), KVFuture::Ready(_)));
-    assert!(matches!(e.scan(b"", 0), KVFuture::Ready(_)));
+    assert!(matches!(e.scan(b"", b"", 0), KVFuture::Ready(_)));
 }
 
 #[test]

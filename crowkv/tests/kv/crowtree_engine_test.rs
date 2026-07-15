@@ -77,7 +77,7 @@ fn get_scan_apply_always_resolve_ready() {
         KVFuture::Ready(_)
     ));
     assert!(matches!(e.get(b"k"), KVFuture::Ready(_)));
-    assert!(matches!(e.scan(b"", 0), KVFuture::Ready(_)));
+    assert!(matches!(e.scan(b"", b"", 0), KVFuture::Ready(_)));
 }
 
 /// Regression guard : unlike the in-memory case
@@ -157,13 +157,13 @@ async fn scan_constructs_pending_for_genuine_demand_load_miss() {
     );
 
     if !e.handle().is_reactor_available() {
-        let (items, truncated) = e.scan(b"", 0).into_ready();
+        let (items, truncated) = e.scan(b"", b"", 0).into_ready();
         assert_eq!(items, vec![(b"k".to_vec(), 1, b"v".to_vec())]);
         assert!(!truncated);
         return;
     }
 
-    match e.scan(b"", 0) {
+    match e.scan(b"", b"", 0) {
         KVFuture::Ready(_) => panic!("expected a genuine Pending after evicting the resident leaf"),
         KVFuture::Pending(fut) => {
             let (items, truncated) = fut.await;
