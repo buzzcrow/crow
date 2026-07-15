@@ -11,7 +11,7 @@ use crate::Cli;
 // `load_config` / `config_path` remain: the `bench stress` path reads
 // `[bench.stress.*]` overlays from the console config file. There is no
 // server registry resolution here anymore — every verb addresses the
-// cluster through `--console`.
+// cluster through `--ip` / `--port`.
 
 pub fn config_path(cli: &Cli) -> Result<PathBuf, ExitCode> {
     if let Some(p) = &cli.config {

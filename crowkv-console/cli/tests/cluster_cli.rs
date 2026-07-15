@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! CLI e2e for cluster observation: `cluster status / topology /
-//! inspect` route entirely through `--console` (no `--server`), against
-//! a web-managed cluster with no persisted registry.
+//! inspect` route entirely through `--ip` / `--port` (no `--server`),
+//! against a web-managed cluster with no persisted registry.
 
 mod testkit;
 
@@ -27,14 +27,16 @@ async fn cluster_status_topology_inspect_via_console() {
     }
 
     let console = spawn_console(&upstream).await;
-    let console_url = format!("http://{console}");
+    let ip = console.ip().to_string();
+    let port = console.port();
 
     // Seed a store + group through the CLI so the logical tree is non-empty.
-    let (code, _, stderr) = run(&cli, &console_url, &["store", "add", "--store-id", "9"]);
+    let (code, _, stderr) = run(&cli, &ip, port, &["store", "add", "--store-id", "9"]);
     assert_eq!(code, 0, "store add stderr={stderr}");
     let (code, _, stderr) = run(
         &cli,
-        &console_url,
+        &ip,
+        port,
         &[
             "paxos",
             "add",
@@ -49,17 +51,17 @@ async fn cluster_status_topology_inspect_via_console() {
         ],
     );
     assert_eq!(code, 0, "paxos add stderr={stderr}");
-    let _ = wait_for_leader(&console_url, 9, 90, Duration::from_secs(15)).await;
+    let _ = wait_for_leader(&ip, port, 9, 90, Duration::from_secs(15)).await;
 
     // status — summarises servers + store/group counts.
-    let (code, stdout, stderr) = run(&cli, &console_url, &["cluster", "status"]);
+    let (code, stdout, stderr) = run(&cli, &ip, port, &["cluster", "status"]);
     assert_eq!(code, 0, "status stderr={stderr}");
     assert!(stdout.contains("servers:"), "stdout={stdout}");
     assert!(stdout.contains("n1"), "stdout={stdout}");
     assert!(stdout.contains("stores: 1"), "stdout={stdout}");
 
     // topology — logical + physical sections.
-    let (code, stdout, stderr) = run(&cli, &console_url, &["cluster", "topology"]);
+    let (code, stdout, stderr) = run(&cli, &ip, port, &["cluster", "topology"]);
     assert_eq!(code, 0, "topology stderr={stderr}");
     assert!(stdout.contains("logical:"), "stdout={stdout}");
     assert!(stdout.contains("store 9"), "stdout={stdout}");
@@ -68,21 +70,21 @@ async fn cluster_status_topology_inspect_via_console() {
     assert!(stdout.contains("node n1"), "stdout={stdout}");
 
     // inspect node (bare token → node id).
-    let (code, stdout, stderr) = run(&cli, &console_url, &["cluster", "inspect", "n1"]);
+    let (code, stdout, stderr) = run(&cli, &ip, port, &["cluster", "inspect", "n1"]);
     assert_eq!(code, 0, "inspect node stderr={stderr}");
     assert!(stdout.contains("mgmt_url:"), "stdout={stdout}");
 
     // inspect store / group via the s.../g... id grammar.
-    let (code, stdout, stderr) = run(&cli, &console_url, &["cluster", "inspect", "s9"]);
+    let (code, stdout, stderr) = run(&cli, &ip, port, &["cluster", "inspect", "s9"]);
     assert_eq!(code, 0, "inspect store stderr={stderr}");
     assert!(stdout.contains("store 9"), "stdout={stdout}");
 
-    let (code, stdout, stderr) = run(&cli, &console_url, &["cluster", "inspect", "s9/g90"]);
+    let (code, stdout, stderr) = run(&cli, &ip, port, &["cluster", "inspect", "s9/g90"]);
     assert_eq!(code, 0, "inspect group stderr={stderr}");
     assert!(stdout.contains("group 90"), "stdout={stdout}");
 
     // --json status decodes as an object with a servers array.
-    let (code, stdout, _) = run(&cli, &console_url, &["--json", "cluster", "status"]);
+    let (code, stdout, _) = run(&cli, &ip, port, &["--json", "cluster", "status"]);
     assert_eq!(code, 0);
     let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("json status");
     assert!(parsed["servers"].is_array(), "json={stdout}");

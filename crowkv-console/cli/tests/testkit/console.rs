@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! Shared CLI e2e harness: spawn a real `crowkv-server` (local fork),
-//! an in-process `crowkv-web` console bound to a random port, and run
-//! the compiled `crowkv` binary against it with `--console`.
+//! an in-process `crowkv-web` service bound to a random port, and run
+//! the compiled `crowkv-cli` binary against it with `--ip` / `--port`.
 //!
 //! Every helper here is consumed by a subset of the `tests/*_cli*`
 //! binaries, so the module-level `dead_code` allow keeps each binary
@@ -192,12 +192,14 @@ pub async fn spawn_console_empty() -> (SocketAddr, PathBuf) {
     (addr, dir)
 }
 
-/// Run the CLI with `--console <url>` plus `args`, capturing
+/// Run the CLI with `--ip <ip> --port <port>` plus `args`, capturing
 /// `(exit_code, stdout, stderr)`.
-pub fn run(cli: &PathBuf, console_url: &str, args: &[&str]) -> (i32, String, String) {
+pub fn run(cli: &PathBuf, ip: &str, port: u16, args: &[&str]) -> (i32, String, String) {
     let out = Command::new(cli)
-        .arg("--console")
-        .arg(console_url)
+        .arg("--ip")
+        .arg(ip)
+        .arg("--port")
+        .arg(port.to_string())
         .args(args)
         .output()
         .expect("spawn cli");
@@ -208,11 +210,11 @@ pub fn run(cli: &PathBuf, console_url: &str, args: &[&str]) -> (i32, String, Str
     )
 }
 
-/// Poll the console until group `(sid, gid)` reports a leader, or the
+/// Poll the service until group `(sid, gid)` reports a leader, or the
 /// timeout elapses. Returns `true` if a leader was observed.
-pub async fn wait_for_leader(console_url: &str, sid: u64, gid: u64, timeout: Duration) -> bool {
+pub async fn wait_for_leader(ip: &str, port: u16, sid: u64, gid: u64, timeout: Duration) -> bool {
     let http = reqwest::Client::new();
-    let url = format!("{console_url}/api/stores/{sid}/groups/{gid}");
+    let url = format!("http://{ip}:{port}/api/stores/{sid}/groups/{gid}");
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
         if let Ok(resp) = http.get(&url).send().await {

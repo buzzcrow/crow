@@ -119,17 +119,32 @@ impl KVEngine for CrowtreeEngine {
         }
     }
 
-    fn scan(&self, prefix: &[u8], limit: usize) -> KVFuture<(Vec<(Vec<u8>, u64, Vec<u8>)>, bool)> {
-        // AsyncCrowtree::try_scan does the same fast-path check
-        // Crowtree::scan itself does, first -- a scan whose whole range is
-        // already resident resolves right here, no allocation beyond the
-        // returned entries, same as the old always-`Ready` body. Only a
-        // genuine cold-leaf miss reaches `Pending`, wrapping the
-        // reactor-driven future `try_scan` already built for us.
-        match self.inner.try_scan(prefix.to_vec(), limit) {
-            ScanOutcome::Ready(result) => KVFuture::ready(decode_scan_result(result)),
+    fn scan(
+        &self,
+        prefix: &[u8],
+        start_after: &[u8],
+        limit: usize,
+    ) -> KVFuture<(Vec<(Vec<u8>, u64, Vec<u8>)>, bool)> {
+        // The C++ crowtree scan API takes only prefix + limit (no
+        // start_after). For pagination we over-fetch with the original
+        // prefix, then filter out keys <= start_after in Rust before
+        // applying the limit. This is inefficient when start_after is deep
+        // into a large prefix range — a follow-up can push start_after
+        // into the C++ engine. When start_after is empty, the fast path
+        // is identical to the old behavior.
+        let prefix_owned = prefix.to_vec();
+        let start_after_owned = start_after.to_vec();
+        let fetch_limit = if start_after.is_empty() { limit } else { 0 };
+
+        match self.inner.try_scan(prefix_owned.clone(), fetch_limit) {
+            ScanOutcome::Ready(result) => {
+                KVFuture::ready(decode_scan_with_start_after(result, &start_after_owned, limit))
+            }
             ScanOutcome::Pending(fut) => {
-                KVFuture::Pending(Box::pin(async move { decode_scan_result(fut.await) }))
+                let sa = start_after_owned;
+                KVFuture::Pending(Box::pin(async move {
+                    decode_scan_with_start_after(fut.await, &sa, limit)
+                }))
             }
         }
     }
@@ -257,17 +272,40 @@ impl KVEngine for CrowtreeEngine {
 
 /// Shared tail of [`CrowtreeEngine::scan`]'s `Ready`/`Pending` arms:
 /// converts a raw `crowtree_ffi::ScanEntry` result into the
-/// `KVEngine::scan` return shape, collapsing an error to an empty,
-/// non-truncated result (matching the prior always-synchronous body's
-/// error handling).
+/// `KVEngine::scan` return shape, filtering by `start_after` and applying
+/// `limit`. When `start_after` is empty the filter is a no-op, matching
+/// the original behavior. Collapses an error to an empty, non-truncated
+/// result.
 type ScanResult = (Vec<(Vec<u8>, u64, Vec<u8>)>, bool);
 
-fn decode_scan_result(result: Result<(Vec<crowtree_ffi::ScanEntry>, bool), CtError>) -> ScanResult {
+fn decode_scan_with_start_after(
+    result: Result<(Vec<crowtree_ffi::ScanEntry>, bool), CtError>,
+    start_after: &[u8],
+    limit: usize,
+) -> ScanResult {
     match result {
-        Ok((entries, truncated)) => (
-            entries.into_iter().map(|e| (e.key, e.slot, e.value)).collect(),
-            truncated,
-        ),
+        Ok((entries, overfetch_truncated)) => {
+            if start_after.is_empty() {
+                // Fast path: no filtering needed, crowtree's truncated
+                // flag is already correct for the given limit.
+                let items: Vec<(Vec<u8>, u64, Vec<u8>)> =
+                    entries.into_iter().map(|e| (e.key, e.slot, e.value)).collect();
+                (items, overfetch_truncated)
+            } else {
+                let mut items: Vec<(Vec<u8>, u64, Vec<u8>)> = entries
+                    .into_iter()
+                    .filter(|e| e.key.as_slice() > start_after)
+                    .map(|e| (e.key, e.slot, e.value))
+                    .collect();
+                let truncated = if limit != 0 && items.len() > limit {
+                    items.truncate(limit);
+                    true
+                } else {
+                    overfetch_truncated
+                };
+                (items, truncated)
+            }
+        }
         Err(_) => (Vec::new(), false),
     }
 }

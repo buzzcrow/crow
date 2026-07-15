@@ -15,7 +15,7 @@ This document defines the **test strategy**, **scope of each layer**, and
 when implementing features or components — consult this doc to determine
 which layer a new test belongs to and what it should cover.
 
-For the live task backlog (unfinished test gaps), see [`plan-test.md`](../plan-test.md).
+For the live task backlog (unfinished test gaps), see [`plan-test.md`](../working/plan-test.md).
 
 ## Architecture Stack
 
@@ -174,7 +174,7 @@ through the group, durability under crash/restart.
 - Single-leader propose, sequential slot allocation, follower rejects, classic propose.
 - Proposer window full → busy; repair fills gap and advances frontier.
 - Election: 1–7 replica counts elect a single leader, driver scaffold, step-down, propose-after-step-down.
-- KV through the group: Put + BatchWrite (puts) + Delete apply to all learners, follower forwards Get/Scan, forward loop-guard. **Gap:** full op correctness checklist not yet covered (see [`plan-test.md`](../plan-test.md)).
+- KV through the group: Put + BatchWrite (puts) + Delete apply to all learners, follower forwards Get/Scan, forward loop-guard. **Gap:** full op correctness checklist not yet covered (see [`plan-test.md`](../working/plan-test.md)).
 - Remote replica transport: unreachable/invalid endpoint returns error.
 - Preemption retry, kv-slot retry on prior accepted value.
 - Durability: single-node crash/restart, full-cluster restart keeps deletes.
@@ -190,7 +190,7 @@ management, topology status. Tests use embedded gRPC server via
 **Covered:**
 - Single-node KV / read modes, follower redirect hint, dedup.
 - Multi-group routing within one node, dynamic add/remove group, missing-group error.
-- KV ops: Put + BatchWrite (puts) + Delete via `kv_put`/`kv_delete`/`kv_batch_write`, persistence round-trip (put/overwrite/delete survive restart). **Gap:** full op correctness checklist not yet covered (see [`plan-test.md`](../plan-test.md)).
+- KV ops: Put + BatchWrite (puts) + Delete via `kv_put`/`kv_delete`/`kv_batch_write`, persistence round-trip (put/overwrite/delete survive restart). **Gap:** full op correctness checklist not yet covered (see [`plan-test.md`](../working/plan-test.md)).
 - Topology `status` composition, `health` levels, `shutdown` cascade + idempotency.
 
 ### Deployment Layer
@@ -235,17 +235,17 @@ Fill gaps bottom-up so a new failure is always attributable to the lowest layer:
 1. Unit + WAL/slot + Election — cheap, deterministic.
 2. Replica layer — highest-value gap; unblocks confident group debugging.
 3. Group reconfiguration + LearnerStream.
-4. Multi-node store and deployment re-enables, after repair-correctness fixes tracked in [`plan-test.md`](../plan-test.md).
+4. Multi-node store and deployment re-enables, after repair-correctness fixes tracked in [`plan-test.md`](../working/plan-test.md).
 
 ## Test Pairing Rule
 
 Every feature or component milestone includes:
 
 1. **Unit invariants** from the matching test design area (property-based or deterministic).
-2. **Failure-injection** matching [`design.md`](../design.md) §9 scenarios.
+2. **Failure-injection** matching [`design.md`](design.md) §9 scenarios.
 3. **crowbench** integration test (end-to-end correctness) once the RPC/client layer is reached.
 
-See [`plan-test.md`](../plan-test.md) for pending test task tracking.
+See [`plan-test.md`](../working/plan-test.md) for pending test task tracking.
 
 ## Feature-Dependent Test Gaps
 
@@ -277,7 +277,7 @@ tests for these features.
 | Attribute | Value |
 | --- | --- |
 | Design doc | — |
-| Depends on | Wire group's `contiguous_applied` into WAL GC watermark instead of `u64::MAX`; see [`plan-test.md`](../plan-test.md) WAL GC safe slot integration |
+| Depends on | Wire group's `contiguous_applied` into WAL GC watermark instead of `u64::MAX`; see [`plan-test.md`](../working/plan-test.md) WAL GC safe slot integration |
 | Target layer | WAL → Group |
 | Description | Today WAL GC uses `u64::MAX` as the watermark, meaning it never trims. The group's `contiguous_applied` (the highest slot chosen by quorum) should bound GC. Tests will cover: GC trims below `contiguous_applied`, replay after GC still recovers chosen entries, GC does not trim unchosen slots. |
 

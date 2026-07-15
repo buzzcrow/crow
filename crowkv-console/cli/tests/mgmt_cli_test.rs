@@ -1,8 +1,8 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! A12 CLI e2e: invoke the compiled `crowkv` binary through a live
-//! `crowkv-web` (`--console`), which itself proxies to a real
+//! A12 CLI e2e: invoke the compiled `crowkv-cli` binary through a live
+//! `crowkv-web` (`--ip` / `--port`), which itself proxies to a real
 //! `crowkv-server`. Exercises the `store / paxos / replica` verbs
 //! end-to-end and confirms the CLI no longer needs `--server`.
 
@@ -27,7 +27,8 @@ async fn store_paxos_replica_round_trip() {
     }
 
     let console = spawn_console(&upstream).await;
-    let console_url = format!("http://{console}");
+    let ip = console.ip().to_string();
+    let port = console.port();
 
     let store_id = "9";
     let group_id = "90";
@@ -35,19 +36,20 @@ async fn store_paxos_replica_round_trip() {
 
     // store add (orchestrated; single node available, console picks n1)
     // Note: stores no longer auto-create groups; groups must be added separately via paxos add
-    let (code, stdout, stderr) = run(&cli, &console_url, &["store", "add", "--store-id", store_id]);
+    let (code, stdout, stderr) = run(&cli, &ip, port, &["store", "add", "--store-id", store_id]);
     assert_eq!(code, 0, "stdout={stdout}\nstderr={stderr}");
     assert!(stdout.contains("added store"));
 
     // store list
-    let (code, stdout, _) = run(&cli, &console_url, &["store", "list"]);
+    let (code, stdout, _) = run(&cli, &ip, port, &["store", "list"]);
     assert_eq!(code, 0);
     assert!(stdout.contains(store_id));
 
     // paxos add (create the first group on n1)
     let (code, _, stderr) = run(
         &cli,
-        &console_url,
+        &ip,
+        port,
         &[
             "paxos",
             "add",
@@ -64,7 +66,7 @@ async fn store_paxos_replica_round_trip() {
     assert_eq!(code, 0, "stderr={stderr}");
 
     // store inspect should now show the group
-    let (code, stdout, _) = run(&cli, &console_url, &["store", "inspect", "--store-id", store_id]);
+    let (code, stdout, _) = run(&cli, &ip, port, &["store", "inspect", "--store-id", store_id]);
     assert_eq!(code, 0);
     assert!(stdout.contains(group_id));
 
@@ -73,7 +75,8 @@ async fn store_paxos_replica_round_trip() {
     let replica_id_2 = "910";
     let (code, _, stderr) = run(
         &cli,
-        &console_url,
+        &ip,
+        port,
         &[
             "paxos",
             "add",
@@ -90,14 +93,15 @@ async fn store_paxos_replica_round_trip() {
     assert_eq!(code, 0, "stderr={stderr}");
 
     // paxos list
-    let (code, stdout, _) = run(&cli, &console_url, &["paxos", "list", "--store-id", store_id]);
+    let (code, stdout, _) = run(&cli, &ip, port, &["paxos", "list", "--store-id", store_id]);
     assert_eq!(code, 0);
     assert!(stdout.contains(group_id_2));
 
     // paxos inspect (logical view: lists replicas on each node)
     let (code, stdout, _) = run(
         &cli,
-        &console_url,
+        &ip,
+        port,
         &[
             "paxos",
             "inspect",
@@ -113,7 +117,8 @@ async fn store_paxos_replica_round_trip() {
     // paxos remove
     let (code, _, stderr) = run(
         &cli,
-        &console_url,
+        &ip,
+        port,
         &[
             "paxos",
             "remove",

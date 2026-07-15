@@ -1,8 +1,8 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! A12 CLI e2e: invoke the compiled `crowkv` binary through a live
-//! `crowkv-web` (`--console`) which itself proxies to a real
+//! A12 CLI e2e: invoke the compiled `crowkv-cli` binary through a live
+//! `crowkv-web` (`--ip` / `--port`) which itself proxies to a real
 //! `crowkv-server`. Exercises the `kv put / get / delete / scan` verbs
 //! end-to-end and verifies the legacy `--server` flag is no longer
 //! required for the four KV verbs.
@@ -29,16 +29,18 @@ async fn kv_put_get_delete_round_trip() {
     }
 
     let console = spawn_console(&upstream).await;
-    let console_url = format!("http://{console}");
+    let ip = console.ip().to_string();
+    let port = console.port();
 
     // Create store 1 / group 1 via the same CLI control path used by the
     // passing bench smoke test, then wait for the single-replica group to
     // report a leader before exercising KV verbs.
-    let (code, _, stderr) = run(&cli, &console_url, &["store", "add", "--store-id", "1"]);
+    let (code, _, stderr) = run(&cli, &ip, port, &["store", "add", "--store-id", "1"]);
     assert_eq!(code, 0, "store add stderr={stderr}");
     let (code, _, stderr) = run(
         &cli,
-        &console_url,
+        &ip,
+        port,
         &[
             "paxos",
             "add",
@@ -54,7 +56,7 @@ async fn kv_put_get_delete_round_trip() {
     );
     assert_eq!(code, 0, "paxos add stderr={stderr}");
     assert!(
-        wait_for_leader(&console_url, 1, 1, Duration::from_secs(15)).await,
+        wait_for_leader(&ip, port, 1, 1, Duration::from_secs(15)).await,
         "group 1 never reported a leader"
     );
 
@@ -63,7 +65,8 @@ async fn kv_put_get_delete_round_trip() {
     let (code, stdout, stderr) = loop {
         let result = run(
             &cli,
-            &console_url,
+            &ip,
+            port,
             &[
                 "kv",
                 "put",
@@ -88,7 +91,8 @@ async fn kv_put_get_delete_round_trip() {
     // get
     let (code, stdout, _) = run(
         &cli,
-        &console_url,
+        &ip,
+        port,
         &[
             "kv",
             "get",
@@ -106,7 +110,8 @@ async fn kv_put_get_delete_round_trip() {
     // delete
     let (code, _, stderr) = run(
         &cli,
-        &console_url,
+        &ip,
+        port,
         &[
             "kv",
             "delete",
@@ -123,7 +128,8 @@ async fn kv_put_get_delete_round_trip() {
     // get → not found returns exit code 3
     let (code, stdout, _) = run(
         &cli,
-        &console_url,
+        &ip,
+        port,
         &[
             "kv",
             "get",
@@ -146,7 +152,8 @@ async fn kv_put_get_delete_round_trip() {
     let (code, _, stderr) = loop {
         let result = run(
             &cli,
-            &console_url,
+            &ip,
+            port,
             &[
                 "kv",
                 "put",
@@ -171,7 +178,8 @@ async fn kv_put_get_delete_round_trip() {
     let (code, _, stderr) = loop {
         let result = run(
             &cli,
-            &console_url,
+            &ip,
+            port,
             &[
                 "kv",
                 "put",
@@ -196,7 +204,8 @@ async fn kv_put_get_delete_round_trip() {
     let (code, stdout, stderr) = loop {
         let result = run(
             &cli,
-            &console_url,
+            &ip,
+            port,
             &[
                 "kv",
                 "list",

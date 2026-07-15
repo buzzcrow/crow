@@ -45,15 +45,12 @@ impl KvStore for PxKvStore {
 
         match self.resolve_read_point(&group, read_mode, client_slot).await {
             ReadDecision::Serve { read_slot, safe_slot } => {
-                let value = group
-                    .local_replica()
-                    .learner
-                    .engine_get(key)
-                    .await
-                    .map(|(_slot, v)| v);
+                let value = group.local_replica().learner.engine_get(key).await;
                 match value {
-                    Some(v) => crate::rpc::KvResponse::ok_value(v, request_id, request_create_ms)
-                        .with_read_slots(read_slot, safe_slot),
+                    Some((slot, v)) => {
+                        crate::rpc::KvResponse::ok_value_with_revision(v, slot, request_id, request_create_ms)
+                            .with_read_slots(read_slot, safe_slot)
+                    }
                     None => crate::rpc::KvResponse::not_found(request_id, request_create_ms)
                         .with_read_slots(read_slot, safe_slot),
                 }
@@ -129,10 +126,12 @@ impl KvStore for PxKvStore {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn kv_scan(
         &self,
         group_id: u64,
         prefix: &[u8],
+        start_after: &[u8],
         limit: u32,
         read_mode: i32,
         request_id: u64,
@@ -168,7 +167,7 @@ impl KvStore for PxKvStore {
         let (scanned, truncated) = group
             .local_replica()
             .learner
-            .engine_scan(prefix, limit as usize)
+            .engine_scan(prefix, start_after, limit as usize)
             .await;
         let mut items: Vec<crate::rpc::KvScanItem> = Vec::with_capacity(scanned.len());
         for (key, _slot, value) in scanned {

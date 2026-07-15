@@ -7,10 +7,11 @@ use crowkv_console_shared::clients::console::ConsoleClient;
 
 use crate::Cli;
 
-/// Build a [`ConsoleClient`] pointed at the `--console` URL. Every CLI
+/// Build a [`ConsoleClient`] pointed at `http://{ip}:{port}`. Every CLI
 /// verb routes through this; there is no direct `crowkv-server` client.
 pub fn console_client(cli: &Cli) -> Result<ConsoleClient, ExitCode> {
-    ConsoleClient::new(cli.console.clone()).map_err(|e| {
+    let url = format!("http://{}:{}", cli.ip, cli.port);
+    ConsoleClient::new(url).map_err(|e| {
         eprintln!("error: build console client: {e}");
         ExitCode::from(2)
     })

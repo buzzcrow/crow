@@ -4,7 +4,7 @@
 # CrowKV - Design: crowtree Durable Storage
 
 Parent: [`design-crowtree.md`](design-crowtree.md)
-Depends on: [`design-crowtree-engine.md`](design-crowtree-engine.md), [`design.md`](../design.md) §12.1, [`design-state-machine.md`](design-state-machine.md), [`design-wal.md`](design-wal.md), [`design-reconfiguration.md`](design-reconfiguration.md)
+Depends on: [`design-crowtree-engine.md`](design-crowtree-engine.md), [`design.md`](design.md) §12.1, [`design-state-machine.md`](design-state-machine.md), [`design-wal.md`](design-wal.md), [`design-reconfiguration.md`](design-reconfiguration.md)
 
 This document specifies how crowtree pages reach durable media and how that
 durability composes with the rest of CrowKV: the `PageStore` backend
@@ -40,7 +40,7 @@ crowtree's tree logic references pages by `PID` and is unaware of the storage
 medium. A `PageStore` maps a durable page slot to bytes — it is the only part
 of crowtree that does I/O, and it is page-granular and **always asynchronous**
 (`read_page`/`write_page` complete via callback/future, matching
-[`design.md` §12.1](../design.md#121-async-disk-io-substrate-moved-from-design-async-iomd)).
+[`design.md` §12.1](design.md#121-async-disk-io-substrate-moved-from-design-async-iomd)).
 The upper layer always uses the async API — regardless of whether the
 underlying platform has `io_uring` (Linux) or not (macOS/fallback). On
 Linux, `BlockAsyncPageStore` + `Reactor` submit genuine `io_uring` SQEs;
@@ -472,7 +472,7 @@ gated on the snapshot pipeline (§6) having run at least once for that page.
 
 **Decision: crowtree does NOT keep a redo WAL of data operations. Recovery is
 snapshot + consensus replay**, consistent with `design-state-machine.md §2.1`
-and `requirement.md §8`.
+and `design.md §8`.
 
 - The consensus layer already has a durable WAL of chosen entries
   ([`design-wal.md`](design-wal.md)). Adding a second op-log in crowtree

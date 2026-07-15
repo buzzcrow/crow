@@ -1,12 +1,14 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-import { RefreshCw, Layers, Network, FileJson } from 'lucide-react';
+import { RefreshCw, Layers, Network, FileJson, Database } from 'lucide-react';
 import { useViewMode } from '../contexts/ViewModeContext';
 import { ViewMode } from '../types';
 import { cn } from '../utils/cn';
 
 export type ClusterHealth = 'Healthy' | 'Degraded' | 'Failed' | 'Unknown';
+
+export type CenterPanelMode = 'topology' | 'swagger' | 'kv';
 
 interface HeaderProps {
   clusterHealth: ClusterHealth;
@@ -16,6 +18,11 @@ interface HeaderProps {
   swaggerActive?: boolean;
   onToggleSwagger?: () => void;
   showSwagger?: boolean;
+  showKV?: boolean;
+  kvActive?: boolean;
+  onToggleKV?: () => void;
+  centerPanel?: CenterPanelMode;
+  onShowTopology?: () => void;
 }
 
 const healthPill: Record<ClusterHealth, string> = {
@@ -40,6 +47,11 @@ export function Header({
   swaggerActive,
   onToggleSwagger,
   showSwagger = true,
+  showKV = false,
+  kvActive = false,
+  onToggleKV,
+  centerPanel = 'topology',
+  onShowTopology,
 }: HeaderProps) {
   const { viewMode, setViewMode } = useViewMode();
 
@@ -65,26 +77,43 @@ export function Header({
       {/* View-mode toggle */}
       <div className="tw-flex tw-items-center tw-rounded-md tw-border tw-border-border tw-overflow-hidden">
         <button
-          onClick={() => setViewMode(ViewMode.Physical)}
+          onClick={() => { setViewMode(ViewMode.Physical); onShowTopology?.(); }}
           className={cn(
             'tw-flex tw-items-center tw-gap-1.5 tw-px-3 tw-py-1.5 tw-text-xs tw-transition-colors',
-            viewMode === ViewMode.Physical ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
+            viewMode === ViewMode.Physical && centerPanel === 'topology' ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
           )}
-          aria-pressed={viewMode === ViewMode.Physical}
+          aria-pressed={viewMode === ViewMode.Physical && centerPanel === 'topology'}
         >
           <Network className="tw-h-3.5 tw-w-3.5" /> Physical
         </button>
         <button
-          onClick={() => setViewMode(ViewMode.Logical)}
+          onClick={() => { setViewMode(ViewMode.Logical); onShowTopology?.(); }}
           className={cn(
             'tw-flex tw-items-center tw-gap-1.5 tw-px-3 tw-py-1.5 tw-text-xs tw-transition-colors',
-            viewMode === ViewMode.Logical ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
+            viewMode === ViewMode.Logical && centerPanel === 'topology' ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
           )}
-          aria-pressed={viewMode === ViewMode.Logical}
+          aria-pressed={viewMode === ViewMode.Logical && centerPanel === 'topology'}
         >
           <Layers className="tw-h-3.5 tw-w-3.5" /> Logical
         </button>
       </div>
+
+      {/* KV operator toggle */}
+      {showKV && onToggleKV && (
+        <button
+          onClick={onToggleKV}
+          className={cn(
+            'tw-flex tw-items-center tw-gap-1.5 tw-px-2.5 tw-py-1.5 tw-rounded-md tw-text-xs tw-border tw-transition-colors',
+            kvActive
+              ? 'tw-bg-accent/15 tw-text-accent tw-border-accent/30'
+              : 'tw-text-muted tw-border-border hover:tw-bg-bg',
+          )}
+          aria-pressed={kvActive}
+          title="KV operator panel"
+        >
+          <Database className="tw-h-3.5 tw-w-3.5" /> KV
+        </button>
+      )}
 
       <div className="tw-flex-1" />
 
