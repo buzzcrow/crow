@@ -194,6 +194,62 @@ async fn read_modes_serve_value_with_slots_on_single_leader() {
 }
 
 #[tokio::test]
+async fn kv_get_returns_per_key_revision() {
+    let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
+    store.add_group(sample_group(1, 1, "127.0.0.1:0"));
+
+    let put = store.kv_put(1, b"rk", b"v1", 11, 1, 1, 1).await;
+    assert!(put.ok);
+    let slot1 = put.revision;
+    assert!(slot1 >= 1);
+
+    let get1 = store.kv_get(1, b"rk", 0, 0, 2, 2).await;
+    assert!(get1.ok, "read should hit: {get1:?}");
+    assert_eq!(
+        get1.revision, slot1,
+        "kv_get revision should match the write slot"
+    );
+
+    let put2 = store.kv_put(1, b"rk", b"v2", 11, 2, 3, 3).await;
+    assert!(put2.ok);
+    let slot2 = put2.revision;
+    assert!(slot2 > slot1, "overwrite should land at a higher slot");
+
+    let get2 = store.kv_get(1, b"rk", 0, 0, 4, 4).await;
+    assert!(get2.ok && get2.value == b"v2");
+    assert_eq!(
+        get2.revision, slot2,
+        "kv_get revision should match the latest write slot"
+    );
+}
+
+#[tokio::test]
+async fn kv_get_missing_key_returns_revision_zero() {
+    let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
+    store.add_group(sample_group(1, 1, "127.0.0.1:0"));
+
+    let get = store.kv_get(1, b"missing", 0, 0, 1, 1).await;
+    assert!(get.not_found, "missing key should return not_found");
+    assert_eq!(get.revision, 0, "missing key should have revision 0");
+}
+
+#[tokio::test]
+async fn kv_get_after_delete_returns_revision_zero() {
+    let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
+    store.add_group(sample_group(1, 1, "127.0.0.1:0"));
+
+    let put = store.kv_put(1, b"dk", b"v1", 11, 1, 1, 1).await;
+    assert!(put.ok);
+
+    let del = store.kv_delete(1, b"dk", 11, 2, 2, 2).await;
+    assert!(del.ok, "delete should succeed");
+
+    let get = store.kv_get(1, b"dk", 0, 0, 3, 3).await;
+    assert!(get.not_found, "deleted key should return not_found");
+    assert_eq!(get.revision, 0, "deleted key should have revision 0");
+}
+
+#[tokio::test]
 async fn dedup_suppresses_retried_client_seq() {
     let store = PxKvStore::new(0, SocketAddr::from(([127, 0, 0, 1], 0)));
     store.add_group(sample_group(1, 1, "127.0.0.1:0"));
