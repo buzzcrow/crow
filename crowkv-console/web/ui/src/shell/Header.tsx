@@ -94,6 +94,23 @@ export function Header({
         </button>
       </div>
 
+      {/* KV operator toggle */}
+      {showKV && onToggleKV && (
+        <button
+          onClick={onToggleKV}
+          className={cn(
+            'tw-flex tw-items-center tw-gap-1.5 tw-px-2.5 tw-py-1.5 tw-rounded-md tw-text-xs tw-border tw-transition-colors',
+            kvActive
+              ? 'tw-bg-accent/15 tw-text-accent tw-border-accent/30'
+              : 'tw-text-muted tw-border-border hover:tw-bg-bg',
+          )}
+          aria-pressed={kvActive}
+          title="KV operator panel"
+        >
+          <Database className="tw-h-3.5 tw-w-3.5" /> KV
+        </button>
+      )}
+
       <div className="tw-flex-1" />
 
       {/* Swagger / API docs toggle */}
@@ -112,23 +129,6 @@ export function Header({
           title={apiTargetNodeId ? `Show API for ${apiTargetNodeId}` : 'No node available for API'}
         >
           <FileJson className="tw-h-3.5 tw-w-3.5" /> API
-        </button>
-      )}
-
-      {/* KV operator toggle */}
-      {showKV && onToggleKV && (
-        <button
-          onClick={onToggleKV}
-          className={cn(
-            'tw-flex tw-items-center tw-gap-1.5 tw-px-2.5 tw-py-1.5 tw-rounded-md tw-text-xs tw-border tw-transition-colors',
-            kvActive
-              ? 'tw-bg-accent/15 tw-text-accent tw-border-accent/30'
-              : 'tw-text-muted tw-border-border hover:tw-bg-bg',
-          )}
-          aria-pressed={kvActive}
-          title="KV operator panel"
-        >
-          <Database className="tw-h-3.5 tw-w-3.5" /> KV
         </button>
       )}
 

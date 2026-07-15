@@ -84,7 +84,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
   const [lastRefreshTime, setLastRefreshTime] = useState<Date>(new Date());
   const [refreshing, setRefreshing] = useState(false);
   const [centerPanel, setCenterPanel] = useState<CenterPanelMode>('topology');
-  const [sidebarWidth, setSidebarWidth] = useState(350);
+  const [sidebarWidth, setSidebarWidth] = useState(280);
   const [inspectorWidth, setInspectorWidth] = useState(320);
   const [resizing, setResizing] = useState<'left' | 'right' | null>(null);
   const [canvasFocusRequest, setCanvasFocusRequest] = useState<{ targetId: string; subtree: boolean; nonce: number } | null>(null);
@@ -145,7 +145,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
 
     const onMouseMove = (event: MouseEvent) => {
       if (resizing === 'left') {
-        setSidebarWidth(Math.min(480, Math.max(220, event.clientX)));
+        setSidebarWidth(Math.min(420, Math.max(200, event.clientX)));
         return;
       }
       setInspectorWidth(Math.min(560, Math.max(280, window.innerWidth - event.clientX)));
