@@ -21,6 +21,8 @@ interface HeaderProps {
   showKV?: boolean;
   kvActive?: boolean;
   onToggleKV?: () => void;
+  centerPanel?: CenterPanelMode;
+  onShowTopology?: () => void;
 }
 
 const healthPill: Record<ClusterHealth, string> = {
@@ -48,6 +50,8 @@ export function Header({
   showKV = false,
   kvActive = false,
   onToggleKV,
+  centerPanel = 'topology',
+  onShowTopology,
 }: HeaderProps) {
   const { viewMode, setViewMode } = useViewMode();
 
@@ -73,22 +77,22 @@ export function Header({
       {/* View-mode toggle */}
       <div className="tw-flex tw-items-center tw-rounded-md tw-border tw-border-border tw-overflow-hidden">
         <button
-          onClick={() => setViewMode(ViewMode.Physical)}
+          onClick={() => { setViewMode(ViewMode.Physical); onShowTopology?.(); }}
           className={cn(
             'tw-flex tw-items-center tw-gap-1.5 tw-px-3 tw-py-1.5 tw-text-xs tw-transition-colors',
-            viewMode === ViewMode.Physical ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
+            viewMode === ViewMode.Physical && centerPanel === 'topology' ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
           )}
-          aria-pressed={viewMode === ViewMode.Physical}
+          aria-pressed={viewMode === ViewMode.Physical && centerPanel === 'topology'}
         >
           <Network className="tw-h-3.5 tw-w-3.5" /> Physical
         </button>
         <button
-          onClick={() => setViewMode(ViewMode.Logical)}
+          onClick={() => { setViewMode(ViewMode.Logical); onShowTopology?.(); }}
           className={cn(
             'tw-flex tw-items-center tw-gap-1.5 tw-px-3 tw-py-1.5 tw-text-xs tw-transition-colors',
-            viewMode === ViewMode.Logical ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
+            viewMode === ViewMode.Logical && centerPanel === 'topology' ? 'tw-bg-accent/15 tw-text-accent' : 'tw-text-muted hover:tw-bg-bg',
           )}
-          aria-pressed={viewMode === ViewMode.Logical}
+          aria-pressed={viewMode === ViewMode.Logical && centerPanel === 'topology'}
         >
           <Layers className="tw-h-3.5 tw-w-3.5" /> Logical
         </button>

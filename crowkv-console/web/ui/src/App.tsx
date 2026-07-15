@@ -479,6 +479,8 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
         showKV={kvEnabled}
         kvActive={centerPanel === 'kv'}
         onToggleKV={() => setCenterPanel((p) => (p === 'kv' ? 'topology' : 'kv'))}
+        centerPanel={centerPanel}
+        onShowTopology={() => setCenterPanel('topology')}
       />
 
       {dataError && (
