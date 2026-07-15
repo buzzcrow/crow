@@ -13,11 +13,6 @@ complexity, and dependency. Before implementation, follow the
 
 ### Medium Priority
 
-**Complexity — Low:**
-- **R1** — Track revision for reads — Area: crowkv consensus — `kv_get` has no
-  monotonic revision counter, limiting linearizable read verification and
-  revision-based snapshot reads.
-
 **Complexity — Medium:**
 - **R2** — Persistent node config — Area: crowkv-server — Per-node server config
   is not persisted; a restart relies on the console to re-push topology, making
@@ -55,25 +50,6 @@ complexity, and dependency. Before implementation, follow the
 ---
 
 ## Detailed Analysis
-
-### R1: Track revision for reads
-
-**Problem**: `px_kv_store.rs` kv_get does not track a revision/epoch for
-reads — the read point resolution uses `read_mode` + `client_slot` but no
-monotonic revision counter. This limits linearizable read correctness
-verification and revision-based snapshot reads.
-
-**Priority**: Medium — correctness-adjacent, but current read modes work.
-
-**Complexity**: Low — add a revision counter to the group/replica, stamp it
-on each chosen slot, expose in `KvResponse`.
-
-**Files**: `crowkv/src/cluster/px_kv_store.rs`, `crowkv/src/rpc/mod.rs`
-
-**Acceptance**: Unit test verifying revision increments per applied slot and
-is returned in kv_get responses.
-
----
 
 ### R2: Persistent node config
 

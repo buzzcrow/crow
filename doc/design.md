@@ -296,6 +296,17 @@ Details of lease and ReadIndex live in [`design-leader-election.md`](design/desi
 
 The linearizable mode uses the **leader's own** contiguous frontier, not the cross-learner safe-slot, because the leader's learner is always at-or-ahead of safe-slot. This is strictly faster than a safe-slot wait while preserving linearizability ([`design-slot.md` §14](design/design-slot.md#14-parallel-slot-linearizability-analysis-moved-from-requirementmd-65)).
 
+### 6.5 Read Revision Tracking
+
+Every `KvResponse` carries a `revision` field (proto field 3). For writes (`kv_put`, `kv_delete`, `kv_batch_write`), `revision` is the Paxos slot at which the mutation was chosen. For reads (`kv_get`), `revision` is the **per-key write slot** — the slot at which the returned value was last written — obtained from `engine_get(key) -> (slot, value)`.
+
+This gives clients a monotonic per-key version they can use to:
+
+- Verify read freshness by comparing `revision` against the leader's current frontier.
+- Issue a subsequent `READ_YOUR_WRITES` read with `client_slot = revision` to observe at least the same version on a follower.
+
+Missing keys and deleted keys return `revision = 0` (no write slot). The `read_slot` and `safe_slot` fields report the replica's serving frontier and group safe-slot respectively; `revision` is distinct — it is per-key, not per-replica.
+
 ---
 
 ## 7. Cluster Bootstrap and Topology Management
