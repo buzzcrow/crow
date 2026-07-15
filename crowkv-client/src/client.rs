@@ -426,6 +426,7 @@ impl CrowkvClient {
         store_id: u64,
         group_id: u64,
         prefix: &[u8],
+        start_after: &[u8],
         limit: u32,
         read_mode: ReadMode,
     ) -> Result<ScanOutcome> {
@@ -436,6 +437,7 @@ impl CrowkvClient {
             let req = KvScanRequest {
                 version: 1,
                 prefix: prefix.to_vec(),
+                start_after: start_after.to_vec(),
                 limit,
                 request_id: next_request_id(),
                 request_create_ms: now_ms(),
