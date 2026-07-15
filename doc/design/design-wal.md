@@ -490,7 +490,7 @@ The WAL is per-node. Inter-node consistency is the consensus layer's job. If a n
 Most of the design above has been implemented. The following items are **not yet
 implemented**: disk-pressure-triggered eager GC (§7.3), retention window (§7.5),
 and the full fail-out procedure with step-out RPC and reconfiguration (§8.1).
-Remaining pending test tasks are tracked in [`plan-test.md`](../plan-test.md):
+Remaining pending test tasks are tracked in [`plan-test.md`](../working/plan-test.md):
 
 - Slot-affinity WAL placement instead of per-record round-robin.
 - Backend-specific durable flush and alignment semantics.

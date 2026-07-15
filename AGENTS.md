@@ -18,6 +18,7 @@ Rust workspace + C++ storage engine (via FFI).
 
 - All build/test/format commands run under **pixi** (`pixi run cargo ...`, `pixi exec clang-format ...`, `pixi run test-ct`, etc.) — never call bare `cargo` or `clang-format`.
 - `unsafe_code = deny` (except `crowtree-ffi`). Clippy `pedantic = warn`.
+- Markdown docs are read as raw text — avoid tables except in `doc/doc_index.md`. Use bullet lists or definition lists instead.
 - `test-util` feature auto-enabled for tests via self dev-dependency — `cargo test` needs no flags.
 - Commit messages: single line, no doc references or task numbers. Code comments: same rule.
 - **Pre-commit quality gate — do not skip:**
@@ -36,4 +37,5 @@ Rust workspace + C++ storage engine (via FFI).
 | Commit changes | Hard Constraints above — no extra doc needed |
 | Debug a test failure | `/debug-test` workflow (env check, log-first, data-first, add missing logs) |
 | Pre-push review | `/review` workflow (checklist, hot-path rules, clippy exceptions) |
+| Implement a new-requirements item | `doc/working/new_requirements.md` → `/implement-requirement` workflow (lifecycle: understand → design → plan → implement → merge → cleanup) |
 | Operator procedures | `doc/procedures.md` (bootstrap, upgrade, replacement, API) |

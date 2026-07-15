@@ -13,10 +13,15 @@ doc only when a task touches a topic in its row. Line counts are approximate
 | --- | ---: | --- |
 | `requirement.md` | ~600 | Source of truth for what must be built. Any feature gap → fix here first. Design-level detail (linearizability proof, CLI tree, Web UI spec, server API) has been moved to sub-design docs; pointers remain in-place. |
 | `design.md` | ~560 | Master design: cross-cutting architecture, write/read flows, module decomposition, crate layout, concurrency model (§12) with async disk I/O substrate (§12.1, merged from design-async-io.md). Read for scope-spanning questions. |
-| `plan-test.md` | ~30 | Unfinished test task backlog with checkboxes. Read when picking the next test to implement. |
-| `plan-demo.md` | ~80 | Demo recording plan: cluster lifecycle GIF, KV operations GIF, failover GIF. Read when recording README demos. |
 | `procedures.md` | ~450 | Operator-facing procedures for a standard CrowKV cluster: bootstrap, rolling upgrade, node replacement, replica add/remove, quorum-loss handling, health checks, backup, full API reference. Uses `crowkv-server` and the console HTTP API as examples. |
-| `new_requirements.md` | ~150 | Forward-looking implementation backlog with priority/complexity analysis and implementation process. Read before picking up crowtree/crowkv follow-up work. |
+
+## Working Files (`doc/working/`)
+
+| Doc | Lines | When to read |
+| --- | ---: | --- |
+| `doc/working/plan-test.md` | ~30 | Unfinished test task backlog with checkboxes. Read when picking the next test to implement. |
+| `doc/working/plan-demo.md` | ~80 | Demo recording plan: cluster lifecycle GIF, KV operations GIF, failover GIF. Read when recording README demos. |
+| `doc/working/new_requirements.md` | ~150 | Forward-looking implementation backlog with priority/complexity analysis and implementation process. Read before picking up crowtree/crowkv follow-up work. |
 
 ## Project Files (repo root)
 

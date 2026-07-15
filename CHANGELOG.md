@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Copyright headers on all source files
 - AGENTS.md with project overview and dispatch table
 - CONTRIBUTING.md, PR/Issue templates
-- Demo recording plan (`doc/plan-demo.md`)
+- Demo recording plan (`doc/working/plan-demo.md`)
 
 ### Changed
 - Restructured agent workflows: conventions merged into `/coding` workflow
