@@ -331,6 +331,12 @@ pub struct KvScanQuery {
     prefix: Option<String>,
     #[serde(default)]
     prefix_hex: Option<String>,
+    /// Exclusive lower bound for pagination (UTF-8). Mutually exclusive
+    /// with `start_after_hex`. Empty means "start from the beginning".
+    #[serde(default)]
+    start_after: Option<String>,
+    #[serde(default)]
+    start_after_hex: Option<String>,
     /// `0` = no limit. Defaults to 100 to keep the JSON payload small
     /// for human consumers.
     #[serde(default = "default_scan_limit")]
@@ -369,11 +375,16 @@ pub async fn http_kv_scan(
         (None, Some(s)) => s.as_bytes().to_vec(),
         (None, None) => Vec::new(),
     };
+    let start_after = match (q.start_after_hex.as_ref(), q.start_after.as_ref()) {
+        (Some(h), _) => decode_hex(h)?,
+        (None, Some(s)) => s.as_bytes().to_vec(),
+        (None, None) => Vec::new(),
+    };
     let limit = q.limit;
     let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
     let client = CrowkvClient::new(ClientConfig::new(seeds));
     let ScanOutcome { items, truncated } = client
-        .scan(sid, gid, &prefix, limit, ReadMode::Linearizable)
+        .scan(sid, gid, &prefix, &start_after, limit, ReadMode::Linearizable)
         .await
         .map_err(map_kv_client_err)?;
     let items = items

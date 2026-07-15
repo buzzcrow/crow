@@ -16,6 +16,7 @@ interface BadgeProps extends React.HTMLAttributes<HTMLSpanElement> {
   healthStatus?: 'Healthy' | 'Degraded' | 'Failed' | 'Unknown';
   role?: 'Leader' | 'Follower' | 'Remote';
   icon?: React.ReactNode;
+  compact?: boolean;
 }
 
 const variantClasses: Record<BadgeVariant, string> = {
@@ -58,8 +59,14 @@ const roleIcons = {
   Remote: <Users className="tw-h-3.5 tw-w-3.5" />,
 };
 
+const roleCompactLabel: Record<string, string> = {
+  Leader: 'L',
+  Follower: 'F',
+  Remote: 'R',
+};
+
 export const Badge = React.forwardRef<HTMLSpanElement, BadgeProps>(
-  ({ className, variant = 'default', size = 'md', healthStatus, role, icon, children, ...props }, ref) => {
+  ({ className, variant = 'default', size = 'md', healthStatus, role, icon, compact = false, children, ...props }, ref) => {
     let dynamicClasses = '';
     let dynamicIcon = icon;
 
@@ -77,14 +84,15 @@ export const Badge = React.forwardRef<HTMLSpanElement, BadgeProps>(
         className={cn(
           'tw-inline-flex tw-items-center tw-gap-1.5 tw-font-medium',
           variantClasses[variant],
-          sizeClasses[size],
+          compact ? 'tw-px-1 tw-py-0.5 tw-text-xs tw-rounded' : sizeClasses[size],
           dynamicClasses,
           className
         )}
         {...props}
       >
         {dynamicIcon}
-        {children}
+        {compact && variant === 'role' && role && roleCompactLabel[role]}
+        {!compact && children}
       </span>
     );
   }
@@ -96,22 +104,24 @@ Badge.displayName = 'Badge';
 export function HealthBadge({
   status,
   size = 'sm',
+  compact = false,
 }: {
   status: NodeHealth | GroupHealth | ReplicaState | 'Healthy' | 'Degraded' | 'Failed' | 'Unknown';
   size?: BadgeSize;
+  compact?: boolean;
 }) {
   const normalizedStatus = toUiHealth(status.toString());
   return (
-    <Badge variant="health" healthStatus={normalizedStatus} size={size}>
+    <Badge variant="health" healthStatus={normalizedStatus} size={size} compact={compact} title={normalizedStatus}>
       {normalizedStatus}
     </Badge>
   );
 }
 
-export function RoleBadge({ role, size = 'sm' }: { role: ReplicaRole | 'Leader' | 'Follower' | 'Remote'; size?: BadgeSize }) {
+export function RoleBadge({ role, size = 'sm', compact = false }: { role: ReplicaRole | 'Leader' | 'Follower' | 'Remote'; size?: BadgeSize; compact?: boolean }) {
   const normalizedRole = toUiRole(role.toString());
   return (
-    <Badge variant="role" role={normalizedRole} size={size}>
+    <Badge variant="role" role={normalizedRole} size={size} compact={compact} title={normalizedRole}>
       {toDisplayState(normalizedRole)}
     </Badge>
   );

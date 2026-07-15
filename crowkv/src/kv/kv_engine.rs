@@ -36,8 +36,16 @@ pub trait KVEngine: Send + Sync {
     /// Live entries (no tombstones) whose key starts with `prefix`, in key
     /// order, capped at `limit` (`0` = unlimited). Returns `(items, truncated)`
     /// where `truncated` is set when more matches existed than were returned.
+    /// `start_after` is an exclusive lower bound (empty = start from
+    /// beginning); only keys strictly greater than `start_after` are
+    /// returned, enabling cursor-based pagination.
     #[allow(clippy::type_complexity)]
-    fn scan(&self, prefix: &[u8], limit: usize) -> KVFuture<(Vec<(Vec<u8>, u64, Vec<u8>)>, bool)>;
+    fn scan(
+        &self,
+        prefix: &[u8],
+        start_after: &[u8],
+        limit: usize,
+    ) -> KVFuture<(Vec<(Vec<u8>, u64, Vec<u8>)>, bool)>;
 
     /// Full ordered stream including tombstones, for `compare`.
     fn iter_all(&self) -> Vec<(Vec<u8>, u64, Cell)>;

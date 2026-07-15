@@ -121,9 +121,10 @@ impl PxLearner {
     pub async fn engine_scan(
         &self,
         prefix: &[u8],
+        start_after: &[u8],
         limit: usize,
     ) -> (Vec<(Vec<u8>, SlotIndex, Vec<u8>)>, bool) {
-        self.engine.scan(prefix, limit).await
+        self.engine.scan(prefix, start_after, limit).await
     }
 
     /// Number of live (non-tombstoned) keys in the engine.

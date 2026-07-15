@@ -3,8 +3,8 @@
 
 # CrowKV - Design: Reconfiguration
 
-Depends on: [`requirement.md`](../requirement.md), [`design.md`](../design.md), [`design-leader-election.md`](design-leader-election.md)
-Satisfies: [requirement.md §9.1](../requirement.md#91-reconfiguration), prerequisites of [requirement.md §9.2](../requirement.md#92-rolling-upgrade)
+Depends on: [`design.md`](design.md), [`design.md`](design.md), [`design-leader-election.md`](design-leader-election.md)
+Satisfies: design.md §9.1](design.md), prerequisites of design.md §9.2](design.md)
 
 This document specifies how a CrowKV group safely changes its membership while preserving consensus safety. The **shipped** mechanism is direct per-node HTTP mutation of each replica's remote-replica list, persisted to the local `GroupConfigStore`, with a `membership_epoch` exact-match fence. The original Raft-style joint-consensus design (§7) is preserved as a historical decision record.
 
@@ -32,7 +32,7 @@ CrowKV supports membership changes within a single group. Specifically:
 - **Replace a member.** Implemented as add-then-remove (or vice versa), each as a single-member change.
 - **Change the leadership of the group.** Triggered as a side effect when removing the current leader.
 
-Out of scope ([requirement.md §2](../requirement.md#2-non-goals-out-of-scope)):
+Out of scope (design.md §2](design.md)):
 
 - Changing `num_groups` (the total number of groups in the cluster) — fixed at cluster creation.
 - Splitting or merging groups — not supported.
@@ -86,7 +86,7 @@ By requiring catch-up while the member is non-voting, we ensure that when it fir
 
 ### 3.3 Snapshot install protocol
 
-Defined in [§8.4 of design.md](../design.md#84-snapshot-and-install) and `design-state-machine.md` §6 (snapshot import). Resumable, throttled, end-to-end CRC.
+Defined in [§8.4 of design.md](design.md#84-snapshot-and-install) and `design-state-machine.md` §6 (snapshot import). Resumable, throttled, end-to-end CRC.
 
 ### 3.4 Catch-up termination criterion
 
@@ -179,7 +179,7 @@ A non-voting catch-up member physically accepts and promises so it can follow th
 > described in this section was never implemented. Topology (per-group
 > memberships, cluster inventory) is operator-managed via the HTTP management
 > API and persisted to per-group config files, not self-hosted in a
-> Paxos-replicated system group — see [`requirement.md` §7.1](../requirement.md#71-groups-and-cluster-topology).
+> Paxos-replicated system group — see [`design.md` §7.1](design.md).
 > There is therefore no cluster-wide `config_version`, no recursive
 > reconfiguration case, and no "Group-0 pauses data-group reconfiguration"
 > rule in the shipped system. The original joint-consensus proposal in this
@@ -309,4 +309,4 @@ The `membership_epoch` protobuf field (added by the fence) is itself a
 version-compat surface — an old binary without it defaults to `0` (protobuf3
 scalar default), which is correct because the initial epoch is `0`.
 Operational procedures for rolling upgrades are documented in
-[`procedures.md`](../procedures.md).
+[`user-guide.md`](../user-manual/user-guide.md).

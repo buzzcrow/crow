@@ -3,8 +3,8 @@
 
 # CrowKV - Design: Leader Election, Term, and Lease
 
-Depends on: [`requirement.md`](../requirement.md), [`design.md`](../design.md)
-Satisfies: [requirement.md §3 Dependencies](../requirement.md#3-dependencies-and-assumptions), [requirement.md §4.2](../requirement.md#42-paxos-core), [requirement.md §6.2](../requirement.md#62-leader-read-fencing), implicit prerequisites of [requirement.md §7](../requirement.md#7-consensus-architecture)
+Depends on: [`design.md`](design.md), [`design.md`](design.md)
+Satisfies: design.md §3 Dependencies](design.md), design.md §4.2](design.md), design.md §6.2](design.md), implicit prerequisites of design.md §7](design.md)
 
 This document specifies leader election, term management, the `PxBallot`/`PxTerm` separation, and the leader lease used for fast linearizable reads. The design follows Raft very closely; only the per-slot Paxos parts differ.
 
@@ -182,7 +182,7 @@ Followers respond with their own `term`, `success` (false if the follower's term
 
 ## 6. Leader Lease
 
-A lease lets the leader serve `Get(mode=Linearizable)` without a per-read quorum round-trip ([§6.1 of design.md](../design.md#61-linearizable-leader-read)). The lease is the standard Raft-style approach with a clock-skew bound.
+A lease lets the leader serve `Get(mode=Linearizable)` without a per-read quorum round-trip ([§6.1 of design.md](design.md#61-linearizable-leader-read)). The lease is the standard Raft-style approach with a clock-skew bound.
 
 ### 6.1 What the lease grants
 
@@ -209,7 +209,7 @@ With the default `heartbeat_interval = 500 ms` and `lease_duration = 9 × heartb
 
 ### 6.3 Clock-skew assumption
 
-[requirement.md §3](../requirement.md#3-dependencies-and-assumptions) caps clock skew at `max_clock_skew` (default `500 ms`, see §10) per heartbeat interval. The lease formula is:
+design.md §3](design.md) caps clock skew at `max_clock_skew` (default `500 ms`, see §10) per heartbeat interval. The lease formula is:
 
 ```
   effective_lease = lease_duration - max_clock_skew
@@ -317,7 +317,7 @@ If the clock-skew assumption is *violated*, lease-based reads can return stale d
 | `heartbeat_interval` | 500 ms | 10 ms – 30 s | Should be ≪ `lease_duration` |
 | `lease_duration` | 4500 ms | 100 ms – 60 s | Should be ≫ `heartbeat_interval` + `max_clock_skew` (rule of thumb: `9 × heartbeat_interval`) |
 | `effective_lease` | derived | — | `= lease_duration - max_clock_skew` |
-| `max_clock_skew` | 500 ms | 1 ms – 5 s | Architectural bound from [requirement.md §3](../requirement.md#3-dependencies-and-assumptions) |
+| `max_clock_skew` | 500 ms | 1 ms – 5 s | Architectural bound from design.md §3](design.md) |
 | `election_min` | 4000 ms | ≥ 8 × `heartbeat_interval` | Avoid spurious elections |
 | `election_max` | 8000 ms | ≤ 60 s | Bounds time to elect after leader loss |
 | `prevote_enabled` | true | bool | Reduces disruption from rejoining nodes |
@@ -329,7 +329,7 @@ Notes:
 
 - **PreVote** (Raft optimization, ON by default): a candidate first asks "would you vote for me?" without bumping the term. This avoids spurious term increments from a partitioned-and-rejoined node.
 - **Pre-emptive step-down on heartbeat loss** is governed by `lease_duration`, not `election_min`. A leader that loses contact with quorum gives up its lease at `lease_duration` and stops serving fast reads even before any follower starts an election.
-- **Default choice rationale.** The defaults above are tuned for general-purpose deployments (mix of single-DC and modest cross-AZ latency). They give ~5–8 s failover detection, which matches the operational expectations of most online KV workloads while keeping heartbeat chatter low. See [`design.md`](../design.md) §13 (Open Design Questions) for the analysis.
+- **Default choice rationale.** The defaults above are tuned for general-purpose deployments (mix of single-DC and modest cross-AZ latency). They give ~5–8 s failover detection, which matches the operational expectations of most online KV workloads while keeping heartbeat chatter low. See [`design.md`](design.md) §13 (Open Design Questions) for the analysis.
 - **Operational profiles:**
   - *Low-latency single datacenter:* `heartbeat_interval = 100 ms`, `election_min/max = 800/1500 ms`, `lease_duration = 900 ms`, `max_clock_skew = 100 ms`. Sub-second failover; higher message rate.
   - *Cross-region / WAN:* `heartbeat_interval = 3 s`, `election_min/max = 24/48 s`, `lease_duration = 27 s`. Matches CockroachDB-style geo-replicated tunings; tolerates wider RTT variance at the cost of failover latency.

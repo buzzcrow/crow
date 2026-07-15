@@ -113,21 +113,20 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
       }
     }, { timeout: 25_000 }).toBe(true);
 
-    // --- KV via inspector ---
-    await aside.getByText('G-70').click();
-    await page.getByRole('tab', { name: 'KV' }).click();
+    // --- KV via KV Operator panel ---
+    await page.getByRole('button', { name: 'KV' }).click();
 
     // Put
-    await page.getByRole('button', { name: /^Put$/ }).click();
     await page.getByPlaceholder('Key').fill('smoke-key');
     await page.getByPlaceholder('Value').fill('smoke-value');
-    await page.getByRole('button', { name: /^Put$/ }).last().click();
+    const putResponsePromise = page.waitForResponse((r) => r.url().includes('/kv/put'));
+    await page.getByRole('button', { name: /^Put$/ }).click();
+    await putResponsePromise;
     await expect(page.getByText(/Key written: "smoke-key"/)).toBeVisible({ timeout: 20_000 });
 
     // Get
+    await page.getByPlaceholder('Key').fill('smoke-key');
     await page.getByRole('button', { name: /^Get$/ }).click();
-    await page.getByPlaceholder('Key to get').fill('smoke-key');
-    await page.getByRole('button', { name: /^Get$/ }).last().click();
     await expect(page.getByText('smoke-value')).toBeVisible({ timeout: 20_000 });
 
     // --- Backend verifies the full chain ---

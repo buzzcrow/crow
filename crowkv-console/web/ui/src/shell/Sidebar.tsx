@@ -32,7 +32,7 @@ export function Sidebar({
   nodeHealthById = {},
   loading,
   readonly,
-  width = 350,
+  width = 280,
   onNodeClick,
   onNodeContextMenu,
   onAdd,

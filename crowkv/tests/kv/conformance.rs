@@ -83,20 +83,36 @@ pub fn scan_is_ordered_prefix_filtered_and_truncates(e: &dyn KVEngine) {
     e.apply(3, &batch(vec![del(b"a:2")])).into_ready().unwrap();
 
     // Unlimited: only live "a:" keys, in order, tombstone excluded.
-    let (items, truncated) = e.scan(b"a:", 0).into_ready();
+    let (items, truncated) = e.scan(b"a:", b"", 0).into_ready();
     let keys: Vec<Vec<u8>> = items.iter().map(|(k, _, _)| k.clone()).collect();
     assert_eq!(keys, vec![b"a:1".to_vec(), b"a:3".to_vec()]);
     assert!(!truncated);
 
     // Limit smaller than the match count sets truncated.
-    let (items, truncated) = e.scan(b"a:", 1).into_ready();
+    let (items, truncated) = e.scan(b"a:", b"", 1).into_ready();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].0, b"a:1".to_vec());
     assert!(truncated);
 
     // Empty prefix scans everything live.
-    let (all, _) = e.scan(b"", 0).into_ready();
+    let (all, _) = e.scan(b"", b"", 0).into_ready();
     assert_eq!(all.len(), 3); // a:1, a:3, b:1
+
+    // start_after: returns keys strictly greater than start_after.
+    let (page, truncated) = e.scan(b"a:", b"a:1", 0).into_ready();
+    let keys: Vec<Vec<u8>> = page.iter().map(|(k, _, _)| k.clone()).collect();
+    assert_eq!(keys, vec![b"a:3".to_vec()]);
+    assert!(!truncated);
+
+    // start_after with limit: pagination returns next page.
+    let (page1, trunc1) = e.scan(b"a:", b"", 1).into_ready();
+    assert_eq!(page1.len(), 1);
+    assert_eq!(page1[0].0, b"a:1".to_vec());
+    assert!(trunc1);
+    let (page2, trunc2) = e.scan(b"a:", b"a:1", 1).into_ready();
+    assert_eq!(page2.len(), 1);
+    assert_eq!(page2[0].0, b"a:3".to_vec());
+    assert!(!trunc2);
 }
 
 pub fn compare_is_empty_for_identical_state_and_detects_divergence(a: &dyn KVEngine, b: &dyn KVEngine) {

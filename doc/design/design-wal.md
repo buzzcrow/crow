@@ -3,8 +3,8 @@
 
 # CrowKV - Design: Write-Ahead Log
 
-Depends on: [`requirement.md`](../requirement.md), [`design.md`](../design.md)
-Satisfies: [requirement.md §8.1](../requirement.md#81-wal-write-ahead-log), [requirement.md §8.2](../requirement.md#82-acceptor)
+Depends on: [`design.md`](design.md), [`design.md`](design.md)
+Satisfies: design.md §8.1](design.md), design.md §8.2](design.md)
 
 This document specifies CrowKV's write-ahead log. **There is exactly one durable
 log per group: the replica's consensus log (the per-slot acceptor log).**
@@ -226,7 +226,7 @@ Crucially, the leader's **own** durable flush is not on the critical path of rem
 > An `Accepted` response is sent to the leader only after the corresponding WAL record's backend durable flush has completed.
 > A client write is acked only after a quorum of acceptors have sent `Accepted`.
 
-This is repeated from [requirement.md §8.1](../requirement.md#81-wal-write-ahead-log) because everything else in this section is a consequence of it.
+This is repeated from design.md §8.1](design.md) because everything else in this section is a consequence of it.
 
 ### 5.2 Failure cases
 
@@ -431,9 +431,9 @@ When the backend durable-flush operation returns an error, the OS reports the di
 1. Stop using the disk for new writes (the `failed` AtomicBool is set; all subsequent `append` calls return `Err`).
 2. Mark the group affected (a multi-disk WAL with one disk lost has incomplete state for slots that landed on the lost disk).
 3. **Fail the node out of the group** (not yet implemented): the node would send a step-out RPC to the leader, the leader records the failed acceptor as not-eligible, and (if necessary) triggers a reconfiguration to maintain quorum.
-4. Rebuild from peers via **snapshot install** ([§8.4 of design.md](../design.md#84-snapshot-and-install)).
+4. Rebuild from peers via **snapshot install** ([§8.4 of design.md](design.md#84-snapshot-and-install)).
 
-This is the **fail-out semantics** decided in [requirement.md §8.1](../requirement.md#81-wal-write-ahead-log). We do not try to keep operating with partial WAL state on the surviving disks; that path requires per-slot replication across disks and adds disproportionate complexity.
+This is the **fail-out semantics** decided in design.md §8.1](design.md). We do not try to keep operating with partial WAL state on the surviving disks; that path requires per-slot replication across disks and adds disproportionate complexity.
 
 ### 8.2 All-disk failure
 
@@ -490,7 +490,7 @@ The WAL is per-node. Inter-node consistency is the consensus layer's job. If a n
 Most of the design above has been implemented. The following items are **not yet
 implemented**: disk-pressure-triggered eager GC (§7.3), retention window (§7.5),
 and the full fail-out procedure with step-out RPC and reconfiguration (§8.1).
-Remaining pending test tasks are tracked in [`plan-test.md`](../plan-test.md):
+Remaining pending test tasks are tracked in [`plan-test.md`](../working/plan-test.md):
 
 - Slot-affinity WAL placement instead of per-record round-robin.
 - Backend-specific durable flush and alignment semantics.

@@ -64,10 +64,12 @@ pub trait KvStore {
     /// discipline as in [`Self::kv_get`]: linearizable scans run behind the
     /// leader read barrier, stale modes serve from local applied state. The
     /// response sets `truncated = true` when `limit` was reached.
+    #[allow(clippy::too_many_arguments)]
     async fn kv_scan(
         &self,
         group_id: u64,
         prefix: &[u8],
+        start_after: &[u8],
         limit: u32,
         read_mode: i32,
         request_id: u64,

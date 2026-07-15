@@ -277,6 +277,7 @@ impl KvService for KvStoreService {
             .kv_scan(
                 req.group_id,
                 &req.prefix,
+                &req.start_after,
                 req.limit,
                 req.read_mode,
                 req.request_id,

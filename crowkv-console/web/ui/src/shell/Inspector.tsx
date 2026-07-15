@@ -2,16 +2,15 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { useState } from 'react';
-import { X, Info, ListChecks, Database, ExternalLink } from 'lucide-react';
+import { X, Info, ListChecks, ExternalLink } from 'lucide-react';
 import { useSelection, SelectedEntity } from '../contexts/SelectionContext';
 import { useViewMode } from '../contexts/ViewModeContext';
 import { cn } from '../utils/cn';
 import { ViewMode, Node, StoreView, CrowKVServerView } from '../types';
-import { KvPanel } from '../panels/KvPanel';
 import { ActivityLog } from '../panels/ActivityLog';
 import { groupLabel, localReplicaLabel, nodeLabel, rackLabel, serverLabel, storeLabel } from '../utils/entityDisplay';
 
-type TabId = 'details' | 'activity' | 'kv';
+type TabId = 'details' | 'activity';
 
 function displayEntityId(entity: SelectedEntity): string {
   switch (entity.type) {
@@ -43,19 +42,15 @@ interface InspectorProps {
 
 /**
  * Right-side inspector. Reacts to SelectionContext: Details + Activity for any
- * selection, plus a KV tab when a logical Group is selected.
+ * selection.
  */
-export function Inspector({ readonly, modules, nodes = [], servers = [], stores = [], width = 320 }: InspectorProps) {
+export function Inspector({ readonly: _readonly, modules: _modules, nodes = [], servers = [], stores = [], width = 320 }: InspectorProps) {
   const { selectedEntity, clearSelection, selectEntity } = useSelection();
   const { setViewMode } = useViewMode();
   const [activeTab, setActiveTab] = useState<TabId>('details');
 
   if (!selectedEntity) return null;
 
-  const kvEnabled =
-    modules?.kv !== false &&
-    selectedEntity.type === 'Group' &&
-    selectedEntity.viewMode === ViewMode.Logical;
   const displayType = selectedEntity.type === 'Server' ? 'CrowKV' : selectedEntity.type;
   const displayName = selectedEntity.name || displayEntityId(selectedEntity);
 
@@ -80,9 +75,6 @@ export function Inspector({ readonly, modules, nodes = [], servers = [], stores 
       <div className="tw-flex tw-items-center tw-border-b tw-border-border tw-px-2 tw-text-xs">
         <Tab id="details" current={activeTab} set={setActiveTab} icon={<Info className="tw-h-3 tw-w-3" />} label="Details" />
         <Tab id="activity" current={activeTab} set={setActiveTab} icon={<ListChecks className="tw-h-3 tw-w-3" />} label="Activity" />
-        {kvEnabled && (
-          <Tab id="kv" current={activeTab} set={setActiveTab} icon={<Database className="tw-h-3 tw-w-3" />} label="KV" />
-        )}
       </div>
 
       <div className="tw-flex-1 tw-overflow-y-auto">
@@ -90,9 +82,6 @@ export function Inspector({ readonly, modules, nodes = [], servers = [], stores 
           <DetailsTab entity={selectedEntity} nodes={nodes} servers={servers} stores={stores} selectEntity={selectEntity} setViewMode={setViewMode} />
         )}
         {activeTab === 'activity' && <ActivityLog />}
-        {activeTab === 'kv' && kvEnabled && (
-          <KvPanel storeId={selectedEntity.parentIds?.store_id || ''} groupId={selectedEntity.id} readonly={readonly} />
-        )}
       </div>
     </aside>
   );

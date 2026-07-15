@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CrowKV User Guide</title>
+<style>
+
+:root {
+  /* ── Hugging Face inspired palette ──────────────────────────────── */
+  --bg: #ffffff;
+  --bg-subtle: #fafafa;
+  --fg: #111827;
+  --fg-default: #374151;
+  --fg-muted: #6b7280;
+  --sidebar-bg: #fafafa;
+  --sidebar-border: #e5e7eb;
+  --code-bg: #f3f4f6;
+  --code-border: #e5e7eb;
+  --border: #e5e7eb;
+  --border-strong: #d1d5db;
+  --accent: #ffd21e;
+  --accent-hover: #f59e0b;
+  --accent-soft: #fff4cc;
+  --accent-on: #111827;
+  --link: #155dfc;
+  --link-hover: #0b4ed6;
+  --tab-active-bg: #ffffff;
+  --tab-inactive-bg: #f3f4f6;
+  --tab-active-fg: #111827;
+  --tab-inactive-fg: #6b7280;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --bg-subtle: #161b22;
+    --fg: #e6edf3;
+    --fg-default: #c9d1d9;
+    --fg-muted: #8b949e;
+    --sidebar-bg: #161b22;
+    --sidebar-border: #30363d;
+    --code-bg: #161b22;
+    --code-border: #30363d;
+    --border: #30363d;
+    --border-strong: #484f58;
+    --accent: #ffd21e;
+    --accent-hover: #f59e0b;
+    --accent-soft: #2a2410;
+    --accent-on: #0d1117;
+    --link: #58a6ff;
+    --link-hover: #79b8ff;
+    --tab-active-bg: #21262d;
+    --tab-inactive-bg: #161b22;
+    --tab-active-fg: #e6edf3;
+    --tab-inactive-fg: #8b949e;
+  }
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: "Source Sans Pro", -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Roboto, sans-serif;
+  background: var(--bg-subtle);
+  color: var(--fg-default);
+  line-height: 1.65;
+  font-size: 15px;
+}
+
+/* ── Layout ─────────────────────────────────────────────────────── */
+.layout {
+  display: flex;
+  min-height: 100vh;
+}
+.sidebar {
+  width: 280px;
+  flex-shrink: 0;
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--sidebar-border);
+  position: fixed;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  overflow-y: auto;
+  padding: 1.5rem 0;
+}
+.content {
+  margin-left: 280px;
+  flex: 1;
+  padding: 2rem 3rem;
+  max-width: calc(100vw - 280px);
+  background: var(--bg);
+}
+
+/* ── Sidebar ────────────────────────────────────────────────────── */
+.sidebar-brand {
+  padding: 0 1.5rem 1rem;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--fg);
+  border-bottom: 1px solid var(--sidebar-border);
+  margin-bottom: 0.75rem;
+  letter-spacing: -0.01em;
+}
+.sidebar-brand .brand-mark {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  background: var(--accent);
+  border-radius: 4px;
+  vertical-align: middle;
+  margin-right: 0.5rem;
+}
+.sidebar nav { padding: 0 0.5rem; }
+.sidebar nav a {
+  display: block;
+  padding: 0.35rem 1rem;
+  color: var(--fg-muted);
+  text-decoration: none;
+  font-size: 0.875rem;
+  border-radius: 6px;
+  transition: all 0.12s;
+  line-height: 1.4;
+}
+.sidebar nav a:hover {
+  color: var(--link);
+  background: var(--code-bg);
+}
+.sidebar nav a.active {
+  color: var(--link);
+  font-weight: 600;
+  background: var(--code-bg);
+}
+.sidebar nav a.sub { padding-left: 2rem; font-size: 0.82rem; }
+
+/* ── Content ────────────────────────────────────────────────────── */
+.content h1 {
+  font-size: 1.9rem;
+  font-weight: 700;
+  color: var(--fg);
+  margin-bottom: 0.5rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+  letter-spacing: -0.02em;
+}
+.content h2 {
+  font-size: 1.4rem;
+  font-weight: 600;
+  color: var(--fg);
+  margin-top: 2.5rem;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.3rem;
+  border-bottom: 1px solid var(--border);
+  scroll-margin-top: 1rem;
+  letter-spacing: -0.01em;
+}
+.content h3 {
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: var(--fg);
+  margin-top: 1.75rem;
+  margin-bottom: 0.5rem;
+  scroll-margin-top: 1rem;
+}
+.content p { margin: 0.6rem 0; }
+.content a { color: var(--link); text-decoration: none; }
+.content a:hover { color: var(--link-hover); text-decoration: underline; }
+.content ul { padding-left: 1.5rem; margin: 0.6rem 0; }
+.content li { margin: 0.3rem 0; }
+.content hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+
+/* ── Inline code ────────────────────────────────────────────────── */
+code {
+  font-family: "IBM Plex Mono", "SF Mono", "Fira Code", "Consolas", monospace;
+  font-size: 0.85em;
+  background: var(--code-bg);
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+  border: 1px solid var(--code-border);
+}
+
+/* ── Code blocks ────────────────────────────────────────────────── */
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--code-border);
+  border-radius: 6px;
+  padding: 0.85rem 1rem;
+  overflow-x: auto;
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+pre code { background: none; border: none; padding: 0; font-size: inherit; }
+
+/* ── Tables ─────────────────────────────────────────────────────── */
+table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1rem 0;
+  font-size: 0.88rem;
+}
+th, td {
+  border: 1px solid var(--border);
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+th {
+  background: var(--code-bg);
+  font-weight: 600;
+  color: var(--fg);
+}
+tr:hover td { background: var(--code-bg); }
+
+/* ── Tabbed code ────────────────────────────────────────────────── */
+.tab-group {
+  margin: 1rem 0;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.tab-bar {
+  display: flex;
+  background: var(--tab-inactive-bg);
+  border-bottom: 1px solid var(--border);
+}
+.tab-btn {
+  padding: 0.45rem 1.1rem;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--tab-inactive-fg);
+  border-bottom: 2px solid transparent;
+  transition: all 0.12s;
+  font-family: inherit;
+}
+.tab-btn:hover { color: var(--fg); background: var(--tab-active-bg); }
+.tab-btn.active {
+  color: var(--tab-active-fg);
+  background: var(--tab-active-bg);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+.tab-panel-content { padding: 1rem; }
+.tab-panel-content table { margin: 0.75rem 0; }
+.tab-panel-content h4 { margin-top: 1.25rem; }
+.tab-panel-content h4:first-child { margin-top: 0; }
+.tab-panel pre {
+  border-radius: 0 0 6px 6px;
+  margin: 0;
+  border: none;
+  border-top: none;
+}
+
+/* ── Mobile ─────────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+  .sidebar {
+    position: static;
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--sidebar-border);
+    max-height: 300px;
+  }
+  .content {
+    margin-left: 0;
+    max-width: 100%;
+    padding: 1.5rem;
+  }
+  .layout { flex-direction: column; }
+}
+
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+<div class="sidebar-brand"><span class="brand-mark"></span>CrowKV</div>
+<nav>
+<a href="#crowkv-user-guide" class="">CrowKV User Guide</a>
+<a href="#1-quick-start-bootstrap-a-3-node-cluster" class="sub">1. Quick Start: Bootstrap a 3-Node Cluster</a>
+<a href="#2-kv-operations" class="sub">2. KV Operations</a>
+<a href="#3-cluster-management" class="sub">3. Cluster Management</a>
+<a href="#4-rolling-upgrade" class="sub">4. Rolling Upgrade</a>
+<a href="#5-emergency-loss-of-quorum" class="sub">5. Emergency: Loss of Quorum</a>
+<a href="#6-backup" class="sub">6. Backup</a>
+<a href="#7-api-reference" class="sub">7. API Reference</a>
+</nav>
+  </aside>
+  <main class="content">
+<h1 id="crowkv-user-guide">CrowKV User Guide</h1>
+<p>This guide walks through starting a cluster, performing basic KV</p>
+<p>operations, managing topology, and running upgrades.</p>
+<p>CrowKV provides three interfaces for cluster management and data</p>
+<p>access:</p>
+<ul>
+<li><strong>Web UI</strong> — the <code>crowkv-web</code> service provides a visual dashboard</li>
+</ul>
+<p>  with cluster topology, group health, a KV Operator panel (store/group</p>
+<p>  selector, paginated scan, inline CRUD, demo data injection), and</p>
+<p>  Swagger UI for browsing the OpenAPI spec of any registered</p>
+<p>  <code>crowkv-server</code> instance.</p>
+<ul>
+<li><strong>CLI</strong> — the <code>crowkv-cli</code> CLI tool is a thin wrapper over the same</li>
+</ul>
+<p>  service HTTP API. It talks to a <code>crowkv-web</code> service</p>
+<p>  (<code>--ip</code> / <code>--port</code>, default <code>127.0.0.1:9920</code>); the service resolves</p>
+<p>  upstream <code>crowkv-server</code> nodes. Use <code>--json</code> for machine-readable</p>
+<p>  output.</p>
+<ul>
+<li><strong>RESTful API</strong> — the service HTTP API is the underlying transport</li>
+</ul>
+<p>  for both the Web UI and the CLI. All endpoints are documented in</p>
+<p>  §7 (API Reference).</p>
+<p>The examples below show both CLI and curl for each operation. All</p>
+<p>examples assume these shell variables are set once:</p>
+<pre><code class="bash">IP=127.0.0.1        # crowkv-web service IP
+PORT=9920           # crowkv-web service port</code></pre>
+<hr>
+<h2 id="1-quick-start-bootstrap-a-3-node-cluster">1. Quick Start: Bootstrap a 3-Node Cluster</h2>
+<h3 id="11-start-the-servers">1.1 Start the servers</h3>
+<p>On each node, run <code>crowkv-server</code>. The first start is empty (no</p>
+<p><code>--stores</code>/<code>--groups</code>); the service creates the topology later.</p>
+<pre><code class="bash"># On n1
+crowkv-server \
+  --management-addr 0.0.0.0 --management-port 2001 \
+  --ports 20001 --election-profile default
+
+# On n2
+crowkv-server \
+  --management-addr 0.0.0.0 --management-port 2002 \
+  --ports 20002 --election-profile default
+
+# On n3
+crowkv-server \
+  --management-addr 0.0.0.0 --management-port 2003 \
+  --ports 20003 --election-profile default</code></pre>
+<h3 id="12-register-the-physical-topology">1.2 Register the physical topology</h3>
+<p>Create a rack, add nodes, and deploy a server on each node.</p>
+<div class="tab-group">
+<div class="tab-bar">
+<button class="tab-btn active" data-tab="0">cli</button>
+<button class="tab-btn" data-tab="1">curl</button>
+</div>
+<div class="tab-panel active" data-panel="0"><pre><code># Create a rack
+crowkv-cli --ip $IP --port $PORT rack add --id r1 --name "rack-one"
+
+# Register each node (repeat for n2, n3)
+crowkv-cli --ip $IP --port $PORT node add --id n1 --rack r1 --host n1.example.com
+
+# Deploy a crowkv-server process on each node (repeat for n2, n3)
+crowkv-cli --ip $IP --port $PORT server deploy \
+  --node n1 --mgmt-port 2001 --grpc-port 20001</code></pre></div>
+<div class="tab-panel" data-panel="1"><pre><code># Create a rack
+curl -X POST "http://$IP:$PORT/api/racks" -H 'Content-Type: application/json' \
+  -d '{"id":"r1"}'
+
+# Register each node (repeat for n2, n3)
+curl -X POST "http://$IP:$PORT/api/nodes" -H 'Content-Type: application/json' \
+  -d '{"id":"n1","rack_id":"r1","host":"n1.example.com","ssh_port":22,"ssh_user":""}'
+
+# Deploy a crowkv-server process on each node (repeat for n2, n3)
+curl -X POST "http://$IP:$PORT/api/nodes/n1/server/deploy" \
+  -H 'Content-Type: application/json' \
+  -d '{"mgmt_port":2001,"grpc_port":20001}'</code></pre></div>
+</div>
+<p>The <code>deploy</code> command spawns <code>crowkv-server</code> on the node (via SSH if</p>
+<p><code>ssh_user</code> is set, or as a local subprocess otherwise).</p>
+<h3 id="13-create-a-store-and-group">1.3 Create a store and group</h3>
+<p>A store is the logical container that owns one or more groups.</p>
+<div class="tab-group">
+<div class="tab-bar">
+<button class="tab-btn active" data-tab="0">cli</button>
+<button class="tab-btn" data-tab="1">curl</button>
+</div>
+<div class="tab-panel active" data-panel="0"><pre><code># Create a store on n1
+crowkv-cli --ip $IP --port $PORT store add --store-id 3 --nodes n1
+
+# Create a group with an initial replica on n1
+crowkv-cli --ip $IP --port $PORT paxos add \
+  --store-id 3 --group-id 3 --replica-id 1 --nodes n1</code></pre></div>
+<div class="tab-panel" data-panel="1"><pre><code>curl -X POST "http://$IP:$PORT/api/stores" -H 'Content-Type: application/json' \
+  -d '{"store_id":3,"nodes":["n1"]}'
+
+curl -X POST "http://$IP:$PORT/api/stores/3/groups" -H 'Content-Type: application/json' \
+  -d '{"group_id":3,"replica_id":1,"nodes":["n1"]}'</code></pre></div>
+</div>
+<h3 id="14-add-the-remaining-replicas">1.4 Add the remaining replicas</h3>
+<div class="tab-group">
+<div class="tab-bar">
+<button class="tab-btn active" data-tab="0">cli</button>
+<button class="tab-btn" data-tab="1">curl</button>
+</div>
+<div class="tab-panel active" data-panel="0"><pre><code>crowkv-cli --ip $IP --port $PORT replica add \
+  --store-id 3 --group-id 3 --node n2 --replica-id 2
+
+crowkv-cli --ip $IP --port $PORT replica add \
+  --store-id 3 --group-id 3 --node n3 --replica-id 3</code></pre></div>
+<div class="tab-panel" data-panel="1"><pre><code>curl -X POST "http://$IP:$PORT/api/stores/3/groups/3/replicas" \
+  -H 'Content-Type: application/json' \
+  -d '{"node_id":"n2","replica_id":2}'
+
+curl -X POST "http://$IP:$PORT/api/stores/3/groups/3/replicas" \
+  -H 'Content-Type: application/json' \
+  -d '{"node_id":"n3","replica_id":3}'</code></pre></div>
+</div>
+<p>The service orchestrates the full add-replica flow: creates the local</p>
+<p>group on the target node, wires remotes bidirectionally, and the new</p>
+<p>replica catches up via snapshot streaming before joining the voting set.</p>
+<h3 id="15-verify-and-smoke-test">1.5 Verify and smoke test</h3>
+<div class="tab-group">
+<div class="tab-bar">
+<button class="tab-btn active" data-tab="0">cli</button>
+<button class="tab-btn" data-tab="1">curl</button>
+</div>
+<div class="tab-panel active" data-panel="0"><pre><code># Check group health
+crowkv-cli --ip $IP --port $PORT paxos inspect --store-id 3 --group-id 3
+# Look for "leader=" and replica states
+
+# Put / Get
+crowkv-cli --ip $IP --port $PORT kv put --store-id 3 --group-id 3 \
+  --key hello --value world
+
+crowkv-cli --ip $IP --port $PORT kv get --store-id 3 --group-id 3 --key hello</code></pre></div>
+<div class="tab-panel" data-panel="1"><pre><code>curl "http://$IP:$PORT/api/stores/3/groups/3"
+
+curl -X POST "http://$IP:$PORT/api/stores/3/groups/3/kv/put" \
+  -H 'Content-Type: application/json' \
+  -d '{"key":"hello","value":"world"}'
+
+curl "http://$IP:$PORT/api/stores/3/groups/3/kv/get?key=hello"</code></pre></div>
+</div>
+<hr>
+<h2 id="2-kv-operations">2. KV Operations</h2>
+<p>All KV operations target a specific <code>(store_id, group_id)</code>.</p>
+<div class="tab-group">
+<div class="tab-bar">
+<button class="tab-btn active" data-tab="0">cli</button>
+<button class="tab-btn" data-tab="1">curl</button>
+</div>
+<div class="tab-panel active" data-panel="0"><pre><code># Put
+crowkv-cli kv put --store-id 3 --group-id 3 --key user:1 --value alice
+
+# Get
+crowkv-cli kv get --store-id 3 --group-id 3 --key user:1
+
+# Delete
+crowkv-cli kv delete --store-id 3 --group-id 3 --key user:1
+
+# Prefix scan
+crowkv-cli kv scan --store-id 3 --group-id 3 --prefix user: --limit 100</code></pre></div>
+<div class="tab-panel" data-panel="1"><pre><code>curl -X POST "http://$IP:$PORT/api/stores/3/groups/3/kv/put" \
+  -H 'Content-Type: application/json' \
+  -d '{"key":"user:1","value":"alice"}'
+
+curl "http://$IP:$PORT/api/stores/3/groups/3/kv/get?key=user:1"
+
+curl -X POST "http://$IP:$PORT/api/stores/3/groups/3/kv/delete" \
+  -H 'Content-Type: application/json' \
+  -d '{"key":"user:1"}'
+
+curl "http://$IP:$PORT/api/stores/3/groups/3/kv/scan?key=user:"</code></pre></div>
+</div>
+<p>The Web UI KV Operator panel provides the same operations with a</p>
+<p>store/group selector, paginated scan, and inline editing.</p>
+<hr>
+<h2 id="3-cluster-management">3. Cluster Management</h2>
+<h3 id="31-check-cluster-health">3.1 Check cluster health</h3>
+<div class="tab-group">
+<div class="tab-bar">
+<button class="tab-btn active" data-tab="0">cli</button>
+<button class="tab-btn" data-tab="1">curl</button>
+</div>
+<div class="tab-panel active" data-panel="0"><pre><code># High-level summary (servers + store/group counts)
+crowkv-cli cluster status
+
+# Full topology (logical stores/groups/replicas + physical nodes/servers)
+crowkv-cli cluster topology
+
+# Inspect a specific store, group, or node
+crowkv-cli cluster inspect s3          # store 3
+crowkv-cli cluster inspect s3/g3       # group 3 in store 3
+crowkv-cli cluster inspect n1          # node n1</code></pre></div>
+<div class="tab-panel" data-panel="1"><pre><code># All nodes
+curl "http://$IP:$PORT/api/nodes"
+
+# All deployed servers
+curl "http://$IP:$PORT/api/servers"
+
+# A specific group
+curl "http://$IP:$PORT/api/stores/3/groups/3"
+# healthy: all replicas up, leader known
+# degraded: some replicas down, quorum + leader available
+# unavailable: quorum lost</code></pre></div>
+</div>
+<h3 id="32-add-a-read-replica">3.2 Add a read replica</h3>
+<div class="tab-group">
+<div class="tab-bar">
+<button class="tab-btn active" data-tab="0">cli</button>
+<button class="tab-btn" data-tab="1">curl</button>
+</div>
+<div class="tab-panel active" data-panel="0"><pre><code>crowkv-cli replica add --store-id 3 --group-id 3 --node n4 --replica-id 4</code></pre></div>
+<div class="tab-panel" data-panel="1"><pre><code>curl -X POST "http://$IP:$PORT/api/stores/3/groups/3/replicas" \
+  -H 'Content-Type: application/json' \
+  -d '{"node_id":"n4","replica_id":4}'</code></pre></div>
+</div>
+<p>The new replica streams a snapshot from the leader, catches up, then</p>
+<p>joins the voting set automatically.</p>
+<h3 id="33-remove-a-replica">3.3 Remove a replica</h3>
+<div class="tab-group">
+<div class="tab-bar">
+<button class="tab-btn active" data-tab="0">cli</button>
+<button class="tab-btn" data-tab="1">curl</button>
+</div>
+<div class="tab-panel active" data-panel="0"><pre><code>crowkv-cli replica remove --store-id 3 --group-id 3 --replica-id 3</code></pre></div>
+<div class="tab-panel" data-panel="1"><pre><code>curl -X DELETE "http://$IP:$PORT/api/stores/3/groups/3/replicas/3"</code></pre></div>
+</div>
+<p>If the target is the leader, the service asks it to step down first,</p>
+<p>waits for a new leader, then removes the replica.</p>
+<h3 id="34-replace-a-failed-node">3.4 Replace a failed node</h3>
+<li>Provision the new machine with the same node ID, management port,</li>
+<p>   and gRPC port.</p>
+<li>Deploy the server via the service:</li>
+<div class="tab-group">
+<div class="tab-bar">
+<button class="tab-btn active" data-tab="0">cli</button>
+<button class="tab-btn" data-tab="1">curl</button>
+</div>
+<div class="tab-panel active" data-panel="0"><pre><code>   crowkv-cli server deploy --node n1 --mgmt-port 2001 --grpc-port 20001</code></pre></div>
+<div class="tab-panel" data-panel="1"><pre><code>   curl -X POST "http://$IP:$PORT/api/nodes/n1/server/deploy" \
+     -H 'Content-Type: application/json' \
+     -d '{"mgmt_port":2001,"grpc_port":20001}'</code></pre></div>
+</div>
+<li>Start with bootstrap args to recover from WAL:</li>
+<pre><code class="bash">   crowkv-server \
+     --management-addr 0.0.0.0 --management-port 2001 \
+     --ports 20001 --election-profile default \
+     --stores 3 --groups 3 --replica 1</code></pre>
+<li>Verify group health.</li>
+<p>If the WAL and config directory were also lost, add the replacement as</p>
+<p>a new replica with a new replica ID instead of reusing the old one.</p>
+<hr>
+<h2 id="4-rolling-upgrade">4. Rolling Upgrade</h2>
+<p>Upgrade one node at a time. Wait for each node to rejoin and catch up</p>
+<p>before moving to the next.</p>
+<p>For each node:</p>
+<li><strong>Stop:</strong></li>
+<div class="tab-group">
+<div class="tab-bar">
+<button class="tab-btn active" data-tab="0">cli</button>
+<button class="tab-btn" data-tab="1">curl</button>
+</div>
+<div class="tab-panel active" data-panel="0"><pre><code>   crowkv-cli server stop --node n1</code></pre></div>
+<div class="tab-panel" data-panel="1"><pre><code>   curl -X POST "http://$IP:$PORT/api/nodes/n1/server/stop"</code></pre></div>
+</div>
+<li><strong>Install the new binary</strong> on the node.</li>
+<li><strong>Restart with persisted store/group IDs:</strong></li>
+<pre><code class="bash">   crowkv-server \
+     --management-addr 0.0.0.0 --management-port 2001 \
+     --ports 20001 --election-profile default \
+     --stores 3 --groups 3 --replica 1</code></pre>
+<p>   <code>--stores</code>/<code>--groups</code> tells the server to reopen the WAL and rejoin</p>
+<p>   as a full member. <code>--replica</code> must match the assigned replica ID.</p>
+<li><strong>Wait for healthy:</strong></li>
+<pre><code class="bash">   crowkv-cli cluster status
+   crowkv-cli paxos inspect --store-id 3 --group-id 3</code></pre>
+<li><strong>Smoke test:</strong></li>
+<pre><code class="bash">   crowkv-cli kv get --store-id 3 --group-id 3 --key hello</code></pre>
+<li>Move to the next node.</li>
+<p><strong>What to watch:</strong> after stopping a node, the remaining nodes elect a</p>
+<p>new leader. Wait for the group view to show a leader before proceeding.</p>
+<p>A brief latency spike during leader transition is normal.</p>
+<hr>
+<h2 id="5-emergency-loss-of-quorum">5. Emergency: Loss of Quorum</h2>
+<p>If two of three nodes fail, the remaining node cannot elect itself</p>
+<p>leader. Writes and linearizable reads block.</p>
+<ul>
+<li><strong>Restore the failed nodes</strong> from backups and restart with</li>
+</ul>
+<p>  <code>--stores</code>/<code>--groups</code>/<code>--replica</code> args. This is always the safest path.</p>
+<ul>
+<li><strong>Recover with data loss</strong> (last resort): force the surviving node to</li>
+</ul>
+<p>  become leader by manually truncating the log. Only safe when the</p>
+<p>  other nodes are permanently lost.</p>
+<p>Do not add a new node to a quorum-less group without first recovering</p>
+<p>leadership.</p>
+<hr>
+<h2 id="6-backup">6. Backup</h2>
+<p>CrowKV durability comes from the per-store WAL (<code>--wal-root</code>) and group</p>
+<p>config files (<code>--config-root</code>). For disaster recovery, back up:</p>
+<ul>
+<li><code>{wal-root}/store{store_id}/</code> for each store</li>
+<li><code>{config-root}/store{store_id}_group{group_id}.json</code> for each group</li>
+<li><code>{data-root}/store{store_id}/group{group_id}/</code> if using crowtree</li>
+</ul>
+<p>  durable KV engine</p>
+<p>Restore by placing these on the replacement node and starting with the</p>
+<p>matching bootstrap args.</p>
+<hr>
+<h2 id="7-api-reference">7. API Reference</h2>
+<div class="tab-group">
+<div class="tab-bar">
+<button class="tab-btn active" data-tab="0">cli</button>
+<button class="tab-btn" data-tab="1">curl</button>
+</div>
+<div class="tab-panel tab-panel-content active" data-panel="0"><p>The <code>crowkv-cli</code> CLI groups commands by resource type. All commands accept</p>
+<p><code>--ip &lt;addr&gt;</code> (default <code>127.0.0.1</code>), <code>--port &lt;port&gt;</code> (default <code>9920</code>),</p>
+<p>and <code>--json</code> for JSON output.</p>
+<ul>
+<li><strong><code>crowkv-cli cluster status</code></strong> — servers + store/group summary</li>
+<li><strong><code>crowkv-cli cluster topology</code></strong> — full logical + physical hierarchy</li>
+<li><strong><code>crowkv-cli cluster inspect &lt;id&gt;</code></strong> — <code>s&lt;sid&gt;</code>, <code>s&lt;sid&gt;/g&lt;gid&gt;</code>,</li>
+</ul>
+<p>  <code>s&lt;sid&gt;/g&lt;gid&gt;/r&lt;rid&gt;</code>, or <code>&lt;node-id&gt;</code></p>
+<ul>
+<li><strong><code>crowkv-cli rack add --id &lt;id&gt; [--name &lt;name&gt;]</code></strong></li>
+<li><strong><code>crowkv-cli rack remove --id &lt;id&gt;</code></strong></li>
+<li><strong><code>crowkv-cli rack list</code></strong></li>
+<li><strong><code>crowkv-cli node add --id &lt;id&gt; --rack &lt;rack&gt; [--host &lt;host&gt;] [--ssh-user &lt;user&gt;]</code></strong></li>
+<li><strong><code>crowkv-cli node remove --id &lt;id&gt;</code></strong></li>
+<li><strong><code>crowkv-cli node list</code></strong></li>
+<li><strong><code>crowkv-cli node ping &lt;node&gt;</code></strong></li>
+<li><strong><code>crowkv-cli server deploy --node &lt;id&gt; --mgmt-port &lt;p&gt; --grpc-port &lt;p&gt;</code></strong></li>
+<li><strong><code>crowkv-cli server restart --node &lt;id&gt;</code></strong></li>
+<li><strong><code>crowkv-cli server stop --node &lt;id&gt;</code></strong></li>
+<li><strong><code>crowkv-cli server list</code></strong></li>
+<li><strong><code>crowkv-cli store add --store-id &lt;id&gt; [--nodes n1,n2,...]</code></strong></li>
+<li><strong><code>crowkv-cli store remove --store-id &lt;id&gt;</code></strong></li>
+<li><strong><code>crowkv-cli store list</code></strong></li>
+<li><strong><code>crowkv-cli store inspect --store-id &lt;id&gt;</code></strong></li>
+<li><strong><code>crowkv-cli paxos add --store-id &lt;s&gt; --group-id &lt;g&gt; --replica-id &lt;r&gt; --nodes n1,n2,...</code></strong></li>
+<li><strong><code>crowkv-cli paxos remove --store-id &lt;s&gt; --group-id &lt;g&gt;</code></strong></li>
+<li><strong><code>crowkv-cli paxos list --store-id &lt;s&gt;</code></strong></li>
+<li><strong><code>crowkv-cli paxos inspect --store-id &lt;s&gt; --group-id &lt;g&gt;</code></strong></li>
+<li><strong><code>crowkv-cli replica add --store-id &lt;s&gt; --group-id &lt;g&gt; --node &lt;n&gt; [--replica-id &lt;r&gt;]</code></strong></li>
+<li><strong><code>crowkv-cli replica remove --store-id &lt;s&gt; --group-id &lt;g&gt; --replica-id &lt;r&gt;</code></strong></li>
+<li><strong><code>crowkv-cli kv put --store-id &lt;s&gt; --group-id &lt;g&gt; --key &lt;k&gt; --value &lt;v&gt;</code></strong></li>
+<li><strong><code>crowkv-cli kv get --store-id &lt;s&gt; --group-id &lt;g&gt; --key &lt;k&gt;</code></strong></li>
+<li><strong><code>crowkv-cli kv delete --store-id &lt;s&gt; --group-id &lt;g&gt; --key &lt;k&gt;</code></strong></li>
+<li><strong><code>crowkv-cli kv scan --store-id &lt;s&gt; --group-id &lt;g&gt; --prefix &lt;p&gt; [--limit &lt;n&gt;]</code></strong></li>
+</ul>
+</div>
+<div class="tab-panel tab-panel-content" data-panel="1"><h4 id="physical-topology">Physical topology</h4>
+<table>
+<thead>
+<tr><th>Operation</th><th>Endpoint</th></tr>
+</thead>
+<tbody>
+<tr><td>List racks</td><td><code>GET /api/racks</code></td></tr>
+<tr><td>Create rack</td><td><code>POST /api/racks</code></td></tr>
+<tr><td>Delete rack</td><td><code>DELETE /api/racks/{rack_id}</code></td></tr>
+<tr><td>List nodes</td><td><code>GET /api/nodes</code></td></tr>
+<tr><td>Add node</td><td><code>POST /api/nodes</code></td></tr>
+<tr><td>Get node</td><td><code>GET /api/nodes/{id}</code></td></tr>
+<tr><td>Remove node</td><td><code>DELETE /api/nodes/{id}</code></td></tr>
+<tr><td>Ping node</td><td><code>POST /api/nodes/{id}/ping</code></td></tr>
+<tr><td>Get server info</td><td><code>GET /api/nodes/{id}/server</code></td></tr>
+<tr><td>Deploy server</td><td><code>POST /api/nodes/{id}/server/deploy</code></td></tr>
+<tr><td>Restart server</td><td><code>POST /api/nodes/{id}/server/restart</code></td></tr>
+<tr><td>Stop server</td><td><code>POST /api/nodes/{id}/server/stop</code></td></tr>
+</tbody>
+</table>
+<h4 id="logical-topology-stores-and-groups">Logical topology (stores and groups)</h4>
+<table>
+<thead>
+<tr><th>Operation</th><th>Endpoint</th></tr>
+</thead>
+<tbody>
+<tr><td>List stores</td><td><code>GET /api/stores</code></td></tr>
+<tr><td>Create store</td><td><code>POST /api/stores</code></td></tr>
+<tr><td>Get store</td><td><code>GET /api/stores/{sid}</code></td></tr>
+<tr><td>Remove store</td><td><code>DELETE /api/stores/{sid}</code></td></tr>
+<tr><td>List groups</td><td><code>GET /api/stores/{sid}/groups</code></td></tr>
+<tr><td>Create group</td><td><code>POST /api/stores/{sid}/groups</code></td></tr>
+<tr><td>Get group view</td><td><code>GET /api/stores/{sid}/groups/{gid}</code></td></tr>
+<tr><td>Remove group</td><td><code>DELETE /api/stores/{sid}/groups/{gid}</code></td></tr>
+<tr><td>List replicas</td><td><code>GET /api/stores/{sid}/groups/{gid}/replicas</code></td></tr>
+<tr><td>Add replica</td><td><code>POST /api/stores/{sid}/groups/{gid}/replicas</code></td></tr>
+<tr><td>Get replica</td><td><code>GET /api/stores/{sid}/groups/{gid}/replicas/{rid}</code></td></tr>
+<tr><td>Remove replica</td><td><code>DELETE /api/stores/{sid}/groups/{gid}/replicas/{rid}</code></td></tr>
+<tr><td>Resolve leader endpoint</td><td><code>GET /api/stores/{sid}/groups/{gid}/endpoint</code></td></tr>
+</tbody>
+</table>
+<h4 id="kv-data-plane">KV data plane</h4>
+<table>
+<thead>
+<tr><th>Operation</th><th>Endpoint</th></tr>
+</thead>
+<tbody>
+<tr><td>Get</td><td><code>GET /api/stores/{sid}/groups/{gid}/kv/get?key=...</code></td></tr>
+<tr><td>Put</td><td><code>POST /api/stores/{sid}/groups/{gid}/kv/put</code></td></tr>
+<tr><td>Delete</td><td><code>POST /api/stores/{sid}/groups/{gid}/kv/delete</code></td></tr>
+<tr><td>Scan</td><td><code>GET /api/stores/{sid}/groups/{gid}/kv/scan?key=...</code></td></tr>
+</tbody>
+</table>
+</div>
+</div>
+
+  </main>
+</div>
+<script>
+
+// Tab switching
+document.querySelectorAll('.tab-group').forEach(function(group) {
+  var btns = group.querySelectorAll('.tab-btn');
+  btns.forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var idx = btn.getAttribute('data-tab');
+      btns.forEach(function(b) { b.classList.remove('active'); });
+      group.querySelectorAll('.tab-panel').forEach(function(p) {
+        p.classList.toggle('active', p.getAttribute('data-panel') === idx);
+      });
+      btn.classList.add('active');
+    });
+  });
+});
+
+// Sidebar active section tracking
+var navLinks = document.querySelectorAll('.sidebar nav a');
+var sections = [];
+navLinks.forEach(function(link) {
+  var id = link.getAttribute('href');
+  if (id && id.startsWith('#')) {
+    var el = document.getElementById(id.slice(1));
+    if (el) sections.push({ id: id, el: el, link: link });
+  }
+});
+
+function updateActive() {
+  var scrollY = window.scrollY + 100;
+  var current = sections[0];
+  for (var i = 0; i < sections.length; i++) {
+    if (sections[i].el.offsetTop <= scrollY) current = sections[i];
+  }
+  navLinks.forEach(function(l) { l.classList.remove('active'); });
+  if (current) current.link.classList.add('active');
+}
+window.addEventListener('scroll', updateActive, { passive: true });
+updateActive();
+
+</script>
+</body>
+</html>

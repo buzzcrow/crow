@@ -9,11 +9,13 @@ tarpaulin-report.html
 .pixi/
 
 # ── C++ (crowtree) build artifacts ──────────────────────────────
+build/
 crowtree/build/
 crowtree/build-asan/
 crowtree/build-tsan/
 crowtree/build-bench/
 crowtree/build*/
+crowtree/Testing/
 crowtree/.cache/
 crowtree/.test-tmp/
 

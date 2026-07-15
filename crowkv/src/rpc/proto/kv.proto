@@ -109,6 +109,10 @@ message KvScanRequest {
   uint64 request_create_ms = 5;
   uint64 group_id = 6;
   ReadMode read_mode = 7;
+  // Exclusive lower bound for pagination. Empty = start from the
+  // beginning. Only keys strictly greater than `start_after` (and
+  // matching `prefix`) are returned.
+  bytes  start_after = 8;
 }
 
 message KvScanItem {

@@ -71,6 +71,7 @@ test-core = { cmd = "rm -rf test-logs && cargo test -p crowkv --all-targets", de
 test-server = { cmd = "cargo test -p crowkv-server --all-targets", depends-on = ["build"] }
 test-cli = { cmd = "cargo test -p crowkv-console-shared -p crowkv-cli --all-targets", depends-on = ["build"] }
 test-web = { cmd = "cargo test -p crowkv-web --all-targets", depends-on = ["build"] }
+test-web-ci = { cmd = "cargo test -p crowkv-web --all-targets -- --test-threads=1", depends-on = ["build"] }
 install-playwright = "cd crowkv-console/web/ui && npx playwright install chromium"
 test-ui = { cmd = "rm -rf test-logs && cargo build -p crowkv-server && export CROWKV_SERVER_BINARY=$(pwd)/target/debug/crowkv-server && cd crowkv-console/web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-web-deps"] }
 test = { cmd = '''
@@ -91,7 +92,7 @@ pixi run test-ct
 pixi run test-core
 pixi run test-server
 pixi run test-cli
-pixi run test-web
+pixi run test-web-ci
 pixi run test-ui
 '
 ''', depends-on = ["build", "install-web-deps"] }
@@ -99,7 +100,7 @@ pixi run test-ui
 # ── Coverage & LOC ───────────────────────────────────────────────
 install-tarpaulin = "cargo install cargo-tarpaulin || echo 'Warning: cargo-tarpaulin install failed (expected on macOS)'"
 coverage = { cmd = "cargo tarpaulin --workspace --out Html --output-dir target/coverage --exclude-files '*/tests/*'", depends-on = ["install-tarpaulin"] }
-loc = "tokei --exclude swagger-ui --exclude 'crowtree/build-*' --exclude target --exclude dist --exclude node_modules"
+loc = "tokei --exclude swagger-ui --exclude 'crowtree/build-*' --exclude target --exclude dist --exclude node_modules --exclude 'doc/user-manual/*.html' --exclude 'doc/user-manual/*.py'"
 
 # ── Clean ────────────────────────────────────────────────────────
 clean = { cmd = '''

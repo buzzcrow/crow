@@ -14,30 +14,28 @@ test.describe('E2E-09 KV put/get', () => {
 
     try {
       await page.goto('/');
-      await page.getByRole('button', { name: 'Logical' }).click();
-      const aside = page.locator('aside').first();
-      await expect(aside.getByText('G-990', { exact: true })).toBeVisible({ timeout: 20_000 });
-      await aside.getByText('G-990', { exact: true }).click();
+      await page.getByRole('button', { name: 'KV' }).click();
 
-      const inspector = page.locator('aside[aria-label="Entity inspector"]');
-      await inspector.getByRole('tab', { name: 'KV' }).click();
+      // Select store 99 and group 990
+      await page.getByLabel('Store').selectOption('99');
+      await page.getByLabel('Group').selectOption('990');
 
-      await inspector.getByRole('button', { name: 'Put' }).first().click();
-      await inspector.getByPlaceholder('Key').fill('e2e-key-9');
-      await inspector.getByPlaceholder('Value').fill('e2e-value-9');
+      // Put
+      await page.getByPlaceholder('Key').fill('e2e-key-9');
+      await page.getByPlaceholder('Value').fill('e2e-value-9');
       const putResponsePromise = page.waitForResponse((response) => response.url().includes('/kv/put'));
-      await inspector.getByRole('button', { name: 'Put' }).last().click();
+      await page.getByRole('button', { name: /^Put$/ }).click();
       const putResponse = await putResponsePromise;
       expect(putResponse.ok(), await putResponse.text()).toBeTruthy();
       await expect(page.getByText(/Key written: "e2e-key-9"/)).toBeVisible({ timeout: 30_000 });
 
-      await inspector.getByRole('button', { name: 'Get' }).first().click();
-      await inspector.getByPlaceholder('Key to get').fill('e2e-key-9');
+      // Get
+      await page.getByPlaceholder('Key').fill('e2e-key-9');
       const getResponsePromise = page.waitForResponse((response) => response.url().includes('/kv/get'));
-      await inspector.getByRole('button', { name: 'Get' }).last().click();
+      await page.getByRole('button', { name: /^Get$/ }).click();
       const getResponse = await getResponsePromise;
       expect(getResponse.ok(), await getResponse.text()).toBeTruthy();
-      await expect(inspector.getByText('e2e-value-9')).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByText('e2e-value-9')).toBeVisible({ timeout: 30_000 });
     } finally {
       await stopNodeServer(baseURL!, 'n9');
     }

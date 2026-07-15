@@ -62,6 +62,31 @@ impl KvResponse {
         }
     }
 
+    /// Successful read returning `value` with the per-key write slot as
+    /// `revision`. Used by `kv_get` hits when the engine reports the slot
+    /// at which the key was last written.
+    #[must_use]
+    pub fn ok_value_with_revision(
+        value: Vec<u8>,
+        revision: u64,
+        request_id: u64,
+        request_create_ms: u64,
+    ) -> Self {
+        Self {
+            version: Self::VERSION,
+            ok: true,
+            revision,
+            error: String::new(),
+            not_found: false,
+            not_leader_hint: String::new(),
+            request_id,
+            request_create_ms,
+            value,
+            read_slot: 0,
+            safe_slot: 0,
+        }
+    }
+
     /// Read miss — key absent in the local learner store.
     #[must_use]
     pub fn not_found(request_id: u64, request_create_ms: u64) -> Self {
