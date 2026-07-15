@@ -18,8 +18,9 @@ doc_index.md            (table of contents for all docs below)
 requirement.md
     └── design/design-xxx.md
 working/
-    ├── plan-<topic>.md     (task plans, deleted after merge)
-    └── new_requirements.md (implementation backlog)
+    ├── plan-<topic>.md      (task plans, deleted after merge)
+    ├── design-<topic>.md    (design drafts, deleted after merge)
+    └── new_requirements.md  (implementation backlog)
 ```
 
 ## Naming
@@ -29,9 +30,10 @@ Sub-design topics: `lowercase-kebab-case`. Examples: `design/design-wal.md`, `de
 ## Working Docs (`doc/working/`)
 
 - `doc/working/plan-<topic>.md` — task plans with checkboxes, file-level changes, dependency ordering.
+- `doc/working/design-<topic>.md` — design drafts created during requirement implementation, folded into formal design docs and deleted after merge.
 - `doc/working/new_requirements.md` — forward-looking implementation backlog.
-- Create when starting a new effort; delete when the effort is complete (after PR merge). Do not leave fully-completed plan docs in the repo.
-- Update `doc/doc_index.md` when adding or removing working docs.
+- Create when starting a new effort; delete when the effort is complete (after PR merge). Do not leave fully-completed plan or design-draft docs in the repo.
+- Do NOT add temporary working docs to `doc/doc_index.md` — the index only tracks long-lived, permanent documentation.
 
 ## Core Rules
 
@@ -40,5 +42,5 @@ Sub-design topics: `lowercase-kebab-case`. Examples: `design/design-wal.md`, `de
 3. **Single source of truth** — requirements in `requirement.md`, design in `design/design-xxx.md`.
 4. **Traceability** — every doc links upstream via section anchors.
 5. **Sub-topic split** — when a design topic exceeds ~200 lines or has independent phases, create `design/design-xxx.md` and add a row to `doc_index.md`.
-6. **Working doc hygiene** — delete `doc/working/plan-<topic>.md` when the effort is complete (and remove from `doc_index.md`).
+6. **Working doc hygiene** — delete `doc/working/plan-<topic>.md` and `doc/working/design-<topic>.md` when the effort is complete. Do not add temporary working docs to `doc_index.md`.
 7. **Raw-readable formatting** — docs are read as raw markdown most times, not rendered. Avoid tables; use definition lists (`- **term**: description`) or nested bullets instead. Tables are only acceptable in `doc_index.md`.
