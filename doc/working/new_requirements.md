@@ -11,16 +11,46 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-| ID | Title | Priority | Complexity | Blocked by | Area |
-| --- | --- | --- | --- | --- | --- |
-| R1 | Track revision for reads | Medium | Low | — | crowkv consensus |
-| R2 | Persistent node config | Medium | Medium | — | crowkv-server |
-| R3 | Zero-copy FFI write path | Low | Medium | — | crowtree FFI |
-| R4 | Bounded memory pool | Low | Medium | — | crowtree engine |
-| R5 | RDMA-pinned allocation | Low | Low (placeholder) | RDMA backend | crowtree engine |
-| R6 | Cross-thread EpochManager::Guard | Low | High | — | crowtree engine |
-| R7 | KV panel in UI | Unprioritized | Medium | — | console web UI |
-| R8 | Metrics module + time-based logs | Unprioritized | Medium | — | crowkv observability |
+### Medium Priority
+
+**Complexity — Low:**
+- **R1** — Track revision for reads — Area: crowkv consensus — `kv_get` has no
+  monotonic revision counter, limiting linearizable read verification and
+  revision-based snapshot reads.
+
+**Complexity — Medium:**
+- **R2** — Persistent node config — Area: crowkv-server — Per-node server config
+  is not persisted; a restart relies on the console to re-push topology, making
+  standalone startup non-deterministic.
+
+### Low Priority
+
+**Complexity — Low (placeholder):**
+- **R5** — RDMA-pinned allocation — Blocked by: RDMA backend — Area: crowtree
+  engine — `buffer::allocate` seam is designed for RDMA-pinned memory but no
+  RDMA backend exists yet; placeholder only.
+
+**Complexity — Medium:**
+- **R3** — Zero-copy FFI write path — Area: crowtree FFI — `ct_apply_put` copies
+  key+value into an internal buffer; for large values this memcpy is avoidable
+  via a direct-write alloc handle.
+- **R4** — Bounded memory pool — Area: crowtree engine — `buffer::allocate` uses
+  unbounded `std::malloc`; a burst of large writes can spike RSS without
+  backpressure.
+
+**Complexity — High:**
+- **R6** — Cross-thread EpochManager::Guard — Area: crowtree engine —
+  `EpochManager::Guard` is thread-bound, forcing copies in async read handoff,
+  snapshot consistency, and stale-root GC scenarios.
+
+### Unprioritized
+
+**Complexity — Medium:**
+- **R7** — KV panel in UI — Area: console web UI — The web console has no KV
+  data panel; users cannot view or scan keys from the UI.
+- **R8** — Metrics module + time-based logs — Area: crowkv observability — No
+  structured metrics collection; operational visibility relies on ad-hoc log
+  lines.
 
 ---
 
@@ -232,40 +262,9 @@ for counter/histogram collection. Log line every N seconds with summary.
 
 ## Implementation Process
 
-Each item follows this lifecycle:
+Each item follows the lifecycle defined in the
+[`/implement-requirement` workflow](../../.devin/workflows/implement-requirement.md):
+understand → design → plan → implement → merge design → cleanup.
 
-```
-1. Understand    → Read relevant code + design docs, confirm the problem
-2. Design        → Write doc/design/design-<topic>.md
-                    - Problem statement + current behavior
-                    - Proposed approach + alternatives considered
-                    - Acceptance test plan (what tests prove it works)
-3. Plan          → Write doc/plan-<topic>.md
-                    - Task breakdown with checkboxes
-                    - File-level changes
-                    - Dependency ordering
-                    - Track progress here
-4. Implement     → Code changes per plan, run tests per acceptance criteria
-5. Merge design  → Fold the design doc into the formal design doc it belongs
-                    to (e.g. design-crowtree-engine.md, design-wal.md), following
-                    that doc's style and detail level. Delete the standalone
-                    design-<topic>.md.
-6. Cleanup       → Mark item done here, delete plan-<topic>.md
-```
-
-### Design doc style (from existing design docs)
-
-- **Problem-first**: state what's broken/missing before proposing solutions
-- **Alternatives**: list rejected approaches with rationale
-- **Code-grounded**: reference actual file paths, function names, line numbers
-- **Concise**: aim for the detail level of existing §-level content in
-  `design/design-crowtree-engine.md` or `design/design-crowtree-storage.md`
-- **Acceptance criteria**: concrete, testable conditions
-
-### Plan doc style
-
-- Task breakdown as `- [ ]` checkboxes
-- One task in progress at a time
-- File list with intended changes
-- Test checklist
-- Update `doc/doc_index.md` if a new doc is added
+After the PR is merged, all obsolete working docs (design draft, plan doc)
+must be deleted — see the workflow's Post-merge cleanup section.

@@ -17,16 +17,21 @@ description: CrowKV documentation hierarchy and conventions
 doc_index.md            (table of contents for all docs below)
 requirement.md
     └── design/design-xxx.md
+working/
+    ├── plan-<topic>.md     (task plans, deleted after merge)
+    └── new_requirements.md (implementation backlog)
 ```
 
 ## Naming
 
 Sub-design topics: `lowercase-kebab-case`. Examples: `design/design-wal.md`, `design/design-paxos.md`.
 
-## Temporary TODO Docs
+## Working Docs (`doc/working/`)
 
-- `todo_plan.md` — tracks unfinished planning tasks.
-- Create when tracking multiple related tasks; mark complete when done; delete when all complete. Do not leave empty or fully-completed TODO files in the repo.
+- `doc/working/plan-<topic>.md` — task plans with checkboxes, file-level changes, dependency ordering.
+- `doc/working/new_requirements.md` — forward-looking implementation backlog.
+- Create when starting a new effort; delete when the effort is complete (after PR merge). Do not leave fully-completed plan docs in the repo.
+- Update `doc/doc_index.md` when adding or removing working docs.
 
 ## Core Rules
 
@@ -35,5 +40,5 @@ Sub-design topics: `lowercase-kebab-case`. Examples: `design/design-wal.md`, `de
 3. **Single source of truth** — requirements in `requirement.md`, design in `design/design-xxx.md`.
 4. **Traceability** — every doc links upstream via section anchors.
 5. **Sub-topic split** — when a design topic exceeds ~200 lines or has independent phases, create `design/design-xxx.md` and add a row to `doc_index.md`.
-6. **TODO hygiene** — delete `todo_plan.md` when all tasks complete (and remove from `doc_index.md`).
+6. **Working doc hygiene** — delete `doc/working/plan-<topic>.md` when the effort is complete (and remove from `doc_index.md`).
 7. **Raw-readable formatting** — docs are read as raw markdown most times, not rendered. Avoid tables; use definition lists (`- **term**: description`) or nested bullets instead. Tables are only acceptable in `doc_index.md`.
