@@ -16,7 +16,7 @@ doc only when a task touches a topic in its row. Line counts are approximate
 | `plan-test.md` | ~30 | Unfinished test task backlog with checkboxes. Read when picking the next test to implement. |
 | `plan-demo.md` | ~80 | Demo recording plan: cluster lifecycle GIF, KV operations GIF, failover GIF. Read when recording README demos. |
 | `procedures.md` | ~450 | Operator-facing procedures for a standard CrowKV cluster: bootstrap, rolling upgrade, node replacement, replica add/remove, quorum-loss handling, health checks, backup, full API reference. Uses `crowkv-server` and the console HTTP API as examples. |
-| `todo_code.md` | ~50 | Forward-looking code-level TODO backlog (open implementation items, blocked/deferred work with rationale). Read before picking up crowtree/crowkv follow-up work. |
+| `new_requirements.md` | ~150 | Forward-looking implementation backlog with priority/complexity analysis and implementation process. Read before picking up crowtree/crowkv follow-up work. |
 
 ## Project Files (repo root)
 
