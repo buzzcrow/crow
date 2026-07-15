@@ -100,7 +100,7 @@ pixi run test-ui
 # ── Coverage & LOC ───────────────────────────────────────────────
 install-tarpaulin = "cargo install cargo-tarpaulin || echo 'Warning: cargo-tarpaulin install failed (expected on macOS)'"
 coverage = { cmd = "cargo tarpaulin --workspace --out Html --output-dir target/coverage --exclude-files '*/tests/*'", depends-on = ["install-tarpaulin"] }
-loc = "tokei --exclude swagger-ui --exclude 'crowtree/build-*' --exclude target --exclude dist --exclude node_modules"
+loc = "tokei --exclude swagger-ui --exclude 'crowtree/build-*' --exclude target --exclude dist --exclude node_modules --exclude 'doc/user-manual/*.html' --exclude 'doc/user-manual/*.py'"
 
 # ── Clean ────────────────────────────────────────────────────────
 clean = { cmd = '''

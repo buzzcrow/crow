@@ -36,6 +36,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
   const [scanLoading, setScanLoading] = useState(false);
   const [scanCursors, setScanCursors] = useState<Map<string, { lastKey: string; truncated: boolean }>>(new Map());
   const [loadingMore, setLoadingMore] = useState(false);
+  const [autoScanned, setAutoScanned] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const [getKey, setGetKey] = useState('');
@@ -48,10 +49,10 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
   const [putLoading, setPutLoading] = useState(false);
 
   const [deleteKey, setDeleteKey] = useState('');
-  const [confirmDelete, setConfirmDelete] = useState<{ count: number; keys: string[]; onConfirm: () => Promise<void> } | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{ count: number; displayCount?: string; keys: string[]; onConfirm: () => Promise<void> } | null>(null);
   const [deleteLoading, setDeleteLoading] = useState(false);
 
-  const [demoCount, setDemoCount] = useState(100);
+  const [demoCount, setDemoCount] = useState(20);
   const [demoLoading, setDemoLoading] = useState(false);
 
   const groupsInStore = useMemo(() => {
@@ -92,6 +93,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
     setStoreId(sid);
     setGroupId('');
     setScanRows([]);
+    setAutoScanned(false);
     setGetResult(null);
     setErrorMsg(null);
   }, []);
@@ -99,6 +101,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
   const handleGroupChange = useCallback((gid: string) => {
     setGroupId(gid);
     setScanRows([]);
+    setAutoScanned(false);
     setGetResult(null);
     setErrorMsg(null);
   }, []);
@@ -146,6 +149,13 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
       setScanLoading(false);
     }
   }, [storeId, groupId, scanPrefix, groupIdsInStore, targetLabel, log, success, error, scanRows.length]);
+
+  useEffect(() => {
+    if (storeId && groupId && !autoScanned && !scanLoading && scanRows.length === 0) {
+      setAutoScanned(true);
+      handleScan();
+    }
+  }, [storeId, groupId, autoScanned, scanLoading, scanRows.length, handleScan]);
 
   const handleLoadMore = useCallback(async () => {
     if (!storeId || !groupId || scanCursors.size === 0) return;
@@ -348,26 +358,82 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
   const handleDemoDelete = useCallback(async () => {
     if (!storeId || !groupId) return;
     const gids = groupId === ALL_GROUPS ? groupIdsInStore : [groupId];
+    const DEMO_SCAN_LIMIT = 1000;
+    const DELETE_CONCURRENCY = 16;
+
+    const cursors = new Map<string, string | undefined>();
+    gids.forEach((gid) => cursors.set(gid, undefined));
     const allKeys: { key: string; gid: string }[] = [];
-    for (const gid of gids) {
-      const result = await kvScan(storeId, gid, 'demo_');
-      allKeys.push(...result.items.map((item) => ({ key: item.key_utf8, gid })));
+    let mayHaveMore = false;
+    for (;;) {
+      let anyTruncated = false;
+      for (const gid of gids) {
+        const sa = cursors.get(gid);
+        const result = await kvScan(storeId, gid, 'demo_', 500, sa);
+        allKeys.push(...result.items.map((item) => ({ key: item.key_utf8, gid })));
+        if (result.truncated && result.items.length > 0) {
+          cursors.set(gid, result.items[result.items.length - 1].key_utf8);
+          anyTruncated = true;
+        } else {
+          cursors.set(gid, undefined);
+        }
+      }
+      if (allKeys.length >= DEMO_SCAN_LIMIT) { mayHaveMore = anyTruncated; break; }
+      if (!anyTruncated) break;
     }
+
     if (allKeys.length === 0) {
       success('No demo keys found');
       return;
     }
-    setConfirmDelete({ count: allKeys.length, keys: allKeys.map((k) => k.key), onConfirm: async () => {
+
+    const displayCount = mayHaveMore ? `${allKeys.length}+` : String(allKeys.length);
+    setConfirmDelete({ count: allKeys.length, displayCount, keys: allKeys.slice(0, 10).map((k) => k.key), onConfirm: async () => {
       setDemoLoading(true);
       let ok = 0, fail = 0;
-      for (const { key, gid } of allKeys) {
-        try {
-          await kvDelete(storeId, gid, { key });
-          ok++;
-        } catch {
-          fail++;
+
+      const parallelDelete = async (keys: { key: string; gid: string }[]) => {
+        let idx = 0;
+        const workers = Array.from({ length: Math.min(DELETE_CONCURRENCY, keys.length) }, async () => {
+          while (idx < keys.length) {
+            const { key, gid } = keys[idx++];
+            try {
+              await kvDelete(storeId, gid, { key });
+              ok++;
+            } catch {
+              fail++;
+            }
+          }
+        });
+        await Promise.all(workers);
+      };
+
+      await parallelDelete(allKeys);
+
+      if (mayHaveMore) {
+        const done = new Set<string>();
+        for (;;) {
+          let anyTruncated = false;
+          const batch: { key: string; gid: string }[] = [];
+          for (const gid of gids) {
+            if (done.has(gid)) continue;
+            const sa = cursors.get(gid);
+            if (sa === undefined) { done.add(gid); continue; }
+            const result = await kvScan(storeId, gid, 'demo_', 500, sa);
+            batch.push(...result.items.map((item) => ({ key: item.key_utf8, gid })));
+            if (result.truncated && result.items.length > 0) {
+              cursors.set(gid, result.items[result.items.length - 1].key_utf8);
+              anyTruncated = true;
+            } else {
+              done.add(gid);
+            }
+          }
+          if (batch.length === 0) break;
+          await parallelDelete(batch);
+          if (!anyTruncated) break;
         }
       }
+
       log({ action: 'Demo Delete All', target: targetLabel, status: fail > 0 ? 'Failed' : 'Success', message: `${ok} deleted, ${fail} failed` });
       success(`Deleted ${ok} demo keys${fail > 0 ? `, ${fail} failed` : ''}`);
       setDemoLoading(false);
@@ -683,8 +749,8 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
       <Dialog
         isOpen={confirmDelete !== null}
         onClose={() => setConfirmDelete(null)}
-        title={`Delete ${confirmDelete?.count || 0} key(s)`}
-        description={`Delete ${confirmDelete?.count || 0} key(s) from ${targetLabel}? This cannot be undone.`}
+        title={`Delete ${confirmDelete?.displayCount || confirmDelete?.count || 0} key(s)`}
+        description={`Delete ${confirmDelete?.displayCount || confirmDelete?.count || 0} key(s) from ${targetLabel}? This cannot be undone.`}
         confirmLabel="Delete"
         destructive
         onConfirm={async () => {

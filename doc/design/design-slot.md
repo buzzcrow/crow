@@ -3,8 +3,8 @@
 
 # CrowKV - Design: Slots — Parallel Pipelining & Concurrent Slot List
 
-Depends on: [`requirement.md`](../requirement.md), [`design.md`](../design.md)
-Satisfies: [requirement.md §6.5](../requirement.md#65-parallel-slot-linearizability-analysis), [requirement.md §7.3](../requirement.md#73-parallel-slot-processing), [`requirement.md`](../requirement.md) §5.1 (high-concurrency log)
+Depends on: [`design.md`](design.md), [`design.md`](design.md)
+Satisfies: design.md §6.5](design.md), design.md §7.3](design.md), [`design.md`](design.md) §5.1 (high-concurrency log)
 
 This document covers two aspects of CrowKV's slot mechanism:
 
@@ -49,14 +49,14 @@ CrowKV exploits this by running many slots in parallel on the leader. Throughput
 - **Gaps.** A slot may remain undecided long after later slots are decided. We need a mechanism to resolve gaps without stalling the hot path.
 - **Conservative cross-key reads.** A `Scan` must wait for a no-gap prefix; point reads do not.
 
-The blind-ops premise from [requirement.md §5.2](../requirement.md#52-operations) makes the trade-off cheap: out-of-order *apply* is safe because no operation reads before writing.
+The blind-ops premise from design.md §5.2](design.md) makes the trade-off cheap: out-of-order *apply* is safe because no operation reads before writing.
 
 ---
 
 ## 2. Concepts and Invariants
 
 - **I1 — Single slot counter.** On a leader, slot assignment is performed by exactly one logical worker. Two writes never receive the same slot, and no two slots are assigned out of arrival order.
-- **I2 — Slot determines linearization.** The slot number assigned to an op is the op's position in the global linearization order ([requirement.md §6.1](../requirement.md#61-write-guarantee)).
+- **I2 — Slot determines linearization.** The slot number assigned to an op is the op's position in the global linearization order (design.md §6.1](design.md)).
 - **I3 — Quorum-fsync before ack.** A client write is acked only after a quorum of acceptors (including the leader) have fsynced their `Accepted(slot, ballot, value)` records. This is the durability hook that makes I2 robust to failures.
 - **I4 — Apply-order independence for blind ops.** For any key *k*, the engine's final value is `value(max{ slot | slot writes k })`. Apply order between non-overlapping keys is irrelevant; for the same key, the higher slot wins regardless of arrival order ([§13](#13-correctness-analysis-for-parallel-slot-writes-moved-from-requirementmd-731)).
 - **I5 — Per-key resolved-slot is monotone.** A learner's per-key tracker only ever advances. This is the basis for read-your-writes from followers.
@@ -74,7 +74,7 @@ The blind-ops premise from [requirement.md §5.2](../requirement.md#52-operation
 | `Applied` | learner.apply() returned | terminal | Used by metrics; safe to evict |
 | `OrphanRepair` | leader changed before reaching `Chosen`; repair task takes over | `Chosen` (via repair) | New leader's responsibility |
 
-**When does the ack happen?** When the slot reaches `Chosen` *and* the leader's own learner has applied it. The leader's own learner application is required so that an immediately-following `Get` on the leader sees the new value (see [§6.1 of design.md](../design.md#61-linearizable-leader-read)).
+**When does the ack happen?** When the slot reaches `Chosen` *and* the leader's own learner has applied it. The leader's own learner application is required so that an immediately-following `Get` on the leader sees the new value (see [§6.1 of design.md](design.md#61-linearizable-leader-read)).
 
 **Eviction.** Once a slot's record is `Applied` *and* its slot number is below the safe-slot, it can be dropped from the in-memory map. The WAL record stays until WAL GC catches up.
 
@@ -106,7 +106,7 @@ As soon as the leader has fsynced its own copy of slot N, it sends `Accept(N, ..
 
 Each learner maintains, per key it has applied, the highest slot that has touched that key. This enables:
 
-- **Read-your-writes** ([§6.2 of design.md](../design.md#62-read-your-writes-follower-read)): a follower can serve `Get(k, slot=N)` as soon as `resolved_slot[k] ≥ N`.
+- **Read-your-writes** ([§6.2 of design.md](design.md#62-read-your-writes-follower-read)): a follower can serve `Get(k, slot=N)` as soon as `resolved_slot[k] ≥ N`.
 - **Linearizability** ([§14](#14-parallel-slot-linearizability-analysis-moved-from-requirementmd-65)): per-key tracking makes "highest slot wins" correct under out-of-order apply.
 
 **Update rule.** On `apply(slot, batch)`: for each `(k, op, v?)` in the batch, if `slot > resolved_slot[k]`, update `resolved_slot[k] = slot` and write/tombstone `v`. Otherwise drop. Then advance `max_applied` and the contiguous-applied frontier.
@@ -127,7 +127,7 @@ A peer that has never reported is treated as `0`, so the safe-slot only rises on
 
 **Propagation.** The leader includes `safe_slot` in heartbeats, write responses, read responses, and the describe-cluster RPC.
 
-`Scan(Linearizable)` uses the leader's *own* contiguous frontier rather than the safe-slot — it is strictly ≥ safe-slot at all times ([§6.4 of design.md](../design.md#64-scan-modes)).
+`Scan(Linearizable)` uses the leader's *own* contiguous frontier rather than the safe-slot — it is strictly ≥ safe-slot at all times ([§6.4 of design.md](design.md#64-scan-modes)).
 
 ---
 
@@ -244,9 +244,7 @@ The bulk Phase-1 typically resolves open gaps in a single RTT. Steady-state gaps
 
 ---
 
-## 13. Correctness Analysis for Parallel Slot Writes (moved from `requirement.md` §7.3.1)
-
-> **Moved 2026-07.** Originally in the requirements doc; relocated here as design-level correctness argument.
+## 13. Correctness Analysis for Parallel Slot Writes
 
 **Key insight:** Parallel slot writes are safe because we only support **blind operations** (`Put`, `Delete`) — no operation reads current state before writing. The final value of each key is determined solely by the highest slot that touched it.
 
@@ -259,9 +257,7 @@ This would NOT be safe for `CAS` or `Increment`, which read current state. Not s
 
 ---
 
-## 14. Parallel-Slot Linearizability Analysis (moved from `requirement.md` §6.5)
-
-> **Moved 2026-07.** Shows that linearizability is preserved under parallel consensus.
+## 14. Parallel-Slot Linearizability Analysis
 
 **Premises:** (1) Only blind ops. (2) Leader serializes slot assignment. (3) Quorum durable-flush before ack. (4) Per-key `(slot, value)` tracking, highest slot wins. (5) Leader reads fenced by lease or ReadIndex.
 

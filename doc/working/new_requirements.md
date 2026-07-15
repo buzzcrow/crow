@@ -41,8 +41,6 @@ complexity, and dependency. Before implementation, follow the
 ### Unprioritized
 
 **Complexity — Medium:**
-- **R7** — KV panel in UI — Area: console web UI — The web console has no KV
-  data panel; users cannot view or scan keys from the UI.
 - **R8** — Metrics module + time-based logs — Area: crowkv observability — No
   structured metrics collection; operational visibility relies on ad-hoc log
   lines.
@@ -198,23 +196,6 @@ token protocol design; option (b) adds per-page atomic overhead to every
   `install_snapshot()` — reader sees old or new tree, never partial.
 - Epoch reclamation stress test: concurrent readers + writers + snapshot
   swaps, no use-after-free under ASan/TSan.
-
----
-
-### R7: KV panel in UI
-
-**Problem**: The web console has no KV data panel — users cannot view/scan
-keys in a store/group from the UI.
-
-**Priority**: Unprioritized.
-
-**Complexity**: Medium — new React component, KV scan API integration,
-pagination/virtualization for large key spaces.
-
-**Files**: `crowkv-console/web/ui/src/components/`, new KV panel component.
-
-**Acceptance**: E2E test — deploy store, put keys, open KV panel, verify
-keys displayed, scan with prefix filter.
 
 ---
 
