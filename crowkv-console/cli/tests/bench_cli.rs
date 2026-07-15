@@ -25,14 +25,16 @@ async fn bench_run_write_smoke() {
     }
 
     let console = spawn_console(&upstream).await;
-    let console_url = format!("http://{console}");
+    let ip = console.ip().to_string();
+    let port = console.port();
 
     // Create store 1 / group 1 and wait for a leader before benching.
-    let (code, _, stderr) = run(&cli, &console_url, &["store", "add", "--store-id", "1"]);
+    let (code, _, stderr) = run(&cli, &ip, port, &["store", "add", "--store-id", "1"]);
     assert_eq!(code, 0, "store add stderr={stderr}");
     let (code, _, stderr) = run(
         &cli,
-        &console_url,
+        &ip,
+        port,
         &[
             "paxos",
             "add",
@@ -48,13 +50,14 @@ async fn bench_run_write_smoke() {
     );
     assert_eq!(code, 0, "paxos add stderr={stderr}");
     assert!(
-        wait_for_leader(&console_url, 1, 1, Duration::from_secs(15)).await,
+        wait_for_leader(&ip, port, 1, 1, Duration::from_secs(15)).await,
         "group 1 never elected a leader",
     );
 
     let (code, stdout, stderr) = run(
         &cli,
-        &console_url,
+        &ip,
+        port,
         &[
             "bench",
             "run",

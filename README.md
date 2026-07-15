@@ -85,14 +85,14 @@ pixi run rs-fmt     # Rust format
 pixi run rs-lint    # Rust clippy
 ```
 
-</details>
+</details> 
 
 ## Documentation
 
 The full design lives in [`doc/`](doc/). Start with:
 
-- [**Requirements**](doc/requirement.md) — what the system must do
-- [**Design**](doc/design.md) — how it works, from philosophy to module decomposition to concurrency model
+- [**Design**](doc/design/design.md) — what CrowKV is, why key choices were made, and how the system is structured
+- [**User Guide**](doc/user-manual/user-guide.md) — quick start, KV operations, cluster management, and API reference
 - [**Doc Index**](doc/doc_index.md) — a navigable map to every design doc and sub-topic
 
 ## Notes on AI-Assisted Development

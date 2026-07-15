@@ -3,8 +3,8 @@
 
 # CrowKV - Design: crowtree Storage Engine (Overview)
 
-Depends on: [`requirement.md`](../requirement.md), [`design.md`](../design.md), [`design-state-machine.md`](design-state-machine.md)
-Satisfies: [requirement.md §8.3 learner storage](../requirement.md#83-learner-storage)
+Depends on: [`design.md`](design.md), [`design.md`](design.md), [`design-state-machine.md`](design-state-machine.md)
+Satisfies: design.md §8.3 learner storage](design.md)
 
 This is the parent document for **crowtree**, the production storage engine that
 backs CrowKV learners: an embeddable, ordered key-value engine implementing the

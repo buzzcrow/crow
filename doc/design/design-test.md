@@ -242,7 +242,7 @@ Fill gaps bottom-up so a new failure is always attributable to the lowest layer:
 Every feature or component milestone includes:
 
 1. **Unit invariants** from the matching test design area (property-based or deterministic).
-2. **Failure-injection** matching [`design.md`](../design.md) §9 scenarios.
+2. **Failure-injection** matching [`design.md`](design.md) §9 scenarios.
 3. **crowbench** integration test (end-to-end correctness) once the RPC/client layer is reached.
 
 See [`plan-test.md`](../working/plan-test.md) for pending test task tracking.

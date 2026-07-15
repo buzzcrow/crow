@@ -14,13 +14,17 @@ description: CrowKV documentation hierarchy and conventions
 ## Hierarchy
 
 ```
-doc_index.md            (table of contents for all docs below)
-requirement.md
-    └── design/design-xxx.md
+doc_index.md                        (table of contents — the only file at doc root)
+design/
+    ├── design.md                   (root design: what + why + architecture)
+    └── design-xxx.md               (sub-design docs)
+user-manual/
+    ├── user-guide.md               (user guide: Web UI, CLI, REST API)
+    └── build_html.py               (MD → HTML converter with tabs)
 working/
-    ├── plan-<topic>.md      (task plans, deleted after merge)
-    ├── design-<topic>.md    (design drafts, deleted after merge)
-    └── new_requirements.md  (implementation backlog)
+    ├── plan-<topic>.md              (task plans, deleted after merge)
+    ├── design-<topic>.md            (design drafts, deleted after merge)
+    └── new_requirements.md          (implementation backlog)
 ```
 
 ## Naming
@@ -38,8 +42,8 @@ Sub-design topics: `lowercase-kebab-case`. Examples: `design/design-wal.md`, `de
 ## Core Rules
 
 1. **Index first** — read `doc_index.md` before opening any other doc; update it in the same commit when you add, rename, delete, or re-scope a doc. One row per doc, one line per `##` section.
-2. **No upstream violations** — fix `requirement.md` first if a gap is found.
-3. **Single source of truth** — requirements in `requirement.md`, design in `design/design-xxx.md`.
+2. **No upstream violations** — fix `design/design.md` first if a gap is found.
+3. **Single source of truth** — design decisions in `design/design.md`, detailed design in `design/design-xxx.md`, user operations in `user-manual/user-guide.md`.
 4. **Traceability** — every doc links upstream via section anchors.
 5. **Sub-topic split** — when a design topic exceeds ~200 lines or has independent phases, create `design/design-xxx.md` and add a row to `doc_index.md`.
 6. **Working doc hygiene** — delete `doc/working/plan-<topic>.md` and `doc/working/design-<topic>.md` when the effort is complete. Do not add temporary working docs to `doc_index.md`.

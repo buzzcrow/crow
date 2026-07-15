@@ -1,14 +1,14 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! `crowkv` CLI entrypoint.
+//! `crowkv-cli` CLI entrypoint.
 //!
 //! Every verb routes through `ConsoleClient` against a `crowkv-web`
-//! console (`--console`, default `http://127.0.0.1:9920`): the CLI is a
+//! service (`--ip` / `--port`, default `127.0.0.1:9920`): the CLI is a
 //! thin clap argument-parsing layer over the same `shared` core the Web
-//! UI uses, and the console resolves upstream `crowkv-server` nodes from
+//! UI uses, and the service resolves upstream `crowkv-server` nodes from
 //! its config and monitor cache. There is no direct `crowkv-server` /
-//! registry path; even `bench` resolves its gRPC target via the console.
+//! registry path; even `bench` resolves its gRPC target via the service.
 
 mod bench;
 mod commands;
@@ -28,22 +28,21 @@ use commands::{
 };
 
 #[derive(Parser, Debug)]
-#[command(name = "crowkv", version, about = "CrowKV cluster console (CLI)")]
+#[command(name = "crowkv-cli", version, about = "CrowKV cluster console (CLI)")]
 struct Cli {
-    /// `crowkv-web` console base URL. The CLI talks to the console,
-    /// not directly to a `crowkv-server`; the console resolves
-    /// upstream nodes from its config and the monitor cache.
-    #[arg(
-        long,
-        global = true,
-        env = "CROWKV_CONSOLE",
-        default_value = "http://127.0.0.1:9920"
-    )]
-    console: String,
+    /// Service IP address of the `crowkv-web` instance. The CLI talks
+    /// to the service, not directly to a `crowkv-server`; the service
+    /// resolves upstream nodes from its config and the monitor cache.
+    #[arg(long, global = true, env = "CROWKV_IP", default_value = "127.0.0.1")]
+    ip: String,
+
+    /// Service port of the `crowkv-web` instance.
+    #[arg(long, global = true, env = "CROWKV_PORT", default_value_t = 9920)]
+    port: u16,
 
     /// Path to the console config file. Defaults to
     /// `$CROWKV_CONSOLE_CONFIG` or `~/.crowkv/console.toml`.
-    #[arg(long, global = true, env = "CROWKV_CONSOLE_CONFIG")]
+    #[arg(short = 'p', long, global = true, env = "CROWKV_CONSOLE_CONFIG")]
     config: Option<PathBuf>,
 
     /// Emit JSON instead of human-readable output where applicable.

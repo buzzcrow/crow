@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! CLI e2e for the physical lifecycle verbs: `rack`, `node`, and
-//! `server` round-trips through `--console` against an empty,
+//! `server` round-trips through `--ip` / `--port` against an empty,
 //! temp-rooted console (local-fork server deploy).
 
 mod testkit;
@@ -27,30 +27,32 @@ async fn rack_node_server_lifecycle() {
     let server_bin = server_bin.to_string_lossy().into_owned();
 
     let (console, dir) = spawn_console_empty().await;
-    let console_url = format!("http://{console}");
+    let ip = console.ip().to_string();
+    let port = console.port();
 
     // rack add / list
     let (code, _, stderr) = run(
         &cli,
-        &console_url,
+        &ip,
+        port,
         &["rack", "add", "--id", "r1", "--name", "rack-one"],
     );
     assert_eq!(code, 0, "rack add stderr={stderr}");
-    let (code, stdout, _) = run(&cli, &console_url, &["rack", "list"]);
+    let (code, stdout, _) = run(&cli, &ip, port, &["rack", "list"]);
     assert_eq!(code, 0);
     assert!(stdout.contains("r1"), "stdout={stdout}");
 
     // node add (two local-fork nodes) / list / ping
     for node in ["n1", "n2"] {
-        let (code, _, stderr) = run(&cli, &console_url, &["node", "add", "--id", node, "--rack", "r1"]);
+        let (code, _, stderr) = run(&cli, &ip, port, &["node", "add", "--id", node, "--rack", "r1"]);
         assert_eq!(code, 0, "node add {node} stderr={stderr}");
     }
-    let (code, stdout, _) = run(&cli, &console_url, &["node", "list"]);
+    let (code, stdout, _) = run(&cli, &ip, port, &["node", "list"]);
     assert_eq!(code, 0);
     assert!(stdout.contains("n1") && stdout.contains("n2"), "stdout={stdout}");
 
     // local-fork node ping is a no-op success.
-    let (code, stdout, stderr) = run(&cli, &console_url, &["node", "ping", "n1"]);
+    let (code, stdout, stderr) = run(&cli, &ip, port, &["node", "ping", "n1"]);
     assert_eq!(code, 0, "ping stderr={stderr}");
     assert!(stdout.contains("reachable"), "stdout={stdout}");
 
@@ -60,7 +62,8 @@ async fn rack_node_server_lifecycle() {
     let grpc_port = grpc_port.to_string();
     let (code, stdout, stderr) = run(
         &cli,
-        &console_url,
+        &ip,
+        port,
         &[
             "server",
             "deploy",
@@ -77,20 +80,20 @@ async fn rack_node_server_lifecycle() {
     assert_eq!(code, 0, "server deploy stderr={stderr}");
     assert!(stdout.contains("deployed server on node n1"), "stdout={stdout}");
 
-    let (code, stdout, stderr) = run(&cli, &console_url, &["server", "list"]);
+    let (code, stdout, stderr) = run(&cli, &ip, port, &["server", "list"]);
     assert_eq!(code, 0, "server list stderr={stderr}");
     assert!(stdout.contains("n1"), "stdout={stdout}");
 
-    let (code, _, stderr) = run(&cli, &console_url, &["server", "restart", "--node", "n1"]);
+    let (code, _, stderr) = run(&cli, &ip, port, &["server", "restart", "--node", "n1"]);
     assert_eq!(code, 0, "server restart stderr={stderr}");
 
-    let (code, _, stderr) = run(&cli, &console_url, &["server", "stop", "--node", "n1"]);
+    let (code, _, stderr) = run(&cli, &ip, port, &["server", "stop", "--node", "n1"]);
     assert_eq!(code, 0, "server stop stderr={stderr}");
 
     // node remove on the server-free node succeeds.
-    let (code, _, stderr) = run(&cli, &console_url, &["node", "remove", "--id", "n2"]);
+    let (code, _, stderr) = run(&cli, &ip, port, &["node", "remove", "--id", "n2"]);
     assert_eq!(code, 0, "node remove stderr={stderr}");
-    let (code, stdout, _) = run(&cli, &console_url, &["node", "list"]);
+    let (code, stdout, _) = run(&cli, &ip, port, &["node", "list"]);
     assert_eq!(code, 0);
     assert!(!stdout.contains("n2"), "n2 should be gone: stdout={stdout}");
 

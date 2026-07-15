@@ -3,8 +3,8 @@
 
 # CrowKV - Design: State Machine
 
-Depends on: [`requirement.md`](../requirement.md), [`design.md`](../design.md)
-Satisfies: [requirement.md §8.3](../requirement.md#83-learner-storage), [requirement.md §8.4 import/export](../requirement.md#84-snapshot-and-install), implementation prerequisites of [requirement.md §14.1 crowbench `compare`](../requirement.md#141-correctness-criteria-for-crowbench)
+Depends on: [`design.md`](design.md), [`design.md`](design.md)
+Satisfies: design.md §8.3](design.md), design.md §8.4 import/export](design.md), implementation prerequisites of design.md §14.1 crowbench `compare`](design.md)
 
 This document specifies the storage engine abstraction used by CrowKV learners. The engine is the **only** consumer of consensus output; it owns the materialized key-value state and serves all reads. The WAL is the durable log; the engine is the materialized projection.
 
@@ -125,7 +125,7 @@ CrowKV does not provide repeatable reads or time-travel queries. Snapshot reads 
 
 `Scan(AtSlot(N))` returns the engine state *after* applying everything up through the contiguous-applied frontier of the serving replica, which the replica advances to ≥ `N` before serving. If a slot `M > N` has already been applied for some key `k`, the value returned for `k` is the value at `M`, not the value at `N`. This still satisfies linearizability: slot `M` linearizes after slot `N`, so the read at "logical instant `N`" is consistent with reading at the later linearization point `M` — both are valid linearization points for a single point in real time. `AtSlot(N)` is therefore a *lower bound on freshness*, not a snapshot pin: single-version reads always reflect the latest applied value.
 
-If true historical snapshots are ever required, MVCC is a future extension. The single-version restriction comes from [requirement.md §1 / §5.2](../requirement.md#5-data-model-and-client-api).
+If true historical snapshots are ever required, MVCC is a future extension. The single-version restriction comes from design.md §1 / §5.2](design.md).
 
 ### 3.3 Resolved-slot is monotone per key
 
@@ -205,7 +205,7 @@ This minimal surface keeps multi-engine compatibility easy.
 
 ### 6.1 Purpose
 
-Snapshot install ([§8.4 of design.md](../design.md#84-snapshot-and-install)) is the bootstrap path for new or far-lagging members. The engine provides export/import primitives that the snapshot module wraps in a chunked, resumable, throttled transfer.
+Snapshot install ([§8.4 of design.md](design.md#84-snapshot-and-install)) is the bootstrap path for new or far-lagging members. The engine provides export/import primitives that the snapshot module wraps in a chunked, resumable, throttled transfer.
 
 In addition to peer transfer, the engine uses snapshot export to persist its own state locally (see §2.1). The local snapshot file stores the KV state and `last_applied_slot`, enabling fast restart without re-applying the entire WAL.
 
@@ -276,7 +276,7 @@ When a key `k` is overwritten with a higher slot value, the old value is immedia
 
 ## 8. Compare for Cross-Learner Validation
 
-A `compare(other) -> diff` operation is required so that `crowbench` can verify state equality across learners after a test run ([requirement.md §14.1](../requirement.md#141-correctness-criteria-for-crowbench)).
+A `compare(other) -> diff` operation is required so that `crowbench` can verify state equality across learners after a test run (design.md §14.1](design.md)).
 
 ### 8.1 Semantics
 
@@ -348,4 +348,4 @@ The trait surface is engine-agnostic; switching engines is a configuration choic
 - Manual debugging or operations exercises → ordered file.
 - Production → crowtree.
 
-**Per-key memory cost considerations:** the per-key resolved-slot adds 8 bytes per live key. For 10⁹ live keys this is 8 GiB on every learner, accepted in the requirement ([§7.3.1](../requirement.md#731-correctness-analysis-for-parallel-slot-writes)). If memory pressure dictates, a future optimization could compress recently-applied resolved-slots into a "below safe-slot" bit (a single bit replacing the 8 bytes when the per-key slot is no longer needed for read-your-writes).
+**Per-key memory cost considerations:** the per-key resolved-slot adds 8 bytes per live key. For 10⁹ live keys this is 8 GiB on every learner, accepted in the requirement ([§7.3.1](design.md)). If memory pressure dictates, a future optimization could compress recently-applied resolved-slots into a "below safe-slot" bit (a single bit replacing the 8 bytes when the per-key slot is no longer needed for read-your-writes).
