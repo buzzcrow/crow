@@ -204,11 +204,11 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
   }, [deleteKey, storeId, groupId, autoScan, log, success, error, handleScan]);
 
   const handleDeletePrefix = useCallback(async () => {
-    if (!scanPrefix || !storeId || !groupId) return;
+    if (!deleteKey || !storeId || !groupId) return;
     const gids = groupId === ALL_GROUPS ? groupIdsInStore : [groupId];
     const allKeys: { key: string; gid: string }[] = [];
     for (const gid of gids) {
-      const result = await kvScan(storeId, gid, scanPrefix);
+      const result = await kvScan(storeId, gid, deleteKey);
       allKeys.push(...result.items.map((item) => ({ key: item.key_utf8, gid })));
     }
     if (allKeys.length === 0) {
@@ -231,7 +231,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
       setDeleteLoading(false);
       setTimeout(() => handleScan(), 100);
     }});
-  }, [scanPrefix, storeId, groupId, groupIdsInStore, targetLabel, log, success, handleScan]);
+  }, [deleteKey, storeId, groupId, groupIdsInStore, targetLabel, log, success, handleScan]);
 
   const selectedRows = scanRows.filter((r) => r.selected);
   const handleDeleteSelected = useCallback(async () => {
@@ -505,8 +505,9 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
               </button>
               <button
                 onClick={handleDeletePrefix}
-                disabled={deleteLoading || !scanPrefix}
+                disabled={deleteLoading || !deleteKey}
                 className="tw-flex tw-items-center tw-gap-1 tw-px-2 tw-py-1 tw-border tw-border-failed/30 tw-text-failed tw-rounded tw-text-xs hover:tw-bg-failed/10 disabled:tw-opacity-50"
+                title="Delete all keys matching the prefix in the Key field"
               >
                 Delete Prefix
               </button>

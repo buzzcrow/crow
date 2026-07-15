@@ -119,9 +119,9 @@ function TreeNodeComponent({
           {node.label}
         </button>
 
-        <div className="tw-flex tw-items-center tw-gap-1 tw-flex-shrink-0">
-          {node.role && <RoleBadge role={node.role} size="sm" />}
-          {node.health && <HealthBadge status={node.health} size="sm" />}
+        <div className="tw-flex tw-items-center tw-gap-0.5 tw-flex-shrink-0">
+          {node.role && <RoleBadge role={node.role} size="sm" compact />}
+          {node.health && <HealthBadge status={node.health} size="sm" compact />}
         </div>
       </div>
 
