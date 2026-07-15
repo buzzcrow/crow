@@ -1,12 +1,14 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-import { RefreshCw, Layers, Network, FileJson } from 'lucide-react';
+import { RefreshCw, Layers, Network, FileJson, Database } from 'lucide-react';
 import { useViewMode } from '../contexts/ViewModeContext';
 import { ViewMode } from '../types';
 import { cn } from '../utils/cn';
 
 export type ClusterHealth = 'Healthy' | 'Degraded' | 'Failed' | 'Unknown';
+
+export type CenterPanelMode = 'topology' | 'swagger' | 'kv';
 
 interface HeaderProps {
   clusterHealth: ClusterHealth;
@@ -16,6 +18,9 @@ interface HeaderProps {
   swaggerActive?: boolean;
   onToggleSwagger?: () => void;
   showSwagger?: boolean;
+  showKV?: boolean;
+  kvActive?: boolean;
+  onToggleKV?: () => void;
 }
 
 const healthPill: Record<ClusterHealth, string> = {
@@ -40,6 +45,9 @@ export function Header({
   swaggerActive,
   onToggleSwagger,
   showSwagger = true,
+  showKV = false,
+  kvActive = false,
+  onToggleKV,
 }: HeaderProps) {
   const { viewMode, setViewMode } = useViewMode();
 
@@ -104,6 +112,23 @@ export function Header({
           title={apiTargetNodeId ? `Show API for ${apiTargetNodeId}` : 'No node available for API'}
         >
           <FileJson className="tw-h-3.5 tw-w-3.5" /> API
+        </button>
+      )}
+
+      {/* KV operator toggle */}
+      {showKV && onToggleKV && (
+        <button
+          onClick={onToggleKV}
+          className={cn(
+            'tw-flex tw-items-center tw-gap-1.5 tw-px-2.5 tw-py-1.5 tw-rounded-md tw-text-xs tw-border tw-transition-colors',
+            kvActive
+              ? 'tw-bg-accent/15 tw-text-accent tw-border-accent/30'
+              : 'tw-text-muted tw-border-border hover:tw-bg-bg',
+          )}
+          aria-pressed={kvActive}
+          title="KV operator panel"
+        >
+          <Database className="tw-h-3.5 tw-w-3.5" /> KV
         </button>
       )}
 
