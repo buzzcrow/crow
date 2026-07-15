@@ -279,9 +279,10 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
     setDemoLoading(true);
     setErrorMsg(null);
     let ok = 0, fail = 0;
+    const batch = Math.random().toString(36).substring(2, 6);
     for (let i = 1; i <= demoCount; i++) {
-      const key = `demo_key_${String(i).padStart(4, '0')}`;
-      const value = `demo_val_${String(i).padStart(4, '0')}`;
+      const key = `demo_key_${batch}_${String(i).padStart(4, '0')}`;
+      const value = `demo_val_${batch}_${String(i).padStart(4, '0')}`;
       const gid = gids[Math.floor(Math.random() * gids.length)];
       try {
         await kvPut(storeId, gid, { key, value });
