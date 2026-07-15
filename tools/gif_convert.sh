@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Convert a screen recording to an optimized GIF for README embedding.
+#
+# Near-duplicate frames are automatically dropped (mpdecimate), so you can
+# record slowly — static periods are skipped, only motion changes are kept.
+#
+# Usage:
+#   tools/gif_convert.sh <input.mov> <output.gif> [width] [fps]
+#
+# Defaults: width=800, fps=10
+# Requires: ffmpeg (install via `brew install ffmpeg` or `pixi install ffmpeg`)
+
+set -euo pipefail
+
+if [[ $# -lt 2 ]]; then
+    echo "Usage: $0 <input.mov> <output.gif> [width] [fps]"
+    echo "  width  — target width in pixels (default: 800)"
+    echo "  fps    — frames per second (default: 10)"
+    exit 1
+fi
+
+INPUT="$1"
+OUTPUT="$2"
+WIDTH="${3:-800}"
+FPS="${4:-10}"
+
+if [[ ! -f "$INPUT" ]]; then
+    echo "error: input file not found: $INPUT"
+    exit 1
+fi
+
+if ! command -v ffmpeg &>/dev/null; then
+    echo "error: ffmpeg not found. Install with: brew install ffmpeg"
+    exit 1
+fi
+
+PALETTE=$(mktemp /tmp/palette_XXXXXX.png)
+
+cleanup() { rm -f "$PALETTE"; }
+trap cleanup EXIT
+
+# Step 1: generate a custom palette for better color quality
+#          (mpdecimate drops near-duplicate frames before palette sampling)
+ffmpeg -v error -i "$INPUT" \
+    -vf "fps=$FPS,scale=$WIDTH:-1:flags=lanczos,mpdecimate=hi=64*12:lo=64*5:frac=0.33,palettegen=stats_mode=diff" \
+    "$PALETTE"
+
+# Step 2: convert using the palette
+#          mpdecimate removes static frames; paletteuse diff_mode stores only
+#          changed regions per frame → small GIF even from a slow recording
+ffmpeg -v error -i "$INPUT" -i "$PALETTE" \
+    -lavfi "fps=$FPS,scale=$WIDTH:-1:flags=lanczos,mpdecimate=hi=64*12:lo=64*5:frac=0.33 [x]; [x][1:v] paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle" \
+    -loop 0 \
+    "$OUTPUT"
+
+SIZE=$(du -h "$OUTPUT" | cut -f1)
+echo "wrote $OUTPUT ($SIZE, ${WIDTH}px, ${FPS}fps)"
