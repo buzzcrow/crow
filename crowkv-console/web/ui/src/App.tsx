@@ -3,6 +3,7 @@
 
 import { Suspense, useState, useCallback, useMemo, lazy, useEffect } from 'react';
 import { Server, Database, Plus, Trash2, Activity, RotateCw, Square } from 'lucide-react';
+import type { CenterPanelMode } from './shell/Header';
 import { ViewModeProvider, useViewMode } from './contexts/ViewModeContext';
 import { SelectionProvider, useSelection } from './contexts/SelectionContext';
 import { ToastProvider, useToast } from './contexts/ToastContext';
@@ -46,6 +47,7 @@ const TopologyCanvas = lazy(() =>
 );
 const Inspector = lazy(() => import('./shell/Inspector').then((m) => ({ default: m.Inspector })));
 const SwaggerPanel = lazy(() => import('./panels/SwaggerPanel').then((m) => ({ default: m.SwaggerPanel })));
+const KvOperatorPanel = lazy(() => import('./panels/KvOperatorPanel').then((m) => ({ default: m.KvOperatorPanel })));
 
 export interface CrowkvConsoleProps {
   /** API prefix for all backend calls (default "/api"). */
@@ -81,7 +83,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
   const [rememberedDeployPorts, setRememberedDeployPorts] = useState<{ mgmt: number[]; grpc: number[] }>({ mgmt: [], grpc: [] });
   const [lastRefreshTime, setLastRefreshTime] = useState<Date>(new Date());
   const [refreshing, setRefreshing] = useState(false);
-  const [showSwagger, setShowSwagger] = useState(false);
+  const [centerPanel, setCenterPanel] = useState<CenterPanelMode>('topology');
   const [sidebarWidth, setSidebarWidth] = useState(350);
   const [inspectorWidth, setInspectorWidth] = useState(320);
   const [resizing, setResizing] = useState<'left' | 'right' | null>(null);
@@ -348,6 +350,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
   const closeDialogs = useCallback(() => setDialog({}), []);
 
   const swaggerEnabled = modules?.swagger !== false;
+  const kvEnabled = modules?.kv !== false;
 
   const rackIds = useMemo(() => racks.map((r) => r.id), [racks]);
   const nodeIds = useMemo(() => nodes.map((n) => n.id), [nodes]);
@@ -471,8 +474,11 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
         refreshing={refreshing}
         apiTargetNodeId={apiTargetNodeId}
         showSwagger={swaggerEnabled}
-        swaggerActive={showSwagger}
-        onToggleSwagger={() => setShowSwagger((v) => !v)}
+        swaggerActive={centerPanel === 'swagger'}
+        onToggleSwagger={() => setCenterPanel((p) => (p === 'swagger' ? 'topology' : 'swagger'))}
+        showKV={kvEnabled}
+        kvActive={centerPanel === 'kv'}
+        onToggleKV={() => setCenterPanel((p) => (p === 'kv' ? 'topology' : 'kv'))}
       />
 
       {dataError && (
@@ -513,8 +519,10 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
         }}
       >
         <Suspense fallback={<BodyFallback />}>
-          {showSwagger && swaggerEnabled ? (
+          {centerPanel === 'swagger' && swaggerEnabled ? (
             <SwaggerPanel nodeId={apiTargetNodeId} apiPrefix={apiPrefix} servers={servers} />
+          ) : centerPanel === 'kv' && kvEnabled ? (
+            <KvOperatorPanel stores={stores} selectedEntity={selectedEntity} readonly={readonly} />
           ) : (
             <TopologyCanvas
               racks={racks}
