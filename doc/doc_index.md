@@ -22,6 +22,8 @@ doc only when a task touches a topic in its row. Line counts are approximate
 | `doc/working/plan-test.md` | ~30 | Unfinished test task backlog with checkboxes. Read when picking the next test to implement. |
 | `doc/working/plan-demo.md` | ~80 | Demo recording plan: cluster lifecycle GIF, KV operations GIF, failover GIF. Read when recording README demos. |
 | `doc/working/new_requirements.md` | ~150 | Forward-looking implementation backlog with priority/complexity analysis and implementation process. Read before picking up crowtree/crowkv follow-up work. |
+| `doc/working/plan-revision.md` | ~25 | Task plan for R1 (track revision for reads). Read when implementing R1. |
+| `doc/working/design-revision.md` | ~60 | Design draft for R1: stamp `engine_get` slot into `KvResponse.revision`. Read when implementing R1. |
 
 ## Project Files (repo root)
 

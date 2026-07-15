@@ -14,7 +14,7 @@ Use this workflow when picking up an item from
 
 ```
 1. Understand    → Read relevant code + design docs, confirm the problem
-2. Design        → Write doc/design/design-<topic>.md
+2. Design        → Write doc/working/design-<topic>.md
                    - Problem statement + current behavior
                    - Proposed approach + alternatives considered
                    - Acceptance test plan (what tests prove it works)
@@ -27,7 +27,7 @@ Use this workflow when picking up an item from
 5. Merge design  → Fold the design doc into the formal design doc it belongs
                    to (e.g. design-crowtree-engine.md, design-wal.md), following
                    that doc's style and detail level. Delete the standalone
-                   design-<topic>.md.
+                   working/design-<topic>.md.
 6. Cleanup       → Mark item done in new_requirements.md, delete plan-<topic>.md
 ```
 
@@ -52,7 +52,7 @@ Use this workflow when picking up an item from
 
 After the Pull Request is merged:
 
-1. **Merge design doc** — fold `doc/design/design-<topic>.md` into the formal
+1. **Merge design doc** — fold `doc/working/design-<topic>.md` into the formal
    design doc it belongs to, then delete the standalone file.
 2. **Delete plan doc** — remove `doc/working/plan-<topic>.md`.
 3. **Mark item done** — check off the item in `doc/working/new_requirements.md`
@@ -60,5 +60,8 @@ After the Pull Request is merged:
 4. **Update index** — update `doc/doc_index.md` if any doc was added, renamed,
    or deleted during the process.
 5. **Remove all obsolete working docs** — delete any `doc/working/plan-<topic>.md`
-   and `doc/design/design-<topic>.md` files that were created for this item.
+   and `doc/working/design-<topic>.md` files that were created for this item.
    The `doc/working/` directory should only contain actively-tracked items.
+   Do not create standalone design docs under `doc/design/` during the
+   implementation process — that directory is reserved for formal, permanent
+   design docs only.
