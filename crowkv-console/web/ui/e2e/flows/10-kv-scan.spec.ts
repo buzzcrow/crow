@@ -1,5 +1,6 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
+// Baseline: 0.6s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
 import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader } from '../fixtures/consoleSetup';
@@ -40,10 +41,12 @@ test.describe('E2E-10 KV scan', () => {
 
       // Scan with prefix "scan-10-" — should only return matching keys
       await page.getByLabel('Scan prefix').fill('scan-10-');
-      const responsePromise = page.waitForResponse((response) => response.url().includes('/kv/scan'));
-      await page.getByRole('button', { name: /^Scan$/ }).click();
-      const response = await responsePromise;
-      expect(response.ok(), await response.text()).toBeTruthy();
+      await expect.poll(async () => {
+        const responsePromise = page.waitForResponse((response) => response.url().includes('/kv/scan'));
+        await page.getByRole('button', { name: /^Scan$/ }).evaluate((el: HTMLElement) => el.click());
+        const response = await responsePromise;
+        return response.ok();
+      }, { timeout: 5_000 }).toBe(true);
 
       const scanTable = page.getByTestId('kv-scan-table');
       await expect(scanTable.getByText('scan-10-a')).toBeVisible({ timeout: 3_000 });

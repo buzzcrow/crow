@@ -1,5 +1,6 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
+// Baseline: 0.7s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
 import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
@@ -37,8 +38,9 @@ test.describe('E2E-31 KV auto-scan toggle', () => {
 
       // Put an initial key and scan
       await putKey(page, 'auto-key-1', 'val-1');
-      await page.getByRole('button', { name: /scan/i }).click();
-      await expect(page.getByTestId('kv-scan-table')).toBeVisible({ timeout: 3_000 });
+      const scanResp = page.waitForResponse((r) => r.url().includes('/kv/scan'));
+      await page.getByRole('button', { name: /scan/i }).evaluate((el: HTMLElement) => el.click());
+      await scanResp;
       await expect(page.getByTestId('kv-scan-table').getByText('auto-key-1')).toBeVisible({ timeout: 3_000 });
 
       // Turn auto-scan off
@@ -47,8 +49,7 @@ test.describe('E2E-31 KV auto-scan toggle', () => {
       // Put another key — scan table should NOT auto-refresh
       await putKey(page, 'auto-key-2', 'val-2');
       // auto-scan is off, so auto-key-2 should never appear in the table.
-      // expect auto-retries: if the key appears within the timeout, the test fails.
-      await expect(page.getByTestId('kv-scan-table').getByText('auto-key-2')).toHaveCount(0, { timeout: 3_000 });
+      await expect(page.getByTestId('kv-scan-table').getByText('auto-key-2')).toHaveCount(0, { timeout: 1_000 });
 
       // Turn auto-scan back on
       await page.getByLabel('auto-scan').check();

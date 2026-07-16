@@ -1,5 +1,6 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
+// Baseline: 1.1s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
 import { addGroup, createStore, deployNodeServer, resetAll, seedRackAndNode, stopNodeServer, waitForLeader } from '../fixtures/consoleSetup';
@@ -51,17 +52,16 @@ test.describe('E2E-26 KV demo inject + delete', () => {
       expect(keys.length).toBe(5);
       expect(keys.every((k) => k.startsWith('demo_key_'))).toBe(true);
 
-      // Delete all demo keys
+      // Delete all demo keys — wait for all delete responses to settle
       await page.getByRole('button', { name: /Delete all demo/ }).click();
       const dialog = page.getByRole('dialog');
       await expect(dialog).toBeVisible();
-      const deleteResponsePromise = page.waitForResponse((r: any) => r.url().includes('/kv/delete'));
       await dialog.getByRole('button', { name: 'Delete' }).click();
-      await deleteResponsePromise;
-
-      // Verify via API that no demo keys remain
-      const remaining = await scanAllDemoKeys(baseURL!, 260, 2600);
-      expect(remaining.length).toBe(0);
+      // Poll until no demo keys remain (delete-all sends multiple requests)
+      await expect.poll(async () => {
+        const remaining = await scanAllDemoKeys(baseURL!, 260, 2600);
+        return remaining.length;
+      }, { timeout: 5_000 }).toBe(0);
 
       // Verify scan table no longer shows demo keys
       await page.getByRole('button', { name: /scan/i }).click();
@@ -101,19 +101,17 @@ test.describe('E2E-26 KV demo inject + delete', () => {
       expect(keys0.length).toBeGreaterThan(0);
       expect(keys1.length).toBeGreaterThan(0);
 
-      // Delete all demo keys in All Groups mode
+      // Delete all demo keys in All Groups mode — poll until clean
       await page.getByRole('button', { name: /Delete all demo/ }).click();
       const dialog = page.getByRole('dialog');
       await expect(dialog).toBeVisible();
-      const deleteResponsePromise = page.waitForResponse((r: any) => r.url().includes('/kv/delete'));
       await dialog.getByRole('button', { name: 'Delete' }).click();
-      await deleteResponsePromise;
-
-      // Verify no demo keys remain in either group
-      const remaining0 = await scanAllDemoKeys(baseURL!, 261, 2610);
-      const remaining1 = await scanAllDemoKeys(baseURL!, 261, 2611);
-      expect(remaining0.length).toBe(0);
-      expect(remaining1.length).toBe(0);
+      // Poll until no demo keys remain in either group
+      await expect.poll(async () => {
+        const r0 = await scanAllDemoKeys(baseURL!, 261, 2610);
+        const r1 = await scanAllDemoKeys(baseURL!, 261, 2611);
+        return r0.length + r1.length;
+      }, { timeout: 5_000 }).toBe(0);
     } finally {
       await stopNodeServer(baseURL!, 'n26b');
     }
@@ -146,17 +144,15 @@ test.describe('E2E-26 KV demo inject + delete', () => {
       expect(keys0.length).toBe(0);
       expect(keys1.length).toBe(10);
 
-      // Delete all demo keys (still in group 2621 context)
+      // Delete all demo keys (still in group 2621 context) — poll until clean
       await page.getByRole('button', { name: /Delete all demo/ }).click();
       const dialog = page.getByRole('dialog');
       await expect(dialog).toBeVisible();
-      const deleteResponsePromise = page.waitForResponse((r: any) => r.url().includes('/kv/delete'));
       await dialog.getByRole('button', { name: 'Delete' }).click();
-      await deleteResponsePromise;
-
-      // Verify cleanup
-      const remaining1 = await scanAllDemoKeys(baseURL!, 262, 2621);
-      expect(remaining1.length).toBe(0);
+      await expect.poll(async () => {
+        const remaining = await scanAllDemoKeys(baseURL!, 262, 2621);
+        return remaining.length;
+      }, { timeout: 5_000 }).toBe(0);
     } finally {
       await stopNodeServer(baseURL!, 'n26c');
     }

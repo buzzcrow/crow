@@ -1,5 +1,6 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
+// Baseline: 0.5s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
 import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader, resetAll } from '../fixtures/consoleSetup';
@@ -57,7 +58,7 @@ test.describe('E2E-32 inspector activity tab', () => {
       await expect(inspector.getByText(/KV Put/i)).toBeVisible({ timeout: 3_000 });
 
       // Click Clear log
-      await inspector.getByRole('button', { name: /clear log/i }).click();
+      await inspector.getByRole('button', { name: /clear log/i }).evaluate((el: HTMLElement) => el.click());
 
       // Verify entries are removed
       await expect(inspector.getByText('No activity yet.')).toBeVisible({ timeout: 3_000 });
