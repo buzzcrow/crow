@@ -366,7 +366,10 @@ async fn step_down_via_api_flips_leader_to_follower() {
     assert_eq!(leader_id, 1, "single replica should self-elect as leader");
 
     let resp: Value = client()
-        .post(format!("{}/stores/0/groups/1/step-down", server.base_url()))
+        .post(format!(
+            "{}/stores/0/groups/1/step-down?sync=true",
+            server.base_url()
+        ))
         .json(&serde_json::json!({"reason": "test"}))
         .send()
         .await
@@ -421,7 +424,10 @@ async fn step_down_rejects_when_not_leader() {
 
     // First step-down succeeds (self-elected leader) and flips to follower.
     let resp: Value = client()
-        .post(format!("{}/stores/0/groups/1/step-down", server.base_url()))
+        .post(format!(
+            "{}/stores/0/groups/1/step-down?sync=true",
+            server.base_url()
+        ))
         .json(&serde_json::json!({}))
         .send()
         .await
@@ -434,7 +440,10 @@ async fn step_down_rejects_when_not_leader() {
     // Immediately retrying while still a follower must be rejected by
     // the strict fence (not leader).
     let resp: Value = client()
-        .post(format!("{}/stores/0/groups/1/step-down", server.base_url()))
+        .post(format!(
+            "{}/stores/0/groups/1/step-down?sync=true",
+            server.base_url()
+        ))
         .json(&serde_json::json!({}))
         .send()
         .await
@@ -452,7 +461,10 @@ async fn step_down_rejects_when_not_leader() {
 async fn step_down_group_not_found() {
     let server = start_server().await;
     let resp = client()
-        .post(format!("{}/stores/0/groups/99/step-down", server.base_url()))
+        .post(format!(
+            "{}/stores/0/groups/99/step-down?sync=true",
+            server.base_url()
+        ))
         .json(&serde_json::json!({}))
         .send()
         .await

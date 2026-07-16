@@ -218,6 +218,17 @@ Full design: `design-wal.md`, `design-state-machine.md`,
   compatibility.
 - **Backup** — in-cluster recovery via snapshot install + WAL replay.
   External backup tool planned as future extension.
+- **Async operations** — management API operations that trigger cluster
+  state changes (step-down, remove replica, add replica) may take
+  seconds during leader re-election. The async operation pattern:
+  trigger returns immediately with `202 {operation_id}`; caller polls
+  `GET /operations/:id` for status (`pending` → `running` →
+  `completed`/`failed`). `?sync=true` preserves the old synchronous
+  behavior for backward compatibility. A `GET
+  /stores/:sid/groups/:gid/ready` endpoint checks cluster readiness
+  (leader elected, quorum reachable, applied-slot lag). The operation
+  registry is an in-memory `DashMap` in `crowkv-server`; background
+  tasks poll group status until a new leader appears or timeout.
 
 Full design: `design-reconfiguration.md`, `design-kv-server.md`.
 
