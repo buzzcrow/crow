@@ -61,9 +61,9 @@ All tasks completed.
 - [ ] **Leader change via API**: 3-node process cluster, trigger step-down via HTTP API, poll `/ready` until new leader, verify KV ops continue.
 - [ ] **Reconfig via API — add replica**: 3-node cluster, add 4th replica via HTTP API, poll `/ready` until caught up, verify data on new node.
 - [ ] **Reconfig via API — remove leader**: 3-node cluster, remove leader via HTTP API, poll `/ready` until new leader, verify KV ops resume.
-- [ ] **Async operation API**: trigger step-down, verify `202 {operation_id}`, poll `GET /operations/:id` until `Completed`.
-- [ ] **Readiness API**: verify `GET /groups/:gid/ready` returns `200` when ready, `503` when no leader, `503` with lag info when replica is behind.
-- [ ] **Backward compat**: existing tests pass with `?sync=true` on step-down, remove replica, add replica endpoints.
+- [x] **Async operation API**: trigger step-down, verify `202 {operation_id}`, poll `GET /operations/:id` until `Completed`. — done in `async_ops_test.rs`
+- [x] **Readiness API**: verify `GET /groups/:gid/ready` returns `200` when ready, `503` when no leader, `503` with lag info when replica is behind. — done in `async_ops_test.rs`
+- [x] **Backward compat**: existing tests pass with `?sync=true` on step-down, remove replica, add replica endpoints. — done in `server_api_test.rs` + `async_ops_test.rs`
 
 ## E2E / Playwright UI Test Implementation Plan
 
@@ -143,7 +143,7 @@ If a test passes on SIMPLE but fails on COMPLEX, the gap is multi-node interacti
 
 These test the reconfig feature: stopping/deleting nodes while groups are active,
 verifying the cluster continues to operate correctly with reduced membership.
-Once R12 (async operation API) is implemented, these tests should use the
+R12 (async operation API) is now implemented — these tests should use the
 async operation pattern (trigger → poll `/operations/:id` → poll `/ready`)
 instead of blocking on the HTTP call.
 

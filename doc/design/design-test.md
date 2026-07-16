@@ -393,6 +393,11 @@ under load. These verify the deployment handles operational failures.
 - Every HTTP management API endpoint must have at least one test: stores
   (list/add/remove), groups (add/remove), replicas (add/remove/list), nodes
   (add/remove/deploy/stop/restart), racks (add/remove), health, topology.
+- Async operation API: `POST /step-down` returns `202 {operation_id}` by
+  default; `?sync=true` preserves synchronous behavior. `GET /operations/:id`
+  returns operation status (`pending`/`running`/`completed`/`failed`).
+  `GET /stores/:sid/groups/:gid/ready` returns `200` when ready (leader
+  elected, quorum reachable), `503` when not ready with reason.
 - Server startup must be tested with various initial configurations.
 - Multi-process cluster: ≥3 nodes form a cluster, elect leaders, and serve
   KV operations.
@@ -494,6 +499,10 @@ to timing. Leader election timeouts are capped at 10 s; all other assertions at 
   Load More, All Groups mode, auto-scan toggle, demo inject, demo delete, copy.
 - **Every inspector feature** must have at least one test: Details tab (entity
   fields), Activity tab (log entries + clear), cross-jump (both directions).
+- **Async operation feedback** (Tier 3): when a step-down or reconfig
+  operation is triggered via UI, the UI should show progress feedback (spinner
+  or status indicator) and poll the async operation API until completion,
+  then refresh topology. Tests verify the UI does not block indefinitely.
 - **Comparative tests** (Tier 2) must run on both simple and complex topologies
   using the same assertion code path.
 
