@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, DEFAULT_SERVER_BINARY } from '../fixtures/consoleSetup';
+import { apiContext, DEFAULT_SERVER_BINARY, stopNodeServer } from '../fixtures/consoleSetup';
 
 /**
  * End-to-end smoke for the rewritten (v1 lean) console UI. Drives the full
@@ -21,11 +21,11 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     await page.goto('/');
 
     // --- Shell renders ---
-    await expect(page.getByRole('button', { name: 'Physical' })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('button', { name: 'Physical' })).toBeVisible({ timeout: 3_000 });
     await expect(page.getByRole('button', { name: 'Logical' })).toBeVisible();
     await expect(page.getByPlaceholder('Filter...')).toBeVisible();
 
-    const aside = page.locator('aside').first();
+    const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
     try {
     // --- Physical: add rack ---
@@ -35,8 +35,8 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     await page.getByLabel('Rack ID').fill('rsm');
     await page.getByLabel('Name (optional)').fill('Rack Smoke');
     await page.getByRole('button', { name: /create rack/i }).click();
-    await expect(page.getByText(/Rack "rsm" created successfully/)).toBeVisible({ timeout: 15_000 });
-    await expect(aside.getByText('R-rsm (Rack Smoke)')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('alert').getByText(/Rack "rsm" created successfully/)).toBeVisible({ timeout: 3_000 });
+    await expect(aside.getByText('R-rsm (Rack Smoke)')).toBeVisible({ timeout: 3_000 });
 
     // --- Physical: add node via context menu ---
     await aside.getByText('R-rsm (Rack Smoke)').click({ button: 'right' });
@@ -46,8 +46,8 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     await page.getByLabel('Host').fill('127.0.0.1');
     await page.getByLabel('Enable CrowKV on this node').uncheck();
     await page.getByRole('button', { name: /create node/i }).click();
-    await expect(page.getByText(/Node "nsm" created successfully/)).toBeVisible({ timeout: 15_000 });
-    await expect(aside.getByText('N-nsm', { exact: true })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('alert').getByText(/Node "nsm" created successfully/)).toBeVisible({ timeout: 3_000 });
+    await expect(aside.getByText('N-nsm', { exact: true })).toBeVisible({ timeout: 3_000 });
 
     // --- Physical: deploy CrowKV Server via context menu ---
     await aside.getByText('N-nsm', { exact: true }).click({ button: 'right' });
@@ -57,7 +57,7 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     await page.getByLabel('gRPC Port').fill('9902');
     await page.getByLabel(/Binary Path/).fill(DEFAULT_SERVER_BINARY);
     await page.getByRole('button', { name: /^Deploy$/ }).click();
-    await expect(page.getByText(/CrowKV deployed on nsm/)).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByRole('alert').getByText(/CrowKV deployed on nsm/)).toBeVisible({ timeout: 3_000 });
 
     // Backend confirms the server is running.
     await expect.poll(async () => {
@@ -70,7 +70,7 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
       } finally {
         await api.dispose();
       }
-    }, { timeout: 20_000 }).toBeGreaterThan(0);
+    }, { timeout: 3_000 }).toBeGreaterThan(0);
 
     // --- Logical: add empty KV store on n1 ---
     await page.getByRole('button', { name: 'Logical' }).click();
@@ -79,8 +79,8 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     await page.getByLabel('KV Store ID (numeric)').fill('7');
     await page.getByLabel(/^nsm/).check();
     await page.getByRole('button', { name: /create kv store/i }).click();
-    await expect(page.getByText(/KV Store 7 created successfully/)).toBeVisible({ timeout: 20_000 });
-    await expect(aside.getByText('S-7')).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('alert').getByText(/KV Store 7 created successfully/)).toBeVisible({ timeout: 3_000 });
+    await expect(aside.getByText('S-7')).toBeVisible({ timeout: 3_000 });
 
     // --- Logical: create first group in store 7 ---
     await aside.getByText('S-7').click({ button: 'right' });
@@ -95,7 +95,7 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     const store7 = page.getByRole('treeitem').filter({ hasText: 'S-7' });
     const expandStore7 = store7.getByRole('button', { name: 'Expand' });
     if (await expandStore7.count()) await expandStore7.click();
-    await expect(aside.getByText('G-70')).toBeVisible({ timeout: 15_000 });
+    await expect(aside.getByText('G-70')).toBeVisible({ timeout: 3_000 });
 
     // Wait for a leader to be elected before KV operations. GroupView has
     // no top-level leader field — the leader is the replica self-reporting
@@ -111,23 +111,23 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
       } finally {
         await api.dispose();
       }
-    }, { timeout: 25_000 }).toBe(true);
+    }, { timeout: 10_000 }).toBe(true);
 
     // --- KV via KV Operator panel ---
-    await page.getByRole('button', { name: 'KV' }).click();
+    await page.locator('header').getByRole('button', { name: 'KV' }).click();
 
     // Put
-    await page.getByPlaceholder('Key').fill('smoke-key');
-    await page.getByPlaceholder('Value').fill('smoke-value');
+    await page.getByLabel('Put key').fill('smoke-key');
+    await page.getByLabel('Put value').fill('smoke-value');
     const putResponsePromise = page.waitForResponse((r) => r.url().includes('/kv/put'));
     await page.getByRole('button', { name: /^Put$/ }).click();
     await putResponsePromise;
-    await expect(page.getByText(/Key written: "smoke-key"/)).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByRole('alert').getByText(/Key written: "smoke-key"/)).toBeVisible({ timeout: 3_000 });
 
     // Get
-    await page.getByPlaceholder('Key').fill('smoke-key');
+    await page.getByLabel('Get key').fill('smoke-key');
     await page.getByRole('button', { name: /^Get$/ }).click();
-    await expect(page.getByText('smoke-value')).toBeVisible({ timeout: 20_000 });
+    await expect(page.getByTestId('kv-get-result')).toBeVisible({ timeout: 3_000 });
 
     // --- Backend verifies the full chain ---
     const api = await apiContext(baseURL!);
@@ -147,12 +147,7 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     } finally {
       // Stop the smoke server so it does not pollute later specs (its
       // bootstrap store 1 would otherwise aggregate into their views).
-      const cleanup = await apiContext(baseURL!);
-      try {
-        await cleanup.post('/api/nodes/nsm/server/stop').catch(() => undefined);
-      } finally {
-        await cleanup.dispose();
-      }
+      await stopNodeServer(baseURL!, 'nsm');
     }
   });
 });

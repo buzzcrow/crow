@@ -83,6 +83,40 @@ pub fn init_file_logging(log_dir: impl AsRef<Path>, process_name: &str) -> Resul
     Ok(LogGuards { _file: file_guard })
 }
 
+/// Opens a metrics log file in the specified directory.
+/// File naming: `metrics-{YYYYMMDD-HHMMSS.mmm}-{pid}.log`.
+///
+/// # Errors
+/// Returns `Err` if the log directory cannot be created or the file
+/// cannot be opened.
+pub fn open_metrics_log(log_dir: impl AsRef<Path>) -> Result<std::fs::File, String> {
+    std::fs::create_dir_all(log_dir.as_ref()).map_err(|e| {
+        format!(
+            "failed to create log directory {}; next step: check path permissions: {e}",
+            log_dir.as_ref().display()
+        )
+    })?;
+
+    let started_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("system clock is before unix epoch; next step: check host clock: {e}"))?
+        .as_millis();
+    let pid = std::process::id();
+    let file_name = format!("metrics-{}-{pid}.log", format_timestamp(started_at));
+    let file_path = log_dir.as_ref().join(file_name);
+
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file_path)
+        .map_err(|e| {
+            format!(
+                "failed to open metrics log file {}; next step: check path permissions: {e}",
+                file_path.display()
+            )
+        })
+}
+
 /// Initializes file and console logging to the specified directory.
 ///
 /// # Errors

@@ -297,11 +297,14 @@ Initial targets (3-node group, LAN):
 
 ## 16. Observability
 
-Mandatory signals: per-group leader/term/max-slot/safe-slot/in-flight/
-gap count; per-node WAL flush latency and throughput; per-RPC rate/
-latency/error breakdown; structured logs with `node_id`, `group_id`,
-`slot`, `term` on consensus events. Tracing hooks reserved but not
-required in the initial design.
+Mandatory signals: per-group leader/term/max-slot/safe-slot/in-flight/gap
+count; per-node WAL flush latency and throughput; per-RPC rate/latency/error
+breakdown; structured logs with `node_id`, `group_id`, `slot`, `term` on
+consensus events.
+
+Full metrics module design (metric types, registry lifecycle, naming
+convention, instrumentation points, system collector, log format, in-memory
+access, FFI boundary): `design-observability.md`.
 
 ## 17. Testing
 

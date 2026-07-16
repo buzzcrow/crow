@@ -13,7 +13,7 @@ test.describe('E2E-05 store group replica chain', () => {
     try {
       await page.goto('/');
       await page.getByRole('button', { name: 'Logical' }).click();
-      const aside = page.locator('aside').first();
+      const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
       await aside.getByRole('button', { name: 'Add Store' }).click();
       await expect(page.getByRole('dialog', { name: 'Add KV Store' })).toBeVisible();
@@ -21,8 +21,8 @@ test.describe('E2E-05 store group replica chain', () => {
       await page.getByLabel(/^n5/).check();
       await page.getByRole('button', { name: /create kv store/i }).click();
 
-      await expect(page.getByText(/KV Store 57 created successfully/)).toBeVisible({ timeout: 30_000 });
-      await expect(aside.getByText('S-57')).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByRole('alert').getByText(/KV Store 57 created successfully/)).toBeVisible({ timeout: 3_000 });
+      await expect(aside.getByText('S-57')).toBeVisible({ timeout: 3_000 });
 
       // Add the first group via the store row context menu.
       await aside.getByText('S-57').click({ button: 'right' });
@@ -38,7 +38,7 @@ test.describe('E2E-05 store group replica chain', () => {
       const store57 = page.getByRole('treeitem').filter({ hasText: 'S-57' });
       const expandStore57 = store57.getByRole('button', { name: 'Expand' });
       if (await expandStore57.count()) await expandStore57.click();
-      await expect(aside.getByText('G-570')).toBeVisible({ timeout: 15_000 });
+      await expect(aside.getByText('G-570')).toBeVisible({ timeout: 3_000 });
 
       // Add a second group via the store row context menu.
       await aside.getByText('S-57').click({ button: 'right' });
@@ -49,8 +49,8 @@ test.describe('E2E-05 store group replica chain', () => {
       await page.getByLabel(/^n5/).check();
       await page.getByRole('button', { name: /create group/i }).click();
 
-      await expect(page.getByText(/Group 580 created successfully/)).toBeVisible({ timeout: 30_000 });
-      await expect(aside.getByText('G-580')).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByRole('alert').getByText(/Group 580 created successfully/)).toBeVisible({ timeout: 3_000 });
+      await expect(aside.getByText('G-580')).toBeVisible({ timeout: 3_000 });
 
       const stores = await api.get('/api/stores');
       expect(stores.ok(), await stores.text()).toBeTruthy();

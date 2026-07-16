@@ -2,11 +2,11 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { test, expect } from '../fixtures/realBackend';
-import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader } from '../fixtures/consoleSetup';
+import { addGroup, createStore, deployNodeServer, resetAll, seedRackAndNode, stopNodeServer, waitForLeader } from '../fixtures/consoleSetup';
 
 async function openKvPanel(page: any, storeId: string, groupId: string) {
   await page.goto('/');
-  await page.getByRole('button', { name: 'KV' }).click();
+  await page.locator('header').getByRole('button', { name: 'KV' }).click();
   await page.getByLabel('Store').selectOption(storeId);
   await page.getByLabel('Group').selectOption(groupId);
 }
@@ -26,25 +26,27 @@ async function scanAllDemoKeys(baseURL: string, storeId: number, groupId: number
 }
 
 test.describe('E2E-26 KV demo inject + delete', () => {
+  test.beforeEach(async ({ baseURL }) => {
+    await resetAll(baseURL!);
+  });
   test('inject into single group then delete all', async ({ page, baseURL }) => {
     await seedRackAndNode(baseURL!, 'r26', 'n26');
     await deployNodeServer(baseURL!, 'n26', 9960, 9970);
-    await createStore(baseURL!, 260, 2600, 26000, ['n26']);
+    await createStore(baseURL!, 260, ['n26']);
+    await addGroup(baseURL!, 260, 2600, 26000, ['n26']);
     await waitForLeader(baseURL!, 260, 2600);
 
     try {
       await openKvPanel(page, '260', '2600');
 
       // Inject 5 demo keys (default is 20, we use a smaller count for speed)
-      await page.getByLabel('Inject').locator('..').locator('input[type="number"]').fill('5');
+      await page.getByLabel('Demo key count').fill('5');
       const injectResponsePromise = page.waitForResponse((r: any) => r.url().includes('/kv/put'));
       await page.getByRole('button', { name: /Inject/ }).click();
       await injectResponsePromise;
 
       // Wait for scan to auto-trigger and show demo keys
-      await expect(page.getByText(/demo_key_/)).toBeVisible({ timeout: 15_000 });
-
-      // Verify via API that 5 demo keys exist in group 2600
+      await expect(page.getByTestId('kv-scan-table').getByText(/demo_key_/).first()).toBeVisible({ timeout: 3_000 });
       const keys = await scanAllDemoKeys(baseURL!, 260, 2600);
       expect(keys.length).toBe(5);
       expect(keys.every((k) => k.startsWith('demo_key_'))).toBe(true);
@@ -58,7 +60,7 @@ test.describe('E2E-26 KV demo inject + delete', () => {
       await deleteResponsePromise;
 
       // Wait for the toast
-      await expect(page.getByText(/Deleted 5 demo keys/)).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByRole('alert').getByText(/Deleted 5 demo keys/)).toBeVisible({ timeout: 3_000 });
 
       // Verify via API that no demo keys remain
       const remaining = await scanAllDemoKeys(baseURL!, 260, 2600);
@@ -71,7 +73,8 @@ test.describe('E2E-26 KV demo inject + delete', () => {
   test('inject into All Groups mode distributes across groups', async ({ page, baseURL }) => {
     await seedRackAndNode(baseURL!, 'r26b', 'n26b');
     await deployNodeServer(baseURL!, 'n26b', 9961, 9971);
-    await createStore(baseURL!, 261, 2610, 26100, ['n26b']);
+    await createStore(baseURL!, 261, ['n26b']);
+    await addGroup(baseURL!, 261, 2610, 26100, ['n26b']);
     await addGroup(baseURL!, 261, 2611, 26110, ['n26b']);
     await waitForLeader(baseURL!, 261, 2610);
     await waitForLeader(baseURL!, 261, 2611);
@@ -80,15 +83,13 @@ test.describe('E2E-26 KV demo inject + delete', () => {
       await openKvPanel(page, '261', 'All Groups');
 
       // Inject 20 demo keys in All Groups mode — should randomly distribute
-      await page.getByLabel('Inject').locator('..').locator('input[type="number"]').fill('20');
+      await page.getByLabel('Demo key count').fill('20');
       const injectResponsePromise = page.waitForResponse((r: any) => r.url().includes('/kv/put'));
       await page.getByRole('button', { name: /Inject/ }).click();
       await injectResponsePromise;
 
       // Wait for scan to show demo keys
-      await expect(page.getByText(/demo_key_/)).toBeVisible({ timeout: 15_000 });
-
-      // Verify total across both groups is 20
+      await expect(page.getByTestId('kv-scan-table').getByText(/demo_key_/).first()).toBeVisible({ timeout: 3_000 });
       const keys0 = await scanAllDemoKeys(baseURL!, 261, 2610);
       const keys1 = await scanAllDemoKeys(baseURL!, 261, 2611);
       expect(keys0.length + keys1.length).toBe(20);
@@ -107,7 +108,7 @@ test.describe('E2E-26 KV demo inject + delete', () => {
       await dialog.getByRole('button', { name: 'Delete' }).click();
       await deleteResponsePromise;
 
-      await expect(page.getByText(/Deleted 20 demo keys/)).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByRole('alert').getByText(/Deleted 20 demo keys/)).toBeVisible({ timeout: 3_000 });
 
       // Verify no demo keys remain in either group
       const remaining0 = await scanAllDemoKeys(baseURL!, 261, 2610);
@@ -122,7 +123,8 @@ test.describe('E2E-26 KV demo inject + delete', () => {
   test('inject into specific second group only targets that group', async ({ page, baseURL }) => {
     await seedRackAndNode(baseURL!, 'r26c', 'n26c');
     await deployNodeServer(baseURL!, 'n26c', 9962, 9972);
-    await createStore(baseURL!, 262, 2620, 26200, ['n26c']);
+    await createStore(baseURL!, 262, ['n26c']);
+    await addGroup(baseURL!, 262, 2620, 26200, ['n26c']);
     await addGroup(baseURL!, 262, 2621, 26210, ['n26c']);
     await waitForLeader(baseURL!, 262, 2620);
     await waitForLeader(baseURL!, 262, 2621);
@@ -132,12 +134,12 @@ test.describe('E2E-26 KV demo inject + delete', () => {
       await openKvPanel(page, '262', '2621');
 
       // Inject 10 demo keys into group 2621 only
-      await page.getByLabel('Inject').locator('..').locator('input[type="number"]').fill('10');
+      await page.getByLabel('Demo key count').fill('10');
       const injectResponsePromise = page.waitForResponse((r: any) => r.url().includes('/kv/put'));
       await page.getByRole('button', { name: /Inject/ }).click();
       await injectResponsePromise;
 
-      await expect(page.getByText(/demo_key_/)).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByTestId('kv-scan-table').getByText(/demo_key_/).first()).toBeVisible({ timeout: 3_000 });
 
       // All 10 keys should be in group 2621, none in 2620
       const keys0 = await scanAllDemoKeys(baseURL!, 262, 2620);
@@ -153,7 +155,7 @@ test.describe('E2E-26 KV demo inject + delete', () => {
       await dialog.getByRole('button', { name: 'Delete' }).click();
       await deleteResponsePromise;
 
-      await expect(page.getByText(/Deleted 10 demo keys/)).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByRole('alert').getByText(/Deleted 10 demo keys/)).toBeVisible({ timeout: 3_000 });
 
       // Verify cleanup
       const remaining1 = await scanAllDemoKeys(baseURL!, 262, 2621);

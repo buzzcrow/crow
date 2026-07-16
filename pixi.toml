@@ -67,6 +67,7 @@ web = { cmd = "echo 'CrowKV console starting at: http://127.0.0.1:9920/' && carg
 
 # ── Test ─────────────────────────────────────────────────────────
 test-ct = { cmd = "ctest --test-dir crowtree/build --output-on-failure", depends-on = ["build"] }
+test-ffi = { cmd = "cargo test -p crowtree-ffi --all-targets", depends-on = ["build"] }
 test-core = { cmd = "rm -rf test-logs && cargo test -p crowkv --all-targets", depends-on = ["build"] }
 test-server = { cmd = "cargo test -p crowkv-server --all-targets", depends-on = ["build"] }
 test-cli = { cmd = "cargo test -p crowkv-console-shared -p crowkv-cli --all-targets", depends-on = ["build"] }
@@ -77,18 +78,20 @@ test-ui = { cmd = "rm -rf test-logs && cargo build -p crowkv-server && export CR
 test = { cmd = '''
 bash -c '
 pixi run test-ct & p1=$!
-pixi run test-core & p2=$!
-pixi run test-server & p3=$!
-pixi run test-cli & p4=$!
-pixi run test-web & p5=$!
-pixi run test-ui & p6=$!
-wait $p1 && wait $p2 && wait $p3 && wait $p4 && wait $p5 && wait $p6
+pixi run test-ffi & p2=$!
+pixi run test-core & p3=$!
+pixi run test-server & p4=$!
+pixi run test-cli & p5=$!
+pixi run test-web & p6=$!
+pixi run test-ui & p7=$!
+wait $p1 && wait $p2 && wait $p3 && wait $p4 && wait $p5 && wait $p6 && wait $p7
 '
 ''', depends-on = ["build", "install-web-deps"] }
 test-suite = { cmd = '''
 bash -c '
 set -e
 pixi run test-ct
+pixi run test-ffi
 pixi run test-core
 pixi run test-server
 pixi run test-cli

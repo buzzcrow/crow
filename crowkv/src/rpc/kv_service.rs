@@ -1,6 +1,8 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
+#![allow(clippy::cast_possible_truncation)]
+
 //! Tonic `KvService` implementation that delegates to `KvStore`.
 //!
 //! Most KV RPCs are forwarded to the node's stub methods so that the
@@ -15,6 +17,7 @@
 
 use crate::cluster::kv_store::KvStore;
 use crate::cluster::px_kv_store::PxKvStore;
+use crate::metrics::{Bandwidth, Counter, LatencyHistogram, LatencySummary, MetricsRegistry};
 use crate::rpc::kv_service_client::KvServiceClient;
 use crate::rpc::kv_service_server::KvService;
 use crate::rpc::{
@@ -22,6 +25,7 @@ use crate::rpc::{
     KvSetRequest,
 };
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Response, Status};
@@ -64,14 +68,60 @@ fn forward_header_set<T>(req: &mut Request<T>) {
     req.metadata_mut().insert(FORWARD_HEADER, v);
 }
 
+/// Compute the approximate wire size of a scan response for bandwidth metrics.
+fn scan_response_size(resp: &KvScanResponse) -> u64 {
+    resp.items
+        .iter()
+        .map(|e| e.key.len() + e.value.len())
+        .sum::<usize>() as u64
+}
+
+/// Metric handles for KV service instrumentation.
+/// Created at service startup by registering with the `MetricsRegistry`.
+struct KvMetrics {
+    put_lh: Arc<LatencyHistogram>,
+    get_lh: Arc<LatencyHistogram>,
+    delete_c: Arc<Counter>,
+    scan_l: Arc<LatencySummary>,
+    bytes_in_bw: Arc<Bandwidth>,
+    bytes_out_bw: Arc<Bandwidth>,
+    errors_c: Arc<Counter>,
+}
+
+impl KvMetrics {
+    fn new(registry: &mut MetricsRegistry, store_id: u64) -> Self {
+        let prefix = format!("s.{store_id}");
+        Self {
+            put_lh: registry.register_histogram(format!("{prefix}.kv.put.lh")),
+            get_lh: registry.register_histogram(format!("{prefix}.kv.get.lh")),
+            delete_c: registry.register_counter(format!("{prefix}.kv.delete.c")),
+            scan_l: registry.register_summary(format!("{prefix}.kv.scan.l")),
+            bytes_in_bw: registry.register_bandwidth(format!("{prefix}.kv.bytes_in.bw")),
+            bytes_out_bw: registry.register_bandwidth(format!("{prefix}.kv.bytes_out.bw")),
+            errors_c: registry.register_counter(format!("{prefix}.kv.errors.c")),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct KvStoreService {
     store: Arc<PxKvStore>,
+    metrics: Option<Arc<KvMetrics>>,
 }
 
 impl KvStoreService {
+    /// Create a new service. If the store has a metrics registry attached,
+    /// KV metrics are registered immediately.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the metrics registry mutex is poisoned.
     pub fn new(store: Arc<PxKvStore>) -> Self {
-        Self { store }
+        let metrics = store.metrics_registry.as_ref().map(|reg| {
+            let mut r = reg.lock().expect("metrics registry poisoned");
+            Arc::new(KvMetrics::new(&mut r, store.store_id))
+        });
+        Self { store, metrics }
     }
 }
 
@@ -79,6 +129,7 @@ impl KvStoreService {
 impl KvService for KvStoreService {
     async fn put(&self, request: Request<KvSetRequest>) -> Result<Response<KvResponse>, Status> {
         let req = request.into_inner();
+        let req_size = req.key.len() + req.value.len();
         trace!(
             store_id = self.store.store_id,
             group_id = req.group_id,
@@ -89,6 +140,7 @@ impl KvService for KvStoreService {
             value_len = req.value.len(),
             "received kv put rpc"
         );
+        let start = Instant::now();
         let mut resp = self
             .store
             .kv_put(
@@ -101,6 +153,14 @@ impl KvService for KvStoreService {
                 req.request_create_ms,
             )
             .await;
+        if let Some(ref m) = self.metrics {
+            m.put_lh.observe(start.elapsed().as_nanos() as u64);
+            m.bytes_in_bw.observe(req_size as u64);
+            m.bytes_out_bw.observe(resp.value.len() as u64);
+            if !resp.ok {
+                m.errors_c.inc();
+            }
+        }
         if !resp.ok {
             warn!(
                 store_id = self.store.store_id,
@@ -119,6 +179,8 @@ impl KvService for KvStoreService {
     async fn get(&self, request: Request<KvGetRequest>) -> Result<Response<KvResponse>, Status> {
         let already_forwarded = request.metadata().get(FORWARD_HEADER).is_some();
         let req = request.into_inner();
+        let req_size = req.key.len();
+        let start = Instant::now();
 
         // Transparent leader-forward: only linearizable reads are forwarded
         // to the leader; the stale read modes (`READ_YOUR_WRITES`,
@@ -137,6 +199,14 @@ impl KvService for KvStoreService {
                             leader = %endpoint,
                             "kv get forwarded to leader"
                         );
+                        if let Some(ref m) = self.metrics {
+                            m.get_lh.observe(start.elapsed().as_nanos() as u64);
+                            m.bytes_in_bw.observe(req_size as u64);
+                            m.bytes_out_bw.observe(resp.value.len() as u64);
+                            if !resp.ok {
+                                m.errors_c.inc();
+                            }
+                        }
                         resp.request_id = req.request_id;
                         resp.request_create_ms = req.request_create_ms;
                         return Ok(Response::new(resp));
@@ -161,6 +231,14 @@ impl KvService for KvStoreService {
                                 req.request_create_ms,
                             )
                             .await;
+                        if let Some(ref m) = self.metrics {
+                            m.get_lh.observe(start.elapsed().as_nanos() as u64);
+                            m.bytes_in_bw.observe(req_size as u64);
+                            m.bytes_out_bw.observe(resp.value.len() as u64);
+                            if !resp.ok {
+                                m.errors_c.inc();
+                            }
+                        }
                         resp.not_leader_hint = endpoint;
                         resp.request_id = req.request_id;
                         resp.request_create_ms = req.request_create_ms;
@@ -181,6 +259,14 @@ impl KvService for KvStoreService {
                 req.request_create_ms,
             )
             .await;
+        if let Some(ref m) = self.metrics {
+            m.get_lh.observe(start.elapsed().as_nanos() as u64);
+            m.bytes_in_bw.observe(req_size as u64);
+            m.bytes_out_bw.observe(resp.value.len() as u64);
+            if !resp.ok {
+                m.errors_c.inc();
+            }
+        }
         resp.request_id = req.request_id;
         resp.request_create_ms = req.request_create_ms;
         Ok(Response::new(resp))
@@ -188,6 +274,7 @@ impl KvService for KvStoreService {
 
     async fn delete(&self, request: Request<KvDeleteRequest>) -> Result<Response<KvResponse>, Status> {
         let req = request.into_inner();
+        let req_size = req.key.len();
         trace!(
             store_id = self.store.store_id,
             group_id = req.group_id,
@@ -208,6 +295,14 @@ impl KvService for KvStoreService {
                 req.request_create_ms,
             )
             .await;
+        if let Some(ref m) = self.metrics {
+            m.delete_c.inc();
+            m.bytes_in_bw.observe(req_size as u64);
+            m.bytes_out_bw.observe(resp.value.len() as u64);
+            if !resp.ok {
+                m.errors_c.inc();
+            }
+        }
         if !resp.ok {
             warn!(
                 store_id = self.store.store_id,
@@ -226,6 +321,8 @@ impl KvService for KvStoreService {
     async fn scan(&self, request: Request<KvScanRequest>) -> Result<Response<KvScanResponse>, Status> {
         let already_forwarded = request.metadata().get(FORWARD_HEADER).is_some();
         let req = request.into_inner();
+        let req_size = req.prefix.len() + req.start_after.len();
+        let start = Instant::now();
         debug!(
             store_id = self.store.store_id,
             group_id = req.group_id,
@@ -250,6 +347,14 @@ impl KvService for KvStoreService {
                             leader = %endpoint,
                             "kv scan forwarded to leader"
                         );
+                        if let Some(ref m) = self.metrics {
+                            m.scan_l.observe(start.elapsed().as_nanos() as u64);
+                            m.bytes_in_bw.observe(req_size as u64);
+                            m.bytes_out_bw.observe(scan_response_size(&resp));
+                            if !resp.ok {
+                                m.errors_c.inc();
+                            }
+                        }
                         resp.request_id = req.request_id;
                         resp.request_create_ms = req.request_create_ms;
                         return Ok(Response::new(resp));
@@ -284,6 +389,14 @@ impl KvService for KvStoreService {
                 req.request_create_ms,
             )
             .await;
+        if let Some(ref m) = self.metrics {
+            m.scan_l.observe(start.elapsed().as_nanos() as u64);
+            m.bytes_in_bw.observe(req_size as u64);
+            m.bytes_out_bw.observe(scan_response_size(&resp));
+            if !resp.ok {
+                m.errors_c.inc();
+            }
+        }
         if !resp.ok {
             warn!(
                 store_id = self.store.store_id,

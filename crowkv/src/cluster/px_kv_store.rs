@@ -10,6 +10,7 @@ use crate::cluster::kv_store::KvStore;
 use crate::cluster::status::{StatusLevel, StoreStatus};
 use crate::common::optional_u64;
 use crate::common::report::OperationReport;
+use crate::metrics::MetricsRegistry;
 use crate::rpc::ReadMode;
 use dashmap::DashMap;
 use std::net::SocketAddr;
@@ -27,6 +28,9 @@ pub struct PxKvStore {
     pub(crate) listen_addr: SocketAddr,
     /// Set the first time `shutdown()` is invoked. Subsequent calls are no-ops.
     shutdown_started: AtomicBool,
+    /// Metrics registry for KV service instrumentation. `None` when
+    /// metrics are disabled (`--metrics-interval 0`).
+    pub(crate) metrics_registry: Option<Arc<std::sync::Mutex<MetricsRegistry>>>,
 }
 
 impl KvStore for PxKvStore {
@@ -206,7 +210,14 @@ impl PxKvStore {
             server_state: Mutex::new(GrpcTaskState::default()),
             listen_addr,
             shutdown_started: AtomicBool::new(false),
+            metrics_registry: None,
         }
+    }
+
+    /// Attach a metrics registry so the KV service can register and
+    /// record metrics. Called before `start()`.
+    pub fn set_metrics_registry(&mut self, registry: Arc<std::sync::Mutex<MetricsRegistry>>) {
+        self.metrics_registry = Some(registry);
     }
 
     /// Cascade shutdown: stop gRPC server (with timeout), then shut down each
@@ -382,6 +393,10 @@ impl PxKvStore {
             "added group to kv store"
         );
         let arc = Arc::new(group);
+        // Wire metrics registry into local + remote replicas when available.
+        if let Some(ref registry) = self.metrics_registry {
+            arc.set_metrics_registry(registry, self.store_id);
+        }
         // Spawn the per-group election driver (no-op when
         // `election_driver_disabled`). Driver holds a `Weak<PxGroup>` so
         // dropping the store's `Arc` does not leak the task. Skip when no

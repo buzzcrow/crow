@@ -105,13 +105,13 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
   const { racks, nodes, nodeStores, nodeHealthById, loading: physLoading, error: physError, refresh: refreshPhysical } = usePhysicalTree({
     enabled: true,
     recursive: 2,
-    pollIntervalActive: 3000,
+    pollIntervalActive: 1000,
     pollIntervalInactive: 30000,
   });
   const { stores, groups, loading: logLoading, error: logError, refresh: refreshLogical } = useLogicalTree({
     enabled: true,
     recursive: 2,
-    pollIntervalActive: 3000,
+    pollIntervalActive: 1000,
     pollIntervalInactive: 30000,
   });
 

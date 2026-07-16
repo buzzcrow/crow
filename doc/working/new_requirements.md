@@ -17,6 +17,18 @@ complexity, and dependency. Before implementation, follow the
 - **R2** — Persistent node config — Area: crowkv-server — Per-node server config
   is not persisted; a restart relies on the console to re-push topology, making
   standalone startup non-deterministic.
+- **R9** — Test strategy refinement — Area: all test layers — Rewrite
+  `design-test.md` to be strategy-oriented (not status-oriented); each layer
+  summarizes its test tiers and coverage strategy. Web UI E2E tiered design is
+  the reference standard. Fill missing tests per `plan-test.md`.
+- **R10** — Benchmark framework — Area: console CLI — Add benchmark capability
+  to console CLI; run single-node benchmarks (in-memory or no-fsync file mode)
+  to identify system bottlenecks and inform performance tuning. Related to R3,
+  R4, R6 (memory efficiency optimizations).
+- **R11** — GUI internal state display — Area: web UI — Surface internal
+  metrics (from R8) in the GUI via existing health/internal-state query
+  infrastructure. Show recent operation counts and metrics per Store/Group
+  with real-time refresh (5–10 s window).
 
 ### Low Priority
 
@@ -43,7 +55,7 @@ complexity, and dependency. Before implementation, follow the
 **Complexity — Medium:**
 - **R8** — Metrics module + time-based logs — Area: crowkv observability — No
   structured metrics collection; operational visibility relies on ad-hoc log
-  lines.
+  lines. **Done** — implemented and merged into `design.md` §16.
 
 ---
 
@@ -201,6 +213,9 @@ token protocol design; option (b) adds per-page atomic overhead to every
 
 ### R8: Metrics module + time-based logs
 
+**Status**: Done. Implemented and merged into `design.md` §16 Observability.
+Working docs (`design-metrics.md`, `plan-metrics.md`) deleted.
+
 **Problem**: No structured metrics collection or periodic metrics logging.
 Operational visibility relies on ad-hoc log lines.
 
@@ -214,6 +229,112 @@ counters, emit periodic summary logs or expose a `/metrics` endpoint.
 
 **Acceptance**: `/metrics` endpoint returns structured metrics. Unit test
 for counter/histogram collection. Log line every N seconds with summary.
+
+---
+
+### R9: Test strategy refinement
+
+**Problem**: `design-test.md` is status-oriented — it lists what is currently
+covered, not the strategy behind the coverage. Each layer should describe its
+test tiers and coverage strategy so a test designer can understand the design
+intent, not just the current state. The Web UI E2E section (recently rewritten
+with Tier 0–3 strategy) is the reference standard; other layers need to match
+that level of strategic clarity.
+
+**Approach**:
+- Rewrite each layer section in `design-test.md` to lead with strategy (what
+  tiers exist, what each tier proves, what coverage rules apply), not current
+  test inventory.
+- Remove per-module "Covered" lists that duplicate test names — these are
+  maintenance burden and go stale. Replace with coverage rules that a designer
+  can check against.
+- Keep the KV operation correctness rule (it is a strategy rule, not a status
+  list).
+- Fill missing tests per the implementation plan in `plan-test.md`.
+
+**Priority**: Medium — the doc is actively used for test design guidance.
+
+**Complexity**: Medium — doc rewrite across all layers, plus test implementation
+per `plan-test.md` phases.
+
+**Files**: `doc/design/design-test.md`, `doc/working/plan-test.md`, test files
+per layer.
+
+**Acceptance**: Each layer section in `design-test.md` describes its tier
+strategy and coverage rules without enumerating specific test names. A new
+contributor can read one layer section and know how to design a test for that
+layer.
+
+---
+
+### R10: Benchmark framework
+
+**Problem**: After R8 (metrics module) is implemented, the next step is to
+establish a benchmark framework to identify system bottlenecks and inform
+performance tuning. Currently there is no way to run sustained load against
+a crowkv-server and measure throughput/latency.
+
+**Approach**:
+- Add a `benchmark` subcommand to the console CLI (`crowkv-console`).
+- Single-node benchmark mode: start one server, create one store + one group,
+  drive KV put/get/delete at configurable rate and concurrency.
+- Storage modes: in-memory (no disk) or file-without-fsync (reduce disk IO
+  bottleneck so we can isolate path-level overhead).
+- Measure: throughput (ops/s), latency p50/p99, WAL append rate, engine apply
+  rate. Report per-mode comparison.
+- Initial goal: establish the benchmark infrastructure and get baseline
+  numbers. Follow-up: create smaller targeted benchmarks for specific
+  bottlenecks identified.
+
+**Dependencies**: R8 (metrics module) for collecting latency/throughput
+counters. Related to R3 (zero-copy FFI), R4 (bounded memory pool), R6
+(cross-thread guard) — all memory efficiency optimizations that benchmark
+results may motivate.
+
+**Priority**: Medium — needed after R8 to guide performance work.
+
+**Complexity**: Medium — CLI subcommand, load generator, metrics collection
+integration, report format.
+
+**Files**: `crowkv-console/cli/src/`, `crowkv-console/shared/src/`, new
+benchmark module.
+
+**Acceptance**: `crowkv-console benchmark --mode memory --duration 60s` runs
+and prints throughput + latency summary. Same for `--mode file-nofsync`.
+Baseline numbers recorded for future comparison.
+
+---
+
+### R11: GUI internal state display
+
+**Problem**: The GUI already queries health and internal state from the
+backend, but does not surface metrics (operation counts, latency, WAL stats)
+in the UI. Operators cannot see what a Store or Group is doing in real time.
+
+**Approach**:
+- Extend the existing health/internal-state query infrastructure to carry
+  metrics from R8 (op counts, latency p50/p99, WAL flush lag, election count)
+  in the response.
+- Display metrics in the Inspector panel — per Store and per Group — with
+  real-time refresh (5–10 s polling window).
+- Show recent operation counts (puts, gets, deletes, scans) and key latency
+  indicators.
+- Keep it lightweight: no historical charts in v1, just current snapshot
+  values that update on refresh.
+
+**Dependencies**: R8 (metrics module) for the underlying counters and
+histograms.
+
+**Priority**: Medium — improves operational visibility once metrics exist.
+
+**Complexity**: Medium — extend API response, add UI components to Inspector,
+wire up polling.
+
+**Files**: `crowkv-console/web/src/` (API handlers), `crowkv-console/web/ui/src/`
+(Inspector component), `crowkv-console/shared/src/` (shared types).
+
+**Acceptance**: Select a Store or Group in the UI, see real-time metrics
+(op count, latency, WAL stats) in the Inspector, values update every 5–10 s.
 
 ---
 

@@ -10,13 +10,14 @@
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
 use tracing::{info, trace};
 
 use crate::common::config::WalConfig;
+use crate::metrics::LatencySummary;
 use crate::paxos::roles::SlotIndex;
 use crate::paxos::PxGroupId;
 
@@ -74,6 +75,9 @@ pub struct WalEngine {
     flush_count: Arc<AtomicU64>,
     /// Total number of records flushed across all batches.
     records_flushed: Arc<AtomicU64>,
+    /// Optional latency summary for `append` calls. Set via
+    /// [`Self::set_append_summary`] when a metrics registry is wired.
+    append_summary: OnceLock<Arc<LatencySummary>>,
 }
 
 impl Drop for WalEngine {
@@ -166,6 +170,7 @@ impl WalEngine {
             writer_tasks: parking_lot::Mutex::new(writer_tasks),
             flush_count,
             records_flushed,
+            append_summary: OnceLock::new(),
         }))
     }
 
@@ -181,6 +186,7 @@ impl WalEngine {
             return Err(io::Error::other("WAL disk failed"));
         }
 
+        let started = Instant::now();
         let pipeline_idx = self.select_pipeline(record);
         let pipeline = &self.pipelines[pipeline_idx];
 
@@ -223,6 +229,11 @@ impl WalEngine {
             pipeline_idx,
             "wal record appended and durably flushed"
         );
+
+        if let Some(s) = self.append_summary.get() {
+            #[allow(clippy::cast_possible_truncation)]
+            s.observe(started.elapsed().as_nanos() as u64);
+        }
 
         Ok(loc)
     }
@@ -330,6 +341,12 @@ impl WalEngine {
             flush_count: self.flush_count.load(Ordering::Relaxed),
             records_flushed: self.records_flushed.load(Ordering::Relaxed),
         }
+    }
+
+    /// Attach a latency summary for `append` instrumentation.
+    /// Called once during group creation when a metrics registry is available.
+    pub fn set_append_summary(&self, summary: Arc<LatencySummary>) {
+        let _ = self.append_summary.set(summary);
     }
 }
 

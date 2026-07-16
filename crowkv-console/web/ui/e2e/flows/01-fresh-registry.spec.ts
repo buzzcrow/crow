@@ -14,12 +14,12 @@ test.describe('E2E-01 fresh registry', () => {
 
     await page.goto('/');
 
-    await expect(page.getByRole('button', { name: 'Physical' })).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByRole('button', { name: 'Logical' })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('button', { name: 'Physical' })).toBeVisible({ timeout: 3_000 });
+    await expect(page.getByRole('button', { name: 'Logical' })).toBeVisible({ timeout: 3_000 });
     await expect(page.getByPlaceholder('Filter...')).toBeVisible();
 
-    const healthText = page.getByText(/healthy|degraded|failed|unknown/i).first();
-    await expect(healthText).toBeVisible({ timeout: 15_000 });
+    const healthText = page.locator('header').getByText(/healthy|degraded|failed|unknown/i);
+    await expect(healthText).toBeVisible({ timeout: 3_000 });
 
     // Ignore transient network 404s; fail only on real JS/runtime errors.
     const jsErrors = consoleErrors.filter((e) => !/Failed to load resource/i.test(e));

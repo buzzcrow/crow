@@ -51,7 +51,7 @@ pub fn store_wal_root(wal_root: &Path, store_id: u64) -> PathBuf {
 /// Durable per-group crowtree directory path: `{data_root}/store{store_id}/group{group_id}`.
 /// Only used when `--kv-engine crowtree` is selected. Both `TextPageStore` and
 /// `BlockPageStore` expect a directory path (`TextPageStore` creates a subdirectory
-/// `{path}/{store_id}-{partition_id}/`, `BlockPageStore` creates `.blk-*` files
+/// `{path}/{store_id}-{group_id}/`, `BlockPageStore` creates `.blk-*` files
 /// directly in `path`).
 #[must_use]
 pub fn store_crowtree_path(data_root: &Path, store_id: u64, group_id: u64) -> PathBuf {
@@ -83,7 +83,7 @@ async fn open_crowtree_engine(
         path: Some(path.to_string_lossy().into_owned()),
         backend,
         store_id: u32::try_from(store_id).unwrap_or(0),
-        partition_id: u32::try_from(group_id).unwrap_or(0),
+        group_id: u32::try_from(group_id).unwrap_or(0),
         ..Default::default()
     };
     // `CrowtreeEngine::open` is a synchronous FFI call; called here inline

@@ -27,13 +27,27 @@ Use this workflow when picking up an item from
 5. Commit        → Commit all code + tests + working docs (design draft, plan doc)
                    This checkpoint preserves work in git history in case of
                    later blocking or human intervention.
-6. Merge design  → Fold the design doc into the formal design doc it belongs
+6. Full test     → Run the entire test-suite (`pixi run test-suite`) after the
+   suite             commit. This includes: test-ct, test-ffi, test-core,
+                   test-server, test-cli, test-web-ci, test-ui. Tests may be
+                   run individually (`pixi run test-ct`, etc.) for faster
+                   iteration, but every test must pass. No failure may be
+                   skipped — all failures must be fixed before proceeding.
+7. Merge design  → Fold the design doc into the formal design doc it belongs
                    to (e.g. design-crowtree-engine.md, design-wal.md), following
                    that doc's style and detail level. Delete the standalone
                    working/design-<topic>.md.
-7. Cleanup       → Mark item done in new_requirements.md, delete plan-<topic>.md
+8. Cleanup       → Mark item done in new_requirements.md, delete plan-<topic>.md
                    and design-<topic>.md
                    → Commit cleanup (second and final commit)
+9. Local CI check → Run the GitHub CI Test job steps locally to verify
+                   they pass before pushing:
+                   - `pixi run cargo fmt --all -- --check`
+                   - `pixi run cargo clippy --all-targets -- -D warnings`
+                   - `pixi run test-ct`
+                   - `pixi run test-ffi`
+                   - `pixi run test-core`
+                   All must pass. If any fail, fix before pushing.
 ```
 
 ## Blocking Conditions
@@ -57,8 +71,9 @@ review.
 
 ### 2. Test failure after 5 retries
 
-During Step 4 (Implement), if a test fails (new or existing regression)
-and remains failing after 5 retry attempts, append to the end of
+During Step 4 (Implement) or Step 6 (Full test suite), if a test fails
+(new or existing regression) and remains failing after 5 retry attempts,
+append to the end of
 `doc/working/plan-<topic>.md` under a `## Blocked` heading with:
 
 - The failing test name(s) and command to reproduce.
@@ -69,7 +84,7 @@ and remains failing after 5 retry attempts, append to the end of
 Commit current work, then stop and wait for human intervention. Do not
 guess fixes or weaken tests.
 
-In all other cases, proceed autonomously through all seven steps.
+In all other cases, proceed autonomously through all eight steps.
 
 ## Design doc style (from existing design docs)
 
