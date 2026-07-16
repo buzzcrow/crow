@@ -68,6 +68,7 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
         await api.dispose();
       }
     }, { timeout: 3_000 }).toBeGreaterThan(0);
+    expect(consoleErrors.filter((e) => !/Failed to load resource/i.test(e)), 'console errors after deploy').toEqual([]);
 
     // --- Logical: add empty KV store on n1 ---
     await page.getByRole('button', { name: 'Logical' }).click();
@@ -92,6 +93,7 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     const expandStore7 = store7.getByRole('button', { name: 'Expand' });
     if (await expandStore7.count()) await expandStore7.click();
     await expect(aside.getByText('G-70')).toBeVisible({ timeout: 3_000 });
+    expect(consoleErrors.filter((e) => !/Failed to load resource/i.test(e)), 'console errors after group creation').toEqual([]);
 
     // Wait for a leader to be elected before KV operations. GroupView has
     // no top-level leader field — the leader is the replica self-reporting
@@ -123,6 +125,7 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     await page.getByLabel('Get key').fill('smoke-key');
     await page.getByRole('button', { name: /^Get$/ }).click();
     await expect(page.getByTestId('kv-get-result')).toBeVisible({ timeout: 3_000 });
+    expect(consoleErrors.filter((e) => !/Failed to load resource/i.test(e)), 'console errors after KV ops').toEqual([]);
 
     // --- Backend verifies the full chain ---
     const api = await apiContext(baseURL!);

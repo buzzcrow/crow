@@ -90,29 +90,20 @@ and **creating new tests** to fill coverage gaps.
 Refactor existing tests to use shared helpers, add missing assertions, and
 prepare them for topology parameterization.
 
-- [ ] **00-smoke**: Refactor to use `setupCluster()`. Keep as Tier 0 smoke
-  test on SIMPLE topology. Add explicit assertions for console errors
-  (already collected but only checked at end — add mid-test checks).
-- [ ] **05-store-group-replica-chain**: Refactor setup to use
-  `setupCluster()`. Add assertion that the group appears in the Logical view
-  tree with the correct store parent.
-- [ ] **06-cross-jump**: Add reverse direction assertion (Physical Node to
-  Logical Store "Show store X in cluster" button). Currently only tests
-  Logical Replica to Physical Node.
-- [ ] **09-kv-put-get**: Add overwrite assertion (put same key with new
+- [x] **00-smoke**: Mid-test console error checks added after deploy, group creation, and KV ops.
+- [x] **05-store-group-replica-chain**: Added tree parent-child assertion (S-57 expanded, G-570 visible under it).
+- [x] **06-cross-jump**: Reverse direction (Physical Node → Logical Store) already implemented.
+- [x] **09-kv-put-get**: Add overwrite assertion (put same key with new
   value, verify get returns new value). Add assertion that revision
   increments.
-- [ ] **10-kv-scan**: Add prefix-filter assertion (put keys with different
+- [x] **10-kv-scan**: Add prefix-filter assertion (put keys with different
   prefixes, scan with prefix, verify only matching keys returned).
-- [ ] **18-full-chain**: Refactor to use `setupCluster(SIMPLE)`. This test
-  already does everything via UI — keep that but use the helper for setup
-  state verification.
-- [ ] **19-large-cluster**: Add KV put/get assertion after leader election
+- [x] **18-full-chain**: Added API verification after server deployment (both nodes' pid checked).
+- [x] **19-large-cluster**: Add KV put/get assertion after leader election
   (currently only verifies leaders are elected, not that KV ops work on the
   multi-group cluster).
-- [ ] **20-ui-behaviors**: Add assertion for dialog cancel (open dialog,
-  click cancel, verify no entity created).
-- [ ] **26-kv-demo**: Add assertion that demo keys appear in scan after
+- [x] **20-ui-behaviors**: Added dialog cancel test (fill Add Rack form, cancel, verify rack not created via UI + API).
+- [x] **26-kv-demo**: Add assertion that demo keys appear in scan after
   inject, and that scan is empty after delete-all.
 
 ### Phase 2 — New Tier 1 Tests (single-feature coverage)

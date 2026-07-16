@@ -112,6 +112,32 @@ test.describe('E2E-20 UI behaviors', () => {
     }
   });
 
+  test('dialog cancel does not create entity', async ({ page, baseURL }) => {
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Physical' }).click();
+
+    await page.getByRole('button', { name: 'Add Rack' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Add Rack' });
+    await expect(dialog).toBeVisible();
+    await dialog.getByLabel('Rack ID').fill('r20cancel');
+    await dialog.getByLabel('Name (optional)').fill('Should Not Exist');
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+
+    await expect(dialog).toHaveCount(0);
+    const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
+    await expect(aside.getByText('r20cancel')).toHaveCount(0);
+
+    const api = await apiContext(baseURL!);
+    try {
+      const resp = await api.get('/api/racks');
+      expect(resp.ok()).toBeTruthy();
+      const racks = await resp.json();
+      expect(racks).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: 'r20cancel' })]));
+    } finally {
+      await api.dispose();
+    }
+  });
+
   test('covers tree chevron vs text click behavior', async ({ page, baseURL }) => {
     await createRack(baseURL!, { id: 'r21a', name: 'Rack Twenty One A' });
     await createRack(baseURL!, { id: 'r21b', name: 'Rack Twenty One B' });
