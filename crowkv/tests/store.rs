@@ -29,3 +29,6 @@ mod shutdown;
 
 #[path = "store/persistence_test.rs"]
 mod persistence;
+
+#[path = "store/kv_correctness_test.rs"]
+mod kv_correctness;
