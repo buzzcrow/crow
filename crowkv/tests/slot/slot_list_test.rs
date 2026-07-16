@@ -336,3 +336,154 @@ fn slot_node_trim_and_reclaim_with_live_refs() {
     let freed2 = list.reclaim();
     assert_eq!(freed2, 1);
 }
+
+// ---------- concurrent stress tests ----------
+
+#[test]
+fn concurrent_insert_at_disjoint_ranges() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let list = Arc::new(PxSlotList::new());
+    let n_threads = 8;
+    let per_thread = 200u64;
+    let mut handles = Vec::new();
+    for t in 0..n_threads {
+        let l = Arc::clone(&list);
+        handles.push(thread::spawn(move || {
+            let base = t * per_thread;
+            for i in 0..per_thread {
+                let slot = base + i;
+                let guard = l.insert_if_empty(slot, slot);
+                assert_eq!(*guard, slot);
+                drop(guard);
+            }
+        }));
+    }
+    for h in handles {
+        h.join().unwrap();
+    }
+    let total = n_threads * per_thread;
+    assert_eq!(list.len(), usize::try_from(total).unwrap());
+    for s in 0..total {
+        assert_eq!(*list.get(s).unwrap(), s);
+    }
+}
+
+#[test]
+fn concurrent_insert_and_read() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let list = Arc::new(PxSlotList::new());
+    let total = 2000u64;
+    let writer = {
+        let l = Arc::clone(&list);
+        thread::spawn(move || {
+            for i in 0..total {
+                let guard = l.insert_if_empty(i, i * 3);
+                drop(guard);
+            }
+        })
+    };
+    let reader = {
+        let l = Arc::clone(&list);
+        thread::spawn(move || {
+            for s in 0..1000u64 {
+                let slot = s % total;
+                if let Some(g) = l.get(slot) {
+                    assert!(*g == slot * 3 || *g == 0);
+                }
+            }
+        })
+    };
+    writer.join().unwrap();
+    reader.join().unwrap();
+    assert_eq!(list.len(), usize::try_from(total).unwrap());
+}
+
+#[test]
+fn concurrent_insert_trim_reclaim() {
+    use std::sync::Arc;
+    use std::thread;
+
+    let list = Arc::new(PxSlotList::new());
+    let chunk = SLOT_CHUNK_SIZE as u64;
+
+    // Phase 1: insert all slots first (no trimming during insert).
+    {
+        let l = Arc::clone(&list);
+        let mut handles = Vec::new();
+        for t in 0..4u64 {
+            let l = Arc::clone(&l);
+            handles.push(thread::spawn(move || {
+                for i in 0..chunk {
+                    let slot = t * chunk + i;
+                    let guard = l.insert_if_empty(slot, slot);
+                    drop(guard);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+    }
+
+    // Phase 2: trim concurrently from multiple threads (reclaim is single-threaded).
+    {
+        let l = Arc::clone(&list);
+        let mut handles = Vec::new();
+        for t in 1..=3u64 {
+            let l = Arc::clone(&l);
+            handles.push(thread::spawn(move || {
+                l.trim(t * chunk);
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        // Reclaim after all trims complete (reclaim must be single-threaded).
+        let _ = l.reclaim();
+    }
+
+    // Final trim at the end.
+    list.trim(chunk * 4);
+    let _ = list.reclaim();
+}
+
+#[test]
+fn multiple_guards_pin_same_chunk() {
+    let list = PxSlotList::new();
+    list.insert_if_empty(5, 100u64);
+    list.insert_if_empty(6, 200u64);
+
+    let g1 = list.get(5).unwrap();
+    let g2 = list.get(6).unwrap();
+
+    list.trim(SLOT_CHUNK_SIZE as u64);
+    assert_eq!(list.reclaim(), 0, "chunk not freed: 2 live guards");
+
+    drop(g1);
+    assert_eq!(list.reclaim(), 0, "chunk not freed: 1 live guard");
+
+    drop(g2);
+    assert_eq!(list.reclaim(), 1, "chunk freed after all guards dropped");
+}
+
+#[test]
+fn progressive_trim_across_chunks() {
+    let list = PxSlotList::new();
+    let chunk = SLOT_CHUNK_SIZE as u64;
+    for i in 0..(chunk * 3) {
+        list.insert_if_empty(i, i);
+    }
+
+    list.trim(chunk);
+    assert_eq!(list.reclaim(), 1);
+
+    list.trim(chunk * 2);
+    assert_eq!(list.reclaim(), 1);
+
+    list.trim(chunk * 3);
+    assert_eq!(list.reclaim(), 1);
+}
