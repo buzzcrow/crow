@@ -3,6 +3,27 @@
 
 # R12 Design — Async Operation API + Cluster Readiness
 
+## Implementation Status
+
+**Implemented (this iteration):**
+- Operation registry (`OperationRegistry`, `Operation`, `OperationKind`,
+  `OperationStatus`) in `crowkv-server/src/operation_registry.rs`
+- `AppState` wrapper with `Deref<Target = KvStoreRegistry>` for backward
+  compatibility with existing handlers
+- `GET /stores/:sid/groups/:gid/ready` — cluster readiness API
+- `GET /operations/:id` — operation status polling
+- `POST /stores/:sid/groups/:gid/step-down` — async mode (default) returns
+  `202 {operation_id}`; `?sync=true` preserves old behavior
+- `spawn_leader_wait` — background task polling for new leader
+- 6 integration tests in `crowkv-server/tests/async_ops_test.rs`
+
+**Deferred (future iterations):**
+- Async remove replica (when removing the leader) — currently synchronous
+- Async add replica (catch-up wait) — currently synchronous
+- GUI integration (spinner, polling, toast notifications)
+- TTL cleanup background task
+- Lag computation from remote heartbeat data (currently always 0)
+
 ## Problem
 
 Management API operations that trigger cluster state changes (step-down,
