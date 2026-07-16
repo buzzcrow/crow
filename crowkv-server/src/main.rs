@@ -110,7 +110,7 @@ async fn main() {
             std::process::exit(1);
         });
 
-    let router = mgmt_api::router(registry.clone());
+    let router = mgmt_api::router(crowkv_server::operation_registry::AppState::new(registry.clone()));
     let listener = tokio::net::TcpListener::bind(mgmt_addr)
         .await
         .unwrap_or_else(|e| {
