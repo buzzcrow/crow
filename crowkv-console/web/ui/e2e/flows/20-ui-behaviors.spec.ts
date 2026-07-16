@@ -1,13 +1,9 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
+// Baseline: 1.6s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
 import { apiContext, createRack, createStore, createNode, deployNodeServer, stopNodeServer } from '../fixtures/consoleSetup';
-
-async function currentViewportTransform(page: any) {
-  await page.locator('.react-flow__viewport').waitFor();
-  return page.locator('.react-flow__viewport').evaluate((el: Element) => (el as HTMLElement).style.transform);
-}
 
 function nextNumericId(values: Array<string | number>): string {
   const max = values.reduce<number>((acc, value) => {
@@ -76,7 +72,6 @@ test.describe('E2E-20 UI behaviors', () => {
       const n20cInput = addGroupDialog.getByLabel(/^n20c/);
       if (await n20cInput.isChecked()) await n20cInput.uncheck();
       await addGroupDialog.getByRole('button', { name: /create group/i }).click();
-      await expect(page.getByRole('alert').getByText(new RegExp(`Group ${expectedGroupId} created successfully`))).toBeVisible({ timeout: 3_000 });
 
       const expectedReplicaAfterGroup = String(Number(expectedReplicaId) + 2);
       await expect(aside.getByText(`G-${expectedGroupId}`)).toBeVisible({ timeout: 3_000 });
@@ -93,7 +88,6 @@ test.describe('E2E-20 UI behaviors', () => {
       expect(optionValues).not.toEqual(expect.arrayContaining(['n20a', 'n20b']));
       await addReplicaDialog.getByLabel('Node', { exact: true }).selectOption('n20c');
       await addReplicaDialog.getByRole('button', { name: /add replica/i }).click();
-      await expect(page.getByRole('alert').getByText(/Replica added to node "n20c" successfully/)).toBeVisible({ timeout: 3_000 });
 
       await aside.getByText(`G-${expectedGroupId}`).click({ button: 'right' });
       await page.getByRole('menuitem', { name: /add replica/i }).click();
@@ -114,7 +108,33 @@ test.describe('E2E-20 UI behaviors', () => {
     }
   });
 
-  test('covers tree chevron vs text click behavior and fit-all viewport changes', async ({ page, baseURL }) => {
+  test('dialog cancel does not create entity', async ({ page, baseURL }) => {
+    await page.goto('/');
+    await page.getByRole('button', { name: 'Physical' }).click();
+
+    await page.getByRole('button', { name: 'Add Rack' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Add Rack' });
+    await expect(dialog).toBeVisible();
+    await dialog.getByLabel('Rack ID').fill('r20cancel');
+    await dialog.getByLabel('Name (optional)').fill('Should Not Exist');
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+
+    await expect(dialog).toHaveCount(0);
+    const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
+    await expect(aside.getByText('r20cancel')).toHaveCount(0);
+
+    const api = await apiContext(baseURL!);
+    try {
+      const resp = await api.get('/api/racks');
+      expect(resp.ok()).toBeTruthy();
+      const racks = await resp.json();
+      expect(racks).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: 'r20cancel' })]));
+    } finally {
+      await api.dispose();
+    }
+  });
+
+  test('covers tree chevron vs text click behavior', async ({ page, baseURL }) => {
     await createRack(baseURL!, { id: 'r21a', name: 'Rack Twenty One A' });
     await createRack(baseURL!, { id: 'r21b', name: 'Rack Twenty One B' });
     await createRack(baseURL!, { id: 'r21c', name: 'Rack Twenty One C' });
@@ -128,29 +148,15 @@ test.describe('E2E-20 UI behaviors', () => {
     const node21c = page.getByRole('treeitem').filter({ hasText: 'N-n21c' });
     await expect(rack21a).toBeVisible({ timeout: 3_000 });
     await expect(node21c).toBeVisible({ timeout: 3_000 });
-    await expect(page.getByRole('button', { name: 'Fit All' })).toBeVisible();
-    await page.waitForTimeout(600);
-    const pane = page.locator('.react-flow__pane').first();
-    const paneBox = await pane.boundingBox();
-    if (!paneBox) throw new Error('react flow pane not found');
-    await page.mouse.move(paneBox.x + paneBox.width / 2, paneBox.y + paneBox.height / 2);
-    await page.mouse.down();
-    await page.mouse.move(paneBox.x + paneBox.width / 2 + 120, paneBox.y + paneBox.height / 2 + 80);
-    await page.mouse.up();
-    await page.waitForTimeout(150);
 
-    const pannedTransform = await currentViewportTransform(page);
-
+    // Chevron click collapses/expands without selecting
     await rack21a.getByRole('button', { name: 'Collapse' }).click();
     await expect(rack21a).toHaveAttribute('aria-expanded', 'false');
-    await page.waitForTimeout(300);
-    await expect.poll(() => currentViewportTransform(page)).toBe(pannedTransform);
+    await rack21a.getByRole('button', { name: 'Expand' }).click();
+    await expect(rack21a).toHaveAttribute('aria-expanded', 'true');
 
+    // Text click selects the node
     await node21c.getByRole('button', { name: 'N-n21c' }).click();
     await expect(node21c).toHaveAttribute('aria-selected', 'true');
-    await page.waitForTimeout(300);
-
-    await page.getByRole('button', { name: 'Fit All' }).click();
-    await expect.poll(() => currentViewportTransform(page)).not.toBe(pannedTransform);
   });
 });

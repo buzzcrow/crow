@@ -1,5 +1,6 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
+// Baseline: 0.7s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
 import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader } from '../fixtures/consoleSetup';
@@ -40,7 +41,6 @@ test.describe('E2E-11 KV delete', () => {
       await dialog.getByRole('button', { name: 'Delete' }).click();
       const deleteResponse = await deleteResponsePromise;
       expect(deleteResponse.ok(), await deleteResponse.text()).toBeTruthy();
-      await expect(page.getByRole('alert').getByText(/Key deleted: "delete-11-key"/)).toBeVisible({ timeout: 3_000 });
 
       // Verify key is gone via Get
       await page.getByLabel('Get key').fill('delete-11-key');

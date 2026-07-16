@@ -17,10 +17,6 @@ complexity, and dependency. Before implementation, follow the
 - **R2** — Persistent node config — Area: crowkv-server — Per-node server config
   is not persisted; a restart relies on the console to re-push topology, making
   standalone startup non-deterministic.
-- **R9** — Test strategy refinement — Area: all test layers — Rewrite
-  `design-test.md` to be strategy-oriented (not status-oriented); each layer
-  summarizes its test tiers and coverage strategy. Web UI E2E tiered design is
-  the reference standard. Fill missing tests per `plan-test.md`.
 - **R10** — Benchmark framework — Area: console CLI — Add benchmark capability
   to console CLI; run single-node benchmarks (in-memory or no-fsync file mode)
   to identify system bottlenecks and inform performance tuning. Related to R3,
@@ -49,13 +45,6 @@ complexity, and dependency. Before implementation, follow the
 - **R6** — Cross-thread EpochManager::Guard — Area: crowtree engine —
   `EpochManager::Guard` is thread-bound, forcing copies in async read handoff,
   snapshot consistency, and stale-root GC scenarios.
-
-### Unprioritized
-
-**Complexity — Medium:**
-- **R8** — Metrics module + time-based logs — Area: crowkv observability — No
-  structured metrics collection; operational visibility relies on ad-hoc log
-  lines. **Done** — implemented and merged into `design.md` §16.
 
 ---
 
@@ -208,62 +197,6 @@ token protocol design; option (b) adds per-page atomic overhead to every
   `install_snapshot()` — reader sees old or new tree, never partial.
 - Epoch reclamation stress test: concurrent readers + writers + snapshot
   swaps, no use-after-free under ASan/TSan.
-
----
-
-### R8: Metrics module + time-based logs
-
-**Status**: Done. Implemented and merged into `design.md` §16 Observability.
-Working docs (`design-metrics.md`, `plan-metrics.md`) deleted.
-
-**Problem**: No structured metrics collection or periodic metrics logging.
-Operational visibility relies on ad-hoc log lines.
-
-**Priority**: Unprioritized.
-
-**Complexity**: Medium — define metrics (latency p50/p99, throughput, error
-rate, WAL flush lag, election count), collect via `tracing` spans or atomic
-counters, emit periodic summary logs or expose a `/metrics` endpoint.
-
-**Files**: new `crowkv/src/metrics/` module, `crowkv-server/src/main.rs`.
-
-**Acceptance**: `/metrics` endpoint returns structured metrics. Unit test
-for counter/histogram collection. Log line every N seconds with summary.
-
----
-
-### R9: Test strategy refinement
-
-**Problem**: `design-test.md` is status-oriented — it lists what is currently
-covered, not the strategy behind the coverage. Each layer should describe its
-test tiers and coverage strategy so a test designer can understand the design
-intent, not just the current state. The Web UI E2E section (recently rewritten
-with Tier 0–3 strategy) is the reference standard; other layers need to match
-that level of strategic clarity.
-
-**Approach**:
-- Rewrite each layer section in `design-test.md` to lead with strategy (what
-  tiers exist, what each tier proves, what coverage rules apply), not current
-  test inventory.
-- Remove per-module "Covered" lists that duplicate test names — these are
-  maintenance burden and go stale. Replace with coverage rules that a designer
-  can check against.
-- Keep the KV operation correctness rule (it is a strategy rule, not a status
-  list).
-- Fill missing tests per the implementation plan in `plan-test.md`.
-
-**Priority**: Medium — the doc is actively used for test design guidance.
-
-**Complexity**: Medium — doc rewrite across all layers, plus test implementation
-per `plan-test.md` phases.
-
-**Files**: `doc/design/design-test.md`, `doc/working/plan-test.md`, test files
-per layer.
-
-**Acceptance**: Each layer section in `design-test.md` describes its tier
-strategy and coverage rules without enumerating specific test names. A new
-contributor can read one layer section and know how to design a test for that
-layer.
 
 ---
 

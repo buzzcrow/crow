@@ -208,4 +208,26 @@ impl PxElectionConfig {
             maintenance_tick_ms: 20,
         }
     }
+
+    /// E2E / Playwright profile: fast election but stable lease.
+    ///
+    /// Election 200–400 ms (vs 4–8 s production) so leader re-election
+    /// completes quickly in real wall-clock time. Heartbeat 200 ms and
+    /// lease 600 ms are long enough to avoid spurious step-downs under
+    /// real scheduling jitter (unlike `for_tests` which needs paused time).
+    #[must_use]
+    pub const fn for_e2e() -> Self {
+        Self {
+            prevote_enabled: true,
+            heartbeat_interval_ms: 200,
+            election_min_ms: 200,
+            election_max_ms: 400,
+            lease_duration_ms: 600,
+            max_clock_skew_ms: 100,
+            bulk_prepare_window: 1024,
+            election_driver_disabled: false,
+            learner_stream_window_frames: 64,
+            maintenance_tick_ms: 5_000,
+        }
+    }
 }

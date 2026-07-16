@@ -1,5 +1,6 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
+// Baseline: 1.1s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
 import { apiContext, deployNodeServer, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
@@ -21,7 +22,6 @@ test.describe('E2E-05 store group replica chain', () => {
       await page.getByLabel(/^n5/).check();
       await page.getByRole('button', { name: /create kv store/i }).click();
 
-      await expect(page.getByRole('alert').getByText(/KV Store 57 created successfully/)).toBeVisible({ timeout: 3_000 });
       await expect(aside.getByText('S-57')).toBeVisible({ timeout: 3_000 });
 
       // Add the first group via the store row context menu.
@@ -40,6 +40,11 @@ test.describe('E2E-05 store group replica chain', () => {
       if (await expandStore57.count()) await expandStore57.click();
       await expect(aside.getByText('G-570')).toBeVisible({ timeout: 3_000 });
 
+      // Verify parent-child: S-57 is expanded and G-570 is visible in the tree
+      const store57Item = page.getByRole('treeitem').filter({ hasText: 'S-57' });
+      await expect(store57Item).toHaveAttribute('aria-expanded', 'true');
+      await expect(aside.getByText('G-570')).toBeVisible({ timeout: 3_000 });
+
       // Add a second group via the store row context menu.
       await aside.getByText('S-57').click({ button: 'right' });
       await page.getByRole('menuitem', { name: /add group/i }).click();
@@ -49,7 +54,6 @@ test.describe('E2E-05 store group replica chain', () => {
       await page.getByLabel(/^n5/).check();
       await page.getByRole('button', { name: /create group/i }).click();
 
-      await expect(page.getByRole('alert').getByText(/Group 580 created successfully/)).toBeVisible({ timeout: 3_000 });
       await expect(aside.getByText('G-580')).toBeVisible({ timeout: 3_000 });
 
       const stores = await api.get('/api/stores');

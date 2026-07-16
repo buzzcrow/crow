@@ -32,6 +32,12 @@ mod group_propose;
 #[path = "group/kv_test.rs"]
 mod kv;
 
+#[path = "group/kv_correctness_test.rs"]
+mod kv_correctness;
+
+#[path = "group/kv_edge_case_test.rs"]
+mod kv_edge_case;
+
 #[path = "group/kv_forward_test.rs"]
 mod kv_forward;
 
@@ -52,6 +58,18 @@ mod paxos_error;
 
 #[path = "group/g1_step_down_survival_test.rs"]
 mod g1_step_down_survival;
+
+#[path = "group/g3_leader_change_test.rs"]
+mod g3_leader_change;
+
+#[path = "group/g4_learner_stream_test.rs"]
+mod g4_learner_stream;
+
+#[path = "group/g5_recovery_test.rs"]
+mod g5_recovery;
+
+#[path = "group/g6_reconfig_test.rs"]
+mod g6_reconfig;
 
 #[path = "group/a3_crash_restart_no_data_loss_test.rs"]
 mod a3_crash_restart_no_data_loss;

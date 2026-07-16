@@ -3,133 +3,117 @@
 
 # CrowKV Test Task Backlog
 
+**Override:** This file is **persistent** — it is not deleted after the
+requirement (R9) is complete. Only completed tasks are removed; the file
+itself remains as the ongoing test task backlog. This overrides the
+`/implement-requirement` workflow's cleanup step which would normally delete
+`plan-<topic>.md`.
+
 Unfinished test tasks, grouped by layer. Each task has a checkbox for tracking.
-For test strategy, layer scope, and coverage details, see [`design/design-test.md`](design/design-test.md).
+For test strategy, layer scope, and coverage details, see [`design/design-test.md`](../design/design-test.md).
 
 ## Suite Timing
 
-Measured on 2026-07-16. All six suites passed with zero failures.
+Measured on 2026-07-17 (clean build, macOS). Build time: 63.5 s.
 
-| Suite | Result | Tests | macOS |
+| Suite | Tests | macOS | Linux |
 | --- | --- | --- | --- |
-| `test-ct` | pass | 328/328 | 8.3 s |
-| `test-core` | pass | 404 | 8.9 s |
-| `test-server` | pass | 47 | 9.4 s |
-| `test-cli` | pass | 56 | 9.6 s |
-| `test-web` | pass | 49 | 39.1 s |
-| `test-ui` | pass | 26/26 | 39.3 s |
+| `test-ct` | 326 | 9.9 s | — |
+| `test-ffi` | 15 | 26.5 s | — |
+| `test-core` | 503 | 56.3 s | — |
+| `test-server` | 55 | 14.9 s | — |
+| `test-cli` | 56 | 34.0 s | — |
+| `test-mgmt-api` | 49 | 42.5 s | — |
+| `test-ui` | 51 | 63.8 s | — |
+
+---
+
+## Unit Layer — paxos/acceptor
+
+Source: `crowkv/src/paxos/acceptor.rs`. Tests: `acceptor_test.rs` (6 tests).
+
+## Unit Layer — paxos/learner
+
+Source: `crowkv/src/paxos/learner.rs`. Tests: `learner_test.rs` (4), `learner_dedup_test.rs` (10), `learner_async_test.rs` (1). Coverage is thorough.
+
+## Unit Layer — paxos/error
+
+Source: `crowkv/src/paxos/error.rs`. Tests: `error_test.rs` (11 variants).
+
+## Unit Layer — kv/mem_kv + kv/op
+
+Source: `crowkv/src/kv/`. Tests: `mem_kv_test.rs` (9 + conformance), `op_codec_test.rs` (11), `kv_future_test.rs` (5), `conformance.rs` (shared). Coverage is thorough.
+
+## Unit Layer — wal/record
+
+Source: `crowkv/src/wal/record.rs`. Tests: `record_tests.rs` (9). No gaps identified.
 
 ## Election Unit
 
-All tasks completed.
+Source: `crowkv/src/election/`. Tests: 8 files, 72 tests. No gaps identified.
+
+## WAL Subsystem
+
+Source: `crowkv/src/wal/`. Tests: 12 files, ~92 tests. Coverage is thorough.
+
+- [ ] **WAL disk-loss recovery**: simulate fsync failure or file loss after write — verify engine surfaces error and reads/replays are consistent with last durable state. Feature-dependent per design-test.md.
+
+## Slot Subsystem
+
+Source: `crowkv/src/paxos/slot_list.rs`, `slot_node.rs`. Tests: `slot_list_test.rs` (18 tests).
 
 ## Replica
 
-- [ ] **WAL GC safe slot integration**: `crowkv/src/wal/gc.rs` uses `safe_slot = u64::MAX`. Needs snapshot persistence and a slot marker (e.g. `contiguous_applied` / durable-commit watermark) so GC can safely truncate below the applied frontier. Add a dedicated GC test once the slot marker is implemented.
+Source: `crowkv/src/cluster/local_replica.rs`. Tests: 10 files, ~56 tests.
+
+- [ ] **WAL GC safe slot integration**: `crowkv/src/wal/gc.rs` uses `safe_slot = u64::MAX`. Needs snapshot persistence and a slot marker so GC can safely truncate below the applied frontier. Add a dedicated GC test once the slot marker is implemented.
 
 ## Group
 
-- [ ] **KV operation correctness**: all op types and orderings through group `propose` — Put, overwrite, Delete, delete non-existent, batch with multiple puts, intra-batch last-wins, put-then-delete, delete-then-put, empty batch, mixed ops across slots. Verify via `engine_get` on all replicas.
-- [ ] **LearnerStream** (`cluster/learner_stream.rs`): bidi-stream framing, flow control, parallel in-flight slots, stream re-establish after drop.
-- [ ] **Recovery above the durable-commit watermark** via bulk Phase 1 / heartbeat catch-up on a fresh follower.
-- [ ] **Leader-kill + restart no-data-loss** at full speed (blocked by repair-correctness).
-- [ ] Two-replica even-quorum behaviour (no progress without both up) as an explicit assertion.
-- [ ] **Leader change simulation**: start 3-node cluster, write keys, force step-down, wait for new leader, write more keys, force another step-down and re-election, verify all keys readable through final leader. Location: `crowkv/tests/group/g3_leader_change_test.rs`.
+Source: `crowkv/src/cluster/group.rs`. Tests: 23 files, ~65 tests.
+
+- [ ] **Reconfig — remove leader**: needs separate plan — requires leader transfer before removal to avoid cluster stall.
 
 ## Store
 
-- [ ] **KV operation correctness**: all op types and orderings through `PxKvStore` public API (`kv_put`, `kv_delete`, `kv_batch_write`) — same checklist as group layer.
-- [ ] **Multi-node, multi-group store**: ≥3 nodes each hosting the same set of groups; assert per-group isolation and independent leadership.
-- [ ] Per-group WAL-root isolation on one node (no cross-group slot/key bleed) at the store layer.
-- [ ] Store-wide graceful shutdown with multiple active groups under load.
+Source: `crowkv/src/store/`. Tests: 8 files, 26 tests (node, multi_group,
+multi_node_multi_group, status, health, shutdown, shutdown_under_load,
+persistence, kv_correctness).
+
+- [ ] **Per-group WAL-root isolation**: needs separate plan — WAL-root per-group not yet configurable in test harness.
 
 ## Deployment
 
+Source: `crowkv-server/`. Tests: 7 files, 55 tests (server_api, async_ops,
+cli_parse, cluster_e2e, startup, snapshot_join_e2e, deployment_reconfig).
+
 - [ ] Re-enable the four ignored process-level tests once their root causes are fixed.
 - [ ] Multi-store-per-node process test that mirrors the Web UI multi-store topology end-to-end.
+- [ ] **Reconfig via API — remove leader**: needs separate plan — requires leader transfer before removal.
+- [ ] **Network partition between processes**: needs separate plan — requires network partition simulation infrastructure.
 
-## E2E / Playwright UI Test Implementation Plan
+## Console Mgmt API Layer
 
-The test suite follows the tiered strategy defined in
-[`design/design-test.md`](../design/design-test.md) Web UI E2E Layer.
-This plan covers both **enhancing existing tests** to fit the tiered system
-and **creating new tests** to fill coverage gaps.
+Source: `crowkv-console/`. Tests: web 13 files (~37 tests), shared/cli 7
+files (~9 tests). Covers REST routes, CLI commands, API forwarding, health
+aggregation, config persistence, OpenAPI proxy. No gaps identified.
 
-### Phase 0 — Shared Infrastructure
+## crowtree C++ Tests
 
-- [ ] **setupCluster() helper**: Add to `consoleSetup.ts`. Accepts a topology
-  descriptor: `{ nodeCount, storeCount, groupsPerStore, replicasPerGroup,
-  rackPrefix, portBase }`. Creates racks, nodes, deploys servers, creates
-  stores, adds groups with replicas, waits for leaders. Returns `{ nodes,
-  stores, groups, apiBase }`. All existing setup sequences (seedRackAndNode +
-  deployNodeServer + createStore + addGroup + waitForLeader) should be
-  refactored to call this helper internally.
-- [ ] **topology presets**: Define `SIMPLE` (3 nodes, 1 store, 1 group, 3
-  replicas) and `COMPLEX` (8 nodes, 2 stores, 2 groups per store, 3 replicas
-  per group on random subsets) as named constants for comparative tests.
+Source: `crowtree/tests/`. Tests: 334 tests (unit: 26 files, integration:
+24 files). Covers cell encoding, leaf/frame/inner pages, delta replay,
+consolidation, mapping table, epoch manager, split/merge, snapshot
+roundtrip, crash recovery, C API, async get/scan, eviction, compression,
+persist, write/read paths, stress. No gaps identified.
 
-### Phase 1 — Enhance Existing Tests (Tier 1 consolidation)
+## Rust FFI / Cross-Engine Parity
 
-Refactor existing tests to use shared helpers, add missing assertions, and
-prepare them for topology parameterization.
+Source: `crowkv/tests/kv/crowtree_engine_test.rs`. Tests: conformance
+suite (shared with `InMemKV`), async pending path, durable reopen,
+cross-engine parity, clear. No gaps identified.
 
-- [ ] **00-smoke**: Refactor to use `setupCluster()`. Keep as Tier 0 smoke
-  test on SIMPLE topology. Add explicit assertions for console errors
-  (already collected but only checked at end — add mid-test checks).
-- [ ] **05-store-group-replica-chain**: Refactor setup to use
-  `setupCluster()`. Add assertion that the group appears in the Logical view
-  tree with the correct store parent.
-- [ ] **06-cross-jump**: Add reverse direction assertion (Physical Node to
-  Logical Store "Show store X in cluster" button). Currently only tests
-  Logical Replica to Physical Node.
-- [ ] **09-kv-put-get**: Add overwrite assertion (put same key with new
-  value, verify get returns new value). Add assertion that revision
-  increments.
-- [ ] **10-kv-scan**: Add prefix-filter assertion (put keys with different
-  prefixes, scan with prefix, verify only matching keys returned).
-- [ ] **18-full-chain**: Refactor to use `setupCluster(SIMPLE)`. This test
-  already does everything via UI — keep that but use the helper for setup
-  state verification.
-- [ ] **19-large-cluster**: Add KV put/get assertion after leader election
-  (currently only verifies leaders are elected, not that KV ops work on the
-  multi-group cluster).
-- [ ] **20-ui-behaviors**: Add assertion for dialog cancel (open dialog,
-  click cancel, verify no entity created).
-- [ ] **26-kv-demo**: Add assertion that demo keys appear in scan after
-  inject, and that scan is empty after delete-all.
+## E2E / Playwright UI Tests
 
-### Phase 2 — New Tier 1 Tests (single-feature coverage)
-
-- [ ] **27-server-lifecycle**: Ping node, Restart server, Stop server — all via context menu. Verify toast feedback and backend state change (server status via API). Stop should make the node's Deploy menu item reappear.
-- [ ] **28-kv-advanced-ops**: Delete Prefix, Delete Selected (checkbox + button), inline delete (per-row trash), copy-to-clipboard on Get result. Each in isolation on a single-group store.
-- [ ] **29-kv-load-more**: Put >100 keys, scan, verify truncated indicator + Load More button, click Load More, verify additional rows appear.
-- [ ] **30-kv-all-groups-mode**: 2+ groups in one store, switch to All Groups, verify scan aggregates, Get disabled, Put distributes to a random group.
-- [ ] **31-kv-auto-scan-toggle**: Toggle auto-scan off, put a key, verify scan table does NOT auto-refresh. Toggle on, put again, verify it does.
-- [ ] **32-inspector-activity-tab**: Perform a mutation, open Inspector Activity tab, verify entry appears with action/target/status. Click Clear log, verify entries removed.
-- [ ] **33-inspector-cross-jump-node-to-store**: Select a physical node hosting a store, verify "Show store X in cluster" button, click it, verify view switches to Logical and store selected.
-- [ ] **34-sidebar-filter**: Create multiple racks/nodes, type in Filter, verify tree narrows. Clear filter, verify all items return.
-- [ ] **35-header-refresh**: Modify backend via API (add rack), click Refresh, verify new rack appears without page reload.
-- [ ] **36-health-pill-states**: Verify "Unknown" with no groups, "Healthy" with all-healthy groups, "Degraded" when a group loses leadership.
-- [ ] **37-dialog-duplicate-id**: Add rack with existing ID, verify error toast and dialog stays open. Same for node and store.
-
-### Phase 3 — New Tier 2 Tests (complex topology & multi-store)
-
-All Tier 2 tests use `setupCluster()` with both SIMPLE and COMPLEX presets.
-If a test passes on SIMPLE but fails on COMPLEX, the gap is multi-node interaction.
-
-- [ ] **38-multi-store-isolation**: 2 stores on overlapping node sets. Put/Get/Delete on store A does not affect store B. Scan on store A returns only store A keys. Groups in different stores have independent leaders.
-- [ ] **39-subset-group-operations**: 8 nodes deployed, create a group on a random 3-node subset. Verify leader election, KV put/get/delete all work. Create a second group on a different 3-node subset (overlapping by 1). Verify both groups operate independently.
-- [ ] **40-multi-group-same-store**: 1 store, 3 groups, each on a different 3-node subset of 5 nodes. Verify per-group leader election, independent KV operations, scan in All Groups mode aggregates correctly.
-- [ ] **41-comparative-standard-suite**: Refactor existing 00-smoke test to accept a topology parameter. Run once with 3-node simple topology, once with 8-node complex topology (2 stores, subset groups). Both must pass. This becomes the regression baseline for multi-node changes.
-
-### Phase 4 — New Tier 3 Tests (reconfig & partial degradation)
-
-These test the reconfig feature: stopping/deleting nodes while groups are active,
-verifying the cluster continues to operate correctly with reduced membership.
-
-- [ ] **42-stop-server-keeps-group**: 3-node group, stop the server on a non-leader node via context menu. Verify group still accepts puts/gets (quorum intact). Verify health pill shows Degraded. Restart the stopped server, verify group returns to full health.
-- [ ] **43-stop-leader-reelection**: 3-node group, identify the leader, stop the leader's server. Verify a new leader is elected within 10s. Verify KV put/get still works. Restart the old leader, verify it rejoins as follower.
-- [ ] **44-delete-node-after-group**: 5-node group, delete a non-leader node. Verify group still operates (quorum 4-of-5). Delete another non-leader. Verify group still operates (quorum 3-of-5). Stop here — do not go below majority.
-- [ ] **45-add-replica-to-running-group**: 3-node group with active KV data, add a 4th replica via context menu. Verify new replica catches up (data visible via scan on the new node's store). Verify group still accepts writes.
-- [ ] **46-multi-store-reconfig**: 2 stores on 5 nodes. Stop a server that participates in both stores. Verify both stores' groups handle the loss correctly (degraded but functional if quorum holds). Restart, verify recovery.
+Source: `crowkv-console/web/ui/e2e/`. Tests: 47 spec files (Phases 0–5).
+All phases complete. No gaps identified.
 

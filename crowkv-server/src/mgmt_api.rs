@@ -4,7 +4,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
@@ -22,10 +22,10 @@ use crowkv::cluster::px_kv_store::PxKvStore;
 use crowkv::cluster::remote_replica::PxRemoteReplica;
 use crowkv::common::config::ServerConfig;
 
+use crate::operation_registry::{AppState, Operation, OperationKind, OperationStatus, OperationTarget};
 use crate::startup::create_group_with_wal;
-use crate::store_registry::KvStoreRegistry;
 
-type RegistryArc = Arc<KvStoreRegistry>;
+type RegistryArc = AppState;
 
 pub fn router(state: RegistryArc) -> Router {
     Router::new()
@@ -48,6 +48,8 @@ pub fn router(state: RegistryArc) -> Router {
         )
         .route("/stores/:sid/groups/:gid/step-down", post(step_down))
         .route("/stores/:sid/groups/:gid/join", post(join_group_via_snapshot))
+        .route("/stores/:sid/groups/:gid/ready", get(group_readiness))
+        .route("/operations/:id", get(get_operation))
         .route("/topology", get(export_topology))
         .route("/top", get(export_topology))
         .route("/openapi.json", get(openapi_spec))
@@ -227,6 +229,8 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Err
         batch_add_remote_replicas,
         step_down,
         join_group_via_snapshot,
+        group_readiness,
+        get_operation,
         export_topology
     ),
     components(
@@ -248,6 +252,10 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Err
             TopologyResponse,
             StepDownBody,
             StepDownResult,
+            ReadinessResponse,
+            OperationResponse,
+            OperationTarget,
+            AsyncOperationResponse,
             ErrorResponse
         )
     ),
@@ -1020,8 +1028,9 @@ struct StepDownResult {
 async fn step_down(
     State(state): State<RegistryArc>,
     Path((sid, gid)): Path<(u64, u64)>,
+    Query(sync): Query<SyncQuery>,
     Json(body): Json<StepDownBody>,
-) -> Result<Json<StepDownResult>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<axum::response::Response, (StatusCode, Json<ErrorResponse>)> {
     let store = state
         .get_store(sid)
         .ok_or_else(|| err_json(StatusCode::NOT_FOUND, format!("store {sid} not found")))?;
@@ -1037,13 +1046,39 @@ async fn step_down(
         store_id = sid,
         group_id = gid,
         accepted = reply.accepted,
+        sync = sync.is_sync(),
         "step-down requested via management API"
     );
-    Ok(Json(StepDownResult {
-        accepted: reply.accepted,
-        current_term: reply.current_term,
-        current_leader_id: reply.current_leader_id,
-    }))
+
+    if sync.is_sync() || !reply.accepted {
+        // Synchronous mode, or step-down was not accepted (no async needed)
+        return Ok(Json(StepDownResult {
+            accepted: reply.accepted,
+            current_term: reply.current_term,
+            current_leader_id: reply.current_leader_id,
+        })
+        .into_response());
+    }
+
+    // Async mode: create operation, spawn leader-wait task, return 202
+    let op_id = state.operations.create(
+        OperationKind::StepDown,
+        OperationTarget {
+            store_id: sid,
+            group_id: gid,
+            replica_id: None,
+        },
+    );
+    spawn_leader_wait(state, op_id, sid, gid, std::time::Duration::from_secs(10));
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(AsyncOperationResponse {
+            operation_id: op_id,
+            status: "pending".to_string(),
+        }),
+    )
+        .into_response())
 }
 
 #[utoipa::path(
@@ -1257,4 +1292,240 @@ fn rebuild_group_with_same_config(group: &PxGroup) -> PxGroup {
         new_group.set_config_store(store.clone());
     }
     new_group
+}
+
+// ── Async operation + readiness API ───────────────────────────
+
+/// Query parameter for backward-compatible synchronous mode.
+#[derive(Debug, Deserialize)]
+pub struct SyncQuery {
+    #[serde(default)]
+    pub sync: Option<bool>,
+}
+
+impl SyncQuery {
+    fn is_sync(&self) -> bool {
+        self.sync.unwrap_or(false)
+    }
+}
+
+/// Response for `GET /stores/:sid/groups/:gid/ready`.
+#[derive(Serialize, ToSchema)]
+pub struct ReadinessResponse {
+    pub ready: bool,
+    pub leader_id: u64,
+    pub term: u64,
+    pub voting_replicas: u32,
+    pub reachable_replicas: u32,
+    pub max_applied_slot: u64,
+    pub min_applied_slot: u64,
+    pub lag: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/stores/{sid}/groups/{gid}/ready",
+    tag = "management",
+    params(
+        ("sid" = u64, Path, description = "Store id"),
+        ("gid" = u64, Path, description = "Group id")
+    ),
+    responses(
+        (status = 200, description = "Group is ready", body = ReadinessResponse),
+        (status = 503, description = "Group is not ready", body = ReadinessResponse),
+        (status = 404, description = "Store or group not found", body = ErrorResponse)
+    )
+)]
+async fn group_readiness(
+    State(state): State<RegistryArc>,
+    Path((sid, gid)): Path<(u64, u64)>,
+) -> Result<(StatusCode, Json<ReadinessResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let store = state
+        .get_store(sid)
+        .ok_or_else(|| err_json(StatusCode::NOT_FOUND, format!("store {sid} not found")))?;
+    let group = store.get_group(gid).ok_or_else(|| {
+        err_json(
+            StatusCode::NOT_FOUND,
+            format!("group {gid} not found in store {sid}"),
+        )
+    })?;
+
+    let status = group.status();
+    let leader_id = status.leader_id;
+    let local_applied = group.local_replica().contiguous_applied();
+
+    let mut voting_count = 0u32;
+    let mut reachable_count = 0u32;
+    let max_applied = local_applied;
+    let min_applied = local_applied;
+
+    if group.local_replica().voting {
+        voting_count += 1;
+        if status.local_replica.status != StatusLevel::Unhealthy {
+            reachable_count += 1;
+        }
+    }
+
+    for remote in &status.remotes {
+        if remote.voting {
+            voting_count += 1;
+            if remote.status != StatusLevel::Unhealthy {
+                reachable_count += 1;
+            }
+        }
+    }
+
+    let lag = 0u64;
+
+    let ready = leader_id != 0 && reachable_count > voting_count / 2;
+    let reason = if leader_id == 0 {
+        Some("no leader elected".to_string())
+    } else if reachable_count <= voting_count / 2 {
+        Some(format!("quorum not reachable: {reachable_count}/{voting_count}"))
+    } else {
+        None
+    };
+
+    let resp = ReadinessResponse {
+        ready,
+        leader_id,
+        term: group.local_replica().current_term_snapshot(),
+        voting_replicas: voting_count,
+        reachable_replicas: reachable_count,
+        max_applied_slot: max_applied,
+        min_applied_slot: min_applied,
+        lag,
+        reason,
+    };
+
+    let code = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    Ok((code, Json(resp)))
+}
+
+/// Response for `GET /operations/:id`.
+#[derive(Serialize, ToSchema)]
+pub struct OperationResponse {
+    pub id: u64,
+    pub kind: String,
+    pub status: String,
+    pub target: OperationTarget,
+    pub started_at_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl From<Operation> for OperationResponse {
+    fn from(op: Operation) -> Self {
+        Self {
+            id: op.id,
+            kind: op.kind.as_str().to_string(),
+            status: op.status.as_str().to_string(),
+            target: op.target,
+            started_at_ms: op.started_at_ms,
+            completed_at_ms: op.completed_at_ms,
+            error: op.error,
+        }
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/operations/{id}",
+    tag = "management",
+    params(
+        ("id" = u64, Path, description = "Operation id")
+    ),
+    responses(
+        (status = 200, description = "Operation status", body = OperationResponse),
+        (status = 404, description = "Operation not found", body = ErrorResponse)
+    )
+)]
+async fn get_operation(
+    State(state): State<RegistryArc>,
+    Path(id): Path<u64>,
+) -> Result<Json<OperationResponse>, (StatusCode, Json<ErrorResponse>)> {
+    match state.operations.get(id) {
+        Some(op) => Ok(Json(op.into())),
+        None => Err(err_json(
+            StatusCode::NOT_FOUND,
+            format!("operation {id} not found"),
+        )),
+    }
+}
+
+/// Response for async operations that return an operation ID.
+#[derive(Serialize, ToSchema)]
+pub struct AsyncOperationResponse {
+    pub operation_id: u64,
+    pub status: String,
+}
+
+/// Spawn a background task that polls group readiness until a new leader
+/// appears, then marks the operation as completed or failed.
+fn spawn_leader_wait(
+    state: RegistryArc,
+    operation_id: u64,
+    store_id: u64,
+    group_id: u64,
+    timeout: std::time::Duration,
+) {
+    state
+        .operations
+        .update_status(operation_id, OperationStatus::Running, None);
+
+    tokio::spawn(async move {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                state.operations.update_status(
+                    operation_id,
+                    OperationStatus::Failed,
+                    Some("timed out waiting for new leader".to_string()),
+                );
+                return;
+            }
+
+            let Some(store) = state.get_store(store_id) else {
+                state.operations.update_status(
+                    operation_id,
+                    OperationStatus::Failed,
+                    Some("store disappeared during operation".to_string()),
+                );
+                return;
+            };
+            let Some(group) = store.get_group(group_id) else {
+                state.operations.update_status(
+                    operation_id,
+                    OperationStatus::Failed,
+                    Some("group disappeared during operation".to_string()),
+                );
+                return;
+            };
+
+            if group.leader_id() != 0 {
+                state
+                    .operations
+                    .update_status(operation_id, OperationStatus::Completed, None);
+                info!(
+                    store_id,
+                    group_id,
+                    operation_id,
+                    new_leader = group.leader_id(),
+                    "async leader-wait operation completed"
+                );
+                return;
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    });
 }

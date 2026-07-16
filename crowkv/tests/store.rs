@@ -12,6 +12,9 @@
 //! server, no HTTP). Tests that boot the `crowkv-server` binary / HTTP
 //! management API live under `crowkv-server/tests`.
 
+#[path = "testkit/mod.rs"]
+mod testkit;
+
 #[path = "store/node_test.rs"]
 mod node;
 
@@ -29,3 +32,12 @@ mod shutdown;
 
 #[path = "store/persistence_test.rs"]
 mod persistence;
+
+#[path = "store/kv_correctness_test.rs"]
+mod kv_correctness;
+
+#[path = "store/multi_node_multi_group_test.rs"]
+mod multi_node_multi_group;
+
+#[path = "store/shutdown_under_load_test.rs"]
+mod shutdown_under_load;

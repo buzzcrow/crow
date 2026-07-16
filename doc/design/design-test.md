@@ -11,9 +11,9 @@ failure points at the lowest broken layer. Each layer gets its own test
 binary and tests only the logic that belongs to that layer.
 
 This document defines the **test strategy**, **scope of each layer**, and
-**high-level test coverage**. It is the reference for designing new tests
+**coverage rules** per layer. It is the reference for designing new tests
 when implementing features or components — consult this doc to determine
-which layer a new test belongs to and what it should cover.
+which layer a new test belongs to and what coverage rules apply.
 
 For the live task backlog (unfinished test gaps), see [`plan-test.md`](../working/plan-test.md).
 
@@ -27,6 +27,8 @@ store      (PxKvStore: many groups, one node identity, routing)   <- crowkv/test
       wal    (WalEngine: durable log)   slot (PxSlotList)           <- crowkv/tests/wal.rs, slot.rs
         unit (pure modules: codec, classifier, kv engine, roles)   <- crowkv/tests/{paxos,kv}.rs + wal/slot codec tests
 deployment (crowkv-server binary + HTTP mgmt API + multi-process)  <- crowkv-server/tests/*
+console    (mgmt API server + CLI: Axum REST, CLI commands)        <- crowkv-console/{web,cli}/tests/*
+ui e2e     (Playwright browser: SPA + real backend)                <- crowkv-console/web/ui/e2e/*
 ```
 
 ## Test Binary Map
@@ -42,6 +44,9 @@ deployment (crowkv-server binary + HTTP mgmt API + multi-process)  <- crowkv-ser
 | `crowkv/tests/group.rs` | group | `PxGroup` multi-node clusters (real loopback gRPC, no mocks) | `cluster/{group,group_election,remote_replica,learner_stream}.rs` |
 | `crowkv/tests/store.rs` | store | `PxKvStore` routing / lifecycle / status / health | `cluster/{px_kv_store,kv_store,kv_server,status}.rs` |
 | `crowkv-server/tests/*` | deployment | server binary + HTTP API, multi-process clusters, CLI, startup | `crowkv-server/src/*` |
+| `crowkv-console/web/tests/*` | console mgmt API | Axum REST API server: node management, OpenAPI proxy, API forwarding | `crowkv-console/web/src/*` |
+| `crowkv-console/{shared,cli}/tests/*` | console mgmt API | shared core (config, API client, health aggregation) + CLI commands | `crowkv-console/{shared,cli}/src/*` |
+| `crowkv-console/web/ui/e2e/*` | UI E2E | Playwright browser tests: SPA interactions, context menus, dialogs, KV panel | `crowkv-console/web/ui/src/*` + real backend |
 
 **Placement rule:** a test that only needs the `crowkv` library (even if it
 binds the embedded gRPC server via `PxKvStore::start`) lives in `crowkv`. A
@@ -62,6 +67,65 @@ test that boots the `crowkv-server` binary / HTTP management API lives in
 - Mixed put/delete across multiple slots and batches
 - Persistence round-trip: all above operations survive WAL replay + restart
 
+**Cluster verification rule:** every tier that creates a real `PxKvStore`,
+`PxGroup`, or `crowkv-server` process must verify two things before
+proceeding to tier-specific assertions:
+
+1. **Leader election succeeded within a bounded timeout.** If leader
+   election does not complete within the timeout (typically 10 s for
+   multi-node, 3 s for single-node), the test fails — slow election is a
+   bug, not a flaky test. The test must assert that exactly one leader
+   exists, not just that "some leader appeared."
+
+2. **Basic KV CRUD correctness via the client library.** After leader
+   election, perform a minimal CRUD cycle through `CrowkvClient` (or
+   direct `PxKvStore` API for lower layers) and verify correctness:
+   - Put a key → Get returns the same value
+   - Overwrite → Get returns new value
+   - Delete → Get returns not-found
+   - Scan returns expected keys
+
+   **Edge-case coverage** (at least one test per layer must cover these):
+   - Empty key (`""`)
+   - Large key (≥1 KB)
+   - Key with special bytes (null bytes, high-UTF8, whitespace-only)
+   - Large value (≥1 MB)
+   - Small value (1 byte)
+   - Empty value (`""`)
+
+   Performance is not asserted here — correctness only. A put that takes
+   5 s but returns `ok=true` and is readable via get is a pass. Performance
+   tuning is tracked separately (R10 benchmark framework).
+
+   KV operations are gRPC only (no REST API for KV). Tests use
+   `CrowkvClient` (deployment/UI layers) or `PxKvStore` public API
+   directly (group/store layers). The console mgmt API layer verifies
+   topology management via REST but does not perform KV operations — KV
+   correctness is delegated to the deployment or UI E2E layer.
+
+**Leader change & reconfig rule:** every tiered layer (Group, Store,
+Deployment, UI E2E) that creates a multi-replica cluster must cover:
+
+1. **Leader change:** trigger step-down on the current leader, verify a new
+   leader is elected within bounded timeout (10 s multi-node, 3 s
+   single-node), verify KV operations continue to work after the new leader
+   is established, verify the old leader rejoins as follower after restart
+   (if applicable).
+
+2. **Reconfig — add replica:** add a new replica to a running group with
+   existing data, verify the new replica catches up (data visible via scan
+   or get on the new node) within bounded timeout. Since tests write few
+   keys, catch-up should complete in seconds — slow catch-up is a bug.
+
+3. **Reconfig — remove replica:** remove a non-leader replica from a running
+   group, verify the group continues to accept KV operations (quorum
+   intact), verify health status reflects the reduced membership.
+
+4. **Reconfig — remove leader:** remove or stop the leader's replica, verify
+   a new leader is elected within bounded timeout, verify KV operations
+   resume. This is the most operationally sensitive scenario — the test must
+   not block indefinitely waiting for election.
+
 ## Layer Definitions
 
 ### Unit Layer
@@ -77,14 +141,18 @@ deterministic and run in microseconds.
 - `kv/mem_kv` — highest-slot-wins, idempotent apply, tombstone, intra-batch last-wins, prefix scan, compare, wire decode.
 - `kv/op` — wire-format encode/decode in isolation.
 
-**Covered:**
-- Acceptor promise/accept fence, ballot ordering, prior accepted.
-- Error keyword + retry-action classification.
-- Learner note-chosen, dedup cache (`dedup_lookup`), durable-watermark tracking.
-- `PxLogEntry` / `PxBallot` edge cases (NoOp vs Accepted, ballot tie-break).
-- `InMemKV` highest-slot-wins, idempotent apply, tombstone, intra-batch, prefix scan, compare, wire decode.
-- `kv/op` wire-format encode/decode.
-- `wal/record` encode/decode round-trip, CRC + truncation errors.
+**Coverage rules:**
+- Acceptor: promise/accept fence, ballot ordering, prior accepted value
+  return.
+- Learner: note-chosen advances chosen/applied, dedup cache lookup, durable
+  watermark tracking.
+- Error: keyword classification + retry-action mapping for all error types.
+- Roles: `PxLogEntry` / `PxBallot` edge cases (NoOp vs Accepted, ballot
+  tie-break).
+- `mem_kv`: highest-slot-wins, idempotent apply, tombstone semantics,
+  intra-batch last-wins, prefix scan, compare, wire decode.
+- `kv/op`: wire-format encode/decode round-trip.
+- `wal/record`: encode/decode round-trip, CRC validation, truncation errors.
 
 ### Election Unit Layer
 
@@ -101,17 +169,33 @@ role transitions, lease management).
 - Term fencing in prepare/accept.
 - Election metrics.
 
-**Covered:**
-- Role transitions: follower (adopts higher term, clears leader), precandidate (no term bump), candidate (bumps term, votes self, extends lockout), leader (sets self, resets lease).
-- `new_inheriting_election_state`: preserves term/voted_for/role, shares acceptor + learner.
-- `PreVote`: grants on higher term + up-to-date log, rejects stale term/log/lockout, no term bump or voted_for mutation.
-- `RequestVote`: grants on higher term + up-to-date log, rejects stale log/lockout/lower term, adopts term + sets voted_for, lockout prevents re-grant, reply carries frontier triple.
-- Heartbeat: adopts higher term, records leader, rejects lower term, accepts equal term, applies committed entries up to commit_slot, idempotent, steps down leader on higher-term heartbeat.
-- Lease: requires leader + unexpired lease, expires after deadline, monotonic extension, reset on role change, renew_lease extends by configured duration minus skew.
-- Term fencing in prepare/accept: rejects stale term, adopts higher term, forwards on equal term.
-- Election metrics: election_count bumps on become_candidate, snapshot reflects state.
-- `handle_step_down`: strict-fence policy (accepts only if leader + matching term + matching target_leader_id), rejects when not leader / term mismatch / wrong target, preserves term on accept, double step-down rejected, reply reports actual term and leader.
-- `frontier_triple` consistency: zero on fresh replica, reflects accepted and learned slots, preserves across role transitions (candidate, leader, follower), handles gaps in accepted log, advances with progressive learn, carried in both PreVote and RequestVote replies.
+**Coverage rules:**
+- Role transitions: follower (adopt higher term, clear leader), precandidate
+  (no term bump), candidate (term bump, self-vote, lockout), leader (set self,
+  reset lease).
+- `new_inheriting_election_state`: preserves term/voted_for/role, shares
+  acceptor + learner.
+- `PreVote`: grant on higher term + up-to-date log, reject stale term/log/
+  lockout, no term bump or voted_for mutation.
+- `RequestVote`: grant on higher term + up-to-date log, reject stale log/
+  lockout/lower term, adopt term + set voted_for, lockout prevents re-grant,
+  reply carries frontier triple.
+- Heartbeat: adopt higher term, record leader, reject lower term, accept
+  equal term, apply committed entries up to commit_slot, idempotent, step
+  down leader on higher-term heartbeat.
+- Lease: requires leader + unexpired, expiry after deadline, monotonic
+  extension, reset on role change, renew_lease extends by configured duration
+  minus skew.
+- Term fencing in prepare/accept: reject stale term, adopt higher term,
+  forward on equal term.
+- `handle_step_down`: strict-fence policy (leader + matching term + matching
+  target_leader_id), reject when not leader / term mismatch / wrong target,
+  preserve term on accept, double step-down rejected, reply reports actual
+  term and leader.
+- `frontier_triple` consistency: zero on fresh replica, reflects accepted
+  and learned slots, preserves across role transitions, handles gaps in
+  accepted log, advances with progressive learn, carried in PreVote and
+  RequestVote replies.
 
 ### WAL Subsystem Layer
 
@@ -133,7 +217,26 @@ replay, GC, I/O backends, pipeline writer. Tests use real temp filesystems
 - `pipeline_writer` — batch coalescing, ack ordering, seal, index updates, batch stats (via `WalEngine` public API).
 - `record` — encode/decode round-trip, CRC + truncation errors.
 
-**Covered:** All modules listed above are tested. No open gaps.
+**Coverage rules:**
+- Engine: append, rotation, seal, durable-flush batching, affinity disks,
+  multi-disk distribution, writer failure, large/iov-split batches,
+  concurrent appends.
+- Segment: header/seal, reader over text + binary, aligned padding recovery.
+- Replay: record recovery, term/voted-for/watermark rebuild, dedup
+  checkpoint, determinism, config-change recovery, restore-to-watermark.
+- GC: remove-below-watermark, zero-watermark no-op, replay-after-gc,
+  snapshot-slot prefix.
+- Block/pipeline backend: alignment, RMW, amplification accounting.
+- File backend: real-filesystem fallback (open/append/flush/fsync/truncate).
+- File restore: durability round-trip over real File backend (close + reopen
+  recovers all records, term/vote/watermark, resume-append).
+- IO backend: detect() selection, open/rename/unlink/read_dir/create_dir_all/
+  exists.
+- Index: insert/locate, register/remove segment, rebuild-from-scans,
+  slot_count.
+- Pipeline writer: batch coalescing, ack ordering, seal, index updates,
+  batch stats.
+- Record: encode/decode round-trip, CRC + truncation errors.
 
 ### Slot Subsystem Layer
 
@@ -147,7 +250,15 @@ interactions with long-lived read guards.
 - Concurrent stress — multi-thread insert at disjoint ranges, concurrent insert+read, insert+trim+reclaim, full insert+trim+reclaim+read stress.
 - Reclamation watermark — long-lived guard prevents reclaim, multiple guards pin chunk, idempotent reclaim, progressive trim across chunks.
 
-**Covered:** All modules listed above are tested. No open gaps.
+**Coverage rules:**
+- `PxSlotList`: insert/get/trim/reclaim, chunk growth, sparse insert, tail
+  lookup, atomic guard, range iteration.
+- `PxSlotNode`: accept-after-promise, duplicate insert, trim/reclaim with
+  live refs.
+- Concurrent stress: multi-thread insert at disjoint ranges, concurrent
+  insert+read, insert+trim+reclaim, full insert+trim+reclaim+read stress.
+- Reclamation watermark: long-lived guard prevents reclaim, multiple guards
+  pin chunk, idempotent reclaim, progressive trim across chunks.
 
 ### Replica Layer
 
@@ -155,14 +266,22 @@ interactions with long-lived read guards.
 acceptor + learner + WAL + slot integration: prepare/accept with WAL
 persistence, dedup suppression, snapshot install, WAL replay ordering.
 
-**Covered:**
-- WAL-backed persistence round-trip: single Put, overwrite (highest-slot-wins), Delete (tombstone survives restart), put-then-delete same key, batch with intra-batch put+delete (last-wins), mixed put/delete across multiple slots and batches.
-- Classic prepare/accept tracking.
-- KV operation correctness: Put applies value, overwrite replaces previous, Delete produces tombstone, delete on non-existent key is no-op, batch with multiple puts, intra-batch last-wins (put→delete→put ordering), empty batch (NoOp), multiple slots with mixed ops.
-- Dedup suppression.
-- Snapshot install / truncate-and-resume.
-- Multi-slot WAL replay ordering: contiguous slots below watermark all applied, hole below watermark stops at hole (partial apply), out-of-order WAL records rebuilt correctly (replay sorts by slot), slots above watermark not applied (left for consensus), empty WAL produces zero state, watermark higher than accepted stops at first hole.
-- Concurrent learn_chosen + on_accept: sequential learn-then-accept and accept-then-learn on same slot, concurrent tokio::join! on same slot (no panic, consistent state), concurrent on adjacent slots, re-accept with different value after learn, 10 concurrent accepts on disjoint slots, 5 concurrent learn_chosen on sequential slots.
+**Coverage rules:**
+- KV operation correctness: all op types and orderings per the KV operation
+  correctness rule above, with WAL-backed persistence round-trip.
+- Prepare/accept tracking: classic Paxos prepare → accept → learn cycle.
+- Dedup suppression: duplicate prepare/accept does not double-apply.
+- Snapshot install / truncate-and-resume: snapshot replaces local state,
+  WAL truncated to snapshot point, append resumes correctly.
+- Multi-slot WAL replay: contiguous slots below watermark all applied, hole
+  below watermark stops at hole (partial apply), out-of-order records sorted
+  by slot during replay, slots above watermark not applied, empty WAL
+  produces zero state, watermark higher than accepted stops at first hole.
+- Concurrency: sequential learn-then-accept and accept-then-learn on same
+  slot, concurrent tokio::join! on same slot (no panic, consistent state),
+  concurrent on adjacent slots, re-accept with different value after learn,
+  concurrent accepts on disjoint slots, concurrent learns on sequential
+  slots.
 
 ### Group Layer
 
@@ -170,16 +289,43 @@ persistence, dedup suppression, snapshot install, WAL replay ordering.
 gRPC (no mocks). Tests exercise full Paxos rounds, leader election, KV
 through the group, durability under crash/restart.
 
-**Covered:**
-- Single-leader propose, sequential slot allocation, follower rejects, classic propose.
-- Proposer window full → busy; repair fills gap and advances frontier.
-- Election: 1–7 replica counts elect a single leader, driver scaffold, step-down, propose-after-step-down.
-- KV through the group: Put + BatchWrite (puts) + Delete apply to all learners, follower forwards Get/Scan, forward loop-guard. **Gap:** full op correctness checklist not yet covered (see [`plan-test.md`](../working/plan-test.md)).
+#### Tiered Strategy
+
+Tests are organized in three tiers of increasing complexity. Each tier
+builds on the confidence of the one below.
+
+**Tier 1 — Basic Group Operations.** Single-leader propose, sequential slot
+allocation, KV through the group (all op types per KV correctness rule),
+follower forwarding, durability under crash/restart. These verify the core
+Paxos + KV integration works end-to-end within one group.
+
+**Tier 2 — Membership & Recovery.** Election across 1–7 replicas, step-down
+and propose-after-step-down, new-member snapshot join, membership epoch
+fencing, learner stream, recovery above durable-commit watermark. These
+verify the group handles dynamic membership and catch-up correctly.
+
+**Tier 3 — Failure & Edge Cases.** Leader kill + restart no-data-loss,
+two-replica even-quorum (no progress without both up), leader change
+simulation, remote replica unreachable, preemption retry, kv-slot retry on
+prior accepted. These verify the group degrades gracefully and recovers
+from failures.
+
+#### Coverage Rules
+
+- Every KV op type and ordering per the KV operation correctness rule,
+  verified via `engine_get` on all replicas (not just the leader).
+- Election must be tested for 1, 2, 3, 5, 7 replica counts — single leader
+  elected, no split-brain.
+- Follower must reject direct client writes and return `NotLeaderHint`.
+- Proposer window full must return `Busy`; repair must fill gap and advance
+  frontier.
+- Durability: single-node crash/restart and full-cluster restart must
+  preserve all committed entries (including tombstones).
+- New-member snapshot join: fresh replica pulls snapshot and catches up to
+  current state.
+- Membership epoch fencing: stale-member accept/reject behavior across
+  membership changes.
 - Remote replica transport: unreachable/invalid endpoint returns error.
-- Preemption retry, kv-slot retry on prior accepted value.
-- Durability: single-node crash/restart, full-cluster restart keeps deletes.
-- New-member snapshot join: pull a snapshot from an existing group to bootstrap a fresh replica.
-- Membership epoch fencing: stale-member accept/reject behavior across membership changes.
 
 ### Store Layer
 
@@ -187,13 +333,121 @@ through the group, durability under crash/restart.
 management, topology status. Tests use embedded gRPC server via
 `PxKvStore::start`.
 
-**Covered:**
-- Single-node KV / read modes, follower redirect hint, dedup.
-- Multi-group routing within one node, dynamic add/remove group, missing-group error.
-- KV ops: Put + BatchWrite (puts) + Delete via `kv_put`/`kv_delete`/`kv_batch_write`, persistence round-trip (put/overwrite/delete survive restart). **Gap:** full op correctness checklist not yet covered (see [`plan-test.md`](../working/plan-test.md)).
-- Topology `status` composition, `health` levels, `shutdown` cascade + idempotency.
+#### Tiered Strategy
 
-### Web UI E2E Layer
+**Tier 1 — Single-Store Operations.** Single-node KV with all read modes,
+follower redirect hint, dedup, KV ops via public API (`kv_put`, `kv_delete`,
+`kv_batch_write`), persistence round-trip. These verify the store-level
+routing and KV interface works correctly.
+
+**Tier 2 — Multi-Group Interactions.** Multi-group routing within one node,
+dynamic add/remove group, missing-group error, per-group WAL-root isolation,
+per-group independent leadership. These verify groups within a store are
+properly isolated.
+
+**Tier 3 — Lifecycle & Topology.** Topology `status` composition, `health`
+levels, graceful `shutdown` cascade + idempotency, store-wide shutdown with
+multiple active groups under load. These verify the store manages its
+lifecycle correctly across all groups.
+
+#### Coverage Rules
+
+- Every KV op type and ordering per the KV operation correctness rule, through
+  `PxKvStore` public API.
+- Single-node: all read modes (leader read, follower redirect, stale read if
+  applicable), dedup.
+- Multi-group: routing to correct group, dynamic add/remove group,
+  missing-group returns error.
+- Persistence: put/overwrite/delete survive restart.
+- Per-group isolation: no cross-group slot/key bleed, independent WAL roots.
+- Topology: `status` composition is correct, `health` levels reflect group
+  states, `shutdown` cascades to all groups and is idempotent.
+
+### Deployment Layer
+
+**Scope:** `crowkv-server` binary + HTTP management API + multi-process
+clusters. Tests boot the actual server binary, exercise the HTTP API, and
+verify multi-process cluster formation and lifecycle.
+
+**Source:** `crowkv-server/tests/*`.
+
+**Test runner:** `pixi run test-server`.
+
+#### Tiered Strategy
+
+**Tier 1 — Single-Server API.** Server startup/shutdown, HTTP management API
+endpoints (stores, groups, replicas, nodes, racks), health check, OpenAPI
+serving. These verify the server binary boots and the HTTP API works.
+
+**Tier 2 — Multi-Process Clusters.** Multi-node cluster formation, KV
+operations through the HTTP API, leader election across processes, store/
+group lifecycle via API calls. These verify the server integrates correctly
+in a distributed setting.
+
+**Tier 3 — Failure & Recovery.** Process crash/restart, network partition
+between processes, multi-store-per-node under failure, graceful shutdown
+under load. These verify the deployment handles operational failures.
+
+#### Coverage Rules
+
+- Every HTTP management API endpoint must have at least one test: stores
+  (list/add/remove), groups (add/remove), replicas (add/remove/list), nodes
+  (add/remove/deploy/stop/restart), racks (add/remove), health, topology.
+- Async operation API: `POST /step-down` returns `202 {operation_id}` by
+  default; `?sync=true` preserves synchronous behavior. `GET /operations/:id`
+  returns operation status (`pending`/`running`/`completed`/`failed`).
+  `GET /stores/:sid/groups/:gid/ready` returns `200` when ready (leader
+  elected, quorum reachable), `503` when not ready with reason.
+- Server startup must be tested with various initial configurations.
+- Multi-process cluster: ≥3 nodes form a cluster, elect leaders, and serve
+  KV operations.
+- Shutdown: graceful shutdown terminates all groups cleanly; restart recovers
+  state.
+
+### Console Mgmt API Layer
+
+**Scope:** Console management API server (Axum) and CLI frontend. Tests
+verify the HTTP REST API endpoints, OpenAPI proxy, API forwarding to
+crowkv-server nodes, shared core logic (config management, API client,
+health aggregation), and CLI commands.
+
+**Source:** `crowkv-console/web/tests/*` (Axum server),
+`crowkv-console/shared/tests/*` (shared core),
+`crowkv-console/cli/tests/*` (CLI).
+
+**Test runners:** `pixi run test-mgmt-api` (web server),
+`pixi run test-cli` (shared core + CLI).
+
+#### Tiered Strategy
+
+**Tier 1 — Single-Endpoint API.** Each REST endpoint tested in isolation:
+add/list/remove racks, nodes, stores, groups, replicas; health check;
+topology export; OpenAPI proxy. These verify individual API correctness.
+
+**Tier 2 — Multi-Node Cluster Creation.** Create a full cluster topology via
+API calls in sequence: add racks → add nodes → deploy servers → create
+stores → add groups → add replicas → wait for leaders. Verify topology
+state, health aggregation, and API forwarding at each step. This verifies
+the API composition works for real deployments.
+
+**Tier 3 — Lifecycle & Error Handling.** Add/remove operations on a live
+cluster (remove group from running store, remove node from rack, re-deploy
+after stop). Error cases: duplicate ID rejection, not-found errors,
+unreachable node forwarding failure, config persistence across restart.
+
+#### Coverage Rules
+- Every REST API endpoint must have at least one test: racks (add/list/
+  remove), nodes (add/remove/deploy/stop/restart), stores (add/list/remove),
+  groups (add/remove), replicas (add/remove/list), health, topology,
+  OpenAPI proxy.
+- Every CLI command must have at least one test: store/group/node lifecycle,
+  health check, topology export, KV operations (if supported via CLI).
+- API forwarding: requests to a node's crowkv-server are correctly proxied.
+- Health aggregation: multi-node health is correctly aggregated into overall
+  status.
+- Config persistence: cluster config survives process restart.
+
+### UI E2E Layer
 
 **Scope:** Playwright browser tests against a real `crowkv-web` + `crowkv-server`
 backend. Tests drive the SPA exactly as an operator would — clicks, context menus,
@@ -245,6 +499,10 @@ to timing. Leader election timeouts are capped at 10 s; all other assertions at 
   Load More, All Groups mode, auto-scan toggle, demo inject, demo delete, copy.
 - **Every inspector feature** must have at least one test: Details tab (entity
   fields), Activity tab (log entries + clear), cross-jump (both directions).
+- **Async operation feedback** (Tier 3): when a step-down or reconfig
+  operation is triggered via UI, the UI should show progress feedback (spinner
+  or status indicator) and poll the async operation API until completion,
+  then refresh topology. Tests verify the UI does not block indefinitely.
 - **Comparative tests** (Tier 2) must run on both simple and complex topologies
   using the same assertion code path.
 

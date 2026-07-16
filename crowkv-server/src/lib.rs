@@ -10,5 +10,6 @@
 
 pub mod cli;
 pub mod mgmt_api;
+pub mod operation_registry;
 pub mod startup;
 pub mod store_registry;
