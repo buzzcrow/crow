@@ -18,7 +18,6 @@ doc only when a task touches a topic in its row.
 | Doc | When to read |
 | --- | --- |
 | `doc/working/plan-test.md` | Unfinished test task backlog with checkboxes. Read when picking the next test to implement. |
-| `doc/working/plan-demo.md` | Demo recording plan: cluster lifecycle GIF, KV operations GIF, failover GIF. Read when recording README demos. |
 | `doc/working/new_requirements.md` | Forward-looking implementation backlog with priority/complexity analysis and implementation process. Read before picking up crowtree/crowkv follow-up work. |
 
 ## Project Files (repo root)
