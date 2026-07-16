@@ -3,8 +3,14 @@
 
 # CrowKV Test Task Backlog
 
+**Override:** This file is **persistent** — it is not deleted after the
+requirement (R9) is complete. Only completed tasks are removed; the file
+itself remains as the ongoing test task backlog. This overrides the
+`/implement-requirement` workflow's cleanup step which would normally delete
+`plan-<topic>.md`.
+
 Unfinished test tasks, grouped by layer. Each task has a checkbox for tracking.
-For test strategy, layer scope, and coverage details, see [`design/design-test.md`](design/design-test.md).
+For test strategy, layer scope, and coverage details, see [`design/design-test.md`](../design/design-test.md).
 
 ## Suite Timing
 
@@ -16,7 +22,7 @@ Measured on 2026-07-16. All six suites passed with zero failures.
 | `test-core` | pass | 404 | 8.9 s |
 | `test-server` | pass | 47 | 9.4 s |
 | `test-cli` | pass | 56 | 9.6 s |
-| `test-web` | pass | 49 | 39.1 s |
+| `test-mgmt-api` | pass | 49 | 39.1 s |
 | `test-ui` | pass | 26/26 | 39.3 s |
 
 ## Election Unit
@@ -30,15 +36,20 @@ All tasks completed.
 ## Group
 
 - [ ] **KV operation correctness**: all op types and orderings through group `propose` — Put, overwrite, Delete, delete non-existent, batch with multiple puts, intra-batch last-wins, put-then-delete, delete-then-put, empty batch, mixed ops across slots. Verify via `engine_get` on all replicas.
+- [ ] **KV edge-case keys**: empty key, large key (≥1KB), special-bytes key (null, high-UTF8, whitespace), large value (≥1MB), small value (1 byte), empty value. At least one test covering all edge cases through group propose.
 - [ ] **LearnerStream** (`cluster/learner_stream.rs`): bidi-stream framing, flow control, parallel in-flight slots, stream re-establish after drop.
 - [ ] **Recovery above the durable-commit watermark** via bulk Phase 1 / heartbeat catch-up on a fresh follower.
 - [ ] **Leader-kill + restart no-data-loss** at full speed (blocked by repair-correctness).
 - [ ] Two-replica even-quorum behaviour (no progress without both up) as an explicit assertion.
 - [ ] **Leader change simulation**: start 3-node cluster, write keys, force step-down, wait for new leader, write more keys, force another step-down and re-election, verify all keys readable through final leader. Location: `crowkv/tests/group/g3_leader_change_test.rs`.
+- [ ] **Reconfig — add replica catch-up**: 3-node group with existing data, add 4th replica, verify new replica catches up (data visible via scan) within 10 s.
+- [ ] **Reconfig — remove non-leader**: 3-node group, remove a non-leader replica, verify group continues to accept KV ops (quorum intact).
+- [ ] **Reconfig — remove leader**: 3-node group, remove the leader, verify new leader elected within 10 s, verify KV ops resume.
 
 ## Store
 
 - [ ] **KV operation correctness**: all op types and orderings through `PxKvStore` public API (`kv_put`, `kv_delete`, `kv_batch_write`) — same checklist as group layer.
+- [ ] **KV edge-case keys**: same edge-case coverage as group layer, through `PxKvStore` public API.
 - [ ] **Multi-node, multi-group store**: ≥3 nodes each hosting the same set of groups; assert per-group isolation and independent leadership.
 - [ ] Per-group WAL-root isolation on one node (no cross-group slot/key bleed) at the store layer.
 - [ ] Store-wide graceful shutdown with multiple active groups under load.
@@ -47,11 +58,17 @@ All tasks completed.
 
 - [ ] Re-enable the four ignored process-level tests once their root causes are fixed.
 - [ ] Multi-store-per-node process test that mirrors the Web UI multi-store topology end-to-end.
+- [ ] **Leader change via API**: 3-node process cluster, trigger step-down via HTTP API, poll `/ready` until new leader, verify KV ops continue.
+- [ ] **Reconfig via API — add replica**: 3-node cluster, add 4th replica via HTTP API, poll `/ready` until caught up, verify data on new node.
+- [ ] **Reconfig via API — remove leader**: 3-node cluster, remove leader via HTTP API, poll `/ready` until new leader, verify KV ops resume.
+- [ ] **Async operation API**: trigger step-down, verify `202 {operation_id}`, poll `GET /operations/:id` until `Completed`.
+- [ ] **Readiness API**: verify `GET /groups/:gid/ready` returns `200` when ready, `503` when no leader, `503` with lag info when replica is behind.
+- [ ] **Backward compat**: existing tests pass with `?sync=true` on step-down, remove replica, add replica endpoints.
 
 ## E2E / Playwright UI Test Implementation Plan
 
 The test suite follows the tiered strategy defined in
-[`design/design-test.md`](../design/design-test.md) Web UI E2E Layer.
+[`design/design-test.md`](../design/design-test.md) UI E2E Layer.
 This plan covers both **enhancing existing tests** to fit the tiered system
 and **creating new tests** to fill coverage gaps.
 
@@ -126,6 +143,9 @@ If a test passes on SIMPLE but fails on COMPLEX, the gap is multi-node interacti
 
 These test the reconfig feature: stopping/deleting nodes while groups are active,
 verifying the cluster continues to operate correctly with reduced membership.
+Once R12 (async operation API) is implemented, these tests should use the
+async operation pattern (trigger → poll `/operations/:id` → poll `/ready`)
+instead of blocking on the HTTP call.
 
 - [ ] **42-stop-server-keeps-group**: 3-node group, stop the server on a non-leader node via context menu. Verify group still accepts puts/gets (quorum intact). Verify health pill shows Degraded. Restart the stopped server, verify group returns to full health.
 - [ ] **43-stop-leader-reelection**: 3-node group, identify the leader, stop the leader's server. Verify a new leader is elected within 10s. Verify KV put/get still works. Restart the old leader, verify it rejoins as follower.

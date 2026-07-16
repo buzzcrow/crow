@@ -29,7 +29,7 @@ Use this workflow when picking up an item from
                    later blocking or human intervention.
 6. Full test     → Run the entire test-suite (`pixi run test-suite`) after the
    suite             commit. This includes: test-ct, test-ffi, test-core,
-                   test-server, test-cli, test-web-ci, test-ui. Tests may be
+                   test-server, test-cli, test-mgmt-api-ci, test-ui. Tests may be
                    run individually (`pixi run test-ct`, etc.) for faster
                    iteration, but every test must pass. No failure may be
                    skipped — all failures must be fixed before proceeding.

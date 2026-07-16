@@ -71,8 +71,8 @@ test-ffi = { cmd = "cargo test -p crowtree-ffi --all-targets", depends-on = ["bu
 test-core = { cmd = "rm -rf test-logs && cargo test -p crowkv --all-targets", depends-on = ["build"] }
 test-server = { cmd = "cargo test -p crowkv-server --all-targets", depends-on = ["build"] }
 test-cli = { cmd = "cargo test -p crowkv-console-shared -p crowkv-cli --all-targets", depends-on = ["build"] }
-test-web = { cmd = "cargo test -p crowkv-web --all-targets", depends-on = ["build"] }
-test-web-ci = { cmd = "cargo test -p crowkv-web --all-targets -- --test-threads=1", depends-on = ["build"] }
+test-mgmt-api = { cmd = "cargo test -p crowkv-web --all-targets", depends-on = ["build"] }
+test-mgmt-api-ci = { cmd = "cargo test -p crowkv-web --all-targets -- --test-threads=1", depends-on = ["build"] }
 install-playwright = "cd crowkv-console/web/ui && npx playwright install chromium"
 test-ui = { cmd = "rm -rf test-logs && cargo build -p crowkv-server && export CROWKV_SERVER_BINARY=$(pwd)/target/debug/crowkv-server && cd crowkv-console/web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-web-deps"] }
 test = { cmd = '''
@@ -82,7 +82,7 @@ pixi run test-ffi & p2=$!
 pixi run test-core & p3=$!
 pixi run test-server & p4=$!
 pixi run test-cli & p5=$!
-pixi run test-web & p6=$!
+pixi run test-mgmt-api & p6=$!
 pixi run test-ui & p7=$!
 wait $p1 && wait $p2 && wait $p3 && wait $p4 && wait $p5 && wait $p6 && wait $p7
 '
@@ -95,7 +95,7 @@ pixi run test-ffi
 pixi run test-core
 pixi run test-server
 pixi run test-cli
-pixi run test-web-ci
+pixi run test-mgmt-api-ci
 pixi run test-ui
 '
 ''', depends-on = ["build", "install-web-deps"] }
