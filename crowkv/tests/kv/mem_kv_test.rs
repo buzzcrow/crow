@@ -4,7 +4,7 @@
 //! `InMemKV` behavior: shared `KVEngine` conformance suite (see
 //! `conformance.rs`) plus `InMemKV`-only cases (`clear`, wire-format decode).
 
-use crowkv::kv::{Batch, InMemKV, KVEngine};
+use crowkv::kv::{Batch, Cell, InMemKV, KVEngine};
 
 use super::conformance;
 use super::conformance::{batch, del, put};
@@ -69,6 +69,20 @@ fn snapshot_export_import_round_trip() {
 fn is_healthy_defaults_to_true() {
     let e = InMemKV::new();
     assert!(e.is_healthy(), "InMemKV has no I/O path to fail");
+}
+
+#[test]
+fn delete_nonexistent_key_is_noop() {
+    let e = InMemKV::new();
+    e.apply(1, &batch(vec![del(b"missing")])).into_ready().unwrap();
+    assert_eq!(e.get(b"missing").into_ready(), None);
+    assert_eq!(e.live_key_count(), 0);
+    let all = e.iter_all();
+    assert_eq!(
+        all,
+        vec![(b"missing".to_vec(), 1, Cell::Tombstone)],
+        "tombstone recorded at applied slot even for non-existent key"
+    );
 }
 
 #[test]
