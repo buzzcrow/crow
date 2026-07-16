@@ -76,11 +76,11 @@ Source: `crowkv/src/wal/`. Tests: 12 files, ~92 tests. Coverage is thorough.
 
 Source: `crowkv/src/paxos/slot_list.rs`, `slot_node.rs`. Tests: `slot_list_test.rs` (18 tests).
 
-- [ ] **Concurrent insert at disjoint ranges**: N threads inserting into non-overlapping slot ranges — all succeed, all retrievable. Design doc calls out this concurrent stress scenario.
-- [ ] **Concurrent insert + read**: writer inserts while reader reads random slots — no panics, no corrupted data.
-- [ ] **Concurrent insert + trim + reclaim**: writer inserts while reaper trims/reclaims — no UAF, no double-free, len consistent. Run under Miri/TSan if available.
-- [ ] **Multiple guards pin same chunk**: 2+ guards on same chunk, trim past chunk, reclaim — chunk not freed until all guards dropped.
-- [ ] **Progressive trim across chunks**: insert 3 chunks, trim+reclaim one at a time — each reclaim frees exactly one chunk.
+- [x] **Concurrent insert at disjoint ranges**
+- [x] **Concurrent insert + read**
+- [x] **Concurrent insert + trim + reclaim**
+- [x] **Multiple guards pin same chunk**
+- [x] **Progressive trim across chunks**
 
 ## Replica
 
