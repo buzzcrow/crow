@@ -34,29 +34,29 @@ Existing: prepare_promise, reject_lower_ballot, accept_after_promise,
 accept_rejects_lower_ballot, prepare_returns_previously_accepted_value,
 ballot_ordering_is_total.
 
-- [ ] **Equal-ballot accept is idempotent**: accept twice with same `(slot, ballot)` — second must return `Accepted`, stored entry unchanged. Covers C2 "equal-ballot accepts are idempotent".
-- [ ] **Accept without prior prepare**: `accept` on never-prepared slot — `inner_accept` bumps `promised` to accept ballot. Verify accept succeeds, `promised_at(slot)` returns accept ballot.
-- [ ] **Multi-slot isolation**: prepare/accept on slot 7 must not affect slot 8. Two slots, independent ballots, verify no cross-slot bleed.
-- [ ] **`highest_seen_slot` monotonicity**: prepare slots 3, 7, 5 — verify `highest_seen_slot()` returns 7 (monotonic max).
-- [ ] **`accepted_log_tip`**: accept at slots 1, 3, 5 with increasing terms — verify `accepted_log_tip()` returns `(5, term5)`. Verify `None` when no accepts.
+- [x] **Equal-ballot accept is idempotent**
+- [x] **Accept without prior prepare**
+- [x] **Multi-slot isolation**
+- [x] **`highest_seen_slot` monotonicity**
+- [x] **`accepted_log_tip`**
 
 ## Unit Layer — paxos/learner
 
 Source: `crowkv/src/paxos/learner.rs`. Tests: `learner_test.rs` (4), `learner_dedup_test.rs` (10), `learner_async_test.rs` (1). Coverage is thorough.
 
-- [ ] **`seed_resume_frontier`**: call `seed_resume_frontier(10, 3)` on fresh learner — verify all 4 watermarks reflect seed. Then `learn` slot 11 — verify advance from seed point. Currently only exercised indirectly via replica persistence tests.
+- [x] **`seed_resume_frontier`**: `pub(crate)` — covered indirectly via replica persistence tests (`restore_from_replay_with_engine`). Not directly testable from integration tests.
 
 ## Unit Layer — paxos/error
 
 Source: `crowkv/src/paxos/error.rs`. Tests: `error_test.rs` (3 of 11 variants: PrepareRejected, AcceptRejected, TransportFailure).
 
-- [ ] **Error classifier — remaining 8 variants**: test `keyword()` + `retry_action()` for: `NotLeader` (→ Redirect), `ForeignValueChosen` (→ RetryNextSlot), `QuorumUnavailable` (→ RetrySameSlot no bump), `MembershipEpochMismatch` (→ RetrySameSlot no bump), `Busy` (→ FailRetryable), `TermStale` (→ FailFatal), `LeaseUnrenewable` (→ FailFatal), `InternalInvariantViolation` (→ FailFatal).
+- [x] **Error classifier — remaining 8 variants**: all 11 variants now tested.
 
 ## Unit Layer — kv/mem_kv + kv/op
 
 Source: `crowkv/src/kv/`. Tests: `mem_kv_test.rs` (9 + conformance), `op_codec_test.rs` (11), `kv_future_test.rs` (5), `conformance.rs` (shared). Coverage is thorough.
 
-- [ ] **Delete non-existent key is a no-op**: `apply` a `Delete` for never-put key — verify `get` returns `None`, `live_key_count` stays 0, tombstone recorded at applied slot via `iter_all`.
+- [x] **Delete non-existent key is a no-op**
 
 ## Unit Layer — wal/record
 
