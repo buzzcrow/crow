@@ -23,7 +23,7 @@ test.describe('E2E-19 large cluster leader monitor', () => {
     // http_add_store reuses the same replica_id across nodes and does not
     // wire remotes, so we extend the group via addReplica below which
     // auto-creates the store on each peer node and wires remotes.
-    await createStore(baseURL!, 199, 1990, 19900, ['n19a']);
+    await createStore(baseURL!, 199, ['n19a']);
     await addGroup(baseURL!, 199, 1990, 19900, ['n19a']);
     // addReplica adds a remote replica to an existing group on a new node;
     // it ensures the target node hosts the store (creating it if needed)
@@ -41,19 +41,19 @@ test.describe('E2E-19 large cluster leader monitor', () => {
       // Navigate to Cluster view and verify all groups appear in UI.
       await page.goto('/');
       await page.getByRole('button', { name: 'Logical' }).click();
-      const aside = page.locator('aside').first();
+      const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
       for (const gid of [1990, 1991, 1992]) {
-        await expect(aside.getByText(`G-${gid}`)).toBeVisible({ timeout: 15_000 });
+        await expect(aside.getByText(`G-${gid}`)).toBeVisible({ timeout: 3_000 });
       }
 
-      // Monitor leader election via API polling (max 30 s).
+      // Monitor leader election via API polling (max 10 s).
       // Three concurrent fresh elections (one per group) need a few
       // election deadlines (default 4-8 s each) plus PreVote/RequestVote
       // round-trip; 30 s gives headroom on a busy CI machine.
       // Use the per-group endpoint and check role=Leader directly.
       const groups = [1990, 1991, 1992];
-      const deadline = Date.now() + 30_000;
+      const deadline = Date.now() + 10_000;
       const leaders = new Map<number, number>();
 
       while (Date.now() < deadline && leaders.size < groups.length) {
@@ -72,12 +72,12 @@ test.describe('E2E-19 large cluster leader monitor', () => {
         }
       }
 
-      // Assert every group has elected exactly one leader within 30 s.
+      // Assert every group has elected exactly one leader within 10 s.
       for (const gid of groups) {
         const leader = leaders.get(gid);
         expect(
           leader,
-          `group ${gid} did not elect exactly one leader within 30 seconds (leaders so far: ${JSON.stringify(Array.from(leaders.entries()))})`,
+          `group ${gid} did not elect exactly one leader within 10 seconds (leaders so far: ${JSON.stringify(Array.from(leaders.entries()))})`,
         ).toBeTruthy();
         expect(leader).toBeGreaterThan(0);
       }

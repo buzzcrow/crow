@@ -2,9 +2,13 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { expect, request } from '@playwright/test';
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export const DEFAULT_SERVER_BINARY =
-  process.env.CROWKV_SERVER_BINARY ?? '/cjdata/cpp/crowkv/target/debug/crowkv-server';
+  process.env.CROWKV_SERVER_BINARY ?? resolve(__dirname, '../../../../../target/debug/crowkv-server');
 
 export interface TestRack {
   id: string;
@@ -15,8 +19,6 @@ export interface TestNode {
   id: string;
   rack_id: string;
   host?: string;
-  ssh_port?: number;
-  ssh_user?: string;
 }
 
 export async function apiContext(baseURL: string) {
@@ -41,13 +43,11 @@ export async function createRack(baseURL: string, rack: TestRack) {
 export async function createNode(baseURL: string, node: TestNode) {
   const api = await apiContext(baseURL);
   try {
-    const response = await api.post('/api/nodes', {
+    const response = await api.post(`/api/racks/${encodeURIComponent(node.rack_id)}/nodes`, {
       data: {
         id: node.id,
         rack_id: node.rack_id,
         host: node.host ?? '127.0.0.1',
-        ssh_port: node.ssh_port ?? 22,
-        ssh_user: node.ssh_user ?? '',
       },
     });
     expect(response.status(), await response.text()).toBe(201);
@@ -80,7 +80,12 @@ export async function deployNodeServer(baseURL: string, nodeId: string, mgmtPort
 export async function stopNodeServer(baseURL: string, nodeId: string) {
   const api = await apiContext(baseURL);
   try {
-    await api.post(`/api/nodes/${encodeURIComponent(nodeId)}/server/stop`).catch(() => undefined);
+    const response = await api.post(`/api/nodes/${encodeURIComponent(nodeId)}/server/stop`);
+    if (!response.ok() && response.status() !== 404 && response.status() !== 409) {
+      console.warn(`stopNodeServer(${nodeId}) returned ${response.status()}:`, await response.text());
+    }
+  } catch (err) {
+    console.warn(`stopNodeServer(${nodeId}) failed:`, err);
   } finally {
     await api.dispose();
   }
@@ -119,7 +124,7 @@ export async function addReplica(baseURL: string, storeId: number, groupId: numb
  * creates the store; a group must be added separately (`addGroup`) and then
  * needs a moment to elect before KV ops can resolve a leader.
  */
-export async function waitForLeader(baseURL: string, storeId: number, groupId: number, timeoutMs = 25_000) {
+export async function waitForLeader(baseURL: string, storeId: number, groupId: number, timeoutMs = 10_000) {
   const api = await apiContext(baseURL);
   try {
     const start = Date.now();
@@ -140,14 +145,12 @@ export async function waitForLeader(baseURL: string, storeId: number, groupId: n
   }
 }
 
-export async function createStore(baseURL: string, storeId: number, groupId: number, replicaId: number, nodeIds: string[]) {
+export async function createStore(baseURL: string, storeId: number, nodeIds: string[]) {
   const api = await apiContext(baseURL);
   try {
     const response = await api.post('/api/stores', {
       data: {
         store_id: storeId,
-        group_id: groupId,
-        replica_id: replicaId,
         nodes: nodeIds,
       },
     });
@@ -160,7 +163,8 @@ export async function createStore(baseURL: string, storeId: number, groupId: num
 export async function resetAll(baseURL: string) {
   const api = await apiContext(baseURL);
   try {
-    await api.post('/internal/reset');
+    const response = await api.post('/internal/reset');
+    expect(response.status(), await response.text()).toBe(200);
   } finally {
     await api.dispose();
   }

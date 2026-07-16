@@ -39,6 +39,13 @@ Defaults: file=`debug`, console (`-l`)=`info`. Override via `RUST_LOG`. See `cro
 - Paxos suite: `crowkv/tests/paxos/*.rs` with `tests/paxos.rs` as entry stub.
 - Tracing in tests: set `CROWKV_TEST_LOG=1`; init in `tests/testkit/logging.rs`.
 
+### E2E / Playwright Tests (`crowkv-console/web/ui/e2e`)
+
+- **No ignoring errors** — never swallow API failures silently; log cleanup errors with `console.warn`.
+- **Precise selectors** — use `getByLabel`, `getByRole`, `getByTestId`, or scoped locators. Avoid unscoped `page.getByText` and `.first()` on page-level locators.
+- **Timeout discipline** — assertion timeouts ≤ 3 s; leader election may use up to 10 s. No inflating timeouts to work around slowness.
+- **`data-testid`** — add to dynamic elements that could match in multiple places; select via `getByTestId`.
+
 ### Health & Info Reporting
 
 When adding internal state to `crowkv` lib:

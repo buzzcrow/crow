@@ -27,6 +27,10 @@
 namespace crowtree
 {
 
+// Forward-declare metric types for BufferPool handles.
+class Counter;
+class Gauge;
+
 using PageAddr = uint64_t;
 
 // Sentinel addr for an anonymous (not-yet-durable) frame: a freshly built page
@@ -134,6 +138,18 @@ class BufferPool
 
     [[nodiscard]] Stats stats() const;
 
+    // Wire optional metrics handles. All pointers must outlive the pool.
+    void set_metrics(Counter *hits, Counter *misses, Counter *evictions, Counter *writebacks, Gauge *resident,
+                     Gauge *dirty)
+    {
+        m_hits_       = hits;
+        m_misses_     = misses;
+        m_evictions_  = evictions;
+        m_writebacks_ = writebacks;
+        m_resident_   = resident;
+        m_dirty_      = dirty;
+    }
+
   private:
     friend class FrameRef;
 
@@ -176,6 +192,14 @@ class BufferPool
     size_t                ht_mask_ = 0;
 
     Stats stats_;
+
+    // Optional metrics handles (null if not wired).
+    Counter *m_hits_       = nullptr;
+    Counter *m_misses_     = nullptr;
+    Counter *m_evictions_  = nullptr;
+    Counter *m_writebacks_ = nullptr;
+    Gauge   *m_resident_   = nullptr;
+    Gauge   *m_dirty_      = nullptr;
 };
 
 } // namespace crowtree

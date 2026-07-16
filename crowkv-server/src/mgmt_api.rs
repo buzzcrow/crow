@@ -421,7 +421,11 @@ async fn add_store(
         bind_addr = %addr,
         "creating PxKvStore via management API"
     );
-    let store = Arc::new(PxKvStore::new(req.store_id, addr));
+    let mut store = PxKvStore::new(req.store_id, addr);
+    if let Some(ref mr) = state.metrics_registry {
+        store.set_metrics_registry(Arc::clone(mr));
+    }
+    let store = Arc::new(store);
 
     if let Err(e) = store.start().await {
         return Err(err_json(

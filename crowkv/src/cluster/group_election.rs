@@ -374,10 +374,26 @@ impl PxGroup {
             "stepping down from leader"
         );
         let metrics = self.local_replica().election_metrics();
+        let handles = self.local_replica().election_registry_handles();
         match reason {
-            StepDownReason::HigherTerm(_) => metrics.record_step_down_higher_term(),
-            StepDownReason::LeaseUnrenewable => metrics.record_step_down_lease_unrenewable(),
-            StepDownReason::Admin => metrics.record_step_down_admin(),
+            StepDownReason::HigherTerm(_) => {
+                metrics.record_step_down_higher_term();
+                if let Some(h) = handles {
+                    h.step_downs_higher_term.inc();
+                }
+            }
+            StepDownReason::LeaseUnrenewable => {
+                metrics.record_step_down_lease_unrenewable();
+                if let Some(h) = handles {
+                    h.step_downs_lease.inc();
+                }
+            }
+            StepDownReason::Admin => {
+                metrics.record_step_down_admin();
+                if let Some(h) = handles {
+                    h.step_downs_admin.inc();
+                }
+            }
         }
         tenure_cancel.cancel();
         let target_term = match reason {

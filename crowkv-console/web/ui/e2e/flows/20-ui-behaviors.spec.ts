@@ -31,7 +31,7 @@ test.describe('E2E-20 UI behaviors', () => {
     await deployNodeServer(baseURL!, 'n20a', 9960, 9970);
     await deployNodeServer(baseURL!, 'n20b', 9961, 9971);
     await deployNodeServer(baseURL!, 'n20c', 9962, 9972);
-    await createStore(baseURL!, 207, 1, 1, ['n20a', 'n20b']);
+    await createStore(baseURL!, 207, ['n20a', 'n20b']);
 
     const api = await apiContext(baseURL!);
     try {
@@ -47,7 +47,7 @@ test.describe('E2E-20 UI behaviors', () => {
 
       await page.goto('/');
       await page.getByRole('button', { name: 'Logical' }).click();
-      const aside = page.locator('aside').first();
+      const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
       await aside.getByRole('button', { name: 'Add Store' }).click();
       const addStoreDialog = page.getByRole('dialog', { name: 'Add KV Store' });
@@ -59,7 +59,7 @@ test.describe('E2E-20 UI behaviors', () => {
       await expect(addStoreDialog.getByLabel(/^n20d/)).toHaveCount(0);
       await addStoreDialog.getByRole('button', { name: 'Cancel' }).click();
 
-      await expect(aside.getByText('S-207')).toBeVisible({ timeout: 15_000 });
+      await expect(aside.getByText('S-207')).toBeVisible({ timeout: 3_000 });
       await aside.getByText('S-207').click({ button: 'right' });
       await page.getByRole('menuitem', { name: /add group/i }).click();
       const addGroupDialog = page.getByRole('dialog', { name: 'Add Group' });
@@ -76,10 +76,10 @@ test.describe('E2E-20 UI behaviors', () => {
       const n20cInput = addGroupDialog.getByLabel(/^n20c/);
       if (await n20cInput.isChecked()) await n20cInput.uncheck();
       await addGroupDialog.getByRole('button', { name: /create group/i }).click();
-      await expect(page.getByText(new RegExp(`Group ${expectedGroupId} created successfully`))).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByRole('alert').getByText(new RegExp(`Group ${expectedGroupId} created successfully`))).toBeVisible({ timeout: 3_000 });
 
       const expectedReplicaAfterGroup = String(Number(expectedReplicaId) + 2);
-      await expect(aside.getByText(`G-${expectedGroupId}`)).toBeVisible({ timeout: 15_000 });
+      await expect(aside.getByText(`G-${expectedGroupId}`)).toBeVisible({ timeout: 3_000 });
       await aside.getByText(`G-${expectedGroupId}`).click({ button: 'right' });
       await page.getByRole('menuitem', { name: /add replica/i }).click();
       const addReplicaDialog = page.getByRole('dialog', { name: 'Add Replica' });
@@ -93,7 +93,7 @@ test.describe('E2E-20 UI behaviors', () => {
       expect(optionValues).not.toEqual(expect.arrayContaining(['n20a', 'n20b']));
       await addReplicaDialog.getByLabel('Node', { exact: true }).selectOption('n20c');
       await addReplicaDialog.getByRole('button', { name: /add replica/i }).click();
-      await expect(page.getByText(/Replica added to node "n20c" successfully/)).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByRole('alert').getByText(/Replica added to node "n20c" successfully/)).toBeVisible({ timeout: 3_000 });
 
       await aside.getByText(`G-${expectedGroupId}`).click({ button: 'right' });
       await page.getByRole('menuitem', { name: /add replica/i }).click();
@@ -126,8 +126,8 @@ test.describe('E2E-20 UI behaviors', () => {
     await page.getByRole('button', { name: 'Physical' }).click();
     const rack21a = page.getByRole('treeitem').filter({ hasText: 'R-r21a (Rack Twenty One A)' });
     const node21c = page.getByRole('treeitem').filter({ hasText: 'N-n21c' });
-    await expect(rack21a).toBeVisible({ timeout: 15_000 });
-    await expect(node21c).toBeVisible({ timeout: 15_000 });
+    await expect(rack21a).toBeVisible({ timeout: 3_000 });
+    await expect(node21c).toBeVisible({ timeout: 3_000 });
     await expect(page.getByRole('button', { name: 'Fit All' })).toBeVisible();
     await page.waitForTimeout(600);
     const pane = page.locator('.react-flow__pane').first();

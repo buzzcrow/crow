@@ -18,7 +18,7 @@ test.describe('E2E-24 KV not-found', () => {
   test('renders a graceful not-found for a missing key', async ({ page, baseURL }) => {
     await seedRackAndNode(baseURL!, 'r24', 'n24');
     await deployNodeServer(baseURL!, 'n24', 9956, 9966);
-    await createStore(baseURL!, 244, 2440, 24400, ['n24']);
+    await createStore(baseURL!, 244, ['n24']);
     await addGroup(baseURL!, 244, 2440, 24400, ['n24']);
     await waitForLeader(baseURL!, 244, 2440);
 
@@ -27,18 +27,18 @@ test.describe('E2E-24 KV not-found', () => {
 
     try {
       await page.goto('/');
-      await page.getByRole('button', { name: 'KV' }).click();
+      await page.locator('header').getByRole('button', { name: 'KV' }).click();
       await page.getByLabel('Store').selectOption('244');
       await page.getByLabel('Group').selectOption('2440');
 
-      await page.getByPlaceholder('Key').fill('missing-key-24');
+      await page.getByLabel('Get key').fill('missing-key-24');
       const getResponsePromise = page.waitForResponse((r) => r.url().includes('/kv/get'));
       await page.getByRole('button', { name: /^Get$/ }).click();
       const getResponse = await getResponsePromise;
       expect(getResponse.ok(), await getResponse.text()).toBeTruthy();
 
-      await expect(page.getByText('not found')).toBeVisible({ timeout: 15_000 });
-      await expect(page.getByText(/Key "missing-key-24" not found/)).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByTestId('kv-not-found')).toBeVisible({ timeout: 3_000 });
+      await expect(page.getByRole('alert').getByText(/Key "missing-key-24" not found/)).toBeVisible({ timeout: 3_000 });
       expect(errors, errors.join('\n')).toHaveLength(0);
     } finally {
       await stopNodeServer(baseURL!, 'n24');

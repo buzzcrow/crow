@@ -23,25 +23,25 @@ test.describe('E2E-22 swagger panel', () => {
     try {
       await page.goto('/');
       await page.getByRole('button', { name: 'Physical' }).click();
-      const aside = page.locator('aside').first();
+      const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
       // Target n22a, then open the API panel.
-      await expect(aside.getByText('N-n22a', { exact: true })).toBeVisible({ timeout: 20_000 });
+      await expect(aside.getByText('N-n22a', { exact: true })).toBeVisible({ timeout: 3_000 });
       await aside.getByRole('button', { name: 'N-n22a' }).click();
       await page.getByRole('button', { name: 'API' }).click();
 
       const frameA = page.locator('iframe[title="Swagger UI for n22a"]');
-      await expect(frameA).toBeVisible({ timeout: 15_000 });
+      await expect(frameA).toBeVisible({ timeout: 3_000 });
       expect(decodeURIComponent((await frameA.getAttribute('src')) ?? '')).toContain('/nodes/n22a/openapi.json');
       // Shell stays mounted (no full-page navigation).
-      await expect(page.getByText('CrowKV Console')).toBeVisible();
+      await expect(page.locator('header').getByText('CrowKV Console')).toBeVisible();
 
       // Switch the selection to n22b -> the iframe re-targets inline.
       await aside.getByRole('button', { name: 'N-n22b' }).click();
       const frameB = page.locator('iframe[title="Swagger UI for n22b"]');
-      await expect(frameB).toBeVisible({ timeout: 15_000 });
+      await expect(frameB).toBeVisible({ timeout: 3_000 });
       expect(decodeURIComponent((await frameB.getAttribute('src')) ?? '')).toContain('/nodes/n22b/openapi.json');
-      await expect(page.getByText('CrowKV Console')).toBeVisible();
+      await expect(page.locator('header').getByText('CrowKV Console')).toBeVisible();
     } finally {
       await stopNodeServer(baseURL!, 'n22a');
       await stopNodeServer(baseURL!, 'n22b');

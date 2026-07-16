@@ -210,6 +210,25 @@ impl PxGroup {
         &self.local_replica
     }
 
+    /// Wire the metrics registry into the local replica and all remote
+    /// replicas. Registers election counters, WAL append summary, and
+    /// per-peer RPC latency/error handles. Called once during group
+    /// creation when a registry is available.
+    pub fn set_metrics_registry(
+        &self,
+        registry: &Arc<std::sync::Mutex<crate::metrics::MetricsRegistry>>,
+        store_id: u64,
+    ) {
+        let group_id = self.group_id;
+        self.local_replica
+            .set_metrics_registry(registry, store_id, group_id);
+        for remote in &self.remote_replicas {
+            if let RemoteReplicaKind::Real(r) = remote {
+                r.set_metrics_registry(registry, store_id, group_id);
+            }
+        }
+    }
+
     pub fn force_classic(&self) -> bool {
         self.force_classic
     }

@@ -31,9 +31,9 @@ class TextPageStore : public PageStore
     TextPageStore(const TextPageStore &)            = delete;
     TextPageStore &operator=(const TextPageStore &) = delete;
 
-    // Open a TextPageStore at `{path}/{store_id}-{partition_id}/`.
+    // Open a TextPageStore at `{path}/{store_id}-{group_id}/`.
     // Creates the directory if absent. On reopen, reads manifest.ck.
-    static Status open(const std::string &path, uint32_t store_id, uint32_t partition_id,
+    static Status open(const std::string &path, uint32_t store_id, uint32_t group_id,
                        std::unique_ptr<TextPageStore> *out);
 
     Status                 write_at(uint64_t off, const uint8_t *buf, size_t len) override;

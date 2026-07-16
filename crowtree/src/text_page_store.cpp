@@ -77,10 +77,10 @@ Status read_file(const std::string &path, std::string *out)
 
 TextPageStore::~TextPageStore() = default;
 
-Status TextPageStore::open(const std::string &path, uint32_t store_id, uint32_t partition_id,
+Status TextPageStore::open(const std::string &path, uint32_t store_id, uint32_t group_id,
                            std::unique_ptr<TextPageStore> *out)
 {
-    std::string dir = path + "/" + std::to_string(store_id) + "-" + std::to_string(partition_id);
+    std::string dir = path + "/" + std::to_string(store_id) + "-" + std::to_string(group_id);
     if (!dir_exists(dir)) {
         Status s = make_dir(dir);
         if (!s.ok()) {

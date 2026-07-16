@@ -20,6 +20,7 @@ use crowkv::cluster::kv_server::KvServer;
 use crowkv::cluster::local_replica::PxLocalReplicaRole;
 use crowkv::cluster::px_kv_store::PxKvStore;
 use crowkv::common::config::{PxElectionConfig, ServerConfig};
+use crowkv::metrics::MetricsRunner;
 
 use crowkv_server::cli::{parse_id_list, parse_port_list, Cli};
 use crowkv_server::mgmt_api::{self, persisted_port_for_store};
@@ -27,6 +28,7 @@ use crowkv_server::startup::create_group_with_wal;
 use crowkv_server::store_registry::{KvEngineKind, KvStoreRegistry};
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() {
     let args = Cli::parse();
 
@@ -39,6 +41,9 @@ async fn main() {
     };
 
     info!("crowkv-server starting...");
+
+    // Metrics runner: periodic flush to a dedicated metrics log file.
+    let mut metrics_runner = create_metrics_runner(args.metrics_interval);
 
     info!(
         stores = ?args.stores.as_deref(),
@@ -75,7 +80,11 @@ async fn main() {
     let registry = Arc::new(
         KvStoreRegistry::with_runtime(election_cfg, wal_root, config_root, wal_backend)
             .with_kv_engine(kv_engine, data_root)
-            .with_crowtree_backend(crowtree_backend),
+            .with_crowtree_backend(crowtree_backend)
+            .with_metrics_registry(metrics_runner.as_ref().map_or_else(
+                || Arc::new(std::sync::Mutex::new(crowkv::metrics::MetricsRegistry::new())),
+                |r| r.registry().clone(),
+            )),
     );
 
     // Populate the port pool from `--ports` even when `--stores` is not
@@ -147,7 +156,24 @@ async fn main() {
         });
 
     // Graceful cascade shutdown (PxKvStore → PxGroup → replicas)
+    if let Some(ref mut runner) = metrics_runner {
+        runner.stop().await;
+        info!("metrics runner stopped");
+    }
     graceful_shutdown(registry).await;
+}
+
+/// Create and start a metrics runner if interval > 0, else None.
+fn create_metrics_runner(interval_secs: u64) -> Option<MetricsRunner> {
+    if interval_secs == 0 {
+        return None;
+    }
+    let metrics_file =
+        crowkv::common::logging::open_metrics_log("log").expect("failed to open metrics log file");
+    let mut runner = MetricsRunner::new(metrics_file, interval_secs);
+    runner.start();
+    info!(interval_secs, "metrics runner started");
+    Some(runner)
 }
 
 async fn shutdown_signal() {
@@ -247,7 +273,11 @@ async fn create_and_start_stores(
         };
         let addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
         info!(store_id, bind_addr = %addr, "creating PxKvStore");
-        let store = Arc::new(PxKvStore::new(store_id, addr));
+        let mut store = PxKvStore::new(store_id, addr);
+        if let Some(ref mr) = registry.metrics_registry {
+            store.set_metrics_registry(Arc::clone(mr));
+        }
+        let store = Arc::new(store);
 
         // Create groups with the single local replica for this store, if group_ids provided.
         // The election driver auto-starts in PxKvStore::add_group; the local replica

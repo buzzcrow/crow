@@ -18,7 +18,6 @@ doc only when a task touches a topic in its row.
 | Doc | When to read |
 | --- | --- |
 | `doc/working/plan-test.md` | Unfinished test task backlog with checkboxes. Read when picking the next test to implement. |
-| `doc/working/plan-demo.md` | Demo recording plan: cluster lifecycle GIF, KV operations GIF, failover GIF. Read when recording README demos. |
 | `doc/working/new_requirements.md` | Forward-looking implementation backlog with priority/complexity analysis and implementation process. Read before picking up crowtree/crowkv follow-up work. |
 
 ## Project Files (repo root)
@@ -87,7 +86,8 @@ doc only when a task touches a topic in its row.
 
 | Doc | Read when working on |
 | --- | --- |
-| `design/design-test.md` | Test strategy, layer scope definitions, high-level coverage per layer, crowtree C++ test layers, feature-dependent test gaps. Read when designing tests or deciding where a test belongs. |
+| `design/design-test.md` | Test strategy, layer scope definitions, high-level coverage per layer, Web UI E2E tiered strategy, crowtree C++ test layers, feature-dependent test gaps. Read when designing tests or deciding where a test belongs. |
+| `design/design-observability.md` | Metrics module design: five metric types (Counter, Gauge, Bandwidth, LatencyHistogram, LatencySummary), registry lifecycle, naming convention, instrumentation points, system metrics collector, log file format, in-memory snapshot access, FFI boundary. Read when working on metrics or observability. |
 
 ## How AI Should Use This Index
 

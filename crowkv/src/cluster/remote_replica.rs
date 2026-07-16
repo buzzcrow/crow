@@ -21,6 +21,7 @@ use crate::cluster::status::{RemoteStatus, StatusLevel};
 use crate::common::config::PxElectionConfig;
 use crate::common::metrics::LayerMetrics;
 use crate::common::report::OperationReport;
+use crate::metrics::{Counter, LatencySummary, MetricsRegistry};
 use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
 use crate::paxos::PxNodeId;
 use crate::rpc::px_service_client::PxServiceClient;
@@ -30,8 +31,7 @@ use crate::rpc::{
     RequestVoteRequest as RpcRequestVoteRequest, StepDownRequest as RpcStepDownRequest,
 };
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::OnceCell;
 use tonic::transport::Channel;
@@ -62,8 +62,18 @@ pub struct PxRemoteReplica {
     pub(crate) voting: bool,
     /// Per-remote RPC counters consumed by `/topology`.
     metrics: LayerMetrics,
+    /// Optional registry handles mirroring RPC stats to the metrics log.
+    /// Set via [`Self::set_metrics_registry`] when a registry is wired.
+    rpc_handles: OnceLock<RpcRegistryHandles>,
     /// Idempotency gate for [`Self::shutdown`].
     shutdown_started: AtomicBool,
+}
+
+/// Registry-based metric handles for per-peer RPC stats.
+#[derive(Debug)]
+pub(crate) struct RpcRegistryHandles {
+    pub(crate) latency: Arc<LatencySummary>,
+    pub(crate) errors: Arc<Counter>,
 }
 
 impl Replica for PxRemoteReplica {
@@ -98,7 +108,7 @@ impl ReplicaClient for PxRemoteReplica {
         let mut client = match self.get_client().await {
             Ok(c) => c.clone(),
             Err(status) => {
-                self.metrics.record_err();
+                self.record_err();
                 return Err(status_to_err(&status));
             }
         };
@@ -119,12 +129,12 @@ impl ReplicaClient for PxRemoteReplica {
         {
             Ok(r) => r.into_inner(),
             Err(status) => {
-                self.metrics.record_err();
+                self.record_err();
                 return Err(status_to_err(&status));
             }
         };
         #[allow(clippy::cast_possible_truncation)]
-        self.metrics.record_ok(started.elapsed().as_millis() as u64);
+        self.record_ok(started.elapsed().as_millis() as u64);
 
         if resp.epoch_mismatch {
             Ok(PxPrepareReply::EpochMismatch {
@@ -188,12 +198,12 @@ impl ReplicaClient for PxRemoteReplica {
         let resp = match self.learner_stream().send_accept(req).await {
             Ok(r) => r,
             Err(err) => {
-                self.metrics.record_err();
+                self.record_err();
                 return Err(err);
             }
         };
         #[allow(clippy::cast_possible_truncation)]
-        self.metrics.record_ok(started.elapsed().as_millis() as u64);
+        self.record_ok(started.elapsed().as_millis() as u64);
 
         if resp.epoch_mismatch {
             Ok(PxAcceptReply::EpochMismatch {
@@ -226,7 +236,7 @@ impl ReplicaClient for PxRemoteReplica {
             .get_client()
             .await
             .map_err(|s| {
-                self.metrics.record_err();
+                self.record_err();
                 status_to_err(&s)
             })?
             .clone();
@@ -244,12 +254,12 @@ impl ReplicaClient for PxRemoteReplica {
             })
             .await
             .map_err(|s| {
-                self.metrics.record_err();
+                self.record_err();
                 status_to_err(&s)
             })?
             .into_inner();
         #[allow(clippy::cast_possible_truncation)]
-        self.metrics.record_ok(started.elapsed().as_millis() as u64);
+        self.record_ok(started.elapsed().as_millis() as u64);
         Ok(VoteReply {
             term: resp.term,
             granted: resp.granted,
@@ -268,7 +278,7 @@ impl ReplicaClient for PxRemoteReplica {
             .get_client()
             .await
             .map_err(|s| {
-                self.metrics.record_err();
+                self.record_err();
                 status_to_err(&s)
             })?
             .clone();
@@ -286,12 +296,12 @@ impl ReplicaClient for PxRemoteReplica {
             })
             .await
             .map_err(|s| {
-                self.metrics.record_err();
+                self.record_err();
                 status_to_err(&s)
             })?
             .into_inner();
         #[allow(clippy::cast_possible_truncation)]
-        self.metrics.record_ok(started.elapsed().as_millis() as u64);
+        self.record_ok(started.elapsed().as_millis() as u64);
         Ok(VoteReply {
             term: resp.term,
             granted: resp.granted,
@@ -328,12 +338,12 @@ impl ReplicaClient for PxRemoteReplica {
         let resp = match self.learner_stream().send_heartbeat(rpc_req).await {
             Ok(r) => r,
             Err(err) => {
-                self.metrics.record_err();
+                self.record_err();
                 return Err(err);
             }
         };
         #[allow(clippy::cast_possible_truncation)]
-        self.metrics.record_ok(started.elapsed().as_millis() as u64);
+        self.record_ok(started.elapsed().as_millis() as u64);
         Ok(HeartbeatReply {
             term: resp.term,
             success: resp.success,
@@ -354,7 +364,7 @@ impl ReplicaClient for PxRemoteReplica {
             .get_client()
             .await
             .map_err(|s| {
-                self.metrics.record_err();
+                self.record_err();
                 status_to_err(&s)
             })?
             .clone();
@@ -371,12 +381,12 @@ impl ReplicaClient for PxRemoteReplica {
             })
             .await
             .map_err(|s| {
-                self.metrics.record_err();
+                self.record_err();
                 status_to_err(&s)
             })?
             .into_inner();
         #[allow(clippy::cast_possible_truncation)]
-        self.metrics.record_ok(started.elapsed().as_millis() as u64);
+        self.record_ok(started.elapsed().as_millis() as u64);
         Ok(StepDownReply {
             accepted: resp.accepted,
             current_term: resp.current_term,
@@ -409,6 +419,7 @@ impl PxRemoteReplica {
             next_request_id: AtomicU64::new(1),
             voting: true,
             metrics: LayerMetrics::new(),
+            rpc_handles: OnceLock::new(),
             shutdown_started: AtomicBool::new(false),
         }
     }
@@ -475,6 +486,45 @@ impl PxRemoteReplica {
         } else {
             id
         }
+    }
+
+    /// Record a successful RPC to both legacy and registry handles.
+    fn record_ok(&self, rtt_ms: u64) {
+        self.metrics.record_ok(rtt_ms);
+        if let Some(h) = self.rpc_handles.get() {
+            h.latency.observe(rtt_ms.saturating_mul(1_000_000));
+        }
+    }
+
+    /// Record a failed RPC to both legacy and registry handles.
+    fn record_err(&self) {
+        self.metrics.record_err();
+        if let Some(h) = self.rpc_handles.get() {
+            h.errors.inc();
+        }
+    }
+
+    /// Register per-peer RPC latency summary and error counter with the
+    /// metrics registry. Called once during group creation when a
+    /// registry is wired.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the metrics registry mutex is poisoned.
+    pub fn set_metrics_registry(
+        &self,
+        registry: &Arc<std::sync::Mutex<MetricsRegistry>>,
+        store_id: u64,
+        group_id: u64,
+    ) {
+        let mut r = registry.lock().expect("metrics registry poisoned");
+        let prefix = format!("s.{store_id}.g.{group_id}");
+        let peer = self.node_id;
+        let handles = RpcRegistryHandles {
+            latency: r.register_summary(format!("{prefix}.rpc.l@{peer}")),
+            errors: r.register_counter(format!("{prefix}.rpc.errors.c@{peer}")),
+        };
+        let _ = self.rpc_handles.set(handles);
     }
 
     /// Read this remote's RPC metrics for the topology endpoint.

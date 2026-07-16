@@ -95,7 +95,7 @@ using ct_options = struct
     enum ct_backend   backend;           // default CT_BACKEND_BLOCK; ignored for in-memory
     uint64_t          block_size;        // 0 => default 64 MiB; ignored for text
     uint32_t          store_id;          // default 0; block file naming
-    uint32_t          partition_id;      // default 0; maps to PxGroupId in CrowKV
+    uint32_t          group_id;          // default 0; maps to PxGroupId in CrowKV
     enum ct_sync_mode sync_mode;         // default CT_SYNC_FULL
 };
 

@@ -105,7 +105,7 @@ The full design lives in [`doc/`](doc/). Start with:
 
 ## Notes on AI-Assisted Development
 
-This project was built entirely with AI — every substantive line of code was AI-generated, with human steering and review. I wrote about the experience, what worked, where AI fails, and what it means for the future of software engineering: [**Building Infrastructure Software with AI**](doc/article/ai-assisted-development.md).
+The code in this project was written with AI assistance. But the shape of the software is personal. Architecture, naming, module boundaries, the tradeoffs that matter. Those are human choices. AI is the compiler. The intent is mine.
 
 ## License
 

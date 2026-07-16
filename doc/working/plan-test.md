@@ -8,53 +8,37 @@ For test strategy, layer scope, and coverage details, see [`design/design-test.m
 
 ## Suite Timing
 
-Measured on 2026-07-15. All six suites passed with zero failures. Times are
-the wall-clock duration of `pixi run <suite>` (including incremental
-build/compile overhead). macOS times are from the original development
-machine; Linux times are from a Linux dev box (same date).
+Measured on 2026-07-16. All six suites passed with zero failures.
 
-| Suite | Result | Tests | macOS | Linux |
-| --- | --- | --- | --- | --- |
-| `test-ct` | pass | 328/328 | 8.3 s | 17.6 s |
-| `test-core` | pass | 404 | 8.9 s | 10.6 s |
-| `test-server` | pass | 47 | 9.4 s | 10.6 s |
-| `test-cli` | pass | 56 | 9.6 s | 11.4 s |
-| `test-web` | pass | 49 | 39.1 s | 28.1 s |
-| `test-ui` | pass | 23/23 | 32.7 s | 41.3 s |
-| **Total** | **pass** | — | **~108 s** | **~120 s** |
-
-The C++ Crowtree tests (`test-ct`) and the Rust core tests (`test-core`) are
-the fastest. The console/web suite (`test-web`) dominates wall time because it
-boots real server processes and runs integration-level API tests. The E2E suite
-(`test-ui`) launches a headless browser against a real backend (system chromium
-at `/snap/bin/chromium` on Linux). Note: `test-ct` is slower on Linux (17.6 s
-vs 8.3 s) due to C++ rebuild overhead; `test-core` is now faster on Linux (10.6 s
-vs 8.9 s) with warm incremental builds; `test-web` is faster on Linux (28.1 s
-vs 39.1 s) possibly due to faster process spawning.
+| Suite | Result | Tests | macOS |
+| --- | --- | --- | --- |
+| `test-ct` | pass | 328/328 | 8.3 s |
+| `test-core` | pass | 404 | 8.9 s |
+| `test-server` | pass | 47 | 9.4 s |
+| `test-cli` | pass | 56 | 9.6 s |
+| `test-web` | pass | 49 | 39.1 s |
+| `test-ui` | pass | 26/26 | 39.3 s |
 
 ## Election Unit
 
-- [x] `on_step_down` handler: strict-fence policy (only accepts if still leader at requested term) (`step_down_test.rs`).
-- [x] `frontier_triple` consistency under concurrent role transitions (`frontier_test.rs`).
+All tasks completed.
 
 ## Replica
 
-- [x] Multi-slot WAL replay ordering edge cases (gaps in accepted log during restore) (`replay_ordering_test.rs`).
-- [x] Concurrent learn_chosen + on_accept race on the same slot (`concurrent_test.rs`).
 - [ ] **WAL GC safe slot integration**: `crowkv/src/wal/gc.rs` uses `safe_slot = u64::MAX`. Needs snapshot persistence and a slot marker (e.g. `contiguous_applied` / durable-commit watermark) so GC can safely truncate below the applied frontier. Add a dedicated GC test once the slot marker is implemented.
 
 ## Group
 
-- [ ] **KV operation correctness**: all op types and orderings through group `propose` — Put, overwrite, Delete, delete non-existent, batch with multiple puts, intra-batch last-wins, put-then-delete, delete-then-put, empty batch, mixed ops across slots. Verify via `engine_get` on all replicas (see [`design/design-test.md`](design/design-test.md) KV op correctness rule).
+- [ ] **KV operation correctness**: all op types and orderings through group `propose` — Put, overwrite, Delete, delete non-existent, batch with multiple puts, intra-batch last-wins, put-then-delete, delete-then-put, empty batch, mixed ops across slots. Verify via `engine_get` on all replicas.
 - [ ] **LearnerStream** (`cluster/learner_stream.rs`): bidi-stream framing, flow control, parallel in-flight slots, stream re-establish after drop.
 - [ ] **Recovery above the durable-commit watermark** via bulk Phase 1 / heartbeat catch-up on a fresh follower.
 - [ ] **Leader-kill + restart no-data-loss** at full speed (blocked by repair-correctness).
 - [ ] Two-replica even-quorum behaviour (no progress without both up) as an explicit assertion.
-- [ ] **Leader change simulation**: start 3-node cluster, write keys, force step-down, wait for new leader, write more keys, force another step-down and re-election, verify all keys readable through final leader. Assert `highest_seen_slot` >= max slot written; no Accepted records missing. Location: `crowkv/tests/group/g3_leader_change_test.rs` (new file, same pattern as `g1_step_down_survival_test.rs`). Timings: use aggressive `for_tests()` (5ms heartbeat, 30–60ms election, 25ms lease).
+- [ ] **Leader change simulation**: start 3-node cluster, write keys, force step-down, wait for new leader, write more keys, force another step-down and re-election, verify all keys readable through final leader. Location: `crowkv/tests/group/g3_leader_change_test.rs`.
 
 ## Store
 
-- [ ] **KV operation correctness**: all op types and orderings through `PxKvStore` public API (`kv_put`, `kv_delete`, `kv_batch_write`) — same checklist as group layer. Verify via `kv_get` and `engine_get` (see [`design/design-test.md`](design/design-test.md) KV op correctness rule).
+- [ ] **KV operation correctness**: all op types and orderings through `PxKvStore` public API (`kv_put`, `kv_delete`, `kv_batch_write`) — same checklist as group layer.
 - [ ] **Multi-node, multi-group store**: ≥3 nodes each hosting the same set of groups; assert per-group isolation and independent leadership.
 - [ ] Per-group WAL-root isolation on one node (no cross-group slot/key bleed) at the store layer.
 - [ ] Store-wide graceful shutdown with multiple active groups under load.
@@ -64,51 +48,88 @@ vs 39.1 s) possibly due to faster process spawning.
 - [ ] Re-enable the four ignored process-level tests once their root causes are fixed.
 - [ ] Multi-store-per-node process test that mirrors the Web UI multi-store topology end-to-end.
 
-## Failing tests (2026-07-12 rerun)
+## E2E / Playwright UI Test Implementation Plan
 
-Decision: keep the aggressive `test` election profile for multi-process tests
-because they run on the same physical node (no long RPC time). The failures
-below are fixed by adding leader-refresh / retry logic instead of slowing the
-profile down.
+The test suite follows the tiered strategy defined in
+[`design/design-test.md`](../design/design-test.md) Web UI E2E Layer.
+This plan covers both **enhancing existing tests** to fit the tiered system
+and **creating new tests** to fill coverage gaps.
 
-After the fixes all six suites pass:
+### Phase 0 — Shared Infrastructure
 
-| Suite | Result |
-|-------|--------|
-| test-ct | pass (291/291) |
-| test-core | pass |
-| test-server | pass |
-| test-cli | pass |
-| test-web | pass |
-| test-ui | pass (23/23) |
+- [ ] **setupCluster() helper**: Add to `consoleSetup.ts`. Accepts a topology
+  descriptor: `{ nodeCount, storeCount, groupsPerStore, replicasPerGroup,
+  rackPrefix, portBase }`. Creates racks, nodes, deploys servers, creates
+  stores, adds groups with replicas, waits for leaders. Returns `{ nodes,
+  stores, groups, apiBase }`. All existing setup sequences (seedRackAndNode +
+  deployNodeServer + createStore + addGroup + waitForLeader) should be
+  refactored to call this helper internally.
+- [ ] **topology presets**: Define `SIMPLE` (3 nodes, 1 store, 1 group, 3
+  replicas) and `COMPLEX` (8 nodes, 2 stores, 2 groups per store, 3 replicas
+  per group on random subsets) as named constants for comparative tests.
 
-### test-server: cluster_e2e_test.rs — "not leader" mid-test (EASY, FIXED)
+### Phase 1 — Enhance Existing Tests (Tier 1 consolidation)
 
-- [x] **`e2e_three_node_cluster_kv_put_batch_delete`** — Fixed.
+Refactor existing tests to use shared helpers, add missing assertions, and
+prepare them for topology parameterization.
 
-**Root cause:** `crowkv-server/tests/testkit/process.rs` hardcodes
-`--election-profile test` (5ms heartbeat, 25ms lease). The 25ms lease expires
-under OS scheduling jitter during the real 3-node process test, so the
-cluster loses leadership before the delete batch is applied.
+- [ ] **00-smoke**: Refactor to use `setupCluster()`. Keep as Tier 0 smoke
+  test on SIMPLE topology. Add explicit assertions for console errors
+  (already collected but only checked at end — add mid-test checks).
+- [ ] **05-store-group-replica-chain**: Refactor setup to use
+  `setupCluster()`. Add assertion that the group appears in the Logical view
+  tree with the correct store parent.
+- [ ] **06-cross-jump**: Add reverse direction assertion (Physical Node to
+  Logical Store "Show store X in cluster" button). Currently only tests
+  Logical Replica to Physical Node.
+- [ ] **09-kv-put-get**: Add overwrite assertion (put same key with new
+  value, verify get returns new value). Add assertion that revision
+  increments.
+- [ ] **10-kv-scan**: Add prefix-filter assertion (put keys with different
+  prefixes, scan with prefix, verify only matching keys returned).
+- [ ] **18-full-chain**: Refactor to use `setupCluster(SIMPLE)`. This test
+  already does everything via UI — keep that but use the helper for setup
+  state verification.
+- [ ] **19-large-cluster**: Add KV put/get assertion after leader election
+  (currently only verifies leaders are elected, not that KV ops work on the
+  multi-group cluster).
+- [ ] **20-ui-behaviors**: Add assertion for dialog cancel (open dialog,
+  click cancel, verify no entity created).
+- [ ] **26-kv-demo**: Add assertion that demo keys appear in scan after
+  inject, and that scan is empty after delete-all.
 
-**Fix:** added a `run_kv_op_with_retry` helper that re-finds the current leader
-and retries the operation when the RPC returns "not leader", while keeping the
-`test` election profile.
+### Phase 2 — New Tier 1 Tests (single-feature coverage)
 
-### test-cli: kv_cli_test.rs — "not leader" on scan/list (EASY, FIXED)
+- [ ] **27-server-lifecycle**: Ping node, Restart server, Stop server — all via context menu. Verify toast feedback and backend state change (server status via API). Stop should make the node's Deploy menu item reappear.
+- [ ] **28-kv-advanced-ops**: Delete Prefix, Delete Selected (checkbox + button), inline delete (per-row trash), copy-to-clipboard on Get result. Each in isolation on a single-group store.
+- [ ] **29-kv-load-more**: Put >100 keys, scan, verify truncated indicator + Load More button, click Load More, verify additional rows appear.
+- [ ] **30-kv-all-groups-mode**: 2+ groups in one store, switch to All Groups, verify scan aggregates, Get disabled, Put distributes to a random group.
+- [ ] **31-kv-auto-scan-toggle**: Toggle auto-scan off, put a key, verify scan table does NOT auto-refresh. Toggle on, put again, verify it does.
+- [ ] **32-inspector-activity-tab**: Perform a mutation, open Inspector Activity tab, verify entry appears with action/target/status. Click Clear log, verify entries removed.
+- [ ] **33-inspector-cross-jump-node-to-store**: Select a physical node hosting a store, verify "Show store X in cluster" button, click it, verify view switches to Logical and store selected.
+- [ ] **34-sidebar-filter**: Create multiple racks/nodes, type in Filter, verify tree narrows. Clear filter, verify all items return.
+- [ ] **35-header-refresh**: Modify backend via API (add rack), click Refresh, verify new rack appears without page reload.
+- [ ] **36-health-pill-states**: Verify "Unknown" with no groups, "Healthy" with all-healthy groups, "Degraded" when a group loses leadership.
+- [ ] **37-dialog-duplicate-id**: Add rack with existing ID, verify error toast and dialog stays open. Same for node and store.
 
-- [x] CLI testkit crowtree corruption (`bench_run_write_smoke` failing with
-      `CrowtreeEngine::open(...) failed: Corruption`) — fixed by deploying
-      the test server into an isolated temp workspace with `bin/` and `log/`
-      subdirs and cleaning up on drop.
-- [x] **`kv_put_get_delete_round_trip`** — Fixed.
+### Phase 3 — New Tier 2 Tests (complex topology & multi-store)
 
-**Root cause:** `crowkv-console/cli/tests/testkit/console.rs::spawn_upstream`
-uses `--election-profile test`. The 25ms lease expires while the test is
-exercising CLI commands, causing the single node to step down and later scans
-to fail.
+All Tier 2 tests use `setupCluster()` with both SIMPLE and COMPLEX presets.
+If a test passes on SIMPLE but fails on COMPLEX, the gap is multi-node interaction.
 
-**Fix:** kept `spawn_upstream` on the `test` profile and added a retry loop
-around the seed `kv put`s and the final `kv list` so transient leader loss is
-retried.
+- [ ] **38-multi-store-isolation**: 2 stores on overlapping node sets. Put/Get/Delete on store A does not affect store B. Scan on store A returns only store A keys. Groups in different stores have independent leaders.
+- [ ] **39-subset-group-operations**: 8 nodes deployed, create a group on a random 3-node subset. Verify leader election, KV put/get/delete all work. Create a second group on a different 3-node subset (overlapping by 1). Verify both groups operate independently.
+- [ ] **40-multi-group-same-store**: 1 store, 3 groups, each on a different 3-node subset of 5 nodes. Verify per-group leader election, independent KV operations, scan in All Groups mode aggregates correctly.
+- [ ] **41-comparative-standard-suite**: Refactor existing 00-smoke test to accept a topology parameter. Run once with 3-node simple topology, once with 8-node complex topology (2 stores, subset groups). Both must pass. This becomes the regression baseline for multi-node changes.
+
+### Phase 4 — New Tier 3 Tests (reconfig & partial degradation)
+
+These test the reconfig feature: stopping/deleting nodes while groups are active,
+verifying the cluster continues to operate correctly with reduced membership.
+
+- [ ] **42-stop-server-keeps-group**: 3-node group, stop the server on a non-leader node via context menu. Verify group still accepts puts/gets (quorum intact). Verify health pill shows Degraded. Restart the stopped server, verify group returns to full health.
+- [ ] **43-stop-leader-reelection**: 3-node group, identify the leader, stop the leader's server. Verify a new leader is elected within 10s. Verify KV put/get still works. Restart the old leader, verify it rejoins as follower.
+- [ ] **44-delete-node-after-group**: 5-node group, delete a non-leader node. Verify group still operates (quorum 4-of-5). Delete another non-leader. Verify group still operates (quorum 3-of-5). Stop here — do not go below majority.
+- [ ] **45-add-replica-to-running-group**: 3-node group with active KV data, add a 4th replica via context menu. Verify new replica catches up (data visible via scan on the new node's store). Verify group still accepts writes.
+- [ ] **46-multi-store-reconfig**: 2 stores on 5 nodes. Stop a server that participates in both stores. Verify both stores' groups handle the loss correctly (degraded but functional if quorum holds). Restart, verify recovery.
 

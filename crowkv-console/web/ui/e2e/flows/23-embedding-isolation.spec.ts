@@ -18,7 +18,7 @@ test.describe('E2E-23 embedding isolation', () => {
   test('honors apiPrefix, readonly, and module opt-out', async ({ page, baseURL }) => {
     await seedRackAndNode(baseURL!, 'r23', 'n23');
     await deployNodeServer(baseURL!, 'n23', 9955, 9965);
-    await createStore(baseURL!, 233, 2330, 23300, ['n23']);
+    await createStore(baseURL!, 233, ['n23']);
     await addGroup(baseURL!, 233, 2330, 23300, ['n23']);
 
     // Reverse-proxy emulation: the SPA issues /proxy/api/* which we rewrite
@@ -34,16 +34,16 @@ test.describe('E2E-23 embedding isolation', () => {
 
     try {
       const apiPrefix = encodeURIComponent('/proxy/api');
-      const proxyRequest = page.waitForRequest('**/proxy/api/**', { timeout: 20_000 });
+      const proxyRequest = page.waitForRequest('**/proxy/api/**', { timeout: 3_000 });
       await page.goto(`/?view=Logical&readonly=1&disableModules=${encodeURIComponent('kv,swagger')}&apiPrefix=${apiPrefix}`);
 
       // apiPrefix: the SPA re-roots every data-plane call under /proxy/api.
       await proxyRequest;
       expect(seen.some((u) => u.includes('/proxy/api/'))).toBeTruthy();
 
-      const aside = page.locator('aside').first();
+      const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
       // Data still loads (rewritten back onto /api by the route above).
-      await expect(aside.getByText('S-233', { exact: true })).toBeVisible({ timeout: 20_000 });
+      await expect(aside.getByText('S-233', { exact: true })).toBeVisible({ timeout: 3_000 });
 
       // readonly: no Add control in the sidebar.
       await expect(aside.getByRole('button', { name: 'Add Store' })).toHaveCount(0);
@@ -57,7 +57,7 @@ test.describe('E2E-23 embedding isolation', () => {
       if (await expandStore.count()) await expandStore.click();
       await group233.getByRole('button', { name: 'G-2330' }).click();
       const inspector = page.locator('aside[aria-label="Entity inspector"]');
-      await expect(inspector.getByRole('tab', { name: 'Details' })).toBeVisible({ timeout: 15_000 });
+      await expect(inspector.getByRole('tab', { name: 'Details' })).toBeVisible({ timeout: 3_000 });
       await expect(inspector.getByRole('tab', { name: 'KV' })).toHaveCount(0);
     } finally {
       await stopNodeServer(baseURL!, 'n23');

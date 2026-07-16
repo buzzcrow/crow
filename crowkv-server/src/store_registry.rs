@@ -4,6 +4,7 @@
 use crowkv::cluster::px_kv_store::PxKvStore;
 use crowkv::common::config::PxElectionConfig;
 use crowkv::kv::CrowtreeBackend;
+use crowkv::metrics::MetricsRegistry;
 use crowkv::wal::IoBackend;
 use dashmap::DashMap;
 use std::path::PathBuf;
@@ -69,6 +70,8 @@ pub struct KvStoreRegistry {
     /// Port pool for KV server listeners, populated from `--ports` CLI arg.
     /// Used by `add_store` as a fallback before `persisted_port_for_store`.
     port_pool: Mutex<Vec<u16>>,
+    /// Metrics registry shared by all stores. `None` when metrics disabled.
+    pub metrics_registry: Option<Arc<Mutex<MetricsRegistry>>>,
 }
 
 impl Default for KvStoreRegistry {
@@ -118,6 +121,7 @@ impl KvStoreRegistry {
             data_root,
             crowtree_backend: CrowtreeBackend::Text,
             port_pool: Mutex::new(Vec::new()),
+            metrics_registry: None,
         }
     }
 
@@ -138,6 +142,13 @@ impl KvStoreRegistry {
     #[must_use]
     pub fn with_crowtree_backend(mut self, crowtree_backend: CrowtreeBackend) -> Self {
         self.crowtree_backend = crowtree_backend;
+        self
+    }
+
+    /// Builder-style setter for [`Self::metrics_registry`].
+    #[must_use]
+    pub fn with_metrics_registry(mut self, registry: Arc<Mutex<MetricsRegistry>>) -> Self {
+        self.metrics_registry = Some(registry);
         self
     }
 

@@ -30,8 +30,12 @@ jobs:
       run: pixi run cargo fmt --all -- --check
     - name: Run clippy
       run: pixi run cargo clippy --all-targets -- -D warnings
-    - name: Run tests
-      run: pixi run test-suite
+    - name: Run C++ tests
+      run: pixi run test-ct
+    - name: Run FFI tests
+      run: pixi run test-ffi
+    - name: Run core tests
+      run: pixi run test-core
 
   E2E:
     runs-on: ubuntu-latest

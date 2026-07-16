@@ -696,6 +696,7 @@ void Crowtree::release_snapshot_slot()
 
 Status Crowtree::snapshot(uint64_t *out_last_applied)
 {
+    auto t0 = std::chrono::steady_clock::now();
     if (opt_.page_store == nullptr) {
         return Status::invalid_argument("snapshot: no page_store");
     }
@@ -780,6 +781,10 @@ Status Crowtree::snapshot(uint64_t *out_last_applied)
     release_snapshot_slot();
     if (out_last_applied != nullptr) {
         *out_last_applied = prepared.last_applied_slot;
+    }
+    if (metrics_.snapshot_l != nullptr) {
+        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+        metrics_.snapshot_l->observe(static_cast<uint64_t>(ns));
     }
     return Status::Ok();
 }

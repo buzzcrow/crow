@@ -93,7 +93,7 @@ mod sys {
         pub backend: u8,
         pub block_size: u64,
         pub store_id: u32,
-        pub partition_id: u32,
+        pub group_id: u32,
         pub sync_mode: u8,
     }
 
@@ -299,8 +299,8 @@ pub struct Options {
     pub block_size: u64,
     /// Store ID for block file naming.
     pub store_id: u32,
-    /// Partition ID, maps to PxGroupId in CrowKV.
-    pub partition_id: u32,
+    /// Group ID, maps to PxGroupId in CrowKV.
+    pub group_id: u32,
     /// Durability barrier policy.
     pub sync_mode: SyncMode,
 }
@@ -419,7 +419,7 @@ impl Crowtree {
             },
             block_size: opt.block_size,
             store_id: opt.store_id,
-            partition_id: opt.partition_id,
+            group_id: opt.group_id,
             sync_mode: opt.sync_mode.as_u8(),
         };
         let mut out: *mut sys::ct_tree = std::ptr::null_mut();

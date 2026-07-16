@@ -13,15 +13,15 @@ test.describe('E2E-17 add replica', () => {
     await deployNodeServer(baseURL!, 'n17b', 9949, 9959);
 
     // Seed a store with an initial group on n17a.
-    await createStore(baseURL!, 177, 1770, 17700, ['n17a']);
+    await createStore(baseURL!, 177, ['n17a']);
     await addGroup(baseURL!, 177, 1770, 17700, ['n17a']);
 
     const api = await apiContext(baseURL!);
     try {
       await page.goto('/');
       await page.getByRole('button', { name: 'Logical' }).click();
-      const aside = page.locator('aside').first();
-      await expect(aside.getByText('G-1770')).toBeVisible({ timeout: 15_000 });
+      const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
+      await expect(aside.getByText('G-1770')).toBeVisible({ timeout: 3_000 });
 
       // Right-click selects + targets the group (without toggling its expand,
       // so the existing replica row stays visible).
@@ -32,10 +32,10 @@ test.describe('E2E-17 add replica', () => {
       await page.getByLabel('Node', { exact: true }).selectOption('n17b');
       await page.getByRole('button', { name: /add replica/i }).click();
 
-      await expect(page.getByText(/Replica added to node "n17b" successfully/)).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByRole('alert').getByText(/Replica added to node "n17b" successfully/)).toBeVisible({ timeout: 3_000 });
 
       // Verify the new replica appears in the logical tree.
-      await expect(aside.getByText('LR-17701')).toBeVisible({ timeout: 15_000 });
+      await expect(aside.getByText('LR-17701')).toBeVisible({ timeout: 3_000 });
 
       // Verify backend: two replicas in the group.
       const response = await api.get('/api/stores/177/groups/1770/replicas');
