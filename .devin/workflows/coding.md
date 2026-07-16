@@ -41,10 +41,10 @@ Defaults: file=`debug`, console (`-l`)=`info`. Override via `RUST_LOG`. See `cro
 
 ### E2E / Playwright Tests (`crowkv-console/web/ui/e2e`)
 
-- **No ignoring errors** — never swallow API failures with `.catch(() => undefined)` or similar. If a cleanup call fails, log it with `console.warn` and the error details. Tests must surface all errors, not hide them.
-- **Precise selectors** — use `getByLabel`, `getByRole`, `getByTestId`, or scoped locators (`page.locator('header').getByRole(...)`, `aside.getByText(...)`). Avoid unscoped `page.getByText(...)` that could match toast messages plus inline text. Avoid `.first()` on page-level locators — scope to a container instead.
-- **Timeout discipline** — all assertion timeouts must be ≤ 3 seconds. The only exception is leader election (`waitForLeader`, `expect.poll` for leader status) which may use up to 10 seconds. No `setTimeout` or `waitForTimeout` increases to work around slow operations.
-- **`data-testid` for dynamic content** — when a test asserts on text that could appear in multiple places (e.g., KV get result, not-found message, scan table), add a `data-testid` to the target element and use `getByTestId` in the test.
+- **No ignoring errors** — never swallow API failures silently; log cleanup errors with `console.warn`.
+- **Precise selectors** — use `getByLabel`, `getByRole`, `getByTestId`, or scoped locators. Avoid unscoped `page.getByText` and `.first()` on page-level locators.
+- **Timeout discipline** — assertion timeouts ≤ 3 s; leader election may use up to 10 s. No inflating timeouts to work around slowness.
+- **`data-testid`** — add to dynamic elements that could match in multiple places; select via `getByTestId`.
 
 ### Health & Info Reporting
 
