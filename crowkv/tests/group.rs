@@ -59,6 +59,9 @@ mod paxos_error;
 #[path = "group/g1_step_down_survival_test.rs"]
 mod g1_step_down_survival;
 
+#[path = "group/g3_leader_change_test.rs"]
+mod g3_leader_change;
+
 #[path = "group/a3_crash_restart_no_data_loss_test.rs"]
 mod a3_crash_restart_no_data_loss;
 
