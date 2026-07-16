@@ -92,7 +92,7 @@ Source: `crowkv/src/cluster/local_replica.rs`. Tests: 10 files, ~56 tests.
 
 Source: `crowkv/src/cluster/group.rs`. Tests: 20 files, ~56 tests.
 
-- [ ] **KV operation correctness**: all op types and orderings through group `propose` — Put, overwrite, Delete, delete non-existent, batch with multiple puts, intra-batch last-wins, put-then-delete, delete-then-put, empty batch, mixed ops across slots. Verify via `engine_get` on all replicas.
+- [x] **KV operation correctness**: 8 tests covering all op types and orderings through group gRPC KV API.
 - [ ] **KV edge-case keys**: empty key, large key (≥1KB), special-bytes key (null, high-UTF8, whitespace), large value (≥1MB), small value (1 byte), empty value. At least one test covering all edge cases through group propose.
 - [ ] **LearnerStream** (`cluster/learner_stream.rs`): bidi-stream framing, flow control, parallel in-flight slots, stream re-establish after drop.
 - [ ] **Recovery above the durable-commit watermark** via bulk Phase 1 / heartbeat catch-up on a fresh follower.
