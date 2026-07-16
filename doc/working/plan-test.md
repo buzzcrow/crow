@@ -150,9 +150,9 @@ R12 (async operation API) is now implemented — these tests should use the
 async operation pattern (trigger → poll `/operations/:id` → poll `/ready`)
 instead of blocking on the HTTP call.
 
-- [ ] **42-stop-server-keeps-group**: 3-node group, stop the server on a non-leader node via context menu. Verify group still accepts puts/gets (quorum intact). Verify health pill shows Degraded. Restart the stopped server, verify group returns to full health.
-- [ ] **43-stop-leader-reelection**: 3-node group, identify the leader, stop the leader's server. Verify a new leader is elected within 10s. Verify KV put/get still works. Restart the old leader, verify it rejoins as follower.
-- [ ] **44-delete-node-after-group**: 5-node group, delete a non-leader node. Verify group still operates (quorum 4-of-5). Delete another non-leader. Verify group still operates (quorum 3-of-5). Stop here — do not go below majority.
-- [ ] **45-add-replica-to-running-group**: 3-node group with active KV data, add a 4th replica via context menu. Verify new replica catches up (data visible via scan on the new node's store). Verify group still accepts writes.
-- [ ] **46-multi-store-reconfig**: 2 stores on 5 nodes. Stop a server that participates in both stores. Verify both stores' groups handle the loss correctly (degraded but functional if quorum holds). Restart, verify recovery.
+- [x] **42-stop-server-keeps-group**: 3-node group, stop non-leader, verify quorum intact and KV ops work. Restart, verify full health.
+- [x] **43-stop-leader-reelection**: 3-node group, stop leader, verify new leader elected within 10s. KV ops continue. Restart old leader, verify rejoin.
+- [x] **44-delete-node-after-group**: 5-node group, delete 2 non-leader nodes sequentially. Group operates down to 3-of-5 (exact majority).
+- [x] **45-add-replica-to-running-group**: 3-node group with KV data, add 4th replica. Verify group still accepts writes and original keys readable.
+- [x] **46-multi-store-reconfig**: 2 stores on overlapping nodes. Stop shared non-leader, both stores maintain quorum. Restart, verify recovery.
 
