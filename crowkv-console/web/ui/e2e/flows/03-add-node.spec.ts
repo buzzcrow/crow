@@ -10,8 +10,8 @@ test.describe('E2E-03 add node', () => {
 
     await page.goto('/');
     await page.getByRole('button', { name: 'Physical' }).click();
-    const aside = page.locator('aside').first();
-    await expect(aside.getByText('R-r3 (Rack Three)')).toBeVisible({ timeout: 15_000 });
+    const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
+    await expect(aside.getByText('R-r3 (Rack Three)')).toBeVisible({ timeout: 3_000 });
 
     // Right-click the rack row: the context menu pre-selects the rack in the
     // Add Node dialog (defaultRackId), so no manual rack selection is needed.
@@ -25,8 +25,8 @@ test.describe('E2E-03 add node', () => {
     await expect(page.getByRole('button', { name: /create node/i })).toBeEnabled();
     await page.getByRole('button', { name: /create node/i }).click();
 
-    await expect(page.getByText(/Node "n3" created successfully/)).toBeVisible({ timeout: 15_000 });
-    await expect(aside.getByText('N-n3', { exact: true })).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('alert').getByText(/Node "n3" created successfully/)).toBeVisible({ timeout: 3_000 });
+    await expect(aside.getByText('N-n3', { exact: true })).toBeVisible({ timeout: 3_000 });
 
     const api = await apiContext(baseURL!);
     try {

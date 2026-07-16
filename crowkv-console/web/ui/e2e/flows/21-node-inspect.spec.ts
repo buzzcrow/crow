@@ -31,7 +31,7 @@ test.describe('E2E-21 physical node inspect', () => {
     await deployNodeServer(baseURL!, 'n26a', 9980, 9990);
     await deployNodeServer(baseURL!, 'n26b', 9981, 9991);
     // store 266, then group 2660 / replica 26600 on n26a, then a peer on n26b.
-    await createStore(baseURL!, 266, 2660, 26600, ['n26a']);
+    await createStore(baseURL!, 266, ['n26a']);
     await addGroup(baseURL!, 266, 2660, 26600, ['n26a']);
     await addReplica(baseURL!, 266, 2660, 'n26b', 26601);
 
@@ -39,11 +39,11 @@ test.describe('E2E-21 physical node inspect', () => {
     try {
       await page.goto('/');
       await page.getByRole('button', { name: 'Physical' }).click();
-      const aside = page.locator('aside').first();
+      const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
       // Per-node store detail loads after the tree mounts, so rows added by
       // polling stay collapsed. Wait for the stores, then expand everything.
-      await expect(aside.getByText('S-266', { exact: true }).first()).toBeVisible({ timeout: 20_000 });
+      await expect(aside.getByText('S-266', { exact: true }).first()).toBeVisible({ timeout: 3_000 });
       for (let i = 0; i < 24; i++) {
         const expander = aside.getByRole('button', { name: 'Expand' }).first();
         if (!(await expander.count())) break;
@@ -51,11 +51,11 @@ test.describe('E2E-21 physical node inspect', () => {
       }
 
       // Local replica on n26a and the remote proxy pointing at n26b's 26601.
-      await expect(aside.getByText('LR-26600', { exact: true })).toBeVisible({ timeout: 20_000 });
-      await expect(aside.getByText('RR-26601', { exact: true })).toBeVisible({ timeout: 20_000 });
+      await expect(aside.getByText('LR-26600', { exact: true })).toBeVisible({ timeout: 3_000 });
+      await expect(aside.getByText('RR-26601', { exact: true })).toBeVisible({ timeout: 3_000 });
       // The mirror side: n26b hosts 26601 locally and a remote proxy for 26600.
-      await expect(aside.getByText('LR-26601', { exact: true })).toBeVisible({ timeout: 20_000 });
-      await expect(aside.getByText('RR-26600', { exact: true })).toBeVisible({ timeout: 20_000 });
+      await expect(aside.getByText('LR-26601', { exact: true })).toBeVisible({ timeout: 3_000 });
+      await expect(aside.getByText('RR-26600', { exact: true })).toBeVisible({ timeout: 3_000 });
 
       // Remove the remote on n26a out-of-band (simulated mis-wiring).
       const del = await api.delete('/api/nodes/n26a/stores/266/groups/2660/remotes/26601');
@@ -63,7 +63,7 @@ test.describe('E2E-21 physical node inspect', () => {
 
       // After a poll the dashed peer row under n26a is gone; n26b's mirror
       // remote (RR-26600) is untouched.
-      await expect(aside.getByText('RR-26601', { exact: true })).toHaveCount(0, { timeout: 20_000 });
+      await expect(aside.getByText('RR-26601', { exact: true })).toHaveCount(0, { timeout: 3_000 });
       await expect(aside.getByText('RR-26600', { exact: true })).toBeVisible();
     } finally {
       await api.dispose();

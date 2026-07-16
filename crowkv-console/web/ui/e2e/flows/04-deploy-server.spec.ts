@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, DEFAULT_SERVER_BINARY, seedRackAndNode } from '../fixtures/consoleSetup';
+import { apiContext, DEFAULT_SERVER_BINARY, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
 
 test.describe('E2E-04 deploy server', () => {
   test('deploys and stops a real crowkv-server through the UI', async ({ page, baseURL }) => {
@@ -12,8 +12,8 @@ test.describe('E2E-04 deploy server', () => {
     try {
       await page.goto('/');
       await page.getByRole('button', { name: 'Physical' }).click();
-      const aside = page.locator('aside').first();
-      await expect(aside.getByText('N-n4', { exact: true })).toBeVisible({ timeout: 15_000 });
+      const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
+      await expect(aside.getByText('N-n4', { exact: true })).toBeVisible({ timeout: 3_000 });
 
       await aside.getByText('N-n4', { exact: true }).click({ button: 'right' });
       await page.getByRole('menuitem', { name: /deploy crowkv/i }).click();
@@ -24,7 +24,7 @@ test.describe('E2E-04 deploy server', () => {
       await page.getByLabel('Binary Path (optional)').fill(DEFAULT_SERVER_BINARY);
       await page.getByRole('button', { name: 'Deploy' }).click();
 
-      await expect(page.getByText(/CrowKV deployed on n4/)).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByRole('alert').getByText(/CrowKV deployed on n4/)).toBeVisible({ timeout: 3_000 });
 
       const server = await api.get('/api/nodes/n4/server');
       expect(server.ok(), await server.text()).toBeTruthy();
@@ -39,7 +39,7 @@ test.describe('E2E-04 deploy server', () => {
       );
       expect(body.pid).toEqual(expect.any(Number));
     } finally {
-      await api.post('/api/nodes/n4/server/stop').catch(() => undefined);
+      await stopNodeServer(baseURL!, 'n4');
       await api.dispose();
     }
   });
