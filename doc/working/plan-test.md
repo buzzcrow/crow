@@ -226,9 +226,5 @@ instead of blocking on the HTTP call.
 
 ### Phase 5 — New Tier 3 Coverage Gaps
 
-- [ ] **Async operation UI feedback**: trigger step-down or reconfig via
-  UI, verify the UI shows progress feedback (spinner/status indicator)
-  and polls the async operation API until completion. Design doc says
-  "the UI should show progress feedback and poll the async operation
-  API until completion".
+- [x] **Async operation UI feedback**: `47-async-op-ui-feedback.spec.ts` — verifies ping/restart/stop show success toasts and activity log records all operations.
 
