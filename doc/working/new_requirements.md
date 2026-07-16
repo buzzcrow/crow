@@ -35,7 +35,9 @@ complexity, and dependency. Before implementation, follow the
   the caller. Add an async operation pattern: trigger returns immediately
   with an operation ID; a separate status endpoint polls completion. Add a
   readiness/convergence check API so callers can verify a group has elected
-  a leader and all replicas are caught up.
+  a leader and all replicas are caught up. **Done** — operation registry,
+  readiness endpoint, async step-down implemented; async remove/add replica
+  and GUI integration deferred.
 
 ### Low Priority
 
@@ -345,7 +347,7 @@ wire up polling.
 
 ---
 
-### R12: Async operation API + cluster readiness
+### R12: Async operation API + cluster readiness — **Done**
 
 **Problem**: Management API operations that trigger cluster state changes
 (step-down, remove replica, add replica, stop server) execute synchronously.
