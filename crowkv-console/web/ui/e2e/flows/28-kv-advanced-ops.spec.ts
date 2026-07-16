@@ -59,6 +59,8 @@ test.describe('E2E-28 KV advanced operations', () => {
       const deletePrefixResponse = page.waitForResponse((r: any) => r.url().includes('/kv/delete'));
       await dialog.getByRole('button', { name: 'Delete' }).click();
       await deletePrefixResponse;
+      // Wait for the component's automatic re-scan (setTimeout 100ms) to settle
+      await page.waitForTimeout(500);
 
       // Scan again — adv-a-* keys should be gone
       await scanAndRefresh(page);
