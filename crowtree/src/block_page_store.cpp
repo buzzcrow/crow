@@ -670,6 +670,9 @@ uint64_t BlockPageStore::size() const
     if (is_block_device_ && capacity_ > 0) {
         return capacity_;
     }
+    if (medium_ == nullptr) {
+        return 0;
+    }
     return medium_->size();
 }
 

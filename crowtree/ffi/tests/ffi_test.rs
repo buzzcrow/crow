@@ -114,10 +114,9 @@ fn mem_apply_batch_multi_key_and_dup_last_wins() {
 #[test]
 fn file_snapshot_reopen_smoke() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("tree.ct");
     let opt = Options {
-        path: Some(path.to_string_lossy().into_owned()),
-        iu_size: 4096,
+        path: Some(dir.path().to_string_lossy().into_owned()),
+        iu_size: 1,
         frame_bytes: 4096,
         ..Default::default()
     };
@@ -150,9 +149,8 @@ fn file_snapshot_reopen_smoke() {
 #[test]
 fn block_device_snapshot_reopen_smoke() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("tree.ct");
     let opt = Options {
-        path: Some(path.to_string_lossy().into_owned()),
+        path: Some(dir.path().to_string_lossy().into_owned()),
         iu_size: 4096,
         frame_bytes: 4096,
         backend: PageStoreBackend::Block,
@@ -235,10 +233,9 @@ fn open_rejects_path_with_nul() {
 #[tokio::test]
 async fn async_bridge_apply_get_snapshot() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("async.ct");
     let opt = Options {
-        path: Some(path.to_string_lossy().into_owned()),
-        iu_size: 4096,
+        path: Some(dir.path().to_string_lossy().into_owned()),
+        iu_size: 1,
         frame_bytes: 4096,
         ..Default::default()
     };
@@ -268,10 +265,9 @@ async fn async_get_fast_path_completes_on_first_poll() {
     use std::task::{Context, Poll, Waker};
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("fast.ct");
     let opt = Options {
-        path: Some(path.to_string_lossy().into_owned()),
-        iu_size: 4096,
+        path: Some(dir.path().to_string_lossy().into_owned()),
+        iu_size: 1,
         frame_bytes: 4096,
         ..Default::default()
     };
@@ -293,10 +289,9 @@ async fn async_get_fast_path_completes_on_first_poll() {
 #[tokio::test]
 async fn async_get_slow_path_completes_after_eviction() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("slow.ct");
     let opt = Options {
-        path: Some(path.to_string_lossy().into_owned()),
-        iu_size: 4096,
+        path: Some(dir.path().to_string_lossy().into_owned()),
+        iu_size: 1,
         frame_bytes: 4096,
         ..Default::default()
     };
@@ -315,10 +310,9 @@ async fn async_get_slow_path_completes_after_eviction() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_async_gets_all_resolve_correctly() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("concurrent.ct");
     let opt = Options {
-        path: Some(path.to_string_lossy().into_owned()),
-        iu_size: 4096,
+        path: Some(dir.path().to_string_lossy().into_owned()),
+        iu_size: 1,
         frame_bytes: 4096,
         ..Default::default()
     };
@@ -356,10 +350,9 @@ async fn async_scan_fast_path_completes_on_first_poll() {
     use std::task::{Context, Poll, Waker};
 
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("scan_fast.ct");
     let opt = Options {
-        path: Some(path.to_string_lossy().into_owned()),
-        iu_size: 4096,
+        path: Some(dir.path().to_string_lossy().into_owned()),
+        iu_size: 1,
         frame_bytes: 4096,
         ..Default::default()
     };
@@ -390,10 +383,9 @@ async fn async_scan_fast_path_completes_on_first_poll() {
 #[tokio::test]
 async fn async_scan_slow_path_completes_after_eviction() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("scan_slow.ct");
     let opt = Options {
-        path: Some(path.to_string_lossy().into_owned()),
-        iu_size: 4096,
+        path: Some(dir.path().to_string_lossy().into_owned()),
+        iu_size: 1,
         frame_bytes: 4096,
         ..Default::default()
     };
@@ -423,10 +415,9 @@ async fn async_scan_slow_path_completes_after_eviction() {
 #[tokio::test]
 async fn async_scan_respects_limit_and_truncated_flag() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("scan_limit.ct");
     let opt = Options {
-        path: Some(path.to_string_lossy().into_owned()),
-        iu_size: 4096,
+        path: Some(dir.path().to_string_lossy().into_owned()),
+        iu_size: 1,
         frame_bytes: 4096,
         ..Default::default()
     };
