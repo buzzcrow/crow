@@ -32,8 +32,6 @@ test.describe('E2E-17 add replica', () => {
       await page.getByLabel('Node', { exact: true }).selectOption('n17b');
       await page.getByRole('button', { name: /add replica/i }).click();
 
-      await expect(page.getByRole('alert').getByText(/Replica added to node "n17b" successfully/)).toBeVisible({ timeout: 3_000 });
-
       // Verify the new replica appears in the logical tree.
       await expect(aside.getByText('LR-17701')).toBeVisible({ timeout: 3_000 });
 

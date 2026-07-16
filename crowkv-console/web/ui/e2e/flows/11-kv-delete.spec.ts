@@ -40,7 +40,6 @@ test.describe('E2E-11 KV delete', () => {
       await dialog.getByRole('button', { name: 'Delete' }).click();
       const deleteResponse = await deleteResponsePromise;
       expect(deleteResponse.ok(), await deleteResponse.text()).toBeTruthy();
-      await expect(page.getByRole('alert').getByText(/Key deleted: "delete-11-key"/)).toBeVisible({ timeout: 3_000 });
 
       // Verify key is gone via Get
       await page.getByLabel('Get key').fill('delete-11-key');

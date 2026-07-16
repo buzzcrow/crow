@@ -558,7 +558,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
                   <>
                     <span className="tw-font-mono tw-text-muted" data-testid="kv-get-result">{getResult.value_utf8}</span>
                     <span className="tw-text-muted tw-text-[10px]">rev: {getResult.revision}</span>
-                    <button onClick={() => copy(getResult.value_utf8 || '')} className="tw-text-muted hover:tw-text-text">
+                    <button onClick={() => copy(getResult.value_utf8 || '')} className="tw-text-muted hover:tw-text-text" data-testid="kv-copy-value">
                       <Copy className="tw-h-3 tw-w-3" />
                     </button>
                   </>
@@ -709,7 +709,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
                       onClick={() => { setGetKey(row.key_utf8); }}
                     >
                       <td className="tw-p-2 tw-text-center" onClick={(e) => { e.stopPropagation(); toggleRow(idx); }}>
-                        <input type="checkbox" checked={row.selected} onChange={() => toggleRow(idx)} />
+                        <input type="checkbox" checked={row.selected} readOnly />
                       </td>
                       <td className="tw-p-2 tw-font-mono tw-truncate tw-max-w-[200px]" title={row.key_utf8}>
                         {row.key_utf8}
@@ -726,6 +726,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
                             onClick={() => handleInlineDelete(row.key_utf8, row.groupId)}
                             className="tw-text-muted hover:tw-text-failed"
                             title="Delete key"
+                            data-testid={`inline-delete-${row.key_utf8}`}
                           >
                             <Trash2 className="tw-h-3 tw-w-3" />
                           </button>

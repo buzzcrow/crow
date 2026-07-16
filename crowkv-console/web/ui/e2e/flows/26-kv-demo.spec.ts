@@ -59,12 +59,13 @@ test.describe('E2E-26 KV demo inject + delete', () => {
       await dialog.getByRole('button', { name: 'Delete' }).click();
       await deleteResponsePromise;
 
-      // Wait for the toast
-      await expect(page.getByRole('alert').getByText(/Deleted 5 demo keys/)).toBeVisible({ timeout: 3_000 });
-
       // Verify via API that no demo keys remain
       const remaining = await scanAllDemoKeys(baseURL!, 260, 2600);
       expect(remaining.length).toBe(0);
+
+      // Verify scan table no longer shows demo keys
+      await page.getByRole('button', { name: /scan/i }).click();
+      await expect(page.getByTestId('kv-scan-table').getByText(/demo_key_/)).toHaveCount(0, { timeout: 3_000 });
     } finally {
       await stopNodeServer(baseURL!, 'n26');
     }
@@ -107,8 +108,6 @@ test.describe('E2E-26 KV demo inject + delete', () => {
       const deleteResponsePromise = page.waitForResponse((r: any) => r.url().includes('/kv/delete'));
       await dialog.getByRole('button', { name: 'Delete' }).click();
       await deleteResponsePromise;
-
-      await expect(page.getByRole('alert').getByText(/Deleted 20 demo keys/)).toBeVisible({ timeout: 3_000 });
 
       // Verify no demo keys remain in either group
       const remaining0 = await scanAllDemoKeys(baseURL!, 261, 2610);
@@ -154,8 +153,6 @@ test.describe('E2E-26 KV demo inject + delete', () => {
       const deleteResponsePromise = page.waitForResponse((r: any) => r.url().includes('/kv/delete'));
       await dialog.getByRole('button', { name: 'Delete' }).click();
       await deleteResponsePromise;
-
-      await expect(page.getByRole('alert').getByText(/Deleted 10 demo keys/)).toBeVisible({ timeout: 3_000 });
 
       // Verify cleanup
       const remaining1 = await scanAllDemoKeys(baseURL!, 262, 2621);

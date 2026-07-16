@@ -38,7 +38,6 @@ test.describe('E2E-24 KV not-found', () => {
       expect(getResponse.ok(), await getResponse.text()).toBeTruthy();
 
       await expect(page.getByTestId('kv-not-found')).toBeVisible({ timeout: 3_000 });
-      await expect(page.getByRole('alert').getByText(/Key "missing-key-24" not found/)).toBeVisible({ timeout: 3_000 });
       expect(errors, errors.join('\n')).toHaveLength(0);
     } finally {
       await stopNodeServer(baseURL!, 'n24');

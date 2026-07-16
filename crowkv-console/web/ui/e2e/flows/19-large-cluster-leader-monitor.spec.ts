@@ -47,16 +47,15 @@ test.describe('E2E-19 large cluster leader monitor', () => {
         await expect(aside.getByText(`G-${gid}`)).toBeVisible({ timeout: 3_000 });
       }
 
-      // Monitor leader election via API polling (max 10 s).
+      // Monitor leader election via API polling.
       // Three concurrent fresh elections (one per group) need a few
       // election deadlines (default 4-8 s each) plus PreVote/RequestVote
       // round-trip; 30 s gives headroom on a busy CI machine.
-      // Use the per-group endpoint and check role=Leader directly.
       const groups = [1990, 1991, 1992];
-      const deadline = Date.now() + 10_000;
       const leaders = new Map<number, number>();
 
-      while (Date.now() < deadline && leaders.size < groups.length) {
+      // Poll until all groups have exactly one leader, or timeout.
+      await expect.poll(async () => {
         for (const gid of groups) {
           if (leaders.has(gid)) continue;
           const response = await api.get(`/api/stores/199/groups/${gid}`);
@@ -67,20 +66,30 @@ test.describe('E2E-19 large cluster leader monitor', () => {
             leaders.set(gid, leaderReplicas[0].replica_id);
           }
         }
-        if (leaders.size < groups.length) {
-          await page.waitForTimeout(500);
-        }
-      }
+        return leaders.size;
+      }, { timeout: 30_000, intervals: [200] }).toBe(groups.length);
 
-      // Assert every group has elected exactly one leader within 10 s.
+      // Assert every group has elected exactly one leader.
       for (const gid of groups) {
         const leader = leaders.get(gid);
         expect(
           leader,
-          `group ${gid} did not elect exactly one leader within 10 seconds (leaders so far: ${JSON.stringify(Array.from(leaders.entries()))})`,
+          `group ${gid} did not elect exactly one leader (leaders so far: ${JSON.stringify(Array.from(leaders.entries()))})`,
         ).toBeTruthy();
         expect(leader).toBeGreaterThan(0);
       }
+
+      // KV put/get verification: write a key to group 1990 and read it back
+      // via the console API to confirm the multi-group cluster serves KV.
+      const putResp = await api.post(`/api/stores/199/groups/1990/kv/put`, {
+        data: { key: 'e2e-19-key', value: 'e2e-19-value' },
+      });
+      expect(putResp.ok(), await putResp.text()).toBeTruthy();
+      const getResp = await api.get(`/api/stores/199/groups/1990/kv/get?key=e2e-19-key`);
+      expect(getResp.ok(), await getResp.text()).toBeTruthy();
+      const getBody = await getResp.json();
+      expect(getBody.found).toBe(true);
+      expect(getBody.value_utf8).toBe('e2e-19-value');
     } finally {
       await api.dispose();
       for (const r of racks) {

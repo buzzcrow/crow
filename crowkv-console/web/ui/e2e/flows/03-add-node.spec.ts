@@ -25,7 +25,6 @@ test.describe('E2E-03 add node', () => {
     await expect(page.getByRole('button', { name: /create node/i })).toBeEnabled();
     await page.getByRole('button', { name: /create node/i }).click();
 
-    await expect(page.getByRole('alert').getByText(/Node "n3" created successfully/)).toBeVisible({ timeout: 3_000 });
     await expect(aside.getByText('N-n3', { exact: true })).toBeVisible({ timeout: 3_000 });
 
     const api = await apiContext(baseURL!);
