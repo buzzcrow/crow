@@ -69,7 +69,7 @@ test.describe('E2E-45 add replica to running group', () => {
         const body = await getGroupStatus(baseURL!, 450, 4500);
         const replicas: any[] = Array.isArray(body.replicas) ? body.replicas : [];
         return replicas.length;
-      }, { timeout: 10_000 }).toBe(4);
+      }, { timeout: 10_000, intervals: [100] }).toBe(4);
 
       // Group still accepts writes
       await kvPut(baseURL!, 450, 4500, 'add45-key3', 'val3');

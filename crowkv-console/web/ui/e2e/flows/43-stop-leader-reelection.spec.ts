@@ -1,6 +1,6 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
-// Baseline: 8.5s (2026-07-16)
+// Baseline: 1.4s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
 import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader, resetAll, apiContext } from '../fixtures/consoleSetup';
@@ -73,7 +73,7 @@ test.describe('E2E-43 stop leader reelection', () => {
         const body = await getGroupStatus(baseURL!, 430, 4300);
         const replicas: any[] = Array.isArray(body.replicas) ? body.replicas : [];
         return replicas.some((r) => String(r.role).toLowerCase() === 'leader');
-      }, { timeout: 10_000 }).toBe(true);
+      }, { timeout: 10_000, intervals: [100] }).toBe(true);
 
       // KV put/get still works after reelection
       await kvPut(baseURL!, 430, 4300, 'reelect43-key2', 'val43b');
@@ -92,7 +92,7 @@ test.describe('E2E-43 stop leader reelection', () => {
         const body = await getGroupStatus(baseURL!, 430, 4300);
         const replicas: any[] = Array.isArray(body.replicas) ? body.replicas : [];
         return replicas.filter((r) => r.status !== 'unhealthy').length;
-      }, { timeout: 10_000 }).toBeGreaterThanOrEqual(3);
+      }, { timeout: 10_000, intervals: [100] }).toBeGreaterThanOrEqual(3);
     } finally {
       await stopNodeServer(baseURL!, 'n43a');
       await stopNodeServer(baseURL!, 'n43b');

@@ -111,7 +111,7 @@ test.describe('E2E-46 multi-store reconfig', () => {
         const bodyA = await getGroupStatus(baseURL!, 460, 4600);
         const replicasA: any[] = Array.isArray(bodyA.replicas) ? bodyA.replicas : [];
         return replicasA.filter((r) => r.status !== 'unhealthy').length;
-      }, { timeout: 10_000 }).toBeGreaterThanOrEqual(3);
+      }, { timeout: 10_000, intervals: [100] }).toBeGreaterThanOrEqual(3);
 
       // Verify original keys still readable after recovery
       expect(await kvGet(baseURL!, 460, 4600, 'ms46-a-key')).toBe('val-a');

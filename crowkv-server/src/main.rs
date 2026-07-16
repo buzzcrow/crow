@@ -58,10 +58,10 @@ async fn main() {
 
     let bootstrap = parse_and_validate_cli_args(&args);
 
-    let election_cfg = if args.election_profile == "test" {
-        PxElectionConfig::for_tests()
-    } else {
-        PxElectionConfig::DEFAULT
+    let election_cfg = match args.election_profile.as_str() {
+        "test" => PxElectionConfig::for_tests(),
+        "e2e" => PxElectionConfig::for_e2e(),
+        _ => PxElectionConfig::DEFAULT,
     };
 
     let wal_root = args.wal_root.clone().unwrap_or_else(|| PathBuf::from("wal"));
