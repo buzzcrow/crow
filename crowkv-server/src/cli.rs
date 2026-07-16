@@ -46,7 +46,7 @@ pub struct Cli {
     #[arg(long)]
     pub config_root: Option<std::path::PathBuf>,
 
-    #[arg(long, default_value = "default", value_parser = ["default", "test"])]
+    #[arg(long, default_value = "default", value_parser = ["default", "test", "e2e"])]
     pub election_profile: String,
 
     /// KV storage engine backing each group's learner. `crowtree` (default)

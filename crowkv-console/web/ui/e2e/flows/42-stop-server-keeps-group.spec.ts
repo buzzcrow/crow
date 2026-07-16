@@ -89,7 +89,7 @@ test.describe('E2E-42 stop server keeps group', () => {
         const body = await getGroupStatus(baseURL!, 420, 4200);
         const replicas: any[] = Array.isArray(body.replicas) ? body.replicas : [];
         return replicas.filter((r) => r.status !== 'unhealthy').length;
-      }, { timeout: 10_000 }).toBeGreaterThanOrEqual(3);
+      }, { timeout: 10_000, intervals: [100] }).toBeGreaterThanOrEqual(3);
     } finally {
       await stopNodeServer(baseURL!, 'n42a');
       await stopNodeServer(baseURL!, 'n42b');

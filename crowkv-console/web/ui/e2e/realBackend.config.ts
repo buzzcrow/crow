@@ -58,5 +58,6 @@ export default defineConfig({
     timeout: 120_000,
     stdout: 'pipe',
     stderr: 'pipe',
+    env: { ...process.env, CROWKV_SERVER_ELECTION_PROFILE: 'e2e' },
   },
 });

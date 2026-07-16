@@ -110,7 +110,7 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
       } finally {
         await api.dispose();
       }
-    }, { timeout: 10_000 }).toBe(true);
+    }, { timeout: 10_000, intervals: [100] }).toBe(true);
 
     // --- KV via KV Operator panel ---
     await page.locator('header').getByRole('button', { name: 'KV' }).click();

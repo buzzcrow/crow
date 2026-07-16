@@ -61,7 +61,7 @@ test.describe('E2E-26 KV demo inject + delete', () => {
       await expect.poll(async () => {
         const remaining = await scanAllDemoKeys(baseURL!, 260, 2600);
         return remaining.length;
-      }, { timeout: 5_000 }).toBe(0);
+      }, { timeout: 5_000, intervals: [100] }).toBe(0);
 
       // Verify scan table no longer shows demo keys
       await page.getByRole('button', { name: /scan/i }).click();
@@ -111,7 +111,7 @@ test.describe('E2E-26 KV demo inject + delete', () => {
         const r0 = await scanAllDemoKeys(baseURL!, 261, 2610);
         const r1 = await scanAllDemoKeys(baseURL!, 261, 2611);
         return r0.length + r1.length;
-      }, { timeout: 5_000 }).toBe(0);
+      }, { timeout: 5_000, intervals: [100] }).toBe(0);
     } finally {
       await stopNodeServer(baseURL!, 'n26b');
     }
@@ -152,7 +152,7 @@ test.describe('E2E-26 KV demo inject + delete', () => {
       await expect.poll(async () => {
         const remaining = await scanAllDemoKeys(baseURL!, 262, 2621);
         return remaining.length;
-      }, { timeout: 5_000 }).toBe(0);
+      }, { timeout: 5_000, intervals: [100] }).toBe(0);
     } finally {
       await stopNodeServer(baseURL!, 'n26c');
     }

@@ -57,8 +57,8 @@ test.describe('E2E-32 inspector activity tab', () => {
       // Verify an entry appears (the KV Put should be logged)
       await expect(inspector.getByText(/KV Put/i)).toBeVisible({ timeout: 3_000 });
 
-      // Click Clear log
-      await inspector.getByRole('button', { name: /clear log/i }).evaluate((el: HTMLElement) => el.click());
+      // Click Clear log (force to bypass any toast overlay)
+      await inspector.getByRole('button', { name: /clear log/i }).click({ force: true });
 
       // Verify entries are removed
       await expect(inspector.getByText('No activity yet.')).toBeVisible({ timeout: 3_000 });
