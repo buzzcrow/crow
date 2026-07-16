@@ -32,7 +32,7 @@ changes.
 - [x] `pixi run cargo clippy --all-targets -- -D warnings` passes
 - [x] `pixi exec clang-format --dry-run --Werror` on changed .cpp/.h passes
 - [x] `pixi run test-ct` passes
-- [ ] Commit
+- [x] Commit
 
 ## Task 1: Rust metric types (core primitives)
 
@@ -68,7 +68,7 @@ Each type exposes:
   avg+rate, histogram p50/p99 with known distribution, summary avg+max
   reset
 - [x] `pixi run cargo clippy --all-targets -- -D warnings` passes
-- [ ] Commit (accumulate with later tasks — single commit per task per
+- [x] Commit (accumulate with later tasks — single commit per task per
   AGENTS.md)
 
 ## Task 2: Rust MetricsRegistry
@@ -300,7 +300,7 @@ Files:
 - [x] `pixi run cargo fmt --all -- --check` passes
 - [x] `pixi run cargo clippy --all-targets -- -D warnings` passes
 - [x] `pixi exec clang-format --dry-run --Werror` on all changed .cpp/.h
-- [ ] Commit (single commit for the entire metrics task)
+- [x] Commit (single commit for the entire metrics task)
 
 ## Test Checklist
 
