@@ -115,10 +115,11 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
   const positioned = useMemo(() => layoutTree(rawNodes, edges), [rawNodes, edges]);
 
   useEffect(() => {
-    if (refreshToken === lastRefreshTokenRef.current) return;
-    lastRefreshTokenRef.current = refreshToken;
-    viewportsRef.current = {};
-    fittedOnceRef.current = {};
+    if (refreshToken !== lastRefreshTokenRef.current) {
+      lastRefreshTokenRef.current = refreshToken;
+      viewportsRef.current = {};
+      fittedOnceRef.current = {};
+    }
   }, [refreshToken]);
 
   useEffect(() => {
@@ -138,7 +139,7 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
       }
     });
     return () => cancelAnimationFrame(frame);
-  }, [fitView, nodesInitialized, positioned.nodes, setViewport, viewMode]);
+  }, [fitView, nodesInitialized, positioned.nodes, setViewport, viewMode, refreshToken]);
 
   const selId = selectedEntity ? selectedNodeId(selectedEntity) : null;
   const decoratedNodes: Node[] = useMemo(

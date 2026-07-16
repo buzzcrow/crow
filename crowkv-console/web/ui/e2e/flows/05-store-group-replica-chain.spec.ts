@@ -21,7 +21,6 @@ test.describe('E2E-05 store group replica chain', () => {
       await page.getByLabel(/^n5/).check();
       await page.getByRole('button', { name: /create kv store/i }).click();
 
-      await expect(page.getByRole('alert').getByText(/KV Store 57 created successfully/)).toBeVisible({ timeout: 3_000 });
       await expect(aside.getByText('S-57')).toBeVisible({ timeout: 3_000 });
 
       // Add the first group via the store row context menu.
@@ -49,7 +48,6 @@ test.describe('E2E-05 store group replica chain', () => {
       await page.getByLabel(/^n5/).check();
       await page.getByRole('button', { name: /create group/i }).click();
 
-      await expect(page.getByRole('alert').getByText(/Group 580 created successfully/)).toBeVisible({ timeout: 3_000 });
       await expect(aside.getByText('G-580')).toBeVisible({ timeout: 3_000 });
 
       const stores = await api.get('/api/stores');

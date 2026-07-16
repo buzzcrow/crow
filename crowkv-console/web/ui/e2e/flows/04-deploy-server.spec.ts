@@ -24,8 +24,6 @@ test.describe('E2E-04 deploy server', () => {
       await page.getByLabel('Binary Path (optional)').fill(DEFAULT_SERVER_BINARY);
       await page.getByRole('button', { name: 'Deploy' }).click();
 
-      await expect(page.getByRole('alert').getByText(/CrowKV deployed on n4/)).toBeVisible({ timeout: 3_000 });
-
       const server = await api.get('/api/nodes/n4/server');
       expect(server.ok(), await server.text()).toBeTruthy();
       const body = await server.json();

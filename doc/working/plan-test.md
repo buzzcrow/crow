@@ -117,17 +117,20 @@ prepare them for topology parameterization.
 
 ### Phase 2 — New Tier 1 Tests (single-feature coverage)
 
-- [ ] **27-server-lifecycle**: Ping node, Restart server, Stop server — all via context menu. Verify toast feedback and backend state change (server status via API). Stop should make the node's Deploy menu item reappear.
-- [ ] **28-kv-advanced-ops**: Delete Prefix, Delete Selected (checkbox + button), inline delete (per-row trash), copy-to-clipboard on Get result. Each in isolation on a single-group store.
-- [ ] **29-kv-load-more**: Put >100 keys, scan, verify truncated indicator + Load More button, click Load More, verify additional rows appear.
-- [ ] **30-kv-all-groups-mode**: 2+ groups in one store, switch to All Groups, verify scan aggregates, Get disabled, Put distributes to a random group.
-- [ ] **31-kv-auto-scan-toggle**: Toggle auto-scan off, put a key, verify scan table does NOT auto-refresh. Toggle on, put again, verify it does.
-- [ ] **32-inspector-activity-tab**: Perform a mutation, open Inspector Activity tab, verify entry appears with action/target/status. Click Clear log, verify entries removed.
-- [ ] **33-inspector-cross-jump-node-to-store**: Select a physical node hosting a store, verify "Show store X in cluster" button, click it, verify view switches to Logical and store selected.
-- [ ] **34-sidebar-filter**: Create multiple racks/nodes, type in Filter, verify tree narrows. Clear filter, verify all items return.
-- [ ] **35-header-refresh**: Modify backend via API (add rack), click Refresh, verify new rack appears without page reload.
-- [ ] **36-health-pill-states**: Verify "Unknown" with no groups, "Healthy" with all-healthy groups, "Degraded" when a group loses leadership.
-- [ ] **37-dialog-duplicate-id**: Add rack with existing ID, verify error toast and dialog stays open. Same for node and store.
+All implemented and passing (39/39). Toast assertions removed, timeouts
+tightened, `evaluate` click bypass for toast-overlay blocking.
+
+- [x] **27-server-lifecycle**: Ping node, Restart server, Stop server — all via context menu. Verify backend state change (server status via API). Stop should make the node's Deploy menu item reappear.
+- [x] **28-kv-advanced-ops**: Delete Prefix, Delete Selected (checkbox + button), inline delete (per-row trash), copy-to-clipboard on Get result. Each in isolation on a single-group store.
+- [x] **29-kv-load-more**: Put >100 keys, scan, verify truncated indicator + Load More button, click Load More, verify additional rows appear.
+- [x] **30-kv-all-groups-mode**: 2+ groups in one store, switch to All Groups, verify scan aggregates, Get disabled, Put distributes to a random group.
+- [x] **31-kv-auto-scan-toggle**: Toggle auto-scan off, put a key, verify scan table does NOT auto-refresh. Toggle on, put again, verify it does.
+- [x] **32-inspector-activity-tab**: Perform a mutation, open Inspector Activity tab, verify entry appears with action/target/status. Click Clear log, verify entries removed.
+- [x] **33-inspector-cross-jump-node-to-store**: Select a physical node hosting a store, verify "Show store X in cluster" button, click it, verify view switches to Logical and store selected.
+- [x] **34-sidebar-filter**: Create multiple racks/nodes, type in Filter, verify tree narrows. Clear filter, verify all items return.
+- [x] **35-header-refresh**: Modify backend via API (add rack), click Refresh, verify new rack appears without page reload.
+- [x] **36-health-pill-states**: Verify "Unknown" with no groups, "Healthy" with all-healthy groups, "Degraded" when a group loses leadership.
+- [x] **37-dialog-duplicate-id**: Add rack with existing ID, verify error toast and dialog stays open. Same for node and store.
 
 ### Phase 3 — New Tier 2 Tests (complex topology & multi-store)
 

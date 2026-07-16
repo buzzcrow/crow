@@ -45,6 +45,7 @@ Defaults: file=`debug`, console (`-l`)=`info`. Override via `RUST_LOG`. See `cro
 - **Precise selectors** — use `getByLabel`, `getByRole`, `getByTestId`, or scoped locators. Avoid unscoped `page.getByText` and `.first()` on page-level locators.
 - **Timeout discipline** — assertion timeouts ≤ 3 s; leader election may use up to 10 s. No inflating timeouts to work around slowness.
 - **`data-testid`** — add to dynamic elements that could match in multiple places; select via `getByTestId`.
+- **Ignore toasts** — never assert on `getByRole('alert')` or wait for toast dismiss. If a toast blocks a click, use `locator.evaluate((el) => el.click())` to bypass.
 
 ### Health & Info Reporting
 

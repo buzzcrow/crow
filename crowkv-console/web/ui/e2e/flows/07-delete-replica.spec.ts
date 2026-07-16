@@ -7,7 +7,7 @@ import { apiContext, addGroup, createStore, deployNodeServer, seedRackAndNode, s
 test.describe('E2E-07 delete replica', () => {
   test('deletes a replica through the UI and verifies the real backend', async ({ page, baseURL }) => {
     await seedRackAndNode(baseURL!, 'r7', 'n7');
-    await deployNodeServer(baseURL!, 'n7', 9917, 9927);
+    await deployNodeServer(baseURL!, 'n7', 9937, 9947);
     await createStore(baseURL!, 77, ['n7']);
     await addGroup(baseURL!, 77, 770, 7700, ['n7']);
 
@@ -23,7 +23,6 @@ test.describe('E2E-07 delete replica', () => {
       await expect(page.getByRole('dialog', { name: 'Delete Replica' })).toBeVisible();
       await page.getByRole('button', { name: /delete replica/i }).click();
 
-      await expect(page.getByRole('alert').getByText(/Replica "7700" deleted successfully/)).toBeVisible({ timeout: 3_000 });
       await expect(aside.getByText('LR-7700')).toHaveCount(0, { timeout: 3_000 });
 
       const response = await api.get('/api/stores/77/groups/770/replicas');

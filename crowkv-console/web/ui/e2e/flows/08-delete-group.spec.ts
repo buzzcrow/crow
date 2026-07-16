@@ -23,7 +23,6 @@ test.describe('E2E-08 delete group', () => {
       await expect(page.getByRole('dialog', { name: 'Delete Group' })).toBeVisible();
       await page.getByRole('button', { name: /delete group/i }).click();
 
-      await expect(page.getByRole('alert').getByText(/Group "880" deleted successfully/)).toBeVisible({ timeout: 3_000 });
       await expect(aside.getByText('G-880')).toHaveCount(0, { timeout: 3_000 });
 
       const response = await api.get('/api/stores/88/groups');

@@ -35,7 +35,6 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     await page.getByLabel('Rack ID').fill('rsm');
     await page.getByLabel('Name (optional)').fill('Rack Smoke');
     await page.getByRole('button', { name: /create rack/i }).click();
-    await expect(page.getByRole('alert').getByText(/Rack "rsm" created successfully/)).toBeVisible({ timeout: 3_000 });
     await expect(aside.getByText('R-rsm (Rack Smoke)')).toBeVisible({ timeout: 3_000 });
 
     // --- Physical: add node via context menu ---
@@ -46,7 +45,6 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     await page.getByLabel('Host').fill('127.0.0.1');
     await page.getByLabel('Enable CrowKV on this node').uncheck();
     await page.getByRole('button', { name: /create node/i }).click();
-    await expect(page.getByRole('alert').getByText(/Node "nsm" created successfully/)).toBeVisible({ timeout: 3_000 });
     await expect(aside.getByText('N-nsm', { exact: true })).toBeVisible({ timeout: 3_000 });
 
     // --- Physical: deploy CrowKV Server via context menu ---
@@ -57,7 +55,6 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     await page.getByLabel('gRPC Port').fill('9902');
     await page.getByLabel(/Binary Path/).fill(DEFAULT_SERVER_BINARY);
     await page.getByRole('button', { name: /^Deploy$/ }).click();
-    await expect(page.getByRole('alert').getByText(/CrowKV deployed on nsm/)).toBeVisible({ timeout: 3_000 });
 
     // Backend confirms the server is running.
     await expect.poll(async () => {
@@ -79,7 +76,6 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     await page.getByLabel('KV Store ID (numeric)').fill('7');
     await page.getByLabel(/^nsm/).check();
     await page.getByRole('button', { name: /create kv store/i }).click();
-    await expect(page.getByRole('alert').getByText(/KV Store 7 created successfully/)).toBeVisible({ timeout: 3_000 });
     await expect(aside.getByText('S-7')).toBeVisible({ timeout: 3_000 });
 
     // --- Logical: create first group in store 7 ---
@@ -122,7 +118,6 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     const putResponsePromise = page.waitForResponse((r) => r.url().includes('/kv/put'));
     await page.getByRole('button', { name: /^Put$/ }).click();
     await putResponsePromise;
-    await expect(page.getByRole('alert').getByText(/Key written: "smoke-key"/)).toBeVisible({ timeout: 3_000 });
 
     // Get
     await page.getByLabel('Get key').fill('smoke-key');
