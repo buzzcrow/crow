@@ -29,6 +29,13 @@ complexity, and dependency. Before implementation, follow the
   metrics (from R8) in the GUI via existing health/internal-state query
   infrastructure. Show recent operation counts and metrics per Store/Group
   with real-time refresh (5–10 s window).
+- **R12** — Async operation API + cluster readiness — Area: crowkv-server —
+  Management API operations that trigger cluster state changes (step-down,
+  remove replica, add replica, stop server) are synchronous and can block
+  the caller. Add an async operation pattern: trigger returns immediately
+  with an operation ID; a separate status endpoint polls completion. Add a
+  readiness/convergence check API so callers can verify a group has elected
+  a leader and all replicas are caught up.
 
 ### Low Priority
 
@@ -335,6 +342,65 @@ wire up polling.
 
 **Acceptance**: Select a Store or Group in the UI, see real-time metrics
 (op count, latency, WAL stats) in the Inspector, values update every 5–10 s.
+
+---
+
+### R12: Async operation API + cluster readiness
+
+**Problem**: Management API operations that trigger cluster state changes
+(step-down, remove replica, add replica, stop server) execute synchronously.
+When the GUI deletes a leader, the HTTP call blocks until the operation
+completes — which may take seconds during leader re-election. There is no
+way for the caller to trigger an operation and poll for completion
+asynchronously. Additionally, after a reconfig operation (e.g. adding a
+replica), there is no API to check whether the new replica has caught up —
+the caller must guess or poll `/health` and infer convergence.
+
+**Approach:**
+
+- **Async operation framework:** Long-running management operations return
+  immediately with an operation ID. A `GET /operations/:id` endpoint polls
+  the operation status (`pending`, `running`, `completed`, `failed`).
+  Operations are tracked in an in-memory registry with automatic cleanup
+  after a TTL.
+
+- **Cluster readiness API:** A `GET /stores/:sid/groups/:gid/ready`
+  endpoint that checks:
+  - A leader has been elected (leader_id != 0)
+  - All voting replicas are reachable and have matching contiguous_applied
+  - No replica is significantly behind (within a configurable lag threshold)
+
+  This is a lightweight, fast check — not a full health report. It returns
+  `200 OK` with readiness details, or `503` if not ready. The GUI and tests
+  can poll this endpoint with a bounded timeout instead of blocking.
+
+- **Operations to make async:** step-down, remove replica (when it's the
+  leader), add replica (catch-up phase), stop server (graceful drain).
+  Simple operations (add rack, list stores) remain synchronous.
+
+- **GUI integration:** The UI triggers an operation, shows a spinner/status
+  indicator, polls `/operations/:id` and `/groups/:gid/ready` until
+  completion, then refreshes the topology view.
+
+**Priority**: Medium — unblocks responsive GUI operations and reliable test
+verification of reconfig scenarios.
+
+**Complexity**: Medium — operation registry, async task spawning, readiness
+check logic, API endpoints, GUI polling integration.
+
+**Files**: `crowkv-server/src/mgmt_api.rs` (new endpoints, operation
+registry), `crowkv/src/cluster/status.rs` (readiness check),
+`crowkv-console/web/ui/src/` (GUI polling), `crowkv-console/shared/src/`
+(shared types).
+
+**Acceptance**:
+- `POST /stores/:sid/groups/:gid/step-down` returns `{operation_id}` instead
+  of blocking.
+- `GET /operations/:id` returns status of the operation.
+- `GET /stores/:sid/groups/:gid/ready` returns readiness status.
+- GUI shows operation progress instead of blocking.
+- Tests can poll `/ready` with bounded timeout to verify convergence after
+  reconfig.
 
 ---
 
