@@ -32,6 +32,9 @@ mod group_propose;
 #[path = "group/kv_test.rs"]
 mod kv;
 
+#[path = "group/kv_correctness_test.rs"]
+mod kv_correctness;
+
 #[path = "group/kv_forward_test.rs"]
 mod kv_forward;
 
