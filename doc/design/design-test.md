@@ -193,16 +193,60 @@ management, topology status. Tests use embedded gRPC server via
 - KV ops: Put + BatchWrite (puts) + Delete via `kv_put`/`kv_delete`/`kv_batch_write`, persistence round-trip (put/overwrite/delete survive restart). **Gap:** full op correctness checklist not yet covered (see [`plan-test.md`](../working/plan-test.md)).
 - Topology `status` composition, `health` levels, `shutdown` cascade + idempotency.
 
-### Deployment Layer
+### Web UI E2E Layer
 
-**Scope:** `crowkv-server` binary + HTTP management API + multi-process
-clusters. Tests boot real processes and exercise the HTTP API end-to-end.
+**Scope:** Playwright browser tests against a real `crowkv-web` + `crowkv-server`
+backend. Tests drive the SPA exactly as an operator would — clicks, context menus,
+dialogs, KV panel — and verify both UI feedback (toasts, tree updates) and backend
+state (API checks). No mocks; the only network interception is route aborting for
+the backend-unreachable test.
 
-**Covered:**
-- HTTP management API (health, openapi, stores/groups CRUD, conflicts).
-- Real-process 3-node cluster KV + topology + dynamic group mgmt.
-- CLI parsing, startup WAL restore/resume.
-- New-member snapshot join via HTTP API (end-to-end).
+**Source:** `crowkv-console/web/ui/e2e/flows/*.spec.ts`, fixtures in
+`crowkv-console/web/ui/e2e/fixtures/consoleSetup.ts`.
+
+**Test runner:** `pixi run test-ui` (Playwright, headless Chromium).
+
+#### Tiered Strategy
+
+Tests are organized in three tiers of increasing complexity. Each tier builds on
+the confidence of the one below. A failure in a lower tier explains failures above.
+
+**Tier 1 — Single-Feature UI Coverage.** Each test exercises one UI element in
+isolation on a minimal topology (1 rack, 1 node, 1 server, 1 store, 1 group).
+Purpose: verify that every clickable control works and produces the expected
+toast/backend state. These are fast, deterministic, and catch UI regressions
+when components are refactored.
+
+**Tier 2 — Complex Topology & Multi-Store.** Tests verify that basic operations
+remain correct under non-trivial deployments: multiple stores, groups on subsets
+of a larger node pool, cross-store isolation. A shared `setupCluster()` helper
+accepts a topology descriptor (node count, store count, groups-per-store,
+replicas-per-group). The same assertion suite runs on both a **simple** topology
+(3 nodes, 1 store, 1 group) and a **complex** topology (8 nodes, 2 stores, subset
+groups). If a test passes on simple but fails on complex, the gap is multi-node
+interaction — this comparative approach isolates topology-specific bugs.
+
+**Tier 3 — Reconfiguration & Partial Degradation.** Tests exercise the reconfig
+feature: stopping/deleting nodes while groups are active, adding replicas to
+running groups, verifying the cluster continues to operate with reduced membership.
+These are the highest-value tests for operational confidence and the most sensitive
+to timing. Leader election timeouts are capped at 10 s; all other assertions at 3 s.
+
+#### Coverage Rules
+
+- **Every context menu action** must have at least one test: Add Node, Delete Rack,
+  Deploy, Ping, Restart, Stop, Delete Node (Physical); Add Group, Delete Store, Add
+  Replica, Delete Group, Delete Replica (Logical).
+- **Every dialog** must have at least one test that fills it and verifies the
+  backend result: AddRack, AddNode, AddStore, AddGroup, AddReplica, DeployServer,
+  ConfirmDelete.
+- **Every KV panel operation** must have at least one test: Get (found + not-found),
+  Put, Delete, Delete Prefix, Delete Selected, inline delete, Scan (with prefix),
+  Load More, All Groups mode, auto-scan toggle, demo inject, demo delete, copy.
+- **Every inspector feature** must have at least one test: Details tab (entity
+  fields), Activity tab (log entries + clear), cross-jump (both directions).
+- **Comparative tests** (Tier 2) must run on both simple and complex topologies
+  using the same assertion code path.
 
 ## crowtree C++ Test Layers
 

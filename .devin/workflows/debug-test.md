@@ -2,25 +2,29 @@
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ---
-description: Debug a failing test — log-first, data-first methodology
+description: Debug a failing test — step-by-step verification, no workarounds
 ---
 
 # Debug Test Failure Flow
 
 Companion workflows: `/coding`, `/review`.
 
+## Principles
+
+- **No workarounds** — never increase timeouts, ignore errors, or weaken assertions to make a test pass. A slow test is a suspicious test; investigate where the time goes before accepting it.
+- **Step-by-step verification** — break the test into discrete steps, each with an expected outcome and a verification method (log, data file, or temporary instrumentation). Find the first step where reality diverges from expectation.
+- **Root cause only** — fix the upstream cause, not the symptom. Downstream workarounds hide bugs and rot.
+
 ## Step 0 — Environment Check
 
 Many failures are environmental, not code bugs. Check first:
 
-- **Proxy env vars**: `env | grep -i proxy` — reqwest/curl route localhost through
-  proxy → connection failures. Fix: `no_proxy='*' http_proxy='' https_proxy='' all_proxy=''`
-- **Lingering processes**: `ps aux | grep crowkv-server | grep -v grep` →
-  `pkill -9 -f 'crowkv-server.*test-logs'`
+- **Proxy env vars**: `env | grep -i proxy` — reqwest/curl route localhost through proxy. Fix: `no_proxy='*' http_proxy='' https_proxy='' all_proxy=''`
+- **Lingering processes**: `ps aux | grep crowkv-server | grep -v grep` → `pkill -9 -f 'crowkv-server.*test-logs'`
 - **Stale test-logs**: `rm -rf test-logs/*` before rerunning web/server suites
 - **Stale build artifacts**: `pixi run cargo clean` if compilation fails
 
-If the failure disappears after cleanup → environmental, note in Debug Techniques below.
+If the failure disappears after cleanup → environmental, not a code bug.
 
 ## Step 1 — Reproduce and Isolate
 
@@ -33,169 +37,55 @@ no_proxy='*' pixi run cargo test -p <crate> --test <file> <test_name> -- --nocap
 pixi run ctest -R '<pattern>' --output-on-failure
 # C++ — via gtest_filter (more precise, runs inside the test binary)
 ./build/crowtree_tests --gtest_filter='<TestSuite.TestName>'
+# Playwright E2E
+npx playwright test --config=e2e/realBackend.config.ts e2e/flows/<file>.spec.ts
 ```
 
 - Passes alone, fails in-suite → port conflict or lingering process (Step 0)
 - Fails alone → proceed to Step 2
 
-## Step 2 — Read the Logs
+## Step 2 — Decompose into Steps and Verify Each
 
-**Rust (crowkv-server)**: `log/crowkv-server-<timestamp>-<pid>.log` by default.
-Web-managed nodes: `runtime-data/N-<node_id>/log/`. Test-spawned: `test-logs/<test-name>-<run-id>/`.
+This is the core technique. Do not jump to a fix — first identify exactly where the test diverges from expectation.
 
-```bash
-ls -t log/crowkv-server-*.log | head -1
-find test-logs -name '*.log' -newer <test-start-time> | head
-```
+1. **List every step** the test performs (setup, action, assertion).
+2. **For each step, write down**: what is the expected state? How do you verify it?
+   - **Logs**: server logs, `RUST_LOG=debug`, Playwright trace (`npx playwright show-trace`).
+   - **Data files**: WAL segments, crowtree files, runtime-data dirs.
+   - **API checks**: `curl` or `fetch` the relevant endpoint mid-test.
+   - **Temporary logs**: add `tracing::debug!` / `console.log` at decision points, rebuild, rerun. Remove after fixing.
+3. **Find the gap**: the first step where the actual state differs from expected. Classify the gap:
+   - **Design gap** — the test expects behavior the code was never written to provide. Fix the code or the test, whichever is wrong.
+   - **Ambiguity gap** — an intermediate process has undefined or timing-dependent behavior (e.g., polling races, missing setup calls). Pin it down with explicit sequencing or additional setup.
+   - **Environmental gap** — external factors (proxy, stale state, port conflicts). Fix the environment, not the code.
 
-Look for: startup sequence (store/WAL/election), `WARN`/`ERROR` lines, last line
-before exit, `SIGTERM`/`SIGINT` (external kill), `panic` (use `RUST_BACKTRACE=full`
-for complete async backtraces).
+## Step 3 — Inspect Logs and On-Disk Data
 
-**C++ (crowtree)**: Set `log_dir` in `ct_options`/`Options` to enable spdlog output
-(`<log_dir>/crowtree.log`). Control verbosity via `log_level` (`trace`/`debug`/`info`).
-No-op if built without spdlog. Example:
-```cpp
-ct_options opt = {};
-opt.log_dir = "/tmp/ct-debug";
-opt.log_level = "debug";
-```
+- **Rust logs**: `log/crowkv-server-*.log`, `runtime-data/N-<node_id>/log/`, `test-logs/`. Look for `WARN`/`ERROR`, startup sequence, `panic` (use `RUST_BACKTRACE=full`).
+- **C++ logs**: set `log_dir` + `log_level="debug"` in `ct_options`/`Options` to enable spdlog output.
+- **WAL segments**: `hexdump -C` or WAL replay tool — expected slots present? record types correct?
+- **crowtree files**: `ct_debug_dump` C API or integration test helpers — file sizes non-zero? unexpected stale files?
 
-Compare log timeline to test expectations. E.g. server started at T+0, election
-won at T+0.05, but `/health` returns 000 → check `ss -tlnp | grep <pid>`.
+## Step 4 — Add Temporary Instrumentation
 
-## Step 3 — Inspect On-Disk Data
-
-- **WAL segments**: `<wal-root>/group<gid>/seg-NNNNNNN.ck` — binary frames
-  (or text-line if `wal_record_format=TextLine`). Inspect with `hexdump -C` or
-  the WAL replay tool. Check: expected slots present? record types correct?
-- **crowtree files**: `<data-root>/` — block files (`*.blk-NNNN`) or text files
-  (`.ck`). Use `ct_debug_dump` C API or `crowtree/tests/integration/` helpers.
-
-Check: file sizes non-zero? unexpected stale files? WAL replay shows expected slots?
-
-## Step 4 — Add Missing Logs
-
-If existing logs don't reveal the cause, add targeted logs at decision points:
+If existing logs don't reveal the gap, add targeted logs at decision points:
 
 1. Find the failing function from backtrace or last log line.
-2. Rust: add `tracing::debug!` with structured fields (`store_id`, `group_id`,
-   `slot`). C++: add `CT_LOG_DEBUG(...)`.
-3. Rebuild, rerun with `RUST_LOG=debug` (Rust) or `log_level="debug"` (C++).
-4. Remove debug logs once fixed (or keep as `trace!`/`CT_LOG_TRACE` if useful).
+2. Rust: add `tracing::debug!` with structured fields. C++: add `CT_LOG_DEBUG(...)`. Playwright: add `console.log` in test or inspect DOM snapshot via trace.
+3. Rebuild, rerun, compare actual vs expected at each step.
+4. Remove temporary logs once fixed (or keep as `trace!`/`CT_LOG_TRACE` if genuinely useful).
 
 ## Step 5 — Fix and Verify
 
-1. Minimal upstream root-cause fix (not downstream workaround).
+1. Minimal upstream root-cause fix.
 2. Rerun failing test alone → must pass.
-3. Rerun full suite for affected crate → must pass.
-4. Quality gate: `pixi run cargo fmt --all -- --check`,
-   `pixi run cargo clippy --all-targets -- -D warnings`,
-   `pixi exec clang-format --dry-run --Werror` on changed `.cpp`/`.h`.
+3. Rerun full suite for affected area → must pass.
+4. Quality gate: `pixi run cargo fmt --all -- --check`, `pixi run cargo clippy --all-targets -- -D warnings`, `pixi exec clang-format --dry-run --Werror` on changed `.cpp`/`.h`.
 5. Add regression test if real bug (not environmental).
 
-## Debug Techniques (append new findings here)
+## Anti-Patterns (never do)
 
-### Proxy environment variables (2026-07-14)
-
-**Symptom**: `cluster_e2e_test` — all tests fail with "server was not ready
-before timeout". `/health` returns 000.
-
-**Root cause**: `http_proxy`/`https_proxy`/`all_proxy` set in shell. reqwest
-routes localhost through unreachable proxy.
-
-**Fix**: `unset http_proxy https_proxy all_proxy` or prefix with
-`no_proxy='*' http_proxy='' https_proxy='' all_proxy=''`.
-
-**Detection**: `curl -v http://127.0.0.1:<port>/health` shows
-`Uses proxy env variable http_proxy == ...`.
-
-### Flaky web tests — parallel CPU contention + process leakage (2026-07-15)
-
-**Symptom**: `pixi run test-web` fails with "did not become healthy within
-timeout". Failing test varies each run — resource-contention signature.
-
-**Root cause**: (1) Parallel test binaries spawn 20–30 `crowkv-server` processes,
-10s `wait_for_ready` insufficient under load. (2) `deploy_local_in_workspace`
-calls `mem::forget(child)` — panic before PID stored in `ProcessGuard` leaks the
-process, snowballing CPU contention.
-
-**Mitigation (do NOT increase timeout)**:
-```bash
-pkill -9 -f crowkv-server; rm -rf test-logs runtime-data; sleep 2
-pixi run test-web
-# or single-threaded:
-pixi run cargo test -p crowkv-web --all-targets -- --test-threads=1
-```
-
-**Proper fix direction**: register PID in `ProcessGuard` *before* `wait_for_ready`
-so timeout panic still cleans up.
-
-### Playwright strict mode violations — unscoped getByText (2026-07-16)
-
-**Symptom**: `Error: Error: strict mode violation: getByText(...) resolved to N elements`
-or test asserts on wrong element (toast message instead of inline result).
-
-**Root cause**: `page.getByText(...)` matches all elements in the DOM, including
-toast notifications (`role="alert"`) that show the same success/error message
-as inline UI text.
-
-**Fix**: Scope selectors to a container or use `data-testid`:
-- Bad: `page.getByText('some-value')`
-- Good: `page.getByTestId('kv-get-result')` (add `data-testid` to the target element)
-- Good: `page.locator('aside').getByText('Rack One')` (scope to sidebar)
-- Good: `page.locator('header').getByText(/healthy|degraded/i)` (scope to header)
-
-**Detection**: Run with `--reporter=list` and check the strict mode error for
-matched element count. Use `npx playwright show-trace` to inspect the DOM snapshot.
-
-### waitForLeader timeout — missing addGroup call (2026-07-16)
-
-**Symptom**: `leader not elected for store X group Y within 10000ms`
-
-**Root cause**: After refactoring `createStore` to not implicitly create groups,
-tests that call `waitForLeader` without first calling `addGroup` will time out
-because the group doesn't exist. The API returns 404 for the group, `waitForLeader`
-silently retries until timeout.
-
-**Fix**: Ensure `addGroup(baseURL, storeId, groupId, replicaId, nodeIds)` is called
-before `waitForLeader(baseURL, storeId, groupId)` for every group that needs a leader.
-
-**Detection**: Check the test setup sequence — `createStore` only creates the store
-metadata, `addGroup` creates the Paxos group with replicas. If `waitForLeader` times
-out, grep the test for `addGroup` calls matching the group ID.
-
-### Binary path not found — hardcoded DEFAULT_SERVER_BINARY (2026-07-16)
-
-**Symptom**: `502 Bad Gateway` with `validation failed for binary: could not resolve
-server binary path: /wrong/path/crowkv-server`
-
-**Root cause**: `DEFAULT_SERVER_BINARY` hardcoded to a machine-specific absolute path.
-
-**Fix**: Resolve relative to the fixture file using ESM-compatible imports:
-```ts
-import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
-const __dirname = dirname(fileURLToPath(import.meta.url));
-export const DEFAULT_SERVER_BINARY =
-  process.env.CROWKV_SERVER_BINARY ?? resolve(__dirname, '../../../../../target/debug/crowkv-server');
-```
-
-**Detection**: Check the 502 response body for the resolved path. Compare with
-`ls target/debug/crowkv-server` from the workspace root.
-
-### UI polling interval vs assertion timeout race (2026-07-16)
-
-**Symptom**: `expect(...).toBeVisible({ timeout: 3_000 })` fails intermittently
-even though the data appears in the UI shortly after.
-
-**Root cause**: UI polling interval (`pollIntervalActive` in `useLogicalTree` /
-`usePhysicalTree`) was set to 3s, same as the assertion timeout. If the first
-poll fires at T+3s and the assertion also expires at T+3s, the race is lost.
-
-**Fix**: Set `pollIntervalActive` to 1s (in `App.tsx`) so the first poll completes
-well within a 3s assertion timeout. This is a root-cause fix — the polling interval
-must be shorter than the test assertion timeout.
-
-**Detection**: Check `App.tsx` for `pollIntervalActive` value. If it equals or
-exceeds the test timeout, reduce the polling interval, not the test timeout.
+- **Increasing timeouts** to make a slow test pass — investigate why it's slow first.
+- **Ignoring errors** (`.catch(() => ...)`, `unwrap_or_default`, swallowing status codes) — log and surface every error.
+- **Weakening assertions** (looser matchers, `.first()` to avoid strict mode, removing checks) — fix the selector or the code, not the assertion.
+- **Downstream workarounds** (patching the test to avoid the failing path) — fix the upstream root cause.

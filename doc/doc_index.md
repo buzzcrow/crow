@@ -86,7 +86,7 @@ doc only when a task touches a topic in its row.
 
 | Doc | Read when working on |
 | --- | --- |
-| `design/design-test.md` | Test strategy, layer scope definitions, high-level coverage per layer, crowtree C++ test layers, feature-dependent test gaps. Read when designing tests or deciding where a test belongs. |
+| `design/design-test.md` | Test strategy, layer scope definitions, high-level coverage per layer, Web UI E2E tiered strategy, crowtree C++ test layers, feature-dependent test gaps. Read when designing tests or deciding where a test belongs. |
 
 ## How AI Should Use This Index
 
