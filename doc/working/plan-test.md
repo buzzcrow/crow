@@ -94,22 +94,22 @@ Source: `crowkv/src/cluster/group.rs`. Tests: 20 files, ~56 tests.
 
 - [x] **KV operation correctness**: 8 tests covering all op types and orderings through group gRPC KV API.
 - [x] **KV edge-case keys**: 6 tests covering empty value, 1-byte value, 1KB key, 100KB value, special-bytes key, whitespace key.
-- [ ] **LearnerStream** (`cluster/learner_stream.rs`): bidi-stream framing, flow control, parallel in-flight slots, stream re-establish after drop.
-- [ ] **Recovery above the durable-commit watermark** via bulk Phase 1 / heartbeat catch-up on a fresh follower.
-- [ ] **Leader-kill + restart no-data-loss** at full speed (blocked by repair-correctness).
+- [ ] **LearnerStream** (`cluster/learner_stream.rs`): blocked — LearnerStream infrastructure not yet implemented.
+- [ ] **Recovery above durable-commit watermark**: blocked — bulk Phase 1 catch-up for fresh follower not yet implemented.
+- [ ] **Leader-kill + restart no-data-loss**: blocked by repair-correctness.
 - [x] **Two-replica even-quorum behaviour**: `two_replica_even_quorum_writes_succeed_with_both_up` — 2-node cluster writes succeed with both up.
 - [x] **Leader change simulation**: `leader_change_simulation` — 3-node cluster, two consecutive step-downs, all keys survive.
-- [ ] **Reconfig — add replica catch-up**: 3-node group with existing data, add 4th replica, verify new replica catches up (data visible via scan) within 10 s.
-- [ ] **Reconfig — remove non-leader**: 3-node group, remove a non-leader replica, verify group continues to accept KV ops (quorum intact).
-- [ ] **Reconfig — remove leader**: 3-node group, remove the leader, verify new leader elected within 10 s, verify KV ops resume.
+- [ ] **Reconfig — add replica catch-up**: blocked — `add_replica` API not yet implemented.
+- [ ] **Reconfig — remove non-leader**: blocked — `remove_replica` API not yet implemented.
+- [ ] **Reconfig — remove leader**: blocked — `remove_replica` API not yet implemented.
 
 ## Store
 
 Source: `crowkv/src/store/`. Tests: 6 files, 23 tests (node, multi_group,
 status, health, shutdown, persistence).
 
-- [ ] **KV operation correctness**: all op types and orderings through `PxKvStore` public API (`kv_put`, `kv_delete`, `kv_batch_write`) — same checklist as group layer.
-- [ ] **KV edge-case keys**: same edge-case coverage as group layer, through `PxKvStore` public API.
+- [x] **KV operation correctness**: 8 tests through `PxKvStore` public API covering all op types and orderings.
+- [x] **KV edge-case keys**: 5 tests covering empty value, 1-byte value, 1KB key, 100KB value, special-bytes key.
 - [ ] **Multi-node, multi-group store**: ≥3 nodes each hosting the same set of groups; assert per-group isolation and independent leadership.
 - [ ] Per-group WAL-root isolation on one node (no cross-group slot/key bleed) at the store layer.
 - [ ] Store-wide graceful shutdown with multiple active groups under load.
