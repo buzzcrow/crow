@@ -137,7 +137,7 @@ export async function waitForLeader(baseURL: string, storeId: number, groupId: n
           (typeof v.leader_id === 'number' && v.leader_id > 0);
         if (hasLeader) return;
       }
-      await new Promise((res) => setTimeout(res, 500));
+      await new Promise((res) => setTimeout(res, 100));
     }
     throw new Error(`leader not elected for store ${storeId} group ${groupId} within ${timeoutMs}ms`);
   } finally {
