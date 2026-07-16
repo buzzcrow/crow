@@ -15,6 +15,7 @@ use crate::common::metrics::{ElectionMetrics, ElectionMetricsSnapshot};
 use crate::common::report::OperationReport;
 use crate::common::time::{anchor_ms_to_instant, instant_to_anchor_ms};
 use crate::kv::{InMemKV, KVEngine};
+use crate::metrics::{Counter, Gauge, MetricsRegistry};
 use crate::paxos::acceptor::PxAcceptor;
 use crate::paxos::learner::PxLearner;
 use crate::paxos::roles::{
@@ -27,7 +28,7 @@ use crate::wal::WalEngine;
 use parking_lot::Mutex;
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, trace};
 
@@ -236,6 +237,21 @@ pub struct PxLocalReplica {
     /// by `election_metrics_snapshot` to compute
     /// `last_heartbeat_age_ms`.
     last_heartbeat_at: Mutex<Option<Instant>>,
+    /// Optional registry handles mirroring election counters to the
+    /// metrics log file. Set via [`Self::set_metrics_registry`] when
+    /// a registry is wired. `None` in tests / no-registry mode.
+    election_handles: OnceLock<ElectionRegistryHandles>,
+}
+
+/// Registry-based metric handles for election counters and gauges.
+/// Created by [`PxLocalReplica::set_metrics_registry`] and stored in
+/// `OnceLock` for lock-free hot-path reads.
+pub(crate) struct ElectionRegistryHandles {
+    pub(crate) elections: Arc<Counter>,
+    pub(crate) step_downs_higher_term: Arc<Counter>,
+    pub(crate) step_downs_lease: Arc<Counter>,
+    pub(crate) step_downs_admin: Arc<Counter>,
+    pub(crate) inflight_slots: Arc<Gauge>,
 }
 
 impl std::fmt::Debug for PxLocalReplica {
@@ -336,6 +352,7 @@ impl PxLocalReplica {
             shutdown_started: AtomicBool::new(false),
             election_metrics: ElectionMetrics::new(),
             last_heartbeat_at: Mutex::new(None),
+            election_handles: OnceLock::new(),
         }
     }
 
@@ -393,6 +410,7 @@ impl PxLocalReplica {
             shutdown_started: AtomicBool::new(false),
             election_metrics: ElectionMetrics::new(),
             last_heartbeat_at: Mutex::new(None),
+            election_handles: OnceLock::new(),
         }
     }
 
@@ -777,6 +795,42 @@ impl PxLocalReplica {
         &self.election_metrics
     }
 
+    /// Borrow optional registry handles for election counters. Returns
+    /// `None` when no metrics registry is wired (tests / no-registry mode).
+    #[must_use]
+    pub(crate) fn election_registry_handles(&self) -> Option<&ElectionRegistryHandles> {
+        self.election_handles.get()
+    }
+
+    /// Register election counters and WAL append summary with the metrics
+    /// registry. Called once during group creation when a registry is
+    /// available. Stores handles in `OnceLock` for lock-free hot-path reads.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the metrics registry mutex is poisoned.
+    pub fn set_metrics_registry(
+        &self,
+        registry: &Arc<std::sync::Mutex<MetricsRegistry>>,
+        store_id: u64,
+        group_id: u64,
+    ) {
+        let mut r = registry.lock().expect("metrics registry poisoned");
+        let prefix = format!("s.{store_id}.g.{group_id}");
+        let handles = ElectionRegistryHandles {
+            elections: r.register_counter(format!("{prefix}.paxos.elections.c")),
+            step_downs_higher_term: r.register_counter(format!("{prefix}.paxos.step_downs.higher_term.c")),
+            step_downs_lease: r.register_counter(format!("{prefix}.paxos.step_downs.lease.c")),
+            step_downs_admin: r.register_counter(format!("{prefix}.paxos.step_downs.admin.c")),
+            inflight_slots: r.register_gauge(format!("{prefix}.paxos.inflight_slots.g")),
+        };
+        let _ = self.election_handles.set(handles);
+        if let Some(ref wal) = self.wal {
+            let summary = r.register_summary(format!("{prefix}.wal.append.l"));
+            wal.set_append_summary(summary);
+        }
+    }
+
     /// Combined election + lease snapshot for the management API /
     /// health endpoint. Combines the monotonic counters with derived
     /// gauges computed at read time so we don't have to keep extra
@@ -809,6 +863,9 @@ impl PxLocalReplica {
         } else {
             None
         };
+        if let Some(h) = self.election_handles.get() {
+            h.inflight_slots.set(bulk_phase1_in_flight_slots);
+        }
         ElectionMetricsSnapshot {
             election_count: counters.election_count,
             current_term: self.current_term_snapshot(),
@@ -891,6 +948,9 @@ impl PxLocalReplica {
             .store(PxLocalReplicaRole::Candidate.as_u8(), Ordering::Release);
         // One election attempt initiated.
         self.election_metrics.record_election();
+        if let Some(h) = self.election_handles.get() {
+            h.elections.inc();
+        }
         info!(
             replica_l_id = self.id,
             current_term = new_term,

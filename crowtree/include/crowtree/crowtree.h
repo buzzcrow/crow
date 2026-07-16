@@ -10,6 +10,7 @@
 #include "crowtree/epoch.h"
 #include "crowtree/mapping_table.h"
 #include "crowtree/memtable.h"
+#include "crowtree/metrics.h"
 #include "crowtree/options.h"
 #include "crowtree/page.h"
 #include "crowtree/snapshot.h"
@@ -604,6 +605,12 @@ class Crowtree
     // scrape or console panel refresh).
     [[nodiscard]] EngineStats stats() const;
 
+    // Wire C++ metrics into the engine. Registers buffer pool, apply, and
+    // snapshot metric handles with the given registry using the provided
+    // name prefix (e.g. "s.1.g.0"). Must be called after open() and before
+    // any operations. The registry must outlive the engine.
+    void set_metrics(MetricsRegistry *registry, const std::string &prefix);
+
     // Evict clean, delta-free resident leaf bases down to at most
     // `max_resident_leaves`, re-tagging their slots unloaded and epoch-retiring the
     // pages; returns the number evicted. Safe against lock-free
@@ -1061,6 +1068,21 @@ class Crowtree
     // consolidation, install_snapshot) while pool_ / mapping_ are still alive.
     // mutable: readers take a guard in const get().
     mutable EpochManager epoch_;
+
+    // ── Optional metrics handles (set via set_metrics) ──
+    struct MetricsHandles
+    {
+        Counter        *buf_hits       = nullptr;
+        Counter        *buf_misses     = nullptr;
+        Counter        *buf_evictions  = nullptr;
+        Counter        *buf_writebacks = nullptr;
+        Gauge          *buf_resident   = nullptr;
+        Gauge          *buf_dirty      = nullptr;
+        LatencySummary *apply_l        = nullptr;
+        LatencySummary *snapshot_l     = nullptr;
+    };
+
+    MetricsHandles metrics_;
 };
 
 } // namespace crowtree

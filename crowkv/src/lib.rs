@@ -9,6 +9,7 @@
 pub mod cluster;
 pub mod common;
 pub mod kv;
+pub mod metrics;
 pub mod paxos;
 pub mod rpc;
 pub mod wal;

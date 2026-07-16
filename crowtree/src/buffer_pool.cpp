@@ -4,6 +4,7 @@
 #include "crowtree/buffer_pool.h"
 
 #include "crowtree/frame_page.h"
+#include "crowtree/metrics.h"
 
 #include <algorithm>
 #include <cstring>
@@ -134,6 +135,9 @@ Status BufferPool::write_back(uint32_t idx)
     }
     m.dirty = false;
     ++stats_.writebacks;
+    if (m_writebacks_ != nullptr) {
+        m_writebacks_->inc();
+    }
     return Status::Ok();
 }
 
@@ -162,6 +166,9 @@ int64_t BufferPool::acquire_victim()
         ht_erase(m.page_id);
         m.page_id = kInvalidPageId;
         ++stats_.evictions;
+        if (m_evictions_ != nullptr) {
+            m_evictions_->inc();
+        }
         return idx;
     }
     return -1; // everything pinned
@@ -177,10 +184,16 @@ Status BufferPool::pin(uint64_t page_id, PageAddr addr, FrameRef *out)
         ++m.pin;
         m.ref = 1;
         ++stats_.hits;
+        if (m_hits_ != nullptr) {
+            m_hits_->inc();
+        }
         *out = FrameRef(this, idx, frame_bytes(idx), page_id);
         return Status::Ok();
     }
     ++stats_.misses;
+    if (m_misses_ != nullptr) {
+        m_misses_->inc();
+    }
     int64_t v = acquire_victim();
     if (v < 0) {
         return Status::internal_error("BufferPool: no evictable frame (all pinned)");
@@ -309,6 +322,12 @@ BufferPool::Stats BufferPool::stats() const
         if (m.pin > 0 || m.page_id != kInvalidPageId) {
             ++s.used;
         }
+    }
+    if (m_resident_ != nullptr) {
+        m_resident_->set(s.resident);
+    }
+    if (m_dirty_ != nullptr) {
+        m_dirty_->set(s.dirty);
     }
     return s;
 }

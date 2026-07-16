@@ -261,7 +261,7 @@ Status BlockPageStore::open_mem(uint32_t iu_size, std::unique_ptr<BlockPageStore
 
 namespace
 {
-// Parse a block filename like "1-3.blk-0007" → (store_id=1, partition_id=3, idx=7).
+// Parse a block filename like "1-3.blk-0007" → (store_id=1, group_id=3, idx=7).
 // Returns false if the filename doesn't match the pattern.
 bool parse_block_filename(const std::string &name, uint32_t &out_store, uint32_t &out_part, uint32_t &out_idx)
 {
@@ -288,16 +288,16 @@ bool parse_block_filename(const std::string &name, uint32_t &out_store, uint32_t
 }
 } // namespace
 
-Status BlockPageStore::open_blocks(const std::string &dir, uint32_t store_id, uint32_t partition_id,
-                                   uint64_t block_size, uint32_t iu_size, std::unique_ptr<BlockPageStore> *out)
+Status BlockPageStore::open_blocks(const std::string &dir, uint32_t store_id, uint32_t group_id, uint64_t block_size,
+                                   uint32_t iu_size, std::unique_ptr<BlockPageStore> *out)
 {
     if (block_size == 0) {
         return Status::invalid_argument("open_blocks: block_size must be > 0");
     }
 
-    auto *store = new BlockPageStore(dir, store_id, partition_id, block_size, iu_size == 0 ? 4096 : iu_size);
+    auto *store = new BlockPageStore(dir, store_id, group_id, block_size, iu_size == 0 ? 4096 : iu_size);
 
-    // Scan directory for existing block files matching {store_id}-{partition_id}.blk-*
+    // Scan directory for existing block files matching {store_id}-{group_id}.blk-*
     DIR *d = ::opendir(dir.c_str());
     if (d != nullptr) {
         struct dirent *ent;
@@ -306,7 +306,7 @@ Status BlockPageStore::open_blocks(const std::string &dir, uint32_t store_id, ui
             if (!parse_block_filename(ent->d_name, s_id, p_id, idx)) {
                 continue;
             }
-            if (s_id != store_id || p_id != partition_id) {
+            if (s_id != store_id || p_id != group_id) {
                 continue;
             }
             // Open the existing block file
@@ -369,7 +369,7 @@ Status BlockPageStore::allocate_new_block()
 {
     uint32_t idx = static_cast<uint32_t>(extents_.size());
     char     name[64];
-    std::snprintf(name, sizeof(name), "%u-%u.blk-%04u", store_id_, partition_id_, idx);
+    std::snprintf(name, sizeof(name), "%u-%u.blk-%04u", store_id_, group_id_, idx);
     std::string path = dir_ + "/" + name;
 
     std::unique_ptr<FileMedium> fm;
@@ -399,7 +399,7 @@ Status BlockPageStore::delete_block(uint32_t block_idx)
     }
 
     char name[64];
-    std::snprintf(name, sizeof(name), "%u-%u.blk-%04u", store_id_, partition_id_, block_idx);
+    std::snprintf(name, sizeof(name), "%u-%u.blk-%04u", store_id_, group_id_, block_idx);
     std::string path = dir_ + "/" + name;
 
     if (::unlink(path.c_str()) < 0 && errno != ENOENT) {
