@@ -670,6 +670,7 @@ void Crowtree::note_applied_slot(uint64_t slot)
 
 Status Crowtree::apply(uint64_t slot, const Batch &batch)
 {
+    auto t0 = std::chrono::steady_clock::now();
     // Reject oversized keys before any state is mutated (plan-tree #15). A key
     // this large is assumed to be a caller bug; validating up front keeps apply
     // all-or-nothing.
@@ -682,6 +683,10 @@ Status Crowtree::apply(uint64_t slot, const Batch &batch)
     }
     apply_batch(slot, batch);
     note_applied_slot(slot);
+    if (metrics_.apply_l != nullptr) {
+        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+        metrics_.apply_l->observe(static_cast<uint64_t>(ns));
+    }
     return Status::Ok();
 }
 
@@ -2344,6 +2349,20 @@ EngineStats Crowtree::stats() const
     s.buffer_pool_used       = bp.used;
     s.buffer_pool_num_frames = bp.num_frames;
     return s;
+}
+
+void Crowtree::set_metrics(MetricsRegistry *registry, const std::string &prefix)
+{
+    metrics_.buf_hits       = registry->register_counter(prefix + ".buf.hits.c");
+    metrics_.buf_misses     = registry->register_counter(prefix + ".buf.misses.c");
+    metrics_.buf_evictions  = registry->register_counter(prefix + ".buf.evictions.c");
+    metrics_.buf_writebacks = registry->register_counter(prefix + ".buf.writebacks.c");
+    metrics_.buf_resident   = registry->register_gauge(prefix + ".buf.resident.g");
+    metrics_.buf_dirty      = registry->register_gauge(prefix + ".buf.dirty.g");
+    metrics_.apply_l        = registry->register_summary(prefix + ".apply.l");
+    metrics_.snapshot_l     = registry->register_summary(prefix + ".snapshot.l");
+    pool_->set_metrics(metrics_.buf_hits, metrics_.buf_misses, metrics_.buf_evictions, metrics_.buf_writebacks,
+                       metrics_.buf_resident, metrics_.buf_dirty);
 }
 
 std::shared_ptr<Snapshot> Crowtree::snapshot_view()

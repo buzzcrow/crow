@@ -69,6 +69,11 @@ pub struct Cli {
     /// (array-of-blocks, `O_DIRECT`) for a real SSD/SCM deployment target.
     #[arg(long, default_value = "text", value_parser = ["text", "block"])]
     pub kv_backend: String,
+
+    /// Metrics flush interval in seconds. 0 disables metrics logging.
+    /// Default: 5.
+    #[arg(long, default_value_t = 5)]
+    pub metrics_interval: u64,
 }
 
 /// Parse a comma-separated list of numbers and ranges into a `Vec<u64>`.
