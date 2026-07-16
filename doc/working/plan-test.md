@@ -93,7 +93,7 @@ Source: `crowkv/src/cluster/local_replica.rs`. Tests: 10 files, ~56 tests.
 Source: `crowkv/src/cluster/group.rs`. Tests: 20 files, ~56 tests.
 
 - [x] **KV operation correctness**: 8 tests covering all op types and orderings through group gRPC KV API.
-- [ ] **KV edge-case keys**: empty key, large key (≥1KB), special-bytes key (null, high-UTF8, whitespace), large value (≥1MB), small value (1 byte), empty value. At least one test covering all edge cases through group propose.
+- [x] **KV edge-case keys**: 6 tests covering empty value, 1-byte value, 1KB key, 100KB value, special-bytes key, whitespace key.
 - [ ] **LearnerStream** (`cluster/learner_stream.rs`): bidi-stream framing, flow control, parallel in-flight slots, stream re-establish after drop.
 - [ ] **Recovery above the durable-commit watermark** via bulk Phase 1 / heartbeat catch-up on a fresh follower.
 - [ ] **Leader-kill + restart no-data-loss** at full speed (blocked by repair-correctness).

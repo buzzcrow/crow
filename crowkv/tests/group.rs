@@ -35,6 +35,9 @@ mod kv;
 #[path = "group/kv_correctness_test.rs"]
 mod kv_correctness;
 
+#[path = "group/kv_edge_case_test.rs"]
+mod kv_edge_case;
+
 #[path = "group/kv_forward_test.rs"]
 mod kv_forward;
 
