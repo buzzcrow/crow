@@ -62,6 +62,15 @@ mod g1_step_down_survival;
 #[path = "group/g3_leader_change_test.rs"]
 mod g3_leader_change;
 
+#[path = "group/g4_learner_stream_test.rs"]
+mod g4_learner_stream;
+
+#[path = "group/g5_recovery_test.rs"]
+mod g5_recovery;
+
+#[path = "group/g6_reconfig_test.rs"]
+mod g6_reconfig;
+
 #[path = "group/a3_crash_restart_no_data_loss_test.rs"]
 mod a3_crash_restart_no_data_loss;
 
