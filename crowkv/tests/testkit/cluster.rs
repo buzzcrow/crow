@@ -32,6 +32,7 @@ impl TestCluster {
         &self.nodes
     }
 
+    #[allow(dead_code)]
     pub fn leader(&self) -> &Arc<PxKvStore> {
         self.nodes
             .iter()
@@ -87,6 +88,7 @@ impl TestCluster {
     }
 }
 
+#[allow(dead_code)]
 pub async fn start_cluster(ids: &[u64], leader_id: u64) -> TestCluster {
     start_cluster_inner(ids, leader_id, false).await
 }

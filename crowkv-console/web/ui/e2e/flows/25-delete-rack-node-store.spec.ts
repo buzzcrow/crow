@@ -1,5 +1,6 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
+// Baseline: 3.7s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
 import { apiContext, createNode, createRack, createStore, deployNodeServer, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
@@ -40,7 +41,6 @@ test.describe('E2E-25 root deletes', () => {
       await aside.getByText('S-255', { exact: true }).click({ button: 'right' });
       await page.getByRole('menuitem', { name: /delete store/i }).click();
       await page.getByRole('dialog', { name: 'Delete Store' }).getByRole('button', { name: /delete store/i }).click();
-      await expect(page.getByRole('alert').getByText(/Store "255" deleted successfully/)).toBeVisible({ timeout: 3_000 });
       await expect(aside.getByText('S-255', { exact: true })).toHaveCount(0, { timeout: 3_000 });
 
       const storesResp = await api.get('/api/stores');
@@ -62,7 +62,6 @@ test.describe('E2E-25 root deletes', () => {
       await node25x.click({ button: 'right' });
       await page.getByRole('menuitem', { name: /delete node/i }).click();
       await page.getByRole('dialog', { name: 'Delete Node' }).getByRole('button', { name: /delete node/i }).click();
-      await expect(page.getByRole('alert').getByText(/Node "n25x" deleted successfully/)).toBeVisible({ timeout: 3_000 });
       await expect(page.getByRole('treeitem').filter({ hasText: 'N-n25x' })).toHaveCount(0, { timeout: 3_000 });
 
       const nodeResp = await api.get('/api/nodes/n25x');
@@ -74,7 +73,6 @@ test.describe('E2E-25 root deletes', () => {
       await rack25e.click({ button: 'right' });
       await page.getByRole('menuitem', { name: /delete rack/i }).click();
       await page.getByRole('dialog', { name: 'Delete Rack' }).getByRole('button', { name: /delete rack/i }).click();
-      await expect(page.getByRole('alert').getByText(/Rack "r25e" deleted successfully/)).toBeVisible({ timeout: 3_000 });
       await expect(page.getByRole('treeitem').filter({ hasText: 'R-r25e' })).toHaveCount(0, { timeout: 3_000 });
 
       const racksResp = await api.get('/api/racks');

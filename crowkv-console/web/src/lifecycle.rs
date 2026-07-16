@@ -490,6 +490,8 @@ pub struct DeployNodeServerBody {
     grpc_port: u16,
     #[serde(default)]
     binary: Option<String>,
+    #[serde(default)]
+    election_profile: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -567,7 +569,10 @@ pub async fn http_deploy_node_server(
         server_id: node_id.clone(),
         mgmt_port: body.mgmt_port,
         grpc_port: body.grpc_port,
-        election_profile: std::env::var("CROWKV_SERVER_ELECTION_PROFILE").ok(),
+        election_profile: body
+            .election_profile
+            .clone()
+            .or_else(|| std::env::var("CROWKV_SERVER_ELECTION_PROFILE").ok()),
         binary: body.binary.clone().map(std::path::PathBuf::from),
     };
 
@@ -596,7 +601,10 @@ pub async fn http_deploy_node_server(
         grpc_port: Some(body.grpc_port),
         auto_start: true,
         binary: body.binary.clone(),
-        election_profile: std::env::var("CROWKV_SERVER_ELECTION_PROFILE").ok(),
+        election_profile: body
+            .election_profile
+            .clone()
+            .or_else(|| std::env::var("CROWKV_SERVER_ELECTION_PROFILE").ok()),
         pid: None,
     };
     state.set_runtime_pid(node_id.clone(), deployed.pid);
@@ -689,7 +697,10 @@ pub async fn http_restart_node_server(
         server_id: node_id.clone(),
         mgmt_port,
         grpc_port,
-        election_profile: std::env::var("CROWKV_SERVER_ELECTION_PROFILE").ok(),
+        election_profile: entry
+            .election_profile
+            .clone()
+            .or_else(|| std::env::var("CROWKV_SERVER_ELECTION_PROFILE").ok()),
         binary: None,
     };
     let deployed = if node.ssh_enabled() {

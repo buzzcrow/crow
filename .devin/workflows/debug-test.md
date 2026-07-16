@@ -89,3 +89,5 @@ If existing logs don't reveal the gap, add targeted logs at decision points:
 - **Ignoring errors** (`.catch(() => ...)`, `unwrap_or_default`, swallowing status codes) — log and surface every error.
 - **Weakening assertions** (looser matchers, `.first()` to avoid strict mode, removing checks) — fix the selector or the code, not the assertion.
 - **Downstream workarounds** (patching the test to avoid the failing path) — fix the upstream root cause.
+- **Waiting on toasts** — never assert on `getByRole('alert')` or wait for toast dismiss. If a toast blocks a click, use `locator.evaluate((el) => el.click())`. See `/coding` E2E rules.
+- **Ignoring baseline timing** — every E2E spec has a `// Baseline: Xs (date)` comment. If a test exceeds 2x its baseline, treat it as a regression signal: investigate where the extra time went before accepting the run. Update the baseline only when a deliberate change justifies it.

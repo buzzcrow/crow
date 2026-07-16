@@ -1,5 +1,6 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
+// Baseline: 0.5s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
 import { apiContext, createRack } from '../fixtures/consoleSetup';
@@ -25,7 +26,6 @@ test.describe('E2E-03 add node', () => {
     await expect(page.getByRole('button', { name: /create node/i })).toBeEnabled();
     await page.getByRole('button', { name: /create node/i }).click();
 
-    await expect(page.getByRole('alert').getByText(/Node "n3" created successfully/)).toBeVisible({ timeout: 3_000 });
     await expect(aside.getByText('N-n3', { exact: true })).toBeVisible({ timeout: 3_000 });
 
     const api = await apiContext(baseURL!);

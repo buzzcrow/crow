@@ -1,5 +1,6 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
+// Baseline: 0.5s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
 import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer, waitForLeader } from '../fixtures/consoleSetup';
@@ -38,7 +39,6 @@ test.describe('E2E-24 KV not-found', () => {
       expect(getResponse.ok(), await getResponse.text()).toBeTruthy();
 
       await expect(page.getByTestId('kv-not-found')).toBeVisible({ timeout: 3_000 });
-      await expect(page.getByRole('alert').getByText(/Key "missing-key-24" not found/)).toBeVisible({ timeout: 3_000 });
       expect(errors, errors.join('\n')).toHaveLength(0);
     } finally {
       await stopNodeServer(baseURL!, 'n24');

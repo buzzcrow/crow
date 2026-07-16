@@ -1,5 +1,6 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
+// Baseline: 0.7s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
 import { apiContext, DEFAULT_SERVER_BINARY, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
@@ -24,20 +25,19 @@ test.describe('E2E-04 deploy server', () => {
       await page.getByLabel('Binary Path (optional)').fill(DEFAULT_SERVER_BINARY);
       await page.getByRole('button', { name: 'Deploy' }).click();
 
-      await expect(page.getByRole('alert').getByText(/CrowKV deployed on n4/)).toBeVisible({ timeout: 3_000 });
-
-      const server = await api.get('/api/nodes/n4/server');
-      expect(server.ok(), await server.text()).toBeTruthy();
-      const body = await server.json();
-      expect(body).toEqual(
+      await expect.poll(async () => {
+        const server = await api.get('/api/nodes/n4/server');
+        if (!server.ok()) return null;
+        return await server.json();
+      }, { timeout: 5_000 }).toEqual(
         expect.objectContaining({
           id: 'n4',
           node_id: 'n4',
           url: 'http://127.0.0.1:9911',
           grpc_url: 'http://127.0.0.1:9921',
+          pid: expect.any(Number),
         }),
       );
-      expect(body.pid).toEqual(expect.any(Number));
     } finally {
       await stopNodeServer(baseURL!, 'n4');
       await api.dispose();

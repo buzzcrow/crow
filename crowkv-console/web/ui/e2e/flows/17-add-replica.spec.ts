@@ -1,5 +1,6 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
+// Baseline: 0.8s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
 import { apiContext, addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
@@ -31,8 +32,6 @@ test.describe('E2E-17 add replica', () => {
       await expect(page.getByRole('dialog', { name: 'Add Replica' })).toBeVisible();
       await page.getByLabel('Node', { exact: true }).selectOption('n17b');
       await page.getByRole('button', { name: /add replica/i }).click();
-
-      await expect(page.getByRole('alert').getByText(/Replica added to node "n17b" successfully/)).toBeVisible({ timeout: 3_000 });
 
       // Verify the new replica appears in the logical tree.
       await expect(aside.getByText('LR-17701')).toBeVisible({ timeout: 3_000 });

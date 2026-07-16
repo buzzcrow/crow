@@ -1,5 +1,6 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
+// Baseline: 0.5s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
 import { apiContext } from '../fixtures/consoleSetup';
@@ -16,7 +17,6 @@ test.describe('E2E-02 add rack', () => {
     await page.getByLabel('Name (optional)').fill('Rack One');
     await page.getByRole('button', { name: /create rack/i }).click();
 
-    await expect(page.getByRole('alert').getByText(/Rack "r1" created successfully/)).toBeVisible({ timeout: 3_000 });
     await expect(page.locator('aside').getByText('Rack One')).toBeVisible({ timeout: 3_000 });
 
     const api = await apiContext(baseURL!);

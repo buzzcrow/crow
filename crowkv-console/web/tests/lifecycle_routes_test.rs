@@ -270,7 +270,6 @@ async fn multiple_racks_and_nodes_create_expected_workspaces() {
     assert_node_workspace(&dir, "2");
     assert_node_workspace(&dir, "10");
 
-    std::env::set_var("CROWKV_SERVER_ELECTION_PROFILE", "test");
     let (s, v) = json_post(
         &client,
         &format!("{base}/api/nodes/1/server/deploy"),
@@ -278,6 +277,7 @@ async fn multiple_racks_and_nodes_create_expected_workspaces() {
             "mgmt_port": pick_free_port(),
             "grpc_port": pick_free_port(),
             "binary": bin.to_string_lossy().to_string(),
+            "election_profile": "test",
         }),
     )
     .await;
@@ -291,6 +291,7 @@ async fn multiple_racks_and_nodes_create_expected_workspaces() {
             "mgmt_port": pick_free_port(),
             "grpc_port": pick_free_port(),
             "binary": bin.to_string_lossy().to_string(),
+            "election_profile": "test",
         }),
     )
     .await;
@@ -345,7 +346,6 @@ async fn deploy_then_stop_local_server() {
     // Deploy a server via node-addressed route.
     let mgmt_port = pick_free_port();
     let grpc_port = pick_free_port();
-    std::env::set_var("CROWKV_SERVER_ELECTION_PROFILE", "test");
     let (s, v) = json_post(
         &client,
         &format!("{base}/api/nodes/n1/server/deploy"),
@@ -353,6 +353,7 @@ async fn deploy_then_stop_local_server() {
             "mgmt_port": mgmt_port,
             "grpc_port": grpc_port,
             "binary": bin.to_string_lossy().to_string(),
+            "election_profile": "test",
         }),
     )
     .await;
@@ -382,6 +383,7 @@ async fn deploy_then_stop_local_server() {
             "mgmt_port": pick_free_port(),
             "grpc_port": pick_free_port(),
             "binary": bin.to_string_lossy().to_string(),
+            "election_profile": "test",
         }),
     )
     .await;
@@ -434,7 +436,6 @@ async fn deploy_then_restart_local_server() {
 
     let mgmt_port = pick_free_port();
     let grpc_port = pick_free_port();
-    std::env::set_var("CROWKV_SERVER_ELECTION_PROFILE", "test");
     let (s, v) = json_post(
         &client,
         &format!("{base}/api/nodes/n1/server/deploy"),
@@ -442,6 +443,7 @@ async fn deploy_then_restart_local_server() {
             "mgmt_port": mgmt_port,
             "grpc_port": grpc_port,
             "binary": bin.to_string_lossy().to_string(),
+            "election_profile": "test",
         }),
     )
     .await;
@@ -451,7 +453,6 @@ async fn deploy_then_restart_local_server() {
     // Pre-position CROWKV_SERVER_BIN so the restart's fallback path
     // (no binary override in the body) still finds the test binary.
     std::env::set_var("CROWKV_SERVER_BIN", bin.to_string_lossy().to_string());
-    std::env::set_var("CROWKV_SERVER_ELECTION_PROFILE", "test");
     let (s, v) = json_post(&client, &format!("{base}/api/nodes/n1/server/restart"), json!({})).await;
     assert!(s.is_success(), "restart: {s} {v}");
     let new_pid = u32::try_from(v["pid"].as_u64().unwrap()).unwrap();
