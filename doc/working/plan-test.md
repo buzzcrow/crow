@@ -25,15 +25,72 @@ Measured on 2026-07-16. All six suites passed with zero failures.
 | `test-mgmt-api` | pass | 49 | 39.1 s |
 | `test-ui` | pass | 26/26 | 39.3 s |
 
+---
+
+## Unit Layer — paxos/acceptor
+
+Source: `crowkv/src/paxos/acceptor.rs`. Tests: `acceptor_test.rs` (6 tests).
+Existing: prepare_promise, reject_lower_ballot, accept_after_promise,
+accept_rejects_lower_ballot, prepare_returns_previously_accepted_value,
+ballot_ordering_is_total.
+
+- [ ] **Equal-ballot accept is idempotent**: accept twice with same `(slot, ballot)` — second must return `Accepted`, stored entry unchanged. Covers C2 "equal-ballot accepts are idempotent".
+- [ ] **Accept without prior prepare**: `accept` on never-prepared slot — `inner_accept` bumps `promised` to accept ballot. Verify accept succeeds, `promised_at(slot)` returns accept ballot.
+- [ ] **Multi-slot isolation**: prepare/accept on slot 7 must not affect slot 8. Two slots, independent ballots, verify no cross-slot bleed.
+- [ ] **`highest_seen_slot` monotonicity**: prepare slots 3, 7, 5 — verify `highest_seen_slot()` returns 7 (monotonic max).
+- [ ] **`accepted_log_tip`**: accept at slots 1, 3, 5 with increasing terms — verify `accepted_log_tip()` returns `(5, term5)`. Verify `None` when no accepts.
+
+## Unit Layer — paxos/learner
+
+Source: `crowkv/src/paxos/learner.rs`. Tests: `learner_test.rs` (4), `learner_dedup_test.rs` (10), `learner_async_test.rs` (1). Coverage is thorough.
+
+- [ ] **`seed_resume_frontier`**: call `seed_resume_frontier(10, 3)` on fresh learner — verify all 4 watermarks reflect seed. Then `learn` slot 11 — verify advance from seed point. Currently only exercised indirectly via replica persistence tests.
+
+## Unit Layer — paxos/error
+
+Source: `crowkv/src/paxos/error.rs`. Tests: `error_test.rs` (3 of 11 variants: PrepareRejected, AcceptRejected, TransportFailure).
+
+- [ ] **Error classifier — remaining 8 variants**: test `keyword()` + `retry_action()` for: `NotLeader` (→ Redirect), `ForeignValueChosen` (→ RetryNextSlot), `QuorumUnavailable` (→ RetrySameSlot no bump), `MembershipEpochMismatch` (→ RetrySameSlot no bump), `Busy` (→ FailRetryable), `TermStale` (→ FailFatal), `LeaseUnrenewable` (→ FailFatal), `InternalInvariantViolation` (→ FailFatal).
+
+## Unit Layer — kv/mem_kv + kv/op
+
+Source: `crowkv/src/kv/`. Tests: `mem_kv_test.rs` (9 + conformance), `op_codec_test.rs` (11), `kv_future_test.rs` (5), `conformance.rs` (shared). Coverage is thorough.
+
+- [ ] **Delete non-existent key is a no-op**: `apply` a `Delete` for never-put key — verify `get` returns `None`, `live_key_count` stays 0, tombstone recorded at applied slot via `iter_all`.
+
+## Unit Layer — wal/record
+
+Source: `crowkv/src/wal/record.rs`. Tests: `record_tests.rs` (9). No gaps identified.
+
 ## Election Unit
 
-All tasks completed.
+Source: `crowkv/src/election/`. Tests: 8 files, 72 tests. All tasks completed.
+
+## WAL Subsystem
+
+Source: `crowkv/src/wal/`. Tests: 12 files, ~92 tests. Coverage is thorough.
+
+- [ ] **WAL disk-loss recovery**: simulate fsync failure or file loss after write — verify engine surfaces error and reads/replays are consistent with last durable state. Feature-dependent per design-test.md.
+
+## Slot Subsystem
+
+Source: `crowkv/src/paxos/slot_list.rs`, `slot_node.rs`. Tests: `slot_list_test.rs` (18 tests).
+
+- [ ] **Concurrent insert at disjoint ranges**: N threads inserting into non-overlapping slot ranges — all succeed, all retrievable. Design doc calls out this concurrent stress scenario.
+- [ ] **Concurrent insert + read**: writer inserts while reader reads random slots — no panics, no corrupted data.
+- [ ] **Concurrent insert + trim + reclaim**: writer inserts while reaper trims/reclaims — no UAF, no double-free, len consistent. Run under Miri/TSan if available.
+- [ ] **Multiple guards pin same chunk**: 2+ guards on same chunk, trim past chunk, reclaim — chunk not freed until all guards dropped.
+- [ ] **Progressive trim across chunks**: insert 3 chunks, trim+reclaim one at a time — each reclaim frees exactly one chunk.
 
 ## Replica
 
-- [ ] **WAL GC safe slot integration**: `crowkv/src/wal/gc.rs` uses `safe_slot = u64::MAX`. Needs snapshot persistence and a slot marker (e.g. `contiguous_applied` / durable-commit watermark) so GC can safely truncate below the applied frontier. Add a dedicated GC test once the slot marker is implemented.
+Source: `crowkv/src/cluster/local_replica.rs`. Tests: 10 files, ~56 tests.
+
+- [ ] **WAL GC safe slot integration**: `crowkv/src/wal/gc.rs` uses `safe_slot = u64::MAX`. Needs snapshot persistence and a slot marker so GC can safely truncate below the applied frontier. Add a dedicated GC test once the slot marker is implemented.
 
 ## Group
+
+Source: `crowkv/src/cluster/group.rs`. Tests: 20 files, ~56 tests.
 
 - [ ] **KV operation correctness**: all op types and orderings through group `propose` — Put, overwrite, Delete, delete non-existent, batch with multiple puts, intra-batch last-wins, put-then-delete, delete-then-put, empty batch, mixed ops across slots. Verify via `engine_get` on all replicas.
 - [ ] **KV edge-case keys**: empty key, large key (≥1KB), special-bytes key (null, high-UTF8, whitespace), large value (≥1MB), small value (1 byte), empty value. At least one test covering all edge cases through group propose.
@@ -48,6 +105,9 @@ All tasks completed.
 
 ## Store
 
+Source: `crowkv/src/store/`. Tests: 6 files, 23 tests (node, multi_group,
+status, health, shutdown, persistence).
+
 - [ ] **KV operation correctness**: all op types and orderings through `PxKvStore` public API (`kv_put`, `kv_delete`, `kv_batch_write`) — same checklist as group layer.
 - [ ] **KV edge-case keys**: same edge-case coverage as group layer, through `PxKvStore` public API.
 - [ ] **Multi-node, multi-group store**: ≥3 nodes each hosting the same set of groups; assert per-group isolation and independent leadership.
@@ -56,14 +116,39 @@ All tasks completed.
 
 ## Deployment
 
+Source: `crowkv-server/`. Tests: 6 files, 53 tests (server_api, async_ops,
+cli_parse, cluster_e2e, startup, snapshot_join_e2e).
+
 - [ ] Re-enable the four ignored process-level tests once their root causes are fixed.
 - [ ] Multi-store-per-node process test that mirrors the Web UI multi-store topology end-to-end.
 - [ ] **Leader change via API**: 3-node process cluster, trigger step-down via HTTP API, poll `/ready` until new leader, verify KV ops continue.
 - [ ] **Reconfig via API — add replica**: 3-node cluster, add 4th replica via HTTP API, poll `/ready` until caught up, verify data on new node.
 - [ ] **Reconfig via API — remove leader**: 3-node cluster, remove leader via HTTP API, poll `/ready` until new leader, verify KV ops resume.
+- [ ] **Network partition between processes**: simulate network isolation between 2 of 3 nodes — verify quorum loss, then restore — verify recovery. Design doc Tier 3.
+- [ ] **Graceful shutdown under load**: continuously write KV ops, trigger graceful shutdown of one node — verify in-flight ops complete or redirect, no data loss.
 - [x] **Async operation API**: trigger step-down, verify `202 {operation_id}`, poll `GET /operations/:id` until `Completed`. — done in `async_ops_test.rs`
 - [x] **Readiness API**: verify `GET /groups/:gid/ready` returns `200` when ready, `503` when no leader, `503` with lag info when replica is behind. — done in `async_ops_test.rs`
 - [x] **Backward compat**: existing tests pass with `?sync=true` on step-down, remove replica, add replica endpoints. — done in `server_api_test.rs` + `async_ops_test.rs`
+
+## Console Mgmt API Layer
+
+Source: `crowkv-console/`. Tests: web 13 files (~37 tests), shared/cli 7
+files (~9 tests). Covers REST routes, CLI commands, API forwarding, health
+aggregation, config persistence, OpenAPI proxy. No gaps identified.
+
+## crowtree C++ Tests
+
+Source: `crowtree/tests/`. Tests: 334 tests (unit: 26 files, integration:
+24 files). Covers cell encoding, leaf/frame/inner pages, delta replay,
+consolidation, mapping table, epoch manager, split/merge, snapshot
+roundtrip, crash recovery, C API, async get/scan, eviction, compression,
+persist, write/read paths, stress. No gaps identified.
+
+## Rust FFI / Cross-Engine Parity
+
+Source: `crowkv/tests/kv/crowtree_engine_test.rs`. Tests: conformance
+suite (shared with `InMemKV`), async pending path, durable reopen,
+cross-engine parity, clear. No gaps identified.
 
 ## E2E / Playwright UI Test Implementation Plan
 
@@ -138,4 +223,12 @@ instead of blocking on the HTTP call.
 - [x] **44-delete-node-after-group**: 5-node group, delete 2 non-leader nodes sequentially. Group operates down to 3-of-5 (exact majority).
 - [x] **45-add-replica-to-running-group**: 3-node group with KV data, add 4th replica. Verify group still accepts writes and original keys readable.
 - [x] **46-multi-store-reconfig**: 2 stores on overlapping nodes. Stop shared non-leader, both stores maintain quorum. Restart, verify recovery.
+
+### Phase 5 — New Tier 3 Coverage Gaps
+
+- [ ] **Async operation UI feedback**: trigger step-down or reconfig via
+  UI, verify the UI shows progress feedback (spinner/status indicator)
+  and polls the async operation API until completion. Design doc says
+  "the UI should show progress feedback and poll the async operation
+  API until completion".
 
