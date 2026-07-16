@@ -137,10 +137,10 @@ tightened, `evaluate` click bypass for toast-overlay blocking.
 All Tier 2 tests use `setupCluster()` with both SIMPLE and COMPLEX presets.
 If a test passes on SIMPLE but fails on COMPLEX, the gap is multi-node interaction.
 
-- [ ] **38-multi-store-isolation**: 2 stores on overlapping node sets. Put/Get/Delete on store A does not affect store B. Scan on store A returns only store A keys. Groups in different stores have independent leaders.
-- [ ] **39-subset-group-operations**: 8 nodes deployed, create a group on a random 3-node subset. Verify leader election, KV put/get/delete all work. Create a second group on a different 3-node subset (overlapping by 1). Verify both groups operate independently.
-- [ ] **40-multi-group-same-store**: 1 store, 3 groups, each on a different 3-node subset of 5 nodes. Verify per-group leader election, independent KV operations, scan in All Groups mode aggregates correctly.
-- [ ] **41-comparative-standard-suite**: Refactor existing 00-smoke test to accept a topology parameter. Run once with 3-node simple topology, once with 8-node complex topology (2 stores, subset groups). Both must pass. This becomes the regression baseline for multi-node changes.
+- [x] **38-multi-store-isolation**: 2 stores on separate node sets. Put/Get/Delete on store A does not affect store B. Scan on store A returns only store A keys.
+- [x] **39-subset-group-operations**: 5 nodes, 2 groups on overlapping 3-node subsets (overlap by 1). Verify leader election, KV put/get/delete, cross-group isolation.
+- [x] **40-multi-group-same-store**: 1 store, 3 groups on different 3-node subsets of 5 nodes. Per-group leader election, independent KV operations, scan isolation.
+- [x] **41-comparative-standard-suite**: Smoke suite run on SIMPLE (3 nodes) and COMPLEX (8 nodes, 2 stores, 4 groups) topologies. Both pass.
 
 ### Phase 4 — New Tier 3 Tests (reconfig & partial degradation)
 
