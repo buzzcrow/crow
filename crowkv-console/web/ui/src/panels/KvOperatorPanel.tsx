@@ -474,8 +474,10 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
         {/* Selector bar */}
         <div className="tw-flex tw-items-center tw-gap-3 tw-flex-wrap">
           <div className="tw-flex tw-items-center tw-gap-1.5">
-            <label className="tw-text-xs tw-text-muted">Store</label>
+            <label htmlFor="kv-store-select" className="tw-text-xs tw-text-muted">Store</label>
             <select
+              id="kv-store-select"
+              aria-label="Store"
               value={storeId}
               onChange={(e) => handleStoreChange(e.target.value)}
               className="tw-bg-panel tw-border tw-border-border tw-rounded tw-px-2 tw-py-1 tw-text-xs tw-text-text"
@@ -486,8 +488,10 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
             </select>
           </div>
           <div className="tw-flex tw-items-center tw-gap-1.5">
-            <label className="tw-text-xs tw-text-muted">Group</label>
+            <label htmlFor="kv-group-select" className="tw-text-xs tw-text-muted">Group</label>
             <select
+              id="kv-group-select"
+              aria-label="Group"
               value={groupId}
               onChange={(e) => handleGroupChange(e.target.value)}
               className="tw-bg-panel tw-border tw-border-border tw-rounded tw-px-2 tw-py-1 tw-text-xs tw-text-text"
@@ -504,6 +508,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
               value={scanPrefix}
               onChange={(e) => setScanPrefix(e.target.value)}
               placeholder="Key prefix (empty = all)"
+              aria-label="Scan prefix"
               className="tw-bg-panel tw-border tw-border-border tw-rounded tw-px-2 tw-py-1 tw-text-xs tw-text-text placeholder:tw-text-muted tw-w-48"
               onKeyDown={(e) => e.key === 'Enter' && handleScan()}
             />
@@ -535,6 +540,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
               value={getKey}
               onChange={(e) => setGetKey(e.target.value)}
               placeholder="Key"
+              aria-label="Get key"
               className="tw-bg-bg tw-border tw-border-border tw-rounded tw-px-2 tw-py-1 tw-text-xs tw-text-text placeholder:tw-text-muted tw-w-40"
               onKeyDown={(e) => e.key === 'Enter' && handleGet()}
             />
@@ -550,14 +556,14 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
               <span className="tw-text-xs tw-text-text tw-flex tw-items-center tw-gap-1">
                 {getResult.found ? (
                   <>
-                    <span className="tw-font-mono tw-text-muted">{getResult.value_utf8}</span>
+                    <span className="tw-font-mono tw-text-muted" data-testid="kv-get-result">{getResult.value_utf8}</span>
                     <span className="tw-text-muted tw-text-[10px]">rev: {getResult.revision}</span>
                     <button onClick={() => copy(getResult.value_utf8 || '')} className="tw-text-muted hover:tw-text-text">
                       <Copy className="tw-h-3 tw-w-3" />
                     </button>
                   </>
                 ) : (
-                  <span className="tw-text-muted">not found</span>
+                  <span className="tw-text-muted" data-testid="kv-not-found">not found</span>
                 )}
               </span>
             )}
@@ -575,6 +581,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
                 value={putKey}
                 onChange={(e) => setPutKey(e.target.value)}
                 placeholder="Key"
+                aria-label="Put key"
                 className="tw-bg-bg tw-border tw-border-border tw-rounded tw-px-2 tw-py-1 tw-text-xs tw-text-text placeholder:tw-text-muted tw-w-40"
               />
               <input
@@ -582,6 +589,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
                 value={putValue}
                 onChange={(e) => setPutValue(e.target.value)}
                 placeholder="Value"
+                aria-label="Put value"
                 className="tw-bg-bg tw-border tw-border-border tw-rounded tw-px-2 tw-py-1 tw-text-xs tw-text-text placeholder:tw-text-muted tw-w-48"
               />
               <button
@@ -608,6 +616,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
                 value={deleteKey}
                 onChange={(e) => setDeleteKey(e.target.value)}
                 placeholder="Key"
+                aria-label="Delete key"
                 className="tw-bg-bg tw-border tw-border-border tw-rounded tw-px-2 tw-py-1 tw-text-xs tw-text-text placeholder:tw-text-muted tw-w-40"
               />
               <button
@@ -647,6 +656,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
                 type="number"
                 value={demoCount}
                 onChange={(e) => setDemoCount(Math.max(1, parseInt(e.target.value) || 0))}
+                aria-label="Demo key count"
                 className="tw-bg-bg tw-border tw-border-border tw-rounded tw-px-2 tw-py-1 tw-text-xs tw-text-text tw-w-20"
               />
               <span className="tw-text-xs tw-text-muted">demo keys</span>
@@ -677,7 +687,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
               {scanRows.length} result(s){scanTruncated && ' (truncated)'}
             </span>
             <div className="tw-border tw-border-border tw-rounded tw-overflow-y-auto" style={{ maxHeight: 'calc(100vh - 360px)' }}>
-              <table className="tw-w-full tw-text-xs">
+              <table className="tw-w-full tw-text-xs" data-testid="kv-scan-table">
                 <thead className="tw-bg-panel tw-sticky tw-top-0">
                   <tr>
                     <th className="tw-w-8 tw-p-2 tw-border-b tw-border-border">

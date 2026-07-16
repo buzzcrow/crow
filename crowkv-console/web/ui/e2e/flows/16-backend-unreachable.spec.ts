@@ -9,6 +9,6 @@ test.describe('E2E-16 backend unreachable', () => {
 
     await page.goto('/');
 
-    await expect(page.getByRole('alert')).toContainText('Backend unreachable', { timeout: 15_000 });
+    await expect(page.getByRole('alert')).toContainText('Backend unreachable', { timeout: 3_000 });
   });
 });

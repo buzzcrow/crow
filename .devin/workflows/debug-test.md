@@ -130,3 +130,72 @@ pixi run cargo test -p crowkv-web --all-targets -- --test-threads=1
 
 **Proper fix direction**: register PID in `ProcessGuard` *before* `wait_for_ready`
 so timeout panic still cleans up.
+
+### Playwright strict mode violations — unscoped getByText (2026-07-16)
+
+**Symptom**: `Error: Error: strict mode violation: getByText(...) resolved to N elements`
+or test asserts on wrong element (toast message instead of inline result).
+
+**Root cause**: `page.getByText(...)` matches all elements in the DOM, including
+toast notifications (`role="alert"`) that show the same success/error message
+as inline UI text.
+
+**Fix**: Scope selectors to a container or use `data-testid`:
+- Bad: `page.getByText('some-value')`
+- Good: `page.getByTestId('kv-get-result')` (add `data-testid` to the target element)
+- Good: `page.locator('aside').getByText('Rack One')` (scope to sidebar)
+- Good: `page.locator('header').getByText(/healthy|degraded/i)` (scope to header)
+
+**Detection**: Run with `--reporter=list` and check the strict mode error for
+matched element count. Use `npx playwright show-trace` to inspect the DOM snapshot.
+
+### waitForLeader timeout — missing addGroup call (2026-07-16)
+
+**Symptom**: `leader not elected for store X group Y within 10000ms`
+
+**Root cause**: After refactoring `createStore` to not implicitly create groups,
+tests that call `waitForLeader` without first calling `addGroup` will time out
+because the group doesn't exist. The API returns 404 for the group, `waitForLeader`
+silently retries until timeout.
+
+**Fix**: Ensure `addGroup(baseURL, storeId, groupId, replicaId, nodeIds)` is called
+before `waitForLeader(baseURL, storeId, groupId)` for every group that needs a leader.
+
+**Detection**: Check the test setup sequence — `createStore` only creates the store
+metadata, `addGroup` creates the Paxos group with replicas. If `waitForLeader` times
+out, grep the test for `addGroup` calls matching the group ID.
+
+### Binary path not found — hardcoded DEFAULT_SERVER_BINARY (2026-07-16)
+
+**Symptom**: `502 Bad Gateway` with `validation failed for binary: could not resolve
+server binary path: /wrong/path/crowkv-server`
+
+**Root cause**: `DEFAULT_SERVER_BINARY` hardcoded to a machine-specific absolute path.
+
+**Fix**: Resolve relative to the fixture file using ESM-compatible imports:
+```ts
+import { resolve, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+const __dirname = dirname(fileURLToPath(import.meta.url));
+export const DEFAULT_SERVER_BINARY =
+  process.env.CROWKV_SERVER_BINARY ?? resolve(__dirname, '../../../../../target/debug/crowkv-server');
+```
+
+**Detection**: Check the 502 response body for the resolved path. Compare with
+`ls target/debug/crowkv-server` from the workspace root.
+
+### UI polling interval vs assertion timeout race (2026-07-16)
+
+**Symptom**: `expect(...).toBeVisible({ timeout: 3_000 })` fails intermittently
+even though the data appears in the UI shortly after.
+
+**Root cause**: UI polling interval (`pollIntervalActive` in `useLogicalTree` /
+`usePhysicalTree`) was set to 3s, same as the assertion timeout. If the first
+poll fires at T+3s and the assertion also expires at T+3s, the race is lost.
+
+**Fix**: Set `pollIntervalActive` to 1s (in `App.tsx`) so the first poll completes
+well within a 3s assertion timeout. This is a root-cause fix — the polling interval
+must be shorter than the test assertion timeout.
+
+**Detection**: Check `App.tsx` for `pollIntervalActive` value. If it equals or
+exceeds the test timeout, reduce the polling interval, not the test timeout.
