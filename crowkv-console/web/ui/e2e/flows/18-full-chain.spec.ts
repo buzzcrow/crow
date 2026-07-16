@@ -3,7 +3,7 @@
 // Baseline: 2.7s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, DEFAULT_SERVER_BINARY, deployNodeServer, stopNodeServer, resetAll } from '../fixtures/consoleSetup';
+import { apiContext, DEFAULT_SERVER_BINARY, stopNodeServer, resetAll } from '../fixtures/consoleSetup';
 
 test.describe('E2E-18 full chain', () => {
   test('creates rack, node, server, store, group, and replica entirely through the UI', async ({ page, baseURL }) => {

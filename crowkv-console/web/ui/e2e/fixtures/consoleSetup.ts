@@ -69,6 +69,7 @@ export async function deployNodeServer(baseURL: string, nodeId: string, mgmtPort
         mgmt_port: mgmtPort,
         grpc_port: grpcPort,
         binary: DEFAULT_SERVER_BINARY,
+        election_profile: 'e2e',
       },
     });
     expect(response.status(), await response.text()).toBe(201);
@@ -81,7 +82,7 @@ export async function stopNodeServer(baseURL: string, nodeId: string) {
   const api = await apiContext(baseURL);
   try {
     const response = await api.post(`/api/nodes/${encodeURIComponent(nodeId)}/server/stop`);
-    if (!response.ok() && response.status() !== 404 && response.status() !== 409) {
+    if (!response.ok() && response.status() !== 400 && response.status() !== 404 && response.status() !== 409) {
       console.warn(`stopNodeServer(${nodeId}) returned ${response.status()}:`, await response.text());
     }
   } catch (err) {

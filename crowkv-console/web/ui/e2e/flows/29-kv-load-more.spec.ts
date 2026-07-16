@@ -13,15 +13,6 @@ async function openKvPanel(page: any, storeId: string, groupId: string) {
   await page.getByLabel('Group').selectOption(groupId);
 }
 
-async function putKey(page: any, key: string, value: string) {
-  await page.getByLabel('Put key').fill(key);
-  await page.getByLabel('Put value').fill(value);
-  const responsePromise = page.waitForResponse((r: any) => r.url().includes('/kv/put'));
-  await page.getByRole('button', { name: /^Put$/ }).click();
-  const response = await responsePromise;
-  expect(response.ok(), await response.text()).toBeTruthy();
-}
-
 test.describe('E2E-29 KV load more', () => {
   test.beforeEach(async ({ baseURL }) => {
     await resetAll(baseURL!);

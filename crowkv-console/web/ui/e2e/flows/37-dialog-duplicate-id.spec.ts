@@ -37,7 +37,6 @@ test.describe('E2E-37 dialog duplicate ID rejection', () => {
 
     await page.goto('/');
     await page.getByRole('button', { name: 'Physical' }).click();
-    const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
     // Right-click rack to get Add Node
     const rackItem = page.getByRole('treeitem').filter({ hasText: 'R-r37b' });
