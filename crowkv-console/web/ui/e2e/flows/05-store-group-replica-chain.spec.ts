@@ -39,6 +39,11 @@ test.describe('E2E-05 store group replica chain', () => {
       if (await expandStore57.count()) await expandStore57.click();
       await expect(aside.getByText('G-570')).toBeVisible({ timeout: 3_000 });
 
+      // Verify parent-child: S-57 is expanded and G-570 is visible in the tree
+      const store57Item = page.getByRole('treeitem').filter({ hasText: 'S-57' });
+      await expect(store57Item).toHaveAttribute('aria-expanded', 'true');
+      await expect(aside.getByText('G-570')).toBeVisible({ timeout: 3_000 });
+
       // Add a second group via the store row context menu.
       await aside.getByText('S-57').click({ button: 'right' });
       await page.getByRole('menuitem', { name: /add group/i }).click();

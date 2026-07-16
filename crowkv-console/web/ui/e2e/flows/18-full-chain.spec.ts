@@ -67,6 +67,18 @@ test.describe('E2E-18 full chain', () => {
       await page.getByLabel('Binary Path (optional)').fill(DEFAULT_SERVER_BINARY);
       await page.getByRole('button', { name: 'Deploy' }).click();
 
+      // Verify both servers are running via API before proceeding.
+      await expect.poll(async () => {
+        const r = await api.get('/api/nodes/n18a/server');
+        if (!r.ok()) return 0;
+        return (await r.json()).pid ?? 0;
+      }, { timeout: 3_000 }).toBeGreaterThan(0);
+      await expect.poll(async () => {
+        const r = await api.get('/api/nodes/n18b/server');
+        if (!r.ok()) return 0;
+        return (await r.json()).pid ?? 0;
+      }, { timeout: 3_000 }).toBeGreaterThan(0);
+
       // Switch to Cluster (Logical) view.
       await page.getByRole('button', { name: 'Logical' }).click();
       await expect(page.getByRole('heading', { name: 'Cluster' })).toBeVisible({ timeout: 3_000 });
