@@ -74,16 +74,8 @@ and **creating new tests** to fill coverage gaps.
 
 ### Phase 0 — Shared Infrastructure
 
-- [ ] **setupCluster() helper**: Add to `consoleSetup.ts`. Accepts a topology
-  descriptor: `{ nodeCount, storeCount, groupsPerStore, replicasPerGroup,
-  rackPrefix, portBase }`. Creates racks, nodes, deploys servers, creates
-  stores, adds groups with replicas, waits for leaders. Returns `{ nodes,
-  stores, groups, apiBase }`. All existing setup sequences (seedRackAndNode +
-  deployNodeServer + createStore + addGroup + waitForLeader) should be
-  refactored to call this helper internally.
-- [ ] **topology presets**: Define `SIMPLE` (3 nodes, 1 store, 1 group, 3
-  replicas) and `COMPLEX` (8 nodes, 2 stores, 2 groups per store, 3 replicas
-  per group on random subsets) as named constants for comparative tests.
+- [x] **setupCluster() helper**: Implemented in `consoleSetup.ts`. Accepts `TopologyDescriptor`, creates racks/nodes/servers/stores/groups, waits for leaders. Used by test 41.
+- [x] **topology presets**: `SIMPLE` (3 nodes, 1 store, 1 group) and `COMPLEX` (8 nodes, 2 stores, 2 groups/store) defined as constants in `consoleSetup.ts`.
 
 ### Phase 1 — Enhance Existing Tests (Tier 1 consolidation)
 
