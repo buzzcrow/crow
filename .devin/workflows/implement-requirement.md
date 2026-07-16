@@ -40,6 +40,14 @@ Use this workflow when picking up an item from
 8. Cleanup       → Mark item done in new_requirements.md, delete plan-<topic>.md
                    and design-<topic>.md
                    → Commit cleanup (second and final commit)
+9. Local CI check → Run the GitHub CI Test job steps locally to verify
+                   they pass before pushing:
+                   - `pixi run cargo fmt --all -- --check`
+                   - `pixi run cargo clippy --all-targets -- -D warnings`
+                   - `pixi run test-ct`
+                   - `pixi run test-ffi`
+                   - `pixi run test-core`
+                   All must pass. If any fail, fix before pushing.
 ```
 
 ## Blocking Conditions
