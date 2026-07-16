@@ -5,11 +5,6 @@
 import { test, expect } from '../fixtures/realBackend';
 import { apiContext, createRack, createStore, createNode, deployNodeServer, stopNodeServer } from '../fixtures/consoleSetup';
 
-async function currentViewportTransform(page: any) {
-  await page.locator('.react-flow__viewport').waitFor();
-  return page.locator('.react-flow__viewport').evaluate((el: Element) => (el as HTMLElement).style.transform);
-}
-
 function nextNumericId(values: Array<string | number>): string {
   const max = values.reduce<number>((acc, value) => {
     const raw = String(value).trim();

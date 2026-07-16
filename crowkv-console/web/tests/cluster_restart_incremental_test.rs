@@ -148,7 +148,13 @@ async fn create_node(client: &reqwest::Client, base: &str, node_id: &str, rack_i
     assert_eq!(status.as_u16(), 201, "create node {node_id}: {body}");
 }
 
-async fn deploy_server(client: &reqwest::Client, base: &str, node_id: &str, binary: &Path) -> u32 {
+async fn deploy_server(
+    client: &reqwest::Client,
+    base: &str,
+    node_id: &str,
+    binary: &Path,
+    election_profile: &str,
+) -> u32 {
     let (status, body) = json_post(
         client,
         &format!("{base}/api/nodes/{node_id}/server/deploy"),
@@ -156,6 +162,7 @@ async fn deploy_server(client: &reqwest::Client, base: &str, node_id: &str, bina
             "mgmt_port": pick_free_port(),
             "grpc_port": pick_free_port(),
             "binary": binary.to_string_lossy().to_string(),
+            "election_profile": election_profile,
         }),
     )
     .await;
@@ -229,7 +236,7 @@ async fn kv_put(client: &reqwest::Client, base: &str, store_id: u64, group_id: u
         }
         // Leader likely changed mid-operation; wait for a stable leader and retry.
         wait_for_group_leader(client, base, store_id, group_id, 0, Duration::from_secs(60)).await;
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -254,7 +261,7 @@ async fn kv_delete(client: &reqwest::Client, base: &str, store_id: u64, group_id
             assert_eq!(body["ok"], true);
         }
         wait_for_group_leader(client, base, store_id, group_id, 0, Duration::from_secs(60)).await;
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -315,7 +322,7 @@ async fn wait_for_group_leader(
                 }
             }
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("group {store_id}/{group_id} failed to converge to one leader within {timeout:?}");
 }
@@ -336,7 +343,7 @@ async fn wait_for_store(
                 return;
             }
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("store {store_id} failed to report {expected_groups} groups within {timeout:?}");
 }
@@ -509,7 +516,7 @@ async fn wait_for_kv_state(
             assert_kv_state(client, base, store_id, group_id, expected).await;
             return;
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -523,7 +530,12 @@ struct Cluster {
     node_ids: Vec<String>,
 }
 
-async fn setup_cluster(tag: &str, rack_nodes: &[(&str, &str)], bin: &Path) -> Cluster {
+async fn setup_cluster(
+    tag: &str,
+    rack_nodes: &[(&str, &str)],
+    bin: &Path,
+    election_profile: &str,
+) -> Cluster {
     let dir = tempdir(tag);
     let cfg_path = dir.join("console.toml");
     let addr = spawn_web_with_path(cfg_path).await;
@@ -544,7 +556,7 @@ async fn setup_cluster(tag: &str, rack_nodes: &[(&str, &str)], bin: &Path) -> Cl
     let mut node_ids = Vec::new();
     for (node_id, rack_id) in rack_nodes {
         create_node(&client, &base, node_id, rack_id).await;
-        let pid = deploy_server(&client, &base, node_id, bin).await;
+        let pid = deploy_server(&client, &base, node_id, bin, election_profile).await;
         guard.pids.insert((*node_id).to_string(), pid);
         node_ids.push((*node_id).to_string());
     }
@@ -649,10 +661,9 @@ async fn restart_recovery(
         }
     };
     std::env::set_var("CROWKV_SERVER_BIN", bin.to_string_lossy().to_string());
-    std::env::set_var("CROWKV_SERVER_ELECTION_PROFILE", election_profile);
     std::env::set_var("CROWKV_WAL_TEXT", "1");
 
-    let mut cluster = setup_cluster(tag, rack_nodes, &bin).await;
+    let mut cluster = setup_cluster(tag, rack_nodes, &bin, election_profile).await;
     eprintln!("test-logs: {}", cluster.dir.display());
 
     // Step 1a: Create all stores + groups first (concurrent startup)
@@ -922,7 +933,7 @@ async fn restart_5node_1group() {
             n_puts: 100,
             deleted_keys: vec![1, 50, 100, 200, 300, 400],
         }],
-        "default",
+        "e2e",
     )
     .await;
 }
@@ -956,7 +967,7 @@ async fn restart_5node_2group() {
                 deleted_keys: vec![2, 80, 150, 220],
             },
         ],
-        "default",
+        "e2e",
     )
     .await;
 }
@@ -991,7 +1002,7 @@ async fn restart_6node_2group_overlap() {
                 deleted_keys: vec![2, 100, 250, 400],
             },
         ],
-        "default",
+        "e2e",
     )
     .await;
 }

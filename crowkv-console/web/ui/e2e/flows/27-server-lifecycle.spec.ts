@@ -18,7 +18,6 @@ test.describe('E2E-27 server lifecycle via context menu', () => {
     try {
       await page.goto('/');
       await page.getByRole('button', { name: 'Physical' }).click();
-      const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
       const nodeItem = page.getByRole('treeitem').filter({ hasText: 'N-n27' });
       await expect(nodeItem).toBeVisible({ timeout: 3_000 });
 

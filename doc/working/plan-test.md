@@ -14,17 +14,17 @@ For test strategy, layer scope, and coverage details, see [`design/design-test.m
 
 ## Suite Timing
 
-Measured on 2026-07-16. All seven suites passed with zero failures.
+Measured on 2026-07-17 (clean build, macOS). Build time: 63.5 s.
 
-| Suite | Result | Tests | macOS | Linux |
-| --- | --- | --- | --- | --- |
-| `test-ct` | pass | 326 | 5.9 s | — |
-| `test-ffi` | pass | 15 | 0.0 s | — |
-| `test-core` | pass | 503 | 16.0 s | — |
-| `test-server` | pass | 55 | 30.2 s | — |
-| `test-cli` | pass | 56 | 39.6 s | — |
-| `test-mgmt-api` | pass | 49 | 76.3 s | — |
-| `test-ui` | pass | 51 | 49.9 s | — |
+| Suite | Tests | macOS | Linux |
+| --- | --- | --- | --- |
+| `test-ct` | 326 | 9.9 s | — |
+| `test-ffi` | 15 | 26.5 s | — |
+| `test-core` | 503 | 56.3 s | — |
+| `test-server` | 55 | 14.9 s | — |
+| `test-cli` | 56 | 34.0 s | — |
+| `test-mgmt-api` | 49 | 42.5 s | — |
+| `test-ui` | 51 | 63.8 s | — |
 
 ---
 

@@ -58,6 +58,7 @@ find crowtree/src crowtree/include crowtree/tests crowtree/bench -type f \( -nam
 ct-lint = "python3 tools/ct_lint.py"
 rs-fmt = "cargo fmt --all"
 rs-lint = "cargo clippy --all-targets -- -D warnings"
+ts-lint = { cmd = "cd crowkv-console/web/ui && npx tsc --noEmit --project tsconfig.e2e.json", depends-on = ["install-web-deps"] }
 install-web-deps = "test -d crowkv-console/web/ui/node_modules || (cd crowkv-console/web/ui && npm ci)"
 build = { cmd = "cmake -S crowtree -B crowtree/build -DCMAKE_BUILD_TYPE=Release && cmake --build crowtree/build -j && cargo build --release && cd crowkv-console/web/ui && npm run build", depends-on = ["install-web-deps"] }
 default = { depends-on = ["build"] }
@@ -72,7 +73,6 @@ test-core = { cmd = "rm -rf test-logs && cargo test -p crowkv --all-targets", de
 test-server = { cmd = "cargo test -p crowkv-server --all-targets", depends-on = ["build"] }
 test-cli = { cmd = "cargo test -p crowkv-console-shared -p crowkv-cli --all-targets", depends-on = ["build"] }
 test-mgmt-api = { cmd = "cargo test -p crowkv-web --all-targets", depends-on = ["build"] }
-test-mgmt-api-ci = { cmd = "cargo test -p crowkv-web --all-targets -- --test-threads=1", depends-on = ["build"] }
 install-playwright = "cd crowkv-console/web/ui && npx playwright install chromium"
 test-ui = { cmd = "rm -rf test-logs && cargo build -p crowkv-server && export CROWKV_SERVER_BINARY=$(pwd)/target/debug/crowkv-server && cd crowkv-console/web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-web-deps"] }
 test = { cmd = '''
@@ -95,7 +95,7 @@ pixi run test-ffi
 pixi run test-core
 pixi run test-server
 pixi run test-cli
-pixi run test-mgmt-api-ci
+pixi run test-mgmt-api
 pixi run test-ui
 '
 ''', depends-on = ["build", "install-web-deps"] }
