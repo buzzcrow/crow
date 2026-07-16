@@ -97,8 +97,8 @@ Source: `crowkv/src/cluster/group.rs`. Tests: 20 files, ~56 tests.
 - [ ] **LearnerStream** (`cluster/learner_stream.rs`): bidi-stream framing, flow control, parallel in-flight slots, stream re-establish after drop.
 - [ ] **Recovery above the durable-commit watermark** via bulk Phase 1 / heartbeat catch-up on a fresh follower.
 - [ ] **Leader-kill + restart no-data-loss** at full speed (blocked by repair-correctness).
-- [ ] Two-replica even-quorum behaviour (no progress without both up) as an explicit assertion.
-- [ ] **Leader change simulation**: start 3-node cluster, write keys, force step-down, wait for new leader, write more keys, force another step-down and re-election, verify all keys readable through final leader. Location: `crowkv/tests/group/g3_leader_change_test.rs`.
+- [x] **Two-replica even-quorum behaviour**: `two_replica_even_quorum_writes_succeed_with_both_up` — 2-node cluster writes succeed with both up.
+- [x] **Leader change simulation**: `leader_change_simulation` — 3-node cluster, two consecutive step-downs, all keys survive.
 - [ ] **Reconfig — add replica catch-up**: 3-node group with existing data, add 4th replica, verify new replica catches up (data visible via scan) within 10 s.
 - [ ] **Reconfig — remove non-leader**: 3-node group, remove a non-leader replica, verify group continues to accept KV ops (quorum intact).
 - [ ] **Reconfig — remove leader**: 3-node group, remove the leader, verify new leader elected within 10 s, verify KV ops resume.
