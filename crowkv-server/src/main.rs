@@ -61,6 +61,7 @@ async fn main() {
     let election_cfg = match args.election_profile.as_str() {
         "test" => PxElectionConfig::for_tests(),
         "e2e" => PxElectionConfig::for_e2e(),
+        "bench" => PxElectionConfig::for_bench(),
         _ => PxElectionConfig::DEFAULT,
     };
 

@@ -638,7 +638,6 @@ dependencies = [
  "crowkv-client",
  "crowkv-console-shared",
  "crowkv-web",
- "dirs",
  "hdrhistogram",
  "hex",
  "rand 0.8.6",

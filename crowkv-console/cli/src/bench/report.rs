@@ -1,11 +1,12 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! JSON-serializable bench report.
+//! Bench report: Markdown-writable, JSON-serializable struct.
 //!
 //! Key work: percentile extraction from `hdrhistogram::Histogram<u64>`,
 //! a lossless round-trippable struct, helpers to read/write the report
-//! file under `~/.crowkv/bench/<run-id>.json`.
+//! file under `bench/<run-id>.md` (Markdown) or `bench/<run-id>.json`
+//! (JSON, for `--json` mode).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -116,18 +117,32 @@ pub struct BenchReport {
 }
 
 impl BenchReport {
-    /// Default report location: `~/.crowkv/bench/`.
+    /// Default report location: `bench-runs/reports/` (CWD-relative,
+    /// same level as `runtime-data/`).
     #[must_use]
-    pub fn default_dir() -> Option<PathBuf> {
-        dirs::home_dir().map(|h| h.join(".crowkv").join("bench"))
+    pub fn default_dir() -> PathBuf {
+        PathBuf::from("bench-runs").join("reports")
     }
 
-    /// Write the report as pretty JSON to `<dir>/<run-id>.json`. The
+    /// Write the report as Markdown to `<dir>/<run-id>.md`. The
     /// directory is created if missing.
     ///
     /// # Errors
     /// I/O or serialization errors.
     pub fn write_to(&self, dir: &Path) -> io::Result<PathBuf> {
+        fs::create_dir_all(dir)?;
+        let path = dir.join(format!("{}.md", self.run_id));
+        fs::write(&path, self.to_markdown())?;
+        Ok(path)
+    }
+
+    /// Write the report as pretty JSON to `<dir>/<run-id>.json`.
+    /// Used by the `--json` CLI flag.
+    ///
+    /// # Errors
+    /// I/O or serialization errors.
+    #[expect(dead_code, reason = "used by --json flag in future CLI expansion")]
+    pub fn write_json_to(&self, dir: &Path) -> io::Result<PathBuf> {
         fs::create_dir_all(dir)?;
         let path = dir.join(format!("{}.json", self.run_id));
         let json = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
@@ -135,13 +150,13 @@ impl BenchReport {
         Ok(path)
     }
 
-    /// Read a previously-written report from disk.
+    /// Read a previously-written Markdown report from disk.
     ///
     /// # Errors
-    /// I/O or JSON-parse errors.
+    /// I/O or parse errors.
     pub fn read_from(path: &Path) -> io::Result<Self> {
-        let bytes = fs::read(path)?;
-        serde_json::from_slice(&bytes).map_err(io::Error::other)
+        let content = fs::read_to_string(path)?;
+        parse_markdown_report(&content)
     }
 
     /// Pretty multi-line summary suitable for the `bench report` CLI.
@@ -197,6 +212,113 @@ impl BenchReport {
             tcp_lost = sm.system.tcp_lost,
         );
         out
+    }
+
+    /// Render the report as a human-readable Markdown document with tables.
+    #[must_use]
+    pub fn to_markdown(&self) -> String {
+        use std::fmt::Write;
+        let mut md = String::new();
+
+        let _ = writeln!(md, "# Benchmark Report: {}", self.run_id);
+        let _ = writeln!(md);
+        let _ = writeln!(
+            md,
+            "- **Started**: {}",
+            self.started_at.format("%Y-%m-%d %H:%M:%S UTC")
+        );
+        let _ = writeln!(
+            md,
+            "- **Finished**: {}",
+            self.finished_at.format("%Y-%m-%d %H:%M:%S UTC")
+        );
+        let _ = writeln!(md, "- **Duration**: {} ms (measurement)", self.duration_ms);
+        let _ = writeln!(md, "- **Warmup**: {} ms (discarded)", self.warmup_ms);
+        let _ = writeln!(md, "- **Workload**: {:?}", self.workload);
+        let _ = writeln!(
+            md,
+            "- **Target**: `{}` (store={}, group={})",
+            self.target_endpoint, self.store_id, self.group_id
+        );
+        let _ = writeln!(md);
+
+        let _ = writeln!(md, "## Configuration");
+        let _ = writeln!(md);
+        let _ = writeln!(md, "| Parameter | Value |");
+        let _ = writeln!(md, "|---|---|");
+        let _ = writeln!(md, "| connections | {} |", self.connections);
+        let _ = writeln!(md, "| threads | {} |", self.threads);
+        let _ = writeln!(md, "| key_space | {} |", self.key_space);
+        let _ = writeln!(md, "| value_size | {} B |", self.value_size);
+        let _ = writeln!(md);
+
+        #[expect(clippy::cast_precision_loss, reason = "display-only throughput")]
+        let secs = (self.duration_ms as f64) / 1000.0;
+        #[expect(clippy::cast_precision_loss, reason = "display-only throughput")]
+        let qps = if secs > 0.0 {
+            self.total_ops as f64 / secs
+        } else {
+            0.0
+        };
+        let _ = writeln!(md, "## Summary");
+        let _ = writeln!(md);
+        let _ = writeln!(md, "| Metric | Value |");
+        let _ = writeln!(md, "|---|---|");
+        let _ = writeln!(md, "| total_ops | {} |", self.total_ops);
+        let _ = writeln!(md, "| throughput | {qps:.1} ops/s |");
+        let _ = writeln!(md, "| total_errors | {} |", self.total_errors);
+        let _ = writeln!(md, "| error_rate | {:.4} |", self.error_rate);
+
+        let _ = writeln!(md);
+
+        let _ = writeln!(md, "## Per-Operation Latency");
+        let _ = writeln!(md);
+        let _ = writeln!(
+            md,
+            "| op | ops | errors | not_found | avg(us) | p50(us) | p90(us) | p99(us) | p999(us) | max(us) |"
+        );
+        let _ = writeln!(md, "|---|---|---|---|---|---|---|---|---|---|");
+        for (kind, op) in &self.by_op {
+            let p = &op.latency_us;
+            let _ = writeln!(
+                md,
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                kind,
+                op.ops,
+                op.errors,
+                op.not_found,
+                p.avg_us,
+                p.p50_us,
+                p.p90_us,
+                p.p99_us,
+                p.p999_us,
+                p.max_us,
+            );
+        }
+        let _ = writeln!(md);
+
+        let sm = &self.server_metrics;
+        let _ = writeln!(md, "## Server Metrics");
+        let _ = writeln!(md);
+        let _ = writeln!(md, "| Metric | Value |");
+        let _ = writeln!(md, "|---|---|");
+        let _ = writeln!(md, "| wal_append | {} |", sm.wal_append_count);
+        let _ = writeln!(md, "| kv_put | {} |", sm.kv_put_count);
+        let _ = writeln!(md, "| kv_get | {} |", sm.kv_get_count);
+        let _ = writeln!(md);
+
+        let _ = writeln!(md, "### System");
+        let _ = writeln!(md);
+        let _ = writeln!(md, "| Metric | Value |");
+        let _ = writeln!(md, "|---|---|");
+        let _ = writeln!(md, "| cpu_user | {} us |", sm.system.cpu_user_us);
+        let _ = writeln!(md, "| cpu_sys | {} us |", sm.system.cpu_sys_us);
+        let _ = writeln!(md, "| rss | {} KB |", sm.system.rss_kb);
+        let _ = writeln!(md, "| tcp_retransmits | {} |", sm.system.tcp_retransmits);
+        let _ = writeln!(md, "| tcp_lost | {} |", sm.system.tcp_lost);
+        let _ = writeln!(md);
+
+        md
     }
 }
 
@@ -425,6 +547,170 @@ pub fn per_op_map(stats: BTreeMap<OpKind, OpStats>) -> BTreeMap<String, OpReport
         .into_iter()
         .map(|(k, v)| (k.label().to_string(), v.into_report()))
         .collect()
+}
+
+/// Parse a Markdown report (as written by [`BenchReport::to_markdown`])
+/// back into a [`BenchReport`]. This is a lightweight line-based parser
+/// that extracts values from the table rows.
+///
+/// # Errors
+/// Returns an `io::Error` if the report is missing the header or
+/// required fields.
+#[expect(
+    clippy::too_many_lines,
+    reason = "line-based parser, each field is a single line"
+)]
+fn parse_markdown_report(content: &str) -> io::Result<BenchReport> {
+    let mut report = BenchReport {
+        run_id: String::new(),
+        started_at: chrono::Utc::now(),
+        finished_at: chrono::Utc::now(),
+        duration_ms: 0,
+        warmup_ms: 0,
+        workload: WorkloadKind::Mix,
+        connections: 0,
+        threads: 0,
+        key_space: 0,
+        value_size: 0,
+        target_endpoint: String::new(),
+        store_id: 0,
+        group_id: 0,
+        total_ops: 0,
+        total_errors: 0,
+        error_rate: 0.0,
+        by_op: BTreeMap::new(),
+        server_metrics: ServerMetrics::default(),
+    };
+
+    let parse_u = |s: &str| -> u64 { s.trim().parse().unwrap_or(0) };
+    let parse_f = |s: &str| -> f64 { s.trim().parse().unwrap_or(0.0) };
+
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("# Benchmark Report: ") {
+            report.run_id = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("- **Started**: ") {
+            if let Ok(dt) =
+                chrono::DateTime::parse_from_str(&rest.replace(" UTC", " +0000"), "%Y-%m-%d %H:%M:%S %z")
+            {
+                report.started_at = dt.with_timezone(&Utc);
+            }
+        } else if let Some(rest) = line.strip_prefix("- **Finished**: ") {
+            if let Ok(dt) =
+                chrono::DateTime::parse_from_str(&rest.replace(" UTC", " +0000"), "%Y-%m-%d %H:%M:%S %z")
+            {
+                report.finished_at = dt.with_timezone(&Utc);
+            }
+        } else if let Some(rest) = line.strip_prefix("- **Duration**: ") {
+            report.duration_ms = parse_u(rest.split_whitespace().next().unwrap_or("0"));
+        } else if let Some(rest) = line.strip_prefix("- **Warmup**: ") {
+            report.warmup_ms = parse_u(rest.split_whitespace().next().unwrap_or("0"));
+        } else if let Some(rest) = line.strip_prefix("- **Workload**: ") {
+            report.workload = match rest.trim() {
+                "Read" => WorkloadKind::Read,
+                "Write" => WorkloadKind::Write,
+                "List" => WorkloadKind::List,
+                _ => WorkloadKind::Mix,
+            };
+        } else if let Some(rest) = line.strip_prefix("- **Target**: ") {
+            let rest = rest.trim_start_matches('`');
+            let parts: Vec<&str> = rest.splitn(2, '(').collect();
+            report.target_endpoint = parts[0].trim().to_string();
+            if parts.len() > 1 {
+                let inner = parts[1].trim_end_matches(')');
+                for pair in inner.split(',') {
+                    let kv: Vec<&str> = pair.split('=').collect();
+                    if kv.len() == 2 {
+                        let key = kv[0].trim();
+                        let val = parse_u(kv[1]);
+                        if key == "store" {
+                            report.store_id = val;
+                        } else if key == "group" {
+                            report.group_id = val;
+                        }
+                    }
+                }
+            }
+        } else if line.starts_with("| ")
+            && !line.starts_with("|---")
+            && !line.starts_with("| Parameter")
+            && !line.starts_with("| Metric")
+            && !line.starts_with("| op |")
+        {
+            let raw_cols: Vec<&str> = line.split('|').collect();
+            let cols: Vec<String> = raw_cols
+                .into_iter()
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty())
+                .collect();
+            if cols.len() < 2 {
+                continue;
+            }
+            match cols[0].as_str() {
+                "connections" => report.connections = u32::try_from(parse_u(&cols[1])).unwrap_or(0),
+                "threads" => report.threads = u32::try_from(parse_u(&cols[1])).unwrap_or(0),
+                "key_space" => report.key_space = parse_u(&cols[1]),
+                "value_size" => {
+                    report.value_size =
+                        usize::try_from(parse_u(cols[1].split_whitespace().next().unwrap_or("0")))
+                            .unwrap_or(0);
+                }
+                "total_ops" => report.total_ops = parse_u(&cols[1]),
+                "total_errors" => report.total_errors = parse_u(&cols[1]),
+                "error_rate" => report.error_rate = parse_f(&cols[1]),
+                "wal_append" => report.server_metrics.wal_append_count = parse_u(&cols[1]),
+                "kv_put" => report.server_metrics.kv_put_count = parse_u(&cols[1]),
+                "kv_get" => report.server_metrics.kv_get_count = parse_u(&cols[1]),
+                "cpu_user" => {
+                    report.server_metrics.system.cpu_user_us =
+                        parse_u(cols[1].split_whitespace().next().unwrap_or("0"));
+                }
+                "cpu_sys" => {
+                    report.server_metrics.system.cpu_sys_us =
+                        parse_u(cols[1].split_whitespace().next().unwrap_or("0"));
+                }
+                "rss" => {
+                    report.server_metrics.system.rss_kb =
+                        parse_u(cols[1].split_whitespace().next().unwrap_or("0"));
+                }
+                "tcp_retransmits" => {
+                    report.server_metrics.system.tcp_retransmits = parse_u(&cols[1]);
+                }
+                "tcp_lost" => {
+                    report.server_metrics.system.tcp_lost = parse_u(&cols[1]);
+                }
+                "read" | "write" if cols.len() >= 10 => {
+                    let p = Percentiles {
+                        min_us: 0,
+                        avg_us: parse_u(&cols[4]),
+                        p50_us: parse_u(&cols[5]),
+                        p90_us: parse_u(&cols[6]),
+                        p99_us: parse_u(&cols[7]),
+                        p999_us: parse_u(&cols[8]),
+                        max_us: parse_u(&cols[9]),
+                    };
+                    report.by_op.insert(
+                        cols[0].clone(),
+                        OpReport {
+                            ops: parse_u(&cols[1]),
+                            errors: parse_u(&cols[2]),
+                            not_found: parse_u(&cols[3]),
+                            latency_us: p,
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if report.run_id.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing '# Benchmark Report:' header",
+        ));
+    }
+    Ok(report)
 }
 
 #[cfg(test)]

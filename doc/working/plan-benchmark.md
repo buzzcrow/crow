@@ -167,9 +167,9 @@ Reference design: [`design-benchmark.md`](design-benchmark.md).
   `BenchFixture`/`parse_metrics_log`/`aggregate_server_metrics` are
   expected until Task 6 wires them into the `bench benchmark` verb.
 
-### Task 6: `bench benchmark` verb
+### Task 6: `bench benchmark` verb — DONE
 
-- [ ] Add `Benchmark` variant to `BenchVerb` enum
+- [x] Add `Benchmark` variant to `BenchVerb` enum
       (`crowkv-console/cli/src/commands/bench.rs`):
       - `--mode <memory|file-nofsync>` (required).
       - `--duration <secs>` (default 60).
@@ -180,7 +180,7 @@ Reference design: [`design-benchmark.md`](design-benchmark.md).
       - `--value-size <n>` (default 64).
       - `--keep-workspace` (flag, default false).
       - `--config <path>` (optional, accepted but stubbed for now).
-- [ ] Implement `bench_benchmark` function:
+- [x] Implement `bench_benchmark` function:
       1. Create workspace dir under
          `~/.crowkv/bench-workspaces/<run-id>/`.
       2. `BenchFixture::new(mode, workspace_dir)` — deploys cluster.
@@ -195,30 +195,30 @@ Reference design: [`design-benchmark.md`](design-benchmark.md).
       8. Print summary (throughput, avg/p50/p99, WAL metrics, system
          metrics, anomaly flags).
       9. `fixture.cleanup()` (unless `--keep-workspace`).
-- [ ] Add `Compare` variant to `BenchVerb`:
+- [x] Add `Compare` variant to `BenchVerb`:
       - Two positional args: `<run-id-1> <run-id-2>`.
-- [ ] Implement `bench_compare` function:
+- [x] Implement `bench_compare` function:
       - Reads both `report.json` files.
       - Prints side-by-side comparison table (throughput, avg/p50/p99
         latency, error rate, WAL metrics, system metrics).
 
-### Task 7: Tests
+### Task 7: Tests — DONE
 
-- [ ] Unit test: `parse_metrics_log` with sample content.
-- [ ] Unit test: `aggregate_server_metrics` with 3-node sample.
-- [ ] Unit test: `Percentiles` serde back-compat (old JSON without
+- [x] Unit test: `parse_metrics_log` with sample content.
+- [x] Unit test: `aggregate_server_metrics` with 3-node sample.
+- [x] Unit test: `Percentiles` serde back-compat (old JSON without
       `avg_us`).
-- [ ] Unit test: WAL `write_batch` with `skip_fsync=true` (no
+- [x] Unit test: WAL `write_batch` with `skip_fsync=true` (no
       `fdatasync` call).
-- [ ] Integration test (`crowkv-console/cli/tests/bench_benchmark.rs`):
+- [x] Integration test (`crowkv-console/cli/tests/bench_benchmark.rs`):
       - `bench benchmark --mode memory --duration 3s` runs end-to-end.
       - Report JSON contains `server_metrics` with non-zero
         `kv_put_count` / `kv_get_count`.
       - Workspace is cleaned up after run.
       - `--keep-workspace` retains workspace.
-- [ ] Integration test: `bench compare <run1> <run2>` prints
+- [x] Integration test: `bench compare <run1> <run2>` prints
       comparison table.
-- [ ] Verify all existing `bench run` / `bench stress` / `bench
+- [x] Verify all existing `bench run` / `bench stress` / `bench
       report` tests pass unchanged.
 
 ## File List
@@ -266,11 +266,11 @@ Task 6 depends on all of 1–5. Task 7 depends on 6.
 
 ## Test Checklist
 
-- [ ] `pixi run test-core` — WAL no-fsync unit test.
-- [ ] `pixi run test-cli` — bench benchmark + compare integration
+- [x] `pixi run test-core` — WAL no-fsync unit test.
+- [x] `pixi run test-cli` — bench benchmark + compare integration
       tests, existing bench tests unchanged.
-- [ ] `pixi run cargo clippy --all-targets -- -D warnings` passes.
-- [ ] `pixi run cargo fmt --all -- --check` passes.
+- [x] `pixi run cargo clippy --all-targets -- -D warnings` passes.
+- [x] `pixi run cargo fmt --all -- --check` passes.
 
 ## Acceptance Criteria Mapping
 

@@ -352,11 +352,9 @@ async fn bench_benchmark(args: BenchBenchmarkArgs, json: bool) -> ExitCode {
         .run_id
         .clone()
         .unwrap_or_else(|| format!("bench-{}-{}", chrono::Utc::now().timestamp_millis(), mode.label()));
-    let Some(home) = dirs::home_dir() else {
-        eprintln!("error: cannot resolve $HOME for workspace dir");
-        return ExitCode::from(1);
-    };
-    let workspace_dir = home.join(".crowkv").join("bench-workspaces").join(&run_id);
+    let workspace_dir = std::path::PathBuf::from("bench-runs")
+        .join("workspaces")
+        .join(&run_id);
 
     println!("provisioning 3-node cluster ({} mode)...", mode.label());
     let mut fixture = match BenchFixture::new(mode, workspace_dir).await {
@@ -479,12 +477,9 @@ fn print_anomalies(report: &crate::bench::BenchReport, log_warning_count: usize)
 fn bench_compare(run_id_1: &str, run_id_2: &str, json: bool) -> ExitCode {
     use crate::bench::BenchReport;
 
-    let Some(dir) = BenchReport::default_dir() else {
-        eprintln!("error: cannot resolve $HOME for report dir");
-        return ExitCode::from(1);
-    };
-    let path1 = dir.join(format!("{run_id_1}.json"));
-    let path2 = dir.join(format!("{run_id_2}.json"));
+    let dir = BenchReport::default_dir();
+    let path1 = dir.join(format!("{run_id_1}.md"));
+    let path2 = dir.join(format!("{run_id_2}.md"));
     let a = match BenchReport::read_from(&path1) {
         Ok(r) => r,
         Err(e) => {
@@ -592,11 +587,8 @@ fn render_comparison(a: &crate::bench::BenchReport, b: &crate::bench::BenchRepor
 fn bench_report(run_id: &str, json: bool) -> ExitCode {
     use crate::bench::BenchReport;
 
-    let Some(dir) = BenchReport::default_dir() else {
-        eprintln!("error: cannot resolve $HOME for report dir");
-        return ExitCode::from(1);
-    };
-    let path = dir.join(format!("{run_id}.json"));
+    let dir = BenchReport::default_dir();
+    let path = dir.join(format!("{run_id}.md"));
     match BenchReport::read_from(&path) {
         Ok(r) => {
             if json {

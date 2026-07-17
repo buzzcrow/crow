@@ -236,4 +236,26 @@ impl PxElectionConfig {
             maintenance_tick_ms: 5_000,
         }
     }
+
+    /// Benchmark profile: stable under real scheduling jitter but fast
+    /// enough for meaningful throughput measurements. Heartbeat 50 ms /
+    /// election 100–200 ms / lease 150 ms. The `test` profile (5 ms
+    /// heartbeat, 25 ms lease) causes constant leader churn under
+    /// concurrent load; `e2e` (200 ms heartbeat) caps throughput too
+    /// low. This sits between the two.
+    #[must_use]
+    pub const fn for_bench() -> Self {
+        Self {
+            prevote_enabled: true,
+            heartbeat_interval_ms: 50,
+            election_min_ms: 100,
+            election_max_ms: 200,
+            lease_duration_ms: 150,
+            max_clock_skew_ms: 25,
+            bulk_prepare_window: 1024,
+            election_driver_disabled: false,
+            learner_stream_window_frames: 64,
+            maintenance_tick_ms: 5_000,
+        }
+    }
 }
