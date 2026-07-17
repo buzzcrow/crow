@@ -30,7 +30,10 @@ crowkv-console/web/ui/e2e/runtime-data/
 # Top-level artifact dirs (anchored to repo root).
 /log/
 /runtime-data/
-/bench-runs/
+# bench-runs/ holds datetime-stamped run dirs; ignore contents
+# but keep the directory itself in the repo.
+/bench-runs/*
+!/bench-runs/.gitkeep
 test-logs/
 
 # Per-crate runtime dirs — these names don't appear in source code,

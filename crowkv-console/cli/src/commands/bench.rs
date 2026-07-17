@@ -352,9 +352,11 @@ async fn bench_benchmark(args: BenchBenchmarkArgs, json: bool) -> ExitCode {
         .run_id
         .clone()
         .unwrap_or_else(|| format!("bench-{}-{}", chrono::Utc::now().timestamp_millis(), mode.label()));
-    let workspace_dir = std::path::PathBuf::from("bench-runs")
-        .join("workspaces")
-        .join(&run_id);
+    let run_dir = crate::bench::BenchReport::create_run_dir(chrono::Utc::now()).unwrap_or_else(|e| {
+        eprintln!("warning: create run dir: {e}");
+        std::path::PathBuf::from("bench-runs/unknown")
+    });
+    let workspace_dir = run_dir.join("workspace");
 
     println!("provisioning 3-node cluster ({} mode)...", mode.label());
     let mut fixture = match BenchFixture::new(mode, workspace_dir).await {
@@ -373,6 +375,7 @@ async fn bench_benchmark(args: BenchBenchmarkArgs, json: bool) -> ExitCode {
     cfg.duration = Duration::from_secs(args.duration_secs);
     cfg.key_space = args.key_space;
     cfg.value_size = args.value_size;
+    cfg.run_dir = Some(run_dir.clone());
     cfg.run_id = Some(run_id.clone());
 
     println!(
@@ -391,7 +394,7 @@ async fn bench_benchmark(args: BenchBenchmarkArgs, json: bool) -> ExitCode {
     report.server_metrics = fixture.collect_metrics();
     let log_warning_count = match path.parent() {
         Some(report_dir) => {
-            let bundle_dir = report_dir.join(format!("{run_id}-artifacts"));
+            let bundle_dir = report_dir.join("logs");
             if let Err(e) = fixture.collect_logs(&bundle_dir) {
                 eprintln!("warning: failed to collect node logs: {e}");
             }
@@ -474,12 +477,21 @@ fn print_anomalies(report: &crate::bench::BenchReport, log_warning_count: usize)
 }
 
 /// `bench compare` — side-by-side comparison of two saved reports.
-fn bench_compare(run_id_1: &str, run_id_2: &str, json: bool) -> ExitCode {
+/// Each `tag` is matched against `bench-runs/*/` directory names
+/// (partial, case-insensitive).
+fn bench_compare(tag_1: &str, tag_2: &str, json: bool) -> ExitCode {
     use crate::bench::BenchReport;
 
-    let dir = BenchReport::default_dir();
-    let path1 = dir.join(format!("{run_id_1}.md"));
-    let path2 = dir.join(format!("{run_id_2}.md"));
+    let Some(dir1) = BenchReport::find_run_dir(tag_1) else {
+        eprintln!("error: no run directory matching {tag_1:?} in bench-runs/");
+        return ExitCode::from(1);
+    };
+    let Some(dir2) = BenchReport::find_run_dir(tag_2) else {
+        eprintln!("error: no run directory matching {tag_2:?} in bench-runs/");
+        return ExitCode::from(1);
+    };
+    let path1 = dir1.join("report.md");
+    let path2 = dir2.join("report.md");
     let a = match BenchReport::read_from(&path1) {
         Ok(r) => r,
         Err(e) => {
@@ -584,11 +596,14 @@ fn render_comparison(a: &crate::bench::BenchReport, b: &crate::bench::BenchRepor
     out
 }
 
-fn bench_report(run_id: &str, json: bool) -> ExitCode {
+fn bench_report(tag: &str, json: bool) -> ExitCode {
     use crate::bench::BenchReport;
 
-    let dir = BenchReport::default_dir();
-    let path = dir.join(format!("{run_id}.md"));
+    let Some(dir) = BenchReport::find_run_dir(tag) else {
+        eprintln!("error: no run directory matching {tag:?} in bench-runs/");
+        return ExitCode::from(1);
+    };
+    let path = dir.join("report.md");
     match BenchReport::read_from(&path) {
         Ok(r) => {
             if json {
