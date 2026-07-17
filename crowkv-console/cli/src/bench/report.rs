@@ -5,8 +5,13 @@
 //!
 //! Key work: percentile extraction from `hdrhistogram::Histogram<u64>`,
 //! a lossless round-trippable struct, helpers to read/write the report
-//! file under `bench/<run-id>.md` (Markdown) or `bench/<run-id>.json`
-//! (JSON, for `--json` mode).
+//! file under `bench-runs/<datetime>/report.md` (Markdown) or
+//! `bench-runs/<datetime>/report.json` (JSON, for `--json` mode).
+//!
+//! The `bench-runs/` directory is always at the **project root**
+//! (found by walking up from CWD for `pixi.toml`), never inside a
+//! crate directory. Each run gets its own datetime-stamped subdirectory
+//! (`YYYY-MM-DD_HHMMSS`) so runs never collide.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -18,6 +23,35 @@ use hdrhistogram::Histogram;
 use serde::{Deserialize, Serialize};
 
 use super::workload::{OpKind, WorkloadKind};
+
+/// Walk up from CWD to find the project root (the directory containing
+/// `pixi.toml`). Falls back to CWD if not found.
+#[must_use]
+fn project_root() -> PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let mut dir: &Path = &cwd;
+    loop {
+        if dir.join("pixi.toml").exists() {
+            return dir.to_path_buf();
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => return cwd,
+        }
+    }
+}
+
+/// Top-level bench-runs directory: `<project_root>/bench-runs/`.
+#[must_use]
+fn bench_runs_root() -> PathBuf {
+    project_root().join("bench-runs")
+}
+
+/// Generate a datetime-stamped run directory name: `YYYY-MM-DD_HHMMSS`.
+#[must_use]
+fn timestamp_dir_name(at: DateTime<Utc>) -> String {
+    at.format("%Y-%m-%d_%H%M%S").to_string()
+}
 
 /// Latency percentiles (microseconds). Stored as `u64` because the
 /// histograms are recorded in microsecond units.
@@ -117,34 +151,55 @@ pub struct BenchReport {
 }
 
 impl BenchReport {
-    /// Default report location: `bench-runs/reports/` (CWD-relative,
-    /// same level as `runtime-data/`).
-    #[must_use]
-    pub fn default_dir() -> PathBuf {
-        PathBuf::from("bench-runs").join("reports")
+    /// Create a new run directory under `<project_root>/bench-runs/<datetime>/`
+    /// and return its path. The directory is created on disk.
+    ///
+    /// # Errors
+    /// I/O errors from `create_dir_all`.
+    pub fn create_run_dir(at: DateTime<Utc>) -> io::Result<PathBuf> {
+        let dir = bench_runs_root().join(timestamp_dir_name(at));
+        fs::create_dir_all(&dir)?;
+        Ok(dir)
     }
 
-    /// Write the report as Markdown to `<dir>/<run-id>.md`. The
-    /// directory is created if missing.
+    /// Scan `bench-runs/*/` for a subdirectory whose name contains `tag`
+    /// (case-insensitive). Returns the path to the first match, or `None`.
+    /// Used by `bench report` and `bench compare` to locate runs by
+    /// partial datetime or run-id.
+    #[must_use]
+    pub fn find_run_dir(tag: &str) -> Option<PathBuf> {
+        let root = bench_runs_root();
+        let Ok(entries) = fs::read_dir(&root) else {
+            return None;
+        };
+        let tag_lower = tag.to_ascii_lowercase();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.to_ascii_lowercase().contains(&tag_lower) {
+                return Some(entry.path());
+            }
+        }
+        None
+    }
+
+    /// Write the report as Markdown to `<run_dir>/report.md`.
     ///
     /// # Errors
     /// I/O or serialization errors.
-    pub fn write_to(&self, dir: &Path) -> io::Result<PathBuf> {
-        fs::create_dir_all(dir)?;
-        let path = dir.join(format!("{}.md", self.run_id));
+    pub fn write_to(&self, run_dir: &Path) -> io::Result<PathBuf> {
+        let path = run_dir.join("report.md");
         fs::write(&path, self.to_markdown())?;
         Ok(path)
     }
 
-    /// Write the report as pretty JSON to `<dir>/<run-id>.json`.
+    /// Write the report as pretty JSON to `<run_dir>/report.json`.
     /// Used by the `--json` CLI flag.
     ///
     /// # Errors
     /// I/O or serialization errors.
     #[expect(dead_code, reason = "used by --json flag in future CLI expansion")]
-    pub fn write_json_to(&self, dir: &Path) -> io::Result<PathBuf> {
-        fs::create_dir_all(dir)?;
-        let path = dir.join(format!("{}.json", self.run_id));
+    pub fn write_json_to(&self, run_dir: &Path) -> io::Result<PathBuf> {
+        let path = run_dir.join("report.json");
         let json = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
         fs::write(&path, json)?;
         Ok(path)
