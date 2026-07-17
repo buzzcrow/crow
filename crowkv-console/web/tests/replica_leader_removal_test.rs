@@ -99,6 +99,7 @@ async fn spawn_upstream(node_id: &str, workspace: &std::path::Path) -> Option<Up
         grpc_port: pick_free_port(),
         election_profile: Some("test".into()),
         binary: Some(bin),
+        ..Default::default()
     };
     let node_dir = workspace.join(node_id);
     std::fs::create_dir_all(node_dir.join("bin")).unwrap();

@@ -153,6 +153,7 @@ async fn ensure_server_running(
         grpc_port,
         election_profile: server.election_profile.clone(),
         binary: server.binary.clone().map(std::path::PathBuf::from),
+        ..Default::default()
     };
     let deployed = if node.ssh_enabled() {
         let server_bin = server.binary.clone().unwrap_or_else(|| {

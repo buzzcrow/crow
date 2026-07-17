@@ -80,6 +80,7 @@ async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
         KvEngineKind::Memory,
         &data_root,
         CrowtreeBackend::Text,
+        false,
     )
     .await
     .unwrap();
@@ -144,6 +145,7 @@ async fn crowtree_engine_persists_across_restart(crowtree_backend: CrowtreeBacke
         KvEngineKind::Crowtree,
         &data_root,
         crowtree_backend,
+        false,
     )
     .await
     .unwrap();
@@ -193,6 +195,7 @@ async fn crowtree_engine_persists_across_restart(crowtree_backend: CrowtreeBacke
         KvEngineKind::Crowtree,
         &data_root,
         crowtree_backend,
+        false,
     )
     .await
     .unwrap();

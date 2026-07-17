@@ -69,6 +69,7 @@ async fn deploy_local_and_observe_topology() {
         grpc_port,
         election_profile: Some("test".into()),
         binary: Some(bin),
+        ..Default::default()
     };
 
     let deployed = match lifecycle::deploy_local(&req, &node).await {

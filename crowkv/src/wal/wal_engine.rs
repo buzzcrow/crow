@@ -144,6 +144,7 @@ impl WalEngine {
                 index.clone(),
                 flush_count.clone(),
                 records_flushed.clone(),
+                config.wal_skip_fsync,
             );
             writer_tasks.push(task);
 

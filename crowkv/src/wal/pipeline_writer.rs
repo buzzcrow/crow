@@ -102,6 +102,7 @@ pub(crate) fn spawn_pipeline_writer(
     index: Arc<parking_lot::Mutex<SegmentIndex>>,
     flush_count: Arc<AtomicU64>,
     records_flushed: Arc<AtomicU64>,
+    skip_fsync: bool,
 ) -> (mpsc::UnboundedSender<WriterCommand>, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::unbounded_channel::<WriterCommand>();
     let jh = tokio::spawn(pipeline_writer_loop(
@@ -120,6 +121,7 @@ pub(crate) fn spawn_pipeline_writer(
         index,
         flush_count,
         records_flushed,
+        skip_fsync,
     ));
     (tx, jh)
 }
@@ -142,6 +144,7 @@ async fn pipeline_writer_loop(
     index: Arc<parking_lot::Mutex<SegmentIndex>>,
     flush_count: Arc<AtomicU64>,
     records_flushed: Arc<AtomicU64>,
+    skip_fsync: bool,
 ) {
     // Reusable per-batch buffers — declared outside the loop so their
     // allocations persist across wake cycles (no per-batch malloc/free).
@@ -259,8 +262,10 @@ async fn pipeline_writer_loop(
                 // Capture segment_id before potential rotation.
                 let segment_id = segment.segment_id;
 
-                // Write all batched records to the segment, then fdatasync.
-                let write_result = write_batch(&mut segment, &batch, &mut offsets).await;
+                // Write all batched records to the segment, then fdatasync
+                // (unless skip_fsync is set for benchmark path-overhead
+                // isolation — see WalConfig::wal_skip_fsync).
+                let write_result = write_batch(&mut segment, &batch, &mut offsets, skip_fsync).await;
 
                 match write_result {
                     Ok(()) => {
@@ -377,6 +382,7 @@ async fn write_batch(
     segment: &mut WalSegment,
     batch: &[PendingWrite],
     offsets: &mut Vec<u64>,
+    skip_fsync: bool,
 ) -> io::Result<()> {
     if batch.is_empty() {
         return Ok(());
@@ -432,8 +438,11 @@ async fn write_batch(
         segment.record_count += 1;
     }
 
-    // Single durable flush for the whole batch.
-    segment.fdatasync().await?;
+    // Single durable flush for the whole batch — skipped when skip_fsync is
+    // set (benchmark isolation mode: data written but not durably flushed).
+    if !skip_fsync {
+        segment.fdatasync().await?;
+    }
 
     trace!(
         segment_id = segment.segment_id,

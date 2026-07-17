@@ -52,12 +52,27 @@ pub struct AddRackBody {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct DeployNodeServerBody {
     pub mgmt_port: u16,
     pub grpc_port: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub election_profile: Option<String>,
+    /// `--kv-engine` value (e.g. `"memory"`, `"crowtree"`). R10
+    /// benchmark framework.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_engine: Option<String>,
+    /// `--kv-backend` value (e.g. `"text"`, `"block"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kv_backend: Option<String>,
+    /// Sets `--no-fsync` on the spawned server when `true`.
+    #[serde(default)]
+    pub no_fsync: bool,
+    /// `--metrics-interval` value in seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics_interval: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
