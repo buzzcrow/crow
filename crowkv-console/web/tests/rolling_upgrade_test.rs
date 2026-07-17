@@ -93,6 +93,7 @@ impl Cluster {
             grpc_port: u.grpc_port,
             election_profile: Some("test".into()),
             binary: Some(u.binary.clone()),
+            ..Default::default()
         };
         let node_dir = self.workspace.join(node_id);
         let deployed = lifecycle::deploy_local_in_dir_with_extra_args(&req, &node, &node_dir, &extra_args)
@@ -153,6 +154,7 @@ async fn spawn_upstream(node_id: &str, workspace: &std::path::Path, binary: &Pat
         grpc_port: pick_free_port(),
         election_profile: Some("test".into()),
         binary: Some(binary.to_path_buf()),
+        ..Default::default()
     };
     let node_dir = workspace.join(node_id);
     std::fs::create_dir_all(node_dir.join("bin")).unwrap();

@@ -285,6 +285,10 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
         total_errors,
         error_rate,
         by_op: per_op_map(by_kind),
+        // Populated by `bench benchmark` (R10) after collecting each
+        // node's `log/metrics.log`; plain `bench run`/`stress` have no
+        // deployed nodes to collect from, so this stays default/empty.
+        server_metrics: super::report::ServerMetrics::default(),
     };
 
     let dir = cfg

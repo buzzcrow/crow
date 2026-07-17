@@ -72,6 +72,10 @@ pub struct KvStoreRegistry {
     port_pool: Mutex<Vec<u16>>,
     /// Metrics registry shared by all stores. `None` when metrics disabled.
     pub metrics_registry: Option<Arc<Mutex<MetricsRegistry>>>,
+    /// Skip the durable `fdatasync` on every WAL write batch, for all
+    /// groups created by this registry. See `--no-fsync` (R10 benchmark
+    /// framework). Default `false`.
+    pub wal_skip_fsync: bool,
 }
 
 impl Default for KvStoreRegistry {
@@ -122,6 +126,7 @@ impl KvStoreRegistry {
             crowtree_backend: CrowtreeBackend::Text,
             port_pool: Mutex::new(Vec::new()),
             metrics_registry: None,
+            wal_skip_fsync: false,
         }
     }
 
@@ -149,6 +154,13 @@ impl KvStoreRegistry {
     #[must_use]
     pub fn with_metrics_registry(mut self, registry: Arc<Mutex<MetricsRegistry>>) -> Self {
         self.metrics_registry = Some(registry);
+        self
+    }
+
+    /// Builder-style setter for [`Self::wal_skip_fsync`].
+    #[must_use]
+    pub fn with_wal_skip_fsync(mut self, skip_fsync: bool) -> Self {
+        self.wal_skip_fsync = skip_fsync;
         self
     }
 
