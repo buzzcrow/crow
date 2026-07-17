@@ -69,6 +69,7 @@ impl BenchMode {
         match self {
             Self::Memory => {
                 body.kv_engine = Some("memory".into());
+                body.no_fsync = true;
             }
             Self::FileNoFsync => {
                 body.kv_engine = Some("crowtree".into());
@@ -182,7 +183,7 @@ impl BenchFixture {
             let mut body = DeployNodeServerBody {
                 mgmt_port: unique_test_port(),
                 grpc_port: unique_test_port(),
-                election_profile: Some("test".into()),
+                election_profile: Some("bench".into()),
                 metrics_interval: Some(1),
                 ..Default::default()
             };

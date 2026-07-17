@@ -66,7 +66,7 @@ pub struct BenchConfig {
     pub duration: Duration,
     pub key_space: u64,
     pub value_size: usize,
-    /// Optional output dir. `None` → `~/.crowkv/bench`.
+    /// Optional output dir. `None` → `bench-runs/reports/`.
     pub report_dir: Option<std::path::PathBuf>,
     /// Optional run-id; defaults to `bench-<unix_millis>-<workload>`.
     pub run_id: Option<String>,
@@ -291,11 +291,7 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
         server_metrics: super::report::ServerMetrics::default(),
     };
 
-    let dir = cfg
-        .report_dir
-        .clone()
-        .or_else(BenchReport::default_dir)
-        .ok_or_else(|| Error::Config("cannot resolve report directory (no $HOME?)".into()))?;
+    let dir = cfg.report_dir.clone().unwrap_or_else(BenchReport::default_dir);
     let path = report
         .write_to(&dir)
         .map_err(|e| Error::Config(format!("write report: {e}")))?;
