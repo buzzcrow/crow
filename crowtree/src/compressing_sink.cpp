@@ -9,14 +9,31 @@
 
 #    include <spdlog/details/os.h>
 
+#    include <algorithm>
+#    include <array>
 #    include <cstdio>
 #    include <cstring>
+#    include <ctime>
+#    include <filesystem>
 #    include <utility>
+#    include <vector>
 
 namespace crowtree
 {
 
 // ── compressing_file_sink ───────────────────────────────────────
+
+// Generate a UTC timestamp string in YYYYMMDD-HHMMSS format.
+static std::string utc_timestamp_secs()
+{
+    const auto now = std::time(nullptr);
+    std::tm    tm_buf{};
+    gmtime_r(&now, &tm_buf);
+    std::array<char, 16> buf{};
+    std::snprintf(buf.data(), buf.size(), "%04d%02d%02d-%02d%02d%02d", tm_buf.tm_year + 1900, tm_buf.tm_mon + 1,
+                  tm_buf.tm_mday, tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
+    return {buf.data()};
+}
 
 template <typename Mutex>
 compressing_file_sink<Mutex>::compressing_file_sink(std::string base_filename, std::size_t max_size,
@@ -38,7 +55,7 @@ std::string compressing_file_sink<Mutex>::calc_filename(const std::string &base_
     if (index == 0) {
         return base_filename;
     }
-    return base_filename + "." + std::to_string(index) + ".log";
+    return base_filename + "." + utc_timestamp_secs() + ".log";
 }
 
 template <typename Mutex> void compressing_file_sink<Mutex>::sink_it_(const spdlog::details::log_msg &msg)
@@ -66,36 +83,51 @@ template <typename Mutex> void compressing_file_sink<Mutex>::rotate_() // NOLINT
 {
     file_helper_.close();
 
-    // Shift compressed rotated files: N → N+1 (delete the oldest).
-    for (auto i = max_files_; i > 0; --i) {
-        std::string src = calc_filename(base_filename_, i - 1);
-        if (i == max_files_) {
-            // The oldest slot: delete both .log and .log.gz if they exist.
-            std::string gz = src + ".gz";
-            std::remove(gz.c_str());
-            std::remove(src.c_str());
-            continue;
-        }
-        std::string gz        = src + ".gz";
-        std::string target_gz = calc_filename(base_filename_, i) + ".gz";
-        if (spdlog::details::os::path_exists(gz)) {
-            std::remove(target_gz.c_str());
-            spdlog::details::os::rename(gz, target_gz);
-        }
-    }
-
-    // Compress the just-closed current file (index 0) → index 1.
+    // Rename current → <base>.YYYYMMDD-HHMMSS.log, then gzip-compress.
     std::string current = calc_filename(base_filename_, 0);
     std::string rotated = calc_filename(base_filename_, 1);
     if (spdlog::details::os::path_exists(current)) {
-        // Rename current → rotated, then compress rotated → rotated.gz.
         std::remove(rotated.c_str());
         spdlog::details::os::rename(current, rotated);
         gzip_compress_file(rotated);
     }
 
+    // Delete oldest rotated files beyond max_files_.
+    prune_rotated();
+
     file_helper_.reopen(true);
     current_size_ = 0;
+}
+
+template <typename Mutex> void compressing_file_sink<Mutex>::prune_rotated()
+{
+    namespace fs = std::filesystem;
+    fs::path    base(base_filename_);
+    fs::path    dir    = base.parent_path().empty() ? fs::current_path() : base.parent_path();
+    std::string prefix = base.filename().string() + ".";
+
+    std::vector<fs::path> rotated_files;
+    std::error_code       ec;
+    for (const auto &entry : fs::directory_iterator(dir, ec)) {
+        if (!entry.is_regular_file()) {
+            continue;
+        }
+        std::string name = entry.path().filename().string();
+        if (name.size() <= prefix.size() || !name.starts_with(prefix)) {
+            continue;
+        }
+        // Only keep .log.gz files (compressed rotated files).
+        if (name.size() < 7 || !name.ends_with(".log.gz")) {
+            continue;
+        }
+        rotated_files.push_back(entry.path());
+    }
+    // Sort descending (newest first) — timestamps sort chronologically.
+    std::ranges::sort(rotated_files, std::greater<>());
+    for (size_t i = max_files_; i < rotated_files.size(); ++i) {
+        std::error_code rm_ec;
+        fs::remove(rotated_files[i], rm_ec);
+    }
 }
 
 // Explicit instantiations.

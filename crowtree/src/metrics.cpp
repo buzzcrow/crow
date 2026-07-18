@@ -5,13 +5,14 @@
 
 #include "crowtree/gzip.h"
 
-#include <sys/stat.h>
-
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
+#include <filesystem>
+#include <vector>
 
 namespace crowtree
 {
@@ -335,34 +336,49 @@ void MetricsRegistry::check_rotate()
         return;
     }
 
-    // Shift compressed rotated files: N → N+1 (delete the oldest).
-    for (size_t i = max_files_; i > 0; --i) {
-        std::string src = rotated_path(i - 1);
-        if (i == max_files_) {
-            std::string gz = src + ".gz";
-            std::remove(gz.c_str());
-            std::remove(src.c_str());
-            continue;
-        }
-        std::string gz        = src + ".gz";
-        std::string target_gz = rotated_path(i) + ".gz";
-        struct stat st;
-        if (::stat(gz.c_str(), &st) == 0) {
-            std::remove(target_gz.c_str());
-            std::rename(gz.c_str(), target_gz.c_str());
-        }
-    }
-
-    // Rename current → rotated.1, then gzip-compress.
-    std::string rotated = rotated_path(1);
+    // Rename current → <base>.YYYYMMDD-HHMMSS.log, then gzip-compress.
+    const auto now = std::time(nullptr);
+    std::tm    tm_buf{};
+    gmtime_r(&now, &tm_buf);
+    std::array<char, 16> ts{};
+    std::snprintf(ts.data(), ts.size(), "%04d%02d%02d-%02d%02d%02d", tm_buf.tm_year + 1900, tm_buf.tm_mon + 1,
+                  tm_buf.tm_mday, tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
+    std::string rotated = log_path_ + "." + ts.data() + ".log";
     std::remove(rotated.c_str());
     std::rename(log_path_.c_str(), rotated.c_str());
     gzip_compress_file(rotated);
+
+    // Delete oldest rotated files beyond max_files_.
+    prune_rotated();
 }
 
-std::string MetricsRegistry::rotated_path(size_t index) const
+void MetricsRegistry::prune_rotated()
 {
-    return log_path_ + "." + std::to_string(index) + ".log";
+    namespace fs = std::filesystem;
+    fs::path    base(log_path_);
+    fs::path    dir    = base.parent_path().empty() ? fs::current_path() : base.parent_path();
+    std::string prefix = base.filename().string() + ".";
+
+    std::vector<fs::path> rotated_files;
+    std::error_code       ec;
+    for (const auto &entry : fs::directory_iterator(dir, ec)) {
+        if (!entry.is_regular_file()) {
+            continue;
+        }
+        std::string name = entry.path().filename().string();
+        if (name.size() <= prefix.size() || !name.starts_with(prefix)) {
+            continue;
+        }
+        if (name.size() < 7 || !name.ends_with(".log.gz")) {
+            continue;
+        }
+        rotated_files.push_back(entry.path());
+    }
+    std::ranges::sort(rotated_files, std::greater<>());
+    for (size_t i = max_files_; i < rotated_files.size(); ++i) {
+        std::error_code rm_ec;
+        fs::remove(rotated_files[i], rm_ec);
+    }
 }
 
 } // namespace crowtree

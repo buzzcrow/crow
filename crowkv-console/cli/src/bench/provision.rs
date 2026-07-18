@@ -242,9 +242,14 @@ impl BenchFixture {
 
     /// Node ids provisioned by this fixture, in deploy order.
     #[must_use]
-    #[expect(dead_code, reason = "useful for tests and future SSH-mode")]
     pub fn node_ids(&self) -> &[String] {
         &self.node_ids
+    }
+
+    /// Workspace directory where node data/logs live.
+    #[must_use]
+    pub fn workspace_dir(&self) -> &Path {
+        &self.workspace_dir
     }
 
     /// Read and aggregate server-side metrics across every node's

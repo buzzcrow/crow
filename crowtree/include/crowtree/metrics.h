@@ -255,9 +255,9 @@ class MetricsRegistry
     size_t            max_file_bytes_ = 30ULL * 1024ULL * 1024ULL;
     size_t            max_files_      = 5;
 
-    void        flush_to_file();
-    void        check_rotate();
-    std::string rotated_path(size_t index) const;
+    void flush_to_file();
+    void check_rotate();
+    void prune_rotated();
 };
 
 } // namespace crowtree

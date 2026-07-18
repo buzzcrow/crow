@@ -138,6 +138,27 @@ impl BenchReport {
         Ok(path)
     }
 
+    /// Write a human-readable text report to `<dir>/report.txt`.
+    /// The directory is created if missing.
+    ///
+    /// `node_ids` and `workspace_dir` provide cluster topology context
+    /// that is not stored in the JSON struct itself.
+    ///
+    /// # Errors
+    /// I/O errors.
+    pub fn write_text_to(
+        &self,
+        dir: &Path,
+        node_ids: &[String],
+        workspace_dir: &Path,
+    ) -> io::Result<PathBuf> {
+        fs::create_dir_all(dir)?;
+        let path = dir.join("report.txt");
+        let text = self.text_report(node_ids, workspace_dir);
+        fs::write(&path, text)?;
+        Ok(path)
+    }
+
     /// Read a previously-written report from disk.
     ///
     /// # Errors
@@ -145,6 +166,156 @@ impl BenchReport {
     pub fn read_from(path: &Path) -> io::Result<Self> {
         let bytes = fs::read(path)?;
         serde_json::from_slice(&bytes).map_err(io::Error::other)
+    }
+
+    /// Generate a comprehensive plain-text report covering test
+    /// configuration, cluster topology, per-op results, and server-side
+    /// metrics. Uses bullet lists (no tables) per project convention.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "display formatter, splitting reduces readability"
+    )]
+    #[must_use]
+    pub fn text_report(&self, node_ids: &[String], workspace_dir: &Path) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+
+        let _ = writeln!(out, "=== CrowKV Benchmark Report ===");
+        let _ = writeln!(out);
+
+        // ── Run Info ──
+        let _ = writeln!(out, "--- Run Info ---");
+        let _ = writeln!(out, "- run_id: {}", self.run_id);
+        let _ = writeln!(
+            out,
+            "- started_at: {}",
+            self.started_at.format("%Y-%m-%d %H:%M:%S UTC")
+        );
+        let _ = writeln!(
+            out,
+            "- finished_at: {}",
+            self.finished_at.format("%Y-%m-%d %H:%M:%S UTC")
+        );
+        let _ = writeln!(out, "- duration: {} ms (measurement window)", self.duration_ms);
+        if self.warmup_ms > 0 {
+            let _ = writeln!(out, "- warmup: {} ms (discarded)", self.warmup_ms);
+        }
+        let _ = writeln!(out);
+
+        // ── Test Configuration ──
+        let _ = writeln!(out, "--- Test Configuration ---");
+        let _ = writeln!(out, "- workload: {:?}", self.workload);
+        let _ = writeln!(out, "- storage_mode: {}", self.mode);
+        let _ = writeln!(out, "- connections: {} (gRPC channels)", self.connections);
+        let _ = writeln!(out, "- threads: {} (worker tasks, closed-loop)", self.threads);
+        let _ = writeln!(out, "- key_space: {} keys", self.key_space);
+        let _ = writeln!(out, "- value_size: {} bytes", self.value_size);
+        let _ = writeln!(out, "- target_endpoint: {}", self.target_endpoint);
+        let _ = writeln!(out, "- store_id: {} / group_id: {}", self.store_id, self.group_id);
+        let _ = writeln!(out);
+
+        // ── Cluster Topology ──
+        let _ = writeln!(out, "--- Cluster Topology ---");
+        let _ = writeln!(out, "- nodes: {} (3-replica Paxos group)", node_ids.len());
+        for (i, nid) in node_ids.iter().enumerate() {
+            let _ = writeln!(out, "  - node[{i}]: {nid}");
+        }
+        let _ = writeln!(out, "- workspace: {}", workspace_dir.display());
+        let _ = writeln!(out, "- engine: crowtree");
+        let mode_desc = match self.mode.as_str() {
+            "mem" => "mem-block page store (in-memory, no disk I/O)",
+            "file" => "file page store (file-backed, no O_DIRECT)",
+            "block-device" => "block page store (O_DIRECT, 4K aligned)",
+            other => other,
+        };
+        let _ = writeln!(out, "- backend: {mode_desc}");
+        let _ = writeln!(out);
+
+        // ── Client-side Results ──
+        let _ = writeln!(out, "--- Client-side Results ---");
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "display-only QPS, precision loss irrelevant"
+        )]
+        let secs = self.duration_ms as f64 / 1000.0;
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "display-only QPS, precision loss irrelevant"
+        )]
+        let qps = if secs > 0.0 {
+            self.total_ops as f64 / secs
+        } else {
+            0.0
+        };
+        let _ = writeln!(out, "- total_ops: {}", self.total_ops);
+        let _ = writeln!(out, "- total_errors: {}", self.total_errors);
+        let _ = writeln!(out, "- error_rate: {:.4}", self.error_rate);
+        let _ = writeln!(out, "- throughput: {qps:.1} ops/s");
+        let _ = writeln!(out);
+
+        // ── Per-Op Breakdown ──
+        if !self.by_op.is_empty() {
+            let _ = writeln!(out, "--- Per-Op Breakdown ---");
+            for (kind, op) in &self.by_op {
+                let p = &op.latency_us;
+                #[allow(
+                    clippy::cast_precision_loss,
+                    reason = "display-only QPS, precision loss irrelevant"
+                )]
+                let op_qps = if secs > 0.0 { op.ops as f64 / secs } else { 0.0 };
+                let _ = writeln!(out, "- {kind}:");
+                let _ = writeln!(out, "  - ops: {} ({op_qps:.1} ops/s)", op.ops);
+                let _ = writeln!(out, "  - errors: {}", op.errors);
+                if op.not_found > 0 {
+                    let _ = writeln!(out, "  - not_found: {}", op.not_found);
+                }
+                let _ = writeln!(
+                    out,
+                    "  - latency (us): min={} avg={} p50={} p90={} p99={} p999={} max={}",
+                    p.min_us, p.avg_us, p.p50_us, p.p90_us, p.p99_us, p.p999_us, p.max_us
+                );
+            }
+            let _ = writeln!(out);
+        }
+
+        // ── Server-side Metrics ──
+        let sm = &self.server_metrics;
+        let _ = writeln!(out, "--- Server-side Metrics (aggregated across nodes) ---");
+        let _ = writeln!(out, "- wal_append_count: {}", sm.wal_append_count);
+        let _ = writeln!(out, "- kv_put_count: {}", sm.kv_put_count);
+        let _ = writeln!(out, "- kv_get_count: {}", sm.kv_get_count);
+        let _ = writeln!(out);
+        let _ = writeln!(out, "--- System Resources ---");
+        let sys = &sm.system;
+        let _ = writeln!(out, "- cpu_user: {} us", sys.cpu_user_us);
+        let _ = writeln!(out, "- cpu_sys: {} us", sys.cpu_sys_us);
+        let _ = writeln!(out, "- peak_rss: {} KB", sys.rss_kb);
+        let _ = writeln!(out, "- tcp_retransmits: {}", sys.tcp_retransmits);
+        let _ = writeln!(out, "- tcp_lost: {}", sys.tcp_lost);
+        let _ = writeln!(out);
+
+        // ── Anomalies ──
+        let mut anomalies: Vec<String> = Vec::new();
+        if self.error_rate > 0.0 {
+            anomalies.push(format!("non-zero client error rate: {:.4}", self.error_rate));
+        }
+        if sys.tcp_retransmits > 0 {
+            anomalies.push(format!("TCP retransmits: {}", sys.tcp_retransmits));
+        }
+        if sys.tcp_lost > 0 {
+            anomalies.push(format!("TCP lost segments: {}", sys.tcp_lost));
+        }
+        let _ = writeln!(out, "--- Anomalies ---");
+        if anomalies.is_empty() {
+            let _ = writeln!(out, "- none");
+        } else {
+            for a in &anomalies {
+                let _ = writeln!(out, "- {a}");
+            }
+        }
+        let _ = writeln!(out);
+        let _ = writeln!(out, "=== End of Report ===");
+        out
     }
 
     /// Pretty multi-line summary suitable for `bench compare` output.
