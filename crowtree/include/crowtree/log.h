@@ -25,10 +25,11 @@ namespace crowtree
 {
 
 // Initialize an async, size-rotating file logger writing to
-// `<log_dir>/crowtree.log`. `level` is one of trace/debug/info/warn/error/off
+// `<log_dir>/crowtree.log`. Rotated files are gzip-compressed to
+// `<log_dir>/crowtree.log.<N>.log.gz`. `level` is one of trace/debug/info/warn/error/off
 // (spdlog names). No-op if `log_dir` is empty or the library was built without
 // spdlog. Any failure to open the file leaves logging disabled (never throws).
-void init_logging(const std::string &log_dir, const std::string &level = "info", size_t max_file_mb = 100,
+void init_logging(const std::string &log_dir, const std::string &level = "info", size_t max_file_mb = 30,
                   size_t max_files = 5);
 
 // Flush and stop the logger (joins the async thread). Safe to call when

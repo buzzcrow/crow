@@ -8,9 +8,10 @@
 
 #ifdef CROWTREE_HAVE_SPDLOG
 
+#    include "crowtree/compressing_sink.h"
+
 #    include <spdlog/async_logger.h>
 #    include <spdlog/details/thread_pool.h>
-#    include <spdlog/sinks/rotating_file_sink.h>
 #    include <spdlog/sinks/stdout_color_sinks.h>
 #    include <spdlog/spdlog.h>
 
@@ -81,7 +82,7 @@ void init_logging(const std::string &log_dir, const std::string &level, size_t m
         // overflow so no message is dropped under bursty load.
         g_tp                   = std::make_shared<spdlog::details::thread_pool>(8192, 1);
         const std::string path = log_dir + "/crowtree.log";
-        auto sink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>(path, max_file_mb * 1024 * 1024, max_files);
+        auto              sink = std::make_shared<compressing_file_sink_mt>(path, max_file_mb * 1024 * 1024, max_files);
         g_logger = std::make_shared<spdlog::async_logger>("crowtree", sink, g_tp, spdlog::async_overflow_policy::block);
         // YYYYMMDD-HHMMSS.mmm [tid] [level] [crowtree] message (aligns with the
         // Rust `tracing` format).

@@ -5,10 +5,8 @@
 //! snapshot filtering, and flush output format.
 
 use crowkv::metrics::{MetricsRegistry, MetricsRunner};
-use std::io::Read;
 use std::sync::Arc;
 use std::sync::Mutex;
-use tempfile::NamedTempFile;
 
 #[test]
 fn counter_window_reset_and_total_accumulate() {
@@ -109,10 +107,9 @@ fn summary_avg_max_and_reset() {
 
 #[tokio::test]
 async fn registry_start_stop_lifecycle() {
-    let tmp = NamedTempFile::new().unwrap();
-    let path = tmp.path().to_path_buf();
+    let tmp = tempfile::tempdir().unwrap();
     let mut runner = MetricsRunner::new(
-        std::fs::File::create(&path).unwrap(),
+        crowkv::common::logging::open_metrics_log(tmp.path(), 30, 5).unwrap(),
         1, // 1 second interval
     );
     runner.start();
@@ -120,11 +117,14 @@ async fn registry_start_stop_lifecycle() {
     // Stop performs a final flush
     runner.stop().await;
 
-    let mut content = String::new();
-    std::fs::File::open(&path)
+    // Find the metrics log file (open_metrics_log names it metrics-*.log)
+    let metrics_file = std::fs::read_dir(tmp.path())
         .unwrap()
-        .read_to_string(&mut content)
-        .unwrap();
+        .flatten()
+        .find(|e| e.file_name().to_string_lossy().starts_with("metrics-"))
+        .map(|e| e.path())
+        .expect("metrics log file not found");
+    let content = std::fs::read_to_string(&metrics_file).unwrap();
     // Should have at least 2 flush blocks (periodic + final)
     let count = content.matches("[metrics").count();
     assert!(count >= 2, "expected >= 2 flush blocks, got {count}");

@@ -33,17 +33,28 @@ async fn main() {
     let args = Cli::parse();
 
     let _guards = if args.log {
-        crowkv::common::logging::init_file_and_console_logging("log", "crowkv-server")
-            .expect("failed to initialize crowkv-server logging")
+        crowkv::common::logging::init_file_and_console_logging(
+            "log",
+            "crowkv-server",
+            args.log_max_file_mb,
+            args.log_max_files,
+        )
+        .expect("failed to initialize crowkv-server logging")
     } else {
-        crowkv::common::logging::init_file_logging("log", "crowkv-server")
-            .expect("failed to initialize crowkv-server logging")
+        crowkv::common::logging::init_file_logging(
+            "log",
+            "crowkv-server",
+            args.log_max_file_mb,
+            args.log_max_files,
+        )
+        .expect("failed to initialize crowkv-server logging")
     };
 
     info!("crowkv-server starting...");
 
     // Metrics runner: periodic flush to a dedicated metrics log file.
-    let mut metrics_runner = create_metrics_runner(args.metrics_interval);
+    let mut metrics_runner =
+        create_metrics_runner(args.metrics_interval, args.log_max_file_mb, args.log_max_files);
 
     info!(
         stores = ?args.stores.as_deref(),
@@ -166,12 +177,12 @@ async fn main() {
 }
 
 /// Create and start a metrics runner if interval > 0, else None.
-fn create_metrics_runner(interval_secs: u64) -> Option<MetricsRunner> {
+fn create_metrics_runner(interval_secs: u64, max_file_mb: usize, max_files: usize) -> Option<MetricsRunner> {
     if interval_secs == 0 {
         return None;
     }
-    let metrics_file =
-        crowkv::common::logging::open_metrics_log("log").expect("failed to open metrics log file");
+    let metrics_file = crowkv::common::logging::open_metrics_log("log", max_file_mb, max_files)
+        .expect("failed to open metrics log file");
     let mut runner = MetricsRunner::new(metrics_file, interval_secs);
     runner.start();
     info!(interval_secs, "metrics runner started");
