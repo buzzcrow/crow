@@ -14,6 +14,9 @@ pub enum Error {
     #[error("server rejected the request: {0}")]
     Server(String),
 
+    #[error("not leader (hint: {hint})")]
+    NotLeader { hint: String },
+
     #[error("no known leader for group (store_id={store_id}, group_id={group_id})")]
     NoLeader { store_id: u64, group_id: u64 },
 

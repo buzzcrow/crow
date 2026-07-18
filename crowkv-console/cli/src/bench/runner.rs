@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use crowkv_client::{ClientConfig, CrowkvClient, GetOutcome, ReadMode, WriteOutcome};
+use crowkv_client::{ClientConfig, CrowkvClient, Error as ClientError, GetOutcome, ReadMode, WriteOutcome};
 use crowkv_console_shared::error::{Error, Result};
 use tracing::{debug, info, warn};
 
@@ -350,14 +350,15 @@ async fn run_worker(
 
         let key = gen.next_key();
         let t0 = Instant::now();
-        let (ok, not_found) = match kind {
+        let (ok, no_leader, not_found) = match kind {
             OpKind::Read => match kv
                 .get(cfg.store_id, cfg.group_id, &key, ReadMode::Linearizable, None)
                 .await
             {
-                Ok(GetOutcome::Found { .. }) => (true, false),
-                Ok(GetOutcome::NotFound) => (true, true),
-                Err(_) => (false, false),
+                Ok(GetOutcome::Found { .. }) => (true, false, false),
+                Ok(GetOutcome::NotFound) => (true, false, true),
+                Err(ClientError::NotLeader { .. }) => (false, true, false),
+                Err(_) => (false, false, false),
             },
             OpKind::Write => {
                 let value = gen.make_value();
@@ -366,8 +367,9 @@ async fn run_worker(
                     .put(cfg.store_id, cfg.group_id, &key, &value, Some((client_id, iter)))
                     .await
                 {
-                    Ok(WriteOutcome { .. }) => (true, false),
-                    Err(_) => (false, false),
+                    Ok(WriteOutcome { .. }) => (true, false, false),
+                    Err(ClientError::NotLeader { .. }) => (false, true, false),
+                    Err(_) => (false, false, false),
                 }
             }
             OpKind::Delete => {
@@ -376,16 +378,18 @@ async fn run_worker(
                     .delete(cfg.store_id, cfg.group_id, &key, Some((client_id, iter)))
                     .await
                 {
-                    Ok(_) => (true, false),
-                    Err(_) => (false, false),
+                    Ok(_) => (true, false, false),
+                    Err(ClientError::NotLeader { .. }) => (false, true, false),
+                    Err(_) => (false, false, false),
                 }
             }
             OpKind::List => match kv
                 .scan(cfg.store_id, cfg.group_id, b"", &[], 1, ReadMode::Linearizable)
                 .await
             {
-                Ok(_) => (true, false),
-                Err(_) => (false, false),
+                Ok(_) => (true, false, false),
+                Err(ClientError::NotLeader { .. }) => (false, true, false),
+                Err(_) => (false, false, false),
             },
         };
         // During the warmup window we drive the same RPC sequence so
@@ -397,7 +401,10 @@ async fn run_worker(
         // out of the published percentiles.
         if recording {
             let lat_us = u64::try_from(t0.elapsed().as_micros()).unwrap_or(u64::MAX);
-            stats.entry(kind).or_default().record(lat_us, ok, not_found);
+            stats
+                .entry(kind)
+                .or_default()
+                .record(lat_us, ok, no_leader, not_found);
 
             // Live counters: each worker owns its `WorkerCounters` so
             // the increments are uncontended. The progress snapshotter

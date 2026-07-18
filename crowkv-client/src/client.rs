@@ -208,6 +208,9 @@ impl CrowkvClient {
                         endpoint = new_endpoint;
                         continue;
                     }
+                    if let Some(e) = self.not_leader_err(&resp) {
+                        return Err(e);
+                    }
                     attempts = self.count_other(attempts, &resp.error)?;
                     if Self::is_unknown_leader(&resp.error) {
                         endpoint = self.wait_and_refresh_leader(store_id, group_id, &endpoint).await;
@@ -334,6 +337,9 @@ impl CrowkvClient {
                         endpoint = new_endpoint;
                         continue;
                     }
+                    if let Some(e) = self.not_leader_err(&resp) {
+                        return Err(e);
+                    }
                     attempts = self.count_other(attempts, &resp.error)?;
                     if Self::is_unknown_leader(&resp.error) {
                         endpoint = self.wait_and_refresh_leader(store_id, group_id, &endpoint).await;
@@ -399,6 +405,9 @@ impl CrowkvClient {
                     if let Some(new_endpoint) = self.follow_not_leader(store_id, group_id, &resp) {
                         endpoint = new_endpoint;
                         continue;
+                    }
+                    if let Some(e) = self.not_leader_err(&resp) {
+                        return Err(e);
                     }
                     attempts = self.count_other(attempts, &resp.error)?;
                     if Self::is_unknown_leader(&resp.error) {
@@ -507,6 +516,20 @@ impl CrowkvClient {
             return None;
         }
         Some(resp.not_leader_hint.clone())
+    }
+
+    /// In `single_attempt` mode, surface a `not leader` response as
+    /// `Error::NotLeader` so the caller (e.g. bench) can distinguish it
+    /// from other errors. Returns `None` if the response is not a
+    /// "not leader" error or if retries are enabled (the retry loop
+    /// handles it internally).
+    fn not_leader_err(&self, resp: &KvResponse) -> Option<Error> {
+        if self.retry.single_attempt && Self::is_unknown_leader(&resp.error) {
+            return Some(Error::NotLeader {
+                hint: resp.not_leader_hint.clone(),
+            });
+        }
+        None
     }
 
     /// A `not leader` failure with an empty hint (the responding replica

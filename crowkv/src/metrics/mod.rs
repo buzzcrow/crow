@@ -135,6 +135,9 @@ impl MetricsRegistry {
     pub fn register_counter(&mut self, name: impl Into<MetricName>) -> Arc<Counter> {
         let name = name.into();
         let name_str = name.to_string();
+        if let Some(existing) = self.counters.iter().find(|e| e.name == name_str) {
+            return Arc::clone(&existing.handle);
+        }
         self.max_name_len = self.max_name_len.max(name_str.len());
         let c = Arc::new(Counter::new(name));
         self.counters.push(CounterEntry {
@@ -148,6 +151,9 @@ impl MetricsRegistry {
     pub fn register_gauge(&mut self, name: impl Into<MetricName>) -> Arc<Gauge> {
         let name = name.into();
         let name_str = name.to_string();
+        if let Some(existing) = self.gauges.iter().find(|e| e.name == name_str) {
+            return Arc::clone(&existing.handle);
+        }
         self.max_name_len = self.max_name_len.max(name_str.len());
         let g = Arc::new(Gauge::new(name));
         self.gauges.push(GaugeEntry {
@@ -161,6 +167,9 @@ impl MetricsRegistry {
     pub fn register_bandwidth(&mut self, name: impl Into<MetricName>) -> Arc<Bandwidth> {
         let name = name.into();
         let name_str = name.to_string();
+        if let Some(existing) = self.bandwidths.iter().find(|e| e.name == name_str) {
+            return Arc::clone(&existing.handle);
+        }
         self.max_name_len = self.max_name_len.max(name_str.len());
         let bw = Arc::new(Bandwidth::new(name));
         self.bandwidths.push(BandwidthEntry {
@@ -174,6 +183,9 @@ impl MetricsRegistry {
     pub fn register_histogram(&mut self, name: impl Into<MetricName>) -> Arc<LatencyHistogram> {
         let name = name.into();
         let name_str = name.to_string();
+        if let Some(existing) = self.histograms.iter().find(|e| e.name == name_str) {
+            return Arc::clone(&existing.handle);
+        }
         self.max_name_len = self.max_name_len.max(name_str.len());
         let h = Arc::new(LatencyHistogram::new(name));
         self.histograms.push(HistogramEntry {
@@ -187,6 +199,9 @@ impl MetricsRegistry {
     pub fn register_summary(&mut self, name: impl Into<MetricName>) -> Arc<LatencySummary> {
         let name = name.into();
         let name_str = name.to_string();
+        if let Some(existing) = self.summaries.iter().find(|e| e.name == name_str) {
+            return Arc::clone(&existing.handle);
+        }
         self.max_name_len = self.max_name_len.max(name_str.len());
         let s = Arc::new(LatencySummary::new(name));
         self.summaries.push(SummaryEntry {
@@ -456,7 +471,7 @@ fn flush_counters<W: Write>(writer: &mut W, entries: &[CounterEntry], window_sec
     let _ = writeln!(
         writer,
         "{:<width$}  {:>8}  {:>8}  {:>8}",
-        "name",
+        "",
         "count",
         "tps(/s)",
         "total",
@@ -488,7 +503,7 @@ fn flush_histograms<W: Write>(writer: &mut W, entries: &[HistogramEntry], window
     let _ = writeln!(
         writer,
         "{:<width$}  {:>8}  {:>8}  {:>8}  {:>8}  {:>8}  {:>8}",
-        "name",
+        "",
         "count",
         "tps(/s)",
         "avg(us)",
@@ -526,7 +541,7 @@ fn flush_summaries<W: Write>(writer: &mut W, entries: &[SummaryEntry], window_se
     let _ = writeln!(
         writer,
         "{:<width$}  {:>8}  {:>8}  {:>8}  {:>8}",
-        "name",
+        "",
         "count",
         "tps(/s)",
         "avg(us)",
@@ -560,7 +575,7 @@ fn flush_bandwidths<W: Write>(writer: &mut W, entries: &[BandwidthEntry], window
     let _ = writeln!(
         writer,
         "{:<width$}  {:>8}  {:>8}  {:>12}  {:>10}",
-        "name",
+        "",
         "count",
         "tps(/s)",
         "avg_size(KB)",
@@ -593,7 +608,7 @@ fn flush_gauges<W: Write>(writer: &mut W, entries: &[GaugeEntry], width: usize) 
     if entries.is_empty() {
         return;
     }
-    let _ = writeln!(writer, "{:<width$}  {:>8}", "name", "value", width = width);
+    let _ = writeln!(writer, "{:<width$}  {:>8}", "", "value", width = width);
     let mut sorted: Vec<&GaugeEntry> = entries.iter().collect();
     sorted.sort_by(|a, b| a.name.cmp(&b.name));
     for e in &sorted {
