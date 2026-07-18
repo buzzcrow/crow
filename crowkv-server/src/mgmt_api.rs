@@ -579,6 +579,7 @@ async fn add_group(
         &state.data_root,
         state.crowtree_backend,
         state.wal_skip_fsync,
+        "log",
     )
     .await
     .map_err(|e| {
@@ -702,6 +703,7 @@ async fn join_group_via_snapshot(
         &state.data_root,
         state.crowtree_backend,
         state.wal_skip_fsync,
+        "log",
     )
     .await
     .map_err(|e| {

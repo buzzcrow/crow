@@ -118,6 +118,13 @@ pub struct CrowtreeStatsView {
     pub buffer_pool_dirty: u32,
     pub buffer_pool_used: u32,
     pub buffer_pool_num_frames: u32,
+    pub mt_upsert_total: u64,
+    pub mt_get_total: u64,
+    pub mt_get_hit_total: u64,
+    pub flush_drain_total: u64,
+    pub flush_entries_total: u64,
+    pub l1_get_total: u64,
+    pub l1_get_hit_total: u64,
 }
 
 impl From<crate::kv::CrowtreeStats> for CrowtreeStatsView {
@@ -136,6 +143,13 @@ impl From<crate::kv::CrowtreeStats> for CrowtreeStatsView {
             buffer_pool_dirty: s.buffer_pool_dirty,
             buffer_pool_used: s.buffer_pool_used,
             buffer_pool_num_frames: s.buffer_pool_num_frames,
+            mt_upsert_total: s.mt_upsert_total,
+            mt_get_total: s.mt_get_total,
+            mt_get_hit_total: s.mt_get_hit_total,
+            flush_drain_total: s.flush_drain_total,
+            flush_entries_total: s.flush_entries_total,
+            l1_get_total: s.l1_get_total,
+            l1_get_hit_total: s.l1_get_hit_total,
         }
     }
 }

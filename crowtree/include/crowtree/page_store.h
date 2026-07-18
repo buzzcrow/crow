@@ -76,19 +76,22 @@ class PageStore
     // callback immediately (ready completion). Backends with a real async
     // engine (IoUring) override these.
 
-    virtual uint64_t submit_read(uint64_t off, void *buf, size_t len, std::function<void(Status)> on_complete)
+    virtual uint64_t submit_read(uint64_t off, void *buf, size_t len,
+                                 std::function<void(Status)> on_complete) // NOLINT(performance-unnecessary-value-param)
     {
         on_complete(read_at(off, static_cast<uint8_t *>(buf), len));
         return 0;
     }
 
-    virtual uint64_t submit_write(uint64_t off, const void *buf, size_t len, std::function<void(Status)> on_complete)
+    virtual uint64_t
+    submit_write(uint64_t off, const void *buf, size_t len,
+                 std::function<void(Status)> on_complete) // NOLINT(performance-unnecessary-value-param)
     {
         on_complete(write_at(off, static_cast<const uint8_t *>(buf), len));
         return 0;
     }
 
-    virtual Status submit_fsync(std::function<void(Status)> on_complete)
+    virtual Status submit_fsync(std::function<void(Status)> on_complete) // NOLINT(performance-unnecessary-value-param)
     {
         on_complete(sync());
         return Status::Ok();
@@ -205,7 +208,7 @@ class DebugPageStore : public PageStore
 class FaultyPageStore : public PageStore
 {
   public:
-    enum class Fault {
+    enum class Fault : std::uint8_t {
         kNone,
         kDrop, // the write never reaches `inner_` at all (as if lost pre-crash)
         kTear, // only the first `tear_len` bytes of this write land

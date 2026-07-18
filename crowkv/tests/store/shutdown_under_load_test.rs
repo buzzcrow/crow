@@ -74,47 +74,61 @@ async fn graceful_shutdown_under_load() {
     );
 
     // The surviving two nodes should re-elect a leader and all
-    // previously committed data should still be readable.
-    // Wait for a new leader among the remaining nodes.
-    let start = Instant::now();
-    let new_leader = loop {
+    // previously committed data should still be readable. The new leader's
+    // lease may expire before all GETs complete (it cannot reach the shut-
+    // down node for heartbeats), so we retry with a re-elected leader on
+    // failure.
+    let mut verified = 0u64;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while verified < 10 {
         assert!(
-            start.elapsed() <= Duration::from_secs(5),
-            "no leader elected after shutdown"
+            Instant::now() <= deadline,
+            "timed out verifying keys after shutdown"
         );
-        let candidate = cluster.nodes().iter().find(|n| {
-            if Arc::ptr_eq(n, leader) {
-                return false;
+
+        // Find a current leader among the surviving nodes.
+        let leader_node = loop {
+            assert!(Instant::now() <= deadline, "no leader elected after shutdown");
+            if let Some(node) = cluster.nodes().iter().find(|n| {
+                !Arc::ptr_eq(n, leader) && n.get_group(1).is_some_and(|g| g.local_replica().is_leader())
+            }) {
+                break node;
             }
-            n.get_group(1).is_some_and(|g| g.local_replica().is_leader())
-        });
-        if let Some(node) = candidate {
-            break node;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+
+        let mut client = cluster.kv_client(leader_node).await;
+        let mut all_ok = true;
+        let mut idx = verified;
+        while idx < 10 {
+            let key = format!("load-{idx}");
+            let val = format!("val-{idx}");
+            let resp = client
+                .get(KvGetRequest {
+                    version: 1,
+                    key: key.as_bytes().to_vec(),
+                    request_id: 9001 + idx,
+                    request_create_ms: 9001 + idx,
+                    group_id: 1,
+                    read_mode: 0,
+                    client_slot: 0,
+                })
+                .await
+                .expect("get rpc")
+                .into_inner();
+            if !resp.ok || resp.not_found {
+                all_ok = false;
+                break;
+            }
+            assert_eq!(resp.value, val.as_bytes(), "key {key:?} value mismatch");
+            idx += 1;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    };
-
-    let mut new_client = cluster.kv_client(new_leader).await;
-
-    // Verify all 10 keys survived the shutdown.
-    for i in 0u64..10 {
-        let key = format!("load-{i}");
-        let val = format!("val-{i}");
-        let resp = new_client
-            .get(KvGetRequest {
-                version: 1,
-                key: key.as_bytes().to_vec(),
-                request_id: 9001,
-                request_create_ms: 9001,
-                group_id: 1,
-                read_mode: 0,
-                client_slot: 0,
-            })
-            .await
-            .expect("get rpc")
-            .into_inner();
-        assert!(resp.ok && !resp.not_found, "key {key:?} should survive shutdown");
-        assert_eq!(resp.value, val.as_bytes(), "key {key:?} value mismatch");
+        verified = idx;
+        if all_ok {
+            break;
+        }
+        // Leader stepped down mid-verification; wait for re-election and retry.
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
     cluster.shutdown().await;

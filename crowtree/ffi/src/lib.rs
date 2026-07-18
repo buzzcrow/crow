@@ -80,6 +80,13 @@ mod sys {
         pub buffer_pool_dirty: u32,
         pub buffer_pool_used: u32,
         pub buffer_pool_num_frames: u32,
+        pub mt_upsert_total: u64,
+        pub mt_get_total: u64,
+        pub mt_get_hit_total: u64,
+        pub flush_drain_total: u64,
+        pub flush_entries_total: u64,
+        pub l1_get_total: u64,
+        pub l1_get_hit_total: u64,
     }
 
     #[repr(C)]
@@ -95,12 +102,26 @@ mod sys {
         pub store_id: u32,
         pub group_id: u32,
         pub sync_mode: u8,
+        pub log_dir: *const c_char,
+        pub log_level: *const c_char,
+        pub log_file_prefix: *const c_char,
+        pub log_max_file_mb: usize,
+        pub log_max_files: usize,
     }
 
     extern "C" {
         pub fn ct_free_buf(buf: *mut ct_buf);
         pub fn ct_open(opt: *const ct_options, out: *mut *mut ct_tree) -> c_int;
         pub fn ct_close(t: *mut ct_tree);
+        pub fn ct_init_logging(
+            log_dir: *const c_char,
+            level: *const c_char,
+            max_file_mb: usize,
+            max_files: usize,
+            file_prefix: *const c_char,
+        );
+        pub fn ct_flush_logging();
+        pub fn ct_shutdown_logging();
         pub fn ct_snapshot(t: *mut ct_tree, out_last_applied: *mut u64) -> c_int;
         pub fn ct_last_applied_slot(t: *const ct_tree) -> u64;
         pub fn ct_set_gc_watermark(t: *mut ct_tree, snapshot_slot: u64, safe_slot: u64);
@@ -303,6 +324,16 @@ pub struct Options {
     pub group_id: u32,
     /// Durability barrier policy.
     pub sync_mode: SyncMode,
+    /// C++ engine log directory (empty = no file logging).
+    pub log_dir: String,
+    /// spdlog level name ("info", "debug", etc.).
+    pub log_level: String,
+    /// C++ log filename prefix (empty = "crowtree").
+    pub log_file_prefix: String,
+    /// Max C++ log file size in MiB before rotation.
+    pub log_max_file_mb: usize,
+    /// Number of rotated C++ log files to keep.
+    pub log_max_files: usize,
 }
 
 /// One record of a multi-key batch passed to [`Crowtree::apply_batch`].
@@ -339,6 +370,13 @@ pub struct Stats {
     pub buffer_pool_dirty: u32,
     pub buffer_pool_used: u32,
     pub buffer_pool_num_frames: u32,
+    pub mt_upsert_total: u64,
+    pub mt_get_total: u64,
+    pub mt_get_hit_total: u64,
+    pub flush_drain_total: u64,
+    pub flush_entries_total: u64,
+    pub l1_get_total: u64,
+    pub l1_get_hit_total: u64,
 }
 
 /// Encode `ops` into `ct_apply_batch`'s packed wire format:
@@ -406,6 +444,21 @@ impl Crowtree {
             .as_ref()
             .map(|p| CString::new(p.as_str()).map_err(|_| CtError::InvalidArgument))
             .transpose()?;
+        let clog_dir: Option<CString> = if opt.log_dir.is_empty() {
+            None
+        } else {
+            Some(CString::new(opt.log_dir.as_str()).map_err(|_| CtError::InvalidArgument)?)
+        };
+        let clog_level: Option<CString> = if opt.log_level.is_empty() {
+            None
+        } else {
+            Some(CString::new(opt.log_level.as_str()).map_err(|_| CtError::InvalidArgument)?)
+        };
+        let clog_prefix: Option<CString> = if opt.log_file_prefix.is_empty() {
+            None
+        } else {
+            Some(CString::new(opt.log_file_prefix.as_str()).map_err(|_| CtError::InvalidArgument)?)
+        };
         let copt = sys::ct_options {
             path: cpath.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
             iu_size: opt.iu_size,
@@ -421,6 +474,11 @@ impl Crowtree {
             store_id: opt.store_id,
             group_id: opt.group_id,
             sync_mode: opt.sync_mode.as_u8(),
+            log_dir: clog_dir.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
+            log_level: clog_level.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
+            log_file_prefix: clog_prefix.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
+            log_max_file_mb: opt.log_max_file_mb,
+            log_max_files: opt.log_max_files,
         };
         let mut out: *mut sys::ct_tree = std::ptr::null_mut();
         check(unsafe { sys::ct_open(&copt, &mut out) })?;
@@ -566,6 +624,13 @@ impl Crowtree {
             buffer_pool_dirty: raw.buffer_pool_dirty,
             buffer_pool_used: raw.buffer_pool_used,
             buffer_pool_num_frames: raw.buffer_pool_num_frames,
+            mt_upsert_total: raw.mt_upsert_total,
+            mt_get_total: raw.mt_get_total,
+            mt_get_hit_total: raw.mt_get_hit_total,
+            flush_drain_total: raw.flush_drain_total,
+            flush_entries_total: raw.flush_entries_total,
+            l1_get_total: raw.l1_get_total,
+            l1_get_hit_total: raw.l1_get_hit_total,
         }
     }
 
@@ -790,6 +855,45 @@ impl Drop for Crowtree {
         }
         unsafe { sys::ct_close(self.ptr.as_ptr()) }
     }
+}
+
+/// Initialize the C++ spdlog async file logger. Call this once at process
+/// startup, before any `Crowtree::open`. All parameters map to the C++
+/// `init_logging()` function. Safe to call when the build has no spdlog
+/// (no-op).
+///
+/// - `log_dir` — directory for log files (empty => stderr)
+/// - `level` — spdlog level name (trace/debug/info/warn/error/off)
+/// - `max_file_mb` — max file size before rotation (0 => 30)
+/// - `max_files` — max rotated files to keep (0 => 5)
+/// - `file_prefix` — filename prefix (empty => "crowtree")
+pub fn ct_init_logging(log_dir: &str, level: &str, max_file_mb: usize, max_files: usize, file_prefix: &str) {
+    let log_dir_c = std::ffi::CString::new(log_dir).unwrap_or_default();
+    let level_c = std::ffi::CString::new(level).unwrap_or_default();
+    let prefix_c = std::ffi::CString::new(file_prefix).unwrap_or_default();
+    unsafe {
+        sys::ct_init_logging(
+            log_dir_c.as_ptr(),
+            level_c.as_ptr(),
+            max_file_mb,
+            max_files,
+            prefix_c.as_ptr(),
+        );
+    }
+}
+
+/// Flush buffered C++ log messages to disk without stopping the logger.
+/// Safe to call when logging was never initialized (no-op).
+pub fn ct_flush_logging() {
+    unsafe { sys::ct_flush_logging() };
+}
+
+/// Flush and stop the C++ spdlog async logger. Call this during process
+/// shutdown (after all `Crowtree` instances are dropped) to ensure
+/// buffered log messages are written to disk. Safe to call when logging
+/// was never initialized (no-op in that case).
+pub fn ct_shutdown_logging() {
+    unsafe { sys::ct_shutdown_logging() };
 }
 
 fn decode_scan(bytes: &[u8], count: usize) -> Result<Vec<ScanEntry>, CtError> {

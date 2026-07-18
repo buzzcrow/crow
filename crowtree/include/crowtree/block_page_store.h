@@ -224,8 +224,8 @@ class BlockPageStore : public PageStore
     {
     }
 
-    int      fd() const;    // returns -1 if no FileMedium
-    uint64_t capacity_ = 0; // probed fixed device size; 0 = unknown
+    [[nodiscard]] int fd() const;    // returns -1 if no FileMedium
+    uint64_t          capacity_ = 0; // probed fixed device size; 0 = unknown
 
     // Array-of-blocks management
     Status allocate_new_block();

@@ -29,8 +29,10 @@ Rust workspace + C++ storage engine (via FFI).
 - **Pre-commit quality gate — do not skip:**
   - `pixi run cargo fmt --all -- --check` and `pixi run cargo clippy --all-targets -- -D warnings` must pass.
   - `pixi exec clang-format --dry-run --Werror` on changed `.cpp`/`.h` files must pass.
+  - `pixi run clang-tidy` on changed `.cpp` files must pass (pre-commit hook runs this automatically).
   - Run tests relevant to the changed code (Rust or C++ `pixi run test-ct`), not the entire suite.
   - Only skip if the toolchain is broken and unfixable — state the reason explicitly.
+  - **Never use `git commit --no-verify`** — it bypasses the pre-commit hook and its clang-tidy check.
 
 ## Dispatch — Read Before Acting
 

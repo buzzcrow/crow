@@ -67,6 +67,14 @@ using ct_stats = struct
     uint32_t buffer_pool_dirty;
     uint32_t buffer_pool_used;
     uint32_t buffer_pool_num_frames;
+    // MemTable (L0) / flush / L1 cumulative counters (monotonic since open).
+    uint64_t mt_upsert_total;
+    uint64_t mt_get_total;
+    uint64_t mt_get_hit_total;
+    uint64_t flush_drain_total;
+    uint64_t flush_entries_total;
+    uint64_t l1_get_total;
+    uint64_t l1_get_hit_total;
 };
 
 // Backend selection for durable storage.
@@ -97,11 +105,27 @@ using ct_options = struct
     uint32_t          store_id;          // default 0; block file naming
     uint32_t          group_id;          // default 0; maps to PxGroupId in CrowKV
     enum ct_sync_mode sync_mode;         // default CT_SYNC_FULL
+    const char       *log_dir;           // null/empty => no C++ file logging
+    const char       *log_level;         // null/empty => "info"
+    const char       *log_file_prefix;   // null/empty => "crowtree"; filename prefix
+    size_t            log_max_file_mb;   // 0 => default 30
+    size_t            log_max_files;     // 0 => default 5
 };
 
 // ── Lifecycle + durability ────────────────────────────────────────
 ct_status ct_open(const ct_options *opt, ct_tree **out);
 void      ct_close(ct_tree *t);
+
+// Process-global logging control (not bound to any ct_tree instance).
+// Call ct_init_logging once at process startup (before any ct_open),
+// ct_flush_logging to push buffered messages to disk, and
+// ct_shutdown_logging at process exit (after all ct_close calls) to
+// flush + join the async logger thread. All three are safe to call
+// when logging was never initialized (no-op).
+void      ct_init_logging(const char *log_dir, const char *level, size_t max_file_mb, size_t max_files,
+                          const char *file_prefix);
+void      ct_flush_logging();
+void      ct_shutdown_logging();
 ct_status ct_snapshot(ct_tree *t, uint64_t *out_last_applied);
 uint64_t  ct_last_applied_slot(const ct_tree *t);
 // gc_slot = min(snapshot_slot, safe_slot); see crowtree::set_gc_watermark.

@@ -37,10 +37,8 @@
 #include "crowtree/compressor.h"
 #include "crowtree/crc32c.h"
 #include "crowtree/crowtree.h"
-#include "crowtree/delta.h"
 #include "crowtree/log.h"
 #include "crowtree/mapping_persist.h"
-#include "crowtree/page_codec.h"
 #include "crowtree/page_store.h"
 
 #include <algorithm>
@@ -317,7 +315,7 @@ SpaceAllocator build_allocator(std::vector<std::pair<uint64_t, uint64_t>> live, 
         for (const auto &e : live) {
             uint64_t addr      = e.first;
             uint64_t remaining = e.second;
-            uint32_t blk       = static_cast<uint32_t>(addr / block_size);
+            auto     blk       = static_cast<uint32_t>(addr / block_size);
             // Split cross-block extents across all covered blocks.
             while (remaining > 0) {
                 uint64_t blk_end      = (static_cast<uint64_t>(blk) + 1) * block_size;
@@ -328,9 +326,9 @@ SpaceAllocator build_allocator(std::vector<std::pair<uint64_t, uint64_t>> live, 
                 ++blk;
             }
         }
-        uint32_t max_blk = static_cast<uint32_t>(eof / block_size);
+        auto max_blk = static_cast<uint32_t>(eof / block_size);
         for (uint32_t i = 0; i <= max_blk; ++i) {
-            if (live_per_block.find(i) == live_per_block.end()) {
+            if (!live_per_block.contains(i)) {
                 a.empty_blocks.insert(i);
             }
         }
@@ -789,7 +787,8 @@ Status Crowtree::snapshot(uint64_t *out_last_applied)
     return Status::Ok();
 }
 
-void Crowtree::snapshot_async(std::function<void(Status, uint64_t)> on_done)
+void Crowtree::snapshot_async(
+    std::function<void(Status, uint64_t)> on_done) // NOLINT(performance-unnecessary-value-param)
 {
     if (opt_.page_store == nullptr) {
         on_done(Status::invalid_argument("snapshot: no page_store"), 0);
@@ -820,8 +819,9 @@ void Crowtree::snapshot_async(std::function<void(Status, uint64_t)> on_done)
     on_done(st, last_applied);
 }
 
-void Crowtree::snapshot_write_next_async(std::shared_ptr<PreparedSnapshot> prepared, size_t idx,
-                                         std::function<void(Status, uint64_t)> on_done)
+void Crowtree::snapshot_write_next_async(                      // NOLINT(readability-convert-member-functions-to-static)
+    std::shared_ptr<PreparedSnapshot> prepared,                // NOLINT(performance-unnecessary-value-param)
+    size_t idx, std::function<void(Status, uint64_t)> on_done) // NOLINT(performance-unnecessary-value-param)
 {
 #ifndef CROWTREE_HAVE_LIBURING
     // Unreachable: snapshot_async()'s only call site for this helper is
@@ -831,7 +831,6 @@ void Crowtree::snapshot_write_next_async(std::shared_ptr<PreparedSnapshot> prepa
     (void)prepared;
     (void)idx;
     (void)on_done;
-    return;
 #else
     // snapshot_inflight_ (acquired by snapshot_async() before
     // prepare_snapshot_locked()) stays held across this entire async chain
@@ -926,9 +925,10 @@ Status Crowtree::open(const Options &opt, std::unique_ptr<Crowtree> *out)
     }
     PageStore     *store = opt.page_store;
     const uint32_t iu    = store->iu_size();
-    // Bring up file logging before doing any work so recovery is observable
-    // (no-op when opt.log_dir is empty or the build has no spdlog).
-    init_logging(opt.log_dir, opt.log_level, opt.log_max_file_mb, opt.log_max_files);
+    // Logging is now process-global: the application calls init_logging()
+    // (via ct_init_logging) at startup before any Crowtree::open(). This
+    // ensures all engine instances share one logger without resetting
+    // each other's.
     CT_LOG_INFO("open: iu={} frame_bytes={} store_size={}", iu, opt.frame_bytes, store->size());
     // Geometry validation (PT9 §9.2): the pool frame must be IU-aligned. The
     // superblock slot is IU-rounded (superblock_slot_bytes), so any IU is supported.

@@ -17,6 +17,11 @@ complexity, and dependency. Before implementation, follow the
 - **R2** — Persistent node config — Area: crowkv-server — Per-node server config
   is not persisted; a restart relies on the console to re-push topology, making
   standalone startup non-deterministic.
+- **R12** — Crow Common shared project — Area: workspace — Extract a
+  standalone `crow-common` project with a Rust crate and a C++ static
+  library. Move reusable utilities (metrics core, logging wrapper, CRC32C,
+  time helpers, operation report) out of `crowkv`/`crowtree` so future
+  storage-system components can share them without re-implementing.
 - **R10** — Benchmark framework — Area: console CLI — Add benchmark capability
   to console CLI; run single-node benchmarks (in-memory or no-fsync file mode)
   to identify system bottlenecks and inform performance tuning. Related to R3,
@@ -25,6 +30,13 @@ complexity, and dependency. Before implementation, follow the
   metrics (from R8) in the GUI via existing health/internal-state query
   infrastructure. Show recent operation counts and metrics per Store/Group
   with real-time refresh (5–10 s window).
+- **R13** — Unify bench client stats with metrics library — Area: console CLI
+  / metrics — Benchmark client-side statistics (`OpStats`, `WorkerCounters`
+  in `bench/runner.rs`) currently use a hand-rolled `hdrhistogram` + manual
+  `AtomicU64` counters instead of crowkv's own `MetricsRegistry` /
+  `LatencyHistogram` / `Counter` classes. After R12 extracts metrics into
+  `crow-common`, the bench client should reuse the same metrics primitives
+  for consistency and to eliminate duplicate statistical infrastructure.
 
 ### Low Priority
 
@@ -268,6 +280,174 @@ wire up polling.
 
 **Acceptance**: Select a Store or Group in the UI, see real-time metrics
 (op count, latency, WAL stats) in the Inspector, values update every 5–10 s.
+
+---
+
+### R12: Crow Common shared project
+
+**Problem**: The crowkv and crowtree codebases contain reusable utility code
+that is embedded inside project-specific crates. As the broader storage-system
+goal expands to multiple components, each project would need to re-implement or
+vend these utilities. Extracting them into a standalone `crow-common` project
+eliminates duplication and establishes a shared foundation.
+
+**Approach**:
+- Create a new `crow-common/` directory at the workspace root, containing two
+  sub-projects:
+  - **`crow-common/rust/`** — a Rust crate (`crow-common`) published as a
+    library. Contains the Rust-side shared utilities.
+  - **`crow-common/cpp/`** — a C++ static library (`libcrowcommon.a`).
+    Contains the C++-side shared utilities. Only static libraries are
+    published — no shared objects — so downstream projects link them in
+    without runtime dependency concerns.
+- Move the following Rust utilities from `crowkv/src/` into
+  `crow-common/rust/src/`:
+  - **Metrics core** (`crowkv/src/metrics/`) — `Counter`, `Gauge`,
+    `LatencyHistogram`, `LatencySummary`, `Bandwidth`, `MetricsRegistry`,
+    `MetricsRunner`, `SystemCollector`, `MetricName`. These are generic
+    atomic-counter primitives with no crowkv-specific dependencies.
+  - **Logging wrapper** (`crowkv/src/common/logging.rs`) —
+    `init_file_logging`, `init_file_and_console_logging`, `open_metrics_log`,
+    `LogGuards`, `RotatingLogWriter`, `format_timestamp`. These encapsulate
+    the `tracing-subscriber` + `file-rotate` initialization with the
+    project's naming conventions (`{process_name}-{YYYYMMDD-HHMMSS.mmm}-{pid}.log`),
+    start/stop/flush lifecycle, and rotation/compression controls.
+  - **Time helpers** (`crowkv/src/common/time.rs`) — `process_anchor`,
+    `instant_to_anchor_ms`, `anchor_ms_to_instant`. Generic monotonic-time
+    utilities.
+  - **Operation report** (`crowkv/src/common/report.rs`) —
+    `OperationReport`. Generic multi-step error aggregation.
+- Move the following C++ utilities from `crowtree/` into
+  `crow-common/cpp/`:
+  - **CRC32C** (`crowtree/include/crowtree/crc32c.h`,
+    `crowtree/src/crc32c.cpp`) — table-driven CRC32C (Castagnoli)
+    implementation used for page/checksum/snapshot integrity. Move to
+    `crow-common` so other storage components can share it. **Follow-up**:
+    replace the hand-rolled table-driven implementation with a mature,
+    well-known library (e.g. `crc32c` from Google's `crc32c` project or
+    hardware-accelerated SSE4.2 intrinsics via a proven library) to avoid
+    maintaining a custom implementation.
+  - **Logging facade** (`crowtree/include/crowtree/log.h`,
+    `crowtree/src/log.cpp`) — `init_logging`, `shutdown_logging`,
+    `logging_enabled`, `CT_LOG_*` macros. The spdlog-backed async logger
+    with rotating/compressing file sink, naming conventions aligned with the
+    Rust side, and start/stop/flush lifecycle. This is a generic C++ logging
+    wrapper, not crowtree-specific.
+  - **Compressing sink** (`crowtree/include/crowtree/compressing_sink.h`,
+    `crowtree/src/compressing_sink.cpp`) — custom spdlog sink with
+    size-based rotation + gzip compression. Used by the logging facade;
+    moves together with it.
+- Review other utility code in `crowkv/src/common/` and `crowtree/src/` for
+  additional candidates (e.g. `config.rs` profiles, byte-order helpers
+  `put_u32`/`get_u32` used across persist/snapshot codecs). Move only code
+  that is genuinely generic and has no project-specific coupling.
+- Update `crowkv` and `crowtree` to depend on `crow-common` (Rust: add
+  `crow-common` as a workspace dependency; C++: link `libcrowcommon.a` and
+  update include paths). Replace the moved code with re-exports or thin
+  wrappers so existing call sites compile with minimal changes.
+- Update `Cargo.toml` workspace members and `pixi.toml` build/test tasks.
+
+**Priority**: Medium — foundational for the multi-component storage-system
+roadmap. Extracting now avoids deeper coupling as more components are built.
+
+**Complexity**: Medium — mechanical extraction + dependency wiring. No new
+algorithms or protocols. The main risk is breaking existing build/test paths;
+mitigated by keeping re-exports at old paths during the transition.
+
+**Files**:
+- New: `crow-common/rust/Cargo.toml`, `crow-common/rust/src/` (moved from
+  `crowkv/src/metrics/`, `crowkv/src/common/logging.rs`, `time.rs`,
+  `report.rs`).
+- New: `crow-common/cpp/CMakeLists.txt`, `crow-common/cpp/include/`,
+  `crow-common/cpp/src/` (moved from `crowtree/include/crowtree/crc32c.h`,
+  `log.h`, `compressing_sink.h` and their `.cpp` counterparts).
+- Modified: `Cargo.toml` (workspace members), `pixi.toml`,
+  `crowkv/Cargo.toml` (add `crow-common` dependency),
+  `crowkv/src/lib.rs` / `crowkv/src/common/mod.rs` (re-export from
+  `crow-common`), `crowtree/CMakeLists.txt` (link `libcrowcommon.a`),
+  `crowtree/ffi/build.rs` (C++ include path update).
+
+**Acceptance**:
+- `pixi run cargo build` and `pixi run test-ct` pass with `crow-common` as a
+  workspace member.
+- `crowkv` metrics tests (`crowkv/tests/metrics_test.rs`) pass unchanged.
+- `crowtree` CRC32C and logging tests pass unchanged.
+- `crow-common` Rust crate compiles independently (`cargo build -p
+  crow-common`).
+- `libcrowcommon.a` builds independently via CMake.
+- No functional changes — all moved code is byte-for-byte identical in
+  behavior; only the module/crate boundary changes.
+
+---
+
+### R13: Unify bench client stats with metrics library
+
+**Problem**: The benchmark client (`bench/runner.rs`) maintains its own
+statistical infrastructure separate from crowkv's metrics module:
+
+- `OpStats` uses the external `hdrhistogram` crate (`Histogram<u64>`) for
+  latency distributions, plus manual `u64` counters for `ops`, `errors`,
+  `not_found`.
+- `WorkerCounters` uses hand-rolled `AtomicU64` for live progress
+  snapshotting.
+
+Meanwhile, crowkv's `MetricsRegistry` provides `LatencyHistogram`,
+`Counter`, `LatencySummary`, and `Bandwidth` — the same primitives the
+server uses for its metrics log. The bench client should reuse these
+classes so there is one statistical infrastructure across the project.
+
+**Two problems blocking immediate adoption**:
+
+1. **Dependency boundary**: `crowkv-cli` does not depend on `crowkv`
+   today (only `crowkv-client` and `crowkv-console-shared`/`crowkv-web`).
+   Adding `crowkv` as a dependency just for metrics would pull in the
+   entire consensus/cluster/WAL stack. This is resolved by R12 (Crow
+   Common shared project), which extracts the metrics core into a
+   standalone `crow-common` crate with no crowkv-specific coupling.
+
+2. **Histogram precision**: crowkv's `LatencyHistogram` uses 12 fixed
+   buckets (1µs, 10µs, 100µs, 500µs, 1ms, 5ms, 10ms, 50ms, 100ms, 500ms,
+   1s, ∞). Percentile queries return the bucket upper bound, not the
+   actual value — e.g. any latency between 500µs and 1ms reports as 1ms.
+   The bench client needs high-precision percentiles (p90, p99, p999, max)
+   for meaningful latency analysis; the current `hdrhistogram` crate
+   provides 3 significant digits with auto-resizing. The fixed-bucket
+   design is intentional for the server hot path (zero allocation, no
+   locks, cache-friendly), but it is too coarse for benchmark reporting.
+
+**Plan**: After R12 extracts metrics into `crow-common`, implement a new
+`PreciseHistogram` (or similar) in `crow-common` that offers higher
+percentile precision at a slightly higher per-observe cost — e.g. an
+HDR-style logarithmic bucket scheme or a lock-free variant of
+`hdrhistogram`. The existing `LatencyHistogram` stays as the low-overhead
+server hot-path option; the new histogram is used by the bench client and
+any other consumer that needs precise tail latency. The bench client then
+replaces `OpStats` / `WorkerCounters` with `crow-common` metrics
+primitives, eliminating the `hdrhistogram` external dependency and
+unifying the statistical infrastructure.
+
+**Dependencies**: R12 (Crow Common shared project) — must extract metrics
+core first.
+
+**Priority**: Medium — consistency and maintainability improvement; not
+blocking current benchmark work.
+
+**Complexity**: Medium — new histogram implementation in `crow-common`,
+bench client refactor to use metrics primitives, update report generation.
+
+**Files**: `crow-common/rust/src/metrics/` (new precise histogram),
+`crowkv-console/cli/src/bench/runner.rs`,
+`crowkv-console/cli/src/bench/report.rs`,
+`crowkv-console/cli/Cargo.toml` (replace `hdrhistogram` with
+`crow-common`).
+
+**Acceptance**:
+- Bench client uses `crow-common` metrics primitives (`Counter`,
+  precise histogram) instead of `hdrhistogram` and manual atomics.
+- Benchmark report percentiles (p50, p90, p99, p999, max) are at least as
+  precise as the previous `hdrhistogram`-based values.
+- `hdrhistogram` dependency removed from `crowkv-cli/Cargo.toml`.
+- Existing benchmark tests pass with the new infrastructure.
 
 ---
 

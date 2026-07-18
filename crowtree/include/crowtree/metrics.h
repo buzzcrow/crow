@@ -49,7 +49,7 @@ class Counter
     {
         uint64_t w = window_.exchange(0, std::memory_order_relaxed);
         uint64_t t = total_.fetch_add(w, std::memory_order_relaxed) + w;
-        return {w, t};
+        return {.count = w, .total = t};
     }
 
     const std::string &name() const
@@ -118,7 +118,7 @@ class Bandwidth
         uint64_t c = count_.exchange(0, std::memory_order_relaxed);
         uint64_t s = sum_.exchange(0, std::memory_order_relaxed);
         uint64_t t = total_bytes_.load(std::memory_order_relaxed);
-        return {c, s, t};
+        return {.count = c, .sum = s, .total_bytes = t};
     }
 
     const std::string &name() const
@@ -198,7 +198,7 @@ class LatencySummary
         uint64_t s = sum_.exchange(0, std::memory_order_relaxed);
         uint64_t m = max_.exchange(0, std::memory_order_relaxed);
         uint64_t t = total_count_.load(std::memory_order_relaxed);
-        return {c, s, m, t};
+        return {.count = c, .sum = s, .max = m, .total_count = t};
     }
 
     const std::string &name() const
@@ -235,7 +235,9 @@ class MetricsRegistry
     void flush_to(FILE *fp, double window_secs, const char *timestamp);
 
     // Start periodic flush thread. interval_secs in seconds.
-    void start(const std::string &log_path, double interval_secs);
+    // max_file_mb and max_files control size-based rotation with gzip
+    // compression of rotated files.
+    void start(const std::string &log_path, double interval_secs, size_t max_file_mb = 30, size_t max_files = 5);
     void stop();
 
   private:
@@ -249,7 +251,13 @@ class MetricsRegistry
     std::thread       flush_thread_;
     std::atomic<bool> running_{false};
     std::string       log_path_;
-    double            interval_secs_ = 0.0;
+    double            interval_secs_  = 0.0;
+    size_t            max_file_bytes_ = 30ULL * 1024ULL * 1024ULL;
+    size_t            max_files_      = 5;
+
+    void        flush_to_file();
+    void        check_rotate();
+    std::string rotated_path(size_t index) const;
 };
 
 } // namespace crowtree

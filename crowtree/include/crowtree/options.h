@@ -149,15 +149,16 @@ struct Options
     // page (falling back to stored-raw when LZ4 is unavailable or unhelpful).
     compress_algo compression = compress_algo::kNone;
 
-    // ── Logging (plan-tree #10) ──
-    // When log_dir is non-empty, Crowtree::open() initializes an async, size-
-    // rotating file logger at <log_dir>/crowtree.log (no-op if the library was
-    // built without spdlog). log_level is an spdlog level name
-    // (trace/debug/info/warn/error/off). Rotation defaults: 100 MiB × 5 files.
-    std::string log_dir;                  // empty = logging disabled
-    std::string log_level       = "info"; // spdlog level name
-    size_t      log_max_file_mb = 100;    // per-file rotation size
-    size_t      log_max_files   = 5;      // rotated files kept
+    // ── Logging ──
+    // These fields are no longer used by Crowtree::open() — logging is now
+    // process-global and must be initialized by the application via
+    // init_logging() (or ct_init_logging in the C API) before any open().
+    // They are retained for API compatibility.
+    std::string log_dir;                      // unused (see init_logging)
+    std::string log_level       = "info";     // unused (see init_logging)
+    std::string log_file_prefix = "crowtree"; // unused (see init_logging)
+    size_t      log_max_file_mb = 30;         // unused (see init_logging)
+    size_t      log_max_files   = 5;          // unused (see init_logging)
 };
 
 } // namespace crowtree

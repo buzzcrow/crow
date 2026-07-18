@@ -86,7 +86,7 @@ doc only when a task touches a topic in its row.
 
 | Doc | Read when working on |
 | --- | --- |
-| `design/design-test.md` | Test strategy, layer scope definitions, coverage rules per layer, tiered strategy for Group/Store/Deployment/UI E2E layers, console mgmt API layer, crowtree C++ test layers, feature-dependent test gaps. Read when designing tests or deciding where a test belongs. |
+| `design/design-test.md` | Test strategy, layer scope definitions, coverage rules per layer, tiered strategy for Group/Store/Deployment/UI E2E layers, console mgmt API layer, crowtree C++ test layers, benchmark layer (lifecycle, storage modes, write-only design, baseline results), feature-dependent test gaps. Read when designing tests or deciding where a test belongs. |
 | `design/design-observability.md` | Metrics module design: five metric types (Counter, Gauge, Bandwidth, LatencyHistogram, LatencySummary), registry lifecycle, naming convention, instrumentation points, system metrics collector, log file format, in-memory snapshot access, FFI boundary. Read when working on metrics or observability. |
 
 ## How AI Should Use This Index
