@@ -23,7 +23,7 @@ use crate::config::NodeEntry;
 use crate::error::{Error, Result};
 
 /// Inputs for a deploy. The console picks the ports; the user provides ids.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DeployRequest {
     pub server_id: String,
     pub mgmt_port: u16,
@@ -34,6 +34,18 @@ pub struct DeployRequest {
     /// current executable.
     pub binary: Option<PathBuf>,
     pub election_profile: Option<String>,
+    /// `--kv-engine` value (e.g. `"memory"`, `"crowtree"`). `None`
+    /// leaves the spawned server's own default in effect.
+    pub kv_engine: Option<String>,
+    /// `--kv-backend` value (e.g. `"text"`, `"block"`). Only
+    /// meaningful when `kv_engine` is `"crowtree"`.
+    pub kv_backend: Option<String>,
+    /// Sets `--no-fsync` on the spawned server when `true` (R10
+    /// benchmark path-overhead isolation mode).
+    pub no_fsync: bool,
+    /// `--metrics-interval` value in seconds. `None` leaves the
+    /// spawned server's own default in effect.
+    pub metrics_interval: Option<u64>,
 }
 
 /// Result of a successful deploy. Persist these fields onto the
@@ -89,6 +101,25 @@ pub async fn deploy_local_in_dir_with_extra_args(
     deploy_local_in_workspace(req, node, Some(workspace_dir), extra_args).await
 }
 
+/// Append `--kv-engine`/`--kv-backend`/`--no-fsync`/`--metrics-interval`
+/// flags to the spawned `crowkv-server` command per `req` (R10 benchmark
+/// framework). Split out of `deploy_local_in_workspace` to keep it under
+/// the line-count lint.
+fn apply_benchmark_flags(cmd: &mut Command, req: &DeployRequest) {
+    if let Some(kv_engine) = &req.kv_engine {
+        cmd.arg("--kv-engine").arg(kv_engine);
+    }
+    if let Some(kv_backend) = &req.kv_backend {
+        cmd.arg("--kv-backend").arg(kv_backend);
+    }
+    if req.no_fsync {
+        cmd.arg("--no-fsync");
+    }
+    if let Some(metrics_interval) = req.metrics_interval {
+        cmd.arg("--metrics-interval").arg(metrics_interval.to_string());
+    }
+}
+
 async fn deploy_local_in_workspace(
     req: &DeployRequest,
     node: &NodeEntry,
@@ -140,6 +171,7 @@ async fn deploy_local_in_workspace(
                 .unwrap_or_else(|| "default".into()),
         )
         .kill_on_drop(false);
+    apply_benchmark_flags(&mut cmd, req);
     for arg in extra_args {
         cmd.arg(arg);
     }

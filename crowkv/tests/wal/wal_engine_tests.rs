@@ -61,6 +61,30 @@ async fn single_record_durable_flush_without_interval_wait() {
     assert_eq!(device.fdatasync_count(), 1);
 }
 
+/// R10: `wal_skip_fsync` skips the durable `fdatasync` call on every write
+/// batch while still writing the record to the segment and resolving the
+/// append ack (benchmark path-overhead isolation mode).
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn skip_fsync_avoids_durable_flush_but_still_appends() {
+    let device = BlockDevice::new();
+    let backend = Arc::new(IoBackend::BlockDevice(device.clone()));
+    let config = WalConfig {
+        wal_skip_fsync: true,
+        ..test_config(vec![PathBuf::from("/wal")])
+    };
+    let wal = WalEngine::create(backend, config, 1).await.unwrap();
+
+    let record = WALRecord::from_promised(1, 1, 10, PxBallot::new(0, 1));
+    wal.append(&record).await.unwrap();
+
+    // The append ack still resolves and the batch is counted as flushed...
+    let stats = wal.batch_stats();
+    assert_eq!(stats.flush_count, 1);
+    assert_eq!(stats.records_flushed, 1);
+    // ...but no durable fdatasync was issued.
+    assert_eq!(device.fdatasync_count(), 0);
+}
+
 /// W3: a burst of concurrent appends coalesces into fewer durable flushes than
 /// records when a coalescing budget is configured.
 #[tokio::test(flavor = "current_thread")]

@@ -84,7 +84,8 @@ async fn main() {
             .with_metrics_registry(metrics_runner.as_ref().map_or_else(
                 || Arc::new(std::sync::Mutex::new(crowkv::metrics::MetricsRegistry::new())),
                 |r| r.registry().clone(),
-            )),
+            ))
+            .with_wal_skip_fsync(args.no_fsync),
     );
 
     // Populate the port pool from `--ports` even when `--stores` is not
@@ -299,6 +300,7 @@ async fn create_and_start_stores(
                 registry.kv_engine,
                 &registry.data_root,
                 registry.crowtree_backend,
+                registry.wal_skip_fsync,
             )
             .await
             {

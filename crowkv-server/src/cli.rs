@@ -74,6 +74,13 @@ pub struct Cli {
     /// Default: 5.
     #[arg(long, default_value_t = 5)]
     pub metrics_interval: u64,
+
+    /// Skip the durable `fdatasync` on every WAL write batch. Records are
+    /// still written to the segment file, but the flush is not durable.
+    /// Unsafe for production — only for benchmark path-overhead isolation
+    /// (R10 benchmark framework).
+    #[arg(long)]
+    pub no_fsync: bool,
 }
 
 /// Parse a comma-separated list of numbers and ranges into a `Vec<u64>`.
