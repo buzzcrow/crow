@@ -69,6 +69,7 @@ async fn spawn_upstream() -> Option<Upstream> {
         grpc_port: pick_free_port(),
         election_profile: Some("test".into()),
         binary: Some(bin),
+        ..Default::default()
     };
     let deployed = lifecycle::deploy_local_in_dir(&req, &node, &workspace)
         .await

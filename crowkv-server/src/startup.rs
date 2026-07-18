@@ -119,11 +119,13 @@ pub async fn create_group_with_wal(
     kv_engine: KvEngineKind,
     data_root: &Path,
     crowtree_backend: CrowtreeBackend,
+    skip_fsync: bool,
 ) -> io::Result<PxGroup> {
     let mut wal_config = WalConfig::with_root(store_wal_root(wal_root, store_id));
     if std::env::var("CROWKV_WAL_TEXT").as_deref() == Ok("1") {
         wal_config.wal_record_format = crowkv::wal::WalRecordFormat::TextLine;
     }
+    wal_config.wal_skip_fsync = skip_fsync;
     let replay = replay_group(&wal_backend, &wal_config.wal_disks, group_id).await?;
     let wal = WalEngine::create(wal_backend, wal_config, group_id).await?;
     wal.set_next_segment_id(replay.max_segment_id.saturating_add(1).max(1));

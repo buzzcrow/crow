@@ -111,6 +111,7 @@ async fn server_deploy(
         mgmt_port,
         grpc_port,
         binary,
+        ..Default::default()
     };
     match client.deploy_node_server(node_id, &body).await {
         Ok(r) => {

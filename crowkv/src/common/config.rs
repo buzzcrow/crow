@@ -83,6 +83,11 @@ pub struct WalConfig {
     /// Record encoding format. `Auto` selects binary frames (zero-copy) on all
     /// backends.
     pub wal_record_format: WalRecordFormat,
+    /// Skip the durable `fdatasync` on every write batch. Records are still
+    /// written to the segment file, but the flush is not durable. Unsafe for
+    /// production — only for benchmark path-overhead isolation (R10). Default
+    /// `false`.
+    pub wal_skip_fsync: bool,
 }
 
 impl WalConfig {
@@ -127,6 +132,7 @@ impl Default for WalConfig {
             wal_aligned: false,
             wal_io_unit_bytes: WalBlockAlignment::DEFAULT_IO_UNIT_BYTES,
             wal_record_format: WalRecordFormat::Auto,
+            wal_skip_fsync: false,
         }
     }
 }

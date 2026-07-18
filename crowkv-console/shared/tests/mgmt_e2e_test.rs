@@ -42,6 +42,7 @@ async fn spawn_server() -> Option<(u32, ServerClient)> {
         grpc_port: pick_free_port(),
         election_profile: Some("test".into()),
         binary: Some(bin),
+        ..Default::default()
     };
     let deployed = lifecycle::deploy_local(&req, &node).await.expect("deploy_local");
     let client = ServerClient::new(deployed.mgmt_url.clone()).unwrap();

@@ -492,6 +492,20 @@ pub struct DeployNodeServerBody {
     binary: Option<String>,
     #[serde(default)]
     election_profile: Option<String>,
+    /// `--kv-engine` value (e.g. `"memory"`, `"crowtree"`). R10
+    /// benchmark framework: lets `BenchFixture` select the storage
+    /// mode per deployed node.
+    #[serde(default)]
+    kv_engine: Option<String>,
+    /// `--kv-backend` value (e.g. `"text"`, `"block"`).
+    #[serde(default)]
+    kv_backend: Option<String>,
+    /// Sets `--no-fsync` on the spawned server when `true`.
+    #[serde(default)]
+    no_fsync: bool,
+    /// `--metrics-interval` value in seconds.
+    #[serde(default)]
+    metrics_interval: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -574,6 +588,10 @@ pub async fn http_deploy_node_server(
             .clone()
             .or_else(|| std::env::var("CROWKV_SERVER_ELECTION_PROFILE").ok()),
         binary: body.binary.clone().map(std::path::PathBuf::from),
+        kv_engine: body.kv_engine.clone(),
+        kv_backend: body.kv_backend.clone(),
+        no_fsync: body.no_fsync,
+        metrics_interval: body.metrics_interval,
     };
 
     let deployed = if node.ssh_enabled() {
@@ -702,6 +720,7 @@ pub async fn http_restart_node_server(
             .clone()
             .or_else(|| std::env::var("CROWKV_SERVER_ELECTION_PROFILE").ok()),
         binary: None,
+        ..Default::default()
     };
     let deployed = if node.ssh_enabled() {
         let server_bin = std::env::var("CROWKV_SERVER_BIN").unwrap_or_else(|_| "crowkv-server".to_string());

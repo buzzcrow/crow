@@ -578,6 +578,7 @@ async fn add_group(
         state.kv_engine,
         &state.data_root,
         state.crowtree_backend,
+        state.wal_skip_fsync,
     )
     .await
     .map_err(|e| {
@@ -700,6 +701,7 @@ async fn join_group_via_snapshot(
         state.kv_engine,
         &state.data_root,
         state.crowtree_backend,
+        state.wal_skip_fsync,
     )
     .await
     .map_err(|e| {

@@ -66,6 +66,12 @@ default = { depends-on = ["build"] }
 # ── Run ──────────────────────────────────────────────────────────
 web = { cmd = "echo 'CrowKV console starting at: http://127.0.0.1:9920/' && cargo run --release -p crowkv-web", depends-on = ["build"] }
 
+# ── Benchmark ────────────────────────────────────────────────────
+bench = { cmd = "cargo run --release -p crowkv-cli -- bench benchmark --mode memory --duration 60s", depends-on = ["build"] }
+bench-nofsync = { cmd = "cargo run --release -p crowkv-cli -- bench benchmark --mode file-nofsync --duration 60s", depends-on = ["build"] }
+bench-quick = { cmd = "cargo run --release -p crowkv-cli -- bench benchmark --mode memory --duration 10s", depends-on = ["build"] }
+bench-compare = { cmd = "cargo run --release -p crowkv-cli -- bench compare", depends-on = ["build"] }
+
 # ── Test ─────────────────────────────────────────────────────────
 test-ct = { cmd = "ctest --test-dir crowtree/build --output-on-failure", depends-on = ["build"] }
 test-ffi = { cmd = "cargo test -p crowtree-ffi --all-targets", depends-on = ["build"] }
