@@ -24,7 +24,7 @@ use commands::{
     run_kv_verb, run_node_verb, run_rack_verb, run_replica_verb, run_server_verb, run_store_verb,
 };
 use commands::{
-    BenchVerb, ClusterVerb, GroupVerb, KvVerb, NodeVerb, RackVerb, ReplicaVerb, ServerVerb, StoreVerb,
+    BenchArgs, ClusterVerb, GroupVerb, KvVerb, NodeVerb, RackVerb, ReplicaVerb, ServerVerb, StoreVerb,
 };
 
 #[derive(Parser, Debug)]
@@ -98,8 +98,8 @@ enum Group {
     },
     /// Load testing (CLI-only).
     Bench {
-        #[command(subcommand)]
-        verb: BenchVerb,
+        #[command(flatten)]
+        bench: BenchArgs,
     },
 }
 
@@ -145,6 +145,6 @@ async fn dispatch(mut cli: Cli) -> ExitCode {
         Group::Paxos { verb } => run_group_verb(&cli, verb).await,
         Group::Replica { verb } => run_replica_verb(&cli, verb).await,
         Group::Kv { verb } => run_kv_verb(&cli, verb).await,
-        Group::Bench { verb } => run_bench_verb(&cli, verb).await,
+        Group::Bench { bench } => run_bench_verb(&cli, bench).await,
     }
 }

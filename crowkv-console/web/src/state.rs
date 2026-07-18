@@ -14,9 +14,9 @@ use crowkv_console_shared::{
 
 /// Shared, mutable console state.
 ///
-/// `config` carries the full `ConsoleConfig` (racks, nodes, servers, bench
-/// overrides) behind a `RwLock`; mutations are persisted via
-/// `ConsoleConfig::save` to `config_path` when present.
+/// `config` carries the full `ConsoleConfig` (racks, nodes, servers)
+/// behind a `RwLock`; mutations are persisted via `ConsoleConfig::save`
+/// to `config_path` when present.
 ///
 /// `openapi_cache` is a per-node TTL cache for the `OpenAPI` JSON proxy.
 #[derive(Clone)]

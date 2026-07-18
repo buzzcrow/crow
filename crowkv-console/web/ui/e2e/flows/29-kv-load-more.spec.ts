@@ -44,7 +44,9 @@ test.describe('E2E-29 KV load more', () => {
       await openKvPanel(page, '290', '2900');
 
       // Scan
+      const scanResponse = page.waitForResponse((r: any) => r.url().includes('/kv/scan'));
       await page.getByRole('button', { name: /scan/i }).click();
+      await scanResponse;
       await expect(page.getByTestId('kv-scan-table')).toBeVisible({ timeout: 3_000 });
 
       // Verify truncated indicator

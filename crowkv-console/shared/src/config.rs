@@ -101,46 +101,21 @@ pub struct ConsoleConfig {
     pub stores: Vec<StoreEntry>,
     #[serde(default)]
     pub groups: Vec<GroupEntry>,
-    /// Optional `[bench]` section. The bench engine's built-in scenarios
-    /// stay authoritative; entries here overlay them field-by-field.
+    /// Optional `[bench]` section. Reserved for future use.
     #[serde(default, skip_serializing_if = "BenchConfig::is_empty")]
     pub bench: BenchConfig,
 }
 
-/// `[bench]` section. Currently only carries user-defined / user-tweaked
-/// stress scenarios (`[bench.stress.<name>]`); future knobs (default
-/// reporting dir, max threads, etc.) belong here too.
+/// `[bench]` section. Reserved for future knobs (default reporting
+/// dir, max threads, etc.); currently empty.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BenchConfig {
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub stress: std::collections::BTreeMap<String, StressScenarioOverride>,
-}
+pub struct BenchConfig {}
 
 impl BenchConfig {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.stress.is_empty()
+        true
     }
-}
-
-/// User-supplied overlay for a stress scenario. Every field is optional;
-/// missing fields fall through to the built-in defaults (or, for
-/// brand-new names, to `BenchConfig::defaults`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StressScenarioOverride {
-    /// `"read" | "write" | "list" | "mix"`. Case-insensitive.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workload: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub threads: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connections: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub duration_secs: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub key_space: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub value_size: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

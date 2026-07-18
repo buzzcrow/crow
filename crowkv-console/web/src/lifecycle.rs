@@ -492,9 +492,8 @@ pub struct DeployNodeServerBody {
     binary: Option<String>,
     #[serde(default)]
     election_profile: Option<String>,
-    /// `--kv-engine` value (e.g. `"memory"`, `"crowtree"`). R10
-    /// benchmark framework: lets `BenchFixture` select the storage
-    /// mode per deployed node.
+    /// `--kv-engine` value (e.g. `"memory"`, `"crowtree"`).
+    /// Lets `BenchFixture` select the storage mode per deployed node.
     #[serde(default)]
     kv_engine: Option<String>,
     /// `--kv-backend` value (e.g. `"text"`, `"block"`).

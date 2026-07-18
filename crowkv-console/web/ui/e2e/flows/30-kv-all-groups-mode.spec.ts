@@ -51,7 +51,9 @@ test.describe('E2E-30 KV all groups mode', () => {
       await expect(page.getByRole('button', { name: /^Get$/ })).toBeDisabled();
 
       // Scan should aggregate keys from both groups
+      const scanResponse = page.waitForResponse((r: any) => r.url().includes('/kv/scan'));
       await page.getByRole('button', { name: /scan/i }).click();
+      await scanResponse;
       await expect(page.getByTestId('kv-scan-table')).toBeVisible({ timeout: 3_000 });
       await expect(page.getByTestId('kv-scan-table').getByText('all-groups-key-0')).toBeVisible({ timeout: 10_000 });
       await expect(page.getByTestId('kv-scan-table').getByText('all-groups-key-1')).toBeVisible({ timeout: 10_000 });

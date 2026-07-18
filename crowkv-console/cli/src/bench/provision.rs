@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! `BenchFixture` — fixture-based cluster provisioning for the `bench
-//! benchmark` verb (R10 benchmark framework).
+//! benchmark` verb.
 //!
 //! Mirrors the UI test fixture's `setupCluster`/`teardownCluster`
 //! (`crowkv-console/web/ui/e2e/fixtures/consoleSetup.ts`), but through
@@ -32,7 +32,7 @@ const NODE_COUNT: usize = 3;
 pub const STORE_ID: u64 = 1;
 pub const GROUP_ID: u64 = 1;
 
-/// Storage mode for the benchmarked cluster (R10 acceptance criteria).
+/// Storage mode for the benchmarked cluster.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BenchMode {
     /// `--kv-engine memory`: in-memory KV engine, no WAL fsync overhead
