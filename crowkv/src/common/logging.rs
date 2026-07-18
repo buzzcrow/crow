@@ -114,12 +114,13 @@ pub fn init_file_logging(
 
 /// Opens a metrics log file in the specified directory with size-based
 /// rotation and gzip compression on rotated files.
-/// File naming: `metrics-{YYYYMMDD-HHMMSS.mmm}-{pid}.log`.
+/// File naming: `{process_name}-metrics-{YYYYMMDD-HHMMSS.mmm}-{pid}.log`.
 ///
 /// # Errors
 /// Returns `Err` if the log directory cannot be created.
 pub fn open_metrics_log(
     log_dir: impl AsRef<Path>,
+    process_name: &str,
     max_file_mb: usize,
     max_files: usize,
 ) -> Result<RotatingLogWriter, String> {
@@ -135,7 +136,10 @@ pub fn open_metrics_log(
         .map_err(|e| format!("system clock is before unix epoch; next step: check host clock: {e}"))?
         .as_millis();
     let pid = std::process::id();
-    let file_name = format!("metrics-{}-{pid}.log", format_timestamp(started_at));
+    let file_name = format!(
+        "{process_name}-metrics-{}-{pid}.log",
+        format_timestamp(started_at)
+    );
     let file_path = log_dir.as_ref().join(file_name);
 
     Ok(make_rotating_writer(file_path, max_file_mb, max_files))

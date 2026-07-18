@@ -13,6 +13,7 @@
 #include "crowtree/async_page_store.h"
 #include "crowtree/block_page_store.h"
 #include "crowtree/crowtree.h"
+#include "crowtree/log.h"
 #include "crowtree/page_store.h"
 #include "crowtree/snapshot_io.h"
 #include "crowtree/text_page_store.h"
@@ -129,7 +130,7 @@ struct ct_tree
 // if the I/O completes after the caller has already abandoned the future.
 struct ct_future_impl
 {
-    enum class Kind { kGet, kFlush, kSnapshot, kScan };
+    enum class Kind : std::uint8_t { kGet, kFlush, kSnapshot, kScan };
     Kind kind = Kind::kGet;
     // Written once by the completion callback (release), read once by the
     // first ct_future_poll that observes it (acquire) -- that acquire/
@@ -211,6 +212,23 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
     }
     o.compression = opt->compression == 1 ? compress_algo::kLz4 : compress_algo::kNone;
 
+    // Logging config (no-op when built without spdlog).
+    if (opt->log_dir != nullptr && opt->log_dir[0] != '\0') {
+        o.log_dir = opt->log_dir;
+    }
+    if (opt->log_level != nullptr && opt->log_level[0] != '\0') {
+        o.log_level = opt->log_level;
+    }
+    if (opt->log_file_prefix != nullptr && opt->log_file_prefix[0] != '\0') {
+        o.log_file_prefix = opt->log_file_prefix;
+    }
+    if (opt->log_max_file_mb != 0) {
+        o.log_max_file_mb = opt->log_max_file_mb;
+    }
+    if (opt->log_max_files != 0) {
+        o.log_max_files = opt->log_max_files;
+    }
+
     // Map ct_sync_mode → SyncMode
     SyncMode sm = SyncMode::kFull;
     switch (opt->sync_mode) {
@@ -264,7 +282,7 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
     }
     else {
         // CT_BACKEND_BLOCK: array-of-blocks BlockPageStore
-        uint64_t                        block_size = opt->block_size == 0 ? (64 * 1024 * 1024) : opt->block_size;
+        uint64_t                        block_size = opt->block_size == 0 ? (64ULL * 1024 * 1024) : opt->block_size;
         uint32_t                        iu         = opt->iu_size == 0 ? 4096 : opt->iu_size;
         std::unique_ptr<BlockPageStore> bs;
         Status s = BlockPageStore::open_blocks(opt->path, opt->store_id, opt->group_id, block_size, iu, &bs);
@@ -299,6 +317,23 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
 void ct_close(ct_tree *t)
 {
     delete t;
+}
+
+void ct_init_logging(const char *log_dir, const char *level, size_t max_file_mb, size_t max_files,
+                     const char *file_prefix)
+{
+    crowtree::init_logging(log_dir != nullptr ? log_dir : "", level != nullptr ? level : "info", max_file_mb, max_files,
+                           file_prefix != nullptr ? file_prefix : "");
+}
+
+void ct_flush_logging()
+{
+    crowtree::flush_logging();
+}
+
+void ct_shutdown_logging()
+{
+    crowtree::shutdown_logging();
 }
 
 ct_status ct_snapshot(ct_tree *t, uint64_t *out_last_applied)
@@ -375,6 +410,13 @@ void ct_get_stats(const ct_tree *t, ct_stats *out)
     out->buffer_pool_dirty         = s.buffer_pool_dirty;
     out->buffer_pool_used          = s.buffer_pool_used;
     out->buffer_pool_num_frames    = s.buffer_pool_num_frames;
+    out->mt_upsert_total           = s.mt_upsert_total;
+    out->mt_get_total              = s.mt_get_total;
+    out->mt_get_hit_total          = s.mt_get_hit_total;
+    out->flush_drain_total         = s.flush_drain_total;
+    out->flush_entries_total       = s.flush_entries_total;
+    out->l1_get_total              = s.l1_get_total;
+    out->l1_get_hit_total          = s.l1_get_hit_total;
 }
 
 uint64_t ct_evict_clean_leaves(ct_tree *t, uint64_t max_resident_leaves)
@@ -537,7 +579,7 @@ ct_future *ct_flush_async(ct_tree *t)
     }
     auto impl  = std::make_shared<ct_future_impl>();
     impl->kind = ct_future_impl::Kind::kFlush;
-    t->tree->flush_async([impl](Status st) {
+    t->tree->flush_async([impl](const Status &st) {
         impl->status = to_status(st);
         impl->done.store(true, std::memory_order_release);
     });
@@ -551,7 +593,7 @@ ct_future *ct_snapshot_async(ct_tree *t)
     }
     auto impl  = std::make_shared<ct_future_impl>();
     impl->kind = ct_future_impl::Kind::kSnapshot;
-    t->tree->snapshot_async([impl](Status st, uint64_t last_applied) {
+    t->tree->snapshot_async([impl](const Status &st, uint64_t last_applied) {
         impl->status = to_status(st);
         impl->slot   = last_applied;
         impl->done.store(true, std::memory_order_release);
@@ -567,7 +609,7 @@ ct_future *ct_scan_async(ct_tree *t, const uint8_t *prefix, size_t plen, size_t 
     auto impl  = std::make_shared<ct_future_impl>();
     impl->kind = ct_future_impl::Kind::kScan;
     t->tree->scan_async(Slice(reinterpret_cast<const char *>(prefix), plen), limit,
-                        [impl](Status st, std::vector<scan_entry> entries, bool truncated) {
+                        [impl](const Status &st, const std::vector<scan_entry> &entries, bool truncated) {
                             impl->status = to_status(st);
                             if (st.ok()) {
                                 // Same packed record format as ct_scan (see

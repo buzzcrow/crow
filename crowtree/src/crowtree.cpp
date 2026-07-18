@@ -3,7 +3,6 @@
 
 #include "crowtree/crowtree.h"
 
-#include "crowtree/async_page_store.h"
 #include "crowtree/compressor.h"
 #include "crowtree/delta.h"
 #include "crowtree/descent.h"
@@ -156,6 +155,7 @@ Crowtree::Crowtree(Options opt) : opt_(std::move(opt))
 
 Crowtree::~Crowtree()
 {
+    CT_LOG_INFO("close: stopping flush thread");
     stop_flush_thread_.store(true);
     {
         std::lock_guard<std::mutex> lk(flush_thread_mu_);
@@ -170,6 +170,7 @@ Crowtree::~Crowtree()
     catch (...) { // NOLINT(bugprone-empty-catch)
         // Destructors must not throw.
     }
+    CT_LOG_INFO("close: done last_applied={} contiguous={}", last_applied_slot_.load(), contiguous_slot_.load());
 }
 
 void Crowtree::start_background_flush_thread()
@@ -407,7 +408,7 @@ void Crowtree::free_all_resident_pages(bool retire)
             uint64_t w = seg->slots[i].load(std::memory_order_relaxed);
             if (slot_word::is_resident(w)) {
                 resident.push_back(
-                    {.page_id = seg_idx * MappingTable::kSegmentSize + i, .head = slot_word::resident_ptr(w)});
+                    {.page_id = (seg_idx * MappingTable::kSegmentSize) + i, .head = slot_word::resident_ptr(w)});
             }
         }
     }
@@ -479,8 +480,8 @@ size_t Crowtree::evict_clean_leaves_locked(size_t max_resident_leaves)
     }
     // Oldest-touched first: evict genuinely cold pages ahead of recently
     // accessed ones, rather than whichever DFS happened to visit first.
-    std::sort(evictable_ranked.begin(), evictable_ranked.end(),
-              [](const auto &a, const auto &b) { return a.second < b.second; });
+    std::ranges::sort(evictable_ranked.begin(), evictable_ranked.end(),
+                      [](const auto &a, const auto &b) { return a.second < b.second; });
     size_t to_evict = evictable_ranked.size() - max_resident_leaves;
     size_t evicted  = 0;
     for (const auto &[page_id, tick] : evictable_ranked) {
@@ -571,8 +572,8 @@ size_t Crowtree::evict_clean_inner_locked(size_t max_resident_inner)
         return 0;
     }
     // Oldest-touched first, same rationale as the leaf pass.
-    std::sort(evictable_ranked.begin(), evictable_ranked.end(),
-              [](const auto &a, const auto &b) { return a.second < b.second; });
+    std::ranges::sort(evictable_ranked.begin(), evictable_ranked.end(),
+                      [](const auto &a, const auto &b) { return a.second < b.second; });
     size_t to_evict = evictable_ranked.size() - max_resident_inner;
     size_t evicted  = 0;
     for (const auto &[page_id, tick] : evictable_ranked) {
@@ -640,6 +641,10 @@ void Crowtree::apply_batch(uint64_t slot, const Batch &batch)
     while (!latest.empty()) {
         auto node = latest.extract(latest.begin());
         active->upsert(Slice(node.key()), slot, std::move(node.mapped()));
+        mt_upsert_total_.fetch_add(1, std::memory_order_relaxed);
+        if (metrics_.mt_upsert_c != nullptr) {
+            metrics_.mt_upsert_c->inc();
+        }
     }
 }
 
@@ -714,6 +719,10 @@ Status Crowtree::apply_encoded(uint64_t slot, std::vector<encoded_op> ops)
         while (!latest.empty()) {
             auto node = latest.extract(latest.begin());
             active->upsert(Slice(node.key()), slot, std::move(node.mapped()));
+            mt_upsert_total_.fetch_add(1, std::memory_order_relaxed);
+            if (metrics_.mt_upsert_c != nullptr) {
+                metrics_.mt_upsert_c->inc();
+            }
         }
     }
     note_applied_slot(slot);
@@ -912,6 +921,16 @@ bool Crowtree::drain_memtable_into_l1_locked(MemTable *mt, uint64_t cs)
         return false;
     }
 
+    flush_drain_total_.fetch_add(1, std::memory_order_relaxed);
+    flush_entries_total_.fetch_add(drained.size(), std::memory_order_relaxed);
+    if (metrics_.flush_drain_c != nullptr) {
+        metrics_.flush_drain_c->inc();
+    }
+    if (metrics_.flush_entries_c != nullptr) {
+        metrics_.flush_entries_c->inc_by(drained.size());
+    }
+    CT_LOG_INFO("drain: entries={} contiguous_slot={}", drained.size(), cs);
+
     size_t i = 0;
     while (i < drained.size()) {
         auto                    resolve = [this](uint64_t p) { return resident(p); };
@@ -1025,10 +1044,11 @@ Status Crowtree::flush()
     last_applied_slot_.store(cs);
     version_.fetch_add(1);
     maybe_evict_locked(); // keep cache bounded; only clean bases go
+    CT_LOG_INFO("flush: drained tables={} last_applied={}", to_drain.size(), cs);
     return Status::Ok();
 }
 
-void Crowtree::flush_async(std::function<void(Status)> on_done)
+void Crowtree::flush_async(std::function<void(Status)> on_done) // NOLINT(performance-unnecessary-value-param)
 {
     // flush() never touches Options::page_store (only snapshot() writes
     // durable bytes -- see this method's doc comment on crowtree.h), so
@@ -1139,13 +1159,11 @@ void Crowtree::split_leaf_locked(uint64_t leaf_page_id, std::vector<uint64_t> pa
     // routing upper-half keys to right_page_id once it references it). Only after the
     // whole path is repointed do we shrink `leaf_page_id` to the lower half.
     uint64_t  right_page_id = mapping_.allocate_page_id();
-    LeafBase *right         = LeafBase::build(std::move(hi), leaf->right_sibling(), pool_,
-                                              opt_.frame_bytes); // NOLINT(performance-move-const-arg)
+    LeafBase *right         = LeafBase::build(hi, leaf->right_sibling(), pool_, opt_.frame_bytes);
     mapping_.store(right_page_id, right);
     propagate_split_locked(std::move(path), leaf_page_id, std::move(sep), right_page_id);
 
-    LeafBase *left =
-        LeafBase::build(std::move(lo), right_page_id, pool_, opt_.frame_bytes); // NOLINT(performance-move-const-arg)
+    LeafBase *left = LeafBase::build(lo, right_page_id, pool_, opt_.frame_bytes);
     mapping_.store(leaf_page_id, left);
     retire_page(leaf);
 }
@@ -1178,8 +1196,7 @@ void Crowtree::propagate_split_locked(std::vector<uint64_t> path, uint64_t child
     children.insert(children.begin() + static_cast<std::ptrdiff_t>(idx + 1), right_page_id);
 
     if (seps.size() <= opt_.inner_max_keys) {
-        mapping_.store(parent_page_id, InnerBase::build(std::move(seps), std::move(children), pool_,
-                                                        opt_.frame_bytes)); // NOLINT(performance-move-const-arg)
+        mapping_.store(parent_page_id, InnerBase::build(seps, children, pool_, opt_.frame_bytes));
         retire_page(parent);
         return;
     }
@@ -1193,10 +1210,8 @@ void Crowtree::propagate_split_locked(std::vector<uint64_t> path, uint64_t child
     std::vector<uint64_t>    rchildren(children.begin() + static_cast<std::ptrdiff_t>(m + 1), children.end());
 
     uint64_t rinner_page_id = mapping_.allocate_page_id();
-    mapping_.store(parent_page_id, InnerBase::build(std::move(lseps), std::move(lchildren), pool_,
-                                                    opt_.frame_bytes)); // NOLINT(performance-move-const-arg)
-    mapping_.store(rinner_page_id, InnerBase::build(std::move(rseps), std::move(rchildren), pool_,
-                                                    opt_.frame_bytes)); // NOLINT(performance-move-const-arg)
+    mapping_.store(parent_page_id, InnerBase::build(lseps, lchildren, pool_, opt_.frame_bytes));
+    mapping_.store(rinner_page_id, InnerBase::build(rseps, rchildren, pool_, opt_.frame_bytes));
     retire_page(parent);
 
     propagate_split_locked(std::move(path), parent_page_id, std::move(median), rinner_page_id);
@@ -1265,8 +1280,7 @@ void Crowtree::try_merge_leaf_locked(uint64_t leaf_page_id, const std::vector<ui
     }
     else {
         size_t parent_seps = seps.size();
-        mapping_.store(parent_page_id, InnerBase::build(std::move(seps), std::move(children), pool_,
-                                                        opt_.frame_bytes)); // NOLINT(performance-move-const-arg)
+        mapping_.store(parent_page_id, InnerBase::build(seps, children, pool_, opt_.frame_bytes));
         retire_page(parent);
         parent_underfull = parent_page_id != root_page_id_.load() && parent_seps < inner_merge_keys();
     }
@@ -1343,8 +1357,7 @@ void Crowtree::try_merge_inner_locked(uint64_t inner_page_id, std::vector<uint64
     for (uint64_t c : inner->children()) {
         mchildren.push_back(c);
     }
-    mapping_.store(left_page_id, InnerBase::build(std::move(mseps), std::move(mchildren), pool_,
-                                                  opt_.frame_bytes)); // NOLINT(performance-move-const-arg)
+    mapping_.store(left_page_id, InnerBase::build(mseps, mchildren, pool_, opt_.frame_bytes));
     retire_page(left);
 
     // 2. Repoint the grandparent: drop separators[idx-1] and children[idx].
@@ -1362,8 +1375,7 @@ void Crowtree::try_merge_inner_locked(uint64_t inner_page_id, std::vector<uint64
     }
     else {
         size_t gp_seps = gseps.size();
-        mapping_.store(gp_page_id, InnerBase::build(std::move(gseps), std::move(gchildren), pool_,
-                                                    opt_.frame_bytes)); // NOLINT(performance-move-const-arg)
+        mapping_.store(gp_page_id, InnerBase::build(gseps, gchildren, pool_, opt_.frame_bytes));
         retire_page(gp);
         gp_underfull = gp_page_id != root_page_id_.load() && gp_seps < inner_merge_keys();
     }
@@ -1407,12 +1419,20 @@ GetView Crowtree::get_view(Slice key) const
         if (!mt->get(key, &cell)) {
             continue;
         }
+        mt_get_total_.fetch_add(1, std::memory_order_relaxed);
+        if (metrics_.mt_get_c != nullptr) {
+            metrics_.mt_get_c->inc();
+        }
         if (!found || cell_wins(CellView{Slice(cell)}, CellView{Slice(best_cell)})) {
             best_cell = std::move(cell);
             found     = true;
         }
     }
     if (found) {
+        mt_get_hit_total_.fetch_add(1, std::memory_order_relaxed);
+        if (metrics_.mt_get_hit_c != nullptr) {
+            metrics_.mt_get_hit_c->inc();
+        }
         CellView v{Slice(best_cell)};
         if (v.is_tombstone()) {
             return result; // not found
@@ -1427,6 +1447,10 @@ GetView Crowtree::get_view(Slice key) const
     // L1: descend to the leaf and resolve its chain. A non-overflow cell's
     // value lives directly in head's frame, which result.guard_ keeps
     // resident for result's lifetime -- borrow it, no copy.
+    l1_get_total_.fetch_add(1, std::memory_order_relaxed);
+    if (metrics_.l1_get_c != nullptr) {
+        metrics_.l1_get_c->inc();
+    }
     uint64_t page_id = find_leaf_page_id([this](uint64_t p) { return resident(p); }, root_page_id_.load(), key);
     if (page_id == kInvalidPageId) {
         return result;
@@ -1438,6 +1462,10 @@ GetView Crowtree::get_view(Slice key) const
     }
     if (v.is_tombstone()) {
         return result;
+    }
+    l1_get_hit_total_.fetch_add(1, std::memory_order_relaxed);
+    if (metrics_.l1_get_hit_c != nullptr) {
+        metrics_.l1_get_hit_c->inc();
     }
     result.found_ = true;
     result.slot_  = v.slot();
@@ -1790,7 +1818,7 @@ Status Crowtree::scan(Slice prefix, size_t limit, std::vector<scan_entry> *out, 
             if (c.idx >= c.entries.size()) {
                 continue;
             }
-            Slice k = Slice(c.entries[c.idx].key);
+            auto k = Slice(c.entries[c.idx].key);
             if (!has_any || k.compare(min_key) < 0) {
                 min_key = k;
                 has_any = true;
@@ -1938,7 +1966,7 @@ bool Crowtree::try_scan_no_load(Slice prefix, size_t limit, std::vector<scan_ent
             if (c.idx >= c.entries.size()) {
                 continue;
             }
-            Slice k = Slice(c.entries[c.idx].key);
+            auto k = Slice(c.entries[c.idx].key);
             if (!has_any || k.compare(min_key) < 0) {
                 min_key = k;
                 has_any = true;
@@ -2348,19 +2376,34 @@ EngineStats Crowtree::stats() const
     s.buffer_pool_dirty      = bp.dirty;
     s.buffer_pool_used       = bp.used;
     s.buffer_pool_num_frames = bp.num_frames;
+
+    s.mt_upsert_total     = mt_upsert_total_.load(std::memory_order_relaxed);
+    s.mt_get_total        = mt_get_total_.load(std::memory_order_relaxed);
+    s.mt_get_hit_total    = mt_get_hit_total_.load(std::memory_order_relaxed);
+    s.flush_drain_total   = flush_drain_total_.load(std::memory_order_relaxed);
+    s.flush_entries_total = flush_entries_total_.load(std::memory_order_relaxed);
+    s.l1_get_total        = l1_get_total_.load(std::memory_order_relaxed);
+    s.l1_get_hit_total    = l1_get_hit_total_.load(std::memory_order_relaxed);
     return s;
 }
 
 void Crowtree::set_metrics(MetricsRegistry *registry, const std::string &prefix)
 {
-    metrics_.buf_hits       = registry->register_counter(prefix + ".buf.hits.c");
-    metrics_.buf_misses     = registry->register_counter(prefix + ".buf.misses.c");
-    metrics_.buf_evictions  = registry->register_counter(prefix + ".buf.evictions.c");
-    metrics_.buf_writebacks = registry->register_counter(prefix + ".buf.writebacks.c");
-    metrics_.buf_resident   = registry->register_gauge(prefix + ".buf.resident.g");
-    metrics_.buf_dirty      = registry->register_gauge(prefix + ".buf.dirty.g");
-    metrics_.apply_l        = registry->register_summary(prefix + ".apply.l");
-    metrics_.snapshot_l     = registry->register_summary(prefix + ".snapshot.l");
+    metrics_.buf_hits        = registry->register_counter(prefix + ".buf.hits.c");
+    metrics_.buf_misses      = registry->register_counter(prefix + ".buf.misses.c");
+    metrics_.buf_evictions   = registry->register_counter(prefix + ".buf.evictions.c");
+    metrics_.buf_writebacks  = registry->register_counter(prefix + ".buf.writebacks.c");
+    metrics_.buf_resident    = registry->register_gauge(prefix + ".buf.resident.g");
+    metrics_.buf_dirty       = registry->register_gauge(prefix + ".buf.dirty.g");
+    metrics_.apply_l         = registry->register_summary(prefix + ".apply.l");
+    metrics_.snapshot_l      = registry->register_summary(prefix + ".snapshot.l");
+    metrics_.mt_upsert_c     = registry->register_counter(prefix + ".mt.upsert.c");
+    metrics_.mt_get_c        = registry->register_counter(prefix + ".mt.get.c");
+    metrics_.mt_get_hit_c    = registry->register_counter(prefix + ".mt.get.hit.c");
+    metrics_.flush_drain_c   = registry->register_counter(prefix + ".flush.drain.c");
+    metrics_.flush_entries_c = registry->register_counter(prefix + ".flush.entries.c");
+    metrics_.l1_get_c        = registry->register_counter(prefix + ".l1.get.c");
+    metrics_.l1_get_hit_c    = registry->register_counter(prefix + ".l1.get.hit.c");
     pool_->set_metrics(metrics_.buf_hits, metrics_.buf_misses, metrics_.buf_evictions, metrics_.buf_writebacks,
                        metrics_.buf_resident, metrics_.buf_dirty);
 }
@@ -2524,8 +2567,7 @@ LeafBase *Crowtree::build_leaf_spilling_locked(std::vector<leaf_entry> entries, 
             e.cell            = encode_overflow_cell_buf(v.slot(), head, value.size());
         }
     }
-    return LeafBase::build(std::move(entries), right_sibling, pool_,
-                           opt_.frame_bytes); // NOLINT(performance-move-const-arg)
+    return LeafBase::build(entries, right_sibling, pool_, opt_.frame_bytes);
 }
 
 void Crowtree::retire_overflow_chain_locked(uint64_t head_page_id)

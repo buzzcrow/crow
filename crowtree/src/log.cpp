@@ -12,9 +12,12 @@
 
 #    include <spdlog/async_logger.h>
 #    include <spdlog/details/thread_pool.h>
+#    include <spdlog/pattern_formatter.h>
 #    include <spdlog/sinks/stdout_color_sinks.h>
 #    include <spdlog/spdlog.h>
+#    include <unistd.h>
 
+#    include <array>
 #    include <atomic>
 #    include <exception>
 #    include <memory>
@@ -44,16 +47,26 @@ bool logging_enabled()
     return g_enabled.load(std::memory_order_relaxed);
 }
 
+void flush_logging()
+{
+    std::lock_guard<std::mutex> lk(g_log_mu);
+    if (g_logger) {
+        g_logger->flush();
+    }
+}
+
 void shutdown_logging()
 {
     std::lock_guard<std::mutex> lk(g_log_mu);
     if (!g_enabled.exchange(false)) {
         return; // never initialized (or already shut down)
     }
+    if (g_logger) {
+        g_logger->flush(); // queue a flush so buffered messages reach the sink
+    }
     spdlog::drop_all(); // release the registry's reference to our logger
     if (g_logger) {
-        g_logger->flush(); // queue a flush ahead of the terminate messages
-        g_logger.reset();  // drop our ref; in-flight worker msgs keep it alive
+        g_logger.reset(); // drop our ref; in-flight worker msgs keep it alive
     }
     // Destroying the thread pool joins its worker(s) after draining the queue; the
     // logger + sinks are then released single-threaded (last worker_ptr), so no
@@ -61,7 +74,8 @@ void shutdown_logging()
     g_tp.reset();
 }
 
-void init_logging(const std::string &log_dir, const std::string &level, size_t max_file_mb, size_t max_files)
+void init_logging(const std::string &log_dir, const std::string &level, size_t max_file_mb, size_t max_files,
+                  const std::string &file_prefix)
 {
     // Reset any prior logger so a fresh init (e.g. a second open() with a
     // different dir) rebinds cleanly.
@@ -72,7 +86,7 @@ void init_logging(const std::string &log_dir, const std::string &level, size_t m
             // No log dir configured: log to stderr so output is visible (tests, CLI).
             auto sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
             g_logger  = std::make_shared<spdlog::logger>("crowtree", sink);
-            g_logger->set_pattern("[%l] %v");
+            g_logger->set_pattern("[%l] [pid %P] %v");
             g_logger->set_level(spdlog::level::from_str(level));
             spdlog::set_default_logger(g_logger);
             g_enabled.store(true, std::memory_order_relaxed);
@@ -80,13 +94,28 @@ void init_logging(const std::string &log_dir, const std::string &level, size_t m
         }
         // Async logger over our own thread pool: fixed-size ring buffer, block on
         // overflow so no message is dropped under bursty load.
-        g_tp                   = std::make_shared<spdlog::details::thread_pool>(8192, 1);
-        const std::string path = log_dir + "/crowtree.log";
+        g_tp = std::make_shared<spdlog::details::thread_pool>(8192, 1);
+        // File name: <prefix>-{YYYYMMDD-HHMMSS.mmm}-{pid}.log (matches the
+        // Rust server's crowkv-server-<ts>-<pid>.log convention so logs from
+        // the same process can be correlated).
+        const auto now    = std::chrono::system_clock::now();
+        const auto t_time = std::chrono::system_clock::to_time_t(now);
+        std::tm    tm_buf{};
+        gmtime_r(&t_time, &tm_buf);
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
+        std::array<char, 32> ts{};
+        std::snprintf(ts.data(), ts.size(), "%04d%02d%02d-%02d%02d%02d.%03lld", tm_buf.tm_year + 1900,
+                      tm_buf.tm_mon + 1, tm_buf.tm_mday, tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec,
+                      static_cast<long long>(ms));
+        const std::string prefix = file_prefix.empty() ? "crowtree" : file_prefix;
+        const std::string path   = log_dir + "/" + prefix + "-" + ts.data() + "-" + std::to_string(::getpid()) + ".log";
         auto              sink = std::make_shared<compressing_file_sink_mt>(path, max_file_mb * 1024 * 1024, max_files);
         g_logger = std::make_shared<spdlog::async_logger>("crowtree", sink, g_tp, spdlog::async_overflow_policy::block);
-        // YYYYMMDD-HHMMSS.mmm [tid] [level] [crowtree] message (aligns with the
-        // Rust `tracing` format).
-        g_logger->set_pattern("%Y%m%d-%H%M%S.%e [%t] [%l] [%n] %v");
+        // YYYYMMDD-HHMMSS.mmm [pid P] [tid] [level] [crowtree] message
+        // (aligns with the Rust `tracing` format; all timestamps UTC).
+        auto formatter = std::make_unique<spdlog::pattern_formatter>("%Y%m%d-%H%M%S.%e [pid %P] [%t] [%l] [%n] %v",
+                                                                     spdlog::pattern_time_type::utc);
+        g_logger->set_formatter(std::move(formatter));
         g_logger->set_level(spdlog::level::from_str(level));
         g_logger->flush_on(spdlog::level::warn);
         spdlog::set_default_logger(g_logger);
@@ -112,12 +141,16 @@ bool logging_enabled()
     return false;
 }
 
+void flush_logging()
+{
+}
+
 void shutdown_logging()
 {
 }
 
 void init_logging(const std::string & /*log_dir*/, const std::string & /*level*/, size_t /*max_file_mb*/,
-                  size_t /*max_files*/)
+                  size_t /*max_files*/, const std::string & /*file_prefix*/)
 {
 }
 

@@ -97,6 +97,13 @@ pub struct CrowtreeStatsSnapshot {
     pub buffer_pool_dirty: u32,
     pub buffer_pool_used: u32,
     pub buffer_pool_num_frames: u32,
+    pub mt_upsert_total: u64,
+    pub mt_get_total: u64,
+    pub mt_get_hit_total: u64,
+    pub flush_drain_total: u64,
+    pub flush_entries_total: u64,
+    pub l1_get_total: u64,
+    pub l1_get_hit_total: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

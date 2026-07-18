@@ -181,6 +181,14 @@ struct EngineStats
     uint32_t buffer_pool_dirty      = 0;
     uint32_t buffer_pool_used       = 0;
     uint32_t buffer_pool_num_frames = 0;
+    // MemTable (L0) / flush / L1 cumulative counters (monotonic since open).
+    uint64_t mt_upsert_total     = 0; // apply() writes into L0
+    uint64_t mt_get_total        = 0; // get() lookups in L0
+    uint64_t mt_get_hit_total    = 0; // L0 lookups that found a cell
+    uint64_t flush_drain_total   = 0; // drain_memtable_into_l1 calls
+    uint64_t flush_entries_total = 0; // entries drained from L0 to L1
+    uint64_t l1_get_total        = 0; // get() lookups that descended to L1
+    uint64_t l1_get_hit_total    = 0; // L1 lookups that found a cell
 };
 
 // One durable blob to write at a fixed offset, computed ahead of time by
@@ -1025,6 +1033,16 @@ class Crowtree
     std::atomic<uint64_t>     snapshot_segments_written_{0}; // segment images written by last snapshot
     mutable std::atomic<bool> io_failed_{false};             // latched demand-load media fault
 
+    // Cumulative operation counters (monotonic since open, exposed via stats()).
+    // mutable: get_view() is const but increments these counters.
+    mutable std::atomic<uint64_t> mt_upsert_total_{0};     // apply() writes into L0
+    mutable std::atomic<uint64_t> mt_get_total_{0};        // get() lookups in L0
+    mutable std::atomic<uint64_t> mt_get_hit_total_{0};    // L0 lookups that found a cell
+    mutable std::atomic<uint64_t> flush_drain_total_{0};   // drain_memtable_into_l1 calls
+    mutable std::atomic<uint64_t> flush_entries_total_{0}; // entries drained from L0 to L1
+    mutable std::atomic<uint64_t> l1_get_total_{0};        // get() lookups that descended to L1
+    mutable std::atomic<uint64_t> l1_get_hit_total_{0};    // L1 lookups that found a cell
+
     // Logical clock for CLOCK-informed eviction ranking (plan-tree #17).
     // `resident()`'s hot path bumps this and stamps the touched page's own
     // `PageBase::last_touch_tick` on every access (a single relaxed atomic
@@ -1080,6 +1098,16 @@ class Crowtree
         Gauge          *buf_dirty      = nullptr;
         LatencySummary *apply_l        = nullptr;
         LatencySummary *snapshot_l     = nullptr;
+        // MemTable (L0) operation counters
+        Counter *mt_upsert_c  = nullptr; // apply() writes into L0
+        Counter *mt_get_c     = nullptr; // get() lookups in L0
+        Counter *mt_get_hit_c = nullptr; // L0 lookups that found a cell
+        // Flush (L0 → L1) counters
+        Counter *flush_drain_c   = nullptr; // drain_memtable_into_l1 calls
+        Counter *flush_entries_c = nullptr; // entries drained from L0 to L1
+        // L1 (B-tree) query counters
+        Counter *l1_get_c     = nullptr; // get() lookups that descended to L1
+        Counter *l1_get_hit_c = nullptr; // L1 lookups that found a cell
     };
 
     MetricsHandles metrics_;

@@ -9,13 +9,16 @@
 // `cc` build, where the Rust side already has its own `tracing` — every macro is
 // a zero-cost no-op and the init/shutdown entry points do nothing.
 //
-// Lifetime: logging is process-global (a single spdlog default logger). It is
-// (re)initialized by init_logging() (Crowtree::open() calls it when
-// Options::log_dir is set) and must be torn down explicitly by the application
-// via shutdown_logging() (flush + join). It is intentionally NOT stopped in
-// ~Crowtree, so multiple Crowtree instances in one process share one logger
-// rather than tearing each other's down; init_logging() is idempotent-safe and
-// simply resets any previous logger.
+// Lifetime: logging is process-global (a single spdlog default logger).
+// The application should call init_logging() once at process startup (before
+// any Crowtree::open()) and shutdown_logging() once at process exit (after all
+// Crowtree instances are destroyed). flush_logging() may be called at any time
+// to push buffered messages to disk without stopping the logger.
+//
+// It is intentionally NOT called from ~Crowtree or Crowtree::open(), so
+// multiple Crowtree instances in one process share one logger without
+// tearing each other's down; init_logging() is idempotent-safe and simply
+// resets any previous logger.
 #pragma once
 
 #include <cstddef>
@@ -25,12 +28,16 @@ namespace crowtree
 {
 
 // Initialize an async, size-rotating file logger writing to
-// `<log_dir>/crowtree.log`. Rotated files are gzip-compressed to
-// `<log_dir>/crowtree.log.<N>.log.gz`. `level` is one of trace/debug/info/warn/error/off
+// `<log_dir>/<file_prefix>-<YYYYMMDD-HHMMSS.mmm>-<pid>.log`. Rotated files are
+// gzip-compressed. `level` is one of trace/debug/info/warn/error/off
 // (spdlog names). No-op if `log_dir` is empty or the library was built without
 // spdlog. Any failure to open the file leaves logging disabled (never throws).
 void init_logging(const std::string &log_dir, const std::string &level = "info", size_t max_file_mb = 30,
-                  size_t max_files = 5);
+                  size_t max_files = 5, const std::string &file_prefix = "crowtree");
+
+// Flush buffered messages to the sink without stopping the logger.
+// Safe to call when uninitialized or already shut down (no-op).
+void flush_logging();
 
 // Flush and stop the logger (joins the async thread). Safe to call when
 // uninitialized and safe to call more than once.

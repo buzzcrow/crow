@@ -27,7 +27,7 @@ pub enum BenchVerb {
         #[arg(long, default_value_t = 5)]
         duration_secs: u64,
         /// Distinct keys per worker key space.
-        #[arg(long, default_value_t = 1_000)]
+        #[arg(long, default_value_t = 1_000_000)]
         key_space: u64,
         /// Per-op value size in bytes.
         #[arg(long, default_value_t = 64)]
@@ -82,7 +82,7 @@ pub enum BenchVerb {
         threads: u32,
         #[arg(long, default_value_t = 4)]
         connections: u32,
-        #[arg(long, default_value_t = 1_000)]
+        #[arg(long, default_value_t = 1_000_000)]
         key_space: u64,
         #[arg(long, default_value_t = 64)]
         value_size: usize,
@@ -392,6 +392,17 @@ async fn bench_benchmark(args: BenchBenchmarkArgs, json: bool) -> ExitCode {
     };
 
     report.server_metrics = fixture.collect_metrics();
+    report.server_metrics.engine_stats = fixture.collect_engine_stats().await;
+    (report.kv_engine, report.kv_backend) = match mode {
+        BenchMode::Memory => ("memory".into(), "n/a".into()),
+        BenchMode::FileNoFsync => ("crowtree".into(), "text".into()),
+    };
+
+    // Stop servers before collecting logs so the C++ spdlog async logger
+    // is flushed (via ct_shutdown_logging in graceful_shutdown) and all
+    // buffered log messages reach disk.
+    fixture.stop_servers().await;
+
     let log_warning_count = match path.parent() {
         Some(report_dir) => {
             let bundle_dir = report_dir.join("logs");

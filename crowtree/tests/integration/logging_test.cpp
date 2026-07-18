@@ -1,10 +1,10 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-// plan-tree #10: file-logging integration test. Enables the async rotating file
-// logger via Options, runs a few ops through open()/snapshot(), then flushes
-// (shutdown_logging) and asserts the log file exists and carries the expected
-// format + content. These tests only exercise the spdlog-backed CMake build.
+// Logging lifecycle integration test. The logging is now process-global:
+// init_logging() is called explicitly before open(), and shutdown_logging()
+// after the engine is destroyed. These tests only exercise the spdlog-backed
+// CMake build.
 #include "crowtree/crowtree.h"
 #include "crowtree/log.h"
 #include "crowtree/page_store.h"
@@ -64,13 +64,15 @@ TEST(Logging, WritesFormattedFileOnOpenAndSnapshot)
     MemPageStore store(1);
     Options      opt;
     opt.page_store = &store;
-    opt.log_dir    = dir.path.string();
-    opt.log_level  = "info";
+
+    // Logging is process-global: init before any open().
+    shutdown_logging(); // clean slate from prior tests
+    init_logging(dir.path.string(), "info", 30, 5, "crowtree");
+    EXPECT_TRUE(logging_enabled());
 
     {
         std::unique_ptr<Crowtree> t;
         ASSERT_TRUE(Crowtree::open(opt, &t).ok());
-        EXPECT_TRUE(logging_enabled());
         ASSERT_TRUE(t->apply(1, put_one("a", "1")).ok());
         ASSERT_TRUE(t->flush().ok());
         ASSERT_TRUE(t->snapshot(nullptr).ok());
@@ -79,8 +81,15 @@ TEST(Logging, WritesFormattedFileOnOpenAndSnapshot)
     shutdown_logging();
     EXPECT_FALSE(logging_enabled());
 
-    fs::path log = dir.path / "crowtree.log";
-    ASSERT_TRUE(fs::exists(log)) << "log file not created at " << log;
+    // The log file name includes a timestamp and PID: crowtree-*.log
+    fs::path log;
+    for (const auto &entry : fs::directory_iterator(dir.path)) {
+        if (entry.path().filename().string().starts_with("crowtree-") && entry.path().extension() == ".log") {
+            log = entry.path();
+            break;
+        }
+    }
+    ASSERT_FALSE(log.empty()) << "no crowtree-*.log file found in " << dir.path;
     std::string body = read_file(log);
     EXPECT_FALSE(body.empty());
     // Pattern: "YYYYMMDD-HHMMSS.mmm [tid] [level] [crowtree] message"
@@ -95,13 +104,15 @@ TEST(Logging, StderrWhenNoLogDir)
 {
     // Make sure a prior test's logger is torn down first.
     shutdown_logging();
+    // Empty log_dir => stderr logger (enabled, no file).
+    init_logging("", "info", 30, 5, "crowtree");
+    EXPECT_TRUE(logging_enabled());
     MemPageStore store(1);
     Options      opt;
     opt.page_store = &store;
-    // opt.log_dir left empty -> logging defaults to stderr (enabled, no file).
     std::unique_ptr<Crowtree> t;
     ASSERT_TRUE(Crowtree::open(opt, &t).ok());
-    EXPECT_TRUE(logging_enabled());
     ASSERT_TRUE(t->apply(1, put_one("k", "v")).ok());
     ASSERT_TRUE(t->flush().ok());
+    shutdown_logging();
 }

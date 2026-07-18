@@ -543,6 +543,17 @@ impl PxKvStore {
         self.groups.len()
     }
 
+    /// Iterate all groups, calling `f` with each `Arc<PxGroup>`.
+    /// Used by the engine stats collector to poll crowtree counters.
+    pub fn for_each_group<F>(&self, mut f: F)
+    where
+        F: FnMut(&Arc<PxGroup>),
+    {
+        for entry in &self.groups {
+            f(entry.value());
+        }
+    }
+
     /// Return `(group_id, local_replica_id, leader_id, remote_count)` for all groups.
     pub fn group_summaries(&self) -> Vec<(u64, u64, u64, usize)> {
         self.groups

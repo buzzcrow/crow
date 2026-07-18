@@ -76,8 +76,9 @@ fn scan_response_size(resp: &KvScanResponse) -> u64 {
         .sum::<usize>() as u64
 }
 
-/// Metric handles for KV service instrumentation.
-/// Created at service startup by registering with the `MetricsRegistry`.
+/// Metric handles for KV service instrumentation, registered per
+/// (store, group) so each group has its own `s.{sid}.g.{gid}.kv.*`
+/// counters in the metrics log.
 struct KvMetrics {
     put_lh: Arc<LatencyHistogram>,
     get_lh: Arc<LatencyHistogram>,
@@ -89,8 +90,8 @@ struct KvMetrics {
 }
 
 impl KvMetrics {
-    fn new(registry: &mut MetricsRegistry, store_id: u64) -> Self {
-        let prefix = format!("s.{store_id}");
+    fn new(registry: &mut MetricsRegistry, store_id: u64, group_id: u64) -> Self {
+        let prefix = format!("s.{store_id}.g.{group_id}");
         Self {
             put_lh: registry.register_histogram(format!("{prefix}.kv.put.lh")),
             get_lh: registry.register_histogram(format!("{prefix}.kv.get.lh")),
@@ -106,22 +107,31 @@ impl KvMetrics {
 #[derive(Clone)]
 pub struct KvStoreService {
     store: Arc<PxKvStore>,
-    metrics: Option<Arc<KvMetrics>>,
+    /// Per-group metrics handles, lazily registered on first RPC for
+    /// each `group_id`.
+    metrics: Option<Arc<DashMap<u64, Arc<KvMetrics>>>>,
 }
 
 impl KvStoreService {
     /// Create a new service. If the store has a metrics registry attached,
-    /// KV metrics are registered immediately.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the metrics registry mutex is poisoned.
+    /// a per-group metrics map is created (entries are lazily added on
+    /// first use by each RPC handler).
     pub fn new(store: Arc<PxKvStore>) -> Self {
-        let metrics = store.metrics_registry.as_ref().map(|reg| {
-            let mut r = reg.lock().expect("metrics registry poisoned");
-            Arc::new(KvMetrics::new(&mut r, store.store_id))
-        });
+        let metrics = store.metrics_registry.as_ref().map(|_| Arc::new(DashMap::new()));
         Self { store, metrics }
+    }
+
+    /// Look up or lazily create the `KvMetrics` for `group_id`.
+    fn metrics_for(&self, group_id: u64) -> Option<Arc<KvMetrics>> {
+        let map = self.metrics.as_ref()?;
+        if let Some(entry) = map.get(&group_id) {
+            return Some(Arc::clone(entry.value()));
+        }
+        let reg = self.store.metrics_registry.as_ref()?;
+        let mut r = reg.lock().expect("metrics registry poisoned");
+        let m = Arc::new(KvMetrics::new(&mut r, self.store.store_id, group_id));
+        map.entry(group_id).or_insert(Arc::clone(&m));
+        Some(m)
     }
 }
 
@@ -153,7 +163,7 @@ impl KvService for KvStoreService {
                 req.request_create_ms,
             )
             .await;
-        if let Some(ref m) = self.metrics {
+        if let Some(m) = self.metrics_for(req.group_id) {
             m.put_lh.observe(start.elapsed().as_nanos() as u64);
             m.bytes_in_bw.observe(req_size as u64);
             m.bytes_out_bw.observe(resp.value.len() as u64);
@@ -199,7 +209,7 @@ impl KvService for KvStoreService {
                             leader = %endpoint,
                             "kv get forwarded to leader"
                         );
-                        if let Some(ref m) = self.metrics {
+                        if let Some(m) = self.metrics_for(req.group_id) {
                             m.get_lh.observe(start.elapsed().as_nanos() as u64);
                             m.bytes_in_bw.observe(req_size as u64);
                             m.bytes_out_bw.observe(resp.value.len() as u64);
@@ -231,7 +241,7 @@ impl KvService for KvStoreService {
                                 req.request_create_ms,
                             )
                             .await;
-                        if let Some(ref m) = self.metrics {
+                        if let Some(m) = self.metrics_for(req.group_id) {
                             m.get_lh.observe(start.elapsed().as_nanos() as u64);
                             m.bytes_in_bw.observe(req_size as u64);
                             m.bytes_out_bw.observe(resp.value.len() as u64);
@@ -259,7 +269,7 @@ impl KvService for KvStoreService {
                 req.request_create_ms,
             )
             .await;
-        if let Some(ref m) = self.metrics {
+        if let Some(m) = self.metrics_for(req.group_id) {
             m.get_lh.observe(start.elapsed().as_nanos() as u64);
             m.bytes_in_bw.observe(req_size as u64);
             m.bytes_out_bw.observe(resp.value.len() as u64);
@@ -295,7 +305,7 @@ impl KvService for KvStoreService {
                 req.request_create_ms,
             )
             .await;
-        if let Some(ref m) = self.metrics {
+        if let Some(m) = self.metrics_for(req.group_id) {
             m.delete_c.inc();
             m.bytes_in_bw.observe(req_size as u64);
             m.bytes_out_bw.observe(resp.value.len() as u64);
@@ -347,7 +357,7 @@ impl KvService for KvStoreService {
                             leader = %endpoint,
                             "kv scan forwarded to leader"
                         );
-                        if let Some(ref m) = self.metrics {
+                        if let Some(m) = self.metrics_for(req.group_id) {
                             m.scan_l.observe(start.elapsed().as_nanos() as u64);
                             m.bytes_in_bw.observe(req_size as u64);
                             m.bytes_out_bw.observe(scan_response_size(&resp));
@@ -389,7 +399,7 @@ impl KvService for KvStoreService {
                 req.request_create_ms,
             )
             .await;
-        if let Some(ref m) = self.metrics {
+        if let Some(m) = self.metrics_for(req.group_id) {
             m.scan_l.observe(start.elapsed().as_nanos() as u64);
             m.bytes_in_bw.observe(req_size as u64);
             m.bytes_out_bw.observe(scan_response_size(&resp));

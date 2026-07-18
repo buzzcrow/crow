@@ -102,46 +102,50 @@ fn write_minimal_report(run_id: &str, total_ops: u64) {
 
 ## Configuration
 
-| Parameter | Value |
-|---|---|
-| connections | 2 |
-| threads | 2 |
-| key_space | 100 |
-| value_size | 64 B |
+```
+connections  : 2
+threads      : 2
+key_space    : 100
+value_size   : 64 B
+kv_engine    : memory
+kv_backend   : n/a
+```
 
 ## Summary
 
-| Metric | Value |
-|---|---|
-| total_ops | {total_ops} |
-| throughput | {qps:.1} ops/s |
-| total_errors | 0 |
-| error_rate | 0.0000 |
+```
+total_ops    : {total_ops}
+throughput   : {qps:.1} ops/s
+total_errors : 0
+error_rate   : 0.0000
+```
 
 ## Per-Operation Latency
 
-| op | ops | errors | not_found | avg(us) | p50(us) | p90(us) | p99(us) | p999(us) | max(us) |
-|---|---|---|---|---|---|---|---|---|---|
-| write | {half} | 0 | 0 | 50 | 48 | 80 | 90 | 95 | 100 |
-| read | {half} | 0 | 0 | 20 | 19 | 30 | 35 | 38 | 40 |
+```
+op       ops    err     nf  avg_us   p50_us   p90_us   p99_us     p999   max_us
+----------------------------------------------------------------------------------
+write   {half}      0      0       50        48        80        90        95       100
+read    {half}      0      0       20        19        30        35        38        40
+```
 
 ## Server Metrics
 
-| Metric | Value |
-|---|---|
-| wal_append | {half} |
-| kv_put | {half} |
-| kv_get | {half} |
+```
+wal_append   : {half}
+kv_put       : {half}
+kv_get       : {half}
+```
 
 ### System
 
-| Metric | Value |
-|---|---|
-| cpu_user | 1000 us |
-| cpu_sys | 200 us |
-| rss | 51200 KB |
-| tcp_retransmits | 0 |
-| tcp_lost | 0 |
+```
+cpu_user       : 1000 us
+cpu_sys        : 200 us
+rss            : 51200 KB
+tcp_retransmits: 0
+tcp_lost       : 0
+```
 ",
     );
     let path = dir.join("report.md");
@@ -188,8 +192,9 @@ async fn bench_benchmark_memory_e2e() {
     let report_path = PathBuf::from(report_path_str);
     let content = std::fs::read_to_string(&report_path).expect("report file");
     assert!(content.contains("# Benchmark Report:"), "content={content}");
-    assert!(content.contains("| total_ops |"), "content={content}");
+    assert!(content.contains("total_ops    :"), "content={content}");
     assert!(content.contains("wal_append"), "content={content}");
+    assert!(content.contains("kv_engine"), "content={content}");
 
     // Workspace is inside the run dir; with --keep-workspace not set,
     // the workspace subdir should be removed but the run dir remains.
