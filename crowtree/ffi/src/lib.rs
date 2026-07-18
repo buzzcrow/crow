@@ -276,12 +276,14 @@ pub enum Compression {
 /// Ignored when `Options::path` is `None` (in-memory).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PageStoreBackend {
-    /// TextPageStore -- debug backend with human-readable `.ck` files.
+    /// File-based page store, no alignment.
     #[default]
-    Text,
-    /// BlockPageStore -- production array-of-blocks backend with
-    /// `O_DIRECT` for a real SSD/SCM deployment target.
+    File,
+    /// Block device: 4K aligned, `O_DIRECT` for a real SSD/SCM
+    /// deployment target.
     Block,
+    /// Mem block device: in-memory, no alignment.
+    MemBlock,
 }
 
 /// Durability barrier policy, mirrors `ct_sync_mode`.
@@ -467,8 +469,9 @@ impl Crowtree {
             compression: u8::from(opt.compression_lz4),
             max_inline_value: opt.max_inline_value,
             backend: match opt.backend {
-                PageStoreBackend::Text => 0,
+                PageStoreBackend::File => 0,
                 PageStoreBackend::Block => 1,
+                PageStoreBackend::MemBlock => 2,
             },
             block_size: opt.block_size,
             store_id: opt.store_id,

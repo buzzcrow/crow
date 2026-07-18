@@ -21,7 +21,6 @@
 //! - [`gc`] — GC worker: watermark-based segment unlink.
 //! - [`config`] — `WalConfig` tunables.
 
-#[cfg(feature = "test-util")]
 mod block_backend;
 mod file_backend;
 pub mod io_backend;
@@ -37,7 +36,6 @@ pub mod segment;
 pub mod wal_engine;
 
 pub use crate::common::config::WalConfig;
-#[cfg(feature = "test-util")]
 pub use block_backend::{BlockDevice, BlockDeviceController};
 pub use io_backend::{IoBackend, OpenOptions};
 pub use record::{RecordType, WALRecord, WalRecordFormat};

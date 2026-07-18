@@ -13,7 +13,6 @@ use std::{fmt, io};
 
 use tracing::info;
 
-#[cfg(feature = "test-util")]
 use super::block_backend;
 use super::file_backend;
 
@@ -24,8 +23,9 @@ use super::file_backend;
 pub enum IoBackend {
     /// `tokio::fs` + `spawn_blocking` for fdatasync. Works everywhere.
     File,
-    /// In-memory simulated disk. Deterministic, supports failure injection.
-    #[cfg(feature = "test-util")]
+    /// In-memory block device, unaligned (RAM / SCM / PMEM model).
+    MemBlock(block_backend::BlockDevice),
+    /// Aligned block device model (SSD/NVMe, 4K I/O unit).
     BlockDevice(block_backend::BlockDevice),
 }
 
@@ -33,7 +33,7 @@ impl fmt::Debug for IoBackend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::File => write!(f, "File"),
-            #[cfg(feature = "test-util")]
+            Self::MemBlock(_) => write!(f, "MemBlock"),
             Self::BlockDevice(_) => write!(f, "BlockDevice"),
         }
     }
@@ -113,6 +113,18 @@ impl IoBackend {
         Self::File
     }
 
+    /// In-memory block device (unaligned, RAM/SCM/PMEM model).
+    #[must_use]
+    pub fn mem_block() -> Self {
+        Self::MemBlock(block_backend::BlockDevice::new())
+    }
+
+    /// Aligned block device model (SSD/NVMe, 4K I/O unit).
+    #[must_use]
+    pub fn block_device() -> Self {
+        Self::BlockDevice(block_backend::BlockDevice::ssd())
+    }
+
     /// Open (or create) a file via the selected backend.
     ///
     /// # Errors
@@ -125,8 +137,7 @@ impl IoBackend {
                     inner: super::WalFileInner::File(f),
                 })
             }
-            #[cfg(feature = "test-util")]
-            Self::BlockDevice(disk) => {
+            Self::MemBlock(disk) | Self::BlockDevice(disk) => {
                 let f = disk.open_segment(path.as_ref(), &opts)?;
                 Ok(super::WalFile {
                     inner: super::WalFileInner::Block(f),
@@ -142,8 +153,7 @@ impl IoBackend {
     pub async fn rename(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
         match self {
             Self::File => tokio::fs::rename(from, to).await,
-            #[cfg(feature = "test-util")]
-            Self::BlockDevice(disk) => disk.rename_segment(from.as_ref(), to.as_ref()),
+            Self::MemBlock(disk) | Self::BlockDevice(disk) => disk.rename_segment(from.as_ref(), to.as_ref()),
         }
     }
 
@@ -154,8 +164,7 @@ impl IoBackend {
     pub async fn unlink(&self, path: impl AsRef<Path>) -> io::Result<()> {
         match self {
             Self::File => tokio::fs::remove_file(path).await,
-            #[cfg(feature = "test-util")]
-            Self::BlockDevice(disk) => disk.unlink_segment(path.as_ref()),
+            Self::MemBlock(disk) | Self::BlockDevice(disk) => disk.unlink_segment(path.as_ref()),
         }
     }
 
@@ -173,8 +182,7 @@ impl IoBackend {
                 }
                 Ok(entries)
             }
-            #[cfg(feature = "test-util")]
-            Self::BlockDevice(disk) => disk.list_layout(path.as_ref()),
+            Self::MemBlock(disk) | Self::BlockDevice(disk) => disk.list_layout(path.as_ref()),
         }
     }
 
@@ -185,8 +193,7 @@ impl IoBackend {
     pub async fn create_dir_all(&self, path: impl AsRef<Path>) -> io::Result<()> {
         match self {
             Self::File => tokio::fs::create_dir_all(path).await,
-            #[cfg(feature = "test-util")]
-            Self::BlockDevice(disk) => disk.create_layout(path.as_ref()),
+            Self::MemBlock(disk) | Self::BlockDevice(disk) => disk.create_layout(path.as_ref()),
         }
     }
 
@@ -194,8 +201,7 @@ impl IoBackend {
     pub async fn exists(&self, path: impl AsRef<Path>) -> bool {
         match self {
             Self::File => tokio::fs::try_exists(path).await.unwrap_or(false),
-            #[cfg(feature = "test-util")]
-            Self::BlockDevice(disk) => disk.contains_path(path.as_ref()),
+            Self::MemBlock(disk) | Self::BlockDevice(disk) => disk.contains_path(path.as_ref()),
         }
     }
 }

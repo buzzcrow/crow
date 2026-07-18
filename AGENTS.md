@@ -16,23 +16,15 @@ Rust workspace + C++ storage engine (via FFI).
 
 ## Hard Constraints
 
-- All build/test/format commands run under **pixi** — never call bare `cargo` or `clang-format`.
-- `unsafe_code = deny` (except `crowtree-ffi`). Clippy `pedantic = warn`.
-- Markdown docs are read as raw text — avoid tables except in `doc/doc_index.md`. Use bullet lists or definition lists instead.
-- `test-util` feature auto-enabled for tests via self dev-dependency — `cargo test` needs no flags.
-- Commit messages: single line, no doc references or task numbers. Code comments: same rule.
-- **Commit discipline — one commit per task, not per interaction:**
-  - A "task" is a coherent unit of work (e.g. "restructure docs", "add CLI rename", "implement R7"). Multiple interactions within the same task should accumulate into a single commit.
-  - Do not commit after every interaction. Only commit when the task is complete.
-  - Before pushing, squash all unpushed commits from the same task into one (soft reset to the remote tip, then re-commit).
-  - Before committing, verify no temp/generated files are staged; add them to `.gitignore` if needed.
+- All build/test/format commands run under **pixi** — never bare `cargo` or `clang-format`.
+- `unsafe_code = deny` (except `crowtree-ffi`); Clippy `pedantic = warn`.
+- Markdown is read as raw text — no tables except in `doc/doc_index.md`; use bullet or definition lists.
+- `test-util` auto-enabled for tests via self dev-dependency — no flags needed.
+- Commit messages and code comments: single line, no doc references or task numbers.
+- **One commit per task, not per interaction** — a "task" is a coherent unit of work (e.g. "restructure docs", "add CLI rename", "implement R7"). Before pushing, squash unpushed commits from the same task into one (soft reset to remote tip, re-commit). Before committing, verify no temp/generated files are staged; add to `.gitignore` if needed.
 - **Pre-commit quality gate — do not skip:**
-  - `pixi run cargo fmt --all -- --check` and `pixi run cargo clippy --all-targets -- -D warnings` must pass.
-  - `pixi exec clang-format --dry-run --Werror` on changed `.cpp`/`.h` files must pass.
-  - `pixi run clang-tidy` on changed `.cpp` files must pass (pre-commit hook runs this automatically).
-  - Run tests relevant to the changed code (Rust or C++ `pixi run test-ct`), not the entire suite.
-  - Only skip if the toolchain is broken and unfixable — state the reason explicitly.
-  - **Never use `git commit --no-verify`** — it bypasses the pre-commit hook and its clang-tidy check.
+  - Lint must pass: `cargo fmt --check`, `cargo clippy -- -D warnings`, `clang-format --dry-run --Werror` (changed `.cpp`/`.h`), `ct-lint` (clang-tidy, changed C++). Fix up to 3 times — always, regardless of cause.
+  - Tests: run only relevant tests (Rust or `test-ct`), not the entire suite. Fix up to 3 times; skip pre-existing failures with a stated reason.
 
 ## Dispatch — Read Before Acting
 

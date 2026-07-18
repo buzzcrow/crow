@@ -37,9 +37,11 @@ pub struct DeployRequest {
     /// `--kv-engine` value (e.g. `"memory"`, `"crowtree"`). `None`
     /// leaves the spawned server's own default in effect.
     pub kv_engine: Option<String>,
-    /// `--kv-backend` value (e.g. `"text"`, `"block"`). Only
+    /// `--kv-backend` value (e.g. `"file"`, `"block"`, `"mem-block"`). Only
     /// meaningful when `kv_engine` is `"crowtree"`.
     pub kv_backend: Option<String>,
+    /// `--wal-backend` value (e.g. `"file"`, `"mem-block"`, `"block-device"`).
+    pub wal_backend: Option<String>,
     /// Sets `--no-fsync` on the spawned server when `true`
     /// (benchmark path-overhead isolation mode).
     pub no_fsync: bool,
@@ -101,7 +103,7 @@ pub async fn deploy_local_in_dir_with_extra_args(
     deploy_local_in_workspace(req, node, Some(workspace_dir), extra_args).await
 }
 
-/// Append `--kv-engine`/`--kv-backend`/`--no-fsync`/`--metrics-interval`
+/// Append `--kv-engine`/`--kv-backend`/`--wal-backend`/`--no-fsync`/`--metrics-interval`
 /// flags to the spawned `crowkv-server` command per `req`. Split out of
 /// `deploy_local_in_workspace` to keep it under the line-count lint.
 fn apply_benchmark_flags(cmd: &mut Command, req: &DeployRequest) {
@@ -110,6 +112,9 @@ fn apply_benchmark_flags(cmd: &mut Command, req: &DeployRequest) {
     }
     if let Some(kv_backend) = &req.kv_backend {
         cmd.arg("--kv-backend").arg(kv_backend);
+    }
+    if let Some(wal_backend) = &req.wal_backend {
+        cmd.arg("--wal-backend").arg(wal_backend);
     }
     if req.no_fsync {
         cmd.arg("--no-fsync");

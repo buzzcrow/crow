@@ -188,28 +188,14 @@ impl MetricsRegistry {
     }
 
     /// Flush all metrics to `writer`, formatting per the design doc log
-    /// format. Resets window state on each metric. Sections with no
-    /// non-zero activity are omitted entirely (no orphan headers).
+    /// format. Resets window state on each metric.
     pub fn flush<W: Write>(&self, writer: &mut W, window_secs: f64, timestamp: &str) {
         let _ = writeln!(writer, "[metrics {timestamp} window={window_secs:.0}s]");
-        // Compute a global max name width so the first three columns
-        // (name, count, tps) are aligned across all sections.
-        let max_name = self
-            .counters
-            .iter()
-            .map(|e| e.name.len())
-            .chain(self.histograms.iter().map(|e| e.name.len()))
-            .chain(self.summaries.iter().map(|e| e.name.len()))
-            .chain(self.bandwidths.iter().map(|e| e.name.len()))
-            .chain(self.gauges.iter().map(|e| e.name.len()))
-            .max()
-            .unwrap_or(4)
-            .max(4);
-        flush_counters(writer, &self.counters, window_secs, max_name);
-        flush_histograms(writer, &self.histograms, window_secs, max_name);
-        flush_summaries(writer, &self.summaries, window_secs, max_name);
-        flush_bandwidths(writer, &self.bandwidths, window_secs, max_name);
-        flush_gauges(writer, &self.gauges, max_name);
+        flush_counters(writer, &self.counters, window_secs);
+        flush_histograms(writer, &self.histograms, window_secs);
+        flush_summaries(writer, &self.summaries, window_secs);
+        flush_bandwidths(writer, &self.bandwidths, window_secs);
+        flush_gauges(writer, &self.gauges);
         let _ = writeln!(writer);
     }
 
@@ -309,19 +295,17 @@ fn iso8601_now() -> String {
 /// `start()`, and call `stop()` during shutdown for a final flush.
 pub struct MetricsRunner {
     registry: Arc<Mutex<MetricsRegistry>>,
-    writer: Arc<Mutex<crate::common::logging::RotatingLogWriter>>,
+    writer: Arc<Mutex<std::fs::File>>,
     task: Option<tokio::task::JoinHandle<()>>,
     interval_secs: f64,
     system_collector: Arc<std::sync::Mutex<SystemCollector>>,
-    /// Optional pre-flush collector (e.g. engine stats poller).
-    collector: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 impl MetricsRunner {
-    /// Create a new runner with the given metrics log writer.
+    /// Create a new runner with the given metrics log file.
     /// The registry starts empty; use `registry()` to register metrics.
     #[must_use]
-    pub fn new(file: crate::common::logging::RotatingLogWriter, interval_secs: u64) -> Self {
+    pub fn new(file: std::fs::File, interval_secs: u64) -> Self {
         Self {
             registry: Arc::new(Mutex::new(MetricsRegistry::new())),
             writer: Arc::new(Mutex::new(file)),
@@ -329,7 +313,6 @@ impl MetricsRunner {
             #[allow(clippy::cast_precision_loss)]
             interval_secs: interval_secs as f64,
             system_collector: Arc::new(std::sync::Mutex::new(SystemCollector::new())),
-            collector: None,
         }
     }
 
@@ -339,13 +322,6 @@ impl MetricsRunner {
         &self.registry
     }
 
-    /// Set a pre-flush collector callback. Called before each flush
-    /// tick so the caller can poll external stats (e.g. C++ engine
-    /// counters) and update registered metrics via the registry.
-    pub fn set_collector(&mut self, f: impl Fn() + Send + Sync + 'static) {
-        self.collector = Some(Arc::new(f));
-    }
-
     /// Start the periodic flush task. The first tick fires immediately
     /// (aligned to the interval boundary), then every `interval_secs`.
     pub fn start(&mut self) {
@@ -353,7 +329,6 @@ impl MetricsRunner {
         let writer = Arc::clone(&self.writer);
         let interval = self.interval_secs;
         let sys_collector = Arc::clone(&self.system_collector);
-        let collector = self.collector.clone();
 
         self.task = Some(tokio::spawn(async move {
             let mut ticker = tokio::time::interval(std::time::Duration::from_secs_f64(interval));
@@ -361,9 +336,6 @@ impl MetricsRunner {
             loop {
                 ticker.tick().await;
                 let ts = iso8601_now();
-                if let Some(ref col) = collector {
-                    col();
-                }
                 if let Ok(reg) = registry.lock() {
                     if let Ok(mut w) = writer.lock() {
                         reg.flush(&mut *w, interval, &ts);
@@ -421,28 +393,31 @@ fn tps(count: u64, window_secs: f64) -> u64 {
     }
 }
 
-fn flush_counters<W: Write>(writer: &mut W, entries: &[CounterEntry], window_secs: f64, max_name: usize) {
-    let mut sorted: Vec<&CounterEntry> = entries.iter().collect();
-    sorted.sort_by(|a, b| a.name.cmp(&b.name));
-    let rows: Vec<(&str, CounterSnapshot)> = sorted
-        .iter()
-        .map(|e| (e.name.as_str(), e.handle.flush()))
-        .filter(|(_, s)| s.count > 0)
-        .collect();
-    if rows.is_empty() {
+fn flush_counters<W: Write>(writer: &mut W, entries: &[CounterEntry], window_secs: f64) {
+    if entries.is_empty() {
         return;
     }
+    let max_name = entries.iter().map(|e| e.name.len()).max().unwrap_or(0);
     let _ = writeln!(
         writer,
-        "{:<width$}  count  tps(/s)  total",
+        "{:<width$}  {:>5}  {:>7}  {:>5}",
         "name",
+        "count",
+        "tps(/s)",
+        "total",
         width = max_name
     );
-    for (name, snap) in &rows {
+    let mut sorted: Vec<&CounterEntry> = entries.iter().collect();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name));
+    for e in &sorted {
+        let snap = e.handle.flush();
+        if snap.count == 0 {
+            continue;
+        }
         let _ = writeln!(
             writer,
             "{:<width$}  {:>5}  {:>7}  {:>6}",
-            name,
+            e.name,
             snap.count,
             tps(snap.count, window_secs),
             snap.total,
@@ -451,28 +426,34 @@ fn flush_counters<W: Write>(writer: &mut W, entries: &[CounterEntry], window_sec
     }
 }
 
-fn flush_histograms<W: Write>(writer: &mut W, entries: &[HistogramEntry], window_secs: f64, max_name: usize) {
-    let mut sorted: Vec<&HistogramEntry> = entries.iter().collect();
-    sorted.sort_by(|a, b| a.name.cmp(&b.name));
-    let rows: Vec<(&str, HistogramSnapshot)> = sorted
-        .iter()
-        .map(|e| (e.name.as_str(), e.handle.flush()))
-        .filter(|(_, s)| s.count > 0)
-        .collect();
-    if rows.is_empty() {
+fn flush_histograms<W: Write>(writer: &mut W, entries: &[HistogramEntry], window_secs: f64) {
+    if entries.is_empty() {
         return;
     }
+    let max_name = entries.iter().map(|e| e.name.len()).max().unwrap_or(0);
     let _ = writeln!(
         writer,
-        "{:<width$}  count  tps(/s)  avg(us)  p50(us)  p99(us)  max(us)",
+        "{:<width$}  {:>5}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}",
         "name",
+        "count",
+        "tps(/s)",
+        "avg(us)",
+        "p50(us)",
+        "p99(us)",
+        "max(us)",
         width = max_name
     );
-    for (name, snap) in &rows {
+    let mut sorted: Vec<&HistogramEntry> = entries.iter().collect();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name));
+    for e in &sorted {
+        let snap = e.handle.flush();
+        if snap.count == 0 {
+            continue;
+        }
         let _ = writeln!(
             writer,
             "{:<width$}  {:>5}  {:>7}  {:>7}  {:>7}  {:>7}  {:>7}",
-            name,
+            e.name,
             snap.count,
             tps(snap.count, window_secs),
             snap.avg / 1000,
@@ -484,28 +465,32 @@ fn flush_histograms<W: Write>(writer: &mut W, entries: &[HistogramEntry], window
     }
 }
 
-fn flush_summaries<W: Write>(writer: &mut W, entries: &[SummaryEntry], window_secs: f64, max_name: usize) {
-    let mut sorted: Vec<&SummaryEntry> = entries.iter().collect();
-    sorted.sort_by(|a, b| a.name.cmp(&b.name));
-    let rows: Vec<(&str, SummarySnapshot)> = sorted
-        .iter()
-        .map(|e| (e.name.as_str(), e.handle.flush()))
-        .filter(|(_, s)| s.count > 0)
-        .collect();
-    if rows.is_empty() {
+fn flush_summaries<W: Write>(writer: &mut W, entries: &[SummaryEntry], window_secs: f64) {
+    if entries.is_empty() {
         return;
     }
+    let max_name = entries.iter().map(|e| e.name.len()).max().unwrap_or(0);
     let _ = writeln!(
         writer,
-        "{:<width$}  count  tps(/s)  avg(us)  max(us)",
+        "{:<width$}  {:>5}  {:>7}  {:>7}  {:>7}",
         "name",
+        "count",
+        "tps(/s)",
+        "avg(us)",
+        "max(us)",
         width = max_name
     );
-    for (name, snap) in &rows {
+    let mut sorted: Vec<&SummaryEntry> = entries.iter().collect();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name));
+    for e in &sorted {
+        let snap = e.handle.flush();
+        if snap.count == 0 {
+            continue;
+        }
         let _ = writeln!(
             writer,
             "{:<width$}  {:>5}  {:>7}  {:>7}  {:>7}",
-            name,
+            e.name,
             snap.count,
             tps(snap.count, window_secs),
             snap.avg / 1000,
@@ -515,30 +500,34 @@ fn flush_summaries<W: Write>(writer: &mut W, entries: &[SummaryEntry], window_se
     }
 }
 
-fn flush_bandwidths<W: Write>(writer: &mut W, entries: &[BandwidthEntry], window_secs: f64, max_name: usize) {
-    let mut sorted: Vec<&BandwidthEntry> = entries.iter().collect();
-    sorted.sort_by(|a, b| a.name.cmp(&b.name));
-    let rows: Vec<(&str, BandwidthSnapshot)> = sorted
-        .iter()
-        .map(|e| (e.name.as_str(), e.handle.flush(window_secs)))
-        .filter(|(_, s)| s.count > 0)
-        .collect();
-    if rows.is_empty() {
+fn flush_bandwidths<W: Write>(writer: &mut W, entries: &[BandwidthEntry], window_secs: f64) {
+    if entries.is_empty() {
         return;
     }
+    let max_name = entries.iter().map(|e| e.name.len()).max().unwrap_or(0);
     let _ = writeln!(
         writer,
-        "{:<width$}  count  tps(/s)  avg_size(KB)  rate(KB/s)",
+        "{:<width$}  {:>5}  {:>7}  {:>12}  {:>10}",
         "name",
+        "count",
+        "tps(/s)",
+        "avg_size(KB)",
+        "rate(KB/s)",
         width = max_name
     );
-    for (name, snap) in &rows {
+    let mut sorted: Vec<&BandwidthEntry> = entries.iter().collect();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name));
+    for e in &sorted {
+        let snap = e.handle.flush(window_secs);
+        if snap.count == 0 {
+            continue;
+        }
         #[allow(clippy::cast_precision_loss)]
         let avg_kb = snap.avg_size as f64 / 1024.0;
         let _ = writeln!(
             writer,
             "{:<width$}  {:>5}  {:>7}  {:>12.1}  {:>10}",
-            name,
+            e.name,
             snap.count,
             tps(snap.count, window_secs),
             avg_kb,
@@ -548,20 +537,17 @@ fn flush_bandwidths<W: Write>(writer: &mut W, entries: &[BandwidthEntry], window
     }
 }
 
-fn flush_gauges<W: Write>(writer: &mut W, entries: &[GaugeEntry], max_name: usize) {
-    let mut sorted: Vec<&GaugeEntry> = entries.iter().collect();
-    sorted.sort_by(|a, b| a.name.cmp(&b.name));
-    let rows: Vec<(&GaugeEntry, u64)> = sorted
-        .iter()
-        .map(|e| (*e, e.handle.snapshot()))
-        .filter(|(_, v)| *v != 0)
-        .collect();
-    if rows.is_empty() {
+fn flush_gauges<W: Write>(writer: &mut W, entries: &[GaugeEntry]) {
+    if entries.is_empty() {
         return;
     }
-    let _ = writeln!(writer, "{:<width$}  value", "name", width = max_name);
-    for (e, val) in &rows {
-        let _ = writeln!(writer, "{:<max_name$}  {val:>5}", e.name.as_str());
+    let max_name = entries.iter().map(|e| e.name.len()).max().unwrap_or(0);
+    let _ = writeln!(writer, "{:<width$}  {:>5}", "name", "value", width = max_name);
+    let mut sorted: Vec<&GaugeEntry> = entries.iter().collect();
+    sorted.sort_by(|a, b| a.name.cmp(&b.name));
+    for e in &sorted {
+        let val = e.handle.snapshot();
+        let _ = writeln!(writer, "{:<width$}  {:>5}", e.name, val, width = max_name);
     }
 }
 
@@ -623,7 +609,7 @@ mod registry_tests {
     }
 
     #[test]
-    fn flush_gauge_section_printed_when_non_zero() {
+    fn flush_gauge_section_always_printed() {
         let mut reg = MetricsRegistry::new();
         let g = reg.register_gauge("s.1.g.0.buf.resident.g");
         g.set(512);
@@ -717,8 +703,13 @@ mod registry_tests {
 
     #[tokio::test]
     async fn runner_lifecycle_produces_flush_blocks() {
-        let tmp = tempfile::tempdir().unwrap();
-        let file = crate::common::logging::open_metrics_log(tmp.path(), "test", 30, 5).unwrap();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
 
         let mut runner = MetricsRunner::new(file, 1);
         {
@@ -732,14 +723,7 @@ mod registry_tests {
         tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
         runner.stop().await;
 
-        // Find the metrics log file (open_metrics_log names it <prefix>-metrics-*.log)
-        let metrics_file = std::fs::read_dir(tmp.path())
-            .unwrap()
-            .flatten()
-            .find(|e| e.file_name().to_string_lossy().contains("-metrics-"))
-            .map(|e| e.path())
-            .expect("metrics log file not found");
-        let content = std::fs::read_to_string(&metrics_file).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
         // Should have at least 2 flush blocks (initial tick + 1s tick + final flush)
         let block_count = content.matches("[metrics").count();
         assert!(

@@ -24,7 +24,7 @@ use crowkv_console_shared::error::{Error, Result};
 use crowkv_console_shared::lifecycle::stop_pid_with_timeout;
 use crowkv_console_shared::test_ports::unique_test_port;
 
-use super::report::{aggregate_server_metrics, parse_metrics_log, EngineStats, ServerMetrics};
+use super::report::{aggregate_server_metrics, parse_metrics_log, ServerMetrics};
 
 /// Number of nodes (and racks, 1:1) provisioned by the fixture.
 const NODE_COUNT: usize = 3;
@@ -35,13 +35,15 @@ pub const GROUP_ID: u64 = 1;
 /// Storage mode for the benchmarked cluster.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BenchMode {
-    /// `--kv-engine memory`: in-memory KV engine, no WAL fsync overhead
-    /// isolation needed (no durable KV writes either).
+    /// Crowtree engine + mem-block page store (in-memory, no alignment),
+    /// WAL on mem-block backend.
     Memory,
-    /// `--kv-engine crowtree --kv-backend text --no-fsync`: durable
-    /// engine + WAL, but WAL `fdatasync` skipped to isolate path-level
-    /// overhead from disk IO.
-    FileNoFsync,
+    /// Crowtree engine + file page store (file-based, no alignment),
+    /// WAL on file backend.
+    File,
+    /// Crowtree engine + block page store (`O_DIRECT`, 4K aligned),
+    /// WAL on block-device backend.
+    Block,
 }
 
 impl BenchMode {
@@ -49,8 +51,9 @@ impl BenchMode {
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s {
-            "memory" => Some(Self::Memory),
-            "file-nofsync" => Some(Self::FileNoFsync),
+            "mem" => Some(Self::Memory),
+            "file" => Some(Self::File),
+            "block" | "block-device" => Some(Self::Block),
             _ => None,
         }
     }
@@ -58,8 +61,9 @@ impl BenchMode {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Self::Memory => "memory",
-            Self::FileNoFsync => "file-nofsync",
+            Self::Memory => "mem",
+            Self::File => "file",
+            Self::Block => "block-device",
         }
     }
 
@@ -68,13 +72,19 @@ impl BenchMode {
     fn apply_to(self, body: &mut DeployNodeServerBody) {
         match self {
             Self::Memory => {
-                body.kv_engine = Some("memory".into());
-                body.no_fsync = true;
-            }
-            Self::FileNoFsync => {
                 body.kv_engine = Some("crowtree".into());
-                body.kv_backend = Some("text".into());
-                body.no_fsync = true;
+                body.kv_backend = Some("mem-block".into());
+                body.wal_backend = Some("mem-block".into());
+            }
+            Self::File => {
+                body.kv_engine = Some("crowtree".into());
+                body.kv_backend = Some("file".into());
+                body.wal_backend = Some("file".into());
+            }
+            Self::Block => {
+                body.kv_engine = Some("crowtree".into());
+                body.kv_backend = Some("block".into());
+                body.wal_backend = Some("block-device".into());
             }
         }
     }
@@ -89,7 +99,6 @@ pub struct BenchFixture {
     console_task: tokio::task::JoinHandle<()>,
     node_ids: Vec<String>,
     node_pids: Vec<u32>,
-    mgmt_urls: Vec<String>,
     leader_endpoint: String,
     workspace_dir: PathBuf,
     stopped: bool,
@@ -117,7 +126,7 @@ impl BenchFixture {
         });
         let client = ConsoleClient::new(format!("http://{addr}"))?;
 
-        let (ids, pids, mgmt_urls) = match Self::provision_nodes(&client, mode).await {
+        let (ids, pids) = match Self::provision_nodes(&client, mode).await {
             Ok(v) => v,
             Err(e) => {
                 console_task.abort();
@@ -143,7 +152,6 @@ impl BenchFixture {
             console_task,
             node_ids: ids,
             node_pids: pids,
-            mgmt_urls,
             leader_endpoint,
             workspace_dir,
             stopped: false,
@@ -153,13 +161,9 @@ impl BenchFixture {
     /// Create 1 rack + 1 node per rack (`NODE_COUNT` total) and deploy a
     /// `crowkv-server` on each, in `mode`. Returns the node ids and their
     /// server pids (index-aligned).
-    async fn provision_nodes(
-        client: &ConsoleClient,
-        mode: BenchMode,
-    ) -> Result<(Vec<String>, Vec<u32>, Vec<String>)> {
+    async fn provision_nodes(client: &ConsoleClient, mode: BenchMode) -> Result<(Vec<String>, Vec<u32>)> {
         let mut ids = Vec::with_capacity(NODE_COUNT);
         let mut pids = Vec::with_capacity(NODE_COUNT);
-        let mut mgmt_urls = Vec::with_capacity(NODE_COUNT);
         for i in 0..NODE_COUNT {
             let rack_id = format!("br{i}");
             let node_id = format!("bn{i}");
@@ -189,7 +193,7 @@ impl BenchFixture {
             let mut body = DeployNodeServerBody {
                 mgmt_port: unique_test_port(),
                 grpc_port: unique_test_port(),
-                election_profile: Some("bench".into()),
+                election_profile: Some("test".into()),
                 metrics_interval: Some(1),
                 ..Default::default()
             };
@@ -201,9 +205,8 @@ impl BenchFixture {
 
             ids.push(node_id);
             pids.push(deployed.pid);
-            mgmt_urls.push(deployed.mgmt_url.clone());
         }
-        Ok((ids, pids, mgmt_urls))
+        Ok((ids, pids))
     }
 
     /// Create the single store spanning all nodes, then a 3-replica
@@ -258,50 +261,6 @@ impl BenchFixture {
         aggregate_server_metrics(&per_node)
     }
 
-    /// Query each node's `/topology` endpoint to collect crowtree engine
-    /// stats (buffer pool, snapshot, GC watermarks). Returns `None` if no
-    /// node reports crowtree stats (e.g. memory mode).
-    pub async fn collect_engine_stats(&self) -> Option<EngineStats> {
-        use crowkv_console_shared::clients::http::ServerClient;
-        let mut aggregated = EngineStats::default();
-        let mut found_any = false;
-        for mgmt_url in &self.mgmt_urls {
-            let Ok(client) = ServerClient::new(mgmt_url) else {
-                continue;
-            };
-            let Ok(stores) = client.topology().await else {
-                continue;
-            };
-            for store in &stores {
-                for group in &store.groups {
-                    if let Some(ct) = &group.local_replica.kv_store.crowtree_stats {
-                        found_any = true;
-                        aggregated.buffer_pool_hits += ct.buffer_pool_hits;
-                        aggregated.buffer_pool_misses += ct.buffer_pool_misses;
-                        aggregated.buffer_pool_evictions += ct.buffer_pool_evictions;
-                        aggregated.buffer_pool_writebacks += ct.buffer_pool_writebacks;
-                        aggregated.snapshot_pages_written += ct.snapshot_pages_written;
-                        aggregated.snapshot_segments_written += ct.snapshot_segments_written;
-                        aggregated.buffer_pool_resident =
-                            aggregated.buffer_pool_resident.max(ct.buffer_pool_resident);
-                        aggregated.buffer_pool_dirty = aggregated.buffer_pool_dirty.max(ct.buffer_pool_dirty);
-                        aggregated.buffer_pool_used = aggregated.buffer_pool_used.max(ct.buffer_pool_used);
-                        aggregated.buffer_pool_num_frames =
-                            aggregated.buffer_pool_num_frames.max(ct.buffer_pool_num_frames);
-                        aggregated.mt_upsert_total += ct.mt_upsert_total;
-                        aggregated.mt_get_total += ct.mt_get_total;
-                        aggregated.mt_get_hit_total += ct.mt_get_hit_total;
-                        aggregated.flush_drain_total += ct.flush_drain_total;
-                        aggregated.flush_entries_total += ct.flush_entries_total;
-                        aggregated.l1_get_total += ct.l1_get_total;
-                        aggregated.l1_get_hit_total += ct.l1_get_hit_total;
-                    }
-                }
-            }
-        }
-        found_any.then_some(aggregated)
-    }
-
     /// Copy every node's `log/` directory into `run_dir/node-<id>/` for
     /// the bundled report artifacts.
     ///
@@ -325,10 +284,10 @@ impl BenchFixture {
         Ok(())
     }
 
-    /// Stop every deployed server via the management API (SIGTERM +
-    /// wait). Does NOT abort the console task or remove the workspace.
-    /// Idempotent — safe to call more than once.
-    pub async fn stop_servers(&mut self) {
+    /// Stop every deployed server, shut down the embedded console-web
+    /// task, and (unless `keep_workspace`) remove the workspace
+    /// directory. Idempotent — safe to call more than once.
+    pub async fn cleanup(&mut self, keep_workspace: bool) {
         if self.stopped {
             return;
         }
@@ -336,13 +295,6 @@ impl BenchFixture {
         for node_id in &self.node_ids {
             let _ = self.client.stop_node_server(node_id).await;
         }
-    }
-
-    /// Shut down the embedded console-web task and (unless `keep_workspace`)
-    /// remove the workspace directory. Call [`stop_servers`] first to
-    /// ensure servers are stopped and logs are flushed. Idempotent.
-    pub async fn cleanup(&mut self, keep_workspace: bool) {
-        self.stop_servers().await;
         self.console_task.abort();
         if !keep_workspace {
             let _ = std::fs::remove_dir_all(&self.workspace_dir);
@@ -353,7 +305,7 @@ impl BenchFixture {
         self.workspace_dir.join(format!("N-{node_id}"))
     }
 
-    /// Locate and read this node's `log/crowkv-server-metrics-<timestamp>-<pid>.log`
+    /// Locate and read this node's `log/metrics-<timestamp>-<pid>.log`
     /// file (see `crowkv::common::logging::open_metrics_log`).
     fn read_node_metrics_log(&self, node_id: &str, pid: u32) -> Option<String> {
         let log_dir = self.node_workspace(node_id).join("log");
@@ -362,7 +314,7 @@ impl BenchFixture {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.contains("-metrics-") && name.ends_with(suffix.as_str()) {
+            if name.starts_with("metrics-") && name.ends_with(suffix.as_str()) {
                 return std::fs::read_to_string(entry.path()).ok();
             }
         }

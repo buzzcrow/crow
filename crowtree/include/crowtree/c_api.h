@@ -79,8 +79,9 @@ using ct_stats = struct
 
 // Backend selection for durable storage.
 enum ct_backend : uint8_t {
-    CT_BACKEND_TEXT  = 0, // TextPageStore (debug, human-readable text files)
-    CT_BACKEND_BLOCK = 1, // BlockPageStore (production, array-of-blocks)
+    CT_BACKEND_FILE      = 0, // FilePageStore (file-based, no alignment)
+    CT_BACKEND_BLOCK     = 1, // BlockPageStore (block device, 4K aligned, O_DIRECT)
+    CT_BACKEND_MEM_BLOCK = 2, // MemPageStore (in-memory block device, no alignment)
 };
 
 // Durability barrier policy.
@@ -101,7 +102,7 @@ using ct_options = struct
     uint8_t           compression;       // 0 = none, 1 = lz4
     uint64_t          max_inline_value;  // 0 => default (frame_bytes/4)
     enum ct_backend   backend;           // default CT_BACKEND_BLOCK; ignored for in-memory
-    uint64_t          block_size;        // 0 => default 64 MiB; ignored for text
+    uint64_t          block_size;        // 0 => default 64 MiB; ignored for file/mem-block
     uint32_t          store_id;          // default 0; block file naming
     uint32_t          group_id;          // default 0; maps to PxGroupId in CrowKV
     enum ct_sync_mode sync_mode;         // default CT_SYNC_FULL

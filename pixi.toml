@@ -67,9 +67,13 @@ default = { depends-on = ["build"] }
 web = { cmd = "echo 'CrowKV console starting at: http://127.0.0.1:9920/' && cargo run --release -p crowkv-web", depends-on = ["build"] }
 
 # ── Benchmark ────────────────────────────────────────────────────
-bench = { cmd = "cargo run --release -p crowkv-cli -- bench benchmark --mode memory --duration-secs 60", depends-on = ["build"] }
-bench-nofsync = { cmd = "cargo run --release -p crowkv-cli -- bench benchmark --mode file-nofsync --duration-secs 60", depends-on = ["build"] }
-bench-quick = { cmd = "cargo run --release -p crowkv-cli -- bench benchmark --mode memory --duration-secs 10", depends-on = ["build"] }
+bench = { cmd = "cargo run --release -p crowkv-cli -- bench run --mode mem --duration-secs 30", depends-on = ["build"] }
+bench-file = { cmd = "cargo run --release -p crowkv-cli -- bench run --mode file --duration-secs 30", depends-on = ["build"] }
+bench-block = { cmd = "cargo run --release -p crowkv-cli -- bench run --mode block-device --duration-secs 30", depends-on = ["build"] }
+bench-quick = { cmd = "cargo run --release -p crowkv-cli -- bench run --mode mem --duration-secs 10", depends-on = ["build"] }
+bench-burst = { cmd = "cargo run --release -p crowkv-cli -- bench run --mode mem --duration-secs 10 --threads 64 --connections 8 --key-space 10000 --value-size 256 --workload mix", depends-on = ["build"] }
+bench-soak = { cmd = "cargo run --release -p crowkv-cli -- bench run --mode mem --duration-secs 30 --threads 8 --connections 4 --key-space 100000 --value-size 1024 --workload write", depends-on = ["build"] }
+bench-hotread = { cmd = "cargo run --release -p crowkv-cli -- bench run --mode mem --duration-secs 15 --threads 32 --connections 4 --key-space 64 --value-size 64 --workload read", depends-on = ["build"] }
 bench-compare = { cmd = "cargo run --release -p crowkv-cli -- bench compare", depends-on = ["build"] }
 
 # ── Test ─────────────────────────────────────────────────────────
@@ -77,7 +81,6 @@ test-ct = { cmd = "ctest --test-dir crowtree/build --output-on-failure", depends
 test-ffi = { cmd = "cargo test -p crowtree-ffi --all-targets", depends-on = ["build"] }
 test-core = { cmd = "rm -rf test-logs && cargo test -p crowkv --all-targets", depends-on = ["build"] }
 test-server = { cmd = "cargo test -p crowkv-server --all-targets", depends-on = ["build"] }
-test-cli = { cmd = "cargo test -p crowkv-console-shared -p crowkv-cli --all-targets", depends-on = ["build"] }
 test-mgmt-api = { cmd = "cargo test -p crowkv-web --all-targets", depends-on = ["build"] }
 install-playwright = "cd crowkv-console/web/ui && npx playwright install chromium"
 test-ui = { cmd = "rm -rf test-logs && cargo build -p crowkv-server && export CROWKV_SERVER_BINARY=$(pwd)/target/debug/crowkv-server && cd crowkv-console/web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-web-deps"] }

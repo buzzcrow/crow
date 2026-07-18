@@ -63,9 +63,12 @@ pub struct DeployNodeServerBody {
     /// `--kv-engine` value (e.g. `"memory"`, `"crowtree"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_engine: Option<String>,
-    /// `--kv-backend` value (e.g. `"text"`, `"block"`).
+    /// `--kv-backend` value (e.g. `"file"`, `"block"`, `"mem-block"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_backend: Option<String>,
+    /// `--wal-backend` value (e.g. `"file"`, `"mem-block"`, `"block-device"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wal_backend: Option<String>,
     /// Sets `--no-fsync` on the spawned server when `true`.
     #[serde(default)]
     pub no_fsync: bool,

@@ -496,9 +496,12 @@ pub struct DeployNodeServerBody {
     /// Lets `BenchFixture` select the storage mode per deployed node.
     #[serde(default)]
     kv_engine: Option<String>,
-    /// `--kv-backend` value (e.g. `"text"`, `"block"`).
+    /// `--kv-backend` value (e.g. `"file"`, `"block"`, `"mem-block"`).
     #[serde(default)]
     kv_backend: Option<String>,
+    /// `--wal-backend` value (e.g. `"file"`, `"mem-block"`, `"block-device"`).
+    #[serde(default)]
+    wal_backend: Option<String>,
     /// Sets `--no-fsync` on the spawned server when `true`.
     #[serde(default)]
     no_fsync: bool,
@@ -589,6 +592,7 @@ pub async fn http_deploy_node_server(
         binary: body.binary.clone().map(std::path::PathBuf::from),
         kv_engine: body.kv_engine.clone(),
         kv_backend: body.kv_backend.clone(),
+        wal_backend: body.wal_backend.clone(),
         no_fsync: body.no_fsync,
         metrics_interval: body.metrics_interval,
     };
