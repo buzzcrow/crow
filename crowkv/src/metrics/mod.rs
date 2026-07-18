@@ -12,6 +12,7 @@ pub mod summary;
 pub mod system;
 
 use std::sync::Arc;
+use std::time::Instant;
 
 pub use bandwidth::{Bandwidth, BandwidthSnapshot};
 pub use counter::{Counter, CounterSnapshot, Gauge};
@@ -113,6 +114,8 @@ pub struct MetricsRegistry {
     bandwidths: Vec<BandwidthEntry>,
     histograms: Vec<HistogramEntry>,
     summaries: Vec<SummaryEntry>,
+    /// Max metric name length across all types, for column alignment.
+    max_name_len: usize,
 }
 
 impl MetricsRegistry {
@@ -124,6 +127,7 @@ impl MetricsRegistry {
             bandwidths: Vec::new(),
             histograms: Vec::new(),
             summaries: Vec::new(),
+            max_name_len: 0,
         }
     }
 
@@ -131,6 +135,7 @@ impl MetricsRegistry {
     pub fn register_counter(&mut self, name: impl Into<MetricName>) -> Arc<Counter> {
         let name = name.into();
         let name_str = name.to_string();
+        self.max_name_len = self.max_name_len.max(name_str.len());
         let c = Arc::new(Counter::new(name));
         self.counters.push(CounterEntry {
             handle: Arc::clone(&c),
@@ -143,6 +148,7 @@ impl MetricsRegistry {
     pub fn register_gauge(&mut self, name: impl Into<MetricName>) -> Arc<Gauge> {
         let name = name.into();
         let name_str = name.to_string();
+        self.max_name_len = self.max_name_len.max(name_str.len());
         let g = Arc::new(Gauge::new(name));
         self.gauges.push(GaugeEntry {
             handle: Arc::clone(&g),
@@ -155,6 +161,7 @@ impl MetricsRegistry {
     pub fn register_bandwidth(&mut self, name: impl Into<MetricName>) -> Arc<Bandwidth> {
         let name = name.into();
         let name_str = name.to_string();
+        self.max_name_len = self.max_name_len.max(name_str.len());
         let bw = Arc::new(Bandwidth::new(name));
         self.bandwidths.push(BandwidthEntry {
             handle: Arc::clone(&bw),
@@ -167,6 +174,7 @@ impl MetricsRegistry {
     pub fn register_histogram(&mut self, name: impl Into<MetricName>) -> Arc<LatencyHistogram> {
         let name = name.into();
         let name_str = name.to_string();
+        self.max_name_len = self.max_name_len.max(name_str.len());
         let h = Arc::new(LatencyHistogram::new(name));
         self.histograms.push(HistogramEntry {
             handle: Arc::clone(&h),
@@ -179,6 +187,7 @@ impl MetricsRegistry {
     pub fn register_summary(&mut self, name: impl Into<MetricName>) -> Arc<LatencySummary> {
         let name = name.into();
         let name_str = name.to_string();
+        self.max_name_len = self.max_name_len.max(name_str.len());
         let s = Arc::new(LatencySummary::new(name));
         self.summaries.push(SummaryEntry {
             handle: Arc::clone(&s),
@@ -191,11 +200,12 @@ impl MetricsRegistry {
     /// format. Resets window state on each metric.
     pub fn flush<W: Write>(&self, writer: &mut W, window_secs: f64, timestamp: &str) {
         let _ = writeln!(writer, "[metrics {timestamp} window={window_secs:.0}s]");
-        flush_counters(writer, &self.counters, window_secs);
-        flush_histograms(writer, &self.histograms, window_secs);
-        flush_summaries(writer, &self.summaries, window_secs);
-        flush_bandwidths(writer, &self.bandwidths, window_secs);
-        flush_gauges(writer, &self.gauges);
+        let width = self.max_name_len;
+        flush_counters(writer, &self.counters, window_secs, width);
+        flush_histograms(writer, &self.histograms, window_secs, width);
+        flush_summaries(writer, &self.summaries, window_secs, width);
+        flush_bandwidths(writer, &self.bandwidths, window_secs, width);
+        flush_gauges(writer, &self.gauges, width);
         let _ = writeln!(writer);
     }
 
@@ -301,6 +311,8 @@ pub struct MetricsRunner {
     system_collector: Arc<std::sync::Mutex<SystemCollector>>,
     /// Optional pre-flush collector (e.g. engine stats poller).
     collector: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Timestamp of the last flush, used to compute the real window.
+    last_flush: Arc<std::sync::Mutex<Option<Instant>>>,
 }
 
 impl MetricsRunner {
@@ -316,6 +328,7 @@ impl MetricsRunner {
             interval_secs: interval_secs as f64,
             system_collector: Arc::new(std::sync::Mutex::new(SystemCollector::new())),
             collector: None,
+            last_flush: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -333,26 +346,44 @@ impl MetricsRunner {
     }
 
     /// Start the periodic flush task. The first tick fires immediately
-    /// (aligned to the interval boundary), then every `interval_secs`.
+    /// and is skipped (no data yet); subsequent ticks flush with the
+    /// real elapsed time since the previous flush as the window.
     pub fn start(&mut self) {
         let registry = Arc::clone(&self.registry);
         let writer = Arc::clone(&self.writer);
         let interval = self.interval_secs;
         let sys_collector = Arc::clone(&self.system_collector);
         let collector = self.collector.clone();
+        let last_flush = Arc::clone(&self.last_flush);
 
         self.task = Some(tokio::spawn(async move {
             let mut ticker = tokio::time::interval(std::time::Duration::from_secs_f64(interval));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // First tick fires immediately — record it as the baseline
+            // but don't flush (no data collected yet).
+            ticker.tick().await;
+            *last_flush
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
             loop {
                 ticker.tick().await;
+                let now = Instant::now();
+                let window_secs = last_flush
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .map(|prev| now.duration_since(prev).as_secs_f64())
+                    .unwrap_or(interval);
+                *last_flush
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(now);
+
                 let ts = iso8601_now();
                 if let Some(ref col) = collector {
                     col();
                 }
                 if let Ok(reg) = registry.lock() {
                     if let Ok(mut w) = writer.lock() {
-                        reg.flush(&mut *w, interval, &ts);
+                        reg.flush(&mut *w, window_secs, &ts);
                         let _ = writeln!(w, "misc");
                         if let Ok(mut sc) = sys_collector.lock() {
                             let snap = sc.collect();
@@ -366,7 +397,8 @@ impl MetricsRunner {
         }));
     }
 
-    /// Stop the flush task and perform a final flush.
+    /// Stop the flush task and perform a final flush with the real
+    /// elapsed time since the last periodic flush.
     pub async fn stop(&mut self) {
         if let Some(task) = self.task.take() {
             task.abort();
@@ -375,10 +407,17 @@ impl MetricsRunner {
         if let Some(ref col) = self.collector {
             col();
         }
+        let now = Instant::now();
+        let window_secs = self
+            .last_flush
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .map(|prev| now.duration_since(prev).as_secs_f64())
+            .unwrap_or(self.interval_secs);
         let ts = iso8601_now();
         if let Ok(reg) = self.registry.lock() {
             if let Ok(mut w) = self.writer.lock() {
-                reg.flush(&mut *w, self.interval_secs, &ts);
+                reg.flush(&mut *w, window_secs, &ts);
                 let _ = writeln!(w, "misc");
                 if let Ok(mut sc) = self.system_collector.lock() {
                     let snap = sc.collect();
@@ -410,19 +449,18 @@ fn tps(count: u64, window_secs: f64) -> u64 {
     }
 }
 
-fn flush_counters<W: Write>(writer: &mut W, entries: &[CounterEntry], window_secs: f64) {
+fn flush_counters<W: Write>(writer: &mut W, entries: &[CounterEntry], window_secs: f64, width: usize) {
     if entries.is_empty() {
         return;
     }
-    let max_name = entries.iter().map(|e| e.name.len()).max().unwrap_or(0);
     let _ = writeln!(
         writer,
-        "{:<width$}  {:>7}  {:>8}  {:>8}",
+        "{:<width$}  {:>8}  {:>8}  {:>8}",
         "name",
         "count",
         "tps(/s)",
         "total",
-        width = max_name
+        width = width
     );
     let mut sorted: Vec<&CounterEntry> = entries.iter().collect();
     sorted.sort_by(|a, b| a.name.cmp(&b.name));
@@ -433,24 +471,23 @@ fn flush_counters<W: Write>(writer: &mut W, entries: &[CounterEntry], window_sec
         }
         let _ = writeln!(
             writer,
-            "{:<width$}  {:>7}  {:>8}  {:>8}",
+            "{:<width$}  {:>8}  {:>8}  {:>8}",
             e.name,
             snap.count,
             tps(snap.count, window_secs),
             snap.total,
-            width = max_name
+            width = width
         );
     }
 }
 
-fn flush_histograms<W: Write>(writer: &mut W, entries: &[HistogramEntry], window_secs: f64) {
+fn flush_histograms<W: Write>(writer: &mut W, entries: &[HistogramEntry], window_secs: f64, width: usize) {
     if entries.is_empty() {
         return;
     }
-    let max_name = entries.iter().map(|e| e.name.len()).max().unwrap_or(0);
     let _ = writeln!(
         writer,
-        "{:<width$}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}  {:>8}",
+        "{:<width$}  {:>8}  {:>8}  {:>8}  {:>8}  {:>8}  {:>8}",
         "name",
         "count",
         "tps(/s)",
@@ -458,7 +495,7 @@ fn flush_histograms<W: Write>(writer: &mut W, entries: &[HistogramEntry], window
         "p50(us)",
         "p99(us)",
         "max(us)",
-        width = max_name
+        width = width
     );
     let mut sorted: Vec<&HistogramEntry> = entries.iter().collect();
     sorted.sort_by(|a, b| a.name.cmp(&b.name));
@@ -469,7 +506,7 @@ fn flush_histograms<W: Write>(writer: &mut W, entries: &[HistogramEntry], window
         }
         let _ = writeln!(
             writer,
-            "{:<width$}  {:>7}  {:>8}  {:>8}  {:>8}  {:>8}  {:>8}",
+            "{:<width$}  {:>8}  {:>8}  {:>8}  {:>8}  {:>8}  {:>8}",
             e.name,
             snap.count,
             tps(snap.count, window_secs),
@@ -477,25 +514,24 @@ fn flush_histograms<W: Write>(writer: &mut W, entries: &[HistogramEntry], window
             snap.p50 / 1000,
             snap.p99 / 1000,
             snap.max / 1000,
-            width = max_name
+            width = width
         );
     }
 }
 
-fn flush_summaries<W: Write>(writer: &mut W, entries: &[SummaryEntry], window_secs: f64) {
+fn flush_summaries<W: Write>(writer: &mut W, entries: &[SummaryEntry], window_secs: f64, width: usize) {
     if entries.is_empty() {
         return;
     }
-    let max_name = entries.iter().map(|e| e.name.len()).max().unwrap_or(0);
     let _ = writeln!(
         writer,
-        "{:<width$}  {:>7}  {:>8}  {:>8}  {:>8}",
+        "{:<width$}  {:>8}  {:>8}  {:>8}  {:>8}",
         "name",
         "count",
         "tps(/s)",
         "avg(us)",
         "max(us)",
-        width = max_name
+        width = width
     );
     let mut sorted: Vec<&SummaryEntry> = entries.iter().collect();
     sorted.sort_by(|a, b| a.name.cmp(&b.name));
@@ -506,31 +542,30 @@ fn flush_summaries<W: Write>(writer: &mut W, entries: &[SummaryEntry], window_se
         }
         let _ = writeln!(
             writer,
-            "{:<width$}  {:>7}  {:>8}  {:>8}  {:>8}",
+            "{:<width$}  {:>8}  {:>8}  {:>8}  {:>8}",
             e.name,
             snap.count,
             tps(snap.count, window_secs),
             snap.avg / 1000,
             snap.max / 1000,
-            width = max_name
+            width = width
         );
     }
 }
 
-fn flush_bandwidths<W: Write>(writer: &mut W, entries: &[BandwidthEntry], window_secs: f64) {
+fn flush_bandwidths<W: Write>(writer: &mut W, entries: &[BandwidthEntry], window_secs: f64, width: usize) {
     if entries.is_empty() {
         return;
     }
-    let max_name = entries.iter().map(|e| e.name.len()).max().unwrap_or(0);
     let _ = writeln!(
         writer,
-        "{:<width$}  {:>7}  {:>8}  {:>12}  {:>10}",
+        "{:<width$}  {:>8}  {:>8}  {:>12}  {:>10}",
         "name",
         "count",
         "tps(/s)",
         "avg_size(KB)",
         "rate(KB/s)",
-        width = max_name
+        width = width
     );
     let mut sorted: Vec<&BandwidthEntry> = entries.iter().collect();
     sorted.sort_by(|a, b| a.name.cmp(&b.name));
@@ -543,28 +578,27 @@ fn flush_bandwidths<W: Write>(writer: &mut W, entries: &[BandwidthEntry], window
         let avg_kb = snap.avg_size as f64 / 1024.0;
         let _ = writeln!(
             writer,
-            "{:<width$}  {:>7}  {:>8}  {:>12.1}  {:>10}",
+            "{:<width$}  {:>8}  {:>8}  {:>12.1}  {:>10}",
             e.name,
             snap.count,
             tps(snap.count, window_secs),
             avg_kb,
             snap.rate / 1024,
-            width = max_name
+            width = width
         );
     }
 }
 
-fn flush_gauges<W: Write>(writer: &mut W, entries: &[GaugeEntry]) {
+fn flush_gauges<W: Write>(writer: &mut W, entries: &[GaugeEntry], width: usize) {
     if entries.is_empty() {
         return;
     }
-    let max_name = entries.iter().map(|e| e.name.len()).max().unwrap_or(0);
-    let _ = writeln!(writer, "{:<width$}  {:>7}", "name", "value", width = max_name);
+    let _ = writeln!(writer, "{:<width$}  {:>8}", "name", "value", width = width);
     let mut sorted: Vec<&GaugeEntry> = entries.iter().collect();
     sorted.sort_by(|a, b| a.name.cmp(&b.name));
     for e in &sorted {
         let val = e.handle.snapshot();
-        let _ = writeln!(writer, "{:<width$}  {:>7}", e.name, val, width = max_name);
+        let _ = writeln!(writer, "{:<width$}  {:>8}", e.name, val, width = width);
     }
 }
 
@@ -736,7 +770,8 @@ mod registry_tests {
         }
         runner.start();
 
-        // Wait 2.5s for at least 2 flush ticks (first immediate, second at 1s)
+        // Wait 2.5s for at least 2 flush ticks (first tick skipped,
+        // flush at 1s, flush at 2s, then final flush on stop)
         tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
         runner.stop().await;
 
