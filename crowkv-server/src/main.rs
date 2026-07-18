@@ -33,17 +33,39 @@ async fn main() {
     let args = Cli::parse();
 
     let _guards = if args.log {
-        crowkv::common::logging::init_file_and_console_logging("log", "crowkv-server")
-            .expect("failed to initialize crowkv-server logging")
+        crowkv::common::logging::init_file_and_console_logging(
+            "log",
+            "crowkv-server",
+            args.log_max_file_mb,
+            args.log_max_files,
+        )
+        .expect("failed to initialize crowkv-server logging")
     } else {
-        crowkv::common::logging::init_file_logging("log", "crowkv-server")
-            .expect("failed to initialize crowkv-server logging")
+        crowkv::common::logging::init_file_logging(
+            "log",
+            "crowkv-server",
+            args.log_max_file_mb,
+            args.log_max_files,
+        )
+        .expect("failed to initialize crowkv-server logging")
     };
+
+    // Initialize the C++ spdlog async logger as a process-global resource.
+    // This must happen before any Crowtree::open() so all engine instances
+    // share one logger. No-op when the build has no spdlog.
+    crowtree_ffi::ct_init_logging(
+        "log",
+        "info",
+        args.log_max_file_mb,
+        args.log_max_files,
+        "crowkv-server-tree",
+    );
 
     info!("crowkv-server starting...");
 
     // Metrics runner: periodic flush to a dedicated metrics log file.
-    let mut metrics_runner = create_metrics_runner(args.metrics_interval);
+    let mut metrics_runner =
+        create_metrics_runner(args.metrics_interval, args.log_max_file_mb, args.log_max_files);
 
     info!(
         stores = ?args.stores.as_deref(),
@@ -61,6 +83,7 @@ async fn main() {
     let election_cfg = match args.election_profile.as_str() {
         "test" => PxElectionConfig::for_tests(),
         "e2e" => PxElectionConfig::for_e2e(),
+        "bench" => PxElectionConfig::for_bench(),
         _ => PxElectionConfig::DEFAULT,
     };
 
@@ -148,6 +171,17 @@ async fn main() {
         .await;
     }
 
+    // Wire engine stats collector into the metrics runner, then start it.
+    // The collector polls C++ engine counters via ct_get_stats each tick,
+    // computes deltas, and inc_by()s on registered Rust counters so they
+    // appear in the metrics log alongside the Rust-side metrics.
+    if let Some(ref mut runner) = metrics_runner {
+        let reg = runner.registry().clone();
+        crowkv_server::engine_collector::setup_engine_collector(&reg, &registry, runner);
+        runner.start();
+        info!(interval_secs = args.metrics_interval, "metrics runner started");
+    }
+
     // Serve until shutdown signal
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
@@ -164,16 +198,16 @@ async fn main() {
     graceful_shutdown(registry).await;
 }
 
-/// Create and start a metrics runner if interval > 0, else None.
-fn create_metrics_runner(interval_secs: u64) -> Option<MetricsRunner> {
+/// Create a metrics runner if interval > 0, else None. Does NOT start
+/// the runner — call `start()` after wiring collectors.
+fn create_metrics_runner(interval_secs: u64, max_file_mb: usize, max_files: usize) -> Option<MetricsRunner> {
     if interval_secs == 0 {
         return None;
     }
     let metrics_file =
-        crowkv::common::logging::open_metrics_log("log").expect("failed to open metrics log file");
-    let mut runner = MetricsRunner::new(metrics_file, interval_secs);
-    runner.start();
-    info!(interval_secs, "metrics runner started");
+        crowkv::common::logging::open_metrics_log("log", "crowkv-server", max_file_mb, max_files)
+            .expect("failed to open metrics log file");
+    let runner = MetricsRunner::new(metrics_file, interval_secs);
     Some(runner)
 }
 
@@ -301,6 +335,7 @@ async fn create_and_start_stores(
                 &registry.data_root,
                 registry.crowtree_backend,
                 registry.wal_skip_fsync,
+                "log",
             )
             .await
             {
@@ -341,6 +376,11 @@ async fn graceful_shutdown(registry: Arc<KvStoreRegistry>) {
         store_count = registry.stores.len(),
         "initiating graceful shutdown of gRPC stores"
     );
+
+    // Flush C++ logs before store shutdown so any in-flight engine messages
+    // are on disk before the engines start tearing down.
+    crowtree_ffi::ct_flush_logging();
+
     let mut total_errors = 0usize;
     for entry in &registry.stores {
         let store_id = *entry.key();
@@ -365,4 +405,9 @@ async fn graceful_shutdown(registry: Arc<KvStoreRegistry>) {
             "crowkv-server shut down with errors (see critical: logs above)"
         );
     }
+
+    // Final flush + stop the C++ spdlog async logger. All Crowtree instances
+    // are now dropped (or about to be), so this is safe.
+    crowtree_ffi::ct_flush_logging();
+    crowtree_ffi::ct_shutdown_logging();
 }

@@ -9,6 +9,7 @@
 //! `use crowkv_server::{cli, mgmt_api, startup, store_registry};`.
 
 pub mod cli;
+pub mod engine_collector;
 pub mod mgmt_api;
 pub mod operation_registry;
 pub mod startup;

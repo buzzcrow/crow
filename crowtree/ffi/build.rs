@@ -101,6 +101,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if have_lz4.is_some() {
         build.define("CROWTREE_HAVE_LZ4", "1");
     }
+
+    // ── spdlog logging (mirrors CMakeLists.txt) ──
+    // The FFI build now enables spdlog so the C++ engine writes
+    // `crowtree.log` alongside the Rust server's `log/` directory.
+    // Requires spdlog + fmt + zlib in the conda/pixi environment.
+    let have_spdlog = conda_prefix.as_ref().is_some_and(|prefix| {
+        prefix.join("include").join("spdlog").is_dir()
+            && (prefix.join("lib").join("libspdlog.dylib").is_file()
+                || prefix.join("lib").join("libspdlog.so").is_file()
+                || prefix.join("lib").join("libspdlog.a").is_file())
+    });
+    if have_spdlog {
+        let prefix = conda_prefix.as_ref().unwrap();
+        build.define("CROWTREE_HAVE_SPDLOG", "1");
+        // fmt is bundled with spdlog in conda-forge; its headers live under
+        // include/fmt and the lib is libfmt. zlib is needed by
+        // compressing_sink for gzip-rotated log files.
+        let lib_dir = prefix.join("lib");
+        println!("cargo:rustc-link-search=native={}", lib_dir.display());
+        println!("cargo:rustc-link-lib=dylib=spdlog");
+        println!("cargo:rustc-link-lib=dylib=fmt");
+        println!("cargo:rustc-link-lib=dylib=z");
+        // Embed the rpath so the dynamic linker finds libspdlog at runtime
+        // (pixi/conda lib dir is not in the default dyld search path).
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.display());
+    }
+
     build.compile("crowtree");
 
     if let Some(dir) = have_lz4 {
@@ -110,5 +137,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("cargo:rerun-if-changed={}", include.display());
     println!("cargo:rerun-if-env-changed=CROWTREE_LZ4_LIB");
+    println!("cargo:rerun-if-env-changed=CONDA_PREFIX");
     Ok(())
 }

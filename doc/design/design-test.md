@@ -46,6 +46,7 @@ ui e2e     (Playwright browser: SPA + real backend)                <- crowkv-con
 | `crowkv-server/tests/*` | deployment | server binary + HTTP API, multi-process clusters, CLI, startup | `crowkv-server/src/*` |
 | `crowkv-console/web/tests/*` | console mgmt API | Axum REST API server: node management, OpenAPI proxy, API forwarding | `crowkv-console/web/src/*` |
 | `crowkv-console/{shared,cli}/tests/*` | console mgmt API | shared core (config, API client, health aggregation) + CLI commands | `crowkv-console/{shared,cli}/src/*` |
+| `crowkv-console/cli/tests/bench_benchmark.rs` | benchmark | `bench benchmark` lifecycle (deploy → run → collect → report → cleanup) + `bench compare` | `crowkv-console/cli/src/bench/*` |
 | `crowkv-console/web/ui/e2e/*` | UI E2E | Playwright browser tests: SPA interactions, context menus, dialogs, KV panel | `crowkv-console/web/ui/src/*` + real backend |
 
 **Placement rule:** a test that only needs the `crowkv` library (even if it
@@ -95,7 +96,7 @@ proceeding to tier-specific assertions:
 
    Performance is not asserted here — correctness only. A put that takes
    5 s but returns `ok=true` and is readable via get is a pass. Performance
-   tuning is tracked separately (R10 benchmark framework).
+   tuning is tracked separately (see Benchmark Layer below).
 
    KV operations are gRPC only (no REST API for KV). Tests use
    `CrowkvClient` (deployment/UI layers) or `PxKvStore` public API
@@ -506,6 +507,139 @@ to timing. Leader election timeouts are capped at 10 s; all other assertions at 
 - **Comparative tests** (Tier 2) must run on both simple and complex topologies
   using the same assertion code path.
 
+## Benchmark Layer
+
+**Scope:** Self-contained benchmark lifecycle — deploy a 3-node cluster,
+drive write/read load, collect server-side metrics + logs, produce a
+report, then clean up. The benchmark is a test type: it exercises the
+full production path (client → leader → Paxos → WAL → memtable →
+async flush) end-to-end, with disk IO isolation to measure consensus +
+memtable throughput rather than fsync latency.
+
+**Source:** `crowkv-console/cli/tests/bench_benchmark.rs`.
+
+**Test runner:** `pixi run test-cli` (includes bench benchmark +
+compare integration tests).
+
+### Benchmark Verb
+
+The `bench benchmark` verb orchestrates the full lifecycle:
+
+- **Deploy** — auto-provision a minimal cluster (1 rack, 3 nodes on
+  localhost) via an embedded `crowkv-web` instance started in-process.
+  Topology creation follows the same pattern as the UI test fixture
+  (`consoleSetup.ts::setupCluster`), but through the typed
+  `ConsoleClient`. Config-driven SSH deployment is accepted but
+  stubbed for future work.
+- **Run** — drive KV put/get/delete at configurable concurrency using
+  the existing closed-loop load generator (`run_bench`). Each worker
+  maintains one in-flight RPC at a time; threads = max concurrency.
+- **Collect** — gather server-side perf counters (WAL append rate, KV
+  op counts), system metrics (CPU, RSS, TCP retransmits), and runtime
+  logs from all 3 node workspaces. Metrics are parsed from each
+  server's `log/metrics-*.log` file and aggregated across nodes.
+- **Cleanup** — stop all server processes, shut down embedded
+  console-web, optionally remove workspace (`--keep-workspace` to
+  retain).
+- **Report** — Markdown report at `bench-runs/<datetime>/report.md`
+  with throughput (ops/s), latency (avg + p50 + p90 + p99 + p999 +
+  max), error rate, WAL metrics, system resource usage, and anomaly
+  detection (non-zero error rate, TCP retransmits, server log
+  warnings).
+
+Reports are stored under `<project_root>/bench-runs/<YYYY-MM-DD_HHMMSS>/`
+— each run gets its own datetime-stamped directory containing
+`report.md`, `workspace/` (deploy artifacts), and `logs/` (node logs).
+The `bench compare <tag1> <tag2>` verb finds runs by partial
+datetime match and prints a side-by-side comparison table.
+
+### Storage Modes
+
+- **`memory`** — in-memory KV engine, WAL with `no_fsync=true`.
+  Baseline: pure consensus + WAL append + memtable insert cost, zero
+  disk IO.
+- **`file-nofsync`** — crowtree engine with `text` backend, WAL with
+  `no_fsync=true`. Durable engine + WAL, but `fdatasync` skipped to
+  isolate path-level overhead from disk IO.
+- **`block`** (planned) — crowtree engine with `block` backend (real
+  block device page store). Memtable is in-memory; async flush writes
+  SST files to block device. WAL also on block device with
+  `no_fsync=true` (page cache only). Tests whether memtable flush
+  can keep up without blocking the write path.
+
+`no_fsync=true` in all modes: WAL writes go to page cache only.
+This is unsafe for production but valid for benchmarking — the goal
+is to measure consensus + memtable throughput, not disk fsync
+latency.
+
+### Write-Only Benchmark Design
+
+**Objective:** Measure maximum write TPS and average latency on the
+leader, with unique keys (no overwrite) to exercise the real
+memtable insert + flush path.
+
+**Key decisions:**
+
+- **Unique keys** — each worker generates monotonically increasing
+  keys from a disjoint range (`worker_id * range + counter`). This
+  forces memtable growth → flush → new SST/snapshot, exercising the
+  real production flow. Random key selection with a small key space
+  causes massive overwrite, hitting memtable in-place update rather
+  than insert + flush.
+- **Connections** — scale with threads: 8 threads → 4 connections,
+  64 threads → 8 connections, 128 threads → 16 connections.
+  Connections double while threads jump faster, keeping channel
+  utilization high without excessive overhead.
+- **Threads sweep** — 8 → 64 → 128. Finds the throughput plateau
+  where adding more workers no longer increases TPS (server-side
+  bottleneck: consensus batch processing, memtable insert, or leader
+  serialization).
+- **Duration** — 10s per run. Short enough for a full sweep under 2
+  minutes, long enough for stable numbers.
+
+**Configuration matrix:** All runs use `--workload write --value-size
+64 --duration-secs 10`.
+
+- Run 1: memory, threads=8, connections=4
+- Run 2: memory, threads=64, connections=8
+- Run 3: memory, threads=128, connections=16
+- Run 4: block, threads=8, connections=4
+- Run 5: block, threads=64, connections=8
+- Run 6: block, threads=128, connections=16
+
+### Baseline Results (memory mode, 2026-07-17)
+
+Preliminary results with `key_space=1000` (random keys, not yet
+unique-key mode):
+
+- **threads=8**: TPS=16,147, avg=494us, p99=651us, errors=0
+- **threads=64**: TPS=107,429, avg=592us, p99=2,021us, errors=86.3%
+- **threads=128**: TPS=128,425, avg=987us, p99=7,207us, errors=89.6%
+
+At 8 threads the system is stable at ~16k ops/s with zero errors.
+At 64+ threads the leader is saturated — throughput appears higher
+but 86-90% of requests fail (timeouts/rejections). The real
+error-free throughput ceiling is ~16k ops/s with current consensus
+batch processing. High-concurrency optimization is deferred.
+
+### Coverage Rules
+
+- `bench benchmark --mode memory` runs end-to-end: deploys cluster,
+  drives load, collects metrics + logs, prints report, cleans up.
+- `bench benchmark --mode file-nofsync` does the same with crowtree
+  engine + no-fsync WAL.
+- `--keep-workspace` retains the workspace for debugging.
+- `bench compare <tag1> <tag2>` prints a side-by-side comparison
+  table with throughput, latency, error rate, WAL metrics, system
+  metrics.
+- Report includes `avg_us` latency alongside p50/p99/p999.
+- Report includes server-side metrics: WAL append counts, KV put/get
+  counts, CPU/RSS/TCP from system metrics.
+- Report includes anomaly detection: non-zero error rate, TCP
+  retransmits, server log warnings.
+- All existing `bench run` / `bench stress` / `bench report` commands
+  continue to work unchanged.
+
 ## crowtree C++ Test Layers
 
 The C++ crowtree library (`libcrowtree`) has its own test layers, separate from
@@ -545,7 +679,8 @@ Every feature or component milestone includes:
 
 1. **Unit invariants** from the matching test design area (property-based or deterministic).
 2. **Failure-injection** matching [`design.md`](design.md) §9 scenarios.
-3. **crowbench** integration test (end-to-end correctness) once the RPC/client layer is reached.
+3. **Benchmark integration test** (end-to-end correctness + performance)
+   once the RPC/client layer is reached — see Benchmark Layer above.
 
 See [`plan-test.md`](../working/plan-test.md) for pending test task tracking.
 

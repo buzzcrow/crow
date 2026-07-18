@@ -3,7 +3,12 @@
 
 #include "crowtree/metrics.h"
 
+#include "crowtree/gzip.h"
+
+#include <sys/stat.h>
+
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -13,8 +18,8 @@ namespace crowtree
 
 // ── LatencyHistogram ────────────────────────────────────────────
 
-static constexpr size_t kNumBuckets                  = 12;
-static const uint64_t   kBucketBoundsNs[kNumBuckets] = {
+static constexpr size_t                        kNumBuckets     = 12;
+static const std::array<uint64_t, kNumBuckets> kBucketBoundsNs = {
     1'000,         // 1us
     10'000,        // 10us
     100'000,       // 100us
@@ -77,8 +82,8 @@ uint64_t LatencyHistogram::percentile(const Snapshot &snap, double p)
     if (snap.count == 0) {
         return 0;
     }
-    double   target_d = static_cast<double>(snap.count) * p / 100.0;
-    uint64_t target   = static_cast<uint64_t>(target_d);
+    double target_d = static_cast<double>(snap.count) * p / 100.0;
+    auto   target   = static_cast<uint64_t>(target_d);
     if (target == 0) {
         target = 1;
     }
@@ -94,7 +99,7 @@ uint64_t LatencyHistogram::percentile(const Snapshot &snap, double p)
 
 // ── MetricsRegistry ─────────────────────────────────────────────
 
-MetricsRegistry::~MetricsRegistry()
+MetricsRegistry::~MetricsRegistry() // NOLINT(bugprone-exception-escape)
 {
     stop();
 }
@@ -141,14 +146,14 @@ LatencySummary *MetricsRegistry::register_summary(const std::string &name)
 
 static std::string iso8601_now()
 {
-    auto now = std::chrono::system_clock::now();
-    auto t   = std::chrono::system_clock::to_time_t(now);
-    auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
-    char buf[40];
-    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%S", std::gmtime(&t));
-    char out[48];
-    std::snprintf(out, sizeof(out), "%s.%03lldZ", buf, static_cast<long long>(ms.count()));
-    return out;
+    auto                 now = std::chrono::system_clock::now();
+    auto                 t   = std::chrono::system_clock::to_time_t(now);
+    auto                 ms  = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+    std::array<char, 40> buf{}; // NOLINT(modernize-avoid-c-arrays)
+    std::strftime(buf.data(), buf.size(), "%Y-%m-%dT%H:%M:%S", std::gmtime(&t));
+    std::array<char, 48> out{}; // NOLINT(modernize-avoid-c-arrays)
+    std::snprintf(out.data(), out.size(), "%s.%03lldZ", buf.data(), static_cast<long long>(ms.count()));
+    return out.data();
 }
 
 // Helper: sort indices by metric name for deterministic output.
@@ -181,8 +186,8 @@ void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timesta
             if (snap.count == 0) {
                 continue;
             }
-            double   tps_d = static_cast<double>(snap.count) / window_secs;
-            uint64_t tps   = static_cast<uint64_t>(tps_d);
+            double tps_d = static_cast<double>(snap.count) / window_secs;
+            auto   tps   = static_cast<uint64_t>(tps_d);
             std::fprintf(fp, "%-*s  %5llu  %7llu  %6llu\n", static_cast<int>(max_name), counters_[i]->name().c_str(),
                          static_cast<unsigned long long>(snap.count), static_cast<unsigned long long>(tps),
                          static_cast<unsigned long long>(snap.total));
@@ -248,7 +253,7 @@ void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timesta
             }
             uint64_t avg_size = snap.count > 0 ? snap.sum / snap.count : 0;
             double   rate_d   = static_cast<double>(snap.sum) / window_secs;
-            uint64_t rate     = static_cast<uint64_t>(rate_d);
+            auto     rate     = static_cast<uint64_t>(rate_d);
             std::fprintf(fp, "%-*s  %5llu  %8llu  %9llu  %8llu\n", static_cast<int>(max_name),
                          bandwidths_[i]->name().c_str(), static_cast<unsigned long long>(snap.count),
                          static_cast<unsigned long long>(avg_size), static_cast<unsigned long long>(rate),
@@ -273,10 +278,12 @@ void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timesta
     std::fprintf(fp, "\n");
 }
 
-void MetricsRegistry::start(const std::string &log_path, double interval_secs)
+void MetricsRegistry::start(const std::string &log_path, double interval_secs, size_t max_file_mb, size_t max_files)
 {
-    log_path_      = log_path;
-    interval_secs_ = interval_secs;
+    log_path_       = log_path;
+    interval_secs_  = interval_secs;
+    max_file_bytes_ = max_file_mb * 1024 * 1024;
+    max_files_      = max_files;
     running_.store(true, std::memory_order_relaxed);
     flush_thread_ = std::thread([this]() {
         while (running_.load(std::memory_order_relaxed)) {
@@ -284,14 +291,7 @@ void MetricsRegistry::start(const std::string &log_path, double interval_secs)
             if (!running_.load(std::memory_order_relaxed)) {
                 break;
             }
-            FILE *fp = std::fopen(log_path_.c_str(), "a");
-            if (fp == nullptr) {
-                continue;
-            }
-            std::string ts = iso8601_now();
-            flush_to(fp, interval_secs_, ts.c_str());
-            std::fflush(fp);
-            std::fclose(fp);
+            flush_to_file();
         }
     });
 }
@@ -304,13 +304,65 @@ void MetricsRegistry::stop()
     if (flush_thread_.joinable()) {
         flush_thread_.join();
     }
+    flush_to_file();
+}
+
+void MetricsRegistry::flush_to_file()
+{
+    // Check if rotation is needed before writing.
+    check_rotate();
+
     FILE *fp = std::fopen(log_path_.c_str(), "a");
-    if (fp != nullptr) {
-        std::string ts = iso8601_now();
-        flush_to(fp, interval_secs_, ts.c_str());
-        std::fflush(fp);
-        std::fclose(fp);
+    if (fp == nullptr) {
+        return;
     }
+    std::string ts = iso8601_now();
+    flush_to(fp, interval_secs_, ts.c_str());
+    std::fflush(fp);
+    std::fclose(fp);
+}
+
+void MetricsRegistry::check_rotate()
+{
+    FILE *fp = std::fopen(log_path_.c_str(), "rb");
+    if (fp == nullptr) {
+        return;
+    }
+    std::fseek(fp, 0, SEEK_END);
+    long size = std::ftell(fp);
+    std::fclose(fp);
+    if (size < 0 || static_cast<size_t>(size) < max_file_bytes_) {
+        return;
+    }
+
+    // Shift compressed rotated files: N → N+1 (delete the oldest).
+    for (size_t i = max_files_; i > 0; --i) {
+        std::string src = rotated_path(i - 1);
+        if (i == max_files_) {
+            std::string gz = src + ".gz";
+            std::remove(gz.c_str());
+            std::remove(src.c_str());
+            continue;
+        }
+        std::string gz        = src + ".gz";
+        std::string target_gz = rotated_path(i) + ".gz";
+        struct stat st;
+        if (::stat(gz.c_str(), &st) == 0) {
+            std::remove(target_gz.c_str());
+            std::rename(gz.c_str(), target_gz.c_str());
+        }
+    }
+
+    // Rename current → rotated.1, then gzip-compress.
+    std::string rotated = rotated_path(1);
+    std::remove(rotated.c_str());
+    std::rename(log_path_.c_str(), rotated.c_str());
+    gzip_compress_file(rotated);
+}
+
+std::string MetricsRegistry::rotated_path(size_t index) const
+{
+    return log_path_ + "." + std::to_string(index) + ".log";
 }
 
 } // namespace crowtree

@@ -46,7 +46,7 @@ pub struct Cli {
     #[arg(long)]
     pub config_root: Option<std::path::PathBuf>,
 
-    #[arg(long, default_value = "default", value_parser = ["default", "test", "e2e"])]
+    #[arg(long, default_value = "default", value_parser = ["default", "test", "e2e", "bench"])]
     pub election_profile: String,
 
     /// KV storage engine backing each group's learner. `crowtree` (default)
@@ -81,6 +81,14 @@ pub struct Cli {
     /// (R10 benchmark framework).
     #[arg(long)]
     pub no_fsync: bool,
+
+    /// Max log file size in MiB before rotation. Default: 30.
+    #[arg(long, default_value_t = 30)]
+    pub log_max_file_mb: usize,
+
+    /// Number of rotated log files to keep. Default: 5.
+    #[arg(long, default_value_t = 5)]
+    pub log_max_files: usize,
 }
 
 /// Parse a comma-separated list of numbers and ranges into a `Vec<u64>`.

@@ -6,17 +6,40 @@
 //! returning a [`LogGuards`] handle whose `Drop` flushes the
 //! non-blocking appender.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use file_rotate::compression::Compression;
+use file_rotate::suffix::AppendCount;
+use file_rotate::{ContentLimit, FileRotate};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::{Layer, SubscriberExt};
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
+/// Default max log file size: 30 MiB.
+pub const DEFAULT_LOG_MAX_FILE_MB: usize = 30;
+/// Default number of rotated files to keep.
+pub const DEFAULT_LOG_MAX_FILES: usize = 5;
+
 pub struct LogGuards {
     _file: WorkerGuard,
+}
+
+/// Type alias for the rotating writer used by both service and metrics logs.
+pub type RotatingLogWriter = FileRotate<AppendCount>;
+
+/// Create a `FileRotate` writer with the given path, size limit, file count,
+/// and gzip compression on rotated files.
+fn make_rotating_writer(path: PathBuf, max_file_mb: usize, max_files: usize) -> RotatingLogWriter {
+    FileRotate::new(
+        path,
+        AppendCount::new(max_files),
+        ContentLimit::Bytes(max_file_mb * 1024 * 1024),
+        Compression::OnRotate(max_files),
+        None,
+    )
 }
 
 /// Format epoch millis as `YYYYMMDD-HHMMSS.mmm` (UTC).
@@ -48,7 +71,12 @@ fn format_timestamp(millis: u128) -> String {
 ///
 /// # Errors
 /// Returns `Err` if the log directory cannot be created due to permission issues or invalid path.
-pub fn init_file_logging(log_dir: impl AsRef<Path>, process_name: &str) -> Result<LogGuards, String> {
+pub fn init_file_logging(
+    log_dir: impl AsRef<Path>,
+    process_name: &str,
+    max_file_mb: usize,
+    max_files: usize,
+) -> Result<LogGuards, String> {
     std::fs::create_dir_all(log_dir.as_ref()).map_err(|e| {
         format!(
             "failed to create log directory {}; next step: check path permissions: {e}",
@@ -62,7 +90,8 @@ pub fn init_file_logging(log_dir: impl AsRef<Path>, process_name: &str) -> Resul
         .as_millis();
     let pid = std::process::id();
     let file_name = format!("{process_name}-{}-{pid}.log", format_timestamp(started_at));
-    let file_appender = tracing_appender::rolling::never(log_dir, file_name);
+    let file_path = log_dir.as_ref().join(file_name);
+    let file_appender = make_rotating_writer(file_path, max_file_mb, max_files);
     let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
 
     let file_filter = EnvFilter::try_from_default_env()
@@ -83,13 +112,18 @@ pub fn init_file_logging(log_dir: impl AsRef<Path>, process_name: &str) -> Resul
     Ok(LogGuards { _file: file_guard })
 }
 
-/// Opens a metrics log file in the specified directory.
-/// File naming: `metrics-{YYYYMMDD-HHMMSS.mmm}-{pid}.log`.
+/// Opens a metrics log file in the specified directory with size-based
+/// rotation and gzip compression on rotated files.
+/// File naming: `{process_name}-metrics-{YYYYMMDD-HHMMSS.mmm}-{pid}.log`.
 ///
 /// # Errors
-/// Returns `Err` if the log directory cannot be created or the file
-/// cannot be opened.
-pub fn open_metrics_log(log_dir: impl AsRef<Path>) -> Result<std::fs::File, String> {
+/// Returns `Err` if the log directory cannot be created.
+pub fn open_metrics_log(
+    log_dir: impl AsRef<Path>,
+    process_name: &str,
+    max_file_mb: usize,
+    max_files: usize,
+) -> Result<RotatingLogWriter, String> {
     std::fs::create_dir_all(log_dir.as_ref()).map_err(|e| {
         format!(
             "failed to create log directory {}; next step: check path permissions: {e}",
@@ -102,19 +136,13 @@ pub fn open_metrics_log(log_dir: impl AsRef<Path>) -> Result<std::fs::File, Stri
         .map_err(|e| format!("system clock is before unix epoch; next step: check host clock: {e}"))?
         .as_millis();
     let pid = std::process::id();
-    let file_name = format!("metrics-{}-{pid}.log", format_timestamp(started_at));
+    let file_name = format!(
+        "{process_name}-metrics-{}-{pid}.log",
+        format_timestamp(started_at)
+    );
     let file_path = log_dir.as_ref().join(file_name);
 
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&file_path)
-        .map_err(|e| {
-            format!(
-                "failed to open metrics log file {}; next step: check path permissions: {e}",
-                file_path.display()
-            )
-        })
+    Ok(make_rotating_writer(file_path, max_file_mb, max_files))
 }
 
 /// Initializes file and console logging to the specified directory.
@@ -124,6 +152,8 @@ pub fn open_metrics_log(log_dir: impl AsRef<Path>) -> Result<std::fs::File, Stri
 pub fn init_file_and_console_logging(
     log_dir: impl AsRef<Path>,
     process_name: &str,
+    max_file_mb: usize,
+    max_files: usize,
 ) -> Result<LogGuards, String> {
     std::fs::create_dir_all(log_dir.as_ref()).map_err(|e| {
         format!(
@@ -138,7 +168,8 @@ pub fn init_file_and_console_logging(
         .as_millis();
     let pid = std::process::id();
     let file_name = format!("{process_name}-{}-{pid}.log", format_timestamp(started_at));
-    let file_appender = tracing_appender::rolling::never(log_dir, file_name);
+    let file_path = log_dir.as_ref().join(file_name);
+    let file_appender = make_rotating_writer(file_path, max_file_mb, max_files);
     let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
 
     let file_filter = EnvFilter::try_from_default_env()

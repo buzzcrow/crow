@@ -27,25 +27,26 @@ crowkv-console/web/ui/*.tsbuildinfo
 crowkv-console/web/ui/e2e/runtime-data/
 
 # ── Runtime artifacts (WAL, config, logs) ───────────────────────
-log/
-runtime-data/
+# Top-level artifact dirs (anchored to repo root).
+/log/
+/runtime-data/
+# bench-runs/ holds datetime-stamped run dirs; ignore contents
+# but keep the directory itself in the repo.
+/bench-runs/*
 test-logs/
-crowkv-server/wal/
-crowkv-server/conf/
+
+# Per-crate runtime dirs — these names don't appear in source code,
+# so globbing is safe and avoids repeating per crate.
+**/wal/
+**/conf/
+**/ctdata/
+
+# `log/` is dangerous as a glob — "log" is a common Rust module name.
+# List explicitly per crate to avoid ignoring source directories.
 crowkv-server/log/
-crowkv-server/ctdata/
-crowkv-console/cli/wal/
-crowkv-console/cli/conf/
 crowkv-console/cli/log/
-crowkv-console/cli/ctdata/
-crowkv-console/shared/wal/
-crowkv-console/shared/conf/
 crowkv-console/shared/log/
-crowkv-console/shared/ctdata/
-crowkv-console/web/wal/
-crowkv-console/web/conf/
 crowkv-console/web/log/
-crowkv-console/web/ctdata/
 
 # ── IDE / OS ────────────────────────────────────────────────────
 .idea/
