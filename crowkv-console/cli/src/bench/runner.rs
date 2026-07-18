@@ -68,10 +68,10 @@ pub struct BenchConfig {
     pub duration: Duration,
     pub key_space: u64,
     pub value_size: usize,
-    /// Run directory: `<project_root>/bench-runs/<datetime>/`. The
-    /// report is written as `report.md` inside this dir. If `None`,
-    /// a new datetime-stamped dir is created at run start.
-    pub run_dir: Option<std::path::PathBuf>,
+    /// Report directory: `bench-runs/<run-folder>/`. The report is
+    /// written as `report.json` inside this dir. If `None`, defaults
+    /// to `bench-runs/`.
+    pub report_dir: Option<std::path::PathBuf>,
     /// Optional run-id; defaults to `bench-<unix_millis>-<workload>`.
     pub run_id: Option<String>,
     /// If `Some(d)`, a tokio task wakes every `d` and emits one human
@@ -106,7 +106,7 @@ impl BenchConfig {
             duration: Duration::from_secs(5),
             key_space: 1_000,
             value_size: 64,
-            run_dir: None,
+            report_dir: None,
             run_id: None,
             progress_interval: None,
             warmup: None,
@@ -284,8 +284,6 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
         threads: cfg.threads,
         key_space: cfg.key_space,
         value_size: cfg.value_size,
-        kv_engine: String::new(),
-        kv_backend: String::new(),
         target_endpoint: cfg.endpoint.clone(),
         store_id: cfg.store_id,
         group_id: cfg.group_id,
@@ -299,10 +297,7 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
         server_metrics: super::report::ServerMetrics::default(),
     };
 
-    let dir = cfg.run_dir.clone().unwrap_or_else(|| {
-        BenchReport::create_run_dir(Utc::now())
-            .unwrap_or_else(|_| std::path::PathBuf::from("bench-runs/unknown"))
-    });
+    let dir = cfg.report_dir.clone().unwrap_or_else(BenchReport::default_dir);
     let path = report
         .write_to(&dir)
         .map_err(|e| Error::Config(format!("write report: {e}")))?;

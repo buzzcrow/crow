@@ -165,6 +165,13 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
     if let Err(e) = report.write_to(&run_dir) {
         eprintln!("warning: failed to re-write report with server metrics: {e}");
     }
+    let text_path = match report.write_text_to(&run_dir, fixture.node_ids(), fixture.workspace_dir()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("warning: failed to write text report: {e}");
+            run_dir.join("report.txt")
+        }
+    };
     let log_warning_count = count_log_warnings(&artifacts_dir);
 
     fixture.cleanup(args.keep_workspace).await;
@@ -173,7 +180,8 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
         return crate::utils::print_json(&report);
     }
     println!("{}", report.human_summary());
-    println!("\nreport: {}", path.display());
+    println!("\nreport (json): {}", path.display());
+    println!("report (text): {}", text_path.display());
     print_anomalies(&report, log_warning_count);
     ExitCode::SUCCESS
 }
@@ -297,8 +305,22 @@ fn bench_report(run_id: &str, json: bool) -> ExitCode {
             if json {
                 crate::utils::print_json(&r)
             } else {
-                println!("{}", r.human_summary());
-                ExitCode::SUCCESS
+                let text_path = path.with_file_name("report.txt");
+                if text_path.exists() {
+                    match std::fs::read_to_string(&text_path) {
+                        Ok(text) => {
+                            println!("{text}");
+                            ExitCode::SUCCESS
+                        }
+                        Err(e) => {
+                            eprintln!("error: read text report {}: {e}", text_path.display());
+                            ExitCode::from(1)
+                        }
+                    }
+                } else {
+                    println!("{}", r.human_summary());
+                    ExitCode::SUCCESS
+                }
             }
         }
         Err(e) => {

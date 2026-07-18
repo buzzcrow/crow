@@ -6,9 +6,10 @@
 // metrics log.
 //
 // When the current log file exceeds `max_size` bytes, it is closed,
-// gzip-compressed to `<base>.<N>.log.gz`, older rotated files are
-// shifted (N→N+1), and a new current file is opened. At most
-// `max_files` compressed rotated files are kept; older ones are deleted.
+// renamed to `<base>.YYYYMMDD-HHMMSS.log`, gzip-compressed to
+// `<base>.YYYYMMDD-HHMMSS.log.gz`, and a new current file is opened.
+// At most `max_files` compressed rotated files are kept; older ones
+// are deleted.
 #pragma once
 
 #ifdef CROWTREE_HAVE_SPDLOG
@@ -39,6 +40,7 @@ template <typename Mutex> class compressing_file_sink final : public spdlog::sin
 
   private:
     void rotate_(); // NOLINT(readability-identifier-naming) — matches spdlog convention
+    void prune_rotated();
 
     std::string                  base_filename_;
     std::size_t                  max_size_;
