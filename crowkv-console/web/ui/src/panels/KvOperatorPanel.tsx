@@ -37,6 +37,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
   const [scanCursors, setScanCursors] = useState<Map<string, { lastKey: string; truncated: boolean }>>(new Map());
   const [loadingMore, setLoadingMore] = useState(false);
   const [autoScanned, setAutoScanned] = useState(false);
+  const [scanDone, setScanDone] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const [getKey, setGetKey] = useState('');
@@ -94,6 +95,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
     setGroupId('');
     setScanRows([]);
     setAutoScanned(false);
+    setScanDone(false);
     setGetResult(null);
     setErrorMsg(null);
   }, []);
@@ -102,6 +104,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
     setGroupId(gid);
     setScanRows([]);
     setAutoScanned(false);
+    setScanDone(false);
     setGetResult(null);
     setErrorMsg(null);
   }, []);
@@ -128,10 +131,12 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
         setScanRows(allRows);
         setScanTruncated(anyTruncated);
         setScanCursors(cursors);
+        setScanDone(true);
       } else {
         const result = await kvScan(storeId, groupId, scanPrefix);
         setScanRows(result.items.map((item) => ({ ...item, groupId, selected: false })));
         setScanTruncated(result.truncated);
+        setScanDone(true);
         const cursors = new Map<string, { lastKey: string; truncated: boolean }>();
         if (result.items.length > 0) {
           cursors.set(groupId, { lastKey: result.items[result.items.length - 1].key_utf8, truncated: result.truncated });
@@ -680,8 +685,10 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
           )}
         </div>
 
-        {/* Results table */}
-        {scanRows.length > 0 && (
+        {/* Results table — rendered whenever a scan has been executed,
+            even with 0 rows, so the table DOM is always present after
+            scan (tests and UX rely on `kv-scan-table` being visible). */}
+        {scanDone && !scanLoading && (
           <div className="tw-space-y-1">
             <span className="tw-text-xs tw-text-muted">
               {scanRows.length} result(s){scanTruncated && ' (truncated)'}
@@ -702,38 +709,46 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
                   </tr>
                 </thead>
                 <tbody className="tw-divide-y tw-divide-border">
-                  {scanRows.map((row, idx) => (
-                    <tr
-                      key={`${row.groupId}-${row.key_utf8}-${idx}`}
-                      className="hover:tw-bg-panel/30 tw-cursor-pointer"
-                      onClick={() => { setGetKey(row.key_utf8); }}
-                    >
-                      <td className="tw-p-2 tw-text-center" onClick={(e) => { e.stopPropagation(); toggleRow(idx); }}>
-                        <input type="checkbox" checked={row.selected} readOnly />
-                      </td>
-                      <td className="tw-p-2 tw-font-mono tw-truncate tw-max-w-[200px]" title={row.key_utf8}>
-                        {row.key_utf8}
-                      </td>
-                      <td className="tw-p-2 tw-font-mono tw-truncate tw-max-w-[200px]" title={row.value_utf8}>
-                        {row.value_utf8}
-                      </td>
-                      {showGroupColumn && (
-                        <td className="tw-p-2 tw-text-muted">{row.groupId}</td>
-                      )}
-                      <td className="tw-p-2" onClick={(e) => e.stopPropagation()}>
-                        {!readonly && (
-                          <button
-                            onClick={() => handleInlineDelete(row.key_utf8, row.groupId)}
-                            className="tw-text-muted hover:tw-text-failed"
-                            title="Delete key"
-                            data-testid={`inline-delete-${row.key_utf8}`}
-                          >
-                            <Trash2 className="tw-h-3 tw-w-3" />
-                          </button>
-                        )}
+                  {scanRows.length === 0 ? (
+                    <tr>
+                      <td colSpan={showGroupColumn ? 5 : 4} className="tw-p-4 tw-text-center tw-text-muted">
+                        No results. Click Scan to list keys.
                       </td>
                     </tr>
-                  ))}
+                  ) : (
+                    scanRows.map((row, idx) => (
+                      <tr
+                        key={`${row.groupId}-${row.key_utf8}-${idx}`}
+                        className="hover:tw-bg-panel/30 tw-cursor-pointer"
+                        onClick={() => { setGetKey(row.key_utf8); }}
+                      >
+                        <td className="tw-p-2 tw-text-center" onClick={(e) => { e.stopPropagation(); toggleRow(idx); }}>
+                          <input type="checkbox" checked={row.selected} readOnly />
+                        </td>
+                        <td className="tw-p-2 tw-font-mono tw-truncate tw-max-w-[200px]" title={row.key_utf8}>
+                          {row.key_utf8}
+                        </td>
+                        <td className="tw-p-2 tw-font-mono tw-truncate tw-max-w-[200px]" title={row.value_utf8}>
+                          {row.value_utf8}
+                        </td>
+                        {showGroupColumn && (
+                          <td className="tw-p-2 tw-text-muted">{row.groupId}</td>
+                        )}
+                        <td className="tw-p-2" onClick={(e) => e.stopPropagation()}>
+                          {!readonly && (
+                            <button
+                              onClick={() => handleInlineDelete(row.key_utf8, row.groupId)}
+                              className="tw-text-muted hover:tw-text-failed"
+                              title="Delete key"
+                              data-testid={`inline-delete-${row.key_utf8}`}
+                            >
+                              <Trash2 className="tw-h-3 tw-w-3" />
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))
+                  )}
                 </tbody>
               </table>
             </div>
@@ -749,7 +764,13 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
           </div>
         )}
 
-        {scanRows.length === 0 && !scanLoading && (
+        {scanLoading && (
+          <div className="tw-text-center tw-text-muted tw-text-xs tw-py-8">
+            Scanning...
+          </div>
+        )}
+
+        {!scanDone && !scanLoading && (
           <div className="tw-text-center tw-text-muted tw-text-xs tw-py-8">
             No results. Click Scan to list keys.
           </div>

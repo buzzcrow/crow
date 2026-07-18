@@ -40,8 +40,8 @@ pub struct DeployRequest {
     /// `--kv-backend` value (e.g. `"text"`, `"block"`). Only
     /// meaningful when `kv_engine` is `"crowtree"`.
     pub kv_backend: Option<String>,
-    /// Sets `--no-fsync` on the spawned server when `true` (R10
-    /// benchmark path-overhead isolation mode).
+    /// Sets `--no-fsync` on the spawned server when `true`
+    /// (benchmark path-overhead isolation mode).
     pub no_fsync: bool,
     /// `--metrics-interval` value in seconds. `None` leaves the
     /// spawned server's own default in effect.
@@ -102,9 +102,8 @@ pub async fn deploy_local_in_dir_with_extra_args(
 }
 
 /// Append `--kv-engine`/`--kv-backend`/`--no-fsync`/`--metrics-interval`
-/// flags to the spawned `crowkv-server` command per `req` (R10 benchmark
-/// framework). Split out of `deploy_local_in_workspace` to keep it under
-/// the line-count lint.
+/// flags to the spawned `crowkv-server` command per `req`. Split out of
+/// `deploy_local_in_workspace` to keep it under the line-count lint.
 fn apply_benchmark_flags(cmd: &mut Command, req: &DeployRequest) {
     if let Some(kv_engine) = &req.kv_engine {
         cmd.arg("--kv-engine").arg(kv_engine);

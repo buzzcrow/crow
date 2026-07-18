@@ -39,7 +39,7 @@ test.describe('E2E-31 KV auto-scan toggle', () => {
       // Put an initial key and scan
       await putKey(page, 'auto-key-1', 'val-1');
       const scanResp = page.waitForResponse((r) => r.url().includes('/kv/scan'));
-      await page.getByRole('button', { name: /scan/i }).evaluate((el: HTMLElement) => el.click());
+      await page.getByRole('button', { name: /scan/i }).click();
       await scanResp;
       await expect(page.getByTestId('kv-scan-table').getByText('auto-key-1')).toBeVisible({ timeout: 3_000 });
 

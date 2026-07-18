@@ -83,7 +83,7 @@ test.describe('E2E-38 multi-store isolation', () => {
 
       // Scan and verify store A keys appear
       const scanResponse = page.waitForResponse((r: any) => r.url().includes('/kv/scan'));
-      await page.getByRole('button', { name: /^Scan$/ }).evaluate((el: HTMLElement) => el.click());
+      await page.getByRole('button', { name: /^Scan$/ }).click();
       await scanResponse;
       await expect(page.getByTestId('kv-scan-table').getByText('iso-a-key1')).toBeVisible({ timeout: 3_000 });
       await expect(page.getByTestId('kv-scan-table').getByText('iso-b-key1')).toHaveCount(0);
@@ -92,7 +92,7 @@ test.describe('E2E-38 multi-store isolation', () => {
       await page.getByLabel('Store').selectOption('381');
       await page.getByLabel('Group').selectOption('3810');
       const scanResponse2 = page.waitForResponse((r: any) => r.url().includes('/kv/scan'));
-      await page.getByRole('button', { name: /^Scan$/ }).evaluate((el: HTMLElement) => el.click());
+      await page.getByRole('button', { name: /^Scan$/ }).click();
       await scanResponse2;
       await expect(page.getByTestId('kv-scan-table').getByText('iso-b-key1')).toBeVisible({ timeout: 3_000 });
       await expect(page.getByTestId('kv-scan-table').getByText('iso-a-key1')).toHaveCount(0);

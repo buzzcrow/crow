@@ -22,7 +22,9 @@ async function putKey(page: any, key: string, value: string) {
 }
 
 async function scanAndRefresh(page: any) {
-  await page.getByRole('button', { name: /^Scan$/ }).evaluate((el: HTMLElement) => el.click());
+  const scanResponse = page.waitForResponse((r: any) => r.url().includes('/kv/scan'));
+  await page.getByRole('button', { name: /^Scan$/ }).click();
+  await scanResponse;
   await expect(page.getByTestId('kv-scan-table')).toBeVisible({ timeout: 3_000 });
 }
 

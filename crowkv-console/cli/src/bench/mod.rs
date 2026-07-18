@@ -6,16 +6,14 @@
 //! Key work: workload kinds (read / write / list / mix), connection
 //! pool over tonic `Channel`s, tokio-task worker model with HDR
 //! latency histograms, and JSON report files written to
-//! `~/.crowkv/bench/<run-id>.json`.
+//! `bench-runs/<run-id>.json`.
 
 pub mod provision;
 pub mod report;
 pub mod runner;
-pub mod scenarios;
 pub mod workload;
 
 pub use provision::{BenchFixture, BenchMode};
 pub use report::BenchReport;
 pub use runner::{run_bench, BenchConfig};
-pub use scenarios::{resolve_stress_scenario, stress_scenario_names};
 pub use workload::WorkloadKind;
