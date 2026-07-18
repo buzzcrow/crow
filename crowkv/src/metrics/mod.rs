@@ -295,17 +295,17 @@ fn iso8601_now() -> String {
 /// `start()`, and call `stop()` during shutdown for a final flush.
 pub struct MetricsRunner {
     registry: Arc<Mutex<MetricsRegistry>>,
-    writer: Arc<Mutex<std::fs::File>>,
+    writer: Arc<Mutex<crate::common::logging::RotatingLogWriter>>,
     task: Option<tokio::task::JoinHandle<()>>,
     interval_secs: f64,
     system_collector: Arc<std::sync::Mutex<SystemCollector>>,
 }
 
 impl MetricsRunner {
-    /// Create a new runner with the given metrics log file.
+    /// Create a new runner with the given metrics log writer.
     /// The registry starts empty; use `registry()` to register metrics.
     #[must_use]
-    pub fn new(file: std::fs::File, interval_secs: u64) -> Self {
+    pub fn new(file: crate::common::logging::RotatingLogWriter, interval_secs: u64) -> Self {
         Self {
             registry: Arc::new(Mutex::new(MetricsRegistry::new())),
             writer: Arc::new(Mutex::new(file)),
@@ -686,13 +686,8 @@ mod registry_tests {
 
     #[tokio::test]
     async fn runner_lifecycle_produces_flush_blocks() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let path = tmp.path().to_path_buf();
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let file = crate::common::logging::open_metrics_log(tmp.path(), 30, 5).unwrap();
 
         let mut runner = MetricsRunner::new(file, 1);
         {
@@ -706,7 +701,14 @@ mod registry_tests {
         tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
         runner.stop().await;
 
-        let content = std::fs::read_to_string(&path).unwrap();
+        // Find the metrics log file (open_metrics_log names it metrics-*.log)
+        let metrics_file = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().starts_with("metrics-"))
+            .map(|e| e.path())
+            .expect("metrics log file not found");
+        let content = std::fs::read_to_string(&metrics_file).unwrap();
         // Should have at least 2 flush blocks (initial tick + 1s tick + final flush)
         let block_count = content.matches("[metrics").count();
         assert!(

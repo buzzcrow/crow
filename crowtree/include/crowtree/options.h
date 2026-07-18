@@ -153,10 +153,11 @@ struct Options
     // When log_dir is non-empty, Crowtree::open() initializes an async, size-
     // rotating file logger at <log_dir>/crowtree.log (no-op if the library was
     // built without spdlog). log_level is an spdlog level name
-    // (trace/debug/info/warn/error/off). Rotation defaults: 100 MiB × 5 files.
+    // (trace/debug/info/warn/error/off). Rotation defaults: 30 MiB × 5 files,
+    // gzip-compressed on rotation.
     std::string log_dir;                  // empty = logging disabled
     std::string log_level       = "info"; // spdlog level name
-    size_t      log_max_file_mb = 100;    // per-file rotation size
+    size_t      log_max_file_mb = 30;     // per-file rotation size
     size_t      log_max_files   = 5;      // rotated files kept
 };
 

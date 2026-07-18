@@ -64,6 +64,10 @@ target_link_libraries(crowtree PUBLIC absl::btree)
 find_package(spdlog REQUIRED)
 target_link_libraries(crowtree PRIVATE spdlog::spdlog)
 target_compile_definitions(crowtree PRIVATE CROWTREE_HAVE_SPDLOG=1)
+
+# zlib for gzip compression of rotated log files (compressing_sink).
+find_package(ZLIB REQUIRED)
+target_link_libraries(crowtree PRIVATE ZLIB::ZLIB)
 # Compile-time level floor: keep trace/debug in Debug builds, strip below info in
 # optimized builds (SPDLOG_ACTIVE_LEVEL elides lower calls entirely).
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
