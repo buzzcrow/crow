@@ -694,6 +694,7 @@ dependencies = [
  "bytes",
  "clap",
  "crowkv",
+ "crowtree-ffi",
  "dashmap",
  "reqwest",
  "serde",

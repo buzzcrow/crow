@@ -280,6 +280,8 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
         threads: cfg.threads,
         key_space: cfg.key_space,
         value_size: cfg.value_size,
+        kv_engine: String::new(),
+        kv_backend: String::new(),
         target_endpoint: cfg.endpoint.clone(),
         store_id: cfg.store_id,
         group_id: cfg.group_id,

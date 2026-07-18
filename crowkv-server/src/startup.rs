@@ -73,6 +73,7 @@ async fn open_crowtree_engine(
     store_id: u64,
     group_id: u64,
     backend: CrowtreeBackend,
+    log_dir: &str,
 ) -> io::Result<Box<dyn KVEngine>> {
     let path = store_crowtree_path(data_root, store_id, group_id);
     if let Some(parent) = path.parent() {
@@ -84,6 +85,8 @@ async fn open_crowtree_engine(
         backend,
         store_id: u32::try_from(store_id).unwrap_or(0),
         group_id: u32::try_from(group_id).unwrap_or(0),
+        log_dir: log_dir.to_string(),
+        log_file_prefix: "crowkv-server-tree".to_string(),
         ..Default::default()
     };
     // `CrowtreeEngine::open` is a synchronous FFI call; called here inline
@@ -120,6 +123,7 @@ pub async fn create_group_with_wal(
     data_root: &Path,
     crowtree_backend: CrowtreeBackend,
     skip_fsync: bool,
+    log_dir: &str,
 ) -> io::Result<PxGroup> {
     let mut wal_config = WalConfig::with_root(store_wal_root(wal_root, store_id));
     if std::env::var("CROWKV_WAL_TEXT").as_deref() == Ok("1") {
@@ -135,7 +139,8 @@ pub async fn create_group_with_wal(
             PxLocalReplica::restore_from_replay(replica_id, initial_role, &replay).await?
         }
         KvEngineKind::Crowtree => {
-            let engine = open_crowtree_engine(data_root, store_id, group_id, crowtree_backend).await?;
+            let engine =
+                open_crowtree_engine(data_root, store_id, group_id, crowtree_backend, log_dir).await?;
             PxLocalReplica::restore_from_replay_with_engine(replica_id, initial_role, &replay, engine).await?
         }
     };

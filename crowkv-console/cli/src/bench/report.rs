@@ -11,7 +11,7 @@
 //! The `bench-runs/` directory is always at the **project root**
 //! (found by walking up from CWD for `pixi.toml`), never inside a
 //! crate directory. Each run gets its own datetime-stamped subdirectory
-//! (`YYYY-MM-DD_HHMMSS`) so runs never collide.
+//! (`YYYY-MM-DD_HH-MM-SS`) so runs never collide.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -47,10 +47,10 @@ fn bench_runs_root() -> PathBuf {
     project_root().join("bench-runs")
 }
 
-/// Generate a datetime-stamped run directory name: `YYYY-MM-DD_HHMMSS`.
+/// Generate a datetime-stamped run directory name: `YYYY-MM-DD_HH-MM-SS`.
 #[must_use]
 fn timestamp_dir_name(at: DateTime<Utc>) -> String {
-    at.format("%Y-%m-%d_%H%M%S").to_string()
+    at.format("%Y-%m-%d_%H-%M-%S").to_string()
 }
 
 /// Latency percentiles (microseconds). Stored as `u64` because the
@@ -136,6 +136,13 @@ pub struct BenchReport {
     pub threads: u32,
     pub key_space: u64,
     pub value_size: usize,
+    /// KV engine used by the benchmarked cluster (e.g. "memory",
+    /// "crowtree"). `#[serde(default)]` for historical reports.
+    #[serde(default)]
+    pub kv_engine: String,
+    /// WAL backend type (e.g. "text", "binary"). Empty for memory mode.
+    #[serde(default)]
+    pub kv_backend: String,
     pub target_endpoint: String,
     pub store_id: u64,
     pub group_id: u64,
@@ -221,7 +228,7 @@ impl BenchReport {
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "run_id          : {}\nworkload        : {:?}\nduration        : {} ms (measurement)\nwarmup          : {} ms (discarded)\nconnections     : {}\nthreads         : {}\nkey_space       : {}\nvalue_size      : {} B\ntarget          : {} (store={} group={})\ntotal_ops       : {}\ntotal_errors    : {}\nerror_rate      : {:.4}",
+            "run_id          : {}\nworkload        : {:?}\nduration        : {} ms (measurement)\nwarmup          : {} ms (discarded)\nconnections     : {}\nthreads         : {}\nkey_space       : {}\nvalue_size      : {} B\nkv_engine       : {}\nkv_backend      : {}\ntarget          : {} (store={} group={})\ntotal_ops       : {}\ntotal_errors    : {}\nerror_rate      : {:.4}",
             self.run_id,
             self.workload,
             self.duration_ms,
@@ -230,6 +237,8 @@ impl BenchReport {
             self.threads,
             self.key_space,
             self.value_size,
+            if self.kv_engine.is_empty() { "n/a" } else { &self.kv_engine },
+            if self.kv_backend.is_empty() { "n/a" } else { &self.kv_backend },
             self.target_endpoint,
             self.store_id,
             self.group_id,
@@ -266,10 +275,37 @@ impl BenchReport {
             tcp_retrans = sm.system.tcp_retransmits,
             tcp_lost = sm.system.tcp_lost,
         );
+        if let Some(es) = &sm.engine_stats {
+            let total = es.buffer_pool_hits + es.buffer_pool_misses;
+            let hit_rate = hit_rate(es.buffer_pool_hits, total);
+            let _ = writeln!(
+                out,
+                "engine_stats    : bp_hits={hits} bp_misses={misses} bp_hit_rate={hr:.1}% bp_evict={evict} bp_wb={wb} snap_pages={sp}\n\
+                 engine_ops      : mt_upsert={mt_u} mt_get={mt_g} mt_get_hit={mt_gh} flush_drain={fd} flush_entries={fe} l1_get={l1g} l1_get_hit={l1gh}",
+                hits = es.buffer_pool_hits,
+                misses = es.buffer_pool_misses,
+                hr = hit_rate,
+                evict = es.buffer_pool_evictions,
+                wb = es.buffer_pool_writebacks,
+                sp = es.snapshot_pages_written,
+                mt_u = es.mt_upsert_total,
+                mt_g = es.mt_get_total,
+                mt_gh = es.mt_get_hit_total,
+                fd = es.flush_drain_total,
+                fe = es.flush_entries_total,
+                l1g = es.l1_get_total,
+                l1gh = es.l1_get_hit_total,
+            );
+        }
         out
     }
 
-    /// Render the report as a human-readable Markdown document with tables.
+    /// Render the report as a human-readable Markdown document using
+    /// aligned text blocks (no tables) for readability in raw markdown.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one writeln per section, format strings are long"
+    )]
     #[must_use]
     pub fn to_markdown(&self) -> String {
         use std::fmt::Write;
@@ -299,12 +335,31 @@ impl BenchReport {
 
         let _ = writeln!(md, "## Configuration");
         let _ = writeln!(md);
-        let _ = writeln!(md, "| Parameter | Value |");
-        let _ = writeln!(md, "|---|---|");
-        let _ = writeln!(md, "| connections | {} |", self.connections);
-        let _ = writeln!(md, "| threads | {} |", self.threads);
-        let _ = writeln!(md, "| key_space | {} |", self.key_space);
-        let _ = writeln!(md, "| value_size | {} B |", self.value_size);
+        let _ = writeln!(
+            md,
+            "```\n\
+             connections  : {}\n\
+             threads      : {}\n\
+             key_space    : {}\n\
+             value_size   : {} B\n\
+             kv_engine    : {}\n\
+             kv_backend   : {}\n\
+             ```",
+            self.connections,
+            self.threads,
+            self.key_space,
+            self.value_size,
+            if self.kv_engine.is_empty() {
+                "n/a"
+            } else {
+                &self.kv_engine
+            },
+            if self.kv_backend.is_empty() {
+                "n/a"
+            } else {
+                &self.kv_backend
+            },
+        );
         let _ = writeln!(md);
 
         #[expect(clippy::cast_precision_loss, reason = "display-only throughput")]
@@ -317,27 +372,42 @@ impl BenchReport {
         };
         let _ = writeln!(md, "## Summary");
         let _ = writeln!(md);
-        let _ = writeln!(md, "| Metric | Value |");
-        let _ = writeln!(md, "|---|---|");
-        let _ = writeln!(md, "| total_ops | {} |", self.total_ops);
-        let _ = writeln!(md, "| throughput | {qps:.1} ops/s |");
-        let _ = writeln!(md, "| total_errors | {} |", self.total_errors);
-        let _ = writeln!(md, "| error_rate | {:.4} |", self.error_rate);
-
+        let _ = writeln!(
+            md,
+            "```\n\
+             total_ops    : {}\n\
+             throughput   : {:.1} ops/s\n\
+             total_errors : {}\n\
+             error_rate   : {:.4}\n\
+             ```",
+            self.total_ops, qps, self.total_errors, self.error_rate,
+        );
         let _ = writeln!(md);
 
         let _ = writeln!(md, "## Per-Operation Latency");
         let _ = writeln!(md);
         let _ = writeln!(
             md,
-            "| op | ops | errors | not_found | avg(us) | p50(us) | p90(us) | p99(us) | p999(us) | max(us) |"
+            "```\n\
+             {:<6} {:>8} {:>6} {:>6} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}\n\
+             {}",
+            "op",
+            "ops",
+            "err",
+            "nf",
+            "avg_us",
+            "p50_us",
+            "p90_us",
+            "p99_us",
+            "p999",
+            "max_us",
+            "-".repeat(82),
         );
-        let _ = writeln!(md, "|---|---|---|---|---|---|---|---|---|---|");
         for (kind, op) in &self.by_op {
             let p = &op.latency_us;
             let _ = writeln!(
                 md,
-                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                "{:<6} {:>8} {:>6} {:>6} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
                 kind,
                 op.ops,
                 op.errors,
@@ -350,28 +420,90 @@ impl BenchReport {
                 p.max_us,
             );
         }
+        let _ = writeln!(md, "```");
         let _ = writeln!(md);
 
         let sm = &self.server_metrics;
         let _ = writeln!(md, "## Server Metrics");
         let _ = writeln!(md);
-        let _ = writeln!(md, "| Metric | Value |");
-        let _ = writeln!(md, "|---|---|");
-        let _ = writeln!(md, "| wal_append | {} |", sm.wal_append_count);
-        let _ = writeln!(md, "| kv_put | {} |", sm.kv_put_count);
-        let _ = writeln!(md, "| kv_get | {} |", sm.kv_get_count);
+        let _ = writeln!(
+            md,
+            "```\n\
+             wal_append   : {}\n\
+             kv_put       : {}\n\
+             kv_get       : {}\n\
+             ```",
+            sm.wal_append_count, sm.kv_put_count, sm.kv_get_count,
+        );
         let _ = writeln!(md);
 
         let _ = writeln!(md, "### System");
         let _ = writeln!(md);
-        let _ = writeln!(md, "| Metric | Value |");
-        let _ = writeln!(md, "|---|---|");
-        let _ = writeln!(md, "| cpu_user | {} us |", sm.system.cpu_user_us);
-        let _ = writeln!(md, "| cpu_sys | {} us |", sm.system.cpu_sys_us);
-        let _ = writeln!(md, "| rss | {} KB |", sm.system.rss_kb);
-        let _ = writeln!(md, "| tcp_retransmits | {} |", sm.system.tcp_retransmits);
-        let _ = writeln!(md, "| tcp_lost | {} |", sm.system.tcp_lost);
+        let _ = writeln!(
+            md,
+            "```\n\
+             cpu_user       : {} us\n\
+             cpu_sys        : {} us\n\
+             rss            : {} KB\n\
+             tcp_retransmits: {}\n\
+             tcp_lost       : {}\n\
+             ```",
+            sm.system.cpu_user_us,
+            sm.system.cpu_sys_us,
+            sm.system.rss_kb,
+            sm.system.tcp_retransmits,
+            sm.system.tcp_lost,
+        );
         let _ = writeln!(md);
+
+        if let Some(es) = &sm.engine_stats {
+            let _ = writeln!(md, "### C++ Engine Stats");
+            let _ = writeln!(md);
+            let total = es.buffer_pool_hits + es.buffer_pool_misses;
+            let hit_rate = hit_rate(es.buffer_pool_hits, total);
+            let _ = writeln!(
+                md,
+                "```\n\
+                 bp_hits       : {}\n\
+                 bp_misses     : {}\n\
+                 bp_hit_rate   : {:.1}%\n\
+                 bp_evictions  : {}\n\
+                 bp_writebacks : {}\n\
+                 bp_resident   : {}\n\
+                 bp_dirty      : {}\n\
+                 bp_used       : {}\n\
+                 bp_num_frames : {}\n\
+                 snap_pages    : {}\n\
+                 snap_segments : {}\n\
+                 mt_upsert     : {}\n\
+                 mt_get        : {}\n\
+                 mt_get_hit    : {}\n\
+                 flush_drain   : {}\n\
+                 flush_entries : {}\n\
+                 l1_get        : {}\n\
+                 l1_get_hit    : {}\n\
+                 ```",
+                es.buffer_pool_hits,
+                es.buffer_pool_misses,
+                hit_rate,
+                es.buffer_pool_evictions,
+                es.buffer_pool_writebacks,
+                es.buffer_pool_resident,
+                es.buffer_pool_dirty,
+                es.buffer_pool_used,
+                es.buffer_pool_num_frames,
+                es.snapshot_pages_written,
+                es.snapshot_segments_written,
+                es.mt_upsert_total,
+                es.mt_get_total,
+                es.mt_get_hit_total,
+                es.flush_drain_total,
+                es.flush_entries_total,
+                es.l1_get_total,
+                es.l1_get_hit_total,
+            );
+            let _ = writeln!(md);
+        }
 
         md
     }
@@ -394,6 +526,48 @@ pub struct ServerMetrics {
     pub kv_get_count: u64,
     /// System resource usage (see `crowkv::metrics::system`).
     pub system: SystemMetrics,
+    /// C++ crowtree engine stats (buffer pool, snapshot). `None` for
+    /// memory-mode benchmarks or when no node reports crowtree stats.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_stats: Option<EngineStats>,
+}
+
+/// C++ crowtree engine diagnostics aggregated across all deployed nodes,
+/// collected via each node's `/topology` endpoint after a bench run.
+/// Counters (hits/misses/evictions/writebacks/snapshot) are summed;
+/// occupancy gauges (`resident/dirty/used/num_frames`) are the max across
+/// nodes (they represent a shared resource, not per-node additive).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct EngineStats {
+    pub buffer_pool_hits: u64,
+    pub buffer_pool_misses: u64,
+    pub buffer_pool_evictions: u64,
+    pub buffer_pool_writebacks: u64,
+    pub snapshot_pages_written: u64,
+    pub snapshot_segments_written: u64,
+    pub buffer_pool_resident: u32,
+    pub buffer_pool_dirty: u32,
+    pub buffer_pool_used: u32,
+    pub buffer_pool_num_frames: u32,
+    pub mt_upsert_total: u64,
+    pub mt_get_total: u64,
+    pub mt_get_hit_total: u64,
+    pub flush_drain_total: u64,
+    pub flush_entries_total: u64,
+    pub l1_get_total: u64,
+    pub l1_get_hit_total: u64,
+}
+
+/// Buffer-pool hit rate as a percentage (0.0–100.0). Returns 0 when
+/// `total` is zero to avoid division by zero.
+#[allow(clippy::cast_precision_loss)]
+#[must_use]
+fn hit_rate(hits: u64, total: u64) -> f64 {
+    if total > 0 {
+        hits as f64 * 100.0 / total as f64
+    } else {
+        0.0
+    }
 }
 
 /// System resource usage extracted from a node's `metrics.log` "misc"
@@ -611,7 +785,29 @@ pub fn per_op_map(stats: BTreeMap<OpKind, OpStats>) -> BTreeMap<String, OpReport
 /// # Errors
 /// Returns an `io::Error` if the report is missing the header or
 /// required fields.
-#[expect(
+/// Parse a `key  : value` line from a text-block code fence. Returns
+/// `Some((key, value))` if the line contains a colon with non-empty
+/// sides, or `None` otherwise (including code-fence delimiters, blank
+/// lines, and separator lines like `---`).
+fn parse_kv_line(line: &str) -> Option<(String, String)> {
+    let line = line.trim();
+    if line.starts_with("```") || line.starts_with("---") || line.is_empty() {
+        return None;
+    }
+    let colon = line.find(':')?;
+    let key = line[..colon].trim().to_string();
+    let val = line[colon + 1..].trim().to_string();
+    if key.is_empty() || val.is_empty() {
+        return None;
+    }
+    // Skip the latency header row (e.g. "op        ops  errors ...").
+    if key == "op" {
+        return None;
+    }
+    Some((key, val))
+}
+
+#[allow(
     clippy::too_many_lines,
     reason = "line-based parser, each field is a single line"
 )]
@@ -627,6 +823,8 @@ fn parse_markdown_report(content: &str) -> io::Result<BenchReport> {
         threads: 0,
         key_space: 0,
         value_size: 0,
+        kv_engine: String::new(),
+        kv_backend: String::new(),
         target_endpoint: String::new(),
         store_id: 0,
         group_id: 0,
@@ -685,6 +883,74 @@ fn parse_markdown_report(content: &str) -> io::Result<BenchReport> {
                         }
                     }
                 }
+            }
+        } else if let Some((key, val)) = parse_kv_line(line) {
+            match key.as_str() {
+                "connections" => report.connections = u32::try_from(parse_u(&val)).unwrap_or(0),
+                "threads" => report.threads = u32::try_from(parse_u(&val)).unwrap_or(0),
+                "key_space" => report.key_space = parse_u(&val),
+                "value_size" => {
+                    report.value_size =
+                        usize::try_from(parse_u(val.split_whitespace().next().unwrap_or("0"))).unwrap_or(0);
+                }
+                "kv_engine" => {
+                    if val != "n/a" {
+                        report.kv_engine = val;
+                    }
+                }
+                "kv_backend" => {
+                    if val != "n/a" {
+                        report.kv_backend = val;
+                    }
+                }
+                "total_ops" => report.total_ops = parse_u(&val),
+                "total_errors" => report.total_errors = parse_u(&val),
+                "error_rate" => report.error_rate = parse_f(&val),
+                "wal_append" => report.server_metrics.wal_append_count = parse_u(&val),
+                "kv_put" => report.server_metrics.kv_put_count = parse_u(&val),
+                "kv_get" => report.server_metrics.kv_get_count = parse_u(&val),
+                "cpu_user" => {
+                    report.server_metrics.system.cpu_user_us =
+                        parse_u(val.split_whitespace().next().unwrap_or("0"));
+                }
+                "cpu_sys" => {
+                    report.server_metrics.system.cpu_sys_us =
+                        parse_u(val.split_whitespace().next().unwrap_or("0"));
+                }
+                "rss" => {
+                    report.server_metrics.system.rss_kb =
+                        parse_u(val.split_whitespace().next().unwrap_or("0"));
+                }
+                "tcp_retransmits" => {
+                    report.server_metrics.system.tcp_retransmits = parse_u(&val);
+                }
+                "tcp_lost" => {
+                    report.server_metrics.system.tcp_lost = parse_u(&val);
+                }
+                "read" | "write" => {
+                    let parts: Vec<&str> = val.split_whitespace().collect();
+                    if parts.len() >= 9 {
+                        let p = Percentiles {
+                            min_us: 0,
+                            avg_us: parse_u(parts[3]),
+                            p50_us: parse_u(parts[4]),
+                            p90_us: parse_u(parts[5]),
+                            p99_us: parse_u(parts[6]),
+                            p999_us: parse_u(parts[7]),
+                            max_us: parse_u(parts[8]),
+                        };
+                        report.by_op.insert(
+                            key,
+                            OpReport {
+                                ops: parse_u(parts[0]),
+                                errors: parse_u(parts[1]),
+                                not_found: parse_u(parts[2]),
+                                latency_us: p,
+                            },
+                        );
+                    }
+                }
+                _ => {}
             }
         } else if line.starts_with("| ")
             && !line.starts_with("|---")
@@ -810,8 +1076,8 @@ mod tests {
         let log = "\
 [metrics 2026-07-17T00:00:00.000Z window=1s]
 name             count  tps(/s)  avg(us)  p50(us)  p99(us)  max(us)
-s.1.kv.put.lh       10        10       50       48       90      95
-s.1.kv.get.lh        5         5       20       19       30      31
+s.1.g.1.kv.put.lh       10        10       50       48       90      95
+s.1.g.1.kv.get.lh        5         5       20       19       30      31
 name             count  tps(/s)  avg(us)  max(us)
 s.1.g.1.wal.append.l   10        10       12       20
 misc
@@ -823,7 +1089,7 @@ sys.tcp_lost     0
 
 [metrics 2026-07-17T00:00:01.000Z window=1s]
 name             count  tps(/s)  avg(us)  p50(us)  p99(us)  max(us)
-s.1.kv.put.lh       20        20       55       50       99      101
+s.1.g.1.kv.put.lh       20        20       55       50       99      101
 name             count  tps(/s)  avg(us)  max(us)
 s.1.g.1.wal.append.l   20        20       13       22
 misc
@@ -862,6 +1128,7 @@ sys.tcp_lost     1
                 tcp_retransmits: 1,
                 tcp_lost: 0,
             },
+            engine_stats: None,
         };
         let node_b = ServerMetrics {
             wal_append_count: 15,
@@ -874,6 +1141,7 @@ sys.tcp_lost     1
                 tcp_retransmits: 3,
                 tcp_lost: 2,
             },
+            engine_stats: None,
         };
         let agg = aggregate_server_metrics(&[node_a, node_b]);
         assert_eq!(agg.wal_append_count, 25);

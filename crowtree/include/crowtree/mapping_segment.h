@@ -36,7 +36,7 @@ inline constexpr uint64_t kNoSegmentImageAddr = std::numeric_limits<uint64_t>::m
 struct MappingSegment
 {
     explicit MappingSegment(uint32_t slot_count)
-        : slots(std::make_unique<std::atomic<uint64_t>[]>(slot_count)),
+        : slots(std::make_unique<std::atomic<uint64_t>[]>(slot_count)), // NOLINT(modernize-avoid-c-arrays)
           slot_count(slot_count)
     {
         for (uint32_t i = 0; i < slot_count; ++i) {
@@ -53,6 +53,7 @@ struct MappingSegment
         return write_seq.load(std::memory_order_relaxed) != persisted_seq.load(std::memory_order_relaxed);
     }
 
+    // NOLINTNEXTLINE(modernize-avoid-c-arrays) runtime-sized array of atomics
     std::unique_ptr<std::atomic<uint64_t>[]> slots; // packed slot words (mapping_slot.h)
     uint32_t                                 slot_count;
     std::atomic<uint32_t>                    live_count{0}; // non-empty slots; 0 => recyclable

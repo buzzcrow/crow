@@ -40,13 +40,15 @@ fn gauge_reports_last_value() {
     reg.flush(&mut buf, 5.0, "2026-07-15T16:30:05Z");
     let out = String::from_utf8(buf).unwrap();
     assert!(out.contains("42"));
+    assert!(out.contains("s.1.g.0.buf.resident.g"));
 
     g.set(0);
     let mut buf2 = Vec::new();
     reg.flush(&mut buf2, 5.0, "2026-07-15T16:30:10Z");
     let out2 = String::from_utf8(buf2).unwrap();
-    assert!(out2.contains("value"));
-    assert!(out2.contains("s.1.g.0.buf.resident.g"));
+    // Zero-value gauges are suppressed — no header, no data line.
+    assert!(!out2.contains("value"));
+    assert!(!out2.contains("s.1.g.0.buf.resident.g"));
 }
 
 #[test]
@@ -109,7 +111,7 @@ fn summary_avg_max_and_reset() {
 async fn registry_start_stop_lifecycle() {
     let tmp = tempfile::tempdir().unwrap();
     let mut runner = MetricsRunner::new(
-        crowkv::common::logging::open_metrics_log(tmp.path(), 30, 5).unwrap(),
+        crowkv::common::logging::open_metrics_log(tmp.path(), "test", 30, 5).unwrap(),
         1, // 1 second interval
     );
     runner.start();
@@ -117,11 +119,11 @@ async fn registry_start_stop_lifecycle() {
     // Stop performs a final flush
     runner.stop().await;
 
-    // Find the metrics log file (open_metrics_log names it metrics-*.log)
+    // Find the metrics log file (open_metrics_log names it <prefix>-metrics-*.log)
     let metrics_file = std::fs::read_dir(tmp.path())
         .unwrap()
         .flatten()
-        .find(|e| e.file_name().to_string_lossy().starts_with("metrics-"))
+        .find(|e| e.file_name().to_string_lossy().contains("-metrics-"))
         .map(|e| e.path())
         .expect("metrics log file not found");
     let content = std::fs::read_to_string(&metrics_file).unwrap();
@@ -205,14 +207,15 @@ fn zero_suppression_counter_with_zero_inc() {
 }
 
 #[test]
-fn gauge_with_zero_value_is_printed() {
+fn gauge_with_zero_value_is_suppressed() {
     let mut reg = MetricsRegistry::new();
     let g = reg.register_gauge("s.1.g.0.buf.dirty.g");
     g.set(0);
     let mut buf = Vec::new();
     reg.flush(&mut buf, 5.0, "2026-07-15T16:30:05Z");
     let out = String::from_utf8(buf).unwrap();
-    assert!(out.contains("s.1.g.0.buf.dirty.g"));
+    // Zero-value gauges are suppressed — no header, no data line.
+    assert!(!out.contains("s.1.g.0.buf.dirty.g"));
 }
 
 #[test]
