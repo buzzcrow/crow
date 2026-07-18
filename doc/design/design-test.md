@@ -586,9 +586,10 @@ memtable insert + flush path.
   real production flow. Random key selection with a small key space
   causes massive overwrite, hitting memtable in-place update rather
   than insert + flush.
-- **Connections** — fixed at 12. Enough channels to avoid HTTP/2
-  head-of-line blocking without introducing excessive connection
-  overhead. No sweep needed.
+- **Connections** — scale with threads: 8 threads → 4 connections,
+  64 threads → 8 connections, 128 threads → 16 connections.
+  Connections double while threads jump faster, keeping channel
+  utilization high without excessive overhead.
 - **Threads sweep** — 8 → 64 → 128. Finds the throughput plateau
   where adding more workers no longer increases TPS (server-side
   bottleneck: consensus batch processing, memtable insert, or leader
@@ -597,14 +598,14 @@ memtable insert + flush path.
   minutes, long enough for stable numbers.
 
 **Configuration matrix:** All runs use `--workload write --value-size
-64 --connections 12 --duration-secs 10`.
+64 --duration-secs 10`.
 
-- Run 1: memory, threads=8
-- Run 2: memory, threads=64
-- Run 3: memory, threads=128
-- Run 4: block, threads=8
-- Run 5: block, threads=64
-- Run 6: block, threads=128
+- Run 1: memory, threads=8, connections=4
+- Run 2: memory, threads=64, connections=8
+- Run 3: memory, threads=128, connections=16
+- Run 4: block, threads=8, connections=4
+- Run 5: block, threads=64, connections=8
+- Run 6: block, threads=128, connections=16
 
 ### Baseline Results (memory mode, 2026-07-17)
 
