@@ -59,6 +59,8 @@ pub struct BenchConfig {
     pub store_id: u64,
     pub group_id: u64,
     pub workload: WorkloadKind,
+    /// Storage mode label: `mem`, `file`, or `block`.
+    pub mode: String,
     /// Number of independent gRPC channels (1..=64). Default 4.
     pub connections: u32,
     /// Number of worker tasks (1..=1000). Default 8.
@@ -98,6 +100,7 @@ impl BenchConfig {
             store_id: 1,
             group_id: 1,
             workload,
+            mode: String::new(),
             connections: 4,
             threads: 8,
             duration: Duration::from_secs(5),
@@ -276,6 +279,7 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
         duration_ms: measure_ms,
         warmup_ms,
         workload: cfg.workload,
+        mode: cfg.mode.clone(),
         connections: cfg.connections,
         threads: cfg.threads,
         key_space: cfg.key_space,

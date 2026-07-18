@@ -208,7 +208,7 @@ TEST(CApi, FileCheckpointReopen)
     opt.iu_size     = 1;
     opt.frame_bytes = 4096;
     opt.compression = 1; // lz4 (falls back to stored-raw if unavailable)
-    // Default backend is CT_BACKEND_TEXT (TextPageStore debug backend)
+    // Default backend is CT_BACKEND_FILE (file-based page store)
 
     std::map<std::string, std::string> oracle;
     {
@@ -243,7 +243,7 @@ TEST(CApi, FileCheckpointReopen)
 }
 
 // plan-tree #22: ct_options.backend=CT_BACKEND_BLOCK selects BlockPageStore
-// instead of the default TextPageStore -- same round-trip as
+// instead of the default file-based page store -- same round-trip as
 // FileCheckpointReopen above, just through the block-device backend.
 TEST(CApi, BlockDeviceCheckpointReopen)
 {

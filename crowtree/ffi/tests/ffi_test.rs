@@ -143,7 +143,7 @@ fn file_snapshot_reopen_smoke() {
 }
 
 // : Options::backend = PageStoreBackend::Block selects
-// BlockPageStore instead of the default TextPageStore -- same
+// BlockPageStore instead of the default file-based page store -- same
 // round-trip as file_snapshot_reopen_smoke above, just through the
 // block-device backend.
 #[test]

@@ -6,9 +6,10 @@
 // (persist.cc) owns the on-device layout (superblocks + ping-pong regions +
 // manifest + pages) and uses this interface only to read/write/sync bytes.
 //
-// v1 backends are synchronous: MemPageStore (in-memory block device, for tests)
-// and BlockPageStore (array-of-blocks / O_DIRECT file). Rust async callers
-// use the FFI spawn-blocking bridge; a native async PageStore is deferred.
+// v1 backends are synchronous: MemPageStore (in-memory block device),
+// FilePageStore (file-based, no alignment), and BlockPageStore
+// (array-of-blocks / O_DIRECT). Rust async callers use the FFI
+// spawn-blocking bridge; a native async PageStore is deferred.
 //
 // Key work: byte device abstraction, in-memory backend, file backend, IU
 // geometry, durability barrier.
@@ -19,7 +20,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <functional>
-#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -76,22 +76,20 @@ class PageStore
     // callback immediately (ready completion). Backends with a real async
     // engine (IoUring) override these.
 
-    virtual uint64_t submit_read(uint64_t off, void *buf, size_t len,
-                                 std::function<void(Status)> on_complete) // NOLINT(performance-unnecessary-value-param)
+    virtual uint64_t submit_read(uint64_t off, void *buf, size_t len, const std::function<void(Status)> &on_complete)
     {
         on_complete(read_at(off, static_cast<uint8_t *>(buf), len));
         return 0;
     }
 
-    virtual uint64_t
-    submit_write(uint64_t off, const void *buf, size_t len,
-                 std::function<void(Status)> on_complete) // NOLINT(performance-unnecessary-value-param)
+    virtual uint64_t submit_write(uint64_t off, const void *buf, size_t len,
+                                  const std::function<void(Status)> &on_complete)
     {
         on_complete(write_at(off, static_cast<const uint8_t *>(buf), len));
         return 0;
     }
 
-    virtual Status submit_fsync(std::function<void(Status)> on_complete) // NOLINT(performance-unnecessary-value-param)
+    virtual Status submit_fsync(const std::function<void(Status)> &on_complete)
     {
         on_complete(sync());
         return Status::Ok();
@@ -118,8 +116,9 @@ class PageStore
     SyncMode sync_mode_ = SyncMode::kFull;
 };
 
-// In-memory block device. Durable only for the lifetime of the object; used by
-// tests and as the v1 BlockPageStore(mem) backend.
+// In-memory block device. Durable only for the lifetime of the object;
+// used as the v1 BlockPageStore(mem) backend and for the mem-block
+// bench mode.
 class MemPageStore : public PageStore
 {
   public:

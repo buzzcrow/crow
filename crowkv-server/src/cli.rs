@@ -64,11 +64,20 @@ pub struct Cli {
     pub data_root: Option<std::path::PathBuf>,
 
     /// Durable backend for the crowtree engine (only used when `--kv-engine
-    /// crowtree`). `text` (default) is the debug text-file backend; `block`
-    /// opens `data_root`'s per-group directory with `BlockPageStore`
-    /// (array-of-blocks, `O_DIRECT`) for a real SSD/SCM deployment target.
-    #[arg(long, default_value = "text", value_parser = ["text", "block"])]
+    /// crowtree`). `file` (default) is the file-based page store (no
+    /// alignment); `block` opens `data_root`'s per-group directory with
+    /// `BlockPageStore` (array-of-blocks, `O_DIRECT`) for a real SSD/SCM
+    /// deployment target; `mem-block` uses an in-memory block device (no
+    /// alignment, RAM/SCM/PMEM model).
+    #[arg(long, default_value = "file", value_parser = ["file", "block", "mem-block"])]
     pub kv_backend: String,
+
+    /// WAL storage backend. `file` (default) uses `tokio::fs` for WAL
+    /// segment files; `mem-block` uses an in-memory block device (no
+    /// alignment); `block-device` uses an aligned block device model
+    /// (SSD/NVMe, 4K I/O unit).
+    #[arg(long, default_value = "file", value_parser = ["file", "mem-block", "block-device"])]
+    pub wal_backend: String,
 
     /// Metrics flush interval in seconds. 0 disables metrics logging.
     /// Default: 5.

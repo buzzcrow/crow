@@ -11,7 +11,6 @@
 
 use std::io;
 
-#[cfg(feature = "test-util")]
 use super::block_backend;
 use super::file_backend;
 
@@ -24,7 +23,6 @@ pub struct WalFile {
 
 pub(crate) enum WalFileInner {
     File(file_backend::FileBackendFile),
-    #[cfg(feature = "test-util")]
     Block(block_backend::BlockSegment),
 }
 
@@ -36,7 +34,6 @@ impl WalFile {
     pub async fn write_at(&mut self, data: &[u8], offset: u64) -> io::Result<usize> {
         match &mut self.inner {
             WalFileInner::File(f) => f.write_at(data, offset).await,
-            #[cfg(feature = "test-util")]
             WalFileInner::Block(f) => f.write_at(data, offset),
         }
     }
@@ -54,7 +51,6 @@ impl WalFile {
     ) -> io::Result<usize> {
         match &mut self.inner {
             WalFileInner::File(f) => f.write_vectored_at(bufs, offset).await,
-            #[cfg(feature = "test-util")]
             WalFileInner::Block(f) => f.write_vectored_at(bufs, offset),
         }
     }
@@ -66,7 +62,6 @@ impl WalFile {
     pub async fn read_at(&mut self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
         match &mut self.inner {
             WalFileInner::File(f) => f.read_at(buf, offset).await,
-            #[cfg(feature = "test-util")]
             WalFileInner::Block(f) => f.read_at(buf, offset),
         }
     }
@@ -78,7 +73,6 @@ impl WalFile {
     pub async fn read_exact_at(&mut self, buf: &mut [u8], offset: u64) -> io::Result<()> {
         match &mut self.inner {
             WalFileInner::File(f) => f.read_exact_at(buf, offset).await,
-            #[cfg(feature = "test-util")]
             WalFileInner::Block(f) => f.read_exact_at(buf, offset),
         }
     }
@@ -90,7 +84,6 @@ impl WalFile {
     pub async fn fdatasync(&self) -> io::Result<()> {
         match &self.inner {
             WalFileInner::File(f) => f.fdatasync().await,
-            #[cfg(feature = "test-util")]
             WalFileInner::Block(f) => f.fdatasync(),
         }
     }
@@ -102,7 +95,6 @@ impl WalFile {
     pub async fn fsync(&self) -> io::Result<()> {
         match &self.inner {
             WalFileInner::File(f) => f.fsync().await,
-            #[cfg(feature = "test-util")]
             WalFileInner::Block(f) => f.fsync(),
         }
     }
@@ -114,7 +106,6 @@ impl WalFile {
     pub async fn len(&mut self) -> io::Result<u64> {
         match &mut self.inner {
             WalFileInner::File(f) => f.len().await,
-            #[cfg(feature = "test-util")]
             WalFileInner::Block(f) => f.len(),
         }
     }
@@ -126,7 +117,6 @@ impl WalFile {
     pub async fn truncate(&self, len: u64) -> io::Result<()> {
         match &self.inner {
             WalFileInner::File(f) => f.truncate(len).await,
-            #[cfg(feature = "test-util")]
             WalFileInner::Block(f) => f.truncate(len),
         }
     }

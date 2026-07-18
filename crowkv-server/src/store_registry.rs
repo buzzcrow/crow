@@ -43,14 +43,28 @@ impl KvEngineKind {
     }
 }
 
+/// Parse the `--wal-backend` CLI value (`clap`'s `value_parser` already
+/// restricts it to `["file", "mem-block", "block-device"]`) into the
+/// WAL's [`IoBackend`].
+#[must_use]
+pub fn parse_wal_backend(s: &str) -> IoBackend {
+    match s {
+        "mem-block" => IoBackend::mem_block(),
+        "block-device" => IoBackend::block_device(),
+        _ => IoBackend::File,
+    }
+}
+
 /// Parse the `--kv-backend` CLI value (`clap`'s `value_parser` already
-/// restricts it to `["text", "block"]`) into the FFI's [`CrowtreeBackend`].
-/// Only meaningful when `KvEngineKind::Crowtree` is selected.
+/// restricts it to `["file", "block", "mem-block"]`) into the FFI's
+/// [`CrowtreeBackend`]. Only meaningful when `KvEngineKind::Crowtree`
+/// is selected.
 #[must_use]
 pub fn parse_crowtree_backend(s: &str) -> CrowtreeBackend {
     match s {
         "block" => CrowtreeBackend::Block,
-        _ => CrowtreeBackend::Text,
+        "mem-block" => CrowtreeBackend::MemBlock,
+        _ => CrowtreeBackend::File,
     }
 }
 
@@ -123,7 +137,7 @@ impl KvStoreRegistry {
             wal_backend,
             kv_engine: KvEngineKind::Memory,
             data_root,
-            crowtree_backend: CrowtreeBackend::Text,
+            crowtree_backend: CrowtreeBackend::File,
             port_pool: Mutex::new(Vec::new()),
             metrics_registry: None,
             wal_skip_fsync: false,

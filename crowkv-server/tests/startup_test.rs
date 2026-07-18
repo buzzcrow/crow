@@ -79,7 +79,7 @@ async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
         backend.clone(),
         KvEngineKind::Memory,
         &data_root,
-        CrowtreeBackend::Text,
+        CrowtreeBackend::File,
         false,
         "",
     )
@@ -217,7 +217,7 @@ async fn crowtree_engine_persists_across_restart(crowtree_backend: CrowtreeBacke
 
 #[tokio::test]
 async fn create_group_with_wal_crowtree_engine_persists_across_restart() {
-    crowtree_engine_persists_across_restart(CrowtreeBackend::Text).await;
+    crowtree_engine_persists_across_restart(CrowtreeBackend::File).await;
 }
 
 /// : same scenario, through `BlockPageStore` (`O_DIRECT`)

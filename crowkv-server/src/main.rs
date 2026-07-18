@@ -98,7 +98,9 @@ async fn main() {
         .unwrap_or_else(|| wal_root.parent().unwrap_or_else(|| Path::new("")).join("ctdata"));
     let kv_engine = KvEngineKind::parse(&args.kv_engine);
     let crowtree_backend = crowkv_server::store_registry::parse_crowtree_backend(&args.kv_backend);
-    let wal_backend = Arc::new(crowkv::wal::IoBackend::detect());
+    let wal_backend = Arc::new(crowkv_server::store_registry::parse_wal_backend(
+        &args.wal_backend,
+    ));
 
     let registry = Arc::new(
         KvStoreRegistry::with_runtime(election_cfg, wal_root, config_root, wal_backend)

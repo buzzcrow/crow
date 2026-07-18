@@ -13,7 +13,6 @@
 #include "crowtree/async_page_store.h"
 #include "crowtree/block_page_store.h"
 #include "crowtree/crowtree.h"
-#include "crowtree/log.h"
 #include "crowtree/page_store.h"
 #include "crowtree/snapshot_io.h"
 #include "crowtree/text_page_store.h"
@@ -212,23 +211,6 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
     }
     o.compression = opt->compression == 1 ? compress_algo::kLz4 : compress_algo::kNone;
 
-    // Logging config (no-op when built without spdlog).
-    if (opt->log_dir != nullptr && opt->log_dir[0] != '\0') {
-        o.log_dir = opt->log_dir;
-    }
-    if (opt->log_level != nullptr && opt->log_level[0] != '\0') {
-        o.log_level = opt->log_level;
-    }
-    if (opt->log_file_prefix != nullptr && opt->log_file_prefix[0] != '\0') {
-        o.log_file_prefix = opt->log_file_prefix;
-    }
-    if (opt->log_max_file_mb != 0) {
-        o.log_max_file_mb = opt->log_max_file_mb;
-    }
-    if (opt->log_max_files != 0) {
-        o.log_max_files = opt->log_max_files;
-    }
-
     // Map ct_sync_mode → SyncMode
     SyncMode sm = SyncMode::kFull;
     switch (opt->sync_mode) {
@@ -261,8 +243,8 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
         }
         h->tree = std::move(t);
     }
-    else if (opt->backend == CT_BACKEND_TEXT) {
-        // Text debug backend: human-readable .ck files
+    else if (opt->backend == CT_BACKEND_FILE) {
+        // File backend: file-based page store, no alignment
         uint32_t                       store_id = opt->store_id;
         uint32_t                       group_id = opt->group_id;
         std::unique_ptr<TextPageStore> ts;
@@ -280,10 +262,24 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
         }
         h->tree = std::move(t);
     }
+    else if (opt->backend == CT_BACKEND_MEM_BLOCK) {
+        // Mem block device: in-memory, no alignment (iu=1)
+        uint32_t iu = opt->iu_size == 0 ? 1 : opt->iu_size;
+        auto     ms = std::make_unique<MemPageStore>(iu);
+        ms->set_sync_mode(sm);
+        h->store     = std::move(ms);
+        o.page_store = h->store.get();
+        std::unique_ptr<Crowtree> t;
+        Status                    os = Crowtree::open(o, &t);
+        if (!os.ok()) {
+            return to_status(os);
+        }
+        h->tree = std::move(t);
+    }
     else {
-        // CT_BACKEND_BLOCK: array-of-blocks BlockPageStore
-        uint64_t                        block_size = opt->block_size == 0 ? (64ULL * 1024 * 1024) : opt->block_size;
-        uint32_t                        iu         = opt->iu_size == 0 ? 4096 : opt->iu_size;
+        // CT_BACKEND_BLOCK: block device, 4K aligned, O_DIRECT
+        uint64_t block_size = opt->block_size == 0 ? (uint64_t{64} * 1024 * 1024) : opt->block_size;
+        uint32_t iu         = opt->iu_size == 0 ? 4096 : opt->iu_size;
         std::unique_ptr<BlockPageStore> bs;
         Status s = BlockPageStore::open_blocks(opt->path, opt->store_id, opt->group_id, block_size, iu, &bs);
         if (!s.ok()) {
@@ -317,23 +313,6 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
 void ct_close(ct_tree *t)
 {
     delete t;
-}
-
-void ct_init_logging(const char *log_dir, const char *level, size_t max_file_mb, size_t max_files,
-                     const char *file_prefix)
-{
-    crowtree::init_logging(log_dir != nullptr ? log_dir : "", level != nullptr ? level : "info", max_file_mb, max_files,
-                           file_prefix != nullptr ? file_prefix : "");
-}
-
-void ct_flush_logging()
-{
-    crowtree::flush_logging();
-}
-
-void ct_shutdown_logging()
-{
-    crowtree::shutdown_logging();
 }
 
 ct_status ct_snapshot(ct_tree *t, uint64_t *out_last_applied)
@@ -410,13 +389,6 @@ void ct_get_stats(const ct_tree *t, ct_stats *out)
     out->buffer_pool_dirty         = s.buffer_pool_dirty;
     out->buffer_pool_used          = s.buffer_pool_used;
     out->buffer_pool_num_frames    = s.buffer_pool_num_frames;
-    out->mt_upsert_total           = s.mt_upsert_total;
-    out->mt_get_total              = s.mt_get_total;
-    out->mt_get_hit_total          = s.mt_get_hit_total;
-    out->flush_drain_total         = s.flush_drain_total;
-    out->flush_entries_total       = s.flush_entries_total;
-    out->l1_get_total              = s.l1_get_total;
-    out->l1_get_hit_total          = s.l1_get_hit_total;
 }
 
 uint64_t ct_evict_clean_leaves(ct_tree *t, uint64_t max_resident_leaves)
