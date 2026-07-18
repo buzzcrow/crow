@@ -194,7 +194,7 @@ impl BenchFixture {
                 mgmt_port: unique_test_port(),
                 grpc_port: unique_test_port(),
                 election_profile: Some("test".into()),
-                metrics_interval: Some(1),
+                metrics_interval: Some(5),
                 ..Default::default()
             };
             mode.apply_to(&mut body);
@@ -310,7 +310,7 @@ impl BenchFixture {
         self.workspace_dir.join(format!("N-{node_id}"))
     }
 
-    /// Locate and read this node's `log/metrics-<timestamp>-<pid>.log`
+    /// Locate and read this node's `log/crowkv-server-metrics-<timestamp>-<pid>.log`
     /// file (see `crowkv::common::logging::open_metrics_log`).
     fn read_node_metrics_log(&self, node_id: &str, pid: u32) -> Option<String> {
         let log_dir = self.node_workspace(node_id).join("log");
@@ -319,7 +319,7 @@ impl BenchFixture {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with("metrics-") && name.ends_with(suffix.as_str()) {
+            if name.contains("-metrics-") && name.ends_with(suffix.as_str()) {
                 return std::fs::read_to_string(entry.path()).ok();
             }
         }

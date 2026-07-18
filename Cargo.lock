@@ -611,7 +611,7 @@ dependencies = [
  "crowkv",
  "crowtree-ffi",
  "dashmap",
- "file-rotate",
+ "flate2",
  "parking_lot",
  "prost",
  "serde",
@@ -1007,16 +1007,6 @@ name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
-
-[[package]]
-name = "file-rotate"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e8e2fa049328a1f3295991407a88585805d126dfaadf74b9fe8c194c730aafc"
-dependencies = [
- "chrono",
- "flate2",
-]
 
 [[package]]
 name = "find-msvc-tools"
