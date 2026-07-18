@@ -60,7 +60,7 @@ pub struct DeployNodeServerBody {
     pub binary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub election_profile: Option<String>,
-    /// `--kv-engine` value (e.g. `"memory"`, `"crowtree"`).
+    /// `--kv-engine` value (e.g. `"crowtree"`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kv_engine: Option<String>,
     /// `--kv-backend` value (e.g. `"file"`, `"block"`, `"mem-block"`).

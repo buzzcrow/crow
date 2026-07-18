@@ -75,6 +75,9 @@ async fn main() {
         management_addr = %args.management_addr,
         management_port = args.management_port,
         election_profile = %args.election_profile,
+        kv_engine = %args.kv_engine,
+        kv_backend = %args.kv_backend,
+        wal_backend = %args.wal_backend,
         "parsed CLI arguments"
     );
 

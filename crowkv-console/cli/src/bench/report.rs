@@ -74,6 +74,7 @@ pub fn percentiles_from_histogram(h: &Histogram<u64>) -> Percentiles {
 pub struct OpReport {
     pub ops: u64,
     pub errors: u64,
+    pub no_leader: u64,
     pub not_found: u64,
     pub latency_us: Percentiles,
 }
@@ -266,6 +267,9 @@ impl BenchReport {
                 let _ = writeln!(out, "- {kind}:");
                 let _ = writeln!(out, "  - ops: {} ({op_qps:.1} ops/s)", op.ops);
                 let _ = writeln!(out, "  - errors: {}", op.errors);
+                if op.no_leader > 0 {
+                    let _ = writeln!(out, "  - no_leader: {}", op.no_leader);
+                }
                 if op.not_found > 0 {
                     let _ = writeln!(out, "  - not_found: {}", op.not_found);
                 }
@@ -346,10 +350,11 @@ impl BenchReport {
             let p = &op.latency_us;
             let _ = writeln!(
                 out,
-                "{kind:>8}: ops={ops} err={err} nf={nf}  avg={avg}us p50={p50}us p99={p99}us p999={p999}us max={max}us",
+                "{kind:>8}: ops={ops} err={err} nl={nl} nf={nf}  avg={avg}us p50={p50}us p99={p99}us p999={p999}us max={max}us",
                 kind = kind,
                 ops = op.ops,
                 err = op.errors,
+                nl = op.no_leader,
                 nf = op.not_found,
                 avg = p.avg_us,
                 p50 = p.p50_us,
@@ -525,6 +530,7 @@ pub fn aggregate_server_metrics(per_node: &[ServerMetrics]) -> ServerMetrics {
 pub struct OpStats {
     pub ops: u64,
     pub errors: u64,
+    pub no_leader: u64,
     pub not_found: u64,
     pub histogram: Histogram<u64>,
 }
@@ -545,15 +551,19 @@ impl OpStats {
         Self {
             ops: 0,
             errors: 0,
+            no_leader: 0,
             not_found: 0,
             histogram,
         }
     }
 
-    pub fn record(&mut self, latency_us: u64, ok: bool, not_found: bool) {
+    pub fn record(&mut self, latency_us: u64, ok: bool, no_leader: bool, not_found: bool) {
         self.ops += 1;
         if !ok {
             self.errors += 1;
+        }
+        if no_leader {
+            self.no_leader += 1;
         }
         if not_found {
             self.not_found += 1;
@@ -572,6 +582,7 @@ impl OpStats {
     pub fn merge(&mut self, other: &Self) {
         self.ops += other.ops;
         self.errors += other.errors;
+        self.no_leader += other.no_leader;
         self.not_found += other.not_found;
         self.histogram.add(&other.histogram).expect("histogram add");
     }
@@ -581,6 +592,7 @@ impl OpStats {
         OpReport {
             ops: self.ops,
             errors: self.errors,
+            no_leader: self.no_leader,
             not_found: self.not_found,
             latency_us: percentiles_from_histogram(&self.histogram),
         }

@@ -19,20 +19,20 @@ use std::sync::Mutex;
 /// so the two paths can never disagree on which engine a fresh group gets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KvEngineKind {
-    /// In-memory, non-durable `InMemKV`. No longer the `--kv-engine` CLI
-    /// default (flipped to `Crowtree`) — kept as the explicit
-    /// low-durability/test/dev choice, and as the placeholder
-    /// value here before `KvStoreRegistry::with_kv_engine` applies the
-    /// CLI-parsed choice.
+    /// In-memory, non-durable `InMemKV`. Test-only — not selectable via
+    /// CLI. Used by unit/integration tests that construct a
+    /// `KvStoreRegistry` programmatically without going through the
+    /// `--kv-engine` CLI flag.
     Memory,
     /// Durable crowtree file under the registry's `data_root`, one file per
     /// `(store_id, group_id)` — see `startup::store_crowtree_path`.
+    /// The only production engine, selectable via `--kv-engine crowtree`.
     Crowtree,
 }
 
 impl KvEngineKind {
     /// Parse the `--kv-engine` CLI value (`clap`'s `value_parser` already
-    /// restricts it to `["memory", "crowtree"]`, so any other input is a
+    /// restricts it to `["crowtree"]`, so any other input is a
     /// caller bug, not a user-facing error path).
     #[must_use]
     pub fn parse(s: &str) -> Self {
@@ -135,7 +135,7 @@ impl KvStoreRegistry {
             wal_root,
             config_root,
             wal_backend,
-            kv_engine: KvEngineKind::Memory,
+            kv_engine: KvEngineKind::Crowtree,
             data_root,
             crowtree_backend: CrowtreeBackend::File,
             port_pool: Mutex::new(Vec::new()),

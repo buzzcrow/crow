@@ -87,6 +87,7 @@ struct KvMetrics {
     bytes_in_bw: Arc<Bandwidth>,
     bytes_out_bw: Arc<Bandwidth>,
     errors_c: Arc<Counter>,
+    no_leader_c: Arc<Counter>,
 }
 
 impl KvMetrics {
@@ -100,6 +101,7 @@ impl KvMetrics {
             bytes_in_bw: registry.register_bandwidth(format!("{prefix}.kv.bytes_in.bw")),
             bytes_out_bw: registry.register_bandwidth(format!("{prefix}.kv.bytes_out.bw")),
             errors_c: registry.register_counter(format!("{prefix}.kv.errors.c")),
+            no_leader_c: registry.register_counter(format!("{prefix}.kv.no-leader.c")),
         }
     }
 }
@@ -169,12 +171,21 @@ impl KvService for KvStoreService {
             m.bytes_out_bw.observe(resp.value.len() as u64);
             if !resp.ok {
                 m.errors_c.inc();
+                if resp.error == "not leader" {
+                    m.no_leader_c.inc();
+                }
             }
         }
         if !resp.ok {
+            let (replica_id, leader_id) = self
+                .store
+                .get_group(req.group_id)
+                .map_or((0, 0), |g| (g.local_replica().id, g.leader_id()));
             warn!(
                 store_id = self.store.store_id,
                 group_id = req.group_id,
+                replica_id,
+                leader_id,
                 request_id = req.request_id,
                 error = resp.error,
                 not_leader_hint = resp.not_leader_hint,
@@ -215,6 +226,9 @@ impl KvService for KvStoreService {
                             m.bytes_out_bw.observe(resp.value.len() as u64);
                             if !resp.ok {
                                 m.errors_c.inc();
+                                if resp.error == "not leader" {
+                                    m.no_leader_c.inc();
+                                }
                             }
                         }
                         resp.request_id = req.request_id;
@@ -247,6 +261,9 @@ impl KvService for KvStoreService {
                             m.bytes_out_bw.observe(resp.value.len() as u64);
                             if !resp.ok {
                                 m.errors_c.inc();
+                                if resp.error == "not leader" {
+                                    m.no_leader_c.inc();
+                                }
                             }
                         }
                         resp.not_leader_hint = endpoint;
@@ -275,6 +292,9 @@ impl KvService for KvStoreService {
             m.bytes_out_bw.observe(resp.value.len() as u64);
             if !resp.ok {
                 m.errors_c.inc();
+                if resp.error == "not leader" {
+                    m.no_leader_c.inc();
+                }
             }
         }
         resp.request_id = req.request_id;
@@ -311,12 +331,21 @@ impl KvService for KvStoreService {
             m.bytes_out_bw.observe(resp.value.len() as u64);
             if !resp.ok {
                 m.errors_c.inc();
+                if resp.error == "not leader" {
+                    m.no_leader_c.inc();
+                }
             }
         }
         if !resp.ok {
+            let (replica_id, leader_id) = self
+                .store
+                .get_group(req.group_id)
+                .map_or((0, 0), |g| (g.local_replica().id, g.leader_id()));
             warn!(
                 store_id = self.store.store_id,
                 group_id = req.group_id,
+                replica_id,
+                leader_id,
                 request_id = req.request_id,
                 error = resp.error,
                 not_leader_hint = resp.not_leader_hint,
@@ -363,6 +392,9 @@ impl KvService for KvStoreService {
                             m.bytes_out_bw.observe(scan_response_size(&resp));
                             if !resp.ok {
                                 m.errors_c.inc();
+                                if resp.error == "not leader" {
+                                    m.no_leader_c.inc();
+                                }
                             }
                         }
                         resp.request_id = req.request_id;
@@ -405,6 +437,9 @@ impl KvService for KvStoreService {
             m.bytes_out_bw.observe(scan_response_size(&resp));
             if !resp.ok {
                 m.errors_c.inc();
+                if resp.error == "not leader" {
+                    m.no_leader_c.inc();
+                }
             }
         }
         if !resp.ok {
@@ -447,9 +482,15 @@ impl KvService for KvStoreService {
             )
             .await;
         if !resp.ok {
+            let (replica_id, leader_id) = self
+                .store
+                .get_group(req.group_id)
+                .map_or((0, 0), |g| (g.local_replica().id, g.leader_id()));
             warn!(
                 store_id = self.store.store_id,
                 group_id = req.group_id,
+                replica_id,
+                leader_id,
                 request_id = req.request_id,
                 error = resp.error,
                 not_leader_hint = resp.not_leader_hint,

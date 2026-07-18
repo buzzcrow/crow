@@ -34,7 +34,7 @@ pub struct DeployRequest {
     /// current executable.
     pub binary: Option<PathBuf>,
     pub election_profile: Option<String>,
-    /// `--kv-engine` value (e.g. `"memory"`, `"crowtree"`). `None`
+    /// `--kv-engine` value (e.g. `"crowtree"`). `None`
     /// leaves the spawned server's own default in effect.
     pub kv_engine: Option<String>,
     /// `--kv-backend` value (e.g. `"file"`, `"block"`, `"mem-block"`). Only

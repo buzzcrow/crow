@@ -49,13 +49,13 @@ pub struct Cli {
     #[arg(long, default_value = "default", value_parser = ["default", "test", "e2e", "bench"])]
     pub election_profile: String,
 
-    /// KV storage engine backing each group's learner. `crowtree` (default)
-    /// durably persists each group's state to its
-    /// own file under `--data-root` (recovered by replaying the WAL through
-    /// it on every restart — see `PxLocalReplica::restore_from_replay_with_engine`);
-    /// `memory` is the in-memory, non-durable `InMemKV`, kept available as
-    /// the explicit low-durability/test/dev choice.
-    #[arg(long, default_value = "crowtree", value_parser = ["memory", "crowtree"])]
+    /// KV storage engine backing each group's learner. `crowtree` (default
+    /// and only production option) durably persists each group's state to
+    /// its own file under `--data-root` (recovered by replaying the WAL
+    /// through it on every restart — see
+    /// `PxLocalReplica::restore_from_replay_with_engine`). The in-memory
+    /// `InMemKV` engine is test-only and not selectable via CLI.
+    #[arg(long, default_value = "crowtree", value_parser = ["crowtree"])]
     pub kv_engine: String,
 
     /// Root directory for durable per-group crowtree files (only used when
