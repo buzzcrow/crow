@@ -402,6 +402,7 @@ void ct_get_stats(const ct_tree *t, ct_stats *out)
     out->gc_watermark              = s.gc_watermark;
     out->io_failed                 = s.io_failed ? 1 : 0;
     out->snapshot_pages_written    = s.snapshot_pages_written;
+    out->snapshot_pages_total      = s.snapshot_pages_total;
     out->snapshot_segments_written = s.snapshot_segments_written;
     out->buffer_pool_hits          = s.buffer_pool_hits;
     out->buffer_pool_misses        = s.buffer_pool_misses;
@@ -411,6 +412,37 @@ void ct_get_stats(const ct_tree *t, ct_stats *out)
     out->buffer_pool_dirty         = s.buffer_pool_dirty;
     out->buffer_pool_used          = s.buffer_pool_used;
     out->buffer_pool_num_frames    = s.buffer_pool_num_frames;
+}
+
+char *ct_flush_metrics_str(ct_tree *t, double window_secs, const char *timestamp, size_t width)
+{
+    if (t == nullptr || timestamp == nullptr) {
+        return nullptr;
+    }
+    std::string str = t->tree->flush_metrics_str(window_secs, timestamp, width);
+    if (str.empty()) {
+        return nullptr;
+    }
+    char *out = static_cast<char *>(std::malloc(str.size() + 1));
+    if (out == nullptr) {
+        return nullptr;
+    }
+    std::memcpy(out, str.data(), str.size());
+    out[str.size()] = '\0';
+    return out;
+}
+
+size_t ct_max_name_len(const ct_tree *t)
+{
+    if (t == nullptr) {
+        return 0;
+    }
+    return t->tree->max_name_len();
+}
+
+void ct_free_string(char *s)
+{
+    std::free(s);
 }
 
 uint64_t ct_evict_clean_leaves(ct_tree *t, uint64_t max_resident_leaves)

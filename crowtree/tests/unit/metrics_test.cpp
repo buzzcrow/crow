@@ -1,7 +1,9 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
+#include "crowtree/crowtree.h"
 #include "crowtree/metrics.h"
+#include "crowtree/page_store.h"
 
 #include <gtest/gtest.h>
 
@@ -157,6 +159,33 @@ TEST(MetricsRegistry, FlushFormat)
     EXPECT_NE(output.find("s.1.g.0.buf.resident.g"), std::string::npos);
     EXPECT_NE(output.find("s.1.kv.scan.l"), std::string::npos);
     EXPECT_NE(output.find("512"), std::string::npos);
+}
+
+TEST(MetricsRegistry, FlushMetricsStrFormat)
+{
+    MemPageStore store(1);
+    Options      opt;
+    opt.page_store = &store;
+    Crowtree t(opt);
+    t.init_metrics("s.0.g.0");
+
+    // Trigger a snapshot to populate some metrics.
+    ASSERT_TRUE(t.apply(1, Batch{{{.key = "k", .kind = OpKind::kPut, .value = "v"}}}).ok());
+    ASSERT_TRUE(t.flush().ok());
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
+
+    std::string out = t.flush_metrics_str(5.0, "2026-07-15T16:30:05.123Z", 0);
+    ASSERT_FALSE(out.empty());
+    EXPECT_NE(out.find("[cpp-metrics"), std::string::npos);
+    EXPECT_NE(out.find("window=5.00s"), std::string::npos);
+    // Latency section should use us units.
+    EXPECT_NE(out.find("us"), std::string::npos);
+    // Bandwidth section should use KB.
+    EXPECT_NE(out.find("KB"), std::string::npos);
+    // tps column should be present.
+    EXPECT_NE(out.find("tps"), std::string::npos);
+    // max_name_len should be non-zero after init_metrics.
+    EXPECT_GT(t.max_name_len(), 0U);
 }
 
 } // namespace

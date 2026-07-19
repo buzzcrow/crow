@@ -17,7 +17,7 @@ use tokio::sync::oneshot;
 use tracing::{info, trace};
 
 use crate::common::config::WalConfig;
-use crate::metrics::LatencySummary;
+use crate::metrics::{Bandwidth, LatencySummary};
 use crate::paxos::roles::SlotIndex;
 use crate::paxos::PxGroupId;
 
@@ -78,6 +78,12 @@ pub struct WalEngine {
     /// Optional latency summary for `append` calls. Set via
     /// [`Self::set_append_summary`] when a metrics registry is wired.
     append_summary: OnceLock<Arc<LatencySummary>>,
+    /// Optional latency summary for `fdatasync` calls. Shared with writer
+    /// tasks via `Arc<OnceLock>` so it can be set after spawn.
+    fsync_summary: Arc<OnceLock<Arc<LatencySummary>>>,
+    /// Optional bandwidth handle for batch write bytes. Shared with writer
+    /// tasks via `Arc<OnceLock>` so it can be set after spawn.
+    write_bandwidth: Arc<OnceLock<Arc<Bandwidth>>>,
 }
 
 impl Drop for WalEngine {
@@ -108,6 +114,8 @@ impl WalEngine {
         let next_segment_id = Arc::new(AtomicU64::new(1));
         let flush_count = Arc::new(AtomicU64::new(0));
         let records_flushed = Arc::new(AtomicU64::new(0));
+        let fsync_summary: Arc<OnceLock<Arc<LatencySummary>>> = Arc::new(OnceLock::new());
+        let write_bandwidth: Arc<OnceLock<Arc<Bandwidth>>> = Arc::new(OnceLock::new());
 
         let coalesce = Duration::from_micros(config.wal_flush_coalesce_us);
         let watchdog = Duration::from_millis(config.wal_flush_watchdog_ms);
@@ -145,6 +153,8 @@ impl WalEngine {
                 flush_count.clone(),
                 records_flushed.clone(),
                 config.wal_skip_fsync,
+                Arc::clone(&fsync_summary),
+                Arc::clone(&write_bandwidth),
             );
             writer_tasks.push(task);
 
@@ -172,6 +182,8 @@ impl WalEngine {
             flush_count,
             records_flushed,
             append_summary: OnceLock::new(),
+            fsync_summary,
+            write_bandwidth,
         }))
     }
 
@@ -348,6 +360,15 @@ impl WalEngine {
     /// Called once during group creation when a metrics registry is available.
     pub fn set_append_summary(&self, summary: Arc<LatencySummary>) {
         let _ = self.append_summary.set(summary);
+    }
+
+    /// Attach latency summary and bandwidth handles for `fdatasync` and
+    /// batch write bytes instrumentation. Called once during group creation
+    /// when a metrics registry is available. Shared with writer tasks via
+    /// `Arc<OnceLock>` so they pick up the handles without a restart.
+    pub fn set_fsync_metrics(&self, fsync: Arc<LatencySummary>, bandwidth: Arc<Bandwidth>) {
+        let _ = self.fsync_summary.set(fsync);
+        let _ = self.write_bandwidth.set(bandwidth);
     }
 }
 

@@ -196,7 +196,7 @@ impl BenchFixture {
             let mut body = DeployNodeServerBody {
                 mgmt_port: unique_test_port(),
                 grpc_port: unique_test_port(),
-                election_profile: Some("test".into()),
+                election_profile: Some("bench".into()),
                 metrics_interval: Some(5),
                 ..Default::default()
             };

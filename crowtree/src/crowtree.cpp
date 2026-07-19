@@ -224,12 +224,18 @@ PageBase *Crowtree::resident(uint64_t page_id) const
                 std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - dl_t0).count();
             metrics_.demand_load_l->observe(static_cast<uint64_t>(ns));
         }
+        if (metrics_.page_read_bw != nullptr) {
+            metrics_.page_read_bw->observe(blob.size());
+        }
         return nullptr;
     }
     if (metrics_.demand_load_l != nullptr) {
         auto ns =
             std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - dl_t0).count();
         metrics_.demand_load_l->observe(static_cast<uint64_t>(ns));
+    }
+    if (metrics_.page_read_bw != nullptr) {
+        metrics_.page_read_bw->observe(blob.size());
     }
     return install_loaded_page(page_id, addr, phys_len, blob);
 }
@@ -974,8 +980,9 @@ Status Crowtree::flush()
         to_drain.swap(frozen_);
     }
 
-    std::shared_ptr<MemTable> active    = current_active();
-    bool                      wrote_any = false;
+    std::shared_ptr<MemTable> active         = current_active();
+    bool                      wrote_any      = false;
+    uint64_t                  entries_before = flush_entries_total_.load(std::memory_order_relaxed);
     for (auto &mt : to_drain) {
         if (drain_memtable_into_l1_locked(mt.get(), cs)) {
             wrote_any = true;
@@ -1015,7 +1022,8 @@ Status Crowtree::flush()
     last_applied_slot_.store(cs);
     version_.fetch_add(1);
     maybe_evict_locked(); // keep cache bounded; only clean bases go
-    CT_LOG_INFO("[{}] flush: tables={} contiguous_slot={}", name_, to_drain.size(), cs);
+    uint64_t entries_drained = flush_entries_total_.load(std::memory_order_relaxed) - entries_before;
+    CT_LOG_INFO("[{}] flush: tables={} entries={} contiguous_slot={}", name_, to_drain.size(), entries_drained, cs);
     if (metrics_.flush_l != nullptr) {
         auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
         metrics_.flush_l->observe(static_cast<uint64_t>(ns));
@@ -2352,6 +2360,7 @@ EngineStats Crowtree::stats() const
     s.gc_watermark              = gc_floor_.load();
     s.io_failed                 = io_failed_.load();
     s.snapshot_pages_written    = snapshot_pages_written_.load();
+    s.snapshot_pages_total      = snapshot_pages_total_.load();
     s.snapshot_segments_written = snapshot_segments_written_.load();
 
     BufferPool::Stats bp     = pool_->stats();
@@ -2369,6 +2378,7 @@ EngineStats Crowtree::stats() const
     s.mt_get_hit_total    = mt_get_hit_total_.load(std::memory_order_relaxed);
     s.flush_drain_total   = flush_drain_total_.load(std::memory_order_relaxed);
     s.flush_entries_total = flush_entries_total_.load(std::memory_order_relaxed);
+    s.snapshot_total      = snapshot_total_.load(std::memory_order_relaxed);
     s.l1_get_total        = l1_get_total_.load(std::memory_order_relaxed);
     s.l1_get_hit_total    = l1_get_hit_total_.load(std::memory_order_relaxed);
     s.map_lookup_total    = map_lookup_total_.load(std::memory_order_relaxed);
@@ -2376,29 +2386,66 @@ EngineStats Crowtree::stats() const
     return s;
 }
 
-void Crowtree::set_metrics(MetricsRegistry *registry, const std::string &prefix)
+void Crowtree::init_metrics(const std::string &prefix)
 {
-    metrics_.buf_hits        = registry->register_counter(prefix + ".buf.hits.c");
-    metrics_.buf_misses      = registry->register_counter(prefix + ".buf.misses.c");
-    metrics_.buf_evictions   = registry->register_counter(prefix + ".buf.evictions.c");
-    metrics_.buf_writebacks  = registry->register_counter(prefix + ".buf.writebacks.c");
-    metrics_.buf_resident    = registry->register_gauge(prefix + ".buf.resident.g");
-    metrics_.buf_dirty       = registry->register_gauge(prefix + ".buf.dirty.g");
-    metrics_.apply_l         = registry->register_summary(prefix + ".apply.l");
-    metrics_.snapshot_l      = registry->register_summary(prefix + ".snapshot.l");
-    metrics_.mt_upsert_c     = registry->register_counter(prefix + ".mt.upsert.c");
-    metrics_.mt_get_c        = registry->register_counter(prefix + ".mt.get.c");
-    metrics_.mt_get_hit_c    = registry->register_counter(prefix + ".mt.get.hit.c");
-    metrics_.flush_drain_c   = registry->register_counter(prefix + ".flush.drain.c");
-    metrics_.flush_entries_c = registry->register_counter(prefix + ".flush.entries.c");
-    metrics_.l1_get_c        = registry->register_counter(prefix + ".l1.get.c");
-    metrics_.l1_get_hit_c    = registry->register_counter(prefix + ".l1.get.hit.c");
-    metrics_.flush_l         = registry->register_summary(prefix + ".flush.l");
-    metrics_.page_write_l    = registry->register_summary(prefix + ".page.write.l");
-    metrics_.map_lookup_c    = registry->register_counter(prefix + ".map.lookup.c");
-    metrics_.demand_load_l   = registry->register_summary(prefix + ".demand.load.l");
+    metrics_registry_ = std::make_unique<MetricsRegistry>();
+    auto *r           = metrics_registry_.get();
+
+    metrics_.buf_hits                    = r->register_counter(prefix + ".buf.hits.c");
+    metrics_.buf_misses                  = r->register_counter(prefix + ".buf.misses.c");
+    metrics_.buf_evictions               = r->register_counter(prefix + ".buf.evictions.c");
+    metrics_.buf_writebacks              = r->register_counter(prefix + ".buf.writebacks.c");
+    metrics_.buf_resident                = r->register_gauge(prefix + ".buf.resident.g");
+    metrics_.buf_dirty                   = r->register_gauge(prefix + ".buf.dirty.g");
+    metrics_.apply_l                     = r->register_summary(prefix + ".apply.l");
+    metrics_.snapshot_l                  = r->register_summary(prefix + ".snapshot.l");
+    metrics_.mt_upsert_c                 = r->register_counter(prefix + ".mt.upsert.c");
+    metrics_.mt_get_c                    = r->register_counter(prefix + ".mt.get.c");
+    metrics_.mt_get_hit_c                = r->register_counter(prefix + ".mt.get.hit.c");
+    metrics_.flush_drain_c               = r->register_counter(prefix + ".flush.drain.c");
+    metrics_.flush_entries_c             = r->register_counter(prefix + ".flush.entries.c");
+    metrics_.l1_get_c                    = r->register_counter(prefix + ".l1.get.c");
+    metrics_.l1_get_hit_c                = r->register_counter(prefix + ".l1.get.hit.c");
+    metrics_.flush_l                     = r->register_summary(prefix + ".flush.l");
+    metrics_.page_write_l                = r->register_summary(prefix + ".page.write.l");
+    metrics_.map_lookup_c                = r->register_counter(prefix + ".map.lookup.c");
+    metrics_.demand_load_l               = r->register_summary(prefix + ".demand.load.l");
+    metrics_.snapshot_apply_l            = r->register_summary(prefix + ".snapshot.apply.l");
+    metrics_.snapshot_page_write_l       = r->register_summary(prefix + ".snapshot.page.write.io.l");
+    metrics_.snapshot_page_write_cache_c = r->register_counter(prefix + ".snapshot.page.write.cache.c");
+    metrics_.snapshot_page_write_bw      = r->register_bandwidth(prefix + ".snapshot.page.write.bw");
+    metrics_.snapshot_meta_write_bw      = r->register_bandwidth(prefix + ".snapshot.meta.write.bw");
+    metrics_.page_read_bw                = r->register_bandwidth(prefix + ".page.read.bw");
+    metrics_.snapshot_pages_c            = r->register_counter(prefix + ".snapshot.pages.c");
     pool_->set_metrics(metrics_.buf_hits, metrics_.buf_misses, metrics_.buf_evictions, metrics_.buf_writebacks,
                        metrics_.buf_resident, metrics_.buf_dirty);
+}
+
+std::string Crowtree::flush_metrics_str(double window_secs, const char *timestamp, size_t width)
+{
+    if (metrics_registry_ == nullptr) {
+        return {};
+    }
+    char  *buf = nullptr;
+    size_t len = 0;
+    FILE  *fp  = open_memstream(&buf, &len);
+    if (fp == nullptr) {
+        return {};
+    }
+    metrics_registry_->flush_to(fp, window_secs, timestamp, "cpp-metrics", width);
+    std::fflush(fp);
+    std::fclose(fp);
+    std::string result(buf, len);
+    free(buf);
+    return result;
+}
+
+size_t Crowtree::max_name_len() const
+{
+    if (metrics_registry_ == nullptr) {
+        return 0;
+    }
+    return metrics_registry_->max_name_len();
 }
 
 std::shared_ptr<Snapshot> Crowtree::snapshot_view()

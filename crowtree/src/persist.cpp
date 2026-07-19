@@ -418,6 +418,9 @@ Status Crowtree::prepare_snapshot_locked(PreparedSnapshot *out)
         else { // clean: already durable from a prior generation, no rewrite
             *out_addr = pg->durable_addr;
             *out_len  = pg->durable_plen;
+            if (metrics_.snapshot_page_write_cache_c != nullptr) {
+                metrics_.snapshot_page_write_cache_c->inc();
+            }
         }
         return Status::Ok();
     };
@@ -524,6 +527,7 @@ Status Crowtree::prepare_snapshot_locked(PreparedSnapshot *out)
         }
     }
     snapshot_pages_written_.store(pages_written);
+    snapshot_pages_total_.fetch_add(pages_written, std::memory_order_relaxed);
     uint64_t segments_written = 0;
 
     // Pass 2: build a fresh image for every segment still dirty after pass
@@ -676,6 +680,7 @@ void Crowtree::commit_prepared_snapshot(const PreparedSnapshot &prepared)
         }
     }
     version_.fetch_add(1);
+    snapshot_total_.fetch_add(1, std::memory_order_relaxed);
     CT_LOG_INFO("[{}] snapshot committed: seq={} last_applied={} live_pages={} written={} segdir_len={}", name_,
                 prepared.seq, prepared.last_applied_slot, prepared.live_page_count, prepared.pages_written,
                 prepared.segdir_len);
@@ -703,15 +708,30 @@ Status Crowtree::snapshot(uint64_t *out_last_applied)
     PreparedSnapshot prepared;
     Status           ps;
     {
+        auto                        apply_t0 = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> lk(write_mutex_);
         ps = prepare_snapshot_locked(&prepared);
+        if (metrics_.snapshot_apply_l != nullptr) {
+            auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - apply_t0)
+                          .count();
+            metrics_.snapshot_apply_l->observe(static_cast<uint64_t>(ns));
+        }
     }
     if (!ps.ok()) {
         release_snapshot_slot();
         return ps;
     }
     for (auto &w : prepared.page_writes) {
-        Status s = opt_.page_store->write_at(w.addr, w.blob.data(), w.blob.size());
+        auto   write_t0 = std::chrono::steady_clock::now();
+        Status s        = opt_.page_store->write_at(w.addr, w.blob.data(), w.blob.size());
+        if (metrics_.snapshot_page_write_l != nullptr) {
+            auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - write_t0)
+                          .count();
+            metrics_.snapshot_page_write_l->observe(static_cast<uint64_t>(ns));
+        }
+        if (metrics_.snapshot_page_write_bw != nullptr) {
+            metrics_.snapshot_page_write_bw->observe(w.blob.size());
+        }
         if (!s.ok()) {
             release_snapshot_slot();
             return s;
@@ -747,6 +767,17 @@ Status Crowtree::snapshot(uint64_t *out_last_applied)
     if (!sync2.ok()) {
         release_snapshot_slot();
         return sync2;
+    }
+
+    // Observe metadata write bytes: segments + directory + anchor.
+    if (metrics_.snapshot_meta_write_bw != nullptr) {
+        uint64_t meta_bytes = 0;
+        for (const auto &sw : prepared.segment_writes) {
+            meta_bytes += sw.blob.size();
+        }
+        meta_bytes += prepared.directory_write.blob.size();
+        meta_bytes += prepared.anchor_write.blob.size();
+        metrics_.snapshot_meta_write_bw->observe(meta_bytes);
     }
 
     commit_prepared_snapshot(prepared);
@@ -943,6 +974,7 @@ Status Crowtree::open(const Options &opt, std::unique_ptr<Crowtree> *out)
     if (!read_best_anchor(*store, iu, &anchor)) {
         // No valid snapshot: fresh empty tree (already constructed).
         CT_LOG_INFO("[{}] open: no committed anchor; starting empty", opt.name);
+        tree->init_metrics("s." + std::to_string(opt.store_id) + ".g." + std::to_string(opt.group_id));
         *out = std::move(tree);
         return Status::Ok();
     }
@@ -1009,6 +1041,7 @@ Status Crowtree::open(const Options &opt, std::unique_ptr<Crowtree> *out)
 
     CT_LOG_INFO("[{}] open: recovered seq={} last_applied={} root_pid={} segments={}", opt.name, anchor.snapshot_seq,
                 anchor.last_applied_slot, anchor.root_page_id, entries.size());
+    tree->init_metrics("s." + std::to_string(opt.store_id) + ".g." + std::to_string(opt.group_id));
     *out = std::move(tree);
     return Status::Ok();
 }

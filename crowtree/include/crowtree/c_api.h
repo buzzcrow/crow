@@ -58,6 +58,7 @@ using ct_stats = struct
     uint64_t gc_watermark;
     int32_t  io_failed; // 0/1
     uint64_t snapshot_pages_written;
+    uint64_t snapshot_pages_total;
     uint64_t snapshot_segments_written;
     uint64_t buffer_pool_hits;
     uint64_t buffer_pool_misses;
@@ -151,6 +152,18 @@ ct_status ct_clear(ct_tree *t);
 // own doc comment). `out` must be non-null; a no-op (out left untouched)
 // if `t` is null.
 void ct_get_stats(const ct_tree *t, ct_stats *out);
+
+// Flush C++ metrics into a formatted string (for FFI return to Rust).
+// Returns a malloc'd null-terminated string; caller must ct_free_string it.
+// Returns nullptr if t is null or no metrics registry is configured.
+// `width` overrides per-section max name length (0 = use internal max).
+char *ct_flush_metrics_str(ct_tree *t, double window_secs, const char *timestamp, size_t width);
+
+// Return the current max metric name length from the C++ registry.
+size_t ct_max_name_len(const ct_tree *t);
+
+// Free a string returned by ct_flush_metrics_str.
+void ct_free_string(char *s);
 
 // Evict clean, delta-free resident leaf bases down to at most
 // `max_resident_leaves` (crowtree::Crowtree::evict_clean_leaves).

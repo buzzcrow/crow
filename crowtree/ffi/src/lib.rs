@@ -71,6 +71,7 @@ mod sys {
         pub gc_watermark: u64,
         pub io_failed: c_int,
         pub snapshot_pages_written: u64,
+        pub snapshot_pages_total: u64,
         pub snapshot_segments_written: u64,
         pub buffer_pool_hits: u64,
         pub buffer_pool_misses: u64,
@@ -85,6 +86,7 @@ mod sys {
         pub mt_get_hit_total: u64,
         pub flush_drain_total: u64,
         pub flush_entries_total: u64,
+        pub snapshot_total: u64,
         pub l1_get_total: u64,
         pub l1_get_hit_total: u64,
     }
@@ -206,6 +208,16 @@ mod sys {
         ) -> c_int;
         pub fn ct_future_free(f: *mut ct_future);
         pub fn ct_reactor_eventfd(t: *const ct_tree) -> i32;
+
+        // ── Metrics FFI ──
+        pub fn ct_flush_metrics_str(
+            t: *mut ct_tree,
+            window_secs: f64,
+            timestamp: *const c_char,
+            width: usize,
+        ) -> *mut c_char;
+        pub fn ct_max_name_len(t: *const ct_tree) -> usize;
+        pub fn ct_free_string(s: *mut c_char);
     }
 }
 
@@ -364,6 +376,7 @@ pub struct Stats {
     pub gc_watermark: u64,
     pub io_failed: bool,
     pub snapshot_pages_written: u64,
+    pub snapshot_pages_total: u64,
     pub snapshot_segments_written: u64,
     pub buffer_pool_hits: u64,
     pub buffer_pool_misses: u64,
@@ -378,6 +391,7 @@ pub struct Stats {
     pub mt_get_hit_total: u64,
     pub flush_drain_total: u64,
     pub flush_entries_total: u64,
+    pub snapshot_total: u64,
     pub l1_get_total: u64,
     pub l1_get_hit_total: u64,
 }
@@ -620,6 +634,7 @@ impl Crowtree {
             gc_watermark: raw.gc_watermark,
             io_failed: raw.io_failed != 0,
             snapshot_pages_written: raw.snapshot_pages_written,
+            snapshot_pages_total: raw.snapshot_pages_total,
             snapshot_segments_written: raw.snapshot_segments_written,
             buffer_pool_hits: raw.buffer_pool_hits,
             buffer_pool_misses: raw.buffer_pool_misses,
@@ -634,9 +649,29 @@ impl Crowtree {
             mt_get_hit_total: raw.mt_get_hit_total,
             flush_drain_total: raw.flush_drain_total,
             flush_entries_total: raw.flush_entries_total,
+            snapshot_total: raw.snapshot_total,
             l1_get_total: raw.l1_get_total,
             l1_get_hit_total: raw.l1_get_hit_total,
         }
+    }
+
+    /// Flush C++ metrics into a formatted string for the `[cpp-metrics]`
+    /// log section. `width` overrides per-section max name length for
+    /// column alignment with the Rust section (0 = use C++ internal max).
+    pub fn flush_metrics_str(&self, window_secs: f64, timestamp: &str, width: usize) -> String {
+        let c_ts = CString::new(timestamp).unwrap_or_default();
+        let ptr = unsafe { sys::ct_flush_metrics_str(self.as_ptr(), window_secs, c_ts.as_ptr(), width) };
+        if ptr.is_null() {
+            return String::new();
+        }
+        let result = unsafe { std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned() };
+        unsafe { sys::ct_free_string(ptr) };
+        result
+    }
+
+    /// Current max metric name length from the C++ registry.
+    pub fn max_name_len(&self) -> usize {
+        unsafe { sys::ct_max_name_len(self.as_ptr()) }
     }
 
     /// Evict clean, delta-free resident leaf bases down to at most
