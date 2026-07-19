@@ -40,7 +40,14 @@ struct mem_entry
 class MemTable
 {
   public:
-    MemTable() = default;
+    explicit MemTable(uint64_t id = 0) : id_(id)
+    {
+    }
+
+    [[nodiscard]] uint64_t id() const
+    {
+        return id_;
+    }
 
     // Insert/replace with highest-slot-wins. Returns true if the table changed.
     // Drops the write if an existing entry has a >= slot. Also drops writes with
@@ -105,6 +112,7 @@ class MemTable
     bool                                              allow_old_slots_ = false;
     uint64_t min_slot_ = UINT64_MAX; // slot range of current entries; tracked on
     uint64_t max_slot_ = 0;          // upsert, reset when the map empties
+    uint64_t id_       = 0;          // monotonic id for logging (mt0, mt1, …)
 };
 
 } // namespace crowtree

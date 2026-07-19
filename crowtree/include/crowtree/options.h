@@ -149,6 +149,16 @@ struct Options
     // page (falling back to stored-raw when LZ4 is unavailable or unhelpful).
     compress_algo compression = compress_algo::kNone;
 
+    // ── Engine identity (logging context) ──
+    // store_id / group_id from the caller (CrowKV passes its Paxos store/group
+    // ids). Used solely to build `name` for CT_LOG context — not for file naming
+    // (the PageStore handles that) or any logic.
+    uint32_t store_id = 0;
+    uint32_t group_id = 0;
+    // Human-readable label prepended to every CT_LOG line, e.g. "s1.g1".
+    // If empty, logs show "[unnamed]".
+    std::string name;
+
     // ── Logging ──
     // These fields are no longer used by Crowtree::open() — logging is now
     // process-global and must be initialized by the application via
