@@ -13,9 +13,8 @@ use super::{Batch, BatchOp, KVEngine, KVFuture, Op};
 /// In-memory, single-version engine backed by an ordered `BTreeMap` under a
 /// single `RwLock`. The write lock held for the duration of `apply` makes the
 /// batch atomic to readers; ordered iteration gives `scan` / `iter_all` for
-/// free. No persistence — test-only, not selectable via the server CLI
-/// (`--kv-engine` only accepts `crowtree`). Used by unit/integration tests
-/// and behavior validation.
+/// free. No persistence — test-only, not selectable via the server CLI.
+/// Used by unit/integration tests and behavior validation.
 #[derive(Default)]
 pub struct InMemKV {
     map: RwLock<BTreeMap<Vec<u8>, (u64, Cell)>>,

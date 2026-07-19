@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use dashmap::DashMap;
 use parking_lot::Mutex;
 
-use crate::kv::{Batch, InMemKV, KVEngine};
+use crate::kv::{Batch, CrowtreeBackend, CrowtreeEngine, CrowtreeOptions, KVEngine};
 use crate::paxos::roles::{Learner, PxLogEntry, SlotIndex};
 use crate::paxos::PxTerm;
 
@@ -63,8 +63,13 @@ pub struct PxLearner {
 
 impl Default for PxLearner {
     fn default() -> Self {
+        let opt = CrowtreeOptions {
+            backend: CrowtreeBackend::MemBlock,
+            ..Default::default()
+        };
+        let engine = CrowtreeEngine::open(&opt).expect("crowtree mem-block open");
         Self {
-            engine: Box::new(InMemKV::new()),
+            engine: Box::new(engine),
             contiguous_chosen: AtomicU64::new(0),
             contiguous_applied: AtomicU64::new(0),
             last_chosen_slot: AtomicU64::new(0),
@@ -82,12 +87,17 @@ impl PxLearner {
     }
 
     /// Construct a learner with a caller-supplied engine backend (e.g.
-    /// [`crate::kv::CrowtreeEngine`]) instead of the default [`InMemKV`].
+    /// [`crate::kv::CrowtreeEngine`], or [`crate::kv::InMemKV`] in tests).
     #[must_use]
     pub fn with_engine(engine: Box<dyn KVEngine>) -> Self {
         Self {
             engine,
-            ..Self::default()
+            contiguous_chosen: AtomicU64::new(0),
+            contiguous_applied: AtomicU64::new(0),
+            last_chosen_slot: AtomicU64::new(0),
+            last_chosen_term: AtomicU64::new(0),
+            out_of_order: Mutex::new(BTreeMap::new()),
+            dedup: DashMap::new(),
         }
     }
 

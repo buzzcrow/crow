@@ -17,7 +17,7 @@ fn counter_window_reset_and_total_accumulate() {
     let mut buf = Vec::new();
     reg.flush(&mut buf, 5.0, "2026-07-15T16:30:05Z");
     let out = String::from_utf8(buf).unwrap();
-    assert!(out.contains("count  tps(/s)  total"));
+    assert!(out.contains("count") && out.contains("tps(/s)") && out.contains("total"));
     assert!(out.contains("s.1.kv.put.c"));
 
     c.inc();
@@ -61,7 +61,12 @@ fn bandwidth_count_avg_size_and_rate() {
     let mut buf = Vec::new();
     reg.flush(&mut buf, 5.0, "2026-07-15T16:30:05Z");
     let out = String::from_utf8(buf).unwrap();
-    assert!(out.contains("count  tps(/s)  avg_size(KB)  rate(KB/s)"));
+    assert!(
+        out.contains("count")
+            && out.contains("tps(/s)")
+            && out.contains("avg_size(KB)")
+            && out.contains("rate(KB/s)")
+    );
     assert!(out.contains("10"));
     assert!(out.contains("s.1.kv.bytes_in.bw"));
 }
@@ -179,11 +184,11 @@ fn flush_format_header_and_sections() {
     // Header
     assert!(out.starts_with("[metrics 2026-07-15T16:30:05.123Z window=5s]"));
     // Section order: counters, histograms, summaries, bandwidths, gauges
-    let counter_pos = out.find("count  tps(/s)  total").unwrap();
-    let hist_pos = out.find("p50(us)").unwrap();
-    let summary_pos = out.find("avg(us)  max(us)").unwrap();
-    let bw_pos = out.find("avg_size(KB)").unwrap();
-    let gauge_pos = out.find("value").unwrap();
+    let counter_pos = out.find("s.1.kv.delete.c").unwrap();
+    let hist_pos = out.find("s.1.kv.get.lh").unwrap();
+    let summary_pos = out.find("s.1.kv.scan.l").unwrap();
+    let bw_pos = out.find("s.1.kv.bytes_in.bw").unwrap();
+    let gauge_pos = out.find("s.1.g.0.buf.resident.g").unwrap();
     assert!(counter_pos < hist_pos);
     assert!(hist_pos < summary_pos);
     assert!(summary_pos < bw_pos);

@@ -14,7 +14,7 @@ use crate::cluster::status::{CrowtreeStatsView, KvStoreStatus, ReplicaStatus, St
 use crate::common::metrics::{ElectionMetrics, ElectionMetricsSnapshot};
 use crate::common::report::OperationReport;
 use crate::common::time::{anchor_ms_to_instant, instant_to_anchor_ms};
-use crate::kv::{InMemKV, KVEngine};
+use crate::kv::{CrowtreeBackend, CrowtreeEngine, CrowtreeOptions, KVEngine};
 use crate::metrics::{Counter, Gauge, MetricsRegistry};
 use crate::paxos::acceptor::PxAcceptor;
 use crate::paxos::learner::PxLearner;
@@ -443,9 +443,10 @@ impl PxLocalReplica {
     }
 
     /// Rebuild a fresh local replica from WAL replay output, using the
-    /// default in-memory [`KVEngine`] ([`InMemKV`]). See
-    /// [`Self::restore_from_replay_with_engine`] for the full argument and
-    /// for injecting a durable backend (e.g. [`crate::kv::CrowtreeEngine`]).
+    /// default [`KVEngine`] (crowtree with mem-block backend, in-memory).
+    /// See [`Self::restore_from_replay_with_engine`] for the full argument
+    /// and for injecting a durable backend (e.g. [`crate::kv::CrowtreeEngine`]
+    /// with file/block storage).
     ///
     /// # Errors
     ///
@@ -456,7 +457,13 @@ impl PxLocalReplica {
         role: PxLocalReplicaRole,
         replay: &ReplayResult,
     ) -> io::Result<Self> {
-        Self::restore_from_replay_with_engine(id, role, replay, Box::new(InMemKV::new())).await
+        let opt = CrowtreeOptions {
+            backend: CrowtreeBackend::MemBlock,
+            ..Default::default()
+        };
+        let engine = CrowtreeEngine::open(&opt)
+            .map_err(|e| io::Error::other(format!("crowtree mem-block open failed: {e:?}")))?;
+        Self::restore_from_replay_with_engine(id, role, replay, Box::new(engine)).await
     }
 
     /// Rebuild a fresh local replica from WAL replay output, backed by a

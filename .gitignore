@@ -35,6 +35,8 @@ crowkv-console/web/ui/e2e/runtime-data/
 /bench-runs/*
 test-logs/
 
+crowkv-console/cli/bench-runs/
+
 # Per-crate runtime dirs — these names don't appear in source code,
 # so globbing is safe and avoids repeating per crate.
 **/wal/

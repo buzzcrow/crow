@@ -34,11 +34,7 @@ pub struct DeployRequest {
     /// current executable.
     pub binary: Option<PathBuf>,
     pub election_profile: Option<String>,
-    /// `--kv-engine` value (e.g. `"crowtree"`). `None`
-    /// leaves the spawned server's own default in effect.
-    pub kv_engine: Option<String>,
-    /// `--kv-backend` value (e.g. `"file"`, `"block"`, `"mem-block"`). Only
-    /// meaningful when `kv_engine` is `"crowtree"`.
+    /// `--kv-backend` value (e.g. `"file"`, `"block"`, `"mem-block"`).
     pub kv_backend: Option<String>,
     /// `--wal-backend` value (e.g. `"file"`, `"mem-block"`, `"block-device"`).
     pub wal_backend: Option<String>,
@@ -103,13 +99,10 @@ pub async fn deploy_local_in_dir_with_extra_args(
     deploy_local_in_workspace(req, node, Some(workspace_dir), extra_args).await
 }
 
-/// Append `--kv-engine`/`--kv-backend`/`--wal-backend`/`--no-fsync`/`--metrics-interval`
+/// Append `--kv-backend`/`--wal-backend`/`--no-fsync`/`--metrics-interval`
 /// flags to the spawned `crowkv-server` command per `req`. Split out of
 /// `deploy_local_in_workspace` to keep it under the line-count lint.
 fn apply_benchmark_flags(cmd: &mut Command, req: &DeployRequest) {
-    if let Some(kv_engine) = &req.kv_engine {
-        cmd.arg("--kv-engine").arg(kv_engine);
-    }
     if let Some(kv_backend) = &req.kv_backend {
         cmd.arg("--kv-backend").arg(kv_backend);
     }

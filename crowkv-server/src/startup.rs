@@ -14,8 +14,6 @@ use crowkv::kv::{CrowtreeBackend, CrowtreeEngine, CrowtreeOptions, KVEngine};
 use crowkv::wal::replay::replay_group;
 use crowkv::wal::{IoBackend, WalEngine};
 
-use crate::store_registry::KvEngineKind;
-
 /// Load persisted group config from the config file and apply it to the group.
 ///
 /// The config file lives at `{config_root}/store{store_id}_group{group_id}.bin`.
@@ -49,8 +47,7 @@ pub fn store_wal_root(wal_root: &Path, store_id: u64) -> PathBuf {
 }
 
 /// Durable per-group crowtree directory path: `{data_root}/store{store_id}/group{group_id}`.
-/// Only used when `--kv-engine crowtree` is selected. Both `TextPageStore` and
-/// `BlockPageStore` expect a directory path (`TextPageStore` creates a subdirectory
+/// Both `TextPageStore` and `BlockPageStore` expect a directory path (`TextPageStore` creates a subdirectory
 /// `{path}/{store_id}-{group_id}/`, `BlockPageStore` creates `.blk-*` files
 /// directly in `path`).
 #[must_use]
@@ -108,7 +105,7 @@ async fn open_crowtree_engine(
 ///
 /// Returns any I/O or replay/restore error encountered while scanning the
 /// existing WAL, creating the new WAL engine, opening the durable crowtree
-/// engine (when selected), or rebuilding the local replica.
+/// engine, or rebuilding the local replica.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_group_with_wal(
     store_id: u64,
@@ -119,7 +116,6 @@ pub async fn create_group_with_wal(
     wal_root: &Path,
     config_root: &Path,
     wal_backend: Arc<IoBackend>,
-    kv_engine: KvEngineKind,
     data_root: &Path,
     crowtree_backend: CrowtreeBackend,
     skip_fsync: bool,
@@ -134,15 +130,9 @@ pub async fn create_group_with_wal(
     let wal = WalEngine::create(wal_backend, wal_config, group_id).await?;
     wal.set_next_segment_id(replay.max_segment_id.saturating_add(1).max(1));
 
-    let mut local_replica = match kv_engine {
-        KvEngineKind::Memory => {
-            PxLocalReplica::restore_from_replay(replica_id, initial_role, &replay).await?
-        }
-        KvEngineKind::Crowtree => {
-            let engine =
-                open_crowtree_engine(data_root, store_id, group_id, crowtree_backend, log_dir).await?;
-            PxLocalReplica::restore_from_replay_with_engine(replica_id, initial_role, &replay, engine).await?
-        }
+    let mut local_replica = {
+        let engine = open_crowtree_engine(data_root, store_id, group_id, crowtree_backend, log_dir).await?;
+        PxLocalReplica::restore_from_replay_with_engine(replica_id, initial_role, &replay, engine).await?
     };
     local_replica.set_wal(wal);
 

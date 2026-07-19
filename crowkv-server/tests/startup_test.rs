@@ -14,7 +14,6 @@ use crowkv::wal::record::WALRecord;
 use crowkv::wal::replay::replay_group;
 use crowkv::wal::{IoBackend, WalEngine};
 use crowkv_server::startup::{create_group_with_wal, store_wal_root};
-use crowkv_server::store_registry::KvEngineKind;
 
 fn encode_put_payload(key: &[u8], value: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -77,7 +76,6 @@ async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
         &wal_root,
         &config_root,
         backend.clone(),
-        KvEngineKind::Memory,
         &data_root,
         CrowtreeBackend::File,
         false,
@@ -114,7 +112,7 @@ async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
     }));
 }
 
-/// `--kv-engine crowtree` end-to-end: a group backed by a durable
+/// Durable crowtree engine end-to-end: a group backed by a durable
 /// `CrowtreeEngine` file survives a simulated process restart (drop the
 /// group, then call `create_group_with_wal` again against the same
 /// `wal_root`/`data_root`) with its KV state intact -- via full WAL replay
@@ -143,7 +141,6 @@ async fn crowtree_engine_persists_across_restart(crowtree_backend: CrowtreeBacke
         &wal_root,
         &config_root,
         backend.clone(),
-        KvEngineKind::Crowtree,
         &data_root,
         crowtree_backend,
         false,
@@ -194,7 +191,6 @@ async fn crowtree_engine_persists_across_restart(crowtree_backend: CrowtreeBacke
         &wal_root,
         &config_root,
         backend.clone(),
-        KvEngineKind::Crowtree,
         &data_root,
         crowtree_backend,
         false,

@@ -22,11 +22,13 @@
 mod crowtree_engine;
 mod kv_engine;
 mod kv_future;
+#[cfg(any(test, feature = "test-util"))]
 mod mem_kv;
 mod op;
 
 pub use crowtree_engine::{CrowtreeBackend, CrowtreeEngine, CrowtreeOptions, CrowtreeStats};
 pub use kv_engine::KVEngine;
 pub use kv_future::KVFuture;
+#[cfg(any(test, feature = "test-util"))]
 pub use mem_kv::InMemKV;
 pub use op::{Batch, BatchOp, Cell, EngineDiff, Op};

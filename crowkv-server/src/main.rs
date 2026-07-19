@@ -25,7 +25,7 @@ use crowkv::metrics::MetricsRunner;
 use crowkv_server::cli::{parse_id_list, parse_port_list, Cli};
 use crowkv_server::mgmt_api::{self, persisted_port_for_store};
 use crowkv_server::startup::create_group_with_wal;
-use crowkv_server::store_registry::{KvEngineKind, KvStoreRegistry};
+use crowkv_server::store_registry::KvStoreRegistry;
 
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
@@ -75,7 +75,6 @@ async fn main() {
         management_addr = %args.management_addr,
         management_port = args.management_port,
         election_profile = %args.election_profile,
-        kv_engine = %args.kv_engine,
         kv_backend = %args.kv_backend,
         wal_backend = %args.wal_backend,
         "parsed CLI arguments"
@@ -99,7 +98,6 @@ async fn main() {
         .data_root
         .clone()
         .unwrap_or_else(|| wal_root.parent().unwrap_or_else(|| Path::new("")).join("ctdata"));
-    let kv_engine = KvEngineKind::parse(&args.kv_engine);
     let crowtree_backend = crowkv_server::store_registry::parse_crowtree_backend(&args.kv_backend);
     let wal_backend = Arc::new(crowkv_server::store_registry::parse_wal_backend(
         &args.wal_backend,
@@ -107,7 +105,7 @@ async fn main() {
 
     let registry = Arc::new(
         KvStoreRegistry::with_runtime(election_cfg, wal_root, config_root, wal_backend)
-            .with_kv_engine(kv_engine, data_root)
+            .with_data_root(data_root)
             .with_crowtree_backend(crowtree_backend)
             .with_metrics_registry(metrics_runner.as_ref().map_or_else(
                 || Arc::new(std::sync::Mutex::new(crowkv::metrics::MetricsRegistry::new())),
@@ -336,7 +334,6 @@ async fn create_and_start_stores(
                 &registry.wal_root,
                 &registry.config_root,
                 registry.wal_backend.clone(),
-                registry.kv_engine,
                 &registry.data_root,
                 registry.crowtree_backend,
                 registry.wal_skip_fsync,

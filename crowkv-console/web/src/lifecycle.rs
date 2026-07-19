@@ -492,10 +492,6 @@ pub struct DeployNodeServerBody {
     binary: Option<String>,
     #[serde(default)]
     election_profile: Option<String>,
-    /// `--kv-engine` value (e.g. `"crowtree"`).
-    /// Lets `BenchFixture` select the storage mode per deployed node.
-    #[serde(default)]
-    kv_engine: Option<String>,
     /// `--kv-backend` value (e.g. `"file"`, `"block"`, `"mem-block"`).
     #[serde(default)]
     kv_backend: Option<String>,
@@ -590,7 +586,6 @@ pub async fn http_deploy_node_server(
             .clone()
             .or_else(|| std::env::var("CROWKV_SERVER_ELECTION_PROFILE").ok()),
         binary: body.binary.clone().map(std::path::PathBuf::from),
-        kv_engine: body.kv_engine.clone(),
         kv_backend: body.kv_backend.clone(),
         wal_backend: body.wal_backend.clone(),
         no_fsync: body.no_fsync,
