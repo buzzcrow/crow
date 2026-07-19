@@ -165,6 +165,7 @@ mod sys {
             prefix: *const u8,
             plen: usize,
             limit: usize,
+            include_tombstones: c_int,
             out_entries: *mut ct_buf,
             out_count: *mut u64,
             truncated: *mut c_int,
@@ -411,6 +412,7 @@ pub struct ScanEntry {
     pub key: Vec<u8>,
     pub slot: u64,
     pub value: Vec<u8>,
+    pub tombstone: bool,
 }
 
 /// A snapshot-view entry (includes tombstones).
@@ -738,7 +740,13 @@ impl Crowtree {
     }
 
     /// Range scan over `prefix` (empty = whole keyspace).
-    pub fn scan(&self, prefix: &[u8], limit: usize) -> Result<(Vec<ScanEntry>, bool), CtError> {
+    /// When `include_tombstones` is true, tombstone entries are included.
+    pub fn scan(
+        &self,
+        prefix: &[u8],
+        limit: usize,
+        include_tombstones: bool,
+    ) -> Result<(Vec<ScanEntry>, bool), CtError> {
         let mut buf = sys::ct_buf {
             data: std::ptr::null_mut(),
             len: 0,
@@ -751,6 +759,7 @@ impl Crowtree {
                 prefix.as_ptr(),
                 prefix.len(),
                 limit,
+                if include_tombstones { 1 } else { 0 },
                 &mut buf,
                 &mut count,
                 &mut truncated,
@@ -922,13 +931,15 @@ fn decode_scan(bytes: &[u8], count: usize) -> Result<Vec<ScanEntry>, CtError> {
         }
         let klen = rd_u32(bytes, pos) as usize;
         pos += 4;
-        if pos + klen + 12 > bytes.len() {
+        if pos + klen + 13 > bytes.len() {
             return Err(CtError::Corruption);
         }
         let key = bytes[pos..pos + klen].to_vec();
         pos += klen;
         let slot = rd_u64(bytes, pos);
         pos += 8;
+        let tombstone = bytes[pos] != 0;
+        pos += 1;
         let vlen = rd_u32(bytes, pos) as usize;
         pos += 4;
         if pos + vlen > bytes.len() {
@@ -936,7 +947,12 @@ fn decode_scan(bytes: &[u8], count: usize) -> Result<Vec<ScanEntry>, CtError> {
         }
         let value = bytes[pos..pos + vlen].to_vec();
         pos += vlen;
-        out.push(ScanEntry { key, slot, value });
+        out.push(ScanEntry {
+            key,
+            slot,
+            value,
+            tombstone,
+        });
     }
     Ok(out)
 }

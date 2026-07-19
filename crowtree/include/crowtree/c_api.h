@@ -230,7 +230,7 @@ ct_future *ct_snapshot_async(ct_tree *t);
 // or permanently loads one more page, so it always terminates; see
 // Crowtree::scan_async's doc comment). On completion (ct_future_poll),
 // *out_value carries the same packed record format as ct_scan
-// (`[u32 klen][key][u64 slot][u32 vlen][val]*`, always a *malloc'd*, owned
+// (`[u32 klen][key][u64 slot][u8 tombstone][u32 vlen][val]*`, always a *malloc'd*, owned
 // buffer -- pass it to ct_free_buf, no zero-copy borrow attempted here,
 // unlike ct_get_async), *out_slot carries the entry count (mirrors
 // ct_scan's *out_count), and *out_found carries the truncated flag (0/1,
@@ -282,11 +282,12 @@ void ct_future_free(ct_future *f);
 int32_t ct_reactor_eventfd(const ct_tree *t);
 
 // Range scan over `prefix` (empty = whole keyspace), up to `limit` (0 = all).
+// When `include_tombstones` is 1, tombstone entries are included in results.
 // `out_entries` is a packed owned buffer of records:
-//   [u32 klen][key bytes][u64 slot][u32 vlen][value bytes] * count
+//   [u32 klen][key bytes][u64 slot][u8 tombstone][u32 vlen][value bytes] * count
 // `out_count` receives the number of records; *truncated is set if more matched.
-ct_status ct_scan(ct_tree *t, const uint8_t *prefix, size_t plen, size_t limit, ct_buf *out_entries,
-                  uint64_t *out_count, int32_t *truncated);
+ct_status ct_scan(ct_tree *t, const uint8_t *prefix, size_t plen, size_t limit, int include_tombstones,
+                  ct_buf *out_entries, uint64_t *out_count, int32_t *truncated);
 
 // ── Consistent view (compare / iterate) ───────────────────────────
 ct_status ct_snapshot_view(ct_tree *t, ct_view **out);

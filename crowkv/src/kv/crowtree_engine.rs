@@ -28,15 +28,9 @@ pub use crowtree_ffi::Stats as CrowtreeStats;
 /// place is an unchanged, honest reflection of what the C API actually
 /// offers, not a shortcut taken here.
 ///
-/// **`iter_all`/`compare` caveat:** `get`/`scan` merge crowtree's in-memory
-/// (L0) and durable-tree (L1) state internally, so every `apply` is visible
-/// immediately, matching `InMemKV`. `iter_all` (and therefore the default
-/// `compare`) instead reads a durable-tree-only snapshot view, so it flushes
-/// the contiguous-applied prefix first to catch L0 up to L1; a slot that's
-/// still blocked behind an earlier out-of-order gap remains invisible to
-/// `iter_all` until the gap fills in, even though `get`/`scan` already see
-/// it. `InMemKV` has no such gap (every apply is immediately visible), so
-/// this is a real, engine-specific difference to be aware of.
+/// **`iter_all`/`compare` note:** `iter_all` uses `scan(b"", 0, true)`
+/// which merges L0+L1 internally and includes tombstones, so every `apply`
+/// is visible immediately without an explicit `flush()`, matching `InMemKV`.
 pub struct CrowtreeEngine {
     inner: AsyncCrowtree,
 }
@@ -72,6 +66,28 @@ impl CrowtreeEngine {
     #[must_use]
     pub fn stats(&self) -> CrowtreeStats {
         self.inner.handle().stats()
+    }
+
+    /// Full ordered stream including tombstones. Test-only utility.
+    #[must_use]
+    pub fn iter_all(&self) -> Vec<(Vec<u8>, u64, Cell)> {
+        // Use scan(b"", 0, true) which merges L0+L1 internally and includes
+        // tombstones — no flush() needed, matching InMemKV's immediate
+        // visibility for both live entries and tombstones.
+        match self.inner.handle().scan(b"", 0, true) {
+            Ok((entries, _)) => entries
+                .into_iter()
+                .map(|e| {
+                    let cell = if e.tombstone {
+                        Cell::Tombstone
+                    } else {
+                        Cell::Value(e.value)
+                    };
+                    (e.key, e.slot, cell)
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        }
     }
 }
 
@@ -149,39 +165,13 @@ impl KVEngine for CrowtreeEngine {
         }
     }
 
-    fn iter_all(&self) -> Vec<(Vec<u8>, u64, Cell)> {
-        // `snapshot_view` only materializes the durable L1 tree, not the L0
-        // MemTable an `apply` lands in first -- unlike `get`/`scan`, which
-        // already merge L0+L1 internally. Flush the contiguous-applied
-        // prefix first so `iter_all`/`compare` observe every `apply` that
-        // isn't blocked behind an out-of-order gap, matching `InMemKV`'s
-        // immediate visibility for the common (in-order) case. A genuine gap
-        // (an out-of-order slot still waiting on an earlier one) is still
-        // invisible here until it fills in -- see the crate-level docs.
-        let _ = self.inner.handle().flush();
-        match self.inner.handle().snapshot_view() {
-            Ok((_at_slot, entries)) => entries
-                .into_iter()
-                .map(|e| {
-                    let cell = if e.tombstone {
-                        Cell::Tombstone
-                    } else {
-                        Cell::Value(e.value)
-                    };
-                    (e.key, e.slot, cell)
-                })
-                .collect(),
-            Err(_) => Vec::new(),
-        }
-    }
-
     fn live_key_count(&self) -> usize {
         // No dedicated count primitive in the C API; a full unlimited scan
         // already excludes tombstones server-side, matching InMemKV's own
         // O(n) linear-scan cost for this method.
         self.inner
             .handle()
-            .scan(b"", 0)
+            .scan(b"", 0, false)
             .map_or(0, |(entries, _)| entries.len())
     }
 

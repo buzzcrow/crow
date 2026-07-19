@@ -2,13 +2,13 @@
 // Licensed under the Apache License, Version 2.0.
 
 #![allow(clippy::cast_possible_truncation)]
+#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 
 use parking_lot::RwLock;
 
-use super::op::Cell;
-use super::{Batch, BatchOp, KVEngine, KVFuture, Op};
+use crowkv::kv::{Batch, BatchOp, Cell, KVEngine, KVFuture, Op};
 
 /// In-memory, single-version engine backed by an ordered `BTreeMap` under a
 /// single `RwLock`. The write lock held for the duration of `apply` makes the
@@ -24,6 +24,16 @@ impl InMemKV {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Full ordered stream including tombstones. Test-only utility.
+    #[must_use]
+    pub fn iter_all(&self) -> Vec<(Vec<u8>, u64, Cell)> {
+        self.map
+            .read()
+            .iter()
+            .map(|(k, (slot, cell))| (k.clone(), *slot, cell.clone()))
+            .collect()
     }
 }
 
@@ -102,14 +112,6 @@ impl KVEngine for InMemKV {
             items.push((key.clone(), *slot, v.clone()));
         }
         KVFuture::ready((items, truncated))
-    }
-
-    fn iter_all(&self) -> Vec<(Vec<u8>, u64, Cell)> {
-        self.map
-            .read()
-            .iter()
-            .map(|(k, (slot, cell))| (k.clone(), *slot, cell.clone()))
-            .collect()
     }
 
     fn live_key_count(&self) -> usize {

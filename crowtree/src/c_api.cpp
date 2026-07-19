@@ -612,11 +612,12 @@ ct_future *ct_scan_async(ct_tree *t, const uint8_t *prefix, size_t plen, size_t 
                             if (st.ok()) {
                                 // Same packed record format as ct_scan (see
                                 // that function): [u32 klen][key][u64
-                                // slot][u32 vlen][val] * count.
+                                // slot][u8 tombstone][u32 vlen][val] * count.
                                 for (const auto &e : entries) {
                                     pack_u32(&impl->scan_packed, static_cast<uint32_t>(e.key.size()));
                                     impl->scan_packed.append(e.key);
                                     pack_u64(&impl->scan_packed, e.slot);
+                                    impl->scan_packed.push_back(static_cast<char>(e.tombstone ? 1 : 0));
                                     pack_u32(&impl->scan_packed, static_cast<uint32_t>(e.value.size()));
                                     impl->scan_packed.append(e.value);
                                 }
@@ -707,15 +708,16 @@ int32_t ct_reactor_eventfd(const ct_tree *t)
     return -1;
 }
 
-ct_status ct_scan(ct_tree *t, const uint8_t *prefix, size_t plen, size_t limit, ct_buf *out_entries,
-                  uint64_t *out_count, int32_t *truncated)
+ct_status ct_scan(ct_tree *t, const uint8_t *prefix, size_t plen, size_t limit, int include_tombstones,
+                  ct_buf *out_entries, uint64_t *out_count, int32_t *truncated)
 {
     if (t == nullptr || out_entries == nullptr) {
         return static_cast<ct_status>(Code::kInvalidArgument);
     }
     std::vector<scan_entry> entries;
     bool                    tr = false;
-    Status s = t->tree->scan(Slice(reinterpret_cast<const char *>(prefix), plen), limit, &entries, &tr);
+    Status                  s = t->tree->scan(Slice(reinterpret_cast<const char *>(prefix), plen), limit, &entries, &tr,
+                                              include_tombstones != 0);
     if (!s.ok()) {
         return to_status(s);
     }
@@ -724,6 +726,7 @@ ct_status ct_scan(ct_tree *t, const uint8_t *prefix, size_t plen, size_t limit, 
         pack_u32(&packed, static_cast<uint32_t>(e.key.size()));
         packed.append(e.key);
         pack_u64(&packed, e.slot);
+        packed.push_back(static_cast<char>(e.tombstone ? 1 : 0));
         pack_u32(&packed, static_cast<uint32_t>(e.value.size()));
         packed.append(e.value);
     }

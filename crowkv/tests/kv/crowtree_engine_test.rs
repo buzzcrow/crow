@@ -5,6 +5,7 @@
 //! `mem_kv_test.rs` (see `conformance.rs`), proving `CrowtreeEngine` and
 //! `InMemKV` satisfy the identical `KVEngine` contract.
 
+use crate::test_util::{compare_dyn, iter_all_dyn};
 use crowkv::kv::{CrowtreeEngine, CrowtreeOptions};
 
 use super::conformance;
@@ -188,7 +189,7 @@ fn clear_drops_all_state() {
     e.clear();
     assert_eq!(e.get(b"k").into_ready(), None);
     assert_eq!(e.live_key_count(), 0);
-    assert!(e.iter_all().is_empty());
+    assert!(iter_all_dyn(&e).is_empty());
 }
 
 /// `clear` must reset per-slot bookkeeping (`received_slots_`/
@@ -261,7 +262,8 @@ async fn clear_then_persist_survives_reopen() {
 /// op stream to `InMemKV` and `CrowtreeEngine`, `compare` must be empty.
 #[test]
 fn parity_with_in_mem_kv_after_identical_op_stream() {
-    use crowkv::kv::{InMemKV, KVEngine};
+    use crate::mem_kv::InMemKV;
+    use crowkv::kv::KVEngine;
 
     let mem = InMemKV::new();
     let ct = open();
@@ -277,6 +279,6 @@ fn parity_with_in_mem_kv_after_identical_op_stream() {
         };
         mem.apply(slot, &b).into_ready().unwrap();
         ct.apply(slot, &b).into_ready().unwrap();
-        assert!(mem.compare(&ct).is_empty(), "diverged after round {round}");
+        assert!(compare_dyn(&mem, &ct).is_empty(), "diverged after round {round}");
     }
 }

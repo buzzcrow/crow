@@ -27,7 +27,7 @@ fn mem_apply_get_scan() {
     assert_eq!(t.get(&key(7)).unwrap(), None);
 
     // Scan all live entries.
-    let (entries, truncated) = t.scan(b"", 0).unwrap();
+    let (entries, truncated) = t.scan(b"", 0, false).unwrap();
     assert!(!truncated);
     assert_eq!(entries.len(), 39); // 40 puts - 1 delete
     assert!(entries.windows(2).all(|w| w[0].key < w[1].key)); // key-sorted

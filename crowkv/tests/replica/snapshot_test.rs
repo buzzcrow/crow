@@ -8,6 +8,7 @@
 //! after clearing the learner's engine, re-applying entries from the acceptor's
 //! accepted log restores the correct KV state and watermarks.
 
+use crate::test_util::iter_all_dyn;
 use bytes::Bytes;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crowkv::paxos::roles::{PxBallot, PxLogEntry};
@@ -160,9 +161,9 @@ async fn clear_drops_all_keys_including_tombstones() {
     replica.learn_chosen(&e2, None, None).await;
 
     // Tombstone is retained internally.
-    assert_eq!(replica.learner.engine().iter_all().len(), 1);
+    assert_eq!(iter_all_dyn(replica.learner.engine()).len(), 1);
 
     // Clear removes everything.
     replica.learner.engine().clear();
-    assert!(replica.learner.engine().iter_all().is_empty());
+    assert!(iter_all_dyn(replica.learner.engine()).is_empty());
 }
