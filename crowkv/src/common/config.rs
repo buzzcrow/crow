@@ -177,6 +177,14 @@ pub struct PxElectionConfig {
     /// `group_maintenance::DEFAULT_MAINTENANCE_TICK`; now a normal
     /// per-group tunable like the other fields here.
     pub maintenance_tick_ms: u64,
+    /// Minimum slot advance since the last durable snapshot before
+    /// `persist_snapshot()` is called again. `flush()` still runs every
+    /// tick; this only gates the expensive disk-write path.
+    pub snapshot_slot_threshold: u64,
+    /// Maximum wall-clock time since the last durable snapshot before
+    /// `persist_snapshot()` is called again, in milliseconds. Ensures a
+    /// low-write-rate replica still checkpoints periodically.
+    pub snapshot_time_threshold_ms: u64,
 }
 
 impl PxElectionConfig {
@@ -193,6 +201,8 @@ impl PxElectionConfig {
         learner_stream_window_frames: 64,
         // Matches the periodic GC trigger cadence (30 s).
         maintenance_tick_ms: 30_000,
+        snapshot_slot_threshold: 10_000,
+        snapshot_time_threshold_ms: 60_000,
     };
 
     /// Aggressive timings for `#[tokio::test(start_paused = true)]` suites.
@@ -212,6 +222,8 @@ impl PxElectionConfig {
             election_driver_disabled: false,
             learner_stream_window_frames: 64,
             maintenance_tick_ms: 20,
+            snapshot_slot_threshold: 100,
+            snapshot_time_threshold_ms: 1_000,
         }
     }
 
@@ -234,6 +246,8 @@ impl PxElectionConfig {
             election_driver_disabled: false,
             learner_stream_window_frames: 64,
             maintenance_tick_ms: 5_000,
+            snapshot_slot_threshold: 10_000,
+            snapshot_time_threshold_ms: 60_000,
         }
     }
 
@@ -256,6 +270,8 @@ impl PxElectionConfig {
             election_driver_disabled: false,
             learner_stream_window_frames: 64,
             maintenance_tick_ms: 5_000,
+            snapshot_slot_threshold: 10_000,
+            snapshot_time_threshold_ms: 60_000,
         }
     }
 }

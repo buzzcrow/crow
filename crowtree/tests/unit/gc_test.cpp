@@ -3,15 +3,12 @@
 
 // plan-tree #21: GC sweep + dual watermark + GcStats.
 #include "crowtree/crowtree.h"
-#include "crowtree/page.h"
 #include "crowtree/page_store.h"
 
 #include <gtest/gtest.h>
 
-#include <chrono>
 #include <memory>
 #include <string>
-#include <thread>
 
 using namespace crowtree;
 
@@ -134,20 +131,14 @@ TEST(Gc, CollectGarbageSkipsEvictedLeaves)
     EXPECT_EQ(t.buffer_pool()->stats().used, used_after_evict);
 }
 
-// plan-tree #21's periodic trigger reuses the background-flush-thread machinery
-// (Options.gc_interval_ms) rather than a second thread. This confirms it
-// actually reclaims the same "delete with no further writes" leaf as
-// CollectGarbageSweepsLeafWithoutFurtherWrites, but via the timer instead of
-// an explicit collect_garbage() call.
-TEST(Gc, PeriodicSweepReclaimsInBackground)
+// Same as CollectGarbageSweepsLeafWithoutFurtherWrites, but via an explicit
+// collect_garbage() call instead of relying on a background thread.
+TEST(Gc, ExplicitSweepReclaimsTombstone)
 {
     MemPageStore store(1);
     Options      opt;
-    opt.page_store        = &store;
-    opt.max_delta_len     = 4;
-    opt.background_flush  = true;
-    opt.flush_interval_ms = 5;
-    opt.gc_interval_ms    = 5;
+    opt.page_store    = &store;
+    opt.max_delta_len = 4;
 
     std::unique_ptr<Crowtree> t;
     ASSERT_TRUE(Crowtree::open(opt, &t).ok());
@@ -161,16 +152,10 @@ TEST(Gc, PeriodicSweepReclaimsInBackground)
     PageBase *before = t->mapping().get_resident(t->root_page_id());
 
     t->set_gc_watermark(5, 5);
+    t->collect_garbage();
 
-    // Poll for the background thread to rebuild the leaf (a distinct PageBase*
-    // at the same page_id) instead of calling collect_garbage() ourselves,
-    // which would make it impossible to tell whether the timer ever fired.
-    bool swept = false;
-    for (int i = 0; i < 100 && !swept; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        swept = t->mapping().get_resident(t->root_page_id()) != before;
-    }
-    EXPECT_TRUE(swept) << "background GC thread never swept the stale tombstone";
+    EXPECT_NE(t->mapping().get_resident(t->root_page_id()), before)
+        << "collect_garbage() never swept the stale tombstone";
 
     std::string v;
     uint64_t    slot;

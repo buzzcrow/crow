@@ -154,10 +154,16 @@ impl BenchReport {
     ///
     /// # Errors
     /// I/O errors.
-    pub fn write_md_to(&self, dir: &Path, node_ids: &[String], workspace_dir: &Path) -> io::Result<PathBuf> {
+    pub fn write_md_to(
+        &self,
+        dir: &Path,
+        node_ids: &[String],
+        workspace_dir: &Path,
+        endpoint_map: &std::collections::HashMap<String, String>,
+    ) -> io::Result<PathBuf> {
         fs::create_dir_all(dir)?;
         let path = dir.join("report.md");
-        let md = self.markdown_report(node_ids, workspace_dir);
+        let md = self.markdown_report(node_ids, workspace_dir, endpoint_map);
         fs::write(&path, md)?;
         Ok(path)
     }
@@ -179,7 +185,12 @@ impl BenchReport {
         reason = "display formatter, splitting reduces readability"
     )]
     #[must_use]
-    pub fn markdown_report(&self, node_ids: &[String], workspace_dir: &Path) -> String {
+    pub fn markdown_report(
+        &self,
+        node_ids: &[String],
+        workspace_dir: &Path,
+        endpoint_map: &std::collections::HashMap<String, String>,
+    ) -> String {
         use std::fmt::Write;
         let mut out = String::new();
 
@@ -354,11 +365,31 @@ impl BenchReport {
             let _ = writeln!(out);
             let _ = writeln!(out, "### Episodes");
             let _ = writeln!(out);
+            let resolve = |ep: &str| -> String {
+                let normalized = ep.strip_prefix("http://").unwrap_or(ep);
+                endpoint_map
+                    .get(ep)
+                    .or_else(|| endpoint_map.get(normalized))
+                    .cloned()
+                    .unwrap_or_else(|| ep.to_string())
+            };
             for (i, c) in changes.iter().enumerate() {
+                let detected_at = chrono::DateTime::from_timestamp_millis(
+                    i64::try_from(c.detected_at_ms).unwrap_or(i64::MAX),
+                )
+                .map_or_else(
+                    || format!("{}ms", c.detected_at_ms),
+                    |dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+                );
                 let _ = writeln!(
                     out,
-                    "- **[{}]** `{} -> {}` trigger={} recovery={}ms detected_at={}ms",
-                    i, c.old_endpoint, c.new_endpoint, c.trigger, c.recovery_ms, c.detected_at_ms,
+                    "- **[{}]** `{} -> {}` trigger={} recovery={}ms detected_at={}",
+                    i,
+                    resolve(&c.old_endpoint),
+                    resolve(&c.new_endpoint),
+                    c.trigger,
+                    c.recovery_ms,
+                    detected_at,
                 );
             }
             let _ = writeln!(out);

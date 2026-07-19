@@ -69,30 +69,24 @@ struct Options
     // ── MemTable flush triggers ──
     size_t   memtable_flush_bytes   = 4ULL * 1024 * 1024; // 4 MiB
     uint32_t memtable_flush_entries = 100000;
-    uint64_t flush_interval_ms      = 200; // time-based flush
-
-    // Run the flusher on a background thread. Tests often set this false and
-    // drive flush() synchronously for determinism.
-    bool background_flush = false;
 
     // ── MemTable double buffering (plan-tree #3) ──
     // Once active_ crosses memtable_flush_bytes/_entries, it is frozen (no
     // longer accepts writes) and a fresh, empty MemTable takes over as
     // active_; the frozen table is drained into L1 by flush() (explicit call
-    // or the background thread). This bounds how large any *one* buffer can
-    // grow and lets new writes proceed without contending with an in-progress
-    // drain (they land in a different MemTable object entirely). This is the
-    // count of buffers total: 1 active_ + up to (max_memtable_count - 1)
-    // queued frozen buffers. Must be >= 2 (2 = the common active_/flushing_
-    // case); values are not currently validated by the engine. When the
-    // frozen queue is already at (max_memtable_count - 1), a further
-    // threshold-triggered freeze is skipped (active_ is allowed to keep
-    // growing past its threshold) rather than stalling the writer -- an
-    // explicit flush()/the background thread is expected to catch up and
-    // free a slot. See Crowtree's active_/frozen_ member comment for the
-    // full design, including how non-contiguous (slot > the current
-    // contiguous frontier) leftovers are handled when a frozen buffer is
-    // drained.
+    // from the upper-layer maintenance loop). This bounds how large any *one*
+    // buffer can grow and lets new writes proceed without contending with an
+    // in-progress drain (they land in a different MemTable object entirely).
+    // This is the count of buffers total: 1 active_ + up to
+    // (max_memtable_count - 1) queued frozen buffers. Must be >= 2 (2 = the
+    // common active_/flushing_ case); values are not currently validated by
+    // the engine. When the frozen queue is already at (max_memtable_count -
+    // 1), a further threshold-triggered freeze is skipped (active_ is allowed
+    // to keep growing past its threshold) rather than stalling the writer --
+    // an explicit flush() is expected to catch up and free a slot. See
+    // Crowtree's active_/frozen_ member comment for the full design,
+    // including how non-contiguous (slot > the current contiguous frontier)
+    // leftovers are handled when a frozen buffer is drained.
     uint32_t max_memtable_count = 2;
 
     // ── Mapping table redesign (plan-tree #14) ──
@@ -102,12 +96,6 @@ struct Options
     // this through as the runtime segment size) -- present now so
     // callers/tests can start tuning it ahead of that wiring.
     uint32_t mapping_segment_slots = 1024;
-
-    // ── Retention GC (plan-tree #21) ──
-    // Periodic collect_garbage() sweep cadence on the same background thread as
-    // background_flush (no second thread). 0 = disabled: collect_garbage() then
-    // only runs when a caller invokes it explicitly.
-    uint64_t gc_interval_ms = 0;
 
     // ── Persistence ──
     // Durable backend. Non-owning; nullptr = pure in-memory engine (no

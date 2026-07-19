@@ -96,6 +96,7 @@ pub struct BenchFixture {
     console_task: tokio::task::JoinHandle<()>,
     node_ids: Vec<String>,
     node_pids: Vec<u32>,
+    node_grpc_urls: Vec<String>,
     leader_endpoint: String,
     workspace_dir: PathBuf,
     stopped: bool,
@@ -123,7 +124,7 @@ impl BenchFixture {
         });
         let client = ConsoleClient::new(format!("http://{addr}"))?;
 
-        let (ids, pids) = match Self::provision_nodes(&client, mode).await {
+        let (ids, pids, grpc_urls) = match Self::provision_nodes(&client, mode).await {
             Ok(v) => v,
             Err(e) => {
                 console_task.abort();
@@ -149,6 +150,7 @@ impl BenchFixture {
             console_task,
             node_ids: ids,
             node_pids: pids,
+            node_grpc_urls: grpc_urls,
             leader_endpoint,
             workspace_dir,
             stopped: false,
@@ -158,9 +160,13 @@ impl BenchFixture {
     /// Create 1 rack + 1 node per rack (`NODE_COUNT` total) and deploy a
     /// `crowkv-server` on each, in `mode`. Returns the node ids and their
     /// server pids (index-aligned).
-    async fn provision_nodes(client: &ConsoleClient, mode: BenchMode) -> Result<(Vec<String>, Vec<u32>)> {
+    async fn provision_nodes(
+        client: &ConsoleClient,
+        mode: BenchMode,
+    ) -> Result<(Vec<String>, Vec<u32>, Vec<String>)> {
         let mut ids = Vec::with_capacity(NODE_COUNT);
         let mut pids = Vec::with_capacity(NODE_COUNT);
+        let mut grpc_urls = Vec::with_capacity(NODE_COUNT);
         for i in 0..NODE_COUNT {
             let rack_id = format!("br{i}");
             let node_id = format!("bn{i}");
@@ -202,8 +208,9 @@ impl BenchFixture {
 
             ids.push(node_id);
             pids.push(deployed.pid);
+            grpc_urls.push(deployed.grpc_url);
         }
-        Ok((ids, pids))
+        Ok((ids, pids, grpc_urls))
     }
 
     /// Create the single store spanning all nodes, then a 3-replica
@@ -249,6 +256,17 @@ impl BenchFixture {
         &self.workspace_dir
     }
 
+    /// Build a map from gRPC endpoint URL to node ID, for resolving
+    /// leader-change episode endpoints to node names in the report.
+    #[must_use]
+    pub fn endpoint_to_node_map(&self) -> std::collections::HashMap<String, String> {
+        self.node_ids
+            .iter()
+            .zip(self.node_grpc_urls.iter())
+            .map(|(nid, url)| (url.clone(), nid.clone()))
+            .collect()
+    }
+
     /// Read and aggregate server-side metrics across every node's
     /// `log/metrics-*.log` file.
     #[must_use]
@@ -286,10 +304,10 @@ impl BenchFixture {
         Ok(())
     }
 
-    /// Stop every deployed server, shut down the embedded console-web
-    /// task, and (unless `keep_workspace`) remove the workspace
-    /// directory. Idempotent — safe to call more than once.
-    pub async fn cleanup(&mut self, keep_workspace: bool) {
+    /// Stop every deployed server and shut down the embedded console-web
+    /// task. The workspace directory is preserved (it lives inside the
+    /// `run_dir`). Idempotent — safe to call more than once.
+    pub async fn cleanup(&mut self) {
         if self.stopped {
             return;
         }
@@ -298,9 +316,6 @@ impl BenchFixture {
             let _ = self.client.stop_node_server(node_id).await;
         }
         self.console_task.abort();
-        if !keep_workspace {
-            let _ = std::fs::remove_dir_all(&self.workspace_dir);
-        }
     }
 
     fn node_workspace(&self, node_id: &str) -> PathBuf {

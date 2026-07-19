@@ -82,6 +82,14 @@ pub trait KVEngine: Send + Sync {
         true
     }
 
+    /// Drain the in-memory write buffer (L0 memtable) into the in-memory
+    /// B+tree (L1), advancing `last_applied_slot` **in memory only** — not
+    /// durable across crashes. A subsequent [`Self::persist_snapshot`] is
+    /// needed to make the advanced watermark crash-safe. Cheap when L0 is
+    /// empty (early-return no-op). Default: no-op (`InMemKV` has no L0/L1
+    /// distinction).
+    fn flush(&self) {}
+
     /// Highest slot `S` such that every slot in `[1, S]` is durably reflected
     /// in this engine already — i.e. a caller rebuilding state from a WAL can
     /// safely skip re-`apply`ing slots `<= S` and start at `S + 1`. Must be

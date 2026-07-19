@@ -49,8 +49,7 @@ pub struct RunArgs {
     #[arg(long, default_value_t = 512)]
     pub value_size: usize,
 
-    /// Retain the deploy workspace (server binaries, WAL/data dirs,
-    /// logs) after the run for debugging. Default: removed.
+    /// Deprecated: workspace is now always kept in the run directory.
     #[arg(long, default_value_t = false)]
     pub keep_workspace: bool,
 
@@ -111,15 +110,11 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
     }
 
     let run_id = args.run_id.clone().unwrap_or_else(next_run_id);
-    let Some(home) = dirs::home_dir() else {
-        eprintln!("error: cannot resolve $HOME for workspace dir");
-        return ExitCode::from(1);
-    };
-    let workspace_dir = home.join(".crowkv").join("bench-workspaces").join(&run_id);
 
     let now = chrono::Utc::now();
     let folder_name = run_folder_name(&run_id, mode.label(), now);
     let run_dir = crate::bench::BenchReport::default_dir().join(&folder_name);
+    let workspace_dir = run_dir.join("workspace");
 
     println!("provisioning 3-node cluster ({} mode)...", mode.label());
     let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -152,7 +147,7 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
         Ok(v) => v,
         Err(e) => {
             eprintln!("error: bench run: {e}");
-            fixture.cleanup(args.keep_workspace).await;
+            fixture.cleanup().await;
             return ExitCode::from(2);
         }
     };
@@ -165,7 +160,12 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
     if let Err(e) = report.write_to(&run_dir) {
         eprintln!("warning: failed to re-write report with server metrics: {e}");
     }
-    let md_path = match report.write_md_to(&run_dir, fixture.node_ids(), fixture.workspace_dir()) {
+    let md_path = match report.write_md_to(
+        &run_dir,
+        fixture.node_ids(),
+        fixture.workspace_dir(),
+        &fixture.endpoint_to_node_map(),
+    ) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("warning: failed to write markdown report: {e}");
@@ -174,7 +174,7 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
     };
     let log_warning_count = count_log_warnings(&artifacts_dir);
 
-    fixture.cleanup(args.keep_workspace).await;
+    fixture.cleanup().await;
 
     if json {
         return crate::utils::print_json(&report);
@@ -319,7 +319,7 @@ fn bench_report(run_id: &str, json: bool) -> ExitCode {
                     let workspace = path
                         .parent()
                         .map_or_else(|| std::path::PathBuf::from("."), |d| d.join("artifacts"));
-                    let text = r.markdown_report(&node_ids, &workspace);
+                    let text = r.markdown_report(&node_ids, &workspace, &std::collections::HashMap::new());
                     let _ = std::fs::write(&md_path, &text);
                     text
                 };
