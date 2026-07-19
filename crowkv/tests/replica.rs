@@ -12,6 +12,12 @@
 //! multi-replica consensus lives in the `group` binary; pure Paxos role
 //! units live in the `paxos` binary.
 
+#[path = "kv/mem_kv_impl.rs"]
+mod mem_kv;
+
+#[path = "kv/test_util.rs"]
+mod test_util;
+
 #[path = "replica/persistence_test.rs"]
 mod persistence;
 

@@ -55,6 +55,7 @@ struct scan_entry
     std::string key;
     uint64_t    slot;
     std::string value;
+    bool        tombstone = false;
 };
 
 struct get_result
@@ -470,9 +471,11 @@ class Crowtree
     [[nodiscard]] std::vector<get_result> multi_get(const std::vector<Slice> &keys) const;
 
     // Ordered range scan over keys with `prefix` (empty = whole keyspace), latest
-    // state (L0 overlaid on L1), skipping tombstones. Returns up to `limit`
-    // entries in key order; sets *truncated if more matched beyond the limit.
-    Status scan(Slice prefix, size_t limit, std::vector<scan_entry> *out, bool *truncated) const;
+    // state (L0 overlaid on L1). When `include_tombstones` is false (default),
+    // tombstones are skipped. Returns up to `limit` entries in key order; sets
+    // *truncated if more matched beyond the limit.
+    Status scan(Slice prefix, size_t limit, std::vector<scan_entry> *out, bool *truncated,
+                bool include_tombstones = false) const;
 
     // Async twin of scan(). Unlike get_async,
     // which has exactly one possible miss point (the root->leaf descent for

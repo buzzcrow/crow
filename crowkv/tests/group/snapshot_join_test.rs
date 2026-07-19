@@ -7,6 +7,7 @@
 //! `SnapshotService` gRPC, instead of replaying full Paxos history from
 //! slot 1.
 
+use crate::test_util::compare_dyn;
 use crate::testkit::cluster::start_cluster;
 use crowkv::cluster::group::PxGroup;
 use crowkv::cluster::{KvServer, PxLocalReplica, PxLocalReplicaRole};
@@ -60,11 +61,10 @@ async fn fresh_replica_joins_via_snapshot_and_matches_leader_state() {
     assert!(at_slot > 0);
 
     // The new replica's engine must now match the leader's exactly.
-    let diff = new_group
-        .local_replica()
-        .learner
-        .engine()
-        .compare(leader_group.local_replica().learner.engine());
+    let diff = compare_dyn(
+        new_group.local_replica().learner.engine(),
+        leader_group.local_replica().learner.engine(),
+    );
     assert!(
         diff.is_empty(),
         "post-join state should match leader exactly: {diff:?}"

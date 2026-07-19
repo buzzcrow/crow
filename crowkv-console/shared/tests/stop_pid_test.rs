@@ -58,6 +58,11 @@ fn stop_pid_force_kills_unresponsive_process() {
         "child process should be alive before stop_pid"
     );
 
+    // Give the shell time to execute `trap '' TERM` before we send SIGTERM.
+    // Without this, a SIGTERM arriving before the trap is installed kills
+    // the shell instantly, causing the timing assertion below to fail.
+    std::thread::sleep(Duration::from_millis(200));
+
     let start = std::time::Instant::now();
     let result = stop_pid_with_timeout(pid, Duration::from_secs(2)).unwrap();
     let elapsed = start.elapsed();

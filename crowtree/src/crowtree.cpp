@@ -1745,7 +1745,8 @@ std::vector<get_result> Crowtree::multi_get(const std::vector<Slice> &keys) cons
     return results;
 }
 
-Status Crowtree::scan(Slice prefix, size_t limit, std::vector<scan_entry> *out, bool *truncated) const
+Status Crowtree::scan(Slice prefix, size_t limit, std::vector<scan_entry> *out, bool *truncated,
+                      bool include_tombstones) const
 {
     out->clear();
     if (truncated != nullptr) {
@@ -1820,7 +1821,7 @@ Status Crowtree::scan(Slice prefix, size_t limit, std::vector<scan_entry> *out, 
             return true;
         }
         CellView v{cell};
-        if (v.is_tombstone()) {
+        if (v.is_tombstone() && !include_tombstones) {
             return true;
         }
         if (limit != 0 && out->size() >= limit) {
@@ -1829,9 +1830,13 @@ Status Crowtree::scan(Slice prefix, size_t limit, std::vector<scan_entry> *out, 
             }
             return false; // stop: a matching entry didn't fit
         }
+        if (v.is_tombstone()) {
+            out->push_back({.key = key.to_string(), .slot = v.slot(), .value = "", .tombstone = true});
+            return true;
+        }
         std::string val =
             v.is_overflow() ? assemble_overflow_value(v.overflow_head(), v.overflow_len()) : v.value().to_string();
-        out->push_back({.key = key.to_string(), .slot = v.slot(), .value = std::move(val)});
+        out->push_back({.key = key.to_string(), .slot = v.slot(), .value = std::move(val), .tombstone = false});
         return true;
     };
 
