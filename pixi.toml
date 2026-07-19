@@ -83,12 +83,13 @@ bench-hotread = { cmd = "cargo run --release -p crowkv-cli -- bench run --mode m
 bench-compare = { cmd = "cargo run --release -p crowkv-cli -- bench compare", depends-on = ["build"] }
 
 # ── Test ─────────────────────────────────────────────────────────
+clean-env = "pkill -9 -f 'crowkv-server.*test-logs' 2>/dev/null; rm -rf test-logs; true"
 test-ct = { cmd = "ctest --test-dir crowtree/build --output-on-failure", depends-on = ["build"] }
 test-ffi = { cmd = "cargo test -p crowtree-ffi --all-targets", depends-on = ["build"] }
-test-core = { cmd = "rm -rf test-logs && cargo test -p crowkv --all-targets", depends-on = ["build"] }
+test-core = { cmd = "cargo test -p crowkv --all-targets", depends-on = ["build"] }
 test-server = { cmd = "cargo test -p crowkv-server --all-targets", depends-on = ["build"] }
 test-mgmt-api = { cmd = "cargo test -p crowkv-web --all-targets", depends-on = ["build"] }
-test-ui = { cmd = "rm -rf test-logs && cargo build -p crowkv-server && export CROWKV_SERVER_BINARY=$(pwd)/target/debug/crowkv-server && cd crowkv-console/web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-deps"] }
+test-ui = { cmd = "cargo build -p crowkv-server && export CROWKV_SERVER_BINARY=$(pwd)/target/debug/crowkv-server && cd crowkv-console/web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-deps"] }
 test = { cmd = '''
 bash -c '
 pixi run test-ct & p1=$!
@@ -104,12 +105,17 @@ wait $p1 && wait $p2 && wait $p3 && wait $p4 && wait $p5 && wait $p6 && wait $p7
 test-suite = { cmd = '''
 bash -c '
 set -e
+pixi run clean-env
 pixi run test-ct
+pixi run clean-env
 pixi run test-ffi
+pixi run clean-env
 pixi run test-core
+pixi run clean-env
 pixi run test-server
-pixi run test-cli
+pixi run clean-env
 pixi run test-mgmt-api
+pixi run clean-env
 pixi run test-ui
 '
 ''', depends-on = ["build", "install-deps"] }

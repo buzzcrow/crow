@@ -177,8 +177,8 @@ void Crowtree::retire_orphaned_page(uint64_t page_id, PageBase *p)
 PageBase *Crowtree::resident(uint64_t page_id) const
 {
     map_lookup_total_.fetch_add(1, std::memory_order_relaxed);
-    if (metrics_.map_lookup_c != nullptr) {
-        metrics_.map_lookup_c->inc();
+    if (metrics_.page_map_lookup_c != nullptr) {
+        metrics_.page_map_lookup_c->inc();
     }
     uint64_t w = mapping_.get_word(page_id);
     if (slot_word::is_empty(w) || !slot_word::is_unloaded(w)) {
@@ -2408,7 +2408,7 @@ void Crowtree::init_metrics(const std::string &prefix)
     metrics_.l1_get_hit_c                = r->register_counter(prefix + ".l1.get.hit.c");
     metrics_.flush_l                     = r->register_summary(prefix + ".flush.l");
     metrics_.page_write_l                = r->register_summary(prefix + ".page.write.l");
-    metrics_.map_lookup_c                = r->register_counter(prefix + ".map.lookup.c");
+    metrics_.page_map_lookup_c           = r->register_counter(prefix + ".page.map.lookup.c");
     metrics_.demand_load_l               = r->register_summary(prefix + ".demand.load.l");
     metrics_.snapshot_apply_l            = r->register_summary(prefix + ".snapshot.apply.l");
     metrics_.snapshot_page_write_l       = r->register_summary(prefix + ".snapshot.page.write.io.l");
@@ -2421,7 +2421,8 @@ void Crowtree::init_metrics(const std::string &prefix)
                        metrics_.buf_resident, metrics_.buf_dirty);
 }
 
-std::string Crowtree::flush_metrics_str(double window_secs, const char *timestamp, size_t width)
+std::string Crowtree::flush_metrics_str(double window_secs, const char *timestamp, size_t width, size_t count_w,
+                                        size_t tps_w)
 {
     if (metrics_registry_ == nullptr) {
         return {};
@@ -2432,7 +2433,7 @@ std::string Crowtree::flush_metrics_str(double window_secs, const char *timestam
     if (fp == nullptr) {
         return {};
     }
-    metrics_registry_->flush_to(fp, window_secs, timestamp, "cpp-metrics", width);
+    metrics_registry_->flush_to(fp, window_secs, timestamp, "cpp-metrics", width, count_w, tps_w);
     std::fflush(fp);
     std::fclose(fp);
     std::string result(buf, len);

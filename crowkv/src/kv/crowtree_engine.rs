@@ -77,6 +77,27 @@ impl CrowtreeEngine {
             .flush_metrics_str(window_secs, timestamp, width)
     }
 
+    /// Extended flush with negotiated column widths.
+    #[must_use]
+    pub fn flush_metrics_str_ext(
+        &self,
+        window_secs: f64,
+        timestamp: &str,
+        width: usize,
+        count_w: usize,
+        tps_w: usize,
+    ) -> String {
+        self.inner
+            .handle()
+            .flush_metrics_str_ext(window_secs, timestamp, width, count_w, tps_w)
+    }
+
+    /// Negotiate column widths with C++. Returns (`count_w`, `tps_w`).
+    #[must_use]
+    pub fn negotiate_widths(&self, rust_count_w: usize, rust_tps_w: usize) -> (usize, usize) {
+        self.inner.handle().negotiate_widths(rust_count_w, rust_tps_w)
+    }
+
     /// Current max metric name length from the C++ registry.
     #[must_use]
     pub fn max_name_len(&self) -> usize {

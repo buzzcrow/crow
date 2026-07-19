@@ -626,7 +626,8 @@ class Crowtree
     // Rust). Uses open_memstream internally. `width` overrides the
     // per-section max name length for column alignment with the Rust
     // section (0 = use internal max).
-    std::string flush_metrics_str(double window_secs, const char *timestamp, size_t width = 0);
+    std::string flush_metrics_str(double window_secs, const char *timestamp, size_t width = 0, size_t count_w = 0,
+                                  size_t tps_w = 0);
 
     // Return the current max metric name length (for Rust's shared-width
     // computation).
@@ -1107,7 +1108,7 @@ class Crowtree
         Counter        *page_write_c = nullptr;
         LatencySummary *page_write_l = nullptr;
         // Mapping table lookup counter
-        Counter *map_lookup_c = nullptr;
+        Counter *page_map_lookup_c = nullptr;
         // Demand-load (page fault I/O) counter + latency
         Counter        *demand_load_c = nullptr;
         LatencySummary *demand_load_l = nullptr;

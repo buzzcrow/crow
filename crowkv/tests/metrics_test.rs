@@ -67,6 +67,7 @@ fn bandwidth_count_avg_size_and_rate() {
             && out.contains("tps(/s)")
             && out.contains("avg_size(KB)")
             && out.contains("rate(KB/s)")
+            && out.contains("total(KB)")
     );
     assert!(out.contains("10"));
     assert!(out.contains("s.1.kv.bytes_in.bw"));
@@ -183,7 +184,7 @@ fn flush_format_header_and_sections() {
     let out = String::from_utf8(buf).unwrap();
 
     // Header
-    assert!(out.starts_with("[metrics 2026-07-15T16:30:05.123Z window=5.00s]"));
+    assert!(out.starts_with("[metrics 2026-07-15T16:30:05.123Z window=5.000s]"));
     // Section order: counters, histograms, summaries, bandwidths, gauges
     let counter_pos = out.find("s.1.kv.delete.c").unwrap();
     let hist_pos = out.find("s.1.kv.get.lh").unwrap();
@@ -210,6 +211,21 @@ fn zero_suppression_counter_with_zero_inc() {
     let out = String::from_utf8(buf).unwrap();
     assert!(out.contains("s.1.kv.put.c"));
     assert!(!out.contains("s.1.kv.delete.c"));
+}
+
+#[test]
+fn header_suppressed_when_all_counters_zero() {
+    let mut reg = MetricsRegistry::new();
+    let _zero = reg.register_counter("s.1.kv.put.c");
+    // No inc() — all counters have count=0
+    let mut buf = Vec::new();
+    reg.flush(&mut buf, 5.0, "2026-07-15T16:30:05Z");
+    let out = String::from_utf8(buf).unwrap();
+    // Counter header should NOT appear since no counter has data
+    assert!(
+        !out.contains("tps(/s)     total"),
+        "counter header should be suppressed when all counters are zero:\n{out}"
+    );
 }
 
 #[test]
@@ -258,8 +274,8 @@ async fn cpp_metrics_block_appears_with_matching_window() {
         let mut reg = runner.registry().lock().unwrap();
         let _ = reg.register_counter("s.1.kv.put.c");
     }
-    runner.set_cpp_flush(|w, window, ts, _width| {
-        let _ = writeln!(w, "[cpp-metrics {ts} window={window:.2}s]");
+    runner.set_cpp_flush(|w, window, ts, _width, _count_w, _tps_w| {
+        let _ = writeln!(w, "[cpp-metrics {ts} window={window:.3}s]");
         let _ = writeln!(
             w,
             "s.0.g.0.snapshot.apply.l  count 1 tps(/s)  avg 100us  max 100us"
@@ -289,10 +305,10 @@ async fn cpp_metrics_block_appears_with_matching_window() {
         content.contains("[cpp-metrics "),
         "missing [cpp-metrics] block in:\n{content}"
     );
-    // Both blocks should have window= with 2 decimal places.
+    // Both blocks should have window= with 3 decimal places.
     assert!(
-        content.contains("window=1.00s") || content.contains("window=1."),
-        "expected window=1.xx in:\n{content}"
+        content.contains("window=1."),
+        "expected window=1.xxx in:\n{content}"
     );
 }
 

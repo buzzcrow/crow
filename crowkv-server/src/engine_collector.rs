@@ -189,21 +189,51 @@ pub fn setup_engine_collector(
 
     // Post-flush C++ callback: call flush_metrics_str per engine.
     let stores2 = Arc::clone(store_registry);
-    runner.set_cpp_flush(move |writer, window_secs, timestamp, rust_width| {
-        for entry in &stores2.stores {
+    runner.set_cpp_flush(
+        move |writer, window_secs, timestamp, rust_width, count_w, tps_w| {
+            for entry in &stores2.stores {
+                let store = entry.value();
+                store.for_each_group(|group| {
+                    let replica = group.local_replica();
+                    let engine = replica.learner.engine();
+                    if let Some(e) = engine.as_any().downcast_ref::<CrowtreeEngine>() {
+                        let cpp_max = e.max_name_len();
+                        let shared_width = rust_width.max(cpp_max);
+                        let str =
+                            e.flush_metrics_str_ext(window_secs, timestamp, shared_width, count_w, tps_w);
+                        if !str.is_empty() {
+                            let _ = std::io::Write::write_all(writer, str.as_bytes());
+                        }
+                    }
+                });
+            }
+        },
+    );
+
+    // Pre-flush negotiate callback: query C++ for its preferred column
+    // widths. Uses the first engine found (all engines share the same
+    // C++ formatting defaults).
+    let stores3 = Arc::clone(store_registry);
+    runner.set_cpp_negotiate(move || {
+        let mut result = (5, 7);
+        let mut found = false;
+        for entry in &stores3.stores {
+            if found {
+                break;
+            }
             let store = entry.value();
             store.for_each_group(|group| {
+                if found {
+                    return;
+                }
                 let replica = group.local_replica();
                 let engine = replica.learner.engine();
                 if let Some(e) = engine.as_any().downcast_ref::<CrowtreeEngine>() {
-                    let cpp_max = e.max_name_len();
-                    let shared_width = rust_width.max(cpp_max);
-                    let str = e.flush_metrics_str(window_secs, timestamp, shared_width);
-                    if !str.is_empty() {
-                        let _ = std::io::Write::write_all(writer, str.as_bytes());
-                    }
+                    result = e.negotiate_widths(5, 7);
+                    found = true;
                 }
             });
         }
+        result
     });
 }

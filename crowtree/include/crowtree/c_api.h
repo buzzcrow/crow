@@ -159,8 +159,25 @@ void ct_get_stats(const ct_tree *t, ct_stats *out);
 // `width` overrides per-section max name length (0 = use internal max).
 char *ct_flush_metrics_str(ct_tree *t, double window_secs, const char *timestamp, size_t width);
 
+// Extended flush with negotiated column widths (count_w, tps_w).
+char *ct_flush_metrics_str_ext(ct_tree *t, double window_secs, const char *timestamp, size_t width, size_t count_w,
+                               size_t tps_w);
+
 // Return the current max metric name length from the C++ registry.
 size_t ct_max_name_len(const ct_tree *t);
+
+// Shared column widths for cross-language alignment.
+// count_w and tps_w are the 2nd and 3rd column widths.
+// NOLINTNEXTLINE(modernize-use-using)
+typedef struct
+{
+    size_t count_w;
+    size_t tps_w;
+} ct_column_widths;
+
+// Negotiate column widths: caller passes its preferred widths,
+// C++ returns its preferred widths in *out. Both sides then use max.
+void ct_negotiate_widths(const ct_tree *t, ct_column_widths input, ct_column_widths *out);
 
 // Free a string returned by ct_flush_metrics_str.
 void ct_free_string(char *s);
