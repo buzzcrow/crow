@@ -49,26 +49,15 @@ pub struct Cli {
     #[arg(long, default_value = "default", value_parser = ["default", "test", "e2e", "bench"])]
     pub election_profile: String,
 
-    /// KV storage engine backing each group's learner. `crowtree` (default
-    /// and only production option) durably persists each group's state to
-    /// its own file under `--data-root` (recovered by replaying the WAL
-    /// through it on every restart — see
-    /// `PxLocalReplica::restore_from_replay_with_engine`). The in-memory
-    /// `InMemKV` engine is test-only and not selectable via CLI.
-    #[arg(long, default_value = "crowtree", value_parser = ["crowtree"])]
-    pub kv_engine: String,
-
-    /// Root directory for durable per-group crowtree files (only used when
-    /// `--kv-engine crowtree`). Default: sibling of `wal_root` named `ctdata`.
+    /// Root directory for durable per-group crowtree files. Default: sibling of `wal_root` named `ctdata`.
     #[arg(long)]
     pub data_root: Option<std::path::PathBuf>,
 
-    /// Durable backend for the crowtree engine (only used when `--kv-engine
-    /// crowtree`). `file` (default) is the file-based page store (no
-    /// alignment); `block` opens `data_root`'s per-group directory with
-    /// `BlockPageStore` (array-of-blocks, `O_DIRECT`) for a real SSD/SCM
-    /// deployment target; `mem-block` uses an in-memory block device (no
-    /// alignment, RAM/SCM/PMEM model).
+    /// Durable backend for the crowtree engine. `file` (default) is the
+    /// file-based page store (no alignment); `block` opens `data_root`'s
+    /// per-group directory with `BlockPageStore` (array-of-blocks, `O_DIRECT`)
+    /// for a real SSD/SCM deployment target; `mem-block` uses an in-memory
+    /// block device (no alignment, RAM/SCM/PMEM model).
     #[arg(long, default_value = "file", value_parser = ["file", "block", "mem-block"])]
     pub kv_backend: String,
 

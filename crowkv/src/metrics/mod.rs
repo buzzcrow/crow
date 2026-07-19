@@ -608,10 +608,18 @@ fn flush_gauges<W: Write>(writer: &mut W, entries: &[GaugeEntry], width: usize) 
     if entries.is_empty() {
         return;
     }
-    let _ = writeln!(writer, "{:<width$}  {:>8}", "", "value", width = width);
     let mut sorted: Vec<&GaugeEntry> = entries.iter().collect();
     sorted.sort_by(|a, b| a.name.cmp(&b.name));
-    for e in &sorted {
+    let non_zero: Vec<&GaugeEntry> = sorted
+        .iter()
+        .filter(|e| e.handle.snapshot() != 0)
+        .copied()
+        .collect();
+    if non_zero.is_empty() {
+        return;
+    }
+    let _ = writeln!(writer, "{:<width$}  {:>8}", "", "value", width = width);
+    for e in &non_zero {
         let val = e.handle.snapshot();
         let _ = writeln!(writer, "{:<width$}  {:>8}", e.name, val, width = width);
     }

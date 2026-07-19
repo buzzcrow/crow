@@ -11,38 +11,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-/// Which [`crowkv::kv::KVEngine`] backend new groups are created with.
-///
-/// Selected once at server startup via `--kv-engine` and stored on the
-/// registry; both the CLI bootstrap path (`main.rs`) and the management-API
-/// dynamic group-creation path (`mgmt_api.rs::add_group`) read it from there
-/// so the two paths can never disagree on which engine a fresh group gets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KvEngineKind {
-    /// In-memory, non-durable `InMemKV`. Test-only — not selectable via
-    /// CLI. Used by unit/integration tests that construct a
-    /// `KvStoreRegistry` programmatically without going through the
-    /// `--kv-engine` CLI flag.
-    Memory,
-    /// Durable crowtree file under the registry's `data_root`, one file per
-    /// `(store_id, group_id)` — see `startup::store_crowtree_path`.
-    /// The only production engine, selectable via `--kv-engine crowtree`.
-    Crowtree,
-}
-
-impl KvEngineKind {
-    /// Parse the `--kv-engine` CLI value (`clap`'s `value_parser` already
-    /// restricts it to `["crowtree"]`, so any other input is a
-    /// caller bug, not a user-facing error path).
-    #[must_use]
-    pub fn parse(s: &str) -> Self {
-        match s {
-            "crowtree" => Self::Crowtree,
-            _ => Self::Memory,
-        }
-    }
-}
-
 /// Parse the `--wal-backend` CLI value (`clap`'s `value_parser` already
 /// restricts it to `["file", "mem-block", "block-device"]`) into the
 /// WAL's [`IoBackend`].
@@ -57,8 +25,7 @@ pub fn parse_wal_backend(s: &str) -> IoBackend {
 
 /// Parse the `--kv-backend` CLI value (`clap`'s `value_parser` already
 /// restricts it to `["file", "block", "mem-block"]`) into the FFI's
-/// [`CrowtreeBackend`]. Only meaningful when `KvEngineKind::Crowtree`
-/// is selected.
+/// [`CrowtreeBackend`].
 #[must_use]
 pub fn parse_crowtree_backend(s: &str) -> CrowtreeBackend {
     match s {
@@ -74,12 +41,9 @@ pub struct KvStoreRegistry {
     pub wal_root: PathBuf,
     pub config_root: PathBuf,
     pub wal_backend: Arc<IoBackend>,
-    pub kv_engine: KvEngineKind,
-    /// Root directory for durable per-group crowtree files. Only read when
-    /// `kv_engine == KvEngineKind::Crowtree`.
+    /// Root directory for durable per-group crowtree files.
     pub data_root: PathBuf,
-    /// Durable backend for the crowtree engine. Only read
-    /// when `kv_engine == KvEngineKind::Crowtree`.
+    /// Durable backend for the crowtree engine.
     pub crowtree_backend: CrowtreeBackend,
     /// Port pool for KV server listeners, populated from `--ports` CLI arg.
     /// Used by `add_store` as a fallback before `persisted_port_for_store`.
@@ -135,7 +99,6 @@ impl KvStoreRegistry {
             wal_root,
             config_root,
             wal_backend,
-            kv_engine: KvEngineKind::Crowtree,
             data_root,
             crowtree_backend: CrowtreeBackend::File,
             port_pool: Mutex::new(Vec::new()),
@@ -144,20 +107,19 @@ impl KvStoreRegistry {
         }
     }
 
-    /// Builder-style setter for [`Self::kv_engine`] / [`Self::data_root`],
+    /// Builder-style setter for [`Self::data_root`],
     /// used by `main.rs` right after construction (mirrors
     /// [`Self::set_port_pool`]'s pattern of a post-construction CLI-driven
     /// override rather than a longer `with_runtime` parameter list).
     #[must_use]
-    pub fn with_kv_engine(mut self, kv_engine: KvEngineKind, data_root: PathBuf) -> Self {
-        self.kv_engine = kv_engine;
+    pub fn with_data_root(mut self, data_root: PathBuf) -> Self {
         self.data_root = data_root;
         self
     }
 
     /// Builder-style setter for [`Self::crowtree_backend`],
     /// used by `main.rs` right after construction alongside
-    /// [`Self::with_kv_engine`].
+    /// [`Self::with_data_root`].
     #[must_use]
     pub fn with_crowtree_backend(mut self, crowtree_backend: CrowtreeBackend) -> Self {
         self.crowtree_backend = crowtree_backend;

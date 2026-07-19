@@ -50,7 +50,7 @@ async fn bench_benchmark_mem_end_to_end() {
         ],
     );
     assert_eq!(code, 0, "stdout={stdout}\nstderr={stderr}");
-    assert!(stdout.contains("report:"), "stdout={stdout}");
+    assert!(stdout.contains("report (json):"), "stdout={stdout}");
     assert!(stdout.contains("total_ops"), "stdout={stdout}");
 }
 
@@ -90,7 +90,7 @@ async fn bench_benchmark_file_end_to_end() {
         ],
     );
     assert_eq!(code, 0, "stdout={stdout}\nstderr={stderr}");
-    assert!(stdout.contains("report:"), "stdout={stdout}");
+    assert!(stdout.contains("report (json):"), "stdout={stdout}");
 }
 
 /// `bench compare` prints a comparison table when two valid report

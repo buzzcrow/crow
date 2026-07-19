@@ -72,17 +72,14 @@ impl BenchMode {
     fn apply_to(self, body: &mut DeployNodeServerBody) {
         match self {
             Self::Memory => {
-                body.kv_engine = Some("crowtree".into());
                 body.kv_backend = Some("mem-block".into());
                 body.wal_backend = Some("mem-block".into());
             }
             Self::File => {
-                body.kv_engine = Some("crowtree".into());
                 body.kv_backend = Some("file".into());
                 body.wal_backend = Some("file".into());
             }
             Self::Block => {
-                body.kv_engine = Some("crowtree".into());
                 body.kv_backend = Some("block".into());
                 body.wal_backend = Some("block-device".into());
             }

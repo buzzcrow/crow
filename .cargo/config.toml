@@ -1,0 +1,12 @@
+# Inject rpath for pixi/conda lib dir so test binaries (not just bins)
+# can find libspdlog and other crowtree FFI dependencies at runtime.
+# build.rs rustc-link-arg only covers bin targets of direct dependents;
+# this covers test binaries of all crates.
+# Test binaries live in target/<profile>/deps/, so @loader_path (macOS)
+# or $ORIGIN (Linux) points there and we traverse up to the repo root's
+# .pixi env.
+[target.'cfg(target_os = "macos")']
+rustflags = ["-C", "link-arg=-Wl,-rpath,@loader_path/../../../.pixi/envs/default/lib"]
+
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "link-arg=-Wl,-rpath,$ORIGIN/../../../.pixi/envs/default/lib"]
