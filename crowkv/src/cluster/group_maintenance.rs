@@ -43,7 +43,7 @@ use std::time::Duration;
 
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 use super::group::PxGroup;
 use crate::wal::gc::run_gc_with_watermark;
@@ -122,11 +122,25 @@ pub(crate) async fn run_pass(group: &PxGroup) {
         || time_elapsed >= Duration::from_millis(group.election_cfg.snapshot_time_threshold_ms);
 
     let engine_snapshot_at = if should_snapshot {
+        debug!(
+            group_id = group.group_id(),
+            replica_id = group.local_replica().id,
+            contiguous_slot = contiguous,
+            slot_advance = slot_advance,
+            time_elapsed_ms = u64::try_from(time_elapsed.as_millis()).unwrap_or(u64::MAX),
+            "maintenance: persisting snapshot (threshold met)"
+        );
         let at = engine.persist_snapshot();
         group
             .last_snapshot_slot
             .store(at, std::sync::atomic::Ordering::Release);
         *group.last_snapshot_time.lock() = std::time::Instant::now();
+        debug!(
+            group_id = group.group_id(),
+            replica_id = group.local_replica().id,
+            snapshot_slot = at,
+            "maintenance: snapshot persisted"
+        );
         at
     } else {
         0

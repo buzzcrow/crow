@@ -29,7 +29,7 @@ crowkv-console/web/ui/e2e/runtime-data/
 # ── Runtime artifacts (WAL, config, logs) ───────────────────────
 # Top-level artifact dirs (anchored to repo root).
 /log/
-/runtime-data/
+/runtime-data/ 
 # bench-runs/ holds datetime-stamped run dirs; ignore contents
 # but keep the directory itself in the repo.
 /bench-runs/*
@@ -39,9 +39,10 @@ crowkv-console/cli/bench-runs/
 
 # Per-crate runtime dirs — these names don't appear in source code,
 # so globbing is safe and avoids repeating per crate.
-**/wal/
+**/waldata/
 **/conf/
 **/ctdata/
+**/wal/
 
 # `log/` is dangerous as a glob — "log" is a common Rust module name.
 # List explicitly per crate to avoid ignoring source directories.

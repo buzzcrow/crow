@@ -253,3 +253,39 @@ TEST(IncrementalCheckpoint, ReopenAfterIncrementalSeesAllValues)
         EXPECT_EQ(v, kv.second) << "key " << kv.first;
     }
 }
+
+TEST(IncrementalCheckpoint, SnapshotPagesTotalAccumulates)
+{
+    MemPageStore store(1);
+    Options      opt;
+    opt.page_store       = &store;
+    opt.max_delta_len    = 1;
+    opt.leaf_split_bytes = 160;
+    opt.frame_bytes      = 4096;
+    Crowtree t(opt);
+    t.init_metrics("s.0.g.0");
+
+    std::map<std::string, std::string> oracle;
+    fill(&t, 200, &oracle);
+
+    // First snapshot: all pages dirty.
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    uint64_t first_written = t.last_snapshot_pages_written();
+    uint64_t first_total   = t.stats().snapshot_pages_total;
+    EXPECT_GT(first_written, 1U);
+    EXPECT_EQ(first_total, first_written);
+
+    // Second snapshot with no changes: per-call stays 0, cumulative persists.
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    EXPECT_EQ(t.last_snapshot_pages_written(), 0U);
+    EXPECT_EQ(t.stats().snapshot_pages_total, first_total);
+
+    // Touch one key, flush, snapshot again: cumulative increases.
+    ASSERT_TRUE(t.apply(100000, put_one(key(7), "updated")).ok());
+    t.force_advance_slot(100000);
+    ASSERT_TRUE(t.flush().ok());
+    ASSERT_TRUE(t.snapshot(nullptr).ok());
+    uint64_t third_written = t.last_snapshot_pages_written();
+    EXPECT_GE(third_written, 1U);
+    EXPECT_EQ(t.stats().snapshot_pages_total, first_total + third_written);
+}

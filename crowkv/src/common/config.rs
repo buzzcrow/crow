@@ -271,7 +271,7 @@ impl PxElectionConfig {
             learner_stream_window_frames: 64,
             maintenance_tick_ms: 5_000,
             snapshot_slot_threshold: 10_000,
-            snapshot_time_threshold_ms: 60_000,
+            snapshot_time_threshold_ms: 1_000,
         }
     }
 }

@@ -170,6 +170,7 @@ struct EngineStats
     uint64_t gc_watermark              = 0;     // min(snapshot_slot, safe_slot) (see gc_watermark())
     bool     io_failed                 = false; // latched media fault (see io_failed())
     uint64_t snapshot_pages_written    = 0;     // last snapshot()'s dirty base pages written
+    uint64_t snapshot_pages_total      = 0;     // cumulative pages written across all snapshots
     uint64_t snapshot_segments_written = 0;     // last snapshot()'s dirty mapping segments written
     // BufferPool::Stats as of this call -- see buffer_pool.h.
     uint64_t buffer_pool_hits       = 0;
@@ -186,6 +187,7 @@ struct EngineStats
     uint64_t mt_get_hit_total    = 0; // L0 lookups that found a cell
     uint64_t flush_drain_total   = 0; // drain_memtable_into_l1 calls
     uint64_t flush_entries_total = 0; // entries drained from L0 to L1
+    uint64_t snapshot_total      = 0; // snapshot() calls (durable checkpoints)
     uint64_t l1_get_total        = 0; // get() lookups that descended to L1
     uint64_t l1_get_hit_total    = 0; // L1 lookups that found a cell
     uint64_t map_lookup_total    = 0; // mapping table lookups
@@ -616,11 +618,19 @@ class Crowtree
     // scrape or console panel refresh).
     [[nodiscard]] EngineStats stats() const;
 
-    // Wire C++ metrics into the engine. Registers buffer pool, apply, and
-    // snapshot metric handles with the given registry using the provided
-    // name prefix (e.g. "s.1.g.0"). Must be called after open() and before
-    // any operations. The registry must outlive the engine.
-    void set_metrics(MetricsRegistry *registry, const std::string &prefix);
+    // Create the internal MetricsRegistry and register all handles
+    // using the provided name prefix (e.g. "s.1.g.0"). Called from open().
+    void init_metrics(const std::string &prefix);
+
+    // Flush all C++ metrics into a formatted string (for FFI return to
+    // Rust). Uses open_memstream internally. `width` overrides the
+    // per-section max name length for column alignment with the Rust
+    // section (0 = use internal max).
+    std::string flush_metrics_str(double window_secs, const char *timestamp, size_t width = 0);
+
+    // Return the current max metric name length (for Rust's shared-width
+    // computation).
+    size_t max_name_len() const;
 
     // Evict clean, delta-free resident leaf bases down to at most
     // `max_resident_leaves`, re-tagging their slots unloaded and epoch-retiring the
@@ -1020,6 +1030,7 @@ class Crowtree
     std::atomic<uint64_t>     version_{0};
     std::atomic<uint64_t>     gc_floor_{0};
     std::atomic<uint64_t>     snapshot_pages_written_{0};    // pages written by last snapshot
+    std::atomic<uint64_t>     snapshot_pages_total_{0};      // cumulative pages written across all snapshots
     std::atomic<uint64_t>     snapshot_segments_written_{0}; // segment images written by last snapshot
     mutable std::atomic<bool> io_failed_{false};             // latched demand-load media fault
 
@@ -1030,6 +1041,7 @@ class Crowtree
     mutable std::atomic<uint64_t> mt_get_hit_total_{0};    // L0 lookups that found a cell
     mutable std::atomic<uint64_t> flush_drain_total_{0};   // drain_memtable_into_l1 calls
     mutable std::atomic<uint64_t> flush_entries_total_{0}; // entries drained from L0 to L1
+    mutable std::atomic<uint64_t> snapshot_total_{0};      // snapshot() calls (durable checkpoints)
     mutable std::atomic<uint64_t> l1_get_total_{0};        // get() lookups that descended to L1
     mutable std::atomic<uint64_t> l1_get_hit_total_{0};    // L1 lookups that found a cell
     mutable std::atomic<uint64_t> map_lookup_total_{0};    // mapping table lookups (find_leaf_page_id / resident)
@@ -1069,7 +1081,7 @@ class Crowtree
     // mutable: readers take a guard in const get().
     mutable EpochManager epoch_;
 
-    // ── Optional metrics handles (set via set_metrics) ──
+    // ── Metrics handles (registered in init_metrics) ──
     struct MetricsHandles
     {
         Counter        *buf_hits       = nullptr;
@@ -1080,28 +1092,39 @@ class Crowtree
         Gauge          *buf_dirty      = nullptr;
         LatencySummary *apply_l        = nullptr;
         LatencySummary *snapshot_l     = nullptr;
-        LatencySummary *flush_l        = nullptr; // flush() L0→L1 drain latency
+        LatencySummary *flush_l        = nullptr;
         // MemTable (L0) operation counters
-        Counter *mt_upsert_c  = nullptr; // apply() writes into L0
-        Counter *mt_get_c     = nullptr; // get() lookups in L0
-        Counter *mt_get_hit_c = nullptr; // L0 lookups that found a cell
+        Counter *mt_upsert_c  = nullptr;
+        Counter *mt_get_c     = nullptr;
+        Counter *mt_get_hit_c = nullptr;
         // Flush (L0 → L1) counters
-        Counter *flush_drain_c   = nullptr; // drain_memtable_into_l1 calls
-        Counter *flush_entries_c = nullptr; // entries drained from L0 to L1
+        Counter *flush_drain_c   = nullptr;
+        Counter *flush_entries_c = nullptr;
         // L1 (B-tree) query counters
-        Counter *l1_get_c     = nullptr; // get() lookups that descended to L1
-        Counter *l1_get_hit_c = nullptr; // L1 lookups that found a cell
+        Counter *l1_get_c     = nullptr;
+        Counter *l1_get_hit_c = nullptr;
         // B+tree page mutation counters (during drain/split/merge/consolidate)
-        Counter        *page_write_c = nullptr; // page builds (split/merge/consolidate)
-        LatencySummary *page_write_l = nullptr; // per-page mutation latency
+        Counter        *page_write_c = nullptr;
+        LatencySummary *page_write_l = nullptr;
         // Mapping table lookup counter
-        Counter *map_lookup_c = nullptr; // find_leaf_page_id / resident calls
+        Counter *map_lookup_c = nullptr;
         // Demand-load (page fault I/O) counter + latency
-        Counter        *demand_load_c = nullptr; // demand-load page faults
-        LatencySummary *demand_load_l = nullptr; // demand-load I/O latency
+        Counter        *demand_load_c = nullptr;
+        LatencySummary *demand_load_l = nullptr;
+        // Snapshot sub-metrics (new)
+        LatencySummary *snapshot_apply_l            = nullptr; // prepare_snapshot_locked latency
+        LatencySummary *snapshot_page_write_l       = nullptr; // per-page write_at latency
+        Counter        *snapshot_page_write_cache_c = nullptr; // clean pages (no write)
+        Bandwidth      *snapshot_page_write_bw      = nullptr; // per-page write bytes
+        Bandwidth      *snapshot_meta_write_bw      = nullptr; // metadata write bytes (seg+dir+anchor)
+        Bandwidth      *page_read_bw                = nullptr; // demand-load read bytes
+        Counter        *snapshot_pages_c            = nullptr; // cumulative pages written
     };
 
     MetricsHandles metrics_;
+
+    // Internal metrics registry (owned by the engine).
+    std::unique_ptr<MetricsRegistry> metrics_registry_;
 };
 
 } // namespace crowtree

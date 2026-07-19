@@ -232,7 +232,14 @@ class MetricsRegistry
     LatencySummary   *register_summary(const std::string &name);
 
     // Flush all metrics to the given file stream.
-    void flush_to(FILE *fp, double window_secs, const char *timestamp);
+    // section_label: "metrics" or "cpp-metrics" (header prefix).
+    // width: 0 = use internal max name length; >0 = use this width for
+    //        column alignment across Rust and C++ sections.
+    void flush_to(FILE *fp, double window_secs, const char *timestamp, const char *section_label = "metrics",
+                  size_t width = 0);
+
+    // Return the current max metric name length across all sections.
+    size_t max_name_len() const;
 
     // Start periodic flush thread. interval_secs in seconds.
     // max_file_mb and max_files control size-based rotation with gzip

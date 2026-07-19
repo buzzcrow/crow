@@ -68,6 +68,21 @@ impl CrowtreeEngine {
         self.inner.handle().stats()
     }
 
+    /// Flush C++ metrics into a formatted string for the `[cpp-metrics]`
+    /// log section. Delegates to `crowtree_ffi::Crowtree::flush_metrics_str`.
+    #[must_use]
+    pub fn flush_metrics_str(&self, window_secs: f64, timestamp: &str, width: usize) -> String {
+        self.inner
+            .handle()
+            .flush_metrics_str(window_secs, timestamp, width)
+    }
+
+    /// Current max metric name length from the C++ registry.
+    #[must_use]
+    pub fn max_name_len(&self) -> usize {
+        self.inner.handle().max_name_len()
+    }
+
     /// Full ordered stream including tombstones. Test-only utility.
     #[must_use]
     pub fn iter_all(&self) -> Vec<(Vec<u8>, u64, Cell)> {

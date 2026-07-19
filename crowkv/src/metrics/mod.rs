@@ -212,16 +212,34 @@ impl MetricsRegistry {
     }
 
     /// Flush all metrics to `writer`, formatting per the design doc log
-    /// format. Resets window state on each metric.
+    /// format. Resets window state on each metric. Uses the registry's
+    /// own `max_name_len` for column width.
     pub fn flush<W: Write>(&self, writer: &mut W, window_secs: f64, timestamp: &str) {
-        let _ = writeln!(writer, "[metrics {timestamp} window={window_secs:.0}s]");
-        let width = self.max_name_len;
+        self.flush_with_width(writer, window_secs, timestamp, self.max_name_len);
+    }
+
+    /// Flush with an explicit column width (for cross-section alignment
+    /// with C++ `[cpp-metrics]`).
+    pub fn flush_with_width<W: Write>(
+        &self,
+        writer: &mut W,
+        window_secs: f64,
+        timestamp: &str,
+        width: usize,
+    ) {
+        let _ = writeln!(writer, "[metrics {timestamp} window={window_secs:.2}s]");
         flush_counters(writer, &self.counters, window_secs, width);
         flush_histograms(writer, &self.histograms, window_secs, width);
         flush_summaries(writer, &self.summaries, window_secs, width);
         flush_bandwidths(writer, &self.bandwidths, window_secs, width);
         flush_gauges(writer, &self.gauges, width);
         let _ = writeln!(writer);
+    }
+
+    /// Current max metric name length across all types.
+    #[must_use]
+    pub fn max_name_len(&self) -> usize {
+        self.max_name_len
     }
 
     /// Number of registered counters (for testing).
@@ -326,6 +344,11 @@ pub struct MetricsRunner {
     system_collector: Arc<std::sync::Mutex<SystemCollector>>,
     /// Optional pre-flush collector (e.g. engine stats poller).
     collector: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Optional post-flush callback to collect C++ metrics strings.
+    /// Called after the Rust `[metrics]` + misc section is written.
+    /// Receives (writer, `window_secs`, timestamp, `shared_width`).
+    #[allow(clippy::type_complexity)]
+    cpp_flush: Option<Arc<dyn Fn(&mut dyn std::io::Write, f64, &str, usize) + Send + Sync>>,
     /// Timestamp of the last flush, used to compute the real window.
     last_flush: Arc<std::sync::Mutex<Option<Instant>>>,
 }
@@ -343,6 +366,7 @@ impl MetricsRunner {
             interval_secs: interval_secs as f64,
             system_collector: Arc::new(std::sync::Mutex::new(SystemCollector::new())),
             collector: None,
+            cpp_flush: None,
             last_flush: Arc::new(std::sync::Mutex::new(None)),
         }
     }
@@ -360,6 +384,17 @@ impl MetricsRunner {
         self.collector = Some(Arc::new(f));
     }
 
+    /// Set a post-flush C++ metrics callback. Called after the Rust
+    /// `[metrics]` + misc section is written. The callback receives
+    /// (writer, `window_secs`, timestamp, `shared_width`) and should write
+    /// the `[cpp-metrics]` block(s) to the writer.
+    pub fn set_cpp_flush(
+        &mut self,
+        f: impl Fn(&mut dyn std::io::Write, f64, &str, usize) + Send + Sync + 'static,
+    ) {
+        self.cpp_flush = Some(Arc::new(f));
+    }
+
     /// Start the periodic flush task. The first tick fires immediately
     /// and is skipped (no data yet); subsequent ticks flush with the
     /// real elapsed time since the previous flush as the window.
@@ -369,6 +404,7 @@ impl MetricsRunner {
         let interval = self.interval_secs;
         let sys_collector = Arc::clone(&self.system_collector);
         let collector = self.collector.clone();
+        let cpp_flush = self.cpp_flush.clone();
         let last_flush = Arc::clone(&self.last_flush);
 
         self.task = Some(tokio::spawn(async move {
@@ -397,15 +433,19 @@ impl MetricsRunner {
                     col();
                 }
                 if let Ok(reg) = registry.lock() {
+                    let rust_max = reg.max_name_len();
                     if let Ok(mut w) = writer.lock() {
-                        reg.flush(&mut *w, window_secs, &ts);
+                        reg.flush_with_width(&mut *w, window_secs, &ts, rust_max);
                         let _ = writeln!(w, "misc");
                         if let Ok(mut sc) = sys_collector.lock() {
                             let snap = sc.collect();
                             flush_system(&mut *w, &snap);
                         }
                         let _ = writeln!(w);
-                        let _ = w.flush();
+                        if let Some(ref cpp) = cpp_flush {
+                            cpp(&mut *w, window_secs, &ts, rust_max);
+                            let _ = w.flush();
+                        }
                     }
                 }
             }
@@ -431,14 +471,18 @@ impl MetricsRunner {
             .unwrap_or(self.interval_secs);
         let ts = iso8601_now();
         if let Ok(reg) = self.registry.lock() {
+            let rust_max = reg.max_name_len();
             if let Ok(mut w) = self.writer.lock() {
-                reg.flush(&mut *w, window_secs, &ts);
+                reg.flush_with_width(&mut *w, window_secs, &ts, rust_max);
                 let _ = writeln!(w, "misc");
                 if let Ok(mut sc) = self.system_collector.lock() {
                     let snap = sc.collect();
                     flush_system(&mut *w, &snap);
                 }
                 let _ = writeln!(w);
+                if let Some(ref cpp) = self.cpp_flush {
+                    cpp(&mut *w, window_secs, &ts, rust_max);
+                }
                 let _ = w.flush();
             }
         }
@@ -655,7 +699,7 @@ mod registry_tests {
         reg.flush(&mut buf, 5.0, "2026-07-15T16:30:05.123Z");
         let out = String::from_utf8(buf).unwrap();
 
-        assert!(out.contains("[metrics 2026-07-15T16:30:05.123Z window=5s]"));
+        assert!(out.contains("[metrics 2026-07-15T16:30:05.123Z window=5.00s]"));
         assert!(out.contains("count") && out.contains("tps(/s)") && out.contains("total"));
         assert!(out.contains("s.1.kv.put.c"));
         assert!(out.contains("10"));

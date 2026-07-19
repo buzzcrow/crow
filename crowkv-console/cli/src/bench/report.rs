@@ -246,14 +246,23 @@ impl BenchReport {
             let _ = writeln!(out, "  - node[{i}]: {nid}");
         }
         let _ = writeln!(out, "- **workspace:** {}", workspace_dir.display());
-        let _ = writeln!(out, "- **engine:** crowtree");
-        let mode_desc = match self.mode.as_str() {
-            "mem" => "mem-block page store (in-memory, no disk I/O)",
-            "file" => "file page store (file-backed, no O_DIRECT)",
-            "block-device" => "block page store (O_DIRECT, 4K aligned)",
-            other => other,
+        let (wal_desc, kv_desc) = match self.mode.as_str() {
+            "mem" => (
+                "mem-block (in-memory, no disk I/O)",
+                "crowtree + mem-block page store (in-memory, no disk I/O)",
+            ),
+            "file" => (
+                "file (file-backed, no O_DIRECT)",
+                "crowtree + file page store (file-backed, no O_DIRECT)",
+            ),
+            "block-device" => (
+                "block-device (O_DIRECT, 4K aligned)",
+                "crowtree + block page store (O_DIRECT, 4K aligned)",
+            ),
+            other => (other, other),
         };
-        let _ = writeln!(out, "- **backend:** {mode_desc}");
+        let _ = writeln!(out, "- **WAL backend:** {wal_desc}");
+        let _ = writeln!(out, "- **KV engine backend:** {kv_desc}");
         let _ = writeln!(out);
 
         // ── Client-side Results ──
