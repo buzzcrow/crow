@@ -165,11 +165,11 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
     if let Err(e) = report.write_to(&run_dir) {
         eprintln!("warning: failed to re-write report with server metrics: {e}");
     }
-    let text_path = match report.write_text_to(&run_dir, fixture.node_ids(), fixture.workspace_dir()) {
+    let md_path = match report.write_md_to(&run_dir, fixture.node_ids(), fixture.workspace_dir()) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("warning: failed to write text report: {e}");
-            run_dir.join("report.txt")
+            eprintln!("warning: failed to write markdown report: {e}");
+            run_dir.join("report.md")
         }
     };
     let log_warning_count = count_log_warnings(&artifacts_dir);
@@ -181,7 +181,7 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
     }
     println!("{}", report.human_summary());
     println!("\nreport (json): {}", path.display());
-    println!("report (text): {}", text_path.display());
+    println!("report (md):   {}", md_path.display());
     print_anomalies(&report, log_warning_count);
     ExitCode::SUCCESS
 }
@@ -206,7 +206,7 @@ fn next_run_id() -> String {
             }
         }
     }
-    (max_id + 1).to_string()
+    format!("{}-{}", max_id + 1, std::process::id())
 }
 
 /// Build the per-run folder name: `bench-{id}-{datetime}-{mode}`.
@@ -305,22 +305,26 @@ fn bench_report(run_id: &str, json: bool) -> ExitCode {
             if json {
                 crate::utils::print_json(&r)
             } else {
-                let text_path = path.with_file_name("report.txt");
-                if text_path.exists() {
-                    match std::fs::read_to_string(&text_path) {
-                        Ok(text) => {
-                            println!("{text}");
-                            ExitCode::SUCCESS
-                        }
+                let md_path = path.with_file_name("report.md");
+                let md_text = if md_path.exists() {
+                    match std::fs::read_to_string(&md_path) {
+                        Ok(text) => text,
                         Err(e) => {
-                            eprintln!("error: read text report {}: {e}", text_path.display());
-                            ExitCode::from(1)
+                            eprintln!("error: read markdown report {}: {e}", md_path.display());
+                            return ExitCode::from(1);
                         }
                     }
                 } else {
-                    println!("{}", r.human_summary());
-                    ExitCode::SUCCESS
-                }
+                    let node_ids = vec!["bn0".to_string(), "bn1".to_string(), "bn2".to_string()];
+                    let workspace = path
+                        .parent()
+                        .map_or_else(|| std::path::PathBuf::from("."), |d| d.join("artifacts"));
+                    let text = r.markdown_report(&node_ids, &workspace);
+                    let _ = std::fs::write(&md_path, &text);
+                    text
+                };
+                println!("{md_text}");
+                ExitCode::SUCCESS
             }
         }
         Err(e) => {

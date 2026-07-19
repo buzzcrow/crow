@@ -1091,7 +1091,7 @@ impl PxGroup {
                         // `last_chosen_slot` watermark advances before
                         // the next heartbeat tick.
                         self.fan_out_chosen_notice(&entry, group_id);
-                        info!(
+                        trace!(
                             group_id,
                             slot = entry.slot,
                             round = entry.ballot.round,
