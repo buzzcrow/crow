@@ -4,6 +4,7 @@
 #include "crowtree/metrics.h"
 
 #include "crowtree/gzip.h"
+#include "crowtree/log.h"
 
 #include <algorithm>
 #include <array>
@@ -287,6 +288,7 @@ void MetricsRegistry::start(const std::string &log_path, double interval_secs, s
     max_files_      = max_files;
     running_.store(true, std::memory_order_relaxed);
     flush_thread_ = std::thread([this]() {
+        set_current_thread_name("ct-metrics");
         while (running_.load(std::memory_order_relaxed)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(interval_secs_ * 1000)));
             if (!running_.load(std::memory_order_relaxed)) {

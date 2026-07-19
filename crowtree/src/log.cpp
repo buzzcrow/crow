@@ -10,6 +10,7 @@
 
 #    include "crowtree/compressing_sink.h"
 
+#    include <pthread.h>
 #    include <spdlog/async_logger.h>
 #    include <spdlog/details/thread_pool.h>
 #    include <spdlog/pattern_formatter.h>
@@ -22,6 +23,8 @@
 #    include <exception>
 #    include <memory>
 #    include <mutex>
+#    include <string>
+#    include <unordered_map>
 
 namespace crowtree
 {
@@ -30,6 +33,42 @@ namespace
 // Process-global enabled flag (see log.h lifetime notes). Relaxed is fine: the
 // macros only need eventual visibility, and init/shutdown are not on a hot path.
 std::atomic<bool> g_enabled{true};
+
+} // namespace
+
+std::mutex                              g_thread_names_mu;
+std::unordered_map<size_t, std::string> g_thread_names;
+
+void set_current_thread_name(const char *name)
+{
+    size_t                      tid = spdlog::details::os::thread_id();
+    std::lock_guard<std::mutex> lk(g_thread_names_mu);
+    g_thread_names[tid] = name;
+#    if defined(__APPLE__)
+    pthread_setname_np(name);
+#    elif defined(__linux__)
+    pthread_setname_np(pthread_self(), name);
+#    endif
+}
+
+namespace
+{
+class thread_name_flag : public spdlog::custom_flag_formatter
+{
+  public:
+    void format(const spdlog::details::log_msg &msg, const std::tm & /*tm*/, spdlog::memory_buf_t &dest) override
+    {
+        std::lock_guard<std::mutex> lk(g_thread_names_mu);
+        if (auto it = g_thread_names.find(msg.thread_id); it != g_thread_names.end()) {
+            dest.append(it->second.data(), it->second.data() + it->second.size());
+        }
+    }
+
+    [[nodiscard]] std::unique_ptr<custom_flag_formatter> clone() const override
+    {
+        return std::make_unique<thread_name_flag>();
+    }
+};
 
 // We OWN the async logger and its thread pool (rather than using spdlog's global
 // registry/thread pool) so that shutdown can join the worker BEFORE the logger's
@@ -86,7 +125,10 @@ void init_logging(const std::string &log_dir, const std::string &level, size_t m
             // No log dir configured: log to stderr so output is visible (tests, CLI).
             auto sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
             g_logger  = std::make_shared<spdlog::logger>("crowtree", sink);
-            g_logger->set_pattern("[%l] [pid %P] %v");
+            auto stderr_fmt =
+                std::make_unique<spdlog::pattern_formatter>("[%l] [%n] %v", spdlog::pattern_time_type::utc);
+            stderr_fmt->add_flag<thread_name_flag>('@');
+            g_logger->set_formatter(std::move(stderr_fmt));
             g_logger->set_level(spdlog::level::from_str(level));
             spdlog::set_default_logger(g_logger);
             g_enabled.store(true, std::memory_order_relaxed);
@@ -111,10 +153,11 @@ void init_logging(const std::string &log_dir, const std::string &level, size_t m
         const std::string path   = log_dir + "/" + prefix + "-" + ts.data() + "-" + std::to_string(::getpid()) + ".log";
         auto              sink = std::make_shared<compressing_file_sink_mt>(path, max_file_mb * 1024 * 1024, max_files);
         g_logger = std::make_shared<spdlog::async_logger>("crowtree", sink, g_tp, spdlog::async_overflow_policy::block);
-        // YYYYMMDD-HHMMSS.mmm [pid P] [tid] [level] [crowtree] message
-        // (aligns with the Rust `tracing` format; all timestamps UTC).
-        auto formatter = std::make_unique<spdlog::pattern_formatter>("%Y%m%d-%H%M%S.%e [pid %P] [%t] [%l] [%n] %v",
+        // YYYYMMDD-HHMMSS.mmm [thread] [level] [crowtree] message
+        // (PID is in the filename; thread name via custom flag; all timestamps UTC).
+        auto formatter = std::make_unique<spdlog::pattern_formatter>("%Y%m%d-%H%M%S.%e [@] [%l] [%n] %v",
                                                                      spdlog::pattern_time_type::utc);
+        formatter->add_flag<thread_name_flag>('@');
         g_logger->set_formatter(std::move(formatter));
         g_logger->set_level(spdlog::level::from_str(level));
         g_logger->flush_on(spdlog::level::warn);
@@ -151,6 +194,10 @@ void shutdown_logging()
 
 void init_logging(const std::string & /*log_dir*/, const std::string & /*level*/, size_t /*max_file_mb*/,
                   size_t /*max_files*/, const std::string & /*file_prefix*/)
+{
+}
+
+void set_current_thread_name(const char * /*name*/)
 {
 }
 

@@ -84,6 +84,8 @@ async fn open_crowtree_engine(
         group_id: u32::try_from(group_id).unwrap_or(0),
         log_dir: log_dir.to_string(),
         log_file_prefix: "crowkv-server-tree".to_string(),
+        background_flush: true,
+        flush_interval_ms: 3600 * 1000, // 1 hour; MemTable threshold still triggers immediate flush
         ..Default::default()
     };
     // `CrowtreeEngine::open` is a synchronous FFI call; called here inline

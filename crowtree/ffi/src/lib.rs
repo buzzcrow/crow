@@ -107,6 +107,8 @@ mod sys {
         pub log_file_prefix: *const c_char,
         pub log_max_file_mb: usize,
         pub log_max_files: usize,
+        pub flush_interval_ms: u64,
+        pub background_flush: u8,
     }
 
     extern "C" {
@@ -336,6 +338,10 @@ pub struct Options {
     pub log_max_file_mb: usize,
     /// Number of rotated C++ log files to keep.
     pub log_max_files: usize,
+    /// Background flush interval in ms. 0 = no background flush thread.
+    pub flush_interval_ms: u64,
+    /// Enable the background flush thread (requires flush_interval_ms > 0).
+    pub background_flush: bool,
 }
 
 /// One record of a multi-key batch passed to [`Crowtree::apply_batch`].
@@ -482,6 +488,8 @@ impl Crowtree {
             log_file_prefix: clog_prefix.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
             log_max_file_mb: opt.log_max_file_mb,
             log_max_files: opt.log_max_files,
+            flush_interval_ms: opt.flush_interval_ms,
+            background_flush: u8::from(opt.background_flush),
         };
         let mut out: *mut sys::ct_tree = std::ptr::null_mut();
         check(unsafe { sys::ct_open(&copt, &mut out) })?;

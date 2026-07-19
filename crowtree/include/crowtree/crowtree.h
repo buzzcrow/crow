@@ -189,6 +189,8 @@ struct EngineStats
     uint64_t flush_entries_total = 0; // entries drained from L0 to L1
     uint64_t l1_get_total        = 0; // get() lookups that descended to L1
     uint64_t l1_get_hit_total    = 0; // L1 lookups that found a cell
+    uint64_t map_lookup_total    = 0; // mapping table lookups
+    uint64_t demand_load_total   = 0; // demand-load page faults
 };
 
 // One durable blob to write at a fixed offset, computed ahead of time by
@@ -940,6 +942,9 @@ class Crowtree
                                    std::function<void(Status, uint64_t last_applied)> on_done);
 
     Options opt_;
+    // Human-readable engine label for CT_LOG context (e.g. "s1.g1").
+    // Copied from opt_.name at construction; empty means "[unnamed]".
+    std::string name_;
     // Base-page frame arena. shared_ptr because epoch-retired pages
     // co-own it; the tree-owned EpochManager (epoch_, declared last so it is
     // destroyed first) reclaims those pages before pool_ is destroyed. Declared
@@ -1012,8 +1017,9 @@ class Crowtree
     // write pattern, which is expected and bounded by how long the
     // underlying gap stays open, not by this mechanism.
     mutable std::shared_mutex             memtable_mutex_;
-    std::shared_ptr<MemTable>             active_{std::make_shared<MemTable>()};
+    std::shared_ptr<MemTable>             active_;
     std::deque<std::shared_ptr<MemTable>> frozen_;
+    std::atomic<uint64_t>                 memtable_next_id_{1}; // monotonic MemTable id for logging
 
     // internal_error slot tracker (replaces the caller-supplied contiguous_slot). Holds
     // received-but-not-yet-contiguous slots above contiguous_slot_; the contiguous
@@ -1042,6 +1048,8 @@ class Crowtree
     mutable std::atomic<uint64_t> flush_entries_total_{0}; // entries drained from L0 to L1
     mutable std::atomic<uint64_t> l1_get_total_{0};        // get() lookups that descended to L1
     mutable std::atomic<uint64_t> l1_get_hit_total_{0};    // L1 lookups that found a cell
+    mutable std::atomic<uint64_t> map_lookup_total_{0};    // mapping table lookups (find_leaf_page_id / resident)
+    mutable std::atomic<uint64_t> demand_load_total_{0};   // demand-load page faults
 
     // Logical clock for CLOCK-informed eviction ranking (plan-tree #17).
     // `resident()`'s hot path bumps this and stamps the touched page's own
@@ -1098,6 +1106,7 @@ class Crowtree
         Gauge          *buf_dirty      = nullptr;
         LatencySummary *apply_l        = nullptr;
         LatencySummary *snapshot_l     = nullptr;
+        LatencySummary *flush_l        = nullptr; // flush() L0→L1 drain latency
         // MemTable (L0) operation counters
         Counter *mt_upsert_c  = nullptr; // apply() writes into L0
         Counter *mt_get_c     = nullptr; // get() lookups in L0
@@ -1108,6 +1117,14 @@ class Crowtree
         // L1 (B-tree) query counters
         Counter *l1_get_c     = nullptr; // get() lookups that descended to L1
         Counter *l1_get_hit_c = nullptr; // L1 lookups that found a cell
+        // B+tree page mutation counters (during drain/split/merge/consolidate)
+        Counter        *page_write_c = nullptr; // page builds (split/merge/consolidate)
+        LatencySummary *page_write_l = nullptr; // per-page mutation latency
+        // Mapping table lookup counter
+        Counter *map_lookup_c = nullptr; // find_leaf_page_id / resident calls
+        // Demand-load (page fault I/O) counter + latency
+        Counter        *demand_load_c = nullptr; // demand-load page faults
+        LatencySummary *demand_load_l = nullptr; // demand-load I/O latency
     };
 
     MetricsHandles metrics_;
