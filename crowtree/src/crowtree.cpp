@@ -147,24 +147,10 @@ Crowtree::Crowtree(Options opt) : opt_(std::move(opt)), name_(opt_.name)
     uint64_t page_id = mapping_.allocate_page_id();
     mapping_.store(page_id, LeafBase::build({}, kInvalidPageId, pool_, opt_.frame_bytes));
     root_page_id_.store(page_id);
-    // Safe here: a directly-constructed tree (not via Crowtree::open()) has no
-    // further single-threaded mutation phase, so it's fine to start immediately.
-    // Crowtree::open() (persist.cpp) suppresses this and starts explicitly after
-    // recovery instead (recovery mutates the tree without write_mutex_).
-    start_background_flush_thread();
 }
 
 Crowtree::~Crowtree()
 {
-    CT_LOG_INFO("[{}] close: stopping flush thread", name_);
-    stop_flush_thread_.store(true);
-    {
-        std::lock_guard<std::mutex> lk(flush_thread_mu_);
-    }
-    flush_thread_cv_.notify_all();
-    if (flush_thread_.joinable()) {
-        flush_thread_.join();
-    }
     try {
         free_all_resident_pages(/*retire=*/false);
     }
@@ -173,45 +159,6 @@ Crowtree::~Crowtree()
     }
     CT_LOG_INFO("[{}] close: done last_applied={} contiguous={}", name_, last_applied_slot_.load(),
                 contiguous_slot_.load());
-}
-
-void Crowtree::start_background_flush_thread()
-{
-    if (!opt_.background_flush || opt_.flush_interval_ms == 0 || flush_thread_.joinable()) {
-        return;
-    }
-    flush_thread_ = std::thread(&Crowtree::background_flush_loop, this);
-}
-
-void Crowtree::background_flush_loop()
-{
-    set_current_thread_name("ct-flush");
-    std::unique_lock<std::mutex> lk(flush_thread_mu_);
-    auto                         last_gc = std::chrono::steady_clock::now();
-    while (!stop_flush_thread_.load()) {
-        flush_thread_cv_.wait_for(lk, std::chrono::milliseconds(opt_.flush_interval_ms));
-        if (stop_flush_thread_.load()) {
-            break;
-        }
-        lk.unlock();
-        // Best-effort: flush() is cheap when L0 has nothing durable-eligible yet
-        // (see flush()'s early-return path) and shares its existing locking with
-        // the apply()-driving thread, so no new synchronization is introduced.
-        (void)flush();
-        // plan-tree #21: reuse this same thread/loop for the periodic
-        // collect_garbage() sweep trigger instead of adding a second thread.
-        // Disabled (opt_.gc_interval_ms == 0) by default; collect_garbage()'s
-        // own leaf-level dropped-count check keeps a no-op tick cheap.
-        if (opt_.gc_interval_ms > 0) {
-            auto now = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_gc).count() >=
-                static_cast<int64_t>(opt_.gc_interval_ms)) {
-                (void)collect_garbage();
-                last_gc = now;
-            }
-        }
-        lk.lock();
-    }
 }
 
 void Crowtree::retire_page(PageBase *p)

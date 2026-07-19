@@ -111,8 +111,6 @@ using ct_options = struct
     const char       *log_file_prefix;   // null/empty => "crowtree"; filename prefix
     size_t            log_max_file_mb;   // 0 => default 30
     size_t            log_max_files;     // 0 => default 5
-    uint64_t          flush_interval_ms; // 0 => no background flush; otherwise auto-flush period
-    uint8_t           background_flush;  // 0 = disabled, 1 = enabled (requires flush_interval_ms > 0)
 };
 
 // ── Lifecycle + durability ────────────────────────────────────────

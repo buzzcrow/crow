@@ -937,21 +937,12 @@ Status Crowtree::open(const Options &opt, std::unique_ptr<Crowtree> *out)
         return Status::invalid_argument("open: frame_bytes must be IU-aligned");
     }
 
-    // The background flush thread must not run during the recovery mutations
-    // below (they touch the tree directly, without write_mutex_, under a
-    // single-threaded assumption — see start_background_flush_thread()'s
-    // comment). Construct with it disabled, then start it explicitly once
-    // recovery (or the no-snapshot fast path) has finished.
-    Options ctor_opt            = opt;
-    ctor_opt.background_flush   = false;
-    auto tree                   = std::make_unique<Crowtree>(ctor_opt);
-    tree->opt_.background_flush = opt.background_flush;
+    auto tree = std::make_unique<Crowtree>(opt);
 
     CommitAnchor anchor;
     if (!read_best_anchor(*store, iu, &anchor)) {
         // No valid snapshot: fresh empty tree (already constructed).
         CT_LOG_INFO("[{}] open: no committed anchor; starting empty", opt.name);
-        tree->start_background_flush_thread();
         *out = std::move(tree);
         return Status::Ok();
     }
@@ -1018,7 +1009,6 @@ Status Crowtree::open(const Options &opt, std::unique_ptr<Crowtree> *out)
 
     CT_LOG_INFO("[{}] open: recovered seq={} last_applied={} root_pid={} segments={}", opt.name, anchor.snapshot_seq,
                 anchor.last_applied_slot, anchor.root_page_id, entries.size());
-    tree->start_background_flush_thread();
     *out = std::move(tree);
     return Status::Ok();
 }

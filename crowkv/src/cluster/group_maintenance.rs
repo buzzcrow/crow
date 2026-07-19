@@ -5,14 +5,18 @@
 //!
 //! Periodically, for the local replica of one group:
 //!
-//! 1. Persists a durable KV-engine snapshot
-//!    ([`KVEngine::persist_snapshot`](crate::kv::KVEngine::persist_snapshot))
-//!    -- a no-op for `InMemKV`; for `CrowtreeEngine` this is what makes
-//!    [`KVEngine::resume_from_slot`](crate::kv::KVEngine::resume_from_slot)
-//!    non-zero on a real restart. Purely local: every
-//!    replica (leader or follower) does this independently of group-wide
-//!    agreement, gated only on its own applied progress.
-//! 2. Advances the engine's GC retention watermark and sweeps it
+//! 1. Flushes the in-memory write buffer (L0) into the B+tree (L1) via
+//!    [`KVEngine::flush`](crate::kv::KVEngine::flush) — cheap, runs every
+//!    tick, advances `last_applied_slot` in memory only.
+//! 2. Conditionally persists a durable snapshot to disk via
+//!    [`KVEngine::persist_snapshot`](crate::kv::KVEngine::persist_snapshot)
+//!    — only when `contiguous_applied - last_snapshot_slot >= threshold`
+//!    or `time-since-last-snapshot >= threshold`, to reduce expensive
+//!    disk I/O. A no-op for `InMemKV`; for `CrowtreeEngine` this is what
+//!    makes [`KVEngine::resume_from_slot`](crate::kv::KVEngine::resume_from_slot)
+//!    non-zero on a real restart. Purely local: every replica (leader or
+//!    follower) does this independently of group-wide agreement.
+//! 3. Advances the engine's GC retention watermark and sweeps it
 //!    ([`KVEngine::set_gc_watermark`](crate::kv::KVEngine::set_gc_watermark)/
 //!    [`collect_garbage`](crate::kv::KVEngine::collect_garbage)), and runs a
 //!    WAL segment GC pass ([`crate::wal::gc::run_gc_with_watermark`]) --
@@ -89,11 +93,6 @@ async fn maintenance_loop(group: Weak<PxGroup>, tick: Duration, cancel: Cancella
 pub(crate) async fn run_pass(group: &PxGroup) {
     let engine = group.local_replica().learner.engine();
     if !engine.is_healthy() {
-        // No automatic step-out trigger exists yet -- this is the
-        // observability half of that gap: a persistently
-        // unhealthy engine is now at least loudly, repeatedly logged on
-        // every maintenance tick instead of being silently invisible
-        // outside of an explicit health-check call.
         error!(
             group_id = group.group_id(),
             replica_id = group.local_replica().id,
@@ -103,17 +102,48 @@ pub(crate) async fn run_pass(group: &PxGroup) {
              group via the admin API"
         );
     }
-    let engine_snapshot_at = engine.persist_snapshot();
 
+    // 1. Flush every tick: drain L0 memtable into L1 in memory (cheap no-op
+    //    when L0 is empty). Advances last_applied_slot in memory only.
+    engine.flush();
+
+    // 2. Conditionally persist a durable snapshot to disk (expensive: sync +
+    //    page writes). Only when the slot advance or time threshold is met.
+    let contiguous = group.local_replica().contiguous_applied();
+    let last_snap_slot = group
+        .last_snapshot_slot
+        .load(std::sync::atomic::Ordering::Acquire);
+    let slot_advance = contiguous.saturating_sub(last_snap_slot);
+    let time_elapsed = {
+        let prev = *group.last_snapshot_time.lock();
+        std::time::Instant::now().duration_since(prev)
+    };
+    let should_snapshot = slot_advance >= group.election_cfg.snapshot_slot_threshold
+        || time_elapsed >= Duration::from_millis(group.election_cfg.snapshot_time_threshold_ms);
+
+    let engine_snapshot_at = if should_snapshot {
+        let at = engine.persist_snapshot();
+        group
+            .last_snapshot_slot
+            .store(at, std::sync::atomic::Ordering::Release);
+        *group.last_snapshot_time.lock() = std::time::Instant::now();
+        at
+    } else {
+        0
+    };
+
+    // 3. GC: set watermark + sweep every tick. The B-tree's own
+    //    dropped-count check makes a no-op tick cheap.
     let safe_slot = group.group_safe_slot();
     let snapshot_slot = group.group_snapshot_slot();
     engine.set_gc_watermark(snapshot_slot, safe_slot);
     engine.collect_garbage();
 
+    // 4. WAL GC: only advance snapshot_slot when we actually persisted.
     let Some(wal) = group.local_replica().wal() else {
         return;
     };
-    if engine_snapshot_at > wal.snapshot_slot() {
+    if engine_snapshot_at > 0 && engine_snapshot_at > wal.snapshot_slot() {
         wal.set_snapshot_slot(engine_snapshot_at);
     }
     if safe_slot == 0 {

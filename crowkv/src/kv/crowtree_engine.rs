@@ -205,6 +205,10 @@ impl KVEngine for CrowtreeEngine {
         !self.inner.handle().io_failed()
     }
 
+    fn flush(&self) {
+        let _ = self.inner.handle().flush();
+    }
+
     fn resume_from_slot(&self) -> u64 {
         // `Crowtree::last_applied_slot` is `contiguous_slot_` as of the last
         // `flush` (see `Crowtree::apply`/`flush`/`recompute_contiguous_locked`

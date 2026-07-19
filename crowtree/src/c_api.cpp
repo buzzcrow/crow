@@ -214,10 +214,6 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
     o.store_id    = opt->store_id;
     o.group_id    = opt->group_id;
     o.name        = "s" + std::to_string(opt->store_id) + ".g" + std::to_string(opt->group_id);
-    if (opt->flush_interval_ms > 0) {
-        o.flush_interval_ms = opt->flush_interval_ms;
-    }
-    o.background_flush = opt->background_flush != 0;
 
     // Map ct_sync_mode → SyncMode
     SyncMode sm = SyncMode::kFull;

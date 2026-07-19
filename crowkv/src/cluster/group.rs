@@ -130,6 +130,14 @@ pub struct PxGroup {
     /// configs separated by more than one change, so "close enough"
     /// epoch matching is not safe -- only exact match is.
     pub(crate) membership_epoch: AtomicU64,
+    /// Slot covered by the last `persist_snapshot()` call. Used by
+    /// `run_pass` to gate expensive disk snapshots on a slot-advance
+    /// threshold (`snapshot_slot_threshold`).
+    pub(crate) last_snapshot_slot: AtomicU64,
+    /// Wall-clock time of the last `persist_snapshot()` call. Used by
+    /// `run_pass` to gate expensive disk snapshots on a time threshold
+    /// (`snapshot_time_threshold_ms`).
+    pub(crate) last_snapshot_time: parking_lot::Mutex<std::time::Instant>,
 }
 
 impl std::fmt::Debug for PxGroup {
@@ -169,6 +177,8 @@ impl PxGroup {
             proposer_window: tokio::sync::Semaphore::new(PaxosConfig::DEFAULT.proposer_window),
             config_store: None,
             membership_epoch: AtomicU64::new(0),
+            last_snapshot_slot: AtomicU64::new(0),
+            last_snapshot_time: parking_lot::Mutex::new(std::time::Instant::now()),
         };
         group.recompute_quorum();
         group

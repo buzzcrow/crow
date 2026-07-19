@@ -17,7 +17,6 @@
 #include "crowtree/status.h"
 
 #include <atomic>
-#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -26,7 +25,6 @@
 #include <set>
 #include <shared_mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace crowtree
@@ -702,23 +700,6 @@ class Crowtree
         return q != 0 ? q : 1;
     }
 
-    // Start the background flush thread if `opt_.background_flush` is set (open-
-    // issue fix, §C). Safe to call at most once; no-op otherwise.
-    // Callers that go through a two-phase construction (Crowtree::open()'s
-    // construct-then-recover sequence in persist.cpp) must delay this call until
-    // *after* recovery finishes, since recovery mutates the freshly-constructed
-    // tree directly (no write_mutex_) under a single-threaded assumption.
-    void start_background_flush_thread();
-    // Background thread body: periodically calls flush() (cheap no-op when L0 is
-    // empty; see flush()) so a low/no-write-rate workload still becomes durable-
-    // eligible on a timer, not only on the size thresholds. Reuses flush()'s
-    // existing write_mutex_/MemTable-mutex_ locking — no new synchronization
-    // between this thread and the apply()-driving thread (design note in
-    // Open Issues §C). Also runs collect_garbage() every
-    // opt_.gc_interval_ms (plan-tree #21) on this same thread/loop -- no second
-    // thread for the periodic GC trigger.
-    void background_flush_loop();
-
     void retire_page(PageBase *p);
     // Retire a page that becomes entirely unreachable by new readers with no
     // replacement under its own PID (a merged-away leaf/inner, or a
@@ -1079,16 +1060,6 @@ class Crowtree
     // rule for block deletion). A block is only deleted after it's empty in
     // two consecutive snapshots — the crash fallback anchor still references it.
     std::set<uint32_t> prev_empty_blocks_;
-
-    // Background flush thread (Options.background_flush / flush_interval_ms),
-    // also driving the periodic collect_garbage() sweep (Options.gc_interval_ms,
-    // plan-tree #21). Not started unless opt_.background_flush is set; see
-    // start_background_flush_thread(). Joined in ~Crowtree before the tree is
-    // torn down.
-    std::thread             flush_thread_;
-    std::mutex              flush_thread_mu_;
-    std::condition_variable flush_thread_cv_;
-    std::atomic<bool>       stop_flush_thread_{false};
 
     // Tree-owned epoch-based reclamation (plan-tree #7; formerly on CrowtreeEnv).
     // Declared last so it is destroyed first: ~Crowtree frees the live tree via

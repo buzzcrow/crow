@@ -120,7 +120,11 @@ async fn maintenance_pass_persists_snapshot_and_gcs_wal_segments_once_safe() {
     apply_through_with_engine(&replica, 15).await;
     assert_eq!(replica.contiguous_applied(), 15);
 
-    let group = PxGroup::new(1, replica);
+    let mut group = PxGroup::new(1, replica);
+    group.set_election_config(PxElectionConfig {
+        snapshot_slot_threshold: 1,
+        ..PxElectionConfig::for_tests()
+    });
 
     // No real peers, so the recompute uses the local replica's own
     // contiguous_applied as the group safe-slot.
@@ -180,6 +184,7 @@ async fn maintenance_loop_uses_configured_tick_interval() {
     let mut group = PxGroup::new(1, replica);
     group.set_election_config(PxElectionConfig {
         maintenance_tick_ms: 5,
+        snapshot_slot_threshold: 1,
         ..PxElectionConfig::for_tests()
     });
     group.note_peer_applied_for_tests(999, 999);
@@ -251,6 +256,10 @@ async fn maintenance_pass_does_not_gc_wal_when_safe_slot_lags_snapshot() {
     // `group_safe_slot` must hold GC back regardless of engine progress.
     apply_through_with_engine(&replica, 15).await;
     let mut group = PxGroup::new(1, replica);
+    group.set_election_config(PxElectionConfig {
+        snapshot_slot_threshold: 1,
+        ..PxElectionConfig::for_tests()
+    });
     group.add_remote_replica(crowkv::cluster::PxRemoteReplica::new(
         2,
         "127.0.0.1:2".to_string(),
