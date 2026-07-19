@@ -432,6 +432,38 @@ char *ct_flush_metrics_str(ct_tree *t, double window_secs, const char *timestamp
     return out;
 }
 
+char *ct_flush_metrics_str_ext(ct_tree *t, double window_secs, const char *timestamp, size_t width, size_t count_w,
+                               size_t tps_w)
+{
+    if (t == nullptr || timestamp == nullptr) {
+        return nullptr;
+    }
+    std::string str = t->tree->flush_metrics_str(window_secs, timestamp, width, count_w, tps_w);
+    if (str.empty()) {
+        return nullptr;
+    }
+    char *out = static_cast<char *>(std::malloc(str.size() + 1));
+    if (out == nullptr) {
+        return nullptr;
+    }
+    std::memcpy(out, str.data(), str.size());
+    out[str.size()] = '\0';
+    return out;
+}
+
+void ct_negotiate_widths(const ct_tree *t, ct_column_widths input, ct_column_widths *out)
+{
+    if (out == nullptr) {
+        return;
+    }
+    // C++ preferred column widths: count=5, tps=7.
+    // If t is null or no registry, just echo back C++ defaults.
+    out->count_w = 5;
+    out->tps_w   = 7;
+    (void)t;
+    (void)input;
+}
+
 size_t ct_max_name_len(const ct_tree *t)
 {
     if (t == nullptr) {

@@ -42,6 +42,11 @@ mod sys {
         _private: [u8; 0],
     }
     #[repr(C)]
+    pub struct ct_column_widths {
+        pub count_w: usize,
+        pub tps_w: usize,
+    }
+    #[repr(C)]
     pub struct ct_import {
         _private: [u8; 0],
     }
@@ -216,7 +221,16 @@ mod sys {
             timestamp: *const c_char,
             width: usize,
         ) -> *mut c_char;
+        pub fn ct_flush_metrics_str_ext(
+            t: *mut ct_tree,
+            window_secs: f64,
+            timestamp: *const c_char,
+            width: usize,
+            count_w: usize,
+            tps_w: usize,
+        ) -> *mut c_char;
         pub fn ct_max_name_len(t: *const ct_tree) -> usize;
+        pub fn ct_negotiate_widths(t: *const ct_tree, input: ct_column_widths, out: *mut ct_column_widths);
         pub fn ct_free_string(s: *mut c_char);
     }
 }
@@ -667,6 +681,38 @@ impl Crowtree {
         let result = unsafe { std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned() };
         unsafe { sys::ct_free_string(ptr) };
         result
+    }
+
+    /// Extended flush with negotiated column widths (count_w, tps_w).
+    pub fn flush_metrics_str_ext(
+        &self,
+        window_secs: f64,
+        timestamp: &str,
+        width: usize,
+        count_w: usize,
+        tps_w: usize,
+    ) -> String {
+        let c_ts = CString::new(timestamp).unwrap_or_default();
+        let ptr = unsafe {
+            sys::ct_flush_metrics_str_ext(self.as_ptr(), window_secs, c_ts.as_ptr(), width, count_w, tps_w)
+        };
+        if ptr.is_null() {
+            return String::new();
+        }
+        let result = unsafe { std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned() };
+        unsafe { sys::ct_free_string(ptr) };
+        result
+    }
+
+    /// Negotiate column widths: returns C++ preferred (count_w, tps_w).
+    pub fn negotiate_widths(&self, rust_count_w: usize, rust_tps_w: usize) -> (usize, usize) {
+        let input = sys::ct_column_widths {
+            count_w: rust_count_w,
+            tps_w: rust_tps_w,
+        };
+        let mut out = sys::ct_column_widths { count_w: 0, tps_w: 0 };
+        unsafe { sys::ct_negotiate_widths(self.as_ptr(), input, &mut out) };
+        (out.count_w, out.tps_w)
     }
 
     /// Current max metric name length from the C++ registry.
