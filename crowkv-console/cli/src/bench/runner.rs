@@ -161,16 +161,8 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
     // via the client's own per-endpoint channel pool, so every worker
     // shares one client and its internal pool rather than owning a
     // channel directly.
-    //
-    // `single_attempt` is mandatory here, not a knob: bench measures raw
-    // per-RPC latency/error-rate against one specific endpoint. Any
-    // client-side retry/redirect (the default, resilient behavior every
-    // other `CrowkvClient` caller wants) would silently convert a real
-    // `NotLeaderHint`/timeout into a slower success, corrupting exactly
-    // the numbers this tool exists to produce.
     let mut client_config = ClientConfig::new(Vec::new());
     client_config.pool_size_per_endpoint = cfg.connections as usize;
-    client_config.retry.single_attempt = true;
     let client = CrowkvClient::new(client_config);
     client.seed_leader(cfg.store_id, cfg.group_id, cfg.endpoint.clone());
     let client = Arc::new(client);
@@ -198,6 +190,7 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
             started_instant,
             deadline,
             counters.clone(),
+            Arc::clone(&client),
         )),
         _ => None,
     };
@@ -261,6 +254,8 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
         total_errors as f64 / total_ops as f64
     };
 
+    let client_metrics = client.metrics();
+
     let run_id = cfg.run_id.clone().unwrap_or_else(|| {
         let ms = started_at.timestamp_millis();
         format!("bench-{ms}-{:?}", cfg.workload).to_ascii_lowercase()
@@ -295,6 +290,7 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
         // node's `log/metrics.log`; plain `bench run`/`stress` have no
         // deployed nodes to collect from, so this stays default/empty.
         server_metrics: super::report::ServerMetrics::default(),
+        client_metrics,
     };
 
     let dir = cfg.report_dir.clone().unwrap_or_else(BenchReport::default_dir);
@@ -432,16 +428,19 @@ async fn run_worker(
 /// only reads `Relaxed` atomics.
 ///
 /// Output format (chosen to be greppable and copy-pastable):
-///   `[+12s] ops=124000 qps=10333 err=0`
+///   `[+12s] ops=124000 qps=10333 err=0 nl_hint=0 xport_err=0`
 ///
 /// Where `qps` is the **delta** ops since the previous tick divided by
 /// the actual elapsed time between ticks (so it self-corrects if the
-/// runtime can't quite hit the requested cadence).
+/// runtime can't quite hit the requested cadence). `nl_hint` and
+/// `xport_err` are cumulative client-side counters for leader-redirect
+/// and transport-error events.
 fn spawn_progress_snapshotter(
     interval: Duration,
     started: Instant,
     deadline: Instant,
     counters: Vec<Arc<WorkerCounters>>,
+    client: Arc<CrowkvClient>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut last_ops: u64 = 0;
@@ -465,10 +464,11 @@ fn spawn_progress_snapshotter(
             let qps = (delta_ops as f64 / dt).round() as u64;
             let elapsed_s = now.duration_since(started).as_secs();
 
-            // stderr keeps stdout reserved for `--json` payloads and
-            // the final report path; CLI tools conventionally print
-            // progress on stderr.
-            eprintln!("[+{elapsed_s}s] ops={total_ops} qps={qps} err={total_err}");
+            let cm = client.metrics();
+            eprintln!(
+                "[+{elapsed_s}s] ops={total_ops} qps={qps} err={total_err} nl_hint={} leader_query={} xport_err={}",
+                cm.not_leader_hint_followed, cm.leader_query, cm.transport_error_retry,
+            );
 
             last_ops = total_ops;
             last_tick = now;

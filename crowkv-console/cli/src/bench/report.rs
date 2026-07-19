@@ -17,6 +17,7 @@ use hdrhistogram::Histogram;
 use serde::{Deserialize, Serialize};
 
 use super::workload::{OpKind, WorkloadKind};
+use crowkv_client::ClientMetricsSnapshot;
 
 /// Latency percentiles (microseconds). Stored as `u64` because the
 /// histograms are recorded in microsecond units.
@@ -117,6 +118,12 @@ pub struct BenchReport {
     /// field existed still deserialize.
     #[serde(default)]
     pub server_metrics: ServerMetrics,
+    /// Client-side metrics from `CrowkvClient`'s internal counters
+    /// (per-op counts, leader-related retry events, topology refreshes).
+    /// `#[serde(default)]` so historical reports written before this
+    /// field existed still deserialize.
+    #[serde(default)]
+    pub client_metrics: ClientMetricsSnapshot,
 }
 
 impl BenchReport {
@@ -139,7 +146,7 @@ impl BenchReport {
         Ok(path)
     }
 
-    /// Write a human-readable text report to `<dir>/report.txt`.
+    /// Write a human-readable Markdown report to `<dir>/report.md`.
     /// The directory is created if missing.
     ///
     /// `node_ids` and `workspace_dir` provide cluster topology context
@@ -147,16 +154,11 @@ impl BenchReport {
     ///
     /// # Errors
     /// I/O errors.
-    pub fn write_text_to(
-        &self,
-        dir: &Path,
-        node_ids: &[String],
-        workspace_dir: &Path,
-    ) -> io::Result<PathBuf> {
+    pub fn write_md_to(&self, dir: &Path, node_ids: &[String], workspace_dir: &Path) -> io::Result<PathBuf> {
         fs::create_dir_all(dir)?;
-        let path = dir.join("report.txt");
-        let text = self.text_report(node_ids, workspace_dir);
-        fs::write(&path, text)?;
+        let path = dir.join("report.md");
+        let md = self.markdown_report(node_ids, workspace_dir);
+        fs::write(&path, md)?;
         Ok(path)
     }
 
@@ -169,71 +171,83 @@ impl BenchReport {
         serde_json::from_slice(&bytes).map_err(io::Error::other)
     }
 
-    /// Generate a comprehensive plain-text report covering test
+    /// Generate a comprehensive Markdown report covering test
     /// configuration, cluster topology, per-op results, and server-side
-    /// metrics. Uses bullet lists (no tables) per project convention.
+    /// metrics. Uses bullet lists with bold labels for readability.
     #[allow(
         clippy::too_many_lines,
         reason = "display formatter, splitting reduces readability"
     )]
     #[must_use]
-    pub fn text_report(&self, node_ids: &[String], workspace_dir: &Path) -> String {
+    pub fn markdown_report(&self, node_ids: &[String], workspace_dir: &Path) -> String {
         use std::fmt::Write;
         let mut out = String::new();
 
-        let _ = writeln!(out, "=== CrowKV Benchmark Report ===");
+        let _ = writeln!(out, "# CrowKV Benchmark Report");
         let _ = writeln!(out);
 
         // ── Run Info ──
-        let _ = writeln!(out, "--- Run Info ---");
-        let _ = writeln!(out, "- run_id: {}", self.run_id);
+        let _ = writeln!(out, "## Run Info");
+        let _ = writeln!(out);
+        let _ = writeln!(out, "- **run_id:** {}", self.run_id);
         let _ = writeln!(
             out,
-            "- started_at: {}",
+            "- **started_at:** {}",
             self.started_at.format("%Y-%m-%d %H:%M:%S UTC")
         );
         let _ = writeln!(
             out,
-            "- finished_at: {}",
+            "- **finished_at:** {}",
             self.finished_at.format("%Y-%m-%d %H:%M:%S UTC")
         );
-        let _ = writeln!(out, "- duration: {} ms (measurement window)", self.duration_ms);
+        let _ = writeln!(
+            out,
+            "- **duration:** {} ms (measurement window)",
+            self.duration_ms
+        );
         if self.warmup_ms > 0 {
-            let _ = writeln!(out, "- warmup: {} ms (discarded)", self.warmup_ms);
+            let _ = writeln!(out, "- **warmup:** {} ms (discarded)", self.warmup_ms);
         }
         let _ = writeln!(out);
 
         // ── Test Configuration ──
-        let _ = writeln!(out, "--- Test Configuration ---");
-        let _ = writeln!(out, "- workload: {:?}", self.workload);
-        let _ = writeln!(out, "- storage_mode: {}", self.mode);
-        let _ = writeln!(out, "- connections: {} (gRPC channels)", self.connections);
-        let _ = writeln!(out, "- threads: {} (worker tasks, closed-loop)", self.threads);
-        let _ = writeln!(out, "- key_space: {} keys", self.key_space);
-        let _ = writeln!(out, "- value_size: {} bytes", self.value_size);
-        let _ = writeln!(out, "- target_endpoint: {}", self.target_endpoint);
-        let _ = writeln!(out, "- store_id: {} / group_id: {}", self.store_id, self.group_id);
+        let _ = writeln!(out, "## Test Configuration");
+        let _ = writeln!(out);
+        let _ = writeln!(out, "- **workload:** {:?}", self.workload);
+        let _ = writeln!(out, "- **storage_mode:** {}", self.mode);
+        let _ = writeln!(out, "- **connections:** {} (gRPC channels)", self.connections);
+        let _ = writeln!(out, "- **threads:** {} (worker tasks, closed-loop)", self.threads);
+        let _ = writeln!(out, "- **key_space:** {} keys", self.key_space);
+        let _ = writeln!(out, "- **value_size:** {} bytes", self.value_size);
+        let _ = writeln!(out, "- **target_endpoint:** {}", self.target_endpoint);
+        let _ = writeln!(
+            out,
+            "- **store_id / group_id:** {} / {}",
+            self.store_id, self.group_id
+        );
         let _ = writeln!(out);
 
         // ── Cluster Topology ──
-        let _ = writeln!(out, "--- Cluster Topology ---");
-        let _ = writeln!(out, "- nodes: {} (3-replica Paxos group)", node_ids.len());
+        let _ = writeln!(out, "## Cluster Topology");
+        let _ = writeln!(out);
+        let _ = writeln!(out, "- **nodes:** {} (3-replica Paxos group)", node_ids.len());
         for (i, nid) in node_ids.iter().enumerate() {
             let _ = writeln!(out, "  - node[{i}]: {nid}");
         }
-        let _ = writeln!(out, "- workspace: {}", workspace_dir.display());
-        let _ = writeln!(out, "- engine: crowtree");
+        let _ = writeln!(out, "- **workspace:** {}", workspace_dir.display());
+        let _ = writeln!(out, "- **engine:** crowtree");
         let mode_desc = match self.mode.as_str() {
             "mem" => "mem-block page store (in-memory, no disk I/O)",
             "file" => "file page store (file-backed, no O_DIRECT)",
             "block-device" => "block page store (O_DIRECT, 4K aligned)",
             other => other,
         };
-        let _ = writeln!(out, "- backend: {mode_desc}");
+        let _ = writeln!(out, "- **backend:** {mode_desc}");
         let _ = writeln!(out);
 
         // ── Client-side Results ──
-        let _ = writeln!(out, "--- Client-side Results ---");
+        let _ = writeln!(out, "## Client-side Results");
+        let _ = writeln!(out);
         #[allow(
             clippy::cast_precision_loss,
             reason = "display-only QPS, precision loss irrelevant"
@@ -248,15 +262,16 @@ impl BenchReport {
         } else {
             0.0
         };
-        let _ = writeln!(out, "- total_ops: {}", self.total_ops);
-        let _ = writeln!(out, "- total_errors: {}", self.total_errors);
-        let _ = writeln!(out, "- error_rate: {:.4}", self.error_rate);
-        let _ = writeln!(out, "- throughput: {qps:.1} ops/s");
+        let _ = writeln!(out, "- **total_ops:** {}", self.total_ops);
+        let _ = writeln!(out, "- **total_errors:** {}", self.total_errors);
+        let _ = writeln!(out, "- **error_rate:** {:.4}", self.error_rate);
+        let _ = writeln!(out, "- **throughput:** {qps:.1} ops/s");
         let _ = writeln!(out);
 
         // ── Per-Op Breakdown ──
         if !self.by_op.is_empty() {
-            let _ = writeln!(out, "--- Per-Op Breakdown ---");
+            let _ = writeln!(out, "## Per-Op Breakdown");
+            let _ = writeln!(out);
             for (kind, op) in &self.by_op {
                 let p = &op.latency_us;
                 #[allow(
@@ -264,19 +279,86 @@ impl BenchReport {
                     reason = "display-only QPS, precision loss irrelevant"
                 )]
                 let op_qps = if secs > 0.0 { op.ops as f64 / secs } else { 0.0 };
-                let _ = writeln!(out, "- {kind}:");
-                let _ = writeln!(out, "  - ops: {} ({op_qps:.1} ops/s)", op.ops);
-                let _ = writeln!(out, "  - errors: {}", op.errors);
+                let _ = writeln!(out, "### {kind}");
+                let _ = writeln!(out);
+                let _ = writeln!(out, "- **ops:** {} ({op_qps:.1} ops/s)", op.ops);
+                let _ = writeln!(out, "- **errors:** {}", op.errors);
                 if op.no_leader > 0 {
-                    let _ = writeln!(out, "  - no_leader: {}", op.no_leader);
+                    let _ = writeln!(out, "- **no_leader:** {}", op.no_leader);
                 }
                 if op.not_found > 0 {
-                    let _ = writeln!(out, "  - not_found: {}", op.not_found);
+                    let _ = writeln!(out, "- **not_found:** {}", op.not_found);
                 }
                 let _ = writeln!(
                     out,
-                    "  - latency (us): min={} avg={} p50={} p90={} p99={} p999={} max={}",
+                    "- **latency (us):** min={} avg={} p50={} p90={} p99={} p999={} max={}",
                     p.min_us, p.avg_us, p.p50_us, p.p90_us, p.p99_us, p.p999_us, p.max_us
+                );
+                let _ = writeln!(out);
+            }
+        }
+
+        // ── Client-side Metrics ──
+        let cm = &self.client_metrics;
+        let _ = writeln!(out, "## Client-side Metrics");
+        let _ = writeln!(out);
+        let _ = writeln!(out, "- **put_ops:** {} (errors: {})", cm.put_ops, cm.put_errors);
+        let _ = writeln!(out, "- **get_ops:** {} (errors: {})", cm.get_ops, cm.get_errors);
+        let _ = writeln!(
+            out,
+            "- **delete_ops:** {} (errors: {})",
+            cm.delete_ops, cm.delete_errors
+        );
+        let _ = writeln!(
+            out,
+            "- **scan_ops:** {} (errors: {})",
+            cm.scan_ops, cm.scan_errors
+        );
+        let _ = writeln!(
+            out,
+            "- **batch_write_ops:** {} (errors: {})",
+            cm.batch_write_ops, cm.batch_write_errors
+        );
+        let _ = writeln!(
+            out,
+            "- **not_leader_hint_followed:** {}",
+            cm.not_leader_hint_followed
+        );
+        let _ = writeln!(out, "- **leader_query:** {}", cm.leader_query);
+        let _ = writeln!(out, "- **unknown_leader_wait:** {}", cm.unknown_leader_wait);
+        let _ = writeln!(out, "- **transport_error_retry:** {}", cm.transport_error_retry);
+        let _ = writeln!(out, "- **retries_exhausted:** {}", cm.retries_exhausted);
+        let _ = writeln!(out, "- **no_leader:** {}", cm.no_leader);
+        let _ = writeln!(out, "- **topology_refresh:** {}", cm.topology_refresh);
+        let _ = writeln!(out);
+
+        // ── Leader Change Analysis ──
+        let changes = &cm.leader_changes;
+        if changes.is_empty() {
+            let _ = writeln!(out, "## Leader Change Analysis");
+            let _ = writeln!(out);
+            let _ = writeln!(out, "- no leader changes detected");
+            let _ = writeln!(out);
+        } else {
+            let total_recovery_ms: u64 = changes.iter().map(|c| c.recovery_ms).sum();
+            let max_recovery_ms = changes.iter().map(|c| c.recovery_ms).max().unwrap_or(0);
+            let min_recovery_ms = changes.iter().map(|c| c.recovery_ms).min().unwrap_or(0);
+            let avg_recovery_ms = total_recovery_ms / changes.len() as u64;
+            let _ = writeln!(out, "## Leader Change Analysis");
+            let _ = writeln!(out);
+            let _ = writeln!(out, "- **count:** {}", changes.len());
+            let _ = writeln!(out, "- **total_recovery:** {total_recovery_ms} ms");
+            let _ = writeln!(out, "- **avg_recovery:** {avg_recovery_ms} ms");
+            let _ = writeln!(out, "- **min_recovery:** {min_recovery_ms} ms");
+            let _ = writeln!(out, "- **max_recovery:** {max_recovery_ms} ms");
+            let _ = writeln!(out);
+            let _ = writeln!(out, "### Episodes");
+            let _ = writeln!(out);
+            for (i, c) in changes.iter().enumerate() {
+                let _ = writeln!(
+                    out,
+                    "- **[{}]** `{} -> {}` trigger={} recovery={}ms detected_at={}ms",
+                    i, c.old_endpoint, c.new_endpoint, c.trigger, c.recovery_ms, c.detected_at_ms,
                 );
             }
             let _ = writeln!(out);
@@ -284,18 +366,20 @@ impl BenchReport {
 
         // ── Server-side Metrics ──
         let sm = &self.server_metrics;
-        let _ = writeln!(out, "--- Server-side Metrics (aggregated across nodes) ---");
-        let _ = writeln!(out, "- wal_append_count: {}", sm.wal_append_count);
-        let _ = writeln!(out, "- kv_put_count: {}", sm.kv_put_count);
-        let _ = writeln!(out, "- kv_get_count: {}", sm.kv_get_count);
+        let _ = writeln!(out, "## Server-side Metrics (aggregated across nodes)");
         let _ = writeln!(out);
-        let _ = writeln!(out, "--- System Resources ---");
+        let _ = writeln!(out, "- **wal_append_count:** {}", sm.wal_append_count);
+        let _ = writeln!(out, "- **kv_put_count:** {}", sm.kv_put_count);
+        let _ = writeln!(out, "- **kv_get_count:** {}", sm.kv_get_count);
+        let _ = writeln!(out);
+        let _ = writeln!(out, "### System Resources");
+        let _ = writeln!(out);
         let sys = &sm.system;
-        let _ = writeln!(out, "- cpu_user: {} us", sys.cpu_user_us);
-        let _ = writeln!(out, "- cpu_sys: {} us", sys.cpu_sys_us);
-        let _ = writeln!(out, "- peak_rss: {} KB", sys.rss_kb);
-        let _ = writeln!(out, "- tcp_retransmits: {}", sys.tcp_retransmits);
-        let _ = writeln!(out, "- tcp_lost: {}", sys.tcp_lost);
+        let _ = writeln!(out, "- **cpu_user:** {} us", sys.cpu_user_us);
+        let _ = writeln!(out, "- **cpu_sys:** {} us", sys.cpu_sys_us);
+        let _ = writeln!(out, "- **peak_rss:** {} KB", sys.rss_kb);
+        let _ = writeln!(out, "- **tcp_retransmits:** {}", sys.tcp_retransmits);
+        let _ = writeln!(out, "- **tcp_lost:** {}", sys.tcp_lost);
         let _ = writeln!(out);
 
         // ── Anomalies ──
@@ -309,7 +393,16 @@ impl BenchReport {
         if sys.tcp_lost > 0 {
             anomalies.push(format!("TCP lost segments: {}", sys.tcp_lost));
         }
-        let _ = writeln!(out, "--- Anomalies ---");
+        if !cm.leader_changes.is_empty() {
+            let total: u64 = cm.leader_changes.iter().map(|c| c.recovery_ms).sum();
+            anomalies.push(format!(
+                "leader changes: {} (total recovery {}ms)",
+                cm.leader_changes.len(),
+                total,
+            ));
+        }
+        let _ = writeln!(out, "## Anomalies");
+        let _ = writeln!(out);
         if anomalies.is_empty() {
             let _ = writeln!(out, "- none");
         } else {
@@ -318,7 +411,7 @@ impl BenchReport {
             }
         }
         let _ = writeln!(out);
-        let _ = writeln!(out, "=== End of Report ===");
+        let _ = writeln!(out, "---");
         out
     }
 
@@ -364,9 +457,10 @@ impl BenchReport {
             );
         }
         let sm = &self.server_metrics;
+        let cm = &self.client_metrics;
         let _ = writeln!(
             out,
-            "server_metrics  : wal_append={wal_append} kv_put={kv_put} kv_get={kv_get}\nsystem          : cpu_user={cpu_user}us cpu_sys={cpu_sys}us rss={rss}KB tcp_retrans={tcp_retrans} tcp_lost={tcp_lost}",
+            "server_metrics  : wal_append={wal_append} kv_put={kv_put} kv_get={kv_get}\nsystem          : cpu_user={cpu_user}us cpu_sys={cpu_sys}us rss={rss}KB tcp_retrans={tcp_retrans} tcp_lost={tcp_lost}\nclient_metrics  : nl_hint={nl_hint} leader_query={leader_query} xport_err={xport_err} retries_exhausted={retries_exhausted} no_leader={no_leader} topo_refresh={topo_refresh}",
             wal_append = sm.wal_append_count,
             kv_put = sm.kv_put_count,
             kv_get = sm.kv_get_count,
@@ -375,7 +469,27 @@ impl BenchReport {
             rss = sm.system.rss_kb,
             tcp_retrans = sm.system.tcp_retransmits,
             tcp_lost = sm.system.tcp_lost,
+            nl_hint = cm.not_leader_hint_followed,
+            leader_query = cm.leader_query,
+            xport_err = cm.transport_error_retry,
+            retries_exhausted = cm.retries_exhausted,
+            no_leader = cm.no_leader,
+            topo_refresh = cm.topology_refresh,
         );
+        let lc = &cm.leader_changes;
+        if lc.is_empty() {
+            let _ = writeln!(out, "leader_changes   : none");
+        } else {
+            let total: u64 = lc.iter().map(|c| c.recovery_ms).sum();
+            let max: u64 = lc.iter().map(|c| c.recovery_ms).max().unwrap_or(0);
+            let _ = writeln!(
+                out,
+                "leader_changes   : count={} total_recovery={}ms max_recovery={}ms",
+                lc.len(),
+                total,
+                max,
+            );
+        }
         out
     }
 }

@@ -1318,7 +1318,7 @@ impl PxLocalReplica {
             self.deadline_reset_signal.notify_one();
         }
         let (contiguous_chosen, last_chosen_term, highest_seen_slot) = self.frontier_triple();
-        info!(
+        debug!(
             replica_l_id = self.id,
             candidate_id = req.candidate_id,
             req_term = req.term,
@@ -1437,7 +1437,7 @@ impl PxLocalReplica {
             self.become_follower(snapshot.current_term);
             self.admin_step_down_signal.notify_waiters();
         } else {
-            info!(
+            debug!(
                 replica_l_id = self.id,
                 req_term = req.term,
                 self_term = snapshot.current_term,
