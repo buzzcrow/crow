@@ -78,7 +78,7 @@ pub async fn start_test_server(args: &[&str]) -> std_io::Result<ServerHandle> {
         .arg("--ports")
         .arg("0")
         .arg("--election-profile")
-        .arg("test")
+        .arg("e2e")
         .arg("--wal-root")
         .arg(&wal_root)
         .stdout(Stdio::piped())

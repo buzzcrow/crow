@@ -189,20 +189,26 @@ pub struct PxElectionConfig {
 
 impl PxElectionConfig {
     /// Production / single-DC default.
+    ///
+    /// Heartbeat 150 ms / election 1–2 s / lease 3 s. Follows etcd's
+    /// production defaults (100 ms heartbeat, 1 s election) with a slightly
+    /// conservative heartbeat for disk-fsync jitter. Lease ≥ `election_max`
+    /// + `clock_skew` (2000 + 500 = 2500) ensures leader-lease safety.
     pub const DEFAULT: Self = Self {
         prevote_enabled: true,
-        heartbeat_interval_ms: 500,
-        election_min_ms: 4000,
-        election_max_ms: 8000,
-        lease_duration_ms: 4500,
+        heartbeat_interval_ms: 150,
+        election_min_ms: 1000,
+        election_max_ms: 2000,
+        lease_duration_ms: 3000,
         max_clock_skew_ms: 500,
         bulk_prepare_window: 1024,
         election_driver_disabled: false,
         learner_stream_window_frames: 64,
-        // Matches the periodic GC trigger cadence (30 s).
-        maintenance_tick_ms: 30_000,
-        snapshot_slot_threshold: 10_000,
-        snapshot_time_threshold_ms: 60_000,
+        // Maintenance loop tick: flush L0→L1 + GC watermark check every
+        // tick; durable snapshot gated by thresholds above.
+        maintenance_tick_ms: 10_000,
+        snapshot_slot_threshold: 100_000,
+        snapshot_time_threshold_ms: 600_000,
     };
 
     /// Aggressive timings for `#[tokio::test(start_paused = true)]` suites.
@@ -221,57 +227,35 @@ impl PxElectionConfig {
             bulk_prepare_window: 1024,
             election_driver_disabled: false,
             learner_stream_window_frames: 64,
-            maintenance_tick_ms: 20,
-            snapshot_slot_threshold: 100,
+            maintenance_tick_ms: 500,
+            snapshot_slot_threshold: 1000,
             snapshot_time_threshold_ms: 1_000,
         }
     }
 
-    /// E2E / Playwright profile: fast election but stable lease.
+    /// E2E / Playwright + benchmark profile: fast election but stable
+    /// under real scheduling jitter.
     ///
-    /// Election 200–400 ms (vs 4–8 s production) so leader re-election
-    /// completes quickly in real wall-clock time. Heartbeat 200 ms and
-    /// lease 600 ms are long enough to avoid spurious step-downs under
-    /// real scheduling jitter (unlike `for_tests` which needs paused time).
+    /// Election 300–600 ms / heartbeat 100 ms / lease 800 ms. Matches the
+    /// Raft paper's 150–300 ms suggestion with a 2× margin for localhost
+    /// parallel-test load. Lease ≥ `election_max` + `clock_skew` (600 + 100
+    /// = 700) ensures leader-lease safety. Snapshot time threshold 20 s
+    /// so short E2E runs still checkpoint without excessive disk I/O.
     #[must_use]
     pub const fn for_e2e() -> Self {
         Self {
             prevote_enabled: true,
-            heartbeat_interval_ms: 200,
-            election_min_ms: 200,
-            election_max_ms: 400,
-            lease_duration_ms: 600,
+            heartbeat_interval_ms: 100,
+            election_min_ms: 300,
+            election_max_ms: 600,
+            lease_duration_ms: 800,
             max_clock_skew_ms: 100,
             bulk_prepare_window: 1024,
             election_driver_disabled: false,
             learner_stream_window_frames: 64,
             maintenance_tick_ms: 5_000,
             snapshot_slot_threshold: 10_000,
-            snapshot_time_threshold_ms: 60_000,
-        }
-    }
-
-    /// Benchmark profile: stable under real scheduling jitter but fast
-    /// enough for meaningful throughput measurements. Heartbeat 50 ms /
-    /// election 100–200 ms / lease 150 ms. The `test` profile (5 ms
-    /// heartbeat, 25 ms lease) causes constant leader churn under
-    /// concurrent load; `e2e` (200 ms heartbeat) caps throughput too
-    /// low. This sits between the two.
-    #[must_use]
-    pub const fn for_bench() -> Self {
-        Self {
-            prevote_enabled: true,
-            heartbeat_interval_ms: 50,
-            election_min_ms: 100,
-            election_max_ms: 200,
-            lease_duration_ms: 150,
-            max_clock_skew_ms: 25,
-            bulk_prepare_window: 1024,
-            election_driver_disabled: false,
-            learner_stream_window_frames: 64,
-            maintenance_tick_ms: 5_000,
-            snapshot_slot_threshold: 10_000,
-            snapshot_time_threshold_ms: 1_000,
+            snapshot_time_threshold_ms: 20_000,
         }
     }
 }

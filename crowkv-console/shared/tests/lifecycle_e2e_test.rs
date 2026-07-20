@@ -67,7 +67,7 @@ async fn deploy_local_and_observe_topology() {
         server_id: "s1".into(),
         mgmt_port,
         grpc_port,
-        election_profile: Some("test".into()),
+        election_profile: Some("e2e".into()),
         binary: Some(bin),
         ..Default::default()
     };
@@ -89,7 +89,7 @@ async fn deploy_local_and_observe_topology() {
         grpc_port: Some(grpc_port),
         auto_start: true,
         binary: None,
-        election_profile: Some("test".into()),
+        election_profile: Some("e2e".into()),
         pid: None,
     })
     .unwrap();
