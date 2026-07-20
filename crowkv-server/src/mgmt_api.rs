@@ -579,6 +579,7 @@ async fn add_group(
         state.crowtree_backend,
         state.wal_skip_fsync,
         "log",
+        state.max_inflight,
     )
     .await
     .map_err(|e| {
@@ -702,6 +703,7 @@ async fn join_group_via_snapshot(
         state.crowtree_backend,
         state.wal_skip_fsync,
         "log",
+        state.max_inflight,
     )
     .await
     .map_err(|e| {
@@ -1293,6 +1295,7 @@ fn rebuild_group_with_same_config(group: &PxGroup) -> PxGroup {
     if let Some(store) = group.config_store() {
         new_group.set_config_store(store.clone());
     }
+    new_group.set_inflight_window(group.inflight_window_size());
     new_group
 }
 

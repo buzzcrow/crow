@@ -63,6 +63,11 @@ pub struct RunArgs {
     /// sequence number.
     #[arg(long)]
     pub run_id: Option<String>,
+
+    /// Maximum in-flight proposals per group (--max-inflight on each
+    /// spawned server). Default: 32.
+    #[arg(long, default_value_t = 32)]
+    pub max_inflight: usize,
 }
 
 /// Arguments for `crowkv-cli bench`.
@@ -118,7 +123,7 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
 
     println!("provisioning 3-node cluster ({} mode)...", mode.label());
     let _ = std::io::Write::flush(&mut std::io::stdout());
-    let mut fixture = match BenchFixture::new(mode, workspace_dir).await {
+    let mut fixture = match BenchFixture::new(mode, workspace_dir, args.max_inflight).await {
         Ok(f) => f,
         Err(e) => {
             eprintln!("error: provision cluster: {e}");
@@ -391,7 +396,16 @@ fn render_comparison(a: &crate::bench::BenchReport, b: &crate::bench::BenchRepor
         qps(a),
         qps(b)
     );
-    let _ = writeln!(out, "{:<24} {:>22} {:>22}", "total_ops", a.total_ops, b.total_ops);
+    let _ = writeln!(
+        out,
+        "{:<24} {:>22} {:>22}",
+        "total_ops (success)", a.total_ops, b.total_ops
+    );
+    let _ = writeln!(
+        out,
+        "{:<24} {:>22} {:>22}",
+        "total_attempts", a.total_attempts, b.total_attempts
+    );
     let _ = writeln!(
         out,
         "{:<24} {:>22.4} {:>22.4}",

@@ -77,6 +77,7 @@ async fn main() {
         election_profile = %args.election_profile,
         kv_backend = %args.kv_backend,
         wal_backend = %args.wal_backend,
+        max_inflight = args.max_inflight,
         "parsed CLI arguments"
     );
 
@@ -110,7 +111,8 @@ async fn main() {
                 || Arc::new(std::sync::Mutex::new(crowkv::metrics::MetricsRegistry::new())),
                 |r| r.registry().clone(),
             ))
-            .with_wal_skip_fsync(args.no_fsync),
+            .with_wal_skip_fsync(args.no_fsync)
+            .with_max_inflight(args.max_inflight),
     );
 
     // Populate the port pool from `--ports` even when `--stores` is not
@@ -169,6 +171,7 @@ async fn main() {
             b.replica_id,
             b.ports.clone(),
             registry.clone(),
+            args.max_inflight,
         )
         .await;
     }
@@ -292,6 +295,7 @@ async fn create_and_start_stores(
     replica_id: u64,
     ports: Vec<u16>,
     registry: Arc<KvStoreRegistry>,
+    max_inflight: usize,
 ) {
     debug!(
         store_count = store_ids.len(),
@@ -337,6 +341,7 @@ async fn create_and_start_stores(
                 registry.crowtree_backend,
                 registry.wal_skip_fsync,
                 "log",
+                max_inflight,
             )
             .await
             {

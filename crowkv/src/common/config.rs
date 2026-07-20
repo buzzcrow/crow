@@ -33,7 +33,7 @@ impl PaxosConfig {
         max_paxos_retries: 3,
         max_slot_retries: 3,
         retry_base_backoff_ms: 5,
-        max_inflight_proposals: 16,
+        max_inflight_proposals: 32,
     };
 }
 
@@ -207,7 +207,7 @@ impl PxElectionConfig {
     ///
     /// `learner_stream_window_frames` is derived as
     /// `PaxosConfig::DEFAULT.max_inflight_proposals * LEARNER_WINDOW_MULTIPLIER`
-    /// (= 16 × 4 = 64).
+    /// (= 32 × 4 = 128).
     pub const DEFAULT: Self = Self {
         prevote_enabled: true,
         heartbeat_interval_ms: 150,
@@ -255,7 +255,8 @@ impl PxElectionConfig {
     /// Election 300–600 ms / heartbeat 100 ms / lease 800 ms. Matches the
     /// Raft paper's 150–300 ms suggestion with a 2× margin for localhost
     /// parallel-test load. Lease ≥ `election_max` + `clock_skew` (600 + 100
-    /// = 700) ensures leader-lease safety. Snapshot time threshold 20 s
+    /// = 700) ensures leader-lease safety. `learner_stream_window_frames`
+    /// = 32 × 4 = 128. Snapshot time threshold 20 s
     /// so short E2E runs still checkpoint without excessive disk I/O.
     #[must_use]
     pub const fn for_e2e() -> Self {

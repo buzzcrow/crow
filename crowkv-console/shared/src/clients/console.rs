@@ -72,6 +72,9 @@ pub struct DeployNodeServerBody {
     /// `--metrics-interval` value in seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics_interval: Option<u64>,
+    /// `--max-inflight` value for the proposal admission window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_inflight: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
