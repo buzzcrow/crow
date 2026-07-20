@@ -109,12 +109,12 @@ pub struct PxGroup {
     /// local WAL to report its own snapshot progress). Recomputed at the
     /// end of each quorum heartbeat round.
     pub(crate) group_snapshot_slot: AtomicU64,
-    /// Proposer sliding-window admission gate. Holds `PaxosConfig::proposer_window`
+    /// In-flight proposal admission gate. Holds `PaxosConfig::max_inflight_proposals`
     /// permits; each in-flight `propose` call holds one for its duration, so at
-    /// most `window` proposals are allocated-but-not-chosen at once. A proposal
-    /// that cannot immediately acquire a permit returns `ProposeResult::Busy`
-    /// (retryable) rather than blocking the caller.
-    pub(crate) proposer_window: tokio::sync::Semaphore,
+    /// most `max_inflight_proposals` proposals are allocated-but-not-chosen at
+    /// once. A proposal that cannot immediately acquire a permit returns
+    /// `ProposeResult::Busy` (retryable) rather than blocking the caller.
+    pub(crate) inflight_window: tokio::sync::Semaphore,
     /// Optional file-based config store for persisting group membership.
     /// Set via [`Self::set_config_store`] when the group has a WAL directory.
     /// When set, [`Self::persist_config`] writes to the config file instead
@@ -174,7 +174,7 @@ impl PxGroup {
             group_safe_slot: AtomicU64::new(0),
             peer_durable: parking_lot::Mutex::new(HashMap::new()),
             group_snapshot_slot: AtomicU64::new(0),
-            proposer_window: tokio::sync::Semaphore::new(PaxosConfig::DEFAULT.proposer_window),
+            inflight_window: tokio::sync::Semaphore::new(PaxosConfig::DEFAULT.max_inflight_proposals),
             config_store: None,
             membership_epoch: AtomicU64::new(0),
             last_snapshot_slot: AtomicU64::new(0),
@@ -985,11 +985,11 @@ impl PxGroup {
         // permit is held for the whole proposal (released on drop at every
         // return path below), so a full window fails fast with `Busy` instead
         // of queuing unboundedly.
-        let Ok(_window_permit) = self.proposer_window.try_acquire() else {
+        let Ok(_window_permit) = self.inflight_window.try_acquire() else {
             warn!(
                 group_id = self.group_id,
-                window = PaxosConfig::DEFAULT.proposer_window,
-                "proposer window full; rejecting proposal as Busy"
+                window = PaxosConfig::DEFAULT.max_inflight_proposals,
+                "inflight window full; rejecting proposal as Busy"
             );
             return ProposeResult::Busy;
         };
@@ -1673,17 +1673,29 @@ impl RemoteReplicaKind {
     }
 }
 
+/// Production metrics helpers for `PxGroup`.
+impl PxGroup {
+    /// Number of in-flight (allocated-but-not-yet-chosen) proposals.
+    /// Derived from the inflight window: `window_size - available_permits`.
+    #[must_use]
+    pub fn inflight_slot_count(&self) -> u64 {
+        let avail = self.inflight_window.available_permits();
+        let window = PaxosConfig::DEFAULT.max_inflight_proposals;
+        u64::try_from(window.saturating_sub(avail)).unwrap_or(0)
+    }
+}
+
 /// Test-only hooks (compiled under the `test-util` feature). These expose
 /// crate-internal mechanisms — the proposer admission semaphore, a single
 /// repair step, and peer-applied injection — to integration tests under
 /// `tests/` without permanently widening the production public API.
 #[cfg(feature = "test-util")]
 impl PxGroup {
-    /// Borrow the proposer sliding-window admission semaphore so a test can
+    /// Borrow the inflight proposal admission semaphore so a test can
     /// exhaust its permits and observe `ProposeResult::Busy`.
     #[must_use]
-    pub fn proposer_window(&self) -> &tokio::sync::Semaphore {
-        &self.proposer_window
+    pub fn inflight_window(&self) -> &tokio::sync::Semaphore {
+        &self.inflight_window
     }
 
     /// Run one background-repair step, returning the slot that was filled

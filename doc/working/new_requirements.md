@@ -37,6 +37,35 @@ complexity, and dependency. Before implementation, follow the
   `LatencyHistogram` / `Counter` classes. After R12 extracts metrics into
   `crow-common`, the bench client should reuse the same metrics primitives
   for consistency and to eliminate duplicate statistical infrastructure.
+- **R14** — Concurrent remote RPC fan-out in Paxos phases — Area: consensus
+  — `run_prepare_phase` and `run_accept_phase` iterate sequentially over
+  `remote_replicas`, awaiting each RPC before sending the next. Making
+  these concurrent (`join_all` / `FuturesUnordered`) reduces per-proposal
+  latency by one RPC round-trip per additional follower.
+- **R15** — Zero-copy PxLogEntry in accept path — Area: consensus —
+  `on_accept` clones `entry` for the acceptor and again for the WAL
+  record; `inner_accept` clones again for `cas_accepted`. With `Bytes`
+  payloads these are ref-count bumps today, but the goal is zero copy:
+  pass `&PxLogEntry` through the acceptor and WAL encode without
+  intermediate clones.
+- **R16** — Overlap local WAL fsync with remote RPC fan-out — Area:
+  consensus / WAL — The leader's local `on_accept` awaits `fdatasync`
+  before returning `PxAcceptReply::Accepted`, putting the leader's disk
+  fsync on the critical path *before* remote RPCs begin. Overlapping the
+  local WAL persist with the remote accept RPCs would hide fsync latency
+  behind network round-trips. **Concept change**: weakens the W6 ack
+  contract (persist-before-reply) for the local replica — the proposer
+  would need to track local persist completion separately from quorum.
+  Gate behind a feature flag; test under crash-recovery scenarios.
+- **R17** — Async engine apply after quorum — Area: consensus / engine —
+  `learn_chosen` (decode payload + `KVEngine::apply`) runs on the
+  proposer critical path before `ProposeResult::Chosen` is returned to
+  the client. Returning `Chosen` immediately after quorum confirmation
+  and applying asynchronously would remove engine apply latency from
+  the write path. **Concept change**: the client receives "chosen"
+  before the local engine has applied the value — read-your-writes
+  semantics break unless a read barrier or apply-fence is added. Gate
+  behind a feature flag; test read-after-write consistency.
 
 ### Low Priority
 
@@ -448,6 +477,256 @@ bench client refactor to use metrics primitives, update report generation.
   precise as the previous `hdrhistogram`-based values.
 - `hdrhistogram` dependency removed from `crowkv-cli/Cargo.toml`.
 - Existing benchmark tests pass with the new infrastructure.
+
+---
+
+### R14: Concurrent remote RPC fan-out in Paxos phases
+
+**Problem**: Both `run_prepare_phase` and `run_accept_phase` in
+`PxGroup` iterate sequentially over `self.remote_replicas`, awaiting
+each `send_prepare` / `send_accept` RPC before sending to the next
+replica. With N followers, the leader pays (N-1) extra serial RPC
+round-trips per proposal. In the current 3-node setup this is one
+extra round-trip (~20-30 µs on loopback); in larger clusters the
+latency penalty grows linearly with follower count.
+
+**Approach**: Collect all remote RPC futures into a `Vec` and await
+them concurrently using `futures::future::join_all` or
+`FuturesUnordered`. The local replica's `on_prepare` / `on_accept`
+call stays first (it is in-process and effectively free). After all
+remote futures resolve, fold the results into the existing
+accumulator variables (`accepted` / `promised`,
+`highest_rejected_round`, `highest_seen_term`, `epoch_mismatch`,
+`adopted`) using the same match logic. The quorum check and return
+logic remain unchanged — they already run after all replicas have
+been contacted.
+
+Key considerations:
+- The match arms are pure accumulation (increment counters, take max
+  of rejected rounds / seen terms, consider adopted entries), so
+  folding from a `Vec` of results is straightforward.
+- `consider_accepted` for the prepare phase must be called in a
+  deterministic order (e.g. by replica id) to keep adoption
+  tie-breaking stable across runs.
+- Error handling per-replica stays the same — each future produces
+  its own `Result`, and errors are logged individually.
+- No semantic change: the proposer still waits for all replicas
+  before checking quorum. The only difference is that RPCs are sent
+  in parallel rather than serially.
+
+**Priority**: Low — optimization, no correctness impact. The
+sequential overhead is small with 3 nodes but grows with cluster
+size.
+
+**Complexity**: Low — mechanical refactor of two loops into
+`join_all` / `FuturesUnordered` + result folding. No new algorithms
+or protocol changes.
+
+**Files**: `crowkv/src/cluster/group.rs` (`run_prepare_phase`,
+`run_accept_phase`).
+
+**Acceptance**:
+- Existing Paxos tests pass unchanged (election, group propose,
+  replica concurrent tests).
+- Benchmark (R10) shows reduced per-proposal latency with >2
+  followers; no regression with 2 followers.
+- No change in quorum / retry / TermStale behavior under concurrent
+  send.
+
+---
+
+### R15: Zero-copy PxLogEntry in accept path
+
+**Problem**: The local accept path performs multiple `PxLogEntry` clones:
+- `on_accept` (`local_replica.rs:1099`) clones `entry` for
+  `self.acceptor.accept(entry.clone())` because it needs `&entry` later
+  for `WALRecord::from_accepted`.
+- `inner_accept` (`acceptor.rs:124`) clones `entry` again for
+  `node.cas_accepted(accepted_ptr, entry.clone())`.
+- `base_entry` (`group.rs:1269`) constructs a new `PxLogEntry` per slot
+  retry, cloning `payload: Bytes` each time.
+
+Today `Bytes::clone` is an `O(1)` ref-count bump, so the cost is
+small. However the goal is zero copy where possible: the acceptor
+should accept `&PxLogEntry` and internally manage the single owned
+copy stored in the slot node, and the WAL encoder should borrow from
+the entry without cloning.
+
+**Approach**:
+- Change `Acceptor::accept` to take `&PxLogEntry` instead of
+  `PxLogEntry`. The acceptor performs one clone internally for
+  `cas_accepted` (unavoidable — the slot node must own its copy).
+- In `on_accept`, avoid the clone for the acceptor call by passing
+  `&entry`. The WAL record encoding (`WALRecord::from_accepted`)
+  already takes `&PxLogEntry`, so no extra clone is needed there.
+- In `base_entry`, pass `payload` by value (move) instead of cloning,
+  and reuse the same `Bytes` handle across retry attempts by cloning
+  only when a new `PxLogEntry` must be constructed (the clone is still
+  `O(1)` but the move avoids one redundant bump per attempt).
+- Audit the prepare path similarly: `on_prepare` already takes
+  primitives by value, so no entry clone there.
+
+**Priority**: Low — current `Bytes::clone` cost is negligible; this is
+a code-quality and future-proofing improvement for when payloads may
+not always be `Bytes`-backed.
+
+**Complexity**: Low — signature changes (`&PxLogEntry` vs
+`PxLogEntry`) and removing redundant clones. No algorithm or protocol
+change.
+
+**Files**: `crowkv/src/cluster/local_replica.rs` (`on_accept`),
+`crowkv/src/paxos/acceptor.rs` (`accept`, `inner_accept`),
+`crowkv/src/paxos/roles.rs` (`Acceptor` trait),
+`crowkv/src/cluster/group.rs` (`base_entry`).
+
+**Acceptance**:
+- Existing Paxos tests pass unchanged.
+- No `PxLogEntry` clone in `on_accept` between acceptor call and WAL
+  encode (verified by code inspection or a debug counter).
+- `Acceptor::accept` takes `&PxLogEntry`; the only clone is inside
+  `cas_accepted`.
+
+---
+
+### R16: Overlap local WAL fsync with remote RPC fan-out
+
+**Problem**: In `run_accept_phase`, the leader calls
+`replica.on_accept(entry.clone()).await` first, which internally awaits
+`wal.append(&record).await` (an `fdatasync` round-trip) before
+returning `PxAcceptReply::Accepted`. Only after this local fsync
+completes does the leader begin sending `send_accept` RPCs to remote
+replicas. The leader's local disk fsync is therefore fully serial with
+the remote RPC fan-out, adding ~10-100 µs (NVMe) to ~1-10 ms (SSD/HDD)
+of disk latency to the critical path before any network I/O starts.
+
+With R14 (concurrent fan-out), the remote RPCs overlap with each other
+but still wait for the local fsync to finish first.
+
+**Approach**: Start the local WAL append and the remote accept RPCs
+concurrently. The local acceptor logic (`inner_accept`) is synchronous
+and completes instantly — only the WAL persist (`fdatasync`) is slow.
+Split `on_accept` into two phases:
+1. **Accept logic** — run `inner_accept`, get the `PxAcceptReply`.
+2. **WAL persist** — `wal.append(&record).await`.
+
+The proposer would:
+1. Call the accept logic on the local replica (instant).
+2. Concurrently: (a) await the local WAL persist, (b) fan out
+   `send_accept` RPCs to all remote replicas (R14 makes these
+   concurrent).
+3. After all futures resolve, fold results and check quorum.
+
+**Concept change (highlighted)**: This weakens the W6 ack contract for
+the *local* replica. Today, `on_accept` guarantees the Accepted record
+is durably persisted before returning `Accepted`. With this change, the
+local replica's `Accepted` reply is returned before the WAL flush
+completes — the proposer tracks local persist separately. If the node
+crashes between the accept reply and the WAL flush, the accepted value
+may be lost, which is safe in Paxos (the value was not yet chosen) but
+means the leader may re-propose a slot it had already accepted. This is
+correctness-safe but changes the durability ordering.
+
+**Feature flag**: Gate behind `wal_overlap_local_persist` (default
+off). When enabled, the proposer overlaps; when disabled, the current
+serial behavior is preserved.
+
+**Testing**:
+- Crash-recovery tests: kill the leader after local accept but before
+  WAL flush; verify the slot is re-proposed and converges.
+- Quorum tests: verify the proposer still waits for all replicas before
+  declaring chosen.
+- Benchmark: measure fsync latency hidden behind RPC round-trips.
+
+**Priority**: Medium — hides fsync latency behind network latency,
+which is the single largest non-network bottleneck in the write path.
+
+**Complexity**: High — splits `on_accept`, changes the proposer's
+local-replica handling from a simple `.await` to a concurrent join,
+weakens W6 contract, requires feature flag and crash-recovery tests.
+
+**Files**: `crowkv/src/cluster/local_replica.rs` (`on_accept` split),
+`crowkv/src/cluster/group.rs` (`run_accept_phase` concurrent local +
+remote), `crowkv/src/wal/wal_engine.rs` (no change to `append` itself).
+
+**Acceptance**:
+- With feature flag off: all existing tests pass, behavior unchanged.
+- With feature flag on: Paxos election and group propose tests pass.
+- Crash-recovery test: leader crash after accept, before WAL flush →
+  slot re-proposed and converges to a single chosen value.
+- Benchmark shows reduced per-proposal latency when fsync is the
+  bottleneck (non-loopback or slow disk).
+
+---
+
+### R17: Async engine apply after quorum
+
+**Problem**: After `AcceptAttempt::Chosen`, the leader calls
+`replica.learn_chosen(&entry, client_id, seq).await` which decodes the
+payload and applies it to the KV engine **before** returning
+`ProposeResult::Chosen` to the client. For `InMemKV` this is trivial,
+but for `CrowtreeEngine` the apply involves FFI + memtable insert,
+potentially triggering a memtable flush. This puts engine apply latency
+on the write critical path.
+
+`fan_out_chosen_notice` (item 7) runs after `learn_chosen` but is a
+non-blocking mpsc enqueue — negligible cost, can stay where it is.
+
+**Approach**: Return `ProposeResult::Chosen` to the client immediately
+after quorum is confirmed, then apply the entry to the local engine
+asynchronously (spawn a task or use a apply queue). The
+`fan_out_chosen_notice` can fire immediately after quorum as well
+(before the async apply completes) since it only carries the slot/term
+watermark, not the payload.
+
+**Concept change (highlighted)**: The client receives "chosen" before
+the local engine has applied the value. This breaks read-your-writes
+semantics: a client that writes a key and then immediately reads it
+may not see the written value if the async apply has not completed.
+Mitigations:
+- **Apply fence**: Track the highest slot applied in the local engine.
+  Reads on the leader check that the applied frontier >= the slot being
+  read; if not, the read waits (or returns a stale-read indicator).
+- **Sync mode**: Gate behind a feature flag `async_engine_apply`
+  (default off). When disabled, the current synchronous apply behavior
+  is preserved.
+- **Client-visible flag**: The `KvResponse` could carry an
+  `applied_locally: bool` field so the client knows whether the value
+  is immediately readable.
+
+**Feature flag**: `async_engine_apply` (default off).
+
+**Testing**:
+- Read-after-write test: write a key, immediately read it; with flag
+  off, must see the value; with flag on, may see stale until apply
+  catches up (verify eventual consistency).
+- Apply-ordering test: multiple writes to the same key; verify the
+  final applied value is the highest-slot value (per-key
+  highest-slot-wins in `KVEngine::apply`).
+- Crash-recovery test: leader crash after quorum but before async
+  apply → on restart, the slot is re-learned and applied from the WAL
+  / peer replication.
+
+**Priority**: Medium — removes engine apply from the write critical
+path, which is significant for `CrowtreeEngine` under load.
+
+**Complexity**: Medium — spawn apply task, track applied frontier, add
+read barrier / fence, feature flag, tests. No protocol change (the
+value is Paxos-chosen regardless of local apply).
+
+**Files**: `crowkv/src/cluster/group.rs` (`propose` — return before
+`learn_chosen`), `crowkv/src/paxos/learner.rs` (`learn` / `apply_entry`
+— async dispatch), `crowkv/src/cluster/local_replica.rs`
+(`learn_chosen` — split into notify + async apply).
+
+**Acceptance**:
+- With feature flag off: all existing tests pass, behavior unchanged.
+- With feature flag on: Paxos tests pass; write latency reduced by
+  engine apply time.
+- Read-after-write test: with flag on, eventual consistency verified
+  (read eventually returns the written value after apply catches up).
+- Apply-ordering test: highest-slot-wins semantics preserved under
+  async apply.
+- Crash-recovery test: slot re-learned and applied after restart.
 
 ---
 

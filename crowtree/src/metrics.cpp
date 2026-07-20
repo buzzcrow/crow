@@ -197,7 +197,7 @@ void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timesta
             }
         }
         if (!active.empty()) {
-            std::fprintf(fp, "%-*s  count  tps(/s)  total\n", static_cast<int>(name_w), "name");
+            std::fprintf(fp, "%-*s  count  tps(/s)  total\n", static_cast<int>(name_w), "");
             for (const auto &[i, snap] : active) {
                 double tps_d = static_cast<double>(snap.count) / window_secs;
                 auto   tps   = static_cast<uint64_t>(tps_d);
@@ -219,7 +219,7 @@ void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timesta
             }
         }
         if (!active.empty()) {
-            std::fprintf(fp, "%-*s  count  tps(/s)  avg(us)  p50  p99  max  total\n", static_cast<int>(name_w), "name");
+            std::fprintf(fp, "%-*s  count  tps(/s)  avg(us)  p50  p99  max  total\n", static_cast<int>(name_w), "");
             for (const auto &[i, snap] : active) {
                 uint64_t p50   = LatencyHistogram::percentile(snap, 50.0);
                 uint64_t p99   = LatencyHistogram::percentile(snap, 99.0);
@@ -248,7 +248,7 @@ void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timesta
             }
         }
         if (!active.empty()) {
-            std::fprintf(fp, "%-*s  count  tps(/s)  avg(us)  max(us)  total\n", static_cast<int>(name_w), "name");
+            std::fprintf(fp, "%-*s  count  tps(/s)  avg(us)  max(us)  total\n", static_cast<int>(name_w), "");
             for (const auto &[i, snap] : active) {
                 uint64_t avg   = snap.count > 0 ? snap.sum / snap.count : 0;
                 double   tps_d = static_cast<double>(snap.count) / window_secs;
@@ -275,7 +275,7 @@ void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timesta
         }
         if (!active.empty()) {
             std::fprintf(fp, "%-*s  count  tps(/s)  avg_size(KB)  rate(KB/s)  total(KB)\n", static_cast<int>(name_w),
-                         "name");
+                         "");
             for (const auto &[i, snap] : active) {
                 uint64_t avg_size = snap.count > 0 ? snap.sum / snap.count : 0;
                 double   rate_d   = static_cast<double>(snap.sum) / window_secs;
@@ -294,7 +294,7 @@ void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timesta
 
     // Gauges (always printed, even if 0)
     if (!gauges_.empty()) {
-        std::fprintf(fp, "%-*s  value\n", static_cast<int>(name_w), "name");
+        std::fprintf(fp, "%-*s  value\n", static_cast<int>(name_w), "");
         auto idx = sorted_indices(gauges_);
         for (size_t i : idx) {
             std::fprintf(fp, "%-*s  %5llu\n", static_cast<int>(name_w), gauges_[i]->name().c_str(),

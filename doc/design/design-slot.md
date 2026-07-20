@@ -82,7 +82,7 @@ The blind-ops premise from design.md §5.2](design.md) makes the trade-off cheap
 
 ## 4. Sliding Window and Backpressure
 
-The number of in-flight slots is capped at the **window size** (`proposer_window`, default 16). The proposer uses a `Semaphore` as a sliding-window admission gate. If a permit is available, the request is admitted, slot is assigned, and proposing begins. The permit is held for the entire proposal duration. If no permit is available (`try_acquire` fails), the leader immediately returns `Busy` — a retryable error. No queuing.
+The number of in-flight slots is capped at the **window size** (`max_inflight_proposals`, default 16). The proposer uses a `Semaphore` as a sliding-window admission gate. If a permit is available, the request is admitted, slot is assigned, and proposing begins. The permit is held for the entire proposal duration. If no permit is available (`try_acquire` fails), the leader immediately returns `Busy` — a retryable error. No queuing.
 
 This fail-fast design avoids unbounded queue latency. The client is expected to retry with backoff. Sustained `Busy` indicates either an undersized window or a downstream bottleneck.
 
@@ -233,7 +233,7 @@ Detailed further in [`design-wal.md`](design-wal.md) §4.
 
 | Parameter | Default | Where it lives |
 | --- | --- | --- |
-| `proposer_window` | 16 | `PaxosConfig` (semaphore permits) |
+| `max_inflight_proposals` | 16 | `PaxosConfig` (semaphore permits) |
 | `max_paxos_retries` | 3 | `PaxosConfig` (per-slot Phase-2 retries) |
 | `max_slot_retries` | 3 | `PaxosConfig` (new-slot retries before giving up) |
 | `retry_base_backoff_ms` | 5 | `PaxosConfig` (exponential backoff base) |

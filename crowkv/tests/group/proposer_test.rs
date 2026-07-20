@@ -1,9 +1,9 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! Proposer sliding-window admission and background-repair tests.
+//! In-flight proposal admission and background-repair tests.
 //!
-//! These drive crate-internal mechanisms (the proposer-window semaphore and a
+//! These drive crate-internal mechanisms (the inflight-window semaphore and a
 //! single repair step) through the `test-util` feature hooks on `PxGroup`,
 //! using a single-voter leader group so quorum is 1 and no peer RPCs are
 //! needed.
@@ -26,8 +26,8 @@ async fn propose_returns_busy_when_window_is_full() {
 
     // Exhaust every window permit so the next admission must fail fast.
     let mut held = Vec::new();
-    for _ in 0..PaxosConfig::DEFAULT.proposer_window {
-        held.push(group.proposer_window().try_acquire().expect("window permit"));
+    for _ in 0..PaxosConfig::DEFAULT.max_inflight_proposals {
+        held.push(group.inflight_window().try_acquire().expect("window permit"));
     }
     match group.propose(b"v".to_vec(), Some(1), Some(1)).await {
         ProposeResult::Busy => {}
