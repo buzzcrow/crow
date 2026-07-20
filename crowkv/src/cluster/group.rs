@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
+use futures::future::join_all;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
@@ -1358,53 +1359,68 @@ impl PxGroup {
             }
         }
 
-        for remote in &self.remote_replicas {
-            if let RemoteReplicaKind::Real(remote) = remote {
-                match remote
-                    .send_prepare(slot, ballot, term, group_id, self.membership_epoch())
-                    .await
-                {
-                    Ok(PxPrepareReply::Promised { accepted, .. }) => {
-                        // Non-voting members (catch-up readers) physically
-                        // promise/accept so they can learn chosen values,
-                        // but their reply must not count toward quorum --
-                        // `quorum` above is sized from voting members only.
-                        if remote.voting {
-                            promised += 1;
-                        }
-                        if let Some(prev) = accepted {
-                            Self::consider_accepted(&mut adopted, prev);
-                        }
+        // Concurrent fan-out: issue all prepare RPCs simultaneously
+        // and fold replies into accumulators. This removes one serial
+        // RPC round-trip per additional follower (R14).
+        let prepare_futs: Vec<_> = self
+            .remote_replicas
+            .iter()
+            .filter_map(|remote| {
+                if let RemoteReplicaKind::Real(remote) = remote {
+                    Some(remote.send_prepare(slot, ballot, term, group_id, self.membership_epoch()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let prepare_results = join_all(prepare_futs).await;
+
+        for (remote, result) in self
+            .remote_replicas
+            .iter()
+            .filter(|r| matches!(r, RemoteReplicaKind::Real(_)))
+            .zip(prepare_results)
+        {
+            let RemoteReplicaKind::Real(remote) = remote else {
+                continue;
+            };
+            match result {
+                Ok(PxPrepareReply::Promised { accepted, .. }) => {
+                    if remote.voting {
+                        promised += 1;
                     }
-                    Ok(PxPrepareReply::Rejected { current_promised, .. }) => {
-                        let candidate = current_promised.round;
-                        highest_rejected_round =
-                            Some(highest_rejected_round.map_or(candidate, |r| r.max(candidate)));
+                    if let Some(prev) = accepted {
+                        Self::consider_accepted(&mut adopted, prev);
                     }
-                    Ok(PxPrepareReply::TermStale { new_term, .. }) => {
-                        highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
-                    }
-                    Ok(PxPrepareReply::EpochMismatch { responder_epoch }) => {
-                        warn!(
-                            group_id,
-                            slot,
-                            remote_id = remote.node_id,
-                            proposer_epoch = self.membership_epoch(),
-                            responder_epoch,
-                            "prepare rejected by membership-epoch fence"
-                        );
-                        epoch_mismatch = Some(responder_epoch);
-                    }
-                    Err(error) => {
-                        error!(
-                            group_id,
-                            slot,
-                            remote_id = remote.node_id,
-                            endpoint = remote.endpoint,
-                            error = %error,
-                            "prepare rpc failed"
-                        );
-                    }
+                }
+                Ok(PxPrepareReply::Rejected { current_promised, .. }) => {
+                    let candidate = current_promised.round;
+                    highest_rejected_round =
+                        Some(highest_rejected_round.map_or(candidate, |r| r.max(candidate)));
+                }
+                Ok(PxPrepareReply::TermStale { new_term, .. }) => {
+                    highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
+                }
+                Ok(PxPrepareReply::EpochMismatch { responder_epoch }) => {
+                    warn!(
+                        group_id,
+                        slot,
+                        remote_id = remote.node_id,
+                        proposer_epoch = self.membership_epoch(),
+                        responder_epoch,
+                        "prepare rejected by membership-epoch fence"
+                    );
+                    epoch_mismatch = Some(responder_epoch);
+                }
+                Err(error) => {
+                    error!(
+                        group_id,
+                        slot,
+                        remote_id = remote.node_id,
+                        endpoint = remote.endpoint,
+                        error = %error,
+                        "prepare rpc failed"
+                    );
                 }
             }
         }
@@ -1516,48 +1532,65 @@ impl PxGroup {
             }
         }
 
-        for remote in &self.remote_replicas {
-            if let RemoteReplicaKind::Real(remote) = remote {
-                match remote
-                    .send_accept(entry, client_id, seq, group_id, self.membership_epoch())
-                    .await
-                {
-                    Ok(PxAcceptReply::Accepted { .. }) => {
-                        // Same non-voting-doesn't-count rule as
-                        // `run_prepare_phase` above.
-                        if remote.voting {
-                            accepted += 1;
-                        }
+        // Concurrent fan-out: issue all accept RPCs simultaneously
+        // and fold replies into accumulators. This removes one serial
+        // RPC round-trip per additional follower (R14).
+        let accept_futs: Vec<_> = self
+            .remote_replicas
+            .iter()
+            .filter_map(|remote| {
+                if let RemoteReplicaKind::Real(remote) = remote {
+                    Some(remote.send_accept(entry, client_id, seq, group_id, self.membership_epoch()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let accept_results = join_all(accept_futs).await;
+
+        for (remote, result) in self
+            .remote_replicas
+            .iter()
+            .filter(|r| matches!(r, RemoteReplicaKind::Real(_)))
+            .zip(accept_results)
+        {
+            let RemoteReplicaKind::Real(remote) = remote else {
+                continue;
+            };
+            match result {
+                Ok(PxAcceptReply::Accepted { .. }) => {
+                    if remote.voting {
+                        accepted += 1;
                     }
-                    Ok(PxAcceptReply::Rejected { current_promised, .. }) => {
-                        let candidate = current_promised.round;
-                        highest_rejected_round =
-                            Some(highest_rejected_round.map_or(candidate, |r| r.max(candidate)));
-                    }
-                    Ok(PxAcceptReply::TermStale { new_term, .. }) => {
-                        highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
-                    }
-                    Ok(PxAcceptReply::EpochMismatch { responder_epoch }) => {
-                        warn!(
-                            group_id,
-                            slot = entry.slot,
-                            remote_id = remote.node_id,
-                            proposer_epoch = self.membership_epoch(),
-                            responder_epoch,
-                            "accept rejected by membership-epoch fence"
-                        );
-                        epoch_mismatch = Some(responder_epoch);
-                    }
-                    Err(error) => {
-                        error!(
-                            group_id,
-                            slot = entry.slot,
-                            remote_id = remote.node_id,
-                            endpoint = remote.endpoint,
-                            error = %error,
-                            "accept rpc failed"
-                        );
-                    }
+                }
+                Ok(PxAcceptReply::Rejected { current_promised, .. }) => {
+                    let candidate = current_promised.round;
+                    highest_rejected_round =
+                        Some(highest_rejected_round.map_or(candidate, |r| r.max(candidate)));
+                }
+                Ok(PxAcceptReply::TermStale { new_term, .. }) => {
+                    highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
+                }
+                Ok(PxAcceptReply::EpochMismatch { responder_epoch }) => {
+                    warn!(
+                        group_id,
+                        slot = entry.slot,
+                        remote_id = remote.node_id,
+                        proposer_epoch = self.membership_epoch(),
+                        responder_epoch,
+                        "accept rejected by membership-epoch fence"
+                    );
+                    epoch_mismatch = Some(responder_epoch);
+                }
+                Err(error) => {
+                    error!(
+                        group_id,
+                        slot = entry.slot,
+                        remote_id = remote.node_id,
+                        endpoint = remote.endpoint,
+                        error = %error,
+                        "accept rpc failed"
+                    );
                 }
             }
         }

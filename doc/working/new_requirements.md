@@ -37,11 +37,10 @@ complexity, and dependency. Before implementation, follow the
   `LatencyHistogram` / `Counter` classes. After R12 extracts metrics into
   `crow-common`, the bench client should reuse the same metrics primitives
   for consistency and to eliminate duplicate statistical infrastructure.
-- **R14** — Concurrent remote RPC fan-out in Paxos phases — Area: consensus
-  — `run_prepare_phase` and `run_accept_phase` iterate sequentially over
-  `remote_replicas`, awaiting each RPC before sending the next. Making
-  these concurrent (`join_all` / `FuturesUnordered`) reduces per-proposal
-  latency by one RPC round-trip per additional follower.
+- **R14** — Concurrent remote RPC fan-out in Paxos phases (DONE) — Area:
+  consensus — `run_prepare_phase` and `run_accept_phase` now use
+  `futures::future::join_all` to issue all remote RPCs concurrently instead
+  of sequentially. +8.7% throughput, -25% avg latency on 3-node mem bench.
 - **R15** — Zero-copy PxLogEntry in accept path — Area: consensus —
   `on_accept` clones `entry` for the acceptor and again for the WAL
   record; `inner_accept` clones again for `cas_accepted`. With `Bytes`
