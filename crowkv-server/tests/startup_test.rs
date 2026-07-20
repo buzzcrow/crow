@@ -80,6 +80,7 @@ async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
         CrowtreeBackend::File,
         false,
         "",
+        16,
     )
     .await
     .unwrap();
@@ -145,6 +146,7 @@ async fn crowtree_engine_persists_across_restart(crowtree_backend: CrowtreeBacke
         crowtree_backend,
         false,
         "",
+        16,
     )
     .await
     .unwrap();
@@ -195,6 +197,7 @@ async fn crowtree_engine_persists_across_restart(crowtree_backend: CrowtreeBacke
         crowtree_backend,
         false,
         "",
+        16,
     )
     .await
     .unwrap();

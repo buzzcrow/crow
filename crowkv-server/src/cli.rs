@@ -87,6 +87,12 @@ pub struct Cli {
     /// Number of rotated log files to keep. Default: 5.
     #[arg(long, default_value_t = 5)]
     pub log_max_files: usize,
+
+    /// Maximum in-flight (allocated-but-not-chosen) proposals per group.
+    /// Each proposal acquires one permit from the admission semaphore;
+    /// a full window fails fast with `Busy` instead of queuing. Default: 32.
+    #[arg(long, default_value_t = 32)]
+    pub max_inflight: usize,
 }
 
 /// Parse a comma-separated list of numbers and ranges into a `Vec<u64>`.

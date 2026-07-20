@@ -74,6 +74,8 @@ pub fn percentiles_from_histogram(h: &Histogram<u64>) -> Percentiles {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OpReport {
     pub ops: u64,
+    #[serde(default)]
+    pub attempts: u64,
     pub errors: u64,
     pub no_leader: u64,
     pub not_found: u64,
@@ -110,6 +112,8 @@ pub struct BenchReport {
     pub store_id: u64,
     pub group_id: u64,
     pub total_ops: u64,
+    #[serde(default)]
+    pub total_attempts: u64,
     pub total_errors: u64,
     pub error_rate: f64,
     pub by_op: BTreeMap<String, OpReport>,
@@ -282,10 +286,11 @@ impl BenchReport {
         } else {
             0.0
         };
-        let _ = writeln!(out, "- **total_ops:** {}", self.total_ops);
+        let _ = writeln!(out, "- **total_ops (success):** {}", self.total_ops);
+        let _ = writeln!(out, "- **total_attempts:** {}", self.total_attempts);
         let _ = writeln!(out, "- **total_errors:** {}", self.total_errors);
         let _ = writeln!(out, "- **error_rate:** {:.4}", self.error_rate);
-        let _ = writeln!(out, "- **throughput:** {qps:.1} ops/s");
+        let _ = writeln!(out, "- **throughput:** {qps:.1} ops/s (success only)");
         let _ = writeln!(out);
 
         // ── Per-Op Breakdown ──
@@ -301,7 +306,8 @@ impl BenchReport {
                 let op_qps = if secs > 0.0 { op.ops as f64 / secs } else { 0.0 };
                 let _ = writeln!(out, "### {kind}");
                 let _ = writeln!(out);
-                let _ = writeln!(out, "- **ops:** {} ({op_qps:.1} ops/s)", op.ops);
+                let _ = writeln!(out, "- **ops (success):** {} ({op_qps:.1} ops/s)", op.ops);
+                let _ = writeln!(out, "- **attempts:** {}", op.attempts);
                 let _ = writeln!(out, "- **errors:** {}", op.errors);
                 if op.no_leader > 0 {
                     let _ = writeln!(out, "- **no_leader:** {}", op.no_leader);
@@ -732,7 +738,8 @@ impl OpStats {
     #[must_use]
     pub fn into_report(self) -> OpReport {
         OpReport {
-            ops: self.ops,
+            ops: self.ops - self.errors,
+            attempts: self.ops,
             errors: self.errors,
             no_leader: self.no_leader,
             not_found: self.not_found,

@@ -5,6 +5,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use tracing::info;
+
 use crowkv::cluster::group::PxGroup;
 use crowkv::cluster::group_config::GroupConfigStore;
 use crowkv::cluster::group_election::LeaderElection;
@@ -120,6 +122,7 @@ pub async fn create_group_with_wal(
     crowtree_backend: CrowtreeBackend,
     skip_fsync: bool,
     log_dir: &str,
+    max_inflight: usize,
 ) -> io::Result<PxGroup> {
     let mut wal_config = WalConfig::with_root(store_wal_root(wal_root, store_id));
     if std::env::var("CROWKV_WAL_TEXT").as_deref() == Ok("1") {
@@ -148,6 +151,11 @@ pub async fn create_group_with_wal(
         group.stamp_proposing_term(term);
     }
     group.set_election_config(election_cfg);
+    group.set_inflight_window(max_inflight);
+    info!(
+        store_id,
+        group_id, max_inflight, skip_fsync, "group created with config"
+    );
     let next_slot = group
         .local_replica()
         .highest_seen_slot()

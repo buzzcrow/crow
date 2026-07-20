@@ -301,13 +301,14 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
 
     let finished_at = Utc::now();
     let actual_duration = started_instant.elapsed();
-    let total_ops: u64 = by_kind.values().map(|s| s.ops).sum();
+    let total_attempts: u64 = by_kind.values().map(|s| s.ops).sum();
     let total_errors: u64 = by_kind.values().map(|s| s.errors).sum();
+    let total_ops = total_attempts - total_errors;
     #[allow(clippy::cast_precision_loss)]
-    let error_rate = if total_ops == 0 {
+    let error_rate = if total_attempts == 0 {
         0.0
     } else {
-        total_errors as f64 / total_ops as f64
+        total_errors as f64 / total_attempts as f64
     };
 
     let client_metrics = client.metrics();
@@ -339,6 +340,7 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
         store_id: cfg.store_id,
         group_id: cfg.group_id,
         total_ops,
+        total_attempts,
         total_errors,
         error_rate,
         by_op: per_op_map(by_kind),

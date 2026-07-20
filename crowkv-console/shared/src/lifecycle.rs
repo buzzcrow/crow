@@ -44,6 +44,9 @@ pub struct DeployRequest {
     /// `--metrics-interval` value in seconds. `None` leaves the
     /// spawned server's own default in effect.
     pub metrics_interval: Option<u64>,
+    /// `--max-inflight` value. `None` leaves the spawned server's
+    /// own default in effect.
+    pub max_inflight: Option<usize>,
 }
 
 /// Result of a successful deploy. Persist these fields onto the
@@ -99,9 +102,10 @@ pub async fn deploy_local_in_dir_with_extra_args(
     deploy_local_in_workspace(req, node, Some(workspace_dir), extra_args).await
 }
 
-/// Append `--kv-backend`/`--wal-backend`/`--no-fsync`/`--metrics-interval`
-/// flags to the spawned `crowkv-server` command per `req`. Split out of
-/// `deploy_local_in_workspace` to keep it under the line-count lint.
+/// Append `--kv-backend`/`--wal-backend`/`--no-fsync`/`--metrics-interval`/
+/// `--max-inflight` flags to the spawned `crowkv-server` command per `req`.
+/// Split out of `deploy_local_in_workspace` to keep it under the line-count
+/// lint.
 fn apply_benchmark_flags(cmd: &mut Command, req: &DeployRequest) {
     if let Some(kv_backend) = &req.kv_backend {
         cmd.arg("--kv-backend").arg(kv_backend);
@@ -114,6 +118,9 @@ fn apply_benchmark_flags(cmd: &mut Command, req: &DeployRequest) {
     }
     if let Some(metrics_interval) = req.metrics_interval {
         cmd.arg("--metrics-interval").arg(metrics_interval.to_string());
+    }
+    if let Some(max_inflight) = req.max_inflight {
+        cmd.arg("--max-inflight").arg(max_inflight.to_string());
     }
 }
 

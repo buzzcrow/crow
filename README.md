@@ -28,6 +28,20 @@ From past experience building storage systems, a high-performance distributed KV
 
 ![Failover](doc/assets/demo-failover.gif)
 
+**Write Performance — Inflight Window Benchmark** — Multi-Paxos allows slots to be decided out of order, but the leader still needs an admission control window to cap memory pressure from in-flight proposals. The benchmark below demonstrates the impact of the `max_inflight_proposals` window on write throughput. A 3-node cluster (in-memory WAL + storage) runs a write-only workload (512-byte values, 1M key space, 12-second duration) with two window sizes:
+
+- **Window = 1** (effectively Raft-style sequential commit): at 16 concurrent writers, 40% of proposals are rejected as `Busy`, and throughput collapses to ~19K ops/s.
+- **Window = 16** (Paxos pipelined commit): zero rejections, throughput reaches ~37K ops/s — **2× faster** than window=1 under the same load.
+
+| Window | Threads | Connections | Throughput (ops/s) | Avg Latency | p99 Latency | Busy Rejections |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 1 | 9,050 | 109 µs | 178 µs | 0 |
+| 1 | 16 | 4 | 19,131 | 834 µs | 1,299 µs | 152,827 (40%) |
+| 16 | 1 | 1 | 9,458 | 104 µs | 164 µs | 0 |
+| 16 | 16 | 4 | 37,033 | 430 µs | 638 µs | 0 |
+
+At 1 thread the window size makes no difference (only one proposal in flight at a time). At 16 threads the inflight window is the difference between a serialized bottleneck and a fully pipelined commit path — exactly the architectural advantage Multi-Paxos holds over Raft on the write hot path.
+
 ## Why Multi-Paxos?
 
 Raft's log is contiguous by construction: a leader cannot acknowledge slot N+1 until slot N is committed. Under high concurrency this becomes a sequential bottleneck.

@@ -116,6 +116,9 @@ pub struct PxGroup {
     /// once. A proposal that cannot immediately acquire a permit returns
     /// `ProposeResult::Busy` (retryable) rather than blocking the caller.
     pub(crate) inflight_window: tokio::sync::Semaphore,
+    /// Cached size of `inflight_window` for logging (the semaphore
+    /// itself does not expose its total permit count).
+    pub(crate) inflight_window_size: usize,
     /// Optional file-based config store for persisting group membership.
     /// Set via [`Self::set_config_store`] when the group has a WAL directory.
     /// When set, [`Self::persist_config`] writes to the config file instead
@@ -176,6 +179,7 @@ impl PxGroup {
             peer_durable: parking_lot::Mutex::new(HashMap::new()),
             group_snapshot_slot: AtomicU64::new(0),
             inflight_window: tokio::sync::Semaphore::new(PaxosConfig::DEFAULT.max_inflight_proposals),
+            inflight_window_size: PaxosConfig::DEFAULT.max_inflight_proposals,
             config_store: None,
             membership_epoch: AtomicU64::new(0),
             last_snapshot_slot: AtomicU64::new(0),
@@ -191,6 +195,20 @@ impl PxGroup {
     /// dedicated config file (`store{sid}_group{gid}.json`) in the group's conf directory.
     pub fn set_config_store(&mut self, store: GroupConfigStore) {
         self.config_store = Some(store);
+    }
+
+    /// Override the in-flight proposal admission window size. Must be
+    /// called before the group starts serving proposals. Replaces the
+    /// semaphore with one sized to `max_inflight`.
+    pub fn set_inflight_window(&mut self, max_inflight: usize) {
+        self.inflight_window = tokio::sync::Semaphore::new(max_inflight);
+        self.inflight_window_size = max_inflight;
+    }
+
+    /// Current inflight proposal window size.
+    #[must_use]
+    pub fn inflight_window_size(&self) -> usize {
+        self.inflight_window_size
     }
 
     /// Get the config store, if set.
@@ -989,7 +1007,7 @@ impl PxGroup {
         let Ok(_window_permit) = self.inflight_window.try_acquire() else {
             warn!(
                 group_id = self.group_id,
-                window = PaxosConfig::DEFAULT.max_inflight_proposals,
+                window = self.inflight_window_size,
                 "inflight window full; rejecting proposal as Busy"
             );
             return ProposeResult::Busy;
@@ -1713,7 +1731,7 @@ impl PxGroup {
     #[must_use]
     pub fn inflight_slot_count(&self) -> u64 {
         let avail = self.inflight_window.available_permits();
-        let window = PaxosConfig::DEFAULT.max_inflight_proposals;
+        let window = self.inflight_window_size;
         u64::try_from(window.saturating_sub(avail)).unwrap_or(0)
     }
 }

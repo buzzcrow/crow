@@ -294,3 +294,35 @@ pixi run bench
 - Tail latency improvement: max dropped from 772ms to 2.9ms
   (eliminated retry storms caused by sequential RPC timeouts)
 - Zero errors in post-R14 run (vs 4 retries_exhausted before)
+
+### Scaling sweep — 2026-07-20
+
+All runs: 3-node cluster, in-memory WAL + in-memory KV (mem-block),
+write-only, 512-byte values, 1M key space, 12-second duration,
+`election_profile = e2e`. `max_inflight_proposals` was increased
+from 16 → 32 → 64 as thread count grew to avoid `Busy` rejections.
+
+| Threads | Conn | Inflight | Throughput (ops/s) | avg (us) | p50 (us) | p99 (us) | Errors |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 16 | 8,404 | 118 | 97 | 183 | 3 |
+| 2 | 1 | 16 | 10,911 | 131 | 123 | 235 | 0 |
+| 16 | 1 | 32 | 23,400 | 683 | 669 | 1074 | 0 |
+| 16 | 2 | 32 | 33,200 | 478 | 467 | 742 | 0 |
+| 16 | 4 | 32 | 37,500 | 425 | 416 | 630 | 0 |
+| 32 | 4 | 32 | 44,200 | 722 | 707 | 1111 | 0 |
+| 32 | 8 | 32 | 44,600 | 715 | 703 | 1052 | 0 |
+| 64 | 8 | 64 | 51,100 | 1249 | 1229 | 1853 | 0 |
+| 64 | 16 | 64 | 50,700 | 1259 | 1243 | 1811 | 0 |
+
+**Observations:**
+- 1T→2T: +30% throughput (pipeline parallelism kicks in)
+- 2T→16T/4C: 3.4× throughput from connection + thread scaling
+- 16T/4C→32T/4C: +18% — inflight window bump (16→32) removed
+  `Busy` rejections
+- 32T/4C→32T/8C: +1% — gRPC channels no longer the bottleneck
+- 32T→64T/8C: +15% throughput but 2× latency — diminishing returns
+- 64T/8C→64T/16C: 0% — consensus path is the hard ceiling
+- Scaling ceiling ~51K ops/s; per-proposal latency ~1.2ms at 64
+  in-flight = 64/1.2ms ≈ 53K theoretical, matches observed
+- Next gains require reducing per-proposal latency (R16: overlap
+  WAL fsync with RPCs, R15: zero-copy accept path)

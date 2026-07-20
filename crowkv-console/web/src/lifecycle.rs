@@ -504,6 +504,9 @@ pub struct DeployNodeServerBody {
     /// `--metrics-interval` value in seconds.
     #[serde(default)]
     metrics_interval: Option<u64>,
+    /// `--max-inflight` value for the proposal admission window.
+    #[serde(default)]
+    max_inflight: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -590,6 +593,7 @@ pub async fn http_deploy_node_server(
         wal_backend: body.wal_backend.clone(),
         no_fsync: body.no_fsync,
         metrics_interval: body.metrics_interval,
+        max_inflight: body.max_inflight,
     };
 
     let deployed = if node.ssh_enabled() {

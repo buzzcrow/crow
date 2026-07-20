@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use crowkv::cluster::px_kv_store::PxKvStore;
-use crowkv::common::config::PxElectionConfig;
+use crowkv::common::config::{PaxosConfig, PxElectionConfig};
 use crowkv::kv::CrowtreeBackend;
 use crowkv::metrics::MetricsRegistry;
 use crowkv::wal::IoBackend;
@@ -54,6 +54,9 @@ pub struct KvStoreRegistry {
     /// groups created by this registry. See `--no-fsync` (R10 benchmark
     /// framework). Default `false`.
     pub wal_skip_fsync: bool,
+    /// Max in-flight proposals for groups created via the management
+    /// API. Set from `--max-inflight` CLI arg. Default: `PaxosConfig::DEFAULT`.
+    pub max_inflight: usize,
 }
 
 impl Default for KvStoreRegistry {
@@ -104,6 +107,7 @@ impl KvStoreRegistry {
             port_pool: Mutex::new(Vec::new()),
             metrics_registry: None,
             wal_skip_fsync: false,
+            max_inflight: PaxosConfig::DEFAULT.max_inflight_proposals,
         }
     }
 
@@ -137,6 +141,13 @@ impl KvStoreRegistry {
     #[must_use]
     pub fn with_wal_skip_fsync(mut self, skip_fsync: bool) -> Self {
         self.wal_skip_fsync = skip_fsync;
+        self
+    }
+
+    /// Builder-style setter for [`Self::max_inflight`].
+    #[must_use]
+    pub fn with_max_inflight(mut self, max_inflight: usize) -> Self {
+        self.max_inflight = max_inflight;
         self
     }
 
