@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crowkv::cluster::kv_server::KvServer;
 use crowkv::cluster::local_replica::PxLocalReplicaRole;
@@ -88,7 +88,7 @@ async fn main() {
         _ => PxElectionConfig::DEFAULT,
     };
 
-    let wal_root = args.wal_root.clone().unwrap_or_else(|| PathBuf::from("wal"));
+    let wal_root = args.wal_root.clone().unwrap_or_else(|| PathBuf::from("waldata"));
     let config_root = args
         .config_root
         .clone()
@@ -293,7 +293,7 @@ async fn create_and_start_stores(
     ports: Vec<u16>,
     registry: Arc<KvStoreRegistry>,
 ) {
-    info!(
+    debug!(
         store_count = store_ids.len(),
         group_count = group_ids.len(),
         "creating stores and groups"
@@ -309,7 +309,7 @@ async fn create_and_start_stores(
                 .unwrap_or(0)
         };
         let addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
-        info!(store_id, bind_addr = %addr, "creating PxKvStore");
+        debug!(store_id, bind_addr = %addr, "creating PxKvStore");
         let mut store = PxKvStore::new(store_id, addr);
         if let Some(ref mr) = registry.metrics_registry {
             store.set_metrics_registry(Arc::clone(mr));
@@ -320,7 +320,7 @@ async fn create_and_start_stores(
         // The election driver auto-starts in PxKvStore::add_group; the local replica
         // begins as Follower and is promoted via Paxos PreVote/RequestVote.
         for &group_id in group_ids {
-            info!(
+            debug!(
                 store_id,
                 group_id, replica_id, "creating PxGroup with local replica"
             );
@@ -363,7 +363,7 @@ async fn create_and_start_stores(
         registry.add_store(store_id, store);
     }
 
-    info!(
+    debug!(
         store_count = registry.stores.len(),
         "all stores started, management API ready"
     );

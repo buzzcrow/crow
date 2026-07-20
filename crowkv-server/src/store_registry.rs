@@ -67,7 +67,7 @@ impl KvStoreRegistry {
     pub fn new() -> Self {
         Self::with_runtime(
             PxElectionConfig::DEFAULT,
-            PathBuf::from("wal"),
+            PathBuf::from("waldata"),
             PathBuf::from("conf"),
             Arc::new(IoBackend::detect()),
         )
@@ -77,7 +77,7 @@ impl KvStoreRegistry {
     pub fn with_election_config(election_cfg: PxElectionConfig) -> Self {
         Self::with_runtime(
             election_cfg,
-            PathBuf::from("wal"),
+            PathBuf::from("waldata"),
             PathBuf::from("conf"),
             Arc::new(IoBackend::detect()),
         )

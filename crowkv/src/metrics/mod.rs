@@ -563,14 +563,15 @@ fn flush_counters<W: Write>(
         tps_w = tps_w
     );
     for (e, snap) in &active {
+        let name_w = e.name.len().max(width);
         let _ = writeln!(
             writer,
-            "{:<width$}  {:>count_w$}  {:>tps_w$}  {:>8}",
+            "{:<name_w$}  {:>count_w$}  {:>tps_w$}  {:>8}",
             e.name,
             snap.count,
             tps(snap.count, window_secs),
             snap.total,
-            width = width,
+            name_w = name_w,
             count_w = count_w,
             tps_w = tps_w
         );
@@ -615,9 +616,10 @@ fn flush_histograms<W: Write>(
         tps_w = tps_w
     );
     for (e, snap) in &active {
+        let name_w = e.name.len().max(width);
         let _ = writeln!(
             writer,
-            "{:<width$}  {:>count_w$}  {:>tps_w$}  {:>8}  {:>8}  {:>8}  {:>8}",
+            "{:<name_w$}  {:>count_w$}  {:>tps_w$}  {:>8}  {:>8}  {:>8}  {:>8}",
             e.name,
             snap.count,
             tps(snap.count, window_secs),
@@ -625,7 +627,7 @@ fn flush_histograms<W: Write>(
             snap.p50 / 1000,
             snap.p99 / 1000,
             snap.max / 1000,
-            width = width,
+            name_w = name_w,
             count_w = count_w,
             tps_w = tps_w
         );
@@ -668,15 +670,16 @@ fn flush_summaries<W: Write>(
         tps_w = tps_w
     );
     for (e, snap) in &active {
+        let name_w = e.name.len().max(width);
         let _ = writeln!(
             writer,
-            "{:<width$}  {:>count_w$}  {:>tps_w$}  {:>8}  {:>8}",
+            "{:<name_w$}  {:>count_w$}  {:>tps_w$}  {:>8}  {:>8}",
             e.name,
             snap.count,
             tps(snap.count, window_secs),
             snap.avg / 1000,
             snap.max / 1000,
-            width = width,
+            name_w = name_w,
             count_w = count_w,
             tps_w = tps_w
         );
@@ -722,16 +725,17 @@ fn flush_bandwidths<W: Write>(
     for (e, snap) in &active {
         #[allow(clippy::cast_precision_loss)]
         let avg_kb = snap.avg_size as f64 / 1024.0;
+        let name_w = e.name.len().max(width);
         let _ = writeln!(
             writer,
-            "{:<width$}  {:>count_w$}  {:>tps_w$}  {:>12.1}  {:>10}  {:>9}",
+            "{:<name_w$}  {:>count_w$}  {:>tps_w$}  {:>12.1}  {:>10}  {:>9}",
             e.name,
             snap.count,
             tps(snap.count, window_secs),
             avg_kb,
             snap.rate / 1024,
             snap.total_bytes / 1024,
-            width = width,
+            name_w = name_w,
             count_w = count_w,
             tps_w = tps_w
         );
@@ -755,7 +759,8 @@ fn flush_gauges<W: Write>(writer: &mut W, entries: &[GaugeEntry], width: usize) 
     let _ = writeln!(writer, "{:<width$}  {:>8}", "", "value", width = width);
     for e in &non_zero {
         let val = e.handle.snapshot();
-        let _ = writeln!(writer, "{:<width$}  {:>8}", e.name, val, width = width);
+        let name_w = e.name.len().max(width);
+        let _ = writeln!(writer, "{:<name_w$}  {:>8}", e.name, val, name_w = name_w);
     }
 }
 

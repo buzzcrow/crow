@@ -10,7 +10,7 @@ use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{debug, info};
 use utoipa::{OpenApi, ToSchema};
 
 use crowkv::cluster::group::PxGroup;
@@ -424,7 +424,7 @@ async fn add_store(
         .parse()
         .map_err(|e| err_json(StatusCode::BAD_REQUEST, format!("invalid address: {e}")))?;
 
-    info!(
+    debug!(
         store_id = req.store_id,
         bind_addr = %addr,
         "creating PxKvStore via management API"
@@ -556,7 +556,7 @@ async fn add_group(
         ));
     }
 
-    info!(
+    debug!(
         store_id = sid,
         group_id = req.group_id,
         replica_id = req.replica_id,
@@ -870,14 +870,14 @@ async fn add_remote_replicas(
         }
     }
 
-    info!(
+    debug!(
         store_id = sid,
         group_id = gid,
         count = remotes.len(),
         "adding remote replicas via management API"
     );
     for r in &remotes {
-        info!(
+        debug!(
             store_id = sid,
             group_id = gid,
             remote_id = r.replica_id,
@@ -1140,14 +1140,14 @@ async fn batch_add_remote_replicas(
         return Ok(StatusCode::OK);
     }
 
-    info!(
+    debug!(
         store_id = sid,
         group_id = gid,
         count = new_remotes.len(),
         "batch adding remote replicas via management API"
     );
     for r in &new_remotes {
-        info!(
+        debug!(
             store_id = sid,
             group_id = gid,
             remote_id = r.replica_id,

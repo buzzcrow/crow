@@ -125,7 +125,7 @@ impl KvServer for Arc<PxKvStore> {
         if let Some(task) = handle {
             debug!(store_id = self.store_id, "joining kv server task");
             let _ = task.await;
-            info!(store_id = self.store_id, "kv server task joined");
+            debug!(store_id = self.store_id, "kv server task joined");
         }
     }
 
@@ -174,7 +174,7 @@ impl PxKvStore {
         let abort = task.abort_handle();
         match tokio::time::timeout(timeout, task).await {
             Ok(Ok(())) => {
-                info!(store_id = self.store_id, "kv server task joined");
+                debug!(store_id = self.store_id, "kv server task joined");
                 Ok(())
             }
             Ok(Err(join_err)) if join_err.is_cancelled() => {

@@ -152,6 +152,10 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
         }
     };
 
+    // Stop servers first so graceful shutdown flushes async C++ logs
+    // (spdlog buffers info-level messages until flush/shutdown).
+    fixture.cleanup().await;
+
     report.server_metrics = fixture.collect_metrics();
     let artifacts_dir = run_dir.join("artifacts");
     if let Err(e) = fixture.collect_logs(&artifacts_dir) {
@@ -173,8 +177,6 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
         }
     };
     let log_warning_count = count_log_warnings(&artifacts_dir);
-
-    fixture.cleanup().await;
 
     if json {
         return crate::utils::print_json(&report);

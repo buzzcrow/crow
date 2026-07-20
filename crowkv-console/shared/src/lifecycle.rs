@@ -173,7 +173,7 @@ async fn deploy_local_in_workspace(
         cmd.arg(arg);
     }
     if let Some(dir) = workspace_dir {
-        cmd.arg("--wal-root").arg("wal");
+        cmd.arg("--wal-root").arg("waldata");
         // Merge stdout and stderr into one file. We open a temp file before
         // spawn (PID unknown), then rename it with the PID after spawn.
         let log_dir = dir.join("log");

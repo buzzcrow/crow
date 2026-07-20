@@ -73,7 +73,7 @@ default = { depends-on = ["build"] }
 web = { cmd = "echo 'CrowKV console starting at: http://127.0.0.1:9920/' && cargo run --release -p crowkv-web", depends-on = ["build"] }
 
 # ── Benchmark ────────────────────────────────────────────────────
-bench = { cmd = "cargo run --release -p crowkv-cli -- bench run --mode mem --duration-secs 10 --threads 1 --connections 1 --workload write", depends-on = ["build"] }
+bench = { cmd = "cargo run --release -p crowkv-cli -- bench run --mode mem --duration-secs 12 --threads 1 --connections 1 --workload write", depends-on = ["build"] }
 bench-mem = { cmd = "cargo run --release -p crowkv-cli -- bench run --mode mem --duration-secs 30", depends-on = ["build"] }
 bench-file = { cmd = "cargo run --release -p crowkv-cli -- bench run --mode file --duration-secs 30", depends-on = ["build"] }
 bench-block = { cmd = "cargo run --release -p crowkv-cli -- bench run --mode block --duration-secs 30", depends-on = ["build"] }

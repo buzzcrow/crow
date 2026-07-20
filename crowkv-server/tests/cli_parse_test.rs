@@ -55,6 +55,12 @@ fn parse_port_valid() {
 
 #[test]
 fn parse_wal_root_cli_option() {
-    let cli = Cli::parse_from(["crowkv-server", "--management-port", "9910", "--wal-root", "wal"]);
-    assert_eq!(cli.wal_root, Some(std::path::PathBuf::from("wal")));
+    let cli = Cli::parse_from([
+        "crowkv-server",
+        "--management-port",
+        "9910",
+        "--wal-root",
+        "waldata",
+    ]);
+    assert_eq!(cli.wal_root, Some(std::path::PathBuf::from("waldata")));
 }
