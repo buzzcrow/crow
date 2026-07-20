@@ -26,10 +26,10 @@ Client PUT/DELETE/BatchWrite
          b. 'paxos_attempt loop (max_paxos_retries = 3)
             i.  [if force_prepare] run_prepare_phase
                 - local on_prepare (acceptor.prepare + WAL append Promised)
-                - sequential remote send_prepare RPCs (unary gRPC)
+                - concurrent remote send_prepare RPCs (join_all, unary gRPC)
             ii. run_accept_phase
                 - local on_accept (acceptor.accept + WAL append Accepted)
-                - sequential remote send_accept RPCs (bidi LearnerStream)
+                - concurrent remote send_accept RPCs (join_all, bidi LearnerStream)
             iii. quorum check
             iv. [if chosen] learn_chosen (decode + KVEngine::apply)
             v.  [if chosen] fan_out_chosen_notice (fire-and-forget mpsc)
@@ -146,11 +146,11 @@ never consume a window permit.
   `acceptor.prepare(slot, ballot)` (lock-free CAS on slot node) →
   WAL append `Promised` record (awaits `fdatasync`) → return
   `PxPrepareReply`.
-- **Remote**: Sequential loop over `remote_replicas`, each
-  `send_prepare` is a unary gRPC RPC (`PxServiceClient::prepare`).
-  Replies are folded into accumulators (`promised`,
-  `highest_rejected_round`, `highest_seen_term`, `epoch_mismatch`,
-  `adopted`).
+- **Remote**: Concurrent fan-out via `join_all` over
+  `remote_replicas`, each `send_prepare` is a unary gRPC RPC
+  (`PxServiceClient::prepare`). Replies are folded into
+  accumulators (`promised`, `highest_rejected_round`,
+  `highest_seen_term`, `epoch_mismatch`, `adopted`).
 - **Quorum**: `promised >= quorum` → proceed; else retry or fail.
 
 ### Accept Phase (`run_accept_phase`)
@@ -159,11 +159,11 @@ never consume a window permit.
   `acceptor.accept(entry.clone())` (lock-free CAS on slot node) →
   WAL append `Accepted` record (awaits `fdatasync`) → return
   `PxAcceptReply`.
-- **Remote**: Sequential loop over `remote_replicas`, each
-  `send_accept` is sent over the per-peer bidi `PxLearnerStream`
-  (awaits correlated reply via oneshot). Replies are folded into
-  accumulators (`accepted`, `highest_rejected_round`,
-  `highest_seen_term`, `epoch_mismatch`).
+- **Remote**: Concurrent fan-out via `join_all` over
+  `remote_replicas`, each `send_accept` is sent over the per-peer
+  bidi `PxLearnerStream` (awaits correlated reply via oneshot).
+  Replies are folded into accumulators (`accepted`,
+  `highest_rejected_round`, `highest_seen_term`, `epoch_mismatch`).
 - **Quorum**: `accepted + 1 (local) >= quorum` → chosen; else retry
   or fail.
 
@@ -189,14 +189,15 @@ never consume a window permit.
 
 ## Tracked Issues
 
-### R14 — Concurrent remote RPC fan-out in Paxos phases
+### R14 — Concurrent remote RPC fan-out in Paxos phases (IMPLEMENTED)
 
 - **Where**: `run_prepare_phase` and `run_accept_phase` in
-  `crowkv/src/cluster/group.rs` — sequential `.await` in
-  `for remote in &self.remote_replicas` loops.
+  `crowkv/src/cluster/group.rs` — previously sequential `.await` in
+  `for remote in &self.remote_replicas` loops; now uses
+  `futures::future::join_all` to issue all remote RPCs concurrently.
 - **Impact**: One extra RPC round-trip per additional follower per
-  phase. With 3 nodes: ~20-30 µs overhead on loopback. Grows
-  linearly with cluster size.
+  phase was removed. With 3 nodes: ~20-30 µs overhead on loopback
+  eliminated. Grows linearly with cluster size.
 - **Tracking**: R14 in `new_requirements.md`.
 
 ### R15 — Zero-copy PxLogEntry in accept path
@@ -256,3 +257,40 @@ never consume a window permit.
   steady state). Classic mode is the safety fallback.
 - **`entry.clone()` in `on_accept`** (item 3) — `Bytes::clone` is
   `O(1)`. Covered by R15 but not a standalone bottleneck.
+
+---
+
+## Performance History — Write Path
+
+### R14: Concurrent remote RPC fan-out (2026-07-20)
+
+**Command:**
+```
+pixi run bench
+# = cargo run --release -p crowkv-cli -- bench run \
+#     --mode mem --duration-secs 12 --threads 2 --connections 1 \
+#     --workload write
+```
+
+**Configuration:**
+- 3-node cluster, in-memory WAL + in-memory KV (mem-block)
+- 2 worker threads, 1 gRPC connection, write-only workload
+- 512-byte values, 1M key space, 12-second duration
+
+**Before (sequential fan-out):**
+- Throughput: 10,034 ops/s
+- Latency: avg=174us p50=142us p90=173us p99=238us p999=323us
+- Per-window (steady state): avg=155us p50=140us p99=236us
+- Errors: 4 (retries_exhausted), leader_query=16
+
+**After (concurrent fan-out via `join_all`):**
+- Throughput: 10,911 ops/s (+8.7%)
+- Latency: avg=131us p50=123us p90=171us p99=235us p999=302us
+- Per-window (steady state): avg=127us p50=121us p99=224us
+- Errors: 0, leader_query=0
+
+**Summary:**
+- Throughput +8.7%, avg latency -25%, p50 latency -13%
+- Tail latency improvement: max dropped from 772ms to 2.9ms
+  (eliminated retry storms caused by sequential RPC timeouts)
+- Zero errors in post-R14 run (vs 4 retries_exhausted before)

@@ -612,6 +612,7 @@ dependencies = [
  "crowtree-ffi",
  "dashmap",
  "flate2",
+ "futures",
  "parking_lot",
  "prost",
  "serde",
