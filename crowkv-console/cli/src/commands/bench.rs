@@ -137,6 +137,7 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
     cfg.value_size = args.value_size;
     cfg.run_id = Some(run_id.clone());
     cfg.report_dir = Some(run_dir.clone());
+    cfg.metrics_log_path = Some(run_dir.join("bench-metrics.log"));
 
     println!(
         "running {} workload for {}s...",

@@ -322,23 +322,11 @@ impl BenchReport {
         let cm = &self.client_metrics;
         let _ = writeln!(out, "## Client-side Metrics");
         let _ = writeln!(out);
-        let _ = writeln!(out, "- **put_ops:** {} (errors: {})", cm.put_ops, cm.put_errors);
-        let _ = writeln!(out, "- **get_ops:** {} (errors: {})", cm.get_ops, cm.get_errors);
-        let _ = writeln!(
-            out,
-            "- **delete_ops:** {} (errors: {})",
-            cm.delete_ops, cm.delete_errors
-        );
-        let _ = writeln!(
-            out,
-            "- **scan_ops:** {} (errors: {})",
-            cm.scan_ops, cm.scan_errors
-        );
-        let _ = writeln!(
-            out,
-            "- **batch_write_ops:** {} (errors: {})",
-            cm.batch_write_ops, cm.batch_write_errors
-        );
+        let _ = writeln!(out, "- **put_errors:** {}", cm.put_errors);
+        let _ = writeln!(out, "- **get_errors:** {}", cm.get_errors);
+        let _ = writeln!(out, "- **delete_errors:** {}", cm.delete_errors);
+        let _ = writeln!(out, "- **scan_errors:** {}", cm.scan_errors);
+        let _ = writeln!(out, "- **batch_write_errors:** {}", cm.batch_write_errors);
         let _ = writeln!(
             out,
             "- **not_leader_hint_followed:** {}",

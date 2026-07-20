@@ -5,9 +5,11 @@
 //! topology cache, retry/idempotency, and `ReadMode` routing on top of
 //! `crowkv`'s generated `KvService` client.
 
+#![allow(clippy::cast_possible_truncation)]
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
 
@@ -95,6 +97,27 @@ impl CrowkvClient {
     #[must_use]
     pub fn metrics(&self) -> crate::metrics::ClientMetricsSnapshot {
         self.metrics.snapshot()
+    }
+
+    /// Drain per-op-kind window latency histograms. Returns one
+    /// `Histogram<u64>` per op kind. The caller is expected to
+    /// accumulate these into cumulative histograms if desired.
+    #[must_use]
+    pub fn drain_window(&self) -> crate::metrics::WindowLatencySnapshot {
+        self.metrics.drain_window()
+    }
+
+    /// Flush per-op-kind window latency histograms to `writer` in the
+    /// same column-aligned format as the server `[metrics]` log.
+    /// Takes a pre-drained `WindowLatencySnapshot` so the caller can
+    /// also use it for cumulative accumulation.
+    pub fn flush_latencies<W: std::fmt::Write>(
+        &self,
+        writer: &mut W,
+        snap: &crate::metrics::WindowLatencySnapshot,
+        window_secs: f64,
+    ) {
+        self.metrics.flush_latencies(writer, snap, window_secs);
     }
 
     /// Force a topology refresh. Not required for normal operation (the
@@ -210,17 +233,19 @@ impl CrowkvClient {
                 group_id,
             };
             let channel = self.pool.get(&endpoint)?;
+            let t0 = Instant::now();
             match KvServiceClient::new(channel).put(req).await {
                 Ok(resp) => {
                     let resp = resp.into_inner();
                     if resp.ok {
                         self.record_write(store_id, group_id, resp.revision);
-                        self.metrics.record_put(true);
+                        self.metrics.record_put_latency(t0.elapsed().as_micros() as u64);
                         return Ok(WriteOutcome {
                             revision: resp.revision,
                             request_id: resp.request_id,
                         });
                     }
+                    self.metrics.record_put_error();
                     if let Some(new_endpoint) = self.follow_not_leader(store_id, group_id, &resp) {
                         self.metrics.record_not_leader_hint();
                         self.metrics.on_leader_error(store_id, group_id, &endpoint);
@@ -238,6 +263,7 @@ impl CrowkvClient {
                     }
                 }
                 Err(status) => {
+                    self.metrics.record_put_error();
                     self.metrics.record_transport_error();
                     self.metrics.on_leader_error(store_id, group_id, &endpoint);
                     endpoint = self
@@ -278,20 +304,22 @@ impl CrowkvClient {
                 client_slot,
             };
             let channel = self.pool.get(&endpoint)?;
+            let t0 = Instant::now();
             match KvServiceClient::new(channel).get(req).await {
                 Ok(resp) => {
                     let resp = resp.into_inner();
                     if resp.not_found {
-                        self.metrics.record_get(true);
+                        self.metrics.record_get_latency(t0.elapsed().as_micros() as u64);
                         return Ok(GetOutcome::NotFound);
                     }
                     if resp.ok {
-                        self.metrics.record_get(true);
+                        self.metrics.record_get_latency(t0.elapsed().as_micros() as u64);
                         return Ok(GetOutcome::Found {
                             value: resp.value,
                             revision: resp.revision,
                         });
                     }
+                    self.metrics.record_get_error();
                     if let Some(new_endpoint) = self.follow_not_leader(store_id, group_id, &resp) {
                         self.metrics.record_not_leader_hint();
                         self.metrics.on_leader_error(store_id, group_id, &endpoint);
@@ -309,6 +337,7 @@ impl CrowkvClient {
                     }
                 }
                 Err(status) => {
+                    self.metrics.record_get_error();
                     self.metrics.record_transport_error();
                     self.metrics.on_leader_error(store_id, group_id, &endpoint);
                     endpoint = self
@@ -351,11 +380,13 @@ impl CrowkvClient {
                 group_id,
             };
             let channel = self.pool.get(&endpoint)?;
+            let t0 = Instant::now();
             match KvServiceClient::new(channel).delete(req).await {
                 Ok(resp) => {
                     let resp = resp.into_inner();
                     if resp.not_found {
-                        self.metrics.record_delete(true);
+                        self.metrics
+                            .record_delete_latency(t0.elapsed().as_micros() as u64);
                         return Ok(WriteOutcome {
                             revision: 0,
                             request_id: resp.request_id,
@@ -363,12 +394,14 @@ impl CrowkvClient {
                     }
                     if resp.ok {
                         self.record_write(store_id, group_id, resp.revision);
-                        self.metrics.record_delete(true);
+                        self.metrics
+                            .record_delete_latency(t0.elapsed().as_micros() as u64);
                         return Ok(WriteOutcome {
                             revision: resp.revision,
                             request_id: resp.request_id,
                         });
                     }
+                    self.metrics.record_delete_error();
                     if let Some(new_endpoint) = self.follow_not_leader(store_id, group_id, &resp) {
                         self.metrics.record_not_leader_hint();
                         self.metrics.on_leader_error(store_id, group_id, &endpoint);
@@ -386,6 +419,7 @@ impl CrowkvClient {
                     }
                 }
                 Err(status) => {
+                    self.metrics.record_delete_error();
                     self.metrics.record_transport_error();
                     self.metrics.on_leader_error(store_id, group_id, &endpoint);
                     endpoint = self
@@ -434,17 +468,20 @@ impl CrowkvClient {
                 group_id,
             };
             let channel = self.pool.get(&endpoint)?;
+            let t0 = Instant::now();
             match KvServiceClient::new(channel).batch_write(req).await {
                 Ok(resp) => {
                     let resp = resp.into_inner();
                     if resp.ok {
                         self.record_write(store_id, group_id, resp.revision);
-                        self.metrics.record_batch_write(true);
+                        self.metrics
+                            .record_batch_write_latency(t0.elapsed().as_micros() as u64);
                         return Ok(WriteOutcome {
                             revision: resp.revision,
                             request_id: resp.request_id,
                         });
                     }
+                    self.metrics.record_batch_write_error();
                     if let Some(new_endpoint) = self.follow_not_leader(store_id, group_id, &resp) {
                         self.metrics.record_not_leader_hint();
                         self.metrics.on_leader_error(store_id, group_id, &endpoint);
@@ -462,6 +499,7 @@ impl CrowkvClient {
                     }
                 }
                 Err(status) => {
+                    self.metrics.record_batch_write_error();
                     self.metrics.record_transport_error();
                     self.metrics.on_leader_error(store_id, group_id, &endpoint);
                     endpoint = self
@@ -503,23 +541,26 @@ impl CrowkvClient {
                 read_mode: read_mode as i32,
             };
             let channel = self.pool.get(&endpoint)?;
+            let t0 = Instant::now();
             match KvServiceClient::new(channel).scan(req).await {
                 Ok(resp) => {
                     let resp = resp.into_inner();
                     if resp.ok {
                         let items = resp.items.into_iter().map(|i| (i.key, i.value)).collect();
-                        self.metrics.record_scan(true);
+                        self.metrics.record_scan_latency(t0.elapsed().as_micros() as u64);
                         return Ok(ScanOutcome {
                             items,
                             truncated: resp.truncated,
                         });
                     }
+                    self.metrics.record_scan_error();
                     // `KvScanResponse` carries no `NotLeaderHint` (server-side
                     // forwarding already handles linearizable scans; other
                     // modes never need a leader) — any `!ok` is a plain error.
                     attempts = self.count_other(attempts, &resp.error)?;
                 }
                 Err(status) => {
+                    self.metrics.record_scan_error();
                     self.metrics.record_transport_error();
                     self.metrics.on_leader_error(store_id, group_id, &endpoint);
                     endpoint = self
