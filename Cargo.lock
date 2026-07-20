@@ -658,6 +658,7 @@ dependencies = [
  "axum",
  "crowkv",
  "dashmap",
+ "hdrhistogram",
  "reqwest",
  "serde",
  "serde_json",

@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
+use hdrhistogram::Histogram;
+
 /// One recorded leader-change episode: from when the client first
 /// detected the old leader was wrong to when it confirmed a new leader.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -79,15 +81,10 @@ impl LeaderChangeTracker {
 /// cumulative totals since client creation.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct ClientMetricsSnapshot {
-    pub put_ops: u64,
     pub put_errors: u64,
-    pub get_ops: u64,
     pub get_errors: u64,
-    pub delete_ops: u64,
     pub delete_errors: u64,
-    pub scan_ops: u64,
     pub scan_errors: u64,
-    pub batch_write_ops: u64,
     pub batch_write_errors: u64,
     pub not_leader_hint_followed: u64,
     pub leader_query: u64,
@@ -101,20 +98,40 @@ pub struct ClientMetricsSnapshot {
     pub leader_changes: Vec<LeaderChangeEpisode>,
 }
 
-/// Metrics counters embedded in [`crate::CrowkvClient`]. Hot-path
-/// counters are lock-free atomics; leader-change tracking uses a
-/// `Mutex` (rare event, not hot path).
+/// Per-op-kind window latency histograms. Drained by `drain_window`
+/// for periodic flushing; the caller is responsible for accumulating
+/// drained snapshots into cumulative histograms if desired.
+#[derive(Debug)]
+struct WindowLatency {
+    put: Histogram<u64>,
+    get: Histogram<u64>,
+    delete: Histogram<u64>,
+    scan: Histogram<u64>,
+    batch_write: Histogram<u64>,
+}
+
+impl Default for WindowLatency {
+    fn default() -> Self {
+        let mk = || Histogram::<u64>::new(3).expect("hdr histogram precision");
+        Self {
+            put: mk(),
+            get: mk(),
+            delete: mk(),
+            scan: mk(),
+            batch_write: mk(),
+        }
+    }
+}
+
+/// Metrics embedded in [`crate::CrowkvClient`]. Hot-path error counters
+/// are lock-free atomics; per-op latency histograms are `Mutex<Histogram>`;
+/// leader-change tracking uses a `Mutex` (rare event, not hot path).
 #[derive(Debug, Default)]
 pub struct ClientMetrics {
-    put_ops: AtomicU64,
     put_errors: AtomicU64,
-    get_ops: AtomicU64,
     get_errors: AtomicU64,
-    delete_ops: AtomicU64,
     delete_errors: AtomicU64,
-    scan_ops: AtomicU64,
     scan_errors: AtomicU64,
-    batch_write_ops: AtomicU64,
     batch_write_errors: AtomicU64,
     not_leader_hint_followed: AtomicU64,
     leader_query: AtomicU64,
@@ -124,42 +141,58 @@ pub struct ClientMetrics {
     no_leader: AtomicU64,
     topology_refresh: AtomicU64,
     leader_changes: Mutex<LeaderChangeTracker>,
+    window_lat: Mutex<WindowLatency>,
 }
 
 impl ClientMetrics {
-    pub(crate) fn record_put(&self, ok: bool) {
-        self.put_ops.fetch_add(1, Ordering::Relaxed);
-        if !ok {
-            self.put_errors.fetch_add(1, Ordering::Relaxed);
+    pub(crate) fn record_put_latency(&self, lat_us: u64) {
+        if let Ok(mut g) = self.window_lat.lock() {
+            let _ = g.put.record(lat_us.max(1));
         }
     }
 
-    pub(crate) fn record_get(&self, ok: bool) {
-        self.get_ops.fetch_add(1, Ordering::Relaxed);
-        if !ok {
-            self.get_errors.fetch_add(1, Ordering::Relaxed);
+    pub(crate) fn record_get_latency(&self, lat_us: u64) {
+        if let Ok(mut g) = self.window_lat.lock() {
+            let _ = g.get.record(lat_us.max(1));
         }
     }
 
-    pub(crate) fn record_delete(&self, ok: bool) {
-        self.delete_ops.fetch_add(1, Ordering::Relaxed);
-        if !ok {
-            self.delete_errors.fetch_add(1, Ordering::Relaxed);
+    pub(crate) fn record_delete_latency(&self, lat_us: u64) {
+        if let Ok(mut g) = self.window_lat.lock() {
+            let _ = g.delete.record(lat_us.max(1));
         }
     }
 
-    pub(crate) fn record_scan(&self, ok: bool) {
-        self.scan_ops.fetch_add(1, Ordering::Relaxed);
-        if !ok {
-            self.scan_errors.fetch_add(1, Ordering::Relaxed);
+    pub(crate) fn record_scan_latency(&self, lat_us: u64) {
+        if let Ok(mut g) = self.window_lat.lock() {
+            let _ = g.scan.record(lat_us.max(1));
         }
     }
 
-    pub(crate) fn record_batch_write(&self, ok: bool) {
-        self.batch_write_ops.fetch_add(1, Ordering::Relaxed);
-        if !ok {
-            self.batch_write_errors.fetch_add(1, Ordering::Relaxed);
+    pub(crate) fn record_batch_write_latency(&self, lat_us: u64) {
+        if let Ok(mut g) = self.window_lat.lock() {
+            let _ = g.batch_write.record(lat_us.max(1));
         }
+    }
+
+    pub(crate) fn record_put_error(&self) {
+        self.put_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_get_error(&self) {
+        self.get_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_delete_error(&self) {
+        self.delete_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_scan_error(&self) {
+        self.scan_errors.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_batch_write_error(&self) {
+        self.batch_write_errors.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn record_not_leader_hint(&self) {
@@ -219,15 +252,10 @@ impl ClientMetrics {
             .map(|mut t| t.snapshot())
             .unwrap_or_default();
         ClientMetricsSnapshot {
-            put_ops: self.put_ops.load(Ordering::Relaxed),
             put_errors: self.put_errors.load(Ordering::Relaxed),
-            get_ops: self.get_ops.load(Ordering::Relaxed),
             get_errors: self.get_errors.load(Ordering::Relaxed),
-            delete_ops: self.delete_ops.load(Ordering::Relaxed),
             delete_errors: self.delete_errors.load(Ordering::Relaxed),
-            scan_ops: self.scan_ops.load(Ordering::Relaxed),
             scan_errors: self.scan_errors.load(Ordering::Relaxed),
-            batch_write_ops: self.batch_write_ops.load(Ordering::Relaxed),
             batch_write_errors: self.batch_write_errors.load(Ordering::Relaxed),
             not_leader_hint_followed: self.not_leader_hint_followed.load(Ordering::Relaxed),
             leader_query: self.leader_query.load(Ordering::Relaxed),
@@ -239,6 +267,138 @@ impl ClientMetrics {
             leader_changes,
         }
     }
+
+    /// Drain per-op-kind window latency histograms, returning one
+    /// `Histogram<u64>` per op kind. The caller is expected to accumulate
+    /// these into cumulative histograms for run-wide percentiles.
+    ///
+    /// # Panics
+    /// Panics if the internal HDR histogram precision is invalid.
+    #[must_use]
+    #[allow(clippy::missing_panics_doc)]
+    pub fn drain_window(&self) -> WindowLatencySnapshot {
+        self.window_lat.lock().map_or_else(
+            |_| WindowLatencySnapshot::default(),
+            |mut g| {
+                let mk = || Histogram::<u64>::new(3).expect("hdr histogram precision");
+                WindowLatencySnapshot {
+                    put: std::mem::replace(&mut g.put, mk()),
+                    get: std::mem::replace(&mut g.get, mk()),
+                    delete: std::mem::replace(&mut g.delete, mk()),
+                    scan: std::mem::replace(&mut g.scan, mk()),
+                    batch_write: std::mem::replace(&mut g.batch_write, mk()),
+                }
+            },
+        )
+    }
+
+    /// Flush per-op-kind window latency histograms to `writer` in the
+    /// same column-aligned format as the server `[metrics]` log.
+    /// Takes a pre-drained `WindowLatencySnapshot` so the caller can
+    /// also use it for cumulative accumulation.
+    ///
+    /// # Panics
+    /// Panics if the internal HDR histogram precision is invalid (only
+    /// possible if the histogram was corrupted, which never happens in
+    /// practice).
+    #[allow(
+        clippy::uninlined_format_args,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    pub fn flush_latencies<W: std::fmt::Write>(
+        &self,
+        writer: &mut W,
+        snap: &WindowLatencySnapshot,
+        window_secs: f64,
+    ) {
+        let width = 24usize;
+        let count_w = 5usize;
+        let tps_w = 7usize;
+
+        let entries: [(&str, &Histogram<u64>); 5] = [
+            ("client.put.lh", &snap.put),
+            ("client.get.lh", &snap.get),
+            ("client.delete.lh", &snap.delete),
+            ("client.scan.lh", &snap.scan),
+            ("client.batch_write.lh", &snap.batch_write),
+        ];
+        let active: Vec<(&str, &Histogram<u64>)> =
+            entries.iter().filter(|(_, h)| !h.is_empty()).copied().collect();
+        if active.is_empty() {
+            return;
+        }
+        let _ = writeln!(
+            writer,
+            "{:<width$}  {:>count_w$}  {:>tps_w$}  {:>8}  {:>8}  {:>8}  {:>8}",
+            "",
+            "count",
+            "tps(/s)",
+            "avg(us)",
+            "p50(us)",
+            "p99(us)",
+            "max(us)",
+            width = width,
+            count_w = count_w,
+            tps_w = tps_w,
+        );
+        for (name, h) in &active {
+            let name_w = name.len().max(width);
+            let count = h.len();
+            let tps = tps_calc(count, window_secs);
+            let avg = h.mean() as u64;
+            let p50 = h.value_at_quantile(0.50);
+            let p99 = h.value_at_quantile(0.99);
+            let max = h.max();
+            let _ = writeln!(
+                writer,
+                "{:<name_w$}  {:>count_w$}  {:>tps_w$}  {:>8}  {:>8}  {:>8}  {:>8}",
+                name,
+                count,
+                tps,
+                avg,
+                p50,
+                p99,
+                max,
+                name_w = name_w,
+                count_w = count_w,
+                tps_w = tps_w,
+            );
+        }
+    }
+}
+
+/// Snapshot of drained window latency histograms, one per op kind.
+#[derive(Debug)]
+pub struct WindowLatencySnapshot {
+    pub put: Histogram<u64>,
+    pub get: Histogram<u64>,
+    pub delete: Histogram<u64>,
+    pub scan: Histogram<u64>,
+    pub batch_write: Histogram<u64>,
+}
+
+impl Default for WindowLatencySnapshot {
+    fn default() -> Self {
+        let mk = || Histogram::<u64>::new(3).expect("hdr histogram precision");
+        Self {
+            put: mk(),
+            get: mk(),
+            delete: mk(),
+            scan: mk(),
+            batch_write: mk(),
+        }
+    }
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+fn tps_calc(count: u64, window_secs: f64) -> u64 {
+    (count as f64 / window_secs) as u64
 }
 
 fn now_epoch_ms() -> u64 {

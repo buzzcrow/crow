@@ -27,7 +27,7 @@ mod topology;
 pub use client::{BatchOp, CrowkvClient, GetOutcome, ScanOutcome, WriteOutcome};
 pub use config::{ClientConfig, RetryConfig};
 pub use error::{Error, Result};
-pub use metrics::{ClientMetrics, ClientMetricsSnapshot, LeaderChangeEpisode};
+pub use metrics::{ClientMetrics, ClientMetricsSnapshot, LeaderChangeEpisode, WindowLatencySnapshot};
 
 /// Re-exported so callers don't need a direct `crowkv` dependency just to
 /// pick a read mode.
