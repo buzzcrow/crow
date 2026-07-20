@@ -67,6 +67,20 @@ pub struct GroupStatus {
     pub messages: Vec<String>,
     pub local_replica: ReplicaStatus,
     pub remotes: Vec<RemoteStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inflight: Option<InflightStatus>,
+}
+
+/// Inflight admission status snapshot.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+pub struct InflightStatus {
+    pub queue_count: usize,
+    pub window_per_queue: usize,
+    pub policy: String,
+    pub occupied: u64,
+    pub waiting: u64,
+    pub total_enqueued: u64,
+    pub total_wait_us: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]

@@ -114,7 +114,13 @@ impl BenchFixture {
     /// Returns an error if the console-web instance fails to bind, any
     /// provisioning call fails, or no leader is elected within the
     /// timeout.
-    pub async fn new(mode: BenchMode, workspace_dir: PathBuf, max_inflight: usize) -> Result<Self> {
+    pub async fn new(
+        mode: BenchMode,
+        workspace_dir: PathBuf,
+        max_inflight: usize,
+        inflight_queues: usize,
+        inflight_admission: &str,
+    ) -> Result<Self> {
         std::fs::create_dir_all(&workspace_dir)?;
 
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
@@ -126,14 +132,16 @@ impl BenchFixture {
         });
         let client = ConsoleClient::new(format!("http://{addr}"))?;
 
-        let (ids, pids, grpc_urls, mgmt_urls) = match Self::provision_nodes(&client, mode, max_inflight).await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                console_task.abort();
-                return Err(e);
-            }
-        };
+        let (ids, pids, grpc_urls, mgmt_urls) =
+            match Self::provision_nodes(&client, mode, max_inflight, inflight_queues, inflight_admission)
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    console_task.abort();
+                    return Err(e);
+                }
+            };
 
         if let Err(e) = Self::provision_store_and_group(&client, &ids).await {
             console_task.abort();
@@ -175,6 +183,8 @@ impl BenchFixture {
         client: &ConsoleClient,
         mode: BenchMode,
         max_inflight: usize,
+        inflight_queues: usize,
+        inflight_admission: &str,
     ) -> Result<(Vec<String>, Vec<u32>, Vec<String>, Vec<String>)> {
         let mut ids = Vec::with_capacity(NODE_COUNT);
         let mut pids = Vec::with_capacity(NODE_COUNT);
@@ -212,6 +222,8 @@ impl BenchFixture {
                 election_profile: Some("e2e".into()),
                 metrics_interval: Some(5),
                 max_inflight: Some(max_inflight),
+                inflight_queues: Some(inflight_queues),
+                inflight_admission: Some(inflight_admission.to_string()),
                 ..Default::default()
             };
             mode.apply_to(&mut body);

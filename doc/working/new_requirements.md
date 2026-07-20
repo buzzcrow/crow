@@ -65,6 +65,12 @@ complexity, and dependency. Before implementation, follow the
   before the local engine has applied the value — read-your-writes
   semantics break unless a read barrier or apply-fence is added. Gate
   behind a feature flag; test read-after-write consistency.
+- **R18** — Queue-based admission control for inflight proposals — Area:
+  consensus — Replace the current `try_acquire` fail-fast `Busy` reject
+  with a configurable queue-per-group admission model. Multiple queues
+  per group, queue count configurable via CLI. Enables fair comparison
+  with Raft-style block-and-queue behavior and eliminates reject storms
+  under high concurrency. Adds queue depth / wait time metrics.
 
 ### Low Priority
 
@@ -726,6 +732,151 @@ value is Paxos-chosen regardless of local apply).
 - Apply-ordering test: highest-slot-wins semantics preserved under
   async apply.
 - Crash-recovery test: slot re-learned and applied after restart.
+
+---
+
+### R18: Queue-based admission control for inflight proposals
+
+**Problem**: The current inflight admission control uses
+`Semaphore::try_acquire` — when the inflight window is full, the
+proposal is immediately rejected with `ProposeResult::Busy`. The
+client library retries up to `max_retries` (default 3) with no
+backoff for `Busy`, generating a reject-retry storm under high
+concurrency. In the README benchmark (window=1, 16 threads), 40% of
+RPCs are `Busy` rejections — wasted CPU on both client and server,
+artificially depressing throughput and making the window=1 numbers
+not representative of true sequential-commit performance.
+
+Raft-style systems handle the same situation by **queuing** — the
+leader blocks the caller until a log slot is available, never
+rejecting. This is the behavior CrowKV should offer as an option for
+fair comparison and for deployments where reject storms are
+undesirable.
+
+**Approach**: Replace the single `Semaphore::try_acquire` with a
+configurable multi-queue admission system owned by `PxGroup`.
+
+- **Queue count configurable**: `PxGroup` holds N admission queues
+  (default 1). Each queue is a `tokio::sync::Semaphore` with
+  `max_inflight_proposals / N` permits (rounded up). A proposal is
+  routed to a queue via a deterministic but low-contention strategy
+  (e.g. `hash(client_id) % N` or round-robin). Multiple queues reduce
+  contention on a single semaphore's waiter list under high load, and
+  allow future per-queue priority or isolation.
+
+- **Queue mode vs reject mode**: Add a config field
+  `inflight_admission: AdmissionPolicy` with variants `Reject` (current
+  `try_acquire` behavior) and `Queue` (blocking `acquire().await`).
+  Default stays `Reject` for backward compatibility. `Queue` mode
+  makes the system behave like Raft — callers block until a permit is
+  available, never seeing `Busy`.
+
+- **No correctness impact**: In Multi-Paxos, slots are independent
+  Paxos instances. The order in which proposals acquire inflight
+  permits and enter the slot allocation pipeline does not affect
+  safety — each slot is decided by its own Paxos round. Multi-queue
+  routing only changes which proposals get admitted first, not the
+  consensus protocol. This is the key insight that makes multi-queue
+  safe: the slot order is not yet decided at admission time.
+
+- **Metrics**: New counters and gauges for observability:
+  - `inflight_queue_depth` (gauge per queue) — current number of
+    waiting proposers (proposals blocked on `acquire()`). Computed as
+    `window_size - available_permits - inflight_occupied` or tracked
+    via an explicit `AtomicU64` waiter counter.
+  - `inflight_total_enqueued` (counter) — cumulative count of
+    proposals that entered the queue (did not get a fast-path permit).
+  - `inflight_total_wait_us` (counter) — cumulative wait time in
+    microseconds. Divided by `total_enqueued` gives average queue
+    wait. Individual wait time is measured as `Instant` delta between
+    entering `acquire()` and getting the permit.
+  - `inflight_occupied` (gauge) — `window_size - available_permits`,
+    same as current `inflight_slot_count()` but per-queue.
+
+- **CLI configuration**: Add `--inflight-queues N` (default 1) and
+  `--inflight-admission <reject|queue>` (default `reject`) to
+  `crowkv-server` CLI. These are per-group settings applied at group
+  creation time via `PxGroup::set_inflight_config(queues, policy)`.
+  The bench provision tool (`crowkv-console/cli/src/bench/provision.rs`)
+  passes these through so benchmark runs can compare reject vs queue
+  mode and varying queue counts.
+
+- **Fast path preserved**: When `AdmissionPolicy::Queue` is active and
+  the queue is empty, the first `try_acquire` succeeds immediately —
+  no async wait, no overhead. Only when `try_acquire` fails does the
+  proposal fall through to `acquire().await` (blocking wait). This
+  two-tier approach keeps the common case (low load) at zero overhead.
+
+**Flow**:
+1. `propose()` calls `try_acquire()` on the routed queue's semaphore.
+2. If success → proceed to Paxos (fast path, zero overhead).
+3. If fail and `AdmissionPolicy::Reject` → return `ProposeResult::Busy`
+   (current behavior).
+4. If fail and `AdmissionPolicy::Queue` → record wait start time,
+   increment waiter counter, `acquire().await` (blocks until a permit
+   is freed by a completing proposal), decrement waiter counter,
+   record wait duration, proceed to Paxos.
+
+**Performance analysis**:
+- **Reject mode (current)**: under high load, 40%+ of RPCs are
+  rejected. Each rejected RPC consumes a full gRPC round-trip +
+  client retry logic + server-side processing, all producing zero
+  useful work. TPS is artificially depressed by reject overhead.
+- **Queue mode**: under high load, all proposals eventually succeed.
+  No wasted RPCs. Latency increases for queued proposals (they wait
+  for a permit), but throughput should be higher because all CPU is
+  spent on useful work. The latency distribution shifts from
+  bimodal (fast success / fast reject) to a long-tail (fast for
+  fast-path, slower for queued).
+- **Multi-queue benefit**: with N queues, contention on the
+  semaphore's internal waiter list is reduced by ~N×. In practice
+  tokio's `Semaphore` is already highly efficient (lock-free
+  fast path, mutex only on waiter list), so multi-queue's primary
+  benefit is observability isolation and future per-queue priority,
+  not raw throughput. Benchmarking will confirm.
+- **Queue depth as backpressure signal**: `inflight_queue_depth` is a
+  direct measure of admission pressure — operators can alert on it
+  and scale the `max_inflight` window or add replicas. This is more
+  actionable than the current `Busy` reject rate.
+
+**Priority**: Medium — improves fairness of benchmark comparisons,
+eliminates reject storms, adds actionable backpressure metrics.
+
+**Complexity**: Medium — new `AdmissionPolicy` enum, multi-queue
+semaphore routing in `PxGroup`, wait-time tracking atomics, CLI flags,
+metrics integration, benchmark provision plumbing. No protocol change.
+
+**Files**:
+- `crowkv/src/cluster/group.rs` — `PxGroup` inflight field refactor
+  (single semaphore → `Vec<Semaphore>` + routing), `propose()`
+  admission logic, `set_inflight_config()` method.
+- `crowkv/src/common/config.rs` — `AdmissionPolicy` enum,
+  `PaxosConfig` new fields (`inflight_queues`, `inflight_admission`).
+- `crowkv/src/cluster/status.rs` — expose per-queue depth / wait
+  metrics in `*Status` structs.
+- `crowkv-server/src/cli.rs` — `--inflight-queues`, `--inflight-admission`
+  flags.
+- `crowkv-server/src/startup.rs` — wire CLI flags to
+  `PxGroup::set_inflight_config()`.
+- `crowkv-console/cli/src/bench/provision.rs` — pass queue config to
+  provisioned groups.
+
+**Acceptance**:
+- `--inflight-admission reject` (default): all existing tests pass,
+  behavior unchanged.
+- `--inflight-admission queue --inflight-queues 1`: no `Busy` rejections
+  under any load; proposals block and eventually succeed. Existing
+  Paxos tests pass (may need longer timeouts for blocking paths).
+- `--inflight-admission queue --inflight-queues 4`: proposals distributed
+  across 4 queues; no `Busy` rejections; per-queue metrics visible in
+  status/health output.
+- Benchmark: queue mode window=1 shows higher throughput than reject
+  mode window=1 (no wasted reject RPCs), and latency distribution is
+  unimodal (no fast-reject spike).
+- Metrics: `inflight_queue_depth`, `inflight_total_enqueued`,
+  `inflight_total_wait_us` visible in metrics log and health API.
+- Multi-queue correctness: concurrent proposals across queues all
+  converge to chosen slots; no slot gaps or lost proposals.
 
 ---
 

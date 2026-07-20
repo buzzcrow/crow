@@ -24,4 +24,4 @@ pub use local_replica::*;
 pub use px_kv_store::*;
 pub use remote_replica::PxRemoteReplica;
 pub use replica::{Replica, ReplicaClient, ReplicaHandler};
-pub use status::{GroupStatus, KvStoreStatus, RemoteStatus, ReplicaStatus, StoreStatus};
+pub use status::{GroupStatus, InflightStatus, KvStoreStatus, RemoteStatus, ReplicaStatus, StoreStatus};

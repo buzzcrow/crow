@@ -23,8 +23,8 @@ use crate::cluster::remote_replica::PxRemoteReplica;
 use crate::cluster::replica::{
     Replica, ReplicaClient, ReplicaHandler, StepDownReply, StepDownRequestPayload,
 };
-use crate::cluster::status::{GroupStatus, StatusLevel};
-use crate::common::config::{PaxosConfig, PxElectionConfig};
+use crate::cluster::status::{GroupStatus, InflightStatus, StatusLevel};
+use crate::common::config::{AdmissionPolicy, PaxosConfig, PxElectionConfig};
 use crate::common::report::OperationReport;
 use crate::paxos::error::{PxPaxosError, PxPaxosPhase, PxRetryAction};
 use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply, SlotIndex};
@@ -110,15 +110,13 @@ pub struct PxGroup {
     /// local WAL to report its own snapshot progress). Recomputed at the
     /// end of each quorum heartbeat round.
     pub(crate) group_snapshot_slot: AtomicU64,
-    /// In-flight proposal admission gate. Holds `PaxosConfig::max_inflight_proposals`
-    /// permits; each in-flight `propose` call holds one for its duration, so at
-    /// most `max_inflight_proposals` proposals are allocated-but-not-chosen at
-    /// once. A proposal that cannot immediately acquire a permit returns
-    /// `ProposeResult::Busy` (retryable) rather than blocking the caller.
-    pub(crate) inflight_window: tokio::sync::Semaphore,
-    /// Cached size of `inflight_window` for logging (the semaphore
-    /// itself does not expose its total permit count).
-    pub(crate) inflight_window_size: usize,
+    /// In-flight proposal admission gate. Holds N semaphores (one per
+    /// queue), each sized to `ceil(max_inflight / N)` permits. Each
+    /// in-flight `propose` call holds one permit for its duration.
+    /// Depending on `policy`, a full queue either fails fast with
+    /// `ProposeResult::Busy` (Reject) or blocks on `acquire().await`
+    /// (Queue).
+    pub(crate) inflight: InflightAdmission,
     /// Optional file-based config store for persisting group membership.
     /// Set via [`Self::set_config_store`] when the group has a WAL directory.
     /// When set, [`Self::persist_config`] writes to the config file instead
@@ -178,8 +176,11 @@ impl PxGroup {
             group_safe_slot: AtomicU64::new(0),
             peer_durable: parking_lot::Mutex::new(HashMap::new()),
             group_snapshot_slot: AtomicU64::new(0),
-            inflight_window: tokio::sync::Semaphore::new(PaxosConfig::DEFAULT.max_inflight_proposals),
-            inflight_window_size: PaxosConfig::DEFAULT.max_inflight_proposals,
+            inflight: InflightAdmission::new(
+                PaxosConfig::DEFAULT.max_inflight_proposals,
+                PaxosConfig::DEFAULT.inflight_queues,
+                PaxosConfig::DEFAULT.inflight_admission,
+            ),
             config_store: None,
             membership_epoch: AtomicU64::new(0),
             last_snapshot_slot: AtomicU64::new(0),
@@ -197,18 +198,29 @@ impl PxGroup {
         self.config_store = Some(store);
     }
 
-    /// Override the in-flight proposal admission window size. Must be
-    /// called before the group starts serving proposals. Replaces the
-    /// semaphore with one sized to `max_inflight`.
-    pub fn set_inflight_window(&mut self, max_inflight: usize) {
-        self.inflight_window = tokio::sync::Semaphore::new(max_inflight);
-        self.inflight_window_size = max_inflight;
+    /// Override the in-flight proposal admission configuration. Must be
+    /// called before the group starts serving proposals.
+    pub fn set_inflight_config(&mut self, max_inflight: usize, queues: usize, policy: AdmissionPolicy) {
+        self.inflight = InflightAdmission::new(max_inflight, queues, policy);
     }
 
-    /// Current inflight proposal window size.
+    /// Current inflight proposal window size (total permits across all
+    /// queues).
     #[must_use]
     pub fn inflight_window_size(&self) -> usize {
-        self.inflight_window_size
+        self.inflight.total_permits()
+    }
+
+    /// Number of admission queues.
+    #[must_use]
+    pub fn inflight_queue_count(&self) -> usize {
+        self.inflight.queue_count
+    }
+
+    /// Current admission policy.
+    #[must_use]
+    pub fn inflight_admission_policy(&self) -> AdmissionPolicy {
+        self.inflight.policy
     }
 
     /// Get the config store, if set.
@@ -697,6 +709,15 @@ impl PxGroup {
             messages,
             local_replica,
             remotes,
+            inflight: Some(InflightStatus {
+                queue_count: self.inflight.queue_count,
+                window_per_queue: self.inflight.window_per_queue,
+                policy: self.inflight.policy.label().to_string(),
+                occupied: self.inflight.occupied(),
+                waiting: self.inflight.waiting.load(Ordering::Relaxed),
+                total_enqueued: self.inflight.total_enqueued.load(Ordering::Relaxed),
+                total_wait_us: self.inflight.total_wait_us.load(Ordering::Relaxed),
+            }),
         }
     }
 
@@ -1002,12 +1023,13 @@ impl PxGroup {
 
         // Sliding-window admission: cap concurrent in-flight proposals. The
         // permit is held for the whole proposal (released on drop at every
-        // return path below), so a full window fails fast with `Busy` instead
-        // of queuing unboundedly.
-        let Ok(_window_permit) = self.inflight_window.try_acquire() else {
+        // return path below). Depending on the admission policy, a full
+        // window either fails fast with `Busy` (Reject) or blocks until a
+        // permit is freed (Queue).
+        let Some(_window_permit) = self.inflight.acquire_permit().await else {
             warn!(
                 group_id = self.group_id,
-                window = self.inflight_window_size,
+                window = self.inflight.total_permits(),
                 "inflight window full; rejecting proposal as Busy"
             );
             return ProposeResult::Busy;
@@ -1727,12 +1749,11 @@ impl RemoteReplicaKind {
 /// Production metrics helpers for `PxGroup`.
 impl PxGroup {
     /// Number of in-flight (allocated-but-not-yet-chosen) proposals.
-    /// Derived from the inflight window: `window_size - available_permits`.
+    /// Derived from all admission queues: sum of `window_per_queue -
+    /// available_permits`.
     #[must_use]
     pub fn inflight_slot_count(&self) -> u64 {
-        let avail = self.inflight_window.available_permits();
-        let window = self.inflight_window_size;
-        u64::try_from(window.saturating_sub(avail)).unwrap_or(0)
+        self.inflight.occupied()
     }
 }
 
@@ -1742,11 +1763,19 @@ impl PxGroup {
 /// `tests/` without permanently widening the production public API.
 #[cfg(feature = "test-util")]
 impl PxGroup {
-    /// Borrow the inflight proposal admission semaphore so a test can
-    /// exhaust its permits and observe `ProposeResult::Busy`.
+    /// Acquire all inflight admission permits across all queues so a
+    /// test can exhaust the window and observe `ProposeResult::Busy`
+    /// (Reject mode) or blocking (Queue mode). Returns permits that
+    /// release on drop.
+    pub fn try_acquire_all_inflight_permits(&self) -> Vec<tokio::sync::SemaphorePermit<'_>> {
+        self.inflight.try_acquire_all()
+    }
+
+    /// Borrow the first (primary) queue's semaphore for tests that need
+    /// direct semaphore access.
     #[must_use]
-    pub fn inflight_window(&self) -> &tokio::sync::Semaphore {
-        &self.inflight_window
+    pub fn inflight_queue_semaphore(&self) -> &tokio::sync::Semaphore {
+        &self.inflight.queues[0]
     }
 
     /// Run one background-repair step, returning the slot that was filled
@@ -1789,6 +1818,113 @@ impl PxGroup {
     /// deterministically.
     pub async fn run_maintenance_pass_for_tests(&self) {
         crate::cluster::group_maintenance::run_pass(self).await;
+    }
+}
+
+/// Multi-queue inflight proposal admission gate. Owns N semaphores,
+/// routes proposals round-robin, and supports both fail-fast (Reject)
+/// and blocking (Queue) admission policies.
+pub(crate) struct InflightAdmission {
+    queues: Vec<tokio::sync::Semaphore>,
+    queue_count: usize,
+    window_per_queue: usize,
+    policy: AdmissionPolicy,
+    route_counter: AtomicU64,
+    /// Cumulative count of proposals that entered the queue (did not
+    /// get a fast-path permit).
+    total_enqueued: AtomicU64,
+    /// Cumulative wait time in microseconds.
+    total_wait_us: AtomicU64,
+    /// Current number of proposals waiting on `acquire().await`.
+    waiting: AtomicU64,
+}
+
+impl InflightAdmission {
+    fn new(max_inflight: usize, queue_count: usize, policy: AdmissionPolicy) -> Self {
+        let n = queue_count.max(1);
+        let per_queue = max_inflight.div_ceil(n);
+        let queues = (0..n).map(|_| tokio::sync::Semaphore::new(per_queue)).collect();
+        Self {
+            queues,
+            queue_count: n,
+            window_per_queue: per_queue,
+            policy,
+            route_counter: AtomicU64::new(0),
+            total_enqueued: AtomicU64::new(0),
+            total_wait_us: AtomicU64::new(0),
+            waiting: AtomicU64::new(0),
+        }
+    }
+
+    /// Total permits across all queues.
+    fn total_permits(&self) -> usize {
+        self.window_per_queue * self.queue_count
+    }
+
+    /// Currently occupied permits across all queues.
+    fn occupied(&self) -> u64 {
+        let total = self.total_permits();
+        let avail: usize = self
+            .queues
+            .iter()
+            .map(tokio::sync::Semaphore::available_permits)
+            .sum();
+        u64::try_from(total.saturating_sub(avail)).unwrap_or(0)
+    }
+
+    /// Route to a queue via round-robin.
+    fn route(&self) -> usize {
+        let idx = self.route_counter.fetch_add(1, Ordering::Relaxed);
+        (idx as usize) % self.queue_count
+    }
+
+    /// Acquire a permit. Returns `None` if Reject mode and the queue is
+    /// full. In Queue mode, blocks until a permit is available.
+    async fn acquire_permit(&self) -> Option<tokio::sync::SemaphorePermit<'_>> {
+        let q = self.route();
+        // Fast path: try to acquire without blocking.
+        if let Ok(permit) = self.queues[q].try_acquire() {
+            return Some(permit);
+        }
+        // Slow path depends on policy.
+        match self.policy {
+            AdmissionPolicy::Reject => None,
+            AdmissionPolicy::Queue => {
+                self.total_enqueued.fetch_add(1, Ordering::Relaxed);
+                self.waiting.fetch_add(1, Ordering::Relaxed);
+                let t0 = std::time::Instant::now();
+                let permit = self.queues[q].acquire().await.expect("inflight semaphore closed");
+                let wait_us = t0.elapsed().as_micros();
+                self.waiting.fetch_sub(1, Ordering::Relaxed);
+                self.total_wait_us
+                    .fetch_add(u64::try_from(wait_us).unwrap_or(u64::MAX), Ordering::Relaxed);
+                Some(permit)
+            }
+        }
+    }
+
+    /// Try to acquire all permits across all queues (test helper).
+    #[cfg(feature = "test-util")]
+    fn try_acquire_all(&self) -> Vec<tokio::sync::SemaphorePermit<'_>> {
+        let mut held = Vec::new();
+        for q in &self.queues {
+            while let Ok(p) = q.try_acquire() {
+                held.push(p);
+            }
+        }
+        held
+    }
+}
+
+impl std::fmt::Debug for InflightAdmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InflightAdmission")
+            .field("queue_count", &self.queue_count)
+            .field("window_per_queue", &self.window_per_queue)
+            .field("policy", &self.policy)
+            .field("occupied", &self.occupied())
+            .field("waiting", &self.waiting.load(Ordering::Relaxed))
+            .finish()
     }
 }
 
