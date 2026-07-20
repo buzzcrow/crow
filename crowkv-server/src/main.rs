@@ -19,7 +19,7 @@ use tracing::{debug, info, warn};
 use crowkv::cluster::kv_server::KvServer;
 use crowkv::cluster::local_replica::PxLocalReplicaRole;
 use crowkv::cluster::px_kv_store::PxKvStore;
-use crowkv::common::config::{PxElectionConfig, ServerConfig};
+use crowkv::common::config::{AdmissionPolicy, PxElectionConfig, ServerConfig};
 use crowkv::metrics::MetricsRunner;
 
 use crowkv_server::cli::{parse_id_list, parse_port_list, Cli};
@@ -78,6 +78,8 @@ async fn main() {
         kv_backend = %args.kv_backend,
         wal_backend = %args.wal_backend,
         max_inflight = args.max_inflight,
+        inflight_queues = args.inflight_queues,
+        inflight_admission = %args.inflight_admission,
         "parsed CLI arguments"
     );
 
@@ -112,7 +114,11 @@ async fn main() {
                 |r| r.registry().clone(),
             ))
             .with_wal_skip_fsync(args.no_fsync)
-            .with_max_inflight(args.max_inflight),
+            .with_max_inflight(args.max_inflight)
+            .with_inflight_queues(args.inflight_queues)
+            .with_inflight_admission(
+                AdmissionPolicy::parse(&args.inflight_admission).unwrap_or(AdmissionPolicy::Reject),
+            ),
     );
 
     // Populate the port pool from `--ports` even when `--stores` is not
@@ -172,6 +178,8 @@ async fn main() {
             b.ports.clone(),
             registry.clone(),
             args.max_inflight,
+            args.inflight_queues,
+            AdmissionPolicy::parse(&args.inflight_admission).unwrap_or(AdmissionPolicy::Reject),
         )
         .await;
     }
@@ -289,6 +297,7 @@ fn parse_and_validate_cli_args(args: &Cli) -> Option<Bootstrap> {
 
 /// Create and start stores with their groups, registering each with the registry.
 /// If `group_ids` is empty, stores are created without groups.
+#[allow(clippy::too_many_arguments)]
 async fn create_and_start_stores(
     store_ids: &[u64],
     group_ids: &[u64],
@@ -296,6 +305,8 @@ async fn create_and_start_stores(
     ports: Vec<u16>,
     registry: Arc<KvStoreRegistry>,
     max_inflight: usize,
+    inflight_queues: usize,
+    inflight_admission: AdmissionPolicy,
 ) {
     debug!(
         store_count = store_ids.len(),
@@ -342,6 +353,8 @@ async fn create_and_start_stores(
                 registry.wal_skip_fsync,
                 "log",
                 max_inflight,
+                inflight_queues,
+                inflight_admission,
             )
             .await
             {

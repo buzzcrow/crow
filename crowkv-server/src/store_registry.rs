@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use crowkv::cluster::px_kv_store::PxKvStore;
-use crowkv::common::config::{PaxosConfig, PxElectionConfig};
+use crowkv::common::config::{AdmissionPolicy, PaxosConfig, PxElectionConfig};
 use crowkv::kv::CrowtreeBackend;
 use crowkv::metrics::MetricsRegistry;
 use crowkv::wal::IoBackend;
@@ -57,6 +57,10 @@ pub struct KvStoreRegistry {
     /// Max in-flight proposals for groups created via the management
     /// API. Set from `--max-inflight` CLI arg. Default: `PaxosConfig::DEFAULT`.
     pub max_inflight: usize,
+    /// Number of admission queues per group. Default: 1.
+    pub inflight_queues: usize,
+    /// Admission policy when the inflight window is full. Default: `Reject`.
+    pub inflight_admission: AdmissionPolicy,
 }
 
 impl Default for KvStoreRegistry {
@@ -108,6 +112,8 @@ impl KvStoreRegistry {
             metrics_registry: None,
             wal_skip_fsync: false,
             max_inflight: PaxosConfig::DEFAULT.max_inflight_proposals,
+            inflight_queues: PaxosConfig::DEFAULT.inflight_queues,
+            inflight_admission: PaxosConfig::DEFAULT.inflight_admission,
         }
     }
 
@@ -148,6 +154,20 @@ impl KvStoreRegistry {
     #[must_use]
     pub fn with_max_inflight(mut self, max_inflight: usize) -> Self {
         self.max_inflight = max_inflight;
+        self
+    }
+
+    /// Builder-style setter for [`Self::inflight_queues`].
+    #[must_use]
+    pub fn with_inflight_queues(mut self, queues: usize) -> Self {
+        self.inflight_queues = queues;
+        self
+    }
+
+    /// Builder-style setter for [`Self::inflight_admission`].
+    #[must_use]
+    pub fn with_inflight_admission(mut self, policy: AdmissionPolicy) -> Self {
+        self.inflight_admission = policy;
         self
     }
 

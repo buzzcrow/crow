@@ -14,6 +14,36 @@ use std::path::PathBuf;
 use crate::wal::pipeline_backend::WalBlockAlignment;
 use crate::wal::record::WalRecordFormat;
 
+/// Admission policy for inflight proposals when the window is full.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AdmissionPolicy {
+    /// Fail fast with `ProposeResult::Busy` (current behavior).
+    #[default]
+    Reject,
+    /// Block the caller on `acquire().await` until a permit is freed.
+    Queue,
+}
+
+impl AdmissionPolicy {
+    /// Parse from a CLI string.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "reject" => Some(Self::Reject),
+            "queue" => Some(Self::Queue),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Reject => "reject",
+            Self::Queue => "queue",
+        }
+    }
+}
+
 /// Paxos retry configuration (static, global).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PaxosConfig {
@@ -26,6 +56,13 @@ pub struct PaxosConfig {
     /// blocking, so the leader never stalls behind a saturated pipeline
     /// (parallel-slot window / performance targets).
     pub max_inflight_proposals: usize,
+    /// Number of admission queues per group. Each queue gets
+    /// `ceil(max_inflight_proposals / inflight_queues)` permits. Default 1.
+    pub inflight_queues: usize,
+    /// Admission policy when all permits are occupied: `Reject` (fail fast
+    /// with `Busy`) or `Queue` (block until a permit is freed). Default
+    /// `Reject`.
+    pub inflight_admission: AdmissionPolicy,
 }
 
 impl PaxosConfig {
@@ -34,6 +71,8 @@ impl PaxosConfig {
         max_slot_retries: 3,
         retry_base_backoff_ms: 5,
         max_inflight_proposals: 32,
+        inflight_queues: 1,
+        inflight_admission: AdmissionPolicy::Reject,
     };
 }
 

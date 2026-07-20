@@ -580,6 +580,8 @@ async fn add_group(
         state.wal_skip_fsync,
         "log",
         state.max_inflight,
+        state.inflight_queues,
+        state.inflight_admission,
     )
     .await
     .map_err(|e| {
@@ -704,6 +706,8 @@ async fn join_group_via_snapshot(
         state.wal_skip_fsync,
         "log",
         state.max_inflight,
+        state.inflight_queues,
+        state.inflight_admission,
     )
     .await
     .map_err(|e| {
@@ -1295,7 +1299,11 @@ fn rebuild_group_with_same_config(group: &PxGroup) -> PxGroup {
     if let Some(store) = group.config_store() {
         new_group.set_config_store(store.clone());
     }
-    new_group.set_inflight_window(group.inflight_window_size());
+    new_group.set_inflight_config(
+        group.inflight_window_size(),
+        group.inflight_queue_count(),
+        group.inflight_admission_policy(),
+    );
     new_group
 }
 

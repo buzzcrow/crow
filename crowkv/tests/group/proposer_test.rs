@@ -10,7 +10,7 @@
 
 use crowkv::cluster::group::{ProposeResult, PxGroup};
 use crowkv::cluster::{PxLocalReplica, PxLocalReplicaRole};
-use crowkv::common::config::PaxosConfig;
+use crowkv::common::config::{AdmissionPolicy, PaxosConfig};
 use crowkv::paxos::roles::{Learner, PxBallot, PxLogEntry};
 
 /// Single-voter leader group: quorum is 1, so propose / repair complete
@@ -25,17 +25,19 @@ async fn propose_returns_busy_when_window_is_full() {
     let group = single_leader_group();
 
     // Exhaust every window permit so the next admission must fail fast.
-    let mut held = Vec::new();
-    for _ in 0..PaxosConfig::DEFAULT.max_inflight_proposals {
-        held.push(group.inflight_window().try_acquire().expect("window permit"));
-    }
+    let held = group.try_acquire_all_inflight_permits();
+    assert_eq!(
+        held.len(),
+        PaxosConfig::DEFAULT.max_inflight_proposals,
+        "should acquire all default window permits"
+    );
     match group.propose(b"v".to_vec(), Some(1), Some(1)).await {
         ProposeResult::Busy => {}
         other => panic!("expected Busy with a full window, got {other:?}"),
     }
 
     // Releasing the permits reopens admission.
-    held.clear();
+    drop(held);
     match group.propose(b"v".to_vec(), Some(1), Some(2)).await {
         ProposeResult::Chosen { .. } => {}
         other => panic!("expected Chosen after window drained, got {other:?}"),
@@ -84,4 +86,55 @@ async fn repair_once_fills_gap_and_advances_frontier() {
         None,
         "no gap remains, so repair is a no-op"
     );
+}
+
+/// Single-voter leader group with queue-mode admission and a small window.
+fn queue_leader_group(max_inflight: usize, queues: usize) -> PxGroup {
+    let local = PxLocalReplica::new(1, PxLocalReplicaRole::Leader);
+    let mut group = PxGroup::new(1, local);
+    group.set_inflight_config(max_inflight, queues, AdmissionPolicy::Queue);
+    group
+}
+
+#[tokio::test]
+async fn propose_queues_when_policy_is_queue() {
+    // Window=1, queue mode: a second concurrent proposal must block
+    // until the first one's permit is released.
+    let group = queue_leader_group(1, 1);
+    let group = std::sync::Arc::new(group);
+
+    // Exhaust the single permit.
+    let held = group.try_acquire_all_inflight_permits();
+    assert_eq!(held.len(), 1, "window=1 should have 1 permit");
+
+    // Launch a propose in the background — it should block.
+    let g = group.clone();
+    let task = tokio::spawn(async move { g.propose(b"v".to_vec(), Some(2), Some(1)).await });
+
+    // Give it a moment to ensure it's blocked.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(!task.is_finished(), "propose should be blocked on queue");
+
+    // Release the permit — the queued propose should now complete.
+    drop(held);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), task)
+        .await
+        .expect("propose should complete within 5s after permit release")
+        .expect("task should not panic");
+    match result {
+        ProposeResult::Chosen { .. } => {}
+        other => panic!("expected Chosen after queue drain, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn multi_queue_distributes_permits() {
+    // Window=4, 2 queues: each queue should have 2 permits.
+    let group = queue_leader_group(4, 2);
+
+    let held = group.try_acquire_all_inflight_permits();
+    assert_eq!(held.len(), 4, "total permits should be 4 across 2 queues");
+
+    // Verify window size reports the total.
+    assert_eq!(group.inflight_window_size(), 4);
 }

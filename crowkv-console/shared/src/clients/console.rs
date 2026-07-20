@@ -75,6 +75,12 @@ pub struct DeployNodeServerBody {
     /// `--max-inflight` value for the proposal admission window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_inflight: Option<usize>,
+    /// `--inflight-queues` value for multi-queue admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inflight_queues: Option<usize>,
+    /// `--inflight-admission` value: `"reject"` or `"queue"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inflight_admission: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

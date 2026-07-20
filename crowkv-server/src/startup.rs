@@ -11,7 +11,7 @@ use crowkv::cluster::group::PxGroup;
 use crowkv::cluster::group_config::GroupConfigStore;
 use crowkv::cluster::group_election::LeaderElection;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
-use crowkv::common::config::{PxElectionConfig, WalConfig};
+use crowkv::common::config::{AdmissionPolicy, PxElectionConfig, WalConfig};
 use crowkv::kv::{CrowtreeBackend, CrowtreeEngine, CrowtreeOptions, KVEngine};
 use crowkv::wal::replay::replay_group;
 use crowkv::wal::{IoBackend, WalEngine};
@@ -123,6 +123,8 @@ pub async fn create_group_with_wal(
     skip_fsync: bool,
     log_dir: &str,
     max_inflight: usize,
+    inflight_queues: usize,
+    inflight_admission: AdmissionPolicy,
 ) -> io::Result<PxGroup> {
     let mut wal_config = WalConfig::with_root(store_wal_root(wal_root, store_id));
     if std::env::var("CROWKV_WAL_TEXT").as_deref() == Ok("1") {
@@ -151,10 +153,15 @@ pub async fn create_group_with_wal(
         group.stamp_proposing_term(term);
     }
     group.set_election_config(election_cfg);
-    group.set_inflight_window(max_inflight);
+    group.set_inflight_config(max_inflight, inflight_queues, inflight_admission);
     info!(
         store_id,
-        group_id, max_inflight, skip_fsync, "group created with config"
+        group_id,
+        max_inflight,
+        inflight_queues,
+        admission = inflight_admission.label(),
+        skip_fsync,
+        "group created with config"
     );
     let next_slot = group
         .local_replica()
