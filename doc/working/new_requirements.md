@@ -65,12 +65,16 @@ complexity, and dependency. Before implementation, follow the
   before the local engine has applied the value — read-your-writes
   semantics break unless a read barrier or apply-fence is added. Gate
   behind a feature flag; test read-after-write consistency.
-- **R18** — Queue-based admission control for inflight proposals — Area:
+- **R18** ✅ — Queue-based admission control for inflight proposals — Area:
   consensus — Replace the current `try_acquire` fail-fast `Busy` reject
   with a configurable queue-per-group admission model. Multiple queues
   per group, queue count configurable via CLI. Enables fair comparison
   with Raft-style block-and-queue behavior and eliminates reject storms
   under high concurrency. Adds queue depth / wait time metrics.
+  **Done** — implemented with `AdmissionPolicy` enum (`Reject`/`Queue`),
+  multi-queue round-robin routing, `--inflight-queues` and
+  `--inflight-admission` CLI flags, `InflightStatus` metrics in
+  `GroupStatus`. Design merged into `design-slot.md` §4.
 
 ### Low Priority
 
