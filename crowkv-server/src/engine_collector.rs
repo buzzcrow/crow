@@ -23,6 +23,7 @@ struct EngineHandles {
     paxos_last_chosen: Arc<Gauge>,
     paxos_highest_seen: Arc<Gauge>,
     paxos_term: Arc<Gauge>,
+    paxos_inflight: Arc<Gauge>,
     snapshot_pages: Arc<Counter>,
 }
 
@@ -36,6 +37,8 @@ impl EngineHandles {
             paxos_highest_seen: registry
                 .register_gauge(format!("s.{store_id}.g.{group_id}.paxos.highest_seen_slot.g")),
             paxos_term: registry.register_gauge(format!("s.{store_id}.g.{group_id}.paxos.current_term.g")),
+            paxos_inflight: registry
+                .register_gauge(format!("s.{store_id}.g.{group_id}.paxos.inflight_slots.g")),
             snapshot_pages: registry
                 .register_counter(format!("s.{store_id}.g.{group_id}.tree.snapshot.pages.c")),
         }
@@ -50,6 +53,7 @@ struct PaxosGauges {
     last_chosen_slot: u64,
     highest_seen_slot: u64,
     current_term: u64,
+    inflight_slots: u64,
 }
 
 /// Read paxos slot watermarks per group.
@@ -65,6 +69,7 @@ fn read_paxos_gauges_per_group(store: &Arc<PxKvStore>) -> std::collections::Hash
                 last_chosen_slot: replica.last_chosen_slot(),
                 highest_seen_slot: replica.highest_seen_slot(),
                 current_term: replica.current_term_snapshot(),
+                inflight_slots: group.inflight_slot_count(),
             },
         );
     });
@@ -162,6 +167,7 @@ pub fn setup_engine_collector(
                 hd.paxos_last_chosen.set(p.last_chosen_slot);
                 hd.paxos_highest_seen.set(p.highest_seen_slot);
                 hd.paxos_term.set(p.current_term);
+                hd.paxos_inflight.set(p.inflight_slots);
             }
 
             // snapshot.pages.c: delta from cumulative snapshot_pages_total.

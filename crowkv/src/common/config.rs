@@ -25,7 +25,7 @@ pub struct PaxosConfig {
     /// permit fails fast with `PxPaxosError::Busy` (retryable) rather than
     /// blocking, so the leader never stalls behind a saturated pipeline
     /// (parallel-slot window / performance targets).
-    pub proposer_window: usize,
+    pub max_inflight_proposals: usize,
 }
 
 impl PaxosConfig {
@@ -33,7 +33,7 @@ impl PaxosConfig {
         max_paxos_retries: 3,
         max_slot_retries: 3,
         retry_base_backoff_ms: 5,
-        proposer_window: 16,
+        max_inflight_proposals: 16,
     };
 }
 
@@ -170,6 +170,11 @@ pub struct PxElectionConfig {
     /// Bounded capacity of the per-peer `PxLearnerStream` outbound mpsc.
     /// Full mpsc surfaces as `PxPaxosError::Busy` on the proposer side
     /// (already classified `FailRetryable`).
+    ///
+    /// Derived as `max_inflight_proposals * LEARNER_WINDOW_MULTIPLIER` (4×) so
+    /// that the learner channel always has headroom over the proposer
+    /// admission gate. Only `max_inflight_proposals` needs to be tuned; this
+    /// field follows automatically.
     pub learner_stream_window_frames: usize,
     /// Tick interval for the per-group engine-durability + WAL-GC
     /// maintenance loop (follow-up; see
@@ -188,12 +193,21 @@ pub struct PxElectionConfig {
 }
 
 impl PxElectionConfig {
+    /// Multiplier applied to `PaxosConfig::max_inflight_proposals` to derive
+    /// `learner_stream_window_frames`. Gives the learner channel 4×
+    /// headroom over the proposer admission gate.
+    pub const LEARNER_WINDOW_MULTIPLIER: usize = 4;
+
     /// Production / single-DC default.
     ///
     /// Heartbeat 150 ms / election 1–2 s / lease 3 s. Follows etcd's
     /// production defaults (100 ms heartbeat, 1 s election) with a slightly
     /// conservative heartbeat for disk-fsync jitter. Lease ≥ `election_max`
     /// + `clock_skew` (2000 + 500 = 2500) ensures leader-lease safety.
+    ///
+    /// `learner_stream_window_frames` is derived as
+    /// `PaxosConfig::DEFAULT.max_inflight_proposals * LEARNER_WINDOW_MULTIPLIER`
+    /// (= 16 × 4 = 64).
     pub const DEFAULT: Self = Self {
         prevote_enabled: true,
         heartbeat_interval_ms: 150,
@@ -203,7 +217,8 @@ impl PxElectionConfig {
         max_clock_skew_ms: 500,
         bulk_prepare_window: 1024,
         election_driver_disabled: false,
-        learner_stream_window_frames: 64,
+        learner_stream_window_frames: PaxosConfig::DEFAULT.max_inflight_proposals
+            * Self::LEARNER_WINDOW_MULTIPLIER,
         // Maintenance loop tick: flush L0→L1 + GC watermark check every
         // tick; durable snapshot gated by thresholds above.
         maintenance_tick_ms: 10_000,
@@ -226,7 +241,8 @@ impl PxElectionConfig {
             max_clock_skew_ms: 1,
             bulk_prepare_window: 1024,
             election_driver_disabled: false,
-            learner_stream_window_frames: 64,
+            learner_stream_window_frames: PaxosConfig::DEFAULT.max_inflight_proposals
+                * Self::LEARNER_WINDOW_MULTIPLIER,
             maintenance_tick_ms: 500,
             snapshot_slot_threshold: 1000,
             snapshot_time_threshold_ms: 1_000,
@@ -252,10 +268,19 @@ impl PxElectionConfig {
             max_clock_skew_ms: 100,
             bulk_prepare_window: 1024,
             election_driver_disabled: false,
-            learner_stream_window_frames: 64,
+            learner_stream_window_frames: PaxosConfig::DEFAULT.max_inflight_proposals
+                * Self::LEARNER_WINDOW_MULTIPLIER,
             maintenance_tick_ms: 5_000,
             snapshot_slot_threshold: 10_000,
             snapshot_time_threshold_ms: 20_000,
         }
+    }
+
+    /// Derive the learner stream window for a given max-inflight-proposals
+    /// count. Call this when customizing `max_inflight_proposals` at runtime
+    /// so the learner channel stays in sync.
+    #[must_use]
+    pub const fn learner_window_for(max_inflight_proposals: usize) -> usize {
+        max_inflight_proposals * Self::LEARNER_WINDOW_MULTIPLIER
     }
 }
