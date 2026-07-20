@@ -42,7 +42,6 @@ crowkv-console/cli/bench-runs/
 **/waldata/
 **/conf/
 **/ctdata/
-**/wal/
 
 # `log/` is dangerous as a glob — "log" is a common Rust module name.
 # List explicitly per crate to avoid ignoring source directories.

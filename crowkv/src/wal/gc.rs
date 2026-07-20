@@ -138,7 +138,7 @@ pub async fn run_gc_with_watermark(wal: &WalEngine, gc_slot: u64) -> io::Result<
     }
 
     if unlinked > 0 {
-        info!(group_id = wal.group_id(), unlinked, gc_slot, "gc pass complete");
+        debug!(group_id = wal.group_id(), unlinked, gc_slot, "gc pass complete");
     }
 
     Ok(unlinked)

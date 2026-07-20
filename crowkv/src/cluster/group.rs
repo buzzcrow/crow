@@ -562,7 +562,7 @@ impl PxGroup {
             .collect();
         self.set_remote_replicas(remotes);
         self.set_membership_epoch(config.membership_epoch);
-        info!(
+        debug!(
             group_id = self.group_id,
             local_id,
             member_count = config.members.len(),
@@ -1251,7 +1251,7 @@ impl PxGroup {
             AcceptAttempt::Chosen => {
                 replica.learn_chosen(&entry, None, None).await;
                 self.fan_out_chosen_notice(&entry, group_id);
-                info!(group_id, slot = gap_slot, "background repair filled gap");
+                debug!(group_id, slot = gap_slot, "background repair filled gap");
                 RepairOutcome::Filled { slot: gap_slot }
             }
             AcceptAttempt::Retry { error, .. } | AcceptAttempt::Fail { error } => {

@@ -213,7 +213,6 @@ pub fn init_file_logging(
         .with_writer(file_writer)
         .with_ansi(false)
         .with_target(true)
-        .with_thread_ids(true)
         .with_thread_names(true)
         .with_filter(file_filter);
 
@@ -279,7 +278,6 @@ pub fn init_file_and_console_logging(
         .with_writer(file_writer)
         .with_ansi(false)
         .with_target(true)
-        .with_thread_ids(true)
         .with_thread_names(true)
         .with_filter(file_filter);
 
@@ -291,7 +289,6 @@ pub fn init_file_and_console_logging(
     let console_layer = fmt::layer()
         .with_ansi(true)
         .with_target(true)
-        .with_thread_ids(true)
         .with_thread_names(true)
         .with_filter(console_filter);
 

@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{timeout, Instant};
-use tracing::{error, info, trace};
+use tracing::{debug, error, trace};
 
 use crate::metrics::{Bandwidth, LatencySummary};
 use crate::paxos::roles::SlotIndex;
@@ -504,7 +504,7 @@ fn register_sealed(index: &parking_lot::Mutex<SegmentIndex>, segment: &WalSegmen
         record_count: segment.record_count,
     };
     index.lock().register_segment(meta);
-    info!(
+    debug!(
         segment_id = segment.segment_id,
         min_slot = segment.min_slot,
         max_slot = segment.max_slot,

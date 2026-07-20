@@ -121,7 +121,7 @@ impl WalConfig {
 impl Default for WalConfig {
     fn default() -> Self {
         Self {
-            wal_disks: vec![PathBuf::from("wal")],
+            wal_disks: vec![PathBuf::from("waldata")],
             wal_segment_size: 64 * 1024 * 1024,
             wal_flush_batch_bytes: 64 * 1024,
             wal_flush_coalesce_us: 0,
