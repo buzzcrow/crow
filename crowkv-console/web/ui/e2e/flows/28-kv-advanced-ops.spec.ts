@@ -89,7 +89,7 @@ test.describe('E2E-28 KV advanced operations', () => {
       await putKey(page, 'adv-inline', 'val-inline');
       await scanAndRefresh(page);
       await expect(page.getByTestId('kv-scan-table').getByText('adv-inline')).toBeVisible({ timeout: 3_000 });
-      await page.getByTestId('inline-delete-adv-inline').evaluate((el: HTMLElement) => el.click());
+      await page.getByTestId('inline-delete-adv-inline').click();
       const inlineDialog = page.getByRole('dialog');
       await expect(inlineDialog).toBeVisible({ timeout: 3_000 });
       const inlineDeleteResponse = page.waitForResponse((r: any) => r.url().includes('/kv/delete'));

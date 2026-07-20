@@ -789,7 +789,7 @@ mod registry_tests {
         reg.flush(&mut buf, 5.0, "2026-07-15T16:30:05.123Z");
         let out = String::from_utf8(buf).unwrap();
 
-        assert!(out.contains("[metrics 2026-07-15T16:30:05.123Z window=5.00s]"));
+        assert!(out.contains("[metrics 2026-07-15T16:30:05.123Z window=5.000s]"));
         assert!(out.contains("count") && out.contains("tps(/s)") && out.contains("total"));
         assert!(out.contains("s.1.kv.put.c"));
         assert!(out.contains("10"));
