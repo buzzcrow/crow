@@ -40,7 +40,7 @@ async fn spawn_server() -> Option<(u32, ServerClient)> {
         server_id: "s1".into(),
         mgmt_port: pick_free_port(),
         grpc_port: pick_free_port(),
-        election_profile: Some("test".into()),
+        election_profile: Some("e2e".into()),
         binary: Some(bin),
         ..Default::default()
     };

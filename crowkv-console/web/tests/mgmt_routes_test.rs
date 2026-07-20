@@ -67,7 +67,7 @@ async fn spawn_upstream() -> Option<Upstream> {
         server_id: "n1".into(),
         mgmt_port: pick_free_port(),
         grpc_port: pick_free_port(),
-        election_profile: Some("test".into()),
+        election_profile: Some("e2e".into()),
         binary: Some(bin),
         ..Default::default()
     };
