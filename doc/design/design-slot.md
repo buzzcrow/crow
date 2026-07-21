@@ -105,6 +105,8 @@ As soon as the leader has fsynced its own copy of slot N, it sends `Accept(N, ..
 
 **Out-of-order `Accepted` and `Chosen` notifications are fine.** A follower may respond `Accepted(N+2)` before `Accepted(N)`. Each is processed independently. A follower may receive `Chosen(N+2)` before `Chosen(N)` and apply only the parts safe to apply (per-key tracking handles this).
 
+**Zero-copy accept path.** `Acceptor::accept` and `ReplicaHandler::on_accept` take `&PxLogEntry` instead of owned `PxLogEntry`. The caller (proposer's `run_accept_phase`, gRPC `handle_accept_inner`, WAL replay) passes a reference — no clone for the acceptor call. The only clone is inside `inner_accept` for `cas_accepted`, where the slot node must own its copy. `WALRecord::from_accepted` already borrows, so the WAL encode after accept is also zero-copy. With `Bytes` payloads these clones were O(1) ref-count bumps; the signature change makes the zero-copy intent explicit and avoids redundant bumps.
+
 ---
 
 ## 6. Per-Key Resolved-Slot
