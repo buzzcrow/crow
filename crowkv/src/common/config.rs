@@ -17,10 +17,11 @@ use crate::wal::record::WalRecordFormat;
 /// Admission policy for inflight proposals when the window is full.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AdmissionPolicy {
-    /// Fail fast with `ProposeResult::Busy` (current behavior).
-    #[default]
+    /// Fail fast with `ProposeResult::Busy`.
     Reject,
     /// Block the caller on `acquire().await` until a permit is freed.
+    /// Default policy — eliminates client-side reject-retry storms.
+    #[default]
     Queue,
 }
 
@@ -72,7 +73,7 @@ impl PaxosConfig {
         retry_base_backoff_ms: 5,
         max_inflight_proposals: 32,
         inflight_queues: 1,
-        inflight_admission: AdmissionPolicy::Reject,
+        inflight_admission: AdmissionPolicy::Queue,
     };
 }
 

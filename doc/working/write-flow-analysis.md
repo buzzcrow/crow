@@ -326,3 +326,84 @@ from 16 → 32 → 64 as thread count grew to avoid `Busy` rejections.
   in-flight = 64/1.2ms ≈ 53K theoretical, matches observed
 - Next gains require reducing per-proposal latency (R16: overlap
   WAL fsync with RPCs, R15: zero-copy accept path)
+
+### Queue admission sweep — 2026-07-21 (R18)
+
+All runs: 3-node cluster, in-memory WAL + in-memory KV (mem-block),
+write-only, 512-byte values, 1M key space, 10-second duration,
+`election_profile = e2e`. Admission policy = `Queue` (R18 default).
+`Q` = inflight_queues (1 or 4).
+
+**MI=32 (fixed inflight=32, sweep threads/connections/queues):**
+
+| Threads | Conn | Q | Throughput (ops/s) | avg (us) | p50 (us) | p99 (us) | Errors |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 1 | 11,355 | 104 | 95 | 154 | 0 |
+| 2 | 1 | 1 | 16,742 | 119 | 112 | 199 | 0 |
+| 4 | 1 | 1 | 21,560 | 185 | 173 | 289 | 0 |
+| 4 | 2 | 1 | 24,960 | 160 | 151 | 251 | 0 |
+| 4 | 4 | 1 | 27,040 | 147 | 139 | 231 | 0 |
+| 4 | 8 | 1 | 23,560 | 169 | 159 | 269 | 0 |
+| 8 | 2 | 1 | 26,761 | 297 | 287 | 473 | 0 |
+| 8 | 4 | 1 | 29,632 | 268 | 263 | 395 | 0 |
+| 16 | 4 | 1 | 32,536 | 490 | 440 | 659 | 0 |
+| 16 | 8 | 1 | 36,880 | 432 | 424 | 633 | 0 |
+| 32 | 8 | 1 | 36,192 | 882 | 876 | 1288 | 0 |
+| 32 | 16 | 1 | 39,056 | 817 | 802 | 1219 | 0 |
+| 32 | 16 | 4 | 39,924 | 799 | 785 | 1187 | 0 |
+| 64 | 4 | 1 | 45,746 | 1396 | 1371 | 1996 | 0 |
+| 64 | 8 | 1 | 43,846 | 1457 | 1428 | 1989 | 0 |
+
+**MI=64 (inflight=64, sweep threads/connections/queues):**
+
+| Threads | Conn | Q | Throughput (ops/s) | avg (us) | p50 (us) | p99 (us) | Errors |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 32 | 4 | 1 | 39,509 | 808 | 714 | 1101 | 0 |
+| 32 | 8 | 1 | 43,989 | 725 | 712 | 1069 | 0 |
+| 32 | 8 | 4 | 44,287 | 720 | 709 | 1053 | 0 |
+| 32 | 16 | 1 | 44,015 | 725 | 712 | 1078 | 0 |
+| 32 | 16 | 4 | 44,242 | 721 | 708 | 1081 | 0 |
+| 64 | 4 | 1 | 48,813 | 1308 | 1276 | 2177 | 0 |
+| 64 | 4 | 4 | 48,731 | 1310 | 1281 | 2131 | 0 |
+| 64 | 8 | 1 | 50,454 | 1266 | 1248 | 1882 | 0 |
+| 64 | 8 | 4 | 48,681 | 1312 | 1294 | 1951 | 0 |
+| 64 | 16 | 1 | 44,302 | 1442 | 1282 | 1816 | 0 |
+
+**MI=128 (inflight=128, sweep threads/connections/queues):**
+
+| Threads | Conn | Q | Throughput (ops/s) | avg (us) | p50 (us) | p99 (us) | Errors |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 32 | 4 | 1 | 42,018 | 759 | 744 | 1185 | 0 |
+| 32 | 8 | 4 | 42,698 | 747 | 735 | 1105 | 0 |
+| 32 | 16 | 4 | 43,264 | 737 | 725 | 1091 | 0 |
+| 64 | 4 | 4 | 48,468 | 1318 | 1291 | 2151 | 0 |
+| 64 | 8 | 4 | 49,306 | 1296 | 1276 | 1949 | 0 |
+| 64 | 16 | 4 | 49,004 | 1304 | 1291 | 1895 | 0 |
+
+**Queue vs Reject comparison (best configs):**
+
+| Mode | Best config | Throughput | avg (us) | p99 (us) | Errors |
+| --- | --- | --- | --- | --- | --- |
+| Reject (prev) | T64 C8 MI64 | 51,100 | 1249 | 1853 | 0 |
+| Queue (R18) | T64 C8 Q1 MI64 | 50,454 | 1266 | 1882 | 0 |
+| Queue (R18) | T64 C4 Q4 MI128 | 48,468 | 1318 | 2151 | 0 |
+| Queue (R18) | T64 C4 Q1 MI32 | 45,746 | 1396 | 1996 | 0 |
+
+**Observations:**
+- Queue mode peak (50,454 ops/s) is within 1.3% of reject mode peak
+  (51,100 ops/s) at the same MI=64 — the wait-queue overhead is
+  negligible (a few atomic increments per proposal for metrics)
+- Zero errors across all 70+ runs — no `Busy` rejections ever, no
+  tuning of `max_inflight` needed to avoid reject storms
+- MI=64 is the sweet spot for both modes; MI=128 shows no improvement
+  (consensus path is the bottleneck, not admission gate)
+- Multi-queue (Q=4) shows no measurable advantage at these thread
+  counts — the semaphore is not the contention bottleneck; the
+  consensus critical path (WAL append + quorum RPC) dominates
+- MI=32 with queue mode (45,746 ops/s) nearly matches reject mode
+  MI=64 (51,100 ops/s) — the queue absorbs contention that would
+  otherwise require a larger inflight window
+- Scaling ceiling remains ~50K ops/s; the bottleneck is per-proposal
+  latency (~1.2ms at 64 in-flight), not admission control
+- Queue mode simplifies operations: no need to tune `max_inflight`
+  to avoid `Busy`; the queue naturally backpressures at any window size

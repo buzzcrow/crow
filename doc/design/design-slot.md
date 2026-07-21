@@ -84,10 +84,10 @@ The blind-ops premise from design.md §5.2](design.md) makes the trade-off cheap
 
 The number of in-flight slots is capped at the **window size** (`max_inflight_proposals`, default 32). The proposer uses an `InflightAdmission` gate backed by one or more `Semaphore`s. If a permit is available, the request is admitted, slot is assigned, and proposing begins. The permit is held for the entire proposal duration.
 
-**Admission policy** (`AdmissionPolicy`, configurable via `--inflight-admission`):
+**Admission policy** (`AdmissionPolicy`, internal config, not exposed via CLI):
 
-- **`Reject` (default)** — If no permit is available (`try_acquire` fails), the leader immediately returns `Busy` — a retryable error. No queuing. This fail-fast design avoids unbounded queue latency. The client is expected to retry with backoff. Sustained `Busy` indicates either an undersized window or a downstream bottleneck.
-- **`Queue`** — If no permit is available, the caller blocks on `acquire().await` until a permit is freed. This eliminates client-side reject-retry storms under contention (e.g., window=1 with 16 writers). Wait time and queue depth are tracked as metrics (`inflight_total_enqueued`, `inflight_total_wait_us`, `inflight_queue_depth`).
+- **`Queue` (default)** — If no permit is available, the caller blocks on `acquire().await` until a permit is freed. This eliminates client-side reject-retry storms under contention (e.g., window=1 with 16 writers). Wait time and queue depth are tracked as metrics (`inflight_total_enqueued`, `inflight_total_wait_us`, `inflight_queue_depth`).
+- **`Reject`** — If no permit is available (`try_acquire` fails), the leader immediately returns `Busy` — a retryable error. No queuing. Used only in tests that need to verify fail-fast behavior.
 
 **Multi-queue routing** (`--inflight-queues`, default 1): The window is split across N semaphores, each sized `ceil(max_inflight / N)`. Proposals are routed round-robin. Multiple queues reduce semaphore contention under high concurrency without affecting correctness (each slot is an independent Paxos instance; admission ordering does not influence consensus safety).
 
@@ -240,7 +240,7 @@ Detailed further in [`design-wal.md`](design-wal.md) §4.
 | --- | --- | --- |
 | `max_inflight_proposals` | 32 | `PaxosConfig` (total semaphore permits) |
 | `inflight_queues` | 1 | `PaxosConfig` (number of admission semaphores) |
-| `inflight_admission` | `Reject` | `PaxosConfig` (`Reject` or `Queue`) |
+| `inflight_admission` | `Queue` | `PaxosConfig` (internal, not CLI-exposed) |
 | `max_paxos_retries` | 3 | `PaxosConfig` (per-slot Phase-2 retries) |
 | `max_slot_retries` | 3 | `PaxosConfig` (new-slot retries before giving up) |
 | `retry_base_backoff_ms` | 5 | `PaxosConfig` (exponential backoff base) |

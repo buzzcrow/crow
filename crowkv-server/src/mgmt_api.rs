@@ -20,7 +20,7 @@ use crowkv::cluster::kv_server::KvServer;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crowkv::cluster::px_kv_store::PxKvStore;
 use crowkv::cluster::remote_replica::PxRemoteReplica;
-use crowkv::common::config::ServerConfig;
+use crowkv::common::config::{AdmissionPolicy, ServerConfig};
 
 use crate::operation_registry::{AppState, Operation, OperationKind, OperationStatus, OperationTarget};
 use crate::startup::create_group_with_wal;
@@ -581,7 +581,7 @@ async fn add_group(
         "log",
         state.max_inflight,
         state.inflight_queues,
-        state.inflight_admission,
+        AdmissionPolicy::Queue,
     )
     .await
     .map_err(|e| {
@@ -707,7 +707,7 @@ async fn join_group_via_snapshot(
         "log",
         state.max_inflight,
         state.inflight_queues,
-        state.inflight_admission,
+        AdmissionPolicy::Queue,
     )
     .await
     .map_err(|e| {

@@ -73,11 +73,6 @@ pub struct RunArgs {
     /// spawned server). Default: 1.
     #[arg(long, default_value_t = 1)]
     pub inflight_queues: usize,
-
-    /// Admission policy (--inflight-admission on each spawned server):
-    /// `reject` or `queue`. Default: `reject`.
-    #[arg(long, default_value = "reject", value_parser = ["reject", "queue"])]
-    pub inflight_admission: String,
 }
 
 /// Arguments for `crowkv-cli bench`.
@@ -133,21 +128,14 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
 
     println!("provisioning 3-node cluster ({} mode)...", mode.label());
     let _ = std::io::Write::flush(&mut std::io::stdout());
-    let mut fixture = match BenchFixture::new(
-        mode,
-        workspace_dir,
-        args.max_inflight,
-        args.inflight_queues,
-        &args.inflight_admission,
-    )
-    .await
-    {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("error: provision cluster: {e}");
-            return ExitCode::from(2);
-        }
-    };
+    let mut fixture =
+        match BenchFixture::new(mode, workspace_dir, args.max_inflight, args.inflight_queues).await {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("error: provision cluster: {e}");
+                return ExitCode::from(2);
+            }
+        };
 
     let mut cfg = BenchConfig::defaults(fixture.leader_endpoint().to_string(), kind);
     cfg.store_id = STORE_ID;

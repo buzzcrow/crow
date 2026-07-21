@@ -510,9 +510,6 @@ pub struct DeployNodeServerBody {
     /// `--inflight-queues` value for multi-queue admission.
     #[serde(default)]
     inflight_queues: Option<usize>,
-    /// `--inflight-admission` value: `"reject"` or `"queue"`.
-    #[serde(default)]
-    inflight_admission: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -601,7 +598,6 @@ pub async fn http_deploy_node_server(
         metrics_interval: body.metrics_interval,
         max_inflight: body.max_inflight,
         inflight_queues: body.inflight_queues,
-        inflight_admission: body.inflight_admission,
     };
 
     let deployed = if node.ssh_enabled() {

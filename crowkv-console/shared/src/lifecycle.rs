@@ -50,9 +50,6 @@ pub struct DeployRequest {
     /// `--inflight-queues` value. `None` leaves the spawned server's
     /// own default in effect.
     pub inflight_queues: Option<usize>,
-    /// `--inflight-admission` value (`"reject"` or `"queue"`). `None`
-    /// leaves the spawned server's own default in effect.
-    pub inflight_admission: Option<String>,
 }
 
 /// Result of a successful deploy. Persist these fields onto the
@@ -130,9 +127,6 @@ fn apply_benchmark_flags(cmd: &mut Command, req: &DeployRequest) {
     }
     if let Some(queues) = req.inflight_queues {
         cmd.arg("--inflight-queues").arg(queues.to_string());
-    }
-    if let Some(admission) = &req.inflight_admission {
-        cmd.arg("--inflight-admission").arg(admission);
     }
 }
 
