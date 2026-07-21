@@ -101,6 +101,11 @@ async fn segment_reader_reads_text_line_records() {
     assert_eq!(decoded1, r1);
     assert_eq!(decoded2, r2);
     assert!(reader.next_record().await.unwrap().is_none());
+
+    let footer = reader.read_footer().await.unwrap().unwrap();
+    assert_eq!(footer.min_slot, 10);
+    assert_eq!(footer.max_slot, 20);
+    assert_eq!(footer.record_count, 2);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
