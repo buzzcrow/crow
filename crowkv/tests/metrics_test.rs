@@ -356,8 +356,8 @@ async fn wal_fsync_and_write_bw_counts_match() {
     let registry = Arc::new(Mutex::new(MetricsRegistry::new()));
     {
         let mut r = registry.lock().unwrap();
-        let fsync_summary = r.register_summary("s.0.g.1.wal.fsync.l");
-        let write_bw = r.register_bandwidth("s.0.g.1.wal.write.bw");
+        let fsync_summary = r.register_summary("s.0.g.1.wal.file.fsync.l");
+        let write_bw = r.register_bandwidth("s.0.g.1.wal.file.write.bw");
         wal.set_fsync_metrics(fsync_summary, write_bw);
     }
 
@@ -382,9 +382,15 @@ async fn wal_fsync_and_write_bw_counts_match() {
     }
     let out = String::from_utf8(buf).unwrap();
 
-    // wal.fsync.l and wal.write.bw should both appear with non-zero count.
-    assert!(out.contains("wal.fsync.l"), "missing wal.fsync.l in:\n{out}");
-    assert!(out.contains("wal.write.bw"), "missing wal.write.bw in:\n{out}");
+    // wal.file.fsync.l and wal.file.write.bw should both appear with non-zero count.
+    assert!(
+        out.contains("wal.file.fsync.l"),
+        "missing wal.file.fsync.l in:\n{out}"
+    );
+    assert!(
+        out.contains("wal.file.write.bw"),
+        "missing wal.file.write.bw in:\n{out}"
+    );
 
     std::fs::remove_dir_all(&dir).ok();
 }

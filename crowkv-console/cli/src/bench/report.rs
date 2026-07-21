@@ -631,7 +631,7 @@ pub fn parse_metrics_log(content: &str) -> ServerMetrics {
             LogSection::Summary => {
                 let name = fields[0];
                 let count: u64 = fields[1].parse().unwrap_or(0);
-                if name.contains(".wal.append.") {
+                if name.contains(".wal.") && name.contains(".append.") {
                     metrics.wal_append_count += count;
                 }
             }
@@ -808,7 +808,7 @@ name             count  tps(/s)  avg(us)  p50(us)  p99(us)  max(us)
 s.1.kv.put.lh       10        10       50       48       90      95
 s.1.kv.get.lh        5         5       20       19       30      31
 name             count  tps(/s)  avg(us)  max(us)
-s.1.g.1.wal.append.l   10        10       12       20
+s.1.g.1.wal.file.append.l   10        10       12       20
 misc
 sys.cpu_user_us  1000
 sys.cpu_sys_us   200
@@ -820,7 +820,7 @@ sys.tcp_lost     0
 name             count  tps(/s)  avg(us)  p50(us)  p99(us)  max(us)
 s.1.kv.put.lh       20        20       55       50       99      101
 name             count  tps(/s)  avg(us)  max(us)
-s.1.g.1.wal.append.l   20        20       13       22
+s.1.g.1.wal.file.append.l   20        20       13       22
 misc
 sys.cpu_user_us  1100
 sys.cpu_sys_us   210

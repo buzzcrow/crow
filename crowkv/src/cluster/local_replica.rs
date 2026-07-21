@@ -833,10 +833,11 @@ impl PxLocalReplica {
         };
         let _ = self.election_handles.set(handles);
         if let Some(ref wal) = self.wal {
-            let append_summary = r.register_summary(format!("{prefix}.wal.append.l"));
+            let bl = wal.backend_label();
+            let append_summary = r.register_summary(format!("{prefix}.wal.{bl}.append.l"));
             wal.set_append_summary(append_summary);
-            let fsync_summary = r.register_summary(format!("{prefix}.wal.fsync.l"));
-            let write_bw = r.register_bandwidth(format!("{prefix}.wal.write.bw"));
+            let fsync_summary = r.register_summary(format!("{prefix}.wal.{bl}.fsync.l"));
+            let write_bw = r.register_bandwidth(format!("{prefix}.wal.{bl}.write.bw"));
             wal.set_fsync_metrics(fsync_summary, write_bw);
         }
     }
