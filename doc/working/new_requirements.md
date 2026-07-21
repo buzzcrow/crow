@@ -75,14 +75,6 @@ complexity, and dependency. Before implementation, follow the
   the Rust caller could eliminate the value copy. See
   [`read-flow-analysis.md`](read-flow-analysis.md) Memory Copy
   Analysis for the full audit.
-- **R22** — Zero-copy Batch decode — Area: kv / consensus —
-  `Batch::decode` does `to_vec()` per key and per value, creating O(n)
-  heap allocations on every `learn_chosen` call. Changing `Op` and
-  `BatchOp` from `Vec<u8>` to `Bytes` allows `Batch::decode` to use
-  `Bytes::slice` (O(1) ref-count bump) instead of `to_vec()`, sharing
-  the `PxLogEntry.payload` allocation. See
-  [`write-flow-analysis.md`](write-flow-analysis.md) Memory Copy
-  Analysis for the full audit.
 
 ### Low Priority
 
@@ -791,76 +783,6 @@ elimination is Medium complexity.
 - The epoch guard is held until the `PinnedValue` is dropped.
 - `InMemKV` continues to work (returns owned `Vec<u8>` as before, or
   adapts to the new trait signature).
-
----
-
-### R22: Zero-copy Batch decode
-
-**Problem**: `Batch::decode` (`op.rs:54`) decodes the Paxos payload
-into `Vec<BatchOp>` where each `BatchOp` owns `key: Vec<u8>` and
-`Op::Put(Vec<u8>)`. Each `to_vec()` is an O(n) heap allocate + memcpy.
-For a batch with K keys and total payload size N, this is K+1
-allocations and N bytes of memcpy — on every `learn_chosen` call,
-i.e. on every write.
-
-The `PxLogEntry.payload` is already `Bytes` (ref-counted, shared
-across the accept path). `Batch::decode` could use `Bytes::slice(range)`
-to create zero-copy views into the same allocation, eliminating all
-`to_vec()` calls.
-
-**Root cause**: `Op` and `BatchOp` use `Vec<u8>` for key and value
-storage. `Vec<u8>` requires ownership of the underlying allocation, so
-`Batch::decode` must copy. `Bytes` supports zero-copy slicing via
-`Bytes::slice(range)` — O(1) ref-count bump, no allocation.
-
-**Approach**:
-- Change `Op::Put(Vec<u8>)` → `Op::Put(Bytes)`.
-- Change `BatchOp.key: Vec<u8>` → `BatchOp.key: Bytes`.
-- Change `Batch::decode` signature from `decode(payload: &[u8])` to
-  `decode(payload: &Bytes)`. Use `payload.slice(start..end)` instead
-  of `payload.get(..).to_vec()`.
-- Change `apply_entry` in `learner.rs` from `payload: &[u8]` to
-  `payload: &Bytes`, and the call site from `entry.payload.as_ref()`
-  to `&entry.payload`.
-- Update `CrowtreeEngine::apply` to use `b.key.as_ref()` and
-  `v.as_ref()` when mapping to `CtBatchOp`.
-- Update `InMemKV::apply` (test engine) to use `Bytes::clone` instead
-  of `Vec::clone`.
-- `Cell`, `EngineDiff` stay `Vec<u8>` — they are engine-internal
-  storage and comparison types, separate from the decode path.
-- `KVEngine` trait signature unchanged — still takes `&Batch`.
-
-**Alternatives considered**:
-- **Lifetime parameter on `Batch`** (`Batch<'a>`): would ripple through
-  `KVEngine` trait, all engine impls, and all callers. High complexity,
-  no benefit over `Bytes` (which is owned + zero-copy).
-- **Borrowed slices (`&[u8]`)**: same lifetime problem as above.
-  `Bytes` is the standard solution for owned + zero-copy in Rust.
-
-**Priority**: Medium — eliminates one O(n) copy pass on every write.
-  For small payloads (≤512 B) the effect is negligible, but for large
-  payloads (≥1 MB) or high-throughput batch writes with many keys, the
-  savings are meaningful.
-
-**Complexity**: Low-Medium — mechanical type change, no trait or
-  lifetime changes, ~7 files.
-
-**Files**: `crowkv/src/kv/op.rs` (`Op`, `BatchOp`, `Batch::decode`),
-`crowkv/src/paxos/learner.rs` (`apply_entry`),
-`crowkv/src/kv/crowtree_engine.rs` (`apply`),
-`crowkv/tests/kv/mem_kv_impl.rs` (`InMemKV::apply`),
-`crowkv/tests/kv/conformance.rs` (`put`/`del` helpers),
-`crowkv/tests/kv/op_codec_test.rs` (test helpers + assertions),
-`crowkv/tests/kv/mem_kv_test.rs` (`Batch::decode` call sites),
-`crowkv/tests/wal/replay_tests.rs` (`Batch::decode` call sites).
-
-**Acceptance**:
-- All existing KV, WAL replay, and op codec tests pass unchanged.
-- No `to_vec()` call in `Batch::decode`.
-- `Batch::decode` uses `Bytes::slice` for zero-copy key/value
-  extraction.
-- `cargo clippy -- -D warnings` passes.
-- `cargo fmt --check` passes.
 
 ---
 
