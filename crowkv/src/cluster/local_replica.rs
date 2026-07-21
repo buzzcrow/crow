@@ -642,13 +642,17 @@ impl PxLocalReplica {
         self.election_state.lock().clone()
     }
 
-    /// Cascade shutdown into acceptor + learner.
+    /// Cascade shutdown: flush + persist engine state, then rely on
+    /// `Drop` for acceptor/learner resource release (slot list reclaim,
+    /// in-memory KV map drop).
     ///
-    /// Acceptor and learner currently rely on `Drop` for resource release
-    /// (slot list reclaim, in-memory KV map drop). The explicit cascade is a
-    /// hook for future persistence layers (P3) which will need to flush.
+    /// The maintenance loop is already cancelled by `PxGroup::shutdown`
+    /// before this method is called, so there is no concurrent
+    /// flush/snapshot risk. `flush()` drains L0 memtable into L1 B+tree
+    /// (in-memory); `persist_snapshot()` writes dirty L1 pages + superblock
+    /// to the page store (disk). For `InMemKV` both are no-ops.
     #[tracing::instrument(level = "debug", skip_all, fields(replica_l_id = self.id))]
-    #[allow(clippy::unused_async)] // async kept for cascade uniformity (P3 will await flush)
+    #[allow(clippy::unused_async)] // async kept for cascade uniformity
     pub async fn shutdown(&self, _per_layer_timeout: Duration) -> OperationReport {
         if self.shutdown_started.swap(true, Ordering::AcqRel) {
             debug!(
@@ -657,9 +661,25 @@ impl PxLocalReplica {
             );
             return OperationReport::new();
         }
+
+        let engine = self.learner.engine();
+        engine.flush();
+        let snap_slot = engine.persist_snapshot();
+        if snap_slot > 0 {
+            info!(
+                replica_l_id = self.id,
+                snapshot_slot = snap_slot,
+                "PxLocalReplica shutdown: engine snapshot persisted"
+            );
+        } else {
+            debug!(
+                replica_l_id = self.id,
+                "PxLocalReplica shutdown: no durable snapshot (non-durable engine or no data)"
+            );
+        }
         info!(
             replica_l_id = self.id,
-            "PxLocalReplica shutdown (acceptor/learner cleanup deferred to Drop)"
+            "PxLocalReplica shutdown complete (acceptor/learner cleanup deferred to Drop)"
         );
         OperationReport::new()
     }

@@ -74,8 +74,22 @@ API, not just at CLI bootstrap.
 ### 2.6 Shutdown
 
 On SIGINT/SIGTERM, Axum stops accepting new HTTP requests, then
-`graceful_shutdown` cascades through each store: `stop()` then
-`join().await` (waits for gRPC tasks to finish).
+`graceful_shutdown` cascades through each store:
+
+1. **`PxKvStore::shutdown`** — stops the gRPC server (cuts frontend
+   load), then cascades into each group.
+2. **`PxGroup::shutdown`** — cancels the tenure token and awaits the
+   election driver + maintenance loop, closes remote gRPC channels,
+   then cascades into the local replica.
+3. **`PxLocalReplica::shutdown`** — calls `KVEngine::flush` (drain L0
+   memtable into L1 B+tree, in-memory) then
+   `KVEngine::persist_snapshot` (write dirty L1 pages + superblock to
+   the page store, durable). For `InMemKV` both are no-ops. Acceptor
+   and learner resource release is deferred to `Drop`.
+
+This ensures in-memory engine state reaches the block file before the
+process exits, so `resume_from_slot` is non-zero on restart and WAL
+replay can skip the durable prefix.
 
 ## 3. Port Pool
 

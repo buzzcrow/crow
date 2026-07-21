@@ -62,6 +62,11 @@ complexity, and dependency. Before implementation, follow the
   `use_direct_io` flag for O_DIRECT control. Enables bench mode that
   hits all block code paths (alignment, RMW, `pwrite`) at high TPS via
   `wal_skip_fsync`.
+- **R20** — Durable flush on graceful shutdown — Area: crowkv-server /
+  crowkv — `PxLocalReplica::shutdown` is a no-op; in-memory engine state
+  (L0 memtable + L1 B+tree) is lost on process exit. Wire
+  `KVEngine::flush` + `KVEngine::persist_snapshot` into the shutdown
+  cascade so data reaches the block file before the process exits.
 - **R17** — Async engine apply after quorum — Area: consensus / engine —
   `learn_chosen` (decode payload + `KVEngine::apply`) runs on the
   proposer critical path before `ProposeResult::Chosen` is returned to
@@ -1022,6 +1027,111 @@ helpers.
   alignment/RMW/`pwrite` code paths.
 - `cargo fmt --check`, `cargo clippy -- -D warnings` pass.
 - Crowtree C++ tests pass unchanged (no structural change on C++ side).
+
+---
+
+### R20: Durable flush on graceful shutdown
+
+**Problem**: `PxLocalReplica::shutdown`
+(`crowkv/src/cluster/local_replica.rs:652-665`) is a no-op — it logs
+and returns an empty `OperationReport`. The comment explicitly defers
+flush work to "future persistence layers (P3)":
+
+```rust
+/// Acceptor and learner currently rely on `Drop` for resource release
+/// (slot list reclaim, in-memory KV map drop). The explicit cascade is a
+/// hook for future persistence layers (P3) which will need to flush.
+#[allow(clippy::unused_async)] // async kept for cascade uniformity (P3 will await flush)
+pub async fn shutdown(&self, _per_layer_timeout: Duration) -> OperationReport {
+```
+
+Meanwhile `CrowtreeEngine` writes data only to in-memory structures
+(L0 memtable → L1 B+tree) during normal operation. Disk writes happen
+exclusively in `Crowtree::snapshot` (called via
+`KVEngine::persist_snapshot`), which is triggered by the maintenance
+loop only when slot/time thresholds are met
+(`snapshot_slot_threshold: 10_000`,
+`snapshot_time_threshold_ms: 20_000` for the e2e profile).
+
+If the process receives SIGINT/SIGTERM before those thresholds are met,
+all in-memory state is lost. The block file (`*.blk-XXXX`) remains at 0
+bytes. On restart, the engine's `resume_from_slot` returns 0, forcing a
+full WAL replay — which is correct but wasteful, and for short-lived
+bench runs means no data is persisted at all.
+
+**Current shutdown cascade**:
+
+1. `main.rs::graceful_shutdown` →
+2. `PxKvStore::shutdown` — stops gRPC server (cuts frontend load), then
+   cascades into each group →
+3. `PxGroup::shutdown` — cancels tenure token, awaits election driver +
+   maintenance loop, closes remote gRPC channels, then →
+4. `PxLocalReplica::shutdown` — **no-op** ← the gap
+
+**Approach**: Wire `KVEngine::flush` + `KVEngine::persist_snapshot`
+into `PxLocalReplica::shutdown`. The maintenance loop is already
+cancelled (step 0 in `PxGroup::shutdown`) before the local replica
+shuts down, so there is no concurrent flush/snapshot risk.
+
+The shutdown method should:
+1. Call `engine.flush()` — drain L0 memtable into L1 B+tree (in-memory,
+   cheap, always safe).
+2. Call `engine.persist_snapshot()` — write dirty L1 pages + superblock
+   to the page store (disk I/O, the expensive part).
+3. Log the snapshot slot returned by `persist_snapshot` at `info` level.
+4. If `persist_snapshot` returns 0 (e.g. `InMemKV` or empty engine), log
+   at `debug` and continue — this is a no-op for non-durable engines.
+5. Report errors via `OperationReport` (matching the cascade contract).
+
+No timeout wrapping is needed for `flush` (synchronous, in-memory).
+`persist_snapshot` is also synchronous (FFI call into C++ `Crowtree`
+which takes `write_mutex_` and does `write_at` + `sync`); it should
+complete quickly for small datasets. The existing `per_layer_timeout`
+parameter is retained for cascade uniformity but not actively used for
+the engine calls — if the FFI call hangs, the process is already in
+shutdown and the OS will kill it.
+
+**Alternatives considered**:
+- **Flush-only (no snapshot)**: Just drain L0→L1 but don't persist to
+  disk. Rejected — L1 is still in-memory; data is still lost on exit.
+  Only `snapshot` writes to the page store.
+- **Call maintenance `run_pass` before shutdown**: Rejected — the
+  maintenance loop is already cancelled; calling `run_pass` directly
+  would bypass the threshold gating and always snapshot, which is the
+  desired behavior for shutdown, but `run_pass` also does GC and WAL GC
+  which are unnecessary during shutdown. Better to call the engine
+  methods directly.
+- **Add a `KVEngine::shutdown` trait method**: Rejected — `flush` +
+  `persist_snapshot` already cover the needed semantics. A new trait
+  method would add API surface for no benefit.
+
+**Priority**: Medium — data loss on every graceful shutdown is a
+correctness issue for durable engines, though WAL replay compensates
+on restart. The block file remaining empty is confusing for operators
+and wasteful for short-lived runs.
+
+**Complexity**: Low — ~30 lines in `PxLocalReplica::shutdown`, update
+doc comments, update `design-kv-server.md` §2.6, add one regression
+test.
+
+**Files**:
+- `crowkv/src/cluster/local_replica.rs` — `shutdown` method: call
+  `engine.flush()` + `engine.persist_snapshot()`, error handling,
+  logging.
+- `doc/design/design-kv-server.md` — §2.6 Shutdown: update to describe
+  the full cascade including engine flush + snapshot.
+
+**Acceptance**:
+- After graceful shutdown of a `CrowtreeEngine`-backed server, the
+  block file (`*.blk-XXXX`) is non-zero (contains persisted pages).
+- After restart, `resume_from_slot` returns the slot persisted by the
+  shutdown snapshot (not 0), and WAL replay skips the durable prefix.
+- `InMemKV`-backed servers: `persist_snapshot` returns 0, no error,
+  shutdown is clean.
+- Existing shutdown tests pass (cascade idempotency, error aggregation).
+- New regression test: start a server with block backend, write data,
+  gracefully shut down, restart, verify data is readable without full
+  WAL replay (or verify block file is non-zero).
 
 ---
 
