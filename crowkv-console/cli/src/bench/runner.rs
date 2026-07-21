@@ -300,7 +300,6 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
     }
 
     let finished_at = Utc::now();
-    let actual_duration = started_instant.elapsed();
     let total_attempts: u64 = by_kind.values().map(|s| s.ops).sum();
     let total_errors: u64 = by_kind.values().map(|s| s.errors).sum();
     let total_ops = total_attempts - total_errors;
@@ -318,10 +317,14 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
         format!("bench-{ms}-{:?}", cfg.workload).to_ascii_lowercase()
     });
 
-    // Measurement duration excludes the warmup window. For a 5 s run
-    // with `warmup = 1 s`, `duration_ms` reads as ≈ 4000.
-    let measure_ms =
-        u64::try_from(actual_duration.saturating_sub(warmup_dur).as_millis()).unwrap_or(u64::MAX);
+    // Measurement window is the configured duration minus warmup.
+    // Workers stop at `deadline = started_instant + cfg.duration` and
+    // only record between `measure_start` and `deadline`, so the
+    // effective injection window is exactly `cfg.duration - warmup`.
+    // Using `actual_duration` would include post-deadline overhead
+    // (worker join, metrics flush), inflating the denominator and
+    // deflating reported TPS.
+    let measure_ms = u64::try_from(cfg.duration.saturating_sub(warmup_dur).as_millis()).unwrap_or(u64::MAX);
     let warmup_ms = u64::try_from(warmup_dur.as_millis()).unwrap_or(u64::MAX);
 
     let report = BenchReport {

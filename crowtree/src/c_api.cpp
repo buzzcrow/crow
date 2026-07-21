@@ -215,6 +215,20 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
     o.group_id    = opt->group_id;
     o.name        = "s" + std::to_string(opt->store_id) + ".g" + std::to_string(opt->group_id);
 
+    // Set backend label for metric names
+    {
+        const bool durable = opt->path != nullptr && opt->path[0] != '\0';
+        if (!durable || opt->backend == CT_BACKEND_MEM_BLOCK) {
+            o.backend_label = "mem";
+        }
+        else if (opt->backend == CT_BACKEND_FILE) {
+            o.backend_label = "file";
+        }
+        else {
+            o.backend_label = "block";
+        }
+    }
+
     // Map ct_sync_mode → SyncMode
     SyncMode sm = SyncMode::kFull;
     switch (opt->sync_mode) {

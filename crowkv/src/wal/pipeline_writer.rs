@@ -180,8 +180,9 @@ async fn pipeline_writer_loop(
     loop {
         // Block until at least one command arrives (zero CPU when idle).
         let Some(cmd) = rx.recv().await else {
-            // Channel closed — engine dropped. Seal and exit.
+            // Channel closed — engine dropped. Seal and flush, then exit.
             let _ = segment.seal().await;
+            let _ = segment.flush().await;
             register_sealed(&index, &segment, pipeline_idx);
             return;
         };

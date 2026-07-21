@@ -69,6 +69,15 @@ constexpr uint64_t kAnchorBytes = 4096;
 // next_page_id,segment_slots,segdir_addr,segdir_len,segdir_crc,anchor_crc.
 constexpr size_t kAnchorFixedFields = 4 + 4 + (8 * 4) + 4 + 8 + 4 + 4 + 4;
 
+std::string make_metrics_prefix(const Options &opt)
+{
+    std::string prefix = "s." + std::to_string(opt.store_id) + ".g." + std::to_string(opt.group_id);
+    if (!opt.backend_label.empty()) {
+        prefix += ".ct." + opt.backend_label;
+    }
+    return prefix;
+}
+
 // Per-store anchor slot size and the byte offset where the page/segment
 // region begins (two A/B anchor slots precede it).
 inline uint64_t superblock_slot_bytes(uint32_t iu)
@@ -974,7 +983,7 @@ Status Crowtree::open(const Options &opt, std::unique_ptr<Crowtree> *out)
     if (!read_best_anchor(*store, iu, &anchor)) {
         // No valid snapshot: fresh empty tree (already constructed).
         CT_LOG_INFO("[{}] open: no committed anchor; starting empty", opt.name);
-        tree->init_metrics("s." + std::to_string(opt.store_id) + ".g." + std::to_string(opt.group_id));
+        tree->init_metrics(make_metrics_prefix(opt));
         *out = std::move(tree);
         return Status::Ok();
     }
@@ -1041,7 +1050,7 @@ Status Crowtree::open(const Options &opt, std::unique_ptr<Crowtree> *out)
 
     CT_LOG_INFO("[{}] open: recovered seq={} last_applied={} root_pid={} segments={}", opt.name, anchor.snapshot_seq,
                 anchor.last_applied_slot, anchor.root_page_id, entries.size());
-    tree->init_metrics("s." + std::to_string(opt.store_id) + ".g." + std::to_string(opt.group_id));
+    tree->init_metrics(make_metrics_prefix(opt));
     *out = std::move(tree);
     return Status::Ok();
 }

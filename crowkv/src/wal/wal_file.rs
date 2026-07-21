@@ -99,6 +99,16 @@ impl WalFile {
         }
     }
 
+    /// Explicit durable flush for shutdown/close. Calls `fsync` (real
+    /// `sync_all`) on both backends — use this instead of `fdatasync`
+    /// when a final flush is needed before dropping the segment.
+    ///
+    /// # Errors
+    /// Returns IO error if the underlying sync fails.
+    pub async fn flush(&self) -> io::Result<()> {
+        self.fsync().await
+    }
+
     /// Current file size in bytes.
     ///
     /// # Errors

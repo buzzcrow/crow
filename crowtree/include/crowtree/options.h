@@ -147,6 +147,11 @@ struct Options
     // If empty, logs show "[unnamed]".
     std::string name;
 
+    // Short backend label for metric names (e.g. "file", "block", "mem").
+    // Set by the caller before open(); included in the init_metrics prefix
+    // so C++ metrics are tagged with their storage backend.
+    std::string backend_label;
+
     // ── Logging ──
     // These fields are no longer used by Crowtree::open() — logging is now
     // process-global and must be initialized by the application via

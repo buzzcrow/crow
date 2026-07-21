@@ -166,7 +166,15 @@ impl WalEngine {
             });
         }
 
-        info!(group_id, pipeline_count, "wal engine created");
+        info!(
+            group_id,
+            pipeline_count,
+            io_backend = ?backend,
+            wal_aligned = config.wal_aligned,
+            wal_io_unit_bytes = config.wal_io_unit_bytes,
+            skip_fsync = config.wal_skip_fsync,
+            "wal engine created"
+        );
 
         Ok(Arc::new(Self {
             backend,
@@ -353,6 +361,16 @@ impl WalEngine {
         BatchStats {
             flush_count: self.flush_count.load(Ordering::Relaxed),
             records_flushed: self.records_flushed.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Short backend label for metric names (e.g. "file", "mem", "block").
+    #[must_use]
+    pub fn backend_label(&self) -> &'static str {
+        match self.backend.as_ref() {
+            IoBackend::File => "file",
+            IoBackend::MemBlock(_) => "mem",
+            IoBackend::BlockDevice(_) => "block",
         }
     }
 

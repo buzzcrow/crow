@@ -241,6 +241,16 @@ impl WalSegment {
     pub async fn fdatasync(&self) -> io::Result<()> {
         self.file.fdatasync().await
     }
+
+    /// Explicit durable flush for shutdown/close. Calls `fsync` (real
+    /// `sync_all`) — use this when a final flush is needed before
+    /// dropping the segment.
+    ///
+    /// # Errors
+    /// Returns IO error if the sync fails.
+    pub async fn flush(&self) -> io::Result<()> {
+        self.file.flush().await
+    }
 }
 
 /// Metadata from reading a segment header.

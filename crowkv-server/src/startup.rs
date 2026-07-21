@@ -88,6 +88,13 @@ async fn open_crowtree_engine(
         log_file_prefix: "crowkv-server-tree".to_string(),
         ..Default::default()
     };
+    info!(
+        store_id,
+        group_id,
+        backend = ?backend,
+        path = %path.display(),
+        "opening crowtree engine"
+    );
     // `CrowtreeEngine::open` is a synchronous FFI call; called here inline
     // (not `spawn_blocking`) consistent with `CrowtreeEngine`'s own
     // documented policy of calling the still-fully-synchronous crowtree
