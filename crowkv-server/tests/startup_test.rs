@@ -82,7 +82,7 @@ async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
         "",
         16,
         1,
-        AdmissionPolicy::Reject,
+        AdmissionPolicy::Queue,
     )
     .await
     .unwrap();
@@ -150,7 +150,7 @@ async fn crowtree_engine_persists_across_restart(crowtree_backend: CrowtreeBacke
         "",
         16,
         1,
-        AdmissionPolicy::Reject,
+        AdmissionPolicy::Queue,
     )
     .await
     .unwrap();
@@ -203,7 +203,7 @@ async fn crowtree_engine_persists_across_restart(crowtree_backend: CrowtreeBacke
         "",
         16,
         1,
-        AdmissionPolicy::Reject,
+        AdmissionPolicy::Queue,
     )
     .await
     .unwrap();

@@ -17,7 +17,13 @@ use crowkv::paxos::roles::{Learner, PxBallot, PxLogEntry};
 /// against the local acceptor with no peer RPCs.
 fn single_leader_group() -> PxGroup {
     let local = PxLocalReplica::new(1, PxLocalReplicaRole::Leader);
-    PxGroup::new(1, local)
+    let mut group = PxGroup::new(1, local);
+    group.set_inflight_config(
+        PaxosConfig::DEFAULT.max_inflight_proposals,
+        PaxosConfig::DEFAULT.inflight_queues,
+        AdmissionPolicy::Reject,
+    );
+    group
 }
 
 #[tokio::test]

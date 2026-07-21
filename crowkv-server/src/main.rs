@@ -79,7 +79,6 @@ async fn main() {
         wal_backend = %args.wal_backend,
         max_inflight = args.max_inflight,
         inflight_queues = args.inflight_queues,
-        inflight_admission = %args.inflight_admission,
         "parsed CLI arguments"
     );
 
@@ -115,10 +114,7 @@ async fn main() {
             ))
             .with_wal_skip_fsync(args.no_fsync)
             .with_max_inflight(args.max_inflight)
-            .with_inflight_queues(args.inflight_queues)
-            .with_inflight_admission(
-                AdmissionPolicy::parse(&args.inflight_admission).unwrap_or(AdmissionPolicy::Reject),
-            ),
+            .with_inflight_queues(args.inflight_queues),
     );
 
     // Populate the port pool from `--ports` even when `--stores` is not
@@ -179,7 +175,6 @@ async fn main() {
             registry.clone(),
             args.max_inflight,
             args.inflight_queues,
-            AdmissionPolicy::parse(&args.inflight_admission).unwrap_or(AdmissionPolicy::Reject),
         )
         .await;
     }
@@ -306,7 +301,6 @@ async fn create_and_start_stores(
     registry: Arc<KvStoreRegistry>,
     max_inflight: usize,
     inflight_queues: usize,
-    inflight_admission: AdmissionPolicy,
 ) {
     debug!(
         store_count = store_ids.len(),
@@ -354,7 +348,7 @@ async fn create_and_start_stores(
                 "log",
                 max_inflight,
                 inflight_queues,
-                inflight_admission,
+                AdmissionPolicy::Queue,
             )
             .await
             {

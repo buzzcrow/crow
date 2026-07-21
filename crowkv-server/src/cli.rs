@@ -98,12 +98,6 @@ pub struct Cli {
     /// `ceil(max_inflight / inflight_queues)` permits. Default: 1.
     #[arg(long, default_value_t = 1)]
     pub inflight_queues: usize,
-
-    /// Admission policy when the inflight window is full: `reject` (fail
-    /// fast with `Busy`) or `queue` (block until a permit is freed).
-    /// Default: `reject`.
-    #[arg(long, default_value = "reject", value_parser = ["reject", "queue"])]
-    pub inflight_admission: String,
 }
 
 /// Parse a comma-separated list of numbers and ranges into a `Vec<u64>`.
