@@ -6,6 +6,7 @@
 
 use crate::mem_kv::InMemKV;
 use crate::test_util::iter_all_dyn;
+use bytes::Bytes;
 use crowkv::kv::{Batch, Cell, KVEngine};
 
 use super::conformance;
@@ -114,7 +115,7 @@ fn batch_decode_matches_put_delete_wire_format() {
     buf.extend_from_slice(b"k2");
     buf.extend_from_slice(&0u32.to_le_bytes());
 
-    let decoded = Batch::decode(&buf);
+    let decoded = Batch::decode(&Bytes::from(buf));
     assert_eq!(
         decoded,
         batch(vec![put(b"k1", b"v1"), del(b"k2")]),
@@ -122,5 +123,5 @@ fn batch_decode_matches_put_delete_wire_format() {
     );
 
     // Empty payload decodes to an empty batch (NoOp repair fill).
-    assert!(Batch::decode(&[]).ops.is_empty());
+    assert!(Batch::decode(&Bytes::new()).ops.is_empty());
 }

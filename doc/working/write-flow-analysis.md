@@ -203,10 +203,12 @@ never consume a window permit.
 
 ## Tracked Optimization Opportunities
 
-- **R15 — Zero-copy PxLogEntry in accept path**: `on_accept` and
-  `inner_accept` clone `entry` (Bytes, O(1) ref-count bump). Goal:
-  acceptor takes `&PxLogEntry`, WAL encode borrows. Only unavoidable
-  clone is inside `cas_accepted` (slot node must own its copy).
+- **R15 — Zero-copy PxLogEntry in accept path** (done): `on_accept`
+  and `acceptor.accept` now take `&PxLogEntry`. All redundant clones
+  eliminated; the only remaining clone is inside `inner_accept` for
+  `cas_accepted` (slot node must own its copy, O(1) ref-count bump
+  with `Bytes` payload). See Memory Copy Analysis below for full
+  audit.
 - **R16 — Overlap local WAL fsync with remote RPC fan-out**: Local
   `fdatasync` is on the critical path before remote RPCs begin. Adds
   ~10-100 µs (NVMe) to write latency. Would weaken W6 ack contract
@@ -287,3 +289,146 @@ Parameters with **no measurable effect** on TPS (at ≤64 threads):
 - **Scaling ceiling ~50K ops/s** — per-proposal latency ~1.2ms at 64
   in-flight. Next gains require reducing per-proposal latency (R16:
   overlap WAL fsync with RPCs, R15: zero-copy accept path).
+
+---
+
+## Memory Copy Analysis
+
+Audit of every point in the write path where payload bytes are
+allocated or copied. Focus is on O(n) operations (heap allocate +
+memcpy proportional to payload size), not O(1) ref-count bumps.
+
+### Notation
+
+- **O(n) copy** = heap allocate + memcpy, proportional to payload size.
+  These are the operations that matter for large (e.g. 1 MB) payloads.
+- **O(1) ref-count** = `Bytes::clone` or `Arc::clone`, atomic ref-count
+  increment. Negligible regardless of payload size.
+- **move** = ownership transfer, zero cost.
+
+### Write Path: Client → Consensus → WAL → Engine
+
+**Step 1 — Payload encoding** (`px_kv_store.rs:608`)
+`encode_kv_payload` builds a `Vec<u8>` by `extend_from_slice` for each
+key and value.
+- **O(n) copy** — one allocation + memcpy of all keys and values into
+  a contiguous buffer. This is the initial encoding; unavoidable since
+  the client sends separate key/value slices.
+
+**Step 2 — Vec → Bytes conversion** (`group.rs:982`)
+`Bytes::from(payload)` where `payload: Vec<u8>`.
+- **move** — `Bytes::from(Vec<u8>)` reuses the existing allocation,
+  zero copy.
+
+**Step 3 — `base_entry` construction** (`group.rs:1310`)
+`base_entry(slot, payload.clone())` — called per slot retry attempt.
+- **O(1) ref-count** — `Bytes::clone` inside `PxLogEntry::clone`.
+  The retry loop clones `payload` because it is reused across attempts;
+  each clone is a ref-count bump.
+
+**Step 4 — Local accept: `on_accept` → `acceptor.accept` → `inner_accept`**
+(`local_replica.rs:1128`, `acceptor.rs:124`)
+`self.acceptor.accept(entry)` where `entry: &PxLogEntry`.
+`inner_accept` does `entry.clone()` for `cas_accepted`.
+- **O(1) ref-count** — `PxLogEntry::clone` = 3×u64 bit copy + 1×
+  `Bytes::clone` (ref-count bump). The slot node must own its copy
+  (`Box::into_raw(Box::new(new))`), so this clone is unavoidable.
+
+**Step 5 — WAL encode: `WALRecord::from_accepted`** (`record.rs:408`)
+`encode_accepted_payload(entry)` does `entry.payload.to_vec()`
+(`record.rs:487`).
+- **O(n) copy** — heap allocate + memcpy of the entire payload. This
+  is a real payload copy. The `Vec<u8>` is then wrapped in
+  `Bytes::from(vec)` for the `WALRecord.payload` field.
+
+**Step 6 — WAL frame encode** (`record.rs:199`)
+`encode_frame()` does `payload: self.payload.clone()` for the
+`RecordFrame`.
+- **O(1) ref-count** — `Bytes::clone` on the WAL record's payload.
+
+**Step 7 — WAL vectored write** (`record.rs:152`)
+`IoSlice::new(&self.payload)` borrows the frame's `Bytes`.
+- **No copy** — vectored `writev` writes directly from the `Bytes`
+  buffer to the file descriptor.
+
+**Step 8 — Remote accept: `send_accept`** (`remote_replica.rs:187`)
+`payload: entry.payload.clone()` for the protobuf `AcceptRequest`.
+- **O(1) ref-count** — `Bytes::clone` for the gRPC message. The gRPC
+  serializer then writes from this `Bytes` into the HTTP/2 frame
+  buffer (one copy into the socket buffer, unavoidable for network
+  transport).
+
+**Step 9 — Follower gRPC deserialization** (`px_service.rs:502-510`)
+`PxLogEntry { payload: value.payload }` — moves the `Bytes` from the
+deserialized protobuf message.
+- **move** — no copy. The gRPC deserializer allocates the `Bytes`
+  buffer from the network frame; ownership transfers to `PxLogEntry`.
+
+**Step 10 — Learn: `learn_chosen`** (`local_replica.rs:1152`)
+`entry.clone()` for the `Learner::learn` trait, then
+`apply_entry(slot, payload.as_ref())` passes `&[u8]`.
+- **O(1) ref-count** — `PxLogEntry::clone` for the learner call.
+
+**Step 11 — Batch decode: `Batch::decode`** (`op.rs:54`)
+`payload.get(..).to_vec()` for each key and value (`op.rs:70,75`).
+- **O(n) copy** — heap allocate + memcpy per key and per value. The
+  `Batch` owns its ops as `Vec<u8>` for each key and value.
+
+**Step 12 — FFI encode: `encode_batch`** (`crowtree/ffi/src/lib.rs:415`)
+Packs `BatchOp`s into a `Vec<u8>` for `ct_apply_batch`.
+- **O(n) copy** — heap allocate + memcpy of all keys and values into
+  the packed FFI buffer format.
+
+**Step 13 — FFI apply: `ct_apply_batch`** (C++ engine)
+The C++ engine copies the packed buffer into its internal memtable.
+- **O(n) copy** — unavoidable; the engine owns its internal storage.
+
+### WAL Replay Path
+
+**`WALRecord::to_log_entry`** (`record.rs:451`) →
+`decode_accepted_payload` does `Bytes::copy_from_slice(&rec.payload[..])`
+(`record.rs:491`).
+- **O(n) copy** — heap allocate + memcpy. Unavoidable: the WAL
+  record's `Bytes` is a different allocation from the original
+  `PxLogEntry`; replay must reconstruct the entry.
+
+### Summary Table
+
+- **O(n) copies (unavoidable):**
+  - Payload encoding — client key/value slices → contiguous `Vec<u8>`.
+  - WAL encode — `entry.payload.to_vec()` for `WALRecord`.
+  - WAL replay — `Bytes::copy_from_slice` to reconstruct `PxLogEntry`.
+  - Batch decode — `to_vec()` per key/value for `Batch` ops.
+  - FFI encode — pack ops into `Vec<u8>` for `ct_apply_batch`.
+  - C++ engine apply — internal memtable copy.
+  - gRPC socket write — kernel copies from user buffer to socket
+    buffer (unavoidable for network I/O).
+
+- **O(1) ref-count bumps (negligible):**
+  - `base_entry` payload clone per slot retry.
+  - `inner_accept` entry clone for `cas_accepted`.
+  - `send_accept` payload clone for protobuf.
+  - `learn_chosen` entry clone for learner.
+  - WAL `encode_frame` payload clone for `RecordFrame`.
+
+- **Zero-copy (move or borrow):**
+  - `Vec<u8>` → `Bytes` conversion at `propose` entry.
+  - gRPC deserialization → `PxLogEntry` (move `Bytes`).
+  - WAL vectored write (`IoSlice` borrows `Bytes`).
+
+### Optimization Opportunities
+
+- **WAL encode** (`entry.payload.to_vec()`): could be eliminated if
+  `WALRecord` stored `Bytes` directly instead of round-tripping through
+  `Vec<u8>`. Since `entry.payload` is already `Bytes`, the
+  `to_vec()` is a redundant copy — `WALRecord.payload` could be
+  `entry.payload.clone()` (O(1) ref-count). The `encode_accepted_payload`
+  function exists only as a seam for future encoding changes; today it
+  is a straight `to_vec()`.
+- **Batch decode** (`to_vec()` per key/value): could be eliminated if
+  `Batch` borrowed from the `Bytes` payload instead of owning
+  `Vec<u8>`. This would require a lifetime parameter on `Batch` and
+  ripple through the `KVEngine` trait — significant refactor.
+- **FFI encode** (`encode_batch`): could be eliminated if the C++
+  engine accepted `Bytes`-backed slices directly instead of a packed
+  buffer. Would require a new C API.

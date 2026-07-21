@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use bytes::Bytes;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 
@@ -324,7 +325,7 @@ impl PxLearner {
     /// or re-proposed. Detecting and reacting to a persistently-unhealthy
     /// local engine is [`KVEngine::apply`]'s caller's job at a layer that
     /// can see engine health across calls, not a single failed apply.
-    async fn apply_entry(&self, slot: SlotIndex, payload: &[u8]) {
+    async fn apply_entry(&self, slot: SlotIndex, payload: &Bytes) {
         let batch = Batch::decode(payload);
         if batch.ops.is_empty() {
             return;
@@ -343,7 +344,7 @@ impl PxLearner {
 
 impl Learner for PxLearner {
     async fn learn(&self, entry: PxLogEntry, client_id: Option<u64>, seq: Option<u64>) {
-        self.apply_entry(entry.slot, entry.payload.as_ref()).await;
+        self.apply_entry(entry.slot, &entry.payload).await;
         self.update_frontier(entry.slot, entry.term);
         self.record_dedup(client_id, seq, entry.slot);
     }
