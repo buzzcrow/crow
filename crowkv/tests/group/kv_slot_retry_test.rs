@@ -35,7 +35,7 @@ async fn kv_put_retries_next_slot_when_slot_has_prior_accepted_value() {
         term: 0,
         payload: bytes::Bytes::from(stale_payload.clone()),
     };
-    let reply = follower_replica.on_accept(entry).await;
+    let reply = follower_replica.on_accept(&entry).await;
     assert!(
         matches!(reply, crowkv::paxos::roles::PxAcceptReply::Accepted { .. }),
         "preload accept should succeed: {reply:?}"

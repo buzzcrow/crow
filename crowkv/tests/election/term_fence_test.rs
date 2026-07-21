@@ -63,7 +63,7 @@ async fn accept_rejects_stale_term() {
     replica.become_follower(5);
 
     let stale = write_entry(1, 1, b"old");
-    let reply = replica.on_accept(stale).await;
+    let reply = replica.on_accept(&stale).await;
     match reply {
         PxAcceptReply::TermStale { new_term, .. } => {
             assert_eq!(new_term, 5);
@@ -78,7 +78,7 @@ async fn accept_adopts_higher_term() {
     assert_eq!(replica.current_term_snapshot(), 0);
 
     let higher = write_entry(1, 9, b"v");
-    let reply = replica.on_accept(higher).await;
+    let reply = replica.on_accept(&higher).await;
     assert!(
         matches!(reply, PxAcceptReply::Accepted { .. }),
         "higher-term accept should proceed after adoption"
@@ -92,7 +92,7 @@ async fn accept_forwards_on_equal_term() {
     replica.become_follower(3);
 
     let entry = write_entry(1, 3, b"v");
-    let reply = replica.on_accept(entry).await;
+    let reply = replica.on_accept(&entry).await;
     assert!(
         matches!(reply, PxAcceptReply::Accepted { .. }),
         "equal term → forward to acceptor"

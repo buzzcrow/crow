@@ -539,7 +539,7 @@ async fn handle_accept_inner(store: &Arc<PxKvStore>, req: AcceptRequest) -> Resu
 
     let reply = <crate::cluster::local_replica::PxLocalReplica as ReplicaHandler>::on_accept(
         replica,
-        entry.clone(),
+        &entry,
         req.group_id,
     )
     .await?;
