@@ -25,6 +25,7 @@ durable accepts.
 - [2. Logical Record Shape](#2-logical-record-shape)
 - [3. Multi-Disk Segment Layout](#3-multi-disk-segment-layout)
 - [4. Write Path and Batched Durable Flush](#4-write-path-and-batched-durable-flush)
+- [4.6 I/O Backend Abstraction](#46-io-backend-abstraction)
 - [5. Ack Contract and Failure Modes](#5-ack-contract-and-failure-modes)
 - [6. Replay, Restore, and Recovery](#6-replay-restore-and-recovery)
 - [7. Garbage Collection](#7-garbage-collection)
@@ -216,6 +217,61 @@ The future-based interface decouples the acceptor's handler from disk timing and
 Different slots may be in flight on different disks at the same time. Slot N may be batching on disk 1 while slot N+1 batches on disk 2. Both durable flushes proceed in parallel. Aggregate flush throughput is `sum over disks of (1 / flush_latency)` — exactly the parallel benefit we want.
 
 Crucially, the leader's **own** durable flush is not on the critical path of remote acceptors' durable flushes. The leader persists locally, then broadcasts; remote acceptors flush in parallel. Two durable flushes total in serial: leader's, and the slowest of the quorum. With multiple disks each durable flush can itself be parallelized internally, but the consensus-level parallelism is what dominates throughput.
+
+### 4.6 I/O backend abstraction
+
+The WAL dispatches all file operations through `IoBackend`, a process-lifetime
+enum with three variants:
+
+- **`File`** — `tokio::fs` + `spawn_blocking` for `fdatasync`. The production
+  default; works everywhere. `fdatasync` is a no-op (only `fsync` on close
+  calls `sync_all`).
+- **`MemBlock(MemBlockDevice)`** — in-memory test harness. Stores segments as
+  `BTreeMap<PathBuf, Vec<u8>>` with error injection (`inject_io_error`,
+  `inject_sync_error`, `set_full`), corruption injection
+  (`corrupt_at_offset`), and layout tracking. `fdatasync` is a no-op (data is
+  already "durable" in RAM). Used by all unit/integration tests.
+- **`BlockDevice(BlockDevice)`** — real file-backed block device. Always opens
+  OS paths and does positional I/O (`pwrite`/`pread`) via `FileExt`.
+  `fdatasync` calls `sync_data`. Whether the path is a regular file, a raw
+  block device, or a tmpfs file makes no difference — in Unix, a block device
+  *is* a file.
+
+`BlockDevice` has two constructors selected by the `O_DIRECT` flag:
+
+- `BlockDevice::new()` — aligned (4K), buffered (no `O_DIRECT`). Default for
+  benchmarks and general use. All alignment/RMW logic runs, `fdatasync`
+  performs a real `sync_data`, but the page cache absorbs writes.
+- `BlockDevice::ssd()` — aligned (4K), `O_DIRECT` (Linux only). Models a real
+  SSD/NVMe with direct I/O bypassing the page cache.
+
+`MemBlockDevice` has two constructors selected by alignment:
+
+- `MemBlockDevice::new()` — unaligned (IU=1, byte-addressable). Models RAM /
+  SCM / PMEM. Default for tests.
+- `MemBlockDevice::with_alignment(align)` — aligned in-memory. For testing
+  RMW logic without real files.
+
+Both `BlockDevice` and `MemBlockDevice` track write counts, fdatasync counts,
+logical/physical bytes written, and RMW counts for observability. The
+`WalEngine::backend_label()` method returns a short string (`"file"`,
+`"mem"`, `"block"`) for metric names. `WalEngine::block_device_snapshot()`
+reads cumulative counters for the engine collector to compute per-window
+deltas.
+
+The WAL bench (`crowkv/benches/wal.rs`) exercises three backends: `Mem`
+(in-memory `MemBlockDevice`), `File` (`tokio::fs`), and `Block`
+(`BlockDevice::new()` with `wal_skip_fsync: true`). The `Block` case hits all
+block code paths (alignment planning, RMW, amplification tracking,
+`pwrite`/`pread` syscalls) at high TPS since `fdatasync` is skipped per
+batch.
+
+The crowtree C++ storage layer has a similar but cleaner separation:
+`TextPageStore` (debug text files), `MemPageStore` (in-memory), and
+`BlockPageStore` (real block device with `O_DIRECT`). Each is a distinct C++
+class — no flag-based branching. The Rust FFI `PageStoreBackend` enum (`File`,
+`Block`, `MemBlock`) maps to these. No structural change was needed on the
+crowtree side for this refactor.
 
 ---
 
