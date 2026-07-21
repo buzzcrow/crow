@@ -839,6 +839,14 @@ impl PxLocalReplica {
             let fsync_summary = r.register_summary(format!("{prefix}.wal.{bl}.fsync.l"));
             let write_bw = r.register_bandwidth(format!("{prefix}.wal.{bl}.write.bw"));
             wal.set_fsync_metrics(fsync_summary, write_bw);
+            if wal.backend().is_block_device() {
+                let handles = crate::wal::wal_engine::BlockDeviceCounterHandles {
+                    logical_bytes: r.register_counter(format!("{prefix}.wal.{bl}.logical_bytes.c")),
+                    physical_bytes: r.register_counter(format!("{prefix}.wal.{bl}.physical_bytes.c")),
+                    rmw: r.register_counter(format!("{prefix}.wal.{bl}.rmw.c")),
+                };
+                wal.set_block_device_counters(handles);
+            }
         }
     }
 

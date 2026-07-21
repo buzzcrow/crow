@@ -17,7 +17,7 @@ use tokio::sync::oneshot;
 use tracing::{info, trace};
 
 use crate::common::config::WalConfig;
-use crate::metrics::{Bandwidth, LatencySummary};
+use crate::metrics::{Bandwidth, Counter, LatencySummary};
 use crate::paxos::roles::SlotIndex;
 use crate::paxos::PxGroupId;
 
@@ -35,6 +35,23 @@ pub struct BatchStats {
     pub flush_count: u64,
     /// Total number of records flushed across all batches.
     pub records_flushed: u64,
+}
+
+/// Cumulative block device counter snapshot, read by the engine collector
+/// to compute per-window deltas for the metrics registry.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BlockDeviceSnapshot {
+    pub logical_bytes_written: u64,
+    pub physical_bytes_written: u64,
+    pub rmw_count: u64,
+}
+
+/// Registered counter handles for block device metrics. Stored on
+/// `WalEngine` via `OnceLock` and polled by the engine collector.
+pub struct BlockDeviceCounterHandles {
+    pub logical_bytes: Arc<Counter>,
+    pub physical_bytes: Arc<Counter>,
+    pub rmw: Arc<Counter>,
 }
 
 impl BatchStats {
@@ -84,6 +101,10 @@ pub struct WalEngine {
     /// Optional bandwidth handle for batch write bytes. Shared with writer
     /// tasks via `Arc<OnceLock>` so it can be set after spawn.
     write_bandwidth: Arc<OnceLock<Arc<Bandwidth>>>,
+    /// Optional block device counter handles for logical/physical bytes and
+    /// RMW count. Set via [`Self::set_block_device_counters`] when a metrics
+    /// registry is wired and the backend is `BlockDevice` or `MemBlock`.
+    block_device_counters: OnceLock<BlockDeviceCounterHandles>,
 }
 
 impl Drop for WalEngine {
@@ -192,6 +213,7 @@ impl WalEngine {
             append_summary: OnceLock::new(),
             fsync_summary,
             write_bandwidth,
+            block_device_counters: OnceLock::new(),
         }))
     }
 
@@ -387,6 +409,40 @@ impl WalEngine {
     pub fn set_fsync_metrics(&self, fsync: Arc<LatencySummary>, bandwidth: Arc<Bandwidth>) {
         let _ = self.fsync_summary.set(fsync);
         let _ = self.write_bandwidth.set(bandwidth);
+    }
+
+    /// Attach block device counter handles for logical/physical bytes and
+    /// RMW count. Called once during group creation when a metrics registry
+    /// is available and the backend is `BlockDevice` or `MemBlock`.
+    pub fn set_block_device_counters(&self, handles: BlockDeviceCounterHandles) {
+        let _ = self.block_device_counters.set(handles);
+    }
+
+    /// Read cumulative block device counters for the engine collector's
+    /// pre-flush poll. Returns `None` when no block device counters are
+    /// registered (e.g. `File` backend or no metrics registry).
+    #[must_use]
+    pub fn block_device_snapshot(&self) -> Option<BlockDeviceSnapshot> {
+        let _handles = self.block_device_counters.get()?;
+        match self.backend.as_ref() {
+            IoBackend::BlockDevice(dev) => Some(BlockDeviceSnapshot {
+                logical_bytes_written: dev.logical_bytes_written(),
+                physical_bytes_written: dev.physical_bytes_written(),
+                rmw_count: dev.rmw_count(),
+            }),
+            IoBackend::MemBlock(dev) => Some(BlockDeviceSnapshot {
+                logical_bytes_written: dev.logical_bytes_written(),
+                physical_bytes_written: dev.physical_bytes_written(),
+                rmw_count: dev.rmw_count(),
+            }),
+            IoBackend::File => None,
+        }
+    }
+
+    /// Access the block device counter handles, if registered.
+    #[must_use]
+    pub fn block_device_counter_handles(&self) -> Option<&BlockDeviceCounterHandles> {
+        self.block_device_counters.get()
     }
 }
 

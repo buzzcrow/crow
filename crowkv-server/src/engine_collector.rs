@@ -14,6 +14,7 @@ use crate::store_registry::KvStoreRegistry;
 use crowkv::cluster::px_kv_store::PxKvStore;
 use crowkv::kv::CrowtreeEngine;
 use crowkv::metrics::{Counter, Gauge, MetricsRegistry, MetricsRunner};
+use crowkv::wal::wal_engine::BlockDeviceSnapshot;
 
 /// Registered Rust handles for one (store, group): Paxos gauges +
 /// snapshot.pages.c bridge counter.
@@ -112,6 +113,8 @@ pub fn setup_engine_collector(
 
     let last_snapshot_pages: Arc<Mutex<std::collections::HashMap<Key, u64>>> =
         Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let last_block_device: Arc<Mutex<std::collections::HashMap<Key, BlockDeviceSnapshot>>> =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
 
     let handles: Arc<Mutex<Vec<(Key, EngineHandles)>>> = Arc::new(Mutex::new(handles));
     let known_keys: Arc<Mutex<std::collections::HashSet<Key>>> = Arc::new(Mutex::new(
@@ -187,6 +190,40 @@ pub fn setup_engine_collector(
                     drop(last);
                     if delta > 0 {
                         hd.snapshot_pages.inc_by(delta);
+                    }
+                }
+            });
+
+            // Block device counters: delta from cumulative WAL counters.
+            store.for_each_group(|group| {
+                if group.group_id() != key.1 {
+                    return;
+                }
+                let replica = group.local_replica();
+                if let Some(wal) = replica.wal() {
+                    if let Some(snap) = wal.block_device_snapshot() {
+                        let mut last = last_block_device.lock().expect("last_block_device poisoned");
+                        let prev = last.entry(*key).or_default();
+                        let d_logical = snap
+                            .logical_bytes_written
+                            .saturating_sub(prev.logical_bytes_written);
+                        let d_physical = snap
+                            .physical_bytes_written
+                            .saturating_sub(prev.physical_bytes_written);
+                        let d_rmw = snap.rmw_count.saturating_sub(prev.rmw_count);
+                        *prev = snap;
+                        drop(last);
+                        if let Some(h) = wal.block_device_counter_handles() {
+                            if d_logical > 0 {
+                                h.logical_bytes.inc_by(d_logical);
+                            }
+                            if d_physical > 0 {
+                                h.physical_bytes.inc_by(d_physical);
+                            }
+                            if d_rmw > 0 {
+                                h.rmw.inc_by(d_rmw);
+                            }
+                        }
                     }
                 }
             });

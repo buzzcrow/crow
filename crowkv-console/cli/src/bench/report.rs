@@ -405,6 +405,21 @@ impl BenchReport {
         let _ = writeln!(out, "- **wal_append_count:** {}", sm.wal_append_count);
         let _ = writeln!(out, "- **kv_put_count:** {}", sm.kv_put_count);
         let _ = writeln!(out, "- **kv_get_count:** {}", sm.kv_get_count);
+        if sm.wal_logical_bytes > 0 || sm.wal_physical_bytes > 0 || sm.wal_rmw_count > 0 {
+            let _ = writeln!(out);
+            let _ = writeln!(out, "### WAL Block Device Metrics");
+            let _ = writeln!(out);
+            let _ = writeln!(out, "- **wal_logical_bytes:** {}", sm.wal_logical_bytes);
+            let _ = writeln!(out, "- **wal_physical_bytes:** {}", sm.wal_physical_bytes);
+            #[allow(clippy::cast_precision_loss, reason = "display-only ratio")]
+            let amplification = if sm.wal_logical_bytes > 0 {
+                sm.wal_physical_bytes as f64 / sm.wal_logical_bytes as f64
+            } else {
+                0.0
+            };
+            let _ = writeln!(out, "- **write_amplification:** {amplification:.2}x");
+            let _ = writeln!(out, "- **wal_rmw_count:** {}", sm.wal_rmw_count);
+        }
         let _ = writeln!(out);
         let _ = writeln!(out, "### System Resources");
         let _ = writeln!(out);
@@ -494,7 +509,7 @@ impl BenchReport {
         let cm = &self.client_metrics;
         let _ = writeln!(
             out,
-            "server_metrics  : wal_append={wal_append} kv_put={kv_put} kv_get={kv_get}\nsystem          : cpu_user={cpu_user}us cpu_sys={cpu_sys}us rss={rss}KB tcp_retrans={tcp_retrans} tcp_lost={tcp_lost}\nclient_metrics  : nl_hint={nl_hint} leader_query={leader_query} xport_err={xport_err} retries_exhausted={retries_exhausted} no_leader={no_leader} topo_refresh={topo_refresh}",
+            "server_metrics  : wal_append={wal_append} kv_put={kv_put} kv_get={kv_get}\nsystem          : cpu_user={cpu_user}us cpu_sys={cpu_sys}us rss={rss}KB tcp_retrans={tcp_retrans} tcp_lost={tcp_lost}\nclient_metrics  : nl_hint={nl_hint} leader_query={leader_query} xport_err={xport_err} retries_exhausted={retries_exhausted} no_leader={no_leader} topo_refresh={topo_refresh}\nblock_device    : logical_bytes={logical} physical_bytes={physical} rmw={rmw}",
             wal_append = sm.wal_append_count,
             kv_put = sm.kv_put_count,
             kv_get = sm.kv_get_count,
@@ -509,6 +524,9 @@ impl BenchReport {
             retries_exhausted = cm.retries_exhausted,
             no_leader = cm.no_leader,
             topo_refresh = cm.topology_refresh,
+            logical = sm.wal_logical_bytes,
+            physical = sm.wal_physical_bytes,
+            rmw = sm.wal_rmw_count,
         );
         let lc = &cm.leader_changes;
         if lc.is_empty() {
@@ -543,6 +561,18 @@ pub struct ServerMetrics {
     /// Total KV get ops (from the `*.kv.get.lh` latency histogram's
     /// per-window counts, summed across the whole run).
     pub kv_get_count: u64,
+    /// Total logical (payload) bytes written to the block device.
+    /// From `*.wal.block.logical_bytes.c` counter, summed across the run.
+    #[serde(default)]
+    pub wal_logical_bytes: u64,
+    /// Total physical bytes written to the block device after alignment
+    /// and RMW widening. From `*.wal.block.physical_bytes.c` counter.
+    #[serde(default)]
+    pub wal_physical_bytes: u64,
+    /// Number of read-modify-write operations triggered by partial-block
+    /// writes. From `*.wal.block.rmw.c` counter.
+    #[serde(default)]
+    pub wal_rmw_count: u64,
     /// System resource usage (see `crowkv::metrics::system`).
     pub system: SystemMetrics,
 }
@@ -597,12 +627,12 @@ pub fn parse_metrics_log(content: &str) -> ServerMetrics {
             section = LogSection::Misc;
             continue;
         }
-        if line.starts_with("name") {
+        if line.starts_with("count") {
             section = if line.contains("p50") {
                 LogSection::Histogram
             } else if line.contains("avg_size") {
                 LogSection::Bandwidth
-            } else if line.contains("avg(us)") {
+            } else if line.contains("avg(us)") && !line.contains("p50") {
                 LogSection::Summary
             } else if line.contains("total") {
                 LogSection::Counter
@@ -646,7 +676,18 @@ pub fn parse_metrics_log(content: &str) -> ServerMetrics {
                     _ => {}
                 }
             }
-            LogSection::Counter | LogSection::Bandwidth | LogSection::Gauge | LogSection::None => {}
+            LogSection::Counter => {
+                let name = fields[0];
+                let count: u64 = fields[1].parse().unwrap_or(0);
+                if name.contains(".wal.") && name.contains(".logical_bytes.") {
+                    metrics.wal_logical_bytes += count;
+                } else if name.contains(".wal.") && name.contains(".physical_bytes.") {
+                    metrics.wal_physical_bytes += count;
+                } else if name.contains(".wal.") && name.contains(".rmw.") {
+                    metrics.wal_rmw_count += count;
+                }
+            }
+            LogSection::Bandwidth | LogSection::Gauge | LogSection::None => {}
         }
     }
 
@@ -664,6 +705,9 @@ pub fn aggregate_server_metrics(per_node: &[ServerMetrics]) -> ServerMetrics {
         agg.wal_append_count += m.wal_append_count;
         agg.kv_put_count += m.kv_put_count;
         agg.kv_get_count += m.kv_get_count;
+        agg.wal_logical_bytes += m.wal_logical_bytes;
+        agg.wal_physical_bytes += m.wal_physical_bytes;
+        agg.wal_rmw_count += m.wal_rmw_count;
         agg.system.cpu_user_us += m.system.cpu_user_us;
         agg.system.cpu_sys_us += m.system.cpu_sys_us;
         agg.system.rss_kb = agg.system.rss_kb.max(m.system.rss_kb);
@@ -804,11 +848,15 @@ mod tests {
     fn parse_metrics_log_sums_across_flush_blocks() {
         let log = "\
 [metrics 2026-07-17T00:00:00.000Z window=1s]
-name             count  tps(/s)  avg(us)  p50(us)  p99(us)  max(us)
-s.1.kv.put.lh       10        10       50       48       90      95
-s.1.kv.get.lh        5         5       20       19       30      31
-name             count  tps(/s)  avg(us)  max(us)
-s.1.g.1.wal.file.append.l   10        10       12       20
+                          count  tps(/s)  avg(us)  p50(us)  p99(us)  max(us)
+s.1.kv.put.lh               10       10       50       48       90       95
+s.1.kv.get.lh                5        5       20       19       30       31
+                          count  tps(/s)  avg(us)  max(us)
+s.1.g.1.wal.file.append.l   10       10       12       20
+                          count  tps(/s)  total
+s.1.g.1.wal.file.logical_bytes.c    10240     10   10240
+s.1.g.1.wal.file.physical_bytes.c   12288     10   12288
+s.1.g.1.wal.file.rmw.c                  5      5       5
 misc
 sys.cpu_user_us  1000
 sys.cpu_sys_us   200
@@ -817,10 +865,14 @@ sys.tcp_retrans  0
 sys.tcp_lost     0
 
 [metrics 2026-07-17T00:00:01.000Z window=1s]
-name             count  tps(/s)  avg(us)  p50(us)  p99(us)  max(us)
-s.1.kv.put.lh       20        20       55       50       99      101
-name             count  tps(/s)  avg(us)  max(us)
-s.1.g.1.wal.file.append.l   20        20       13       22
+                          count  tps(/s)  avg(us)  p50(us)  p99(us)  max(us)
+s.1.kv.put.lh               20       20       55       50       99      101
+                          count  tps(/s)  avg(us)  max(us)
+s.1.g.1.wal.file.append.l   20       20       13       22
+                          count  tps(/s)  total
+s.1.g.1.wal.file.logical_bytes.c    20480     20   30720
+s.1.g.1.wal.file.physical_bytes.c   24576     20   36864
+s.1.g.1.wal.file.rmw.c                 10     10      15
 misc
 sys.cpu_user_us  1100
 sys.cpu_sys_us   210
@@ -832,6 +884,9 @@ sys.tcp_lost     1
         assert_eq!(m.kv_put_count, 30); // 10 + 20, kv.get absent in 2nd block
         assert_eq!(m.kv_get_count, 5);
         assert_eq!(m.wal_append_count, 30); // 10 + 20
+        assert_eq!(m.wal_logical_bytes, 30720); // 10240 + 20480
+        assert_eq!(m.wal_physical_bytes, 36864); // 12288 + 24576
+        assert_eq!(m.wal_rmw_count, 15); // 5 + 10
         assert_eq!(m.system.cpu_user_us, 2100); // 1000 + 1100
         assert_eq!(m.system.cpu_sys_us, 410); // 200 + 210
         assert_eq!(m.system.rss_kb, 61440); // peak across blocks
@@ -850,6 +905,9 @@ sys.tcp_lost     1
             wal_append_count: 10,
             kv_put_count: 5,
             kv_get_count: 3,
+            wal_logical_bytes: 10240,
+            wal_physical_bytes: 12288,
+            wal_rmw_count: 5,
             system: SystemMetrics {
                 cpu_user_us: 100,
                 cpu_sys_us: 20,
@@ -862,6 +920,9 @@ sys.tcp_lost     1
             wal_append_count: 15,
             kv_put_count: 7,
             kv_get_count: 4,
+            wal_logical_bytes: 20480,
+            wal_physical_bytes: 24576,
+            wal_rmw_count: 10,
             system: SystemMetrics {
                 cpu_user_us: 90,
                 cpu_sys_us: 30,
@@ -874,6 +935,9 @@ sys.tcp_lost     1
         assert_eq!(agg.wal_append_count, 25);
         assert_eq!(agg.kv_put_count, 12);
         assert_eq!(agg.kv_get_count, 7);
+        assert_eq!(agg.wal_logical_bytes, 30720);
+        assert_eq!(agg.wal_physical_bytes, 36864);
+        assert_eq!(agg.wal_rmw_count, 15);
         assert_eq!(agg.system.cpu_user_us, 190);
         assert_eq!(agg.system.cpu_sys_us, 50);
         assert_eq!(agg.system.rss_kb, 60_000);

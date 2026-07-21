@@ -5,7 +5,7 @@
 //! byte-addressable (unaligned) vs block-aligned read-modify-write.
 
 use crowkv::wal::pipeline_backend::WalBlockAlignment;
-use crowkv::wal::{BlockDevice, IoBackend, OpenOptions};
+use crowkv::wal::{IoBackend, MemBlockDevice, OpenOptions};
 use std::path::Path;
 
 async fn open_segment(backend: &IoBackend, path: &str) -> crowkv::wal::WalFile {
@@ -17,9 +17,9 @@ async fn open_segment(backend: &IoBackend, path: &str) -> crowkv::wal::WalFile {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn unaligned_device_writes_payload_directly_without_amplification() {
-    let device = BlockDevice::new();
+    let device = MemBlockDevice::new();
     assert_eq!(device.alignment(), WalBlockAlignment::Unaligned);
-    let backend = IoBackend::BlockDevice(device.clone());
+    let backend = IoBackend::MemBlock(device.clone());
 
     let mut file = open_segment(&backend, "/dev/mem/seg-0000001.ck").await;
     file.write_at(b"hello", 10).await.unwrap();
@@ -40,12 +40,12 @@ async fn unaligned_device_writes_payload_directly_without_amplification() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn aligned_device_partial_write_does_read_modify_write() {
-    let device = BlockDevice::ssd();
+    let device = MemBlockDevice::with_alignment(WalBlockAlignment::default_aligned());
     assert_eq!(
         device.alignment(),
         WalBlockAlignment::Aligned { io_unit_bytes: 4096 }
     );
-    let backend = IoBackend::BlockDevice(device.clone());
+    let backend = IoBackend::MemBlock(device.clone());
 
     let mut file = open_segment(&backend, "/dev/nvme0/seg-0000001.ck").await;
     // 200-byte payload at offset 100: not block-aligned, requires RMW of the
@@ -68,8 +68,8 @@ async fn aligned_device_partial_write_does_read_modify_write() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn unaligned_device_counts_writes_and_durable_flushes() {
-    let device = BlockDevice::new();
-    let backend = IoBackend::BlockDevice(device.clone());
+    let device = MemBlockDevice::new();
+    let backend = IoBackend::MemBlock(device.clone());
 
     let mut file = open_segment(&backend, "/dev/mem/seg-0000002.ck").await;
     file.write_at(b"ab", 0).await.unwrap();
@@ -85,8 +85,8 @@ async fn unaligned_device_counts_writes_and_durable_flushes() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn aligned_device_rmw_preserves_neighbouring_bytes_in_same_block() {
-    let device = BlockDevice::ssd();
-    let backend = IoBackend::BlockDevice(device.clone());
+    let device = MemBlockDevice::with_alignment(WalBlockAlignment::default_aligned());
+    let backend = IoBackend::MemBlock(device.clone());
 
     let mut file = open_segment(&backend, "/dev/nvme0/seg-0000001.ck").await;
     // Two sub-block writes into the same 4 KiB block. The second must not erase
@@ -109,8 +109,8 @@ async fn aligned_device_rmw_preserves_neighbouring_bytes_in_same_block() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn aligned_device_block_aligned_write_avoids_amplification() {
-    let device = BlockDevice::ssd();
-    let backend = IoBackend::BlockDevice(device.clone());
+    let device = MemBlockDevice::with_alignment(WalBlockAlignment::default_aligned());
+    let backend = IoBackend::MemBlock(device.clone());
 
     let mut file = open_segment(&backend, "/dev/nvme0/seg-0000001.ck").await;
     let block = vec![7u8; 4096];
@@ -124,8 +124,8 @@ async fn aligned_device_block_aligned_write_avoids_amplification() {
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn aligned_device_supports_custom_io_unit() {
-    let device = BlockDevice::with_alignment(WalBlockAlignment::Aligned { io_unit_bytes: 512 });
-    let backend = IoBackend::BlockDevice(device.clone());
+    let device = MemBlockDevice::with_alignment(WalBlockAlignment::Aligned { io_unit_bytes: 512 });
+    let backend = IoBackend::MemBlock(device.clone());
 
     let mut file = open_segment(&backend, "/dev/scm0/seg-0000001.ck").await;
     file.write_at(&[1u8; 100], 0).await.unwrap();

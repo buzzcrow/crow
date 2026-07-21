@@ -20,10 +20,10 @@ use std::sync::Arc;
 use crowkv::cluster::group::PxGroup;
 use crowkv::cluster::{PxLocalReplica, PxLocalReplicaRole, PxRemoteReplica};
 use crowkv::wal::wal_engine::WalEngine;
-use crowkv::wal::{BlockDevice, IoBackend, WalConfig};
+use crowkv::wal::{IoBackend, MemBlockDevice, WalConfig};
 
 fn sim_backend() -> Arc<IoBackend> {
-    Arc::new(IoBackend::BlockDevice(BlockDevice::new()))
+    Arc::new(IoBackend::MemBlock(MemBlockDevice::new()))
 }
 
 /// A minimal real `WalEngine`, just so `PxLocalReplica::wal` is `Some` and

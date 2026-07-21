@@ -23,9 +23,9 @@ use super::file_backend;
 pub enum IoBackend {
     /// `tokio::fs` + `spawn_blocking` for fdatasync. Works everywhere.
     File,
-    /// In-memory block device, unaligned (RAM / SCM / PMEM model).
-    MemBlock(block_backend::BlockDevice),
-    /// Aligned block device model (SSD/NVMe, 4K I/O unit).
+    /// In-memory block device (test harness, error/corruption injection).
+    MemBlock(block_backend::MemBlockDevice),
+    /// Real file-backed block device (aligned I/O, configurable `O_DIRECT`).
     BlockDevice(block_backend::BlockDevice),
 }
 
@@ -113,16 +113,30 @@ impl IoBackend {
         Self::File
     }
 
-    /// In-memory block device (unaligned, RAM/SCM/PMEM model).
+    /// In-memory block device (unaligned, test harness with error injection).
     #[must_use]
     pub fn mem_block() -> Self {
-        Self::MemBlock(block_backend::BlockDevice::new())
+        Self::MemBlock(block_backend::MemBlockDevice::new())
     }
 
-    /// Aligned block device model (SSD/NVMe, 4K I/O unit).
+    /// Real file-backed block device with `O_DIRECT` (SSD/NVMe, 4K aligned).
     #[must_use]
     pub fn block_device() -> Self {
         Self::BlockDevice(block_backend::BlockDevice::ssd())
+    }
+
+    /// Returns `true` if the backend is `BlockDevice` or `MemBlock`
+    /// (i.e. has block device counters worth exposing).
+    #[must_use]
+    pub fn is_block_device(&self) -> bool {
+        matches!(self, Self::BlockDevice(_) | Self::MemBlock(_))
+    }
+
+    /// Real file-backed block device with buffered I/O (aligned, no `O_DIRECT`).
+    /// Ideal for benchmarks that exercise block code paths without disk-bound TPS.
+    #[must_use]
+    pub fn block_buffered() -> Self {
+        Self::BlockDevice(block_backend::BlockDevice::new())
     }
 
     /// Open (or create) a file via the selected backend.
@@ -137,7 +151,13 @@ impl IoBackend {
                     inner: super::WalFileInner::File(f),
                 })
             }
-            Self::MemBlock(disk) | Self::BlockDevice(disk) => {
+            Self::MemBlock(disk) => {
+                let f = disk.open_segment(path.as_ref(), &opts)?;
+                Ok(super::WalFile {
+                    inner: super::WalFileInner::MemBlock(f),
+                })
+            }
+            Self::BlockDevice(disk) => {
                 let f = disk.open_segment(path.as_ref(), &opts)?;
                 Ok(super::WalFile {
                     inner: super::WalFileInner::Block(f),
@@ -153,7 +173,8 @@ impl IoBackend {
     pub async fn rename(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
         match self {
             Self::File => tokio::fs::rename(from, to).await,
-            Self::MemBlock(disk) | Self::BlockDevice(disk) => disk.rename_segment(from.as_ref(), to.as_ref()),
+            Self::MemBlock(disk) => disk.rename_segment(from.as_ref(), to.as_ref()),
+            Self::BlockDevice(disk) => disk.rename_segment(from.as_ref(), to.as_ref()),
         }
     }
 
@@ -164,7 +185,8 @@ impl IoBackend {
     pub async fn unlink(&self, path: impl AsRef<Path>) -> io::Result<()> {
         match self {
             Self::File => tokio::fs::remove_file(path).await,
-            Self::MemBlock(disk) | Self::BlockDevice(disk) => disk.unlink_segment(path.as_ref()),
+            Self::MemBlock(disk) => disk.unlink_segment(path.as_ref()),
+            Self::BlockDevice(disk) => disk.unlink_segment(path.as_ref()),
         }
     }
 
@@ -182,7 +204,8 @@ impl IoBackend {
                 }
                 Ok(entries)
             }
-            Self::MemBlock(disk) | Self::BlockDevice(disk) => disk.list_layout(path.as_ref()),
+            Self::MemBlock(disk) => disk.list_layout(path.as_ref()),
+            Self::BlockDevice(disk) => disk.list_layout(path.as_ref()),
         }
     }
 
@@ -193,7 +216,8 @@ impl IoBackend {
     pub async fn create_dir_all(&self, path: impl AsRef<Path>) -> io::Result<()> {
         match self {
             Self::File => tokio::fs::create_dir_all(path).await,
-            Self::MemBlock(disk) | Self::BlockDevice(disk) => disk.create_layout(path.as_ref()),
+            Self::MemBlock(disk) => disk.create_layout(path.as_ref()),
+            Self::BlockDevice(disk) => disk.create_layout(path.as_ref()),
         }
     }
 
@@ -201,7 +225,8 @@ impl IoBackend {
     pub async fn exists(&self, path: impl AsRef<Path>) -> bool {
         match self {
             Self::File => tokio::fs::try_exists(path).await.unwrap_or(false),
-            Self::MemBlock(disk) | Self::BlockDevice(disk) => disk.contains_path(path.as_ref()),
+            Self::MemBlock(disk) => disk.contains_path(path.as_ref()),
+            Self::BlockDevice(disk) => disk.contains_path(path.as_ref()),
         }
     }
 }

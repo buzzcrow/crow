@@ -21,10 +21,10 @@ use crowkv::paxos::roles::{Learner, PxBallot, PxLogEntry};
 use crowkv::wal::record::WALRecord;
 use crowkv::wal::replay::replay_group;
 use crowkv::wal::wal_engine::WalEngine;
-use crowkv::wal::{BlockDevice, IoBackend, WalConfig};
+use crowkv::wal::{IoBackend, MemBlockDevice, WalConfig};
 
 fn sim_backend() -> Arc<IoBackend> {
-    Arc::new(IoBackend::BlockDevice(BlockDevice::new()))
+    Arc::new(IoBackend::MemBlock(MemBlockDevice::new()))
 }
 
 /// A file-backed `CrowtreeEngine`: `persist_snapshot` (`Crowtree::snapshot`)
