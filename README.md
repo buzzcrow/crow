@@ -28,19 +28,23 @@ From past experience building storage systems, a high-performance distributed KV
 
 ![Failover](doc/assets/demo-failover.gif)
 
-**Write Performance — Inflight Window Benchmark** — Multi-Paxos allows slots to be decided out of order, but the leader still needs an admission control window to cap memory pressure from in-flight proposals. The benchmark below demonstrates the impact of the `max_inflight_proposals` window on write throughput. A 3-node cluster (in-memory WAL + storage) runs a write-only workload (512-byte values, 1M key space, 12-second duration) with two window sizes:
+**Write Performance — Inflight Window & Queue Admission** — Multi-Paxos allows slots to be decided out of order, but the leader still needs an admission control window to cap memory pressure from in-flight proposals. CrowKV uses a queue-based admission policy (R18): when the window is full, proposals block on a semaphore instead of being rejected as `Busy`. This eliminates client-side retry storms while maintaining the same peak throughput.
 
-- **Window = 1** (effectively Raft-style sequential commit): at 16 concurrent writers, 40% of proposals are rejected as `Busy`, and throughput collapses to ~19K ops/s.
-- **Window = 16** (Paxos pipelined commit): zero rejections, throughput reaches ~37K ops/s — **2× faster** than window=1 under the same load.
+The benchmark below (3-node cluster, in-memory WAL + storage, write-only, 512-byte values, 1M key space, 12-second duration) shows two key results:
+
+- **Window = 1** (effectively Raft-style sequential commit): at 16 concurrent writers, **zero rejections** — the queue absorbs all contention. Throughput is ~13K ops/s (serialized by the 1-permit window).
+- **Window = 16** (Paxos pipelined commit): zero rejections, throughput reaches ~37K ops/s — **2.8× faster** than window=1 under the same load.
+- **Window = 64, 64 threads** (full pipeline): peak throughput of **50K ops/s** with zero rejections and p99 latency under 2ms.
 
 | Window | Threads | Connections | Throughput (ops/s) | Avg Latency | p99 Latency | Busy Rejections |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 1 | 1 | 9,050 | 109 µs | 178 µs | 0 |
-| 1 | 16 | 4 | 19,131 | 834 µs | 1,299 µs | 152,827 (40%) |
-| 16 | 1 | 1 | 9,458 | 104 µs | 164 µs | 0 |
-| 16 | 16 | 4 | 37,033 | 430 µs | 638 µs | 0 |
+| 1 | 1 | 1 | 9,074 | 109 µs | 198 µs | 0 |
+| 1 | 16 | 4 | 13,278 | 1,203 µs | 1,360 µs | 0 |
+| 16 | 1 | 1 | 8,969 | 110 µs | 168 µs | 0 |
+| 16 | 16 | 4 | 36,661 | 434 µs | 642 µs | 0 |
+| 64 | 64 | 8 | 50,107 | 1,275 µs | 1,942 µs | 0 |
 
-At 1 thread the window size makes no difference (only one proposal in flight at a time). At 16 threads the inflight window is the difference between a serialized bottleneck and a fully pipelined commit path — exactly the architectural advantage Multi-Paxos holds over Raft on the write hot path.
+At 1 thread the window size makes no difference (only one proposal in flight at a time). At 16 threads the inflight window is the difference between a serialized bottleneck and a fully pipelined commit path — exactly the architectural advantage Multi-Paxos holds over Raft on the write hot path. Queue-based admission ensures this advantage is realized without any client-side retry logic: **zero `Busy` rejections across all configurations**.
 
 ## Why Multi-Paxos?
 
