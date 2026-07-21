@@ -223,36 +223,67 @@ never consume a window permit.
 All runs: 3-node cluster, in-memory WAL + in-memory KV (mem-block),
 write-only, 512-byte values, 1M key space, 12-second duration,
 `election_profile = e2e`. Admission policy = `Queue` (R18 default).
+TPS = success-only (total_attempts - total_errors / duration).
 
-### Queue admission — key configs
+### Factors Affecting TPS
 
-| Window | Threads | Conn | Throughput (ops/s) | avg (us) | p50 (us) | p99 (us) | Errors |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 1 | 1 | 9,074 | 109 | 99 | 198 | 0 |
-| 1 | 16 | 4 | 13,278 | 1203 | 1066 | 1360 | 0 |
-| 16 | 1 | 1 | 8,969 | 110 | 98 | 168 | 0 |
-| 16 | 16 | 4 | 36,661 | 434 | 426 | 642 | 0 |
-| 32 | 64 | 4 | 45,746 | 1396 | 1371 | 1996 | 0 |
-| 64 | 64 | 8 | 50,107 | 1275 | 1251 | 1942 | 0 |
+Three tunable parameters influence write throughput:
 
-### Queue vs Reject comparison
+- **`max_inflight_proposals` (window)** — Total semaphore permits
+  across all admission queues. Controls how many proposals can be
+  in-flight concurrently. This is the primary TPS lever: more permits
+  = more pipeline parallelism = higher throughput, until the consensus
+  critical path (WAL append + quorum RPC) becomes the bottleneck.
+- **`threads` (worker tasks)** — Client-side concurrency. More workers
+  fill the pipeline faster. Diminishing returns once the server-side
+  consensus path is saturated.
+- **`connections` (gRPC channels)** — Per-endpoint channel pool size.
+  Must be sufficient to avoid gRPC stream head-of-line blocking.
+  Beyond ~4 connections, no measurable effect — the bottleneck moves
+  to server-side consensus.
 
-| Mode | Best config | Throughput | avg (us) | p99 (us) | Errors |
+Parameters with **no measurable effect** on TPS (at ≤64 threads):
+
+- **`inflight_queues`** — Multi-queue routing (1 vs 4 semaphores).
+  The semaphore is not the contention bottleneck; consensus path
+  dominates. Default 1 is sufficient.
+- **Window > 64** — MI=128 shows no improvement over MI=64. The
+  consensus critical path (~1.2ms per proposal) is the hard ceiling:
+  64 / 1.2ms ≈ 53K theoretical, matches observed 50K peak.
+
+### Scaling: 1T to 64T (MI=64, Q=1)
+
+| Threads | Conn | Throughput (ops/s) | avg (us) | p50 (us) | p99 (us) | Errors |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 9,074 | 109 | 99 | 198 | 0 |
+| 2 | 1 | 16,742 | 119 | 112 | 199 | 0 |
+| 4 | 4 | 27,040 | 147 | 139 | 231 | 0 |
+| 8 | 4 | 29,632 | 268 | 263 | 395 | 0 |
+| 16 | 8 | 36,880 | 432 | 424 | 633 | 0 |
+| 32 | 8 | 43,989 | 725 | 712 | 1069 | 0 |
+| 64 | 8 | 50,107 | 1275 | 1251 | 1942 | 0 |
+
+### Window impact (16T, 4C, Q=1)
+
+| Window | Throughput (ops/s) | avg (us) | p50 (us) | p99 (us) | Errors |
 | --- | --- | --- | --- | --- | --- |
-| Reject (pre-R18) | T64 C8 MI64 | 51,100 | 1249 | 1853 | 0 |
-| Queue (R18) | T64 C8 Q1 MI64 | 50,454 | 1266 | 1882 | 0 |
+| 1 | 13,278 | 1203 | 1066 | 1360 | 0 |
+| 16 | 36,661 | 434 | 426 | 642 | 0 |
+| 32 | 36,792 | 433 | 424 | 635 | 0 |
+| 64 | 36,543 | 436 | 427 | 643 | 0 |
 
 ### Conclusions
 
-- **Queue mode peak (50K ops/s) matches reject mode** — semaphore
-  queue overhead is negligible (a few atomic increments per proposal)
-- **Zero `Busy` rejections across all 70+ runs** — no client retry
-  logic needed, no `max_inflight` tuning to avoid reject storms
-- **MI=64 is the sweet spot**; MI=128 shows no improvement (consensus
-  path is the bottleneck, not admission gate)
-- **Multi-queue (Q=4) has no measurable effect** at ≤64 threads —
-  semaphore is not the contention bottleneck; WAL append + quorum RPC
-  dominates
+- **Window is the primary TPS lever** — W=1→W=16 gives 2.8× throughput
+  (13K→37K at 16T/4C). W=16+ all converge to ~37K at this thread count
+  (pipeline is already saturated).
+- **Threads scale throughput until server saturation** — 1T→64T gives
+  5.5× throughput (9K→50K at MI=64). Returns diminish after 32T.
+- **Connections matter only at low counts** — 1C→4C gives +60% at 4T.
+  Beyond 4C, no effect (gRPC is not the bottleneck).
+- **Queue mode: zero errors across all configurations** — no `Busy`
+  rejections, no client retry logic needed, no window tuning to avoid
+  reject storms. The queue naturally backpressures at any window size.
 - **Scaling ceiling ~50K ops/s** — per-proposal latency ~1.2ms at 64
-  in-flight = 64/1.2ms ≈ 53K theoretical, matches observed. Next
-  gains require reducing per-proposal latency (R16, R15)
+  in-flight. Next gains require reducing per-proposal latency (R16:
+  overlap WAL fsync with RPCs, R15: zero-copy accept path).
