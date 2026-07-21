@@ -10,12 +10,12 @@ use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 use crowkv::wal::record::WALRecord;
 use crowkv::wal::replay::replay_group;
 use crowkv::wal::wal_engine::WalEngine;
-use crowkv::wal::{BlockDevice, IoBackend, WalConfig};
+use crowkv::wal::{IoBackend, MemBlockDevice, WalConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 fn sim_backend() -> Arc<IoBackend> {
-    Arc::new(IoBackend::BlockDevice(BlockDevice::new()))
+    Arc::new(IoBackend::MemBlock(MemBlockDevice::new()))
 }
 
 fn test_config(disks: &[PathBuf]) -> WalConfig {

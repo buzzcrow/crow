@@ -28,7 +28,7 @@ use bytes::Bytes;
 use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 use crowkv::wal::record::WALRecord;
 use crowkv::wal::wal_engine::WalEngine;
-use crowkv::wal::{BlockDevice, IoBackend, WalConfig};
+use crowkv::wal::{BlockDevice, IoBackend, MemBlockDevice, WalConfig};
 
 // ---------- helpers ----------
 
@@ -89,6 +89,7 @@ fn runtime() -> tokio::runtime::Runtime {
 enum Backend {
     Mem,
     File,
+    Block,
 }
 
 struct Case {
@@ -137,6 +138,24 @@ const CASES: &[Case] = &[
         threads: 128,
         payload_size: 1024,
     },
+    Case {
+        name: "block_1",
+        backend: Backend::Block,
+        threads: 1,
+        payload_size: 1024,
+    },
+    Case {
+        name: "block_32",
+        backend: Backend::Block,
+        threads: 32,
+        payload_size: 1024,
+    },
+    Case {
+        name: "block_128",
+        backend: Backend::Block,
+        threads: 128,
+        payload_size: 1024,
+    },
 ];
 
 // ---------- runner ----------
@@ -153,7 +172,7 @@ struct CaseResult {
 fn run_case(rt: &tokio::runtime::Runtime, case: &Case) -> CaseResult {
     let (wal, _tmp) = match case.backend {
         Backend::Mem => {
-            let backend = Arc::new(IoBackend::BlockDevice(BlockDevice::new()));
+            let backend = Arc::new(IoBackend::MemBlock(MemBlockDevice::new()));
             let config = WalConfig {
                 wal_disks: vec![PathBuf::from("/bench-wal")],
                 wal_segment_size: 64 * 1024 * 1024,
@@ -168,6 +187,18 @@ fn run_case(rt: &tokio::runtime::Runtime, case: &Case) -> CaseResult {
             let config = WalConfig {
                 wal_disks: vec![tmp.path().to_path_buf()],
                 wal_segment_size: 64 * 1024 * 1024,
+                ..Default::default()
+            };
+            let wal = rt.block_on(async { WalEngine::create(backend, config, 1).await.unwrap() });
+            (wal, Some(tmp))
+        }
+        Backend::Block => {
+            let tmp = tempfile::tempdir().unwrap();
+            let backend = Arc::new(IoBackend::BlockDevice(BlockDevice::new()));
+            let config = WalConfig {
+                wal_disks: vec![tmp.path().to_path_buf()],
+                wal_segment_size: 64 * 1024 * 1024,
+                wal_skip_fsync: true,
                 ..Default::default()
             };
             let wal = rt.block_on(async { WalEngine::create(backend, config, 1).await.unwrap() });

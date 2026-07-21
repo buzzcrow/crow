@@ -10,12 +10,12 @@ use crowkv::wal::record::{WALRecord, WalRecordFormat, WAL_MAGIC};
 use crowkv::wal::replay::replay_group;
 use crowkv::wal::segment::SEG_HEADER_LEN;
 use crowkv::wal::wal_engine::WalEngine;
-use crowkv::wal::{BlockDevice, IoBackend, OpenOptions, WalConfig};
+use crowkv::wal::{IoBackend, MemBlockDevice, OpenOptions, WalConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 fn sim_backend() -> Arc<IoBackend> {
-    Arc::new(IoBackend::BlockDevice(BlockDevice::new()))
+    Arc::new(IoBackend::MemBlock(MemBlockDevice::new()))
 }
 
 fn test_config(disks: Vec<PathBuf>) -> WalConfig {
@@ -49,8 +49,8 @@ fn wal_config_defaults_use_flush_names_and_wake_drain_flush() {
 /// with no batching delay (the default `wal_flush_coalesce_us = 0` policy).
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn single_record_durable_flush_without_interval_wait() {
-    let device = BlockDevice::new();
-    let backend = Arc::new(IoBackend::BlockDevice(device.clone()));
+    let device = MemBlockDevice::new();
+    let backend = Arc::new(IoBackend::MemBlock(device.clone()));
     let config = test_config(vec![PathBuf::from("/wal")]);
     let wal = WalEngine::create(backend, config, 1).await.unwrap();
 
@@ -66,8 +66,8 @@ async fn single_record_durable_flush_without_interval_wait() {
 /// append ack (benchmark path-overhead isolation mode).
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn skip_fsync_avoids_durable_flush_but_still_appends() {
-    let device = BlockDevice::new();
-    let backend = Arc::new(IoBackend::BlockDevice(device.clone()));
+    let device = MemBlockDevice::new();
+    let backend = Arc::new(IoBackend::MemBlock(device.clone()));
     let config = WalConfig {
         wal_skip_fsync: true,
         ..test_config(vec![PathBuf::from("/wal")])
@@ -89,8 +89,8 @@ async fn skip_fsync_avoids_durable_flush_but_still_appends() {
 /// records when a coalescing budget is configured.
 #[tokio::test(flavor = "current_thread")]
 async fn burst_appends_coalesce_into_fewer_flushes() {
-    let device = BlockDevice::new();
-    let backend = Arc::new(IoBackend::BlockDevice(device.clone()));
+    let device = MemBlockDevice::new();
+    let backend = Arc::new(IoBackend::MemBlock(device.clone()));
     let config = WalConfig {
         wal_disks: vec![PathBuf::from("/wal-burst")],
         wal_segment_size: 16 * 1024 * 1024, // large: no rotation/seal flushes
@@ -126,8 +126,8 @@ async fn burst_appends_coalesce_into_fewer_flushes() {
 /// runs; wake-drain then collapses them into one `fdatasync`.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn file_backend_durable_flush_once_per_drained_batch() {
-    let device = BlockDevice::new();
-    let backend = Arc::new(IoBackend::BlockDevice(device.clone()));
+    let device = MemBlockDevice::new();
+    let backend = Arc::new(IoBackend::MemBlock(device.clone()));
     let config = WalConfig {
         wal_disks: vec![PathBuf::from("/wal-batch")],
         wal_segment_size: 16 * 1024 * 1024, // large: no rotation/seal flushes
@@ -164,8 +164,8 @@ async fn file_backend_durable_flush_once_per_drained_batch() {
 /// recovering all records.
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn large_binary_batch_splits_across_iov_max_and_replays() {
-    let device = BlockDevice::new();
-    let backend = Arc::new(IoBackend::BlockDevice(device.clone()));
+    let device = MemBlockDevice::new();
+    let backend = Arc::new(IoBackend::MemBlock(device.clone()));
     let config = WalConfig {
         wal_disks: vec![PathBuf::from("/wal-vec-chunk")],
         wal_segment_size: 64 * 1024 * 1024,
@@ -211,8 +211,8 @@ async fn large_binary_batch_splits_across_iov_max_and_replays() {
 /// marks the WAL failed; subsequent appends fail fast.
 #[tokio::test(flavor = "current_thread")]
 async fn flush_error_fails_append_and_marks_wal_failed() {
-    let device = BlockDevice::new();
-    let backend = Arc::new(IoBackend::BlockDevice(device.clone()));
+    let device = MemBlockDevice::new();
+    let backend = Arc::new(IoBackend::MemBlock(device.clone()));
     let config = test_config(vec![PathBuf::from("/wal-syncerr")]);
     let wal = WalEngine::create(backend, config, 1).await.unwrap();
 
@@ -414,8 +414,8 @@ async fn seal_all_stops_writes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_appends_all_acks_resolved_and_replay_complete() {
     let group_id = 7u64;
-    let device = BlockDevice::new();
-    let backend = Arc::new(IoBackend::BlockDevice(device.clone()));
+    let device = MemBlockDevice::new();
+    let backend = Arc::new(IoBackend::MemBlock(device.clone()));
     let disk = PathBuf::from("/wal-concurrent");
     let config = WalConfig {
         wal_disks: vec![disk.clone()],
@@ -463,8 +463,8 @@ async fn concurrent_appends_all_acks_resolved_and_replay_complete() {
 /// the WAL must be marked `is_failed()`. Subsequent appends must be rejected.
 #[tokio::test(flavor = "current_thread")]
 async fn writer_failure_fails_acks_and_marks_wal_failed() {
-    let device = BlockDevice::new();
-    let backend = Arc::new(IoBackend::BlockDevice(device.clone()));
+    let device = MemBlockDevice::new();
+    let backend = Arc::new(IoBackend::MemBlock(device.clone()));
     let config = WalConfig {
         wal_disks: vec![PathBuf::from("/wal-writer-fail")],
         wal_segment_size: 16 * 1024 * 1024,
@@ -511,8 +511,8 @@ async fn writer_failure_fails_acks_and_marks_wal_failed() {
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn aligned_engine_append_rotate_seal_replays_all_records() {
     let group_id = 4u64;
-    let device = BlockDevice::ssd();
-    let backend = Arc::new(IoBackend::BlockDevice(device.clone()));
+    let device = MemBlockDevice::with_alignment(WalBlockAlignment::default_aligned());
+    let backend = Arc::new(IoBackend::MemBlock(device.clone()));
     let disk = PathBuf::from("/nvme0");
     let config = WalConfig {
         wal_disks: vec![disk.clone()],

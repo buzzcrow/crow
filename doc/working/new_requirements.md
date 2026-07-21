@@ -56,6 +56,12 @@ complexity, and dependency. Before implementation, follow the
   contract (persist-before-reply) for the local replica — the proposer
   would need to track local persist completion separately from quorum.
   Gate behind a feature flag; test under crash-recovery scenarios.
+- **R19** — Unify block device abstraction — Area: WAL / crowtree —
+  Remove `use_real_files` from `BlockDevice`; split in-memory test
+  harness (`MemBlockDevice`) from real file I/O (`BlockDevice`). Add
+  `use_direct_io` flag for O_DIRECT control. Enables bench mode that
+  hits all block code paths (alignment, RMW, `pwrite`) at high TPS via
+  `wal_skip_fsync`.
 - **R17** — Async engine apply after quorum — Area: consensus / engine —
   `learn_chosen` (decode payload + `KVEngine::apply`) runs on the
   proposer critical path before `ProposeResult::Chosen` is returned to
@@ -881,6 +887,141 @@ metrics integration, benchmark provision plumbing. No protocol change.
   `inflight_total_wait_us` visible in metrics log and health API.
 - Multi-queue correctness: concurrent proposals across queues all
   converge to chosen slots; no slot gaps or lost proposals.
+
+---
+
+### R19: Unify block device abstraction — remove `use_real_files`, split test harness from real I/O
+
+**Problem**: The WAL `BlockDevice` (`crowkv/src/wal/block_backend.rs`) conflates
+two unrelated responsibilities behind a single `use_real_files: bool` flag:
+
+1. **Real file I/O** — opens OS files, uses `pwrite`/`pread` via
+   `FileExt`, calls `sync_data` for `fdatasync`. This is the production
+   path: open a path, do positional I/O with alignment. Whether the path
+   is `/dev/nvme0n1`, `/tmp/wal/seg0.dat`, or `/dev/shm/wal/seg0.dat`
+   makes no difference — in Unix, a block device *is* a file.
+
+2. **In-memory simulation** — stores segments as `BTreeMap<PathBuf,
+   Vec<u8>>`, supports error injection (`inject_io_error`,
+   `inject_sync_error`, `set_full`), corruption injection
+   (`corrupt_at_offset`), and layout tracking. This is a **test
+   harness** for deterministic failure testing.
+
+The `use_real_files` flag forces every method (`open_segment`,
+`rename_segment`, `unlink_segment`, `list_layout`, `create_layout`,
+`contains_path`, `write_at`, `read_at`, `fdatasync`, `len`, `truncate`)
+to branch on an `if` — two completely different code paths sharing one
+struct. This is a leaky abstraction: the BlockDevice shouldn't know or
+care whether its path is a regular file or a raw device.
+
+A related issue: the `ssd()` constructor unconditionally sets
+`O_DIRECT` (Linux only, `0o40000`). There is no way to get aligned I/O
+with real files but without `O_DIRECT` — needed for benchmarks that
+exercise alignment/RMW code paths without disk-bound `fdatasync` latency
+(use `wal_skip_fsync` + buffered `pwrite`, or point WAL at tmpfs).
+
+The crowtree C++ storage layer (`crowtree/src/c_api.cpp:ct_open`) has a
+similar but cleaner separation: `TextPageStore` (debug text files),
+`MemPageStore` (in-memory), and `BlockPageStore` (real block device with
+`O_DIRECT`). The C++ layer does not have the `use_real_files` problem —
+each backend is a distinct class. However, the Rust FFI
+`PageStoreBackend` enum (`File`, `Block`, `MemBlock`) maps to these
+three C++ classes, and the `Block` variant always uses `O_DIRECT` with
+no option for buffered aligned I/O — the same inflexibility as the WAL
+side.
+
+**Approach**:
+
+WAL side:
+- **Remove `use_real_files`** from `BlockDevice`. The struct always
+  opens real OS paths and does positional I/O. O_DIRECT becomes a
+  configurable flag (`use_direct_io: bool`), defaulting to `false`.
+- **Extract the in-memory simulation** into a separate type
+  (`MemBlockDevice`) that owns the `BTreeMap<PathBuf, Vec<u8>>`,
+  `BlockDeviceController` (error/corruption injection), and layout
+  tracking. `MemBlockDevice` implements the same segment open/read/
+  write/sync interface as `BlockDevice`.
+- **Update `IoBackend`** to have four variants: `File`,
+  `MemBlock(MemBlockDevice)`, `BlockDevice(BlockDevice)`, and
+  `BlockDevice` always uses real files. The `MemBlock` variant is the
+  test harness; `BlockDevice` is the production path.
+- **Constructors**: `BlockDevice::new()` → aligned, real files,
+  buffered (no O_DIRECT). `BlockDevice::ssd()` → aligned, real files,
+  O_DIRECT. `BlockDevice::with_alignment(align, use_direct_io)` →
+  explicit. `MemBlockDevice::new()` → in-memory, unaligned.
+  `MemBlockDevice::with_alignment(align)` → in-memory with alignment
+  (for testing RMW logic without real files).
+- **Bench integration**: The WAL bench (`crowkv/benches/wal.rs`) adds a
+  `Block` backend case using `BlockDevice::new()` (aligned, buffered,
+  real files) with `wal_skip_fsync: true` in `WalConfig`. This hits all
+  block code paths (alignment planning, RMW, amplification tracking,
+  `pwrite`/`pread` syscalls) at high TPS since `fdatasync` is skipped.
+
+Crowtree side:
+- **No structural change needed** — the C++ layer already has clean
+  backend separation. The only improvement: add a `BufferedBlock`
+  option to `PageStoreBackend` (or a `use_direct_io` flag on the
+  `Block` variant) so crowtree can also do aligned I/O without
+  `O_DIRECT` for benchmark parity. This is lower priority since
+  crowtree's `SyncMode::kSkip` already handles the "skip fsync" case.
+
+**Alternatives considered**:
+- **Trait-based abstraction** (`trait BlockStorage` implemented by both
+  `BlockDevice` and `MemBlockDevice`): rejected because the current
+  `IoBackend` enum + `WalFileInner` enum dispatch is already the
+  abstraction layer. Adding a trait would introduce dynamic dispatch
+  and another indirection layer for no benefit — the enum dispatch is
+  zero-cost and already works.
+- **Keep `use_real_files`, just add `use_direct_io`**: rejected because
+  it doesn't fix the core problem — every method still branches on two
+  unrelated code paths in one struct, and the test harness (error
+  injection, corruption, in-memory segments) is tangled with the
+  production I/O path.
+
+**Priority**: Medium — the current code works but is hard to maintain
+and extend. The `use_real_files` flag is a design smell that blocks
+clean benchmark mode integration.
+
+**Complexity**: Medium — mechanical refactor: extract `MemBlockDevice`,
+simplify `BlockDevice`, update `IoBackend` enum and all call sites.
+No algorithm or protocol change. ~15 files touched, mostly test
+helpers.
+
+**Files**:
+- `crowkv/src/wal/block_backend.rs` — split into `BlockDevice` (real
+  I/O only) + `MemBlockDevice` (in-memory test harness).
+- `crowkv/src/wal/io_backend.rs` — update `IoBackend` enum variants.
+- `crowkv/src/wal/wal_file.rs` — update `WalFileInner` if needed.
+- `crowkv/src/wal/mod.rs` — re-exports.
+- `crowkv/src/wal/wal_engine.rs` — `backend_name()` match arms.
+- `crowkv/benches/wal.rs` — add `Block` backend case.
+- `crowkv/tests/wal/block_backend_tests.rs` — update to use
+  `MemBlockDevice` for in-memory tests, `BlockDevice` for real-file
+  tests.
+- `crowkv/tests/wal/wal_engine_tests.rs` — update `sim_backend()`.
+- `crowkv/tests/wal/segment_tests.rs` — update `sim_backend()` and
+  `aligned_backend()`.
+- `crowkv/tests/wal/replay_tests.rs` — update `sim_backend()`.
+- `crowkv/tests/group/maintenance_test.rs` — update `sim_backend()`.
+- `crowkv/tests/group/snapshot_slot_test.rs` — update `sim_backend()`.
+- `crowkv-server/src/store_registry.rs` — update
+  `parse_wal_backend()` for new enum variants.
+- `crowtree/ffi/src/lib.rs` — optionally add `BufferedBlock` to
+  `PageStoreBackend` (lower priority).
+
+**Acceptance**:
+- All existing WAL tests pass unchanged (using `MemBlockDevice` where
+  they previously used `BlockDevice::new()`).
+- `BlockDevice` no longer has `use_real_files` field — always opens
+  real files.
+- `MemBlockDevice` owns the in-memory `BTreeMap`, `BlockDeviceController`,
+  and layout tracking.
+- `BlockDevice::ssd()` uses O_DIRECT; `BlockDevice::new()` uses buffered
+  I/O with alignment.
+- WAL bench `Block` case runs with `wal_skip_fsync: true` and exercises
+  alignment/RMW/`pwrite` code paths.
+- `cargo fmt --check`, `cargo clippy -- -D warnings` pass.
+- Crowtree C++ tests pass unchanged (no structural change on C++ side).
 
 ---
 
