@@ -1543,7 +1543,7 @@ impl PxGroup {
             "run accept phase"
         );
 
-        match <PxLocalReplica as ReplicaHandler>::on_accept(replica, entry.clone(), group_id).await {
+        match <PxLocalReplica as ReplicaHandler>::on_accept(replica, entry, group_id).await {
             Ok(PxAcceptReply::Accepted { .. }) => {
                 // See the matching guard in `run_prepare_phase` above.
                 if replica.voting() {

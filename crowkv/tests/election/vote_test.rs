@@ -79,7 +79,7 @@ async fn prevote_rejects_when_log_not_up_to_date() {
     replica.clear_vote_lockout();
 
     // Accept an entry at slot 10, term 4 — our log tip is (10, 4).
-    let _ = replica.on_accept(accept_entry(10, 4, 1)).await;
+    let _ = replica.on_accept(&accept_entry(10, 4, 1)).await;
 
     let reply = <PxLocalReplica as ReplicaHandler>::on_pre_vote(&replica, make_vote_req(2, 2, 5, 3), 1)
         .await
@@ -141,7 +141,7 @@ async fn request_vote_rejects_candidate_with_stale_log() {
     replica.clear_vote_lockout();
 
     // Our log tip is (10, 4).
-    let _ = replica.on_accept(accept_entry(10, 4, 1)).await;
+    let _ = replica.on_accept(&accept_entry(10, 4, 1)).await;
 
     let reply = <PxLocalReplica as ReplicaHandler>::on_request_vote(&replica, make_vote_req(2, 2, 5, 3), 1)
         .await
@@ -158,7 +158,7 @@ async fn request_vote_grants_for_matching_log_tip_even_if_learner_cold() {
 
     // Accept at (11, 6) — learner is cold (no learn_chosen called).
     // on_accept at term=6 bumps current_term to 6.
-    let _ = replica.on_accept(accept_entry(11, 6, 1)).await;
+    let _ = replica.on_accept(&accept_entry(11, 6, 1)).await;
     assert_eq!(replica.last_chosen_slot(), 0, "learner cold");
     let current_term = replica.current_term_snapshot();
 
@@ -226,7 +226,7 @@ async fn request_vote_reply_carries_frontier_triple() {
     replica.clear_vote_lockout();
 
     // Accept at slot 7, term 3 — bumps current_term to 3.
-    let _ = replica.on_accept(accept_entry(7, 3, 1)).await;
+    let _ = replica.on_accept(&accept_entry(7, 3, 1)).await;
     let current_term = replica.current_term_snapshot();
 
     let reply = <PxLocalReplica as ReplicaHandler>::on_request_vote(

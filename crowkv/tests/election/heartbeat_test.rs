@@ -104,7 +104,7 @@ async fn heartbeat_applies_committed_entries_up_to_commit_slot() {
     // Accept entries at slots 1–3 but don't learn them (follower path).
     for slot in 1..=3u64 {
         let entry = write_entry(slot, b"k", &format!("v{slot}").into_bytes());
-        let _ = replica.on_accept(entry).await;
+        let _ = replica.on_accept(&entry).await;
     }
 
     // Heartbeat with commit_slot=3 should apply slots 1–3.
@@ -130,7 +130,7 @@ async fn heartbeat_does_not_apply_beyond_accepted_log() {
 
     // Accept only slot 1.
     let entry = write_entry(1, b"k", b"v1");
-    let _ = replica.on_accept(entry).await;
+    let _ = replica.on_accept(&entry).await;
 
     // Heartbeat claims commit_slot=5 but we only have slot 1.
     let _ = <PxLocalReplica as ReplicaHandler>::on_heartbeat(&replica, heartbeat(1, 2, 5), 1)
@@ -149,7 +149,7 @@ async fn heartbeat_idempotent_for_repeated_commit_slot() {
     let replica = PxLocalReplica::new(1, PxLocalReplicaRole::Follower);
 
     let entry = write_entry(1, b"k", b"v1");
-    let _ = replica.on_accept(entry).await;
+    let _ = replica.on_accept(&entry).await;
 
     let _ = <PxLocalReplica as ReplicaHandler>::on_heartbeat(&replica, heartbeat(1, 2, 1), 1)
         .await

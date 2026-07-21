@@ -141,7 +141,7 @@ pub trait ReplicaHandler: Replica {
     ) -> Result<PxPrepareReply, PxReplicaError>;
 
     /// Phase-2 `Accept` handler.
-    async fn on_accept(&self, entry: PxLogEntry, group_id: u64) -> Result<PxAcceptReply, PxReplicaError>;
+    async fn on_accept(&self, entry: &PxLogEntry, group_id: u64) -> Result<PxAcceptReply, PxReplicaError>;
 
     /// `PreVote` handler. No state mutation; returns the vote decision plus the
     /// learner-frontier triple for the candidate's bulk-Phase-1 calculation.

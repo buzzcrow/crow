@@ -292,7 +292,7 @@ impl ReplicaHandler for PxLocalReplica {
         Ok(self.on_prepare(slot, ballot, term).await)
     }
 
-    async fn on_accept(&self, entry: PxLogEntry, _group_id: u64) -> Result<PxAcceptReply, PxReplicaError> {
+    async fn on_accept(&self, entry: &PxLogEntry, _group_id: u64) -> Result<PxAcceptReply, PxReplicaError> {
         Ok(self.on_accept(entry).await)
     }
 
@@ -506,7 +506,7 @@ impl PxLocalReplica {
                             "restore replay accepted missing log entry",
                         )
                     })?;
-                    let _ = replica.acceptor.accept(entry).await;
+                    let _ = replica.acceptor.accept(&entry).await;
                 }
                 crate::wal::record::RecordType::VoteGranted => {}
             }
@@ -1109,7 +1109,7 @@ impl PxLocalReplica {
     ///
     /// Same two-fence rule as [`Self::on_prepare`] but the term lives on
     /// `entry.term` (because the accept message carries the value).
-    pub async fn on_accept(&self, entry: PxLogEntry) -> PxAcceptReply {
+    pub async fn on_accept(&self, entry: &PxLogEntry) -> PxAcceptReply {
         let req_term = entry.term;
         let local_term = self.current_term_snapshot();
         if req_term < local_term {
@@ -1125,7 +1125,7 @@ impl PxLocalReplica {
         // Keep a reference for the WAL persist below.
         let slot = entry.slot;
         let ballot = entry.ballot;
-        let reply = self.acceptor.accept(entry.clone()).await;
+        let reply = self.acceptor.accept(entry).await;
 
         // Ack contract (W6): persist Accepted record before replying.
         if matches!(reply, PxAcceptReply::Accepted { .. }) {
@@ -1138,7 +1138,7 @@ impl PxLocalReplica {
                 "on_accept: accepted leader proposal"
             );
             if let Some(wal) = &self.wal {
-                let record = WALRecord::from_accepted(wal.group_id(), &entry);
+                let record = WALRecord::from_accepted(wal.group_id(), entry);
                 if let Err(e) = wal.append(&record).await {
                     tracing::error!(slot, ?ballot, error = %e, "WAL persist Accepted failed");
                 }

@@ -75,7 +75,7 @@ fn entry(slot: u64, payload: Vec<u8>) -> PxLogEntry {
 async fn put_applies_value_to_kv_engine() {
     let replica = PxLocalReplica::new(1, PxLocalReplicaRole::Follower);
     let entry = entry(1, encode_put(b"key", b"value"));
-    let _ = replica.on_accept(entry.clone()).await;
+    let _ = replica.on_accept(&entry).await;
     replica.learn_chosen(&entry, None, None).await;
 
     assert_eq!(
@@ -93,11 +93,11 @@ async fn overwrite_replaces_previous_value() {
     let replica = PxLocalReplica::new(1, PxLocalReplicaRole::Follower);
 
     let e1 = entry(1, encode_put(b"k", b"v1"));
-    let _ = replica.on_accept(e1.clone()).await;
+    let _ = replica.on_accept(&e1).await;
     replica.learn_chosen(&e1, None, None).await;
 
     let e2 = entry(2, encode_put(b"k", b"v2"));
-    let _ = replica.on_accept(e2.clone()).await;
+    let _ = replica.on_accept(&e2).await;
     replica.learn_chosen(&e2, None, None).await;
 
     assert_eq!(
@@ -115,7 +115,7 @@ async fn delete_produces_tombstone() {
     let replica = PxLocalReplica::new(1, PxLocalReplicaRole::Follower);
 
     let e1 = entry(1, encode_put(b"k", b"v1"));
-    let _ = replica.on_accept(e1.clone()).await;
+    let _ = replica.on_accept(&e1).await;
     replica.learn_chosen(&e1, None, None).await;
 
     assert!(
@@ -124,7 +124,7 @@ async fn delete_produces_tombstone() {
     );
 
     let e2 = entry(2, encode_delete(b"k"));
-    let _ = replica.on_accept(e2.clone()).await;
+    let _ = replica.on_accept(&e2).await;
     replica.learn_chosen(&e2, None, None).await;
 
     assert_eq!(
@@ -142,7 +142,7 @@ async fn delete_nonexistent_key_is_noop() {
     let replica = PxLocalReplica::new(1, PxLocalReplicaRole::Follower);
 
     let e1 = entry(1, encode_delete(b"ghost"));
-    let _ = replica.on_accept(e1.clone()).await;
+    let _ = replica.on_accept(&e1).await;
     replica.learn_chosen(&e1, None, None).await;
 
     assert_eq!(
@@ -167,7 +167,7 @@ async fn batch_multiple_puts_apply_all() {
             (b"k3".to_vec(), Some(b"v3".to_vec())),
         ]),
     );
-    let _ = replica.on_accept(e1.clone()).await;
+    let _ = replica.on_accept(&e1).await;
     replica.learn_chosen(&e1, None, None).await;
 
     assert_eq!(
@@ -200,7 +200,7 @@ async fn batch_intra_batch_last_wins() {
             (b"k".to_vec(), None), // delete
         ]),
     );
-    let _ = replica.on_accept(e1.clone()).await;
+    let _ = replica.on_accept(&e1).await;
     replica.learn_chosen(&e1, None, None).await;
 
     assert_eq!(
@@ -223,7 +223,7 @@ async fn batch_put_then_delete_same_key() {
             (b"k".to_vec(), None), // delete
         ]),
     );
-    let _ = replica.on_accept(e1.clone()).await;
+    let _ = replica.on_accept(&e1).await;
     replica.learn_chosen(&e1, None, None).await;
 
     assert_eq!(
@@ -246,7 +246,7 @@ async fn batch_delete_then_put_same_key() {
             (b"k".to_vec(), Some(b"v1".to_vec())), // then put
         ]),
     );
-    let _ = replica.on_accept(e1.clone()).await;
+    let _ = replica.on_accept(&e1).await;
     replica.learn_chosen(&e1, None, None).await;
 
     assert_eq!(
@@ -263,7 +263,7 @@ async fn empty_batch_is_noop() {
     let replica = PxLocalReplica::new(1, PxLocalReplicaRole::Follower);
 
     let e1 = entry(1, encode_batch(&[]));
-    let _ = replica.on_accept(e1.clone()).await;
+    let _ = replica.on_accept(&e1).await;
     replica.learn_chosen(&e1, None, None).await;
 
     assert_eq!(
@@ -288,12 +288,12 @@ async fn multiple_slots_mixed_ops_correctness() {
             (b"k2".to_vec(), Some(b"v2".to_vec())),
         ]),
     );
-    let _ = replica.on_accept(e1.clone()).await;
+    let _ = replica.on_accept(&e1).await;
     replica.learn_chosen(&e1, None, None).await;
 
     // Slot 2: overwrite k1
     let e2 = entry(2, encode_put(b"k1", b"v1b"));
-    let _ = replica.on_accept(e2.clone()).await;
+    let _ = replica.on_accept(&e2).await;
     replica.learn_chosen(&e2, None, None).await;
 
     // Slot 3: delete k2, put k3
@@ -301,7 +301,7 @@ async fn multiple_slots_mixed_ops_correctness() {
         3,
         encode_batch(&[(b"k2".to_vec(), None), (b"k3".to_vec(), Some(b"v3".to_vec()))]),
     );
-    let _ = replica.on_accept(e3.clone()).await;
+    let _ = replica.on_accept(&e3).await;
     replica.learn_chosen(&e3, None, None).await;
 
     assert_eq!(

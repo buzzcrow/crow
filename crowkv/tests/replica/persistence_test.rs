@@ -130,7 +130,7 @@ async fn wal_backed_replica_reloads_committed_kv_after_restart() {
             (3, b"alpha", b"3"),
         ] {
             let entry = write_entry(slot, key, value);
-            let reply = replica.on_accept(entry.clone()).await;
+            let reply = replica.on_accept(&entry).await;
             assert!(
                 matches!(reply, crowkv::paxos::roles::PxAcceptReply::Accepted { .. }),
                 "slot {slot} should be accepted: {reply:?}"
@@ -180,12 +180,12 @@ async fn delete_survives_wal_restart() {
 
         // Slot 1: put "k1" = "v1"
         let e1 = write_entry(1, b"k1", b"v1");
-        let _ = replica.on_accept(e1.clone()).await;
+        let _ = replica.on_accept(&e1).await;
         replica.learn_chosen(&e1, None, None).await;
 
         // Slot 2: delete "k1"
         let e2 = delete_entry(2, b"k1");
-        let _ = replica.on_accept(e2.clone()).await;
+        let _ = replica.on_accept(&e2).await;
         replica.learn_chosen(&e2, None, None).await;
 
         assert_eq!(replica.contiguous_applied(), 2);
@@ -225,17 +225,17 @@ async fn put_then_delete_same_key_survives_restart() {
 
         // Slot 1: put "k" = "v1"
         let e1 = write_entry(1, b"k", b"v1");
-        let _ = replica.on_accept(e1.clone()).await;
+        let _ = replica.on_accept(&e1).await;
         replica.learn_chosen(&e1, None, None).await;
 
         // Slot 2: put "k" = "v2" (overwrite)
         let e2 = write_entry(2, b"k", b"v2");
-        let _ = replica.on_accept(e2.clone()).await;
+        let _ = replica.on_accept(&e2).await;
         replica.learn_chosen(&e2, None, None).await;
 
         // Slot 3: delete "k"
         let e3 = delete_entry(3, b"k");
-        let _ = replica.on_accept(e3.clone()).await;
+        let _ = replica.on_accept(&e3).await;
         replica.learn_chosen(&e3, None, None).await;
 
         assert_eq!(replica.contiguous_applied(), 3);
@@ -278,12 +278,12 @@ async fn batch_with_put_and_delete_survives_restart() {
                 (b"k1".to_vec(), None), // delete k1 — should win over put in same batch
             ],
         );
-        let _ = replica.on_accept(e1.clone()).await;
+        let _ = replica.on_accept(&e1).await;
         replica.learn_chosen(&e1, None, None).await;
 
         // Slot 2: put k3
         let e2 = write_entry(2, b"k3", b"v3");
-        let _ = replica.on_accept(e2.clone()).await;
+        let _ = replica.on_accept(&e2).await;
         replica.learn_chosen(&e2, None, None).await;
 
         assert_eq!(replica.contiguous_applied(), 2);
@@ -351,12 +351,12 @@ async fn mixed_put_delete_batch_survives_restart() {
                 (b"k3".to_vec(), Some(b"v3".to_vec())),
             ],
         );
-        let _ = replica.on_accept(e1.clone()).await;
+        let _ = replica.on_accept(&e1).await;
         replica.learn_chosen(&e1, None, None).await;
 
         // Slot 2: delete k2 (single-op entry)
         let e2 = delete_entry(2, b"k2");
-        let _ = replica.on_accept(e2.clone()).await;
+        let _ = replica.on_accept(&e2).await;
         replica.learn_chosen(&e2, None, None).await;
 
         // Slot 3: batch — put k4, delete k1, put k5
@@ -368,7 +368,7 @@ async fn mixed_put_delete_batch_survives_restart() {
                 (b"k5".to_vec(), Some(b"v5".to_vec())),
             ],
         );
-        let _ = replica.on_accept(e3.clone()).await;
+        let _ = replica.on_accept(&e3).await;
         replica.learn_chosen(&e3, None, None).await;
 
         assert_eq!(replica.contiguous_applied(), 3);

@@ -122,7 +122,7 @@ async fn classic_prepare_and_accept_track_state() {
         payload: bytes::Bytes::from_static(b"payload"),
     };
 
-    let accept_reply = node.on_accept(entry.clone()).await;
+    let accept_reply = node.on_accept(&entry).await;
     assert!(matches!(
         accept_reply,
         crowkv::paxos::roles::PxAcceptReply::Accepted { .. }
