@@ -1,17 +1,19 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
+use bytes::Bytes;
+
 /// A single mutation within a batch: set a value or delete (tombstone) a key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Op {
-    Put(Vec<u8>),
+    Put(Bytes),
     Delete,
 }
 
 /// One `(key, op)` mutation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BatchOp {
-    pub key: Vec<u8>,
+    pub key: Bytes,
     pub op: Op,
 }
 
@@ -51,7 +53,7 @@ impl Batch {
     /// An empty payload (e.g. a `NoOp` repair entry) decodes to an empty
     /// batch. Malformed/truncated input stops decoding at the bad record.
     #[must_use]
-    pub fn decode(payload: &[u8]) -> Self {
+    pub fn decode(payload: &Bytes) -> Self {
         let mut ops = Vec::new();
         if payload.is_empty() {
             return Self { ops };
@@ -67,12 +69,20 @@ impl Batch {
 
             let key_len = read_u32_le(payload, offset) as usize;
             offset += 4;
-            let key = payload.get(offset..offset + key_len).unwrap_or(&[]).to_vec();
+            let key = if offset + key_len <= payload.len() {
+                payload.slice(offset..offset + key_len)
+            } else {
+                Bytes::new()
+            };
             offset += key_len;
 
             let value_len = read_u32_le(payload, offset) as usize;
             offset += 4;
-            let value = payload.get(offset..offset + value_len).unwrap_or(&[]).to_vec();
+            let value = if offset + value_len <= payload.len() {
+                payload.slice(offset..offset + value_len)
+            } else {
+                Bytes::new()
+            };
             offset += value_len;
 
             let op = if kind == 0 { Op::Put(value) } else { Op::Delete };
@@ -82,7 +92,7 @@ impl Batch {
     }
 }
 
-fn read_u32_le(buf: &[u8], offset: usize) -> u32 {
+fn read_u32_le(buf: &Bytes, offset: usize) -> u32 {
     let b = buf.get(offset..offset + 4).unwrap_or(&[0; 4]);
     u32::from_le_bytes([b[0], b[1], b[2], b[3]])
 }

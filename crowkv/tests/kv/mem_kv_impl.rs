@@ -49,7 +49,7 @@ impl KVEngine for InMemKV {
         // would let the first op claim the slot and skip the rest).
         let mut collapsed: BTreeMap<&[u8], &Op> = BTreeMap::new();
         for BatchOp { key, op } in &batch.ops {
-            collapsed.insert(key.as_slice(), op);
+            collapsed.insert(key.as_ref(), op);
         }
         let mut map = self.map.write();
         for (key, op) in collapsed {
@@ -59,7 +59,7 @@ impl KVEngine for InMemKV {
                 }
             }
             let cell = match op {
-                Op::Put(v) => Cell::Value(v.clone()),
+                Op::Put(v) => Cell::Value(v.to_vec()),
                 Op::Delete => Cell::Tombstone,
             };
             map.insert(key.to_vec(), (slot, cell));

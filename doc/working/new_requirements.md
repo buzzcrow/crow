@@ -59,6 +59,30 @@ complexity, and dependency. Before implementation, follow the
   counters, no read-specific gauges. See
   [`read-flow-analysis.md`](read-flow-analysis.md) for the full gap
   analysis and proposed metrics hierarchy.
+- **R20** — Eliminate O(n) payload copy in WAL encode — Area: WAL —
+  `WALRecord::from_accepted` calls `encode_accepted_payload(entry)`
+  which does `entry.payload.to_vec()`, an O(n) heap allocate + memcpy
+  of the entire payload. Since `entry.payload` is already `Bytes`, the
+  `WALRecord.payload` could be `entry.payload.clone()` (O(1) ref-count
+  bump) instead. See
+  [`write-flow-analysis.md`](write-flow-analysis.md) Memory Copy
+  Analysis for the full audit.
+- **R21** — Zero-copy engine read API — Area: crowtree FFI / engine —
+  `CrowtreeEngine::get` copies the key (`key.to_vec()`) for the FFI
+  call and copies the value (`copy_buf`) from the C++ engine's internal
+  buffer because the epoch guard is released before the value is
+  returned. A pinned-value API that extends the epoch guard lifetime to
+  the Rust caller could eliminate the value copy. See
+  [`read-flow-analysis.md`](read-flow-analysis.md) Memory Copy
+  Analysis for the full audit.
+- **R22** — Zero-copy Batch decode — Area: kv / consensus —
+  `Batch::decode` does `to_vec()` per key and per value, creating O(n)
+  heap allocations on every `learn_chosen` call. Changing `Op` and
+  `BatchOp` from `Vec<u8>` to `Bytes` allows `Batch::decode` to use
+  `Bytes::slice` (O(1) ref-count bump) instead of `to_vec()`, sharing
+  the `PxLogEntry.payload` allocation. See
+  [`write-flow-analysis.md`](write-flow-analysis.md) Memory Copy
+  Analysis for the full audit.
 
 ### Low Priority
 
@@ -71,6 +95,14 @@ complexity, and dependency. Before implementation, follow the
 - **R3** — Zero-copy FFI write path — Area: crowtree FFI — `ct_apply_put` copies
   key+value into an internal buffer; for large values this memcpy is avoidable
   via a direct-write alloc handle.
+- **R23** — Eliminate FFI batch encode copy — Area: crowtree FFI —
+  `encode_batch` packs `&[BatchOp]` into a flat `Vec<u8>` before calling
+  `ct_apply_batch`, an O(n) heap allocate + memcpy of all keys and values.
+  A new C API accepting an array of `(key_ptr, key_len, val_ptr, val_len)`
+  structs would eliminate the packing copy. Related to R3 (single-put FFI
+  copy) but targets the batch path. See
+  [`write-flow-analysis.md`](write-flow-analysis.md) Memory Copy
+  Analysis for the full audit.
 - **R4** — Bounded memory pool — Area: crowtree engine — `buffer::allocate` uses
   unbounded `std::malloc`; a burst of large writes can spike RSS without
   backpressure.
@@ -651,6 +683,263 @@ fallback counter), `crowkv/src/paxos/learner.rs`
 - Read bandwidth (`read_bytes_in/out.bw`) + write bandwidth
   (derived: `bytes_in/out.bw` minus read) accounts for total KV
   bandwidth.
+
+---
+
+### R20: Eliminate O(n) payload copy in WAL encode
+
+**Problem**: `WALRecord::from_accepted` (`record.rs:408`) calls
+`encode_accepted_payload(entry)` which does `entry.payload.to_vec()`
+(`record.rs:487`). This is an O(n) heap allocate + memcpy of the
+entire payload — the only O(n) copy in the accept → WAL path that is
+potentially avoidable. The `Vec<u8>` is then wrapped back into
+`Bytes::from(vec)` for the `WALRecord.payload` field, making the
+round-trip through `Vec<u8>` purely wasteful.
+
+**Root cause**: `encode_accepted_payload` exists as a seam for future
+encoding transformations (e.g. compression, encryption). Today it is a
+straight `entry.payload.to_vec()` — the payload bytes are unchanged,
+just copied into a new allocation.
+
+**Approach**:
+- Change `WALRecord::from_accepted` to store `entry.payload.clone()`
+  directly (O(1) ref-count bump) when no encoding transformation is
+  needed.
+- Keep `encode_accepted_payload` as the seam, but make it return
+  `Bytes` instead of `Vec<u8>`. When no transformation is active, it
+  returns `entry.payload.clone()`. When a transformation is added
+  later, it returns `Bytes::from(transformed_vec)`.
+- Verify that `encode_frame` and the vectored write path work
+  unchanged — they already operate on `WALRecord.payload: Bytes`.
+
+**Priority**: Low — with `Bytes` payloads the copy is a single
+`memcpy` per accept. For small payloads (≤512 B, the benchmark
+default) the cost is negligible. For large payloads (≥1 MB) it is a
+measurable but still small fraction of the total write latency
+(consensus RPC round-trip dominates).
+
+**Complexity**: Low — one function change, no API or trait changes.
+
+**Files**: `crowkv/src/wal/record.rs` (`encode_accepted_payload`,
+`from_accepted`).
+
+**Acceptance**:
+- All existing WAL tests pass unchanged.
+- No `to_vec()` call in `WALRecord::from_accepted` when no encoding
+  transformation is active.
+- `WALRecord.payload` is a `Bytes::clone` of `entry.payload` (shared
+  allocation), verified by code inspection.
+
+---
+
+### R21: Zero-copy engine read API
+
+**Problem**: `CrowtreeEngine::get` has two O(n) copies on the read
+path:
+- **Key copy**: `try_get(key.to_vec())` (`crowtree_engine.rs:168`)
+  allocates a `Vec<u8>` copy of the key for the FFI call. The C API
+  `ct_get_async` takes `*const u8, len`, so a borrow could work, but
+  the async FFI wrapper requires `Send` ownership for the reactor
+  boundary.
+- **Value copy**: `copy_buf(value)` (`ffi/src/lib.rs:1178`) does
+  `slice::from_raw_parts(..).to_vec()`. The C++ engine's zero-copy
+  fast path returns a `ct_buf` that may be a borrowed pointer into a
+  still-live frame (epoch guard), but the Rust side must copy because
+  the epoch guard is released immediately after `ct_future_free`.
+
+For large values (≥1 MB) these copies are measurable on the read
+critical path. The key copy is the smaller concern (keys are typically
+small); the value copy is the primary target.
+
+**Approach**:
+- **Value copy**: Introduce a "pinned value" C API that returns a
+  `ct_buf` along with a guard handle that keeps the epoch alive until
+  the caller explicitly releases it. The Rust side wraps this in a
+  `PinnedValue` type that owns the guard and derefs to `&[u8]`. The
+  `KVEngine::get` trait would need a new return type (e.g.
+  `KVFuture<Option<(SlotIndex, PinnedValue)>>` or a borrowing variant).
+  This is a significant API change affecting the `KVEngine` trait,
+  `PxLearner::engine_get`, `kv_get` response construction, and gRPC
+  serialization.
+- **Key copy**: Change the async FFI wrapper to accept a raw pointer
+  + length instead of `Vec<u8>`, with a lifetime guarantee that the
+  caller's buffer outlives the synchronous poll. This is simpler than
+  the value fix but still requires careful `Send`/`unsafe` reasoning.
+
+**Priority**: Low — the read path has fewer O(n) copies than the
+write path, and the engine value copy is structurally similar to the
+InMemKV clone (both return owned `Vec<u8>`). For small values the cost
+is negligible. For large values the copy is measurable but still a
+small fraction of total read latency (gRPC serialization + network
+round-trip dominate).
+
+**Complexity**: High — the value copy elimination requires a new C
+API (`ct_get_pinned` or similar), a new Rust wrapper type with guard
+semantics, and changes to the `KVEngine` trait. The key copy
+elimination is Medium complexity.
+
+**Files**: `crowtree/ffi/src/lib.rs` (`try_get`, `copy_buf`,
+`AsyncCrowtree`), `crowkv/src/kv/kv_engine.rs` (`KVEngine` trait),
+`crowkv/src/kv/crowtree_engine.rs` (`get`), `crowkv/src/paxos/learner.rs`
+(`engine_get`), `crowkv/src/cluster/px_kv_store.rs` (`kv_get`),
+`crowtree/include/crowtree/c_api.h` (new C API).
+
+**Acceptance**:
+- All existing read tests pass unchanged.
+- `CrowtreeEngine::get` fast path returns a borrowed reference to the
+  engine's internal buffer (no `copy_buf` on the fast path).
+- The epoch guard is held until the `PinnedValue` is dropped.
+- `InMemKV` continues to work (returns owned `Vec<u8>` as before, or
+  adapts to the new trait signature).
+
+---
+
+### R22: Zero-copy Batch decode
+
+**Problem**: `Batch::decode` (`op.rs:54`) decodes the Paxos payload
+into `Vec<BatchOp>` where each `BatchOp` owns `key: Vec<u8>` and
+`Op::Put(Vec<u8>)`. Each `to_vec()` is an O(n) heap allocate + memcpy.
+For a batch with K keys and total payload size N, this is K+1
+allocations and N bytes of memcpy — on every `learn_chosen` call,
+i.e. on every write.
+
+The `PxLogEntry.payload` is already `Bytes` (ref-counted, shared
+across the accept path). `Batch::decode` could use `Bytes::slice(range)`
+to create zero-copy views into the same allocation, eliminating all
+`to_vec()` calls.
+
+**Root cause**: `Op` and `BatchOp` use `Vec<u8>` for key and value
+storage. `Vec<u8>` requires ownership of the underlying allocation, so
+`Batch::decode` must copy. `Bytes` supports zero-copy slicing via
+`Bytes::slice(range)` — O(1) ref-count bump, no allocation.
+
+**Approach**:
+- Change `Op::Put(Vec<u8>)` → `Op::Put(Bytes)`.
+- Change `BatchOp.key: Vec<u8>` → `BatchOp.key: Bytes`.
+- Change `Batch::decode` signature from `decode(payload: &[u8])` to
+  `decode(payload: &Bytes)`. Use `payload.slice(start..end)` instead
+  of `payload.get(..).to_vec()`.
+- Change `apply_entry` in `learner.rs` from `payload: &[u8]` to
+  `payload: &Bytes`, and the call site from `entry.payload.as_ref()`
+  to `&entry.payload`.
+- Update `CrowtreeEngine::apply` to use `b.key.as_ref()` and
+  `v.as_ref()` when mapping to `CtBatchOp`.
+- Update `InMemKV::apply` (test engine) to use `Bytes::clone` instead
+  of `Vec::clone`.
+- `Cell`, `EngineDiff` stay `Vec<u8>` — they are engine-internal
+  storage and comparison types, separate from the decode path.
+- `KVEngine` trait signature unchanged — still takes `&Batch`.
+
+**Alternatives considered**:
+- **Lifetime parameter on `Batch`** (`Batch<'a>`): would ripple through
+  `KVEngine` trait, all engine impls, and all callers. High complexity,
+  no benefit over `Bytes` (which is owned + zero-copy).
+- **Borrowed slices (`&[u8]`)**: same lifetime problem as above.
+  `Bytes` is the standard solution for owned + zero-copy in Rust.
+
+**Priority**: Medium — eliminates one O(n) copy pass on every write.
+  For small payloads (≤512 B) the effect is negligible, but for large
+  payloads (≥1 MB) or high-throughput batch writes with many keys, the
+  savings are meaningful.
+
+**Complexity**: Low-Medium — mechanical type change, no trait or
+  lifetime changes, ~7 files.
+
+**Files**: `crowkv/src/kv/op.rs` (`Op`, `BatchOp`, `Batch::decode`),
+`crowkv/src/paxos/learner.rs` (`apply_entry`),
+`crowkv/src/kv/crowtree_engine.rs` (`apply`),
+`crowkv/tests/kv/mem_kv_impl.rs` (`InMemKV::apply`),
+`crowkv/tests/kv/conformance.rs` (`put`/`del` helpers),
+`crowkv/tests/kv/op_codec_test.rs` (test helpers + assertions),
+`crowkv/tests/kv/mem_kv_test.rs` (`Batch::decode` call sites),
+`crowkv/tests/wal/replay_tests.rs` (`Batch::decode` call sites).
+
+**Acceptance**:
+- All existing KV, WAL replay, and op codec tests pass unchanged.
+- No `to_vec()` call in `Batch::decode`.
+- `Batch::decode` uses `Bytes::slice` for zero-copy key/value
+  extraction.
+- `cargo clippy -- -D warnings` passes.
+- `cargo fmt --check` passes.
+
+---
+
+### R23: Eliminate FFI batch encode copy
+
+**Problem**: `CrowtreeEngine::apply` (`crowtree_engine.rs:135`) maps
+`BatchOp` to `CtBatchOp<'_>` (borrowed slices), then calls
+`Crowtree::apply_batch` (`ffi/src/lib.rs:548`), which internally calls
+`encode_batch(ops)` (`ffi/src/lib.rs:415`). `encode_batch` packs all
+keys and values into a single flat `Vec<u8>` wire format
+(`[u8 kind][u32 klen][key][u32 vlen][value] * count`) before passing it
+to the C API `ct_apply_batch`. This is an O(n) heap allocate + memcpy
+of the entire batch payload — all keys and values are copied into the
+packed buffer, then the C++ engine copies them again into its internal
+memtable.
+
+The `CtBatchOp<'_>` already holds borrowed `&[u8]` slices into the
+`Batch`'s `Bytes` payloads (after R22). The packing copy is purely an
+FFI marshalling artifact — the C API `ct_apply_batch` accepts a single
+contiguous buffer + count, forcing the Rust side to flatten the slices.
+
+**Root cause**: `ct_apply_batch` (`c_api.h`) takes
+`const uint8_t* packed, size_t packed_len, uint64_t count` — a single
+packed buffer. There is no C API that accepts an array of key/value
+pointer-length pairs, so the Rust FFI wrapper must serialize the slices
+into one contiguous allocation.
+
+**Approach**:
+- Add a new C API `ct_apply_batch_slices` that accepts an array of
+  `ct_kv_ref` structs (`{ const uint8_t* key; uint32_t key_len; const
+  uint8_t* value; uint32_t value_len; uint8_t kind; }`) plus the slot
+  and count. The C++ implementation iterates the array directly — no
+  unpacking from a flat buffer needed.
+- Change `Crowtree::apply_batch` (`ffi/src/lib.rs`) to call
+  `ct_apply_batch_slices` with a stack-allocated `[ct_kv_ref; MAX_BATCH]`
+  or a `Vec<ct_kv_ref>` (small, count-sized — not payload-sized).
+  Eliminates `encode_batch` entirely.
+- Keep `ct_apply_batch` (packed buffer API) for backward compatibility
+  or remove it if no other caller exists.
+- `CrowtreeEngine::apply` (`crowtree_engine.rs`) unchanged — already
+  produces `CtBatchOp<'_>` with borrowed slices; only the FFI layer
+  changes.
+
+**Relationship to R3**: R3 targets the C++ *internal* copy in
+`ct_apply_put` (single-key) via a direct-write alloc handle. R23
+targets the Rust-side *packing* copy in `encode_batch` (multi-key).
+They are independent: R3 eliminates the C++ memcpy from caller buffer
+to internal buffer; R23 eliminates the Rust memcpy from scattered
+slices to a flat FFI buffer. Both could be unified if the
+`ct_apply_batch_slices` API is extended to accept crowtree-owned
+handles (from R3's `ct_alloc`), but that is a future design decision.
+
+**Priority**: Low — the packing copy is one `memcpy` of the total
+batch payload size. For small batches (≤512 B, benchmark default) the
+cost is negligible. For large batches (≥1 MB) or high-throughput
+multi-key writes, the copy is measurable but still a small fraction of
+total write latency (consensus RPC round-trip dominates). No current
+profiling motivation.
+
+**Complexity**: Medium — new C API surface (`ct_apply_batch_slices`,
+`ct_kv_ref` struct), C++ implementation in `c_api.cpp`, Rust FFI
+adapter change in `ffi/src/lib.rs`. No `KVEngine` trait or
+`CrowtreeEngine` changes. Lifetime safety is straightforward (borrowed
+slices outlive the synchronous FFI call).
+
+**Files**: `crowtree/include/crowtree/c_api.h` (new C API + struct),
+`crowtree/src/c_api.cpp` (implementation),
+`crowtree/ffi/src/lib.rs` (`apply_batch` — call new API, remove
+`encode_batch`), `crowtree/ffi/tests/ffi_test.rs` (batch tests pass
+unchanged).
+
+**Acceptance**:
+- All existing FFI batch tests pass unchanged.
+- No `encode_batch` call in `Crowtree::apply_batch`.
+- No `Vec<u8>` allocation for batch packing in the apply path.
+- `ct_apply_batch_slices` correctly applies multi-key batches with
+  duplicate-key last-wins semantics (verified by existing tests).
+- `pixi run cargo clippy -- -D warnings` passes.
+- `pixi run cargo fmt --check` passes.
 
 ---
 

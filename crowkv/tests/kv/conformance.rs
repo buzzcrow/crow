@@ -10,18 +10,19 @@
 //! `#[test]` functions with a freshly constructed engine.
 
 use crate::test_util::{compare_dyn, iter_all_dyn};
+use bytes::Bytes;
 use crowkv::kv::{Batch, BatchOp, Cell, KVEngine, Op};
 
 pub fn put(key: &[u8], value: &[u8]) -> BatchOp {
     BatchOp {
-        key: key.to_vec(),
-        op: Op::Put(value.to_vec()),
+        key: Bytes::copy_from_slice(key),
+        op: Op::Put(Bytes::copy_from_slice(value)),
     }
 }
 
 pub fn del(key: &[u8]) -> BatchOp {
     BatchOp {
-        key: key.to_vec(),
+        key: Bytes::copy_from_slice(key),
         op: Op::Delete,
     }
 }

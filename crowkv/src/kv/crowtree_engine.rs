@@ -141,10 +141,10 @@ impl KVEngine for CrowtreeEngine {
             .iter()
             .map(|b| match &b.op {
                 Op::Put(v) => CtBatchOp::Put {
-                    key: &b.key,
-                    value: v,
+                    key: b.key.as_ref(),
+                    value: v.as_ref(),
                 },
-                Op::Delete => CtBatchOp::Delete { key: &b.key },
+                Op::Delete => CtBatchOp::Delete { key: b.key.as_ref() },
             })
             .collect();
         // crowtree enforces per-key highest-slot-wins internally against its
