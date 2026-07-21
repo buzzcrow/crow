@@ -22,10 +22,6 @@ complexity, and dependency. Before implementation, follow the
   library. Move reusable utilities (metrics core, logging wrapper, CRC32C,
   time helpers, operation report) out of `crowkv`/`crowtree` so future
   storage-system components can share them without re-implementing.
-- **R10** — Benchmark framework — Area: console CLI — Add benchmark capability
-  to console CLI; run single-node benchmarks (in-memory or no-fsync file mode)
-  to identify system bottlenecks and inform performance tuning. Related to R3,
-  R4, R6 (memory efficiency optimizations).
 - **R11** — GUI internal state display — Area: web UI — Surface internal
   metrics (from R8) in the GUI via existing health/internal-state query
   infrastructure. Show recent operation counts and metrics per Store/Group
@@ -37,12 +33,6 @@ complexity, and dependency. Before implementation, follow the
   `LatencyHistogram` / `Counter` classes. After R12 extracts metrics into
   `crow-common`, the bench client should reuse the same metrics primitives
   for consistency and to eliminate duplicate statistical infrastructure.
-- **R15** — Zero-copy PxLogEntry in accept path — Area: consensus —
-  `on_accept` clones `entry` for the acceptor and again for the WAL
-  record; `inner_accept` clones again for `cas_accepted`. With `Bytes`
-  payloads these are ref-count bumps today, but the goal is zero copy:
-  pass `&PxLogEntry` through the acceptor and WAL encode without
-  intermediate clones.
 - **R16** — Overlap local WAL fsync with remote RPC fan-out — Area:
   consensus / WAL — The leader's local `on_accept` awaits `fdatasync`
   before returning `PxAcceptReply::Accepted`, putting the leader's disk
@@ -61,6 +51,14 @@ complexity, and dependency. Before implementation, follow the
   before the local engine has applied the value — read-your-writes
   semantics break unless a read barrier or apply-fence is added. Gate
   behind a feature flag; test read-after-write consistency.
+- **R19** — Read performance profiling and metrics — Area: consensus /
+  metrics / client — The read path lacks the latency-bandwidth-counter
+  hierarchy that the write path has. No per-mode latency breakdown, no
+  lease-vs-ReadIndex path counter, no read barrier latency, no engine
+  get latency, no read bandwidth separation, no forward/fallback
+  counters, no read-specific gauges. See
+  [`read-flow-analysis.md`](read-flow-analysis.md) for the full gap
+  analysis and proposed metrics hierarchy.
 
 ### Low Priority
 
@@ -233,44 +231,6 @@ token protocol design; option (b) adds per-page atomic overhead to every
   `install_snapshot()` — reader sees old or new tree, never partial.
 - Epoch reclamation stress test: concurrent readers + writers + snapshot
   swaps, no use-after-free under ASan/TSan.
-
----
-
-### R10: Benchmark framework
-
-**Problem**: After R8 (metrics module) is implemented, the next step is to
-establish a benchmark framework to identify system bottlenecks and inform
-performance tuning. Currently there is no way to run sustained load against
-a crowkv-server and measure throughput/latency.
-
-**Approach**:
-- Add a `benchmark` subcommand to the console CLI (`crowkv-console`).
-- Single-node benchmark mode: start one server, create one store + one group,
-  drive KV put/get/delete at configurable rate and concurrency.
-- Storage modes: in-memory (no disk) or file-without-fsync (reduce disk IO
-  bottleneck so we can isolate path-level overhead).
-- Measure: throughput (ops/s), latency p50/p99, WAL append rate, engine apply
-  rate. Report per-mode comparison.
-- Initial goal: establish the benchmark infrastructure and get baseline
-  numbers. Follow-up: create smaller targeted benchmarks for specific
-  bottlenecks identified.
-
-**Dependencies**: R8 (metrics module) for collecting latency/throughput
-counters. Related to R3 (zero-copy FFI), R4 (bounded memory pool), R6
-(cross-thread guard) — all memory efficiency optimizations that benchmark
-results may motivate.
-
-**Priority**: Medium — needed after R8 to guide performance work.
-
-**Complexity**: Medium — CLI subcommand, load generator, metrics collection
-integration, report format.
-
-**Files**: `crowkv-console/cli/src/`, `crowkv-console/shared/src/`, new
-benchmark module.
-
-**Acceptance**: `crowkv-console benchmark --mode memory --duration 60s` runs
-and prints throughput + latency summary. Same for `--mode file-nofsync`.
-Baseline numbers recorded for future comparison.
 
 ---
 
@@ -475,59 +435,6 @@ bench client refactor to use metrics primitives, update report generation.
 
 ---
 
-### R15: Zero-copy PxLogEntry in accept path
-
-**Problem**: The local accept path performs multiple `PxLogEntry` clones:
-- `on_accept` (`local_replica.rs:1099`) clones `entry` for
-  `self.acceptor.accept(entry.clone())` because it needs `&entry` later
-  for `WALRecord::from_accepted`.
-- `inner_accept` (`acceptor.rs:124`) clones `entry` again for
-  `node.cas_accepted(accepted_ptr, entry.clone())`.
-- `base_entry` (`group.rs:1269`) constructs a new `PxLogEntry` per slot
-  retry, cloning `payload: Bytes` each time.
-
-Today `Bytes::clone` is an `O(1)` ref-count bump, so the cost is
-small. However the goal is zero copy where possible: the acceptor
-should accept `&PxLogEntry` and internally manage the single owned
-copy stored in the slot node, and the WAL encoder should borrow from
-the entry without cloning.
-
-**Approach**:
-- Change `Acceptor::accept` to take `&PxLogEntry` instead of
-  `PxLogEntry`. The acceptor performs one clone internally for
-  `cas_accepted` (unavoidable — the slot node must own its copy).
-- In `on_accept`, avoid the clone for the acceptor call by passing
-  `&entry`. The WAL record encoding (`WALRecord::from_accepted`)
-  already takes `&PxLogEntry`, so no extra clone is needed there.
-- In `base_entry`, pass `payload` by value (move) instead of cloning,
-  and reuse the same `Bytes` handle across retry attempts by cloning
-  only when a new `PxLogEntry` must be constructed (the clone is still
-  `O(1)` but the move avoids one redundant bump per attempt).
-- Audit the prepare path similarly: `on_prepare` already takes
-  primitives by value, so no entry clone there.
-
-**Priority**: Low — current `Bytes::clone` cost is negligible; this is
-a code-quality and future-proofing improvement for when payloads may
-not always be `Bytes`-backed.
-
-**Complexity**: Low — signature changes (`&PxLogEntry` vs
-`PxLogEntry`) and removing redundant clones. No algorithm or protocol
-change.
-
-**Files**: `crowkv/src/cluster/local_replica.rs` (`on_accept`),
-`crowkv/src/paxos/acceptor.rs` (`accept`, `inner_accept`),
-`crowkv/src/paxos/roles.rs` (`Acceptor` trait),
-`crowkv/src/cluster/group.rs` (`base_entry`).
-
-**Acceptance**:
-- Existing Paxos tests pass unchanged.
-- No `PxLogEntry` clone in `on_accept` between acceptor call and WAL
-  encode (verified by code inspection or a debug counter).
-- `Acceptor::accept` takes `&PxLogEntry`; the only clone is inside
-  `cas_accepted`.
-
----
-
 ### R16: Overlap local WAL fsync with remote RPC fan-out
 
 **Problem**: In `run_accept_phase`, the leader calls
@@ -667,6 +574,83 @@ value is Paxos-chosen regardless of local apply).
 - Apply-ordering test: highest-slot-wins semantics preserved under
   async apply.
 - Crash-recovery test: slot re-learned and applied after restart.
+
+---
+
+### R19: Read performance profiling and metrics
+
+**Problem**: The write path has a well-instrumented
+latency-bandwidth-counter hierarchy (WAL append/fsync latency, write
+bandwidth, election counters, inflight gauge). The read path has
+only a single `get.lh` histogram and a `scan.l` summary — no
+per-mode breakdown, no consensus-layer metrics (lease vs ReadIndex),
+no engine-layer latency, no read-specific bandwidth, and no
+forward/fallback counters. Operators cannot diagnose read
+performance issues at the same granularity as write issues.
+
+Full analysis in
+[`read-flow-analysis.md`](read-flow-analysis.md).
+
+**Approach**: Add a read metrics hierarchy mirroring the write
+path's structure, following the design principles in
+`design-observability.md`:
+
+- **Latency hierarchy** (feature layer → thinnest layer):
+  - `kv.get.lh` — existing, get RPC end-to-end
+  - `read.barrier.l` — new LatencySummary for
+    `linearizable_read_barrier` (near-zero for lease path, one
+    heartbeat RTT for ReadIndex)
+  - `read.engine_get.l` — new LatencySummary for `KVEngine::get`
+    (isolates engine cost from consensus barrier cost)
+  - `kv.scan.l` — existing, scan RPC end-to-end
+- **Bandwidth hierarchy** (read vs write separation):
+  - `kv.read_bytes_in.bw` / `kv.read_bytes_out.bw` — new, read
+    traffic separated from the combined `bytes_in/out.bw`
+- **Counters** (outcome / population separation):
+  - `read.lease_path.c` — linearizable reads via lease fast path
+  - `read.readindex_path.c` — linearizable reads via ReadIndex
+    fallback
+  - `kv.get_forwarded.c` — reads forwarded to leader (server-side)
+  - `kv.get_forward_failed.c` — forward attempts that failed
+  - `read.ryw_fallback.c` — ReadYourWrites reads redirected to
+    leader
+- **Gauges** (state, bridged from existing atomics):
+  - `read.lease_valid.g` — 1 if leader's read lease is valid
+  - `read.contiguous_applied.g` — current `contiguous_applied`
+  - `read.safe_slot.g` — current `group_safe_slot`
+
+**Priority**: Medium — read performance is undiagnosable today;
+the metrics infrastructure (MetricsRegistry, KvMetrics,
+ElectionRegistryHandles) already exists and just needs new handles
+wired in.
+
+**Complexity**: Medium — new metric handles in `KvMetrics` and
+`ElectionRegistryHandles` (or a new `ReadRegistryHandles`), timing
+instrumentation in `linearizable_read_barrier`, `resolve_read_point`,
+`KvStoreService::get/scan`, and `PxLearner::engine_get`. No
+algorithm or protocol change.
+
+**Files**: `crowkv/src/rpc/kv_service.rs` (KvMetrics — new handles,
+forward/fallback counters, read bandwidth), `crowkv/src/cluster/
+local_replica.rs` (ReadRegistryHandles — lease/ReadIndex counters,
+barrier latency, gauges), `crowkv/src/cluster/group_election.rs`
+(`linearizable_read_barrier` — timing + path counter),
+`crowkv/src/cluster/px_kv_store.rs` (`resolve_read_point` — RYW
+fallback counter), `crowkv/src/paxos/learner.rs`
+(`engine_get` — timing).
+
+**Acceptance**:
+- Metrics log shows read-specific counters, latency summaries,
+  bandwidth, and gauges per (store, group).
+- `read.lease_path.c + read.readindex_path.c` equals the total
+  linearizable get count in the same window.
+- `read.barrier.l` avg is near-zero when lease is valid; matches
+  heartbeat RTT when ReadIndex path is taken.
+- `read.engine_get.l` isolates engine cost (trivial for InMemKV,
+  measurable for CrowtreeEngine demand-load misses).
+- Read bandwidth (`read_bytes_in/out.bw`) + write bandwidth
+  (derived: `bytes_in/out.bw` minus read) accounts for total KV
+  bandwidth.
 
 ---
 
