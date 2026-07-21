@@ -62,11 +62,13 @@ complexity, and dependency. Before implementation, follow the
   `use_direct_io` flag for O_DIRECT control. Enables bench mode that
   hits all block code paths (alignment, RMW, `pwrite`) at high TPS via
   `wal_skip_fsync`.
-- **R20** — Durable flush on graceful shutdown — Area: crowkv-server /
-  crowkv — `PxLocalReplica::shutdown` is a no-op; in-memory engine state
-  (L0 memtable + L1 B+tree) is lost on process exit. Wire
+- **R20** ✅ — Durable flush on graceful shutdown — Area: crowkv-server /
+  crowkv — `PxLocalReplica::shutdown` was a no-op; in-memory engine state
+  (L0 memtable + L1 B+tree) was lost on process exit. Now wires
   `KVEngine::flush` + `KVEngine::persist_snapshot` into the shutdown
   cascade so data reaches the block file before the process exits.
+  **Done** — implemented in `PxLocalReplica::shutdown`, design merged
+  into `design-kv-server.md` §2.6.
 - **R17** — Async engine apply after quorum — Area: consensus / engine —
   `learn_chosen` (decode payload + `KVEngine::apply`) runs on the
   proposer critical path before `ProposeResult::Chosen` is returned to
