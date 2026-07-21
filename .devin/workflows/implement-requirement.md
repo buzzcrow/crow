@@ -37,8 +37,9 @@ Use this workflow when picking up an item from
                    to (e.g. design-crowtree-engine.md, design-wal.md), following
                    that doc's style and detail level. Delete the standalone
                    working/design-<topic>.md.
-8. Cleanup       → Mark item done in new_requirements.md, delete plan-<topic>.md
-                   and design-<topic>.md
+8. Cleanup       → Remove the item entirely from new_requirements.md (both
+                   Item Index entry and Detailed Analysis section), delete
+                   plan-<topic>.md and design-<topic>.md
                    → Commit cleanup (second and final commit)
 9. Local CI check → Run the GitHub CI Test job steps locally to verify
                    they pass before pushing:
@@ -114,6 +115,6 @@ The workflow produces at least **two commits** per requirement:
    implementation commit includes the design draft and plan doc, preserving
    the full working state in git history.
 2. **Cleanup commit** (after Step 7) — merged design doc, deletion of
-   working docs, item marked done in new_requirements.md.
+   working docs, item removed from new_requirements.md.
 
 All commits must pass the pre-commit quality gate (fmt, clippy, tests).
