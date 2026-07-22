@@ -9,6 +9,7 @@
 #include "crowtree/log.h"
 #include "crowtree/mapping_slot.h"
 #ifdef CROWTREE_HAVE_LIBURING
+#    include "crowtree/async_page_store.h"
 #    include "crowtree/reactor.h"
 #endif
 
