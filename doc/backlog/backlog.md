@@ -51,14 +51,6 @@ complexity, and dependency. Before implementation, follow the
   before the local engine has applied the value — read-your-writes
   semantics break unless a read barrier or apply-fence is added. Gate
   behind a feature flag; test read-after-write consistency.
-- **[R19](R19-read-metrics.md)** — Read performance profiling and metrics — Area: consensus /
-  metrics / client — The read path lacks the latency-bandwidth-counter
-  hierarchy that the write path has. No per-mode latency breakdown, no
-  lease-vs-ReadIndex path counter, no read barrier latency, no engine
-  get latency, no read bandwidth separation, no forward/fallback
-  counters, no read-specific gauges. See
-  [`read-flow-analysis.md`](../working/read-flow-analysis.md) for the full gap
-  analysis and proposed metrics hierarchy.
 - **[R26](R26-follower-read.md)** — Follower read distribution for MinSlot — Area: client — The
   client always calls `resolve_leader` for all read modes, including
   MinSlot reads that could be served from any follower. This

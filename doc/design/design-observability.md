@@ -75,11 +75,16 @@ integration (R11).
 ### Instrumentation Points
 
 - Rust KV service (`kv_service.rs`): put/get latency histograms, scan summary,
-  delete counter, bytes in/out bandwidth, error/no-leader counters.
+  delete counter, bytes in/out bandwidth, read bytes in/out bandwidth,
+  error/no-leader counters, get-forwarded / get-forward-failed counters.
 - Rust WAL (`wal_engine.rs`, `pipeline_writer.rs`): append latency summary,
   fsync latency summary (thinnest-layer disk IO), write bandwidth.
 - Rust cluster (`local_replica.rs`): election/step-down counters, in-flight
   slots gauge. Paxos slot watermarks (gauges bridged from `LocalReplica`).
+- Rust cluster (`group.rs`): read-path handles (`ReadRegistryHandles`) —
+  lease/ReadIndex path counters, read barrier latency summary, engine_get
+  latency summary, MinSlot-fallback counter, read-state gauges (lease valid,
+  contiguous applied, safe slot).
 - Rust RPC (`remote_replica.rs`): per-peer RPC latency summary + error counter
   with dynamic names.
 - C++ buffer pool (`buffer_pool.cpp`): hits/misses/evictions/writebacks
@@ -153,6 +158,47 @@ unaffected.
   nominal configured interval. Rust computes `window_secs` once per tick
   and passes the same value to both its own `reg.flush()` and the C++ FFI
   call, guaranteeing identical windows across both sections.
+
+### Read Path Metrics
+
+The read path mirrors the write path's latency-bandwidth-counter hierarchy.
+Handles live in two places: `KvMetrics` (per store, group; in
+`kv_service.rs`) for RPC-layer metrics, and `ReadRegistryHandles` (per
+store, group; on `PxGroup` via `OnceLock`, mirroring
+`ElectionRegistryHandles` on `PxLocalReplica`) for consensus- and
+engine-layer metrics.
+
+- **Latency hierarchy** (feature layer → thinnest layer):
+  - `kv.get.lh` — get RPC end-to-end (existing).
+  - `read.barrier.l` — `LatencySummary` for
+    `linearizable_read_barrier` (near-zero for lease path, one heartbeat
+    RTT for ReadIndex).
+  - `read.engine_get.l` — `LatencySummary` for `KVEngine::get_bytes`
+    (isolates engine cost from consensus barrier cost).
+  - `kv.scan.l` — scan RPC end-to-end (existing).
+- **Bandwidth hierarchy** (read vs. write separation; combined kept for
+  backward compat, read subset lets operators derive write by subtraction):
+  - `kv.read_bytes_in.bw` / `kv.read_bytes_out.bw` — read traffic
+    separated from the combined `bytes_in/out.bw`.
+- **Counters** (outcome / population separation):
+  - `read.lease_path.c` — linearizable reads via lease fast path.
+  - `read.readindex_path.c` — linearizable reads via ReadIndex fallback.
+  - `kv.get_forwarded.c` — reads forwarded to leader (server-side).
+  - `kv.get_forward_failed.c` — forward attempts that failed.
+  - `read.minslot_fallback.c` — MinSlot reads redirected to leader
+    because the local replica hasn't caught up.
+- **Gauges** (state, bridged on-demand at `resolve_read_point` — same
+  pattern as `inflight_slots.g`):
+  - `read.lease_valid.g` — 1 if leader's read lease is valid at the most
+    recent barrier, 0 otherwise.
+  - `read.contiguous_applied.g` — current `contiguous_applied`.
+  - `read.safe_slot.g` — current `group_safe_slot`.
+
+`read.lease_path.c + read.readindex_path.c` equals the total linearizable
+get count in the same window. The path counters are outcome counters (which
+path served the read), not call counters — `read.barrier.l` already carries
+the total call count. This follows the counter/summary non-redundancy
+principle (justified under "different population/outcome").
 
 ### C++ Registry Ownership
 
