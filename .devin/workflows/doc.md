@@ -57,4 +57,4 @@ Sub-design topics: `lowercase-kebab-case`. Examples: `design/design-wal.md`, `de
 4. **Traceability** — every doc links upstream via section anchors.
 5. **Sub-topic split** — when a design topic exceeds ~200 lines or has independent phases, create `design/design-xxx.md` and add a row to `doc_index.md`.
 6. **Working doc hygiene** — delete `doc/working/plan-<topic>.md` and `doc/working/design-<topic>.md` when the effort is complete. Do not add temporary working docs to `doc_index.md`.
-7. **Raw-readable formatting** — docs are read as raw markdown most times, not rendered. Avoid tables; use definition lists (`- **term**: description`) or nested bullets instead. Tables are only acceptable in `doc_index.md`.
+7. **Raw-readable formatting** — docs are read as raw markdown most times, not rendered. Prefer definition lists (`- **term**: description`) or nested bullets. Tables are allowed only when genuinely necessary for data/metric comparison (e.g. benchmark results with multiple columns per row); otherwise avoid them. `doc_index.md` always uses tables.

@@ -18,7 +18,7 @@ Rust workspace + C++ storage engine (via FFI).
 
 - All build/test/format commands run under **pixi** — never bare `cargo` or `clang-format`.
 - `unsafe_code = deny` (except `crowtree-ffi`); Clippy `pedantic = warn`.
-- Markdown is read as raw text — no tables except in `doc/doc_index.md`; use bullet or definition lists.
+- Markdown is read as raw text — prefer bullet or definition lists; tables allowed only when genuinely necessary for data/metric comparison (e.g. benchmark results). `doc_index.md` always uses tables.
 - `test-util` auto-enabled for tests via self dev-dependency — no flags needed.
 - Commit messages and code comments: single line, no doc references or task numbers.
 - **One commit per task, not per interaction** — a "task" is a coherent unit of work (e.g. "restructure docs", "add CLI rename", "implement R7"). Before pushing, squash unpushed commits from the same task into one (soft reset to remote tip, re-commit). Before committing, verify no temp/generated files are staged; add to `.gitignore` if needed.
