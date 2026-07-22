@@ -778,8 +778,8 @@ The read path has fewer O(n) copies than the write path:
   `encode_kv_payload` step.
 - **No Batch decode** — reads do not decode a `Batch`; the engine
   returns the value directly.
-- **No FFI encode_batch** — reads use `ct_get` / `ct_scan`, not
-  `ct_apply_batch`.
+- **No FFI batch encode** — reads use `ct_get` / `ct_scan`, not
+  `ct_apply_batch_slices`.
 
 The main O(n) copy unique to the read path is the engine value copy
 (`copy_buf` for Crowtree, clone for InMemKV). This is structurally
