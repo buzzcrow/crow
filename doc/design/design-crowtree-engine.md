@@ -515,19 +515,37 @@ resolves on the next reactor-driven wakeup.
 
 ### 3.4 Zero-Copy Value Across FFI
 
-- **Fast path:** the `ct_future` holds an `EpochManager::Guard` that keeps
-  the frame resident; `ct_future_poll` returns a `ct_buf` pointing directly
-  into the frame bytes (borrowed, not owned). Rust copies the bytes into a
-  `Vec<u8>`, then the guard releases when the future is freed. This is one
-  copy (frame → Rust `Vec`) — same total copies as the synchronous path, but
-  the copy is a pure memcpy with no I/O wait and no thread scheduling.
-- **Slow path:** the I/O read fills a C++-owned buffer; on completion the
-  future returns it as an owned `ct_buf` (C++ allocates, Rust frees). This is
-  also one copy (I/O buffer → Rust `Vec`).
-- **Further optimization (not implemented):** if Rust and C++ shared an
-  allocator (e.g. `jemalloc`), the `ct_buf` could move into a `Vec<u8>`
-  without copying — the same "shared allocator" option as §2.3 Option B,
-  layerable on later.
+- **Fast path (PinnedValue):** the `ct_future` holds an
+  `EpochManager::Guard` that keeps the frame resident;
+  `ct_future_poll` returns a `ct_buf` pointing directly into the frame
+  bytes (borrowed, not owned). `AsyncCrowtree::try_get_pinned` wraps
+  this in a `PinnedValue` — a `!Send` RAII type that holds the
+  `ct_future` handle so the epoch guard stays alive until `PinnedValue`
+  is dropped. `PinnedValue::as_bytes()` borrows directly from the C++
+  frame with no `copy_buf` allocation. The `KVEngine::get_bytes` trait
+  method (default impl delegates to `get` + `Bytes::from(vec)`;
+  `CrowtreeEngine` overrides to use `try_get_pinned`) copies from
+  `PinnedValue` into `Bytes` before dropping the pin, eliminating the
+  intermediate `Vec<u8>` allocation. Total: one copy (frame → `Bytes`),
+  one allocation (`Bytes`), no `Vec<u8>`.
+- **Slow path:** the I/O read fills a C++-owned buffer; on completion
+  the future returns it as an owned `ct_buf` (C++ allocates, Rust
+  frees). `materialize_owned` runs on the reactor thread, copying the
+  borrowed value into an owned `buffer` and releasing the guard before
+  the completion callback fires. The Rust side then copies from the
+  owned buffer into `Vec<u8>` / `Bytes`. This is also one copy
+  (I/O buffer → Rust `Vec`).
+- **Key copy elimination:** `AsyncCrowtree::try_get` /
+  `try_get_pinned` accept `&[u8]` instead of `Vec<u8>`, since
+  `ct_get_async` copies the key internally into a
+  `std::shared_ptr<std::string>`. The Rust-side `key.to_vec()` is
+  eliminated — no C++ changes required.
+- **True zero-copy (not implemented):** `Bytes::from_raw_parts` with a
+  custom drop calling `ct_future_free` would eliminate the value copy
+  entirely, but `Bytes` is `Send` and could be dropped on another
+  thread, while the epoch guard must be released on the thread that
+  entered it (`EpochManager::Guard` is thread-local). Blocked by R6
+  (cross-thread epoch guard).
 
 ### 3.5 Decision Log
 
