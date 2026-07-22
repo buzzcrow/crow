@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::cluster::group_config::{GroupConfigStore, PxGroupConfig, PxGroupMember};
-use crate::cluster::group_election::PendingLeaderHandoff;
+use crate::cluster::group_election::{PendingLeaderHandoff, ReadBarrierOutcome};
 use crate::cluster::local_replica::PxLocalReplica;
 use crate::cluster::remote_replica::PxRemoteReplica;
 use crate::cluster::replica::{
@@ -38,12 +38,22 @@ use crate::paxos::{PxGroupId, PxNodeId};
 pub(crate) struct ReadRegistryHandles {
     pub(crate) lease_path: Arc<Counter>,
     pub(crate) readindex_path: Arc<Counter>,
+    pub(crate) readindex_rounds: Arc<Counter>,
     pub(crate) minslot_fallback: Arc<Counter>,
     pub(crate) barrier: Arc<LatencySummary>,
     pub(crate) engine_get: Arc<LatencySummary>,
     pub(crate) lease_valid: Arc<Gauge>,
     pub(crate) contiguous_applied: Arc<Gauge>,
     pub(crate) safe_slot: Arc<Gauge>,
+}
+
+/// Pending `ReadIndex` barrier batch: the waiters that arrived while the
+/// round leader's heartbeat round was in flight. Held in
+/// `PxGroup::pending_read_barrier` only for the duration of one `ReadIndex`
+/// round; the leader drains and resolves all waiters with its outcome
+/// (carrying the pre-round `read_slot` freshness floor) on completion.
+pub(crate) struct PendingReadBarrier {
+    pub(crate) waiters: Vec<tokio::sync::oneshot::Sender<ReadBarrierOutcome>>,
 }
 
 pub struct PxGroup {
@@ -160,6 +170,19 @@ pub struct PxGroup {
     /// [`Self::set_metrics_registry`] when a registry is wired.
     /// `None` in tests / no-registry mode.
     pub(crate) read_handles: OnceLock<ReadRegistryHandles>,
+    /// Pending `ReadIndex` barrier batch. `Some` only while a `ReadIndex`
+    /// heartbeat round is in flight; concurrent reads that arrive during
+    /// the round enqueue a waiter here instead of starting their own
+    /// round. The round leader drains and resolves all waiters on round
+    /// completion (success → `Ready`, step-down → `NotLeader`, no-quorum
+    /// → `NoQuorum`). See `linearizable_read_barrier`.
+    pub(crate) pending_read_barrier: parking_lot::Mutex<Option<PendingReadBarrier>>,
+    /// Test-only gate that holds the next `ReadIndex` heartbeat round open
+    /// until the test releases it, so concurrent reads deterministically
+    /// batch onto one round. Set via `set_readindex_round_gate_for_tests`
+    /// under the `test-util` feature; `None` in production.
+    #[cfg(feature = "test-util")]
+    pub(crate) readindex_round_gate: parking_lot::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 
 impl std::fmt::Debug for PxGroup {
@@ -206,6 +229,9 @@ impl PxGroup {
             last_snapshot_slot: AtomicU64::new(0),
             last_snapshot_time: parking_lot::Mutex::new(std::time::Instant::now()),
             read_handles: OnceLock::new(),
+            pending_read_barrier: parking_lot::Mutex::new(None),
+            #[cfg(feature = "test-util")]
+            readindex_round_gate: parking_lot::Mutex::new(None),
         };
         group.recompute_quorum();
         group
@@ -298,6 +324,7 @@ impl PxGroup {
         let read_handles = ReadRegistryHandles {
             lease_path: r.register_counter(format!("{prefix}.read.lease_path.c")),
             readindex_path: r.register_counter(format!("{prefix}.read.readindex_path.c")),
+            readindex_rounds: r.register_counter(format!("{prefix}.read.readindex_rounds.c")),
             minslot_fallback: r.register_counter(format!("{prefix}.read.minslot_fallback.c")),
             barrier: r.register_summary(format!("{prefix}.read.barrier.l")),
             engine_get: r.register_summary(format!("{prefix}.read.engine_get.l")),
@@ -1863,6 +1890,35 @@ impl PxGroup {
     /// deterministically.
     pub async fn run_maintenance_pass_for_tests(&self) {
         crate::cluster::group_maintenance::run_pass(self).await;
+    }
+
+    /// Install a one-shot gate that holds the next `ReadIndex` heartbeat
+    /// round open until `release` is consumed. The test keeps the
+    /// `oneshot::Sender` and sends `()` once the batch of concurrent
+    /// reads has been fired, so the round leader blocks long enough for
+    /// the other reads to enqueue on the pending-barrier queue. Consumed
+    /// by the first round that runs after this call.
+    pub fn set_readindex_round_gate_for_tests(&self, release: tokio::sync::oneshot::Receiver<()>) {
+        *self.readindex_round_gate.lock() = Some(release);
+    }
+
+    /// Whether a `ReadIndex` heartbeat round is currently in flight (i.e.
+    /// a pending-barrier batch exists). Used by tests to wait until the
+    /// round leader has registered its batch before firing the waiters.
+    #[must_use]
+    pub fn has_pending_read_barrier_for_tests(&self) -> bool {
+        self.pending_read_barrier.lock().is_some()
+    }
+
+    /// Number of waiters currently queued on the in-flight `ReadIndex`
+    /// round. Used by tests to confirm all concurrent reads have batched
+    /// onto one round before releasing the gate.
+    #[must_use]
+    pub fn pending_read_barrier_waiters_for_tests(&self) -> usize {
+        self.pending_read_barrier
+            .lock()
+            .as_ref()
+            .map_or(0, |p| p.waiters.len())
     }
 }
 
