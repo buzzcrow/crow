@@ -73,8 +73,9 @@ Design: `doc/working/design-r3.md`. Upstream: `design/design-crowtree-engine.md`
   Option B as partially implemented (R3 delivers handle-based
   ownership transfer; full engine integration deferred).
 
-- [ ] **4.2** Update `doc/working/new_requirements.md` §R3: mark
-  status as implemented after all phases complete.
+- [ ] **4.2** Delete `doc/backlog/R3-zero-copy-ffi.md` and remove the
+  R3 entry from `doc/backlog/backlog.md` after all phases
+  complete.
 
 ## Dependency ordering
 

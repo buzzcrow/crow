@@ -36,5 +36,5 @@ Rust workspace + C++ storage engine (via FFI).
 | Commit changes | Hard Constraints above — no extra doc needed |
 | Debug a test failure | `/debug-test` workflow (env check, log-first, data-first, add missing logs) |
 | Pre-push review | `/review` workflow (checklist, hot-path rules, clippy exceptions) |
-| Implement a new-requirements item | `doc/working/new_requirements.md` → `/implement-requirement` workflow (lifecycle: understand → design → plan → implement → commit → merge → cleanup) |
+| Implement a new-requirements item | `doc/backlog/backlog.md` (index) → open the matched `R**-<topic>.md` → `/implement-requirement` workflow (lifecycle: understand → design → plan → implement → commit → merge → cleanup) |
 | User guide / operations | `doc/user-manual/user-guide.md` (quick start, KV ops, cluster management, upgrade, API reference) |

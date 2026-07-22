@@ -4,7 +4,7 @@
 # R3 Design — Zero-Copy FFI Write Path
 
 Upstream: `design/design-crowtree-engine.md` §2.2–§2.3 (buffer management,
-FFI ownership), `doc/working/new_requirements.md` §R3.
+FFI ownership), `doc/backlog/R3-zero-copy-ffi.md`.
 
 ## Problem
 
