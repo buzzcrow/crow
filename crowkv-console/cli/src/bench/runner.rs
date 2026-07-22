@@ -442,7 +442,15 @@ async fn run_worker(
                 }
             }
             OpKind::List => match kv
-                .scan(cfg.store_id, cfg.group_id, b"", &[], 1, ReadMode::Linearizable)
+                .scan(
+                    cfg.store_id,
+                    cfg.group_id,
+                    b"",
+                    &[],
+                    1,
+                    ReadMode::Linearizable,
+                    None,
+                )
                 .await
             {
                 Ok(_) => (true, false, false),

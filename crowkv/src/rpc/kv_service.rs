@@ -204,10 +204,10 @@ impl KvService for KvStoreService {
         let start = Instant::now();
 
         // Transparent leader-forward: only linearizable reads are forwarded
-        // to the leader; the stale read modes (`READ_YOUR_WRITES`,
-        // `BOUNDED_STALE`, `BEST_EFFORT`) are deliberately served from the
-        // local replica without a hop. The loop-guard header makes the
-        // linearizable hop at-most-once.
+        // to the leader; `MinSlot` reads are deliberately served from the
+        // local replica without a hop (the response carries a `NotLeader`
+        // hint if the local frontier has not caught up). The loop-guard
+        // header makes the linearizable hop at-most-once.
         let linearizable = req.read_mode == crate::rpc::ReadMode::Linearizable as i32;
         if linearizable && !already_forwarded {
             if let Some(endpoint) = self.store.forward_target_for(req.group_id) {
@@ -250,7 +250,7 @@ impl KvService for KvStoreService {
                                 req.group_id,
                                 &req.key,
                                 req.read_mode,
-                                req.client_slot,
+                                req.min_slot,
                                 req.request_id,
                                 req.request_create_ms,
                             )
@@ -281,7 +281,7 @@ impl KvService for KvStoreService {
                 req.group_id,
                 &req.key,
                 req.read_mode,
-                req.client_slot,
+                req.min_slot,
                 req.request_id,
                 req.request_create_ms,
             )
@@ -373,7 +373,8 @@ impl KvService for KvStoreService {
         );
 
         // Transparent leader-forward, mirroring `get`: only linearizable
-        // scans hop to the leader; stale modes serve from the local replica.
+        // scans hop to the leader; min_slot scans serve from the local
+        // replica.
         let linearizable = req.read_mode == crate::rpc::ReadMode::Linearizable as i32;
         if linearizable && !already_forwarded {
             if let Some(endpoint) = self.store.forward_target_for(req.group_id) {
@@ -427,6 +428,7 @@ impl KvService for KvStoreService {
                 &req.start_after,
                 req.limit,
                 req.read_mode,
+                req.min_slot,
                 req.request_id,
                 req.request_create_ms,
             )

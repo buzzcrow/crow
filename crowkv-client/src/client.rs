@@ -57,7 +57,7 @@ pub enum BatchOp {
 /// Standalone `CrowKV` client: topology discovery over the HTTP management
 /// API, per-group leader cache, retry loop reusing `(client_id, seq)` across
 /// retries of one logical write, and `ReadMode` routing including
-/// `ReadYourWrites` client-side slot tracking.
+/// `MinSlot` client-side slot tracking.
 pub struct CrowkvClient {
     topology: TopologyCache,
     pool: ConnectionPool,
@@ -66,7 +66,7 @@ pub struct CrowkvClient {
     next_seq: AtomicU64,
     metrics: Arc<ClientMetrics>,
     /// Per-`(store_id, group_id)` high-watermark of the last write's
-    /// `revision`, auto-attached as `client_slot` on `ReadYourWrites` reads.
+    /// `revision`, auto-attached as `min_slot` on `MinSlot` reads.
     /// Bounded by the number of groups this client has written to, not by
     /// keyspace size.
     write_watermark: DashMap<(u64, u64), u64>,
@@ -189,7 +189,7 @@ impl CrowkvClient {
             .or_insert(revision);
     }
 
-    /// Cached `client_slot` for `ReadYourWrites` reads against this group:
+    /// Cached `min_slot` for `MinSlot` reads against this group:
     /// the highest `revision` this client has observed from its own writes,
     /// or `0` if it has never written to this group.
     #[must_use]
@@ -288,9 +288,9 @@ impl CrowkvClient {
         group_id: u64,
         key: &[u8],
         read_mode: ReadMode,
-        client_slot: Option<u64>,
+        min_slot: Option<u64>,
     ) -> Result<GetOutcome> {
-        let client_slot = self.resolve_client_slot(store_id, group_id, read_mode, client_slot);
+        let min_slot = self.resolve_min_slot(store_id, group_id, read_mode, min_slot);
         let mut endpoint = self.resolve_leader(store_id, group_id).await?;
         let mut attempts = 0u32;
         let mut backoff = self.retry.backoff_base;
@@ -302,7 +302,7 @@ impl CrowkvClient {
                 request_create_ms: now_ms(),
                 group_id,
                 read_mode: read_mode as i32,
-                client_slot,
+                min_slot,
             };
             let channel = self.pool.get(&endpoint)?;
             let t0 = Instant::now();
@@ -518,6 +518,7 @@ impl CrowkvClient {
     ///
     /// # Errors
     /// See [`Error`].
+    #[allow(clippy::too_many_arguments)]
     pub async fn scan(
         &self,
         store_id: u64,
@@ -526,7 +527,9 @@ impl CrowkvClient {
         start_after: &[u8],
         limit: u32,
         read_mode: ReadMode,
+        min_slot: Option<u64>,
     ) -> Result<ScanOutcome> {
+        let min_slot = self.resolve_min_slot(store_id, group_id, read_mode, min_slot);
         let mut endpoint = self.resolve_leader(store_id, group_id).await?;
         let mut attempts = 0u32;
         let mut backoff = self.retry.backoff_base;
@@ -540,6 +543,7 @@ impl CrowkvClient {
                 request_create_ms: now_ms(),
                 group_id,
                 read_mode: read_mode as i32,
+                min_slot,
             };
             let channel = self.pool.get(&endpoint)?;
             let t0 = Instant::now();
@@ -579,19 +583,19 @@ impl CrowkvClient {
         }
     }
 
-    /// `ReadYourWrites` auto-attaches this client's own last-write watermark
-    /// for the group unless the caller already supplied a `client_slot`.
-    fn resolve_client_slot(
+    /// `MinSlot` auto-attaches this client's own last-write watermark
+    /// for the group unless the caller already supplied a `min_slot`.
+    fn resolve_min_slot(
         &self,
         store_id: u64,
         group_id: u64,
         read_mode: ReadMode,
-        client_slot: Option<u64>,
+        min_slot: Option<u64>,
     ) -> u64 {
-        if let Some(slot) = client_slot {
+        if let Some(slot) = min_slot {
             return slot;
         }
-        if read_mode == ReadMode::ReadYourWrites {
+        if read_mode == ReadMode::MinSlot {
             return self.read_your_writes_slot(store_id, group_id);
         }
         0

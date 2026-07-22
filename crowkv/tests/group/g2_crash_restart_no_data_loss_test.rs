@@ -189,7 +189,7 @@ impl WalCluster {
                 request_create_ms: 9001,
                 group_id: GROUP,
                 read_mode: 0,
-                client_slot: 0,
+                min_slot: 0,
             })
             .await
             .ok()?

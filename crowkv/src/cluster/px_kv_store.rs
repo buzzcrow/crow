@@ -39,7 +39,7 @@ impl KvStore for PxKvStore {
         group_id: u64,
         key: &[u8],
         read_mode: i32,
-        client_slot: u64,
+        min_slot: u64,
         request_id: u64,
         request_create_ms: u64,
     ) -> crate::rpc::KvResponse {
@@ -47,7 +47,7 @@ impl KvStore for PxKvStore {
             return missing_group_response(request_id, request_create_ms);
         };
 
-        match self.resolve_read_point(&group, read_mode, client_slot).await {
+        match self.resolve_read_point(&group, read_mode, min_slot).await {
             ReadDecision::Serve { read_slot, safe_slot } => {
                 let value = group.local_replica().learner.engine_get(key).await;
                 match value {
@@ -141,6 +141,7 @@ impl KvStore for PxKvStore {
         start_after: &[u8],
         limit: u32,
         read_mode: i32,
+        min_slot: u64,
         request_id: u64,
         request_create_ms: u64,
     ) -> crate::rpc::KvScanResponse {
@@ -152,8 +153,10 @@ impl KvStore for PxKvStore {
             );
         };
 
-        // Scans carry no read-your-writes slot, so `client_slot` is 0.
-        let read_slot = match self.resolve_read_point(&group, read_mode, 0).await {
+        // Scans pass `min_slot` through to the read resolver; for
+        // linearizable scans it is ignored, for MinSlot scans it sets
+        // the freshness floor.
+        let read_slot = match self.resolve_read_point(&group, read_mode, min_slot).await {
             ReadDecision::Serve { read_slot, .. } => read_slot,
             ReadDecision::NotLeader { hint } => {
                 return scan_err(
@@ -468,16 +471,10 @@ impl PxKvStore {
     ///   fresh. Instead it redirects (`NotLeader`) so the caller retries at the
     ///   real leader, or fails (`Unavailable`) when no quorum can confirm
     ///   freshness.
-    /// * **`ReadYourWrites`** — serve locally once the applied frontier has
-    ///   caught up to `client_slot`; otherwise point the client at the leader.
-    /// * **`BoundedStale` / `BestEffort`** — serve from local applied state
-    ///   without a round-trip; the response reports `safe_slot`.
-    async fn resolve_read_point(
-        &self,
-        group: &Arc<PxGroup>,
-        read_mode: i32,
-        client_slot: u64,
-    ) -> ReadDecision {
+    /// * **`MinSlot`** — serve locally once the applied frontier has caught up
+    ///   to `min_slot`; otherwise point the client at the leader. `min_slot = 0`
+    ///   accepts any staleness.
+    async fn resolve_read_point(&self, group: &Arc<PxGroup>, read_mode: i32, min_slot: u64) -> ReadDecision {
         let replica = group.local_replica();
         let safe_slot = group.group_safe_slot();
         let mode = ReadMode::try_from(read_mode).unwrap_or(ReadMode::Linearizable);
@@ -508,8 +505,8 @@ impl PxKvStore {
                     }
                 }
             }
-            ReadMode::ReadYourWrites => {
-                if replica.contiguous_applied() >= client_slot {
+            ReadMode::MinSlot => {
+                if replica.contiguous_applied() >= min_slot {
                     ReadDecision::Serve {
                         read_slot: replica.contiguous_applied(),
                         safe_slot,
@@ -520,10 +517,6 @@ impl PxKvStore {
                     }
                 }
             }
-            ReadMode::BoundedStale | ReadMode::BestEffort => ReadDecision::Serve {
-                read_slot: replica.contiguous_applied(),
-                safe_slot,
-            },
         }
     }
 

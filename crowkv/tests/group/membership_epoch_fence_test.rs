@@ -72,7 +72,7 @@ async fn get_via_leader(cluster: &TestCluster, key: &[u8]) -> Option<Vec<u8>> {
             request_create_ms: 9001,
             group_id: 1,
             read_mode: 0, // Linearizable
-            client_slot: 0,
+            min_slot: 0,
         })
         .await
         .ok()?

@@ -137,7 +137,15 @@ async fn put_get_delete_cycle() {
         .expect("seed beta/1");
 
     let out = kv
-        .scan(store_id, group_id, b"alpha/", &[], 0, ReadMode::Linearizable)
+        .scan(
+            store_id,
+            group_id,
+            b"alpha/",
+            &[],
+            0,
+            ReadMode::Linearizable,
+            None,
+        )
         .await
         .expect("scan");
     assert!(!out.truncated);
@@ -148,7 +156,15 @@ async fn put_get_delete_cycle() {
 
     // Truncation: limit < matching count.
     let out = kv
-        .scan(store_id, group_id, b"alpha/", &[], 1, ReadMode::Linearizable)
+        .scan(
+            store_id,
+            group_id,
+            b"alpha/",
+            &[],
+            1,
+            ReadMode::Linearizable,
+            None,
+        )
         .await
         .expect("scan limit=1");
     assert!(out.truncated);
@@ -157,7 +173,7 @@ async fn put_get_delete_cycle() {
 
     // Empty prefix returns everything; limit=0 means "no limit".
     let out = kv
-        .scan(store_id, group_id, b"", &[], 0, ReadMode::Linearizable)
+        .scan(store_id, group_id, b"", &[], 0, ReadMode::Linearizable, None)
         .await
         .expect("scan all");
     assert!(out.items.iter().any(|(k, _)| k == b"beta/1"));
@@ -169,7 +185,7 @@ async fn put_get_delete_cycle() {
     // leader discovery for a group the client never learned about).
     kv.seed_leader(store_id, 9999, endpoint.clone());
     let err = kv
-        .scan(store_id, 9999, b"", &[], 0, ReadMode::Linearizable)
+        .scan(store_id, 9999, b"", &[], 0, ReadMode::Linearizable, None)
         .await
         .expect_err("scan missing group");
     assert!(format!("{err}").contains("not found"), "got: {err}");

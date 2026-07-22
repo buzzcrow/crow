@@ -181,8 +181,8 @@ impl WalCluster {
                     request_id: 1,
                     request_create_ms: 1,
                     group_id: GROUP,
-                    read_mode: 3, // BestEffort: serve from local engine
-                    client_slot: 0,
+                    read_mode: 1, // MinSlot: serve from local engine
+                    min_slot: 0,
                 })
                 .await
                 .expect("get")
