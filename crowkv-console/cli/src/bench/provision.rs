@@ -97,7 +97,6 @@ pub struct BenchFixture {
     node_ids: Vec<String>,
     node_pids: Vec<u32>,
     node_grpc_urls: Vec<String>,
-    #[allow(dead_code)]
     node_mgmt_urls: Vec<String>,
     leader_endpoint: String,
     workspace_dir: PathBuf,
@@ -264,6 +263,15 @@ impl BenchFixture {
     #[must_use]
     pub fn leader_endpoint(&self) -> &str {
         &self.leader_endpoint
+    }
+
+    /// Per-node `crowkv-server` management-API URLs (one per deployed
+    /// node). Each serves `/topology`, which a bench client with
+    /// `ReadEndpointPolicy::AnyReplica` fetches to learn the full
+    /// replica list for `MinSlot` read distribution.
+    #[must_use]
+    pub fn node_mgmt_urls(&self) -> &[String] {
+        &self.node_mgmt_urls
     }
 
     /// Node ids provisioned by this fixture, in deploy order.

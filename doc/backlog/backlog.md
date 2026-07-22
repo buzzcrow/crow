@@ -53,18 +53,6 @@ complexity, and dependency. Before implementation, follow the
   before the local engine has applied the value — read-your-writes
   semantics break unless a read barrier or apply-fence is added. Gate
   behind a feature flag; test read-after-write consistency.
-- **[R28](R28-read-bench.md)** — Read path benchmark — Area: bench / metrics — The write path has
-  a benchmark harness with recorded results; the read path does not.
-  The existing bench runner hardcodes `ReadMode::Linearizable` with
-  `min_slot = None` and has no pre-population step. Extend the harness
-  to support both read modes (Linearizable + MinSlot), min_slot
-  policy, deterministic value generation (per-byte hash from
-  `(key_id, offset)`), key-space pre-population (200K keys), and
-  random spot-check correctness verification (8 random bytes per
-  read). Two-phase run: (1) single test to verify latency is
-  reasonable (lease path ~0 barrier, MinSlot local serve,
-  correctness_errors = 0), (2) scale sweep to find max TPS per read
-  mode. Depends on R19 for diagnostic depth.
 
 ### Low Priority
 

@@ -31,15 +31,15 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use crowkv_client::{
-    ClientConfig, CrowkvClient, Error as ClientError, GetOutcome, ReadMode, WindowLatencySnapshot,
-    WriteOutcome,
+    ClientConfig, CrowkvClient, Error as ClientError, GetOutcome, ReadEndpointPolicy, ReadMode,
+    WindowLatencySnapshot, WriteOutcome,
 };
 use crowkv_console_shared::error::{Error, Result};
 use hdrhistogram::Histogram;
 use tracing::{debug, info, warn};
 
-use super::report::{per_op_map, percentiles_from_histogram, BenchReport, OpStats};
-use super::workload::{OpGen, OpKind, WorkloadKind};
+use super::report::{per_op_map, percentiles_from_histogram, BenchReport, OpOutcome, OpStats};
+use super::workload::{format_key, value_for, MinSlotPolicy, OpGen, OpKind, WorkloadKind};
 
 /// Lock-free per-worker counters used by the optional progress
 /// snapshotter and the metrics flusher. Workers bump these on every op
@@ -130,6 +130,37 @@ pub struct BenchConfig {
     /// (`duration` minus `warmup`); `warmup_ms` is surfaced separately
     /// in the report so operators can see what was discarded.
     pub warmup: Option<Duration>,
+    /// Read mode for read ops. Default `Linearizable`. Ignored for
+    /// write/delete ops.
+    pub read_mode: ReadMode,
+    /// `min_slot` resolution policy for `MinSlot` reads. `Auto` passes
+    /// `None` so the client auto-attaches its write watermark; `Zero`
+    /// forces `Some(0)`; `Fixed(n)` forces `Some(n)`. Ignored for
+    /// `Linearizable` reads and non-read ops.
+    pub min_slot_policy: MinSlotPolicy,
+    /// Pre-population count: write `[0, count)` keys with deterministic
+    /// values before warmup begins. `None` or `0` disables. Default
+    /// 200,000. Not measured (excluded from latency/TPS); reported
+    /// separately as `pre_pop_ms` / `pre_pop_errors`. Also establishes
+    /// the client's `write_watermark` so `MinSlot` reads with
+    /// `min_slot = auto` carry it.
+    pub pre_populate: Option<u64>,
+    /// Number of random bytes to spot-check per `Found` read against
+    /// the deterministic `byte_at(key_id, offset)` formula. Default 8.
+    /// 0 disables verification.
+    pub verify_bytes: usize,
+    /// `MinSlot` read-endpoint selection policy. `Leader` (default)
+    /// routes `MinSlot` reads to the leader (same as `Linearizable`);
+    /// `AnyReplica` distributes `MinSlot` reads round-robin across all
+    /// replicas, exercising the real follower local-serve + fallback
+    /// path. Ignored for `Linearizable` reads (always target leader).
+    pub read_endpoint_policy: ReadEndpointPolicy,
+    /// Topology seed URL (the console-web's `/topology` endpoint).
+    /// When set, the client can fetch the full replica list so
+    /// `AnyReplica` has endpoints to round-robin over. `None` leaves
+    /// the client with an empty seed list (no topology fetch — fine
+    /// for `Leader` policy, but `AnyReplica` would have no replicas).
+    pub topology_seed: Option<String>,
 }
 
 impl BenchConfig {
@@ -151,6 +182,12 @@ impl BenchConfig {
             progress_interval: None,
             metrics_log_path: None,
             warmup: None,
+            read_mode: ReadMode::Linearizable,
+            min_slot_policy: MinSlotPolicy::Auto,
+            pre_populate: None,
+            verify_bytes: 8,
+            read_endpoint_policy: ReadEndpointPolicy::Leader,
+            topology_seed: None,
         }
     }
 
@@ -201,12 +238,51 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
     // the old runner's "N independent gRPC channels, round-robined" pool
     // via the client's own per-endpoint channel pool, so every worker
     // shares one client and its internal pool rather than owning a
-    // channel directly.
-    let mut client_config = ClientConfig::new(Vec::new());
+    // channel directly. When `topology_seed` is set (MinSlot benches
+    // with `AnyReplica`), the seed list is non-empty so the client can
+    // fetch `/topology` and learn the full replica list for round-robin
+    // distribution.
+    let mut client_config = ClientConfig::new(cfg.topology_seed.clone().map(|s| vec![s]).unwrap_or_default());
     client_config.pool_size_per_endpoint = cfg.connections as usize;
+    client_config.read_endpoint_policy = cfg.read_endpoint_policy;
     let client = CrowkvClient::new(client_config);
     client.seed_leader(cfg.store_id, cfg.group_id, cfg.endpoint.clone());
     let client = Arc::new(client);
+
+    // Pre-population phase: sequentially write `[0, pre_populate)` keys
+    // with deterministic values before the measurement window begins.
+    // Not measured (excluded from latency/TPS); reported separately as
+    // `pre_pop_ms` / `pre_pop_errors`. Also establishes the client's
+    // `write_watermark` so `MinSlot` reads with `min_slot = auto`
+    // carry it. Retries on `NotLeader` (the client follows the hint
+    // internally, so a plain `put` retry loop suffices).
+    let (pre_pop_ms, pre_pop_errors) = match cfg.pre_populate {
+        Some(count) if count > 0 => {
+            info!(count, "bench: pre-populating key space");
+            let pop_start = Instant::now();
+            let mut errors: u64 = 0;
+            for id in 0..count {
+                let key = format_key(id);
+                let value = value_for(id, cfg.value_size);
+                let mut attempts = 0u32;
+                loop {
+                    attempts += 1;
+                    match client.put(cfg.store_id, cfg.group_id, &key, &value, None).await {
+                        Ok(_) => break,
+                        Err(ClientError::NotLeader { .. }) if attempts < 8 => {}
+                        Err(_) => {
+                            errors += 1;
+                            break;
+                        }
+                    }
+                }
+            }
+            let ms = u64::try_from(pop_start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            info!(ms, errors, "bench: pre-population done");
+            (ms, errors)
+        }
+        _ => (0, 0),
+    };
 
     let started_at = Utc::now();
     let started_instant = Instant::now();
@@ -259,6 +335,13 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
                 cfg2.key_space,
                 cfg2.value_size,
             );
+            // Read benches with pre-population draw read keys from the
+            // populated range so reads return `Found` (not `NotFound`).
+            if let Some(count) = cfg2.pre_populate {
+                if count > 0 {
+                    gen.set_read_key_space(count);
+                }
+            }
             run_worker(
                 &client,
                 &mut gen,
@@ -302,6 +385,7 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
     let finished_at = Utc::now();
     let total_attempts: u64 = by_kind.values().map(|s| s.ops).sum();
     let total_errors: u64 = by_kind.values().map(|s| s.errors).sum();
+    let total_correctness_errors: u64 = by_kind.values().map(|s| s.correctness_errors).sum();
     let total_ops = total_attempts - total_errors;
     #[allow(clippy::cast_precision_loss)]
     let error_rate = if total_attempts == 0 {
@@ -346,6 +430,9 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
         total_attempts,
         total_errors,
         error_rate,
+        correctness_errors: total_correctness_errors,
+        pre_pop_ms,
+        pre_pop_errors,
         by_op: per_op_map(by_kind),
         // Populated by `bench benchmark` (R10) after collecting each
         // node's `log/metrics.log`; plain `bench run`/`stress` have no
@@ -375,7 +462,11 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
 /// optional progress snapshotter). Both increments use `Relaxed` —
 /// ordering doesn't matter since the snapshotter only sums and prints,
 /// and the final report is computed from the returned `OpStats`.
-#[allow(clippy::too_many_arguments)]
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "per-op dispatch loop; splitting per-kind reduces readability"
+)]
 async fn run_worker(
     kv: &CrowkvClient,
     gen: &mut OpGen,
@@ -406,18 +497,48 @@ async fn run_worker(
             WorkloadKind::Mix => gen.pick_mix_kind(),
         };
 
-        let key = gen.next_key();
+        // Reads draw from the populated range (`next_read_key`) and
+        // carry the key_id for spot-check verification; other ops draw
+        // from the full `key_space`.
+        let (key, read_key_id) = if kind == OpKind::Read {
+            let (id, k) = gen.next_read_key();
+            (k, Some(id))
+        } else {
+            (gen.next_key(), None)
+        };
         let t0 = Instant::now();
-        let (ok, no_leader, not_found) = match kind {
-            OpKind::Read => match kv
-                .get(cfg.store_id, cfg.group_id, &key, ReadMode::Linearizable, None)
-                .await
-            {
-                Ok(GetOutcome::Found { .. }) => (true, false, false),
-                Ok(GetOutcome::NotFound) => (true, false, true),
-                Err(ClientError::NotLeader { .. }) => (false, true, false),
-                Err(_) => (false, false, false),
-            },
+        let outcome = match kind {
+            OpKind::Read => {
+                let min_slot = cfg.min_slot_policy.to_min_slot();
+                match kv
+                    .get(cfg.store_id, cfg.group_id, &key, cfg.read_mode, min_slot)
+                    .await
+                {
+                    Ok(GetOutcome::Found { value, .. }) => {
+                        // Spot-check `verify_bytes` random offsets
+                        // against the deterministic formula. A
+                        // mismatch is a correctness error (distinct
+                        // from transport/NotLeader errors).
+                        let ok_verify =
+                            read_key_id.is_some_and(|id| gen.verify_value(id, &value, cfg.verify_bytes));
+                        OpOutcome {
+                            ok: true,
+                            correctness_error: !ok_verify,
+                            ..Default::default()
+                        }
+                    }
+                    Ok(GetOutcome::NotFound) => OpOutcome {
+                        ok: true,
+                        not_found: true,
+                        ..Default::default()
+                    },
+                    Err(ClientError::NotLeader { .. }) => OpOutcome {
+                        no_leader: true,
+                        ..Default::default()
+                    },
+                    Err(_) => OpOutcome::default(),
+                }
+            }
             OpKind::Write => {
                 let value = gen.make_value();
                 let client_id = u64::from(worker_id) + 1;
@@ -425,9 +546,15 @@ async fn run_worker(
                     .put(cfg.store_id, cfg.group_id, &key, &value, Some((client_id, iter)))
                     .await
                 {
-                    Ok(WriteOutcome { .. }) => (true, false, false),
-                    Err(ClientError::NotLeader { .. }) => (false, true, false),
-                    Err(_) => (false, false, false),
+                    Ok(WriteOutcome { .. }) => OpOutcome {
+                        ok: true,
+                        ..Default::default()
+                    },
+                    Err(ClientError::NotLeader { .. }) => OpOutcome {
+                        no_leader: true,
+                        ..Default::default()
+                    },
+                    Err(_) => OpOutcome::default(),
                 }
             }
             OpKind::Delete => {
@@ -436,9 +563,15 @@ async fn run_worker(
                     .delete(cfg.store_id, cfg.group_id, &key, Some((client_id, iter)))
                     .await
                 {
-                    Ok(_) => (true, false, false),
-                    Err(ClientError::NotLeader { .. }) => (false, true, false),
-                    Err(_) => (false, false, false),
+                    Ok(_) => OpOutcome {
+                        ok: true,
+                        ..Default::default()
+                    },
+                    Err(ClientError::NotLeader { .. }) => OpOutcome {
+                        no_leader: true,
+                        ..Default::default()
+                    },
+                    Err(_) => OpOutcome::default(),
                 }
             }
             OpKind::List => match kv
@@ -453,9 +586,15 @@ async fn run_worker(
                 )
                 .await
             {
-                Ok(_) => (true, false, false),
-                Err(ClientError::NotLeader { .. }) => (false, true, false),
-                Err(_) => (false, false, false),
+                Ok(_) => OpOutcome {
+                    ok: true,
+                    ..Default::default()
+                },
+                Err(ClientError::NotLeader { .. }) => OpOutcome {
+                    no_leader: true,
+                    ..Default::default()
+                },
+                Err(_) => OpOutcome::default(),
             },
         };
         // During the warmup window we drive the same RPC sequence so
@@ -467,14 +606,11 @@ async fn run_worker(
         // out of the published percentiles.
         if recording {
             let lat_us = u64::try_from(t0.elapsed().as_micros()).unwrap_or(u64::MAX);
-            stats
-                .entry(kind)
-                .or_default()
-                .record(lat_us, ok, no_leader, not_found);
+            stats.entry(kind).or_default().record(lat_us, outcome);
 
             // Live per-op counters: each worker owns its `WorkerCounters`
             // so the increments are uncontended.
-            counters.record(kind, ok);
+            counters.record(kind, outcome.ok);
         }
 
         // Yield periodically so heavy worker counts cooperate.
