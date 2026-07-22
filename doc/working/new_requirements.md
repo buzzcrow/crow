@@ -75,6 +75,16 @@ complexity, and dependency. Before implementation, follow the
   the Rust caller could eliminate the value copy. See
   [`read-flow-analysis.md`](read-flow-analysis.md) Memory Copy
   Analysis for the full audit.
+- **R24** — Simplify read modes to Linearizable + MinSlot — Area:
+  consensus / client / RPC — Collapse the current four read modes
+  (Linearizable, ReadYourWrites, BoundedStale, BestEffort) into two:
+  Linearizable (leader-served with lease/ReadIndex fencing) and MinSlot
+  (client carries `min_slot`, replica checks `contiguous_applied >=
+  min_slot`, serves or redirects to leader). The client chooses the
+  freshness policy by setting `min_slot`: 0 = accept any staleness,
+  write watermark = read-your-writes, last `safe_slot` = bounded stale.
+  See [`read-flow-analysis.md`](read-flow-analysis.md) for the full
+  analysis.
 
 ### Low Priority
 
@@ -87,12 +97,11 @@ complexity, and dependency. Before implementation, follow the
 - **R3** — Zero-copy FFI write path — Area: crowtree FFI — `ct_apply_put` copies
   key+value into an internal buffer; for large values this memcpy is avoidable
   via a direct-write alloc handle.
-- **R23** — Eliminate FFI batch encode copy — Area: crowtree FFI —
-  `encode_batch` packs `&[BatchOp]` into a flat `Vec<u8>` before calling
-  `ct_apply_batch`, an O(n) heap allocate + memcpy of all keys and values.
-  A new C API accepting an array of `(key_ptr, key_len, val_ptr, val_len)`
-  structs would eliminate the packing copy. Related to R3 (single-put FFI
-  copy) but targets the batch path. See
+- **R25** — Eliminate client-side batch copy via `Bytes` — Area: client /
+  RPC — `CrowkvClient::batch_write` clones each `BatchOp` key/value
+  (`Vec<u8>::clone`) into `KvBatchItem`, then clones the entire `items` vec
+  per retry. Switching client `BatchOp` and proto `bytes` fields to
+  `bytes::Bytes` makes these O(1) ref-count bumps. See
   [`write-flow-analysis.md`](write-flow-analysis.md) Memory Copy
   Analysis for the full audit.
 - **R4** — Bounded memory pool — Area: crowtree engine — `buffer::allocate` uses
@@ -786,80 +795,209 @@ elimination is Medium complexity.
 
 ---
 
-### R23: Eliminate FFI batch encode copy
+### R25: Eliminate client-side batch copy via `Bytes`
 
-**Problem**: `CrowtreeEngine::apply` (`crowtree_engine.rs:135`) maps
-`BatchOp` to `CtBatchOp<'_>` (borrowed slices), then calls
-`Crowtree::apply_batch` (`ffi/src/lib.rs:548`), which internally calls
-`encode_batch(ops)` (`ffi/src/lib.rs:415`). `encode_batch` packs all
-keys and values into a single flat `Vec<u8>` wire format
-(`[u8 kind][u32 klen][key][u32 vlen][value] * count`) before passing it
-to the C API `ct_apply_batch`. This is an O(n) heap allocate + memcpy
-of the entire batch payload — all keys and values are copied into the
-packed buffer, then the C++ engine copies them again into its internal
-memtable.
+**Problem**: `CrowkvClient::batch_write` (`client.rs:440`) has two
+avoidable O(n) copies in the batch write path:
 
-The `CtBatchOp<'_>` already holds borrowed `&[u8]` slices into the
-`Batch`'s `Bytes` payloads (after R22). The packing copy is purely an
-FFI marshalling artifact — the C API `ct_apply_batch` accepts a single
-contiguous buffer + count, forcing the Rust side to flatten the slices.
+1. **BatchOp → KvBatchItem clone** (`client.rs:442-456`): The client
+   `BatchOp` owns `Vec<u8>` for key and value. Mapping to the protobuf
+   `KvBatchItem` calls `key.clone()` and `value.clone()` per op —
+   O(n) heap allocate + memcpy of every key and value in the batch.
+2. **items.clone() per retry** (`client.rs:463`): The retry loop
+   clones the entire `Vec<KvBatchItem>` on every attempt — O(n) copy
+   of all keys and values per retry.
 
-**Root cause**: `ct_apply_batch` (`c_api.h`) takes
-`const uint8_t* packed, size_t packed_len, uint64_t count` — a single
-packed buffer. There is no C API that accepts an array of key/value
-pointer-length pairs, so the Rust FFI wrapper must serialize the slices
-into one contiguous allocation.
+The same pattern affects single-key `put` (`client.rs:226-227`:
+`key.to_vec()`, `value.to_vec()`) and `delete` (`client.rs:356`:
+`key.to_vec()`), but those are one-key copies, not batch-scaled.
+
+**Root cause**: `prost-build` in `build.rs:12` maps only
+`AcceptedValue.payload` to `bytes::Bytes`. All other `bytes` proto
+fields (KV `key`, `value`, `prefix`, `start_after`, etc.) use the
+default `Vec<u8>` mapping. The client `BatchOp` (`client.rs:51-53`)
+also uses `Vec<u8>`. Every clone of a `Vec<u8>` is an O(n) heap
+allocate + memcpy; every clone of a `Bytes` is an O(1) atomic
+ref-count bump.
 
 **Approach**:
-- Add a new C API `ct_apply_batch_slices` that accepts an array of
-  `ct_kv_ref` structs (`{ const uint8_t* key; uint32_t key_len; const
-  uint8_t* value; uint32_t value_len; uint8_t kind; }`) plus the slot
-  and count. The C++ implementation iterates the array directly — no
-  unpacking from a flat buffer needed.
-- Change `Crowtree::apply_batch` (`ffi/src/lib.rs`) to call
-  `ct_apply_batch_slices` with a stack-allocated `[ct_kv_ref; MAX_BATCH]`
-  or a `Vec<ct_kv_ref>` (small, count-sized — not payload-sized).
-  Eliminates `encode_batch` entirely.
-- Keep `ct_apply_batch` (packed buffer API) for backward compatibility
-  or remove it if no other caller exists.
-- `CrowtreeEngine::apply` (`crowtree_engine.rs`) unchanged — already
-  produces `CtBatchOp<'_>` with borrowed slices; only the FFI layer
-  changes.
+- Extend `prost-build` `.bytes([...])` in `build.rs` to map KV
+  `bytes` fields to `Bytes`: `KvBatchItem.key`, `KvBatchItem.value`,
+  `KvSetRequest.key`, `KvSetRequest.value`, `KvDeleteRequest.key`,
+  `KvScanRequest.prefix`, `KvScanRequest.start_after`, and response
+  fields (`KvGetResponse.value`, `KvScanResponse.items.key/value`).
+- Change client `BatchOp` (`client.rs:51-53`) from `Vec<u8>` to
+  `Bytes`.
+- Update `batch_write` to construct `KvBatchItem` with `Bytes::clone`
+  (O(1)) instead of `Vec<u8>::clone` (O(n)). The retry loop's
+  `items.clone()` also becomes O(1) per item.
+- Update all call sites that construct or destructure the affected
+  proto types: `px_kv_store.rs` (`encode_kv_batch_items`,
+  `encode_kv_payload`), `kv_store.rs` trait, console CLI/web handlers,
+  tests.
+- The server-side `encode_kv_batch_items` (`px_kv_store.rs:624`)
+  still flattens into a `Vec<u8>` consensus payload — that copy
+  remains (eliminating it requires changing the consensus payload
+  contract, out of scope for R25).
 
-**Relationship to R3**: R3 targets the C++ *internal* copy in
-`ct_apply_put` (single-key) via a direct-write alloc handle. R23
-targets the Rust-side *packing* copy in `encode_batch` (multi-key).
-They are independent: R3 eliminates the C++ memcpy from caller buffer
-to internal buffer; R23 eliminates the Rust memcpy from scattered
-slices to a flat FFI buffer. Both could be unified if the
-`ct_apply_batch_slices` API is extended to accept crowtree-owned
-handles (from R3's `ct_alloc`), but that is a future design decision.
+**Alternatives considered**:
+- **Borrowed slices in client API** (`&[(&[u8], Option<&[u8]>)]`):
+  eliminates copies but changes the public API ergonomics and
+  complicates retry (borrowed data must outlive the retry loop).
+  `Bytes` achieves the same zero-copy-with-ergonomics via ref-counting.
+- **Server-side payload encoding elimination**: skip
+  `encode_kv_batch_items` and pass `KvBatchItem` directly as the
+  Paxos payload. Requires changing `Batch::decode` to match the
+  protobuf wire format, or eliminating `Batch::decode` entirely and
+  having the learner apply `KvBatchItem` directly. High complexity,
+  ripples through consensus + WAL + replay. Separate requirement.
 
-**Priority**: Low — the packing copy is one `memcpy` of the total
-batch payload size. For small batches (≤512 B, benchmark default) the
-cost is negligible. For large batches (≥1 MB) or high-throughput
-multi-key writes, the copy is measurable but still a small fraction of
-total write latency (consensus RPC round-trip dominates). No current
-profiling motivation.
+**Relationship to R23 (done)**: R23 eliminated the FFI-layer packing
+copy (`encode_batch` → `ct_apply_batch_slices`). R25 targets the
+client-layer composition copy (`BatchOp` → `KvBatchItem`). They are
+independent layers — R23 was C API/FFI, R25 is client/RPC types.
 
-**Complexity**: Medium — new C API surface (`ct_apply_batch_slices`,
-`ct_kv_ref` struct), C++ implementation in `c_api.cpp`, Rust FFI
-adapter change in `ffi/src/lib.rs`. No `KVEngine` trait or
-`CrowtreeEngine` changes. Lifetime safety is straightforward (borrowed
-slices outlive the synchronous FFI call).
+**Priority**: Medium — the copies are O(n) per batch, affecting both
+first-attempt and every retry. For large batches (≥1 MB) or
+high-throughput multi-key writes, the clone cost is measurable. For
+small batches (benchmark default ≤512 B), negligible. The refactor
+also improves the single-key `put`/`delete`/`scan` paths.
 
-**Files**: `crowtree/include/crowtree/c_api.h` (new C API + struct),
-`crowtree/src/c_api.cpp` (implementation),
-`crowtree/ffi/src/lib.rs` (`apply_batch` — call new API, remove
-`encode_batch`), `crowtree/ffi/tests/ffi_test.rs` (batch tests pass
-unchanged).
+**Complexity**: Medium — the `prost-build` config change is one line,
+but the resulting type change from `Vec<u8>` to `Bytes` ripples
+through all call sites that construct, destructure, or compare proto
+fields. The client `BatchOp` is a public API type. Lifetime safety
+is not a concern (`Bytes` is `'static`). No C++ or FFI changes.
+
+**Files**: `crowkv/build.rs` (extend `.bytes([...])`),
+`crowkv-client/src/client.rs` (`BatchOp` type, `batch_write`,
+`put`, `delete`, `scan`),
+`crowkv/src/cluster/px_kv_store.rs` (`encode_kv_batch_items`,
+`encode_kv_payload`),
+`crowkv/src/cluster/kv_store.rs` (trait signature),
+`crowkv/src/rpc/*.rs` (generated, auto-updated by prost),
+`crowkv-console/{cli,web}` (handlers that construct KV requests),
+`crowkv/tests/**` (test helpers that construct KV requests).
 
 **Acceptance**:
-- All existing FFI batch tests pass unchanged.
-- No `encode_batch` call in `Crowtree::apply_batch`.
-- No `Vec<u8>` allocation for batch packing in the apply path.
-- `ct_apply_batch_slices` correctly applies multi-key batches with
-  duplicate-key last-wins semantics (verified by existing tests).
+- All existing client and server tests pass unchanged.
+- `CrowkvClient::batch_write` does not call `Vec<u8>::clone` for
+  key/value data (verified by code inspection or benchmark).
+- `items.clone()` in the retry loop is O(1) per item (ref-count bump).
+- `pixi run cargo clippy -- -D warnings` passes.
+- `pixi run cargo fmt --check` passes.
+
+---
+
+### R24: Simplify read modes to Linearizable + MinSlot
+
+**Problem**: The current `ReadMode` enum has four variants
+(`Linearizable`, `ReadYourWrites`, `BoundedStale`, `BestEffort`), but
+`BoundedStale` and `BestEffort` are identical in code — both serve
+locally without any freshness check, just reporting `safe_slot` in the
+response. `ReadYourWrites` is a stricter variant that checks
+`contiguous_applied >= client_slot`, but this is a client-specific
+freshness policy enforced server-side. The four-mode design adds
+protocol complexity (per-mode routing in `resolve_read_point`,
+per-mode client logic in `resolve_client_slot`, per-mode metrics
+breakdown) without meaningful semantic distinction.
+
+Industry practice (etcd, TiKV, CockroachDB, Spanner, FoundationDB)
+consistently uses **two read modes**: a linearizable mode
+(leader-served with lease or ReadIndex) and a stale mode where the
+client carries a freshness bound (slot/timestamp/version) and the
+replica checks its applied frontier. The client decides the freshness
+policy by choosing what bound to pass — the server does not need
+distinct modes for read-your-writes vs bounded-stale vs best-effort.
+
+**Design**:
+
+- **Mode 1: Linearizable** — leader-served with lease/ReadIndex
+  fencing. Same as today: if not leader, forward to leader; if leader,
+  check lease (0-RTT fast path) or ReadIndex (1-RTT quorum heartbeat),
+  then serve from local engine. The leader must verify it is still
+  leader before serving — a deposed leader serving reads would return
+  stale data (the new leader may have committed newer writes).
+
+- **Mode 2: MinSlot** — client carries `min_slot` in the request. The
+  server checks `contiguous_applied >= min_slot`: if yes, serve
+  locally and return `{ value, read_slot, safe_slot }`; if no, return
+  `NotLeader` with leader hint so the client retries on the leader
+  (the leader always has the latest `contiguous_applied`).
+  - `min_slot = 0` → accept any staleness (replaces BestEffort)
+  - `min_slot = client_write_watermark` → read-your-writes (replaces
+    ReadYourWrites)
+  - `min_slot = last_observed_safe_slot` → bounded stale (replaces
+    BoundedStale)
+  - The client chooses the policy; the server logic is one comparison.
+
+- **Slot numbers, not timestamps**: CrowKV uses Paxos slot numbers
+  (already returned as `revision` in write responses) as the freshness
+  bound. No clock dependency, no NTP, no clock-skew uncertainty.
+  Timestamp-based systems (TiKV, CockroachDB, Spanner) need
+  timestamps for cross-group transaction ordering; CrowKV is per-key
+  per-group, so slot numbers are sufficient and simpler.
+
+**Protocol changes**:
+- `ReadMode` enum: `Linearizable` (0), `MinSlot` (1). Drop
+  `ReadYourWrites`, `BoundedStale`, `BestEffort`.
+- `KvGetRequest`: rename `client_slot` to `min_slot`. Same field,
+  clearer name. Used only for `MinSlot` mode.
+- `KvScanRequest`: add `min_slot` field. Same check for scans.
+- `resolve_read_point`: two arms instead of four:
+  - `Linearizable` → barrier (lease/ReadIndex) or `NotLeader` redirect
+  - `MinSlot` → `contiguous_applied >= min_slot ? Serve : NotLeader`
+- Client: drop `resolve_client_slot` complexity. Client passes
+  `min_slot` directly (0 for don't-care, or saved `revision` from last
+  write). Client-side write watermark tracking remains, but it's a
+  simple `max(revision)` — no mode-specific logic.
+- Scan: `KvScanRequest` gets `min_slot` field, same check.
+
+**What we lose**:
+- Server-side enforcement of read-your-writes. Today, a follower that
+  hasn't caught up to `client_slot` redirects to the leader. With
+  MinSlot, the same thing happens — the follower checks
+  `contiguous_applied >= min_slot` and redirects if not met. So the
+  behavior is identical; the difference is purely naming and
+  generality.
+- BoundedStale's `safe_slot`-based check (global replication
+  frontier). Today BoundedStale doesn't enforce this anyway (it just
+  reports `safe_slot`). If a client wants global-replication freshness,
+  it passes `min_slot = last_safe_slot` — but the check is against
+  `contiguous_applied` (local), not `safe_slot` (global). This is
+  intentionally more permissive: the leader always has the latest
+  local state, so redirecting to the leader for a MinSlot miss
+  guarantees correctness.
+
+**Priority**: Medium — simplifies the protocol, reduces code surface,
+eliminates redundant modes. Not urgent (current modes work), but
+reduces maintenance burden and prepares for future read-scaling work
+(G8: client targets any replica for stale reads).
+
+**Complexity**: Medium — touches `ReadMode` enum (proto),
+`resolve_read_point` (4 arms → 2), client `get`/`scan` (drop
+mode-specific logic), `KvGetRequest`/`KvScanRequest` (rename field),
+tests (update read-mode test cases). No algorithm or consensus change.
+
+**Files**: `crowkv/src/rpc/kv.proto` (ReadMode enum, request fields),
+`crowkv/src/cluster/px_kv_store.rs` (`resolve_read_point`,
+`kv_get`, `kv_scan`), `crowkv-client/src/client.rs` (`get`, `scan`,
+drop `resolve_client_slot`), `crowkv/src/rpc/kv_service.rs`
+(forwarding logic — unchanged, still only forwards Linearizable),
+tests in `crowkv/tests/kv/` and `crowkv-client/tests/`.
+
+**Acceptance**:
+- All existing read tests pass with updated mode names and field names.
+- `resolve_read_point` has exactly two arms (Linearizable, MinSlot).
+- `ReadMode` enum has exactly two variants.
+- `BoundedStale`, `BestEffort`, `ReadYourWrites` are removed from the
+  proto and all code.
+- MinSlot with `min_slot=0` behaves identically to old BestEffort
+  (serve locally, report `safe_slot`).
+- MinSlot with `min_slot=write_revision` behaves identically to old
+  ReadYourWrites (redirect to leader if not caught up).
+- Linearizable mode behaves identically to today (lease/ReadIndex,
+  leader forwarding).
 - `pixi run cargo clippy -- -D warnings` passes.
 - `pixi run cargo fmt --check` passes.
 

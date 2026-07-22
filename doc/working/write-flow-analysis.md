@@ -369,18 +369,25 @@ deserialized protobuf message.
 `apply_entry(slot, payload.as_ref())` passes `&[u8]`.
 - **O(1) ref-count** — `PxLogEntry::clone` for the learner call.
 
-**Step 11 — Batch decode: `Batch::decode`** (`op.rs:54`)
-`payload.get(..).to_vec()` for each key and value (`op.rs:70,75`).
-- **O(n) copy** — heap allocate + memcpy per key and per value. The
-  `Batch` owns its ops as `Vec<u8>` for each key and value.
+**Step 11 — Batch decode: `Batch::decode`** (`op.rs:56`)
+`payload.slice(offset..offset + len)` for each key and value
+(`op.rs:73,82`). `BatchOp` owns `Bytes` (not `Vec<u8>`).
+- **O(1) ref-count** — `Bytes::slice` shares the underlying allocation;
+  no heap allocate or memcpy. The `Batch` owns its ops as `Bytes` for
+  each key and value, all pointing into the original payload buffer.
 
-**Step 12 — FFI encode: `encode_batch`** (`crowtree/ffi/src/lib.rs:415`)
-Packs `BatchOp`s into a `Vec<u8>` for `ct_apply_batch`.
-- **O(n) copy** — heap allocate + memcpy of all keys and values into
-  the packed FFI buffer format.
+**Step 12 — FFI batch apply: `ct_apply_batch_slices`**
+(`crowtree/ffi/src/lib.rs:533`)
+`Crowtree::apply_batch` builds a `Vec<ct_kv_ref>` (small
+pointer-length structs, count-sized not payload-sized) and calls
+`ct_apply_batch_slices`. No packing into a flat buffer.
+- **No copy** — the `ct_kv_ref` array holds non-owning pointers into
+  the caller's `Bytes`-backed slices. Eliminates the former
+  `encode_batch` packing copy (R23, done).
 
-**Step 13 — FFI apply: `ct_apply_batch`** (C++ engine)
-The C++ engine copies the packed buffer into its internal memtable.
+**Step 13 — C++ engine apply: `ct_apply_batch_slices`** (C++ engine)
+The C++ engine copies each key/value from the `ct_kv_ref` pointers
+into its internal memtable.
 - **O(n) copy** — unavoidable; the engine owns its internal storage.
 
 ### WAL Replay Path
@@ -398,8 +405,6 @@ The C++ engine copies the packed buffer into its internal memtable.
   - Payload encoding — client key/value slices → contiguous `Vec<u8>`.
   - WAL encode — `entry.payload.to_vec()` for `WALRecord`.
   - WAL replay — `Bytes::copy_from_slice` to reconstruct `PxLogEntry`.
-  - Batch decode — `to_vec()` per key/value for `Batch` ops.
-  - FFI encode — pack ops into `Vec<u8>` for `ct_apply_batch`.
   - C++ engine apply — internal memtable copy.
   - gRPC socket write — kernel copies from user buffer to socket
     buffer (unavoidable for network I/O).
@@ -410,11 +415,13 @@ The C++ engine copies the packed buffer into its internal memtable.
   - `send_accept` payload clone for protobuf.
   - `learn_chosen` entry clone for learner.
   - WAL `encode_frame` payload clone for `RecordFrame`.
+  - Batch decode — `Bytes::slice` per key/value (shares payload buffer).
 
 - **Zero-copy (move or borrow):**
   - `Vec<u8>` → `Bytes` conversion at `propose` entry.
   - gRPC deserialization → `PxLogEntry` (move `Bytes`).
   - WAL vectored write (`IoSlice` borrows `Bytes`).
+  - FFI batch apply — `ct_kv_ref` pointer-length structs (R23, done).
 
 ### Optimization Opportunities
 
@@ -425,10 +432,15 @@ The C++ engine copies the packed buffer into its internal memtable.
   `entry.payload.clone()` (O(1) ref-count). The `encode_accepted_payload`
   function exists only as a seam for future encoding changes; today it
   is a straight `to_vec()`.
-- **Batch decode** (`to_vec()` per key/value): could be eliminated if
-  `Batch` borrowed from the `Bytes` payload instead of owning
-  `Vec<u8>`. This would require a lifetime parameter on `Batch` and
-  ripple through the `KVEngine` trait — significant refactor.
-- **FFI encode** (`encode_batch`): could be eliminated if the C++
-  engine accepted `Bytes`-backed slices directly instead of a packed
-  buffer. Would require a new C API.
+- **Batch decode** — already zero-copy: `Batch::decode` uses
+  `Bytes::slice` (O(1) ref-count), not `to_vec()`. `BatchOp` owns
+  `Bytes` that share the payload buffer.
+- **FFI batch encode** — already eliminated (R23, done):
+  `ct_apply_batch_slices` accepts an array of `ct_kv_ref`
+  pointer-length structs; no packing copy.
+- **Client-side batch copy** (R25): `CrowkvClient::batch_write` clones
+  each `BatchOp` key/value (`Vec<u8>::clone`) into `KvBatchItem`, then
+  clones the entire `items` vec per retry. Switching client `BatchOp`
+  and proto `bytes` fields to `bytes::Bytes` (via `prost-build` config)
+  makes these O(1) ref-count bumps. Medium complexity — type change
+  ripples through call sites but no C++ or consensus changes.
