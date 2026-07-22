@@ -28,15 +28,9 @@ pub use crowtree_ffi::Stats as CrowtreeStats;
 /// place is an unchanged, honest reflection of what the C API actually
 /// offers, not a shortcut taken here.
 ///
-/// **`iter_all`/`compare` caveat:** `get`/`scan` merge crowtree's in-memory
-/// (L0) and durable-tree (L1) state internally, so every `apply` is visible
-/// immediately, matching `InMemKV`. `iter_all` (and therefore the default
-/// `compare`) instead reads a durable-tree-only snapshot view, so it flushes
-/// the contiguous-applied prefix first to catch L0 up to L1; a slot that's
-/// still blocked behind an earlier out-of-order gap remains invisible to
-/// `iter_all` until the gap fills in, even though `get`/`scan` already see
-/// it. `InMemKV` has no such gap (every apply is immediately visible), so
-/// this is a real, engine-specific difference to be aware of.
+/// **`iter_all`/`compare` note:** `iter_all` uses `scan(b"", 0, true)`
+/// which merges L0+L1 internally and includes tombstones, so every `apply`
+/// is visible immediately without an explicit `flush()`, matching `InMemKV`.
 pub struct CrowtreeEngine {
     inner: AsyncCrowtree,
 }
@@ -73,6 +67,64 @@ impl CrowtreeEngine {
     pub fn stats(&self) -> CrowtreeStats {
         self.inner.handle().stats()
     }
+
+    /// Flush C++ metrics into a formatted string for the `[cpp-metrics]`
+    /// log section. Delegates to `crowtree_ffi::Crowtree::flush_metrics_str`.
+    #[must_use]
+    pub fn flush_metrics_str(&self, window_secs: f64, timestamp: &str, width: usize) -> String {
+        self.inner
+            .handle()
+            .flush_metrics_str(window_secs, timestamp, width)
+    }
+
+    /// Extended flush with negotiated column widths.
+    #[must_use]
+    pub fn flush_metrics_str_ext(
+        &self,
+        window_secs: f64,
+        timestamp: &str,
+        width: usize,
+        count_w: usize,
+        tps_w: usize,
+    ) -> String {
+        self.inner
+            .handle()
+            .flush_metrics_str_ext(window_secs, timestamp, width, count_w, tps_w)
+    }
+
+    /// Negotiate column widths with C++. Returns (`count_w`, `tps_w`).
+    #[must_use]
+    pub fn negotiate_widths(&self, rust_count_w: usize, rust_tps_w: usize) -> (usize, usize) {
+        self.inner.handle().negotiate_widths(rust_count_w, rust_tps_w)
+    }
+
+    /// Current max metric name length from the C++ registry.
+    #[must_use]
+    pub fn max_name_len(&self) -> usize {
+        self.inner.handle().max_name_len()
+    }
+
+    /// Full ordered stream including tombstones. Test-only utility.
+    #[must_use]
+    pub fn iter_all(&self) -> Vec<(Vec<u8>, u64, Cell)> {
+        // Use scan(b"", 0, true) which merges L0+L1 internally and includes
+        // tombstones — no flush() needed, matching InMemKV's immediate
+        // visibility for both live entries and tombstones.
+        match self.inner.handle().scan(b"", 0, true) {
+            Ok((entries, _)) => entries
+                .into_iter()
+                .map(|e| {
+                    let cell = if e.tombstone {
+                        Cell::Tombstone
+                    } else {
+                        Cell::Value(e.value)
+                    };
+                    (e.key, e.slot, cell)
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
 }
 
 impl KVEngine for CrowtreeEngine {
@@ -89,10 +141,10 @@ impl KVEngine for CrowtreeEngine {
             .iter()
             .map(|b| match &b.op {
                 Op::Put(v) => CtBatchOp::Put {
-                    key: &b.key,
-                    value: v,
+                    key: b.key.as_ref(),
+                    value: v.as_ref(),
                 },
-                Op::Delete => CtBatchOp::Delete { key: &b.key },
+                Op::Delete => CtBatchOp::Delete { key: b.key.as_ref() },
             })
             .collect();
         // crowtree enforces per-key highest-slot-wins internally against its
@@ -149,39 +201,13 @@ impl KVEngine for CrowtreeEngine {
         }
     }
 
-    fn iter_all(&self) -> Vec<(Vec<u8>, u64, Cell)> {
-        // `snapshot_view` only materializes the durable L1 tree, not the L0
-        // MemTable an `apply` lands in first -- unlike `get`/`scan`, which
-        // already merge L0+L1 internally. Flush the contiguous-applied
-        // prefix first so `iter_all`/`compare` observe every `apply` that
-        // isn't blocked behind an out-of-order gap, matching `InMemKV`'s
-        // immediate visibility for the common (in-order) case. A genuine gap
-        // (an out-of-order slot still waiting on an earlier one) is still
-        // invisible here until it fills in -- see the crate-level docs.
-        let _ = self.inner.handle().flush();
-        match self.inner.handle().snapshot_view() {
-            Ok((_at_slot, entries)) => entries
-                .into_iter()
-                .map(|e| {
-                    let cell = if e.tombstone {
-                        Cell::Tombstone
-                    } else {
-                        Cell::Value(e.value)
-                    };
-                    (e.key, e.slot, cell)
-                })
-                .collect(),
-            Err(_) => Vec::new(),
-        }
-    }
-
     fn live_key_count(&self) -> usize {
         // No dedicated count primitive in the C API; a full unlimited scan
         // already excludes tombstones server-side, matching InMemKV's own
         // O(n) linear-scan cost for this method.
         self.inner
             .handle()
-            .scan(b"", 0)
+            .scan(b"", 0, false)
             .map_or(0, |(entries, _)| entries.len())
     }
 
@@ -213,6 +239,10 @@ impl KVEngine for CrowtreeEngine {
         // lifetime, which is the intended "fail out, don't silently retry"
         // semantics for a durable-storage fault.
         !self.inner.handle().io_failed()
+    }
+
+    fn flush(&self) {
+        let _ = self.inner.handle().flush();
     }
 
     fn resume_from_slot(&self) -> u64 {

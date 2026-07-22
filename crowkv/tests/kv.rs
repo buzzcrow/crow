@@ -8,11 +8,17 @@
 //! idempotency, per-key highest-slot-wins, tombstones, prefix scan,
 //! `compare`), plus cross-engine parity.
 
+#[path = "kv/mem_kv_impl.rs"]
+mod mem_kv;
+
 #[path = "kv/conformance.rs"]
 mod conformance;
 
+#[path = "kv/test_util.rs"]
+mod test_util;
+
 #[path = "kv/mem_kv_test.rs"]
-mod mem_kv;
+mod mem_kv_tests;
 
 #[path = "kv/crowtree_engine_test.rs"]
 mod crowtree_engine;

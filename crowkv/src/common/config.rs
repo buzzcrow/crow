@@ -14,6 +14,37 @@ use std::path::PathBuf;
 use crate::wal::pipeline_backend::WalBlockAlignment;
 use crate::wal::record::WalRecordFormat;
 
+/// Admission policy for inflight proposals when the window is full.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AdmissionPolicy {
+    /// Fail fast with `ProposeResult::Busy`.
+    Reject,
+    /// Block the caller on `acquire().await` until a permit is freed.
+    /// Default policy — eliminates client-side reject-retry storms.
+    #[default]
+    Queue,
+}
+
+impl AdmissionPolicy {
+    /// Parse from a CLI string.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "reject" => Some(Self::Reject),
+            "queue" => Some(Self::Queue),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Reject => "reject",
+            Self::Queue => "queue",
+        }
+    }
+}
+
 /// Paxos retry configuration (static, global).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PaxosConfig {
@@ -25,7 +56,14 @@ pub struct PaxosConfig {
     /// permit fails fast with `PxPaxosError::Busy` (retryable) rather than
     /// blocking, so the leader never stalls behind a saturated pipeline
     /// (parallel-slot window / performance targets).
-    pub proposer_window: usize,
+    pub max_inflight_proposals: usize,
+    /// Number of admission queues per group. Each queue gets
+    /// `ceil(max_inflight_proposals / inflight_queues)` permits. Default 1.
+    pub inflight_queues: usize,
+    /// Admission policy when all permits are occupied: `Reject` (fail fast
+    /// with `Busy`) or `Queue` (block until a permit is freed). Default
+    /// `Reject`.
+    pub inflight_admission: AdmissionPolicy,
 }
 
 impl PaxosConfig {
@@ -33,7 +71,9 @@ impl PaxosConfig {
         max_paxos_retries: 3,
         max_slot_retries: 3,
         retry_base_backoff_ms: 5,
-        proposer_window: 16,
+        max_inflight_proposals: 32,
+        inflight_queues: 1,
+        inflight_admission: AdmissionPolicy::Queue,
     };
 }
 
@@ -121,7 +161,7 @@ impl WalConfig {
 impl Default for WalConfig {
     fn default() -> Self {
         Self {
-            wal_disks: vec![PathBuf::from("wal")],
+            wal_disks: vec![PathBuf::from("waldata")],
             wal_segment_size: 64 * 1024 * 1024,
             wal_flush_batch_bytes: 64 * 1024,
             wal_flush_coalesce_us: 0,
@@ -170,6 +210,11 @@ pub struct PxElectionConfig {
     /// Bounded capacity of the per-peer `PxLearnerStream` outbound mpsc.
     /// Full mpsc surfaces as `PxPaxosError::Busy` on the proposer side
     /// (already classified `FailRetryable`).
+    ///
+    /// Derived as `max_inflight_proposals * LEARNER_WINDOW_MULTIPLIER` (4×) so
+    /// that the learner channel always has headroom over the proposer
+    /// admission gate. Only `max_inflight_proposals` needs to be tuned; this
+    /// field follows automatically.
     pub learner_stream_window_frames: usize,
     /// Tick interval for the per-group engine-durability + WAL-GC
     /// maintenance loop (follow-up; see
@@ -177,22 +222,48 @@ pub struct PxElectionConfig {
     /// `group_maintenance::DEFAULT_MAINTENANCE_TICK`; now a normal
     /// per-group tunable like the other fields here.
     pub maintenance_tick_ms: u64,
+    /// Minimum slot advance since the last durable snapshot before
+    /// `persist_snapshot()` is called again. `flush()` still runs every
+    /// tick; this only gates the expensive disk-write path.
+    pub snapshot_slot_threshold: u64,
+    /// Maximum wall-clock time since the last durable snapshot before
+    /// `persist_snapshot()` is called again, in milliseconds. Ensures a
+    /// low-write-rate replica still checkpoints periodically.
+    pub snapshot_time_threshold_ms: u64,
 }
 
 impl PxElectionConfig {
+    /// Multiplier applied to `PaxosConfig::max_inflight_proposals` to derive
+    /// `learner_stream_window_frames`. Gives the learner channel 4×
+    /// headroom over the proposer admission gate.
+    pub const LEARNER_WINDOW_MULTIPLIER: usize = 4;
+
     /// Production / single-DC default.
+    ///
+    /// Heartbeat 150 ms / election 1–2 s / lease 3 s. Follows etcd's
+    /// production defaults (100 ms heartbeat, 1 s election) with a slightly
+    /// conservative heartbeat for disk-fsync jitter. Lease ≥ `election_max`
+    /// + `clock_skew` (2000 + 500 = 2500) ensures leader-lease safety.
+    ///
+    /// `learner_stream_window_frames` is derived as
+    /// `PaxosConfig::DEFAULT.max_inflight_proposals * LEARNER_WINDOW_MULTIPLIER`
+    /// (= 32 × 4 = 128).
     pub const DEFAULT: Self = Self {
         prevote_enabled: true,
-        heartbeat_interval_ms: 500,
-        election_min_ms: 4000,
-        election_max_ms: 8000,
-        lease_duration_ms: 4500,
+        heartbeat_interval_ms: 150,
+        election_min_ms: 1000,
+        election_max_ms: 2000,
+        lease_duration_ms: 3000,
         max_clock_skew_ms: 500,
         bulk_prepare_window: 1024,
         election_driver_disabled: false,
-        learner_stream_window_frames: 64,
-        // Matches the periodic GC trigger cadence (30 s).
-        maintenance_tick_ms: 30_000,
+        learner_stream_window_frames: PaxosConfig::DEFAULT.max_inflight_proposals
+            * Self::LEARNER_WINDOW_MULTIPLIER,
+        // Maintenance loop tick: flush L0→L1 + GC watermark check every
+        // tick; durable snapshot gated by thresholds above.
+        maintenance_tick_ms: 10_000,
+        snapshot_slot_threshold: 100_000,
+        snapshot_time_threshold_ms: 600_000,
     };
 
     /// Aggressive timings for `#[tokio::test(start_paused = true)]` suites.
@@ -210,52 +281,47 @@ impl PxElectionConfig {
             max_clock_skew_ms: 1,
             bulk_prepare_window: 1024,
             election_driver_disabled: false,
-            learner_stream_window_frames: 64,
-            maintenance_tick_ms: 20,
+            learner_stream_window_frames: PaxosConfig::DEFAULT.max_inflight_proposals
+                * Self::LEARNER_WINDOW_MULTIPLIER,
+            maintenance_tick_ms: 500,
+            snapshot_slot_threshold: 1000,
+            snapshot_time_threshold_ms: 1_000,
         }
     }
 
-    /// E2E / Playwright profile: fast election but stable lease.
+    /// E2E / Playwright + benchmark profile: fast election but stable
+    /// under real scheduling jitter.
     ///
-    /// Election 200–400 ms (vs 4–8 s production) so leader re-election
-    /// completes quickly in real wall-clock time. Heartbeat 200 ms and
-    /// lease 600 ms are long enough to avoid spurious step-downs under
-    /// real scheduling jitter (unlike `for_tests` which needs paused time).
+    /// Election 300–600 ms / heartbeat 100 ms / lease 800 ms. Matches the
+    /// Raft paper's 150–300 ms suggestion with a 2× margin for localhost
+    /// parallel-test load. Lease ≥ `election_max` + `clock_skew` (600 + 100
+    /// = 700) ensures leader-lease safety. `learner_stream_window_frames`
+    /// = 32 × 4 = 128. Snapshot time threshold 20 s
+    /// so short E2E runs still checkpoint without excessive disk I/O.
     #[must_use]
     pub const fn for_e2e() -> Self {
         Self {
             prevote_enabled: true,
-            heartbeat_interval_ms: 200,
-            election_min_ms: 200,
-            election_max_ms: 400,
-            lease_duration_ms: 600,
+            heartbeat_interval_ms: 100,
+            election_min_ms: 300,
+            election_max_ms: 600,
+            lease_duration_ms: 800,
             max_clock_skew_ms: 100,
             bulk_prepare_window: 1024,
             election_driver_disabled: false,
-            learner_stream_window_frames: 64,
+            learner_stream_window_frames: PaxosConfig::DEFAULT.max_inflight_proposals
+                * Self::LEARNER_WINDOW_MULTIPLIER,
             maintenance_tick_ms: 5_000,
+            snapshot_slot_threshold: 10_000,
+            snapshot_time_threshold_ms: 20_000,
         }
     }
 
-    /// Benchmark profile: stable under real scheduling jitter but fast
-    /// enough for meaningful throughput measurements. Heartbeat 50 ms /
-    /// election 100–200 ms / lease 150 ms. The `test` profile (5 ms
-    /// heartbeat, 25 ms lease) causes constant leader churn under
-    /// concurrent load; `e2e` (200 ms heartbeat) caps throughput too
-    /// low. This sits between the two.
+    /// Derive the learner stream window for a given max-inflight-proposals
+    /// count. Call this when customizing `max_inflight_proposals` at runtime
+    /// so the learner channel stays in sync.
     #[must_use]
-    pub const fn for_bench() -> Self {
-        Self {
-            prevote_enabled: true,
-            heartbeat_interval_ms: 50,
-            election_min_ms: 100,
-            election_max_ms: 200,
-            lease_duration_ms: 150,
-            max_clock_skew_ms: 25,
-            bulk_prepare_window: 1024,
-            election_driver_disabled: false,
-            learner_stream_window_frames: 64,
-            maintenance_tick_ms: 5_000,
-        }
+    pub const fn learner_window_for(max_inflight_proposals: usize) -> usize {
+        max_inflight_proposals * Self::LEARNER_WINDOW_MULTIPLIER
     }
 }

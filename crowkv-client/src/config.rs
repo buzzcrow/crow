@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! Client configuration. Retry-policy defaults mirror the client
-//! interaction spec (retry on `NotLeaderHint`, 1s-then-retry on unknown
+//! interaction spec (retry on `NotLeaderHint`, 100ms-then-retry on unknown
 //! leader, exponential backoff on transport errors).
 
 use std::time::Duration;
@@ -20,32 +20,22 @@ pub struct RetryConfig {
     /// `NotLeaderHint`-with-hint retries do not count against this.
     pub max_retries: u32,
     /// Wait before retrying when the leader is completely unknown (no cached
-    /// endpoint, no hint from the server).
+    /// endpoint, no hint from the server). The client queries `/topology`
+    /// first, then sleeps this duration before checking again.
     pub unknown_leader_wait: Duration,
     /// Initial backoff after a transport-level error (connect failure,
     /// timeout). Doubles each attempt up to `backoff_max`.
     pub backoff_base: Duration,
     pub backoff_max: Duration,
-    /// When `true`, disables *all* client-side resilience -- including the
-    /// normally-uncounted, unconditional `NotLeaderHint` follow -- so every
-    /// call makes exactly one RPC and returns whatever that single attempt
-    /// produced (success, application error, or transport error) with no
-    /// wait, no topology refresh, and no redirect. For latency/error-rate
-    /// benchmarking callers (e.g. `crowkv-cli`'s bench runner) where any
-    /// client-side retry would silently convert a real failure into a
-    /// slower success and corrupt the measurement. Default `false` (normal
-    /// resilient behavior) for every other caller.
-    pub single_attempt: bool,
 }
 
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
             max_retries: 3,
-            unknown_leader_wait: Duration::from_secs(1),
+            unknown_leader_wait: Duration::from_millis(100),
             backoff_base: Duration::from_millis(100),
             backoff_max: Duration::from_secs(5),
-            single_attempt: false,
         }
     }
 }

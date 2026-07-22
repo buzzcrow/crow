@@ -22,6 +22,7 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
 use crowkv::cluster::group::PxGroup;
 use crowkv::cluster::kv_server::KvServer;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
@@ -128,8 +129,8 @@ async fn client_follows_not_leader_hint_to_real_leader() {
     let raw_resp = raw
         .put(KvSetRequest {
             version: 1,
-            key: b"sanity".to_vec(),
-            value: b"check".to_vec(),
+            key: Bytes::from_static(b"sanity"),
+            value: Bytes::from_static(b"check"),
             seq: 1,
             ttl_ms: 0,
             client_id: 999,

@@ -10,12 +10,12 @@ use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 use crowkv::wal::record::WALRecord;
 use crowkv::wal::replay::replay_group;
 use crowkv::wal::wal_engine::WalEngine;
-use crowkv::wal::{BlockDevice, IoBackend, WalConfig};
+use crowkv::wal::{IoBackend, MemBlockDevice, WalConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 fn sim_backend() -> Arc<IoBackend> {
-    Arc::new(IoBackend::BlockDevice(BlockDevice::new()))
+    Arc::new(IoBackend::MemBlock(MemBlockDevice::new()))
 }
 
 fn test_config(disks: &[PathBuf]) -> WalConfig {
@@ -338,7 +338,7 @@ async fn restore_from_replay_with_engine_resumes_from_last_applied_slot() {
     // CrowtreeEngine reports via `resume_from_slot()` on a real restart.
     let engine = CrowtreeEngine::open(&CrowtreeOptions::default()).expect("open crowtree engine");
     engine
-        .apply(1, &Batch::decode(&encode_put_payload(b"k1", b"v1")))
+        .apply(1, &Batch::decode(&Bytes::from(encode_put_payload(b"k1", b"v1"))))
         .into_ready()
         .unwrap();
     engine.handle().flush().expect("flush");
@@ -418,11 +418,17 @@ async fn restore_from_replay_with_engine_falls_back_when_resume_slot_has_no_acce
     // rather than an outright-impossible-via-the-API state.
     let engine = CrowtreeEngine::open(&CrowtreeOptions::default()).expect("open crowtree engine");
     engine
-        .apply(1, &Batch::decode(&encode_put_payload(b"phantom1", b"x")))
+        .apply(
+            1,
+            &Batch::decode(&Bytes::from(encode_put_payload(b"phantom1", b"x"))),
+        )
         .into_ready()
         .unwrap();
     engine
-        .apply(2, &Batch::decode(&encode_put_payload(b"phantom2", b"y")))
+        .apply(
+            2,
+            &Batch::decode(&Bytes::from(encode_put_payload(b"phantom2", b"y"))),
+        )
         .into_ready()
         .unwrap();
     engine.handle().flush().expect("flush");

@@ -36,10 +36,10 @@ pub mod segment;
 pub mod wal_engine;
 
 pub use crate::common::config::WalConfig;
-pub use block_backend::{BlockDevice, BlockDeviceController};
+pub use block_backend::{BlockDevice, BlockDeviceController, MemBlockDevice};
 pub use io_backend::{IoBackend, OpenOptions};
 pub use record::{RecordType, WALRecord, WalRecordFormat};
-pub use wal_engine::{BatchStats, WalEngine};
+pub use wal_engine::{BatchStats, BlockDeviceCounterHandles, BlockDeviceSnapshot, WalEngine};
 pub use wal_file::WalFile;
 pub(crate) use wal_file::WalFileInner;
 

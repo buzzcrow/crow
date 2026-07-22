@@ -4,6 +4,7 @@
 //! Integration tests for the metrics registry: lifecycle, window reset,
 //! snapshot filtering, and flush output format.
 
+use crowkv::common::logging::RotatingLogWriter;
 use crowkv::metrics::{MetricsRegistry, MetricsRunner};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -66,6 +67,7 @@ fn bandwidth_count_avg_size_and_rate() {
             && out.contains("tps(/s)")
             && out.contains("avg_size(KB)")
             && out.contains("rate(KB/s)")
+            && out.contains("total(KB)")
     );
     assert!(out.contains("10"));
     assert!(out.contains("s.1.kv.bytes_in.bw"));
@@ -182,7 +184,7 @@ fn flush_format_header_and_sections() {
     let out = String::from_utf8(buf).unwrap();
 
     // Header
-    assert!(out.starts_with("[metrics 2026-07-15T16:30:05.123Z window=5s]"));
+    assert!(out.starts_with("[metrics 2026-07-15T16:30:05.123Z window=5.000s]"));
     // Section order: counters, histograms, summaries, bandwidths, gauges
     let counter_pos = out.find("s.1.kv.delete.c").unwrap();
     let hist_pos = out.find("s.1.kv.get.lh").unwrap();
@@ -209,6 +211,21 @@ fn zero_suppression_counter_with_zero_inc() {
     let out = String::from_utf8(buf).unwrap();
     assert!(out.contains("s.1.kv.put.c"));
     assert!(!out.contains("s.1.kv.delete.c"));
+}
+
+#[test]
+fn header_suppressed_when_all_counters_zero() {
+    let mut reg = MetricsRegistry::new();
+    let _zero = reg.register_counter("s.1.kv.put.c");
+    // No inc() — all counters have count=0
+    let mut buf = Vec::new();
+    reg.flush(&mut buf, 5.0, "2026-07-15T16:30:05Z");
+    let out = String::from_utf8(buf).unwrap();
+    // Counter header should NOT appear since no counter has data
+    assert!(
+        !out.contains("tps(/s)     total"),
+        "counter header should be suppressed when all counters are zero:\n{out}"
+    );
 }
 
 #[test]
@@ -239,4 +256,141 @@ fn registry_shared_arc_mutex_usage() {
     }
     let out = String::from_utf8(buf).unwrap();
     assert!(out.contains('6')); // total = 6
+}
+
+#[tokio::test]
+async fn cpp_metrics_block_appears_with_matching_window() {
+    let dir = std::env::temp_dir().join(format!(
+        "crowkv_metrics_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let writer = RotatingLogWriter::new(dir.clone(), "test", std::process::id(), 1, 1).unwrap();
+    let mut runner = MetricsRunner::new(writer, 1);
+    {
+        let mut reg = runner.registry().lock().unwrap();
+        let _ = reg.register_counter("s.1.kv.put.c");
+    }
+    runner.set_cpp_flush(|w, window, ts, _width, _count_w, _tps_w| {
+        let _ = writeln!(w, "[cpp-metrics {ts} window={window:.3}s]");
+        let _ = writeln!(
+            w,
+            "s.0.g.0.snapshot.apply.l  count 1 tps(/s)  avg 100us  max 100us"
+        );
+        let _ = writeln!(w);
+    });
+    runner.start();
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    runner.stop().await;
+
+    // Read the log file and check for both blocks.
+    let entries = std::fs::read_dir(&dir).unwrap();
+    let mut content = String::new();
+    for entry in entries {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "log") {
+            content.push_str(&std::fs::read_to_string(&path).unwrap());
+        }
+    }
+    std::fs::remove_dir_all(&dir).ok();
+
+    assert!(
+        content.contains("[metrics "),
+        "missing [metrics] block in:\n{content}"
+    );
+    assert!(
+        content.contains("[cpp-metrics "),
+        "missing [cpp-metrics] block in:\n{content}"
+    );
+    // Both blocks should have window= with 3 decimal places.
+    assert!(
+        content.contains("window=1."),
+        "expected window=1.xxx in:\n{content}"
+    );
+}
+
+#[test]
+fn no_bridged_cpp_names_in_rust_section() {
+    let mut reg = MetricsRegistry::new();
+    let c = reg.register_counter("s.1.kv.put.c");
+    c.inc();
+    let g = reg.register_gauge("s.1.g.0.paxos.inflight_slots.g");
+    g.set(5);
+
+    let mut buf = Vec::new();
+    reg.flush(&mut buf, 5.0, "2026-07-15T16:30:05Z");
+    let out = String::from_utf8(buf).unwrap();
+
+    // C++-bridged names should NOT appear in the Rust metrics section.
+    assert!(!out.contains("tree.flush_entries.c"));
+    assert!(!out.contains("tree.flush.drain.c"));
+    assert!(!out.contains("tree.buf.hits.c"));
+    assert!(!out.contains("tree.demand.load.l"));
+    // Rust-native names should appear.
+    assert!(out.contains("s.1.kv.put.c"));
+    assert!(out.contains("s.1.g.0.paxos.inflight_slots.g"));
+}
+
+#[tokio::test]
+async fn wal_fsync_and_write_bw_counts_match() {
+    use crowkv::paxos::roles::{PxBallot, SlotIndex};
+    use crowkv::wal::{IoBackend, RecordType, WALRecord, WalConfig, WalEngine};
+
+    let dir = std::env::temp_dir().join(format!(
+        "crowkv_wal_metrics_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+
+    let mut wal_config = WalConfig::with_root(dir.join("wal"));
+    wal_config.wal_skip_fsync = false;
+    let backend = Arc::new(IoBackend::File);
+    let wal = WalEngine::create(backend, wal_config, 1).await.unwrap();
+
+    let registry = Arc::new(Mutex::new(MetricsRegistry::new()));
+    {
+        let mut r = registry.lock().unwrap();
+        let fsync_summary = r.register_summary("s.0.g.1.wal.file.fsync.l");
+        let write_bw = r.register_bandwidth("s.0.g.1.wal.file.write.bw");
+        wal.set_fsync_metrics(fsync_summary, write_bw);
+    }
+
+    // Append a few records to trigger write_batch + fdatasync.
+    for i in 1u64..=3 {
+        let rec = WALRecord {
+            record_type: RecordType::Accepted,
+            group_id: 1,
+            term: 1,
+            slot: i as SlotIndex,
+            ballot: PxBallot::new(1, 1),
+            payload: bytes::Bytes::from(format!("v{i}")),
+        };
+        wal.append(&rec).await.unwrap();
+    }
+
+    // Flush the metrics and check counts.
+    let mut buf = Vec::new();
+    {
+        let r = registry.lock().unwrap();
+        r.flush(&mut buf, 5.0, "2026-07-15T16:30:05Z");
+    }
+    let out = String::from_utf8(buf).unwrap();
+
+    // wal.file.fsync.l and wal.file.write.bw should both appear with non-zero count.
+    assert!(
+        out.contains("wal.file.fsync.l"),
+        "missing wal.file.fsync.l in:\n{out}"
+    );
+    assert!(
+        out.contains("wal.file.write.bw"),
+        "missing wal.file.write.bw in:\n{out}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
 }

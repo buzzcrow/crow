@@ -69,6 +69,15 @@ constexpr uint64_t kAnchorBytes = 4096;
 // next_page_id,segment_slots,segdir_addr,segdir_len,segdir_crc,anchor_crc.
 constexpr size_t kAnchorFixedFields = 4 + 4 + (8 * 4) + 4 + 8 + 4 + 4 + 4;
 
+std::string make_metrics_prefix(const Options &opt)
+{
+    std::string prefix = "s." + std::to_string(opt.store_id) + ".g." + std::to_string(opt.group_id);
+    if (!opt.backend_label.empty()) {
+        prefix += ".ct." + opt.backend_label;
+    }
+    return prefix;
+}
+
 // Per-store anchor slot size and the byte offset where the page/segment
 // region begins (two A/B anchor slots precede it).
 inline uint64_t superblock_slot_bytes(uint32_t iu)
@@ -288,7 +297,7 @@ constexpr double kSparseBlockThreshold = 0.70;
 // from the gap list so new writes don't reuse space in nearly-empty blocks.
 // Also populates `empty_blocks` with block indices that have zero live bytes.
 SpaceAllocator build_allocator(std::vector<std::pair<uint64_t, uint64_t>> live, uint64_t file_size, uint32_t iu,
-                               uint64_t region_base, uint64_t block_size)
+                               uint64_t region_base, uint64_t block_size, const std::string &name)
 {
     SpaceAllocator a;
     a.iu = iu;
@@ -332,7 +341,7 @@ SpaceAllocator build_allocator(std::vector<std::pair<uint64_t, uint64_t>> live, 
                 a.empty_blocks.insert(i);
             }
         }
-        CT_LOG_INFO("build_allocator: live_extents={} empty_blocks={} max_blk={} block_size={}", live.size(),
+        CT_LOG_INFO("[{}] build_allocator: live_extents={} empty_blocks={} max_blk={} block_size={}", name, live.size(),
                     a.empty_blocks.size(), max_blk, block_size);
 
         // Exclude gaps in sparse blocks from the gap list.
@@ -349,7 +358,7 @@ SpaceAllocator build_allocator(std::vector<std::pair<uint64_t, uint64_t>> live, 
             }
             size_t gaps_before = a.gaps.size();
             a.gaps             = std::move(filtered);
-            CT_LOG_INFO("build_allocator: gap filtering {} -> {} (sparse-block threshold {})", gaps_before,
+            CT_LOG_INFO("[{}] build_allocator: gap filtering {} -> {} (sparse-block threshold {})", name, gaps_before,
                         a.gaps.size(), kSparseBlockThreshold);
         }
     }
@@ -387,7 +396,7 @@ Status Crowtree::prepare_snapshot_locked(PreparedSnapshot *out)
     if (have_prev && !collect_live_extents_from_directory(*store, prev, iu, &live)) {
         return Status::corruption("snapshot: committed segment directory unreadable");
     }
-    SpaceAllocator alloc = build_allocator(std::move(live), store->size(), iu, region_base, store->block_size());
+    SpaceAllocator alloc = build_allocator(std::move(live), store->size(), iu, region_base, store->block_size(), name_);
     out->empty_blocks    = alloc.empty_blocks;
 
     uint64_t pages_written = 0;
@@ -418,6 +427,9 @@ Status Crowtree::prepare_snapshot_locked(PreparedSnapshot *out)
         else { // clean: already durable from a prior generation, no rewrite
             *out_addr = pg->durable_addr;
             *out_len  = pg->durable_plen;
+            if (metrics_.snapshot_page_write_cache_c != nullptr) {
+                metrics_.snapshot_page_write_cache_c->inc();
+            }
         }
         return Status::Ok();
     };
@@ -524,6 +536,7 @@ Status Crowtree::prepare_snapshot_locked(PreparedSnapshot *out)
         }
     }
     snapshot_pages_written_.store(pages_written);
+    snapshot_pages_total_.fetch_add(pages_written, std::memory_order_relaxed);
     uint64_t segments_written = 0;
 
     // Pass 2: build a fresh image for every segment still dirty after pass
@@ -676,8 +689,10 @@ void Crowtree::commit_prepared_snapshot(const PreparedSnapshot &prepared)
         }
     }
     version_.fetch_add(1);
-    CT_LOG_INFO("snapshot committed: seq={} last_applied={} live_pages={} written={} segdir_len={}", prepared.seq,
-                prepared.last_applied_slot, prepared.live_page_count, prepared.pages_written, prepared.segdir_len);
+    snapshot_total_.fetch_add(1, std::memory_order_relaxed);
+    CT_LOG_INFO("[{}] snapshot committed: seq={} last_applied={} live_pages={} written={} segdir_len={}", name_,
+                prepared.seq, prepared.last_applied_slot, prepared.live_page_count, prepared.pages_written,
+                prepared.segdir_len);
 }
 
 void Crowtree::acquire_snapshot_slot()
@@ -702,15 +717,30 @@ Status Crowtree::snapshot(uint64_t *out_last_applied)
     PreparedSnapshot prepared;
     Status           ps;
     {
+        auto                        apply_t0 = std::chrono::steady_clock::now();
         std::lock_guard<std::mutex> lk(write_mutex_);
         ps = prepare_snapshot_locked(&prepared);
+        if (metrics_.snapshot_apply_l != nullptr) {
+            auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - apply_t0)
+                          .count();
+            metrics_.snapshot_apply_l->observe(static_cast<uint64_t>(ns));
+        }
     }
     if (!ps.ok()) {
         release_snapshot_slot();
         return ps;
     }
     for (auto &w : prepared.page_writes) {
-        Status s = opt_.page_store->write_at(w.addr, w.blob.data(), w.blob.size());
+        auto   write_t0 = std::chrono::steady_clock::now();
+        Status s        = opt_.page_store->write_at(w.addr, w.blob.data(), w.blob.size());
+        if (metrics_.snapshot_page_write_l != nullptr) {
+            auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - write_t0)
+                          .count();
+            metrics_.snapshot_page_write_l->observe(static_cast<uint64_t>(ns));
+        }
+        if (metrics_.snapshot_page_write_bw != nullptr) {
+            metrics_.snapshot_page_write_bw->observe(w.blob.size());
+        }
         if (!s.ok()) {
             release_snapshot_slot();
             return s;
@@ -748,6 +778,17 @@ Status Crowtree::snapshot(uint64_t *out_last_applied)
         return sync2;
     }
 
+    // Observe metadata write bytes: segments + directory + anchor.
+    if (metrics_.snapshot_meta_write_bw != nullptr) {
+        uint64_t meta_bytes = 0;
+        for (const auto &sw : prepared.segment_writes) {
+            meta_bytes += sw.blob.size();
+        }
+        meta_bytes += prepared.directory_write.blob.size();
+        meta_bytes += prepared.anchor_write.blob.size();
+        metrics_.snapshot_meta_write_bw->observe(meta_bytes);
+    }
+
     commit_prepared_snapshot(prepared);
 
     // Block compaction: delete blocks that are empty in both this snapshot
@@ -763,13 +804,13 @@ Status Crowtree::snapshot(uint64_t *out_last_applied)
                     to_delete.push_back(blk);
                 }
             }
-            CT_LOG_INFO("block compaction: empty_now={} empty_prev={} to_delete={}", prepared.empty_blocks.size(),
-                        prev_empty_blocks_.size(), to_delete.size());
+            CT_LOG_INFO("[{}] block compaction: empty_now={} empty_prev={} to_delete={}", name_,
+                        prepared.empty_blocks.size(), prev_empty_blocks_.size(), to_delete.size());
             for (uint32_t blk : to_delete) {
-                CT_LOG_INFO("block compaction: deleting empty block {}", blk);
+                CT_LOG_INFO("[{}] block compaction: deleting empty block {}", name_, blk);
                 Status ds = bps->delete_block(blk);
                 if (!ds.ok()) {
-                    CT_LOG_WARN("block compaction: delete_block({}) failed: {}", blk, ds.to_string());
+                    CT_LOG_WARN("[{}] block compaction: delete_block({}) failed: {}", name_, blk, ds.to_string());
                 }
             }
         }
@@ -929,28 +970,20 @@ Status Crowtree::open(const Options &opt, std::unique_ptr<Crowtree> *out)
     // (via ct_init_logging) at startup before any Crowtree::open(). This
     // ensures all engine instances share one logger without resetting
     // each other's.
-    CT_LOG_INFO("open: iu={} frame_bytes={} store_size={}", iu, opt.frame_bytes, store->size());
+    CT_LOG_INFO("[{}] open: iu={} frame_bytes={} store_size={}", opt.name, iu, opt.frame_bytes, store->size());
     // Geometry validation (PT9 §9.2): the pool frame must be IU-aligned. The
     // superblock slot is IU-rounded (superblock_slot_bytes), so any IU is supported.
     if (iu > 1 && (opt.frame_bytes % iu != 0)) {
         return Status::invalid_argument("open: frame_bytes must be IU-aligned");
     }
 
-    // The background flush thread must not run during the recovery mutations
-    // below (they touch the tree directly, without write_mutex_, under a
-    // single-threaded assumption — see start_background_flush_thread()'s
-    // comment). Construct with it disabled, then start it explicitly once
-    // recovery (or the no-snapshot fast path) has finished.
-    Options ctor_opt            = opt;
-    ctor_opt.background_flush   = false;
-    auto tree                   = std::make_unique<Crowtree>(ctor_opt);
-    tree->opt_.background_flush = opt.background_flush;
+    auto tree = std::make_unique<Crowtree>(opt);
 
     CommitAnchor anchor;
     if (!read_best_anchor(*store, iu, &anchor)) {
         // No valid snapshot: fresh empty tree (already constructed).
-        CT_LOG_INFO("open: no committed anchor; starting empty");
-        tree->start_background_flush_thread();
+        CT_LOG_INFO("[{}] open: no committed anchor; starting empty", opt.name);
+        tree->init_metrics(make_metrics_prefix(opt));
         *out = std::move(tree);
         return Status::Ok();
     }
@@ -1015,9 +1048,9 @@ Status Crowtree::open(const Options &opt, std::unique_ptr<Crowtree> *out)
     tree->contiguous_slot_.store(anchor.last_applied_slot);
     tree->version_.store(anchor.snapshot_seq);
 
-    CT_LOG_INFO("open: recovered seq={} last_applied={} root_pid={} segments={}", anchor.snapshot_seq,
+    CT_LOG_INFO("[{}] open: recovered seq={} last_applied={} root_pid={} segments={}", opt.name, anchor.snapshot_seq,
                 anchor.last_applied_slot, anchor.root_page_id, entries.size());
-    tree->start_background_flush_thread();
+    tree->init_metrics(make_metrics_prefix(opt));
     *out = std::move(tree);
     return Status::Ok();
 }

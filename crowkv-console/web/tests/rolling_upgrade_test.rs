@@ -91,7 +91,7 @@ impl Cluster {
             server_id: node_id.into(),
             mgmt_port: u.mgmt_port,
             grpc_port: u.grpc_port,
-            election_profile: Some("test".into()),
+            election_profile: Some("e2e".into()),
             binary: Some(u.binary.clone()),
             ..Default::default()
         };
@@ -152,7 +152,7 @@ async fn spawn_upstream(node_id: &str, workspace: &std::path::Path, binary: &Pat
         server_id: node_id.into(),
         mgmt_port: pick_free_port(),
         grpc_port: pick_free_port(),
-        election_profile: Some("test".into()),
+        election_profile: Some("e2e".into()),
         binary: Some(binary.to_path_buf()),
         ..Default::default()
     };

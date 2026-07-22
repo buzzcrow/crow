@@ -8,6 +8,7 @@
 //! empty value. All verified via `engine_get` on all replicas.
 
 use crate::testkit::cluster::{start_cluster, TestCluster};
+use bytes::Bytes;
 use crowkv::rpc::KvSetRequest;
 
 async fn put_raw(
@@ -19,8 +20,8 @@ async fn put_raw(
     let resp = client
         .put(KvSetRequest {
             version: 1,
-            key: key.to_vec(),
-            value: val.to_vec(),
+            key: Bytes::copy_from_slice(key),
+            value: Bytes::copy_from_slice(val),
             ttl_ms: 0,
             request_id: req_id,
             request_create_ms: 1000 + req_id,

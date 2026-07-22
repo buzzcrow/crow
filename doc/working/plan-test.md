@@ -14,17 +14,18 @@ For test strategy, layer scope, and coverage details, see [`design/design-test.m
 
 ## Suite Timing
 
-Measured on 2026-07-17 (clean build, macOS). Build time: 63.5 s.
+Measured on 2026-07-20 (clean build, macOS). Build time: 72.8 s.
+Run `pixi run clean` before measuring for reproducible results.
 
 | Suite | Tests | macOS | Linux |
 | --- | --- | --- | --- |
-| `test-ct` | 326 | 9.9 s | — |
-| `test-ffi` | 15 | 26.5 s | — |
-| `test-core` | 503 | 56.3 s | — |
-| `test-server` | 55 | 14.9 s | — |
-| `test-cli` | 56 | 34.0 s | — |
-| `test-mgmt-api` | 49 | 42.5 s | — |
-| `test-ui` | 51 | 63.8 s | — |
+| `test-ct` | 328 | 9.1 s | — |
+| `test-ffi` | 15 | 29.9 s | — |
+| `test-core` | 508 | 43.5 s | — |
+| `test-server` | 55 | 37.0 s | — |
+| `test-cli` | 13 | 35.1 s | — |
+| `test-mgmt-api` | 49 | 39.1 s | — |
+| `test-ui` | 51 | 81.4 s | — |
 
 ---
 

@@ -10,6 +10,7 @@
 //! replicas.
 
 use crate::testkit::cluster::{start_cluster, TestCluster};
+use bytes::Bytes;
 use crowkv::rpc::{KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvSetRequest};
 
 async fn put(
@@ -21,8 +22,8 @@ async fn put(
     let resp = client
         .put(KvSetRequest {
             version: 1,
-            key: key.to_vec(),
-            value: val.to_vec(),
+            key: Bytes::copy_from_slice(key),
+            value: Bytes::copy_from_slice(val),
             ttl_ms: 0,
             request_id: req_id,
             request_create_ms: 1000 + req_id,
@@ -44,7 +45,7 @@ async fn delete(
     let resp = client
         .delete(KvDeleteRequest {
             version: 1,
-            key: key.to_vec(),
+            key: Bytes::copy_from_slice(key),
             request_id: req_id,
             request_create_ms: 1000 + req_id,
             client_id: 0,
@@ -68,8 +69,8 @@ async fn batch_write(
             items: items
                 .into_iter()
                 .map(|(k, v, is_del)| KvBatchItem {
-                    key: k.to_vec(),
-                    value: v.to_vec(),
+                    key: Bytes::copy_from_slice(k),
+                    value: Bytes::copy_from_slice(v),
                     is_delete: is_del,
                 })
                 .collect(),

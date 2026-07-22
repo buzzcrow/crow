@@ -11,13 +11,21 @@
 mod testkit;
 
 use crowkv_console_shared::lifecycle;
+use std::sync::{Mutex, OnceLock};
 use testkit::console::{crowkv_cli_bin, run};
+
+static BENCH_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn bench_lock() -> std::sync::MutexGuard<'static, ()> {
+    BENCH_MUTEX.get_or_init(|| Mutex::new(())).lock().unwrap()
+}
 
 /// `bench run --mode mem --duration-secs 3` runs end-to-end,
 /// exits 0, and prints a report path. The workspace is cleaned up
 /// automatically (no `--keep-workspace`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bench_benchmark_mem_end_to_end() {
+    let _lock = bench_lock();
     let cli = crowkv_cli_bin();
     if !cli.exists() {
         eprintln!("skipping: crowkv CLI binary not built ({})", cli.display());
@@ -58,6 +66,7 @@ async fn bench_benchmark_mem_end_to_end() {
 /// end-to-end with the crowtree engine + file page store.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bench_benchmark_file_end_to_end() {
+    let _lock = bench_lock();
     let cli = crowkv_cli_bin();
     if !cli.exists() {
         eprintln!("skipping: crowkv CLI binary not built ({})", cli.display());
@@ -97,6 +106,7 @@ async fn bench_benchmark_file_end_to_end() {
 /// JSON files exist. We generate two quick reports first, then compare.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bench_compare_two_reports() {
+    let _lock = bench_lock();
     let cli = crowkv_cli_bin();
     if !cli.exists() {
         eprintln!("skipping: crowkv CLI binary not built ({})", cli.display());

@@ -612,6 +612,7 @@ dependencies = [
  "crowtree-ffi",
  "dashmap",
  "flate2",
+ "futures",
  "parking_lot",
  "prost",
  "serde",
@@ -656,8 +657,10 @@ name = "crowkv-client"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "bytes",
  "crowkv",
  "dashmap",
+ "hdrhistogram",
  "reqwest",
  "serde",
  "serde_json",

@@ -7,18 +7,19 @@
 //! These tests target `Batch::decode` directly: round-trip, truncation, empty
 //! payload, multi-op, large keys/values, and boundary conditions.
 
+use bytes::Bytes;
 use crowkv::kv::{Batch, BatchOp, Op};
 
 fn put(key: &[u8], value: &[u8]) -> BatchOp {
     BatchOp {
-        key: key.to_vec(),
-        op: Op::Put(value.to_vec()),
+        key: Bytes::copy_from_slice(key),
+        op: Op::Put(Bytes::copy_from_slice(value)),
     }
 }
 
 fn del(key: &[u8]) -> BatchOp {
     BatchOp {
-        key: key.to_vec(),
+        key: Bytes::copy_from_slice(key),
         op: Op::Delete,
     }
 }
@@ -42,13 +43,14 @@ fn encode(ops: &[(&[u8], Option<&[u8]>)]) -> Vec<u8> {
 
 #[test]
 fn decode_empty_payload_returns_empty_batch() {
-    let batch = Batch::decode(&[]);
+    let payload = Bytes::new();
+    let batch = Batch::decode(&payload);
     assert!(batch.ops.is_empty());
 }
 
 #[test]
 fn decode_zero_ops_returns_empty_batch() {
-    let buf = vec![0u8];
+    let buf = Bytes::from_static(&[0u8]);
     let batch = Batch::decode(&buf);
     assert!(batch.ops.is_empty());
 }
@@ -56,28 +58,28 @@ fn decode_zero_ops_returns_empty_batch() {
 #[test]
 fn decode_single_put_roundtrips() {
     let buf = encode(&[(b"k", Some(b"v"))]);
-    let batch = Batch::decode(&buf);
+    let batch = Batch::decode(&Bytes::from(buf));
     assert_eq!(batch.ops, vec![put(b"k", b"v")]);
 }
 
 #[test]
 fn decode_single_delete_roundtrips() {
     let buf = encode(&[(b"k", None)]);
-    let batch = Batch::decode(&buf);
+    let batch = Batch::decode(&Bytes::from(buf));
     assert_eq!(batch.ops, vec![del(b"k")]);
 }
 
 #[test]
 fn decode_multi_op_roundtrips() {
     let buf = encode(&[(b"k1", Some(b"v1")), (b"k2", None), (b"k3", Some(b"v3"))]);
-    let batch = Batch::decode(&buf);
+    let batch = Batch::decode(&Bytes::from(buf));
     assert_eq!(batch.ops, vec![put(b"k1", b"v1"), del(b"k2"), put(b"k3", b"v3")]);
 }
 
 #[test]
 fn decode_empty_value_put() {
     let buf = encode(&[(b"k", Some(b""))]);
-    let batch = Batch::decode(&buf);
+    let batch = Batch::decode(&Bytes::from(buf));
     assert_eq!(batch.ops, vec![put(b"k", b"")]);
 }
 
@@ -86,16 +88,16 @@ fn decode_large_key_and_value() {
     let key = vec![0x42u8; 1024];
     let value = vec![0xABu8; 4096];
     let buf = encode(&[(&key, Some(&value))]);
-    let batch = Batch::decode(&buf);
+    let batch = Batch::decode(&Bytes::from(buf));
     assert_eq!(batch.ops.len(), 1);
-    assert_eq!(batch.ops[0].key, key);
-    assert_eq!(batch.ops[0].op, Op::Put(value.clone()));
+    assert_eq!(batch.ops[0].key, Bytes::from(key));
+    assert_eq!(batch.ops[0].op, Op::Put(Bytes::from(value)));
 }
 
 #[test]
 fn decode_truncated_after_op_count_stops_cleanly() {
     // Claim 3 ops but provide no data.
-    let buf = vec![3u8];
+    let buf = Bytes::from_static(&[3u8]);
     let batch = Batch::decode(&buf);
     assert!(batch.ops.is_empty(), "truncated payload yields no ops");
 }
@@ -106,10 +108,10 @@ fn decode_truncated_mid_key_stops_cleanly() {
     let mut buf = vec![1u8, 0u8]; // 1 op, Put
     buf.extend_from_slice(&10u32.to_le_bytes()); // key_len = 10
     buf.extend_from_slice(b"abc"); // only 3 bytes
-    let batch = Batch::decode(&buf);
+    let batch = Batch::decode(&Bytes::from(buf));
     assert_eq!(batch.ops.len(), 1);
-    // The decoder reads key_len=10 but only 3 bytes remain; unwrap_or(&[]) yields empty.
-    assert_eq!(batch.ops[0].key, b"");
+    // The decoder reads key_len=10 but only 3 bytes remain; slice clamps to available.
+    assert_eq!(batch.ops[0].key, Bytes::from_static(b""));
 }
 
 #[test]
@@ -120,10 +122,10 @@ fn decode_truncated_mid_value_stops_cleanly() {
     buf.push(b'k');
     buf.extend_from_slice(&10u32.to_le_bytes()); // value_len = 10
     buf.extend_from_slice(b"abc"); // only 3 bytes
-    let batch = Batch::decode(&buf);
+    let batch = Batch::decode(&Bytes::from(buf));
     assert_eq!(batch.ops.len(), 1);
-    // value_len=10 but only 3 bytes remain; unwrap_or(&[]) yields empty.
-    assert_eq!(batch.ops[0].op, Op::Put(b"".to_vec()));
+    // value_len=10 but only 3 bytes remain; slice clamps to available.
+    assert_eq!(batch.ops[0].op, Op::Put(Bytes::from_static(b"")));
 }
 
 #[test]
@@ -133,7 +135,7 @@ fn decode_unknown_kind_byte_becomes_delete() {
     buf.extend_from_slice(&1u32.to_le_bytes());
     buf.push(b'k');
     buf.extend_from_slice(&0u32.to_le_bytes());
-    let batch = Batch::decode(&buf);
+    let batch = Batch::decode(&Bytes::from(buf));
     assert_eq!(batch.ops, vec![del(b"k")]);
 }
 
@@ -147,6 +149,6 @@ fn decode_max_op_count_u8() {
         buf.push(i);
         buf.extend_from_slice(&0u32.to_le_bytes());
     }
-    let batch = Batch::decode(&buf);
+    let batch = Batch::decode(&Bytes::from(buf));
     assert_eq!(batch.ops.len(), 255);
 }

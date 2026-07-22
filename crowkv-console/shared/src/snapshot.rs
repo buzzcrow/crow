@@ -102,6 +102,7 @@ pub struct CrowtreeStatsSnapshot {
     pub mt_get_hit_total: u64,
     pub flush_drain_total: u64,
     pub flush_entries_total: u64,
+    pub snapshot_total: u64,
     pub l1_get_total: u64,
     pub l1_get_hit_total: u64,
 }

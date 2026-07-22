@@ -4,6 +4,7 @@
 //! KV gRPC integration tests covering Put/Delete/BatchWrite flows.
 
 use crate::testkit::cluster::{start_cluster, TestCluster};
+use bytes::Bytes;
 use crowkv::rpc::{KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvSetRequest};
 
 #[tokio::test]
@@ -16,8 +17,8 @@ async fn kv_mutations_apply_to_all_learners() {
     let resp = client
         .put(KvSetRequest {
             version: 1,
-            key: b"k1".to_vec(),
-            value: b"v1".to_vec(),
+            key: Bytes::from_static(b"k1"),
+            value: Bytes::from_static(b"v1"),
             ttl_ms: 0,
             request_id: 101,
             request_create_ms: 1001,
@@ -38,13 +39,13 @@ async fn kv_mutations_apply_to_all_learners() {
             version: 1,
             items: vec![
                 KvBatchItem {
-                    key: b"k1".to_vec(),
-                    value: b"v2".to_vec(),
+                    key: Bytes::from_static(b"k1"),
+                    value: Bytes::from_static(b"v2"),
                     is_delete: false,
                 },
                 KvBatchItem {
-                    key: b"k2".to_vec(),
-                    value: b"v2".to_vec(),
+                    key: Bytes::from_static(b"k2"),
+                    value: Bytes::from_static(b"v2"),
                     is_delete: false,
                 },
             ],
@@ -66,7 +67,7 @@ async fn kv_mutations_apply_to_all_learners() {
     let resp = client
         .delete(KvDeleteRequest {
             version: 1,
-            key: b"k1".to_vec(),
+            key: Bytes::from_static(b"k1"),
             request_id: 103,
             request_create_ms: 1003,
             client_id: 0,

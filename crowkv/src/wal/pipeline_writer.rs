@@ -23,13 +23,14 @@
 
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{timeout, Instant};
-use tracing::{error, info, trace};
+use tracing::{debug, error, trace};
 
+use crate::metrics::{Bandwidth, LatencySummary};
 use crate::paxos::roles::SlotIndex;
 use crate::paxos::PxGroupId;
 
@@ -103,6 +104,8 @@ pub(crate) fn spawn_pipeline_writer(
     flush_count: Arc<AtomicU64>,
     records_flushed: Arc<AtomicU64>,
     skip_fsync: bool,
+    fsync_summary: Arc<OnceLock<Arc<LatencySummary>>>,
+    write_bandwidth: Arc<OnceLock<Arc<Bandwidth>>>,
 ) -> (mpsc::UnboundedSender<WriterCommand>, tokio::task::JoinHandle<()>) {
     let (tx, rx) = mpsc::unbounded_channel::<WriterCommand>();
     let jh = tokio::spawn(pipeline_writer_loop(
@@ -122,6 +125,8 @@ pub(crate) fn spawn_pipeline_writer(
         flush_count,
         records_flushed,
         skip_fsync,
+        fsync_summary,
+        write_bandwidth,
     ));
     (tx, jh)
 }
@@ -145,6 +150,8 @@ async fn pipeline_writer_loop(
     flush_count: Arc<AtomicU64>,
     records_flushed: Arc<AtomicU64>,
     skip_fsync: bool,
+    fsync_summary: Arc<OnceLock<Arc<LatencySummary>>>,
+    write_bandwidth: Arc<OnceLock<Arc<Bandwidth>>>,
 ) {
     // Reusable per-batch buffers — declared outside the loop so their
     // allocations persist across wake cycles (no per-batch malloc/free).
@@ -173,8 +180,9 @@ async fn pipeline_writer_loop(
     loop {
         // Block until at least one command arrives (zero CPU when idle).
         let Some(cmd) = rx.recv().await else {
-            // Channel closed — engine dropped. Seal and exit.
+            // Channel closed — engine dropped. Seal and flush, then exit.
             let _ = segment.seal().await;
+            let _ = segment.flush().await;
             register_sealed(&index, &segment, pipeline_idx);
             return;
         };
@@ -265,7 +273,15 @@ async fn pipeline_writer_loop(
                 // Write all batched records to the segment, then fdatasync
                 // (unless skip_fsync is set for benchmark path-overhead
                 // isolation — see WalConfig::wal_skip_fsync).
-                let write_result = write_batch(&mut segment, &batch, &mut offsets, skip_fsync).await;
+                let write_result = write_batch(
+                    &mut segment,
+                    &batch,
+                    &mut offsets,
+                    skip_fsync,
+                    &fsync_summary,
+                    &write_bandwidth,
+                )
+                .await;
 
                 match write_result {
                     Ok(()) => {
@@ -383,6 +399,8 @@ async fn write_batch(
     batch: &[PendingWrite],
     offsets: &mut Vec<u64>,
     skip_fsync: bool,
+    fsync_summary: &OnceLock<Arc<LatencySummary>>,
+    write_bandwidth: &OnceLock<Arc<Bandwidth>>,
 ) -> io::Result<()> {
     if batch.is_empty() {
         return Ok(());
@@ -441,7 +459,18 @@ async fn write_batch(
     // Single durable flush for the whole batch — skipped when skip_fsync is
     // set (benchmark isolation mode: data written but not durably flushed).
     if !skip_fsync {
+        let fsync_start = Instant::now();
         segment.fdatasync().await?;
+        if let Some(s) = fsync_summary.get() {
+            #[allow(clippy::cast_possible_truncation)]
+            s.observe(fsync_start.elapsed().as_nanos() as u64);
+        }
+    }
+
+    // Observe batch write bytes (regardless of fsync — the write happened).
+    if let Some(bw) = write_bandwidth.get() {
+        #[allow(clippy::cast_possible_truncation)]
+        bw.observe(total_len as u64);
     }
 
     trace!(
@@ -476,7 +505,7 @@ fn register_sealed(index: &parking_lot::Mutex<SegmentIndex>, segment: &WalSegmen
         record_count: segment.record_count,
     };
     index.lock().register_segment(meta);
-    info!(
+    debug!(
         segment_id = segment.segment_id,
         min_slot = segment.min_slot,
         max_slot = segment.max_slot,

@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use crowkv::cluster::group::PxGroup;
 use crowkv::cluster::group_config::GroupConfigStore;
 use crowkv::cluster::group_election::LeaderElection;
@@ -183,7 +184,7 @@ impl WalCluster {
         let resp = client
             .get(KvGetRequest {
                 version: 1,
-                key: key.to_vec(),
+                key: Bytes::copy_from_slice(key),
                 request_id: 9001,
                 request_create_ms: 9001,
                 group_id: GROUP,
@@ -194,7 +195,7 @@ impl WalCluster {
             .ok()?
             .into_inner();
         if resp.ok && !resp.not_found {
-            Some(resp.value)
+            Some(resp.value.to_vec())
         } else {
             None
         }
@@ -273,8 +274,8 @@ async fn commit_writes(cluster: &WalCluster, kvs: &[(Vec<u8>, Vec<u8>)]) {
                 let resp = client
                     .put(KvSetRequest {
                         version: 1,
-                        key: key.clone(),
-                        value: value.clone(),
+                        key: Bytes::from(key.clone()),
+                        value: Bytes::from(value.clone()),
                         seq,
                         ttl_ms: 0,
                         client_id: 77,

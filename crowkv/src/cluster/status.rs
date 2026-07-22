@@ -67,6 +67,20 @@ pub struct GroupStatus {
     pub messages: Vec<String>,
     pub local_replica: ReplicaStatus,
     pub remotes: Vec<RemoteStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inflight: Option<InflightStatus>,
+}
+
+/// Inflight admission status snapshot.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+pub struct InflightStatus {
+    pub queue_count: usize,
+    pub window_per_queue: usize,
+    pub policy: String,
+    pub occupied: u64,
+    pub waiting: u64,
+    pub total_enqueued: u64,
+    pub total_wait_us: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
@@ -109,6 +123,7 @@ pub struct CrowtreeStatsView {
     pub contiguous_slot: u64,
     pub gc_watermark: u64,
     pub snapshot_pages_written: u64,
+    pub snapshot_pages_total: u64,
     pub snapshot_segments_written: u64,
     pub buffer_pool_hits: u64,
     pub buffer_pool_misses: u64,
@@ -123,6 +138,7 @@ pub struct CrowtreeStatsView {
     pub mt_get_hit_total: u64,
     pub flush_drain_total: u64,
     pub flush_entries_total: u64,
+    pub snapshot_total: u64,
     pub l1_get_total: u64,
     pub l1_get_hit_total: u64,
 }
@@ -134,6 +150,7 @@ impl From<crate::kv::CrowtreeStats> for CrowtreeStatsView {
             contiguous_slot: s.contiguous_slot,
             gc_watermark: s.gc_watermark,
             snapshot_pages_written: s.snapshot_pages_written,
+            snapshot_pages_total: s.snapshot_pages_total,
             snapshot_segments_written: s.snapshot_segments_written,
             buffer_pool_hits: s.buffer_pool_hits,
             buffer_pool_misses: s.buffer_pool_misses,
@@ -148,6 +165,7 @@ impl From<crate::kv::CrowtreeStats> for CrowtreeStatsView {
             mt_get_hit_total: s.mt_get_hit_total,
             flush_drain_total: s.flush_drain_total,
             flush_entries_total: s.flush_entries_total,
+            snapshot_total: s.snapshot_total,
             l1_get_total: s.l1_get_total,
             l1_get_hit_total: s.l1_get_hit_total,
         }

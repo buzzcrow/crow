@@ -318,8 +318,8 @@ from failures.
 - Election must be tested for 1, 2, 3, 5, 7 replica counts — single leader
   elected, no split-brain.
 - Follower must reject direct client writes and return `NotLeaderHint`.
-- Proposer window full must return `Busy`; repair must fill gap and advance
-  frontier.
+- Proposer window full must queue (queue admission, R18); repair must
+  fill gap and advance frontier.
 - Durability: single-node crash/restart and full-cluster restart must
   preserve all committed entries (including tombstones).
 - New-member snapshot join: fresh replica pulls snapshot and catches up to
@@ -607,20 +607,13 @@ memtable insert + flush path.
 - Run 5: block, threads=64, connections=8
 - Run 6: block, threads=128, connections=16
 
-### Baseline Results (memory mode, 2026-07-17)
+### Baseline Results
 
-Preliminary results with `key_space=1000` (random keys, not yet
-unique-key mode):
-
-- **threads=8**: TPS=16,147, avg=494us, p99=651us, errors=0
-- **threads=64**: TPS=107,429, avg=592us, p99=2,021us, errors=86.3%
-- **threads=128**: TPS=128,425, avg=987us, p99=7,207us, errors=89.6%
-
-At 8 threads the system is stable at ~16k ops/s with zero errors.
-At 64+ threads the leader is saturated — throughput appears higher
-but 86-90% of requests fail (timeouts/rejections). The real
-error-free throughput ceiling is ~16k ops/s with current consensus
-batch processing. High-concurrency optimization is deferred.
+Current benchmark results are in
+[`doc/working/write-flow-analysis.md`](../working/write-flow-analysis.md)
+§ Benchmark Results. Key findings: peak 50K ops/s (64T/8C/MI=64),
+zero errors with queue admission (R18), scaling ceiling is per-proposal
+consensus latency (~1.2ms).
 
 ### Coverage Rules
 

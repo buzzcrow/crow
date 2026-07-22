@@ -10,7 +10,7 @@ use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::{debug, info};
 use utoipa::{OpenApi, ToSchema};
 
 use crowkv::cluster::group::PxGroup;
@@ -20,7 +20,7 @@ use crowkv::cluster::kv_server::KvServer;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crowkv::cluster::px_kv_store::PxKvStore;
 use crowkv::cluster::remote_replica::PxRemoteReplica;
-use crowkv::common::config::ServerConfig;
+use crowkv::common::config::{AdmissionPolicy, ServerConfig};
 
 use crate::operation_registry::{AppState, Operation, OperationKind, OperationStatus, OperationTarget};
 use crate::startup::create_group_with_wal;
@@ -424,7 +424,7 @@ async fn add_store(
         .parse()
         .map_err(|e| err_json(StatusCode::BAD_REQUEST, format!("invalid address: {e}")))?;
 
-    info!(
+    debug!(
         store_id = req.store_id,
         bind_addr = %addr,
         "creating PxKvStore via management API"
@@ -556,7 +556,7 @@ async fn add_group(
         ));
     }
 
-    info!(
+    debug!(
         store_id = sid,
         group_id = req.group_id,
         replica_id = req.replica_id,
@@ -579,6 +579,9 @@ async fn add_group(
         state.crowtree_backend,
         state.wal_skip_fsync,
         "log",
+        state.max_inflight,
+        state.inflight_queues,
+        AdmissionPolicy::Queue,
     )
     .await
     .map_err(|e| {
@@ -702,6 +705,9 @@ async fn join_group_via_snapshot(
         state.crowtree_backend,
         state.wal_skip_fsync,
         "log",
+        state.max_inflight,
+        state.inflight_queues,
+        AdmissionPolicy::Queue,
     )
     .await
     .map_err(|e| {
@@ -870,14 +876,14 @@ async fn add_remote_replicas(
         }
     }
 
-    info!(
+    debug!(
         store_id = sid,
         group_id = gid,
         count = remotes.len(),
         "adding remote replicas via management API"
     );
     for r in &remotes {
-        info!(
+        debug!(
             store_id = sid,
             group_id = gid,
             remote_id = r.replica_id,
@@ -1140,14 +1146,14 @@ async fn batch_add_remote_replicas(
         return Ok(StatusCode::OK);
     }
 
-    info!(
+    debug!(
         store_id = sid,
         group_id = gid,
         count = new_remotes.len(),
         "batch adding remote replicas via management API"
     );
     for r in &new_remotes {
-        info!(
+        debug!(
             store_id = sid,
             group_id = gid,
             remote_id = r.replica_id,
@@ -1293,6 +1299,11 @@ fn rebuild_group_with_same_config(group: &PxGroup) -> PxGroup {
     if let Some(store) = group.config_store() {
         new_group.set_config_store(store.clone());
     }
+    new_group.set_inflight_config(
+        group.inflight_window_size(),
+        group.inflight_queue_count(),
+        group.inflight_admission_policy(),
+    );
     new_group
 }
 

@@ -42,6 +42,11 @@ mod sys {
         _private: [u8; 0],
     }
     #[repr(C)]
+    pub struct ct_column_widths {
+        pub count_w: usize,
+        pub tps_w: usize,
+    }
+    #[repr(C)]
     pub struct ct_import {
         _private: [u8; 0],
     }
@@ -54,6 +59,15 @@ mod sys {
     pub struct ct_buf {
         pub data: *mut u8,
         pub len: usize,
+    }
+
+    #[repr(C)]
+    pub struct ct_kv_ref {
+        pub key: *const u8,
+        pub key_len: usize,
+        pub value: *const u8,
+        pub value_len: usize,
+        pub kind: u8,
     }
 
     #[repr(C)]
@@ -71,6 +85,7 @@ mod sys {
         pub gc_watermark: u64,
         pub io_failed: c_int,
         pub snapshot_pages_written: u64,
+        pub snapshot_pages_total: u64,
         pub snapshot_segments_written: u64,
         pub buffer_pool_hits: u64,
         pub buffer_pool_misses: u64,
@@ -85,6 +100,7 @@ mod sys {
         pub mt_get_hit_total: u64,
         pub flush_drain_total: u64,
         pub flush_entries_total: u64,
+        pub snapshot_total: u64,
         pub l1_get_total: u64,
         pub l1_get_hit_total: u64,
     }
@@ -139,13 +155,7 @@ mod sys {
             vlen: usize,
         ) -> c_int;
         pub fn ct_apply_delete(t: *mut ct_tree, slot: u64, key: *const u8, klen: usize) -> c_int;
-        pub fn ct_apply_batch(
-            t: *mut ct_tree,
-            slot: u64,
-            ops: *const u8,
-            ops_len: usize,
-            count: u64,
-        ) -> c_int;
+        pub fn ct_apply_batch_slices(t: *mut ct_tree, slot: u64, ops: *const ct_kv_ref, count: u64) -> c_int;
         pub fn ct_force_advance_slot(t: *mut ct_tree, slot: u64);
         pub fn ct_put(t: *mut ct_tree, key: *const u8, klen: usize, val: *const u8, vlen: usize) -> c_int;
         pub fn ct_del(t: *mut ct_tree, key: *const u8, klen: usize) -> c_int;
@@ -163,6 +173,7 @@ mod sys {
             prefix: *const u8,
             plen: usize,
             limit: usize,
+            include_tombstones: c_int,
             out_entries: *mut ct_buf,
             out_count: *mut u64,
             truncated: *mut c_int,
@@ -205,6 +216,25 @@ mod sys {
         ) -> c_int;
         pub fn ct_future_free(f: *mut ct_future);
         pub fn ct_reactor_eventfd(t: *const ct_tree) -> i32;
+
+        // ── Metrics FFI ──
+        pub fn ct_flush_metrics_str(
+            t: *mut ct_tree,
+            window_secs: f64,
+            timestamp: *const c_char,
+            width: usize,
+        ) -> *mut c_char;
+        pub fn ct_flush_metrics_str_ext(
+            t: *mut ct_tree,
+            window_secs: f64,
+            timestamp: *const c_char,
+            width: usize,
+            count_w: usize,
+            tps_w: usize,
+        ) -> *mut c_char;
+        pub fn ct_max_name_len(t: *const ct_tree) -> usize;
+        pub fn ct_negotiate_widths(t: *const ct_tree, input: ct_column_widths, out: *mut ct_column_widths);
+        pub fn ct_free_string(s: *mut c_char);
     }
 }
 
@@ -363,6 +393,7 @@ pub struct Stats {
     pub gc_watermark: u64,
     pub io_failed: bool,
     pub snapshot_pages_written: u64,
+    pub snapshot_pages_total: u64,
     pub snapshot_segments_written: u64,
     pub buffer_pool_hits: u64,
     pub buffer_pool_misses: u64,
@@ -377,26 +408,9 @@ pub struct Stats {
     pub mt_get_hit_total: u64,
     pub flush_drain_total: u64,
     pub flush_entries_total: u64,
+    pub snapshot_total: u64,
     pub l1_get_total: u64,
     pub l1_get_hit_total: u64,
-}
-
-/// Encode `ops` into `ct_apply_batch`'s packed wire format:
-/// `[u8 kind][u32 klen][key][u32 vlen][value] * count` (kind 0=put, 1=delete).
-fn encode_batch(ops: &[BatchOp<'_>]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for op in ops {
-        let (kind, key, value): (u8, &[u8], &[u8]) = match op {
-            BatchOp::Put { key, value } => (0, key, value),
-            BatchOp::Delete { key } => (1, key, b""),
-        };
-        out.push(kind);
-        out.extend_from_slice(&(key.len() as u32).to_le_bytes());
-        out.extend_from_slice(key);
-        out.extend_from_slice(&(value.len() as u32).to_le_bytes());
-        out.extend_from_slice(value);
-    }
-    out
 }
 
 /// A scan result entry.
@@ -405,6 +419,7 @@ pub struct ScanEntry {
     pub key: Vec<u8>,
     pub slot: u64,
     pub value: Vec<u8>,
+    pub tombstone: bool,
 }
 
 /// A snapshot-view entry (includes tombstones).
@@ -516,16 +531,26 @@ impl Crowtree {
     /// concurrent reader never observes a partially-applied batch -- unlike
     /// looping [`Self::apply_put`]/[`Self::apply_delete`] per key).
     pub fn apply_batch(&self, slot: u64, ops: &[BatchOp<'_>]) -> Result<(), CtError> {
-        let packed = encode_batch(ops);
-        check(unsafe {
-            sys::ct_apply_batch(
-                self.as_ptr(),
-                slot,
-                packed.as_ptr(),
-                packed.len(),
-                ops.len() as u64,
-            )
-        })
+        let refs: Vec<sys::ct_kv_ref> = ops
+            .iter()
+            .map(|op| match op {
+                BatchOp::Put { key, value } => sys::ct_kv_ref {
+                    key: key.as_ptr(),
+                    key_len: key.len(),
+                    value: value.as_ptr(),
+                    value_len: value.len(),
+                    kind: 0,
+                },
+                BatchOp::Delete { key } => sys::ct_kv_ref {
+                    key: key.as_ptr(),
+                    key_len: key.len(),
+                    value: std::ptr::null(),
+                    value_len: 0,
+                    kind: 1,
+                },
+            })
+            .collect();
+        check(unsafe { sys::ct_apply_batch_slices(self.as_ptr(), slot, refs.as_ptr(), refs.len() as u64) })
     }
 
     pub fn force_advance_slot(&self, slot: u64) {
@@ -618,6 +643,7 @@ impl Crowtree {
             gc_watermark: raw.gc_watermark,
             io_failed: raw.io_failed != 0,
             snapshot_pages_written: raw.snapshot_pages_written,
+            snapshot_pages_total: raw.snapshot_pages_total,
             snapshot_segments_written: raw.snapshot_segments_written,
             buffer_pool_hits: raw.buffer_pool_hits,
             buffer_pool_misses: raw.buffer_pool_misses,
@@ -632,9 +658,61 @@ impl Crowtree {
             mt_get_hit_total: raw.mt_get_hit_total,
             flush_drain_total: raw.flush_drain_total,
             flush_entries_total: raw.flush_entries_total,
+            snapshot_total: raw.snapshot_total,
             l1_get_total: raw.l1_get_total,
             l1_get_hit_total: raw.l1_get_hit_total,
         }
+    }
+
+    /// Flush C++ metrics into a formatted string for the `[cpp-metrics]`
+    /// log section. `width` overrides per-section max name length for
+    /// column alignment with the Rust section (0 = use C++ internal max).
+    pub fn flush_metrics_str(&self, window_secs: f64, timestamp: &str, width: usize) -> String {
+        let c_ts = CString::new(timestamp).unwrap_or_default();
+        let ptr = unsafe { sys::ct_flush_metrics_str(self.as_ptr(), window_secs, c_ts.as_ptr(), width) };
+        if ptr.is_null() {
+            return String::new();
+        }
+        let result = unsafe { std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned() };
+        unsafe { sys::ct_free_string(ptr) };
+        result
+    }
+
+    /// Extended flush with negotiated column widths (count_w, tps_w).
+    pub fn flush_metrics_str_ext(
+        &self,
+        window_secs: f64,
+        timestamp: &str,
+        width: usize,
+        count_w: usize,
+        tps_w: usize,
+    ) -> String {
+        let c_ts = CString::new(timestamp).unwrap_or_default();
+        let ptr = unsafe {
+            sys::ct_flush_metrics_str_ext(self.as_ptr(), window_secs, c_ts.as_ptr(), width, count_w, tps_w)
+        };
+        if ptr.is_null() {
+            return String::new();
+        }
+        let result = unsafe { std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned() };
+        unsafe { sys::ct_free_string(ptr) };
+        result
+    }
+
+    /// Negotiate column widths: returns C++ preferred (count_w, tps_w).
+    pub fn negotiate_widths(&self, rust_count_w: usize, rust_tps_w: usize) -> (usize, usize) {
+        let input = sys::ct_column_widths {
+            count_w: rust_count_w,
+            tps_w: rust_tps_w,
+        };
+        let mut out = sys::ct_column_widths { count_w: 0, tps_w: 0 };
+        unsafe { sys::ct_negotiate_widths(self.as_ptr(), input, &mut out) };
+        (out.count_w, out.tps_w)
+    }
+
+    /// Current max metric name length from the C++ registry.
+    pub fn max_name_len(&self) -> usize {
+        unsafe { sys::ct_max_name_len(self.as_ptr()) }
     }
 
     /// Evict clean, delta-free resident leaf bases down to at most
@@ -730,7 +808,13 @@ impl Crowtree {
     }
 
     /// Range scan over `prefix` (empty = whole keyspace).
-    pub fn scan(&self, prefix: &[u8], limit: usize) -> Result<(Vec<ScanEntry>, bool), CtError> {
+    /// When `include_tombstones` is true, tombstone entries are included.
+    pub fn scan(
+        &self,
+        prefix: &[u8],
+        limit: usize,
+        include_tombstones: bool,
+    ) -> Result<(Vec<ScanEntry>, bool), CtError> {
         let mut buf = sys::ct_buf {
             data: std::ptr::null_mut(),
             len: 0,
@@ -743,6 +827,7 @@ impl Crowtree {
                 prefix.as_ptr(),
                 prefix.len(),
                 limit,
+                if include_tombstones { 1 } else { 0 },
                 &mut buf,
                 &mut count,
                 &mut truncated,
@@ -914,13 +999,15 @@ fn decode_scan(bytes: &[u8], count: usize) -> Result<Vec<ScanEntry>, CtError> {
         }
         let klen = rd_u32(bytes, pos) as usize;
         pos += 4;
-        if pos + klen + 12 > bytes.len() {
+        if pos + klen + 13 > bytes.len() {
             return Err(CtError::Corruption);
         }
         let key = bytes[pos..pos + klen].to_vec();
         pos += klen;
         let slot = rd_u64(bytes, pos);
         pos += 8;
+        let tombstone = bytes[pos] != 0;
+        pos += 1;
         let vlen = rd_u32(bytes, pos) as usize;
         pos += 4;
         if pos + vlen > bytes.len() {
@@ -928,7 +1015,12 @@ fn decode_scan(bytes: &[u8], count: usize) -> Result<Vec<ScanEntry>, CtError> {
         }
         let value = bytes[pos..pos + vlen].to_vec();
         pos += vlen;
-        out.push(ScanEntry { key, slot, value });
+        out.push(ScanEntry {
+            key,
+            slot,
+            value,
+            tombstone,
+        });
     }
     Ok(out)
 }

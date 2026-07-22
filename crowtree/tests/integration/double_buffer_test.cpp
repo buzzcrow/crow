@@ -51,7 +51,6 @@ TEST(DoubleBuffer, ThresholdSwapKeepsAllEntriesReadable)
 {
     Options opt;
     opt.memtable_flush_entries = 2; // force a freeze every couple of applies
-    opt.background_flush       = false;
     Crowtree t(opt);
 
     const int K = 20;
@@ -88,7 +87,6 @@ TEST(DoubleBuffer, NonContiguousLeftoverSurvivesAcrossFreezeGenerations)
 {
     Options opt;
     opt.memtable_flush_entries = 1; // freeze after every single apply
-    opt.background_flush       = false;
     Crowtree t(opt);
 
     // slot 5 for "a" is never contiguous with the (empty) frontier at 0.
@@ -132,7 +130,6 @@ TEST(DoubleBuffer, SupportsMoreThanTwoBuffersAndFlushesAllOfThemCorrectly)
     Options opt;
     opt.max_memtable_count     = 4; // active_ + up to 3 queued frozen_ buffers
     opt.memtable_flush_entries = 1; // freeze after every single apply
-    opt.background_flush       = false;
     Crowtree t(opt);
 
     const int K = 8;
@@ -168,7 +165,6 @@ TEST(DoubleBuffer, GetAndScanResolveHighestSlotAcrossOutOfOrderFreezeBoundary)
 {
     Options opt;
     opt.memtable_flush_entries = 1; // freeze after every single apply
-    opt.background_flush       = false;
     Crowtree t(opt);
 
     // "a"@20 lands in generation 1, which is immediately frozen by the next
@@ -204,7 +200,6 @@ TEST(DoubleBuffer, ConcurrentReadersDuringFrequentFreezeAndDrainNoCorruption)
     Options opt;
     opt.memtable_flush_entries = 4; // freeze/drain every few applies
     opt.max_memtable_count     = 3;
-    opt.background_flush       = false;
     Crowtree t(opt);
 
     const int         K = 200;

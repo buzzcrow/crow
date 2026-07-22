@@ -406,14 +406,13 @@ impl WALRecord {
     /// Encode a [`PxLogEntry`] into a `WALRecord` with `RecordType::Accepted`.
     #[must_use]
     pub fn from_accepted(group_id: PxGroupId, entry: &PxLogEntry) -> Self {
-        let payload = encode_accepted_payload(entry);
         Self {
             record_type: RecordType::Accepted,
             group_id,
             term: entry.term,
             slot: entry.slot,
             ballot: entry.ballot,
-            payload: Bytes::from(payload),
+            payload: encode_accepted_payload(entry),
         }
     }
 
@@ -483,18 +482,16 @@ impl WALRecord {
 /// ```text
 /// [inner : rest]  — PxLogEntry.payload bytes
 /// ```
-fn encode_accepted_payload(entry: &PxLogEntry) -> Vec<u8> {
-    entry.payload.to_vec()
+fn encode_accepted_payload(entry: &PxLogEntry) -> Bytes {
+    entry.payload.clone()
 }
 
 fn decode_accepted_payload(rec: &WALRecord) -> PxLogEntry {
-    let inner_payload = Bytes::copy_from_slice(&rec.payload[..]);
-
     PxLogEntry {
         slot: rec.slot,
         ballot: rec.ballot,
         term: rec.term,
-        payload: inner_payload,
+        payload: rec.payload.clone(),
     }
 }
 
@@ -512,7 +509,7 @@ fn parse_u64(value: &str, field: &str) -> Result<u64, RecordError> {
         .map_err(|e| RecordError::BadText(format!("invalid {field}: {e}")))
 }
 
-fn parse_hex_u32(value: &str) -> Result<u32, RecordError> {
+pub(crate) fn parse_hex_u32(value: &str) -> Result<u32, RecordError> {
     u32::from_str_radix(value, 16).map_err(|e| RecordError::BadText(format!("invalid crc32c: {e}")))
 }
 

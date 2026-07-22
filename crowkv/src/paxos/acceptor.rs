@@ -130,9 +130,9 @@ impl PxAcceptor {
 
 impl Acceptor for PxAcceptor {
     #[allow(clippy::unused_async)]
-    async fn accept(&self, entry: PxLogEntry) -> PxAcceptReply {
+    async fn accept(&self, entry: &PxLogEntry) -> PxAcceptReply {
         let slot = entry.slot;
-        match self.inner_accept(&entry) {
+        match self.inner_accept(entry) {
             Some(PxAcceptResult::Accepted { slot: s, ballot: b }) => {
                 PxAcceptReply::Accepted { slot: s, ballot: b }
             }

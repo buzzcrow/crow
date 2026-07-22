@@ -2,13 +2,13 @@
 // Licensed under the Apache License, Version 2.0.
 
 #![allow(clippy::cast_possible_truncation)]
+#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 
 use parking_lot::RwLock;
 
-use super::op::Cell;
-use super::{Batch, BatchOp, KVEngine, KVFuture, Op};
+use crowkv::kv::{Batch, BatchOp, Cell, KVEngine, KVFuture, Op};
 
 /// In-memory, single-version engine backed by an ordered `BTreeMap` under a
 /// single `RwLock`. The write lock held for the duration of `apply` makes the
@@ -25,6 +25,16 @@ impl InMemKV {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Full ordered stream including tombstones. Test-only utility.
+    #[must_use]
+    pub fn iter_all(&self) -> Vec<(Vec<u8>, u64, Cell)> {
+        self.map
+            .read()
+            .iter()
+            .map(|(k, (slot, cell))| (k.clone(), *slot, cell.clone()))
+            .collect()
+    }
 }
 
 impl KVEngine for InMemKV {
@@ -39,7 +49,7 @@ impl KVEngine for InMemKV {
         // would let the first op claim the slot and skip the rest).
         let mut collapsed: BTreeMap<&[u8], &Op> = BTreeMap::new();
         for BatchOp { key, op } in &batch.ops {
-            collapsed.insert(key.as_slice(), op);
+            collapsed.insert(key.as_ref(), op);
         }
         let mut map = self.map.write();
         for (key, op) in collapsed {
@@ -49,7 +59,7 @@ impl KVEngine for InMemKV {
                 }
             }
             let cell = match op {
-                Op::Put(v) => Cell::Value(v.clone()),
+                Op::Put(v) => Cell::Value(v.to_vec()),
                 Op::Delete => Cell::Tombstone,
             };
             map.insert(key.to_vec(), (slot, cell));
@@ -102,14 +112,6 @@ impl KVEngine for InMemKV {
             items.push((key.clone(), *slot, v.clone()));
         }
         KVFuture::ready((items, truncated))
-    }
-
-    fn iter_all(&self) -> Vec<(Vec<u8>, u64, Cell)> {
-        self.map
-            .read()
-            .iter()
-            .map(|(k, (slot, cell))| (k.clone(), *slot, cell.clone()))
-            .collect()
     }
 
     fn live_key_count(&self) -> usize {

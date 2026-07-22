@@ -572,7 +572,7 @@ async fn setup_cluster(
 
 impl Cluster {
     fn node_wal_dir(&self, node_id: &str) -> PathBuf {
-        self.dir.join(format!("N-{node_id}")).join("wal")
+        self.dir.join(format!("N-{node_id}")).join("waldata")
     }
 
     async fn stop_all(&self) {

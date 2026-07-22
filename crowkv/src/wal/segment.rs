@@ -20,14 +20,23 @@
 //!   record_count : u32 LE
 //!   crc32c       : u32 LE — over footer fields before crc
 //! ```
+//!
+//! ## Text-line footer layout (`TextLine` format)
+//!
+//! ```text
+//! CROW_WAL_FOOTER min_slot=N max_slot=N record_count=N crc32c=HHHHHHHH\n
+//! ```
+//!
+//! `crc32c` covers the text before ` crc32c=` (same scheme as text records).
 
+use std::fmt::Write as _;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::paxos::roles::SlotIndex;
 use crate::paxos::PxGroupId;
 
-use super::record::{RecordError, WALRecord, WalRecordFormat};
+use super::record::{parse_hex_u32, RecordError, WALRecord, WalRecordFormat};
 use super::{IoBackend, OpenOptions, WalFile};
 
 pub const SEG_MAGIC: u32 = 0x5345_474D;
@@ -38,6 +47,9 @@ pub const FOOTER_LEN: usize = 4 + 8 + 8 + 4 + 4; // 28
 
 /// Text prefix for text-format segment headers (mirrors `WALRecord::TEXT_PREFIX`).
 pub const SEG_TEXT_PREFIX: &str = "CROW_WAL_SEG";
+
+/// Text prefix for text-format segment footers.
+pub const FOOTER_TEXT_PREFIX: &str = "CROW_WAL_FOOTER";
 
 /// Bytes scanned from the file tail when locating a sealed footer past
 /// block-alignment padding (B1). Trailing padding never exceeds one I/O unit,
@@ -157,7 +169,14 @@ impl WalSegment {
         if self.sealed {
             return Ok(());
         }
-        let footer = encode_footer(self.min_slot, self.max_slot, self.record_count);
+        let footer: Vec<u8> = match self.record_format {
+            WalRecordFormat::TextLine => {
+                encode_text_footer(self.min_slot, self.max_slot, self.record_count).into_bytes()
+            }
+            WalRecordFormat::Auto | WalRecordFormat::Binary => {
+                encode_footer(self.min_slot, self.max_slot, self.record_count)
+            }
+        };
         self.file.write_at(&footer, self.write_offset).await?;
         self.write_offset += footer.len() as u64;
         self.file.fdatasync().await?;
@@ -240,6 +259,16 @@ impl WalSegment {
     /// Returns IO error if the sync fails.
     pub async fn fdatasync(&self) -> io::Result<()> {
         self.file.fdatasync().await
+    }
+
+    /// Explicit durable flush for shutdown/close. Calls `fsync` (real
+    /// `sync_all`) — use this when a final flush is needed before
+    /// dropping the segment.
+    ///
+    /// # Errors
+    /// Returns IO error if the sync fails.
+    pub async fn flush(&self) -> io::Result<()> {
+        self.file.flush().await
     }
 }
 
@@ -370,6 +399,11 @@ impl SegmentReader {
             return self.next_text_record(record_offset).await;
         }
 
+        // Text footer end marker (text-format sealed segment).
+        if self.next_is_text_footer().await? {
+            return Ok(None);
+        }
+
         // Peek the next frame marker (the `frame_len` of a record, the
         // `FOOTER_MAGIC` of a seal footer, or `0` for trailing padding).
         let mut frame_hdr = [0u8; 4];
@@ -416,6 +450,19 @@ impl SegmentReader {
 
     async fn next_record_is_text(&mut self) -> Result<bool, (RecordError, u64)> {
         let prefix = WALRecord::TEXT_PREFIX.as_bytes();
+        if self.file_len - self.offset < prefix.len() as u64 {
+            return Ok(false);
+        }
+        let mut buf = vec![0u8; prefix.len()];
+        self.file
+            .read_exact_at(&mut buf, self.offset)
+            .await
+            .map_err(|_| (RecordError::Truncated, self.offset))?;
+        Ok(buf == prefix)
+    }
+
+    async fn next_is_text_footer(&mut self) -> Result<bool, (RecordError, u64)> {
+        let prefix = FOOTER_TEXT_PREFIX.as_bytes();
         if self.file_len - self.offset < prefix.len() as u64 {
             return Ok(false);
         }
@@ -475,8 +522,8 @@ impl SegmentReader {
             return Ok(None);
         }
 
-        // Fast path: footer at the physical end (unaligned backends, or an
-        // aligned segment that happens to end on a block boundary).
+        // Fast path: binary footer at the physical end (unaligned backends, or
+        // an aligned segment that happens to end on a block boundary).
         let footer_off = self.file_len - FOOTER_LEN as u64;
         let mut buf = [0u8; FOOTER_LEN];
         self.file.read_exact_at(&mut buf, footer_off).await?;
@@ -484,16 +531,20 @@ impl SegmentReader {
             return Ok(Some(footer));
         }
 
-        // Slow path: the footer may be buried under block-alignment padding.
-        // Read a bounded tail (padding is < one I/O unit) and locate the footer
-        // immediately after the last non-zero byte.
+        // Read a bounded tail for both text footer search and binary slow path.
         let min_off = SEG_HEADER_LEN as u64;
         let tail_start = self.file_len.saturating_sub(FOOTER_TAIL_SCAN_BYTES).max(min_off);
         let tail_len = usize::try_from(self.file_len - tail_start).expect("footer tail length exceeds usize");
         let mut tail = vec![0u8; tail_len];
         self.file.read_exact_at(&mut tail, tail_start).await?;
 
-        // Last non-zero byte within the tail marks the end of the footer.
+        // Try text footer: search for FOOTER_TEXT_PREFIX in the tail.
+        if let Some(footer) = try_decode_text_footer_from_tail(&tail) {
+            return Ok(Some(footer));
+        }
+
+        // Binary slow path: the footer may be buried under block-alignment
+        // padding. Locate it just past the last non-zero byte.
         let Some(last_nonzero) = tail.iter().rposition(|&b| b != 0) else {
             return Ok(None);
         };
@@ -626,6 +677,84 @@ fn decode_footer(buf: &[u8; FOOTER_LEN]) -> Option<SegmentFooter> {
         max_slot,
         record_count,
     })
+}
+
+fn encode_text_footer(min_slot: SlotIndex, max_slot: SlotIndex, record_count: u32) -> String {
+    let mut line =
+        format!("{FOOTER_TEXT_PREFIX} min_slot={min_slot} max_slot={max_slot} record_count={record_count}");
+    let crc = crc32c::crc32c(line.as_bytes());
+    let _ = writeln!(line, " crc32c={crc:08x}");
+    line
+}
+
+fn decode_text_footer(line: &str) -> Result<SegmentFooter, RecordError> {
+    let line = line.trim_end_matches(['\r', '\n']);
+    let (body, crc_hex) = line
+        .rsplit_once(" crc32c=")
+        .ok_or_else(|| RecordError::BadText("missing crc32c field".to_string()))?;
+    let got = parse_hex_u32(crc_hex)?;
+    let expected = crc32c::crc32c(body.as_bytes());
+    if got != expected {
+        return Err(RecordError::BadCrc { expected, got });
+    }
+
+    let mut fields = body.split(' ');
+    let prefix = fields
+        .next()
+        .ok_or_else(|| RecordError::BadText("missing prefix".to_string()))?;
+    if prefix != FOOTER_TEXT_PREFIX {
+        return Err(RecordError::BadText(format!("bad prefix: {prefix}")));
+    }
+
+    let mut min_slot = None;
+    let mut max_slot = None;
+    let mut record_count = None;
+    for field in fields {
+        let (key, value) = field
+            .split_once('=')
+            .ok_or_else(|| RecordError::BadText(format!("malformed field: {field}")))?;
+        match key {
+            "min_slot" => {
+                min_slot = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|e| RecordError::BadText(format!("bad min_slot: {e}")))?,
+                );
+            }
+            "max_slot" => {
+                max_slot = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|e| RecordError::BadText(format!("bad max_slot: {e}")))?,
+                );
+            }
+            "record_count" => {
+                record_count = Some(
+                    value
+                        .parse::<u32>()
+                        .map_err(|e| RecordError::BadText(format!("bad record_count: {e}")))?,
+                );
+            }
+            _ => return Err(RecordError::BadText(format!("unknown field: {key}"))),
+        }
+    }
+
+    Ok(SegmentFooter {
+        min_slot: min_slot.ok_or_else(|| RecordError::BadText("missing min_slot".to_string()))?,
+        max_slot: max_slot.ok_or_else(|| RecordError::BadText("missing max_slot".to_string()))?,
+        record_count: record_count.ok_or_else(|| RecordError::BadText("missing record_count".to_string()))?,
+    })
+}
+
+fn try_decode_text_footer_from_tail(tail: &[u8]) -> Option<SegmentFooter> {
+    let end = tail.iter().rposition(|&b| b != 0)? + 1;
+    let data = &tail[..end];
+
+    let prefix = FOOTER_TEXT_PREFIX.as_bytes();
+    let pos = data.windows(prefix.len()).rposition(|w| w == prefix)?;
+    let newline_rel = data[pos..].iter().position(|&b| b == b'\n')?;
+    let line = std::str::from_utf8(&data[pos..pos + newline_rel]).ok()?;
+    decode_text_footer(line).ok()
 }
 
 /// Parse a segment filename to extract the `segment_id`.

@@ -49,8 +49,7 @@ pub struct RunArgs {
     #[arg(long, default_value_t = 512)]
     pub value_size: usize,
 
-    /// Retain the deploy workspace (server binaries, WAL/data dirs,
-    /// logs) after the run for debugging. Default: removed.
+    /// Deprecated: workspace is now always kept in the run directory.
     #[arg(long, default_value_t = false)]
     pub keep_workspace: bool,
 
@@ -64,6 +63,16 @@ pub struct RunArgs {
     /// sequence number.
     #[arg(long)]
     pub run_id: Option<String>,
+
+    /// Maximum in-flight proposals per group (--max-inflight on each
+    /// spawned server). Default: 32.
+    #[arg(long, default_value_t = 32)]
+    pub max_inflight: usize,
+
+    /// Number of admission queues per group (--inflight-queues on each
+    /// spawned server). Default: 1.
+    #[arg(long, default_value_t = 1)]
+    pub inflight_queues: usize,
 }
 
 /// Arguments for `crowkv-cli bench`.
@@ -111,25 +120,22 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
     }
 
     let run_id = args.run_id.clone().unwrap_or_else(next_run_id);
-    let Some(home) = dirs::home_dir() else {
-        eprintln!("error: cannot resolve $HOME for workspace dir");
-        return ExitCode::from(1);
-    };
-    let workspace_dir = home.join(".crowkv").join("bench-workspaces").join(&run_id);
 
     let now = chrono::Utc::now();
     let folder_name = run_folder_name(&run_id, mode.label(), now);
     let run_dir = crate::bench::BenchReport::default_dir().join(&folder_name);
+    let workspace_dir = run_dir.join("workspace");
 
     println!("provisioning 3-node cluster ({} mode)...", mode.label());
     let _ = std::io::Write::flush(&mut std::io::stdout());
-    let mut fixture = match BenchFixture::new(mode, workspace_dir).await {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("error: provision cluster: {e}");
-            return ExitCode::from(2);
-        }
-    };
+    let mut fixture =
+        match BenchFixture::new(mode, workspace_dir, args.max_inflight, args.inflight_queues).await {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("error: provision cluster: {e}");
+                return ExitCode::from(2);
+            }
+        };
 
     let mut cfg = BenchConfig::defaults(fixture.leader_endpoint().to_string(), kind);
     cfg.store_id = STORE_ID;
@@ -142,6 +148,7 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
     cfg.value_size = args.value_size;
     cfg.run_id = Some(run_id.clone());
     cfg.report_dir = Some(run_dir.clone());
+    cfg.metrics_log_path = Some(run_dir.join("bench-metrics.log"));
 
     println!(
         "running {} workload for {}s...",
@@ -152,10 +159,14 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
         Ok(v) => v,
         Err(e) => {
             eprintln!("error: bench run: {e}");
-            fixture.cleanup(args.keep_workspace).await;
+            fixture.cleanup().await;
             return ExitCode::from(2);
         }
     };
+
+    // Stop servers first so graceful shutdown flushes async C++ logs
+    // (spdlog buffers info-level messages until flush/shutdown).
+    fixture.cleanup().await;
 
     report.server_metrics = fixture.collect_metrics();
     let artifacts_dir = run_dir.join("artifacts");
@@ -165,23 +176,26 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
     if let Err(e) = report.write_to(&run_dir) {
         eprintln!("warning: failed to re-write report with server metrics: {e}");
     }
-    let text_path = match report.write_text_to(&run_dir, fixture.node_ids(), fixture.workspace_dir()) {
+    let md_path = match report.write_md_to(
+        &run_dir,
+        fixture.node_ids(),
+        fixture.workspace_dir(),
+        &fixture.endpoint_to_node_map(),
+    ) {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("warning: failed to write text report: {e}");
-            run_dir.join("report.txt")
+            eprintln!("warning: failed to write markdown report: {e}");
+            run_dir.join("report.md")
         }
     };
     let log_warning_count = count_log_warnings(&artifacts_dir);
-
-    fixture.cleanup(args.keep_workspace).await;
 
     if json {
         return crate::utils::print_json(&report);
     }
     println!("{}", report.human_summary());
     println!("\nreport (json): {}", path.display());
-    println!("report (text): {}", text_path.display());
+    println!("report (md):   {}", md_path.display());
     print_anomalies(&report, log_warning_count);
     ExitCode::SUCCESS
 }
@@ -206,7 +220,7 @@ fn next_run_id() -> String {
             }
         }
     }
-    (max_id + 1).to_string()
+    format!("{}-{}", max_id + 1, std::process::id())
 }
 
 /// Build the per-run folder name: `bench-{id}-{datetime}-{mode}`.
@@ -305,22 +319,26 @@ fn bench_report(run_id: &str, json: bool) -> ExitCode {
             if json {
                 crate::utils::print_json(&r)
             } else {
-                let text_path = path.with_file_name("report.txt");
-                if text_path.exists() {
-                    match std::fs::read_to_string(&text_path) {
-                        Ok(text) => {
-                            println!("{text}");
-                            ExitCode::SUCCESS
-                        }
+                let md_path = path.with_file_name("report.md");
+                let md_text = if md_path.exists() {
+                    match std::fs::read_to_string(&md_path) {
+                        Ok(text) => text,
                         Err(e) => {
-                            eprintln!("error: read text report {}: {e}", text_path.display());
-                            ExitCode::from(1)
+                            eprintln!("error: read markdown report {}: {e}", md_path.display());
+                            return ExitCode::from(1);
                         }
                     }
                 } else {
-                    println!("{}", r.human_summary());
-                    ExitCode::SUCCESS
-                }
+                    let node_ids = vec!["bn0".to_string(), "bn1".to_string(), "bn2".to_string()];
+                    let workspace = path
+                        .parent()
+                        .map_or_else(|| std::path::PathBuf::from("."), |d| d.join("artifacts"));
+                    let text = r.markdown_report(&node_ids, &workspace, &std::collections::HashMap::new());
+                    let _ = std::fs::write(&md_path, &text);
+                    text
+                };
+                println!("{md_text}");
+                ExitCode::SUCCESS
             }
         }
         Err(e) => {
@@ -384,7 +402,16 @@ fn render_comparison(a: &crate::bench::BenchReport, b: &crate::bench::BenchRepor
         qps(a),
         qps(b)
     );
-    let _ = writeln!(out, "{:<24} {:>22} {:>22}", "total_ops", a.total_ops, b.total_ops);
+    let _ = writeln!(
+        out,
+        "{:<24} {:>22} {:>22}",
+        "total_ops (success)", a.total_ops, b.total_ops
+    );
+    let _ = writeln!(
+        out,
+        "{:<24} {:>22} {:>22}",
+        "total_attempts", a.total_attempts, b.total_attempts
+    );
     let _ = writeln!(
         out,
         "{:<24} {:>22.4} {:>22.4}",

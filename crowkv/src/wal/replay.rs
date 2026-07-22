@@ -10,7 +10,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tracing::{error, info, warn};
+use tracing::{debug, error, warn};
 
 use crate::paxos::roles::SlotIndex;
 use crate::paxos::{PxGroupId, PxNodeId, PxTerm};
@@ -76,7 +76,7 @@ pub async fn replay_group(
 
     all_segments.sort_by_key(|&(_, seg_id, _)| seg_id);
 
-    info!(
+    debug!(
         group_id,
         segment_count = all_segments.len(),
         "replay: discovered segments"
@@ -174,7 +174,7 @@ pub async fn replay_group(
         index.register_segment(meta);
     }
 
-    info!(
+    debug!(
         group_id,
         total_records = verified_records.len(),
         max_segment_id,

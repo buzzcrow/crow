@@ -46,7 +46,7 @@ pub struct Cli {
     #[arg(long)]
     pub config_root: Option<std::path::PathBuf>,
 
-    #[arg(long, default_value = "default", value_parser = ["default", "test", "e2e", "bench"])]
+    #[arg(long, default_value = "default", value_parser = ["default", "test", "e2e"])]
     pub election_profile: String,
 
     /// Root directory for durable per-group crowtree files. Default: sibling of `wal_root` named `ctdata`.
@@ -87,6 +87,17 @@ pub struct Cli {
     /// Number of rotated log files to keep. Default: 5.
     #[arg(long, default_value_t = 5)]
     pub log_max_files: usize,
+
+    /// Maximum in-flight (allocated-but-not-chosen) proposals per group.
+    /// Each proposal acquires one permit from the admission semaphore;
+    /// a full window fails fast with `Busy` instead of queuing. Default: 32.
+    #[arg(long, default_value_t = 32)]
+    pub max_inflight: usize,
+
+    /// Number of admission queues per group. Each queue gets
+    /// `ceil(max_inflight / inflight_queues)` permits. Default: 1.
+    #[arg(long, default_value_t = 1)]
+    pub inflight_queues: usize,
 }
 
 /// Parse a comma-separated list of numbers and ranges into a `Vec<u64>`.

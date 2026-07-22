@@ -52,7 +52,7 @@ async fn accept_after_promise() {
     let acc = PxAcceptor::new();
     let _ = acc.prepare(7, PxBallot::new(1, 1)).await;
     let e = entry(7, PxBallot::new(1, 1), b"v1");
-    let reply = acc.accept(e.clone()).await;
+    let reply = acc.accept(&e).await;
     assert_eq!(
         reply,
         PxAcceptReply::Accepted {
@@ -68,7 +68,7 @@ async fn accept_rejects_lower_ballot() {
     let acc = PxAcceptor::new();
     let _ = acc.prepare(7, PxBallot::new(5, 1)).await;
     let stale = entry(7, PxBallot::new(4, 1), b"stale");
-    let reply = acc.accept(stale).await;
+    let reply = acc.accept(&stale).await;
     assert_eq!(
         reply,
         PxAcceptReply::Rejected {
@@ -84,7 +84,7 @@ async fn prepare_returns_previously_accepted_value() {
     let acc = PxAcceptor::new();
     let _ = acc.prepare(7, PxBallot::new(1, 1)).await;
     let v1 = entry(7, PxBallot::new(1, 1), b"v1");
-    let _ = acc.accept(v1.clone()).await;
+    let _ = acc.accept(&v1).await;
     let reply = acc.prepare(7, PxBallot::new(2, 2)).await;
     assert_eq!(
         reply,
@@ -107,7 +107,7 @@ async fn equal_ballot_accept_is_idempotent() {
     let acc = PxAcceptor::new();
     let _ = acc.prepare(7, PxBallot::new(1, 1)).await;
     let e1 = entry(7, PxBallot::new(1, 1), b"v1");
-    let reply1 = acc.accept(e1.clone()).await;
+    let reply1 = acc.accept(&e1).await;
     assert_eq!(
         reply1,
         PxAcceptReply::Accepted {
@@ -117,7 +117,7 @@ async fn equal_ballot_accept_is_idempotent() {
     );
     // Second accept with the same ballot must also return Accepted (C2 invariant).
     let e2 = entry(7, PxBallot::new(1, 1), b"v2");
-    let reply2 = acc.accept(e2.clone()).await;
+    let reply2 = acc.accept(&e2).await;
     assert_eq!(
         reply2,
         PxAcceptReply::Accepted {
@@ -131,7 +131,7 @@ async fn equal_ballot_accept_is_idempotent() {
 async fn accept_without_prior_prepare() {
     let acc = PxAcceptor::new();
     let e = entry(7, PxBallot::new(3, 2), b"v1");
-    let reply = acc.accept(e.clone()).await;
+    let reply = acc.accept(&e).await;
     assert_eq!(
         reply,
         PxAcceptReply::Accepted {
@@ -147,11 +147,11 @@ async fn multi_slot_isolation() {
     let acc = PxAcceptor::new();
     let _ = acc.prepare(7, PxBallot::new(1, 1)).await;
     let e7 = entry(7, PxBallot::new(1, 1), b"v7");
-    let _ = acc.accept(e7.clone()).await;
+    let _ = acc.accept(&e7).await;
 
     let _ = acc.prepare(8, PxBallot::new(2, 2)).await;
     let e8 = entry(8, PxBallot::new(2, 2), b"v8");
-    let _ = acc.accept(e8.clone()).await;
+    let _ = acc.accept(&e8).await;
 
     // Slot 7 state is untouched by slot 8 operations.
     assert_eq!(acc.promised_at(7), Some(PxBallot::new(1, 1)));
@@ -176,9 +176,9 @@ async fn accepted_log_tip_returns_highest_accepted_slot() {
     // No accepts yet.
     assert!(acc.accepted_log_tip().is_none());
 
-    let _ = acc.accept(entry(1, PxBallot::new(1, 1), b"v1")).await;
-    let _ = acc.accept(entry(3, PxBallot::new(1, 1), b"v3")).await;
-    let _ = acc.accept(entry(5, PxBallot::new(1, 1), b"v5")).await;
+    let _ = acc.accept(&entry(1, PxBallot::new(1, 1), b"v1")).await;
+    let _ = acc.accept(&entry(3, PxBallot::new(1, 1), b"v3")).await;
+    let _ = acc.accept(&entry(5, PxBallot::new(1, 1), b"v5")).await;
 
     let tip = acc.accepted_log_tip();
     assert_eq!(tip, Some((5, 1)));

@@ -12,11 +12,11 @@ autobenches = false
 workspace = true
 
 [features]
-# Exposes a handful of crate-internal hooks (proposer-window semaphore,
-# single-step repair, peer-applied injection) as `pub` so integration tests
-# under `tests/` can drive them without permanently widening the public API.
-# Enabled automatically for this crate's own test build via the self
-# dev-dependency below, so `cargo test` needs no extra flags.
+# Exposes crate-internal hooks that need private-field access: PxGroup test
+# hooks (proposer-window semaphore, single-step repair, peer-applied injection)
+# and SimDisk I/O backend. InMemKV has been moved to tests/ and no longer needs
+# this feature. Enabled automatically for this crate's own test build via the
+# self dev-dependency below, so `cargo test` needs no extra flags.
 test-util = []
 
 [dependencies]
@@ -26,6 +26,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tonic = { workspace = true }
 prost = { workspace = true }
 bytes = "1"
+futures = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 dashmap = "6"

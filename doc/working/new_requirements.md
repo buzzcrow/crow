@@ -22,10 +22,6 @@ complexity, and dependency. Before implementation, follow the
   library. Move reusable utilities (metrics core, logging wrapper, CRC32C,
   time helpers, operation report) out of `crowkv`/`crowtree` so future
   storage-system components can share them without re-implementing.
-- **R10** — Benchmark framework — Area: console CLI — Add benchmark capability
-  to console CLI; run single-node benchmarks (in-memory or no-fsync file mode)
-  to identify system bottlenecks and inform performance tuning. Related to R3,
-  R4, R6 (memory efficiency optimizations).
 - **R11** — GUI internal state display — Area: web UI — Surface internal
   metrics (from R8) in the GUI via existing health/internal-state query
   infrastructure. Show recent operation counts and metrics per Store/Group
@@ -37,6 +33,50 @@ complexity, and dependency. Before implementation, follow the
   `LatencyHistogram` / `Counter` classes. After R12 extracts metrics into
   `crow-common`, the bench client should reuse the same metrics primitives
   for consistency and to eliminate duplicate statistical infrastructure.
+- **R16** — Overlap local WAL fsync with remote RPC fan-out — Area:
+  consensus / WAL — The leader's local `on_accept` awaits `fdatasync`
+  before returning `PxAcceptReply::Accepted`, putting the leader's disk
+  fsync on the critical path *before* remote RPCs begin. Overlapping the
+  local WAL persist with the remote accept RPCs would hide fsync latency
+  behind network round-trips. **Concept change**: weakens the W6 ack
+  contract (persist-before-reply) for the local replica — the proposer
+  would need to track local persist completion separately from quorum.
+  Gate behind a feature flag; test under crash-recovery scenarios.
+- **R17** — Async engine apply after quorum — Area: consensus / engine —
+  `learn_chosen` (decode payload + `KVEngine::apply`) runs on the
+  proposer critical path before `ProposeResult::Chosen` is returned to
+  the client. Returning `Chosen` immediately after quorum confirmation
+  and applying asynchronously would remove engine apply latency from
+  the write path. **Concept change**: the client receives "chosen"
+  before the local engine has applied the value — read-your-writes
+  semantics break unless a read barrier or apply-fence is added. Gate
+  behind a feature flag; test read-after-write consistency.
+- **R19** — Read performance profiling and metrics — Area: consensus /
+  metrics / client — The read path lacks the latency-bandwidth-counter
+  hierarchy that the write path has. No per-mode latency breakdown, no
+  lease-vs-ReadIndex path counter, no read barrier latency, no engine
+  get latency, no read bandwidth separation, no forward/fallback
+  counters, no read-specific gauges. See
+  [`read-flow-analysis.md`](read-flow-analysis.md) for the full gap
+  analysis and proposed metrics hierarchy.
+- **R21** — Zero-copy engine read API — Area: crowtree FFI / engine —
+  `CrowtreeEngine::get` copies the key (`key.to_vec()`) for the FFI
+  call and copies the value (`copy_buf`) from the C++ engine's internal
+  buffer because the epoch guard is released before the value is
+  returned. A pinned-value API that extends the epoch guard lifetime to
+  the Rust caller could eliminate the value copy. See
+  [`read-flow-analysis.md`](read-flow-analysis.md) Memory Copy
+  Analysis for the full audit.
+- **R24** — Simplify read modes to Linearizable + MinSlot — Area:
+  consensus / client / RPC — Collapse the current four read modes
+  (Linearizable, ReadYourWrites, BoundedStale, BestEffort) into two:
+  Linearizable (leader-served with lease/ReadIndex fencing) and MinSlot
+  (client carries `min_slot`, replica checks `contiguous_applied >=
+  min_slot`, serves or redirects to leader). The client chooses the
+  freshness policy by setting `min_slot`: 0 = accept any staleness,
+  write watermark = read-your-writes, last `safe_slot` = bounded stale.
+  See [`read-flow-analysis.md`](read-flow-analysis.md) for the full
+  analysis.
 
 ### Low Priority
 
@@ -49,6 +89,13 @@ complexity, and dependency. Before implementation, follow the
 - **R3** — Zero-copy FFI write path — Area: crowtree FFI — `ct_apply_put` copies
   key+value into an internal buffer; for large values this memcpy is avoidable
   via a direct-write alloc handle.
+- **R25** — Eliminate client-side batch copy via `Bytes` — Area: client /
+  RPC — `CrowkvClient::batch_write` clones each `BatchOp` key/value
+  (`Vec<u8>::clone`) into `KvBatchItem`, then clones the entire `items` vec
+  per retry. Switching client `BatchOp` and proto `bytes` fields to
+  `bytes::Bytes` makes these O(1) ref-count bumps. See
+  [`write-flow-analysis.md`](write-flow-analysis.md) Memory Copy
+  Analysis for the full audit.
 - **R4** — Bounded memory pool — Area: crowtree engine — `buffer::allocate` uses
   unbounded `std::malloc`; a burst of large writes can spike RSS without
   backpressure.
@@ -209,44 +256,6 @@ token protocol design; option (b) adds per-page atomic overhead to every
   `install_snapshot()` — reader sees old or new tree, never partial.
 - Epoch reclamation stress test: concurrent readers + writers + snapshot
   swaps, no use-after-free under ASan/TSan.
-
----
-
-### R10: Benchmark framework
-
-**Problem**: After R8 (metrics module) is implemented, the next step is to
-establish a benchmark framework to identify system bottlenecks and inform
-performance tuning. Currently there is no way to run sustained load against
-a crowkv-server and measure throughput/latency.
-
-**Approach**:
-- Add a `benchmark` subcommand to the console CLI (`crowkv-console`).
-- Single-node benchmark mode: start one server, create one store + one group,
-  drive KV put/get/delete at configurable rate and concurrency.
-- Storage modes: in-memory (no disk) or file-without-fsync (reduce disk IO
-  bottleneck so we can isolate path-level overhead).
-- Measure: throughput (ops/s), latency p50/p99, WAL append rate, engine apply
-  rate. Report per-mode comparison.
-- Initial goal: establish the benchmark infrastructure and get baseline
-  numbers. Follow-up: create smaller targeted benchmarks for specific
-  bottlenecks identified.
-
-**Dependencies**: R8 (metrics module) for collecting latency/throughput
-counters. Related to R3 (zero-copy FFI), R4 (bounded memory pool), R6
-(cross-thread guard) — all memory efficiency optimizations that benchmark
-results may motivate.
-
-**Priority**: Medium — needed after R8 to guide performance work.
-
-**Complexity**: Medium — CLI subcommand, load generator, metrics collection
-integration, report format.
-
-**Files**: `crowkv-console/cli/src/`, `crowkv-console/shared/src/`, new
-benchmark module.
-
-**Acceptance**: `crowkv-console benchmark --mode memory --duration 60s` runs
-and prints throughput + latency summary. Same for `--mode file-nofsync`.
-Baseline numbers recorded for future comparison.
 
 ---
 
@@ -448,6 +457,495 @@ bench client refactor to use metrics primitives, update report generation.
   precise as the previous `hdrhistogram`-based values.
 - `hdrhistogram` dependency removed from `crowkv-cli/Cargo.toml`.
 - Existing benchmark tests pass with the new infrastructure.
+
+---
+
+### R16: Overlap local WAL fsync with remote RPC fan-out
+
+**Problem**: In `run_accept_phase`, the leader calls
+`replica.on_accept(entry.clone()).await` first, which internally awaits
+`wal.append(&record).await` (an `fdatasync` round-trip) before
+returning `PxAcceptReply::Accepted`. Only after this local fsync
+completes does the leader begin sending `send_accept` RPCs to remote
+replicas. The leader's local disk fsync is therefore fully serial with
+the remote RPC fan-out, adding ~10-100 µs (NVMe) to ~1-10 ms (SSD/HDD)
+of disk latency to the critical path before any network I/O starts.
+
+With R14 (concurrent fan-out), the remote RPCs overlap with each other
+but still wait for the local fsync to finish first.
+
+**Approach**: Start the local WAL append and the remote accept RPCs
+concurrently. The local acceptor logic (`inner_accept`) is synchronous
+and completes instantly — only the WAL persist (`fdatasync`) is slow.
+Split `on_accept` into two phases:
+1. **Accept logic** — run `inner_accept`, get the `PxAcceptReply`.
+2. **WAL persist** — `wal.append(&record).await`.
+
+The proposer would:
+1. Call the accept logic on the local replica (instant).
+2. Concurrently: (a) await the local WAL persist, (b) fan out
+   `send_accept` RPCs to all remote replicas (R14 makes these
+   concurrent).
+3. After all futures resolve, fold results and check quorum.
+
+**Concept change (highlighted)**: This weakens the W6 ack contract for
+the *local* replica. Today, `on_accept` guarantees the Accepted record
+is durably persisted before returning `Accepted`. With this change, the
+local replica's `Accepted` reply is returned before the WAL flush
+completes — the proposer tracks local persist separately. If the node
+crashes between the accept reply and the WAL flush, the accepted value
+may be lost, which is safe in Paxos (the value was not yet chosen) but
+means the leader may re-propose a slot it had already accepted. This is
+correctness-safe but changes the durability ordering.
+
+**Feature flag**: Gate behind `wal_overlap_local_persist` (default
+off). When enabled, the proposer overlaps; when disabled, the current
+serial behavior is preserved.
+
+**Testing**:
+- Crash-recovery tests: kill the leader after local accept but before
+  WAL flush; verify the slot is re-proposed and converges.
+- Quorum tests: verify the proposer still waits for all replicas before
+  declaring chosen.
+- Benchmark: measure fsync latency hidden behind RPC round-trips.
+
+**Priority**: Medium — hides fsync latency behind network latency,
+which is the single largest non-network bottleneck in the write path.
+
+**Complexity**: High — splits `on_accept`, changes the proposer's
+local-replica handling from a simple `.await` to a concurrent join,
+weakens W6 contract, requires feature flag and crash-recovery tests.
+
+**Files**: `crowkv/src/cluster/local_replica.rs` (`on_accept` split),
+`crowkv/src/cluster/group.rs` (`run_accept_phase` concurrent local +
+remote), `crowkv/src/wal/wal_engine.rs` (no change to `append` itself).
+
+**Acceptance**:
+- With feature flag off: all existing tests pass, behavior unchanged.
+- With feature flag on: Paxos election and group propose tests pass.
+- Crash-recovery test: leader crash after accept, before WAL flush →
+  slot re-proposed and converges to a single chosen value.
+- Benchmark shows reduced per-proposal latency when fsync is the
+  bottleneck (non-loopback or slow disk).
+
+---
+
+### R17: Async engine apply after quorum
+
+**Problem**: After `AcceptAttempt::Chosen`, the leader calls
+`replica.learn_chosen(&entry, client_id, seq).await` which decodes the
+payload and applies it to the KV engine **before** returning
+`ProposeResult::Chosen` to the client. For `InMemKV` this is trivial,
+but for `CrowtreeEngine` the apply involves FFI + memtable insert,
+potentially triggering a memtable flush. This puts engine apply latency
+on the write critical path.
+
+`fan_out_chosen_notice` (item 7) runs after `learn_chosen` but is a
+non-blocking mpsc enqueue — negligible cost, can stay where it is.
+
+**Approach**: Return `ProposeResult::Chosen` to the client immediately
+after quorum is confirmed, then apply the entry to the local engine
+asynchronously (spawn a task or use a apply queue). The
+`fan_out_chosen_notice` can fire immediately after quorum as well
+(before the async apply completes) since it only carries the slot/term
+watermark, not the payload.
+
+**Concept change (highlighted)**: The client receives "chosen" before
+the local engine has applied the value. This breaks read-your-writes
+semantics: a client that writes a key and then immediately reads it
+may not see the written value if the async apply has not completed.
+Mitigations:
+- **Apply fence**: Track the highest slot applied in the local engine.
+  Reads on the leader check that the applied frontier >= the slot being
+  read; if not, the read waits (or returns a stale-read indicator).
+- **Sync mode**: Gate behind a feature flag `async_engine_apply`
+  (default off). When disabled, the current synchronous apply behavior
+  is preserved.
+- **Client-visible flag**: The `KvResponse` could carry an
+  `applied_locally: bool` field so the client knows whether the value
+  is immediately readable.
+
+**Feature flag**: `async_engine_apply` (default off).
+
+**Testing**:
+- Read-after-write test: write a key, immediately read it; with flag
+  off, must see the value; with flag on, may see stale until apply
+  catches up (verify eventual consistency).
+- Apply-ordering test: multiple writes to the same key; verify the
+  final applied value is the highest-slot value (per-key
+  highest-slot-wins in `KVEngine::apply`).
+- Crash-recovery test: leader crash after quorum but before async
+  apply → on restart, the slot is re-learned and applied from the WAL
+  / peer replication.
+
+**Priority**: Medium — removes engine apply from the write critical
+path, which is significant for `CrowtreeEngine` under load.
+
+**Complexity**: Medium — spawn apply task, track applied frontier, add
+read barrier / fence, feature flag, tests. No protocol change (the
+value is Paxos-chosen regardless of local apply).
+
+**Files**: `crowkv/src/cluster/group.rs` (`propose` — return before
+`learn_chosen`), `crowkv/src/paxos/learner.rs` (`learn` / `apply_entry`
+— async dispatch), `crowkv/src/cluster/local_replica.rs`
+(`learn_chosen` — split into notify + async apply).
+
+**Acceptance**:
+- With feature flag off: all existing tests pass, behavior unchanged.
+- With feature flag on: Paxos tests pass; write latency reduced by
+  engine apply time.
+- Read-after-write test: with flag on, eventual consistency verified
+  (read eventually returns the written value after apply catches up).
+- Apply-ordering test: highest-slot-wins semantics preserved under
+  async apply.
+- Crash-recovery test: slot re-learned and applied after restart.
+
+---
+
+### R19: Read performance profiling and metrics
+
+**Problem**: The write path has a well-instrumented
+latency-bandwidth-counter hierarchy (WAL append/fsync latency, write
+bandwidth, election counters, inflight gauge). The read path has
+only a single `get.lh` histogram and a `scan.l` summary — no
+per-mode breakdown, no consensus-layer metrics (lease vs ReadIndex),
+no engine-layer latency, no read-specific bandwidth, and no
+forward/fallback counters. Operators cannot diagnose read
+performance issues at the same granularity as write issues.
+
+Full analysis in
+[`read-flow-analysis.md`](read-flow-analysis.md).
+
+**Approach**: Add a read metrics hierarchy mirroring the write
+path's structure, following the design principles in
+`design-observability.md`:
+
+- **Latency hierarchy** (feature layer → thinnest layer):
+  - `kv.get.lh` — existing, get RPC end-to-end
+  - `read.barrier.l` — new LatencySummary for
+    `linearizable_read_barrier` (near-zero for lease path, one
+    heartbeat RTT for ReadIndex)
+  - `read.engine_get.l` — new LatencySummary for `KVEngine::get`
+    (isolates engine cost from consensus barrier cost)
+  - `kv.scan.l` — existing, scan RPC end-to-end
+- **Bandwidth hierarchy** (read vs write separation):
+  - `kv.read_bytes_in.bw` / `kv.read_bytes_out.bw` — new, read
+    traffic separated from the combined `bytes_in/out.bw`
+- **Counters** (outcome / population separation):
+  - `read.lease_path.c` — linearizable reads via lease fast path
+  - `read.readindex_path.c` — linearizable reads via ReadIndex
+    fallback
+  - `kv.get_forwarded.c` — reads forwarded to leader (server-side)
+  - `kv.get_forward_failed.c` — forward attempts that failed
+  - `read.ryw_fallback.c` — ReadYourWrites reads redirected to
+    leader
+- **Gauges** (state, bridged from existing atomics):
+  - `read.lease_valid.g` — 1 if leader's read lease is valid
+  - `read.contiguous_applied.g` — current `contiguous_applied`
+  - `read.safe_slot.g` — current `group_safe_slot`
+
+**Priority**: Medium — read performance is undiagnosable today;
+the metrics infrastructure (MetricsRegistry, KvMetrics,
+ElectionRegistryHandles) already exists and just needs new handles
+wired in.
+
+**Complexity**: Medium — new metric handles in `KvMetrics` and
+`ElectionRegistryHandles` (or a new `ReadRegistryHandles`), timing
+instrumentation in `linearizable_read_barrier`, `resolve_read_point`,
+`KvStoreService::get/scan`, and `PxLearner::engine_get`. No
+algorithm or protocol change.
+
+**Files**: `crowkv/src/rpc/kv_service.rs` (KvMetrics — new handles,
+forward/fallback counters, read bandwidth), `crowkv/src/cluster/
+local_replica.rs` (ReadRegistryHandles — lease/ReadIndex counters,
+barrier latency, gauges), `crowkv/src/cluster/group_election.rs`
+(`linearizable_read_barrier` — timing + path counter),
+`crowkv/src/cluster/px_kv_store.rs` (`resolve_read_point` — RYW
+fallback counter), `crowkv/src/paxos/learner.rs`
+(`engine_get` — timing).
+
+**Acceptance**:
+- Metrics log shows read-specific counters, latency summaries,
+  bandwidth, and gauges per (store, group).
+- `read.lease_path.c + read.readindex_path.c` equals the total
+  linearizable get count in the same window.
+- `read.barrier.l` avg is near-zero when lease is valid; matches
+  heartbeat RTT when ReadIndex path is taken.
+- `read.engine_get.l` isolates engine cost (trivial for InMemKV,
+  measurable for CrowtreeEngine demand-load misses).
+- Read bandwidth (`read_bytes_in/out.bw`) + write bandwidth
+  (derived: `bytes_in/out.bw` minus read) accounts for total KV
+  bandwidth.
+
+---
+
+### R21: Zero-copy engine read API
+
+**Problem**: `CrowtreeEngine::get` has two O(n) copies on the read
+path:
+- **Key copy**: `try_get(key.to_vec())` (`crowtree_engine.rs:168`)
+  allocates a `Vec<u8>` copy of the key for the FFI call. The C API
+  `ct_get_async` takes `*const u8, len`, so a borrow could work, but
+  the async FFI wrapper requires `Send` ownership for the reactor
+  boundary.
+- **Value copy**: `copy_buf(value)` (`ffi/src/lib.rs:1178`) does
+  `slice::from_raw_parts(..).to_vec()`. The C++ engine's zero-copy
+  fast path returns a `ct_buf` that may be a borrowed pointer into a
+  still-live frame (epoch guard), but the Rust side must copy because
+  the epoch guard is released immediately after `ct_future_free`.
+
+For large values (≥1 MB) these copies are measurable on the read
+critical path. The key copy is the smaller concern (keys are typically
+small); the value copy is the primary target.
+
+**Approach**:
+- **Value copy**: Introduce a "pinned value" C API that returns a
+  `ct_buf` along with a guard handle that keeps the epoch alive until
+  the caller explicitly releases it. The Rust side wraps this in a
+  `PinnedValue` type that owns the guard and derefs to `&[u8]`. The
+  `KVEngine::get` trait would need a new return type (e.g.
+  `KVFuture<Option<(SlotIndex, PinnedValue)>>` or a borrowing variant).
+  This is a significant API change affecting the `KVEngine` trait,
+  `PxLearner::engine_get`, `kv_get` response construction, and gRPC
+  serialization.
+- **Key copy**: Change the async FFI wrapper to accept a raw pointer
+  + length instead of `Vec<u8>`, with a lifetime guarantee that the
+  caller's buffer outlives the synchronous poll. This is simpler than
+  the value fix but still requires careful `Send`/`unsafe` reasoning.
+
+**Priority**: Low — the read path has fewer O(n) copies than the
+write path, and the engine value copy is structurally similar to the
+InMemKV clone (both return owned `Vec<u8>`). For small values the cost
+is negligible. For large values the copy is measurable but still a
+small fraction of total read latency (gRPC serialization + network
+round-trip dominate).
+
+**Complexity**: High — the value copy elimination requires a new C
+API (`ct_get_pinned` or similar), a new Rust wrapper type with guard
+semantics, and changes to the `KVEngine` trait. The key copy
+elimination is Medium complexity.
+
+**Files**: `crowtree/ffi/src/lib.rs` (`try_get`, `copy_buf`,
+`AsyncCrowtree`), `crowkv/src/kv/kv_engine.rs` (`KVEngine` trait),
+`crowkv/src/kv/crowtree_engine.rs` (`get`), `crowkv/src/paxos/learner.rs`
+(`engine_get`), `crowkv/src/cluster/px_kv_store.rs` (`kv_get`),
+`crowtree/include/crowtree/c_api.h` (new C API).
+
+**Acceptance**:
+- All existing read tests pass unchanged.
+- `CrowtreeEngine::get` fast path returns a borrowed reference to the
+  engine's internal buffer (no `copy_buf` on the fast path).
+- The epoch guard is held until the `PinnedValue` is dropped.
+- `InMemKV` continues to work (returns owned `Vec<u8>` as before, or
+  adapts to the new trait signature).
+
+---
+
+### R25: Eliminate client-side batch copy via `Bytes`
+
+**Problem**: `CrowkvClient::batch_write` (`client.rs:440`) has two
+avoidable O(n) copies in the batch write path:
+
+1. **BatchOp → KvBatchItem clone** (`client.rs:442-456`): The client
+   `BatchOp` owns `Vec<u8>` for key and value. Mapping to the protobuf
+   `KvBatchItem` calls `key.clone()` and `value.clone()` per op —
+   O(n) heap allocate + memcpy of every key and value in the batch.
+2. **items.clone() per retry** (`client.rs:463`): The retry loop
+   clones the entire `Vec<KvBatchItem>` on every attempt — O(n) copy
+   of all keys and values per retry.
+
+The same pattern affects single-key `put` (`client.rs:226-227`:
+`key.to_vec()`, `value.to_vec()`) and `delete` (`client.rs:356`:
+`key.to_vec()`), but those are one-key copies, not batch-scaled.
+
+**Root cause**: `prost-build` in `build.rs:12` maps only
+`AcceptedValue.payload` to `bytes::Bytes`. All other `bytes` proto
+fields (KV `key`, `value`, `prefix`, `start_after`, etc.) use the
+default `Vec<u8>` mapping. The client `BatchOp` (`client.rs:51-53`)
+also uses `Vec<u8>`. Every clone of a `Vec<u8>` is an O(n) heap
+allocate + memcpy; every clone of a `Bytes` is an O(1) atomic
+ref-count bump.
+
+**Approach**:
+- Extend `prost-build` `.bytes([...])` in `build.rs` to map KV
+  `bytes` fields to `Bytes`: `KvBatchItem.key`, `KvBatchItem.value`,
+  `KvSetRequest.key`, `KvSetRequest.value`, `KvDeleteRequest.key`,
+  `KvScanRequest.prefix`, `KvScanRequest.start_after`, and response
+  fields (`KvGetResponse.value`, `KvScanResponse.items.key/value`).
+- Change client `BatchOp` (`client.rs:51-53`) from `Vec<u8>` to
+  `Bytes`.
+- Update `batch_write` to construct `KvBatchItem` with `Bytes::clone`
+  (O(1)) instead of `Vec<u8>::clone` (O(n)). The retry loop's
+  `items.clone()` also becomes O(1) per item.
+- Update all call sites that construct or destructure the affected
+  proto types: `px_kv_store.rs` (`encode_kv_batch_items`,
+  `encode_kv_payload`), `kv_store.rs` trait, console CLI/web handlers,
+  tests.
+- The server-side `encode_kv_batch_items` (`px_kv_store.rs:624`)
+  still flattens into a `Vec<u8>` consensus payload — that copy
+  remains (eliminating it requires changing the consensus payload
+  contract, out of scope for R25).
+
+**Alternatives considered**:
+- **Borrowed slices in client API** (`&[(&[u8], Option<&[u8]>)]`):
+  eliminates copies but changes the public API ergonomics and
+  complicates retry (borrowed data must outlive the retry loop).
+  `Bytes` achieves the same zero-copy-with-ergonomics via ref-counting.
+- **Server-side payload encoding elimination**: skip
+  `encode_kv_batch_items` and pass `KvBatchItem` directly as the
+  Paxos payload. Requires changing `Batch::decode` to match the
+  protobuf wire format, or eliminating `Batch::decode` entirely and
+  having the learner apply `KvBatchItem` directly. High complexity,
+  ripples through consensus + WAL + replay. Separate requirement.
+
+**Relationship to R23 (done)**: R23 eliminated the FFI-layer packing
+copy (`encode_batch` → `ct_apply_batch_slices`). R25 targets the
+client-layer composition copy (`BatchOp` → `KvBatchItem`). They are
+independent layers — R23 was C API/FFI, R25 is client/RPC types.
+
+**Priority**: Medium — the copies are O(n) per batch, affecting both
+first-attempt and every retry. For large batches (≥1 MB) or
+high-throughput multi-key writes, the clone cost is measurable. For
+small batches (benchmark default ≤512 B), negligible. The refactor
+also improves the single-key `put`/`delete`/`scan` paths.
+
+**Complexity**: Medium — the `prost-build` config change is one line,
+but the resulting type change from `Vec<u8>` to `Bytes` ripples
+through all call sites that construct, destructure, or compare proto
+fields. The client `BatchOp` is a public API type. Lifetime safety
+is not a concern (`Bytes` is `'static`). No C++ or FFI changes.
+
+**Files**: `crowkv/build.rs` (extend `.bytes([...])`),
+`crowkv-client/src/client.rs` (`BatchOp` type, `batch_write`,
+`put`, `delete`, `scan`),
+`crowkv/src/cluster/px_kv_store.rs` (`encode_kv_batch_items`,
+`encode_kv_payload`),
+`crowkv/src/cluster/kv_store.rs` (trait signature),
+`crowkv/src/rpc/*.rs` (generated, auto-updated by prost),
+`crowkv-console/{cli,web}` (handlers that construct KV requests),
+`crowkv/tests/**` (test helpers that construct KV requests).
+
+**Acceptance**:
+- All existing client and server tests pass unchanged.
+- `CrowkvClient::batch_write` does not call `Vec<u8>::clone` for
+  key/value data (verified by code inspection or benchmark).
+- `items.clone()` in the retry loop is O(1) per item (ref-count bump).
+- `pixi run cargo clippy -- -D warnings` passes.
+- `pixi run cargo fmt --check` passes.
+
+---
+
+### R24: Simplify read modes to Linearizable + MinSlot
+
+**Problem**: The current `ReadMode` enum has four variants
+(`Linearizable`, `ReadYourWrites`, `BoundedStale`, `BestEffort`), but
+`BoundedStale` and `BestEffort` are identical in code — both serve
+locally without any freshness check, just reporting `safe_slot` in the
+response. `ReadYourWrites` is a stricter variant that checks
+`contiguous_applied >= client_slot`, but this is a client-specific
+freshness policy enforced server-side. The four-mode design adds
+protocol complexity (per-mode routing in `resolve_read_point`,
+per-mode client logic in `resolve_client_slot`, per-mode metrics
+breakdown) without meaningful semantic distinction.
+
+Industry practice (etcd, TiKV, CockroachDB, Spanner, FoundationDB)
+consistently uses **two read modes**: a linearizable mode
+(leader-served with lease or ReadIndex) and a stale mode where the
+client carries a freshness bound (slot/timestamp/version) and the
+replica checks its applied frontier. The client decides the freshness
+policy by choosing what bound to pass — the server does not need
+distinct modes for read-your-writes vs bounded-stale vs best-effort.
+
+**Design**:
+
+- **Mode 1: Linearizable** — leader-served with lease/ReadIndex
+  fencing. Same as today: if not leader, forward to leader; if leader,
+  check lease (0-RTT fast path) or ReadIndex (1-RTT quorum heartbeat),
+  then serve from local engine. The leader must verify it is still
+  leader before serving — a deposed leader serving reads would return
+  stale data (the new leader may have committed newer writes).
+
+- **Mode 2: MinSlot** — client carries `min_slot` in the request. The
+  server checks `contiguous_applied >= min_slot`: if yes, serve
+  locally and return `{ value, read_slot, safe_slot }`; if no, return
+  `NotLeader` with leader hint so the client retries on the leader
+  (the leader always has the latest `contiguous_applied`).
+  - `min_slot = 0` → accept any staleness (replaces BestEffort)
+  - `min_slot = client_write_watermark` → read-your-writes (replaces
+    ReadYourWrites)
+  - `min_slot = last_observed_safe_slot` → bounded stale (replaces
+    BoundedStale)
+  - The client chooses the policy; the server logic is one comparison.
+
+- **Slot numbers, not timestamps**: CrowKV uses Paxos slot numbers
+  (already returned as `revision` in write responses) as the freshness
+  bound. No clock dependency, no NTP, no clock-skew uncertainty.
+  Timestamp-based systems (TiKV, CockroachDB, Spanner) need
+  timestamps for cross-group transaction ordering; CrowKV is per-key
+  per-group, so slot numbers are sufficient and simpler.
+
+**Protocol changes**:
+- `ReadMode` enum: `Linearizable` (0), `MinSlot` (1). Drop
+  `ReadYourWrites`, `BoundedStale`, `BestEffort`.
+- `KvGetRequest`: rename `client_slot` to `min_slot`. Same field,
+  clearer name. Used only for `MinSlot` mode.
+- `KvScanRequest`: add `min_slot` field. Same check for scans.
+- `resolve_read_point`: two arms instead of four:
+  - `Linearizable` → barrier (lease/ReadIndex) or `NotLeader` redirect
+  - `MinSlot` → `contiguous_applied >= min_slot ? Serve : NotLeader`
+- Client: drop `resolve_client_slot` complexity. Client passes
+  `min_slot` directly (0 for don't-care, or saved `revision` from last
+  write). Client-side write watermark tracking remains, but it's a
+  simple `max(revision)` — no mode-specific logic.
+- Scan: `KvScanRequest` gets `min_slot` field, same check.
+
+**What we lose**:
+- Server-side enforcement of read-your-writes. Today, a follower that
+  hasn't caught up to `client_slot` redirects to the leader. With
+  MinSlot, the same thing happens — the follower checks
+  `contiguous_applied >= min_slot` and redirects if not met. So the
+  behavior is identical; the difference is purely naming and
+  generality.
+- BoundedStale's `safe_slot`-based check (global replication
+  frontier). Today BoundedStale doesn't enforce this anyway (it just
+  reports `safe_slot`). If a client wants global-replication freshness,
+  it passes `min_slot = last_safe_slot` — but the check is against
+  `contiguous_applied` (local), not `safe_slot` (global). This is
+  intentionally more permissive: the leader always has the latest
+  local state, so redirecting to the leader for a MinSlot miss
+  guarantees correctness.
+
+**Priority**: Medium — simplifies the protocol, reduces code surface,
+eliminates redundant modes. Not urgent (current modes work), but
+reduces maintenance burden and prepares for future read-scaling work
+(G8: client targets any replica for stale reads).
+
+**Complexity**: Medium — touches `ReadMode` enum (proto),
+`resolve_read_point` (4 arms → 2), client `get`/`scan` (drop
+mode-specific logic), `KvGetRequest`/`KvScanRequest` (rename field),
+tests (update read-mode test cases). No algorithm or consensus change.
+
+**Files**: `crowkv/src/rpc/kv.proto` (ReadMode enum, request fields),
+`crowkv/src/cluster/px_kv_store.rs` (`resolve_read_point`,
+`kv_get`, `kv_scan`), `crowkv-client/src/client.rs` (`get`, `scan`,
+drop `resolve_client_slot`), `crowkv/src/rpc/kv_service.rs`
+(forwarding logic — unchanged, still only forwards Linearizable),
+tests in `crowkv/tests/kv/` and `crowkv-client/tests/`.
+
+**Acceptance**:
+- All existing read tests pass with updated mode names and field names.
+- `resolve_read_point` has exactly two arms (Linearizable, MinSlot).
+- `ReadMode` enum has exactly two variants.
+- `BoundedStale`, `BestEffort`, `ReadYourWrites` are removed from the
+  proto and all code.
+- MinSlot with `min_slot=0` behaves identically to old BestEffort
+  (serve locally, report `safe_slot`).
+- MinSlot with `min_slot=write_revision` behaves identically to old
+  ReadYourWrites (redirect to leader if not caught up).
+- Linearizable mode behaves identically to today (lease/ReadIndex,
+  leader forwarding).
+- `pixi run cargo clippy -- -D warnings` passes.
+- `pixi run cargo fmt --check` passes.
 
 ---
 

@@ -7,6 +7,7 @@
 
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use crowkv::cluster::replica::StepDownRequestPayload;
 use crowkv::rpc::{KvGetRequest, KvSetRequest};
 
@@ -33,7 +34,7 @@ async fn read_via_leader(cluster: &TestCluster, key: &[u8]) -> Option<Vec<u8>> {
     let resp = client
         .get(KvGetRequest {
             version: 1,
-            key: key.to_vec(),
+            key: Bytes::copy_from_slice(key),
             request_id: 9001,
             request_create_ms: 9001,
             group_id: 1,
@@ -44,7 +45,7 @@ async fn read_via_leader(cluster: &TestCluster, key: &[u8]) -> Option<Vec<u8>> {
         .ok()?
         .into_inner();
     if resp.ok && !resp.not_found {
-        Some(resp.value)
+        Some(resp.value.to_vec())
     } else {
         None
     }
@@ -64,8 +65,8 @@ async fn write_survives_forced_leader_step_down() {
     let put = leader_client
         .put(KvSetRequest {
             version: 1,
-            key: b"g1".to_vec(),
-            value: b"survives".to_vec(),
+            key: Bytes::from_static(b"g1"),
+            value: Bytes::from_static(b"survives"),
             ttl_ms: 0,
             request_id: 1,
             request_create_ms: 1,

@@ -38,7 +38,7 @@ async fn prepare_then_accept_succeeds() {
 
     // Phase 2: accept a value at the same ballot.
     let entry = write_entry(1, PxBallot::new(1, 1), 1, b"v1");
-    let reply = replica.on_accept(entry.clone()).await;
+    let reply = replica.on_accept(&entry).await;
     assert!(matches!(reply, PxAcceptReply::Accepted { .. }));
     assert_eq!(replica.accepted_at(1).await, Some(entry));
 }
@@ -63,7 +63,7 @@ async fn accept_rejects_lower_ballot() {
     let _ = replica.on_prepare(3, PxBallot::new(3, 1), 1).await;
 
     let stale = write_entry(3, PxBallot::new(2, 1), 1, b"stale");
-    let reply = replica.on_accept(stale).await;
+    let reply = replica.on_accept(&stale).await;
     assert!(matches!(reply, PxAcceptReply::Rejected { .. }));
     assert!(replica.accepted_at(3).await.is_none());
 }
@@ -75,7 +75,7 @@ async fn re_prepare_returns_previously_accepted_value() {
     // Prepare + accept at ballot (1, 1).
     let _ = replica.on_prepare(7, PxBallot::new(1, 1), 1).await;
     let v1 = write_entry(7, PxBallot::new(1, 1), 1, b"v1");
-    let _ = replica.on_accept(v1.clone()).await;
+    let _ = replica.on_accept(&v1).await;
 
     // Re-prepare at a higher ballot — must return the previously accepted value.
     let reply = replica.on_prepare(7, PxBallot::new(2, 2), 2).await;
@@ -134,12 +134,12 @@ async fn multiple_slots_track_independently() {
     // Slot 1: prepare + accept.
     let _ = replica.on_prepare(1, PxBallot::new(1, 1), 1).await;
     let e1 = write_entry(1, PxBallot::new(1, 1), 1, b"v1");
-    let _ = replica.on_accept(e1.clone()).await;
+    let _ = replica.on_accept(&e1).await;
 
     // Slot 2: prepare + accept with a different value.
     let _ = replica.on_prepare(2, PxBallot::new(1, 1), 1).await;
     let e2 = write_entry(2, PxBallot::new(1, 1), 1, b"v2");
-    let _ = replica.on_accept(e2.clone()).await;
+    let _ = replica.on_accept(&e2).await;
 
     // Both slots have independent accepted values.
     assert_eq!(replica.accepted_at(1).await, Some(e1));
@@ -154,7 +154,7 @@ async fn learn_chosen_advances_applied_frontier() {
     // Prepare + accept + learn slot 1.
     let _ = replica.on_prepare(1, PxBallot::new(0, 1), 1).await;
     let entry = write_entry(1, PxBallot::new(0, 1), 1, b"v1");
-    let _ = replica.on_accept(entry.clone()).await;
+    let _ = replica.on_accept(&entry).await;
     replica.learn_chosen(&entry, None, None).await;
 
     assert_eq!(replica.contiguous_applied(), 1);

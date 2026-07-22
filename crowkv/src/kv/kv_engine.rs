@@ -2,7 +2,6 @@
 // Licensed under the Apache License, Version 2.0.
 
 use super::kv_future::KVFuture;
-use super::op::{Cell, EngineDiff};
 use super::Batch;
 
 /// Storage engine surface. All reads are non-mutating and may run concurrently
@@ -47,9 +46,6 @@ pub trait KVEngine: Send + Sync {
         limit: usize,
     ) -> KVFuture<(Vec<(Vec<u8>, u64, Vec<u8>)>, bool)>;
 
-    /// Full ordered stream including tombstones, for `compare`.
-    fn iter_all(&self) -> Vec<(Vec<u8>, u64, Cell)>;
-
     /// Number of live (non-tombstoned) keys.
     fn live_key_count(&self) -> usize;
 
@@ -85,6 +81,14 @@ pub trait KVEngine: Send + Sync {
     fn is_healthy(&self) -> bool {
         true
     }
+
+    /// Drain the in-memory write buffer (L0 memtable) into the in-memory
+    /// B+tree (L1), advancing `last_applied_slot` **in memory only** — not
+    /// durable across crashes. A subsequent [`Self::persist_snapshot`] is
+    /// needed to make the advanced watermark crash-safe. Cheap when L0 is
+    /// empty (early-return no-op). Default: no-op (`InMemKV` has no L0/L1
+    /// distinction).
+    fn flush(&self) {}
 
     /// Highest slot `S` such that every slot in `[1, S]` is durably reflected
     /// in this engine already — i.e. a caller rebuilding state from a WAL can
@@ -172,66 +176,5 @@ pub trait KVEngine: Send + Sync {
     fn snapshot_import(&self, stream: &[u8]) -> Result<u64, String> {
         let _ = stream;
         Err("snapshot import not supported by this engine".to_string())
-    }
-
-    /// Logical diff against `other`, sorted by key. Empty means the two
-    /// engines hold the same `(slot, cell)` for every key. Compared exactly,
-    /// including resolved-slot and tombstones.
-    fn compare(&self, other: &dyn KVEngine) -> Vec<EngineDiff> {
-        let left = self.iter_all();
-        let right = other.iter_all();
-        let mut diffs = Vec::new();
-        let (mut i, mut j) = (0usize, 0usize);
-        while i < left.len() || j < right.len() {
-            match (left.get(i), right.get(j)) {
-                (Some(l), Some(r)) => match l.0.cmp(&r.0) {
-                    std::cmp::Ordering::Less => {
-                        diffs.push(EngineDiff {
-                            key: l.0.clone(),
-                            left: Some((l.1, l.2.clone())),
-                            right: None,
-                        });
-                        i += 1;
-                    }
-                    std::cmp::Ordering::Greater => {
-                        diffs.push(EngineDiff {
-                            key: r.0.clone(),
-                            left: None,
-                            right: Some((r.1, r.2.clone())),
-                        });
-                        j += 1;
-                    }
-                    std::cmp::Ordering::Equal => {
-                        if l.1 != r.1 || l.2 != r.2 {
-                            diffs.push(EngineDiff {
-                                key: l.0.clone(),
-                                left: Some((l.1, l.2.clone())),
-                                right: Some((r.1, r.2.clone())),
-                            });
-                        }
-                        i += 1;
-                        j += 1;
-                    }
-                },
-                (Some(l), None) => {
-                    diffs.push(EngineDiff {
-                        key: l.0.clone(),
-                        left: Some((l.1, l.2.clone())),
-                        right: None,
-                    });
-                    i += 1;
-                }
-                (None, Some(r)) => {
-                    diffs.push(EngineDiff {
-                        key: r.0.clone(),
-                        left: None,
-                        right: Some((r.1, r.2.clone())),
-                    });
-                    j += 1;
-                }
-                (None, None) => break,
-            }
-        }
-        diffs
     }
 }

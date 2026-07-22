@@ -9,18 +9,20 @@
 //! Each function is a reusable assertion body; callers wrap them in their own
 //! `#[test]` functions with a freshly constructed engine.
 
+use crate::test_util::{compare_dyn, iter_all_dyn};
+use bytes::Bytes;
 use crowkv::kv::{Batch, BatchOp, Cell, KVEngine, Op};
 
 pub fn put(key: &[u8], value: &[u8]) -> BatchOp {
     BatchOp {
-        key: key.to_vec(),
-        op: Op::Put(value.to_vec()),
+        key: Bytes::copy_from_slice(key),
+        op: Op::Put(Bytes::copy_from_slice(value)),
     }
 }
 
 pub fn del(key: &[u8]) -> BatchOp {
     BatchOp {
-        key: key.to_vec(),
+        key: Bytes::copy_from_slice(key),
         op: Op::Delete,
     }
 }
@@ -61,7 +63,7 @@ pub fn delete_writes_tombstone(e: &dyn KVEngine) {
     assert_eq!(e.get(b"k").into_ready(), None, "tombstoned key is not live");
     assert_eq!(e.live_key_count(), 0);
     // The tombstone is retained internally (visible via iter_all) at its slot.
-    let all = e.iter_all();
+    let all = iter_all_dyn(e);
     assert_eq!(all, vec![(b"k".to_vec(), 2, Cell::Tombstone)]);
 }
 
@@ -121,7 +123,7 @@ pub fn compare_is_empty_for_identical_state_and_detects_divergence(a: &dyn KVEng
     a.apply(1, &batch(vec![put(b"y", b"1")])).into_ready().unwrap();
     b.apply(1, &batch(vec![put(b"y", b"1")])).into_ready().unwrap();
     b.apply(2, &batch(vec![put(b"x", b"2")])).into_ready().unwrap();
-    assert!(a.compare(b).is_empty(), "identical logical state");
+    assert!(compare_dyn(a, b).is_empty(), "identical logical state");
 
     // Divergent resolved-slot for the same value is a difference. Slot 3
     // (not e.g. 9) keeps this contiguous with the slots already applied
@@ -131,7 +133,7 @@ pub fn compare_is_empty_for_identical_state_and_detects_divergence(a: &dyn KVEng
     // see it (an engine-specific difference from `InMemKV`, not something
     // this test is trying to exercise).
     b.apply(3, &batch(vec![put(b"x", b"2")])).into_ready().unwrap();
-    let diff = a.compare(b);
+    let diff = compare_dyn(a, b);
     assert_eq!(diff.len(), 1);
     assert_eq!(diff[0].key, b"x".to_vec());
 }
@@ -168,7 +170,7 @@ pub fn snapshot_export_import_round_trip(source: &dyn KVEngine, target: &dyn KVE
     );
 
     assert!(
-        target.compare(source).is_empty(),
+        compare_dyn(target, source).is_empty(),
         "imported state must be logically identical to the exporter's"
     );
     assert_eq!(target.get(b"a").into_ready(), None, "tombstoned key stays absent");
