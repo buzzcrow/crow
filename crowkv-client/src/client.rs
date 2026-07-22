@@ -5,9 +5,13 @@
 //! topology cache, retry/idempotency, and `ReadMode` routing on top of
 //! `crowkv`'s generated `KvService` client.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#![allow(clippy::cast_possible_truncation)]
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use bytes::Bytes;
 use dashmap::DashMap;
 
 use crowkv::rpc::kv_service_client::KvServiceClient;
@@ -18,6 +22,7 @@ use crowkv::rpc::{
 
 use crate::config::{ClientConfig, RetryConfig};
 use crate::error::{Error, Result};
+use crate::metrics::ClientMetrics;
 use crate::pool::ConnectionPool;
 use crate::topology::TopologyCache;
 
@@ -45,8 +50,8 @@ pub struct ScanOutcome {
 /// One item of a `batch_write` call.
 #[derive(Debug, Clone)]
 pub enum BatchOp {
-    Put { key: Vec<u8>, value: Vec<u8> },
-    Delete { key: Vec<u8> },
+    Put { key: Bytes, value: Bytes },
+    Delete { key: Bytes },
 }
 
 /// Standalone `CrowKV` client: topology discovery over the HTTP management
@@ -59,6 +64,7 @@ pub struct CrowkvClient {
     retry: RetryConfig,
     client_id: u64,
     next_seq: AtomicU64,
+    metrics: Arc<ClientMetrics>,
     /// Per-`(store_id, group_id)` high-watermark of the last write's
     /// `revision`, auto-attached as `client_slot` on `ReadYourWrites` reads.
     /// Bounded by the number of groups this client has written to, not by
@@ -75,6 +81,7 @@ impl CrowkvClient {
             retry: config.retry,
             client_id: new_client_id(),
             next_seq: AtomicU64::new(1),
+            metrics: Arc::new(ClientMetrics::default()),
             write_watermark: DashMap::new(),
         }
     }
@@ -83,6 +90,35 @@ impl CrowkvClient {
     #[must_use]
     pub fn client_id(&self) -> u64 {
         self.client_id
+    }
+
+    /// Snapshot the client's internal metrics counters (per-op counts,
+    /// leader-related retry events, topology refreshes). Values are
+    /// cumulative since client creation.
+    #[must_use]
+    pub fn metrics(&self) -> crate::metrics::ClientMetricsSnapshot {
+        self.metrics.snapshot()
+    }
+
+    /// Drain per-op-kind window latency histograms. Returns one
+    /// `Histogram<u64>` per op kind. The caller is expected to
+    /// accumulate these into cumulative histograms if desired.
+    #[must_use]
+    pub fn drain_window(&self) -> crate::metrics::WindowLatencySnapshot {
+        self.metrics.drain_window()
+    }
+
+    /// Flush per-op-kind window latency histograms to `writer` in the
+    /// same column-aligned format as the server `[metrics]` log.
+    /// Takes a pre-drained `WindowLatencySnapshot` so the caller can
+    /// also use it for cumulative accumulation.
+    pub fn flush_latencies<W: std::fmt::Write>(
+        &self,
+        writer: &mut W,
+        snap: &crate::metrics::WindowLatencySnapshot,
+        window_secs: f64,
+    ) {
+        self.metrics.flush_latencies(writer, snap, window_secs);
     }
 
     /// Force a topology refresh. Not required for normal operation (the
@@ -113,13 +149,13 @@ impl CrowkvClient {
     }
 
     /// Resolve the current leader endpoint for `(store_id, group_id)`,
-    /// retrying an "unknown leader" outcome ("Unknown leader:
-    /// 1s-then-retry") rather than failing on the first
-    /// miss. A single failed/empty `/topology` fetch is not conclusive: the
-    /// group may simply be mid-election (a real, common case right after a
-    /// node restart) or the seed just queried may be transiently down while
-    /// others are fine. Bounded by the same `RetryConfig::max_retries`
-    /// budget used for post-request retries.
+    /// retrying an "unknown leader" outcome ("100ms-then-retry") rather
+    /// than failing on the first miss. A single failed/empty `/topology`
+    /// fetch is not conclusive: the group may simply be mid-election (a
+    /// real, common case right after a node restart) or the seed just
+    /// queried may be transiently down while others are fine. Bounded by
+    /// the same `RetryConfig::max_retries` budget used for post-request
+    /// retries.
     async fn resolve_leader(&self, store_id: u64, group_id: u64) -> Result<String> {
         if let Some(ep) = self.topology.leader(store_id, group_id) {
             return Ok(ep);
@@ -130,14 +166,18 @@ impl CrowkvClient {
             // yet (mid-election) are both just "leader unknown right now"
             // from the caller's perspective -- collapse them into the same
             // retry path instead of surfacing the transport error early.
+            self.metrics.record_leader_query();
+            self.metrics.record_topology_refresh();
             let _ = self.topology.refresh().await;
             if let Some(ep) = self.topology.leader(store_id, group_id) {
                 return Ok(ep);
             }
             attempts += 1;
-            if self.retry.single_attempt || attempts > self.retry.max_retries {
+            if attempts > self.retry.max_retries {
+                self.metrics.record_no_leader();
                 return Err(Error::NoLeader { store_id, group_id });
             }
+            self.metrics.record_unknown_leader_wait();
             tokio::time::sleep(self.retry.unknown_leader_wait).await;
         }
     }
@@ -184,8 +224,8 @@ impl CrowkvClient {
         loop {
             let req = KvSetRequest {
                 version: 1,
-                key: key.to_vec(),
-                value: value.to_vec(),
+                key: Bytes::copy_from_slice(key),
+                value: Bytes::copy_from_slice(value),
                 seq,
                 ttl_ms: 0,
                 client_id,
@@ -194,34 +234,44 @@ impl CrowkvClient {
                 group_id,
             };
             let channel = self.pool.get(&endpoint)?;
+            let t0 = Instant::now();
             match KvServiceClient::new(channel).put(req).await {
                 Ok(resp) => {
                     let resp = resp.into_inner();
                     if resp.ok {
                         self.record_write(store_id, group_id, resp.revision);
+                        self.metrics.record_put_latency(t0.elapsed().as_micros() as u64);
                         return Ok(WriteOutcome {
                             revision: resp.revision,
                             request_id: resp.request_id,
                         });
                     }
+                    self.metrics.record_put_error();
                     if let Some(new_endpoint) = self.follow_not_leader(store_id, group_id, &resp) {
+                        self.metrics.record_not_leader_hint();
+                        self.metrics.on_leader_error(store_id, group_id, &endpoint);
+                        self.metrics
+                            .on_leader_resolved(store_id, group_id, &new_endpoint, "not_leader_hint");
                         endpoint = new_endpoint;
                         continue;
                     }
-                    if let Some(e) = self.not_leader_err(&resp) {
-                        return Err(e);
-                    }
                     attempts = self.count_other(attempts, &resp.error)?;
                     if Self::is_unknown_leader(&resp.error) {
+                        self.metrics.on_leader_error(store_id, group_id, &endpoint);
                         endpoint = self.wait_and_refresh_leader(store_id, group_id, &endpoint).await;
+                        self.metrics
+                            .on_leader_resolved(store_id, group_id, &endpoint, "unknown_leader");
                     }
                 }
                 Err(status) => {
-                    if !self.retry.single_attempt {
-                        endpoint = self
-                            .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
-                            .await;
-                    }
+                    self.metrics.record_put_error();
+                    self.metrics.record_transport_error();
+                    self.metrics.on_leader_error(store_id, group_id, &endpoint);
+                    endpoint = self
+                        .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
+                        .await;
+                    self.metrics
+                        .on_leader_resolved(store_id, group_id, &endpoint, "transport_error");
                     attempts = self.count_other(attempts, &status.to_string())?;
                 }
             }
@@ -247,7 +297,7 @@ impl CrowkvClient {
         loop {
             let req = KvGetRequest {
                 version: 1,
-                key: key.to_vec(),
+                key: Bytes::copy_from_slice(key),
                 request_id: next_request_id(),
                 request_create_ms: now_ms(),
                 group_id,
@@ -255,33 +305,47 @@ impl CrowkvClient {
                 client_slot,
             };
             let channel = self.pool.get(&endpoint)?;
+            let t0 = Instant::now();
             match KvServiceClient::new(channel).get(req).await {
                 Ok(resp) => {
                     let resp = resp.into_inner();
                     if resp.not_found {
+                        self.metrics.record_get_latency(t0.elapsed().as_micros() as u64);
                         return Ok(GetOutcome::NotFound);
                     }
                     if resp.ok {
+                        self.metrics.record_get_latency(t0.elapsed().as_micros() as u64);
                         return Ok(GetOutcome::Found {
-                            value: resp.value,
+                            value: resp.value.to_vec(),
                             revision: resp.revision,
                         });
                     }
+                    self.metrics.record_get_error();
                     if let Some(new_endpoint) = self.follow_not_leader(store_id, group_id, &resp) {
+                        self.metrics.record_not_leader_hint();
+                        self.metrics.on_leader_error(store_id, group_id, &endpoint);
+                        self.metrics
+                            .on_leader_resolved(store_id, group_id, &new_endpoint, "not_leader_hint");
                         endpoint = new_endpoint;
                         continue;
                     }
                     attempts = self.count_other(attempts, &resp.error)?;
                     if Self::is_unknown_leader(&resp.error) {
+                        self.metrics.on_leader_error(store_id, group_id, &endpoint);
                         endpoint = self.wait_and_refresh_leader(store_id, group_id, &endpoint).await;
+                        self.metrics
+                            .on_leader_resolved(store_id, group_id, &endpoint, "unknown_leader");
                     }
                 }
                 Err(status) => {
-                    if !self.retry.single_attempt {
-                        endpoint = self
-                            .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
-                            .await;
-                    }
+                    self.metrics.record_get_error();
+                    self.metrics.record_transport_error();
+                    self.metrics.on_leader_error(store_id, group_id, &endpoint);
+                    endpoint = self
+                        .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
+                        .await;
+                    self.metrics
+                        .on_leader_resolved(store_id, group_id, &endpoint, "transport_error");
                     attempts = self.count_other(attempts, &status.to_string())?;
                 }
             }
@@ -309,7 +373,7 @@ impl CrowkvClient {
         loop {
             let req = KvDeleteRequest {
                 version: 1,
-                key: key.to_vec(),
+                key: Bytes::copy_from_slice(key),
                 seq,
                 client_id,
                 request_id: next_request_id(),
@@ -317,10 +381,13 @@ impl CrowkvClient {
                 group_id,
             };
             let channel = self.pool.get(&endpoint)?;
+            let t0 = Instant::now();
             match KvServiceClient::new(channel).delete(req).await {
                 Ok(resp) => {
                     let resp = resp.into_inner();
                     if resp.not_found {
+                        self.metrics
+                            .record_delete_latency(t0.elapsed().as_micros() as u64);
                         return Ok(WriteOutcome {
                             revision: 0,
                             request_id: resp.request_id,
@@ -328,29 +395,39 @@ impl CrowkvClient {
                     }
                     if resp.ok {
                         self.record_write(store_id, group_id, resp.revision);
+                        self.metrics
+                            .record_delete_latency(t0.elapsed().as_micros() as u64);
                         return Ok(WriteOutcome {
                             revision: resp.revision,
                             request_id: resp.request_id,
                         });
                     }
+                    self.metrics.record_delete_error();
                     if let Some(new_endpoint) = self.follow_not_leader(store_id, group_id, &resp) {
+                        self.metrics.record_not_leader_hint();
+                        self.metrics.on_leader_error(store_id, group_id, &endpoint);
+                        self.metrics
+                            .on_leader_resolved(store_id, group_id, &new_endpoint, "not_leader_hint");
                         endpoint = new_endpoint;
                         continue;
                     }
-                    if let Some(e) = self.not_leader_err(&resp) {
-                        return Err(e);
-                    }
                     attempts = self.count_other(attempts, &resp.error)?;
                     if Self::is_unknown_leader(&resp.error) {
+                        self.metrics.on_leader_error(store_id, group_id, &endpoint);
                         endpoint = self.wait_and_refresh_leader(store_id, group_id, &endpoint).await;
+                        self.metrics
+                            .on_leader_resolved(store_id, group_id, &endpoint, "unknown_leader");
                     }
                 }
                 Err(status) => {
-                    if !self.retry.single_attempt {
-                        endpoint = self
-                            .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
-                            .await;
-                    }
+                    self.metrics.record_delete_error();
+                    self.metrics.record_transport_error();
+                    self.metrics.on_leader_error(store_id, group_id, &endpoint);
+                    endpoint = self
+                        .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
+                        .await;
+                    self.metrics
+                        .on_leader_resolved(store_id, group_id, &endpoint, "transport_error");
                     attempts = self.count_other(attempts, &status.to_string())?;
                 }
             }
@@ -373,7 +450,7 @@ impl CrowkvClient {
                 },
                 BatchOp::Delete { key } => KvBatchItem {
                     key: key.clone(),
-                    value: Vec::new(),
+                    value: Bytes::new(),
                     is_delete: true,
                 },
             })
@@ -392,34 +469,45 @@ impl CrowkvClient {
                 group_id,
             };
             let channel = self.pool.get(&endpoint)?;
+            let t0 = Instant::now();
             match KvServiceClient::new(channel).batch_write(req).await {
                 Ok(resp) => {
                     let resp = resp.into_inner();
                     if resp.ok {
                         self.record_write(store_id, group_id, resp.revision);
+                        self.metrics
+                            .record_batch_write_latency(t0.elapsed().as_micros() as u64);
                         return Ok(WriteOutcome {
                             revision: resp.revision,
                             request_id: resp.request_id,
                         });
                     }
+                    self.metrics.record_batch_write_error();
                     if let Some(new_endpoint) = self.follow_not_leader(store_id, group_id, &resp) {
+                        self.metrics.record_not_leader_hint();
+                        self.metrics.on_leader_error(store_id, group_id, &endpoint);
+                        self.metrics
+                            .on_leader_resolved(store_id, group_id, &new_endpoint, "not_leader_hint");
                         endpoint = new_endpoint;
                         continue;
                     }
-                    if let Some(e) = self.not_leader_err(&resp) {
-                        return Err(e);
-                    }
                     attempts = self.count_other(attempts, &resp.error)?;
                     if Self::is_unknown_leader(&resp.error) {
+                        self.metrics.on_leader_error(store_id, group_id, &endpoint);
                         endpoint = self.wait_and_refresh_leader(store_id, group_id, &endpoint).await;
+                        self.metrics
+                            .on_leader_resolved(store_id, group_id, &endpoint, "unknown_leader");
                     }
                 }
                 Err(status) => {
-                    if !self.retry.single_attempt {
-                        endpoint = self
-                            .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
-                            .await;
-                    }
+                    self.metrics.record_batch_write_error();
+                    self.metrics.record_transport_error();
+                    self.metrics.on_leader_error(store_id, group_id, &endpoint);
+                    endpoint = self
+                        .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
+                        .await;
+                    self.metrics
+                        .on_leader_resolved(store_id, group_id, &endpoint, "transport_error");
                     attempts = self.count_other(attempts, &status.to_string())?;
                 }
             }
@@ -445,8 +533,8 @@ impl CrowkvClient {
         loop {
             let req = KvScanRequest {
                 version: 1,
-                prefix: prefix.to_vec(),
-                start_after: start_after.to_vec(),
+                prefix: Bytes::copy_from_slice(prefix),
+                start_after: Bytes::copy_from_slice(start_after),
                 limit,
                 request_id: next_request_id(),
                 request_create_ms: now_ms(),
@@ -454,27 +542,37 @@ impl CrowkvClient {
                 read_mode: read_mode as i32,
             };
             let channel = self.pool.get(&endpoint)?;
+            let t0 = Instant::now();
             match KvServiceClient::new(channel).scan(req).await {
                 Ok(resp) => {
                     let resp = resp.into_inner();
                     if resp.ok {
-                        let items = resp.items.into_iter().map(|i| (i.key, i.value)).collect();
+                        let items = resp
+                            .items
+                            .into_iter()
+                            .map(|i| (i.key.to_vec(), i.value.to_vec()))
+                            .collect();
+                        self.metrics.record_scan_latency(t0.elapsed().as_micros() as u64);
                         return Ok(ScanOutcome {
                             items,
                             truncated: resp.truncated,
                         });
                     }
+                    self.metrics.record_scan_error();
                     // `KvScanResponse` carries no `NotLeaderHint` (server-side
                     // forwarding already handles linearizable scans; other
                     // modes never need a leader) — any `!ok` is a plain error.
                     attempts = self.count_other(attempts, &resp.error)?;
                 }
                 Err(status) => {
-                    if !self.retry.single_attempt {
-                        endpoint = self
-                            .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
-                            .await;
-                    }
+                    self.metrics.record_scan_error();
+                    self.metrics.record_transport_error();
+                    self.metrics.on_leader_error(store_id, group_id, &endpoint);
+                    endpoint = self
+                        .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
+                        .await;
+                    self.metrics
+                        .on_leader_resolved(store_id, group_id, &endpoint, "transport_error");
                     attempts = self.count_other(attempts, &status.to_string())?;
                 }
             }
@@ -509,27 +607,7 @@ impl CrowkvClient {
         }
         self.topology
             .set_leader(store_id, group_id, resp.not_leader_hint.clone());
-        if self.retry.single_attempt {
-            // Still worth caching the real leader for the *next* call, but
-            // this call itself must not silently redirect -- see
-            // `RetryConfig::single_attempt`.
-            return None;
-        }
         Some(resp.not_leader_hint.clone())
-    }
-
-    /// In `single_attempt` mode, surface a `not leader` response as
-    /// `Error::NotLeader` so the caller (e.g. bench) can distinguish it
-    /// from other errors. Returns `None` if the response is not a
-    /// "not leader" error or if retries are enabled (the retry loop
-    /// handles it internally).
-    fn not_leader_err(&self, resp: &KvResponse) -> Option<Error> {
-        if self.retry.single_attempt && Self::is_unknown_leader(&resp.error) {
-            return Some(Error::NotLeader {
-                hint: resp.not_leader_hint.clone(),
-            });
-        }
-        None
     }
 
     /// A `not leader` failure with an empty hint (the responding replica
@@ -543,8 +621,11 @@ impl CrowkvClient {
     /// After an [`Self::is_unknown_leader`] failure, give the election a
     /// chance to converge and pick up whatever leader the cache learns in
     /// the meantime, instead of busy-retrying the same non-answering
-    /// replica ("Unknown leader: 1s-then-retry").
+    /// replica ("100ms-then-retry").
     async fn wait_and_refresh_leader(&self, store_id: u64, group_id: u64, endpoint: &str) -> String {
+        self.metrics.record_unknown_leader_wait();
+        self.metrics.record_leader_query();
+        self.metrics.record_topology_refresh();
         let _ = self.topology.refresh().await;
         tokio::time::sleep(self.retry.unknown_leader_wait).await;
         self.topology
@@ -563,6 +644,7 @@ impl CrowkvClient {
         current: &str,
         backoff: &mut Duration,
     ) -> String {
+        self.metrics.record_topology_refresh();
         let _ = self.topology.refresh().await;
         let endpoint = self
             .topology
@@ -580,7 +662,8 @@ impl CrowkvClient {
     /// `Error::RetriesExhausted` once `attempts` exceeds the budget.
     fn count_other(&self, attempts: u32, last: &str) -> Result<u32> {
         let attempts = attempts + 1;
-        if self.retry.single_attempt || attempts > self.retry.max_retries {
+        if attempts > self.retry.max_retries {
+            self.metrics.record_retries_exhausted();
             return Err(Error::RetriesExhausted {
                 attempts,
                 last: last.to_string(),

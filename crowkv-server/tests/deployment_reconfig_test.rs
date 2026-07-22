@@ -9,6 +9,7 @@
 
 mod testkit;
 
+use bytes::Bytes;
 use crowkv::rpc::kv_service_client::KvServiceClient;
 use crowkv::rpc::{KvGetRequest, KvSetRequest};
 use serde_json::Value;
@@ -156,27 +157,40 @@ async fn kv_put(nodes: &[ServerNode], group_id: u64, key: &[u8], val: &[u8], req
 }
 
 async fn kv_put_nodes(nodes: &[&ServerNode], group_id: u64, key: &[u8], val: &[u8], req_id: u64) -> bool {
-    let leader_idx = wait_for_leader_ref(nodes, group_id, Duration::from_secs(10)).await;
-    let addr = node_endpoint(&topology(nodes[leader_idx]).await);
-    let mut client = KvServiceClient::connect(format!("http://{addr}"))
-        .await
-        .expect("connect");
-    let resp = client
-        .put(KvSetRequest {
-            version: 1,
-            key: key.to_vec(),
-            value: val.to_vec(),
-            ttl_ms: 0,
-            request_id: req_id,
-            request_create_ms: req_id,
-            client_id: 0,
-            seq: 0,
-            group_id,
-        })
-        .await
-        .expect("put rpc")
-        .into_inner();
-    resp.ok
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut last_err = String::new();
+    while Instant::now() < deadline {
+        let leader_idx = wait_for_leader_ref(nodes, group_id, Duration::from_secs(10)).await;
+        let addr = node_endpoint(&topology(nodes[leader_idx]).await);
+        let mut client = KvServiceClient::connect(format!("http://{addr}"))
+            .await
+            .expect("connect");
+        match client
+            .put(KvSetRequest {
+                version: 1,
+                key: Bytes::copy_from_slice(key),
+                value: Bytes::copy_from_slice(val),
+                ttl_ms: 0,
+                request_id: req_id,
+                request_create_ms: req_id,
+                client_id: 0,
+                seq: 0,
+                group_id,
+            })
+            .await
+        {
+            Ok(resp) => return resp.into_inner().ok,
+            Err(status) => {
+                last_err = status.message().to_string();
+                if last_err.to_lowercase().contains("not leader") {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    continue;
+                }
+                panic!("put rpc failed: {last_err}");
+            }
+        }
+    }
+    panic!("kv put timed out waiting for leader: {last_err}");
 }
 
 #[allow(dead_code)]
@@ -193,7 +207,7 @@ async fn kv_get_nodes(nodes: &[&ServerNode], group_id: u64, key: &[u8]) -> Optio
     let resp = client
         .get(KvGetRequest {
             version: 1,
-            key: key.to_vec(),
+            key: Bytes::copy_from_slice(key),
             request_id: 9001,
             request_create_ms: 9001,
             group_id,
@@ -204,7 +218,7 @@ async fn kv_get_nodes(nodes: &[&ServerNode], group_id: u64, key: &[u8]) -> Optio
         .ok()?
         .into_inner();
     if resp.ok && !resp.not_found {
-        Some(resp.value)
+        Some(resp.value.to_vec())
     } else {
         None
     }

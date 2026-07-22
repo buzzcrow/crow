@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -84,52 +85,298 @@ impl BlockDeviceController {
     }
 }
 
-/// Simulated block device used as a test [`super::IoBackend`].
+/// Real file-backed block device. Always opens OS paths and does positional
+/// I/O (`pwrite`/`pread`) via `FileExt`. Whether the path is a regular file,
+/// a raw block device, or a tmpfs file makes no difference — in Unix, a
+/// block device *is* a file.
 ///
-/// Two write implementations are selected by [`Self::alignment`], modelling the
-/// two real device classes:
-///
-/// - [`WalBlockAlignment::Unaligned`] — byte-addressable media (RAM / SCM /
-///   PMEM). Writes land at arbitrary offsets with no amplification. This is the
-///   simpler path and the default ([`BlockDevice::new`]).
-/// - [`WalBlockAlignment::Aligned`] — block media that requires I/O aligned to
-///   the device I/O unit (e.g. an SSD/`NVMe` under `O_DIRECT`). Sub-block
-///   writes are widened to the enclosing aligned range via read-modify-write,
-///   so physical storage always advances in whole I/O units and the device
-///   tracks the resulting write amplification ([`BlockDevice::ssd`]).
+/// Alignment and `O_DIRECT` are independently configurable:
+/// - [`BlockDevice::new`] — aligned (4K), buffered (no `O_DIRECT`). Default
+///   for benchmarks and general use.
+/// - [`BlockDevice::ssd`] — aligned (4K), `O_DIRECT`. Models a real SSD/`NVMe`
+///   with direct I/O bypassing the page cache.
 #[derive(Clone)]
 pub struct BlockDevice {
+    write_count: Arc<AtomicU64>,
+    fdatasync_count: Arc<AtomicU64>,
+    alignment: WalBlockAlignment,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    use_direct_io: bool,
+    logical_bytes_written: Arc<AtomicU64>,
+    physical_bytes_written: Arc<AtomicU64>,
+    rmw_count: Arc<AtomicU64>,
+}
+
+impl BlockDevice {
+    /// Create an aligned block device using real OS files with buffered I/O
+    /// (no `O_DIRECT`). All alignment/RMW logic runs, `fdatasync` performs a
+    /// real `sync_data` syscall, but the page cache absorbs writes. Ideal
+    /// for benchmarks that exercise block code paths without disk-bound TPS.
+    #[must_use]
+    pub fn new() -> Self {
+        tracing::info!("BlockDevice::new — real OS files, buffered, 4K aligned");
+        Self::with_alignment(WalBlockAlignment::default_aligned(), false)
+    }
+
+    /// Create an aligned block device using real OS files with `O_DIRECT`
+    /// (Linux only). `fdatasync` performs a real `sync_data` syscall. Use
+    /// this for production SSD/`NVMe` modelling.
+    #[must_use]
+    pub fn ssd() -> Self {
+        tracing::info!("BlockDevice::ssd — real OS files, O_DIRECT, 4K aligned, fdatasync = sync_data");
+        Self::with_alignment(WalBlockAlignment::default_aligned(), true)
+    }
+
+    /// Create a block device with an explicit alignment mode and `O_DIRECT` flag.
+    #[must_use]
+    pub fn with_alignment(alignment: WalBlockAlignment, use_direct_io: bool) -> Self {
+        Self {
+            write_count: Arc::new(AtomicU64::new(0)),
+            fdatasync_count: Arc::new(AtomicU64::new(0)),
+            alignment,
+            use_direct_io,
+            logical_bytes_written: Arc::new(AtomicU64::new(0)),
+            physical_bytes_written: Arc::new(AtomicU64::new(0)),
+            rmw_count: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    #[must_use]
+    pub fn alignment(&self) -> WalBlockAlignment {
+        self.alignment
+    }
+
+    #[must_use]
+    pub fn write_count(&self) -> u64 {
+        self.write_count.load(Ordering::Acquire)
+    }
+
+    #[must_use]
+    pub fn fdatasync_count(&self) -> u64 {
+        self.fdatasync_count.load(Ordering::Acquire)
+    }
+
+    /// Total logical (payload) bytes accepted by writes.
+    #[must_use]
+    pub fn logical_bytes_written(&self) -> u64 {
+        self.logical_bytes_written.load(Ordering::Acquire)
+    }
+
+    /// Total physical bytes written to the underlying media.
+    #[must_use]
+    pub fn physical_bytes_written(&self) -> u64 {
+        self.physical_bytes_written.load(Ordering::Acquire)
+    }
+
+    /// Number of writes that triggered a read-modify-write of a partial block.
+    #[must_use]
+    pub fn rmw_count(&self) -> u64 {
+        self.rmw_count.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn open_segment(&self, segment_path: &Path, opts: &OpenOptions) -> io::Result<BlockSegment> {
+        let segment_path = segment_path.to_path_buf();
+        let mut std_opts = std::fs::OpenOptions::new();
+        std_opts.read(true).write(true);
+        if opts.create {
+            std_opts.create(true);
+        }
+        if opts.create_new {
+            std_opts.create_new(true);
+        }
+        if opts.truncate {
+            std_opts.truncate(true);
+        }
+        #[cfg(target_os = "linux")]
+        if self.use_direct_io {
+            use std::os::unix::fs::OpenOptionsExt;
+            std_opts.custom_flags(0o40000);
+        }
+        let file = std_opts.open(&segment_path)?;
+        Ok(BlockSegment {
+            device: self.clone(),
+            file,
+        })
+    }
+
+    #[allow(clippy::unused_self)]
+    pub(crate) fn rename_segment(&self, from: &Path, to: &Path) -> io::Result<()> {
+        std::fs::rename(from, to)
+    }
+
+    #[allow(clippy::unused_self)]
+    pub(crate) fn unlink_segment(&self, segment_path: &Path) -> io::Result<()> {
+        std::fs::remove_file(segment_path)
+    }
+
+    #[allow(clippy::unused_self)]
+    pub(crate) fn list_layout(&self, layout_path: &Path) -> io::Result<Vec<PathBuf>> {
+        let mut entries = Vec::new();
+        let rd = std::fs::read_dir(layout_path)?;
+        for entry in rd.flatten() {
+            entries.push(entry.path());
+        }
+        Ok(entries)
+    }
+
+    #[allow(clippy::unused_self)]
+    pub(crate) fn create_layout(&self, layout_path: &Path) -> io::Result<()> {
+        std::fs::create_dir_all(layout_path)
+    }
+
+    #[allow(clippy::unused_self)]
+    pub(crate) fn contains_path(&self, path: &Path) -> bool {
+        path.exists()
+    }
+}
+
+impl Default for BlockDevice {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub(crate) struct BlockSegment {
+    device: BlockDevice,
+    file: std::fs::File,
+}
+
+impl BlockSegment {
+    pub fn write_at(&self, data: &[u8], offset: u64) -> io::Result<usize> {
+        self.write_bytes_to_file(&self.file, data, offset)?;
+        self.device.write_count.fetch_add(1, Ordering::AcqRel);
+        self.device
+            .logical_bytes_written
+            .fetch_add(data.len() as u64, Ordering::AcqRel);
+        Ok(data.len())
+    }
+
+    pub fn write_vectored_at(&self, bufs: &[std::io::IoSlice<'_>], offset: u64) -> io::Result<usize> {
+        let total_len: usize = bufs.iter().map(|b| b.len()).sum();
+        let mut cur_offset = offset;
+        for buf in bufs {
+            self.write_bytes_to_file(&self.file, buf, cur_offset)?;
+            cur_offset += buf.len() as u64;
+        }
+        self.device.write_count.fetch_add(1, Ordering::AcqRel);
+        self.device
+            .logical_bytes_written
+            .fetch_add(total_len as u64, Ordering::AcqRel);
+        Ok(total_len)
+    }
+
+    fn write_bytes_to_file(&self, file: &std::fs::File, data: &[u8], offset: u64) -> io::Result<()> {
+        match self.device.alignment {
+            WalBlockAlignment::Unaligned => {
+                file.write_at(data, offset)?;
+                self.device
+                    .physical_bytes_written
+                    .fetch_add(data.len() as u64, Ordering::AcqRel);
+            }
+            WalBlockAlignment::Aligned { io_unit_bytes } => {
+                let plan = self.device.alignment.plan_write(offset, data.len());
+                let aligned_off = plan.aligned_offset;
+                let aligned_len = plan.aligned_len;
+                let mut raw = vec![0u8; aligned_len + io_unit_bytes];
+                let start = raw.as_mut_ptr().align_offset(io_unit_bytes);
+                if start >= io_unit_bytes {
+                    return Err(io::Error::other("BlockDevice: failed to align O_DIRECT buffer"));
+                }
+                let buf = &mut raw[start..start + aligned_len];
+                if plan.requires_read_modify_write {
+                    match file.read_at(buf, aligned_off) {
+                        Ok(_) => {}
+                        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {}
+                        Err(e) => return Err(e),
+                    }
+                    self.device.rmw_count.fetch_add(1, Ordering::AcqRel);
+                }
+                let payload_off = plan.payload_offset_within_aligned;
+                buf[payload_off..payload_off + data.len()].copy_from_slice(data);
+                file.write_at(buf, aligned_off)?;
+                self.device
+                    .physical_bytes_written
+                    .fetch_add(aligned_len as u64, Ordering::AcqRel);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        self.file.read_at(buf, offset)
+    }
+
+    pub fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        let n = self.read_at(buf, offset)?;
+        if n < buf.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "BlockSegment: read_exact_at short read: wanted {} got {n}",
+                    buf.len()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn fdatasync(&self) -> io::Result<()> {
+        self.device.fdatasync_count.fetch_add(1, Ordering::AcqRel);
+        self.file.sync_data()?;
+        Ok(())
+    }
+
+    pub fn fsync(&self) -> io::Result<()> {
+        self.fdatasync()
+    }
+
+    pub fn len(&self) -> io::Result<u64> {
+        Ok(self.file.metadata()?.len())
+    }
+
+    pub fn truncate(&self, len: u64) -> io::Result<()> {
+        self.file.set_len(len)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MemBlockDevice — in-memory test harness with error/corruption injection.
+// ---------------------------------------------------------------------------
+
+/// In-memory block device for deterministic failure testing. Stores segments
+/// as `BTreeMap<PathBuf, Vec<u8>>` and supports error injection
+/// ([`BlockDeviceController`]) and corruption injection. `fdatasync` is a
+/// no-op (data is already "durable" in RAM).
+///
+/// Two write implementations are selected by [`Self::alignment`]:
+/// - [`WalBlockAlignment::Unaligned`] — byte-addressable (RAM / SCM / PMEM
+///   model). Default via [`MemBlockDevice::new`].
+/// - [`WalBlockAlignment::Aligned`] — block-aligned with read-modify-write,
+///   modelling an SSD/NVMe I/O unit without real files. Via
+///   [`MemBlockDevice::with_alignment`].
+#[derive(Clone)]
+pub struct MemBlockDevice {
     segments: Arc<Mutex<BTreeMap<PathBuf, Vec<u8>>>>,
     layouts: Arc<Mutex<BTreeSet<PathBuf>>>,
     controller: BlockDeviceController,
     write_count: Arc<AtomicU64>,
     fdatasync_count: Arc<AtomicU64>,
     alignment: WalBlockAlignment,
-    /// Logical (payload) bytes accepted by `write_at`.
     logical_bytes_written: Arc<AtomicU64>,
-    /// Physical bytes the device actually wrote (aligned ranges). Equals
-    /// `logical_bytes_written` for an unaligned device.
     physical_bytes_written: Arc<AtomicU64>,
-    /// Number of writes that required a read-modify-write of a partial block.
     rmw_count: Arc<AtomicU64>,
 }
 
-impl BlockDevice {
-    /// Create an unaligned (byte-addressable) block device — the simple path
-    /// modelling RAM / SCM / PMEM.
+impl MemBlockDevice {
+    /// Create an unaligned (byte-addressable) in-memory block device — the
+    /// simple path modelling RAM / SCM / PMEM.
     #[must_use]
     pub fn new() -> Self {
+        tracing::info!("MemBlockDevice::new — in-memory, unaligned");
         Self::with_alignment(WalBlockAlignment::Unaligned)
     }
 
-    /// Create an aligned block device modelling an SSD/NVMe using the default
-    /// I/O unit size (`WalBlockAlignment::DEFAULT_IO_UNIT_BYTES`).
-    #[must_use]
-    pub fn ssd() -> Self {
-        Self::with_alignment(WalBlockAlignment::default_aligned())
-    }
-
-    /// Create a block device with an explicit alignment mode.
+    /// Create an in-memory block device with an explicit alignment mode.
     #[must_use]
     pub fn with_alignment(alignment: WalBlockAlignment) -> Self {
         Self {
@@ -165,35 +412,37 @@ impl BlockDevice {
         self.fdatasync_count.load(Ordering::Acquire)
     }
 
-    /// Total logical (payload) bytes accepted by writes.
     #[must_use]
     pub fn logical_bytes_written(&self) -> u64 {
         self.logical_bytes_written.load(Ordering::Acquire)
     }
 
-    /// Total physical bytes written to the underlying media. For an aligned
-    /// device this is larger than [`Self::logical_bytes_written`] whenever
-    /// writes are not block-aligned (write amplification).
     #[must_use]
     pub fn physical_bytes_written(&self) -> u64 {
         self.physical_bytes_written.load(Ordering::Acquire)
     }
 
-    /// Number of writes that triggered a read-modify-write of a partial block.
     #[must_use]
     pub fn rmw_count(&self) -> u64 {
         self.rmw_count.load(Ordering::Acquire)
     }
 
-    pub(crate) fn open_segment(&self, segment_path: &Path, opts: &OpenOptions) -> io::Result<BlockSegment> {
+    pub(crate) fn open_segment(
+        &self,
+        segment_path: &Path,
+        opts: &OpenOptions,
+    ) -> io::Result<MemBlockSegment> {
+        let segment_path = segment_path.to_path_buf();
         self.controller.apply_corruptions(&self.segments);
         self.controller.check_io()?;
-        let segment_path = segment_path.to_path_buf();
         let mut segments = self.segments.lock();
         if opts.create_new && segments.contains_key(&segment_path) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
-                format!("BlockDevice: segment already exists: {}", segment_path.display()),
+                format!(
+                    "MemBlockDevice: segment already exists: {}",
+                    segment_path.display()
+                ),
             ));
         }
         if opts.create && !segments.contains_key(&segment_path) {
@@ -207,10 +456,10 @@ impl BlockDevice {
         if !segments.contains_key(&segment_path) {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("BlockDevice: segment not found: {}", segment_path.display()),
+                format!("MemBlockDevice: segment not found: {}", segment_path.display()),
             ));
         }
-        Ok(BlockSegment {
+        Ok(MemBlockSegment {
             segment_path,
             device: self.clone(),
         })
@@ -222,7 +471,7 @@ impl BlockDevice {
         let data = segments.remove(from).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("BlockDevice rename_segment: not found: {}", from.display()),
+                format!("MemBlockDevice rename_segment: not found: {}", from.display()),
             )
         })?;
         segments.insert(to.to_path_buf(), data);
@@ -236,7 +485,7 @@ impl BlockDevice {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!(
-                    "BlockDevice unlink_segment: not found: {}",
+                    "MemBlockDevice unlink_segment: not found: {}",
                     segment_path.display()
                 ),
             ));
@@ -287,20 +536,18 @@ impl BlockDevice {
     }
 }
 
-impl Default for BlockDevice {
+impl Default for MemBlockDevice {
     fn default() -> Self {
         Self::new()
     }
 }
 
-pub(crate) struct BlockSegment {
+pub(crate) struct MemBlockSegment {
     segment_path: PathBuf,
-    device: BlockDevice,
+    device: MemBlockDevice,
 }
 
-impl BlockSegment {
-    /// Write `data` at byte `offset`, dispatching to the device's alignment
-    /// implementation.
+impl MemBlockSegment {
     pub fn write_at(&self, data: &[u8], offset: u64) -> io::Result<usize> {
         self.device.controller.check_write()?;
         self.write_bytes(data, offset)?;
@@ -311,9 +558,6 @@ impl BlockSegment {
         Ok(data.len())
     }
 
-    /// Write multiple non-contiguous buffers at `offset` as a single logical
-    /// write operation. The underlying simulated media still copies each slice,
-    /// but this avoids a caller-side concatenation copy.
     pub fn write_vectored_at(&self, bufs: &[std::io::IoSlice<'_>], offset: u64) -> io::Result<usize> {
         self.device.controller.check_write()?;
         let total_len: usize = bufs.iter().map(|b| b.len()).sum();
@@ -329,8 +573,6 @@ impl BlockSegment {
         Ok(total_len)
     }
 
-    /// Internal byte copy: applies the data to the in-memory segment without
-    /// updating any counters. Used by both `write_at` and `write_vectored_at`.
     fn write_bytes(&self, data: &[u8], offset: u64) -> io::Result<()> {
         match self.device.alignment {
             WalBlockAlignment::Unaligned => self.write_unaligned(data, offset),
@@ -338,13 +580,11 @@ impl BlockSegment {
         }
     }
 
-    /// Byte-addressable write: payload lands directly at `offset`. Models
-    /// RAM / SCM / PMEM where there is no alignment requirement.
     fn write_unaligned(&self, data: &[u8], offset: u64) -> io::Result<()> {
         let mut segments = self.device.segments.lock();
         let segment_data = segments
             .get_mut(&self.segment_path)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "BlockSegment: segment removed"))?;
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "MemBlockSegment: segment removed"))?;
         let off = usize::try_from(offset).expect("offset exceeds usize");
         let end = off + data.len();
         if end > segment_data.len() {
@@ -357,25 +597,17 @@ impl BlockSegment {
         Ok(())
     }
 
-    /// Block-aligned write: the logical write is widened to the enclosing
-    /// aligned range and applied as a read-modify-write so the device only ever
-    /// performs aligned physical I/O. Models an SSD/NVMe whose I/O unit equals
-    /// the configured alignment. Tracks the resulting write amplification.
     fn write_aligned(&self, data: &[u8], offset: u64) -> io::Result<()> {
         let plan = self.device.alignment.plan_write(offset, data.len());
         let mut segments = self.device.segments.lock();
         let segment_data = segments
             .get_mut(&self.segment_path)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "BlockSegment: segment removed"))?;
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "MemBlockSegment: segment removed"))?;
         let aligned_off = usize::try_from(plan.aligned_offset).expect("aligned offset exceeds usize");
         let aligned_end = aligned_off + plan.aligned_len;
-        // Physical media advances in whole I/O units; grow to the aligned end.
         if aligned_end > segment_data.len() {
             segment_data.resize(aligned_end, 0);
         }
-        // Read-modify-write: the enclosing block is read (it is already present
-        // in `segment_data`), the payload region overwritten, and the whole
-        // aligned block rewritten. Direct overlay yields identical final bytes.
         let payload_off = aligned_off + plan.payload_offset_within_aligned;
         segment_data[payload_off..payload_off + data.len()].copy_from_slice(data);
         self.device
@@ -388,12 +620,12 @@ impl BlockSegment {
     }
 
     pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
-        self.device.controller.apply_corruptions(&self.device.segments);
         self.device.controller.check_io()?;
+        self.device.controller.apply_corruptions(&self.device.segments);
         let segments = self.device.segments.lock();
         let segment_data = segments
             .get(&self.segment_path)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "BlockSegment: segment removed"))?;
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "MemBlockSegment: segment removed"))?;
         let off = usize::try_from(offset).expect("offset exceeds usize");
         if off >= segment_data.len() {
             return Ok(0);
@@ -410,7 +642,7 @@ impl BlockSegment {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 format!(
-                    "BlockSegment: read_exact_at short read: wanted {} got {n}",
+                    "MemBlockSegment: read_exact_at short read: wanted {} got {n}",
                     buf.len()
                 ),
             ));
@@ -434,7 +666,7 @@ impl BlockSegment {
         let segments = self.device.segments.lock();
         let segment_data = segments
             .get(&self.segment_path)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "BlockSegment: segment removed"))?;
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "MemBlockSegment: segment removed"))?;
         Ok(segment_data.len() as u64)
     }
 
@@ -443,7 +675,7 @@ impl BlockSegment {
         let mut segments = self.device.segments.lock();
         let segment_data = segments
             .get_mut(&self.segment_path)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "BlockSegment: segment removed"))?;
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "MemBlockSegment: segment removed"))?;
         segment_data.truncate(usize::try_from(len).expect("len exceeds usize"));
         Ok(())
     }

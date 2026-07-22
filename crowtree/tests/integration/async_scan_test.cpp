@@ -85,6 +85,7 @@ std::map<std::string, std::string> unpack_entries(const ct_buf &buf, uint64_t co
         std::string key(reinterpret_cast<const char *>(p + pos), klen);
         pos += klen;
         (void)get_u64(); // slot, unused by these tests
+        pos += 1;        // tombstone flag, unused by these tests
         uint32_t    vlen = get_u32();
         std::string val(reinterpret_cast<const char *>(p + pos), vlen);
         pos += vlen;
@@ -146,7 +147,7 @@ TEST(AsyncScan, MatchesSyncScanOutputIncludingTruncation)
     ct_buf   sync_entries = {};
     uint64_t sync_count   = 0;
     int32_t  sync_trunc   = 0;
-    ASSERT_EQ(ct_scan(t, nullptr, 0, 12, &sync_entries, &sync_count, &sync_trunc), 0);
+    ASSERT_EQ(ct_scan(t, nullptr, 0, 12, 0, &sync_entries, &sync_count, &sync_trunc), 0);
     auto sync_map = unpack_entries(sync_entries, sync_count);
     ct_free_buf(&sync_entries);
 

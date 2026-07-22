@@ -135,80 +135,30 @@ void collect_in_order(Resolve &&resolve, uint64_t root_page_id, uint64_t gc_floo
 
 } // namespace
 
-Crowtree::Crowtree(Options opt) : opt_(std::move(opt))
+Crowtree::Crowtree(Options opt) : opt_(std::move(opt)), name_(opt_.name)
 {
     pool_ = std::make_shared<BufferPool>(opt_.buffer_pool_bytes, opt_.frame_bytes, opt_.page_store);
     // Segment recycling (#14b) hands emptied segments to the tree-owned epoch
     // manager so a lock-free reader that already loaded a segment pointer
     // keeps a valid one until its guard drains.
     mapping_.set_epoch_manager(&epoch_);
+    active_ = std::make_shared<MemTable>(memtable_next_id_.fetch_add(1, std::memory_order_relaxed));
     // Initialize with a single empty leaf as the root.
     uint64_t page_id = mapping_.allocate_page_id();
     mapping_.store(page_id, LeafBase::build({}, kInvalidPageId, pool_, opt_.frame_bytes));
     root_page_id_.store(page_id);
-    // Safe here: a directly-constructed tree (not via Crowtree::open()) has no
-    // further single-threaded mutation phase, so it's fine to start immediately.
-    // Crowtree::open() (persist.cpp) suppresses this and starts explicitly after
-    // recovery instead (recovery mutates the tree without write_mutex_).
-    start_background_flush_thread();
 }
 
 Crowtree::~Crowtree()
 {
-    CT_LOG_INFO("close: stopping flush thread");
-    stop_flush_thread_.store(true);
-    {
-        std::lock_guard<std::mutex> lk(flush_thread_mu_);
-    }
-    flush_thread_cv_.notify_all();
-    if (flush_thread_.joinable()) {
-        flush_thread_.join();
-    }
     try {
         free_all_resident_pages(/*retire=*/false);
     }
     catch (...) { // NOLINT(bugprone-empty-catch)
         // Destructors must not throw.
     }
-    CT_LOG_INFO("close: done last_applied={} contiguous={}", last_applied_slot_.load(), contiguous_slot_.load());
-}
-
-void Crowtree::start_background_flush_thread()
-{
-    if (!opt_.background_flush || opt_.flush_interval_ms == 0 || flush_thread_.joinable()) {
-        return;
-    }
-    flush_thread_ = std::thread(&Crowtree::background_flush_loop, this);
-}
-
-void Crowtree::background_flush_loop()
-{
-    std::unique_lock<std::mutex> lk(flush_thread_mu_);
-    auto                         last_gc = std::chrono::steady_clock::now();
-    while (!stop_flush_thread_.load()) {
-        flush_thread_cv_.wait_for(lk, std::chrono::milliseconds(opt_.flush_interval_ms));
-        if (stop_flush_thread_.load()) {
-            break;
-        }
-        lk.unlock();
-        // Best-effort: flush() is cheap when L0 has nothing durable-eligible yet
-        // (see flush()'s early-return path) and shares its existing locking with
-        // the apply()-driving thread, so no new synchronization is introduced.
-        (void)flush();
-        // plan-tree #21: reuse this same thread/loop for the periodic
-        // collect_garbage() sweep trigger instead of adding a second thread.
-        // Disabled (opt_.gc_interval_ms == 0) by default; collect_garbage()'s
-        // own leaf-level dropped-count check keeps a no-op tick cheap.
-        if (opt_.gc_interval_ms > 0) {
-            auto now = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_gc).count() >=
-                static_cast<int64_t>(opt_.gc_interval_ms)) {
-                (void)collect_garbage();
-                last_gc = now;
-            }
-        }
-        lk.lock();
-    }
+    CT_LOG_INFO("[{}] close: done last_applied={} contiguous={}", name_, last_applied_slot_.load(),
+                contiguous_slot_.load());
 }
 
 void Crowtree::retire_page(PageBase *p)
@@ -226,6 +176,10 @@ void Crowtree::retire_orphaned_page(uint64_t page_id, PageBase *p)
 
 PageBase *Crowtree::resident(uint64_t page_id) const
 {
+    map_lookup_total_.fetch_add(1, std::memory_order_relaxed);
+    if (metrics_.page_map_lookup_c != nullptr) {
+        metrics_.page_map_lookup_c->inc();
+    }
     uint64_t w = mapping_.get_word(page_id);
     if (slot_word::is_empty(w) || !slot_word::is_unloaded(w)) {
         if (slot_word::is_resident(w)) {
@@ -244,11 +198,13 @@ PageBase *Crowtree::resident(uint64_t page_id) const
     // load_mutex_; double-checked so only one loader installs. The unloaded
     // descriptor is inline in the slot word (no heap allocation), so there is
     // no descriptor to free -- just re-read and check.
+    auto                        dl_t0 = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lk(load_mutex_);
     w = mapping_.get_word(page_id);
     if (slot_word::is_empty(w) || !slot_word::is_unloaded(w)) {
         return slot_word::is_resident(w) ? slot_word::resident_ptr(w) : nullptr; // another loader won
     }
+    demand_load_total_.fetch_add(1, std::memory_order_relaxed);
     uint32_t iu       = opt_.page_store->iu_size();
     uint64_t addr     = slot_word::unloaded_iu_index(w) * iu;
     uint32_t phys_len = slot_word::unloaded_iu_count(w) * iu;
@@ -260,9 +216,26 @@ PageBase *Crowtree::resident(uint64_t page_id) const
     // a committed page; latch it so callers can detect it (the read still degrades
     // to a miss, since the lock-free path can't propagate a Status).
     if (!s.ok()) {
-        CT_LOG_ERROR("demand-load I/O fault: pid={} addr={} len={} status={}", page_id, addr, phys_len, s.to_string());
+        CT_LOG_ERROR("[{}] demand-load I/O fault: pid={} addr={} len={} status={}", name_, page_id, addr, phys_len,
+                     s.to_string());
         io_failed_.store(true);
+        if (metrics_.demand_load_l != nullptr) {
+            auto ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - dl_t0).count();
+            metrics_.demand_load_l->observe(static_cast<uint64_t>(ns));
+        }
+        if (metrics_.page_read_bw != nullptr) {
+            metrics_.page_read_bw->observe(blob.size());
+        }
         return nullptr;
+    }
+    if (metrics_.demand_load_l != nullptr) {
+        auto ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - dl_t0).count();
+        metrics_.demand_load_l->observe(static_cast<uint64_t>(ns));
+    }
+    if (metrics_.page_read_bw != nullptr) {
+        metrics_.page_read_bw->observe(blob.size());
     }
     return install_loaded_page(page_id, addr, phys_len, blob);
 }
@@ -272,18 +245,18 @@ PageBase *Crowtree::install_loaded_page(uint64_t page_id, uint64_t addr, uint32_
 {
     uint32_t raw_len = durable_blob_raw_len(blob.data(), blob.size());
     if (raw_len == 0) {
-        CT_LOG_ERROR("demand-load corrupt blob (raw_len=0): pid={} addr={}", page_id, addr);
+        CT_LOG_ERROR("[{}] demand-load corrupt blob (raw_len=0): pid={} addr={}", name_, page_id, addr);
         io_failed_.store(true);
         return nullptr;
     }
     std::vector<uint8_t> frame(raw_len);
     if (!decode_durable_page(blob.data(), blob.size(), frame.data(), raw_len).ok()) {
-        CT_LOG_ERROR("demand-load decode failed: pid={} addr={} raw_len={}", page_id, addr, raw_len);
+        CT_LOG_ERROR("[{}] demand-load decode failed: pid={} addr={} raw_len={}", name_, page_id, addr, raw_len);
         io_failed_.store(true);
         return nullptr;
     }
     if (!frame_validate(frame.data(), raw_len)) {
-        CT_LOG_ERROR("demand-load frame validation failed: pid={} addr={}", page_id, addr);
+        CT_LOG_ERROR("[{}] demand-load frame validation failed: pid={} addr={}", name_, page_id, addr);
         io_failed_.store(true);
         return nullptr;
     }
@@ -882,7 +855,7 @@ bool Crowtree::maybe_freeze_active(bool force)
         }
     }
     frozen_.push_back(active_);
-    active_ = std::make_shared<MemTable>();
+    active_ = std::make_shared<MemTable>(memtable_next_id_.fetch_add(1, std::memory_order_relaxed));
     // Propagate the known-durable floor to the fresh table immediately (not
     // just on its first flush()) so a stale re-apply landing in it before
     // its own first drain is still correctly rejected.
@@ -899,7 +872,7 @@ void Crowtree::reset_memtables_locked()
 {
     std::unique_lock<std::shared_mutex> lk(memtable_mutex_);
     frozen_.clear();
-    active_ = std::make_shared<MemTable>();
+    active_ = std::make_shared<MemTable>(memtable_next_id_.fetch_add(1, std::memory_order_relaxed));
 }
 
 size_t Crowtree::memtable_count() const
@@ -929,8 +902,6 @@ bool Crowtree::drain_memtable_into_l1_locked(MemTable *mt, uint64_t cs)
     if (metrics_.flush_entries_c != nullptr) {
         metrics_.flush_entries_c->inc_by(drained.size());
     }
-    CT_LOG_INFO("drain: entries={} contiguous_slot={}", drained.size(), cs);
-
     size_t i = 0;
     while (i < drained.size()) {
         auto                    resolve = [this](uint64_t p) { return resident(p); };
@@ -984,6 +955,7 @@ bool Crowtree::drain_memtable_into_l1_locked(MemTable *mt, uint64_t cs)
 
 Status Crowtree::flush()
 {
+    auto                        t0 = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lk(write_mutex_);
     uint64_t                    cs = contiguous_slot_.load();
 
@@ -1008,8 +980,9 @@ Status Crowtree::flush()
         to_drain.swap(frozen_);
     }
 
-    std::shared_ptr<MemTable> active    = current_active();
-    bool                      wrote_any = false;
+    std::shared_ptr<MemTable> active         = current_active();
+    bool                      wrote_any      = false;
+    uint64_t                  entries_before = flush_entries_total_.load(std::memory_order_relaxed);
     for (auto &mt : to_drain) {
         if (drain_memtable_into_l1_locked(mt.get(), cs)) {
             wrote_any = true;
@@ -1038,13 +1011,23 @@ Status Crowtree::flush()
         if (cs > last_applied_slot_.load()) {
             last_applied_slot_.store(cs);
         }
+        if (metrics_.flush_l != nullptr) {
+            auto ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+            metrics_.flush_l->observe(static_cast<uint64_t>(ns));
+        }
         return Status::Ok();
     }
 
     last_applied_slot_.store(cs);
     version_.fetch_add(1);
     maybe_evict_locked(); // keep cache bounded; only clean bases go
-    CT_LOG_INFO("flush: drained tables={} last_applied={}", to_drain.size(), cs);
+    uint64_t entries_drained = flush_entries_total_.load(std::memory_order_relaxed) - entries_before;
+    CT_LOG_INFO("[{}] flush: tables={} entries={} contiguous_slot={}", name_, to_drain.size(), entries_drained, cs);
+    if (metrics_.flush_l != nullptr) {
+        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+        metrics_.flush_l->observe(static_cast<uint64_t>(ns));
+    }
     return Status::Ok();
 }
 
@@ -1058,6 +1041,7 @@ void Crowtree::flush_async(std::function<void(Status)> on_done) // NOLINT(perfor
 
 void Crowtree::consolidate_locked(uint64_t page_id)
 {
+    auto      t0   = std::chrono::steady_clock::now();
     PageBase *head = resident(page_id);
     if (head == nullptr) {
         return;
@@ -1090,6 +1074,10 @@ void Crowtree::consolidate_locked(uint64_t page_id)
     }
 
     maybe_split_or_merge_locked(page_id);
+    if (metrics_.page_write_l != nullptr) {
+        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
+        metrics_.page_write_l->observe(static_cast<uint64_t>(ns));
+    }
 }
 
 std::vector<uint64_t> Crowtree::path_to_page_id_locked(uint64_t target_page_id) const
@@ -1642,12 +1630,13 @@ void Crowtree::get_async_attempt(std::shared_ptr<std::string> key_owned, std::fu
         }
         uint32_t iu   = opt_.page_store->iu_size();
         auto     blob = std::make_shared<std::vector<uint8_t>>(round_up_to_iu(plen, iu));
+        demand_load_total_.fetch_add(1, std::memory_order_relaxed);
         opt_.async_page_store->submit_read(
             addr, blob->data(), blob->size(),
             [this, page_id = pending_page_id, addr, plen, blob, key_owned, on_done](Status st) mutable {
                 if (!st.ok()) {
-                    CT_LOG_ERROR("get_async: demand-load I/O fault: pid={} addr={} len={} status={}", page_id, addr,
-                                 plen, st.to_string());
+                    CT_LOG_ERROR("[{}] get_async: demand-load I/O fault: pid={} addr={} len={} status={}", name_,
+                                 page_id, addr, plen, st.to_string());
                     io_failed_.store(true);
                     on_done(GetView()); // not found; no guard was ever entered
                     return;
@@ -1711,7 +1700,8 @@ std::vector<get_result> Crowtree::multi_get(const std::vector<Slice> &keys) cons
     return results;
 }
 
-Status Crowtree::scan(Slice prefix, size_t limit, std::vector<scan_entry> *out, bool *truncated) const
+Status Crowtree::scan(Slice prefix, size_t limit, std::vector<scan_entry> *out, bool *truncated,
+                      bool include_tombstones) const
 {
     out->clear();
     if (truncated != nullptr) {
@@ -1786,7 +1776,7 @@ Status Crowtree::scan(Slice prefix, size_t limit, std::vector<scan_entry> *out, 
             return true;
         }
         CellView v{cell};
-        if (v.is_tombstone()) {
+        if (v.is_tombstone() && !include_tombstones) {
             return true;
         }
         if (limit != 0 && out->size() >= limit) {
@@ -1795,9 +1785,13 @@ Status Crowtree::scan(Slice prefix, size_t limit, std::vector<scan_entry> *out, 
             }
             return false; // stop: a matching entry didn't fit
         }
+        if (v.is_tombstone()) {
+            out->push_back({.key = key.to_string(), .slot = v.slot(), .value = "", .tombstone = true});
+            return true;
+        }
         std::string val =
             v.is_overflow() ? assemble_overflow_value(v.overflow_head(), v.overflow_len()) : v.value().to_string();
-        out->push_back({.key = key.to_string(), .slot = v.slot(), .value = std::move(val)});
+        out->push_back({.key = key.to_string(), .slot = v.slot(), .value = std::move(val), .tombstone = false});
         return true;
     };
 
@@ -2049,12 +2043,13 @@ void Crowtree::scan_async_attempt(std::shared_ptr<std::string> prefix_owned, siz
         }
         uint32_t iu   = opt_.page_store->iu_size();
         auto     blob = std::make_shared<std::vector<uint8_t>>(round_up_to_iu(plen, iu));
+        demand_load_total_.fetch_add(1, std::memory_order_relaxed);
         opt_.async_page_store->submit_read(
             addr, blob->data(), blob->size(),
             [this, page_id = pending_page_id, addr, plen, blob, prefix_owned, limit, on_done](Status st) mutable {
                 if (!st.ok()) {
-                    CT_LOG_ERROR("scan_async: demand-load I/O fault: pid={} addr={} len={} status={}", page_id, addr,
-                                 plen, st.to_string());
+                    CT_LOG_ERROR("[{}] scan_async: demand-load I/O fault: pid={} addr={} len={} status={}", name_,
+                                 page_id, addr, plen, st.to_string());
                     io_failed_.store(true);
                     on_done(st, {}, false);
                     return;
@@ -2365,6 +2360,7 @@ EngineStats Crowtree::stats() const
     s.gc_watermark              = gc_floor_.load();
     s.io_failed                 = io_failed_.load();
     s.snapshot_pages_written    = snapshot_pages_written_.load();
+    s.snapshot_pages_total      = snapshot_pages_total_.load();
     s.snapshot_segments_written = snapshot_segments_written_.load();
 
     BufferPool::Stats bp     = pool_->stats();
@@ -2382,30 +2378,75 @@ EngineStats Crowtree::stats() const
     s.mt_get_hit_total    = mt_get_hit_total_.load(std::memory_order_relaxed);
     s.flush_drain_total   = flush_drain_total_.load(std::memory_order_relaxed);
     s.flush_entries_total = flush_entries_total_.load(std::memory_order_relaxed);
+    s.snapshot_total      = snapshot_total_.load(std::memory_order_relaxed);
     s.l1_get_total        = l1_get_total_.load(std::memory_order_relaxed);
     s.l1_get_hit_total    = l1_get_hit_total_.load(std::memory_order_relaxed);
+    s.map_lookup_total    = map_lookup_total_.load(std::memory_order_relaxed);
+    s.demand_load_total   = demand_load_total_.load(std::memory_order_relaxed);
     return s;
 }
 
-void Crowtree::set_metrics(MetricsRegistry *registry, const std::string &prefix)
+void Crowtree::init_metrics(const std::string &prefix)
 {
-    metrics_.buf_hits        = registry->register_counter(prefix + ".buf.hits.c");
-    metrics_.buf_misses      = registry->register_counter(prefix + ".buf.misses.c");
-    metrics_.buf_evictions   = registry->register_counter(prefix + ".buf.evictions.c");
-    metrics_.buf_writebacks  = registry->register_counter(prefix + ".buf.writebacks.c");
-    metrics_.buf_resident    = registry->register_gauge(prefix + ".buf.resident.g");
-    metrics_.buf_dirty       = registry->register_gauge(prefix + ".buf.dirty.g");
-    metrics_.apply_l         = registry->register_summary(prefix + ".apply.l");
-    metrics_.snapshot_l      = registry->register_summary(prefix + ".snapshot.l");
-    metrics_.mt_upsert_c     = registry->register_counter(prefix + ".mt.upsert.c");
-    metrics_.mt_get_c        = registry->register_counter(prefix + ".mt.get.c");
-    metrics_.mt_get_hit_c    = registry->register_counter(prefix + ".mt.get.hit.c");
-    metrics_.flush_drain_c   = registry->register_counter(prefix + ".flush.drain.c");
-    metrics_.flush_entries_c = registry->register_counter(prefix + ".flush.entries.c");
-    metrics_.l1_get_c        = registry->register_counter(prefix + ".l1.get.c");
-    metrics_.l1_get_hit_c    = registry->register_counter(prefix + ".l1.get.hit.c");
+    metrics_registry_ = std::make_unique<MetricsRegistry>();
+    auto *r           = metrics_registry_.get();
+
+    metrics_.buf_hits                    = r->register_counter(prefix + ".buf.hits.c");
+    metrics_.buf_misses                  = r->register_counter(prefix + ".buf.misses.c");
+    metrics_.buf_evictions               = r->register_counter(prefix + ".buf.evictions.c");
+    metrics_.buf_writebacks              = r->register_counter(prefix + ".buf.writebacks.c");
+    metrics_.buf_resident                = r->register_gauge(prefix + ".buf.resident.g");
+    metrics_.buf_dirty                   = r->register_gauge(prefix + ".buf.dirty.g");
+    metrics_.apply_l                     = r->register_summary(prefix + ".apply.l");
+    metrics_.snapshot_l                  = r->register_summary(prefix + ".snapshot.l");
+    metrics_.mt_upsert_c                 = r->register_counter(prefix + ".mt.upsert.c");
+    metrics_.mt_get_c                    = r->register_counter(prefix + ".mt.get.c");
+    metrics_.mt_get_hit_c                = r->register_counter(prefix + ".mt.get.hit.c");
+    metrics_.flush_drain_c               = r->register_counter(prefix + ".flush.drain.c");
+    metrics_.flush_entries_c             = r->register_counter(prefix + ".flush.entries.c");
+    metrics_.l1_get_c                    = r->register_counter(prefix + ".l1.get.c");
+    metrics_.l1_get_hit_c                = r->register_counter(prefix + ".l1.get.hit.c");
+    metrics_.flush_l                     = r->register_summary(prefix + ".flush.l");
+    metrics_.page_write_l                = r->register_summary(prefix + ".page.write.l");
+    metrics_.page_map_lookup_c           = r->register_counter(prefix + ".page.map.lookup.c");
+    metrics_.demand_load_l               = r->register_summary(prefix + ".demand.load.l");
+    metrics_.snapshot_apply_l            = r->register_summary(prefix + ".snapshot.apply.l");
+    metrics_.snapshot_page_write_l       = r->register_summary(prefix + ".snapshot.page.write.io.l");
+    metrics_.snapshot_page_write_cache_c = r->register_counter(prefix + ".snapshot.page.write.cache.c");
+    metrics_.snapshot_page_write_bw      = r->register_bandwidth(prefix + ".snapshot.page.write.bw");
+    metrics_.snapshot_meta_write_bw      = r->register_bandwidth(prefix + ".snapshot.meta.write.bw");
+    metrics_.page_read_bw                = r->register_bandwidth(prefix + ".page.read.bw");
+    metrics_.snapshot_pages_c            = r->register_counter(prefix + ".snapshot.pages.c");
     pool_->set_metrics(metrics_.buf_hits, metrics_.buf_misses, metrics_.buf_evictions, metrics_.buf_writebacks,
                        metrics_.buf_resident, metrics_.buf_dirty);
+}
+
+std::string Crowtree::flush_metrics_str(double window_secs, const char *timestamp, size_t width, size_t count_w,
+                                        size_t tps_w)
+{
+    if (metrics_registry_ == nullptr) {
+        return {};
+    }
+    char  *buf = nullptr;
+    size_t len = 0;
+    FILE  *fp  = open_memstream(&buf, &len);
+    if (fp == nullptr) {
+        return {};
+    }
+    metrics_registry_->flush_to(fp, window_secs, timestamp, "cpp-metrics", width, count_w, tps_w);
+    std::fflush(fp);
+    std::fclose(fp);
+    std::string result(buf, len);
+    free(buf);
+    return result;
+}
+
+size_t Crowtree::max_name_len() const
+{
+    if (metrics_registry_ == nullptr) {
+        return 0;
+    }
+    return metrics_registry_->max_name_len();
 }
 
 std::shared_ptr<Snapshot> Crowtree::snapshot_view()

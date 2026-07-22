@@ -43,9 +43,8 @@ std::string temp_path()
 }
 
 // Bounded poll for a background-thread-set flag, matching the style already
-// used for the background flush/GC threads (background_flush_test.cpp,
-// gc_test.cpp): no condvar wiring for the test's own synchronization, just
-// a short sleep loop with a generous overall deadline.
+// used in other tests: no condvar wiring for the test's own synchronization,
+// just a short sleep loop with a generous overall deadline.
 template <typename Pred> bool wait_for(Pred pred, int max_iters = 200, int sleep_ms = 5)
 {
     for (int i = 0; i < max_iters; ++i) {

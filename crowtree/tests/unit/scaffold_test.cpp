@@ -57,5 +57,4 @@ TEST(Options, Defaults)
     EXPECT_EQ(o.max_delta_len, 8U);
     EXPECT_EQ(o.max_delta_bytes, 256U * 1024U);
     EXPECT_GT(o.leaf_split_bytes, o.leaf_merge_bytes);
-    EXPECT_FALSE(o.background_flush);
 }

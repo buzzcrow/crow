@@ -1,6 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
+use bytes::Bytes;
 use crowkv::cluster::group::PxGroup;
 use crowkv::cluster::kv_store::KvStore;
 use crowkv::cluster::{KvServer, PxKvStore, PxLocalReplica, PxLocalReplicaRole, PxRemoteReplica};
@@ -48,13 +49,13 @@ async fn kv_ops_apply_locally_for_single_leader() {
             1,
             vec![
                 KvBatchItem {
-                    key: b"k1".to_vec(),
-                    value: b"v2".to_vec(),
+                    key: Bytes::from_static(b"k1"),
+                    value: Bytes::from_static(b"v2"),
                     is_delete: false,
                 },
                 KvBatchItem {
-                    key: b"k2".to_vec(),
-                    value: b"v2".to_vec(),
+                    key: Bytes::from_static(b"k2"),
+                    value: Bytes::from_static(b"v2"),
                     is_delete: false,
                 },
             ],
@@ -122,7 +123,7 @@ async fn classic_prepare_and_accept_track_state() {
         payload: bytes::Bytes::from_static(b"payload"),
     };
 
-    let accept_reply = node.on_accept(entry.clone()).await;
+    let accept_reply = node.on_accept(&entry).await;
     assert!(matches!(
         accept_reply,
         crowkv::paxos::roles::PxAcceptReply::Accepted { .. }
@@ -159,7 +160,7 @@ async fn read_modes_serve_value_with_slots_on_single_leader() {
     // (lease starts expired), confirms quorum trivially, and serves locally.
     let lin = store.kv_get(1, b"rk", 0, 0, 2, 2).await;
     assert!(
-        lin.ok && lin.value == b"rv",
+        lin.ok && lin.value.as_ref() == b"rv",
         "linearizable read should hit: {lin:?}"
     );
     assert!(
@@ -171,7 +172,7 @@ async fn read_modes_serve_value_with_slots_on_single_leader() {
     // frontier has caught up, so it is served locally.
     let ryw = store.kv_get(1, b"rk", 1, revision, 3, 3).await;
     assert!(
-        ryw.ok && ryw.value == b"rv",
+        ryw.ok && ryw.value.as_ref() == b"rv",
         "read-your-writes should hit: {ryw:?}"
     );
 
@@ -186,11 +187,14 @@ async fn read_modes_serve_value_with_slots_on_single_leader() {
     // BoundedStale (mode 2) and BestEffort (mode 3) always serve locally.
     let bounded = store.kv_get(1, b"rk", 2, 0, 5, 5).await;
     assert!(
-        bounded.ok && bounded.value == b"rv",
+        bounded.ok && bounded.value.as_ref() == b"rv",
         "bounded-stale read should hit"
     );
     let best = store.kv_get(1, b"rk", 3, 0, 6, 6).await;
-    assert!(best.ok && best.value == b"rv", "best-effort read should hit");
+    assert!(
+        best.ok && best.value.as_ref() == b"rv",
+        "best-effort read should hit"
+    );
 }
 
 #[tokio::test]
@@ -216,7 +220,7 @@ async fn kv_get_returns_per_key_revision() {
     assert!(slot2 > slot1, "overwrite should land at a higher slot");
 
     let get2 = store.kv_get(1, b"rk", 0, 0, 4, 4).await;
-    assert!(get2.ok && get2.value == b"v2");
+    assert!(get2.ok && get2.value.as_ref() == b"v2");
     assert_eq!(
         get2.revision, slot2,
         "kv_get revision should match the latest write slot"

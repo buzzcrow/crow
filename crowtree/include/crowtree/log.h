@@ -48,6 +48,11 @@ void shutdown_logging();
 // nothing is emitted before logging is configured.
 [[nodiscard]] bool logging_enabled();
 
+// Set the current thread's name for CT_LOG output (stored thread_local and
+// also passed to pthread_setname_np for debugger/htop visibility). Should be
+// called at the start of each engine thread's body.
+void set_current_thread_name(const char *name);
+
 } // namespace crowtree
 
 #ifdef CROWTREE_HAVE_SPDLOG

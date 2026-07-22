@@ -28,6 +28,24 @@ From past experience building storage systems, a high-performance distributed KV
 
 ![Failover](doc/assets/demo-failover.gif)
 
+**Write Performance — Inflight Window & Queue Admission** — Multi-Paxos allows slots to be decided out of order, but the leader still needs an admission control window to cap memory pressure from in-flight proposals. CrowKV uses a queue-based admission policy (R18): when the window is full, proposals block on a semaphore instead of being rejected as `Busy`. This eliminates client-side retry storms while maintaining the same peak throughput.
+
+The benchmark below (3-node cluster, in-memory WAL + storage, write-only, 512-byte values, 1M key space, 12-second duration) shows two key results:
+
+- **Window = 1** (effectively Raft-style sequential commit): at 16 concurrent writers, **zero rejections** — the queue absorbs all contention. Throughput is ~13K ops/s (serialized by the 1-permit window).
+- **Window = 16** (Paxos pipelined commit): zero rejections, throughput reaches ~37K ops/s — **2.8× faster** than window=1 under the same load.
+- **Window = 64, 64 threads** (full pipeline): peak throughput of **50K ops/s** with zero rejections and p99 latency under 2ms.
+
+| Window | Threads | Connections | Throughput (ops/s) | Avg Latency | p99 Latency | Busy Rejections |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 1 | 9,074 | 109 µs | 198 µs | 0 |
+| 1 | 16 | 4 | 13,278 | 1,203 µs | 1,360 µs | 0 |
+| 16 | 1 | 1 | 8,969 | 110 µs | 168 µs | 0 |
+| 16 | 16 | 4 | 36,661 | 434 µs | 642 µs | 0 |
+| 64 | 64 | 8 | 50,107 | 1,275 µs | 1,942 µs | 0 |
+
+At 1 thread the window size makes no difference (only one proposal in flight at a time). At 16 threads the inflight window is the difference between a serialized bottleneck and a fully pipelined commit path — exactly the architectural advantage Multi-Paxos holds over Raft on the write hot path. Queue-based admission ensures this advantage is realized without any client-side retry logic: **zero `Busy` rejections across all configurations**.
+
 ## Why Multi-Paxos?
 
 Raft's log is contiguous by construction: a leader cannot acknowledge slot N+1 until slot N is committed. Under high concurrency this becomes a sequential bottleneck.

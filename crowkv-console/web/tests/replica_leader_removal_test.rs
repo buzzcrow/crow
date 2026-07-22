@@ -97,7 +97,7 @@ async fn spawn_upstream(node_id: &str, workspace: &std::path::Path) -> Option<Up
         server_id: node_id.into(),
         mgmt_port: pick_free_port(),
         grpc_port: pick_free_port(),
-        election_profile: Some("test".into()),
+        election_profile: Some("e2e".into()),
         binary: Some(bin),
         ..Default::default()
     };

@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
+use futures::future::join_all;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
@@ -22,8 +23,8 @@ use crate::cluster::remote_replica::PxRemoteReplica;
 use crate::cluster::replica::{
     Replica, ReplicaClient, ReplicaHandler, StepDownReply, StepDownRequestPayload,
 };
-use crate::cluster::status::{GroupStatus, StatusLevel};
-use crate::common::config::{PaxosConfig, PxElectionConfig};
+use crate::cluster::status::{GroupStatus, InflightStatus, StatusLevel};
+use crate::common::config::{AdmissionPolicy, PaxosConfig, PxElectionConfig};
 use crate::common::report::OperationReport;
 use crate::paxos::error::{PxPaxosError, PxPaxosPhase, PxRetryAction};
 use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply, SlotIndex};
@@ -109,12 +110,13 @@ pub struct PxGroup {
     /// local WAL to report its own snapshot progress). Recomputed at the
     /// end of each quorum heartbeat round.
     pub(crate) group_snapshot_slot: AtomicU64,
-    /// Proposer sliding-window admission gate. Holds `PaxosConfig::proposer_window`
-    /// permits; each in-flight `propose` call holds one for its duration, so at
-    /// most `window` proposals are allocated-but-not-chosen at once. A proposal
-    /// that cannot immediately acquire a permit returns `ProposeResult::Busy`
-    /// (retryable) rather than blocking the caller.
-    pub(crate) proposer_window: tokio::sync::Semaphore,
+    /// In-flight proposal admission gate. Holds N semaphores (one per
+    /// queue), each sized to `ceil(max_inflight / N)` permits. Each
+    /// in-flight `propose` call holds one permit for its duration.
+    /// Depending on `policy`, a full queue either fails fast with
+    /// `ProposeResult::Busy` (Reject) or blocks on `acquire().await`
+    /// (Queue).
+    pub(crate) inflight: InflightAdmission,
     /// Optional file-based config store for persisting group membership.
     /// Set via [`Self::set_config_store`] when the group has a WAL directory.
     /// When set, [`Self::persist_config`] writes to the config file instead
@@ -130,6 +132,14 @@ pub struct PxGroup {
     /// configs separated by more than one change, so "close enough"
     /// epoch matching is not safe -- only exact match is.
     pub(crate) membership_epoch: AtomicU64,
+    /// Slot covered by the last `persist_snapshot()` call. Used by
+    /// `run_pass` to gate expensive disk snapshots on a slot-advance
+    /// threshold (`snapshot_slot_threshold`).
+    pub(crate) last_snapshot_slot: AtomicU64,
+    /// Wall-clock time of the last `persist_snapshot()` call. Used by
+    /// `run_pass` to gate expensive disk snapshots on a time threshold
+    /// (`snapshot_time_threshold_ms`).
+    pub(crate) last_snapshot_time: parking_lot::Mutex<std::time::Instant>,
 }
 
 impl std::fmt::Debug for PxGroup {
@@ -166,9 +176,15 @@ impl PxGroup {
             group_safe_slot: AtomicU64::new(0),
             peer_durable: parking_lot::Mutex::new(HashMap::new()),
             group_snapshot_slot: AtomicU64::new(0),
-            proposer_window: tokio::sync::Semaphore::new(PaxosConfig::DEFAULT.proposer_window),
+            inflight: InflightAdmission::new(
+                PaxosConfig::DEFAULT.max_inflight_proposals,
+                PaxosConfig::DEFAULT.inflight_queues,
+                PaxosConfig::DEFAULT.inflight_admission,
+            ),
             config_store: None,
             membership_epoch: AtomicU64::new(0),
+            last_snapshot_slot: AtomicU64::new(0),
+            last_snapshot_time: parking_lot::Mutex::new(std::time::Instant::now()),
         };
         group.recompute_quorum();
         group
@@ -180,6 +196,31 @@ impl PxGroup {
     /// dedicated config file (`store{sid}_group{gid}.json`) in the group's conf directory.
     pub fn set_config_store(&mut self, store: GroupConfigStore) {
         self.config_store = Some(store);
+    }
+
+    /// Override the in-flight proposal admission configuration. Must be
+    /// called before the group starts serving proposals.
+    pub fn set_inflight_config(&mut self, max_inflight: usize, queues: usize, policy: AdmissionPolicy) {
+        self.inflight = InflightAdmission::new(max_inflight, queues, policy);
+    }
+
+    /// Current inflight proposal window size (total permits across all
+    /// queues).
+    #[must_use]
+    pub fn inflight_window_size(&self) -> usize {
+        self.inflight.total_permits()
+    }
+
+    /// Number of admission queues.
+    #[must_use]
+    pub fn inflight_queue_count(&self) -> usize {
+        self.inflight.queue_count
+    }
+
+    /// Current admission policy.
+    #[must_use]
+    pub fn inflight_admission_policy(&self) -> AdmissionPolicy {
+        self.inflight.policy
     }
 
     /// Get the config store, if set.
@@ -552,7 +593,7 @@ impl PxGroup {
             .collect();
         self.set_remote_replicas(remotes);
         self.set_membership_epoch(config.membership_epoch);
-        info!(
+        debug!(
             group_id = self.group_id,
             local_id,
             member_count = config.members.len(),
@@ -668,6 +709,15 @@ impl PxGroup {
             messages,
             local_replica,
             remotes,
+            inflight: Some(InflightStatus {
+                queue_count: self.inflight.queue_count,
+                window_per_queue: self.inflight.window_per_queue,
+                policy: self.inflight.policy.label().to_string(),
+                occupied: self.inflight.occupied(),
+                waiting: self.inflight.waiting.load(Ordering::Relaxed),
+                total_enqueued: self.inflight.total_enqueued.load(Ordering::Relaxed),
+                total_wait_us: self.inflight.total_wait_us.load(Ordering::Relaxed),
+            }),
         }
     }
 
@@ -973,13 +1023,14 @@ impl PxGroup {
 
         // Sliding-window admission: cap concurrent in-flight proposals. The
         // permit is held for the whole proposal (released on drop at every
-        // return path below), so a full window fails fast with `Busy` instead
-        // of queuing unboundedly.
-        let Ok(_window_permit) = self.proposer_window.try_acquire() else {
+        // return path below). Depending on the admission policy, a full
+        // window either fails fast with `Busy` (Reject) or blocks until a
+        // permit is freed (Queue).
+        let Some(_window_permit) = self.inflight.acquire_permit().await else {
             warn!(
                 group_id = self.group_id,
-                window = PaxosConfig::DEFAULT.proposer_window,
-                "proposer window full; rejecting proposal as Busy"
+                window = self.inflight.total_permits(),
+                "inflight window full; rejecting proposal as Busy"
             );
             return ProposeResult::Busy;
         };
@@ -1091,7 +1142,7 @@ impl PxGroup {
                         // `last_chosen_slot` watermark advances before
                         // the next heartbeat tick.
                         self.fan_out_chosen_notice(&entry, group_id);
-                        info!(
+                        trace!(
                             group_id,
                             slot = entry.slot,
                             round = entry.ballot.round,
@@ -1241,7 +1292,7 @@ impl PxGroup {
             AcceptAttempt::Chosen => {
                 replica.learn_chosen(&entry, None, None).await;
                 self.fan_out_chosen_notice(&entry, group_id);
-                info!(group_id, slot = gap_slot, "background repair filled gap");
+                debug!(group_id, slot = gap_slot, "background repair filled gap");
                 RepairOutcome::Filled { slot: gap_slot }
             }
             AcceptAttempt::Retry { error, .. } | AcceptAttempt::Fail { error } => {
@@ -1348,53 +1399,68 @@ impl PxGroup {
             }
         }
 
-        for remote in &self.remote_replicas {
-            if let RemoteReplicaKind::Real(remote) = remote {
-                match remote
-                    .send_prepare(slot, ballot, term, group_id, self.membership_epoch())
-                    .await
-                {
-                    Ok(PxPrepareReply::Promised { accepted, .. }) => {
-                        // Non-voting members (catch-up readers) physically
-                        // promise/accept so they can learn chosen values,
-                        // but their reply must not count toward quorum --
-                        // `quorum` above is sized from voting members only.
-                        if remote.voting {
-                            promised += 1;
-                        }
-                        if let Some(prev) = accepted {
-                            Self::consider_accepted(&mut adopted, prev);
-                        }
+        // Concurrent fan-out: issue all prepare RPCs simultaneously
+        // and fold replies into accumulators. This removes one serial
+        // RPC round-trip per additional follower (R14).
+        let prepare_futs: Vec<_> = self
+            .remote_replicas
+            .iter()
+            .filter_map(|remote| {
+                if let RemoteReplicaKind::Real(remote) = remote {
+                    Some(remote.send_prepare(slot, ballot, term, group_id, self.membership_epoch()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let prepare_results = join_all(prepare_futs).await;
+
+        for (remote, result) in self
+            .remote_replicas
+            .iter()
+            .filter(|r| matches!(r, RemoteReplicaKind::Real(_)))
+            .zip(prepare_results)
+        {
+            let RemoteReplicaKind::Real(remote) = remote else {
+                continue;
+            };
+            match result {
+                Ok(PxPrepareReply::Promised { accepted, .. }) => {
+                    if remote.voting {
+                        promised += 1;
                     }
-                    Ok(PxPrepareReply::Rejected { current_promised, .. }) => {
-                        let candidate = current_promised.round;
-                        highest_rejected_round =
-                            Some(highest_rejected_round.map_or(candidate, |r| r.max(candidate)));
+                    if let Some(prev) = accepted {
+                        Self::consider_accepted(&mut adopted, prev);
                     }
-                    Ok(PxPrepareReply::TermStale { new_term, .. }) => {
-                        highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
-                    }
-                    Ok(PxPrepareReply::EpochMismatch { responder_epoch }) => {
-                        warn!(
-                            group_id,
-                            slot,
-                            remote_id = remote.node_id,
-                            proposer_epoch = self.membership_epoch(),
-                            responder_epoch,
-                            "prepare rejected by membership-epoch fence"
-                        );
-                        epoch_mismatch = Some(responder_epoch);
-                    }
-                    Err(error) => {
-                        error!(
-                            group_id,
-                            slot,
-                            remote_id = remote.node_id,
-                            endpoint = remote.endpoint,
-                            error = %error,
-                            "prepare rpc failed"
-                        );
-                    }
+                }
+                Ok(PxPrepareReply::Rejected { current_promised, .. }) => {
+                    let candidate = current_promised.round;
+                    highest_rejected_round =
+                        Some(highest_rejected_round.map_or(candidate, |r| r.max(candidate)));
+                }
+                Ok(PxPrepareReply::TermStale { new_term, .. }) => {
+                    highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
+                }
+                Ok(PxPrepareReply::EpochMismatch { responder_epoch }) => {
+                    warn!(
+                        group_id,
+                        slot,
+                        remote_id = remote.node_id,
+                        proposer_epoch = self.membership_epoch(),
+                        responder_epoch,
+                        "prepare rejected by membership-epoch fence"
+                    );
+                    epoch_mismatch = Some(responder_epoch);
+                }
+                Err(error) => {
+                    error!(
+                        group_id,
+                        slot,
+                        remote_id = remote.node_id,
+                        endpoint = remote.endpoint,
+                        error = %error,
+                        "prepare rpc failed"
+                    );
                 }
             }
         }
@@ -1477,7 +1543,7 @@ impl PxGroup {
             "run accept phase"
         );
 
-        match <PxLocalReplica as ReplicaHandler>::on_accept(replica, entry.clone(), group_id).await {
+        match <PxLocalReplica as ReplicaHandler>::on_accept(replica, entry, group_id).await {
             Ok(PxAcceptReply::Accepted { .. }) => {
                 // See the matching guard in `run_prepare_phase` above.
                 if replica.voting() {
@@ -1506,48 +1572,65 @@ impl PxGroup {
             }
         }
 
-        for remote in &self.remote_replicas {
-            if let RemoteReplicaKind::Real(remote) = remote {
-                match remote
-                    .send_accept(entry, client_id, seq, group_id, self.membership_epoch())
-                    .await
-                {
-                    Ok(PxAcceptReply::Accepted { .. }) => {
-                        // Same non-voting-doesn't-count rule as
-                        // `run_prepare_phase` above.
-                        if remote.voting {
-                            accepted += 1;
-                        }
+        // Concurrent fan-out: issue all accept RPCs simultaneously
+        // and fold replies into accumulators. This removes one serial
+        // RPC round-trip per additional follower (R14).
+        let accept_futs: Vec<_> = self
+            .remote_replicas
+            .iter()
+            .filter_map(|remote| {
+                if let RemoteReplicaKind::Real(remote) = remote {
+                    Some(remote.send_accept(entry, client_id, seq, group_id, self.membership_epoch()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let accept_results = join_all(accept_futs).await;
+
+        for (remote, result) in self
+            .remote_replicas
+            .iter()
+            .filter(|r| matches!(r, RemoteReplicaKind::Real(_)))
+            .zip(accept_results)
+        {
+            let RemoteReplicaKind::Real(remote) = remote else {
+                continue;
+            };
+            match result {
+                Ok(PxAcceptReply::Accepted { .. }) => {
+                    if remote.voting {
+                        accepted += 1;
                     }
-                    Ok(PxAcceptReply::Rejected { current_promised, .. }) => {
-                        let candidate = current_promised.round;
-                        highest_rejected_round =
-                            Some(highest_rejected_round.map_or(candidate, |r| r.max(candidate)));
-                    }
-                    Ok(PxAcceptReply::TermStale { new_term, .. }) => {
-                        highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
-                    }
-                    Ok(PxAcceptReply::EpochMismatch { responder_epoch }) => {
-                        warn!(
-                            group_id,
-                            slot = entry.slot,
-                            remote_id = remote.node_id,
-                            proposer_epoch = self.membership_epoch(),
-                            responder_epoch,
-                            "accept rejected by membership-epoch fence"
-                        );
-                        epoch_mismatch = Some(responder_epoch);
-                    }
-                    Err(error) => {
-                        error!(
-                            group_id,
-                            slot = entry.slot,
-                            remote_id = remote.node_id,
-                            endpoint = remote.endpoint,
-                            error = %error,
-                            "accept rpc failed"
-                        );
-                    }
+                }
+                Ok(PxAcceptReply::Rejected { current_promised, .. }) => {
+                    let candidate = current_promised.round;
+                    highest_rejected_round =
+                        Some(highest_rejected_round.map_or(candidate, |r| r.max(candidate)));
+                }
+                Ok(PxAcceptReply::TermStale { new_term, .. }) => {
+                    highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
+                }
+                Ok(PxAcceptReply::EpochMismatch { responder_epoch }) => {
+                    warn!(
+                        group_id,
+                        slot = entry.slot,
+                        remote_id = remote.node_id,
+                        proposer_epoch = self.membership_epoch(),
+                        responder_epoch,
+                        "accept rejected by membership-epoch fence"
+                    );
+                    epoch_mismatch = Some(responder_epoch);
+                }
+                Err(error) => {
+                    error!(
+                        group_id,
+                        slot = entry.slot,
+                        remote_id = remote.node_id,
+                        endpoint = remote.endpoint,
+                        error = %error,
+                        "accept rpc failed"
+                    );
                 }
             }
         }
@@ -1663,17 +1746,36 @@ impl RemoteReplicaKind {
     }
 }
 
+/// Production metrics helpers for `PxGroup`.
+impl PxGroup {
+    /// Number of in-flight (allocated-but-not-yet-chosen) proposals.
+    /// Derived from all admission queues: sum of `window_per_queue -
+    /// available_permits`.
+    #[must_use]
+    pub fn inflight_slot_count(&self) -> u64 {
+        self.inflight.occupied()
+    }
+}
+
 /// Test-only hooks (compiled under the `test-util` feature). These expose
 /// crate-internal mechanisms — the proposer admission semaphore, a single
 /// repair step, and peer-applied injection — to integration tests under
 /// `tests/` without permanently widening the production public API.
 #[cfg(feature = "test-util")]
 impl PxGroup {
-    /// Borrow the proposer sliding-window admission semaphore so a test can
-    /// exhaust its permits and observe `ProposeResult::Busy`.
+    /// Acquire all inflight admission permits across all queues so a
+    /// test can exhaust the window and observe `ProposeResult::Busy`
+    /// (Reject mode) or blocking (Queue mode). Returns permits that
+    /// release on drop.
+    pub fn try_acquire_all_inflight_permits(&self) -> Vec<tokio::sync::SemaphorePermit<'_>> {
+        self.inflight.try_acquire_all()
+    }
+
+    /// Borrow the first (primary) queue's semaphore for tests that need
+    /// direct semaphore access.
     #[must_use]
-    pub fn proposer_window(&self) -> &tokio::sync::Semaphore {
-        &self.proposer_window
+    pub fn inflight_queue_semaphore(&self) -> &tokio::sync::Semaphore {
+        &self.inflight.queues[0]
     }
 
     /// Run one background-repair step, returning the slot that was filled
@@ -1716,6 +1818,113 @@ impl PxGroup {
     /// deterministically.
     pub async fn run_maintenance_pass_for_tests(&self) {
         crate::cluster::group_maintenance::run_pass(self).await;
+    }
+}
+
+/// Multi-queue inflight proposal admission gate. Owns N semaphores,
+/// routes proposals round-robin, and supports both fail-fast (Reject)
+/// and blocking (Queue) admission policies.
+pub(crate) struct InflightAdmission {
+    queues: Vec<tokio::sync::Semaphore>,
+    queue_count: usize,
+    window_per_queue: usize,
+    policy: AdmissionPolicy,
+    route_counter: AtomicU64,
+    /// Cumulative count of proposals that entered the queue (did not
+    /// get a fast-path permit).
+    total_enqueued: AtomicU64,
+    /// Cumulative wait time in microseconds.
+    total_wait_us: AtomicU64,
+    /// Current number of proposals waiting on `acquire().await`.
+    waiting: AtomicU64,
+}
+
+impl InflightAdmission {
+    fn new(max_inflight: usize, queue_count: usize, policy: AdmissionPolicy) -> Self {
+        let n = queue_count.max(1);
+        let per_queue = max_inflight.div_ceil(n);
+        let queues = (0..n).map(|_| tokio::sync::Semaphore::new(per_queue)).collect();
+        Self {
+            queues,
+            queue_count: n,
+            window_per_queue: per_queue,
+            policy,
+            route_counter: AtomicU64::new(0),
+            total_enqueued: AtomicU64::new(0),
+            total_wait_us: AtomicU64::new(0),
+            waiting: AtomicU64::new(0),
+        }
+    }
+
+    /// Total permits across all queues.
+    fn total_permits(&self) -> usize {
+        self.window_per_queue * self.queue_count
+    }
+
+    /// Currently occupied permits across all queues.
+    fn occupied(&self) -> u64 {
+        let total = self.total_permits();
+        let avail: usize = self
+            .queues
+            .iter()
+            .map(tokio::sync::Semaphore::available_permits)
+            .sum();
+        u64::try_from(total.saturating_sub(avail)).unwrap_or(0)
+    }
+
+    /// Route to a queue via round-robin.
+    fn route(&self) -> usize {
+        let idx = self.route_counter.fetch_add(1, Ordering::Relaxed);
+        (idx as usize) % self.queue_count
+    }
+
+    /// Acquire a permit. Returns `None` if Reject mode and the queue is
+    /// full. In Queue mode, blocks until a permit is available.
+    async fn acquire_permit(&self) -> Option<tokio::sync::SemaphorePermit<'_>> {
+        let q = self.route();
+        // Fast path: try to acquire without blocking.
+        if let Ok(permit) = self.queues[q].try_acquire() {
+            return Some(permit);
+        }
+        // Slow path depends on policy.
+        match self.policy {
+            AdmissionPolicy::Reject => None,
+            AdmissionPolicy::Queue => {
+                self.total_enqueued.fetch_add(1, Ordering::Relaxed);
+                self.waiting.fetch_add(1, Ordering::Relaxed);
+                let t0 = std::time::Instant::now();
+                let permit = self.queues[q].acquire().await.expect("inflight semaphore closed");
+                let wait_us = t0.elapsed().as_micros();
+                self.waiting.fetch_sub(1, Ordering::Relaxed);
+                self.total_wait_us
+                    .fetch_add(u64::try_from(wait_us).unwrap_or(u64::MAX), Ordering::Relaxed);
+                Some(permit)
+            }
+        }
+    }
+
+    /// Try to acquire all permits across all queues (test helper).
+    #[cfg(feature = "test-util")]
+    fn try_acquire_all(&self) -> Vec<tokio::sync::SemaphorePermit<'_>> {
+        let mut held = Vec::new();
+        for q in &self.queues {
+            while let Ok(p) = q.try_acquire() {
+                held.push(p);
+            }
+        }
+        held
+    }
+}
+
+impl std::fmt::Debug for InflightAdmission {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InflightAdmission")
+            .field("queue_count", &self.queue_count)
+            .field("window_per_queue", &self.window_per_queue)
+            .field("policy", &self.policy)
+            .field("occupied", &self.occupied())
+            .field("waiting", &self.waiting.load(Ordering::Relaxed))
+            .finish()
     }
 }
 

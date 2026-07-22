@@ -10,6 +10,7 @@ mod testkit;
 
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use crowkv::rpc::kv_service_client::KvServiceClient;
 use crowkv::rpc::{KvGetRequest, KvSetRequest};
 use serde_json::Value;
@@ -174,8 +175,8 @@ async fn kv_put(
     let resp = kv
         .put(KvSetRequest {
             version: 1,
-            key: key.to_vec(),
-            value: value.to_vec(),
+            key: Bytes::copy_from_slice(key),
+            value: Bytes::copy_from_slice(value),
             seq: req_id,
             ttl_ms: 0,
             client_id: 9000,
@@ -206,7 +207,7 @@ async fn kv_get_local_until(
         let resp = kv
             .get(KvGetRequest {
                 version: 1,
-                key: key.to_vec(),
+                key: Bytes::copy_from_slice(key),
                 request_id: req_id,
                 request_create_ms: req_id,
                 group_id,
@@ -222,7 +223,7 @@ async fn kv_get_local_until(
                 "kv get returned ok=false without not_found: {}",
                 resp.error
             );
-            return Some(resp.value);
+            return Some(resp.value.to_vec());
         }
         if Instant::now() >= deadline {
             return None;

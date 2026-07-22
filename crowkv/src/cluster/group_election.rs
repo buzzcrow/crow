@@ -213,7 +213,7 @@ impl LeaderElection for PxGroup {
             .max(next_slot_minus_one)
             .max(peer_highest_seen_slot_max);
 
-        info!(
+        debug!(
             group_id,
             term,
             floor,
@@ -227,7 +227,7 @@ impl LeaderElection for PxGroup {
 
         if ceiling <= floor {
             self.leader_read_ready.store(true, Ordering::Release);
-            info!(group_id, term, "bulk phase 1 skipped (empty range)");
+            debug!(group_id, term, "bulk phase 1 skipped (empty range)");
             return;
         }
 
@@ -291,7 +291,7 @@ impl LeaderElection for PxGroup {
         let next = ceiling.saturating_add(1);
         self.next_slot.fetch_max(next, Ordering::AcqRel);
         self.leader_read_ready.store(true, Ordering::Release);
-        info!(group_id, term, ceiling, next_slot = next, "bulk phase 1 done");
+        debug!(group_id, term, ceiling, next_slot = next, "bulk phase 1 done");
     }
 }
 

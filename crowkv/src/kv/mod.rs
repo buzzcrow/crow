@@ -15,20 +15,17 @@
 //! and out-of-order parallel-slot applies naturally correct (highest slot
 //! wins).
 //!
-//! Key work: `KVEngine` trait, in-memory implementation, payload `Batch` decode,
-//! cross-learner `compare`. Ordered-file / crowtree engines and streamable
-//! snapshot import/export land in later phases.
+//! Key work: `KVEngine` trait, payload `Batch` decode, cross-learner
+//! `compare`. The crowtree engine and streamable snapshot import/export land
+//! in later phases. `InMemKV` lives in `tests/` as a test-only reference
+//! implementation.
 
 mod crowtree_engine;
 mod kv_engine;
 mod kv_future;
-#[cfg(any(test, feature = "test-util"))]
-mod mem_kv;
 mod op;
 
 pub use crowtree_engine::{CrowtreeBackend, CrowtreeEngine, CrowtreeOptions, CrowtreeStats};
 pub use kv_engine::KVEngine;
 pub use kv_future::KVFuture;
-#[cfg(any(test, feature = "test-util"))]
-pub use mem_kv::InMemKV;
 pub use op::{Batch, BatchOp, Cell, EngineDiff, Op};

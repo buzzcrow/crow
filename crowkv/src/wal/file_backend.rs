@@ -109,8 +109,11 @@ impl FileBackendFile {
         Ok(())
     }
 
+    /// No-op — let the OS page cache flush naturally. Use [`Self::fsync`]
+    /// for an explicit durable flush on close/shutdown.
+    #[allow(clippy::unused_async)]
     pub async fn fdatasync(&self) -> io::Result<()> {
-        self.file.sync_data().await
+        Ok(())
     }
 
     pub async fn fsync(&self) -> io::Result<()> {

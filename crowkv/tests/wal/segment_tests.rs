@@ -5,20 +5,23 @@
 
 use bytes::Bytes;
 use crowkv::paxos::roles::PxBallot;
+use crowkv::wal::pipeline_backend::WalBlockAlignment;
 use crowkv::wal::record::{RecordType, WALRecord, WalRecordFormat};
 use crowkv::wal::segment::{SegmentReader, WalSegment, SEG_HEADER_LEN};
-use crowkv::wal::{BlockDevice, IoBackend};
+use crowkv::wal::{IoBackend, MemBlockDevice};
 use std::path::PathBuf;
 
 fn sim_backend() -> IoBackend {
-    IoBackend::BlockDevice(BlockDevice::new())
+    IoBackend::MemBlock(MemBlockDevice::new())
 }
 
 /// 4 KiB-aligned block device (SSD/NVMe model). Every physical write is widened
 /// to the enclosing 4 KiB unit, so a sealed segment ends in zero padding out to
 /// the block boundary — the B1 scenario the reader must tolerate.
 fn aligned_backend() -> IoBackend {
-    IoBackend::BlockDevice(BlockDevice::ssd())
+    IoBackend::MemBlock(MemBlockDevice::with_alignment(
+        WalBlockAlignment::default_aligned(),
+    ))
 }
 
 fn accepted_record(group: u64, slot: u64, payload_len: usize) -> WALRecord {
@@ -98,6 +101,11 @@ async fn segment_reader_reads_text_line_records() {
     assert_eq!(decoded1, r1);
     assert_eq!(decoded2, r2);
     assert!(reader.next_record().await.unwrap().is_none());
+
+    let footer = reader.read_footer().await.unwrap().unwrap();
+    assert_eq!(footer.min_slot, 10);
+    assert_eq!(footer.max_slot, 20);
+    assert_eq!(footer.record_count, 2);
 }
 
 #[tokio::test(flavor = "current_thread", start_paused = true)]

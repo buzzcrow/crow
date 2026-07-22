@@ -84,7 +84,7 @@ async fn term_fencing_in_acceptor_rejects_old_term() {
         term: 1,
         payload: bytes::Bytes::from_static(b"old"),
     };
-    let reply = replica.on_accept(stale).await;
+    let reply = replica.on_accept(&stale).await;
     match reply {
         PxAcceptReply::TermStale { new_term, .. } => {
             assert_eq!(new_term, 5, "TermStale should report the replica's current_term");
@@ -106,7 +106,7 @@ async fn term_fencing_in_acceptor_adopts_higher_term() {
         term: 9,
         payload: bytes::Bytes::from_static(b"v"),
     };
-    let reply = replica.on_accept(higher).await;
+    let reply = replica.on_accept(&higher).await;
     assert!(
         matches!(reply, PxAcceptReply::Accepted { .. }),
         "higher-term Accept should proceed after adoption: {reply:?}"
@@ -127,7 +127,7 @@ async fn request_vote_rejects_candidate_missing_higher_accepted_log_tip() {
         term: 4,
         payload: bytes::Bytes::from_static(b"v"),
     };
-    let reply = voter.on_accept(accepted).await;
+    let reply = voter.on_accept(&accepted).await;
     assert!(matches!(reply, PxAcceptReply::Accepted { .. }));
     let term = voter.current_term_snapshot();
 
@@ -159,7 +159,7 @@ async fn request_vote_grants_candidate_with_matching_accepted_log_tip_even_if_le
         term: 6,
         payload: bytes::Bytes::from_static(b"v2"),
     };
-    let reply = voter.on_accept(accepted).await;
+    let reply = voter.on_accept(&accepted).await;
     assert!(matches!(reply, PxAcceptReply::Accepted { .. }));
     assert_eq!(
         voter.last_chosen_slot(),

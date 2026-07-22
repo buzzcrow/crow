@@ -51,7 +51,7 @@ async fn learn_then_accept_same_slot() {
 
     // Now re-accept slot 5.
     let entry5 = make_entry(5, 1, b"5");
-    let reply = replica.on_accept(entry5.clone()).await;
+    let reply = replica.on_accept(&entry5).await;
 
     assert!(
         matches!(reply, PxAcceptReply::Accepted { .. }),
@@ -73,7 +73,7 @@ async fn accept_then_learn_same_slot() {
     // Accept slots 1-5 sequentially.
     for slot in 1..=5u64 {
         let entry = make_entry(slot, 1, &slot.to_string().into_bytes());
-        let reply = replica.on_accept(entry.clone()).await;
+        let reply = replica.on_accept(&entry).await;
         assert!(matches!(reply, PxAcceptReply::Accepted { .. }));
     }
 
@@ -96,7 +96,7 @@ async fn concurrent_learn_and_accept_same_slot() {
     // Pre-learn slots 1-4 so slot 5 is the next contiguous slot.
     for slot in 1..=4u64 {
         let entry = make_entry(slot, 1, &slot.to_string().into_bytes());
-        let _ = replica.on_accept(entry.clone()).await;
+        let _ = replica.on_accept(&entry).await;
         replica.learn_chosen(&entry, None, None).await;
     }
     assert_eq!(replica.contiguous_applied(), 4);
@@ -105,7 +105,7 @@ async fn concurrent_learn_and_accept_same_slot() {
 
     // Both operations on slot 5 concurrently.
     let (accept_result, ()) = tokio::join!(
-        replica.on_accept(entry5.clone()),
+        replica.on_accept(&entry5),
         replica.learn_chosen(&entry5, None, None)
     );
 
@@ -128,14 +128,14 @@ async fn concurrent_learn_and_accept_adjacent_slots() {
 
     // First learn slot 1 so contiguous_applied is at 1.
     let entry1 = make_entry(1, 1, b"v1");
-    let _ = replica.on_accept(entry1.clone()).await;
+    let _ = replica.on_accept(&entry1).await;
     replica.learn_chosen(&entry1, None, None).await;
     assert_eq!(replica.contiguous_applied(), 1);
 
     // Now concurrently accept slot 2 and learn slot 2.
     let entry2 = make_entry(2, 1, b"v2");
     let (accept_result, ()) = tokio::join!(
-        replica.on_accept(entry2.clone()),
+        replica.on_accept(&entry2),
         replica.learn_chosen(&entry2, None, None)
     );
 
@@ -153,14 +153,14 @@ async fn concurrent_learn_then_accept_different_value_same_slot() {
     // Learn slots 1-3 sequentially (establishes contiguous frontier).
     for slot in 1..=3u64 {
         let entry = make_entry(slot, 1, &slot.to_string().into_bytes());
-        let _ = replica.on_accept(entry.clone()).await;
+        let _ = replica.on_accept(&entry).await;
         replica.learn_chosen(&entry, None, None).await;
     }
     assert_eq!(replica.contiguous_applied(), 3);
 
     // Now accept v2 at slot 3 (same term, same ballot — re-accept).
     let entry_v2 = make_entry(3, 1, b"v2");
-    let reply = replica.on_accept(entry_v2.clone()).await;
+    let reply = replica.on_accept(&entry_v2).await;
 
     // Acceptor should accept the new value.
     assert!(
@@ -184,7 +184,7 @@ async fn concurrent_accepts_on_different_slots_no_interference() {
         let entry = make_entry(slot, 1, &slot.to_string().into_bytes());
         let r = Arc::clone(&replica);
         handles.push(tokio::spawn(async move {
-            let reply = r.on_accept(entry.clone()).await;
+            let reply = r.on_accept(&entry).await;
             assert!(
                 matches!(reply, PxAcceptReply::Accepted { .. }),
                 "slot {slot} should be accepted"
@@ -214,7 +214,7 @@ async fn concurrent_learn_chosen_multiple_slots() {
     // Accept slots 1-5 sequentially first.
     for slot in 1..=5u64 {
         let entry = make_entry(slot, 1, &slot.to_string().into_bytes());
-        let _ = replica.on_accept(entry.clone()).await;
+        let _ = replica.on_accept(&entry).await;
     }
 
     // Now learn all 5 concurrently.

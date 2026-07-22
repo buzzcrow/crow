@@ -11,7 +11,7 @@ pub trait Proposer {
 #[allow(async_fn_in_trait)]
 pub trait Acceptor {
     #[allow(clippy::unused_async)]
-    async fn accept(&self, entry: PxLogEntry) -> PxAcceptReply;
+    async fn accept(&self, entry: &PxLogEntry) -> PxAcceptReply;
     #[allow(clippy::unused_async)]
     async fn prepare(&self, slot: SlotIndex, ballot: PxBallot) -> PxPrepareReply;
 

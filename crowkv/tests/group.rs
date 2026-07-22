@@ -20,6 +20,12 @@
 #[path = "testkit/mod.rs"]
 mod testkit;
 
+#[path = "kv/mem_kv_impl.rs"]
+mod mem_kv;
+
+#[path = "kv/test_util.rs"]
+mod test_util;
+
 #[path = "group/group_test.rs"]
 mod group;
 

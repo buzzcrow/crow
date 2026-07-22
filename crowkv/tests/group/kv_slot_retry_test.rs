@@ -2,6 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use crate::testkit::cluster::start_cluster_classic;
+use bytes::Bytes;
 use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 use crowkv::rpc::KvSetRequest;
 
@@ -35,7 +36,7 @@ async fn kv_put_retries_next_slot_when_slot_has_prior_accepted_value() {
         term: 0,
         payload: bytes::Bytes::from(stale_payload.clone()),
     };
-    let reply = follower_replica.on_accept(entry).await;
+    let reply = follower_replica.on_accept(&entry).await;
     assert!(
         matches!(reply, crowkv::paxos::roles::PxAcceptReply::Accepted { .. }),
         "preload accept should succeed: {reply:?}"
@@ -46,8 +47,8 @@ async fn kv_put_retries_next_slot_when_slot_has_prior_accepted_value() {
     let put_resp = kv
         .put(KvSetRequest {
             version: 1,
-            key: b"my-key".to_vec(),
-            value: b"my-value".to_vec(),
+            key: Bytes::from_static(b"my-key"),
+            value: Bytes::from_static(b"my-value"),
             ttl_ms: 0,
             request_id: 201,
             request_create_ms: 2001,

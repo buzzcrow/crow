@@ -69,10 +69,9 @@ TEST(WritePath, BasePagesLiveInBufferPool)
 //
 // D6 asks for a "back-pressure test under a write storm (eager snapshot)".
 // No eager-snapshot-on-memory-pressure trigger actually exists anywhere in
-// the engine (verified by inspection: background_flush_loop only calls
-// flush()/collect_garbage(), never snapshot(); maybe_evict_locked only
-// evicts *clean* frames) -- "a write storm that outruns
-// snapshot triggers an eager snapshot" was never implemented, so there is
+// the engine (verified by inspection: flush() only drains L0 to L1, never
+// snapshot(); maybe_evict_locked only evicts *clean* frames) -- "a write
+// storm that outruns snapshot triggers an eager snapshot" was never implemented, so there is
 // nothing to test *as originally scoped*. What's real and testable without
 // inventing a new feature: for a write storm against a *bounded* key set
 // (the design's actual back-pressure concern -- unbounded dirty growth),

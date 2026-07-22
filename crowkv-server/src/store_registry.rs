@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 use crowkv::cluster::px_kv_store::PxKvStore;
-use crowkv::common::config::PxElectionConfig;
+use crowkv::common::config::{PaxosConfig, PxElectionConfig};
 use crowkv::kv::CrowtreeBackend;
 use crowkv::metrics::MetricsRegistry;
 use crowkv::wal::IoBackend;
@@ -54,6 +54,11 @@ pub struct KvStoreRegistry {
     /// groups created by this registry. See `--no-fsync` (R10 benchmark
     /// framework). Default `false`.
     pub wal_skip_fsync: bool,
+    /// Max in-flight proposals for groups created via the management
+    /// API. Set from `--max-inflight` CLI arg. Default: `PaxosConfig::DEFAULT`.
+    pub max_inflight: usize,
+    /// Number of admission queues per group. Default: 1.
+    pub inflight_queues: usize,
 }
 
 impl Default for KvStoreRegistry {
@@ -67,7 +72,7 @@ impl KvStoreRegistry {
     pub fn new() -> Self {
         Self::with_runtime(
             PxElectionConfig::DEFAULT,
-            PathBuf::from("wal"),
+            PathBuf::from("waldata"),
             PathBuf::from("conf"),
             Arc::new(IoBackend::detect()),
         )
@@ -77,7 +82,7 @@ impl KvStoreRegistry {
     pub fn with_election_config(election_cfg: PxElectionConfig) -> Self {
         Self::with_runtime(
             election_cfg,
-            PathBuf::from("wal"),
+            PathBuf::from("waldata"),
             PathBuf::from("conf"),
             Arc::new(IoBackend::detect()),
         )
@@ -104,6 +109,8 @@ impl KvStoreRegistry {
             port_pool: Mutex::new(Vec::new()),
             metrics_registry: None,
             wal_skip_fsync: false,
+            max_inflight: PaxosConfig::DEFAULT.max_inflight_proposals,
+            inflight_queues: PaxosConfig::DEFAULT.inflight_queues,
         }
     }
 
@@ -137,6 +144,20 @@ impl KvStoreRegistry {
     #[must_use]
     pub fn with_wal_skip_fsync(mut self, skip_fsync: bool) -> Self {
         self.wal_skip_fsync = skip_fsync;
+        self
+    }
+
+    /// Builder-style setter for [`Self::max_inflight`].
+    #[must_use]
+    pub fn with_max_inflight(mut self, max_inflight: usize) -> Self {
+        self.max_inflight = max_inflight;
+        self
+    }
+
+    /// Builder-style setter for [`Self::inflight_queues`].
+    #[must_use]
+    pub fn with_inflight_queues(mut self, queues: usize) -> Self {
+        self.inflight_queues = queues;
         self
     }
 

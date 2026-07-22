@@ -23,6 +23,7 @@ pub struct WalFile {
 
 pub(crate) enum WalFileInner {
     File(file_backend::FileBackendFile),
+    MemBlock(block_backend::MemBlockSegment),
     Block(block_backend::BlockSegment),
 }
 
@@ -34,6 +35,7 @@ impl WalFile {
     pub async fn write_at(&mut self, data: &[u8], offset: u64) -> io::Result<usize> {
         match &mut self.inner {
             WalFileInner::File(f) => f.write_at(data, offset).await,
+            WalFileInner::MemBlock(f) => f.write_at(data, offset),
             WalFileInner::Block(f) => f.write_at(data, offset),
         }
     }
@@ -51,6 +53,7 @@ impl WalFile {
     ) -> io::Result<usize> {
         match &mut self.inner {
             WalFileInner::File(f) => f.write_vectored_at(bufs, offset).await,
+            WalFileInner::MemBlock(f) => f.write_vectored_at(bufs, offset),
             WalFileInner::Block(f) => f.write_vectored_at(bufs, offset),
         }
     }
@@ -62,6 +65,7 @@ impl WalFile {
     pub async fn read_at(&mut self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
         match &mut self.inner {
             WalFileInner::File(f) => f.read_at(buf, offset).await,
+            WalFileInner::MemBlock(f) => f.read_at(buf, offset),
             WalFileInner::Block(f) => f.read_at(buf, offset),
         }
     }
@@ -73,6 +77,7 @@ impl WalFile {
     pub async fn read_exact_at(&mut self, buf: &mut [u8], offset: u64) -> io::Result<()> {
         match &mut self.inner {
             WalFileInner::File(f) => f.read_exact_at(buf, offset).await,
+            WalFileInner::MemBlock(f) => f.read_exact_at(buf, offset),
             WalFileInner::Block(f) => f.read_exact_at(buf, offset),
         }
     }
@@ -84,6 +89,7 @@ impl WalFile {
     pub async fn fdatasync(&self) -> io::Result<()> {
         match &self.inner {
             WalFileInner::File(f) => f.fdatasync().await,
+            WalFileInner::MemBlock(f) => f.fdatasync(),
             WalFileInner::Block(f) => f.fdatasync(),
         }
     }
@@ -95,8 +101,19 @@ impl WalFile {
     pub async fn fsync(&self) -> io::Result<()> {
         match &self.inner {
             WalFileInner::File(f) => f.fsync().await,
+            WalFileInner::MemBlock(f) => f.fsync(),
             WalFileInner::Block(f) => f.fsync(),
         }
+    }
+
+    /// Explicit durable flush for shutdown/close. Calls `fsync` (real
+    /// `sync_all`) on both backends — use this instead of `fdatasync`
+    /// when a final flush is needed before dropping the segment.
+    ///
+    /// # Errors
+    /// Returns IO error if the underlying sync fails.
+    pub async fn flush(&self) -> io::Result<()> {
+        self.fsync().await
     }
 
     /// Current file size in bytes.
@@ -106,6 +123,7 @@ impl WalFile {
     pub async fn len(&mut self) -> io::Result<u64> {
         match &mut self.inner {
             WalFileInner::File(f) => f.len().await,
+            WalFileInner::MemBlock(f) => f.len(),
             WalFileInner::Block(f) => f.len(),
         }
     }
@@ -117,6 +135,7 @@ impl WalFile {
     pub async fn truncate(&self, len: u64) -> io::Result<()> {
         match &self.inner {
             WalFileInner::File(f) => f.truncate(len).await,
+            WalFileInner::MemBlock(f) => f.truncate(len),
             WalFileInner::Block(f) => f.truncate(len),
         }
     }

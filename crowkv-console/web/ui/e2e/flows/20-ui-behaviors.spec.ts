@@ -16,14 +16,19 @@ function nextNumericId(values: Array<string | number>): string {
 
 test.describe('E2E-20 UI behaviors', () => {
   test('covers create dialog defaults and eligible candidate lists', async ({ page, baseURL }) => {
-    await createRack(baseURL!, { id: 'r20a', name: 'Rack Twenty A' });
-    await createRack(baseURL!, { id: 'r20b', name: 'Rack Twenty B' });
-    await createRack(baseURL!, { id: 'r20c', name: 'Rack Twenty C' });
-    await createRack(baseURL!, { id: 'r20d', name: 'Rack Twenty D' });
-    await createNode(baseURL!, { id: 'n20a', rack_id: 'r20a' });
-    await createNode(baseURL!, { id: 'n20b', rack_id: 'r20b' });
-    await createNode(baseURL!, { id: 'n20c', rack_id: 'r20c' });
-    await createNode(baseURL!, { id: 'n20d', rack_id: 'r20d' });
+    // Batch independent API calls to reduce total round-trip time under load.
+    await Promise.all([
+      createRack(baseURL!, { id: 'r20a', name: 'Rack Twenty A' }),
+      createRack(baseURL!, { id: 'r20b', name: 'Rack Twenty B' }),
+      createRack(baseURL!, { id: 'r20c', name: 'Rack Twenty C' }),
+      createRack(baseURL!, { id: 'r20d', name: 'Rack Twenty D' }),
+    ]);
+    await Promise.all([
+      createNode(baseURL!, { id: 'n20a', rack_id: 'r20a' }),
+      createNode(baseURL!, { id: 'n20b', rack_id: 'r20b' }),
+      createNode(baseURL!, { id: 'n20c', rack_id: 'r20c' }),
+      createNode(baseURL!, { id: 'n20d', rack_id: 'r20d' }),
+    ]);
     await deployNodeServer(baseURL!, 'n20a', 9960, 9970);
     await deployNodeServer(baseURL!, 'n20b', 9961, 9971);
     await deployNodeServer(baseURL!, 'n20c', 9962, 9972);
@@ -102,9 +107,11 @@ test.describe('E2E-20 UI behaviors', () => {
       await remainingReplicaDialog.getByRole('button', { name: 'Cancel' }).click();
     } finally {
       await api.dispose();
-      await stopNodeServer(baseURL!, 'n20a');
-      await stopNodeServer(baseURL!, 'n20b');
-      await stopNodeServer(baseURL!, 'n20c');
+      await Promise.all([
+        stopNodeServer(baseURL!, 'n20a'),
+        stopNodeServer(baseURL!, 'n20b'),
+        stopNodeServer(baseURL!, 'n20c'),
+      ]);
     }
   });
 

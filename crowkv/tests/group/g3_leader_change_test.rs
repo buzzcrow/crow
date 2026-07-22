@@ -11,6 +11,7 @@
 
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use crowkv::cluster::replica::StepDownRequestPayload;
 use crowkv::rpc::{KvGetRequest, KvSetRequest};
 
@@ -33,7 +34,7 @@ async fn read_via_leader(cluster: &TestCluster, key: &[u8]) -> Option<Vec<u8>> {
     let resp = client
         .get(KvGetRequest {
             version: 1,
-            key: key.to_vec(),
+            key: Bytes::copy_from_slice(key),
             request_id: 9001,
             request_create_ms: 9001,
             group_id: 1,
@@ -44,7 +45,7 @@ async fn read_via_leader(cluster: &TestCluster, key: &[u8]) -> Option<Vec<u8>> {
         .ok()?
         .into_inner();
     if resp.ok && !resp.not_found {
-        Some(resp.value)
+        Some(resp.value.to_vec())
     } else {
         None
     }
@@ -66,8 +67,8 @@ async fn two_replica_even_quorum_writes_succeed_with_both_up() {
     let resp = client
         .put(KvSetRequest {
             version: 1,
-            key: b"q2".to_vec(),
-            value: b"both_up".to_vec(),
+            key: Bytes::from_static(b"q2"),
+            value: Bytes::from_static(b"both_up"),
             ttl_ms: 0,
             request_id: 1,
             request_create_ms: 1,
@@ -94,8 +95,8 @@ async fn put_via_leader(cluster: &TestCluster, key: &[u8], val: &[u8], req_id: u
     let resp = client
         .put(KvSetRequest {
             version: 1,
-            key: key.to_vec(),
-            value: val.to_vec(),
+            key: Bytes::copy_from_slice(key),
+            value: Bytes::copy_from_slice(val),
             ttl_ms: 0,
             request_id: req_id,
             request_create_ms: req_id,

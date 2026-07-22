@@ -67,7 +67,7 @@ async fn create_file_wal(wal_dir: PathBuf) -> Arc<WalEngine> {
 async fn commit_slots(replica: &PxLocalReplica, wal: &WalEngine, n: u64) {
     for slot in 1..=n {
         let entry = write_entry(slot, b"k", &slot.to_string().into_bytes());
-        let reply = replica.on_accept(entry.clone()).await;
+        let reply = replica.on_accept(&entry).await;
         assert!(
             matches!(reply, PxAcceptReply::Accepted { .. }),
             "slot {slot} should be accepted"
@@ -138,14 +138,14 @@ async fn restore_stops_at_hole_below_watermark() {
         // Accept slots 1, 2, 3 and learn all.
         for slot in 1..=3u64 {
             let entry = write_entry(slot, b"k", &slot.to_string().into_bytes());
-            let _ = replica.on_accept(entry.clone()).await;
+            let _ = replica.on_accept(&entry).await;
             replica.learn_chosen(&entry, None, None).await;
         }
         assert_eq!(replica.contiguous_applied(), 3);
 
         // Now accept slot 5 (skipping 4) and learn it.
         let entry5 = write_entry(5, b"k", b"5");
-        let _ = replica.on_accept(entry5.clone()).await;
+        let _ = replica.on_accept(&entry5).await;
         replica.learn_chosen(&entry5, None, None).await;
 
         wal.seal_all().await.expect("seal");
@@ -236,15 +236,15 @@ async fn restore_does_not_apply_without_snapshot() {
         // Commit slots 1-3.
         for slot in 1..=3u64 {
             let entry = write_entry(slot, b"k", &slot.to_string().into_bytes());
-            let _ = replica.on_accept(entry.clone()).await;
+            let _ = replica.on_accept(&entry).await;
             replica.learn_chosen(&entry, None, None).await;
         }
 
         // Accept slots 4, 5 but DON'T learn them.
         let entry4 = write_entry(4, b"k", b"4");
         let entry5 = write_entry(5, b"k", b"5");
-        let _ = replica.on_accept(entry4.clone()).await;
-        let _ = replica.on_accept(entry5.clone()).await;
+        let _ = replica.on_accept(&entry4).await;
+        let _ = replica.on_accept(&entry5).await;
 
         wal.seal_all().await.expect("seal");
     }

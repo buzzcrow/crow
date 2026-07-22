@@ -292,7 +292,7 @@ impl ReplicaHandler for PxLocalReplica {
         Ok(self.on_prepare(slot, ballot, term).await)
     }
 
-    async fn on_accept(&self, entry: PxLogEntry, _group_id: u64) -> Result<PxAcceptReply, PxReplicaError> {
+    async fn on_accept(&self, entry: &PxLogEntry, _group_id: u64) -> Result<PxAcceptReply, PxReplicaError> {
         Ok(self.on_accept(entry).await)
     }
 
@@ -506,7 +506,7 @@ impl PxLocalReplica {
                             "restore replay accepted missing log entry",
                         )
                     })?;
-                    let _ = replica.acceptor.accept(entry).await;
+                    let _ = replica.acceptor.accept(&entry).await;
                 }
                 crate::wal::record::RecordType::VoteGranted => {}
             }
@@ -642,13 +642,17 @@ impl PxLocalReplica {
         self.election_state.lock().clone()
     }
 
-    /// Cascade shutdown into acceptor + learner.
+    /// Cascade shutdown: flush + persist engine state, then rely on
+    /// `Drop` for acceptor/learner resource release (slot list reclaim,
+    /// in-memory KV map drop).
     ///
-    /// Acceptor and learner currently rely on `Drop` for resource release
-    /// (slot list reclaim, in-memory KV map drop). The explicit cascade is a
-    /// hook for future persistence layers (P3) which will need to flush.
+    /// The maintenance loop is already cancelled by `PxGroup::shutdown`
+    /// before this method is called, so there is no concurrent
+    /// flush/snapshot risk. `flush()` drains L0 memtable into L1 B+tree
+    /// (in-memory); `persist_snapshot()` writes dirty L1 pages + superblock
+    /// to the page store (disk). For `InMemKV` both are no-ops.
     #[tracing::instrument(level = "debug", skip_all, fields(replica_l_id = self.id))]
-    #[allow(clippy::unused_async)] // async kept for cascade uniformity (P3 will await flush)
+    #[allow(clippy::unused_async)] // async kept for cascade uniformity
     pub async fn shutdown(&self, _per_layer_timeout: Duration) -> OperationReport {
         if self.shutdown_started.swap(true, Ordering::AcqRel) {
             debug!(
@@ -657,9 +661,25 @@ impl PxLocalReplica {
             );
             return OperationReport::new();
         }
+
+        let engine = self.learner.engine();
+        engine.flush();
+        let snap_slot = engine.persist_snapshot();
+        if snap_slot > 0 {
+            info!(
+                replica_l_id = self.id,
+                snapshot_slot = snap_slot,
+                "PxLocalReplica shutdown: engine snapshot persisted"
+            );
+        } else {
+            debug!(
+                replica_l_id = self.id,
+                "PxLocalReplica shutdown: no durable snapshot (non-durable engine or no data)"
+            );
+        }
         info!(
             replica_l_id = self.id,
-            "PxLocalReplica shutdown (acceptor/learner cleanup deferred to Drop)"
+            "PxLocalReplica shutdown complete (acceptor/learner cleanup deferred to Drop)"
         );
         OperationReport::new()
     }
@@ -833,8 +853,20 @@ impl PxLocalReplica {
         };
         let _ = self.election_handles.set(handles);
         if let Some(ref wal) = self.wal {
-            let summary = r.register_summary(format!("{prefix}.wal.append.l"));
-            wal.set_append_summary(summary);
+            let bl = wal.backend_label();
+            let append_summary = r.register_summary(format!("{prefix}.wal.{bl}.append.l"));
+            wal.set_append_summary(append_summary);
+            let fsync_summary = r.register_summary(format!("{prefix}.wal.{bl}.fsync.l"));
+            let write_bw = r.register_bandwidth(format!("{prefix}.wal.{bl}.write.bw"));
+            wal.set_fsync_metrics(fsync_summary, write_bw);
+            if wal.backend().is_block_device() {
+                let handles = crate::wal::wal_engine::BlockDeviceCounterHandles {
+                    logical_bytes: r.register_counter(format!("{prefix}.wal.{bl}.logical_bytes.c")),
+                    physical_bytes: r.register_counter(format!("{prefix}.wal.{bl}.physical_bytes.c")),
+                    rmw: r.register_counter(format!("{prefix}.wal.{bl}.rmw.c")),
+                };
+                wal.set_block_device_counters(handles);
+            }
         }
     }
 
@@ -1077,7 +1109,7 @@ impl PxLocalReplica {
     ///
     /// Same two-fence rule as [`Self::on_prepare`] but the term lives on
     /// `entry.term` (because the accept message carries the value).
-    pub async fn on_accept(&self, entry: PxLogEntry) -> PxAcceptReply {
+    pub async fn on_accept(&self, entry: &PxLogEntry) -> PxAcceptReply {
         let req_term = entry.term;
         let local_term = self.current_term_snapshot();
         if req_term < local_term {
@@ -1093,7 +1125,7 @@ impl PxLocalReplica {
         // Keep a reference for the WAL persist below.
         let slot = entry.slot;
         let ballot = entry.ballot;
-        let reply = self.acceptor.accept(entry.clone()).await;
+        let reply = self.acceptor.accept(entry).await;
 
         // Ack contract (W6): persist Accepted record before replying.
         if matches!(reply, PxAcceptReply::Accepted { .. }) {
@@ -1106,7 +1138,7 @@ impl PxLocalReplica {
                 "on_accept: accepted leader proposal"
             );
             if let Some(wal) = &self.wal {
-                let record = WALRecord::from_accepted(wal.group_id(), &entry);
+                let record = WALRecord::from_accepted(wal.group_id(), entry);
                 if let Err(e) = wal.append(&record).await {
                     tracing::error!(slot, ?ballot, error = %e, "WAL persist Accepted failed");
                 }
@@ -1318,7 +1350,7 @@ impl PxLocalReplica {
             self.deadline_reset_signal.notify_one();
         }
         let (contiguous_chosen, last_chosen_term, highest_seen_slot) = self.frontier_triple();
-        info!(
+        debug!(
             replica_l_id = self.id,
             candidate_id = req.candidate_id,
             req_term = req.term,
@@ -1437,7 +1469,7 @@ impl PxLocalReplica {
             self.become_follower(snapshot.current_term);
             self.admin_step_down_signal.notify_waiters();
         } else {
-            info!(
+            debug!(
                 replica_l_id = self.id,
                 req_term = req.term,
                 self_term = snapshot.current_term,

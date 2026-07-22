@@ -96,6 +96,9 @@ pub struct BenchFixture {
     console_task: tokio::task::JoinHandle<()>,
     node_ids: Vec<String>,
     node_pids: Vec<u32>,
+    node_grpc_urls: Vec<String>,
+    #[allow(dead_code)]
+    node_mgmt_urls: Vec<String>,
     leader_endpoint: String,
     workspace_dir: PathBuf,
     stopped: bool,
@@ -111,7 +114,12 @@ impl BenchFixture {
     /// Returns an error if the console-web instance fails to bind, any
     /// provisioning call fails, or no leader is elected within the
     /// timeout.
-    pub async fn new(mode: BenchMode, workspace_dir: PathBuf) -> Result<Self> {
+    pub async fn new(
+        mode: BenchMode,
+        workspace_dir: PathBuf,
+        max_inflight: usize,
+        inflight_queues: usize,
+    ) -> Result<Self> {
         std::fs::create_dir_all(&workspace_dir)?;
 
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
@@ -123,13 +131,14 @@ impl BenchFixture {
         });
         let client = ConsoleClient::new(format!("http://{addr}"))?;
 
-        let (ids, pids) = match Self::provision_nodes(&client, mode).await {
-            Ok(v) => v,
-            Err(e) => {
-                console_task.abort();
-                return Err(e);
-            }
-        };
+        let (ids, pids, grpc_urls, mgmt_urls) =
+            match Self::provision_nodes(&client, mode, max_inflight, inflight_queues).await {
+                Ok(v) => v,
+                Err(e) => {
+                    console_task.abort();
+                    return Err(e);
+                }
+            };
 
         if let Err(e) = Self::provision_store_and_group(&client, &ids).await {
             console_task.abort();
@@ -144,11 +153,20 @@ impl BenchFixture {
             }
         };
 
+        // Wait for cluster health: all replicas must know the leader
+        // and the leader must be actively serving requests.
+        if let Err(e) = wait_for_healthy_cluster(&mgmt_urls, &leader_endpoint).await {
+            console_task.abort();
+            return Err(e);
+        }
+
         Ok(Self {
             client,
             console_task,
             node_ids: ids,
             node_pids: pids,
+            node_grpc_urls: grpc_urls,
+            node_mgmt_urls: mgmt_urls,
             leader_endpoint,
             workspace_dir,
             stopped: false,
@@ -158,9 +176,16 @@ impl BenchFixture {
     /// Create 1 rack + 1 node per rack (`NODE_COUNT` total) and deploy a
     /// `crowkv-server` on each, in `mode`. Returns the node ids and their
     /// server pids (index-aligned).
-    async fn provision_nodes(client: &ConsoleClient, mode: BenchMode) -> Result<(Vec<String>, Vec<u32>)> {
+    async fn provision_nodes(
+        client: &ConsoleClient,
+        mode: BenchMode,
+        max_inflight: usize,
+        inflight_queues: usize,
+    ) -> Result<(Vec<String>, Vec<u32>, Vec<String>, Vec<String>)> {
         let mut ids = Vec::with_capacity(NODE_COUNT);
         let mut pids = Vec::with_capacity(NODE_COUNT);
+        let mut grpc_urls = Vec::with_capacity(NODE_COUNT);
+        let mut mgmt_urls = Vec::with_capacity(NODE_COUNT);
         for i in 0..NODE_COUNT {
             let rack_id = format!("br{i}");
             let node_id = format!("bn{i}");
@@ -190,8 +215,10 @@ impl BenchFixture {
             let mut body = DeployNodeServerBody {
                 mgmt_port: unique_test_port(),
                 grpc_port: unique_test_port(),
-                election_profile: Some("test".into()),
+                election_profile: Some("e2e".into()),
                 metrics_interval: Some(5),
+                max_inflight: Some(max_inflight),
+                inflight_queues: Some(inflight_queues),
                 ..Default::default()
             };
             mode.apply_to(&mut body);
@@ -202,8 +229,10 @@ impl BenchFixture {
 
             ids.push(node_id);
             pids.push(deployed.pid);
+            grpc_urls.push(deployed.grpc_url);
+            mgmt_urls.push(deployed.mgmt_url);
         }
-        Ok((ids, pids))
+        Ok((ids, pids, grpc_urls, mgmt_urls))
     }
 
     /// Create the single store spanning all nodes, then a 3-replica
@@ -249,6 +278,17 @@ impl BenchFixture {
         &self.workspace_dir
     }
 
+    /// Build a map from gRPC endpoint URL to node ID, for resolving
+    /// leader-change episode endpoints to node names in the report.
+    #[must_use]
+    pub fn endpoint_to_node_map(&self) -> std::collections::HashMap<String, String> {
+        self.node_ids
+            .iter()
+            .zip(self.node_grpc_urls.iter())
+            .map(|(nid, url)| (url.clone(), nid.clone()))
+            .collect()
+    }
+
     /// Read and aggregate server-side metrics across every node's
     /// `log/metrics-*.log` file.
     #[must_use]
@@ -286,10 +326,10 @@ impl BenchFixture {
         Ok(())
     }
 
-    /// Stop every deployed server, shut down the embedded console-web
-    /// task, and (unless `keep_workspace`) remove the workspace
-    /// directory. Idempotent — safe to call more than once.
-    pub async fn cleanup(&mut self, keep_workspace: bool) {
+    /// Stop every deployed server and shut down the embedded console-web
+    /// task. The workspace directory is preserved (it lives inside the
+    /// `run_dir`). Idempotent — safe to call more than once.
+    pub async fn cleanup(&mut self) {
         if self.stopped {
             return;
         }
@@ -298,9 +338,6 @@ impl BenchFixture {
             let _ = self.client.stop_node_server(node_id).await;
         }
         self.console_task.abort();
-        if !keep_workspace {
-            let _ = std::fs::remove_dir_all(&self.workspace_dir);
-        }
     }
 
     fn node_workspace(&self, node_id: &str) -> PathBuf {
@@ -352,6 +389,84 @@ async fn wait_for_leader_endpoint(client: &ConsoleClient, timeout: Duration) -> 
             return Err(Error::Config(format!(
                 "no leader elected for store {STORE_ID} group {GROUP_ID} within {timeout:?}"
             )));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Wait for cluster health: (1) the leader can serve a test put, and
+/// (2) every node's `/topology` reports the same non-zero `leader_id`.
+/// This ensures the leader has sent heartbeats to all followers and they
+/// all know who the leader is, preventing election disruptions at the
+/// start of the benchmark.
+async fn wait_for_healthy_cluster(mgmt_urls: &[String], leader_endpoint: &str) -> Result<()> {
+    use crowkv_client::{ClientConfig, CrowkvClient};
+    use crowkv_console_shared::clients::http::ServerClient;
+
+    // Phase 1: verify the leader can serve a test put.
+    let mut cfg = ClientConfig::new(Vec::new());
+    cfg.retry.max_retries = 2;
+    let client = CrowkvClient::new(cfg);
+    client.seed_leader(STORE_ID, GROUP_ID, leader_endpoint.to_string());
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        match client
+            .put(STORE_ID, GROUP_ID, b"__bench_health__", b"ok", None)
+            .await
+        {
+            Ok(_) => break,
+            Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+            Err(e) => {
+                return Err(Error::Config(format!(
+                    "leader not serving requests within 15s: {e}"
+                )));
+            }
+        }
+    }
+
+    // Phase 2: poll every node's /topology until all report the same
+    // non-zero leader_id for our store/group.
+    loop {
+        let mut all_agree = true;
+        let mut consensus_leader: Option<u64> = None;
+        for url in mgmt_urls {
+            let Ok(sc) = ServerClient::new(url) else {
+                all_agree = false;
+                break;
+            };
+            let Ok(stores) = sc.topology().await else {
+                all_agree = false;
+                break;
+            };
+            let leader_id = stores
+                .iter()
+                .find(|s| s.store_id == STORE_ID)
+                .and_then(|s| s.groups.iter().find(|g| g.group_id == GROUP_ID))
+                .map_or(0, |g| g.leader_id);
+
+            if leader_id == 0 {
+                all_agree = false;
+                break;
+            }
+            match consensus_leader {
+                None => consensus_leader = Some(leader_id),
+                Some(l) if l != leader_id => {
+                    all_agree = false;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        if all_agree {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(Error::Config(
+                "cluster not healthy within 15s: replicas disagree on leader".to_string(),
+            ));
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }

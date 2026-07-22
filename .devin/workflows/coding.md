@@ -16,9 +16,10 @@ Companion workflows: `/review` (pre-push), `/doc` (doc rules).
 - `critical!` (macro = `error!("critical: …")`) — invariant violated / unreachable. Always include `next step:`.
 - `error!` — recoverable error; state how it's handled.
 - `warn!` — anomaly worth attention (timeout retried, transient failure).
-- `info!` — major lifecycle / state transitions.
-- `debug!` — per-request entry/exit, hot-path decisions.
+- `info!` — system state changes only: component start/stop, node add/remove, leader change, election transitions, membership changes, shutdown. No per-request or per-operation logs.
+- `debug!` — per-request entry/exit, hot-path decisions, routine startup details (replay scan, segment sealed, gc pass).
 - `trace!` — ad-hoc only; not in production code.
+- Standard: after running a cluster with operations, an AI reading only `info`-level logs and metrics should understand the full system lifecycle without debugging.
 
 Structured fields in Paxos-scoped logs (never inline in message):
 `store_id`, `group_id`, `replica_l_id`, `replica_r_id`, `slot`, `ballot` — when in scope.

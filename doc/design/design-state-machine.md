@@ -169,6 +169,25 @@ For a key `k` appearing multiple times in a batch (rare but legal — see [`desi
 
 `apply` either completes or returns an error. On error, the engine must leave its state unchanged (no partial apply). The learner treats engine apply errors as fatal — they indicate disk corruption or out-of-space — and fails the node out of the group.
 
+### 4.6 Zero-copy batch decode
+
+`Batch::decode` extracts keys and values from the Paxos payload using
+`Bytes::slice(range)`, which creates zero-copy views into the same
+allocation as `PxLogEntry.payload` (an O(1) ref-count bump). This
+eliminates the per-key and per-value `to_vec()` heap allocations that
+would otherwise occur on every `learn_chosen` call.
+
+`Op::Put(Bytes)` and `BatchOp.key: Bytes` use `Bytes` (ref-counted,
+owned, `Send`) rather than `Vec<u8>`. The `KVEngine::apply` trait
+signature is unchanged — it still takes `&Batch`. Engine
+implementations use `Bytes::as_ref()` to obtain `&[u8]` for FFI or
+internal storage. `Cell` and `EngineDiff` remain `Vec<u8>` since they
+represent engine-internal storage, not the decode path.
+
+Truncated payloads (where a key or value length exceeds the remaining
+bytes) yield empty `Bytes` for that field, matching the previous
+`unwrap_or(&[])` behavior.
+
 ---
 
 ## 5. Read Surface

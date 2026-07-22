@@ -14,12 +14,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Parser;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crowkv::cluster::kv_server::KvServer;
 use crowkv::cluster::local_replica::PxLocalReplicaRole;
 use crowkv::cluster::px_kv_store::PxKvStore;
-use crowkv::common::config::{PxElectionConfig, ServerConfig};
+use crowkv::common::config::{AdmissionPolicy, PxElectionConfig, ServerConfig};
 use crowkv::metrics::MetricsRunner;
 
 use crowkv_server::cli::{parse_id_list, parse_port_list, Cli};
@@ -77,6 +77,8 @@ async fn main() {
         election_profile = %args.election_profile,
         kv_backend = %args.kv_backend,
         wal_backend = %args.wal_backend,
+        max_inflight = args.max_inflight,
+        inflight_queues = args.inflight_queues,
         "parsed CLI arguments"
     );
 
@@ -85,11 +87,10 @@ async fn main() {
     let election_cfg = match args.election_profile.as_str() {
         "test" => PxElectionConfig::for_tests(),
         "e2e" => PxElectionConfig::for_e2e(),
-        "bench" => PxElectionConfig::for_bench(),
         _ => PxElectionConfig::DEFAULT,
     };
 
-    let wal_root = args.wal_root.clone().unwrap_or_else(|| PathBuf::from("wal"));
+    let wal_root = args.wal_root.clone().unwrap_or_else(|| PathBuf::from("waldata"));
     let config_root = args
         .config_root
         .clone()
@@ -111,7 +112,9 @@ async fn main() {
                 || Arc::new(std::sync::Mutex::new(crowkv::metrics::MetricsRegistry::new())),
                 |r| r.registry().clone(),
             ))
-            .with_wal_skip_fsync(args.no_fsync),
+            .with_wal_skip_fsync(args.no_fsync)
+            .with_max_inflight(args.max_inflight)
+            .with_inflight_queues(args.inflight_queues),
     );
 
     // Populate the port pool from `--ports` even when `--stores` is not
@@ -170,6 +173,8 @@ async fn main() {
             b.replica_id,
             b.ports.clone(),
             registry.clone(),
+            args.max_inflight,
+            args.inflight_queues,
         )
         .await;
     }
@@ -287,14 +292,17 @@ fn parse_and_validate_cli_args(args: &Cli) -> Option<Bootstrap> {
 
 /// Create and start stores with their groups, registering each with the registry.
 /// If `group_ids` is empty, stores are created without groups.
+#[allow(clippy::too_many_arguments)]
 async fn create_and_start_stores(
     store_ids: &[u64],
     group_ids: &[u64],
     replica_id: u64,
     ports: Vec<u16>,
     registry: Arc<KvStoreRegistry>,
+    max_inflight: usize,
+    inflight_queues: usize,
 ) {
-    info!(
+    debug!(
         store_count = store_ids.len(),
         group_count = group_ids.len(),
         "creating stores and groups"
@@ -310,7 +318,7 @@ async fn create_and_start_stores(
                 .unwrap_or(0)
         };
         let addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
-        info!(store_id, bind_addr = %addr, "creating PxKvStore");
+        debug!(store_id, bind_addr = %addr, "creating PxKvStore");
         let mut store = PxKvStore::new(store_id, addr);
         if let Some(ref mr) = registry.metrics_registry {
             store.set_metrics_registry(Arc::clone(mr));
@@ -321,7 +329,7 @@ async fn create_and_start_stores(
         // The election driver auto-starts in PxKvStore::add_group; the local replica
         // begins as Follower and is promoted via Paxos PreVote/RequestVote.
         for &group_id in group_ids {
-            info!(
+            debug!(
                 store_id,
                 group_id, replica_id, "creating PxGroup with local replica"
             );
@@ -338,6 +346,9 @@ async fn create_and_start_stores(
                 registry.crowtree_backend,
                 registry.wal_skip_fsync,
                 "log",
+                max_inflight,
+                inflight_queues,
+                AdmissionPolicy::Queue,
             )
             .await
             {
@@ -364,7 +375,7 @@ async fn create_and_start_stores(
         registry.add_store(store_id, store);
     }
 
-    info!(
+    debug!(
         store_count = registry.stores.len(),
         "all stores started, management API ready"
     );

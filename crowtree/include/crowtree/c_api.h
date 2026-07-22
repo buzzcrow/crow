@@ -58,6 +58,7 @@ using ct_stats = struct
     uint64_t gc_watermark;
     int32_t  io_failed; // 0/1
     uint64_t snapshot_pages_written;
+    uint64_t snapshot_pages_total;
     uint64_t snapshot_segments_written;
     uint64_t buffer_pool_hits;
     uint64_t buffer_pool_misses;
@@ -152,6 +153,35 @@ ct_status ct_clear(ct_tree *t);
 // if `t` is null.
 void ct_get_stats(const ct_tree *t, ct_stats *out);
 
+// Flush C++ metrics into a formatted string (for FFI return to Rust).
+// Returns a malloc'd null-terminated string; caller must ct_free_string it.
+// Returns nullptr if t is null or no metrics registry is configured.
+// `width` overrides per-section max name length (0 = use internal max).
+char *ct_flush_metrics_str(ct_tree *t, double window_secs, const char *timestamp, size_t width);
+
+// Extended flush with negotiated column widths (count_w, tps_w).
+char *ct_flush_metrics_str_ext(ct_tree *t, double window_secs, const char *timestamp, size_t width, size_t count_w,
+                               size_t tps_w);
+
+// Return the current max metric name length from the C++ registry.
+size_t ct_max_name_len(const ct_tree *t);
+
+// Shared column widths for cross-language alignment.
+// count_w and tps_w are the 2nd and 3rd column widths.
+// NOLINTNEXTLINE(modernize-use-using)
+typedef struct
+{
+    size_t count_w;
+    size_t tps_w;
+} ct_column_widths;
+
+// Negotiate column widths: caller passes its preferred widths,
+// C++ returns its preferred widths in *out. Both sides then use max.
+void ct_negotiate_widths(const ct_tree *t, ct_column_widths input, ct_column_widths *out);
+
+// Free a string returned by ct_flush_metrics_str.
+void ct_free_string(char *s);
+
 // Evict clean, delta-free resident leaf bases down to at most
 // `max_resident_leaves` (crowtree::Crowtree::evict_clean_leaves).
 // Test/ops hook -- forces the demand-load path a subsequent ct_get/
@@ -176,6 +206,21 @@ void      ct_force_advance_slot(ct_tree *t, uint64_t slot);
 //   [u8 kind (0=put,1=delete)][u32 klen][key bytes][u32 vlen][value bytes]
 // `vlen`/value bytes are 0-length for a delete record.
 ct_status ct_apply_batch(ct_tree *t, uint64_t slot, const uint8_t *ops, size_t ops_len, uint64_t count);
+
+// One key/value reference for ct_apply_batch_slices — non-owning pointers
+// into the caller's buffers (must outlive the call). kind: 0 = put, 1 = delete.
+using ct_kv_ref = struct
+{
+    const uint8_t *key;
+    size_t         key_len;
+    const uint8_t *value; // null/zero-len for delete
+    size_t         value_len;
+    uint8_t        kind;
+};
+
+// Same semantics as ct_apply_batch but accepts an array of ct_kv_ref structs
+// instead of a packed buffer — eliminates the Rust-side packing copy.
+ct_status ct_apply_batch_slices(ct_tree *t, uint64_t slot, const ct_kv_ref *ops, uint64_t count);
 
 // Convenience: auto-assign the next slot and apply (single-writer only).
 ct_status ct_put(ct_tree *t, const uint8_t *key, size_t klen, const uint8_t *val, size_t vlen);
@@ -228,7 +273,7 @@ ct_future *ct_snapshot_async(ct_tree *t);
 // or permanently loads one more page, so it always terminates; see
 // Crowtree::scan_async's doc comment). On completion (ct_future_poll),
 // *out_value carries the same packed record format as ct_scan
-// (`[u32 klen][key][u64 slot][u32 vlen][val]*`, always a *malloc'd*, owned
+// (`[u32 klen][key][u64 slot][u8 tombstone][u32 vlen][val]*`, always a *malloc'd*, owned
 // buffer -- pass it to ct_free_buf, no zero-copy borrow attempted here,
 // unlike ct_get_async), *out_slot carries the entry count (mirrors
 // ct_scan's *out_count), and *out_found carries the truncated flag (0/1,
@@ -280,11 +325,12 @@ void ct_future_free(ct_future *f);
 int32_t ct_reactor_eventfd(const ct_tree *t);
 
 // Range scan over `prefix` (empty = whole keyspace), up to `limit` (0 = all).
+// When `include_tombstones` is 1, tombstone entries are included in results.
 // `out_entries` is a packed owned buffer of records:
-//   [u32 klen][key bytes][u64 slot][u32 vlen][value bytes] * count
+//   [u32 klen][key bytes][u64 slot][u8 tombstone][u32 vlen][value bytes] * count
 // `out_count` receives the number of records; *truncated is set if more matched.
-ct_status ct_scan(ct_tree *t, const uint8_t *prefix, size_t plen, size_t limit, ct_buf *out_entries,
-                  uint64_t *out_count, int32_t *truncated);
+ct_status ct_scan(ct_tree *t, const uint8_t *prefix, size_t plen, size_t limit, int include_tombstones,
+                  ct_buf *out_entries, uint64_t *out_count, int32_t *truncated);
 
 // ── Consistent view (compare / iterate) ───────────────────────────
 ct_status ct_snapshot_view(ct_tree *t, ct_view **out);

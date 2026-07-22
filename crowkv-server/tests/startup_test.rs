@@ -7,7 +7,7 @@ use bytes::Bytes;
 use crowkv::cluster::group::ProposeResult;
 use crowkv::cluster::group_election::LeaderElection;
 use crowkv::cluster::local_replica::PxLocalReplicaRole;
-use crowkv::common::config::{PxElectionConfig, WalConfig};
+use crowkv::common::config::{AdmissionPolicy, PxElectionConfig, WalConfig};
 use crowkv::kv::CrowtreeBackend;
 use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 use crowkv::wal::record::WALRecord;
@@ -80,6 +80,9 @@ async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
         CrowtreeBackend::File,
         false,
         "",
+        16,
+        1,
+        AdmissionPolicy::Queue,
     )
     .await
     .unwrap();
@@ -145,6 +148,9 @@ async fn crowtree_engine_persists_across_restart(crowtree_backend: CrowtreeBacke
         crowtree_backend,
         false,
         "",
+        16,
+        1,
+        AdmissionPolicy::Queue,
     )
     .await
     .unwrap();
@@ -195,6 +201,9 @@ async fn crowtree_engine_persists_across_restart(crowtree_backend: CrowtreeBacke
         crowtree_backend,
         false,
         "",
+        16,
+        1,
+        AdmissionPolicy::Queue,
     )
     .await
     .unwrap();

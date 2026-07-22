@@ -6,6 +6,8 @@
 //! wires a real `CrowtreeEngine`'s `persist_snapshot` into the group's WAL
 //! `snapshot_slot`, and that WAL segment GC only fires once the group
 //! safe-slot (not just the engine snapshot) allows it.
+//!
+//! Also covers `PxLocalReplica::shutdown` flush + `persist_snapshot` (R20).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,15 +18,15 @@ use crowkv::cluster::group::PxGroup;
 use crowkv::cluster::group_election::LeaderElection;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crowkv::common::config::PxElectionConfig;
-use crowkv::kv::{CrowtreeEngine, CrowtreeOptions};
+use crowkv::kv::{CrowtreeEngine, CrowtreeOptions, KVEngine};
 use crowkv::paxos::roles::{Learner, PxBallot, PxLogEntry};
 use crowkv::wal::record::WALRecord;
 use crowkv::wal::replay::replay_group;
 use crowkv::wal::wal_engine::WalEngine;
-use crowkv::wal::{BlockDevice, IoBackend, WalConfig};
+use crowkv::wal::{IoBackend, MemBlockDevice, WalConfig};
 
 fn sim_backend() -> Arc<IoBackend> {
-    Arc::new(IoBackend::BlockDevice(BlockDevice::new()))
+    Arc::new(IoBackend::MemBlock(MemBlockDevice::new()))
 }
 
 /// A file-backed `CrowtreeEngine`: `persist_snapshot` (`Crowtree::snapshot`)
@@ -120,7 +122,11 @@ async fn maintenance_pass_persists_snapshot_and_gcs_wal_segments_once_safe() {
     apply_through_with_engine(&replica, 15).await;
     assert_eq!(replica.contiguous_applied(), 15);
 
-    let group = PxGroup::new(1, replica);
+    let mut group = PxGroup::new(1, replica);
+    group.set_election_config(PxElectionConfig {
+        snapshot_slot_threshold: 1,
+        ..PxElectionConfig::for_tests()
+    });
 
     // No real peers, so the recompute uses the local replica's own
     // contiguous_applied as the group safe-slot.
@@ -180,6 +186,7 @@ async fn maintenance_loop_uses_configured_tick_interval() {
     let mut group = PxGroup::new(1, replica);
     group.set_election_config(PxElectionConfig {
         maintenance_tick_ms: 5,
+        snapshot_slot_threshold: 1,
         ..PxElectionConfig::for_tests()
     });
     group.note_peer_applied_for_tests(999, 999);
@@ -251,6 +258,10 @@ async fn maintenance_pass_does_not_gc_wal_when_safe_slot_lags_snapshot() {
     // `group_safe_slot` must hold GC back regardless of engine progress.
     apply_through_with_engine(&replica, 15).await;
     let mut group = PxGroup::new(1, replica);
+    group.set_election_config(PxElectionConfig {
+        snapshot_slot_threshold: 1,
+        ..PxElectionConfig::for_tests()
+    });
     group.add_remote_replica(crowkv::cluster::PxRemoteReplica::new(
         2,
         "127.0.0.1:2".to_string(),
@@ -268,5 +279,63 @@ async fn maintenance_pass_does_not_gc_wal_when_safe_slot_lags_snapshot() {
     assert_eq!(
         seg_count_after, seg_count_before,
         "a lagging voting peer's safe_slot must hold WAL GC back even though this replica's engine is far ahead"
+    );
+}
+
+/// R20: `PxLocalReplica::shutdown` must flush + persist the engine
+/// snapshot so data reaches the block file before the process exits.
+/// After shutdown, reopening the engine from the same directory should
+/// report a non-zero `resume_from_slot` (the snapshot covers all
+/// applied slots), proving the durable prefix was written.
+#[tokio::test]
+async fn shutdown_persists_engine_snapshot() {
+    let engine_dir = tempfile::tempdir().unwrap();
+    let engine_path = engine_dir.path().join("data");
+    std::fs::create_dir_all(&engine_path).unwrap();
+
+    let backend = sim_backend();
+    let empty_replay = replay_group(&backend, &[PathBuf::from("/empty")], 1)
+        .await
+        .unwrap();
+
+    let engine = CrowtreeEngine::open(&CrowtreeOptions {
+        path: Some(engine_path.display().to_string()),
+        ..Default::default()
+    })
+    .unwrap();
+
+    let replica = PxLocalReplica::restore_from_replay_with_engine(
+        1,
+        PxLocalReplicaRole::Leader,
+        &empty_replay,
+        Box::new(engine),
+    )
+    .await
+    .unwrap();
+
+    // Apply real Put payloads through slots 1..=10.
+    apply_through_with_engine(&replica, 10).await;
+    assert_eq!(replica.contiguous_applied(), 10);
+
+    // Graceful shutdown — should flush + persist_snapshot.
+    let report = replica.shutdown(Duration::from_secs(5)).await;
+    assert!(
+        report.is_clean(),
+        "shutdown should be clean, got: {:?}",
+        report.errors
+    );
+
+    // Reopen the engine from the same directory. The snapshot persisted
+    // by shutdown should make resume_from_slot non-zero.
+    let reopened = CrowtreeEngine::open(&CrowtreeOptions {
+        path: Some(engine_path.display().to_string()),
+        ..Default::default()
+    })
+    .unwrap();
+
+    let resume_slot = reopened.resume_from_slot();
+    assert_eq!(
+        resume_slot, 10,
+        "resume_from_slot should be 10 after shutdown persisted the snapshot, got {resume_slot}"
     );
 }

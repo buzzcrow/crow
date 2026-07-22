@@ -8,6 +8,7 @@
 
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use crowkv::cluster::group::PxGroup;
 use crowkv::cluster::group_election::LeaderElection;
 use crowkv::cluster::{KvServer, PxLocalReplica, PxLocalReplicaRole, PxRemoteReplica};
@@ -43,8 +44,8 @@ async fn put_to_group(
     let resp = client
         .put(KvSetRequest {
             version: 1,
-            key: key.to_vec(),
-            value: val.to_vec(),
+            key: Bytes::copy_from_slice(key),
+            value: Bytes::copy_from_slice(val),
             ttl_ms: 0,
             request_id: req_id,
             request_create_ms: req_id,
@@ -62,7 +63,7 @@ async fn get_from_group(client: &mut KvServiceClient<Channel>, group_id: u64, ke
     let resp = client
         .get(KvGetRequest {
             version: 1,
-            key: key.to_vec(),
+            key: Bytes::copy_from_slice(key),
             request_id: 9001,
             request_create_ms: 9001,
             group_id,
@@ -73,7 +74,7 @@ async fn get_from_group(client: &mut KvServiceClient<Channel>, group_id: u64, ke
         .ok()?
         .into_inner();
     if resp.ok && !resp.not_found {
-        Some(resp.value)
+        Some(resp.value.to_vec())
     } else {
         None
     }

@@ -211,6 +211,23 @@ ct_status ct_open(const ct_options *opt, ct_tree **out)
         o.max_inline_value = opt->max_inline_value;
     }
     o.compression = opt->compression == 1 ? compress_algo::kLz4 : compress_algo::kNone;
+    o.store_id    = opt->store_id;
+    o.group_id    = opt->group_id;
+    o.name        = "s" + std::to_string(opt->store_id) + ".g" + std::to_string(opt->group_id);
+
+    // Set backend label for metric names
+    {
+        const bool durable = opt->path != nullptr && opt->path[0] != '\0';
+        if (!durable || opt->backend == CT_BACKEND_MEM_BLOCK) {
+            o.backend_label = "mem";
+        }
+        else if (opt->backend == CT_BACKEND_FILE) {
+            o.backend_label = "file";
+        }
+        else {
+            o.backend_label = "block";
+        }
+    }
 
     // Map ct_sync_mode → SyncMode
     SyncMode sm = SyncMode::kFull;
@@ -399,6 +416,7 @@ void ct_get_stats(const ct_tree *t, ct_stats *out)
     out->gc_watermark              = s.gc_watermark;
     out->io_failed                 = s.io_failed ? 1 : 0;
     out->snapshot_pages_written    = s.snapshot_pages_written;
+    out->snapshot_pages_total      = s.snapshot_pages_total;
     out->snapshot_segments_written = s.snapshot_segments_written;
     out->buffer_pool_hits          = s.buffer_pool_hits;
     out->buffer_pool_misses        = s.buffer_pool_misses;
@@ -408,6 +426,69 @@ void ct_get_stats(const ct_tree *t, ct_stats *out)
     out->buffer_pool_dirty         = s.buffer_pool_dirty;
     out->buffer_pool_used          = s.buffer_pool_used;
     out->buffer_pool_num_frames    = s.buffer_pool_num_frames;
+}
+
+char *ct_flush_metrics_str(ct_tree *t, double window_secs, const char *timestamp, size_t width)
+{
+    if (t == nullptr || timestamp == nullptr) {
+        return nullptr;
+    }
+    std::string str = t->tree->flush_metrics_str(window_secs, timestamp, width);
+    if (str.empty()) {
+        return nullptr;
+    }
+    char *out = static_cast<char *>(std::malloc(str.size() + 1));
+    if (out == nullptr) {
+        return nullptr;
+    }
+    std::memcpy(out, str.data(), str.size());
+    out[str.size()] = '\0';
+    return out;
+}
+
+char *ct_flush_metrics_str_ext(ct_tree *t, double window_secs, const char *timestamp, size_t width, size_t count_w,
+                               size_t tps_w)
+{
+    if (t == nullptr || timestamp == nullptr) {
+        return nullptr;
+    }
+    std::string str = t->tree->flush_metrics_str(window_secs, timestamp, width, count_w, tps_w);
+    if (str.empty()) {
+        return nullptr;
+    }
+    char *out = static_cast<char *>(std::malloc(str.size() + 1));
+    if (out == nullptr) {
+        return nullptr;
+    }
+    std::memcpy(out, str.data(), str.size());
+    out[str.size()] = '\0';
+    return out;
+}
+
+void ct_negotiate_widths(const ct_tree *t, ct_column_widths input, ct_column_widths *out)
+{
+    if (out == nullptr) {
+        return;
+    }
+    // C++ preferred column widths: count=5, tps=7.
+    // If t is null or no registry, just echo back C++ defaults.
+    out->count_w = 5;
+    out->tps_w   = 7;
+    (void)t;
+    (void)input;
+}
+
+size_t ct_max_name_len(const ct_tree *t)
+{
+    if (t == nullptr) {
+        return 0;
+    }
+    return t->tree->max_name_len();
+}
+
+void ct_free_string(char *s)
+{
+    std::free(s);
 }
 
 uint64_t ct_evict_clean_leaves(ct_tree *t, uint64_t max_resident_leaves)
@@ -487,6 +568,29 @@ ct_status ct_apply_batch(ct_tree *t, uint64_t slot, const uint8_t *ops, size_t o
         Slice value_slice(reinterpret_cast<const char *>(ops + pos), vlen);
         pos += vlen;
         OpKind kind = kind_byte == 0 ? OpKind::kPut : OpKind::kDelete;
+        encoded.push_back({std::move(key), encode_cell_buf(slot, kind, kind == OpKind::kPut ? value_slice : Slice())});
+    }
+    return to_status(t->tree->apply_encoded(slot, std::move(encoded)));
+}
+
+ct_status ct_apply_batch_slices(ct_tree *t, uint64_t slot, const ct_kv_ref *ops, uint64_t count)
+{
+    if (t == nullptr || (ops == nullptr && count != 0)) {
+        return static_cast<ct_status>(Code::kInvalidArgument);
+    }
+    std::vector<Crowtree::encoded_op> encoded;
+    encoded.reserve(count);
+    for (uint64_t i = 0; i < count; ++i) {
+        const ct_kv_ref &op = ops[i];
+        if (op.key == nullptr && op.key_len != 0) {
+            return static_cast<ct_status>(Code::kInvalidArgument);
+        }
+        if (op.kind != 0 && op.kind != 1) {
+            return static_cast<ct_status>(Code::kInvalidArgument);
+        }
+        std::string key(reinterpret_cast<const char *>(op.key), op.key_len);
+        OpKind      kind = op.kind == 0 ? OpKind::kPut : OpKind::kDelete;
+        Slice       value_slice(reinterpret_cast<const char *>(op.value), op.value_len);
         encoded.push_back({std::move(key), encode_cell_buf(slot, kind, kind == OpKind::kPut ? value_slice : Slice())});
     }
     return to_status(t->tree->apply_encoded(slot, std::move(encoded)));
@@ -605,11 +709,12 @@ ct_future *ct_scan_async(ct_tree *t, const uint8_t *prefix, size_t plen, size_t 
                             if (st.ok()) {
                                 // Same packed record format as ct_scan (see
                                 // that function): [u32 klen][key][u64
-                                // slot][u32 vlen][val] * count.
+                                // slot][u8 tombstone][u32 vlen][val] * count.
                                 for (const auto &e : entries) {
                                     pack_u32(&impl->scan_packed, static_cast<uint32_t>(e.key.size()));
                                     impl->scan_packed.append(e.key);
                                     pack_u64(&impl->scan_packed, e.slot);
+                                    impl->scan_packed.push_back(static_cast<char>(e.tombstone ? 1 : 0));
                                     pack_u32(&impl->scan_packed, static_cast<uint32_t>(e.value.size()));
                                     impl->scan_packed.append(e.value);
                                 }
@@ -700,15 +805,16 @@ int32_t ct_reactor_eventfd(const ct_tree *t)
     return -1;
 }
 
-ct_status ct_scan(ct_tree *t, const uint8_t *prefix, size_t plen, size_t limit, ct_buf *out_entries,
-                  uint64_t *out_count, int32_t *truncated)
+ct_status ct_scan(ct_tree *t, const uint8_t *prefix, size_t plen, size_t limit, int include_tombstones,
+                  ct_buf *out_entries, uint64_t *out_count, int32_t *truncated)
 {
     if (t == nullptr || out_entries == nullptr) {
         return static_cast<ct_status>(Code::kInvalidArgument);
     }
     std::vector<scan_entry> entries;
     bool                    tr = false;
-    Status s = t->tree->scan(Slice(reinterpret_cast<const char *>(prefix), plen), limit, &entries, &tr);
+    Status                  s = t->tree->scan(Slice(reinterpret_cast<const char *>(prefix), plen), limit, &entries, &tr,
+                                              include_tombstones != 0);
     if (!s.ok()) {
         return to_status(s);
     }
@@ -717,6 +823,7 @@ ct_status ct_scan(ct_tree *t, const uint8_t *prefix, size_t plen, size_t limit, 
         pack_u32(&packed, static_cast<uint32_t>(e.key.size()));
         packed.append(e.key);
         pack_u64(&packed, e.slot);
+        packed.push_back(static_cast<char>(e.tombstone ? 1 : 0));
         pack_u32(&packed, static_cast<uint32_t>(e.value.size()));
         packed.append(e.value);
     }

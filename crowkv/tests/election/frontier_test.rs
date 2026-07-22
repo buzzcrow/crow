@@ -57,7 +57,7 @@ async fn frontier_triple_reflects_accepted_slot() {
     replica.clear_vote_lockout();
 
     // Accept at slot 5, term 3 — bumps current_term to 3.
-    let _ = replica.on_accept(accept_entry(5, 3, 1)).await;
+    let _ = replica.on_accept(&accept_entry(5, 3, 1)).await;
     let current_term = replica.current_term_snapshot();
 
     let reply = <PxLocalReplica as ReplicaHandler>::on_request_vote(
@@ -86,7 +86,7 @@ async fn frontier_triple_reflects_learned_slot() {
     // Accept + learn at slot 3, term 2 (must learn 1,2,3 for contiguous).
     for slot in 1..=3u64 {
         let entry = accept_entry(slot, 2, 1);
-        let _ = replica.on_accept(entry.clone()).await;
+        let _ = replica.on_accept(&entry).await;
         replica.learn_chosen(&entry, None, None).await;
     }
     let current_term = replica.current_term_snapshot();
@@ -116,7 +116,7 @@ async fn frontier_triple_consistent_after_become_candidate() {
     // Accept + learn slots 1-7, term 4 (sequential for contiguous).
     for slot in 1..=7u64 {
         let entry = accept_entry(slot, 4, 1);
-        let _ = replica.on_accept(entry.clone()).await;
+        let _ = replica.on_accept(&entry).await;
         replica.learn_chosen(&entry, None, None).await;
     }
     let term_before = replica.current_term_snapshot();
@@ -149,7 +149,7 @@ async fn frontier_triple_consistent_after_become_leader() {
     // Accept + learn slots 1-10, term 5.
     for slot in 1..=10u64 {
         let entry = accept_entry(slot, 5, 1);
-        let _ = replica.on_accept(entry.clone()).await;
+        let _ = replica.on_accept(&entry).await;
         replica.learn_chosen(&entry, None, None).await;
     }
     let term = replica.current_term_snapshot();
@@ -185,7 +185,7 @@ async fn frontier_triple_consistent_after_become_follower() {
     // Build up state: accept + learn slots 1-4, term 2.
     for slot in 1..=4u64 {
         let entry = accept_entry(slot, 2, 1);
-        let _ = replica.on_accept(entry.clone()).await;
+        let _ = replica.on_accept(&entry).await;
         replica.learn_chosen(&entry, None, None).await;
     }
     let term = replica.current_term_snapshot();
@@ -220,11 +220,11 @@ async fn frontier_triple_with_gap_in_accepted_log() {
 
     // Accept at slots 1 and 5 (gap at 2-4), learn slot 1.
     let entry1 = accept_entry(1, 2, 1);
-    let _ = replica.on_accept(entry1.clone()).await;
+    let _ = replica.on_accept(&entry1).await;
     replica.learn_chosen(&entry1, None, None).await;
 
     let entry5 = accept_entry(5, 2, 1);
-    let _ = replica.on_accept(entry5).await;
+    let _ = replica.on_accept(&entry5).await;
 
     let term = replica.current_term_snapshot();
 
@@ -246,7 +246,7 @@ async fn frontier_triple_advances_with_progressive_learn() {
     // Accept + learn slots 1, 2, 3 sequentially.
     for slot in 1..=3u64 {
         let entry = accept_entry(slot, 2, 1);
-        let _ = replica.on_accept(entry.clone()).await;
+        let _ = replica.on_accept(&entry).await;
         replica.learn_chosen(&entry, None, None).await;
     }
 
@@ -270,7 +270,7 @@ async fn prevote_reply_carries_frontier_triple() {
     // Accept + learn at slot 8, term 3 (sequential 1-8 for contiguous).
     for slot in 1..=8u64 {
         let entry = accept_entry(slot, 3, 1);
-        let _ = replica.on_accept(entry.clone()).await;
+        let _ = replica.on_accept(&entry).await;
         replica.learn_chosen(&entry, None, None).await;
     }
     let term = replica.current_term_snapshot();

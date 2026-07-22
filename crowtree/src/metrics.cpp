@@ -4,6 +4,7 @@
 #include "crowtree/metrics.h"
 
 #include "crowtree/gzip.h"
+#include "crowtree/log.h"
 
 #include <algorithm>
 #include <array>
@@ -12,6 +13,7 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <utility>
 #include <vector>
 
 namespace crowtree
@@ -168,115 +170,160 @@ template <typename T> static std::vector<size_t> sorted_indices(const std::vecto
     return idx;
 }
 
-void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timestamp)
+void MetricsRegistry::flush_to(FILE *fp, double window_secs, const char *timestamp, const char *section_label,
+                               size_t width, size_t count_w, size_t tps_w)
 {
     std::lock_guard<std::mutex> lock(flush_mutex_);
 
-    std::fprintf(fp, "[metrics %s window=%.0fs]\n", timestamp, window_secs);
+    // Global max name length across all sections (or override from caller).
+    size_t name_w = width;
+    if (name_w == 0) {
+        name_w = max_name_len();
+    }
+    // Negotiated column widths (0 = use C++ defaults).
+    size_t cw = count_w > 0 ? count_w : 5;
+    size_t tw = tps_w > 0 ? tps_w : 7;
+
+    std::fprintf(fp, "[%s %s window=%.3fs]\n", section_label, timestamp, window_secs);
 
     // Counters
     if (!counters_.empty()) {
-        size_t max_name = 0;
-        for (const auto &e : counters_) {
-            max_name = std::max(max_name, e->name().size());
-        }
-        std::fprintf(fp, "%-*s  count  tps(/s)  total\n", static_cast<int>(max_name), "name");
-        auto idx = sorted_indices(counters_);
+        auto                                              idx = sorted_indices(counters_);
+        std::vector<std::pair<size_t, Counter::Snapshot>> active;
         for (size_t i : idx) {
             auto snap = counters_[i]->flush();
-            if (snap.count == 0) {
-                continue;
+            if (snap.count > 0) {
+                active.emplace_back(i, snap);
             }
-            double tps_d = static_cast<double>(snap.count) / window_secs;
-            auto   tps   = static_cast<uint64_t>(tps_d);
-            std::fprintf(fp, "%-*s  %5llu  %7llu  %6llu\n", static_cast<int>(max_name), counters_[i]->name().c_str(),
-                         static_cast<unsigned long long>(snap.count), static_cast<unsigned long long>(tps),
-                         static_cast<unsigned long long>(snap.total));
+        }
+        if (!active.empty()) {
+            std::fprintf(fp, "%-*s  count  tps(/s)  total\n", static_cast<int>(name_w), "");
+            for (const auto &[i, snap] : active) {
+                double tps_d = static_cast<double>(snap.count) / window_secs;
+                auto   tps   = static_cast<uint64_t>(tps_d);
+                std::fprintf(fp, "%-*s  %*llu  %*llu  %6llu\n", static_cast<int>(name_w), counters_[i]->name().c_str(),
+                             static_cast<int>(cw), static_cast<unsigned long long>(snap.count), static_cast<int>(tw),
+                             static_cast<unsigned long long>(tps), static_cast<unsigned long long>(snap.total));
+            }
         }
     }
 
     // Histograms
     if (!histograms_.empty()) {
-        size_t max_name = 0;
-        for (const auto &e : histograms_) {
-            max_name = std::max(max_name, e->name().size());
-        }
-        std::fprintf(fp, "%-*s  count  p50  p99  avg(ns)  total\n", static_cast<int>(max_name), "name");
-        auto idx = sorted_indices(histograms_);
+        auto                                                       idx = sorted_indices(histograms_);
+        std::vector<std::pair<size_t, LatencyHistogram::Snapshot>> active;
         for (size_t i : idx) {
             auto snap = histograms_[i]->flush();
-            if (snap.count == 0) {
-                continue;
+            if (snap.count > 0) {
+                active.emplace_back(i, snap);
             }
-            uint64_t p50 = LatencyHistogram::percentile(snap, 50.0);
-            uint64_t p99 = LatencyHistogram::percentile(snap, 99.0);
-            uint64_t avg = snap.count > 0 ? snap.sum / snap.count : 0;
-            std::fprintf(fp, "%-*s  %5llu  %4llu  %4llu  %7llu  %5llu\n", static_cast<int>(max_name),
-                         histograms_[i]->name().c_str(), static_cast<unsigned long long>(snap.count),
-                         static_cast<unsigned long long>(p50), static_cast<unsigned long long>(p99),
-                         static_cast<unsigned long long>(avg), static_cast<unsigned long long>(snap.total_count));
+        }
+        if (!active.empty()) {
+            std::fprintf(fp, "%-*s  count  tps(/s)  avg(us)  p50  p99  max  total\n", static_cast<int>(name_w), "");
+            for (const auto &[i, snap] : active) {
+                uint64_t p50   = LatencyHistogram::percentile(snap, 50.0);
+                uint64_t p99   = LatencyHistogram::percentile(snap, 99.0);
+                uint64_t avg   = snap.count > 0 ? snap.sum / snap.count : 0;
+                double   tps_d = static_cast<double>(snap.count) / window_secs;
+                auto     tps   = static_cast<uint64_t>(tps_d);
+                std::fprintf(fp, "%-*s  %*llu  %*llu  %7llu  %4llu  %4llu  %7llu  %5llu\n", static_cast<int>(name_w),
+                             histograms_[i]->name().c_str(), static_cast<int>(cw),
+                             static_cast<unsigned long long>(snap.count), static_cast<int>(tw),
+                             static_cast<unsigned long long>(tps), static_cast<unsigned long long>(avg / 1000),
+                             static_cast<unsigned long long>(p50 / 1000), static_cast<unsigned long long>(p99 / 1000),
+                             static_cast<unsigned long long>(snap.sum / snap.count),
+                             static_cast<unsigned long long>(snap.total_count));
+            }
         }
     }
 
     // Summaries
     if (!summaries_.empty()) {
-        size_t max_name = 0;
-        for (const auto &e : summaries_) {
-            max_name = std::max(max_name, e->name().size());
-        }
-        std::fprintf(fp, "%-*s  count  avg(ns)  max(ns)  total\n", static_cast<int>(max_name), "name");
-        auto idx = sorted_indices(summaries_);
+        auto                                                     idx = sorted_indices(summaries_);
+        std::vector<std::pair<size_t, LatencySummary::Snapshot>> active;
         for (size_t i : idx) {
             auto snap = summaries_[i]->flush();
-            if (snap.count == 0) {
-                continue;
+            if (snap.count > 0) {
+                active.emplace_back(i, snap);
             }
-            uint64_t avg = snap.count > 0 ? snap.sum / snap.count : 0;
-            std::fprintf(fp, "%-*s  %5llu  %7llu  %7llu  %5llu\n", static_cast<int>(max_name),
-                         summaries_[i]->name().c_str(), static_cast<unsigned long long>(snap.count),
-                         static_cast<unsigned long long>(avg), static_cast<unsigned long long>(snap.max),
-                         static_cast<unsigned long long>(snap.total_count));
+        }
+        if (!active.empty()) {
+            std::fprintf(fp, "%-*s  count  tps(/s)  avg(us)  max(us)  total\n", static_cast<int>(name_w), "");
+            for (const auto &[i, snap] : active) {
+                uint64_t avg   = snap.count > 0 ? snap.sum / snap.count : 0;
+                double   tps_d = static_cast<double>(snap.count) / window_secs;
+                auto     tps   = static_cast<uint64_t>(tps_d);
+                std::fprintf(fp, "%-*s  %*llu  %*llu  %7llu  %7llu  %5llu\n", static_cast<int>(name_w),
+                             summaries_[i]->name().c_str(), static_cast<int>(cw),
+                             static_cast<unsigned long long>(snap.count), static_cast<int>(tw),
+                             static_cast<unsigned long long>(tps), static_cast<unsigned long long>(avg / 1000),
+                             static_cast<unsigned long long>(snap.max / 1000),
+                             static_cast<unsigned long long>(snap.total_count));
+            }
         }
     }
 
     // Bandwidths
     if (!bandwidths_.empty()) {
-        size_t max_name = 0;
-        for (const auto &e : bandwidths_) {
-            max_name = std::max(max_name, e->name().size());
-        }
-        std::fprintf(fp, "%-*s  count  avg_size  rate(B/s)  total(B)\n", static_cast<int>(max_name), "name");
-        auto idx = sorted_indices(bandwidths_);
+        auto                                                idx = sorted_indices(bandwidths_);
+        std::vector<std::pair<size_t, Bandwidth::Snapshot>> active;
         for (size_t i : idx) {
             auto snap = bandwidths_[i]->flush();
-            if (snap.count == 0) {
-                continue;
+            if (snap.count > 0) {
+                active.emplace_back(i, snap);
             }
-            uint64_t avg_size = snap.count > 0 ? snap.sum / snap.count : 0;
-            double   rate_d   = static_cast<double>(snap.sum) / window_secs;
-            auto     rate     = static_cast<uint64_t>(rate_d);
-            std::fprintf(fp, "%-*s  %5llu  %8llu  %9llu  %8llu\n", static_cast<int>(max_name),
-                         bandwidths_[i]->name().c_str(), static_cast<unsigned long long>(snap.count),
-                         static_cast<unsigned long long>(avg_size), static_cast<unsigned long long>(rate),
-                         static_cast<unsigned long long>(snap.total_bytes));
+        }
+        if (!active.empty()) {
+            std::fprintf(fp, "%-*s  count  tps(/s)  avg_size(KB)  rate(KB/s)  total(KB)\n", static_cast<int>(name_w),
+                         "");
+            for (const auto &[i, snap] : active) {
+                uint64_t avg_size = snap.count > 0 ? snap.sum / snap.count : 0;
+                double   rate_d   = static_cast<double>(snap.sum) / window_secs;
+                auto     rate     = static_cast<uint64_t>(rate_d);
+                double   tps_d    = static_cast<double>(snap.count) / window_secs;
+                auto     tps      = static_cast<uint64_t>(tps_d);
+                std::fprintf(fp, "%-*s  %*llu  %*llu  %12llu  %10llu  %9llu\n", static_cast<int>(name_w),
+                             bandwidths_[i]->name().c_str(), static_cast<int>(cw),
+                             static_cast<unsigned long long>(snap.count), static_cast<int>(tw),
+                             static_cast<unsigned long long>(tps), static_cast<unsigned long long>(avg_size / 1024),
+                             static_cast<unsigned long long>(rate / 1024),
+                             static_cast<unsigned long long>(snap.total_bytes / 1024));
+            }
         }
     }
 
     // Gauges (always printed, even if 0)
     if (!gauges_.empty()) {
-        size_t max_name = 0;
-        for (const auto &e : gauges_) {
-            max_name = std::max(max_name, e->name().size());
-        }
-        std::fprintf(fp, "%-*s  value\n", static_cast<int>(max_name), "name");
+        std::fprintf(fp, "%-*s  value\n", static_cast<int>(name_w), "");
         auto idx = sorted_indices(gauges_);
         for (size_t i : idx) {
-            std::fprintf(fp, "%-*s  %5llu\n", static_cast<int>(max_name), gauges_[i]->name().c_str(),
+            std::fprintf(fp, "%-*s  %5llu\n", static_cast<int>(name_w), gauges_[i]->name().c_str(),
                          static_cast<unsigned long long>(gauges_[i]->get()));
         }
     }
 
     std::fprintf(fp, "\n");
+}
+
+size_t MetricsRegistry::max_name_len() const
+{
+    size_t max_len = 0;
+    for (const auto &e : counters_) {
+        max_len = std::max(max_len, e->name().size());
+    }
+    for (const auto &e : histograms_) {
+        max_len = std::max(max_len, e->name().size());
+    }
+    for (const auto &e : summaries_) {
+        max_len = std::max(max_len, e->name().size());
+    }
+    for (const auto &e : bandwidths_) {
+        max_len = std::max(max_len, e->name().size());
+    }
+    for (const auto &e : gauges_) {
+        max_len = std::max(max_len, e->name().size());
+    }
+    return max_len;
 }
 
 void MetricsRegistry::start(const std::string &log_path, double interval_secs, size_t max_file_mb, size_t max_files)
@@ -287,6 +334,7 @@ void MetricsRegistry::start(const std::string &log_path, double interval_secs, s
     max_files_      = max_files;
     running_.store(true, std::memory_order_relaxed);
     flush_thread_ = std::thread([this]() {
+        set_current_thread_name("ct-metrics");
         while (running_.load(std::memory_order_relaxed)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(interval_secs_ * 1000)));
             if (!running_.load(std::memory_order_relaxed)) {
@@ -318,7 +366,7 @@ void MetricsRegistry::flush_to_file()
         return;
     }
     std::string ts = iso8601_now();
-    flush_to(fp, interval_secs_, ts.c_str());
+    flush_to(fp, interval_secs_, ts.c_str(), "metrics", 0);
     std::fflush(fp);
     std::fclose(fp);
 }

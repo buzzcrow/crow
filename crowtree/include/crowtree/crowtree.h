@@ -17,7 +17,6 @@
 #include "crowtree/status.h"
 
 #include <atomic>
-#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -26,7 +25,6 @@
 #include <set>
 #include <shared_mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace crowtree
@@ -55,6 +53,7 @@ struct scan_entry
     std::string key;
     uint64_t    slot;
     std::string value;
+    bool        tombstone = false;
 };
 
 struct get_result
@@ -171,6 +170,7 @@ struct EngineStats
     uint64_t gc_watermark              = 0;     // min(snapshot_slot, safe_slot) (see gc_watermark())
     bool     io_failed                 = false; // latched media fault (see io_failed())
     uint64_t snapshot_pages_written    = 0;     // last snapshot()'s dirty base pages written
+    uint64_t snapshot_pages_total      = 0;     // cumulative pages written across all snapshots
     uint64_t snapshot_segments_written = 0;     // last snapshot()'s dirty mapping segments written
     // BufferPool::Stats as of this call -- see buffer_pool.h.
     uint64_t buffer_pool_hits       = 0;
@@ -187,8 +187,11 @@ struct EngineStats
     uint64_t mt_get_hit_total    = 0; // L0 lookups that found a cell
     uint64_t flush_drain_total   = 0; // drain_memtable_into_l1 calls
     uint64_t flush_entries_total = 0; // entries drained from L0 to L1
+    uint64_t snapshot_total      = 0; // snapshot() calls (durable checkpoints)
     uint64_t l1_get_total        = 0; // get() lookups that descended to L1
     uint64_t l1_get_hit_total    = 0; // L1 lookups that found a cell
+    uint64_t map_lookup_total    = 0; // mapping table lookups
+    uint64_t demand_load_total   = 0; // demand-load page faults
 };
 
 // One durable blob to write at a fixed offset, computed ahead of time by
@@ -468,9 +471,11 @@ class Crowtree
     [[nodiscard]] std::vector<get_result> multi_get(const std::vector<Slice> &keys) const;
 
     // Ordered range scan over keys with `prefix` (empty = whole keyspace), latest
-    // state (L0 overlaid on L1), skipping tombstones. Returns up to `limit`
-    // entries in key order; sets *truncated if more matched beyond the limit.
-    Status scan(Slice prefix, size_t limit, std::vector<scan_entry> *out, bool *truncated) const;
+    // state (L0 overlaid on L1). When `include_tombstones` is false (default),
+    // tombstones are skipped. Returns up to `limit` entries in key order; sets
+    // *truncated if more matched beyond the limit.
+    Status scan(Slice prefix, size_t limit, std::vector<scan_entry> *out, bool *truncated,
+                bool include_tombstones = false) const;
 
     // Async twin of scan(). Unlike get_async,
     // which has exactly one possible miss point (the root->leaf descent for
@@ -613,11 +618,20 @@ class Crowtree
     // scrape or console panel refresh).
     [[nodiscard]] EngineStats stats() const;
 
-    // Wire C++ metrics into the engine. Registers buffer pool, apply, and
-    // snapshot metric handles with the given registry using the provided
-    // name prefix (e.g. "s.1.g.0"). Must be called after open() and before
-    // any operations. The registry must outlive the engine.
-    void set_metrics(MetricsRegistry *registry, const std::string &prefix);
+    // Create the internal MetricsRegistry and register all handles
+    // using the provided name prefix (e.g. "s.1.g.0"). Called from open().
+    void init_metrics(const std::string &prefix);
+
+    // Flush all C++ metrics into a formatted string (for FFI return to
+    // Rust). Uses open_memstream internally. `width` overrides the
+    // per-section max name length for column alignment with the Rust
+    // section (0 = use internal max).
+    std::string flush_metrics_str(double window_secs, const char *timestamp, size_t width = 0, size_t count_w = 0,
+                                  size_t tps_w = 0);
+
+    // Return the current max metric name length (for Rust's shared-width
+    // computation).
+    size_t max_name_len() const;
 
     // Evict clean, delta-free resident leaf bases down to at most
     // `max_resident_leaves`, re-tagging their slots unloaded and epoch-retiring the
@@ -696,23 +710,6 @@ class Crowtree
         uint32_t q = opt_.inner_max_keys / 4;
         return q != 0 ? q : 1;
     }
-
-    // Start the background flush thread if `opt_.background_flush` is set (open-
-    // issue fix, §C). Safe to call at most once; no-op otherwise.
-    // Callers that go through a two-phase construction (Crowtree::open()'s
-    // construct-then-recover sequence in persist.cpp) must delay this call until
-    // *after* recovery finishes, since recovery mutates the freshly-constructed
-    // tree directly (no write_mutex_) under a single-threaded assumption.
-    void start_background_flush_thread();
-    // Background thread body: periodically calls flush() (cheap no-op when L0 is
-    // empty; see flush()) so a low/no-write-rate workload still becomes durable-
-    // eligible on a timer, not only on the size thresholds. Reuses flush()'s
-    // existing write_mutex_/MemTable-mutex_ locking — no new synchronization
-    // between this thread and the apply()-driving thread (design note in
-    // Open Issues §C). Also runs collect_garbage() every
-    // opt_.gc_interval_ms (plan-tree #21) on this same thread/loop -- no second
-    // thread for the periodic GC trigger.
-    void background_flush_loop();
 
     void retire_page(PageBase *p);
     // Retire a page that becomes entirely unreachable by new readers with no
@@ -940,6 +937,9 @@ class Crowtree
                                    std::function<void(Status, uint64_t last_applied)> on_done);
 
     Options opt_;
+    // Human-readable engine label for CT_LOG context (e.g. "s1.g1").
+    // Copied from opt_.name at construction; empty means "[unnamed]".
+    std::string name_;
     // Base-page frame arena. shared_ptr because epoch-retired pages
     // co-own it; the tree-owned EpochManager (epoch_, declared last so it is
     // destroyed first) reclaims those pages before pool_ is destroyed. Declared
@@ -1012,8 +1012,9 @@ class Crowtree
     // write pattern, which is expected and bounded by how long the
     // underlying gap stays open, not by this mechanism.
     mutable std::shared_mutex             memtable_mutex_;
-    std::shared_ptr<MemTable>             active_{std::make_shared<MemTable>()};
+    std::shared_ptr<MemTable>             active_;
     std::deque<std::shared_ptr<MemTable>> frozen_;
+    std::atomic<uint64_t>                 memtable_next_id_{1}; // monotonic MemTable id for logging
 
     // internal_error slot tracker (replaces the caller-supplied contiguous_slot). Holds
     // received-but-not-yet-contiguous slots above contiguous_slot_; the contiguous
@@ -1030,6 +1031,7 @@ class Crowtree
     std::atomic<uint64_t>     version_{0};
     std::atomic<uint64_t>     gc_floor_{0};
     std::atomic<uint64_t>     snapshot_pages_written_{0};    // pages written by last snapshot
+    std::atomic<uint64_t>     snapshot_pages_total_{0};      // cumulative pages written across all snapshots
     std::atomic<uint64_t>     snapshot_segments_written_{0}; // segment images written by last snapshot
     mutable std::atomic<bool> io_failed_{false};             // latched demand-load media fault
 
@@ -1040,8 +1042,11 @@ class Crowtree
     mutable std::atomic<uint64_t> mt_get_hit_total_{0};    // L0 lookups that found a cell
     mutable std::atomic<uint64_t> flush_drain_total_{0};   // drain_memtable_into_l1 calls
     mutable std::atomic<uint64_t> flush_entries_total_{0}; // entries drained from L0 to L1
+    mutable std::atomic<uint64_t> snapshot_total_{0};      // snapshot() calls (durable checkpoints)
     mutable std::atomic<uint64_t> l1_get_total_{0};        // get() lookups that descended to L1
     mutable std::atomic<uint64_t> l1_get_hit_total_{0};    // L1 lookups that found a cell
+    mutable std::atomic<uint64_t> map_lookup_total_{0};    // mapping table lookups (find_leaf_page_id / resident)
+    mutable std::atomic<uint64_t> demand_load_total_{0};   // demand-load page faults
 
     // Logical clock for CLOCK-informed eviction ranking (plan-tree #17).
     // `resident()`'s hot path bumps this and stamps the touched page's own
@@ -1069,16 +1074,6 @@ class Crowtree
     // two consecutive snapshots — the crash fallback anchor still references it.
     std::set<uint32_t> prev_empty_blocks_;
 
-    // Background flush thread (Options.background_flush / flush_interval_ms),
-    // also driving the periodic collect_garbage() sweep (Options.gc_interval_ms,
-    // plan-tree #21). Not started unless opt_.background_flush is set; see
-    // start_background_flush_thread(). Joined in ~Crowtree before the tree is
-    // torn down.
-    std::thread             flush_thread_;
-    std::mutex              flush_thread_mu_;
-    std::condition_variable flush_thread_cv_;
-    std::atomic<bool>       stop_flush_thread_{false};
-
     // Tree-owned epoch-based reclamation (plan-tree #7; formerly on CrowtreeEnv).
     // Declared last so it is destroyed first: ~Crowtree frees the live tree via
     // free_subtree(root, /*retire=*/false) (no readers at teardown), then epoch_'s
@@ -1087,7 +1082,7 @@ class Crowtree
     // mutable: readers take a guard in const get().
     mutable EpochManager epoch_;
 
-    // ── Optional metrics handles (set via set_metrics) ──
+    // ── Metrics handles (registered in init_metrics) ──
     struct MetricsHandles
     {
         Counter        *buf_hits       = nullptr;
@@ -1098,19 +1093,39 @@ class Crowtree
         Gauge          *buf_dirty      = nullptr;
         LatencySummary *apply_l        = nullptr;
         LatencySummary *snapshot_l     = nullptr;
+        LatencySummary *flush_l        = nullptr;
         // MemTable (L0) operation counters
-        Counter *mt_upsert_c  = nullptr; // apply() writes into L0
-        Counter *mt_get_c     = nullptr; // get() lookups in L0
-        Counter *mt_get_hit_c = nullptr; // L0 lookups that found a cell
+        Counter *mt_upsert_c  = nullptr;
+        Counter *mt_get_c     = nullptr;
+        Counter *mt_get_hit_c = nullptr;
         // Flush (L0 → L1) counters
-        Counter *flush_drain_c   = nullptr; // drain_memtable_into_l1 calls
-        Counter *flush_entries_c = nullptr; // entries drained from L0 to L1
+        Counter *flush_drain_c   = nullptr;
+        Counter *flush_entries_c = nullptr;
         // L1 (B-tree) query counters
-        Counter *l1_get_c     = nullptr; // get() lookups that descended to L1
-        Counter *l1_get_hit_c = nullptr; // L1 lookups that found a cell
+        Counter *l1_get_c     = nullptr;
+        Counter *l1_get_hit_c = nullptr;
+        // B+tree page mutation counters (during drain/split/merge/consolidate)
+        Counter        *page_write_c = nullptr;
+        LatencySummary *page_write_l = nullptr;
+        // Mapping table lookup counter
+        Counter *page_map_lookup_c = nullptr;
+        // Demand-load (page fault I/O) counter + latency
+        Counter        *demand_load_c = nullptr;
+        LatencySummary *demand_load_l = nullptr;
+        // Snapshot sub-metrics (new)
+        LatencySummary *snapshot_apply_l            = nullptr; // prepare_snapshot_locked latency
+        LatencySummary *snapshot_page_write_l       = nullptr; // per-page write_at latency
+        Counter        *snapshot_page_write_cache_c = nullptr; // clean pages (no write)
+        Bandwidth      *snapshot_page_write_bw      = nullptr; // per-page write bytes
+        Bandwidth      *snapshot_meta_write_bw      = nullptr; // metadata write bytes (seg+dir+anchor)
+        Bandwidth      *page_read_bw                = nullptr; // demand-load read bytes
+        Counter        *snapshot_pages_c            = nullptr; // cumulative pages written
     };
 
     MetricsHandles metrics_;
+
+    // Internal metrics registry (owned by the engine).
+    std::unique_ptr<MetricsRegistry> metrics_registry_;
 };
 
 } // namespace crowtree
