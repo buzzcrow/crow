@@ -16,7 +16,7 @@ use dashmap::DashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use tracing::{debug, info};
@@ -49,7 +49,11 @@ impl KvStore for PxKvStore {
 
         match self.resolve_read_point(&group, read_mode, min_slot).await {
             ReadDecision::Serve { read_slot, safe_slot } => {
+                let engine_start = Instant::now();
                 let value = group.local_replica().learner.engine_get_bytes(key).await;
+                if let Some(h) = group.read_handles() {
+                    h.engine_get.observe(engine_start.elapsed().as_nanos() as u64);
+                }
                 match value {
                     Some((slot, v)) => {
                         crate::rpc::KvResponse::ok_value_with_revision(v, slot, request_id, request_create_ms)
@@ -474,6 +478,11 @@ impl PxKvStore {
     async fn resolve_read_point(&self, group: &Arc<PxGroup>, read_mode: i32, min_slot: u64) -> ReadDecision {
         let replica = group.local_replica();
         let safe_slot = group.group_safe_slot();
+        let contiguous_applied = replica.contiguous_applied();
+        if let Some(h) = group.read_handles() {
+            h.contiguous_applied.set(contiguous_applied);
+            h.safe_slot.set(safe_slot);
+        }
         let mode = ReadMode::try_from(read_mode).unwrap_or(ReadMode::Linearizable);
         match mode {
             ReadMode::Linearizable => {
@@ -503,12 +512,15 @@ impl PxKvStore {
                 }
             }
             ReadMode::MinSlot => {
-                if replica.contiguous_applied() >= min_slot {
+                if contiguous_applied >= min_slot {
                     ReadDecision::Serve {
-                        read_slot: replica.contiguous_applied(),
+                        read_slot: contiguous_applied,
                         safe_slot,
                     }
                 } else {
+                    if let Some(h) = group.read_handles() {
+                        h.minslot_fallback.inc();
+                    }
                     ReadDecision::NotLeader {
                         hint: self.forward_target_for(group.group_id()).unwrap_or_default(),
                     }

@@ -41,3 +41,6 @@ mod multi_node_multi_group;
 
 #[path = "store/shutdown_under_load_test.rs"]
 mod shutdown_under_load;
+
+#[path = "store/read_metrics_test.rs"]
+mod read_metrics;
