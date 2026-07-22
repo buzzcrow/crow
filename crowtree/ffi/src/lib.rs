@@ -1193,6 +1193,49 @@ fn try_poll_ct_future(guard: &mut FutureGuard, kind: FutureKind) -> Option<Resul
     Some(result)
 }
 
+/// Like [`try_poll_ct_future`] for `FutureKind::Get`, but instead of
+/// copying the value bytes out and freeing the future, returns a
+/// [`PinnedValue`] that borrows directly from the C++ frame. The
+/// `ct_future` handle is transferred into the `PinnedValue` (its `Drop`
+/// calls `ct_future_free`), so `guard.0` is nulled to prevent
+/// `FutureGuard`'s `Drop` from double-freeing.
+fn try_poll_ct_future_pinned(guard: &mut FutureGuard) -> Option<Result<Option<(u64, PinnedValue)>, CtError>> {
+    let mut done: c_int = 0;
+    let mut found: c_int = 0;
+    let mut slot: u64 = 0;
+    let mut value = sys::ct_buf {
+        data: std::ptr::null_mut(),
+        len: 0,
+    };
+    let rc = unsafe { sys::ct_future_poll(guard.0, &mut done, &mut found, &mut slot, &mut value) };
+    if done == 0 {
+        return None;
+    }
+    let result = match check(rc) {
+        Ok(()) => {
+            if found != 0 {
+                let pv = PinnedValue {
+                    handle: guard.0,
+                    data: value.data,
+                    len: value.len,
+                    _not_send: std::marker::PhantomData,
+                };
+                Ok(Some((slot, pv)))
+            } else {
+                // Not found: still need to free the future.
+                unsafe { sys::ct_future_free(guard.0) };
+                Ok(None)
+            }
+        }
+        Err(e) => {
+            unsafe { sys::ct_future_free(guard.0) };
+            Err(e)
+        }
+    };
+    guard.0 = std::ptr::null_mut();
+    Some(result)
+}
+
 /// Drives one `ct_get_async`/`ct_flush_async`/`ct_snapshot_async` handle to
 /// completion: polls it, and if not yet done, waits for the tree's eventfd
 /// pump to fan out a notification before polling again. A fast-path
@@ -1329,7 +1372,7 @@ impl AsyncCrowtree {
     /// up, instead of collapsing it back into a uniform `async fn` (which
     /// would force boxing on every call, fast path included -- exactly what
     /// `KVFuture::Ready` exists to avoid).
-    pub fn try_get(&self, key: Vec<u8>) -> GetOutcome {
+    pub fn try_get(&self, key: &[u8]) -> GetOutcome {
         let fut = unsafe { sys::ct_get_async(self.inner.as_ptr(), key.as_ptr(), key.len()) };
         let mut guard = FutureGuard(fut);
         if let Some(result) = try_poll_ct_future(&mut guard, FutureKind::Get) {
@@ -1337,6 +1380,24 @@ impl AsyncCrowtree {
         }
         let tree = self.inner.clone();
         GetOutcome::Pending(Box::pin(async move {
+            let out = drive_ct_future(guard, &tree, FutureKind::Get).await?;
+            Ok(out.found.then_some((out.slot, out.value)))
+        }))
+    }
+
+    /// Like [`Self::try_get`] but the fast path returns a [`PinnedValue`]
+    /// borrowing directly from the C++ engine's internal buffer (no
+    /// `copy_buf` allocation). The slow path is identical to
+    /// [`Self::try_get`]'s (`PinnedGetOutcome::Pending` resolves to an
+    /// owned `Vec<u8>`).
+    pub fn try_get_pinned(&self, key: &[u8]) -> PinnedGetOutcome {
+        let fut = unsafe { sys::ct_get_async(self.inner.as_ptr(), key.as_ptr(), key.len()) };
+        let mut guard = FutureGuard(fut);
+        if let Some(result) = try_poll_ct_future_pinned(&mut guard) {
+            return PinnedGetOutcome::Ready(result);
+        }
+        let tree = self.inner.clone();
+        PinnedGetOutcome::Pending(Box::pin(async move {
             let out = drive_ct_future(guard, &tree, FutureKind::Get).await?;
             Ok(out.found.then_some((out.slot, out.value)))
         }))
@@ -1403,4 +1464,51 @@ pub enum ScanOutcome {
     /// absent one, that will complete synchronously on the next poll
     /// regardless -- `.await` this to completion.
     Pending(Pin<Box<dyn Future<Output = Result<(Vec<ScanEntry>, bool), CtError>> + Send>>),
+}
+
+/// Zero-copy borrowed value from a fast-path `ct_get_async` completion.
+/// Holds the `ct_future` handle so the epoch guard keeping the frame
+/// resident stays alive until this value is dropped. `!Send` because the
+/// epoch guard is thread-local (`EpochManager::Guard` must be released on
+/// the thread that entered it).
+pub struct PinnedValue {
+    handle: *mut sys::ct_future,
+    data: *const u8,
+    len: usize,
+    _not_send: std::marker::PhantomData<*mut ()>,
+}
+
+impl PinnedValue {
+    /// Borrow the value bytes directly from the C++ engine's internal
+    /// buffer. Valid until `self` is dropped.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        if self.data.is_null() || self.len == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(self.data, self.len) }
+        }
+    }
+}
+
+impl Drop for PinnedValue {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe { sys::ct_future_free(self.handle) };
+        }
+    }
+}
+
+/// Result of [`AsyncCrowtree::try_get_pinned`] -- like [`GetOutcome`] but
+/// the fast path returns a [`PinnedValue`] (zero-copy borrow from the C++
+/// frame) instead of an owned `Vec<u8>`. The slow path is identical to
+/// [`GetOutcome::Pending`]: the value is always owned (copied by
+/// `materialize_owned` on the reactor thread).
+#[allow(clippy::type_complexity)]
+pub enum PinnedGetOutcome {
+    /// Fast path (resident hit/miss) -- zero-copy borrow, no `copy_buf`.
+    Ready(Result<Option<(u64, PinnedValue)>, CtError>),
+    /// Slow path (demand-load miss) -- resolves to an owned `Vec<u8>`,
+    /// same as [`GetOutcome::Pending`].
+    Pending(Pin<Box<dyn Future<Output = Result<Option<(u64, Vec<u8>)>, CtError>> + Send>>),
 }

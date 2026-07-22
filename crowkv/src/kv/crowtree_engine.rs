@@ -6,7 +6,10 @@
 
 use super::op::Cell;
 use super::{Batch, KVEngine, KVFuture, Op};
-use crowtree_ffi::{AsyncCrowtree, BatchOp as CtBatchOp, Crowtree, CtError, GetOutcome, ScanOutcome};
+use bytes::Bytes;
+use crowtree_ffi::{
+    AsyncCrowtree, BatchOp as CtBatchOp, Crowtree, CtError, GetOutcome, PinnedGetOutcome, ScanOutcome,
+};
 use std::sync::Arc;
 
 pub use crowtree_ffi::Options as CrowtreeOptions;
@@ -165,9 +168,31 @@ impl KVEngine for CrowtreeEngine {
         // right here, no allocation, same as the old always-`Ready` body.
         // Only a genuine demand-load miss reaches `Pending`, wrapping the
         // reactor-driven future `try_get` already built for us.
-        match self.inner.try_get(key.to_vec()) {
+        match self.inner.try_get(key) {
             GetOutcome::Ready(result) => KVFuture::ready(result.ok().flatten()),
             GetOutcome::Pending(fut) => KVFuture::Pending(Box::pin(async move { fut.await.ok().flatten() })),
+        }
+    }
+
+    fn get_bytes(&self, key: &[u8]) -> KVFuture<Option<(u64, Bytes)>> {
+        // try_get_pinned: fast path returns a PinnedValue borrowing directly
+        // from the C++ frame (no copy_buf allocation). The value is copied
+        // into Bytes here, then PinnedValue is dropped (releasing the epoch
+        // guard). Slow path is identical to get's Pending arm.
+        match self.inner.try_get_pinned(key) {
+            PinnedGetOutcome::Ready(result) => {
+                let mapped = result.ok().flatten().map(|(slot, pinned)| {
+                    let bytes = Bytes::copy_from_slice(pinned.as_bytes());
+                    (slot, bytes)
+                });
+                KVFuture::ready(mapped)
+            }
+            PinnedGetOutcome::Pending(fut) => KVFuture::Pending(Box::pin(async move {
+                fut.await
+                    .ok()
+                    .flatten()
+                    .map(|(slot, vec)| (slot, Bytes::from(vec)))
+            })),
         }
     }
 
