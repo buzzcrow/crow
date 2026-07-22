@@ -93,6 +93,20 @@ pub struct ClientMetricsSnapshot {
     pub retries_exhausted: u64,
     pub no_leader: u64,
     pub topology_refresh: u64,
+    /// `MinSlot` reads whose first endpoint was picked by the
+    /// `AnyReplica` selector (a non-leader replica, or the leader as
+    /// one of the round-robin pool). Lets an operator confirm
+    /// distribution is actually happening. `Leader` policy never
+    /// increments this.
+    #[serde(default)]
+    pub read_endpoint_distributed: u64,
+    /// `MinSlot` reads that were distributed to a follower but fell
+    /// back to the leader because the follower had not applied
+    /// `min_slot` (server returned `NotLeader`). Pairs with the
+    /// server-side `read.minslot_fallback.c` to confirm the fallback
+    /// rate stays low.
+    #[serde(default)]
+    pub read_endpoint_fallback: u64,
     /// Recorded leader-change episodes during the client's lifetime.
     #[serde(default)]
     pub leader_changes: Vec<LeaderChangeEpisode>,
@@ -140,6 +154,8 @@ pub struct ClientMetrics {
     retries_exhausted: AtomicU64,
     no_leader: AtomicU64,
     topology_refresh: AtomicU64,
+    read_endpoint_distributed: AtomicU64,
+    read_endpoint_fallback: AtomicU64,
     leader_changes: Mutex<LeaderChangeTracker>,
     window_lat: Mutex<WindowLatency>,
 }
@@ -223,6 +239,18 @@ impl ClientMetrics {
         self.topology_refresh.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A `MinSlot` read was routed by the `AnyReplica` selector to a
+    /// replica chosen from the topology cache's replica list.
+    pub(crate) fn record_read_endpoint_distributed(&self) {
+        self.read_endpoint_distributed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A distributed `MinSlot` read fell back to the leader after the
+    /// chosen replica returned `NotLeader` (had not applied `min_slot`).
+    pub(crate) fn record_read_endpoint_fallback(&self) {
+        self.read_endpoint_fallback.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Record the start of a leader-change episode. Called when any
     /// worker encounters a leader-related error (`NotLeaderHint`,
     /// unknown leader, transport error to the current leader).
@@ -264,6 +292,8 @@ impl ClientMetrics {
             retries_exhausted: self.retries_exhausted.load(Ordering::Relaxed),
             no_leader: self.no_leader.load(Ordering::Relaxed),
             topology_refresh: self.topology_refresh.load(Ordering::Relaxed),
+            read_endpoint_distributed: self.read_endpoint_distributed.load(Ordering::Relaxed),
+            read_endpoint_fallback: self.read_endpoint_fallback.load(Ordering::Relaxed),
             leader_changes,
         }
     }
