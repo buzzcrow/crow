@@ -51,14 +51,6 @@ complexity, and dependency. Before implementation, follow the
   before the local engine has applied the value — read-your-writes
   semantics break unless a read barrier or apply-fence is added. Gate
   behind a feature flag; test read-after-write consistency.
-- **[R26](R26-follower-read.md)** — Follower read distribution for MinSlot — Area: client — The
-  client always calls `resolve_leader` for all read modes, including
-  MinSlot reads that could be served from any follower. This
-  concentrates stale-read load on the leader. Add a read-endpoint
-  selector so MinSlot reads can target any replica. Depends on R19 for
-  validation (forward counter + per-mode latency). Gate behind
-  `read_endpoint_policy = leader | any_replica`. See G8 in
-  [`read-flow-analysis.md`](../working/read-flow-analysis.md).
 - **[R27](R27-readindex-batch.md)** — ReadIndex batching for linearizable reads — Area: consensus
   — Each linearizable read that falls back to ReadIndex triggers a
   separate heartbeat round. Batch pending ReadIndex barriers into a
