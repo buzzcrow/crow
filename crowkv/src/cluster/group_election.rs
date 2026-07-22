@@ -1,6 +1,8 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
+#![allow(clippy::cast_possible_truncation)]
+
 //! Leader-election surface of [`PxGroup`].
 //!
 //! This module defines the [`LeaderElection`] trait and implements it for
@@ -662,6 +664,7 @@ impl PxGroup {
     ///   reflected locally; a higher term steps us down; no quorum means we
     ///   cannot prove freshness and the read must be retried elsewhere.
     pub(crate) async fn linearizable_read_barrier(self: &Arc<Self>) -> ReadBarrierOutcome {
+        let barrier_start = StdInstant::now();
         let replica = self.local_replica();
         if !replica.is_leader() {
             return ReadBarrierOutcome::NotLeader;
@@ -674,17 +677,32 @@ impl PxGroup {
             return ReadBarrierOutcome::NoQuorum;
         }
 
-        if replica.lease_read_valid(StdInstant::now()) {
+        let lease_valid = replica.lease_read_valid(StdInstant::now());
+        if let Some(h) = self.read_handles() {
+            h.lease_valid.set(u64::from(lease_valid));
+        }
+        if lease_valid {
+            if let Some(h) = self.read_handles() {
+                h.barrier.observe(barrier_start.elapsed().as_nanos() as u64);
+                h.lease_path.inc();
+            }
             return ReadBarrierOutcome::Ready { read_slot };
         }
 
         let cfg = self.election_cfg;
         let term = replica.current_term_snapshot();
-        match self.run_heartbeat_round(&cfg, term).await {
+        let outcome = match self.run_heartbeat_round(&cfg, term).await {
             HeartbeatOutcome::SteppedDown { .. } => ReadBarrierOutcome::NotLeader,
             HeartbeatOutcome::Continued { quorum_acked: true } => ReadBarrierOutcome::Ready { read_slot },
             HeartbeatOutcome::Continued { quorum_acked: false } => ReadBarrierOutcome::NoQuorum,
+        };
+        if let Some(h) = self.read_handles() {
+            h.barrier.observe(barrier_start.elapsed().as_nanos() as u64);
+            if matches!(outcome, ReadBarrierOutcome::Ready { .. }) {
+                h.readindex_path.inc();
+            }
         }
+        outcome
     }
 
     /// Drive one full election attempt: optional `PreVote` →
