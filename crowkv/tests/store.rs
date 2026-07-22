@@ -44,3 +44,6 @@ mod shutdown_under_load;
 
 #[path = "store/read_metrics_test.rs"]
 mod read_metrics;
+
+#[path = "store/readindex_batch_test.rs"]
+mod readindex_batch;
