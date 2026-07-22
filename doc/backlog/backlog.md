@@ -11,6 +11,9 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
+**Next R number: R30** — the highest R ever assigned was R29 (shipped).
+Bump this line in the same commit when adding a new item.
+
 ### Medium Priority
 
 **Complexity — Medium:**
