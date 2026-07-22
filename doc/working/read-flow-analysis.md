@@ -210,12 +210,12 @@ Client SCAN(prefix, start_after, limit, read_mode, min_slot?)
   backward compat).
 - **G7 — No MinSlot fallback counter.** Can't detect follower lag
   driving redirects. Fix: `read.minslot_fallback.c`.
-- **G8 — No read parallelism.** Client targets leader for all modes;
-  stale-read capacity on followers wasted. Fix: client resolves to any
-  replica for MinSlot; needs topology cache exposing all endpoints +
-  read-endpoint selector (round-robin / least-conn / latency). Server
-  already serves stale locally. Gate behind
-  `read_endpoint_policy = leader | any_replica`.
+- **G8 — No read parallelism (resolved by R26).** Client previously
+  targeted leader for all modes; stale-read capacity on followers
+  wasted. Fix (shipped): client resolves to any replica for MinSlot
+  via `read_endpoint_policy = any_replica`; topology cache exposes all
+  endpoints; round-robin read-endpoint selector with `NotLeader`-hint
+  fallback. Least-conn / latency policies remain future work.
 - **G9 — ReadIndex batching not implemented.** Documented in
   `design-leader-election.md` §7.2. Each expired-lease linearizable
   read triggers a separate heartbeat. Fix: queue pending barriers,
@@ -245,9 +245,10 @@ forwarding linearizable reads to the leader (MinSlot self-checks
 instead).
 
 Main gaps: **metrics instrumentation** (G1–G7, G10) — operators can't
-diagnose reads at write-path granularity; **read parallelism** (G8) —
-stale-read capacity concentrated on the leader; **ReadIndex batching**
-(G9) — documented future optimization.
+diagnose reads at write-path granularity; **read parallelism** (G8,
+resolved by R26) — stale-read capacity now distributed via
+`read_endpoint_policy = any_replica`; **ReadIndex batching** (G9) —
+documented future optimization.
 
 ---
 
