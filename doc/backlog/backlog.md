@@ -11,8 +11,7 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R30** — the highest R ever assigned was R29 (shipped).
-Bump this line in the same commit when adding a new item.
+**Next R number: R30** — Bump this line in the same commit when adding a new item.
 
 ### Medium Priority
 
@@ -54,14 +53,6 @@ Bump this line in the same commit when adding a new item.
   before the local engine has applied the value — read-your-writes
   semantics break unless a read barrier or apply-fence is added. Gate
   behind a feature flag; test read-after-write consistency.
-- **[R27](R27-readindex-batch.md)** — ReadIndex batching for linearizable reads — Area: consensus
-  — Each linearizable read that falls back to ReadIndex triggers a
-  separate heartbeat round. Batch pending ReadIndex barriers into a
-  single heartbeat round so one quorum ack resolves all pending reads.
-  Depends on R19 for validation (path counter + barrier latency).
-  Documented as "not yet implemented" in `../design/design-leader-election.md`
-  §7.2. See G9 in
-  [`read-flow-analysis.md`](../working/read-flow-analysis.md).
 - **[R28](R28-read-bench.md)** — Read path benchmark — Area: bench / metrics — The write path has
   a benchmark harness with recorded results; the read path does not.
   The existing bench runner hardcodes `ReadMode::Linearizable` with
