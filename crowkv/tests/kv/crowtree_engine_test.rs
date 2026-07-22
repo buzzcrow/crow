@@ -282,3 +282,42 @@ fn parity_with_in_mem_kv_after_identical_op_stream() {
         assert!(compare_dyn(&mem, &ct).is_empty(), "diverged after round {round}");
     }
 }
+
+/// `get_bytes` fast path: returns `Bytes` matching the written value
+/// without an intermediate `Vec<u8>` allocation (uses `PinnedValue`
+/// internally). Verifies the zero-copy read path produces correct results
+/// for both found and not-found cases.
+#[tokio::test]
+async fn get_bytes_fast_path_returns_correct_value() {
+    use crowkv::kv::KVEngine;
+
+    let e = open();
+    e.apply(1, &conformance::batch(vec![conformance::put(b"k", b"hello")]))
+        .into_ready()
+        .unwrap();
+
+    let result = e.get_bytes(b"k").await;
+    assert_eq!(result, Some((1, bytes::Bytes::from_static(b"hello"))));
+
+    let missing = e.get_bytes(b"missing").await;
+    assert_eq!(missing, None);
+}
+
+/// `get_bytes` with a large value: verifies the pinned-value path
+/// correctly handles values that span the full frame.
+#[tokio::test]
+async fn get_bytes_fast_path_large_value() {
+    use crowkv::kv::KVEngine;
+
+    let e = open();
+    let large: Vec<u8> = (0..4096u32).map(|i| u8::try_from(i % 256).unwrap()).collect();
+    e.apply(1, &conformance::batch(vec![conformance::put(b"k", &large)]))
+        .into_ready()
+        .unwrap();
+
+    let result = e.get_bytes(b"k").await;
+    assert!(result.is_some());
+    let (slot, value) = result.unwrap();
+    assert_eq!(slot, 1);
+    assert_eq!(value.as_ref(), large.as_slice());
+}

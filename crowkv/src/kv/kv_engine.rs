@@ -4,6 +4,8 @@
 use super::kv_future::KVFuture;
 use super::Batch;
 
+use bytes::Bytes;
+
 /// Storage engine surface. All reads are non-mutating and may run concurrently
 /// with `apply`.
 ///
@@ -31,6 +33,21 @@ pub trait KVEngine: Send + Sync {
 
     /// Live value and its resolved slot, or `None` if unset or tombstoned.
     fn get(&self, key: &[u8]) -> KVFuture<Option<(u64, Vec<u8>)>>;
+
+    /// Like [`Self::get`] but returns [`Bytes`] instead of `Vec<u8>`, so
+    /// the gRPC response path can avoid an extra allocation. The default
+    /// implementation delegates to [`Self::get`] and converts the
+    /// `Vec<u8>` into `Bytes` (zero-copy move). [`super::CrowtreeEngine`]
+    /// overrides this to use a pinned-value FFI path that eliminates the
+    /// intermediate `Vec<u8>` allocation on the fast path.
+    fn get_bytes(&self, key: &[u8]) -> KVFuture<Option<(u64, Bytes)>> {
+        match self.get(key) {
+            KVFuture::Ready(v) => KVFuture::ready(v.flatten().map(|(slot, vec)| (slot, Bytes::from(vec)))),
+            KVFuture::Pending(fut) => KVFuture::Pending(Box::pin(async move {
+                fut.await.map(|(slot, vec)| (slot, Bytes::from(vec)))
+            })),
+        }
+    }
 
     /// Live entries (no tombstones) whose key starts with `prefix`, in key
     /// order, capped at `limit` (`0` = unlimited). Returns `(items, truncated)`

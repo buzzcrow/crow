@@ -49,15 +49,12 @@ impl KvStore for PxKvStore {
 
         match self.resolve_read_point(&group, read_mode, min_slot).await {
             ReadDecision::Serve { read_slot, safe_slot } => {
-                let value = group.local_replica().learner.engine_get(key).await;
+                let value = group.local_replica().learner.engine_get_bytes(key).await;
                 match value {
-                    Some((slot, v)) => crate::rpc::KvResponse::ok_value_with_revision(
-                        bytes::Bytes::from(v),
-                        slot,
-                        request_id,
-                        request_create_ms,
-                    )
-                    .with_read_slots(read_slot, safe_slot),
+                    Some((slot, v)) => {
+                        crate::rpc::KvResponse::ok_value_with_revision(v, slot, request_id, request_create_ms)
+                            .with_read_slots(read_slot, safe_slot)
+                    }
                     None => crate::rpc::KvResponse::not_found(request_id, request_create_ms)
                         .with_read_slots(read_slot, safe_slot),
                 }
