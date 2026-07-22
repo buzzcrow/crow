@@ -216,10 +216,11 @@ Client SCAN(prefix, start_after, limit, read_mode, min_slot?)
   via `read_endpoint_policy = any_replica`; topology cache exposes all
   endpoints; round-robin read-endpoint selector with `NotLeader`-hint
   fallback. Least-conn / latency policies remain future work.
-- **G9 — ReadIndex batching not implemented.** Documented in
+- **G9 — ReadIndex batching (resolved by R27).** Documented in
   `design-leader-election.md` §7.2. Each expired-lease linearizable
-  read triggers a separate heartbeat. Fix: queue pending barriers,
-  resolve all on one quorum ack.
+  read previously triggered a separate heartbeat; concurrent barriers
+  now coalesce onto one in-flight round (queue pending barriers,
+  resolve all on one quorum ack).
 - **G10 — No read-specific gauges.** Fix: `read.lease_valid.g` (1/0),
   `read.contiguous_applied.g`, `read.safe_slot.g` (latter two bridged
   from existing atomics already in `GroupStatus`).
@@ -247,8 +248,9 @@ instead).
 Main gaps: **metrics instrumentation** (G1–G7, G10) — operators can't
 diagnose reads at write-path granularity; **read parallelism** (G8,
 resolved by R26) — stale-read capacity now distributed via
-`read_endpoint_policy = any_replica`; **ReadIndex batching** (G9) —
-documented future optimization.
+`read_endpoint_policy = any_replica`; **ReadIndex batching** (G9,
+resolved by R27) — concurrent barriers now coalesce onto one
+heartbeat round.
 
 ---
 
