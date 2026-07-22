@@ -13,12 +13,20 @@ doc only when a task touches a topic in its row.
 | `design/design.md` | Root design document: what CrowKV is, why key choices were made, architecture overview, data model, read modes, consensus/storage/lifecycle/client interaction, module decomposition, crate layout, concurrency model. Read first for any design or architecture question. |
 | `user-manual/user-guide.md` | User guide: three interfaces (Web UI, CLI, REST API), quick start (bootstrap a 3-node cluster), KV operations, cluster management (health, add/remove replicas, replace nodes), rolling upgrade, emergency procedures, backup, and full CLI + REST API reference. Run `python3 doc/user-manual/build_html.py` to generate `user-guide.html` with tabbed CLI/curl examples. |
 
+## Backlog (`doc/backlog/`)
+
+| Doc | When to read |
+| --- | --- |
+| `doc/backlog/backlog.md` | Forward-looking implementation backlog index with priority/complexity classification and brief intros. Read before picking up crowtree/crowkv follow-up work. Each entry links to its detail doc. |
+| `doc/backlog/R**-<topic>.md` | Per-requirement detailed analysis (problem, approach, files, acceptance). Open only the matched `R**` file; delete it after the requirement is implemented and merged. |
+
 ## Working Files (`doc/working/`)
 
 | Doc | When to read |
 | --- | --- |
 | `doc/working/plan-test.md` | Unfinished test task backlog with checkboxes. Read when picking the next test to implement. |
-| `doc/working/new_requirements.md` | Forward-looking implementation backlog with priority/complexity analysis and implementation process. Read before picking up crowtree/crowkv follow-up work. |
+| `doc/working/read-flow-analysis.md` | Read path gap analysis and proposed metrics hierarchy. Read when working on read performance (R19/R26/R27). |
+| `doc/working/write-flow-analysis.md` | Write path trace and optimization opportunities. Read when working on write-path performance. |
 
 ## Project Files (repo root)
 
