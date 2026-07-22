@@ -487,13 +487,11 @@ fn encode_accepted_payload(entry: &PxLogEntry) -> Bytes {
 }
 
 fn decode_accepted_payload(rec: &WALRecord) -> PxLogEntry {
-    let inner_payload = Bytes::copy_from_slice(&rec.payload[..]);
-
     PxLogEntry {
         slot: rec.slot,
         ballot: rec.ballot,
         term: rec.term,
-        payload: inner_payload,
+        payload: rec.payload.clone(),
     }
 }
 

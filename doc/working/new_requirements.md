@@ -59,14 +59,6 @@ complexity, and dependency. Before implementation, follow the
   counters, no read-specific gauges. See
   [`read-flow-analysis.md`](read-flow-analysis.md) for the full gap
   analysis and proposed metrics hierarchy.
-- **R20** — Eliminate O(n) payload copy in WAL encode — Area: WAL —
-  `WALRecord::from_accepted` calls `encode_accepted_payload(entry)`
-  which does `entry.payload.to_vec()`, an O(n) heap allocate + memcpy
-  of the entire payload. Since `entry.payload` is already `Bytes`, the
-  `WALRecord.payload` could be `entry.payload.clone()` (O(1) ref-count
-  bump) instead. See
-  [`write-flow-analysis.md`](write-flow-analysis.md) Memory Copy
-  Analysis for the full audit.
 - **R21** — Zero-copy engine read API — Area: crowtree FFI / engine —
   `CrowtreeEngine::get` copies the key (`key.to_vec()`) for the FFI
   call and copies the value (`copy_buf`) from the C++ engine's internal
@@ -684,52 +676,6 @@ fallback counter), `crowkv/src/paxos/learner.rs`
 - Read bandwidth (`read_bytes_in/out.bw`) + write bandwidth
   (derived: `bytes_in/out.bw` minus read) accounts for total KV
   bandwidth.
-
----
-
-### R20: Eliminate O(n) payload copy in WAL encode
-
-**Problem**: `WALRecord::from_accepted` (`record.rs:408`) calls
-`encode_accepted_payload(entry)` which does `entry.payload.to_vec()`
-(`record.rs:487`). This is an O(n) heap allocate + memcpy of the
-entire payload — the only O(n) copy in the accept → WAL path that is
-potentially avoidable. The `Vec<u8>` is then wrapped back into
-`Bytes::from(vec)` for the `WALRecord.payload` field, making the
-round-trip through `Vec<u8>` purely wasteful.
-
-**Root cause**: `encode_accepted_payload` exists as a seam for future
-encoding transformations (e.g. compression, encryption). Today it is a
-straight `entry.payload.to_vec()` — the payload bytes are unchanged,
-just copied into a new allocation.
-
-**Approach**:
-- Change `WALRecord::from_accepted` to store `entry.payload.clone()`
-  directly (O(1) ref-count bump) when no encoding transformation is
-  needed.
-- Keep `encode_accepted_payload` as the seam, but make it return
-  `Bytes` instead of `Vec<u8>`. When no transformation is active, it
-  returns `entry.payload.clone()`. When a transformation is added
-  later, it returns `Bytes::from(transformed_vec)`.
-- Verify that `encode_frame` and the vectored write path work
-  unchanged — they already operate on `WALRecord.payload: Bytes`.
-
-**Priority**: Low — with `Bytes` payloads the copy is a single
-`memcpy` per accept. For small payloads (≤512 B, the benchmark
-default) the cost is negligible. For large payloads (≥1 MB) it is a
-measurable but still small fraction of the total write latency
-(consensus RPC round-trip dominates).
-
-**Complexity**: Low — one function change, no API or trait changes.
-
-**Files**: `crowkv/src/wal/record.rs` (`encode_accepted_payload`,
-`from_accepted`).
-
-**Acceptance**:
-- All existing WAL tests pass unchanged.
-- No `to_vec()` call in `WALRecord::from_accepted` when no encoding
-  transformation is active.
-- `WALRecord.payload` is a `Bytes::clone` of `entry.payload` (shared
-  allocation), verified by code inspection.
 
 ---
 
