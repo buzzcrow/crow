@@ -21,6 +21,7 @@
 //! follower's `Get` instead returns the value, the forward has run.
 
 use crate::testkit::cluster::start_cluster;
+use bytes::Bytes;
 use crowkv::cluster::KvServer;
 use crowkv::rpc::kv_service_client::KvServiceClient;
 use crowkv::rpc::{KvGetRequest, KvScanRequest, KvSetRequest};
@@ -51,8 +52,8 @@ async fn follower_get_forwards_to_leader_after_local_clear() {
     let put = leader_client
         .put(KvSetRequest {
             version: 1,
-            key: b"fk".to_vec(),
-            value: b"fv".to_vec(),
+            key: Bytes::from_static(b"fk"),
+            value: Bytes::from_static(b"fv"),
             ttl_ms: 0,
             request_id: 101,
             request_create_ms: 1001,
@@ -88,7 +89,7 @@ async fn follower_get_forwards_to_leader_after_local_clear() {
     let resp = follower_client
         .get(KvGetRequest {
             version: 1,
-            key: b"fk".to_vec(),
+            key: Bytes::from_static(b"fk"),
             request_id: 102,
             request_create_ms: 1002,
             group_id: 1,
@@ -106,7 +107,7 @@ async fn follower_get_forwards_to_leader_after_local_clear() {
     assert!(!resp.not_found, "follower forward should not surface not_found");
     assert_eq!(
         resp.value,
-        b"fv".to_vec(),
+        Bytes::from_static(b"fv"),
         "follower must return the leader's value via forward"
     );
 
@@ -136,8 +137,8 @@ async fn follower_scan_forwards_to_leader_after_local_clear() {
         let _ = leader_client
             .put(KvSetRequest {
                 version: 1,
-                key: k,
-                value: v,
+                key: Bytes::from(k),
+                value: Bytes::from(v),
                 seq,
                 ttl_ms: 0,
                 client_id: 11,
@@ -158,12 +159,12 @@ async fn follower_scan_forwards_to_leader_after_local_clear() {
         .scan(KvScanRequest {
             version: 1,
             group_id: 1,
-            prefix: b"a".to_vec(),
+            prefix: Bytes::from_static(b"a"),
             limit: 0,
             request_id: 201,
             request_create_ms: 1101,
             read_mode: 0,
-            start_after: Vec::new(),
+            start_after: Bytes::new(),
         })
         .await
         .expect("kv scan on follower")
@@ -171,7 +172,7 @@ async fn follower_scan_forwards_to_leader_after_local_clear() {
 
     assert!(resp.ok, "follower scan forward should succeed");
     assert!(!resp.truncated);
-    let keys: Vec<Vec<u8>> = resp.items.iter().map(|i| i.key.clone()).collect();
+    let keys: Vec<Vec<u8>> = resp.items.iter().map(|i| i.key.to_vec()).collect();
     assert_eq!(
         keys,
         vec![b"a1".to_vec(), b"a2".to_vec()],
@@ -202,8 +203,8 @@ async fn forwarded_request_does_not_re_forward() {
     let _ = leader_client
         .put(KvSetRequest {
             version: 1,
-            key: b"loop".to_vec(),
-            value: b"v".to_vec(),
+            key: Bytes::from_static(b"loop"),
+            value: Bytes::from_static(b"v"),
             ttl_ms: 0,
             request_id: 300,
             request_create_ms: 1200,
@@ -234,7 +235,7 @@ async fn forwarded_request_does_not_re_forward() {
 
     let req = with_forward_header(Request::new(KvGetRequest {
         version: 1,
-        key: b"loop".to_vec(),
+        key: Bytes::from_static(b"loop"),
         request_id: 301,
         request_create_ms: 1201,
         group_id: 1,

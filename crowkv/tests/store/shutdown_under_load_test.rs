@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use crowkv::cluster::group::PxGroup;
 use crowkv::cluster::kv_store::KvStore;
 use crowkv::cluster::{KvServer, PxKvStore, PxLocalReplica, PxLocalReplicaRole};
@@ -49,8 +50,8 @@ async fn graceful_shutdown_under_load() {
         let resp = client
             .put(KvSetRequest {
                 version: 1,
-                key: key.as_bytes().to_vec(),
-                value: val.as_bytes().to_vec(),
+                key: Bytes::copy_from_slice(key.as_bytes()),
+                value: Bytes::copy_from_slice(val.as_bytes()),
                 ttl_ms: 0,
                 request_id: i + 1,
                 request_create_ms: i + 1,
@@ -106,7 +107,7 @@ async fn graceful_shutdown_under_load() {
             let resp = client
                 .get(KvGetRequest {
                     version: 1,
-                    key: key.as_bytes().to_vec(),
+                    key: Bytes::copy_from_slice(key.as_bytes()),
                     request_id: 9001 + idx,
                     request_create_ms: 9001 + idx,
                     group_id: 1,

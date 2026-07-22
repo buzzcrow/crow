@@ -406,14 +406,13 @@ impl WALRecord {
     /// Encode a [`PxLogEntry`] into a `WALRecord` with `RecordType::Accepted`.
     #[must_use]
     pub fn from_accepted(group_id: PxGroupId, entry: &PxLogEntry) -> Self {
-        let payload = encode_accepted_payload(entry);
         Self {
             record_type: RecordType::Accepted,
             group_id,
             term: entry.term,
             slot: entry.slot,
             ballot: entry.ballot,
-            payload: Bytes::from(payload),
+            payload: encode_accepted_payload(entry),
         }
     }
 
@@ -483,8 +482,8 @@ impl WALRecord {
 /// ```text
 /// [inner : rest]  — PxLogEntry.payload bytes
 /// ```
-fn encode_accepted_payload(entry: &PxLogEntry) -> Vec<u8> {
-    entry.payload.to_vec()
+fn encode_accepted_payload(entry: &PxLogEntry) -> Bytes {
+    entry.payload.clone()
 }
 
 fn decode_accepted_payload(rec: &WALRecord) -> PxLogEntry {

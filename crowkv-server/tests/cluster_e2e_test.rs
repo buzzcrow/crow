@@ -5,6 +5,7 @@
 
 mod testkit;
 
+use bytes::Bytes;
 use crowkv::rpc::kv_service_client::KvServiceClient;
 use crowkv::rpc::{KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvGetRequest, KvSetRequest};
 use serde_json::Value;
@@ -266,8 +267,8 @@ async fn e2e_three_node_cluster_kv_put_batch_delete() {
         group_id,
         &KvOp::Put(KvSetRequest {
             version: 1,
-            key: b"hello".to_vec(),
-            value: b"world".to_vec(),
+            key: Bytes::from_static(b"hello"),
+            value: Bytes::from_static(b"world"),
             seq: 1,
             ttl_ms: 0,
             client_id: 100,
@@ -288,7 +289,7 @@ async fn e2e_three_node_cluster_kv_put_batch_delete() {
         group_id,
         &KvOp::Get(KvGetRequest {
             version: 1,
-            key: b"hello".to_vec(),
+            key: Bytes::from_static(b"hello"),
             request_id: 1011,
             request_create_ms: 10011,
             group_id,
@@ -298,7 +299,7 @@ async fn e2e_three_node_cluster_kv_put_batch_delete() {
     )
     .await;
     assert!(resp.ok, "get should succeed: {}", resp.error);
-    assert_eq!(resp.value, b"world");
+    assert_eq!(resp.value, Bytes::from_static(b"world"));
 
     let resp = run_kv_op_with_retry(
         &nodes,
@@ -307,13 +308,13 @@ async fn e2e_three_node_cluster_kv_put_batch_delete() {
             version: 1,
             items: vec![
                 KvBatchItem {
-                    key: b"hello".to_vec(),
-                    value: b"updated".to_vec(),
+                    key: Bytes::from_static(b"hello"),
+                    value: Bytes::from_static(b"updated"),
                     is_delete: false,
                 },
                 KvBatchItem {
-                    key: b"foo".to_vec(),
-                    value: b"bar".to_vec(),
+                    key: Bytes::from_static(b"foo"),
+                    value: Bytes::from_static(b"bar"),
                     is_delete: false,
                 },
             ],
@@ -332,7 +333,7 @@ async fn e2e_three_node_cluster_kv_put_batch_delete() {
         group_id,
         &KvOp::Delete(KvDeleteRequest {
             version: 1,
-            key: b"hello".to_vec(),
+            key: Bytes::from_static(b"hello"),
             seq: 3,
             client_id: 100,
             request_id: 1003,
@@ -351,7 +352,7 @@ async fn e2e_three_node_cluster_kv_put_batch_delete() {
         group_id,
         &KvOp::Get(KvGetRequest {
             version: 1,
-            key: b"hello".to_vec(),
+            key: Bytes::from_static(b"hello"),
             request_id: 1013,
             request_create_ms: 10013,
             group_id,
@@ -398,8 +399,8 @@ async fn e2e_follower_returns_not_leader_hint() {
     let resp = kv
         .put(KvSetRequest {
             version: 1,
-            key: b"k".to_vec(),
-            value: b"v".to_vec(),
+            key: Bytes::from_static(b"k"),
+            value: Bytes::from_static(b"v"),
             seq: 1,
             ttl_ms: 0,
             client_id: 200,
@@ -491,8 +492,8 @@ async fn e2e_dynamic_group_management() {
     let resp = kv
         .put(KvSetRequest {
             version: 1,
-            key: b"after-remove".to_vec(),
-            value: b"still-works".to_vec(),
+            key: Bytes::from_static(b"after-remove"),
+            value: Bytes::from_static(b"still-works"),
             seq: 1,
             ttl_ms: 0,
             client_id: 300,
@@ -597,8 +598,8 @@ async fn kv_put(
     let resp = kv
         .put(KvSetRequest {
             version: 1,
-            key: key.to_vec(),
-            value: value.to_vec(),
+            key: Bytes::copy_from_slice(key),
+            value: Bytes::copy_from_slice(value),
             seq: req_id,
             ttl_ms: 0,
             client_id: 7000,
@@ -625,7 +626,7 @@ async fn kv_get(
     let resp = kv
         .get(KvGetRequest {
             version: 1,
-            key: key.to_vec(),
+            key: Bytes::copy_from_slice(key),
             request_id: req_id,
             request_create_ms: req_id,
             group_id,
@@ -643,7 +644,7 @@ async fn kv_get(
             "kv get returned ok=false without not_found: {}",
             resp.error
         );
-        (true, resp.value)
+        (true, resp.value.to_vec())
     }
 }
 
@@ -656,7 +657,7 @@ async fn kv_delete(
     let resp = kv
         .delete(KvDeleteRequest {
             version: 1,
-            key: key.to_vec(),
+            key: Bytes::copy_from_slice(key),
             seq: req_id,
             client_id: 7000,
             request_id: req_id,

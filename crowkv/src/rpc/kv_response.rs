@@ -10,6 +10,7 @@
 //! expanded construction.
 
 use super::KvResponse;
+use bytes::Bytes;
 
 impl KvResponse {
     /// Wire-format version emitted by every response. Bump only when
@@ -29,7 +30,7 @@ impl KvResponse {
             not_leader_hint: String::new(),
             request_id,
             request_create_ms,
-            value: Vec::new(),
+            value: Bytes::new(),
             read_slot: 0,
             safe_slot: 0,
         }
@@ -46,7 +47,7 @@ impl KvResponse {
 
     /// Successful read returning `value`. Used by `kv_get` hits.
     #[must_use]
-    pub fn ok_value(value: Vec<u8>, request_id: u64, request_create_ms: u64) -> Self {
+    pub fn ok_value(value: Bytes, request_id: u64, request_create_ms: u64) -> Self {
         Self {
             version: Self::VERSION,
             ok: true,
@@ -67,7 +68,7 @@ impl KvResponse {
     /// at which the key was last written.
     #[must_use]
     pub fn ok_value_with_revision(
-        value: Vec<u8>,
+        value: Bytes,
         revision: u64,
         request_id: u64,
         request_create_ms: u64,
@@ -99,7 +100,7 @@ impl KvResponse {
             not_leader_hint: String::new(),
             request_id,
             request_create_ms,
-            value: Vec::new(),
+            value: Bytes::new(),
             read_slot: 0,
             safe_slot: 0,
         }
@@ -118,7 +119,7 @@ impl KvResponse {
             not_leader_hint: hint,
             request_id,
             request_create_ms,
-            value: Vec::new(),
+            value: Bytes::new(),
             read_slot: 0,
             safe_slot: 0,
         }
@@ -136,7 +137,7 @@ impl KvResponse {
             not_leader_hint: String::new(),
             request_id,
             request_create_ms,
-            value: Vec::new(),
+            value: Bytes::new(),
             read_slot: 0,
             safe_slot: 0,
         }

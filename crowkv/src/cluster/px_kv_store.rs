@@ -51,10 +51,13 @@ impl KvStore for PxKvStore {
             ReadDecision::Serve { read_slot, safe_slot } => {
                 let value = group.local_replica().learner.engine_get(key).await;
                 match value {
-                    Some((slot, v)) => {
-                        crate::rpc::KvResponse::ok_value_with_revision(v, slot, request_id, request_create_ms)
-                            .with_read_slots(read_slot, safe_slot)
-                    }
+                    Some((slot, v)) => crate::rpc::KvResponse::ok_value_with_revision(
+                        bytes::Bytes::from(v),
+                        slot,
+                        request_id,
+                        request_create_ms,
+                    )
+                    .with_read_slots(read_slot, safe_slot),
                     None => crate::rpc::KvResponse::not_found(request_id, request_create_ms)
                         .with_read_slots(read_slot, safe_slot),
                 }
@@ -175,7 +178,10 @@ impl KvStore for PxKvStore {
             .await;
         let mut items: Vec<crate::rpc::KvScanItem> = Vec::with_capacity(scanned.len());
         for (key, _slot, value) in scanned {
-            items.push(crate::rpc::KvScanItem { key, value });
+            items.push(crate::rpc::KvScanItem {
+                key: bytes::Bytes::from(key),
+                value: bytes::Bytes::from(value),
+            });
         }
 
         debug!(

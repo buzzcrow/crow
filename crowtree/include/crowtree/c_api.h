@@ -207,6 +207,21 @@ void      ct_force_advance_slot(ct_tree *t, uint64_t slot);
 // `vlen`/value bytes are 0-length for a delete record.
 ct_status ct_apply_batch(ct_tree *t, uint64_t slot, const uint8_t *ops, size_t ops_len, uint64_t count);
 
+// One key/value reference for ct_apply_batch_slices — non-owning pointers
+// into the caller's buffers (must outlive the call). kind: 0 = put, 1 = delete.
+using ct_kv_ref = struct
+{
+    const uint8_t *key;
+    size_t         key_len;
+    const uint8_t *value; // null/zero-len for delete
+    size_t         value_len;
+    uint8_t        kind;
+};
+
+// Same semantics as ct_apply_batch but accepts an array of ct_kv_ref structs
+// instead of a packed buffer — eliminates the Rust-side packing copy.
+ct_status ct_apply_batch_slices(ct_tree *t, uint64_t slot, const ct_kv_ref *ops, uint64_t count);
+
 // Convenience: auto-assign the next slot and apply (single-writer only).
 ct_status ct_put(ct_tree *t, const uint8_t *key, size_t klen, const uint8_t *val, size_t vlen);
 ct_status ct_del(ct_tree *t, const uint8_t *key, size_t klen);

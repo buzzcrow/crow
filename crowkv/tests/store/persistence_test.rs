@@ -107,7 +107,7 @@ async fn store_reloads_kv_through_public_api_after_restart() {
     // beta was deleted in slot 4.
     let alpha = store.kv_get(GROUP, b"alpha", 3, 0, 10, 10).await;
     assert!(
-        alpha.ok && !alpha.not_found && alpha.value == b"3",
+        alpha.ok && !alpha.not_found && alpha.value.as_ref() == b"3",
         "alpha should be '3' after replay: {alpha:?}"
     );
 

@@ -8,6 +8,7 @@
 //! last-wins, put-then-delete, delete-then-put, empty batch,
 //! mixed ops across slots. Also covers edge-case keys.
 
+use bytes::Bytes;
 use crowkv::cluster::group::PxGroup;
 use crowkv::cluster::kv_store::KvStore;
 use crowkv::cluster::{PxKvStore, PxLocalReplica, PxLocalReplicaRole};
@@ -56,18 +57,18 @@ async fn batch_multiple_puts_all_visible() {
     let store = leader_store();
     let items = vec![
         KvBatchItem {
-            key: b"a".to_vec(),
-            value: b"1".to_vec(),
+            key: Bytes::from_static(b"a"),
+            value: Bytes::from_static(b"1"),
             is_delete: false,
         },
         KvBatchItem {
-            key: b"b".to_vec(),
-            value: b"2".to_vec(),
+            key: Bytes::from_static(b"b"),
+            value: Bytes::from_static(b"2"),
             is_delete: false,
         },
         KvBatchItem {
-            key: b"c".to_vec(),
-            value: b"3".to_vec(),
+            key: Bytes::from_static(b"c"),
+            value: Bytes::from_static(b"3"),
             is_delete: false,
         },
     ];
@@ -82,18 +83,18 @@ async fn intra_batch_last_occurrence_wins() {
     let store = leader_store();
     let items = vec![
         KvBatchItem {
-            key: b"k".to_vec(),
-            value: b"a".to_vec(),
+            key: Bytes::from_static(b"k"),
+            value: Bytes::from_static(b"a"),
             is_delete: false,
         },
         KvBatchItem {
-            key: b"k".to_vec(),
-            value: vec![],
+            key: Bytes::from_static(b"k"),
+            value: Bytes::new(),
             is_delete: true,
         },
         KvBatchItem {
-            key: b"k".to_vec(),
-            value: b"final".to_vec(),
+            key: Bytes::from_static(b"k"),
+            value: Bytes::from_static(b"final"),
             is_delete: false,
         },
     ];

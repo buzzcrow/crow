@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use crowkv::cluster::group::PxGroup;
 use crowkv::cluster::group_config::GroupConfigStore;
 use crowkv::cluster::group_election::LeaderElection;
@@ -176,7 +177,7 @@ impl WalCluster {
             let resp = client
                 .get(KvGetRequest {
                     version: 1,
-                    key: key.to_vec(),
+                    key: Bytes::copy_from_slice(key),
                     request_id: 1,
                     request_create_ms: 1,
                     group_id: GROUP,
@@ -187,7 +188,7 @@ impl WalCluster {
                 .expect("get")
                 .into_inner();
             let val = if resp.ok && !resp.not_found {
-                Some(resp.value)
+                Some(resp.value.to_vec())
             } else {
                 None
             };
@@ -258,8 +259,8 @@ async fn put(cluster: &WalCluster, key: &str, value: &str, seq: u64) {
             let resp = client
                 .put(KvSetRequest {
                     version: 1,
-                    key: key.as_bytes().to_vec(),
-                    value: value.as_bytes().to_vec(),
+                    key: Bytes::copy_from_slice(key.as_bytes()),
+                    value: Bytes::copy_from_slice(value.as_bytes()),
                     seq,
                     client_id: 0,
                     ttl_ms: 0,
@@ -288,7 +289,7 @@ async fn delete(cluster: &WalCluster, key: &str, seq: u64) {
             let resp = client
                 .delete(KvDeleteRequest {
                     version: 1,
-                    key: key.as_bytes().to_vec(),
+                    key: Bytes::copy_from_slice(key.as_bytes()),
                     seq,
                     client_id: 0,
                     request_id: seq,
