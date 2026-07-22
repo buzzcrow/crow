@@ -59,14 +59,6 @@ complexity, and dependency. Before implementation, follow the
   counters, no read-specific gauges. See
   [`read-flow-analysis.md`](read-flow-analysis.md) for the full gap
   analysis and proposed metrics hierarchy.
-- **R21** — Zero-copy engine read API — Area: crowtree FFI / engine —
-  `CrowtreeEngine::get` copies the key (`key.to_vec()`) for the FFI
-  call and copies the value (`copy_buf`) from the C++ engine's internal
-  buffer because the epoch guard is released before the value is
-  returned. A pinned-value API that extends the epoch guard lifetime to
-  the Rust caller could eliminate the value copy. See
-  [`read-flow-analysis.md`](read-flow-analysis.md) Memory Copy
-  Analysis for the full audit.
 
 ### Low Priority
 

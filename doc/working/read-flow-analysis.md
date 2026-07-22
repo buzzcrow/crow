@@ -651,8 +651,11 @@ The gRPC framework deserializes the request into `KvGetRequest`.
   frame. Unavoidable for gRPC.
 
 **Step 3 — `kv_get` → `engine_get`** (`px_kv_store.rs:52`,
-`learner.rs:120`)
-`group.local_replica().learner.engine_get(key)` where `key: &[u8]`.
+`learner.rs:129`)
+`group.local_replica().learner.engine_get_bytes(key)` where `key: &[u8]`.
+The production read path uses `engine_get_bytes` (returns `Bytes`), not
+`engine_get` (returns `Vec<u8>`); `engine_get` remains for non-Bytes
+callers.
 - **No copy** — passes a slice reference to the engine.
 
 **Step 4a — InMemKV get** (test-only engine)
@@ -660,38 +663,40 @@ The gRPC framework deserializes the request into `KvGetRequest`.
 - **No copy** — returns a reference to the stored value. The caller
   receives an owned `Vec<u8>` via `DashMap`'s `get` returning a ref,
   but the `KVEngine::get` trait returns `Vec<u8>` — so the value is
-  cloned out of the `DashMap` on return.
+  cloned out of the `DashMap` on return. `get_bytes` default impl then
+  wraps it via `Bytes::from(vec)`.
 - **O(n) copy** — value cloned from the map's internal storage.
 
-**Step 4b — CrowtreeEngine get (fast path)** (`crowtree_engine.rs:168`,
-`ffi/src/lib.rs:1337`)
-`try_get(key.to_vec())` → `ct_get_async` → `ct_future_poll` →
-`copy_buf(value)`.
-- **O(n) copy (key)** — `key.to_vec()` allocates a copy of the key
-  for the FFI call. The C API takes `*const u8, len`, so the key
-  could theoretically be passed as a borrow without copying, but the
-  async API wraps it in a `Vec<u8>` for `Send` safety across the
-  reactor boundary.
-- **O(n) copy (value)** — `copy_buf` does
-  `slice::from_raw_parts(..).to_vec()`. The C++ engine returns a
-  `ct_buf` that may be a borrowed pointer into a still-live frame
-  (zero-copy fast path within C++), but the Rust side must copy it
-  out because the epoch guard is released immediately after
-  `ct_future_free`. So the value is always copied from the engine's
-  internal buffer into an owned `Vec<u8>`.
+**Step 4b — CrowtreeEngine get_bytes (fast path)** (`crowtree_engine.rs:177`,
+`ffi/src/lib.rs:1393`)
+`try_get_pinned(key)` → `ct_get_async` → `ct_future_poll` →
+`PinnedValue` borrowing directly from the C++ frame, then
+`Bytes::copy_from_slice(pinned.as_bytes())` before dropping the pin.
+- **No copy (key)** — `try_get_pinned` takes `&[u8]`; `ct_get_async`
+  copies the key internally into a `std::shared_ptr<std::string>`, so
+  the Rust-side `key.to_vec()` is eliminated.
+- **O(n) copy (value)** — one copy: frame → `Bytes` via
+  `copy_from_slice`. The intermediate `Vec<u8>` allocation is
+  eliminated (no `copy_buf`). The `PinnedValue` holds the `ct_future`
+  handle so the epoch guard stays alive until the `Bytes` copy
+  completes, then drops to release the guard. Total: one copy, one
+  allocation (`Bytes`), no `Vec<u8>`.
 
-**Step 4c — CrowtreeEngine get (slow path / demand-load miss)**
-Same as fast path, but `ct_future_poll` returns `done == 0`, so the
-  future suspends until the io_uring page fetch completes. On
-  completion, the same `copy_buf` path runs.
-- **O(n) copy (value)** — same as fast path. Additionally, the C++
-  engine copies the page from disk into the buffer pool, but that is
-  internal to the engine and not counted here.
+**Step 4c — CrowtreeEngine get_bytes (slow path / demand-load miss)**
+`ct_future_poll` returns `done == 0`, so the future suspends until the
+io_uring page fetch completes. On completion `materialize_owned` runs
+on the reactor thread, copying the borrowed value into an owned buffer
+and releasing the guard before the completion callback fires. The
+Rust side then copies from the owned buffer into `Vec<u8>` / `Bytes`.
+- **O(n) copy (value)** — one copy: I/O buffer → Rust `Vec`/`Bytes`.
+  Additionally, the C++ engine copies the page from disk into the
+  buffer pool, but that is internal to the engine and not counted
+  here.
 
-**Step 5 — Response construction** (`kv_response.rs:69`)
+**Step 5 — Response construction** (`kv_response.rs:70`)
 `KvResponse::ok_value_with_revision(value, slot, ...)` takes
-`value: Vec<u8>` by value.
-- **move** — the `Vec<u8>` from the engine is moved into the response
+`value: Bytes` by value.
+- **move** — the `Bytes` from the engine is moved into the response
   struct. No copy.
 
 **Step 6 — gRPC response serialization**
@@ -731,29 +736,35 @@ gRPC response. Each entry's key and value are moved, not copied.
   - gRPC request deserialization — key from network frame.
   - gRPC response serialization — value(s) into socket buffer.
   - Engine get (InMemKV) — value cloned from internal map.
-  - Engine get (Crowtree) — key `to_vec()` for FFI; value `copy_buf`
-    from C++ buffer (epoch guard lifetime constraint).
+  - Engine get (Crowtree, fast path) — one copy: frame → `Bytes` via
+    `copy_from_slice` (R21 eliminated the intermediate `Vec<u8>` and
+    the key `to_vec()`).
+  - Engine get (Crowtree, slow path) — one copy: I/O buffer →
+    `Vec`/`Bytes` (guard released on reactor thread before completion).
   - Engine scan (Crowtree) — prefix `to_vec()`; packed result
     `take_buf`; per-entry `Vec<u8>` allocations in `decode_scan`.
 
-- **O(n) copies (potentially avoidable):**
-  - Engine get key copy (`key.to_vec()`) — the C API takes
-    `*const u8, len`, so a borrow could work if the async FFI
-    wrapper did not require `Send` ownership. Would need an API
-    change to pass a raw pointer + lifetime guarantee instead of
-    `Vec<u8>`.
-  - Engine get value copy (`copy_buf`) — the C++ engine's zero-copy
-    fast path returns a borrowed pointer into a frame, but the Rust
-    side must copy because the epoch guard is released before the
-    value is returned. Could be eliminated with a "pinned value"
-    API that extends the epoch guard lifetime to the Rust caller,
-    but this would require a new C API and careful lifetime
-    management.
+- **O(n) copies (eliminated by R21):**
+  - Engine get key copy (`key.to_vec()`) — `try_get_pinned` now takes
+    `&[u8]`; the C API copies the key internally into a
+    `std::shared_ptr<std::string>`, so the Rust-side copy is gone.
+  - Engine get intermediate `Vec<u8>` (`copy_buf`) — the fast path
+    now returns a `PinnedValue` borrowing directly from the C++ frame;
+    `Bytes::copy_from_slice` produces the final `Bytes` in one copy
+    instead of frame → `Vec` → `Bytes` (two copies + two allocations).
+
+- **O(n) copies (remaining, blocked by R6):**
+  - Engine get value copy (frame → `Bytes`) — true zero-copy via
+    `Bytes::from_raw_parts` with a drop calling `ct_future_free` would
+    eliminate it, but `Bytes` is `Send` and could be dropped on
+    another thread, while the epoch guard must be released on the
+    thread that entered it (`EpochManager::Guard` is thread-local).
+    Blocked by R6 (cross-thread epoch guard).
 
 - **Zero-copy (move or borrow):**
-  - `kv_get` → `engine_get` passes `&[u8]` (no key copy at the
+  - `kv_get` → `engine_get_bytes` passes `&[u8]` (no key copy at the
     Rust call boundary).
-  - Response `Vec<u8>` moved into `KvResponse` (no copy).
+  - Response `Bytes` moved into `KvResponse` (no copy).
 
 ### Comparison with Write Path
 
@@ -766,10 +777,9 @@ The read path has fewer O(n) copies than the write path:
 - **No FFI batch encode** — reads use `ct_get` / `ct_scan`, not
   `ct_apply_batch_slices`.
 
-The main O(n) copy unique to the read path is the engine value copy
-(`copy_buf` for Crowtree, clone for InMemKV). This is structurally
-unavoidable: the engine owns its internal storage, and the caller
-needs an owned `Vec<u8>` to return via gRPC. The only way to
-eliminate it would be a zero-copy engine read API that returns a
-borrowed reference with a guarded lifetime — a significant engine
-API change.
+After R21, the read path's remaining engine value copy (frame →
+`Bytes`) is structurally similar to the write path's: the engine owns
+its internal storage, and the caller needs an owned `Bytes` to return
+via gRPC. True zero-copy (no frame → `Bytes` copy) is blocked by R6
+(cross-thread epoch guard), since `Bytes` is `Send` but the guard is
+thread-local.
