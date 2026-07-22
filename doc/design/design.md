@@ -159,7 +159,11 @@ RPC layer and config schema reserve hooks for TLS from day one.
   its applied frontier ≥ `min_slot`, otherwise redirects to leader.
   The client chooses the freshness policy by setting `min_slot`:
   `0` = accept any staleness; write watermark = read-your-writes;
-  last known `safe_slot` = bounded stale.
+  last known `safe_slot` = bounded stale. Under
+  `read_endpoint_policy = AnyReplica`, the client round-robins these
+  reads across all replicas in the group (leader included), so
+  follower capacity is used and the leader's read share drops to
+  ~`1/N`.
 
 **Range reads (Scan):** same two modes. Linearizable scan waits for
 the leader's own contiguous applied frontier — this is the one
@@ -235,8 +239,22 @@ Full design: `design-reconfiguration.md`, `design-kv-server.md`.
 ## 10. Client Interaction
 
 - **Discovery** — client polls a seed server's HTTP `/topology` endpoint
-  to build `(store_id, group_id) → leader_endpoint` cache. No gRPC
-  `DescribeCluster`. Re-polls only on cache miss / `NotLeader`.
+  to build `(store_id, group_id) → leader_endpoint` cache plus a
+  `(store_id, group_id) → replica_endpoints` list (local + remotes). No
+  gRPC `DescribeCluster`. Re-polls only on cache miss / `NotLeader`.
+- **Read-endpoint policy** — `ClientConfig::read_endpoint_policy`
+  selects how `MinSlot` reads pick a target replica:
+  - `Leader` (default) — every read targets the leader; backward
+    compatible, linearizable-safe.
+  - `AnyReplica` — `MinSlot` reads round-robin across the cached
+    replica list (leader included as one of the N replicas). A follower
+    whose applied frontier has not reached `min_slot` returns
+    `NotLeader` with the leader hint; the client follows the hint for
+    that request and increments `read_endpoint_fallback`. Linearizable
+    reads always target the leader regardless of policy. Scans use the
+    same selector; the scan fallback parses the server's
+    `"not leader; retry scan at {endpoint}"` error string (no protocol
+    field today).
 - **Retry** — on timeout or `NotLeader`, client retries with backoff.
   `NotLeader` with hint → follow hint immediately.
 - **Idempotency** — `(client_id, seq)` dedup, persisted into the

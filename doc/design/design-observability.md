@@ -200,6 +200,25 @@ path served the read), not call counters — `read.barrier.l` already carries
 the total call count. This follows the counter/summary non-redundancy
 principle (justified under "different population/outcome").
 
+### Client Metrics
+
+`crowkv-client` exposes its own `ClientMetrics` (lock-free `AtomicU64`
+counters, snapshotted via `ClientMetricsSnapshot`) for retry, topology,
+and read-distribution observability. They are not part of the server's
+`MetricsRegistry` — the client is a separate process and has no C++
+handle. Two counters cover R26 follower-read distribution:
+
+- `read_endpoint_distributed` — incremented each time the `AnyReplica`
+  selector picks a replica from the cached list for a `MinSlot` read
+  (i.e. the distribution branch fired). Pairs with the server-side
+  `read.minslot_fallback.c` to confirm the distribution rate and the
+  fallback rate.
+- `read_endpoint_fallback` — incremented each time a distributed
+  `MinSlot` read fell back to the leader via `NotLeaderHint` (get) or
+  the scan `"not leader; retry scan at "` parse. A high
+  `read_endpoint_fallback / read_endpoint_distributed` ratio means
+  followers are lagging and the policy is providing little benefit.
+
 ### C++ Registry Ownership
 
 C++ `Crowtree` creates its own `MetricsRegistry` internally via
