@@ -58,6 +58,7 @@ This is the core technique. Do not jump to a fix — first identify exactly wher
    - **Design gap** — the test expects behavior the code was never written to provide. Fix the code or the test, whichever is wrong.
    - **Ambiguity gap** — an intermediate process has undefined or timing-dependent behavior (e.g., polling races, missing setup calls). Pin it down with explicit sequencing or additional setup.
    - **Environmental gap** — external factors (proxy, stale state, port conflicts). Fix the environment, not the code.
+4. **Measure per-step time** if the gap isn't obvious from logs (long-running tests): bracket each step with wall-clock deltas — Playwright `Date.now()` + `console.log` (`--reporter=line`), Rust `Instant::now()` + `eprintln!` (`--nocapture`), C++ `steady_clock` to stderr. The step whose elapsed approaches the assertion timeout is the prime suspect — drill into its upstream call. A step at 2x+ its share of the spec's `// Baseline: Xs` is a regression signal even if the test still passes.
 
 ## Step 3 — Inspect Logs and On-Disk Data
 
