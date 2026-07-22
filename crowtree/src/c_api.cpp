@@ -573,6 +573,29 @@ ct_status ct_apply_batch(ct_tree *t, uint64_t slot, const uint8_t *ops, size_t o
     return to_status(t->tree->apply_encoded(slot, std::move(encoded)));
 }
 
+ct_status ct_apply_batch_slices(ct_tree *t, uint64_t slot, const ct_kv_ref *ops, uint64_t count)
+{
+    if (t == nullptr || (ops == nullptr && count != 0)) {
+        return static_cast<ct_status>(Code::kInvalidArgument);
+    }
+    std::vector<Crowtree::encoded_op> encoded;
+    encoded.reserve(count);
+    for (uint64_t i = 0; i < count; ++i) {
+        const ct_kv_ref &op = ops[i];
+        if (op.key == nullptr && op.key_len != 0) {
+            return static_cast<ct_status>(Code::kInvalidArgument);
+        }
+        if (op.kind != 0 && op.kind != 1) {
+            return static_cast<ct_status>(Code::kInvalidArgument);
+        }
+        std::string key(reinterpret_cast<const char *>(op.key), op.key_len);
+        OpKind      kind = op.kind == 0 ? OpKind::kPut : OpKind::kDelete;
+        Slice       value_slice(reinterpret_cast<const char *>(op.value), op.value_len);
+        encoded.push_back({std::move(key), encode_cell_buf(slot, kind, kind == OpKind::kPut ? value_slice : Slice())});
+    }
+    return to_status(t->tree->apply_encoded(slot, std::move(encoded)));
+}
+
 void ct_force_advance_slot(ct_tree *t, uint64_t slot)
 {
     if (t != nullptr) {

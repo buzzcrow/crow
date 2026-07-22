@@ -19,6 +19,7 @@ use crowkv::cluster::kv_server::KvServer;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crowkv::cluster::px_kv_store::PxKvStore;
 
+use bytes::Bytes;
 use crowkv_client::{BatchOp, ClientConfig, CrowkvClient, GetOutcome, ReadMode};
 
 const STORE_ID: u64 = 1;
@@ -109,12 +110,12 @@ async fn batch_write_and_scan() {
             GROUP_ID,
             &[
                 BatchOp::Put {
-                    key: b"a1".to_vec(),
-                    value: b"1".to_vec(),
+                    key: Bytes::from_static(b"a1"),
+                    value: Bytes::from_static(b"1"),
                 },
                 BatchOp::Put {
-                    key: b"a2".to_vec(),
-                    value: b"2".to_vec(),
+                    key: Bytes::from_static(b"a2"),
+                    value: Bytes::from_static(b"2"),
                 },
             ],
         )

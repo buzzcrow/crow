@@ -9,6 +9,7 @@
 
 mod testkit;
 
+use bytes::Bytes;
 use crowkv::rpc::kv_service_client::KvServiceClient;
 use crowkv::rpc::{KvGetRequest, KvSetRequest};
 use serde_json::Value;
@@ -167,8 +168,8 @@ async fn kv_put_nodes(nodes: &[&ServerNode], group_id: u64, key: &[u8], val: &[u
         match client
             .put(KvSetRequest {
                 version: 1,
-                key: key.to_vec(),
-                value: val.to_vec(),
+                key: Bytes::copy_from_slice(key),
+                value: Bytes::copy_from_slice(val),
                 ttl_ms: 0,
                 request_id: req_id,
                 request_create_ms: req_id,
@@ -206,7 +207,7 @@ async fn kv_get_nodes(nodes: &[&ServerNode], group_id: u64, key: &[u8]) -> Optio
     let resp = client
         .get(KvGetRequest {
             version: 1,
-            key: key.to_vec(),
+            key: Bytes::copy_from_slice(key),
             request_id: 9001,
             request_create_ms: 9001,
             group_id,
@@ -217,7 +218,7 @@ async fn kv_get_nodes(nodes: &[&ServerNode], group_id: u64, key: &[u8]) -> Optio
         .ok()?
         .into_inner();
     if resp.ok && !resp.not_found {
-        Some(resp.value)
+        Some(resp.value.to_vec())
     } else {
         None
     }

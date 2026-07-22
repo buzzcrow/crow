@@ -16,6 +16,7 @@ workspace = true
 # `Serialize`/`Deserialize`) without depending on `crowkv-server` or
 # `crowkv-console` (see doc/.
 crowkv = { path = "../crowkv" }
+bytes = "1"
 tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
 tonic = { workspace = true }
 dashmap = "6"

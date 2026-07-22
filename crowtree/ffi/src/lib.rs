@@ -62,6 +62,15 @@ mod sys {
     }
 
     #[repr(C)]
+    pub struct ct_kv_ref {
+        pub key: *const u8,
+        pub key_len: usize,
+        pub value: *const u8,
+        pub value_len: usize,
+        pub kind: u8,
+    }
+
+    #[repr(C)]
     pub struct ct_gc_stats {
         pub tombstones_dropped: u64,
         pub pages_freed: u64,
@@ -146,13 +155,7 @@ mod sys {
             vlen: usize,
         ) -> c_int;
         pub fn ct_apply_delete(t: *mut ct_tree, slot: u64, key: *const u8, klen: usize) -> c_int;
-        pub fn ct_apply_batch(
-            t: *mut ct_tree,
-            slot: u64,
-            ops: *const u8,
-            ops_len: usize,
-            count: u64,
-        ) -> c_int;
+        pub fn ct_apply_batch_slices(t: *mut ct_tree, slot: u64, ops: *const ct_kv_ref, count: u64) -> c_int;
         pub fn ct_force_advance_slot(t: *mut ct_tree, slot: u64);
         pub fn ct_put(t: *mut ct_tree, key: *const u8, klen: usize, val: *const u8, vlen: usize) -> c_int;
         pub fn ct_del(t: *mut ct_tree, key: *const u8, klen: usize) -> c_int;
@@ -410,24 +413,6 @@ pub struct Stats {
     pub l1_get_hit_total: u64,
 }
 
-/// Encode `ops` into `ct_apply_batch`'s packed wire format:
-/// `[u8 kind][u32 klen][key][u32 vlen][value] * count` (kind 0=put, 1=delete).
-fn encode_batch(ops: &[BatchOp<'_>]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for op in ops {
-        let (kind, key, value): (u8, &[u8], &[u8]) = match op {
-            BatchOp::Put { key, value } => (0, key, value),
-            BatchOp::Delete { key } => (1, key, b""),
-        };
-        out.push(kind);
-        out.extend_from_slice(&(key.len() as u32).to_le_bytes());
-        out.extend_from_slice(key);
-        out.extend_from_slice(&(value.len() as u32).to_le_bytes());
-        out.extend_from_slice(value);
-    }
-    out
-}
-
 /// A scan result entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanEntry {
@@ -546,16 +531,26 @@ impl Crowtree {
     /// concurrent reader never observes a partially-applied batch -- unlike
     /// looping [`Self::apply_put`]/[`Self::apply_delete`] per key).
     pub fn apply_batch(&self, slot: u64, ops: &[BatchOp<'_>]) -> Result<(), CtError> {
-        let packed = encode_batch(ops);
-        check(unsafe {
-            sys::ct_apply_batch(
-                self.as_ptr(),
-                slot,
-                packed.as_ptr(),
-                packed.len(),
-                ops.len() as u64,
-            )
-        })
+        let refs: Vec<sys::ct_kv_ref> = ops
+            .iter()
+            .map(|op| match op {
+                BatchOp::Put { key, value } => sys::ct_kv_ref {
+                    key: key.as_ptr(),
+                    key_len: key.len(),
+                    value: value.as_ptr(),
+                    value_len: value.len(),
+                    kind: 0,
+                },
+                BatchOp::Delete { key } => sys::ct_kv_ref {
+                    key: key.as_ptr(),
+                    key_len: key.len(),
+                    value: std::ptr::null(),
+                    value_len: 0,
+                    kind: 1,
+                },
+            })
+            .collect();
+        check(unsafe { sys::ct_apply_batch_slices(self.as_ptr(), slot, refs.as_ptr(), refs.len() as u64) })
     }
 
     pub fn force_advance_slot(&self, slot: u64) {

@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use bytes::Bytes;
 use dashmap::DashMap;
 
 use crowkv::rpc::kv_service_client::KvServiceClient;
@@ -49,8 +50,8 @@ pub struct ScanOutcome {
 /// One item of a `batch_write` call.
 #[derive(Debug, Clone)]
 pub enum BatchOp {
-    Put { key: Vec<u8>, value: Vec<u8> },
-    Delete { key: Vec<u8> },
+    Put { key: Bytes, value: Bytes },
+    Delete { key: Bytes },
 }
 
 /// Standalone `CrowKV` client: topology discovery over the HTTP management
@@ -223,8 +224,8 @@ impl CrowkvClient {
         loop {
             let req = KvSetRequest {
                 version: 1,
-                key: key.to_vec(),
-                value: value.to_vec(),
+                key: Bytes::copy_from_slice(key),
+                value: Bytes::copy_from_slice(value),
                 seq,
                 ttl_ms: 0,
                 client_id,
@@ -296,7 +297,7 @@ impl CrowkvClient {
         loop {
             let req = KvGetRequest {
                 version: 1,
-                key: key.to_vec(),
+                key: Bytes::copy_from_slice(key),
                 request_id: next_request_id(),
                 request_create_ms: now_ms(),
                 group_id,
@@ -315,7 +316,7 @@ impl CrowkvClient {
                     if resp.ok {
                         self.metrics.record_get_latency(t0.elapsed().as_micros() as u64);
                         return Ok(GetOutcome::Found {
-                            value: resp.value,
+                            value: resp.value.to_vec(),
                             revision: resp.revision,
                         });
                     }
@@ -372,7 +373,7 @@ impl CrowkvClient {
         loop {
             let req = KvDeleteRequest {
                 version: 1,
-                key: key.to_vec(),
+                key: Bytes::copy_from_slice(key),
                 seq,
                 client_id,
                 request_id: next_request_id(),
@@ -449,7 +450,7 @@ impl CrowkvClient {
                 },
                 BatchOp::Delete { key } => KvBatchItem {
                     key: key.clone(),
-                    value: Vec::new(),
+                    value: Bytes::new(),
                     is_delete: true,
                 },
             })
@@ -532,8 +533,8 @@ impl CrowkvClient {
         loop {
             let req = KvScanRequest {
                 version: 1,
-                prefix: prefix.to_vec(),
-                start_after: start_after.to_vec(),
+                prefix: Bytes::copy_from_slice(prefix),
+                start_after: Bytes::copy_from_slice(start_after),
                 limit,
                 request_id: next_request_id(),
                 request_create_ms: now_ms(),
@@ -546,7 +547,11 @@ impl CrowkvClient {
                 Ok(resp) => {
                     let resp = resp.into_inner();
                     if resp.ok {
-                        let items = resp.items.into_iter().map(|i| (i.key, i.value)).collect();
+                        let items = resp
+                            .items
+                            .into_iter()
+                            .map(|i| (i.key.to_vec(), i.value.to_vec()))
+                            .collect();
                         self.metrics.record_scan_latency(t0.elapsed().as_micros() as u64);
                         return Ok(ScanOutcome {
                             items,
