@@ -67,8 +67,6 @@ complexity, and dependency. Before implementation, follow the
   the Rust caller could eliminate the value copy. See
   [`read-flow-analysis.md`](read-flow-analysis.md) Memory Copy
   Analysis for the full audit.
-- **R24** — ~~Simplify read modes to Linearizable + MinSlot~~ —
-  **Done.**
 
 ### Low Priority
 
