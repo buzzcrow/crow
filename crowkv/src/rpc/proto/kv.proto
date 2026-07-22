@@ -24,20 +24,17 @@ message KvSetRequest {
 
 // Point-read consistency mode. Applies to both KvGetRequest and (with the
 // same numeric values) KvScanRequest.
-//   0 LINEARIZABLE     — reflect every committed write; served by the leader
-//                        behind a lease fast-path or ReadIndex quorum check,
-//                        followers transparently forward.
-//   1 READ_YOUR_WRITES — served locally on any replica once its applied
-//                        frontier has caught up to `client_slot`; otherwise
-//                        forwarded to the leader.
-//   2 BOUNDED_STALE    — served locally without a round-trip; `safe_slot`
-//                        in the response reports the freshness floor.
-//   3 BEST_EFFORT      — served locally, no freshness guarantee.
+//   0 LINEARIZABLE — reflect every committed write; served by the leader
+//                    behind a lease fast-path or ReadIndex quorum check,
+//                    followers transparently forward.
+//   1 MIN_SLOT     — client carries `min_slot`; replica serves locally if
+//                    its applied frontier >= min_slot, otherwise redirects
+//                    to the leader. min_slot = 0 accepts any staleness;
+//                    the write watermark gives read-your-writes; the last
+//                    known safe_slot gives bounded-stale.
 enum ReadMode {
   LINEARIZABLE = 0;
-  READ_YOUR_WRITES = 1;
-  BOUNDED_STALE = 2;
-  BEST_EFFORT = 3;
+  MIN_SLOT = 1;
 }
 
 message KvGetRequest {
@@ -47,9 +44,10 @@ message KvGetRequest {
   uint64 request_create_ms = 4;
   uint64 group_id = 5;
   ReadMode read_mode = 6;
-  // For READ_YOUR_WRITES: the slot the client must observe (typically the
-  // `revision` returned by its last write). Ignored by other modes.
-  uint64 client_slot = 7;
+  // For MIN_SLOT: the minimum applied slot the replica must have reached
+  // before serving locally. 0 = accept any staleness. Ignored by
+  // LINEARIZABLE.
+  uint64 min_slot = 7;
 }
 
 message KvDeleteRequest {
@@ -113,6 +111,8 @@ message KvScanRequest {
   // beginning. Only keys strictly greater than `start_after` (and
   // matching `prefix`) are returned.
   bytes  start_after = 8;
+  // For MIN_SLOT: same semantics as KvGetRequest.min_slot.
+  uint64 min_slot = 9;
 }
 
 message KvScanItem {

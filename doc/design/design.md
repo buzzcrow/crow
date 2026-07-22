@@ -155,15 +155,15 @@ RPC layer and config schema reserve hooks for TLS from day one.
 
 **Point reads:**
 - **Linearizable** — leader-served, fenced by lease or ReadIndex.
-- **Read-your-writes** — client carries last write's slot; reads from
-  any follower whose per-key resolved slot ≥ that slot.
-- **Bounded stale** — client carries last known safe-slot; reads from
-  any follower whose global resolved slot ≥ that slot.
-- **Best-effort** — read any follower, accept possible inconsistency.
+- **MinSlot** — client carries `min_slot`; replica serves locally if
+  its applied frontier ≥ `min_slot`, otherwise redirects to leader.
+  The client chooses the freshness policy by setting `min_slot`:
+  `0` = accept any staleness; write watermark = read-your-writes;
+  last known `safe_slot` = bounded stale.
 
-**Range reads (Scan):** `Linearizable` (default), `SafeSlot`,
-`AtSlot(N)`. Linearizable scan waits for the leader's own contiguous
-applied frontier — this is the one latency cost of parallel slots.
+**Range reads (Scan):** same two modes. Linearizable scan waits for
+the leader's own contiguous applied frontier — this is the one
+latency cost of parallel slots.
 
 Full read-flow details: `design-leader-election.md`,
 `design-state-machine.md`.

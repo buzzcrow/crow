@@ -14,13 +14,13 @@ opportunities. Mirrors the structure of
 ## Read Flow — Point Read (Get)
 
 ```
-Client GET(key, read_mode, client_slot?)
+Client GET(key, read_mode, min_slot?)
   → CrowkvClient::get
-    1. resolve_client_slot — for ReadYourWrites, auto-attach
-       write watermark; for other modes, 0
+    1. resolve_min_slot — for MinSlot, auto-attach
+       write watermark; for Linearizable, 0
     2. resolve_leader(store_id, group_id) — ALWAYS resolves to the
        cached leader endpoint, regardless of read_mode
-    3. send KvGetRequest { key, read_mode, client_slot } to endpoint
+    3. send KvGetRequest { key, read_mode, min_slot } to endpoint
     4. retry loop (NotLeaderHint → follow, unknown leader → wait+refresh,
        transport error → backoff+refresh)
   → KvStoreService::get (server-side gRPC handler)
@@ -29,9 +29,9 @@ Client GET(key, read_mode, client_slot?)
        via x-crowkv-forwarded header)
        - on forward success → return leader's response
        - on forward failure → fall through to local store (degraded)
-    6. [stale modes] no forwarding — serve from local store directly
+    6. [MinSlot] no forwarding — serve from local store directly
   → PxKvStore::kv_get
-    7. resolve_read_point(group, read_mode, client_slot)
+    7. resolve_read_point(group, read_mode, min_slot)
        → ReadDecision (see per-mode routing below)
     8. [Serve] learner.engine_get(key) → KVEngine::get(key)
        → Some((resolved_slot, value)) or None
@@ -53,14 +53,11 @@ Client GET(key, read_mode, client_slot?)
     if forwarding failed or the loop-guard header is set, the store
     returns `NotLeader` rather than serving stale)
 
-- **ReadYourWrites** — if `contiguous_applied >= client_slot`:
+- **MinSlot** — if `contiguous_applied >= min_slot`:
   serve locally at `contiguous_applied`. Otherwise: `NotLeader`
   redirect (the local replica has not yet applied the client's last
-  write; the leader is guaranteed to have applied it).
-
-- **BoundedStale / BestEffort** — always serve locally at
-  `contiguous_applied`, reporting `group_safe_slot` as the freshness
-  floor. No round-trip, no redirect.
+  write; the leader is guaranteed to have applied it). `min_slot = 0`
+  accepts any staleness.
 
 ### Linearizable Read Barrier (`linearizable_read_barrier`)
 
@@ -87,8 +84,7 @@ Two paths, mirroring the Raft leader-read fencing model:
   `resolve_read_point`.
 - **`ReadBarrierOutcome`** — `Ready { read_slot }` | `NotLeader` |
   `NoQuorum`. The outcome of `linearizable_read_barrier`.
-- **`ReadMode`** (proto enum) — `Linearizable` (0),
-  `ReadYourWrites` (1), `BoundedStale` (2), `BestEffort` (3).
+- **`ReadMode`** (proto enum) — `Linearizable` (0), `MinSlot` (1).
 - **`group_safe_slot`** — `min(local contiguous_applied, all voting
   peers' last-reported contiguous_applied)`. Monotone within a
   tenure. The freshness floor for bounded-stale reads.
@@ -101,18 +97,18 @@ Two paths, mirroring the Raft leader-read fencing model:
 ## Read Flow — Range Read (Scan)
 
 ```
-Client SCAN(prefix, start_after, limit, read_mode)
+Client SCAN(prefix, start_after, limit, read_mode, min_slot?)
   → CrowkvClient::scan
-    1. resolve_leader (always — same as get)
+    1. resolve_min_slot (same as get)
     2. send KvScanRequest to endpoint
     3. retry loop (no NotLeaderHint field in KvScanResponse;
        !ok is a plain error)
   → KvStoreService::scan
     4. [linearizable only] forward_kv_scan to leader (same
        at-most-once pattern as get)
-    5. [stale modes] serve locally
+    5. [MinSlot] serve locally
   → PxKvStore::kv_scan
-    6. resolve_read_point (client_slot = 0 — scans carry no RYW slot)
+    6. resolve_read_point (min_slot passed through)
     7. [Serve] learner.engine_scan(prefix, start_after, limit)
        → Vec<(key, slot, value)>, truncated
     8. build KvScanResponse with read_slot
@@ -151,21 +147,17 @@ read volume causes resource starvation for writes.
 
 ### Parallel Reads Across Replicas
 
-Reads **can** run in parallel across replicas, but only for stale
-modes. The current implementation does not exploit this fully:
+Reads **can** run in parallel across replicas, but only for
+`MinSlot` mode. The current implementation does not exploit this
+fully:
 
-- **BoundedStale / BestEffort** — the server serves these from the
-  local replica without forwarding. If the client sends these
-  requests to different replicas (e.g. via a round-robin endpoint
-  selector), they execute in parallel on each replica. However, the
-  current client (`CrowkvClient`) always resolves to the **leader**
-  endpoint via `resolve_leader`, even for stale reads. So in
-  practice, all reads go to the leader today.
-
-- **ReadYourWrites** — can be served from any replica whose
-  `contiguous_applied >= client_slot`. The server-side handler does
-  not forward these (only linearizable reads are forwarded). But the
-  client always sends to the leader, so the leader serves them.
+- **MinSlot** — the server serves these from the local replica
+  without forwarding. If the client sends these requests to different
+  replicas (e.g. via a round-robin endpoint selector), they execute in
+  parallel on each replica. However, the current client
+  (`CrowkvClient`) always resolves to the **leader** endpoint via
+  `resolve_leader`, even for MinSlot reads. So in practice, all reads
+  go to the leader today.
 
 - **Linearizable** — must be served from the leader (with lease or
   ReadIndex). No parallelism across replicas by definition.
@@ -191,12 +183,11 @@ for stale reads, or introduce a server-side read-load-balancer.
 
 ### "Read does not use multiple window, but it can run parallel at each replica"
 
-**Correct.** Reads do not use the inflight admission window. Stale
-reads (BoundedStale, BestEffort) can be served from any replica in
-parallel — each replica's engine has its own `get` / `scan` path
-with no cross-replica coordination. ReadYourWrites can also be
-served from any replica that has caught up to `client_slot`. Only
-linearizable reads are serialized through the leader.
+**Correct.** Reads do not use the inflight admission window. MinSlot
+reads can be served from any replica in parallel — each replica's
+engine has its own `get` / `scan` path with no cross-replica
+coordination. Only linearizable reads are serialized through the
+leader.
 
 ### "If the slot is accepted and persistent to crowtree in each replica then read on any replica will return same result"
 
@@ -230,15 +221,12 @@ This is why linearizable reads are forwarded to the leader: the
 leader is the only replica guaranteed to have the latest applied
 state.
 
-**For ReadYourWrites**: the client carries `client_slot` (the slot
+**For MinSlot**: the client carries `min_slot` (e.g. the slot
 of its last write). If the follower's `contiguous_applied >=
-client_slot`, the follower has applied that write and can serve the
+min_slot`, the follower has applied that write and can serve the
 read. If not, the read is redirected to the leader. This is
-correct — the follower self-checks before serving.
-
-**For BoundedStale / BestEffort**: the client accepts staleness.
-The response includes `safe_slot` (the group safe-slot), so the
-client can judge freshness. No forwarding needed.
+correct — the follower self-checks before serving. `min_slot = 0`
+accepts any staleness.
 
 ### Comparison with Raft Cluster Read Implementation
 
@@ -257,20 +245,19 @@ adaptations:
   request time).
 
 - **Follower reads** — Raft supports follower reads for stale
-  semantics (e.g. etcd's `serializable` reads). CrowKV's
-  BoundedStale / BestEffort modes are analogous. The key difference
-  is that Raft followers receive log entries via `AppendEntries`
-  (blocking, in-order), while CrowKV followers receive
-  `ChosenNotification` via fire-and-forget mpsc (best-effort,
-  out-of-order). This means CrowKV followers may lag more than Raft
-  followers under load, but the correctness argument is the same:
-  stale reads are explicitly labeled as stale, and the `safe_slot`
-  provides a freshness bound.
+  semantics (e.g. etcd's `serializable` reads). CrowKV's `MinSlot`
+  mode with `min_slot = 0` is analogous. The key difference is that
+  Raft followers receive log entries via `AppendEntries` (blocking,
+  in-order), while CrowKV followers receive `ChosenNotification` via
+  fire-and-forget mpsc (best-effort, out-of-order). This means CrowKV
+  followers may lag more than Raft followers under load, but the
+  correctness argument is the same: stale reads are explicitly
+  labeled as stale, and the `safe_slot` provides a freshness bound.
 
-- **ReadYourWrites** — not a standard Raft mode. CrowKV adds this
-  as a middle ground: the client carries its last write's slot, and
-  any replica (including followers) that has applied up to that
-  slot can serve the read. This is similar to etcd's
+- **MinSlot** — not a standard Raft mode. CrowKV adds this as a
+  middle ground: the client carries `min_slot` (e.g. its last write's
+  slot), and any replica (including followers) that has applied up to
+  that slot can serve the read. This is similar to etcd's
   `linearizable` vs `serializable` distinction but with a
   per-client freshness guarantee.
 
@@ -292,8 +279,8 @@ group_id)` to find the leader endpoint, regardless of `read_mode`.
 The topology cache is populated from the HTTP management API
 (`/topology`) and updated via `NotLeaderHint` on response errors.
 
-For `ReadYourWrites`, `resolve_client_slot` auto-attaches the
-client's write watermark (`write_watermark`) as `client_slot` if the
+For `MinSlot`, `resolve_min_slot` auto-attaches the
+client's write watermark (`write_watermark`) as `min_slot` if the
 caller did not supply one. This watermark is the highest `revision`
 (slot) the client has observed from its own writes to this group.
 
@@ -316,9 +303,8 @@ linearizable reads only:
 4. On forward failure → fall through to local store (degraded
    read; the store will return `NotLeader` for linearizable mode).
 
-Stale modes (`ReadYourWrites`, `BoundedStale`, `BestEffort`) are
-**never forwarded** — they are served from the local replica
-directly.
+`MinSlot` reads are **never forwarded** — they are served from the
+local replica directly.
 
 ### Engine Read (`KVEngine::get`)
 
@@ -382,16 +368,16 @@ latency, no forward count, no read-mode breakdown.
 
 **Problem**: All `get` RPCs share a single `get.lh` histogram
 regardless of read mode. A linearizable read (which may incur a
-heartbeat round-trip) and a best-effort read (which is a local
-engine lookup) are indistinguishable in the metrics. Operators
-cannot diagnose "linearizable reads are slow because the lease
-keeps expiring" vs "best-effort reads are slow because the engine
+heartbeat round-trip) and a MinSlot read with `min_slot = 0` (which
+is a local engine lookup) are indistinguishable in the metrics.
+Operators cannot diagnose "linearizable reads are slow because the
+lease keeps expiring" vs "MinSlot reads are slow because the engine
 is slow."
 
 **Fix**: Add per-mode latency histograms or a mode-tagged summary.
 Options:
 - (a) Separate histograms: `kv.get.linearizable.lh`,
-  `kv.get.ryw.lh`, `kv.get.bounded_stale.lh`, `kv.get.best_effort.lh`
+  `kv.get.min_slot.lh`
 - (b) Keep one histogram but add per-mode counters so the operator
   can compute per-mode average latency from the summary.
 
@@ -468,16 +454,16 @@ Alternatively, separate per-op-kind bandwidth (get vs scan), but
 this may be excessive. A read-vs-write split is the minimum useful
 hierarchy.
 
-### G7 — No read-your-writes fallback counter
+### G7 — No MinSlot fallback counter
 
-**Problem**: ReadYourWrites reads that cannot be served locally
-(`contiguous_applied < client_slot`) are redirected to the leader.
+**Problem**: MinSlot reads that cannot be served locally
+(`contiguous_applied < min_slot`) are redirected to the leader.
 No counter tracks how often this happens. High fallback counts
 indicate the follower is lagging behind the client's write rate,
 which may signal a replication lag problem.
 
 **Fix**: Add a counter:
-- `s.{sid}.g.{gid}.read.ryw_fallback.c` — ReadYourWrites reads
+- `s.{sid}.g.{gid}.read.minslot_fallback.c` — MinSlot reads
   redirected to leader because local replica hasn't caught up
 
 ### G8 — No read parallelism (client always targets leader)
@@ -488,9 +474,8 @@ follower. This concentrates all read load on the leader, wasting
 follower capacity. Under read-heavy workloads, the leader becomes a
 bottleneck even for stale reads that don't require leadership.
 
-**Fix**: For stale modes (BoundedStale, BestEffort), the client
-could resolve to any replica endpoint, not just the leader. This
-requires:
+**Fix**: For MinSlot reads, the client could resolve to any replica
+endpoint, not just the leader. This requires:
 - Topology cache to expose all replica endpoints, not just the
   leader.
 - A read-endpoint selector (round-robin, least-connection, or
@@ -569,7 +554,7 @@ thinnest-layer latency + bandwidth + counters + gauges):
   to leader (server-side)
 - `s.{sid}.g.{gid}.kv.get_forward_failed.c` — **new** — forward
   attempts that failed
-- `s.{sid}.g.{gid}.read.ryw_fallback.c` — **new** — ReadYourWrites
+- `s.{sid}.g.{gid}.read.minslot_fallback.c` — **new** — MinSlot
   reads redirected to leader
 - `s.{sid}.g.{gid}.kv.errors.c` — **existing** — all KV errors
   (shared)
@@ -598,7 +583,7 @@ Following `design-observability.md`:
   combined bytes_in/out, domain-separated (read vs write traffic).
 - **Counter/Summary Non-Redundancy** — `lease_path.c` and
   `readindex_path.c` are outcome counters (different populations),
-  not redundant with `get.lh` (which carries count). `ryw_fallback.c`
+  not redundant with `get.lh` (which carries count). `minslot_fallback.c`
   is a different outcome (redirected vs served). The forward
   counters are a different population (forwarded vs local).
 - **Gauge** — `lease_valid.g` is a state gauge (can change without

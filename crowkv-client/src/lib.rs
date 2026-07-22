@@ -10,7 +10,7 @@
 //! - **Retry policy** on `NotLeaderHint` / timeout / other errors, reusing
 //!   the same `(client_id, seq)` across retries of one logical write so the
 //!   server's dedup cache can do its job.
-//! - **`ReadMode` routing**, including client-side `ReadYourWrites` slot
+//! - **`ReadMode` routing**, including client-side `MinSlot` slot
 //!   tracking (a bounded per-group high-watermark, not per-key).
 //! - A per-endpoint `tonic::Channel` pool.
 //!

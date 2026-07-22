@@ -168,32 +168,27 @@ async fn read_modes_serve_value_with_slots_on_single_leader() {
         "read_slot should be at the committed frontier"
     );
 
-    // ReadYourWrites (mode 1) with the client's own write slot: the applied
+    // MinSlot (mode 1) with the client's own write slot: the applied
     // frontier has caught up, so it is served locally.
     let ryw = store.kv_get(1, b"rk", 1, revision, 3, 3).await;
     assert!(
         ryw.ok && ryw.value.as_ref() == b"rv",
-        "read-your-writes should hit: {ryw:?}"
+        "min_slot read should hit: {ryw:?}"
     );
 
-    // ReadYourWrites demanding a future slot the replica has not applied yet
+    // MinSlot demanding a future slot the replica has not applied yet
     // is redirected rather than served stale.
     let ryw_future = store.kv_get(1, b"rk", 1, revision + 100, 4, 4).await;
     assert!(
         !ryw_future.ok,
-        "RYW past the applied frontier must not serve locally"
+        "min_slot past the applied frontier must not serve locally"
     );
 
-    // BoundedStale (mode 2) and BestEffort (mode 3) always serve locally.
-    let bounded = store.kv_get(1, b"rk", 2, 0, 5, 5).await;
-    assert!(
-        bounded.ok && bounded.value.as_ref() == b"rv",
-        "bounded-stale read should hit"
-    );
-    let best = store.kv_get(1, b"rk", 3, 0, 6, 6).await;
+    // MinSlot with min_slot = 0 always serves locally (any staleness).
+    let best = store.kv_get(1, b"rk", 1, 0, 5, 5).await;
     assert!(
         best.ok && best.value.as_ref() == b"rv",
-        "best-effort read should hit"
+        "min_slot=0 read should hit"
     );
 }
 

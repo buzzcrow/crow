@@ -212,7 +212,7 @@ async fn kv_get_nodes(nodes: &[&ServerNode], group_id: u64, key: &[u8]) -> Optio
             request_create_ms: 9001,
             group_id,
             read_mode: 0,
-            client_slot: 0,
+            min_slot: 0,
         })
         .await
         .ok()?

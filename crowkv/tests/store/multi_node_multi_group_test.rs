@@ -68,7 +68,7 @@ async fn get_from_group(client: &mut KvServiceClient<Channel>, group_id: u64, ke
             request_create_ms: 9001,
             group_id,
             read_mode: 0,
-            client_slot: 0,
+            min_slot: 0,
         })
         .await
         .ok()?
