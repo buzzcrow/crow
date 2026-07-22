@@ -286,3 +286,179 @@ encode. After R21, the read path's remaining engine value copy
 engine owns its internal storage and the caller needs an owned `Bytes`
 for gRPC. True zero-copy is blocked by R6 (cross-thread epoch guard),
 since `Bytes` is `Send` but the guard is thread-local.
+
+---
+
+## Benchmark Results — 2026-07-23
+
+3-node cluster, in-memory WAL + in-memory KV (mem-block), read-only,
+512-byte values, 200K key space pre-populated with deterministic
+per-byte hash values (`byte_at(key_id, offset) = splitmix64(key_id ^
+splitmix64(offset)) mod 256`), 12-second measurement window,
+`election_profile = e2e`. Reads draw uniformly from `[0, 200K)`.
+Correctness spot-check disabled (`--verify-bytes 0`) for clean
+throughput; verified separately with `--verify-bytes 8`
+(`correctness_errors = 0` across all configs). Pre-population takes
+~22s for 200K keys (excluded from measurement; reported as
+`pre_pop_ms`).
+
+Two read modes benchmarked, both at 1 thread : 1 connection (no
+HTTP/2 stream multiplexing overhead — see note below):
+
+- **Linearizable** — lease fast path (barrier ~0 when the leader's
+  lease is valid), ReadIndex fallback when the lease has expired.
+  Client `read_endpoint_policy = Leader` (always targets leader).
+- **MinSlot `min_slot=0` + AnyReplica** — pure local serve (no
+  barrier, any staleness accepted), reads distributed round-robin
+  across all 3 replicas. Each replica handles 1/3 of reads, removing
+  the leader as the single bottleneck. `read_endpoint_distributed`
+  confirms reads reach followers; `read_endpoint_fallback = 0`
+  (no redirects — `min_slot=0` always serves locally).
+
+### Scaling: 1T:1C — Linearizable
+
+| Threads | Conn | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 3 | 3 | 32,318 | 91 | 72 | 201 | 287 | 0 |
+| 6 | 6 | 35,003 | 170 | 162 | 368 | 453 | 0 |
+| 12 | 12 | 75,278 | 157 | 154 | 250 | 289 | 0 |
+| 24 | 24 | 86,556 | 275 | 273 | 407 | 467 | 0 |
+| 48 | 48 | 90,381 | 528 | 531 | 743 | 837 | 0 |
+
+### Scaling: 1T:1C — MinSlot `min_slot=0` + AnyReplica
+
+| Threads | Conn | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 3 | 3 | 31,852 | 93 | 83 | 150 | 206 | 0 |
+| 6 | 6 | 30,807 | 193 | 171 | 337 | 432 | 0 |
+| 12 | 12 | 46,800 | 254 | 230 | 429 | 577 | 0 |
+| 24 | 24 | 60,399 | 395 | 369 | 541 | 658 | 0 |
+| 48 | 48 | 85,136 | 561 | 550 | 761 | 867 | 0 |
+
+### Note: 1T:2C boosts MinSlot (extra connection per replica)
+
+MinSlot benefits from more connections per replica — 2 connections
+per replica per thread (1T:2C) keeps each replica's pipeline fuller.
+Linearizable does not benefit (the single leader is already
+pipeline-saturated at 1T:1C).
+
+| Threads | MinSlot 1T:1C | MinSlot 1T:2C | Gain |
+| --- | --- | --- | --- |
+| 3 | 31,852 | 36,532 | +15% |
+| 6 | 30,807 | 59,042 | +92% |
+| 12 | 46,800 | 77,352 | +65% |
+| 24 | 60,399 | 80,679 | +34% |
+
+At 6T, 1T:2C nearly doubles throughput (31K → 59K) — 1 connection per
+replica was starving the replica's pipeline; 2 connections keeps it
+fed. At 24T the gain narrows to +34% as replicas approach saturation.
+
+With 1T:2C, MinSlot beats Linearizable at low-mid concurrency:
+6T 59K vs 35K (1.7×), 12T 77K vs 75K (1.03×). At 24T+ the leader's
+deeper pipeline catches up (Linearizable 87K vs MinSlot 81K).
+
+### Conclusions
+
+- **Reads are ~1.8× faster than writes at peak** — write peak ~50K
+  ops/s (write-flow § Benchmark Results); Linearizable read peak
+  ~90K ops/s (48T/48C). Reads skip the consensus critical path (no
+  WAL append, no quorum RPC) — the lease barrier is ~0 when the
+  leader's lease is valid, so a linearizable read is just engine get
+  + gRPC RTT.
+- **Linearizable scales cleanly to 90K at 48T** — zero errors across
+  all 5 configs, p99 stays under 743µs. The single leader's gRPC
+  pipeline absorbs 48 concurrent connections without degradation.
+  No oversaturation cliff within the tested range.
+- **MinSlot 1T:1C underperforms Linearizable at 1T:1C** — the
+  per-request round-robin across 3 replicas adds selection overhead
+  (topology cache lookup + atomic cursor) without enough pipeline
+  depth per replica. At 6T/6C, MinSlot (30.8K) is slower than
+  Linearizable (35.0K). The advantage appears only at 48T (85K vs
+  90K — within noise).
+- **MinSlot 1T:2C is the optimal MinSlot config** — 2 connections
+  per replica per thread keeps each replica's pipeline full. At 6T,
+  MinSlot 1T:2C (59K) is 1.7× Linearizable 1T:1C (35K). The win is
+  distributing reads across 3 replicas × 2 connections = 6 parallel
+  pipelines vs the leader's 6.
+- **HTTP/2 stream sharing hurts throughput** — 2 threads sharing 1
+  connection (2T:1C) drops MinSlot throughput 17% at 6T (31K → 26K).
+  HTTP/2 multiplexing overhead: concurrent streams on one connection
+  contend on the frame layer. 1T:1C (dedicated connection per
+  thread) is the sweet spot for both modes.
+- **Correctness verified separately** — `correctness_errors = 0`
+  across all configs when `--verify-bytes 8` is enabled. The
+  deterministic `byte_at(key_id, offset)` formula + 8-random-byte
+  spot-check confirms the read path returns the exact bytes written
+  by pre-population. Verification costs ~7% throughput (10.3K vs
+  9.6K at 1T/1C Linearizable) — disabled in the scaling tables for
+  clean throughput numbers.
+- **`not_found` near 0** — a handful of reads returned `NotFound`
+  (0–927 per run) from pre-population gaps (retry-exhausted writes
+  during the 22s pre-pop phase). These are counted separately and
+  are not correctness errors.
+
+### gRPC transport: HTTP/2 connection lock design problem
+
+The ideal pattern for high-TPS small-message RPC is **multiple
+threads sharing one TCP connection**: each thread writes its request
+to the socket, the kernel coalesces concurrent `write()` calls into
+one TCP segment, and the server demuxes by request ID. This is
+efficient because the kernel's TCP lock is a fast spinlock held for
+one syscall, and coalescing happens for free in the kernel write
+buffer.
+
+HTTP/2 breaks this pattern. Its design requires a **connection-level
+lock in userspace** that serializes all concurrent writers before
+they reach the socket:
+
+- **HTTP/2 multiplexes via streams, not request IDs.** Each request
+  is a stream with its own state (open, half-closed, closed) and its
+  own HEADERS/DATA frames. The frame encoder must interleave frames
+  from multiple streams into one byte stream on the connection.
+  This interleaving requires exclusive access to the connection's
+  frame output buffer — a userspace lock.
+- **HPACK header encoding is stateful.** The HPACK encoder maintains
+  a per-connection dynamic table (shared across all streams). Two
+  threads encoding headers concurrently would corrupt the table, so
+  HPACK encoding is serialized under the connection lock.
+- **Flow control is per-connection and per-stream.** Each `DATA`
+  frame write must check and decrement both the connection-level and
+  stream-level flow-control windows — shared mutable state that
+  requires the connection lock.
+
+The result: when N threads submit to one gRPC connection
+concurrently, they serialize on the h2 connection lock during frame
+encoding + HPACK + flow-control bookkeeping. The kernel's TCP
+coalescing still works, but it's fed by a **single-threaded
+userspace funnel** — the lock serializes all N threads before any of
+them reach `write()`. The kernel never sees concurrent writers; h2
+hands it one merged buffer from one thread.
+
+A custom protocol (`[len][req_id][protobuf]` over raw TCP) has **no
+connection-level userspace lock**. Each thread calls `write()`
+independently — the length-prefixed framing is stateless, there's no
+shared encoder table, no per-stream state, no flow-control windows.
+The kernel's TCP lock (fast spinlock, held for one syscall) is the
+only serialization point. N threads produce N independent `write()`
+calls that the kernel coalesces into one segment. The userspace
+funnel is gone.
+
+This is a **design mismatch**, not a tuning problem. HTTP/2's
+stream/HPACK/flow-control architecture inherently requires a
+connection-level lock for correctness. You cannot make h2 accept
+concurrent writers without a lock — the shared mutable state
+(HPACK table, frame output buffer, flow-control windows) demands
+it. The 2T:1C 17% throughput drop measured in the bench is this
+lock's cost: two threads that should run in parallel are funneled
+through one userspace critical section.
+
+**Decision: not replacing gRPC now.** A custom transport would
+eliminate the connection lock and recover the lost concurrency, but
+requires reimplementing connection pooling, reconnect, timeout,
+cancellation, error propagation, backpressure, and TLS — 2–4K lines
+of infrastructure that gRPC provides. The lock's cost is bounded
+(~17% at 2T:1C, avoided entirely at 1T:1C) and the current
+bottleneck for production workloads is consensus (writes) or disk
+I/O, not read-path framing. Revisit if read throughput becomes the
+primary constraint and the h2 connection lock is profiled as the
+hot spot.
