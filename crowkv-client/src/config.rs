@@ -40,6 +40,26 @@ impl Default for RetryConfig {
     }
 }
 
+/// Read-endpoint selection policy for `MinSlot` reads. Linearizable
+/// reads always target the leader regardless of this setting (they must,
+/// for correctness); the policy only affects how a `MinSlot` read's
+/// first endpoint is chosen.
+///
+/// - `Leader` (default) — preserve the historical behavior: every read
+///   starts at the cached leader endpoint. Backward compatible and
+///   linearizable-safe.
+/// - `AnyReplica` — `MinSlot` reads are distributed round-robin across
+///   all replica endpoints the topology cache knows for the group. If a
+///   chosen follower has not applied `min_slot`, the server returns a
+///   `NotLeader` hint pointing at the leader and the client follows it
+///   for that one request (mirroring the existing retry path).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ReadEndpointPolicy {
+    #[default]
+    Leader,
+    AnyReplica,
+}
+
 /// Top-level client configuration.
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
@@ -57,6 +77,10 @@ pub struct ClientConfig {
     /// fetch.
     pub topology_min_refresh_interval: Duration,
     pub retry: RetryConfig,
+    /// How `MinSlot` reads pick their first endpoint. See
+    /// [`ReadEndpointPolicy`]. Default `Leader` preserves the pre-R26
+    /// behavior; `AnyReplica` enables follower read distribution.
+    pub read_endpoint_policy: ReadEndpointPolicy,
 }
 
 impl ClientConfig {
@@ -67,6 +91,7 @@ impl ClientConfig {
             pool_size_per_endpoint: 1,
             topology_min_refresh_interval: Duration::from_millis(200),
             retry: RetryConfig::default(),
+            read_endpoint_policy: ReadEndpointPolicy::default(),
         }
     }
 }
