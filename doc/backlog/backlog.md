@@ -71,16 +71,6 @@ complexity, and dependency. Before implementation, follow the
   reasonable (lease path ~0 barrier, MinSlot local serve,
   correctness_errors = 0), (2) scale sweep to find max TPS per read
   mode. Depends on R19 for diagnostic depth.
-- **[R29](R29-lagging-follower-e2e.md)** — Lagging-follower e2e for MinSlot fallback — Area: client
-  test — R26's `AnyReplica` follower-read distribution includes a
-  `NotLeader`-hint fallback when a chosen follower hasn't applied
-  `min_slot`, but the existing 2-node e2e cluster can't trigger it
-  (the follower applies on accept before the leader reaches quorum).
-  Add a 3-node cluster with a non-voting learner whose
-  `contiguous_applied` stays 0, giving deterministic end-to-end
-  coverage of: distributed read → lagging follower → NotLeader redirect
-  → leader retry → read succeeds → `read_endpoint_fallback` increments.
-  Test-only; depends on R26.
 
 ### Low Priority
 
