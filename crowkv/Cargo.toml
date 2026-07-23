@@ -36,6 +36,7 @@ tracing = { workspace = true }
 tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true }
 flate2 = { workspace = true }
+pin-project-lite = { workspace = true }
 utoipa = "5"
 crc32c = "0.6"
 crowtree-ffi = { path = "../crowtree/ffi" }

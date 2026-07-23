@@ -37,6 +37,7 @@ tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 thiserror = "2"
 flate2 = "1"
+pin-project-lite = "0.2"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

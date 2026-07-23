@@ -614,6 +614,7 @@ dependencies = [
  "flate2",
  "futures",
  "parking_lot",
+ "pin-project-lite",
  "prost",
  "serde",
  "serde_json",
