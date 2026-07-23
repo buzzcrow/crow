@@ -34,7 +34,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::OnceCell;
-use tonic::transport::Channel;
+use tonic::transport::{Channel, Endpoint};
 use tracing::{debug, info};
 
 #[derive(Debug)]
@@ -399,10 +399,13 @@ impl PxRemoteReplica {
     async fn get_client(&self) -> Result<&PxServiceClient<Channel>, tonic::Status> {
         self.grpc_client
             .get_or_try_init(|| async {
-                PxServiceClient::connect(format!("http://{}", self.endpoint))
+                let ch = Endpoint::from_shared(format!("http://{}", self.endpoint))
+                    .map_err(|e| tonic::Status::unavailable(e.to_string()))?
+                    .tcp_nodelay(true)
+                    .connect()
                     .await
-                    .map_err(|e| tonic::Status::unavailable(e.to_string()))
-                    .map(Box::new)
+                    .map_err(|e| tonic::Status::unavailable(e.to_string()))?;
+                Ok(Box::new(PxServiceClient::new(ch)))
             })
             .await
             .map(std::convert::AsRef::as_ref)
