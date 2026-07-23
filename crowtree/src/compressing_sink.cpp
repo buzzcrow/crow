@@ -29,7 +29,7 @@ static std::string utc_timestamp_secs()
     const auto now = std::time(nullptr);
     std::tm    tm_buf{};
     gmtime_r(&now, &tm_buf);
-    std::array<char, 16> buf{};
+    std::array<char, 128> buf{};
     std::snprintf(buf.data(), buf.size(), "%04d%02d%02d-%02d%02d%02d", tm_buf.tm_year + 1900, tm_buf.tm_mon + 1,
                   tm_buf.tm_mday, tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
     return {buf.data()};
