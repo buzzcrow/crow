@@ -190,7 +190,7 @@ async fn kv_put(
     assert!(resp.ok, "kv put failed: {}", resp.error);
 }
 
-/// Local (non-forwarded, `read_mode: BEST_EFFORT`) get against whichever
+/// Local (non-forwarded, `read_mode: MIN_SLOT`) get against whichever
 /// node `kv` is connected to -- works regardless of that node's
 /// voting/leadership status (unlike the default `LINEARIZABLE` mode, which
 /// redirects a non-leader to the leader), which is what lets this test
@@ -211,8 +211,8 @@ async fn kv_get_local_until(
                 request_id: req_id,
                 request_create_ms: req_id,
                 group_id,
-                read_mode: 3, // BEST_EFFORT
-                client_slot: 0,
+                read_mode: 1, // MIN_SLOT
+                min_slot: 0,
             })
             .await
             .expect("kv get rpc")

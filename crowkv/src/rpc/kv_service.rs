@@ -88,6 +88,10 @@ struct KvMetrics {
     bytes_out_bw: Arc<Bandwidth>,
     errors_c: Arc<Counter>,
     no_leader_c: Arc<Counter>,
+    read_bytes_in_bw: Arc<Bandwidth>,
+    read_bytes_out_bw: Arc<Bandwidth>,
+    get_forwarded_c: Arc<Counter>,
+    get_forward_failed_c: Arc<Counter>,
 }
 
 impl KvMetrics {
@@ -102,6 +106,42 @@ impl KvMetrics {
             bytes_out_bw: registry.register_bandwidth(format!("{prefix}.kv.bytes_out.bw")),
             errors_c: registry.register_counter(format!("{prefix}.kv.errors.c")),
             no_leader_c: registry.register_counter(format!("{prefix}.kv.no-leader.c")),
+            read_bytes_in_bw: registry.register_bandwidth(format!("{prefix}.kv.read_bytes_in.bw")),
+            read_bytes_out_bw: registry.register_bandwidth(format!("{prefix}.kv.read_bytes_out.bw")),
+            get_forwarded_c: registry.register_counter(format!("{prefix}.kv.get_forwarded.c")),
+            get_forward_failed_c: registry.register_counter(format!("{prefix}.kv.get_forward_failed.c")),
+        }
+    }
+
+    /// Record get latency, bandwidth (combined + read-separated), and
+    /// error counters for one get response.
+    fn record_get(&self, elapsed_ns: u64, req_size: u64, resp: &KvResponse) {
+        self.get_lh.observe(elapsed_ns);
+        self.bytes_in_bw.observe(req_size);
+        self.bytes_out_bw.observe(resp.value.len() as u64);
+        self.read_bytes_in_bw.observe(req_size);
+        self.read_bytes_out_bw.observe(resp.value.len() as u64);
+        if !resp.ok {
+            self.errors_c.inc();
+            if resp.error == "not leader" {
+                self.no_leader_c.inc();
+            }
+        }
+    }
+
+    /// Record scan latency, bandwidth (combined + read-separated), and
+    /// error counters for one scan response.
+    fn record_scan(&self, elapsed_ns: u64, req_size: u64, resp_size: u64, resp: &KvScanResponse) {
+        self.scan_l.observe(elapsed_ns);
+        self.bytes_in_bw.observe(req_size);
+        self.bytes_out_bw.observe(resp_size);
+        self.read_bytes_in_bw.observe(req_size);
+        self.read_bytes_out_bw.observe(resp_size);
+        if !resp.ok {
+            self.errors_c.inc();
+            if resp.error == "not leader" {
+                self.no_leader_c.inc();
+            }
         }
     }
 }
@@ -204,10 +244,10 @@ impl KvService for KvStoreService {
         let start = Instant::now();
 
         // Transparent leader-forward: only linearizable reads are forwarded
-        // to the leader; the stale read modes (`READ_YOUR_WRITES`,
-        // `BOUNDED_STALE`, `BEST_EFFORT`) are deliberately served from the
-        // local replica without a hop. The loop-guard header makes the
-        // linearizable hop at-most-once.
+        // to the leader; `MinSlot` reads are deliberately served from the
+        // local replica without a hop (the response carries a `NotLeader`
+        // hint if the local frontier has not caught up). The loop-guard
+        // header makes the linearizable hop at-most-once.
         let linearizable = req.read_mode == crate::rpc::ReadMode::Linearizable as i32;
         if linearizable && !already_forwarded {
             if let Some(endpoint) = self.store.forward_target_for(req.group_id) {
@@ -221,15 +261,8 @@ impl KvService for KvStoreService {
                             "kv get forwarded to leader"
                         );
                         if let Some(m) = self.metrics_for(req.group_id) {
-                            m.get_lh.observe(start.elapsed().as_nanos() as u64);
-                            m.bytes_in_bw.observe(req_size as u64);
-                            m.bytes_out_bw.observe(resp.value.len() as u64);
-                            if !resp.ok {
-                                m.errors_c.inc();
-                                if resp.error == "not leader" {
-                                    m.no_leader_c.inc();
-                                }
-                            }
+                            m.record_get(start.elapsed().as_nanos() as u64, req_size as u64, &resp);
+                            m.get_forwarded_c.inc();
                         }
                         resp.request_id = req.request_id;
                         resp.request_create_ms = req.request_create_ms;
@@ -250,21 +283,14 @@ impl KvService for KvStoreService {
                                 req.group_id,
                                 &req.key,
                                 req.read_mode,
-                                req.client_slot,
+                                req.min_slot,
                                 req.request_id,
                                 req.request_create_ms,
                             )
                             .await;
                         if let Some(m) = self.metrics_for(req.group_id) {
-                            m.get_lh.observe(start.elapsed().as_nanos() as u64);
-                            m.bytes_in_bw.observe(req_size as u64);
-                            m.bytes_out_bw.observe(resp.value.len() as u64);
-                            if !resp.ok {
-                                m.errors_c.inc();
-                                if resp.error == "not leader" {
-                                    m.no_leader_c.inc();
-                                }
-                            }
+                            m.record_get(start.elapsed().as_nanos() as u64, req_size as u64, &resp);
+                            m.get_forward_failed_c.inc();
                         }
                         resp.not_leader_hint = endpoint;
                         resp.request_id = req.request_id;
@@ -281,21 +307,13 @@ impl KvService for KvStoreService {
                 req.group_id,
                 &req.key,
                 req.read_mode,
-                req.client_slot,
+                req.min_slot,
                 req.request_id,
                 req.request_create_ms,
             )
             .await;
         if let Some(m) = self.metrics_for(req.group_id) {
-            m.get_lh.observe(start.elapsed().as_nanos() as u64);
-            m.bytes_in_bw.observe(req_size as u64);
-            m.bytes_out_bw.observe(resp.value.len() as u64);
-            if !resp.ok {
-                m.errors_c.inc();
-                if resp.error == "not leader" {
-                    m.no_leader_c.inc();
-                }
-            }
+            m.record_get(start.elapsed().as_nanos() as u64, req_size as u64, &resp);
         }
         resp.request_id = req.request_id;
         resp.request_create_ms = req.request_create_ms;
@@ -373,7 +391,8 @@ impl KvService for KvStoreService {
         );
 
         // Transparent leader-forward, mirroring `get`: only linearizable
-        // scans hop to the leader; stale modes serve from the local replica.
+        // scans hop to the leader; min_slot scans serve from the local
+        // replica.
         let linearizable = req.read_mode == crate::rpc::ReadMode::Linearizable as i32;
         if linearizable && !already_forwarded {
             if let Some(endpoint) = self.store.forward_target_for(req.group_id) {
@@ -387,15 +406,13 @@ impl KvService for KvStoreService {
                             "kv scan forwarded to leader"
                         );
                         if let Some(m) = self.metrics_for(req.group_id) {
-                            m.scan_l.observe(start.elapsed().as_nanos() as u64);
-                            m.bytes_in_bw.observe(req_size as u64);
-                            m.bytes_out_bw.observe(scan_response_size(&resp));
-                            if !resp.ok {
-                                m.errors_c.inc();
-                                if resp.error == "not leader" {
-                                    m.no_leader_c.inc();
-                                }
-                            }
+                            let resp_size = scan_response_size(&resp);
+                            m.record_scan(
+                                start.elapsed().as_nanos() as u64,
+                                req_size as u64,
+                                resp_size,
+                                &resp,
+                            );
                         }
                         resp.request_id = req.request_id;
                         resp.request_create_ms = req.request_create_ms;
@@ -427,20 +444,19 @@ impl KvService for KvStoreService {
                 &req.start_after,
                 req.limit,
                 req.read_mode,
+                req.min_slot,
                 req.request_id,
                 req.request_create_ms,
             )
             .await;
         if let Some(m) = self.metrics_for(req.group_id) {
-            m.scan_l.observe(start.elapsed().as_nanos() as u64);
-            m.bytes_in_bw.observe(req_size as u64);
-            m.bytes_out_bw.observe(scan_response_size(&resp));
-            if !resp.ok {
-                m.errors_c.inc();
-                if resp.error == "not leader" {
-                    m.no_leader_c.inc();
-                }
-            }
+            let resp_size = scan_response_size(&resp);
+            m.record_scan(
+                start.elapsed().as_nanos() as u64,
+                req_size as u64,
+                resp_size,
+                &resp,
+            );
         }
         if !resp.ok {
             warn!(

@@ -16,4 +16,4 @@ pub mod workload;
 pub use provision::{BenchFixture, BenchMode};
 pub use report::BenchReport;
 pub use runner::{run_bench, BenchConfig};
-pub use workload::WorkloadKind;
+pub use workload::{MinSlotPolicy, WorkloadKind};

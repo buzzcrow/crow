@@ -10,7 +10,7 @@
 //! - **Retry policy** on `NotLeaderHint` / timeout / other errors, reusing
 //!   the same `(client_id, seq)` across retries of one logical write so the
 //!   server's dedup cache can do its job.
-//! - **`ReadMode` routing**, including client-side `ReadYourWrites` slot
+//! - **`ReadMode` routing**, including client-side `MinSlot` slot
 //!   tracking (a bounded per-group high-watermark, not per-key).
 //! - A per-endpoint `tonic::Channel` pool.
 //!
@@ -25,7 +25,7 @@ mod pool;
 mod topology;
 
 pub use client::{BatchOp, CrowkvClient, GetOutcome, ScanOutcome, WriteOutcome};
-pub use config::{ClientConfig, RetryConfig};
+pub use config::{ClientConfig, ReadEndpointPolicy, RetryConfig};
 pub use error::{Error, Result};
 pub use metrics::{ClientMetrics, ClientMetricsSnapshot, LeaderChangeEpisode, WindowLatencySnapshot};
 

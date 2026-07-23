@@ -112,7 +112,7 @@ async fn graceful_shutdown_under_load() {
                     request_create_ms: 9001 + idx,
                     group_id: 1,
                     read_mode: 0,
-                    client_slot: 0,
+                    min_slot: 0,
                 })
                 .await
                 .expect("get rpc")

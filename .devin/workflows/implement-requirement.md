@@ -2,13 +2,17 @@
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ---
-description: Lifecycle for implementing requirement items from doc/working/new_requirements.md
+description: Lifecycle for implementing requirement items from doc/backlog/backlog.md
 ---
 
 # CrowKV - Implement Requirement Flow
 
 Use this workflow when picking up an item from
-`doc/working/new_requirements.md`. Each item follows the full lifecycle below.
+`doc/backlog/backlog.md`. The index lists each requirement
+(`R**`) with a brief intro and a link to its detail doc
+(`doc/backlog/R**-<topic>.md`). Open the matched detail doc for the
+full problem/approach/files/acceptance analysis. Each item follows the
+full lifecycle below.
 
 ## Lifecycle
 
@@ -37,9 +41,11 @@ Use this workflow when picking up an item from
                    to (e.g. design-crowtree-engine.md, design-wal.md), following
                    that doc's style and detail level. Delete the standalone
                    working/design-<topic>.md.
-8. Cleanup       → Remove the item entirely from new_requirements.md (both
-                   Item Index entry and Detailed Analysis section), delete
-                   plan-<topic>.md and design-<topic>.md
+8. Cleanup       → Delete the requirement's detail doc
+                   `doc/backlog/R**-<topic>.md` and remove its entry
+                   from the Item Index in
+                   `doc/backlog/backlog.md`. Delete
+                   plan-<topic>.md and design-<topic>.md.
                    → Commit cleanup (second and final commit)
 9. Local CI check → Run the GitHub CI Test job steps locally to verify
                    they pass before pushing:
@@ -115,6 +121,7 @@ The workflow produces at least **two commits** per requirement:
    implementation commit includes the design draft and plan doc, preserving
    the full working state in git history.
 2. **Cleanup commit** (after Step 7) — merged design doc, deletion of
-   working docs, item removed from new_requirements.md.
+   working docs, deletion of `R**-<topic>.md` and its index entry in
+   `backlog.md`.
 
 All commits must pass the pre-commit quality gate (fmt, clippy, tests).

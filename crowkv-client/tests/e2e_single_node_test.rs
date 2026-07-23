@@ -5,7 +5,7 @@
 //! (no mocks): topology discovery over a small `/topology` HTTP server
 //! backed by the store's real `status`, then `put`/`get`/`delete`/
 //! `batch_write`/`scan` through [`crowkv_client::CrowkvClient`], covering
-//! `ReadMode` routing and the `ReadYourWrites` watermark
+//! `ReadMode` routing and the `MinSlot` watermark
 //! (C1-C3).
 
 use std::sync::Arc;
@@ -86,7 +86,7 @@ async fn put_get_delete_round_trip_via_topology_discovery() {
     );
 
     match client
-        .get(STORE_ID, GROUP_ID, b"k1", ReadMode::BestEffort, None)
+        .get(STORE_ID, GROUP_ID, b"k1", ReadMode::MinSlot, None)
         .await
         .unwrap()
     {
@@ -123,7 +123,7 @@ async fn batch_write_and_scan() {
         .expect("batch_write");
 
     let scanned = client
-        .scan(STORE_ID, GROUP_ID, b"a", &[], 0, ReadMode::BestEffort)
+        .scan(STORE_ID, GROUP_ID, b"a", &[], 0, ReadMode::MinSlot, None)
         .await
         .expect("scan");
     assert_eq!(scanned.items.len(), 2);
@@ -147,10 +147,10 @@ async fn read_your_writes_uses_auto_tracked_watermark() {
         .expect("put");
     assert_eq!(client.read_your_writes_slot(STORE_ID, GROUP_ID), write.revision);
 
-    // No explicit `client_slot` -- the client auto-attaches its own
-    // last-write watermark for `ReadYourWrites`.
+    // No explicit `min_slot` -- the client auto-attaches its own
+    // last-write watermark for `MinSlot`.
     match client
-        .get(STORE_ID, GROUP_ID, b"session:42", ReadMode::ReadYourWrites, None)
+        .get(STORE_ID, GROUP_ID, b"session:42", ReadMode::MinSlot, None)
         .await
         .unwrap()
     {

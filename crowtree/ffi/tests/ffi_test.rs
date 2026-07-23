@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 // PT8.5: C ABI / Rust integration tests through the safe adapter.
-use crowtree_ffi::{AsyncCrowtree, BatchOp, Crowtree, CtError, Options, PageStoreBackend};
+use crowtree_ffi::{AsyncCrowtree, BatchOp, Crowtree, CtError, Options, PageStoreBackend, PinnedGetOutcome};
 
 fn key(i: usize) -> Vec<u8> {
     format!("key{i:05}").into_bytes()
@@ -432,4 +432,86 @@ async fn async_scan_respects_limit_and_truncated_flag() {
     let (entries, truncated) = t.scan(Vec::new(), 5).await.unwrap();
     assert_eq!(entries.len(), 5);
     assert!(truncated);
+}
+
+#[tokio::test]
+async fn try_get_pinned_fast_path_returns_borrowed_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let opt = Options {
+        path: Some(dir.path().to_string_lossy().into_owned()),
+        iu_size: 1,
+        frame_bytes: 4096,
+        ..Default::default()
+    };
+    let t = AsyncCrowtree::open(&opt).unwrap();
+    t.apply_put(1, key(0), b"v0".to_vec()).await.unwrap();
+    t.flush().await.unwrap();
+
+    match t.try_get_pinned(&key(0)) {
+        PinnedGetOutcome::Ready(Ok(Some((slot, pinned)))) => {
+            assert_eq!(slot, 1);
+            assert_eq!(pinned.as_bytes(), b"v0");
+        }
+        _ => panic!("expected Ready(Ok(Some)) on resident hit"),
+    }
+
+    // Not-found case: should return Ready(Ok(None)).
+    match t.try_get_pinned(&key(99)) {
+        PinnedGetOutcome::Ready(Ok(None)) => {}
+        _ => panic!("expected Ready(Ok(None)) for missing key"),
+    }
+}
+
+#[tokio::test]
+async fn try_get_pinned_slow_path_resolves_after_eviction() {
+    let dir = tempfile::tempdir().unwrap();
+    let opt = Options {
+        path: Some(dir.path().to_string_lossy().into_owned()),
+        iu_size: 1,
+        frame_bytes: 4096,
+        ..Default::default()
+    };
+    let t = AsyncCrowtree::open(&opt).unwrap();
+    t.apply_put(1, key(0), b"v0".to_vec()).await.unwrap();
+    t.flush().await.unwrap();
+    t.snapshot().await.unwrap();
+    t.handle().evict_clean_leaves(0);
+
+    // On builds without io_uring (e.g. macOS), ct_get_async completes
+    // synchronously even after eviction (sync fallback), so both Ready
+    // and Pending are valid outcomes — either way the value must be correct.
+    match t.try_get_pinned(&key(0)) {
+        PinnedGetOutcome::Ready(Ok(Some((slot, pinned)))) => {
+            assert_eq!(slot, 1);
+            assert_eq!(pinned.as_bytes(), b"v0");
+        }
+        PinnedGetOutcome::Pending(fut) => {
+            let result = fut.await.unwrap();
+            assert_eq!(result, Some((1u64, b"v0".to_vec())));
+        }
+        _ => panic!("expected Ok(Some) or Pending for evicted key"),
+    }
+}
+
+#[tokio::test]
+async fn try_get_pinned_fast_path_with_large_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let opt = Options {
+        path: Some(dir.path().to_string_lossy().into_owned()),
+        iu_size: 1,
+        frame_bytes: 4096,
+        ..Default::default()
+    };
+    let t = AsyncCrowtree::open(&opt).unwrap();
+    let large: Vec<u8> = (0..4096u32).map(|i| u8::try_from(i % 256).unwrap()).collect();
+    t.apply_put(1, key(0), large.clone()).await.unwrap();
+    t.flush().await.unwrap();
+
+    match t.try_get_pinned(&key(0)) {
+        PinnedGetOutcome::Ready(Ok(Some((slot, pinned)))) => {
+            assert_eq!(slot, 1);
+            assert_eq!(pinned.as_bytes(), large.as_slice());
+        }
+        _ => panic!("expected Ready(Ok(Some)) on resident hit"),
+    }
 }

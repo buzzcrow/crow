@@ -44,6 +44,7 @@ ui e2e     (Playwright browser: SPA + real backend)                <- crowkv-con
 | `crowkv/tests/group.rs` | group | `PxGroup` multi-node clusters (real loopback gRPC, no mocks) | `cluster/{group,group_election,remote_replica,learner_stream}.rs` |
 | `crowkv/tests/store.rs` | store | `PxKvStore` routing / lifecycle / status / health | `cluster/{px_kv_store,kv_store,kv_server,status}.rs` |
 | `crowkv-server/tests/*` | deployment | server binary + HTTP API, multi-process clusters, CLI, startup | `crowkv-server/src/*` |
+| `crowkv-client/tests/*` | client e2e | `CrowkvClient` retry, topology cache, `NotLeaderHint` follow, `AnyReplica` read distribution + fallback against embedded gRPC servers | `crowkv-client/src/*` |
 | `crowkv-console/web/tests/*` | console mgmt API | Axum REST API server: node management, OpenAPI proxy, API forwarding | `crowkv-console/web/src/*` |
 | `crowkv-console/{shared,cli}/tests/*` | console mgmt API | shared core (config, API client, health aggregation) + CLI commands | `crowkv-console/{shared,cli}/src/*` |
 | `crowkv-console/cli/tests/bench_benchmark.rs` | benchmark | `bench benchmark` lifecycle (deploy → run → collect → report → cleanup) + `bench compare` | `crowkv-console/cli/src/bench/*` |
@@ -363,6 +364,34 @@ lifecycle correctly across all groups.
 - Per-group isolation: no cross-group slot/key bleed, independent WAL roots.
 - Topology: `status` composition is correct, `health` levels reflect group
   states, `shutdown` cascades to all groups and is idempotent.
+
+### Client Library E2E
+
+**Scope:** `CrowkvClient` behavior against embedded `PxKvStore` gRPC
+servers — retry, topology cache refresh, `NotLeaderHint` follow,
+`AnyReplica` read-endpoint distribution, and the `MinSlot` lagging-follower
+fallback. Tests bind real loopback gRPC endpoints and drive the public
+client API; no `crowkv-server` binary is booted.
+
+**Source:** `crowkv-client/tests/*`.
+
+**Lagging-follower harness (R29):** to exercise the `AnyReplica`
+`MinSlot` fallback end-to-end (distributed read → lagging follower →
+`NotLeader` redirect → leader retry → `read_endpoint_fallback`
+increments), a 3-node cluster stands up A (leader, voting), B (follower,
+voting), and C (non-voting lagging learner). C is **not** wired as a
+remote on A's group: the accept and chosen-notice fan-out
+(`group.rs::run_accept_phase`, `fan_out_chosen_notice`) sends to every
+real remote regardless of the `voting` flag, and `on_accept` applies via
+`learn_chosen` directly — so a non-voting C wired on A would still apply
+and would not lag. Keeping C off A's remote list makes it
+deterministically lag (`contiguous_applied` stays 0), mirroring a real
+learner catching up via snapshot + WAL tail outside the accept fan-out.
+C's election driver is disabled (`add_group_without_election`) so the
+non-voting follower does not time out and spin up elections. A
+hand-crafted `/topology` (A's real `status()` with C appended to group
+1's remotes) exposes all three endpoints to the `AnyReplica` selector so
+reads round-robin over `[A, B, C]` and deterministically hit C.
 
 ### Deployment Layer
 

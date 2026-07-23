@@ -20,7 +20,7 @@ use crowkv::rpc::{
     ReadMode,
 };
 
-use crate::config::{ClientConfig, RetryConfig};
+use crate::config::{ClientConfig, ReadEndpointPolicy, RetryConfig};
 use crate::error::{Error, Result};
 use crate::metrics::ClientMetrics;
 use crate::pool::ConnectionPool;
@@ -57,7 +57,7 @@ pub enum BatchOp {
 /// Standalone `CrowKV` client: topology discovery over the HTTP management
 /// API, per-group leader cache, retry loop reusing `(client_id, seq)` across
 /// retries of one logical write, and `ReadMode` routing including
-/// `ReadYourWrites` client-side slot tracking.
+/// `MinSlot` client-side slot tracking.
 pub struct CrowkvClient {
     topology: TopologyCache,
     pool: ConnectionPool,
@@ -66,10 +66,19 @@ pub struct CrowkvClient {
     next_seq: AtomicU64,
     metrics: Arc<ClientMetrics>,
     /// Per-`(store_id, group_id)` high-watermark of the last write's
-    /// `revision`, auto-attached as `client_slot` on `ReadYourWrites` reads.
+    /// `revision`, auto-attached as `min_slot` on `MinSlot` reads.
     /// Bounded by the number of groups this client has written to, not by
     /// keyspace size.
     write_watermark: DashMap<(u64, u64), u64>,
+    /// `MinSlot` read-endpoint selection policy. `Leader` (default)
+    /// preserves the pre-R26 behavior; `AnyReplica` distributes `MinSlot`
+    /// reads round-robin across the topology cache's replica list.
+    /// Linearizable reads always target the leader regardless of this.
+    read_endpoint_policy: ReadEndpointPolicy,
+    /// Per-`(store_id, group_id)` round-robin cursor for the
+    /// `AnyReplica` `MinSlot` selector. Lock-free `fetch_add`; one entry
+    /// per group the client has read from.
+    read_rr: DashMap<(u64, u64), AtomicU64>,
 }
 
 impl CrowkvClient {
@@ -83,6 +92,8 @@ impl CrowkvClient {
             next_seq: AtomicU64::new(1),
             metrics: Arc::new(ClientMetrics::default()),
             write_watermark: DashMap::new(),
+            read_endpoint_policy: config.read_endpoint_policy,
+            read_rr: DashMap::new(),
         }
     }
 
@@ -182,6 +193,48 @@ impl CrowkvClient {
         }
     }
 
+    /// Pick the first endpoint for a read. Linearizable reads always
+    /// resolve to the leader (correctness: only the leader can prove a
+    /// linearizable read is fresh). `MinSlot` reads under the `Leader`
+    /// policy also resolve to the leader (backward-compatible default).
+    /// `MinSlot` reads under `AnyReplica` round-robin across the
+    /// topology cache's replica list for the group; if no replica list
+    /// is known (cache miss) the client refreshes `/topology` once and
+    /// retries, falling back to the leader if still unknown — a
+    /// single-replica group or a stale `/topology` never blocks reads.
+    async fn resolve_read_endpoint(
+        &self,
+        store_id: u64,
+        group_id: u64,
+        read_mode: ReadMode,
+    ) -> Result<String> {
+        if read_mode == ReadMode::Linearizable || self.read_endpoint_policy == ReadEndpointPolicy::Leader {
+            return self.resolve_leader(store_id, group_id).await;
+        }
+        // `MinSlot` + `AnyReplica`: pick a replica round-robin.
+        if self.topology.replicas(store_id, group_id).is_none() {
+            self.metrics.record_topology_refresh();
+            let _ = self.topology.refresh().await;
+        }
+        let replicas = match self.topology.replicas(store_id, group_id) {
+            Some(r) if !r.is_empty() => r,
+            _ => {
+                // No replica list available (single-replica group, or
+                // every seed unreachable): fall back to the leader
+                // rather than failing the read.
+                return self.resolve_leader(store_id, group_id).await;
+            }
+        };
+        let cursor = self
+            .read_rr
+            .entry((store_id, group_id))
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_add(1, Ordering::Relaxed);
+        let idx = (cursor as usize) % replicas.len();
+        self.metrics.record_read_endpoint_distributed();
+        Ok(replicas[idx].clone())
+    }
+
     fn record_write(&self, store_id: u64, group_id: u64, revision: u64) {
         self.write_watermark
             .entry((store_id, group_id))
@@ -189,7 +242,7 @@ impl CrowkvClient {
             .or_insert(revision);
     }
 
-    /// Cached `client_slot` for `ReadYourWrites` reads against this group:
+    /// Cached `min_slot` for `MinSlot` reads against this group:
     /// the highest `revision` this client has observed from its own writes,
     /// or `0` if it has never written to this group.
     #[must_use]
@@ -288,10 +341,10 @@ impl CrowkvClient {
         group_id: u64,
         key: &[u8],
         read_mode: ReadMode,
-        client_slot: Option<u64>,
+        min_slot: Option<u64>,
     ) -> Result<GetOutcome> {
-        let client_slot = self.resolve_client_slot(store_id, group_id, read_mode, client_slot);
-        let mut endpoint = self.resolve_leader(store_id, group_id).await?;
+        let min_slot = self.resolve_min_slot(store_id, group_id, read_mode, min_slot);
+        let mut endpoint = self.resolve_read_endpoint(store_id, group_id, read_mode).await?;
         let mut attempts = 0u32;
         let mut backoff = self.retry.backoff_base;
         loop {
@@ -302,7 +355,7 @@ impl CrowkvClient {
                 request_create_ms: now_ms(),
                 group_id,
                 read_mode: read_mode as i32,
-                client_slot,
+                min_slot,
             };
             let channel = self.pool.get(&endpoint)?;
             let t0 = Instant::now();
@@ -326,6 +379,16 @@ impl CrowkvClient {
                         self.metrics.on_leader_error(store_id, group_id, &endpoint);
                         self.metrics
                             .on_leader_resolved(store_id, group_id, &new_endpoint, "not_leader_hint");
+                        // A `MinSlot` read distributed to a follower
+                        // that hasn't applied `min_slot` redirects to
+                        // the leader here — count the distribution
+                        // fallback so operators can confirm the rate
+                        // stays low.
+                        if read_mode == ReadMode::MinSlot
+                            && self.read_endpoint_policy == ReadEndpointPolicy::AnyReplica
+                        {
+                            self.metrics.record_read_endpoint_fallback();
+                        }
                         endpoint = new_endpoint;
                         continue;
                     }
@@ -518,6 +581,7 @@ impl CrowkvClient {
     ///
     /// # Errors
     /// See [`Error`].
+    #[allow(clippy::too_many_arguments)]
     pub async fn scan(
         &self,
         store_id: u64,
@@ -526,8 +590,10 @@ impl CrowkvClient {
         start_after: &[u8],
         limit: u32,
         read_mode: ReadMode,
+        min_slot: Option<u64>,
     ) -> Result<ScanOutcome> {
-        let mut endpoint = self.resolve_leader(store_id, group_id).await?;
+        let min_slot = self.resolve_min_slot(store_id, group_id, read_mode, min_slot);
+        let mut endpoint = self.resolve_read_endpoint(store_id, group_id, read_mode).await?;
         let mut attempts = 0u32;
         let mut backoff = self.retry.backoff_base;
         loop {
@@ -540,6 +606,7 @@ impl CrowkvClient {
                 request_create_ms: now_ms(),
                 group_id,
                 read_mode: read_mode as i32,
+                min_slot,
             };
             let channel = self.pool.get(&endpoint)?;
             let t0 = Instant::now();
@@ -559,9 +626,23 @@ impl CrowkvClient {
                         });
                     }
                     self.metrics.record_scan_error();
-                    // `KvScanResponse` carries no `NotLeaderHint` (server-side
-                    // forwarding already handles linearizable scans; other
-                    // modes never need a leader) — any `!ok` is a plain error.
+                    // `KvScanResponse` carries no dedicated
+                    // `not_leader_hint` field; the server encodes a
+                    // `MinSlot` redirect as
+                    // `"not leader; retry scan at {endpoint}"`. Follow
+                    // it to the leader (uncounted, mirroring the `get`
+                    // path) so a distributed `MinSlot` scan against a
+                    // follower that hasn't applied `min_slot` falls
+                    // back rather than being treated as a plain error.
+                    if let Some(new_endpoint) = Self::follow_scan_not_leader(&resp.error) {
+                        if read_mode == ReadMode::MinSlot
+                            && self.read_endpoint_policy == ReadEndpointPolicy::AnyReplica
+                        {
+                            self.metrics.record_read_endpoint_fallback();
+                        }
+                        endpoint = new_endpoint;
+                        continue;
+                    }
                     attempts = self.count_other(attempts, &resp.error)?;
                 }
                 Err(status) => {
@@ -579,19 +660,19 @@ impl CrowkvClient {
         }
     }
 
-    /// `ReadYourWrites` auto-attaches this client's own last-write watermark
-    /// for the group unless the caller already supplied a `client_slot`.
-    fn resolve_client_slot(
+    /// `MinSlot` auto-attaches this client's own last-write watermark
+    /// for the group unless the caller already supplied a `min_slot`.
+    fn resolve_min_slot(
         &self,
         store_id: u64,
         group_id: u64,
         read_mode: ReadMode,
-        client_slot: Option<u64>,
+        min_slot: Option<u64>,
     ) -> u64 {
-        if let Some(slot) = client_slot {
+        if let Some(slot) = min_slot {
             return slot;
         }
-        if read_mode == ReadMode::ReadYourWrites {
+        if read_mode == ReadMode::MinSlot {
             return self.read_your_writes_slot(store_id, group_id);
         }
         0
@@ -608,6 +689,21 @@ impl CrowkvClient {
         self.topology
             .set_leader(store_id, group_id, resp.not_leader_hint.clone());
         Some(resp.not_leader_hint.clone())
+    }
+
+    /// `KvScanResponse` has no dedicated `not_leader_hint` field; the
+    /// server encodes a `MinSlot` redirect as the error string
+    /// `"not leader; retry scan at {endpoint}"` (see
+    /// `px_kv_store.rs::kv_scan`). Parse the leader endpoint out of
+    /// that prefix and return it so the scan retry loop can follow the
+    /// redirect. Returns `None` for any other error shape, leaving the
+    /// caller's counted-error path intact.
+    fn follow_scan_not_leader(error: &str) -> Option<String> {
+        let prefix = "not leader; retry scan at ";
+        error
+            .strip_prefix(prefix)
+            .filter(|s| !s.is_empty())
+            .map(std::string::ToString::to_string)
     }
 
     /// A `not leader` failure with an empty hint (the responding replica
