@@ -79,6 +79,11 @@ pub struct OpReport {
     pub errors: u64,
     pub no_leader: u64,
     pub not_found: u64,
+    /// Reads where spot-check bytes didn't match the deterministic
+    /// `byte_at(key_id, offset)` formula. Should be 0 in a correct
+    /// system. `#[serde(default)]` so historical reports deserialize.
+    #[serde(default)]
+    pub correctness_errors: u64,
     pub latency_us: Percentiles,
 }
 
@@ -116,6 +121,20 @@ pub struct BenchReport {
     pub total_attempts: u64,
     pub total_errors: u64,
     pub error_rate: f64,
+    /// Total spot-check correctness errors across all op kinds (reads
+    /// where returned bytes didn't match the deterministic formula).
+    /// Should be 0 in a correct system. `#[serde(default)]` so
+    /// historical reports deserialize.
+    #[serde(default)]
+    pub correctness_errors: u64,
+    /// Wall-clock duration of the pre-population phase (0 when not
+    /// run). `#[serde(default)]` for back-compat.
+    #[serde(default)]
+    pub pre_pop_ms: u64,
+    /// Write failures during pre-population. `#[serde(default)]` for
+    /// back-compat.
+    #[serde(default)]
+    pub pre_pop_errors: u64,
     pub by_op: BTreeMap<String, OpReport>,
     /// Server-side metrics aggregated across all deployed nodes.
     /// `#[serde(default)]` so historical reports written before this
@@ -223,6 +242,20 @@ impl BenchReport {
         if self.warmup_ms > 0 {
             let _ = writeln!(out, "- **warmup:** {} ms (discarded)", self.warmup_ms);
         }
+        if self.pre_pop_ms > 0 {
+            let _ = writeln!(
+                out,
+                "- **pre_populate:** {} ms, {} errors",
+                self.pre_pop_ms, self.pre_pop_errors
+            );
+        }
+        if self.correctness_errors > 0 {
+            let _ = writeln!(
+                out,
+                "- **correctness_errors:** {} (spot-check mismatches)",
+                self.correctness_errors
+            );
+        }
         let _ = writeln!(out);
 
         // ── Test Configuration ──
@@ -314,6 +347,9 @@ impl BenchReport {
                 }
                 if op.not_found > 0 {
                     let _ = writeln!(out, "- **not_found:** {}", op.not_found);
+                }
+                if op.correctness_errors > 0 {
+                    let _ = writeln!(out, "- **correctness_errors:** {}", op.correctness_errors);
                 }
                 let _ = writeln!(
                     out,
@@ -471,7 +507,7 @@ impl BenchReport {
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "run_id          : {}\nmode            : {}\nworkload        : {:?}\nduration        : {} ms (measurement)\nwarmup          : {} ms (discarded)\nconnections     : {}\nthreads         : {}\nkey_space       : {}\nvalue_size      : {} B\ntarget          : {} (store={} group={})\ntotal_ops       : {}\ntotal_errors    : {}\nerror_rate      : {:.4}",
+            "run_id          : {}\nmode            : {}\nworkload        : {:?}\nduration        : {} ms (measurement)\nwarmup          : {} ms (discarded)\nconnections     : {}\nthreads         : {}\nkey_space       : {}\nvalue_size      : {} B\ntarget          : {} (store={} group={})\ntotal_ops       : {}\ntotal_errors    : {}\nerror_rate      : {:.4}\ncorrectness_err : {}\npre_populate    : {} ms, {} errors",
             self.run_id,
             self.mode,
             self.workload,
@@ -487,17 +523,21 @@ impl BenchReport {
             self.total_ops,
             self.total_errors,
             self.error_rate,
+            self.correctness_errors,
+            self.pre_pop_ms,
+            self.pre_pop_errors,
         );
         for (kind, op) in &self.by_op {
             let p = &op.latency_us;
             let _ = writeln!(
                 out,
-                "{kind:>8}: ops={ops} err={err} nl={nl} nf={nf}  avg={avg}us p50={p50}us p99={p99}us p999={p999}us max={max}us",
+                "{kind:>8}: ops={ops} err={err} nl={nl} nf={nf} ce={ce}  avg={avg}us p50={p50}us p99={p99}us p999={p999}us max={max}us",
                 kind = kind,
                 ops = op.ops,
                 err = op.errors,
                 nl = op.no_leader,
                 nf = op.not_found,
+                ce = op.correctness_errors,
                 avg = p.avg_us,
                 p50 = p.p50_us,
                 p99 = p.p99_us,
@@ -717,6 +757,19 @@ pub fn aggregate_server_metrics(per_node: &[ServerMetrics]) -> ServerMetrics {
     agg
 }
 
+/// Per-op outcome flags recorded into `OpStats`. Grouped as a struct
+/// so `OpStats::record` stays under clippy's bool-parameter limit.
+/// Construct at call sites with struct literal syntax, e.g.
+/// `OpOutcome { ok: true, not_found: true, ..Default::default() }`.
+#[derive(Debug, Clone, Copy, Default)]
+#[allow(clippy::struct_excessive_bools, reason = "independent per-op flags")]
+pub struct OpOutcome {
+    pub ok: bool,
+    pub no_leader: bool,
+    pub not_found: bool,
+    pub correctness_error: bool,
+}
+
 /// Builder for accumulating one op kind worth of stats.
 #[derive(Debug)]
 pub struct OpStats {
@@ -724,6 +777,7 @@ pub struct OpStats {
     pub errors: u64,
     pub no_leader: u64,
     pub not_found: u64,
+    pub correctness_errors: u64,
     pub histogram: Histogram<u64>,
 }
 
@@ -745,20 +799,24 @@ impl OpStats {
             errors: 0,
             no_leader: 0,
             not_found: 0,
+            correctness_errors: 0,
             histogram,
         }
     }
 
-    pub fn record(&mut self, latency_us: u64, ok: bool, no_leader: bool, not_found: bool) {
+    pub fn record(&mut self, latency_us: u64, outcome: OpOutcome) {
         self.ops += 1;
-        if !ok {
+        if !outcome.ok {
             self.errors += 1;
         }
-        if no_leader {
+        if outcome.no_leader {
             self.no_leader += 1;
         }
-        if not_found {
+        if outcome.not_found {
             self.not_found += 1;
+        }
+        if outcome.correctness_error {
+            self.correctness_errors += 1;
         }
         // Floor at 1us; auto-resize handles the upper bound.
         let v = latency_us.max(1);
@@ -776,6 +834,7 @@ impl OpStats {
         self.errors += other.errors;
         self.no_leader += other.no_leader;
         self.not_found += other.not_found;
+        self.correctness_errors += other.correctness_errors;
         self.histogram.add(&other.histogram).expect("histogram add");
     }
 
@@ -787,6 +846,7 @@ impl OpStats {
             errors: self.errors,
             no_leader: self.no_leader,
             not_found: self.not_found,
+            correctness_errors: self.correctness_errors,
             latency_us: percentiles_from_histogram(&self.histogram),
         }
     }

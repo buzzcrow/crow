@@ -1,6 +1,8 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
+#![allow(clippy::cast_possible_truncation)]
+
 //! Leader-election surface of [`PxGroup`].
 //!
 //! This module defines the [`LeaderElection`] trait and implements it for
@@ -24,7 +26,7 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
-use crate::cluster::group::{AcceptAttempt, PrepareAttempt, PxGroup, RemoteReplicaKind};
+use crate::cluster::group::{AcceptAttempt, PendingReadBarrier, PrepareAttempt, PxGroup, RemoteReplicaKind};
 use crate::cluster::local_replica::PxLocalReplicaRole;
 use crate::cluster::replica::{
     HeartbeatReply, HeartbeatRequestPayload, PxReplicaError, ReplicaClient, VoteReply, VoteRequestPayload,
@@ -324,7 +326,9 @@ pub(crate) enum HeartbeatOutcome {
 }
 
 /// Outcome of a linearizable read barrier (`linearizable_read_barrier`).
-#[derive(Debug, PartialEq, Eq)]
+/// `Clone` so the round leader can fan the same outcome out to every
+/// batched waiter queued onto a shared `ReadIndex` heartbeat round.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ReadBarrierOutcome {
     /// Read may be served from local applied state; every committed write up
     /// to `read_slot` is reflected locally.
@@ -662,6 +666,7 @@ impl PxGroup {
     ///   reflected locally; a higher term steps us down; no quorum means we
     ///   cannot prove freshness and the read must be retried elsewhere.
     pub(crate) async fn linearizable_read_barrier(self: &Arc<Self>) -> ReadBarrierOutcome {
+        let barrier_start = StdInstant::now();
         let replica = self.local_replica();
         if !replica.is_leader() {
             return ReadBarrierOutcome::NotLeader;
@@ -674,17 +679,99 @@ impl PxGroup {
             return ReadBarrierOutcome::NoQuorum;
         }
 
-        if replica.lease_read_valid(StdInstant::now()) {
+        let lease_valid = replica.lease_read_valid(StdInstant::now());
+        if let Some(h) = self.read_handles() {
+            h.lease_valid.set(u64::from(lease_valid));
+        }
+        if lease_valid {
+            if let Some(h) = self.read_handles() {
+                h.barrier.observe(barrier_start.elapsed().as_nanos() as u64);
+                h.lease_path.inc();
+            }
             return ReadBarrierOutcome::Ready { read_slot };
+        }
+
+        // ReadIndex path. Coalesce concurrent barriers onto a single
+        // in-flight heartbeat round: the first read to arrive (the "round
+        // leader") starts the round and registers a pending batch with the
+        // `read_slot` it captured above; later reads that arrive while the
+        // round is in flight enqueue a waiter and adopt the same outcome
+        // (and the same conservative `read_slot` freshness floor). The
+        // mutex serializes enqueue/dequeue so no waiter is lost — a read
+        // either joins the batch (sees `Some`) or, after the leader drains,
+        // starts a fresh batch (sees `None`). Correctness is identical to
+        // the single-read ReadIndex path: the heartbeat quorum confirms
+        // leadership at this term, and the engine get returns the latest
+        // applied value (not a `read_slot`-pinned value), so batched reads
+        // observe fresh state; the shared `read_slot` only under-reports
+        // freshness.
+        let joined_rx = {
+            let mut guard = self.pending_read_barrier.lock();
+            if let Some(pending) = guard.as_mut() {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                pending.waiters.push(tx);
+                Some(rx)
+            } else {
+                guard.replace(PendingReadBarrier { waiters: Vec::new() });
+                None
+            }
+        };
+
+        // Batched onto an in-flight round: wait for the round leader to
+        // resolve us. A dropped sender (round-leader cancellation) maps to
+        // `NoQuorum` so the caller retries safely.
+        if let Some(rx) = joined_rx {
+            let outcome = rx.await.unwrap_or(ReadBarrierOutcome::NoQuorum);
+            if let Some(h) = self.read_handles() {
+                h.barrier.observe(barrier_start.elapsed().as_nanos() as u64);
+                if matches!(outcome, ReadBarrierOutcome::Ready { .. }) {
+                    h.readindex_path.inc();
+                }
+            }
+            return outcome;
+        }
+
+        // Round leader: a test-only gate may hold the round open so
+        // concurrent reads deterministically enqueue before the round
+        // runs. No-op in production (`None`). The guard is dropped at the
+        // `;` so the `Receiver` is awaited without a non-Send lock guard
+        // held across the await.
+        #[cfg(feature = "test-util")]
+        {
+            let gate = self.readindex_round_gate.lock().take();
+            if let Some(gate) = gate {
+                let _ = gate.await;
+            }
         }
 
         let cfg = self.election_cfg;
         let term = replica.current_term_snapshot();
-        match self.run_heartbeat_round(&cfg, term).await {
+        let outcome = match self.run_heartbeat_round(&cfg, term).await {
             HeartbeatOutcome::SteppedDown { .. } => ReadBarrierOutcome::NotLeader,
             HeartbeatOutcome::Continued { quorum_acked: true } => ReadBarrierOutcome::Ready { read_slot },
             HeartbeatOutcome::Continued { quorum_acked: false } => ReadBarrierOutcome::NoQuorum,
+        };
+
+        // Drain the batch and fan the outcome out to every waiter that
+        // joined this round. Taking the slot clears "in flight" so the
+        // next ReadIndex read starts a fresh batch.
+        let waiters = self
+            .pending_read_barrier
+            .lock()
+            .take()
+            .map_or_else(Vec::new, |p| p.waiters);
+        for tx in waiters {
+            let _ = tx.send(outcome.clone());
         }
+
+        if let Some(h) = self.read_handles() {
+            h.barrier.observe(barrier_start.elapsed().as_nanos() as u64);
+            h.readindex_rounds.inc();
+            if matches!(outcome, ReadBarrierOutcome::Ready { .. }) {
+                h.readindex_path.inc();
+            }
+        }
+        outcome
     }
 
     /// Drive one full election attempt: optional `PreVote` →

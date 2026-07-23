@@ -244,7 +244,20 @@ The cost is one network round-trip per ReadIndex (or per batch of reads). No fsy
 
 ### 7.2 Batching
 
-> **Not yet implemented.** The current `linearizable_read_barrier` serves one read at a time. Batching multiple reads into a single heartbeat-quorum round is a planned optimization.
+Concurrent ReadIndex barriers coalesce onto a single in-flight heartbeat round so a burst of N expired-lease linearizable reads costs one quorum round-trip, not N.
+
+The leader holds a pending-barrier batch (`PxGroup::pending_read_barrier`) for the duration of one ReadIndex round:
+
+1. The first read to arrive (the *round leader*) captures `R = contiguous_chosen`, registers the batch, and runs `run_heartbeat_round`.
+2. Reads that arrive while the round is in flight enqueue a `oneshot` waiter on the batch instead of starting their own round.
+3. When the round completes, the round leader drains the batch and resolves every waiter with the same outcome — `Ready { read_slot: R }` on quorum ack, `NotLeader` on step-down (higher term), `NoQuorum` when quorum is unreachable. A waiter whose round leader is cancelled (dropped sender) receives `NoQuorum` and retries.
+4. The lease fast path is unchanged: lease-valid reads still serve immediately without queueing.
+
+The mutex over the batch serializes enqueue and drain, so no waiter is lost — a read either joins the in-flight batch or, after the leader drains, starts a fresh batch.
+
+**Correctness** is identical to the single-read procedure in §7.1. The heartbeat quorum at the leader's term confirms no higher-term election displaced this leader during the round, so every committed write is reflected in the leader's local state. The engine get returns the *latest* applied value for the key (single-version, highest-slot-wins), not a value pinned to `R`; each batched read performs its own `engine_get_bytes` after the barrier resolves and observes the freshest local state at its serve time. The shared `R` reported in the response is therefore a conservative freshness floor (the pre-round `contiguous_chosen`), never an over-estimate — a write that commits *during* the round has slot > `R` and is returned by the engine get, so late-arriving batched reads are not stale.
+
+**Metric.** `read.readindex_rounds.c` increments once per ReadIndex heartbeat round (by the round leader). `read.readindex_path.c` still increments once per read that takes the ReadIndex path, so for a batched burst of N reads `readindex_rounds.c == 1` and `readindex_path.c == N`; average batch size is `readindex_path.c / readindex_rounds.c`. `read.barrier.l` drops toward one RTT amortized across the batch.
 
 ### 7.3 When to choose ReadIndex over lease
 

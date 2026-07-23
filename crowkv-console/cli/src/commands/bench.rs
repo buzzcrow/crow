@@ -73,6 +73,41 @@ pub struct RunArgs {
     /// spawned server). Default: 1.
     #[arg(long, default_value_t = 1)]
     pub inflight_queues: usize,
+
+    /// Read mode for read ops: `linearizable` (default) or `minslot`.
+    /// Ignored for write/delete ops.
+    #[arg(long, default_value = "linearizable")]
+    pub read_mode: String,
+
+    /// `min_slot` policy for `MinSlot` reads: `auto` (carry client
+    /// write watermark, default), `zero` (always 0, max staleness), or
+    /// a fixed slot number. Ignored for `Linearizable` reads.
+    #[arg(long, default_value = "auto")]
+    pub min_slot: String,
+
+    /// Pre-population count: write `<count>` keys with deterministic
+    /// values before measurement begins. Defaults to 200,000 for read
+    /// workloads (so reads return `Found`), 0 for write/mix/list (no
+    /// pre-pop needed). Set to 0 to disable. Not measured (reported
+    /// separately as `pre_pop_ms`).
+    #[arg(long)]
+    pub pre_populate: Option<u64>,
+
+    /// Number of random bytes to spot-check per `Found` read against
+    /// the deterministic value formula. Default 8. Set to 0 to disable
+    /// verification.
+    #[arg(long, default_value_t = 8)]
+    pub verify_bytes: usize,
+
+    /// `MinSlot` read-endpoint selection policy: `leader` (default,
+    /// routes `MinSlot` reads to the leader) or `any-replica`
+    /// (distributes `MinSlot` reads across all replicas, exercising the
+    /// real follower local-serve + fallback path). Ignored for
+    /// `Linearizable` reads. When not specified, defaults to
+    /// `any-replica` for `--read-mode minslot` and `leader` for
+    /// `--read-mode linearizable`.
+    #[arg(long)]
+    pub read_endpoint_policy: Option<String>,
 }
 
 /// Arguments for `crowkv-cli bench`.
@@ -99,9 +134,14 @@ pub async fn run_bench_verb(cli: &Cli, args: BenchArgs) -> ExitCode {
 
 /// `bench run` — full self-contained lifecycle: deploy (fixture),
 /// run, collect, cleanup, report.
+#[allow(
+    clippy::too_many_lines,
+    reason = "orchestrates deploy/run/report; splitting reduces readability"
+)]
 async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
     use crate::bench::provision::{GROUP_ID, STORE_ID};
-    use crate::bench::{run_bench, BenchConfig, BenchFixture, BenchMode, WorkloadKind};
+    use crate::bench::{run_bench, BenchConfig, BenchFixture, BenchMode, MinSlotPolicy, WorkloadKind};
+    use crowkv_client::{ReadEndpointPolicy, ReadMode};
     use std::time::Duration;
 
     let Some(mode) = BenchMode::parse(&args.mode) else {
@@ -113,6 +153,40 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
         Err(bad) => {
             eprintln!("error: unknown workload {bad:?} (expected: read|write|list|mix)");
             return ExitCode::from(1);
+        }
+    };
+    let read_mode = match args.read_mode.to_ascii_lowercase().as_str() {
+        "linearizable" => ReadMode::Linearizable,
+        "minslot" | "min_slot" => ReadMode::MinSlot,
+        other => {
+            eprintln!("error: unknown read-mode {other:?} (expected: linearizable|minslot)");
+            return ExitCode::from(1);
+        }
+    };
+    let min_slot_policy = match MinSlotPolicy::parse(&args.min_slot) {
+        Ok(p) => p,
+        Err(bad) => {
+            eprintln!("error: unknown min-slot {bad:?} (expected: auto|zero|<n>)");
+            return ExitCode::from(1);
+        }
+    };
+    // Default: AnyReplica for MinSlot (exercises follower local-serve +
+    // fallback), Leader for Linearizable (always targets leader anyway).
+    let read_endpoint_policy = match args.read_endpoint_policy.as_deref() {
+        Some(s) => match s.to_ascii_lowercase().as_str() {
+            "leader" => ReadEndpointPolicy::Leader,
+            "any-replica" | "any_replica" | "anyreplica" => ReadEndpointPolicy::AnyReplica,
+            other => {
+                eprintln!("error: unknown read-endpoint-policy {other:?} (expected: leader|any-replica)");
+                return ExitCode::from(1);
+            }
+        },
+        None => {
+            if read_mode == ReadMode::MinSlot {
+                ReadEndpointPolicy::AnyReplica
+            } else {
+                ReadEndpointPolicy::Leader
+            }
         }
     };
     if args.config.is_some() {
@@ -149,6 +223,20 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
     cfg.run_id = Some(run_id.clone());
     cfg.report_dir = Some(run_dir.clone());
     cfg.metrics_log_path = Some(run_dir.join("bench-metrics.log"));
+    cfg.read_mode = read_mode;
+    cfg.min_slot_policy = min_slot_policy;
+    cfg.pre_populate = args
+        .pre_populate
+        .or_else(|| (kind == WorkloadKind::Read).then_some(200_000))
+        .filter(|c| *c > 0);
+    cfg.verify_bytes = args.verify_bytes;
+    cfg.read_endpoint_policy = read_endpoint_policy;
+    // AnyReplica needs the full replica list, which comes from a
+    // `/topology` fetch against any `crowkv-server`'s mgmt API. Leader
+    // policy doesn't need it (the client seeds the leader directly).
+    if cfg.read_endpoint_policy == ReadEndpointPolicy::AnyReplica {
+        cfg.topology_seed = Some(fixture.node_mgmt_urls()[0].clone());
+    }
 
     println!(
         "running {} workload for {}s...",

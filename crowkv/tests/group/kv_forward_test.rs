@@ -94,7 +94,7 @@ async fn follower_get_forwards_to_leader_after_local_clear() {
             request_create_ms: 1002,
             group_id: 1,
             read_mode: 0,
-            client_slot: 0,
+            min_slot: 0,
         })
         .await
         .expect("kv get on follower")
@@ -165,6 +165,7 @@ async fn follower_scan_forwards_to_leader_after_local_clear() {
             request_create_ms: 1101,
             read_mode: 0,
             start_after: Bytes::new(),
+            min_slot: 0,
         })
         .await
         .expect("kv scan on follower")
@@ -240,7 +241,7 @@ async fn forwarded_request_does_not_re_forward() {
         request_create_ms: 1201,
         group_id: 1,
         read_mode: 0,
-        client_slot: 0,
+        min_slot: 0,
     }));
     let resp = client
         .get(req)

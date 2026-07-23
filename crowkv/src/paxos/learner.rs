@@ -122,6 +122,14 @@ impl PxLearner {
         self.engine.get(key).await
     }
 
+    /// Like [`Self::engine_get`] but returns [`Bytes`] instead of `Vec<u8>`,
+    /// via [`KVEngine::get_bytes`]. Avoids an intermediate `Vec<u8>` allocation
+    /// on the crowtree fast path.
+    #[must_use]
+    pub async fn engine_get_bytes(&self, key: &[u8]) -> Option<(SlotIndex, Bytes)> {
+        self.engine.get_bytes(key).await
+    }
+
     /// Ordered prefix scan of live entries; see [`KVEngine::scan`].
     /// `async fn` for signature uniformity with [`Self::engine_get`], but
     /// `KVEngine::scan` has no genuine `Pending` path yet (no

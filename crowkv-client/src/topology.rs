@@ -27,6 +27,13 @@ pub struct TopologyCache {
     seeds: RwLock<Vec<String>>,
     http: reqwest::Client,
     leaders: DashMap<(u64, u64), String>,
+    /// Per-`(store_id, group_id)` full replica endpoint list (local +
+    /// remotes), populated from the same `/topology` fetch as `leaders`.
+    /// Used by the `AnyReplica` read-endpoint selector; `Leader` policy
+    /// never reads it. Refreshed only by `refresh()` — `set_leader` (the
+    /// `NotLeaderHint` fast path) does not touch it, since a hint only
+    /// carries the leader endpoint.
+    replicas: DashMap<(u64, u64), Vec<String>>,
     min_refresh_interval: Duration,
     /// Single-flight guard: while held, a fetch is either in flight or was
     /// just completed within `min_refresh_interval`. Concurrent `refresh`
@@ -42,6 +49,7 @@ impl TopologyCache {
             seeds: RwLock::new(seeds),
             http: reqwest::Client::new(),
             leaders: DashMap::new(),
+            replicas: DashMap::new(),
             min_refresh_interval,
             // Far enough in the past that the first `refresh` always fetches.
             refresh_gate: AsyncMutex::new(
@@ -56,6 +64,15 @@ impl TopologyCache {
     #[must_use]
     pub fn leader(&self, store_id: u64, group_id: u64) -> Option<String> {
         self.leaders.get(&(store_id, group_id)).map(|v| v.clone())
+    }
+
+    /// Cached full replica endpoint list for a group (local + remotes),
+    /// if known. Never performs I/O. Used by the `AnyReplica`
+    /// read-endpoint selector; returns `None` until the first
+    /// `refresh()` lands a `/topology` body that includes this group.
+    #[must_use]
+    pub fn replicas(&self, store_id: u64, group_id: u64) -> Option<Vec<String>> {
+        self.replicas.get(&(store_id, group_id)).map(|v| v.clone())
     }
 
     /// Directly seed the cache with a leader endpoint learned from a
@@ -115,10 +132,14 @@ impl TopologyCache {
 
     fn merge(&self, body: TopologyResponse) {
         for store in body.stores {
+            // `listen_addr` is the local replica's gRPC endpoint; it is
+            // `None` only for a server that hasn't bound its listener yet,
+            // in which case this store contributes no endpoints.
+            let local_endpoint = store.listen_addr.clone();
             for group in store.groups {
                 let leader_id = group.leader_id;
                 let endpoint = if group.local_replica.id == leader_id {
-                    store.listen_addr.clone()
+                    local_endpoint.clone()
                 } else {
                     group
                         .remotes
@@ -128,6 +149,22 @@ impl TopologyCache {
                 };
                 if let Some(endpoint) = endpoint {
                     self.leaders.insert((store.store_id, group.group_id), endpoint);
+                }
+
+                // Full replica endpoint list for the `AnyReplica`
+                // read-endpoint selector: the local replica (via
+                // `listen_addr`) plus every remote's `endpoint`. Skip the
+                // local entry when `listen_addr` is `None` (server not
+                // bound yet) — a partial list would mis-route reads.
+                let mut replicas: Vec<String> = Vec::with_capacity(group.remotes.len() + 1);
+                if let Some(addr) = &local_endpoint {
+                    replicas.push(addr.clone());
+                }
+                for r in &group.remotes {
+                    replicas.push(r.endpoint.clone());
+                }
+                if !replicas.is_empty() {
+                    self.replicas.insert((store.store_id, group.group_id), replicas);
                 }
             }
         }

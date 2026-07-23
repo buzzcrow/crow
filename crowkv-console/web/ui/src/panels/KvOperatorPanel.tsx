@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { Search, Info, Database, Trash2, Loader2, Copy, AlertTriangle, FlaskConical } from 'lucide-react';
 import { useToast } from '../contexts/ToastContext';
 import { useActivity } from '../contexts/ActivityContext';
@@ -155,6 +155,9 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
     }
   }, [storeId, groupId, scanPrefix, groupIdsInStore, targetLabel, log, success, error, scanRows.length]);
 
+  const handleScanRef = useRef(handleScan);
+  useEffect(() => { handleScanRef.current = handleScan; }, [handleScan]);
+
   useEffect(() => {
     if (storeId && groupId && !autoScanned && !scanLoading && scanRows.length === 0) {
       setAutoScanned(true);
@@ -233,7 +236,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
       setPutValue('');
       if (autoScan) {
         setGroupId(targetGid);
-        setTimeout(() => handleScan(), 100);
+        setTimeout(() => handleScanRef.current(), 100);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Put failed';
@@ -254,7 +257,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
         log({ action: 'KV Delete', target: `${storeId}/${groupId}`, status: 'Success', message: `key: "${deleteKey}"` });
         success(`Key deleted: "${deleteKey}"`);
         setDeleteKey('');
-        if (autoScan) setTimeout(() => handleScan(), 100);
+        if (autoScan) setTimeout(() => handleScanRef.current(), 100);
       } catch (err) {
         const msg = err instanceof Error ? err.message : 'Delete failed';
         setErrorMsg(msg);
