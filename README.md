@@ -28,24 +28,6 @@ From past experience building storage systems, a high-performance distributed KV
 
 ![Failover](doc/assets/demo-failover.gif)
 
-**Write Performance — Inflight Window & Queue Admission** — Multi-Paxos allows slots to be decided out of order, but the leader still needs an admission control window to cap memory pressure from in-flight proposals. CrowKV uses a queue-based admission policy (R18): when the window is full, proposals block on a semaphore instead of being rejected as `Busy`. This eliminates client-side retry storms while maintaining the same peak throughput.
-
-The benchmark below (3-node cluster, in-memory WAL + storage, write-only, 512-byte values, 1M key space, 12-second duration) shows two key results:
-
-- **Window = 1** (effectively Raft-style sequential commit): at 16 concurrent writers, **zero rejections** — the queue absorbs all contention. Throughput is ~13K ops/s (serialized by the 1-permit window).
-- **Window = 16** (Paxos pipelined commit): zero rejections, throughput reaches ~37K ops/s — **2.8× faster** than window=1 under the same load.
-- **Window = 64, 64 threads** (full pipeline): peak throughput of **50K ops/s** with zero rejections and p99 latency under 2ms.
-
-| Window | Threads | Connections | Throughput (ops/s) | Avg Latency | p99 Latency | Busy Rejections |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | 1 | 1 | 9,074 | 109 µs | 198 µs | 0 |
-| 1 | 16 | 4 | 13,278 | 1,203 µs | 1,360 µs | 0 |
-| 16 | 1 | 1 | 8,969 | 110 µs | 168 µs | 0 |
-| 16 | 16 | 4 | 36,661 | 434 µs | 642 µs | 0 |
-| 64 | 64 | 8 | 50,107 | 1,275 µs | 1,942 µs | 0 |
-
-At 1 thread the window size makes no difference (only one proposal in flight at a time). At 16 threads the inflight window is the difference between a serialized bottleneck and a fully pipelined commit path — exactly the architectural advantage Multi-Paxos holds over Raft on the write hot path. Queue-based admission ensures this advantage is realized without any client-side retry logic: **zero `Busy` rejections across all configurations**.
-
 ## Why Multi-Paxos?
 
 Raft's log is contiguous by construction: a leader cannot acknowledge slot N+1 until slot N is committed. Under high concurrency this becomes a sequential bottleneck.
@@ -124,6 +106,41 @@ The full design lives in [`doc/`](doc/). Start with:
 ## Notes on AI-Assisted Development
 
 The code in this project was written with AI assistance. But the shape of the software is personal. Architecture, naming, module boundaries, the tradeoffs that matter. Those are human choices. AI is the compiler. The intent is mine.
+
+## Performance
+
+**Write Performance — Inflight Window & Queue Admission** — Multi-Paxos allows slots to be decided out of order, but the leader still needs an admission control window to cap memory pressure from in-flight proposals. CrowKV uses a queue-based admission policy (R18): when the window is full, proposals block on a semaphore instead of being rejected as `Busy`. This eliminates client-side retry storms while maintaining the same peak throughput.
+
+The benchmark below (3-node cluster, in-memory WAL + storage, write-only, 512-byte values, 1M key space, 12-second duration) shows two key results:
+
+- **Window = 1** (effectively Raft-style sequential commit): at 16 concurrent writers, **zero rejections** — the queue absorbs all contention. Throughput is ~13K ops/s (serialized by the 1-permit window).
+- **Window = 16** (Paxos pipelined commit): zero rejections, throughput reaches ~37K ops/s — **2.8× faster** than window=1 under the same load.
+- **Window = 64, 64 threads** (full pipeline): peak throughput of **50K ops/s** with zero rejections and p99 latency under 2ms.
+
+| Window | Threads | Connections | Throughput (ops/s) | Avg Latency | p99 Latency | Busy Rejections |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 1 | 9,074 | 109 µs | 198 µs | 0 |
+| 1 | 16 | 4 | 13,278 | 1,203 µs | 1,360 µs | 0 |
+| 16 | 1 | 1 | 8,969 | 110 µs | 168 µs | 0 |
+| 16 | 16 | 4 | 36,661 | 434 µs | 642 µs | 0 |
+| 64 | 64 | 8 | 50,107 | 1,275 µs | 1,942 µs | 0 |
+
+At 1 thread the window size makes no difference (only one proposal in flight at a time). At 16 threads the inflight window is the difference between a serialized bottleneck and a fully pipelined commit path — exactly the architectural advantage Multi-Paxos holds over Raft on the write hot path. Queue-based admission ensures this advantage is realized without any client-side retry logic: **zero `Busy` rejections across all configurations**.
+
+**Read Performance — Two Read Modes** — CrowKV supports two read modes. **Linearizable** reads go to the group leader and wait for a lease barrier (no quorum RPC when the lease is valid — just engine get + gRPC RTT). **MinSlot** reads target any replica with a sufficiently advanced commit slot, distributing load across all replicas in the group.
+
+The benchmark below (3-node cluster, in-memory WAL + storage, read-only, 512-byte values, 200K key space pre-populated, 12-second measurement) was run on a single-node deployment (AMD Ryzen 9 5950X, 16 cores / 32 threads, Linux). Because all three replicas run on one machine, MinSlot's 3-replica parallelism is bounded by the same CPU and gRPC stack as Linearizable — the two modes converge at peak throughput. In a multi-node deployment, MinSlot would scale across separate machines.
+
+| Threads | Connections | Linearizable ops/s | Linearizable p99 | MinSlot ops/s | MinSlot p99 |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 5,876 | 233 µs | 5,876 | 233 µs |
+| 6 | 6 | 47,366 | 200 µs | 45,563 | 183 µs |
+| 24 | 24 | 120,494 | 403 µs | 112,172 | 444 µs |
+| 48 | 48 | 144,486 | 828 µs | 135,928 | 884 µs |
+
+Both modes scale cleanly to ~140K ops/s with zero errors. Reads are ~2.8× faster than writes at peak (145K vs 50K) — they skip the consensus critical path entirely (no WAL append, no quorum RPC). The lease barrier costs ~0 when the leader's lease is valid, so a linearizable read is effectively a local engine get plus one gRPC round trip.
+
+**gRPC transport limitation** — the current transport is tonic/gRPC over HTTP/2. HTTP/2's stream multiplexing requires a connection-level userspace lock (HPACK header encoding, frame interleaving, flow-control bookkeeping), which serializes concurrent writers sharing one TCP connection. This costs ~17% throughput when multiple threads share a connection, and causes Linearizable reads to collapse when connections exceed threads (the leader's single endpoint bears all connection-sharing contention). MinSlot mitigates this by spreading connections across replicas. The long-term plan is to replace gRPC on the internal replica-to-replica hot path with a purpose-built Rust RPC library (length-prefixed framing over raw TCP, keeping prost/protobuf for serialization) to eliminate the HTTP/2 connection lock entirely. This is deferred until read throughput becomes the primary bottleneck — currently the bottleneck is consensus (writes) and disk I/O, not read-path framing.
 
 ## License
 

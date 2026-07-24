@@ -302,6 +302,9 @@ throughput; verified separately with `--verify-bytes 8`
 ~22s for 200K keys (excluded from measurement; reported as
 `pre_pop_ms`).
 
+Benchmark scripts: full sweep `tools/bench-read-sweep.sh`, regression
+subset `tools/bench-read-regression.sh`.
+
 Two read modes benchmarked, both at 1 thread : 1 connection (no
 HTTP/2 stream multiplexing overhead — see note below):
 
@@ -452,13 +455,21 @@ it. The 2T:1C 17% throughput drop measured in the bench is this
 lock's cost: two threads that should run in parallel are funneled
 through one userspace critical section.
 
-**Decision: not replacing gRPC now.** A custom transport would
-eliminate the connection lock and recover the lost concurrency, but
-requires reimplementing connection pooling, reconnect, timeout,
-cancellation, error propagation, backpressure, and TLS — 2–4K lines
-of infrastructure that gRPC provides. The lock's cost is bounded
-(~17% at 2T:1C, avoided entirely at 1T:1C) and the current
-bottleneck for production workloads is consensus (writes) or disk
-I/O, not read-path framing. Revisit if read throughput becomes the
-primary constraint and the h2 connection lock is profiled as the
-hot spot.
+**Decision: not replacing gRPC now; will write a custom Rust RPC
+library in the future.** A custom transport would eliminate the
+connection lock and recover the lost concurrency, but requires
+reimplementing connection pooling, reconnect, timeout, cancellation,
+error propagation, backpressure, and TLS — 2–4K lines of
+infrastructure that gRPC provides. The lock's cost is bounded (~17%
+at 2T:1C, avoided entirely at 1T:1C) and the current bottleneck for
+production workloads is consensus (writes) or disk I/O, not
+read-path framing. The long-term plan is to build a purpose-built
+Rust RPC library for CrowKV (length-prefixed framing over raw TCP,
+keeping prost/protobuf for serialization) to replace gRPC on the
+internal replica-to-replica hot path. This is deferred until read
+throughput becomes the primary constraint and the h2 connection lock
+is profiled as the hot spot. Reference implementations to study
+before building: protosocket (Momento, 2.75x over gRPC, tokio +
+prost, no HTTP/2), Volo (CloudWeGo, custom binary transport, 350k+
+QPS), and Cap'n Proto RPC (zero-copy serialization, promise
+pipelining).
