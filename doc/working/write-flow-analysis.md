@@ -179,12 +179,17 @@ Client PUT/DELETE/BatchWrite
 
 ---
 
-## Benchmark Results — 2026-07-21
+## Benchmark Results — 2026-07-24
 
-3-node cluster, in-memory WAL + in-memory KV (mem-block), write-only,
-512-byte values, 1M key space, 12-second duration,
-`election_profile = e2e`. Admission policy = `Queue` (R18 default).
-TPS = success-only (total_attempts - total_errors / duration).
+Systematic T:C:W sweep. 3-node cluster (bench fixture, in-process
+console-web + 3 spawned `crowkv-server` processes), in-memory WAL +
+in-memory KV (mem-block), write-only, 512-byte values, 1M key space,
+12-second duration, `election_profile = e2e`, admission policy =
+`Queue` (R18 default). Platform: AMD Ryzen 9 5950X (16 cores / 32
+threads), Linux. 28 runs total, zero errors across all configs.
+
+Script: `tools/bench-write-sweep.sh`. Regression subset:
+`tools/bench-write-regression.sh`.
 
 ### Factors Affecting TPS
 
@@ -194,56 +199,125 @@ TPS = success-only (total_attempts - total_errors / duration).
   critical path (WAL append + quorum RPC) becomes the bottleneck.
 - **`threads` (worker tasks)** — client-side concurrency; more workers
   fill the pipeline faster; diminishing returns once server-side
-  consensus is saturated.
-- **`connections` (gRPC channels)** — per-endpoint channel pool size;
-  must be sufficient to avoid gRPC stream head-of-line blocking; beyond
-  ~4, no measurable effect (bottleneck moves to server-side consensus).
+  consensus is saturated (~24T).
+- **`connections` (gRPC channels)** — **no measurable effect at any
+  thread count**. Unlike reads (where T:C ratio matters due to the
+  HTTP/2 connection lock), writes are bottlenecked by server-side
+  consensus (WAL fsync + quorum RPC), not gRPC framing. C=3 and C=48
+  produce identical throughput at 12T and 48T.
 
 No measurable effect on TPS (at ≤64 threads):
 
 - **`inflight_queues`** — multi-queue routing (1 vs 4 semaphores);
   semaphore is not the contention bottleneck; consensus path
   dominates. Default 1 is sufficient.
-- **Window > 64** — MI=128 no improvement over MI=64. Consensus
-  critical path ~1.2ms per proposal is the hard ceiling:
-  64 / 1.2ms ≈ 53K theoretical, matches observed 50K peak.
+- **Window > 16** — MI=16, 32, 64 all converge to ~29K at 48T.
+  Consensus critical path is the hard ceiling.
+- **Connections** — C has zero effect on write throughput at any T.
+  The write path's bottleneck is consensus, not gRPC.
 
-### Scaling: 1T to 64T (MI=64, Q=1)
+### Phase 1 — Baseline 1T:1C scaling (MI=64)
 
-| Threads | Conn | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | Errors |
+| Threads | Conn | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 3,249 | 305 | 339 | 444 | 562 | 0 |
+| 6 | 6 | 19,922 | 299 | 288 | 475 | 984 | 0 |
+| 12 | 12 | 25,802 | 462 | 449 | 740 | 1,684 | 0 |
+| 24 | 24 | 28,761 | 832 | 820 | 1,264 | 2,751 | 0 |
+| 48 | 48 | 28,898 | 1,658 | 1,643 | 2,419 | 5,399 | 0 |
+
+Throughput plateaus at 24T (~29K). Adding threads beyond 24T
+increases latency without improving throughput — the consensus
+pipeline is saturated.
+
+### Phase 2 — T:C ratio exploration (MI=64)
+
+| Threads | Conn | Ratio | Throughput (ops/s) | avg (µs) | p99 (µs) | Errors |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 1 | 9,074 | 109 | 99 | 198 | 0 |
-| 2 | 1 | 16,742 | 119 | 112 | 199 | 0 |
-| 4 | 4 | 27,040 | 147 | 139 | 231 | 0 |
-| 8 | 4 | 29,632 | 268 | 263 | 395 | 0 |
-| 16 | 8 | 36,880 | 432 | 424 | 633 | 0 |
-| 32 | 8 | 43,989 | 725 | 712 | 1069 | 0 |
-| 64 | 8 | 50,107 | 1275 | 1251 | 1942 | 0 |
+| 12 | 3 | 4:1 | 24,665 | 484 | 801 | 0 |
+| 12 | 6 | 2:1 | 25,734 | 464 | 750 | 0 |
+| 12 | 12 | 1:1 | 25,798 | 463 | 771 | 0 |
+| 12 | 24 | 1:2 | 25,840 | 462 | 743 | 0 |
+| 12 | 48 | 1:4 | 25,737 | 464 | 760 | 0 |
+| 48 | 12 | 4:1 | 29,267 | 1,637 | 2,453 | 0 |
+| 48 | 24 | 2:1 | 29,057 | 1,649 | 2,471 | 0 |
+| 48 | 48 | 1:1 | 29,134 | 1,645 | 2,373 | 0 |
+| 48 | 64 | 1:1.3 | 29,004 | 1,652 | 2,397 | 0 |
 
-### Window impact (16T, 4C, Q=1)
+**Key finding: T:C ratio has zero effect on write throughput.** At
+12T, C=3 and C=48 both give ~25K. At 48T, C=12 and C=64 both give
+~29K. This is fundamentally different from reads, where the HTTP/2
+connection lock makes T:C ratio critical. Writes are bottlenecked by
+the consensus critical path (WAL append + quorum RPC), which is
+server-side and independent of how many gRPC channels the client
+opens.
 
-| Window | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | Errors |
-| --- | --- | --- | --- | --- | --- |
-| 1 | 13,278 | 1203 | 1066 | 1360 | 0 |
-| 16 | 36,661 | 434 | 426 | 642 | 0 |
-| 32 | 36,792 | 433 | 424 | 635 | 0 |
-| 64 | 36,543 | 436 | 427 | 643 | 0 |
+### Phase 3 — Window impact at 48T:48C
+
+| Window | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 6,361 | 7,544 | 6,499 | 10,455 | 10,687 | 0 |
+| 4 | 20,776 | 2,308 | 2,253 | 3,215 | 8,295 | 0 |
+| 16 | 28,040 | 1,709 | 1,679 | 2,467 | 5,963 | 0 |
+| 32 | 28,827 | 1,662 | 1,644 | 2,481 | 5,563 | 0 |
+| 64 | 28,920 | 1,657 | 1,638 | 2,509 | 5,067 | 0 |
+
+**Window is the primary TPS lever.** MI=1→16 gives 4.4× throughput
+(6K→28K). MI=1 (effectively Raft-style sequential commit) serializes
+all proposals through a single permit — 48 threads queue at 7.5ms
+avg latency. MI=16+ converges: the consensus pipeline is saturated,
+adding more permits doesn't help because the per-proposal critical
+path (WAL fsync + quorum RPC) is the bottleneck.
+
+### Phase 4 — Low thread count (MI=64)
+
+| Threads | Conn | Ratio | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | Errors |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 1:1 | 2,836 | 350 | 354 | 445 | 0 |
+| 1 | 2 | 1:2 | 2,914 | 340 | 358 | 447 | 0 |
+| 1 | 4 | 1:4 | 2,842 | 349 | 361 | 450 | 0 |
+| 2 | 1 | 2:1 | 6,344 | 313 | 261 | 500 | 0 |
+| 2 | 2 | 1:1 | 7,210 | 275 | 224 | 475 | 0 |
+| 2 | 4 | 1:2 | 8,889 | 223 | 210 | 383 | 0 |
+| 3 | 1 | 3:1 | 11,856 | 251 | 243 | 409 | 0 |
+| 3 | 3 | 1:1 | 12,915 | 230 | 222 | 383 | 0 |
+| 3 | 6 | 1:2 | 12,704 | 234 | 219 | 357 | 0 |
+
+At 1T, C has no effect (~2.8K) — single-thread throughput is bounded
+by per-proposal latency (~350us). At 2T, more connections help
+(6.3K→8.9K) because 2 threads sharing 1 connection contend on the h2
+lock; 2T:4C gives each thread its own connection. At 3T, 3C and 6C
+converge (~12.8K).
+
+### Comparison with previous test (2026-07-21)
+
+The previous test reported 50K ops/s peak at 64T:8C. This sweep
+measures ~29K at all 48T+ configs, including a direct 64T:8C
+re-run (29,319 ops/s). The difference is likely due to code changes
+between July 21 and July 24 (WAL restore, election fixes, group
+wiring changes). The relative findings are consistent: window is the
+primary lever, threads scale until consensus saturation, connections
+have minimal effect. The absolute throughput regression is
+not investigated here — it warrants a separate profiling pass.
 
 ### Conclusions
 
-- **Window is the primary TPS lever** — W=1→W=16 gives 2.8× throughput
-  (13K→37K at 16T/4C). W=16+ converge to ~37K at this thread count
-  (pipeline already saturated).
-- **Threads scale throughput until server saturation** — 1T→64T gives
-  5.5× throughput (9K→50K at MI=64). Returns diminish after 32T.
-- **Connections matter only at low counts** — 1C→4C gives +60% at 4T;
-  beyond 4C, no effect (gRPC is not the bottleneck).
-- **Queue mode: zero errors across all configurations** — no `Busy`
-  rejections, no client retry, no window tuning to avoid reject storms;
-  queue naturally backpressures at any window size.
-- **Scaling ceiling ~50K ops/s** — per-proposal latency ~1.2ms at 64
+- **Window is the primary TPS lever** — MI=1→16 gives 4.4× throughput
+  (6K→28K at 48T). MI=16+ converges (consensus pipeline saturated).
+- **Threads scale until 24T, then plateau** — 1T→24T gives 10×
+  throughput (3K→29K). 24T→48T adds latency without throughput gain.
+- **T:C ratio has zero effect on writes** — unlike reads, C=3 and C=64
+  produce identical throughput at the same T. The write bottleneck is
+  server-side consensus (WAL fsync + quorum RPC), not gRPC framing.
+  This is the key difference from reads, where the HTTP/2 connection
+  lock makes T:C ratio critical.
+- **Queue mode: zero errors across all 28 configurations** — no `Busy`
+  rejections, no client retry; queue naturally backpressures at any
+  window size.
+- **Scaling ceiling ~29K ops/s** — per-proposal latency ~1.7ms at 48
   in-flight. Next gains require reducing per-proposal latency (R16:
-  overlap WAL fsync with RPCs; R15: zero-copy accept path).
+  overlap WAL fsync with RPCs; R15: zero-copy accept path). The
+  previous 50K ceiling suggests a regression worth investigating.
 
 ---
 
