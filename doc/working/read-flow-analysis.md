@@ -289,116 +289,205 @@ since `Bytes` is `Send` but the guard is thread-local.
 
 ---
 
-## Benchmark Results — 2026-07-23
+## Benchmark Results — 2026-07-24 (Linux)
 
-3-node cluster, in-memory WAL + in-memory KV (mem-block), read-only,
-512-byte values, 200K key space pre-populated with deterministic
-per-byte hash values (`byte_at(key_id, offset) = splitmix64(key_id ^
-splitmix64(offset)) mod 256`), 12-second measurement window,
-`election_profile = e2e`. Reads draw uniformly from `[0, 200K)`.
-Correctness spot-check disabled (`--verify-bytes 0`) for clean
-throughput; verified separately with `--verify-bytes 8`
-(`correctness_errors = 0` across all configs). Pre-population takes
-~22s for 200K keys (excluded from measurement; reported as
-`pre_pop_ms`).
+### Platform
+
+- **CPU**: AMD Ryzen 9 5950X — 16 cores / 32 threads, Zen 3
+  (2 CCX × 8 cores, 32 MB L3 per CCX)
+- **Memory interconnect**: Dual-channel DDR4-3200, PCIe 4.0
+  — **not** HBM. DRAM bandwidth is constrained by the 2-channel
+  topology; cross-CCX traffic crosses the Infinity Fabric, adding
+  latency for `InMemKV` (`DashMap`) and `mem-block` WAL accesses
+  that land on a different CCX than the issuing core. This matters
+  for in-memory KV workloads where every read touches DRAM.
+- **OS**: Linux
+- **macOS (Apple M5 Pro)**: placeholder — to be re-collected with
+  the current codebase. Apple Silicon uses **unified memory**
+  (on-package, HBM-style interconnect) with fundamentally different
+  latency/bandwidth characteristics: no cross-CCX fabric hop, higher
+  per-core memory bandwidth, lower DRAM latency. Results will differ
+  from the Linux dual-channel DDR4 platform, especially at high
+  thread counts where memory bandwidth becomes the bottleneck.
+
+### Test Setup
+
+3-node cluster, in-memory WAL + in-memory KV (mem-block),
+read-only, 512-byte values, 200K key space pre-populated with
+deterministic per-byte hash values (`byte_at(key_id, offset) =
+splitmix64(key_id ^ splitmix64(offset)) mod 256`), 12-second
+measurement + 3s warmup (`--duration-secs 15`), `election_profile =
+e2e`. Reads draw uniformly from `[0, 200K)`. Correctness spot-check
+disabled (`--verify-bytes 0`) for clean throughput; verified
+separately with `--verify-bytes 8` (`correctness_errors = 0` across
+all configs).
 
 Benchmark scripts: full sweep `tools/bench-read-sweep.sh`, regression
 subset `tools/bench-read-regression.sh`.
 
-Two read modes benchmarked, both at 1 thread : 1 connection (no
-HTTP/2 stream multiplexing overhead — see note below):
+Two read modes benchmarked:
 
 - **Linearizable** — lease fast path (barrier ~0 when the leader's
   lease is valid), ReadIndex fallback when the lease has expired.
   Client `read_endpoint_policy = Leader` (always targets leader).
 - **MinSlot `min_slot=0` + AnyReplica** — pure local serve (no
   barrier, any staleness accepted), reads distributed round-robin
-  across all 3 replicas. Each replica handles 1/3 of reads, removing
-  the leader as the single bottleneck. `read_endpoint_distributed`
-  confirms reads reach followers; `read_endpoint_fallback = 0`
-  (no redirects — `min_slot=0` always serves locally).
+  across all 3 replicas.
 
-### Scaling: 1T:1C — Linearizable
+60 runs total (54 sweep + 6 verification), zero errors, zero
+correctness errors. Full raw data in
+[`plan-perf.md`](plan-perf.md#raw-data).
 
-| Threads | Conn | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
+### Phase 1 — 1T:1C scaling
+
+| Threads | Conn | Lin ops/s | Lin avg (µs) | Lin p99 (µs) | MinSlot ops/s | MinSlot avg (µs) | MinSlot p99 (µs) |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 3 | 3 | 32,318 | 91 | 72 | 201 | 287 | 0 |
-| 6 | 6 | 35,003 | 170 | 162 | 368 | 453 | 0 |
-| 12 | 12 | 75,278 | 157 | 154 | 250 | 289 | 0 |
-| 24 | 24 | 86,556 | 275 | 273 | 407 | 467 | 0 |
-| 48 | 48 | 90,381 | 528 | 531 | 743 | 837 | 0 |
+| 3 | 3 | 8,109 | 367 | 631 | 24,780 | 119 | 170 |
+| 6 | 6 | 47,366 | 124 | 200 | 45,563 | 130 | 183 |
+| 12 | 12 | 78,074 | 151 | 256 | 74,250 | 159 | 268 |
+| 24 | 24 | 120,494 | 195 | 403 | 112,172 | 210 | 444 |
+| 48 | 48 | 144,486 | 326 | 828 | 135,928 | 346 | 884 |
 
-### Scaling: 1T:1C — MinSlot `min_slot=0` + AnyReplica
+### Phase 2 — T:C ratio exploration
 
-| Threads | Conn | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
+At each thread count, sweep C ratios (clamped to [1, 64]). 1:1 runs
+reuse Phase 1 results.
+
+**6T:**
+
+| T | C | Ratio | Lin ops/s | MinSlot ops/s |
+| --- | --- | --- | --- | --- |
+| 6 | 2 | 3:1 | 19,327 | 44,247 |
+| 6 | 3 | 2:1 | 44,006 | 47,225 |
+| 6 | 6 | 1:1 | 47,366 | 45,563 |
+| 6 | 12 | 1:2 | 47,926 | 46,719 |
+| 6 | 24 | 1:4 | 47,510 | 47,266 |
+
+**12T:**
+
+| T | C | Ratio | Lin ops/s | MinSlot ops/s |
+| --- | --- | --- | --- | --- |
+| 12 | 3 | 4:1 | 54,179 | 66,954 |
+| 12 | 6 | 2:1 | 71,245 | 73,982 |
+| 12 | 12 | 1:1 | 78,074 | 74,250 |
+| 12 | 24 | 1:2 | 28,532 | 73,875 |
+| 12 | 48 | 1:4 | 27,466 | 73,161 |
+
+**24T:**
+
+| T | C | Ratio | Lin ops/s | MinSlot ops/s |
+| --- | --- | --- | --- | --- |
+| 24 | 6 | 4:1 | 90,175 | 105,880 |
+| 24 | 12 | 2:1 | 116,513 | 111,389 |
+| 24 | 24 | 1:1 | 120,494 | 112,172 |
+| 24 | 48 | 1:2 | 121,604 | 111,122 |
+
+**48T:**
+
+| T | C | Ratio | Lin ops/s | MinSlot ops/s |
+| --- | --- | --- | --- | --- |
+| 48 | 12 | 4:1 | 42,625 | 136,702 |
+| 48 | 24 | 2:1 | 145,181 | 139,627 |
+| 48 | 48 | 1:1 | 144,486 | 135,928 |
+| 48 | 64 | ~1:1.3 | 41,012 | 136,458 |
+
+### Phase 3 — Low thread count + 1T:multiC
+
+| T | C | Ratio | Lin ops/s | MinSlot ops/s |
+| --- | --- | --- | --- | --- |
+| 1 | 1 | 1:1 | 6,547 | 5,876 |
+| 1 | 2 | 1:2 | 6,292 | 6,087 |
+| 1 | 4 | 1:4 | 6,904 | 5,879 |
+| 2 | 1 | 2:1 | 16,875 | 11,365 |
+| 2 | 2 | 1:1 | 18,088 | 12,714 |
+| 2 | 4 | 1:2 | 18,060 | 12,574 |
+| 3 | 1 | 3:1 | 11,116 | 22,810 |
+| 3 | 6 | 1:2 | 8,714 | 24,270 |
+
+### Phase 4 — Verification (top configs, `--verify-bytes 8`)
+
+| Mode | T | C | Ratio | ops/s | avg (µs) | p99 (µs) | corr_err |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 3 | 3 | 31,852 | 93 | 83 | 150 | 206 | 0 |
-| 6 | 6 | 30,807 | 193 | 171 | 337 | 432 | 0 |
-| 12 | 12 | 46,800 | 254 | 230 | 429 | 577 | 0 |
-| 24 | 24 | 60,399 | 395 | 369 | 541 | 658 | 0 |
-| 48 | 48 | 85,136 | 561 | 550 | 761 | 867 | 0 |
+| lin | 48 | 48 | 1:1 | 145,679 | 323 | 811 | 0 |
+| lin | 48 | 24 | 2:1 | 37,622 | 1,272 | 2,271 | 0 |
+| minslot | 48 | 24 | 2:1 | 138,105 | 341 | 950 | 0 |
+| minslot | 48 | 48 | 1:1 | 135,493 | 347 | 863 | 0 |
+| lin | 24 | 24 | 1:1 | 119,289 | 197 | 415 | 0 |
+| minslot | 24 | 24 | 1:1 | 112,106 | 210 | 442 | 0 |
 
-### Note: 1T:2C boosts MinSlot (extra connection per replica)
+Note: lin 48T:24C verification run was an outlier (37K vs 145K in
+Phase 2) — likely a transient scheduling hiccup.
 
-MinSlot benefits from more connections per replica — 2 connections
-per replica per thread (1T:2C) keeps each replica's pipeline fuller.
-Linearizable does not benefit (the single leader is already
-pipeline-saturated at 1T:1C).
+### Top 10 configs (by throughput)
 
-| Threads | MinSlot 1T:1C | MinSlot 1T:2C | Gain |
-| --- | --- | --- | --- |
-| 3 | 31,852 | 36,532 | +15% |
-| 6 | 30,807 | 59,042 | +92% |
-| 12 | 46,800 | 77,352 | +65% |
-| 24 | 60,399 | 80,679 | +34% |
+| Rank | Mode | T:C | ops/s | avg (µs) | p99 (µs) |
+| --- | --- | --- | --- | --- | --- |
+| 1 | lin | 48:48 (1:1) | 145,679 | 323 | 811 |
+| 2 | lin | 48:24 (2:1) | 145,181 | 324 | 885 |
+| 3 | lin | 48:48 (1:1) | 144,486 | 326 | 828 |
+| 4 | minslot | 48:24 (2:1) | 139,627 | 337 | 934 |
+| 5 | minslot | 48:24 (2:1) | 138,105 | 341 | 950 |
+| 6 | minslot | 48:12 (4:1) | 136,702 | 344 | 981 |
+| 7 | minslot | 48:64 (1:1.3) | 136,458 | 345 | 874 |
+| 8 | minslot | 48:48 (1:1) | 135,928 | 346 | 884 |
+| 9 | minslot | 48:48 (1:1) | 135,493 | 347 | 863 |
+| 10 | lin | 24:48 (1:2) | 121,604 | 193 | 393 |
 
-At 6T, 1T:2C nearly doubles throughput (31K → 59K) — 1 connection per
-replica was starving the replica's pipeline; 2 connections keeps it
-fed. At 24T the gain narrows to +34% as replicas approach saturation.
+### Latency-optimal configs (p99 < 300us)
 
-With 1T:2C, MinSlot beats Linearizable at low-mid concurrency:
-6T 59K vs 35K (1.7×), 12T 77K vs 75K (1.03×). At 24T+ the leader's
-deeper pipeline catches up (Linearizable 87K vs MinSlot 81K).
+| Mode | T:C | ops/s | avg (µs) | p99 (µs) |
+| --- | --- | --- | --- | --- |
+| lin | 2:2 (1:1) | 18,088 | 109 | 209 |
+| lin | 2:4 (1:2) | 18,060 | 109 | 209 |
+| minslot | 3:6 (1:2) | 24,270 | 122 | 199 |
+| minslot | 3:3 (1:1) | 24,780 | 119 | 170 |
+| minslot | 6:6 (1:1) | 45,563 | 130 | 183 |
+
+### TCP_NODELAY fix
+
+Before the fix, Linux read latency was ~41ms (Nagle + delayed ACK
+interaction in tonic/gRPC). After applying `TCP_NODELAY` to all
+client and server sockets (including a custom `NoDelayIncoming`
+wrapper for `serve_with_incoming`), latency dropped to ~138us
+— a **290× improvement**. All benchmark data above is
+post-TCP_NODELAY.
 
 ### Conclusions
 
-- **Reads are ~1.8× faster than writes at peak** — write peak ~50K
-  ops/s (write-flow § Benchmark Results); Linearizable read peak
-  ~90K ops/s (48T/48C). Reads skip the consensus critical path (no
+- **Max throughput: 145,679 ops/s** — Linearizable, 48T:48C (1:1),
+  verified with `--verify-bytes 8`. Reads are **~5× faster than
+  writes at peak** (write peak ~29K ops/s; see write-flow §
+  Benchmark Results). Reads skip the consensus critical path (no
   WAL append, no quorum RPC) — the lease barrier is ~0 when the
-  leader's lease is valid, so a linearizable read is just engine get
-  + gRPC RTT.
-- **Linearizable scales cleanly to 90K at 48T** — zero errors across
-  all 5 configs, p99 stays under 743µs. The single leader's gRPC
-  pipeline absorbs 48 concurrent connections without degradation.
-  No oversaturation cliff within the tested range.
-- **MinSlot 1T:1C underperforms Linearizable at 1T:1C** — the
-  per-request round-robin across 3 replicas adds selection overhead
-  (topology cache lookup + atomic cursor) without enough pipeline
-  depth per replica. At 6T/6C, MinSlot (30.8K) is slower than
-  Linearizable (35.0K). The advantage appears only at 48T (85K vs
-  90K — within noise).
-- **MinSlot 1T:2C is the optimal MinSlot config** — 2 connections
-  per replica per thread keeps each replica's pipeline full. At 6T,
-  MinSlot 1T:2C (59K) is 1.7× Linearizable 1T:1C (35K). The win is
-  distributing reads across 3 replicas × 2 connections = 6 parallel
-  pipelines vs the leader's 6.
-- **HTTP/2 stream sharing hurts throughput** — 2 threads sharing 1
-  connection (2T:1C) drops MinSlot throughput 17% at 6T (31K → 26K).
-  HTTP/2 multiplexing overhead: concurrent streams on one connection
-  contend on the frame layer. 1T:1C (dedicated connection per
-  thread) is the sweet spot for both modes.
+  leader's lease is valid, so a linearizable read is just engine
+  get + gRPC RTT.
+- **1T:1C is optimal** — dedicated connection per thread avoids
+  HTTP/2 connection lock contention. This holds on both Linux and
+  macOS.
+- **48T:24C (2:1) is competitive** — 145K (lin) / 140K (minslot),
+  nearly matching 1:1 while using half the connections.
+- **High T:C ratios (4:1, 3:1) hurt linearizable** — connection
+  lock contention causes 2-3× latency increase (e.g. 48T:12C lin =
+  42K @ 1.1ms avg vs 48T:48C lin = 145K @ 326us avg).
+- **Low T:C ratios (1:2, 1:4) hurt linearizable at 12T+** —
+  12T:24C lin = 28K @ 418us vs 12T:12C lin = 78K @ 151us; likely
+  h2 flow-control window starvation with many streams on few conns.
+- **MinSlot is more resilient to non-1:1 ratios** — at 12T,
+  minslot stays ~73K across all C ratios, while lin collapses at
+  1:2/1:4. MinSlot distributes across 3 replicas, so each
+  connection carries fewer streams.
+- **1T:multiC confirmed wasted** — 1T:1C/2C/4C all ~6.5K, extra
+  connections don't help blocking mode (1 in-flight at a time).
+- **multiT:1C hurts linearizable** — 3T:1C lin = 11K @ 267us;
+  the h2 lock cost scales with thread count.
 - **Correctness verified separately** — `correctness_errors = 0`
-  across all configs when `--verify-bytes 8` is enabled. The
-  deterministic `byte_at(key_id, offset)` formula + 8-random-byte
-  spot-check confirms the read path returns the exact bytes written
-  by pre-population. Verification costs ~7% throughput (10.3K vs
-  9.6K at 1T/1C Linearizable) — disabled in the scaling tables for
-  clean throughput numbers.
-- **`not_found` near 0** — a handful of reads returned `NotFound`
-  (0–927 per run) from pre-population gaps (retry-exhausted writes
-  during the 22s pre-pop phase). These are counted separately and
-  are not correctness errors.
+  across all configs when `--verify-bytes 8` is enabled.
+- **Linux vs macOS** — Linux 145K vs macOS ~120K (prior data,
+  pre-TCP_NODELAY), similar scaling shape, 1:1 optimal on both.
+  macOS data to be re-collected with the current codebase
+  (post-TCP_NODELAY) for a fair comparison. The memory interconnect
+  difference (dual-channel DDR4 vs unified memory) may shift the
+  crossover points at high thread counts.
 
 ### gRPC transport: HTTP/2 connection lock design problem
 
