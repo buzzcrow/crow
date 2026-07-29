@@ -3,12 +3,13 @@
 #
 # Builds crowkv-cli + crowkv-server with debug symbols and frame
 # pointers (Rust + C++ via cc crate), then runs a write benchmark
-# under samply (primary) or perf record (fallback).
+# under perf record (primary, generates flamegraph SVG) or
+# samply (alternative, Firefox Profiler UI).
 #
 # Usage:
 #   bash tools/profile-write.sh [sampler] [duration]
 #
-#   sampler   - samply (default) | perf
+#   sampler   - perf (default) | samply
 #   duration  - benchmark duration in seconds (default 15)
 #
 # Output:
@@ -19,26 +20,30 @@
 #
 # Prerequisites:
 #   - pixi installed, project deps resolved
-#   - samply: cargo install samply (auto-checked)
+#   - samply + inferno: installed via `pixi run install-deps`
 #   - perf:   linux-tools for running kernel
-#   - jq installed
 set -euo pipefail
 cd /cjdata/cpp/crowkv
 
-SAMPLER="${1:-samply}"
+if [ "$(uname -s)" = "Darwin" ]; then
+    DEFAULT_SAMPLER="samply"
+else
+    DEFAULT_SAMPLER="perf"
+fi
+SAMPLER="${1:-$DEFAULT_SAMPLER}"
 DURATION="${2:-15}"
 RESULTS_DIR="doc/working"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 
-# Peak write config from the sweep: 48T:48C MI=16
-THREADS=48
-CONNECTIONS=48
-MI=16
+# Write config: 24T:24C max-inflight=32
+THREADS=24
+CONNECTIONS=24
+MAX_INFLIGHT=32
 KEYSPACE=1000000
 VALUE_SIZE=512
 
 echo "=== CrowKV write profiling ($SAMPLER) ==="
-echo "Config: ${THREADS}T:${CONNECTIONS}C MI=${MI} ${DURATION}s"
+echo "Config: ${THREADS}T:${CONNECTIONS}C max-inflight=${MAX_INFLIGHT} ${DURATION}s"
 echo ""
 
 # ── Step 1: Build with debug symbols + frame pointers ──
@@ -76,7 +81,7 @@ if [ "$SAMPLER" = "samply" ]; then
         exit 1
     fi
 
-    OUTPUT="${RESULTS_DIR}/profile-write-${TIMESTAMP}.zip"
+    OUTPUT="${RESULTS_DIR}/profile-write-${TIMESTAMP}.json.gz"
     echo ">>> Running samply record (${DURATION}s bench)..."
     echo "    Profile will be saved to: ${OUTPUT}"
     echo "    A browser tab should open automatically when done."
@@ -86,13 +91,22 @@ if [ "$SAMPLER" = "samply" ]; then
         "$CLI_BIN" bench run \
         --mode mem --workload write --duration-secs "$DURATION" \
         --threads "$THREADS" --connections "$CONNECTIONS" \
-        --max-inflight "$MI" --inflight-queues 1 \
+        --max-inflight "$MAX_INFLIGHT" --inflight-queues 1 \
+        --metrics-interval 1 \
         --key-space "$KEYSPACE" --value-size "$VALUE_SIZE" \
         --verify-bytes 0 --json 2>&1
 
     echo ""
     echo ">>> Profile saved: ${OUTPUT}"
-    echo "    View with: samply load ${OUTPUT}"
+    echo ""
+    echo ">>> To view the profile:"
+    echo "    samply load ${OUTPUT}"
+    echo ""
+    echo "    This starts a local web server and opens Firefox Profiler"
+    echo "    in your browser. Press Ctrl+C to stop the server when done."
+    echo ""
+    echo "    Or upload directly to https://profiler.firefox.com"
+    echo "    (Load a profile from file → select the .json.gz)"
 
 elif [ "$SAMPLER" = "perf" ]; then
     if ! command -v perf &>/dev/null; then
@@ -107,14 +121,17 @@ elif [ "$SAMPLER" = "perf" ]; then
     echo "    Data will be saved to: ${PERFDIR}/"
     echo ""
 
-    # -F 999: 999Hz sampling   -g: call graphs   --call-graph dwarf: DWARF-based
-    # unwinding (works without frame pointers but we add them anyway for
-    # fp-based fallback).
-    perf record -F 999 -g --call-graph dwarf -o "$PERFDIR/perf.data" -- \
+    # -F 999: 999Hz sampling   -g: call graphs   --call-graph fp: frame-pointer
+    # unwinding (fast, low overhead; works because we build with
+    # -Cforce-frame-pointers=yes and -fno-omit-frame-pointer).
+    # If you see truncated stacks through pre-built libs, switch to:
+    #   --call-graph dwarf
+    perf record -F 999 -g --call-graph fp -o "$PERFDIR/perf.data" -- \
         "$CLI_BIN" bench run \
         --mode mem --workload write --duration-secs "$DURATION" \
         --threads "$THREADS" --connections "$CONNECTIONS" \
-        --max-inflight "$MI" --inflight-queues 1 \
+        --max-inflight "$MAX_INFLIGHT" --inflight-queues 1 \
+        --metrics-interval 1 \
         --key-space "$KEYSPACE" --value-size "$VALUE_SIZE" \
         --verify-bytes 0 --json 2>&1
 
@@ -124,21 +141,17 @@ elif [ "$SAMPLER" = "perf" ]; then
     # Generate perf script for flamegraph conversion
     perf script -i "$PERFDIR/perf.data" > "$PERFDIR/perf-script.txt" 2>/dev/null
 
-    # Generate flamegraph SVG via brendangregg/FlameGraph tools.
-    # Auto-detect from /tmp/FlameGraph, $FLAMEGRAPH_DIR, or PATH.
-    FLAMEGRAPH_DIR="${FLAMEGRAPH_DIR:-/tmp/FlameGraph}"
-    if [ -x "${FLAMEGRAPH_DIR}/flamegraph.pl" ]; then
-        export PATH="${FLAMEGRAPH_DIR}:${PATH}"
-    fi
-    if command -v stackcollapse-perf.pl &>/dev/null && command -v flamegraph.pl &>/dev/null; then
+    # Generate flamegraph SVG via inferno (Rust port of FlameGraph).
+    # Installed through `pixi run install-deps` (cargo install inferno).
+    if command -v inferno-collapse-perf &>/dev/null && command -v inferno-flamegraph &>/dev/null; then
         echo "    Generating flamegraph SVG..."
         perf script -i "$PERFDIR/perf.data" 2>/dev/null | \
-            stackcollapse-perf.pl --all | \
-            flamegraph.pl --title "CrowKV write ${THREADS}T:${CONNECTIONS}C MI=${MI}" \
-            > "$PERFDIR/flamegraph.svg" 2>/dev/null
+            inferno-collapse-perf --all | \
+            inferno-flamegraph --title "CrowKV write ${THREADS}T:${CONNECTIONS}C MI=${MAX_INFLIGHT}" \
+            > "$PERFDIR/flamegraph.svg"
         echo "    Flamegraph SVG: ${PERFDIR}/flamegraph.svg"
     else
-        echo "    (Install FlameGraph: git clone --depth 1 https://github.com/brendangregg/FlameGraph /tmp/FlameGraph)"
+        echo "    (Install inferno: pixi run install-deps  or  cargo install inferno)"
     fi
 
     echo ""
@@ -146,7 +159,7 @@ elif [ "$SAMPLER" = "perf" ]; then
     echo "    hotspot ${PERFDIR}/perf.data"
     echo ""
     echo ">>> Or generate a flamegraph manually:"
-    echo "    perf script -i ${PERFDIR}/perf.data | stackcollapse-perf.pl | flamegraph.pl > ${PERFDIR}/flamegraph.svg"
+    echo "    perf script -i ${PERFDIR}/perf.data | inferno-collapse-perf --all | inferno-flamegraph > ${PERFDIR}/flamegraph.svg"
 
 else
     echo "ERROR: unknown sampler '$SAMPLER' (expected: samply | perf)"
