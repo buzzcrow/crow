@@ -53,6 +53,8 @@ crowkv-console/web/log/
 # ── Profiling artifacts ─────────────────────────────────────────
 # samply / perf / flamegraph output (profile-write-*.zip, profile-write-*/)
 doc/working/profile-*
+# bench sweep raw output (bench-write-*.tsv, bench-read-*.tsv, etc.)
+doc/working/bench-*.tsv
 perf.data*
 perf-script.txt
 flamegraph.svg

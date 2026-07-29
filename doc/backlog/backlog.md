@@ -11,7 +11,7 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R32** — Bump this line in the same commit when adding a new item.
+**Next R number: R33** — Bump this line in the same commit when adding a new item.
 
 ### Medium Priority
 
@@ -79,6 +79,20 @@ complexity, and dependency. Before implementation, follow the
   the 50K→29K difference is largely a platform effect, not a code
   regression. The Intel same-platform bisect remains open but is lower
   priority; R16a/R17/R30 can proceed on M5 Pro without waiting.
+- **[R32](R32-custom-rust-rpc.md)** — Custom Rust RPC library to replace gRPC on the hot path — Area:
+  RPC / consensus — gRPC (tonic + h2) serializes concurrent writers on a
+  connection-level userspace lock (HPACK table, frame buffer,
+  flow-control windows); measured cost is ~17% at 2T:1C, zero at
+  1T:1C. A custom `[len][req_id][protobuf]`-over-raw-TCP transport
+  removes the userspace funnel — the kernel TCP lock is the only
+  serialization point. **Deferred until** read throughput is the
+  primary constraint AND the h2 lock is profiled as the hot spot; until
+  then write-path (R16a/R17/R30) and disk-I/O work take precedence.
+  High complexity (2–4K lines: framing, pool, reconnect, timeout,
+  cancellation, backpressure, TLS). Scope is the internal
+  replica-to-replica path only; management API stays on Axum/HTTP.
+  Reference implementations: protosocket (Momento), Volo (CloudWeGo),
+  Cap'n Proto RPC.
 
 ### Low Priority
 
