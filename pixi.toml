@@ -57,6 +57,8 @@ set -e
 git config core.hooksPath .githooks
 test -d crowkv-console/web/ui/node_modules || (cd crowkv-console/web/ui && npm ci)
 cargo install cargo-tarpaulin || echo "Warning: cargo-tarpaulin install failed (expected on macOS)"
+cargo install --locked samply || echo "Warning: samply install failed"
+cargo install --locked inferno || echo "Warning: inferno install failed"
 '
 '''
 ct-fmt = '''
@@ -81,6 +83,9 @@ bench-burst = { cmd = "cargo run --release -p crowkv-cli -- bench run --mode mem
 bench-soak = { cmd = "cargo run --release -p crowkv-cli -- bench run --mode mem --duration-secs 30 --threads 8 --connections 4 --key-space 100000 --value-size 1024 --workload write", depends-on = ["build"] }
 bench-hotread = { cmd = "cargo run --release -p crowkv-cli -- bench run --mode mem --duration-secs 15 --threads 32 --connections 4 --key-space 64 --value-size 64 --workload read", depends-on = ["build"] }
 bench-compare = { cmd = "cargo run --release -p crowkv-cli -- bench compare", depends-on = ["build"] }
+
+# ── Profile ───────────────────────────────────────────────────────
+profile-write = { cmd = "bash tools/profile-write.sh", depends-on = ["build"] }
 
 # ── Test ─────────────────────────────────────────────────────────
 clean-env = "pkill -9 -f 'crowkv-server.*test-logs' 2>/dev/null; rm -rf test-logs; true"
