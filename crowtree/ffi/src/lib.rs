@@ -54,6 +54,16 @@ mod sys {
     pub struct ct_future {
         _private: [u8; 0],
     }
+    #[repr(C)]
+    pub struct ct_write_handle {
+        _private: [u8; 0],
+    }
+
+    #[repr(C)]
+    pub struct ct_write_ptrs {
+        pub key: *mut u8,
+        pub val: *mut u8,
+    }
 
     #[repr(C)]
     pub struct ct_buf {
@@ -157,6 +167,15 @@ mod sys {
         pub fn ct_apply_delete(t: *mut ct_tree, slot: u64, key: *const u8, klen: usize) -> c_int;
         pub fn ct_apply_batch_slices(t: *mut ct_tree, slot: u64, ops: *const ct_kv_ref, count: u64) -> c_int;
         pub fn ct_force_advance_slot(t: *mut ct_tree, slot: u64);
+        pub fn ct_alloc(
+            t: *mut ct_tree,
+            key_len: usize,
+            val_len: usize,
+            out_handle: *mut *mut ct_write_handle,
+            out_ptrs: *mut ct_write_ptrs,
+        ) -> c_int;
+        pub fn ct_apply_put_owned(t: *mut ct_tree, slot: u64, handle: *mut ct_write_handle) -> c_int;
+        pub fn ct_free_handle(handle: *mut ct_write_handle);
         pub fn ct_put(t: *mut ct_tree, key: *const u8, klen: usize, val: *const u8, vlen: usize) -> c_int;
         pub fn ct_del(t: *mut ct_tree, key: *const u8, klen: usize) -> c_int;
         pub fn ct_flush(t: *mut ct_tree) -> c_int;
@@ -431,6 +450,71 @@ pub struct ViewEntry {
     pub value: Vec<u8>,
 }
 
+/// RAII wrapper over a crowtree-owned zero-copy write handle (R3).
+/// The caller writes key and value bytes directly into crowtree-owned
+/// memory via [`WriteHandle::key_mut`] / [`WriteHandle::value_mut`],
+/// then [`WriteHandle::apply`] consumes the handle with zero value
+/// memcpy. If dropped without applying, the handle is freed via
+/// `ct_free_handle` (RAII safety).
+///
+/// `!Send + !Sync`: the handle's internal pointers are not safe to
+/// share across threads.
+pub struct WriteHandle {
+    ptr: *mut sys::ct_write_handle,
+    tree: *mut sys::ct_tree,
+    key_ptr: *mut u8,
+    val_ptr: *mut u8,
+    key_len: usize,
+    val_len: usize,
+    consumed: bool,
+}
+
+impl std::fmt::Debug for WriteHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WriteHandle")
+            .field("key_len", &self.key_len)
+            .field("val_len", &self.val_len)
+            .field("consumed", &self.consumed)
+            .finish_non_exhaustive()
+    }
+}
+
+impl WriteHandle {
+    /// Writable key slice `[0, key_len)`.
+    pub fn key_mut(&mut self) -> &mut [u8] {
+        if self.consumed || self.key_len == 0 || self.key_ptr.is_null() {
+            return &mut [];
+        }
+        unsafe { std::slice::from_raw_parts_mut(self.key_ptr, self.key_len) }
+    }
+
+    /// Writable value slice `[0, val_len)`.
+    pub fn value_mut(&mut self) -> &mut [u8] {
+        if self.consumed || self.val_len == 0 || self.val_ptr.is_null() {
+            return &mut [];
+        }
+        unsafe { std::slice::from_raw_parts_mut(self.val_ptr, self.val_len) }
+    }
+
+    /// Apply the pre-allocated key+value at `slot` (zero value memcpy).
+    /// Consumes the handle.
+    pub fn apply(mut self, slot: u64) -> Result<(), CtError> {
+        if self.consumed {
+            return Err(CtError::InvalidArgument);
+        }
+        self.consumed = true;
+        check(unsafe { sys::ct_apply_put_owned(self.tree, slot, self.ptr) })
+    }
+}
+
+impl Drop for WriteHandle {
+    fn drop(&mut self) {
+        if !self.consumed {
+            unsafe { sys::ct_free_handle(self.ptr) };
+        }
+    }
+}
+
 /// Owning handle to a crowtree engine. Send + Sync: the C++ engine serializes
 /// writes internally and keeps reads lock-free.
 pub struct Crowtree {
@@ -520,6 +604,28 @@ impl Crowtree {
                 value.as_ptr(),
                 value.len(),
             )
+        })
+    }
+
+    /// Allocate crowtree-owned memory for a zero-copy put (R3). Returns a
+    /// [`WriteHandle`] whose `key_mut`/`value_mut` slices the caller writes
+    /// into directly, then [`WriteHandle::apply`] consumes with zero value
+    /// memcpy.
+    pub fn alloc_put(&self, key_len: usize, val_len: usize) -> Result<WriteHandle, CtError> {
+        let mut handle: *mut sys::ct_write_handle = std::ptr::null_mut();
+        let mut ptrs = sys::ct_write_ptrs {
+            key: std::ptr::null_mut(),
+            val: std::ptr::null_mut(),
+        };
+        check(unsafe { sys::ct_alloc(self.as_ptr(), key_len, val_len, &mut handle, &mut ptrs) })?;
+        Ok(WriteHandle {
+            ptr: handle,
+            tree: self.as_ptr(),
+            key_ptr: ptrs.key,
+            val_ptr: ptrs.val,
+            key_len,
+            val_len,
+            consumed: false,
         })
     }
 

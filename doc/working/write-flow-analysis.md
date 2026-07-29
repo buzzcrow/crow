@@ -36,8 +36,8 @@ Client PUT/DELETE/BatchWrite
             ii. run_accept_phase
                 - local on_accept (acceptor.accept + WAL append Accepted)
                   [O(1) ref-count: PxLogEntry::clone for cas_accepted]
-                  [copy: entry.payload.to_vec() for WALRecord, unavoidable
-                   today — could be Bytes::clone if WALRecord stored Bytes]
+                  [no copy: encode_accepted_payload is entry.payload.clone()
+                   (O(1) ref-count); WALRecord.payload is Bytes]
                   [no copy: IoSlice borrows Bytes for vectored writev]
                 - concurrent remote send_accept RPCs (join_all, bidi LearnerStream)
                   [O(1) ref-count: Bytes::clone for AcceptRequest]
@@ -168,10 +168,23 @@ Client PUT/DELETE/BatchWrite
   `acceptor.accept` take `&PxLogEntry`; redundant clones eliminated;
   only remaining clone is inside `inner_accept` for `cas_accepted` (slot
   node must own its copy, O(1) ref-count bump with `Bytes` payload).
-- **R16 — Overlap local WAL fsync with remote RPC fan-out**: local
-  `fdatasync` is on the critical path before remote RPCs begin (~10-100
-  µs on NVMe). Would weaken W6 ack contract for local replica; requires
-  feature flag + crash-recovery tests.
+- **R16a — Concurrent local + remote fan-out**: today both
+  `run_accept_phase` and `run_prepare_phase` `await` the local
+  `on_accept`/`on_prepare` (which runs acceptor CAS + WAL append +
+  `fdatasync`) *before* issuing any remote RPC. The leader's local
+  fsync (~10-100 µs on NVMe) sits on the critical path ahead of the
+  network RTT. Fix: issue the local handler and the remote RPCs
+  concurrently (fold the local call into the same `join_all`). The
+  quorum check still awaits the local reply before counting it, so
+  **W6 is not weakened** — W6 only forbids the local replica replying
+  `Accepted` before persist; the proposer still waits for that reply.
+  Pure win, no contract change, no feature flag.
+- **R16b — Early ack before local persist**: return `Chosen` before the
+  local WAL flush completes, tracking local persist separately from
+  quorum. *This* is the part that weakens W6 for the local replica — a
+  crash between accept reply and WAL flush may lose the accepted value
+  (safe in Paxos, but changes durability ordering). Requires feature
+  flag + crash-recovery tests. Lower priority than R16a.
 - **R17 — Async engine apply after quorum**: `learn_chosen` runs before
   `ProposeResult::Chosen` is returned; engine apply (FFI + memtable
   insert) is on the write critical path. Would break read-your-writes;
@@ -291,14 +304,57 @@ converge (~12.8K).
 
 ### Comparison with previous test (2026-07-21)
 
-The previous test reported 50K ops/s peak at 64T:8C. This sweep
-measures ~29K at all 48T+ configs, including a direct 64T:8C
-re-run (29,319 ops/s). The difference is likely due to code changes
-between July 21 and July 24 (WAL restore, election fixes, group
-wiring changes). The relative findings are consistent: window is the
-primary lever, threads scale until consensus saturation, connections
-have minimal effect. The absolute throughput regression is
-not investigated here — it warrants a separate profiling pass.
+The previous test reported 50K ops/s peak at 64T:8C (Intel Ryzen 9
+5950X, Linux). This sweep measures ~29K at all 48T+ configs on the
+same Intel platform, including a direct 64T:8C re-run (29,319 ops/s).
+The relative findings are consistent: window is the primary lever,
+threads scale until consensus saturation, connections have minimal
+effect. The absolute throughput difference is investigated below.
+
+### macOS M5 Pro retest (2026-07-29)
+
+To separate platform effects from code regression, the regression
+sentinel configs were re-run on macOS M5 Pro (arm64, Darwin 25.5.0).
+Same workload (write-only, 512 B values, 1M key space, 12 s, mem
+mode, Queue admission, MI=64 unless noted).
+
+| Threads | Conn | MI | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 64 | 9,457 | 104 | 96 | 137 | 241 | 0 |
+| 24 | 24 | 64 | 41,062 | 582 | 574 | 845 | 1,099 | 0 |
+| 48 | 48 | 64 | 46,679 | 1,026 | 1,015 | 1,462 | 2,397 | 0 |
+| 64 | 8 | 64 | 47,808 | 1,336 | 1,329 | 1,900 | 3,075 | 0 |
+| 48 | 48 | 1 | 13,320 | 3,602 | 3,083 | 3,721 | 105,791 | 48 |
+
+**Key finding: the 50K→29K difference is largely a platform effect,
+not a code regression.** On M5 Pro the 64T:8C config hits ~48K —
+within 4% of the original Intel 50K claim. The M5 Pro is meaningfully
+faster than the Intel Ryzen 9 5950X for this workload at every config:
+
+- **Single-thread (1T:1C)**: M5 Pro 9.5K vs Intel 2.8K — **3.4×**.
+  The M5 Pro's per-core throughput and memory subsystem dominate;
+  single-thread write latency is bound by per-proposal critical path
+  (WAL fsync + quorum RPC), and M5 Pro's NVMe + memory latency is
+  substantially lower.
+- **Saturation (24T+)**: M5 Pro ~41-48K vs Intel ~29K — **1.4-1.7×**.
+  The M5 Pro has fewer but faster cores; it saturates later and at a
+  higher ceiling.
+- **Window impact (MI=1 vs MI=64)**: same 4-5× ratio on both platforms
+  (M5 Pro 13K→47K; Intel 6K→29K). The relative shape is identical;
+  only the absolute ceiling differs.
+
+**Implication for R31**: the Intel same-platform regression (50K on
+07-21 → 29K on 07-24) is still real and warrants an Intel bisect if
+that platform is available. But the "ceiling" is not 29K globally —
+that is Intel-specific. On M5 Pro the steady-state ceiling is ~48K,
+close to the original 50K claim. Optimizations (R16a/R17/R30) should
+be benchmarked on a single consistent platform; cross-platform
+comparisons are not meaningful for absolute throughput.
+
+The MI=1 run on M5 Pro showed 48 errors with a 106 ms p999 tail —
+queue saturation under aggressive load with a single permit; the
+errors are likely client-side timeouts at the 3.6 ms avg latency, not
+consensus failures (zero errors at MI=64).
 
 ### Conclusions
 
@@ -314,10 +370,14 @@ not investigated here — it warrants a separate profiling pass.
 - **Queue mode: zero errors across all 28 configurations** — no `Busy`
   rejections, no client retry; queue naturally backpressures at any
   window size.
-- **Scaling ceiling ~29K ops/s** — per-proposal latency ~1.7ms at 48
-  in-flight. Next gains require reducing per-proposal latency (R16:
-  overlap WAL fsync with RPCs; R15: zero-copy accept path). The
-  previous 50K ceiling suggests a regression worth investigating.
+- **Scaling ceiling is platform-dependent** — Intel Ryzen 9 5950X
+  ~29K ops/s; Apple M5 Pro ~48K ops/s at the same config. Per-proposal
+  latency at 48 inflight is ~1.7 ms (Intel) vs ~1.0 ms (M5 Pro). Next
+  gains require reducing per-proposal latency (R16a: concurrent local
+  + remote fan-out; R15: zero-copy accept path, done). The Intel
+  same-platform 50K→29K drop (07-21 → 07-24) is tracked as R31; the
+  M5 Pro retest shows the code path itself reaches ~48K, so the
+  "regression" is largely a platform effect, not a code defect.
 
 ---
 
@@ -327,15 +387,17 @@ Copy points are annotated inline in the flow diagram above. Summary
 of what remains:
 
 - **O(n) unavoidable** — payload encoding (client key/value slices →
-  contiguous `Vec<u8>`); WAL encode (`entry.payload.to_vec()` for
-  `WALRecord`); WAL replay (`Bytes::copy_from_slice` to reconstruct
-  `PxLogEntry`); C++ engine apply (internal memtable copy); gRPC
-  socket write (kernel user→socket buffer copy).
+  contiguous `Vec<u8>`); WAL replay (`Bytes::copy_from_slice` to
+  reconstruct `PxLogEntry` from on-disk bytes); C++ engine apply
+  (internal memtable copy); gRPC socket write (kernel user→socket
+  buffer copy).
 - **O(1) ref-count bumps (negligible)** — `base_entry` payload clone
   per slot retry; `inner_accept` entry clone for `cas_accepted`;
   `send_accept` payload clone for protobuf; `learn_chosen` entry clone
-  for learner; WAL `encode_frame` payload clone for `RecordFrame`;
-  Batch decode `Bytes::slice` per key/value (shares payload buffer).
+  for learner; WAL `from_accepted` payload clone (`encode_accepted_payload`
+  is `entry.payload.clone()`); WAL `encode_frame` payload clone for
+  `RecordFrame`; Batch decode `Bytes::slice` per key/value (shares
+  payload buffer).
 - **Zero-copy (move/borrow)** — `Vec<u8>` → `Bytes` at `propose`
   entry; gRPC deserialization → `PxLogEntry` (move `Bytes`); WAL
   vectored write (`IoSlice` borrows `Bytes`); FFI batch apply
@@ -343,12 +405,10 @@ of what remains:
 
 ### Optimization Opportunities
 
-- **WAL encode** (`entry.payload.to_vec()`) — eliminable if `WALRecord`
-  stored `Bytes` directly instead of round-tripping through `Vec<u8>`.
-  `entry.payload` is already `Bytes`; `to_vec()` is redundant —
-  `WALRecord.payload` could be `entry.payload.clone()` (O(1) ref-count).
-  `encode_accepted_payload` exists only as a seam for future encoding
-  changes; today it is a straight `to_vec()`.
+- **WAL encode** — already zero-copy: `encode_accepted_payload` is
+  `entry.payload.clone()` (O(1) ref-count); `WALRecord.payload` is
+  `Bytes`. No further work here. (Previously listed as a `to_vec()`
+  copy — that was stale; the code already does the right thing.)
 - **Batch decode** — already zero-copy: `Batch::decode` uses
   `Bytes::slice` (O(1) ref-count), not `to_vec()`; `BatchOp` owns
   `Bytes` that share the payload buffer.

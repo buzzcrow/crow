@@ -515,3 +515,60 @@ async fn try_get_pinned_fast_path_with_large_value() {
         _ => panic!("expected Ready(Ok(Some)) on resident hit"),
     }
 }
+
+#[test]
+fn zero_copy_alloc_apply_round_trip() {
+    let t = Crowtree::open(&Options::default()).unwrap();
+    let mut h = t.alloc_put(3, 5).unwrap();
+    h.key_mut().copy_from_slice(b"abc");
+    h.value_mut().copy_from_slice(b"hello");
+    h.apply(1).unwrap();
+    t.flush().unwrap();
+    let got = t.get(b"abc").unwrap();
+    assert_eq!(got, Some((1u64, b"hello".to_vec())));
+}
+
+#[test]
+fn zero_copy_large_value_round_trip() {
+    let t = Crowtree::open(&Options::default()).unwrap();
+    let big: Vec<u8> = (0..8192u32).map(|i| u8::try_from(i % 256).unwrap()).collect();
+    let mut h = t.alloc_put(4, big.len()).unwrap();
+    h.key_mut().copy_from_slice(b"bigk");
+    h.value_mut().copy_from_slice(&big);
+    h.apply(1).unwrap();
+    t.flush().unwrap();
+    let got = t.get(b"bigk").unwrap();
+    assert_eq!(got, Some((1u64, big)));
+}
+
+#[test]
+fn zero_copy_empty_value_round_trip() {
+    let t = Crowtree::open(&Options::default()).unwrap();
+    let mut h = t.alloc_put(2, 0).unwrap();
+    h.key_mut().copy_from_slice(b"ev");
+    assert!(h.value_mut().is_empty());
+    h.apply(1).unwrap();
+    t.flush().unwrap();
+    let got = t.get(b"ev").unwrap();
+    assert_eq!(got, Some((1u64, Vec::new())));
+}
+
+#[test]
+fn zero_copy_handle_drop_without_apply_no_leak() {
+    let t = Crowtree::open(&Options::default()).unwrap();
+    let mut h = t.alloc_put(10, 4096).unwrap();
+    h.key_mut().fill(0xAB);
+    h.value_mut().fill(0xCD);
+    drop(h); // RAII frees the handle
+}
+
+#[test]
+fn zero_copy_oversized_key_rejected() {
+    let opt = Options {
+        frame_bytes: 4096,
+        ..Default::default()
+    };
+    let t = Crowtree::open(&opt).unwrap();
+    let result = t.alloc_put(3000, 4);
+    assert_eq!(result.err(), Some(CtError::InvalidArgument));
+}
