@@ -3,7 +3,7 @@
 
 //! JSON-serializable bench report.
 //!
-//! Key work: percentile extraction from `hdrhistogram::Histogram<u64>`,
+//! Key work: percentile extraction from `crow_common::metrics::PreciseHistogram`,
 //! a lossless round-trippable struct, helpers to read/write the report
 //! file under `bench-runs/<run-id>.json`.
 
@@ -13,7 +13,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use hdrhistogram::Histogram;
+use crow_common::metrics::PreciseHistogram;
 use serde::{Deserialize, Serialize};
 
 use super::workload::{OpKind, WorkloadKind};
@@ -52,10 +52,10 @@ impl Percentiles {
     }
 }
 
-/// Extract a fixed set of percentiles from an HDR histogram.
+/// Extract a fixed set of percentiles from a precise histogram.
 #[must_use]
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-pub fn percentiles_from_histogram(h: &Histogram<u64>) -> Percentiles {
+pub fn percentiles_from_histogram(h: &PreciseHistogram) -> Percentiles {
     if h.is_empty() {
         return Percentiles::empty();
     }
@@ -778,21 +778,18 @@ pub struct OpStats {
     pub no_leader: u64,
     pub not_found: u64,
     pub correctness_errors: u64,
-    pub histogram: Histogram<u64>,
+    pub histogram: PreciseHistogram,
 }
 
 impl OpStats {
-    /// Build an empty `OpStats` with an auto-resizing HDR histogram at
-    /// 3 significant digits. Auto-resize means the upper bound grows on
-    /// demand instead of saturating, so pathological tail latencies are
-    /// reported faithfully at the cost of a few extra allocations.
-    ///
-    /// # Panics
-    /// Panics if `Histogram::new` rejects the precision (it shouldn't
-    /// with `3`).
+    /// Build an empty `OpStats` with a `PreciseHistogram` at 3 significant
+    /// digits. The histogram's pre-allocated range (`2^32 µs`) covers any
+    /// realistic bench latency, so no auto-resize is needed.
     #[must_use]
     pub fn new() -> Self {
-        let mut histogram = Histogram::<u64>::new(3).expect("hdr histogram precision");
+        let mut histogram = PreciseHistogram::new(3);
+        // Retained for parity with the previous hdrhistogram-based API;
+        // a no-op since the pre-allocated range already covers everything.
         histogram.auto(true);
         Self {
             ops: 0,
@@ -818,24 +815,20 @@ impl OpStats {
         if outcome.correctness_error {
             self.correctness_errors += 1;
         }
-        // Floor at 1us; auto-resize handles the upper bound.
+        // Floor at 1us; PreciseHistogram clamps the upper bound internally.
         let v = latency_us.max(1);
-        let _ = self.histogram.record(v);
+        self.histogram.record(v);
     }
 
     /// Merge another `OpStats` into this one (used by the runner to reduce
     /// per-worker stats).
-    ///
-    /// # Panics
-    /// Panics if the underlying HDR histogram addition fails (it shouldn't
-    /// with equal bounds).
     pub fn merge(&mut self, other: &Self) {
         self.ops += other.ops;
         self.errors += other.errors;
         self.no_leader += other.no_leader;
         self.not_found += other.not_found;
         self.correctness_errors += other.correctness_errors;
-        self.histogram.add(&other.histogram).expect("histogram add");
+        self.histogram.add(&other.histogram);
     }
 
     #[must_use]
@@ -884,10 +877,10 @@ mod tests {
 
     #[test]
     fn percentiles_from_histogram_computes_mean() {
-        let mut h = Histogram::<u64>::new(3).unwrap();
-        h.record(10).unwrap();
-        h.record(20).unwrap();
-        h.record(30).unwrap();
+        let mut h = PreciseHistogram::new(3);
+        h.record(10);
+        h.record(20);
+        h.record(30);
         let p = percentiles_from_histogram(&h);
         assert_eq!(p.avg_us, 20);
         assert_eq!(p.min_us, 10);
@@ -896,7 +889,7 @@ mod tests {
 
     #[test]
     fn percentiles_from_empty_histogram_is_empty() {
-        let h = Histogram::<u64>::new(3).unwrap();
+        let h = PreciseHistogram::new(3);
         let p = percentiles_from_histogram(&h);
         assert_eq!(p, Percentiles::empty());
     }
