@@ -70,7 +70,7 @@ doc only when a task touches a topic in its row.
 | `design/design-leader-election.md` | Term/ballot bridge, election protocol, new-leader bulk Phase 1, heartbeats, leader lease, ReadIndex, step-down. |
 | `design/design-slot.md` | Parallel slot pipelining (§1–§14): sliding window, gap detection/repair, safe-slot, per-key resolved-slot, correctness analysis, linearizability proof. Concurrent sparse slot list (§15–§22): `SlotList<T>`, chunk layout, trim/GC, reclamation. |
 | `design/design-rpc.md` | Wire protocol design: classic Paxos message surface, LearnerStream bidi stream (why dedicated stream, flow control, parallelism), PxService, version compatibility, Paxos error model (§7). Cluster discovery is HTTP, not gRPC. |
-| `design/design-reconfiguration.md` | Direct per-node mutation model, member add/remove, leader transfer, `membership_epoch` fence, safety argument, design history. |
+| `design/design-reconfiguration.md` | Direct per-node mutation model, member add/remove, leader transfer, `membership_epoch` fence, safety argument, design history. Applies to all groups including system group (group 0). |
 | `design/design-state-machine.md` | Storage plug-in: per-key slot tracking, apply semantics, snapshot, compaction, compare, engine impls. |
 
 ### Storage
@@ -86,9 +86,9 @@ doc only when a task touches a topic in its row.
 
 | Doc | Read when working on |
 | --- | --- |
-| `design/design-console.md` | `crowkv-console` design: shared core crate, web (Axum + React) and CLI (`clap`) frontends, two-hierarchy API (physical `/api/racks`,`/api/nodes` vs. logical `/api/stores`), monitor task, SSH lifecycle, Swagger UI hosting, CLI design rules. |
+| `design/design-console.md` | `crowkv-console` design: shared core crate, web (Axum + React) and CLI (`clap`) frontends, two-hierarchy API (physical `/api/racks`,`/api/nodes` vs. logical `/api/stores`), monitor task, SSH lifecycle, Swagger UI hosting, CLI design rules, persistent cluster config / system group (§4.3: two-phase bootstrap, topology KV schema, three-way fallback, divergence reconciliation). |
 | `design/design-ui.md` | Web UI design (v1 lean rewrite): 3-pane shell, two hierarchy views, slim React Flow canvas, inspector (Details/Activity), embedded Swagger, KV Operator center panel (§6.1: store/group selector, paginated scan, inline CRUD, demo inject/delete), minimal embedding contract. |
-| `design/design-kv-server.md` | `crowkv-server` binary: KV engine selection, startup ordering, concurrency model, HTTP management API design (axum), group lifecycle, shutdown, port pool. |
+| `design/design-kv-server.md` | `crowkv-server` binary: KV engine selection, startup ordering (§2.2: `node-config.json` auto-restore + group 0 reconciliation), concurrency model, HTTP management API design (axum, §2.4: system group endpoints `/system/init`, `/topology/finalize`, `/topology/ready`), group lifecycle, shutdown, port pool. |
 
 ### Cross-Cutting
 
