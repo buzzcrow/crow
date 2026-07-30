@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 use crowkv::wal::io_backend::IoBackend;
 use crowkv::wal::record::{RecordType, WALRecord};
 use crowkv::wal::segment::SegmentReader;
-use crowkv_console_shared::lifecycle::crowkv_server_bin;
+use crowkv_console_shared::lifecycle::{crowkv_server_bin, stop_pid_with_timeout};
 use crowkv_console_shared::ConsoleConfig;
 use crowkv_web::{router, AppState};
 use serde_json::{json, Value};
@@ -37,10 +37,7 @@ struct ProcessGuard {
 impl Drop for ProcessGuard {
     fn drop(&mut self) {
         for pid in self.pids.values() {
-            let _ = std::process::Command::new("kill")
-                .arg("-KILL")
-                .arg(pid.to_string())
-                .status();
+            let _ = stop_pid_with_timeout(*pid, Duration::from_secs(5));
         }
     }
 }

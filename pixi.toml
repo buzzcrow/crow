@@ -94,7 +94,7 @@ test-ffi = { cmd = "cargo test -p crowtree-ffi --all-targets", depends-on = ["bu
 test-core = { cmd = "cargo test -p crowkv --all-targets", depends-on = ["build"] }
 test-server = { cmd = "cargo test -p crowkv-server --all-targets", depends-on = ["build"] }
 test-cli = { cmd = "cargo test -p crowkv-cli --all-targets", depends-on = ["build"] }
-test-mgmt-api = { cmd = "cargo test -p crowkv-web --all-targets", depends-on = ["build"] }
+test-mgmt-api = { cmd = "cargo test -p crowkv-web --all-targets -- --test-threads=1", depends-on = ["build"] }
 test-ui = { cmd = "cargo build -p crowkv-server && export CROWKV_SERVER_BINARY=$(pwd)/target/debug/crowkv-server && cd crowkv-console/web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-deps"] }
 test = { cmd = '''
 bash -c '

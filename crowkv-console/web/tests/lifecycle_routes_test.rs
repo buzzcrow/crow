@@ -7,13 +7,26 @@
 //! The deploy path requires the `crowkv-server` binary and skips
 //! silently otherwise.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use crowkv_console_shared::lifecycle::crowkv_server_bin;
+use crowkv_console_shared::lifecycle::{crowkv_server_bin, stop_pid_with_timeout};
 use crowkv_console_shared::ConsoleConfig;
 use crowkv_web::{router, AppState};
 use serde_json::{json, Value};
+
+struct ProcessGuard {
+    pids: BTreeMap<String, u32>,
+}
+
+impl Drop for ProcessGuard {
+    fn drop(&mut self) {
+        for pid in self.pids.values() {
+            let _ = stop_pid_with_timeout(*pid, Duration::from_secs(5));
+        }
+    }
+}
 
 fn pick_free_port() -> u16 {
     crowkv_console_shared::test_ports::unique_test_port()
@@ -309,14 +322,8 @@ async fn multiple_racks_and_nodes_create_expected_workspaces() {
         .exists());
     assert!(std::fs::read_dir(dir.join("N-2/bin")).unwrap().next().is_none());
 
-    let _ = std::process::Command::new("kill")
-        .arg("-KILL")
-        .arg(pid1.to_string())
-        .status();
-    let _ = std::process::Command::new("kill")
-        .arg("-KILL")
-        .arg(pid10.to_string())
-        .status();
+    let _ = stop_pid_with_timeout(pid1, Duration::from_secs(5));
+    let _ = stop_pid_with_timeout(pid10, Duration::from_secs(5));
 }
 
 #[tokio::test]
@@ -334,6 +341,9 @@ async fn deploy_then_stop_local_server() {
     let addr = spawn_web_with_path(cfg_path.clone()).await;
     let base = format!("http://{addr}");
     let client = reqwest::Client::new();
+    let mut guard = ProcessGuard {
+        pids: BTreeMap::new(),
+    };
 
     // Bootstrap a rack + local-fork node via the API.
     let (s, _) = json_post(&client, &format!("{base}/api/racks"), json!({ "id": "r1" })).await;
@@ -364,6 +374,7 @@ async fn deploy_then_stop_local_server() {
     assert_eq!(v["node_id"], "n1");
     assert!(v["pid"].as_u64().unwrap() > 0);
     let pid = u32::try_from(v["pid"].as_u64().unwrap()).unwrap();
+    guard.pids.insert("n1".into(), pid);
     assert!(dir.join("N-n1/bin").is_dir());
     assert!(dir.join("N-n1/log").is_dir());
     assert!(std::fs::read_dir(dir.join("N-n1/bin")).unwrap().next().is_some());
@@ -403,12 +414,6 @@ async fn deploy_then_stop_local_server() {
         v.get("pid").is_none() || v["pid"].is_null(),
         "pid should be cleared after stop: {v}"
     );
-
-    // Best-effort: reap if the process is still around.
-    let _ = std::process::Command::new("kill")
-        .arg("-KILL")
-        .arg(pid.to_string())
-        .status();
 }
 
 #[tokio::test]
@@ -426,6 +431,9 @@ async fn deploy_then_restart_local_server() {
     let addr = spawn_web_with_path(cfg_path.clone()).await;
     let base = format!("http://{addr}");
     let client = reqwest::Client::new();
+    let mut guard = ProcessGuard {
+        pids: BTreeMap::new(),
+    };
 
     let (s, _) = json_post(&client, &format!("{base}/api/racks"), json!({ "id": "r1" })).await;
     assert_eq!(s.as_u16(), 201);
@@ -452,6 +460,7 @@ async fn deploy_then_restart_local_server() {
     .await;
     assert!(s.is_success(), "deploy: {s} {v}");
     let old_pid = u32::try_from(v["pid"].as_u64().unwrap()).unwrap();
+    guard.pids.insert("n1-old".into(), old_pid);
 
     // Pre-position CROWKV_SERVER_BIN so the restart's fallback path
     // (no binary override in the body) still finds the test binary.
@@ -459,6 +468,7 @@ async fn deploy_then_restart_local_server() {
     let (s, v) = json_post(&client, &format!("{base}/api/nodes/n1/server/restart"), json!({})).await;
     assert!(s.is_success(), "restart: {s} {v}");
     let new_pid = u32::try_from(v["pid"].as_u64().unwrap()).unwrap();
+    guard.pids.insert("n1-new".into(), new_pid);
     assert_ne!(new_pid, old_pid, "restart should replace the process");
     assert_eq!(
         v["mgmt_url"],
@@ -470,14 +480,6 @@ async fn deploy_then_restart_local_server() {
     let (_, v) = json_get(&client, &format!("{base}/api/nodes/n1/server")).await;
     assert_eq!(v["pid"].as_u64().unwrap(), u64::from(new_pid));
 
-    // Cleanup.
+    // Cleanup via API, then guard handles any survivors.
     let _ = json_post(&client, &format!("{base}/api/nodes/n1/server/stop"), json!({})).await;
-    let _ = std::process::Command::new("kill")
-        .arg("-KILL")
-        .arg(old_pid.to_string())
-        .status();
-    let _ = std::process::Command::new("kill")
-        .arg("-KILL")
-        .arg(new_pid.to_string())
-        .status();
 }

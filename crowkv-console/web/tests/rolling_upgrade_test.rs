@@ -59,8 +59,8 @@ impl Cluster {
         format!("http://{}", self.web)
     }
 
-    fn stop(self) {
-        for n in self.nodes.into_values() {
+    fn stop(&mut self) {
+        for n in self.nodes.values() {
             let _ = lifecycle::stop_pid_with_timeout(n.pid, Duration::from_secs(5));
         }
     }
@@ -101,6 +101,14 @@ impl Cluster {
             .expect("restart node");
         // Update the stored pid so stop() cleans up the new process.
         self.nodes.get_mut(node_id).unwrap().pid = deployed.pid;
+    }
+}
+
+impl Drop for Cluster {
+    fn drop(&mut self) {
+        for n in self.nodes.values() {
+            let _ = lifecycle::stop_pid_with_timeout(n.pid, Duration::from_secs(5));
+        }
     }
 }
 
