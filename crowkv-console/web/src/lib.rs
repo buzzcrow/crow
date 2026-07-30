@@ -166,4 +166,11 @@ mod tests {
     fn router_builds() {
         let _ = router(AppState::default());
     }
+
+    #[tokio::test]
+    async fn startup_topology_check_no_nodes() {
+        let state = AppState::default();
+        // No nodes deployed → NoNodes path, should not panic or hang.
+        super::mgmt::startup_topology_check(&state).await;
+    }
 }
