@@ -42,7 +42,8 @@ pub struct LatencyHistogram {
 
 #[allow(dead_code)]
 impl LatencyHistogram {
-    pub(crate) fn new(name: MetricName) -> Self {
+    #[must_use]
+    pub fn new(name: MetricName) -> Self {
         Self {
             name,
             buckets: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -63,7 +64,7 @@ impl LatencyHistogram {
 
     /// Snapshot and reset window state. Returns count, p50, p99, max (all in
     /// nanoseconds), and `total_count`.
-    pub(crate) fn flush(&self) -> HistogramSnapshot {
+    pub fn flush(&self) -> HistogramSnapshot {
         let mut bucket_counts = [0u64; NUM_BUCKETS];
         for (i, b) in self.buckets.iter().enumerate() {
             bucket_counts[i] = b.swap(0, Ordering::Relaxed);
@@ -88,7 +89,7 @@ impl LatencyHistogram {
     }
 
     /// Current values without resetting.
-    pub(crate) fn snapshot(&self) -> HistogramSnapshot {
+    pub fn snapshot(&self) -> HistogramSnapshot {
         let mut bucket_counts = [0u64; NUM_BUCKETS];
         for (i, b) in self.buckets.iter().enumerate() {
             bucket_counts[i] = b.load(Ordering::Relaxed);

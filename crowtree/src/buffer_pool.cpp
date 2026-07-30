@@ -3,8 +3,8 @@
 
 #include "crowtree/buffer_pool.h"
 
+#include "crow-common/metrics.h"
 #include "crowtree/frame_page.h"
-#include "crowtree/metrics.h"
 
 #include <algorithm>
 #include <cstring>

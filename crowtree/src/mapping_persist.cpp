@@ -3,7 +3,7 @@
 
 #include "crowtree/mapping_persist.h"
 
-#include "crowtree/crc32c.h"
+#include "crow-common/crc32c.h"
 
 namespace crowtree
 {
@@ -81,14 +81,14 @@ void encode_segment_image(const SegmentImageHeader &hdr, const std::vector<uint6
     put_u64(out, hdr.generation);
     put_u32(out, hdr.slot_count);
     put_u32(out, hdr.live_count);
-    uint32_t header_crc = crc32c(out->data() + base, out->size() - base);
+    uint32_t header_crc = crow::common::crc32c(out->data() + base, out->size() - base);
     put_u32(out, header_crc);
 
     size_t body_base = out->size();
     for (uint64_t w : words) {
         put_u64(out, w);
     }
-    uint32_t body_crc = crc32c(out->data() + body_base, out->size() - body_base);
+    uint32_t body_crc = crow::common::crc32c(out->data() + body_base, out->size() - body_base);
     put_u32(out, body_crc);
     if (out_body_crc != nullptr) {
         *out_body_crc = body_crc;
@@ -105,7 +105,7 @@ Status decode_segment_image(const uint8_t *buf, size_t len, SegmentImageHeader *
         return Status::corruption("segment image: bad magic");
     }
     uint32_t stored_header_crc = get_u32(buf + (kImageHeaderBytes - 4));
-    if (crc32c(buf, kImageHeaderBytes - 4) != stored_header_crc) {
+    if (crow::common::crc32c(buf, kImageHeaderBytes - 4) != stored_header_crc) {
         return Status::corruption("segment image: header CRC mismatch");
     }
     // Clean-break format: no older format to
@@ -125,7 +125,7 @@ Status decode_segment_image(const uint8_t *buf, size_t len, SegmentImageHeader *
     }
     const uint8_t *body     = buf + kImageHeaderBytes;
     uint32_t       body_crc = get_u32(body + body_bytes);
-    if (crc32c(body, body_bytes) != body_crc) {
+    if (crow::common::crc32c(body, body_bytes) != body_crc) {
         return Status::corruption("segment image: body CRC mismatch");
     }
 
@@ -149,7 +149,7 @@ void encode_segment_directory(const std::vector<DirEntry> &entries, std::vector<
     put_u16(out, kFormatVersion);
     put_u16(out, 0); // flags, reserved
     put_u32(out, static_cast<uint32_t>(entries.size()));
-    uint32_t header_crc = crc32c(out->data() + base, out->size() - base);
+    uint32_t header_crc = crow::common::crc32c(out->data() + base, out->size() - base);
     put_u32(out, header_crc);
 
     size_t body_base = out->size();
@@ -161,7 +161,7 @@ void encode_segment_directory(const std::vector<DirEntry> &entries, std::vector<
         put_u32(out, e.image_len);
         put_u32(out, e.image_crc);
     }
-    uint32_t body_crc = crc32c(out->data() + body_base, out->size() - body_base);
+    uint32_t body_crc = crow::common::crc32c(out->data() + body_base, out->size() - body_base);
     put_u32(out, body_crc);
 }
 
@@ -174,7 +174,7 @@ Status decode_segment_directory(const uint8_t *buf, size_t len, std::vector<DirE
         return Status::corruption("segment directory: bad magic");
     }
     uint32_t stored_header_crc = get_u32(buf + (kDirHeaderBytes - 4));
-    if (crc32c(buf, kDirHeaderBytes - 4) != stored_header_crc) {
+    if (crow::common::crc32c(buf, kDirHeaderBytes - 4) != stored_header_crc) {
         return Status::corruption("segment directory: header CRC mismatch");
     }
     if (get_u16(buf + 4) != kFormatVersion) {
@@ -188,7 +188,7 @@ Status decode_segment_directory(const uint8_t *buf, size_t len, std::vector<DirE
     }
     const uint8_t *body     = buf + kDirHeaderBytes;
     uint32_t       body_crc = get_u32(body + body_bytes);
-    if (crc32c(body, body_bytes) != body_crc) {
+    if (crow::common::crc32c(body, body_bytes) != body_crc) {
         return Status::corruption("segment directory: body CRC mismatch");
     }
 

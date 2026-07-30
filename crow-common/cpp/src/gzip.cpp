@@ -1,14 +1,14 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-#include "crowtree/gzip.h"
+#include "crow-common/gzip.h"
 
 #include <zlib.h>
 
 #include <array>
 #include <cstdio>
 
-namespace crowtree
+namespace crow::common
 {
 
 bool gzip_compress_file(const std::string &src_path)
@@ -56,4 +56,4 @@ bool gzip_compress_file(const std::string &src_path)
     return ok;
 }
 
-} // namespace crowtree
+} // namespace crow::common

@@ -22,7 +22,8 @@ pub struct LatencySummary {
 
 #[allow(dead_code)]
 impl LatencySummary {
-    pub(crate) fn new(name: MetricName) -> Self {
+    #[must_use]
+    pub fn new(name: MetricName) -> Self {
         Self {
             name,
             count: AtomicU64::new(0),
@@ -53,7 +54,7 @@ impl LatencySummary {
 
     /// Snapshot and reset window state. Returns count, avg (ns), max (ns),
     /// and `total_count`.
-    pub(crate) fn flush(&self) -> SummarySnapshot {
+    pub fn flush(&self) -> SummarySnapshot {
         let count = self.count.swap(0, Ordering::Relaxed);
         let sum = self.sum.swap(0, Ordering::Relaxed);
         let max = self.max.swap(0, Ordering::Relaxed);
@@ -68,7 +69,7 @@ impl LatencySummary {
     }
 
     /// Current values without resetting.
-    pub(crate) fn snapshot(&self) -> SummarySnapshot {
+    pub fn snapshot(&self) -> SummarySnapshot {
         let count = self.count.load(Ordering::Relaxed);
         let sum = self.sum.load(Ordering::Relaxed);
         let max = self.max.load(Ordering::Relaxed);

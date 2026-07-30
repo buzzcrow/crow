@@ -3,8 +3,8 @@
 
 #include "crowtree/snapshot_io.h"
 
+#include "crow-common/crc32c.h"
 #include "crowtree/cell.h"
-#include "crowtree/crc32c.h"
 #include "crowtree/crowtree.h"
 #include "crowtree/page_types.h"
 
@@ -84,7 +84,7 @@ Status snapshot_export_begin_portable(Crowtree &tree, size_t chunk_bytes, std::u
         put_u32(&s, static_cast<uint32_t>(val.size()));
         s.append(val.data(), val.size());
     }
-    uint32_t crc = crc32c(reinterpret_cast<const uint8_t *>(s.data()), s.size());
+    uint32_t crc = crow::common::crc32c(reinterpret_cast<const uint8_t *>(s.data()), s.size());
     put_u32(&s, crc);
 
     auto exp = std::make_unique<SnapshotExport>(std::move(s), chunk_bytes, slot);
@@ -117,7 +117,7 @@ Status snapshot_export_begin_native(Crowtree &tree, size_t chunk_bytes, std::uni
         put_u32(&s, static_cast<uint32_t>(f.frame.size()));
         s.append(reinterpret_cast<const char *>(f.frame.data()), f.frame.size());
     }
-    uint32_t crc = crc32c(reinterpret_cast<const uint8_t *>(s.data()), s.size());
+    uint32_t crc = crow::common::crc32c(reinterpret_cast<const uint8_t *>(s.data()), s.size());
     put_u32(&s, crc);
 
     auto exp = std::make_unique<SnapshotExport>(std::move(s), chunk_bytes, slot);
@@ -198,7 +198,7 @@ Status SnapshotImport::finish_native(const uint8_t *p, size_t len, uint64_t *out
     }
     // Verify the whole-stream CRC over everything but the trailing 4 bytes.
     uint32_t want_crc = get_u32(p + (len - kSnapTrailer));
-    if (crc32c(p, len - kSnapTrailer) != want_crc) {
+    if (crow::common::crc32c(p, len - kSnapTrailer) != want_crc) {
         return Status::corruption("snapshot: CRC mismatch");
     }
 
@@ -261,7 +261,7 @@ Status SnapshotImport::finish(uint64_t *out_at_slot)
     }
     // Verify the whole-stream CRC over everything but the trailing 4 bytes.
     uint32_t want_crc = get_u32(p + (len - kSnapTrailer));
-    if (crc32c(p, len - kSnapTrailer) != want_crc) {
+    if (crow::common::crc32c(p, len - kSnapTrailer) != want_crc) {
         return Status::corruption("snapshot: CRC mismatch");
     }
 

@@ -5,7 +5,7 @@
 
 #include <string>
 
-namespace crowtree
+namespace crow::common
 {
 
 // Compress a file with gzip (zlib). Reads `src_path`, writes
@@ -13,4 +13,4 @@ namespace crowtree
 // On failure, leaves the original file intact and returns false.
 bool gzip_compress_file(const std::string &src_path);
 
-} // namespace crowtree
+} // namespace crow::common

@@ -3,7 +3,7 @@
 
 #include "crowtree/compressor.h"
 
-#include "crowtree/crc32c.h"
+#include "crow-common/crc32c.h"
 
 #include <cstring>
 
@@ -70,7 +70,7 @@ void encode_durable_page(const uint8_t *frame, uint32_t page_bytes, compress_alg
         stored.assign(frame, frame + page_bytes);
     }
 
-    uint32_t crc = crc32c(stored.data(), stored.size());
+    uint32_t crc = crow::common::crc32c(stored.data(), stored.size());
     out->clear();
     out->reserve(kDurableBlobHeader + stored.size());
     out->push_back(static_cast<uint8_t>(algo));
@@ -113,7 +113,7 @@ Status decode_durable_page(const uint8_t *blob, size_t blob_len, uint8_t *frame_
         return Status::corruption("blob stored_len");
     }
     const uint8_t *stored = blob + kDurableBlobHeader;
-    if (crc32c(stored, stored_len) != crc) {
+    if (crow::common::crc32c(stored, stored_len) != crc) {
         return Status::corruption("blob CRC mismatch");
     }
 

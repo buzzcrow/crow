@@ -62,7 +62,7 @@ cargo install --locked inferno || echo "Warning: inferno install failed"
 '
 '''
 ct-fmt = '''
-find crowtree/src crowtree/include crowtree/tests crowtree/bench -type f \( -name '*.cpp' -o -name '*.h' \) -print0 | xargs -0 clang-format -i
+find crowtree/src crowtree/include crowtree/tests crowtree/bench crow-common/cpp -type f \( -name '*.cpp' -o -name '*.h' \) -print0 | xargs -0 clang-format -i
 '''
 ct-lint = "python3 tools/ct_lint.py"
 rs-fmt = "cargo fmt --all"

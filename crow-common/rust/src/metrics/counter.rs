@@ -20,7 +20,8 @@ pub struct Counter {
 
 #[allow(dead_code)]
 impl Counter {
-    pub(crate) fn new(name: MetricName) -> Self {
+    #[must_use]
+    pub fn new(name: MetricName) -> Self {
         Self {
             name,
             window: AtomicU64::new(0),
@@ -41,14 +42,14 @@ impl Counter {
     }
 
     /// Snapshot the window delta and total, then reset window to 0.
-    pub(crate) fn flush(&self) -> CounterSnapshot {
+    pub fn flush(&self) -> CounterSnapshot {
         let count = self.window.swap(0, Ordering::Relaxed);
         let total = self.total.load(Ordering::Relaxed);
         CounterSnapshot { count, total }
     }
 
     /// Current window + total without resetting.
-    pub(crate) fn snapshot(&self) -> CounterSnapshot {
+    pub fn snapshot(&self) -> CounterSnapshot {
         let count = self.window.load(Ordering::Relaxed);
         let total = self.total.load(Ordering::Relaxed);
         CounterSnapshot { count, total }
@@ -75,7 +76,8 @@ pub struct Gauge {
 
 #[allow(dead_code)]
 impl Gauge {
-    pub(crate) fn new(name: MetricName) -> Self {
+    #[must_use]
+    pub fn new(name: MetricName) -> Self {
         Self {
             name,
             value: AtomicU64::new(0),
@@ -88,7 +90,7 @@ impl Gauge {
     }
 
     /// Read the current value.
-    pub(crate) fn snapshot(&self) -> u64 {
+    pub fn snapshot(&self) -> u64 {
         self.value.load(Ordering::Relaxed)
     }
 

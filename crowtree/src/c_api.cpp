@@ -10,11 +10,11 @@
 // hand them back to ct_free_buf regardless of allocator details.
 #include "crowtree/c_api.h"
 
+#include "crow-common/log.h"
 #include "crowtree/async_page_store.h"
 #include "crowtree/block_page_store.h"
 #include "crowtree/cell.h"
 #include "crowtree/crowtree.h"
-#include "crowtree/log.h"
 #include "crowtree/page_store.h"
 #include "crowtree/snapshot_io.h"
 #include "crowtree/text_page_store.h"
@@ -346,19 +346,19 @@ void ct_close(ct_tree *t)
 void ct_init_logging(const char *log_dir, const char *level, size_t max_file_mb, size_t max_files,
                      const char *file_prefix)
 {
-    crowtree::init_logging(log_dir == nullptr ? "" : std::string(log_dir),
-                           level == nullptr ? "info" : std::string(level), max_file_mb, max_files,
-                           file_prefix == nullptr ? "crowtree" : std::string(file_prefix));
+    crow::common::init_logging(log_dir == nullptr ? "" : std::string(log_dir),
+                               level == nullptr ? "info" : std::string(level), max_file_mb, max_files,
+                               file_prefix == nullptr ? "crowtree" : std::string(file_prefix));
 }
 
 void ct_flush_logging()
 {
-    crowtree::flush_logging();
+    crow::common::flush_logging();
 }
 
 void ct_shutdown_logging()
 {
-    crowtree::shutdown_logging();
+    crow::common::shutdown_logging();
 }
 
 ct_status ct_snapshot(ct_tree *t, uint64_t *out_last_applied)

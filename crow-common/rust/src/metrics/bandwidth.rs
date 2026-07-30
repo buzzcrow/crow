@@ -21,7 +21,8 @@ pub struct Bandwidth {
 
 #[allow(dead_code)]
 impl Bandwidth {
-    pub(crate) fn new(name: MetricName) -> Self {
+    #[must_use]
+    pub fn new(name: MetricName) -> Self {
         Self {
             name,
             count: AtomicU64::new(0),
@@ -39,7 +40,7 @@ impl Bandwidth {
 
     /// Snapshot window values and reset them. Returns count, `avg_size` (bytes),
     /// and rate (bytes/sec) computed from `window_secs`.
-    pub(crate) fn flush(&self, window_secs: f64) -> BandwidthSnapshot {
+    pub fn flush(&self, window_secs: f64) -> BandwidthSnapshot {
         let count = self.count.swap(0, Ordering::Relaxed);
         let sum = self.sum.swap(0, Ordering::Relaxed);
         let total_bytes = self.total_bytes.load(Ordering::Relaxed);
@@ -63,7 +64,7 @@ impl Bandwidth {
     }
 
     /// Current values without resetting.
-    pub(crate) fn snapshot(&self, window_secs: f64) -> BandwidthSnapshot {
+    pub fn snapshot(&self, window_secs: f64) -> BandwidthSnapshot {
         let count = self.count.load(Ordering::Relaxed);
         let sum = self.sum.load(Ordering::Relaxed);
         let total_bytes = self.total_bytes.load(Ordering::Relaxed);
