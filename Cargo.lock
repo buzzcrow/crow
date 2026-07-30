@@ -599,6 +599,7 @@ name = "crow-common"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "serde",
  "tempfile",
  "tokio",
  "tracing",

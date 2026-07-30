@@ -11,12 +11,14 @@
 use std::io::Write;
 use std::time::Instant;
 
+use serde::{Deserialize, Serialize};
+
 #[cfg(target_os = "linux")]
 use std::fs;
 
 /// Snapshot of system-level metrics at a single point in time.
-#[derive(Debug, Clone, Default)]
-pub struct SystemSnapshot {
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemMetrics {
     /// User CPU time (microseconds) since the previous snapshot.
     pub cpu_user_us: u64,
     /// System CPU time (microseconds) since the previous snapshot.
@@ -59,7 +61,7 @@ impl SystemCollector {
 
     /// Collect a system snapshot, computing deltas from the previous call.
     #[must_use]
-    pub fn collect(&mut self) -> SystemSnapshot {
+    pub fn collect(&mut self) -> SystemMetrics {
         let (user_us, sys_us) = read_cpu_times();
         let (retransmits, lost) = read_tcp_stats();
         let _elapsed = self.prev_instant.elapsed();
@@ -77,7 +79,7 @@ impl SystemCollector {
 
         let rss_kb = read_rss_kb();
 
-        SystemSnapshot {
+        SystemMetrics {
             cpu_user_us,
             cpu_sys_us,
             rss_kb,
@@ -94,7 +96,7 @@ impl Default for SystemCollector {
 }
 
 /// Write a system snapshot to the flush writer in the "misc" section format.
-pub fn flush_system<W: Write>(writer: &mut W, snap: &SystemSnapshot) {
+pub fn flush_system<W: Write>(writer: &mut W, snap: &SystemMetrics) {
     let _ = writeln!(writer, "sys.cpu_user_us  {}", snap.cpu_user_us);
     let _ = writeln!(writer, "sys.cpu_sys_us   {}", snap.cpu_sys_us);
     let _ = writeln!(writer, "sys.rss_kb       {}", snap.rss_kb);
@@ -231,7 +233,7 @@ mod tests {
 
     #[test]
     fn flush_system_writes_all_fields() {
-        let snap = SystemSnapshot {
+        let snap = SystemMetrics {
             cpu_user_us: 1000,
             cpu_sys_us: 500,
             rss_kb: 4096,

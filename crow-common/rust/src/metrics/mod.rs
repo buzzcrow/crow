@@ -20,7 +20,7 @@ pub use counter::{Counter, CounterSnapshot, Gauge};
 pub use histogram::{HistogramSnapshot, LatencyHistogram};
 pub use precise::PreciseHistogram;
 pub use summary::{LatencySummary, SummarySnapshot};
-pub use system::{flush_system, SystemCollector, SystemSnapshot};
+pub use system::{flush_system, SystemCollector, SystemMetrics};
 
 /// Metric name: either a static string (process-global metrics) or an
 /// owned `Arc<str>` (dynamic-name metrics like per-peer RPC stats).
