@@ -51,6 +51,7 @@ impl ConnectionPool {
                     endpoint: endpoint.to_string(),
                     reason: e.to_string(),
                 })?
+                .tcp_nodelay(true)
                 .connect_lazy();
             channels.push(channel);
         }

@@ -424,18 +424,26 @@ Read: get(key):
 
 Two options for how Rust hands value memory to C++, sequenced:
 
-- **Option A — copy at the boundary (current).** Rust passes `*const u8` +
-  len; C++ `buffer::alloc()`s and copies once at the FFI boundary. Simpler;
-  one copy remains at the boundary but the *internal* pipeline is already
-  zero-copy (§2.2).
-- **Option B — shared allocator, end-to-end zero-copy (deferred).** Rust
-  allocates through an allocator shared with C++ (`ct_alloc`/`ct_free`, or a
-  common `jemalloc`), then *yields ownership* across the FFI; C++ wraps it
-  with `buffer::move_from()`. No copy from the network buffer all the way
-  into the frame build. Requires a stable ownership-transfer contract at the
-  C ABI — deferred because it requires `header_reserve`'s layout to become a
-  stable, exposed cross-FFI ABI contract Rust must replicate exactly; see
-  [`todo_code.md`](../todo_code.md) for the concrete blocker.
+- **Option A — copy at the boundary (current default).** Rust passes
+  `*const u8` + len; C++ `buffer::alloc()`s and copies once at the FFI
+  boundary. Simpler; one copy remains at the boundary but the *internal*
+  pipeline is already zero-copy (§2.2).
+- **Option B — handle-based ownership transfer (R3, implemented).** The
+  caller allocates crowtree-owned memory via `ct_alloc(key_len, val_len)`,
+  which returns an opaque `ct_write_handle` plus two writable pointers
+  (key + value). The caller writes key/value bytes directly into that
+  memory, then `ct_apply_put_owned(tree, slot, handle)` writes the cell
+  header (slot + flags) into the pre-allocated cell and moves key+cell
+  into `apply_encoded` — zero value memcpy. `ct_free_handle(handle)` is
+  the error/cancel path. The cell header layout (`kCellHeaderSize`) is
+  internal — the C API never exposes it, sidestepping the ABI-stability
+  concern that originally blocked Option B. The Rust adapter wraps the
+  handle in a `WriteHandle` struct with RAII `Drop` (frees if not
+  consumed) and `apply(self, slot)` (consumes). `!Send + !Sync`. SBO is
+  preserved: small values (≤ 15 B) use inline storage, same as Option A.
+  Full engine integration (wiring `KVEngine::apply` to use the handle
+  path for large values) is deferred — R3 delivers the C API + Rust FFI
+  wrapper.
 
 Ownership rule (extends `design-crowtree.md §4`): a buffer *yielded* to
 `ct_apply_*` is owned by the tree and freed by it once flushed into a frame;

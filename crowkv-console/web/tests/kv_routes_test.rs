@@ -27,6 +27,12 @@ struct Upstream {
     grpc_url: String,
 }
 
+impl Drop for Upstream {
+    fn drop(&mut self) {
+        let _ = lifecycle::stop_pid_with_timeout(self.pid, Duration::from_secs(5));
+    }
+}
+
 async fn spawn_upstream() -> Option<Upstream> {
     let bin = crowkv_server_bin()?;
     if !bin.exists() {
@@ -184,10 +190,6 @@ async fn kv_put_get_delete_through_web_routes() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["found"], true);
     assert_eq!(body["value_hex"], "deadbeef");
-
-    // Cleanup.
-    let _ = lifecycle::stop_pid(upstream.pid);
-    tokio::time::sleep(Duration::from_millis(50)).await;
 }
 
 #[tokio::test]

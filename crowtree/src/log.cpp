@@ -145,7 +145,7 @@ void init_logging(const std::string &log_dir, const std::string &level, size_t m
         std::tm    tm_buf{};
         gmtime_r(&t_time, &tm_buf);
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
-        std::array<char, 32> ts{};
+        std::array<char, 128> ts{};
         std::snprintf(ts.data(), ts.size(), "%04d%02d%02d-%02d%02d%02d.%03lld", tm_buf.tm_year + 1900,
                       tm_buf.tm_mon + 1, tm_buf.tm_mday, tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec,
                       static_cast<long long>(ms));

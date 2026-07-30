@@ -647,6 +647,13 @@ class Crowtree
     // evict_clean_leaves never evicts an inner base.
     [[nodiscard]] size_t evict_clean_inner(size_t max_resident_inner);
 
+    // Effective key size limit (opt_.max_key_size or frame_bytes/2). Keys larger
+    // than this are rejected at apply() (plan-tree #15).
+    [[nodiscard]] size_t max_key_size() const
+    {
+        return opt_.max_key_size != 0 ? opt_.max_key_size : opt_.frame_bytes / 2;
+    }
+
   private:
     // apply a batch's ops into L0 at `slot` (intra-batch last-op-wins).
     void apply_batch(uint64_t slot, const Batch &batch);
@@ -759,13 +766,6 @@ class Crowtree
     [[nodiscard]] size_t max_inline_value() const
     {
         return opt_.max_inline_value != 0 ? opt_.max_inline_value : opt_.frame_bytes / 4;
-    }
-
-    // Effective key size limit (opt_.max_key_size or frame_bytes/2). Keys larger
-    // than this are rejected at apply() (plan-tree #15).
-    [[nodiscard]] size_t max_key_size() const
-    {
-        return opt_.max_key_size != 0 ? opt_.max_key_size : opt_.frame_bytes / 2;
     }
 
     // Fold a leaf chain (deltas + base) to key-sorted storage entries by

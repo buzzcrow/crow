@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crowkv_console_shared::config::{NodeEntry, RackEntry, ServerEntry};
-use crowkv_console_shared::lifecycle::{self, crowkv_server_bin, DeployRequest};
+use crowkv_console_shared::lifecycle::{self, crowkv_server_bin, stop_pid_with_timeout, DeployRequest};
 use crowkv_console_shared::ConsoleConfig;
 use crowkv_web::{router, AppState};
 use serde_json::json;
@@ -29,10 +29,7 @@ struct Upstream {
 
 impl Drop for Upstream {
     fn drop(&mut self) {
-        let _ = std::process::Command::new("kill")
-            .arg("-KILL")
-            .arg(self.pid.to_string())
-            .status();
+        let _ = stop_pid_with_timeout(self.pid, Duration::from_secs(5));
         let _ = std::fs::remove_dir_all(&self.workspace);
     }
 }

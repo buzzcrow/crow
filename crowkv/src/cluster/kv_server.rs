@@ -22,6 +22,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
+use tokio_stream::Stream;
 use tonic::transport::Server;
 use tracing::{debug, error, info};
 
@@ -86,11 +87,12 @@ impl KvServer for Arc<PxKvStore> {
         let (tx, rx) = tokio::sync::oneshot::channel();
 
         let handle = tokio::spawn(async move {
+            let incoming = NoDelayIncoming::new(listener);
             let serve = Server::builder()
                 .add_service(px_service_server)
                 .add_service(kv_service_server)
                 .add_service(snapshot_service_server)
-                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener));
+                .serve_with_incoming(incoming);
 
             tokio::select! {
                 _ = serve => {},
@@ -197,5 +199,35 @@ impl PxKvStore {
                 Err(msg)
             }
         }
+    }
+}
+
+pin_project_lite::pin_project! {
+    struct NoDelayIncoming {
+        #[pin]
+        inner: tokio_stream::wrappers::TcpListenerStream,
+    }
+}
+
+impl NoDelayIncoming {
+    fn new(listener: TcpListener) -> Self {
+        Self {
+            inner: tokio_stream::wrappers::TcpListenerStream::new(listener),
+        }
+    }
+}
+
+impl Stream for NoDelayIncoming {
+    type Item = std::io::Result<tokio::net::TcpStream>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        let this = self.project();
+        this.inner.poll_next(cx).map_ok(|stream| {
+            let _ = stream.set_nodelay(true);
+            stream
+        })
     }
 }

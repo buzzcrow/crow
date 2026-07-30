@@ -23,11 +23,12 @@ extern "C" {
 using ct_status = int32_t; // 0 = ok; negative mirrors crowtree::Code
 
 // Opaque handles.
-using ct_tree   = struct ct_tree;
-using ct_view   = struct ct_view;
-using ct_iter   = struct ct_iter;
-using ct_export = struct ct_export;
-using ct_import = struct ct_import;
+using ct_tree         = struct ct_tree;
+using ct_view         = struct ct_view;
+using ct_iter         = struct ct_iter;
+using ct_export       = struct ct_export;
+using ct_import       = struct ct_import;
+using ct_write_handle = struct ct_write_handle;
 
 // Owned byte buffer handed back to the caller; free with ct_free_buf.
 using ct_buf = struct
@@ -198,6 +199,43 @@ uint64_t ct_evict_clean_inner(ct_tree *t, uint64_t max_resident_inner);
 ct_status ct_apply_put(ct_tree *t, uint64_t slot, const uint8_t *key, size_t klen, const uint8_t *val, size_t vlen);
 ct_status ct_apply_delete(ct_tree *t, uint64_t slot, const uint8_t *key, size_t klen);
 void      ct_force_advance_slot(ct_tree *t, uint64_t slot);
+
+// ── Zero-copy write path (R3) ──────────────────────────────────────
+//
+// Handle-based alloc-then-apply: the caller writes key and value bytes
+// directly into crowtree-owned memory, then ct_apply_put_owned consumes
+// the handle with zero value memcpy (the cell header is written at apply
+// time; the value region was filled by the caller). The cell header
+// layout (kCellHeaderSize) is internal — the C API never exposes it.
+//
+// Lifecycle: ct_alloc → write key/val → ct_apply_put_owned (consumes)
+//            ct_alloc → ct_free_handle (error/cancel path)
+//
+// For small values (≤ 15 B) the cell buffer is inline (SBO, no malloc) —
+// same as ct_apply_put's internal path, no regression. For small keys
+// (≤ ~15 B) the key string is inline (std::string SSO) — same as today.
+
+// Writable pointers returned by ct_alloc.
+using ct_write_ptrs = struct
+{
+    uint8_t *key; // [0, key_len) — caller fills key bytes
+    uint8_t *val; // [0, val_len) — caller fills value bytes
+};
+
+// Allocate crowtree-owned memory for a key + value write. `t` may be null
+// (allocates without tree validation); if non-null, key_len is validated
+// against the tree's max_key_size. Returns an opaque handle plus writable
+// pointers via `out_ptrs`. The pointers are valid until ct_apply_put_owned
+// or ct_free_handle is called.
+ct_status ct_alloc(ct_tree *t, size_t key_len, size_t val_len, ct_write_handle **out_handle, ct_write_ptrs *out_ptrs);
+
+// Apply a pre-allocated key+value at `slot` (zero value memcpy). Writes
+// the cell header (slot + put flags) into the pre-allocated cell, then
+// moves key+cell into apply_encoded. Consumes and frees the handle.
+ct_status ct_apply_put_owned(ct_tree *t, uint64_t slot, ct_write_handle *handle);
+
+// Free a handle that was never applied (error/cancel path). No-op if null.
+void ct_free_handle(ct_write_handle *handle);
 
 // Apply a multi-key batch atomically at `slot` (single call into
 // Crowtree::apply, so it's atomic to readers -- unlike looping ct_apply_put/
