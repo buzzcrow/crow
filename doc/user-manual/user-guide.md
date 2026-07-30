@@ -95,7 +95,40 @@ curl -X POST "http://$IP:$PORT/api/nodes/n1/server/deploy" \
 The `deploy` command spawns `crowkv-server` on the node (via SSH if
 `ssh_user` is set, or as a local subprocess otherwise).
 
-### 1.3 Create a store and group
+### 1.3 Initialize the cluster
+
+Before creating data stores or groups, the cluster must be
+initialized. This creates the system group (store 0, group 0) which
+stores cluster topology metadata as KV entries, providing HA for
+the topology itself.
+
+**CLI:**
+
+```bash
+# Initialize with all deployed nodes
+crowkv-cli --ip $IP --port $PORT cluster init --nodes n1,n2,n3
+```
+
+**curl:**
+
+```bash
+curl -X POST "http://$IP:$PORT/api/cluster/init" \
+  -H 'Content-Type: application/json' \
+  -d '{"nodes":["n1","n2","n3"]}'
+```
+
+This creates store 0 and group 0 on each selected node, wires remotes
+for multi-node, and automatically finalizes the cutover (sets the
+`/topology/ready` flag in group 0). After initialization, data
+store/group creation is unblocked.
+
+For a single-node dev cluster, pass one node:
+
+```bash
+crowkv-cli --ip $IP --port $PORT cluster init --nodes n1
+```
+
+### 1.4 Create a store and group
 
 A store is the logical container that owns one or more groups.
 
@@ -120,7 +153,10 @@ curl -X POST "http://$IP:$PORT/api/stores/3/groups" -H 'Content-Type: applicatio
   -d '{"group_id":3,"replica_id":1,"nodes":["n1"]}'
 ```
 
-### 1.4 Add the remaining replicas
+If the cluster has not been initialized, store/group creation returns
+`409 Conflict` with a message directing you to run `cluster init` first.
+
+### 1.5 Add the remaining replicas
 
 **CLI:**
 
@@ -148,7 +184,7 @@ The service orchestrates the full add-replica flow: creates the local
 group on the target node, wires remotes bidirectionally, and the new
 replica catches up via snapshot streaming before joining the voting set.
 
-### 1.5 Verify and smoke test
+### 1.6 Verify and smoke test
 
 **CLI:**
 
@@ -310,7 +346,17 @@ waits for a new leader, then removes the replica.
      -d '{"mgmt_port":2001,"grpc_port":20001}'
    ```
 
-3. Start with bootstrap args to recover from WAL:
+3. Start the server. With R2, the server auto-loads its store/group
+   configuration from `conf/node-config.json` — no `--stores`/`--groups`
+   CLI args needed for normal restart:
+
+   ```bash
+   crowkv-server \
+     --management-addr 0.0.0.0 --management-port 2001 \
+     --ports 20001 --election-profile default
+   ```
+
+   If `node-config.json` is lost, fall back to explicit bootstrap args:
 
    ```bash
    crowkv-server \
@@ -349,7 +395,16 @@ For each node:
 
 2. **Install the new binary** on the node.
 
-3. **Restart with persisted store/group IDs:**
+3. **Restart the server.** With R2, the server auto-loads its
+   store/group configuration from `conf/node-config.json`:
+
+   ```bash
+   crowkv-server \
+     --management-addr 0.0.0.0 --management-port 2001 \
+     --ports 20001 --election-profile default
+   ```
+
+   If `node-config.json` is missing, fall back to explicit args:
 
    ```bash
    crowkv-server \
@@ -387,8 +442,10 @@ A brief latency spike during leader transition is normal.
 If two of three nodes fail, the remaining node cannot elect itself
 leader. Writes and linearizable reads block.
 
-- **Restore the failed nodes** from backups and restart with
-  `--stores`/`--groups`/`--replica` args. This is always the safest path.
+- **Restore the failed nodes** from backups and restart. With R2,
+  the server auto-loads from `conf/node-config.json`; if the config is
+  lost, fall back to `--stores`/`--groups`/`--replica` args. This is
+  always the safest path.
 - **Recover with data loss** (last resort): force the surviving node to
   become leader by manually truncating the log. Only safe when the
   other nodes are permanently lost.
@@ -400,16 +457,19 @@ leadership.
 
 ## 6. Backup
 
-CrowKV durability comes from the per-store WAL (`--wal-root`) and group
-config files (`--config-root`). For disaster recovery, back up:
+CrowKV durability comes from the per-store WAL (`--wal-root`), the
+per-node config cache (`--config-root`), and the durable KV engine
+(`--data-root`). For disaster recovery, back up:
 
 - `{wal-root}/store{store_id}/` for each store
-- `{config-root}/store{store_id}_group{group_id}.json` for each group
+- `{config-root}/node-config.json` — per-node store/group config cache
 - `{data-root}/store{store_id}/group{group_id}/` if using crowtree
   durable KV engine
 
-Restore by placing these on the replacement node and starting with the
-matching bootstrap args.
+Restore by placing these on the replacement node and starting the
+server. With `node-config.json` present, no `--stores`/`--groups`
+bootstrap args are needed. If the config is lost, use explicit
+`--stores`/`--groups`/`--replica` args to recover from WAL.
 
 ---
 
@@ -436,6 +496,7 @@ and `--json` for JSON output.
 - **`crowkv-cli server restart --node <id>`**
 - **`crowkv-cli server stop --node <id>`**
 - **`crowkv-cli server list`**
+- **`crowkv-cli cluster init --nodes n1,n2,...`** — initialize cluster (system group)
 - **`crowkv-cli store add --store-id <id> [--nodes n1,n2,...]`**
 - **`crowkv-cli store remove --store-id <id>`**
 - **`crowkv-cli store list`**
@@ -452,6 +513,12 @@ and `--json` for JSON output.
 - **`crowkv-cli kv scan --store-id <s> --group-id <g> --prefix <p> [--limit <n>]`**
 
 **curl:**
+
+#### Cluster lifecycle
+
+| Operation | Endpoint |
+| --- | --- |
+| Initialize cluster | `POST /api/cluster/init` |
 
 #### Physical topology
 
@@ -496,3 +563,15 @@ and `--json` for JSON output.
 | Put | `POST /api/stores/{sid}/groups/{gid}/kv/put` |
 | Delete | `POST /api/stores/{sid}/groups/{gid}/kv/delete` |
 | Scan | `GET /api/stores/{sid}/groups/{gid}/kv/scan?key=...` |
+
+#### Server management (per-node)
+
+| Operation | Endpoint |
+| --- | --- |
+| System init (bootstrap group 0) | `POST /system/init` |
+| Topology finalize (cutover) | `POST /topology/finalize` |
+| Check topology ready | `GET /topology/ready` |
+
+These endpoints are on the `crowkv-server` management API (not the
+console web API). The console's `POST /api/cluster/init` orchestrates
+`/system/init` across nodes and auto-finalizes.
