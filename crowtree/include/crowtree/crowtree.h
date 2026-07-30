@@ -6,11 +6,11 @@
 // (L0); flush() merges the contiguous-applied prefix into the COW B+tree (L1).
 #pragma once
 
+#include "crow-common/metrics.h"
 #include "crowtree/cell.h"
 #include "crowtree/epoch.h"
 #include "crowtree/mapping_table.h"
 #include "crowtree/memtable.h"
-#include "crowtree/metrics.h"
 #include "crowtree/options.h"
 #include "crowtree/page.h"
 #include "crowtree/snapshot.h"
@@ -29,6 +29,17 @@
 
 namespace crowtree
 {
+
+// The metrics core moved to crow-common (R12); bridge the moved types
+// into `crowtree` with per-type using-declarations so existing
+// `Counter*`/`Gauge*`/`LatencySummary*`/`MetricsRegistry`/`Bandwidth`
+// references compile unchanged. (Not a `namespace crowtree =
+// crow::common;` alias — only the specific types are bridged.)
+using crow::common::Bandwidth;
+using crow::common::Counter;
+using crow::common::Gauge;
+using crow::common::LatencySummary;
+using crow::common::MetricsRegistry;
 
 #ifdef CROWTREE_HAVE_LIBURING
 class Reactor;

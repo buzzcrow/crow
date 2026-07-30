@@ -24,12 +24,23 @@
 #include <mutex>
 #include <vector>
 
-namespace crowtree
+// Forward-declare metric types for BufferPool handles. The metrics core
+// moved to crow-common (R12); bridge the moved types into `crowtree`
+// with per-type using-declarations so existing `Counter*`/`Gauge*`
+// references compile unchanged. (Not a `namespace crowtree =
+// crow::common;` alias — only the specific types are bridged.) The
+// forward declarations live at the root namespace so they resolve to
+// `crow::common::Counter` rather than nesting under `crowtree::`.
+namespace crow::common
 {
-
-// Forward-declare metric types for BufferPool handles.
 class Counter;
 class Gauge;
+} // namespace crow::common
+
+namespace crowtree
+{
+using crow::common::Counter;
+using crow::common::Gauge;
 
 using PageAddr = uint64_t;
 

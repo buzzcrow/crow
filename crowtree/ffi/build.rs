@@ -30,12 +30,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .to_path_buf();
     let src = engine.join("src");
     let include = engine.join("include");
+    // crow-common shared utils (R12): crc32c, log, compressing_sink, gzip,
+    // metrics moved out of crowtree into a sibling `crow-common/cpp` project.
+    // The FFI build globs both source trees into one `cc::Build` so the moved
+    // TUs compile with the same flags as the remaining crowtree sources.
+    let common = engine
+        .parent()
+        .expect("crowtree must have a parent")
+        .join("crow-common")
+        .join("cpp");
+    let common_src = common.join("src");
+    let common_include = common.join("include");
 
     let mut files = Vec::new();
     collect_cc(&src, &mut files)?;
+    collect_cc(&common_src, &mut files)?;
 
     let mut build = cc::Build::new();
-    build.cpp(true).std("c++20").include(&include).warnings(false);
+    build
+        .cpp(true)
+        .std("c++20")
+        .include(&include)
+        .include(&common_include)
+        .warnings(false);
 
     // The engine now includes Abseil headers (absl::btree_map in the MemTable,
     // ). Abseil is header-only for btree, so we only need its include
@@ -114,7 +131,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     if have_spdlog {
         let prefix = conda_prefix.as_ref().unwrap();
-        build.define("CROWTREE_HAVE_SPDLOG", "1");
+        // CROW_HAVE_SPDLOG gates the moved crow-common log.h/compressing_sink.h
+        // (the remaining crowtree sources include crow-common/log.h and use
+        // CR_LOG_*). The FFI build compiles everything in one cc::Build, so a
+        // single define covers both trees; the moved files no longer reference
+        // CROWTREE_HAVE_SPDLOG.
+        build.define("CROW_HAVE_SPDLOG", "1");
         // fmt is bundled with spdlog in conda-forge; its headers live under
         // include/fmt and the lib is libfmt. zlib is needed by
         // compressing_sink for gzip-rotated log files.

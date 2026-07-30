@@ -14,7 +14,7 @@
 #include <thread>
 #include <vector>
 
-namespace crowtree
+namespace crow::common
 {
 
 // ── Metric types ────────────────────────────────────────────────
@@ -268,4 +268,4 @@ class MetricsRegistry
     void prune_rotated();
 };
 
-} // namespace crowtree
+} // namespace crow::common

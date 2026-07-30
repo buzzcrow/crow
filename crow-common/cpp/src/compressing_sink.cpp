@@ -1,11 +1,11 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-#include "crowtree/compressing_sink.h"
+#include "crow-common/compressing_sink.h"
 
-#ifdef CROWTREE_HAVE_SPDLOG
+#ifdef CROW_HAVE_SPDLOG
 
-#    include "crowtree/gzip.h"
+#    include "crow-common/gzip.h"
 
 #    include <spdlog/details/os.h>
 
@@ -18,7 +18,7 @@
 #    include <utility>
 #    include <vector>
 
-namespace crowtree
+namespace crow::common
 {
 
 // ── compressing_file_sink ───────────────────────────────────────
@@ -134,6 +134,6 @@ template <typename Mutex> void compressing_file_sink<Mutex>::prune_rotated()
 template class compressing_file_sink<std::mutex>;
 template class compressing_file_sink<spdlog::details::null_mutex>;
 
-} // namespace crowtree
+} // namespace crow::common
 
-#endif // CROWTREE_HAVE_SPDLOG
+#endif // CROW_HAVE_SPDLOG

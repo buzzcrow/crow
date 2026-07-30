@@ -3,10 +3,10 @@
 
 #include "crowtree/crowtree.h"
 
+#include "crow-common/log.h"
 #include "crowtree/compressor.h"
 #include "crowtree/delta.h"
 #include "crowtree/descent.h"
-#include "crowtree/log.h"
 #include "crowtree/mapping_slot.h"
 #ifdef CROWTREE_HAVE_LIBURING
 #    include "crowtree/async_page_store.h"
@@ -158,7 +158,7 @@ Crowtree::~Crowtree()
     catch (...) { // NOLINT(bugprone-empty-catch)
         // Destructors must not throw.
     }
-    CT_LOG_INFO("[{}] close: done last_applied={} contiguous={}", name_, last_applied_slot_.load(),
+    CR_LOG_INFO("[{}] close: done last_applied={} contiguous={}", name_, last_applied_slot_.load(),
                 contiguous_slot_.load());
 }
 
@@ -217,7 +217,7 @@ PageBase *Crowtree::resident(uint64_t page_id) const
     // a committed page; latch it so callers can detect it (the read still degrades
     // to a miss, since the lock-free path can't propagate a Status).
     if (!s.ok()) {
-        CT_LOG_ERROR("[{}] demand-load I/O fault: pid={} addr={} len={} status={}", name_, page_id, addr, phys_len,
+        CR_LOG_ERROR("[{}] demand-load I/O fault: pid={} addr={} len={} status={}", name_, page_id, addr, phys_len,
                      s.to_string());
         io_failed_.store(true);
         if (metrics_.demand_load_l != nullptr) {
@@ -246,18 +246,18 @@ PageBase *Crowtree::install_loaded_page(uint64_t page_id, uint64_t addr, uint32_
 {
     uint32_t raw_len = durable_blob_raw_len(blob.data(), blob.size());
     if (raw_len == 0) {
-        CT_LOG_ERROR("[{}] demand-load corrupt blob (raw_len=0): pid={} addr={}", name_, page_id, addr);
+        CR_LOG_ERROR("[{}] demand-load corrupt blob (raw_len=0): pid={} addr={}", name_, page_id, addr);
         io_failed_.store(true);
         return nullptr;
     }
     std::vector<uint8_t> frame(raw_len);
     if (!decode_durable_page(blob.data(), blob.size(), frame.data(), raw_len).ok()) {
-        CT_LOG_ERROR("[{}] demand-load decode failed: pid={} addr={} raw_len={}", name_, page_id, addr, raw_len);
+        CR_LOG_ERROR("[{}] demand-load decode failed: pid={} addr={} raw_len={}", name_, page_id, addr, raw_len);
         io_failed_.store(true);
         return nullptr;
     }
     if (!frame_validate(frame.data(), raw_len)) {
-        CT_LOG_ERROR("[{}] demand-load frame validation failed: pid={} addr={}", name_, page_id, addr);
+        CR_LOG_ERROR("[{}] demand-load frame validation failed: pid={} addr={}", name_, page_id, addr);
         io_failed_.store(true);
         return nullptr;
     }
@@ -1024,7 +1024,7 @@ Status Crowtree::flush()
     version_.fetch_add(1);
     maybe_evict_locked(); // keep cache bounded; only clean bases go
     uint64_t entries_drained = flush_entries_total_.load(std::memory_order_relaxed) - entries_before;
-    CT_LOG_INFO("[{}] flush: tables={} entries={} contiguous_slot={}", name_, to_drain.size(), entries_drained, cs);
+    CR_LOG_INFO("[{}] flush: tables={} entries={} contiguous_slot={}", name_, to_drain.size(), entries_drained, cs);
     if (metrics_.flush_l != nullptr) {
         auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count();
         metrics_.flush_l->observe(static_cast<uint64_t>(ns));
@@ -1636,7 +1636,7 @@ void Crowtree::get_async_attempt(std::shared_ptr<std::string> key_owned, std::fu
             addr, blob->data(), blob->size(),
             [this, page_id = pending_page_id, addr, plen, blob, key_owned, on_done](Status st) mutable {
                 if (!st.ok()) {
-                    CT_LOG_ERROR("[{}] get_async: demand-load I/O fault: pid={} addr={} len={} status={}", name_,
+                    CR_LOG_ERROR("[{}] get_async: demand-load I/O fault: pid={} addr={} len={} status={}", name_,
                                  page_id, addr, plen, st.to_string());
                     io_failed_.store(true);
                     on_done(GetView()); // not found; no guard was ever entered
@@ -2049,7 +2049,7 @@ void Crowtree::scan_async_attempt(std::shared_ptr<std::string> prefix_owned, siz
             addr, blob->data(), blob->size(),
             [this, page_id = pending_page_id, addr, plen, blob, prefix_owned, limit, on_done](Status st) mutable {
                 if (!st.ok()) {
-                    CT_LOG_ERROR("[{}] scan_async: demand-load I/O fault: pid={} addr={} len={} status={}", name_,
+                    CR_LOG_ERROR("[{}] scan_async: demand-load I/O fault: pid={} addr={} len={} status={}", name_,
                                  page_id, addr, plen, st.to_string());
                     io_failed_.store(true);
                     on_done(st, {}, false);

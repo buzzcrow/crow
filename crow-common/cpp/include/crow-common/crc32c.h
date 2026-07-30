@@ -11,7 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace crowtree
+namespace crow::common
 {
 
 namespace detail
@@ -52,4 +52,4 @@ namespace detail
     return crc32c_update(0, data, len);
 }
 
-} // namespace crowtree
+} // namespace crow::common

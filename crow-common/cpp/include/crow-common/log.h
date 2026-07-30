@@ -3,8 +3,8 @@
 
 // Crowtree logging facade (plan-tree #10).
 //
-// The engine logs through the CT_LOG_* macros below. When the library is built
-// with spdlog (the CMake build defines CROWTREE_HAVE_SPDLOG), these expand to an
+// The engine logs through the CR_LOG_* macros below. When the library is built
+// with spdlog (the CMake build defines CROW_HAVE_SPDLOG), these expand to an
 // async, rotating-file logger. In builds without spdlog — notably the Rust FFI
 // `cc` build, where the Rust side already has its own `tracing` — every macro is
 // a zero-cost no-op and the init/shutdown entry points do nothing.
@@ -24,7 +24,7 @@
 #include <cstddef>
 #include <string>
 
-namespace crowtree
+namespace crow::common
 {
 
 // Initialize an async, size-rotating file logger writing to
@@ -44,7 +44,7 @@ void flush_logging();
 void shutdown_logging();
 
 // True once init_logging() has succeeded and shutdown_logging() has not run.
-// Cheap (a single relaxed atomic load); used to gate the CT_LOG_* macros so
+// Cheap (a single relaxed atomic load); used to gate the CR_LOG_* macros so
 // nothing is emitted before logging is configured.
 [[nodiscard]] bool logging_enabled();
 
@@ -53,62 +53,62 @@ void shutdown_logging();
 // called at the start of each engine thread's body.
 void set_current_thread_name(const char *name);
 
-} // namespace crowtree
+} // namespace crow::common
 
-#ifdef CROWTREE_HAVE_SPDLOG
+#ifdef CROW_HAVE_SPDLOG
 #    include <spdlog/spdlog.h>
 
 // Each macro first checks the runtime enabled flag (no output before
 // init_logging), then defers to spdlog's own compile-time level filtering
 // (SPDLOG_ACTIVE_LEVEL) and runtime level. Args use fmt formatting, e.g.
-// CT_LOG_INFO("open iu={} frame={}", iu, frame_bytes).
-#    define CT_LOG_ERROR(...)                    \
-        do {                                     \
-            if (::crowtree::logging_enabled()) { \
-                SPDLOG_ERROR(__VA_ARGS__);       \
-            }                                    \
+// CR_LOG_INFO("open iu={} frame={}", iu, frame_bytes).
+#    define CR_LOG_ERROR(...)                        \
+        do {                                         \
+            if (::crow::common::logging_enabled()) { \
+                SPDLOG_ERROR(__VA_ARGS__);           \
+            }                                        \
         } while (0)
-#    define CT_LOG_WARN(...)                     \
-        do {                                     \
-            if (::crowtree::logging_enabled()) { \
-                SPDLOG_WARN(__VA_ARGS__);        \
-            }                                    \
+#    define CR_LOG_WARN(...)                         \
+        do {                                         \
+            if (::crow::common::logging_enabled()) { \
+                SPDLOG_WARN(__VA_ARGS__);            \
+            }                                        \
         } while (0)
-#    define CT_LOG_INFO(...)                     \
-        do {                                     \
-            if (::crowtree::logging_enabled()) { \
-                SPDLOG_INFO(__VA_ARGS__);        \
-            }                                    \
+#    define CR_LOG_INFO(...)                         \
+        do {                                         \
+            if (::crow::common::logging_enabled()) { \
+                SPDLOG_INFO(__VA_ARGS__);            \
+            }                                        \
         } while (0)
-#    define CT_LOG_DEBUG(...)                    \
-        do {                                     \
-            if (::crowtree::logging_enabled()) { \
-                SPDLOG_DEBUG(__VA_ARGS__);       \
-            }                                    \
+#    define CR_LOG_DEBUG(...)                        \
+        do {                                         \
+            if (::crow::common::logging_enabled()) { \
+                SPDLOG_DEBUG(__VA_ARGS__);           \
+            }                                        \
         } while (0)
-#    define CT_LOG_TRACE(...)                    \
-        do {                                     \
-            if (::crowtree::logging_enabled()) { \
-                SPDLOG_TRACE(__VA_ARGS__);       \
-            }                                    \
+#    define CR_LOG_TRACE(...)                        \
+        do {                                         \
+            if (::crow::common::logging_enabled()) { \
+                SPDLOG_TRACE(__VA_ARGS__);           \
+            }                                        \
         } while (0)
 
-#else // !CROWTREE_HAVE_SPDLOG — zero-cost no-ops
+#else // !CROW_HAVE_SPDLOG — zero-cost no-ops
 
-#    define CT_LOG_ERROR(...) \
+#    define CR_LOG_ERROR(...) \
         do {                  \
         } while (0)
-#    define CT_LOG_WARN(...) \
+#    define CR_LOG_WARN(...) \
         do {                 \
         } while (0)
-#    define CT_LOG_INFO(...) \
+#    define CR_LOG_INFO(...) \
         do {                 \
         } while (0)
-#    define CT_LOG_DEBUG(...) \
+#    define CR_LOG_DEBUG(...) \
         do {                  \
         } while (0)
-#    define CT_LOG_TRACE(...) \
+#    define CR_LOG_TRACE(...) \
         do {                  \
         } while (0)
 
-#endif // CROWTREE_HAVE_SPDLOG
+#endif // CROW_HAVE_SPDLOG

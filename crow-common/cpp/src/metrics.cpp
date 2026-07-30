@@ -1,10 +1,10 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-#include "crowtree/metrics.h"
+#include "crow-common/metrics.h"
 
-#include "crowtree/gzip.h"
-#include "crowtree/log.h"
+#include "crow-common/gzip.h"
+#include "crow-common/log.h"
 
 #include <algorithm>
 #include <array>
@@ -16,7 +16,7 @@
 #include <utility>
 #include <vector>
 
-namespace crowtree
+namespace crow::common
 {
 
 // ── LatencyHistogram ────────────────────────────────────────────
@@ -429,4 +429,4 @@ void MetricsRegistry::prune_rotated()
     }
 }
 
-} // namespace crowtree
+} // namespace crow::common

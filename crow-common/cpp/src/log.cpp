@@ -4,11 +4,11 @@
 // Implementation of the crowtree logging facade (plan-tree #10). See log.h for
 // the contract. Split into an spdlog-backed build and a no-op build so the Rust
 // FFI `cc` build (no spdlog) still compiles this translation unit cleanly.
-#include "crowtree/log.h"
+#include "crow-common/log.h"
 
-#ifdef CROWTREE_HAVE_SPDLOG
+#ifdef CROW_HAVE_SPDLOG
 
-#    include "crowtree/compressing_sink.h"
+#    include "crow-common/compressing_sink.h"
 
 #    include <pthread.h>
 #    include <spdlog/async_logger.h>
@@ -26,7 +26,7 @@
 #    include <string>
 #    include <unordered_map>
 
-namespace crowtree
+namespace crow::common
 {
 namespace
 {
@@ -172,11 +172,11 @@ void init_logging(const std::string &log_dir, const std::string &level, size_t m
     }
 }
 
-} // namespace crowtree
+} // namespace crow::common
 
-#else // !CROWTREE_HAVE_SPDLOG — no-op build
+#else // !CROW_HAVE_SPDLOG — no-op build
 
-namespace crowtree
+namespace crow::common
 {
 
 bool logging_enabled()
@@ -201,6 +201,6 @@ void set_current_thread_name(const char * /*name*/)
 {
 }
 
-} // namespace crowtree
+} // namespace crow::common
 
-#endif // CROWTREE_HAVE_SPDLOG
+#endif // CROW_HAVE_SPDLOG

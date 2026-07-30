@@ -12,7 +12,7 @@
 // are deleted.
 #pragma once
 
-#ifdef CROWTREE_HAVE_SPDLOG
+#ifdef CROW_HAVE_SPDLOG
 
 #    include <spdlog/details/file_helper.h>
 #    include <spdlog/details/null_mutex.h>
@@ -22,7 +22,7 @@
 #    include <mutex>
 #    include <string>
 
-namespace crowtree
+namespace crow::common
 {
 
 // spdlog sink: rotating file with gzip compression of rotated files.
@@ -52,6 +52,6 @@ template <typename Mutex> class compressing_file_sink final : public spdlog::sin
 using compressing_file_sink_mt = compressing_file_sink<std::mutex>;
 using compressing_file_sink_st = compressing_file_sink<spdlog::details::null_mutex>;
 
-} // namespace crowtree
+} // namespace crow::common
 
-#endif // CROWTREE_HAVE_SPDLOG
+#endif // CROW_HAVE_SPDLOG

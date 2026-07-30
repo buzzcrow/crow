@@ -5,8 +5,8 @@
 // init_logging() is called explicitly before open(), and shutdown_logging()
 // after the engine is destroyed. These tests only exercise the spdlog-backed
 // CMake build.
+#include "crow-common/log.h"
 #include "crowtree/crowtree.h"
-#include "crowtree/log.h"
 #include "crowtree/page_store.h"
 
 #include <gtest/gtest.h>
@@ -17,6 +17,7 @@
 #include <string>
 
 using namespace crowtree;
+using namespace crow::common;
 
 namespace
 {

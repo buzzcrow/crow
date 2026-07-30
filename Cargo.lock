@@ -601,6 +601,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
+name = "crow-common"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "crowkv"
 version = "0.1.0"
 dependencies = [
@@ -608,6 +620,7 @@ dependencies = [
  "crc32c",
  "criterion",
  "crossbeam-skiplist",
+ "crow-common",
  "crowkv",
  "crowtree-ffi",
  "dashmap",
