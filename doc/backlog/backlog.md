@@ -23,13 +23,6 @@ complexity, and dependency. Before implementation, follow the
   metrics (from R8) in the GUI via existing health/internal-state query
   infrastructure. Show recent operation counts and metrics per Store/Group
   with real-time refresh (5–10 s window).
-- **[R13](R13-bench-metrics.md)** — Unify bench client stats with metrics library — Area: console CLI
-  / metrics — Benchmark client-side statistics (`OpStats`, `WorkerCounters`
-  in `bench/runner.rs`) currently use a hand-rolled `hdrhistogram` + manual
-  `AtomicU64` counters instead of crowkv's own `MetricsRegistry` /
-  `LatencyHistogram` / `Counter` classes. After R12 extracts metrics into
-  `crow-common`, the bench client should reuse the same metrics primitives
-  for consistency and to eliminate duplicate statistical infrastructure.
 - **[R16a](R16a-concurrent-fanout.md)** — Concurrent local + remote fan-out — Area:
   consensus / WAL — `run_accept_phase` and `run_prepare_phase` `await`
   the local `on_accept`/`on_prepare` (acceptor CAS + WAL append +
