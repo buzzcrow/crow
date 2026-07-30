@@ -10,7 +10,7 @@
 #include <string>
 #include <utility>
 
-namespace crow::common
+namespace crow::common::metrics
 {
 
 class Counter
@@ -55,4 +55,4 @@ class Counter
     std::atomic<uint64_t> total_;
 };
 
-} // namespace crow::common
+} // namespace crow::common::metrics

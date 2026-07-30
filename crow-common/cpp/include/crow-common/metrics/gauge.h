@@ -9,7 +9,7 @@
 #include <string>
 #include <utility>
 
-namespace crow::common
+namespace crow::common::metrics
 {
 
 class Gauge
@@ -39,4 +39,4 @@ class Gauge
     std::atomic<uint64_t> value_;
 };
 
-} // namespace crow::common
+} // namespace crow::common::metrics

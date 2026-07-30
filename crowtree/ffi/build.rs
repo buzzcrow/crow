@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 fn collect_cc(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
+        if path.is_dir() {
+            collect_cc(&path, out)?;
+            continue;
+        }
         // Engine sources use the.cpp extension (renamed from.cc in the STL
         // rename task); accept both so the crate builds regardless.
         match path.extension().and_then(|s| s.to_str()) {

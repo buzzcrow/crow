@@ -109,7 +109,7 @@ void Reactor::cancel(uint64_t op_id)
 
 void Reactor::run()
 {
-    set_current_thread_name("ct-reactor");
+    crow::common::set_current_thread_name("ct-reactor");
     if (!valid_) {
         return;
     }

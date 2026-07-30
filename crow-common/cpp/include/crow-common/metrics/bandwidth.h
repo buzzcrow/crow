@@ -9,7 +9,7 @@
 #include <string>
 #include <utility>
 
-namespace crow::common
+namespace crow::common::metrics
 {
 
 class Bandwidth
@@ -53,4 +53,4 @@ class Bandwidth
     std::atomic<uint64_t> total_bytes_;
 };
 
-} // namespace crow::common
+} // namespace crow::common::metrics

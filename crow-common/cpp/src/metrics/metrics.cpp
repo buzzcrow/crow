@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-#include "crow-common/metrics.h"
+#include "crow-common/metrics/metrics.h"
 
 #include "crow-common/gzip.h"
 #include "crow-common/log.h"
@@ -16,7 +16,7 @@
 #include <utility>
 #include <vector>
 
-namespace crow::common
+namespace crow::common::metrics
 {
 
 // ── MetricsRegistry ─────────────────────────────────────────────
@@ -348,4 +348,4 @@ void MetricsRegistry::prune_rotated()
     }
 }
 
-} // namespace crow::common
+} // namespace crow::common::metrics

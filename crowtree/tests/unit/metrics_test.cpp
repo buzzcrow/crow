@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-#include "crow-common/metrics.h"
+#include "crow-common/metrics/metrics.h"
 #include "crowtree/crowtree.h"
 #include "crowtree/page_store.h"
 
@@ -13,11 +13,10 @@
 
 namespace crowtree
 {
-// Metrics core moved to crow-common (R12); bring the moved types into
-// `crowtree` so the test's unqualified `Counter`/`Gauge`/... references
-// resolve. `Crowtree`/`Options`/`Batch`/`MemPageStore` stay in
-// `crowtree`.
-using namespace crow::common;
+// Metrics core moved to crow-common::metrics (R12); bring the moved types
+// into `crowtree` so the test's unqualified `Counter`/`Gauge`/... references
+// resolve. `Crowtree`/`Options`/`Batch`/`MemPageStore` stay in `crowtree`.
+using namespace crow::common::metrics;
 
 namespace
 {

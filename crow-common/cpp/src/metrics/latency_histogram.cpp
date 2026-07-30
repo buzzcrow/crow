@@ -1,13 +1,13 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-#include "crow-common/latency_histogram.h"
+#include "crow-common/metrics/latency_histogram.h"
 
 #include <array>
 #include <cstdint>
 #include <utility>
 
-namespace crow::common
+namespace crow::common::metrics
 {
 
 static constexpr size_t                        kNumBuckets     = 12;
@@ -89,4 +89,4 @@ uint64_t LatencyHistogram::percentile(const Snapshot &snap, double p)
     return kBucketBoundsNs[kNumBuckets - 1];
 }
 
-} // namespace crow::common
+} // namespace crow::common::metrics
