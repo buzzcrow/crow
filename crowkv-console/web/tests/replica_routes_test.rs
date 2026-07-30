@@ -21,6 +21,7 @@
 //! Skips silently when the `crowkv-server` binary is not built
 //! (matches the pattern in `mgmt_routes_test.rs` / `kv_routes_test.rs`).
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -43,6 +44,18 @@ struct Upstream {
     pid: u32,
     mgmt_url: String,
     grpc_url: String,
+}
+
+struct ProcessGuard {
+    pids: BTreeMap<String, u32>,
+}
+
+impl Drop for ProcessGuard {
+    fn drop(&mut self) {
+        for pid in self.pids.values() {
+            let _ = lifecycle::stop_pid_with_timeout(*pid, Duration::from_secs(5));
+        }
+    }
 }
 
 fn tempdir(tag: &str) -> PathBuf {
@@ -159,19 +172,21 @@ async fn spawn_web(upstreams: &[Upstream]) -> SocketAddr {
 #[allow(clippy::too_many_lines)]
 async fn replica_add_remove_wires_peers_bidirectionally() {
     let workspace = tempdir("replica_routes");
+    let mut guard = ProcessGuard {
+        pids: BTreeMap::new(),
+    };
     let Some(n1) = spawn_upstream("n1", &workspace).await else {
         eprintln!("skipping: crowkv-server binary not built");
         return;
     };
+    guard.pids.insert("n1".into(), n1.pid);
     let Some(n2) = spawn_upstream("n2", &workspace).await else {
-        let _ = lifecycle::stop_pid(n1.pid);
         eprintln!("skipping: crowkv-server binary not built");
         return;
     };
+    guard.pids.insert("n2".into(), n2.pid);
     let n1_mgmt = n1.mgmt_url.clone();
     let n2_mgmt = n2.mgmt_url.clone();
-    let n1_pid = n1.pid;
-    let n2_pid = n2.pid;
 
     let web = spawn_web(&[n1, n2]).await;
     let base = format!("http://{web}");
@@ -357,8 +372,5 @@ async fn replica_add_remove_wires_peers_bidirectionally() {
         "lone surviving replica should re-elect itself as leader after the leader was removed"
     );
 
-    // Cleanup.
-    let _ = lifecycle::stop_pid(n1_pid);
-    let _ = lifecycle::stop_pid(n2_pid);
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Cleanup is handled by ProcessGuard Drop.
 }

@@ -10,6 +10,7 @@
 
 #include <array>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <string>
 #include <vector>
@@ -412,4 +413,134 @@ TEST(CApi, SyncSkipSnapshotReopen)
         ct_free_buf(&val);
         ct_close(t);
     }
+}
+
+// R3: zero-copy handle-based write path — alloc → write → apply round-trip,
+// alloc → free (no leak), large value, and oversized key rejection.
+TEST(CApi, ZeroCopyHandleAllocApplyRoundTrip)
+{
+    ct_options opt  = {};
+    opt.frame_bytes = 4096;
+    ct_tree *t      = nullptr;
+    ASSERT_EQ(ct_open(&opt, &t), 0);
+    ASSERT_NE(t, nullptr);
+
+    // Basic round-trip: alloc, write key+val, apply, verify via ct_get.
+    {
+        ct_write_handle *h = nullptr;
+        ct_write_ptrs    p = {};
+        ASSERT_EQ(ct_alloc(t, 3, 5, &h, &p), 0);
+        ASSERT_NE(h, nullptr);
+        ASSERT_NE(p.key, nullptr);
+        ASSERT_NE(p.val, nullptr);
+        std::memcpy(p.key, "abc", 3);
+        std::memcpy(p.val, "hello", 5);
+        ASSERT_EQ(ct_apply_put_owned(t, 1, h), 0);
+    }
+    ASSERT_EQ(ct_flush(t), 0);
+    {
+        int32_t  found = 0;
+        uint64_t slot  = 0;
+        ct_buf   val   = {};
+        ASSERT_EQ(ct_get(t, reinterpret_cast<const uint8_t *>("abc"), 3, &found, &slot, &val), 0);
+        EXPECT_EQ(found, 1);
+        EXPECT_EQ(slot, 1U);
+        EXPECT_EQ(std::string(reinterpret_cast<char *>(val.data), val.len), "hello");
+        ct_free_buf(&val);
+    }
+
+    // Large value (>4 KiB) round-trip.
+    {
+        std::string      big_val(8192, 'Z');
+        ct_write_handle *h = nullptr;
+        ct_write_ptrs    p = {};
+        ASSERT_EQ(ct_alloc(t, 4, big_val.size(), &h, &p), 0);
+        ASSERT_NE(p.val, nullptr);
+        std::memcpy(p.key, "bigk", 4);
+        std::memcpy(p.val, big_val.data(), big_val.size());
+        ASSERT_EQ(ct_apply_put_owned(t, 2, h), 0);
+    }
+    ASSERT_EQ(ct_flush(t), 0);
+    {
+        int32_t  found = 0;
+        uint64_t slot  = 0;
+        ct_buf   val   = {};
+        ASSERT_EQ(ct_get(t, reinterpret_cast<const uint8_t *>("bigk"), 4, &found, &slot, &val), 0);
+        EXPECT_EQ(found, 1);
+        EXPECT_EQ(std::string(reinterpret_cast<char *>(val.data), val.len), std::string(8192, 'Z'));
+        ct_free_buf(&val);
+    }
+
+    // Empty value round-trip.
+    {
+        ct_write_handle *h = nullptr;
+        ct_write_ptrs    p = {};
+        ASSERT_EQ(ct_alloc(t, 2, 0, &h, &p), 0);
+        ASSERT_NE(p.key, nullptr);
+        ASSERT_EQ(p.val, nullptr);
+        std::memcpy(p.key, "ev", 2);
+        ASSERT_EQ(ct_apply_put_owned(t, 3, h), 0);
+    }
+    ASSERT_EQ(ct_flush(t), 0);
+    {
+        int32_t  found = 0;
+        uint64_t slot  = 0;
+        ct_buf   val   = {};
+        ASSERT_EQ(ct_get(t, reinterpret_cast<const uint8_t *>("ev"), 2, &found, &slot, &val), 0);
+        EXPECT_EQ(found, 1);
+        EXPECT_EQ(val.len, 0U);
+        ct_free_buf(&val);
+    }
+
+    ct_close(t);
+}
+
+// R3: alloc → free (no apply) — ASan verifies no leak.
+TEST(CApi, ZeroCopyHandleAllocFreeNoLeak)
+{
+    ct_options opt  = {};
+    opt.frame_bytes = 4096;
+    ct_tree *t      = nullptr;
+    ASSERT_EQ(ct_open(&opt, &t), 0);
+
+    ct_write_handle *h = nullptr;
+    ct_write_ptrs    p = {};
+    ASSERT_EQ(ct_alloc(t, 10, 4096, &h, &p), 0);
+    ASSERT_NE(p.key, nullptr);
+    ASSERT_NE(p.val, nullptr);
+    std::memset(p.key, 0xAB, 10);
+    std::memset(p.val, 0xCD, 4096);
+    ct_free_handle(h);
+
+    ct_free_handle(nullptr);
+
+    ct_close(t);
+}
+
+// R3: oversized key rejected at alloc time.
+TEST(CApi, ZeroCopyHandleOversizedKeyRejected)
+{
+    ct_options opt  = {};
+    opt.frame_bytes = 4096;
+    ct_tree *t      = nullptr;
+    ASSERT_EQ(ct_open(&opt, &t), 0);
+
+    ct_write_handle *h = nullptr;
+    ct_write_ptrs    p = {};
+    EXPECT_EQ(ct_alloc(t, 3000, 4, &h, &p), static_cast<ct_status>(-2));
+    EXPECT_EQ(h, nullptr);
+
+    ct_close(t);
+}
+
+// R3: null tree alloc (no key validation, still allocates).
+TEST(CApi, ZeroCopyHandleAllocNullTree)
+{
+    ct_write_handle *h = nullptr;
+    ct_write_ptrs    p = {};
+    ASSERT_EQ(ct_alloc(nullptr, 4, 8, &h, &p), 0);
+    ASSERT_NE(h, nullptr);
+    ASSERT_NE(p.key, nullptr);
+    ASSERT_NE(p.val, nullptr);
+    ct_free_handle(h);
 }

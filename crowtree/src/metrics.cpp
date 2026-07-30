@@ -388,7 +388,7 @@ void MetricsRegistry::check_rotate()
     const auto now = std::time(nullptr);
     std::tm    tm_buf{};
     gmtime_r(&now, &tm_buf);
-    std::array<char, 16> ts{};
+    std::array<char, 128> ts{};
     std::snprintf(ts.data(), ts.size(), "%04d%02d%02d-%02d%02d%02d", tm_buf.tm_year + 1900, tm_buf.tm_mon + 1,
                   tm_buf.tm_mday, tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec);
     std::string rotated = log_path_ + "." + ts.data() + ".log";

@@ -96,8 +96,8 @@ fn become_follower_expires_lease() {
 
 #[test]
 fn renew_lease_extends_by_configured_duration_minus_skew() {
-    let now = Instant::now();
     let leader = PxLocalReplica::new(1, PxLocalReplicaRole::Leader);
+    let now = Instant::now();
     let cfg = PxElectionConfig::for_tests();
 
     leader.renew_lease(now, &cfg);

@@ -38,6 +38,7 @@ use crate::rpc::{
     learner_stream_request, learner_stream_response, AcceptRequest, AcceptedResponse, ChosenNotification,
     HeartbeatRequest, HeartbeatResponse, LearnerStreamRequest, LearnerStreamResponse,
 };
+use tonic::transport::{Channel, Endpoint};
 
 /// Map from outbound `request_id` to the awaiting client `oneshot`.
 /// Shared between the send-half (insert) and recv-half (remove + dispatch)
@@ -217,7 +218,14 @@ async fn run_learner_stream(
         }
 
         let connect_url = format!("http://{endpoint}");
-        let connect_result = PxServiceClient::connect(connect_url.clone()).await;
+        let connect_result: Result<PxServiceClient<Channel>, tonic::Status> =
+            match Endpoint::from_shared(connect_url) {
+                Ok(ep) => match ep.tcp_nodelay(true).connect().await {
+                    Ok(channel) => Ok(PxServiceClient::new(channel)),
+                    Err(e) => Err(tonic::Status::unavailable(e.to_string())),
+                },
+                Err(e) => Err(tonic::Status::unavailable(e.to_string())),
+            };
         let mut client = match connect_result {
             Ok(c) => c,
             Err(err) => {

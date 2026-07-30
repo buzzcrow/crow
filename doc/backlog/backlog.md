@@ -11,7 +11,7 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R30** — Bump this line in the same commit when adding a new item.
+**Next R number: R33** — Bump this line in the same commit when adding a new item.
 
 ### Medium Priority
 
@@ -35,15 +35,24 @@ complexity, and dependency. Before implementation, follow the
   `LatencyHistogram` / `Counter` classes. After R12 extracts metrics into
   `crow-common`, the bench client should reuse the same metrics primitives
   for consistency and to eliminate duplicate statistical infrastructure.
-- **[R16](R16-overlap-fsync.md)** — Overlap local WAL fsync with remote RPC fan-out — Area:
-  consensus / WAL — The leader's local `on_accept` awaits `fdatasync`
-  before returning `PxAcceptReply::Accepted`, putting the leader's disk
-  fsync on the critical path *before* remote RPCs begin. Overlapping the
-  local WAL persist with the remote accept RPCs would hide fsync latency
-  behind network round-trips. **Concept change**: weakens the W6 ack
+- **[R16a](R16a-concurrent-fanout.md)** — Concurrent local + remote fan-out — Area:
+  consensus / WAL — `run_accept_phase` and `run_prepare_phase` `await`
+  the local `on_accept`/`on_prepare` (acceptor CAS + WAL append +
+  `fdatasync`) *before* issuing any remote RPC, putting the leader's
+  local fsync on the critical path ahead of the network RTT. Folding
+  the local call into the same `join_all` as the remote RPCs overlaps
+  the local fsync with the network round-trip. **No contract change** —
+  W6 only forbids the local replica replying `Accepted` before persist,
+  and `on_accept` still does not return until `wal.append` resolves; only
+  the *issue order* of remote RPCs changes. Pure win, no feature flag.
+- **[R16b](R16b-early-ack.md)** — Early ack before local WAL persist — Area: consensus / WAL —
+  Return `Chosen` as soon as *remote* quorum is met, without waiting
+  for the local WAL flush; track local persist separately. Builds on
+  R16a's concurrent join. **Concept change**: weakens the W6 ack
   contract (persist-before-reply) for the local replica — the proposer
   would need to track local persist completion separately from quorum.
   Gate behind a feature flag; test under crash-recovery scenarios.
+  Depends on R16a.
 - **[R17](R17-async-apply.md)** — Async engine apply after quorum — Area: consensus / engine —
   `learn_chosen` (decode payload + `KVEngine::apply`) runs on the
   proposer critical path before `ProposeResult::Chosen` is returned to
@@ -53,6 +62,37 @@ complexity, and dependency. Before implementation, follow the
   before the local engine has applied the value — read-your-writes
   semantics break unless a read barrier or apply-fence is added. Gate
   behind a feature flag; test read-after-write consistency.
+- **[R30](R30-zero-copy-engine-apply.md)** — Zero-copy engine apply — Area: consensus / engine / FFI —
+  R3 delivered handle-based FFI (`ct_alloc` / `ct_apply_put_owned`), but the
+  consensus layer still copies: Paxos deserialization materializes `Vec<u8>`
+  keys/values, then `ct_apply_batch_slices` copies again at the C++ boundary.
+  This item wires the full path so data flows from Paxos payload to crowtree
+  frame with zero intermediate copies: deserialize directly into handles,
+  extend the C API for batch handles, and add a `KVEngine` apply-handles
+  variant. Depends on R3 (completed).
+- **[R31](R31-write-regression-investigation.md)** — Investigate 50K→29K write throughput regression — Area:
+  consensus / bench — The 2026-07-21 sweep reported ~50K ops/s peak at
+  64T:8C (Intel Ryzen 9 5950X). The 2026-07-24 sweep measured ~29K at
+  the same config on the same Intel platform (direct re-run: 29,319),
+  a ~42% drop. **Step 1 done (2026-07-29)**: a macOS M5 Pro retest hits
+  ~48K at the same config, within 4% of the original Intel 50K claim —
+  the 50K→29K difference is largely a platform effect, not a code
+  regression. The Intel same-platform bisect remains open but is lower
+  priority; R16a/R17/R30 can proceed on M5 Pro without waiting.
+- **[R32](R32-custom-rust-rpc.md)** — Custom Rust RPC library to replace gRPC on the hot path — Area:
+  RPC / consensus — gRPC (tonic + h2) serializes concurrent writers on a
+  connection-level userspace lock (HPACK table, frame buffer,
+  flow-control windows); measured cost is ~17% at 2T:1C, zero at
+  1T:1C. A custom `[len][req_id][protobuf]`-over-raw-TCP transport
+  removes the userspace funnel — the kernel TCP lock is the only
+  serialization point. **Deferred until** read throughput is the
+  primary constraint AND the h2 lock is profiled as the hot spot; until
+  then write-path (R16a/R17/R30) and disk-I/O work take precedence.
+  High complexity (2–4K lines: framing, pool, reconnect, timeout,
+  cancellation, backpressure, TLS). Scope is the internal
+  replica-to-replica path only; management API stays on Axum/HTTP.
+  Reference implementations: protosocket (Momento), Volo (CloudWeGo),
+  Cap'n Proto RPC.
 
 ### Low Priority
 
@@ -62,9 +102,6 @@ complexity, and dependency. Before implementation, follow the
   RDMA backend exists yet; placeholder only.
 
 **Complexity — Medium:**
-- **[R3](R3-zero-copy-ffi.md)** — Zero-copy FFI write path — Area: crowtree FFI — `ct_apply_put` copies
-  key+value into an internal buffer; for large values this memcpy is avoidable
-  via a direct-write alloc handle.
 - **[R4](R4-bounded-mempool.md)** — Bounded memory pool — Area: crowtree engine — `buffer::allocate` uses
   unbounded `std::malloc`; a burst of large writes can spike RSS without
   backpressure.

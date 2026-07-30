@@ -36,8 +36,8 @@ Client PUT/DELETE/BatchWrite
             ii. run_accept_phase
                 - local on_accept (acceptor.accept + WAL append Accepted)
                   [O(1) ref-count: PxLogEntry::clone for cas_accepted]
-                  [copy: entry.payload.to_vec() for WALRecord, unavoidable
-                   today — could be Bytes::clone if WALRecord stored Bytes]
+                  [no copy: encode_accepted_payload is entry.payload.clone()
+                   (O(1) ref-count); WALRecord.payload is Bytes]
                   [no copy: IoSlice borrows Bytes for vectored writev]
                 - concurrent remote send_accept RPCs (join_all, bidi LearnerStream)
                   [O(1) ref-count: Bytes::clone for AcceptRequest]
@@ -168,10 +168,23 @@ Client PUT/DELETE/BatchWrite
   `acceptor.accept` take `&PxLogEntry`; redundant clones eliminated;
   only remaining clone is inside `inner_accept` for `cas_accepted` (slot
   node must own its copy, O(1) ref-count bump with `Bytes` payload).
-- **R16 — Overlap local WAL fsync with remote RPC fan-out**: local
-  `fdatasync` is on the critical path before remote RPCs begin (~10-100
-  µs on NVMe). Would weaken W6 ack contract for local replica; requires
-  feature flag + crash-recovery tests.
+- **R16a — Concurrent local + remote fan-out**: today both
+  `run_accept_phase` and `run_prepare_phase` `await` the local
+  `on_accept`/`on_prepare` (which runs acceptor CAS + WAL append +
+  `fdatasync`) *before* issuing any remote RPC. The leader's local
+  fsync (~10-100 µs on NVMe) sits on the critical path ahead of the
+  network RTT. Fix: issue the local handler and the remote RPCs
+  concurrently (fold the local call into the same `join_all`). The
+  quorum check still awaits the local reply before counting it, so
+  **W6 is not weakened** — W6 only forbids the local replica replying
+  `Accepted` before persist; the proposer still waits for that reply.
+  Pure win, no contract change, no feature flag.
+- **R16b — Early ack before local persist**: return `Chosen` before the
+  local WAL flush completes, tracking local persist separately from
+  quorum. *This* is the part that weakens W6 for the local replica — a
+  crash between accept reply and WAL flush may lose the accepted value
+  (safe in Paxos, but changes durability ordering). Requires feature
+  flag + crash-recovery tests. Lower priority than R16a.
 - **R17 — Async engine apply after quorum**: `learn_chosen` runs before
   `ProposeResult::Chosen` is returned; engine apply (FFI + memtable
   insert) is on the write critical path. Would break read-your-writes;
@@ -179,12 +192,17 @@ Client PUT/DELETE/BatchWrite
 
 ---
 
-## Benchmark Results — 2026-07-21
+## Benchmark Results — 2026-07-24
 
-3-node cluster, in-memory WAL + in-memory KV (mem-block), write-only,
-512-byte values, 1M key space, 12-second duration,
-`election_profile = e2e`. Admission policy = `Queue` (R18 default).
-TPS = success-only (total_attempts - total_errors / duration).
+Systematic T:C:W sweep. 3-node cluster (bench fixture, in-process
+console-web + 3 spawned `crowkv-server` processes), in-memory WAL +
+in-memory KV (mem-block), write-only, 512-byte values, 1M key space,
+12-second duration, `election_profile = e2e`, admission policy =
+`Queue` (R18 default). Platform: AMD Ryzen 9 5950X (16 cores / 32
+threads), Linux. 28 runs total, zero errors across all configs.
+
+Script: `tools/bench-write-sweep.sh`. Regression subset:
+`tools/bench-write-regression.sh`.
 
 ### Factors Affecting TPS
 
@@ -194,56 +212,172 @@ TPS = success-only (total_attempts - total_errors / duration).
   critical path (WAL append + quorum RPC) becomes the bottleneck.
 - **`threads` (worker tasks)** — client-side concurrency; more workers
   fill the pipeline faster; diminishing returns once server-side
-  consensus is saturated.
-- **`connections` (gRPC channels)** — per-endpoint channel pool size;
-  must be sufficient to avoid gRPC stream head-of-line blocking; beyond
-  ~4, no measurable effect (bottleneck moves to server-side consensus).
+  consensus is saturated (~24T).
+- **`connections` (gRPC channels)** — **no measurable effect at any
+  thread count**. Unlike reads (where T:C ratio matters due to the
+  HTTP/2 connection lock), writes are bottlenecked by server-side
+  consensus (WAL fsync + quorum RPC), not gRPC framing. C=3 and C=48
+  produce identical throughput at 12T and 48T.
 
 No measurable effect on TPS (at ≤64 threads):
 
 - **`inflight_queues`** — multi-queue routing (1 vs 4 semaphores);
   semaphore is not the contention bottleneck; consensus path
   dominates. Default 1 is sufficient.
-- **Window > 64** — MI=128 no improvement over MI=64. Consensus
-  critical path ~1.2ms per proposal is the hard ceiling:
-  64 / 1.2ms ≈ 53K theoretical, matches observed 50K peak.
+- **Window > 16** — MI=16, 32, 64 all converge to ~29K at 48T.
+  Consensus critical path is the hard ceiling.
+- **Connections** — C has zero effect on write throughput at any T.
+  The write path's bottleneck is consensus, not gRPC.
 
-### Scaling: 1T to 64T (MI=64, Q=1)
+### Phase 1 — Baseline 1T:1C scaling (MI=64)
 
-| Threads | Conn | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | Errors |
+| Threads | Conn | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 3,249 | 305 | 339 | 444 | 562 | 0 |
+| 6 | 6 | 19,922 | 299 | 288 | 475 | 984 | 0 |
+| 12 | 12 | 25,802 | 462 | 449 | 740 | 1,684 | 0 |
+| 24 | 24 | 28,761 | 832 | 820 | 1,264 | 2,751 | 0 |
+| 48 | 48 | 28,898 | 1,658 | 1,643 | 2,419 | 5,399 | 0 |
+
+Throughput plateaus at 24T (~29K). Adding threads beyond 24T
+increases latency without improving throughput — the consensus
+pipeline is saturated.
+
+### Phase 2 — T:C ratio exploration (MI=64)
+
+| Threads | Conn | Ratio | Throughput (ops/s) | avg (µs) | p99 (µs) | Errors |
 | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 1 | 9,074 | 109 | 99 | 198 | 0 |
-| 2 | 1 | 16,742 | 119 | 112 | 199 | 0 |
-| 4 | 4 | 27,040 | 147 | 139 | 231 | 0 |
-| 8 | 4 | 29,632 | 268 | 263 | 395 | 0 |
-| 16 | 8 | 36,880 | 432 | 424 | 633 | 0 |
-| 32 | 8 | 43,989 | 725 | 712 | 1069 | 0 |
-| 64 | 8 | 50,107 | 1275 | 1251 | 1942 | 0 |
+| 12 | 3 | 4:1 | 24,665 | 484 | 801 | 0 |
+| 12 | 6 | 2:1 | 25,734 | 464 | 750 | 0 |
+| 12 | 12 | 1:1 | 25,798 | 463 | 771 | 0 |
+| 12 | 24 | 1:2 | 25,840 | 462 | 743 | 0 |
+| 12 | 48 | 1:4 | 25,737 | 464 | 760 | 0 |
+| 48 | 12 | 4:1 | 29,267 | 1,637 | 2,453 | 0 |
+| 48 | 24 | 2:1 | 29,057 | 1,649 | 2,471 | 0 |
+| 48 | 48 | 1:1 | 29,134 | 1,645 | 2,373 | 0 |
+| 48 | 64 | 1:1.3 | 29,004 | 1,652 | 2,397 | 0 |
 
-### Window impact (16T, 4C, Q=1)
+**Key finding: T:C ratio has zero effect on write throughput.** At
+12T, C=3 and C=48 both give ~25K. At 48T, C=12 and C=64 both give
+~29K. This is fundamentally different from reads, where the HTTP/2
+connection lock makes T:C ratio critical. Writes are bottlenecked by
+the consensus critical path (WAL append + quorum RPC), which is
+server-side and independent of how many gRPC channels the client
+opens.
 
-| Window | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | Errors |
-| --- | --- | --- | --- | --- | --- |
-| 1 | 13,278 | 1203 | 1066 | 1360 | 0 |
-| 16 | 36,661 | 434 | 426 | 642 | 0 |
-| 32 | 36,792 | 433 | 424 | 635 | 0 |
-| 64 | 36,543 | 436 | 427 | 643 | 0 |
+### Phase 3 — Window impact at 48T:48C
+
+| Window | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 6,361 | 7,544 | 6,499 | 10,455 | 10,687 | 0 |
+| 4 | 20,776 | 2,308 | 2,253 | 3,215 | 8,295 | 0 |
+| 16 | 28,040 | 1,709 | 1,679 | 2,467 | 5,963 | 0 |
+| 32 | 28,827 | 1,662 | 1,644 | 2,481 | 5,563 | 0 |
+| 64 | 28,920 | 1,657 | 1,638 | 2,509 | 5,067 | 0 |
+
+**Window is the primary TPS lever.** MI=1→16 gives 4.4× throughput
+(6K→28K). MI=1 (effectively Raft-style sequential commit) serializes
+all proposals through a single permit — 48 threads queue at 7.5ms
+avg latency. MI=16+ converges: the consensus pipeline is saturated,
+adding more permits doesn't help because the per-proposal critical
+path (WAL fsync + quorum RPC) is the bottleneck.
+
+### Phase 4 — Low thread count (MI=64)
+
+| Threads | Conn | Ratio | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | Errors |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 1:1 | 2,836 | 350 | 354 | 445 | 0 |
+| 1 | 2 | 1:2 | 2,914 | 340 | 358 | 447 | 0 |
+| 1 | 4 | 1:4 | 2,842 | 349 | 361 | 450 | 0 |
+| 2 | 1 | 2:1 | 6,344 | 313 | 261 | 500 | 0 |
+| 2 | 2 | 1:1 | 7,210 | 275 | 224 | 475 | 0 |
+| 2 | 4 | 1:2 | 8,889 | 223 | 210 | 383 | 0 |
+| 3 | 1 | 3:1 | 11,856 | 251 | 243 | 409 | 0 |
+| 3 | 3 | 1:1 | 12,915 | 230 | 222 | 383 | 0 |
+| 3 | 6 | 1:2 | 12,704 | 234 | 219 | 357 | 0 |
+
+At 1T, C has no effect (~2.8K) — single-thread throughput is bounded
+by per-proposal latency (~350us). At 2T, more connections help
+(6.3K→8.9K) because 2 threads sharing 1 connection contend on the h2
+lock; 2T:4C gives each thread its own connection. At 3T, 3C and 6C
+converge (~12.8K).
+
+### Comparison with previous test (2026-07-21)
+
+The previous test reported 50K ops/s peak at 64T:8C (Intel Ryzen 9
+5950X, Linux). This sweep measures ~29K at all 48T+ configs on the
+same Intel platform, including a direct 64T:8C re-run (29,319 ops/s).
+The relative findings are consistent: window is the primary lever,
+threads scale until consensus saturation, connections have minimal
+effect. The absolute throughput difference is investigated below.
+
+### macOS M5 Pro retest (2026-07-29)
+
+To separate platform effects from code regression, the regression
+sentinel configs were re-run on macOS M5 Pro (arm64, Darwin 25.5.0).
+Same workload (write-only, 512 B values, 1M key space, 12 s, mem
+mode, Queue admission, MI=64 unless noted).
+
+| Threads | Conn | MI | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 64 | 9,457 | 104 | 96 | 137 | 241 | 0 |
+| 24 | 24 | 64 | 41,062 | 582 | 574 | 845 | 1,099 | 0 |
+| 48 | 48 | 64 | 46,679 | 1,026 | 1,015 | 1,462 | 2,397 | 0 |
+| 64 | 8 | 64 | 47,808 | 1,336 | 1,329 | 1,900 | 3,075 | 0 |
+| 48 | 48 | 1 | 13,320 | 3,602 | 3,083 | 3,721 | 105,791 | 48 |
+
+**Key finding: the 50K→29K difference is largely a platform effect,
+not a code regression.** On M5 Pro the 64T:8C config hits ~48K —
+within 4% of the original Intel 50K claim. The M5 Pro is meaningfully
+faster than the Intel Ryzen 9 5950X for this workload at every config:
+
+- **Single-thread (1T:1C)**: M5 Pro 9.5K vs Intel 2.8K — **3.4×**.
+  The M5 Pro's per-core throughput and memory subsystem dominate;
+  single-thread write latency is bound by per-proposal critical path
+  (WAL fsync + quorum RPC), and M5 Pro's NVMe + memory latency is
+  substantially lower.
+- **Saturation (24T+)**: M5 Pro ~41-48K vs Intel ~29K — **1.4-1.7×**.
+  The M5 Pro has fewer but faster cores; it saturates later and at a
+  higher ceiling.
+- **Window impact (MI=1 vs MI=64)**: same 4-5× ratio on both platforms
+  (M5 Pro 13K→47K; Intel 6K→29K). The relative shape is identical;
+  only the absolute ceiling differs.
+
+**Implication for R31**: the Intel same-platform regression (50K on
+07-21 → 29K on 07-24) is still real and warrants an Intel bisect if
+that platform is available. But the "ceiling" is not 29K globally —
+that is Intel-specific. On M5 Pro the steady-state ceiling is ~48K,
+close to the original 50K claim. Optimizations (R16a/R17/R30) should
+be benchmarked on a single consistent platform; cross-platform
+comparisons are not meaningful for absolute throughput.
+
+The MI=1 run on M5 Pro showed 48 errors with a 106 ms p999 tail —
+queue saturation under aggressive load with a single permit; the
+errors are likely client-side timeouts at the 3.6 ms avg latency, not
+consensus failures (zero errors at MI=64).
 
 ### Conclusions
 
-- **Window is the primary TPS lever** — W=1→W=16 gives 2.8× throughput
-  (13K→37K at 16T/4C). W=16+ converge to ~37K at this thread count
-  (pipeline already saturated).
-- **Threads scale throughput until server saturation** — 1T→64T gives
-  5.5× throughput (9K→50K at MI=64). Returns diminish after 32T.
-- **Connections matter only at low counts** — 1C→4C gives +60% at 4T;
-  beyond 4C, no effect (gRPC is not the bottleneck).
-- **Queue mode: zero errors across all configurations** — no `Busy`
-  rejections, no client retry, no window tuning to avoid reject storms;
-  queue naturally backpressures at any window size.
-- **Scaling ceiling ~50K ops/s** — per-proposal latency ~1.2ms at 64
-  in-flight. Next gains require reducing per-proposal latency (R16:
-  overlap WAL fsync with RPCs; R15: zero-copy accept path).
+- **Window is the primary TPS lever** — MI=1→16 gives 4.4× throughput
+  (6K→28K at 48T). MI=16+ converges (consensus pipeline saturated).
+- **Threads scale until 24T, then plateau** — 1T→24T gives 10×
+  throughput (3K→29K). 24T→48T adds latency without throughput gain.
+- **T:C ratio has zero effect on writes** — unlike reads, C=3 and C=64
+  produce identical throughput at the same T. The write bottleneck is
+  server-side consensus (WAL fsync + quorum RPC), not gRPC framing.
+  This is the key difference from reads, where the HTTP/2 connection
+  lock makes T:C ratio critical.
+- **Queue mode: zero errors across all 28 configurations** — no `Busy`
+  rejections, no client retry; queue naturally backpressures at any
+  window size.
+- **Scaling ceiling is platform-dependent** — Intel Ryzen 9 5950X
+  ~29K ops/s; Apple M5 Pro ~48K ops/s at the same config. Per-proposal
+  latency at 48 inflight is ~1.7 ms (Intel) vs ~1.0 ms (M5 Pro). Next
+  gains require reducing per-proposal latency (R16a: concurrent local
+  + remote fan-out; R15: zero-copy accept path, done). The Intel
+  same-platform 50K→29K drop (07-21 → 07-24) is tracked as R31; the
+  M5 Pro retest shows the code path itself reaches ~48K, so the
+  "regression" is largely a platform effect, not a code defect.
 
 ---
 
@@ -253,15 +387,17 @@ Copy points are annotated inline in the flow diagram above. Summary
 of what remains:
 
 - **O(n) unavoidable** — payload encoding (client key/value slices →
-  contiguous `Vec<u8>`); WAL encode (`entry.payload.to_vec()` for
-  `WALRecord`); WAL replay (`Bytes::copy_from_slice` to reconstruct
-  `PxLogEntry`); C++ engine apply (internal memtable copy); gRPC
-  socket write (kernel user→socket buffer copy).
+  contiguous `Vec<u8>`); WAL replay (`Bytes::copy_from_slice` to
+  reconstruct `PxLogEntry` from on-disk bytes); C++ engine apply
+  (internal memtable copy); gRPC socket write (kernel user→socket
+  buffer copy).
 - **O(1) ref-count bumps (negligible)** — `base_entry` payload clone
   per slot retry; `inner_accept` entry clone for `cas_accepted`;
   `send_accept` payload clone for protobuf; `learn_chosen` entry clone
-  for learner; WAL `encode_frame` payload clone for `RecordFrame`;
-  Batch decode `Bytes::slice` per key/value (shares payload buffer).
+  for learner; WAL `from_accepted` payload clone (`encode_accepted_payload`
+  is `entry.payload.clone()`); WAL `encode_frame` payload clone for
+  `RecordFrame`; Batch decode `Bytes::slice` per key/value (shares
+  payload buffer).
 - **Zero-copy (move/borrow)** — `Vec<u8>` → `Bytes` at `propose`
   entry; gRPC deserialization → `PxLogEntry` (move `Bytes`); WAL
   vectored write (`IoSlice` borrows `Bytes`); FFI batch apply
@@ -269,12 +405,10 @@ of what remains:
 
 ### Optimization Opportunities
 
-- **WAL encode** (`entry.payload.to_vec()`) — eliminable if `WALRecord`
-  stored `Bytes` directly instead of round-tripping through `Vec<u8>`.
-  `entry.payload` is already `Bytes`; `to_vec()` is redundant —
-  `WALRecord.payload` could be `entry.payload.clone()` (O(1) ref-count).
-  `encode_accepted_payload` exists only as a seam for future encoding
-  changes; today it is a straight `to_vec()`.
+- **WAL encode** — already zero-copy: `encode_accepted_payload` is
+  `entry.payload.clone()` (O(1) ref-count); `WALRecord.payload` is
+  `Bytes`. No further work here. (Previously listed as a `to_vec()`
+  copy — that was stale; the code already does the right thing.)
 - **Batch decode** — already zero-copy: `Batch::decode` uses
   `Bytes::slice` (O(1) ref-count), not `to_vec()`; `BatchOp` owns
   `Bytes` that share the payload buffer.

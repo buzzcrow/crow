@@ -740,6 +740,7 @@ async fn shrink_group_to_three(nodes: &[ServerNode], group_id: u64) {
 ///   - `wire_topology` for a non-bootstrap group,
 ///   - learner-store isolation between groups in the same `PxKvStore`.
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn e2e_multi_group_isolated_kv() {
     let group_a = 1;
     let group_b = 2;
@@ -766,39 +767,134 @@ async fn e2e_multi_group_isolated_kv() {
     wire_topology(&nodes, group_b).await;
 
     // Both groups must elect leaders independently.
-    let leader_a = wait_for_leader(&nodes, group_a, std::time::Duration::from_secs(20)).await;
-    let leader_b = wait_for_leader(&nodes, group_b, std::time::Duration::from_secs(20)).await;
-
-    let addr_leader_a = node_endpoint(&topology(&nodes[leader_a]).await);
-    let addr_leader_b = node_endpoint(&topology(&nodes[leader_b]).await);
-
-    let mut kv_a = KvServiceClient::connect(format!("http://{addr_leader_a}"))
-        .await
-        .expect("connect kv_a");
-    let mut kv_b = KvServiceClient::connect(format!("http://{addr_leader_b}"))
-        .await
-        .expect("connect kv_b");
+    let _leader_a = wait_for_leader(&nodes, group_a, std::time::Duration::from_secs(20)).await;
+    let _leader_b = wait_for_leader(&nodes, group_b, std::time::Duration::from_secs(20)).await;
 
     // Same key, distinct values per group.
-    kv_put(&mut kv_a, group_a, b"shared-key", b"value-from-A", 5001).await;
-    kv_put(&mut kv_b, group_b, b"shared-key", b"value-from-B", 5002).await;
+    let resp = run_kv_op_with_retry(
+        &nodes,
+        group_a,
+        &KvOp::Put(KvSetRequest {
+            version: 1,
+            key: Bytes::from_static(b"shared-key"),
+            value: Bytes::from_static(b"value-from-A"),
+            seq: 5001,
+            ttl_ms: 0,
+            client_id: 7000,
+            request_id: 5001,
+            request_create_ms: 5001,
+            group_id: group_a,
+        }),
+    )
+    .await;
+    assert!(resp.ok, "group_a put failed: {}", resp.error);
+
+    let resp = run_kv_op_with_retry(
+        &nodes,
+        group_b,
+        &KvOp::Put(KvSetRequest {
+            version: 1,
+            key: Bytes::from_static(b"shared-key"),
+            value: Bytes::from_static(b"value-from-B"),
+            seq: 5002,
+            ttl_ms: 0,
+            client_id: 7000,
+            request_id: 5002,
+            request_create_ms: 5002,
+            group_id: group_b,
+        }),
+    )
+    .await;
+    assert!(resp.ok, "group_b put failed: {}", resp.error);
 
     // Each group sees its own value.
-    let (found_a, val_a) = kv_get(&mut kv_a, group_a, b"shared-key", 5101).await;
-    assert!(found_a, "group_a get should hit");
-    assert_eq!(val_a, b"value-from-A");
+    let resp = run_kv_op_with_retry(
+        &nodes,
+        group_a,
+        &KvOp::Get(KvGetRequest {
+            version: 1,
+            key: Bytes::from_static(b"shared-key"),
+            request_id: 5101,
+            request_create_ms: 5101,
+            group_id: group_a,
+            read_mode: 0,
+            min_slot: 0,
+        }),
+    )
+    .await;
+    assert!(resp.ok, "group_a get should hit: {}", resp.error);
+    assert_eq!(resp.value, Bytes::from_static(b"value-from-A"));
 
-    let (found_b, val_b) = kv_get(&mut kv_b, group_b, b"shared-key", 5102).await;
-    assert!(found_b, "group_b get should hit");
-    assert_eq!(val_b, b"value-from-B");
+    let resp = run_kv_op_with_retry(
+        &nodes,
+        group_b,
+        &KvOp::Get(KvGetRequest {
+            version: 1,
+            key: Bytes::from_static(b"shared-key"),
+            request_id: 5102,
+            request_create_ms: 5102,
+            group_id: group_b,
+            read_mode: 0,
+            min_slot: 0,
+        }),
+    )
+    .await;
+    assert!(resp.ok, "group_b get should hit: {}", resp.error);
+    assert_eq!(resp.value, Bytes::from_static(b"value-from-B"));
 
     // Delete on A must not affect B.
-    kv_delete(&mut kv_a, group_a, b"shared-key", 5201).await;
-    let (found_a_del, _) = kv_get(&mut kv_a, group_a, b"shared-key", 5301).await;
-    assert!(!found_a_del, "key should be gone in group_a");
-    let (found_b_still, val_b_still) = kv_get(&mut kv_b, group_b, b"shared-key", 5302).await;
-    assert!(found_b_still, "key in group_b must survive delete in group_a");
-    assert_eq!(val_b_still, b"value-from-B");
+    let resp = run_kv_op_with_retry(
+        &nodes,
+        group_a,
+        &KvOp::Delete(KvDeleteRequest {
+            version: 1,
+            key: Bytes::from_static(b"shared-key"),
+            seq: 5201,
+            client_id: 7000,
+            request_id: 5201,
+            request_create_ms: 5201,
+            group_id: group_a,
+        }),
+    )
+    .await;
+    assert!(resp.ok, "group_a delete failed: {}", resp.error);
+
+    let resp = run_kv_op_with_retry(
+        &nodes,
+        group_a,
+        &KvOp::Get(KvGetRequest {
+            version: 1,
+            key: Bytes::from_static(b"shared-key"),
+            request_id: 5301,
+            request_create_ms: 5301,
+            group_id: group_a,
+            read_mode: 0,
+            min_slot: 0,
+        }),
+    )
+    .await;
+    assert!(resp.not_found, "key should be gone in group_a");
+
+    let resp = run_kv_op_with_retry(
+        &nodes,
+        group_b,
+        &KvOp::Get(KvGetRequest {
+            version: 1,
+            key: Bytes::from_static(b"shared-key"),
+            request_id: 5302,
+            request_create_ms: 5302,
+            group_id: group_b,
+            read_mode: 0,
+            min_slot: 0,
+        }),
+    )
+    .await;
+    assert!(
+        resp.ok,
+        "key in group_b must survive delete in group_a: {}",
+        resp.error
+    );
+    assert_eq!(resp.value, Bytes::from_static(b"value-from-B"));
 }
 
 /// Scenario: bring up a 3-replica group out of 5 nodes, do KV, then

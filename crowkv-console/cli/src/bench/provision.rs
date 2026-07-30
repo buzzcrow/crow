@@ -118,6 +118,7 @@ impl BenchFixture {
         workspace_dir: PathBuf,
         max_inflight: usize,
         inflight_queues: usize,
+        metrics_interval: u64,
     ) -> Result<Self> {
         std::fs::create_dir_all(&workspace_dir)?;
 
@@ -131,7 +132,8 @@ impl BenchFixture {
         let client = ConsoleClient::new(format!("http://{addr}"))?;
 
         let (ids, pids, grpc_urls, mgmt_urls) =
-            match Self::provision_nodes(&client, mode, max_inflight, inflight_queues).await {
+            match Self::provision_nodes(&client, mode, max_inflight, inflight_queues, metrics_interval).await
+            {
                 Ok(v) => v,
                 Err(e) => {
                     console_task.abort();
@@ -180,6 +182,7 @@ impl BenchFixture {
         mode: BenchMode,
         max_inflight: usize,
         inflight_queues: usize,
+        metrics_interval: u64,
     ) -> Result<(Vec<String>, Vec<u32>, Vec<String>, Vec<String>)> {
         let mut ids = Vec::with_capacity(NODE_COUNT);
         let mut pids = Vec::with_capacity(NODE_COUNT);
@@ -215,7 +218,7 @@ impl BenchFixture {
                 mgmt_port: unique_test_port(),
                 grpc_port: unique_test_port(),
                 election_profile: Some("e2e".into()),
-                metrics_interval: Some(5),
+                metrics_interval: Some(metrics_interval),
                 max_inflight: Some(max_inflight),
                 inflight_queues: Some(inflight_queues),
                 ..Default::default()

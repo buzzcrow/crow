@@ -12,6 +12,7 @@
 
 #include "crowtree/async_page_store.h"
 #include "crowtree/block_page_store.h"
+#include "crowtree/cell.h"
 #include "crowtree/crowtree.h"
 #include "crowtree/log.h"
 #include "crowtree/page_store.h"
@@ -177,6 +178,15 @@ struct ct_import
 {
     ct_tree                        *owner = nullptr;
     std::unique_ptr<SnapshotImport> imp;
+};
+
+// R3: zero-copy write handle. The caller writes key bytes into key.data()
+// and value bytes into cell.data() + kCellHeaderSize. ct_apply_put_owned
+// writes the cell header (slot + flags) and moves both into apply_encoded.
+struct ct_write_handle
+{
+    std::string key;  // pre-allocated with key_len, caller fills bytes
+    buffer      cell; // buffer::alloc(val_len, kCellHeaderSize)
 };
 
 // ── ct_free_buf ───────────────────────────────────────────────────
@@ -601,6 +611,50 @@ void ct_force_advance_slot(ct_tree *t, uint64_t slot)
     if (t != nullptr) {
         t->tree->force_advance_slot(slot);
     }
+}
+
+// ── Zero-copy write path (R3) ──────────────────────────────────────
+
+ct_status ct_alloc(ct_tree *t, size_t key_len, size_t val_len, ct_write_handle **out_handle, ct_write_ptrs *out_ptrs)
+{
+    if (out_handle == nullptr || out_ptrs == nullptr) {
+        return static_cast<ct_status>(Code::kInvalidArgument);
+    }
+    if (t != nullptr) {
+        const size_t key_limit = t->tree->max_key_size();
+        if (key_len > key_limit) {
+            return static_cast<ct_status>(Code::kInvalidArgument);
+        }
+    }
+    auto h        = std::make_unique<ct_write_handle>();
+    h->key        = std::string(key_len, '\0');
+    h->cell       = buffer::alloc(val_len, kCellHeaderSize);
+    out_ptrs->key = key_len > 0 ? reinterpret_cast<uint8_t *>(h->key.data()) : nullptr;
+    out_ptrs->val = val_len > 0 ? h->cell.data() + kCellHeaderSize : nullptr;
+    *out_handle   = h.release();
+    return static_cast<ct_status>(Code::kOk);
+}
+
+ct_status ct_apply_put_owned(ct_tree *t, uint64_t slot, ct_write_handle *handle)
+{
+    if (t == nullptr || handle == nullptr) {
+        return static_cast<ct_status>(Code::kInvalidArgument);
+    }
+    uint8_t *p = handle->cell.data();
+    for (int i = 0; i < 8; ++i) {
+        p[i] = static_cast<uint8_t>((slot >> (8 * i)) & 0xff);
+    }
+    p[8] = 0; // kPut (no tombstone flag)
+    std::vector<Crowtree::encoded_op> ops;
+    ops.push_back({std::move(handle->key), std::move(handle->cell)});
+    auto status = to_status(t->tree->apply_encoded(slot, std::move(ops)));
+    delete handle;
+    return status;
+}
+
+void ct_free_handle(ct_write_handle *handle)
+{
+    delete handle;
 }
 
 ct_status ct_put(ct_tree *t, const uint8_t *key, size_t klen, const uint8_t *val, size_t vlen)

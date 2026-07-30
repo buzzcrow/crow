@@ -296,8 +296,11 @@ impl PxElectionConfig {
     /// Raft paper's 150–300 ms suggestion with a 2× margin for localhost
     /// parallel-test load. Lease ≥ `election_max` + `clock_skew` (600 + 100
     /// = 700) ensures leader-lease safety. `learner_stream_window_frames`
-    /// = 32 × 4 = 128. Snapshot time threshold 20 s
-    /// so short E2E runs still checkpoint without excessive disk I/O.
+    /// = 32 × 4 = 128. Maintenance tick 3 s, snapshot time threshold 9 s
+    /// so a 15 s bench triggers exactly one time-threshold snapshot
+    /// (at the third tick, t≈9 s) while exercising more flush/GC passes.
+    /// Slot threshold 1,000,000 avoids slot-triggered snapshots firing
+    /// on every tick at high throughput.
     #[must_use]
     pub const fn for_e2e() -> Self {
         Self {
@@ -311,9 +314,9 @@ impl PxElectionConfig {
             election_driver_disabled: false,
             learner_stream_window_frames: PaxosConfig::DEFAULT.max_inflight_proposals
                 * Self::LEARNER_WINDOW_MULTIPLIER,
-            maintenance_tick_ms: 5_000,
-            snapshot_slot_threshold: 10_000,
-            snapshot_time_threshold_ms: 20_000,
+            maintenance_tick_ms: 3_000,
+            snapshot_slot_threshold: 1_000_000,
+            snapshot_time_threshold_ms: 9_000,
         }
     }
 

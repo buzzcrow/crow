@@ -11,7 +11,7 @@ use crate::Cli;
 pub enum BenchSub {
     /// Run a benchmark (deploy 3-node cluster, drive load, collect
     /// metrics, report, cleanup).
-    Run(RunArgs),
+    Run(Box<RunArgs>),
     /// Re-render a previously-saved report.
     Report {
         /// Run ID of the report to re-render.
@@ -74,6 +74,11 @@ pub struct RunArgs {
     #[arg(long, default_value_t = 1)]
     pub inflight_queues: usize,
 
+    /// Server metrics log flush interval in seconds (--metrics-interval
+    /// on each spawned server). Default: 5. Set to 1 for short bench runs.
+    #[arg(long, default_value_t = 5)]
+    pub metrics_interval: u64,
+
     /// Read mode for read ops: `linearizable` (default) or `minslot`.
     /// Ignored for write/delete ops.
     #[arg(long, default_value = "linearizable")]
@@ -119,7 +124,7 @@ pub struct BenchArgs {
 
 pub async fn run_bench_verb(cli: &Cli, args: BenchArgs) -> ExitCode {
     match args.sub {
-        Some(BenchSub::Run(run_args)) => bench_benchmark(run_args, cli.json).await,
+        Some(BenchSub::Run(run_args)) => bench_benchmark(*run_args, cli.json).await,
         Some(BenchSub::Report { run_id }) => bench_report(&run_id, cli.json),
         Some(BenchSub::Compare { run_id_1, run_id_2 }) => bench_compare(&run_id_1, &run_id_2, cli.json),
         None => {
@@ -202,14 +207,21 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
 
     println!("provisioning 3-node cluster ({} mode)...", mode.label());
     let _ = std::io::Write::flush(&mut std::io::stdout());
-    let mut fixture =
-        match BenchFixture::new(mode, workspace_dir, args.max_inflight, args.inflight_queues).await {
-            Ok(f) => f,
-            Err(e) => {
-                eprintln!("error: provision cluster: {e}");
-                return ExitCode::from(2);
-            }
-        };
+    let mut fixture = match BenchFixture::new(
+        mode,
+        workspace_dir,
+        args.max_inflight,
+        args.inflight_queues,
+        args.metrics_interval,
+    )
+    .await
+    {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("error: provision cluster: {e}");
+            return ExitCode::from(2);
+        }
+    };
 
     let mut cfg = BenchConfig::defaults(fixture.leader_endpoint().to_string(), kind);
     cfg.store_id = STORE_ID;

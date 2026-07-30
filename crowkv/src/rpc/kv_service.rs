@@ -56,6 +56,7 @@ async fn forward_channel(endpoint: &str) -> Result<Channel, Status> {
     }
     let ch = Endpoint::from_shared(format!("http://{endpoint}"))
         .map_err(|e| Status::invalid_argument(format!("bad leader endpoint {endpoint}: {e}")))?
+        .tcp_nodelay(true)
         .connect()
         .await
         .map_err(|e| Status::unavailable(format!("connect leader {endpoint}: {e}")))?;
