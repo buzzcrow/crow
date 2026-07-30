@@ -38,6 +38,14 @@ The management API starts **before** stores so the server is observable
 even if store creation fails. When `--stores` is omitted, the server
 boots empty and stores are created via the management API.
 
+With R2, the server auto-loads its store/group configuration from
+`conf/node-config.json` (per-node config cache) on startup. If the
+cache exists, `--stores`/`--groups` CLI args are not needed — the
+server restores all stores/groups from the cache, replays WAL, and
+rejoins the cluster. If the cache is missing, explicit CLI args serve
+as fallback. After store creation, the server reconciles with group 0
+topology KV if group 0 is reachable and finalized.
+
 ### 2.3 Concurrency model
 
 `KvStoreRegistry` holds stores in a `DashMap` (lock-free concurrent map).
@@ -61,6 +69,11 @@ Key endpoint groups:
   server's topology export for bulk wiring.
 - **Topology export** — `GET /topology` produces a JSON document that
   another server can consume to batch-add remotes.
+- **System group** — `POST /system/init` bootstraps store 0 + group 0
+  on this node. `POST /topology/finalize` writes the `/topology/ready`
+  flag into group 0 (idempotent cutover). `GET /topology/ready` checks
+  if group 0 is authoritative. See `design-console.md` §4.3 for the
+  full persistent cluster config design.
 - **Admin operations** — `step-down` (force leader step-down), `join`
   (new-member snapshot join).
 
