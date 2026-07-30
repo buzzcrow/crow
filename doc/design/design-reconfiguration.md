@@ -6,7 +6,7 @@
 Depends on: [`design.md`](design.md), [`design.md`](design.md), [`design-leader-election.md`](design-leader-election.md)
 Satisfies: design.md §9.1](design.md), prerequisites of design.md §9.2](design.md)
 
-This document specifies how a CrowKV group safely changes its membership while preserving consensus safety. The **shipped** mechanism is direct per-node HTTP mutation of each replica's remote-replica list, persisted to the local `GroupConfigStore`, with a `membership_epoch` exact-match fence. The original Raft-style joint-consensus design (§7) is preserved as a historical decision record.
+This document specifies how a CrowKV group safely changes its membership while preserving consensus safety. The **shipped** mechanism is direct per-node HTTP mutation of each replica's remote-replica list, persisted to the local `GroupConfigStore`, with a `membership_epoch` exact-match fence. This model applies to all groups including the system group (group 0, which stores cluster topology metadata — see `design.md` §3.3). The original Raft-style joint-consensus design (§7) is preserved as a historical decision record.
 
 ## Table of Contents
 
@@ -16,7 +16,7 @@ This document specifies how a CrowKV group safely changes its membership while p
 - [4. Member Removal](#4-member-removal)
 - [5. Leader Transfer](#5-leader-transfer)
 - [6. The `membership_epoch` Fence](#6-the-membership_epoch-fence)
-- [7. Group-0 Special Cases (historical)](#7-group-0-special-cases-historical)
+- [7. Group-0 Special Cases (historical, superseded by R2)](#7-group-0-special-cases-historical)
 - [8. Safety Argument](#8-safety-argument)
 - [9. Failure During Reconfiguration](#9-failure-during-reconfiguration)
 - [10. Tunables and Defaults](#10-tunables-and-defaults)
@@ -175,16 +175,19 @@ A non-voting catch-up member physically accepts and promises so it can follow th
 
 ## 7. Group-0 Special Cases (historical)
 
-> **Decision record (2026-07):** `Group-0` as
-> described in this section was never implemented. Topology (per-group
-> memberships, cluster inventory) is operator-managed via the HTTP management
-> API and persisted to per-group config files, not self-hosted in a
-> Paxos-replicated system group — see [`design.md` §7.1](design.md).
-> There is therefore no cluster-wide `config_version`, no recursive
-> reconfiguration case, and no "Group-0 pauses data-group reconfiguration"
-> rule in the shipped system. The original joint-consensus proposal in this
-> document was also never implemented; see §11 for the design history and the
-> rationale for choosing the shipped model. Kept below for history/reference only.
+> **Decision record (2026-07, updated 2026-07):** `Group-0` as
+> originally described in this section (joint-consensus-based system
+> group) was never implemented. However, R2 later adopted a system
+> group (store 0, group 0) using the **shipped Model B reconfiguration**
+> (direct HTTP mutation + `membership_epoch` fence) — no
+> joint-consensus primitive was needed. Group 0 stores cluster topology
+> as KV entries (`/topology/ready`, `/topology/racks/`, `/topology/nodes/`,
+> etc.) and is created via `POST /system/init` and finalized via
+> `POST /topology/finalize`. See `design.md` §3.3 and
+> `design-console.md` §4.3 for the implemented design. The original
+> joint-consensus proposal below was never built; see §11 for the design
+> history and the rationale for choosing the shipped model. Kept for
+> history/reference only.
 
 The original design described Raft-style joint consensus with `C_old ∪ C_new` intermediate configurations, two `ConfigChange` log entries per membership change, and `TimeoutNow` fast leader transfer. The shipped system uses direct per-node HTTP mutation and `membership_epoch` fencing instead. A system embedding `crowkv`'s primitives may still choose to build a joint-consensus layer on top of the `membership_epoch` fence.
 
