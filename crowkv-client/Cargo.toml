@@ -16,6 +16,7 @@ workspace = true
 # `Serialize`/`Deserialize`) without depending on `crowkv-server` or
 # `crowkv-console` (see doc/.
 crowkv = { path = "../crowkv" }
+crow-common = { path = "../crow-common/rust" }
 bytes = "1"
 tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
 tonic = { workspace = true }
@@ -25,7 +26,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = { workspace = true }
 tracing = { workspace = true }
-hdrhistogram = "7"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "test-util", "net"] }

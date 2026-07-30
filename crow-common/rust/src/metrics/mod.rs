@@ -8,6 +8,7 @@
 pub mod bandwidth;
 pub mod counter;
 pub mod histogram;
+pub mod precise;
 pub mod summary;
 pub mod system;
 
@@ -17,6 +18,7 @@ use std::time::Instant;
 pub use bandwidth::{Bandwidth, BandwidthSnapshot};
 pub use counter::{Counter, CounterSnapshot, Gauge};
 pub use histogram::{HistogramSnapshot, LatencyHistogram};
+pub use precise::PreciseHistogram;
 pub use summary::{LatencySummary, SummarySnapshot};
 pub use system::{flush_system, SystemCollector, SystemSnapshot};
 

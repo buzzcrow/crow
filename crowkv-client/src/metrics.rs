@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
-use hdrhistogram::Histogram;
+use crow_common::metrics::PreciseHistogram;
 
 /// One recorded leader-change episode: from when the client first
 /// detected the old leader was wrong to when it confirmed a new leader.
@@ -117,16 +117,16 @@ pub struct ClientMetricsSnapshot {
 /// drained snapshots into cumulative histograms if desired.
 #[derive(Debug)]
 struct WindowLatency {
-    put: Histogram<u64>,
-    get: Histogram<u64>,
-    delete: Histogram<u64>,
-    scan: Histogram<u64>,
-    batch_write: Histogram<u64>,
+    put: PreciseHistogram,
+    get: PreciseHistogram,
+    delete: PreciseHistogram,
+    scan: PreciseHistogram,
+    batch_write: PreciseHistogram,
 }
 
 impl Default for WindowLatency {
     fn default() -> Self {
-        let mk = || Histogram::<u64>::new(3).expect("hdr histogram precision");
+        let mk = || PreciseHistogram::new(3);
         Self {
             put: mk(),
             get: mk(),
@@ -163,31 +163,31 @@ pub struct ClientMetrics {
 impl ClientMetrics {
     pub(crate) fn record_put_latency(&self, lat_us: u64) {
         if let Ok(mut g) = self.window_lat.lock() {
-            let _ = g.put.record(lat_us.max(1));
+            g.put.record(lat_us.max(1));
         }
     }
 
     pub(crate) fn record_get_latency(&self, lat_us: u64) {
         if let Ok(mut g) = self.window_lat.lock() {
-            let _ = g.get.record(lat_us.max(1));
+            g.get.record(lat_us.max(1));
         }
     }
 
     pub(crate) fn record_delete_latency(&self, lat_us: u64) {
         if let Ok(mut g) = self.window_lat.lock() {
-            let _ = g.delete.record(lat_us.max(1));
+            g.delete.record(lat_us.max(1));
         }
     }
 
     pub(crate) fn record_scan_latency(&self, lat_us: u64) {
         if let Ok(mut g) = self.window_lat.lock() {
-            let _ = g.scan.record(lat_us.max(1));
+            g.scan.record(lat_us.max(1));
         }
     }
 
     pub(crate) fn record_batch_write_latency(&self, lat_us: u64) {
         if let Ok(mut g) = self.window_lat.lock() {
-            let _ = g.batch_write.record(lat_us.max(1));
+            g.batch_write.record(lat_us.max(1));
         }
     }
 
@@ -299,18 +299,14 @@ impl ClientMetrics {
     }
 
     /// Drain per-op-kind window latency histograms, returning one
-    /// `Histogram<u64>` per op kind. The caller is expected to accumulate
+    /// `PreciseHistogram` per op kind. The caller is expected to accumulate
     /// these into cumulative histograms for run-wide percentiles.
-    ///
-    /// # Panics
-    /// Panics if the internal HDR histogram precision is invalid.
     #[must_use]
-    #[allow(clippy::missing_panics_doc)]
     pub fn drain_window(&self) -> WindowLatencySnapshot {
         self.window_lat.lock().map_or_else(
             |_| WindowLatencySnapshot::default(),
             |mut g| {
-                let mk = || Histogram::<u64>::new(3).expect("hdr histogram precision");
+                let mk = || PreciseHistogram::new(3);
                 WindowLatencySnapshot {
                     put: std::mem::replace(&mut g.put, mk()),
                     get: std::mem::replace(&mut g.get, mk()),
@@ -326,11 +322,6 @@ impl ClientMetrics {
     /// same column-aligned format as the server `[metrics]` log.
     /// Takes a pre-drained `WindowLatencySnapshot` so the caller can
     /// also use it for cumulative accumulation.
-    ///
-    /// # Panics
-    /// Panics if the internal HDR histogram precision is invalid (only
-    /// possible if the histogram was corrupted, which never happens in
-    /// practice).
     #[allow(
         clippy::uninlined_format_args,
         clippy::cast_possible_truncation,
@@ -347,14 +338,14 @@ impl ClientMetrics {
         let count_w = 5usize;
         let tps_w = 7usize;
 
-        let entries: [(&str, &Histogram<u64>); 5] = [
+        let entries: [(&str, &PreciseHistogram); 5] = [
             ("client.put.lh", &snap.put),
             ("client.get.lh", &snap.get),
             ("client.delete.lh", &snap.delete),
             ("client.scan.lh", &snap.scan),
             ("client.batch_write.lh", &snap.batch_write),
         ];
-        let active: Vec<(&str, &Histogram<u64>)> =
+        let active: Vec<(&str, &PreciseHistogram)> =
             entries.iter().filter(|(_, h)| !h.is_empty()).copied().collect();
         if active.is_empty() {
             return;
@@ -402,16 +393,16 @@ impl ClientMetrics {
 /// Snapshot of drained window latency histograms, one per op kind.
 #[derive(Debug)]
 pub struct WindowLatencySnapshot {
-    pub put: Histogram<u64>,
-    pub get: Histogram<u64>,
-    pub delete: Histogram<u64>,
-    pub scan: Histogram<u64>,
-    pub batch_write: Histogram<u64>,
+    pub put: PreciseHistogram,
+    pub get: PreciseHistogram,
+    pub delete: PreciseHistogram,
+    pub scan: PreciseHistogram,
+    pub batch_write: PreciseHistogram,
 }
 
 impl Default for WindowLatencySnapshot {
     fn default() -> Self {
-        let mk = || Histogram::<u64>::new(3).expect("hdr histogram precision");
+        let mk = || PreciseHistogram::new(3);
         Self {
             put: mk(),
             get: mk(),
