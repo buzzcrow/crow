@@ -11,7 +11,7 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R34** — Bump this line in the same commit when adding a new item.
+**Next R number: R35** — Bump this line in the same commit when adding a new item.
 
 ### Medium Priority
 
@@ -81,6 +81,15 @@ complexity, and dependency. Before implementation, follow the
   replica-to-replica path only; management API stays on Axum/HTTP.
   Reference implementations: protosocket (Momento), Volo (CloudWeGo),
   Cap'n Proto RPC.
+- **[R34](R34-isa-l.md)** — Introduce ISA-L for SIMD-optimized CRC32C, EC, and deflate — Area:
+  crow-common / crowtree — Replace the software table-driven CRC32C in
+  `crow-common/cpp/include/crow-common/crc32c.h` with ISA-L's
+  `crc32_iscsi`, which runtime-dispatches to SSE4.2/AVX/AVX2/AVX512 SIMD
+  on x86 and NEON on ARM. ISA-L also provides Reed-Solomon erasure codes
+  and deflate-compatible compression (igzip) for future use. Phase 1
+  (CRC32C) is Low complexity — thin wrapper + CMake/pixi wiring, no API
+  change. Rust WAL CRC already hardware-accelerated via the `crc32c`
+  crate; no Rust change needed.
 
 ### Low Priority
 

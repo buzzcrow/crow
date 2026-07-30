@@ -11,11 +11,11 @@
 // metric instances and drives the periodic flush.
 #pragma once
 
-#include "crow-common/bandwidth.h"
-#include "crow-common/counter.h"
-#include "crow-common/gauge.h"
-#include "crow-common/latency_histogram.h"
-#include "crow-common/latency_summary.h"
+#include "crow-common/metrics/bandwidth.h"
+#include "crow-common/metrics/counter.h"
+#include "crow-common/metrics/gauge.h"
+#include "crow-common/metrics/latency_histogram.h"
+#include "crow-common/metrics/latency_summary.h"
 
 #include <atomic>
 #include <cstdint>
@@ -26,7 +26,7 @@
 #include <thread>
 #include <vector>
 
-namespace crow::common
+namespace crow::common::metrics
 {
 
 // ── Registry ────────────────────────────────────────────────────
@@ -83,4 +83,4 @@ class MetricsRegistry
     void prune_rotated();
 };
 
-} // namespace crow::common
+} // namespace crow::common::metrics

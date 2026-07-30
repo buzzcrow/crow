@@ -9,7 +9,7 @@
 #include <string>
 #include <utility>
 
-namespace crow::common
+namespace crow::common::metrics
 {
 
 class LatencySummary
@@ -59,4 +59,4 @@ class LatencySummary
     std::atomic<uint64_t> total_count_;
 };
 
-} // namespace crow::common
+} // namespace crow::common::metrics

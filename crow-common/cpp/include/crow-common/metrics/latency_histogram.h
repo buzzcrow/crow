@@ -11,7 +11,7 @@
 #include <utility>
 #include <vector>
 
-namespace crow::common
+namespace crow::common::metrics
 {
 
 class LatencyHistogram
@@ -46,4 +46,4 @@ class LatencyHistogram
     std::atomic<uint64_t>                               total_count_;
 };
 
-} // namespace crow::common
+} // namespace crow::common::metrics
