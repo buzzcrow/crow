@@ -55,8 +55,16 @@ impl Cluster {
         self.nodes[node_id].mgmt_url.clone()
     }
 
-    fn stop(self) {
-        for n in self.nodes.into_values() {
+    fn stop(&mut self) {
+        for n in self.nodes.values() {
+            let _ = lifecycle::stop_pid_with_timeout(n.pid, Duration::from_secs(5));
+        }
+    }
+}
+
+impl Drop for Cluster {
+    fn drop(&mut self) {
+        for n in self.nodes.values() {
             let _ = lifecycle::stop_pid_with_timeout(n.pid, Duration::from_secs(5));
         }
     }
@@ -357,7 +365,8 @@ async fn role_on_node(cluster: &Cluster, node_id: &str, rid: u64) -> Option<Stri
 
 #[tokio::test]
 async fn remove_leader_from_five_node_group_elects_new_leader() {
-    let Some(cluster) = spawn_five_node_cluster("remove_leader_from_five_node_group_elects_new_leader").await
+    let Some(mut cluster) =
+        spawn_five_node_cluster("remove_leader_from_five_node_group_elects_new_leader").await
     else {
         return;
     };
@@ -416,8 +425,9 @@ async fn remove_leader_from_five_node_group_elects_new_leader() {
 }
 
 #[tokio::test]
+#[allow(clippy::unused_async)]
 async fn remove_unreachable_leader_from_five_node_group_uses_lease_fallback() {
-    let Some(cluster) =
+    let Some(mut cluster) =
         spawn_five_node_cluster("remove_unreachable_leader_from_five_node_group_uses_lease_fallback").await
     else {
         return;
