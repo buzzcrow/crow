@@ -283,6 +283,8 @@ Single-leader hot path: **Proposer → WAL → Replicator → Learner → ack.**
 ## 12. Crate Layout
 
 ```
+crow-common/rust    (shared Rust crate: metrics, logging, time, report)
+crow-common/cpp     (shared C++ static lib: crc32c, log, compressing_sink, gzip, metrics)
 crowkv              (core library: consensus, engine, wal, rpc, cluster)
 crowkv-client       (client library: topology cache, retry, NotLeader handling)
 crowkv-server       (binary: CLI, HTTP mgmt API, store/group wiring)
@@ -291,6 +293,17 @@ crowkv-console/web     (Axum web server + React SPA)
 crowkv-console/cli     (CLI binary: crowkv command)
 crowtree/ffi        (C++ B+tree engine, FFI bridge to Rust)
 ```
+
+`crow-common` holds project-agnostic utilities shared across the
+storage-system stack. The Rust crate (`crow-common`) provides the
+metrics registry, `tracing`-based logging wrapper, monotonic-time
+helpers, and multi-step error aggregator; `crowkv` re-exports them at
+their original module paths so call sites compile unchanged. The C++
+static library (`libcrowcommon.a`, namespace `crow::common`) provides
+CRC32C, the spdlog logging facade (`CR_LOG_*` macros), the compressing
+file sink, gzip helpers, and the atomic-counter metrics core;
+`crowtree` links against it and bridges the moved types into the
+`crowtree` namespace via using-declarations.
 
 ## 13. Concurrency Model
 
@@ -310,6 +323,9 @@ The async disk I/O substrate (`AsyncFile`: io_uring on Linux ≥ 5.11,
 ## 14. Components
 
 - **`crowkv`** — core library: consensus, engine, WAL, I/O, RPC, reconfiguration.
+- **`crow-common`** — shared utilities (Rust crate + C++ static lib):
+  metrics, logging, time, report (Rust); CRC32C, spdlog facade,
+  compressing sink, gzip, atomic metrics (C++).
 - **`crowkv-server`** — reference server binary. Design: `design-kv-server.md`.
 - **`crowkv-console`** — unified management project (Web UI + CLI).
   Design: `design-console.md`, `design-ui.md`.
