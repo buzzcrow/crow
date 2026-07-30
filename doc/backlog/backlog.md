@@ -11,7 +11,7 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R33** — Bump this line in the same commit when adding a new item.
+**Next R number: R34** — Bump this line in the same commit when adding a new item.
 
 ### Medium Priority
 
@@ -20,10 +20,13 @@ complexity, and dependency. Before implementation, follow the
   is not persisted; a restart relies on the console to re-push topology, making
   standalone startup non-deterministic.
 - **[R12](R12-crow-common.md)** — Crow Common shared project — Area: workspace — Extract a
-  standalone `crow-common` project with a Rust crate and a C++ static
-  library. Move reusable utilities (metrics core, logging wrapper, CRC32C,
-  time helpers, operation report) out of `crowkv`/`crowtree` so future
-  storage-system components can share them without re-implementing.
+  standalone `crow-common` project (Rust crate + C++ static lib, namespace
+  `crow::common`). Move reusable utilities (metrics core, logging wrapper,
+  CRC32C, gzip, time helpers, operation report) out of `crowkv`/`crowtree`
+  so future storage-system components can share them without
+  re-implementing. The `CT_LOG_*` → `CR_LOG_*` macro rename rides along
+  with the logging facade move; the broader `crowtree` → `crow-tree`
+  rename is R33.
 - **[R11](R11-gui-state.md)** — GUI internal state display — Area: web UI — Surface internal
   metrics (from R8) in the GUI via existing health/internal-state query
   infrastructure. Show recent operation counts and metrics per Store/Group
@@ -102,6 +105,12 @@ complexity, and dependency. Before implementation, follow the
   RDMA backend exists yet; placeholder only.
 
 **Complexity — Medium:**
+- **[R33](R33-crow-tree-rename.md)** — Rename crowtree → crow-tree — Area: workspace — Rename the
+  `crowtree` directory/crate to `crow-tree` and renamespace C++ from
+  `crowtree::` to `crow::tree`, plus `CROWTREE_*` macro prefixes to
+  `CROW_TREE_*`. Cosmetic / naming consistency with the `crow-*` convention
+  from R12; no functional change. Independent of R12 (can run before or
+  after, most naturally after).
 - **[R4](R4-bounded-mempool.md)** — Bounded memory pool — Area: crowtree engine — `buffer::allocate` uses
   unbounded `std::malloc`; a burst of large writes can spike RSS without
   backpressure.
