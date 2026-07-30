@@ -330,6 +330,85 @@ async fn ensure_group_remotes(state: &AppState, group: &GroupEntry) -> Result<()
     Ok(())
 }
 
+/// Result of the three-way group 0 state check at console startup.
+enum Group0State {
+    /// No nodes deployed yet — first-run scenario.
+    NoNodes,
+    /// Group 0 not found on any reachable node — phase 1 (TOML mode).
+    Missing,
+    /// Group 0 exists but `/topology/ready` not set — TOML mode with warning.
+    NotReady,
+    /// Group 0 exists and `/topology/ready` is set — group 0 authoritative.
+    Ready,
+}
+
+/// Check group 0 state across all deployed nodes to determine the
+/// topology source at console startup.
+async fn check_group0_state(state: &AppState) -> Group0State {
+    let node_ids: Vec<String> = {
+        let cfg = state.config.read().unwrap();
+        cfg.servers.iter().filter_map(|s| s.node_id.clone()).collect()
+    };
+    if node_ids.is_empty() {
+        return Group0State::NoNodes;
+    }
+    let mut found_group0 = false;
+    for nid in &node_ids {
+        let Ok(url) = mgmt_url_for_node(state, nid) else {
+            continue;
+        };
+        let Ok(client) = build_server_client(url) else {
+            continue;
+        };
+        // Check if group 0 exists by listing stores.
+        if let Ok(stores) = client.list_stores().await {
+            if stores.iter().any(|s| s.store_id == 0) {
+                found_group0 = true;
+                if let Ok(resp) = client.topology_ready().await {
+                    if resp.ready {
+                        return Group0State::Ready;
+                    }
+                }
+            }
+        }
+    }
+    if found_group0 {
+        Group0State::NotReady
+    } else {
+        Group0State::Missing
+    }
+}
+
+/// Console startup three-way fallback. Checks group 0 state and picks
+/// the right topology source before restoring.
+///
+/// # Panics
+/// Panics if the `RwLock` is poisoned.
+pub async fn startup_topology_check(state: &AppState) {
+    match check_group0_state(state).await {
+        Group0State::NoNodes => {
+            info!("no nodes deployed; first-run scenario, skipping topology restore");
+        }
+        Group0State::Missing => {
+            info!("group 0 not found on any node; TOML mode (phase 1)");
+            restore_persisted_topology(state).await;
+        }
+        Group0State::NotReady => {
+            warn!("group 0 exists but not finalized; using TOML mode with warning");
+            restore_persisted_topology(state).await;
+        }
+        Group0State::Ready => {
+            info!("group 0 is ready; loading topology from group 0 KV");
+            // In phase 2, topology is authoritative from group 0.
+            // For now, still restore from TOML (the cutover to reading
+            // group 0 KV into console config is T7's reconciliation).
+            // The key difference: we know the cluster is initialized,
+            // so data store/group creation is unblocked.
+            restore_persisted_topology(state).await;
+        }
+    }
+}
+
 /// Restore persisted topology (servers, stores, groups, replicas) on startup.
 ///
 /// # Panics

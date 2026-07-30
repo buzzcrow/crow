@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let server_count = cfg.servers.len();
     let state = crowkv_web::AppState::with_config(cfg, path);
     tracing::info!(servers = server_count, "loaded registry");
-    crowkv_web::mgmt::restore_persisted_topology(&state).await;
+    crowkv_web::mgmt::startup_topology_check(&state).await;
 
     axum::serve(listener, crowkv_web::router(state)).await?;
     Ok(())
