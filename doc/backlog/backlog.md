@@ -16,11 +16,6 @@ complexity, and dependency. Before implementation, follow the
 ### Medium Priority
 
 **Complexity — Medium:**
-- **[R2](R2-persistent-config.md)** — HA persistent cluster config — Area: crowkv-server / console —
-  Cluster topology is a single-point-of-failure in console TOML. Recommended
-  design: system group (group 0) stores topology as KV entries; two-phase
-  bootstrap with idempotent TOML→group 0 cutover via `POST /topology/finalize`.
-  Model B reconfiguration already shipped — no P4 ConfigChange dependency.
 - **[R11](R11-gui-state.md)** — GUI internal state display — Area: web UI — Surface internal
   metrics (from R8) in the GUI via existing health/internal-state query
   infrastructure. Show recent operation counts and metrics per Store/Group
