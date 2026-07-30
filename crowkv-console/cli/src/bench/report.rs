@@ -13,7 +13,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use crow_common::metrics::PreciseHistogram;
+use crow_common::metrics::{PreciseHistogram, SystemMetrics};
 use serde::{Deserialize, Serialize};
 
 use super::workload::{OpKind, WorkloadKind};
@@ -615,18 +615,6 @@ pub struct ServerMetrics {
     pub wal_rmw_count: u64,
     /// System resource usage (see `crowkv::metrics::system`).
     pub system: SystemMetrics,
-}
-
-/// System resource usage extracted from a node's `metrics.log` "misc"
-/// section. CPU time and TCP counters are deltas summed across the run;
-/// `rss_kb` is the peak (max) RSS observed during the run.
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
-pub struct SystemMetrics {
-    pub cpu_user_us: u64,
-    pub cpu_sys_us: u64,
-    pub rss_kb: u64,
-    pub tcp_retransmits: u64,
-    pub tcp_lost: u64,
 }
 
 /// Section a metrics-log line currently belongs to, tracked while
