@@ -19,6 +19,7 @@ use tracing::{debug, error, info, trace, warn};
 use crate::cluster::group_config::{GroupConfigStore, PxGroupConfig, PxGroupMember};
 use crate::cluster::group_election::{PendingLeaderHandoff, ReadBarrierOutcome};
 use crate::cluster::local_replica::PxLocalReplica;
+use crate::cluster::node_config::NodeConfigStore;
 use crate::cluster::remote_replica::PxRemoteReplica;
 use crate::cluster::replica::{
     Replica, ReplicaClient, ReplicaHandler, StepDownReply, StepDownRequestPayload,
@@ -148,6 +149,11 @@ pub struct PxGroup {
     /// When set, [`Self::persist_config`] writes to the config file instead
     /// of the WAL metadata lane.
     pub(crate) config_store: Option<GroupConfigStore>,
+    /// Optional per-node config store (node-config.json). When set,
+    /// [`Self::persist_config`] writes to the combined node config file
+    /// instead of the legacy per-group file. Takes priority over
+    /// `config_store`.
+    pub(crate) node_config_store: Option<(NodeConfigStore, u64, u64)>,
     /// Monotonic counter bumped by exactly 1 whenever a mutation changes
     /// the *voting set* (a voting member added/removed, or an existing
     /// remote's voting flag flips) -- never for a non-voting add/remove,
@@ -225,6 +231,7 @@ impl PxGroup {
                 PaxosConfig::DEFAULT.inflight_admission,
             ),
             config_store: None,
+            node_config_store: None,
             membership_epoch: AtomicU64::new(0),
             last_snapshot_slot: AtomicU64::new(0),
             last_snapshot_time: parking_lot::Mutex::new(std::time::Instant::now()),
@@ -243,6 +250,16 @@ impl PxGroup {
     /// dedicated config file (`store{sid}_group{gid}.json`) in the group's conf directory.
     pub fn set_config_store(&mut self, store: GroupConfigStore) {
         self.config_store = Some(store);
+    }
+
+    /// Set the per-node config store for this group.
+    ///
+    /// When set, `persist_config` writes to `node-config.json`
+    /// (the combined per-node cache) instead of the legacy per-group
+    /// file. The `(store_id, group_id)` pair identifies this group's
+    /// entry within the file.
+    pub fn set_node_config_store(&mut self, store: NodeConfigStore, store_id: u64, group_id: u64) {
+        self.node_config_store = Some((store, store_id, group_id));
     }
 
     /// Override the in-flight proposal admission configuration. Must be
@@ -274,6 +291,18 @@ impl PxGroup {
     #[must_use]
     pub fn config_store(&self) -> Option<&GroupConfigStore> {
         self.config_store.as_ref()
+    }
+
+    /// Get the node config store, if set.
+    #[must_use]
+    pub fn node_config_store(&self) -> Option<&NodeConfigStore> {
+        self.node_config_store.as_ref().map(|(s, _, _)| s)
+    }
+
+    /// Get the `store_id` associated with the node config store, if set.
+    #[must_use]
+    pub fn node_config_store_sid(&self) -> Option<u64> {
+        self.node_config_store.as_ref().map(|(_, sid, _)| *sid)
     }
 
     /// Spawn the per-group engine-durability + WAL GC maintenance loop
@@ -702,7 +731,23 @@ impl PxGroup {
             members,
             membership_epoch: self.membership_epoch(),
         };
-        if let Some(store) = &self.config_store {
+        if let Some((store, sid, _gid)) = &self.node_config_store {
+            if let Err(e) = store.save_group(*sid, &config, local_id).await {
+                error!(
+                    group_id = self.group_id,
+                    term,
+                    error = %e,
+                    "persist group config to node-config.json failed"
+                );
+            } else {
+                info!(
+                    group_id = self.group_id,
+                    term,
+                    replica_count = config.members.len(),
+                    "persisted group config to node-config.json"
+                );
+            }
+        } else if let Some(store) = &self.config_store {
             if let Err(e) = store.save(&config).await {
                 error!(
                     group_id = self.group_id,
