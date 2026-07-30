@@ -16,9 +16,11 @@ complexity, and dependency. Before implementation, follow the
 ### Medium Priority
 
 **Complexity — Medium:**
-- **[R2](R2-persistent-config.md)** — Persistent node config — Area: crowkv-server — Per-node server config
-  is not persisted; a restart relies on the console to re-push topology, making
-  standalone startup non-deterministic.
+- **[R2](R2-persistent-config.md)** — HA persistent cluster config — Area: crowkv-server / console —
+  Cluster topology is a single-point-of-failure in console TOML. Recommended
+  design: system group (group 0) stores topology as KV entries; two-phase
+  bootstrap with idempotent TOML→group 0 cutover via `POST /topology/finalize`.
+  Model B reconfiguration already shipped — no P4 ConfigChange dependency.
 - **[R11](R11-gui-state.md)** — GUI internal state display — Area: web UI — Surface internal
   metrics (from R8) in the GUI via existing health/internal-state query
   infrastructure. Show recent operation counts and metrics per Store/Group
@@ -90,6 +92,13 @@ complexity, and dependency. Before implementation, follow the
   (CRC32C) is Low complexity — thin wrapper + CMake/pixi wiring, no API
   change. Rust WAL CRC already hardware-accelerated via the `crc32c`
   crate; no Rust change needed.
+- **[R33](R33-crow-tree-rename.md)** — Extract crow-tree to separate repo and rename — Area:
+  workspace — Move `crowtree/` into its own git repository (preserving
+  history), wire `crowkv` to depend on `crow-tree-ffi` as an external
+  dependency, and rename the crate/namespace/macros from `crowtree` to
+  `crow-tree` / `crow::tree` / `CROW_TREE_*`. Establishes the `crowkv` →
+  `crow-tree` dependency boundary analogous to `crowkv` → `crow-common`.
+  Most naturally done after R12.
 
 ### Low Priority
 
@@ -99,12 +108,6 @@ complexity, and dependency. Before implementation, follow the
   RDMA backend exists yet; placeholder only.
 
 **Complexity — Medium:**
-- **[R33](R33-crow-tree-rename.md)** — Rename crowtree → crow-tree — Area: workspace — Rename the
-  `crowtree` directory/crate to `crow-tree` and renamespace C++ from
-  `crowtree::` to `crow::tree`, plus `CROWTREE_*` macro prefixes to
-  `CROW_TREE_*`. Cosmetic / naming consistency with the `crow-*` convention
-  from R12; no functional change. Independent of R12 (can run before or
-  after, most naturally after).
 - **[R4](R4-bounded-mempool.md)** — Bounded memory pool — Area: crowtree engine — `buffer::allocate` uses
   unbounded `std::malloc`; a burst of large writes can spike RSS without
   backpressure.
