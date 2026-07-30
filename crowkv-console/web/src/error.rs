@@ -15,6 +15,10 @@ pub fn err_400(msg: impl Into<String>) -> (StatusCode, Json<ErrorBody>) {
     (StatusCode::BAD_REQUEST, Json(ErrorBody { error: msg.into() }))
 }
 
+pub fn err_409(msg: impl Into<String>) -> (StatusCode, Json<ErrorBody>) {
+    (StatusCode::CONFLICT, Json(ErrorBody { error: msg.into() }))
+}
+
 pub fn err_500(msg: impl Into<String>) -> (StatusCode, Json<ErrorBody>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,

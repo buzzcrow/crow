@@ -7,7 +7,7 @@
 //! built on top of the A4 per-node primitives. Reads aggregate from
 //! the monitor cache; writes fan out to every listed node.
 
-use crate::error::{err_400, err_500, err_502, ErrorBody};
+use crate::error::{err_400, err_409, err_500, err_502, ErrorBody};
 use crate::state::AppState;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -77,6 +77,37 @@ async fn wait_for_new_leader(
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     false
+}
+
+/// Check whether the cluster is initialized (group 0 exists and is ready
+/// on at least one reachable node). Returns `true` if the topology
+/// cutover has been finalized, or if no nodes are deployed yet (first-run
+/// scenario where the console itself drives init).
+async fn cluster_initialized(state: &AppState) -> bool {
+    let node_ids: Vec<String> = {
+        let cfg = state.config.read().unwrap();
+        cfg.servers.iter().filter_map(|s| s.node_id.clone()).collect()
+    };
+    if node_ids.is_empty() {
+        return true; // No servers deployed yet; allow first-run flows.
+    }
+    for nid in &node_ids {
+        let Ok(url) = mgmt_url_for_node(state, nid) else {
+            continue;
+        };
+        let Ok(client) = build_server_client(url) else {
+            continue;
+        };
+        if let Ok(resp) = client.topology_ready().await {
+            if resp.ready {
+                return true;
+            }
+        }
+    }
+    // If no node has group 0 ready, but group 0 exists in the console
+    // config, treat it as initialized (covers restart-before-finalize).
+    let cfg = state.config.read().unwrap();
+    cfg.group(0, 0).is_some()
 }
 
 pub(crate) async fn refresh_node_cache(state: &AppState, node_id: &str) {
@@ -501,6 +532,11 @@ pub async fn http_add_store(
     State(state): State<AppState>,
     Json(body): Json<CreateStoreBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorBody>)> {
+    if body.store_id != 0 && !cluster_initialized(&state).await {
+        return Err(err_409(
+            "cluster not initialized; call POST /api/cluster/init first",
+        ));
+    }
     let mut target_nodes = if body.nodes.is_empty() {
         let cfg = state.config.read().unwrap();
         let first = cfg
@@ -676,6 +712,11 @@ pub async fn http_add_group(
     Path(sid): Path<u64>,
     Json(body): Json<CreateGroupBody>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorBody>)> {
+    if sid != 0 && !cluster_initialized(&state).await {
+        return Err(err_409(
+            "cluster not initialized; call POST /api/cluster/init first",
+        ));
+    }
     if body.nodes.is_empty() {
         return Err(err_400("nodes list must not be empty"));
     }
@@ -1341,4 +1382,147 @@ pub async fn http_remove_replica(
         .map_err(|e| err_500(format!("persist config: {e}")))?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ── Cluster init (R2) ───────────────────────────────────────────────
+
+/// Request body for `POST /api/cluster/init`.
+#[derive(Debug, Deserialize)]
+pub struct ClusterInitBody {
+    /// Node IDs to include in the system group (store 0, group 0).
+    /// Must be non-empty. For a single node, group 0 self-elects.
+    /// For multiple nodes, remotes are wired and election starts after.
+    pub nodes: Vec<String>,
+}
+
+/// `POST /api/cluster/init` — initialize the cluster by bootstrapping
+/// the system group (store 0, group 0) on the selected nodes, wiring
+/// remotes, and auto-finalizing the topology cutover.
+///
+/// # Errors
+/// Returns `400` if `nodes` is empty, `502` if a node is unreachable or
+/// `system/init` fails, `500` if config persistence fails.
+///
+/// # Panics
+/// Does not panic; panics in inner helpers are not reachable.
+#[allow(clippy::too_many_lines)]
+pub async fn http_cluster_init(
+    State(state): State<AppState>,
+    Json(body): Json<ClusterInitBody>,
+) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, Json<ErrorBody>)> {
+    if body.nodes.is_empty() {
+        return Err(err_400("nodes list must not be empty"));
+    }
+
+    let mut seen = HashSet::new();
+    let mut target_nodes = body.nodes.clone();
+    target_nodes.retain(|nid| seen.insert(nid.clone()));
+
+    let single_node = target_nodes.len() == 1;
+
+    // Phase 1: call /system/init on each node.
+    let mut succeeded: Vec<(String, u64)> = Vec::new();
+    for (i, nid) in target_nodes.iter().enumerate() {
+        let url = mgmt_url_for_node(&state, nid)?;
+        let client = build_server_client(url)?;
+        client
+            .health()
+            .await
+            .map_err(|e| err_502(format!("node {nid} not reachable: {e}")))?;
+
+        let replica_id = 1 + i as u64;
+        let req = crowkv_console_shared::mgmt::SystemInitRequest {
+            replica_id,
+            start_election: single_node,
+        };
+        match client.system_init(&req).await {
+            Ok(resp) => {
+                info!(
+                    node_id = nid,
+                    replica_id = resp.replica_id,
+                    listen_addr = resp.listen_addr.as_deref().unwrap_or("?"),
+                    "system/init succeeded"
+                );
+                succeeded.push((nid.clone(), replica_id));
+            }
+            Err(e) => {
+                // Rollback: remove group 0 on nodes that succeeded.
+                for (ok_nid, _) in &succeeded {
+                    if let Ok(u) = mgmt_url_for_node(&state, ok_nid) {
+                        if let Ok(c) = build_server_client(u) {
+                            let _ = c.remove_group(0, 0).await;
+                        }
+                    }
+                }
+                return Err(err_502(format!("system/init failed on node {nid}: {e}")));
+            }
+        }
+    }
+
+    // Phase 2: refresh caches so we can resolve gRPC endpoints.
+    for (nid, _) in &succeeded {
+        refresh_node_cache(&state, nid).await;
+    }
+
+    // Phase 3: wire remotes for multi-node.
+    if !single_node {
+        for (i, (nid, _rid)) in succeeded.iter().enumerate() {
+            let Ok(url) = mgmt_url_for_node(&state, nid) else {
+                continue;
+            };
+            let Ok(client) = build_server_client(url) else {
+                continue;
+            };
+            let mut remotes: Vec<RemoteReplicaInfo> = Vec::new();
+            for (j, (peer_nid, peer_rid)) in succeeded.iter().enumerate() {
+                if j == i {
+                    continue;
+                }
+                if let Some(ep) = grpc_endpoint_for_node(&state, peer_nid, 0).await {
+                    remotes.push(RemoteReplicaInfo {
+                        replica_id: *peer_rid,
+                        endpoint: ep,
+                    });
+                }
+            }
+            if !remotes.is_empty() {
+                let _ = client.add_remote_replicas(0, 0, &remotes).await;
+            }
+        }
+
+        // Refresh caches after remote wiring.
+        for (nid, _) in &succeeded {
+            refresh_node_cache(&state, nid).await;
+        }
+    }
+
+    // Phase 4: persist topology in console config.
+    {
+        let mut cfg = state.config.write().unwrap();
+        let store_nodes: Vec<String> = succeeded.iter().map(|(n, _)| n.clone()).collect();
+        cfg.record_store(0, store_nodes);
+        let replicas: Vec<ReplicaEntry> = succeeded
+            .iter()
+            .map(|(nid, rid)| ReplicaEntry {
+                replica_id: *rid,
+                node_id: nid.clone(),
+            })
+            .collect();
+        cfg.record_group(0, 0, replicas);
+    }
+    state
+        .persist()
+        .map_err(|e| err_500(format!("persist config: {e}")))?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "store_id": 0,
+            "group_id": 0,
+            "nodes": succeeded.iter().map(|(n, r)| serde_json::json!({
+                "node_id": n,
+                "replica_id": r,
+            })).collect::<Vec<_>>(),
+        })),
+    ))
 }
