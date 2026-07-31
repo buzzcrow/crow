@@ -9,6 +9,7 @@ mod testkit;
 
 use std::time::Duration;
 
+use crowkv_console_shared::clients::console::ConsoleClient;
 use crowkv_console_shared::lifecycle;
 use testkit::console::{crowkv_cli_bin, run, spawn_console, spawn_upstream, wait_for_leader};
 
@@ -29,6 +30,13 @@ async fn cluster_status_topology_inspect_via_console() {
     let console = spawn_console(&upstream).await;
     let ip = console.ip().to_string();
     let port = console.port();
+
+    // Initialize the system group so non-zero stores can be created.
+    let console_client = ConsoleClient::new(format!("http://{ip}:{port}")).unwrap();
+    console_client
+        .cluster_init(&["n1".to_string()])
+        .await
+        .expect("cluster_init");
 
     // Seed a store + group through the CLI so the logical tree is non-empty.
     let (code, _, stderr) = run(&cli, &ip, port, &["store", "add", "--store-id", "9"]);
