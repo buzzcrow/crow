@@ -66,7 +66,7 @@ async fn cluster_status_topology_inspect_via_console() {
     assert_eq!(code, 0, "status stderr={stderr}");
     assert!(stdout.contains("servers:"), "stdout={stdout}");
     assert!(stdout.contains("n1"), "stdout={stdout}");
-    assert!(stdout.contains("stores: 1"), "stdout={stdout}");
+    assert!(stdout.contains("stores: 2"), "stdout={stdout}");
 
     // topology — logical + physical sections.
     let (code, stdout, stderr) = run(&cli, &ip, port, &["cluster", "topology"]);

@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { ChevronRight, ChevronDown } from 'lucide-react';
 import { cn } from '../utils/cn';
 import { useSelection } from '../contexts/SelectionContext';
@@ -146,6 +146,20 @@ function TreeNodeComponent({
 
 export function Tree({ nodes, defaultExpandedIds = [], onNodeClick, onNodeContextMenu, className }: TreeProps) {
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set(defaultExpandedIds));
+  const prevDefaultRef = useRef<Set<string>>(new Set(defaultExpandedIds));
+
+  useEffect(() => {
+    const prev = prevDefaultRef.current;
+    const next = new Set(defaultExpandedIds);
+    setExpandedIds((cur) => {
+      const merged = new Set(cur);
+      for (const id of next) {
+        if (!prev.has(id)) merged.add(id);
+      }
+      return merged;
+    });
+    prevDefaultRef.current = next;
+  }, [defaultExpandedIds]);
 
   const toggleExpanded = useCallback((id: string) => {
     setExpandedIds((prev) => {

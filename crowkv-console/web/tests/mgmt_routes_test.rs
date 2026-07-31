@@ -130,7 +130,16 @@ async fn full_mgmt_cycle_through_web_routes() {
     let base = format!("http://{web}");
     let http = reqwest::Client::new();
 
-    // 1. POST /api/stores → 201 (orchestrated create on node n1).
+    // 1. Initialize the system group so non-zero stores can be created.
+    let resp = http
+        .post(format!("{base}/api/cluster/init"))
+        .json(&json!({"nodes": ["n1"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "cluster init: {:?}", resp.text().await.ok());
+
+    // 2. POST /api/stores → 201 (orchestrated create on node n1).
     let store_id: u64 = 7;
     let resp = http
         .post(format!("{base}/api/stores"))
@@ -140,7 +149,7 @@ async fn full_mgmt_cycle_through_web_routes() {
         .expect("POST /api/stores");
     assert_eq!(resp.status(), 201, "{:?}", resp.text().await.ok());
 
-    // 2. GET /api/stores → list contains the store (from cache).
+    // 3. GET /api/stores → list contains the store (from cache).
     let stores: Vec<serde_json::Value> = http
         .get(format!("{base}/api/stores"))
         .send()
@@ -156,7 +165,7 @@ async fn full_mgmt_cycle_through_web_routes() {
         "store_id={store_id} not found in {stores:?}"
     );
 
-    // 3. GET /api/stores/:sid → store detail.
+    // 4. GET /api/stores/:sid → store detail.
     let resp = http
         .get(format!("{base}/api/stores/{store_id}"))
         .send()
@@ -171,7 +180,7 @@ async fn full_mgmt_cycle_through_web_routes() {
         "new store should start empty: {detail:?}"
     );
 
-    // 4. POST /api/stores/:sid/groups → 201 (orchestrated group create).
+    // 5. POST /api/stores/:sid/groups → 201 (orchestrated group create).
     let group_id: u64 = 70;
     let replica_id: u64 = 700;
     let resp = http
@@ -182,7 +191,7 @@ async fn full_mgmt_cycle_through_web_routes() {
         .unwrap();
     assert_eq!(resp.status(), 201, "{:?}", resp.text().await.ok());
 
-    // 5. POST /api/stores/:sid/groups → 201 (second group).
+    // 6. POST /api/stores/:sid/groups → 201 (second group).
     let group_id_2: u64 = 80;
     let replica_id_2: u64 = 800;
     let resp = http
@@ -193,7 +202,7 @@ async fn full_mgmt_cycle_through_web_routes() {
         .unwrap();
     assert_eq!(resp.status(), 201, "{:?}", resp.text().await.ok());
 
-    // 6. GET /api/stores/:sid/groups → 2 explicitly created groups.
+    // 7. GET /api/stores/:sid/groups → 2 explicitly created groups.
     let groups: Vec<serde_json::Value> = http
         .get(format!("{base}/api/stores/{store_id}/groups"))
         .send()
@@ -204,7 +213,7 @@ async fn full_mgmt_cycle_through_web_routes() {
         .unwrap();
     assert_eq!(groups.len(), 2, "expected 2 groups, got {groups:?}");
 
-    // 7. GET /api/stores/:sid/groups/:gid → group detail.
+    // 8. GET /api/stores/:sid/groups/:gid → group detail.
     let resp = http
         .get(format!("{base}/api/stores/{store_id}/groups/{group_id_2}"))
         .send()
@@ -214,7 +223,7 @@ async fn full_mgmt_cycle_through_web_routes() {
     let gv: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(gv["group_id"], group_id_2);
 
-    // 8. DELETE /api/stores/:sid/groups/:gid → removes the second group.
+    // 9. DELETE /api/stores/:sid/groups/:gid → removes the second group.
     let resp = http
         .delete(format!("{base}/api/stores/{store_id}/groups/{group_id_2}"))
         .send()
@@ -222,7 +231,7 @@ async fn full_mgmt_cycle_through_web_routes() {
         .unwrap();
     assert_eq!(resp.status(), 204);
 
-    // 9. DELETE /api/stores/:sid → removes the store.
+    // 10. DELETE /api/stores/:sid → removes the store.
     let resp = http
         .delete(format!("{base}/api/stores/{store_id}"))
         .send()
@@ -230,7 +239,7 @@ async fn full_mgmt_cycle_through_web_routes() {
         .unwrap();
     assert_eq!(resp.status(), 204);
 
-    // 10. GET /api/stores → store 7 should be gone (default store 1 may
+    // 11. GET /api/stores → store 7 should be gone (default store 1 may
     //    remain because crowkv-server creates it on startup).
     let stores: Vec<serde_json::Value> = http
         .get(format!("{base}/api/stores"))

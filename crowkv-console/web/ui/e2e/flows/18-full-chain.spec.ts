@@ -3,7 +3,7 @@
 // Baseline: 2.7s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, DEFAULT_SERVER_BINARY, stopNodeServer, resetAll } from '../fixtures/consoleSetup';
+import { apiContext, clusterInit, DEFAULT_SERVER_BINARY, stopNodeServer, resetAll } from '../fixtures/consoleSetup';
 
 test.describe('E2E-18 full chain', () => {
   test('creates rack, node, server, store, group, and replica entirely through the UI', async ({ page, baseURL }) => {
@@ -85,6 +85,7 @@ test.describe('E2E-18 full chain', () => {
       await expect(page.getByRole('heading', { name: 'Cluster' })).toBeVisible({ timeout: 3_000 });
 
       // 6. Create empty store 188 on n18a.
+      await clusterInit(baseURL!, ['n18a', 'n18b']);
       await page.locator('aside').getByRole('button', { name: 'Add Store' }).click();
       await expect(page.getByRole('dialog', { name: 'Add KV Store' })).toBeVisible();
       await page.getByLabel('KV Store ID (numeric)').fill('188');

@@ -1525,6 +1525,18 @@ pub async fn http_cluster_init(
                 succeeded.push((nid.clone(), replica_id));
             }
             Err(e) => {
+                // 409 Conflict means group 0 already exists — the node was
+                // already initialized. Treat as success and continue.
+                let is_already_init = matches!(
+                    &e,
+                    SharedError::UpstreamRpc { status, .. }
+                    if status.contains("409")
+                );
+                if is_already_init {
+                    info!(node_id = nid, "system/init: group 0 already exists, skipping");
+                    succeeded.push((nid.clone(), replica_id));
+                    continue;
+                }
                 // Rollback: remove group 0 on nodes that succeeded.
                 for (ok_nid, _) in &succeeded {
                     if let Ok(u) = mgmt_url_for_node(&state, ok_nid) {
