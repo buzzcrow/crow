@@ -663,6 +663,15 @@ async fn restart_recovery(
     let mut cluster = setup_cluster(tag, rack_nodes, &bin, election_profile).await;
     eprintln!("test-logs: {}", cluster.dir.display());
 
+    // Step 0: Initialize the system group so non-zero stores can be created.
+    let (status, body) = json_post(
+        &cluster.client,
+        &format!("{}/api/cluster/init", cluster.base),
+        json!({ "nodes": cluster.node_ids }),
+    )
+    .await;
+    assert_eq!(status.as_u16(), 201, "cluster init: {body}");
+
     // Step 1a: Create all stores + groups first (concurrent startup)
     // Collect the union of nodes for each store_id so the store is created
     // on every node that hosts any of its groups.

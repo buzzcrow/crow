@@ -197,6 +197,15 @@ async fn replica_add_remove_wires_peers_bidirectionally() {
     let rid1: u64 = 1;
     let rid2: u64 = 2;
 
+    // 0. Initialize the system group so non-zero stores can be created.
+    let resp = http
+        .post(format!("{base}/api/cluster/init"))
+        .json(&json!({"nodes": ["n1", "n2"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "cluster init: {:?}", resp.text().await.ok());
+
     // 1. Create an empty store on n1.
     let resp = http
         .post(format!("{base}/api/stores"))

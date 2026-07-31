@@ -141,6 +141,11 @@ impl BenchFixture {
                 }
             };
 
+        if let Err(e) = client.cluster_init(&ids).await {
+            console_task.abort();
+            return Err(upstream_err("cluster", "cluster_init", &e));
+        }
+
         if let Err(e) = Self::provision_store_and_group(&client, &ids).await {
             console_task.abort();
             return Err(e);
