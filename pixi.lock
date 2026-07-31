@@ -43,6 +43,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/gxx_impl_linux-64-14.3.0-h2185e75_19.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/gxx_linux-64-14.3.0-hd240bd5_27.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/icu-78.3-h33c6efd_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/isa-l-2.32.1-hb03c661_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/jemalloc-5.3.0-h5888daf_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/kernel-headers_linux-64-4.18.0-he073ed8_9.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/keyutils-1.6.3-hb9d3cd8_0.conda
@@ -146,6 +147,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/glog-0.7.1-heb240a5_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/gtest-1.17.0-ha393de7_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/icu-78.3-hef89b57_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/isa-l-2.31.1-h5505292_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/krb5-1.22.2-hfd3d5f3_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/ld64-956.6-llvm19_1_he86490a_4.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/ld64_osx-arm64-956.6-llvm19_1_ha2625f7_4.conda
@@ -1051,6 +1053,25 @@ packages:
   license_family: MIT
   size: 12361647
   timestamp: 1773822915649
+- conda: https://conda.anaconda.org/conda-forge/linux-64/isa-l-2.32.1-hb03c661_0.conda
+  sha256: bdcd52848058d7a5ef3fdd88b29701b51d03e948e49f5cc05036d8c8f7943f4e
+  md5: aee2e139304e7b59d3369222bb9eb288
+  depends:
+  - __glibc >=2.17,<3.0.a0
+  - libgcc >=14
+  license: BSD-3-Clause
+  license_family: BSD
+  size: 168645
+  timestamp: 1783949090784
+- conda: https://conda.anaconda.org/conda-forge/osx-arm64/isa-l-2.31.1-h5505292_1.conda
+  sha256: f0cad459ebfc209269cb7a964fc37d811aa973876c5508e529e414f379a38c23
+  md5: 00c87ad2b46e1863f514b831674f1a43
+  depends:
+  - __osx >=11.0
+  license: BSD-3-Clause
+  license_family: BSD
+  size: 122475
+  timestamp: 1736497418302
 - conda: https://conda.anaconda.org/conda-forge/linux-64/jemalloc-5.3.0-h5888daf_1.conda
   sha256: ab7eb1fed221d1186a0b7585eef6a2c6f95f5ac5b8a641084071d5249e7fc5f1
   md5: 6006eda427d9ed4ee350e364677251d4

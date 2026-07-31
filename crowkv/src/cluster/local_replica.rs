@@ -1110,6 +1110,17 @@ impl PxLocalReplica {
     /// Same two-fence rule as [`Self::on_prepare`] but the term lives on
     /// `entry.term` (because the accept message carries the value).
     pub async fn on_accept(&self, entry: &PxLogEntry) -> PxAcceptReply {
+        let reply = self.on_accept_inner(entry).await;
+        if matches!(reply, PxAcceptReply::Accepted { .. }) {
+            self.on_accept_persist(entry).await;
+        }
+        reply
+    }
+
+    /// Acceptor CAS only — term fence + `acceptor.accept`, no WAL persist.
+    /// Returns the reply immediately. Used by R16b early-ack path where the
+    /// proposer tracks WAL persist separately from quorum.
+    pub async fn on_accept_inner(&self, entry: &PxLogEntry) -> PxAcceptReply {
         let req_term = entry.term;
         let local_term = self.current_term_snapshot();
         if req_term < local_term {
@@ -1122,35 +1133,75 @@ impl PxLocalReplica {
             self.become_follower(req_term);
         }
 
-        // Keep a reference for the WAL persist below.
-        let slot = entry.slot;
-        let ballot = entry.ballot;
         let reply = self.acceptor.accept(entry).await;
-
-        // Ack contract (W6): persist Accepted record before replying.
         if matches!(reply, PxAcceptReply::Accepted { .. }) {
             debug!(
                 replica_l_id = self.id,
-                slot,
-                round = ballot.round,
-                leader_id = ballot.leader_id,
+                slot = entry.slot,
+                round = entry.ballot.round,
+                leader_id = entry.ballot.leader_id,
                 term = entry.term,
-                "on_accept: accepted leader proposal"
+                "on_accept_inner: accepted leader proposal"
             );
-            if let Some(wal) = &self.wal {
-                let record = WALRecord::from_accepted(wal.group_id(), entry);
-                if let Err(e) = wal.append(&record).await {
-                    tracing::error!(slot, ?ballot, error = %e, "WAL persist Accepted failed");
-                }
+        }
+        reply
+    }
+
+    /// WAL persist of an Accepted record. Called after [`Self::on_accept_inner`]
+    /// when the reply is `Accepted`. In the default path this completes before
+    /// the reply is observed by the proposer (W6 contract). In the R16b
+    /// early-ack path it runs concurrently with remote RPC fan-out.
+    pub async fn on_accept_persist(&self, entry: &PxLogEntry) {
+        if let Some(wal) = &self.wal {
+            let record = WALRecord::from_accepted(wal.group_id(), entry);
+            if let Err(e) = wal.append(&record).await {
+                tracing::error!(
+                    slot = entry.slot,
+                    ballot = ?entry.ballot,
+                    error = %e,
+                    "WAL persist Accepted failed"
+                );
             }
         }
+    }
 
-        reply
+    /// R16b: spawn the WAL persist as a detached background task.
+    /// Used when `wal_early_ack` is enabled — the value is already
+    /// Paxos-chosen, so the persist is durability best-effort.
+    pub fn spawn_accept_persist(&self, entry: PxLogEntry) {
+        if let Some(wal) = &self.wal {
+            let wal = Arc::clone(wal);
+            tokio::spawn(async move {
+                let record = WALRecord::from_accepted(wal.group_id(), &entry);
+                if let Err(e) = wal.append(&record).await {
+                    tracing::error!(
+                        slot = entry.slot,
+                        ballot = ?entry.ballot,
+                        error = %e,
+                        "WAL persist Accepted failed (early-ack background)"
+                    );
+                }
+            });
+        }
     }
 
     /// Learn a chosen entry (apply to state machine).
     pub async fn learn_chosen(&self, entry: &PxLogEntry, client_id: Option<u64>, seq: Option<u64>) {
         self.learner.learn(entry.clone(), client_id, seq).await;
+    }
+
+    /// R17: spawn `learn_chosen` as a detached background task. Used when
+    /// `async_engine_apply` is enabled — the value is already Paxos-chosen,
+    /// so applying to the local engine can happen asynchronously. The
+    /// learner's `apply_entry` is idempotent (drops slot <= `last_applied`),
+    /// and `update_frontier` / `record_dedup` are atomic, so a delayed
+    /// apply is safe. Read-your-writes semantics break until the apply
+    /// catches up — callers must gate reads on the applied frontier.
+    pub fn spawn_learn_chosen(&self, entry: PxLogEntry, client_id: Option<u64>, seq: Option<u64>) {
+        let learner = Arc::clone(&self.learner);
+        tokio::spawn(async move {
+            learner.learn(entry, client_id, seq).await;
+        });
     }
 
     /// Apply locally-accepted entries to the state machine up to `commit_slot`

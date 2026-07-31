@@ -36,6 +36,17 @@ target_compile_definitions(crowcommon PUBLIC CROW_HAVE_SPDLOG=1)
 find_package(ZLIB REQUIRED)
 target_link_libraries(crowcommon PRIVATE ZLIB::ZLIB)
 
+# ISA-L for SIMD-optimized CRC32C (crc32_iscsi) in crow-common/crc32c.h.
+find_path(ISAL_INCLUDE_DIR isa-l/crc.h)
+find_library(ISAL_LIB NAMES isal)
+if(ISAL_INCLUDE_DIR AND ISAL_LIB)
+  message(STATUS "crow-common ISA-L: ${ISAL_LIB} (${ISAL_INCLUDE_DIR})")
+  target_include_directories(crowcommon PUBLIC ${ISAL_INCLUDE_DIR})
+  target_link_libraries(crowcommon PUBLIC ${ISAL_LIB})
+else()
+  message(FATAL_ERROR "ISA-L not found (required for CRC32C)")
+endif()
+
 # Compile-time level floor: keep trace/debug in Debug builds, strip below info in
 # optimized builds (SPDLOG_ACTIVE_LEVEL elides lower calls entirely).
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
