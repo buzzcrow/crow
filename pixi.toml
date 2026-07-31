@@ -23,6 +23,7 @@ spdlog = ">=1.17.0,<2"  # crowtree async file logging (plan-tree #10)
 clang-format = ">=19.0.0"
 clang-tools = "*"
 folly = "*"
+isa-l = "*"
 # Rust toolchain (crowkv)
 rust = ">=1.96"
 protobuf = "*"

@@ -66,6 +66,17 @@ pub struct PxGroup {
     pub(crate) next_slot: AtomicU64,
     /// When true, always run Phase-1 Prepare before Accept (classic Paxos).
     force_classic: bool,
+    /// R16b: when true, the proposer declares `Chosen` as soon as remote
+    /// quorum is met, without waiting for the local WAL persist to finish.
+    /// The local persist is tracked concurrently. Weakens the W6 ack
+    /// contract for the local replica. Default false.
+    wal_early_ack: bool,
+    /// R17: when true, `learn_chosen` (engine apply) runs as a background
+    /// task instead of on the propose critical path. The client receives
+    /// `Chosen` before the local engine has applied the value.
+    /// Read-your-writes semantics break unless a read barrier is added.
+    /// Default false.
+    async_engine_apply: bool,
     /// Leader-election / heartbeat / lease tunables for this group's
     /// [`crate::cluster::group_election::spawn`] driver task.
     pub(crate) election_cfg: PxElectionConfig,
@@ -214,6 +225,8 @@ impl PxGroup {
             valid_replica_count: 0,
             next_slot: AtomicU64::new(1),
             force_classic: false,
+            wal_early_ack: false,
+            async_engine_apply: false,
             election_cfg: PxElectionConfig::DEFAULT,
             tenure_cancel: CancellationToken::new(),
             driver_handle: AsyncMutex::new(None),
@@ -262,7 +275,19 @@ impl PxGroup {
         self.node_config_store = Some((store, store_id, group_id));
     }
 
-    /// Override the in-flight proposal admission configuration. Must be
+    /// Enable or disable R16b early-ack (declare chosen on remote quorum
+    /// without waiting for local WAL persist). Default off.
+    pub fn set_wal_early_ack(&mut self, enabled: bool) {
+        self.wal_early_ack = enabled;
+    }
+
+    /// Enable or disable R17 async engine apply (return Chosen before
+    /// local engine apply completes). Default off.
+    pub fn set_async_engine_apply(&mut self, enabled: bool) {
+        self.async_engine_apply = enabled;
+    }
+
+    /// Set the in-flight proposal admission configuration. Must be
     /// called before the group starts serving proposals.
     pub fn set_inflight_config(&mut self, max_inflight: usize, queues: usize, policy: AdmissionPolicy) {
         self.inflight = InflightAdmission::new(max_inflight, queues, policy);
@@ -1254,10 +1279,15 @@ impl PxGroup {
                     .await
                 {
                     AcceptAttempt::Chosen => {
-                        replica.learn_chosen(&entry, client_id, seq).await;
-                        // Tell peers the slot is chosen so their
-                        // `last_chosen_slot` watermark advances before
-                        // the next heartbeat tick.
+                        // R17: when async_engine_apply is enabled, spawn
+                        // the engine apply as a background task and return
+                        // Chosen immediately. The fan_out_chosen_notice
+                        // fires immediately too (non-blocking mpsc enqueue).
+                        if self.async_engine_apply {
+                            replica.spawn_learn_chosen(entry.clone(), client_id, seq);
+                        } else {
+                            replica.learn_chosen(&entry, client_id, seq).await;
+                        }
                         self.fan_out_chosen_notice(&entry, group_id);
                         trace!(
                             group_id,
@@ -1479,12 +1509,29 @@ impl PxGroup {
         let mut epoch_mismatch: Option<u64> = None;
         let mut adopted: Option<PxLogEntry> = None;
 
-        match <PxLocalReplica as ReplicaHandler>::on_prepare(replica, slot, ballot, term, group_id).await {
+        // R16a: Concurrent local + remote fan-out. Issue the local
+        // on_prepare and all remote prepare RPCs concurrently via
+        // tokio::join!, overlapping the local fsync with the network
+        // round-trip. The quorum check still counts the local reply.
+        let prepare_futs: Vec<_> = self
+            .remote_replicas
+            .iter()
+            .filter_map(|remote| {
+                if let RemoteReplicaKind::Real(remote) = remote {
+                    Some(remote.send_prepare(slot, ballot, term, group_id, self.membership_epoch()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let (local_result, prepare_results) = tokio::join!(
+            <PxLocalReplica as ReplicaHandler>::on_prepare(replica, slot, ballot, term, group_id),
+            join_all(prepare_futs),
+        );
+
+        match local_result {
             Ok(PxPrepareReply::Promised { accepted, .. }) => {
-                // A non-voting local replica should never reach this
-                // method as leader/candidate in the first place (see the
-                // election-side voting guard), but gate the self-count
-                // defensively too rather than relying solely on that.
                 if replica.voting() {
                     promised += 1;
                 }
@@ -1499,10 +1546,6 @@ impl PxGroup {
                 highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
             }
             Ok(PxPrepareReply::EpochMismatch { .. }) => {
-                // The local in-process acceptor path never produces this
-                // (it's a wire-response-only fence check made before
-                // calling `on_prepare` at all); unreachable for a local
-                // self-call.
                 unreachable!("local on_prepare does not produce EpochMismatch")
             }
             Err(error) => {
@@ -1515,22 +1558,6 @@ impl PxGroup {
                 );
             }
         }
-
-        // Concurrent fan-out: issue all prepare RPCs simultaneously
-        // and fold replies into accumulators. This removes one serial
-        // RPC round-trip per additional follower (R14).
-        let prepare_futs: Vec<_> = self
-            .remote_replicas
-            .iter()
-            .filter_map(|remote| {
-                if let RemoteReplicaKind::Real(remote) = remote {
-                    Some(remote.send_prepare(slot, ballot, term, group_id, self.membership_epoch()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-        let prepare_results = join_all(prepare_futs).await;
 
         for (remote, result) in self
             .remote_replicas
@@ -1660,38 +1687,14 @@ impl PxGroup {
             "run accept phase"
         );
 
-        match <PxLocalReplica as ReplicaHandler>::on_accept(replica, entry, group_id).await {
-            Ok(PxAcceptReply::Accepted { .. }) => {
-                // See the matching guard in `run_prepare_phase` above.
-                if replica.voting() {
-                    accepted += 1;
-                }
-            }
-            Ok(PxAcceptReply::Rejected { current_promised, .. }) => {
-                highest_rejected_round = Some(current_promised.round);
-            }
-            Ok(PxAcceptReply::TermStale { new_term, .. }) => {
-                highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
-            }
-            Ok(PxAcceptReply::EpochMismatch { .. }) => {
-                // See the matching unreachable arm in `run_prepare_phase`
-                // above -- the local in-process path never produces this.
-                unreachable!("local on_accept does not produce EpochMismatch")
-            }
-            Err(error) => {
-                error!(
-                    group_id,
-                    slot = entry.slot,
-                    replica_id = replica.id,
-                    error = %error,
-                    "local accept handler failed"
-                );
-            }
-        }
-
-        // Concurrent fan-out: issue all accept RPCs simultaneously
-        // and fold replies into accumulators. This removes one serial
-        // RPC round-trip per additional follower (R14).
+        // R16a/R16b: Concurrent local + remote fan-out. When wal_early_ack
+        // is disabled (default), the local on_accept (CAS + WAL persist)
+        // runs concurrently with remote RPCs via tokio::join!, and the
+        // quorum check waits for the local reply (R16a). When wal_early_ack
+        // is enabled, the local CAS runs concurrently with remote RPCs,
+        // and the WAL persist is tracked as a background task — the
+        // proposer declares Chosen as soon as remote quorum + local CAS
+        // succeed, without waiting for the local fsync (R16b).
         let accept_futs: Vec<_> = self
             .remote_replicas
             .iter()
@@ -1703,51 +1706,163 @@ impl PxGroup {
                 }
             })
             .collect();
-        let accept_results = join_all(accept_futs).await;
 
-        for (remote, result) in self
-            .remote_replicas
-            .iter()
-            .filter(|r| matches!(r, RemoteReplicaKind::Real(_)))
-            .zip(accept_results)
-        {
-            let RemoteReplicaKind::Real(remote) = remote else {
-                continue;
-            };
-            match result {
+        if self.wal_early_ack {
+            // R16b: split path — CAS only, persist deferred.
+            let (local_result, accept_results) =
+                tokio::join!(replica.on_accept_inner(entry), join_all(accept_futs),);
+
+            let local_accepted = matches!(local_result, PxAcceptReply::Accepted { .. });
+            match local_result {
+                PxAcceptReply::Accepted { .. } => {
+                    if replica.voting() {
+                        accepted += 1;
+                    }
+                }
+                PxAcceptReply::Rejected { current_promised, .. } => {
+                    highest_rejected_round = Some(current_promised.round);
+                }
+                PxAcceptReply::TermStale { new_term, .. } => {
+                    highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
+                }
+                PxAcceptReply::EpochMismatch { .. } => {
+                    unreachable!("local on_accept does not produce EpochMismatch")
+                }
+            }
+
+            for (remote, result) in self
+                .remote_replicas
+                .iter()
+                .filter(|r| matches!(r, RemoteReplicaKind::Real(_)))
+                .zip(accept_results)
+            {
+                let RemoteReplicaKind::Real(remote) = remote else {
+                    continue;
+                };
+                match result {
+                    Ok(PxAcceptReply::Accepted { .. }) => {
+                        if remote.voting {
+                            accepted += 1;
+                        }
+                    }
+                    Ok(PxAcceptReply::Rejected { current_promised, .. }) => {
+                        let candidate = current_promised.round;
+                        highest_rejected_round =
+                            Some(highest_rejected_round.map_or(candidate, |r| r.max(candidate)));
+                    }
+                    Ok(PxAcceptReply::TermStale { new_term, .. }) => {
+                        highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
+                    }
+                    Ok(PxAcceptReply::EpochMismatch { responder_epoch }) => {
+                        warn!(
+                            group_id,
+                            slot = entry.slot,
+                            remote_id = remote.node_id,
+                            proposer_epoch = self.membership_epoch(),
+                            responder_epoch,
+                            "accept rejected by membership-epoch fence"
+                        );
+                        epoch_mismatch = Some(responder_epoch);
+                    }
+                    Err(error) => {
+                        error!(
+                            group_id,
+                            slot = entry.slot,
+                            remote_id = remote.node_id,
+                            endpoint = remote.endpoint,
+                            error = %error,
+                            "accept rpc failed"
+                        );
+                    }
+                }
+            }
+
+            // R16b: if chosen, spawn the local WAL persist as a background
+            // task. The value is already Paxos-chosen; the persist is a
+            // durability best-effort that completes asynchronously. If it
+            // fails, the error is logged (the value is chosen regardless).
+            if local_accepted && accepted >= quorum {
+                replica.spawn_accept_persist(entry.clone());
+                return AcceptAttempt::Chosen;
+            }
+        } else {
+            // R16a: default path — local on_accept (CAS + WAL persist)
+            // concurrent with remote RPCs.
+            let (local_result, accept_results) = tokio::join!(
+                <PxLocalReplica as ReplicaHandler>::on_accept(replica, entry, group_id),
+                join_all(accept_futs),
+            );
+
+            match local_result {
                 Ok(PxAcceptReply::Accepted { .. }) => {
-                    if remote.voting {
+                    if replica.voting() {
                         accepted += 1;
                     }
                 }
                 Ok(PxAcceptReply::Rejected { current_promised, .. }) => {
-                    let candidate = current_promised.round;
-                    highest_rejected_round =
-                        Some(highest_rejected_round.map_or(candidate, |r| r.max(candidate)));
+                    highest_rejected_round = Some(current_promised.round);
                 }
                 Ok(PxAcceptReply::TermStale { new_term, .. }) => {
                     highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
                 }
-                Ok(PxAcceptReply::EpochMismatch { responder_epoch }) => {
-                    warn!(
-                        group_id,
-                        slot = entry.slot,
-                        remote_id = remote.node_id,
-                        proposer_epoch = self.membership_epoch(),
-                        responder_epoch,
-                        "accept rejected by membership-epoch fence"
-                    );
-                    epoch_mismatch = Some(responder_epoch);
+                Ok(PxAcceptReply::EpochMismatch { .. }) => {
+                    unreachable!("local on_accept does not produce EpochMismatch")
                 }
                 Err(error) => {
                     error!(
                         group_id,
                         slot = entry.slot,
-                        remote_id = remote.node_id,
-                        endpoint = remote.endpoint,
+                        replica_id = replica.id,
                         error = %error,
-                        "accept rpc failed"
+                        "local accept handler failed"
                     );
+                }
+            }
+
+            for (remote, result) in self
+                .remote_replicas
+                .iter()
+                .filter(|r| matches!(r, RemoteReplicaKind::Real(_)))
+                .zip(accept_results)
+            {
+                let RemoteReplicaKind::Real(remote) = remote else {
+                    continue;
+                };
+                match result {
+                    Ok(PxAcceptReply::Accepted { .. }) => {
+                        if remote.voting {
+                            accepted += 1;
+                        }
+                    }
+                    Ok(PxAcceptReply::Rejected { current_promised, .. }) => {
+                        let candidate = current_promised.round;
+                        highest_rejected_round =
+                            Some(highest_rejected_round.map_or(candidate, |r| r.max(candidate)));
+                    }
+                    Ok(PxAcceptReply::TermStale { new_term, .. }) => {
+                        highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
+                    }
+                    Ok(PxAcceptReply::EpochMismatch { responder_epoch }) => {
+                        warn!(
+                            group_id,
+                            slot = entry.slot,
+                            remote_id = remote.node_id,
+                            proposer_epoch = self.membership_epoch(),
+                            responder_epoch,
+                            "accept rejected by membership-epoch fence"
+                        );
+                        epoch_mismatch = Some(responder_epoch);
+                    }
+                    Err(error) => {
+                        error!(
+                            group_id,
+                            slot = entry.slot,
+                            remote_id = remote.node_id,
+                            endpoint = remote.endpoint,
+                            error = %error,
+                            "accept rpc failed"
+                        );
+                    }
                 }
             }
         }
