@@ -119,6 +119,13 @@ apply(slot, batch):
     maybe_signal_flush()                         // size/entry/time threshold crossed
 ```
 
+- The consensus apply path stores **split cells** — the value is
+  borrowed from the payload `Bytes` via a `kExternal` buffer (no value
+  memcpy), and the 9-byte cell header is stored as `slot`/`flags` fields
+  in `cell_entry`. The contiguous cell is materialized at flush / L0-read.
+  See §2.4 for the full design. The pseudocode above shows the
+  contiguous-cell path (used by snapshot import and the direct C API);
+  both paths coexist in the same MemTable.
 - The MemTable keeps **one cell per key** (highest slot wins), so repeated
   writes to a hot key collapse in memory before ever reaching the tree.
 - `apply` drops cells already durable in L1 (`slot <= last_applied_slot`) and
@@ -277,7 +284,7 @@ Three disciplines solve this:
    (worst-case unbounded retained memory) — accepted because reads are short
    (one `get`/`scan`) and there is a single writer, so the active-epoch
    window is tiny.
-4. **Per-page refcount on handoff paths** (R6) — composes with EBR as an
+4. **Per-page refcount on handoff paths** — composes with EBR as an
    orthogonal cross-thread lifetime mechanism. EBR protects the same-thread
    walk (the `Guard` is thread-bound); refcount extends page lifetime across
    threads after the walk hands off a borrowed `Slice` (`get_async` slow
@@ -392,37 +399,54 @@ guard). Design rules:
   `malloc`); a size-classed pool or RDMA-pinned allocator could slot in here
   later with no call-site changes — see [`todo_code.md`](../todo_code.md) for
   why that hasn't been done speculatively.
-- **MemTable = `absl::btree_map<std::string, buffer>`.** The KEY stays
-  `std::string`, the VALUE is a move-only `buffer`. **Why the key is not a
-  `buffer`:** a B-tree stores `pair<const Key, Value>` and *relocates* slots
-  on node split/merge, which requires moving the `const` key — a move-only
-  `buffer` key falls back to its deleted copy ctor and fails to compile.
-  `std::string`'s SSO already inlines small keys, so it is the correct key
-  type; `buffer`'s SBO gives the same inline benefit on the value side plus
-  the borrowed read path. `std::less<>` is transparent → heterogeneous
-  `Slice`/`string_view` lookup with no temporary key.
+- **MemTable = `absl::btree_map<std::string, cell_entry>`.** The KEY stays
+  `std::string`, the VALUE is a `cell_entry{slot, flags, cell}`. The
+  `cell` buffer is either **contiguous** (`kOwned`, full `[header][value]`
+  — used by snapshot import and the direct C API) or **split** (`kExternal`,
+  value-only borrowed from a Rust `Bytes` — the zero-copy consensus apply
+  path). The contiguous form is materialized at the API boundary
+  (`get`/`drain`/`snapshot`). **Why the key is not a `buffer`:** a B-tree stores
+  `pair<const Key, Value>` and *relocates* slots on node split/merge, which
+  requires moving the `const` key — a move-only `buffer` key falls back to
+  its deleted copy ctor and fails to compile. `std::string`'s SSO already
+  inlines small keys, so it is the correct key type; `buffer`'s SBO gives
+  the same inline benefit on the value side plus the borrowed read path.
+  `std::less<>` is transparent → heterogeneous `Slice`/`string_view`
+  lookup with no temporary key.
 
 ### 2.2 Write and Read Pipelines
 
 ```
-Write: Rust API: user provides key: &[u8], value: &[u8]
+Write (consensus apply path — zero-copy):
+  Rust: Batch::decode produces Bytes slices (O(1) Arc ref-bump)
+  → CrowtreeEngine::apply: per-op Bytes::clone → BytesRef handle (Arc bump)
+  → ct_apply_batch_external: C++ wraps value as kExternal buffer (NO memcpy)
+  → apply_external → MemTable::upsert_external: cell_entry{slot, flags, value:kExternal}
+  → [payload Bytes stays alive, pinned by external buffers' Arc clones]
+
+Write (contiguous-cell path — snapshot import / direct C API):
   → allocate one buffer (value + reserved cell header)          ← the ONE allocation
   → C FFI: ct_apply_put(tree, slot, key_ptr,klen, val_ptr,vlen)
-  → C++ wraps as buffer (copy at the boundary today; §2.3)
+  → C++ wraps as buffer (copy at the boundary; §2.3)
   → encode cell: write slot+flags into the reserved header       (no alloc, no copy)
   → MemTable::upsert(key_buf, cell_buf): std::move into the map   (no copy)
-  → flush(): drain moves buffers out of the MemTable             (no copy)
+
+Flush (off the apply critical path):
+  → drain_up_to: materialize split cells → contiguous [header][value] (value memcpy HERE)
   → frame builder copies bytes into the slotted frame layout     ← unavoidable (page construction)
 
 Read: get(key):
   guard = epoch.enter()                       // keeps resident frames alive (§1.6)
-  L0 (MemTable) hit: must COPY (value lives under the MemTable mutex, released on return)
+  L0 (MemTable) hit: must COPY (materializes split cell into [header][value]; one copy)
   L1 (B+tree) hit:   return buffer::wrap(cell_value_ptr_in_frame, len)  // BORROWED, zero copy
                       valid only while `guard` is held AND the frame stays resident
 ```
 
-- **Before:** 3 copies (encode → MemTable → drain-vector → frame). **After:**
-  1 copy (frame construction).
+- **Apply critical path: zero value memcpy.** The value bytes are borrowed
+  from the Paxos payload `Bytes` via `kExternal` buffers; the `memcpy` is
+  deferred to flush (off the critical path). The total value-copy count is
+  2 (materialization at flush + frame construction), both on the Flusher
+  thread — none on the apply thread.
 - **L1 reads are zero-copy:** the returned `buffer` borrows the cell's value
   bytes directly from the resident frame. **The epoch guard alone keeps the
   frame resident** — eviction does not free a page's frame directly, it
@@ -437,33 +461,98 @@ Read: get(key):
 
 ### 2.3 Rust FFI Ownership
 
-Two options for how Rust hands value memory to C++, sequenced:
+Three options for how Rust hands value memory to C++:
 
-- **Option A — copy at the boundary (current default).** Rust passes
-  `*const u8` + len; C++ `buffer::alloc()`s and copies once at the FFI
-  boundary. Simpler; one copy remains at the boundary but the *internal*
-  pipeline is already zero-copy (§2.2).
-- **Option B — handle-based ownership transfer (R3, implemented).** The
-  caller allocates crowtree-owned memory via `ct_alloc(key_len, val_len)`,
-  which returns an opaque `ct_write_handle` plus two writable pointers
-  (key + value). The caller writes key/value bytes directly into that
-  memory, then `ct_apply_put_owned(tree, slot, handle)` writes the cell
-  header (slot + flags) into the pre-allocated cell and moves key+cell
-  into `apply_encoded` — zero value memcpy. `ct_free_handle(handle)` is
-  the error/cancel path. The cell header layout (`kCellHeaderSize`) is
+- **Option A — copy at the boundary.** Rust passes `*const u8` + len; C++
+  `buffer::alloc()`s and copies once at the FFI boundary. Simpler; one
+  copy remains at the boundary but the *internal* pipeline is zero-copy
+  (§2.2). Used by the simple single-op C API (`ct_apply_put`,
+  `ct_apply_batch`, `ct_apply_batch_slices`).
+- **Option B — handle-based ownership transfer.** The caller
+  allocates crowtree-owned memory via `ct_alloc(key_len, val_len)`, which
+  returns an opaque `ct_write_handle` plus two writable pointers (key +
+  value). The caller writes key/value bytes directly into that memory,
+  then `ct_apply_put_owned(tree, slot, handle)` writes the cell header
+  (slot + flags) into the pre-allocated cell and moves key+cell into
+  `apply_encoded` — zero value memcpy. `ct_free_handle(handle)` is the
+  error/cancel path. The cell header layout (`kCellHeaderSize`) is
   internal — the C API never exposes it, sidestepping the ABI-stability
-  concern that originally blocked Option B. The Rust adapter wraps the
+  concern that originally blocked this option. The Rust adapter wraps the
   handle in a `WriteHandle` struct with RAII `Drop` (frees if not
   consumed) and `apply(self, slot)` (consumes). `!Send + !Sync`. SBO is
   preserved: small values (≤ 15 B) use inline storage, same as Option A.
-  Full engine integration (wiring `KVEngine::apply` to use the handle
-  path for large values) is deferred — R3 delivers the C API + Rust FFI
-  wrapper.
+  Intended for direct API callers that want zero-copy single-op apply.
+- **Option C — external borrow from Rust `Bytes`.** The consensus
+  apply path (`CrowtreeEngine::apply`) uses `ct_apply_batch_external`:
+  each Put op's value `Bytes` is cloned (O(1) `Arc` bump) into a
+  `BytesRef` handle handed to C++. C++ wraps the value bytes as a
+  `kExternal` `buffer` (borrowed, no memcpy) and stores a **split cell**
+  in the MemTable — `cell_entry{slot, flags, value:kExternal}` — where
+  the 9-byte cell header is stored as fields, not as adjacent bytes. The
+  contiguous `[header][value]` cell is materialized at the MemTable API
+  boundary (`get`/`drain_up_to`/`snapshot`), where a copy already exists,
+  all off the apply critical path. When the `kExternal` buffer is freed
+  (drain/overwrite), C++ calls back into Rust (`ct_release_bytes`) to
+  drop the `Arc<Bytes>` clone, keeping the payload allocation alive until
+  every borrowing buffer is freed. The `kExternal` mode adds zero size
+  overhead to `buffer` (the drop-control fields overlap the SBO `inbuf_`
+  array via a union). See §2.4.
 
 Ownership rule (extends `design-crowtree.md §4`): a buffer *yielded* to
 `ct_apply_*` is owned by the tree and freed by it once flushed into a frame;
 a buffer *borrowed* into a call (not yielded) follows the existing "borrowed
-for the call's duration" rule.
+for the call's duration" rule. An **external** buffer (Option C) is
+borrowed from Rust and kept alive by an `Arc<Bytes>` refcount — C++ calls
+back into Rust to drop the ref when the buffer is freed (drain/overwrite),
+so the payload allocation survives until every borrowing buffer is released.
+
+### 2.4 Zero-Copy Apply: Split-Cell External Buffers
+
+**Design challenge.** The consensus apply path receives value bytes as
+`Bytes` slices into the packed Paxos payload — a single refcounted
+allocation shared by all ops in the batch. The contiguous-cell apply path
+(Option A/B) calls `encode_cell_buf`, which performs a value `memcpy`
+(64 KiB for a large value) on the apply thread — the dominant per-op cost
+for large values. The goal is to eliminate this copy for the consensus
+apply path without changing the contiguous cell representation downstream.
+
+**Why a naive external buffer doesn't work.** The cell is stored as one
+contiguous `buffer` `[9-byte header][value]` everywhere (`mem_entry.cell`,
+`leaf_entry.cell`, B+tree frames, snapshot I/O). `CellView` reads
+`slot()`/`flags()`/`value()` by slicing this contiguous memory. A
+`Bytes`-backed external buffer cannot satisfy this contiguity: the value
+bytes live in the packed payload `Bytes`, and the 9-byte header (known only
+at apply time) is not adjacent to them.
+
+**Design.** Split the cell **only while it lives in the MemTable**;
+materialize the contiguous form at the memtable API boundary
+(`get`/`drain_up_to`/`snapshot`) — points where a copy already exists, all
+off the apply critical path. Everything downstream (flush, delta, frame,
+`leaf_entry`, `CellView`, snapshot I/O) sees contiguous cells unchanged.
+
+- **`buffer::mode::kExternal`** — a buffer mode that borrows value bytes
+  from a Rust `Bytes` and calls `drop_fn(owner)` on destruction to
+  decrement the Rust refcount. The drop-control fields (`drop_fn`, `owner`)
+  overlap the SBO `inbuf_` array via a union — zero size overhead.
+  `clone()` deep-copies the borrowed bytes into an owned buffer; move
+  transfers `ext_` and releases the source without calling `drop_fn`.
+- **`cell_entry`** — the MemTable's internal map value: `{slot, flags, cell}`.
+  Contiguous: `cell` is `kOwned` (full `[header][value]`). Split: `cell` is
+  `kExternal` (value-only, borrowed). Tag: `cell.ownership() == kExternal`.
+  `materialize()` builds a contiguous `[header][value]` buffer from the
+  fields + borrowed value (one value `memcpy`, off the apply hot path).
+- **`apply_external(slot, vector<external_op>)`** — same semantics as
+  `apply_encoded` (oversized-key rejection, slot bookkeeping,
+  `maybe_swap_active`, intra-batch last-key-wins) but builds `cell_entry`
+  directly — no `encode_cell_buf`, no value `memcpy`.
+- **`ct_apply_batch_external`** — C API: `ct_ext_op{key, value, kind,
+  bytes_ref, drop_fn}`. Rust hands a `BytesRef` (boxed `Arc<Bytes>`) per Put
+  op; C++ wraps the value as `kExternal` and calls `drop_fn(bytes_ref)` when
+  the buffer is freed.
+- **`CrowtreeEngine::apply`** — unchanged `KVEngine::apply` trait; builds
+  `ExtOp`s from the `Batch`'s `Bytes` slices (O(1) `Arc::clone` per op) and
+  calls `apply_batch_external`. WAL replay goes through the same
+  `learner.learn` → `apply_entry` path, so it benefits automatically.
 
 ---
 
@@ -553,7 +642,7 @@ resolves on the next reactor-driven wakeup.
   one allocation (`Bytes`), no `Vec<u8>`.
 - **Slow path:** the I/O read fills a C++-owned buffer; on completion
   the future returns it as an owned `ct_buf` (C++ allocates, Rust
-  frees). For frame-borrowed values, R6 replaces the copy with a per-page
+  frees). For frame-borrowed values, the zero-copy path replaces the copy with a per-page
   refcount pin: the reactor thread pins the leaf base page(s) under its
   epoch guard, releases the guard, and hands the `GetView` (still borrowing
   the frame) across threads; `ct_future_free` unpins from the dropping
@@ -565,12 +654,12 @@ resolves on the next reactor-driven wakeup.
   `ct_get_async` copies the key internally into a
   `std::shared_ptr<std::string>`. The Rust-side `key.to_vec()` is
   eliminated — no C++ changes required.
-- **True zero-copy (R6):** `PinnedValue::into_bytes()` creates a `Bytes`
+- **True zero-copy:** `PinnedValue::into_bytes()` creates a `Bytes`
   via `Bytes::from_owner` backed by the C++ frame — no copy. The
   `ct_future` handle (and its page refcount pins) is held by the `Bytes`
   owner; when the last `Bytes` ref clone is dropped on any thread, the
   owner's `Drop` runs, which drops the `PinnedValue`, which calls
-  `ct_future_free` to unpin. R6 made `PinnedValue` `Send` (the per-page
+  `ct_future_free` to unpin. `PinnedValue` is `Send` (the per-page
   refcount is thread-independent), enabling this cross-thread zero-copy
   handoff. `CrowtreeEngine::get_bytes` uses this path directly.
 

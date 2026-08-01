@@ -84,7 +84,7 @@ with no type suffix.
 
 Prefix-based snapshot: `registry.snapshot("s.1.")` returns all metrics for
 store 1; `snapshot("")` returns all. This is the foundation for future GUI
-integration (R11).
+integration.
 
 ### Instrumentation Points
 
@@ -220,7 +220,7 @@ principle (justified under "different population/outcome").
 counters, snapshotted via `ClientMetricsSnapshot`) for retry, topology,
 and read-distribution observability. They are not part of the server's
 `MetricsRegistry` — the client is a separate process and has no C++
-handle. Two counters cover R26 follower-read distribution:
+handle. Two counters cover follower-read distribution:
 
 - `read_endpoint_distributed` — incremented each time the `AnyReplica`
   selector picks a replica from the cached list for a `MinSlot` read

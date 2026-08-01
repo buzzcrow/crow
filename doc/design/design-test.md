@@ -319,7 +319,7 @@ from failures.
 - Election must be tested for 1, 2, 3, 5, 7 replica counts — single leader
   elected, no split-brain.
 - Follower must reject direct client writes and return `NotLeaderHint`.
-- Proposer window full must queue (queue admission, R18); repair must
+- Proposer window full must queue (queue admission); repair must
   fill gap and advance frontier.
 - Durability: single-node crash/restart and full-cluster restart must
   preserve all committed entries (including tombstones).
@@ -375,7 +375,7 @@ client API; no `crowkv-server` binary is booted.
 
 **Source:** `crowkv-client/tests/*`.
 
-**Lagging-follower harness (R29):** to exercise the `AnyReplica`
+**Lagging-follower harness:** to exercise the `AnyReplica`
 `MinSlot` fallback end-to-end (distributed read → lagging follower →
 `NotLeader` redirect → leader retry → `read_endpoint_fallback`
 increments), a 3-node cluster stands up A (leader, voting), B (follower,
@@ -641,7 +641,7 @@ memtable insert + flush path.
 Current benchmark results are in
 [`doc/working/write-flow-analysis.md`](../working/write-flow-analysis.md)
 § Benchmark Results. Key findings: peak 50K ops/s (64T/8C/MI=64),
-zero errors with queue admission (R18), scaling ceiling is per-proposal
+zero errors with queue admission, scaling ceiling is per-proposal
 consensus latency (~1.2ms).
 
 ### Coverage Rules

@@ -90,7 +90,7 @@ Group 0 membership evolves using the shipped Model B reconfiguration
 primitive required.
 
 **Design history:** Originally rejected in favor of pure
-operator-managed topology. Re-evaluated and adopted as R2 when the
+operator-managed topology. Re-evaluated and adopted when the
 single-point-of-failure risk of console-only TOML became the blocking
 concern for HA deployments. The operator-managed HTTP management API
 remains as the Phase 1 bootstrap path; group 0 adds the HA cutover.
