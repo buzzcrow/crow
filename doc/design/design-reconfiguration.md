@@ -16,7 +16,7 @@ This document specifies how a CrowKV group safely changes its membership while p
 - [4. Member Removal](#4-member-removal)
 - [5. Leader Transfer](#5-leader-transfer)
 - [6. The `membership_epoch` Fence](#6-the-membership_epoch-fence)
-- [7. Group-0 Special Cases (historical, superseded by R2)](#7-group-0-special-cases-historical)
+- [7. Group-0 Special Cases (historical, superseded by persistent cluster config)](#7-group-0-special-cases-historical)
 - [8. Safety Argument](#8-safety-argument)
 - [9. Failure During Reconfiguration](#9-failure-during-reconfiguration)
 - [10. Tunables and Defaults](#10-tunables-and-defaults)
@@ -177,7 +177,8 @@ A non-voting catch-up member physically accepts and promises so it can follow th
 
 > **Decision record (2026-07, updated 2026-07):** `Group-0` as
 > originally described in this section (joint-consensus-based system
-> group) was never implemented. However, R2 later adopted a system
+> group) was never implemented. However, the persistent cluster config
+> requirement later adopted a system
 > group (store 0, group 0) using the **shipped Model B reconfiguration**
 > (direct HTTP mutation + `membership_epoch` fence) — no
 > joint-consensus primitive was needed. Group 0 stores cluster topology
