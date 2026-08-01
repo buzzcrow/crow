@@ -3,7 +3,7 @@
 
 #include "crowtree/reactor.h"
 
-#include "crowtree/log.h"
+#include "crow-common/log.h"
 
 #include <sys/eventfd.h>
 #include <unistd.h>
@@ -19,12 +19,12 @@ Reactor::Reactor(unsigned ring_entries)
 {
     int rc = ::io_uring_queue_init(ring_entries, &ring_, 0);
     if (rc < 0) {
-        CT_LOG_ERROR("Reactor: io_uring_queue_init failed: {}", std::strerror(-rc));
+        CR_LOG_ERROR("Reactor: io_uring_queue_init failed: {}", std::strerror(-rc));
         return; // valid_ stays false
     }
     eventfd_ = ::eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     if (eventfd_ < 0) {
-        CT_LOG_ERROR("Reactor: eventfd() failed: {}", std::strerror(errno));
+        CR_LOG_ERROR("Reactor: eventfd() failed: {}", std::strerror(errno));
         ::io_uring_queue_exit(&ring_);
         return; // valid_ stays false
     }
@@ -109,7 +109,7 @@ void Reactor::cancel(uint64_t op_id)
 
 void Reactor::run()
 {
-    set_current_thread_name("ct-reactor");
+    crow::common::set_current_thread_name("ct-reactor");
     if (!valid_) {
         return;
     }

@@ -350,6 +350,21 @@ impl ConsoleClient {
         self.get_json(&format!("/api/stores/{sid}")).await
     }
 
+    /// `POST /api/cluster/init` — bootstrap the system group (store 0,
+    /// group 0) on the given nodes. Must be called before creating
+    /// non-zero stores/groups.
+    ///
+    /// # Errors
+    /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
+    pub async fn cluster_init(&self, nodes: &[String]) -> Result<Value> {
+        #[derive(Serialize)]
+        struct ClusterInitBody<'a> {
+            nodes: &'a [String],
+        }
+        self.post_json("/api/cluster/init", &ClusterInitBody { nodes })
+            .await
+    }
+
     /// `POST /api/stores`.
     ///
     /// # Errors

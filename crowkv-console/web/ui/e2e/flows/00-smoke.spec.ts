@@ -3,7 +3,7 @@
 // Baseline: 2.0s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, DEFAULT_SERVER_BINARY, stopNodeServer } from '../fixtures/consoleSetup';
+import { apiContext, clusterInit, DEFAULT_SERVER_BINARY, stopNodeServer } from '../fixtures/consoleSetup';
 
 /**
  * End-to-end smoke for the rewritten (v1 lean) console UI. Drives the full
@@ -72,6 +72,7 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     expect(consoleErrors.filter((e) => !/Failed to load resource/i.test(e)), 'console errors after deploy').toEqual([]);
 
     // --- Logical: add empty KV store on n1 ---
+    await clusterInit(baseURL!, ['nsm']);
     await page.getByRole('button', { name: 'Logical' }).click();
     await page.getByRole('button', { name: 'Add Store' }).click();
     await expect(page.getByRole('dialog', { name: 'Add KV Store' })).toBeVisible();

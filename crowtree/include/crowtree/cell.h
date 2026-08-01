@@ -78,16 +78,17 @@ inline void encode_cell_into(std::string *out, uint64_t slot, OpKind kind, Slice
 // resulting `buffer::slice()` unchanged.
 [[nodiscard]] inline buffer encode_cell_buf(uint64_t slot, OpKind kind, Slice value = Slice())
 {
-    uint8_t  flags = (kind == OpKind::kDelete) ? kFlagTombstone : 0;
-    size_t   vlen  = (kind != OpKind::kDelete) ? value.size() : 0;
-    buffer   b     = buffer::alloc(/*capacity=*/vlen, /*header_reserve=*/kCellHeaderSize);
-    uint8_t *p     = b.data(); // [0,9) header, [9, 9+vlen) value — one block
+    uint8_t                              flags = (kind == OpKind::kDelete) ? kFlagTombstone : 0;
+    size_t                               vlen  = (kind != OpKind::kDelete) ? value.size() : 0;
+    buffer                               b     = buffer::alloc(/*capacity=*/vlen, /*header_reserve=*/kCellHeaderSize);
+    std::array<uint8_t, kCellHeaderSize> hdr{};
     for (int i = 0; i < 8; ++i) {
-        p[i] = static_cast<uint8_t>((slot >> (8 * i)) & 0xff);
+        hdr[i] = static_cast<uint8_t>((slot >> (8 * i)) & 0xff);
     }
-    p[8] = flags;
+    hdr[8] = flags;
+    std::memcpy(b.data(), hdr.data(), kCellHeaderSize);
     if (vlen > 0) {
-        std::memcpy(p + kCellHeaderSize, value.data(), vlen);
+        std::memcpy(b.data() + kCellHeaderSize, value.data(), vlen);
     }
     return b; // size() is already kCellHeaderSize + vlen
 }

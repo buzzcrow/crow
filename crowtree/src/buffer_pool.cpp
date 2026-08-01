@@ -3,8 +3,8 @@
 
 #include "crowtree/buffer_pool.h"
 
+#include "crow-common/metrics/metrics.h"
 #include "crowtree/frame_page.h"
-#include "crowtree/metrics.h"
 
 #include <algorithm>
 #include <cstring>
@@ -66,11 +66,11 @@ BufferPool::BufferPool(size_t capacity_bytes, uint32_t page_bytes, PageStore *st
     if (num_frames_ == 0) {
         num_frames_ = 1;
     }
-    arena_.assign(size_t(num_frames_) * page_bytes_, 0);
+    arena_.assign(static_cast<size_t>(num_frames_) * page_bytes_, 0);
     frames_.resize(num_frames_);
     stats_.num_frames = num_frames_;
 
-    size_t ht_cap = next_pow2(size_t(num_frames_) * 2);
+    size_t ht_cap = next_pow2(static_cast<size_t>(num_frames_) * 2);
     ht_cap        = std::max<size_t>(ht_cap, 2);
     ht_key_.assign(ht_cap, kInvalidPageId);
     ht_val_.assign(ht_cap, 0);
@@ -176,8 +176,8 @@ int64_t BufferPool::acquire_victim()
 
 Status BufferPool::pin(uint64_t page_id, PageAddr addr, FrameRef *out)
 {
-    std::lock_guard<std::mutex> lk(mu_);
-    int64_t                     hit = ht_find(page_id);
+    std::scoped_lock lk(mu_);
+    int64_t          hit = ht_find(page_id);
     if (hit >= 0) {
         auto       idx = static_cast<uint32_t>(hit);
         FrameMeta &m   = frames_[idx];
@@ -219,7 +219,7 @@ Status BufferPool::pin(uint64_t page_id, PageAddr addr, FrameRef *out)
 
 Status BufferPool::pin_new(uint64_t page_id, PageAddr addr, FrameRef *out)
 {
-    std::lock_guard<std::mutex> lk(mu_);
+    std::scoped_lock lk(mu_);
     if (ht_find(page_id) >= 0) {
         return Status::invalid_argument("BufferPool: page_id already resident");
     }
@@ -242,8 +242,8 @@ Status BufferPool::pin_new(uint64_t page_id, PageAddr addr, FrameRef *out)
 
 Status BufferPool::acquire_frame(uint32_t *out_idx, uint8_t **out_bytes)
 {
-    std::lock_guard<std::mutex> lk(mu_);
-    int64_t                     v = acquire_victim();
+    std::scoped_lock lk(mu_);
+    int64_t          v = acquire_victim();
     if (v < 0) {
         return Status::internal_error("BufferPool: no evictable frame (all pinned)");
     }
@@ -262,8 +262,8 @@ Status BufferPool::acquire_frame(uint32_t *out_idx, uint8_t **out_bytes)
 
 void BufferPool::release_frame(uint32_t idx)
 {
-    std::lock_guard<std::mutex> lk(mu_);
-    FrameMeta                  &m = frames_[idx];
+    std::scoped_lock lk(mu_);
+    FrameMeta       &m = frames_[idx];
     if (m.page_id != kInvalidPageId && ht_find(m.page_id) == static_cast<int64_t>(idx)) {
         ht_erase(m.page_id);
     }
@@ -276,7 +276,7 @@ void BufferPool::release_frame(uint32_t idx)
 
 void BufferPool::unpin(uint32_t idx)
 {
-    std::lock_guard<std::mutex> lk(mu_);
+    std::scoped_lock lk(mu_);
     if (frames_[idx].pin > 0) {
         --frames_[idx].pin;
     }
@@ -284,8 +284,8 @@ void BufferPool::unpin(uint32_t idx)
 
 void BufferPool::mark_dirty(uint64_t page_id)
 {
-    std::lock_guard<std::mutex> lk(mu_);
-    int64_t                     hit = ht_find(page_id);
+    std::scoped_lock lk(mu_);
+    int64_t          hit = ht_find(page_id);
     if (hit >= 0) {
         frames_[static_cast<uint32_t>(hit)].dirty = true;
     }
@@ -293,7 +293,7 @@ void BufferPool::mark_dirty(uint64_t page_id)
 
 Status BufferPool::flush_dirty()
 {
-    std::lock_guard<std::mutex> lk(mu_);
+    std::scoped_lock lk(mu_);
     for (uint32_t idx = 0; idx < num_frames_; ++idx) {
         if (frames_[idx].page_id != kInvalidPageId && frames_[idx].dirty) {
             Status s = write_back(idx);
@@ -307,11 +307,11 @@ Status BufferPool::flush_dirty()
 
 BufferPool::Stats BufferPool::stats() const
 {
-    std::lock_guard<std::mutex> lk(mu_);
-    Stats                       s = stats_;
-    s.resident                    = 0;
-    s.dirty                       = 0;
-    s.used                        = 0;
+    std::scoped_lock lk(mu_);
+    Stats            s = stats_;
+    s.resident         = 0;
+    s.dirty            = 0;
+    s.used             = 0;
     for (const FrameMeta &m : frames_) {
         if (m.page_id != kInvalidPageId) {
             ++s.resident;

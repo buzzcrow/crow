@@ -3,7 +3,7 @@
 // Baseline: 1.1s (2026-07-16)
 
 import { test, expect } from '../fixtures/realBackend';
-import { apiContext, deployNodeServer, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
+import { apiContext, clusterInit, deployNodeServer, seedRackAndNode, stopNodeServer } from '../fixtures/consoleSetup';
 
 test.describe('E2E-05 store group replica chain', () => {
   test('creates store and group through the UI against a real deployed server', async ({ page, baseURL }) => {
@@ -16,6 +16,7 @@ test.describe('E2E-05 store group replica chain', () => {
       await page.getByRole('button', { name: 'Logical' }).click();
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
+      await clusterInit(baseURL!, ['n5']);
       await aside.getByRole('button', { name: 'Add Store' }).click();
       await expect(page.getByRole('dialog', { name: 'Add KV Store' })).toBeVisible();
       await page.getByLabel('KV Store ID (numeric)').fill('57');

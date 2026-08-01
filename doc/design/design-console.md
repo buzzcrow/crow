@@ -183,6 +183,61 @@ long-running monitor task that owns the live cache:
    request. A handler that needs a stronger guarantee ("force fresh")
    can request an inline refresh, but that is the exception.
 
+### 4.3 Persistent Cluster Config (R2)
+
+**Problem**: The TOML config file is a single point of failure — losing
+the console host loses the full topology. Per-node server config is also
+not persisted independently; a node restart relies on the console to
+re-push topology.
+
+**Solution**: A designated Paxos group — **system group (store 0,
+group 0)** — stores the full cluster topology as regular KV entries.
+Since it is a Paxos group, the topology is replicated, consistent, and
+HA by the same mechanism that protects user data. No external
+coordinator needed. This is the standard industry pattern (closest
+analog: CockroachDB system ranges).
+
+- **Two-phase bootstrap**:
+  - Phase 1: Console TOML is source of truth (existing behavior).
+  - Phase 2: `POST /topology/finalize` writes all TOML topology into
+    group 0 KV, sets `/topology/ready` flag. Idempotent and retry-safe.
+  - Console restart: three-way fallback — group 0 missing → TOML mode;
+    group 0 not ready → TOML mode + warning; group 0 ready → group 0
+    authoritative.
+
+- **Topology KV schema** (in group 0):
+  - `/topology/ready` — flag key; presence means group 0 is authoritative
+  - `/topology/racks/<rack_id>` — rack metadata
+  - `/topology/nodes/<node_id>` — node metadata
+  - `/topology/stores/<store_id>` — store metadata
+  - `/topology/groups/<group_id>` — group metadata
+  - `/topology/replicas/<group_id>/<replica_id>` — replica metadata
+  - `/topology/counters/<entity>` — ID allocation counters
+
+- **Per-node config cache** (`conf/node-config.json`): Local cache
+  derived from the system group. On startup: load cache → create
+  stores/groups → replay WAL → reconcile with group 0 KV. If cache is
+  lost, node queries group 0 to rebuild it.
+
+- **Divergence reconciliation**: On node startup, if group 0 is
+  reachable and finalized, compare local cache against group 0 KV.
+  Create missing stores/groups, remove stale ones. If group 0 not
+  reachable, boot from local cache only (deferred).
+
+- **Cluster init flow**: `POST /api/cluster/init` on the console
+  orchestrates: calls `POST /system/init` on selected nodes, wires
+  remotes for multi-node, persists topology in console config. Data
+  store/group creation is blocked (`409`) until cluster is initialized.
+
+- **Management API endpoints** (on `crowkv-server`):
+  - `POST /system/init` — bootstrap store 0 + group 0 on this node
+  - `POST /topology/finalize` — idempotent cutover, sets `/topology/ready`
+  - `GET /topology/ready` — check if group 0 is authoritative
+
+- **Group 0 membership evolution**: Reuses shipped Model B
+  reconfiguration (direct HTTP mutation + `membership_epoch` fence).
+  No new consensus primitive required.
+
 ## 5. Node Access Model
 
 ### 5.1 Two transports per node

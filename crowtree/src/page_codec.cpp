@@ -3,7 +3,7 @@
 
 #include "crowtree/page_codec.h"
 
-#include "crowtree/crc32c.h"
+#include "crow-common/crc32c.h"
 
 #include <cstring>
 
@@ -214,7 +214,7 @@ std::vector<uint8_t> PageCodec::encode(const PageBase *page, uint32_t iu_size)
     }
 
     auto     logical_len = static_cast<uint32_t>(body.size());
-    uint32_t crc         = crc32c(body.data(), body.size());
+    uint32_t crc         = crow::common::crc32c(body.data(), body.size());
 
     std::vector<uint8_t> frame;
     frame.reserve(kPageFrameHeaderSize + body.size());
@@ -248,7 +248,7 @@ Status PageCodec::decode(const uint8_t *buf, size_t len, PageBase **out)
         return Status::corruption("page logical_len exceeds frame");
     }
     const uint8_t *body = buf + kPageFrameHeaderSize;
-    if (crc32c(body, logical_len) != crc) {
+    if (crow::common::crc32c(body, logical_len) != crc) {
         return Status::corruption("page CRC mismatch");
     }
 

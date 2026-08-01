@@ -145,6 +145,8 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/api/stores/:sid/groups/:gid/kv/scan", get(kv::http_kv_scan))
         .route("/api/stores/:sid/groups/:gid/kv/put", post(kv::http_kv_put))
         .route("/api/stores/:sid/groups/:gid/kv/delete", post(kv::http_kv_delete))
+        // ── Cluster init (R2): system group bootstrap ────────────────
+        .route("/api/cluster/init", post(mgmt::http_cluster_init))
         // ── Internal: E2E test reset ─────────────────────────────────
         .route("/internal/reset", post(lifecycle::http_internal_reset))
         // React SPA fallback.
@@ -163,5 +165,12 @@ mod tests {
     #[test]
     fn router_builds() {
         let _ = router(AppState::default());
+    }
+
+    #[tokio::test]
+    async fn startup_topology_check_no_nodes() {
+        let state = AppState::default();
+        // No nodes deployed → NoNodes path, should not panic or hang.
+        super::mgmt::startup_topology_check(&state).await;
     }
 }

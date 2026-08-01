@@ -146,7 +146,27 @@ export async function waitForLeader(baseURL: string, storeId: number, groupId: n
   }
 }
 
+export async function clusterInit(baseURL: string, nodeIds: string[]) {
+  const api = await apiContext(baseURL);
+  try {
+    const response = await api.post('/api/cluster/init', {
+      data: { nodes: nodeIds },
+    });
+    // 201 = freshly initialized, 409/200 = already initialized — both OK.
+    if (response.status() !== 201 && response.status() !== 409) {
+      throw new Error(`cluster_init failed: ${response.status()} ${await response.text()}`);
+    }
+  } finally {
+    await api.dispose();
+  }
+}
+
 export async function createStore(baseURL: string, storeId: number, nodeIds: string[]) {
+  // Non-zero stores require the system group (store 0 / group 0) to exist.
+  // system_init is idempotent, so this is safe to call every time.
+  if (storeId !== 0) {
+    await clusterInit(baseURL, nodeIds);
+  }
   const api = await apiContext(baseURL);
   try {
     const response = await api.post('/api/stores', {

@@ -63,6 +63,48 @@ struct PageBase
     // evictable, which is correct: a demand-loaded-but-not-yet-re-read page
     // should be at least as evictable as one that's actually been used.
     std::atomic<uint64_t> last_touch_tick{0};
+
+    // R6: cross-thread pin state for handoff paths (get_async slow path,
+    // snapshot_view → PinnedSnapshot). Composes with EBR: EBR protects the
+    // same-thread walk; pin_state_ extends page lifetime across threads after
+    // the walk hands off a borrowed Slice or pinned snapshot. NOT touched on
+    // the sync get/scan hot path (EBR only). Bits 0-30 = pin count; bit 31 =
+    // kRetiredBit (set by the epoch deleter when EBR has drained). See
+    // retire_with_pins() / unpin() for the no-double-free protocol.
+    std::atomic<uint32_t>     pin_state_{0};
+    static constexpr uint32_t kRetiredBit = 1U << 31;
+
+    // Pin this page for a cross-thread handoff. Only call while the slot is
+    // still resident (caller's invariant: the pin path captures the pointer
+    // under an epoch guard before the writer can clear the slot).
+    void pin()
+    {
+        pin_state_.fetch_add(1, std::memory_order_acquire);
+    }
+
+    // Unpin (drop one cross-thread reference). If this is the last unpin of a
+    // retired page, free the page. Safe to call from any thread.
+    void unpin()
+    {
+        uint32_t prev = pin_state_.fetch_sub(1, std::memory_order_acq_rel);
+        uint32_t now  = prev - 1;
+        if (now == kRetiredBit) {
+            delete this;
+        }
+    }
+
+    // Called by the epoch deleter (after EBR drains). Sets kRetiredBit. If no
+    // pins are outstanding (count was 0), frees immediately. Otherwise the
+    // last unpin() frees. Safe because after kRetiredBit is set, no new pin()
+    // can start (the slot was cleared before retire, so the pin path can't
+    // reach this page).
+    void retire_with_pins()
+    {
+        uint32_t prev = pin_state_.fetch_or(kRetiredBit, std::memory_order_acq_rel);
+        if (prev == 0) {
+            delete this;
+        }
+    }
 };
 
 // One leaf entry: key + encoded slot-aware cell payload (see cell.h). The key is

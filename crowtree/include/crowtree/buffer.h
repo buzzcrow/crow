@@ -57,7 +57,8 @@ class buffer
         buffer b;
         b.header_reserve_ = header_reserve;
         if (total == 0) {
-            return b; // empty
+            b.inline_active_ = true; // data() returns inbuf_.data() (valid even when empty)
+            return b;                // empty
         }
         b.mode_ = mode::kOwned;
         b.size_ = total;

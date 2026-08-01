@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crow-common/rust",
     "crowkv",
     "crowkv-client",
     "crowkv-server",
@@ -30,6 +31,7 @@ categories = ["database-implementations", "distributed-systems"]
 
 [workspace.dependencies]
 tokio = { version = "1.40", default-features = false }
+crow-common = { path = "crow-common/rust" }
 tonic = "0.12"
 prost = { version = "0.13", features = ["derive"] }
 tracing = "0.1"

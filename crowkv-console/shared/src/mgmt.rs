@@ -109,6 +109,46 @@ pub struct StepDownResult {
     pub current_leader_id: u64,
 }
 
+/// `POST /system/init` body.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SystemInitRequest {
+    #[serde(default = "default_replica_id")]
+    pub replica_id: u64,
+    #[serde(default = "default_start_election_true")]
+    pub start_election: bool,
+}
+
+fn default_replica_id() -> u64 {
+    1
+}
+
+fn default_start_election_true() -> bool {
+    true
+}
+
+/// `POST /system/init` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemInitResponse {
+    pub store_id: u64,
+    pub group_id: u64,
+    pub replica_id: u64,
+    #[serde(default)]
+    pub listen_addr: Option<String>,
+}
+
+/// `POST /topology/finalize` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopologyFinalizeResponse {
+    pub ready: bool,
+    pub already_finalized: bool,
+}
+
+/// `GET /topology/ready` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopologyReadyResponse {
+    pub ready: bool,
+}
+
 // ── Client methods ─────────────────────────────────────────────────
 
 impl ServerClient {
@@ -212,6 +252,30 @@ impl ServerClient {
     pub async fn step_down(&self, sid: u64, gid: u64, req: &StepDownRequest) -> Result<StepDownResult> {
         self.post_json(&format!("/stores/{sid}/groups/{gid}/step-down"), req)
             .await
+    }
+
+    /// `POST /system/init` — bootstrap the system group (store 0, group 0).
+    ///
+    /// # Errors
+    /// Transport / non-2xx status codes surface as `Error::UpstreamRpc`.
+    pub async fn system_init(&self, req: &SystemInitRequest) -> Result<SystemInitResponse> {
+        self.post_json("/system/init", req).await
+    }
+
+    /// `POST /topology/finalize` — idempotent cutover to group 0 authoritative.
+    ///
+    /// # Errors
+    /// Transport / non-2xx status codes surface as `Error::UpstreamRpc`.
+    pub async fn topology_finalize(&self) -> Result<TopologyFinalizeResponse> {
+        self.post_json("/topology/finalize", &serde_json::json!({})).await
+    }
+
+    /// `GET /topology/ready` — check if group 0 is authoritative.
+    ///
+    /// # Errors
+    /// Transport / non-2xx status codes surface as `Error::UpstreamRpc`.
+    pub async fn topology_ready(&self) -> Result<TopologyReadyResponse> {
+        self.get_json("/topology/ready").await
     }
 
     // ── Transport helpers shared by mgmt methods ────────────────────

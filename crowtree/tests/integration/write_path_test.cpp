@@ -147,9 +147,9 @@ TEST(WritePath, IntraBatchLastWins)
 {
     Crowtree t;
     Batch    b{
-           {{.key = "k", .kind = OpKind::kPut, .value = "first"},
-            {.key = "k", .kind = OpKind::kPut, .value = "second"},
-            {.key = "k", .kind = OpKind::kPut, .value = "third"}}
+        {{.key = "k", .kind = OpKind::kPut, .value = "first"},
+         {.key = "k", .kind = OpKind::kPut, .value = "second"},
+         {.key = "k", .kind = OpKind::kPut, .value = "third"}}
     };
     ASSERT_TRUE(t.apply(1, b).ok());
     ASSERT_TRUE(t.flush().ok());

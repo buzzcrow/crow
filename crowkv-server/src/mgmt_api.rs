@@ -17,9 +17,11 @@ use crowkv::cluster::group::PxGroup;
 use crowkv::cluster::group_config::GroupConfigStore;
 use crowkv::cluster::group_election::LeaderElection;
 use crowkv::cluster::kv_server::KvServer;
+use crowkv::cluster::kv_store::KvStore;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crowkv::cluster::px_kv_store::PxKvStore;
 use crowkv::cluster::remote_replica::PxRemoteReplica;
+use crowkv::cluster::topology_kv;
 use crowkv::common::config::{AdmissionPolicy, ServerConfig};
 
 use crate::operation_registry::{AppState, Operation, OperationKind, OperationStatus, OperationTarget};
@@ -30,6 +32,9 @@ type RegistryArc = AppState;
 pub fn router(state: RegistryArc) -> Router {
     Router::new()
         .route("/health", get(health_check))
+        .route("/system/init", post(system_init))
+        .route("/topology/finalize", post(topology_finalize))
+        .route("/topology/ready", get(topology_ready))
         .route("/stores", get(list_stores).post(add_store))
         .route("/stores/:sid", get(get_store).delete(remove_store))
         .route("/stores/:sid/groups", get(list_groups).post(add_group))
@@ -93,6 +98,45 @@ struct GroupSummary {
     local_replica_id: u64,
     leader_id: u64,
     remote_count: usize,
+}
+
+#[derive(ToSchema, Deserialize)]
+struct SystemInitRequest {
+    /// Replica ID for this node's group 0 replica. Defaults to 1.
+    #[serde(default = "default_replica_id")]
+    replica_id: u64,
+    /// Whether to start the election driver immediately. For single-node
+    /// init, set `true` (self-elect). For multi-node, set `false` and
+    /// wire remotes first. Defaults to `true`.
+    #[serde(default = "default_start_election")]
+    start_election: bool,
+}
+
+fn default_replica_id() -> u64 {
+    1
+}
+
+fn default_start_election() -> bool {
+    true
+}
+
+#[derive(ToSchema, Serialize)]
+struct SystemInitResponse {
+    store_id: u64,
+    group_id: u64,
+    replica_id: u64,
+    listen_addr: Option<String>,
+}
+
+#[derive(ToSchema, Serialize)]
+struct TopologyFinalizeResponse {
+    ready: bool,
+    already_finalized: bool,
+}
+
+#[derive(ToSchema, Serialize)]
+struct TopologyReadyResponse {
+    ready: bool,
 }
 
 #[derive(ToSchema, Deserialize)]
@@ -230,6 +274,9 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Err
         step_down,
         join_group_via_snapshot,
         group_readiness,
+        system_init,
+        topology_finalize,
+        topology_ready,
         get_operation,
         export_topology
     ),
@@ -244,6 +291,10 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Err
             StoreSummary,
             StoreDetail,
             GroupSummary,
+            SystemInitRequest,
+            SystemInitResponse,
+            TopologyFinalizeResponse,
+            TopologyReadyResponse,
             AddStoreRequest,
             AddGroupRequest,
             JoinGroupRequest,
@@ -323,6 +374,231 @@ async fn health_check(State(state): State<RegistryArc>) -> (StatusCode, Json<Hea
             stores,
         }),
     )
+}
+
+/// `POST /system/init` — bootstrap the system group (store 0, group 0).
+///
+/// Creates store 0 (if it does not already exist) and group 0 with a
+/// local replica on this node. For single-node init, `start_election`
+/// defaults to `true` (self-elect). For multi-node, the caller sets
+/// `start_election: false` and wires remotes afterward via
+/// `POST /stores/0/groups/0/remotes`.
+#[utoipa::path(
+        post,
+        path = "/system/init",
+        tag = "management",
+        request_body = SystemInitRequest,
+        responses(
+            (status = 201, description = "System group created", body = SystemInitResponse),
+            (status = 409, description = "Group 0 already exists", body = ErrorResponse),
+            (status = 500, description = "Store or group creation failed", body = ErrorResponse)
+        )
+    )]
+async fn system_init(
+    State(state): State<RegistryArc>,
+    req: Option<Json<SystemInitRequest>>,
+) -> Result<(StatusCode, Json<SystemInitResponse>), (StatusCode, Json<ErrorResponse>)> {
+    const SYSTEM_STORE_ID: u64 = 0;
+    const SYSTEM_GROUP_ID: u64 = 0;
+
+    let req = req.map_or(
+        SystemInitRequest {
+            replica_id: default_replica_id(),
+            start_election: default_start_election(),
+        },
+        |Json(r)| r,
+    );
+
+    // Create store 0 if it does not exist.
+    if !state.stores.contains_key(&SYSTEM_STORE_ID) {
+        let addr: SocketAddr = "0.0.0.0:0"
+            .parse()
+            .map_err(|e| err_json(StatusCode::BAD_REQUEST, format!("invalid address: {e}")))?;
+        let mut store = PxKvStore::new(SYSTEM_STORE_ID, addr);
+        if let Some(ref mr) = state.metrics_registry {
+            store.set_metrics_registry(Arc::clone(mr));
+        }
+        let store = Arc::new(store);
+        store.start().await.map_err(|e| {
+            err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to start store 0: {e}"),
+            )
+        })?;
+        state.add_store(SYSTEM_STORE_ID, store);
+        info!(
+            store_id = SYSTEM_STORE_ID,
+            "system store 0 created via /system/init"
+        );
+    }
+
+    let store = state.get_store(SYSTEM_STORE_ID).ok_or_else(|| {
+        err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store 0 not found after creation",
+        )
+    })?;
+
+    // Check if group 0 already exists.
+    if store.get_group(SYSTEM_GROUP_ID).is_some() {
+        return Err(err_json(
+            StatusCode::CONFLICT,
+            "group 0 already exists in store 0",
+        ));
+    }
+
+    let group = create_group_with_wal(
+        SYSTEM_STORE_ID,
+        SYSTEM_GROUP_ID,
+        req.replica_id,
+        PxLocalReplicaRole::Leader,
+        state.election_cfg,
+        &state.wal_root,
+        &state.config_root,
+        state.wal_backend.clone(),
+        &state.data_root,
+        state.crowtree_backend,
+        state.wal_skip_fsync,
+        "log",
+        state.max_inflight,
+        state.inflight_queues,
+        AdmissionPolicy::Queue,
+    )
+    .await
+    .map_err(|e| {
+        err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to create group 0: {e}"),
+        )
+    })?;
+
+    if req.start_election && group.quorum() == 1 {
+        let current_term = group.local_replica().current_term_snapshot();
+        if current_term == 0 {
+            group.local_replica().become_candidate(1);
+            group.local_replica().persist_current_vote().await;
+            group.local_replica().become_leader();
+        }
+        group.stamp_proposing_term(group.local_replica().current_term_snapshot());
+    }
+
+    let listen_addr = store.listen_addr().map(|a| a.to_string());
+
+    if req.start_election {
+        store.add_group(group);
+    } else {
+        store.add_group_without_election(group);
+    }
+
+    info!(
+        store_id = SYSTEM_STORE_ID,
+        group_id = SYSTEM_GROUP_ID,
+        replica_id = req.replica_id,
+        start_election = req.start_election,
+        "system group 0 created via /system/init"
+    );
+
+    Ok((
+        StatusCode::CREATED,
+        Json(SystemInitResponse {
+            store_id: SYSTEM_STORE_ID,
+            group_id: SYSTEM_GROUP_ID,
+            replica_id: req.replica_id,
+            listen_addr,
+        }),
+    ))
+}
+
+/// `POST /topology/finalize` — idempotent cutover from console TOML to
+/// group 0 authoritative. Proposes a KV put of `/topology/ready` = `true`
+/// into group 0 on store 0. Returns `200` if already finalized (key
+/// exists) or if the proposal succeeds.
+#[utoipa::path(
+        post,
+        path = "/topology/finalize",
+        tag = "management",
+        responses(
+            (status = 200, description = "Topology finalized", body = TopologyFinalizeResponse),
+            (status = 404, description = "Store 0 or group 0 not found", body = ErrorResponse),
+            (status = 409, description = "Not leader; retry at hinted leader", body = ErrorResponse),
+            (status = 500, description = "Proposal failed", body = ErrorResponse)
+        )
+    )]
+async fn topology_finalize(
+    State(state): State<RegistryArc>,
+) -> Result<(StatusCode, Json<TopologyFinalizeResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let store = state
+        .get_store(0)
+        .ok_or_else(|| err_json(StatusCode::NOT_FOUND, "store 0 not found"))?;
+    // Ensure group 0 exists.
+    if store.get_group(0).is_none() {
+        return Err(err_json(StatusCode::NOT_FOUND, "group 0 not found in store 0"));
+    }
+
+    // Check if already finalized (idempotent).
+    let get_resp = store.kv_get(0, topology_kv::READY_KEY, 0, 0, 0, 0).await;
+    if get_resp.ok && !get_resp.value.is_empty() {
+        return Ok((
+            StatusCode::OK,
+            Json(TopologyFinalizeResponse {
+                ready: true,
+                already_finalized: true,
+            }),
+        ));
+    }
+
+    // Propose the ready key.
+    let put_resp = store.kv_put(0, topology_kv::READY_KEY, b"true", 0, 0, 0, 0).await;
+    if !put_resp.ok {
+        if put_resp.error == "not leader" {
+            return Err(err_json(
+                StatusCode::CONFLICT,
+                format!("not leader; hint: {}", put_resp.not_leader_hint),
+            ));
+        }
+        return Err(err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("topology finalize proposal failed: {}", put_resp.error),
+        ));
+    }
+
+    info!("topology finalized: /topology/ready key written to group 0");
+
+    Ok((
+        StatusCode::OK,
+        Json(TopologyFinalizeResponse {
+            ready: true,
+            already_finalized: false,
+        }),
+    ))
+}
+
+/// `GET /topology/ready` — check whether group 0 has the `/topology/ready`
+/// flag key set, indicating the cutover to group 0 authoritative is complete.
+#[utoipa::path(
+        get,
+        path = "/topology/ready",
+        tag = "management",
+        responses(
+            (status = 200, description = "Readiness checked", body = TopologyReadyResponse),
+            (status = 404, description = "Store 0 or group 0 not found", body = ErrorResponse)
+        )
+    )]
+async fn topology_ready(
+    State(state): State<RegistryArc>,
+) -> Result<(StatusCode, Json<TopologyReadyResponse>), (StatusCode, Json<ErrorResponse>)> {
+    let store = state
+        .get_store(0)
+        .ok_or_else(|| err_json(StatusCode::NOT_FOUND, "store 0 not found"))?;
+    // Ensure group 0 exists.
+    if store.get_group(0).is_none() {
+        return Err(err_json(StatusCode::NOT_FOUND, "group 0 not found in store 0"));
+    }
+
+    let resp = store.kv_get(0, topology_kv::READY_KEY, 0, 0, 0, 0).await;
+    let ready = resp.ok && !resp.value.is_empty();
+
+    Ok((StatusCode::OK, Json(TopologyReadyResponse { ready })))
 }
 
 #[utoipa::path(
@@ -1298,6 +1574,10 @@ fn rebuild_group_with_same_config(group: &PxGroup) -> PxGroup {
     }
     if let Some(store) = group.config_store() {
         new_group.set_config_store(store.clone());
+    }
+    if let Some(node_store) = group.node_config_store() {
+        let sid = group.node_config_store_sid().unwrap_or(0);
+        new_group.set_node_config_store(node_store.clone(), sid, new_group.group_id());
     }
     new_group.set_inflight_config(
         group.inflight_window_size(),

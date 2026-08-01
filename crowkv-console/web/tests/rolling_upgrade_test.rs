@@ -264,6 +264,15 @@ async fn create_three_node_group(cluster: &Cluster) {
     let sid = Cluster::sid();
     let gid = Cluster::gid();
 
+    // Initialize the system group so non-zero stores can be created.
+    let resp = http
+        .post(format!("{base}/api/cluster/init"))
+        .json(&json!({"nodes": ["n1", "n2", "n3"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "cluster init: {:?}", resp.text().await.ok());
+
     let resp = http
         .post(format!("{base}/api/stores"))
         .json(&json!({"store_id": sid, "nodes": ["n1"]}))

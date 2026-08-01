@@ -12,5 +12,6 @@ pub mod cli;
 pub mod engine_collector;
 pub mod mgmt_api;
 pub mod operation_registry;
+pub mod reconcile;
 pub mod startup;
 pub mod store_registry;

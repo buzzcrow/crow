@@ -126,6 +126,15 @@ async fn kv_put_get_delete_through_web_routes() {
     let base = format!("http://{web}");
     let http = reqwest::Client::new();
 
+    // Initialize the system group so non-zero stores can be created.
+    let resp = http
+        .post(format!("{base}/api/cluster/init"))
+        .json(&json!({"nodes": ["n1"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "cluster init: {:?}", resp.text().await.ok());
+
     // Create store 1 and group 1 (stores no longer auto-create groups).
     let store_resp = http
         .post(format!("{base}/api/stores"))
