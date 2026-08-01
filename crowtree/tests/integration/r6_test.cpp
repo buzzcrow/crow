@@ -99,6 +99,9 @@ TEST(R6, PinnedSnapshotStaysConsistentAcrossInstallSnapshot)
 
     // Take a pinned snapshot of the 200-key tree.
     auto snap = t.snapshot_view();
+    // R6: snapshot_view() now returns a PinnedSnapshot (zero-copy, page
+    // refcount pins keep frames alive). Verify it's actually a PinnedSnapshot.
+    EXPECT_NE(dynamic_cast<PinnedSnapshot *>(snap.get()), nullptr);
     ASSERT_EQ(snap->size(), 200U);
 
     // Wipe the tree via install_snapshot. The old pages are retired, but

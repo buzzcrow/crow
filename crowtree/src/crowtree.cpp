@@ -19,6 +19,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <unordered_map>
 #include <vector>
 
 namespace crowtree
@@ -405,10 +406,14 @@ void Crowtree::free_all_resident_pages(bool retire)
             }
         }
         else {
-            // Teardown: no concurrent readers, delete the chain immediately.
+            // Teardown: no concurrent readers, but a PinnedSnapshot may still
+            // hold refcount pins on these pages (R6). Use retire_with_pins()
+            // instead of delete: if pins are outstanding, the delete defers
+            // to the last unpin; if no pins, it frees immediately (same cost
+            // as delete).
             for (PageBase *n = e.head; n != nullptr;) {
                 PageBase *next = n->next;
-                delete n;
+                n->retire_with_pins();
                 n = next;
             }
             mapping_.clear(e.page_id);
@@ -2471,39 +2476,154 @@ size_t Crowtree::max_name_len() const
 
 std::shared_ptr<Snapshot> Crowtree::snapshot_view()
 {
-    // Materialize the L1 tree into an independent copy for a consistent
-    // point-in-time view. (Deviation from a true zero-copy pinned-root COW
-    // snapshot; see snapshot.h.) Unlike the old implementation, this no
-    // longer holds write_mutex_ for the O(N) walk: collect_in_order walks the
-    // leaf chain via right_sibling (same technique and safety argument as
-    // scan()) under a single epoch guard held for this whole call, so a
-    // concurrent split/merge/flush is never blocked. The guard is entered and
-    // released on this same thread within this one function call, so it
-    // respects EpochManager::Guard's thread-bound contract even though the
-    // returned Snapshot (a plain materialized copy, not a live guard) can
-    // freely cross threads afterwards.
+    // R6: zero-copy pinned snapshot. Walks the leaf chain under an epoch guard
+    // (same safety argument as the old materialized version — see the comment
+    // below on the walk's concurrency properties), captures every PageBase*
+    // touched (leaf chain heads + overflow pages), pins each via pin_state_,
+    // then releases the guard. Returns a PinnedSnapshot that holds the pins
+    // and materializes entries lazily from the pinned frames on first call.
+    // The pages stay alive via refcount until the PinnedSnapshot is dropped —
+    // on any thread.
     //
-    // at_slot is captured *before* the walk, not after: flush() only bumps
-    // last_applied_slot_ once it has finished publishing every leaf it
-    // touched (highest-slot-wins, monotonic -- a flush never removes
-    // already-durable data), so a concurrent flush racing the walk can only
-    // make the walk see *more* than at_slot promises, never less. Capturing
-    // after the walk would risk the opposite (a tag claiming a slot whose
-    // data the walk started collecting before that slot's flush finished).
-    EpochManager::Guard     guard   = epoch_.enter();
-    uint64_t                at_slot = last_applied_slot_.load();
-    std::vector<leaf_entry> entries;
-    collect_in_order([this](uint64_t p) { return resident(p); }, root_page_id_.load(), gc_floor_.load(), &entries);
-    // Materialize overflow pointer cells into inline cells so the Snapshot is
-    // self-contained (compare / export / get need the actual value bytes).
-    for (leaf_entry &e : entries) {
-        CellView v{Slice(e.cell)};
-        if (v.is_overflow()) {
-            e.cell = encode_cell_buf(v.slot(), OpKind::kPut,
-                                     Slice(assemble_overflow_value(v.overflow_head(), v.overflow_len())));
+    // Concurrency: the walk uses the same collect_in_order right_sibling
+    // technique as scan() and the old snapshot_view(), under a single epoch
+    // guard. A concurrent split/merge/flush is never blocked. The guard is
+    // entered and released on this same thread (respecting Guard's
+    // thread-bound contract); the PinnedSnapshot's pins are thread-independent.
+    //
+    // at_slot is captured *before* the walk (same rationale as before: flush
+    // only bumps last_applied_slot_ after publishing, so a racing flush can
+    // only make the walk see more, never less).
+    EpochManager::Guard guard   = epoch_.enter();
+    uint64_t            at_slot = last_applied_slot_.load();
+
+    // Walk the leaf chain, capturing page pointers. We inline the
+    // collect_in_order walk so we can capture both leaf chain pages (head →
+    // ... → base for each leaf — the full delta chain, not just the head) and
+    // overflow pages in a single pass. materialize() follows head->next, so
+    // every node in every chain must be pinned.
+    std::vector<PageBase *> leaf_chain_heads;
+    std::vector<PageBase *> all_pinned_pages;
+    std::vector<PageBase *> overflow_pages;
+    uint64_t                root_pid = root_page_id_.load();
+    if (root_pid != kInvalidPageId) {
+        uint64_t page_id = find_leaf_page_id([this](uint64_t p) { return resident(p); }, root_pid, Slice());
+        while (page_id != kInvalidPageId) {
+            PageBase *head = resident(page_id);
+            if (head == nullptr) {
+                break;
+            }
+            leaf_chain_heads.push_back(head);
+            // Capture the entire chain (head → ... → base), not just the head.
+            // materialize() calls resolve_chain_sorted(head) which follows
+            // head->next; every delta node must be pinned to survive the
+            // epoch guard release.
+            for (PageBase *node = head; node != nullptr; node = node->next) {
+                all_pinned_pages.push_back(node);
+                if (node->type == page_type::kLeafBase) {
+                    LeafFrameView v = static_cast<LeafBase *>(node)->view();
+                    for (uint32_t i = 0; i < v.count(); ++i) {
+                        CellView c{v.cell(i)};
+                        if (c.is_overflow()) {
+                            capture_overflow_chain(c.overflow_head(), overflow_pages);
+                        }
+                    }
+                    for (uint32_t i = 0; i < v.delta_count(); ++i) {
+                        CellView c{v.delta_cell(i)};
+                        if (c.is_overflow()) {
+                            capture_overflow_chain(c.overflow_head(), overflow_pages);
+                        }
+                    }
+                }
+                else if (node->type == page_type::kBatchDelta) {
+                    for (const leaf_entry &e : static_cast<BatchDelta *>(node)->entries()) {
+                        CellView c{Slice(e.cell)};
+                        if (c.is_overflow()) {
+                            capture_overflow_chain(c.overflow_head(), overflow_pages);
+                        }
+                    }
+                }
+            }
+            LeafBase *base = chain_leaf_base(head);
+            page_id        = base != nullptr ? base->right_sibling() : kInvalidPageId;
         }
     }
-    return std::make_shared<Snapshot>(at_slot, std::move(entries));
+
+    // Dedup overflow pages (a single overflow chain may be referenced by
+    // multiple keys in the same leaf). Also add them to all_pinned_pages.
+    std::ranges::sort(overflow_pages);
+    auto [first_dup, last_dup] = std::ranges::unique(overflow_pages);
+    overflow_pages.erase(first_dup, last_dup);
+    for (PageBase *p : overflow_pages) {
+        all_pinned_pages.push_back(p);
+    }
+
+    auto snap = std::make_shared<PinnedSnapshot>(at_slot, std::move(leaf_chain_heads), std::move(all_pinned_pages),
+                                                 std::move(overflow_pages));
+    // The PinnedSnapshot ctor pins the captured pages; release the epoch guard
+    // now (the pins keep the pages resident across threads).
+    guard = EpochManager::Guard();
+    return snap;
+}
+
+// Capture all pages in an overflow chain starting at head_page_id. Used by
+// snapshot_view() to pin overflow pages so PinnedSnapshot::materialize() can
+// assemble overflow values from pinned frames without re-entering the mapping
+// table.
+void Crowtree::capture_overflow_chain(uint64_t head_page_id, std::vector<PageBase *> &out)
+{
+    uint64_t page_id = head_page_id;
+    for (int guard = 0; page_id != kInvalidPageId && guard < (1 << 24); ++guard) {
+        PageBase *p = resident(page_id);
+        if (p == nullptr || p->type != page_type::kOverflowFrame) {
+            break;
+        }
+        out.push_back(p);
+        page_id = static_cast<OverflowBase *>(p)->next_page_id();
+    }
+}
+
+// R6: PinnedSnapshot::materialize() — walk the captured leaf chain heads (in
+// order), resolve each chain via resolve_chain_sorted, and assemble overflow
+// values from the captured overflow pages. Called lazily on first entries()
+// access. Defined here (not in snapshot.h) because it needs resolve_chain_sorted
+// and the OverflowBase/LeafBase page types from crowtree.cpp's internal helpers.
+void PinnedSnapshot::materialize() const
+{
+    // Build a lookup from page_id → PageBase* for the captured overflow pages
+    // so we can assemble overflow values without re-entering the mapping table.
+    std::unordered_map<uint64_t, PageBase *> overflow_by_id;
+    for (PageBase *p : overflow_pages_) {
+        overflow_by_id[p->page_id] = p;
+    }
+
+    for (PageBase *head : leaf_chain_heads_) {
+        auto entries = resolve_chain_sorted(head, 0); // gc_floor=0: keep all (snapshot is point-in-time)
+        for (auto &e : entries) {
+            CellView v{Slice(e.cell)};
+            if (v.is_overflow()) {
+                // Assemble from pinned overflow pages.
+                std::string assembled;
+                assembled.reserve(v.overflow_len());
+                uint64_t page_id = v.overflow_head();
+                for (int guard = 0; page_id != kInvalidPageId && guard < (1 << 24); ++guard) {
+                    auto it = overflow_by_id.find(page_id);
+                    if (it == overflow_by_id.end()) {
+                        break;
+                    }
+                    auto *ov    = static_cast<OverflowBase *>(it->second);
+                    Slice chunk = ov->payload();
+                    assembled.append(chunk.data(), chunk.size());
+                    page_id = ov->next_page_id();
+                }
+                if (assembled.size() > v.overflow_len()) {
+                    assembled.resize(v.overflow_len());
+                }
+                e.cell = encode_cell_buf(v.slot(), OpKind::kPut, Slice(assembled));
+            }
+            entries_.push_back(std::move(e));
+        }
+    }
 }
 
 std::string Crowtree::assemble_overflow_value(uint64_t head_page_id, uint64_t total_len) const
