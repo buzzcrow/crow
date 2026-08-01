@@ -50,7 +50,7 @@ TEST(R6Refcount, RetireWithPinsDefersUntilLastUnpin)
     EXPECT_EQ(freed.load(), 0);
     p->unpin();                 // NOLINT(clang-analyzer-cplusplus.NewDelete) count 2→1, no free
     EXPECT_EQ(freed.load(), 0); // still 1 pin
-    p->unpin(); // NOLINT(clang-analyzer-cplusplus.NewDelete) last unpin frees (count 1→0 + retired bit)
+    p->unpin();                 // NOLINT(clang-analyzer-cplusplus.NewDelete) last unpin frees (count 1→0 + retired bit)
     EXPECT_EQ(freed.load(), 1);
 }
 
