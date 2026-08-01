@@ -11,6 +11,7 @@ name = "crowtree_ffi"
 path = "src/lib.rs"
 
 [dependencies]
+bytes = "1"
 # "net" is required for tokio::io::unix::AsyncFd, "sync" for tokio::sync::
 # Notify.
 tokio = { version = "1.40", features = ["rt", "rt-multi-thread", "macros", "net", "sync"] }

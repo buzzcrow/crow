@@ -269,23 +269,20 @@ of what remains:
   gone; C API copies internally); engine get intermediate `Vec<u8>`
   (fast path returns `PinnedValue` borrowing the C++ frame; final
   `Bytes` produced in one copy instead of frame → `Vec` → `Bytes`).
-- **Remaining, blocked by R6** — engine get value copy (frame →
-  `Bytes`): true zero-copy via `Bytes::from_raw_parts` with a drop
-  calling `ct_future_free` would eliminate it, but `Bytes` is `Send`
-  and could be dropped on another thread while the epoch guard must be
-  released on the entering thread (thread-local). Blocked by R6
-  (cross-thread epoch guard).
+- **Eliminated by R6** — engine get value copy (frame → `Bytes`):
+  `PinnedValue::into_bytes()` creates a `Bytes` via `Bytes::from_owner`
+  backed by the C++ frame — no copy. The page refcount pins stay alive
+  until the `Bytes` is dropped on any thread (R6: `PinnedValue` is `Send`).
 - **Zero-copy (move/borrow)** — `kv_get` → `engine_get_bytes` passes
   `&[u8]` (no key copy at the Rust boundary); response `Bytes` moved
   into `KvResponse` (no copy).
 
 The read path has fewer O(n) copies than the write path: no WAL
 encode/replay, no payload encoding, no Batch decode, no FFI batch
-encode. After R21, the read path's remaining engine value copy
-(frame → `Bytes`) is structurally similar to the write path's: the
-engine owns its internal storage and the caller needs an owned `Bytes`
-for gRPC. True zero-copy is blocked by R6 (cross-thread epoch guard),
-since `Bytes` is `Send` but the guard is thread-local.
+encode. After R6, the read path is fully zero-copy from frame to gRPC
+response: `PinnedValue::into_bytes()` produces a `Bytes` backed by the
+C++ frame via `Bytes::from_owner`, with page refcount pins keeping the
+frame alive until the `Bytes` is dropped on any thread.
 
 ---
 
