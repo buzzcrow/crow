@@ -565,11 +565,14 @@ resolves on the next reactor-driven wakeup.
   `ct_get_async` copies the key internally into a
   `std::shared_ptr<std::string>`. The Rust-side `key.to_vec()` is
   eliminated — no C++ changes required.
-- **True zero-copy (R6 unblocked):** `Bytes::from_raw_parts` with a
-  custom drop calling `ct_future_free` eliminates the value copy entirely.
-  R6 makes `PinnedValue` `Send` (the per-page refcount is
-  thread-independent), so `Bytes` can be dropped on any thread. The
-  `Bytes` integration is a follow-up; the C++ pin mechanism lands first.
+- **True zero-copy (R6):** `PinnedValue::into_bytes()` creates a `Bytes`
+  via `Bytes::from_owner` backed by the C++ frame — no copy. The
+  `ct_future` handle (and its page refcount pins) is held by the `Bytes`
+  owner; when the last `Bytes` ref clone is dropped on any thread, the
+  owner's `Drop` runs, which drops the `PinnedValue`, which calls
+  `ct_future_free` to unpin. R6 made `PinnedValue` `Send` (the per-page
+  refcount is thread-independent), enabling this cross-thread zero-copy
+  handoff. `CrowtreeEngine::get_bytes` uses this path directly.
 
 ### 3.5 Decision Log
 
