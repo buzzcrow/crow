@@ -62,11 +62,6 @@ complexity, and dependency. Before implementation, follow the
   unbounded `std::malloc`; a burst of large writes can spike RSS without
   backpressure.
 
-**Complexity — High:**
-- **[R6](R6-cross-thread-guard.md)** — Cross-thread EpochManager::Guard — Area: crowtree engine —
-  `EpochManager::Guard` is thread-bound, forcing copies in async read handoff,
-  snapshot consistency, and stale-root GC scenarios.
-
 ---
 
 ## Implementation Process
