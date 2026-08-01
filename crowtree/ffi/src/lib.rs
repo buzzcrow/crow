@@ -1324,7 +1324,6 @@ fn try_poll_ct_future_pinned(guard: &mut FutureGuard) -> Option<Result<Option<(u
                     handle: guard.0,
                     data: value.data,
                     len: value.len,
-                    _not_send: std::marker::PhantomData,
                 };
                 Ok(Some((slot, pv)))
             } else {
@@ -1572,17 +1571,22 @@ pub enum ScanOutcome {
     Pending(Pin<Box<dyn Future<Output = Result<(Vec<ScanEntry>, bool), CtError>> + Send>>),
 }
 
-/// Zero-copy borrowed value from a fast-path `ct_get_async` completion.
-/// Holds the `ct_future` handle so the epoch guard keeping the frame
-/// resident stays alive until this value is dropped. `!Send` because the
-/// epoch guard is thread-local (`EpochManager::Guard` must be released on
-/// the thread that entered it).
+/// Zero-copy borrowed value from a `ct_get_async` completion. Holds the
+/// `ct_future` handle so the C++ page refcount (R6) keeping the frame
+/// resident stays alive until this value is dropped. `Send` because the
+/// per-page refcount is thread-independent (R6: pin/unpin from any thread).
 pub struct PinnedValue {
     handle: *mut sys::ct_future,
     data: *const u8,
     len: usize,
-    _not_send: std::marker::PhantomData<*mut ()>,
 }
+
+// R6: PinnedValue is Send — the C++ page refcount (pin_state_ on PageBase)
+// is a thread-independent atomic. ct_future_free unpins from the dropping
+// thread. SAFETY: the handle is a unique pointer to a heap-allocated
+// ct_future_impl; no shared mutable state across threads except the
+// refcount atomics, which are designed for cross-thread access.
+unsafe impl Send for PinnedValue {}
 
 impl PinnedValue {
     /// Borrow the value bytes directly from the C++ engine's internal

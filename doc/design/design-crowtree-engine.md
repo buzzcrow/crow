@@ -269,13 +269,28 @@ Three disciplines solve this:
    slots before freeing. Lock-free and tightly memory-bounded, but the reader
    pays a publish (store + fence + re-validation) per pointer, and a
    root→…→leaf descent needs one hazard per level.
-3. **Epoch-based reclamation (EBR)** — crowtree's choice. A reader brackets
-   its **whole** operation in one `Guard`; it never publishes which pointers
-   it holds. Reader cost is one enter/exit *per operation*, not per pointer.
-   Trade-off vs. hazard pointers: a single stalled guard blocks *all*
-   reclamation (worst-case unbounded retained memory) — accepted because
-   reads are short (one `get`/`scan`) and there is a single writer, so the
-   active-epoch window is tiny.
+3. **Epoch-based reclamation (EBR)** — crowtree's choice for the sync read
+   hot path (`get`/`scan`/`get_view`). A reader brackets its **whole**
+   operation in one `Guard`; it never publishes which pointers it holds.
+   Reader cost is one enter/exit *per operation*, not per pointer. Trade-off
+   vs. hazard pointers: a single stalled guard blocks *all* reclamation
+   (worst-case unbounded retained memory) — accepted because reads are short
+   (one `get`/`scan`) and there is a single writer, so the active-epoch
+   window is tiny.
+4. **Per-page refcount on handoff paths** (R6) — composes with EBR as an
+   orthogonal cross-thread lifetime mechanism. EBR protects the same-thread
+   walk (the `Guard` is thread-bound); refcount extends page lifetime across
+   threads after the walk hands off a borrowed `Slice` (`get_async` slow
+   path) or a pinned snapshot (`snapshot_view` → `PinnedSnapshot`). The
+   per-page `pin_state_` atomic on `PageBase` is only touched on the
+   handoff paths (one `fetch_add` on pin, one `fetch_sub` on unpin), NOT on
+   the sync `get`/`scan` hot path — the §1.6 rejection of refcount ("atomic
+   RMW on every page touch on the read hot path") stands for the hot path.
+   The epoch deleter sets a `kRetiredBit` via `fetch_or`; if pins are
+   outstanding (count > 0), the deleter defers and the last `unpin` frees.
+   This decouples page lifetime from the entering thread's participant slot,
+   eliminating the copy in `materialize_owned` and the stale-root GC delay
+   when a snapshot is handed to another thread.
 
 ### 1.7 Read Path
 
@@ -538,22 +553,23 @@ resolves on the next reactor-driven wakeup.
   one allocation (`Bytes`), no `Vec<u8>`.
 - **Slow path:** the I/O read fills a C++-owned buffer; on completion
   the future returns it as an owned `ct_buf` (C++ allocates, Rust
-  frees). `materialize_owned` runs on the reactor thread, copying the
-  borrowed value into an owned `buffer` and releasing the guard before
-  the completion callback fires. The Rust side then copies from the
-  owned buffer into `Vec<u8>` / `Bytes`. This is also one copy
-  (I/O buffer → Rust `Vec`).
+  frees). For frame-borrowed values, R6 replaces the copy with a per-page
+  refcount pin: the reactor thread pins the leaf base page(s) under its
+  epoch guard, releases the guard, and hands the `GetView` (still borrowing
+  the frame) across threads; `ct_future_free` unpins from the dropping
+  thread. `materialize_owned` remains only for overflow-chain values
+  (assembled from multiple pages, no single frame to borrow). The Rust
+  side then copies from the borrowed/owned buffer into `Vec<u8>` / `Bytes`.
 - **Key copy elimination:** `AsyncCrowtree::try_get` /
   `try_get_pinned` accept `&[u8]` instead of `Vec<u8>`, since
   `ct_get_async` copies the key internally into a
   `std::shared_ptr<std::string>`. The Rust-side `key.to_vec()` is
   eliminated — no C++ changes required.
-- **True zero-copy (not implemented):** `Bytes::from_raw_parts` with a
-  custom drop calling `ct_future_free` would eliminate the value copy
-  entirely, but `Bytes` is `Send` and could be dropped on another
-  thread, while the epoch guard must be released on the thread that
-  entered it (`EpochManager::Guard` is thread-local). Blocked by R6
-  (cross-thread epoch guard).
+- **True zero-copy (R6 unblocked):** `Bytes::from_raw_parts` with a
+  custom drop calling `ct_future_free` eliminates the value copy entirely.
+  R6 makes `PinnedValue` `Send` (the per-page refcount is
+  thread-independent), so `Bytes` can be dropped on any thread. The
+  `Bytes` integration is a follow-up; the C++ pin mechanism lands first.
 
 ### 3.5 Decision Log
 
