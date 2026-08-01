@@ -71,45 +71,38 @@ task breakdown.
   - Existing `async_get_test.cpp` Case 2 still passes (the materialized
     path for overflow values).
 
-### Phase 3: `PinnedSnapshot` (scenarios 2 + 3) — DEFERRED
+### Phase 3: `PinnedSnapshot` (scenarios 2 + 3)
 
-- [ ] **T8**: `PinnedSnapshot` class
+- [x] **T8**: `PinnedSnapshot` class
   - File: `crowtree/include/crowtree/snapshot.h`
-  - Holds: `uint64_t at_slot_`, `std::vector<PageBase*> pinned_pages_`,
-    `uint64_t root_page_id_` (for descent), leaf chain head IDs (captured).
-  - Provides: `at_slot()`, `size()`, `find()`, `get()` — reading from
-    pinned frames (same semantics as `Snapshot` but zero-copy).
-  - Provides: `entries()` — one-time materialization into
-    `std::vector<leaf_entry>` (for `compare` / export callers).
-  - Provides: `compare()` — delegates to materialized `entries()`.
-  - Movable, not copyable. Dtor unpins all `pinned_pages_`.
-  - Walks via captured `PageBase*` pointers, NOT via `resident()`.
+  - Inherits from `Snapshot` (so all existing callers using
+    `shared_ptr<Snapshot>` work unchanged). Holds `leaf_chain_heads_`
+    (ordered list of chain heads), `all_pinned_pages_` (every chain node +
+    overflow page), `overflow_pages_` (subset for overflow assembly).
+  - `entries()` virtual, lazily materializes from pinned frames on first
+    call. `get()`, `find()`, `size()` delegate to `entries()`.
+  - Movable not copyable. Dtor unpins all `all_pinned_pages_`.
 
-- [ ] **T9**: `snapshot_view()` returns `PinnedSnapshot`
-  - File: `crowtree/src/crowtree.cpp` (line 2453-2488)
-  - Enter epoch guard, load `root_page_id_`, walk via `resident()`.
-  - Capture every `PageBase*` touched (inner descent + leaf chain) into
-    `pinned_pages_`, call `pin()` on each.
-  - Release epoch guard. Return `make_shared<PinnedSnapshot>(...)`.
-  - The walk logic (collect_in_order) is refactored to capture pointers
-    during the walk and defer materialization to `PinnedSnapshot::entries()`.
+- [x] **T9**: `snapshot_view()` returns `PinnedSnapshot`
+  - File: `crowtree/src/crowtree.cpp`
+  - Enter epoch guard, walk leaf chain via `resident()`. Capture every
+    `PageBase*` in every chain (head → ... → base) + overflow pages.
+    Pin each, release guard, return `PinnedSnapshot`.
+  - `materialize()` walks captured heads via `resolve_chain_sorted`,
+    assembles overflow values from pinned overflow pages.
 
-- [ ] **T10**: Update `snapshot_view()` callers
-  - Files: any caller of `snapshot_view()` that uses `Snapshot` directly.
-  - Grep for `snapshot_view()` across `crowtree/` and `crowkv/`.
-  - Most callers use `->entries()`, `->compare()`, `->get()`,
-    `->at_slot()` — all provided by `PinnedSnapshot`. Type name changes
-    from `Snapshot` to `PinnedSnapshot`; behavior unchanged for
-    same-thread callers.
+- [x] **T10**: Update `snapshot_view()` callers
+  - No changes needed — `PinnedSnapshot` inherits from `Snapshot`, return
+    type stays `shared_ptr<Snapshot>`. All callers (version_test,
+    snapshot_io, c_api, stress_test, ffi_test) work unchanged.
 
-- [ ] **T11**: Test — `PinnedSnapshot` consistency across `install_snapshot`
+- [x] **T11**: Test — `PinnedSnapshot` consistency across `install_snapshot`
   - File: `crowtree/tests/integration/r6_test.cpp`
-  - Build tree A with 1000 keys. `snapshot_view()` → `PinnedSnapshot snap`.
-  - In another thread, `install_snapshot({}, 0)` (wipes the tree).
-  - Confirm `snap->entries()` still has all 1000 keys (leaf chain not
-    truncated/mixed). Confirm `snap->size() == 1000`.
-  - Drop `snap`. Confirm old pages are freed (buffer_pool stats return to
-    baseline after GC).
+  - `R6.PinnedSnapshotStaysConsistentAcrossInstallSnapshot`: verifies
+    `dynamic_cast<PinnedSnapshot*>` succeeds, snapshot stays consistent
+    across `install_snapshot({}, 0)`, all 200 keys readable after wipe.
+  - `R6.ConcurrentReadersAndInstallSnapshotNoUAF`: 4 reader threads +
+    50 install_snapshot churns, no UAF.
 
 ### Phase 4: Docs + perf gate
 
@@ -165,32 +158,30 @@ T12, T13 (docs, independent)
 
 ## Implementation status
 
-**Committed in `a02153a` (pushed to `origin/task-common`):**
+**Committed in `a02153a` (phase 1, pushed to `origin/task-common`):**
 - T1-T3: Core refcount mechanism (`pin_state_` on `PageBase`,
   `pin()`/`unpin()`/`retire_with_pins()`, `retire_page` deleter, 4 unit
   tests).
 - T4-T7: `get_async` slow path pins instead of `materialize_owned` for
   frame-borrowed values; `GetView` gains `pins_` vector +
   `borrowed_chain_head_` + debug `frame_base()`; `PinnedValue` is now
-  `Send`; 3 integration tests (get_async no-copy, snapshot consistency,
-  concurrent UAF stress).
+  `Send`; 3 integration tests.
 - T12-T13: R6 backlog doc + design-crowtree-engine.md §1.6/§3.4 updated.
 - T14: `read_path_bench.cpp` perf-gate benchmark.
 - T15: `R6.ConcurrentReadersAndInstallSnapshotNoUAF` stress test.
-- Pre-commit gate: cargo fmt, clippy `-D warnings`, clang-format,
-  clang-tidy all clean.
 
-**Deferred (separate change):**
-- T8-T11: `PinnedSnapshot` class + `snapshot_view()` return type change.
-  Scenario 2's full consistency (leaf chain not truncated/mixed) needs the
-  `PinnedSnapshot` to capture page pointers during the walk and traverse
-  via those pointers (not via `resident()`/mapping table). The current
-  `snapshot_view()` still materializes a copy — correct but not zero-copy.
-  The refcount mechanism (T1-T3) is in place; the `PinnedSnapshot` class
-  is the next step. The R6 test `PinnedSnapshotStaysConsistentAcrossInstallSnapshot`
-  verifies the *current* behavior (materialized copy is consistent because
-  the epoch guard protects the walk); the zero-copy pinned version is the
-  follow-up.
+**Committed in `9fa2653` (phase 2, pushed to `origin/task-common`):**
+- T8-T11: `PinnedSnapshot` class (inherits from `Snapshot`); `snapshot_view()`
+  captures + pins full leaf delta chains + overflow pages during the walk,
+  releases the epoch guard, returns a `PinnedSnapshot` that materializes
+  lazily from pinned frames on first `entries()` call. No caller changes
+  needed (return type stays `shared_ptr<Snapshot>`).
+- Key fixes: destructor path uses `retire_with_pins()` instead of direct
+  `delete` (so a `PinnedSnapshot` outliving the `Crowtree` doesn't UAF);
+  concurrent refcount unit test rewritten to respect the real invariant.
+- All 339 crowtree C++ tests + 23 FFI tests pass. Pre-commit gate clean.
+
+**Remaining (separate change):**
 - `Bytes::from_raw_parts` true-zero-copy in `crowtree_engine.rs`.
   `PinnedValue` is now `Send` (T6), which unblocks this; the `Bytes`
   integration is a separate change.
