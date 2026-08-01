@@ -37,6 +37,57 @@ struct mem_entry
     uint64_t slot;
 };
 
+// Internal MemTable value (R30). A cell is stored in one of two forms:
+//   - contiguous: `cell` is a kOwned buffer holding the full [header][value]
+//     payload (the pre-R30 path, used by snapshot import and the legacy
+//     `upsert(Slice, slot, buffer&&)` overload). `slot`/`flags` are decoded
+//     from the cell via `CellView` and kept as fields for fast
+//     highest-slot-wins checks without re-parsing.
+//   - split: `cell` is a kExternal buffer holding ONLY the value bytes,
+//     borrowed from a Rust `bytes::Bytes` (zero-copy apply path). The 9-byte
+//     header is NOT stored as bytes — `slot`/`flags` are the fields, and the
+//     contiguous cell is materialized at the memtable API boundary
+//     (`get`/`drain_up_to`/`snapshot`) where a copy already exists.
+// Tag: `cell.ownership() == buffer::mode::kExternal` -> split; else contiguous.
+// (The memtable never stores kBorrowed cells, so the tag is unambiguous.)
+struct cell_entry
+{
+    uint64_t slot  = 0;
+    uint8_t  flags = 0;
+    buffer   cell; // contiguous (kOwned): full [header][value]; split (kExternal): value-only
+
+    // Materialize a contiguous [header][value] cell (deep copy). Used by
+    // `snapshot()` and any path that must leave the map intact.
+    [[nodiscard]] buffer materialize() const
+    {
+        if (cell.ownership() != buffer::mode::kExternal) {
+            return cell.clone(); // already contiguous
+        }
+        size_t   vlen = cell.size();
+        buffer   b    = buffer::alloc(vlen, kCellHeaderSize);
+        uint8_t *p    = b.data();
+        for (int i = 0; i < 8; ++i) {
+            p[i] = static_cast<uint8_t>((slot >> (8 * i)) & 0xff);
+        }
+        p[8] = flags;
+        if (vlen > 0) {
+            std::memcpy(b.data() + kCellHeaderSize, cell.data(), vlen);
+        }
+        return b;
+    }
+
+    // Materialize, moving the contiguous cell out when possible (drain path —
+    // the entry is erased right after, so the owned cell can be moved instead
+    // of cloned). Split cells still copy (borrowed bytes cannot be moved).
+    [[nodiscard]] buffer materialize_move()
+    {
+        if (cell.ownership() != buffer::mode::kExternal) {
+            return std::move(cell); // contiguous: move the whole cell out
+        }
+        return materialize(); // split: copy value + build header
+    }
+};
+
 class MemTable
 {
   public:
@@ -57,6 +108,14 @@ class MemTable
     // Used by apply's per-batch dedup (single-allocation encoded cell via
     // encode_cell_buf) and snapshot import.
     bool upsert(Slice key, uint64_t slot, buffer &&cell_payload);
+
+    // Zero-copy apply path (R30): store a split cell — the value is borrowed
+    // from a Rust `bytes::Bytes` via a kExternal buffer (no value memcpy), and
+    // the 9-byte cell header is stored as `slot`/`flags` fields. The
+    // contiguous cell is materialized at `get`/`drain_up_to`/`snapshot`.
+    // `value` must be a kExternal buffer (Put) or an empty buffer (Delete,
+    // `flags = kFlagTombstone`).
+    bool upsert_external(Slice key, uint64_t slot, uint8_t flags, buffer &&value);
 
     // Set the durable floor (engine's last_applied_slot). Writes at or below it are
     // already in L1 and are rejected by upsert (unless allow_old_slots). Does not
@@ -103,13 +162,13 @@ class MemTable
 
   private:
     mutable std::mutex mu_;
-    // key (std::string, SSO) -> encoded cell (owned buffer, SBO-inline for small
-    // values). std::less<> is transparent, enabling heterogeneous lookup by
-    // std::string_view without allocating a temporary key.
-    absl::btree_map<std::string, buffer, std::less<>> map_;
-    size_t                                            bytes_           = 0;
-    uint64_t                                          durable_floor_   = 0;
-    bool                                              allow_old_slots_ = false;
+    // key (std::string, SSO) -> cell_entry (contiguous or split). std::less<> is
+    // transparent, enabling heterogeneous lookup by std::string_view without
+    // allocating a temporary key.
+    absl::btree_map<std::string, cell_entry, std::less<>> map_;
+    size_t                                                bytes_           = 0;
+    uint64_t                                              durable_floor_   = 0;
+    bool                                                  allow_old_slots_ = false;
     uint64_t min_slot_ = UINT64_MAX; // slot range of current entries; tracked on
     uint64_t max_slot_ = 0;          // upsert, reset when the map empties
     uint64_t id_       = 0;          // monotonic id for logging (mt0, mt1, …)

@@ -1,9 +1,16 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-// buffer: a move-only byte container that is either OWNED (frees on destruction)
-// or BORROWED (a non-owning view whose lifetime is guaranteed elsewhere — e.g. a
-// resident B+tree frame held alive by an epoch guard).
+// buffer: a move-only byte container that is one of:
+//   OWNED    — allocated (inline SBO or heap seam); frees on destruction.
+//   BORROWED — a non-owning view whose lifetime is guaranteed elsewhere (e.g. a
+//              resident B+tree frame held alive by an epoch guard); never frees.
+//   EXTERNAL — a non-owning view into Rust-owned memory (a `bytes::Bytes` slice);
+//              on destruction calls a caller-supplied drop callback that
+//              decrements the Rust refcount, so the borrowed allocation stays
+//              alive until every EXTERNAL buffer referencing it is freed. Used
+//              by the zero-copy apply path (R30) to let the MemTable borrow
+//              value bytes straight from the Paxos payload `Bytes`.
 //
 // Layout of an OWNED allocation created by alloc(capacity, header_reserve):
 //
@@ -38,6 +45,7 @@ class buffer
     enum class mode : uint8_t {
         kOwned,    // allocated (inline SBO or malloc seam); frees on destruction
         kBorrowed, // view into external memory; never frees
+        kExternal, // view into Rust-owned memory; calls drop_fn(owner) on destruction
     };
 
     // Owned buffers whose total length is <= kInlineCap are stored inline (no
@@ -91,6 +99,26 @@ class buffer
         b.heap_     = const_cast<uint8_t *>(data); // never written/freed through
         b.size_     = len;
         b.capacity_ = len;
+        return b;
+    }
+
+    // External view over Rust-owned bytes (zero-copy apply path, R30). `owner`
+    // is an opaque handle (e.g. a boxed `Arc<Bytes>`); `drop_fn(owner)` is
+    // called exactly once when this buffer is destroyed or moved-from, so the
+    // Rust allocation stays alive until every EXTERNAL buffer referencing it
+    // is freed. `data()`/`size()`/`slice()` address the borrowed bytes; the
+    // buffer never writes to or frees `data`. `clone()` deep-copies into an
+    // owned buffer (the borrowed bytes are copied; `drop_fn` still fires on the
+    // original's destruction).
+    static buffer wrap_external(const uint8_t *data, size_t len, void *owner, void (*drop_fn)(void *))
+    {
+        buffer b;
+        b.mode_         = mode::kExternal;
+        b.heap_         = const_cast<uint8_t *>(data); // borrowed; never freed through heap_
+        b.size_         = len;
+        b.capacity_     = len;
+        b.ext_.drop_fn_ = drop_fn;
+        b.ext_.owner_   = owner;
         return b;
     }
 
@@ -252,6 +280,11 @@ class buffer
             std::memcpy(inbuf_.data(), o.inbuf_.data(), size_); // only the used bytes
             heap_ = nullptr;
         }
+        else if (mode_ == mode::kExternal) {
+            heap_         = o.heap_;
+            ext_.drop_fn_ = o.ext_.drop_fn_;
+            ext_.owner_   = o.ext_.owner_;
+        }
         else {
             heap_ = o.heap_;
         }
@@ -262,6 +295,9 @@ class buffer
     {
         if (mode_ == mode::kOwned && !inline_active_ && heap_ != nullptr) {
             deallocate(heap_);
+        }
+        else if (mode_ == mode::kExternal && ext_.drop_fn_ != nullptr) {
+            ext_.drop_fn_(ext_.owner_);
         }
         release_fields();
     }
@@ -276,13 +312,26 @@ class buffer
         mode_           = mode::kOwned;
     }
 
-    uint8_t                        *heap_           = nullptr; // owned-heap or borrowed external ptr (null when inline)
-    size_t                          size_           = 0;       // used length
-    size_t                          capacity_       = 0;       // usable capacity (kInlineCap when inline)
-    size_t                          header_reserve_ = 0;       // reserved prefix length (owned cells)
-    bool                            inline_active_  = false;   // owned && stored in inbuf_
-    mode                            mode_           = mode::kOwned;
-    std::array<uint8_t, kInlineCap> inbuf_{}; // SBO storage; valid iff inline_active_
+    uint8_t *heap_           = nullptr; // owned-heap, borrowed, or external ptr (null when inline)
+    size_t   size_           = 0;       // used length
+    size_t   capacity_       = 0;       // usable capacity (kInlineCap when inline)
+    size_t   header_reserve_ = 0;       // reserved prefix length (owned cells)
+    bool     inline_active_  = false;   // owned && stored in inbuf_
+    mode     mode_           = mode::kOwned;
+
+    // SBO storage (owned-inline) overlaps the EXTERNAL drop-control fields
+    // (R30). The two are mutually exclusive: kExternal never uses inline
+    // storage, so the union adds zero size overhead. Both variants are trivial
+    // types, so the union needs no explicit destructor.
+    union {
+        std::array<uint8_t, kInlineCap> inbuf_{}; // SBO storage; valid iff inline_active_
+
+        struct
+        {
+            void (*drop_fn_)(void *); // called on destruction (kExternal)
+            void *owner_;             // opaque Rust handle (e.g. boxed Arc<Bytes>)
+        } ext_;
+    };
 };
 
 } // namespace crowtree

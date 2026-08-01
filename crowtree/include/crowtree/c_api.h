@@ -260,6 +260,32 @@ using ct_kv_ref = struct
 // instead of a packed buffer — eliminates the Rust-side packing copy.
 ct_status ct_apply_batch_slices(ct_tree *t, uint64_t slot, const ct_kv_ref *ops, uint64_t count);
 
+// One zero-copy key/value op for ct_apply_batch_external (R30). `value` is a
+// non-owning pointer into Rust-owned memory (a `bytes::Bytes` slice); crowtree
+// borrows it via a kExternal buffer and calls `drop_fn(bytes_ref)` when the
+// buffer is freed (at MemTable drain/overwrite). `bytes_ref` is an opaque
+// Rust handle (e.g. a boxed `Arc<Bytes>`); `drop_fn` decrements the Rust
+// refcount. kind: 0 = put, 1 = delete (value/value_len/bytes_ref/drop_fn are
+// unused for delete).
+using ct_ext_op = struct
+{
+    const uint8_t *key;
+    size_t         key_len;
+    const uint8_t *value;     // borrowed from Rust Bytes (put only)
+    size_t         value_len; // 0 for delete
+    uint8_t        kind;      // 0 = put, 1 = delete
+    void          *bytes_ref; // opaque Rust handle (put only); NULL for delete
+    void (*drop_fn)(void *);  // Rust drop callback (put only); NULL for delete
+};
+
+// Zero-copy apply (R30): same semantics as ct_apply_batch_slices (atomic
+// multi-key apply, highest-slot-wins, oversized-key rejection) but the value
+// bytes are borrowed from Rust-owned memory instead of copied at the FFI
+// boundary. The value memcpy is deferred to MemTable drain (flush, off the
+// apply critical path). Ownership of every `bytes_ref` transfers to crowtree;
+// `drop_fn` is called exactly once per op when the borrowed buffer is freed.
+ct_status ct_apply_batch_external(ct_tree *t, uint64_t slot, const ct_ext_op *ops, uint64_t count);
+
 // Convenience: auto-assign the next slot and apply (single-writer only).
 ct_status ct_put(ct_tree *t, const uint8_t *key, size_t klen, const uint8_t *val, size_t vlen);
 ct_status ct_del(ct_tree *t, const uint8_t *key, size_t klen);

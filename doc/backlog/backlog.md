@@ -21,13 +21,16 @@ complexity, and dependency. Before implementation, follow the
   infrastructure. Show recent operation counts and metrics per Store/Group
   with real-time refresh (5–10 s window).
 - **[R30](R30-zero-copy-engine-apply.md)** — Zero-copy engine apply — Area: consensus / engine / FFI —
-  R3 delivered handle-based FFI (`ct_alloc` / `ct_apply_put_owned`), but the
-  consensus layer still copies: Paxos deserialization materializes `Vec<u8>`
-  keys/values, then `ct_apply_batch_slices` copies again at the C++ boundary.
-  This item wires the full path so data flows from Paxos payload to crowtree
-  frame with zero intermediate copies: deserialize directly into handles,
-  extend the C API for batch handles, and add a `KVEngine` apply-handles
-  variant. Depends on R3 (completed).
+  R23 already made `Batch::decode` zero-copy (`Bytes` slices); the one
+  remaining apply-path copy is `encode_cell_buf`'s value `memcpy` inside
+  `ct_apply_batch_slices`. The R3 handle path does not help (it relocates
+  the same copy to Rust). This item eliminates the apply-critical-path copy
+  via a split-cell MemTable representation: the value is borrowed from the
+  payload `Bytes` through a new `buffer::kExternal` mode (with an FFI drop
+  callback that decrements the Rust refcount), the 9-byte cell header is
+  stored as `slot`/`flags` fields, and the contiguous `[header][value]` cell
+  is materialized at flush / L0-read (where a copy already exists, off the
+  hot path). Depends on R3 + R23 (completed).
 - **[R32](R32-custom-rust-rpc.md)** — Custom Rust RPC library to replace gRPC on the hot path — Area:
   RPC / consensus — gRPC (tonic + h2) serializes concurrent writers on a
   connection-level userspace lock (HPACK table, frame buffer,
