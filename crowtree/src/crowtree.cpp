@@ -164,14 +164,18 @@ Crowtree::~Crowtree()
 
 void Crowtree::retire_page(PageBase *p)
 {
-    epoch_.retire_object(p);
+    // R6: the deleter sets kRetiredBit instead of deleting outright. If a
+    // cross-thread pin (get_async handoff / PinnedSnapshot) is outstanding,
+    // the delete defers to the last unpin(). Otherwise it frees immediately
+    // (same cost as the old delete).
+    epoch_.retire(p, [](void *ptr) { static_cast<PageBase *>(ptr)->retire_with_pins(); });
 }
 
 void Crowtree::retire_orphaned_page(uint64_t page_id, PageBase *p)
 {
     epoch_.retire(p, [this, page_id](void *ptr) {
         mapping_.clear(page_id);
-        delete static_cast<PageBase *>(ptr);
+        static_cast<PageBase *>(ptr)->retire_with_pins();
     });
 }
 
@@ -1559,21 +1563,36 @@ bool Crowtree::try_get_view_no_load(Slice key, GetView *result, uint64_t *out_pe
         result->value_ = result->owned_.slice();
     }
     else {
-        result->value_ = v.value(); // borrowed: lives in head's frame
+        result->value_               = v.value(); // borrowed: lives in head's frame
+        result->borrowed_chain_head_ = head;      // R6: pin target for slow path
     }
     return true; // resolved: found
 }
 
 GetView Crowtree::materialize_owned(GetView &&v)
 {
-    if (v.found_ && v.owned_.empty()) {
+    if (v.found_ && v.owned_.empty() && v.borrowed_chain_head_ != nullptr) {
+        // R6: frame-borrowed value on the slow path. Pin the chain (head →
+        // base) so the borrowed Slice survives the thread boundary, then
+        // release the epoch guard on this (the entering) thread. The last
+        // unpin (from ct_future_free on any thread) frees if the page was
+        // retired in the meantime.
+        for (PageBase *n = v.borrowed_chain_head_; n != nullptr; n = n->next) {
+            n->pin();
+            v.pins_.push_back(n);
+        }
+        v.borrowed_chain_head_ = nullptr;
+    }
+    else if (v.found_ && v.owned_.empty()) {
+        // Overflow-chain value (assembled, no single frame to borrow): copy
+        // as before. R6 doesn't change this path.
         v.owned_ = buffer::copy_of(v.value_);
         v.value_ = v.owned_.slice();
     }
     // Release on this (the entering) thread before on_done can hand this
     // GetView off across the FFI boundary to a ct_future_free that might
-    // run on a different one -- see EpochManager::Guard's "do not move
-    // across threads" contract.
+    // run on a different one. For the pin path, the pages stay alive via
+    // refcount; for the copy path, the owned buffer is independent.
     v.guard_ = EpochManager::Guard();
     return std::move(v);
 }

@@ -109,7 +109,8 @@ class GetView
           found_(o.found_),
           slot_(o.slot_),
           value_(o.value_),
-          owned_(std::move(o.owned_))
+          owned_(std::move(o.owned_)),
+          pins_(std::move(o.pins_))
     {
         if (!owned_.empty()) {
             value_ = owned_.slice();
@@ -119,11 +120,13 @@ class GetView
     GetView &operator=(GetView &&o) noexcept
     {
         if (this != &o) {
+            release_pins();
             guard_ = std::move(o.guard_);
             found_ = o.found_;
             slot_  = o.slot_;
             value_ = o.value_;
             owned_ = std::move(o.owned_);
+            pins_  = std::move(o.pins_);
             if (!owned_.empty()) {
                 value_ = owned_.slice();
             }
@@ -133,6 +136,11 @@ class GetView
 
     GetView(const GetView &)            = delete;
     GetView &operator=(const GetView &) = delete;
+
+    ~GetView()
+    {
+        release_pins();
+    }
 
     [[nodiscard]] bool found() const
     {
@@ -150,6 +158,14 @@ class GetView
         return value_;
     }
 
+    // R6 debug-only: the frame address a borrowed value points into, or
+    // nullptr for an owned (L0 / overflow) value. Used by tests to verify
+    // the get_async slow path returns a borrowed Slice (no copy).
+    [[nodiscard]] const uint8_t *frame_base() const
+    {
+        return owned_.empty() ? value_.bytes() : nullptr;
+    }
+
   private:
     friend class Crowtree;
     EpochManager::Guard guard_; // keeps an L1 hit's frame resident
@@ -157,6 +173,22 @@ class GetView
     uint64_t            slot_  = 0;
     Slice               value_; // borrowed (L1) or owned_.slice() (L0 / overflow)
     buffer              owned_; // backing storage when the value can't be borrowed
+    // R6: cross-thread pins holding the borrowed value's chain alive after
+    // the epoch guard is released (get_async slow path). Empty on the fast
+    // path (guard_ alone keeps the frame resident) and for owned values.
+    std::vector<PageBase *> pins_;
+    // R6: the chain head whose frame/entries back the borrowed value_, set
+    // by try_get_view_no_load when the value is borrowed (not L0/overflow).
+    // Used by the slow path to walk + pin the chain before releasing guard_.
+    PageBase *borrowed_chain_head_ = nullptr;
+
+    void release_pins()
+    {
+        for (PageBase *p : pins_) {
+            p->unpin();
+        }
+        pins_.clear();
+    }
 };
 
 // Result of an explicit collect_garbage() sweep (plan-tree #21).

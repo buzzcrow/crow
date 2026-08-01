@@ -117,7 +117,7 @@ if(CROWTREE_BENCH)
   find_package(benchmark REQUIRED)
   file(GLOB CROWTREE_BENCH_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/bench/*.cpp)
   add_executable(crowtree_bench ${CROWTREE_BENCH_SRC})
-  target_link_libraries(crowtree_bench PRIVATE benchmark::benchmark absl::btree)
+  target_link_libraries(crowtree_bench PRIVATE benchmark::benchmark absl::btree crowtree)
   # Third-party headers (folly/absl/benchmark) are not -Werror clean.
   target_compile_options(crowtree_bench PRIVATE -Wno-error)
   find_package(folly CONFIG QUIET)
