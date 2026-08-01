@@ -70,13 +70,32 @@ it.
 is a separate monotonic epoch for Raft-style leader election. Keeping
 them separate cleanly decouples consensus from election.
 
-### 3.3 Operator-managed topology (no Group-0)
+### 3.3 System group (Group 0) for topology metadata
 
-Originally designed with a self-hosted system group ("Group-0").
-**Rejected** — operator-managed topology via HTTP management API is
-simpler, avoids a cluster-wide SPOF, and is the implemented and tested
-model. Nothing prevents an embedding system from building its own
-Group-0 on top.
+A designated Paxos group — **system group (store 0, group 0)** —
+stores the full cluster topology as regular KV entries. Since it is a
+Paxos group, the topology is replicated, consistent, and HA by the same
+mechanism that protects user data. No external coordinator needed.
+
+**Two-phase bootstrap:** Phase 1 uses console TOML as the topology
+source of truth (operator-managed, existing behavior). Phase 2 cuts
+over to group 0 authoritative via an idempotent `POST /topology/finalize`
+that writes all TOML topology into group 0 KV and sets the
+`/topology/ready` flag. Console restart uses a three-way fallback:
+group 0 missing → TOML mode; group 0 not ready → TOML mode + warning;
+group 0 ready → group 0 authoritative.
+
+Group 0 membership evolves using the shipped Model B reconfiguration
+(direct HTTP mutation + `membership_epoch` fence). No new consensus
+primitive required.
+
+**Design history:** Originally rejected in favor of pure
+operator-managed topology. Re-evaluated and adopted as R2 when the
+single-point-of-failure risk of console-only TOML became the blocking
+concern for HA deployments. The operator-managed HTTP management API
+remains as the Phase 1 bootstrap path; group 0 adds the HA cutover.
+
+Full design: `design-console.md` §4.3, `design-kv-server.md` §2.2/§2.4.
 
 ### 3.4 Explicit group_id on every RPC
 
@@ -209,10 +228,14 @@ Full design: `design-wal.md`, `design-state-machine.md`,
 
 ## 9. Cluster Lifecycle
 
-- **Bootstrap** — operator starts each `crowkv-server`, creates
-  stores/groups via HTTP management API. Each node persists group
-  config to its own config file and resumes on restart without
-  re-issuing HTTP calls.
+- **Bootstrap** — operator starts each `crowkv-server`, deploys via
+  console, then calls `POST /api/cluster/init` to create the system
+  group (store 0, group 0). Data store/group creation is blocked
+  (`409`) until the cluster is initialized. Each node persists its
+  store/group config to `conf/node-config.json` (per-node config cache)
+  and resumes on restart without re-issuing HTTP calls. After startup,
+  the node reconciles with group 0 topology KV if group 0 is reachable
+  and finalized.
 - **Reconfiguration** — per-node HTTP mutation of remote-replica
   lists, persisted to config file, `membership_epoch` fence
   (exact-match on Prepare/Accept). New members join as non-voting,
@@ -283,6 +306,8 @@ Single-leader hot path: **Proposer → WAL → Replicator → Learner → ack.**
 ## 12. Crate Layout
 
 ```
+crow-common/rust    (shared Rust crate: metrics, logging, time, report)
+crow-common/cpp     (shared C++ static lib: crc32c, log, compressing_sink, gzip, metrics)
 crowkv              (core library: consensus, engine, wal, rpc, cluster)
 crowkv-client       (client library: topology cache, retry, NotLeader handling)
 crowkv-server       (binary: CLI, HTTP mgmt API, store/group wiring)
@@ -291,6 +316,17 @@ crowkv-console/web     (Axum web server + React SPA)
 crowkv-console/cli     (CLI binary: crowkv command)
 crowtree/ffi        (C++ B+tree engine, FFI bridge to Rust)
 ```
+
+`crow-common` holds project-agnostic utilities shared across the
+storage-system stack. The Rust crate (`crow-common`) provides the
+metrics registry, `tracing`-based logging wrapper, monotonic-time
+helpers, and multi-step error aggregator; `crowkv` re-exports them at
+their original module paths so call sites compile unchanged. The C++
+static library (`libcrowcommon.a`, namespace `crow::common`) provides
+CRC32C, the spdlog logging facade (`CR_LOG_*` macros), the compressing
+file sink, gzip helpers, and the atomic-counter metrics core;
+`crowtree` links against it and bridges the moved types into the
+`crowtree` namespace via using-declarations.
 
 ## 13. Concurrency Model
 
@@ -310,6 +346,9 @@ The async disk I/O substrate (`AsyncFile`: io_uring on Linux ≥ 5.11,
 ## 14. Components
 
 - **`crowkv`** — core library: consensus, engine, WAL, I/O, RPC, reconfiguration.
+- **`crow-common`** — shared utilities (Rust crate + C++ static lib):
+  metrics, logging, time, report (Rust); CRC32C, spdlog facade,
+  compressing sink, gzip, atomic metrics (C++).
 - **`crowkv-server`** — reference server binary. Design: `design-kv-server.md`.
 - **`crowkv-console`** — unified management project (Web UI + CLI).
   Design: `design-console.md`, `design-ui.md`.

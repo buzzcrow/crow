@@ -176,15 +176,16 @@ impl KVEngine for CrowtreeEngine {
 
     fn get_bytes(&self, key: &[u8]) -> KVFuture<Option<(u64, Bytes)>> {
         // try_get_pinned: fast path returns a PinnedValue borrowing directly
-        // from the C++ frame (no copy_buf allocation). The value is copied
-        // into Bytes here, then PinnedValue is dropped (releasing the epoch
-        // guard). Slow path is identical to get's Pending arm.
+        // from the C++ frame. into_bytes() creates a Bytes backed by the
+        // C++ frame via Bytes::from_owner — zero-copy, no copy_from_slice.
+        // The page refcount pins stay alive until the Bytes is dropped (on
+        // any thread, R6). Slow path is identical to get's Pending arm.
         match self.inner.try_get_pinned(key) {
             PinnedGetOutcome::Ready(result) => {
-                let mapped = result.ok().flatten().map(|(slot, pinned)| {
-                    let bytes = Bytes::copy_from_slice(pinned.as_bytes());
-                    (slot, bytes)
-                });
+                let mapped = result
+                    .ok()
+                    .flatten()
+                    .map(|(slot, pinned)| (slot, pinned.into_bytes()));
                 KVFuture::ready(mapped)
             }
             PinnedGetOutcome::Pending(fut) => KVFuture::Pending(Box::pin(async move {

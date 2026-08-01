@@ -32,12 +32,12 @@
 // Key work: segment-scan-driven dirty-page/segment discovery, crash-safe
 // free-space reuse, page/segment-image/directory framing, anchor A/B
 // commit, best-anchor recovery, lazy mapping-table rebuild.
+#include "crow-common/crc32c.h"
+#include "crow-common/log.h"
 #include "crowtree/async_page_store.h"
 #include "crowtree/block_page_store.h"
 #include "crowtree/compressor.h"
-#include "crowtree/crc32c.h"
 #include "crowtree/crowtree.h"
-#include "crowtree/log.h"
 #include "crowtree/mapping_persist.h"
 #include "crowtree/page_store.h"
 
@@ -157,7 +157,7 @@ void encode_anchor(const CommitAnchor &a, uint64_t slot_bytes, std::vector<uint8
     put_u64(buf, a.segdir_addr);
     put_u32(buf, a.segdir_len);
     put_u32(buf, a.segdir_crc);
-    uint32_t crc = crc32c(buf->data(), buf->size());
+    uint32_t crc = crow::common::crc32c(buf->data(), buf->size());
     put_u32(buf, crc);
     buf->resize(slot_bytes, 0); // zero pad to the IU-aligned slot size
 }
@@ -168,7 +168,7 @@ bool decode_anchor(const uint8_t *buf, CommitAnchor *a)
         return false;
     }
     uint32_t stored_crc = get_u32(buf + (kAnchorFixedFields - 4));
-    if (crc32c(buf, kAnchorFixedFields - 4) != stored_crc) {
+    if (crow::common::crc32c(buf, kAnchorFixedFields - 4) != stored_crc) {
         return false;
     }
     a->magic          = get_u32(buf);
@@ -341,7 +341,7 @@ SpaceAllocator build_allocator(std::vector<std::pair<uint64_t, uint64_t>> live, 
                 a.empty_blocks.insert(i);
             }
         }
-        CT_LOG_INFO("[{}] build_allocator: live_extents={} empty_blocks={} max_blk={} block_size={}", name, live.size(),
+        CR_LOG_INFO("[{}] build_allocator: live_extents={} empty_blocks={} max_blk={} block_size={}", name, live.size(),
                     a.empty_blocks.size(), max_blk, block_size);
 
         // Exclude gaps in sparse blocks from the gap list.
@@ -358,7 +358,7 @@ SpaceAllocator build_allocator(std::vector<std::pair<uint64_t, uint64_t>> live, 
             }
             size_t gaps_before = a.gaps.size();
             a.gaps             = std::move(filtered);
-            CT_LOG_INFO("[{}] build_allocator: gap filtering {} -> {} (sparse-block threshold {})", name, gaps_before,
+            CR_LOG_INFO("[{}] build_allocator: gap filtering {} -> {} (sparse-block threshold {})", name, gaps_before,
                         a.gaps.size(), kSparseBlockThreshold);
         }
     }
@@ -648,7 +648,7 @@ Status Crowtree::prepare_snapshot_locked(PreparedSnapshot *out)
     anchor.segment_slots     = static_cast<uint32_t>(MappingTable::kSegmentSize);
     anchor.segdir_addr       = segdir_addr;
     anchor.segdir_len        = static_cast<uint32_t>(segdir_len);
-    anchor.segdir_crc        = crc32c(out->directory_write.blob.data(), segdir_len);
+    anchor.segdir_crc        = crow::common::crc32c(out->directory_write.blob.data(), segdir_len);
 
     std::vector<uint8_t> abuf;
     encode_anchor(anchor, superblock_slot_bytes(iu), &abuf);
@@ -690,7 +690,7 @@ void Crowtree::commit_prepared_snapshot(const PreparedSnapshot &prepared)
     }
     version_.fetch_add(1);
     snapshot_total_.fetch_add(1, std::memory_order_relaxed);
-    CT_LOG_INFO("[{}] snapshot committed: seq={} last_applied={} live_pages={} written={} segdir_len={}", name_,
+    CR_LOG_INFO("[{}] snapshot committed: seq={} last_applied={} live_pages={} written={} segdir_len={}", name_,
                 prepared.seq, prepared.last_applied_slot, prepared.live_page_count, prepared.pages_written,
                 prepared.segdir_len);
 }
@@ -804,13 +804,13 @@ Status Crowtree::snapshot(uint64_t *out_last_applied)
                     to_delete.push_back(blk);
                 }
             }
-            CT_LOG_INFO("[{}] block compaction: empty_now={} empty_prev={} to_delete={}", name_,
+            CR_LOG_INFO("[{}] block compaction: empty_now={} empty_prev={} to_delete={}", name_,
                         prepared.empty_blocks.size(), prev_empty_blocks_.size(), to_delete.size());
             for (uint32_t blk : to_delete) {
-                CT_LOG_INFO("[{}] block compaction: deleting empty block {}", name_, blk);
+                CR_LOG_INFO("[{}] block compaction: deleting empty block {}", name_, blk);
                 Status ds = bps->delete_block(blk);
                 if (!ds.ok()) {
-                    CT_LOG_WARN("[{}] block compaction: delete_block({}) failed: {}", name_, blk, ds.to_string());
+                    CR_LOG_WARN("[{}] block compaction: delete_block({}) failed: {}", name_, blk, ds.to_string());
                 }
             }
         }
@@ -970,7 +970,7 @@ Status Crowtree::open(const Options &opt, std::unique_ptr<Crowtree> *out)
     // (via ct_init_logging) at startup before any Crowtree::open(). This
     // ensures all engine instances share one logger without resetting
     // each other's.
-    CT_LOG_INFO("[{}] open: iu={} frame_bytes={} store_size={}", opt.name, iu, opt.frame_bytes, store->size());
+    CR_LOG_INFO("[{}] open: iu={} frame_bytes={} store_size={}", opt.name, iu, opt.frame_bytes, store->size());
     // Geometry validation (PT9 §9.2): the pool frame must be IU-aligned. The
     // superblock slot is IU-rounded (superblock_slot_bytes), so any IU is supported.
     if (iu > 1 && (opt.frame_bytes % iu != 0)) {
@@ -982,7 +982,7 @@ Status Crowtree::open(const Options &opt, std::unique_ptr<Crowtree> *out)
     CommitAnchor anchor;
     if (!read_best_anchor(*store, iu, &anchor)) {
         // No valid snapshot: fresh empty tree (already constructed).
-        CT_LOG_INFO("[{}] open: no committed anchor; starting empty", opt.name);
+        CR_LOG_INFO("[{}] open: no committed anchor; starting empty", opt.name);
         tree->init_metrics(make_metrics_prefix(opt));
         *out = std::move(tree);
         return Status::Ok();
@@ -998,7 +998,7 @@ Status Crowtree::open(const Options &opt, std::unique_ptr<Crowtree> *out)
     if (!dr.ok()) {
         return dr;
     }
-    if (crc32c(dbuf.data(), anchor.segdir_len) != anchor.segdir_crc) {
+    if (crow::common::crc32c(dbuf.data(), anchor.segdir_len) != anchor.segdir_crc) {
         return Status::corruption("open: segment directory CRC mismatch");
     }
     std::vector<DirEntry> entries;
@@ -1048,7 +1048,7 @@ Status Crowtree::open(const Options &opt, std::unique_ptr<Crowtree> *out)
     tree->contiguous_slot_.store(anchor.last_applied_slot);
     tree->version_.store(anchor.snapshot_seq);
 
-    CT_LOG_INFO("[{}] open: recovered seq={} last_applied={} root_pid={} segments={}", opt.name, anchor.snapshot_seq,
+    CR_LOG_INFO("[{}] open: recovered seq={} last_applied={} root_pid={} segments={}", opt.name, anchor.snapshot_seq,
                 anchor.last_applied_slot, anchor.root_page_id, entries.size());
     tree->init_metrics(make_metrics_prefix(opt));
     *out = std::move(tree);

@@ -10,10 +10,12 @@ mod testkit;
 
 use std::time::Duration;
 
+use crowkv_console_shared::clients::console::ConsoleClient;
 use crowkv_console_shared::lifecycle;
 use testkit::console::{crowkv_cli_bin, run, spawn_console, spawn_upstream};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::too_many_lines)]
 async fn store_paxos_replica_round_trip() {
     let Some(upstream) = spawn_upstream().await else {
         eprintln!("skipping: crowkv-server binary not built");
@@ -29,6 +31,12 @@ async fn store_paxos_replica_round_trip() {
     let console = spawn_console(&upstream).await;
     let ip = console.ip().to_string();
     let port = console.port();
+
+    let console_client = ConsoleClient::new(format!("http://{ip}:{port}")).unwrap();
+    console_client
+        .cluster_init(&["n1".to_string()])
+        .await
+        .expect("cluster_init");
 
     let store_id = "9";
     let group_id = "90";

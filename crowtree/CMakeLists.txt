@@ -29,6 +29,13 @@ endif()
 find_path(LIBURING_INCLUDE_DIR liburing.h)
 find_library(LIBURING_LIB NAMES uring)
 
+# ── crow-common (shared utils: crc32c, log, gzip, metrics) ────────
+# Built in-tree via add_subdirectory so a single `cmake -S crowtree`
+# invocation produces both libcrowcommon.a and libcrowtree.a. crowtree
+# links crowcommon PUBLIC because its public headers (frame_page.h,
+# page_codec.h, compressor.h, crowtree.h) include crow-common headers.
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../crow-common/cpp crow-common-build)
+
 # ── Library ───────────────────────────────────────────────────────
 file(GLOB_RECURSE CROWTREE_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
 if(NOT (LIBURING_INCLUDE_DIR AND LIBURING_LIB))
@@ -40,7 +47,7 @@ endif()
 add_library(crowtree STATIC ${CROWTREE_SRC})
 target_include_directories(crowtree PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 find_package(Threads REQUIRED)
-target_link_libraries(crowtree PUBLIC Threads::Threads)
+target_link_libraries(crowtree PUBLIC Threads::Threads crowcommon)
 
 if(LIBURING_INCLUDE_DIR AND LIBURING_LIB)
   message(STATUS "crowtree liburing: ${LIBURING_LIB} (${LIBURING_INCLUDE_DIR})")
@@ -55,21 +62,15 @@ endif()
 find_package(absl REQUIRED)
 target_link_libraries(crowtree PUBLIC absl::btree)
 
-# ── spdlog logging (plan-tree #10) ────────────────────────────────
-# Gated behind CROWTREE_HAVE_SPDLOG (mirrors the LZ4 pattern): the CMake build
-# gets an async rotating-file logger; the Rust FFI cc build (no spdlog) compiles
-# the CT_LOG_* macros to no-ops. Linked PRIVATE — libcrowtree is STATIC, so CMake
-# still propagates the spdlog/fmt link requirement to the final executables while
-# keeping the header/compile-def surface off the public interface.
-find_package(spdlog REQUIRED)
-target_link_libraries(crowtree PRIVATE spdlog::spdlog)
-target_compile_definitions(crowtree PRIVATE CROWTREE_HAVE_SPDLOG=1)
-
-# zlib for gzip compression of rotated log files (compressing_sink).
-find_package(ZLIB REQUIRED)
-target_link_libraries(crowtree PRIVATE ZLIB::ZLIB)
-# Compile-time level floor: keep trace/debug in Debug builds, strip below info in
-# optimized builds (SPDLOG_ACTIVE_LEVEL elides lower calls entirely).
+# ── spdlog logging ────────────────────────────────────────────────
+# spdlog, zlib, and the CROW_HAVE_SPDLOG gate now come from `crowcommon`
+# (linked PUBLIC above) — the logging facade, compressing sink, gzip
+# helper, and metrics core moved there (R12). crowtree's remaining
+# sources include crow-common/log.h and use CR_LOG_*; the spdlog/fmt/zlib
+# link requirement propagates transitively to final executables through
+# crowcommon's PRIVATE link. Keep the SPDLOG_ACTIVE_LEVEL floor on
+# crowtree so its includers of crow-common/log.h get the same level
+# filtering as crowcommon's own TUs.
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
   target_compile_definitions(crowtree PRIVATE SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_TRACE)
 else()
@@ -116,7 +117,7 @@ if(CROWTREE_BENCH)
   find_package(benchmark REQUIRED)
   file(GLOB CROWTREE_BENCH_SRC CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/bench/*.cpp)
   add_executable(crowtree_bench ${CROWTREE_BENCH_SRC})
-  target_link_libraries(crowtree_bench PRIVATE benchmark::benchmark absl::btree)
+  target_link_libraries(crowtree_bench PRIVATE benchmark::benchmark absl::btree crowtree)
   # Third-party headers (folly/absl/benchmark) are not -Werror clean.
   target_compile_options(crowtree_bench PRIVATE -Wno-error)
   find_package(folly CONFIG QUIET)

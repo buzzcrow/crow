@@ -11,13 +11,16 @@ pub mod kv_server;
 pub mod kv_store;
 pub mod learner_stream;
 pub mod local_replica;
+pub mod node_config;
 pub mod px_kv_store;
 pub mod remote_replica;
 pub mod replica;
 pub mod status;
+pub mod topology_kv;
 
 pub use group::ProposeResult;
 pub use group_config::{GroupConfigStore, PxGroupConfig, PxGroupMember};
+pub use node_config::{NodeConfig, NodeConfigStore, NodeGroupEntry, NodeStoreEntry};
 
 pub use kv_server::*;
 pub use local_replica::*;

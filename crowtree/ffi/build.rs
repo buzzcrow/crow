@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 fn collect_cc(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let path = entry?.path();
+        if path.is_dir() {
+            collect_cc(&path, out)?;
+            continue;
+        }
         // Engine sources use the.cpp extension (renamed from.cc in the STL
         // rename task); accept both so the crate builds regardless.
         match path.extension().and_then(|s| s.to_str()) {
@@ -30,18 +34,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .to_path_buf();
     let src = engine.join("src");
     let include = engine.join("include");
+    // crow-common shared utils (R12): crc32c, log, compressing_sink, gzip,
+    // metrics moved out of crowtree into a sibling `crow-common/cpp` project.
+    // The FFI build globs both source trees into one `cc::Build` so the moved
+    // TUs compile with the same flags as the remaining crowtree sources.
+    let common = engine
+        .parent()
+        .expect("crowtree must have a parent")
+        .join("crow-common")
+        .join("cpp");
+    let common_src = common.join("src");
+    let common_include = common.join("include");
 
     let mut files = Vec::new();
     collect_cc(&src, &mut files)?;
+    collect_cc(&common_src, &mut files)?;
 
     let mut build = cc::Build::new();
-    build.cpp(true).std("c++20").include(&include).warnings(false);
+    build
+        .cpp(true)
+        .std("c++20")
+        .include(&include)
+        .include(&common_include)
+        .warnings(false);
 
     // The engine now includes Abseil headers (absl::btree_map in the MemTable,
     // ). Abseil is header-only for btree, so we only need its include
     // path; in the pixi/conda environment it lives under $CONDA_PREFIX/include.
     // Use -isystem (not -I) for third-party headers so -Wall -Wextra skips them.
-    let conda_prefix = std::env::var("CONDA_PREFIX").ok().map(PathBuf::from);
+    let conda_prefix = std::env::var("CONDA_PREFIX").ok().map(PathBuf::from).or_else(|| {
+        // Fallback: when CONDA_PREFIX is not set (e.g., Playwright's
+        // webServer subprocess), try the pixi env dir relative to CARGO_MANIFEST_DIR.
+        let pixi_env = manifest
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|root| root.join(".pixi").join("envs").join("default"));
+        pixi_env.filter(|p| p.join("include").is_dir())
+    });
     if let Some(prefix) = &conda_prefix {
         let inc = prefix.join("include");
         if inc.join("absl").is_dir() {
@@ -114,7 +143,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     if have_spdlog {
         let prefix = conda_prefix.as_ref().unwrap();
-        build.define("CROWTREE_HAVE_SPDLOG", "1");
+        // CROW_HAVE_SPDLOG gates the moved crow-common log.h/compressing_sink.h
+        // (the remaining crowtree sources include crow-common/log.h and use
+        // CR_LOG_*). The FFI build compiles everything in one cc::Build, so a
+        // single define covers both trees; the moved files no longer reference
+        // CROWTREE_HAVE_SPDLOG.
+        build.define("CROW_HAVE_SPDLOG", "1");
         // fmt is bundled with spdlog in conda-forge; its headers live under
         // include/fmt and the lib is libfmt. zlib is needed by
         // compressing_sink for gzip-rotated log files.
@@ -125,6 +159,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rustc-link-lib=dylib=z");
         // Embed the rpath so the dynamic linker finds libspdlog at runtime
         // (pixi/conda lib dir is not in the default dyld search path).
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.display());
+    }
+
+    // ── ISA-L for SIMD-optimized CRC32C (crc32_iscsi) ──
+    // crow-common/crc32c.h calls crc32_iscsi which lives in libisal.
+    // The CMake build links it via find_library(ISAL_LIB NAMES isal); the
+    // FFI build must link it too since it compiles crow-common sources.
+    // The include path must also be added so isa-l/crc.h is found even
+    // when the Abseil check above does not add the conda include dir.
+    let have_isal = conda_prefix.as_ref().is_some_and(|prefix| {
+        prefix.join("include").join("isa-l").join("crc.h").is_file()
+            && (prefix.join("lib").join("libisal.dylib").is_file()
+                || prefix.join("lib").join("libisal.so").is_file()
+                || prefix.join("lib").join("libisal.a").is_file())
+    });
+    if have_isal {
+        let prefix = conda_prefix.as_ref().unwrap();
+        let inc_dir = prefix.join("include");
+        let lib_dir = prefix.join("lib");
+        build.flag(format!("-isystem{}", inc_dir.display()));
+        println!("cargo:rustc-link-search=native={}", lib_dir.display());
+        println!("cargo:rustc-link-lib=dylib=isal");
         println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.display());
     }
 

@@ -37,6 +37,20 @@ handles cross the FFI boundary at runtime.
 - **LatencySummary** (`AtomicU64` x 4) — lightweight latency tracking
   (count + sum + max + total_count). `observe(ns)`. Flush shows `avg(us)`,
   `max(us)`. Use cases: scan, snapshot, WAL append, RPC, apply.
+- **PreciseHistogram** (`crow-common/rust/src/metrics/precise.rs`) —
+  HDR-style logarithmic histogram delivering ≥3 significant digits of
+  percentile precision, the precise counterpart to the fixed-bucket
+  `LatencyHistogram`. `1024` linear sub-buckets per power-of-2 magnitude
+  (relative error ≤0.1%); pre-allocated range `0..=2^32 µs` (~71 min)
+  makes `auto(true)` a no-op (no resize logic). `&mut self` methods
+  (`record`, `add`, `reset`) — every call site has exclusive access
+  (`Mutex`-guarded in the client library, per-worker owned in the bench
+  `OpStats`, owned by the flusher task for `CumulativeLatency`), so a
+  lock-free impl is unnecessary. Tracks `count`/`sum`/`min`/`max` exactly
+  (only percentiles are bucketed). Use cases: bench-client per-op
+  latency (`OpStats`), client-library window latency
+  (`WindowLatencySnapshot`), bench cumulative run-wide percentiles
+  (`CumulativeLatency`). Replaces the external `hdrhistogram` crate.
 
 ### Registry and Lifecycle
 
@@ -218,6 +232,18 @@ handle. Two counters cover R26 follower-read distribution:
   the scan `"not leader; retry scan at "` parse. A high
   `read_endpoint_fallback / read_endpoint_distributed` ratio means
   followers are lagging and the policy is providing little benefit.
+
+The client library also maintains per-op-kind window latency histograms
+(`WindowLatency` / `WindowLatencySnapshot`), drained by `drain_window`
+for periodic flushing and merged into the bench runner's cumulative
+`bench.*.lh` histograms. These use `crow-common`'s `PreciseHistogram`
+(not the server's fixed-bucket `LatencyHistogram`) because the bench
+needs p50/p90/p99/p999/max at ≥3 significant digits — the same precision
+the bench's own `OpStats` and `CumulativeLatency` require. The bench
+runner's per-worker `WorkerCounters` use `crow-common`'s `Counter`
+(window delta via `flush().count`, cumulative total via
+`snapshot().total`), unifying the bench and client on the project's own
+metrics primitives and removing the external `hdrhistogram` dependency.
 
 ### C++ Registry Ownership
 

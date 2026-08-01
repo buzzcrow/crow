@@ -11,6 +11,7 @@ mod testkit;
 
 use std::time::Duration;
 
+use crowkv_console_shared::clients::console::ConsoleClient;
 use crowkv_console_shared::lifecycle;
 use testkit::console::{crowkv_cli_bin, run, spawn_console, spawn_upstream, wait_for_leader};
 
@@ -31,6 +32,12 @@ async fn kv_put_get_delete_round_trip() {
     let console = spawn_console(&upstream).await;
     let ip = console.ip().to_string();
     let port = console.port();
+
+    let console_client = ConsoleClient::new(format!("http://{ip}:{port}")).unwrap();
+    console_client
+        .cluster_init(&["n1".to_string()])
+        .await
+        .expect("cluster_init");
 
     // Create store 1 / group 1 via the same CLI control path used by the
     // passing bench smoke test, then wait for the single-replica group to

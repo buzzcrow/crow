@@ -6,11 +6,11 @@
 // (L0); flush() merges the contiguous-applied prefix into the COW B+tree (L1).
 #pragma once
 
+#include "crow-common/metrics/metrics.h"
 #include "crowtree/cell.h"
 #include "crowtree/epoch.h"
 #include "crowtree/mapping_table.h"
 #include "crowtree/memtable.h"
-#include "crowtree/metrics.h"
 #include "crowtree/options.h"
 #include "crowtree/page.h"
 #include "crowtree/snapshot.h"
@@ -29,6 +29,17 @@
 
 namespace crowtree
 {
+
+// The metrics core moved to crow-common::metrics (R12); bridge the moved types
+// into `crowtree` with per-type using-declarations so existing
+// `Counter*`/`Gauge*`/`LatencySummary*`/`MetricsRegistry`/`Bandwidth`
+// references compile unchanged. (Not a `namespace crowtree =
+// crow::common::metrics;` alias — only the specific types are bridged.)
+using crow::common::metrics::Bandwidth;
+using crow::common::metrics::Counter;
+using crow::common::metrics::Gauge;
+using crow::common::metrics::LatencySummary;
+using crow::common::metrics::MetricsRegistry;
 
 #ifdef CROWTREE_HAVE_LIBURING
 class Reactor;
@@ -98,7 +109,8 @@ class GetView
           found_(o.found_),
           slot_(o.slot_),
           value_(o.value_),
-          owned_(std::move(o.owned_))
+          owned_(std::move(o.owned_)),
+          pins_(std::move(o.pins_))
     {
         if (!owned_.empty()) {
             value_ = owned_.slice();
@@ -108,11 +120,13 @@ class GetView
     GetView &operator=(GetView &&o) noexcept
     {
         if (this != &o) {
+            release_pins();
             guard_ = std::move(o.guard_);
             found_ = o.found_;
             slot_  = o.slot_;
             value_ = o.value_;
             owned_ = std::move(o.owned_);
+            pins_  = std::move(o.pins_);
             if (!owned_.empty()) {
                 value_ = owned_.slice();
             }
@@ -122,6 +136,11 @@ class GetView
 
     GetView(const GetView &)            = delete;
     GetView &operator=(const GetView &) = delete;
+
+    ~GetView()
+    {
+        release_pins();
+    }
 
     [[nodiscard]] bool found() const
     {
@@ -139,6 +158,14 @@ class GetView
         return value_;
     }
 
+    // R6 debug-only: the frame address a borrowed value points into, or
+    // nullptr for an owned (L0 / overflow) value. Used by tests to verify
+    // the get_async slow path returns a borrowed Slice (no copy).
+    [[nodiscard]] const uint8_t *frame_base() const
+    {
+        return owned_.empty() ? value_.bytes() : nullptr;
+    }
+
   private:
     friend class Crowtree;
     EpochManager::Guard guard_; // keeps an L1 hit's frame resident
@@ -146,6 +173,22 @@ class GetView
     uint64_t            slot_  = 0;
     Slice               value_; // borrowed (L1) or owned_.slice() (L0 / overflow)
     buffer              owned_; // backing storage when the value can't be borrowed
+    // R6: cross-thread pins holding the borrowed value's chain alive after
+    // the epoch guard is released (get_async slow path). Empty on the fast
+    // path (guard_ alone keeps the frame resident) and for owned values.
+    std::vector<PageBase *> pins_;
+    // R6: the chain head whose frame/entries back the borrowed value_, set
+    // by try_get_view_no_load when the value is borrowed (not L0/overflow).
+    // Used by the slow path to walk + pin the chain before releasing guard_.
+    PageBase *borrowed_chain_head_ = nullptr;
+
+    void release_pins()
+    {
+        for (PageBase *p : pins_) {
+            p->unpin();
+        }
+        pins_.clear();
+    }
 };
 
 // Result of an explicit collect_garbage() sweep (plan-tree #21).
@@ -495,6 +538,9 @@ class Crowtree
 
     // pin a consistent point-in-time view at `last_applied_slot` (the durable L1
     // state). Used for scan-at / compare / iter_all / snapshot export.
+    // R6: returns a PinnedSnapshot (zero-copy, page refcount pins keep frames
+    // alive across threads). The return type is shared_ptr<Snapshot> for ABI
+    // compatibility with existing callers; PinnedSnapshot inherits from Snapshot.
     [[nodiscard]] std::shared_ptr<Snapshot> snapshot_view();
 
     // Replace the entire engine state with `sorted_entries` (key-sorted, including
@@ -806,6 +852,9 @@ class Crowtree
     // (demand-load). Hot (resident) path is lock-free; the cold path locks
     // load_mutex_ and double-checks. Returns nullptr if the slot is unset.
     [[nodiscard]] PageBase *resident(uint64_t page_id) const;
+
+    // R6: capture all pages in an overflow chain (for PinnedSnapshot pinning).
+    void capture_overflow_chain(uint64_t head_page_id, std::vector<PageBase *> &out);
 
     // Shared by resident()'s synchronous cold path and get_async's async
     // completion handler: decodes+validates a

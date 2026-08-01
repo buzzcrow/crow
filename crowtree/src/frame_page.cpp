@@ -3,7 +3,7 @@
 
 #include "crowtree/frame_page.h"
 
-#include "crowtree/crc32c.h"
+#include "crow-common/crc32c.h"
 
 namespace crowtree
 {
@@ -17,7 +17,7 @@ void stamp_trailer(uint8_t *f, uint32_t page_bytes)
 {
     uint32_t body = page_bytes - static_cast<uint32_t>(kFrameTrailerSize);
     frame_put_u32(f, body, page_bytes); // logical_len
-    uint32_t crc = crc32c(f, body);
+    uint32_t crc = crow::common::crc32c(f, body);
     frame_put_u32(f, body + 4, crc);
 }
 
@@ -58,7 +58,7 @@ bool frame_validate(const uint8_t *f, uint32_t page_bytes)
         return false; // logical_len cross-check
     }
     uint32_t stored = frame_u32(f, body + 4);
-    return crc32c(f, body) == stored;
+    return crow::common::crc32c(f, body) == stored;
 }
 
 // ── LeafFrameBuilder ──────────────────────────────────────────────

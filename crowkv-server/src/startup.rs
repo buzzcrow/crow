@@ -11,36 +11,55 @@ use crowkv::cluster::group::PxGroup;
 use crowkv::cluster::group_config::GroupConfigStore;
 use crowkv::cluster::group_election::LeaderElection;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
+use crowkv::cluster::node_config::NodeConfigStore;
 use crowkv::common::config::{AdmissionPolicy, PxElectionConfig, WalConfig};
 use crowkv::kv::{CrowtreeBackend, CrowtreeEngine, CrowtreeOptions, KVEngine};
 use crowkv::wal::replay::replay_group;
 use crowkv::wal::{IoBackend, WalEngine};
 
-/// Load persisted group config from the config file and apply it to the group.
+/// Load persisted group config and apply it to the group.
 ///
-/// The config file lives at `{config_root}/store{store_id}_group{group_id}.bin`.
-/// If present, the group is seeded with the durable membership so it does not
-/// start as a `quorum=1` singleton in the restore window. The config store is
-/// also set on the group so future `persist_config` calls write to the same
-/// file.
+/// Reads from `node-config.json` (the per-node config cache). If the
+/// group entry is present, the group is seeded with the durable
+/// membership so it does not start as a `quorum=1` singleton in the
+/// restore window. The node config store is also set on the group so
+/// future `persist_config` calls write to the same file.
 async fn maybe_apply_persisted_config(group: &mut PxGroup, config_root: &Path, store_id: u64) {
-    let store = GroupConfigStore::new(config_root, store_id, group.group_id());
-    match store.load().await {
+    let node_store = NodeConfigStore::new(config_root);
+    match node_store.load_group(store_id, group.group_id()).await {
         Ok(Some(config)) => {
             if config.group_id == group.group_id() {
                 group.apply_config(&config);
             }
         }
-        Ok(None) => {}
+        Ok(None) => {
+            // Fall back to legacy per-group config file for migration.
+            let legacy_store = GroupConfigStore::new(config_root, store_id, group.group_id());
+            match legacy_store.load().await {
+                Ok(Some(config)) => {
+                    if config.group_id == group.group_id() {
+                        group.apply_config(&config);
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        group_id = group.group_id(),
+                        error = %e,
+                        "failed to load persisted group config"
+                    );
+                }
+            }
+        }
         Err(e) => {
             tracing::warn!(
                 group_id = group.group_id(),
                 error = %e,
-                "failed to load persisted group config"
+                "failed to load node-config.json"
             );
         }
     }
-    group.set_config_store(store);
+    group.set_node_config_store(node_store, store_id, group.group_id());
 }
 
 #[must_use]

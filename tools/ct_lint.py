@@ -10,6 +10,7 @@ SEARCH_DIRS = [
     Path("crowtree/include"),
     Path("crowtree/tests"),
     Path("crowtree/bench"),
+    Path("crow-common/cpp"),
 ]
 EXTENSIONS = {".cpp", ".h"}
 DEFAULT_BATCH_SIZE = 3

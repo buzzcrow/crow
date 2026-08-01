@@ -25,17 +25,16 @@
 //! ceiling is well below tokio's per-task overhead at this scale.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use crow_common::metrics::{Counter, MetricName, PreciseHistogram};
 use crowkv_client::{
     ClientConfig, CrowkvClient, Error as ClientError, GetOutcome, ReadEndpointPolicy, ReadMode,
     WindowLatencySnapshot, WriteOutcome,
 };
 use crowkv_console_shared::error::{Error, Result};
-use hdrhistogram::Histogram;
 use tracing::{debug, info, warn};
 
 use super::report::{per_op_map, percentiles_from_histogram, BenchReport, OpOutcome, OpStats};
@@ -43,47 +42,64 @@ use super::workload::{format_key, value_for, MinSlotPolicy, OpGen, OpKind, Workl
 
 /// Lock-free per-worker counters used by the optional progress
 /// snapshotter and the metrics flusher. Workers bump these on every op
-/// with `Relaxed` ordering — there is no contention because each worker
-/// owns its `Arc<WorkerCounters>` exclusively. Per-op-kind ok/err counts
-/// let the metrics log distinguish successful from failed operations.
-#[derive(Debug, Default)]
+/// via `Counter::inc` — there is no contention because each worker owns
+/// its `Arc<WorkerCounters>` exclusively. Per-op-kind ok/err counts let
+/// the metrics log distinguish successful from failed operations. The
+/// progress snapshotter reads cumulative totals via `snapshot().total`;
+/// the metrics flusher reads window deltas via `flush().count`, dropping
+/// its manual `prev_*` bookkeeping.
+#[derive(Debug)]
 struct WorkerCounters {
-    put_ok: AtomicU64,
-    put_err: AtomicU64,
-    get_ok: AtomicU64,
-    get_err: AtomicU64,
-    delete_ok: AtomicU64,
-    delete_err: AtomicU64,
-    scan_ok: AtomicU64,
-    scan_err: AtomicU64,
+    put_ok: Counter,
+    put_err: Counter,
+    get_ok: Counter,
+    get_err: Counter,
+    delete_ok: Counter,
+    delete_err: Counter,
+    scan_ok: Counter,
+    scan_err: Counter,
 }
 
 impl WorkerCounters {
+    #[must_use]
+    fn new() -> Self {
+        Self {
+            put_ok: Counter::new(MetricName::Static("bench.put.ok")),
+            put_err: Counter::new(MetricName::Static("bench.put.err")),
+            get_ok: Counter::new(MetricName::Static("bench.get.ok")),
+            get_err: Counter::new(MetricName::Static("bench.get.err")),
+            delete_ok: Counter::new(MetricName::Static("bench.delete.ok")),
+            delete_err: Counter::new(MetricName::Static("bench.delete.err")),
+            scan_ok: Counter::new(MetricName::Static("bench.scan.ok")),
+            scan_err: Counter::new(MetricName::Static("bench.scan.err")),
+        }
+    }
+
     fn total_ops(&self) -> u64 {
-        self.put_ok.load(Ordering::Relaxed)
-            + self.get_ok.load(Ordering::Relaxed)
-            + self.delete_ok.load(Ordering::Relaxed)
-            + self.scan_ok.load(Ordering::Relaxed)
+        self.put_ok.snapshot().total
+            + self.get_ok.snapshot().total
+            + self.delete_ok.snapshot().total
+            + self.scan_ok.snapshot().total
     }
 
     fn total_errors(&self) -> u64 {
-        self.put_err.load(Ordering::Relaxed)
-            + self.get_err.load(Ordering::Relaxed)
-            + self.delete_err.load(Ordering::Relaxed)
-            + self.scan_err.load(Ordering::Relaxed)
+        self.put_err.snapshot().total
+            + self.get_err.snapshot().total
+            + self.delete_err.snapshot().total
+            + self.scan_err.snapshot().total
     }
 
     fn record(&self, kind: OpKind, ok: bool) {
         match (kind, ok) {
-            (OpKind::Write, true) => self.put_ok.fetch_add(1, Ordering::Relaxed),
-            (OpKind::Write, false) => self.put_err.fetch_add(1, Ordering::Relaxed),
-            (OpKind::Read, true) => self.get_ok.fetch_add(1, Ordering::Relaxed),
-            (OpKind::Read, false) => self.get_err.fetch_add(1, Ordering::Relaxed),
-            (OpKind::Delete, true) => self.delete_ok.fetch_add(1, Ordering::Relaxed),
-            (OpKind::Delete, false) => self.delete_err.fetch_add(1, Ordering::Relaxed),
-            (OpKind::List, true) => self.scan_ok.fetch_add(1, Ordering::Relaxed),
-            (OpKind::List, false) => self.scan_err.fetch_add(1, Ordering::Relaxed),
-        };
+            (OpKind::Write, true) => self.put_ok.inc(),
+            (OpKind::Write, false) => self.put_err.inc(),
+            (OpKind::Read, true) => self.get_ok.inc(),
+            (OpKind::Read, false) => self.get_err.inc(),
+            (OpKind::Delete, true) => self.delete_ok.inc(),
+            (OpKind::Delete, false) => self.delete_err.inc(),
+            (OpKind::List, true) => self.scan_ok.inc(),
+            (OpKind::List, false) => self.scan_err.inc(),
+        }
     }
 }
 
@@ -298,7 +314,7 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
     // a one-line summary; workers never read each other's counters.
     let mut counters: Vec<Arc<WorkerCounters>> = Vec::with_capacity(cfg.threads as usize);
     for _ in 0..cfg.threads {
-        counters.push(Arc::new(WorkerCounters::default()));
+        counters.push(Arc::new(WorkerCounters::new()));
     }
 
     let progress_handle = match cfg.progress_interval {
@@ -696,16 +712,16 @@ struct CumLine {
 /// merged into these for run-wide `bench.*.lh` percentiles.
 #[derive(Debug)]
 struct CumulativeLatency {
-    put: Histogram<u64>,
-    get: Histogram<u64>,
-    delete: Histogram<u64>,
-    scan: Histogram<u64>,
-    batch_write: Histogram<u64>,
+    put: PreciseHistogram,
+    get: PreciseHistogram,
+    delete: PreciseHistogram,
+    scan: PreciseHistogram,
+    batch_write: PreciseHistogram,
 }
 
 impl Default for CumulativeLatency {
     fn default() -> Self {
-        let mk = || Histogram::<u64>::new(3).expect("hdr histogram precision");
+        let mk = || PreciseHistogram::new(3);
         Self {
             put: mk(),
             get: mk(),
@@ -718,11 +734,11 @@ impl Default for CumulativeLatency {
 
 impl CumulativeLatency {
     fn merge(&mut self, snap: &WindowLatencySnapshot) {
-        let _ = self.put.add(snap.put.clone());
-        let _ = self.get.add(snap.get.clone());
-        let _ = self.delete.add(snap.delete.clone());
-        let _ = self.scan.add(snap.scan.clone());
-        let _ = self.batch_write.add(snap.batch_write.clone());
+        self.put.add(&snap.put);
+        self.get.add(&snap.get);
+        self.delete.add(&snap.delete);
+        self.scan.add(&snap.scan);
+        self.batch_write.add(&snap.batch_write);
     }
 }
 
@@ -754,16 +770,6 @@ fn spawn_metrics_flusher(
         let mut last_tick = started;
         let mut prev_cm = client.metrics();
         let mut cum_lat = CumulativeLatency::default();
-
-        // Previous per-op bench counter values for delta calculation.
-        let mut prev_put_ok: u64 = 0;
-        let mut prev_put_err: u64 = 0;
-        let mut prev_get_ok: u64 = 0;
-        let mut prev_get_err: u64 = 0;
-        let mut prev_del_ok: u64 = 0;
-        let mut prev_del_err: u64 = 0;
-        let mut prev_scan_ok: u64 = 0;
-        let mut prev_scan_err: u64 = 0;
 
         loop {
             // Align each tick to a wall-clock interval boundary (e.g. :05,
@@ -813,36 +819,18 @@ fn spawn_metrics_flusher(
             let cm_snap = cm.clone();
             prev_cm = cm;
 
-            // Per-op bench counters (ok/err) from WorkerCounters.
-            let put_ok: u64 = counters.iter().map(|c| c.put_ok.load(Ordering::Relaxed)).sum();
-            let put_err: u64 = counters.iter().map(|c| c.put_err.load(Ordering::Relaxed)).sum();
-            let get_ok: u64 = counters.iter().map(|c| c.get_ok.load(Ordering::Relaxed)).sum();
-            let get_err: u64 = counters.iter().map(|c| c.get_err.load(Ordering::Relaxed)).sum();
-            let del_ok: u64 = counters.iter().map(|c| c.delete_ok.load(Ordering::Relaxed)).sum();
-            let del_err: u64 = counters
-                .iter()
-                .map(|c| c.delete_err.load(Ordering::Relaxed))
-                .sum();
-            let scan_ok: u64 = counters.iter().map(|c| c.scan_ok.load(Ordering::Relaxed)).sum();
-            let scan_err: u64 = counters.iter().map(|c| c.scan_err.load(Ordering::Relaxed)).sum();
-
-            let d_put_ok = put_ok.saturating_sub(prev_put_ok);
-            let d_put_err_b = put_err.saturating_sub(prev_put_err);
-            let d_get_ok = get_ok.saturating_sub(prev_get_ok);
-            let d_get_err_b = get_err.saturating_sub(prev_get_err);
-            let d_del_ok = del_ok.saturating_sub(prev_del_ok);
-            let d_del_err_b = del_err.saturating_sub(prev_del_err);
-            let d_scan_ok = scan_ok.saturating_sub(prev_scan_ok);
-            let d_scan_err_b = scan_err.saturating_sub(prev_scan_err);
-
-            prev_put_ok = put_ok;
-            prev_put_err = put_err;
-            prev_get_ok = get_ok;
-            prev_get_err = get_err;
-            prev_del_ok = del_ok;
-            prev_del_err = del_err;
-            prev_scan_ok = scan_ok;
-            prev_scan_err = scan_err;
+            // Per-op bench counter window deltas from WorkerCounters.
+            // `Counter::flush()` returns the window delta since the last
+            // flush and resets the window, so no manual `prev_*`
+            // bookkeeping is needed.
+            let d_put_ok: u64 = counters.iter().map(|c| c.put_ok.flush().count).sum();
+            let d_put_err_b: u64 = counters.iter().map(|c| c.put_err.flush().count).sum();
+            let d_get_ok: u64 = counters.iter().map(|c| c.get_ok.flush().count).sum();
+            let d_get_err_b: u64 = counters.iter().map(|c| c.get_err.flush().count).sum();
+            let d_del_ok: u64 = counters.iter().map(|c| c.delete_ok.flush().count).sum();
+            let d_del_err_b: u64 = counters.iter().map(|c| c.delete_err.flush().count).sum();
+            let d_scan_ok: u64 = counters.iter().map(|c| c.scan_ok.flush().count).sum();
+            let d_scan_err_b: u64 = counters.iter().map(|c| c.scan_err.flush().count).sum();
 
             // Column widths — match server defaults.
             let width = 24usize;
@@ -857,7 +845,7 @@ fn spawn_metrics_flusher(
 
             // 2. Cumulative latency histograms (bench.*.lh) with p90/p999.
             let mut cum_lines: Vec<CumLine> = Vec::new();
-            let entries: [(&str, &Histogram<u64>); 5] = [
+            let entries: [(&str, &PreciseHistogram); 5] = [
                 ("bench.put.lh", &cum_lat.put),
                 ("bench.get.lh", &cum_lat.get),
                 ("bench.delete.lh", &cum_lat.delete),

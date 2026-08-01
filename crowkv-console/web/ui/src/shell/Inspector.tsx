@@ -249,7 +249,7 @@ function buildCrossJump(
   }
   // Physical Node -> logical Store ("show in cluster").
   if (entity.viewMode === ViewMode.Physical && entity.type === 'Node') {
-    const store = stores.find((s) => s.nodes?.includes(entity.id));
+    const store = stores.find((s) => String(s.store_id) !== '0' && s.nodes?.includes(entity.id));
     if (store) {
       return {
         label: `Show store ${store.store_id} in cluster`,

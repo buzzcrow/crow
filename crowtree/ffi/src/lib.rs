@@ -1324,7 +1324,6 @@ fn try_poll_ct_future_pinned(guard: &mut FutureGuard) -> Option<Result<Option<(u
                     handle: guard.0,
                     data: value.data,
                     len: value.len,
-                    _not_send: std::marker::PhantomData,
                 };
                 Ok(Some((slot, pv)))
             } else {
@@ -1572,17 +1571,22 @@ pub enum ScanOutcome {
     Pending(Pin<Box<dyn Future<Output = Result<(Vec<ScanEntry>, bool), CtError>> + Send>>),
 }
 
-/// Zero-copy borrowed value from a fast-path `ct_get_async` completion.
-/// Holds the `ct_future` handle so the epoch guard keeping the frame
-/// resident stays alive until this value is dropped. `!Send` because the
-/// epoch guard is thread-local (`EpochManager::Guard` must be released on
-/// the thread that entered it).
+/// Zero-copy borrowed value from a `ct_get_async` completion. Holds the
+/// `ct_future` handle so the C++ page refcount (R6) keeping the frame
+/// resident stays alive until this value is dropped. `Send` because the
+/// per-page refcount is thread-independent (R6: pin/unpin from any thread).
 pub struct PinnedValue {
     handle: *mut sys::ct_future,
     data: *const u8,
     len: usize,
-    _not_send: std::marker::PhantomData<*mut ()>,
 }
+
+// R6: PinnedValue is Send — the C++ page refcount (pin_state_ on PageBase)
+// is a thread-independent atomic. ct_future_free unpins from the dropping
+// thread. SAFETY: the handle is a unique pointer to a heap-allocated
+// ct_future_impl; no shared mutable state across threads except the
+// refcount atomics, which are designed for cross-thread access.
+unsafe impl Send for PinnedValue {}
 
 impl PinnedValue {
     /// Borrow the value bytes directly from the C++ engine's internal
@@ -1594,6 +1598,30 @@ impl PinnedValue {
         } else {
             unsafe { std::slice::from_raw_parts(self.data, self.len) }
         }
+    }
+
+    /// Convert into a `Bytes` that borrows directly from the C++ frame —
+    /// zero-copy. The `ct_future` handle (and its page refcount pins) is
+    /// kept alive until the `Bytes` is dropped, on any thread (R6: the
+    /// per-page refcount is thread-independent, so `PinnedValue` is `Send`).
+    /// When the last `Bytes` ref clone is dropped, the owner's `Drop` runs,
+    /// which drops the `PinnedValue`, which calls `ct_future_free` to unpin.
+    #[must_use]
+    pub fn into_bytes(self) -> bytes::Bytes {
+        bytes::Bytes::from_owner(PinnedBytesOwner { pv: self })
+    }
+}
+
+/// Owner backing a `Bytes` created from `PinnedValue::into_bytes`. Holds the
+/// `PinnedValue` so its `Drop` (calling `ct_future_free`) runs when the
+/// `Bytes`'s refcount hits zero. `Send` because `PinnedValue` is `Send` (R6).
+struct PinnedBytesOwner {
+    pv: PinnedValue,
+}
+
+impl AsRef<[u8]> for PinnedBytesOwner {
+    fn as_ref(&self) -> &[u8] {
+        self.pv.as_bytes()
     }
 }
 

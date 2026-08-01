@@ -179,6 +179,9 @@ async fn main() {
         .await;
     }
 
+    // Reconcile local state with group 0 topology KV.
+    crowkv_server::reconcile::reconcile_with_group0(&registry).await;
+
     // Wire engine stats collector into the metrics runner, then start it.
     // The collector polls C++ engine counters via ct_get_stats each tick,
     // computes deltas, and inc_by()s on registered Rust counters so they
