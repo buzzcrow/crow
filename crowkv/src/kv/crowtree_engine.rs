@@ -7,9 +7,7 @@
 use super::op::Cell;
 use super::{Batch, KVEngine, KVFuture, Op};
 use bytes::Bytes;
-use crowtree_ffi::{
-    AsyncCrowtree, BatchOp as CtBatchOp, Crowtree, CtError, GetOutcome, PinnedGetOutcome, ScanOutcome,
-};
+use crowtree_ffi::{AsyncCrowtree, Crowtree, CtError, ExtOp, GetOutcome, PinnedGetOutcome, ScanOutcome};
 use std::sync::Arc;
 
 pub use crowtree_ffi::Options as CrowtreeOptions;
@@ -139,25 +137,29 @@ impl KVEngine for CrowtreeEngine {
         if batch.ops.is_empty() {
             return KVFuture::ready(Ok(()));
         }
-        let ops: Vec<CtBatchOp<'_>> = batch
+        // R30 zero-copy apply: the value Bytes are borrowed by crowtree via
+        // kExternal buffers (no value memcpy on the apply critical path); the
+        // copy is deferred to MemTable drain (flush, off the critical path).
+        // Bytes::clone is an O(1) Arc ref-bump, so building ExtOps from the
+        // borrowed Batch is zero-copy. crowtree enforces per-key
+        // highest-slot-wins internally, same contract InMemKV enforces itself,
+        // via one atomic multi-key apply so a concurrent reader never observes
+        // a partially-applied batch.
+        let ops: Vec<ExtOp> = batch
             .ops
             .iter()
             .map(|b| match &b.op {
-                Op::Put(v) => CtBatchOp::Put {
-                    key: b.key.as_ref(),
-                    value: v.as_ref(),
+                Op::Put(v) => ExtOp::Put {
+                    key: b.key.clone(),
+                    value: v.clone(),
                 },
-                Op::Delete => CtBatchOp::Delete { key: b.key.as_ref() },
+                Op::Delete => ExtOp::Delete { key: b.key.clone() },
             })
             .collect();
-        // crowtree enforces per-key highest-slot-wins internally against its
-        // own resolved state, same contract InMemKV enforces itself, via one
-        // atomic multi-key apply (ct_apply_batch) so a concurrent reader
-        // never observes a partially-applied batch.
         let result = self
             .inner
             .handle()
-            .apply_batch(slot, &ops)
+            .apply_batch_external(slot, ops)
             .map_err(|e| e.to_string());
         KVFuture::ready(result)
     }

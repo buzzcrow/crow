@@ -712,6 +712,38 @@ Status Crowtree::apply_encoded(uint64_t slot, std::vector<encoded_op> ops)
     return Status::Ok();
 }
 
+Status Crowtree::apply_external(uint64_t slot, std::vector<external_op> ops)
+{
+    // Same guard as apply_encoded: validate every key before any state mutation.
+    const size_t key_limit = max_key_size();
+    for (const external_op &op : ops) {
+        if (op.key.size() > key_limit) {
+            return Status::invalid_argument("key exceeds max_key_size (" + std::to_string(op.key.size()) + " > " +
+                                            std::to_string(key_limit) + ")");
+        }
+    }
+    if (!ops.empty()) {
+        // Intra-batch: last occurrence (vector order) wins, same as apply_encoded.
+        // Track {flags, value} per key; the value buffer is moved straight down
+        // (no encode_cell_buf, no value memcpy).
+        std::map<std::string, std::pair<uint8_t, buffer>> latest;
+        for (external_op &op : ops) {
+            latest[std::move(op.key)] = {op.flags, std::move(op.value)};
+        }
+        std::shared_ptr<MemTable> active = current_active();
+        while (!latest.empty()) {
+            auto node = latest.extract(latest.begin());
+            active->upsert_external(Slice(node.key()), slot, node.mapped().first, std::move(node.mapped().second));
+            mt_upsert_total_.fetch_add(1, std::memory_order_relaxed);
+            if (metrics_.mt_upsert_c != nullptr) {
+                metrics_.mt_upsert_c->inc();
+            }
+        }
+    }
+    note_applied_slot(slot);
+    return Status::Ok();
+}
+
 void Crowtree::force_advance_slot(uint64_t slot)
 {
     {

@@ -1,75 +1,140 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-### R30: Zero-copy engine apply — eliminate all write-path copies
+### R30: Zero-copy engine apply — eliminate the apply-path value copy
 
-**Problem**: The write path from Paxos commit to crowtree frame build still
-has two copies even after R3's handle-based FFI:
+**Problem**: The write path from Paxos commit to crowtree memtable still
+copies the value once on the apply critical path, even after R23's
+slice-based `ct_apply_batch_slices` and R3's handle-based FFI.
 
-1. **Deserialization copy** — `learn_chosen` decodes the Paxos payload into
-   Rust `Vec<u8>` key/value buffers (`Batch` struct), then passes `&[u8]`
-   borrows to `KVEngine::apply`.
-2. **Boundary copy** — `CrowtreeEngine::apply` maps to `ct_apply_batch_slices`,
-   which copies key+value into C++ internal `buffer`s (Option A, §2.3).
+R23 already eliminated the deserialization copy: `Batch::decode` uses
+`payload.slice(...)` per key/value, producing `Bytes` ref-bumps (O(1),
+zero copy) — no `Vec<u8>` materialization. The one remaining copy is in
+`encode_cell_buf` (called inside `ct_apply_batch_slices`): it allocates
+a contiguous `[9-byte header][value]` buffer and `memcpy`s the value
+bytes out of the caller's `Bytes` slice into it. For a 64 KiB value
+that is a 64 KiB copy on the consensus/apply thread.
 
-R3 delivered `ct_alloc` / `ct_apply_put_owned` / `ct_free_handle` and the
-Rust `WriteHandle` wrapper, but the consensus layer does not use them. This
-item wires the full path so data flows from Paxos payload bytes to crowtree
-frame with zero intermediate copies.
+A second copy happens later at flush (`frame_page.cpp` writes the cell
+into the slotted frame via `memcpy`). That copy is unavoidable (page
+construction) and off the critical path (async Flusher thread). R30
+targets only the apply-path copy.
 
-**Approach**:
+**Why the R3 handle path does not help here**: `ct_alloc` +
+`ct_apply_put_owned` lets a caller write key/value into crowtree-owned
+memory then move it in. But the caller still must copy the value *from
+the packed payload `Bytes` slice* into the handle's writable pointer —
+relocating the same copy from C++ to Rust, not eliminating it. The copy
+is unavoidable *as long as the cell must be one contiguous
+`[header][value]` buffer*, because the value bytes live in a shared
+packed `Bytes` that cannot be moved into a per-op C++ allocation.
 
-- **Paxos deserialization into handles** — Instead of materializing
-  `Batch { Vec<u8> key, Vec<u8> value }`, the deserializer calls
-  `Crowtree::alloc_put(key_len, val_len)` and writes decoded key/value bytes
-  directly into the handle's writable pointers. The handle is then applied
-  via `WriteHandle::apply(slot)`. No Rust-side `Vec<u8>` allocation for
-  keys or values.
+**Approach — split-cell with an external (Bytes-borrowed) value buffer**:
 
-- **Batch handle API** — R3 only supports single-put handles. The consensus
-  layer applies multi-key batches atomically. Either:
-  - Extend the C API with `ct_alloc_batch(count)` returning a batch handle
-    with per-entry alloc slots, plus `ct_apply_batch_owned` that consumes
-    the whole batch; or
-  - Keep single handles and add an atomic apply-variant that takes a
-    `Vec<WriteHandle>` and applies all-or-nothing at the C++ level.
+The cell's contiguous `[header][value]` layout is load-bearing across
+the engine (`CellView`, delta chains, frames, snapshot I/O — ~50 sites).
+Rather than refactor the cell representation everywhere, R30 splits the
+cell *only while it lives in the MemTable*, and materializes the
+contiguous form at flush / L0-read / snapshot-export — points where a
+copy already exists.
 
-- **WAL replay path** — Same treatment: replay decoded entries directly
-  into handles instead of materializing `Vec<u8>` intermediates.
+- **`buffer::mode::kExternal`** — a new buffer mode that borrows value
+  bytes from a Rust-owned `Bytes`. Holds `{ptr, len, owner, drop_fn}`;
+  `drop_fn(owner)` is a C function pointer that calls back into Rust to
+  decrement the `Bytes` refcount when the buffer is freed. No malloc,
+  no memcpy at construction. The payload `Bytes` stays alive (refcount
+  pinned by every external buffer borrowing a slice of it) until the
+  MemTable drains those entries at flush.
 
-- **`KVEngine::apply` signature** — Current trait method takes `&Batch`
-  (borrowed data already in Rust memory). Needs a new variant or path
-  that accepts owned handles, e.g. `apply_handles(slot, Vec<WriteHandle>)`
-  or a streaming callback that writes into handle memory.
+- **Split `mem_entry`** — while in the MemTable, a cell is stored as
+  `{ slot: u64, flags: u8, value: buffer }` rather than one contiguous
+  `buffer` cell. The 9-byte header is NOT stored as bytes — it is two
+  integer fields (zero allocation). The value is a `kExternal` buffer
+  borrowing from the payload `Bytes`. `CellView` is not used on the
+  split form; the memtable reads `slot`/`flags` from the fields and the
+  value from the external buffer's slice directly.
 
-- **Fallback** — For small values (≤ SBO threshold, ~15 B), the handle
-  path and the copy path have identical cost (inline storage, no malloc).
-  The engine can use Option A for small values and Option B for large
-  values, gated by a threshold, to avoid handle overhead on the fast path.
+- **Materialization at flush** — when the Flusher drains entries into a
+  batch delta, it materializes each split cell into one contiguous
+  `[header][value]` `buffer` (write header from `slot`/`flags`, `memcpy`
+  value from the external pointer). This copy happens on the async
+  Flusher thread, not the apply critical path. The frame builder then
+  consumes the contiguous cell unchanged. (Optimization: fold header +
+  value straight into the frame, skipping the intermediate cell buffer.)
 
-**Priority**: Medium — eliminates the last copies on the write critical
+- **L0 read path** — `MemTable::get` already copies the cell into a
+  `std::string` today. For a split cell it writes the 9-byte header from
+  the fields + `memcpy`s the value from the external pointer — same one
+  copy plus 9 bytes. No read regression. `MemTable::snapshot` (scan
+  merge) similarly materializes on clone.
+
+- **FFI** — new `ct_apply_batch_external(tree, slot, ops, count)` where
+  each op carries `{key_ptr, key_len, value_ptr, value_len, kind,
+  bytes_ref, drop_fn}`. `bytes_ref` is an opaque pointer to a Rust
+  refcount handle (e.g. a heap-allocated `Arc<Bytes>`); `drop_fn`
+  decrements it. The C++ side wraps each value as a `kExternal` buffer
+  and each key as a copied `std::string` (keys are small; SBO). The
+  Rust FFI layer owns the handle lifecycle: it clones the payload
+  `Bytes` ref once per op, passes the handles to C++, and the C++
+  `kExternal` buffers' destructors call `drop_fn` at flush/drain time.
+
+- **`KVEngine::apply` path** — the learner's `apply_entry` decodes the
+  payload `Batch` (zero-copy `Bytes` slices, unchanged) and, for
+  `CrowtreeEngine`, calls the new external apply path instead of
+  `apply_batch`. `InMemKV` is unaffected (it copies into its own
+  `DashMap` regardless). A new `KVEngine` method or a
+  `CrowtreeEngine`-specific path avoids changing the trait for engines
+  that cannot benefit.
+
+- **WAL replay** — same path (`learner.learn` → `apply_entry`), so it
+  benefits automatically. No separate replay change.
+
+- **Small-value fast path** — values ≤ SBO threshold (~15 B) are inline
+  in the current design with no malloc. The external path has identical
+  cost for small values (no malloc either — it borrows). No threshold
+  gating needed; the external path is uniformly ≤ the copy path. The
+  only overhead is the refcount handle clone per op (one atomic
+  increment), negligible vs. a memcpy.
+
+**Priority**: Medium — eliminates the last copy on the apply critical
 path; meaningful for large-value workloads (≥ 4 KiB).
 
-**Complexity**: High — touches Paxos payload deserialization, WAL replay,
-`KVEngine` trait, `CrowtreeEngine` adapter, and requires a batch-handle
-C API extension. Cross-layer change with consensus semantics implications
-(batch atomicity must be preserved).
+**Complexity**: High — touches the C++ `buffer` abstraction (new mode),
+`mem_entry` shape, MemTable upsert/get/drain/snapshot, flush
+materialization, L0 read, snapshot I/O, the C API, the Rust FFI layer,
+and the learner apply path. Cross-layer change; the cell representation
+change is scoped to the MemTable to limit blast radius, but every
+`CellView` consumer of memtable output must be audited.
 
-**Depends on**: R3 (completed) — handle-based FFI C API + Rust wrapper.
+**Depends on**: R3 (completed) — handle-based FFI C API + Rust wrapper;
+R23 (completed) — slice-based `ct_apply_batch_slices` + zero-copy
+`Batch::decode`.
 
 **Files**:
-- `crowkv/src/consensus/` — Paxos payload deserialization, `learn_chosen`
-- `crowkv/src/kv/engine.rs` — `KVEngine` trait
-- `crowkv/src/kv/crowtree_engine.rs` — `CrowtreeEngine::apply`
-- `crowkv/src/wal/` — WAL replay path
-- `crowtree/include/crowtree/c_api.h` — batch handle API (if needed)
-- `crowtree/src/c_api.cpp` — batch handle implementation
-- `crowtree/ffi/src/lib.rs` — Rust batch handle wrapper
+- `crowtree/include/crowtree/buffer.h` — `kExternal` mode + drop callback
+- `crowtree/include/crowtree/memtable.h` — split `mem_entry`
+- `crowtree/src/memtable.cpp` — upsert/get/drain/snapshot for split cells
+- `crowtree/src/crowtree.cpp` — `apply_encoded` external path, flush
+  materialization, L0 read, snapshot I/O audit
+- `crowtree/src/frame_page.cpp` — consume materialized contiguous cell
+  (unchanged, or folded header+value directly)
+- `crowtree/include/crowtree/c_api.h` — `ct_apply_batch_external`
+- `crowtree/src/c_api.cpp` — external batch apply implementation
+- `crowtree/ffi/src/lib.rs` — Rust `Bytes` ref handle, drop callback,
+  `apply_batch_external` wrapper
+- `crowkv/src/kv/crowtree_engine.rs` — `KVEngine::apply` external path
+- `crowkv/src/paxos/learner.rs` — `apply_entry` wiring
+- `crowkv/src/kv/op.rs` — expose `Bytes` slices for the external path
 
 **Acceptance**:
-- Benchmark: zero `memcpy` calls on the apply path for values > 4 KiB
-  (verify with profiling — `samply` on macOS, `perf` on Linux).
-- No regression for small values (≤ 256 B): latency within ±5% of Option A.
+- Profiling: zero value `memcpy` on the apply path for values > 4 KiB
+  (verify with `samply` on macOS, `perf` on Linux). The only remaining
+  value copy is at flush (off the critical path).
+- No regression for small values (≤ 256 B): apply latency within ±5%
+  of the current `ct_apply_batch_slices` path.
 - Existing consensus tests pass (batch atomicity, WAL recovery).
-- New integration test: large-value batch (3 keys, 64 KiB each) round-trip
-  through Paxos commit → apply → read.
+- New integration test: large-value batch (3 keys, 64 KiB each)
+  round-trip through Paxos commit → apply → read.
+- New test: external-buffer lifetime — a payload `Bytes` is not freed
+  until the MemTable drains the entries borrowing from it (valgrind /
+  ASan clean under a stress apply + flush cycle).
