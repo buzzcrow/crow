@@ -538,6 +538,9 @@ class Crowtree
 
     // pin a consistent point-in-time view at `last_applied_slot` (the durable L1
     // state). Used for scan-at / compare / iter_all / snapshot export.
+    // R6: returns a PinnedSnapshot (zero-copy, page refcount pins keep frames
+    // alive across threads). The return type is shared_ptr<Snapshot> for ABI
+    // compatibility with existing callers; PinnedSnapshot inherits from Snapshot.
     [[nodiscard]] std::shared_ptr<Snapshot> snapshot_view();
 
     // Replace the entire engine state with `sorted_entries` (key-sorted, including
@@ -849,6 +852,9 @@ class Crowtree
     // (demand-load). Hot (resident) path is lock-free; the cold path locks
     // load_mutex_ and double-checks. Returns nullptr if the slot is unset.
     [[nodiscard]] PageBase *resident(uint64_t page_id) const;
+
+    // R6: capture all pages in an overflow chain (for PinnedSnapshot pinning).
+    void capture_overflow_chain(uint64_t head_page_id, std::vector<PageBase *> &out);
 
     // Shared by resident()'s synchronous cold path and get_async's async
     // completion handler: decodes+validates a
