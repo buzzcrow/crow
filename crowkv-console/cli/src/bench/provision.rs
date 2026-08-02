@@ -113,6 +113,7 @@ impl BenchFixture {
     /// Returns an error if the console-web instance fails to bind, any
     /// provisioning call fails, or no leader is elected within the
     /// timeout.
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         mode: BenchMode,
         workspace_dir: PathBuf,
@@ -120,6 +121,8 @@ impl BenchFixture {
         inflight_queues: usize,
         metrics_interval: u64,
         node_config: Option<String>,
+        coalesce_window_us: Option<u64>,
+        coalesce_max_keys: Option<usize>,
     ) -> Result<Self> {
         std::fs::create_dir_all(&workspace_dir)?;
 
@@ -139,6 +142,8 @@ impl BenchFixture {
             inflight_queues,
             metrics_interval,
             node_config,
+            coalesce_window_us,
+            coalesce_max_keys,
         )
         .await
         {
@@ -190,6 +195,7 @@ impl BenchFixture {
     /// Create 1 rack + 1 node per rack (`NODE_COUNT` total) and deploy a
     /// `crowkv-server` on each, in `mode`. Returns the node ids and their
     /// server pids (index-aligned).
+    #[allow(clippy::too_many_arguments)]
     async fn provision_nodes(
         client: &ConsoleClient,
         mode: BenchMode,
@@ -197,6 +203,8 @@ impl BenchFixture {
         inflight_queues: usize,
         metrics_interval: u64,
         node_config: Option<String>,
+        coalesce_window_us: Option<u64>,
+        coalesce_max_keys: Option<usize>,
     ) -> Result<(Vec<String>, Vec<u32>, Vec<String>, Vec<String>)> {
         let mut ids = Vec::with_capacity(NODE_COUNT);
         let mut pids = Vec::with_capacity(NODE_COUNT);
@@ -235,6 +243,8 @@ impl BenchFixture {
                 metrics_interval: Some(metrics_interval),
                 max_inflight: Some(max_inflight),
                 inflight_queues: Some(inflight_queues),
+                coalesce_window_us,
+                coalesce_max_keys,
                 ..Default::default()
             };
             mode.apply_to(&mut body);

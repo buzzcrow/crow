@@ -120,8 +120,12 @@ async fn main() {
     config.wal_skip_fsync = args.no_fsync;
     config.paxos.max_inflight_proposals = args.max_inflight;
     config.paxos.inflight_queues = args.inflight_queues;
-    config.paxos.coalesce_window_us = args.coalesce_window_us;
-    config.paxos.coalesce_max_keys = args.coalesce_max_keys;
+    if let Some(window) = args.coalesce_window_us {
+        config.paxos.coalesce_window_us = window;
+    }
+    if let Some(max_keys) = args.coalesce_max_keys {
+        config.paxos.coalesce_max_keys = max_keys;
+    }
 
     let registry = Arc::new(KvStoreRegistry::with_config(config).with_metrics_registry(
         metrics_runner.as_ref().map_or_else(

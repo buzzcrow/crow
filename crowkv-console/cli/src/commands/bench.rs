@@ -119,6 +119,16 @@ pub struct RunArgs {
     /// config fields without changing defaults.
     #[arg(long)]
     pub node_config: Option<String>,
+
+    /// R36 coalesce window in microseconds (--coalesce-window-us on each
+    /// spawned server). `0` disables. Default: 0 (disabled).
+    #[arg(long)]
+    pub coalesce_window_us: Option<u64>,
+
+    /// R36 max ops per coalesced batch (--coalesce-max-keys on each
+    /// spawned server). Default: 32.
+    #[arg(long)]
+    pub coalesce_max_keys: Option<usize>,
 }
 
 /// Arguments for `crowkv-cli bench`.
@@ -220,6 +230,8 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
         args.inflight_queues,
         args.metrics_interval,
         args.node_config.clone(),
+        args.coalesce_window_us,
+        args.coalesce_max_keys,
     )
     .await
     {

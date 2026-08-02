@@ -510,6 +510,12 @@ pub struct DeployNodeServerBody {
     /// `--inflight-queues` value for multi-queue admission.
     #[serde(default)]
     inflight_queues: Option<usize>,
+    /// `--coalesce-window-us` value for R36 proposal coalescing.
+    #[serde(default)]
+    coalesce_window_us: Option<u64>,
+    /// `--coalesce-max-keys` value for R36 proposal coalescing.
+    #[serde(default)]
+    coalesce_max_keys: Option<usize>,
     /// Optional `--config` JSON path passed to the spawned `crowkv-server`.
     #[serde(default)]
     config: Option<String>,
@@ -601,6 +607,8 @@ pub async fn http_deploy_node_server(
         metrics_interval: body.metrics_interval,
         max_inflight: body.max_inflight,
         inflight_queues: body.inflight_queues,
+        coalesce_window_us: body.coalesce_window_us,
+        coalesce_max_keys: body.coalesce_max_keys,
         config: body.config.clone().map(std::path::PathBuf::from),
     };
 

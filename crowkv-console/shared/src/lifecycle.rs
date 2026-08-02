@@ -50,6 +50,12 @@ pub struct DeployRequest {
     /// `--inflight-queues` value. `None` leaves the spawned server's
     /// own default in effect.
     pub inflight_queues: Option<usize>,
+    /// `--coalesce-window-us` value. `None` leaves the spawned server's
+    /// own default in effect.
+    pub coalesce_window_us: Option<u64>,
+    /// `--coalesce-max-keys` value. `None` leaves the spawned server's
+    /// own default in effect.
+    pub coalesce_max_keys: Option<usize>,
     /// Optional `--config` JSON path for `crowkv-server`.
     pub config: Option<PathBuf>,
 }
@@ -129,6 +135,12 @@ fn apply_benchmark_flags(cmd: &mut Command, req: &DeployRequest) {
     }
     if let Some(queues) = req.inflight_queues {
         cmd.arg("--inflight-queues").arg(queues.to_string());
+    }
+    if let Some(window) = req.coalesce_window_us {
+        cmd.arg("--coalesce-window-us").arg(window.to_string());
+    }
+    if let Some(max_keys) = req.coalesce_max_keys {
+        cmd.arg("--coalesce-max-keys").arg(max_keys.to_string());
     }
     if let Some(config) = &req.config {
         cmd.arg("--config").arg(config.as_os_str());
