@@ -26,8 +26,9 @@ complexity, and dependency. Before implementation, follow the
   against a higher-`seq` request that committed first, silently
   dropping its payload while reporting success. Reachable by the
   documented concurrent-pipelining client pattern (shared
-  `Arc<CrowkvClient>`, one `client_id`, many in-flight requests).
-  Correctness bug, not a tuning item.
+  `Arc<CrowkvClient>` on the default `ids=None` write path, one
+  `client_id`, many in-flight requests). Correctness bug, not a
+  tuning item.
 
 ### Medium Priority
 

@@ -68,10 +68,9 @@ async fn dedup_lookup_returns_slot_for_already_applied_seq() {
         Some(5),
         "exact seq match returns commit slot"
     );
-    assert_eq!(
-        learner.dedup_lookup(42, 2),
-        Some(5),
-        "lower seq also returns commit slot (already applied)"
+    assert!(
+        learner.dedup_lookup(42, 2).is_none(),
+        "unrecorded lower seq is a miss, not a hit against a higher seq's slot"
     );
 }
 
@@ -87,7 +86,7 @@ async fn dedup_lookup_returns_none_for_higher_seq() {
 }
 
 #[tokio::test]
-async fn dedup_tracks_highest_seq_per_client() {
+async fn dedup_records_each_seq_at_its_own_slot() {
     let learner = PxLearner::new();
     // Apply seq=1 at slot 1, then seq=5 at slot 3 for the same client.
     learner
@@ -97,19 +96,23 @@ async fn dedup_tracks_highest_seq_per_client() {
         .learn(write_entry(3, &encode_put(b"a", b"5")), Some(7), Some(5))
         .await;
 
-    // seq=5 is the highest; lookup for seq <= 5 returns slot 3.
+    // Each recorded seq maps to its own slot (exact-match lookup).
+    assert_eq!(learner.dedup_lookup(7, 1), Some(1));
     assert_eq!(learner.dedup_lookup(7, 5), Some(3));
-    assert_eq!(
-        learner.dedup_lookup(7, 1),
-        Some(3),
-        "older seq maps to latest slot"
-    );
+    // An unrecorded seq is a miss, not a hit against a higher seq's slot.
+    assert!(learner.dedup_lookup(7, 2).is_none());
+    assert!(learner.dedup_lookup(7, 4).is_none());
 
-    // A lower seq applied later does not regress the dedup record.
+    // A lower seq applied later is recorded at its own slot, not ignored.
     learner
         .learn(write_entry(4, &encode_put(b"a", b"2")), Some(7), Some(2))
         .await;
-    assert_eq!(learner.dedup_lookup(7, 5), Some(3), "highest seq slot unchanged");
+    assert_eq!(
+        learner.dedup_lookup(7, 2),
+        Some(4),
+        "newly recorded seq hits its own slot"
+    );
+    assert_eq!(learner.dedup_lookup(7, 5), Some(3), "earlier seq slot unchanged");
 }
 
 #[tokio::test]
