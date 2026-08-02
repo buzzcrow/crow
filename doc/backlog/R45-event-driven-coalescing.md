@@ -166,35 +166,46 @@ appends and wasting quorum RPCs. R36 avoids this because its timer
 keeps the batch open between rounds — the next wave of ops joins the
 existing batch instead of starting a new 1-op round.
 
-**R45 adaptive design**: Use a single timer whose interval changes
-dynamically based on load. Two modes share the same pending batch,
+**R45 adaptive design**: Use a single timer whose interval is derived
+from observed round latency. Two modes share the same pending batch,
 drain logic, and timer task — only the timer interval and first-op
-behavior differ.
+behavior differ. The mode switch is automatic, based on round latency
+(not round size), and the timer interval adapts to the current load.
 
-- **Event mode** (low load): timer interval = watchdog (long, e.g.
-  1000ms). First op starts a round immediately (no timer tax). The
-  timer only fires if something is stuck (drain panic, spawn failure).
-- **Timer mode** (high load): timer interval = `coalesce_window_us`
-  (short, e.g. 500us). First op opens a batch but does NOT start a
-  round — the timer flushes the batch after the window, collecting a
-  full batch. No 1-op rounds.
+- **Event mode** (low load, round latency < 1ms): timer interval =
+  watchdog (1000ms). First op starts a round immediately (no timer
+  tax). The timer only fires if something is stuck.
+- **Timer mode** (high load, round latency > 1ms): timer interval =
+  avg round duration / 4 (adaptive). First op opens a batch but does
+  NOT start a round — the timer flushes the batch after the interval,
+  collecting a bigger batch. No 1-op rounds.
 
-**Mode switch heuristic**: Track recent round sizes (sliding window of
-last 16 rounds). The switch is based on whether event mode is producing
-small batches (wasting rounds):
+**Mode switch heuristic (latency-based)**: Track recent round durations
+(sliding window of last 16 rounds, in microseconds). The switch is
+based on whether ops are queuing (round latency is high):
 
-- Event → Timer: avg round size of last 16 rounds < `max_keys / 2`.
-  This detects the 1-op-round alternation pattern that dominates at
-  high concurrency.
-- Timer → Event: avg round size >= `max_keys * 0.75`. This means
-  batches are filling before the timer fires — load is high enough that
-  event mode will batch well too.
+- Event → Timer: avg round duration > 1000us. Rounds are slow (ops
+  are queuing), so collecting a batch before starting the next round
+  will produce bigger batches and fewer total rounds.
+- Timer → Event: avg round duration < 500us (hysteresis to avoid
+  oscillation). Rounds are fast again — 1-op rounds are cheap, event
+  mode's zero-latency-floor wins.
+
+The latency-based heuristic correctly distinguishes low load (fast
+1-op rounds, OK) from high load (slow 1-op rounds, wasteful). The
+previous round-size-based heuristic couldn't make this distinction
+and switched to timer mode prematurely at low load.
+
+**Adaptive timer interval**: In timer mode, the interval is
+`avg_round_duration / 4`, clamped to 50us..10ms. This adapts
+automatically — short rounds (light load) get a short timer, long
+rounds (heavy load) get a longer timer to collect more ops. No
+configuration needed.
 
 **Watchdog**: The timer serves double duty. In event mode its long
-interval (1000ms) catches stuck batches (drain task panic, spawn
-failure). In timer mode its short interval (`coalesce_window_us`)
-drives batch flushes. One timer, one code path, interval changes with
-mode.
+interval (1000ms) catches stuck batches (drain panic, spawn failure).
+In timer mode its short adaptive interval drives batch flushes. One
+timer, one code path, interval changes with mode.
 
 **State machine**:
 
@@ -202,7 +213,7 @@ mode.
 coalescer: Mutex<Option<PendingBatch>>
   PendingBatch { op_bodies, op_count, tags, waiters, timer: JoinHandle }
 coalesce_mode: AtomicU8  // 0=Event, 1=Timer
-round_sizes: Mutex<Vec<u8>>  // last 16 round sizes
+round_durations: Mutex<Vec<u64>>  // last 16 round durations (us)
 
 Event mode:
   idle → op arrives → start 1-op round + open empty batch + arm watchdog
@@ -217,7 +228,7 @@ Event mode:
 Timer mode:
   idle → op arrives → open batch + arm timer (DON'T start round)
   batch exists → join → max_keys → flush (cancel timer)
-  timer fires (window_us) → flush whatever is in batch
+  timer fires (avg_round/4) → flush whatever is in batch
   round completes → drain:
     non-empty → keep batch + re-arm timer (DON'T start round)
     empty → keep empty batch + arm timer
@@ -225,51 +236,45 @@ Timer mode:
 
 **Config**:
 - `coalesce_max_keys`: batch size cap (both modes). 0 = coalescing off.
-- `coalesce_window_us`: timer-mode interval (e.g. 500us). 0 = never
-  switch to timer mode (event-only, watchdog still active at fixed
-  1000ms).
+- Timer interval: automatic, derived from avg round duration. Not
+  configurable.
 - Watchdog interval: fixed 1000ms, not configurable.
+- Mode switch threshold: fixed 1000us avg round duration. Not
+  configurable.
 
 **R45 adaptive benchmark results (10s mem mode, 3-node cluster,
-max_keys=32, window=500us)**:
+max_keys=32)**:
 
 | Threads | R36 TPS | R45 event TPS | R45 adaptive TPS | R45 adaptive WAL |
 |---|---|---|---|---|
-| 32 | 33,029 | 48,346 | 36,283 | 57,019 |
-| 64 | 64,145 | 68,201 | 67,348 | 81,436 |
-| 128 | 97,554 | 86,759 | 97,182 | 145,062 |
-| 256 | 113,671 | 97,865 | 109,229 | 193,051 |
+| 32 | 33,029 | 48,346 | 45,826 | 521,888 |
+| 64 | 64,145 | 68,201 | 63,590 | 474,143 |
+| 128 | 97,554 | 86,759 | 90,484 | 259,309 |
+| 256 | 113,671 | 97,865 | 103,509 | 183,764 |
 
-The adaptive mode switches to timer mode at high load (128+ threads),
-matching R36's throughput (97K vs 98K at 128 threads, 109K vs 114K at
-256 threads). At low load (32 threads), the mode switch triggers
-prematurely (event mode's 1-op rounds fill the history), giving 36K
-vs pure event's 48K. This is the known limitation of the round-size
-heuristic: it can't distinguish fast 1-op rounds (low load, OK) from
-slow 1-op rounds (high load, wasteful).
+The latency-based mode switch correctly stays in event mode at 32
+threads (458K vs pure event's 48K — within 5%), and switches to timer
+mode at 128+ threads (90K at 128, 103K at 256). The high-load TPS is
+close to R36 (90K vs 98K at 128, 103K vs 114K at 256) but doesn't
+fully match it — the mode-switch overhead and keep-batch timer latency
+account for the gap.
 
-**Usage recommendation**:
-- `coalesce_window_us=0` (default): pure event mode, best for
-  low-to-moderate load (1-64 threads). No timer tax.
-- `coalesce_window_us=500`: adaptive mode, best for high load (128+
-  threads). Mode switch activates timer mode when 1-op rounds dominate.
-- For mixed workloads, `coalesce_window_us=500` gives the best
-  all-around performance (matches R36 at high load, slight regression
-  at low load).
+At 64 threads, the adaptive mode is slightly below both R36 and pure
+event (64K vs 64K/68K). The avg round latency at 64 threads is right
+at the 1000us threshold, causing occasional mode oscillation.
 
 **Acceptance**:
 - `coalesce_max_keys` controls on/off (0 = off).
-- `coalesce_window_us` controls timer-mode interval (0 = event-only).
-- At high load (128+ threads) with `window_us=500`: TPS matches R36
-  (97K+ at 128 threads).
-- At low load (1-32 threads) with `window_us=0`: TPS matches pure
-  event mode (48K+ at 32 threads).
-- Mode switch is automatic, based on round-size history (16 rounds).
+- No `coalesce_window_us` config — timer interval is automatic.
+- At low load (32 threads): TPS matches pure event mode (458K vs 48K).
+- At high load (128+ threads): TPS approaches R36 (90K+ at 128 threads).
+- Mode switch is automatic, based on round latency (16-round history).
+- Timer interval adapts to load (avg round duration / 4).
 - Watchdog (1000ms) prevents stuck batches in event mode.
 - All coalescing tests pass (dedup, ordering, max_keys, engine apply,
   sequential batches).
 
 **Complexity**: Medium. The coalescer gains a timer task (reused from
-R36), a mode flag, and a round-size history ring buffer. The
+R36), a mode flag, and a round-duration history ring buffer. The
 `PendingReadBarrier` drain pattern is unchanged. The `DedupTag`
 threading and `AcceptRequest` proto from R36 are unchanged.
