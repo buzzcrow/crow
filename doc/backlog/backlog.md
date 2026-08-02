@@ -45,14 +45,6 @@ complexity, and dependency. Before implementation, follow the
   `crow-tree` / `crow::tree` / `CROW_TREE_*`. Establishes the `crowkv` →
   `crow-tree` dependency boundary analogous to `crowkv` → `crow-common`.
   Most naturally done after R12.
-- **[R36](R36-proposal-coalescing.md)** — Server-side proposal coalescing — Area: consensus / write path —
-  A bounded micro-batcher at the `PxGroup::propose` entry merges
-  concurrent single-key proposes into one multi-key Paxos proposal
-  (one slot, one quorum RPC, one fsync), amortizing the per-proposal
-  fixed cost. Must preserve `(client_id, seq)` dedup ordering; tunable
-  coalesce window (`coalesce_window_us = 0` disables). Directly attacks
-  the throughput saturation ceiling. Medium-high complexity; touches
-  the admission gate and propose entry.
 - **[R37](R37-scan-start-after-pushdown.md)** — Scan `start_after` push-down into the C++ engine — Area:
   read path / scan — `ct_scan_async` takes only `prefix` + `limit`; when
   `start_after` is non-empty the Rust wrapper over-fetches the whole
