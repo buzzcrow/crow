@@ -78,10 +78,7 @@ pub struct DeployNodeServerBody {
     /// `--inflight-queues` value for multi-queue admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inflight_queues: Option<usize>,
-    /// `--coalesce-window-us` value for R36 proposal coalescing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub coalesce_window_us: Option<u64>,
-    /// `--coalesce-max-keys` value for R36 proposal coalescing.
+    /// `--coalesce-max-keys` value for R45 proposal coalescing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coalesce_max_keys: Option<usize>,
     /// Optional `--config` JSON path passed to the spawned `crowkv-server`.

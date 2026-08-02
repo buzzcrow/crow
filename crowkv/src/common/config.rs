@@ -64,14 +64,9 @@ pub struct PaxosConfig {
     /// with `Busy`) or `Queue` (block until a permit is freed). Default
     /// `Reject`.
     pub inflight_admission: AdmissionPolicy,
-    /// R36 coalesce window in microseconds. The leader micro-batches
-    /// concurrent single-key proposes for up to this long before flushing
-    /// one multi-key Paxos proposal. `0` disables coalescing (current
-    /// behavior — one proposal per key). Default `0` (opt-in).
-    pub coalesce_window_us: u64,
-    /// R36 max ops per coalesced batch. Capped at 255 (the payload op-count
-    /// byte). When a batch fills, it flushes immediately without waiting
-    /// for the window. Default 32.
+    /// R45 max ops per coalesced batch. Capped at 255 (the payload op-count
+    /// byte). `0` disables coalescing (one proposal per key). Default 0
+    /// (opt-in).
     pub coalesce_max_keys: usize,
 }
 
@@ -83,8 +78,7 @@ impl PaxosConfig {
         max_inflight_proposals: 32,
         inflight_queues: 1,
         inflight_admission: AdmissionPolicy::Queue,
-        coalesce_window_us: 0,
-        coalesce_max_keys: 32,
+        coalesce_max_keys: 0,
     };
 }
 

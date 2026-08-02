@@ -59,20 +59,19 @@ pub(crate) struct PendingReadBarrier {
     pub(crate) waiters: Vec<tokio::sync::oneshot::Sender<ReadBarrierOutcome>>,
 }
 
-/// R36: an accumulating coalesced batch. Held in `PxGroup::coalescer`
-/// between the first op of a batch and its flush (timer or
-/// `coalesce_max_keys`). `op_bodies` are the per-op payload bodies
-/// (each single-op payload's leading count byte dropped); the flush
-/// prepends `op_count` and concatenates them into one multi-key `Batch`
-/// payload. `tags` carries one `(client_id, seq)` dedup tag per client
-/// op, all mapping to the shared slot. `waiters` receive the shared
-/// `ProposeResult` when the flush completes.
+/// R45: an accumulating batch for the *next* Paxos round. Held in
+/// `PxGroup::coalescer` while a round is in flight — ops that arrive
+/// during the round append here instead of starting their own round.
+/// When the in-flight round completes, this batch is drained and
+/// becomes the next round (if non-empty). If it fills to `max_keys`
+/// before the round completes, it is flushed immediately as a
+/// concurrent round (the "multiple pipelines" path).
+#[derive(Default)]
 pub(crate) struct PendingBatch {
     pub(crate) op_bodies: Vec<u8>,
     pub(crate) op_count: u8,
     pub(crate) tags: Vec<DedupTag>,
     pub(crate) waiters: Vec<tokio::sync::oneshot::Sender<ProposeResult>>,
-    pub(crate) timer: JoinHandle<()>,
 }
 
 pub struct PxGroup {
@@ -208,6 +207,11 @@ pub struct PxGroup {
     /// under the `test-util` feature; `None` in production.
     #[cfg(feature = "test-util")]
     pub(crate) readindex_round_gate: parking_lot::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// Test-only gate that holds the next coalescer round open until the
+    /// test releases it, so concurrent ops deterministically join the
+    /// pending batch. Consumed by the first round that runs after this call.
+    #[cfg(feature = "test-util")]
+    pub(crate) coalesce_round_gate: parking_lot::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     /// R36 self-weak back-reference, set once the group is wrapped in an
     /// [`Arc`] via [`Self::set_self_weak`]. The coalescer's per-batch timer
     /// task upgrades this to spawn a flush without the group holding a
@@ -215,10 +219,11 @@ pub struct PxGroup {
     /// groups not wrapped in `Arc`); the coalescer falls back to the
     /// direct single-op path when unset.
     pub(crate) self_weak: OnceLock<Weak<PxGroup>>,
-    /// R36 proposal coalescer state. `None` when no batch is accumulating;
-    /// `Some(PendingBatch)` between the first op of a batch and its flush
-    /// (timer or `coalesce_max_keys`). Guarded by its own mutex so the
-    /// hot propose path only touches it when coalescing is active.
+    /// R45 event-driven coalescer state. `None` when idle (no round in
+    /// flight, no batch accumulating); `Some(PendingBatch)` while a Paxos
+    /// round is in flight and ops are accumulating for the next round.
+    /// Drained on round completion to start the next round, or on
+    /// `max_keys` overflow to start a concurrent round.
     pub(crate) coalescer: parking_lot::Mutex<Option<PendingBatch>>,
 }
 
@@ -276,6 +281,8 @@ impl PxGroup {
             pending_read_barrier: parking_lot::Mutex::new(None),
             #[cfg(feature = "test-util")]
             readindex_round_gate: parking_lot::Mutex::new(None),
+            #[cfg(feature = "test-util")]
+            coalesce_round_gate: parking_lot::Mutex::new(None),
             self_weak: OnceLock::new(),
             coalescer: parking_lot::Mutex::new(None),
         };
@@ -1190,12 +1197,13 @@ impl PxGroup {
     /// Propose an opaque payload through Paxos. Returns the slot if chosen,
     /// or an error string.
     ///
-    /// When R36 coalescing is enabled (`coalesce_window_us > 0` and the
-    /// self-weak is set), concurrent single-key proposes are micro-batched
-    /// into one multi-key Paxos proposal (one slot, one quorum round); each
-    /// coalesced caller still receives `ProposeResult::Chosen { slot }` for
-    /// the shared slot. When coalescing is disabled (`coalesce_window_us =
-    /// 0`, the default), this is the legacy one-proposal-per-key path.
+    /// When R45 coalescing is enabled (`coalesce_max_keys > 0` and the
+    /// self-weak is set), the first op starts a Paxos round immediately
+    /// and concurrent ops arriving during the round join the next batch
+    /// (one slot, one quorum round per batch); each coalesced caller
+    /// receives `ProposeResult::Chosen { slot }` for the shared slot.
+    /// When coalescing is disabled (`coalesce_max_keys = 0`), this is the
+    /// legacy one-proposal-per-key path.
     pub async fn propose(&self, payload: Vec<u8>, client_id: Option<u64>, seq: Option<u64>) -> ProposeResult {
         let replica = &self.local_replica;
 
@@ -1242,16 +1250,10 @@ impl PxGroup {
 
         let tag = dedup_tag(client_id, seq);
 
-        // R36: coalesce when enabled and the self-weak is available (so the
-        // timer task can spawn a flush). Otherwise the direct one-op path.
-        let coalesce_on = self.config.paxos.coalesce_window_us > 0 && self.self_weak.get().is_some();
-        tracing::warn!(
-            group_id = self.group_id,
-            coalesce_window_us = self.config.paxos.coalesce_window_us,
-            self_weak_set = self.self_weak.get().is_some(),
-            coalesce_on,
-            "R36-CHECK coalesce path"
-        );
+        // R45: event-driven coalescing. When `coalesce_max_keys > 0` and
+        // self-weak is set, the first op starts a round immediately (no
+        // timer) and ops arriving during the round join the next batch.
+        let coalesce_on = self.config.paxos.coalesce_max_keys > 0 && self.self_weak.get().is_some();
         if coalesce_on {
             self.coalesce_enqueue(payload, tag).await
         } else {
@@ -1500,39 +1502,46 @@ impl PxGroup {
         })
     }
 
-    // ── R36 coalescer ─────────────────────────────────────────
+    // ── R45 event-driven coalescer ──────────────────────────
 
-    /// Enqueue one single-key op into the coalescer. Joins the currently
-    /// accumulating batch (or starts one), registers a waiter, and returns
-    /// the batch's shared `ProposeResult` once the batch is flushed (by the
-    /// `coalesce_window_us` timer or when `coalesce_max_keys` is reached).
-    /// The flush runs `propose_inner` on a spawned task so the triggering
-    /// caller is not pinned to the paxos round and the next batch can start
-    /// collecting immediately.
+    /// Enqueue one single-key op into the event-driven coalescer.
+    #[allow(clippy::type_complexity)]
+    ///
+    /// - If idle (no round in flight): start a round **immediately** with
+    ///   this 1-op payload (no timer, no waiting). Open a pending batch for
+    ///   ops that arrive during this round.
+    /// - If accumulating (round in flight): append to the pending batch. If
+    ///   the batch fills to `max_keys`, flush it as a concurrent round.
+    ///
+    /// On round completion, the completion callback drains the pending batch
+    /// and starts the next round if non-empty (or goes idle if empty).
     async fn coalesce_enqueue(&self, payload: Vec<u8>, tag: Option<DedupTag>) -> ProposeResult {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        // The op body is the payload with its leading op-count byte dropped;
-        // op bodies are self-delimited, so concatenation + a single count
-        // prefix reconstructs a valid multi-key `Batch` payload.
         let op_body: &[u8] = payload.get(1..).unwrap_or(&[]);
-
         let max_keys = self.config.paxos.coalesce_max_keys.min(255) as u8;
-        let flush_now = {
+
+        // Try to join an in-flight round's accumulating batch. The locked
+        // section returns `Some` (start a round with this payload/tags/
+        // waiters) or `None` (joined a batch, just await the oneshot).
+        // The guard is dropped before the block ends so no non-Send lock
+        // guard is held across an await.
+        let start_round: Option<(
+            Vec<u8>,
+            Vec<DedupTag>,
+            Vec<tokio::sync::oneshot::Sender<ProposeResult>>,
+        )> = {
             let mut guard = self.coalescer.lock();
             match &mut *guard {
                 None => {
-                    let mut op_bodies = Vec::with_capacity(op_body.len());
-                    op_bodies.extend_from_slice(op_body);
-                    let tags = tag.into_iter().collect::<Vec<_>>();
-                    let timer = self.arm_coalesce_timer();
-                    *guard = Some(PendingBatch {
-                        op_bodies,
-                        op_count: 1,
-                        tags,
-                        waiters: vec![tx],
-                        timer,
-                    });
-                    1 >= max_keys
+                    // Idle: this op starts a new round immediately. The
+                    // pending batch (for ops arriving during this round)
+                    // starts empty — this op is already in the round.
+                    *guard = Some(PendingBatch::default());
+                    let mut round_payload = Vec::with_capacity(1 + op_body.len());
+                    round_payload.push(1u8);
+                    round_payload.extend_from_slice(op_body);
+                    let round_tags: Vec<DedupTag> = tag.into_iter().collect();
+                    Some((round_payload, round_tags, vec![tx]))
                 }
                 Some(batch) => {
                     batch.op_bodies.extend_from_slice(op_body);
@@ -1541,65 +1550,91 @@ impl PxGroup {
                         batch.tags.push(t);
                     }
                     batch.waiters.push(tx);
-                    batch.op_count >= max_keys
+                    if batch.op_count >= max_keys {
+                        // Batch full: flush as a concurrent round. Take
+                        // the batch and leave a fresh empty one so ops
+                        // arriving during this new round still accumulate.
+                        let taken = std::mem::take(batch);
+                        *guard = Some(PendingBatch::default());
+                        let mut p = Vec::with_capacity(1 + taken.op_bodies.len());
+                        p.push(taken.op_count);
+                        p.extend_from_slice(&taken.op_bodies);
+                        Some((p, taken.tags, taken.waiters))
+                    } else {
+                        // Joined the batch; wait for the round to complete.
+                        None
+                    }
                 }
             }
         };
-        if flush_now {
-            self.flush_coalescer();
-        }
+
+        // If None, we joined a pending batch — just await the result.
+        let Some((payload, round_tags, round_waiters)) = start_round else {
+            return match rx.await {
+                Ok(result) => result,
+                Err(_) => ProposeResult::Err("coalescer round dropped".to_string()),
+            };
+        };
+
+        // Start the round. Spawn so the caller is not pinned to the paxos
+        // round and can return via the oneshot.
+        let payload = bytes::Bytes::from(payload);
+        let Some(group) = self.self_weak.get().and_then(Weak::upgrade) else {
+            return ProposeResult::Err("group dropped".to_string());
+        };
+        tokio::spawn(async move {
+            #[cfg(feature = "test-util")]
+            group.coalesce_await_round_gate().await;
+            let result = group.propose_inner(payload, &round_tags).await;
+            for waiter in round_waiters {
+                let _ = waiter.send(result.clone());
+            }
+            group.coalesce_drain_after_round();
+        });
+
         match rx.await {
             Ok(result) => result,
-            // Closed oneshot: the flush task was dropped (group shutdown
-            // mid-flush). Surface a retryable error so the client retries.
-            Err(_) => ProposeResult::Err("coalescer flush dropped".to_string()),
+            Err(_) => ProposeResult::Err("coalescer round dropped".to_string()),
         }
     }
 
-    /// Arm the per-batch timer that fires `coalesce_window_us` after the
-    /// first op lands. On fire it flushes whatever has accumulated. The
-    /// task holds only a `Weak<PxGroup>` so it never leaks the group.
-    fn arm_coalesce_timer(&self) -> JoinHandle<()> {
-        let weak = self
-            .self_weak
-            .get()
-            .expect("coalescer requires self_weak to be set")
-            .clone();
-        let window = Duration::from_micros(self.config.paxos.coalesce_window_us);
-        tokio::spawn(async move {
-            sleep(window).await;
-            if let Some(group) = weak.upgrade() {
-                group.flush_coalescer();
-            }
-        })
-    }
-
-    /// Flush the current pending batch (if any) as one multi-key Paxos
-    /// proposal. Takes the batch from under the mutex (a racing timer +
-    /// `max_keys` flush resolves to one winner; the loser no-ops), builds the
-    /// merged payload, and spawns `propose_inner` to drive the round and fan
-    /// the result to every waiter.
-    fn flush_coalescer(&self) {
+    /// Called after a coalesced round completes. Drains the pending batch
+    /// (ops that accumulated during the round) and starts the next round
+    /// if non-empty, or goes idle if empty.
+    fn coalesce_drain_after_round(&self) {
         let batch = self.coalescer.lock().take();
-        let Some(mut batch) = batch else {
-            return; // already flushed by a racing trigger
+        let Some(batch) = batch else {
+            return; // already idle (shouldn't happen, but safe)
         };
-        // Cancel the timer handle if it's still running (max_keys path).
-        batch.timer.abort();
+        if batch.op_count == 0 {
+            // No ops arrived during the round — go idle.
+            return;
+        }
+        // Build the next round's payload from the accumulated batch.
         let mut payload = Vec::with_capacity(1 + batch.op_bodies.len());
         payload.push(batch.op_count);
         payload.extend_from_slice(&batch.op_bodies);
         let payload = bytes::Bytes::from(payload);
-        let tags = std::mem::take(&mut batch.tags);
-        let waiters = std::mem::take(&mut batch.waiters);
+        let tags = batch.tags;
+        let waiters = batch.waiters;
+        // Open a fresh pending batch for ops arriving during this next round.
+        self.coalescer.lock().replace(PendingBatch {
+            op_bodies: Vec::new(),
+            op_count: 0,
+            tags: Vec::new(),
+            waiters: Vec::new(),
+        });
         let Some(group) = self.self_weak.get().and_then(Weak::upgrade) else {
-            return; // group dropped; waiters get closed oneshot
+            return;
         };
         tokio::spawn(async move {
+            #[cfg(feature = "test-util")]
+            group.coalesce_await_round_gate().await;
             let result = group.propose_inner(payload, &tags).await;
             for waiter in waiters {
                 let _ = waiter.send(result.clone());
             }
+            group.coalesce_drain_after_round();
         });
     }
 
@@ -2298,6 +2333,38 @@ impl PxGroup {
             .lock()
             .as_ref()
             .map_or(0, |p| p.waiters.len())
+    }
+
+    /// Install a one-shot gate that holds the next coalescer round open
+    /// until the test releases it, so concurrent ops deterministically
+    /// join the pending batch. The test keeps the `oneshot::Sender` and
+    /// sends `()` once the batch of concurrent ops has been fired.
+    pub fn set_coalesce_round_gate_for_tests(&self, release: tokio::sync::oneshot::Receiver<()>) {
+        *self.coalesce_round_gate.lock() = Some(release);
+    }
+
+    /// Whether a coalescer round is in flight (pending batch exists).
+    #[must_use]
+    pub fn has_coalesce_pending_for_tests(&self) -> bool {
+        self.coalescer.lock().is_some()
+    }
+
+    /// Number of ops in the current pending batch.
+    #[must_use]
+    pub fn coalesce_pending_count_for_tests(&self) -> u8 {
+        self.coalescer.lock().as_ref().map_or(0, |b| b.op_count)
+    }
+}
+
+impl PxGroup {
+    /// Test-only: await the coalesce round gate if set. Consumed by the
+    /// first round that runs after the gate is installed.
+    #[cfg(feature = "test-util")]
+    async fn coalesce_await_round_gate(&self) {
+        let gate = self.coalesce_round_gate.lock().take();
+        if let Some(gate) = gate {
+            let _ = gate.await;
+        }
     }
 }
 

@@ -120,9 +120,6 @@ async fn main() {
     config.wal_skip_fsync = args.no_fsync;
     config.paxos.max_inflight_proposals = args.max_inflight;
     config.paxos.inflight_queues = args.inflight_queues;
-    if let Some(window) = args.coalesce_window_us {
-        config.paxos.coalesce_window_us = window;
-    }
     if let Some(max_keys) = args.coalesce_max_keys {
         config.paxos.coalesce_max_keys = max_keys;
     }

@@ -120,13 +120,8 @@ pub struct RunArgs {
     #[arg(long)]
     pub node_config: Option<String>,
 
-    /// R36 coalesce window in microseconds (--coalesce-window-us on each
-    /// spawned server). `0` disables. Default: 0 (disabled).
-    #[arg(long)]
-    pub coalesce_window_us: Option<u64>,
-
-    /// R36 max ops per coalesced batch (--coalesce-max-keys on each
-    /// spawned server). Default: 32.
+    /// R45 max ops per coalesced batch (--coalesce-max-keys on each
+    /// spawned server). `0` disables (default).
     #[arg(long)]
     pub coalesce_max_keys: Option<usize>,
 }
@@ -230,7 +225,6 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
         args.inflight_queues,
         args.metrics_interval,
         args.node_config.clone(),
-        args.coalesce_window_us,
         args.coalesce_max_keys,
     )
     .await

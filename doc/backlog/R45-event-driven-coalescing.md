@@ -124,6 +124,39 @@ subsequent ops still aggregate during the round. The win spans both
 regimes: no timer tax at low load, better inflight utilization at high
 load.
 
+**R45 benchmark results (event-driven, 10s mem mode, 3-node cluster)**:
+
+| Threads | Conns | max_keys | TPS | Avg latency | WAL appends |
+|---|---|---|---|---|---|
+| baseline | 32 | 4 | 0 | 28,033 | 1,139us | 841,093 |
+| R45 coalesce | 32 | 4 | 32 | 48,346 | 658us | 401,897 |
+| baseline | 64 | 8 | 0 | 28,415 | 2,250us | 852,562 |
+| R45 coalesce | 64 | 8 | 32 | 68,201 | 933us | 377,591 |
+| baseline | 128 | 16 | 0 | 28,502 | 4,489us | 855,145 |
+| R45 coalesce | 128 | 16 | 32 | 86,759 | 1,468us | 425,484 |
+| baseline | 256 | 32 | 0 | 28,414 | 9,008us | 852,528 |
+| R45 coalesce | 256 | 32 | 32 | 97,865 | 2,607us | 437,744 |
+
+**R45 vs R36 comparison**:
+
+| Threads | R36 TPS | R45 TPS | R36 latency | R45 latency | Winner |
+|---|---|---|---|---|---|
+| 32 | 33,029 | 48,346 | 965us | 658us | R45 (+46% TPS) |
+| 64 | 64,145 | 68,201 | 993us | 933us | R45 (+6% TPS) |
+| 128 | 97,554 | 86,759 | 1,305us | 1,468us | R36 (-11% TPS) |
+| 256 | 113,671 | 97,865 | 2,241us | 2,607us | R36 (-14% TPS) |
+
+R45 wins at low-to-moderate concurrency (32-64 threads): the first op
+starts immediately with no timer tax, and subsequent ops aggregate
+during the round. At high concurrency (128+ threads), R36's timer
+approach wins because it collects larger batches (32 ops per round vs
+R45's smaller batches from immediate round starts). R45's WAL append
+count is 5-10x higher than R36's, confirming smaller batch sizes.
+
+The crossover is at ~64 threads. Below that, R45's zero-latency-floor
+design wins; above that, R36's collect-then-flush approach produces
+bigger batches and fewer rounds.
+
 **Acceptance**:
 - `coalesce_window_us` config knob and CLI flag removed; coalescing is
   controlled by `coalesce_max_keys` alone (0 = off).

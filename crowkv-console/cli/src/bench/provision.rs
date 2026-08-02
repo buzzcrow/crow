@@ -121,7 +121,6 @@ impl BenchFixture {
         inflight_queues: usize,
         metrics_interval: u64,
         node_config: Option<String>,
-        coalesce_window_us: Option<u64>,
         coalesce_max_keys: Option<usize>,
     ) -> Result<Self> {
         std::fs::create_dir_all(&workspace_dir)?;
@@ -142,7 +141,6 @@ impl BenchFixture {
             inflight_queues,
             metrics_interval,
             node_config,
-            coalesce_window_us,
             coalesce_max_keys,
         )
         .await
@@ -203,7 +201,6 @@ impl BenchFixture {
         inflight_queues: usize,
         metrics_interval: u64,
         node_config: Option<String>,
-        coalesce_window_us: Option<u64>,
         coalesce_max_keys: Option<usize>,
     ) -> Result<(Vec<String>, Vec<u32>, Vec<String>, Vec<String>)> {
         let mut ids = Vec::with_capacity(NODE_COUNT);
@@ -243,7 +240,6 @@ impl BenchFixture {
                 metrics_interval: Some(metrics_interval),
                 max_inflight: Some(max_inflight),
                 inflight_queues: Some(inflight_queues),
-                coalesce_window_us,
                 coalesce_max_keys,
                 ..Default::default()
             };
