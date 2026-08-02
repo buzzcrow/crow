@@ -50,26 +50,6 @@ enable is gated on T1, not R35.
 
 ---
 
-## T2 — Rust WAL CRC32C hardware path
-
-- [ ] Replace the `crc32c` crate (0.6) in the Rust WAL with a hardware
-      path: either FFI to `crow_common::crc32c` (now ISA-L
-      `crc32_iscsi`, R34) or a thin `crc32_iscsi` binding.
-- [ ] Verify CRC values are byte-identical (same Castagnoli polynomial
-      + reflected/seeded convention) so existing WAL segments decode
-      without a migration.
-- [ ] Benchmark encode/replay CRC cost on x86 and ARM (the `crc32c`
-      crate has an SSE4.2 path on x86 but no NEON path on ARM; ISA-L
-      covers both).
-
-**Scope**: Small — swap the checksum backend in `wal/record.rs` and
-`wal/segment.rs`. Low critical-path impact (CRC is a small fraction of
-WAL encode), but aligns the Rust and C++ checksum and helps ARM.
-
-**Files**: `crowkv/src/wal/record.rs`, `crowkv/src/wal/segment.rs`,
-`crowkv/Cargo.toml` (drop `crc32c` crate, add binding if FFI),
-`crowtree/ffi/build.rs` (link `crowcommon` if FFI).
-
 ---
 
 ## T3 — WAL group-commit coalesce tuning

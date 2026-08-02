@@ -527,15 +527,12 @@ requirements; small/tuning items are traced in
   coalesce window and must preserve `(client_id, seq)` dedup ordering.
   Medium-high complexity; touches the admission gate and the propose
   entry.
-- **Rust WAL CRC32C hardware path** — tracked as **T2** in
-  [`plan-io-clean.md`](plan-io-clean.md). The Rust WAL uses the
-  `crc32c` crate (0.6) for record/footer checksums on every encode and
-  replay; the C++ side moved to ISA-L `crc32_iscsi` (R34). The `crc32c`
-  crate has an SSE4.2 path on x86 but no NEON path on ARM, and is not
-  vectorized to the same degree as ISA-L. FFI-ing `crow_common::crc32c`
-  (or a thin `crc32_iscsi` binding) for the Rust WAL aligns the two
-  paths and helps ARM. Low impact on the critical path (CRC is a small
-  fraction of encode), low-medium complexity.
+- **Rust WAL CRC32C hardware path (done)** — The Rust WAL now FFI-s
+  through `crowtree-ffi::crc32c` to `crow_common::crc32c` (ISA-L
+  `crc32_iscsi`, R34), replacing the software `crc32c` crate. Same
+  Castagnoli polynomial + reflected/seeded convention — existing WAL
+  segments decode without migration (102 WAL tests pass). Aligns the
+  Rust and C++ checksum and adds a NEON path on ARM.
 - **WAL group-commit coalesce tuning** — tracked as **T3** in
   [`plan-io-clean.md`](plan-io-clean.md). `wal_flush_coalesce_us`
   defaults to 0 (flush as soon as the first record is queued). A small
