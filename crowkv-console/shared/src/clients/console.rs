@@ -78,6 +78,9 @@ pub struct DeployNodeServerBody {
     /// `--inflight-queues` value for multi-queue admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inflight_queues: Option<usize>,
+    /// Optional `--config` JSON path passed to the spawned `crowkv-server`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

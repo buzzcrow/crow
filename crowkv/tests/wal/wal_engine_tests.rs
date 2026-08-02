@@ -41,13 +41,12 @@ fn write_entry(group: u64, slot: u64) -> WALRecord {
 fn wal_config_defaults_use_flush_names_and_wake_drain_flush() {
     let config = WalConfig::default();
     assert_eq!(config.wal_flush_batch_bytes, 64 * 1024);
-    assert_eq!(config.wal_flush_coalesce_us, 0);
     assert_eq!(config.wal_flush_watchdog_ms, 100);
     assert_eq!(config.wal_record_format, WalRecordFormat::Auto);
 }
 
 /// W3: wake-drain-flush issues exactly one durable flush for a single record
-/// with no batching delay (the default `wal_flush_coalesce_us = 0` policy).
+/// with no batching delay (the default wake-drain-flush policy).
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn single_record_durable_flush_without_interval_wait() {
     let device = MemBlockDevice::new();
@@ -119,8 +118,8 @@ async fn skip_fsync_avoids_durable_flush_but_still_appends() {
     assert_eq!(device.fdatasync_count(), 0);
 }
 
-/// W3: a burst of concurrent appends coalesces into fewer durable flushes than
-/// records when a coalescing budget is configured.
+/// W3: a burst of concurrent appends batches into fewer durable flushes than
+/// records via wake-drain-flush (all records queued before the writer wakes).
 #[tokio::test(flavor = "current_thread")]
 async fn burst_appends_coalesce_into_fewer_flushes() {
     let device = MemBlockDevice::new();
@@ -128,8 +127,7 @@ async fn burst_appends_coalesce_into_fewer_flushes() {
     let config = WalConfig {
         wal_disks: vec![PathBuf::from("/wal-burst")],
         wal_segment_size: 16 * 1024 * 1024, // large: no rotation/seal flushes
-        wal_flush_batch_bytes: 1024 * 1024, // large: batch bounded by coalesce window
-        wal_flush_coalesce_us: 5_000,       // 5ms coalescing window
+        wal_flush_batch_bytes: 1024 * 1024, // large: whole batch fits
         ..Default::default()
     };
     let wal = WalEngine::create(backend, config, 1).await.unwrap();
@@ -455,7 +453,6 @@ async fn concurrent_appends_all_acks_resolved_and_replay_complete() {
         wal_disks: vec![disk.clone()],
         wal_segment_size: 4 * 1024 * 1024,
         wal_flush_batch_bytes: 256 * 1024,
-        wal_flush_coalesce_us: 1_000,
         ..Default::default()
     };
     let wal = WalEngine::create(backend.clone(), config, group_id)
@@ -503,7 +500,6 @@ async fn writer_failure_fails_acks_and_marks_wal_failed() {
         wal_disks: vec![PathBuf::from("/wal-writer-fail")],
         wal_segment_size: 16 * 1024 * 1024,
         wal_flush_batch_bytes: 1024 * 1024,
-        wal_flush_coalesce_us: 5_000,
         ..Default::default()
     };
     let wal = WalEngine::create(backend, config, 1).await.unwrap();

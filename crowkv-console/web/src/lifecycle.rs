@@ -510,6 +510,9 @@ pub struct DeployNodeServerBody {
     /// `--inflight-queues` value for multi-queue admission.
     #[serde(default)]
     inflight_queues: Option<usize>,
+    /// Optional `--config` JSON path passed to the spawned `crowkv-server`.
+    #[serde(default)]
+    config: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -598,6 +601,7 @@ pub async fn http_deploy_node_server(
         metrics_interval: body.metrics_interval,
         max_inflight: body.max_inflight,
         inflight_queues: body.inflight_queues,
+        config: body.config.clone().map(std::path::PathBuf::from),
     };
 
     let deployed = if node.ssh_enabled() {

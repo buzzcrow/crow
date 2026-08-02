@@ -106,6 +106,7 @@ impl Default for ServerConfig {
 
 /// WAL configuration for a single consensus group.
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
 pub struct WalConfig {
     /// Directories to distribute WAL segments across.
     pub wal_disks: Vec<PathBuf>,
@@ -113,12 +114,9 @@ pub struct WalConfig {
     pub wal_segment_size: u64,
     /// Durable flush batch size trigger (bytes). Default 64 KiB.
     pub wal_flush_batch_bytes: usize,
-    /// Optional durable flush coalescing budget (microseconds). Default 0.
-    pub wal_flush_coalesce_us: u64,
     /// Safety-net timer that wakes the idle writer every `watchdog` ms to
     /// drain any queued records in case of a missed wake ("just in case for
-    /// bugs"). Also caps the coalesce window when `wal_flush_coalesce_us > 0`.
-    /// Default 100 ms.
+    /// bugs"). Default 100 ms.
     pub wal_flush_watchdog_ms: u64,
     /// Disk-pressure watermark for eager GC. Default 80%.
     pub wal_disk_high_watermark_pct: u8,
@@ -179,7 +177,6 @@ impl Default for WalConfig {
             wal_disks: vec![PathBuf::from("waldata")],
             wal_segment_size: 64 * 1024 * 1024,
             wal_flush_batch_bytes: 64 * 1024,
-            wal_flush_coalesce_us: 0,
             wal_flush_watchdog_ms: 100,
             wal_disk_high_watermark_pct: 80,
             wal_min_retention_secs: 3600,

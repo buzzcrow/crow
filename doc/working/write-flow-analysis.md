@@ -127,10 +127,11 @@ Client PUT/DELETE/BatchWrite
   maps to `PxPaxosError::Busy` (retryable).
 - **WAL batch aggregation** — writer task drains all queued records per
   wake cycle: `rx.recv()` (block until first) → `try_recv` drain →
-  optional coalesce (`wal_flush_coalesce_us`, default 0) → single
-  vectored `writev` + single `fdatasync` → resolve all pending oneshot
-  acks. Multiple in-flight proposals on the same pipeline flush
-  together, amortizing fsync cost.
+  single vectored `writev` + single `fdatasync` → resolve all pending
+  oneshot acks. Multiple in-flight proposals on the same pipeline flush
+  together, amortizing fsync cost. The watchdog
+  (`wal_flush_watchdog_ms`, default 100 ms) wakes the idle writer
+  periodically as a safety net against missed wakes.
 
 ---
 
@@ -512,7 +513,12 @@ requirements; small/tuning items are traced in
   not violate any externally visible guarantee. Needs fault-injection
   crash-recovery tests (kill -9 between `on_accept_inner` and
   `spawn_accept_persist`, then replay). Low code complexity once tests
-  pass.
+  pass. **T1.5 benchmark (done)**: at 1T:1C MI=64, early-ack on vs off:
+  2906 vs 2809 ops/s (+3.5%), avg 341 vs 353 µs (−12 µs / −3.4%).
+  At 48T:48C MI=64: 29790 vs 27663 ops/s (+7.7%), avg 1608 vs 1732 µs
+  (−124 µs / −7.2%), p999 5668 vs 6420 µs (−11.7%). The gain is larger
+  under saturation because early-ack lets the leader start the next
+  proposal without waiting for local WAL persist.
 - **Server-side proposal coalescing** — tracked as
   **[R36](../backlog/R36-proposal-coalescing.md)** (backlog). Today each
   client `PUT` is its own Paxos proposal (one slot, one WAL record, one
@@ -533,10 +539,14 @@ requirements; small/tuning items are traced in
   Castagnoli polynomial + reflected/seeded convention — existing WAL
   segments decode without migration (102 WAL tests pass). Aligns the
   Rust and C++ checksum and adds a NEON path on ARM.
-- **WAL group-commit coalesce tuning** — tracked as **T3** in
-  [`plan-io-clean.md`](plan-io-clean.md). `wal_flush_coalesce_us`
-  defaults to 0 (flush as soon as the first record is queued). A small
-  coalesce window (e.g. 10-50 µs) lets more in-flight proposals land in
-  one `writev` + `fdatasync`, amortizing fsync cost further. Pure
-  config/tuning change, no code; benchmark the latency/throughput
-  tradeoff on a single platform.
+- **WAL group-commit coalesce tuning (T3, done — removed)** —
+  `wal_flush_coalesce_us` was swept across {0, 10, 25, 50, 100, 200} µs
+  at 48T:48C MI=64 (saturated write, in-memory WAL). No non-zero value
+  showed any advantage over the baseline (0 µs): throughput was flat at
+  ~29.2K ops/s (±1% noise) and p99/p999 showed no trend. The
+  wake-drain-flush baseline already amortizes fsync across records that
+  arrive during a flush, so an explicit coalescing window adds nothing.
+  **Decision: removed** `wal_flush_coalesce_us` (config field, coalesce
+  arm in `pipeline_writer.rs`, related tests/docs). The watchdog
+  (`wal_flush_watchdog_ms`) stays as the safety-net timer. See
+  [`plan-io-clean.md`](plan-io-clean.md) T3.

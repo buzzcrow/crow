@@ -113,6 +113,12 @@ pub struct RunArgs {
     /// `--read-mode linearizable`.
     #[arg(long)]
     pub read_endpoint_policy: Option<String>,
+
+    /// Optional `CrowKVConfig` JSON file passed as `--config` to each
+    /// benchmark node. Useful for tuning `wal_early_ack` or other
+    /// config fields without changing defaults.
+    #[arg(long)]
+    pub node_config: Option<String>,
 }
 
 /// Arguments for `crowkv-cli bench`.
@@ -213,6 +219,7 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
         args.max_inflight,
         args.inflight_queues,
         args.metrics_interval,
+        args.node_config.clone(),
     )
     .await
     {

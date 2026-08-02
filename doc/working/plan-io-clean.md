@@ -44,8 +44,10 @@ in `CrowKVConfig::default()` after tests pass.
       re-drive a chosen-but-not-durable slot after a crash).
 - [x] **T1.4** — No regression: existing crash-restart tests pass with
       the new default.
-- [ ] **T1.5** (deferred to Linux bench) — Benchmark per-proposal
-      latency drop; document in `write-flow-analysis.md`.
+- [x] **T1.5** (Linux bench, done) — Benchmark per-proposal latency drop;
+      documented in `write-flow-analysis.md`. Results: 1T:1C +3.5%
+      throughput / −3.4% avg latency; 48T:48C +7.7% throughput / −7.2%
+      avg latency / −11.7% p999.
 
 **Scope**: Medium — the R16b mechanism is implemented and merged; this
 is verification + default-flip. The fault-injection harness exists
@@ -69,32 +71,22 @@ gate), `crowkv/src/common/config.rs` (default flip in
 
 ## T3 — WAL group-commit coalesce tuning
 
-- [ ] Sweep `wal_flush_coalesce_us` (currently default 0) across
+- [x] Sweep `wal_flush_coalesce_us` (previously default 0) across
       {0, 10, 25, 50, 100, 200} µs at a saturated write config
-      (48T:48C, MI=64) on one platform. Note: `wal_flush_coalesce_us`
-      is **optional**. The default (`0`) is wake-drain-flush with no
-      coalesce timer — the writer parks on `rx.recv()`, drains all
-      already-queued records via `try_recv` on wake, then flushes
-      immediately. Natural batching already occurs because records
-      arriving during an in-flight flush queue in the mpsc channel and
-      are drained together on the next wake cycle. A non-zero
-      `wal_flush_coalesce_us` adds an explicit bounded wait window
-      (`min(coalesce, watchdog)`) to gather more records before flushing.
-      The watchdog (`wal_flush_watchdog_ms`) is a safety net "just in
-      case of bugs"; today it only caps the coalesce window, but it
-      should also guard the wake-drain-flush path (see T3.1).
-- [ ] Measure throughput vs p99/p999 latency tradeoff; with `coalesce
+      (48T:48C, MI=64) on Linux. Results: throughput flat at ~29.2K
+      ops/s (±1% noise), p99/p999 no trend — no non-zero value showed
+      any advantage over the wake-drain-flush baseline (coalesce=0).
+- [x] Measure throughput vs p99/p999 latency tradeoff; with `coalesce
       = 0` the baseline already amortizes fsync across records that
-      arrive during a flush, so the question is whether an explicit
-      wait window adds any measurable gain on top of wake-drain-flush.
-- [ ] Decide on `wal_flush_coalesce_us`: keep only if some non-zero
-      value shows an obvious advantage (clear throughput gain with
-      acceptable tail). If no value shows an obvious advantage, **remove
-      the option** — delete the config field and the coalesce arm in
-      `pipeline_writer.rs` (the `if !coalesce.is_zero()` block), plus
+      arrive during a flush, so an explicit wait window adds no
+      measurable gain on top of wake-drain-flush.
+- [x] Decide on `wal_flush_coalesce_us`: **removed** — no non-zero
+      value showed an obvious advantage (clear throughput gain with
+      acceptable tail). Deleted the config field, the coalesce arm in
+      `pipeline_writer.rs` (the `if !coalesce.is_zero()` block), and
       related tests/bench columns. `wal_flush_watchdog_ms` stays
-      regardless (see T3.1). Document the decision and results in
-      `write-flow-analysis.md`.
+      (guards the flush path via T3.1). Decision and results
+      documented in `write-flow-analysis.md`.
 - [x] **T3.1** — Wire the watchdog into the wake-drain-flush path so
       `wal_flush_watchdog_ms` is a real safety net when `coalesce = 0`
       (or after coalesce removal), not just a cap on the coalesce window.
