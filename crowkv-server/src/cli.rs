@@ -110,11 +110,6 @@ pub struct Cli {
     /// Paxos proposal. `0` disables coalescing (default).
     #[arg(long)]
     pub coalesce_max_keys: Option<usize>,
-    /// R45 timer-mode window in microseconds. Under high load the
-    /// coalescer switches to timer mode and flushes batches after this
-    /// interval. `0` = event-only mode (default).
-    #[arg(long)]
-    pub coalesce_window_us: Option<u64>,
 }
 
 /// Parse a comma-separated list of numbers and ranges into a `Vec<u64>`.

@@ -77,26 +77,29 @@ pub(crate) struct PendingBatch {
 }
 
 /// R45 coalescer mode: event (low load, no timer tax) or timer (high
-/// load, collect-then-flush for bigger batches).
+/// load, collect-then-flush for bigger batches). Switched automatically
+/// based on observed round latency.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum CoalesceMode {
     Event,
     Timer,
 }
 
-impl CoalesceMode {
-    /// Timer interval for this mode: watchdog (long) for event, flush
-    /// window (short) for timer.
-    fn timer_interval_us(self, window_us: u64) -> u64 {
-        match self {
-            Self::Event => 1_000_000, // 1000ms watchdog
-            Self::Timer => window_us.max(1),
-        }
-    }
-}
-
-/// Sliding window of recent round sizes for mode-switch heuristics.
+/// Sliding window of recent round durations (microseconds) for the
+/// latency-based mode switch heuristic.
 const ROUND_HISTORY_LEN: usize = 16;
+/// Timer interval is 1/8 of avg round duration. Adapts automatically —
+/// short rounds (low load) get a short timer, long rounds (high load)
+/// get a longer timer to collect more ops.
+const TIMER_DIVISOR: u64 = 8;
+/// Minimum avg round duration (microseconds) to activate timer mode.
+/// Below this, rounds are fast enough that 1-op rounds are cheap —
+/// event mode's zero-latency-floor wins. Above this, ops queue and
+/// timer mode's bigger batches reduce total rounds.
+const TIMER_MODE_THRESHOLD_US: u64 = 1_000;
+/// Watchdog interval (microseconds) — fires if a batch is stuck (drain
+/// panic, spawn failure). Long enough to never fire in normal operation.
+const WATCHDOG_US: u64 = 1_000_000;
 
 pub struct PxGroup {
     pub group_id: PxGroupId,
@@ -250,11 +253,11 @@ pub struct PxGroup {
     /// `max_keys` overflow to start a concurrent round.
     pub(crate) coalescer: parking_lot::Mutex<Option<PendingBatch>>,
     /// R45 coalescer mode: event (low load) or timer (high load).
-    /// Switched automatically based on round-size history.
+    /// Switched automatically based on observed round latency.
     pub(crate) coalesce_mode: std::sync::atomic::AtomicU8,
-    /// R45 sliding window of recent round sizes for mode-switch
-    /// heuristics. Stores the last `ROUND_HISTORY_LEN` round op-counts.
-    pub(crate) coalesce_round_history: parking_lot::Mutex<Vec<u8>>,
+    /// R45 sliding window of recent round durations (microseconds) for
+    /// the latency-based mode switch heuristic.
+    pub(crate) coalesce_round_history: parking_lot::Mutex<Vec<u64>>,
 }
 
 impl std::fmt::Debug for PxGroup {
@@ -1550,12 +1553,12 @@ impl PxGroup {
             .store(mode as u8, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Record a completed round's op-count and evaluate mode switch.
-    fn coalesce_record_round(&self, op_count: u8) {
-        let max_keys = self.config.paxos.coalesce_max_keys.min(255) as u8;
-        let window_us = self.config.paxos.coalesce_window_us;
+    /// Record a completed round's duration and evaluate mode switch.
+    /// The timer interval for timer mode is derived from avg round
+    /// duration — adapting automatically to load.
+    fn coalesce_record_round(&self, duration_us: u64) {
         let mut history = self.coalesce_round_history.lock();
-        history.push(op_count);
+        history.push(duration_us);
         if history.len() > ROUND_HISTORY_LEN {
             history.remove(0);
         }
@@ -1563,52 +1566,72 @@ impl PxGroup {
             return;
         }
         let len = history.len();
-        let sum: u32 = history.iter().map(|&v| u32::from(v)).sum();
-        let avg = f64::from(sum) / f64::from(len as u32);
+        let sum: u64 = history.iter().sum();
+        let avg_us = sum / len as u64;
         let mode = self.coalesce_mode();
         match mode {
             CoalesceMode::Event => {
-                // Switch to timer mode if avg round size is small (lots
-                // of 1-op rounds) and timer mode is configured.
-                if window_us > 0 && avg < f64::from(max_keys) / 2.0 {
+                // Switch to timer mode when avg round latency exceeds
+                // the threshold — ops are queuing, so collecting a
+                // batch before starting the next round will produce
+                // bigger batches and fewer total rounds.
+                if avg_us > TIMER_MODE_THRESHOLD_US {
                     self.set_coalesce_mode(CoalesceMode::Timer);
                     tracing::info!(
                         group_id = self.group_id,
-                        avg_round_size = avg,
+                        avg_round_us = avg_us,
                         "coalescer: event → timer mode"
                     );
                 }
             }
             CoalesceMode::Timer => {
-                // Switch back to event mode if batches consistently fill
-                // before the timer fires.
-                if avg >= f64::from(max_keys) * 0.75 {
+                // Switch back to event mode when avg round latency drops
+                // below half the threshold (hysteresis to avoid
+                // oscillation). Rounds are fast again — 1-op rounds are
+                // cheap, event mode's zero-latency-floor wins.
+                if avg_us < TIMER_MODE_THRESHOLD_US / 2 {
                     self.set_coalesce_mode(CoalesceMode::Event);
                     tracing::info!(
                         group_id = self.group_id,
-                        avg_round_size = avg,
-                        "coalescer: timer → event mode (batches near-full)"
+                        avg_round_us = avg_us,
+                        "coalescer: timer → event mode"
                     );
                 }
             }
         }
     }
 
-    /// Arm the timer for the current pending batch. The timer fires after
-    /// the mode-appropriate interval and flushes the batch (or goes idle
-    /// if empty in event mode).
+    /// Compute the timer interval for the current mode. In event mode
+    /// this is the watchdog (long). In timer mode it's a fraction of
+    /// the avg round duration — adapting to load automatically.
+    fn coalesce_timer_interval_us(&self) -> u64 {
+        match self.coalesce_mode() {
+            CoalesceMode::Event => WATCHDOG_US,
+            CoalesceMode::Timer => {
+                // Adaptive: 1/TIMER_DIVISOR of avg round duration.
+                // The timer interval scales with load — short rounds
+                // (low load) get a short timer, long rounds (high load)
+                // get a longer timer to collect more ops.
+                let history = self.coalesce_round_history.lock();
+                if history.is_empty() {
+                    return 500; // fallback
+                }
+                let sum: u64 = history.iter().sum();
+                let avg = sum / history.len() as u64;
+                let interval = avg / TIMER_DIVISOR;
+                interval.clamp(50, 10_000) // clamp 50us..10ms
+            }
+        }
+    }
+
+    /// Arm the timer for the current pending batch. The timer fires
+    /// after the mode-appropriate interval and flushes the batch (or
+    /// goes idle if empty in event mode).
     fn coalesce_arm_timer(&self, batch: &mut PendingBatch) {
-        // Cancel any existing timer first.
         if let Some(old) = batch.timer.take() {
             old.abort();
         }
-        let mode = self.coalesce_mode();
-        let interval_us = mode.timer_interval_us(self.config.paxos.coalesce_window_us);
-        self.coalesce_arm_timer_us(batch, interval_us);
-    }
-
-    /// Internal: arm a timer with a specific interval in microseconds.
-    fn coalesce_arm_timer_us(&self, batch: &mut PendingBatch, interval_us: u64) {
+        let interval_us = self.coalesce_timer_interval_us();
         let Some(group) = self.self_weak.get().and_then(Weak::upgrade) else {
             return;
         };
@@ -1626,7 +1649,6 @@ impl PxGroup {
         let Some(mut batch) = batch else {
             return;
         };
-        // Cancel the timer handle inside the batch (it's us).
         batch.timer = None;
         if batch.op_count == 0 {
             // Empty batch — watchdog fired in event mode. Go idle.
@@ -1636,10 +1658,10 @@ impl PxGroup {
         self.coalesce_flush_batch(batch);
     }
 
-    /// Flush a pending batch as a Paxos round. Records the round size and
-    /// opens a fresh pending batch for ops arriving during this round.
+    /// Flush a pending batch as a Paxos round. Records the round
+    /// duration and opens a fresh pending batch for ops arriving during
+    /// this round.
     fn coalesce_flush_batch(&self, batch: PendingBatch) {
-        let op_count = batch.op_count;
         let mut payload = Vec::with_capacity(1 + batch.op_bodies.len());
         payload.push(batch.op_count);
         payload.extend_from_slice(&batch.op_bodies);
@@ -1656,11 +1678,13 @@ impl PxGroup {
         tokio::spawn(async move {
             #[cfg(feature = "test-util")]
             group.coalesce_await_round_gate().await;
+            let start = std::time::Instant::now();
             let result = group.propose_inner(payload, &tags).await;
+            let duration_us = start.elapsed().as_micros() as u64;
             for waiter in waiters {
                 let _ = waiter.send(result.clone());
             }
-            group.coalesce_record_round(op_count);
+            group.coalesce_record_round(duration_us);
             group.coalesce_drain_after_round();
         });
     }
@@ -1693,8 +1717,6 @@ impl PxGroup {
                 None => match mode {
                     CoalesceMode::Event => {
                         // Event mode idle: start a 1-op round immediately.
-                        // Open an empty pending batch + arm watchdog for
-                        // ops arriving during this round.
                         let mut batch = PendingBatch::default();
                         self.coalesce_arm_timer(&mut batch);
                         *guard = Some(batch);
@@ -1727,8 +1749,7 @@ impl PxGroup {
                     }
                     batch.waiters.push(tx);
                     if batch.op_count >= max_keys {
-                        // Batch full: flush as a concurrent round. Take
-                        // the batch and leave a fresh one (with timer).
+                        // Batch full: flush as a concurrent round.
                         let taken = std::mem::take(batch);
                         let mut new_batch = PendingBatch::default();
                         self.coalesce_arm_timer(&mut new_batch);
@@ -1736,7 +1757,6 @@ impl PxGroup {
                         let mut p = Vec::with_capacity(1 + taken.op_bodies.len());
                         p.push(taken.op_count);
                         p.extend_from_slice(&taken.op_bodies);
-                        // Cancel the taken batch's timer — we're flushing now.
                         if let Some(t) = taken.timer {
                             t.abort();
                         }
@@ -1765,11 +1785,13 @@ impl PxGroup {
         tokio::spawn(async move {
             #[cfg(feature = "test-util")]
             group.coalesce_await_round_gate().await;
+            let start = std::time::Instant::now();
             let result = group.propose_inner(payload, &round_tags).await;
+            let duration_us = start.elapsed().as_micros() as u64;
             for waiter in round_waiters {
                 let _ = waiter.send(result.clone());
             }
-            group.coalesce_record_round(1);
+            group.coalesce_record_round(duration_us);
             group.coalesce_drain_after_round();
         });
 
@@ -1798,7 +1820,8 @@ impl PxGroup {
             // No ops arrived during the round.
             // In timer mode: keep the empty batch open with a timer —
             // ops arriving will join the batch instead of starting a
-            // 1-op round.
+            // 1-op round. This is the key mechanism that prevents 1-op
+            // rounds at high load.
             // In event mode: go idle immediately. The next op starts a
             // 1-op round (no timer tax).
             if mode == CoalesceMode::Timer {
@@ -1813,7 +1836,10 @@ impl PxGroup {
                 self.coalesce_flush_batch(batch);
             }
             CoalesceMode::Timer => {
-                // Timer mode: keep the batch accumulating, re-arm the timer.
+                // Timer mode: keep the batch accumulating, re-arm the
+                // timer. This produces bigger batches at the cost of
+                // timer latency — the right trade-off at high load
+                // where round latency dominates.
                 self.coalesce_arm_timer(&mut batch);
                 self.coalescer.lock().replace(batch);
             }

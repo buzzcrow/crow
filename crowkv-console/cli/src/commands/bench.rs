@@ -124,10 +124,6 @@ pub struct RunArgs {
     /// spawned server). `0` disables (default).
     #[arg(long)]
     pub coalesce_max_keys: Option<usize>,
-    /// R45 timer-mode window in microseconds (--coalesce-window-us on
-    /// each spawned server). `0` = event-only (default).
-    #[arg(long)]
-    pub coalesce_window_us: Option<u64>,
 }
 
 /// Arguments for `crowkv-cli bench`.
@@ -230,7 +226,6 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
         args.metrics_interval,
         args.node_config.clone(),
         args.coalesce_max_keys,
-        args.coalesce_window_us,
     )
     .await
     {
