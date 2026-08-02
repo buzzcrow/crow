@@ -16,9 +16,11 @@ request happened to commit last, not necessarily the slot of the
 before slot allocation — not only on retries of the same logical
 write. `CrowkvClient` is designed to be shared (`Arc<CrowkvClient>`)
 across many concurrent callers under one `client_id`, with `seq`
-assigned via a shared `AtomicU64` (`next_seq.fetch_add`) — this is the
-documented/intended pipelining pattern (`crowkv-console/cli/src/bench/runner.rs`
-shares one client across `cfg.threads` workers). Multi-slot
+assigned via a shared `AtomicU64` (`next_seq.fetch_add`) on the
+default `ids=None` write path (`crowkv-client/src/client.rs` `put` /
+`delete` / `batch_write`). This is the documented/intended pipelining
+pattern: one shared client, many in-flight writes, all stamped with
+the same `client_id` and a strictly-increasing shared `seq`. Multi-slot
 concurrency explicitly allows slots to be **chosen out of order**
 (`write-flow-analysis.md` § Multi-Slot Concurrency).
 
@@ -36,6 +38,15 @@ correctness (data-loss) bug, not a performance issue — existing tests
 sequential-retry case and the "older seq maps to latest slot" behavior
 is asserted as *intended*, so nothing currently catches the concurrent
 false-positive case.
+
+Note: the bench runner (`crowkv-console/cli/src/bench/runner.rs`) does
+*not* trigger this — it bypasses the shared `client_id`/`next_seq` by
+passing an explicit per-worker `client_id = worker_id + 1` and a
+per-worker monotonic `iter` counter, so each `(client_id, seq)` pair
+is unique to one worker and strictly monotonic within it. The bug is
+reachable via the client API's default `ids=None` write path on a
+shared `Arc<CrowkvClient>`, which is the documented pipelining
+contract.
 
 **Approach**:
 - Replace the single `DedupEntry` with a small bounded per-client
@@ -73,11 +84,20 @@ false-positive case.
   "outcome unknown, safe to re-propose" (unchanged from today).
 
 **Acceptance**:
-- Existing same-seq retry tests (`dedup_test.rs`) still pass unchanged.
-- `dedup_tracks_highest_seq_per_client_across_slots`'s "older seq maps
-  to latest slot" assertion is corrected to reflect exact-seq lookup
-  (a lower, never-recorded seq is a miss, not a hit against a higher
-  seq's slot).
+- Existing same-seq retry tests (`dedup_test.rs`,
+  `learner_dedup_test.rs`) still pass for the exact-match case.
+- The "older/lower seq maps to latest slot" assertions are corrected to
+  reflect exact-seq lookup (a lower, never-recorded seq is a miss, not
+  a hit against a higher seq's slot). Four existing assertions encode
+  the buggy behavior and must be flipped:
+  - `crowkv/tests/replica/dedup_test.rs::learn_chosen_populates_dedup_cache`
+    — `dedup_lookup(42, 4) == Some(1)` ("Lower seq also hits").
+  - `crowkv/tests/replica/dedup_test.rs::dedup_tracks_highest_seq_per_client_across_slots`
+    — `dedup_lookup(7, 1) == Some(2)` ("older seq maps to latest slot").
+  - `crowkv/tests/paxos/learner_dedup_test.rs::dedup_lookup_returns_slot_for_already_applied_seq`
+    — `dedup_lookup(42, 2) == Some(5)` ("lower seq also returns commit slot").
+  - `crowkv/tests/paxos/learner_dedup_test.rs::dedup_tracks_highest_seq_per_client`
+    — `dedup_lookup(7, 1) == Some(3)` ("older seq maps to latest slot").
 - No regression in write-path throughput benchmarks (the dedup check
   is off the common Paxos critical path either way; only the lookup
   structure changes from O(1) single-entry to O(1) amortized
@@ -155,12 +175,12 @@ async fn dedup_retains_at_least_64_requests_per_client() {
 structure.
 
 **Priority**: High — correctness/data-loss bug, reachable by the
-documented concurrent-pipelining client usage pattern (the same
-pattern used to produce the write-path throughput benchmarks).
+documented concurrent-pipelining client usage pattern (shared
+`Arc<CrowkvClient>` with the default `ids=None` write path).
 
 **Complexity**: Low-medium — confined to `PxLearner`'s dedup map and
-its two call sites (`dedup_lookup`, `record_dedup`); touches one
-existing test's expectation.
+its two call sites (`dedup_lookup`, `record_dedup`); touches four
+existing test assertions' expectations.
 
 **Files**: `crowkv/src/paxos/learner.rs` (dedup structure + lookup/record),
 `crowkv/tests/replica/dedup_test.rs`,

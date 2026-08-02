@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
@@ -12,13 +12,44 @@ use crate::kv::{Batch, CrowtreeBackend, CrowtreeEngine, CrowtreeOptions, KVEngin
 use crate::paxos::roles::{Learner, PxLogEntry, SlotIndex};
 use crate::paxos::PxTerm;
 
-/// Per-client dedup record: the highest applied client sequence number and the
-/// commit slot it landed at. Stored one-per-client (latest wins); a retry of
-/// any `seq <= last_seq` is treated as already-applied (idempotent retry).
-#[derive(Clone, Copy, Debug)]
-struct DedupEntry {
-    last_seq: u64,
-    last_slot: SlotIndex,
+/// Per-client dedup retention: the last `DEDUP_WINDOW` committed
+/// `(seq, slot)` mappings, in commit order. Exact-match lookup — a `seq`
+/// that was itself recorded returns its slot; an unrecorded `seq` (lower or
+/// otherwise) is a miss and falls into the "outside the window, outcome
+/// unknown" case from `design.md` §10 (safe to re-propose). Sized to the
+/// `design.md` "≥ 64 requests per client" floor, generously above
+/// `max_inflight_proposals` (default 32) so a full window of concurrent
+/// same-client requests never evicts an unresolved entry prematurely.
+const DEDUP_WINDOW: usize = 64;
+
+/// Per-client bounded dedup window. `VecDeque` (not a hash map): N is tiny
+/// and the common case is a retry of the most-recent seq, scanned first.
+#[derive(Debug, Default)]
+struct DedupWindow {
+    entries: VecDeque<(u64, SlotIndex)>,
+}
+
+impl DedupWindow {
+    fn record(&mut self, seq: u64, slot: SlotIndex) {
+        // Idempotent re-`learn` of an already-recorded seq (e.g. a duplicate
+        // `Chosen` notice): leave the existing entry in place — no duplicate,
+        // no slot overwrite.
+        if self.entries.iter().any(|(s, _)| *s == seq) {
+            return;
+        }
+        self.entries.push_back((seq, slot));
+        if self.entries.len() > DEDUP_WINDOW {
+            self.entries.pop_front();
+        }
+    }
+
+    fn lookup(&self, seq: u64) -> Option<SlotIndex> {
+        self.entries
+            .iter()
+            .rev()
+            .find(|(s, _)| *s == seq)
+            .map(|(_, slot)| *slot)
+    }
 }
 
 /// State-machine driver: applies chosen log entries to a pluggable
@@ -59,7 +90,10 @@ pub struct PxLearner {
     /// circuit a retried request to its prior commit slot without re-running
     /// Paxos. In-memory only — lost on crash/restart; retried requests after
     /// a restart simply get a new Paxos slot (same value, no corruption).
-    dedup: DashMap<u64, DedupEntry>,
+    /// Retains the last `DEDUP_WINDOW` (64) `(seq, slot)` mappings per client;
+    /// exact-match lookup — an unrecorded `seq` is a miss, never a false
+    /// positive against a higher committed seq's slot.
+    dedup: DashMap<u64, DedupWindow>,
 }
 
 impl Default for PxLearner {
@@ -277,25 +311,24 @@ impl PxLearner {
         self.last_chosen_term.store(term, Ordering::Release);
     }
 
-    /// Idempotency lookup: if `client_id`'s highest applied sequence number is
-    /// `>= seq`, the request was already committed; return the commit slot of
-    /// that client's latest applied request so the proposer can reply without
-    /// re-running Paxos. `client_id == 0` is the "no client" sentinel and never
-    /// dedups. Returns `None` for a fresh `(client, seq)`.
+    /// Idempotency lookup: if `client_id` has a recorded `(seq, slot)`
+    /// mapping for this exact `seq`, return its commit slot so the proposer
+    /// can reply without re-running Paxos. `client_id == 0` is the "no
+    /// client" sentinel and never dedups. An unrecorded `seq` (lower or
+    /// otherwise) returns `None` — it falls into the "outside the window,
+    /// outcome unknown" case from `design.md` §10 and is safe to re-propose.
     #[must_use]
     pub fn dedup_lookup(&self, client_id: u64, seq: u64) -> Option<SlotIndex> {
         if client_id == 0 {
             return None;
         }
-        self.dedup
-            .get(&client_id)
-            .filter(|e| seq <= e.last_seq)
-            .map(|e| e.last_slot)
+        self.dedup.get(&client_id).and_then(|w| w.lookup(seq))
     }
 
-    /// Record that `(client_id, seq)` committed at `slot`. Keeps the highest
-    /// `seq` seen per client (monotonic; out-of-order / replayed lower seqs do
-    /// not regress the record). No-op for the `client_id == 0` sentinel.
+    /// Record that `(client_id, seq)` committed at `slot`. Appends to the
+    /// per-client window (idempotent on a duplicate `seq`); evicts the oldest
+    /// entry once the window exceeds `DEDUP_WINDOW`. No-op for the
+    /// `client_id == 0` sentinel.
     fn record_dedup(&self, client_id: Option<u64>, seq: Option<u64>, slot: SlotIndex) {
         let (Some(client_id), Some(seq)) = (client_id, seq) else {
             return;
@@ -305,15 +338,11 @@ impl PxLearner {
         }
         self.dedup
             .entry(client_id)
-            .and_modify(|e| {
-                if seq > e.last_seq {
-                    e.last_seq = seq;
-                    e.last_slot = slot;
-                }
-            })
-            .or_insert(DedupEntry {
-                last_seq: seq,
-                last_slot: slot,
+            .and_modify(|w| w.record(seq, slot))
+            .or_insert_with(|| {
+                let mut w = DedupWindow::default();
+                w.record(seq, slot);
+                w
             });
     }
 

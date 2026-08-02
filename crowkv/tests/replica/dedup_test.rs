@@ -42,8 +42,9 @@ async fn learn_chosen_populates_dedup_cache() {
 
     // Dedup lookup for the same (client_id, seq) returns the commit slot.
     assert_eq!(replica.learner.dedup_lookup(42, 5), Some(1));
-    // Lower seq also hits (already applied).
-    assert_eq!(replica.learner.dedup_lookup(42, 4), Some(1));
+    // An unrecorded lower seq is a miss, not a hit against a higher seq's
+    // slot (exact-match lookup; outside-the-window outcome is unknown).
+    assert!(replica.learner.dedup_lookup(42, 4).is_none());
     // Higher seq does not hit.
     assert!(replica.learner.dedup_lookup(42, 6).is_none());
 }
@@ -76,7 +77,7 @@ async fn dedup_suppresses_retried_request_at_same_slot() {
 }
 
 #[tokio::test]
-async fn dedup_tracks_highest_seq_per_client_across_slots() {
+async fn dedup_records_each_seq_at_its_own_slot() {
     let replica = PxLocalReplica::new(1, PxLocalReplicaRole::Leader);
 
     // Client 7: seq=1 at slot 1, seq=3 at slot 2.
@@ -87,13 +88,11 @@ async fn dedup_tracks_highest_seq_per_client_across_slots() {
         .learn_chosen(&write_entry(2, b"k", b"v3"), Some(7), Some(3))
         .await;
 
-    // Latest dedup record is seq=3 at slot 2.
+    // Each recorded seq maps to its own slot (exact-match lookup).
+    assert_eq!(replica.learner.dedup_lookup(7, 1), Some(1));
     assert_eq!(replica.learner.dedup_lookup(7, 3), Some(2));
-    assert_eq!(
-        replica.learner.dedup_lookup(7, 1),
-        Some(2),
-        "older seq maps to latest slot"
-    );
+    // An unrecorded seq is a miss, not a hit against a higher seq's slot.
+    assert!(replica.learner.dedup_lookup(7, 2).is_none());
     assert!(replica.learner.dedup_lookup(7, 4).is_none());
 }
 
@@ -144,4 +143,63 @@ async fn dedup_ignores_entries_without_client_id() {
 
     // No client_id → no dedup entry for any client.
     assert!(replica.learner.dedup_lookup(1, 1).is_none());
+}
+
+#[tokio::test]
+async fn dedup_does_not_false_positive_on_out_of_order_higher_seq() {
+    let replica = PxLocalReplica::new(1, PxLocalReplicaRole::Leader);
+
+    // Same client, two logically distinct writes: seq=100 (key "a") and
+    // seq=105 (key "b"). seq=105 is learned FIRST (out-of-order slot
+    // choice — e.g. seq=105's proposal happened to win its quorum round
+    // before seq=100's did).
+    let entry_b = write_entry(2, b"b", b"vb"); // slot 2, seq 105
+    replica.learn_chosen(&entry_b, Some(77), Some(105)).await;
+
+    // BUG (pre-fix): seq=100 has never been recorded, but the old
+    // single-entry "latest wins" dedup treats 100 <= 105 as a hit and
+    // would return `Some(2)` here — the slot of an unrelated write, for
+    // a payload ("a") that was never proposed. That is a silent
+    // data-loss false positive: `propose` would short-circuit to
+    // `Chosen { slot: 2 }` for the seq=100 caller without ever running
+    // Paxos for key "a".
+    //
+    // FIXED behavior: an unrecorded seq is a miss, regardless of any
+    // higher seq already committed for the same client.
+    assert!(
+        replica.learner.dedup_lookup(77, 100).is_none(),
+        "seq=100 was never recorded; a higher committed seq=105 must not \
+         produce a false-positive hit against its slot"
+    );
+
+    // Now seq=100 (key "a") is actually proposed and learned at slot 3.
+    let entry_a = write_entry(3, b"a", b"va");
+    replica.learn_chosen(&entry_a, Some(77), Some(100)).await;
+
+    // A genuine retry of seq=100 now correctly hits its own slot (3),
+    // not seq=105's slot (2).
+    assert_eq!(replica.learner.dedup_lookup(77, 100), Some(3));
+    // seq=105's own record is unaffected.
+    assert_eq!(replica.learner.dedup_lookup(77, 105), Some(2));
+}
+
+#[tokio::test]
+async fn dedup_retains_at_least_64_requests_per_client() {
+    let replica = PxLocalReplica::new(1, PxLocalReplicaRole::Leader);
+
+    // Commit seq=1..=80 for one client, each at its own slot.
+    for seq in 1u64..=80 {
+        let entry = write_entry(seq, format!("k{seq}").as_bytes(), b"v");
+        replica.learn_chosen(&entry, Some(5), Some(seq)).await;
+    }
+
+    // The most recent >= 64 requests must still be individually
+    // retrievable by their own seq (not just the latest).
+    for seq in 17u64..=80 {
+        assert_eq!(
+            replica.learner.dedup_lookup(5, seq),
+            Some(seq),
+            "seq={seq} should still be in the retained window"
+        );
+    }
 }

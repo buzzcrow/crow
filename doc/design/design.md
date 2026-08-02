@@ -281,8 +281,11 @@ Full design: `design-reconfiguration.md`, `design-kv-server.md`.
 - **Retry** — on timeout or `NotLeader`, client retries with backoff.
   `NotLeader` with hint → follow hint immediately.
 - **Idempotency** — `(client_id, seq)` dedup, persisted into the
-  PxLogEntry stream (survives leader change). Retention: ≥ 64 requests
-  per client AND ≥ 60s. Outside the window, outcome is unknown.
+  PxLogEntry stream (survives leader change). Per-client retention of
+  the last 64 committed `(seq, slot)` mappings, exact-match lookup: a
+  recorded `seq` returns its own commit slot; an unrecorded `seq`
+  (lower or otherwise) is a miss. Outside the window, outcome is
+  unknown, safe to re-propose.
 
 ## 11. Module Decomposition
 
