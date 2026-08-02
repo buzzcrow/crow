@@ -30,21 +30,37 @@ Client PUT/DELETE/BatchWrite
          a. base_entry(slot, payload.clone())
             [O(1) ref-count: Bytes::clone per retry attempt]
          b. 'paxos_attempt loop (max_paxos_retries = 3)
-            i.  [if force_prepare] run_prepare_phase
-                - local on_prepare (acceptor.prepare + WAL append Promised)
-                - concurrent remote send_prepare RPCs (join_all, unary gRPC)
-            ii. run_accept_phase
-                - local on_accept (acceptor.accept + WAL append Accepted)
-                  [O(1) ref-count: PxLogEntry::clone for cas_accepted]
-                  [no copy: encode_accepted_payload is entry.payload.clone()
-                   (O(1) ref-count); WALRecord.payload is Bytes]
-                  [no copy: IoSlice borrows Bytes for vectored writev]
-                - concurrent remote send_accept RPCs (join_all, bidi LearnerStream)
+            i.  [if force_prepare] run_prepare_phase (R16a: concurrent)
+                - tokio::join!(local on_prepare, join_all(remote send_prepare))
+                  local on_prepare: acceptor.prepare + WAL append Promised
+                  remote: send_prepare RPCs (unary gRPC)
+                - quorum check counts the local reply (W6 intact)
+            ii. run_accept_phase (R16a/R16b: concurrent, two paths)
+                - remote (both paths): send_accept RPCs (join_all, bidi
+                  LearnerStream)
                   [O(1) ref-count: Bytes::clone for AcceptRequest]
                   [copy: payload → socket buffer on gRPC serialize, unavoidable]
                   [move: follower gRPC deserialize → PxLogEntry.payload Bytes]
+                - default (wal_early_ack = false, R16a):
+                    tokio::join!(local on_accept, join_all(remote send_accept))
+                    local on_accept = on_accept_inner (CAS) + on_accept_persist
+                      (WAL append Accepted, awaits fdatasync)
+                      [O(1) ref-count: PxLogEntry::clone for cas_accepted]
+                      [no copy: encode_accepted_payload is entry.payload.clone()
+                       (O(1) ref-count); WALRecord.payload is Bytes]
+                      [no copy: IoSlice borrows Bytes for vectored writev]
+                    quorum check waits for the local reply (W6 intact)
+                - early-ack (wal_early_ack = true, R16b):
+                    tokio::join!(on_accept_inner (CAS only), join_all(remote))
+                    local WAL persist deferred to spawn_accept_persist
+                      (fire-and-forget tokio::spawn; best-effort durability)
+                    chosen declared on remote quorum + local CAS, before fsync
+                      (weakens W6 for the local replica)
             iii. quorum check
             iv. [if chosen] learn_chosen (decode + KVEngine::apply)
+                - default (async_engine_apply = false): inline await
+                - R17 (async_engine_apply = true): spawn_learn_chosen
+                  (fire-and-forget tokio::spawn; returns Chosen before apply)
                 [O(1) ref-count: PxLogEntry::clone for learner]
                 [O(1) ref-count: Batch::decode uses Bytes::slice per key/value]
                 [no copy: FFI ct_apply_batch_slices takes ct_kv_ref pointers
@@ -132,21 +148,31 @@ Client PUT/DELETE/BatchWrite
   `dedup_lookup(client_id, seq)` checks if the learner already applied
   this pair; if so, returns the cached commit slot without re-running
   Paxos. Duplicates never consume a window permit.
-- **Prepare phase (`run_prepare_phase`)** — local: `on_prepare` → term
-  fence → `acceptor.prepare` (lock-free CAS on slot node) → WAL append
-  `Promised` (awaits `fdatasync`) → `PxPrepareReply`. Remote:
-  `join_all` over `remote_replicas`, each `send_prepare` unary gRPC;
-  replies folded into `promised`, `highest_rejected_round`,
-  `highest_seen_term`, `epoch_mismatch`, `adopted`. Quorum:
-  `promised >= quorum` → proceed; else retry or fail.
-- **Accept phase (`run_accept_phase`)** — local: `on_accept` → term
-  fence → `acceptor.accept(entry.clone())` (lock-free CAS) → WAL append
-  `Accepted` (awaits `fdatasync`) → `PxAcceptReply`. Remote: `join_all`
-  over `remote_replicas`, each `send_accept` over the per-peer bidi
-  `PxLearnerStream` (awaits correlated reply via oneshot); replies
-  folded into `accepted`, `highest_rejected_round`,
-  `highest_seen_term`, `epoch_mismatch`. Quorum:
-  `accepted + 1 (local) >= quorum` → chosen; else retry or fail.
+- **Prepare phase (`run_prepare_phase`)** — R16a: the local `on_prepare`
+  (term fence → `acceptor.prepare` lock-free CAS → WAL append `Promised`
+  awaiting `fdatasync` → `PxPrepareReply`) and all remote `send_prepare`
+  unary gRPCs run concurrently via `tokio::join!`, overlapping the local
+  fsync with the network round-trip. Replies folded into `promised`,
+  `highest_rejected_round`, `highest_seen_term`, `epoch_mismatch`,
+  `adopted`. Quorum: `promised >= quorum` → proceed; else retry or fail.
+  The quorum check still awaits the local reply before counting it, so
+  W6 is intact.
+- **Accept phase (`run_accept_phase`)** — R16a/R16b: two paths.
+  - **Default (`wal_early_ack = false`, R16a)** — local `on_accept`
+    (term fence → `acceptor.accept` lock-free CAS → WAL append `Accepted`
+    awaiting `fdatasync` → `PxAcceptReply`) and all remote `send_accept`
+    RPCs over the per-peer bidi `PxLearnerStream` run concurrently via
+    `tokio::join!`. Quorum check waits for the local reply; W6 intact.
+  - **Early-ack (`wal_early_ack = true`, R16b)** — local `on_accept_inner`
+    (CAS only, no WAL persist) runs concurrently with remote RPCs; the
+    local WAL persist is deferred to `spawn_accept_persist`
+    (fire-and-forget `tokio::spawn`). `Chosen` is declared as soon as
+    remote quorum + local CAS succeed, before the local fsync — weakens
+    W6 for the local replica (a crash between CAS and persist can lose
+    the accepted value; safe in Paxos, changes durability ordering).
+  - Replies folded into `accepted`, `highest_rejected_round`,
+    `highest_seen_term`, `epoch_mismatch`. Quorum:
+    `accepted >= quorum` → chosen; else retry or fail.
 - **Learn / apply (`learn_chosen`)** —
   `learner.learn(entry, client_id, seq)` → decode `Batch` from payload
   → `KVEngine::apply(slot, &batch)` → update dedup map → advance
@@ -154,7 +180,10 @@ Client PUT/DELETE/BatchWrite
   FFI `ct_apply_put` / `ct_apply_delete` → memtable insert (may
   trigger flush/compaction). `KVEngine::apply` is `async` but has no
   genuine `Pending` path today (no async apply C API) — never
-  suspends.
+  suspends. R17: when `async_engine_apply` is enabled, `learn_chosen`
+  runs via `spawn_learn_chosen` (fire-and-forget `tokio::spawn`) and the
+  proposer returns `Chosen` before the local engine has applied the
+  value — breaks read-your-writes until an apply fence is added.
 - **Chosen notice (`fan_out_chosen_notice`)** — fire-and-forget
   `ChosenNotification` over each peer's `PxLearnerStream`; non-blocking
   `try_send` on mpsc; failures logged at `debug!` and swallowed — next
@@ -168,27 +197,45 @@ Client PUT/DELETE/BatchWrite
   `acceptor.accept` take `&PxLogEntry`; redundant clones eliminated;
   only remaining clone is inside `inner_accept` for `cas_accepted` (slot
   node must own its copy, O(1) ref-count bump with `Bytes` payload).
-- **R16a — Concurrent local + remote fan-out**: today both
-  `run_accept_phase` and `run_prepare_phase` `await` the local
-  `on_accept`/`on_prepare` (which runs acceptor CAS + WAL append +
-  `fdatasync`) *before* issuing any remote RPC. The leader's local
-  fsync (~10-100 µs on NVMe) sits on the critical path ahead of the
-  network RTT. Fix: issue the local handler and the remote RPCs
-  concurrently (fold the local call into the same `join_all`). The
-  quorum check still awaits the local reply before counting it, so
-  **W6 is not weakened** — W6 only forbids the local replica replying
-  `Accepted` before persist; the proposer still waits for that reply.
-  Pure win, no contract change, no feature flag.
-- **R16b — Early ack before local persist**: return `Chosen` before the
-  local WAL flush completes, tracking local persist separately from
-  quorum. *This* is the part that weakens W6 for the local replica — a
-  crash between accept reply and WAL flush may lose the accepted value
-  (safe in Paxos, but changes durability ordering). Requires feature
-  flag + crash-recovery tests. Lower priority than R16a.
-- **R17 — Async engine apply after quorum**: `learn_chosen` runs before
-  `ProposeResult::Chosen` is returned; engine apply (FFI + memtable
-  insert) is on the write critical path. Would break read-your-writes;
-  needs apply fence / read barrier.
+- **R16a — Concurrent local + remote fan-out** (done, 2026-07-31):
+  `run_prepare_phase` and the default `run_accept_phase` path now issue
+  the local handler and all remote RPCs concurrently via `tokio::join!`,
+  overlapping the leader's local fsync (~10-100 µs on NVMe) with the
+  network round-trip. The quorum check still awaits the local reply
+  before counting it, so **W6 is not weakened** — W6 only forbids the
+  local replica replying `Accepted` before persist; the proposer still
+  waits for that reply. Pure win, no contract change, no feature flag.
+- **R16b — Early ack before local persist** (done, 2026-07-31,
+  default-off): `wal_early_ack` flag splits `on_accept` into
+  `on_accept_inner` (CAS only) + `on_accept_persist` (WAL append). When
+  enabled, the proposer declares `Chosen` on remote quorum + local CAS,
+  before the local fsync; the persist runs via `spawn_accept_persist`
+  (fire-and-forget). Weakens W6 for the local replica — a crash between
+  CAS and persist can lose the accepted value (safe in Paxos, changes
+  durability ordering). The flag is implemented in the hot path but
+  default-off and not carried across group rebuild; enable (default
+  flip + rebuild-carry) is tracked in R35, gated on T1 crash tests.
+- **R17 — Async engine apply after quorum** (done, 2026-07-31,
+  default-off): `async_engine_apply` flag moves `learn_chosen` to
+  `spawn_learn_chosen` (fire-and-forget `tokio::spawn`); the proposer
+  returns `Chosen` before the local engine has applied the value.
+  Removes engine apply (FFI + memtable insert) from the write critical
+  path. Breaks **Linearizable** read-your-writes until an apply fence is
+  added — the existing `linearizable_read_barrier` does not gate on the
+  applied frontier (MinSlot already gates on `contiguous_applied` and is
+  unaffected). The flag is implemented in the hot path but default-off
+  and not carried across group rebuild; apply fence + default flip +
+  rebuild-carry are tracked in R35.
+- **R34 — ISA-L CRC32C** (done, 2026-07-31): `crow-common/crc32c.h` now
+  delegates to ISA-L `crc32_iscsi`, which runtime-dispatches to the
+  best SIMD path (SSE4.2+PCLMULQDQ / AVX2 / AVX512 on x86, NEON on ARM).
+  Accelerates C++ engine durability checksums (superblock, pages). Note:
+  the **Rust WAL** still uses the `crc32c` crate (0.6) for record/footer
+  checksums — R34 does not touch the Rust write path.
+- **R31 — Write regression investigation** (closed, 2026-07-31): the
+  Intel same-platform 50K→29K drop (07-21 → 07-24) was confirmed by the
+  M5 Pro retest to be largely a platform effect, not a code defect (the
+  code path reaches ~48K on M5 Pro). Closed without an Intel bisect.
 
 ---
 
@@ -344,12 +391,13 @@ faster than the Intel Ryzen 9 5950X for this workload at every config:
   only the absolute ceiling differs.
 
 **Implication for R31**: the Intel same-platform regression (50K on
-07-21 → 29K on 07-24) is still real and warrants an Intel bisect if
-that platform is available. But the "ceiling" is not 29K globally —
-that is Intel-specific. On M5 Pro the steady-state ceiling is ~48K,
-close to the original 50K claim. Optimizations (R16a/R17/R30) should
-be benchmarked on a single consistent platform; cross-platform
-comparisons are not meaningful for absolute throughput.
+07-21 → 29K on 07-24) was closed as a platform effect, not a code
+defect — the M5 Pro retest shows the code path itself reaches ~48K.
+The "ceiling" is not 29K globally; that is Intel-specific. On M5 Pro
+the steady-state ceiling is ~48K, close to the original 50K claim.
+Optimizations (R16a/R16b/R17) should be benchmarked on a single
+consistent platform; cross-platform comparisons are not meaningful
+for absolute throughput.
 
 The MI=1 run on M5 Pro showed 48 errors with a 106 ms p999 tail —
 queue saturation under aggressive load with a single permit; the
@@ -372,12 +420,16 @@ consensus failures (zero errors at MI=64).
   window size.
 - **Scaling ceiling is platform-dependent** — Intel Ryzen 9 5950X
   ~29K ops/s; Apple M5 Pro ~48K ops/s at the same config. Per-proposal
-  latency at 48 inflight is ~1.7 ms (Intel) vs ~1.0 ms (M5 Pro). Next
-  gains require reducing per-proposal latency (R16a: concurrent local
-  + remote fan-out; R15: zero-copy accept path, done). The Intel
-  same-platform 50K→29K drop (07-21 → 07-24) is tracked as R31; the
-  M5 Pro retest shows the code path itself reaches ~48K, so the
-  "regression" is largely a platform effect, not a code defect.
+  latency at 48 inflight is ~1.7 ms (Intel) vs ~1.0 ms (M5 Pro). The
+  per-proposal critical path is now: max(local fsync, quorum RPC) after
+  R16a (was local fsync → quorum RPC, serial). R15 (zero-copy accept
+  path, done) and R16a (concurrent fan-out, done) have already removed
+  the serial local fsync from the critical path. Remaining per-proposal
+  latency is dominated by the quorum RPC round-trip and the local fsync
+  running concurrently; further gains need R16b (drop local fsync from
+  the critical path entirely) or a faster quorum transport (R32). The
+  Intel same-platform 50K→29K drop (07-21 → 07-24) was closed as R31
+  (platform effect, not a code defect).
 
 ---
 
@@ -415,9 +467,79 @@ of what remains:
 - **FFI batch encode** — already eliminated (R23, done):
   `ct_apply_batch_slices` accepts an array of `ct_kv_ref`
   pointer-length structs; no packing copy.
-- **Client-side batch copy (R25)** — `CrowkvClient::batch_write` clones
-  each `BatchOp` key/value (`Vec<u8>::clone`) into `KvBatchItem`, then
-  clones the entire `items` vec per retry. Switching client `BatchOp`
-  and proto `bytes` fields to `bytes::Bytes` (via `prost-build` config)
-  makes these O(1) ref-count bumps. Medium complexity — type change
-  ripples through call sites but no C++ or consensus changes.
+- **Client-side batch copy (R25, partial)** — proto `bytes` fields are
+  now `bytes::Bytes` (done via `prost-build` config), so `KvBatchItem`
+  holds `Bytes`. But `CrowkvClient::BatchOp` still owns `Vec<u8>`
+  key/value, so `batch_write` clones each key/value into `KvBatchItem`
+  and clones the whole `items` vec per retry. Switching `BatchOp` to
+  `Bytes` makes these O(1) ref-count bumps. Low-medium complexity — type
+  change ripples through client call sites but no C++ or consensus
+  changes.
+
+---
+
+## Write-Path Enhancement Ideas
+
+Grounded in the current code (post R16a/R16b/R17/R34). Ordered by
+expected impact on the per-proposal critical path, which after R16a is
+`max(local fsync, quorum RPC)`. Larger items are tracked as backlog
+requirements; small/tuning items are traced in
+[`plan-io-clean.md`](plan-io-clean.md).
+
+- **Apply fence for R17 (enable `async_engine_apply` by default)** —
+  tracked as **[R35](../backlog/R35-apply-fence.md)** (backlog). The
+  biggest remaining write-path win. R17 is implemented but default-off
+  because `learn_chosen` (FFI + memtable insert) is moved off the
+  critical path, breaking the **Linearizable** read mode's
+  read-your-writes. (MinSlot already gates on `contiguous_applied` and
+  is unaffected.) The existing `linearizable_read_barrier` confirms the
+  leader is still leader and captures `read_slot = contiguous_chosen`,
+  but the engine get returns the latest **applied** value — with R17 on
+  a chosen-but-not-applied slot can be missed. An apply fence — have
+  Linearizable reads await `contiguous_applied >= read_slot` before
+  serving — restores Linearizable read-your-writes and lets R17 ship by
+  default. The learner's `apply_item` is already idempotent and
+  `update_frontier` / `record_dedup` are atomic, so a delayed apply is
+  safe. Medium complexity, confined to the Linearizable read path +
+  learner.
+- **Crash-recovery tests for R16b (enable `wal_early_ack` by default)** —
+  tracked as **T1** in [`plan-io-clean.md`](plan-io-clean.md).
+  R16b drops the local fsync off the critical path entirely (chosen on
+  remote quorum + local CAS). On NVMe the local fsync is ~10-100 µs, so
+  this is the larger single latency component once R16a has overlapped
+  it with the quorum RPC. The mechanism is implemented; the blocker is
+  durability-ordering validation: a crash between CAS and persist must
+  not violate any externally visible guarantee. Needs fault-injection
+  crash-recovery tests (kill -9 between `on_accept_inner` and
+  `spawn_accept_persist`, then replay). Low code complexity once tests
+  pass.
+- **Server-side proposal coalescing** — tracked as
+  **[R36](../backlog/R36-proposal-coalescing.md)** (backlog). Today each
+  client `PUT` is its own Paxos proposal (one slot, one WAL record, one
+  fsync batch entry, one quorum RPC round). The `Batch` payload format
+  already supports multiple ops and `kv_batch_write` exposes it to
+  clients, but there is no server-side coalescer that merges concurrent
+  single-key proposes into one multi-key proposal before slot
+  allocation. A bounded micro-batcher (collect for ≤N µs or ≤K keys,
+  then one `propose`) would amortize the per-proposal fixed cost (quorum
+  RPC + fsync) across many keys — directly attacks the saturation
+  ceiling. Trades a small latency floor for throughput; needs a tunable
+  coalesce window and must preserve `(client_id, seq)` dedup ordering.
+  Medium-high complexity; touches the admission gate and the propose
+  entry.
+- **Rust WAL CRC32C hardware path** — tracked as **T2** in
+  [`plan-io-clean.md`](plan-io-clean.md). The Rust WAL uses the
+  `crc32c` crate (0.6) for record/footer checksums on every encode and
+  replay; the C++ side moved to ISA-L `crc32_iscsi` (R34). The `crc32c`
+  crate has an SSE4.2 path on x86 but no NEON path on ARM, and is not
+  vectorized to the same degree as ISA-L. FFI-ing `crow_common::crc32c`
+  (or a thin `crc32_iscsi` binding) for the Rust WAL aligns the two
+  paths and helps ARM. Low impact on the critical path (CRC is a small
+  fraction of encode), low-medium complexity.
+- **WAL group-commit coalesce tuning** — tracked as **T3** in
+  [`plan-io-clean.md`](plan-io-clean.md). `wal_flush_coalesce_us`
+  defaults to 0 (flush as soon as the first record is queued). A small
+  coalesce window (e.g. 10-50 µs) lets more in-flight proposals land in
+  one `writev` + `fdatasync`, amortizing fsync cost further. Pure
+  config/tuning change, no code; benchmark the latency/throughput
+  tradeoff on a single platform.
