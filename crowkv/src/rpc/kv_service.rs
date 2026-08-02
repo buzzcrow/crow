@@ -83,6 +83,8 @@ fn scan_response_size(resp: &KvScanResponse) -> u64 {
 struct KvMetrics {
     put_lh: Arc<LatencyHistogram>,
     get_lh: Arc<LatencyHistogram>,
+    get_linearizable_lh: Arc<LatencyHistogram>,
+    get_min_slot_lh: Arc<LatencyHistogram>,
     delete_c: Arc<Counter>,
     scan_l: Arc<LatencySummary>,
     bytes_in_bw: Arc<Bandwidth>,
@@ -101,6 +103,8 @@ impl KvMetrics {
         Self {
             put_lh: registry.register_histogram(format!("{prefix}.kv.put.lh")),
             get_lh: registry.register_histogram(format!("{prefix}.kv.get.lh")),
+            get_linearizable_lh: registry.register_histogram(format!("{prefix}.kv.get.linearizable.lh")),
+            get_min_slot_lh: registry.register_histogram(format!("{prefix}.kv.get.min_slot.lh")),
             delete_c: registry.register_counter(format!("{prefix}.kv.delete.c")),
             scan_l: registry.register_summary(format!("{prefix}.kv.scan.l")),
             bytes_in_bw: registry.register_bandwidth(format!("{prefix}.kv.bytes_in.bw")),
@@ -114,10 +118,15 @@ impl KvMetrics {
         }
     }
 
-    /// Record get latency, bandwidth (combined + read-separated), and
-    /// error counters for one get response.
-    fn record_get(&self, elapsed_ns: u64, req_size: u64, resp: &KvResponse) {
+    /// Record get latency into the combined and per-mode histograms,
+    /// bandwidth (combined + read-separated), and error counters.
+    fn record_get(&self, elapsed_ns: u64, req_size: u64, read_mode: i32, resp: &KvResponse) {
         self.get_lh.observe(elapsed_ns);
+        if read_mode == crate::rpc::ReadMode::Linearizable as i32 {
+            self.get_linearizable_lh.observe(elapsed_ns);
+        } else {
+            self.get_min_slot_lh.observe(elapsed_ns);
+        }
         self.bytes_in_bw.observe(req_size);
         self.bytes_out_bw.observe(resp.value.len() as u64);
         self.read_bytes_in_bw.observe(req_size);
@@ -262,7 +271,12 @@ impl KvService for KvStoreService {
                             "kv get forwarded to leader"
                         );
                         if let Some(m) = self.metrics_for(req.group_id) {
-                            m.record_get(start.elapsed().as_nanos() as u64, req_size as u64, &resp);
+                            m.record_get(
+                                start.elapsed().as_nanos() as u64,
+                                req_size as u64,
+                                req.read_mode,
+                                &resp,
+                            );
                             m.get_forwarded_c.inc();
                         }
                         resp.request_id = req.request_id;
@@ -290,7 +304,12 @@ impl KvService for KvStoreService {
                             )
                             .await;
                         if let Some(m) = self.metrics_for(req.group_id) {
-                            m.record_get(start.elapsed().as_nanos() as u64, req_size as u64, &resp);
+                            m.record_get(
+                                start.elapsed().as_nanos() as u64,
+                                req_size as u64,
+                                req.read_mode,
+                                &resp,
+                            );
                             m.get_forward_failed_c.inc();
                         }
                         resp.not_leader_hint = endpoint;
@@ -314,7 +333,12 @@ impl KvService for KvStoreService {
             )
             .await;
         if let Some(m) = self.metrics_for(req.group_id) {
-            m.record_get(start.elapsed().as_nanos() as u64, req_size as u64, &resp);
+            m.record_get(
+                start.elapsed().as_nanos() as u64,
+                req_size as u64,
+                req.read_mode,
+                &resp,
+            );
         }
         resp.request_id = req.request_id;
         resp.request_create_ms = req.request_create_ms;
