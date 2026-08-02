@@ -35,6 +35,10 @@ pub struct BatchStats {
     pub flush_count: u64,
     /// Total number of records flushed across all batches.
     pub records_flushed: u64,
+    /// Total number of watchdog wakeups across all pipelines (idle writer
+    /// safety-net timer fires). Non-zero while idle indicates the writer is
+    /// cycling; near-zero under load indicates the wake path is working.
+    pub watchdog_wakeups: u64,
 }
 
 /// Cumulative block device counter snapshot, read by the engine collector
@@ -92,6 +96,9 @@ pub struct WalEngine {
     flush_count: Arc<AtomicU64>,
     /// Total number of records flushed across all batches.
     records_flushed: Arc<AtomicU64>,
+    /// Total number of watchdog wakeups across all pipelines (idle writer
+    /// safety-net timer fires).
+    watchdog_wakeups: Arc<AtomicU64>,
     /// Optional latency summary for `append` calls. Set via
     /// [`Self::set_append_summary`] when a metrics registry is wired.
     append_summary: OnceLock<Arc<LatencySummary>>,
@@ -135,6 +142,7 @@ impl WalEngine {
         let next_segment_id = Arc::new(AtomicU64::new(1));
         let flush_count = Arc::new(AtomicU64::new(0));
         let records_flushed = Arc::new(AtomicU64::new(0));
+        let watchdog_wakeups = Arc::new(AtomicU64::new(0));
         let fsync_summary: Arc<OnceLock<Arc<LatencySummary>>> = Arc::new(OnceLock::new());
         let write_bandwidth: Arc<OnceLock<Arc<Bandwidth>>> = Arc::new(OnceLock::new());
 
@@ -173,6 +181,7 @@ impl WalEngine {
                 index.clone(),
                 flush_count.clone(),
                 records_flushed.clone(),
+                watchdog_wakeups.clone(),
                 config.wal_skip_fsync,
                 Arc::clone(&fsync_summary),
                 Arc::clone(&write_bandwidth),
@@ -210,6 +219,7 @@ impl WalEngine {
             writer_tasks: parking_lot::Mutex::new(writer_tasks),
             flush_count,
             records_flushed,
+            watchdog_wakeups,
             append_summary: OnceLock::new(),
             fsync_summary,
             write_bandwidth,
@@ -383,6 +393,7 @@ impl WalEngine {
         BatchStats {
             flush_count: self.flush_count.load(Ordering::Relaxed),
             records_flushed: self.records_flushed.load(Ordering::Relaxed),
+            watchdog_wakeups: self.watchdog_wakeups.load(Ordering::Relaxed),
         }
     }
 

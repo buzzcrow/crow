@@ -115,7 +115,10 @@ pub struct WalConfig {
     pub wal_flush_batch_bytes: usize,
     /// Optional durable flush coalescing budget (microseconds). Default 0.
     pub wal_flush_coalesce_us: u64,
-    /// Watchdog timer for stuck durable flush batches. Default 100 ms.
+    /// Safety-net timer that wakes the idle writer every `watchdog` ms to
+    /// drain any queued records in case of a missed wake ("just in case for
+    /// bugs"). Also caps the coalesce window when `wal_flush_coalesce_us > 0`.
+    /// Default 100 ms.
     pub wal_flush_watchdog_ms: u64,
     /// Disk-pressure watermark for eager GC. Default 80%.
     pub wal_disk_high_watermark_pct: u8,

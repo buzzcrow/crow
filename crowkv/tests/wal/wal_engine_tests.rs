@@ -13,6 +13,7 @@ use crowkv::wal::wal_engine::WalEngine;
 use crowkv::wal::{IoBackend, MemBlockDevice, OpenOptions, WalConfig};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 fn sim_backend() -> Arc<IoBackend> {
     Arc::new(IoBackend::MemBlock(MemBlockDevice::new()))
@@ -58,6 +59,39 @@ async fn single_record_durable_flush_without_interval_wait() {
     wal.append(&record).await.unwrap();
 
     // Exactly one durable flush covers the single record; no rotation/seal.
+    assert_eq!(device.fdatasync_count(), 1);
+}
+
+/// T3.1: the watchdog safety-net timer wakes the idle writer periodically so a
+/// queued record is drained even if a normal wake were missed. With a short
+/// watchdog and real time, sleeping past several cycles fires the timer; the
+/// `watchdog_wakeups` counter increments and the writer stays functional.
+#[tokio::test(flavor = "current_thread")]
+async fn watchdog_wakes_idle_writer_and_stays_functional() {
+    let device = MemBlockDevice::new();
+    let backend = Arc::new(IoBackend::MemBlock(device.clone()));
+    let config = WalConfig {
+        wal_disks: vec![PathBuf::from("/wal-wd")],
+        wal_segment_size: 1024 * 1024,
+        wal_flush_watchdog_ms: 10,
+        ..Default::default()
+    };
+    let wal = WalEngine::create(backend, config, 1).await.unwrap();
+
+    // Idle: sleep past several watchdog cycles. The writer's timeout fires,
+    // try_recv drains (empty), and it re-parks each cycle.
+    tokio::time::sleep(Duration::from_millis(35)).await;
+
+    let stats = wal.batch_stats();
+    assert!(
+        stats.watchdog_wakeups >= 1,
+        "watchdog should fire while idle, got {}",
+        stats.watchdog_wakeups
+    );
+
+    // Writer is still alive — a real append flushes normally.
+    let record = WALRecord::from_promised(1, 1, 10, PxBallot::new(0, 1));
+    wal.append(&record).await.unwrap();
     assert_eq!(device.fdatasync_count(), 1);
 }
 

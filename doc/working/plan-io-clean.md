@@ -73,43 +73,59 @@ gate), `crowkv/src/common/config.rs` (default flip in
       {0, 10, 25, 50, 100, 200} µs at a saturated write config
       (48T:48C, MI=64) on one platform. Note: `wal_flush_coalesce_us`
       is **optional**. The default (`0`) is wake-drain-flush with no
-      timer — the writer parks on `rx.recv()`, drains all already-queued
-      records via `try_recv` on wake, then flushes immediately. Natural
-      batching already occurs because records arriving during an
-      in-flight flush queue in the mpsc channel and are drained
-      together on the next wake cycle. A non-zero `wal_flush_coalesce_us`
-      adds an explicit bounded wait window (`min(coalesce, watchdog)`)
-      to gather more records before flushing. The watchdog
-      (`wal_flush_watchdog_ms`) is a safety cap on that window only —
-      it does nothing when `coalesce = 0` (exists just in case of bugs).
+      coalesce timer — the writer parks on `rx.recv()`, drains all
+      already-queued records via `try_recv` on wake, then flushes
+      immediately. Natural batching already occurs because records
+      arriving during an in-flight flush queue in the mpsc channel and
+      are drained together on the next wake cycle. A non-zero
+      `wal_flush_coalesce_us` adds an explicit bounded wait window
+      (`min(coalesce, watchdog)`) to gather more records before flushing.
+      The watchdog (`wal_flush_watchdog_ms`) is a safety net "just in
+      case of bugs"; today it only caps the coalesce window, but it
+      should also guard the wake-drain-flush path (see T3.1).
 - [ ] Measure throughput vs p99/p999 latency tradeoff; with `coalesce
       = 0` the baseline already amortizes fsync across records that
       arrive during a flush, so the question is whether an explicit
       wait window adds any measurable gain on top of wake-drain-flush.
-- [ ] Decide: keep `wal_flush_coalesce_us` only if some non-zero value
-      shows an obvious advantage (clear throughput gain with
+- [ ] Decide on `wal_flush_coalesce_us`: keep only if some non-zero
+      value shows an obvious advantage (clear throughput gain with
       acceptable tail). If no value shows an obvious advantage, **remove
-      the option entirely** — delete the config field, the coalesce
-      plumbing in `pipeline_writer.rs`, the watchdog cap on the window,
-      and related tests/bench columns. Document the decision and any
-      results in `write-flow-analysis.md`.
+      the option** — delete the config field and the coalesce arm in
+      `pipeline_writer.rs` (the `if !coalesce.is_zero()` block), plus
+      related tests/bench columns. `wal_flush_watchdog_ms` stays
+      regardless (see T3.1). Document the decision and results in
+      `write-flow-analysis.md`.
+- [x] **T3.1** — Wire the watchdog into the wake-drain-flush path so
+      `wal_flush_watchdog_ms` is a real safety net when `coalesce = 0`
+      (or after coalesce removal), not just a cap on the coalesce window.
+      Currently `watchdog` is only referenced at
+      `pipeline_writer.rs:249` inside `if !coalesce.is_zero()`, so with
+      `coalesce = 0` it does nothing. The watchdog exists "just in
+      case of bugs" — e.g. a record stuck in the queue or a missed
+      wake — and should force a drain+flush within `watchdog` ms even
+      when idle/no-coalesce. Small code change in `pipeline_writer.rs`
+      (e.g. `timeout(watchdog, rx.recv())` or a select with an interval
+      timer; on timeout, `try_recv` + flush any queued records, then
+      re-park). Add a test that a queued record flushes within
+      `watchdog` ms even if the normal wake is missed.
 
-**Scope**: Small — config/benchmarking first. If the option is kept,
-no code change (just pick a default). If the option is removed, small
-code change: drop `wal_flush_coalesce_us` **and** `wal_flush_watchdog_ms`
-(the watchdog only caps the coalesce window — see `pipeline_writer.rs:249`
-and `design-wal.md` "When coalescing is 0 (default), the watchdog is not
-used"; it guards no other path) from `WalConfig`, `pipeline_writer.rs`,
-`wal_engine.rs`, tests, and bench scripts. The wake-drain-flush
-baseline stays as the only batching path.
+**Scope**: Small. T3.1 (watchdog wiring) is independent of the coalesce
+sweep and can proceed first. The sweep is pure config/benchmarking; if
+coalesce is removed, the code change is dropping the `if !coalesce.is_zero()`
+block + the `coalesce` plumbing tied to it (the watchdog itself stays —
+it now guards the flush path via T3.1). The wake-drain-flush baseline
+stays as the only batching path.
 
 **Files**: `tools/bench-write-*.sh` (add coalesce sweep column),
-`crowkv/src/common/config.rs` (default if kept, or remove
-`wal_flush_coalesce_us` + `wal_flush_watchdog_ms` if removed),
-`crowkv/src/wal/pipeline_writer.rs` + `wal_engine.rs` (remove coalesce
-arm + watchdog plumbing if removed),
-`crowkv/tests/wal/wal_engine_tests.rs` (update if removed),
+`crowkv/src/common/config.rs` (remove `wal_flush_coalesce_us` if
+removed; `wal_flush_watchdog_ms` stays),
+`crowkv/src/wal/pipeline_writer.rs` (T3.1 watchdog wiring; remove
+coalesce arm if removed),
+`crowkv/src/wal/wal_engine.rs` (drop `coalesce` plumbing if removed),
+`crowkv/tests/wal/wal_engine_tests.rs` (watchdog test; update coalesce
+tests if removed),
 `doc/working/write-flow-analysis.md` (results + decision),
-`doc/design/design-wal.md` (update if removed).
+`doc/design/design-wal.md` (update watchdog description + remove
+coalesce rows if removed).
 
 ---
