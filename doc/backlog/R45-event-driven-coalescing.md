@@ -47,31 +47,23 @@ This eliminates the `coalesce_window_us` config knob entirely. The
 coalescer is either on (`coalesce_max_keys > 0`) or off
 (`coalesce_max_keys == 0`). No timer, no latency floor.
 
-**Why aggregate from the start (not fill inflight window first)**:
+**Why aggregate from the start**:
 
-Two possible event-driven designs were considered:
+The first op starts a round immediately, but every subsequent op that
+arrives during any in-flight round joins the pending batch. The inflight
+window is a flow-control backstop, not the primary aggregation trigger.
 
-- **Option A (fill window first)**: Each op starts its own round until
-  the inflight window is full, then aggregate. At medium load (8 ops),
-  this issues 8 separate rounds — zero aggregation. Aggregation only
-  kicks in under saturation.
-- **Option B (aggregate from start)** — **chosen**: The first op starts
-  a round immediately, but every subsequent op that arrives during any
-  in-flight round joins the pending batch. The inflight window is a
-  flow-control backstop, not the primary aggregation trigger.
-
-| Load | Option A | Option B (chosen) |
+| Load | Rounds issued | Behavior |
 |---|---|---|
-| 1 op | 1 round, no tax | 1 round, no tax |
-| 8 ops | 8 rounds, no aggregation | 2 rounds (1+7), good aggregation |
-| 64 ops | 32 rounds, then aggregate | ~2 rounds of 32, then more as needed |
-| 64+ ops | 32 concurrent rounds, then aggregate | 32 concurrent rounds, each full |
+| 1 op | 1 round | Starts immediately, no tax |
+| 8 ops | 2 rounds (1+7) | Op 1 starts round 1; ops 2-8 arrive during round 1 and join pending batch; round 1 completes, round 2 carries 7 ops |
+| 64 ops | ~2 rounds of 32, then more | Batches fill to `max_keys`, overflow starts concurrent rounds |
+| 64+ ops | up to 32 concurrent rounds, each full | All permits taken; pending batch accumulates until a round frees a permit |
 
-Option B is strictly better: aggregation happens whenever ops arrive
-during an in-flight round — not only when the inflight window is
-saturated. The first op never waits (starts immediately), and every
-subsequent op that arrives during any in-flight round gets a free ride
-in the next batch.
+Aggregation happens whenever ops arrive during an in-flight round — not
+only when the inflight window is saturated. The first op never waits
+(starts immediately), and every subsequent op that arrives during any
+in-flight round gets a free ride in the next batch.
 
 **Interaction with the inflight window**: The existing `max_inflight`
 permits cap concurrent Paxos rounds. With Option B, each round carries
