@@ -22,31 +22,44 @@ Optimization Opportunities for the full lists and rationale.
 
 ## T1 — Crash-recovery hardening for R16b (enable `wal_early_ack`)
 
-- [ ] Add a fault-injection crash-recovery test: kill the leader
-      between `on_accept_inner` (CAS) and `spawn_accept_persist`
-      (deferred WAL append), restart, verify WAL replay does not lose
-      the Paxos-chosen value and that a subsequent leader re-adopts it.
-- [ ] Add a test for the window where `wal_early_ack` is on and the
-      local persist fails (background task logs the error): confirm the
-      value is still chosen (Paxos-safe) and that repair `repair_once`
-      re-drives the slot if needed.
-- [ ] Once tests pass, flip `wal_early_ack` default to true and
-      benchmark the per-proposal latency drop (local fsync removed from
-      the critical path; critical path becomes `quorum RPC` only).
+Design: [`design-t1-crash-recovery.md`](design-t1-crash-recovery.md).
+Decisions: (1) test-only `Notify` gate on `spawn_accept_persist` to
+deterministically hit the CAS→persist window (mirrors
+`readindex_round_gate` pattern); (2) keep `wal_early_ack` as an
+internal `PxGroup` field, flip the default in `PxGroup::new`, carry
+across rebuild in `mgmt_api` (no config struct / CLI flag).
 
-**Scope**: Medium — the R16b mechanism is implemented and merged
-(`on_accept_inner` / `on_accept_persist` / `spawn_accept_persist`); this
-is verification + default-flip, not new design. The work is the
-fault-injection harness (process kill + restart + WAL replay assertion).
+- [ ] **T1.1** — Crash-recovery test: install `test-util` `Notify` gate
+      on leader's `spawn_accept_persist`, fire `put` (returns `Chosen`
+      before gated persist), kill leader, restart, assert chosen value
+      is recoverable (WAL or `repair_once`). Mirrors
+      `g2_crash_restart_no_data_loss_test.rs`'s `kill`/`restart`.
+- [ ] **T1.2** — Persist-failure test: `wal_early_ack` on, `chmod 000`
+      the WAL dir after `Chosen`, confirm value is still chosen
+      (Paxos-safe) and `repair_once` re-drives the slot.
+- [ ] **T1.3** — Flip `wal_early_ack` default to `true` in
+      `PxGroup::new`; add `wal_early_ack()` getter; carry across
+      rebuild in `mgmt_api.rs` (next to `force_classic` block).
+- [ ] **T1.4** — No regression: existing crash-restart tests pass with
+      the new default.
+- [ ] **T1.5** (deferred to Linux bench) — Benchmark per-proposal
+      latency drop; document in `write-flow-analysis.md`.
 
-**Dependency**: R35 carries `wal_early_ack` across group rebuild in
-`mgmt_api` (shared with R17's `async_engine_apply`). T1's own work
-(crash tests + default flip) is independent of R35's apply fence; R16b's
-enable is gated on T1, not R35.
+**Scope**: Medium — the R16b mechanism is implemented and merged; this
+is verification + default-flip. The fault-injection harness exists
+(`g2`'s `kill`/`restart`); the new work is the `test-util` `Notify`
+gate + two test files + the default flip + `mgmt_api` carry.
 
-**Files**: `crowkv/tests/` (new crash-recovery test),
-`crowkv/src/cluster/group.rs` (`wal_early_ack` default),
-`crowkv/src/cluster/local_replica.rs` (no code change expected).
+**Dependency**: R35 shares the `mgmt_api` rebuild-carry pattern. T1
+carries `wal_early_ack`; R35 carries `async_engine_apply`. T1's default
+flip is independent of R35's fence. T1.5 (benchmark) is platform-gated
+(Linux); T1.1–T1.4 are not.
+
+**Files**: `crowkv/src/cluster/local_replica.rs` (`test-util` `Notify`
+gate), `crowkv/src/cluster/group.rs` (default flip + getter),
+`crowkv-server/src/mgmt_api.rs` (rebuild-carry),
+`crowkv/tests/group/` (new test files),
+`doc/working/write-flow-analysis.md` (T1.5 results, deferred).
 
 ---
 
