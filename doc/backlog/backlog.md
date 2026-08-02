@@ -45,19 +45,6 @@ complexity, and dependency. Before implementation, follow the
   `crow-tree` / `crow::tree` / `CROW_TREE_*`. Establishes the `crowkv` →
   `crow-tree` dependency boundary analogous to `crowkv` → `crow-common`.
   Most naturally done after R12.
-- **[R35](R35-apply-fence.md)** — Apply fence for async engine apply (enable R17 by default) — Area:
-  read path / learner — R17 moves `learn_chosen` (engine apply) off the
-  write critical path via `spawn_learn_chosen`, but ships default-off
-  because it breaks the **Linearizable** read mode's read-your-writes
-  (MinSlot already gates on `contiguous_applied` and is unaffected).
-  Gate the Linearizable barrier on the learner's `contiguous_applied`
-  frontier (already an `AtomicU64`) so a read awaits the write's slot
-  before serving. Then flip the `async_engine_apply` internal default to
-  true (no CLI flag / public API — internal config only) and carry it
-  across group rebuild. Enable by default if no regression. Unblocks
-  the biggest remaining write-path latency win. Medium complexity,
-  confined to the Linearizable read path + learner + `mgmt_api`;
-  composes with R27 ReadIndex batching.
 - **[R36](R36-proposal-coalescing.md)** — Server-side proposal coalescing — Area: consensus / write path —
   A bounded micro-batcher at the `PxGroup::propose` entry merges
   concurrent single-key proposes into one multi-key Paxos proposal
