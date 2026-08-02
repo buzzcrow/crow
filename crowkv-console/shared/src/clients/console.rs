@@ -81,6 +81,9 @@ pub struct DeployNodeServerBody {
     /// `--coalesce-max-keys` value for R45 proposal coalescing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coalesce_max_keys: Option<usize>,
+    /// `--coalesce-window-us` value for R45 timer-mode interval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coalesce_window_us: Option<u64>,
     /// Optional `--config` JSON path passed to the spawned `crowkv-server`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<String>,
