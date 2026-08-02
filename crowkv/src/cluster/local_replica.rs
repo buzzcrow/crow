@@ -241,6 +241,13 @@ pub struct PxLocalReplica {
     /// metrics log file. Set via [`Self::set_metrics_registry`] when
     /// a registry is wired. `None` in tests / no-registry mode.
     election_handles: OnceLock<ElectionRegistryHandles>,
+    /// Test-only gate that blocks `spawn_accept_persist`'s background
+    /// task before `wal.append`, so a test can deterministically kill
+    /// the replica in the CAS→persist window (R16b early-ack). Set via
+    /// `set_persist_gate_for_tests` under the `test-util` feature;
+    /// `None` in production.
+    #[cfg(feature = "test-util")]
+    persist_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
 }
 
 /// Registry-based metric handles for election counters and gauges.
@@ -353,6 +360,8 @@ impl PxLocalReplica {
             election_metrics: ElectionMetrics::new(),
             last_heartbeat_at: Mutex::new(None),
             election_handles: OnceLock::new(),
+            #[cfg(feature = "test-util")]
+            persist_gate: Mutex::new(None),
         }
     }
 
@@ -411,6 +420,8 @@ impl PxLocalReplica {
             election_metrics: ElectionMetrics::new(),
             last_heartbeat_at: Mutex::new(None),
             election_handles: OnceLock::new(),
+            #[cfg(feature = "test-util")]
+            persist_gate: Mutex::new(None),
         }
     }
 
@@ -421,6 +432,17 @@ impl PxLocalReplica {
     /// will persist `voted_for` changes.
     pub fn set_wal(&mut self, wal: Arc<WalEngine>) {
         self.wal = Some(wal);
+    }
+
+    /// Install a `Notify` gate that blocks `spawn_accept_persist`'s
+    /// background task before `wal.append`. The test keeps the `Arc`;
+    /// the background task waits on `notify.notified()` and only
+    /// proceeds once the test calls `notify_one()`. Used by T1
+    /// crash-recovery tests to deterministically hit the CAS→persist
+    /// window.
+    #[cfg(feature = "test-util")]
+    pub fn set_persist_gate_for_tests(&self, notify: Arc<tokio::sync::Notify>) {
+        *self.persist_gate.lock() = Some(notify);
     }
 
     /// Set this replica's listen endpoint (called by the store when the
@@ -1171,7 +1193,13 @@ impl PxLocalReplica {
     pub fn spawn_accept_persist(&self, entry: PxLogEntry) {
         if let Some(wal) = &self.wal {
             let wal = Arc::clone(wal);
+            #[cfg(feature = "test-util")]
+            let gate = self.persist_gate.lock().clone();
             tokio::spawn(async move {
+                #[cfg(feature = "test-util")]
+                if let Some(notify) = gate {
+                    notify.notified().await;
+                }
                 let record = WALRecord::from_accepted(wal.group_id(), &entry);
                 if let Err(e) = wal.append(&record).await {
                     tracing::error!(
