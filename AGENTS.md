@@ -20,7 +20,7 @@ Rust workspace + C++ storage engine (via FFI).
 - `unsafe_code = deny` (except `crowtree-ffi`); Clippy `pedantic = warn`.
 - Markdown is read as raw text — prefer bullet or definition lists; tables allowed only when genuinely necessary for data/metric comparison (e.g. benchmark results). `doc_index.md` always uses tables.
 - `test-util` auto-enabled for tests via self dev-dependency — no flags needed.
-- Commit messages and code comments: single line, no doc references or task numbers.
+- Commit messages: single-line subject only — no body, no trailers (e.g. `Co-Authored-By`, `Generated with`), no doc references, no task numbers (R-numbers). Code comments: single line, no doc references or task numbers.
 - **One commit per task, not per interaction** — a "task" is a coherent unit of work (e.g. "restructure docs", "add CLI rename", "implement R7"). Small, closely-related changes (e.g. a backlog entry + its tmp-file cleanup + the ignore rule that surfaces from it) may be merged into one commit. Before pushing, squash unpushed commits from the same task into one (soft reset to remote tip, re-commit). Before committing, verify no temp/generated files are staged; add to `.gitignore` if needed.
 - **Pre-commit quality gate — do not skip:**
   - Lint must pass: `cargo fmt --check`, `cargo clippy -- -D warnings`, `clang-format --dry-run --Werror` (changed `.cpp`/`.h`), `ct-lint` (clang-tidy, changed C++). Fix up to 3 times — always, regardless of cause.
