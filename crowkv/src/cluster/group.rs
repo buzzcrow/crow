@@ -43,6 +43,8 @@ pub(crate) struct ReadRegistryHandles {
     pub(crate) minslot_fallback: Arc<Counter>,
     pub(crate) barrier: Arc<LatencySummary>,
     pub(crate) engine_get: Arc<LatencySummary>,
+    /// R35 apply-fence wait latency (fast path is a single atomic load).
+    pub(crate) apply_fence: Arc<LatencySummary>,
     pub(crate) lease_valid: Arc<Gauge>,
     pub(crate) contiguous_applied: Arc<Gauge>,
     pub(crate) safe_slot: Arc<Gauge>,
@@ -214,9 +216,12 @@ impl PxGroup {
             remote_replicas: Vec::new(),
             valid_replica_count: 0,
             next_slot: AtomicU64::new(1),
-            // Test path: wal_early_ack defaults false; production overwrites via set_from_config.
+            // Test path: wal_early_ack / async_engine_apply default false
+            // for deterministic synchronous apply; production overwrites via
+            // set_from_config.
             config: CrowKVConfig {
                 wal_early_ack: false,
+                async_engine_apply: false,
                 ..CrowKVConfig::default()
             },
             tenure_cancel: CancellationToken::new(),
@@ -399,6 +404,7 @@ impl PxGroup {
             minslot_fallback: r.register_counter(format!("{prefix}.read.minslot_fallback.c")),
             barrier: r.register_summary(format!("{prefix}.read.barrier.l")),
             engine_get: r.register_summary(format!("{prefix}.read.engine_get.l")),
+            apply_fence: r.register_summary(format!("{prefix}.read.apply_fence.l")),
             lease_valid: r.register_gauge(format!("{prefix}.read.lease_valid.g")),
             contiguous_applied: r.register_gauge(format!("{prefix}.read.contiguous_applied.g")),
             safe_slot: r.register_gauge(format!("{prefix}.read.safe_slot.g")),

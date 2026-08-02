@@ -487,6 +487,19 @@ impl PxKvStore {
                 if replica.is_leader() {
                     match group.linearizable_read_barrier().await {
                         ReadBarrierOutcome::Ready { read_slot } => {
+                            // R35 apply fence: with R17 (`async_engine_apply`)
+                            // on, a just-chosen slot may not yet be applied
+                            // when the barrier resolves, so a linearizable
+                            // read could miss a just-written value. Wait for
+                            // the local applied frontier to reach `read_slot`
+                            // before serving the engine get. With R17 off the
+                            // frontier already equals `read_slot` and this is
+                            // a single atomic load + compare (no wait).
+                            let fence_start = Instant::now();
+                            replica.await_apply_fence(read_slot).await;
+                            if let Some(h) = group.read_handles() {
+                                h.apply_fence.observe(fence_start.elapsed().as_nanos() as u64);
+                            }
                             ReadDecision::Serve { read_slot, safe_slot }
                         }
                         // Lost leadership during the barrier: redirect to the

@@ -1,12 +1,15 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "test-util")]
+use std::sync::Arc;
 
 use bytes::Bytes;
 use dashmap::DashMap;
 use parking_lot::Mutex;
+use tokio::sync::Notify;
 
 use crate::kv::{Batch, CrowtreeBackend, CrowtreeEngine, CrowtreeOptions, KVEngine};
 use crate::paxos::roles::{Learner, PxLogEntry, SlotIndex};
@@ -85,6 +88,13 @@ pub struct PxLearner {
     /// slot → term so the frontier advance step can also bump
     /// `last_chosen_term` if it crosses an out-of-order slot.
     out_of_order: Mutex<BTreeMap<SlotIndex, PxTerm>>,
+    /// Out-of-order **applied** slots awaiting a gap-fill from a lower slot.
+    /// R17's `spawn_learn_chosen` defers the engine apply, and spawned
+    /// applies can complete out of order, so `contiguous_applied` needs the
+    /// same drain pattern `out_of_order` gives `contiguous_chosen`. Empty in
+    /// steady state on the leader (propose slots are sequential); populated
+    /// only under spawn reordering.
+    applied_out_of_order: Mutex<BTreeSet<SlotIndex>>,
     /// Per-`client_id` idempotency cache. Updated on every `learn` that
     /// carries a `(client_id, seq)`; consulted by the proposer to short-
     /// circuit a retried request to its prior commit slot without re-running
@@ -94,6 +104,20 @@ pub struct PxLearner {
     /// exact-match lookup — an unrecorded `seq` is a miss, never a false
     /// positive against a higher committed seq's slot.
     dedup: DashMap<u64, DedupWindow>,
+    /// R35 apply fence: woken whenever `contiguous_applied` advances, so a
+    /// Linearizable read awaiting `contiguous_applied >= read_slot` (after
+    /// the leadership barrier resolves) can block until the async R17
+    /// `spawn_learn_chosen` apply catches up instead of busy-spinning. The
+    /// fast path (slot already applied) never awaits — `await_applied` does
+    /// one `Acquire` load and returns.
+    apply_notify: Notify,
+    /// Test-only gate that holds `apply_entry` until the test releases it,
+    /// so the R35 apply-fence test can deterministically park the spawned
+    /// R17 apply and prove the Linearizable read's fence waits for it.
+    /// `None` in production; set via `set_apply_gate_for_tests` under the
+    /// `test-util` feature.
+    #[cfg(feature = "test-util")]
+    apply_gate: Mutex<Option<Arc<Notify>>>,
 }
 
 impl Default for PxLearner {
@@ -110,7 +134,11 @@ impl Default for PxLearner {
             last_chosen_slot: AtomicU64::new(0),
             last_chosen_term: AtomicU64::new(0),
             out_of_order: Mutex::new(BTreeMap::new()),
+            applied_out_of_order: Mutex::new(BTreeSet::new()),
             dedup: DashMap::new(),
+            apply_notify: Notify::new(),
+            #[cfg(feature = "test-util")]
+            apply_gate: Mutex::new(None),
         }
     }
 }
@@ -132,7 +160,11 @@ impl PxLearner {
             last_chosen_slot: AtomicU64::new(0),
             last_chosen_term: AtomicU64::new(0),
             out_of_order: Mutex::new(BTreeMap::new()),
+            applied_out_of_order: Mutex::new(BTreeSet::new()),
             dedup: DashMap::new(),
+            apply_notify: Notify::new(),
+            #[cfg(feature = "test-util")]
+            apply_gate: Mutex::new(None),
         }
     }
 
@@ -198,6 +230,38 @@ impl PxLearner {
         self.contiguous_applied.load(Ordering::Acquire)
     }
 
+    /// R35 apply fence: wait until `contiguous_applied >= slot`, then return.
+    ///
+    /// Used by the Linearizable read path after the leadership barrier
+    /// resolves `read_slot` — with R17 (`async_engine_apply`) on, a
+    /// just-chosen slot may not yet be applied, so the read must wait for
+    /// the spawned `learn_chosen` apply to land before serving the engine
+    /// get (read-your-writes). With R17 off, `contiguous_applied` already
+    /// tracks `contiguous_chosen`, so the fast-path load returns immediately.
+    ///
+    /// Register-before-load: the `notified()` future is created **before**
+    /// the `Acquire` load so a `notify_waiters` that fires between the load
+    /// and registration is not missed — the load observes the
+    /// `Release`-stored new frontier and returns without awaiting. Bounded
+    /// by apply throughput (memtable insert is fast and contiguous).
+    pub async fn await_applied(&self, slot: SlotIndex) {
+        loop {
+            let notified = self.apply_notify.notified();
+            if self.contiguous_applied.load(Ordering::Acquire) >= slot {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Test-only: hold `apply_entry` until the given [`Notify`] is signaled,
+    /// so the R35 apply-fence test can deterministically park the spawned
+    /// R17 apply and prove the Linearizable read's fence waits for it.
+    #[cfg(feature = "test-util")]
+    pub fn set_apply_gate_for_tests(&self, notify: Arc<Notify>) {
+        *self.apply_gate.lock() = Some(notify);
+    }
+
     /// Highest slot ever seen as chosen (gaps allowed).
     #[must_use]
     pub fn last_chosen_slot(&self) -> SlotIndex {
@@ -239,10 +303,15 @@ impl PxLearner {
         }
     }
 
-    /// Update the frontier for a newly learned `(slot, term)`.
+    /// Advance the **chosen** frontier for a newly learned `(slot, term)`:
+    /// `last_chosen_slot`/`term` (max ever seen) and `contiguous_chosen`
+    /// (with out-of-order drain). Does **not** touch `contiguous_applied` —
+    /// R17 splits the applied frontier into [`Self::advance_applied_frontier`]
+    /// so the chosen frontier can advance synchronously (before `propose`
+    /// returns) while the engine apply is deferred.
     ///
     /// Idempotent: re-applying an already-learned slot is a no-op.
-    fn update_frontier(&self, slot: SlotIndex, term: PxTerm) {
+    pub(crate) fn update_chosen_frontier(&self, slot: SlotIndex, term: PxTerm) {
         // `last_chosen_slot` is the max ever seen (gaps allowed).
         let mut prev = self.last_chosen_slot.load(Ordering::Relaxed);
         loop {
@@ -283,8 +352,6 @@ impl PxLearner {
                     }
                 }
                 self.contiguous_chosen.store(cc, Ordering::Release);
-                // V1: apply == learn, so contiguous_applied tracks contiguous_chosen.
-                self.contiguous_applied.store(cc, Ordering::Release);
             }
             std::cmp::Ordering::Greater => {
                 map.insert(slot, term);
@@ -292,8 +359,49 @@ impl PxLearner {
         }
     }
 
+    /// Advance the **applied** frontier for a slot whose engine apply just
+    /// completed. R17 defers the apply, so this runs in the spawned
+    /// `learn_chosen` task (and in the V1 sync `learn` path right after the
+    /// sync apply). Spawned applies can complete out of order, so this
+    /// mirrors `update_chosen_frontier`'s drain pattern with a separate
+    /// `applied_out_of_order` map. Wakes any Linearizable read parked in
+    /// [`Self::await_applied`] when `contiguous_applied` advances.
+    ///
+    /// Idempotent: re-advancing an already-applied slot is a no-op.
+    pub(crate) fn advance_applied_frontier(&self, slot: SlotIndex) {
+        let mut map = self.applied_out_of_order.lock();
+        let mut ca = self.contiguous_applied.load(Ordering::Acquire);
+        match slot.cmp(&(ca + 1)) {
+            std::cmp::Ordering::Less => {
+                // Already applied (slot <= ca). No advance.
+            }
+            std::cmp::Ordering::Equal => {
+                ca = slot;
+                // Drain consecutive out-of-order applied slots.
+                while let Some(&next_slot) = map.iter().next() {
+                    if next_slot == ca + 1 {
+                        ca = next_slot;
+                        map.remove(&next_slot);
+                    } else {
+                        break;
+                    }
+                }
+                self.contiguous_applied.store(ca, Ordering::Release);
+                // R35: wake any Linearizable read parked in `await_applied`
+                // on the prior frontier. `notify_waiters` (not
+                // `notify_one`) so every concurrent fenced read re-checks
+                // together; woken readers that are still behind loop and
+                // re-park. No-op when no reader is waiting.
+                self.apply_notify.notify_waiters();
+            }
+            std::cmp::Ordering::Greater => {
+                map.insert(slot);
+            }
+        }
+    }
+
     /// Fast-forward the chosen-slot frontier directly to `(slot, term)`,
-    /// bypassing `update_frontier`'s sequential/out-of-order-map advance.
+    /// bypassing `update_chosen_frontier`'s sequential/out-of-order-map advance.
     ///
     /// Only safe to call once, before any `learn` call, on a
     /// freshly-constructed learner (does not merge with existing
@@ -329,7 +437,7 @@ impl PxLearner {
     /// per-client window (idempotent on a duplicate `seq`); evicts the oldest
     /// entry once the window exceeds `DEDUP_WINDOW`. No-op for the
     /// `client_id == 0` sentinel.
-    fn record_dedup(&self, client_id: Option<u64>, seq: Option<u64>, slot: SlotIndex) {
+    pub(crate) fn record_dedup(&self, client_id: Option<u64>, seq: Option<u64>, slot: SlotIndex) {
         let (Some(client_id), Some(seq)) = (client_id, seq) else {
             return;
         };
@@ -362,7 +470,17 @@ impl PxLearner {
     /// or re-proposed. Detecting and reacting to a persistently-unhealthy
     /// local engine is [`KVEngine::apply`]'s caller's job at a layer that
     /// can see engine health across calls, not a single failed apply.
-    async fn apply_entry(&self, slot: SlotIndex, payload: &Bytes) {
+    pub(crate) async fn apply_entry(&self, slot: SlotIndex, payload: &Bytes) {
+        // Test-only apply gate: park until the test releases, so the R35
+        // fence test can hold the spawned R17 apply deterministically. The
+        // guard is dropped at the `;` so the `Notify` is awaited without a
+        // non-Send lock guard held across the await.
+        #[cfg(feature = "test-util")]
+        let gate = self.apply_gate.lock().clone();
+        #[cfg(feature = "test-util")]
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
         let batch = Batch::decode(payload);
         if batch.ops.is_empty() {
             return;
@@ -381,8 +499,13 @@ impl PxLearner {
 
 impl Learner for PxLearner {
     async fn learn(&self, entry: PxLogEntry, client_id: Option<u64>, seq: Option<u64>) {
+        // V1 sync path (followers, restore, R17-off leader): apply, then
+        // advance both frontiers, then record dedup. With apply synchronous,
+        // `contiguous_applied` tracks `contiguous_chosen` exactly — the R35
+        // apply fence is a no-op fast path on this path.
         self.apply_entry(entry.slot, &entry.payload).await;
-        self.update_frontier(entry.slot, entry.term);
+        self.update_chosen_frontier(entry.slot, entry.term);
+        self.advance_applied_frontier(entry.slot);
         self.record_dedup(client_id, seq, entry.slot);
     }
 }
