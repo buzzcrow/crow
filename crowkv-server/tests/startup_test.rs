@@ -7,7 +7,7 @@ use bytes::Bytes;
 use crowkv::cluster::group::ProposeResult;
 use crowkv::cluster::group_election::LeaderElection;
 use crowkv::cluster::local_replica::PxLocalReplicaRole;
-use crowkv::common::config::{AdmissionPolicy, PxElectionConfig, WalConfig};
+use crowkv::common::config::{CrowKVConfig, WalConfig};
 use crowkv::kv::CrowtreeBackend;
 use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 use crowkv::wal::record::WALRecord;
@@ -67,22 +67,20 @@ async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
     wal.seal_all().await.unwrap();
 
     let data_root = temp.path().join("data-root");
+    let config = CrowKVConfig {
+        wal_root: wal_root.clone(),
+        config_root: config_root.clone(),
+        data_root: data_root.clone(),
+        ..CrowKVConfig::for_tests()
+    };
     let group = create_group_with_wal(
         store_id,
         group_id,
         replica_id,
         PxLocalReplicaRole::Leader,
-        PxElectionConfig::for_tests(),
-        &wal_root,
-        &config_root,
+        &config,
         backend.clone(),
-        &data_root,
         CrowtreeBackend::File,
-        false,
-        "",
-        16,
-        1,
-        AdmissionPolicy::Queue,
     )
     .await
     .unwrap();
@@ -109,7 +107,8 @@ async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
         other => panic!("expected chosen proposal after restore, got {other:?}"),
     }
 
-    let replay = replay_group(&backend, &config.wal_disks, group_id).await.unwrap();
+    let replay_wal_dir = store_wal_root(&config.wal_root, store_id);
+    let replay = replay_group(&backend, &[replay_wal_dir], group_id).await.unwrap();
     assert!(replay.records.iter().any(|record| {
         record.slot == 3 && matches!(record.record_type, crowkv::wal::record::RecordType::Accepted)
     }));
@@ -135,22 +134,20 @@ async fn crowtree_engine_persists_across_restart(crowtree_backend: CrowtreeBacke
     let group_id = 5;
     let replica_id = 1;
 
+    let config = CrowKVConfig {
+        wal_root: wal_root.clone(),
+        config_root: config_root.clone(),
+        data_root: data_root.clone(),
+        ..CrowKVConfig::for_tests()
+    };
     let group = create_group_with_wal(
         store_id,
         group_id,
         replica_id,
         PxLocalReplicaRole::Leader,
-        PxElectionConfig::for_tests(),
-        &wal_root,
-        &config_root,
+        &config,
         backend.clone(),
-        &data_root,
         crowtree_backend,
-        false,
-        "",
-        16,
-        1,
-        AdmissionPolicy::Queue,
     )
     .await
     .unwrap();
@@ -193,17 +190,9 @@ async fn crowtree_engine_persists_across_restart(crowtree_backend: CrowtreeBacke
         group_id,
         replica_id,
         PxLocalReplicaRole::Leader,
-        PxElectionConfig::for_tests(),
-        &wal_root,
-        &config_root,
+        &config,
         backend.clone(),
-        &data_root,
         crowtree_backend,
-        false,
-        "",
-        16,
-        1,
-        AdmissionPolicy::Queue,
     )
     .await
     .unwrap();

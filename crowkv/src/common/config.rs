@@ -15,7 +15,7 @@ use crate::wal::pipeline_backend::WalBlockAlignment;
 use crate::wal::record::WalRecordFormat;
 
 /// Admission policy for inflight proposals when the window is full.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum AdmissionPolicy {
     /// Fail fast with `ProposeResult::Busy`.
     Reject,
@@ -46,7 +46,7 @@ impl AdmissionPolicy {
 }
 
 /// Paxos retry configuration (static, global).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct PaxosConfig {
     pub max_paxos_retries: usize,
     pub max_slot_retries: usize,
@@ -77,8 +77,14 @@ impl PaxosConfig {
     };
 }
 
+impl Default for PaxosConfig {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// Server-level configuration (static, global).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ServerConfig {
     /// Per-layer graceful-shutdown timeout in milliseconds.
     /// Shutdowns that take longer almost always indicate a stuck task and are
@@ -92,8 +98,14 @@ impl ServerConfig {
     };
 }
 
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// WAL configuration for a single consensus group.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct WalConfig {
     /// Directories to distribute WAL segments across.
     pub wal_disks: Vec<PathBuf>,
@@ -185,7 +197,7 @@ impl Default for WalConfig {
 /// Defaults target a single-datacenter deployment with NTP-disciplined
 /// clocks. Rationale and cross-DC / WAN override profile documented
 /// in the leader-election sub-design.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct PxElectionConfig {
     /// Whether `PreVote` rounds protect against partition-rejoin disruption.
     pub prevote_enabled: bool,
@@ -326,5 +338,183 @@ impl PxElectionConfig {
     #[must_use]
     pub const fn learner_window_for(max_inflight_proposals: usize) -> usize {
         max_inflight_proposals * Self::LEARNER_WINDOW_MULTIPLIER
+    }
+}
+
+impl Default for PxElectionConfig {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Unified configuration for a `CrowKV` cluster node.
+///
+/// Merges all sub-configs (`ServerConfig`, `PaxosConfig`,
+/// `PxElectionConfig`, `WalConfig`) and the former `PxGroup` internal
+/// flags (`force_classic`, `wal_early_ack`, `async_engine_apply`) into
+/// one struct with `serde` derives for JSON file loading. Runtime
+/// paths and backends are `#[serde(skip)]` — set from CLI args after
+/// loading.
+///
+/// Usage: `CrowKVConfig::load_from_file(path)` or
+/// `CrowKVConfig::default()`, then CLI args override individual fields,
+/// then pass `&CrowKVConfig` to `create_group_with_wal`.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct CrowKVConfig {
+    #[serde(default)]
+    pub server: ServerConfig,
+    #[serde(default)]
+    pub paxos: PaxosConfig,
+    #[serde(default)]
+    pub election: PxElectionConfig,
+    #[serde(default)]
+    pub wal: WalConfig,
+    #[serde(default)]
+    pub force_classic: bool,
+    #[serde(default)]
+    pub wal_early_ack: bool,
+    #[serde(default)]
+    pub async_engine_apply: bool,
+    /// WAL root directory. `#[serde(skip)]` — set from `--wal-root` CLI.
+    #[serde(skip)]
+    pub wal_root: PathBuf,
+    /// Group config root directory. `#[serde(skip)]` — set from CLI.
+    #[serde(skip)]
+    pub config_root: PathBuf,
+    /// Crowtree data root directory. `#[serde(skip)]` — set from CLI.
+    #[serde(skip)]
+    pub data_root: PathBuf,
+    /// WAL I/O backend label. `#[serde(skip)]` — set from `--wal-backend`.
+    #[serde(skip)]
+    pub wal_backend: String,
+    /// Crowtree storage backend label. `#[serde(skip)]` — set from
+    /// `--kv-backend`.
+    #[serde(skip)]
+    pub crowtree_backend: String,
+    /// Skip durable fdatasync. `#[serde(skip)]` — set from `--no-fsync`.
+    #[serde(skip)]
+    pub wal_skip_fsync: bool,
+    /// Log directory. `#[serde(skip)]` — set from CLI.
+    #[serde(skip)]
+    pub log_dir: String,
+}
+
+impl Default for CrowKVConfig {
+    fn default() -> Self {
+        Self {
+            server: ServerConfig::DEFAULT,
+            paxos: PaxosConfig::DEFAULT,
+            election: PxElectionConfig::DEFAULT,
+            wal: WalConfig::default(),
+            force_classic: false,
+            wal_early_ack: false,
+            async_engine_apply: false,
+            wal_root: PathBuf::from("waldata"),
+            config_root: PathBuf::from("conf"),
+            data_root: PathBuf::from("ctdata"),
+            wal_backend: "file".to_string(),
+            crowtree_backend: "file".to_string(),
+            wal_skip_fsync: false,
+            log_dir: "log".to_string(),
+        }
+    }
+}
+
+impl CrowKVConfig {
+    /// Load from a JSON file. Missing fields use sub-struct defaults.
+    ///
+    /// # Errors
+    /// Returns the `serde_json::Error` on parse failure.
+    pub fn load_from_file(path: &std::path::Path) -> Result<Self, serde_json::Error> {
+        let file = std::fs::File::open(path).map_err(serde_json::Error::io)?;
+        let mut config: Self = serde_json::from_reader(file)?;
+        // Fill runtime defaults if the file didn't set them (they're
+        // serde-skip so they're always default-initialized by
+        // deserialization).
+        if config.wal_root.as_os_str().is_empty() {
+            config.wal_root = PathBuf::from("waldata");
+        }
+        if config.config_root.as_os_str().is_empty() {
+            config.config_root = PathBuf::from("conf");
+        }
+        if config.data_root.as_os_str().is_empty() {
+            config.data_root = PathBuf::from("ctdata");
+        }
+        if config.wal_backend.is_empty() {
+            config.wal_backend = "file".to_string();
+        }
+        if config.crowtree_backend.is_empty() {
+            config.crowtree_backend = "file".to_string();
+        }
+        if config.log_dir.is_empty() {
+            config.log_dir = "log".to_string();
+        }
+        Ok(config)
+    }
+
+    /// Test profile — fast election timings, `wal_early_ack` off.
+    #[must_use]
+    pub fn for_tests() -> Self {
+        Self {
+            election: PxElectionConfig::for_tests(),
+            ..Self::default()
+        }
+    }
+
+    /// E2E / benchmark profile — stable under real scheduling jitter.
+    #[must_use]
+    pub fn for_e2e() -> Self {
+        Self {
+            election: PxElectionConfig::for_e2e(),
+            ..Self::default()
+        }
+    }
+
+    /// Max in-flight proposals (convenience accessor for
+    /// `paxos.max_inflight_proposals`).
+    #[must_use]
+    pub fn max_inflight(&self) -> usize {
+        self.paxos.max_inflight_proposals
+    }
+
+    /// Number of admission queues (convenience accessor for
+    /// `paxos.inflight_queues`).
+    #[must_use]
+    pub fn inflight_queues(&self) -> usize {
+        self.paxos.inflight_queues
+    }
+
+    /// Admission policy (convenience accessor for
+    /// `paxos.inflight_admission`).
+    #[must_use]
+    pub fn inflight_admission(&self) -> AdmissionPolicy {
+        self.paxos.inflight_admission
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crowkv_config_default_round_trip() {
+        let config = CrowKVConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let restored: CrowKVConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.max_inflight(), config.max_inflight());
+        assert_eq!(restored.wal_early_ack, config.wal_early_ack);
+        assert_eq!(restored.election.election_min_ms, config.election.election_min_ms);
+    }
+
+    #[test]
+    fn crowkv_config_partial_json_uses_defaults() {
+        let json = r#"{"wal_early_ack": true}"#;
+        let config: CrowKVConfig = serde_json::from_str(json).unwrap();
+        assert!(config.wal_early_ack);
+        assert_eq!(
+            config.paxos.max_inflight_proposals,
+            PaxosConfig::DEFAULT.max_inflight_proposals
+        );
     }
 }

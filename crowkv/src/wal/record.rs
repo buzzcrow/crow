@@ -45,7 +45,7 @@ pub const HEADER_BODY_LEN: usize = 4 + 2 + 1 + 8 + 8 + 8 + 8 + 8 + 4; // 51
 pub const MIN_RECORD_SIZE: usize = 4 + HEADER_BODY_LEN + 4;
 
 /// Encoding format used for WAL records inside a segment.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum WalRecordFormat {
     Auto,
     Binary,
