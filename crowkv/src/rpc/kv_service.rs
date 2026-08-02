@@ -428,10 +428,10 @@ impl KvService for KvStoreService {
                             error = %status,
                             "kv scan forward failed; next step: serving stale local scan"
                         );
-                        // Fall through to local scan. KvScanResponse has
-                        // no not_leader_hint field, so the caller cannot
-                        // observe the routing decision here — this is a
-                        // best-effort degraded read.
+                        // Fall through to local scan. The caller observes
+                        // the routing decision only if the local scan
+                        // also returns NotLeader (via not_leader_hint);
+                        // otherwise this is a best-effort degraded read.
                     }
                 }
             }

@@ -113,29 +113,6 @@ coalesce mechanism already exists in the WAL writer task
 
 ---
 
-## T5 — Scan `not_leader_hint` field (read E3)
-
-- [ ] Add a `not_leader_hint` field (string, leader endpoint) to
-      `KvScanResponse` in the proto.
-- [ ] In `PxKvStore::kv_scan`, populate `not_leader_hint` on the
-      `NotLeader` branch (same `forward_target_for` source as `get`),
-      instead of encoding it into the error string.
-- [ ] In `CrowkvClient::scan`, follow the hint when present (uncounted,
-      mirroring `get`'s `follow_not_leader`); only count a scan error
-      when the hint is empty.
-- [ ] Remove the error-string parsing in `follow_scan_not_leader`.
-
-**Scope**: Small — one proto field, one populate site, one client
-follow path. The server-side forwarding for linearizable scans is
-unchanged (already transparent); this only affects MinSlot scans on a
-lagging follower.
-
-**Files**: `crowkv/src/rpc/proto.rs` or `.proto` (`KvScanResponse`),
-`crowkv/src/cluster/px_kv_store.rs` (`kv_scan` NotLeader branch),
-`crowkv-client/src/client.rs` (`scan` retry loop, `follow_scan_not_leader`).
-
----
-
 ## T6 — `InMemKV` read/apply concurrency (read E5, low priority)
 
 - [ ] Replace `InMemKV`'s `RwLock<BTreeMap>` with a `DashMap` (or

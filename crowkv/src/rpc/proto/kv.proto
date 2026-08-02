@@ -132,6 +132,9 @@ message KvScanResponse {
   uint64 request_create_ms = 7;
   // Slot the scan was served at (the serving replica's applied frontier).
   uint64 read_slot = 8;
+  // Leader endpoint when this node is not the leader (MinSlot scan on a
+  // lagging follower). Empty for other failure shapes.
+  string not_leader_hint = 9;
 }
 
 service KvService {

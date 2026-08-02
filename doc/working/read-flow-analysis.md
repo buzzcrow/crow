@@ -251,14 +251,11 @@ Client SCAN(prefix, start_after, limit, read_mode, min_slot?)
   owned `Vec`). A `PinnedScanEntry` / `Bytes::from_owner` path for
   scan values would eliminate the per-entry copy, mirroring R6 for the
   scan path. Matters for large-value range reads.
-- **E3 — Scan `not_leader_hint`.** `KvScanResponse` has no
-  `not_leader_hint` field, so a MinSlot scan that hits a lagging
-  follower is a counted client error (parsed from the error string),
-  not an uncounted follow like `get`. Adding a hint field (leader
-  endpoint) would let MinSlot scan follow redirects cheaply and keep
-  client error counts clean. Server-side forwarding already hides
-  linearizable redirects; this only affects MinSlot on a follower that
-  hasn't reached `min_slot`.
+- **E3 — Scan `not_leader_hint` (done).** `KvScanResponse` now carries
+  a `not_leader_hint` field; a MinSlot scan that hits a lagging follower
+  follows the redirect uncounted, mirroring `get`. Server-side
+  forwarding already hides linearizable redirects; this only affects
+  MinSlot on a follower that hasn't reached `min_slot`.
 - **E4 — Least-conn / latency read-endpoint policy.** R26 shipped
   round-robin `AnyReplica`. A `ReadEndpointPolicy::LeastConnections`
   or `::Latency` policy — driven by server-reported in-flight counts
@@ -302,9 +299,9 @@ forwarding linearizable reads to the leader (MinSlot self-checks
 instead).
 
 Open work: **G1** per-mode latency breakdown; **E1** scan `start_after`
-push-down, **E2** scan value zero-copy, **E3** scan `not_leader_hint`,
-**E4** least-conn/latency endpoint policy, **E5** `InMemKV` read/apply
-concurrency, **E6** custom RPC transport (R32, deferred).
+push-down, **E2** scan value zero-copy, **E4** least-conn/latency
+endpoint policy, **E5** `InMemKV` read/apply concurrency, **E6** custom
+RPC transport (R32, deferred). **E3** scan `not_leader_hint` is done.
 
 ---
 
