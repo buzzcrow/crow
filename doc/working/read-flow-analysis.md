@@ -385,8 +385,8 @@ Two read modes benchmarked:
   across all 3 replicas.
 
 60 runs total (54 sweep + 6 verification), zero errors, zero
-correctness errors. Full raw data in
-[`plan-perf.md`](plan-perf.md#raw-data).
+correctness errors. Raw data is reproducible via
+[`tools/bench-read-sweep.sh`](../../tools/bench-read-sweep.sh).
 
 ### Phase 1 — 1T:1C scaling
 
