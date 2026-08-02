@@ -11,7 +11,7 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R43** — Bump this line in the same commit when adding a new item.
+**Next R number: R44** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
@@ -87,20 +87,34 @@ complexity, and dependency. Before implementation, follow the
   `LeastConnections` (per-endpoint in-flight) and `Latency` (per-endpoint
   RTT EWMA) policies route by actual capacity. Medium complexity;
   client-local state, no server change.
-- **[R40](R40-crowkv-config.md)** — Unified `CrowKVConfig` (merge all sub-configs, JSON file loading) — Area:
-  config / workspace — Today configuration is scattered across
-  `WalConfig`, `PxElectionConfig`, `PaxosConfig`, `ServerConfig`, and
-  three `PxGroup` internal bool flags (`wal_early_ack`,
-  `async_engine_apply`, `force_classic`), wired through 4
-  `create_group_with_wal` call sites each passing ~14 individual params
-  pulled from `KvStoreRegistry` fields. Merge all into one
-  `CrowKVConfig` with `serde` derives, loaded from a JSON config file
-  (CLI args override individual fields). Eliminates the scattered
-  params, the per-flag `mgmt_api` rebuild-carry blocks, and the
-  per-flag setter/getter pattern on `PxGroup`. Prerequisite for T1's
-  `wal_early_ack` default flip and R35's `async_engine_apply` carry.
-  Medium complexity; touches `config.rs`, `PxGroup`, `KvStoreRegistry`,
-  `create_group_with_wal`, `mgmt_api` rebuild, `main.rs` CLI wiring.
+- **[R43](R43-write-path-fanout-hardening.md)** — Write-path fan-out hardening — Area:
+  consensus / write path — Six enhancements from the write-flow review,
+  all in the prepare/accept fan-out and `PxLearnerStream`: quorum
+  short-circuit (fold replies via `FuturesUnordered`, return on quorum
+  + local reply instead of `join_all` over all peers — per-proposal
+  latency becomes k-th-fastest, not slowest peer), RPC deadline on
+  accept/heartbeat oneshots (a hung-but-connected peer currently
+  stalls all writes indefinitely), write-path phase latency metrics
+  (propose-e2e / prepare / accept / first-quorum-RPC / apply),
+  backoff jitter, a heartbeat priority/reserved lane on the shared
+  LearnerStream queue, and a reply-fold helper extraction that
+  de-risks the short-circuit rewrite. Medium complexity; the
+  short-circuit must preserve W6 and late TermStale/Epoch side
+  effects.
+- **[R43](R43-write-path-fanout-hardening.md)** — Write-path fan-out hardening — Area:
+  consensus / write path — Six enhancements from the write-flow review,
+  all in the prepare/accept fan-out and `PxLearnerStream`: quorum
+  short-circuit (fold replies via `FuturesUnordered`, return on quorum
+  + local reply instead of `join_all` over all peers — per-proposal
+  latency becomes k-th-fastest, not slowest peer), RPC deadline on
+  accept/heartbeat oneshots (a hung-but-connected peer currently
+  stalls all writes indefinitely), write-path phase latency metrics
+  (propose-e2e / prepare / accept / first-quorum-RPC / apply),
+  backoff jitter, a heartbeat priority/reserved lane on the shared
+  LearnerStream queue, and a reply-fold helper extraction that
+  de-risks the short-circuit rewrite. Medium complexity; the
+  short-circuit must preserve W6 and late TermStale/Epoch side
+  effects.
 
 ### Low Priority
 

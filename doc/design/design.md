@@ -133,6 +133,19 @@ disk WAL segments are tagged by slot index for parallelism.
 Node-to-node and client-to-node channels are plaintext initially. The
 RPC layer and config schema reserve hooks for TLS from day one.
 
+### 3.10 Unified `CrowKVConfig`
+
+All cluster tunables — WAL, election, paxos, server, and the per-group
+internal flags (`force_classic`, `wal_early_ack`,
+`async_engine_apply`) — live in one `CrowKVConfig` struct with `serde`
+derives, loaded from a JSON config file (CLI args override individual
+fields). `PxGroup` holds a single `config: CrowKVConfig` field as the
+source of truth; individual setters (`set_force_classic`,
+`set_wal_early_ack`, etc.) delegate into `self.config.*` for surgical
+single-field overrides without rebuilding the whole struct. The
+`mgmt_api` rebuild path carries the config as one unit via
+`set_from_config(group.config())` instead of per-flag blocks.
+
 ## 4. Architecture Overview
 
 ```
@@ -296,7 +309,7 @@ Full design: `design-reconfiguration.md`, `design-kv-server.md`.
 | **Learner** | Tracks chosen values; applies to storage engine; maintains per-key resolved-slot. |
 | **WAL** | Durable, multi-disk write-ahead log. Sole persistent ground truth. |
 | **KvStore** | KV-facing runtime per node; owns `PxGroup`s; routes by `group_id`. |
-| **PxGroup** | Paxos group runtime; coordinates local + remote replicas. |
+| **PxGroup** | Paxos group runtime; coordinates local + remote replicas; holds one `CrowKVConfig`. |
 | **Replicator** | Streams `Accept`/`Chosen` from leader to peers; handles backpressure. |
 | **Leader Elector** | Raft-style election; manages `PxTerm`; lease management. |
 | **Repair** | Background task: detects and resolves slot gaps via classic Paxos. |
