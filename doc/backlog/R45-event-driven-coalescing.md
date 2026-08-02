@@ -14,28 +14,82 @@ amortization benefit.
 
 **Proposed approach**: Replace the timer with an event-driven flush,
 modeled on the existing `PendingReadBarrier` pattern in
-`group.rs::linearizable_read_barrier`:
+`group.rs::linearizable_read_barrier`. The core idea: **aggregate from
+the start, use more inflight permits only when batches overflow**.
 
-- The first op to arrive when no batch is in flight starts the Paxos
-  round **immediately** (no sleep). It also opens a `PendingBatch` that
-  accumulates ops arriving *while the round is in flight*.
-- Each subsequent op that arrives while the round is in flight appends
-  to the pending batch and registers a waiter.
-- When the in-flight round completes, the leader drains the pending
-  batch and starts the next round with whatever accumulated (could be 1
-  op, could be `max_keys`). If the batch is empty, the cycle ends.
-- `max_keys` still triggers an immediate flush (same as R36) — but only
-  matters when a round is already in flight and the pending batch fills.
+State machine (per group):
+
+```
+coalesce_state: Mutex<Option<PendingBatch>>   // None = idle, Some = accumulating
+inflight_rounds: Semaphore (existing max_inflight permits)
+```
+
+Flow:
+
+- Op arrives, no pending batch (`coalesce_state == None`):
+  - Open a `PendingBatch`, add this op, start a Paxos round **immediately**
+    with this 1-op payload (acquire 1 inflight permit). Do NOT wait.
+  - The pending batch stays open to accumulate ops that arrive *during*
+    this round.
+- Op arrives, pending batch exists (round in flight):
+  - Append op body + tag to the pending batch, register a waiter.
+  - If batch fills to `coalesce_max_keys`: start a **second** round
+    immediately (acquire another inflight permit), open a new pending
+    batch for the next wave. This is the "multiple pipelines" path —
+    only triggers when a single round can't keep up.
+- Round completes (callback in `propose_inner`'s spawn):
+  - Fan the `ProposeResult` to that round's waiters.
+  - Drain the pending batch. If non-empty, start the next round with
+    whatever accumulated (could be 1 op, could be `max_keys`). If empty,
+    the cycle ends — back to idle.
 
 This eliminates the `coalesce_window_us` config knob entirely. The
 coalescer is either on (`coalesce_max_keys > 0`) or off
 (`coalesce_max_keys == 0`). No timer, no latency floor.
 
+**Why aggregate from the start (not fill inflight window first)**:
+
+Two possible event-driven designs were considered:
+
+- **Option A (fill window first)**: Each op starts its own round until
+  the inflight window is full, then aggregate. At medium load (8 ops),
+  this issues 8 separate rounds — zero aggregation. Aggregation only
+  kicks in under saturation.
+- **Option B (aggregate from start)** — **chosen**: The first op starts
+  a round immediately, but every subsequent op that arrives during any
+  in-flight round joins the pending batch. The inflight window is a
+  flow-control backstop, not the primary aggregation trigger.
+
+| Load | Option A | Option B (chosen) |
+|---|---|---|
+| 1 op | 1 round, no tax | 1 round, no tax |
+| 8 ops | 8 rounds, no aggregation | 2 rounds (1+7), good aggregation |
+| 64 ops | 32 rounds, then aggregate | ~2 rounds of 32, then more as needed |
+| 64+ ops | 32 concurrent rounds, then aggregate | 32 concurrent rounds, each full |
+
+Option B is strictly better: aggregation happens whenever ops arrive
+during an in-flight round — not only when the inflight window is
+saturated. The first op never waits (starts immediately), and every
+subsequent op that arrives during any in-flight round gets a free ride
+in the next batch.
+
+**Interaction with the inflight window**: The existing `max_inflight`
+permits cap concurrent Paxos rounds. With Option B, each round carries
+up to `coalesce_max_keys` ops, so the effective in-flight key count is
+`max_inflight × coalesce_max_keys` (e.g. 32 × 32 = 1024 keys). When all
+permits are taken, the pending batch keeps accumulating (up to
+`max_keys`) without starting a new round — when a round completes and
+frees a permit, the accumulated batch flushes as the next round. This
+is strictly better than R36's timer approach, which under a full
+inflight window creates many small blocked batches (each timer flush
+spawns a task that immediately blocks on `acquire_permit`).
+
 **Existing pattern**: `PxGroup::pending_read_barrier`
 (`group.rs:204`) batches `ReadIndex` reads that arrive while a heartbeat
 round is in flight, then drains all waiters on round completion. The
-coalescer would use the same shape: `parking_lot::Mutex<Option<PendingBatch>>`,
-drained on round completion, `None` when idle.
+coalescer uses the same shape: `parking_lot::Mutex<Option<PendingBatch>>`,
+drained on round completion, `None` when idle. The difference is R45
+allows multiple concurrent rounds (inflight permits) instead of just 1.
 
 **Key difference from R36**: R36 holds the batch open for a fixed time
 window *before* starting the round. R45 starts the round immediately and
@@ -59,11 +113,13 @@ Batch size distribution (500us window, 32 threads, 165K ops):
 - Timer fires only on tail batches (size 1-4)
 
 **R45 hypothesis**: At high concurrency (64 threads), R45 should match
-R36 (batches fill during the round anyway). At low concurrency (1-8
-threads), R45 should beat R36 because the first op starts the round
-immediately instead of waiting `window_us`. The win is in the
-low-to-moderate concurrency regime where R36's timer tax is pure
-overhead.
+or exceed R36 (batches fill during the round anyway, and the inflight
+window is used more efficiently — no blocked small batches). At low
+concurrency (1-8 threads), R45 should beat R36 because the first op
+starts the round immediately instead of waiting `window_us`, and
+subsequent ops still aggregate during the round. The win spans both
+regimes: no timer tax at low load, better inflight utilization at high
+load.
 
 **Acceptance**:
 - `coalesce_window_us` config knob and CLI flag removed; coalescing is
