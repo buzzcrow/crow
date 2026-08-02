@@ -1530,7 +1530,8 @@ fn rebuild_group_with_same_config(group: &PxGroup) -> PxGroup {
     // (role, leader_id) snapshot from the prior replica under the mutex,
     // so `set_leader_id` is redundant here. The `role_atomic` and
     // `believed_leader_id` on the new replica already match.
-    new_group.set_election_config(group.election_config());
+    // Carry the unified config wholesale — replaces the former per-flag carry blocks.
+    new_group.set_from_config(group.config());
     // Preserve `proposing_term` so the new group's leadership gate
     // (`role == Leader && current_term == proposing_term`) passes for
     // an already-elected leader that didn't have to re-stamp the term
@@ -1545,15 +1546,6 @@ fn rebuild_group_with_same_config(group: &PxGroup) -> PxGroup {
     // the group's whole history -- defeating the exact-match fence the
     // very next time two mutations land close together.
     new_group.set_membership_epoch(group.membership_epoch());
-    if group.force_classic() {
-        new_group.set_force_classic(true);
-    }
-    if group.wal_early_ack() {
-        new_group.set_wal_early_ack(true);
-    }
-    if group.async_engine_apply() {
-        new_group.set_async_engine_apply(true);
-    }
     if let Some(store) = group.config_store() {
         new_group.set_config_store(store.clone());
     }
@@ -1561,11 +1553,6 @@ fn rebuild_group_with_same_config(group: &PxGroup) -> PxGroup {
         let sid = group.node_config_store_sid().unwrap_or(0);
         new_group.set_node_config_store(node_store.clone(), sid, new_group.group_id());
     }
-    new_group.set_inflight_config(
-        group.inflight_window_size(),
-        group.inflight_queue_count(),
-        group.inflight_admission_policy(),
-    );
     new_group
 }
 

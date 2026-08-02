@@ -79,7 +79,7 @@ pub trait LeaderElection {
     ///
     /// Must be called after the group is wrapped in an [`Arc`] so the
     /// driver can hold a [`Weak`] back-reference. No-op when
-    /// `election_cfg.election_driver_disabled` is set or when the driver
+    /// `config.election.election_driver_disabled` is set or when the driver
     /// has already been started.
     fn start_election_loop(self: &Arc<Self>) -> impl std::future::Future<Output = ()> + Send;
 
@@ -124,11 +124,11 @@ pub trait LeaderElection {
 
 impl LeaderElection for PxGroup {
     fn election_config(&self) -> PxElectionConfig {
-        self.election_cfg
+        self.config.election
     }
 
     fn set_election_config(&mut self, cfg: PxElectionConfig) {
-        self.election_cfg = cfg;
+        self.config.election = cfg;
         // Mirror onto the local replica so vote/heartbeat handlers extend
         // `vote_lockout_until` with the configured profile rather than the
         // hard-coded default.
@@ -158,7 +158,7 @@ impl LeaderElection for PxGroup {
     }
 
     async fn start_election_loop(self: &Arc<Self>) {
-        if self.election_cfg.election_driver_disabled {
+        if self.config.election.election_driver_disabled {
             debug!(
                 group_id = self.group_id,
                 replica_l_id = self.local_replica().id,
@@ -176,7 +176,7 @@ impl LeaderElection for PxGroup {
             return;
         }
         let weak: Weak<Self> = Arc::downgrade(self);
-        let handle = spawn(weak, self.election_cfg, self.tenure_cancel.clone());
+        let handle = spawn(weak, self.config.election, self.tenure_cancel.clone());
         *driver_guard = Some(handle);
     }
 
@@ -744,7 +744,7 @@ impl PxGroup {
             }
         }
 
-        let cfg = self.election_cfg;
+        let cfg = self.config.election;
         let term = replica.current_term_snapshot();
         let outcome = match self.run_heartbeat_round(&cfg, term).await {
             HeartbeatOutcome::SteppedDown { .. } => ReadBarrierOutcome::NotLeader,

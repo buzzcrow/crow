@@ -25,7 +25,7 @@ use crate::cluster::replica::{
     Replica, ReplicaClient, ReplicaHandler, StepDownReply, StepDownRequestPayload,
 };
 use crate::cluster::status::{GroupStatus, InflightStatus, StatusLevel};
-use crate::common::config::{AdmissionPolicy, PaxosConfig, PxElectionConfig};
+use crate::common::config::{AdmissionPolicy, CrowKVConfig, PaxosConfig};
 use crate::common::report::OperationReport;
 use crate::metrics::{Counter, Gauge, LatencySummary};
 use crate::paxos::error::{PxPaxosError, PxPaxosPhase, PxRetryAction};
@@ -64,22 +64,12 @@ pub struct PxGroup {
     pub(crate) remote_replicas: Vec<RemoteReplicaKind>,
     pub(crate) valid_replica_count: usize,
     pub(crate) next_slot: AtomicU64,
-    /// When true, always run Phase-1 Prepare before Accept (classic Paxos).
-    force_classic: bool,
-    /// R16b: when true, the proposer declares `Chosen` as soon as remote
-    /// quorum is met, without waiting for the local WAL persist to finish.
-    /// The local persist is tracked concurrently. Weakens the W6 ack
-    /// contract for the local replica. Default false.
-    wal_early_ack: bool,
-    /// R17: when true, `learn_chosen` (engine apply) runs as a background
-    /// task instead of on the propose critical path. The client receives
-    /// `Chosen` before the local engine has applied the value.
-    /// Read-your-writes semantics break unless a read barrier is added.
-    /// Default false.
-    async_engine_apply: bool,
-    /// Leader-election / heartbeat / lease tunables for this group's
-    /// [`crate::cluster::group_election::spawn`] driver task.
-    pub(crate) election_cfg: PxElectionConfig,
+    /// Unified cluster configuration held by this group. Replaces the
+    /// former individual `force_classic` / `wal_early_ack` /
+    /// `async_engine_apply` bool fields and `election_cfg`. Set wholesale
+    /// via [`Self::set_from_config`]; individual setters delegate into
+    /// `self.config.*` so the held config stays the source of truth.
+    pub(crate) config: CrowKVConfig,
     /// Per-leadership-tenure [`CancellationToken`]. Cancelled in
     /// [`Self::shutdown`] and by every step-down trigger. The bulk-Phase-1
     /// sweep and the election driver both honor it.
@@ -224,10 +214,11 @@ impl PxGroup {
             remote_replicas: Vec::new(),
             valid_replica_count: 0,
             next_slot: AtomicU64::new(1),
-            force_classic: false,
-            wal_early_ack: false,
-            async_engine_apply: false,
-            election_cfg: PxElectionConfig::DEFAULT,
+            // Test path: wal_early_ack defaults false; production overwrites via set_from_config.
+            config: CrowKVConfig {
+                wal_early_ack: false,
+                ..CrowKVConfig::default()
+            },
             tenure_cancel: CancellationToken::new(),
             driver_handle: AsyncMutex::new(None),
             maintenance_handle: AsyncMutex::new(None),
@@ -278,36 +269,45 @@ impl PxGroup {
     /// Enable or disable R16b early-ack (declare chosen on remote quorum
     /// without waiting for local WAL persist). Default off.
     pub fn set_wal_early_ack(&mut self, enabled: bool) {
-        self.wal_early_ack = enabled;
+        self.config.wal_early_ack = enabled;
     }
 
     /// Enable or disable R17 async engine apply (return Chosen before
     /// local engine apply completes). Default off.
     pub fn set_async_engine_apply(&mut self, enabled: bool) {
-        self.async_engine_apply = enabled;
+        self.config.async_engine_apply = enabled;
     }
 
-    /// Apply all tunables from a `CrowKVConfig`: election config,
-    /// inflight admission, and the three internal flags
-    /// (`force_classic`, `wal_early_ack`, `async_engine_apply`).
-    /// Replaces the per-field setter calls at group creation and
-    /// rebuild sites.
-    pub fn set_from_config(&mut self, config: &crate::common::config::CrowKVConfig) {
+    /// Apply all tunables from a `CrowKVConfig` wholesale: replaces the
+    /// held config, mirrors the election lease onto the local replica,
+    /// and reconstructs the inflight admission gate from the paxos
+    /// params. Replaces the per-field setter calls at group creation
+    /// and rebuild sites.
+    pub fn set_from_config(&mut self, config: &CrowKVConfig) {
+        self.config = config.clone();
         self.set_election_config(config.election);
         self.set_inflight_config(
-            config.max_inflight(),
-            config.inflight_queues(),
-            config.inflight_admission(),
+            config.paxos.max_inflight_proposals,
+            config.paxos.inflight_queues,
+            config.paxos.inflight_admission,
         );
-        self.force_classic = config.force_classic;
-        self.wal_early_ack = config.wal_early_ack;
-        self.async_engine_apply = config.async_engine_apply;
+    }
+
+    /// Borrow the unified config held by this group.
+    #[must_use]
+    pub fn config(&self) -> &CrowKVConfig {
+        &self.config
     }
 
     /// Set the in-flight proposal admission configuration. Must be
-    /// called before the group starts serving proposals.
+    /// called before the group starts serving proposals. Also syncs the
+    /// params into `self.config.paxos` so the held config stays the
+    /// source of truth.
     pub fn set_inflight_config(&mut self, max_inflight: usize, queues: usize, policy: AdmissionPolicy) {
         self.inflight = InflightAdmission::new(max_inflight, queues, policy);
+        self.config.paxos.max_inflight_proposals = max_inflight;
+        self.config.paxos.inflight_queues = queues;
+        self.config.paxos.inflight_admission = policy;
     }
 
     /// Current inflight proposal window size (total permits across all
@@ -353,7 +353,7 @@ impl PxGroup {
     /// Must be called after the group is wrapped in an [`Arc`] so the loop
     /// can hold a [`std::sync::Weak`] back-reference, mirroring
     /// [`crate::cluster::group_election::LeaderElection::start_election_loop`].
-    /// No-op when `election_cfg.election_driver_disabled` is set or when
+    /// No-op when `config.election.election_driver_disabled` is set or when
     /// the loop has already been started.
     pub async fn start_engine_maintenance_loop(self: &Arc<Self>) {
         crate::cluster::group_maintenance::start(self).await;
@@ -414,19 +414,19 @@ impl PxGroup {
     }
 
     pub fn force_classic(&self) -> bool {
-        self.force_classic
+        self.config.force_classic
     }
 
     /// Whether R16b early-ack is enabled (deferred local WAL persist).
     #[must_use]
     pub fn wal_early_ack(&self) -> bool {
-        self.wal_early_ack
+        self.config.wal_early_ack
     }
 
     /// Whether R17 async engine apply is enabled (deferred engine apply).
     #[must_use]
     pub fn async_engine_apply(&self) -> bool {
-        self.async_engine_apply
+        self.config.async_engine_apply
     }
 
     /// Snapshot of the believed leader id for this group. Delegates to the
@@ -653,7 +653,7 @@ impl PxGroup {
     // ── Setters ───────────────────────────────────────────────────
 
     pub fn set_force_classic(&mut self, force: bool) {
-        self.force_classic = force;
+        self.config.force_classic = force;
     }
 
     pub fn inherit_local_state_from(&mut self, prior: &Self) {
@@ -875,7 +875,7 @@ impl PxGroup {
             group_id: self.group_id,
             leader_id: self.leader_id(),
             local_replica_id: local_replica.id,
-            force_classic: self.force_classic,
+            force_classic: self.config.force_classic,
             status,
             messages,
             local_replica,
@@ -1229,7 +1229,7 @@ impl PxGroup {
 
         'slot_retry: for _slot_attempt in 0..PaxosConfig::DEFAULT.max_slot_retries {
             let base_entry = self.base_entry(slot, payload.clone());
-            let mut force_prepare = self.force_classic; // Classic: always prepare; Leader: Phase-2 only
+            let mut force_prepare = self.config.force_classic; // Classic: always prepare; Leader: Phase-2 only
             let mut min_round = 0u64;
 
             for attempt in 0..PaxosConfig::DEFAULT.max_paxos_retries {
@@ -1312,7 +1312,7 @@ impl PxGroup {
                         // the engine apply as a background task and return
                         // Chosen immediately. The fan_out_chosen_notice
                         // fires immediately too (non-blocking mpsc enqueue).
-                        if self.async_engine_apply {
+                        if self.config.async_engine_apply {
                             replica.spawn_learn_chosen(entry.clone(), client_id, seq);
                         } else {
                             replica.learn_chosen(&entry, client_id, seq).await;
@@ -1736,7 +1736,7 @@ impl PxGroup {
             })
             .collect();
 
-        if self.wal_early_ack && self.cached_quorum > 1 {
+        if self.config.wal_early_ack && self.cached_quorum > 1 {
             // R16b: split path — CAS only, persist deferred.
             // Only safe with quorum > 1: a single-node group has no
             // survivors to re-drive a chosen-but-not-durable slot

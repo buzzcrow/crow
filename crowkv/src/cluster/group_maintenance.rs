@@ -49,14 +49,14 @@ use super::group::PxGroup;
 use crate::wal::gc::run_gc_with_watermark;
 
 /// Start the per-group maintenance loop on `group`, unless already running
-/// or `election_cfg.election_driver_disabled` is set (reused here too:
+/// or `config.election.election_driver_disabled` is set (reused here too:
 /// legacy pinned-leader tests that want no per-group background tasks
-/// already set this). Tick interval is `election_cfg.maintenance_tick_ms`
+/// already set this). Tick interval is `config.election.maintenance_tick_ms`
 /// (follow-up: previously a hardcoded
 /// `DEFAULT_MAINTENANCE_TICK` constant here, now a normal per-group
 /// tunable alongside the election timings on `PxElectionConfig`).
 pub(crate) async fn start(group: &Arc<PxGroup>) {
-    if group.election_cfg.election_driver_disabled {
+    if group.config.election.election_driver_disabled {
         return;
     }
     let mut guard = group.maintenance_handle.lock().await;
@@ -64,7 +64,7 @@ pub(crate) async fn start(group: &Arc<PxGroup>) {
         return;
     }
     let weak = Arc::downgrade(group);
-    let tick = Duration::from_millis(group.election_cfg.maintenance_tick_ms);
+    let tick = Duration::from_millis(group.config.election.maintenance_tick_ms);
     *guard = Some(spawn(weak, tick, group.tenure_cancel.clone()));
 }
 
@@ -118,8 +118,8 @@ pub(crate) async fn run_pass(group: &PxGroup) {
         let prev = *group.last_snapshot_time.lock();
         std::time::Instant::now().duration_since(prev)
     };
-    let should_snapshot = slot_advance >= group.election_cfg.snapshot_slot_threshold
-        || time_elapsed >= Duration::from_millis(group.election_cfg.snapshot_time_threshold_ms);
+    let should_snapshot = slot_advance >= group.config.election.snapshot_slot_threshold
+        || time_elapsed >= Duration::from_millis(group.config.election.snapshot_time_threshold_ms);
 
     let engine_snapshot_at = if should_snapshot {
         debug!(
