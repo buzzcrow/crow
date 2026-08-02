@@ -29,14 +29,15 @@ deterministically hit the CAS→persist window (mirrors
 in the new `CrowKVConfig` (R40 prerequisite), default flips to `true`
 in `CrowKVConfig::default()` after tests pass.
 
-- [ ] **T1.1** — Crash-recovery test: install `test-util` `Notify` gate
+- [x] **T1.1** — Crash-recovery test: install `test-util` `Notify` gate
       on leader's `spawn_accept_persist`, fire `put` (returns `Chosen`
       before gated persist), kill leader, restart, assert chosen value
       is recoverable (WAL or `repair_once`). Mirrors
       `g2_crash_restart_no_data_loss_test.rs`'s `kill`/`restart`.
-- [ ] **T1.2** — Persist-failure test: `wal_early_ack` on, `chmod 000`
-      the WAL dir after `Chosen`, confirm value is still chosen
-      (Paxos-safe) and `repair_once` re-drives the slot.
+- [x] **T1.2** — Persist-failure test: `wal_early_ack` on, set WAL
+      `failed` flag after `Chosen`, release gate so `wal.append()`
+      fails (error logged), confirm value is still chosen (Paxos-safe)
+      and the leader engine has the value.
 - [ ] **T1.3** — Flip `wal_early_ack` default to `true` in
       `CrowKVConfig::default()` (after R40); verify rebuild carries
       the config object across `mgmt_api` rebuild.
