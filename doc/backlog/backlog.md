@@ -11,7 +11,23 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R41** — Bump this line in the same commit when adding a new item.
+**Next R number: R43** — Bump this line in the same commit when adding a new item.
+
+### High Priority
+
+**Complexity — Low-medium:**
+- **[R41](R41-dedup-window.md)** — Bounded per-client dedup window (fix
+  single-entry false-positive) — Area: consensus / idempotency —
+  `PxLearner` keeps only the single latest `(seq, slot)` per client
+  ("latest wins"), but `design.md` promises a ≥64-request retention
+  window. Since `propose` checks dedup unconditionally (not only on
+  retries) and slots can be chosen out of order, a concurrent
+  lower-`seq` request from the same `client_id` can false-positive
+  against a higher-`seq` request that committed first, silently
+  dropping its payload while reporting success. Reachable by the
+  documented concurrent-pipelining client pattern (shared
+  `Arc<CrowkvClient>`, one `client_id`, many in-flight requests).
+  Correctness bug, not a tuning item.
 
 ### Medium Priority
 
@@ -109,6 +125,16 @@ complexity, and dependency. Before implementation, follow the
 - **[R4](R4-bounded-mempool.md)** — Bounded memory pool — Area: crowtree engine — `buffer::allocate` uses
   unbounded `std::malloc`; a burst of large writes can spike RSS without
   backpressure.
+
+**Complexity — Low:**
+- **[R42](R42-forward-target-redundant-lookup.md)** — Drop redundant
+  group lookup in read-path `NotLeader` redirect — Area: read path —
+  `PxKvStore::resolve_read_point`'s three `NotLeader` sites call
+  `self.forward_target_for(group.group_id())`, which re-derives the same
+  `Arc<PxGroup>` via a `DashMap` lookup + clone even though the function
+  already holds `group: &Arc<PxGroup>`. Fires on every linearizable
+  non-leader redirect and every `MinSlot` staleness fallback. Replace
+  with `group.leader_endpoint()` directly; no behavior change.
 
 ---
 

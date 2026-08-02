@@ -192,54 +192,6 @@ Client PUT/DELETE/BatchWrite
 
 ---
 
-## Tracked Optimization Opportunities
-
-- **R15 — Zero-copy PxLogEntry in accept path** (done): `on_accept` and
-  `acceptor.accept` take `&PxLogEntry`; redundant clones eliminated;
-  only remaining clone is inside `inner_accept` for `cas_accepted` (slot
-  node must own its copy, O(1) ref-count bump with `Bytes` payload).
-- **R16a — Concurrent local + remote fan-out** (done, 2026-07-31):
-  `run_prepare_phase` and the default `run_accept_phase` path now issue
-  the local handler and all remote RPCs concurrently via `tokio::join!`,
-  overlapping the leader's local fsync (~10-100 µs on NVMe) with the
-  network round-trip. The quorum check still awaits the local reply
-  before counting it, so **W6 is not weakened** — W6 only forbids the
-  local replica replying `Accepted` before persist; the proposer still
-  waits for that reply. Pure win, no contract change, no feature flag.
-- **R16b — Early ack before local persist** (done, 2026-07-31,
-  default-off): `wal_early_ack` flag splits `on_accept` into
-  `on_accept_inner` (CAS only) + `on_accept_persist` (WAL append). When
-  enabled, the proposer declares `Chosen` on remote quorum + local CAS,
-  before the local fsync; the persist runs via `spawn_accept_persist`
-  (fire-and-forget). Weakens W6 for the local replica — a crash between
-  CAS and persist can lose the accepted value (safe in Paxos, changes
-  durability ordering). The flag is implemented in the hot path but
-  default-off and not carried across group rebuild; enable (default
-  flip + rebuild-carry) is tracked in R35, gated on T1 crash tests.
-- **R17 — Async engine apply after quorum** (done, 2026-07-31,
-  default-off): `async_engine_apply` flag moves `learn_chosen` to
-  `spawn_learn_chosen` (fire-and-forget `tokio::spawn`); the proposer
-  returns `Chosen` before the local engine has applied the value.
-  Removes engine apply (FFI + memtable insert) from the write critical
-  path. Breaks **Linearizable** read-your-writes until an apply fence is
-  added — the existing `linearizable_read_barrier` does not gate on the
-  applied frontier (MinSlot already gates on `contiguous_applied` and is
-  unaffected). The flag is implemented in the hot path but default-off
-  and not carried across group rebuild; apply fence + default flip +
-  rebuild-carry are tracked in R35.
-- **R34 — ISA-L CRC32C** (done, 2026-07-31): `crow-common/crc32c.h` now
-  delegates to ISA-L `crc32_iscsi`, which runtime-dispatches to the
-  best SIMD path (SSE4.2+PCLMULQDQ / AVX2 / AVX512 on x86, NEON on ARM).
-  Accelerates C++ engine durability checksums (superblock, pages). Note:
-  the **Rust WAL** still uses the `crc32c` crate (0.6) for record/footer
-  checksums — R34 does not touch the Rust write path.
-- **R31 — Write regression investigation** (closed, 2026-07-31): the
-  Intel same-platform 50K→29K drop (07-21 → 07-24) was confirmed by the
-  M5 Pro retest to be largely a platform effect, not a code defect (the
-  code path reaches ~48K on M5 Pro). Closed without an Intel bisect.
-
----
-
 ## Benchmark Results — 2026-07-24
 
 Systematic T:C:W sweep. 3-node cluster (bench fixture, in-process
@@ -468,14 +420,11 @@ of what remains:
 - **FFI batch encode** — already eliminated (R23, done):
   `ct_apply_batch_slices` accepts an array of `ct_kv_ref`
   pointer-length structs; no packing copy.
-- **Client-side batch copy (R25, partial)** — proto `bytes` fields are
-  now `bytes::Bytes` (done via `prost-build` config), so `KvBatchItem`
-  holds `Bytes`. But `CrowkvClient::BatchOp` still owns `Vec<u8>`
-  key/value, so `batch_write` clones each key/value into `KvBatchItem`
-  and clones the whole `items` vec per retry. Switching `BatchOp` to
-  `Bytes` makes these O(1) ref-count bumps. Low-medium complexity — type
-  change ripples through client call sites but no C++ or consensus
-  changes.
+- **Client-side batch copy (R25, done)** — proto `bytes` fields are
+  `bytes::Bytes` (via `prost-build` config), and `CrowkvClient::BatchOp`
+  also holds `Bytes` key/value. `batch_write`'s `key.clone()` /
+  `value.clone()` into `KvBatchItem` and the `items.clone()` per retry
+  are all O(1) ref-count bumps, not copies. No further work here.
 
 ---
 
@@ -503,22 +452,6 @@ requirements; small/tuning items are traced in
   `update_frontier` / `record_dedup` are atomic, so a delayed apply is
   safe. Medium complexity, confined to the Linearizable read path +
   learner.
-- **Crash-recovery tests for R16b (enable `wal_early_ack` by default)** —
-  tracked as **T1** in [`plan-io-clean.md`](plan-io-clean.md).
-  R16b drops the local fsync off the critical path entirely (chosen on
-  remote quorum + local CAS). On NVMe the local fsync is ~10-100 µs, so
-  this is the larger single latency component once R16a has overlapped
-  it with the quorum RPC. The mechanism is implemented; the blocker is
-  durability-ordering validation: a crash between CAS and persist must
-  not violate any externally visible guarantee. Needs fault-injection
-  crash-recovery tests (kill -9 between `on_accept_inner` and
-  `spawn_accept_persist`, then replay). Low code complexity once tests
-  pass. **T1.5 benchmark (done)**: at 1T:1C MI=64, early-ack on vs off:
-  2906 vs 2809 ops/s (+3.5%), avg 341 vs 353 µs (−12 µs / −3.4%).
-  At 48T:48C MI=64: 29790 vs 27663 ops/s (+7.7%), avg 1608 vs 1732 µs
-  (−124 µs / −7.2%), p999 5668 vs 6420 µs (−11.7%). The gain is larger
-  under saturation because early-ack lets the leader start the next
-  proposal without waiting for local WAL persist.
 - **Server-side proposal coalescing** — tracked as
   **[R36](../backlog/R36-proposal-coalescing.md)** (backlog). Today each
   client `PUT` is its own Paxos proposal (one slot, one WAL record, one
@@ -533,20 +466,3 @@ requirements; small/tuning items are traced in
   coalesce window and must preserve `(client_id, seq)` dedup ordering.
   Medium-high complexity; touches the admission gate and the propose
   entry.
-- **Rust WAL CRC32C hardware path (done)** — The Rust WAL now FFI-s
-  through `crowtree-ffi::crc32c` to `crow_common::crc32c` (ISA-L
-  `crc32_iscsi`, R34), replacing the software `crc32c` crate. Same
-  Castagnoli polynomial + reflected/seeded convention — existing WAL
-  segments decode without migration (102 WAL tests pass). Aligns the
-  Rust and C++ checksum and adds a NEON path on ARM.
-- **WAL group-commit coalesce tuning (T3, done — removed)** —
-  `wal_flush_coalesce_us` was swept across {0, 10, 25, 50, 100, 200} µs
-  at 48T:48C MI=64 (saturated write, in-memory WAL). No non-zero value
-  showed any advantage over the baseline (0 µs): throughput was flat at
-  ~29.2K ops/s (±1% noise) and p99/p999 showed no trend. The
-  wake-drain-flush baseline already amortizes fsync across records that
-  arrive during a flush, so an explicit coalescing window adds nothing.
-  **Decision: removed** `wal_flush_coalesce_us` (config field, coalesce
-  arm in `pipeline_writer.rs`, related tests/docs). The watchdog
-  (`wal_flush_watchdog_ms`) stays as the safety-net timer. See
-  [`plan-io-clean.md`](plan-io-clean.md) T3.

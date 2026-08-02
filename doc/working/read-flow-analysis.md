@@ -142,11 +142,11 @@ Client SCAN(prefix, start_after, limit, read_mode, min_slot?)
 
 - **No admission window** — reads bypass `InflightAdmission`; no
   `max_inflight_reads`. Burst bounded only by Tokio scheduling, engine
-  throughput (`InMemKV` `RwLock<BTreeMap>` — concurrent readers, but
-  reads serialize with `apply` under the write lock; FFI + demand-load
-  for `CrowtreeEngine`), and HTTP/2 stream concurrency. Intentional:
-  reads are cheap, non-blocking, and lease-path reads consume no
-  consensus resources.
+  throughput (`InMemKV` test-only `DashMap` (E5) — per-key entry API,
+  reads proceed concurrent with `apply`, no global write lock; FFI +
+  demand-load for `CrowtreeEngine`), and HTTP/2 stream concurrency.
+  Intentional: reads are cheap, non-blocking, and lease-path reads
+  consume no consensus resources.
 - **Parallel across replicas — MinSlot only.** Each replica's engine
   has its own `get`/`scan` path with no cross-replica coordination.
   Linearizable reads are serialized through the leader by definition.
@@ -204,16 +204,17 @@ Client SCAN(prefix, start_after, limit, read_mode, min_slot?)
   (degraded, `kv.get_forward_failed.c`; store returns `NotLeader` for
   linearizable). MinSlot never forwarded. Scan mirrors this in
   `KvStoreService::scan` / `forward_kv_scan`.
-- **Engine get** — `InMemKV`: `BTreeMap::get` under `RwLock` read lock →
-  value cloned out via trait return → `Bytes::from(vec)`.
-  `CrowtreeEngine`: `try_get_pinned` → fast path lock-free memtable
-  lookup with epoch guard returning `PinnedValue` (R6: `into_bytes()`
-  produces a zero-copy `Bytes` via `Bytes::from_owner`); slow path
-  `ct_get_async` demand-load via `ct_future` (primary latency
-  contributor for cold reads).
+- **Engine get** — `InMemKV` (test-only): `DashMap::get` (per-shard
+  lock, no global lock) → value cloned out via trait return →
+  `Bytes::from(vec)`. `CrowtreeEngine`: `try_get_pinned` → fast path
+  lock-free memtable lookup with epoch guard returning `PinnedValue`
+  (R6: `into_bytes()` produces a zero-copy `Bytes` via
+  `Bytes::from_owner`); slow path `ct_get_async` demand-load via
+  `ct_future` (primary latency contributor for cold reads).
 - **Engine scan** — ordered prefix scan, up to `limit` live
-  (non-tombstoned) entries. `InMemKV`: `BTreeMap::range` iteration
-  under read lock (already key-sorted). `CrowtreeEngine`:
+  (non-tombstoned) entries. `InMemKV` (test-only): `DashMap` is not
+  key-ordered — collects matching live entries then sorts (E5).
+  `CrowtreeEngine`:
   `try_scan` → `ct_scan_async` (fast path memtable traversal, slow path
   demand-load retry loop); packed result decoded per-entry into
   `Vec<u8>` key+value. `start_after` is not pushed into the C++ API —
@@ -310,7 +311,7 @@ of what remains:
 
 - **O(n) unavoidable** — gRPC request deserialize (key/prefix from
   network frame); gRPC response serialize (value(s) into socket);
-  `InMemKV` get (value cloned from `BTreeMap` under `RwLock` read lock);
+  `InMemKV` (test-only) get (value cloned from `DashMap` shard);
   `CrowtreeEngine` get (one copy: frame → `Bytes` fast path, or I/O
   buffer → `Bytes` slow path); `CrowtreeEngine` scan (prefix `to_vec()`
   for FFI, packed result `take_buf`, per-entry `Vec<u8>` for key+value
@@ -348,9 +349,12 @@ remains (see E2).
 - **Memory interconnect**: Dual-channel DDR4-3200, PCIe 4.0
   — **not** HBM. DRAM bandwidth is constrained by the 2-channel
   topology; cross-CCX traffic crosses the Infinity Fabric, adding
-  latency for `InMemKV` (`DashMap`) and `mem-block` WAL accesses
+  latency for `CrowtreeEngine` `mem-block` page-store and WAL accesses
   that land on a different CCX than the issuing core. This matters
-  for in-memory KV workloads where every read touches DRAM.
+  for in-memory KV workloads where every read touches DRAM. (The
+  benchmark uses `--mode mem` → `kv_backend = mem-block`, i.e.
+  `CrowtreeEngine` over an in-memory block page store — not the
+  test-only `InMemKV`, which isn't wired into the server CLI.)
 - **OS**: Linux
 - **macOS (Apple M5 Pro)**: placeholder — to be re-collected with
   the current codebase. Apple Silicon uses **unified memory**
