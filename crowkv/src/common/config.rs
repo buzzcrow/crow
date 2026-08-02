@@ -408,7 +408,7 @@ impl Default for CrowKVConfig {
             election: PxElectionConfig::DEFAULT,
             wal: WalConfig::default(),
             force_classic: false,
-            wal_early_ack: false,
+            wal_early_ack: true,
             async_engine_apply: false,
             wal_root: PathBuf::from("waldata"),
             config_root: PathBuf::from("conf"),
