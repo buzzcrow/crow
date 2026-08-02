@@ -185,13 +185,7 @@ impl PxLearner {
     /// `.await` never actually suspends for it.
     #[must_use]
     pub async fn engine_get(&self, key: &[u8]) -> Option<(SlotIndex, Vec<u8>)> {
-        let result = self.engine.get(key).await;
-        eprintln!(
-            "DEBUG R36 engine_get: key={:?} result={:?}",
-            key,
-            result.is_some()
-        );
-        result
+        self.engine.get(key).await
     }
 
     /// Like [`Self::engine_get`] but returns [`Bytes`] instead of `Vec<u8>`,

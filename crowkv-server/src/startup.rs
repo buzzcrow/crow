@@ -184,7 +184,6 @@ pub async fn create_group_with_wal(
         max_inflight = config.max_inflight(),
         inflight_queues = config.inflight_queues(),
         admission = config.inflight_admission().label(),
-        coalesce_window_us = config.paxos.coalesce_window_us,
         coalesce_max_keys = config.paxos.coalesce_max_keys,
         skip_fsync = config.wal_skip_fsync,
         wal_early_ack = config.wal_early_ack,

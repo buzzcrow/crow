@@ -105,18 +105,9 @@ pub struct Cli {
     #[arg(long, default_value_t = 1)]
     pub inflight_queues: usize,
 
-    /// R36 coalesce window in microseconds. The leader micro-batches
-    /// concurrent single-key proposes for up to this long before flushing
-    /// one multi-key Paxos proposal. `0` disables coalescing (default).
-    /// When omitted, falls back to the config-file value (if `--config`
-    /// is provided); otherwise defaults to 0 (disabled).
-    #[arg(long)]
-    pub coalesce_window_us: Option<u64>,
-
-    /// R36 max ops per coalesced batch (capped at 255). When a batch fills
-    /// it flushes immediately without waiting for the window. Default: 32.
-    /// When omitted, falls back to the config-file value (if `--config`
-    /// is provided); otherwise defaults to 32.
+    /// R45 max ops per coalesced batch (capped at 255). The leader
+    /// event-batches concurrent single-key proposes into one multi-key
+    /// Paxos proposal. `0` disables coalescing (default).
     #[arg(long)]
     pub coalesce_max_keys: Option<usize>,
 }
