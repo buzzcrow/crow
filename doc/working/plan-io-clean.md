@@ -94,25 +94,6 @@ coalesce mechanism already exists in the WAL writer task
 
 ---
 
-## T4 — Per-mode get latency breakdown (read G1)
-
-- [ ] Split `kv.get.lh` into `kv.get.linearizable.lh` and
-      `kv.get.min_slot.lh` in `KvMetrics`, recording each get against
-      the histogram matching its `read_mode`.
-- [ ] Keep the combined `kv.get.lh` for backward compat (record into
-      both the per-mode and the combined histogram on each get).
-- [ ] Verify the per-mode histograms surface in the metrics dump
-      (`/internal-state` or equivalent); confirm linearizable shows
-      the ReadIndex RTT tail and MinSlot does not.
-
-**Scope**: Small — register two extra `LatencyHistogram`s and branch the
-`record_get` call on `read_mode`. No logic change; pure instrumentation.
-
-**Files**: `crowkv/src/rpc/kv_service.rs` (`KvMetrics` struct,
-`record_get`, metric registration in `new`).
-
----
-
 ## T6 — `InMemKV` read/apply concurrency (read E5, low priority)
 
 - [ ] Replace `InMemKV`'s `RwLock<BTreeMap>` with a `DashMap` (or

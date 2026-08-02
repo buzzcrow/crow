@@ -227,10 +227,10 @@ Client SCAN(prefix, start_after, limit, read_mode, min_slot?)
 
 ### Open gaps
 
-- **G1 — No per-mode latency breakdown.** `kv.get.lh` merges
-  linearizable (may incur heartbeat RTT) with MinSlot (local lookup).
-  Fix: separate `kv.get.linearizable.lh` / `kv.get.min_slot.lh`, or
-  per-mode counters + shared histogram.
+- **G1 — Per-mode latency breakdown (done).** `kv.get.lh` is now split
+  into `kv.get.linearizable.lh` and `kv.get.min_slot.lh`; each get
+  records into both its per-mode histogram and the combined
+  `kv.get.lh` for backward compat.
 
 ### Enhancement opportunities
 
@@ -298,10 +298,11 @@ for stale modes; chosen+applied ⇒ identical results across replicas
 forwarding linearizable reads to the leader (MinSlot self-checks
 instead).
 
-Open work: **G1** per-mode latency breakdown; **E1** scan `start_after`
-push-down, **E2** scan value zero-copy, **E4** least-conn/latency
-endpoint policy, **E5** `InMemKV` read/apply concurrency, **E6** custom
-RPC transport (R32, deferred). **E3** scan `not_leader_hint` is done.
+Open work: **E1** scan `start_after` push-down, **E2** scan value
+zero-copy, **E4** least-conn/latency endpoint policy, **E5** `InMemKV`
+read/apply concurrency, **E6** custom RPC transport (R32, deferred).
+**G1** per-mode latency breakdown and **E3** scan `not_leader_hint` are
+done.
 
 ---
 
