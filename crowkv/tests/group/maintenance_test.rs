@@ -70,8 +70,7 @@ async fn apply_through_with_engine(replica: &PxLocalReplica, upto: u64) {
                     term: 1,
                     payload: Bytes::from(encode_put_payload(format!("k{slot}").as_bytes(), b"v")),
                 },
-                None,
-                None,
+                &[],
             )
             .await;
     }

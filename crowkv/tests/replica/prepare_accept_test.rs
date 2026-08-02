@@ -155,7 +155,7 @@ async fn learn_chosen_advances_applied_frontier() {
     let _ = replica.on_prepare(1, PxBallot::new(0, 1), 1).await;
     let entry = write_entry(1, PxBallot::new(0, 1), 1, b"v1");
     let _ = replica.on_accept(&entry).await;
-    replica.learn_chosen(&entry, None, None).await;
+    replica.learn_chosen(&entry, &[]).await;
 
     assert_eq!(replica.contiguous_applied(), 1);
     assert_eq!(replica.contiguous_chosen(), 1);

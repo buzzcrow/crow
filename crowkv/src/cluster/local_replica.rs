@@ -19,7 +19,7 @@ use crate::metrics::{Counter, Gauge, MetricsRegistry};
 use crate::paxos::acceptor::PxAcceptor;
 use crate::paxos::learner::PxLearner;
 use crate::paxos::roles::{
-    Acceptor, Learner, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply, SlotIndex,
+    Acceptor, DedupTag, Learner, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply, SlotIndex,
 };
 use crate::paxos::{PxNodeId, PxTerm};
 use crate::wal::record::WALRecord;
@@ -600,7 +600,7 @@ impl PxLocalReplica {
         };
         for slot in start_slot..=highest {
             if let Some(entry) = replica.acceptor.accepted_at(slot) {
-                replica.learner.learn(entry, None, None).await;
+                replica.learner.learn(entry, &[]).await;
             }
         }
 
@@ -1213,9 +1213,12 @@ impl PxLocalReplica {
         }
     }
 
-    /// Learn a chosen entry (apply to state machine).
-    pub async fn learn_chosen(&self, entry: &PxLogEntry, client_id: Option<u64>, seq: Option<u64>) {
-        self.learner.learn(entry.clone(), client_id, seq).await;
+    /// Learn a chosen entry (apply to state machine) and record each
+    /// dedup tag against the slot. A single-key propose passes one tag;
+    /// a coalesced batch passes one per client op; repair/election pass
+    /// none.
+    pub async fn learn_chosen(&self, entry: &PxLogEntry, dedup_tags: &[DedupTag]) {
+        self.learner.learn(entry.clone(), dedup_tags).await;
     }
 
     /// R17: defer the engine apply (`apply_entry` + applied-frontier
@@ -1231,12 +1234,12 @@ impl PxLocalReplica {
     /// apply) before serving the read, preserving read-your-writes. The
     /// learner's `apply_entry` is idempotent, and the frontier/dedup
     /// updates are atomic, so a delayed apply is safe.
-    pub fn spawn_learn_chosen(&self, entry: PxLogEntry, client_id: Option<u64>, seq: Option<u64>) {
+    pub fn spawn_learn_chosen(&self, entry: PxLogEntry, dedup_tags: &[DedupTag]) {
         let learner = Arc::clone(&self.learner);
         // Sync: chosen frontier + dedup (cheap atomics; must precede
         // `propose` returning `Chosen` for read-your-writes).
         learner.update_chosen_frontier(entry.slot, entry.term);
-        learner.record_dedup(client_id, seq, entry.slot);
+        learner.record_dedup_tags(dedup_tags, entry.slot);
         // Deferred: engine apply + applied frontier (the FFI/memtable insert
         // moved off the write critical path; the apply fence gates reads).
         tokio::spawn(async move {
@@ -1262,7 +1265,7 @@ impl PxLocalReplica {
             let Some(entry) = self.acceptor.accepted_at(next) else {
                 break;
             };
-            self.learner.learn(entry, None, None).await;
+            self.learner.learn(entry, &[]).await;
             next += 1;
         }
     }

@@ -12,7 +12,7 @@ use parking_lot::Mutex;
 use tokio::sync::Notify;
 
 use crate::kv::{Batch, CrowtreeBackend, CrowtreeEngine, CrowtreeOptions, KVEngine};
-use crate::paxos::roles::{Learner, PxLogEntry, SlotIndex};
+use crate::paxos::roles::{DedupTag, Learner, PxLogEntry, SlotIndex};
 use crate::paxos::PxTerm;
 
 /// Per-client dedup retention: the last `DEDUP_WINDOW` committed
@@ -185,7 +185,13 @@ impl PxLearner {
     /// `.await` never actually suspends for it.
     #[must_use]
     pub async fn engine_get(&self, key: &[u8]) -> Option<(SlotIndex, Vec<u8>)> {
-        self.engine.get(key).await
+        let result = self.engine.get(key).await;
+        eprintln!(
+            "DEBUG R36 engine_get: key={:?} result={:?}",
+            key,
+            result.is_some()
+        );
+        result
     }
 
     /// Like [`Self::engine_get`] but returns [`Bytes`] instead of `Vec<u8>`,
@@ -433,25 +439,24 @@ impl PxLearner {
         self.dedup.get(&client_id).and_then(|w| w.lookup(seq))
     }
 
-    /// Record that `(client_id, seq)` committed at `slot`. Appends to the
-    /// per-client window (idempotent on a duplicate `seq`); evicts the oldest
-    /// entry once the window exceeds `DEDUP_WINDOW`. No-op for the
-    /// `client_id == 0` sentinel.
-    pub(crate) fn record_dedup(&self, client_id: Option<u64>, seq: Option<u64>, slot: SlotIndex) {
-        let (Some(client_id), Some(seq)) = (client_id, seq) else {
-            return;
-        };
-        if client_id == 0 {
-            return;
+    /// Record every dedup tag in `tags` against `slot`. A coalesced
+    /// multi-key batch passes one tag per client op; a single-key
+    /// propose passes one; repair/election pass none. `client_id == 0`
+    /// tags are skipped (sentinel).
+    pub(crate) fn record_dedup_tags(&self, tags: &[DedupTag], slot: SlotIndex) {
+        for tag in tags {
+            if tag.client_id == 0 {
+                continue;
+            }
+            self.dedup
+                .entry(tag.client_id)
+                .and_modify(|w| w.record(tag.seq, slot))
+                .or_insert_with(|| {
+                    let mut w = DedupWindow::default();
+                    w.record(tag.seq, slot);
+                    w
+                });
         }
-        self.dedup
-            .entry(client_id)
-            .and_modify(|w| w.record(seq, slot))
-            .or_insert_with(|| {
-                let mut w = DedupWindow::default();
-                w.record(seq, slot);
-                w
-            });
     }
 
     /// Decode `payload` and apply it to the engine at `slot`.
@@ -498,7 +503,7 @@ impl PxLearner {
 }
 
 impl Learner for PxLearner {
-    async fn learn(&self, entry: PxLogEntry, client_id: Option<u64>, seq: Option<u64>) {
+    async fn learn(&self, entry: PxLogEntry, dedup_tags: &[DedupTag]) {
         // V1 sync path (followers, restore, R17-off leader): apply, then
         // advance both frontiers, then record dedup. With apply synchronous,
         // `contiguous_applied` tracks `contiguous_chosen` exactly — the R35
@@ -506,6 +511,6 @@ impl Learner for PxLearner {
         self.apply_entry(entry.slot, &entry.payload).await;
         self.update_chosen_frontier(entry.slot, entry.term);
         self.advance_applied_frontier(entry.slot);
-        self.record_dedup(client_id, seq, entry.slot);
+        self.record_dedup_tags(dedup_tags, entry.slot);
     }
 }

@@ -104,6 +104,17 @@ pub struct Cli {
     /// `ceil(max_inflight / inflight_queues)` permits. Default: 1.
     #[arg(long, default_value_t = 1)]
     pub inflight_queues: usize,
+
+    /// R36 coalesce window in microseconds. The leader micro-batches
+    /// concurrent single-key proposes for up to this long before flushing
+    /// one multi-key Paxos proposal. `0` disables coalescing (default).
+    #[arg(long, default_value_t = 0)]
+    pub coalesce_window_us: u64,
+
+    /// R36 max ops per coalesced batch (capped at 255). When a batch fills
+    /// it flushes immediately without waiting for the window. Default: 32.
+    #[arg(long, default_value_t = 32)]
+    pub coalesce_max_keys: usize,
 }
 
 /// Parse a comma-separated list of numbers and ranges into a `Vec<u64>`.

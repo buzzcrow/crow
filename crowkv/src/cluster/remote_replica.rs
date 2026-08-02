@@ -22,7 +22,7 @@ use crate::common::config::PxElectionConfig;
 use crate::common::metrics::LayerMetrics;
 use crate::common::report::OperationReport;
 use crate::metrics::{Counter, LatencySummary, MetricsRegistry};
-use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
+use crate::paxos::roles::{DedupTag, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
 use crate::paxos::PxNodeId;
 use crate::rpc::px_service_client::PxServiceClient;
 use crate::rpc::{
@@ -161,8 +161,7 @@ impl ReplicaClient for PxRemoteReplica {
     async fn send_accept(
         &self,
         entry: &PxLogEntry,
-        client_id: Option<u64>,
-        seq: Option<u64>,
+        dedup_tags: &[DedupTag],
         group_id: u64,
         membership_epoch: u64,
     ) -> Result<PxAcceptReply, PxReplicaError> {
@@ -171,6 +170,10 @@ impl ReplicaClient for PxRemoteReplica {
         // (PxLogEntry -> AcceptRequest, AcceptedResponse -> PxAcceptReply)
         // is identical; only the transport changes.
         let request_id = self.alloc_request_id();
+        // Legacy single-tag fields: the first coalesced tag (or 0) so
+        // older followers during a rolling upgrade still record one dedup
+        // entry. New followers prefer `dedup_tags`.
+        let (legacy_client_id, legacy_seq) = dedup_tags.first().map_or((0, 0), |t| (t.client_id, t.seq));
         let req = AcceptRequest {
             version: 1,
             slot: entry.slot,
@@ -188,10 +191,17 @@ impl ReplicaClient for PxRemoteReplica {
             }),
             request_id,
             request_create_ms: 0,
-            client_id: client_id.unwrap_or(0),
-            seq: seq.unwrap_or(0),
+            client_id: legacy_client_id,
+            seq: legacy_seq,
             group_id,
             membership_epoch,
+            dedup_tags: dedup_tags
+                .iter()
+                .map(|t| crate::rpc::DedupTag {
+                    client_id: t.client_id,
+                    seq: t.seq,
+                })
+                .collect(),
         };
 
         let started = Instant::now();
