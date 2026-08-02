@@ -377,12 +377,68 @@ consensus failures (zero errors at MI=64).
   per-proposal critical path is now: max(local fsync, quorum RPC) after
   R16a (was local fsync → quorum RPC, serial). R15 (zero-copy accept
   path, done) and R16a (concurrent fan-out, done) have already removed
-  the serial local fsync from the critical path. Remaining per-proposal
-  latency is dominated by the quorum RPC round-trip and the local fsync
-  running concurrently; further gains need R16b (drop local fsync from
-  the critical path entirely) or a faster quorum transport (R32). The
+  the serial local fsync from the critical path. R16b (early-ack,
+  `wal_early_ack` default-on) then dropped the leader's local fsync from
+  the critical path entirely — the per-proposal path is now the quorum
+  RPC round-trip only (see the Early-ack A/B section below for the
+  measured lift). Remaining per-proposal latency is dominated by the
+  quorum RPC; further gains need a faster quorum transport (R32). The
   Intel same-platform 50K→29K drop (07-21 → 07-24) was closed as R31
   (platform effect, not a code defect).
+
+### Early-ack A/B (`wal_early_ack` on vs off)
+
+Same workload as the main sweep (write-only, 512 B values, 1M key space,
+12 s, mem mode, Queue admission, MI=64), Linux (AMD Ryzen 9 5950X).
+Compares the relaxed ack mode (§5.4 of `design-wal.md`: `Chosen` declared
+on remote quorum durable flush + leader CAS, leader's local WAL persist
+deferred to a background spawn) against the strict mode (leader's local
+fsync on the critical path).
+
+| Config | Mode | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1T:1C | early-ack on | 2,906 | 341 | 355 | 441 | 568 | 0 |
+| 1T:1C | early-ack off | 2,809 | 353 | 360 | 443 | 577 | 0 |
+| 48T:48C | early-ack on | 29,790 | 1,608 | 1,590 | 2,354 | 5,668 | 0 |
+| 48T:48C | early-ack off | 27,663 | 1,732 | 1,585 | 2,206 | 6,420 | 0 |
+
+- **1T:1C** — +3.5% throughput (2,809 → 2,906), −3.4% avg latency
+  (353 → 341 µs). Single-proposal critical path drops the local fsync,
+  which is the larger single component once R16a overlapped it with the
+  quorum RPC.
+- **48T:48C** — +7.7% throughput (27,663 → 29,790), −7.2% avg latency
+  (1,732 → 1,608 µs), −11.7% p999 (6,420 → 5,668 µs). p99 is roughly
+  flat-to-slightly-up (2,206 → 2,354 µs, +6.7%) — the deferred persist
+  shifts some tail mass from p999 into p99 by adding a small amount of
+  background-persist contention, but the net tail (p999) and the average
+  both improve. The throughput gain is the saturation-ceiling lift from
+  removing the leader's fsync from the bottleneck path.
+
+### WAL flush coalesce sweep (`wal_flush_coalesce_us`)
+
+Sweeps the coalesce budget at the saturated write config (48T:48C, MI=64),
+Linux (AMD Ryzen 9 5950X). The coalesce budget was an explicit wait window
+the flush worker would insert before draining, on top of the
+wake-drain-flush baseline.
+
+| coalesce (µs) | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 | 29,266 | 1,637 | 1,624 | 2,364 | 4,928 | 0 |
+| 10 | 29,362 | 1,632 | 1,618 | 2,370 | 5,212 | 0 |
+| 25 | 29,157 | 1,643 | 1,630 | 2,382 | 4,444 | 0 |
+| 50 | 29,332 | 1,633 | 1,619 | 2,344 | 5,420 | 0 |
+| 100 | 29,241 | 1,639 | 1,622 | 2,466 | 4,700 | 0 |
+| 200 | 29,452 | 1,627 | 1,614 | 2,376 | 4,872 | 0 |
+
+Throughput is flat at ~29.2K ops/s (±1% noise) across the whole range;
+p99/p999 show no trend. No non-zero value showed any advantage over the
+wake-drain-flush baseline (coalesce = 0): the baseline already amortizes
+fsync across records that arrive during a flush, so an explicit wait
+window adds no measurable gain on top of it. **Decision: removed.** The
+`wal_flush_coalesce_us` config field and the coalesce arm in
+`pipeline_writer.rs` were deleted; `wal_flush_watchdog_ms` stays as the
+safety-net timer for the wake-drain-flush path (it wakes the idle writer
+every `watchdog` ms to drain any queued record in case of a missed wake).
 
 ---
 
@@ -431,10 +487,10 @@ of what remains:
 ## Write-Path Enhancement Ideas
 
 Grounded in the current code (post R16a/R16b/R17/R34). Ordered by
-expected impact on the per-proposal critical path, which after R16a is
-`max(local fsync, quorum RPC)`. Larger items are tracked as backlog
-requirements; small/tuning items are traced in
-[`plan-io-clean.md`](plan-io-clean.md).
+expected impact on the per-proposal critical path, which after R16b
+(early-ack, default-on) is the quorum RPC round-trip only — the leader's
+local fsync runs concurrently off the critical path. Larger items are
+tracked as backlog requirements.
 
 - **Apply fence for R17 (enable `async_engine_apply` by default)** —
   tracked as **[R35](../backlog/R35-apply-fence.md)** (backlog). The
@@ -466,3 +522,24 @@ requirements; small/tuning items are traced in
   coalesce window and must preserve `(client_id, seq)` dedup ordering.
   Medium-high complexity; touches the admission gate and the propose
   entry.
+- **Fan-out hardening (quorum short-circuit, RPC deadline, phase
+  metrics)** — tracked as
+  **[R43](../backlog/R43-write-path-fanout-hardening.md)** (backlog).
+  Six items from the 2026-08 write-flow review: (1) both phases
+  `join_all` ALL remote replies, so per-proposal latency is
+  `max(all peers)` instead of the quorum-th fastest — a
+  `FuturesUnordered` fold that returns on quorum + local reply (W6
+  intact) with a detached straggler drain (preserving late
+  TermStale/EpochMismatch side effects) is the largest remaining
+  latency lever needing no new transport; (2) accept/heartbeat
+  oneshots have no deadline, so a hung-but-connected peer stalls all
+  writes indefinitely even with quorum reachable; (3) `MetricHandles`
+  has read-path summaries only — no propose-e2e / prepare / accept /
+  first-quorum-RPC / apply latency breakdown (the critical-path
+  analysis above is inferred, not measured); (4) `retry_backoff` has
+  no jitter and sleeps while holding the admission permit; (5)
+  heartbeats share the 64-frame LearnerStream mpsc with accepts and
+  can be `Busy`-rejected at peak write load, degrading lease/election
+  stability; (6) the reply-fold `match` is triplicated (~150 lines)
+  across prepare + both accept paths — extract a helper first to
+  de-risk (1).

@@ -281,11 +281,11 @@ crowtree side for this refactor.
 > An `Accepted` response is sent to the leader only after the corresponding WAL record's backend durable flush has completed.
 > A client write is acked only after a quorum of acceptors have sent `Accepted`.
 
-This is repeated from design.md §8.1](design.md) because everything else in this section is a consequence of it.
+This is repeated from design.md §8.1](design.md) because everything else in this section is a consequence of it. This is the **strict** mode. The **early-ack** mode (§5.4) relaxes the leader's own durability ordering but keeps the quorum-durability requirement; both modes are described in §5.4.
 
 ### 5.2 Failure cases
 
-- **Crash before durable flush.** The record may or may not be on disk. Replay reads what is on disk; the slot may end up with no record on this acceptor. That is fine — the leader either had a quorum from other acceptors (slot is chosen) or not (slot will be repaired). No client was acked, so no expectation is violated.
+- **Crash before durable flush.** The record may or may not be on disk. Replay reads what is on disk; the slot may end up with no record on this acceptor. That is fine — the leader either had a quorum from other acceptors (slot is chosen) or not (slot will be repaired). In strict mode no client was acked for this acceptor's slot, so no expectation is violated; in early-ack mode (§5.4) the leader may have acked the client on the remote quorum alone, and the chosen-but-not-locally-durable slot is re-adopted by `repair_once` from the followers on restart.
 
   On restart, the new leader computes its recovery ceiling from durable state, not from an assumed contiguous log tail: `ceiling = max(local highest_seen_slot, peers' highest_seen_slot, persisted next_slot - 1 if present)`. Because parallel writes may leave holes inside `[floor+1, ceiling]`, the leader must run bulk Phase 1 over the whole open interval and fill empty slots with `NoOp`. It does **not** rely on `latest_slot + window_size` to discover hidden data; any value absent from every acceptor's durable state could not have formed a durable quorum and therefore could not have been acknowledged.
 
@@ -295,9 +295,22 @@ This is repeated from design.md §8.1](design.md) because everything else in thi
 
 ### 5.3 What we never do
 
-- Ack a client write before the leader's own durable flush.
-- Ack a client write before quorum durable flush.
-- Send `Accepted` based only on the in-memory state, expecting durable flush to succeed later. (Some systems do this for low latency at the cost of correctness under crash; CrowKV does not.)
+- Ack a client write before a quorum of acceptors have durably flushed. This holds in both ack modes (§5.4): the early-ack mode defers only the *leader's own* durable flush, never the remote quorum's.
+- Declare a slot `Chosen` without a quorum of `Accepted` responses (remote durable + leader CAS in early-ack mode; remote durable + leader durable in strict mode).
+
+### 5.4 Ack modes (`wal_early_ack`)
+
+The ack contract in §5.1 is the **strict** mode: every acceptor — including the leader — completes its WAL durable flush before its `Accepted` counts toward `Chosen`, and the client is acked only after the leader's own flush joins the quorum. `wal_early_ack` (default `true`, gated on `quorum > 1`) is a **relaxed** mode that drops the leader's local fsync off the write critical path:
+
+- The leader runs `on_accept_inner` (the term-fence CAS + in-memory `acceptor.accept`) concurrently with the remote `send_accept` fan-out via `tokio::join!`.
+- `Chosen` is declared as soon as the **remote quorum** has durably flushed *and* the leader's local CAS has landed. The leader's own WAL `Accepted` record is appended by a fire-and-forget `tokio::spawn` (`spawn_accept_persist`) that runs off the critical path; its failure is logged and does not retract `Chosen`.
+- The client is acked at that point. The per-proposal critical path becomes the quorum RPC round-trip only (the local fsync, ~10–100 µs on NVMe, runs concurrently and is no longer on the path).
+
+**Crash-recovery guarantee.** A crash in the window between the leader's CAS landing and the deferred local persist is Paxos-safe: the value is chosen (remote quorum accepted durably), so the client's observed `Chosen` is not violated. The leader's acceptor state for that slot is lost on crash (the CAS was in memory, the WAL record never landed), but on restart `replay_group` rebuilds from durable state only and `repair_once` re-adopts the chosen value for the gap slot from the followers (classic prepare + accept re-runs and re-chooses the highest-ballot accepted value). A value the client observed as `Chosen` therefore remains readable after crash + restart — either the local WAL raced the kill and has it, or repair re-adopts it from the quorum.
+
+**Single-node gate.** `wal_early_ack` defaults to `true` only when `quorum > 1`. A single-node group (quorum = 1) has no survivors to re-drive a chosen-but-not-locally-durable slot after a crash, so the leader's local fsync must stay on the critical path and the strict contract (§5.1) applies.
+
+**What is not relaxed.** The remote quorum's durable flush is still on the critical path in both modes — `Chosen` is never declared on in-memory-only remote accepts. The relaxation is strictly the leader's *own* durability ordering, recovered by `repair_once` rather than awaited inline.
 
 ---
 
@@ -518,6 +531,7 @@ The WAL is per-node. Inter-node consistency is the consensus layer's job. If a n
 | `wal_aligned` | `wal_aligned` | false | Selects block-aligned I/O backend |
 | `wal_io_unit_bytes` | `wal_io_unit_bytes` | 4096 | IU size when `wal_aligned` is true |
 | `wal_record_format` | `wal_record_format` | Auto | Binary (zero-copy) or text-line |
+| `wal_early_ack` | `CrowKVConfig.wal_early_ack` | `true` (gated on `quorum > 1`) | Early-ack mode (§5.4): declare `Chosen` on remote quorum durable flush + leader CAS, deferring the leader's local WAL persist to a background spawn. Default `false` for single-node groups (quorum = 1) — no survivors to re-drive a chosen-but-not-locally-durable slot. |
 
 **Choosing durable-flush batching:**
 
