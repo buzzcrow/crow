@@ -103,31 +103,35 @@ Zero production overhead (the gate is `cfg`-out in release builds).
 
 ### Decision 2 — Where `wal_early_ack` config lives
 
-**Chosen: keep it as an internal `PxGroup` field, flip the default in
-`PxGroup::new`, carry across rebuild in `mgmt_api`. No config struct,
-no CLI flag, no env var.**
+**Chosen: `wal_early_ack` becomes a field in the new `CrowKVConfig`
+(R40), the unified cluster config struct loaded from a JSON file.
+Default flips to `true` in `CrowKVConfig::default()` after T1 tests
+pass. Carried across group rebuild in `mgmt_api` as part of the config
+object, not as a scattered individual field.**
 
-R35 (`R35-apply-fence.md` L48–63) already established this: both
-`wal_early_ack` and `async_engine_apply` are "internal config, not
-operator-tunable." The existing `set_wal_early_ack` setter (L280)
-remains for test override. The work is:
+R40 (the config refactor) is a prerequisite for T1's default flip. R40
+merges `WalConfig`, `PxElectionConfig`, `PaxosConfig`, `ServerConfig`,
+and the `PxGroup` internal flags (`wal_early_ack`,
+`async_engine_apply`, `force_classic`) into one `CrowKVConfig` with
+`serde` derives for JSON file loading. See
+[`R40-crowkv-config.md`](../backlog/R40-crowkv-config.md) for the full
+refactor design. T1's remaining work after R40:
 
-1. Flip `wal_early_ack: false` → `true` at `group.rs` L228 (after tests
-   pass).
-2. Add a `wal_early_ack()` getter (mirrors `force_classic()` at L1572)
-   and carry it across rebuild in `mgmt_api.rs` next to the
-   `force_classic` block — so add/remove/promote replica does not
-   silently reset it to the struct default. R35 will carry
-   `async_engine_apply` in the same spot; doing `wal_early_ack` first
-   establishes the pattern.
+1. Flip `wal_early_ack` default to `true` in `CrowKVConfig::default()`
+   (after T1.1 + T1.2 tests pass).
+2. Verify the `mgmt_api` rebuild path carries the full `CrowKVConfig`
+   (R40 establishes this; T1 confirms `wal_early_ack` survives rebuild).
 
 **Alternatives considered:**
 
-- **Add to `WalConfig` or `PxElectionConfig`.** Rejected — these are
-  operator-facing structs (serialized, CLI-exposed). `wal_early_ack` is
-  an internal optimization flag, not a tunable; exposing it invites
-  misconfiguration (a user disabling it loses the latency win with no
-  safety benefit, since the crash tests prove it's safe).
+- **Keep as internal `PxGroup` field, no config struct.** Rejected —
+  the user directed a full config refactor (R40) to consolidate all
+  sub-configs into one `CrowKVConfig`. The scattered-field pattern
+  (`force_classic` carry block at `mgmt_api.rs` L1572, individual
+  setters on `PxGroup`) does not scale as more flags accumulate.
+- **Add to `WalConfig` or `PxElectionConfig` (pre-refactor).** Rejected
+  — these are being merged into `CrowKVConfig` by R40; adding to them
+  now and then merging later is wasted work.
 - **Keep `false` default, flip via test-only setter in the crash tests
   only.** Rejected — the goal of T1 is to enable R16b by default in
   production, not just test it. The default must flip.
@@ -176,9 +180,10 @@ write-flow benchmarks). **Blocked on Linux access** — same as T3.
   persist (logged error) does not affect Paxos safety: the value is
   chosen, and `repair_once` re-drives the slot to durability. Passes
   with `wal_early_ack = true`.
-- **T1.3** — `wal_early_ack` defaults to `true` in `PxGroup::new` and
-  survives a group rebuild (add/remove/promote replica) in `mgmt_api`
-  (carry-forward block next to `force_classic`).
+- **T1.3** — `wal_early_ack` defaults to `true` in
+  `CrowKVConfig::default()` (after R40 lands) and survives a group
+  rebuild (add/remove/promote replica) in `mgmt_api` (R40 carries the
+  full config object across rebuild).
 - **T1.4** — No regression: existing crash-restart tests
   (`g2_crash_restart_no_data_loss_test`,
   `a3_crash_restart_no_data_loss_test`) pass with the new default.
@@ -190,10 +195,10 @@ write-flow benchmarks). **Blocked on Linux access** — same as T3.
 
 - `crowkv/src/cluster/local_replica.rs` — `test-util` `Notify` gate on
   `spawn_accept_persist`; `wal_early_ack` is already wired here.
-- `crowkv/src/cluster/group.rs` — flip `wal_early_ack` default (L228);
-  add `wal_early_ack()` getter.
-- `crowkv-server/src/mgmt_api.rs` — carry `wal_early_ack` across rebuild
-  (next to `force_classic` block, L1572).
+- `crowkv/src/common/config.rs` — `wal_early_ack` default flip in
+  `CrowKVConfig::default()` (after R40 creates the struct).
+- `crowkv-server/src/mgmt_api.rs` — verify rebuild carries
+  `CrowKVConfig` (R40 establishes this).
 - `crowkv/tests/group/` — new crash-recovery test file(s) for T1.1 +
   T1.2, mirroring `g2_crash_restart_no_data_loss_test.rs`'s
   `kill`/`restart` harness.
@@ -202,10 +207,16 @@ write-flow benchmarks). **Blocked on Linux access** — same as T3.
 
 ## Dependencies
 
-- **R35** — shares the `mgmt_api` rebuild-carry pattern. T1 carries
-  `wal_early_ack`; R35 carries `async_engine_apply`. T1's carry block
-  establishes the pattern R35 will mirror. T1's default flip is
-  independent of R35's fence (R35 enables R17; T1 enables R16b).
+- **R40** (prerequisite) — `CrowKVConfig` refactor. T1's
+  `wal_early_ack` default flip lands in `CrowKVConfig::default()`, not
+  `PxGroup::new`. T1.1 + T1.2 (crash tests) can proceed in parallel
+  with R40 since the `test-util` `Notify` gate is independent of the
+  config struct; T1.3 (default flip) waits for R40.
+- **R35** — shares the rebuild-carry pattern. After R40, both
+  `wal_early_ack` and `async_engine_apply` are fields in
+  `CrowKVConfig`, carried as one object across rebuild. T1's default
+  flip is independent of R35's fence (R35 enables R17; T1 enables
+  R16b).
 - **Linux bench box** — T1.5 (benchmark) is deferred until Linux
   access, same as T3. T1.1–T1.4 (tests + default flip) are not
   platform-gated.

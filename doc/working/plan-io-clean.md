@@ -25,9 +25,9 @@ Optimization Opportunities for the full lists and rationale.
 Design: [`design-t1-crash-recovery.md`](design-t1-crash-recovery.md).
 Decisions: (1) test-only `Notify` gate on `spawn_accept_persist` to
 deterministically hit the CAS→persist window (mirrors
-`readindex_round_gate` pattern); (2) keep `wal_early_ack` as an
-internal `PxGroup` field, flip the default in `PxGroup::new`, carry
-across rebuild in `mgmt_api` (no config struct / CLI flag).
+`readindex_round_gate` pattern); (2) `wal_early_ack` becomes a field
+in the new `CrowKVConfig` (R40 prerequisite), default flips to `true`
+in `CrowKVConfig::default()` after tests pass.
 
 - [ ] **T1.1** — Crash-recovery test: install `test-util` `Notify` gate
       on leader's `spawn_accept_persist`, fire `put` (returns `Chosen`
@@ -38,8 +38,8 @@ across rebuild in `mgmt_api` (no config struct / CLI flag).
       the WAL dir after `Chosen`, confirm value is still chosen
       (Paxos-safe) and `repair_once` re-drives the slot.
 - [ ] **T1.3** — Flip `wal_early_ack` default to `true` in
-      `PxGroup::new`; add `wal_early_ack()` getter; carry across
-      rebuild in `mgmt_api.rs` (next to `force_classic` block).
+      `CrowKVConfig::default()` (after R40); verify rebuild carries
+      the config object across `mgmt_api` rebuild.
 - [ ] **T1.4** — No regression: existing crash-restart tests pass with
       the new default.
 - [ ] **T1.5** (deferred to Linux bench) — Benchmark per-proposal
@@ -48,17 +48,19 @@ across rebuild in `mgmt_api` (no config struct / CLI flag).
 **Scope**: Medium — the R16b mechanism is implemented and merged; this
 is verification + default-flip. The fault-injection harness exists
 (`g2`'s `kill`/`restart`); the new work is the `test-util` `Notify`
-gate + two test files + the default flip + `mgmt_api` carry.
+gate + two test files + the default flip in `CrowKVConfig`.
 
-**Dependency**: R35 shares the `mgmt_api` rebuild-carry pattern. T1
-carries `wal_early_ack`; R35 carries `async_engine_apply`. T1's default
-flip is independent of R35's fence. T1.5 (benchmark) is platform-gated
-(Linux); T1.1–T1.4 are not.
+**Dependency**: **R40** (prerequisite for T1.3) — `CrowKVConfig`
+refactor. T1.1 + T1.2 (crash tests) can proceed in parallel with R40
+(the `Notify` gate is independent of the config struct). R35 shares
+the rebuild-carry pattern (both flags become `CrowKVConfig` fields
+after R40). T1.5 (benchmark) is platform-gated (Linux); T1.1–T1.4 are
+not.
 
 **Files**: `crowkv/src/cluster/local_replica.rs` (`test-util` `Notify`
-gate), `crowkv/src/cluster/group.rs` (default flip + getter),
-`crowkv-server/src/mgmt_api.rs` (rebuild-carry),
-`crowkv/tests/group/` (new test files),
+gate), `crowkv/src/common/config.rs` (default flip in
+`CrowKVConfig::default()` after R40), `crowkv-server/src/mgmt_api.rs`
+(verify rebuild-carry), `crowkv/tests/group/` (new test files),
 `doc/working/write-flow-analysis.md` (T1.5 results, deferred).
 
 ---

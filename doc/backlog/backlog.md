@@ -11,7 +11,7 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R40** — Bump this line in the same commit when adding a new item.
+**Next R number: R41** — Bump this line in the same commit when adding a new item.
 
 ### Medium Priority
 
@@ -83,6 +83,20 @@ complexity, and dependency. Before implementation, follow the
   `LeastConnections` (per-endpoint in-flight) and `Latency` (per-endpoint
   RTT EWMA) policies route by actual capacity. Medium complexity;
   client-local state, no server change.
+- **[R40](R40-crowkv-config.md)** — Unified `CrowKVConfig` (merge all sub-configs, JSON file loading) — Area:
+  config / workspace — Today configuration is scattered across
+  `WalConfig`, `PxElectionConfig`, `PaxosConfig`, `ServerConfig`, and
+  three `PxGroup` internal bool flags (`wal_early_ack`,
+  `async_engine_apply`, `force_classic`), wired through 4
+  `create_group_with_wal` call sites each passing ~14 individual params
+  pulled from `KvStoreRegistry` fields. Merge all into one
+  `CrowKVConfig` with `serde` derives, loaded from a JSON config file
+  (CLI args override individual fields). Eliminates the scattered
+  params, the per-flag `mgmt_api` rebuild-carry blocks, and the
+  per-flag setter/getter pattern on `PxGroup`. Prerequisite for T1's
+  `wal_early_ack` default flip and R35's `async_engine_apply` carry.
+  Medium complexity; touches `config.rs`, `PxGroup`, `KvStoreRegistry`,
+  `create_group_with_wal`, `mgmt_api` rebuild, `main.rs` CLI wiring.
 
 ### Low Priority
 
