@@ -477,3 +477,139 @@ Compared to `BTreeMap`: ~10× faster insert, ~5× faster latest-slot access, ~3�
 1. **Manual `reader_refs` vs `Arc<Chunk<T>>`:** Keep manual as target; validate against `Arc` prototype if risk grows.
 2. **Chunk size:** Start with 1K; make `SLOT_CHUNK_SIZE` a `const` generic for benchmarking.
 3. **Per-slot `AtomicPtr` vs inline storage:** Start with `AtomicPtr`; optimise if profiles show bottleneck.
+
+## 23. Server-side Proposal Coalescing (R36)
+
+### 23.1 Problem
+
+Each client `PUT`/`DELETE` is its own Paxos proposal: one slot, one
+quorum RPC round, one WAL record, one learner apply. WAL batch
+aggregation already amortizes `fsync` across concurrent proposals, and
+R16b removed the leader's local `fsync` from the critical path, so the
+remaining per-proposal fixed cost is the **quorum RPC round**. The
+write-flow sweep shows throughput plateaus at ~29K (Intel) / ~48K
+(M5 Pro) once the consensus pipeline saturates, independent of the
+inflight window above MI=16. The bottleneck is the per-proposal quorum
+RPC rate, not `fsync`.
+
+The `Batch` payload format already supports multiple ops per slot and
+`kv_batch_write` exposes it, but there was no server-side coalescer:
+concurrent single-key proposes each took a distinct slot and paid the
+full quorum round.
+
+### 23.2 Coalescer Design
+
+A bounded micro-batcher (the **coalescer**) at the `PxGroup::propose`
+entry merges concurrent single-key proposes into one multi-key Paxos
+proposal — one slot, one quorum RPC, one learner apply — amortizing
+the per-proposal fixed cost across many keys.
+
+Per-group state on `PxGroup`:
+
+- `coalescer: parking_lot::Mutex<Option<PendingBatch>>` — the
+  accumulating batch, `None` when no batch is open.
+- `self_weak: OnceLock<Weak<PxGroup>>` — set once the group is wrapped
+  in `Arc`, so the timer task can spawn a flush without holding a
+  strong self-reference.
+
+`PendingBatch` holds:
+- `op_bodies: Vec<u8>` — concatenated op bodies (each single-op
+  payload's leading count byte dropped; op bodies are self-delimited).
+- `op_count: u8` — number of ops accumulated.
+- `tags: Vec<DedupTag>` — one `(client_id, seq)` dedup tag per client
+  op, all mapping to the shared slot.
+- `waiters: Vec<oneshot::Sender<ProposeResult>>` — one per coalesced
+  caller; each receives the shared `ProposeResult` on flush.
+- `timer: JoinHandle<()>` — armed `sleep(window_us)` → flush.
+
+`propose` flow (refactored into `propose` + `propose_inner`):
+
+1. Leadership gate (as before).
+2. Dedup lookup (as before) — a hit returns the cached slot
+   immediately, never enters a batch.
+3. If `coalesce_window_us == 0` (disabled) or `self_weak` is unset:
+   call `propose_inner(payload, &[tag])` directly — bit-identical to
+   the legacy path.
+4. Else (coalescing on): lock the coalescer:
+   - No pending batch → start one with this op, arm a timer task
+     (`sleep(window_us)` then `flush`). Register a waiter oneshot,
+     return its `Receiver`.
+   - Pending batch exists → append this op's body + tag, register a
+     waiter. If `op_count == coalesce_max_keys`: cancel the timer,
+     take the batch, spawn the flush. Return the `Receiver`.
+5. `await` the waiter's `ProposeResult`.
+
+`flush` (called by both the timer task and the max_keys path):
+
+1. Lock coalescer, `take` the pending batch (`None` wins the race; the
+   loser no-ops).
+2. Build merged payload: `[op_count as u8][op_bodies]`.
+3. `tokio::spawn` `propose_inner(payload, tags)`. On completion, fan
+   the `ProposeResult` (now `Clone`) to all waiters.
+
+Spawning the flush (rather than running it inline) decouples the
+triggering caller from the paxos round and lets the next batch start
+collecting immediately. Multiple in-flight batches are bounded by the
+existing inflight gate (`max_inflight` permits; each batch holds one).
+
+### 23.3 Dedup Tag Threading
+
+A coalesced batch carries K `(client_id, seq)` tags but one slot. To
+preserve the existing dedup-on-all-replicas invariant (so a follower
+that becomes leader can return cached slots for retried coalesced ops),
+all K tags must reach every replica that accepts the batch.
+
+The `Accept` RPC proto is extended with a repeated `dedup_tags` field:
+
+```proto
+message DedupTag { uint64 client_id = 1; uint64 seq = 2; }
+// in AcceptRequest:
+repeated DedupTag dedup_tags = 13;
+```
+
+The legacy `client_id`/`seq` fields (9/10) are kept populated with the
+first tag (or 0) for backward-compat with older followers during a
+rolling upgrade. New followers prefer `dedup_tags`; older followers
+fall back to the legacy single tag.
+
+The `Learner::learn` trait signature changed from `(entry,
+client_id: Option<u64>, seq: Option<u64>)` to `(entry, dedup_tags:
+&[DedupTag])`. `PxLearner::record_dedup_tags` records each tag against
+the slot (skipping `client_id == 0` sentinels). Repair/election/restore
+paths pass `&[]` (no tags → no dedup recording, identical to the old
+`None, None`).
+
+### 23.4 Config
+
+`PaxosConfig` gains two fields:
+
+- `coalesce_window_us: u64` — max wait to fill a batch. `0` disables
+  (default `0` = current behavior; opt-in).
+- `coalesce_max_keys: usize` — max ops per batch (cap 255, the payload
+  count byte). Default 32.
+
+CLI: `--coalesce-window-us`, `--coalesce-max-keys` on `crowkv-server`,
+applied in `main.rs` into `config.paxos`. Wired into the group via
+`set_from_config` (the coalescer reads `self.config.paxos.*`).
+
+### 23.5 Correctness
+
+- **Dedup**: each coalesced tag is recorded on leader + all accepting
+  followers → a retried `(client_id, seq)` returns the shared slot on
+  any replica that has it; outside the window, safe to re-propose
+  (per-key highest-slot-wins makes a re-propose idempotent at the
+  engine level). Identical guarantee shape as before.
+- **Per-key ordering**: unchanged — all ops in a batch share one slot;
+  across batches, per-key highest-slot-wins applies as before.
+- **`ProposeResult::Chosen { slot }` contract**: every coalesced
+  waiter receives the same slot. `ProposeResult` gains `Clone`.
+- **`coalesce_window_us = 0`**: `propose` calls `propose_inner` with a
+  1-tag slice — the paxos loop is unchanged; the only difference is
+  the `&[DedupTag]` vs `(Option, Option)` plumbing, which records the
+  same single dedup entry. No behavior change.
+- **Leadership**: re-checked inside `propose_inner`; a step-down
+  between batch collection and flush surfaces as `NotLeader` to all
+  waiters.
+- **Shutdown**: the timer task holds a `Weak<PxGroup>`; on shutdown
+  the pending batch is dropped (waiters get a closed oneshot → mapped
+  to `Err`).
