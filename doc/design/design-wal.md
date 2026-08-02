@@ -202,7 +202,7 @@ The flush worker flushes when any of:
 - It is woken by a transition from empty queue to non-empty queue (`rx.recv().await`).
 - Pending bytes ≥ `wal_flush_batch_bytes` (default 64 KiB) — breaks the drain loop early.
 - Optional coalescing budget (`wal_flush_coalesce_us`, default 0 µs). When non-zero, the writer waits up to `min(coalesce, watchdog)` for more records before flushing.
-- The watchdog (`wal_flush_watchdog_ms`, default 100 ms) caps the coalescing window so the writer never waits longer than that for more records. When coalescing is 0 (default), the watchdog is not used — the writer drains and flushes immediately.
+- The watchdog (`wal_flush_watchdog_ms`, default 100 ms) is a safety-net timer that wakes the idle writer every `watchdog` ms to drain any queued records in case of a missed wake (a defensive measure "just in case for bugs"). It also caps the coalescing window when `wal_flush_coalesce_us > 0`. The idle wakeup does a `try_recv` drain and re-parks if nothing is queued — no I/O, no allocation, ~10 wakeups/s at the default 100 ms.
 
 Default behavior is therefore **wake-drain-flush**: a lone record does not wait for 1 ms, while a concurrent burst gets batched because the worker drains all immediately-ready records before issuing I/O. Higher `wal_flush_coalesce_us` values may be enabled for throughput benchmarks, but they are not required for correctness.
 
@@ -513,7 +513,7 @@ The WAL is per-node. Inter-node consistency is the consensus layer's job. If a n
 | `wal_segment_size` | `wal_segment_size` | 64 MiB | Trade GC granularity vs file count |
 | `wal_flush_batch_bytes` | `wal_flush_batch_bytes` | 64 KiB | Batch cap per durable flush |
 | `wal_flush_coalesce_us` | `wal_flush_coalesce_us` | 0 µs | Optional micro coalescing; default wake-drain-flush |
-| `wal_flush_watchdog_ms` | `wal_flush_watchdog_ms` | 100 ms | Caps coalescing window |
+| `wal_flush_watchdog_ms` | `wal_flush_watchdog_ms` | 100 ms | Safety-net timer: wakes idle writer to drain missed wakes; caps coalesce window |
 | `wal_disk_high_watermark_pct` | `wal_disk_high_watermark_pct` | 80% | Triggers eager GC (not yet implemented) |
 | `wal_min_retention_secs` | `wal_min_retention_secs` | 3600 (1 h) | Forensics retention (not yet implemented) |
 | `gc_tick_secs` | `gc_tick_secs` | 30 s | GC scan cadence |
