@@ -1218,17 +1218,30 @@ impl PxLocalReplica {
         self.learner.learn(entry.clone(), client_id, seq).await;
     }
 
-    /// R17: spawn `learn_chosen` as a detached background task. Used when
+    /// R17: defer the engine apply (`apply_entry` + applied-frontier
+    /// advance) to a detached background task, while advancing the chosen
+    /// frontier and recording dedup **synchronously**. Used when
     /// `async_engine_apply` is enabled — the value is already Paxos-chosen,
-    /// so applying to the local engine can happen asynchronously. The
-    /// learner's `apply_entry` is idempotent (drops slot <= `last_applied`),
-    /// and `update_frontier` / `record_dedup` are atomic, so a delayed
-    /// apply is safe. Read-your-writes semantics break until the apply
-    /// catches up — callers must gate reads on the applied frontier.
+    /// so the FFI/memtable insert can happen asynchronously.
+    ///
+    /// The chosen frontier (`contiguous_chosen`) and dedup must advance
+    /// before `propose` returns so a subsequent Linearizable read's
+    /// `read_slot = contiguous_chosen` reflects this slot — the R35 apply
+    /// fence then waits for `contiguous_applied >= read_slot` (the spawned
+    /// apply) before serving the read, preserving read-your-writes. The
+    /// learner's `apply_entry` is idempotent, and the frontier/dedup
+    /// updates are atomic, so a delayed apply is safe.
     pub fn spawn_learn_chosen(&self, entry: PxLogEntry, client_id: Option<u64>, seq: Option<u64>) {
         let learner = Arc::clone(&self.learner);
+        // Sync: chosen frontier + dedup (cheap atomics; must precede
+        // `propose` returning `Chosen` for read-your-writes).
+        learner.update_chosen_frontier(entry.slot, entry.term);
+        learner.record_dedup(client_id, seq, entry.slot);
+        // Deferred: engine apply + applied frontier (the FFI/memtable insert
+        // moved off the write critical path; the apply fence gates reads).
         tokio::spawn(async move {
-            learner.learn(entry, client_id, seq).await;
+            learner.apply_entry(entry.slot, &entry.payload).await;
+            learner.advance_applied_frontier(entry.slot);
         });
     }
 
@@ -1322,6 +1335,15 @@ impl PxLocalReplica {
     #[must_use]
     pub fn contiguous_applied(&self) -> SlotIndex {
         self.learner.contiguous_applied()
+    }
+
+    /// R35 apply fence: wait until the local applied frontier reaches
+    /// `slot`. Delegates to [`PxLearner::await_applied`]. Used by the
+    /// Linearizable read path after the leadership barrier so a read does
+    /// not return a just-chosen-but-not-yet-applied value when R17
+    /// (`async_engine_apply`) is on.
+    pub async fn await_apply_fence(&self, slot: SlotIndex) {
+        self.learner.await_applied(slot).await;
     }
 
     /// Highest slot ever opened on this replica's acceptor.

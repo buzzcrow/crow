@@ -409,7 +409,12 @@ impl Default for CrowKVConfig {
             wal: WalConfig::default(),
             force_classic: false,
             wal_early_ack: true,
-            async_engine_apply: false,
+            // R35: async engine apply on by default — the Linearizable
+            // read path's apply fence (`PxLearner::await_applied`) preserves
+            // read-your-writes, so moving `learn_chosen` off the write
+            // critical path is safe. Test profiles (`for_tests`) and the
+            // `PxGroup::new` test path opt back out for determinism.
+            async_engine_apply: true,
             wal_root: PathBuf::from("waldata"),
             config_root: PathBuf::from("conf"),
             data_root: PathBuf::from("ctdata"),
@@ -458,6 +463,10 @@ impl CrowKVConfig {
     pub fn for_tests() -> Self {
         Self {
             election: PxElectionConfig::for_tests(),
+            // Keep tests synchronous/deterministic — R17's spawned apply
+            // introduces timing nondeterminism. Tests that exercise R17 opt
+            // in via `set_async_engine_apply(true)`.
+            async_engine_apply: false,
             ..Self::default()
         }
     }
