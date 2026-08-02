@@ -15,20 +15,7 @@ complexity, and dependency. Before implementation, follow the
 
 ### High Priority
 
-**Complexity — Low-medium:**
-- **[R41](R41-dedup-window.md)** — Bounded per-client dedup window (fix
-  single-entry false-positive) — Area: consensus / idempotency —
-  `PxLearner` keeps only the single latest `(seq, slot)` per client
-  ("latest wins"), but `design.md` promises a ≥64-request retention
-  window. Since `propose` checks dedup unconditionally (not only on
-  retries) and slots can be chosen out of order, a concurrent
-  lower-`seq` request from the same `client_id` can false-positive
-  against a higher-`seq` request that committed first, silently
-  dropping its payload while reporting success. Reachable by the
-  documented concurrent-pipelining client pattern (shared
-  `Arc<CrowkvClient>` on the default `ids=None` write path, one
-  `client_id`, many in-flight requests). Correctness bug, not a
-  tuning item.
+*(none currently)*
 
 ### Medium Priority
 
