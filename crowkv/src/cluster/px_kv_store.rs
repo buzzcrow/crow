@@ -149,6 +149,7 @@ impl KvStore for PxKvStore {
         let Some(group) = self.get_group(group_id) else {
             return scan_err(
                 format!("group {group_id} not found in store {}", self.store_id),
+                String::new(),
                 request_id,
                 request_create_ms,
             );
@@ -160,14 +161,10 @@ impl KvStore for PxKvStore {
         let read_slot = match self.resolve_read_point(&group, read_mode, min_slot).await {
             ReadDecision::Serve { read_slot, .. } => read_slot,
             ReadDecision::NotLeader { hint } => {
-                return scan_err(
-                    format!("not leader; retry scan at {hint}"),
-                    request_id,
-                    request_create_ms,
-                );
+                return scan_err("not leader".to_string(), hint, request_id, request_create_ms);
             }
             ReadDecision::Unavailable { msg } => {
-                return scan_err(msg, request_id, request_create_ms);
+                return scan_err(msg, String::new(), request_id, request_create_ms);
             }
         };
 
@@ -207,6 +204,7 @@ impl KvStore for PxKvStore {
             request_id,
             request_create_ms,
             read_slot,
+            not_leader_hint: String::new(),
         }
     }
 }
@@ -658,10 +656,14 @@ fn missing_group_response(request_id: u64, request_create_ms: u64) -> crate::rpc
     )
 }
 
-/// Build a failed [`crate::rpc::KvScanResponse`] carrying `error`. Scans have
-/// no dedicated `not_leader_hint`/`not_found` channel, so all failure shapes
-/// collapse to `ok = false` with a descriptive message.
-fn scan_err(error: String, request_id: u64, request_create_ms: u64) -> crate::rpc::KvScanResponse {
+/// Build a failed [`crate::rpc::KvScanResponse`] carrying `error` and an
+/// optional `not_leader_hint`. Non-redirect failures pass an empty hint.
+fn scan_err(
+    error: String,
+    not_leader_hint: String,
+    request_id: u64,
+    request_create_ms: u64,
+) -> crate::rpc::KvScanResponse {
     crate::rpc::KvScanResponse {
         version: 1,
         ok: false,
@@ -671,6 +673,7 @@ fn scan_err(error: String, request_id: u64, request_create_ms: u64) -> crate::rp
         request_id,
         request_create_ms,
         read_slot: 0,
+        not_leader_hint,
     }
 }
 
