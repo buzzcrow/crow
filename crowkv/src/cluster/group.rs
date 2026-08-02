@@ -1551,9 +1551,6 @@ impl PxGroup {
                     }
                     batch.waiters.push(tx);
                     if batch.op_count >= max_keys {
-                        // Batch full: flush as a concurrent round. Take
-                        // the batch and leave a fresh empty one so ops
-                        // arriving during this new round still accumulate.
                         let taken = std::mem::take(batch);
                         *guard = Some(PendingBatch::default());
                         let mut p = Vec::with_capacity(1 + taken.op_bodies.len());
@@ -1561,7 +1558,6 @@ impl PxGroup {
                         p.extend_from_slice(&taken.op_bodies);
                         Some((p, taken.tags, taken.waiters))
                     } else {
-                        // Joined the batch; wait for the round to complete.
                         None
                     }
                 }
