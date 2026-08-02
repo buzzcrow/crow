@@ -146,7 +146,6 @@ impl WalEngine {
         let fsync_summary: Arc<OnceLock<Arc<LatencySummary>>> = Arc::new(OnceLock::new());
         let write_bandwidth: Arc<OnceLock<Arc<Bandwidth>>> = Arc::new(OnceLock::new());
 
-        let coalesce = Duration::from_micros(config.wal_flush_coalesce_us);
         let watchdog = Duration::from_millis(config.wal_flush_watchdog_ms);
         let batch_bytes = config.wal_flush_batch_bytes;
         let segment_size = config.wal_segment_size;
@@ -174,7 +173,6 @@ impl WalEngine {
                 group_id,
                 next_segment_id.clone(),
                 segment_size,
-                coalesce,
                 watchdog,
                 batch_bytes,
                 failed.clone(),

@@ -81,7 +81,7 @@ the JSON file has a clear hierarchical structure:
   "server":    { "shutdown_timeout_ms": 10000 },
   "paxos":     { "max_inflight_proposals": 32, "inflight_admission": "queue" },
   "election":  { "heartbeat_interval_ms": 150, "lease_duration_ms": 3000 },
-  "wal":       { "wal_segment_size": 67108864, "wal_flush_coalesce_us": 0 },
+  "wal":       { "wal_segment_size": 67108864 },
   "force_classic": false,
   "wal_early_ack": true,
   "async_engine_apply": false

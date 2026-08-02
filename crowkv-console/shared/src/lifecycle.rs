@@ -50,6 +50,8 @@ pub struct DeployRequest {
     /// `--inflight-queues` value. `None` leaves the spawned server's
     /// own default in effect.
     pub inflight_queues: Option<usize>,
+    /// Optional `--config` JSON path for `crowkv-server`.
+    pub config: Option<PathBuf>,
 }
 
 /// Result of a successful deploy. Persist these fields onto the
@@ -127,6 +129,9 @@ fn apply_benchmark_flags(cmd: &mut Command, req: &DeployRequest) {
     }
     if let Some(queues) = req.inflight_queues {
         cmd.arg("--inflight-queues").arg(queues.to_string());
+    }
+    if let Some(config) = &req.config {
+        cmd.arg("--config").arg(config.as_os_str());
     }
 }
 
@@ -321,8 +326,12 @@ pub fn process_is_alive(pid: u32) -> bool {
 pub fn remote_start_command(req: &DeployRequest, server_bin: &str) -> String {
     // `nohup ... &` + redirected fds detaches the child from the SSH
     // channel; the trailing `echo $!` prints the pid we want to capture.
+    let config_arg = req
+        .config
+        .as_ref()
+        .map_or_else(String::new, |c| format!(" --config {}", c.display()));
     format!(
-        "nohup {bin} --management-addr 127.0.0.1 --management-port {mp} --ports {gp} \
+        "nohup {bin}{config_arg} --management-addr 127.0.0.1 --management-port {mp} --ports {gp} \
          >/tmp/crowkv-server.{mp}.out 2>/tmp/crowkv-server.{mp}.err </dev/null & echo $!",
         bin = server_bin,
         mp = req.mgmt_port,

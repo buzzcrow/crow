@@ -119,6 +119,7 @@ impl BenchFixture {
         max_inflight: usize,
         inflight_queues: usize,
         metrics_interval: u64,
+        node_config: Option<String>,
     ) -> Result<Self> {
         std::fs::create_dir_all(&workspace_dir)?;
 
@@ -131,15 +132,22 @@ impl BenchFixture {
         });
         let client = ConsoleClient::new(format!("http://{addr}"))?;
 
-        let (ids, pids, grpc_urls, mgmt_urls) =
-            match Self::provision_nodes(&client, mode, max_inflight, inflight_queues, metrics_interval).await
-            {
-                Ok(v) => v,
-                Err(e) => {
-                    console_task.abort();
-                    return Err(e);
-                }
-            };
+        let (ids, pids, grpc_urls, mgmt_urls) = match Self::provision_nodes(
+            &client,
+            mode,
+            max_inflight,
+            inflight_queues,
+            metrics_interval,
+            node_config,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                console_task.abort();
+                return Err(e);
+            }
+        };
 
         if let Err(e) = client.cluster_init(&ids).await {
             console_task.abort();
@@ -188,6 +196,7 @@ impl BenchFixture {
         max_inflight: usize,
         inflight_queues: usize,
         metrics_interval: u64,
+        node_config: Option<String>,
     ) -> Result<(Vec<String>, Vec<u32>, Vec<String>, Vec<String>)> {
         let mut ids = Vec::with_capacity(NODE_COUNT);
         let mut pids = Vec::with_capacity(NODE_COUNT);
@@ -229,6 +238,7 @@ impl BenchFixture {
                 ..Default::default()
             };
             mode.apply_to(&mut body);
+            body.config = node_config.clone();
             let deployed = client
                 .deploy_node_server(&node_id, &body)
                 .await
