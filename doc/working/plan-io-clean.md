@@ -38,10 +38,11 @@ in `CrowKVConfig::default()` after tests pass.
       `failed` flag after `Chosen`, release gate so `wal.append()`
       fails (error logged), confirm value is still chosen (Paxos-safe)
       and the leader engine has the value.
-- [ ] **T1.3** — Flip `wal_early_ack` default to `true` in
-      `CrowKVConfig::default()` (after R40); verify rebuild carries
-      the config object across `mgmt_api` rebuild.
-- [ ] **T1.4** — No regression: existing crash-restart tests pass with
+- [x] **T1.3** — Flip `wal_early_ack` default to `true` in
+      `CrowKVConfig::default()` (after R40); gated on `quorum > 1`
+      for single-node safety (a single-node group has no survivors to
+      re-drive a chosen-but-not-durable slot after a crash).
+- [x] **T1.4** — No regression: existing crash-restart tests pass with
       the new default.
 - [ ] **T1.5** (deferred to Linux bench) — Benchmark per-proposal
       latency drop; document in `write-flow-analysis.md`.
@@ -70,20 +71,45 @@ gate), `crowkv/src/common/config.rs` (default flip in
 
 - [ ] Sweep `wal_flush_coalesce_us` (currently default 0) across
       {0, 10, 25, 50, 100, 200} µs at a saturated write config
-      (48T:48C, MI=64) on one platform.
-- [ ] Measure throughput vs p99/p999 latency tradeoff; the coalesce
-      window lets more in-flight proposals land in one `writev` +
-      `fdatasync`, amortizing fsync cost.
-- [ ] Pick a default (likely 0 if no win, or the smallest value with a
-      measurable throughput gain and acceptable tail); document in
-      `write-flow-analysis.md`.
+      (48T:48C, MI=64) on one platform. Note: `wal_flush_coalesce_us`
+      is **optional**. The default (`0`) is wake-drain-flush with no
+      timer — the writer parks on `rx.recv()`, drains all already-queued
+      records via `try_recv` on wake, then flushes immediately. Natural
+      batching already occurs because records arriving during an
+      in-flight flush queue in the mpsc channel and are drained
+      together on the next wake cycle. A non-zero `wal_flush_coalesce_us`
+      adds an explicit bounded wait window (`min(coalesce, watchdog)`)
+      to gather more records before flushing. The watchdog
+      (`wal_flush_watchdog_ms`) is a safety cap on that window only —
+      it does nothing when `coalesce = 0` (exists just in case of bugs).
+- [ ] Measure throughput vs p99/p999 latency tradeoff; with `coalesce
+      = 0` the baseline already amortizes fsync across records that
+      arrive during a flush, so the question is whether an explicit
+      wait window adds any measurable gain on top of wake-drain-flush.
+- [ ] Decide: keep `wal_flush_coalesce_us` only if some non-zero value
+      shows an obvious advantage (clear throughput gain with
+      acceptable tail). If no value shows an obvious advantage, **remove
+      the option entirely** — delete the config field, the coalesce
+      plumbing in `pipeline_writer.rs`, the watchdog cap on the window,
+      and related tests/bench columns. Document the decision and any
+      results in `write-flow-analysis.md`.
 
-**Scope**: Small — pure config/benchmarking, no code change. The
-coalesce mechanism already exists in the WAL writer task
-(`wal_flush_coalesce_us`).
+**Scope**: Small — config/benchmarking first. If the option is kept,
+no code change (just pick a default). If the option is removed, small
+code change: drop `wal_flush_coalesce_us` **and** `wal_flush_watchdog_ms`
+(the watchdog only caps the coalesce window — see `pipeline_writer.rs:249`
+and `design-wal.md` "When coalescing is 0 (default), the watchdog is not
+used"; it guards no other path) from `WalConfig`, `pipeline_writer.rs`,
+`wal_engine.rs`, tests, and bench scripts. The wake-drain-flush
+baseline stays as the only batching path.
 
 **Files**: `tools/bench-write-*.sh` (add coalesce sweep column),
-`crowkv/src/wal/` (default constant only if changed),
-`doc/working/write-flow-analysis.md` (results).
+`crowkv/src/common/config.rs` (default if kept, or remove
+`wal_flush_coalesce_us` + `wal_flush_watchdog_ms` if removed),
+`crowkv/src/wal/pipeline_writer.rs` + `wal_engine.rs` (remove coalesce
+arm + watchdog plumbing if removed),
+`crowkv/tests/wal/wal_engine_tests.rs` (update if removed),
+`doc/working/write-flow-analysis.md` (results + decision),
+`doc/design/design-wal.md` (update if removed).
 
 ---
