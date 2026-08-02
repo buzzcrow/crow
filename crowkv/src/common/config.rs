@@ -68,6 +68,12 @@ pub struct PaxosConfig {
     /// byte). `0` disables coalescing (one proposal per key). Default 0
     /// (opt-in).
     pub coalesce_max_keys: usize,
+    /// R45 timer-mode window in microseconds. When the coalescer switches
+    /// to timer mode (high load), batches flush after this interval or
+    /// when `coalesce_max_keys` is reached, whichever comes first.
+    /// `0` = event-only mode (never switch to timer mode; watchdog still
+    /// active at fixed 1000ms). Default 0.
+    pub coalesce_window_us: u64,
 }
 
 impl PaxosConfig {
@@ -79,6 +85,7 @@ impl PaxosConfig {
         inflight_queues: 1,
         inflight_admission: AdmissionPolicy::Queue,
         coalesce_max_keys: 0,
+        coalesce_window_us: 0,
     };
 }
 
