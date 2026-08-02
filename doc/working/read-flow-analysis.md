@@ -267,6 +267,16 @@ Client SCAN(prefix, start_after, limit, read_mode, min_slot?)
   `apply` (per-key entry API, no global write lock). `scan` and
   `iter_all` collect and sort since `DashMap` is not key-ordered —
   acceptable for test-only use.
+- **E7 — Read-path hardening batch (tracked as R44).** Eight smaller
+  gaps from the implementation review, bundled in
+  `doc/backlog/R44-read-path-hardening.md`: scan forward-fail path
+  drops the leader hint (get sets it); scan FFI errors swallowed to an
+  empty `ok` result; client string-matches `"not leader"`; client
+  ignores topology refresh failures; ReadIndex heartbeat round runs
+  peer catch-up replay inline; C++ `scan_async` restarts the whole
+  scan on any cold leaf (no cursor resume); client `to_vec` copies of
+  response values; no per-mode scan latency split or over-fetch
+  counters.
 - **E6 — Custom RPC transport (deferred, R32).** The HTTP/2
   connection-level lock serializes concurrent writers on one
   connection (HPACK table, frame output buffer, flow-control windows
@@ -296,9 +306,10 @@ for stale modes; chosen+applied ⇒ identical results across replicas
 forwarding linearizable reads to the leader (MinSlot self-checks
 instead).
 
-Open work: **E1** scan `start_after` push-down, **E2** scan value
-zero-copy, **E4** least-conn/latency endpoint policy, **E6** custom RPC
-transport (R32, deferred). **G1** per-mode latency breakdown, **E3**
+Open work: **E1** scan `start_after` push-down (R37), **E2** scan value
+zero-copy (R38), **E4** least-conn/latency endpoint policy (R39),
+**E6** custom RPC transport (R32, deferred), **E7** read-path
+hardening batch (R44). **G1** per-mode latency breakdown, **E3**
 scan `not_leader_hint`, and **E5** `InMemKV` read/apply concurrency are
 done.
 
@@ -581,13 +592,17 @@ them reach `write()`. The kernel never sees concurrent writers; h2
 hands it one merged buffer from one thread.
 
 A custom protocol (`[len][req_id][protobuf]` over raw TCP) has **no
-connection-level userspace lock**. Each thread calls `write()`
-independently — the length-prefixed framing is stateless, there's no
-shared encoder table, no per-stream state, no flow-control windows.
-The kernel's TCP lock (fast spinlock, held for one syscall) is the
-only serialization point. N threads produce N independent `write()`
-calls that the kernel coalesces into one segment. The userspace
-funnel is gone.
+connection-level userspace lock**. The length-prefixed framing is
+stateless — no shared encoder table, no per-stream state, no
+flow-control windows. Threads cannot call `write()` on the socket
+directly, though: a TCP `write()` is not atomic under partial writes
+(a full send buffer can interleave bytes from two threads and corrupt
+the framing). The proven design (protosocket, Volo) is a
+per-connection writer task draining a lock-free MPSC queue with
+`writev` batching. That is still one serialization point per
+connection, but a vastly cheaper one — a queue push instead of HPACK
++ stream state + flow-control bookkeeping under a mutex. The
+expensive userspace funnel is gone.
 
 This is a **design mismatch**, not a tuning problem. HTTP/2's
 stream/HPACK/flow-control architecture inherently requires a

@@ -11,7 +11,7 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R44** — Bump this line in the same commit when adding a new item.
+**Next R number: R45** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
@@ -101,20 +101,22 @@ complexity, and dependency. Before implementation, follow the
   de-risks the short-circuit rewrite. Medium complexity; the
   short-circuit must preserve W6 and late TermStale/Epoch side
   effects.
-- **[R43](R43-write-path-fanout-hardening.md)** — Write-path fan-out hardening — Area:
-  consensus / write path — Six enhancements from the write-flow review,
-  all in the prepare/accept fan-out and `PxLearnerStream`: quorum
-  short-circuit (fold replies via `FuturesUnordered`, return on quorum
-  + local reply instead of `join_all` over all peers — per-proposal
-  latency becomes k-th-fastest, not slowest peer), RPC deadline on
-  accept/heartbeat oneshots (a hung-but-connected peer currently
-  stalls all writes indefinitely), write-path phase latency metrics
-  (propose-e2e / prepare / accept / first-quorum-RPC / apply),
-  backoff jitter, a heartbeat priority/reserved lane on the shared
-  LearnerStream queue, and a reply-fold helper extraction that
-  de-risks the short-circuit rewrite. Medium complexity; the
-  short-circuit must preserve W6 and late TermStale/Epoch side
-  effects.
+- **[R44](R44-read-path-hardening.md)** — Read-path hardening — Area:
+  read path — Eight enhancements from the read-flow review, all small
+  and outside the items already tracked (R37/R38/R39/R32/R42): scan
+  forward-fail path drops the leader hint (get sets it, scan doesn't);
+  `decode_scan_with_start_after` swallows FFI errors (corruption reads
+  as empty `ok` result); client retry matches `"not leader"` by string
+  instead of a structured error code; client ignores topology refresh
+  failures and retries against stale endpoints; ReadIndex heartbeat
+  round runs peer catch-up replay inline (lagging follower inflates
+  linearizable read p99 during recovery); C++ `scan_async` restarts
+  the whole scan on any cold leaf (no cursor resume); client copies
+  response values (`to_vec` per get / per scan entry) despite prost
+  `Bytes`; no per-mode scan latency split or over-fetch counters.
+  Low-medium complexity; kv_service / crowtree_engine / client are
+  mechanical, bounded catch-up needs care, scan cursor composes with
+  R37.
 
 ### Low Priority
 
