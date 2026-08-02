@@ -35,10 +35,9 @@ Client GET(key, read_mode, min_slot?)
     8. [Serve] learner.engine_get_bytes(key: &[u8]) → KVEngine::get_bytes
        → Some((resolved_slot, Bytes)) or None
        [no key copy at Rust boundary]
-       [value copy: InMemKV clones out of BTreeMap under RwLock read
-        lock; Crowtree fast path one copy frame→Bytes (R21 eliminated
-        the intermediate Vec); Crowtree slow path one copy I/O buf→Bytes
-        on reactor thread]
+       [value copy: InMemKV clones out of DashMap shard; Crowtree fast
+        path one copy frame→Bytes (R21 eliminated the intermediate Vec);
+        Crowtree slow path one copy I/O buf→Bytes on reactor thread]
     9. build KvResponse { read_slot, safe_slot, value: Bytes }
        [move: Bytes moved into response, no copy]
        [copy: value → socket buffer on gRPC serialize, unavoidable]
@@ -262,13 +261,11 @@ Client SCAN(prefix, start_after, limit, read_mode, min_slot?)
   or client-measured RTT — would balance MinSlot load by actual
   capacity rather than blind rotation, avoiding hotspots when one
   replica is slow (e.g. demand-loading cold crowtree pages).
-- **E5 — `InMemKV` read/apply concurrency.** `InMemKV` is
-  `RwLock<BTreeMap>`: reads take the read lock (concurrent with each
-  other) but block behind `apply`'s write lock for the whole batch.
-  A sharded/lock-free map (e.g. `DashMap`) would let reads proceed
-  concurrent with writes. Low priority — `InMemKV` is test-only, not
-  selectable via the server CLI — but the prior version of this doc
-  incorrectly described it as lock-free, which it is not.
+- **E5 — `InMemKV` read/apply concurrency (done).** `InMemKV` now uses
+  `DashMap` instead of `RwLock<BTreeMap>`: reads proceed concurrent with
+  `apply` (per-key entry API, no global write lock). `scan` and
+  `iter_all` collect and sort since `DashMap` is not key-ordered —
+  acceptable for test-only use.
 - **E6 — Custom RPC transport (deferred, R32).** The HTTP/2
   connection-level lock serializes concurrent writers on one
   connection (HPACK table, frame output buffer, flow-control windows
@@ -299,9 +296,9 @@ forwarding linearizable reads to the leader (MinSlot self-checks
 instead).
 
 Open work: **E1** scan `start_after` push-down, **E2** scan value
-zero-copy, **E4** least-conn/latency endpoint policy, **E5** `InMemKV`
-read/apply concurrency, **E6** custom RPC transport (R32, deferred).
-**G1** per-mode latency breakdown and **E3** scan `not_leader_hint` are
+zero-copy, **E4** least-conn/latency endpoint policy, **E6** custom RPC
+transport (R32, deferred). **G1** per-mode latency breakdown, **E3**
+scan `not_leader_hint`, and **E5** `InMemKV` read/apply concurrency are
 done.
 
 ---

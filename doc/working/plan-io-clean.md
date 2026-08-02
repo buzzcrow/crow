@@ -50,8 +50,6 @@ enable is gated on T1, not R35.
 
 ---
 
----
-
 ## T3 — WAL group-commit coalesce tuning
 
 - [ ] Sweep `wal_flush_coalesce_us` (currently default 0) across
@@ -73,22 +71,3 @@ coalesce mechanism already exists in the WAL writer task
 `doc/working/write-flow-analysis.md` (results).
 
 ---
-
-## T6 — `InMemKV` read/apply concurrency (read E5, low priority)
-
-- [ ] Replace `InMemKV`'s `RwLock<BTreeMap>` with a `DashMap` (or
-      sharded map) so reads proceed concurrent with `apply`.
-- [ ] Verify `scan` still returns key-ordered results (`DashMap` is not
-      sorted; either sort on scan or keep a secondary sorted index —
-      confirm the test-only cost is acceptable).
-- [ ] Confirm no test regression; `InMemKV` is test-only (not
-      selectable via the server CLI), so production is unaffected.
-
-**Scope**: Small — but low priority. `InMemKV` is test-only; the
-`RwLock` only matters under heavy concurrent read+write in tests. The
-prior version of `read-flow-analysis.md` incorrectly described
-`InMemKV` as lock-free, which it is not; this task makes it true, or
-the doc stays corrected.
-
-**Files**: `crowkv/tests/kv/mem_kv_impl.rs` (`InMemKV` struct, `apply`,
-`get`, `scan`).
