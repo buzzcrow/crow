@@ -15,6 +15,12 @@ pub struct Cli {
     #[arg(long, default_value = "0.0.0.0")]
     pub management_addr: String,
 
+    /// Path to a JSON config file. When provided, loads `CrowKVConfig`
+    /// from the file; CLI args override individual fields. When omitted,
+    /// uses `CrowKVConfig::default()`.
+    #[arg(long)]
+    pub config: Option<std::path::PathBuf>,
+
     /// Port pool for gRPC `PxKvStore` listeners (comma/range format, e.g. "28001,28002,28010..28020").
     #[arg(long)]
     pub ports: Option<String>,

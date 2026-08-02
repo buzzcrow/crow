@@ -1,0 +1,30 @@
+{
+  "server": {
+    "max_message_size": 67108864
+  },
+  "paxos": {
+    "max_inflight_proposals": 16,
+    "inflight_queues": 1,
+    "inflight_admission": "Queue"
+  },
+  "election": {
+    "election_timeout_ms": 1500,
+    "heartbeat_interval_ms": 100,
+    "lease_duration_ms": 3000,
+    "pre_vote": true,
+    "election_driver_disabled": false,
+    "snapshot_slot_threshold": 10000,
+    "snapshot_time_threshold_ms": 300000,
+    "maintenance_tick_ms": 1000
+  },
+  "wal": {
+    "wal_root": "waldata",
+    "wal_record_format": "Binary",
+    "wal_segment_size": 67108864,
+    "wal_buffer_size": 1048576,
+    "wal_skip_fsync": false
+  },
+  "force_classic": false,
+  "wal_early_ack": false,
+  "async_engine_apply": false
+}

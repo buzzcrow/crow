@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::cluster::group_config::{GroupConfigStore, PxGroupConfig, PxGroupMember};
-use crate::cluster::group_election::{PendingLeaderHandoff, ReadBarrierOutcome};
+use crate::cluster::group_election::{LeaderElection, PendingLeaderHandoff, ReadBarrierOutcome};
 use crate::cluster::local_replica::PxLocalReplica;
 use crate::cluster::node_config::NodeConfigStore;
 use crate::cluster::remote_replica::PxRemoteReplica;
@@ -287,6 +287,23 @@ impl PxGroup {
         self.async_engine_apply = enabled;
     }
 
+    /// Apply all tunables from a `CrowKVConfig`: election config,
+    /// inflight admission, and the three internal flags
+    /// (`force_classic`, `wal_early_ack`, `async_engine_apply`).
+    /// Replaces the per-field setter calls at group creation and
+    /// rebuild sites.
+    pub fn set_from_config(&mut self, config: &crate::common::config::CrowKVConfig) {
+        self.set_election_config(config.election);
+        self.set_inflight_config(
+            config.max_inflight(),
+            config.inflight_queues(),
+            config.inflight_admission(),
+        );
+        self.force_classic = config.force_classic;
+        self.wal_early_ack = config.wal_early_ack;
+        self.async_engine_apply = config.async_engine_apply;
+    }
+
     /// Set the in-flight proposal admission configuration. Must be
     /// called before the group starts serving proposals.
     pub fn set_inflight_config(&mut self, max_inflight: usize, queues: usize, policy: AdmissionPolicy) {
@@ -398,6 +415,18 @@ impl PxGroup {
 
     pub fn force_classic(&self) -> bool {
         self.force_classic
+    }
+
+    /// Whether R16b early-ack is enabled (deferred local WAL persist).
+    #[must_use]
+    pub fn wal_early_ack(&self) -> bool {
+        self.wal_early_ack
+    }
+
+    /// Whether R17 async engine apply is enabled (deferred engine apply).
+    #[must_use]
+    pub fn async_engine_apply(&self) -> bool {
+        self.async_engine_apply
     }
 
     /// Snapshot of the believed leader id for this group. Delegates to the

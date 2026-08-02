@@ -22,7 +22,7 @@ use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crowkv::cluster::px_kv_store::PxKvStore;
 use crowkv::cluster::remote_replica::PxRemoteReplica;
 use crowkv::cluster::topology_kv;
-use crowkv::common::config::{AdmissionPolicy, ServerConfig};
+use crowkv::common::config::ServerConfig;
 
 use crate::operation_registry::{AppState, Operation, OperationKind, OperationStatus, OperationTarget};
 use crate::startup::create_group_with_wal;
@@ -452,17 +452,9 @@ async fn system_init(
         SYSTEM_GROUP_ID,
         req.replica_id,
         PxLocalReplicaRole::Leader,
-        state.election_cfg,
-        &state.wal_root,
-        &state.config_root,
+        &state.config,
         state.wal_backend.clone(),
-        &state.data_root,
         state.crowtree_backend,
-        state.wal_skip_fsync,
-        "log",
-        state.max_inflight,
-        state.inflight_queues,
-        AdmissionPolicy::Queue,
     )
     .await
     .map_err(|e| {
@@ -691,7 +683,7 @@ async fn add_store(
     let port = if port.is_none() {
         match state.next_port() {
             Some(p) => Some(p),
-            None => persisted_port_for_store(&state.config_root, req.store_id).await,
+            None => persisted_port_for_store(&state.config.config_root, req.store_id).await,
         }
     } else {
         port
@@ -847,17 +839,9 @@ async fn add_group(
         req.group_id,
         req.replica_id,
         initial_role,
-        state.election_cfg,
-        &state.wal_root,
-        &state.config_root,
+        &state.config,
         state.wal_backend.clone(),
-        &state.data_root,
         state.crowtree_backend,
-        state.wal_skip_fsync,
-        "log",
-        state.max_inflight,
-        state.inflight_queues,
-        AdmissionPolicy::Queue,
     )
     .await
     .map_err(|e| {
@@ -973,17 +957,9 @@ async fn join_group_via_snapshot(
         gid,
         req.replica_id,
         PxLocalReplicaRole::Follower,
-        state.election_cfg,
-        &state.wal_root,
-        &state.config_root,
+        &state.config,
         state.wal_backend.clone(),
-        &state.data_root,
         state.crowtree_backend,
-        state.wal_skip_fsync,
-        "log",
-        state.max_inflight,
-        state.inflight_queues,
-        AdmissionPolicy::Queue,
     )
     .await
     .map_err(|e| {
@@ -1571,6 +1547,12 @@ fn rebuild_group_with_same_config(group: &PxGroup) -> PxGroup {
     new_group.set_membership_epoch(group.membership_epoch());
     if group.force_classic() {
         new_group.set_force_classic(true);
+    }
+    if group.wal_early_ack() {
+        new_group.set_wal_early_ack(true);
+    }
+    if group.async_engine_apply() {
+        new_group.set_async_engine_apply(true);
     }
     if let Some(store) = group.config_store() {
         new_group.set_config_store(store.clone());
