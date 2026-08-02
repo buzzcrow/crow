@@ -91,13 +91,24 @@ added latency.
 
 **R36 benchmark results (timer-based, 10s mem mode, 3-node cluster)**:
 
-| Config | Threads | Window | TPS | Avg latency | WAL appends |
-|---|---|---|---|---|---|
-| baseline (no coalesce) | 32 | 0 | 27,787 | 1,149us | 833,669 |
-| R36 coalesce | 32 | 500us | 33,029 | 965us | 31,090 |
-| R36 coalesce | 32 | 1ms | 33,182 | 961us | 31,124 |
-| baseline (no coalesce) | 64 | 0 | 28,062 | 2,278us | 841,907 |
-| R36 coalesce | 64 | 500us | 64,145 | 993us | 60,498 |
+| Config | Threads | Conns | Window | TPS | Avg latency | WAL appends |
+|---|---|---|---|---|---|---|
+| baseline (no coalesce) | 32 | 4 | 0 | 27,787 | 1,149us | 833,669 |
+| R36 coalesce | 32 | 4 | 500us | 33,029 | 965us | 31,090 |
+| R36 coalesce | 32 | 4 | 1ms | 33,182 | 961us | 31,124 |
+| baseline (no coalesce) | 64 | 8 | 0 | 28,062 | 2,278us | 841,907 |
+| R36 coalesce | 64 | 8 | 500us | 64,145 | 993us | 60,498 |
+| baseline (no coalesce) | 128 | 16 | 0 | 28,260 | 4,528us | 847,880 |
+| R36 coalesce | 128 | 16 | 500us | 97,554 | 1,305us | 92,752 |
+| R36 coalesce | 128 | 16 | 1ms | 95,897 | 1,328us | 91,037 |
+| baseline (no coalesce) | 256 | 32 | 0 | 27,804 | 9,205us | 834,216 |
+| R36 coalesce | 256 | 32 | 500us | 113,671 | 2,241us | 110,034 |
+
+Baseline plateaus at ~28K TPS regardless of thread count — the
+bottleneck is the per-proposal quorum RPC rate, not client concurrency.
+Coalescing scales with concurrency: more loader threads = more ops
+arriving per round = larger batches = fewer rounds. At 256 threads,
+coalescing achieves **113K TPS vs 28K baseline = 4.1x improvement**.
 
 Batch size distribution (500us window, 32 threads, 165K ops):
 - 99% of batches hit `max_keys=32` (fill before timer)
