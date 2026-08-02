@@ -1245,6 +1245,13 @@ impl PxGroup {
         // R36: coalesce when enabled and the self-weak is available (so the
         // timer task can spawn a flush). Otherwise the direct one-op path.
         let coalesce_on = self.config.paxos.coalesce_window_us > 0 && self.self_weak.get().is_some();
+        tracing::warn!(
+            group_id = self.group_id,
+            coalesce_window_us = self.config.paxos.coalesce_window_us,
+            self_weak_set = self.self_weak.get().is_some(),
+            coalesce_on,
+            "R36-CHECK coalesce path"
+        );
         if coalesce_on {
             self.coalesce_enqueue(payload, tag).await
         } else {
