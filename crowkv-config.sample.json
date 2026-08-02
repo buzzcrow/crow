@@ -25,6 +25,6 @@
     "wal_skip_fsync": false
   },
   "force_classic": false,
-  "wal_early_ack": false,
+  "wal_early_ack": true,
   "async_engine_apply": false
 }

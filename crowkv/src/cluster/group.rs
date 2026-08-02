@@ -1736,8 +1736,11 @@ impl PxGroup {
             })
             .collect();
 
-        if self.wal_early_ack {
+        if self.wal_early_ack && self.cached_quorum > 1 {
             // R16b: split path — CAS only, persist deferred.
+            // Only safe with quorum > 1: a single-node group has no
+            // survivors to re-drive a chosen-but-not-durable slot
+            // after a crash, so the persist must be synchronous.
             let (local_result, accept_results) =
                 tokio::join!(replica.on_accept_inner(entry), join_all(accept_futs),);
 
