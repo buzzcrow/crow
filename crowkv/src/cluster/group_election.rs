@@ -272,9 +272,9 @@ impl LeaderElection for PxGroup {
 
             entry.term = term;
 
-            match self.run_accept_phase(replica, &entry, None, None, quorum).await {
+            match self.run_accept_phase(replica, &entry, &[], quorum).await {
                 AcceptAttempt::Chosen => {
-                    replica.learn_chosen(&entry, None, None).await;
+                    replica.learn_chosen(&entry, &[]).await;
                     self.fan_out_chosen_notice(&entry, group_id);
                     slots_repaired += 1;
                 }
@@ -553,13 +553,7 @@ impl PxGroup {
                                     let mut caught_up = false;
                                     for catchup_attempt in 0..2u8 {
                                         match remote
-                                            .send_accept(
-                                                &entry,
-                                                None,
-                                                None,
-                                                group_id,
-                                                self.membership_epoch(),
-                                            )
+                                            .send_accept(&entry, &[], group_id, self.membership_epoch())
                                             .await
                                         {
                                             Ok(crate::paxos::roles::PxAcceptReply::Accepted { .. }) => {

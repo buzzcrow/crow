@@ -10,7 +10,11 @@
 
 use bytes::Bytes;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
-use crowkv::paxos::roles::{PxBallot, PxLogEntry};
+use crowkv::paxos::roles::{DedupTag, PxBallot, PxLogEntry};
+
+fn tag(client_id: u64, seq: u64) -> [DedupTag; 1] {
+    [DedupTag { client_id, seq }]
+}
 
 #[allow(clippy::cast_possible_truncation)]
 fn encode_put(key: &[u8], value: &[u8]) -> Vec<u8> {
@@ -38,7 +42,7 @@ async fn learn_chosen_populates_dedup_cache() {
     let replica = PxLocalReplica::new(1, PxLocalReplicaRole::Leader);
 
     let entry = write_entry(1, b"k", b"v");
-    replica.learn_chosen(&entry, Some(42), Some(5)).await;
+    replica.learn_chosen(&entry, &tag(42, 5)).await;
 
     // Dedup lookup for the same (client_id, seq) returns the commit slot.
     assert_eq!(replica.learner.dedup_lookup(42, 5), Some(1));
@@ -61,10 +65,10 @@ async fn dedup_suppresses_retried_request_at_same_slot() {
             term: 1,
             payload: Bytes::new(),
         };
-        replica.learn_chosen(&entry, None, None).await;
+        replica.learn_chosen(&entry, &[]).await;
     }
     let entry = write_entry(3, b"k", b"v1");
-    replica.learn_chosen(&entry, Some(10), Some(1)).await;
+    replica.learn_chosen(&entry, &tag(10, 1)).await;
     assert_eq!(replica.contiguous_applied(), 3);
 
     // A retried request for the same (client_id, seq) hits the dedup cache.
@@ -72,7 +76,7 @@ async fn dedup_suppresses_retried_request_at_same_slot() {
     assert_eq!(cached, Some(3), "retry should return the original commit slot");
 
     // Re-applying the same entry is idempotent — frontier does not advance.
-    replica.learn_chosen(&entry, Some(10), Some(1)).await;
+    replica.learn_chosen(&entry, &tag(10, 1)).await;
     assert_eq!(replica.contiguous_applied(), 3, "re-learn is idempotent");
 }
 
@@ -82,10 +86,10 @@ async fn dedup_records_each_seq_at_its_own_slot() {
 
     // Client 7: seq=1 at slot 1, seq=3 at slot 2.
     replica
-        .learn_chosen(&write_entry(1, b"k", b"v1"), Some(7), Some(1))
+        .learn_chosen(&write_entry(1, b"k", b"v1"), &tag(7, 1))
         .await;
     replica
-        .learn_chosen(&write_entry(2, b"k", b"v3"), Some(7), Some(3))
+        .learn_chosen(&write_entry(2, b"k", b"v3"), &tag(7, 3))
         .await;
 
     // Each recorded seq maps to its own slot (exact-match lookup).
@@ -101,10 +105,10 @@ async fn dedup_is_per_client() {
     let replica = PxLocalReplica::new(1, PxLocalReplicaRole::Leader);
 
     replica
-        .learn_chosen(&write_entry(1, b"k", b"v1"), Some(10), Some(1))
+        .learn_chosen(&write_entry(1, b"k", b"v1"), &tag(10, 1))
         .await;
     replica
-        .learn_chosen(&write_entry(2, b"k", b"v2"), Some(20), Some(1))
+        .learn_chosen(&write_entry(2, b"k", b"v2"), &tag(20, 1))
         .await;
 
     assert_eq!(replica.learner.dedup_lookup(10, 1), Some(1));
@@ -124,7 +128,7 @@ async fn dedup_ignores_client_id_zero() {
         term: 1,
         payload: Bytes::from(encode_put(b"k", b"v")),
     };
-    replica.learn_chosen(&entry, Some(0), Some(1)).await;
+    replica.learn_chosen(&entry, &tag(0, 1)).await;
 
     assert!(replica.learner.dedup_lookup(0, 1).is_none());
 }
@@ -139,7 +143,7 @@ async fn dedup_ignores_entries_without_client_id() {
         term: 1,
         payload: Bytes::new(),
     };
-    replica.learn_chosen(&entry, None, None).await;
+    replica.learn_chosen(&entry, &[]).await;
 
     // No client_id → no dedup entry for any client.
     assert!(replica.learner.dedup_lookup(1, 1).is_none());
@@ -154,7 +158,7 @@ async fn dedup_does_not_false_positive_on_out_of_order_higher_seq() {
     // choice — e.g. seq=105's proposal happened to win its quorum round
     // before seq=100's did).
     let entry_b = write_entry(2, b"b", b"vb"); // slot 2, seq 105
-    replica.learn_chosen(&entry_b, Some(77), Some(105)).await;
+    replica.learn_chosen(&entry_b, &tag(77, 105)).await;
 
     // BUG (pre-fix): seq=100 has never been recorded, but the old
     // single-entry "latest wins" dedup treats 100 <= 105 as a hit and
@@ -174,7 +178,7 @@ async fn dedup_does_not_false_positive_on_out_of_order_higher_seq() {
 
     // Now seq=100 (key "a") is actually proposed and learned at slot 3.
     let entry_a = write_entry(3, b"a", b"va");
-    replica.learn_chosen(&entry_a, Some(77), Some(100)).await;
+    replica.learn_chosen(&entry_a, &tag(77, 100)).await;
 
     // A genuine retry of seq=100 now correctly hits its own slot (3),
     // not seq=105's slot (2).
@@ -190,7 +194,7 @@ async fn dedup_retains_at_least_64_requests_per_client() {
     // Commit seq=1..=80 for one client, each at its own slot.
     for seq in 1u64..=80 {
         let entry = write_entry(seq, format!("k{seq}").as_bytes(), b"v");
-        replica.learn_chosen(&entry, Some(5), Some(seq)).await;
+        replica.learn_chosen(&entry, &tag(5, seq)).await;
     }
 
     // The most recent >= 64 requests must still be individually

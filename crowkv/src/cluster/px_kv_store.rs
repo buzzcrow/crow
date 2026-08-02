@@ -401,6 +401,8 @@ impl PxKvStore {
             "added group to kv store"
         );
         let arc = Arc::new(group);
+        // R36: set the self-weak so the coalescer can spawn flush tasks.
+        // arc.set_self_weak();
         // Wire metrics registry into local + remote replicas when available.
         if let Some(ref registry) = self.metrics_registry {
             arc.set_metrics_registry(registry, self.store_id);

@@ -66,8 +66,7 @@ async fn repair_once_fills_gap_and_advances_frontier() {
                 term: 0,
                 payload: bytes::Bytes::from_static(b""),
             },
-            None,
-            None,
+            &[],
         )
         .await;
     assert_eq!(group.local_replica().contiguous_chosen(), 0, "gap below slot 2");

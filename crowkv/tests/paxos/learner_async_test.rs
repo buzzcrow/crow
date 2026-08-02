@@ -50,7 +50,7 @@ async fn engine_get_resolves_correctly_across_both_ready_and_pending() {
         term: 1,
         payload: bytes::Bytes::from(encode_put_payload(b"k", b"v")),
     };
-    learner.learn(entry, None, None).await;
+    learner.learn(entry, &[]).await;
 
     // Resident hit: the underlying KVFuture is Ready here (no eviction yet).
     assert_eq!(

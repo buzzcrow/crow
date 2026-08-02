@@ -72,11 +72,25 @@ message AcceptRequest {
   AcceptedValue value = 6;
   uint64 request_id = 7;
   uint64 request_create_ms = 8;
+  // Legacy single dedup tag (fields 9/10). Kept populated with the first
+  // coalesced tag (or 0) for backward-compat with older followers during a
+  // rolling upgrade. New replicas prefer `dedup_tags` (field 13), which
+  // carries one tag per coalesced client op.
   uint64 client_id = 9;
   uint64 seq = 10;
   uint64 group_id = 11;
   // P5 M2: see PrepareRequest.membership_epoch.
   uint64 membership_epoch = 12;
+  // R36: one (client_id, seq) dedup tag per coalesced client op, all
+  // mapping to this slot. Empty for repair/election entries and for
+  // older leaders (fall back to legacy client_id/seq).
+  repeated DedupTag dedup_tags = 13;
+}
+
+// R36: a single (client_id, seq) dedup mapping for a chosen slot.
+message DedupTag {
+  uint64 client_id = 1;
+  uint64 seq = 2;
 }
 
 message AcceptedResponse {

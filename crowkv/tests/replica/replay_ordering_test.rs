@@ -72,7 +72,7 @@ async fn commit_slots(replica: &PxLocalReplica, wal: &WalEngine, n: u64) {
             matches!(reply, PxAcceptReply::Accepted { .. }),
             "slot {slot} should be accepted"
         );
-        replica.learn_chosen(&entry, None, None).await;
+        replica.learn_chosen(&entry, &[]).await;
     }
     wal.seal_all().await.expect("seal");
 }
@@ -139,14 +139,14 @@ async fn restore_stops_at_hole_below_watermark() {
         for slot in 1..=3u64 {
             let entry = write_entry(slot, b"k", &slot.to_string().into_bytes());
             let _ = replica.on_accept(&entry).await;
-            replica.learn_chosen(&entry, None, None).await;
+            replica.learn_chosen(&entry, &[]).await;
         }
         assert_eq!(replica.contiguous_applied(), 3);
 
         // Now accept slot 5 (skipping 4) and learn it.
         let entry5 = write_entry(5, b"k", b"5");
         let _ = replica.on_accept(&entry5).await;
-        replica.learn_chosen(&entry5, None, None).await;
+        replica.learn_chosen(&entry5, &[]).await;
 
         wal.seal_all().await.expect("seal");
     }
@@ -237,7 +237,7 @@ async fn restore_does_not_apply_without_snapshot() {
         for slot in 1..=3u64 {
             let entry = write_entry(slot, b"k", &slot.to_string().into_bytes());
             let _ = replica.on_accept(&entry).await;
-            replica.learn_chosen(&entry, None, None).await;
+            replica.learn_chosen(&entry, &[]).await;
         }
 
         // Accept slots 4, 5 but DON'T learn them.

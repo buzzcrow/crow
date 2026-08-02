@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 
 use futures::future::join_all;
 use tokio::sync::Mutex as AsyncMutex;
@@ -29,7 +29,7 @@ use crate::common::config::{AdmissionPolicy, CrowKVConfig, PaxosConfig};
 use crate::common::report::OperationReport;
 use crate::metrics::{Counter, Gauge, LatencySummary};
 use crate::paxos::error::{PxPaxosError, PxPaxosPhase, PxRetryAction};
-use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply, SlotIndex};
+use crate::paxos::roles::{DedupTag, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply, SlotIndex};
 use crate::paxos::{PxGroupId, PxNodeId};
 
 /// Registry-based metric handles for read-path instrumentation.
@@ -57,6 +57,22 @@ pub(crate) struct ReadRegistryHandles {
 /// (carrying the pre-round `read_slot` freshness floor) on completion.
 pub(crate) struct PendingReadBarrier {
     pub(crate) waiters: Vec<tokio::sync::oneshot::Sender<ReadBarrierOutcome>>,
+}
+
+/// R36: an accumulating coalesced batch. Held in `PxGroup::coalescer`
+/// between the first op of a batch and its flush (timer or
+/// `coalesce_max_keys`). `op_bodies` are the per-op payload bodies
+/// (each single-op payload's leading count byte dropped); the flush
+/// prepends `op_count` and concatenates them into one multi-key `Batch`
+/// payload. `tags` carries one `(client_id, seq)` dedup tag per client
+/// op, all mapping to the shared slot. `waiters` receive the shared
+/// `ProposeResult` when the flush completes.
+pub(crate) struct PendingBatch {
+    pub(crate) op_bodies: Vec<u8>,
+    pub(crate) op_count: u8,
+    pub(crate) tags: Vec<DedupTag>,
+    pub(crate) waiters: Vec<tokio::sync::oneshot::Sender<ProposeResult>>,
+    pub(crate) timer: JoinHandle<()>,
 }
 
 pub struct PxGroup {
@@ -192,6 +208,18 @@ pub struct PxGroup {
     /// under the `test-util` feature; `None` in production.
     #[cfg(feature = "test-util")]
     pub(crate) readindex_round_gate: parking_lot::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// R36 self-weak back-reference, set once the group is wrapped in an
+    /// [`Arc`] via [`Self::set_self_weak`]. The coalescer's per-batch timer
+    /// task upgrades this to spawn a flush without the group holding a
+    /// strong self-reference (which would leak). `None` until set (test
+    /// groups not wrapped in `Arc`); the coalescer falls back to the
+    /// direct single-op path when unset.
+    pub(crate) self_weak: OnceLock<Weak<PxGroup>>,
+    /// R36 proposal coalescer state. `None` when no batch is accumulating;
+    /// `Some(PendingBatch)` between the first op of a batch and its flush
+    /// (timer or `coalesce_max_keys`). Guarded by its own mutex so the
+    /// hot propose path only touches it when coalescing is active.
+    pub(crate) coalescer: parking_lot::Mutex<Option<PendingBatch>>,
 }
 
 impl std::fmt::Debug for PxGroup {
@@ -248,6 +276,8 @@ impl PxGroup {
             pending_read_barrier: parking_lot::Mutex::new(None),
             #[cfg(feature = "test-util")]
             readindex_round_gate: parking_lot::Mutex::new(None),
+            self_weak: OnceLock::new(),
+            coalescer: parking_lot::Mutex::new(None),
         };
         group.recompute_quorum();
         group
@@ -362,6 +392,15 @@ impl PxGroup {
     /// the loop has already been started.
     pub async fn start_engine_maintenance_loop(self: &Arc<Self>) {
         crate::cluster::group_maintenance::start(self).await;
+    }
+
+    /// Set the `Weak<PxGroup>` self-reference used by the R36 coalescer to
+    /// spawn per-batch flush tasks without holding a strong self-reference.
+    /// Must be called once after the group is wrapped in an [`Arc`]; idempotent
+    /// (a second call is a no-op). Mirrors the `Weak` back-reference pattern of
+    /// the election/maintenance loops.
+    pub fn set_self_weak(self: &Arc<Self>) {
+        let _ = self.self_weak.set(Arc::downgrade(self));
     }
 
     // ── Getters ───────────────────────────────────────────────────
@@ -1150,13 +1189,15 @@ impl PxGroup {
 
     /// Propose an opaque payload through Paxos. Returns the slot if chosen,
     /// or an error string.
+    ///
+    /// When R36 coalescing is enabled (`coalesce_window_us > 0` and the
+    /// self-weak is set), concurrent single-key proposes are micro-batched
+    /// into one multi-key Paxos proposal (one slot, one quorum round); each
+    /// coalesced caller still receives `ProposeResult::Chosen { slot }` for
+    /// the shared slot. When coalescing is disabled (`coalesce_window_us =
+    /// 0`, the default), this is the legacy one-proposal-per-key path.
     pub async fn propose(&self, payload: Vec<u8>, client_id: Option<u64>, seq: Option<u64>) -> ProposeResult {
         let replica = &self.local_replica;
-        // Convert the client `Vec<u8>` to `Bytes` once at the entry
-        // point. `Bytes::from(Vec<u8>)` reuses the existing allocation
-        // (no copy) and gives us cheap `Clone` (ref-count bump) for the
-        // slot-retry loop and the per-peer Accept fanout.
-        let payload: bytes::Bytes = bytes::Bytes::from(payload);
 
         // Leadership gate. Checks BOTH:
         //   * role == Leader  -- captures the role atomic flipped by
@@ -1184,7 +1225,8 @@ impl PxGroup {
         // Idempotency: a retried `(client_id, seq)` that the learner has
         // already applied returns its prior commit slot without re-running
         // Paxos (exactly-once writes, idempotent retry). Checked before
-        // window admission so duplicates never consume a window permit.
+        // window admission / coalescing so duplicates never consume a
+        // window permit or enter a batch.
         if let (Some(cid), Some(s)) = (client_id, seq) {
             if let Some(cached_slot) = replica.learner.dedup_lookup(cid, s) {
                 debug!(
@@ -1196,6 +1238,40 @@ impl PxGroup {
                 );
                 return ProposeResult::Chosen { slot: cached_slot };
             }
+        }
+
+        let tag = dedup_tag(client_id, seq);
+
+        // R36: coalesce when enabled and the self-weak is available (so the
+        // timer task can spawn a flush). Otherwise the direct one-op path.
+        let coalesce_on = self.config.paxos.coalesce_window_us > 0 && self.self_weak.get().is_some();
+        if coalesce_on {
+            self.coalesce_enqueue(payload, tag).await
+        } else {
+            let tags: Vec<DedupTag> = tag.into_iter().collect();
+            // `Bytes::from(Vec<u8>)` reuses the allocation (no copy) and
+            // gives cheap `Clone` for the slot-retry loop and Accept fanout.
+            self.propose_inner(bytes::Bytes::from(payload), &tags).await
+        }
+    }
+
+    /// Drive one Paxos proposal (single- or multi-key) through to a chosen
+    /// slot. Holds one inflight permit for the whole round, allocates one
+    /// slot, and records every `dedup_tags` entry against the chosen slot
+    /// on the local learner. The leadership gate is re-checked here so a
+    /// step-down between coalescer batch collection and flush surfaces as
+    /// `NotLeader` instead of racing into Paxos with stale identity.
+    async fn propose_inner(&self, payload: bytes::Bytes, dedup_tags: &[DedupTag]) -> ProposeResult {
+        let replica = &self.local_replica;
+
+        // Re-check the leadership gate (see `propose`).
+        let role_is_leader = replica.role() == crate::cluster::local_replica::PxLocalReplicaRole::Leader;
+        let current_term = replica.current_term_snapshot();
+        let proposing_term = self.proposing_term.load(Ordering::Acquire);
+        if !(role_is_leader && current_term == proposing_term) {
+            return ProposeResult::NotLeader {
+                leader_hint: self.leader_endpoint().unwrap_or_default(),
+            };
         }
 
         // Sliding-window admission: cap concurrent in-flight proposals. The
@@ -1226,8 +1302,7 @@ impl PxGroup {
         trace!(
             group_id,
             my_id = self.local_replica.id,
-            client_id = ?client_id,
-            seq = ?seq,
+            dedup_tags = dedup_tags.len(),
             peer_count = self.valid_replica_count,
             quorum,
             "start paxos proposal"
@@ -1309,19 +1384,16 @@ impl PxGroup {
                     entry.ballot.round = min_round;
                 }
 
-                match self
-                    .run_accept_phase(replica, &entry, client_id, seq, quorum)
-                    .await
-                {
+                match self.run_accept_phase(replica, &entry, dedup_tags, quorum).await {
                     AcceptAttempt::Chosen => {
                         // R17: when async_engine_apply is enabled, spawn
                         // the engine apply as a background task and return
                         // Chosen immediately. The fan_out_chosen_notice
                         // fires immediately too (non-blocking mpsc enqueue).
                         if self.config.async_engine_apply {
-                            replica.spawn_learn_chosen(entry.clone(), client_id, seq);
+                            replica.spawn_learn_chosen(entry.clone(), dedup_tags);
                         } else {
-                            replica.learn_chosen(&entry, client_id, seq).await;
+                            replica.learn_chosen(&entry, dedup_tags).await;
                         }
                         self.fan_out_chosen_notice(&entry, group_id);
                         trace!(
@@ -1421,6 +1493,109 @@ impl PxGroup {
         })
     }
 
+    // ── R36 coalescer ─────────────────────────────────────────
+
+    /// Enqueue one single-key op into the coalescer. Joins the currently
+    /// accumulating batch (or starts one), registers a waiter, and returns
+    /// the batch's shared `ProposeResult` once the batch is flushed (by the
+    /// `coalesce_window_us` timer or when `coalesce_max_keys` is reached).
+    /// The flush runs `propose_inner` on a spawned task so the triggering
+    /// caller is not pinned to the paxos round and the next batch can start
+    /// collecting immediately.
+    async fn coalesce_enqueue(&self, payload: Vec<u8>, tag: Option<DedupTag>) -> ProposeResult {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        // The op body is the payload with its leading op-count byte dropped;
+        // op bodies are self-delimited, so concatenation + a single count
+        // prefix reconstructs a valid multi-key `Batch` payload.
+        let op_body: &[u8] = payload.get(1..).unwrap_or(&[]);
+
+        let max_keys = self.config.paxos.coalesce_max_keys.min(255) as u8;
+        let flush_now = {
+            let mut guard = self.coalescer.lock();
+            match &mut *guard {
+                None => {
+                    let mut op_bodies = Vec::with_capacity(op_body.len());
+                    op_bodies.extend_from_slice(op_body);
+                    let tags = tag.into_iter().collect::<Vec<_>>();
+                    let timer = self.arm_coalesce_timer();
+                    *guard = Some(PendingBatch {
+                        op_bodies,
+                        op_count: 1,
+                        tags,
+                        waiters: vec![tx],
+                        timer,
+                    });
+                    1 >= max_keys
+                }
+                Some(batch) => {
+                    batch.op_bodies.extend_from_slice(op_body);
+                    batch.op_count = batch.op_count.saturating_add(1);
+                    if let Some(t) = tag {
+                        batch.tags.push(t);
+                    }
+                    batch.waiters.push(tx);
+                    batch.op_count >= max_keys
+                }
+            }
+        };
+        if flush_now {
+            self.flush_coalescer();
+        }
+        match rx.await {
+            Ok(result) => result,
+            // Closed oneshot: the flush task was dropped (group shutdown
+            // mid-flush). Surface a retryable error so the client retries.
+            Err(_) => ProposeResult::Err("coalescer flush dropped".to_string()),
+        }
+    }
+
+    /// Arm the per-batch timer that fires `coalesce_window_us` after the
+    /// first op lands. On fire it flushes whatever has accumulated. The
+    /// task holds only a `Weak<PxGroup>` so it never leaks the group.
+    fn arm_coalesce_timer(&self) -> JoinHandle<()> {
+        let weak = self
+            .self_weak
+            .get()
+            .expect("coalescer requires self_weak to be set")
+            .clone();
+        let window = Duration::from_micros(self.config.paxos.coalesce_window_us);
+        tokio::spawn(async move {
+            sleep(window).await;
+            if let Some(group) = weak.upgrade() {
+                group.flush_coalescer();
+            }
+        })
+    }
+
+    /// Flush the current pending batch (if any) as one multi-key Paxos
+    /// proposal. Takes the batch from under the mutex (a racing timer +
+    /// `max_keys` flush resolves to one winner; the loser no-ops), builds the
+    /// merged payload, and spawns `propose_inner` to drive the round and fan
+    /// the result to every waiter.
+    fn flush_coalescer(&self) {
+        let batch = self.coalescer.lock().take();
+        let Some(mut batch) = batch else {
+            return; // already flushed by a racing trigger
+        };
+        // Cancel the timer handle if it's still running (max_keys path).
+        batch.timer.abort();
+        let mut payload = Vec::with_capacity(1 + batch.op_bodies.len());
+        payload.push(batch.op_count);
+        payload.extend_from_slice(&batch.op_bodies);
+        let payload = bytes::Bytes::from(payload);
+        let tags = std::mem::take(&mut batch.tags);
+        let waiters = std::mem::take(&mut batch.waiters);
+        let Some(group) = self.self_weak.get().and_then(Weak::upgrade) else {
+            return; // group dropped; waiters get closed oneshot
+        };
+        tokio::spawn(async move {
+            let result = group.propose_inner(payload, &tags).await;
+            for waiter in waiters {
+                let _ = waiter.send(result.clone());
+            }
+        });
+    }
+
     /// One background-repair step: find the lowest gap in the open prefix
     /// (the first unchosen slot below the highest slot this leader has seen
     /// chosen) and drive classic Paxos to close it.
@@ -1470,9 +1645,9 @@ impl PxGroup {
             }
         };
 
-        match self.run_accept_phase(replica, &entry, None, None, quorum).await {
+        match self.run_accept_phase(replica, &entry, &[], quorum).await {
             AcceptAttempt::Chosen => {
-                replica.learn_chosen(&entry, None, None).await;
+                replica.learn_chosen(&entry, &[]).await;
                 self.fan_out_chosen_notice(&entry, group_id);
                 debug!(group_id, slot = gap_slot, "background repair filled gap");
                 RepairOutcome::Filled { slot: gap_slot }
@@ -1704,8 +1879,7 @@ impl PxGroup {
         &self,
         replica: &PxLocalReplica,
         entry: &PxLogEntry,
-        client_id: Option<u64>,
-        seq: Option<u64>,
+        dedup_tags: &[DedupTag],
         quorum: usize,
     ) -> AcceptAttempt {
         let mut accepted = 0usize;
@@ -1735,7 +1909,7 @@ impl PxGroup {
             .iter()
             .filter_map(|remote| {
                 if let RemoteReplicaKind::Real(remote) = remote {
-                    Some(remote.send_accept(entry, client_id, seq, group_id, self.membership_epoch()))
+                    Some(remote.send_accept(entry, dedup_tags, group_id, self.membership_epoch()))
                 } else {
                     None
                 }
@@ -2120,6 +2294,19 @@ impl PxGroup {
     }
 }
 
+/// Build a dedup tag from the client-supplied `(client_id, seq)` options.
+/// `None` when either is absent or `client_id == 0` (the no-dedup sentinel
+/// matching `PxLearner::record_dedup_tags`).
+fn dedup_tag(client_id: Option<u64>, seq: Option<u64>) -> Option<DedupTag> {
+    match (client_id, seq) {
+        (Some(cid), Some(s)) if cid != 0 => Some(DedupTag {
+            client_id: cid,
+            seq: s,
+        }),
+        _ => None,
+    }
+}
+
 /// Multi-queue inflight proposal admission gate. Owns N semaphores,
 /// routes proposals round-robin, and supports both fail-fast (Reject)
 /// and blocking (Queue) admission policies.
@@ -2228,7 +2415,7 @@ impl std::fmt::Debug for InflightAdmission {
 }
 
 /// Result of a `PxGroup::propose` call.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum ProposeResult {
     Chosen {
         slot: u64,

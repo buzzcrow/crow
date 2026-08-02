@@ -23,11 +23,24 @@ pub trait Acceptor {
     fn trim_slot(&self) -> SlotIndex;
 }
 
+/// One `(client_id, seq)` dedup tag for a chosen slot. `client_id == 0`
+/// is the no-dedup sentinel (matches `PxLearner::record_dedup`). A
+/// coalesced multi-key batch carries one tag per client op, all mapping
+/// to the same slot; a single-key propose carries one; repair/election
+/// entries carry none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DedupTag {
+    pub client_id: u64,
+    pub seq: u64,
+}
+
 #[allow(async_fn_in_trait)]
 pub trait Learner {
-    /// Apply a chosen log entry to the state machine.
-    /// `client_id`/`seq` are runtime dedup metadata (not persisted in WAL).
-    async fn learn(&self, entry: PxLogEntry, client_id: Option<u64>, seq: Option<u64>);
+    /// Apply a chosen log entry to the state machine and record each
+    /// `dedup_tags` entry against the slot. Tags are runtime dedup
+    /// metadata (not persisted in WAL). Empty slice = no dedup
+    /// (repair/election/restore catch-up).
+    async fn learn(&self, entry: PxLogEntry, dedup_tags: &[DedupTag]);
 }
 
 /// Paxos proposal number, ordered first by `round`, then by `leader_id`.

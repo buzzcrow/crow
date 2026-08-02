@@ -23,4 +23,4 @@ pub mod slot_node;
 pub mod learner;
 pub mod roles;
 
-pub use roles::PxLogEntry;
+pub use roles::{DedupTag, PxLogEntry};

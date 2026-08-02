@@ -37,7 +37,7 @@ async fn send_accept_to_unreachable_endpoint_returns_error() {
         payload: bytes::Bytes::from_static(b"test"),
     };
 
-    let result = remote.send_accept(&entry, None, None, 1, 0).await;
+    let result = remote.send_accept(&entry, &[], 1, 0).await;
     assert!(result.is_err(), "should fail when remote is unreachable");
     let err = result.unwrap_err();
     match &err {

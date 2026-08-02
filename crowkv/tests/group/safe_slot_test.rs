@@ -26,8 +26,7 @@ async fn apply_through(replica: &PxLocalReplica, upto: SlotIndex) {
                     term: 0,
                     payload: bytes::Bytes::new(),
                 },
-                None,
-                None,
+                &[],
             )
             .await;
     }
