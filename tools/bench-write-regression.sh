@@ -3,13 +3,22 @@
 # Usage: bash tools/bench-write-regression.sh
 #
 # Regression sentinel for write throughput with coalescing enabled.
-# WAL append count tracks coalescing efficiency.
+# WAL append count tracks coalescing efficiency. Results are appended
+# to doc/working/bench-write-regression.tsv and documented (with the
+# CPU type) in the "Regression sentinel" section of
+# doc/working/write-flow-analysis.md.
 #
 # Configurations:
 #   - Scaling: 1T:1C → 256T:32C, coalesce_max_keys=32,
 #     drain_threshold=1 (default), max_inflight=32
 #
 # 7 runs × 10s ≈ 70s + deploy overhead.
+#
+# Reference platform (2026-08-04 run): AMD Ryzen 9 5950X
+# (16 cores / 32 threads, x86_64, Linux). Peak ~124K ops/s at 256T.
+# Always record the CPU model in the doc when publishing a run —
+# absolute write throughput is platform-dependent (see write-flow-
+# analysis.md § "macOS M5 Pro retest").
 #
 # Prerequisites:
 #   - pixi installed, project dependencies resolved

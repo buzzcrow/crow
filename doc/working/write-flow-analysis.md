@@ -296,6 +296,33 @@ wake-drain-flush baseline (coalesce = 0). **Decision: removed** —
 `wal_flush_coalesce_us` and the coalesce arm in `pipeline_writer.rs`
 were deleted; `wal_flush_watchdog_ms` stays as the safety-net timer.
 
+### Regression sentinel (`tools/bench-write-regression.sh`)
+
+Coalesced write throughput sweep (R45b, `coalesce_max_keys=32`,
+`drain_threshold=1`, `max_inflight=32`, 10s mem mode, 3-node cluster,
+512 B values, 1M key space). Regression sentinel for write throughput
+with coalescing enabled; WAL append count tracks coalescing efficiency.
+
+Platform: **AMD Ryzen 9 5950X** (16 cores / 32 threads, x86_64, Linux).
+Run: 2026-08-04. Raw TSV: `doc/working/bench-write-regression.tsv`.
+
+| Threads | Conn | Throughput (ops/s) | WAL append | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 3,029 | 90,870 | 327 | 350 | 428 | 564 | 0 |
+| 4 | 2 | 12,681 | 274,197 | 313 | 300 | 496 | 826 | 0 |
+| 16 | 4 | 32,935 | 180,596 | 483 | 472 | 804 | 1,761 | 0 |
+| 32 | 16 | 52,688 | 141,915 | 604 | 576 | 1,180 | 3,708 | 0 |
+| 64 | 32 | 75,280 | 109,862 | 846 | 800 | 1,850 | 4,988 | 0 |
+| 128 | 32 | 105,779 | 105,226 | 1,204 | 1,124 | 2,592 | 9,632 | 0 |
+| 256 | 32 | 123,745 | 116,944 | 2,058 | 1,911 | 4,392 | 14,976 | 0 |
+
+Coalescing lifts the saturation ceiling from ~29K (non-coalesced, see
+Phase 1 above) to ~124K at 256T — a 4.3× gain from batching single-key
+ops into one slot/round. WAL append count drops as load rises (90K→~110K
+WAL appends for 1.2M ops at 256T = ~11× amortization), confirming the
+`max_keys` overflow path produces full batches at high load. Zero errors
+across all configs.
+
 ---
 
 ## Memory Copy Summary
