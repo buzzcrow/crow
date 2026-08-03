@@ -499,9 +499,9 @@ full quorum round.
 ### 23.2 Evolution: R36 (timer) → R45 (event) → R45b (drain threshold)
 
 **R36 (timer-based, superseded)**: The first op opens a batch and arms
-a fixed timer (`coalesce_window_us`, e.g. 500us). The timer fires (or
-the batch fills to `max_keys`) → spawn a slot-task. The timer is a
-deferred slot-task spawn — it delays the round so ops accumulate first.
+a fixed timer (e.g. 500us). The timer fires (or the batch fills to
+`max_keys`) → spawn a slot-task. The timer is a deferred slot-task
+spawn — it delays the round so ops accumulate first.
 At high load, batches fill to `max_keys` before the timer fires; at
 low load, the timer adds a fixed latency floor (the "timer tax"). R36
 slot-tasks are fire-and-forget (no drain after round completion).
@@ -521,8 +521,7 @@ taking the batch. If `occupied >= coalesce_drain_threshold`, skip the
 drain — the `max_keys` overflow path handles high load with full
 batches. At high load, drains almost never fire (many slot-tasks in
 flight); at low load, drains always fire (few slot-tasks, threshold
-not exceeded). Effective default = `1` (auto-set by the server when
-coalescing is on; see §23.5).
+not exceeded). Default = `1` (see §23.5).
 
 ### 23.3 Coalescer Design (R45b)
 
@@ -621,15 +620,11 @@ paths pass `&[]` (no tags → no dedup recording, identical to the old
 
 - `coalesce_max_keys: usize` — max ops per batch (cap 65535, the
   payload count field is `u16`). `0` disables coalescing (default).
-- `coalesce_window_us: u64` — reserved (unused in R45 event mode; kept
-  for backward compat). Default 0.
 - `coalesce_drain_threshold: usize` — skip drain when in-flight
-  slot-task count >= this. The config struct default is `0`, but the
-  server binary (`main.rs`) auto-sets it to `1` when coalescing is
-  enabled (`coalesce_max_keys > 0`) and no explicit threshold is given
-  — so the effective default when coalescing is on is `1`. `0` means
-  always drain (pure event mode); higher values skip the drain at high
-  load so the `max_keys` overflow path produces full batches.
+  slot-task count >= this. Default `1` (skip drain only when another
+  slot-task is still in flight; the last finisher always drains).
+  `0` = always drain (pure event mode); higher values skip the drain
+  at high load so the `max_keys` overflow path produces full batches.
 
 CLI: `--coalesce-max-keys`, `--coalesce-drain-threshold` on
 `crowkv-server`, applied in `main.rs` into `config.paxos`. Wired into
