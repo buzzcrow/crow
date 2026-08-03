@@ -64,10 +64,6 @@ pub struct PaxosConfig {
     /// R45 max ops per coalesced batch. `0` disables coalescing (one
     /// proposal per key). Default 0 (opt-in).
     pub coalesce_max_keys: usize,
-    /// R45 watchdog interval in microseconds. Fires if a batch is stuck
-    /// (drain panic, spawn failure). Default 0 (watchdog still active at
-    /// fixed 1000ms).
-    pub coalesce_window_us: u64,
     /// R45b drain threshold: skip draining the pending batch in
     /// `coalesce_drain_after_round` when the in-flight slot-task count
     /// (`occupied`) is at or above this value. Lets the `max_keys`
@@ -86,8 +82,7 @@ impl PaxosConfig {
         max_inflight_proposals: 32,
         inflight_admission: AdmissionPolicy::Queue,
         coalesce_max_keys: 0,
-        coalesce_window_us: 0,
-        coalesce_drain_threshold: 0,
+        coalesce_drain_threshold: 1,
     };
 }
 
