@@ -14,7 +14,7 @@ use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 
 fn encode_put(key: &[u8], value: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.push(1); // op_count
+    buf.extend_from_slice(&1u16.to_le_bytes()); // op_count
     buf.push(0); // kind = Put
     let key_len = u32::try_from(key.len()).expect("key len");
     buf.extend_from_slice(&key_len.to_le_bytes());
@@ -27,7 +27,7 @@ fn encode_put(key: &[u8], value: &[u8]) -> Vec<u8> {
 
 fn encode_delete(key: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.push(1); // op_count
+    buf.extend_from_slice(&1u16.to_le_bytes()); // op_count
     buf.push(1); // kind = Delete
     let key_len = u32::try_from(key.len()).expect("key len");
     buf.extend_from_slice(&key_len.to_le_bytes());
@@ -39,7 +39,7 @@ fn encode_delete(key: &[u8]) -> Vec<u8> {
 #[allow(clippy::cast_possible_truncation)]
 fn encode_batch(ops: &[(Vec<u8>, Option<Vec<u8>>)]) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.push(ops.len() as u8);
+    buf.extend_from_slice(&(ops.len() as u16).to_le_bytes());
     for (key, value) in ops {
         if let Some(v) = value {
             buf.push(0); // Put

@@ -15,7 +15,7 @@ use crowkv::paxos::roles::{Learner, PxBallot, PxLogEntry};
 
 fn encode_put_payload(key: &[u8], value: &[u8]) -> Vec<u8> {
     let mut payload = Vec::new();
-    payload.push(1u8); // op_count
+    payload.extend_from_slice(&1u16.to_le_bytes()); // op_count
     payload.push(0u8); // Put
     payload.extend_from_slice(&u32::try_from(key.len()).unwrap().to_le_bytes());
     payload.extend_from_slice(key);

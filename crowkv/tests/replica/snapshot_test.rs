@@ -16,7 +16,7 @@ use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 #[allow(clippy::cast_possible_truncation)]
 fn encode_put(key: &[u8], value: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.push(1u8); // op_count
+    buf.extend_from_slice(&1u16.to_le_bytes()); // op_count
     buf.push(0u8); // Put
     buf.extend_from_slice(&(key.len() as u32).to_le_bytes());
     buf.extend_from_slice(key);
@@ -28,7 +28,7 @@ fn encode_put(key: &[u8], value: &[u8]) -> Vec<u8> {
 #[allow(clippy::cast_possible_truncation)]
 fn encode_delete(key: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.push(1u8); // op_count
+    buf.extend_from_slice(&1u16.to_le_bytes()); // op_count
     buf.push(1u8); // Delete
     buf.extend_from_slice(&(key.len() as u32).to_le_bytes());
     buf.extend_from_slice(key);

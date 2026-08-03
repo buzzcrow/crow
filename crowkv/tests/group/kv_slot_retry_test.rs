@@ -8,7 +8,7 @@ use crowkv::rpc::KvSetRequest;
 
 fn encode_put_payload(key: &[u8], value: &[u8]) -> Vec<u8> {
     let mut payload = Vec::new();
-    payload.push(1);
+    payload.extend_from_slice(&1u16.to_le_bytes());
     payload.push(0);
     payload.extend_from_slice(&u32::try_from(key.len()).unwrap().to_le_bytes());
     payload.extend_from_slice(key);

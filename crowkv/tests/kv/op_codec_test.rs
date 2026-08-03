@@ -27,7 +27,7 @@ fn del(key: &[u8]) -> BatchOp {
 #[allow(clippy::cast_possible_truncation)]
 fn encode(ops: &[(&[u8], Option<&[u8]>)]) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.push(ops.len() as u8);
+    buf.extend_from_slice(&(ops.len() as u16).to_le_bytes());
     for (key, value_opt) in ops {
         buf.push(u8::from(value_opt.is_none())); // 0 = Put, 1 = Delete
         buf.extend_from_slice(&(key.len() as u32).to_le_bytes());
@@ -50,7 +50,7 @@ fn decode_empty_payload_returns_empty_batch() {
 
 #[test]
 fn decode_zero_ops_returns_empty_batch() {
-    let buf = Bytes::from_static(&[0u8]);
+    let buf = Bytes::from_static(&[0u8, 0u8]);
     let batch = Batch::decode(&buf);
     assert!(batch.ops.is_empty());
 }
@@ -96,8 +96,8 @@ fn decode_large_key_and_value() {
 
 #[test]
 fn decode_truncated_after_op_count_stops_cleanly() {
-    // Claim 3 ops but provide no data.
-    let buf = Bytes::from_static(&[3u8]);
+    // Claim 3 ops but provide no data (only op_count bytes).
+    let buf = Bytes::from_static(&[3u8, 0u8]);
     let batch = Batch::decode(&buf);
     assert!(batch.ops.is_empty(), "truncated payload yields no ops");
 }
@@ -105,7 +105,7 @@ fn decode_truncated_after_op_count_stops_cleanly() {
 #[test]
 fn decode_truncated_mid_key_stops_cleanly() {
     // Claim 1 Put, key_len=10, but only 3 key bytes.
-    let mut buf = vec![1u8, 0u8]; // 1 op, Put
+    let mut buf = vec![1u8, 0u8, 0u8]; // 1 op (u16 LE), Put
     buf.extend_from_slice(&10u32.to_le_bytes()); // key_len = 10
     buf.extend_from_slice(b"abc"); // only 3 bytes
     let batch = Batch::decode(&Bytes::from(buf));
@@ -117,7 +117,7 @@ fn decode_truncated_mid_key_stops_cleanly() {
 #[test]
 fn decode_truncated_mid_value_stops_cleanly() {
     // Claim 1 Put, key="k", value_len=10, but only 3 value bytes.
-    let mut buf = vec![1u8, 0u8]; // 1 op, Put
+    let mut buf = vec![1u8, 0u8, 0u8]; // 1 op (u16 LE), Put
     buf.extend_from_slice(&1u32.to_le_bytes()); // key_len = 1
     buf.push(b'k');
     buf.extend_from_slice(&10u32.to_le_bytes()); // value_len = 10
@@ -131,7 +131,7 @@ fn decode_truncated_mid_value_stops_cleanly() {
 #[test]
 fn decode_unknown_kind_byte_becomes_delete() {
     // kind=2 is not 0 (Put) so it falls to the else branch → Delete.
-    let mut buf = vec![1u8, 2u8]; // 1 op, unknown kind
+    let mut buf = vec![1u8, 0u8, 2u8]; // 1 op (u16 LE), unknown kind
     buf.extend_from_slice(&1u32.to_le_bytes());
     buf.push(b'k');
     buf.extend_from_slice(&0u32.to_le_bytes());
@@ -140,15 +140,15 @@ fn decode_unknown_kind_byte_becomes_delete() {
 }
 
 #[test]
-fn decode_max_op_count_u8() {
-    // 255 ops, each a single-byte key Put with empty value.
-    let mut buf = vec![255u8];
-    for i in 0..255u8 {
+fn decode_max_op_count_u16() {
+    // 300 ops, each a single-byte key Put with empty value.
+    let mut buf = (300u16).to_le_bytes().to_vec();
+    for i in 0..300u16 {
         buf.push(0u8); // Put
         buf.extend_from_slice(&1u32.to_le_bytes());
-        buf.push(i);
+        buf.push(u8::try_from(i).unwrap());
         buf.extend_from_slice(&0u32.to_le_bytes());
     }
     let batch = Batch::decode(&Bytes::from(buf));
-    assert_eq!(batch.ops.len(), 255);
+    assert_eq!(batch.ops.len(), 300);
 }
