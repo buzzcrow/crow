@@ -11,7 +11,7 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R45** — Bump this line in the same commit when adding a new item.
+**Next R number: R46** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
@@ -96,18 +96,6 @@ complexity, and dependency. Before implementation, follow the
   Low-medium complexity; kv_service / crowtree_engine / client are
   mechanical, bounded catch-up needs care, scan cursor composes with
   R37.
-- **[R45](R45-event-driven-coalescing.md)** — Event-driven proposal coalescing (replace R36 timer) — Area:
-  consensus / write path — R36 coalescing uses a timer (`coalesce_window_us`
-  sleep then flush) that adds a fixed latency floor for the first op in a
-  sparse batch. Replace with an event-driven flush modeled on the existing
-  `PendingReadBarrier` pattern: the first op starts the Paxos round
-  immediately, ops arriving during the round join the next batch, and the
-  round completion triggers the next flush. Eliminates the timer config
-  knob; coalescing is on/off via `coalesce_max_keys` alone. R36 measured
-  2.3x TPS at 64 threads (64K vs 28K); R45 targets matching that at high
-  concurrency while improving low-concurrency latency. Medium complexity;
-  reuses R36's `DedupTag` threading and proto.
-
 ### Low Priority
 
 **Complexity — Low (placeholder):**

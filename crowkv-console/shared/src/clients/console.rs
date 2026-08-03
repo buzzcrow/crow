@@ -75,9 +75,6 @@ pub struct DeployNodeServerBody {
     /// `--max-inflight` value for the proposal admission window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_inflight: Option<usize>,
-    /// `--inflight-queues` value for multi-queue admission.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inflight_queues: Option<usize>,
     /// `--coalesce-max-keys` value for R45 proposal coalescing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coalesce_max_keys: Option<usize>,

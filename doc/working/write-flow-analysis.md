@@ -92,9 +92,9 @@ Client PUT/DELETE/BatchWrite
 
 ## Multi-Slot Concurrency
 
-- **Inflight admission (R18)** — `InflightAdmission` gate backed by N
-  `tokio::sync::Semaphore` queues (`inflight_queues`, default 1). Total
-  permits = `max_inflight_proposals` (default 32). Each `propose`
+- **Inflight admission (R18)** — `InflightAdmission` gate backed by a
+  single `tokio::sync::Semaphore` of `max_inflight_proposals` permits
+  (default 32). Each `propose`
   acquires one permit before slot allocation, holds it for the entire
   proposal duration (released on drop at every return path).
   - **Queue policy (default)** — `acquire_permit().await` blocks until
@@ -102,9 +102,6 @@ Client PUT/DELETE/BatchWrite
     semaphore fast path is lock-free (atomic CAS).
   - **Reject policy (tests only)** — `try_acquire`, returns
     `ProposeResult::Busy` if full.
-  - **Multi-queue routing** — permits round-robin across N semaphores,
-    each `ceil(max_inflight / N)`; reduces contention (no measurable
-    effect at ≤64 threads; consensus path dominates).
   - **Metrics** — `inflight_queue_depth`, `inflight_total_enqueued`,
     `inflight_total_wait_us`, `inflight_occupied` via `GroupStatus`.
   - **Slot allocation** — `next_slot.fetch_add(1, Ordering::Relaxed)`,
@@ -201,8 +198,7 @@ in-memory KV (mem-block), write-only, 512-byte values, 1M key space,
 `Queue` (R18 default). Platform: AMD Ryzen 9 5950X (16 cores / 32
 threads), Linux. 28 runs total, zero errors across all configs.
 
-Script: `tools/bench-write-sweep.sh`. Regression subset:
-`tools/bench-write-regression.sh`.
+Regression sentinel: `tools/bench-write-regression.sh`.
 
 ### Factors Affecting TPS
 
@@ -221,9 +217,6 @@ Script: `tools/bench-write-sweep.sh`. Regression subset:
 
 No measurable effect on TPS (at ≤64 threads):
 
-- **`inflight_queues`** — multi-queue routing (1 vs 4 semaphores);
-  semaphore is not the contention bottleneck; consensus path
-  dominates. Default 1 is sufficient.
 - **Window > 16** — MI=16, 32, 64 all converge to ~29K at 48T.
   Consensus critical path is the hard ceiling.
 - **Connections** — C has zero effect on write throughput at any T.
@@ -508,20 +501,38 @@ tracked as backlog requirements.
   `update_frontier` / `record_dedup` are atomic, so a delayed apply is
   safe. Medium complexity, confined to the Linearizable read path +
   learner.
-- **Server-side proposal coalescing** — tracked as
-  **[R36](../backlog/R36-proposal-coalescing.md)** (backlog). Today each
-  client `PUT` is its own Paxos proposal (one slot, one WAL record, one
-  fsync batch entry, one quorum RPC round). The `Batch` payload format
-  already supports multiple ops and `kv_batch_write` exposes it to
-  clients, but there is no server-side coalescer that merges concurrent
-  single-key proposes into one multi-key proposal before slot
-  allocation. A bounded micro-batcher (collect for ≤N µs or ≤K keys,
-  then one `propose`) would amortize the per-proposal fixed cost (quorum
-  RPC + fsync) across many keys — directly attacks the saturation
-  ceiling. Trades a small latency floor for throughput; needs a tunable
-  coalesce window and must preserve `(client_id, seq)` dedup ordering.
-  Medium-high complexity; touches the admission gate and the propose
-  entry.
+- **Server-side proposal coalescing (R36 → R45/R45b, done)** —
+  implemented. R36 used a timer-based collect-then-flush; R45 replaced
+  it with event-driven immediate flush + drain after round; R45b added
+  a drain threshold (`coalesce_drain_threshold`, default `1`) that
+  skips the drain at high load so the `max_keys` overflow path produces
+  full batches. See
+  [`design-slot.md` §23](../design/design-slot.md#23-server-side-proposal-coalescing-r36--r45r45b)
+  for the full design. Benchmark results (10s mem mode, 3-node cluster,
+  max_keys=32, connections=32):
+
+  Standard bench command:
+  `crowkv-cli bench run --mode mem --workload write --duration-secs 10 --threads {T} --connections 32 --coalesce-max-keys 32 [--coalesce-drain-threshold {N}]`
+
+  | Threads | Baseline TPS | R36 TPS | R45b TPS | R36 WAL | R45b WAL |
+  |---|---|---|---|---|---|
+  | 32 | 27,787 | 33,029 | 47,485 | 31,090 | 139,404 |
+  | 64 | 28,062 | 64,145 | 68,741 | 60,498 | 106,926 |
+  | 128 | 28,260 | 97,554 | 101,537 | 92,752 | 101,350 |
+  | 256 | 27,804 | 113,671 | 118,377 | 110,034 | 111,944 |
+
+  R45b beats R36 at high load (128: 102K vs 98K, 256: 118K vs 114K)
+  with no low-load regression (32 threads: 47K, matching event mode).
+  The drain threshold eliminates the 1-op round fragmentation that
+  caused R45 event mode's high-load gap (WAL 425K → 101K at 128
+  threads).
+
+  Coalescer race fix: `coalesce_flush_batch` previously did
+  unconditional `replace(new_batch)`, overwriting batches created by
+  ops arriving between drain's `take()` and flush's `replace()`. This
+  dropped oneshot senders ("coalescer round dropped" errors, ~80 per
+  10s at 256t/c32). Fix: only set new batch when coalescer is still
+  `None`. After fix: zero drops, TPS unchanged.
 - **Fan-out hardening (quorum short-circuit, RPC deadline, phase
   metrics)** — tracked as
   **[R43](../backlog/R43-write-path-fanout-hardening.md)** (backlog).

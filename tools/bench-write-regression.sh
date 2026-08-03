@@ -1,21 +1,20 @@
 #!/usr/bin/env bash
 # --- CrowKV write regression benchmark ---
-# Usage: bash doc/working/bench-write-regression.sh
+# Usage: bash tools/bench-write-regression.sh
 #
-# Focused subset of bench-write-sweep.sh for regression detection.
-# Covers the key findings from the full sweep:
-#   - Single-thread baseline (1T:1C)
-#   - Scaling: 6T mid + 24T peak + 48T saturation
-#   - T:C ratio insensitivity (12T:3C should match 12T:12C)
-#   - Window impact (MI=1 vs MI=64 at 48T)
-#   - h2 lock at low thread count (2T:1C)
+# Regression sentinel for write throughput with coalescing enabled.
+# WAL append count tracks coalescing efficiency.
+#
+# Configurations:
+#   - Scaling: 1T:1C → 256T:32C, coalesce_max_keys=32,
+#     drain_threshold=1 (default), max_inflight=32
 #
 # 7 runs × 10s ≈ 70s + deploy overhead.
 #
 # Prerequisites:
 #   - pixi installed, project dependencies resolved
 #   - jq installed
-#   - release binary built (cargo build --release -p crowkv-cli)
+#   - release binary built (pixi run -- cargo build --release -p crowkv-cli -p crowkv-server)
 set -euo pipefail
 cd /cjdata/cpp/crowkv
 
@@ -25,53 +24,47 @@ KEYSPACE=1000000
 VALUE_SIZE=512
 
 run_bench() {
-    local threads="$1" conn="$2" ratio="$3" mi="$4"
-    local label="${threads}T:${conn}C ($ratio) MI=$mi"
+    local threads="$1" conn="$2" mi="$3" coalesce="$4" drain="$5" label="$6"
     echo ">>> $label ..."
     local output
     output=$(pixi run -- cargo run --release -p crowkv-cli -- bench run \
         --mode mem --workload write --duration-secs "$DURATION" \
         --threads "$threads" --connections "$conn" \
-        --max-inflight "$mi" --inflight-queues 1 \
+        --max-inflight "$mi" \
+        --coalesce-max-keys "$coalesce" \
+        $([ "$drain" != "" ] && echo "--coalesce-drain-threshold $drain") \
         --key-space "$KEYSPACE" --value-size "$VALUE_SIZE" \
         --verify-bytes 0 --json 2>&1)
     local json; json=$(echo "$output" | sed -n '/^{/,/^}/p')
     if [ -z "$json" ]; then
         echo "    ERROR: no JSON output"; echo "$output" | tail -5
-        echo -e "$threads\t$conn\t$ratio\t$mi\t0\t0\t0\t0\t0\t1" >> "$RESULTS_FILE"
+        echo -e "$label\t0\t0\t0\t0\t0\t0\t1" >> "$RESULTS_FILE"
         return
     fi
-    local ops_s avg_us p50_us p99_us p999_us errors
+    local ops_s avg_us p50_us p99_us p999_us errors wal
     ops_s=$(echo "$json" | jq -r '.total_ops * 1000 / .duration_ms' | awk '{printf "%.0f", $1}')
     avg_us=$(echo "$json" | jq -r '.by_op.write.latency_us.avg_us')
     p50_us=$(echo "$json" | jq -r '.by_op.write.latency_us.p50_us')
     p99_us=$(echo "$json" | jq -r '.by_op.write.latency_us.p99_us')
     p999_us=$(echo "$json" | jq -r '.by_op.write.latency_us.p999_us')
     errors=$(echo "$json" | jq -r '.total_errors')
-    echo "    ops/s=$ops_s avg=${avg_us}us p50=${p50_us}us p99=${p99_us}us p999=${p999_us}us err=$errors"
-    echo -e "$threads\t$conn\t$ratio\t$mi\t$ops_s\t$avg_us\t$p50_us\t$p99_us\t$p999_us\t$errors" >> "$RESULTS_FILE"
+    wal=$(echo "$json" | jq -r '.server_metrics.wal_append_count')
+    echo "    ops/s=$ops_s wal=$wal avg=${avg_us}us p50=${p50_us}us p99=${p99_us}us p999=${p999_us}us err=$errors"
+    echo -e "$label\t$ops_s\t$wal\t$avg_us\t$p50_us\t$p99_us\t$p999_us\t$errors" >> "$RESULTS_FILE"
 }
 
 # --- regression sentinel configs ---
 
-echo -e "threads\tconn\tratio\tmi\tops_s\tavg_us\tp50_us\tp99_us\tp999_us\terrors" > "$RESULTS_FILE"
+echo -e "label\tops_s\twal_append\tavg_us\tp50_us\tp99_us\tp999_us\terrors" > "$RESULTS_FILE"
 
-echo "=== Single-thread baseline ==="
-run_bench 1 1 "1:1" 64       # ~2.8K expected
-
-echo "=== Scaling ==="
-run_bench 6 6 "1:1" 64       # ~20K expected
-run_bench 24 24 "1:1" 64     # ~29K expected (peak)
-run_bench 48 48 "1:1" 64     # ~29K expected (saturation, latency up)
-
-echo "=== T:C ratio insensitivity (should match 12T:12C) ==="
-run_bench 12 3 "4:1" 64      # ~25K expected, same as 12T:12C
-
-echo "=== Window impact (MI=1 should be ~6K) ==="
-run_bench 48 48 "1:1" 1      # ~6K expected, regression if much lower
-
-echo "=== h2 lock at low thread count ==="
-run_bench 2 1 "2:1" 64       # ~6.3K expected
+echo "=== write (mi=32, coalesce=32, drain=1) ==="
+run_bench 1 1 32 32 1 "write_1t_1c_mi32_coales32_drain1"
+run_bench 4 2 32 32 1 "write_4t_2c_mi32_coales32_drain1"
+run_bench 16 4 32 32 1 "write_16t_4c_mi32_coales32_drain1"
+run_bench 32 16 32 32 1 "write_32t_16c_mi32_coales32_drain1"
+run_bench 64 32 32 32 1 "write_64t_32c_mi32_coales32_drain1"
+run_bench 128 32 32 32 1 "write_128t_32c_mi32_coales32_drain1"
+run_bench 256 32 32 32 1 "write_256t_32c_mi32_coales32_drain1"
 
 echo "=== DONE ==="
 echo "Results in $RESULTS_FILE"

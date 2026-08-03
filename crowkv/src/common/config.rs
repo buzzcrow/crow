@@ -57,9 +57,6 @@ pub struct PaxosConfig {
     /// blocking, so the leader never stalls behind a saturated pipeline
     /// (parallel-slot window / performance targets).
     pub max_inflight_proposals: usize,
-    /// Number of admission queues per group. Each queue gets
-    /// `ceil(max_inflight_proposals / inflight_queues)` permits. Default 1.
-    pub inflight_queues: usize,
     /// Admission policy when all permits are occupied: `Reject` (fail fast
     /// with `Busy`) or `Queue` (block until a permit is freed). Default
     /// `Reject`.
@@ -75,9 +72,9 @@ pub struct PaxosConfig {
     /// `coalesce_drain_after_round` when the in-flight slot-task count
     /// (`occupied`) is at or above this value. Lets the `max_keys`
     /// overflow path handle high load (full batches) while the drain
-    /// maintains concurrency at low-moderate load. Default
-    /// `max_inflight / 4` (set via CLI when coalescing is enabled).
-    /// `0` = always drain (disables the heuristic).
+    /// maintains concurrency at low-moderate load. Default `1` (set
+    /// via CLI when coalescing is enabled). `0` = always drain
+    /// (disables the heuristic).
     pub coalesce_drain_threshold: usize,
 }
 
@@ -87,7 +84,6 @@ impl PaxosConfig {
         max_slot_retries: 3,
         retry_base_backoff_ms: 5,
         max_inflight_proposals: 32,
-        inflight_queues: 1,
         inflight_admission: AdmissionPolicy::Queue,
         coalesce_max_keys: 0,
         coalesce_window_us: 0,
@@ -503,13 +499,6 @@ impl CrowKVConfig {
     #[must_use]
     pub fn max_inflight(&self) -> usize {
         self.paxos.max_inflight_proposals
-    }
-
-    /// Number of admission queues (convenience accessor for
-    /// `paxos.inflight_queues`).
-    #[must_use]
-    pub fn inflight_queues(&self) -> usize {
-        self.paxos.inflight_queues
     }
 
     /// Admission policy (convenience accessor for

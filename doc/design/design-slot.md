@@ -241,7 +241,6 @@ Detailed further in [`design-wal.md`](design-wal.md) §4.
 | Parameter | Default | Where it lives |
 | --- | --- | --- |
 | `max_inflight_proposals` | 32 | `PaxosConfig` (total semaphore permits) |
-| `inflight_queues` | 1 | `PaxosConfig` (number of admission semaphores) |
 | `inflight_admission` | `Queue` | `PaxosConfig` (internal, not CLI-exposed) |
 | `max_paxos_retries` | 3 | `PaxosConfig` (per-slot Phase-2 retries) |
 | `max_slot_retries` | 3 | `PaxosConfig` (new-slot retries before giving up) |
@@ -478,7 +477,7 @@ Compared to `BTreeMap`: ~10× faster insert, ~5× faster latest-slot access, ~3�
 2. **Chunk size:** Start with 1K; make `SLOT_CHUNK_SIZE` a `const` generic for benchmarking.
 3. **Per-slot `AtomicPtr` vs inline storage:** Start with `AtomicPtr`; optimise if profiles show bottleneck.
 
-## 23. Server-side Proposal Coalescing (R36)
+## 23. Server-side Proposal Coalescing (R36 → R45/R45b)
 
 ### 23.1 Problem
 
@@ -497,62 +496,98 @@ The `Batch` payload format already supports multiple ops per slot and
 concurrent single-key proposes each took a distinct slot and paid the
 full quorum round.
 
-### 23.2 Coalescer Design
+### 23.2 Evolution: R36 (timer) → R45 (event) → R45b (drain threshold)
 
-A bounded micro-batcher (the **coalescer**) at the `PxGroup::propose`
-entry merges concurrent single-key proposes into one multi-key Paxos
-proposal — one slot, one quorum RPC, one learner apply — amortizing
-the per-proposal fixed cost across many keys.
+**R36 (timer-based, superseded)**: The first op opens a batch and arms
+a fixed timer (`coalesce_window_us`, e.g. 500us). The timer fires (or
+the batch fills to `max_keys`) → spawn a slot-task. The timer is a
+deferred slot-task spawn — it delays the round so ops accumulate first.
+At high load, batches fill to `max_keys` before the timer fires; at
+low load, the timer adds a fixed latency floor (the "timer tax"). R36
+slot-tasks are fire-and-forget (no drain after round completion).
+
+**R45 (event-driven, current)**: The first op starts a 1-op slot-task
+**immediately** (no timer). Ops arriving during the round join a
+pending batch. On round completion, `coalesce_drain_after_round` takes
+the pending batch and starts the next slot-task (if non-empty) or goes
+idle (if empty). No timer, no latency floor. The high-load gap: with
+N concurrent slot-tasks, the drain fragments the single shared batch —
+most finishers get an empty batch, the coalescer goes idle, and the
+next op starts a 1-op round.
+
+**R45b (drain threshold, current)**: Same as R45, but the drain checks
+the in-flight slot-task count (`occupied` — permits held) before
+taking the batch. If `occupied >= coalesce_drain_threshold`, skip the
+drain — the `max_keys` overflow path handles high load with full
+batches. At high load, drains almost never fire (many slot-tasks in
+flight); at low load, drains always fire (few slot-tasks, threshold
+not exceeded). Default threshold = `max_inflight / 4` (= 8).
+
+### 23.3 Coalescer Design (R45b)
 
 Per-group state on `PxGroup`:
 
 - `coalescer: parking_lot::Mutex<Option<PendingBatch>>` — the
-  accumulating batch, `None` when no batch is open.
+  accumulating batch, `None` when idle.
 - `self_weak: OnceLock<Weak<PxGroup>>` — set once the group is wrapped
-  in `Arc`, so the timer task can spawn a flush without holding a
-  strong self-reference.
+  in `Arc`, so spawned slot-tasks can upgrade without holding a strong
+  self-reference.
+- `coalesce_last_activity_us: AtomicU64` — last coalescer activity
+  timestamp (updated on every enqueue and drain). Used by the
+  activity-based watchdog.
 
 `PendingBatch` holds:
 - `op_bodies: Vec<u8>` — concatenated op bodies (each single-op
-  payload's leading count byte dropped; op bodies are self-delimited).
-- `op_count: u8` — number of ops accumulated.
+  payload's leading count bytes dropped; op bodies are self-delimited).
+- `op_count: u16` — number of ops accumulated.
 - `tags: Vec<DedupTag>` — one `(client_id, seq)` dedup tag per client
   op, all mapping to the shared slot.
 - `waiters: Vec<oneshot::Sender<ProposeResult>>` — one per coalesced
   caller; each receives the shared `ProposeResult` on flush.
-- `timer: JoinHandle<()>` — armed `sleep(window_us)` → flush.
+- `timer: Option<JoinHandle<()>>` — reserved (unused in event mode;
+  the watchdog is activity-based, not per-batch).
 
 `propose` flow (refactored into `propose` + `propose_inner`):
 
 1. Leadership gate (as before).
 2. Dedup lookup (as before) — a hit returns the cached slot
    immediately, never enters a batch.
-3. If `coalesce_window_us == 0` (disabled) or `self_weak` is unset:
+3. If `coalesce_max_keys == 0` (disabled) or `self_weak` is unset:
    call `propose_inner(payload, &[tag])` directly — bit-identical to
    the legacy path.
-4. Else (coalescing on): lock the coalescer:
-   - No pending batch → start one with this op, arm a timer task
-     (`sleep(window_us)` then `flush`). Register a waiter oneshot,
-     return its `Receiver`.
-   - Pending batch exists → append this op's body + tag, register a
-     waiter. If `op_count == coalesce_max_keys`: cancel the timer,
-     take the batch, spawn the flush. Return the `Receiver`.
+4. Else (coalescing on): `coalesce_enqueue(payload, tag)`:
+   - Coalescer is `None` (idle) → create a batch with this op, start a
+     1-op slot-task **immediately**. Open a fresh empty batch for ops
+     arriving during this round.
+   - Coalescer is `Some` (batch exists) → append op body + tag +
+     waiter. If `op_count >= max_keys` → overflow: take the batch,
+     spawn a concurrent slot-task, open a new empty batch.
 5. `await` the waiter's `ProposeResult`.
 
-`flush` (called by both the timer task and the max_keys path):
+`coalesce_flush_batch` (called by overflow and drain):
 
-1. Lock coalescer, `take` the pending batch (`None` wins the race; the
-   loser no-ops).
-2. Build merged payload: `[op_count as u8][op_bodies]`.
+1. Build merged payload: `[op_count as u16 LE][op_bodies]`.
+2. Open a fresh empty batch in `coalescer` (for ops during the next
+   round).
 3. `tokio::spawn` `propose_inner(payload, tags)`. On completion, fan
-   the `ProposeResult` (now `Clone`) to all waiters.
+   the `ProposeResult` (now `Clone`) to all waiters, then call
+   `coalesce_drain_after_round`.
 
-Spawning the flush (rather than running it inline) decouples the
-triggering caller from the paxos round and lets the next batch start
-collecting immediately. Multiple in-flight batches are bounded by the
-existing inflight gate (`max_inflight` permits; each batch holds one).
+`coalesce_drain_after_round` (called after each slot-task finishes):
 
-### 23.3 Dedup Tag Threading
+1. Touch activity timestamp.
+2. If `occupied >= coalesce_drain_threshold` → return (skip drain;
+   overflow handles it).
+3. Take the pending batch from `coalescer`.
+4. If `op_count == 0` → go idle (return).
+5. If `op_count > 0` → `coalesce_flush_batch(batch)` (start next round).
+
+**Watchdog**: A single background task per group sleeps 1000ms, then
+checks if there's been no coalescer activity for 1000ms. If so, it
+flushes any stuck non-empty batch. Safety net for edge cases (drain
+panic, spawn failure). Zero overhead during normal operation.
+
+### 23.4 Dedup Tag Threading
 
 A coalesced batch carries K `(client_id, seq)` tags but one slot. To
 preserve the existing dedup-on-all-replicas invariant (so a follower
@@ -579,20 +614,25 @@ the slot (skipping `client_id == 0` sentinels). Repair/election/restore
 paths pass `&[]` (no tags → no dedup recording, identical to the old
 `None, None`).
 
-### 23.4 Config
+### 23.5 Config
 
-`PaxosConfig` gains two fields:
+`PaxosConfig` gains:
 
-- `coalesce_window_us: u64` — max wait to fill a batch. `0` disables
-  (default `0` = current behavior; opt-in).
-- `coalesce_max_keys: usize` — max ops per batch (cap 255, the payload
-  count byte). Default 32.
+- `coalesce_max_keys: usize` — max ops per batch (cap 65535, the
+  payload count field is `u16`). `0` disables coalescing (default).
+- `coalesce_window_us: u64` — reserved (unused in R45 event mode; kept
+  for backward compat). Default 0.
+- `coalesce_drain_threshold: usize` — skip drain when in-flight
+  slot-task count >= this. Default `1` (auto-set when coalescing is
+  enabled). `0` = always drain (disables the heuristic, reverts to
+  pure event mode).
 
-CLI: `--coalesce-window-us`, `--coalesce-max-keys` on `crowkv-server`,
-applied in `main.rs` into `config.paxos`. Wired into the group via
-`set_from_config` (the coalescer reads `self.config.paxos.*`).
+CLI: `--coalesce-max-keys`, `--coalesce-drain-threshold` on
+`crowkv-server`, applied in `main.rs` into `config.paxos`. Wired into
+the group via `set_from_config` (the coalescer reads
+`self.config.paxos.*`).
 
-### 23.5 Correctness
+### 23.6 Correctness
 
 - **Dedup**: each coalesced tag is recorded on leader + all accepting
   followers → a retried `(client_id, seq)` returns the shared slot on
@@ -603,13 +643,32 @@ applied in `main.rs` into `config.paxos`. Wired into the group via
   across batches, per-key highest-slot-wins applies as before.
 - **`ProposeResult::Chosen { slot }` contract**: every coalesced
   waiter receives the same slot. `ProposeResult` gains `Clone`.
-- **`coalesce_window_us = 0`**: `propose` calls `propose_inner` with a
+- **`coalesce_max_keys = 0`**: `propose` calls `propose_inner` with a
   1-tag slice — the paxos loop is unchanged; the only difference is
   the `&[DedupTag]` vs `(Option, Option)` plumbing, which records the
   same single dedup entry. No behavior change.
 - **Leadership**: re-checked inside `propose_inner`; a step-down
   between batch collection and flush surfaces as `NotLeader` to all
   waiters.
-- **Shutdown**: the timer task holds a `Weak<PxGroup>`; on shutdown
-  the pending batch is dropped (waiters get a closed oneshot → mapped
+- **Shutdown**: slot-tasks hold a `Weak<PxGroup>`; on shutdown the
+  pending batch is dropped (waiters get a closed oneshot → mapped
   to `Err`).
+- **Drain threshold liveness**: the inflight permit is released (on
+  permit drop in `propose_inner`) **before** `coalesce_drain_after_round`
+  is called. So the last finisher always sees `occupied = 0 < threshold`
+  and takes the batch. The batch is never stuck. The 1000ms watchdog
+  is a backstop for edge cases (drain panic, spawn failure).
+
+### 23.7 Benchmark Results (10s mem mode, 3-node cluster, max_keys=32)
+
+| Threads | Baseline TPS | R36 TPS | R45 event TPS | R45b TPS | R36 WAL | R45b WAL |
+|---|---|---|---|---|---|---|
+| 32 | 27,787 | 33,029 | 48,346 | 47,485 | 31,090 | 139,404 |
+| 64 | 28,062 | 64,145 | 68,201 | 68,741 | 60,498 | 106,926 |
+| 128 | 28,260 | 97,554 | 86,759 | 101,537 | 92,752 | 101,350 |
+| 256 | 27,804 | 113,671 | 97,865 | 118,377 | 110,034 | 111,944 |
+
+R45b beats R36 at high load (128: 102K vs 98K, 256: 118K vs 114K) with
+WAL counts close to R36. At 64 threads it matches event mode and beats
+R36. At 32 threads it matches event mode (no regression) — the
+default threshold of 1 still allows drains at low load.

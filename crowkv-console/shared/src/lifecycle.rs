@@ -47,9 +47,6 @@ pub struct DeployRequest {
     /// `--max-inflight` value. `None` leaves the spawned server's
     /// own default in effect.
     pub max_inflight: Option<usize>,
-    /// `--inflight-queues` value. `None` leaves the spawned server's
-    /// own default in effect.
-    pub inflight_queues: Option<usize>,
     /// `--coalesce-max-keys` value. `None` leaves the spawned server's
     /// own default in effect.
     pub coalesce_max_keys: Option<usize>,
@@ -132,9 +129,6 @@ fn apply_benchmark_flags(cmd: &mut Command, req: &DeployRequest) {
     }
     if let Some(max_inflight) = req.max_inflight {
         cmd.arg("--max-inflight").arg(max_inflight.to_string());
-    }
-    if let Some(queues) = req.inflight_queues {
-        cmd.arg("--inflight-queues").arg(queues.to_string());
     }
     if let Some(max_keys) = req.coalesce_max_keys {
         cmd.arg("--coalesce-max-keys").arg(max_keys.to_string());
