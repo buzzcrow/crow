@@ -507,9 +507,6 @@ pub struct DeployNodeServerBody {
     /// `--max-inflight` value for the proposal admission window.
     #[serde(default)]
     max_inflight: Option<usize>,
-    /// `--inflight-queues` value for multi-queue admission.
-    #[serde(default)]
-    inflight_queues: Option<usize>,
     /// `--coalesce-max-keys` value for R45 proposal coalescing.
     #[serde(default)]
     coalesce_max_keys: Option<usize>,
@@ -606,7 +603,6 @@ pub async fn http_deploy_node_server(
         no_fsync: body.no_fsync,
         metrics_interval: body.metrics_interval,
         max_inflight: body.max_inflight,
-        inflight_queues: body.inflight_queues,
         coalesce_max_keys: body.coalesce_max_keys,
         coalesce_drain_threshold: body.coalesce_drain_threshold,
         config: body.config.clone().map(std::path::PathBuf::from),

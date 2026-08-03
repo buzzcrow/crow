@@ -78,7 +78,6 @@ async fn main() {
         kv_backend = %args.kv_backend,
         wal_backend = %args.wal_backend,
         max_inflight = args.max_inflight,
-        inflight_queues = args.inflight_queues,
         "parsed CLI arguments"
     );
 
@@ -119,14 +118,13 @@ async fn main() {
     config.crowtree_backend = args.kv_backend.clone();
     config.wal_skip_fsync = args.no_fsync;
     config.paxos.max_inflight_proposals = args.max_inflight;
-    config.paxos.inflight_queues = args.inflight_queues;
     if let Some(max_keys) = args.coalesce_max_keys {
         config.paxos.coalesce_max_keys = max_keys;
     }
     if let Some(threshold) = args.coalesce_drain_threshold {
         config.paxos.coalesce_drain_threshold = threshold;
     } else if config.paxos.coalesce_max_keys > 0 && config.paxos.coalesce_drain_threshold == 0 {
-        config.paxos.coalesce_drain_threshold = (config.paxos.max_inflight_proposals / 4).max(1);
+        config.paxos.coalesce_drain_threshold = 1;
     }
 
     let registry = Arc::new(KvStoreRegistry::with_config(config).with_metrics_registry(

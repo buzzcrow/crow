@@ -182,7 +182,6 @@ pub async fn create_group_with_wal(
         store_id,
         group_id,
         max_inflight = config.max_inflight(),
-        inflight_queues = config.inflight_queues(),
         admission = config.inflight_admission().label(),
         coalesce_max_keys = config.paxos.coalesce_max_keys,
         coalesce_drain_threshold = config.paxos.coalesce_drain_threshold,

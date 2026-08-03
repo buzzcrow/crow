@@ -44,6 +44,10 @@ on all tail percentiles.
 - [ ] Decide: accept the p99 shift as a net win (avg + p999 improve,
       p99 slightly worse), or bound the background persist's scheduling
       priority / pin it off the accept worker.
+- [ ] After T4 is resolved, delete `tools/bench-early-ack.sh` (one-off
+      A/B script, not a regression sentinel) and update the
+      `write-flow-analysis.md` § Early-ack A/B reference to drop the
+      script citation.
 
 **Scope**: Small — measurement + a possible scheduling tweak. No
 consensus-path change; the deferred persist is already off the

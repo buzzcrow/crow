@@ -4,7 +4,6 @@
   },
   "paxos": {
     "max_inflight_proposals": 16,
-    "inflight_queues": 1,
     "inflight_admission": "Queue"
   },
   "election": {

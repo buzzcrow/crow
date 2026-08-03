@@ -100,11 +100,6 @@ pub struct Cli {
     #[arg(long, default_value_t = 32)]
     pub max_inflight: usize,
 
-    /// Number of admission queues per group. Each queue gets
-    /// `ceil(max_inflight / inflight_queues)` permits. Default: 1.
-    #[arg(long, default_value_t = 1)]
-    pub inflight_queues: usize,
-
     /// R45 max ops per coalesced batch (capped at 255). The leader
     /// event-batches concurrent single-key proposes into one multi-key
     /// Paxos proposal. `0` disables coalescing (default).

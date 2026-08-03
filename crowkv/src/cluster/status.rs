@@ -74,8 +74,7 @@ pub struct GroupStatus {
 /// Inflight admission status snapshot.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
 pub struct InflightStatus {
-    pub queue_count: usize,
-    pub window_per_queue: usize,
+    pub window: usize,
     pub policy: String,
     pub occupied: u64,
     pub waiting: u64,

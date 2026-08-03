@@ -289,7 +289,6 @@ impl PxGroup {
             group_snapshot_slot: AtomicU64::new(0),
             inflight: InflightAdmission::new(
                 PaxosConfig::DEFAULT.max_inflight_proposals,
-                PaxosConfig::DEFAULT.inflight_queues,
                 PaxosConfig::DEFAULT.inflight_admission,
             ),
             config_store: None,
@@ -353,7 +352,6 @@ impl PxGroup {
         self.set_election_config(config.election);
         self.set_inflight_config(
             config.paxos.max_inflight_proposals,
-            config.paxos.inflight_queues,
             config.paxos.inflight_admission,
         );
         self.coalesce_max_keys.store(
@@ -372,24 +370,16 @@ impl PxGroup {
     /// called before the group starts serving proposals. Also syncs the
     /// params into `self.config.paxos` so the held config stays the
     /// source of truth.
-    pub fn set_inflight_config(&mut self, max_inflight: usize, queues: usize, policy: AdmissionPolicy) {
-        self.inflight = InflightAdmission::new(max_inflight, queues, policy);
+    pub fn set_inflight_config(&mut self, max_inflight: usize, policy: AdmissionPolicy) {
+        self.inflight = InflightAdmission::new(max_inflight, policy);
         self.config.paxos.max_inflight_proposals = max_inflight;
-        self.config.paxos.inflight_queues = queues;
         self.config.paxos.inflight_admission = policy;
     }
 
-    /// Current inflight proposal window size (total permits across all
-    /// queues).
+    /// Current inflight proposal window size (total permits).
     #[must_use]
     pub fn inflight_window_size(&self) -> usize {
         self.inflight.total_permits()
-    }
-
-    /// Number of admission queues.
-    #[must_use]
-    pub fn inflight_queue_count(&self) -> usize {
-        self.inflight.queue_count
     }
 
     /// Current admission policy.
@@ -960,8 +950,7 @@ impl PxGroup {
             local_replica,
             remotes,
             inflight: Some(InflightStatus {
-                queue_count: self.inflight.queue_count,
-                window_per_queue: self.inflight.window_per_queue,
+                window: self.inflight.window,
                 policy: self.inflight.policy.label().to_string(),
                 occupied: self.inflight.occupied(),
                 waiting: self.inflight.waiting.load(Ordering::Relaxed),
@@ -1599,7 +1588,10 @@ impl PxGroup {
         let waiters = batch.waiters;
         // Open a fresh pending batch for the next round.
         let new_batch = PendingBatch::default();
-        self.coalescer.lock().replace(new_batch);
+        let mut guard = self.coalescer.lock();
+        if guard.is_none() {
+            *guard = Some(new_batch);
+        }
         let Some(group) = self.self_weak.get().and_then(Weak::upgrade) else {
             return;
         };
@@ -2359,11 +2351,10 @@ impl PxGroup {
         self.inflight.try_acquire_all()
     }
 
-    /// Borrow the first (primary) queue's semaphore for tests that need
-    /// direct semaphore access.
+    /// Borrow the inflight semaphore for tests that need direct access.
     #[must_use]
-    pub fn inflight_queue_semaphore(&self) -> &tokio::sync::Semaphore {
-        &self.inflight.queues[0]
+    pub fn inflight_semaphore(&self) -> &tokio::sync::Semaphore {
+        &self.inflight.semaphore
     }
 
     /// Run one background-repair step, returning the slot that was filled
@@ -2489,15 +2480,13 @@ fn dedup_tag(client_id: Option<u64>, seq: Option<u64>) -> Option<DedupTag> {
     }
 }
 
-/// Multi-queue inflight proposal admission gate. Owns N semaphores,
-/// routes proposals round-robin, and supports both fail-fast (Reject)
-/// and blocking (Queue) admission policies.
+/// Inflight proposal admission gate. Owns a single semaphore of
+/// `max_inflight` permits and supports both fail-fast (Reject) and
+/// blocking (Queue) admission policies.
 pub(crate) struct InflightAdmission {
-    queues: Vec<tokio::sync::Semaphore>,
-    queue_count: usize,
-    window_per_queue: usize,
+    semaphore: tokio::sync::Semaphore,
+    window: usize,
     policy: AdmissionPolicy,
-    route_counter: AtomicU64,
     /// Cumulative count of proposals that entered the queue (did not
     /// get a fast-path permit).
     total_enqueued: AtomicU64,
@@ -2508,50 +2497,33 @@ pub(crate) struct InflightAdmission {
 }
 
 impl InflightAdmission {
-    fn new(max_inflight: usize, queue_count: usize, policy: AdmissionPolicy) -> Self {
-        let n = queue_count.max(1);
-        let per_queue = max_inflight.div_ceil(n);
-        let queues = (0..n).map(|_| tokio::sync::Semaphore::new(per_queue)).collect();
+    fn new(max_inflight: usize, policy: AdmissionPolicy) -> Self {
         Self {
-            queues,
-            queue_count: n,
-            window_per_queue: per_queue,
+            semaphore: tokio::sync::Semaphore::new(max_inflight),
+            window: max_inflight,
             policy,
-            route_counter: AtomicU64::new(0),
             total_enqueued: AtomicU64::new(0),
             total_wait_us: AtomicU64::new(0),
             waiting: AtomicU64::new(0),
         }
     }
 
-    /// Total permits across all queues.
+    /// Total permits.
     fn total_permits(&self) -> usize {
-        self.window_per_queue * self.queue_count
+        self.window
     }
 
-    /// Currently occupied permits across all queues.
+    /// Currently occupied permits.
     fn occupied(&self) -> u64 {
-        let total = self.total_permits();
-        let avail: usize = self
-            .queues
-            .iter()
-            .map(tokio::sync::Semaphore::available_permits)
-            .sum();
-        u64::try_from(total.saturating_sub(avail)).unwrap_or(0)
+        let avail = self.semaphore.available_permits();
+        u64::try_from(self.window.saturating_sub(avail)).unwrap_or(0)
     }
 
-    /// Route to a queue via round-robin.
-    fn route(&self) -> usize {
-        let idx = self.route_counter.fetch_add(1, Ordering::Relaxed);
-        (idx as usize) % self.queue_count
-    }
-
-    /// Acquire a permit. Returns `None` if Reject mode and the queue is
+    /// Acquire a permit. Returns `None` if Reject mode and the window is
     /// full. In Queue mode, blocks until a permit is available.
     async fn acquire_permit(&self) -> Option<tokio::sync::SemaphorePermit<'_>> {
-        let q = self.route();
         // Fast path: try to acquire without blocking.
-        if let Ok(permit) = self.queues[q].try_acquire() {
+        if let Ok(permit) = self.semaphore.try_acquire() {
             return Some(permit);
         }
         // Slow path depends on policy.
@@ -2561,7 +2533,7 @@ impl InflightAdmission {
                 self.total_enqueued.fetch_add(1, Ordering::Relaxed);
                 self.waiting.fetch_add(1, Ordering::Relaxed);
                 let t0 = std::time::Instant::now();
-                let permit = self.queues[q].acquire().await.expect("inflight semaphore closed");
+                let permit = self.semaphore.acquire().await.expect("inflight semaphore closed");
                 let wait_us = t0.elapsed().as_micros();
                 self.waiting.fetch_sub(1, Ordering::Relaxed);
                 self.total_wait_us
@@ -2571,14 +2543,12 @@ impl InflightAdmission {
         }
     }
 
-    /// Try to acquire all permits across all queues (test helper).
+    /// Try to acquire all permits (test helper).
     #[cfg(feature = "test-util")]
     fn try_acquire_all(&self) -> Vec<tokio::sync::SemaphorePermit<'_>> {
         let mut held = Vec::new();
-        for q in &self.queues {
-            while let Ok(p) = q.try_acquire() {
-                held.push(p);
-            }
+        while let Ok(p) = self.semaphore.try_acquire() {
+            held.push(p);
         }
         held
     }
@@ -2587,8 +2557,7 @@ impl InflightAdmission {
 impl std::fmt::Debug for InflightAdmission {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InflightAdmission")
-            .field("queue_count", &self.queue_count)
-            .field("window_per_queue", &self.window_per_queue)
+            .field("window", &self.window)
             .field("policy", &self.policy)
             .field("occupied", &self.occupied())
             .field("waiting", &self.waiting.load(Ordering::Relaxed))

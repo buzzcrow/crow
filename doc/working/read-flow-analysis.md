@@ -387,8 +387,7 @@ disabled (`--verify-bytes 0`) for clean throughput; verified
 separately with `--verify-bytes 8` (`correctness_errors = 0` across
 all configs).
 
-Benchmark scripts: full sweep `tools/bench-read-sweep.sh`, regression
-subset `tools/bench-read-regression.sh`.
+Regression sentinel: `tools/bench-read-regression.sh`.
 
 Two read modes benchmarked:
 
@@ -400,8 +399,9 @@ Two read modes benchmarked:
   across all 3 replicas.
 
 60 runs total (54 sweep + 6 verification), zero errors, zero
-correctness errors. Raw data is reproducible via
-[`tools/bench-read-sweep.sh`](../../tools/bench-read-sweep.sh).
+correctness errors. Raw data was collected via the now-removed full
+sweep script; the regression sentinel is
+[`tools/bench-read-regression.sh`](../../tools/bench-read-regression.sh).
 
 ### Phase 1 — 1T:1C scaling
 
