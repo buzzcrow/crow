@@ -124,6 +124,11 @@ pub struct RunArgs {
     /// spawned server). `0` disables (default).
     #[arg(long)]
     pub coalesce_max_keys: Option<usize>,
+
+    /// R45b drain threshold (--coalesce-drain-threshold on each
+    /// spawned server). Default `max_inflight / 4`. `0` = always drain.
+    #[arg(long)]
+    pub coalesce_drain_threshold: Option<usize>,
 }
 
 /// Arguments for `crowkv-cli bench`.
@@ -226,6 +231,7 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
         args.metrics_interval,
         args.node_config.clone(),
         args.coalesce_max_keys,
+        args.coalesce_drain_threshold,
     )
     .await
     {

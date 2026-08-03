@@ -53,6 +53,9 @@ pub struct DeployRequest {
     /// `--coalesce-max-keys` value. `None` leaves the spawned server's
     /// own default in effect.
     pub coalesce_max_keys: Option<usize>,
+    /// `--coalesce-drain-threshold` value. `None` leaves the spawned
+    /// server's own default in effect.
+    pub coalesce_drain_threshold: Option<usize>,
     /// Optional `--config` JSON path for `crowkv-server`.
     pub config: Option<PathBuf>,
 }
@@ -135,6 +138,9 @@ fn apply_benchmark_flags(cmd: &mut Command, req: &DeployRequest) {
     }
     if let Some(max_keys) = req.coalesce_max_keys {
         cmd.arg("--coalesce-max-keys").arg(max_keys.to_string());
+    }
+    if let Some(threshold) = req.coalesce_drain_threshold {
+        cmd.arg("--coalesce-drain-threshold").arg(threshold.to_string());
     }
     if let Some(config) = &req.config {
         cmd.arg("--config").arg(config.as_os_str());
