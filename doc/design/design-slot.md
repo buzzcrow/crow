@@ -623,9 +623,9 @@ paths pass `&[]` (no tags → no dedup recording, identical to the old
 - `coalesce_window_us: u64` — reserved (unused in R45 event mode; kept
   for backward compat). Default 0.
 - `coalesce_drain_threshold: usize` — skip drain when in-flight
-  slot-task count >= this. Default `1` (auto-set when coalescing is
-  enabled). `0` = always drain (disables the heuristic, reverts to
-  pure event mode).
+  slot-task count >= this. Default `0` (always drain; the `max_keys`
+  overflow path handles high load). Set above 0 to skip the drain at
+  high load so the overflow path produces full batches.
 
 CLI: `--coalesce-max-keys`, `--coalesce-drain-threshold` on
 `crowkv-server`, applied in `main.rs` into `config.paxos`. Wired into
@@ -670,5 +670,6 @@ the group via `set_from_config` (the coalescer reads
 
 R45b beats R36 at high load (128: 102K vs 98K, 256: 118K vs 114K) with
 WAL counts close to R36. At 64 threads it matches event mode and beats
-R36. At 32 threads it matches event mode (no regression) — the
-default threshold of 1 still allows drains at low load.
+R36. At 32 threads it matches event mode (no regression) — the default
+threshold of 0 always drains at low load, preserving the zero-latency-
+floor behavior.
