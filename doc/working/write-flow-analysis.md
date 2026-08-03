@@ -347,79 +347,17 @@ of what remains:
   vectored write (`IoSlice` borrows `Bytes`); FFI batch apply
   `ct_kv_ref` pointer-length structs (R23, done).
 
-### Optimization Opportunities
-
-- **WAL encode** — already zero-copy: `encode_accepted_payload` is
-  `entry.payload.clone()` (O(1) ref-count); `WALRecord.payload` is
-  `Bytes`. No further work here. (Previously listed as a `to_vec()`
-  copy — that was stale; the code already does the right thing.)
-- **Batch decode** — already zero-copy: `Batch::decode` uses
-  `Bytes::slice` (O(1) ref-count), not `to_vec()`; `BatchOp` owns
-  `Bytes` that share the payload buffer.
-- **FFI batch encode** — already eliminated (R23, done):
-  `ct_apply_batch_slices` accepts an array of `ct_kv_ref`
-  pointer-length structs; no packing copy.
-- **Client-side batch copy (R25, done)** — proto `bytes` fields are
-  `bytes::Bytes` (via `prost-build` config), and `CrowkvClient::BatchOp`
-  also holds `Bytes` key/value. `batch_write`'s `key.clone()` /
-  `value.clone()` into `KvBatchItem` and the `items.clone()` per retry
-  are all O(1) ref-count bumps, not copies. No further work here.
-
 ---
 
 ## Write-Path Enhancement Ideas
 
 Grounded in the current code (post R16a/R16b/R17/R23/R25/R34/R35/R45b).
-Ordered by expected impact on the per-proposal critical path, which after
-R16b (early-ack, production default-on) and R17 (async engine apply,
-production default-on, gated by the R35 apply fence) is the quorum RPC
-round-trip only — the leader's local fsync and engine apply both run
-off the critical path. Larger items are tracked as backlog requirements.
+The per-proposal critical path, after R16b (early-ack, production
+default-on) and R17 (async engine apply, production default-on, gated
+by the R35 apply fence), is the quorum RPC round-trip only — the
+leader's local fsync and engine apply both run off the critical path.
+Remaining items are tracked as backlog requirements.
 
-- **Apply fence for R17 (R35, done)** — `async_engine_apply` is now
-  production default-on. R17 moves `learn_chosen`'s engine apply
-  (FFI + memtable insert) off the write critical path via
-  `spawn_learn_chosen`: chosen frontier + dedup advance synchronously
-  (so a subsequent Linearizable read's `read_slot` reflects the slot),
-  then `apply_entry` + `advance_applied_frontier` spawn. The **R35 apply
-  fence** (`PxLearner::await_applied`) has Linearizable reads await
-  `contiguous_applied >= read_slot` before serving, restoring
-  read-your-writes; `apply_entry` is idempotent and the frontier/dedup
-  updates are atomic, so a delayed apply is safe. (MinSlot reads already
-  gate on `contiguous_applied` and are unaffected.) Test profiles
-  (`for_tests`, `PxGroup::new`) opt back out for determinism.
-- **Server-side proposal coalescing (R36 → R45/R45b, done)** —
-  implemented. R36 used a timer-based collect-then-flush; R45 replaced
-  it with event-driven immediate flush + drain after round; R45b added
-  a drain threshold (`coalesce_drain_threshold`, default `0` = always
-  drain) that, when set above 0, skips the drain at high load so the
-  `max_keys` overflow path produces full batches. See
-  [`design-slot.md` §23](../design/design-slot.md#23-server-side-proposal-coalescing-r36--r45r45b)
-  for the full design. Benchmark results (10s mem mode, 3-node cluster,
-  max_keys=32, connections=32):
-
-  Standard bench command:
-  `crowkv-cli bench run --mode mem --workload write --duration-secs 10 --threads {T} --connections 32 --coalesce-max-keys 32 [--coalesce-drain-threshold {N}]`
-
-  | Threads | Baseline TPS | R36 TPS | R45b TPS | R36 WAL | R45b WAL |
-  |---|---|---|---|---|---|
-  | 32 | 27,787 | 33,029 | 47,485 | 31,090 | 139,404 |
-  | 64 | 28,062 | 64,145 | 68,741 | 60,498 | 106,926 |
-  | 128 | 28,260 | 97,554 | 101,537 | 92,752 | 101,350 |
-  | 256 | 27,804 | 113,671 | 118,377 | 110,034 | 111,944 |
-
-  R45b beats R36 at high load (128: 102K vs 98K, 256: 118K vs 114K)
-  with no low-load regression (32 threads: 47K, matching event mode).
-  The drain threshold eliminates the 1-op round fragmentation that
-  caused R45 event mode's high-load gap (WAL 425K → 101K at 128
-  threads).
-
-  Coalescer race fix: `coalesce_flush_batch` previously did
-  unconditional `replace(new_batch)`, overwriting batches created by
-  ops arriving between drain's `take()` and flush's `replace()`. This
-  dropped oneshot senders ("coalescer round dropped" errors, ~80 per
-  10s at 256t/c32). Fix: only set new batch when coalescer is still
-  `None`. After fix: zero drops, TPS unchanged.
 - **Fan-out hardening (quorum short-circuit, RPC deadline, phase
   metrics)** — tracked as
   **[R43](../backlog/R43-write-path-fanout-hardening.md)** (backlog).
