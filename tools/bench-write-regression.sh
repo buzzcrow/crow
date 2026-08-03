@@ -63,17 +63,32 @@ run_bench() {
 }
 
 # --- regression sentinel configs ---
+#
+# Reference results (2026-08-04, AMD Ryzen 9 5950X, 16c/32t, x86_64, Linux):
+#   mi=32, coalesce=32, drain=1, 10s mem mode, 3-node cluster, 512B values, 1M keys
+#
+#   T    C    ops/s     WAL      avg    p50    p99    p999   err
+#   1    1    3,029     90,870   327    350    428    564    0
+#   4    2    12,681    274,197  313    300    496    826    0
+#   16   4    32,935    180,596  483    472    804    1,761  0
+#   32   16   52,688    141,915  604    576    1,180  3,708  0
+#   64   32   75,280    109,862  846    800    1,850  4,988  0
+#   128  32   105,779   105,226  1,204  1,124  2,592  9,632  0
+#   256  32   123,745   116,944  2,058  1,911  4,392  14,976 0
+#
+# Coalescing lifts the ceiling from ~29K (non-coalesced) to ~124K at 256T.
+# WAL amortization reaches ~11x at 256T. Zero errors across all configs.
 
 echo -e "label\tops_s\twal_append\tavg_us\tp50_us\tp99_us\tp999_us\terrors" > "$RESULTS_FILE"
 
 echo "=== write (mi=32, coalesce=32, drain=1) ==="
-run_bench 1 1 32 32 1 "write_1t_1c_mi32_coales32_drain1"
-run_bench 4 2 32 32 1 "write_4t_2c_mi32_coales32_drain1"
-run_bench 16 4 32 32 1 "write_16t_4c_mi32_coales32_drain1"
-run_bench 32 16 32 32 1 "write_32t_16c_mi32_coales32_drain1"
-run_bench 64 32 32 32 1 "write_64t_32c_mi32_coales32_drain1"
-run_bench 128 32 32 32 1 "write_128t_32c_mi32_coales32_drain1"
-run_bench 256 32 32 32 1 "write_256t_32c_mi32_coales32_drain1"
+run_bench 1 1 32 32 1 "write_1t_1c_mi32_coales32_drain1"        # ref: 3,029 ops/s
+run_bench 4 2 32 32 1 "write_4t_2c_mi32_coales32_drain1"        # ref: 12,681 ops/s
+run_bench 16 4 32 32 1 "write_16t_4c_mi32_coales32_drain1"      # ref: 32,935 ops/s
+run_bench 32 16 32 32 1 "write_32t_16c_mi32_coales32_drain1"    # ref: 52,688 ops/s
+run_bench 64 32 32 32 1 "write_64t_32c_mi32_coales32_drain1"    # ref: 75,280 ops/s
+run_bench 128 32 32 32 1 "write_128t_32c_mi32_coales32_drain1"  # ref: 105,779 ops/s
+run_bench 256 32 32 32 1 "write_256t_32c_mi32_coales32_drain1"  # ref: 123,745 ops/s
 
 echo "=== DONE ==="
 echo "Results in $RESULTS_FILE"
