@@ -73,11 +73,11 @@ pub struct PaxosConfig {
     pub coalesce_window_us: u64,
     /// R45b drain threshold: skip draining the pending batch in
     /// `coalesce_drain_after_round` when the in-flight slot-task count
-    /// (`occupied + waiting`) is at or above this value. Lets the
-    /// `max_keys` overflow path handle high load (full batches) while
-    /// the drain maintains concurrency at low-moderate load. Default
-    /// `1` (set via CLI when coalescing is enabled). `0` = always drain
-    /// (disables the heuristic).
+    /// (`occupied`) is at or above this value. Lets the `max_keys`
+    /// overflow path handle high load (full batches) while the drain
+    /// maintains concurrency at low-moderate load. Default
+    /// `max_inflight / 4` (set via CLI when coalescing is enabled).
+    /// `0` = always drain (disables the heuristic).
     pub coalesce_drain_threshold: usize,
 }
 
