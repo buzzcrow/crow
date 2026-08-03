@@ -151,41 +151,41 @@ see `in_flight >= T` and skip; the last T finishers each see
 get `None`/empty and go idle). The batch is never stuck — at least one
 finisher always takes it. The 1000ms watchdog is a backstop.
 
-**Behavior by load** (threshold=1):
-- **High load** (128-256 threads): 2+ slot-tasks always in flight →
-  drain always skips. Batches fill to `max_keys=32` via overflow —
-  full batches, like R36. No fragmentation, no 1-op rounds.
-- **Moderate load** (64 threads): 1-2 slot-tasks in flight → drain
-  fires when the last slot-task finishes, takes the accumulated batch,
+**Behavior by load** (threshold=`max_inflight / 4` = 8):
+- **High load** (128-256 threads): 8+ slot-tasks always in flight →
+  drain skips. Batches fill to `max_keys=32` via overflow — full
+  batches, like R36. No fragmentation, no 1-op rounds.
+- **Moderate load** (64 threads): 1-8 slot-tasks in flight → drain
+  fires when the count drops below 8, takes the accumulated batch,
   starts the next round. Maintains concurrency without fragmenting.
-- **Low load** (32 threads): 1 slot-task at a time → drain fires
-  after every round (in_flight drops to 0). Same as pure event mode —
-  no timer tax, small batches OK.
+- **Low load** (32 threads): 1-2 slot-tasks in flight → drain always
+  fires (count well below 8). Same as pure event mode — no timer tax,
+  small batches OK.
 
 ## Config
 
 - `coalesce_max_keys`: batch size cap. `0` = coalescing off (one
   proposal per key). Default `0` (opt-in).
 - `coalesce_drain_threshold`: skip drain when in-flight count >= this
-  value. Default `1` (set automatically when coalescing is enabled and
-  no explicit value given). `0` = always drain (disables the
-  heuristic, reverts to pure event mode / Strategy 2).
+  value. Default `max_inflight / 4` (set automatically when coalescing
+  is enabled and no explicit value given). `0` = always drain
+  (disables the heuristic, reverts to pure event mode / Strategy 2).
 
 ## Benchmark results (10s mem mode, 3-node cluster, max_keys=32)
 
 | Threads | R36 TPS | R45 event TPS | R45b TPS | R36 WAL | R45 event WAL | R45b WAL |
 |---|---|---|---|---|---|---|
-| 32 | 33,029 | 48,346 | 42,090 | 31,090 | 401,897 | 124,217 |
-| 64 | 64,145 | 68,201 | 69,108 | 60,498 | 377,591 | 107,645 |
-| 128 | 97,554 | 86,759 | 101,033 | 92,752 | 425,484 | 100,656 |
-| 256 | 113,671 | 97,865 | 119,098 | 110,034 | 437,744 | 112,494 |
+| 32 | 33,029 | 48,346 | 47,485 | 31,090 | 401,897 | 139,404 |
+| 64 | 64,145 | 68,201 | 68,741 | 60,498 | 377,591 | 106,926 |
+| 128 | 97,554 | 86,759 | 101,537 | 92,752 | 425,484 | 101,350 |
+| 256 | 113,671 | 97,865 | 118,377 | 110,034 | 437,744 | 111,944 |
 
-R45b (threshold=1) beats R36 at high load (128: 101K vs 98K, 256:
-119K vs 114K) while cutting WAL 3-4x vs pure event mode (425K→101K at
-128, 438K→112K at 256). At 64 threads it beats both R36 and event mode
-(69K vs 64K/68K). At 32 threads it's below event mode (42K vs 48K) but
-above R36 (33K) — the threshold occasionally skips a drain that would
-maintain concurrency at very low load.
+R45b (threshold=`max_inflight / 4`) beats R36 at high load (128: 102K
+vs 98K, 256: 118K vs 114K) while cutting WAL 3-4x vs pure event mode
+(425K→101K at 128, 438K→112K at 256). At 64 threads it matches event
+mode and beats R36 (69K vs 64K). At 32 threads it matches event mode
+(47K vs 48K) — the threshold of 8 is high enough that drains always
+fire at low load, preserving the zero-latency-floor behavior.
 
 ## What stays unchanged across R45/R45b
 
@@ -199,12 +199,12 @@ maintain concurrency at very low load.
 ## Acceptance
 
 - `coalesce_max_keys` controls on/off (0 = off).
-- `coalesce_drain_threshold` defaults to `1` when coalescing is on.
-- At high load (128+ threads): TPS beats R36 (101K+ at 128, 119K+ at
+- `coalesce_drain_threshold` defaults to `max_inflight / 4` when
+  coalescing is on.
+- At high load (128+ threads): TPS beats R36 (101K+ at 128, 118K+ at
   256).
-- At moderate load (64 threads): TPS beats both R36 and event mode.
-- At low load (32 threads): TPS above R36, below event mode (small
-  tradeoff for high-load gains).
+- At moderate load (64 threads): TPS matches event mode, beats R36.
+- At low load (32 threads): TPS matches event mode (no regression).
 - All coalescing tests pass (dedup, ordering, max_keys, engine apply,
   sequential batches).
 

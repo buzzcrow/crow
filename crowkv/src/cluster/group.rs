@@ -1713,16 +1713,16 @@ impl PxGroup {
     /// zero-latency-floor behavior at low load.
     ///
     /// R45b drain threshold: if the in-flight slot-task count
-    /// (`occupied + waiting`) is at or above `coalesce_drain_threshold`,
-    /// skip the drain — the `max_keys` overflow path handles high load
-    /// with full batches, and draining here would fragment the batch
-    /// (many slot-tasks racing to take one shared batch). The permit is
+    /// (`occupied`) is at or above `coalesce_drain_threshold`, skip the
+    /// drain — the `max_keys` overflow path handles high load with full
+    /// batches, and draining here would fragment the batch (many
+    /// slot-tasks racing to take one shared batch). The permit is
     /// already released before this call, so the last finisher always
     /// sees a count below threshold and takes the batch.
     fn coalesce_drain_after_round(&self) {
         self.coalesce_touch_activity();
         let threshold = self.config.paxos.coalesce_drain_threshold;
-        if threshold > 0 && self.inflight.in_flight_count() >= u64::try_from(threshold).unwrap_or(u64::MAX) {
+        if threshold > 0 && self.inflight.occupied() >= u64::try_from(threshold).unwrap_or(u64::MAX) {
             return;
         }
         let batch = self.coalescer.lock().take();
@@ -2538,13 +2538,6 @@ impl InflightAdmission {
             .map(tokio::sync::Semaphore::available_permits)
             .sum();
         u64::try_from(total.saturating_sub(avail)).unwrap_or(0)
-    }
-
-    /// Total in-flight slot-tasks: permits held (running rounds) plus
-    /// tasks parked on `acquire().await` (window full). Used by the
-    /// R45b drain threshold to decide whether to skip draining.
-    fn in_flight_count(&self) -> u64 {
-        self.occupied() + self.waiting.load(Ordering::Relaxed)
     }
 
     /// Route to a queue via round-robin.
