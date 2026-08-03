@@ -12,7 +12,7 @@ use crowkv::common::config::CrowKVConfig;
 #[allow(clippy::cast_possible_truncation)]
 fn encode_put(key: &[u8], value: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.push(1u8);
+    buf.extend_from_slice(&1u16.to_le_bytes());
     buf.push(0u8);
     buf.extend_from_slice(&(key.len() as u32).to_le_bytes());
     buf.extend_from_slice(key);
@@ -132,7 +132,8 @@ async fn coalesce_dedup_tags_recorded() {
 
 #[tokio::test]
 async fn coalesce_max_keys_overflow_starts_concurrent_round() {
-    let group = coalesce_group(2);
+    let group = coalesce_group(32);
+    group.set_coalesce_max_keys_for_tests(2);
     let (gate_tx, gate_rx) = tokio::sync::oneshot::channel();
     group.set_coalesce_round_gate_for_tests(gate_rx);
     let g = Arc::clone(&group);

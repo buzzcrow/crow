@@ -44,7 +44,7 @@ impl Batch {
     /// `PxKvStore::encode_kv_payload` / `encode_kv_batch_items`.
     ///
     /// Wire format:
-    ///   [`op_count`: u8]
+    ///   [`op_count`: u16 LE]
     ///   for each op:
     ///     [`kind`: u8]  0 = Put, 1 = Delete
     ///     [`key_len`: u32 LE][key bytes]
@@ -58,8 +58,9 @@ impl Batch {
         if payload.is_empty() {
             return Self { ops };
         }
-        let op_count = payload[0] as usize;
-        let mut offset = 1usize;
+        let op_count =
+            u16::from_le_bytes([*payload.first().unwrap_or(&0), *payload.get(1).unwrap_or(&0)]) as usize;
+        let mut offset = 2usize;
         for _ in 0..op_count {
             if offset >= payload.len() {
                 break;

@@ -29,7 +29,7 @@ const REPLICA_ID: u64 = 7;
 
 fn encode_put_payload(key: &[u8], value: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.push(1); // op = PUT
+    buf.extend_from_slice(&1u16.to_le_bytes()); // op_count = 1
     buf.push(0); // flags
     let key_len = u32::try_from(key.len()).expect("key length exceeds u32");
     buf.extend_from_slice(&key_len.to_le_bytes());
@@ -42,7 +42,7 @@ fn encode_put_payload(key: &[u8], value: &[u8]) -> Vec<u8> {
 
 fn encode_delete_payload(key: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.push(1); // op = DELETE
+    buf.extend_from_slice(&1u16.to_le_bytes()); // op_count = 1
     buf.push(1); // kind = Delete
     let key_len = u32::try_from(key.len()).expect("key length exceeds u32");
     buf.extend_from_slice(&key_len.to_le_bytes());
@@ -54,7 +54,7 @@ fn encode_delete_payload(key: &[u8]) -> Vec<u8> {
 #[allow(clippy::cast_possible_truncation)]
 fn encode_batch_payload(ops: &[(Vec<u8>, Option<Vec<u8>>)]) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.push(ops.len() as u8); // op_count
+    buf.extend_from_slice(&(ops.len() as u16).to_le_bytes()); // op_count
     for (key, value) in ops {
         if let Some(v) = value {
             buf.push(0); // kind = Put

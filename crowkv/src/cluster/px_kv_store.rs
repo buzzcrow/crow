@@ -627,7 +627,7 @@ impl PxKvStore {
 
     fn encode_kv_payload(ops: &[(&[u8], Option<&[u8]>)]) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.push(ops.len() as u8);
+        buf.extend_from_slice(&(ops.len() as u16).to_le_bytes());
         for (key, value_opt) in ops {
             buf.push(u8::from(value_opt.is_none()));
             buf.extend_from_slice(&(key.len() as u32).to_le_bytes());
@@ -643,7 +643,7 @@ impl PxKvStore {
 
     fn encode_kv_batch_items(items: &[crate::rpc::KvBatchItem]) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.push(items.len() as u8);
+        buf.extend_from_slice(&(items.len() as u16).to_le_bytes());
         for item in items {
             buf.push(u8::from(item.is_delete));
             buf.extend_from_slice(&(item.key.len() as u32).to_le_bytes());
