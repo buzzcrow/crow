@@ -71,6 +71,14 @@ pub struct PaxosConfig {
     /// (drain panic, spawn failure). Default 0 (watchdog still active at
     /// fixed 1000ms).
     pub coalesce_window_us: u64,
+    /// R45b drain threshold: skip draining the pending batch in
+    /// `coalesce_drain_after_round` when the in-flight slot-task count
+    /// (`occupied + waiting`) is at or above this value. Lets the
+    /// `max_keys` overflow path handle high load (full batches) while
+    /// the drain maintains concurrency at low-moderate load. Default
+    /// `1` (set via CLI when coalescing is enabled). `0` = always drain
+    /// (disables the heuristic).
+    pub coalesce_drain_threshold: usize,
 }
 
 impl PaxosConfig {
@@ -83,6 +91,7 @@ impl PaxosConfig {
         inflight_admission: AdmissionPolicy::Queue,
         coalesce_max_keys: 0,
         coalesce_window_us: 0,
+        coalesce_drain_threshold: 0,
     };
 }
 
