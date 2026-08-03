@@ -126,7 +126,7 @@ async fn main() {
     if let Some(threshold) = args.coalesce_drain_threshold {
         config.paxos.coalesce_drain_threshold = threshold;
     } else if config.paxos.coalesce_max_keys > 0 && config.paxos.coalesce_drain_threshold == 0 {
-        config.paxos.coalesce_drain_threshold = 1;
+        config.paxos.coalesce_drain_threshold = (config.paxos.max_inflight_proposals / 4).max(1);
     }
 
     let registry = Arc::new(KvStoreRegistry::with_config(config).with_metrics_registry(
