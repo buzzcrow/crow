@@ -38,7 +38,8 @@ Client PUT/DELETE/BatchWrite
               batch is non-empty AND inflight.occupied() <
               coalesce_drain_threshold, flush it as the next round
               immediately (zero-latency-floor at low load); else go idle.
-              Default threshold = 0 → always drain (R45b threshold off)
+              Default threshold = 1 (auto-set by server when coalescing
+              is on; 0 = always drain = pure event mode)
             - Watchdog (WATCHDOG_US = 1 s): single long-running task,
               flushes a stuck non-empty batch if no coalescer activity
               for 1 s (safety net against missed wakes)
