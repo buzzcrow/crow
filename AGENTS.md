@@ -8,11 +8,11 @@ Rust workspace + C++ storage engine (via FFI).
 
 ## Crates
 
-- **`crowkv`** — core lib: consensus, engine, WAL, I/O, RPC, reconfiguration.
-- **`crowkv-client`** — client library (retry, topology cache, `NotLeaderHint`).
-- **`crowkv-server`** — binary: CLI, HTTP management API, store/group/replica wiring.
-- **`crowkv-console/{shared,web,cli}`** — management console (Axum+React web, `clap` CLI, shared core).
-- **`crow-tree/ffi`** — Rust FFI bindings to C++ crow-tree storage engine.
+- **`crow-kv`** — core lib: consensus, engine, WAL, I/O, RPC, reconfiguration.
+- **`crow-kv-client`** — client library (retry, topology cache, `NotLeaderHint`).
+- **`crow-kv-server`** — binary: CLI, HTTP management API, store/group/replica wiring.
+- **`crow-console-shared`** / **`crow-web`** / **`crow-cli`** — management console (shared core lib, Axum+React web, `clap` CLI); general cluster-management surface, not limited to CrowKV.
+- **`lib/crow-tree/ffi`** — Rust FFI bindings to C++ crow-tree storage engine.
 
 ## Hard Constraints
 

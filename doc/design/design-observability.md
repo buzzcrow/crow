@@ -37,7 +37,7 @@ handles cross the FFI boundary at runtime.
 - **LatencySummary** (`AtomicU64` x 4) — lightweight latency tracking
   (count + sum + max + total_count). `observe(ns)`. Flush shows `avg(us)`,
   `max(us)`. Use cases: scan, snapshot, WAL append, RPC, apply.
-- **PreciseHistogram** (`crow-common/rust/src/metrics/precise.rs`) —
+- **PreciseHistogram** (`lib/crow-common/rust/src/metrics/precise.rs`) —
   HDR-style logarithmic histogram delivering ≥3 significant digits of
   percentile precision, the precise counterpart to the fixed-bucket
   `LatencyHistogram`. `1024` linear sub-buckets per power-of-2 magnitude
@@ -59,14 +59,14 @@ registry has `start(interval_secs)` (spawns flush thread/task), `stop()`
 (final flush + join), and `flush()` (iterate all metrics, snapshot, format,
 reset window state). Interval is typically 5s or 10s.
 
-- Rust (`crowkv/src/metrics/mod.rs`): `MetricsRegistry` with type-grouped
+- Rust (`lib/crow-kv/src/metrics/mod.rs`): `MetricsRegistry` with type-grouped
   `Vec<T>` collections, `Arc`-shared, metric handles stored on service/store
   structs. `MetricsRunner` spawns a tokio interval task, computes real
   elapsed `window_secs` per tick, flushes Rust metrics, then invokes a
   post-flush callback that calls C++ `flush_metrics_str()` for each engine
   and writes the `[cpp-metrics]` block. Also provides `snapshot(prefix)` for
   in-memory access without resetting window state.
-- C++ (`crow-tree/include/crow-tree/metrics.h`, `crow-tree/src/metrics.cpp`):
+- C++ (`lib/crow-tree/include/lib/crow-tree/metrics.h`, `lib/crow-tree/src/metrics.cpp`):
   Same type-grouped pattern. `Crowtree` owns its own `MetricsRegistry`
   internally (`init_metrics(prefix)` called from `open()`). Metric handles
   are raw pointers (registry owns lifetime). `flush_metrics_str()` captures
@@ -246,7 +246,7 @@ quorum-th-fastest remote latency, not the full fan-out tail.
 
 ### Client Metrics
 
-`crowkv-client` exposes its own `ClientMetrics` (lock-free `AtomicU64`
+`crow-kv-client` exposes its own `ClientMetrics` (lock-free `AtomicU64`
 counters, snapshotted via `ClientMetricsSnapshot`) for retry, topology,
 and read-distribution observability. They are not part of the server's
 `MetricsRegistry` — the client is a separate process and has no C++

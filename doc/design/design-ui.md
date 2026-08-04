@@ -94,7 +94,7 @@ No navigation stack / back button in v1.
 
 ## 4. Visual Language
 
-Single dark theme via CSS variables under `.crowkv-console` (existing
+Single dark theme via CSS variables under `.crow-console` (existing
 tokens in `src/index.css`). Status colors: `--healthy`, `--degraded`,
 `--failed`, `--unknown`, plus `--remote` for remote-replica accent.
 
@@ -211,8 +211,8 @@ The SPA is mountable as a sub-component with a minimal props interface
 (`apiPrefix`, `basePath`, `readonly`, `modules` opt-out, `initialViewMode`,
 `onEvent` callback). Three isolation rules:
 
-- **Style isolation** — everything wraps in `.crowkv-console`; Tailwind
-  uses the `tw-` prefix and `important: '.crowkv-console'`.
+- **Style isolation** — everything wraps in `.crow-console`; Tailwind
+  uses the `tw-` prefix and `important: '.crow-console'`.
 - **API isolation** — every fetch resolves against `apiPrefix`.
 - **Standalone** — `index.html` mounts at the document root with defaults;
   `embed.ts` exports the component for hosts.
@@ -256,6 +256,6 @@ needed for the lean surface.
 
 - Existing Vitest unit tests for dialog request bodies and `listRacks`
   envelope handling are **retained** (they pin the backend contract).
-- The Playwright real-backend E2E suite (`crowkv-console/web/ui/e2e/`)
+- The Playwright real-backend E2E suite (`app/crow-web/ui/e2e/`)
   targets this lean SPA; selectors track the rewritten DOM. The full
   chain rack→node→deploy→store→group→replica→KV is the acceptance bar.

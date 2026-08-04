@@ -1,0 +1,36 @@
+[package]
+name = "crow-kv-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CrowKV server binary: single-group, multi-group, and cluster modes."
+
+[[bin]]
+name = "crow-kv-server"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+[dependencies]
+crow-kv = { path = "../../lib/crow-kv" }
+crow-tree-ffi = { path = "../../lib/crow-tree/ffi" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal"] }
+tracing = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+axum = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dashmap = "6"
+utoipa = "5"
+
+[dev-dependencies]
+reqwest = { version = "0.12", features = ["json"] }
+tonic = { workspace = true }
+tempfile = "3"
+bytes = "1"

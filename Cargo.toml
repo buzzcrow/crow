@@ -1,17 +1,17 @@
 [workspace]
 resolver = "2"
 members = [
-    "crow-common/rust",
-    "crowkv",
-    "crowkv-client",
-    "crowkv-server",
-    "crowkv-console/shared",
-    "crowkv-console/web",
-    "crowkv-console/cli",
-    "crow-tree/ffi",
+    "lib/crow-common/rust",
+    "lib/crow-kv",
+    "lib/crow-kv-client",
+    "app/crow-kv-server",
+    "lib/crow-console-shared",
+    "app/crow-web",
+    "app/crow-cli",
+    "lib/crow-tree/ffi",
 ]
 # : crow-tree/ffi moved from `exclude` into `members` now that
-# crowkv depends on it (CrowTreeEngine) -- building crowkv already triggers
+# crow-kv depends on it (CrowTreeEngine) -- building crow-kv already triggers
 # the C++ build step via crow-tree-ffi's build.rs regardless of workspace
 # membership, so the original "keep the C build out of the main workspace"
 # rationale for excluding it no longer holds; membership instead unifies
@@ -31,7 +31,7 @@ categories = ["database-implementations", "distributed-systems"]
 
 [workspace.dependencies]
 tokio = { version = "1.40", default-features = false }
-crow-common = { path = "crow-common/rust" }
+crow-common = { path = "lib/crow-common/rust" }
 tonic = "0.12"
 prost = { version = "0.13", features = ["derive"] }
 tracing = "0.1"

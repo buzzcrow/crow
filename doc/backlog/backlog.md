@@ -40,10 +40,10 @@ complexity, and dependency. Before implementation, follow the
   Cap'n Proto RPC.
 - **[R33](R33-crow-tree-rename.md)** — Extract crow-tree to separate repo and rename — Area:
   workspace — Move `crowtree/` into its own git repository (preserving
-  history), wire `crowkv` to depend on `crow-tree-ffi` as an external
+  history), wire `crow-kv` to depend on `crow-tree-ffi` as an external
   dependency, and rename the crate/namespace/macros from `crowtree` to
-  `crow-tree` / `crow::tree` / `CROW_TREE_*`. Establishes the `crowkv` →
-  `crow-tree` dependency boundary analogous to `crowkv` → `crow-common`.
+  `crow-tree` / `crow::tree` / `CROW_TREE_*`. Establishes the `crow-kv` →
+  `crow-tree` dependency boundary analogous to `crow-kv` → `crow-common`.
   Most naturally done after R12.
 - **[R37](R37-scan-start-after-pushdown.md)** — Scan `start_after` push-down into the C++ engine — Area:
   read path / scan — `ct_scan_async` takes only `prefix` + `limit`; when

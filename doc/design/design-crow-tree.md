@@ -9,9 +9,9 @@ Satisfies: design.md §8.3 learner storage](design.md)
 This is the parent document for **crow-tree**, the production storage engine that
 backs CrowKV learners: an embeddable, ordered key-value engine implementing the
 CrowKV `KVEngine` contract, built as a standalone C++ library (`libcrow-tree`) and
-consumed from the Rust `crowkv` crate over a C ABI. It records the decisions
+consumed from the Rust `crow-kv` crate over a C ABI. It records the decisions
 behind that design and maps the sub-design documents. `libcrow-tree` is fully
-implemented, wired into `crowkv` (`CrowTreeEngine`), and shipped; this document
+implemented, wired into `crow-kv` (`CrowTreeEngine`), and shipped; this document
 set is the durable record of *why* it looks the way it does, not a build plan —
 see [`todo_code.md`](../todo_code.md) for anything still open.
 
@@ -98,7 +98,7 @@ not a dependency. What crow-tree reused vs. dropped vs. simplified from it:
 ## 2. Architecture
 
 ```
-crowkv (Rust)
+crow-kv (Rust)
   PxLearner ──drives──► dyn KVEngine
                           ├─ InMemKV            (Rust, tests)
                           └─ CrowTreeEngine     (Rust, FFI adapter; §4)
@@ -238,7 +238,7 @@ trivial: the receiver imports the root at `S`, then replays the WAL from
 ## 4. FFI Boundary
 
 The boundary is **coarse** (engine-level). The Rust `CrowTreeEngine`
-(`crowkv/src/kv/crow_tree_engine.rs`) is a thin adapter that:
+(`lib/crow-kv/src/kv/crow_tree_engine.rs`) is a thin adapter that:
 
 - Owns an opaque `*mut ct_tree` handle returned by `ct_open`.
 - Translates `Batch` / keys / ranges to `(ptr, len)` pairs across the C ABI.
@@ -249,7 +249,7 @@ The boundary is **coarse** (engine-level). The Rust `CrowTreeEngine`
 - Maps C status codes to `EngineError`.
 
 Ownership rules (enforced by convention, documented at the C API in
-`crow-tree/include/crow-tree/c_api.h`, the single source of truth for exact
+`lib/crow-tree/include/lib/crow-tree/c_api.h`, the single source of truth for exact
 signatures):
 
 - Buffers passed *into* C are borrowed for the call's duration only.

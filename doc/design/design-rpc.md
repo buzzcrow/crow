@@ -51,7 +51,7 @@ bytes in P1 M2; `kind` discrimination (empty = `NoOp`, non-empty =
 `Write`) is not a protobuf field — `ConfigChange` and
 `DedupCheckpoint` kinds are designed but not yet implemented.
 
-The full protobuf definitions are in `crowkv/src/rpc/proto/`; this
+The full protobuf definitions are in `lib/crow-kv/src/rpc/proto/`; this
 doc covers design decisions only.
 
 ---
@@ -95,7 +95,7 @@ flows through `LearnerStream`.
 
 **Cluster discovery — HTTP, not gRPC.** A gRPC `AdminService.DescribeCluster`
 RPC was sketched but **rejected, not deferred**. Cluster/topology
-discovery is served by `crowkv-server`'s existing HTTP management API
+discovery is served by `crow-kv-server`'s existing HTTP management API
 (`GET /topology`), which every client polls for
 `(store_id, group_id) -> leader_endpoint` discovery. No
 `AdminService` gRPC service exists or is planned.
@@ -267,7 +267,7 @@ making every clone an O(n) heap allocate + memcpy. For hot-path KV
 fields that are cloned across retry loops or fanout, this is
 avoidable.
 
-`crowkv/build.rs` uses `prost_build::Configure::bytes([...])` to map
+`lib/crow-kv/build.rs` uses `prost_build::Configure::bytes([...])` to map
 selected `bytes` proto fields to `bytes::Bytes` instead, turning
 clones into O(1) atomic ref-count bumps:
 
@@ -282,7 +282,7 @@ clones into O(1) atomic ref-count bumps:
 - `KvScanRequest.prefix`, `KvScanRequest.start_after` — scan request.
 - `KvScanItem.key`, `KvScanItem.value` — scan response items.
 
-The client `BatchOp` type (`crowkv-client/src/client.rs`) also uses
+The client `BatchOp` type (`lib/crow-kv-client/src/client.rs`) also uses
 `Bytes` for `key` and `value`, so `BatchOp` → `KvBatchItem` conversion
 and the per-retry `items.clone()` are both O(1) per item.
 

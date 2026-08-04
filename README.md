@@ -62,11 +62,11 @@ Multi-Paxos treats each slot as an independent Paxos instance. Slots can be **de
 
 | Crate | What it is |
 | --- | --- |
-| `crowkv` | Core library: Multi-Paxos consensus, WAL, storage engine trait, RPC, reconfiguration |
-| `crowkv-server` | Server binary: hosts groups, serves gRPC + HTTP management API |
-| `crowkv-client` | Client library: topology cache, retry, idempotency |
+| `crow-kv` | Core library: Multi-Paxos consensus, WAL, storage engine trait, RPC, reconfiguration |
+| `crow-kv-server` | Server binary: hosts groups, serves gRPC + HTTP management API |
+| `crow-kv-client` | Client library: topology cache, retry, idempotency |
 | `crow-tree` | Custom storage engine (C++ core + Rust FFI): B+tree, delta chains, io_uring reactor, buffer pool |
-| `crowkv-console` | Operations console: web UI (Axum + React) and CLI |
+| `crow-console` | Operations console: web UI (Axum + React) and CLI |
 
 <details>
 <summary><b>Getting Started</b></summary>

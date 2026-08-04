@@ -49,7 +49,7 @@ because no operation reads before writing.
 - **No client-side transactions.** Each request is independent and
   idempotent.
 - **No authn/authz.** Trusted-network assumption. Consumers needing
-  auth should wrap `crowkv` in a server that adds it.
+  auth should wrap `crow-kv` in a server that adds it.
 - **No full Jepsen-style linearizability checking.** Testing verifies
   same-state comparison and controlled-order verification.
 
@@ -99,7 +99,7 @@ Full design: `design-console.md` §4.3, `design-kv-server.md` §2.2/§2.4.
 
 ### 3.4 Explicit group_id on every RPC
 
-`crowkv` performs no key-to-group mapping. An application built on top
+`crow-kv` performs no key-to-group mapping. An application built on top
 is free to implement `hash(key) % num_groups` or any other policy —
 that policy is layered on top of, not inside, the core library.
 
@@ -163,7 +163,7 @@ single-field overrides without rebuilding the whole struct. The
         └─────────┘
 ```
 
-- **KvStore** — KV-facing runtime on one physical node (`crowkv-server`
+- **KvStore** — KV-facing runtime on one physical node (`crow-kv-server`
   process). Hosts multiple `PxGroup`s; routes by explicit `group_id`.
 - **PxGroup** — independent Paxos ensemble. Contains one
   `PxLocalReplica` (acceptor + learner) and N−1 `PxRemoteReplica`
@@ -241,7 +241,7 @@ Full design: `design-wal.md`, `design-state-machine.md`,
 
 ## 9. Cluster Lifecycle
 
-- **Bootstrap** — operator starts each `crowkv-server`, deploys via
+- **Bootstrap** — operator starts each `crow-kv-server`, deploys via
   console, then calls `POST /api/cluster/init` to create the system
   group (store 0, group 0). Data store/group creation is blocked
   (`409`) until the cluster is initialized. Each node persists its
@@ -267,7 +267,7 @@ Full design: `design-wal.md`, `design-state-machine.md`,
   behavior for backward compatibility. A `GET
   /stores/:sid/groups/:gid/ready` endpoint checks cluster readiness
   (leader elected, quorum reachable, applied-slot lag). The operation
-  registry is an in-memory `DashMap` in `crowkv-server`; background
+  registry is an in-memory `DashMap` in `crow-kv-server`; background
   tasks poll group status until a new leader appears or timeout.
 
 Full design: `design-reconfiguration.md`, `design-kv-server.md`.
@@ -322,21 +322,21 @@ Single-leader hot path: **Proposer → WAL → Replicator → Learner → ack.**
 ## 12. Crate Layout
 
 ```
-crow-common/rust    (shared Rust crate: metrics, logging, time, report)
-crow-common/cpp     (shared C++ static lib: crc32c, log, compressing_sink, gzip, metrics)
-crowkv              (core library: consensus, engine, wal, rpc, cluster)
-crowkv-client       (client library: topology cache, retry, NotLeader handling)
-crowkv-server       (binary: CLI, HTTP mgmt API, store/group wiring)
-crowkv-console/shared  (console core: API client, models)
-crowkv-console/web     (Axum web server + React SPA)
-crowkv-console/cli     (CLI binary: crowkv command)
-crow-tree/ffi        (C++ B+tree engine, FFI bridge to Rust)
+lib/crow-common/rust    (shared Rust crate: metrics, logging, time, report)
+lib/crow-common/cpp     (shared C++ static lib: crc32c, log, compressing_sink, gzip, metrics)
+lib/crow-kv              (core library: consensus, engine, wal, rpc, cluster)
+lib/crow-kv-client       (client library: topology cache, retry, NotLeader handling)
+app/crow-kv-server       (binary: CLI, HTTP mgmt API, store/group wiring)
+lib/crow-console-shared  (console core: API client, models)
+app/crow-web             (Axum web server + React SPA)
+app/crow-cli             (CLI binary: cluster management command)
+lib/crow-tree/ffi        (C++ B+tree engine, FFI bridge to Rust)
 ```
 
 `crow-common` holds project-agnostic utilities shared across the
 storage-system stack. The Rust crate (`crow-common`) provides the
 metrics registry, `tracing`-based logging wrapper, monotonic-time
-helpers, and multi-step error aggregator; `crowkv` re-exports them at
+helpers, and multi-step error aggregator; `crow-kv` re-exports them at
 their original module paths so call sites compile unchanged. The C++
 static library (`libcrowcommon.a`, namespace `crow::common`) provides
 CRC32C, the spdlog logging facade (`CR_LOG_*` macros), the compressing
@@ -361,14 +361,14 @@ The async disk I/O substrate (`AsyncFile`: io_uring on Linux ≥ 5.11,
 
 ## 14. Components
 
-- **`crowkv`** — core library: consensus, engine, WAL, I/O, RPC, reconfiguration.
+- **`crow-kv`** — core library: consensus, engine, WAL, I/O, RPC, reconfiguration.
 - **`crow-common`** — shared utilities (Rust crate + C++ static lib):
   metrics, logging, time, report (Rust); CRC32C, spdlog facade,
   compressing sink, gzip, atomic metrics (C++).
-- **`crowkv-server`** — reference server binary. Design: `design-kv-server.md`.
-- **`crowkv-console`** — unified management project (Web UI + CLI).
+- **`crow-kv-server`** — reference server binary. Design: `design-kv-server.md`.
+- **`crow-console`** — unified management project (Web UI + CLI).
   Design: `design-console.md`, `design-ui.md`.
-- **`crowbench`** — benchmark tool, fulfilled by `crowkv-console` CLI
+- **`crowbench`** — benchmark tool, fulfilled by `crow-console` CLI
   `bench` subcommand.
 - **RPC** — protobuf over gRPC (tonic + prost). Design: `design-rpc.md`.
 

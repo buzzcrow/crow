@@ -275,7 +275,7 @@ tr:hover td { background: var(--code-bg); }
   <aside class="sidebar">
 <div class="sidebar-brand"><span class="brand-mark"></span>CrowKV</div>
 <nav>
-<a href="#crowkv-user-guide" class="">CrowKV User Guide</a>
+<a href="#crow-kv-user-guide" class="">CrowKV User Guide</a>
 <a href="#1-quick-start-bootstrap-a-3-node-cluster" class="sub">1. Quick Start: Bootstrap a 3-Node Cluster</a>
 <a href="#2-kv-operations" class="sub">2. KV Operations</a>
 <a href="#3-cluster-management" class="sub">3. Cluster Management</a>
@@ -286,24 +286,24 @@ tr:hover td { background: var(--code-bg); }
 </nav>
   </aside>
   <main class="content">
-<h1 id="crowkv-user-guide">CrowKV User Guide</h1>
+<h1 id="crow-kv-user-guide">CrowKV User Guide</h1>
 <p>This guide walks through starting a cluster, performing basic KV</p>
 <p>operations, managing topology, and running upgrades.</p>
 <p>CrowKV provides three interfaces for cluster management and data</p>
 <p>access:</p>
 <ul>
-<li><strong>Web UI</strong> — the <code>crowkv-web</code> service provides a visual dashboard</li>
+<li><strong>Web UI</strong> — the <code>crow-web</code> service provides a visual dashboard</li>
 </ul>
 <p>  with cluster topology, group health, a KV Operator panel (store/group</p>
 <p>  selector, paginated scan, inline CRUD, demo data injection), and</p>
 <p>  Swagger UI for browsing the OpenAPI spec of any registered</p>
-<p>  <code>crowkv-server</code> instance.</p>
+<p>  <code>crow-kv-server</code> instance.</p>
 <ul>
-<li><strong>CLI</strong> — the <code>crowkv-cli</code> CLI tool is a thin wrapper over the same</li>
+<li><strong>CLI</strong> — the <code>crow-cli</code> CLI tool is a thin wrapper over the same</li>
 </ul>
-<p>  service HTTP API. It talks to a <code>crowkv-web</code> service</p>
+<p>  service HTTP API. It talks to a <code>crow-web</code> service</p>
 <p>  (<code>--ip</code> / <code>--port</code>, default <code>127.0.0.1:9920</code>); the service resolves</p>
-<p>  upstream <code>crowkv-server</code> nodes. Use <code>--json</code> for machine-readable</p>
+<p>  upstream <code>crow-kv-server</code> nodes. Use <code>--json</code> for machine-readable</p>
 <p>  output.</p>
 <ul>
 <li><strong>RESTful API</strong> — the service HTTP API is the underlying transport</li>
@@ -312,25 +312,25 @@ tr:hover td { background: var(--code-bg); }
 <p>  §7 (API Reference).</p>
 <p>The examples below show both CLI and curl for each operation. All</p>
 <p>examples assume these shell variables are set once:</p>
-<pre><code class="bash">IP=127.0.0.1        # crowkv-web service IP
-PORT=9920           # crowkv-web service port</code></pre>
+<pre><code class="bash">IP=127.0.0.1        # crow-web service IP
+PORT=9920           # crow-web service port</code></pre>
 <hr>
 <h2 id="1-quick-start-bootstrap-a-3-node-cluster">1. Quick Start: Bootstrap a 3-Node Cluster</h2>
 <h3 id="11-start-the-servers">1.1 Start the servers</h3>
-<p>On each node, run <code>crowkv-server</code>. The first start is empty (no</p>
+<p>On each node, run <code>crow-kv-server</code>. The first start is empty (no</p>
 <p><code>--stores</code>/<code>--groups</code>); the service creates the topology later.</p>
 <pre><code class="bash"># On n1
-crowkv-server \
+crow-kv-server \
   --management-addr 0.0.0.0 --management-port 2001 \
   --ports 20001 --election-profile default
 
 # On n2
-crowkv-server \
+crow-kv-server \
   --management-addr 0.0.0.0 --management-port 2002 \
   --ports 20002 --election-profile default
 
 # On n3
-crowkv-server \
+crow-kv-server \
   --management-addr 0.0.0.0 --management-port 2003 \
   --ports 20003 --election-profile default</code></pre>
 <h3 id="12-register-the-physical-topology">1.2 Register the physical topology</h3>
@@ -341,13 +341,13 @@ crowkv-server \
 <button class="tab-btn" data-tab="1">curl</button>
 </div>
 <div class="tab-panel active" data-panel="0"><pre><code># Create a rack
-crowkv-cli --ip $IP --port $PORT rack add --id r1 --name "rack-one"
+crow-cli --ip $IP --port $PORT rack add --id r1 --name "rack-one"
 
 # Register each node (repeat for n2, n3)
-crowkv-cli --ip $IP --port $PORT node add --id n1 --rack r1 --host n1.example.com
+crow-cli --ip $IP --port $PORT node add --id n1 --rack r1 --host n1.example.com
 
-# Deploy a crowkv-server process on each node (repeat for n2, n3)
-crowkv-cli --ip $IP --port $PORT server deploy \
+# Deploy a crow-kv-server process on each node (repeat for n2, n3)
+crow-cli --ip $IP --port $PORT server deploy \
   --node n1 --mgmt-port 2001 --grpc-port 20001</code></pre></div>
 <div class="tab-panel" data-panel="1"><pre><code># Create a rack
 curl -X POST "http://$IP:$PORT/api/racks" -H 'Content-Type: application/json' \
@@ -357,12 +357,12 @@ curl -X POST "http://$IP:$PORT/api/racks" -H 'Content-Type: application/json' \
 curl -X POST "http://$IP:$PORT/api/nodes" -H 'Content-Type: application/json' \
   -d '{"id":"n1","rack_id":"r1","host":"n1.example.com","ssh_port":22,"ssh_user":""}'
 
-# Deploy a crowkv-server process on each node (repeat for n2, n3)
+# Deploy a crow-kv-server process on each node (repeat for n2, n3)
 curl -X POST "http://$IP:$PORT/api/nodes/n1/server/deploy" \
   -H 'Content-Type: application/json' \
   -d '{"mgmt_port":2001,"grpc_port":20001}'</code></pre></div>
 </div>
-<p>The <code>deploy</code> command spawns <code>crowkv-server</code> on the node (via SSH if</p>
+<p>The <code>deploy</code> command spawns <code>crow-kv-server</code> on the node (via SSH if</p>
 <p><code>ssh_user</code> is set, or as a local subprocess otherwise).</p>
 <h3 id="13-create-a-store-and-group">1.3 Create a store and group</h3>
 <p>A store is the logical container that owns one or more groups.</p>
@@ -372,10 +372,10 @@ curl -X POST "http://$IP:$PORT/api/nodes/n1/server/deploy" \
 <button class="tab-btn" data-tab="1">curl</button>
 </div>
 <div class="tab-panel active" data-panel="0"><pre><code># Create a store on n1
-crowkv-cli --ip $IP --port $PORT store add --store-id 3 --nodes n1
+crow-cli --ip $IP --port $PORT store add --store-id 3 --nodes n1
 
 # Create a group with an initial replica on n1
-crowkv-cli --ip $IP --port $PORT paxos add \
+crow-cli --ip $IP --port $PORT paxos add \
   --store-id 3 --group-id 3 --replica-id 1 --nodes n1</code></pre></div>
 <div class="tab-panel" data-panel="1"><pre><code>curl -X POST "http://$IP:$PORT/api/stores" -H 'Content-Type: application/json' \
   -d '{"store_id":3,"nodes":["n1"]}'
@@ -389,10 +389,10 @@ curl -X POST "http://$IP:$PORT/api/stores/3/groups" -H 'Content-Type: applicatio
 <button class="tab-btn active" data-tab="0">cli</button>
 <button class="tab-btn" data-tab="1">curl</button>
 </div>
-<div class="tab-panel active" data-panel="0"><pre><code>crowkv-cli --ip $IP --port $PORT replica add \
+<div class="tab-panel active" data-panel="0"><pre><code>crow-cli --ip $IP --port $PORT replica add \
   --store-id 3 --group-id 3 --node n2 --replica-id 2
 
-crowkv-cli --ip $IP --port $PORT replica add \
+crow-cli --ip $IP --port $PORT replica add \
   --store-id 3 --group-id 3 --node n3 --replica-id 3</code></pre></div>
 <div class="tab-panel" data-panel="1"><pre><code>curl -X POST "http://$IP:$PORT/api/stores/3/groups/3/replicas" \
   -H 'Content-Type: application/json' \
@@ -412,14 +412,14 @@ curl -X POST "http://$IP:$PORT/api/stores/3/groups/3/replicas" \
 <button class="tab-btn" data-tab="1">curl</button>
 </div>
 <div class="tab-panel active" data-panel="0"><pre><code># Check group health
-crowkv-cli --ip $IP --port $PORT paxos inspect --store-id 3 --group-id 3
+crow-cli --ip $IP --port $PORT paxos inspect --store-id 3 --group-id 3
 # Look for "leader=" and replica states
 
 # Put / Get
-crowkv-cli --ip $IP --port $PORT kv put --store-id 3 --group-id 3 \
+crow-cli --ip $IP --port $PORT kv put --store-id 3 --group-id 3 \
   --key hello --value world
 
-crowkv-cli --ip $IP --port $PORT kv get --store-id 3 --group-id 3 --key hello</code></pre></div>
+crow-cli --ip $IP --port $PORT kv get --store-id 3 --group-id 3 --key hello</code></pre></div>
 <div class="tab-panel" data-panel="1"><pre><code>curl "http://$IP:$PORT/api/stores/3/groups/3"
 
 curl -X POST "http://$IP:$PORT/api/stores/3/groups/3/kv/put" \
@@ -437,16 +437,16 @@ curl "http://$IP:$PORT/api/stores/3/groups/3/kv/get?key=hello"</code></pre></div
 <button class="tab-btn" data-tab="1">curl</button>
 </div>
 <div class="tab-panel active" data-panel="0"><pre><code># Put
-crowkv-cli kv put --store-id 3 --group-id 3 --key user:1 --value alice
+crow-cli kv put --store-id 3 --group-id 3 --key user:1 --value alice
 
 # Get
-crowkv-cli kv get --store-id 3 --group-id 3 --key user:1
+crow-cli kv get --store-id 3 --group-id 3 --key user:1
 
 # Delete
-crowkv-cli kv delete --store-id 3 --group-id 3 --key user:1
+crow-cli kv delete --store-id 3 --group-id 3 --key user:1
 
 # Prefix scan
-crowkv-cli kv scan --store-id 3 --group-id 3 --prefix user: --limit 100</code></pre></div>
+crow-cli kv scan --store-id 3 --group-id 3 --prefix user: --limit 100</code></pre></div>
 <div class="tab-panel" data-panel="1"><pre><code>curl -X POST "http://$IP:$PORT/api/stores/3/groups/3/kv/put" \
   -H 'Content-Type: application/json' \
   -d '{"key":"user:1","value":"alice"}'
@@ -470,15 +470,15 @@ curl "http://$IP:$PORT/api/stores/3/groups/3/kv/scan?key=user:"</code></pre></di
 <button class="tab-btn" data-tab="1">curl</button>
 </div>
 <div class="tab-panel active" data-panel="0"><pre><code># High-level summary (servers + store/group counts)
-crowkv-cli cluster status
+crow-cli cluster status
 
 # Full topology (logical stores/groups/replicas + physical nodes/servers)
-crowkv-cli cluster topology
+crow-cli cluster topology
 
 # Inspect a specific store, group, or node
-crowkv-cli cluster inspect s3          # store 3
-crowkv-cli cluster inspect s3/g3       # group 3 in store 3
-crowkv-cli cluster inspect n1          # node n1</code></pre></div>
+crow-cli cluster inspect s3          # store 3
+crow-cli cluster inspect s3/g3       # group 3 in store 3
+crow-cli cluster inspect n1          # node n1</code></pre></div>
 <div class="tab-panel" data-panel="1"><pre><code># All nodes
 curl "http://$IP:$PORT/api/nodes"
 
@@ -497,7 +497,7 @@ curl "http://$IP:$PORT/api/stores/3/groups/3"
 <button class="tab-btn active" data-tab="0">cli</button>
 <button class="tab-btn" data-tab="1">curl</button>
 </div>
-<div class="tab-panel active" data-panel="0"><pre><code>crowkv-cli replica add --store-id 3 --group-id 3 --node n4 --replica-id 4</code></pre></div>
+<div class="tab-panel active" data-panel="0"><pre><code>crow-cli replica add --store-id 3 --group-id 3 --node n4 --replica-id 4</code></pre></div>
 <div class="tab-panel" data-panel="1"><pre><code>curl -X POST "http://$IP:$PORT/api/stores/3/groups/3/replicas" \
   -H 'Content-Type: application/json' \
   -d '{"node_id":"n4","replica_id":4}'</code></pre></div>
@@ -510,7 +510,7 @@ curl "http://$IP:$PORT/api/stores/3/groups/3"
 <button class="tab-btn active" data-tab="0">cli</button>
 <button class="tab-btn" data-tab="1">curl</button>
 </div>
-<div class="tab-panel active" data-panel="0"><pre><code>crowkv-cli replica remove --store-id 3 --group-id 3 --replica-id 3</code></pre></div>
+<div class="tab-panel active" data-panel="0"><pre><code>crow-cli replica remove --store-id 3 --group-id 3 --replica-id 3</code></pre></div>
 <div class="tab-panel" data-panel="1"><pre><code>curl -X DELETE "http://$IP:$PORT/api/stores/3/groups/3/replicas/3"</code></pre></div>
 </div>
 <p>If the target is the leader, the service asks it to step down first,</p>
@@ -524,13 +524,13 @@ curl "http://$IP:$PORT/api/stores/3/groups/3"
 <button class="tab-btn active" data-tab="0">cli</button>
 <button class="tab-btn" data-tab="1">curl</button>
 </div>
-<div class="tab-panel active" data-panel="0"><pre><code>   crowkv-cli server deploy --node n1 --mgmt-port 2001 --grpc-port 20001</code></pre></div>
+<div class="tab-panel active" data-panel="0"><pre><code>   crow-cli server deploy --node n1 --mgmt-port 2001 --grpc-port 20001</code></pre></div>
 <div class="tab-panel" data-panel="1"><pre><code>   curl -X POST "http://$IP:$PORT/api/nodes/n1/server/deploy" \
      -H 'Content-Type: application/json' \
      -d '{"mgmt_port":2001,"grpc_port":20001}'</code></pre></div>
 </div>
 <li>Start with bootstrap args to recover from WAL:</li>
-<pre><code class="bash">   crowkv-server \
+<pre><code class="bash">   crow-kv-server \
      --management-addr 0.0.0.0 --management-port 2001 \
      --ports 20001 --election-profile default \
      --stores 3 --groups 3 --replica 1</code></pre>
@@ -548,22 +548,22 @@ curl "http://$IP:$PORT/api/stores/3/groups/3"
 <button class="tab-btn active" data-tab="0">cli</button>
 <button class="tab-btn" data-tab="1">curl</button>
 </div>
-<div class="tab-panel active" data-panel="0"><pre><code>   crowkv-cli server stop --node n1</code></pre></div>
+<div class="tab-panel active" data-panel="0"><pre><code>   crow-cli server stop --node n1</code></pre></div>
 <div class="tab-panel" data-panel="1"><pre><code>   curl -X POST "http://$IP:$PORT/api/nodes/n1/server/stop"</code></pre></div>
 </div>
 <li><strong>Install the new binary</strong> on the node.</li>
 <li><strong>Restart with persisted store/group IDs:</strong></li>
-<pre><code class="bash">   crowkv-server \
+<pre><code class="bash">   crow-kv-server \
      --management-addr 0.0.0.0 --management-port 2001 \
      --ports 20001 --election-profile default \
      --stores 3 --groups 3 --replica 1</code></pre>
 <p>   <code>--stores</code>/<code>--groups</code> tells the server to reopen the WAL and rejoin</p>
 <p>   as a full member. <code>--replica</code> must match the assigned replica ID.</p>
 <li><strong>Wait for healthy:</strong></li>
-<pre><code class="bash">   crowkv-cli cluster status
-   crowkv-cli paxos inspect --store-id 3 --group-id 3</code></pre>
+<pre><code class="bash">   crow-cli cluster status
+   crow-cli paxos inspect --store-id 3 --group-id 3</code></pre>
 <li><strong>Smoke test:</strong></li>
-<pre><code class="bash">   crowkv-cli kv get --store-id 3 --group-id 3 --key hello</code></pre>
+<pre><code class="bash">   crow-cli kv get --store-id 3 --group-id 3 --key hello</code></pre>
 <li>Move to the next node.</li>
 <p><strong>What to watch:</strong> after stopping a node, the remaining nodes elect a</p>
 <p>new leader. Wait for the group view to show a leader before proceeding.</p>
@@ -602,41 +602,41 @@ curl "http://$IP:$PORT/api/stores/3/groups/3"
 <button class="tab-btn active" data-tab="0">cli</button>
 <button class="tab-btn" data-tab="1">curl</button>
 </div>
-<div class="tab-panel tab-panel-content active" data-panel="0"><p>The <code>crowkv-cli</code> CLI groups commands by resource type. All commands accept</p>
+<div class="tab-panel tab-panel-content active" data-panel="0"><p>The <code>crow-cli</code> CLI groups commands by resource type. All commands accept</p>
 <p><code>--ip &lt;addr&gt;</code> (default <code>127.0.0.1</code>), <code>--port &lt;port&gt;</code> (default <code>9920</code>),</p>
 <p>and <code>--json</code> for JSON output.</p>
 <ul>
-<li><strong><code>crowkv-cli cluster status</code></strong> — servers + store/group summary</li>
-<li><strong><code>crowkv-cli cluster topology</code></strong> — full logical + physical hierarchy</li>
-<li><strong><code>crowkv-cli cluster inspect &lt;id&gt;</code></strong> — <code>s&lt;sid&gt;</code>, <code>s&lt;sid&gt;/g&lt;gid&gt;</code>,</li>
+<li><strong><code>crow-cli cluster status</code></strong> — servers + store/group summary</li>
+<li><strong><code>crow-cli cluster topology</code></strong> — full logical + physical hierarchy</li>
+<li><strong><code>crow-cli cluster inspect &lt;id&gt;</code></strong> — <code>s&lt;sid&gt;</code>, <code>s&lt;sid&gt;/g&lt;gid&gt;</code>,</li>
 </ul>
 <p>  <code>s&lt;sid&gt;/g&lt;gid&gt;/r&lt;rid&gt;</code>, or <code>&lt;node-id&gt;</code></p>
 <ul>
-<li><strong><code>crowkv-cli rack add --id &lt;id&gt; [--name &lt;name&gt;]</code></strong></li>
-<li><strong><code>crowkv-cli rack remove --id &lt;id&gt;</code></strong></li>
-<li><strong><code>crowkv-cli rack list</code></strong></li>
-<li><strong><code>crowkv-cli node add --id &lt;id&gt; --rack &lt;rack&gt; [--host &lt;host&gt;] [--ssh-user &lt;user&gt;]</code></strong></li>
-<li><strong><code>crowkv-cli node remove --id &lt;id&gt;</code></strong></li>
-<li><strong><code>crowkv-cli node list</code></strong></li>
-<li><strong><code>crowkv-cli node ping &lt;node&gt;</code></strong></li>
-<li><strong><code>crowkv-cli server deploy --node &lt;id&gt; --mgmt-port &lt;p&gt; --grpc-port &lt;p&gt;</code></strong></li>
-<li><strong><code>crowkv-cli server restart --node &lt;id&gt;</code></strong></li>
-<li><strong><code>crowkv-cli server stop --node &lt;id&gt;</code></strong></li>
-<li><strong><code>crowkv-cli server list</code></strong></li>
-<li><strong><code>crowkv-cli store add --store-id &lt;id&gt; [--nodes n1,n2,...]</code></strong></li>
-<li><strong><code>crowkv-cli store remove --store-id &lt;id&gt;</code></strong></li>
-<li><strong><code>crowkv-cli store list</code></strong></li>
-<li><strong><code>crowkv-cli store inspect --store-id &lt;id&gt;</code></strong></li>
-<li><strong><code>crowkv-cli paxos add --store-id &lt;s&gt; --group-id &lt;g&gt; --replica-id &lt;r&gt; --nodes n1,n2,...</code></strong></li>
-<li><strong><code>crowkv-cli paxos remove --store-id &lt;s&gt; --group-id &lt;g&gt;</code></strong></li>
-<li><strong><code>crowkv-cli paxos list --store-id &lt;s&gt;</code></strong></li>
-<li><strong><code>crowkv-cli paxos inspect --store-id &lt;s&gt; --group-id &lt;g&gt;</code></strong></li>
-<li><strong><code>crowkv-cli replica add --store-id &lt;s&gt; --group-id &lt;g&gt; --node &lt;n&gt; [--replica-id &lt;r&gt;]</code></strong></li>
-<li><strong><code>crowkv-cli replica remove --store-id &lt;s&gt; --group-id &lt;g&gt; --replica-id &lt;r&gt;</code></strong></li>
-<li><strong><code>crowkv-cli kv put --store-id &lt;s&gt; --group-id &lt;g&gt; --key &lt;k&gt; --value &lt;v&gt;</code></strong></li>
-<li><strong><code>crowkv-cli kv get --store-id &lt;s&gt; --group-id &lt;g&gt; --key &lt;k&gt;</code></strong></li>
-<li><strong><code>crowkv-cli kv delete --store-id &lt;s&gt; --group-id &lt;g&gt; --key &lt;k&gt;</code></strong></li>
-<li><strong><code>crowkv-cli kv scan --store-id &lt;s&gt; --group-id &lt;g&gt; --prefix &lt;p&gt; [--limit &lt;n&gt;]</code></strong></li>
+<li><strong><code>crow-cli rack add --id &lt;id&gt; [--name &lt;name&gt;]</code></strong></li>
+<li><strong><code>crow-cli rack remove --id &lt;id&gt;</code></strong></li>
+<li><strong><code>crow-cli rack list</code></strong></li>
+<li><strong><code>crow-cli node add --id &lt;id&gt; --rack &lt;rack&gt; [--host &lt;host&gt;] [--ssh-user &lt;user&gt;]</code></strong></li>
+<li><strong><code>crow-cli node remove --id &lt;id&gt;</code></strong></li>
+<li><strong><code>crow-cli node list</code></strong></li>
+<li><strong><code>crow-cli node ping &lt;node&gt;</code></strong></li>
+<li><strong><code>crow-cli server deploy --node &lt;id&gt; --mgmt-port &lt;p&gt; --grpc-port &lt;p&gt;</code></strong></li>
+<li><strong><code>crow-cli server restart --node &lt;id&gt;</code></strong></li>
+<li><strong><code>crow-cli server stop --node &lt;id&gt;</code></strong></li>
+<li><strong><code>crow-cli server list</code></strong></li>
+<li><strong><code>crow-cli store add --store-id &lt;id&gt; [--nodes n1,n2,...]</code></strong></li>
+<li><strong><code>crow-cli store remove --store-id &lt;id&gt;</code></strong></li>
+<li><strong><code>crow-cli store list</code></strong></li>
+<li><strong><code>crow-cli store inspect --store-id &lt;id&gt;</code></strong></li>
+<li><strong><code>crow-cli paxos add --store-id &lt;s&gt; --group-id &lt;g&gt; --replica-id &lt;r&gt; --nodes n1,n2,...</code></strong></li>
+<li><strong><code>crow-cli paxos remove --store-id &lt;s&gt; --group-id &lt;g&gt;</code></strong></li>
+<li><strong><code>crow-cli paxos list --store-id &lt;s&gt;</code></strong></li>
+<li><strong><code>crow-cli paxos inspect --store-id &lt;s&gt; --group-id &lt;g&gt;</code></strong></li>
+<li><strong><code>crow-cli replica add --store-id &lt;s&gt; --group-id &lt;g&gt; --node &lt;n&gt; [--replica-id &lt;r&gt;]</code></strong></li>
+<li><strong><code>crow-cli replica remove --store-id &lt;s&gt; --group-id &lt;g&gt; --replica-id &lt;r&gt;</code></strong></li>
+<li><strong><code>crow-cli kv put --store-id &lt;s&gt; --group-id &lt;g&gt; --key &lt;k&gt; --value &lt;v&gt;</code></strong></li>
+<li><strong><code>crow-cli kv get --store-id &lt;s&gt; --group-id &lt;g&gt; --key &lt;k&gt;</code></strong></li>
+<li><strong><code>crow-cli kv delete --store-id &lt;s&gt; --group-id &lt;g&gt; --key &lt;k&gt;</code></strong></li>
+<li><strong><code>crow-cli kv scan --store-id &lt;s&gt; --group-id &lt;g&gt; --prefix &lt;p&gt; [--limit &lt;n&gt;]</code></strong></li>
 </ul>
 </div>
 <div class="tab-panel tab-panel-content" data-panel="1"><h4 id="physical-topology">Physical topology</h4>

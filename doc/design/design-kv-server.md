@@ -10,11 +10,11 @@ Satisfies: [`design.md`](design.md) §15.2
 
 ## 1. Overview
 
-`crowkv-server` is a thin binary that wires the `crowkv` library into a
+`crow-kv-server` is a thin binary that wires the `crow-kv` library into a
 runnable process. It adds CLI argument parsing, an HTTP management
 server for runtime topology control, and graceful startup/shutdown
 orchestration. The server does **not** contain business logic — all
-consensus, KV operations, and replication are handled by the `crowkv`
+consensus, KV operations, and replication are handled by the `crow-kv`
 library.
 
 ## 2. Design Decisions

@@ -145,7 +145,7 @@ docs:
 ## Benchmark Results — 2026-07-24
 
 Systematic T:C:W sweep. 3-node cluster (bench fixture, in-process
-console-web + 3 spawned `crowkv-server` processes), in-memory WAL +
+console-web + 3 spawned `crow-kv-server` processes), in-memory WAL +
 in-memory KV (mem-block), write-only, 512-byte values, 1M key space,
 12-second duration, `election_profile = e2e`, admission policy =
 `Queue` (R18 default). Platform: AMD Ryzen 9 5950X (16 cores / 32

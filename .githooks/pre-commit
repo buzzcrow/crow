@@ -16,7 +16,7 @@ if ! pixi run cargo fmt --all -- --check; then
 fi
 
 # Collect staged C++ files
-staged_cpp=$(git diff --cached --name-only --diff-filter=ACM -- 'crow-tree/src/*.cpp' 'crow-tree/include/crow-tree/*.h')
+staged_cpp=$(git diff --cached --name-only --diff-filter=ACM -- 'lib/crow-tree/src/*.cpp' 'lib/crow-tree/include/crow-tree/*.h')
 
 # Check C++ formatting (only staged files)
 if [ -n "$staged_cpp" ]; then
@@ -38,8 +38,8 @@ if [ $? -ne 0 ]; then
 fi
 
 # Run clang-tidy (only on staged .cpp files)
-staged_cpp_src=$(git diff --cached --name-only --diff-filter=ACM -- 'crow-tree/src/*.cpp')
-if [ -n "$staged_cpp_src" ] && [ -d crow-tree/build ]; then
+staged_cpp_src=$(git diff --cached --name-only --diff-filter=ACM -- 'lib/crow-tree/src/*.cpp')
+if [ -n "$staged_cpp_src" ] && [ -d lib/crow-tree/build ]; then
     echo "Running clang-tidy on staged C++ files..."
     # Mirror CMake's liburing gate: reactor.cpp and file_async_page_store.cpp require
     # liburing headers; on macOS (and anywhere liburing is missing) they are excluded
@@ -60,7 +60,7 @@ if [ -n "$staged_cpp_src" ] && [ -d crow-tree/build ]; then
         fail=0
         for f in "${cpp_files[@]}"; do
             base=$(basename "$f")
-            (pixi run clang-tidy "$f" -p crow-tree/build 2>&1 | grep -E '^(error:|warning:|/.*: error:|/.*: warning:)' > "$tmpdir/$base.out") &
+            (pixi run clang-tidy "$f" -p lib/crow-tree/build 2>&1 | grep -E '^(error:|warning:|/.*: error:|/.*: warning:)' > "$tmpdir/$base.out") &
         done
         wait
         for f in "${cpp_files[@]}"; do
@@ -76,8 +76,8 @@ if [ -n "$staged_cpp_src" ] && [ -d crow-tree/build ]; then
             exit 1
         fi
     fi
-elif [ -n "$staged_cpp_src" ] && [ ! -d crow-tree/build ]; then
-    echo "⚠️  Skipping clang-tidy: crow-tree/build not found. Run 'pixi run build' first."
+elif [ -n "$staged_cpp_src" ] && [ ! -d lib/crow-tree/build ]; then
+    echo "⚠️  Skipping clang-tidy: lib/crow-tree/build not found. Run 'pixi run build' first."
 fi
 
 echo "✅ All checks passed!"

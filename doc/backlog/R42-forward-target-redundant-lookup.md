@@ -60,4 +60,4 @@ impact observed, just removes avoidable work from a redirect-heavy path.
 
 **Complexity**: Low — three call-site edits in one function.
 
-**Files**: `crowkv/src/cluster/px_kv_store.rs`.
+**Files**: `lib/crow-kv/src/cluster/px_kv_store.rs`.

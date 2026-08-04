@@ -346,4 +346,4 @@ Notes:
 - **Operational profiles:**
   - *Low-latency single datacenter:* `heartbeat_interval = 100 ms`, `election_min/max = 800/1500 ms`, `lease_duration = 900 ms`, `max_clock_skew = 100 ms`. Sub-second failover; higher message rate.
   - *Cross-region / WAN:* `heartbeat_interval = 3 s`, `election_min/max = 24/48 s`, `lease_duration = 27 s`. Matches CockroachDB-style geo-replicated tunings; tolerates wider RTT variance at the cost of failover latency.
-  - *Tests:* `PxElectionConfig::for_tests()` produces `heartbeat = 5 ms`, `election = 30–60 ms`, `lease = 25 ms` for use under `tokio::time::pause()`. Not exposed on `crowkv-server` CLI.
+  - *Tests:* `PxElectionConfig::for_tests()` produces `heartbeat = 5 ms`, `election = 30–60 ms`, `lease = 25 ms` for use under `tokio::time::pause()`. Not exposed on `crow-kv-server` CLI.

@@ -54,7 +54,7 @@ consensus-path change; the deferred persist is already off the
 `Chosen` critical path.
 
 **Files**: `tools/bench-early-ack.sh` (add per-percentile columns if
-not already present), `crowkv/src/cluster/local_replica.rs`
+not already present), `lib/crow-kv/src/cluster/local_replica.rs`
 (`spawn_accept_persist` scheduling, if a tweak is needed),
 `doc/working/write-flow-analysis.md` (results + decision).
 

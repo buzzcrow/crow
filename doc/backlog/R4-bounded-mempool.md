@@ -4,7 +4,7 @@
 ### R4: Bounded memory pool for `buffer` allocations
 
 **Problem**: `buffer::allocate` uses unbounded `std::malloc`. When crowtree is
-embedded in crowkv-server, a burst of large writes can spike RSS without
+embedded in crow-kv-server, a burst of large writes can spike RSS without
 backpressure.
 
 **Approach**: Admission control at `Crowtree::apply()`/`apply_batch()` entry

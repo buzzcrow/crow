@@ -93,8 +93,8 @@ on gRPC/HTTP until there is a separate reason to migrate them.
   revisited.
 
 **Files** (expected, not started):
-- New crate `crowkv-rpc` (or similar) — framing, pool, reconnect.
-- `crowkv` consensus/RPC wiring — swap tonic client/server for the new
+- New crate `crow-kv-rpc` (or similar) — framing, pool, reconnect.
+- `crow-kv` consensus/RPC wiring — swap tonic client/server for the new
   transport on the internal hot path.
 - `.proto` schemas — unchanged (prost reused).
 

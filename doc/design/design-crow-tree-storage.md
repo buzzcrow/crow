@@ -570,7 +570,7 @@ The exact C ABI (`ct_snapshot_export_begin/next/end`,
 `ct_snapshot_import*`, and the rest of the surface — `ct_open`, `ct_apply`,
 `ct_get`, `ct_scan`, `ct_snapshot_view`, `ct_set_gc_watermark`,
 `ct_collect_garbage`, ...) is specified in
-[`crow-tree/include/crow-tree/c_api.h`](../../../crow-tree/include/crow-tree/c_api.h)
+[`lib/crow-tree/include/lib/crow-tree/c_api.h`](../../../lib/crow-tree/include/lib/crow-tree/c_api.h)
 — that header is the single source of truth for signatures; this document
 only records the shape and rationale.
 

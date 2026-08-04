@@ -84,11 +84,11 @@ jobs:
     - uses: prefix-dev/setup-pixi@v0.8.1
       with:
         pixi-version: latest
-    - name: Cache cargo + target (incl. crowkv-server binary)
+    - name: Cache cargo + target (incl. crow-kv-server binary)
       uses: Swatinem/rust-cache@v2
     - name: Install Playwright Chromium
       run: pixi run npx playwright install --with-deps chromium
-      working-directory: crowkv-console/web/ui
+      working-directory: app/crow-web/ui
     - name: Run real-backend E2E suite
       run: pixi run test-ui
     - name: Upload Playwright report on failure
@@ -97,6 +97,6 @@ jobs:
       with:
         name: playwright-report
         path: |
-          crowkv-console/web/ui/playwright-report
-          crowkv-console/web/ui/test-results
+          app/crow-web/ui/playwright-report
+          app/crow-web/ui/test-results
         retention-days: 7

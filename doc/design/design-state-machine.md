@@ -77,7 +77,7 @@ queried through `KVEngine::resume_from_slot()`. This replaces the former
 `DurableCommitWatermark` WAL record design.
 
 **Restart behavior** (`PxLocalReplica::restore_from_replay_with_engine`,
-`crowkv/src/cluster/local_replica.rs`):
+`lib/crow-kv/src/cluster/local_replica.rs`):
 
 1. WAL replay rebuilds acceptor state (`Promised`, `Accepted`, `VoteGranted`) — Pass 1, unconditional.
 2. The engine reports `resume_from = resume_from_slot()`: the highest slot it
@@ -99,7 +99,7 @@ Step 3's skip is a pure **optimization**, not a correctness requirement:
 local WAL through `learn()` (`resume_from = 0`, `InMemKV`'s permanent case)
 always converges to the same correct state — it's just extra, safe, no-op
 work. `persist_snapshot()` (called periodically by the group's maintenance
-loop, `crowkv/src/cluster/group_maintenance.rs::run_pass`) is what advances
+loop, `lib/crow-kv/src/cluster/group_maintenance.rs::run_pass`) is what advances
 the durable floor `resume_from_slot()` will report on the *next* restart.
 
 ---

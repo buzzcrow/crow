@@ -31,53 +31,53 @@ Run `pixi run clean` before measuring for reproducible results.
 
 ## Unit Layer — paxos/acceptor
 
-Source: `crowkv/src/paxos/acceptor.rs`. Tests: `acceptor_test.rs` (6 tests).
+Source: `lib/crow-kv/src/paxos/acceptor.rs`. Tests: `acceptor_test.rs` (6 tests).
 
 ## Unit Layer — paxos/learner
 
-Source: `crowkv/src/paxos/learner.rs`. Tests: `learner_test.rs` (4), `learner_dedup_test.rs` (10), `learner_async_test.rs` (1). Coverage is thorough.
+Source: `lib/crow-kv/src/paxos/learner.rs`. Tests: `learner_test.rs` (4), `learner_dedup_test.rs` (10), `learner_async_test.rs` (1). Coverage is thorough.
 
 ## Unit Layer — paxos/error
 
-Source: `crowkv/src/paxos/error.rs`. Tests: `error_test.rs` (11 variants).
+Source: `lib/crow-kv/src/paxos/error.rs`. Tests: `error_test.rs` (11 variants).
 
 ## Unit Layer — kv/mem_kv + kv/op
 
-Source: `crowkv/src/kv/`. Tests: `mem_kv_test.rs` (9 + conformance), `op_codec_test.rs` (11), `kv_future_test.rs` (5), `conformance.rs` (shared). Coverage is thorough.
+Source: `lib/crow-kv/src/kv/`. Tests: `mem_kv_test.rs` (9 + conformance), `op_codec_test.rs` (11), `kv_future_test.rs` (5), `conformance.rs` (shared). Coverage is thorough.
 
 ## Unit Layer — wal/record
 
-Source: `crowkv/src/wal/record.rs`. Tests: `record_tests.rs` (9). No gaps identified.
+Source: `lib/crow-kv/src/wal/record.rs`. Tests: `record_tests.rs` (9). No gaps identified.
 
 ## Election Unit
 
-Source: `crowkv/src/election/`. Tests: 8 files, 72 tests. No gaps identified.
+Source: `lib/crow-kv/src/election/`. Tests: 8 files, 72 tests. No gaps identified.
 
 ## WAL Subsystem
 
-Source: `crowkv/src/wal/`. Tests: 12 files, ~92 tests. Coverage is thorough.
+Source: `lib/crow-kv/src/wal/`. Tests: 12 files, ~92 tests. Coverage is thorough.
 
 - [ ] **WAL disk-loss recovery**: simulate fsync failure or file loss after write — verify engine surfaces error and reads/replays are consistent with last durable state. Feature-dependent per design-test.md.
 
 ## Slot Subsystem
 
-Source: `crowkv/src/paxos/slot_list.rs`, `slot_node.rs`. Tests: `slot_list_test.rs` (18 tests).
+Source: `lib/crow-kv/src/paxos/slot_list.rs`, `slot_node.rs`. Tests: `slot_list_test.rs` (18 tests).
 
 ## Replica
 
-Source: `crowkv/src/cluster/local_replica.rs`. Tests: 10 files, ~56 tests.
+Source: `lib/crow-kv/src/cluster/local_replica.rs`. Tests: 10 files, ~56 tests.
 
-- [ ] **WAL GC safe slot integration**: `crowkv/src/wal/gc.rs` uses `safe_slot = u64::MAX`. Needs snapshot persistence and a slot marker so GC can safely truncate below the applied frontier. Add a dedicated GC test once the slot marker is implemented.
+- [ ] **WAL GC safe slot integration**: `lib/crow-kv/src/wal/gc.rs` uses `safe_slot = u64::MAX`. Needs snapshot persistence and a slot marker so GC can safely truncate below the applied frontier. Add a dedicated GC test once the slot marker is implemented.
 
 ## Group
 
-Source: `crowkv/src/cluster/group.rs`. Tests: 23 files, ~65 tests.
+Source: `lib/crow-kv/src/cluster/group.rs`. Tests: 23 files, ~65 tests.
 
 - [ ] **Reconfig — remove leader**: needs separate plan — requires leader transfer before removal to avoid cluster stall.
 
 ## Store
 
-Source: `crowkv/src/store/`. Tests: 8 files, 26 tests (node, multi_group,
+Source: `lib/crow-kv/src/store/`. Tests: 8 files, 26 tests (node, multi_group,
 multi_node_multi_group, status, health, shutdown, shutdown_under_load,
 persistence, kv_correctness).
 
@@ -85,7 +85,7 @@ persistence, kv_correctness).
 
 ## Deployment
 
-Source: `crowkv-server/`. Tests: 7 files, 55 tests (server_api, async_ops,
+Source: `app/crow-kv-server/`. Tests: 7 files, 55 tests (server_api, async_ops,
 cli_parse, cluster_e2e, startup, snapshot_join_e2e, deployment_reconfig).
 
 - [ ] Re-enable the four ignored process-level tests once their root causes are fixed.
@@ -95,13 +95,13 @@ cli_parse, cluster_e2e, startup, snapshot_join_e2e, deployment_reconfig).
 
 ## Console Mgmt API Layer
 
-Source: `crowkv-console/`. Tests: web 13 files (~37 tests), shared/cli 7
+Source: `lib/crow-console-shared/`, `app/crow-web/`, `app/crow-cli/`. Tests: web 13 files (~37 tests), shared/cli 7
 files (~9 tests). Covers REST routes, CLI commands, API forwarding, health
 aggregation, config persistence, OpenAPI proxy. No gaps identified.
 
 ## crow-tree C++ Tests
 
-Source: `crow-tree/tests/`. Tests: 334 tests (unit: 26 files, integration:
+Source: `lib/crow-tree/tests/`. Tests: 334 tests (unit: 26 files, integration:
 24 files). Covers cell encoding, leaf/frame/inner pages, delta replay,
 consolidation, mapping table, epoch manager, split/merge, snapshot
 roundtrip, crash recovery, C API, async get/scan, eviction, compression,
@@ -109,12 +109,12 @@ persist, write/read paths, stress. No gaps identified.
 
 ## Rust FFI / Cross-Engine Parity
 
-Source: `crowkv/tests/kv/crow_tree_engine_test.rs`. Tests: conformance
+Source: `lib/crow-kv/tests/kv/crow_tree_engine_test.rs`. Tests: conformance
 suite (shared with `InMemKV`), async pending path, durable reopen,
 cross-engine parity, clear. No gaps identified.
 
 ## E2E / Playwright UI Tests
 
-Source: `crowkv-console/web/ui/e2e/`. Tests: 47 spec files (Phases 0–5).
+Source: `app/crow-web/ui/e2e/`. Tests: 47 spec files (Phases 0–5).
 All phases complete. No gaps identified.
 

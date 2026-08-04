@@ -42,7 +42,7 @@ See `pixi.toml` for the full list of tasks.
 ### C++ (crow-tree)
 
 - Follow `.clang-format` and `.clang-tidy` configs.
-- GoogleTest for tests under `crow-tree/tests/`.
+- GoogleTest for tests under `lib/crow-tree/tests/`.
 
 ### Design Docs
 
@@ -63,11 +63,11 @@ See `pixi.toml` for the full list of tasks.
 
 | Crate | What it is |
 | --- | --- |
-| `crowkv` | Core library: Multi-Paxos consensus, WAL, storage engine, RPC |
-| `crowkv-server` | Server binary: gRPC + HTTP management API |
-| `crowkv-client` | Client library: topology cache, retry, idempotency |
+| `crow-kv` | Core library: Multi-Paxos consensus, WAL, storage engine, RPC |
+| `crow-kv-server` | Server binary: gRPC + HTTP management API |
+| `crow-kv-client` | Client library: topology cache, retry, idempotency |
 | `crow-tree` | C++ storage engine (B+tree, delta chains, io_uring, buffer pool) |
-| `crowkv-console` | Operations console: web UI (Axum + React) and CLI |
+| `crow-console` | Operations console: web UI (Axum + React) and CLI |
 
 See `AGENTS.md` for a dispatch table on which docs to read for each type of task.
 

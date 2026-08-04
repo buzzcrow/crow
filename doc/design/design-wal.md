@@ -258,7 +258,7 @@ logical/physical bytes written, and RMW counts for observability. The
 reads cumulative counters for the engine collector to compute per-window
 deltas.
 
-The WAL bench (`crowkv/benches/wal.rs`) exercises three backends: `Mem`
+The WAL bench (`lib/crow-kv/benches/wal.rs`) exercises three backends: `Mem`
 (in-memory `MemBlockDevice`), `File` (`tokio::fs`), and `Block`
 (`BlockDevice::new()` with `wal_skip_fsync: true`). The `Block` case hits all
 block code paths (alignment planning, RMW, amplification tracking,

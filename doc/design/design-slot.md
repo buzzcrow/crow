@@ -627,7 +627,7 @@ paths pass `&[]` (no tags → no dedup recording, identical to the old
   at high load so the `max_keys` overflow path produces full batches.
 
 CLI: `--coalesce-max-keys`, `--coalesce-drain-threshold` on
-`crowkv-server`, applied in `main.rs` into `config.paxos`. Wired into
+`crow-kv-server`, applied in `main.rs` into `config.paxos`. Wired into
 the group via `set_from_config` (the coalescer reads
 `self.config.paxos.*`).
 

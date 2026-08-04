@@ -28,9 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - gRPC services: Paxos (Prepare/Promise/Accept/Accepted), KV, Snapshot
 - Leader election with term/ballot fencing and leader lease
 - Reconfiguration: member add/remove, leader transfer, membership epoch fence
-- `crowkv-server` binary with HTTP management API
-- `crowkv-client` library with topology cache, retry, idempotency
-- `crowkv-console`: web UI (Axum + React) and CLI for cluster lifecycle management
+- `crow-kv-server` binary with HTTP management API
+- `crow-kv-client` library with topology cache, retry, idempotency
+- `crow-console`: web UI (Axum + React) and CLI for cluster lifecycle management
 - Comprehensive design documentation (`doc/`)
 - CI with GitHub Actions (fmt, clippy, test, Playwright E2E)
 - Pre-commit hooks (cargo fmt, clippy, clang-format, clang-tidy)

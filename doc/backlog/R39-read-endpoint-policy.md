@@ -56,7 +56,7 @@ the EWMA decay rate, the tie-break policy, and whether to expose the
 choice as separate enum variants or a single `Adaptive` policy that
 picks based on history depth.
 
-**Files**: `crowkv-client/src/config.rs` (`ReadEndpointPolicy` enum),
-`crowkv-client/src/client.rs` (`resolve_read_endpoint` — new selection
-logic, per-endpoint state), `crowkv-client/src/metrics.rs` (optional:
+**Files**: `lib/crow-kv-client/src/config.rs` (`ReadEndpointPolicy` enum),
+`lib/crow-kv-client/src/client.rs` (`resolve_read_endpoint` — new selection
+logic, per-endpoint state), `lib/crow-kv-client/src/metrics.rs` (optional:
 per-endpoint RTT gauge).

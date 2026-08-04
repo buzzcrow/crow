@@ -45,7 +45,7 @@ Out of scope (design.md §2](design.md)):
 
 ## 2. Direct Per-Node Mutation Model
 
-The shipped design does not use `ConfigChange` log entries or a joint configuration. Instead, the operator (or `crowkv-console`) mutates the remote-replica list on each node independently through the HTTP management API:
+The shipped design does not use `ConfigChange` log entries or a joint configuration. Instead, the operator (or `crow-console`) mutates the remote-replica list on each node independently through the HTTP management API:
 
 - `POST /stores/:sid/groups/:gid/remotes` — add one or more remote replicas.
 - `DELETE /stores/:sid/groups/:gid/remotes/:rid` — remove a remote replica.
@@ -190,7 +190,7 @@ A non-voting catch-up member physically accepts and promises so it can follow th
 > history and the rationale for choosing the shipped model. Kept for
 > history/reference only.
 
-The original design described Raft-style joint consensus with `C_old ∪ C_new` intermediate configurations, two `ConfigChange` log entries per membership change, and `TimeoutNow` fast leader transfer. The shipped system uses direct per-node HTTP mutation and `membership_epoch` fencing instead. A system embedding `crowkv`'s primitives may still choose to build a joint-consensus layer on top of the `membership_epoch` fence.
+The original design described Raft-style joint consensus with `C_old ∪ C_new` intermediate configurations, two `ConfigChange` log entries per membership change, and `TimeoutNow` fast leader transfer. The shipped system uses direct per-node HTTP mutation and `membership_epoch` fencing instead. A system embedding `crow-kv`'s primitives may still choose to build a joint-consensus layer on top of the `membership_epoch` fence.
 
 ---
 
@@ -259,13 +259,13 @@ The original `design-reconfiguration.md` (§7, now historical) specified
 Raft-style joint consensus: two `ConfigChange` log entries per membership
 change (`joint = C_old ∪ C_new`, then `C_new`), both-quorum evaluation gated
 on *apply* not *chosen*, non-voting catch-up, `TimeoutNow` leader transfer,
-and Group-0-specific serialization rules. `crowkv/src/reconfig/mod.rs` was a
+and Group-0-specific serialization rules. `lib/crow-kv/src/reconfig/mod.rs` was a
 skeleton stub — no joint-consensus code, no `ConfigChange` log-entry kind, no
 `TimeoutNow` RPC were ever built.
 
 What shipped instead (Model B, same operator-driven-simplicity spirit as P4's
 topology decision): **direct, per-node HTTP mutation** of each replica's
-remote-replica list (`crowkv-server/src/mgmt_api.rs`), persisted to the local
+remote-replica list (`app/crow-kv-server/src/mgmt_api.rs`), persisted to the local
 `GroupConfigStore` config file, with a non-voting-then-voting dance for
 new-member catch-up and no consensus-log involvement at all.
 
@@ -289,7 +289,7 @@ Three options were evaluated:
   — the console's existing all-nodes HTTP fan-out already delivers the epoch
   bump to every node.
 - **(c) Full joint consensus.** Out of scope — would need its own design and
-  implementation plan. A system embedding `crowkv`'s primitives may still
+  implementation plan. A system embedding `crow-kv`'s primitives may still
   choose to build a joint-consensus layer on top of the `membership_epoch`
   fence.
 

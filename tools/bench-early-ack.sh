@@ -13,9 +13,9 @@
 # Prerequisites:
 #   - pixi installed, project dependencies resolved
 #   - jq installed
-#   - release binary built (pixi run cargo build --release -p crowkv-cli)
+#   - release binary built (pixi run cargo build --release -p crow-cli)
 set -euo pipefail
-cd /cjdata/cpp/crowkv
+cd /cjdata/cpp/crow
 
 RESULTS_FILE="doc/working/bench-early-ack-results.tsv"
 DURATION=15
@@ -32,7 +32,7 @@ run_bench() {
     local label="$1" threads="$2" conn="$3" config_arg="$4"
     echo ">>> $label ..."
     local output
-    output=$(pixi run -- cargo run --release -p crowkv-cli -- bench run \
+    output=$(pixi run -- cargo run --release -p crow-cli -- bench run \
         --mode mem --workload write --duration-secs "$DURATION" \
         --threads "$threads" --connections "$conn" \
         --max-inflight "$MI" --inflight-queues 1 \

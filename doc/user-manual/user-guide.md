@@ -9,15 +9,15 @@ operations, managing topology, and running upgrades.
 CrowKV provides three interfaces for cluster management and data
 access:
 
-- **Web UI** — the `crowkv-web` service provides a visual dashboard
+- **Web UI** — the `crow-web` service provides a visual dashboard
   with cluster topology, group health, a KV Operator panel (store/group
   selector, paginated scan, inline CRUD, demo data injection), and
   Swagger UI for browsing the OpenAPI spec of any registered
-  `crowkv-server` instance.
-- **CLI** — the `crowkv-cli` CLI tool is a thin wrapper over the same
-  service HTTP API. It talks to a `crowkv-web` service
+  `crow-kv-server` instance.
+- **CLI** — the `crow-cli` CLI tool is a thin wrapper over the same
+  service HTTP API. It talks to a `crow-web` service
   (`--ip` / `--port`, default `127.0.0.1:9920`); the service resolves
-  upstream `crowkv-server` nodes. Use `--json` for machine-readable
+  upstream `crow-kv-server` nodes. Use `--json` for machine-readable
   output.
 - **RESTful API** — the service HTTP API is the underlying transport
   for both the Web UI and the CLI. All endpoints are documented in
@@ -27,8 +27,8 @@ The examples below show both CLI and curl for each operation. All
 examples assume these shell variables are set once:
 
 ```bash
-IP=127.0.0.1        # crowkv-web service IP
-PORT=9920           # crowkv-web service port
+IP=127.0.0.1        # crow-web service IP
+PORT=9920           # crow-web service port
 ```
 
 ---
@@ -37,22 +37,22 @@ PORT=9920           # crowkv-web service port
 
 ### 1.1 Start the servers
 
-On each node, run `crowkv-server`. The first start is empty (no
+On each node, run `crow-kv-server`. The first start is empty (no
 `--stores`/`--groups`); the service creates the topology later.
 
 ```bash
 # On n1
-crowkv-server \
+crow-kv-server \
   --management-addr 0.0.0.0 --management-port 2001 \
   --ports 20001 --election-profile default
 
 # On n2
-crowkv-server \
+crow-kv-server \
   --management-addr 0.0.0.0 --management-port 2002 \
   --ports 20002 --election-profile default
 
 # On n3
-crowkv-server \
+crow-kv-server \
   --management-addr 0.0.0.0 --management-port 2003 \
   --ports 20003 --election-profile default
 ```
@@ -65,13 +65,13 @@ Create a rack, add nodes, and deploy a server on each node.
 
 ```bash
 # Create a rack
-crowkv-cli --ip $IP --port $PORT rack add --id r1 --name "rack-one"
+crow-cli --ip $IP --port $PORT rack add --id r1 --name "rack-one"
 
 # Register each node (repeat for n2, n3)
-crowkv-cli --ip $IP --port $PORT node add --id n1 --rack r1 --host n1.example.com
+crow-cli --ip $IP --port $PORT node add --id n1 --rack r1 --host n1.example.com
 
-# Deploy a crowkv-server process on each node (repeat for n2, n3)
-crowkv-cli --ip $IP --port $PORT server deploy \
+# Deploy a crow-kv-server process on each node (repeat for n2, n3)
+crow-cli --ip $IP --port $PORT server deploy \
   --node n1 --mgmt-port 2001 --grpc-port 20001
 ```
 
@@ -86,13 +86,13 @@ curl -X POST "http://$IP:$PORT/api/racks" -H 'Content-Type: application/json' \
 curl -X POST "http://$IP:$PORT/api/nodes" -H 'Content-Type: application/json' \
   -d '{"id":"n1","rack_id":"r1","host":"n1.example.com","ssh_port":22,"ssh_user":""}'
 
-# Deploy a crowkv-server process on each node (repeat for n2, n3)
+# Deploy a crow-kv-server process on each node (repeat for n2, n3)
 curl -X POST "http://$IP:$PORT/api/nodes/n1/server/deploy" \
   -H 'Content-Type: application/json' \
   -d '{"mgmt_port":2001,"grpc_port":20001}'
 ```
 
-The `deploy` command spawns `crowkv-server` on the node (via SSH if
+The `deploy` command spawns `crow-kv-server` on the node (via SSH if
 `ssh_user` is set, or as a local subprocess otherwise).
 
 ### 1.3 Initialize the cluster
@@ -106,7 +106,7 @@ the topology itself.
 
 ```bash
 # Initialize with all deployed nodes
-crowkv-cli --ip $IP --port $PORT cluster init --nodes n1,n2,n3
+crow-cli --ip $IP --port $PORT cluster init --nodes n1,n2,n3
 ```
 
 **curl:**
@@ -125,7 +125,7 @@ store/group creation is unblocked.
 For a single-node dev cluster, pass one node:
 
 ```bash
-crowkv-cli --ip $IP --port $PORT cluster init --nodes n1
+crow-cli --ip $IP --port $PORT cluster init --nodes n1
 ```
 
 ### 1.4 Create a store and group
@@ -136,10 +136,10 @@ A store is the logical container that owns one or more groups.
 
 ```bash
 # Create a store on n1
-crowkv-cli --ip $IP --port $PORT store add --store-id 3 --nodes n1
+crow-cli --ip $IP --port $PORT store add --store-id 3 --nodes n1
 
 # Create a group with an initial replica on n1
-crowkv-cli --ip $IP --port $PORT paxos add \
+crow-cli --ip $IP --port $PORT paxos add \
   --store-id 3 --group-id 3 --replica-id 1 --nodes n1
 ```
 
@@ -161,10 +161,10 @@ If the cluster has not been initialized, store/group creation returns
 **CLI:**
 
 ```bash
-crowkv-cli --ip $IP --port $PORT replica add \
+crow-cli --ip $IP --port $PORT replica add \
   --store-id 3 --group-id 3 --node n2 --replica-id 2
 
-crowkv-cli --ip $IP --port $PORT replica add \
+crow-cli --ip $IP --port $PORT replica add \
   --store-id 3 --group-id 3 --node n3 --replica-id 3
 ```
 
@@ -190,14 +190,14 @@ replica catches up via snapshot streaming before joining the voting set.
 
 ```bash
 # Check group health
-crowkv-cli --ip $IP --port $PORT paxos inspect --store-id 3 --group-id 3
+crow-cli --ip $IP --port $PORT paxos inspect --store-id 3 --group-id 3
 # Look for "leader=" and replica states
 
 # Put / Get
-crowkv-cli --ip $IP --port $PORT kv put --store-id 3 --group-id 3 \
+crow-cli --ip $IP --port $PORT kv put --store-id 3 --group-id 3 \
   --key hello --value world
 
-crowkv-cli --ip $IP --port $PORT kv get --store-id 3 --group-id 3 --key hello
+crow-cli --ip $IP --port $PORT kv get --store-id 3 --group-id 3 --key hello
 ```
 
 **curl:**
@@ -222,16 +222,16 @@ All KV operations target a specific `(store_id, group_id)`.
 
 ```bash
 # Put
-crowkv-cli kv put --store-id 3 --group-id 3 --key user:1 --value alice
+crow-cli kv put --store-id 3 --group-id 3 --key user:1 --value alice
 
 # Get
-crowkv-cli kv get --store-id 3 --group-id 3 --key user:1
+crow-cli kv get --store-id 3 --group-id 3 --key user:1
 
 # Delete
-crowkv-cli kv delete --store-id 3 --group-id 3 --key user:1
+crow-cli kv delete --store-id 3 --group-id 3 --key user:1
 
 # Prefix scan
-crowkv-cli kv scan --store-id 3 --group-id 3 --prefix user: --limit 100
+crow-cli kv scan --store-id 3 --group-id 3 --prefix user: --limit 100
 ```
 
 **curl:**
@@ -263,15 +263,15 @@ store/group selector, paginated scan, and inline editing.
 
 ```bash
 # High-level summary (servers + store/group counts)
-crowkv-cli cluster status
+crow-cli cluster status
 
 # Full topology (logical stores/groups/replicas + physical nodes/servers)
-crowkv-cli cluster topology
+crow-cli cluster topology
 
 # Inspect a specific store, group, or node
-crowkv-cli cluster inspect s3          # store 3
-crowkv-cli cluster inspect s3/g3       # group 3 in store 3
-crowkv-cli cluster inspect n1          # node n1
+crow-cli cluster inspect s3          # store 3
+crow-cli cluster inspect s3/g3       # group 3 in store 3
+crow-cli cluster inspect n1          # node n1
 ```
 
 **curl:**
@@ -295,7 +295,7 @@ curl "http://$IP:$PORT/api/stores/3/groups/3"
 **CLI:**
 
 ```bash
-crowkv-cli replica add --store-id 3 --group-id 3 --node n4 --replica-id 4
+crow-cli replica add --store-id 3 --group-id 3 --node n4 --replica-id 4
 ```
 
 **curl:**
@@ -314,7 +314,7 @@ joins the voting set automatically.
 **CLI:**
 
 ```bash
-crowkv-cli replica remove --store-id 3 --group-id 3 --replica-id 3
+crow-cli replica remove --store-id 3 --group-id 3 --replica-id 3
 ```
 
 **curl:**
@@ -335,7 +335,7 @@ waits for a new leader, then removes the replica.
    **CLI:**
 
    ```bash
-   crowkv-cli server deploy --node n1 --mgmt-port 2001 --grpc-port 20001
+   crow-cli server deploy --node n1 --mgmt-port 2001 --grpc-port 20001
    ```
 
    **curl:**
@@ -351,7 +351,7 @@ waits for a new leader, then removes the replica.
    CLI args needed for normal restart:
 
    ```bash
-   crowkv-server \
+   crow-kv-server \
      --management-addr 0.0.0.0 --management-port 2001 \
      --ports 20001 --election-profile default
    ```
@@ -359,7 +359,7 @@ waits for a new leader, then removes the replica.
    If `node-config.json` is lost, fall back to explicit bootstrap args:
 
    ```bash
-   crowkv-server \
+   crow-kv-server \
      --management-addr 0.0.0.0 --management-port 2001 \
      --ports 20001 --election-profile default \
      --stores 3 --groups 3 --replica 1
@@ -384,7 +384,7 @@ For each node:
    **CLI:**
 
    ```bash
-   crowkv-cli server stop --node n1
+   crow-cli server stop --node n1
    ```
 
    **curl:**
@@ -399,7 +399,7 @@ For each node:
    store/group configuration from `conf/node-config.json`:
 
    ```bash
-   crowkv-server \
+   crow-kv-server \
      --management-addr 0.0.0.0 --management-port 2001 \
      --ports 20001 --election-profile default
    ```
@@ -407,7 +407,7 @@ For each node:
    If `node-config.json` is missing, fall back to explicit args:
 
    ```bash
-   crowkv-server \
+   crow-kv-server \
      --management-addr 0.0.0.0 --management-port 2001 \
      --ports 20001 --election-profile default \
      --stores 3 --groups 3 --replica 1
@@ -419,14 +419,14 @@ For each node:
 4. **Wait for healthy:**
 
    ```bash
-   crowkv-cli cluster status
-   crowkv-cli paxos inspect --store-id 3 --group-id 3
+   crow-cli cluster status
+   crow-cli paxos inspect --store-id 3 --group-id 3
    ```
 
 5. **Smoke test:**
 
    ```bash
-   crowkv-cli kv get --store-id 3 --group-id 3 --key hello
+   crow-cli kv get --store-id 3 --group-id 3 --key hello
    ```
 
 6. Move to the next node.
@@ -477,40 +477,40 @@ bootstrap args are needed. If the config is lost, use explicit
 
 **CLI:**
 
-The `crowkv-cli` CLI groups commands by resource type. All commands accept
+The `crow-cli` CLI groups commands by resource type. All commands accept
 `--ip <addr>` (default `127.0.0.1`), `--port <port>` (default `9920`),
 and `--json` for JSON output.
 
-- **`crowkv-cli cluster status`** — servers + store/group summary
-- **`crowkv-cli cluster topology`** — full logical + physical hierarchy
-- **`crowkv-cli cluster inspect <id>`** — `s<sid>`, `s<sid>/g<gid>`,
+- **`crow-cli cluster status`** — servers + store/group summary
+- **`crow-cli cluster topology`** — full logical + physical hierarchy
+- **`crow-cli cluster inspect <id>`** — `s<sid>`, `s<sid>/g<gid>`,
   `s<sid>/g<gid>/r<rid>`, or `<node-id>`
-- **`crowkv-cli rack add --id <id> [--name <name>]`**
-- **`crowkv-cli rack remove --id <id>`**
-- **`crowkv-cli rack list`**
-- **`crowkv-cli node add --id <id> --rack <rack> [--host <host>] [--ssh-user <user>]`**
-- **`crowkv-cli node remove --id <id>`**
-- **`crowkv-cli node list`**
-- **`crowkv-cli node ping <node>`**
-- **`crowkv-cli server deploy --node <id> --mgmt-port <p> --grpc-port <p>`**
-- **`crowkv-cli server restart --node <id>`**
-- **`crowkv-cli server stop --node <id>`**
-- **`crowkv-cli server list`**
-- **`crowkv-cli cluster init --nodes n1,n2,...`** — initialize cluster (system group)
-- **`crowkv-cli store add --store-id <id> [--nodes n1,n2,...]`**
-- **`crowkv-cli store remove --store-id <id>`**
-- **`crowkv-cli store list`**
-- **`crowkv-cli store inspect --store-id <id>`**
-- **`crowkv-cli paxos add --store-id <s> --group-id <g> --replica-id <r> --nodes n1,n2,...`**
-- **`crowkv-cli paxos remove --store-id <s> --group-id <g>`**
-- **`crowkv-cli paxos list --store-id <s>`**
-- **`crowkv-cli paxos inspect --store-id <s> --group-id <g>`**
-- **`crowkv-cli replica add --store-id <s> --group-id <g> --node <n> [--replica-id <r>]`**
-- **`crowkv-cli replica remove --store-id <s> --group-id <g> --replica-id <r>`**
-- **`crowkv-cli kv put --store-id <s> --group-id <g> --key <k> --value <v>`**
-- **`crowkv-cli kv get --store-id <s> --group-id <g> --key <k>`**
-- **`crowkv-cli kv delete --store-id <s> --group-id <g> --key <k>`**
-- **`crowkv-cli kv scan --store-id <s> --group-id <g> --prefix <p> [--limit <n>]`**
+- **`crow-cli rack add --id <id> [--name <name>]`**
+- **`crow-cli rack remove --id <id>`**
+- **`crow-cli rack list`**
+- **`crow-cli node add --id <id> --rack <rack> [--host <host>] [--ssh-user <user>]`**
+- **`crow-cli node remove --id <id>`**
+- **`crow-cli node list`**
+- **`crow-cli node ping <node>`**
+- **`crow-cli server deploy --node <id> --mgmt-port <p> --grpc-port <p>`**
+- **`crow-cli server restart --node <id>`**
+- **`crow-cli server stop --node <id>`**
+- **`crow-cli server list`**
+- **`crow-cli cluster init --nodes n1,n2,...`** — initialize cluster (system group)
+- **`crow-cli store add --store-id <id> [--nodes n1,n2,...]`**
+- **`crow-cli store remove --store-id <id>`**
+- **`crow-cli store list`**
+- **`crow-cli store inspect --store-id <id>`**
+- **`crow-cli paxos add --store-id <s> --group-id <g> --replica-id <r> --nodes n1,n2,...`**
+- **`crow-cli paxos remove --store-id <s> --group-id <g>`**
+- **`crow-cli paxos list --store-id <s>`**
+- **`crow-cli paxos inspect --store-id <s> --group-id <g>`**
+- **`crow-cli replica add --store-id <s> --group-id <g> --node <n> [--replica-id <r>]`**
+- **`crow-cli replica remove --store-id <s> --group-id <g> --replica-id <r>`**
+- **`crow-cli kv put --store-id <s> --group-id <g> --key <k> --value <v>`**
+- **`crow-cli kv get --store-id <s> --group-id <g> --key <k>`**
+- **`crow-cli kv delete --store-id <s> --group-id <g> --key <k>`**
+- **`crow-cli kv scan --store-id <s> --group-id <g> --prefix <p> [--limit <n>]`**
 
 **curl:**
 
@@ -572,6 +572,6 @@ and `--json` for JSON output.
 | Topology finalize (cutover) | `POST /topology/finalize` |
 | Check topology ready | `GET /topology/ready` |
 
-These endpoints are on the `crowkv-server` management API (not the
+These endpoints are on the `crow-kv-server` management API (not the
 console web API). The console's `POST /api/cluster/init` orchestrates
 `/system/init` across nodes and auto-finalizes.

@@ -25,7 +25,7 @@ Client GET(key, read_mode, min_slot?)
        transport error → backoff+refresh
   → KvStoreService::get (gRPC)
     5. [Linearizable] if local not leader and not already forwarded →
-       forward_kv_get to leader (at-most-once via x-crowkv-forwarded)
+       forward_kv_get to leader (at-most-once via x-crow-kv-forwarded)
        - success → return leader's response
        - failure → fall through to local store (degraded)
     6. [MinSlot] no forwarding — serve local
@@ -198,7 +198,7 @@ Client SCAN(prefix, start_after, limit, read_mode, min_slot?)
   → backoff + refresh. All counted against `max_retries` except hint
   follows.
 - **Server forwarding** — `KvStoreService::get`: check
-  `x-crowkv-forwarded` (loop-guard); if not forwarded and local not
+  `x-crow-kv-forwarded` (loop-guard); if not forwarded and local not
   leader → `forward_kv_get`; success → return leader response (metrics
   recorded at forwarder, `kv.get_forwarded.c`); failure → fall through
   (degraded, `kv.get_forward_failed.c`; store returns `NotLeader` for

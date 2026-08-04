@@ -20,40 +20,40 @@ For the live task backlog (unfinished test gaps), see [`plan-test.md`](../workin
 ## Architecture Stack
 
 ```
-store      (PxKvStore: many groups, one node identity, routing)   <- crowkv/tests/store.rs
-  group    (PxGroup: 1 local + N remote replicas, full Paxos)      <- crowkv/tests/group.rs
-    replica  (PxLocalReplica: acceptor + learner + WAL + slots)    <- crowkv/tests/replica.rs
-      election (PxLocalReplica election state machine, pure logic) <- crowkv/tests/election.rs
-      wal    (WalEngine: durable log)   slot (PxSlotList)           <- crowkv/tests/wal.rs, slot.rs
-        unit (pure modules: codec, classifier, kv engine, roles)   <- crowkv/tests/{paxos,kv}.rs + wal/slot codec tests
-deployment (crowkv-server binary + HTTP mgmt API + multi-process)  <- crowkv-server/tests/*
-console    (mgmt API server + CLI: Axum REST, CLI commands)        <- crowkv-console/{web,cli}/tests/*
-ui e2e     (Playwright browser: SPA + real backend)                <- crowkv-console/web/ui/e2e/*
+store      (PxKvStore: many groups, one node identity, routing)   <- lib/crow-kv/tests/store.rs
+  group    (PxGroup: 1 local + N remote replicas, full Paxos)      <- lib/crow-kv/tests/group.rs
+    replica  (PxLocalReplica: acceptor + learner + WAL + slots)    <- lib/crow-kv/tests/replica.rs
+      election (PxLocalReplica election state machine, pure logic) <- lib/crow-kv/tests/election.rs
+      wal    (WalEngine: durable log)   slot (PxSlotList)           <- lib/crow-kv/tests/wal.rs, slot.rs
+        unit (pure modules: codec, classifier, kv engine, roles)   <- lib/crow-kv/tests/{paxos,kv}.rs + wal/slot codec tests
+deployment (crow-kv-server binary + HTTP mgmt API + multi-process)  <- app/crow-kv-server/tests/*
+console    (mgmt API server + CLI: Axum REST, CLI commands)        <- app/crow-{web,cli}/tests/*
+ui e2e     (Playwright browser: SPA + real backend)                <- app/crow-web/ui/e2e/*
 ```
 
 ## Test Binary Map
 
 | Binary | Layer | Drives | Source under test |
 | --- | --- | --- | --- |
-| `crowkv/tests/paxos.rs` | unit | `acceptor`, `learner`, `error` classifier in isolation | `paxos/{acceptor,learner,error}.rs` |
-| `crowkv/tests/kv.rs` | unit | `InMemKV` / `KVEngine` apply semantics | `kv/{mem_kv,kv_engine,op}.rs` |
-| `crowkv/tests/election.rs` | unit | `PxLocalReplica` election state machine (role transitions, vote granting, heartbeat, lease, term fencing) | `cluster/local_replica.rs` election logic |
-| `crowkv/tests/wal.rs` | subsystem | `WalEngine` append/replay/gc/segment + record codec + backends | `wal/*` |
-| `crowkv/tests/slot.rs` | subsystem | `PxSlotList` / `PxSlotNode` | `paxos/{slot_list,slot_node}.rs` |
-| `crowkv/tests/replica.rs` | replica | single `PxLocalReplica` (no peers) | `cluster/local_replica.rs`, `paxos/*` |
-| `crowkv/tests/group.rs` | group | `PxGroup` multi-node clusters (real loopback gRPC, no mocks) | `cluster/{group,group_election,remote_replica,learner_stream}.rs` |
-| `crowkv/tests/store.rs` | store | `PxKvStore` routing / lifecycle / status / health | `cluster/{px_kv_store,kv_store,kv_server,status}.rs` |
-| `crowkv-server/tests/*` | deployment | server binary + HTTP API, multi-process clusters, CLI, startup | `crowkv-server/src/*` |
-| `crowkv-client/tests/*` | client e2e | `CrowkvClient` retry, topology cache, `NotLeaderHint` follow, `AnyReplica` read distribution + fallback against embedded gRPC servers | `crowkv-client/src/*` |
-| `crowkv-console/web/tests/*` | console mgmt API | Axum REST API server: node management, OpenAPI proxy, API forwarding | `crowkv-console/web/src/*` |
-| `crowkv-console/{shared,cli}/tests/*` | console mgmt API | shared core (config, API client, health aggregation) + CLI commands | `crowkv-console/{shared,cli}/src/*` |
-| `crowkv-console/cli/tests/bench_benchmark.rs` | benchmark | `bench benchmark` lifecycle (deploy → run → collect → report → cleanup) + `bench compare` | `crowkv-console/cli/src/bench/*` |
-| `crowkv-console/web/ui/e2e/*` | UI E2E | Playwright browser tests: SPA interactions, context menus, dialogs, KV panel | `crowkv-console/web/ui/src/*` + real backend |
+| `lib/crow-kv/tests/paxos.rs` | unit | `acceptor`, `learner`, `error` classifier in isolation | `paxos/{acceptor,learner,error}.rs` |
+| `lib/crow-kv/tests/kv.rs` | unit | `InMemKV` / `KVEngine` apply semantics | `kv/{mem_kv,kv_engine,op}.rs` |
+| `lib/crow-kv/tests/election.rs` | unit | `PxLocalReplica` election state machine (role transitions, vote granting, heartbeat, lease, term fencing) | `cluster/local_replica.rs` election logic |
+| `lib/crow-kv/tests/wal.rs` | subsystem | `WalEngine` append/replay/gc/segment + record codec + backends | `wal/*` |
+| `lib/crow-kv/tests/slot.rs` | subsystem | `PxSlotList` / `PxSlotNode` | `paxos/{slot_list,slot_node}.rs` |
+| `lib/crow-kv/tests/replica.rs` | replica | single `PxLocalReplica` (no peers) | `cluster/local_replica.rs`, `paxos/*` |
+| `lib/crow-kv/tests/group.rs` | group | `PxGroup` multi-node clusters (real loopback gRPC, no mocks) | `cluster/{group,group_election,remote_replica,learner_stream}.rs` |
+| `lib/crow-kv/tests/store.rs` | store | `PxKvStore` routing / lifecycle / status / health | `cluster/{px_kv_store,kv_store,kv_server,status}.rs` |
+| `app/crow-kv-server/tests/*` | deployment | server binary + HTTP API, multi-process clusters, CLI, startup | `app/crow-kv-server/src/*` |
+| `lib/crow-kv-client/tests/*` | client e2e | `CrowkvClient` retry, topology cache, `NotLeaderHint` follow, `AnyReplica` read distribution + fallback against embedded gRPC servers | `lib/crow-kv-client/src/*` |
+| `app/crow-web/tests/*` | console mgmt API | Axum REST API server: node management, OpenAPI proxy, API forwarding | `app/crow-web/src/*` |
+| `lib/crow-console-shared/tests/*`, `app/crow-cli/tests/*` | console mgmt API | shared core (config, API client, health aggregation) + CLI commands | `lib/crow-console-shared/src/*`, `app/crow-cli/src/*` |
+| `app/crow-cli/tests/bench_benchmark.rs` | benchmark | `bench benchmark` lifecycle (deploy → run → collect → report → cleanup) + `bench compare` | `app/crow-cli/src/bench/*` |
+| `app/crow-web/ui/e2e/*` | UI E2E | Playwright browser tests: SPA interactions, context menus, dialogs, KV panel | `app/crow-web/ui/src/*` + real backend |
 
-**Placement rule:** a test that only needs the `crowkv` library (even if it
-binds the embedded gRPC server via `PxKvStore::start`) lives in `crowkv`. A
-test that boots the `crowkv-server` binary / HTTP management API lives in
-`crowkv-server`.
+**Placement rule:** a test that only needs the `crow-kv` library (even if it
+binds the embedded gRPC server via `PxKvStore::start`) lives in `crow-kv`. A
+test that boots the `crow-kv-server` binary / HTTP management API lives in
+`crow-kv-server`.
 
 **KV operation correctness rule:** every layer that applies KV mutations
 (replica, group, store) must test all operation types and orderings:
@@ -70,7 +70,7 @@ test that boots the `crowkv-server` binary / HTTP management API lives in
 - Persistence round-trip: all above operations survive WAL replay + restart
 
 **Cluster verification rule:** every tier that creates a real `PxKvStore`,
-`PxGroup`, or `crowkv-server` process must verify two things before
+`PxGroup`, or `crow-kv-server` process must verify two things before
 proceeding to tier-specific assertions:
 
 1. **Leader election succeeded within a bounded timeout.** If leader
@@ -371,9 +371,9 @@ lifecycle correctly across all groups.
 servers — retry, topology cache refresh, `NotLeaderHint` follow,
 `AnyReplica` read-endpoint distribution, and the `MinSlot` lagging-follower
 fallback. Tests bind real loopback gRPC endpoints and drive the public
-client API; no `crowkv-server` binary is booted.
+client API; no `crow-kv-server` binary is booted.
 
-**Source:** `crowkv-client/tests/*`.
+**Source:** `lib/crow-kv-client/tests/*`.
 
 **Lagging-follower harness:** to exercise the `AnyReplica`
 `MinSlot` fallback end-to-end (distributed read → lagging follower →
@@ -395,11 +395,11 @@ reads round-robin over `[A, B, C]` and deterministically hit C.
 
 ### Deployment Layer
 
-**Scope:** `crowkv-server` binary + HTTP management API + multi-process
+**Scope:** `crow-kv-server` binary + HTTP management API + multi-process
 clusters. Tests boot the actual server binary, exercise the HTTP API, and
 verify multi-process cluster formation and lifecycle.
 
-**Source:** `crowkv-server/tests/*`.
+**Source:** `app/crow-kv-server/tests/*`.
 
 **Test runner:** `pixi run test-server`.
 
@@ -438,12 +438,12 @@ under load. These verify the deployment handles operational failures.
 
 **Scope:** Console management API server (Axum) and CLI frontend. Tests
 verify the HTTP REST API endpoints, OpenAPI proxy, API forwarding to
-crowkv-server nodes, shared core logic (config management, API client,
+crow-kv-server nodes, shared core logic (config management, API client,
 health aggregation), and CLI commands.
 
-**Source:** `crowkv-console/web/tests/*` (Axum server),
-`crowkv-console/shared/tests/*` (shared core),
-`crowkv-console/cli/tests/*` (CLI).
+**Source:** `app/crow-web/tests/*` (Axum server),
+`lib/crow-console-shared/tests/*` (shared core),
+`app/crow-cli/tests/*` (CLI).
 
 **Test runners:** `pixi run test-mgmt-api` (web server),
 `pixi run test-cli` (shared core + CLI).
@@ -472,21 +472,21 @@ unreachable node forwarding failure, config persistence across restart.
   OpenAPI proxy.
 - Every CLI command must have at least one test: store/group/node lifecycle,
   health check, topology export, KV operations (if supported via CLI).
-- API forwarding: requests to a node's crowkv-server are correctly proxied.
+- API forwarding: requests to a node's crow-kv-server are correctly proxied.
 - Health aggregation: multi-node health is correctly aggregated into overall
   status.
 - Config persistence: cluster config survives process restart.
 
 ### UI E2E Layer
 
-**Scope:** Playwright browser tests against a real `crowkv-web` + `crowkv-server`
+**Scope:** Playwright browser tests against a real `crow-web` + `crow-kv-server`
 backend. Tests drive the SPA exactly as an operator would — clicks, context menus,
 dialogs, KV panel — and verify both UI feedback (toasts, tree updates) and backend
 state (API checks). No mocks; the only network interception is route aborting for
 the backend-unreachable test.
 
-**Source:** `crowkv-console/web/ui/e2e/flows/*.spec.ts`, fixtures in
-`crowkv-console/web/ui/e2e/fixtures/consoleSetup.ts`.
+**Source:** `app/crow-web/ui/e2e/flows/*.spec.ts`, fixtures in
+`app/crow-web/ui/e2e/fixtures/consoleSetup.ts`.
 
 **Test runner:** `pixi run test-ui` (Playwright, headless Chromium).
 
@@ -545,7 +545,7 @@ full production path (client → leader → Paxos → WAL → memtable →
 async flush) end-to-end, with disk IO isolation to measure consensus +
 memtable throughput rather than fsync latency.
 
-**Source:** `crowkv-console/cli/tests/bench_benchmark.rs`.
+**Source:** `app/crow-cli/tests/bench_benchmark.rs`.
 
 **Test runner:** `pixi run test-cli` (includes bench benchmark +
 compare integration tests).
@@ -555,7 +555,7 @@ compare integration tests).
 The `bench benchmark` verb orchestrates the full lifecycle:
 
 - **Deploy** — auto-provision a minimal cluster (1 rack, 3 nodes on
-  localhost) via an embedded `crowkv-web` instance started in-process.
+  localhost) via an embedded `crow-web` instance started in-process.
   Topology creation follows the same pattern as the UI test fixture
   (`consoleSetup.ts::setupCluster`), but through the typed
   `ConsoleClient`. Config-driven SSH deployment is accepted but
@@ -669,11 +669,11 @@ the Rust test binaries above. They run as `test-ct` in CI (291 tests, ~8 s).
 
 | Layer | Where | What it proves |
 | --- | --- | --- |
-| C++ unit | `libcrow-tree/tests/unit` | Single component correctness: cell encoding, leaf page build/read, delta replay, consolidation triggers, mapping table, epoch manager, split point. |
-| C++ integration | `libcrow-tree/tests/integration` | Multi-component flows over `InMemoryPageStore` and `FilePageStore`: basic CRUD, batch apply, scan, split/merge, consistent view, snapshot roundtrip, GC. |
-| Crash/recovery | `libcrow-tree/tests/recovery` | Durability: snapshot + recover, torn-page, superblock A/B, double-apply idempotency. Uses a `FaultyPageStore` with fault points (drop-write, tear, flip-bytes, reorder) for the FI matrix. |
-| Rust FFI | `crowkv` `tests/` | `CrowTreeEngine` trait conformance (shared parametrized tests with `InMemKV`), async bridge, buffer ownership, error mapping. |
-| Cross-engine parity | `crowkv` `tests/` | `InMemKV` and `CrowTreeEngine` produce identical state via `compare()` after random op streams, snapshot export/import round-trips, and mid-stream restart. |
+| C++ unit | `liblib/crow-tree/tests/unit` | Single component correctness: cell encoding, leaf page build/read, delta replay, consolidation triggers, mapping table, epoch manager, split point. |
+| C++ integration | `liblib/crow-tree/tests/integration` | Multi-component flows over `InMemoryPageStore` and `FilePageStore`: basic CRUD, batch apply, scan, split/merge, consistent view, snapshot roundtrip, GC. |
+| Crash/recovery | `liblib/crow-tree/tests/recovery` | Durability: snapshot + recover, torn-page, superblock A/B, double-apply idempotency. Uses a `FaultyPageStore` with fault points (drop-write, tear, flip-bytes, reorder) for the FI matrix. |
+| Rust FFI | `crow-kv` `tests/` | `CrowTreeEngine` trait conformance (shared parametrized tests with `InMemKV`), async bridge, buffer ownership, error mapping. |
+| Cross-engine parity | `crow-kv` `tests/` | `InMemKV` and `CrowTreeEngine` produce identical state via `compare()` after random op streams, snapshot export/import round-trips, and mid-stream restart. |
 | Concurrency | sanitizer CI | No data races / UAF under reader+writer load (TSan/ASan/UBSan); epoch reclamation under load; version pin + GC. |
 
 The authoritative correctness oracle is **`compare()` against `InMemKV`**: for

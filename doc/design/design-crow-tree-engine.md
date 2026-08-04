@@ -374,7 +374,7 @@ needs to outlive the read guard.
 
 ### 2.1 The `buffer` Abstraction
 
-`buffer` (`crow-tree/include/crow-tree/buffer.h`) is a move-only byte container
+`buffer` (`lib/crow-tree/include/lib/crow-tree/buffer.h`) is a move-only byte container
 that is *either* owned (frees on destruction) *or* borrowed (a non-owning view
 whose lifetime is guaranteed elsewhere — a resident frame under an epoch
 guard). Design rules:
@@ -676,7 +676,7 @@ resolves on the next reactor-driven wakeup.
 
 ## 4. Rust-Side `KVEngine` Async Trait Shape
 
-> **Merged from `design-crowkv-async-kvengine.md` (2026-07).**
+> **Merged from `design-crow-kv-async-kvengine.md` (2026-07).**
 > **Status:** implemented (landed 2026-07-09).
 > This section records the design of the Rust-side `KVEngine` trait's async
 > shape (`KVFuture<T>`) and why it looks the way it does — kept as the
@@ -732,7 +732,7 @@ pub trait KVEngine: Send + Sync {
 
 `Ready` costs nothing beyond the enum tag + inline value — no allocation, no
 `Pin<Box<..>>`. `InMemKV` always returns `Ready`. `CrowTreeEngine::get`
-(`crowkv/src/kv/crow_tree_engine.rs`) does the same fast-path check the C++
+(`lib/crow-kv/src/kv/crow_tree_engine.rs`) does the same fast-path check the C++
 layer does first, via `crow_tree_ffi::AsyncCrowtree::try_get`; on a resident
 hit/miss it returns `Ready` at zero extra cost, and only on a genuine
 demand-load miss does it construct `Pending`, wrapping the reactor-driven

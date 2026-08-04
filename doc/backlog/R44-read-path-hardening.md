@@ -28,7 +28,7 @@ read-path files, and are best done as one coherent hardening pass:
   wrong answer instead of an error.
 - **E3 — Client retry matches errors by string.** The retry loop
   detects redirects via `error == "not leader"` exact string compare
-  (`crowkv-client/src/client.rs` L698). Fragile against any
+  (`lib/crow-kv-client/src/client.rs` L698). Fragile against any
   server-side message change; a structured error code on `KvResponse`
   / `KvScanResponse` would make the contract explicit.
 - **E4 — Client ignores topology refresh failures.**
@@ -92,7 +92,7 @@ read-path files, and are best done as one coherent hardening pass:
   lower bound after the demand-load completes. Best done together
   with (or immediately after) R37's lower-bound seek.
 - **E7**: add `Bytes`-returning variants (or migrate the outcome
-  structs) in `crowkv-client`; accept `impl Into<Bytes>` for keys and
+  structs) in `crow-kv-client`; accept `impl Into<Bytes>` for keys and
   prefixes so callers holding `Bytes` pay no copy.
 - **E8**: add `scan_linearizable_l` / `scan_min_slot_l` summaries
   mirroring the get split, plus `scan_overfetch_fetched_c` /
@@ -126,11 +126,11 @@ soon; E5 is the only latency item and only bites during recovery.
 addition with fallback; E4 is client-local; E5 needs care to keep
 quorum semantics intact; E6 is C++ engine work gated on R37's shape.
 
-**Files**: `crowkv/src/rpc/kv_service.rs` (forward helper, hint,
-metrics), `crowkv/src/kv/crowtree_engine.rs` (error propagation,
-over-fetch counters), `crowkv/src/cluster/px_kv_store.rs` (scan error
-mapping), `crowkv/src/cluster/group_election.rs` (bounded catch-up),
-`crowkv/src/rpc/proto/kv.proto` (error code), `crowkv-client/src/client.rs`
+**Files**: `lib/crow-kv/src/rpc/kv_service.rs` (forward helper, hint,
+metrics), `lib/crow-kv/src/kv/crowtree_engine.rs` (error propagation,
+over-fetch counters), `lib/crow-kv/src/cluster/px_kv_store.rs` (scan error
+mapping), `lib/crow-kv/src/cluster/group_election.rs` (bounded catch-up),
+`lib/crow-kv/src/rpc/proto/kv.proto` (error code), `lib/crow-kv-client/src/client.rs`
 (+ `topology.rs`) (structured errors, refresh handling, `Bytes` API),
 `crowtree/src/crowtree.cpp` + `crowtree/ffi` (scan cursor resume).
 

@@ -17,7 +17,7 @@ doc only when a task touches a topic in its row.
 
 | Doc | When to read |
 | --- | --- |
-| `doc/backlog/backlog.md` | Forward-looking implementation backlog index with priority/complexity classification and brief intros. Read before picking up crow-tree/crowkv follow-up work. Each entry links to its detail doc. |
+| `doc/backlog/backlog.md` | Forward-looking implementation backlog index with priority/complexity classification and brief intros. Read before picking up lib/crow-tree/crow-kv follow-up work. Each entry links to its detail doc. |
 | `doc/backlog/R**-<topic>.md` | Per-requirement detailed analysis (problem, approach, files, acceptance). Open only the matched `R**` file; delete it after the requirement is implemented and merged. |
 
 ## Working Files (`doc/working/`)
@@ -86,9 +86,9 @@ doc only when a task touches a topic in its row.
 
 | Doc | Read when working on |
 | --- | --- |
-| `design/design-console.md` | `crowkv-console` design: shared core crate, web (Axum + React) and CLI (`clap`) frontends, two-hierarchy API (physical `/api/racks`,`/api/nodes` vs. logical `/api/stores`), monitor task, SSH lifecycle, Swagger UI hosting, CLI design rules, persistent cluster config / system group (§4.3: two-phase bootstrap, topology KV schema, three-way fallback, divergence reconciliation). |
+| `design/design-console.md` | `crow-console` design: shared core crate, web (Axum + React) and CLI (`clap`) frontends, two-hierarchy API (physical `/api/racks`,`/api/nodes` vs. logical `/api/stores`), monitor task, SSH lifecycle, Swagger UI hosting, CLI design rules, persistent cluster config / system group (§4.3: two-phase bootstrap, topology KV schema, three-way fallback, divergence reconciliation). |
 | `design/design-ui.md` | Web UI design (v1 lean rewrite): 3-pane shell, two hierarchy views, slim React Flow canvas, inspector (Details/Activity), embedded Swagger, KV Operator center panel (§6.1: store/group selector, paginated scan, inline CRUD, demo inject/delete), minimal embedding contract. |
-| `design/design-kv-server.md` | `crowkv-server` binary: KV engine selection, startup ordering (§2.2: `node-config.json` auto-restore + group 0 reconciliation), concurrency model, HTTP management API design (axum, §2.4: system group endpoints `/system/init`, `/topology/finalize`, `/topology/ready`), group lifecycle, shutdown, port pool. |
+| `design/design-kv-server.md` | `crow-kv-server` binary: KV engine selection, startup ordering (§2.2: `node-config.json` auto-restore + group 0 reconciliation), concurrency model, HTTP management API design (axum, §2.4: system group endpoints `/system/init`, `/topology/finalize`, `/topology/ready`), group lifecycle, shutdown, port pool. |
 
 ### Cross-Cutting
 
