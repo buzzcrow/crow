@@ -779,7 +779,7 @@ impl PxGroup {
         for remote in remote_replicas {
             let idx = remote.node_id as usize;
             if idx < self.remote_replicas.len() {
-                self.remote_replicas[idx] = RemoteReplicaKind::Real(remote);
+                self.remote_replicas[idx] = RemoteReplicaKind::Real(Box::new(remote));
                 self.valid_replica_count += 1;
             }
         }
@@ -815,7 +815,8 @@ impl PxGroup {
         while idx >= self.remote_replicas.len() {
             self.remote_replicas.push(RemoteReplicaKind::Placeholder);
         }
-        self.remote_replicas[idx] = RemoteReplicaKind::Real(PxRemoteReplica::new(node_id, endpoint));
+        self.remote_replicas[idx] =
+            RemoteReplicaKind::Real(Box::new(PxRemoteReplica::new(node_id, endpoint)));
         self.valid_replica_count = self
             .remote_replicas
             .iter()
@@ -1180,7 +1181,7 @@ impl PxGroup {
             self.valid_replica_count += 1;
         }
 
-        self.remote_replicas[idx] = RemoteReplicaKind::Real(remote);
+        self.remote_replicas[idx] = RemoteReplicaKind::Real(Box::new(remote));
         self.recompute_quorum();
 
         // Bump the epoch iff this mutation actually changes the voting
@@ -2585,9 +2586,11 @@ fn retry_jitter_multiplier() -> u64 {
 }
 
 /// Remote replica kind - either a real remote replica or a placeholder.
+/// `Real` boxes `PxRemoteReplica` (~208 bytes) to keep the enum small
+/// (`clippy::large_enum_variant`).
 #[derive(Debug)]
 pub(crate) enum RemoteReplicaKind {
-    Real(PxRemoteReplica),
+    Real(Box<PxRemoteReplica>),
     Placeholder,
 }
 
@@ -2608,7 +2611,7 @@ impl RemoteReplicaKind {
 
     fn as_real(&self) -> Option<&PxRemoteReplica> {
         match self {
-            Self::Real(r) => Some(r),
+            Self::Real(r) => Some(r.as_ref()),
             Self::Placeholder => None,
         }
     }

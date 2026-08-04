@@ -52,13 +52,18 @@ export function usePhysicalTree({
   const [error, setError] = useState<Error | null>(null);
   const isActiveRef = useRef(true);
   const pollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const hasLoadedRef = useRef(false);
 
   // Fetch physical tree data
   const fetchData = useCallback(async () => {
     if (!enabled) return;
 
     try {
-      setLoading(true);
+      // Only show loading state on the initial fetch; subsequent polls
+      // refresh silently to avoid flipping the sidebar placeholder.
+      if (!hasLoadedRef.current) {
+        setLoading(true);
+      }
       setError(null);
 
       // Fetch racks with recursive depth
@@ -114,6 +119,7 @@ export function usePhysicalTree({
       console.error('Failed to fetch physical tree:', err);
       setError(err instanceof Error ? err : new Error('Unknown error fetching physical tree'));
     } finally {
+      hasLoadedRef.current = true;
       setLoading(false);
     }
   }, [enabled, recursive]);

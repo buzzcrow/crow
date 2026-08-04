@@ -147,6 +147,7 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/api/stores/:sid/groups/:gid/kv/delete", post(kv::http_kv_delete))
         // ── Cluster init (R2): system group bootstrap ────────────────
         .route("/api/cluster/init", post(mgmt::http_cluster_init))
+        .route("/api/cluster/reset", post(lifecycle::http_internal_reset))
         // ── Internal: E2E test reset ─────────────────────────────────
         .route("/internal/reset", post(lifecycle::http_internal_reset))
         // React SPA fallback.

@@ -19,6 +19,8 @@ use crow_console_shared::error::Error as SharedError;
 use crow_console_shared::lifecycle::{self, DeployRequest};
 use crow_console_shared::mgmt::{
     AddGroupInitialRole, AddGroupRequest, AddStoreRequest, RemoteReplicaInfo, StepDownRequest,
+    TopologyFinalizeRequest, TopologyGroupInput, TopologyNodeInput, TopologyRackInput, TopologyReplicaInput,
+    TopologyStoreInput,
 };
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -720,6 +722,11 @@ pub async fn http_remove_store(
     State(state): State<AppState>,
     Path(sid): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+    if sid == 0 {
+        return Err(err_409(
+            "store 0 is the system store; use POST /api/cluster/reset to tear down the entire cluster",
+        ));
+    }
     let view = state.monitor_cache.resolve_store(sid).await.ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
@@ -959,6 +966,11 @@ pub async fn http_remove_group(
     State(state): State<AppState>,
     Path((sid, gid)): Path<(u64, u64)>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+    if sid == 0 && gid == 0 {
+        return Err(err_409(
+            "group 0 in store 0 is the system group; use POST /api/cluster/reset to tear down the entire cluster",
+        ));
+    }
     let view = state.monitor_cache.resolve_group(sid, gid).await.ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
@@ -1605,6 +1617,40 @@ pub async fn http_cluster_init(
         .persist()
         .map_err(|e| err_500(format!("persist config: {e}")))?;
 
+    // Phase 5: finalize topology — write all topology metadata into
+    // group 0 KV and set the /topology/ready flag. Try each succeeded
+    // node until one accepts (the leader will).
+    let finalize_body = {
+        let cfg = state.config.read().unwrap();
+        build_topology_finalize_body(&cfg, &succeeded)
+    };
+    let mut finalized = false;
+    for (nid, _) in &succeeded {
+        let Ok(url) = mgmt_url_for_node(&state, nid) else {
+            continue;
+        };
+        let Ok(client) = build_server_client(url) else {
+            continue;
+        };
+        match client.topology_finalize(&finalize_body).await {
+            Ok(resp) => {
+                info!(
+                    node_id = nid,
+                    already_finalized = resp.already_finalized,
+                    "topology/finalize succeeded"
+                );
+                finalized = true;
+                break;
+            }
+            Err(e) => {
+                warn!(node_id = nid, error = %e, "topology/finalize failed; trying next node");
+            }
+        }
+    }
+    if !finalized {
+        warn!("topology/finalize failed on all nodes; cluster init succeeded but topology not written to group 0");
+    }
+
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
@@ -1616,4 +1662,101 @@ pub async fn http_cluster_init(
             })).collect::<Vec<_>>(),
         })),
     ))
+}
+
+/// Build the `TopologyFinalizeRequest` from the console config, capturing
+/// racks, nodes, stores, groups, and replicas for writing into group 0 KV.
+fn build_topology_finalize_body(
+    cfg: &crow_console_shared::config::ConsoleConfig,
+    succeeded: &[(String, u64)],
+) -> TopologyFinalizeRequest {
+    let racks: Vec<TopologyRackInput> = cfg
+        .racks
+        .iter()
+        .map(|r| TopologyRackInput {
+            rack_id: r.id.clone(),
+            name: r.name.clone(),
+        })
+        .collect();
+
+    let nodes: Vec<TopologyNodeInput> = cfg
+        .nodes
+        .iter()
+        .filter_map(|n| {
+            let server = cfg.server_for_node(&n.id)?;
+            Some(TopologyNodeInput {
+                node_id: n.id.clone(),
+                rack_id: n.rack_id.clone(),
+                host: n.host.clone(),
+                mgmt_endpoint: server.url.clone(),
+                grpc_endpoint: server.grpc_url.clone().unwrap_or_default(),
+                election_profile: server.election_profile.clone(),
+                auto_start: server.auto_start,
+            })
+        })
+        .collect();
+
+    let stores: Vec<TopologyStoreInput> = cfg
+        .stores
+        .iter()
+        .map(|s| TopologyStoreInput {
+            store_id: s.store_id,
+            nodes: s.nodes.clone(),
+        })
+        .collect();
+
+    let groups: Vec<TopologyGroupInput> = cfg
+        .groups
+        .iter()
+        .map(|g| TopologyGroupInput {
+            group_id: g.group_id,
+            store_id: g.store_id,
+        })
+        .collect();
+
+    // Build replicas from group entries. For the system group (0/0),
+    // use the succeeded list from init; for other groups, use config.
+    let mut replicas: Vec<TopologyReplicaInput> = Vec::new();
+    for (nid, rid) in succeeded {
+        let server = cfg.server_for_node(nid);
+        let endpoint = server.and_then(|s| s.grpc_url.clone()).unwrap_or_default();
+        let role = if *rid == succeeded.first().map_or(1, |(_, r)| *r) {
+            "leader"
+        } else {
+            "follower"
+        };
+        replicas.push(TopologyReplicaInput {
+            group_id: 0,
+            replica_id: *rid,
+            node_id: nid.clone(),
+            role: role.to_string(),
+            voting: true,
+            endpoint,
+        });
+    }
+    for g in &cfg.groups {
+        if g.store_id == 0 && g.group_id == 0 {
+            continue; // already handled above
+        }
+        for r in &g.replicas {
+            let server = cfg.server_for_node(&r.node_id);
+            let endpoint = server.and_then(|s| s.grpc_url.clone()).unwrap_or_default();
+            replicas.push(TopologyReplicaInput {
+                group_id: g.group_id,
+                replica_id: r.replica_id,
+                node_id: r.node_id.clone(),
+                role: "follower".to_string(),
+                voting: true,
+                endpoint,
+            });
+        }
+    }
+
+    TopologyFinalizeRequest {
+        racks,
+        nodes,
+        stores,
+        groups,
+        replicas,
+    }
 }

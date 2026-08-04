@@ -546,6 +546,51 @@ export async function removeStore(storeId: string, options?: RequestOptions): Pr
 }
 
 /**
+ * Body accepted by `POST /api/cluster/init`
+ * (`crow_web::mgmt::ClusterInitBody`).
+ */
+export interface InitClusterRequest {
+  nodes: string[];
+}
+
+/**
+ * Initialize the cluster by bootstrapping the system group
+ * (store 0, group 0) on the selected nodes.
+ */
+export async function initCluster(
+  req: InitClusterRequest,
+  options?: RequestOptions
+): Promise<unknown> {
+  const body = JSON.stringify({ nodes: req.nodes });
+  const url = `/api/cluster/init`;
+  return jsonOrThrow(
+    await fetchWithOptions(url, {
+      ...options,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      skipDeduplication: true,
+    })
+  );
+}
+
+/**
+ * Reset the entire cluster: tear down all groups, stores, server
+ * processes, nodes, and racks in dependency order. The system group
+ * (store 0, group 0) is included. Console config is cleared.
+ */
+export async function resetCluster(options?: RequestOptions): Promise<unknown> {
+  const url = `/api/cluster/reset`;
+  return jsonOrThrow(
+    await fetchWithOptions(url, {
+      ...options,
+      method: 'POST',
+      skipDeduplication: true,
+    })
+  );
+}
+
+/**
  * List all groups in a store
  */
 export async function listGroups(storeId: string, recursive?: number, options?: RequestOptions): Promise<GroupView[]> {

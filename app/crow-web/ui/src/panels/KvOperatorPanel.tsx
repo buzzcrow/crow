@@ -22,9 +22,13 @@ interface KvOperatorPanelProps {
   stores: StoreView[];
   selectedEntity: SelectedEntity | null;
   readonly?: boolean;
+  /** True when the backend is unreachable (fetch error). */
+  backendError?: boolean;
+  /** True when the initial data load is in progress. */
+  loading?: boolean;
 }
 
-export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperatorPanelProps) {
+export function KvOperatorPanel({ stores, selectedEntity, readonly, backendError, loading }: KvOperatorPanelProps) {
   const { success, error } = useToast();
   const { log } = useActivity();
 
@@ -64,6 +68,15 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
 
   const groupIdsInStore = useMemo(() => groupsInStore.map((g) => String(g.group_id)), [groupsInStore]);
 
+  // Group 0 is the system group (topology metadata). It is queryable but
+  // read-only from the KV operator panel — no put/delete/demo inject.
+  const isSystemGroup = storeId === '0' && groupId === '0';
+  // Writable groups exclude group 0 (used for "All Groups" write targets).
+  const writableGroupIds = useMemo(
+    () => groupIdsInStore.filter((gid) => !(storeId === '0' && gid === '0')),
+    [groupIdsInStore, storeId],
+  );
+
   useEffect(() => {
     if (stores.length > 0 && !storeId) {
       setStoreId(String(stores[0].store_id));
@@ -84,11 +97,17 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
       const sid = selectedEntity.parentIds?.store_id;
       const gid = selectedEntity.id;
       if (sid && stores.some((s) => String(s.store_id) === sid)) {
+        if (sid === storeId && gid === groupId) return;
         setStoreId(sid);
         setGroupId(gid);
+        setScanRows([]);
+        setAutoScanned(false);
+        setScanDone(false);
+        setGetResult(null);
+        setErrorMsg(null);
       }
     }
-  }, [selectedEntity, stores]);
+  }, [selectedEntity, stores, storeId, groupId]);
 
   const handleStoreChange = useCallback((sid: string) => {
     setStoreId(sid);
@@ -222,8 +241,9 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
 
   const handlePut = useCallback(async () => {
     if (!putKey || !putValue || !storeId || !groupId) return;
+    if (isSystemGroup) return;
     const targetGid = groupId === ALL_GROUPS
-      ? groupIdsInStore[Math.floor(Math.random() * groupIdsInStore.length)]
+      ? writableGroupIds[Math.floor(Math.random() * writableGroupIds.length)]
       : groupId;
     if (!targetGid) return;
     setPutLoading(true);
@@ -246,10 +266,10 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
     } finally {
       setPutLoading(false);
     }
-  }, [putKey, putValue, storeId, groupId, groupIdsInStore, autoScan, log, success, error, handleScan]);
+  }, [putKey, putValue, storeId, groupId, writableGroupIds, isSystemGroup, autoScan, log, success, error, handleScan]);
 
   const handleDeleteKey = useCallback(async () => {
-    if (!deleteKey || !storeId || !groupId || groupId === ALL_GROUPS) return;
+    if (!deleteKey || !storeId || !groupId || groupId === ALL_GROUPS || isSystemGroup) return;
     setConfirmDelete({ count: 1, keys: [deleteKey], onConfirm: async () => {
       setDeleteLoading(true);
       try {
@@ -267,11 +287,11 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
         setDeleteLoading(false);
       }
     }});
-  }, [deleteKey, storeId, groupId, autoScan, log, success, error, handleScan]);
+  }, [deleteKey, storeId, groupId, isSystemGroup, autoScan, log, success, error, handleScan]);
 
   const handleDeletePrefix = useCallback(async () => {
-    if (!deleteKey || !storeId || !groupId) return;
-    const gids = groupId === ALL_GROUPS ? groupIdsInStore : [groupId];
+    if (!deleteKey || !storeId || !groupId || isSystemGroup) return;
+    const gids = groupId === ALL_GROUPS ? writableGroupIds : [groupId];
     const allKeys: { key: string; gid: string }[] = [];
     for (const gid of gids) {
       const result = await kvScan(storeId, gid, deleteKey);
@@ -297,15 +317,18 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
       setDeleteLoading(false);
       setTimeout(() => handleScan(), 100);
     }});
-  }, [deleteKey, storeId, groupId, groupIdsInStore, targetLabel, log, success, handleScan]);
+  }, [deleteKey, storeId, groupId, isSystemGroup, writableGroupIds, targetLabel, log, success, handleScan]);
 
   const selectedRows = scanRows.filter((r) => r.selected);
   const handleDeleteSelected = useCallback(async () => {
     if (selectedRows.length === 0) return;
-    setConfirmDelete({ count: selectedRows.length, keys: selectedRows.map((r) => r.key_utf8), onConfirm: async () => {
+    // Exclude system group rows from deletion.
+    const writableRows = selectedRows.filter((r) => !(storeId === '0' && r.groupId === '0'));
+    if (writableRows.length === 0) return;
+    setConfirmDelete({ count: writableRows.length, keys: writableRows.map((r) => r.key_utf8), onConfirm: async () => {
       setDeleteLoading(true);
       let ok = 0, fail = 0;
-      for (const row of selectedRows) {
+      for (const row of writableRows) {
         try {
           await kvDelete(storeId, row.groupId, { key: row.key_utf8 });
           ok++;
@@ -321,6 +344,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
   }, [selectedRows, storeId, targetLabel, log, success, handleScan]);
 
   const handleInlineDelete = useCallback((key: string, gid: string) => {
+    if (storeId === '0' && gid === '0') return;
     setConfirmDelete({ count: 1, keys: [key], onConfirm: async () => {
       setDeleteLoading(true);
       try {
@@ -340,7 +364,8 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
 
   const handleDemoInject = useCallback(async () => {
     if (!storeId || demoCount <= 0) return;
-    const gids = groupId === ALL_GROUPS ? groupIdsInStore : [groupId];
+    if (isSystemGroup) return;
+    const gids = groupId === ALL_GROUPS ? writableGroupIds : [groupId];
     if (gids.length === 0) return;
     setDemoLoading(true);
     setErrorMsg(null);
@@ -361,11 +386,12 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
     success(`Injected ${ok} demo keys${fail > 0 ? `, ${fail} failed` : ''}`);
     setDemoLoading(false);
     setTimeout(() => handleScan(), 100);
-  }, [storeId, groupId, groupIdsInStore, demoCount, targetLabel, log, success, handleScan]);
+  }, [storeId, groupId, isSystemGroup, writableGroupIds, demoCount, targetLabel, log, success, handleScan]);
 
   const handleDemoDelete = useCallback(async () => {
     if (!storeId || !groupId) return;
-    const gids = groupId === ALL_GROUPS ? groupIdsInStore : [groupId];
+    if (isSystemGroup) return;
+    const gids = groupId === ALL_GROUPS ? writableGroupIds : [groupId];
     const DEMO_SCAN_LIMIT = 1000;
     const DELETE_CONCURRENCY = 16;
 
@@ -447,7 +473,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
       setDemoLoading(false);
       setTimeout(() => handleScan(), 100);
     }});
-  }, [storeId, groupId, groupIdsInStore, targetLabel, log, success, handleScan]);
+  }, [storeId, groupId, isSystemGroup, writableGroupIds, targetLabel, log, success, handleScan]);
 
   const toggleRow = useCallback((idx: number) => {
     setScanRows((prev) => prev.map((r, i) => (i === idx ? { ...r, selected: !r.selected } : r)));
@@ -471,7 +497,11 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
   if (stores.length === 0) {
     return (
       <div className="tw-flex tw-items-center tw-justify-center tw-h-full tw-text-muted tw-text-sm">
-        No stores available. Create a store first.
+        {backendError
+          ? 'Backend unreachable — retrying'
+          : loading
+            ? 'Loading…'
+            : 'No stores available. Create a store first.'}
       </div>
     );
   }
@@ -581,7 +611,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
           </div>
 
           {/* Put row */}
-          {!readonly && (
+          {!readonly && !isSystemGroup && (
             <div className="tw-flex tw-items-center tw-gap-2 tw-flex-wrap">
               <span className="tw-text-xs tw-text-muted tw-w-10">Put</span>
               <input
@@ -616,7 +646,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
           )}
 
           {/* Delete row */}
-          {!readonly && (
+          {!readonly && !isSystemGroup && (
             <div className="tw-flex tw-items-center tw-gap-2 tw-flex-wrap">
               <span className="tw-text-xs tw-text-muted tw-w-10">Del</span>
               <input
@@ -654,7 +684,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
           )}
 
           {/* Demo row */}
-          {!readonly && (
+          {!readonly && !isSystemGroup && (
             <div className="tw-flex tw-items-center tw-gap-2 tw-flex-wrap tw-pt-1 tw-border-t tw-border-border">
               <span className="tw-text-xs tw-text-muted tw-w-10 tw-flex tw-items-center tw-gap-0.5">
                 <FlaskConical className="tw-h-3 tw-w-3" /> Demo
@@ -670,7 +700,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
               <span className="tw-text-xs tw-text-muted">demo keys</span>
               <button
                 onClick={handleDemoInject}
-                disabled={demoLoading}
+                disabled={demoLoading || (groupId === ALL_GROUPS && writableGroupIds.length === 0)}
                 className="tw-flex tw-items-center tw-gap-1 tw-px-2 tw-py-1 tw-bg-accent tw-text-bg tw-rounded tw-text-xs disabled:tw-opacity-50"
               >
                 {demoLoading ? <Loader2 className="tw-h-3 tw-w-3 tw-animate-spin" /> : <Database className="tw-h-3 tw-w-3" />}
@@ -678,7 +708,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
               </button>
               <button
                 onClick={handleDemoDelete}
-                disabled={demoLoading}
+                disabled={demoLoading || (groupId === ALL_GROUPS && writableGroupIds.length === 0)}
                 className="tw-flex tw-items-center tw-gap-1 tw-px-2 tw-py-1 tw-border tw-border-failed/30 tw-text-failed tw-rounded tw-text-xs hover:tw-bg-failed/10 disabled:tw-opacity-50"
               >
                 <Trash2 className="tw-h-3 tw-w-3" />
@@ -687,6 +717,13 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
             </div>
           )}
         </div>
+
+        {isSystemGroup && (
+          <div className="tw-flex tw-items-start tw-gap-2 tw-p-2 tw-rounded tw-bg-panel/50 tw-border tw-border-border tw-text-muted tw-text-xs">
+            <AlertTriangle className="tw-h-4 tw-w-4 tw-flex-shrink-0" />
+            <span>Group 0 is the system group (topology metadata). Writes are disabled; use Scan and Get to inspect.</span>
+          </div>
+        )}
 
         {/* Results table — rendered whenever a scan has been executed,
             even with 0 rows, so the table DOM is always present after
@@ -738,7 +775,7 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly }: KvOperator
                           <td className="tw-p-2 tw-text-muted">{row.groupId}</td>
                         )}
                         <td className="tw-p-2" onClick={(e) => e.stopPropagation()}>
-                          {!readonly && (
+                          {!readonly && !(storeId === '0' && row.groupId === '0') && (
                             <button
                               onClick={() => handleInlineDelete(row.key_utf8, row.groupId)}
                               className="tw-text-muted hover:tw-text-failed"
