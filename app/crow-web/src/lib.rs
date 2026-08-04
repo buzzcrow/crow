@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! `CrowKV` Console web backend.
+//! `Crow Storage` Console web backend.
 //!
 //! Key work: two-tree API contract, physical tree lifecycle (A3),
 //! per-node primitives (A4), logical store/group planes (A5/A6),

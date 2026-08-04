@@ -81,7 +81,7 @@ const FRONTEND_MISSING_HTML: &str = r#"<!doctype html>
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <title>CrowKV Console &middot; UI not built</title>
+    <title>Crow Storage Console &middot; UI not built</title>
     <style>
         body { font-family: ui-monospace, monospace; margin: 32px; max-width: 720px; background: #0b0d10; color: #d8dee9; }
         h1 { font-size: 18px; color: #88c0d0; }
@@ -91,7 +91,7 @@ const FRONTEND_MISSING_HTML: &str = r#"<!doctype html>
     </style>
 </head>
 <body>
-    <h1>CrowKV Console &middot; UI not built</h1>
+    <h1>Crow Storage Console &middot; UI not built</h1>
     <p>The React SPA bundle was not found at <code>crow-console/web/ui/dist/</code>.</p>
     <p>Run the build once and reload:</p>
     <pre>make ui-install

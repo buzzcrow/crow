@@ -19,7 +19,7 @@ export interface InitClusterDialogProps {
 
 /**
  * Initialize the cluster by bootstrapping the system group
- * (store 0, group 0) on the selected CrowKV nodes.
+ * (store 0, group 0) on the selected Crow Storage nodes.
  *
  * Backend contract: `crow-console/web/src/mgmt.rs::ClusterInitBody`.
  */
@@ -88,7 +88,7 @@ export function InitClusterDialog({
       isOpen={isOpen}
       onClose={handleClose}
       title="Initialize Cluster"
-      description="Bootstrap the system group (store 0, group 0) on the selected CrowKV nodes. This must be done before creating any KV store."
+      description="Bootstrap the system group (store 0, group 0) on the selected Crow Storage nodes. This must be done before creating any KV store."
       confirmLabel="Initialize Cluster"
       onConfirm={handleSubmit}
       confirmDisabled={!valid || isLoading}
@@ -97,11 +97,11 @@ export function InitClusterDialog({
       <div className="tw-space-y-4">
         <div className="tw-space-y-2">
           <label className="tw-text-xs tw-font-medium tw-text-text">
-            CrowKV Nodes (select at least one)
+            Crow Storage Nodes (select at least one)
           </label>
           {availableNodes.length === 0 ? (
             <div className="tw-text-sm tw-text-muted">
-              No reachable CrowKV nodes available. Deploy a CrowKV server and wait until it is Running and Up.
+              No reachable Crow Storage nodes available. Deploy a Crow Storage server and wait until it is Running and Up.
             </div>
           ) : (
             <div className="tw-max-h-40 tw-overflow-y-auto tw-border tw-border-border tw-rounded-md tw-p-2 tw-space-y-1">

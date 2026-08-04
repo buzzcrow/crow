@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! Shared core for the `CrowKV` Console (web + CLI).
+//! Shared core for the `Crow Storage` Console (web + CLI).
 //!
 //! Key work: data models for racks/nodes/servers/stores/groups/replicas,
 //! HTTP and gRPC clients to `crow-kv-server`, registry persistence,

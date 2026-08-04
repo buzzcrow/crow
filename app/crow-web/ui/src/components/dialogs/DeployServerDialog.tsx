@@ -61,7 +61,7 @@ export function DeployServerDialog({
         grpc_port: deployedPorts.grpcPort,
         ...(binary.trim() ? { binary: binary.trim() } : {}),
       });
-      success(`CrowKV deployed on ${nodeId}`);
+      success(`Crow Storage deployed on ${nodeId}`);
       onClose();
       await onSuccess?.(deployedPorts);
     } catch (err) {

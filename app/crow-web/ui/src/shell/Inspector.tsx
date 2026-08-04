@@ -51,7 +51,7 @@ export function Inspector({ readonly: _readonly, modules: _modules, nodes = [], 
 
   if (!selectedEntity) return null;
 
-  const displayType = selectedEntity.type === 'Server' ? 'CrowKV' : selectedEntity.type;
+  const displayType = selectedEntity.type === 'Server' ? 'Crow Storage' : selectedEntity.type;
   const displayName = selectedEntity.name || displayEntityId(selectedEntity);
 
   return (
@@ -127,7 +127,7 @@ interface DetailsTabProps {
 }
 
 function DetailsTab({ entity, nodes, servers, stores, selectEntity, setViewMode }: DetailsTabProps) {
-  const displayType = entity.type === 'Server' ? 'CrowKV' : entity.type;
+  const displayType = entity.type === 'Server' ? 'Crow Storage' : entity.type;
   const displayId = displayEntityId(entity);
   const serverNodeId = entity.type === 'Node' ? entity.id : entity.parentIds?.node_id;
   const server =

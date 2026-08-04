@@ -82,7 +82,7 @@ export function AddNodeDialog({
         });
       }
 
-      success(enableCrowKV ? `Node "${trimmedNodeId}" created and CrowKV enabled` : `Node "${trimmedNodeId}" created successfully`);
+      success(enableCrowKV ? `Node "${trimmedNodeId}" created and Crow Storage enabled` : `Node "${trimmedNodeId}" created successfully`);
       onCreatedRackId?.(rackId);
       setRackId(initialRackId);
       setNodeId(initialNodeId);
@@ -176,7 +176,7 @@ export function AddNodeDialog({
             onChange={(e) => setEnableCrowKV(e.target.checked)}
             className="tw-h-4 tw-w-4 tw-rounded tw-border tw-border-border tw-bg-bg tw-text-accent focus:tw-ring-accent"
           />
-          <span>Enable CrowKV on this node</span>
+          <span>Enable Crow Storage on this node</span>
         </label>
         {enableCrowKV && (
           <>

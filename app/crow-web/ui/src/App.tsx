@@ -241,7 +241,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           if (!hasServer) {
             items.push({
               id: 'deploy',
-              label: 'Deploy CrowKV',
+              label: 'Deploy Crow Storage',
               icon: <Server className="tw-h-4 tw-w-4" />,
               onSelect: () => setDialog((d) => ({ ...d, deployServer: { nodeId: t.id } })),
             });
@@ -259,15 +259,15 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           if (hasServer) {
             items.push({
               id: 'restart',
-              label: 'Restart CrowKV',
+              label: 'Restart Crow Storage',
               icon: <RotateCw className="tw-h-4 tw-w-4" />,
-              onSelect: () => runMutation('Restart CrowKV', t.id, () => restartServer(t.id)),
+              onSelect: () => runMutation('Restart Crow Storage', t.id, () => restartServer(t.id)),
             });
             items.push({
               id: 'stop',
-              label: 'Stop CrowKV',
+              label: 'Stop Crow Storage',
               icon: <Square className="tw-h-4 tw-w-4" />,
-              onSelect: () => runMutation('Stop CrowKV', t.id, () => stopServer(t.id)),
+              onSelect: () => runMutation('Stop Crow Storage', t.id, () => stopServer(t.id)),
             });
           }
           items.push({ id: 's1', separator: true });
