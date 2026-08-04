@@ -2,7 +2,7 @@
 
 ## Reporting a Vulnerability
 
-If you discover a security vulnerability in CrowKV, please report it responsibly:
+If you discover a security vulnerability in CROW, please report it responsibly:
 
 1. **Do not** open a public GitHub issue.
 2. Email **buzzcrow@126.com** with a description of the vulnerability and reproduction steps.
@@ -10,7 +10,7 @@ If you discover a security vulnerability in CrowKV, please report it responsibly
 
 ## Scope
 
-CrowKV is currently a pre-production project. Security fixes will be prioritized but may not have defined SLAs.
+CROW is currently a pre-production project. Security fixes will be prioritized but may not have defined SLAs.
 
 ## Disclosure
 

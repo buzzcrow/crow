@@ -1,5 +1,5 @@
 # Inject rpath for pixi/conda lib dir so test binaries (not just bins)
-# can find libspdlog and other crowtree FFI dependencies at runtime.
+# can find libspdlog and other crow-tree FFI dependencies at runtime.
 # build.rs rustc-link-arg only covers bin targets of direct dependents;
 # this covers test binaries of all crates.
 # Test binaries live in target/<profile>/deps/ (3 levels to repo root),

@@ -5,7 +5,7 @@
 description: Review Rust code
 ---
 
-# CrowKV - Code Review
+# CROW - Code Review
 
 Goal: lean, correct, no dead code.
 

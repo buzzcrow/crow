@@ -23,9 +23,9 @@
 # Prerequisites:
 #   - pixi installed, project dependencies resolved
 #   - jq installed
-#   - release binary built (pixi run -- cargo build --release -p crowkv-cli -p crowkv-server)
+#   - release binary built (pixi run -- cargo build --release -p crow-cli -p crow-kv-server)
 set -euo pipefail
-cd /cjdata/cpp/crowkv
+cd /cjdata/cpp/crow
 
 RESULTS_FILE="doc/working/bench-write-regression.tsv"
 DURATION=10
@@ -36,7 +36,7 @@ run_bench() {
     local threads="$1" conn="$2" mi="$3" coalesce="$4" drain="$5" label="$6"
     echo ">>> $label ..."
     local output
-    output=$(pixi run -- cargo run --release -p crowkv-cli -- bench run \
+    output=$(pixi run -- cargo run --release -p crow-cli -- bench run \
         --mode mem --workload write --duration-secs "$DURATION" \
         --threads "$threads" --connections "$conn" \
         --max-inflight "$mi" \

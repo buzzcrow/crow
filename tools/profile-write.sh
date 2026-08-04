@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # --- CrowKV write profiling with flamechart output ---
 #
-# Builds crowkv-cli + crowkv-server with debug symbols and frame
+# Builds crow-cli + crow-kv-server with debug symbols and frame
 # pointers (Rust + C++ via cc crate), then runs a write benchmark
 # under perf record (primary, generates flamegraph SVG) or
 # samply (alternative, Firefox Profiler UI).
@@ -23,7 +23,7 @@
 #   - samply + inferno: installed via `pixi run install-deps`
 #   - perf:   linux-tools for running kernel
 set -euo pipefail
-cd /cjdata/cpp/crowkv
+cd /cjdata/cpp/crow
 
 if [ "$(uname -s)" = "Darwin" ]; then
     DEFAULT_SAMPLER="samply"
@@ -53,25 +53,25 @@ export RUSTFLAGS="-Cforce-frame-pointers=yes"
 export CXXFLAGS="-g -fno-omit-frame-pointer"
 export CFLAGS="-g -fno-omit-frame-pointer"
 
-pixi run -- cargo build --release -p crowkv-cli -p crowkv-server 2>&1 | tail -3
+pixi run -- cargo build --release -p crow-cli -p crow-kv-server 2>&1 | tail -3
 echo "    Done."
 echo ""
 
 # Verify debug symbols
-if ! readelf -S target/release/crowkv-server 2>/dev/null | grep -q debug; then
-    echo "WARNING: crowkv-server binary has no debug sections."
+if ! readelf -S target/release/crow-kv-server 2>/dev/null | grep -q debug; then
+    echo "WARNING: crow-kv-server binary has no debug sections."
     echo "         Flamecharts will show addresses, not function names."
 fi
 
 # ── Step 2: Profile ──
 # Bypass pixi for the actual run — set LD_LIBRARY_PATH so the
 # binaries find libspdlog/libfmt/libz from the pixi env. This keeps
-# the process tree clean (samply -> crowkv-cli -> crowkv-server)
-# instead of samply -> pixi -> cargo -> crowkv-cli -> crowkv-server.
-PIXI_LIB="$(cd /cjdata/cpp/crowkv/.pixi/envs/default/lib && pwd)"
+# the process tree clean (samply -> crow-cli -> crow-kv-server)
+# instead of samply -> pixi -> cargo -> crow-cli -> crow-kv-server.
+PIXI_LIB="$(cd /cjdata/cpp/crow/.pixi/envs/default/lib && pwd)"
 export LD_LIBRARY_PATH="${PIXI_LIB}:${LD_LIBRARY_PATH:-}"
-export CROWKV_SERVER_BIN="$(cd /cjdata/cpp/crowkv && pwd)/target/release/crowkv-server"
-CLI_BIN="$(cd /cjdata/cpp/crowkv && pwd)/target/release/crowkv-cli"
+export CROW_KV_SERVER_BIN="$(cd /cjdata/cpp/crow && pwd)/target/release/crow-kv-server"
+CLI_BIN="$(cd /cjdata/cpp/crow && pwd)/target/release/crow-cli"
 
 mkdir -p "$RESULTS_DIR"
 

@@ -54,8 +54,8 @@ response build path. Must preserve R6's `Send` guarantee for the
 derived `Bytes`.
 
 **Files**: `crowtree/ffi/src/lib.rs` (`PinnedScanEntry` / scan result
-decode, `Bytes::from_owner` for scan values), `crowkv/src/kv/kv_engine.rs`
-(`KVEngine::scan` trait signature), `crowkv/src/kv/crowtree_engine.rs`
-(`scan` implementation), `crowkv/tests/kv/mem_kv_impl.rs` (`InMemKV::scan`
-signature update), `crowkv/src/cluster/px_kv_store.rs` (`kv_scan`
+decode, `Bytes::from_owner` for scan values), `lib/crow-kv/src/kv/kv_engine.rs`
+(`KVEngine::scan` trait signature), `lib/crow-kv/src/kv/crowtree_engine.rs`
+(`scan` implementation), `lib/crow-kv/tests/kv/mem_kv_impl.rs` (`InMemKV::scan`
+signature update), `lib/crow-kv/src/cluster/px_kv_store.rs` (`kv_scan`
 response build).

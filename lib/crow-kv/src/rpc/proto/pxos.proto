@@ -1,0 +1,321 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
+// Classic-Paxos + leader-election message set (P1 M2 + P1 M3).
+// P4 will extend further with snapshot and client messages.
+//
+// Field-number rules: append-only within a message. Tags reserved for
+// historical fields are not reused.
+
+syntax = "proto3";
+
+package crow_kv.rpc;
+
+message PrepareRequest {
+  uint32 version = 1;
+  uint64 slot    = 2;
+  uint64 round   = 3;
+  uint64 leader_id = 4;
+  uint64 request_id = 5;
+  uint64 request_create_ms = 6;
+  uint64 group_id = 7;
+  // P1 M3: leader's current term for the two-fence rule.
+  uint64 term = 8;
+  // P5 M2: leader's current membership_epoch for the exact-match
+  // membership-epoch fence. Absent/0 from an old binary is treated as
+  // epoch 0, matching a freshly-created group that has never had a
+  // membership mutation.
+  uint64 membership_epoch = 9;
+}
+
+message AcceptedValue {
+  uint64 slot  = 1;
+  uint64 round = 2;
+  uint64 leader_id = 3;
+  uint64 term  = 4;
+  bytes  payload = 5;
+}
+
+message PromiseResponse {
+  uint32 version = 1;
+  uint64 slot    = 2;
+  uint64 round   = 3;
+  uint64 leader_id = 4;
+  AcceptedValue previously_accepted = 5;
+  bool   rejected = 6;
+  uint64 rejected_round   = 7;
+  uint64 rejected_leader_id = 8;
+  uint64 request_id = 9;
+  uint64 request_create_ms = 10;
+  // P1 M3: responder's current term so the proposer can detect a stale
+  // leader (term < responder.current_term -> step down with TermStale).
+  uint64 term = 11;
+  // P1 M3: responder echoes back TermStale when the prepare's term is lower
+  // than its own. Carries `term` as the new term to adopt.
+  bool term_stale = 12;
+  // P5 M2: responder's own membership_epoch, always populated (not just
+  // on mismatch) so the proposer can log/compare even when it matches.
+  uint64 membership_epoch = 13;
+  // P5 M2: set when the proposer's membership_epoch did not exactly
+  // match `membership_epoch` above. Distinct from `rejected`/`term_stale`
+  // -- the proposer must not bump its ballot in response, only refresh
+  // its membership view.
+  bool epoch_mismatch = 14;
+}
+
+message AcceptRequest {
+  uint32 version = 1;
+  uint64 slot    = 2;
+  uint64 round   = 3;
+  uint64 leader_id = 4;
+  uint64 term    = 5;
+  AcceptedValue value = 6;
+  uint64 request_id = 7;
+  uint64 request_create_ms = 8;
+  // Legacy single dedup tag (fields 9/10). Kept populated with the first
+  // coalesced tag (or 0) for backward-compat with older followers during a
+  // rolling upgrade. New replicas prefer `dedup_tags` (field 13), which
+  // carries one tag per coalesced client op.
+  uint64 client_id = 9;
+  uint64 seq = 10;
+  uint64 group_id = 11;
+  // P5 M2: see PrepareRequest.membership_epoch.
+  uint64 membership_epoch = 12;
+  // R36: one (client_id, seq) dedup tag per coalesced client op, all
+  // mapping to this slot. Empty for repair/election entries and for
+  // older leaders (fall back to legacy client_id/seq).
+  repeated DedupTag dedup_tags = 13;
+}
+
+// R36: a single (client_id, seq) dedup mapping for a chosen slot.
+message DedupTag {
+  uint64 client_id = 1;
+  uint64 seq = 2;
+}
+
+message AcceptedResponse {
+  uint32 version = 1;
+  uint64 slot    = 2;
+  uint64 round   = 3;
+  uint64 leader_id = 4;
+  bool   rejected = 5;
+  uint64 rejected_round   = 6;
+  uint64 rejected_leader_id = 7;
+  uint64 request_id = 8;
+  uint64 request_create_ms = 9;
+  // P1 M3: responder's current term.
+  uint64 term = 10;
+  // P1 M3: term-stale rejection (see PromiseResponse.term_stale).
+  bool term_stale = 11;
+  // P5 M2: see PromiseResponse.membership_epoch.
+  uint64 membership_epoch = 12;
+  // P5 M2: see PromiseResponse.epoch_mismatch.
+  bool epoch_mismatch = 13;
+}
+
+// ---------------------------------------------------------------------------
+// P1 M3: leader election
+// ---------------------------------------------------------------------------
+
+// PreVote round (Raft-style). PreCandidate sends proposed_term =
+// current_term + 1 without bumping its own term; peers reply granted=true if
+// they would vote for it in proposed_term (log-up-to-date check + vote
+// lockout window). This avoids disruption from partitioned nodes whose term
+// would otherwise leap past the cluster's.
+message PreVoteRequest {
+  uint32 version = 1;
+  uint64 group_id = 2;
+  uint64 term = 3;            // proposed term (current_term + 1)
+  uint64 candidate_id = 4;
+  uint64 accepted_log_tip_slot = 5;
+  uint64 accepted_log_tip_term = 6;
+  uint64 request_id = 7;
+  uint64 request_create_ms = 8;
+}
+
+message PreVoteResponse {
+  uint32 version = 1;
+  uint64 group_id = 2;
+  uint64 term = 3;            // responder's current_term (for stale detect)
+  bool   granted = 4;
+  // Learner frontier piggy-back for the candidate's bulk-Phase-1 ceiling.
+  uint64 contiguous_chosen = 5;
+  uint64 last_chosen_term = 6;
+  uint64 highest_seen_slot = 7;
+  uint64 request_id = 8;
+  uint64 request_create_ms = 9;
+}
+
+// Real RequestVote round (same shape as PreVote; consumes the vote slot).
+message RequestVoteRequest {
+  uint32 version = 1;
+  uint64 group_id = 2;
+  uint64 term = 3;            // term that won the prevote quorum
+  uint64 candidate_id = 4;
+  uint64 accepted_log_tip_slot = 5;
+  uint64 accepted_log_tip_term = 6;
+  uint64 request_id = 7;
+  uint64 request_create_ms = 8;
+}
+
+message RequestVoteResponse {
+  uint32 version = 1;
+  uint64 group_id = 2;
+  uint64 term = 3;
+  bool   granted = 4;
+  uint64 contiguous_chosen = 5;
+  uint64 last_chosen_term = 6;
+  uint64 highest_seen_slot = 7;
+  uint64 request_id = 8;
+  uint64 request_create_ms = 9;
+}
+
+// Heartbeat (also extends the follower's election deadline and vote-lockout
+// window). `lease_grant_until_ms_mono` and `t_send_ms_mono` are the leader's
+// monotonic-clock timestamps; followers do not treat them as wall-clock.
+message HeartbeatRequest {
+  uint32 version = 1;
+  uint64 group_id = 2;
+  uint64 term = 3;
+  uint64 leader_id = 4;
+  uint64 prev_log_slot = 5;
+  uint64 prev_log_term = 6;
+  uint64 committed_safe_slot = 7;
+  uint64 lease_grant_until_ms_mono = 8;
+  uint64 t_send_ms_mono = 9;
+  uint64 request_id = 10;
+  uint64 request_create_ms = 11;
+}
+
+message HeartbeatResponse {
+  uint32 version = 1;
+  uint64 group_id = 2;
+  uint64 term = 3;
+  bool   success = 4;
+  uint64 contiguous_chosen = 5;
+  uint64 last_chosen_term = 6;
+  uint64 contiguous_applied = 7;
+  uint64 highest_seen_slot = 8;
+  uint64 request_id = 9;
+  uint64 request_create_ms = 10;
+  // Highest slot durably captured in this follower's own last engine
+  // snapshot (`snapshot_slot`; mirrors `WalEngine::snapshot_slot()`).
+  // The leader aggregates this across voting peers to compute the group's
+  // real "durable on leader + >=1 peer" watermark, instead of
+  // approximating it with `contiguous_applied`/`group_safe_slot`.
+  uint64 durable_snapshot_slot = 11;
+}
+
+// Admin step-down primitive (decision §7.1: strict fence).
+//
+// Accept iff is_leader && self.id == target_leader_id && term == current_term.
+// On reject, response echoes current_term and current_leader_id so the admin
+// client can reissue against the right replica.
+message StepDownRequest {
+  uint32 version = 1;
+  uint64 group_id = 2;
+  uint64 term = 3;
+  uint64 target_leader_id = 4;
+  string reason = 5;
+  uint64 request_id = 6;
+  uint64 request_create_ms = 7;
+}
+
+message StepDownResponse {
+  uint32 version = 1;
+  uint64 group_id = 2;
+  bool   accepted = 3;
+  uint64 current_term = 4;
+  uint64 current_leader_id = 5;
+  uint64 request_id = 6;
+  uint64 request_create_ms = 7;
+}
+
+// Per-peer bidi LearnerStream. Multiplexes Accept + Heartbeat + Chosen
+// notifications on one stream per (group_id, peer_id) pair so heartbeats
+// cannot reorder ahead of an Accept they logically follow. Prepare /
+// RequestVote / PreVote / StepDown remain unary RPCs.
+message ChosenNotification {
+  uint32 version = 1;
+  uint64 group_id = 2;
+  uint64 slot = 3;
+  uint64 term = 4;
+  uint64 leader_id = 5;
+  uint64 request_id = 6;
+  uint64 request_create_ms = 7;
+}
+
+message LearnerStreamRequest {
+  oneof frame {
+    AcceptRequest      accept    = 1;
+    HeartbeatRequest   heartbeat = 2;
+    ChosenNotification chosen    = 3;
+  }
+}
+
+message LearnerStreamResponse {
+  oneof frame {
+    AcceptedResponse  accepted  = 1;
+    HeartbeatResponse heartbeat = 2;
+  }
+}
+
+service PxService {
+  rpc Prepare(PrepareRequest) returns (PromiseResponse);
+  rpc Accept(AcceptRequest) returns (AcceptedResponse);
+
+  // P1 M3 leader election.
+  rpc PreVote(PreVoteRequest) returns (PreVoteResponse);
+  rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc StepDown(StepDownRequest) returns (StepDownResponse);
+
+  // P1 M3 per-peer bidi stream (steady-state Accept/Heartbeat/Chosen).
+  rpc LearnerStream(stream LearnerStreamRequest) returns (stream LearnerStreamResponse);
+}
+
+// ---------------------------------------------------------------------------
+// #20 New-member snapshot install. Layered on the existing per-replica
+// `voting` flag rather than the full joint-consensus reconfiguration state
+// machine (`ConfigChange` log entries, both-quorum evaluation), which is
+// not implemented in this codebase: a new/far-lagging member starts
+// non-voting (`PxGroupMember.voting = false`), pulls a snapshot plus the
+// WAL tail via this service, and an operator promotes it to voting once
+// caught up.
+// ---------------------------------------------------------------------------
+
+message SnapshotRequest {
+  uint64 group_id = 1;
+}
+
+// One item of the streamed snapshot transfer. `KVEngine::snapshot_export`'s
+// byte stream is chunked into `data` frames of bounded size; the exported
+// `at_slot` itself is embedded in that byte stream and returned by
+// `KVEngine::snapshot_import`, so it is not repeated here. The **first**
+// item of every response stream is always a `header`, carrying
+// `term_at_slot` -- needed (alongside `at_slot`) to seed the joining
+// replica's learner frontier -- since it cannot be recovered from the
+// exported bytes alone.
+message SnapshotStreamItem {
+  oneof payload {
+    SnapshotHeader header = 1;
+    bytes data = 2;
+  }
+}
+
+message SnapshotHeader {
+  // Term of the log entry chosen at the snapshot's own `at_slot`, read from
+  // the exporting replica's own acceptor (`accepted_at(at_slot)`).
+  uint64 term_at_slot = 1;
+  // P5 M2: the exporting replica's current membership_epoch, so a
+  // freshly-joining replica seeds its own epoch fence from this instead
+  // of starting at 0 -- otherwise it could never receive a Prepare/Accept
+  // (even as a non-voting catch-up learner) from a group that has ever
+  // had a membership change, since every such request is stamped with
+  // the leader's *current* (non-zero) epoch.
+  uint64 membership_epoch = 2;
+}
+
+service SnapshotService {
+  rpc StreamSnapshot(SnapshotRequest) returns (stream SnapshotStreamItem);
+}

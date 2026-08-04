@@ -2,10 +2,10 @@
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ---
-description: CrowKV documentation hierarchy and conventions
+description: CROW documentation hierarchy and conventions
 ---
 
-# CrowKV Documentation Structure
+# CROW Documentation Structure
 
 ## Entry Point
 

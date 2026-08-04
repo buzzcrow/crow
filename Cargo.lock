@@ -586,6 +586,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
+name = "crow-cli"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "chrono",
+ "clap",
+ "crow-common",
+ "crow-console-shared",
+ "crow-kv-client",
+ "crow-web",
+ "dirs",
+ "hex",
+ "rand 0.8.6",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "crow-common"
 version = "0.1.0"
 dependencies = [
@@ -599,15 +621,35 @@ dependencies = [
 ]
 
 [[package]]
-name = "crowkv"
+name = "crow-console-shared"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "crow-kv-client",
+ "dirs",
+ "futures",
+ "hex",
+ "reqwest",
+ "russh",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
+name = "crow-kv"
 version = "0.1.0"
 dependencies = [
  "bytes",
  "criterion",
  "crossbeam-skiplist",
  "crow-common",
- "crowkv",
- "crowtree-ffi",
+ "crow-kv",
+ "crow-tree-ffi",
  "dashmap",
  "flate2",
  "futures",
@@ -630,35 +672,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "crowkv-cli"
-version = "0.1.0"
-dependencies = [
- "axum",
- "chrono",
- "clap",
- "crow-common",
- "crowkv-client",
- "crowkv-console-shared",
- "crowkv-web",
- "dirs",
- "hex",
- "rand 0.8.6",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "crowkv-client"
+name = "crow-kv-client"
 version = "0.1.0"
 dependencies = [
  "axum",
  "bytes",
  "crow-common",
- "crowkv",
+ "crow-kv",
  "dashmap",
  "reqwest",
  "serde",
@@ -670,34 +690,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "crowkv-console-shared"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "crowkv-client",
- "dirs",
- "futures",
- "hex",
- "reqwest",
- "russh",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
- "toml",
- "tracing",
-]
-
-[[package]]
-name = "crowkv-server"
+name = "crow-kv-server"
 version = "0.1.0"
 dependencies = [
  "axum",
  "bytes",
  "clap",
- "crowkv",
- "crowtree-ffi",
+ "crow-kv",
+ "crow-tree-ffi",
  "dashmap",
  "reqwest",
  "serde",
@@ -710,15 +710,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "crowkv-web"
+name = "crow-tree-ffi"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "cc",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "crow-web"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
  "clap",
- "crowkv",
- "crowkv-client",
- "crowkv-console-shared",
+ "crow-console-shared",
+ "crow-kv",
+ "crow-kv-client",
  "hex",
  "reqwest",
  "serde",
@@ -728,16 +738,6 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "crowtree-ffi"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "cc",
- "tempfile",
- "tokio",
 ]
 
 [[package]]
