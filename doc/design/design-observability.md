@@ -95,10 +95,14 @@ integration.
   fsync latency summary (thinnest-layer disk IO), write bandwidth.
 - Rust cluster (`local_replica.rs`): election/step-down counters, in-flight
   slots gauge. Paxos slot watermarks (gauges bridged from `LocalReplica`).
+  Engine-apply latency summary (registered here, observed in
+  `learner.rs apply_entry`).
 - Rust cluster (`group.rs`): read-path handles (`ReadRegistryHandles`) —
   lease/ReadIndex path counters, read barrier latency summary, engine_get
   latency summary, MinSlot-fallback counter, read-state gauges (lease valid,
-  contiguous applied, safe slot).
+  contiguous applied, safe slot). Write-path handles
+  (`WriteRegistryHandles`) — propose-e2e, prepare-phase, accept-phase,
+  accept-quorum-RPC latency summaries.
 - Rust RPC (`remote_replica.rs`): per-peer RPC latency summary + error counter
   with dynamic names.
 - C++ buffer pool (`buffer_pool.cpp`): hits/misses/evictions/writebacks
@@ -213,6 +217,32 @@ get count in the same window. The path counters are outcome counters (which
 path served the read), not call counters — `read.barrier.l` already carries
 the total call count. This follows the counter/summary non-redundancy
 principle (justified under "different population/outcome").
+
+### Write Path Metrics
+
+The write path mirrors the read path's latency hierarchy. Handles live in
+`WriteRegistryHandles` (per store, group; on `PxGroup` via `OnceLock`,
+mirroring `ReadRegistryHandles`), except `engine_apply` which is registered
+on `PxLocalReplica` (alongside the WAL handles) and observed in
+`PxLearner::apply_entry`.
+
+- **Latency hierarchy** (feature layer → thinnest layer):
+  - `write.propose_e2e.l` — `propose_inner` entry → return (the full
+    client-observed proposal latency, including retries).
+  - `write.prepare_phase.l` — `run_prepare_phase` entry → return.
+  - `write.accept_phase.l` — `run_accept_phase` entry → return.
+  - `write.accept_quorum_rpc.l` — accept-phase start → first-quorum
+    reached (the k-th-fastest remote reply latency; recorded only on the
+    quorum short-circuit success path, not on the failure path).
+  - `write.engine_apply.l` — `PxLearner::apply_entry` entry → return
+    (isolates engine apply cost from consensus phase cost).
+
+All five are `LatencySummary` (count + sum + max), matching the read-path
+`barrier` / `engine_get` pattern. Percentile precision is not needed for
+phase-level attribution — the bench client already has `PreciseHistogram`
+for client-observed p99. The `accept_quorum_rpc` timer is meaningful only
+after the quorum short-circuit (§6.1 of `design-rpc.md`); it records the
+quorum-th-fastest remote latency, not the full fan-out tail.
 
 ### Client Metrics
 
