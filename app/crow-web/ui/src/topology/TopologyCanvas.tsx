@@ -172,6 +172,13 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
     const focusNodes = positioned.nodes.filter((node) => targetIds.has(node.id));
     if (focusNodes.length === 0) return;
 
+    // Drop any stale saved viewport for this mode. Programmatic setCenter
+    // does not reliably fire onMoveEnd with the new viewport, so the saved
+    // value still points at the pre-focus position; if a poll lands right
+    // after the focus pan, the node-change effect would otherwise restore it
+    // and snap the view back to where it was before the click.
+    viewportsRef.current[viewMode] = undefined;
+
     const frame = requestAnimationFrame(() => {
       // Pan only — keep the current zoom level, just center the focused
       // node(s) in the viewport. Scaling on every click is jarring.
