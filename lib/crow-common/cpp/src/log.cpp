@@ -152,7 +152,8 @@ void init_logging(const std::string &log_dir, const std::string &level, size_t m
         const std::string prefix = file_prefix.empty() ? "crow-tree" : file_prefix;
         const std::string path   = log_dir + "/" + prefix + "-" + ts.data() + "-" + std::to_string(::getpid()) + ".log";
         auto              sink = std::make_shared<compressing_file_sink_mt>(path, max_file_mb * 1024 * 1024, max_files);
-        g_logger = std::make_shared<spdlog::async_logger>("crow-tree", sink, g_tp, spdlog::async_overflow_policy::block);
+        g_logger =
+            std::make_shared<spdlog::async_logger>("crow-tree", sink, g_tp, spdlog::async_overflow_policy::block);
         // YYYYMMDD-HHMMSS.mmm [thread] [level] [crow-tree] message
         // (PID is in the filename; thread name via custom flag; all timestamps UTC).
         auto formatter = std::make_unique<spdlog::pattern_formatter>("%Y%m%d-%H%M%S.%e [@] [%l] [%n] %v",
