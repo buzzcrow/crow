@@ -93,7 +93,7 @@ export function AddStoreDialog({
       isOpen={isOpen}
       onClose={handleClose}
       title="Add KV Store"
-      description="Create a new empty KV store on the selected CrowKV nodes. Groups and replicas are created separately."
+      description="Create a new empty KV store on the selected Crow Storage nodes. Groups and replicas are created separately."
       confirmLabel="Create KV Store"
       onConfirm={handleSubmit}
       confirmDisabled={!valid || isLoading}
@@ -110,11 +110,11 @@ export function AddStoreDialog({
         />
         <div className="tw-space-y-2">
           <label className="tw-text-xs tw-font-medium tw-text-text">
-            CrowKV Nodes (select at least one)
+            Crow Storage Nodes (select at least one)
           </label>
           {availableNodes.length === 0 ? (
             <div className="tw-text-sm tw-text-muted">
-              No reachable CrowKV nodes available. Deploy a CrowKV server and wait until it is Running and Up.
+              No reachable Crow Storage nodes available. Deploy a Crow Storage server and wait until it is Running and Up.
             </div>
           ) : (
             <div className="tw-max-h-40 tw-overflow-y-auto tw-border tw-border-border tw-rounded-md tw-p-2 tw-space-y-1">

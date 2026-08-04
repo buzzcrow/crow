@@ -44,14 +44,14 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     await expect(page.getByRole('dialog')).toBeVisible();
     await page.getByLabel('Node ID').fill('nsm');
     await page.getByLabel('Host').fill('127.0.0.1');
-    await page.getByLabel('Enable CrowKV on this node').uncheck();
+    await page.getByLabel('Enable Crow Storage on this node').uncheck();
     await page.getByRole('button', { name: /create node/i }).click();
     await expect(aside.getByText('N-nsm', { exact: true })).toBeVisible({ timeout: 3_000 });
 
-    // --- Physical: deploy CrowKV Server via context menu ---
+    // --- Physical: deploy Crow Storage Server via context menu ---
     await aside.getByText('N-nsm', { exact: true }).click({ button: 'right' });
-    await page.getByRole('menuitem', { name: /Deploy CrowKV/i }).click();
-    await expect(page.getByRole('dialog', { name: /Deploy CrowKV on nsm/ })).toBeVisible();
+    await page.getByRole('menuitem', { name: /Deploy Crow Storage/i }).click();
+    await expect(page.getByRole('dialog', { name: /Deploy Crow Storage on nsm/ })).toBeVisible();
     await page.getByLabel('Management Port').fill('9901');
     await page.getByLabel('gRPC Port').fill('9902');
     await page.getByLabel(/Binary Path/).fill(DEFAULT_SERVER_BINARY);

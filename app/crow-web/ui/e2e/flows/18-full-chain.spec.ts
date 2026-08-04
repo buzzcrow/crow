@@ -30,7 +30,7 @@ test.describe('E2E-18 full chain', () => {
       await page.getByLabel('Rack', { exact: true }).selectOption('r18');
       await page.getByLabel('Node ID').fill('n18a');
       await page.getByLabel('Host').fill('127.0.0.1');
-      await page.getByLabel('Enable CrowKV on this node').uncheck();
+      await page.getByLabel('Enable Crow Storage on this node').uncheck();
       await page.getByRole('button', { name: /create node/i }).click();
 
       // 3. Add node n18b to r18 via rack context menu.
@@ -40,7 +40,7 @@ test.describe('E2E-18 full chain', () => {
       await page.getByLabel('Rack', { exact: true }).selectOption('r18');
       await page.getByLabel('Node ID').fill('n18b');
       await page.getByLabel('Host').fill('127.0.0.1');
-      await page.getByLabel('Enable CrowKV on this node').uncheck();
+      await page.getByLabel('Enable Crow Storage on this node').uncheck();
       await page.getByRole('button', { name: /create node/i }).click();
 
       // Ensure rack r18 is expanded so its nodes are visible. The tree may
@@ -50,19 +50,19 @@ test.describe('E2E-18 full chain', () => {
       const expandRack18 = rack18.getByRole('button', { name: 'Expand' });
       if (await expandRack18.count()) await expandRack18.click();
 
-      // 4. Deploy CrowKV Server on n18a.
+      // 4. Deploy Crow Storage Server on n18a.
       await page.getByRole('treeitem').filter({ hasText: 'N-n18a' }).click({ button: 'right' });
-      await page.getByRole('menuitem', { name: /deploy CrowKV/i }).click();
-      await expect(page.getByRole('dialog', { name: /deploy CrowKV on n18a/i })).toBeVisible();
+      await page.getByRole('menuitem', { name: /deploy Crow Storage/i }).click();
+      await expect(page.getByRole('dialog', { name: /deploy Crow Storage on n18a/i })).toBeVisible();
       await page.getByLabel('Management Port').fill('9933');
       await page.getByLabel('gRPC Port').fill('9943');
       await page.getByLabel('Binary Path (optional)').fill(DEFAULT_SERVER_BINARY);
       await page.getByRole('button', { name: 'Deploy' }).click();
 
-      // 5. Deploy CrowKV Server on n18b.
+      // 5. Deploy Crow Storage Server on n18b.
       await page.getByRole('treeitem').filter({ hasText: 'N-n18b' }).click({ button: 'right' });
-      await page.getByRole('menuitem', { name: /deploy CrowKV/i }).click();
-      await expect(page.getByRole('dialog', { name: /deploy CrowKV on n18b/i })).toBeVisible();
+      await page.getByRole('menuitem', { name: /deploy Crow Storage/i }).click();
+      await expect(page.getByRole('dialog', { name: /deploy Crow Storage on n18b/i })).toBeVisible();
       await page.getByLabel('Management Port').fill('9934');
       await page.getByLabel('gRPC Port').fill('9944');
       await page.getByLabel('Binary Path (optional)').fill(DEFAULT_SERVER_BINARY);

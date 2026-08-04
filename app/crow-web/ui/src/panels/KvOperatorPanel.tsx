@@ -79,18 +79,22 @@ export function KvOperatorPanel({ stores, selectedEntity, readonly, backendError
 
   useEffect(() => {
     if (stores.length > 0 && !storeId) {
-      setStoreId(String(stores[0].store_id));
+      // Prefer the first non-system store (store 0 is read-only topology).
+      const firstWritable = stores.find((s) => String(s.store_id) !== '0');
+      setStoreId(String((firstWritable ?? stores[0]).store_id));
     }
   }, [stores, storeId]);
 
   useEffect(() => {
     if (groupIdsInStore.length > 0 && !groupId) {
-      setGroupId(groupIdsInStore[0]);
+      // Prefer the first non-system group (group 0 in store 0 is read-only).
+      const firstWritable = groupIdsInStore.find((gid) => !(storeId === '0' && gid === '0'));
+      setGroupId(firstWritable ?? groupIdsInStore[0]);
     }
     if (groupId && !groupIdsInStore.includes(groupId) && groupId !== ALL_GROUPS) {
       setGroupId(groupIdsInStore[0] || '');
     }
-  }, [groupIdsInStore, groupId]);
+  }, [groupIdsInStore, groupId, storeId]);
 
   useEffect(() => {
     if (selectedEntity?.type === 'Group' && selectedEntity.viewMode === 'Logical') {

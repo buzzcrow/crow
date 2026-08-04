@@ -29,7 +29,7 @@ test.describe('E2E-47 async operation UI feedback', () => {
       // Restart — should show a success toast
       await nodeItem.click({ button: 'right' });
       const restartResponse = page.waitForResponse((r: any) => r.url().includes('/server/restart'));
-      await page.getByRole('menuitem', { name: /restart CrowKV/i }).click();
+      await page.getByRole('menuitem', { name: /restart Crow Storage/i }).click();
       await restartResponse;
 
       const restartToast = page.getByRole('alert').filter({ hasText: /restart/i });
@@ -38,7 +38,7 @@ test.describe('E2E-47 async operation UI feedback', () => {
       // Stop — should show a success toast
       await nodeItem.click({ button: 'right' });
       const stopResponse = page.waitForResponse((r: any) => r.url().includes('/server/stop'));
-      await page.getByRole('menuitem', { name: /stop CrowKV/i }).click();
+      await page.getByRole('menuitem', { name: /stop Crow Storage/i }).click();
       await stopResponse;
 
       const stopToast = page.getByRole('alert').filter({ hasText: /stop/i });
@@ -51,8 +51,8 @@ test.describe('E2E-47 async operation UI feedback', () => {
       await inspector.getByRole('tab', { name: 'Activity' }).click();
 
       await expect(inspector.getByText(/ping node/i)).toBeVisible({ timeout: 3_000 });
-      await expect(inspector.getByText(/restart CrowKV/i)).toBeVisible({ timeout: 3_000 });
-      await expect(inspector.getByText(/stop CrowKV/i)).toBeVisible({ timeout: 3_000 });
+      await expect(inspector.getByText(/restart Crow Storage/i)).toBeVisible({ timeout: 3_000 });
+      await expect(inspector.getByText(/stop Crow Storage/i)).toBeVisible({ timeout: 3_000 });
     } finally {
       await stopNodeServer(baseURL!, 'n47');
     }
