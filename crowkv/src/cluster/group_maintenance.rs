@@ -12,7 +12,7 @@
 //!    [`KVEngine::persist_snapshot`](crate::kv::KVEngine::persist_snapshot)
 //!    — only when `contiguous_applied - last_snapshot_slot >= threshold`
 //!    or `time-since-last-snapshot >= threshold`, to reduce expensive
-//!    disk I/O. A no-op for `InMemKV`; for `CrowtreeEngine` this is what
+//!    disk I/O. A no-op for `InMemKV`; for `CrowTreeEngine` this is what
 //!    makes [`KVEngine::resume_from_slot`](crate::kv::KVEngine::resume_from_slot)
 //!    non-zero on a real restart. Purely local: every replica (leader or
 //!    follower) does this independently of group-wide agreement.

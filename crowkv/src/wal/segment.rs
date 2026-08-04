@@ -654,7 +654,7 @@ fn encode_footer(min_slot: SlotIndex, max_slot: SlotIndex, record_count: u32) ->
     buf.extend_from_slice(&min_slot.to_le_bytes());
     buf.extend_from_slice(&max_slot.to_le_bytes());
     buf.extend_from_slice(&record_count.to_le_bytes());
-    let crc = crowtree_ffi::crc32c(&buf);
+    let crc = crow_tree_ffi::crc32c(&buf);
     buf.extend_from_slice(&crc.to_le_bytes());
     buf
 }
@@ -668,7 +668,7 @@ fn decode_footer(buf: &[u8; FOOTER_LEN]) -> Option<SegmentFooter> {
     let max_slot = u64::from_le_bytes(buf[12..20].try_into().unwrap());
     let record_count = u32::from_le_bytes(buf[20..24].try_into().unwrap());
     let crc_stored = u32::from_le_bytes(buf[24..28].try_into().unwrap());
-    let crc_computed = crowtree_ffi::crc32c(&buf[..24]);
+    let crc_computed = crow_tree_ffi::crc32c(&buf[..24]);
     if crc_stored != crc_computed {
         return None;
     }
@@ -682,7 +682,7 @@ fn decode_footer(buf: &[u8; FOOTER_LEN]) -> Option<SegmentFooter> {
 fn encode_text_footer(min_slot: SlotIndex, max_slot: SlotIndex, record_count: u32) -> String {
     let mut line =
         format!("{FOOTER_TEXT_PREFIX} min_slot={min_slot} max_slot={max_slot} record_count={record_count}");
-    let crc = crowtree_ffi::crc32c(line.as_bytes());
+    let crc = crow_tree_ffi::crc32c(line.as_bytes());
     let _ = writeln!(line, " crc32c={crc:08x}");
     line
 }
@@ -693,7 +693,7 @@ fn decode_text_footer(line: &str) -> Result<SegmentFooter, RecordError> {
         .rsplit_once(" crc32c=")
         .ok_or_else(|| RecordError::BadText("missing crc32c field".to_string()))?;
     let got = parse_hex_u32(crc_hex)?;
-    let expected = crowtree_ffi::crc32c(body.as_bytes());
+    let expected = crow_tree_ffi::crc32c(body.as_bytes());
     if got != expected {
         return Err(RecordError::BadCrc { expected, got });
     }

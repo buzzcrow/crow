@@ -3,7 +3,7 @@
 
 # CrowKV
 
-Distributed KV store: Paxos consensus, per-key slots, WAL durability, crowtree storage engine.
+Distributed KV store: Paxos consensus, per-key slots, WAL durability, crow-tree storage engine.
 Rust workspace + C++ storage engine (via FFI).
 
 ## Crates
@@ -12,12 +12,12 @@ Rust workspace + C++ storage engine (via FFI).
 - **`crowkv-client`** — client library (retry, topology cache, `NotLeaderHint`).
 - **`crowkv-server`** — binary: CLI, HTTP management API, store/group/replica wiring.
 - **`crowkv-console/{shared,web,cli}`** — management console (Axum+React web, `clap` CLI, shared core).
-- **`crowtree/ffi`** — Rust FFI bindings to C++ crowtree storage engine.
+- **`crow-tree/ffi`** — Rust FFI bindings to C++ crow-tree storage engine.
 
 ## Hard Constraints
 
 - All build/test/format commands run under **pixi** — never bare `cargo` or `clang-format`.
-- `unsafe_code = deny` (except `crowtree-ffi`); Clippy `pedantic = warn`.
+- `unsafe_code = deny` (except `crow-tree-ffi`); Clippy `pedantic = warn`.
 - Markdown is read as raw text — prefer bullet or definition lists; tables allowed only when genuinely necessary for data/metric comparison (e.g. benchmark results). `doc_index.md` always uses tables.
 - `test-util` auto-enabled for tests via self dev-dependency — no flags needed.
 - Commit messages: single-line subject only — no body, no trailers (e.g. `Co-Authored-By`, `Generated with`), no doc references, no task numbers (R-numbers). Code comments: single line, no doc references or task numbers.

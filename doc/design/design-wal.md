@@ -265,12 +265,12 @@ block code paths (alignment planning, RMW, amplification tracking,
 `pwrite`/`pread` syscalls) at high TPS since `fdatasync` is skipped per
 batch.
 
-The crowtree C++ storage layer has a similar but cleaner separation:
+The crow-tree C++ storage layer has a similar but cleaner separation:
 `TextPageStore` (debug text files), `MemPageStore` (in-memory), and
 `BlockPageStore` (real block device with `O_DIRECT`). Each is a distinct C++
 class — no flag-based branching. The Rust FFI `PageStoreBackend` enum (`File`,
 `Block`, `MemBlock`) maps to these. No structural change was needed on the
-crowtree side for this refactor.
+crow-tree side for this refactor.
 
 ---
 
@@ -329,7 +329,7 @@ The split matters: replay/restore are purely *local* (this node's WAL), but `Acc
 
 - New-leader recovery / steady-state heartbeat catch-up re-learning the value from quorum-confirmed consensus (§6.4 / §6.5).
 
-**No `DurableCommitWatermark` WAL record.** The state machine owns its own persistence boundary — but that boundary is the *engine's* durability (crowtree's on-disk snapshot), not a separate state-machine-level snapshot file; see §6.2 below and `design-state-machine.md §2.1`. The WAL does not duplicate this information.
+**No `DurableCommitWatermark` WAL record.** The state machine owns its own persistence boundary — but that boundary is the *engine's* durability (crow-tree's on-disk snapshot), not a separate state-machine-level snapshot file; see §6.2 below and `design-state-machine.md §2.1`. The WAL does not duplicate this information.
 
 ### 6.1 Replay — rebuild acceptor state (`replay_group`)
 
@@ -367,7 +367,7 @@ for the full mechanics. In short:
   (highest-slot-wins per key) — so it works unconditionally, including for
   `InMemKV` which has no durable floor at all.
 - **Optimization for a durable engine:** before Pass 2, the engine reports
-  its own durable floor via `KVEngine::resume_from_slot()` (crowtree's
+  its own durable floor via `KVEngine::resume_from_slot()` (crow-tree's
   `last_applied_slot`, restored from its on-disk snapshot). Pass 2 then
   starts just above that floor instead of at slot 1, and the learner's
   frontier is fast-forwarded directly to it — skipping the redundant
@@ -377,8 +377,8 @@ for the full mechanics. In short:
 
 This avoids resurrecting a value that was accepted locally but never chosen,
 and — via the resume-floor check — never re-applies a write below a point
-the engine has already durably advanced past (crowtree rejects such writes
-outright; see `design-crowtree-engine.md`).
+the engine has already durably advanced past (crow-tree rejects such writes
+outright; see `design-crow-tree-engine.md`).
 
 ### 6.3 Wiring a live group (`create_group_with_wal`)
 

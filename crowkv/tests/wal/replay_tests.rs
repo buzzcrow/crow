@@ -5,7 +5,7 @@
 
 use bytes::Bytes;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
-use crowkv::kv::{Batch, CrowtreeEngine, CrowtreeOptions, KVEngine};
+use crowkv::kv::{Batch, CrowTreeEngine, CrowTreeOptions, KVEngine};
 use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 use crowkv::wal::record::WALRecord;
 use crowkv::wal::replay::replay_group;
@@ -253,7 +253,7 @@ async fn restore_from_replay_rebuilds_live_replica_state() {
 }
 
 /// `restore_from_replay_with_engine` replays the full WAL into a
-/// caller-supplied engine (here an in-memory `CrowtreeEngine`, standing in
+/// caller-supplied engine (here an in-memory `CrowTreeEngine`, standing in
 /// for the durable file-backed one `crowkv-server` uses), not just the
 /// default `InMemKV`. Otherwise identical restore semantics to
 /// `restore_from_replay` (same term/voted-for/acceptor state, same
@@ -279,9 +279,9 @@ async fn restore_from_replay_with_engine_uses_injected_engine() {
 
     let replay = replay_group(&backend, &disks, 1).await.unwrap();
 
-    // `path: None` selects an in-memory crowtree store -- same restore path
-    // crowkv-server's `--kv-engine crowtree` uses, minus the on-disk file.
-    let engine = CrowtreeEngine::open(&CrowtreeOptions::default()).expect("open in-memory crowtree engine");
+    // `path: None` selects an in-memory crow-tree store -- same restore path
+    // crowkv-server's `--kv-engine crow-tree` uses, minus the on-disk file.
+    let engine = CrowTreeEngine::open(&CrowTreeOptions::default()).expect("open in-memory crow-tree engine");
     let restored = PxLocalReplica::restore_from_replay_with_engine(
         7,
         PxLocalReplicaRole::Follower,
@@ -307,7 +307,7 @@ async fn restore_from_replay_with_engine_uses_injected_engine() {
 /// `resume_from_slot() > 0`: an engine that already durably reflects a
 /// prefix of the WAL (here, slot 1 pre-applied and `flush()`ed before the
 /// engine is handed to `restore_from_replay_with_engine`, simulating what a
-/// real restart sees from a durable `CrowtreeEngine`) skips re-`learn()`ing
+/// real restart sees from a durable `CrowTreeEngine`) skips re-`learn()`ing
 /// that prefix, but must land at the exact same `contiguous_chosen` /
 /// `contiguous_applied` / `last_chosen_slot` / `last_chosen_term` state (and
 /// the same final KV contents) a full sequential replay would have produced.
@@ -335,8 +335,8 @@ async fn restore_from_replay_with_engine_resumes_from_last_applied_slot() {
     let replay = replay_group(&backend, &disks, 1).await.unwrap();
 
     // Pre-apply + flush slot 1 directly, matching what a durably-recovered
-    // CrowtreeEngine reports via `resume_from_slot()` on a real restart.
-    let engine = CrowtreeEngine::open(&CrowtreeOptions::default()).expect("open crowtree engine");
+    // CrowTreeEngine reports via `resume_from_slot()` on a real restart.
+    let engine = CrowTreeEngine::open(&CrowTreeOptions::default()).expect("open crow-tree engine");
     engine
         .apply(1, &Batch::decode(&Bytes::from(encode_put_payload(b"k1", b"v1"))))
         .into_ready()
@@ -411,12 +411,12 @@ async fn restore_from_replay_with_engine_falls_back_when_resume_slot_has_no_acce
 
     // Engine reports a resume floor (slot 2) the WAL-rebuilt acceptor has no
     // accepted entry for. `last_applied_slot()` is itself a contiguous
-    // watermark (crowtree folds `received_slots_` forward from its own
+    // watermark (crow-tree folds `received_slots_` forward from its own
     // frontier), so reaching floor 2 legitimately requires applying slot 1
     // too -- modeling an engine that durably has extra data at slot 2 with
     // no independent WAL corroboration (e.g. a lost/truncated WAL record),
     // rather than an outright-impossible-via-the-API state.
-    let engine = CrowtreeEngine::open(&CrowtreeOptions::default()).expect("open crowtree engine");
+    let engine = CrowTreeEngine::open(&CrowTreeOptions::default()).expect("open crow-tree engine");
     engine
         .apply(
             1,

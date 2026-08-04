@@ -23,8 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Multi-Paxos consensus with per-key slot pipelining and out-of-order apply
 - WAL with multi-disk segments, batched durable flush, replay, and GC
-- crowtree storage engine: B+tree with delta chains, io_uring async I/O, epoch-safe lock-free reads, buffer pool
-- `KVEngine` trait with in-memory and crowtree backends
+- crow-tree storage engine: B+tree with delta chains, io_uring async I/O, epoch-safe lock-free reads, buffer pool
+- `KVEngine` trait with in-memory and crow-tree backends
 - gRPC services: Paxos (Prepare/Promise/Accept/Accepted), KV, Snapshot
 - Leader election with term/ballot fencing and leader lease
 - Reconfiguration: member add/remove, leader transfer, membership epoch fence

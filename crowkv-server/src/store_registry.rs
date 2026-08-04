@@ -3,7 +3,7 @@
 
 use crowkv::cluster::px_kv_store::PxKvStore;
 use crowkv::common::config::CrowKVConfig;
-use crowkv::kv::CrowtreeBackend;
+use crowkv::kv::CrowTreeBackend;
 use crowkv::metrics::MetricsRegistry;
 use crowkv::wal::IoBackend;
 use dashmap::DashMap;
@@ -24,13 +24,13 @@ pub fn parse_wal_backend(s: &str) -> IoBackend {
 
 /// Parse the `--kv-backend` CLI value (`clap`'s `value_parser` already
 /// restricts it to `["file", "block", "mem-block"]`) into the FFI's
-/// [`CrowtreeBackend`].
+/// [`CrowTreeBackend`].
 #[must_use]
-pub fn parse_crowtree_backend(s: &str) -> CrowtreeBackend {
+pub fn parse_crowtree_backend(s: &str) -> CrowTreeBackend {
     match s {
-        "block" => CrowtreeBackend::Block,
-        "mem-block" => CrowtreeBackend::MemBlock,
-        _ => CrowtreeBackend::File,
+        "block" => CrowTreeBackend::Block,
+        "mem-block" => CrowTreeBackend::MemBlock,
+        _ => CrowTreeBackend::File,
     }
 }
 
@@ -40,8 +40,8 @@ pub struct KvStoreRegistry {
     pub config: CrowKVConfig,
     /// Parsed WAL I/O backend (derived from `config.wal_backend`).
     pub wal_backend: Arc<IoBackend>,
-    /// Parsed crowtree storage backend (derived from `config.crowtree_backend`).
-    pub crowtree_backend: CrowtreeBackend,
+    /// Parsed crow-tree storage backend (derived from `config.crowtree_backend`).
+    pub crowtree_backend: CrowTreeBackend,
     /// Port pool for KV server listeners, populated from `--ports` CLI arg.
     /// Used by `add_store` as a fallback before `persisted_port_for_store`.
     port_pool: Mutex<Vec<u16>>,

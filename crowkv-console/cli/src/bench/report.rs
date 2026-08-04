@@ -286,15 +286,15 @@ impl BenchReport {
         let (wal_desc, kv_desc) = match self.mode.as_str() {
             "mem" => (
                 "mem-block (in-memory, no disk I/O)",
-                "crowtree + mem-block page store (in-memory, no disk I/O)",
+                "crow-tree + mem-block page store (in-memory, no disk I/O)",
             ),
             "file" => (
                 "file (file-backed, no O_DIRECT)",
-                "crowtree + file page store (file-backed, no O_DIRECT)",
+                "crow-tree + file page store (file-backed, no O_DIRECT)",
             ),
             "block-device" => (
                 "block-device (O_DIRECT, 4K aligned)",
-                "crowtree + block page store (O_DIRECT, 4K aligned)",
+                "crow-tree + block page store (O_DIRECT, 4K aligned)",
             ),
             other => (other, other),
         };

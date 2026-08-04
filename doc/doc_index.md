@@ -17,7 +17,7 @@ doc only when a task touches a topic in its row.
 
 | Doc | When to read |
 | --- | --- |
-| `doc/backlog/backlog.md` | Forward-looking implementation backlog index with priority/complexity classification and brief intros. Read before picking up crowtree/crowkv follow-up work. Each entry links to its detail doc. |
+| `doc/backlog/backlog.md` | Forward-looking implementation backlog index with priority/complexity classification and brief intros. Read before picking up crow-tree/crowkv follow-up work. Each entry links to its detail doc. |
 | `doc/backlog/R**-<topic>.md` | Per-requirement detailed analysis (problem, approach, files, acceptance). Open only the matched `R**` file; delete it after the requirement is implemented and merged. |
 
 ## Working Files (`doc/working/`)
@@ -78,9 +78,9 @@ doc only when a task touches a topic in its row.
 | Doc | Read when working on |
 | --- | --- |
 | `design/design-wal.md` | Write-ahead log: multi-disk segments, backend-neutral durable flush, ack contract, replay/restore/recovery, GC, disk loss. |
-| `design/design-crowtree.md` | crowtree overview: goals/non-goals, architecture, `KVEngine`/`EngineView` abstraction, out-of-order apply + two-GC model, FFI boundary, sub-doc map, full decision log (D1-D19). Read first for storage-engine work. |
-| `design/design-crowtree-engine.md` | crowtree in-memory engine: slot cell, pages/delta records, write path (apply→delta→consolidate→split/merge), versioned root (`RootVersion`), tree-owned lock-free epoch reclamation, read path, concurrency invariants; the `buffer` memory-ownership model (owned/borrowed, SBO, zero-copy write/read pipelines); the io_uring async FFI bridge (reactor, `ct_future`, fast/slow path); Rust-side `KVEngine` async trait shape (`KVFuture<T>`, §4). |
-| `design/design-crowtree-storage.md` | crowtree durable storage: `PageStore` backends (`TextPageStore` debug text files, `BlockPageStore` array-of-blocks / O_DIRECT), zero-copy slotted frame format, buffer pool (frame arena, CLOCK eviction, epoch-safe reuse), internal-WAL decision, snapshot pipeline + recovery + export/import, mapping table (PID indirection, segment persistence/recycling), GC watermarks + consensus-WAL GC coupling, new-member install. |
+| `design/design-crow-tree.md` | crow-tree overview: goals/non-goals, architecture, `KVEngine`/`EngineView` abstraction, out-of-order apply + two-GC model, FFI boundary, sub-doc map, full decision log (D1-D19). Read first for storage-engine work. |
+| `design/design-crow-tree-engine.md` | crow-tree in-memory engine: slot cell, pages/delta records, write path (apply→delta→consolidate→split/merge), versioned root (`RootVersion`), tree-owned lock-free epoch reclamation, read path, concurrency invariants; the `buffer` memory-ownership model (owned/borrowed, SBO, zero-copy write/read pipelines); the io_uring async FFI bridge (reactor, `ct_future`, fast/slow path); Rust-side `KVEngine` async trait shape (`KVFuture<T>`, §4). |
+| `design/design-crow-tree-storage.md` | crow-tree durable storage: `PageStore` backends (`TextPageStore` debug text files, `BlockPageStore` array-of-blocks / O_DIRECT), zero-copy slotted frame format, buffer pool (frame arena, CLOCK eviction, epoch-safe reuse), internal-WAL decision, snapshot pipeline + recovery + export/import, mapping table (PID indirection, segment persistence/recycling), GC watermarks + consensus-WAL GC coupling, new-member install. |
 
 ### Operations / UI
 
@@ -94,7 +94,7 @@ doc only when a task touches a topic in its row.
 
 | Doc | Read when working on |
 | --- | --- |
-| `design/design-test.md` | Test strategy, layer scope definitions, coverage rules per layer, tiered strategy for Group/Store/Deployment/UI E2E layers, console mgmt API layer, crowtree C++ test layers, benchmark layer (lifecycle, storage modes, write-only design, baseline results), feature-dependent test gaps. Read when designing tests or deciding where a test belongs. |
+| `design/design-test.md` | Test strategy, layer scope definitions, coverage rules per layer, tiered strategy for Group/Store/Deployment/UI E2E layers, console mgmt API layer, crow-tree C++ test layers, benchmark layer (lifecycle, storage modes, write-only design, baseline results), feature-dependent test gaps. Read when designing tests or deciding where a test belongs. |
 | `design/design-observability.md` | Metrics module design: five metric types (Counter, Gauge, Bandwidth, LatencyHistogram, LatencySummary), registry lifecycle, naming convention, instrumentation points, system metrics collector, log file format, in-memory snapshot access, FFI boundary. Read when working on metrics or observability. |
 
 ## How AI Should Use This Index

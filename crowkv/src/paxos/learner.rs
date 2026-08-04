@@ -10,7 +10,7 @@ use dashmap::DashMap;
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 
-use crate::kv::{Batch, CrowtreeBackend, CrowtreeEngine, CrowtreeOptions, KVEngine};
+use crate::kv::{Batch, CrowTreeBackend, CrowTreeEngine, CrowTreeOptions, KVEngine};
 use crate::paxos::roles::{DedupTag, Learner, PxLogEntry, SlotIndex};
 use crate::paxos::PxTerm;
 
@@ -68,7 +68,7 @@ impl DedupWindow {
 /// `last_chosen_slot` / `last_chosen_term` (for `RequestVote` log-up-to-date check).
 pub struct PxLearner {
     /// Materialized key-value state. Boxed so the backend (in-memory, file,
-    /// crowtree) is a runtime choice; the whole `PxLearner` is `Arc`-shared
+    /// crow-tree) is a runtime choice; the whole `PxLearner` is `Arc`-shared
     /// across replica rebuilds, so the engine is shared with it.
     engine: Box<dyn KVEngine>,
     /// Highest slot S such that every slot in `[1, S]` has been learned.
@@ -124,11 +124,11 @@ pub struct PxLearner {
 
 impl Default for PxLearner {
     fn default() -> Self {
-        let opt = CrowtreeOptions {
-            backend: CrowtreeBackend::MemBlock,
+        let opt = CrowTreeOptions {
+            backend: CrowTreeBackend::MemBlock,
             ..Default::default()
         };
-        let engine = CrowtreeEngine::open(&opt).expect("crowtree mem-block open");
+        let engine = CrowTreeEngine::open(&opt).expect("crow-tree mem-block open");
         Self {
             engine: Box::new(engine),
             contiguous_chosen: AtomicU64::new(0),
@@ -153,7 +153,7 @@ impl PxLearner {
     }
 
     /// Construct a learner with a caller-supplied engine backend (e.g.
-    /// [`crate::kv::CrowtreeEngine`], or [`crate::kv::InMemKV`] in tests).
+    /// [`crate::kv::CrowTreeEngine`], or [`crate::kv::InMemKV`] in tests).
     #[must_use]
     pub fn with_engine(engine: Box<dyn KVEngine>) -> Self {
         Self {
@@ -188,7 +188,7 @@ impl PxLearner {
     /// tombstoned. Convenience wrapper over [`KVEngine::get`].
     ///
     /// `async fn`: `.await`s the `KVFuture` directly instead of `into_ready` --
-    /// [`crate::kv::CrowtreeEngine::get`] can now genuinely construct
+    /// [`crate::kv::CrowTreeEngine::get`] can now genuinely construct
     /// `KVFuture::Pending` for a demand-load miss, and `into_ready` would
     /// panic on that case. The fast (`Ready`) path costs nothing extra: a
     /// `KVFuture::poll` on `Ready` resolves on the very first poll, so this
@@ -200,7 +200,7 @@ impl PxLearner {
 
     /// Like [`Self::engine_get`] but returns [`Bytes`] instead of `Vec<u8>`,
     /// via [`KVEngine::get_bytes`]. Avoids an intermediate `Vec<u8>` allocation
-    /// on the crowtree fast path.
+    /// on the crow-tree fast path.
     #[must_use]
     pub async fn engine_get_bytes(&self, key: &[u8]) -> Option<(SlotIndex, Bytes)> {
         self.engine.get_bytes(key).await
@@ -209,7 +209,7 @@ impl PxLearner {
     /// Ordered prefix scan of live entries; see [`KVEngine::scan`].
     /// `async fn` for signature uniformity with [`Self::engine_get`], but
     /// `KVEngine::scan` has no genuine `Pending` path yet (no
-    /// `ct_scan_async` C API -- see `CrowtreeEngine`'s own doc comment), so
+    /// `ct_scan_async` C API -- see `CrowTreeEngine`'s own doc comment), so
     /// this never actually suspends today either.
     #[must_use]
     #[allow(clippy::type_complexity)]
@@ -473,7 +473,7 @@ impl PxLearner {
     /// this never actually suspends today.
     ///
     /// A local apply failure (e.g. a durable I/O error on a
-    /// `CrowtreeEngine`) is logged at `ERROR` and otherwise swallowed here:
+    /// `CrowTreeEngine`) is logged at `ERROR` and otherwise swallowed here:
     /// the value is still Paxos-chosen (this is a local durability fault,
     /// not a consensus outcome), so it must not be treated as "not applied"
     /// or re-proposed. Detecting and reacting to a persistently-unhealthy

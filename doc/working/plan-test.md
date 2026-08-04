@@ -99,9 +99,9 @@ Source: `crowkv-console/`. Tests: web 13 files (~37 tests), shared/cli 7
 files (~9 tests). Covers REST routes, CLI commands, API forwarding, health
 aggregation, config persistence, OpenAPI proxy. No gaps identified.
 
-## crowtree C++ Tests
+## crow-tree C++ Tests
 
-Source: `crowtree/tests/`. Tests: 334 tests (unit: 26 files, integration:
+Source: `crow-tree/tests/`. Tests: 334 tests (unit: 26 files, integration:
 24 files). Covers cell encoding, leaf/frame/inner pages, delta replay,
 consolidation, mapping table, epoch manager, split/merge, snapshot
 roundtrip, crash recovery, C API, async get/scan, eviction, compression,
@@ -109,7 +109,7 @@ persist, write/read paths, stress. No gaps identified.
 
 ## Rust FFI / Cross-Engine Parity
 
-Source: `crowkv/tests/kv/crowtree_engine_test.rs`. Tests: conformance
+Source: `crowkv/tests/kv/crow_tree_engine_test.rs`. Tests: conformance
 suite (shared with `InMemKV`), async pending path, durable reopen,
 cross-engine parity, clear. No gaps identified.
 

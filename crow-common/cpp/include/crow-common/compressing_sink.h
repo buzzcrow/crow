@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 // Custom spdlog sink: size-based rotation with gzip compression of
-// rotated files. Used by both the crowtree service log and the crowtree
+// rotated files. Used by both the crow-tree service log and the crow-tree
 // metrics log.
 //
 // When the current log file exceeds `max_size` bytes, it is closed,

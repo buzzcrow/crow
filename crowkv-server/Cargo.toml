@@ -19,7 +19,7 @@ default = []
 
 [dependencies]
 crowkv = { path = "../crowkv" }
-crowtree-ffi = { path = "../crowtree/ffi" }
+crow-tree-ffi = { path = "../crow-tree/ffi" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal"] }
 tracing = { workspace = true }
 clap = { version = "4", features = ["derive"] }

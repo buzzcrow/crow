@@ -587,10 +587,10 @@ datetime match and prints a side-by-side comparison table.
 - **`memory`** — in-memory KV engine, WAL with `no_fsync=true`.
   Baseline: pure consensus + WAL append + memtable insert cost, zero
   disk IO.
-- **`file-nofsync`** — crowtree engine with `text` backend, WAL with
+- **`file-nofsync`** — crow-tree engine with `text` backend, WAL with
   `no_fsync=true`. Durable engine + WAL, but `fdatasync` skipped to
   isolate path-level overhead from disk IO.
-- **`block`** (planned) — crowtree engine with `block` backend (real
+- **`block`** (planned) — crow-tree engine with `block` backend (real
   block device page store). Memtable is in-memory; async flush writes
   SST files to block device. WAL also on block device with
   `no_fsync=true` (page cache only). Tests whether memtable flush
@@ -648,7 +648,7 @@ consensus latency (~1.2ms).
 
 - `bench benchmark --mode memory` runs end-to-end: deploys cluster,
   drives load, collects metrics + logs, prints report, cleans up.
-- `bench benchmark --mode file-nofsync` does the same with crowtree
+- `bench benchmark --mode file-nofsync` does the same with crow-tree
   engine + no-fsync WAL.
 - `--keep-workspace` retains the workspace for debugging.
 - `bench compare <tag1> <tag2>` prints a side-by-side comparison
@@ -662,18 +662,18 @@ consensus latency (~1.2ms).
 - All existing `bench run` / `bench stress` / `bench report` commands
   continue to work unchanged.
 
-## crowtree C++ Test Layers
+## crow-tree C++ Test Layers
 
-The C++ crowtree library (`libcrowtree`) has its own test layers, separate from
+The C++ crow-tree library (`libcrow-tree`) has its own test layers, separate from
 the Rust test binaries above. They run as `test-ct` in CI (291 tests, ~8 s).
 
 | Layer | Where | What it proves |
 | --- | --- | --- |
-| C++ unit | `libcrowtree/tests/unit` | Single component correctness: cell encoding, leaf page build/read, delta replay, consolidation triggers, mapping table, epoch manager, split point. |
-| C++ integration | `libcrowtree/tests/integration` | Multi-component flows over `InMemoryPageStore` and `FilePageStore`: basic CRUD, batch apply, scan, split/merge, consistent view, snapshot roundtrip, GC. |
-| Crash/recovery | `libcrowtree/tests/recovery` | Durability: snapshot + recover, torn-page, superblock A/B, double-apply idempotency. Uses a `FaultyPageStore` with fault points (drop-write, tear, flip-bytes, reorder) for the FI matrix. |
-| Rust FFI | `crowkv` `tests/` | `CrowtreeEngine` trait conformance (shared parametrized tests with `InMemKV`), async bridge, buffer ownership, error mapping. |
-| Cross-engine parity | `crowkv` `tests/` | `InMemKV` and `CrowtreeEngine` produce identical state via `compare()` after random op streams, snapshot export/import round-trips, and mid-stream restart. |
+| C++ unit | `libcrow-tree/tests/unit` | Single component correctness: cell encoding, leaf page build/read, delta replay, consolidation triggers, mapping table, epoch manager, split point. |
+| C++ integration | `libcrow-tree/tests/integration` | Multi-component flows over `InMemoryPageStore` and `FilePageStore`: basic CRUD, batch apply, scan, split/merge, consistent view, snapshot roundtrip, GC. |
+| Crash/recovery | `libcrow-tree/tests/recovery` | Durability: snapshot + recover, torn-page, superblock A/B, double-apply idempotency. Uses a `FaultyPageStore` with fault points (drop-write, tear, flip-bytes, reorder) for the FI matrix. |
+| Rust FFI | `crowkv` `tests/` | `CrowTreeEngine` trait conformance (shared parametrized tests with `InMemKV`), async bridge, buffer ownership, error mapping. |
+| Cross-engine parity | `crowkv` `tests/` | `InMemKV` and `CrowTreeEngine` produce identical state via `compare()` after random op streams, snapshot export/import round-trips, and mid-stream restart. |
 | Concurrency | sanitizer CI | No data races / UAF under reader+writer load (TSan/ASan/UBSan); epoch reclamation under load; version pin + GC. |
 
 The authoritative correctness oracle is **`compare()` against `InMemKV`**: for

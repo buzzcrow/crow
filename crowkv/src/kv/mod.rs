@@ -16,16 +16,16 @@
 //! wins).
 //!
 //! Key work: `KVEngine` trait, payload `Batch` decode, cross-learner
-//! `compare`. The crowtree engine and streamable snapshot import/export land
+//! `compare`. The crow-tree engine and streamable snapshot import/export land
 //! in later phases. `InMemKV` lives in `tests/` as a test-only reference
 //! implementation.
 
-mod crowtree_engine;
+mod crow_tree_engine;
 mod kv_engine;
 mod kv_future;
 mod op;
 
-pub use crowtree_engine::{CrowtreeBackend, CrowtreeEngine, CrowtreeOptions, CrowtreeStats};
+pub use crow_tree_engine::{CrowTreeBackend, CrowTreeEngine, CrowTreeOptions, CrowTreeStats};
 pub use kv_engine::KVEngine;
 pub use kv_future::KVFuture;
 pub use op::{Batch, BatchOp, Cell, EngineDiff, Op};

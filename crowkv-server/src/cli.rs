@@ -55,11 +55,11 @@ pub struct Cli {
     #[arg(long, default_value = "default", value_parser = ["default", "test", "e2e"])]
     pub election_profile: String,
 
-    /// Root directory for durable per-group crowtree files. Default: sibling of `wal_root` named `ctdata`.
+    /// Root directory for durable per-group crow-tree files. Default: sibling of `wal_root` named `ctdata`.
     #[arg(long)]
     pub data_root: Option<std::path::PathBuf>,
 
-    /// Durable backend for the crowtree engine. `file` (default) is the
+    /// Durable backend for the crow-tree engine. `file` (default) is the
     /// file-based page store (no alignment); `block` opens `data_root`'s
     /// per-group directory with `BlockPageStore` (array-of-blocks, `O_DIRECT`)
     /// for a real SSD/SCM deployment target; `mem-block` uses an in-memory

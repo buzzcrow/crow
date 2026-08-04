@@ -8,7 +8,7 @@ use crowkv::cluster::group::ProposeResult;
 use crowkv::cluster::group_election::LeaderElection;
 use crowkv::cluster::local_replica::PxLocalReplicaRole;
 use crowkv::common::config::{CrowKVConfig, WalConfig};
-use crowkv::kv::CrowtreeBackend;
+use crowkv::kv::CrowTreeBackend;
 use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 use crowkv::wal::record::WALRecord;
 use crowkv::wal::replay::replay_group;
@@ -80,7 +80,7 @@ async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
         PxLocalReplicaRole::Leader,
         &config,
         backend.clone(),
-        CrowtreeBackend::File,
+        CrowTreeBackend::File,
     )
     .await
     .unwrap();
@@ -114,17 +114,17 @@ async fn create_group_with_wal_restores_and_resumes_at_next_slot() {
     }));
 }
 
-/// Durable crowtree engine end-to-end: a group backed by a durable
-/// `CrowtreeEngine` file survives a simulated process restart (drop the
+/// Durable crow-tree engine end-to-end: a group backed by a durable
+/// `CrowTreeEngine` file survives a simulated process restart (drop the
 /// group, then call `create_group_with_wal` again against the same
 /// `wal_root`/`data_root`) with its KV state intact -- via full WAL replay
-/// into a fresh `CrowtreeEngine::open` at the same file
+/// into a fresh `CrowTreeEngine::open` at the same file
 /// (`PxLocalReplica::restore_from_replay_with_engine`), not by any
 /// resume-from-last-applied-slot shortcut (not implemented; see /// #20's note on why that needs separate, careful frontier-seeding work).
-/// Parameterized over [`CrowtreeBackend`] so the same
+/// Parameterized over [`CrowTreeBackend`] so the same
 /// scenario covers both the default buffered-file backend and the raw
 /// `O_DIRECT` block-device backend.
-async fn crowtree_engine_persists_across_restart(crowtree_backend: CrowtreeBackend) {
+async fn crow_tree_engine_persists_across_restart(crowtree_backend: CrowTreeBackend) {
     let temp = tempfile::tempdir().unwrap();
     let wal_root = temp.path().join("wal-root");
     let config_root = temp.path().join("conf-root");
@@ -152,12 +152,12 @@ async fn crowtree_engine_persists_across_restart(crowtree_backend: CrowtreeBacke
     .await
     .unwrap();
 
-    // The durable crowtree file was created under data_root, not left at the
+    // The durable crow-tree file was created under data_root, not left at the
     // default in-memory (no file) path.
-    let ct_path = crowkv_server::startup::store_crowtree_path(&data_root, store_id, group_id);
+    let ct_path = crowkv_server::startup::store_crow_tree_path(&data_root, store_id, group_id);
     assert!(
         ct_path.exists(),
-        "expected a durable crowtree file at {}",
+        "expected a durable crow-tree file at {}",
         ct_path.display()
     );
 
@@ -180,9 +180,9 @@ async fn crowtree_engine_persists_across_restart(crowtree_backend: CrowtreeBacke
         Some(b"ct-value".to_vec())
     );
 
-    // Simulate a process restart: drop the group (closes the crowtree file
+    // Simulate a process restart: drop the group (closes the crow-tree file
     // handle via `Crowtree`'s `Drop`), then rebuild from the same WAL +
-    // crowtree file.
+    // crow-tree file.
     drop(group);
 
     let restarted = create_group_with_wal(
@@ -205,18 +205,18 @@ async fn crowtree_engine_persists_across_restart(crowtree_backend: CrowtreeBacke
             .await
             .map(|(_, v)| v),
         Some(b"ct-value".to_vec()),
-        "crowtree-backed KV state must survive a simulated restart"
+        "crow-tree-backed KV state must survive a simulated restart"
     );
 }
 
 #[tokio::test]
-async fn create_group_with_wal_crowtree_engine_persists_across_restart() {
-    crowtree_engine_persists_across_restart(CrowtreeBackend::File).await;
+async fn create_group_with_wal_crow_tree_engine_persists_across_restart() {
+    crow_tree_engine_persists_across_restart(CrowTreeBackend::File).await;
 }
 
 /// : same scenario, through `BlockPageStore` (`O_DIRECT`)
 /// instead of the default `FilePageStore`.
 #[tokio::test]
-async fn create_group_with_wal_crowtree_block_backend_persists_across_restart() {
-    crowtree_engine_persists_across_restart(CrowtreeBackend::Block).await;
+async fn create_group_with_wal_crow_tree_block_backend_persists_across_restart() {
+    crow_tree_engine_persists_across_restart(CrowTreeBackend::Block).await;
 }

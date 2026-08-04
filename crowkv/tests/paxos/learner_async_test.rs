@@ -4,12 +4,12 @@
 //! Regression gate for the deferred
 //! caller-side conversion: proves `PxLearner::engine_get` genuinely awaits
 //! through a real `KVFuture::Pending` end-to-end, not just that
-//! `CrowtreeEngine::get` constructs one in isolation
-//! (`kv/crowtree_engine_test.rs`'s `get_constructs_pending_for_genuine_demand_load_miss`
+//! `CrowTreeEngine::get` constructs one in isolation
+//! (`kv/crow_tree_engine_test.rs`'s `get_constructs_pending_for_genuine_demand_load_miss`
 //! covers that layer). This is the test the design doc's §6 explicitly
 //! deferred adding until `PxLearner` actually had an `async fn` to test.
 
-use crowkv::kv::{CrowtreeEngine, CrowtreeOptions};
+use crowkv::kv::{CrowTreeEngine, CrowTreeOptions};
 use crowkv::paxos::learner::PxLearner;
 use crowkv::paxos::roles::{Learner, PxBallot, PxLogEntry};
 
@@ -25,7 +25,7 @@ fn encode_put_payload(key: &[u8], value: &[u8]) -> Vec<u8> {
 }
 
 /// `PxLearner::engine_get`, backed by a durable (file-backed)
-/// `CrowtreeEngine`, resolves correctly whether the underlying
+/// `CrowTreeEngine`, resolves correctly whether the underlying
 /// `KVFuture` is `Ready` (resident hit) or genuinely `Pending` (demand-load
 /// miss after eviction) -- `.await`ing either case must produce the same
 /// answer a synchronous `into_ready()` would have, for the case where it's
@@ -33,7 +33,7 @@ fn encode_put_payload(key: &[u8], value: &[u8]) -> Vec<u8> {
 #[tokio::test]
 async fn engine_get_resolves_correctly_across_both_ready_and_pending() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let engine = CrowtreeEngine::open(&CrowtreeOptions {
+    let engine = CrowTreeEngine::open(&CrowTreeOptions {
         path: Some(tmp.path().to_string_lossy().into_owned()),
         ..Default::default()
     })
@@ -62,7 +62,7 @@ async fn engine_get_resolves_correctly_across_both_ready_and_pending() {
     // Force the leaf unloaded: `engine_get`'s next call now has to await a
     // genuine KVFuture::Pending underneath (see the engine-layer
     // `get_constructs_pending_for_genuine_demand_load_miss` regression
-    // guard in `kv/crowtree_engine_test.rs` for the isolated version of
+    // guard in `kv/crow_tree_engine_test.rs` for the isolated version of
     // this same property).
     handle.flush().expect("flush");
     handle.snapshot().expect("snapshot");

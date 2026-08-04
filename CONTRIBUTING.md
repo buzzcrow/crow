@@ -13,7 +13,7 @@ CrowKV uses [Pixi](https://pixi.sh) to pin the C++ toolchain, Rust compiler, and
 # Install pixi
 curl -fsSL https://pixi.sh/install.sh | sh
 
-# Build everything (crowtree C++ + Rust workspace + web UI)
+# Build everything (crow-tree C++ + Rust workspace + web UI)
 pixi run build
 
 # Run all tests
@@ -32,17 +32,17 @@ See `pixi.toml` for the full list of tasks.
 
 ### Rust
 
-- `unsafe_code = deny` (except `crowtree-ffi`). Clippy `pedantic = warn`.
+- `unsafe_code = deny` (except `crow-tree-ffi`). Clippy `pedantic = warn`.
 - `Px` prefix for Paxos types (e.g. `PxGroupId`, `PxReplicaService`).
 - Integration tests only — under each crate's `tests/`. No inline `#[cfg(test)] mod tests`.
 - Shared test helpers: `tests/testkit/<topic>.rs`.
 - Logging via `tracing` with structured fields, not inline in messages.
 - No doc references in code comments — keep docs in `doc/`.
 
-### C++ (crowtree)
+### C++ (crow-tree)
 
 - Follow `.clang-format` and `.clang-tidy` configs.
-- GoogleTest for tests under `crowtree/tests/`.
+- GoogleTest for tests under `crow-tree/tests/`.
 
 ### Design Docs
 
@@ -66,7 +66,7 @@ See `pixi.toml` for the full list of tasks.
 | `crowkv` | Core library: Multi-Paxos consensus, WAL, storage engine, RPC |
 | `crowkv-server` | Server binary: gRPC + HTTP management API |
 | `crowkv-client` | Client library: topology cache, retry, idempotency |
-| `crowtree` | C++ storage engine (B+tree, delta chains, io_uring, buffer pool) |
+| `crow-tree` | C++ storage engine (B+tree, delta chains, io_uring, buffer pool) |
 | `crowkv-console` | Operations console: web UI (Axum + React) and CLI |
 
 See `AGENTS.md` for a dispatch table on which docs to read for each type of task.

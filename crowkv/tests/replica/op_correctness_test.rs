@@ -322,7 +322,7 @@ async fn multiple_slots_mixed_ops_correctness() {
 
 /// A 64 KiB-value batch through the full Paxos commit → apply → read path.
 /// This is the workload R30 targets: the value bytes are borrowed by the
-/// crowtree engine via kExternal buffers (no value memcpy on the apply
+/// crow-tree engine via kExternal buffers (no value memcpy on the apply
 /// critical path), and the copy is deferred to flush. The test verifies
 /// correctness end-to-end — the values must round-trip exactly.
 #[tokio::test]

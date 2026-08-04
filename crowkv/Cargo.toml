@@ -39,7 +39,7 @@ flate2 = { workspace = true }
 pin-project-lite = { workspace = true }
 utoipa = "5"
 crow-common = { workspace = true }
-crowtree-ffi = { path = "../crowtree/ffi" }
+crow-tree-ffi = { path = "../crow-tree/ffi" }
 
 [build-dependencies]
 tonic-build = "0.12"

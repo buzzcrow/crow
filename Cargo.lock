@@ -599,6 +599,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "crow-tree-ffi"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "cc",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "crowkv"
 version = "0.1.0"
 dependencies = [
@@ -606,8 +616,8 @@ dependencies = [
  "criterion",
  "crossbeam-skiplist",
  "crow-common",
+ "crow-tree-ffi",
  "crowkv",
- "crowtree-ffi",
  "dashmap",
  "flate2",
  "futures",
@@ -696,8 +706,8 @@ dependencies = [
  "axum",
  "bytes",
  "clap",
+ "crow-tree-ffi",
  "crowkv",
- "crowtree-ffi",
  "dashmap",
  "reqwest",
  "serde",
@@ -728,16 +738,6 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
-]
-
-[[package]]
-name = "crowtree-ffi"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "cc",
- "tempfile",
- "tokio",
 ]
 
 [[package]]

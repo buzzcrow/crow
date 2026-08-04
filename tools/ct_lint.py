@@ -6,30 +6,30 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 SEARCH_DIRS = [
-    Path("crowtree/src"),
-    Path("crowtree/include"),
-    Path("crowtree/tests"),
-    Path("crowtree/bench"),
+    Path("crow-tree/src"),
+    Path("crow-tree/include"),
+    Path("crow-tree/tests"),
+    Path("crow-tree/bench"),
     Path("crow-common/cpp"),
 ]
 EXTENSIONS = {".cpp", ".h"}
 DEFAULT_BATCH_SIZE = 3
 DEFAULT_JOBS = 10
 
-# Files that are Linux-only (guarded by CROWTREE_HAVE_LIBURING). clang-tidy
+# Files that are Linux-only (guarded by CROW_TREE_HAVE_LIBURING). clang-tidy
 # cannot process them on macOS (reactor.h has a #error when liburing is
 # absent), so they are skipped when liburing is not found by CMake.
 LIBURING_GATED_FILES = {
-    "crowtree/include/crowtree/reactor.h",
-    "crowtree/src/reactor.cpp",
-    "crowtree/src/block_async_page_store.cpp",
-    "crowtree/tests/unit/reactor_test.cpp",
+    "crow-tree/include/crow-tree/reactor.h",
+    "crow-tree/src/reactor.cpp",
+    "crow-tree/src/block_async_page_store.cpp",
+    "crow-tree/tests/unit/reactor_test.cpp",
 }
 
 
 def liburing_available() -> bool:
-    """Check the CMake cache for liburing (set by crowtree/CMakeLists.txt)."""
-    cache = Path("crowtree/build/CMakeCache.txt")
+    """Check the CMake cache for liburing (set by crow-tree/CMakeLists.txt)."""
+    cache = Path("crow-tree/build/CMakeCache.txt")
     if not cache.exists():
         return True  # no build dir — don't skip (let clang-tidy report the real error)
     text = cache.read_text()
@@ -54,7 +54,7 @@ def collect_files() -> list[str]:
 
 def run_batch(batch: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["clang-tidy", "-p", "crowtree/build", "--quiet", *batch],
+        ["clang-tidy", "-p", "crow-tree/build", "--quiet", *batch],
         text=True,
         capture_output=True,
     )

@@ -23,14 +23,14 @@ library.
 
 `--kv-engine` chooses the `KVEngine` implementation for all groups:
 
-- **`crowtree` (default)** — durable, file-backed. Each group gets its
+- **`crow-tree` (default)** — durable, file-backed. Each group gets its
   own file under `--data-root`, recovered by replaying the WAL on
   restart.
 - **`memory`** — in-memory, non-durable. Explicit low-durability choice
   for tests and dev.
 
 `--kv-backend` (`text` default, or `block` for `O_DIRECT`) only applies
-when `--kv-engine crowtree` is selected.
+when `--kv-engine crow-tree` is selected.
 
 ### 2.2 Startup ordering
 

@@ -144,7 +144,7 @@ Client SCAN(prefix, start_after, limit, read_mode, min_slot?)
   `max_inflight_reads`. Burst bounded only by Tokio scheduling, engine
   throughput (`InMemKV` test-only `DashMap` (E5) — per-key entry API,
   reads proceed concurrent with `apply`, no global write lock; FFI +
-  demand-load for `CrowtreeEngine`), and HTTP/2 stream concurrency.
+  demand-load for `CrowTreeEngine`), and HTTP/2 stream concurrency.
   Intentional: reads are cheap, non-blocking, and lease-path reads
   consume no consensus resources.
 - **Parallel across replicas — MinSlot only.** Each replica's engine
@@ -206,7 +206,7 @@ Client SCAN(prefix, start_after, limit, read_mode, min_slot?)
   `KvStoreService::scan` / `forward_kv_scan`.
 - **Engine get** — `InMemKV` (test-only): `DashMap::get` (per-shard
   lock, no global lock) → value cloned out via trait return →
-  `Bytes::from(vec)`. `CrowtreeEngine`: `try_get_pinned` → fast path
+  `Bytes::from(vec)`. `CrowTreeEngine`: `try_get_pinned` → fast path
   lock-free memtable lookup with epoch guard returning `PinnedValue`
   (R6: `into_bytes()` produces a zero-copy `Bytes` via
   `Bytes::from_owner`); slow path `ct_get_async` demand-load via
@@ -214,7 +214,7 @@ Client SCAN(prefix, start_after, limit, read_mode, min_slot?)
 - **Engine scan** — ordered prefix scan, up to `limit` live
   (non-tombstoned) entries. `InMemKV` (test-only): `DashMap` is not
   key-ordered — collects matching live entries then sorts (E5).
-  `CrowtreeEngine`:
+  `CrowTreeEngine`:
   `try_scan` → `ct_scan_async` (fast path memtable traversal, slow path
   demand-load retry loop); packed result decoded per-entry into
   `Vec<u8>` key+value. `start_after` is not pushed into the C++ API —
@@ -234,7 +234,7 @@ Client SCAN(prefix, start_after, limit, read_mode, min_slot?)
 
 ### Enhancement opportunities
 
-- **E1 — Scan `start_after` push-down.** `CrowtreeEngine::scan` cannot
+- **E1 — Scan `start_after` push-down.** `CrowTreeEngine::scan` cannot
   push `start_after` into the C++ API (`ct_scan_async` takes only
   `prefix` + `limit`). When `start_after` is non-empty the engine sets
   `fetch_limit = 0` (over-fetch the whole prefix range), ships the
@@ -243,7 +243,7 @@ Client SCAN(prefix, start_after, limit, read_mode, min_slot?)
   transfers and decodes entries the client will discard. Fix: extend
   `ct_scan_async` with a `start_after` cursor + lower-bound seek, so
   the C++ engine starts iteration at the cursor and applies the limit
-  natively. Flagged in the `CrowtreeEngine::scan` code comment.
+  natively. Flagged in the `CrowTreeEngine::scan` code comment.
 - **E2 — Scan value zero-copy.** Get has R6 zero-copy via
   `PinnedValue::into_bytes` (`Bytes::from_owner` backed by the C++
   frame). Scan still produces per-entry `Vec<u8>` for both key and
@@ -261,7 +261,7 @@ Client SCAN(prefix, start_after, limit, read_mode, min_slot?)
   or `::Latency` policy — driven by server-reported in-flight counts
   or client-measured RTT — would balance MinSlot load by actual
   capacity rather than blind rotation, avoiding hotspots when one
-  replica is slow (e.g. demand-loading cold crowtree pages).
+  replica is slow (e.g. demand-loading cold crow-tree pages).
 - **E5 — `InMemKV` read/apply concurrency (done).** `InMemKV` now uses
   `DashMap` instead of `RwLock<BTreeMap>`: reads proceed concurrent with
   `apply` (per-key entry API, no global write lock). `scan` and
@@ -296,7 +296,7 @@ no admission window. Primary latency contributors:
 1. **Linearizable read barrier** — zero (lease) or one heartbeat RTT
    (ReadIndex).
 2. **Engine get** — trivial (`InMemKV`) or FFI + possible demand-load
-   (`CrowtreeEngine`).
+   (`CrowTreeEngine`).
 3. **Server-side forwarding** — one extra hop for linearizable reads
    on non-leader replicas.
 
@@ -323,8 +323,8 @@ of what remains:
 - **O(n) unavoidable** — gRPC request deserialize (key/prefix from
   network frame); gRPC response serialize (value(s) into socket);
   `InMemKV` (test-only) get (value cloned from `DashMap` shard);
-  `CrowtreeEngine` get (one copy: frame → `Bytes` fast path, or I/O
-  buffer → `Bytes` slow path); `CrowtreeEngine` scan (prefix `to_vec()`
+  `CrowTreeEngine` get (one copy: frame → `Bytes` fast path, or I/O
+  buffer → `Bytes` slow path); `CrowTreeEngine` scan (prefix `to_vec()`
   for FFI, packed result `take_buf`, per-entry `Vec<u8>` for key+value
   in `decode_scan`; plus over-fetch copies when `start_after` is
   non-empty — see E1).
@@ -360,11 +360,11 @@ remains (see E2).
 - **Memory interconnect**: Dual-channel DDR4-3200, PCIe 4.0
   — **not** HBM. DRAM bandwidth is constrained by the 2-channel
   topology; cross-CCX traffic crosses the Infinity Fabric, adding
-  latency for `CrowtreeEngine` `mem-block` page-store and WAL accesses
+  latency for `CrowTreeEngine` `mem-block` page-store and WAL accesses
   that land on a different CCX than the issuing core. This matters
   for in-memory KV workloads where every read touches DRAM. (The
   benchmark uses `--mode mem` → `kv_backend = mem-block`, i.e.
-  `CrowtreeEngine` over an in-memory block page store — not the
+  `CrowTreeEngine` over an in-memory block page store — not the
   test-only `InMemKV`, which isn't wired into the server CLI.)
 - **OS**: Linux
 - **macOS (Apple M5 Pro)**: placeholder — to be re-collected with

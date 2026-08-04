@@ -6,13 +6,13 @@
 //! C++ registry) into the Rust `MetricsRegistry` so they appear in the
 //! periodic metrics log. C++ engine counters/gauges/summaries/bandwidths
 //! are now flushed natively via the `[cpp-metrics]` section (FFI string
-//! from `CrowtreeEngine::flush_metrics_str`).
+//! from `CrowTreeEngine::flush_metrics_str`).
 
 use std::sync::{Arc, Mutex};
 
 use crate::store_registry::KvStoreRegistry;
 use crowkv::cluster::px_kv_store::PxKvStore;
-use crowkv::kv::CrowtreeEngine;
+use crowkv::kv::CrowTreeEngine;
 use crowkv::metrics::{Counter, Gauge, MetricsRegistry, MetricsRunner};
 use crowkv::wal::wal_engine::BlockDeviceSnapshot;
 
@@ -180,7 +180,7 @@ pub fn setup_engine_collector(
                 }
                 let replica = group.local_replica();
                 let engine = replica.learner.engine();
-                if let Some(e) = engine.as_any().downcast_ref::<CrowtreeEngine>() {
+                if let Some(e) = engine.as_any().downcast_ref::<CrowTreeEngine>() {
                     let s = e.stats();
                     let current = s.snapshot_pages_total;
                     let mut last = last_snapshot_pages.lock().expect("last_snapshot_pages poisoned");
@@ -239,7 +239,7 @@ pub fn setup_engine_collector(
                 store.for_each_group(|group| {
                     let replica = group.local_replica();
                     let engine = replica.learner.engine();
-                    if let Some(e) = engine.as_any().downcast_ref::<CrowtreeEngine>() {
+                    if let Some(e) = engine.as_any().downcast_ref::<CrowTreeEngine>() {
                         let cpp_max = e.max_name_len();
                         let shared_width = rust_width.max(cpp_max);
                         let str =
@@ -271,7 +271,7 @@ pub fn setup_engine_collector(
                 }
                 let replica = group.local_replica();
                 let engine = replica.learner.engine();
-                if let Some(e) = engine.as_any().downcast_ref::<CrowtreeEngine>() {
+                if let Some(e) = engine.as_any().downcast_ref::<CrowTreeEngine>() {
                     result = e.negotiate_widths(5, 7);
                     found = true;
                 }

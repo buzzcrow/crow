@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! Shared `KVEngine` conformance suite, parametrized over any implementation
-//! (`InMemKV`, `CrowtreeEngine`) so both get identical behavioral coverage:
+//! (`InMemKV`, `CrowTreeEngine`) so both get identical behavioral coverage:
 //! per-key highest-slot-wins apply, tombstones, apply idempotency, ordered
 //! prefix scan with truncation, intra-batch dedup, and cross-engine compare.
 //!
@@ -127,7 +127,7 @@ pub fn compare_is_empty_for_identical_state_and_detects_divergence(a: &dyn KVEng
 
     // Divergent resolved-slot for the same value is a difference. Slot 3
     // (not e.g. 9) keeps this contiguous with the slots already applied
-    // above -- crowtree only flushes its *contiguous*-applied prefix into
+    // above -- crow-tree only flushes its *contiguous*-applied prefix into
     // the durable tree `iter_all`/`compare` read from, so a slot left behind
     // a gap wouldn't be visible yet even though `get`/`scan` would already
     // see it (an engine-specific difference from `InMemKV`, not something

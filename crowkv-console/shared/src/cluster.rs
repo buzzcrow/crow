@@ -18,7 +18,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::snapshot::CrowtreeStatsSnapshot;
+use crate::snapshot::CrowTreeStatsSnapshot;
 
 pub type RackId = String;
 pub type NodeId = String;
@@ -158,7 +158,7 @@ pub struct LocalReplicaInfo {
     pub engine_healthy: bool,
     /// Mirrors `KvStoreStatus::crowtree_stats`; `None` for `InMemKV`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crowtree_stats: Option<CrowtreeStatsSnapshot>,
+    pub crowtree_stats: Option<CrowTreeStatsSnapshot>,
 }
 
 fn default_engine_healthy() -> bool {
@@ -279,7 +279,7 @@ pub struct ReplicaView {
     pub engine_healthy: bool,
     /// See [`LocalReplicaInfo::crowtree_stats`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crowtree_stats: Option<CrowtreeStatsSnapshot>,
+    pub crowtree_stats: Option<CrowTreeStatsSnapshot>,
 }
 
 #[cfg(test)]

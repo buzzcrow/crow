@@ -33,7 +33,7 @@ namespace crow::common
 // (spdlog names). No-op if `log_dir` is empty or the library was built without
 // spdlog. Any failure to open the file leaves logging disabled (never throws).
 void init_logging(const std::string &log_dir, const std::string &level = "info", size_t max_file_mb = 30,
-                  size_t max_files = 5, const std::string &file_prefix = "crowtree");
+                  size_t max_files = 5, const std::string &file_prefix = "crow-tree");
 
 // Flush buffered messages to the sink without stopping the logger.
 // Safe to call when uninitialized or already shut down (no-op).

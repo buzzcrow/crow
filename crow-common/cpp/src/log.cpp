@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-// Implementation of the crowtree logging facade (plan-tree #10). See log.h for
+// Implementation of the crow-tree logging facade (plan-tree #10). See log.h for
 // the contract. Split into an spdlog-backed build and a no-op build so the Rust
 // FFI `cc` build (no spdlog) still compiles this translation unit cleanly.
 #include "crow-common/log.h"
@@ -124,7 +124,7 @@ void init_logging(const std::string &log_dir, const std::string &level, size_t m
         if (log_dir.empty()) {
             // No log dir configured: log to stderr so output is visible (tests, CLI).
             auto sink = std::make_shared<spdlog::sinks::stderr_color_sink_mt>();
-            g_logger  = std::make_shared<spdlog::logger>("crowtree", sink);
+            g_logger  = std::make_shared<spdlog::logger>("crow-tree", sink);
             auto stderr_fmt =
                 std::make_unique<spdlog::pattern_formatter>("[%l] [%n] %v", spdlog::pattern_time_type::utc);
             stderr_fmt->add_flag<thread_name_flag>('@');
@@ -149,11 +149,11 @@ void init_logging(const std::string &log_dir, const std::string &level, size_t m
         std::snprintf(ts.data(), ts.size(), "%04d%02d%02d-%02d%02d%02d.%03lld", tm_buf.tm_year + 1900,
                       tm_buf.tm_mon + 1, tm_buf.tm_mday, tm_buf.tm_hour, tm_buf.tm_min, tm_buf.tm_sec,
                       static_cast<long long>(ms));
-        const std::string prefix = file_prefix.empty() ? "crowtree" : file_prefix;
+        const std::string prefix = file_prefix.empty() ? "crow-tree" : file_prefix;
         const std::string path   = log_dir + "/" + prefix + "-" + ts.data() + "-" + std::to_string(::getpid()) + ".log";
         auto              sink = std::make_shared<compressing_file_sink_mt>(path, max_file_mb * 1024 * 1024, max_files);
-        g_logger = std::make_shared<spdlog::async_logger>("crowtree", sink, g_tp, spdlog::async_overflow_policy::block);
-        // YYYYMMDD-HHMMSS.mmm [thread] [level] [crowtree] message
+        g_logger = std::make_shared<spdlog::async_logger>("crow-tree", sink, g_tp, spdlog::async_overflow_policy::block);
+        // YYYYMMDD-HHMMSS.mmm [thread] [level] [crow-tree] message
         // (PID is in the filename; thread name via custom flag; all timestamps UTC).
         auto formatter = std::make_unique<spdlog::pattern_formatter>("%Y%m%d-%H%M%S.%e [@] [%l] [%n] %v",
                                                                      spdlog::pattern_time_type::utc);

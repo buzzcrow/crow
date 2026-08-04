@@ -7,12 +7,12 @@ use std::task::{Context, Poll};
 
 /// Fast-path-or-real-future result for a [`super::KVEngine`] operation that is
 /// usually synchronous (in-memory hit / no I/O) but occasionally needs to
-/// wait on real I/O (a crowtree demand-load miss, or a write that triggers a
+/// wait on real I/O (a crow-tree demand-load miss, or a write that triggers a
 /// flush) once the `io_uring` reactor lands.
 ///
 /// `Ready` costs nothing beyond the enum tag + inline value — no allocation,
 /// no `Pin<Box<..>>>` — so a [`super::KVEngine`] that never needs real I/O
-/// ([`super::InMemKV`], or [`super::CrowtreeEngine`] on every in-memory/
+/// ([`super::InMemKV`], or [`super::CrowTreeEngine`] on every in-memory/
 /// resident hit, which is *every* case today since no reactor exists yet)
 /// never pays anything for being "async-capable". Only the genuine I/O path
 /// boxes a future.

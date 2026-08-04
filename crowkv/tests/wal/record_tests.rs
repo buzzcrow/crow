@@ -152,7 +152,7 @@ fn text_line_corruption_returns_bad_crc() {
 #[test]
 fn text_line_rejects_malformed_payload_hex() {
     let body = "CROW_WAL_TEXT v=1 type=Promised group_id=1 term=2 slot=3 ballot_round=4 ballot_leader_id=5 payload_hex=abc";
-    let crc = crowtree_ffi::crc32c(body.as_bytes());
+    let crc = crow_tree_ffi::crc32c(body.as_bytes());
     let line = format!("{body} crc32c={crc:08x}\n");
 
     assert!(matches!(

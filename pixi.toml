@@ -12,14 +12,14 @@ platforms = [
 ]
 
 [dependencies]
-# C++ build toolchain (crowtree)
+# C++ build toolchain (crow-tree)
 cmake = ">=3.20"
 make = "*"
 cxx-compiler = "*"
 gtest = "*"
 lz4 = "*"
-libabseil = "*"  # crowtree MemTable uses absl::btree_map (plan-tree #9)
-spdlog = ">=1.17.0,<2"  # crowtree async file logging (plan-tree #10)
+libabseil = "*"  # crow-tree MemTable uses absl::btree_map (plan-tree #9)
+spdlog = ">=1.17.0,<2"  # crow-tree async file logging (plan-tree #10)
 clang-format = ">=19.0.0"
 clang-tools = "*"
 folly = "*"
@@ -41,11 +41,11 @@ zstd = ">=1.5.7,<2"
 bzip2 = ">=1.0.8,<2"
 snappy = ">=1.2.2,<2"
 
-# io_uring reactor (crowtree/include/crowtree/reactor.h).
+# io_uring reactor (crow-tree/include/crow-tree/reactor.h).
 # Linux-only kernel interface -- no osx-arm64 conda-forge build exists, so this
 # must be a per-platform target dependency, not a top-level one (design doc
-# design-crowtree-engine.md §3.5: the reactor itself is excluded from macOS
-# builds; see crowtree/CMakeLists.txt's CROWTREE_HAVE_LIBURING gate).
+# design-crow-tree-engine.md §3.5: the reactor itself is excluded from macOS
+# builds; see crow-tree/CMakeLists.txt's CROW_TREE_HAVE_LIBURING gate).
 [target.linux-64.dependencies]
 liburing = "*"
 
@@ -63,13 +63,13 @@ cargo install --locked inferno || echo "Warning: inferno install failed"
 '
 '''
 ct-fmt = '''
-find crowtree/src crowtree/include crowtree/tests crowtree/bench crow-common/cpp -type f \( -name '*.cpp' -o -name '*.h' \) -print0 | xargs -0 clang-format -i
+find crow-tree/src crow-tree/include crow-tree/tests crow-tree/bench crow-common/cpp -type f \( -name '*.cpp' -o -name '*.h' \) -print0 | xargs -0 clang-format -i
 '''
 ct-lint = "python3 tools/ct_lint.py"
 rs-fmt = "cargo fmt --all"
 rs-lint = "cargo clippy --all-targets -- -D warnings"
 ts-lint = { cmd = "cd crowkv-console/web/ui && npx tsc --noEmit --project tsconfig.e2e.json", depends-on = ["install-deps"] }
-build = { cmd = "cmake -S crowtree -B crowtree/build -DCMAKE_BUILD_TYPE=Release && cmake --build crowtree/build -j && cargo build --release && cd crowkv-console/web/ui && npm run build", depends-on = ["install-deps"] }
+build = { cmd = "cmake -S crow-tree -B crow-tree/build -DCMAKE_BUILD_TYPE=Release && cmake --build crow-tree/build -j && cargo build --release && cd crowkv-console/web/ui && npm run build", depends-on = ["install-deps"] }
 default = { depends-on = ["build"] }
 
 # ── Run ──────────────────────────────────────────────────────────
@@ -90,8 +90,8 @@ profile-write = { cmd = "bash tools/profile-write.sh", depends-on = ["build"] }
 
 # ── Test ─────────────────────────────────────────────────────────
 clean-env = "pkill -9 -f 'crowkv-server.*test-logs' 2>/dev/null; rm -rf test-logs; true"
-test-ct = { cmd = "ctest --test-dir crowtree/build --output-on-failure", depends-on = ["build"] }
-test-ffi = { cmd = "cargo test -p crowtree-ffi --all-targets", depends-on = ["build"] }
+test-ct = { cmd = "ctest --test-dir crow-tree/build --output-on-failure", depends-on = ["build"] }
+test-ffi = { cmd = "cargo test -p crow-tree-ffi --all-targets", depends-on = ["build"] }
 test-core = { cmd = "cargo test -p crowkv --all-targets", depends-on = ["build"] }
 test-server = { cmd = "cargo test -p crowkv-server --all-targets -- --test-threads=1", depends-on = ["build"] }
 test-cli = { cmd = "cargo test -p crowkv-cli --all-targets", depends-on = ["build"] }
@@ -131,7 +131,7 @@ pixi run test-ui
 
 # ── Coverage & LOC ───────────────────────────────────────────────
 coverage = { cmd = "cargo tarpaulin --workspace --out Html --output-dir target/coverage --exclude-files '*/tests/*'", depends-on = ["install-deps"] }
-loc = "tokei --exclude swagger-ui --exclude 'crowtree/build-*' --exclude target --exclude dist --exclude node_modules --exclude 'doc/user-manual/*.html' --exclude 'doc/user-manual/*.py'"
+loc = "tokei --exclude swagger-ui --exclude 'crow-tree/build-*' --exclude target --exclude dist --exclude node_modules --exclude 'doc/user-manual/*.html' --exclude 'doc/user-manual/*.py'"
 
 # ── Clean ────────────────────────────────────────────────────────
 clean = { cmd = '''
@@ -140,7 +140,7 @@ pkill crowkv-server || true
 pkill crowkv-web || true
 pkill crowkv-cli || true
 cargo clean
-rm -rf crowtree/build crowtree/build-asan crowtree/build-tsan crowtree/build-ubsan
+rm -rf crow-tree/build crow-tree/build-asan crow-tree/build-tsan crow-tree/build-ubsan
 rm -rf crowkv-console/web/ui/dist crowkv-console/web/ui/node_modules
 rm -rf test-logs
 find . -type d -name log ! -path "*/src/*" -prune -exec rm -rf {} \; 2>/dev/null || true
@@ -148,42 +148,42 @@ find . -type d -name runtime-data ! -path "*/src/*" -prune -exec rm -rf {} \; 2>
 '
 ''' }
 
-# ── crowtree sanitizers ──────────────────────────────────────────
+# ── crow-tree sanitizers ──────────────────────────────────────────
 
 # AddressSanitizer build + tests. setarch -R disables ASLR (Linux only);
 # on macOS we run ctest directly.
 ct-asan = '''
 set -e
-cmake -S crowtree -B crowtree/build-asan -DCMAKE_BUILD_TYPE=Debug -DCROWTREE_SANITIZER=address
-cmake --build crowtree/build-asan -j
+cmake -S crow-tree -B crow-tree/build-asan -DCMAKE_BUILD_TYPE=Debug -DCROW_TREE_SANITIZER=address
+cmake --build crow-tree/build-asan -j
 if command -v setarch > /dev/null 2>&1; then
-  setarch -R ctest --test-dir crowtree/build-asan --output-on-failure
+  setarch -R ctest --test-dir crow-tree/build-asan --output-on-failure
 else
-  ctest --test-dir crowtree/build-asan --output-on-failure
+  ctest --test-dir crow-tree/build-asan --output-on-failure
 fi
 '''
 
 # ThreadSanitizer build + tests.
 ct-tsan = '''
 set -e
-cmake -S crowtree -B crowtree/build-tsan -DCMAKE_BUILD_TYPE=Debug -DCROWTREE_SANITIZER=thread
-cmake --build crowtree/build-tsan -j
+cmake -S crow-tree -B crow-tree/build-tsan -DCMAKE_BUILD_TYPE=Debug -DCROW_TREE_SANITIZER=thread
+cmake --build crow-tree/build-tsan -j
 if command -v setarch > /dev/null 2>&1; then
-  setarch -R ctest --test-dir crowtree/build-tsan --output-on-failure
+  setarch -R ctest --test-dir crow-tree/build-tsan --output-on-failure
 else
-  ctest --test-dir crowtree/build-tsan --output-on-failure
+  ctest --test-dir crow-tree/build-tsan --output-on-failure
 fi
 '''
 
 # UndefinedBehaviorSanitizer build + tests.
 ct-ubsan = '''
 set -e
-cmake -S crowtree -B crowtree/build-ubsan -DCMAKE_BUILD_TYPE=Debug -DCROWTREE_SANITIZER=undefined
-cmake --build crowtree/build-ubsan -j
+cmake -S crow-tree -B crow-tree/build-ubsan -DCMAKE_BUILD_TYPE=Debug -DCROW_TREE_SANITIZER=undefined
+cmake --build crow-tree/build-ubsan -j
 export UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1
 if command -v setarch > /dev/null 2>&1; then
-  setarch -R ctest --test-dir crowtree/build-ubsan --output-on-failure
+  setarch -R ctest --test-dir crow-tree/build-ubsan --output-on-failure
 else
-  ctest --test-dir crowtree/build-ubsan --output-on-failure
+  ctest --test-dir crow-tree/build-ubsan --output-on-failure
 fi
 '''

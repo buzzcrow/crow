@@ -31,7 +31,7 @@ fn main() {
 
     // Emit rpath for the pixi/conda lib directory so that libspdlog and
     // friends are found at runtime when the C++ engine is built with
-    // CROWTREE_HAVE_SPDLOG.
+    // CROW_TREE_HAVE_SPDLOG.
     if let Ok(prefix) = std::env::var("CONDA_PREFIX") {
         let lib_dir = std::path::Path::new(&prefix).join("lib");
         if lib_dir.join("libspdlog.dylib").is_file() || lib_dir.join("libspdlog.so").is_file() {

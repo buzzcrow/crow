@@ -21,9 +21,9 @@ use crate::cluster::px_kv_store::PxKvStore;
 use crate::rpc::snapshot_service_server::SnapshotService;
 use crate::rpc::{snapshot_stream_item, SnapshotHeader, SnapshotRequest, SnapshotStreamItem};
 
-/// Chunk size for streamed `data` frames. Matches crowtree's own portable
+/// Chunk size for streamed `data` frames. Matches crow-tree's own portable
 /// snapshot export default chunk size (`kSnapshotChunkBytes`,
-/// `crowtree/include/crowtree/snapshot_io.h`) so re-chunking here rarely
+/// `crow-tree/include/crow-tree/snapshot_io.h`) so re-chunking here rarely
 /// splits an already-chunk-aligned stream any further.
 const SNAPSHOT_STREAM_CHUNK_BYTES: usize = 1024 * 1024;
 

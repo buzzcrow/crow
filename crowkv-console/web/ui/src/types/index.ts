@@ -69,10 +69,10 @@ export interface NodeStore {
   groups: NodeGroup[];
 }
 
-// Batched crowtree engine diagnostics (doc/todo-sm.md Step 6); mirrors
-// crowkv's `CrowtreeStatsView`. Present only when the group's engine is
-// `CrowtreeEngine` (absent/undefined for `InMemKV`).
-export interface CrowtreeStats {
+// Batched crow-tree engine diagnostics (doc/todo-sm.md Step 6); mirrors
+// crowkv's `CrowTreeStatsView`. Present only when the group's engine is
+// `CrowTreeEngine` (absent/undefined for `InMemKV`).
+export interface CrowTreeStats {
   last_applied_slot: number;
   contiguous_slot: number;
   gc_watermark: number;
@@ -93,7 +93,7 @@ export interface LocalReplicaInfo {
   role: ReplicaRole;
   state: ReplicaState;
   engine_healthy: boolean;
-  crowtree_stats?: CrowtreeStats;
+  crowtree_stats?: CrowTreeStats;
 }
 
 export interface RemoteReplicaInfo {
@@ -142,7 +142,7 @@ export interface ReplicaView {
   role: ReplicaRole;
   state: ReplicaState;
   engine_healthy: boolean;
-  crowtree_stats?: CrowtreeStats;
+  crowtree_stats?: CrowTreeStats;
 }
 
 // Common Enums

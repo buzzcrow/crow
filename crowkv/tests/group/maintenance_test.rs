@@ -3,7 +3,7 @@
 
 //! Engine-durability + WAL GC maintenance loop (`group_maintenance`)
 //! integration test: verifies `PxGroup::run_maintenance_pass_for_tests`
-//! wires a real `CrowtreeEngine`'s `persist_snapshot` into the group's WAL
+//! wires a real `CrowTreeEngine`'s `persist_snapshot` into the group's WAL
 //! `snapshot_slot`, and that WAL segment GC only fires once the group
 //! safe-slot (not just the engine snapshot) allows it.
 //!
@@ -18,7 +18,7 @@ use crowkv::cluster::group::PxGroup;
 use crowkv::cluster::group_election::LeaderElection;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crowkv::common::config::PxElectionConfig;
-use crowkv::kv::{CrowtreeEngine, CrowtreeOptions, KVEngine};
+use crowkv::kv::{CrowTreeEngine, CrowTreeOptions, KVEngine};
 use crowkv::paxos::roles::{Learner, PxBallot, PxLogEntry};
 use crowkv::wal::record::WALRecord;
 use crowkv::wal::replay::replay_group;
@@ -29,14 +29,14 @@ fn sim_backend() -> Arc<IoBackend> {
     Arc::new(IoBackend::MemBlock(MemBlockDevice::new()))
 }
 
-/// A file-backed `CrowtreeEngine`: `persist_snapshot` (`Crowtree::snapshot`)
+/// A file-backed `CrowTreeEngine`: `persist_snapshot` (`Crowtree::snapshot`)
 /// requires a real `page_store` and fails (`invalid_argument: no
 /// page_store`) for the default in-memory (`path: None`) engine, so tests
 /// exercising it need a real durable backend.
-fn open_file_engine(dir: &std::path::Path) -> CrowtreeEngine {
+fn open_file_engine(dir: &std::path::Path) -> CrowTreeEngine {
     let path = dir.join("data");
     std::fs::create_dir_all(&path).unwrap();
-    CrowtreeEngine::open(&CrowtreeOptions {
+    CrowTreeEngine::open(&CrowTreeOptions {
         path: Some(path.display().to_string()),
         ..Default::default()
     })
@@ -100,7 +100,7 @@ async fn maintenance_pass_persists_snapshot_and_gcs_wal_segments_once_safe() {
     let seg_count_before = wal.index().lock().segments().count();
     assert!(seg_count_before >= 2, "need multiple segments for GC test");
 
-    // Real file-backed CrowtreeEngine, attached to a fresh replica with an
+    // Real file-backed CrowTreeEngine, attached to a fresh replica with an
     // empty replay result.
     let engine_dir = tempfile::tempdir().unwrap();
     let engine = open_file_engine(engine_dir.path());
@@ -297,7 +297,7 @@ async fn shutdown_persists_engine_snapshot() {
         .await
         .unwrap();
 
-    let engine = CrowtreeEngine::open(&CrowtreeOptions {
+    let engine = CrowTreeEngine::open(&CrowTreeOptions {
         path: Some(engine_path.display().to_string()),
         ..Default::default()
     })
@@ -326,7 +326,7 @@ async fn shutdown_persists_engine_snapshot() {
 
     // Reopen the engine from the same directory. The snapshot persisted
     // by shutdown should make resume_from_slot non-zero.
-    let reopened = CrowtreeEngine::open(&CrowtreeOptions {
+    let reopened = CrowTreeEngine::open(&CrowTreeOptions {
         path: Some(engine_path.display().to_string()),
         ..Default::default()
     })

@@ -67,23 +67,23 @@ pub struct KvStoreView {
     pub key_count: u64,
     /// Mirrors `crowkv`'s `KvStoreStatus::engine_healthy`. `true` for
     /// `InMemKV` always; `false` once a
-    /// `CrowtreeEngine`'s durable I/O fault has latched.
+    /// `CrowTreeEngine`'s durable I/O fault has latched.
     #[serde(default = "default_engine_healthy")]
     pub engine_healthy: bool,
     /// Mirrors `crowkv`'s `KvStoreStatus::crowtree_stats`; `None` when the
-    /// group's engine isn't `CrowtreeEngine` (e.g. `InMemKV`).
+    /// group's engine isn't `CrowTreeEngine` (e.g. `InMemKV`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crowtree_stats: Option<CrowtreeStatsSnapshot>,
+    pub crowtree_stats: Option<CrowTreeStatsSnapshot>,
 }
 
 fn default_engine_healthy() -> bool {
     true
 }
 
-/// Mirrors `crowkv`'s `CrowtreeStatsView` --
-/// batched crowtree engine diagnostics for a single group's local replica.
+/// Mirrors `crowkv`'s `CrowTreeStatsView` --
+/// batched crow-tree engine diagnostics for a single group's local replica.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct CrowtreeStatsSnapshot {
+pub struct CrowTreeStatsSnapshot {
     pub last_applied_slot: u64,
     pub contiguous_slot: u64,
     pub gc_watermark: u64,

@@ -11,11 +11,11 @@ use bytes::Bytes;
 ///
 /// `apply`/`get`/`scan` return [`KVFuture`] rather than their value directly:
 /// the common case (in-memory hit / no I/O) resolves immediately at zero
-/// cost via [`KVFuture::ready`], while a genuine I/O path (crowtree
-/// demand-load miss, via the `io_uring` reactor) returns a real `Pending` future. [`super::CrowtreeEngine::get`] and
-/// [`super::CrowtreeEngine::scan`] both construct `Pending` for a genuine
-/// cold-leaf miss (via `crowtree_ffi::AsyncCrowtree::try_get`/`try_scan`);
-/// `InMemKV` and `CrowtreeEngine::apply` always resolve `Ready` (no
+/// cost via [`KVFuture::ready`], while a genuine I/O path (crow-tree
+/// demand-load miss, via the `io_uring` reactor) returns a real `Pending` future. [`super::CrowTreeEngine::get`] and
+/// [`super::CrowTreeEngine::scan`] both construct `Pending` for a genuine
+/// cold-leaf miss (via `crow_tree_ffi::AsyncCrowtree::try_get`/`try_scan`);
+/// `InMemKV` and `CrowTreeEngine::apply` always resolve `Ready` (no
 /// `ct_apply_*_async` C API exists yet).
 pub trait KVEngine: Send + Sync {
     /// Apply `batch` at `slot`. Atomic to readers and idempotent: an op for
@@ -24,7 +24,7 @@ pub trait KVEngine: Send + Sync {
     ///
     /// # Errors
     /// Returns an error string if the underlying write fails (e.g. a durable
-    /// I/O error on a [`super::CrowtreeEngine`]). The value is still
+    /// I/O error on a [`super::CrowTreeEngine`]). The value is still
     /// Paxos-chosen even on an `Err` here -- this reports a *local* apply/
     /// durability failure, not a consensus outcome, so callers must not
     /// treat it as "not applied" for consensus purposes. `InMemKV` has no
@@ -37,7 +37,7 @@ pub trait KVEngine: Send + Sync {
     /// Like [`Self::get`] but returns [`Bytes`] instead of `Vec<u8>`, so
     /// the gRPC response path can avoid an extra allocation. The default
     /// implementation delegates to [`Self::get`] and converts the
-    /// `Vec<u8>` into `Bytes` (zero-copy move). [`super::CrowtreeEngine`]
+    /// `Vec<u8>` into `Bytes` (zero-copy move). [`super::CrowTreeEngine`]
     /// overrides this to use a pinned-value FFI path that eliminates the
     /// intermediate `Vec<u8>` allocation on the fast path.
     fn get_bytes(&self, key: &[u8]) -> KVFuture<Option<(u64, Bytes)>> {
@@ -74,10 +74,10 @@ pub trait KVEngine: Send + Sync {
     /// `&dyn KVEngine` (e.g. `PxLearner::engine`) recover the concrete
     /// engine type for an operation deliberately kept off this trait
     /// because it's meaningful for only one engine kind -- e.g.
-    /// [`super::CrowtreeEngine::stats`]: `InMemKV`
+    /// [`super::CrowTreeEngine::stats`]: `InMemKV`
     /// has no comparable internals, so putting `stats` on the trait itself
     /// would mean a dummy/`Option`-wrapped implementation for it, the same
-    /// reasoning that already keeps [`super::CrowtreeEngine::handle`] off
+    /// reasoning that already keeps [`super::CrowTreeEngine::handle`] off
     /// this trait. Every implementor's body is just `self`.
     fn as_any(&self) -> &dyn std::any::Any;
 
@@ -93,7 +93,7 @@ pub trait KVEngine: Send + Sync {
     /// remove-replica path).
     ///
     /// Default `true` (`InMemKV` has no I/O path to fail).
-    /// [`super::CrowtreeEngine::is_healthy`] overrides this with
+    /// [`super::CrowTreeEngine::is_healthy`] overrides this with
     /// `!Crowtree::io_failed`.
     fn is_healthy(&self) -> bool {
         true
@@ -114,10 +114,10 @@ pub trait KVEngine: Send + Sync {
     /// actually be applied, not just "some slot `<= S` was seen".
     ///
     /// The default (`0`) is always correct for a fresh/non-durable engine
-    /// ([`super::InMemKV`], or a `CrowtreeEngine` opened with `path: None`) —
+    /// ([`super::InMemKV`], or a `CrowTreeEngine` opened with `path: None`) —
     /// it just means "nothing to skip, replay everything". A durable engine
-    /// that overrides this (e.g. [`super::CrowtreeEngine`], via
-    /// `crowtree_ffi::Crowtree::last_applied_slot`) lets
+    /// that overrides this (e.g. [`super::CrowTreeEngine`], via
+    /// `crow_tree_ffi::Crowtree::last_applied_slot`) lets
     /// [`crate::cluster::local_replica::PxLocalReplica::restore_from_replay_with_engine`]
     /// skip re-walking an already-durable WAL prefix. Only meaningful to call
     /// once, right after opening a freshly-recovered engine and before any
@@ -163,7 +163,7 @@ pub trait KVEngine: Send + Sync {
     /// only ever meaningful fed back into **this same engine kind's**
     /// [`Self::snapshot_import`] — never across engine kinds.
     ///
-    /// Default: unsupported (`InMemKV` and [`super::CrowtreeEngine`] both
+    /// Default: unsupported (`InMemKV` and [`super::CrowTreeEngine`] both
     /// override this with a real implementation; a future engine kind that
     /// doesn't gets a clear error instead of silently returning empty
     /// state).

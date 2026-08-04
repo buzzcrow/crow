@@ -211,7 +211,7 @@ struct JoinGroupRequest {
     replica_id: u64,
     /// gRPC endpoint (`host:port`) of an existing, already-caught-up member
     /// of this group to pull the snapshot from. Must run the **same**
-    /// crowtree backend as this store -- `KVEngine::snapshot_import`
+    /// crow-tree backend as this store -- `KVEngine::snapshot_import`
     /// is only ever meaningful fed a stream from the same engine kind's
     /// `snapshot_export`.
     peer_endpoint: String,

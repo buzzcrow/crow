@@ -38,7 +38,7 @@ full lifecycle below.
                    iteration, but every test must pass. No failure may be
                    skipped — all failures must be fixed before proceeding.
 7. Merge design  → Fold the design doc into the formal design doc it belongs
-                   to (e.g. design-crowtree-engine.md, design-wal.md), following
+                   to (e.g. design-crow-tree-engine.md, design-wal.md), following
                    that doc's style and detail level. Delete the standalone
                    working/design-<topic>.md.
 8. Cleanup       → Delete the requirement's detail doc
@@ -99,7 +99,7 @@ In all other cases, proceed autonomously through all eight steps.
 - **Alternatives**: list rejected approaches with rationale
 - **Code-grounded**: reference actual file paths, function names, line numbers
 - **Concise**: aim for the detail level of existing §-level content in
-  `design/design-crowtree-engine.md` or `design/design-crowtree-storage.md`
+  `design/design-crow-tree-engine.md` or `design/design-crow-tree-storage.md`
 - **Acceptance criteria**: concrete, testable conditions
 
 ## Plan doc style

@@ -8,14 +8,14 @@ Satisfies: design.md §8.3](design.md), design.md §8.4 import/export](design.md
 
 This document specifies the storage engine abstraction used by CrowKV learners. The engine is the **only** consumer of consensus output; it owns the materialized key-value state and serves all reads. The WAL is the durable log; the engine is the materialized projection.
 
-> **P3 redesign note.** The production engine `crowtree` and the redefined
-> (async, snapshot/GC-aware) `KVEngine` abstraction are specified in the crowtree
-> sub-design set: [`design-crowtree.md`](design-crowtree.md) (overview + engine
-> abstraction + language/FFI decisions), [`design-crowtree-engine.md`](design-crowtree-engine.md)
-> (in-memory engine + memory model + async FFI), [`design-crowtree-storage.md`](design-crowtree-storage.md)
+> **P3 redesign note.** The production engine `crow-tree` and the redefined
+> (async, snapshot/GC-aware) `KVEngine` abstraction are specified in the crow-tree
+> sub-design set: [`design-crow-tree.md`](design-crow-tree.md) (overview + engine
+> abstraction + language/FFI decisions), [`design-crow-tree-engine.md`](design-crow-tree-engine.md)
+> (in-memory engine + memory model + async FFI), [`design-crow-tree-storage.md`](design-crow-tree-storage.md)
 > (durable storage + mapping table + snapshot/GC flow). This document remains the
 > source of truth for the *semantics* (per-key slot, apply, compare, compaction);
-> crowtree docs own the *implementation*.
+> crow-tree docs own the *implementation*.
 
 ## Table of Contents
 
@@ -36,7 +36,7 @@ This document specifies the storage engine abstraction used by CrowKV learners. 
 
 **Goals:**
 
-- Define one engine surface so the same learner code drives any backend (in-memory, crowtree).
+- Define one engine surface so the same learner code drives any backend (in-memory, crow-tree).
 - Encode the per-key resolved-slot semantics that make parallel-slot consensus correct.
 - Provide a deterministic state-equality check (`compare`) for cross-learner test verification.
 - Provide a streamable snapshot import/export usable by snapshot install.
@@ -71,8 +71,8 @@ The engine does **not** know about Paxos, terms, ballots, leaders, or the networ
 
 The state machine's persistence boundary is separate from the WAL — but it is
 not a dedicated "state-machine snapshot file" either. It is whatever the
-*engine itself* durably persists (crowtree's own snapshot pipeline,
-[`design-crowtree-storage.md §6`](design-crowtree-storage.md#6-snapshot-recovery-and-exportimport)),
+*engine itself* durably persists (crow-tree's own snapshot pipeline,
+[`design-crow-tree-storage.md §6`](design-crow-tree-storage.md#6-snapshot-recovery-and-exportimport)),
 queried through `KVEngine::resume_from_slot()`. This replaces the former
 `DurableCommitWatermark` WAL record design.
 
@@ -81,7 +81,7 @@ queried through `KVEngine::resume_from_slot()`. This replaces the former
 
 1. WAL replay rebuilds acceptor state (`Promised`, `Accepted`, `VoteGranted`) — Pass 1, unconditional.
 2. The engine reports `resume_from = resume_from_slot()`: the highest slot it
-   already durably reflects (always `0` for `InMemKV`; crowtree's
+   already durably reflects (always `0` for `InMemKV`; crow-tree's
    `last_applied_slot`, restored from its on-disk commit anchor, for a
    durable engine that was cleanly snapshotted before the crash/restart).
 3. Pass 2 `learn()`s every WAL-accepted slot in `(resume_from, highest_local]`
@@ -159,7 +159,7 @@ After all tuples are processed, advance the engine's `max_applied = max(max_appl
 
 The whole `apply` is atomic with respect to readers: a reader either sees all of the batch's effects or none. This is required so that a `Scan(Linearizable)` does not observe a partial batch as the "current state".
 
-In-memory engines can hold a write lock for the duration of the batch. File-based engines can use a transactional write group. crowtree's btree operations on a single batch can ride on its own concurrency control.
+In-memory engines can hold a write lock for the duration of the batch. File-based engines can use a transactional write group. crow-tree's btree operations on a single batch can ride on its own concurrency control.
 
 ### 4.4 Intra-batch order
 
@@ -261,9 +261,9 @@ The slot is returned because callers (the learner) need it to assemble responses
 
 ### 5.2 `scan(range, limit) → iterator<(key, slot, value)>`
 
-Returns an iterator of live entries (no tombstones) within `range`, in key order, up to `limit` items. The iterator may be backed by a btree cursor (in crowtree) or a sorted-tree iterator (in-memory).
+Returns an iterator of live entries (no tombstones) within `range`, in key order, up to `limit` items. The iterator may be backed by a btree cursor (in crow-tree) or a sorted-tree iterator (in-memory).
 
-The iterator must reflect a consistent point-in-time view of the engine. In-memory engines use a snapshot-on-iterator-create. File engines and crowtree use their natural snapshot or copy-on-write semantics. The point in time corresponds to "after some `apply` calls and before others" — which is always a valid linearization point given the consensus layer's slot ordering.
+The iterator must reflect a consistent point-in-time view of the engine. In-memory engines use a snapshot-on-iterator-create. File engines and crow-tree use their natural snapshot or copy-on-write semantics. The point in time corresponds to "after some `apply` calls and before others" — which is always a valid linearization point given the consensus layer's slot ordering.
 
 ### 5.3 `multi_get(keys) → map<key, (slot, value)>`
 
@@ -296,7 +296,7 @@ In addition to peer transfer, the engine uses snapshot export to persist its own
 - Chunks have stable ordering and stable boundaries: the same state always produces the same byte sequence, modulo any internal pagination. This determinism is what makes resumption possible.
 - Chunk size is engine-defined; 1–4 MiB is a reasonable default.
 
-The chunk format is **engine-specific** — the in-memory tree might serialize key/value pairs in btree order; crowtree might dump native pages directly. The snapshot module treats chunks as opaque.
+The chunk format is **engine-specific** — the in-memory tree might serialize key/value pairs in btree order; crow-tree might dump native pages directly. The snapshot module treats chunks as opaque.
 
 ### 6.3 Import
 
@@ -309,7 +309,7 @@ The chunk format is **engine-specific** — the in-memory tree might serialize k
 
 ### 6.4 Cross-engine snapshots
 
-The default rule: **snapshot exported by engine X can only be imported by engine X.** A 3-node group all running crowtree can snapshot-install crowtree-formatted snapshots. A test cluster mixing in-memory and file engines must export/import via a portable format.
+The default rule: **snapshot exported by engine X can only be imported by engine X.** A 3-node group all running crow-tree can snapshot-install crow-tree-formatted snapshots. A test cluster mixing in-memory and file engines must export/import via a portable format.
 
 A portable interchange format (e.g. sorted key-value pairs with slots) is provided as an optional path for testing and operations, at the cost of being slower than the native path. Production deployments should use a single engine type per group.
 
@@ -337,7 +337,7 @@ The conservative "both must pass" rule prevents observability holes.
 
 ### 7.2 When can an old value be GC'd?
 
-When a key `k` is overwritten with a higher slot value, the old value is immediately overwritten in single-version storage; there is nothing to GC. The complication is only with tombstones (representing deletes) and with engine-internal versioning (e.g. crowtree's MVCC of pages, which it manages internally).
+When a key `k` is overwritten with a higher slot value, the old value is immediately overwritten in single-version storage; there is nothing to GC. The complication is only with tombstones (representing deletes) and with engine-internal versioning (e.g. crow-tree's MVCC of pages, which it manages internally).
 
 ### 7.3 Compaction trigger
 
@@ -348,7 +348,7 @@ When a key `k` is overwritten with a higher slot value, the old value is immedia
 ### 7.4 Engine-specific compaction
 
 - In-memory: tombstones are simply removed from the map.
-- crowtree: leverages crowtree's internal compaction. The sweeper hands crowtree a "tombstones below slot S are safe to drop" hint and crowtree merges that into its compaction policy.
+- crow-tree: leverages crow-tree's internal compaction. The sweeper hands crow-tree a "tombstones below slot S are safe to drop" hint and crow-tree merges that into its compaction policy.
 
 ---
 
@@ -360,7 +360,7 @@ A `compare(other) -> diff` operation is required so that `crowbench` can verify 
 
 `compare(other)` returns a diff describing the keys that differ in `(slot, value)` between `self` and `other`. If the engines are in the same logical state (same set of live keys, same `(slot, value)` per key), the diff is empty.
 
-The compare is **logical**, not byte-level. Two engines may have different physical layouts (e.g. one in-memory and one crowtree) yet be logically equal. Compare must succeed across engine types.
+The compare is **logical**, not byte-level. Two engines may have different physical layouts (e.g. one in-memory and one crow-tree) yet be logically equal. Compare must succeed across engine types.
 
 ### 8.2 Required behavior
 
@@ -392,12 +392,12 @@ Two engine implementations satisfy the surface above. Each is appropriate for a 
 - Snapshot format: serialized sorted (key, slot, value-or-tombstone) tuples.
 - Concurrency: read-write lock over the whole map for `apply`; concurrent reads via a snapshot pointer.
 
-### 9.2 crowtree
+### 9.2 crow-tree
 
-- Backing store: the production btree library `crowtree` — a C++ `libcrowtree`
+- Backing store: the production btree library `crow-tree` — a C++ `libcrow-tree`
   (single-writer COW B+tree with per-leaf delta chains, epoch GC, versioned root)
   consumed from Rust over a coarse C ABI. Full design:
-  [`design-crowtree.md`](design-crowtree.md) and its sub-docs.
+  [`design-crow-tree.md`](design-crow-tree.md) and its sub-docs.
 - Persistence: yes, via a pluggable `PageStore` (local file, raw block device,
   remote/RDMA); snapshot + consensus replay for recovery (no second op-log).
 - Use cases: production.
@@ -424,6 +424,6 @@ The trait surface is engine-agnostic; switching engines is a configuration choic
 
 - Unit and integration tests → in-memory.
 - Manual debugging or operations exercises → ordered file.
-- Production → crowtree.
+- Production → crow-tree.
 
 **Per-key memory cost considerations:** the per-key resolved-slot adds 8 bytes per live key. For 10⁹ live keys this is 8 GiB on every learner, accepted in the requirement ([§7.3.1](design.md)). If memory pressure dictates, a future optimization could compress recently-applied resolved-slots into a "below safe-slot" bit (a single bit replacing the 8 bytes when the per-key slot is no longer needed for read-your-writes).

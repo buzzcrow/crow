@@ -24,8 +24,8 @@ pub enum BenchSub {
 /// Arguments for `crowkv-cli bench run`.
 #[derive(Args, Debug)]
 pub struct RunArgs {
-    /// Storage mode: `mem` (crowtree + mem-block), `file` (crowtree +
-    /// file page store), or `block` (crowtree + block page store).
+    /// Storage mode: `mem` (crow-tree + mem-block), `file` (crow-tree +
+    /// file page store), or `block` (crow-tree + block page store).
     #[arg(long, default_value = "mem")]
     pub mode: String,
 

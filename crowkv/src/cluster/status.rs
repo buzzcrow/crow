@@ -99,25 +99,25 @@ pub struct KvStoreStatus {
     /// `/topology` per-request.
     pub key_count: u64,
     /// [`crate::kv::KVEngine::is_healthy`] as of this call. `true` for
-    /// `InMemKV` always; for a `CrowtreeEngine`, `false` once a durable I/O
+    /// `InMemKV` always; for a `CrowTreeEngine`, `false` once a durable I/O
     /// fault has latched (`Crowtree::io_failed`).
     #[serde(default = "default_true")]
     pub engine_healthy: bool,
-    /// [`crate::kv::CrowtreeEngine::stats`] as of this call, or `None` for
+    /// [`crate::kv::CrowTreeEngine::stats`] as of this call, or `None` for
     /// `InMemKV` (no comparable internals). Populated by downcasting
     /// `PxLearner::engine()` via [`crate::kv::KVEngine::as_any`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub crowtree_stats: Option<CrowtreeStatsView>,
+    pub crowtree_stats: Option<CrowTreeStatsView>,
 }
 
 fn default_true() -> bool {
     true
 }
 
-/// Wire-serializable mirror of [`crate::kv::CrowtreeStats`] (that type lives
-/// in `crowtree_ffi` and isn't `Serialize`), for `/topology`/`/api/health`.
+/// Wire-serializable mirror of [`crate::kv::CrowTreeStats`] (that type lives
+/// in `crow_tree_ffi` and isn't `Serialize`), for `/topology`/`/api/health`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
-pub struct CrowtreeStatsView {
+pub struct CrowTreeStatsView {
     pub last_applied_slot: u64,
     pub contiguous_slot: u64,
     pub gc_watermark: u64,
@@ -142,8 +142,8 @@ pub struct CrowtreeStatsView {
     pub l1_get_hit_total: u64,
 }
 
-impl From<crate::kv::CrowtreeStats> for CrowtreeStatsView {
-    fn from(s: crate::kv::CrowtreeStats) -> Self {
+impl From<crate::kv::CrowTreeStats> for CrowTreeStatsView {
+    fn from(s: crate::kv::CrowTreeStats) -> Self {
         Self {
             last_applied_slot: s.last_applied_slot,
             contiguous_slot: s.contiguous_slot,

@@ -8,16 +8,16 @@ tarpaulin-report.html
 # ── Pixi ────────────────────────────────────────────────────────
 .pixi/
 
-# ── C++ (crowtree) build artifacts ──────────────────────────────
+# ── C++ (crow-tree) build artifacts ──────────────────────────────
 build/
-crowtree/build/
-crowtree/build-asan/
-crowtree/build-tsan/
-crowtree/build-bench/
-crowtree/build*/
-crowtree/Testing/
-crowtree/.cache/
-crowtree/.test-tmp/
+crow-tree/build/
+crow-tree/build-asan/
+crow-tree/build-tsan/
+crow-tree/build-bench/
+crow-tree/build*/
+crow-tree/Testing/
+crow-tree/.cache/
+crow-tree/.test-tmp/
 .test-tmp/
 
 # ── Frontend (crowkv-console/web/ui) ────────────────────────────

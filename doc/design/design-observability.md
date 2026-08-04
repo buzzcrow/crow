@@ -66,7 +66,7 @@ reset window state). Interval is typically 5s or 10s.
   post-flush callback that calls C++ `flush_metrics_str()` for each engine
   and writes the `[cpp-metrics]` block. Also provides `snapshot(prefix)` for
   in-memory access without resetting window state.
-- C++ (`crowtree/include/crowtree/metrics.h`, `crowtree/src/metrics.cpp`):
+- C++ (`crow-tree/include/crow-tree/metrics.h`, `crow-tree/src/metrics.cpp`):
   Same type-grouped pattern. `Crowtree` owns its own `MetricsRegistry`
   internally (`init_metrics(prefix)` called from `open()`). Metric handles
   are raw pointers (registry owns lifetime). `flush_metrics_str()` captures
@@ -107,12 +107,12 @@ integration.
   with dynamic names.
 - C++ buffer pool (`buffer_pool.cpp`): hits/misses/evictions/writebacks
   counters, resident/dirty gauges.
-- C++ engine (`crowtree.cpp`): apply latency summary, demand-load latency
+- C++ engine (`crow-tree.cpp`): apply latency summary, demand-load latency
   summary + page-read bandwidth.
 - C++ persist (`persist.cpp`): snapshot latency summary, snapshot-apply
   latency summary, per-page write IO latency + cache-hit counter + write
   bandwidth, metadata write bandwidth.
-- C++ flush (`crowtree.cpp`): flush latency summary, page-build (in-memory
+- C++ flush (`crow-tree.cpp`): flush latency summary, page-build (in-memory
   mutation) latency summary, flush drain/entries magnitude counters.
 
 ### System Metrics Collector

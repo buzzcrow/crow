@@ -25,7 +25,7 @@ higher throughput than Raft's strictly sequential log.
 - **Bounded idempotency** for retried requests via `(client_id, seq)` dedup.
 - **High throughput** via parallel per-slot Paxos + multiple independent groups.
 - **Pluggable storage** — same core library works for in-memory tests,
-  local file tests, and crowtree btree in production.
+  local file tests, and crow-tree btree in production.
 
 **Design philosophy:** "Raft for everything that doesn't matter for
 performance, Multi-Paxos for the one thing that does." Leader election,
@@ -228,7 +228,7 @@ ReadIndex), `design-rpc.md` (wire protocol, LearnerStream).
   CRC integrity, quorum-durable-flush ack contract. Disk loss → node
   rebuilds from peers via snapshot install.
 - **Pluggable engines** — in-memory btree (testing), local ordered file
-  (testing), crowtree btree (production). All implement the same
+  (testing), crow-tree btree (production). All implement the same
   interface including a `compare` method for cross-engine verification.
 - **Per-key slot tracking** — engine stores `(slot, value)` per key;
   tombstones GC'd after slot is below snapshot and safe-slot.
@@ -237,7 +237,7 @@ ReadIndex), `design-rpc.md` (wire protocol, LearnerStream).
   bootstrap.
 
 Full design: `design-wal.md`, `design-state-machine.md`,
-`design-crowtree.md`.
+`design-crow-tree.md`.
 
 ## 9. Cluster Lifecycle
 
@@ -314,7 +314,7 @@ Full design: `design-reconfiguration.md`, `design-kv-server.md`.
 | **Leader Elector** | Raft-style election; manages `PxTerm`; lease management. |
 | **Repair** | Background task: detects and resolves slot gaps via classic Paxos. |
 | **Snapshot** | Per-group snapshots; serves install to lagging peers. |
-| **Storage Engine** | Pluggable `KVEngine` trait: `InMemKV`, `CrowtreeEngine`. |
+| **Storage Engine** | Pluggable `KVEngine` trait: `InMemKV`, `CrowTreeEngine`. |
 | **RPC** | gRPC layer: `PxReplicaService`, `KvStoreService`, `PxSnapshotService`. |
 
 Single-leader hot path: **Proposer → WAL → Replicator → Learner → ack.**
@@ -330,7 +330,7 @@ crowkv-server       (binary: CLI, HTTP mgmt API, store/group wiring)
 crowkv-console/shared  (console core: API client, models)
 crowkv-console/web     (Axum web server + React SPA)
 crowkv-console/cli     (CLI binary: crowkv command)
-crowtree/ffi        (C++ B+tree engine, FFI bridge to Rust)
+crow-tree/ffi        (C++ B+tree engine, FFI bridge to Rust)
 ```
 
 `crow-common` holds project-agnostic utilities shared across the
@@ -341,8 +341,8 @@ their original module paths so call sites compile unchanged. The C++
 static library (`libcrowcommon.a`, namespace `crow::common`) provides
 CRC32C, the spdlog logging facade (`CR_LOG_*` macros), the compressing
 file sink, gzip helpers, and the atomic-counter metrics core;
-`crowtree` links against it and bridges the moved types into the
-`crowtree` namespace via using-declarations.
+`crow-tree` links against it and bridges the moved types into the
+`crow-tree` namespace via using-declarations.
 
 ## 13. Concurrency Model
 

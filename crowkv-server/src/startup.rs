@@ -13,7 +13,7 @@ use crowkv::cluster::group_election::LeaderElection;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crowkv::cluster::node_config::NodeConfigStore;
 use crowkv::common::config::{CrowKVConfig, WalConfig};
-use crowkv::kv::{CrowtreeBackend, CrowtreeEngine, CrowtreeOptions, KVEngine};
+use crowkv::kv::{CrowTreeBackend, CrowTreeEngine, CrowTreeOptions, KVEngine};
 use crowkv::wal::replay::replay_group;
 use crowkv::wal::{IoBackend, WalEngine};
 
@@ -67,38 +67,38 @@ pub fn store_wal_root(wal_root: &Path, store_id: u64) -> PathBuf {
     wal_root.join(format!("store{store_id}"))
 }
 
-/// Durable per-group crowtree directory path: `{data_root}/store{store_id}/group{group_id}`.
+/// Durable per-group crow-tree directory path: `{data_root}/store{store_id}/group{group_id}`.
 /// Both `TextPageStore` and `BlockPageStore` expect a directory path (`TextPageStore` creates a subdirectory
 /// `{path}/{store_id}-{group_id}/`, `BlockPageStore` creates `.blk-*` files
 /// directly in `path`).
 #[must_use]
-pub fn store_crowtree_path(data_root: &Path, store_id: u64, group_id: u64) -> PathBuf {
+pub fn store_crow_tree_path(data_root: &Path, store_id: u64, group_id: u64) -> PathBuf {
     data_root
         .join(format!("store{store_id}"))
         .join(format!("group{group_id}"))
 }
 
-/// Open (creating on first boot) the durable crowtree engine backing
+/// Open (creating on first boot) the durable crow-tree engine backing
 /// `(store_id, group_id)`'s learner, boxed for [`PxLearner::with_engine`]
 /// via [`PxLocalReplica::restore_from_replay_with_engine`].
 ///
 /// # Errors
 ///
 /// Returns an I/O error if the parent directory cannot be created, or if
-/// `CrowtreeEngine::open` fails (e.g. a corrupt or unreadable file).
-async fn open_crowtree_engine(
+/// `CrowTreeEngine::open` fails (e.g. a corrupt or unreadable file).
+async fn open_crow_tree_engine(
     data_root: &Path,
     store_id: u64,
     group_id: u64,
-    backend: CrowtreeBackend,
+    backend: CrowTreeBackend,
     log_dir: &str,
 ) -> io::Result<Box<dyn KVEngine>> {
-    let path = store_crowtree_path(data_root, store_id, group_id);
+    let path = store_crow_tree_path(data_root, store_id, group_id);
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
     tokio::fs::create_dir_all(&path).await?;
-    let opt = CrowtreeOptions {
+    let opt = CrowTreeOptions {
         path: Some(path.to_string_lossy().into_owned()),
         backend,
         store_id: u32::try_from(store_id).unwrap_or(0),
@@ -112,16 +112,16 @@ async fn open_crowtree_engine(
         group_id,
         backend = ?backend,
         path = %path.display(),
-        "opening crowtree engine"
+        "opening crow-tree engine"
     );
-    // `CrowtreeEngine::open` is a synchronous FFI call; called here inline
-    // (not `spawn_blocking`) consistent with `CrowtreeEngine`'s own
-    // documented policy of calling the still-fully-synchronous crowtree
+    // `CrowTreeEngine::open` is a synchronous FFI call; called here inline
+    // (not `spawn_blocking`) consistent with `CrowTreeEngine`'s own
+    // documented policy of calling the still-fully-synchronous crow-tree
     // core directly rather than adding a thread-pool hop with no genuine
-    // asynchrony behind it (see `crowkv::kv::CrowtreeEngine`'s docs). This
+    // asynchrony behind it (see `crowkv::kv::CrowTreeEngine`'s docs). This
     // runs once per group at boot, not on a hot path.
-    let engine = CrowtreeEngine::open(&opt)
-        .map_err(|e| io::Error::other(format!("CrowtreeEngine::open({}) failed: {e:?}", path.display())))?;
+    let engine = CrowTreeEngine::open(&opt)
+        .map_err(|e| io::Error::other(format!("CrowTreeEngine::open({}) failed: {e:?}", path.display())))?;
     Ok(Box::new(engine))
 }
 
@@ -132,7 +132,7 @@ async fn open_crowtree_engine(
 /// # Errors
 ///
 /// Returns any I/O or replay/restore error encountered while scanning the
-/// existing WAL, creating the new WAL engine, opening the durable crowtree
+/// existing WAL, creating the new WAL engine, opening the durable crow-tree
 /// engine, or rebuilding the local replica.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_group_with_wal(
@@ -142,7 +142,7 @@ pub async fn create_group_with_wal(
     initial_role: PxLocalReplicaRole,
     config: &CrowKVConfig,
     wal_backend: Arc<IoBackend>,
-    crowtree_backend: CrowtreeBackend,
+    crowtree_backend: CrowTreeBackend,
 ) -> io::Result<PxGroup> {
     let mut wal_config = WalConfig::with_root(store_wal_root(&config.wal_root, store_id));
     if std::env::var("CROWKV_WAL_TEXT").as_deref() == Ok("1") {
@@ -154,7 +154,7 @@ pub async fn create_group_with_wal(
     wal.set_next_segment_id(replay.max_segment_id.saturating_add(1).max(1));
 
     let mut local_replica = {
-        let engine = open_crowtree_engine(
+        let engine = open_crow_tree_engine(
             &config.data_root,
             store_id,
             group_id,

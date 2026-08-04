@@ -182,9 +182,9 @@ batch; the engine returns keys strictly greater than `start_after` that
 still match the prefix. The UI shows a "Load more" button when
 `truncated` is true; clicking it appends the next batch.
 
-**Decision — `CrowtreeEngine` over-fetch + filter:** The C++ crowtree
+**Decision — `CrowTreeEngine` over-fetch + filter:** The C++ crow-tree
 scan API takes only prefix + limit (no `start_after`). Rather than
-modifying C++ immediately, `CrowtreeEngine` over-fetches with the
+modifying C++ immediately, `CrowTreeEngine` over-fetches with the
 original prefix, then filters out keys ≤ `start_after` in Rust before
 applying the limit. This is inefficient when `start_after` is deep into
 a large prefix range — a follow-up can push `start_after` into the C++

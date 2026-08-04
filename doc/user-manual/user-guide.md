@@ -463,7 +463,7 @@ per-node config cache (`--config-root`), and the durable KV engine
 
 - `{wal-root}/store{store_id}/` for each store
 - `{config-root}/node-config.json` — per-node store/group config cache
-- `{data-root}/store{store_id}/group{group_id}/` if using crowtree
+- `{data-root}/store{store_id}/group{group_id}/` if using crow-tree
   durable KV engine
 
 Restore by placing these on the replacement node and starting the

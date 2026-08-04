@@ -54,7 +54,7 @@ Multi-Paxos treats each slot as an independent Paxos instance. Slots can be **de
 ```
 
 - **Multi-group sharding** — each node hosts multiple Paxos groups; routing is by explicit `group_id`. Group membership and key ranges are operator-defined.
-- **Pluggable storage** — the WAL is the source of truth; the key-value engine is a derived projection. An in-memory engine and `crowtree` (a custom B+tree with delta chains encoding, io_uring async I/O, and epoch-safe lock-free reads) are both implemented behind a unified `KVEngine` trait.
+- **Pluggable storage** — the WAL is the source of truth; the key-value engine is a derived projection. An in-memory engine and `crow-tree` (a custom B+tree with delta chains encoding, io_uring async I/O, and epoch-safe lock-free reads) are both implemented behind a unified `KVEngine` trait.
 - **Raft where it doesn't matter, Paxos where it does** — leader election, leases, snapshot install, and reconfiguration follow settled Raft designs. Only the write hot path diverges into Multi-Paxos.
 - **Console** — a web UI and CLI for cluster lifecycle management (bootstrap, rolling upgrade, replica add/remove, health monitoring).
 
@@ -65,7 +65,7 @@ Multi-Paxos treats each slot as an independent Paxos instance. Slots can be **de
 | `crowkv` | Core library: Multi-Paxos consensus, WAL, storage engine trait, RPC, reconfiguration |
 | `crowkv-server` | Server binary: hosts groups, serves gRPC + HTTP management API |
 | `crowkv-client` | Client library: topology cache, retry, idempotency |
-| `crowtree` | Custom storage engine (C++ core + Rust FFI): B+tree, delta chains, io_uring reactor, buffer pool |
+| `crow-tree` | Custom storage engine (C++ core + Rust FFI): B+tree, delta chains, io_uring reactor, buffer pool |
 | `crowkv-console` | Operations console: web UI (Axum + React) and CLI |
 
 <details>
@@ -77,7 +77,7 @@ CrowKV uses [Pixi](https://pixi.sh) for environment management — it pins the C
 # Install pixi (if not already installed)
 curl -fsSL https://pixi.sh/install.sh | sh
 
-# Build everything (crowtree C++ + Rust workspace + web UI)
+# Build everything (crow-tree C++ + Rust workspace + web UI)
 pixi run build
 
 # Run all tests (C++ ctest + Rust unit/integration + web + Playwright e2e)

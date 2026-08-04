@@ -53,7 +53,7 @@ async fn main() {
     // Initialize the C++ spdlog async logger as a process-global resource.
     // This must happen before any Crowtree::open() so all engine instances
     // share one logger. No-op when the build has no spdlog.
-    crowtree_ffi::ct_init_logging(
+    crow_tree_ffi::ct_init_logging(
         "log",
         "info",
         args.log_max_file_mb,
@@ -398,7 +398,7 @@ async fn graceful_shutdown(registry: Arc<KvStoreRegistry>) {
 
     // Flush C++ logs before store shutdown so any in-flight engine messages
     // are on disk before the engines start tearing down.
-    crowtree_ffi::ct_flush_logging();
+    crow_tree_ffi::ct_flush_logging();
 
     let mut total_errors = 0usize;
     for entry in &registry.stores {
@@ -427,6 +427,6 @@ async fn graceful_shutdown(registry: Arc<KvStoreRegistry>) {
 
     // Final flush + stop the C++ spdlog async logger. All Crowtree instances
     // are now dropped (or about to be), so this is safe.
-    crowtree_ffi::ct_flush_logging();
-    crowtree_ffi::ct_shutdown_logging();
+    crow_tree_ffi::ct_flush_logging();
+    crow_tree_ffi::ct_shutdown_logging();
 }

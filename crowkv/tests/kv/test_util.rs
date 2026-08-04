@@ -8,7 +8,7 @@
 //! keeping `iter_all`/`compare` off the main `KVEngine` trait.
 
 use crate::mem_kv::InMemKV;
-use crowkv::kv::{Cell, CrowtreeEngine, EngineDiff, KVEngine};
+use crowkv::kv::{Cell, CrowTreeEngine, EngineDiff, KVEngine};
 
 /// Full ordered stream including tombstones, via downcast to the concrete
 /// engine type.
@@ -16,7 +16,7 @@ pub fn iter_all_dyn(engine: &dyn KVEngine) -> Vec<(Vec<u8>, u64, Cell)> {
     if let Some(e) = engine.as_any().downcast_ref::<InMemKV>() {
         return e.iter_all();
     }
-    if let Some(e) = engine.as_any().downcast_ref::<CrowtreeEngine>() {
+    if let Some(e) = engine.as_any().downcast_ref::<CrowTreeEngine>() {
         return e.iter_all();
     }
     Vec::new()

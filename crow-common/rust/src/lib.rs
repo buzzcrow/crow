@@ -5,7 +5,7 @@
 //! (`crowkv`, `crow-tree`, future `crow-*` libs).
 //!
 //! Re-exports the generic, project-agnostic primitives extracted out of
-//! `crowkv` and `crowtree` so each component depends on `crow-common`
+//! `crowkv` and `crow-tree` so each component depends on `crow-common`
 //! instead of re-implementing or vendoring them:
 //!
 //! - [`metrics`] — lightweight atomic counters, gauges, bandwidth,

@@ -63,7 +63,7 @@ async fn bench_benchmark_mem_end_to_end() {
 }
 
 /// `bench run --mode file --duration-secs 3` runs
-/// end-to-end with the crowtree engine + file page store.
+/// end-to-end with the crow-tree engine + file page store.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn bench_benchmark_file_end_to_end() {
     let _lock = bench_lock();

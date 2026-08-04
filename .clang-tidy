@@ -12,7 +12,7 @@ Checks: >
   -readability-function-cognitive-complexity,
   -bugprone-easily-swappable-parameters
 WarningsAsErrors: ''
-HeaderFilterRegex: '(^|.*/)crowtree/(include|src|tests)/.*'
+HeaderFilterRegex: '(^|.*/)crow-tree/(include|src|tests)/.*'
 FormatStyle: file
 CheckOptions:
   - key: modernize-use-nodiscard.ReplacementString
