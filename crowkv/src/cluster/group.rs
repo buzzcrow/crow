@@ -6,10 +6,13 @@
 #![allow(clippy::missing_fields_in_debug)]
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 
 use futures::future::join_all;
+use futures::stream::FuturesUnordered;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
@@ -17,12 +20,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::cluster::group_config::{GroupConfigStore, PxGroupConfig, PxGroupMember};
-use crate::cluster::group_election::{LeaderElection, PendingLeaderHandoff, ReadBarrierOutcome};
+use crate::cluster::group_election::{LeaderElection, PendingLeaderHandoff, ReadBarrierOutcome, XorShift64};
 use crate::cluster::local_replica::PxLocalReplica;
 use crate::cluster::node_config::NodeConfigStore;
 use crate::cluster::remote_replica::PxRemoteReplica;
 use crate::cluster::replica::{
-    Replica, ReplicaClient, ReplicaHandler, StepDownReply, StepDownRequestPayload,
+    PxReplicaError, Replica, ReplicaClient, ReplicaHandler, StepDownReply, StepDownRequestPayload,
 };
 use crate::cluster::status::{GroupStatus, InflightStatus, StatusLevel};
 use crate::common::config::{AdmissionPolicy, CrowKVConfig, PaxosConfig};
@@ -31,6 +34,16 @@ use crate::metrics::{Counter, Gauge, LatencySummary};
 use crate::paxos::error::{PxPaxosError, PxPaxosPhase, PxRetryAction};
 use crate::paxos::roles::{DedupTag, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply, SlotIndex};
 use crate::paxos::{PxGroupId, PxNodeId};
+
+/// Registry-based metric handles for write-path instrumentation.
+/// Created by [`PxGroup::set_metrics_registry`] and stored in a
+/// `OnceLock` for lock-free hot-path reads. Mirrors `ReadRegistryHandles`.
+pub(crate) struct WriteRegistryHandles {
+    pub(crate) propose_e2e: Arc<LatencySummary>,
+    pub(crate) prepare_phase: Arc<LatencySummary>,
+    pub(crate) accept_phase: Arc<LatencySummary>,
+    pub(crate) accept_quorum_rpc: Arc<LatencySummary>,
+}
 
 /// Registry-based metric handles for read-path instrumentation.
 /// Created by [`PxGroup::set_metrics_registry`] and stored in a
@@ -203,6 +216,9 @@ pub struct PxGroup {
     /// [`Self::set_metrics_registry`] when a registry is wired.
     /// `None` in tests / no-registry mode.
     pub(crate) read_handles: OnceLock<ReadRegistryHandles>,
+    /// Optional registry handles for write-path metrics. Set via
+    /// [`Self::set_metrics_registry`] when a registry is wired.
+    pub(crate) write_handles: OnceLock<WriteRegistryHandles>,
     /// Pending `ReadIndex` barrier batch. `Some` only while a `ReadIndex`
     /// heartbeat round is in flight; concurrent reads that arrive during
     /// the round enqueue a waiter here instead of starting their own
@@ -297,6 +313,7 @@ impl PxGroup {
             last_snapshot_slot: AtomicU64::new(0),
             last_snapshot_time: parking_lot::Mutex::new(std::time::Instant::now()),
             read_handles: OnceLock::new(),
+            write_handles: OnceLock::new(),
             pending_read_barrier: parking_lot::Mutex::new(None),
             #[cfg(feature = "test-util")]
             readindex_round_gate: parking_lot::Mutex::new(None),
@@ -473,6 +490,13 @@ impl PxGroup {
             safe_slot: r.register_gauge(format!("{prefix}.read.safe_slot.g")),
         };
         let _ = self.read_handles.set(read_handles);
+        let write_handles = WriteRegistryHandles {
+            propose_e2e: r.register_summary(format!("{prefix}.write.propose_e2e.l")),
+            prepare_phase: r.register_summary(format!("{prefix}.write.prepare_phase.l")),
+            accept_phase: r.register_summary(format!("{prefix}.write.accept_phase.l")),
+            accept_quorum_rpc: r.register_summary(format!("{prefix}.write.accept_quorum_rpc.l")),
+        };
+        let _ = self.write_handles.set(write_handles);
     }
 
     /// Borrow optional registry handles for read-path metrics. Returns
@@ -1287,6 +1311,16 @@ impl PxGroup {
     /// step-down between coalescer batch collection and flush surfaces as
     /// `NotLeader` instead of racing into Paxos with stale identity.
     async fn propose_inner(&self, payload: bytes::Bytes, dedup_tags: &[DedupTag]) -> ProposeResult {
+        let e2e_start = std::time::Instant::now();
+        let result = self.propose_inner_impl(payload, dedup_tags).await;
+        if let Some(h) = self.write_handles.get() {
+            h.propose_e2e
+                .observe(e2e_start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX));
+        }
+        result
+    }
+
+    async fn propose_inner_impl(&self, payload: bytes::Bytes, dedup_tags: &[DedupTag]) -> ProposeResult {
         let replica = &self.local_replica;
 
         // Re-check the leadership gate (see `propose`).
@@ -1827,6 +1861,26 @@ impl PxGroup {
         quorum: usize,
         min_round: u64,
     ) -> PrepareAttempt {
+        let phase_start = std::time::Instant::now();
+        let result = self
+            .run_prepare_phase_impl(replica, slot, payload, quorum, min_round)
+            .await;
+        if let Some(h) = self.write_handles.get() {
+            h.prepare_phase
+                .observe(phase_start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX));
+        }
+        result
+    }
+
+    async fn run_prepare_phase_impl(
+        &self,
+        replica: &PxLocalReplica,
+        slot: u64,
+        payload: bytes::Bytes,
+        quorum: usize,
+        min_round: u64,
+    ) -> PrepareAttempt {
+        use futures::stream::StreamExt;
         let mut max_round = min_round;
         if let Some(b) = replica.promised_at(slot).await {
             max_round = max_round.max(b.round);
@@ -1849,111 +1903,199 @@ impl PxGroup {
         entry.ballot = ballot;
         let term = entry.term;
 
-        let mut promised = 0usize;
-        let mut highest_rejected_round: Option<u64> = None;
-        let mut highest_seen_term: Option<u64> = None;
-        let mut epoch_mismatch: Option<u64> = None;
-        let mut adopted: Option<PxLogEntry> = None;
+        let mut fold = ReplyFold::new();
 
-        // R16a: Concurrent local + remote fan-out. Issue the local
-        // on_prepare and all remote prepare RPCs concurrently via
-        // tokio::join!, overlapping the local fsync with the network
-        // round-trip. The quorum check still counts the local reply.
-        let prepare_futs: Vec<_> = self
-            .remote_replicas
-            .iter()
-            .filter_map(|remote| {
-                if let RemoteReplicaKind::Real(remote) = remote {
-                    Some(remote.send_prepare(slot, ballot, term, group_id, self.membership_epoch()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let (local_result, prepare_results) = tokio::join!(
-            <PxLocalReplica as ReplicaHandler>::on_prepare(replica, slot, ballot, term, group_id),
-            join_all(prepare_futs),
-        );
-
-        match local_result {
-            Ok(PxPrepareReply::Promised { accepted, .. }) => {
-                if replica.voting() {
-                    promised += 1;
-                }
-                if let Some(prev) = accepted {
-                    Self::consider_accepted(&mut adopted, prev);
-                }
-            }
-            Ok(PxPrepareReply::Rejected { current_promised, .. }) => {
-                highest_rejected_round = Some(current_promised.round);
-            }
-            Ok(PxPrepareReply::TermStale { new_term, .. }) => {
-                highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
-            }
-            Ok(PxPrepareReply::EpochMismatch { .. }) => {
-                unreachable!("local on_prepare does not produce EpochMismatch")
-            }
-            Err(error) => {
-                error!(
-                    group_id,
-                    slot,
-                    replica_id = replica.id,
-                    error = %error,
-                    "local prepare handler failed"
-                );
-            }
-        }
-
-        for (remote, result) in self
-            .remote_replicas
-            .iter()
-            .filter(|r| matches!(r, RemoteReplicaKind::Real(_)))
-            .zip(prepare_results)
-        {
-            let RemoteReplicaKind::Real(remote) = remote else {
-                continue;
-            };
-            match result {
-                Ok(PxPrepareReply::Promised { accepted, .. }) => {
-                    if remote.voting {
-                        promised += 1;
-                    }
-                    if let Some(prev) = accepted {
-                        Self::consider_accepted(&mut adopted, prev);
-                    }
-                }
-                Ok(PxPrepareReply::Rejected { current_promised, .. }) => {
-                    let candidate = current_promised.round;
-                    highest_rejected_round =
-                        Some(highest_rejected_round.map_or(candidate, |r| r.max(candidate)));
-                }
-                Ok(PxPrepareReply::TermStale { new_term, .. }) => {
-                    highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
-                }
-                Ok(PxPrepareReply::EpochMismatch { responder_epoch }) => {
-                    warn!(
-                        group_id,
+        // E1: quorum short-circuit. When self_weak is set (all add_group
+        // groups), fan out via FuturesUnordered with 'static futures
+        // (capturing Arc<PxGroup>) so the proposer returns on quorum +
+        // local-folded and detaches the remaining replies for side effects
+        // (late TermStale → step down, late EpochMismatch → adopt epoch).
+        // Fallback to join_all for groups without self_weak (unit-test
+        // single-voter groups — no remotes, trivial).
+        if let Some(group) = self.self_weak.get().and_then(Weak::upgrade) {
+            let membership_epoch = self.membership_epoch();
+            let mut futs: FuturesUnordered<
+                Pin<Box<dyn Future<Output = TaggedPrepareReply> + Send + 'static>>,
+            > = FuturesUnordered::new();
+            // Local prepare (W6: counted before Proceed is returned).
+            {
+                let group = group.clone();
+                futs.push(Box::pin(async move {
+                    let r = <PxLocalReplica as ReplicaHandler>::on_prepare(
+                        &group.local_replica,
                         slot,
-                        remote_id = remote.node_id,
-                        proposer_epoch = self.membership_epoch(),
-                        responder_epoch,
-                        "prepare rejected by membership-epoch fence"
-                    );
-                    epoch_mismatch = Some(responder_epoch);
+                        ballot,
+                        term,
+                        group_id,
+                    )
+                    .await;
+                    TaggedPrepareReply::Local(r)
+                }));
+            }
+            // Remote prepares.
+            for (idx, remote) in group.remote_replicas.iter().enumerate() {
+                if let RemoteReplicaKind::Real(remote) = remote {
+                    let voting = remote.voting;
+                    let remote_id = remote.node_id;
+                    let endpoint = remote.endpoint.clone();
+                    let group = group.clone();
+                    futs.push(Box::pin(async move {
+                        let reply = match group.remote_replicas.get(idx) {
+                            Some(RemoteReplicaKind::Real(r)) => {
+                                r.send_prepare(slot, ballot, term, group_id, membership_epoch)
+                                    .await
+                            }
+                            _ => Err(PxReplicaError::Internal(
+                                "prepare: remote vanished mid-fanout".to_string(),
+                            )),
+                        };
+                        TaggedPrepareReply::Remote {
+                            voting,
+                            remote_id,
+                            endpoint,
+                            reply,
+                        }
+                    }));
                 }
+            }
+            while let Some(tagged) = futs.next().await {
+                match tagged {
+                    TaggedPrepareReply::Local(result) => match result {
+                        Ok(reply) => fold.fold_prepare_local(replica.voting(), reply),
+                        Err(error) => {
+                            error!(
+                                group_id,
+                                slot,
+                                replica_id = replica.id,
+                                error = %error,
+                                "local prepare handler failed"
+                            );
+                            fold.local_folded = true;
+                        }
+                    },
+                    TaggedPrepareReply::Remote {
+                        voting,
+                        remote_id,
+                        endpoint,
+                        reply,
+                        ..
+                    } => {
+                        let ctx = RemoteFoldCtx {
+                            group_id,
+                            slot,
+                            remote_id,
+                            proposer_epoch: membership_epoch,
+                            phase: "prepare",
+                        };
+                        match reply {
+                            Ok(reply) => fold.fold_prepare_remote(voting, &ctx, reply),
+                            Err(error) => {
+                                error!(
+                                    group_id,
+                                    slot,
+                                    remote_id,
+                                    endpoint = %endpoint,
+                                    error = %error,
+                                    "prepare rpc failed"
+                                );
+                            }
+                        }
+                    }
+                }
+                // E1 short-circuit: quorum + local folded + no disqualifying
+                // TermStale (prepare checks TermStale before quorum, matching
+                // the existing failure-decision order). Detach remaining
+                // replies for side effects, then break to the Proceed path.
+                if fold.accepted >= quorum && fold.local_folded && fold.highest_seen_term.is_none() {
+                    let cancel = group.tenure_cancel.clone();
+                    let group_drain = group.clone();
+                    tokio::spawn(async move {
+                        loop {
+                            tokio::select! {
+                                biased;
+                                () = cancel.cancelled() => return,
+                                Some(tagged) = futs.next() =>
+                                    prepare_drain_side_effect(&group_drain, slot, tagged),
+                                else => return,
+                            }
+                        }
+                    });
+                    break;
+                }
+            }
+        } else {
+            // Fallback: join_all (groups without self_weak — no remotes).
+            let prepare_futs: Vec<_> = self
+                .remote_replicas
+                .iter()
+                .filter_map(|remote| {
+                    if let RemoteReplicaKind::Real(remote) = remote {
+                        Some(remote.send_prepare(slot, ballot, term, group_id, self.membership_epoch()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            let (local_result, prepare_results) = tokio::join!(
+                <PxLocalReplica as ReplicaHandler>::on_prepare(replica, slot, ballot, term, group_id),
+                join_all(prepare_futs),
+            );
+
+            match local_result {
+                Ok(reply) => fold.fold_prepare_local(replica.voting(), reply),
                 Err(error) => {
                     error!(
                         group_id,
                         slot,
-                        remote_id = remote.node_id,
-                        endpoint = remote.endpoint,
+                        replica_id = replica.id,
                         error = %error,
-                        "prepare rpc failed"
+                        "local prepare handler failed"
                     );
+                    fold.local_folded = true;
+                }
+            }
+
+            for (remote, result) in self
+                .remote_replicas
+                .iter()
+                .filter(|r| matches!(r, RemoteReplicaKind::Real(_)))
+                .zip(prepare_results)
+            {
+                let RemoteReplicaKind::Real(remote) = remote else {
+                    continue;
+                };
+                let ctx = RemoteFoldCtx {
+                    group_id,
+                    slot,
+                    remote_id: remote.node_id,
+                    proposer_epoch: self.membership_epoch(),
+                    phase: "prepare",
+                };
+                match result {
+                    Ok(reply) => fold.fold_prepare_remote(remote.voting, &ctx, reply),
+                    Err(error) => {
+                        error!(
+                            group_id,
+                            slot,
+                            remote_id = remote.node_id,
+                            endpoint = remote.endpoint,
+                            error = %error,
+                            "prepare rpc failed"
+                        );
+                    }
                 }
             }
         }
+
+        let ReplyFold {
+            accepted: promised,
+            highest_rejected_round,
+            highest_seen_term,
+            epoch_mismatch,
+            adopted,
+            local_folded: _,
+        } = fold;
 
         if let Some(new_term) = highest_seen_term {
             // A peer's `current_term > term`. The proposer is a stale leader;
@@ -2018,10 +2160,27 @@ impl PxGroup {
         dedup_tags: &[DedupTag],
         quorum: usize,
     ) -> AcceptAttempt {
-        let mut accepted = 0usize;
-        let mut highest_rejected_round: Option<u64> = None;
-        let mut highest_seen_term: Option<u64> = None;
-        let mut epoch_mismatch: Option<u64> = None;
+        let phase_start = std::time::Instant::now();
+        let result = self
+            .run_accept_phase_impl(replica, entry, dedup_tags, quorum)
+            .await;
+        if let Some(h) = self.write_handles.get() {
+            h.accept_phase
+                .observe(phase_start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX));
+        }
+        result
+    }
+
+    async fn run_accept_phase_impl(
+        &self,
+        replica: &PxLocalReplica,
+        entry: &PxLogEntry,
+        dedup_tags: &[DedupTag],
+        quorum: usize,
+    ) -> AcceptAttempt {
+        use futures::stream::StreamExt;
+        let quorum_rpc_start = std::time::Instant::now();
+        let mut fold = ReplyFold::new();
         let group_id = self.group_id;
         trace!(
             group_id,
@@ -2032,188 +2191,291 @@ impl PxGroup {
             "run accept phase"
         );
 
-        // R16a/R16b: Concurrent local + remote fan-out. When wal_early_ack
-        // is disabled (default), the local on_accept (CAS + WAL persist)
-        // runs concurrently with remote RPCs via tokio::join!, and the
-        // quorum check waits for the local reply (R16a). When wal_early_ack
-        // is enabled, the local CAS runs concurrently with remote RPCs,
-        // and the WAL persist is tracked as a background task — the
-        // proposer declares Chosen as soon as remote quorum + local CAS
-        // succeed, without waiting for the local fsync (R16b).
-        let accept_futs: Vec<_> = self
-            .remote_replicas
-            .iter()
-            .filter_map(|remote| {
-                if let RemoteReplicaKind::Real(remote) = remote {
-                    Some(remote.send_accept(entry, dedup_tags, group_id, self.membership_epoch()))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        // E1: quorum short-circuit. When self_weak is set, fan out via
+        // FuturesUnordered with 'static futures (capturing Arc<PxGroup>) so
+        // the proposer returns on quorum + local-folded and detaches the
+        // remaining replies for side effects. Fallback to join_all for
+        // groups without self_weak (unit-test single-voter groups).
+        if let Some(group) = self.self_weak.get().and_then(Weak::upgrade) {
+            let membership_epoch = self.membership_epoch();
+            let entry_owned = entry.clone();
+            let dedup_tags_owned = dedup_tags.to_vec();
+            let slot = entry.slot;
 
-        if self.config.wal_early_ack && self.cached_quorum > 1 {
-            // R16b: split path — CAS only, persist deferred.
-            // Only safe with quorum > 1: a single-node group has no
-            // survivors to re-drive a chosen-but-not-durable slot
-            // after a crash, so the persist must be synchronous.
-            let (local_result, accept_results) =
-                tokio::join!(replica.on_accept_inner(entry), join_all(accept_futs),);
-
-            let local_accepted = matches!(local_result, PxAcceptReply::Accepted { .. });
-            match local_result {
-                PxAcceptReply::Accepted { .. } => {
-                    if replica.voting() {
-                        accepted += 1;
-                    }
+            if self.config.wal_early_ack && self.cached_quorum > 1 {
+                // R16b: split path — CAS only, persist deferred.
+                let mut futs = build_accept_remote_futs(
+                    &group,
+                    &entry_owned,
+                    &dedup_tags_owned,
+                    group_id,
+                    membership_epoch,
+                );
+                // Local CAS (infallible → wrapped in Ok to normalize).
+                {
+                    let group = group.clone();
+                    let entry = entry_owned.clone();
+                    futs.push(Box::pin(async move {
+                        let r = group.local_replica.on_accept_inner(&entry).await;
+                        TaggedAcceptReply::Local(Ok(r))
+                    }));
                 }
-                PxAcceptReply::Rejected { current_promised, .. } => {
-                    highest_rejected_round = Some(current_promised.round);
-                }
-                PxAcceptReply::TermStale { new_term, .. } => {
-                    highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
-                }
-                PxAcceptReply::EpochMismatch { .. } => {
-                    unreachable!("local on_accept does not produce EpochMismatch")
-                }
-            }
-
-            for (remote, result) in self
-                .remote_replicas
-                .iter()
-                .filter(|r| matches!(r, RemoteReplicaKind::Real(_)))
-                .zip(accept_results)
-            {
-                let RemoteReplicaKind::Real(remote) = remote else {
-                    continue;
-                };
-                match result {
-                    Ok(PxAcceptReply::Accepted { .. }) => {
-                        if remote.voting {
-                            accepted += 1;
+                let mut local_accepted = false;
+                while let Some(tagged) = futs.next().await {
+                    match tagged {
+                        TaggedAcceptReply::Local(Ok(reply)) => {
+                            local_accepted = matches!(reply, PxAcceptReply::Accepted { .. });
+                            fold.fold_accept_local(replica.voting(), &reply);
+                        }
+                        TaggedAcceptReply::Local(Err(_)) => {
+                            unreachable!("on_accept_inner is infallible")
+                        }
+                        TaggedAcceptReply::Remote {
+                            voting,
+                            remote_id,
+                            endpoint,
+                            reply,
+                            ..
+                        } => {
+                            let ctx = RemoteFoldCtx {
+                                group_id,
+                                slot,
+                                remote_id,
+                                proposer_epoch: membership_epoch,
+                                phase: "accept",
+                            };
+                            match reply {
+                                Ok(reply) => fold.fold_accept_remote(voting, &ctx, &reply),
+                                Err(error) => {
+                                    error!(
+                                        group_id, slot, remote_id, endpoint = %endpoint,
+                                        error = %error, "accept rpc failed"
+                                    );
+                                }
+                            }
                         }
                     }
-                    Ok(PxAcceptReply::Rejected { current_promised, .. }) => {
-                        let candidate = current_promised.round;
-                        highest_rejected_round =
-                            Some(highest_rejected_round.map_or(candidate, |r| r.max(candidate)));
-                    }
-                    Ok(PxAcceptReply::TermStale { new_term, .. }) => {
-                        highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
-                    }
-                    Ok(PxAcceptReply::EpochMismatch { responder_epoch }) => {
-                        warn!(
-                            group_id,
-                            slot = entry.slot,
-                            remote_id = remote.node_id,
-                            proposer_epoch = self.membership_epoch(),
-                            responder_epoch,
-                            "accept rejected by membership-epoch fence"
-                        );
-                        epoch_mismatch = Some(responder_epoch);
-                    }
-                    Err(error) => {
-                        error!(
-                            group_id,
-                            slot = entry.slot,
-                            remote_id = remote.node_id,
-                            endpoint = remote.endpoint,
-                            error = %error,
-                            "accept rpc failed"
-                        );
+                    // R16b short-circuit: local CAS + quorum.
+                    if local_accepted && fold.accepted >= quorum {
+                        let cancel = group.tenure_cancel.clone();
+                        let group_drain = group.clone();
+                        tokio::spawn(async move {
+                            loop {
+                                tokio::select! {
+                                    biased;
+                                    () = cancel.cancelled() => return,
+                                    Some(tagged) = futs.next() =>
+                                        accept_drain_side_effect(&group_drain, slot, tagged),
+                                    else => return,
+                                }
+                            }
+                        });
+                        if let Some(h) = self.write_handles.get() {
+                            h.accept_quorum_rpc.observe(
+                                quorum_rpc_start
+                                    .elapsed()
+                                    .as_nanos()
+                                    .try_into()
+                                    .unwrap_or(u64::MAX),
+                            );
+                        }
+                        replica.spawn_accept_persist(entry.clone());
+                        return AcceptAttempt::Chosen;
                     }
                 }
-            }
-
-            // R16b: if chosen, spawn the local WAL persist as a background
-            // task. The value is already Paxos-chosen; the persist is a
-            // durability best-effort that completes asynchronously. If it
-            // fails, the error is logged (the value is chosen regardless).
-            if local_accepted && accepted >= quorum {
-                replica.spawn_accept_persist(entry.clone());
-                return AcceptAttempt::Chosen;
+            } else {
+                // R16a: default path — local on_accept (CAS + WAL persist).
+                let mut futs = build_accept_remote_futs(
+                    &group,
+                    &entry_owned,
+                    &dedup_tags_owned,
+                    group_id,
+                    membership_epoch,
+                );
+                {
+                    let group = group.clone();
+                    let entry = entry_owned.clone();
+                    futs.push(Box::pin(async move {
+                        let r = <PxLocalReplica as ReplicaHandler>::on_accept(
+                            &group.local_replica,
+                            &entry,
+                            group_id,
+                        )
+                        .await;
+                        TaggedAcceptReply::Local(r)
+                    }));
+                }
+                while let Some(tagged) = futs.next().await {
+                    match tagged {
+                        TaggedAcceptReply::Local(result) => match result {
+                            Ok(reply) => fold.fold_accept_local(replica.voting(), &reply),
+                            Err(error) => {
+                                error!(
+                                    group_id, slot, replica_id = replica.id,
+                                    error = %error, "local accept handler failed"
+                                );
+                                fold.local_folded = true;
+                            }
+                        },
+                        TaggedAcceptReply::Remote {
+                            voting,
+                            remote_id,
+                            endpoint,
+                            reply,
+                            ..
+                        } => {
+                            let ctx = RemoteFoldCtx {
+                                group_id,
+                                slot,
+                                remote_id,
+                                proposer_epoch: membership_epoch,
+                                phase: "accept",
+                            };
+                            match reply {
+                                Ok(reply) => fold.fold_accept_remote(voting, &ctx, &reply),
+                                Err(error) => {
+                                    error!(
+                                        group_id, slot, remote_id, endpoint = %endpoint,
+                                        error = %error, "accept rpc failed"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    // R16a short-circuit: quorum + local folded (W6).
+                    if fold.accepted >= quorum && fold.local_folded {
+                        let cancel = group.tenure_cancel.clone();
+                        let group_drain = group.clone();
+                        tokio::spawn(async move {
+                            loop {
+                                tokio::select! {
+                                    biased;
+                                    () = cancel.cancelled() => return,
+                                    Some(tagged) = futs.next() =>
+                                        accept_drain_side_effect(&group_drain, slot, tagged),
+                                    else => return,
+                                }
+                            }
+                        });
+                        if let Some(h) = self.write_handles.get() {
+                            h.accept_quorum_rpc.observe(
+                                quorum_rpc_start
+                                    .elapsed()
+                                    .as_nanos()
+                                    .try_into()
+                                    .unwrap_or(u64::MAX),
+                            );
+                        }
+                        break;
+                    }
+                }
             }
         } else {
-            // R16a: default path — local on_accept (CAS + WAL persist)
-            // concurrent with remote RPCs.
-            let (local_result, accept_results) = tokio::join!(
-                <PxLocalReplica as ReplicaHandler>::on_accept(replica, entry, group_id),
-                join_all(accept_futs),
-            );
-
-            match local_result {
-                Ok(PxAcceptReply::Accepted { .. }) => {
-                    if replica.voting() {
-                        accepted += 1;
-                    }
-                }
-                Ok(PxAcceptReply::Rejected { current_promised, .. }) => {
-                    highest_rejected_round = Some(current_promised.round);
-                }
-                Ok(PxAcceptReply::TermStale { new_term, .. }) => {
-                    highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
-                }
-                Ok(PxAcceptReply::EpochMismatch { .. }) => {
-                    unreachable!("local on_accept does not produce EpochMismatch")
-                }
-                Err(error) => {
-                    error!(
-                        group_id,
-                        slot = entry.slot,
-                        replica_id = replica.id,
-                        error = %error,
-                        "local accept handler failed"
-                    );
-                }
-            }
-
-            for (remote, result) in self
+            // Fallback: join_all (groups without self_weak — no remotes).
+            let accept_futs: Vec<_> = self
                 .remote_replicas
                 .iter()
-                .filter(|r| matches!(r, RemoteReplicaKind::Real(_)))
-                .zip(accept_results)
-            {
-                let RemoteReplicaKind::Real(remote) = remote else {
-                    continue;
-                };
-                match result {
-                    Ok(PxAcceptReply::Accepted { .. }) => {
-                        if remote.voting {
-                            accepted += 1;
+                .filter_map(|remote| {
+                    if let RemoteReplicaKind::Real(remote) = remote {
+                        Some(remote.send_accept(entry, dedup_tags, group_id, self.membership_epoch()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if self.config.wal_early_ack && self.cached_quorum > 1 {
+                let (local_result, accept_results) =
+                    tokio::join!(replica.on_accept_inner(entry), join_all(accept_futs),);
+
+                let local_accepted = matches!(&local_result, PxAcceptReply::Accepted { .. });
+                fold.fold_accept_local(replica.voting(), &local_result);
+
+                for (remote, result) in self
+                    .remote_replicas
+                    .iter()
+                    .filter(|r| matches!(r, RemoteReplicaKind::Real(_)))
+                    .zip(accept_results)
+                {
+                    let RemoteReplicaKind::Real(remote) = remote else {
+                        continue;
+                    };
+                    let ctx = RemoteFoldCtx {
+                        group_id,
+                        slot: entry.slot,
+                        remote_id: remote.node_id,
+                        proposer_epoch: self.membership_epoch(),
+                        phase: "accept",
+                    };
+                    match result {
+                        Ok(reply) => fold.fold_accept_remote(remote.voting, &ctx, &reply),
+                        Err(error) => {
+                            error!(
+                                group_id, slot = entry.slot, remote_id = remote.node_id,
+                                endpoint = remote.endpoint, error = %error, "accept rpc failed"
+                            );
                         }
                     }
-                    Ok(PxAcceptReply::Rejected { current_promised, .. }) => {
-                        let candidate = current_promised.round;
-                        highest_rejected_round =
-                            Some(highest_rejected_round.map_or(candidate, |r| r.max(candidate)));
-                    }
-                    Ok(PxAcceptReply::TermStale { new_term, .. }) => {
-                        highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
-                    }
-                    Ok(PxAcceptReply::EpochMismatch { responder_epoch }) => {
-                        warn!(
-                            group_id,
-                            slot = entry.slot,
-                            remote_id = remote.node_id,
-                            proposer_epoch = self.membership_epoch(),
-                            responder_epoch,
-                            "accept rejected by membership-epoch fence"
-                        );
-                        epoch_mismatch = Some(responder_epoch);
-                    }
+                }
+
+                if local_accepted && fold.accepted >= quorum {
+                    replica.spawn_accept_persist(entry.clone());
+                    return AcceptAttempt::Chosen;
+                }
+            } else {
+                let (local_result, accept_results) = tokio::join!(
+                    <PxLocalReplica as ReplicaHandler>::on_accept(replica, entry, group_id),
+                    join_all(accept_futs),
+                );
+
+                match local_result {
+                    Ok(reply) => fold.fold_accept_local(replica.voting(), &reply),
                     Err(error) => {
                         error!(
-                            group_id,
-                            slot = entry.slot,
-                            remote_id = remote.node_id,
-                            endpoint = remote.endpoint,
-                            error = %error,
-                            "accept rpc failed"
+                            group_id, slot = entry.slot, replica_id = replica.id,
+                            error = %error, "local accept handler failed"
                         );
+                        fold.local_folded = true;
+                    }
+                }
+
+                for (remote, result) in self
+                    .remote_replicas
+                    .iter()
+                    .filter(|r| matches!(r, RemoteReplicaKind::Real(_)))
+                    .zip(accept_results)
+                {
+                    let RemoteReplicaKind::Real(remote) = remote else {
+                        continue;
+                    };
+                    let ctx = RemoteFoldCtx {
+                        group_id,
+                        slot: entry.slot,
+                        remote_id: remote.node_id,
+                        proposer_epoch: self.membership_epoch(),
+                        phase: "accept",
+                    };
+                    match result {
+                        Ok(reply) => fold.fold_accept_remote(remote.voting, &ctx, &reply),
+                        Err(error) => {
+                            error!(
+                                group_id, slot = entry.slot, remote_id = remote.node_id,
+                                endpoint = remote.endpoint, error = %error, "accept rpc failed"
+                            );
+                        }
                     }
                 }
             }
         }
+
+        let ReplyFold {
+            accepted,
+            highest_rejected_round,
+            highest_seen_term,
+            epoch_mismatch,
+            adopted: _,
+            local_folded: _,
+        } = fold;
 
         if accepted >= quorum {
             return AcceptAttempt::Chosen;
@@ -2292,8 +2554,34 @@ impl PxGroup {
 
     fn retry_backoff(attempt: usize) -> Duration {
         let factor = 1u64 << attempt.min(6);
-        Duration::from_millis(PaxosConfig::DEFAULT.retry_base_backoff_ms.saturating_mul(factor))
+        let base = PaxosConfig::DEFAULT.retry_base_backoff_ms.saturating_mul(factor);
+        // E4: ±50% jitter to decorrelate retry storms across replicas.
+        // `jitter_mult` is in `[500, 1500]` (milli-units), so
+        // `base * jitter_mult / 1000` gives `[base/2, base*3/2]`.
+        let jitter_mult = retry_jitter_multiplier();
+        Duration::from_millis(base.saturating_mul(jitter_mult) / 1000)
     }
+}
+
+thread_local! {
+    static RETRY_JITTER_RNG: std::cell::RefCell<XorShift64> =
+        std::cell::RefCell::new(XorShift64::new(seed_retry_jitter()));
+}
+
+fn seed_retry_jitter() -> u64 {
+    // Seed from node id + monotonic nanos so two replicas starting
+    // simultaneously get different sequences.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    nanos.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+}
+
+fn retry_jitter_multiplier() -> u64 {
+    RETRY_JITTER_RNG.with(|rng| {
+        let r = rng.borrow_mut().next_u64() % 1001;
+        500 + r
+    })
 }
 
 /// Remote replica kind - either a real remote replica or a placeholder.
@@ -2618,4 +2906,305 @@ pub(crate) enum AcceptAttempt {
     Fail {
         error: PxPaxosError,
     },
+}
+
+/// Logging context for a remote reply fold. The per-remote `EpochMismatch`
+/// arm emits a `warn!` with peer attribution, so the fold method needs the
+/// fields that vary per remote.
+struct RemoteFoldCtx {
+    group_id: u64,
+    slot: u64,
+    remote_id: PxNodeId,
+    proposer_epoch: u64,
+    /// "prepare" or "accept" — selects the warn message text.
+    phase: &'static str,
+}
+
+/// Accumulator for the prepare/accept reply fold. Replaces the triplicated
+/// inline `match` over `PxPrepareReply` / `PxAcceptReply` in
+/// `run_prepare_phase` and `run_accept_phase` (both R16a and R16b paths).
+///
+/// `accepted` counts promises (prepare) or accepts (accept) from voting
+/// replicas only. `local_folded` is set once the local reply has been
+/// observed (Ok or Err) so the E1 quorum short-circuit can gate
+/// `Chosen`/`Proceed` on the local reply being counted first (W6).
+struct ReplyFold {
+    accepted: usize,
+    highest_rejected_round: Option<u64>,
+    highest_seen_term: Option<u64>,
+    epoch_mismatch: Option<u64>,
+    adopted: Option<PxLogEntry>,
+    local_folded: bool,
+}
+
+impl ReplyFold {
+    fn new() -> Self {
+        Self {
+            accepted: 0,
+            highest_rejected_round: None,
+            highest_seen_term: None,
+            epoch_mismatch: None,
+            adopted: None,
+            local_folded: false,
+        }
+    }
+
+    fn note_rejected(&mut self, current_promised: PxBallot) {
+        let candidate = current_promised.round;
+        self.highest_rejected_round = Some(
+            self.highest_rejected_round
+                .map_or(candidate, |r| r.max(candidate)),
+        );
+    }
+
+    fn note_term_stale(&mut self, new_term: u64) {
+        self.highest_seen_term = Some(self.highest_seen_term.map_or(new_term, |t| t.max(new_term)));
+    }
+
+    /// Fold the local prepare reply. `EpochMismatch` is unreachable on the
+    /// local acceptor.
+    fn fold_prepare_local(&mut self, voting: bool, reply: PxPrepareReply) {
+        match reply {
+            PxPrepareReply::Promised { accepted, .. } => {
+                if voting {
+                    self.accepted += 1;
+                }
+                if let Some(prev) = accepted {
+                    PxGroup::consider_accepted(&mut self.adopted, prev);
+                }
+            }
+            PxPrepareReply::Rejected { current_promised, .. } => {
+                self.note_rejected(current_promised);
+            }
+            PxPrepareReply::TermStale { new_term, .. } => {
+                self.note_term_stale(new_term);
+            }
+            PxPrepareReply::EpochMismatch { .. } => {
+                unreachable!("local on_prepare does not produce EpochMismatch")
+            }
+        }
+        self.local_folded = true;
+    }
+
+    /// Fold a remote prepare reply. `EpochMismatch` is real and logged with
+    /// peer attribution.
+    fn fold_prepare_remote(&mut self, voting: bool, ctx: &RemoteFoldCtx, reply: PxPrepareReply) {
+        match reply {
+            PxPrepareReply::Promised { accepted, .. } => {
+                if voting {
+                    self.accepted += 1;
+                }
+                if let Some(prev) = accepted {
+                    PxGroup::consider_accepted(&mut self.adopted, prev);
+                }
+            }
+            PxPrepareReply::Rejected { current_promised, .. } => {
+                self.note_rejected(current_promised);
+            }
+            PxPrepareReply::TermStale { new_term, .. } => {
+                self.note_term_stale(new_term);
+            }
+            PxPrepareReply::EpochMismatch { responder_epoch } => {
+                warn!(
+                    group_id = ctx.group_id,
+                    slot = ctx.slot,
+                    remote_id = ctx.remote_id,
+                    proposer_epoch = ctx.proposer_epoch,
+                    responder_epoch,
+                    "{} rejected by membership-epoch fence",
+                    ctx.phase
+                );
+                self.epoch_mismatch = Some(responder_epoch);
+            }
+        }
+    }
+
+    /// Fold the local accept reply (R16a `Ok` arm and R16b infallible path
+    /// share this — the reply-arm logic is identical). `EpochMismatch` is
+    /// unreachable on the local acceptor.
+    fn fold_accept_local(&mut self, voting: bool, reply: &PxAcceptReply) {
+        match reply {
+            PxAcceptReply::Accepted { .. } => {
+                if voting {
+                    self.accepted += 1;
+                }
+            }
+            PxAcceptReply::Rejected { current_promised, .. } => {
+                self.note_rejected(*current_promised);
+            }
+            PxAcceptReply::TermStale { new_term, .. } => {
+                self.note_term_stale(*new_term);
+            }
+            PxAcceptReply::EpochMismatch { .. } => {
+                unreachable!("local on_accept does not produce EpochMismatch")
+            }
+        }
+        self.local_folded = true;
+    }
+
+    /// Fold a remote accept reply. `EpochMismatch` is real and logged with
+    /// peer attribution.
+    fn fold_accept_remote(&mut self, voting: bool, ctx: &RemoteFoldCtx, reply: &PxAcceptReply) {
+        match reply {
+            PxAcceptReply::Accepted { .. } => {
+                if voting {
+                    self.accepted += 1;
+                }
+            }
+            PxAcceptReply::Rejected { current_promised, .. } => {
+                self.note_rejected(*current_promised);
+            }
+            PxAcceptReply::TermStale { new_term, .. } => {
+                self.note_term_stale(*new_term);
+            }
+            PxAcceptReply::EpochMismatch { responder_epoch } => {
+                warn!(
+                    group_id = ctx.group_id,
+                    slot = ctx.slot,
+                    remote_id = ctx.remote_id,
+                    proposer_epoch = ctx.proposer_epoch,
+                    responder_epoch,
+                    "{} rejected by membership-epoch fence",
+                    ctx.phase
+                );
+                self.epoch_mismatch = Some(*responder_epoch);
+            }
+        }
+    }
+}
+
+/// Tagged reply from the prepare-phase fan-out. The local future and each
+/// remote future produce one of these so a single `FuturesUnordered` can
+/// fold them in arrival order (E1 quorum short-circuit). `remote_id` /
+/// `endpoint` are captured at future-build time so the fold loop and the
+/// detached drain do not need to re-look-up the remote (which may vanish
+/// if the group is reconfigured mid-proposal).
+enum TaggedPrepareReply {
+    Local(Result<PxPrepareReply, PxReplicaError>),
+    Remote {
+        voting: bool,
+        remote_id: PxNodeId,
+        endpoint: String,
+        reply: Result<PxPrepareReply, PxReplicaError>,
+    },
+}
+
+/// Tagged reply from the accept-phase fan-out. The R16b local path produces
+/// an infallible `PxAcceptReply` (wrapped in `Ok` to normalize); R16a local
+/// and all remotes produce `Result<PxAcceptReply, PxReplicaError>`.
+enum TaggedAcceptReply {
+    Local(Result<PxAcceptReply, PxReplicaError>),
+    Remote {
+        voting: bool,
+        remote_id: PxNodeId,
+        endpoint: String,
+        reply: Result<PxAcceptReply, PxReplicaError>,
+    },
+}
+
+/// Apply a late prepare reply observed by the detached drain task (after the
+/// proposer already short-circuited on quorum). Only `TermStale` and
+/// `EpochMismatch` carry side effects the proposer must not lose; accepted /
+/// rejected / error replies are no-ops here (the slot is already proceeding).
+fn prepare_drain_side_effect(group: &Arc<PxGroup>, slot: u64, tagged: TaggedPrepareReply) {
+    let group_id = group.group_id;
+    let (remote_id, reply) = match tagged {
+        TaggedPrepareReply::Local(_) => return,
+        TaggedPrepareReply::Remote { remote_id, reply, .. } => (remote_id, reply),
+    };
+    match reply {
+        Ok(PxPrepareReply::TermStale { new_term, .. }) => {
+            warn!(
+                group_id,
+                slot, remote_id, new_term, "late prepare TermStale in drain; stepping down"
+            );
+            group.local_replica.become_follower(new_term);
+        }
+        Ok(PxPrepareReply::EpochMismatch { responder_epoch }) => {
+            let adopted = group.adopt_membership_epoch(responder_epoch);
+            warn!(
+                group_id,
+                slot,
+                remote_id,
+                responder_epoch,
+                adopted_epoch = adopted,
+                "late prepare EpochMismatch in drain; adopted responder epoch"
+            );
+        }
+        _ => {}
+    }
+}
+
+/// Apply a late accept reply observed by the detached drain task. Mirrors
+/// [`prepare_drain_side_effect`] for the accept reply type.
+fn accept_drain_side_effect(group: &Arc<PxGroup>, slot: u64, tagged: TaggedAcceptReply) {
+    let group_id = group.group_id;
+    let (remote_id, reply) = match tagged {
+        TaggedAcceptReply::Local(_) => return,
+        TaggedAcceptReply::Remote { remote_id, reply, .. } => (remote_id, reply),
+    };
+    match reply {
+        Ok(PxAcceptReply::TermStale { new_term, .. }) => {
+            warn!(
+                group_id,
+                slot, remote_id, new_term, "late accept TermStale in drain; stepping down"
+            );
+            group.local_replica.become_follower(new_term);
+        }
+        Ok(PxAcceptReply::EpochMismatch { responder_epoch }) => {
+            let adopted = group.adopt_membership_epoch(responder_epoch);
+            warn!(
+                group_id,
+                slot,
+                remote_id,
+                responder_epoch,
+                adopted_epoch = adopted,
+                "late accept EpochMismatch in drain; adopted responder epoch"
+            );
+        }
+        _ => {}
+    }
+}
+
+/// Build the `FuturesUnordered` of remote accept RPC futures for the E1
+/// short-circuit path. Each future captures `Arc<PxGroup>` (so it is
+/// `'static`) and resolves to a `TaggedAcceptReply::Remote`. Shared by the
+/// R16b and R16a accept paths (only the local future differs).
+fn build_accept_remote_futs(
+    group: &Arc<PxGroup>,
+    entry: &PxLogEntry,
+    dedup_tags: &[DedupTag],
+    group_id: u64,
+    membership_epoch: u64,
+) -> FuturesUnordered<Pin<Box<dyn Future<Output = TaggedAcceptReply> + Send + 'static>>> {
+    let futs: FuturesUnordered<Pin<Box<dyn Future<Output = TaggedAcceptReply> + Send + 'static>>> =
+        FuturesUnordered::new();
+    for (idx, remote) in group.remote_replicas.iter().enumerate() {
+        if let RemoteReplicaKind::Real(remote) = remote {
+            let voting = remote.voting;
+            let remote_id = remote.node_id;
+            let endpoint = remote.endpoint.clone();
+            let group = group.clone();
+            let entry = entry.clone();
+            let dedup_tags = dedup_tags.to_owned();
+            futs.push(Box::pin(async move {
+                let reply = match group.remote_replicas.get(idx) {
+                    Some(RemoteReplicaKind::Real(r)) => {
+                        r.send_accept(&entry, &dedup_tags, group_id, membership_epoch)
+                            .await
+                    }
+                    _ => Err(PxReplicaError::Internal(
+                        "accept: remote vanished mid-fanout".to_string(),
+                    )),
+                };
+                TaggedAcceptReply::Remote {
+                    voting,
+                    remote_id,
+                    endpoint,
+                    reply,
+                }
+            }));
+        }
+    }
+    futs
 }
