@@ -874,6 +874,8 @@ impl PxLocalReplica {
             inflight_slots: r.register_gauge(format!("{prefix}.paxos.inflight_slots.g")),
         };
         let _ = self.election_handles.set(handles);
+        let engine_apply = r.register_summary(format!("{prefix}.write.engine_apply.l"));
+        self.learner.set_engine_apply_summary(engine_apply);
         if let Some(ref wal) = self.wal {
             let bl = wal.backend_label();
             let append_summary = r.register_summary(format!("{prefix}.wal.{bl}.append.l"));

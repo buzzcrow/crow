@@ -3,8 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-#[cfg(feature = "test-util")]
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -118,6 +117,9 @@ pub struct PxLearner {
     /// `test-util` feature.
     #[cfg(feature = "test-util")]
     apply_gate: Mutex<Option<Arc<Notify>>>,
+    /// Optional registry handle for engine-apply latency. Set via
+    /// [`Self::set_engine_apply_summary`] when a registry is wired.
+    engine_apply: OnceLock<Arc<crate::metrics::LatencySummary>>,
 }
 
 impl Default for PxLearner {
@@ -139,6 +141,7 @@ impl Default for PxLearner {
             apply_notify: Notify::new(),
             #[cfg(feature = "test-util")]
             apply_gate: Mutex::new(None),
+            engine_apply: OnceLock::new(),
         }
     }
 }
@@ -165,6 +168,7 @@ impl PxLearner {
             apply_notify: Notify::new(),
             #[cfg(feature = "test-util")]
             apply_gate: Mutex::new(None),
+            engine_apply: OnceLock::new(),
         }
     }
 
@@ -172,6 +176,12 @@ impl PxLearner {
     #[must_use]
     pub fn engine(&self) -> &dyn KVEngine {
         self.engine.as_ref()
+    }
+
+    /// Wire the engine-apply latency summary. Called once during group
+    /// creation when a metrics registry is available.
+    pub fn set_engine_apply_summary(&self, summary: Arc<crate::metrics::LatencySummary>) {
+        let _ = self.engine_apply.set(summary);
     }
 
     /// Live value and its resolved slot for `key`, or `None` if unset or
@@ -484,6 +494,7 @@ impl PxLearner {
         if batch.ops.is_empty() {
             return;
         }
+        let apply_start = std::time::Instant::now();
         if let Err(error) = self.engine.apply(slot, &batch).await {
             tracing::error!(
                 slot,
@@ -492,6 +503,9 @@ impl PxLearner {
                  durably reflected in the local engine; next step: check engine health and \
                  consider failing this node out of the group"
             );
+        }
+        if let Some(h) = self.engine_apply.get() {
+            h.observe(apply_start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX));
         }
     }
 }
