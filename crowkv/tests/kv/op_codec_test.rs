@@ -146,7 +146,7 @@ fn decode_max_op_count_u16() {
     for i in 0..300u16 {
         buf.push(0u8); // Put
         buf.extend_from_slice(&1u32.to_le_bytes());
-        buf.push(u8::try_from(i).unwrap());
+        buf.push(u8::try_from(i % 256).expect("i % 256 fits in u8"));
         buf.extend_from_slice(&0u32.to_le_bytes());
     }
     let batch = Batch::decode(&Bytes::from(buf));
