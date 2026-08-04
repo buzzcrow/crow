@@ -24,7 +24,7 @@ Run `pixi run clean` before measuring for reproducible results.
 | `test-kv-core` | 508 | 43.5 s | — |
 | `test-kv-server` | 55 | 37.0 s | — |
 | `test-console-cli` | 13 | 35.1 s | — |
-| `test-console-web` | 49 | 39.1 s | — |
+| `test-console-server` | 49 | 39.1 s | — |
 | `test-console-ui` | 51 | 81.4 s | — |
 
 ---

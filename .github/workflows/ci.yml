@@ -49,7 +49,7 @@ jobs:
     - name: Clean env
       run: pixi run clean-env
     - name: Run mgmt-api tests
-      run: pixi run test-console-web
+      run: pixi run test-console-server
 
   ServerTests:
     runs-on: ubuntu-latest
