@@ -201,10 +201,9 @@ The flush worker flushes when any of:
 
 - It is woken by a transition from empty queue to non-empty queue (`rx.recv().await`).
 - Pending bytes ≥ `wal_flush_batch_bytes` (default 64 KiB) — breaks the drain loop early.
-- Optional coalescing budget (`wal_flush_coalesce_us`, default 0 µs). When non-zero, the writer waits up to `min(coalesce, watchdog)` for more records before flushing.
-- The watchdog (`wal_flush_watchdog_ms`, default 100 ms) caps the coalescing window so the writer never waits longer than that for more records. When coalescing is 0 (default), the watchdog is not used — the writer drains and flushes immediately.
+- The watchdog (`wal_flush_watchdog_ms`, default 100 ms) is a safety-net timer that wakes the idle writer every `watchdog` ms to drain any queued records in case of a missed wake (a defensive measure "just in case for bugs"). The idle wakeup does a `try_recv` drain and re-parks if nothing is queued — no I/O, no allocation, ~10 wakeups/s at the default 100 ms.
 
-Default behavior is therefore **wake-drain-flush**: a lone record does not wait for 1 ms, while a concurrent burst gets batched because the worker drains all immediately-ready records before issuing I/O. Higher `wal_flush_coalesce_us` values may be enabled for throughput benchmarks, but they are not required for correctness.
+Default behavior is **wake-drain-flush**: a lone record flushes immediately, while a concurrent burst gets batched because the worker drains all immediately-ready records before issuing I/O. A coalescing budget (`wal_flush_coalesce_us`) was previously available but was removed after T3 benchmarking showed no gain over the wake-drain-flush baseline.
 
 ### 4.4 Async write completion
 
@@ -282,11 +281,11 @@ crowtree side for this refactor.
 > An `Accepted` response is sent to the leader only after the corresponding WAL record's backend durable flush has completed.
 > A client write is acked only after a quorum of acceptors have sent `Accepted`.
 
-This is repeated from design.md §8.1](design.md) because everything else in this section is a consequence of it.
+This is repeated from design.md §8.1](design.md) because everything else in this section is a consequence of it. This is the **strict** mode. The **early-ack** mode (§5.4) relaxes the leader's own durability ordering but keeps the quorum-durability requirement; both modes are described in §5.4.
 
 ### 5.2 Failure cases
 
-- **Crash before durable flush.** The record may or may not be on disk. Replay reads what is on disk; the slot may end up with no record on this acceptor. That is fine — the leader either had a quorum from other acceptors (slot is chosen) or not (slot will be repaired). No client was acked, so no expectation is violated.
+- **Crash before durable flush.** The record may or may not be on disk. Replay reads what is on disk; the slot may end up with no record on this acceptor. That is fine — the leader either had a quorum from other acceptors (slot is chosen) or not (slot will be repaired). In strict mode no client was acked for this acceptor's slot, so no expectation is violated; in early-ack mode (§5.4) the leader may have acked the client on the remote quorum alone, and the chosen-but-not-locally-durable slot is re-adopted by `repair_once` from the followers on restart.
 
   On restart, the new leader computes its recovery ceiling from durable state, not from an assumed contiguous log tail: `ceiling = max(local highest_seen_slot, peers' highest_seen_slot, persisted next_slot - 1 if present)`. Because parallel writes may leave holes inside `[floor+1, ceiling]`, the leader must run bulk Phase 1 over the whole open interval and fill empty slots with `NoOp`. It does **not** rely on `latest_slot + window_size` to discover hidden data; any value absent from every acceptor's durable state could not have formed a durable quorum and therefore could not have been acknowledged.
 
@@ -296,9 +295,22 @@ This is repeated from design.md §8.1](design.md) because everything else in thi
 
 ### 5.3 What we never do
 
-- Ack a client write before the leader's own durable flush.
-- Ack a client write before quorum durable flush.
-- Send `Accepted` based only on the in-memory state, expecting durable flush to succeed later. (Some systems do this for low latency at the cost of correctness under crash; CrowKV does not.)
+- Ack a client write before a quorum of acceptors have durably flushed. This holds in both ack modes (§5.4): the early-ack mode defers only the *leader's own* durable flush, never the remote quorum's.
+- Declare a slot `Chosen` without a quorum of `Accepted` responses (remote durable + leader CAS in early-ack mode; remote durable + leader durable in strict mode).
+
+### 5.4 Ack modes (`wal_early_ack`)
+
+The ack contract in §5.1 is the **strict** mode: every acceptor — including the leader — completes its WAL durable flush before its `Accepted` counts toward `Chosen`, and the client is acked only after the leader's own flush joins the quorum. `wal_early_ack` (default `true`, gated on `quorum > 1`) is a **relaxed** mode that drops the leader's local fsync off the write critical path:
+
+- The leader runs `on_accept_inner` (the term-fence CAS + in-memory `acceptor.accept`) concurrently with the remote `send_accept` fan-out via `tokio::join!`.
+- `Chosen` is declared as soon as the **remote quorum** has durably flushed *and* the leader's local CAS has landed. The leader's own WAL `Accepted` record is appended by a fire-and-forget `tokio::spawn` (`spawn_accept_persist`) that runs off the critical path; its failure is logged and does not retract `Chosen`.
+- The client is acked at that point. The per-proposal critical path becomes the quorum RPC round-trip only (the local fsync, ~10–100 µs on NVMe, runs concurrently and is no longer on the path).
+
+**Crash-recovery guarantee.** A crash in the window between the leader's CAS landing and the deferred local persist is Paxos-safe: the value is chosen (remote quorum accepted durably), so the client's observed `Chosen` is not violated. The leader's acceptor state for that slot is lost on crash (the CAS was in memory, the WAL record never landed), but on restart `replay_group` rebuilds from durable state only and `repair_once` re-adopts the chosen value for the gap slot from the followers (classic prepare + accept re-runs and re-chooses the highest-ballot accepted value). A value the client observed as `Chosen` therefore remains readable after crash + restart — either the local WAL raced the kill and has it, or repair re-adopts it from the quorum.
+
+**Single-node gate.** `wal_early_ack` defaults to `true` only when `quorum > 1`. A single-node group (quorum = 1) has no survivors to re-drive a chosen-but-not-locally-durable slot after a crash, so the leader's local fsync must stay on the critical path and the strict contract (§5.1) applies.
+
+**What is not relaxed.** The remote quorum's durable flush is still on the critical path in both modes — `Chosen` is never declared on in-memory-only remote accepts. The relaxation is strictly the leader's *own* durability ordering, recovered by `repair_once` rather than awaited inline.
 
 ---
 
@@ -512,20 +524,20 @@ The WAL is per-node. Inter-node consistency is the consensus layer's job. If a n
 | `wal_disks` | `wal_disks` | required | ≥ 1; more → higher throughput |
 | `wal_segment_size` | `wal_segment_size` | 64 MiB | Trade GC granularity vs file count |
 | `wal_flush_batch_bytes` | `wal_flush_batch_bytes` | 64 KiB | Batch cap per durable flush |
-| `wal_flush_coalesce_us` | `wal_flush_coalesce_us` | 0 µs | Optional micro coalescing; default wake-drain-flush |
-| `wal_flush_watchdog_ms` | `wal_flush_watchdog_ms` | 100 ms | Caps coalescing window |
+| `wal_flush_watchdog_ms` | `wal_flush_watchdog_ms` | 100 ms | Safety-net timer: wakes idle writer to drain missed wakes |
 | `wal_disk_high_watermark_pct` | `wal_disk_high_watermark_pct` | 80% | Triggers eager GC (not yet implemented) |
 | `wal_min_retention_secs` | `wal_min_retention_secs` | 3600 (1 h) | Forensics retention (not yet implemented) |
 | `gc_tick_secs` | `gc_tick_secs` | 30 s | GC scan cadence |
 | `wal_aligned` | `wal_aligned` | false | Selects block-aligned I/O backend |
 | `wal_io_unit_bytes` | `wal_io_unit_bytes` | 4096 | IU size when `wal_aligned` is true |
 | `wal_record_format` | `wal_record_format` | Auto | Binary (zero-copy) or text-line |
+| `wal_early_ack` | `CrowKVConfig.wal_early_ack` | `true` (gated on `quorum > 1`) | Early-ack mode (§5.4): declare `Chosen` on remote quorum durable flush + leader CAS, deferring the leader's local WAL persist to a background spawn. Default `false` for single-node groups (quorum = 1) — no survivors to re-drive a chosen-but-not-locally-durable slot. |
 
 **Choosing durable-flush batching:**
 
-- Latency-critical, low write rate → `wal_flush_coalesce_us = 0` (wake-drain-flush; no fixed delay).
-- Throughput-oriented → `wal_flush_batch_bytes = 64–512 KiB`, optionally `wal_flush_coalesce_us = 50–250`.
-- WAN replication piggybacking → tune coalescing only after measuring end-to-end RTT and tail latency.
+- Latency-critical, low write rate → defaults (wake-drain-flush; no fixed delay).
+- Throughput-oriented → `wal_flush_batch_bytes = 64–512 KiB`.
+- WAN replication piggybacking → tune batching only after measuring end-to-end RTT and tail latency.
 
 **Choosing segment size:**
 

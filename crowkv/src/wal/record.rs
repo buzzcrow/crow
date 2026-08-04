@@ -45,7 +45,7 @@ pub const HEADER_BODY_LEN: usize = 4 + 2 + 1 + 8 + 8 + 8 + 8 + 8 + 4; // 51
 pub const MIN_RECORD_SIZE: usize = 4 + HEADER_BODY_LEN + 4;
 
 /// Encoding format used for WAL records inside a segment.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum WalRecordFormat {
     Auto,
     Binary,
@@ -209,7 +209,7 @@ impl WALRecord {
         let mut header = [0u8; HEADER_BODY_LEN];
         write_header_body(&mut header, self, payload_len);
 
-        let crc = crc32c::crc32c_append(crc32c::crc32c(&header), &self.payload);
+        let crc = crowtree_ffi::crc32c_update(crowtree_ffi::crc32c(&header), &self.payload);
         let mut crc_bytes = [0u8; 4];
         crc_bytes.copy_from_slice(&crc.to_le_bytes());
 
@@ -265,7 +265,7 @@ impl WALRecord {
             body[frame_len - 2],
             body[frame_len - 1],
         ]);
-        let crc_computed = crc32c::crc32c(&body[..frame_len - 4]);
+        let crc_computed = crowtree_ffi::crc32c(&body[..frame_len - 4]);
         if crc_stored != crc_computed {
             return Err(RecordError::BadCrc {
                 expected: crc_computed,
@@ -325,7 +325,7 @@ impl WALRecord {
             self.ballot.leader_id,
             encode_hex(&self.payload)
         );
-        let crc = crc32c::crc32c(line.as_bytes());
+        let crc = crowtree_ffi::crc32c(line.as_bytes());
         let _ = writeln!(line, " crc32c={crc:08x}");
         line
     }
@@ -341,7 +341,7 @@ impl WALRecord {
             .rsplit_once(" crc32c=")
             .ok_or_else(|| RecordError::BadText("missing crc32c field".to_string()))?;
         let got = parse_hex_u32(crc_hex)?;
-        let expected = crc32c::crc32c(body.as_bytes());
+        let expected = crowtree_ffi::crc32c(body.as_bytes());
         if got != expected {
             return Err(RecordError::BadCrc { expected, got });
         }

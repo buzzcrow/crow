@@ -22,7 +22,7 @@ use crate::common::config::PxElectionConfig;
 use crate::common::metrics::LayerMetrics;
 use crate::common::report::OperationReport;
 use crate::metrics::{Counter, LatencySummary, MetricsRegistry};
-use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
+use crate::paxos::roles::{DedupTag, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
 use crate::paxos::PxNodeId;
 use crate::rpc::px_service_client::PxServiceClient;
 use crate::rpc::{
@@ -54,6 +54,12 @@ pub struct PxRemoteReplica {
     /// `with_config` is called; defaults to `64` for tests / callsites
     /// that construct via [`Self::new`] without a config.
     learner_stream_window_frames: usize,
+    /// Per-RPC deadline for `send_prepare` (unary) and the bidi
+    /// `learner_stream` accept/heartbeat calls. Snapshot of
+    /// `PxElectionConfig::learner_stream_rpc_timeout_ms`.
+    rpc_timeout: Duration,
+    /// E5: reserved queue capacity for heartbeats inside the learner stream.
+    heartbeat_reserve: usize,
     /// Monotonic correlation id allocator for `Accept` / `Heartbeat`
     /// frames sent over [`Self::learner_stream`]. Starts at 1; 0 is
     /// reserved as the "no correlation" sentinel used by fire-and-forget
@@ -113,8 +119,9 @@ impl ReplicaClient for PxRemoteReplica {
             }
         };
         let started = Instant::now();
-        let resp = match client
-            .prepare(PrepareRequest {
+        let resp = match tokio::time::timeout(
+            self.rpc_timeout,
+            client.prepare(PrepareRequest {
                 version: 1,
                 slot,
                 round: ballot.round,
@@ -124,13 +131,22 @@ impl ReplicaClient for PxRemoteReplica {
                 group_id,
                 term,
                 membership_epoch,
-            })
-            .await
+            }),
+        )
+        .await
         {
-            Ok(r) => r.into_inner(),
-            Err(status) => {
+            Ok(Ok(r)) => r.into_inner(),
+            Ok(Err(status)) => {
                 self.record_err();
                 return Err(status_to_err(&status));
+            }
+            Err(_) => {
+                self.record_err();
+                return Err(PxReplicaError::Internal(format!(
+                    "prepare rpc timeout after {} ms at peer {}",
+                    self.rpc_timeout.as_millis(),
+                    self.endpoint
+                )));
             }
         };
         #[allow(clippy::cast_possible_truncation)]
@@ -161,8 +177,7 @@ impl ReplicaClient for PxRemoteReplica {
     async fn send_accept(
         &self,
         entry: &PxLogEntry,
-        client_id: Option<u64>,
-        seq: Option<u64>,
+        dedup_tags: &[DedupTag],
         group_id: u64,
         membership_epoch: u64,
     ) -> Result<PxAcceptReply, PxReplicaError> {
@@ -171,6 +186,10 @@ impl ReplicaClient for PxRemoteReplica {
         // (PxLogEntry -> AcceptRequest, AcceptedResponse -> PxAcceptReply)
         // is identical; only the transport changes.
         let request_id = self.alloc_request_id();
+        // Legacy single-tag fields: the first coalesced tag (or 0) so
+        // older followers during a rolling upgrade still record one dedup
+        // entry. New followers prefer `dedup_tags`.
+        let (legacy_client_id, legacy_seq) = dedup_tags.first().map_or((0, 0), |t| (t.client_id, t.seq));
         let req = AcceptRequest {
             version: 1,
             slot: entry.slot,
@@ -188,10 +207,17 @@ impl ReplicaClient for PxRemoteReplica {
             }),
             request_id,
             request_create_ms: 0,
-            client_id: client_id.unwrap_or(0),
-            seq: seq.unwrap_or(0),
+            client_id: legacy_client_id,
+            seq: legacy_seq,
             group_id,
             membership_epoch,
+            dedup_tags: dedup_tags
+                .iter()
+                .map(|t| crate::rpc::DedupTag {
+                    client_id: t.client_id,
+                    seq: t.seq,
+                })
+                .collect(),
         };
 
         let started = Instant::now();
@@ -402,6 +428,8 @@ impl PxRemoteReplica {
                 let ch = Endpoint::from_shared(format!("http://{}", self.endpoint))
                     .map_err(|e| tonic::Status::unavailable(e.to_string()))?
                     .tcp_nodelay(true)
+                    .http2_keep_alive_interval(Duration::from_secs(5))
+                    .keep_alive_while_idle(true)
                     .connect()
                     .await
                     .map_err(|e| tonic::Status::unavailable(e.to_string()))?;
@@ -419,6 +447,8 @@ impl PxRemoteReplica {
             grpc_client: OnceCell::new(),
             learner_stream: OnceLock::new(),
             learner_stream_window_frames: PxElectionConfig::DEFAULT.learner_stream_window_frames,
+            rpc_timeout: Duration::from_millis(PxElectionConfig::DEFAULT.learner_stream_rpc_timeout_ms),
+            heartbeat_reserve: PxElectionConfig::DEFAULT.learner_stream_heartbeat_reserve,
             next_request_id: AtomicU64::new(1),
             voting: true,
             metrics: LayerMetrics::new(),
@@ -428,12 +458,15 @@ impl PxRemoteReplica {
     }
 
     /// Construct a remote replica with the given election config snapshot.
-    /// The only field consumed today is `learner_stream_window_frames`
-    /// (learner stream window); other fields stay configurable per-call.
+    /// Consumes `learner_stream_window_frames` (learner stream window) and
+    /// `learner_stream_rpc_timeout_ms` (per-RPC deadline); other fields stay
+    /// configurable per-call.
     #[must_use]
     pub fn with_config(node_id: PxNodeId, endpoint: String, cfg: &PxElectionConfig) -> Self {
         let mut r = Self::new(node_id, endpoint);
         r.learner_stream_window_frames = cfg.learner_stream_window_frames;
+        r.rpc_timeout = Duration::from_millis(cfg.learner_stream_rpc_timeout_ms);
+        r.heartbeat_reserve = cfg.learner_stream_heartbeat_reserve;
         r
     }
 
@@ -444,6 +477,8 @@ impl PxRemoteReplica {
         self.learner_stream.get_or_init(|| {
             let cfg = PxElectionConfig {
                 learner_stream_window_frames: self.learner_stream_window_frames,
+                learner_stream_rpc_timeout_ms: self.rpc_timeout.as_millis().try_into().unwrap_or(u64::MAX),
+                learner_stream_heartbeat_reserve: self.heartbeat_reserve,
                 ..PxElectionConfig::DEFAULT
             };
             PxLearnerStream::new(self.endpoint.clone(), &cfg)

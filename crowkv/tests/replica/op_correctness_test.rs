@@ -14,7 +14,7 @@ use crowkv::paxos::roles::{PxBallot, PxLogEntry};
 
 fn encode_put(key: &[u8], value: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.push(1); // op_count
+    buf.extend_from_slice(&1u16.to_le_bytes()); // op_count
     buf.push(0); // kind = Put
     let key_len = u32::try_from(key.len()).expect("key len");
     buf.extend_from_slice(&key_len.to_le_bytes());
@@ -27,7 +27,7 @@ fn encode_put(key: &[u8], value: &[u8]) -> Vec<u8> {
 
 fn encode_delete(key: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.push(1); // op_count
+    buf.extend_from_slice(&1u16.to_le_bytes()); // op_count
     buf.push(1); // kind = Delete
     let key_len = u32::try_from(key.len()).expect("key len");
     buf.extend_from_slice(&key_len.to_le_bytes());
@@ -39,7 +39,7 @@ fn encode_delete(key: &[u8]) -> Vec<u8> {
 #[allow(clippy::cast_possible_truncation)]
 fn encode_batch(ops: &[(Vec<u8>, Option<Vec<u8>>)]) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.push(ops.len() as u8);
+    buf.extend_from_slice(&(ops.len() as u16).to_le_bytes());
     for (key, value) in ops {
         if let Some(v) = value {
             buf.push(0); // Put
@@ -76,7 +76,7 @@ async fn put_applies_value_to_kv_engine() {
     let replica = PxLocalReplica::new(1, PxLocalReplicaRole::Follower);
     let entry = entry(1, encode_put(b"key", b"value"));
     let _ = replica.on_accept(&entry).await;
-    replica.learn_chosen(&entry, None, None).await;
+    replica.learn_chosen(&entry, &[]).await;
 
     assert_eq!(
         replica.learner.engine_get(b"key").await.map(|(_, v)| v),
@@ -94,11 +94,11 @@ async fn overwrite_replaces_previous_value() {
 
     let e1 = entry(1, encode_put(b"k", b"v1"));
     let _ = replica.on_accept(&e1).await;
-    replica.learn_chosen(&e1, None, None).await;
+    replica.learn_chosen(&e1, &[]).await;
 
     let e2 = entry(2, encode_put(b"k", b"v2"));
     let _ = replica.on_accept(&e2).await;
-    replica.learn_chosen(&e2, None, None).await;
+    replica.learn_chosen(&e2, &[]).await;
 
     assert_eq!(
         replica.learner.engine_get(b"k").await.map(|(_, v)| v),
@@ -116,7 +116,7 @@ async fn delete_produces_tombstone() {
 
     let e1 = entry(1, encode_put(b"k", b"v1"));
     let _ = replica.on_accept(&e1).await;
-    replica.learn_chosen(&e1, None, None).await;
+    replica.learn_chosen(&e1, &[]).await;
 
     assert!(
         replica.learner.engine_get(b"k").await.is_some(),
@@ -125,7 +125,7 @@ async fn delete_produces_tombstone() {
 
     let e2 = entry(2, encode_delete(b"k"));
     let _ = replica.on_accept(&e2).await;
-    replica.learn_chosen(&e2, None, None).await;
+    replica.learn_chosen(&e2, &[]).await;
 
     assert_eq!(
         replica.learner.engine_get(b"k").await,
@@ -143,7 +143,7 @@ async fn delete_nonexistent_key_is_noop() {
 
     let e1 = entry(1, encode_delete(b"ghost"));
     let _ = replica.on_accept(&e1).await;
-    replica.learn_chosen(&e1, None, None).await;
+    replica.learn_chosen(&e1, &[]).await;
 
     assert_eq!(
         replica.learner.engine_get(b"ghost").await,
@@ -168,7 +168,7 @@ async fn batch_multiple_puts_apply_all() {
         ]),
     );
     let _ = replica.on_accept(&e1).await;
-    replica.learn_chosen(&e1, None, None).await;
+    replica.learn_chosen(&e1, &[]).await;
 
     assert_eq!(
         replica.learner.engine_get(b"k1").await.map(|(_, v)| v),
@@ -201,7 +201,7 @@ async fn batch_intra_batch_last_wins() {
         ]),
     );
     let _ = replica.on_accept(&e1).await;
-    replica.learn_chosen(&e1, None, None).await;
+    replica.learn_chosen(&e1, &[]).await;
 
     assert_eq!(
         replica.learner.engine_get(b"k").await,
@@ -224,7 +224,7 @@ async fn batch_put_then_delete_same_key() {
         ]),
     );
     let _ = replica.on_accept(&e1).await;
-    replica.learn_chosen(&e1, None, None).await;
+    replica.learn_chosen(&e1, &[]).await;
 
     assert_eq!(
         replica.learner.engine_get(b"k").await,
@@ -247,7 +247,7 @@ async fn batch_delete_then_put_same_key() {
         ]),
     );
     let _ = replica.on_accept(&e1).await;
-    replica.learn_chosen(&e1, None, None).await;
+    replica.learn_chosen(&e1, &[]).await;
 
     assert_eq!(
         replica.learner.engine_get(b"k").await.map(|(_, v)| v),
@@ -264,7 +264,7 @@ async fn empty_batch_is_noop() {
 
     let e1 = entry(1, encode_batch(&[]));
     let _ = replica.on_accept(&e1).await;
-    replica.learn_chosen(&e1, None, None).await;
+    replica.learn_chosen(&e1, &[]).await;
 
     assert_eq!(
         replica.contiguous_applied(),
@@ -289,12 +289,12 @@ async fn multiple_slots_mixed_ops_correctness() {
         ]),
     );
     let _ = replica.on_accept(&e1).await;
-    replica.learn_chosen(&e1, None, None).await;
+    replica.learn_chosen(&e1, &[]).await;
 
     // Slot 2: overwrite k1
     let e2 = entry(2, encode_put(b"k1", b"v1b"));
     let _ = replica.on_accept(&e2).await;
-    replica.learn_chosen(&e2, None, None).await;
+    replica.learn_chosen(&e2, &[]).await;
 
     // Slot 3: delete k2, put k3
     let e3 = entry(
@@ -302,7 +302,7 @@ async fn multiple_slots_mixed_ops_correctness() {
         encode_batch(&[(b"k2".to_vec(), None), (b"k3".to_vec(), Some(b"v3".to_vec()))]),
     );
     let _ = replica.on_accept(&e3).await;
-    replica.learn_chosen(&e3, None, None).await;
+    replica.learn_chosen(&e3, &[]).await;
 
     assert_eq!(
         replica.learner.engine_get(b"k1").await.map(|(_, v)| v),
@@ -316,4 +316,121 @@ async fn multiple_slots_mixed_ops_correctness() {
         "k3 put"
     );
     assert_eq!(replica.contiguous_applied(), 3);
+}
+
+// ── R30: zero-copy apply with large values ─────────────────────
+
+/// A 64 KiB-value batch through the full Paxos commit → apply → read path.
+/// This is the workload R30 targets: the value bytes are borrowed by the
+/// crowtree engine via kExternal buffers (no value memcpy on the apply
+/// critical path), and the copy is deferred to flush. The test verifies
+/// correctness end-to-end — the values must round-trip exactly.
+#[tokio::test]
+async fn r30_large_value_batch_round_trip() {
+    let replica = PxLocalReplica::new(1, PxLocalReplicaRole::Follower);
+    let v1 = vec![0x11u8; 65536];
+    let v2 = vec![0x22u8; 65536];
+    let v3 = vec![0x33u8; 65536];
+    let e1 = entry(
+        1,
+        encode_batch(&[
+            (b"big1".to_vec(), Some(v1.clone())),
+            (b"big2".to_vec(), Some(v2.clone())),
+            (b"big3".to_vec(), Some(v3.clone())),
+        ]),
+    );
+    let _ = replica.on_accept(&e1).await;
+    replica.learn_chosen(&e1, &[]).await;
+
+    assert_eq!(
+        replica.learner.engine_get(b"big1").await.map(|(_, v)| v),
+        Some(v1),
+        "big1 round-trips through zero-copy apply"
+    );
+    assert_eq!(
+        replica.learner.engine_get(b"big2").await.map(|(_, v)| v),
+        Some(v2),
+        "big2 round-trips through zero-copy apply"
+    );
+    assert_eq!(
+        replica.learner.engine_get(b"big3").await.map(|(_, v)| v),
+        Some(v3),
+        "big3 round-trips through zero-copy apply"
+    );
+    assert_eq!(replica.contiguous_applied(), 1);
+}
+
+/// Small values (≤ SBO threshold) must not regress — the external apply path
+/// has uniform cost ≤ the copy path (no malloc for either; one `Arc::clone` per
+/// op). This test verifies correctness for small values through the same path.
+#[tokio::test]
+async fn r30_small_value_batch_no_regression() {
+    let replica = PxLocalReplica::new(1, PxLocalReplicaRole::Follower);
+    let e1 = entry(
+        1,
+        encode_batch(&[
+            (b"s1".to_vec(), Some(b"small1".to_vec())),
+            (b"s2".to_vec(), Some(b"small2".to_vec())),
+            (b"s3".to_vec(), Some(b"x".to_vec())),
+        ]),
+    );
+    let _ = replica.on_accept(&e1).await;
+    replica.learn_chosen(&e1, &[]).await;
+
+    assert_eq!(
+        replica.learner.engine_get(b"s1").await.map(|(_, v)| v),
+        Some(b"small1".to_vec())
+    );
+    assert_eq!(
+        replica.learner.engine_get(b"s2").await.map(|(_, v)| v),
+        Some(b"small2".to_vec())
+    );
+    assert_eq!(
+        replica.learner.engine_get(b"s3").await.map(|(_, v)| v),
+        Some(b"x".to_vec())
+    );
+    assert_eq!(replica.contiguous_applied(), 1);
+}
+
+/// Batch atomicity with large values: a multi-key batch with a mix of large
+/// puts and a delete must apply atomically — all puts visible, delete
+/// produces a tombstone, no partial state.
+#[tokio::test]
+async fn r30_large_value_batch_atomicity_with_delete() {
+    let replica = PxLocalReplica::new(1, PxLocalReplicaRole::Follower);
+    // First slot: put k1 (small) and k2 (64 KiB).
+    let big = vec![0xABu8; 65536];
+    let e1 = entry(
+        1,
+        encode_batch(&[
+            (b"k1".to_vec(), Some(b"v1".to_vec())),
+            (b"k2".to_vec(), Some(big.clone())),
+        ]),
+    );
+    let _ = replica.on_accept(&e1).await;
+    replica.learn_chosen(&e1, &[]).await;
+
+    // Second slot: overwrite k1 (large) and delete k2.
+    let big2 = vec![0xCDu8; 65536];
+    let e2 = entry(
+        2,
+        encode_batch(&[
+            (b"k1".to_vec(), Some(big2.clone())),
+            (b"k2".to_vec(), None), // delete
+        ]),
+    );
+    let _ = replica.on_accept(&e2).await;
+    replica.learn_chosen(&e2, &[]).await;
+
+    assert_eq!(
+        replica.learner.engine_get(b"k1").await.map(|(_, v)| v),
+        Some(big2),
+        "k1 overwritten with large value"
+    );
+    assert_eq!(
+        replica.learner.engine_get(b"k2").await,
+        None,
+        "k2 deleted (tombstone)"
+    );
+    assert_eq!(replica.contiguous_applied(), 2);
 }

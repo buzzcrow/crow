@@ -36,6 +36,11 @@ async fn put_raw(
 }
 
 async fn assert_cluster_value(cluster: &TestCluster, key: &[u8], expected: &[u8]) {
+    // Yield + brief sleep so the async learner-stream task drains before
+    // checking follower engines. The learner-stream chosen notification
+    // is async; a single yield_now is not always enough.
+    tokio::task::yield_now().await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     for node in cluster.nodes() {
         let group = node.get_group(1).expect("group exists");
         let replica = group.local_replica();

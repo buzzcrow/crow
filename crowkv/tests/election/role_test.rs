@@ -189,7 +189,7 @@ async fn new_inheriting_election_state_shares_acceptor_and_learner() {
         term: 1,
         payload: Bytes::new(),
     };
-    prior.learner.learn(entry, None, None).await;
+    prior.learner.learn(entry, &[]).await;
 
     let inherited = PxLocalReplica::new_inheriting_election_state(&prior);
     assert_eq!(

@@ -149,6 +149,7 @@ impl KvStore for PxKvStore {
         let Some(group) = self.get_group(group_id) else {
             return scan_err(
                 format!("group {group_id} not found in store {}", self.store_id),
+                String::new(),
                 request_id,
                 request_create_ms,
             );
@@ -160,14 +161,10 @@ impl KvStore for PxKvStore {
         let read_slot = match self.resolve_read_point(&group, read_mode, min_slot).await {
             ReadDecision::Serve { read_slot, .. } => read_slot,
             ReadDecision::NotLeader { hint } => {
-                return scan_err(
-                    format!("not leader; retry scan at {hint}"),
-                    request_id,
-                    request_create_ms,
-                );
+                return scan_err("not leader".to_string(), hint, request_id, request_create_ms);
             }
             ReadDecision::Unavailable { msg } => {
-                return scan_err(msg, request_id, request_create_ms);
+                return scan_err(msg, String::new(), request_id, request_create_ms);
             }
         };
 
@@ -207,6 +204,7 @@ impl KvStore for PxKvStore {
             request_id,
             request_create_ms,
             read_slot,
+            not_leader_hint: String::new(),
         }
     }
 }
@@ -403,6 +401,7 @@ impl PxKvStore {
             "added group to kv store"
         );
         let arc = Arc::new(group);
+        arc.set_self_weak();
         // Wire metrics registry into local + remote replicas when available.
         if let Some(ref registry) = self.metrics_registry {
             arc.set_metrics_registry(registry, self.store_id);
@@ -489,6 +488,19 @@ impl PxKvStore {
                 if replica.is_leader() {
                     match group.linearizable_read_barrier().await {
                         ReadBarrierOutcome::Ready { read_slot } => {
+                            // R35 apply fence: with R17 (`async_engine_apply`)
+                            // on, a just-chosen slot may not yet be applied
+                            // when the barrier resolves, so a linearizable
+                            // read could miss a just-written value. Wait for
+                            // the local applied frontier to reach `read_slot`
+                            // before serving the engine get. With R17 off the
+                            // frontier already equals `read_slot` and this is
+                            // a single atomic load + compare (no wait).
+                            let fence_start = Instant::now();
+                            replica.await_apply_fence(read_slot).await;
+                            if let Some(h) = group.read_handles() {
+                                h.apply_fence.observe(fence_start.elapsed().as_nanos() as u64);
+                            }
                             ReadDecision::Serve { read_slot, safe_slot }
                         }
                         // Lost leadership during the barrier: redirect to the
@@ -615,7 +627,7 @@ impl PxKvStore {
 
     fn encode_kv_payload(ops: &[(&[u8], Option<&[u8]>)]) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.push(ops.len() as u8);
+        buf.extend_from_slice(&(ops.len() as u16).to_le_bytes());
         for (key, value_opt) in ops {
             buf.push(u8::from(value_opt.is_none()));
             buf.extend_from_slice(&(key.len() as u32).to_le_bytes());
@@ -631,7 +643,7 @@ impl PxKvStore {
 
     fn encode_kv_batch_items(items: &[crate::rpc::KvBatchItem]) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.push(items.len() as u8);
+        buf.extend_from_slice(&(items.len() as u16).to_le_bytes());
         for item in items {
             buf.push(u8::from(item.is_delete));
             buf.extend_from_slice(&(item.key.len() as u32).to_le_bytes());
@@ -658,10 +670,14 @@ fn missing_group_response(request_id: u64, request_create_ms: u64) -> crate::rpc
     )
 }
 
-/// Build a failed [`crate::rpc::KvScanResponse`] carrying `error`. Scans have
-/// no dedicated `not_leader_hint`/`not_found` channel, so all failure shapes
-/// collapse to `ok = false` with a descriptive message.
-fn scan_err(error: String, request_id: u64, request_create_ms: u64) -> crate::rpc::KvScanResponse {
+/// Build a failed [`crate::rpc::KvScanResponse`] carrying `error` and an
+/// optional `not_leader_hint`. Non-redirect failures pass an empty hint.
+fn scan_err(
+    error: String,
+    not_leader_hint: String,
+    request_id: u64,
+    request_create_ms: u64,
+) -> crate::rpc::KvScanResponse {
     crate::rpc::KvScanResponse {
         version: 1,
         ok: false,
@@ -671,6 +687,7 @@ fn scan_err(error: String, request_id: u64, request_create_ms: u64) -> crate::rp
         request_id,
         request_create_ms,
         read_slot: 0,
+        not_leader_hint,
     }
 }
 

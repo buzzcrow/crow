@@ -17,7 +17,7 @@
 //! matching client senders.
 
 use crate::paxos::roles::SlotIndex;
-use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
+use crate::paxos::roles::{DedupTag, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
 use crate::paxos::{PxGroupId, PxNodeId, PxTerm};
 
 /// Transport-neutral replica error.
@@ -190,8 +190,7 @@ pub trait ReplicaClient: Replica {
     async fn send_accept(
         &self,
         entry: &PxLogEntry,
-        client_id: Option<u64>,
-        seq: Option<u64>,
+        dedup_tags: &[DedupTag],
         group_id: u64,
         membership_epoch: u64,
     ) -> Result<PxAcceptReply, PxReplicaError>;

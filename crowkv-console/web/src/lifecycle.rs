@@ -507,9 +507,15 @@ pub struct DeployNodeServerBody {
     /// `--max-inflight` value for the proposal admission window.
     #[serde(default)]
     max_inflight: Option<usize>,
-    /// `--inflight-queues` value for multi-queue admission.
+    /// `--coalesce-max-keys` value for R45 proposal coalescing.
     #[serde(default)]
-    inflight_queues: Option<usize>,
+    coalesce_max_keys: Option<usize>,
+    /// `--coalesce-drain-threshold` value for R45b drain heuristic.
+    #[serde(default)]
+    coalesce_drain_threshold: Option<usize>,
+    /// Optional `--config` JSON path passed to the spawned `crowkv-server`.
+    #[serde(default)]
+    config: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -597,7 +603,9 @@ pub async fn http_deploy_node_server(
         no_fsync: body.no_fsync,
         metrics_interval: body.metrics_interval,
         max_inflight: body.max_inflight,
-        inflight_queues: body.inflight_queues,
+        coalesce_max_keys: body.coalesce_max_keys,
+        coalesce_drain_threshold: body.coalesce_drain_threshold,
+        config: body.config.clone().map(std::path::PathBuf::from),
     };
 
     let deployed = if node.ssh_enabled() {

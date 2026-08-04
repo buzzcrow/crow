@@ -68,7 +68,7 @@ doc only when a task touches a topic in its row.
 | Doc | Read when working on |
 | --- | --- |
 | `design/design-leader-election.md` | Term/ballot bridge, election protocol, new-leader bulk Phase 1, heartbeats, leader lease, ReadIndex, step-down. |
-| `design/design-slot.md` | Parallel slot pipelining (§1–§14): sliding window, gap detection/repair, safe-slot, per-key resolved-slot, correctness analysis, linearizability proof. Concurrent sparse slot list (§15–§22): `SlotList<T>`, chunk layout, trim/GC, reclamation. |
+| `design/design-slot.md` | Parallel slot pipelining (§1–§14): sliding window, gap detection/repair, safe-slot, per-key resolved-slot, correctness analysis, linearizability proof. Concurrent sparse slot list (§15–§22): `SlotList<T>`, chunk layout, trim/GC, reclamation. Server-side proposal coalescing (§23): R36 timer → R45 event → R45b drain threshold, micro-batcher, dedup tag threading, config, correctness, benchmark results. |
 | `design/design-rpc.md` | Wire protocol design: classic Paxos message surface, LearnerStream bidi stream (why dedicated stream, flow control, parallelism), PxService, version compatibility, Paxos error model (§7). Cluster discovery is HTTP, not gRPC. |
 | `design/design-reconfiguration.md` | Direct per-node mutation model, member add/remove, leader transfer, `membership_epoch` fence, safety argument, design history. Applies to all groups including system group (group 0). |
 | `design/design-state-machine.md` | Storage plug-in: per-key slot tracking, apply semantics, snapshot, compaction, compare, engine impls. |

@@ -11,9 +11,12 @@
 //!
 //! ## Scheduling
 //!
-//! The writer parks on `rx.recv()` when idle (zero CPU). On wake it drains
-//! all ready records with `try_recv`, optionally coalesces for a bounded
-//! window, then flushes once and acks the whole batch.
+//! The writer parks on `timeout(watchdog, rx.recv())` when idle. On wake it
+//! drains all ready records with `try_recv`, then flushes once and acks the
+//! whole batch. The watchdog (`wal_flush_watchdog_ms`, default 100 ms) is a
+//! safety-net timer that fires periodically while idle to drain any queued
+//! record in case of a missed wake — the idle wakeup does a `try_recv` and
+//! re-parks if nothing is queued (no I/O, ~10 wakeups/s at the default).
 //!
 //! ## Durability contract
 //!
@@ -96,13 +99,13 @@ pub(crate) fn spawn_pipeline_writer(
     group_id: PxGroupId,
     next_segment_id: Arc<AtomicU64>,
     segment_size: u64,
-    coalesce: Duration,
     watchdog: Duration,
     batch_bytes: usize,
     failed: Arc<AtomicBool>,
     index: Arc<parking_lot::Mutex<SegmentIndex>>,
     flush_count: Arc<AtomicU64>,
     records_flushed: Arc<AtomicU64>,
+    watchdog_wakeups: Arc<AtomicU64>,
     skip_fsync: bool,
     fsync_summary: Arc<OnceLock<Arc<LatencySummary>>>,
     write_bandwidth: Arc<OnceLock<Arc<Bandwidth>>>,
@@ -117,13 +120,13 @@ pub(crate) fn spawn_pipeline_writer(
         group_id,
         next_segment_id,
         segment_size,
-        coalesce,
         watchdog,
         batch_bytes,
         failed,
         index,
         flush_count,
         records_flushed,
+        watchdog_wakeups,
         skip_fsync,
         fsync_summary,
         write_bandwidth,
@@ -142,13 +145,13 @@ async fn pipeline_writer_loop(
     group_id: PxGroupId,
     next_segment_id: Arc<AtomicU64>,
     segment_size: u64,
-    coalesce: Duration,
     watchdog: Duration,
     batch_bytes: usize,
     failed: Arc<AtomicBool>,
     index: Arc<parking_lot::Mutex<SegmentIndex>>,
     flush_count: Arc<AtomicU64>,
     records_flushed: Arc<AtomicU64>,
+    watchdog_wakeups: Arc<AtomicU64>,
     skip_fsync: bool,
     fsync_summary: Arc<OnceLock<Arc<LatencySummary>>>,
     write_bandwidth: Arc<OnceLock<Arc<Bandwidth>>>,
@@ -178,13 +181,27 @@ async fn pipeline_writer_loop(
     };
 
     loop {
-        // Block until at least one command arrives (zero CPU when idle).
-        let Some(cmd) = rx.recv().await else {
-            // Channel closed — engine dropped. Seal and flush, then exit.
-            let _ = segment.seal().await;
-            let _ = segment.flush().await;
-            register_sealed(&index, &segment, pipeline_idx);
-            return;
+        // Park until a command arrives, or until the watchdog fires as a
+        // safety net to drain any queued record in case of a missed wake.
+        // The idle wakeup does a `try_recv` and re-parks if nothing is
+        // queued — no I/O, no allocation.
+        let cmd = match timeout(watchdog, rx.recv()).await {
+            Ok(Some(cmd)) => cmd,
+            Ok(None) => {
+                // Channel closed — engine dropped. Seal and flush, then exit.
+                let _ = segment.seal().await;
+                let _ = segment.flush().await;
+                register_sealed(&index, &segment, pipeline_idx);
+                return;
+            }
+            Err(_) => {
+                // Watchdog fired — defensive drain in case a wake was missed.
+                watchdog_wakeups.fetch_add(1, Ordering::Relaxed);
+                match rx.try_recv() {
+                    Ok(cmd) => cmd,
+                    Err(_) => continue,
+                }
+            }
         };
 
         match cmd {
@@ -241,29 +258,6 @@ async fn pipeline_writer_loop(
                             break;
                         }
                         Err(_) => break,
-                    }
-                }
-
-                // Optional coalescing window.
-                if !coalesce.is_zero() && batch_bytes_acc < batch_bytes {
-                    let window = coalesce.min(watchdog);
-                    let deadline = Instant::now() + window;
-                    while batch_bytes_acc < batch_bytes {
-                        let remaining = deadline.saturating_duration_since(Instant::now());
-                        if remaining.is_zero() {
-                            break;
-                        }
-                        match timeout(remaining, rx.recv()).await {
-                            Ok(Some(WriterCommand::Write(req))) => {
-                                batch_bytes_acc += req.encoded.total_len();
-                                batch.push(req);
-                            }
-                            Ok(Some(WriterCommand::Seal { ack })) => {
-                                pending_seal_acks.push(ack);
-                                break;
-                            }
-                            Ok(None) | Err(_) => break,
-                        }
                     }
                 }
 

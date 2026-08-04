@@ -408,6 +408,26 @@ class Crowtree
     // (by vector order) wins, same as apply_batch.
     Status apply_encoded(uint64_t slot, std::vector<encoded_op> ops);
 
+    // One zero-copy op for apply_external (R30): `value` is a kExternal buffer
+    // borrowing bytes from a Rust `bytes::Bytes` (Put) or an empty buffer
+    // (Delete, `flags = kFlagTombstone`). The 9-byte cell header is NOT in the
+    // buffer — it is stored as the `flags` field here plus the `slot` argument,
+    // and materialized into a contiguous cell at MemTable drain/get. Lets the
+    // consensus apply path skip the value memcpy that encode_cell_buf performs.
+    struct external_op
+    {
+        std::string key;
+        uint8_t     flags = 0; // kPut (0) or kFlagTombstone
+        buffer      value;     // kExternal (borrowed) for Put; empty for Delete
+    };
+
+    // Same semantics as apply_encoded (oversized-key rejection, slot
+    // bookkeeping, maybe_swap_active, intra-batch last-key-wins) but stores
+    // split cells via MemTable::upsert_external — no encode_cell_buf, no value
+    // memcpy on the apply critical path. The value copy is deferred to flush
+    // (off the critical path).
+    Status apply_external(uint64_t slot, std::vector<external_op> ops);
+
     // Advance the contiguous frontier up to `slot`, filling any intervening slots
     // as NoOps (e.g. after learner NoOp slots or during restore). Explicit and
     // free of learner jargon.

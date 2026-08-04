@@ -102,8 +102,8 @@ fn clear_drops_all_state() {
 fn batch_decode_matches_put_delete_wire_format() {
     // Mirror PxKvStore::encode_kv_payload: [count][kind][klen][k][vlen][v].
     let mut buf = Vec::new();
-    buf.push(2u8); // op_count
-                   // Put k1=v1
+    buf.extend_from_slice(&2u16.to_le_bytes()); // op_count
+                                                // Put k1=v1
     buf.push(0u8);
     buf.extend_from_slice(&2u32.to_le_bytes());
     buf.extend_from_slice(b"k1");

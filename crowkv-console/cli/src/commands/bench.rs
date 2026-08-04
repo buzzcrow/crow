@@ -69,11 +69,6 @@ pub struct RunArgs {
     #[arg(long, default_value_t = 32)]
     pub max_inflight: usize,
 
-    /// Number of admission queues per group (--inflight-queues on each
-    /// spawned server). Default: 1.
-    #[arg(long, default_value_t = 1)]
-    pub inflight_queues: usize,
-
     /// Server metrics log flush interval in seconds (--metrics-interval
     /// on each spawned server). Default: 5. Set to 1 for short bench runs.
     #[arg(long, default_value_t = 5)]
@@ -113,6 +108,22 @@ pub struct RunArgs {
     /// `--read-mode linearizable`.
     #[arg(long)]
     pub read_endpoint_policy: Option<String>,
+
+    /// Optional `CrowKVConfig` JSON file passed as `--config` to each
+    /// benchmark node. Useful for tuning `wal_early_ack` or other
+    /// config fields without changing defaults.
+    #[arg(long)]
+    pub node_config: Option<String>,
+
+    /// R45 max ops per coalesced batch (--coalesce-max-keys on each
+    /// spawned server). `0` disables (default).
+    #[arg(long)]
+    pub coalesce_max_keys: Option<usize>,
+
+    /// R45b drain threshold (--coalesce-drain-threshold on each
+    /// spawned server). Default `1`. `0` = always drain.
+    #[arg(long)]
+    pub coalesce_drain_threshold: Option<usize>,
 }
 
 /// Arguments for `crowkv-cli bench`.
@@ -211,8 +222,10 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
         mode,
         workspace_dir,
         args.max_inflight,
-        args.inflight_queues,
         args.metrics_interval,
+        args.node_config.clone(),
+        args.coalesce_max_keys,
+        args.coalesce_drain_threshold,
     )
     .await
     {

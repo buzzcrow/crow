@@ -25,7 +25,7 @@ const GROUP: u64 = 1;
 
 fn encode_put_payload(key: &[u8], value: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.push(1); // op = PUT
+    buf.extend_from_slice(&1u16.to_le_bytes()); // op_count = 1
     buf.push(0); // flags
     let key_len = u32::try_from(key.len()).expect("key length exceeds u32");
     buf.extend_from_slice(&key_len.to_le_bytes());

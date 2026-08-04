@@ -28,7 +28,7 @@ fn noop_apply_path() {
         payload: bytes::Bytes::new(),
     };
     let before = learner.live_key_count();
-    learner.learn(entry, None, None);
+    learner.learn(entry, &[]);
     let after = learner.live_key_count();
     assert_eq!(before, after, "NoOp must not mutate the KV store");
     assert_eq!(

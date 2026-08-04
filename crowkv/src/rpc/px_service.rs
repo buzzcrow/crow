@@ -18,7 +18,7 @@ use crate::cluster::replica::{
     HeartbeatRequestPayload, PxReplicaError, ReplicaHandler, StepDownRequestPayload, VoteRequestPayload,
 };
 use crate::common::optional_u64;
-use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
+use crate::paxos::roles::{DedupTag, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
 use crate::paxos::PxTerm;
 
 use crate::rpc::px_service_server::PxService;
@@ -499,6 +499,24 @@ async fn handle_accept_inner(store: &Arc<PxKvStore>, req: AcceptRequest) -> Resu
     })?;
     let client_id = optional_u64(req.client_id);
     let seq = optional_u64(req.seq);
+    // R36: prefer the repeated `dedup_tags` (one per coalesced client op);
+    // fall back to the legacy single `client_id`/`seq` for older leaders.
+    let dedup_tags: Vec<DedupTag> = if !req.dedup_tags.is_empty() {
+        req.dedup_tags
+            .iter()
+            .map(|t| DedupTag {
+                client_id: t.client_id,
+                seq: t.seq,
+            })
+            .collect()
+    } else if let (Some(cid), Some(s)) = (client_id, seq) {
+        vec![DedupTag {
+            client_id: cid,
+            seq: s,
+        }]
+    } else {
+        Vec::new()
+    };
     let entry = PxLogEntry {
         slot: req.slot,
         ballot: PxBallot {
@@ -544,7 +562,7 @@ async fn handle_accept_inner(store: &Arc<PxKvStore>, req: AcceptRequest) -> Resu
     )
     .await?;
     if matches!(reply, PxAcceptReply::Accepted { .. }) {
-        replica.learn_chosen(&entry, client_id, seq).await;
+        replica.learn_chosen(&entry, &dedup_tags).await;
     }
 
     let (rejected, rejected_round, rejected_leader_id, term_stale, reply_term) = match reply {

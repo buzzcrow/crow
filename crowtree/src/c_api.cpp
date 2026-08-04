@@ -606,6 +606,39 @@ ct_status ct_apply_batch_slices(ct_tree *t, uint64_t slot, const ct_kv_ref *ops,
     return to_status(t->tree->apply_encoded(slot, std::move(encoded)));
 }
 
+ct_status ct_apply_batch_external(ct_tree *t, uint64_t slot, const ct_ext_op *ops, uint64_t count)
+{
+    if (t == nullptr || (ops == nullptr && count != 0)) {
+        return static_cast<ct_status>(Code::kInvalidArgument);
+    }
+    std::vector<Crowtree::external_op> external;
+    external.reserve(count);
+    for (uint64_t i = 0; i < count; ++i) {
+        const ct_ext_op &op = ops[i];
+        if (op.key == nullptr && op.key_len != 0) {
+            return static_cast<ct_status>(Code::kInvalidArgument);
+        }
+        if (op.kind != 0 && op.kind != 1) {
+            return static_cast<ct_status>(Code::kInvalidArgument);
+        }
+        std::string key(reinterpret_cast<const char *>(op.key), op.key_len);
+        uint8_t     flags = (op.kind == 1) ? kFlagTombstone : 0;
+        buffer      value;
+        if (op.kind == 0 && op.value_len > 0) {
+            // Borrow the value bytes from Rust-owned memory; crowtree calls
+            // drop_fn(bytes_ref) when this buffer is freed (drain/overwrite).
+            value = buffer::wrap_external(op.value, op.value_len, op.bytes_ref, op.drop_fn);
+        }
+        else if (op.kind == 0 && op.value_len == 0) {
+            // Put with empty value: no external borrow needed (empty owned buf).
+            value = buffer::alloc(0);
+        }
+        // Delete: value stays default (empty); flags = kFlagTombstone.
+        external.push_back({std::move(key), flags, std::move(value)});
+    }
+    return to_status(t->tree->apply_external(slot, std::move(external)));
+}
+
 void ct_force_advance_slot(ct_tree *t, uint64_t slot)
 {
     if (t != nullptr) {

@@ -12,7 +12,7 @@ use crowkv::cluster::group_config::GroupConfigStore;
 use crowkv::cluster::group_election::LeaderElection;
 use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crowkv::cluster::node_config::NodeConfigStore;
-use crowkv::common::config::{AdmissionPolicy, PxElectionConfig, WalConfig};
+use crowkv::common::config::{CrowKVConfig, WalConfig};
 use crowkv::kv::{CrowtreeBackend, CrowtreeEngine, CrowtreeOptions, KVEngine};
 use crowkv::wal::replay::replay_group;
 use crowkv::wal::{IoBackend, WalEngine};
@@ -140,35 +140,34 @@ pub async fn create_group_with_wal(
     group_id: u64,
     replica_id: u64,
     initial_role: PxLocalReplicaRole,
-    election_cfg: PxElectionConfig,
-    wal_root: &Path,
-    config_root: &Path,
+    config: &CrowKVConfig,
     wal_backend: Arc<IoBackend>,
-    data_root: &Path,
     crowtree_backend: CrowtreeBackend,
-    skip_fsync: bool,
-    log_dir: &str,
-    max_inflight: usize,
-    inflight_queues: usize,
-    inflight_admission: AdmissionPolicy,
 ) -> io::Result<PxGroup> {
-    let mut wal_config = WalConfig::with_root(store_wal_root(wal_root, store_id));
+    let mut wal_config = WalConfig::with_root(store_wal_root(&config.wal_root, store_id));
     if std::env::var("CROWKV_WAL_TEXT").as_deref() == Ok("1") {
         wal_config.wal_record_format = crowkv::wal::WalRecordFormat::TextLine;
     }
-    wal_config.wal_skip_fsync = skip_fsync;
+    wal_config.wal_skip_fsync = config.wal_skip_fsync;
     let replay = replay_group(&wal_backend, &wal_config.wal_disks, group_id).await?;
     let wal = WalEngine::create(wal_backend, wal_config, group_id).await?;
     wal.set_next_segment_id(replay.max_segment_id.saturating_add(1).max(1));
 
     let mut local_replica = {
-        let engine = open_crowtree_engine(data_root, store_id, group_id, crowtree_backend, log_dir).await?;
+        let engine = open_crowtree_engine(
+            &config.data_root,
+            store_id,
+            group_id,
+            crowtree_backend,
+            &config.log_dir,
+        )
+        .await?;
         PxLocalReplica::restore_from_replay_with_engine(replica_id, initial_role, &replay, engine).await?
     };
     local_replica.set_wal(wal);
 
     let mut group = PxGroup::new(group_id, local_replica);
-    maybe_apply_persisted_config(&mut group, config_root, store_id).await;
+    maybe_apply_persisted_config(&mut group, &config.config_root, store_id).await;
     // If the caller initialized the group as Leader, the proposal leadership
     // gate (current_term == proposing_term) will not open until the term is
     // stamped. The election driver handles this on a real win, but groups
@@ -178,15 +177,16 @@ pub async fn create_group_with_wal(
         let term = group.local_replica().current_term_snapshot();
         group.stamp_proposing_term(term);
     }
-    group.set_election_config(election_cfg);
-    group.set_inflight_config(max_inflight, inflight_queues, inflight_admission);
+    group.set_from_config(config);
     info!(
         store_id,
         group_id,
-        max_inflight,
-        inflight_queues,
-        admission = inflight_admission.label(),
-        skip_fsync,
+        max_inflight = config.max_inflight(),
+        admission = config.inflight_admission().label(),
+        coalesce_max_keys = config.paxos.coalesce_max_keys,
+        coalesce_drain_threshold = config.paxos.coalesce_drain_threshold,
+        skip_fsync = config.wal_skip_fsync,
+        wal_early_ack = config.wal_early_ack,
         "group created with config"
     );
     let next_slot = group

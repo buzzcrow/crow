@@ -23,6 +23,7 @@
 //! reconnects with capped exponential backoff.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -59,6 +60,16 @@ pub enum LearnerStreamReply {
 }
 
 /// User-side request to the background task.
+/// Frame kind for E5 heartbeat reserved capacity. `Accept` and `Chosen`
+/// share the non-heartbeat lane; `Heartbeat` gets a reserved portion of the
+/// outbound queue so a saturated accept path cannot starve leader heartbeats.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FrameKind {
+    Accept,
+    Heartbeat,
+    Chosen,
+}
+
 struct OutboundCmd {
     frame: LearnerStreamRequest,
     /// Oneshot for the reply. `None` for fire-and-forget frames
@@ -67,6 +78,8 @@ struct OutboundCmd {
     /// Correlation key (echoed from the inner `request_id`). Only meaningful
     /// when `reply_tx.is_some()`.
     request_id: u64,
+    /// E5: frame kind for reserved-capacity dispatch.
+    kind: FrameKind,
 }
 
 /// Per-peer bidi `LearnerStream` client.
@@ -77,6 +90,17 @@ pub struct PxLearnerStream {
     endpoint: String,
     cmd_tx: mpsc::Sender<OutboundCmd>,
     cancel: CancellationToken,
+    rpc_timeout: Duration,
+    current_pending: Arc<Mutex<Option<PendingMap>>>,
+    /// E5: reserved queue capacity for heartbeats. Non-heartbeat frames are
+    /// rejected with `Busy` once `non_heartbeat_count >= window - reserve`.
+    heartbeat_reserve: usize,
+    /// Total capacity of `cmd_tx` (snapshot of the mpsc channel size).
+    window: usize,
+    /// Current count of non-heartbeat frames in the outbound queue.
+    /// Incremented by `dispatch` (non-heartbeat), decremented by the bg
+    /// task when it pops a non-heartbeat cmd.
+    non_heartbeat_count: Arc<AtomicUsize>,
 }
 
 impl PxLearnerStream {
@@ -85,14 +109,30 @@ impl PxLearnerStream {
     #[must_use]
     pub fn new(endpoint: String, cfg: &PxElectionConfig) -> Arc<Self> {
         let cancel = CancellationToken::new();
-        let (cmd_tx, cmd_rx) = mpsc::channel(cfg.learner_stream_window_frames.max(1));
+        let window = cfg.learner_stream_window_frames.max(1);
+        let (cmd_tx, cmd_rx) = mpsc::channel(window);
+        let rpc_timeout = Duration::from_millis(cfg.learner_stream_rpc_timeout_ms);
+        let heartbeat_reserve = cfg.learner_stream_heartbeat_reserve.min(window);
+        let current_pending: Arc<Mutex<Option<PendingMap>>> = Arc::new(Mutex::new(None));
+        let non_heartbeat_count = Arc::new(AtomicUsize::new(0));
         let stream = Arc::new(Self {
             endpoint: endpoint.clone(),
             cmd_tx,
             cancel: cancel.clone(),
+            rpc_timeout,
+            current_pending: current_pending.clone(),
+            heartbeat_reserve,
+            window,
+            non_heartbeat_count: non_heartbeat_count.clone(),
         });
         let endpoint_for_task = endpoint;
-        tokio::spawn(run_learner_stream(endpoint_for_task, cmd_rx, cancel));
+        tokio::spawn(run_learner_stream(
+            endpoint_for_task,
+            cmd_rx,
+            cancel,
+            current_pending,
+            non_heartbeat_count,
+        ));
         stream
     }
 
@@ -115,16 +155,25 @@ impl PxLearnerStream {
             frame,
             reply_tx: Some(tx),
             request_id,
+            kind: FrameKind::Accept,
         })?;
-        match rx.await {
-            Ok(Ok(LearnerStreamReply::Accepted(r))) => Ok(r),
-            Ok(Ok(LearnerStreamReply::Heartbeat(_))) => Err(PxReplicaError::Internal(
+        match tokio::time::timeout(self.rpc_timeout, rx).await {
+            Ok(Ok(Ok(LearnerStreamReply::Accepted(r)))) => Ok(r),
+            Ok(Ok(Ok(LearnerStreamReply::Heartbeat(_)))) => Err(PxReplicaError::Internal(
                 "learner_stream: heartbeat reply on accept oneshot (correlation bug)".to_string(),
             )),
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(PxReplicaError::Internal(
+            Ok(Ok(Err(e))) => Err(e),
+            Ok(Err(_)) => Err(PxReplicaError::Internal(
                 "learner_stream: oneshot dropped".to_string(),
             )),
+            Err(_) => {
+                self.remove_pending(request_id);
+                Err(PxReplicaError::Internal(format!(
+                    "learner_stream: accept rpc timeout after {} ms at peer {}",
+                    self.rpc_timeout.as_millis(),
+                    self.endpoint
+                )))
+            }
         }
     }
 
@@ -142,16 +191,25 @@ impl PxLearnerStream {
             frame,
             reply_tx: Some(tx),
             request_id,
+            kind: FrameKind::Heartbeat,
         })?;
-        match rx.await {
-            Ok(Ok(LearnerStreamReply::Heartbeat(r))) => Ok(r),
-            Ok(Ok(LearnerStreamReply::Accepted(_))) => Err(PxReplicaError::Internal(
+        match tokio::time::timeout(self.rpc_timeout, rx).await {
+            Ok(Ok(Ok(LearnerStreamReply::Heartbeat(r)))) => Ok(r),
+            Ok(Ok(Ok(LearnerStreamReply::Accepted(_)))) => Err(PxReplicaError::Internal(
                 "learner_stream: accepted reply on heartbeat oneshot (correlation bug)".to_string(),
             )),
-            Ok(Err(e)) => Err(e),
-            Err(_) => Err(PxReplicaError::Internal(
+            Ok(Ok(Err(e))) => Err(e),
+            Ok(Err(_)) => Err(PxReplicaError::Internal(
                 "learner_stream: oneshot dropped".to_string(),
             )),
+            Err(_) => {
+                self.remove_pending(request_id);
+                Err(PxReplicaError::Internal(format!(
+                    "learner_stream: heartbeat rpc timeout after {} ms at peer {}",
+                    self.rpc_timeout.as_millis(),
+                    self.endpoint
+                )))
+            }
         }
     }
 
@@ -168,25 +226,66 @@ impl PxLearnerStream {
             frame,
             reply_tx: None,
             request_id: 0,
+            kind: FrameKind::Chosen,
         })
     }
 
     fn dispatch(&self, cmd: OutboundCmd) -> Result<(), PxReplicaError> {
-        // Flow control: `try_send` (non-blocking) instead of
-        // `send` (await). When the per-peer mpsc is full we surface the
-        // queue depth as a typed error so the proposer can map it to
-        // `PxPaxosError::Busy` (already classified `FailRetryable`)
-        // rather than blocking the call site behind backpressure.
+        let is_heartbeat = cmd.kind == FrameKind::Heartbeat;
+        // E5: heartbeat reserved capacity. Non-heartbeat frames are rejected
+        // when the non-heartbeat count reaches the shared portion
+        // (`window - reserve`); heartbeats may use the full window.
+        if !is_heartbeat {
+            let shared_cap = self.window.saturating_sub(self.heartbeat_reserve);
+            let mut current = self.non_heartbeat_count.load(Ordering::Relaxed);
+            loop {
+                if current >= shared_cap {
+                    return Err(PxReplicaError::Internal(format!(
+                        "learner_stream: outbound queue full (reserved for heartbeats) at peer {}",
+                        self.endpoint
+                    )));
+                }
+                match self.non_heartbeat_count.compare_exchange(
+                    current,
+                    current + 1,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => current = actual,
+                }
+            }
+        }
         match self.cmd_tx.try_send(cmd) {
             Ok(()) => Ok(()),
-            Err(mpsc::error::TrySendError::Full(_)) => Err(PxReplicaError::Internal(format!(
-                "learner_stream: outbound queue full at peer {}",
-                self.endpoint
-            ))),
-            Err(mpsc::error::TrySendError::Closed(_)) => Err(PxReplicaError::Internal(format!(
-                "learner_stream: peer {} is shut down",
-                self.endpoint
-            ))),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                if !is_heartbeat {
+                    self.non_heartbeat_count.fetch_sub(1, Ordering::AcqRel);
+                }
+                Err(PxReplicaError::Internal(format!(
+                    "learner_stream: outbound queue full at peer {}",
+                    self.endpoint
+                )))
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                if !is_heartbeat {
+                    self.non_heartbeat_count.fetch_sub(1, Ordering::AcqRel);
+                }
+                Err(PxReplicaError::Internal(format!(
+                    "learner_stream: peer {} is shut down",
+                    self.endpoint
+                )))
+            }
+        }
+    }
+
+    /// Remove a pending-map entry after a caller-side timeout. No-op if the
+    /// reply already arrived (dispatch removed it) or the connection has
+    /// reset (map cleared). Prevents the pending map from leaking entries
+    /// on hung peers.
+    fn remove_pending(&self, request_id: u64) {
+        if let Some(map) = self.current_pending.lock().as_ref() {
+            map.lock().remove(&request_id);
         }
     }
 
@@ -209,6 +308,8 @@ async fn run_learner_stream(
     endpoint: String,
     mut cmd_rx: mpsc::Receiver<OutboundCmd>,
     cancel: CancellationToken,
+    current_pending: Arc<Mutex<Option<PendingMap>>>,
+    non_heartbeat_count: Arc<AtomicUsize>,
 ) {
     let mut backoff = BACKOFF_INITIAL;
 
@@ -218,14 +319,7 @@ async fn run_learner_stream(
         }
 
         let connect_url = format!("http://{endpoint}");
-        let connect_result: Result<PxServiceClient<Channel>, tonic::Status> =
-            match Endpoint::from_shared(connect_url) {
-                Ok(ep) => match ep.tcp_nodelay(true).connect().await {
-                    Ok(channel) => Ok(PxServiceClient::new(channel)),
-                    Err(e) => Err(tonic::Status::unavailable(e.to_string())),
-                },
-                Err(e) => Err(tonic::Status::unavailable(e.to_string())),
-            };
+        let connect_result = connect_learner_stream(&connect_url).await;
         let mut client = match connect_result {
             Ok(c) => c,
             Err(err) => {
@@ -238,7 +332,7 @@ async fn run_learner_stream(
                 // matching call sites (e.g. `remote_error` test) keep
                 // working unchanged.
                 let reason = format!("grpc Unavailable: learner_stream connect failed: {err}");
-                fail_queued_commands(&mut cmd_rx, &reason);
+                fail_queued_commands(&mut cmd_rx, &reason, &non_heartbeat_count);
                 if !sleep_or_cancel(backoff, &cancel).await {
                     return;
                 }
@@ -270,6 +364,7 @@ async fn run_learner_stream(
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let pending_for_recv = pending.clone();
+        *current_pending.lock() = Some(pending.clone());
 
         // Spawn the recv-half task: pulls server frames and dispatches to
         // pending oneshots. Exits on stream end / error.
@@ -307,6 +402,9 @@ async fn run_learner_stream(
                 () = cancel.cancelled() => break,
                 cmd = cmd_rx.recv() => {
                     let Some(cmd) = cmd else { return; };
+                    if cmd.kind != FrameKind::Heartbeat {
+                        non_heartbeat_count.fetch_sub(1, Ordering::AcqRel);
+                    }
                     if let Some(reply_tx) = cmd.reply_tx {
                         pending.lock().insert(cmd.request_id, reply_tx);
                     }
@@ -321,6 +419,11 @@ async fn run_learner_stream(
         // unblocks.
         drop(out_tx);
         recv_handle.abort();
+
+        // Clear the shared pending ref so caller-side timeout cleanup is a
+        // no-op while disconnected (the drain below already fails all
+        // oneshots).
+        *current_pending.lock() = None;
 
         // Fail all pending oneshots so callers don't hang.
         let drained: Vec<_> = std::mem::take(&mut *pending.lock()).into_iter().collect();
@@ -358,11 +461,32 @@ fn dispatch_response(pending: &PendingMap, resp: LearnerStreamResponse) {
     }
 }
 
+/// Establish a gRPC channel + client to `connect_url` with h2 keepalive.
+async fn connect_learner_stream(connect_url: &str) -> Result<PxServiceClient<Channel>, tonic::Status> {
+    let ep = Endpoint::from_shared(connect_url.to_string())
+        .map_err(|e| tonic::Status::unavailable(e.to_string()))?;
+    let channel = ep
+        .tcp_nodelay(true)
+        .http2_keep_alive_interval(Duration::from_secs(5))
+        .keep_alive_while_idle(true)
+        .connect()
+        .await
+        .map_err(|e| tonic::Status::unavailable(e.to_string()))?;
+    Ok(PxServiceClient::new(channel))
+}
+
 /// Drain any commands queued behind the bg-task channel and fail their
 /// awaiting oneshots with the given message. Called from the connect-
 /// retry loop so callers do not block on a peer that is down.
-fn fail_queued_commands(cmd_rx: &mut mpsc::Receiver<OutboundCmd>, reason: &str) {
+fn fail_queued_commands(
+    cmd_rx: &mut mpsc::Receiver<OutboundCmd>,
+    reason: &str,
+    non_heartbeat_count: &AtomicUsize,
+) {
     while let Ok(cmd) = cmd_rx.try_recv() {
+        if cmd.kind != FrameKind::Heartbeat {
+            non_heartbeat_count.fetch_sub(1, Ordering::AcqRel);
+        }
         if let Some(tx) = cmd.reply_tx {
             let _ = tx.send(Err(PxReplicaError::Internal(reason.to_string())));
         }

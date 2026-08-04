@@ -15,7 +15,7 @@ use crate::wal::pipeline_backend::WalBlockAlignment;
 use crate::wal::record::WalRecordFormat;
 
 /// Admission policy for inflight proposals when the window is full.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub enum AdmissionPolicy {
     /// Fail fast with `ProposeResult::Busy`.
     Reject,
@@ -46,7 +46,7 @@ impl AdmissionPolicy {
 }
 
 /// Paxos retry configuration (static, global).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct PaxosConfig {
     pub max_paxos_retries: usize,
     pub max_slot_retries: usize,
@@ -57,13 +57,21 @@ pub struct PaxosConfig {
     /// blocking, so the leader never stalls behind a saturated pipeline
     /// (parallel-slot window / performance targets).
     pub max_inflight_proposals: usize,
-    /// Number of admission queues per group. Each queue gets
-    /// `ceil(max_inflight_proposals / inflight_queues)` permits. Default 1.
-    pub inflight_queues: usize,
     /// Admission policy when all permits are occupied: `Reject` (fail fast
     /// with `Busy`) or `Queue` (block until a permit is freed). Default
     /// `Reject`.
     pub inflight_admission: AdmissionPolicy,
+    /// R45 max ops per coalesced batch. `0` disables coalescing (one
+    /// proposal per key). Default 0 (opt-in).
+    pub coalesce_max_keys: usize,
+    /// R45b drain threshold: skip draining the pending batch in
+    /// `coalesce_drain_after_round` when the in-flight slot-task count
+    /// (`occupied`) is at or above this value. Lets the `max_keys`
+    /// overflow path handle high load (full batches) while the drain
+    /// maintains concurrency at low-moderate load. Default `1` (set
+    /// via CLI when coalescing is enabled). `0` = always drain
+    /// (disables the heuristic).
+    pub coalesce_drain_threshold: usize,
 }
 
 impl PaxosConfig {
@@ -72,13 +80,20 @@ impl PaxosConfig {
         max_slot_retries: 3,
         retry_base_backoff_ms: 5,
         max_inflight_proposals: 32,
-        inflight_queues: 1,
         inflight_admission: AdmissionPolicy::Queue,
+        coalesce_max_keys: 0,
+        coalesce_drain_threshold: 1,
     };
 }
 
+impl Default for PaxosConfig {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// Server-level configuration (static, global).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct ServerConfig {
     /// Per-layer graceful-shutdown timeout in milliseconds.
     /// Shutdowns that take longer almost always indicate a stuck task and are
@@ -92,8 +107,15 @@ impl ServerConfig {
     };
 }
 
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
 /// WAL configuration for a single consensus group.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
 pub struct WalConfig {
     /// Directories to distribute WAL segments across.
     pub wal_disks: Vec<PathBuf>,
@@ -101,9 +123,9 @@ pub struct WalConfig {
     pub wal_segment_size: u64,
     /// Durable flush batch size trigger (bytes). Default 64 KiB.
     pub wal_flush_batch_bytes: usize,
-    /// Optional durable flush coalescing budget (microseconds). Default 0.
-    pub wal_flush_coalesce_us: u64,
-    /// Watchdog timer for stuck durable flush batches. Default 100 ms.
+    /// Safety-net timer that wakes the idle writer every `watchdog` ms to
+    /// drain any queued records in case of a missed wake ("just in case for
+    /// bugs"). Default 100 ms.
     pub wal_flush_watchdog_ms: u64,
     /// Disk-pressure watermark for eager GC. Default 80%.
     pub wal_disk_high_watermark_pct: u8,
@@ -164,7 +186,6 @@ impl Default for WalConfig {
             wal_disks: vec![PathBuf::from("waldata")],
             wal_segment_size: 64 * 1024 * 1024,
             wal_flush_batch_bytes: 64 * 1024,
-            wal_flush_coalesce_us: 0,
             wal_flush_watchdog_ms: 100,
             wal_disk_high_watermark_pct: 80,
             wal_min_retention_secs: 3600,
@@ -185,7 +206,7 @@ impl Default for WalConfig {
 /// Defaults target a single-datacenter deployment with NTP-disciplined
 /// clocks. Rationale and cross-DC / WAN override profile documented
 /// in the leader-election sub-design.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct PxElectionConfig {
     /// Whether `PreVote` rounds protect against partition-rejoin disruption.
     pub prevote_enabled: bool,
@@ -230,6 +251,20 @@ pub struct PxElectionConfig {
     /// `persist_snapshot()` is called again, in milliseconds. Ensures a
     /// low-write-rate replica still checkpoints periodically.
     pub snapshot_time_threshold_ms: u64,
+    /// Per-RPC deadline for unary `prepare` and bidi `accept`/`heartbeat`
+    /// learner-stream calls, in milliseconds. On expiry the caller gets a
+    /// retryable `PxReplicaError` and the pending-map entry (bidi path) is
+    /// removed so it cannot leak. Paired with h2 keepalive on the
+    /// connect-time `Endpoint` so a hung peer (accepts connection but never
+    /// replies) is detected within the deadline rather than stalling the
+    /// proposer indefinitely.
+    pub learner_stream_rpc_timeout_ms: u64,
+    /// Reserved queue capacity inside the per-peer `PxLearnerStream`
+    /// outbound mpsc that only heartbeats may use. Non-heartbeat frames
+    /// (`accept`, `chosen`) are rejected with `Busy` once the shared
+    /// portion (`window - reserve`) is full, so a saturated accept path
+    /// cannot starve leader heartbeats and trigger spurious elections.
+    pub learner_stream_heartbeat_reserve: usize,
 }
 
 impl PxElectionConfig {
@@ -264,6 +299,8 @@ impl PxElectionConfig {
         maintenance_tick_ms: 10_000,
         snapshot_slot_threshold: 100_000,
         snapshot_time_threshold_ms: 600_000,
+        learner_stream_rpc_timeout_ms: 2000,
+        learner_stream_heartbeat_reserve: 8,
     };
 
     /// Aggressive timings for `#[tokio::test(start_paused = true)]` suites.
@@ -286,6 +323,8 @@ impl PxElectionConfig {
             maintenance_tick_ms: 500,
             snapshot_slot_threshold: 1000,
             snapshot_time_threshold_ms: 1_000,
+            learner_stream_rpc_timeout_ms: 500,
+            learner_stream_heartbeat_reserve: 2,
         }
     }
 
@@ -317,6 +356,8 @@ impl PxElectionConfig {
             maintenance_tick_ms: 3_000,
             snapshot_slot_threshold: 1_000_000,
             snapshot_time_threshold_ms: 9_000,
+            learner_stream_rpc_timeout_ms: 1000,
+            learner_stream_heartbeat_reserve: 4,
         }
     }
 
@@ -326,5 +367,185 @@ impl PxElectionConfig {
     #[must_use]
     pub const fn learner_window_for(max_inflight_proposals: usize) -> usize {
         max_inflight_proposals * Self::LEARNER_WINDOW_MULTIPLIER
+    }
+}
+
+impl Default for PxElectionConfig {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Unified configuration for a `CrowKV` cluster node.
+///
+/// Merges all sub-configs (`ServerConfig`, `PaxosConfig`,
+/// `PxElectionConfig`, `WalConfig`) and the former `PxGroup` internal
+/// flags (`force_classic`, `wal_early_ack`, `async_engine_apply`) into
+/// one struct with `serde` derives for JSON file loading. Runtime
+/// paths and backends are `#[serde(skip)]` — set from CLI args after
+/// loading.
+///
+/// Usage: `CrowKVConfig::load_from_file(path)` or
+/// `CrowKVConfig::default()`, then CLI args override individual fields,
+/// then pass `&CrowKVConfig` to `create_group_with_wal`.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct CrowKVConfig {
+    #[serde(default)]
+    pub server: ServerConfig,
+    #[serde(default)]
+    pub paxos: PaxosConfig,
+    #[serde(default)]
+    pub election: PxElectionConfig,
+    #[serde(default)]
+    pub wal: WalConfig,
+    #[serde(default)]
+    pub force_classic: bool,
+    #[serde(default)]
+    pub wal_early_ack: bool,
+    #[serde(default)]
+    pub async_engine_apply: bool,
+    /// WAL root directory. `#[serde(skip)]` — set from `--wal-root` CLI.
+    #[serde(skip)]
+    pub wal_root: PathBuf,
+    /// Group config root directory. `#[serde(skip)]` — set from CLI.
+    #[serde(skip)]
+    pub config_root: PathBuf,
+    /// Crowtree data root directory. `#[serde(skip)]` — set from CLI.
+    #[serde(skip)]
+    pub data_root: PathBuf,
+    /// WAL I/O backend label. `#[serde(skip)]` — set from `--wal-backend`.
+    #[serde(skip)]
+    pub wal_backend: String,
+    /// Crowtree storage backend label. `#[serde(skip)]` — set from
+    /// `--kv-backend`.
+    #[serde(skip)]
+    pub crowtree_backend: String,
+    /// Skip durable fdatasync. `#[serde(skip)]` — set from `--no-fsync`.
+    #[serde(skip)]
+    pub wal_skip_fsync: bool,
+    /// Log directory. `#[serde(skip)]` — set from CLI.
+    #[serde(skip)]
+    pub log_dir: String,
+}
+
+impl Default for CrowKVConfig {
+    fn default() -> Self {
+        Self {
+            server: ServerConfig::DEFAULT,
+            paxos: PaxosConfig::DEFAULT,
+            election: PxElectionConfig::DEFAULT,
+            wal: WalConfig::default(),
+            force_classic: false,
+            wal_early_ack: true,
+            // R35: async engine apply on by default — the Linearizable
+            // read path's apply fence (`PxLearner::await_applied`) preserves
+            // read-your-writes, so moving `learn_chosen` off the write
+            // critical path is safe. Test profiles (`for_tests`) and the
+            // `PxGroup::new` test path opt back out for determinism.
+            async_engine_apply: true,
+            wal_root: PathBuf::from("waldata"),
+            config_root: PathBuf::from("conf"),
+            data_root: PathBuf::from("ctdata"),
+            wal_backend: "file".to_string(),
+            crowtree_backend: "file".to_string(),
+            wal_skip_fsync: false,
+            log_dir: "log".to_string(),
+        }
+    }
+}
+
+impl CrowKVConfig {
+    /// Load from a JSON file. Missing fields use sub-struct defaults.
+    ///
+    /// # Errors
+    /// Returns the `serde_json::Error` on parse failure.
+    pub fn load_from_file(path: &std::path::Path) -> Result<Self, serde_json::Error> {
+        let file = std::fs::File::open(path).map_err(serde_json::Error::io)?;
+        let mut config: Self = serde_json::from_reader(file)?;
+        // Fill runtime defaults if the file didn't set them (they're
+        // serde-skip so they're always default-initialized by
+        // deserialization).
+        if config.wal_root.as_os_str().is_empty() {
+            config.wal_root = PathBuf::from("waldata");
+        }
+        if config.config_root.as_os_str().is_empty() {
+            config.config_root = PathBuf::from("conf");
+        }
+        if config.data_root.as_os_str().is_empty() {
+            config.data_root = PathBuf::from("ctdata");
+        }
+        if config.wal_backend.is_empty() {
+            config.wal_backend = "file".to_string();
+        }
+        if config.crowtree_backend.is_empty() {
+            config.crowtree_backend = "file".to_string();
+        }
+        if config.log_dir.is_empty() {
+            config.log_dir = "log".to_string();
+        }
+        Ok(config)
+    }
+
+    /// Test profile — fast election timings, `wal_early_ack` off.
+    #[must_use]
+    pub fn for_tests() -> Self {
+        Self {
+            election: PxElectionConfig::for_tests(),
+            // Keep tests synchronous/deterministic — R17's spawned apply
+            // introduces timing nondeterminism. Tests that exercise R17 opt
+            // in via `set_async_engine_apply(true)`.
+            async_engine_apply: false,
+            ..Self::default()
+        }
+    }
+
+    /// E2E / benchmark profile — stable under real scheduling jitter.
+    #[must_use]
+    pub fn for_e2e() -> Self {
+        Self {
+            election: PxElectionConfig::for_e2e(),
+            ..Self::default()
+        }
+    }
+
+    /// Max in-flight proposals (convenience accessor for
+    /// `paxos.max_inflight_proposals`).
+    #[must_use]
+    pub fn max_inflight(&self) -> usize {
+        self.paxos.max_inflight_proposals
+    }
+
+    /// Admission policy (convenience accessor for
+    /// `paxos.inflight_admission`).
+    #[must_use]
+    pub fn inflight_admission(&self) -> AdmissionPolicy {
+        self.paxos.inflight_admission
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crowkv_config_default_round_trip() {
+        let config = CrowKVConfig::default();
+        let json = serde_json::to_string(&config).unwrap();
+        let restored: CrowKVConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.max_inflight(), config.max_inflight());
+        assert_eq!(restored.wal_early_ack, config.wal_early_ack);
+        assert_eq!(restored.election.election_min_ms, config.election.election_min_ms);
+    }
+
+    #[test]
+    fn crowkv_config_partial_json_uses_defaults() {
+        let json = r#"{"wal_early_ack": true}"#;
+        let config: CrowKVConfig = serde_json::from_str(json).unwrap();
+        assert!(config.wal_early_ack);
+        assert_eq!(
+            config.paxos.max_inflight_proposals,
+            PaxosConfig::DEFAULT.max_inflight_proposals
+        );
     }
 }

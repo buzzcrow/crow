@@ -90,7 +90,7 @@ Group 0 membership evolves using the shipped Model B reconfiguration
 primitive required.
 
 **Design history:** Originally rejected in favor of pure
-operator-managed topology. Re-evaluated and adopted as R2 when the
+operator-managed topology. Re-evaluated and adopted when the
 single-point-of-failure risk of console-only TOML became the blocking
 concern for HA deployments. The operator-managed HTTP management API
 remains as the Phase 1 bootstrap path; group 0 adds the HA cutover.
@@ -132,6 +132,19 @@ disk WAL segments are tagged by slot index for parallelism.
 
 Node-to-node and client-to-node channels are plaintext initially. The
 RPC layer and config schema reserve hooks for TLS from day one.
+
+### 3.10 Unified `CrowKVConfig`
+
+All cluster tunables — WAL, election, paxos, server, and the per-group
+internal flags (`force_classic`, `wal_early_ack`,
+`async_engine_apply`) — live in one `CrowKVConfig` struct with `serde`
+derives, loaded from a JSON config file (CLI args override individual
+fields). `PxGroup` holds a single `config: CrowKVConfig` field as the
+source of truth; individual setters (`set_force_classic`,
+`set_wal_early_ack`, etc.) delegate into `self.config.*` for surgical
+single-field overrides without rebuilding the whole struct. The
+`mgmt_api` rebuild path carries the config as one unit via
+`set_from_config(group.config())` instead of per-flag blocks.
 
 ## 4. Architecture Overview
 
@@ -281,8 +294,11 @@ Full design: `design-reconfiguration.md`, `design-kv-server.md`.
 - **Retry** — on timeout or `NotLeader`, client retries with backoff.
   `NotLeader` with hint → follow hint immediately.
 - **Idempotency** — `(client_id, seq)` dedup, persisted into the
-  PxLogEntry stream (survives leader change). Retention: ≥ 64 requests
-  per client AND ≥ 60s. Outside the window, outcome is unknown.
+  PxLogEntry stream (survives leader change). Per-client retention of
+  the last 64 committed `(seq, slot)` mappings, exact-match lookup: a
+  recorded `seq` returns its own commit slot; an unrecorded `seq`
+  (lower or otherwise) is a miss. Outside the window, outcome is
+  unknown, safe to re-propose.
 
 ## 11. Module Decomposition
 
@@ -293,7 +309,7 @@ Full design: `design-reconfiguration.md`, `design-kv-server.md`.
 | **Learner** | Tracks chosen values; applies to storage engine; maintains per-key resolved-slot. |
 | **WAL** | Durable, multi-disk write-ahead log. Sole persistent ground truth. |
 | **KvStore** | KV-facing runtime per node; owns `PxGroup`s; routes by `group_id`. |
-| **PxGroup** | Paxos group runtime; coordinates local + remote replicas. |
+| **PxGroup** | Paxos group runtime; coordinates local + remote replicas; holds one `CrowKVConfig`. |
 | **Replicator** | Streams `Accept`/`Chosen` from leader to peers; handles backpressure. |
 | **Leader Elector** | Raft-style election; manages `PxTerm`; lease management. |
 | **Repair** | Background task: detects and resolves slot gaps via classic Paxos. |

@@ -626,21 +626,20 @@ impl CrowkvClient {
                         });
                     }
                     self.metrics.record_scan_error();
-                    // `KvScanResponse` carries no dedicated
-                    // `not_leader_hint` field; the server encodes a
-                    // `MinSlot` redirect as
-                    // `"not leader; retry scan at {endpoint}"`. Follow
-                    // it to the leader (uncounted, mirroring the `get`
-                    // path) so a distributed `MinSlot` scan against a
-                    // follower that hasn't applied `min_slot` falls
-                    // back rather than being treated as a plain error.
-                    if let Some(new_endpoint) = Self::follow_scan_not_leader(&resp.error) {
+                    // Follow a `not_leader_hint` redirect (uncounted,
+                    // mirroring the `get` path) so a `MinSlot` scan
+                    // against a follower that hasn't applied `min_slot`
+                    // falls back to the leader rather than being treated
+                    // as a plain error.
+                    if !resp.not_leader_hint.is_empty() {
                         if read_mode == ReadMode::MinSlot
                             && self.read_endpoint_policy == ReadEndpointPolicy::AnyReplica
                         {
                             self.metrics.record_read_endpoint_fallback();
                         }
-                        endpoint = new_endpoint;
+                        self.topology
+                            .set_leader(store_id, group_id, resp.not_leader_hint.clone());
+                        endpoint = resp.not_leader_hint;
                         continue;
                     }
                     attempts = self.count_other(attempts, &resp.error)?;
@@ -689,21 +688,6 @@ impl CrowkvClient {
         self.topology
             .set_leader(store_id, group_id, resp.not_leader_hint.clone());
         Some(resp.not_leader_hint.clone())
-    }
-
-    /// `KvScanResponse` has no dedicated `not_leader_hint` field; the
-    /// server encodes a `MinSlot` redirect as the error string
-    /// `"not leader; retry scan at {endpoint}"` (see
-    /// `px_kv_store.rs::kv_scan`). Parse the leader endpoint out of
-    /// that prefix and return it so the scan retry loop can follow the
-    /// redirect. Returns `None` for any other error shape, leaving the
-    /// caller's counted-error path intact.
-    fn follow_scan_not_leader(error: &str) -> Option<String> {
-        let prefix = "not leader; retry scan at ";
-        error
-            .strip_prefix(prefix)
-            .filter(|s| !s.is_empty())
-            .map(std::string::ToString::to_string)
     }
 
     /// A `not leader` failure with an empty hint (the responding replica

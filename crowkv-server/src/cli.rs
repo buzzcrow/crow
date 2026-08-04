@@ -15,6 +15,12 @@ pub struct Cli {
     #[arg(long, default_value = "0.0.0.0")]
     pub management_addr: String,
 
+    /// Path to a JSON config file. When provided, loads `CrowKVConfig`
+    /// from the file; CLI args override individual fields. When omitted,
+    /// uses `CrowKVConfig::default()`.
+    #[arg(long)]
+    pub config: Option<std::path::PathBuf>,
+
     /// Port pool for gRPC `PxKvStore` listeners (comma/range format, e.g. "28001,28002,28010..28020").
     #[arg(long)]
     pub ports: Option<String>,
@@ -94,10 +100,17 @@ pub struct Cli {
     #[arg(long, default_value_t = 32)]
     pub max_inflight: usize,
 
-    /// Number of admission queues per group. Each queue gets
-    /// `ceil(max_inflight / inflight_queues)` permits. Default: 1.
-    #[arg(long, default_value_t = 1)]
-    pub inflight_queues: usize,
+    /// R45 max ops per coalesced batch (capped at 255). The leader
+    /// event-batches concurrent single-key proposes into one multi-key
+    /// Paxos proposal. `0` disables coalescing (default).
+    #[arg(long)]
+    pub coalesce_max_keys: Option<usize>,
+
+    /// R45b drain threshold: skip draining the pending batch when
+    /// in-flight slot-tasks >= this count. Default `max_inflight / 4`.
+    /// `0` = always drain (disables the heuristic).
+    #[arg(long)]
+    pub coalesce_drain_threshold: Option<usize>,
 }
 
 /// Parse a comma-separated list of numbers and ranges into a `Vec<u64>`.

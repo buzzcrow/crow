@@ -16,8 +16,9 @@ Client GET(key, read_mode, min_slot?)
   → CrowkvClient::get
     1. resolve_min_slot — MinSlot: auto-attach write watermark;
        Linearizable: 0
-    2. resolve_leader(store_id, group_id) — ALWAYS cached leader
-       endpoint, regardless of read_mode
+    2. resolve_read_endpoint — Linearizable (or MinSlot + Leader
+       policy): cached leader endpoint; MinSlot + AnyReplica (R26):
+       round-robin across replica endpoints, fallback to leader
     3. send KvGetRequest { key, read_mode, min_slot }
        [copy: key → HTTP/2 frame, unavoidable]
     4. retry: NotLeaderHint → follow; empty hint → wait+refresh;
@@ -34,8 +35,8 @@ Client GET(key, read_mode, min_slot?)
     8. [Serve] learner.engine_get_bytes(key: &[u8]) → KVEngine::get_bytes
        → Some((resolved_slot, Bytes)) or None
        [no key copy at Rust boundary]
-       [value copy: InMemKV clones out of DashMap; Crowtree fast path
-        one copy frame→Bytes (R21 eliminated the intermediate Vec);
+       [value copy: InMemKV clones out of DashMap shard; Crowtree fast
+        path one copy frame→Bytes (R21 eliminated the intermediate Vec);
         Crowtree slow path one copy I/O buf→Bytes on reactor thread]
     9. build KvResponse { read_slot, safe_slot, value: Bytes }
        [move: Bytes moved into response, no copy]
@@ -45,10 +46,11 @@ Client GET(key, read_mode, min_slot?)
 ### Per-Mode Routing (`resolve_read_point`)
 
 - **Linearizable** — local is leader:
-  - `linearizable_read_barrier()` → lease fast path or ReadIndex
-    fallback → `Ready { read_slot }` serve at `contiguous_chosen`
+  - `linearizable_read_barrier()` → leader-read-ready gate (else
+    `NoQuorum`) → lease fast path or ReadIndex fallback →
+    `Ready { read_slot }` serve at `contiguous_chosen`
   - `NotLeader` → redirect (race / loop-guard after forwarding failed)
-  - `NoQuorum` → `Unavailable`
+  - `NoQuorum` → `Unavailable` (no quorum, or leader not yet read-ready)
   - local not leader → `NotLeader` redirect (forwarding should have
     handled it; falls back to `NotLeader` rather than serving stale)
 - **MinSlot** — `contiguous_applied >= min_slot` → serve locally at
@@ -58,14 +60,22 @@ Client GET(key, read_mode, min_slot?)
 
 ### Linearizable Read Barrier
 
-1. **Lease fast path** — `lease_read_valid(now)` true → serve at
+1. **Leader-read-ready gate** — `leader_read_ready()` false → `NoQuorum`
+   without touching the lease or heartbeat. Set by the election driver
+   once the leader has a quorum-established term; cleared on step-down.
+   Cheap early reject for a replica that just won an election but hasn't
+   yet confirmed quorum, or one that has lost it.
+2. **Lease fast path** — `lease_read_valid(now)` true → serve at
    `contiguous_chosen` with no round-trip. Lease renewed by each
    successful heartbeat; valid for `lease_duration - max_clock_skew`
    after the last quorum ack.
-2. **ReadIndex fallback** — lease expired → one `run_heartbeat_round`.
-   Quorum ack confirms leadership at this term; higher term steps
-   down; no quorum → `NoQuorum`. Read served at `contiguous_chosen`
-   captured *before* the heartbeat.
+3. **ReadIndex fallback** — lease expired → one `run_heartbeat_round`,
+   with **R27 batching**: the first read to arrive (round leader) starts
+   the round and registers a pending batch carrying its pre-round
+   `read_slot`; later reads enqueue a waiter and adopt the same outcome
+   (same conservative freshness floor). Quorum ack confirms leadership
+   at this term; higher term steps down; no quorum → `NoQuorum`. Read
+   served at `contiguous_chosen` captured *before* the heartbeat.
 
 ### Key Data Structures
 
@@ -81,6 +91,13 @@ Client GET(key, read_mode, min_slot?)
 - **`contiguous_applied`** — highest contiguous slot applied to the
   local engine. Under V1 (apply == learn) tracks
   `contiguous_chosen` directly.
+- **`ReadRegistryHandles`** — registry-backed metric handles for the
+  read path, stored in a `OnceLock` for lock-free hot-path reads.
+  Counters: `lease_path`, `readindex_path`, `readindex_rounds`,
+  `minslot_fallback`. Latency summaries: `barrier`, `engine_get`.
+  Gauges: `lease_valid`, `contiguous_applied`, `safe_slot`. Plus
+  `PendingReadBarrier` (waiters coalesced onto one in-flight ReadIndex
+  round, R27).
 
 ---
 
@@ -90,27 +107,31 @@ Client GET(key, read_mode, min_slot?)
 Client SCAN(prefix, start_after, limit, read_mode, min_slot?)
   → CrowkvClient::scan
     1. resolve_min_slot (same as get)
-    2. send KvScanRequest
+    2. resolve_read_endpoint (same as get; R26 AnyReplica for MinSlot)
+    3. send KvScanRequest
        [copy: prefix → HTTP/2 frame, unavoidable]
-    3. retry: no NotLeaderHint in KvScanResponse; !ok is a plain error
+    4. retry: no NotLeaderHint in KvScanResponse; !ok is a plain error
   → KvStoreService::scan
-    4. [Linearizable] forward_kv_scan to leader (same at-most-once)
-    5. [MinSlot] serve local
+    5. [Linearizable] forward_kv_scan to leader (same at-most-once)
+    6. [MinSlot] serve local
        [copy: prefix allocated from network frame, unavoidable]
   → PxKvStore::kv_scan
-    6. resolve_read_point (min_slot passed through)
-    7. [Serve] learner.engine_scan(prefix, start_after, limit)
+    7. resolve_read_point (min_slot passed through)
+    8. [Serve] learner.engine_scan(prefix, start_after, limit)
        → Vec<(key, slot, value)>, truncated
-       [Crowtree: prefix to_vec() for FFI; packed result take_buf;
-        per-entry Vec<u8> for key+value in decode_scan]
-    8. build KvScanResponse { read_slot, entries }
+       [Crowtree: prefix to_vec() for FFI; ct_scan_async (fast path
+        memtable, slow path demand-load retry loop); packed result
+        take_buf; per-entry Vec<u8> for key+value in decode_scan.
+        start_after non-empty → fetch_limit=0 (over-fetch whole prefix
+        range), filter keys <= start_after in Rust, then apply limit]
+    9. build KvScanResponse { read_slot, entries }
        [move: entries moved into response, no copy]
        [copy: entries → socket buffer on gRPC serialize, unavoidable]
 ```
 
 - **No `not_leader_hint` in `KvScanResponse`** — client can't follow a
   hint; any `!ok` is a counted error. Server-side forwarding handles
-  linearizable redirection transparently.
+  linearizable redirection transparently. See E3 for adding a hint.
 - **`LatencySummary` not `LatencyHistogram`** — scan latency is
   dominated by result-set size, so fixed-bucket percentiles are less
   informative than count + avg + max.
@@ -121,18 +142,21 @@ Client SCAN(prefix, start_after, limit, read_mode, min_slot?)
 
 - **No admission window** — reads bypass `InflightAdmission`; no
   `max_inflight_reads`. Burst bounded only by Tokio scheduling, engine
-  throughput (lock-free `InMemKV`; FFI + demand-load for
-  `CrowtreeEngine`), and HTTP/2 stream concurrency. Intentional: reads
-  are cheap, non-blocking, and lease-path reads consume no consensus
-  resources.
+  throughput (`InMemKV` test-only `DashMap` (E5) — per-key entry API,
+  reads proceed concurrent with `apply`, no global write lock; FFI +
+  demand-load for `CrowtreeEngine`), and HTTP/2 stream concurrency.
+  Intentional: reads are cheap, non-blocking, and lease-path reads
+  consume no consensus resources.
 - **Parallel across replicas — MinSlot only.** Each replica's engine
   has its own `get`/`scan` path with no cross-replica coordination.
   Linearizable reads are serialized through the leader by definition.
-- **Gap: client always targets leader.** `resolve_leader` is used for
-  all read modes including stale. Stale-read capacity on followers is
-  wasted; leader carries unnecessary read load. Design choice
-  (simplicity over read scaling); future optimization could resolve to
-  any replica for MinSlot, or add a server-side read-load-balancer.
+- **Stale-read fan-out (resolved by R26).** With
+  `read_endpoint_policy = any_replica`, MinSlot reads round-robin
+  across all replica endpoints, so follower read capacity is no longer
+  wasted. A follower that hasn't applied `min_slot` redirects to the
+  leader (`NotLeader`), counted via `read_endpoint_fallback`. Default
+  policy remains `Leader`; least-conn / latency policies are future
+  work (E4).
 
 ---
 
@@ -159,71 +183,108 @@ Client SCAN(prefix, start_after, limit, read_mode, min_slot?)
 
 ## Read Path Components
 
-- **Client routing** — `CrowkvClient::get` always calls
-  `resolve_leader`. Topology cache populated from `/topology`, updated
-  via `NotLeaderHint`. For MinSlot, `resolve_min_slot` auto-attaches
-  the client's `write_watermark` (highest `revision` observed from its
-  own writes to this group) if caller omitted `min_slot`. Retry:
-  `NotLeaderHint` non-empty → follow (uncounted); empty hint →
-  `wait_and_refresh_leader` (100ms + refresh); transport error →
-  backoff + refresh. All counted against `max_retries` except hint
+- **Client routing** — `CrowkvClient::get` calls `resolve_read_endpoint`:
+  Linearizable, or MinSlot with `read_endpoint_policy = Leader`, →
+  `resolve_leader` (cached leader endpoint). MinSlot with
+  `read_endpoint_policy = AnyReplica` (R26) → round-robin across the
+  topology's replica endpoints, falling back to `resolve_leader` when
+  the replica list is empty. Topology cache populated from `/topology`,
+  updated via `NotLeaderHint`. For MinSlot, `resolve_min_slot`
+  auto-attaches the client's `write_watermark` (highest `revision`
+  observed from its own writes to this group) if caller omitted
+  `min_slot`. Retry: `NotLeaderHint` non-empty → follow (uncounted;
+  MinSlot+AnyReplica also records `read_endpoint_fallback`); empty
+  hint → `wait_and_refresh_leader` (100ms + refresh); transport error
+  → backoff + refresh. All counted against `max_retries` except hint
   follows.
 - **Server forwarding** — `KvStoreService::get`: check
   `x-crowkv-forwarded` (loop-guard); if not forwarded and local not
   leader → `forward_kv_get`; success → return leader response (metrics
-  recorded at forwarder); failure → fall through (degraded; store
-  returns `NotLeader` for linearizable). MinSlot never forwarded.
-- **Engine get** — `InMemKV`: `DashMap::get` → ref, cloned out via
-  trait return → `Bytes::from(vec)`. `CrowtreeEngine`: FFI
-  `ct_get_async` → fast path lock-free memtable lookup with epoch
-  guard; slow path io_uring demand-load via `ct_future` (primary
-  latency contributor for cold reads).
+  recorded at forwarder, `kv.get_forwarded.c`); failure → fall through
+  (degraded, `kv.get_forward_failed.c`; store returns `NotLeader` for
+  linearizable). MinSlot never forwarded. Scan mirrors this in
+  `KvStoreService::scan` / `forward_kv_scan`.
+- **Engine get** — `InMemKV` (test-only): `DashMap::get` (per-shard
+  lock, no global lock) → value cloned out via trait return →
+  `Bytes::from(vec)`. `CrowtreeEngine`: `try_get_pinned` → fast path
+  lock-free memtable lookup with epoch guard returning `PinnedValue`
+  (R6: `into_bytes()` produces a zero-copy `Bytes` via
+  `Bytes::from_owner`); slow path `ct_get_async` demand-load via
+  `ct_future` (primary latency contributor for cold reads).
 - **Engine scan** — ordered prefix scan, up to `limit` live
-  (non-tombstoned) entries. `InMemKV`: sorted `DashMap` iteration.
-  `CrowtreeEngine`: in-order memtable traversal. No async scan C API
-  yet.
+  (non-tombstoned) entries. `InMemKV` (test-only): `DashMap` is not
+  key-ordered — collects matching live entries then sorts (E5).
+  `CrowtreeEngine`:
+  `try_scan` → `ct_scan_async` (fast path memtable traversal, slow path
+  demand-load retry loop); packed result decoded per-entry into
+  `Vec<u8>` key+value. `start_after` is not pushed into the C++ API —
+  when non-empty the engine over-fetches the whole prefix range
+  (`fetch_limit=0`) and filters in Rust.
 
 ---
 
 ## Gaps and Optimization Opportunities
 
-- **G1 — No per-mode latency breakdown.** `get.lh` merges linearizable
-  (may incur heartbeat RTT) with MinSlot (local lookup). Fix: separate
-  `kv.get.linearizable.lh` / `kv.get.min_slot.lh`, or per-mode counters
-  + shared histogram.
-- **G2 — No lease vs ReadIndex counter.** Can't tell whether
-  linearizable latency is lease ineffectiveness or engine slowness.
-  Fix: `read.lease_path.c`, `read.readindex_path.c`.
-- **G3 — No read barrier latency.** Can't separate barrier RTT from
-  engine get. Fix: `read.barrier.l` (LatencySummary; near-zero lease,
-  one RTT ReadIndex).
-- **G4 — No forward counter.** Can't tell client misrouting from
-  cache-stale leader changes. Fix: `kv.get_forwarded.c`,
-  `kv.get_forward_failed.c`.
-- **G5 — No engine read latency.** `get.lh` covers barrier + engine;
-  can't isolate engine cost (matters for `CrowtreeEngine` demand-load).
-  Fix: `read.engine_get.l` (mirrors write path's
-  `wal.{bl}.append.l` / `fsync.l` thinnest-layer pattern).
-- **G6 — No read bandwidth hierarchy.** `bytes_in/out.bw` shared with
-  writes; mixed workloads indistinguishable. Fix:
-  `kv.read_bytes_in.bw`, `kv.read_bytes_out.bw` (keep combined for
-  backward compat).
-- **G7 — No MinSlot fallback counter.** Can't detect follower lag
-  driving redirects. Fix: `read.minslot_fallback.c`.
-- **G8 — No read parallelism (resolved by R26).** Client previously
-  targeted leader for all modes; stale-read capacity on followers
-  wasted. Fix (shipped): client resolves to any replica for MinSlot
-  via `read_endpoint_policy = any_replica`; topology cache exposes all
-  endpoints; round-robin read-endpoint selector with `NotLeader`-hint
-  fallback. Least-conn / latency policies remain future work.
-- **G9 — ReadIndex batching (resolved by R27).** Documented in
-  `design-leader-election.md` §7.2. Each expired-lease linearizable
-  read previously triggered a separate heartbeat; concurrent barriers
-  now coalesce onto one in-flight round (queue pending barriers,
-  resolve all on one quorum ack).
-- **G10 — No read-specific gauges.** Fix: `read.lease_valid.g` (1/0),
-  `read.contiguous_applied.g`, `read.safe_slot.g` (latter two bridged
-  from existing atomics already in `GroupStatus`).
+### Open gaps
+
+- **G1 — Per-mode latency breakdown (done).** `kv.get.lh` is now split
+  into `kv.get.linearizable.lh` and `kv.get.min_slot.lh`; each get
+  records into both its per-mode histogram and the combined
+  `kv.get.lh` for backward compat.
+
+### Enhancement opportunities
+
+- **E1 — Scan `start_after` push-down.** `CrowtreeEngine::scan` cannot
+  push `start_after` into the C++ API (`ct_scan_async` takes only
+  `prefix` + `limit`). When `start_after` is non-empty the engine sets
+  `fetch_limit = 0` (over-fetch the whole prefix range), ships the
+  packed result across the FFI boundary, then filters keys `<=
+  start_after` in Rust before applying the limit. Deep pagination
+  transfers and decodes entries the client will discard. Fix: extend
+  `ct_scan_async` with a `start_after` cursor + lower-bound seek, so
+  the C++ engine starts iteration at the cursor and applies the limit
+  natively. Flagged in the `CrowtreeEngine::scan` code comment.
+- **E2 — Scan value zero-copy.** Get has R6 zero-copy via
+  `PinnedValue::into_bytes` (`Bytes::from_owner` backed by the C++
+  frame). Scan still produces per-entry `Vec<u8>` for both key and
+  value in `decode_scan` (packed `take_buf` → per-entry decode →
+  owned `Vec`). A `PinnedScanEntry` / `Bytes::from_owner` path for
+  scan values would eliminate the per-entry copy, mirroring R6 for the
+  scan path. Matters for large-value range reads.
+- **E3 — Scan `not_leader_hint` (done).** `KvScanResponse` now carries
+  a `not_leader_hint` field; a MinSlot scan that hits a lagging follower
+  follows the redirect uncounted, mirroring `get`. Server-side
+  forwarding already hides linearizable redirects; this only affects
+  MinSlot on a follower that hasn't reached `min_slot`.
+- **E4 — Least-conn / latency read-endpoint policy.** R26 shipped
+  round-robin `AnyReplica`. A `ReadEndpointPolicy::LeastConnections`
+  or `::Latency` policy — driven by server-reported in-flight counts
+  or client-measured RTT — would balance MinSlot load by actual
+  capacity rather than blind rotation, avoiding hotspots when one
+  replica is slow (e.g. demand-loading cold crowtree pages).
+- **E5 — `InMemKV` read/apply concurrency (done).** `InMemKV` now uses
+  `DashMap` instead of `RwLock<BTreeMap>`: reads proceed concurrent with
+  `apply` (per-key entry API, no global write lock). `scan` and
+  `iter_all` collect and sort since `DashMap` is not key-ordered —
+  acceptable for test-only use.
+- **E7 — Read-path hardening batch (tracked as R44).** Eight smaller
+  gaps from the implementation review, bundled in
+  `doc/backlog/R44-read-path-hardening.md`: scan forward-fail path
+  drops the leader hint (get sets it); scan FFI errors swallowed to an
+  empty `ok` result; client string-matches `"not leader"`; client
+  ignores topology refresh failures; ReadIndex heartbeat round runs
+  peer catch-up replay inline; C++ `scan_async` restarts the whole
+  scan on any cold leaf (no cursor resume); client `to_vec` copies of
+  response values; no per-mode scan latency split or over-fetch
+  counters.
+- **E6 — Custom RPC transport (deferred, R32).** The HTTP/2
+  connection-level lock serializes concurrent writers on one
+  connection (HPACK table, frame output buffer, flow-control windows
+  are shared mutable state). A length-prefixed custom transport over
+  raw TCP would eliminate the userspace funnel and recover
+  concurrency for many-threads-one-connection patterns. Tracked as
+  R32; deferred until read throughput is the primary constraint and
+  the h2 lock is profiled as the hot spot. See § gRPC transport below.
 
 ---
 
@@ -245,12 +306,12 @@ for stale modes; chosen+applied ⇒ identical results across replicas
 forwarding linearizable reads to the leader (MinSlot self-checks
 instead).
 
-Main gaps: **metrics instrumentation** (G1–G7, G10) — operators can't
-diagnose reads at write-path granularity; **read parallelism** (G8,
-resolved by R26) — stale-read capacity now distributed via
-`read_endpoint_policy = any_replica`; **ReadIndex batching** (G9,
-resolved by R27) — concurrent barriers now coalesce onto one
-heartbeat round.
+Open work: **E1** scan `start_after` push-down (R37), **E2** scan value
+zero-copy (R38), **E4** least-conn/latency endpoint policy (R39),
+**E6** custom RPC transport (R32, deferred), **E7** read-path
+hardening batch (R44). **G1** per-mode latency breakdown, **E3**
+scan `not_leader_hint`, and **E5** `InMemKV` read/apply concurrency are
+done.
 
 ---
 
@@ -261,10 +322,12 @@ of what remains:
 
 - **O(n) unavoidable** — gRPC request deserialize (key/prefix from
   network frame); gRPC response serialize (value(s) into socket);
-  `InMemKV` get (value cloned from `DashMap`); `CrowtreeEngine` get
-  (one copy: frame → `Bytes` fast path, or I/O buffer → `Bytes` slow
-  path); `CrowtreeEngine` scan (prefix `to_vec()` for FFI, packed
-  result `take_buf`, per-entry `Vec<u8>` in `decode_scan`).
+  `InMemKV` (test-only) get (value cloned from `DashMap` shard);
+  `CrowtreeEngine` get (one copy: frame → `Bytes` fast path, or I/O
+  buffer → `Bytes` slow path); `CrowtreeEngine` scan (prefix `to_vec()`
+  for FFI, packed result `take_buf`, per-entry `Vec<u8>` for key+value
+  in `decode_scan`; plus over-fetch copies when `start_after` is
+  non-empty — see E1).
 - **Eliminated by R21** — engine get key copy (Rust-side `to_vec()`
   gone; C API copies internally); engine get intermediate `Vec<u8>`
   (fast path returns `PinnedValue` borrowing the C++ frame; final
@@ -279,10 +342,12 @@ of what remains:
 
 The read path has fewer O(n) copies than the write path: no WAL
 encode/replay, no payload encoding, no Batch decode, no FFI batch
-encode. After R6, the read path is fully zero-copy from frame to gRPC
-response: `PinnedValue::into_bytes()` produces a `Bytes` backed by the
-C++ frame via `Bytes::from_owner`, with page refcount pins keeping the
-frame alive until the `Bytes` is dropped on any thread.
+encode. After R6, the **get** path is fully zero-copy from frame to
+gRPC response: `PinnedValue::into_bytes()` produces a `Bytes` backed
+by the C++ frame via `Bytes::from_owner`, with page refcount pins
+keeping the frame alive until the `Bytes` is dropped on any thread.
+The **scan** path is not yet zero-copy — per-entry `Vec<u8>` decode
+remains (see E2).
 
 ---
 
@@ -295,9 +360,12 @@ frame alive until the `Bytes` is dropped on any thread.
 - **Memory interconnect**: Dual-channel DDR4-3200, PCIe 4.0
   — **not** HBM. DRAM bandwidth is constrained by the 2-channel
   topology; cross-CCX traffic crosses the Infinity Fabric, adding
-  latency for `InMemKV` (`DashMap`) and `mem-block` WAL accesses
+  latency for `CrowtreeEngine` `mem-block` page-store and WAL accesses
   that land on a different CCX than the issuing core. This matters
-  for in-memory KV workloads where every read touches DRAM.
+  for in-memory KV workloads where every read touches DRAM. (The
+  benchmark uses `--mode mem` → `kv_backend = mem-block`, i.e.
+  `CrowtreeEngine` over an in-memory block page store — not the
+  test-only `InMemKV`, which isn't wired into the server CLI.)
 - **OS**: Linux
 - **macOS (Apple M5 Pro)**: placeholder — to be re-collected with
   the current codebase. Apple Silicon uses **unified memory**
@@ -319,8 +387,7 @@ disabled (`--verify-bytes 0`) for clean throughput; verified
 separately with `--verify-bytes 8` (`correctness_errors = 0` across
 all configs).
 
-Benchmark scripts: full sweep `tools/bench-read-sweep.sh`, regression
-subset `tools/bench-read-regression.sh`.
+Regression sentinel: `tools/bench-read-regression.sh`.
 
 Two read modes benchmarked:
 
@@ -332,8 +399,9 @@ Two read modes benchmarked:
   across all 3 replicas.
 
 60 runs total (54 sweep + 6 verification), zero errors, zero
-correctness errors. Full raw data in
-[`plan-perf.md`](plan-perf.md#raw-data).
+correctness errors. Raw data was collected via the now-removed full
+sweep script; the regression sentinel is
+[`tools/bench-read-regression.sh`](../../tools/bench-read-regression.sh).
 
 ### Phase 1 — 1T:1C scaling
 
@@ -524,13 +592,17 @@ them reach `write()`. The kernel never sees concurrent writers; h2
 hands it one merged buffer from one thread.
 
 A custom protocol (`[len][req_id][protobuf]` over raw TCP) has **no
-connection-level userspace lock**. Each thread calls `write()`
-independently — the length-prefixed framing is stateless, there's no
-shared encoder table, no per-stream state, no flow-control windows.
-The kernel's TCP lock (fast spinlock, held for one syscall) is the
-only serialization point. N threads produce N independent `write()`
-calls that the kernel coalesces into one segment. The userspace
-funnel is gone.
+connection-level userspace lock**. The length-prefixed framing is
+stateless — no shared encoder table, no per-stream state, no
+flow-control windows. Threads cannot call `write()` on the socket
+directly, though: a TCP `write()` is not atomic under partial writes
+(a full send buffer can interleave bytes from two threads and corrupt
+the framing). The proven design (protosocket, Volo) is a
+per-connection writer task draining a lock-free MPSC queue with
+`writev` batching. That is still one serialization point per
+connection, but a vastly cheaper one — a queue push instead of HPACK
++ stream state + flow-control bookkeeping under a mutex. The
+expensive userspace funnel is gone.
 
 This is a **design mismatch**, not a tuning problem. HTTP/2's
 stream/HPACK/flow-control architecture inherently requires a

@@ -47,3 +47,6 @@ mod read_metrics;
 
 #[path = "store/readindex_batch_test.rs"]
 mod readindex_batch;
+
+#[path = "store/apply_fence_test.rs"]
+mod apply_fence;

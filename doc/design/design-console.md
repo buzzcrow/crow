@@ -183,7 +183,7 @@ long-running monitor task that owns the live cache:
    request. A handler that needs a stronger guarantee ("force fresh")
    can request an inline refresh, but that is the exception.
 
-### 4.3 Persistent Cluster Config (R2)
+### 4.3 Persistent Cluster Config
 
 **Problem**: The TOML config file is a single point of failure — losing
 the console host loses the full topology. Per-node server config is also

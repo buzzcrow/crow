@@ -28,7 +28,7 @@ const GROUP: u64 = 1;
 #[allow(clippy::cast_possible_truncation)]
 fn accepted_write(slot: u64, term: u64, key: &[u8], value: &[u8]) -> PxLogEntry {
     let mut payload = Vec::new();
-    payload.push(1u8); // op_count
+    payload.extend_from_slice(&1u16.to_le_bytes()); // op_count
     payload.push(0u8); // Put
     payload.extend_from_slice(&(key.len() as u32).to_le_bytes());
     payload.extend_from_slice(key);

@@ -38,7 +38,7 @@ The management API starts **before** stores so the server is observable
 even if store creation fails. When `--stores` is omitted, the server
 boots empty and stores are created via the management API.
 
-With R2, the server auto-loads its store/group configuration from
+With persistent cluster config, the server auto-loads its store/group configuration from
 `conf/node-config.json` (per-node config cache) on startup. If the
 cache exists, `--stores`/`--groups` CLI args are not needed — the
 server restores all stores/groups from the cache, replays WAL, and

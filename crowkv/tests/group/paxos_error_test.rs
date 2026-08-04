@@ -98,6 +98,7 @@ async fn malformed_accept_request_is_rejected_by_grpc_boundary() {
             seq: 0,
             group_id: 1,
             membership_epoch: 0,
+            dedup_tags: Vec::new(),
         })
         .await
         .expect_err("missing value should be rejected");

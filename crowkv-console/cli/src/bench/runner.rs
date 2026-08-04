@@ -666,21 +666,22 @@ fn spawn_progress_snapshotter(
         loop {
             tokio::time::sleep(interval).await;
             let now = Instant::now();
-            if now >= deadline {
-                break;
-            }
+            // Clamp the final partial tick to the deadline so the last
+            // progress line is still emitted with accurate QPS.
+            let past_deadline = now >= deadline;
+            let effective_now = if past_deadline { deadline } else { now };
 
             let total_ops: u64 = counters.iter().map(|c| c.total_ops()).sum();
             let total_err: u64 = counters.iter().map(|c| c.total_errors()).sum();
             let delta_ops = total_ops.saturating_sub(last_ops);
-            let dt = now.duration_since(last_tick).as_secs_f64().max(1e-9);
+            let dt = effective_now.duration_since(last_tick).as_secs_f64().max(1e-9);
             #[allow(
                 clippy::cast_precision_loss,
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss
             )]
             let qps = (delta_ops as f64 / dt).round() as u64;
-            let elapsed_s = now.duration_since(started).as_secs();
+            let elapsed_s = effective_now.duration_since(started).as_secs();
 
             let cm = client.metrics();
             eprintln!(
@@ -689,7 +690,11 @@ fn spawn_progress_snapshotter(
             );
 
             last_ops = total_ops;
-            last_tick = now;
+            last_tick = effective_now;
+
+            if past_deadline {
+                break;
+            }
         }
     })
 }
@@ -785,12 +790,14 @@ fn spawn_metrics_flusher(
                 .unwrap_or(interval);
             tokio::time::sleep(delay).await;
             let now = Instant::now();
-            if now >= deadline {
-                break;
-            }
+            // If the aligned tick overshoots the deadline, clamp reporting
+            // to the deadline so the final partial window is still emitted
+            // (TPS stays accurate) instead of being silently dropped.
+            let past_deadline = now >= deadline;
+            let effective_now = if past_deadline { deadline } else { now };
 
-            let dt = now.duration_since(last_tick).as_secs_f64().max(1e-9);
-            let elapsed = now.duration_since(started).as_secs_f64().max(1e-9);
+            let dt = effective_now.duration_since(last_tick).as_secs_f64().max(1e-9);
+            let elapsed = effective_now.duration_since(started).as_secs_f64().max(1e-9);
             let timestamp = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
 
             // Drain window latency from the client library once.
@@ -1024,7 +1031,11 @@ fn spawn_metrics_flusher(
                 let _ = f.write_all(out.as_bytes());
             }
 
-            last_tick = now;
+            last_tick = effective_now;
+
+            if past_deadline {
+                break;
+            }
         }
     })
 }

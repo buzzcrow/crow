@@ -16,15 +16,38 @@ EXTENSIONS = {".cpp", ".h"}
 DEFAULT_BATCH_SIZE = 3
 DEFAULT_JOBS = 10
 
+# Files that are Linux-only (guarded by CROWTREE_HAVE_LIBURING). clang-tidy
+# cannot process them on macOS (reactor.h has a #error when liburing is
+# absent), so they are skipped when liburing is not found by CMake.
+LIBURING_GATED_FILES = {
+    "crowtree/include/crowtree/reactor.h",
+    "crowtree/src/reactor.cpp",
+    "crowtree/src/block_async_page_store.cpp",
+    "crowtree/tests/unit/reactor_test.cpp",
+}
+
+
+def liburing_available() -> bool:
+    """Check the CMake cache for liburing (set by crowtree/CMakeLists.txt)."""
+    cache = Path("crowtree/build/CMakeCache.txt")
+    if not cache.exists():
+        return True  # no build dir — don't skip (let clang-tidy report the real error)
+    text = cache.read_text()
+    return "LIBURING_INCLUDE_DIR:PATH=LIBURING_INCLUDE_DIR-NOTFOUND" not in text
+
 
 def collect_files() -> list[str]:
+    skip_liburing = not liburing_available()
     files: list[str] = []
     for root in SEARCH_DIRS:
         if not root.exists():
             continue
         for path in root.rglob("*"):
             if path.is_file() and path.suffix in EXTENSIONS:
-                files.append(path.as_posix())
+                posix = path.as_posix()
+                if skip_liburing and posix in LIBURING_GATED_FILES:
+                    continue
+                files.append(posix)
     files.sort()
     return files
 

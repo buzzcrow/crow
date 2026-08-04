@@ -6,10 +6,13 @@
 #![allow(clippy::missing_fields_in_debug)]
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 
 use futures::future::join_all;
+use futures::stream::FuturesUnordered;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
@@ -17,20 +20,30 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::cluster::group_config::{GroupConfigStore, PxGroupConfig, PxGroupMember};
-use crate::cluster::group_election::{PendingLeaderHandoff, ReadBarrierOutcome};
+use crate::cluster::group_election::{LeaderElection, PendingLeaderHandoff, ReadBarrierOutcome, XorShift64};
 use crate::cluster::local_replica::PxLocalReplica;
 use crate::cluster::node_config::NodeConfigStore;
 use crate::cluster::remote_replica::PxRemoteReplica;
 use crate::cluster::replica::{
-    Replica, ReplicaClient, ReplicaHandler, StepDownReply, StepDownRequestPayload,
+    PxReplicaError, Replica, ReplicaClient, ReplicaHandler, StepDownReply, StepDownRequestPayload,
 };
 use crate::cluster::status::{GroupStatus, InflightStatus, StatusLevel};
-use crate::common::config::{AdmissionPolicy, PaxosConfig, PxElectionConfig};
+use crate::common::config::{AdmissionPolicy, CrowKVConfig, PaxosConfig};
 use crate::common::report::OperationReport;
 use crate::metrics::{Counter, Gauge, LatencySummary};
 use crate::paxos::error::{PxPaxosError, PxPaxosPhase, PxRetryAction};
-use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply, SlotIndex};
+use crate::paxos::roles::{DedupTag, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply, SlotIndex};
 use crate::paxos::{PxGroupId, PxNodeId};
+
+/// Registry-based metric handles for write-path instrumentation.
+/// Created by [`PxGroup::set_metrics_registry`] and stored in a
+/// `OnceLock` for lock-free hot-path reads. Mirrors `ReadRegistryHandles`.
+pub(crate) struct WriteRegistryHandles {
+    pub(crate) propose_e2e: Arc<LatencySummary>,
+    pub(crate) prepare_phase: Arc<LatencySummary>,
+    pub(crate) accept_phase: Arc<LatencySummary>,
+    pub(crate) accept_quorum_rpc: Arc<LatencySummary>,
+}
 
 /// Registry-based metric handles for read-path instrumentation.
 /// Created by [`PxGroup::set_metrics_registry`] and stored in a
@@ -43,6 +56,8 @@ pub(crate) struct ReadRegistryHandles {
     pub(crate) minslot_fallback: Arc<Counter>,
     pub(crate) barrier: Arc<LatencySummary>,
     pub(crate) engine_get: Arc<LatencySummary>,
+    /// R35 apply-fence wait latency (fast path is a single atomic load).
+    pub(crate) apply_fence: Arc<LatencySummary>,
     pub(crate) lease_valid: Arc<Gauge>,
     pub(crate) contiguous_applied: Arc<Gauge>,
     pub(crate) safe_slot: Arc<Gauge>,
@@ -57,6 +72,30 @@ pub(crate) struct PendingReadBarrier {
     pub(crate) waiters: Vec<tokio::sync::oneshot::Sender<ReadBarrierOutcome>>,
 }
 
+/// R45: an accumulating batch for the *next* Paxos round. Held in
+/// `PxGroup::coalescer` while a round is in flight — ops that arrive
+/// during the round append here instead of starting their own round.
+/// When the in-flight round completes, this batch is drained and
+/// becomes the next round (if non-empty). If it fills to `max_keys`
+/// before the round completes, it is flushed immediately as a
+/// concurrent round (the "multiple pipelines" path). The `timer` field
+/// is reserved for watchdog use (currently a no-op).
+#[derive(Default)]
+pub(crate) struct PendingBatch {
+    pub(crate) op_bodies: Vec<u8>,
+    pub(crate) op_count: u16,
+    pub(crate) tags: Vec<DedupTag>,
+    pub(crate) waiters: Vec<tokio::sync::oneshot::Sender<ProposeResult>>,
+    pub(crate) timer: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Watchdog interval (microseconds). A single long-running watchdog task
+/// sleeps this long, then checks if there's been no coalescer activity
+/// (enqueue or round completion) for this duration. If so, it flushes
+/// any stuck non-empty batch. Only fires on inactivity — zero overhead
+/// during normal operation.
+const WATCHDOG_US: u64 = 1_000_000;
+
 pub struct PxGroup {
     pub group_id: PxGroupId,
     cached_quorum: usize,
@@ -64,22 +103,12 @@ pub struct PxGroup {
     pub(crate) remote_replicas: Vec<RemoteReplicaKind>,
     pub(crate) valid_replica_count: usize,
     pub(crate) next_slot: AtomicU64,
-    /// When true, always run Phase-1 Prepare before Accept (classic Paxos).
-    force_classic: bool,
-    /// R16b: when true, the proposer declares `Chosen` as soon as remote
-    /// quorum is met, without waiting for the local WAL persist to finish.
-    /// The local persist is tracked concurrently. Weakens the W6 ack
-    /// contract for the local replica. Default false.
-    wal_early_ack: bool,
-    /// R17: when true, `learn_chosen` (engine apply) runs as a background
-    /// task instead of on the propose critical path. The client receives
-    /// `Chosen` before the local engine has applied the value.
-    /// Read-your-writes semantics break unless a read barrier is added.
-    /// Default false.
-    async_engine_apply: bool,
-    /// Leader-election / heartbeat / lease tunables for this group's
-    /// [`crate::cluster::group_election::spawn`] driver task.
-    pub(crate) election_cfg: PxElectionConfig,
+    /// Unified cluster configuration held by this group. Replaces the
+    /// former individual `force_classic` / `wal_early_ack` /
+    /// `async_engine_apply` bool fields and `election_cfg`. Set wholesale
+    /// via [`Self::set_from_config`]; individual setters delegate into
+    /// `self.config.*` so the held config stays the source of truth.
+    pub(crate) config: CrowKVConfig,
     /// Per-leadership-tenure [`CancellationToken`]. Cancelled in
     /// [`Self::shutdown`] and by every step-down trigger. The bulk-Phase-1
     /// sweep and the election driver both honor it.
@@ -187,6 +216,9 @@ pub struct PxGroup {
     /// [`Self::set_metrics_registry`] when a registry is wired.
     /// `None` in tests / no-registry mode.
     pub(crate) read_handles: OnceLock<ReadRegistryHandles>,
+    /// Optional registry handles for write-path metrics. Set via
+    /// [`Self::set_metrics_registry`] when a registry is wired.
+    pub(crate) write_handles: OnceLock<WriteRegistryHandles>,
     /// Pending `ReadIndex` barrier batch. `Some` only while a `ReadIndex`
     /// heartbeat round is in flight; concurrent reads that arrive during
     /// the round enqueue a waiter here instead of starting their own
@@ -200,6 +232,35 @@ pub struct PxGroup {
     /// under the `test-util` feature; `None` in production.
     #[cfg(feature = "test-util")]
     pub(crate) readindex_round_gate: parking_lot::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// Test-only gate that holds the next coalescer round open until the
+    /// test releases it, so concurrent ops deterministically join the
+    /// pending batch. Consumed by the first round that runs after this call.
+    #[cfg(feature = "test-util")]
+    pub(crate) coalesce_round_gate: parking_lot::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// R36 self-weak back-reference, set once the group is wrapped in an
+    /// [`Arc`] via [`Self::set_self_weak`]. The coalescer's per-batch timer
+    /// task upgrades this to spawn a flush without the group holding a
+    /// strong self-reference (which would leak). `None` until set (test
+    /// groups not wrapped in `Arc`); the coalescer falls back to the
+    /// direct single-op path when unset.
+    pub(crate) self_weak: OnceLock<Weak<PxGroup>>,
+    /// R45 coalescer state. `None` when idle (no round in flight, no
+    /// batch accumulating); `Some(PendingBatch)` while a Paxos round is
+    /// in flight and ops are accumulating for the next round. Drained on
+    /// round completion to start the next round, or on `max_keys`
+    /// overflow to start a concurrent round.
+    pub(crate) coalescer: parking_lot::Mutex<Option<PendingBatch>>,
+    /// Fixed `max_keys` for coalescing batches. Set from config; 0 disables
+    /// coalescing. When a batch fills to this size, it flushes as a
+    /// concurrent round.
+    pub(crate) coalesce_max_keys: std::sync::atomic::AtomicU16,
+    /// Last coalescer activity timestamp (micros since `UNIX_EPOCH`).
+    /// Updated on every enqueue and round completion. The watchdog
+    /// checks this to detect stuck batches.
+    pub(crate) coalesce_last_activity_us: std::sync::atomic::AtomicU64,
+    /// Single long-running watchdog task handle. Started lazily on
+    /// first enqueue.
+    pub(crate) coalesce_watchdog_handle: OnceLock<tokio::task::JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for PxGroup {
@@ -224,10 +285,14 @@ impl PxGroup {
             remote_replicas: Vec::new(),
             valid_replica_count: 0,
             next_slot: AtomicU64::new(1),
-            force_classic: false,
-            wal_early_ack: false,
-            async_engine_apply: false,
-            election_cfg: PxElectionConfig::DEFAULT,
+            // Test path: wal_early_ack / async_engine_apply default false
+            // for deterministic synchronous apply; production overwrites via
+            // set_from_config.
+            config: CrowKVConfig {
+                wal_early_ack: false,
+                async_engine_apply: false,
+                ..CrowKVConfig::default()
+            },
             tenure_cancel: CancellationToken::new(),
             driver_handle: AsyncMutex::new(None),
             maintenance_handle: AsyncMutex::new(None),
@@ -240,7 +305,6 @@ impl PxGroup {
             group_snapshot_slot: AtomicU64::new(0),
             inflight: InflightAdmission::new(
                 PaxosConfig::DEFAULT.max_inflight_proposals,
-                PaxosConfig::DEFAULT.inflight_queues,
                 PaxosConfig::DEFAULT.inflight_admission,
             ),
             config_store: None,
@@ -249,9 +313,17 @@ impl PxGroup {
             last_snapshot_slot: AtomicU64::new(0),
             last_snapshot_time: parking_lot::Mutex::new(std::time::Instant::now()),
             read_handles: OnceLock::new(),
+            write_handles: OnceLock::new(),
             pending_read_barrier: parking_lot::Mutex::new(None),
             #[cfg(feature = "test-util")]
             readindex_round_gate: parking_lot::Mutex::new(None),
+            #[cfg(feature = "test-util")]
+            coalesce_round_gate: parking_lot::Mutex::new(None),
+            self_weak: OnceLock::new(),
+            coalescer: parking_lot::Mutex::new(None),
+            coalesce_max_keys: std::sync::atomic::AtomicU16::new(0),
+            coalesce_last_activity_us: std::sync::atomic::AtomicU64::new(0),
+            coalesce_watchdog_handle: OnceLock::new(),
         };
         group.recompute_quorum();
         group
@@ -278,32 +350,53 @@ impl PxGroup {
     /// Enable or disable R16b early-ack (declare chosen on remote quorum
     /// without waiting for local WAL persist). Default off.
     pub fn set_wal_early_ack(&mut self, enabled: bool) {
-        self.wal_early_ack = enabled;
+        self.config.wal_early_ack = enabled;
     }
 
     /// Enable or disable R17 async engine apply (return Chosen before
     /// local engine apply completes). Default off.
     pub fn set_async_engine_apply(&mut self, enabled: bool) {
-        self.async_engine_apply = enabled;
+        self.config.async_engine_apply = enabled;
+    }
+
+    /// Apply all tunables from a `CrowKVConfig` wholesale: replaces the
+    /// held config, mirrors the election lease onto the local replica,
+    /// and reconstructs the inflight admission gate from the paxos
+    /// params. Replaces the per-field setter calls at group creation
+    /// and rebuild sites.
+    pub fn set_from_config(&mut self, config: &CrowKVConfig) {
+        self.config = config.clone();
+        self.set_election_config(config.election);
+        self.set_inflight_config(
+            config.paxos.max_inflight_proposals,
+            config.paxos.inflight_admission,
+        );
+        self.coalesce_max_keys.store(
+            config.paxos.coalesce_max_keys as u16,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    /// Borrow the unified config held by this group.
+    #[must_use]
+    pub fn config(&self) -> &CrowKVConfig {
+        &self.config
     }
 
     /// Set the in-flight proposal admission configuration. Must be
-    /// called before the group starts serving proposals.
-    pub fn set_inflight_config(&mut self, max_inflight: usize, queues: usize, policy: AdmissionPolicy) {
-        self.inflight = InflightAdmission::new(max_inflight, queues, policy);
+    /// called before the group starts serving proposals. Also syncs the
+    /// params into `self.config.paxos` so the held config stays the
+    /// source of truth.
+    pub fn set_inflight_config(&mut self, max_inflight: usize, policy: AdmissionPolicy) {
+        self.inflight = InflightAdmission::new(max_inflight, policy);
+        self.config.paxos.max_inflight_proposals = max_inflight;
+        self.config.paxos.inflight_admission = policy;
     }
 
-    /// Current inflight proposal window size (total permits across all
-    /// queues).
+    /// Current inflight proposal window size (total permits).
     #[must_use]
     pub fn inflight_window_size(&self) -> usize {
         self.inflight.total_permits()
-    }
-
-    /// Number of admission queues.
-    #[must_use]
-    pub fn inflight_queue_count(&self) -> usize {
-        self.inflight.queue_count
     }
 
     /// Current admission policy.
@@ -336,10 +429,19 @@ impl PxGroup {
     /// Must be called after the group is wrapped in an [`Arc`] so the loop
     /// can hold a [`std::sync::Weak`] back-reference, mirroring
     /// [`crate::cluster::group_election::LeaderElection::start_election_loop`].
-    /// No-op when `election_cfg.election_driver_disabled` is set or when
+    /// No-op when `config.election.election_driver_disabled` is set or when
     /// the loop has already been started.
     pub async fn start_engine_maintenance_loop(self: &Arc<Self>) {
         crate::cluster::group_maintenance::start(self).await;
+    }
+
+    /// Set the `Weak<PxGroup>` self-reference used by the R36 coalescer to
+    /// spawn per-batch flush tasks without holding a strong self-reference.
+    /// Must be called once after the group is wrapped in an [`Arc`]; idempotent
+    /// (a second call is a no-op). Mirrors the `Weak` back-reference pattern of
+    /// the election/maintenance loops.
+    pub fn set_self_weak(self: &Arc<Self>) {
+        let _ = self.self_weak.set(Arc::downgrade(self));
     }
 
     // ── Getters ───────────────────────────────────────────────────
@@ -382,11 +484,19 @@ impl PxGroup {
             minslot_fallback: r.register_counter(format!("{prefix}.read.minslot_fallback.c")),
             barrier: r.register_summary(format!("{prefix}.read.barrier.l")),
             engine_get: r.register_summary(format!("{prefix}.read.engine_get.l")),
+            apply_fence: r.register_summary(format!("{prefix}.read.apply_fence.l")),
             lease_valid: r.register_gauge(format!("{prefix}.read.lease_valid.g")),
             contiguous_applied: r.register_gauge(format!("{prefix}.read.contiguous_applied.g")),
             safe_slot: r.register_gauge(format!("{prefix}.read.safe_slot.g")),
         };
         let _ = self.read_handles.set(read_handles);
+        let write_handles = WriteRegistryHandles {
+            propose_e2e: r.register_summary(format!("{prefix}.write.propose_e2e.l")),
+            prepare_phase: r.register_summary(format!("{prefix}.write.prepare_phase.l")),
+            accept_phase: r.register_summary(format!("{prefix}.write.accept_phase.l")),
+            accept_quorum_rpc: r.register_summary(format!("{prefix}.write.accept_quorum_rpc.l")),
+        };
+        let _ = self.write_handles.set(write_handles);
     }
 
     /// Borrow optional registry handles for read-path metrics. Returns
@@ -397,7 +507,19 @@ impl PxGroup {
     }
 
     pub fn force_classic(&self) -> bool {
-        self.force_classic
+        self.config.force_classic
+    }
+
+    /// Whether R16b early-ack is enabled (deferred local WAL persist).
+    #[must_use]
+    pub fn wal_early_ack(&self) -> bool {
+        self.config.wal_early_ack
+    }
+
+    /// Whether R17 async engine apply is enabled (deferred engine apply).
+    #[must_use]
+    pub fn async_engine_apply(&self) -> bool {
+        self.config.async_engine_apply
     }
 
     /// Snapshot of the believed leader id for this group. Delegates to the
@@ -624,7 +746,7 @@ impl PxGroup {
     // ── Setters ───────────────────────────────────────────────────
 
     pub fn set_force_classic(&mut self, force: bool) {
-        self.force_classic = force;
+        self.config.force_classic = force;
     }
 
     pub fn inherit_local_state_from(&mut self, prior: &Self) {
@@ -846,14 +968,13 @@ impl PxGroup {
             group_id: self.group_id,
             leader_id: self.leader_id(),
             local_replica_id: local_replica.id,
-            force_classic: self.force_classic,
+            force_classic: self.config.force_classic,
             status,
             messages,
             local_replica,
             remotes,
             inflight: Some(InflightStatus {
-                queue_count: self.inflight.queue_count,
-                window_per_queue: self.inflight.window_per_queue,
+                window: self.inflight.window,
                 policy: self.inflight.policy.label().to_string(),
                 occupied: self.inflight.occupied(),
                 waiting: self.inflight.waiting.load(Ordering::Relaxed),
@@ -1115,13 +1236,16 @@ impl PxGroup {
 
     /// Propose an opaque payload through Paxos. Returns the slot if chosen,
     /// or an error string.
+    ///
+    /// When R45 coalescing is enabled (`coalesce_max_keys > 0` and the
+    /// self-weak is set), the first op starts a Paxos round immediately
+    /// and concurrent ops arriving during the round join the next batch
+    /// (one slot, one quorum round per batch); each coalesced caller
+    /// receives `ProposeResult::Chosen { slot }` for the shared slot.
+    /// When coalescing is disabled (`coalesce_max_keys = 0`), this is the
+    /// legacy one-proposal-per-key path.
     pub async fn propose(&self, payload: Vec<u8>, client_id: Option<u64>, seq: Option<u64>) -> ProposeResult {
         let replica = &self.local_replica;
-        // Convert the client `Vec<u8>` to `Bytes` once at the entry
-        // point. `Bytes::from(Vec<u8>)` reuses the existing allocation
-        // (no copy) and gives us cheap `Clone` (ref-count bump) for the
-        // slot-retry loop and the per-peer Accept fanout.
-        let payload: bytes::Bytes = bytes::Bytes::from(payload);
 
         // Leadership gate. Checks BOTH:
         //   * role == Leader  -- captures the role atomic flipped by
@@ -1149,7 +1273,8 @@ impl PxGroup {
         // Idempotency: a retried `(client_id, seq)` that the learner has
         // already applied returns its prior commit slot without re-running
         // Paxos (exactly-once writes, idempotent retry). Checked before
-        // window admission so duplicates never consume a window permit.
+        // window admission / coalescing so duplicates never consume a
+        // window permit or enter a batch.
         if let (Some(cid), Some(s)) = (client_id, seq) {
             if let Some(cached_slot) = replica.learner.dedup_lookup(cid, s) {
                 debug!(
@@ -1161,6 +1286,51 @@ impl PxGroup {
                 );
                 return ProposeResult::Chosen { slot: cached_slot };
             }
+        }
+
+        let tag = dedup_tag(client_id, seq);
+
+        // R45: event-driven coalescing. When `coalesce_max_keys > 0` and
+        // self-weak is set, the first op starts a round immediately (no
+        // timer) and ops arriving during the round join the next batch.
+        let coalesce_on = self.config.paxos.coalesce_max_keys > 0 && self.self_weak.get().is_some();
+        if coalesce_on {
+            self.coalesce_enqueue(payload, tag).await
+        } else {
+            let tags: Vec<DedupTag> = tag.into_iter().collect();
+            // `Bytes::from(Vec<u8>)` reuses the allocation (no copy) and
+            // gives cheap `Clone` for the slot-retry loop and Accept fanout.
+            self.propose_inner(bytes::Bytes::from(payload), &tags).await
+        }
+    }
+
+    /// Drive one Paxos proposal (single- or multi-key) through to a chosen
+    /// slot. Holds one inflight permit for the whole round, allocates one
+    /// slot, and records every `dedup_tags` entry against the chosen slot
+    /// on the local learner. The leadership gate is re-checked here so a
+    /// step-down between coalescer batch collection and flush surfaces as
+    /// `NotLeader` instead of racing into Paxos with stale identity.
+    async fn propose_inner(&self, payload: bytes::Bytes, dedup_tags: &[DedupTag]) -> ProposeResult {
+        let e2e_start = std::time::Instant::now();
+        let result = self.propose_inner_impl(payload, dedup_tags).await;
+        if let Some(h) = self.write_handles.get() {
+            h.propose_e2e
+                .observe(e2e_start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX));
+        }
+        result
+    }
+
+    async fn propose_inner_impl(&self, payload: bytes::Bytes, dedup_tags: &[DedupTag]) -> ProposeResult {
+        let replica = &self.local_replica;
+
+        // Re-check the leadership gate (see `propose`).
+        let role_is_leader = replica.role() == crate::cluster::local_replica::PxLocalReplicaRole::Leader;
+        let current_term = replica.current_term_snapshot();
+        let proposing_term = self.proposing_term.load(Ordering::Acquire);
+        if !(role_is_leader && current_term == proposing_term) {
+            return ProposeResult::NotLeader {
+                leader_hint: self.leader_endpoint().unwrap_or_default(),
+            };
         }
 
         // Sliding-window admission: cap concurrent in-flight proposals. The
@@ -1191,8 +1361,7 @@ impl PxGroup {
         trace!(
             group_id,
             my_id = self.local_replica.id,
-            client_id = ?client_id,
-            seq = ?seq,
+            dedup_tags = dedup_tags.len(),
             peer_count = self.valid_replica_count,
             quorum,
             "start paxos proposal"
@@ -1200,7 +1369,7 @@ impl PxGroup {
 
         'slot_retry: for _slot_attempt in 0..PaxosConfig::DEFAULT.max_slot_retries {
             let base_entry = self.base_entry(slot, payload.clone());
-            let mut force_prepare = self.force_classic; // Classic: always prepare; Leader: Phase-2 only
+            let mut force_prepare = self.config.force_classic; // Classic: always prepare; Leader: Phase-2 only
             let mut min_round = 0u64;
 
             for attempt in 0..PaxosConfig::DEFAULT.max_paxos_retries {
@@ -1274,19 +1443,16 @@ impl PxGroup {
                     entry.ballot.round = min_round;
                 }
 
-                match self
-                    .run_accept_phase(replica, &entry, client_id, seq, quorum)
-                    .await
-                {
+                match self.run_accept_phase(replica, &entry, dedup_tags, quorum).await {
                     AcceptAttempt::Chosen => {
                         // R17: when async_engine_apply is enabled, spawn
                         // the engine apply as a background task and return
                         // Chosen immediately. The fan_out_chosen_notice
                         // fires immediately too (non-blocking mpsc enqueue).
-                        if self.async_engine_apply {
-                            replica.spawn_learn_chosen(entry.clone(), client_id, seq);
+                        if self.config.async_engine_apply {
+                            replica.spawn_learn_chosen(entry.clone(), dedup_tags);
                         } else {
-                            replica.learn_chosen(&entry, client_id, seq).await;
+                            replica.learn_chosen(&entry, dedup_tags).await;
                         }
                         self.fan_out_chosen_notice(&entry, group_id);
                         trace!(
@@ -1386,6 +1552,220 @@ impl PxGroup {
         })
     }
 
+    // ── R45 coalescer ─────────────────────────────────────
+
+    /// Current time in microseconds since `UNIX_EPOCH`. Coarse — used only
+    /// for watchdog inactivity detection.
+    fn now_micros() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_micros() as u64)
+    }
+
+    /// Record coalescer activity (enqueue or round completion). The
+    /// watchdog uses this to detect stuck batches.
+    fn coalesce_touch_activity(&self) {
+        self.coalesce_last_activity_us
+            .store(Self::now_micros(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Start the single long-running watchdog task if not already running.
+    /// Called lazily on first enqueue. The watchdog sleeps for
+    /// `WATCHDOG_US`, then checks if there's been no activity for that
+    /// duration. If so, it flushes any stuck non-empty batch.
+    fn coalesce_start_watchdog(&self) {
+        self.coalesce_watchdog_handle.get_or_init(|| {
+            let Some(group) = self.self_weak.get().and_then(Weak::upgrade) else {
+                return tokio::spawn(async {});
+            };
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_micros(WATCHDOG_US)).await;
+                    let last = group
+                        .coalesce_last_activity_us
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    let now = Self::now_micros();
+                    if now.saturating_sub(last) < WATCHDOG_US {
+                        continue;
+                    }
+                    // No activity for WATCHDOG_US — check for stuck batch.
+                    let batch = group.coalescer.lock().take();
+                    let Some(mut batch) = batch else {
+                        continue;
+                    };
+                    if let Some(timer) = batch.timer.take() {
+                        timer.abort();
+                    }
+                    if batch.op_count > 0 {
+                        tracing::warn!(
+                            group_id = group.group_id,
+                            op_count = batch.op_count,
+                            "coalescer: watchdog flushing stuck batch"
+                        );
+                        group.coalesce_touch_activity();
+                        group.coalesce_flush_batch(batch);
+                    }
+                    // Empty batch — just drop it (go idle).
+                }
+            })
+        });
+    }
+
+    /// Flush a pending batch as a Paxos round. Opens a fresh pending
+    /// batch for ops arriving during this round.
+    fn coalesce_flush_batch(&self, batch: PendingBatch) {
+        let mut payload = Vec::with_capacity(2 + batch.op_bodies.len());
+        payload.extend_from_slice(&batch.op_count.to_le_bytes());
+        payload.extend_from_slice(&batch.op_bodies);
+        let payload = bytes::Bytes::from(payload);
+        let tags = batch.tags;
+        let waiters = batch.waiters;
+        // Open a fresh pending batch for the next round.
+        let new_batch = PendingBatch::default();
+        let mut guard = self.coalescer.lock();
+        if guard.is_none() {
+            *guard = Some(new_batch);
+        }
+        let Some(group) = self.self_weak.get().and_then(Weak::upgrade) else {
+            return;
+        };
+        tokio::spawn(async move {
+            #[cfg(feature = "test-util")]
+            group.coalesce_await_round_gate().await;
+            let result = group.propose_inner(payload, &tags).await;
+            for waiter in waiters {
+                let _ = waiter.send(result.clone());
+            }
+            group.coalesce_drain_after_round();
+        });
+    }
+
+    /// Enqueue one single-key op into the coalescer.
+    ///
+    /// - Idle (no batch): start a 1-op round immediately. Open a pending
+    ///   batch for concurrent ops.
+    /// - Batch exists: append to the pending batch. If the batch fills to
+    ///   `max_keys`, flush it as a concurrent round.
+    ///
+    /// A single activity-based watchdog task runs in the background — it
+    /// only fires if there's no coalescer activity for `WATCHDOG_US`.
+    #[allow(clippy::type_complexity)]
+    async fn coalesce_enqueue(&self, payload: Vec<u8>, tag: Option<DedupTag>) -> ProposeResult {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let op_body: &[u8] = payload.get(2..).unwrap_or(&[]);
+        let max_keys = self.coalesce_max_keys.load(std::sync::atomic::Ordering::Relaxed);
+        self.coalesce_touch_activity();
+        self.coalesce_start_watchdog();
+
+        // The locked section returns:
+        //   Some((payload, tags, waiters)) → start a round now
+        //   None → joined a batch, just await the oneshot
+        let start_round: Option<(
+            Vec<u8>,
+            Vec<DedupTag>,
+            Vec<tokio::sync::oneshot::Sender<ProposeResult>>,
+        )> = {
+            let mut guard = self.coalescer.lock();
+            match &mut *guard {
+                None => {
+                    // Idle: start a 1-op round immediately.
+                    let batch = PendingBatch::default();
+                    *guard = Some(batch);
+                    let mut round_payload = Vec::with_capacity(2 + op_body.len());
+                    round_payload.extend_from_slice(&1u16.to_le_bytes());
+                    round_payload.extend_from_slice(op_body);
+                    let round_tags: Vec<DedupTag> = tag.into_iter().collect();
+                    Some((round_payload, round_tags, vec![tx]))
+                }
+                Some(batch) => {
+                    batch.op_bodies.extend_from_slice(op_body);
+                    batch.op_count = batch.op_count.saturating_add(1);
+                    if let Some(t) = tag {
+                        batch.tags.push(t);
+                    }
+                    batch.waiters.push(tx);
+                    if batch.op_count >= max_keys {
+                        // Batch full: flush as a concurrent round.
+                        let taken = std::mem::take(batch);
+                        *guard = Some(PendingBatch::default());
+                        let mut p = Vec::with_capacity(2 + taken.op_bodies.len());
+                        p.extend_from_slice(&taken.op_count.to_le_bytes());
+                        p.extend_from_slice(&taken.op_bodies);
+                        if let Some(t) = taken.timer {
+                            t.abort();
+                        }
+                        Some((p, taken.tags, taken.waiters))
+                    } else {
+                        None
+                    }
+                }
+            }
+        };
+
+        // If None, we joined a batch — just await the result.
+        let Some((payload, round_tags, round_waiters)) = start_round else {
+            return match rx.await {
+                Ok(result) => result,
+                Err(_) => ProposeResult::Err("coalescer round dropped".to_string()),
+            };
+        };
+
+        // Start the round. Spawn so the caller is not pinned to the paxos
+        // round and can return via the oneshot.
+        let payload = bytes::Bytes::from(payload);
+        let Some(group) = self.self_weak.get().and_then(Weak::upgrade) else {
+            return ProposeResult::Err("group dropped".to_string());
+        };
+        tokio::spawn(async move {
+            #[cfg(feature = "test-util")]
+            group.coalesce_await_round_gate().await;
+            let result = group.propose_inner(payload, &round_tags).await;
+            for waiter in round_waiters {
+                let _ = waiter.send(result.clone());
+            }
+            group.coalesce_drain_after_round();
+        });
+
+        match rx.await {
+            Ok(result) => result,
+            Err(_) => ProposeResult::Err("coalescer round dropped".to_string()),
+        }
+    }
+
+    /// Called after a coalesced round completes. Drains the pending
+    /// batch (ops that accumulated during the round). If non-empty,
+    /// flushes it as the next round immediately. If empty, goes idle
+    /// (coalescer → `None`) so the next op starts a 1-op round — the
+    /// zero-latency-floor behavior at low load.
+    ///
+    /// R45b drain threshold: if the in-flight slot-task count
+    /// (`occupied`) is at or above `coalesce_drain_threshold`, skip the
+    /// drain — the `max_keys` overflow path handles high load with full
+    /// batches, and draining here would fragment the batch (many
+    /// slot-tasks racing to take one shared batch). The permit is
+    /// already released before this call, so the last finisher always
+    /// sees a count below threshold and takes the batch.
+    fn coalesce_drain_after_round(&self) {
+        self.coalesce_touch_activity();
+        let threshold = self.config.paxos.coalesce_drain_threshold;
+        if threshold > 0 && self.inflight.occupied() >= u64::try_from(threshold).unwrap_or(u64::MAX) {
+            return;
+        }
+        let batch = self.coalescer.lock().take();
+        let Some(mut batch) = batch else {
+            return;
+        };
+        if let Some(timer) = batch.timer.take() {
+            timer.abort();
+        }
+        if batch.op_count == 0 {
+            // No ops arrived during the round — go idle.
+            return;
+        }
+        // Flush the accumulated batch as the next round immediately.
+        self.coalesce_flush_batch(batch);
+    }
+
     /// One background-repair step: find the lowest gap in the open prefix
     /// (the first unchosen slot below the highest slot this leader has seen
     /// chosen) and drive classic Paxos to close it.
@@ -1435,9 +1815,9 @@ impl PxGroup {
             }
         };
 
-        match self.run_accept_phase(replica, &entry, None, None, quorum).await {
+        match self.run_accept_phase(replica, &entry, &[], quorum).await {
             AcceptAttempt::Chosen => {
-                replica.learn_chosen(&entry, None, None).await;
+                replica.learn_chosen(&entry, &[]).await;
                 self.fan_out_chosen_notice(&entry, group_id);
                 debug!(group_id, slot = gap_slot, "background repair filled gap");
                 RepairOutcome::Filled { slot: gap_slot }
@@ -1481,6 +1861,26 @@ impl PxGroup {
         quorum: usize,
         min_round: u64,
     ) -> PrepareAttempt {
+        let phase_start = std::time::Instant::now();
+        let result = self
+            .run_prepare_phase_impl(replica, slot, payload, quorum, min_round)
+            .await;
+        if let Some(h) = self.write_handles.get() {
+            h.prepare_phase
+                .observe(phase_start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX));
+        }
+        result
+    }
+
+    async fn run_prepare_phase_impl(
+        &self,
+        replica: &PxLocalReplica,
+        slot: u64,
+        payload: bytes::Bytes,
+        quorum: usize,
+        min_round: u64,
+    ) -> PrepareAttempt {
+        use futures::stream::StreamExt;
         let mut max_round = min_round;
         if let Some(b) = replica.promised_at(slot).await {
             max_round = max_round.max(b.round);
@@ -1503,111 +1903,199 @@ impl PxGroup {
         entry.ballot = ballot;
         let term = entry.term;
 
-        let mut promised = 0usize;
-        let mut highest_rejected_round: Option<u64> = None;
-        let mut highest_seen_term: Option<u64> = None;
-        let mut epoch_mismatch: Option<u64> = None;
-        let mut adopted: Option<PxLogEntry> = None;
+        let mut fold = ReplyFold::new();
 
-        // R16a: Concurrent local + remote fan-out. Issue the local
-        // on_prepare and all remote prepare RPCs concurrently via
-        // tokio::join!, overlapping the local fsync with the network
-        // round-trip. The quorum check still counts the local reply.
-        let prepare_futs: Vec<_> = self
-            .remote_replicas
-            .iter()
-            .filter_map(|remote| {
-                if let RemoteReplicaKind::Real(remote) = remote {
-                    Some(remote.send_prepare(slot, ballot, term, group_id, self.membership_epoch()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let (local_result, prepare_results) = tokio::join!(
-            <PxLocalReplica as ReplicaHandler>::on_prepare(replica, slot, ballot, term, group_id),
-            join_all(prepare_futs),
-        );
-
-        match local_result {
-            Ok(PxPrepareReply::Promised { accepted, .. }) => {
-                if replica.voting() {
-                    promised += 1;
-                }
-                if let Some(prev) = accepted {
-                    Self::consider_accepted(&mut adopted, prev);
-                }
-            }
-            Ok(PxPrepareReply::Rejected { current_promised, .. }) => {
-                highest_rejected_round = Some(current_promised.round);
-            }
-            Ok(PxPrepareReply::TermStale { new_term, .. }) => {
-                highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
-            }
-            Ok(PxPrepareReply::EpochMismatch { .. }) => {
-                unreachable!("local on_prepare does not produce EpochMismatch")
-            }
-            Err(error) => {
-                error!(
-                    group_id,
-                    slot,
-                    replica_id = replica.id,
-                    error = %error,
-                    "local prepare handler failed"
-                );
-            }
-        }
-
-        for (remote, result) in self
-            .remote_replicas
-            .iter()
-            .filter(|r| matches!(r, RemoteReplicaKind::Real(_)))
-            .zip(prepare_results)
-        {
-            let RemoteReplicaKind::Real(remote) = remote else {
-                continue;
-            };
-            match result {
-                Ok(PxPrepareReply::Promised { accepted, .. }) => {
-                    if remote.voting {
-                        promised += 1;
-                    }
-                    if let Some(prev) = accepted {
-                        Self::consider_accepted(&mut adopted, prev);
-                    }
-                }
-                Ok(PxPrepareReply::Rejected { current_promised, .. }) => {
-                    let candidate = current_promised.round;
-                    highest_rejected_round =
-                        Some(highest_rejected_round.map_or(candidate, |r| r.max(candidate)));
-                }
-                Ok(PxPrepareReply::TermStale { new_term, .. }) => {
-                    highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
-                }
-                Ok(PxPrepareReply::EpochMismatch { responder_epoch }) => {
-                    warn!(
-                        group_id,
+        // E1: quorum short-circuit. When self_weak is set (all add_group
+        // groups), fan out via FuturesUnordered with 'static futures
+        // (capturing Arc<PxGroup>) so the proposer returns on quorum +
+        // local-folded and detaches the remaining replies for side effects
+        // (late TermStale → step down, late EpochMismatch → adopt epoch).
+        // Fallback to join_all for groups without self_weak (unit-test
+        // single-voter groups — no remotes, trivial).
+        if let Some(group) = self.self_weak.get().and_then(Weak::upgrade) {
+            let membership_epoch = self.membership_epoch();
+            let mut futs: FuturesUnordered<
+                Pin<Box<dyn Future<Output = TaggedPrepareReply> + Send + 'static>>,
+            > = FuturesUnordered::new();
+            // Local prepare (W6: counted before Proceed is returned).
+            {
+                let group = group.clone();
+                futs.push(Box::pin(async move {
+                    let r = <PxLocalReplica as ReplicaHandler>::on_prepare(
+                        &group.local_replica,
                         slot,
-                        remote_id = remote.node_id,
-                        proposer_epoch = self.membership_epoch(),
-                        responder_epoch,
-                        "prepare rejected by membership-epoch fence"
-                    );
-                    epoch_mismatch = Some(responder_epoch);
+                        ballot,
+                        term,
+                        group_id,
+                    )
+                    .await;
+                    TaggedPrepareReply::Local(r)
+                }));
+            }
+            // Remote prepares.
+            for (idx, remote) in group.remote_replicas.iter().enumerate() {
+                if let RemoteReplicaKind::Real(remote) = remote {
+                    let voting = remote.voting;
+                    let remote_id = remote.node_id;
+                    let endpoint = remote.endpoint.clone();
+                    let group = group.clone();
+                    futs.push(Box::pin(async move {
+                        let reply = match group.remote_replicas.get(idx) {
+                            Some(RemoteReplicaKind::Real(r)) => {
+                                r.send_prepare(slot, ballot, term, group_id, membership_epoch)
+                                    .await
+                            }
+                            _ => Err(PxReplicaError::Internal(
+                                "prepare: remote vanished mid-fanout".to_string(),
+                            )),
+                        };
+                        TaggedPrepareReply::Remote {
+                            voting,
+                            remote_id,
+                            endpoint,
+                            reply,
+                        }
+                    }));
                 }
+            }
+            while let Some(tagged) = futs.next().await {
+                match tagged {
+                    TaggedPrepareReply::Local(result) => match result {
+                        Ok(reply) => fold.fold_prepare_local(replica.voting(), reply),
+                        Err(error) => {
+                            error!(
+                                group_id,
+                                slot,
+                                replica_id = replica.id,
+                                error = %error,
+                                "local prepare handler failed"
+                            );
+                            fold.local_folded = true;
+                        }
+                    },
+                    TaggedPrepareReply::Remote {
+                        voting,
+                        remote_id,
+                        endpoint,
+                        reply,
+                        ..
+                    } => {
+                        let ctx = RemoteFoldCtx {
+                            group_id,
+                            slot,
+                            remote_id,
+                            proposer_epoch: membership_epoch,
+                            phase: "prepare",
+                        };
+                        match reply {
+                            Ok(reply) => fold.fold_prepare_remote(voting, &ctx, reply),
+                            Err(error) => {
+                                error!(
+                                    group_id,
+                                    slot,
+                                    remote_id,
+                                    endpoint = %endpoint,
+                                    error = %error,
+                                    "prepare rpc failed"
+                                );
+                            }
+                        }
+                    }
+                }
+                // E1 short-circuit: quorum + local folded + no disqualifying
+                // TermStale (prepare checks TermStale before quorum, matching
+                // the existing failure-decision order). Detach remaining
+                // replies for side effects, then break to the Proceed path.
+                if fold.accepted >= quorum && fold.local_folded && fold.highest_seen_term.is_none() {
+                    let cancel = group.tenure_cancel.clone();
+                    let group_drain = group.clone();
+                    tokio::spawn(async move {
+                        loop {
+                            tokio::select! {
+                                biased;
+                                () = cancel.cancelled() => return,
+                                Some(tagged) = futs.next() =>
+                                    prepare_drain_side_effect(&group_drain, slot, tagged),
+                                else => return,
+                            }
+                        }
+                    });
+                    break;
+                }
+            }
+        } else {
+            // Fallback: join_all (groups without self_weak — no remotes).
+            let prepare_futs: Vec<_> = self
+                .remote_replicas
+                .iter()
+                .filter_map(|remote| {
+                    if let RemoteReplicaKind::Real(remote) = remote {
+                        Some(remote.send_prepare(slot, ballot, term, group_id, self.membership_epoch()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            let (local_result, prepare_results) = tokio::join!(
+                <PxLocalReplica as ReplicaHandler>::on_prepare(replica, slot, ballot, term, group_id),
+                join_all(prepare_futs),
+            );
+
+            match local_result {
+                Ok(reply) => fold.fold_prepare_local(replica.voting(), reply),
                 Err(error) => {
                     error!(
                         group_id,
                         slot,
-                        remote_id = remote.node_id,
-                        endpoint = remote.endpoint,
+                        replica_id = replica.id,
                         error = %error,
-                        "prepare rpc failed"
+                        "local prepare handler failed"
                     );
+                    fold.local_folded = true;
+                }
+            }
+
+            for (remote, result) in self
+                .remote_replicas
+                .iter()
+                .filter(|r| matches!(r, RemoteReplicaKind::Real(_)))
+                .zip(prepare_results)
+            {
+                let RemoteReplicaKind::Real(remote) = remote else {
+                    continue;
+                };
+                let ctx = RemoteFoldCtx {
+                    group_id,
+                    slot,
+                    remote_id: remote.node_id,
+                    proposer_epoch: self.membership_epoch(),
+                    phase: "prepare",
+                };
+                match result {
+                    Ok(reply) => fold.fold_prepare_remote(remote.voting, &ctx, reply),
+                    Err(error) => {
+                        error!(
+                            group_id,
+                            slot,
+                            remote_id = remote.node_id,
+                            endpoint = remote.endpoint,
+                            error = %error,
+                            "prepare rpc failed"
+                        );
+                    }
                 }
             }
         }
+
+        let ReplyFold {
+            accepted: promised,
+            highest_rejected_round,
+            highest_seen_term,
+            epoch_mismatch,
+            adopted,
+            local_folded: _,
+        } = fold;
 
         if let Some(new_term) = highest_seen_term {
             // A peer's `current_term > term`. The proposer is a stale leader;
@@ -1669,14 +2157,30 @@ impl PxGroup {
         &self,
         replica: &PxLocalReplica,
         entry: &PxLogEntry,
-        client_id: Option<u64>,
-        seq: Option<u64>,
+        dedup_tags: &[DedupTag],
         quorum: usize,
     ) -> AcceptAttempt {
-        let mut accepted = 0usize;
-        let mut highest_rejected_round: Option<u64> = None;
-        let mut highest_seen_term: Option<u64> = None;
-        let mut epoch_mismatch: Option<u64> = None;
+        let phase_start = std::time::Instant::now();
+        let result = self
+            .run_accept_phase_impl(replica, entry, dedup_tags, quorum)
+            .await;
+        if let Some(h) = self.write_handles.get() {
+            h.accept_phase
+                .observe(phase_start.elapsed().as_nanos().try_into().unwrap_or(u64::MAX));
+        }
+        result
+    }
+
+    async fn run_accept_phase_impl(
+        &self,
+        replica: &PxLocalReplica,
+        entry: &PxLogEntry,
+        dedup_tags: &[DedupTag],
+        quorum: usize,
+    ) -> AcceptAttempt {
+        use futures::stream::StreamExt;
+        let quorum_rpc_start = std::time::Instant::now();
+        let mut fold = ReplyFold::new();
         let group_id = self.group_id;
         trace!(
             group_id,
@@ -1687,185 +2191,291 @@ impl PxGroup {
             "run accept phase"
         );
 
-        // R16a/R16b: Concurrent local + remote fan-out. When wal_early_ack
-        // is disabled (default), the local on_accept (CAS + WAL persist)
-        // runs concurrently with remote RPCs via tokio::join!, and the
-        // quorum check waits for the local reply (R16a). When wal_early_ack
-        // is enabled, the local CAS runs concurrently with remote RPCs,
-        // and the WAL persist is tracked as a background task — the
-        // proposer declares Chosen as soon as remote quorum + local CAS
-        // succeed, without waiting for the local fsync (R16b).
-        let accept_futs: Vec<_> = self
-            .remote_replicas
-            .iter()
-            .filter_map(|remote| {
-                if let RemoteReplicaKind::Real(remote) = remote {
-                    Some(remote.send_accept(entry, client_id, seq, group_id, self.membership_epoch()))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        // E1: quorum short-circuit. When self_weak is set, fan out via
+        // FuturesUnordered with 'static futures (capturing Arc<PxGroup>) so
+        // the proposer returns on quorum + local-folded and detaches the
+        // remaining replies for side effects. Fallback to join_all for
+        // groups without self_weak (unit-test single-voter groups).
+        if let Some(group) = self.self_weak.get().and_then(Weak::upgrade) {
+            let membership_epoch = self.membership_epoch();
+            let entry_owned = entry.clone();
+            let dedup_tags_owned = dedup_tags.to_vec();
+            let slot = entry.slot;
 
-        if self.wal_early_ack {
-            // R16b: split path — CAS only, persist deferred.
-            let (local_result, accept_results) =
-                tokio::join!(replica.on_accept_inner(entry), join_all(accept_futs),);
-
-            let local_accepted = matches!(local_result, PxAcceptReply::Accepted { .. });
-            match local_result {
-                PxAcceptReply::Accepted { .. } => {
-                    if replica.voting() {
-                        accepted += 1;
-                    }
+            if self.config.wal_early_ack && self.cached_quorum > 1 {
+                // R16b: split path — CAS only, persist deferred.
+                let mut futs = build_accept_remote_futs(
+                    &group,
+                    &entry_owned,
+                    &dedup_tags_owned,
+                    group_id,
+                    membership_epoch,
+                );
+                // Local CAS (infallible → wrapped in Ok to normalize).
+                {
+                    let group = group.clone();
+                    let entry = entry_owned.clone();
+                    futs.push(Box::pin(async move {
+                        let r = group.local_replica.on_accept_inner(&entry).await;
+                        TaggedAcceptReply::Local(Ok(r))
+                    }));
                 }
-                PxAcceptReply::Rejected { current_promised, .. } => {
-                    highest_rejected_round = Some(current_promised.round);
-                }
-                PxAcceptReply::TermStale { new_term, .. } => {
-                    highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
-                }
-                PxAcceptReply::EpochMismatch { .. } => {
-                    unreachable!("local on_accept does not produce EpochMismatch")
-                }
-            }
-
-            for (remote, result) in self
-                .remote_replicas
-                .iter()
-                .filter(|r| matches!(r, RemoteReplicaKind::Real(_)))
-                .zip(accept_results)
-            {
-                let RemoteReplicaKind::Real(remote) = remote else {
-                    continue;
-                };
-                match result {
-                    Ok(PxAcceptReply::Accepted { .. }) => {
-                        if remote.voting {
-                            accepted += 1;
+                let mut local_accepted = false;
+                while let Some(tagged) = futs.next().await {
+                    match tagged {
+                        TaggedAcceptReply::Local(Ok(reply)) => {
+                            local_accepted = matches!(reply, PxAcceptReply::Accepted { .. });
+                            fold.fold_accept_local(replica.voting(), &reply);
+                        }
+                        TaggedAcceptReply::Local(Err(_)) => {
+                            unreachable!("on_accept_inner is infallible")
+                        }
+                        TaggedAcceptReply::Remote {
+                            voting,
+                            remote_id,
+                            endpoint,
+                            reply,
+                            ..
+                        } => {
+                            let ctx = RemoteFoldCtx {
+                                group_id,
+                                slot,
+                                remote_id,
+                                proposer_epoch: membership_epoch,
+                                phase: "accept",
+                            };
+                            match reply {
+                                Ok(reply) => fold.fold_accept_remote(voting, &ctx, &reply),
+                                Err(error) => {
+                                    error!(
+                                        group_id, slot, remote_id, endpoint = %endpoint,
+                                        error = %error, "accept rpc failed"
+                                    );
+                                }
+                            }
                         }
                     }
-                    Ok(PxAcceptReply::Rejected { current_promised, .. }) => {
-                        let candidate = current_promised.round;
-                        highest_rejected_round =
-                            Some(highest_rejected_round.map_or(candidate, |r| r.max(candidate)));
-                    }
-                    Ok(PxAcceptReply::TermStale { new_term, .. }) => {
-                        highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
-                    }
-                    Ok(PxAcceptReply::EpochMismatch { responder_epoch }) => {
-                        warn!(
-                            group_id,
-                            slot = entry.slot,
-                            remote_id = remote.node_id,
-                            proposer_epoch = self.membership_epoch(),
-                            responder_epoch,
-                            "accept rejected by membership-epoch fence"
-                        );
-                        epoch_mismatch = Some(responder_epoch);
-                    }
-                    Err(error) => {
-                        error!(
-                            group_id,
-                            slot = entry.slot,
-                            remote_id = remote.node_id,
-                            endpoint = remote.endpoint,
-                            error = %error,
-                            "accept rpc failed"
-                        );
+                    // R16b short-circuit: local CAS + quorum.
+                    if local_accepted && fold.accepted >= quorum {
+                        let cancel = group.tenure_cancel.clone();
+                        let group_drain = group.clone();
+                        tokio::spawn(async move {
+                            loop {
+                                tokio::select! {
+                                    biased;
+                                    () = cancel.cancelled() => return,
+                                    Some(tagged) = futs.next() =>
+                                        accept_drain_side_effect(&group_drain, slot, tagged),
+                                    else => return,
+                                }
+                            }
+                        });
+                        if let Some(h) = self.write_handles.get() {
+                            h.accept_quorum_rpc.observe(
+                                quorum_rpc_start
+                                    .elapsed()
+                                    .as_nanos()
+                                    .try_into()
+                                    .unwrap_or(u64::MAX),
+                            );
+                        }
+                        replica.spawn_accept_persist(entry.clone());
+                        return AcceptAttempt::Chosen;
                     }
                 }
-            }
-
-            // R16b: if chosen, spawn the local WAL persist as a background
-            // task. The value is already Paxos-chosen; the persist is a
-            // durability best-effort that completes asynchronously. If it
-            // fails, the error is logged (the value is chosen regardless).
-            if local_accepted && accepted >= quorum {
-                replica.spawn_accept_persist(entry.clone());
-                return AcceptAttempt::Chosen;
+            } else {
+                // R16a: default path — local on_accept (CAS + WAL persist).
+                let mut futs = build_accept_remote_futs(
+                    &group,
+                    &entry_owned,
+                    &dedup_tags_owned,
+                    group_id,
+                    membership_epoch,
+                );
+                {
+                    let group = group.clone();
+                    let entry = entry_owned.clone();
+                    futs.push(Box::pin(async move {
+                        let r = <PxLocalReplica as ReplicaHandler>::on_accept(
+                            &group.local_replica,
+                            &entry,
+                            group_id,
+                        )
+                        .await;
+                        TaggedAcceptReply::Local(r)
+                    }));
+                }
+                while let Some(tagged) = futs.next().await {
+                    match tagged {
+                        TaggedAcceptReply::Local(result) => match result {
+                            Ok(reply) => fold.fold_accept_local(replica.voting(), &reply),
+                            Err(error) => {
+                                error!(
+                                    group_id, slot, replica_id = replica.id,
+                                    error = %error, "local accept handler failed"
+                                );
+                                fold.local_folded = true;
+                            }
+                        },
+                        TaggedAcceptReply::Remote {
+                            voting,
+                            remote_id,
+                            endpoint,
+                            reply,
+                            ..
+                        } => {
+                            let ctx = RemoteFoldCtx {
+                                group_id,
+                                slot,
+                                remote_id,
+                                proposer_epoch: membership_epoch,
+                                phase: "accept",
+                            };
+                            match reply {
+                                Ok(reply) => fold.fold_accept_remote(voting, &ctx, &reply),
+                                Err(error) => {
+                                    error!(
+                                        group_id, slot, remote_id, endpoint = %endpoint,
+                                        error = %error, "accept rpc failed"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    // R16a short-circuit: quorum + local folded (W6).
+                    if fold.accepted >= quorum && fold.local_folded {
+                        let cancel = group.tenure_cancel.clone();
+                        let group_drain = group.clone();
+                        tokio::spawn(async move {
+                            loop {
+                                tokio::select! {
+                                    biased;
+                                    () = cancel.cancelled() => return,
+                                    Some(tagged) = futs.next() =>
+                                        accept_drain_side_effect(&group_drain, slot, tagged),
+                                    else => return,
+                                }
+                            }
+                        });
+                        if let Some(h) = self.write_handles.get() {
+                            h.accept_quorum_rpc.observe(
+                                quorum_rpc_start
+                                    .elapsed()
+                                    .as_nanos()
+                                    .try_into()
+                                    .unwrap_or(u64::MAX),
+                            );
+                        }
+                        break;
+                    }
+                }
             }
         } else {
-            // R16a: default path — local on_accept (CAS + WAL persist)
-            // concurrent with remote RPCs.
-            let (local_result, accept_results) = tokio::join!(
-                <PxLocalReplica as ReplicaHandler>::on_accept(replica, entry, group_id),
-                join_all(accept_futs),
-            );
-
-            match local_result {
-                Ok(PxAcceptReply::Accepted { .. }) => {
-                    if replica.voting() {
-                        accepted += 1;
-                    }
-                }
-                Ok(PxAcceptReply::Rejected { current_promised, .. }) => {
-                    highest_rejected_round = Some(current_promised.round);
-                }
-                Ok(PxAcceptReply::TermStale { new_term, .. }) => {
-                    highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
-                }
-                Ok(PxAcceptReply::EpochMismatch { .. }) => {
-                    unreachable!("local on_accept does not produce EpochMismatch")
-                }
-                Err(error) => {
-                    error!(
-                        group_id,
-                        slot = entry.slot,
-                        replica_id = replica.id,
-                        error = %error,
-                        "local accept handler failed"
-                    );
-                }
-            }
-
-            for (remote, result) in self
+            // Fallback: join_all (groups without self_weak — no remotes).
+            let accept_futs: Vec<_> = self
                 .remote_replicas
                 .iter()
-                .filter(|r| matches!(r, RemoteReplicaKind::Real(_)))
-                .zip(accept_results)
-            {
-                let RemoteReplicaKind::Real(remote) = remote else {
-                    continue;
-                };
-                match result {
-                    Ok(PxAcceptReply::Accepted { .. }) => {
-                        if remote.voting {
-                            accepted += 1;
+                .filter_map(|remote| {
+                    if let RemoteReplicaKind::Real(remote) = remote {
+                        Some(remote.send_accept(entry, dedup_tags, group_id, self.membership_epoch()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if self.config.wal_early_ack && self.cached_quorum > 1 {
+                let (local_result, accept_results) =
+                    tokio::join!(replica.on_accept_inner(entry), join_all(accept_futs),);
+
+                let local_accepted = matches!(&local_result, PxAcceptReply::Accepted { .. });
+                fold.fold_accept_local(replica.voting(), &local_result);
+
+                for (remote, result) in self
+                    .remote_replicas
+                    .iter()
+                    .filter(|r| matches!(r, RemoteReplicaKind::Real(_)))
+                    .zip(accept_results)
+                {
+                    let RemoteReplicaKind::Real(remote) = remote else {
+                        continue;
+                    };
+                    let ctx = RemoteFoldCtx {
+                        group_id,
+                        slot: entry.slot,
+                        remote_id: remote.node_id,
+                        proposer_epoch: self.membership_epoch(),
+                        phase: "accept",
+                    };
+                    match result {
+                        Ok(reply) => fold.fold_accept_remote(remote.voting, &ctx, &reply),
+                        Err(error) => {
+                            error!(
+                                group_id, slot = entry.slot, remote_id = remote.node_id,
+                                endpoint = remote.endpoint, error = %error, "accept rpc failed"
+                            );
                         }
                     }
-                    Ok(PxAcceptReply::Rejected { current_promised, .. }) => {
-                        let candidate = current_promised.round;
-                        highest_rejected_round =
-                            Some(highest_rejected_round.map_or(candidate, |r| r.max(candidate)));
-                    }
-                    Ok(PxAcceptReply::TermStale { new_term, .. }) => {
-                        highest_seen_term = Some(highest_seen_term.map_or(new_term, |t| t.max(new_term)));
-                    }
-                    Ok(PxAcceptReply::EpochMismatch { responder_epoch }) => {
-                        warn!(
-                            group_id,
-                            slot = entry.slot,
-                            remote_id = remote.node_id,
-                            proposer_epoch = self.membership_epoch(),
-                            responder_epoch,
-                            "accept rejected by membership-epoch fence"
-                        );
-                        epoch_mismatch = Some(responder_epoch);
-                    }
+                }
+
+                if local_accepted && fold.accepted >= quorum {
+                    replica.spawn_accept_persist(entry.clone());
+                    return AcceptAttempt::Chosen;
+                }
+            } else {
+                let (local_result, accept_results) = tokio::join!(
+                    <PxLocalReplica as ReplicaHandler>::on_accept(replica, entry, group_id),
+                    join_all(accept_futs),
+                );
+
+                match local_result {
+                    Ok(reply) => fold.fold_accept_local(replica.voting(), &reply),
                     Err(error) => {
                         error!(
-                            group_id,
-                            slot = entry.slot,
-                            remote_id = remote.node_id,
-                            endpoint = remote.endpoint,
-                            error = %error,
-                            "accept rpc failed"
+                            group_id, slot = entry.slot, replica_id = replica.id,
+                            error = %error, "local accept handler failed"
                         );
+                        fold.local_folded = true;
+                    }
+                }
+
+                for (remote, result) in self
+                    .remote_replicas
+                    .iter()
+                    .filter(|r| matches!(r, RemoteReplicaKind::Real(_)))
+                    .zip(accept_results)
+                {
+                    let RemoteReplicaKind::Real(remote) = remote else {
+                        continue;
+                    };
+                    let ctx = RemoteFoldCtx {
+                        group_id,
+                        slot: entry.slot,
+                        remote_id: remote.node_id,
+                        proposer_epoch: self.membership_epoch(),
+                        phase: "accept",
+                    };
+                    match result {
+                        Ok(reply) => fold.fold_accept_remote(remote.voting, &ctx, &reply),
+                        Err(error) => {
+                            error!(
+                                group_id, slot = entry.slot, remote_id = remote.node_id,
+                                endpoint = remote.endpoint, error = %error, "accept rpc failed"
+                            );
+                        }
                     }
                 }
             }
         }
+
+        let ReplyFold {
+            accepted,
+            highest_rejected_round,
+            highest_seen_term,
+            epoch_mismatch,
+            adopted: _,
+            local_folded: _,
+        } = fold;
 
         if accepted >= quorum {
             return AcceptAttempt::Chosen;
@@ -1944,8 +2554,34 @@ impl PxGroup {
 
     fn retry_backoff(attempt: usize) -> Duration {
         let factor = 1u64 << attempt.min(6);
-        Duration::from_millis(PaxosConfig::DEFAULT.retry_base_backoff_ms.saturating_mul(factor))
+        let base = PaxosConfig::DEFAULT.retry_base_backoff_ms.saturating_mul(factor);
+        // E4: ±50% jitter to decorrelate retry storms across replicas.
+        // `jitter_mult` is in `[500, 1500]` (milli-units), so
+        // `base * jitter_mult / 1000` gives `[base/2, base*3/2]`.
+        let jitter_mult = retry_jitter_multiplier();
+        Duration::from_millis(base.saturating_mul(jitter_mult) / 1000)
     }
+}
+
+thread_local! {
+    static RETRY_JITTER_RNG: std::cell::RefCell<XorShift64> =
+        std::cell::RefCell::new(XorShift64::new(seed_retry_jitter()));
+}
+
+fn seed_retry_jitter() -> u64 {
+    // Seed from node id + monotonic nanos so two replicas starting
+    // simultaneously get different sequences.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    nanos.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+}
+
+fn retry_jitter_multiplier() -> u64 {
+    RETRY_JITTER_RNG.with(|rng| {
+        let r = rng.borrow_mut().next_u64() % 1001;
+        500 + r
+    })
 }
 
 /// Remote replica kind - either a real remote replica or a placeholder.
@@ -2003,11 +2639,10 @@ impl PxGroup {
         self.inflight.try_acquire_all()
     }
 
-    /// Borrow the first (primary) queue's semaphore for tests that need
-    /// direct semaphore access.
+    /// Borrow the inflight semaphore for tests that need direct access.
     #[must_use]
-    pub fn inflight_queue_semaphore(&self) -> &tokio::sync::Semaphore {
-        &self.inflight.queues[0]
+    pub fn inflight_semaphore(&self) -> &tokio::sync::Semaphore {
+        &self.inflight.semaphore
     }
 
     /// Run one background-repair step, returning the slot that was filled
@@ -2080,17 +2715,66 @@ impl PxGroup {
             .as_ref()
             .map_or(0, |p| p.waiters.len())
     }
+
+    /// Install a one-shot gate that holds the next coalescer round open
+    /// until the test releases it, so concurrent ops deterministically
+    /// join the pending batch. The test keeps the `oneshot::Sender` and
+    /// sends `()` once the batch of concurrent ops has been fired.
+    pub fn set_coalesce_round_gate_for_tests(&self, release: tokio::sync::oneshot::Receiver<()>) {
+        *self.coalesce_round_gate.lock() = Some(release);
+    }
+
+    /// Whether a coalescer round is in flight (pending batch exists).
+    #[must_use]
+    pub fn has_coalesce_pending_for_tests(&self) -> bool {
+        self.coalescer.lock().is_some()
+    }
+
+    /// Number of ops in the current pending batch.
+    #[must_use]
+    pub fn coalesce_pending_count_for_tests(&self) -> u16 {
+        self.coalescer.lock().as_ref().map_or(0, |b| b.op_count)
+    }
+
+    /// Set the `max_keys` for testing.
+    pub fn set_coalesce_max_keys_for_tests(&self, max_keys: u16) {
+        self.coalesce_max_keys
+            .store(max_keys, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
-/// Multi-queue inflight proposal admission gate. Owns N semaphores,
-/// routes proposals round-robin, and supports both fail-fast (Reject)
-/// and blocking (Queue) admission policies.
+impl PxGroup {
+    /// Test-only: await the coalesce round gate if set. Consumed by the
+    /// first round that runs after the gate is installed.
+    #[cfg(feature = "test-util")]
+    async fn coalesce_await_round_gate(&self) {
+        let gate = self.coalesce_round_gate.lock().take();
+        if let Some(gate) = gate {
+            let _ = gate.await;
+        }
+    }
+}
+
+/// Build a dedup tag from the client-supplied `(client_id, seq)` options.
+/// `None` when either is absent or `client_id == 0` (the no-dedup sentinel
+/// matching `PxLearner::record_dedup_tags`).
+fn dedup_tag(client_id: Option<u64>, seq: Option<u64>) -> Option<DedupTag> {
+    match (client_id, seq) {
+        (Some(cid), Some(s)) if cid != 0 => Some(DedupTag {
+            client_id: cid,
+            seq: s,
+        }),
+        _ => None,
+    }
+}
+
+/// Inflight proposal admission gate. Owns a single semaphore of
+/// `max_inflight` permits and supports both fail-fast (Reject) and
+/// blocking (Queue) admission policies.
 pub(crate) struct InflightAdmission {
-    queues: Vec<tokio::sync::Semaphore>,
-    queue_count: usize,
-    window_per_queue: usize,
+    semaphore: tokio::sync::Semaphore,
+    window: usize,
     policy: AdmissionPolicy,
-    route_counter: AtomicU64,
     /// Cumulative count of proposals that entered the queue (did not
     /// get a fast-path permit).
     total_enqueued: AtomicU64,
@@ -2101,50 +2785,33 @@ pub(crate) struct InflightAdmission {
 }
 
 impl InflightAdmission {
-    fn new(max_inflight: usize, queue_count: usize, policy: AdmissionPolicy) -> Self {
-        let n = queue_count.max(1);
-        let per_queue = max_inflight.div_ceil(n);
-        let queues = (0..n).map(|_| tokio::sync::Semaphore::new(per_queue)).collect();
+    fn new(max_inflight: usize, policy: AdmissionPolicy) -> Self {
         Self {
-            queues,
-            queue_count: n,
-            window_per_queue: per_queue,
+            semaphore: tokio::sync::Semaphore::new(max_inflight),
+            window: max_inflight,
             policy,
-            route_counter: AtomicU64::new(0),
             total_enqueued: AtomicU64::new(0),
             total_wait_us: AtomicU64::new(0),
             waiting: AtomicU64::new(0),
         }
     }
 
-    /// Total permits across all queues.
+    /// Total permits.
     fn total_permits(&self) -> usize {
-        self.window_per_queue * self.queue_count
+        self.window
     }
 
-    /// Currently occupied permits across all queues.
+    /// Currently occupied permits.
     fn occupied(&self) -> u64 {
-        let total = self.total_permits();
-        let avail: usize = self
-            .queues
-            .iter()
-            .map(tokio::sync::Semaphore::available_permits)
-            .sum();
-        u64::try_from(total.saturating_sub(avail)).unwrap_or(0)
+        let avail = self.semaphore.available_permits();
+        u64::try_from(self.window.saturating_sub(avail)).unwrap_or(0)
     }
 
-    /// Route to a queue via round-robin.
-    fn route(&self) -> usize {
-        let idx = self.route_counter.fetch_add(1, Ordering::Relaxed);
-        (idx as usize) % self.queue_count
-    }
-
-    /// Acquire a permit. Returns `None` if Reject mode and the queue is
+    /// Acquire a permit. Returns `None` if Reject mode and the window is
     /// full. In Queue mode, blocks until a permit is available.
     async fn acquire_permit(&self) -> Option<tokio::sync::SemaphorePermit<'_>> {
-        let q = self.route();
         // Fast path: try to acquire without blocking.
-        if let Ok(permit) = self.queues[q].try_acquire() {
+        if let Ok(permit) = self.semaphore.try_acquire() {
             return Some(permit);
         }
         // Slow path depends on policy.
@@ -2154,7 +2821,7 @@ impl InflightAdmission {
                 self.total_enqueued.fetch_add(1, Ordering::Relaxed);
                 self.waiting.fetch_add(1, Ordering::Relaxed);
                 let t0 = std::time::Instant::now();
-                let permit = self.queues[q].acquire().await.expect("inflight semaphore closed");
+                let permit = self.semaphore.acquire().await.expect("inflight semaphore closed");
                 let wait_us = t0.elapsed().as_micros();
                 self.waiting.fetch_sub(1, Ordering::Relaxed);
                 self.total_wait_us
@@ -2164,14 +2831,12 @@ impl InflightAdmission {
         }
     }
 
-    /// Try to acquire all permits across all queues (test helper).
+    /// Try to acquire all permits (test helper).
     #[cfg(feature = "test-util")]
     fn try_acquire_all(&self) -> Vec<tokio::sync::SemaphorePermit<'_>> {
         let mut held = Vec::new();
-        for q in &self.queues {
-            while let Ok(p) = q.try_acquire() {
-                held.push(p);
-            }
+        while let Ok(p) = self.semaphore.try_acquire() {
+            held.push(p);
         }
         held
     }
@@ -2180,8 +2845,7 @@ impl InflightAdmission {
 impl std::fmt::Debug for InflightAdmission {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InflightAdmission")
-            .field("queue_count", &self.queue_count)
-            .field("window_per_queue", &self.window_per_queue)
+            .field("window", &self.window)
             .field("policy", &self.policy)
             .field("occupied", &self.occupied())
             .field("waiting", &self.waiting.load(Ordering::Relaxed))
@@ -2190,7 +2854,7 @@ impl std::fmt::Debug for InflightAdmission {
 }
 
 /// Result of a `PxGroup::propose` call.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum ProposeResult {
     Chosen {
         slot: u64,
@@ -2242,4 +2906,305 @@ pub(crate) enum AcceptAttempt {
     Fail {
         error: PxPaxosError,
     },
+}
+
+/// Logging context for a remote reply fold. The per-remote `EpochMismatch`
+/// arm emits a `warn!` with peer attribution, so the fold method needs the
+/// fields that vary per remote.
+struct RemoteFoldCtx {
+    group_id: u64,
+    slot: u64,
+    remote_id: PxNodeId,
+    proposer_epoch: u64,
+    /// "prepare" or "accept" — selects the warn message text.
+    phase: &'static str,
+}
+
+/// Accumulator for the prepare/accept reply fold. Replaces the triplicated
+/// inline `match` over `PxPrepareReply` / `PxAcceptReply` in
+/// `run_prepare_phase` and `run_accept_phase` (both R16a and R16b paths).
+///
+/// `accepted` counts promises (prepare) or accepts (accept) from voting
+/// replicas only. `local_folded` is set once the local reply has been
+/// observed (Ok or Err) so the E1 quorum short-circuit can gate
+/// `Chosen`/`Proceed` on the local reply being counted first (W6).
+struct ReplyFold {
+    accepted: usize,
+    highest_rejected_round: Option<u64>,
+    highest_seen_term: Option<u64>,
+    epoch_mismatch: Option<u64>,
+    adopted: Option<PxLogEntry>,
+    local_folded: bool,
+}
+
+impl ReplyFold {
+    fn new() -> Self {
+        Self {
+            accepted: 0,
+            highest_rejected_round: None,
+            highest_seen_term: None,
+            epoch_mismatch: None,
+            adopted: None,
+            local_folded: false,
+        }
+    }
+
+    fn note_rejected(&mut self, current_promised: PxBallot) {
+        let candidate = current_promised.round;
+        self.highest_rejected_round = Some(
+            self.highest_rejected_round
+                .map_or(candidate, |r| r.max(candidate)),
+        );
+    }
+
+    fn note_term_stale(&mut self, new_term: u64) {
+        self.highest_seen_term = Some(self.highest_seen_term.map_or(new_term, |t| t.max(new_term)));
+    }
+
+    /// Fold the local prepare reply. `EpochMismatch` is unreachable on the
+    /// local acceptor.
+    fn fold_prepare_local(&mut self, voting: bool, reply: PxPrepareReply) {
+        match reply {
+            PxPrepareReply::Promised { accepted, .. } => {
+                if voting {
+                    self.accepted += 1;
+                }
+                if let Some(prev) = accepted {
+                    PxGroup::consider_accepted(&mut self.adopted, prev);
+                }
+            }
+            PxPrepareReply::Rejected { current_promised, .. } => {
+                self.note_rejected(current_promised);
+            }
+            PxPrepareReply::TermStale { new_term, .. } => {
+                self.note_term_stale(new_term);
+            }
+            PxPrepareReply::EpochMismatch { .. } => {
+                unreachable!("local on_prepare does not produce EpochMismatch")
+            }
+        }
+        self.local_folded = true;
+    }
+
+    /// Fold a remote prepare reply. `EpochMismatch` is real and logged with
+    /// peer attribution.
+    fn fold_prepare_remote(&mut self, voting: bool, ctx: &RemoteFoldCtx, reply: PxPrepareReply) {
+        match reply {
+            PxPrepareReply::Promised { accepted, .. } => {
+                if voting {
+                    self.accepted += 1;
+                }
+                if let Some(prev) = accepted {
+                    PxGroup::consider_accepted(&mut self.adopted, prev);
+                }
+            }
+            PxPrepareReply::Rejected { current_promised, .. } => {
+                self.note_rejected(current_promised);
+            }
+            PxPrepareReply::TermStale { new_term, .. } => {
+                self.note_term_stale(new_term);
+            }
+            PxPrepareReply::EpochMismatch { responder_epoch } => {
+                warn!(
+                    group_id = ctx.group_id,
+                    slot = ctx.slot,
+                    remote_id = ctx.remote_id,
+                    proposer_epoch = ctx.proposer_epoch,
+                    responder_epoch,
+                    "{} rejected by membership-epoch fence",
+                    ctx.phase
+                );
+                self.epoch_mismatch = Some(responder_epoch);
+            }
+        }
+    }
+
+    /// Fold the local accept reply (R16a `Ok` arm and R16b infallible path
+    /// share this — the reply-arm logic is identical). `EpochMismatch` is
+    /// unreachable on the local acceptor.
+    fn fold_accept_local(&mut self, voting: bool, reply: &PxAcceptReply) {
+        match reply {
+            PxAcceptReply::Accepted { .. } => {
+                if voting {
+                    self.accepted += 1;
+                }
+            }
+            PxAcceptReply::Rejected { current_promised, .. } => {
+                self.note_rejected(*current_promised);
+            }
+            PxAcceptReply::TermStale { new_term, .. } => {
+                self.note_term_stale(*new_term);
+            }
+            PxAcceptReply::EpochMismatch { .. } => {
+                unreachable!("local on_accept does not produce EpochMismatch")
+            }
+        }
+        self.local_folded = true;
+    }
+
+    /// Fold a remote accept reply. `EpochMismatch` is real and logged with
+    /// peer attribution.
+    fn fold_accept_remote(&mut self, voting: bool, ctx: &RemoteFoldCtx, reply: &PxAcceptReply) {
+        match reply {
+            PxAcceptReply::Accepted { .. } => {
+                if voting {
+                    self.accepted += 1;
+                }
+            }
+            PxAcceptReply::Rejected { current_promised, .. } => {
+                self.note_rejected(*current_promised);
+            }
+            PxAcceptReply::TermStale { new_term, .. } => {
+                self.note_term_stale(*new_term);
+            }
+            PxAcceptReply::EpochMismatch { responder_epoch } => {
+                warn!(
+                    group_id = ctx.group_id,
+                    slot = ctx.slot,
+                    remote_id = ctx.remote_id,
+                    proposer_epoch = ctx.proposer_epoch,
+                    responder_epoch,
+                    "{} rejected by membership-epoch fence",
+                    ctx.phase
+                );
+                self.epoch_mismatch = Some(*responder_epoch);
+            }
+        }
+    }
+}
+
+/// Tagged reply from the prepare-phase fan-out. The local future and each
+/// remote future produce one of these so a single `FuturesUnordered` can
+/// fold them in arrival order (E1 quorum short-circuit). `remote_id` /
+/// `endpoint` are captured at future-build time so the fold loop and the
+/// detached drain do not need to re-look-up the remote (which may vanish
+/// if the group is reconfigured mid-proposal).
+enum TaggedPrepareReply {
+    Local(Result<PxPrepareReply, PxReplicaError>),
+    Remote {
+        voting: bool,
+        remote_id: PxNodeId,
+        endpoint: String,
+        reply: Result<PxPrepareReply, PxReplicaError>,
+    },
+}
+
+/// Tagged reply from the accept-phase fan-out. The R16b local path produces
+/// an infallible `PxAcceptReply` (wrapped in `Ok` to normalize); R16a local
+/// and all remotes produce `Result<PxAcceptReply, PxReplicaError>`.
+enum TaggedAcceptReply {
+    Local(Result<PxAcceptReply, PxReplicaError>),
+    Remote {
+        voting: bool,
+        remote_id: PxNodeId,
+        endpoint: String,
+        reply: Result<PxAcceptReply, PxReplicaError>,
+    },
+}
+
+/// Apply a late prepare reply observed by the detached drain task (after the
+/// proposer already short-circuited on quorum). Only `TermStale` and
+/// `EpochMismatch` carry side effects the proposer must not lose; accepted /
+/// rejected / error replies are no-ops here (the slot is already proceeding).
+fn prepare_drain_side_effect(group: &Arc<PxGroup>, slot: u64, tagged: TaggedPrepareReply) {
+    let group_id = group.group_id;
+    let (remote_id, reply) = match tagged {
+        TaggedPrepareReply::Local(_) => return,
+        TaggedPrepareReply::Remote { remote_id, reply, .. } => (remote_id, reply),
+    };
+    match reply {
+        Ok(PxPrepareReply::TermStale { new_term, .. }) => {
+            warn!(
+                group_id,
+                slot, remote_id, new_term, "late prepare TermStale in drain; stepping down"
+            );
+            group.local_replica.become_follower(new_term);
+        }
+        Ok(PxPrepareReply::EpochMismatch { responder_epoch }) => {
+            let adopted = group.adopt_membership_epoch(responder_epoch);
+            warn!(
+                group_id,
+                slot,
+                remote_id,
+                responder_epoch,
+                adopted_epoch = adopted,
+                "late prepare EpochMismatch in drain; adopted responder epoch"
+            );
+        }
+        _ => {}
+    }
+}
+
+/// Apply a late accept reply observed by the detached drain task. Mirrors
+/// [`prepare_drain_side_effect`] for the accept reply type.
+fn accept_drain_side_effect(group: &Arc<PxGroup>, slot: u64, tagged: TaggedAcceptReply) {
+    let group_id = group.group_id;
+    let (remote_id, reply) = match tagged {
+        TaggedAcceptReply::Local(_) => return,
+        TaggedAcceptReply::Remote { remote_id, reply, .. } => (remote_id, reply),
+    };
+    match reply {
+        Ok(PxAcceptReply::TermStale { new_term, .. }) => {
+            warn!(
+                group_id,
+                slot, remote_id, new_term, "late accept TermStale in drain; stepping down"
+            );
+            group.local_replica.become_follower(new_term);
+        }
+        Ok(PxAcceptReply::EpochMismatch { responder_epoch }) => {
+            let adopted = group.adopt_membership_epoch(responder_epoch);
+            warn!(
+                group_id,
+                slot,
+                remote_id,
+                responder_epoch,
+                adopted_epoch = adopted,
+                "late accept EpochMismatch in drain; adopted responder epoch"
+            );
+        }
+        _ => {}
+    }
+}
+
+/// Build the `FuturesUnordered` of remote accept RPC futures for the E1
+/// short-circuit path. Each future captures `Arc<PxGroup>` (so it is
+/// `'static`) and resolves to a `TaggedAcceptReply::Remote`. Shared by the
+/// R16b and R16a accept paths (only the local future differs).
+fn build_accept_remote_futs(
+    group: &Arc<PxGroup>,
+    entry: &PxLogEntry,
+    dedup_tags: &[DedupTag],
+    group_id: u64,
+    membership_epoch: u64,
+) -> FuturesUnordered<Pin<Box<dyn Future<Output = TaggedAcceptReply> + Send + 'static>>> {
+    let futs: FuturesUnordered<Pin<Box<dyn Future<Output = TaggedAcceptReply> + Send + 'static>>> =
+        FuturesUnordered::new();
+    for (idx, remote) in group.remote_replicas.iter().enumerate() {
+        if let RemoteReplicaKind::Real(remote) = remote {
+            let voting = remote.voting;
+            let remote_id = remote.node_id;
+            let endpoint = remote.endpoint.clone();
+            let group = group.clone();
+            let entry = entry.clone();
+            let dedup_tags = dedup_tags.to_owned();
+            futs.push(Box::pin(async move {
+                let reply = match group.remote_replicas.get(idx) {
+                    Some(RemoteReplicaKind::Real(r)) => {
+                        r.send_accept(&entry, &dedup_tags, group_id, membership_epoch)
+                            .await
+                    }
+                    _ => Err(PxReplicaError::Internal(
+                        "accept: remote vanished mid-fanout".to_string(),
+                    )),
+                };
+                TaggedAcceptReply::Remote {
+                    voting,
+                    remote_id,
+                    endpoint,
+                    reply,
+                }
+            }));
+        }
+    }
+    futs
 }

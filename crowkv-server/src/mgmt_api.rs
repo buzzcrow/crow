@@ -22,7 +22,7 @@ use crowkv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crowkv::cluster::px_kv_store::PxKvStore;
 use crowkv::cluster::remote_replica::PxRemoteReplica;
 use crowkv::cluster::topology_kv;
-use crowkv::common::config::{AdmissionPolicy, ServerConfig};
+use crowkv::common::config::ServerConfig;
 
 use crate::operation_registry::{AppState, Operation, OperationKind, OperationStatus, OperationTarget};
 use crate::startup::create_group_with_wal;
@@ -452,17 +452,9 @@ async fn system_init(
         SYSTEM_GROUP_ID,
         req.replica_id,
         PxLocalReplicaRole::Leader,
-        state.election_cfg,
-        &state.wal_root,
-        &state.config_root,
+        &state.config,
         state.wal_backend.clone(),
-        &state.data_root,
         state.crowtree_backend,
-        state.wal_skip_fsync,
-        "log",
-        state.max_inflight,
-        state.inflight_queues,
-        AdmissionPolicy::Queue,
     )
     .await
     .map_err(|e| {
@@ -691,7 +683,7 @@ async fn add_store(
     let port = if port.is_none() {
         match state.next_port() {
             Some(p) => Some(p),
-            None => persisted_port_for_store(&state.config_root, req.store_id).await,
+            None => persisted_port_for_store(&state.config.config_root, req.store_id).await,
         }
     } else {
         port
@@ -847,17 +839,9 @@ async fn add_group(
         req.group_id,
         req.replica_id,
         initial_role,
-        state.election_cfg,
-        &state.wal_root,
-        &state.config_root,
+        &state.config,
         state.wal_backend.clone(),
-        &state.data_root,
         state.crowtree_backend,
-        state.wal_skip_fsync,
-        "log",
-        state.max_inflight,
-        state.inflight_queues,
-        AdmissionPolicy::Queue,
     )
     .await
     .map_err(|e| {
@@ -973,17 +957,9 @@ async fn join_group_via_snapshot(
         gid,
         req.replica_id,
         PxLocalReplicaRole::Follower,
-        state.election_cfg,
-        &state.wal_root,
-        &state.config_root,
+        &state.config,
         state.wal_backend.clone(),
-        &state.data_root,
         state.crowtree_backend,
-        state.wal_skip_fsync,
-        "log",
-        state.max_inflight,
-        state.inflight_queues,
-        AdmissionPolicy::Queue,
     )
     .await
     .map_err(|e| {
@@ -1554,7 +1530,8 @@ fn rebuild_group_with_same_config(group: &PxGroup) -> PxGroup {
     // (role, leader_id) snapshot from the prior replica under the mutex,
     // so `set_leader_id` is redundant here. The `role_atomic` and
     // `believed_leader_id` on the new replica already match.
-    new_group.set_election_config(group.election_config());
+    // Carry the unified config wholesale — replaces the former per-flag carry blocks.
+    new_group.set_from_config(group.config());
     // Preserve `proposing_term` so the new group's leadership gate
     // (`role == Leader && current_term == proposing_term`) passes for
     // an already-elected leader that didn't have to re-stamp the term
@@ -1569,9 +1546,6 @@ fn rebuild_group_with_same_config(group: &PxGroup) -> PxGroup {
     // the group's whole history -- defeating the exact-match fence the
     // very next time two mutations land close together.
     new_group.set_membership_epoch(group.membership_epoch());
-    if group.force_classic() {
-        new_group.set_force_classic(true);
-    }
     if let Some(store) = group.config_store() {
         new_group.set_config_store(store.clone());
     }
@@ -1579,11 +1553,6 @@ fn rebuild_group_with_same_config(group: &PxGroup) -> PxGroup {
         let sid = group.node_config_store_sid().unwrap_or(0);
         new_group.set_node_config_store(node_store.clone(), sid, new_group.group_id());
     }
-    new_group.set_inflight_config(
-        group.inflight_window_size(),
-        group.inflight_queue_count(),
-        group.inflight_admission_policy(),
-    );
     new_group
 }
 

@@ -16,6 +16,9 @@ This document defines the wire-serialization contract for all node-to-node and c
 - [4. Service Definitions](#4-service-definitions)
 - [5. Version Compatibility Rules](#5-version-compatibility-rules)
 - [6. Flow Control and Parallelism](#6-flow-control-and-parallelism)
+  - [6.1 Quorum Short-Circuit](#61-quorum-short-circuit)
+  - [6.2 RPC Deadline](#62-rpc-deadline)
+  - [6.3 Heartbeat Reserved Capacity](#63-heartbeat-reserved-capacity)
 - [7. Paxos Error Model](#7-paxos-error-model)
 - [8. Open Questions](#8-open-questions)
 - [9. Proto `bytes` Field Mapping — `bytes::Bytes`](#9-proto-bytes-field-mapping--bytesbytes)
@@ -130,6 +133,56 @@ pipelining described in `design-slot.md` §5:
   backoff (50 ms → 2 s). The proposer treats this as retryable and
   re-sends the `Accept` after reconnect.
 
+### 6.1 Quorum Short-Circuit
+
+`run_prepare_phase` and `run_accept_phase` fan out to all peers but
+do not wait for all replies. A `FuturesUnordered` (local + each remote,
+tagged with `(voting, kind)`) is drained via `StreamExt::next`; the
+phase returns as soon as `accepted >= quorum` AND the local reply has
+been folded (the W6 invariant — `Chosen`/`Proceed` is never returned
+before the local WAL persist / CAS reply is counted). The
+still-pending futures are moved into a detached drain task that
+continues folding for side effects only: a late `TermStale` triggers
+`become_follower`; a late `EpochMismatch` adopts the responder epoch.
+The drain captures `self_weak` (upgrades to `Arc<PxGroup>`), so a
+dropped group lets the upgrade fail and the task exit cleanly. It
+honors `tenure_cancel` so a step-down aborts the drain.
+
+In a 3-node group (quorum = local + 1), the proposal latency is the
+quorum-th-fastest reply, not `max(all peers)`. A slow but connected
+follower no longer drags every write. Failure detection is preserved
+— it just moves off the latency path.
+
+### 6.2 RPC Deadline
+
+`send_accept` / `send_heartbeat` wrap their oneshot await with
+`tokio::time::timeout(rpc_timeout)`. On expiry the caller removes its
+pending-map entry (the recv half no-ops on a missing entry, so a late
+reply is logged at `debug!` and dropped) and surfaces a typed
+retryable error. `send_prepare` wraps the unary gRPC call with the
+same timeout. A connected-yet-unresponsive peer (GC pause, half-open
+socket, overloaded server) is surfaced as a retryable failure within
+`learner_stream_rpc_timeout_ms` (default 2000 ms, aligned with the 2 s
+election max) rather than blocking the fan-out indefinitely.
+
+Belt-and-braces: h2 keepalive (`http2_keep_alive_interval` +
+`keep_alive_while_idle`) is enabled on both the `get_client` `Endpoint`
+and the learner_stream connect `Endpoint`, so a silent half-open
+connection is detected at the transport layer independent of the
+application timeout.
+
+### 6.3 Heartbeat Reserved Capacity
+
+`OutboundCmd` carries a `kind: FrameKind { Accept, Heartbeat, Chosen }`.
+`dispatch` tracks the count of non-heartbeat frames in flight via an
+`AtomicUsize`. Non-heartbeat frames (Accept, Chosen) are rejected when
+the non-heartbeat count reaches `window - heartbeat_reserve`
+(default reserve 8); heartbeats may use the full window. This
+preserves FIFO ordering (heartbeats and accepts share the same mpsc,
+so a heartbeat cannot race ahead of an accept it logically follows —
+§3 invariant 1) while guaranteeing heartbeats can never be starved of
+a queue slot under write saturation.
+
 ---
 
 ## 7. Paxos Error Model
@@ -173,6 +226,13 @@ slot, redirects the client, or returns a retryable error.
 - **Foreign value:** adopt it for the current slot. If not the client
   value, retry the client operation on a later slot only after the
   foreign value is learned.
+
+Retry backoff (`retry_backoff`) is `base * 2^attempt` with ±50% jitter
+(`base * multiplier / 1000` where `multiplier ∈ [500, 1500]`), using a
+thread-local `XorShift64` PRNG seeded from monotonic nanos. This
+decorrelates retry storms across replicas that collide on the same
+slot. The admission permit is held during backoff (releasing it would
+let a duplicate `(client_id, seq)` admit concurrently).
 
 ### 7.3 RPC Mapping
 
@@ -250,3 +310,6 @@ payload contract, out of scope).
 - `design-leader-election.md` §6 — heartbeat/lease interaction with
   stream ordering
 - `design-slot.md` §5 — pipelined fanout and per-peer flow control
+- `design-observability.md` — write-path phase metrics
+  (`write.propose_e2e.l`, `write.prepare_phase.l`, `write.accept_phase.l`,
+  `write.accept_quorum_rpc.l`, `write.engine_apply.l`)

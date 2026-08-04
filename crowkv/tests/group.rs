@@ -110,3 +110,10 @@ mod snapshot_slot;
 #[cfg(feature = "test-util")]
 #[path = "group/maintenance_test.rs"]
 mod maintenance;
+
+#[cfg(feature = "test-util")]
+#[path = "group/t1_early_ack_crash_test.rs"]
+mod t1_early_ack_crash;
+
+#[path = "group/coalesce_test.rs"]
+mod coalesce;

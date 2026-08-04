@@ -20,7 +20,6 @@ fn single_leader_group() -> PxGroup {
     let mut group = PxGroup::new(1, local);
     group.set_inflight_config(
         PaxosConfig::DEFAULT.max_inflight_proposals,
-        PaxosConfig::DEFAULT.inflight_queues,
         AdmissionPolicy::Reject,
     );
     group
@@ -66,8 +65,7 @@ async fn repair_once_fills_gap_and_advances_frontier() {
                 term: 0,
                 payload: bytes::Bytes::from_static(b""),
             },
-            None,
-            None,
+            &[],
         )
         .await;
     assert_eq!(group.local_replica().contiguous_chosen(), 0, "gap below slot 2");
@@ -95,10 +93,10 @@ async fn repair_once_fills_gap_and_advances_frontier() {
 }
 
 /// Single-voter leader group with queue-mode admission and a small window.
-fn queue_leader_group(max_inflight: usize, queues: usize) -> PxGroup {
+fn queue_leader_group(max_inflight: usize) -> PxGroup {
     let local = PxLocalReplica::new(1, PxLocalReplicaRole::Leader);
     let mut group = PxGroup::new(1, local);
-    group.set_inflight_config(max_inflight, queues, AdmissionPolicy::Queue);
+    group.set_inflight_config(max_inflight, AdmissionPolicy::Queue);
     group
 }
 
@@ -106,7 +104,7 @@ fn queue_leader_group(max_inflight: usize, queues: usize) -> PxGroup {
 async fn propose_queues_when_policy_is_queue() {
     // Window=1, queue mode: a second concurrent proposal must block
     // until the first one's permit is released.
-    let group = queue_leader_group(1, 1);
+    let group = queue_leader_group(1);
     let group = std::sync::Arc::new(group);
 
     // Exhaust the single permit.
@@ -131,16 +129,4 @@ async fn propose_queues_when_policy_is_queue() {
         ProposeResult::Chosen { .. } => {}
         other => panic!("expected Chosen after queue drain, got {other:?}"),
     }
-}
-
-#[tokio::test]
-async fn multi_queue_distributes_permits() {
-    // Window=4, 2 queues: each queue should have 2 permits.
-    let group = queue_leader_group(4, 2);
-
-    let held = group.try_acquire_all_inflight_permits();
-    assert_eq!(held.len(), 4, "total permits should be 4 across 2 queues");
-
-    // Verify window size reports the total.
-    assert_eq!(group.inflight_window_size(), 4);
 }

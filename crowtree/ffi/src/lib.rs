@@ -11,6 +11,7 @@
 //! for them yet -- Phase 2 scoped only get/flush/snapshot) still bridge via
 //! `spawn_blocking`.
 
+use bytes::Bytes;
 use std::ffi::CString;
 use std::future::Future;
 use std::os::fd::{AsRawFd, RawFd};
@@ -78,6 +79,22 @@ mod sys {
         pub value: *const u8,
         pub value_len: usize,
         pub kind: u8,
+    }
+
+    // R30: one zero-copy op for ct_apply_batch_external. `bytes_ref` is an
+    // opaque Rust handle (a boxed Bytes); `drop_fn` decrements its refcount
+    // when crowtree frees the borrowed buffer.
+    pub type ct_drop_fn = extern "C" fn(*mut std::ffi::c_void);
+
+    #[repr(C)]
+    pub struct ct_ext_op {
+        pub key: *const u8,
+        pub key_len: usize,
+        pub value: *const u8,
+        pub value_len: usize,
+        pub kind: u8,
+        pub bytes_ref: *mut std::ffi::c_void,
+        pub drop_fn: Option<ct_drop_fn>,
     }
 
     #[repr(C)]
@@ -166,6 +183,12 @@ mod sys {
         ) -> c_int;
         pub fn ct_apply_delete(t: *mut ct_tree, slot: u64, key: *const u8, klen: usize) -> c_int;
         pub fn ct_apply_batch_slices(t: *mut ct_tree, slot: u64, ops: *const ct_kv_ref, count: u64) -> c_int;
+        pub fn ct_apply_batch_external(
+            t: *mut ct_tree,
+            slot: u64,
+            ops: *const ct_ext_op,
+            count: u64,
+        ) -> c_int;
         pub fn ct_force_advance_slot(t: *mut ct_tree, slot: u64);
         pub fn ct_alloc(
             t: *mut ct_tree,
@@ -392,6 +415,41 @@ pub struct Options {
 pub enum BatchOp<'a> {
     Put { key: &'a [u8], value: &'a [u8] },
     Delete { key: &'a [u8] },
+}
+
+/// Opaque Rust handle keeping a [`Bytes`] alive while crowtree borrows its
+/// bytes via a C++ `kExternal` buffer (R30). Created by
+/// [`Crowtree::apply_batch_external`]; freed by the C++ `drop_fn` callback
+/// ([`ct_release_bytes`]) when the borrowed buffer is destroyed (MemTable
+/// drain/overwrite). The `Bytes`' refcount keeps the underlying allocation
+/// (typically a Paxos payload) alive until every borrowing buffer is freed.
+// The field is never read — its sole purpose is to be dropped (decrementing
+// the `Bytes` Arc refcount) when the `Box<BytesRef>` is reclaimed by
+// `ct_release_bytes`. Keeping the `Bytes` alive is the side effect we want.
+#[allow(dead_code)]
+struct BytesRef(Bytes);
+
+/// Drop callback handed to C++ for each `ct_ext_op` value (R30). Reclaims the
+/// boxed [`BytesRef`] — dropping the [`Bytes`] inside, which decrements the
+/// underlying `Arc` refcount. Called exactly once per handle by crowtree when
+/// the corresponding `kExternal` buffer is freed.
+extern "C" fn ct_release_bytes(owner: *mut std::ffi::c_void) {
+    if !owner.is_null() {
+        // SAFETY: `owner` was created by `Box::into_raw(Box::new(BytesRef(..)))`
+        // in `apply_batch_external` and is handed back to us exactly once.
+        unsafe { drop(Box::from_raw(owner as *mut BytesRef)) };
+    }
+}
+
+/// One zero-copy op for [`Crowtree::apply_batch_external`] (R30). The value
+/// [`Bytes`] is kept alive by a ref handle handed to C++; crowtree borrows the
+/// value bytes until MemTable drain, then calls back to drop the ref. The key
+/// is copied into a C++ `std::string` during the call (small; SBO), so it can
+/// be a cheap [`Bytes`] clone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExtOp {
+    Put { key: Bytes, value: Bytes },
+    Delete { key: Bytes },
 }
 
 /// Result of an explicit [`Crowtree::collect_garbage`] sweep.
@@ -657,6 +715,63 @@ impl Crowtree {
             })
             .collect();
         check(unsafe { sys::ct_apply_batch_slices(self.as_ptr(), slot, refs.as_ptr(), refs.len() as u64) })
+    }
+
+    /// Zero-copy apply (R30): like [`Self::apply_batch`] but the value bytes
+    /// are borrowed from Rust-owned [`Bytes`] memory instead of copied at the
+    /// FFI boundary. Each Put op's `value` [`Bytes`] is kept alive by a ref
+    /// handle handed to C++; crowtree borrows the value bytes via a C++
+    /// `kExternal` buffer and calls [`ct_release_bytes`] when the buffer is
+    /// freed (MemTable drain/overwrite). The value `memcpy` is deferred to
+    /// flush (off the apply critical path). Keys are copied into C++
+    /// `std::string`s during the call (small; SBO), same as [`Self::apply_batch`].
+    ///
+    /// Ownership of every Put's value handle transfers to C++; on any error
+    /// return, C++ frees the handles via `drop_fn` (the `external_op` vector
+    /// destructors run on the error path).
+    pub fn apply_batch_external(&self, slot: u64, ops: Vec<ExtOp>) -> Result<(), CtError> {
+        let mut ffi_ops: Vec<sys::ct_ext_op> = Vec::with_capacity(ops.len());
+        // Hold key Bytes alive for the duration of the FFI call (C++ copies
+        // them into std::string during the call; after that the pointers are
+        // not needed).
+        let mut keys: Vec<Bytes> = Vec::with_capacity(ops.len());
+        for op in ops {
+            match op {
+                ExtOp::Put { key, value } => {
+                    let val_ptr = value.as_ptr();
+                    let val_len = value.len();
+                    // Move the value Bytes into a heap handle; C++ owns it now.
+                    let handle = Box::into_raw(Box::new(BytesRef(value))) as *mut std::ffi::c_void;
+                    keys.push(key);
+                    let k = keys.last().expect("just pushed");
+                    ffi_ops.push(sys::ct_ext_op {
+                        key: k.as_ptr(),
+                        key_len: k.len(),
+                        value: val_ptr,
+                        value_len: val_len,
+                        kind: 0,
+                        bytes_ref: handle,
+                        drop_fn: Some(ct_release_bytes),
+                    });
+                }
+                ExtOp::Delete { key } => {
+                    keys.push(key);
+                    let k = keys.last().expect("just pushed");
+                    ffi_ops.push(sys::ct_ext_op {
+                        key: k.as_ptr(),
+                        key_len: k.len(),
+                        value: std::ptr::null(),
+                        value_len: 0,
+                        kind: 1,
+                        bytes_ref: std::ptr::null_mut(),
+                        drop_fn: None,
+                    });
+                }
+            }
+        }
+        check(unsafe {
+            sys::ct_apply_batch_external(self.as_ptr(), slot, ffi_ops.as_ptr(), ffi_ops.len() as u64)
+        })
     }
 
     pub fn force_advance_slot(&self, slot: u64) {
@@ -1088,6 +1203,28 @@ pub fn ct_flush_logging() {
 /// was never initialized (no-op in that case).
 pub fn ct_shutdown_logging() {
     unsafe { sys::ct_shutdown_logging() };
+}
+
+// ── CRC32C (crow-common / ISA-L crc32_iscsi) ───────────────────────
+// Exposes the same hardware-accelerated CRC32C the C++ engine uses
+// (R34) to the Rust WAL, replacing the software `crc32c` crate. Same
+// Castagnoli polynomial + reflected/seeded convention — byte-identical.
+
+extern "C" {
+    fn crow_common_crc32c(data: *const u8, len: usize) -> u32;
+    fn crow_common_crc32c_update(crc: u32, data: *const u8, len: usize) -> u32;
+}
+
+/// Compute CRC32C over `data` (seed 0).
+#[must_use]
+pub fn crc32c(data: &[u8]) -> u32 {
+    unsafe { crow_common_crc32c(data.as_ptr(), data.len()) }
+}
+
+/// Continue CRC32C from a previous `crc` value over `data`.
+#[must_use]
+pub fn crc32c_update(crc: u32, data: &[u8]) -> u32 {
+    unsafe { crow_common_crc32c_update(crc, data.as_ptr(), data.len()) }
 }
 
 fn decode_scan(bytes: &[u8], count: usize) -> Result<Vec<ScanEntry>, CtError> {

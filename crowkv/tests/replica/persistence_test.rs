@@ -29,7 +29,7 @@ const REPLICA_ID: u64 = 7;
 
 fn encode_put_payload(key: &[u8], value: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.push(1); // op = PUT
+    buf.extend_from_slice(&1u16.to_le_bytes()); // op_count = 1
     buf.push(0); // flags
     let key_len = u32::try_from(key.len()).expect("key length exceeds u32");
     buf.extend_from_slice(&key_len.to_le_bytes());
@@ -42,7 +42,7 @@ fn encode_put_payload(key: &[u8], value: &[u8]) -> Vec<u8> {
 
 fn encode_delete_payload(key: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.push(1); // op = DELETE
+    buf.extend_from_slice(&1u16.to_le_bytes()); // op_count = 1
     buf.push(1); // kind = Delete
     let key_len = u32::try_from(key.len()).expect("key length exceeds u32");
     buf.extend_from_slice(&key_len.to_le_bytes());
@@ -54,7 +54,7 @@ fn encode_delete_payload(key: &[u8]) -> Vec<u8> {
 #[allow(clippy::cast_possible_truncation)]
 fn encode_batch_payload(ops: &[(Vec<u8>, Option<Vec<u8>>)]) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.push(ops.len() as u8); // op_count
+    buf.extend_from_slice(&(ops.len() as u16).to_le_bytes()); // op_count
     for (key, value) in ops {
         if let Some(v) = value {
             buf.push(0); // kind = Put
@@ -135,7 +135,7 @@ async fn wal_backed_replica_reloads_committed_kv_after_restart() {
                 matches!(reply, crowkv::paxos::roles::PxAcceptReply::Accepted { .. }),
                 "slot {slot} should be accepted: {reply:?}"
             );
-            replica.learn_chosen(&entry, None, None).await;
+            replica.learn_chosen(&entry, &[]).await;
         }
         assert_eq!(replica.contiguous_applied(), 3, "applied frontier at slot 3");
         wal.seal_all().await.expect("seal");
@@ -181,12 +181,12 @@ async fn delete_survives_wal_restart() {
         // Slot 1: put "k1" = "v1"
         let e1 = write_entry(1, b"k1", b"v1");
         let _ = replica.on_accept(&e1).await;
-        replica.learn_chosen(&e1, None, None).await;
+        replica.learn_chosen(&e1, &[]).await;
 
         // Slot 2: delete "k1"
         let e2 = delete_entry(2, b"k1");
         let _ = replica.on_accept(&e2).await;
-        replica.learn_chosen(&e2, None, None).await;
+        replica.learn_chosen(&e2, &[]).await;
 
         assert_eq!(replica.contiguous_applied(), 2);
         assert_eq!(
@@ -226,17 +226,17 @@ async fn put_then_delete_same_key_survives_restart() {
         // Slot 1: put "k" = "v1"
         let e1 = write_entry(1, b"k", b"v1");
         let _ = replica.on_accept(&e1).await;
-        replica.learn_chosen(&e1, None, None).await;
+        replica.learn_chosen(&e1, &[]).await;
 
         // Slot 2: put "k" = "v2" (overwrite)
         let e2 = write_entry(2, b"k", b"v2");
         let _ = replica.on_accept(&e2).await;
-        replica.learn_chosen(&e2, None, None).await;
+        replica.learn_chosen(&e2, &[]).await;
 
         // Slot 3: delete "k"
         let e3 = delete_entry(3, b"k");
         let _ = replica.on_accept(&e3).await;
-        replica.learn_chosen(&e3, None, None).await;
+        replica.learn_chosen(&e3, &[]).await;
 
         assert_eq!(replica.contiguous_applied(), 3);
         assert_eq!(replica.learner.engine_get(b"k").await, None, "key deleted");
@@ -279,12 +279,12 @@ async fn batch_with_put_and_delete_survives_restart() {
             ],
         );
         let _ = replica.on_accept(&e1).await;
-        replica.learn_chosen(&e1, None, None).await;
+        replica.learn_chosen(&e1, &[]).await;
 
         // Slot 2: put k3
         let e2 = write_entry(2, b"k3", b"v3");
         let _ = replica.on_accept(&e2).await;
-        replica.learn_chosen(&e2, None, None).await;
+        replica.learn_chosen(&e2, &[]).await;
 
         assert_eq!(replica.contiguous_applied(), 2);
         assert_eq!(
@@ -352,12 +352,12 @@ async fn mixed_put_delete_batch_survives_restart() {
             ],
         );
         let _ = replica.on_accept(&e1).await;
-        replica.learn_chosen(&e1, None, None).await;
+        replica.learn_chosen(&e1, &[]).await;
 
         // Slot 2: delete k2 (single-op entry)
         let e2 = delete_entry(2, b"k2");
         let _ = replica.on_accept(&e2).await;
-        replica.learn_chosen(&e2, None, None).await;
+        replica.learn_chosen(&e2, &[]).await;
 
         // Slot 3: batch — put k4, delete k1, put k5
         let e3 = batch_entry(
@@ -369,7 +369,7 @@ async fn mixed_put_delete_batch_survives_restart() {
             ],
         );
         let _ = replica.on_accept(&e3).await;
-        replica.learn_chosen(&e3, None, None).await;
+        replica.learn_chosen(&e3, &[]).await;
 
         assert_eq!(replica.contiguous_applied(), 3);
 

@@ -2,7 +2,7 @@
 # --- CrowKV read regression benchmark ---
 # Usage: bash doc/working/bench-read-regression.sh
 #
-# Focused subset of bench-read-sweep.sh for regression detection.
+# Regression sentinel for read throughput and correctness.
 # Covers the key findings from the full sweep:
 #   - Linearizable 1T:1C scaling (6T baseline + 48T peak)
 #   - MinSlot 1T:1C underperforms at low concurrency

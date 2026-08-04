@@ -10,7 +10,7 @@
 
 use std::io::Write;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -19,7 +19,7 @@ use tracing::{debug, info, warn};
 use crowkv::cluster::kv_server::KvServer;
 use crowkv::cluster::local_replica::PxLocalReplicaRole;
 use crowkv::cluster::px_kv_store::PxKvStore;
-use crowkv::common::config::{AdmissionPolicy, PxElectionConfig, ServerConfig};
+use crowkv::common::config::{CrowKVConfig, PxElectionConfig, ServerConfig};
 use crowkv::metrics::MetricsRunner;
 
 use crowkv_server::cli::{parse_id_list, parse_port_list, Cli};
@@ -78,44 +78,59 @@ async fn main() {
         kv_backend = %args.kv_backend,
         wal_backend = %args.wal_backend,
         max_inflight = args.max_inflight,
-        inflight_queues = args.inflight_queues,
         "parsed CLI arguments"
     );
 
     let bootstrap = parse_and_validate_cli_args(&args);
 
-    let election_cfg = match args.election_profile.as_str() {
+    // Load config: from --config file if provided, else defaults. CLI
+    // args override individual fields after loading.
+    let mut config = match &args.config {
+        Some(path) => CrowKVConfig::load_from_file(path)
+            .unwrap_or_else(|e| panic!("failed to load config from {}: {e}", path.display())),
+        None => CrowKVConfig::default(),
+    };
+
+    // CLI overrides.
+    config.election = match args.election_profile.as_str() {
         "test" => PxElectionConfig::for_tests(),
         "e2e" => PxElectionConfig::for_e2e(),
         _ => PxElectionConfig::DEFAULT,
     };
+    if let Some(ref wal_root) = args.wal_root {
+        config.wal_root = wal_root.clone();
+    }
+    config.config_root = args.config_root.clone().unwrap_or_else(|| {
+        config
+            .wal_root
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join("conf")
+    });
+    config.data_root = args.data_root.clone().unwrap_or_else(|| {
+        config
+            .wal_root
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join("ctdata")
+    });
+    config.wal_backend = args.wal_backend.clone();
+    config.crowtree_backend = args.kv_backend.clone();
+    config.wal_skip_fsync = args.no_fsync;
+    config.paxos.max_inflight_proposals = args.max_inflight;
+    if let Some(max_keys) = args.coalesce_max_keys {
+        config.paxos.coalesce_max_keys = max_keys;
+    }
+    if let Some(threshold) = args.coalesce_drain_threshold {
+        config.paxos.coalesce_drain_threshold = threshold;
+    }
 
-    let wal_root = args.wal_root.clone().unwrap_or_else(|| PathBuf::from("waldata"));
-    let config_root = args
-        .config_root
-        .clone()
-        .unwrap_or_else(|| wal_root.parent().unwrap_or_else(|| Path::new("")).join("conf"));
-    let data_root = args
-        .data_root
-        .clone()
-        .unwrap_or_else(|| wal_root.parent().unwrap_or_else(|| Path::new("")).join("ctdata"));
-    let crowtree_backend = crowkv_server::store_registry::parse_crowtree_backend(&args.kv_backend);
-    let wal_backend = Arc::new(crowkv_server::store_registry::parse_wal_backend(
-        &args.wal_backend,
+    let registry = Arc::new(KvStoreRegistry::with_config(config).with_metrics_registry(
+        metrics_runner.as_ref().map_or_else(
+            || Arc::new(std::sync::Mutex::new(crowkv::metrics::MetricsRegistry::new())),
+            |r| r.registry().clone(),
+        ),
     ));
-
-    let registry = Arc::new(
-        KvStoreRegistry::with_runtime(election_cfg, wal_root, config_root, wal_backend)
-            .with_data_root(data_root)
-            .with_crowtree_backend(crowtree_backend)
-            .with_metrics_registry(metrics_runner.as_ref().map_or_else(
-                || Arc::new(std::sync::Mutex::new(crowkv::metrics::MetricsRegistry::new())),
-                |r| r.registry().clone(),
-            ))
-            .with_wal_skip_fsync(args.no_fsync)
-            .with_max_inflight(args.max_inflight)
-            .with_inflight_queues(args.inflight_queues),
-    );
 
     // Populate the port pool from `--ports` even when `--stores` is not
     // provided, so stores created later via the management API can use
@@ -173,8 +188,6 @@ async fn main() {
             b.replica_id,
             b.ports.clone(),
             registry.clone(),
-            args.max_inflight,
-            args.inflight_queues,
         )
         .await;
     }
@@ -302,8 +315,6 @@ async fn create_and_start_stores(
     replica_id: u64,
     ports: Vec<u16>,
     registry: Arc<KvStoreRegistry>,
-    max_inflight: usize,
-    inflight_queues: usize,
 ) {
     debug!(
         store_count = store_ids.len(),
@@ -316,7 +327,7 @@ async fn create_and_start_stores(
         let port = if ports[i] > 0 {
             ports[i]
         } else {
-            persisted_port_for_store(&registry.config_root, store_id)
+            persisted_port_for_store(&registry.config.config_root, store_id)
                 .await
                 .unwrap_or(0)
         };
@@ -341,17 +352,9 @@ async fn create_and_start_stores(
                 group_id,
                 replica_id,
                 PxLocalReplicaRole::Follower,
-                registry.election_cfg,
-                &registry.wal_root,
-                &registry.config_root,
+                &registry.config,
                 registry.wal_backend.clone(),
-                &registry.data_root,
                 registry.crowtree_backend,
-                registry.wal_skip_fsync,
-                "log",
-                max_inflight,
-                inflight_queues,
-                AdmissionPolicy::Queue,
             )
             .await
             {

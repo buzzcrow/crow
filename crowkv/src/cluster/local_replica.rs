@@ -19,7 +19,7 @@ use crate::metrics::{Counter, Gauge, MetricsRegistry};
 use crate::paxos::acceptor::PxAcceptor;
 use crate::paxos::learner::PxLearner;
 use crate::paxos::roles::{
-    Acceptor, Learner, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply, SlotIndex,
+    Acceptor, DedupTag, Learner, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply, SlotIndex,
 };
 use crate::paxos::{PxNodeId, PxTerm};
 use crate::wal::record::WALRecord;
@@ -241,6 +241,13 @@ pub struct PxLocalReplica {
     /// metrics log file. Set via [`Self::set_metrics_registry`] when
     /// a registry is wired. `None` in tests / no-registry mode.
     election_handles: OnceLock<ElectionRegistryHandles>,
+    /// Test-only gate that blocks `spawn_accept_persist`'s background
+    /// task before `wal.append`, so a test can deterministically kill
+    /// the replica in the CAS→persist window (R16b early-ack). Set via
+    /// `set_persist_gate_for_tests` under the `test-util` feature;
+    /// `None` in production.
+    #[cfg(feature = "test-util")]
+    persist_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
 }
 
 /// Registry-based metric handles for election counters and gauges.
@@ -353,6 +360,8 @@ impl PxLocalReplica {
             election_metrics: ElectionMetrics::new(),
             last_heartbeat_at: Mutex::new(None),
             election_handles: OnceLock::new(),
+            #[cfg(feature = "test-util")]
+            persist_gate: Mutex::new(None),
         }
     }
 
@@ -411,6 +420,8 @@ impl PxLocalReplica {
             election_metrics: ElectionMetrics::new(),
             last_heartbeat_at: Mutex::new(None),
             election_handles: OnceLock::new(),
+            #[cfg(feature = "test-util")]
+            persist_gate: Mutex::new(None),
         }
     }
 
@@ -421,6 +432,17 @@ impl PxLocalReplica {
     /// will persist `voted_for` changes.
     pub fn set_wal(&mut self, wal: Arc<WalEngine>) {
         self.wal = Some(wal);
+    }
+
+    /// Install a `Notify` gate that blocks `spawn_accept_persist`'s
+    /// background task before `wal.append`. The test keeps the `Arc`;
+    /// the background task waits on `notify.notified()` and only
+    /// proceeds once the test calls `notify_one()`. Used by T1
+    /// crash-recovery tests to deterministically hit the CAS→persist
+    /// window.
+    #[cfg(feature = "test-util")]
+    pub fn set_persist_gate_for_tests(&self, notify: Arc<tokio::sync::Notify>) {
+        *self.persist_gate.lock() = Some(notify);
     }
 
     /// Set this replica's listen endpoint (called by the store when the
@@ -578,7 +600,7 @@ impl PxLocalReplica {
         };
         for slot in start_slot..=highest {
             if let Some(entry) = replica.acceptor.accepted_at(slot) {
-                replica.learner.learn(entry, None, None).await;
+                replica.learner.learn(entry, &[]).await;
             }
         }
 
@@ -852,6 +874,8 @@ impl PxLocalReplica {
             inflight_slots: r.register_gauge(format!("{prefix}.paxos.inflight_slots.g")),
         };
         let _ = self.election_handles.set(handles);
+        let engine_apply = r.register_summary(format!("{prefix}.write.engine_apply.l"));
+        self.learner.set_engine_apply_summary(engine_apply);
         if let Some(ref wal) = self.wal {
             let bl = wal.backend_label();
             let append_summary = r.register_summary(format!("{prefix}.wal.{bl}.append.l"));
@@ -1171,7 +1195,13 @@ impl PxLocalReplica {
     pub fn spawn_accept_persist(&self, entry: PxLogEntry) {
         if let Some(wal) = &self.wal {
             let wal = Arc::clone(wal);
+            #[cfg(feature = "test-util")]
+            let gate = self.persist_gate.lock().clone();
             tokio::spawn(async move {
+                #[cfg(feature = "test-util")]
+                if let Some(notify) = gate {
+                    notify.notified().await;
+                }
                 let record = WALRecord::from_accepted(wal.group_id(), &entry);
                 if let Err(e) = wal.append(&record).await {
                     tracing::error!(
@@ -1185,22 +1215,38 @@ impl PxLocalReplica {
         }
     }
 
-    /// Learn a chosen entry (apply to state machine).
-    pub async fn learn_chosen(&self, entry: &PxLogEntry, client_id: Option<u64>, seq: Option<u64>) {
-        self.learner.learn(entry.clone(), client_id, seq).await;
+    /// Learn a chosen entry (apply to state machine) and record each
+    /// dedup tag against the slot. A single-key propose passes one tag;
+    /// a coalesced batch passes one per client op; repair/election pass
+    /// none.
+    pub async fn learn_chosen(&self, entry: &PxLogEntry, dedup_tags: &[DedupTag]) {
+        self.learner.learn(entry.clone(), dedup_tags).await;
     }
 
-    /// R17: spawn `learn_chosen` as a detached background task. Used when
+    /// R17: defer the engine apply (`apply_entry` + applied-frontier
+    /// advance) to a detached background task, while advancing the chosen
+    /// frontier and recording dedup **synchronously**. Used when
     /// `async_engine_apply` is enabled — the value is already Paxos-chosen,
-    /// so applying to the local engine can happen asynchronously. The
-    /// learner's `apply_entry` is idempotent (drops slot <= `last_applied`),
-    /// and `update_frontier` / `record_dedup` are atomic, so a delayed
-    /// apply is safe. Read-your-writes semantics break until the apply
-    /// catches up — callers must gate reads on the applied frontier.
-    pub fn spawn_learn_chosen(&self, entry: PxLogEntry, client_id: Option<u64>, seq: Option<u64>) {
+    /// so the FFI/memtable insert can happen asynchronously.
+    ///
+    /// The chosen frontier (`contiguous_chosen`) and dedup must advance
+    /// before `propose` returns so a subsequent Linearizable read's
+    /// `read_slot = contiguous_chosen` reflects this slot — the R35 apply
+    /// fence then waits for `contiguous_applied >= read_slot` (the spawned
+    /// apply) before serving the read, preserving read-your-writes. The
+    /// learner's `apply_entry` is idempotent, and the frontier/dedup
+    /// updates are atomic, so a delayed apply is safe.
+    pub fn spawn_learn_chosen(&self, entry: PxLogEntry, dedup_tags: &[DedupTag]) {
         let learner = Arc::clone(&self.learner);
+        // Sync: chosen frontier + dedup (cheap atomics; must precede
+        // `propose` returning `Chosen` for read-your-writes).
+        learner.update_chosen_frontier(entry.slot, entry.term);
+        learner.record_dedup_tags(dedup_tags, entry.slot);
+        // Deferred: engine apply + applied frontier (the FFI/memtable insert
+        // moved off the write critical path; the apply fence gates reads).
         tokio::spawn(async move {
-            learner.learn(entry, client_id, seq).await;
+            learner.apply_entry(entry.slot, &entry.payload).await;
+            learner.advance_applied_frontier(entry.slot);
         });
     }
 
@@ -1221,7 +1267,7 @@ impl PxLocalReplica {
             let Some(entry) = self.acceptor.accepted_at(next) else {
                 break;
             };
-            self.learner.learn(entry, None, None).await;
+            self.learner.learn(entry, &[]).await;
             next += 1;
         }
     }
@@ -1294,6 +1340,15 @@ impl PxLocalReplica {
     #[must_use]
     pub fn contiguous_applied(&self) -> SlotIndex {
         self.learner.contiguous_applied()
+    }
+
+    /// R35 apply fence: wait until the local applied frontier reaches
+    /// `slot`. Delegates to [`PxLearner::await_applied`]. Used by the
+    /// Linearizable read path after the leadership barrier so a read does
+    /// not return a just-chosen-but-not-yet-applied value when R17
+    /// (`async_engine_apply`) is on.
+    pub async fn await_apply_fence(&self, slot: SlotIndex) {
+        self.learner.await_applied(slot).await;
     }
 
     /// Highest slot ever opened on this replica's acceptor.

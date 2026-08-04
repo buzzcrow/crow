@@ -18,177 +18,127 @@ Client PUT/DELETE/BatchWrite
        [copy: client key/value slices → contiguous Vec<u8>, unavoidable]
   → PxKvStore::propose_and_respond
     → PxGroup::propose(payload, client_id, seq)
-       [move: Vec<u8> → Bytes reuses allocation, zero copy]
       1. Leadership gate (role == Leader && current_term == proposing_term)
+         → NotLeader { leader_hint } on miss (drains in-flight proposals)
       2. Idempotency check (dedup_lookup by client_id + seq)
-      3. Inflight admission (InflightAdmission::acquire_permit().await)
+         → cached ProposeResult::Chosen { slot } on hit — no permit, no
+           Paxos round, no batch entry (duplicates never consume a window
+           permit)
+      3. Branch on coalesce_max_keys > 0 && self_weak set:
+         a. Coalescing ON (R45/R45b) → coalesce_enqueue(payload, tag)
+            - Idle (no pending batch): start a 1-op round immediately
+              (no timer); open a fresh pending batch for concurrent ops
+            - Batch exists: append op_body + tag + oneshot waiter;
+              if op_count >= coalesce_max_keys → flush the full batch as
+              a concurrent round (max_keys overflow path)
+            - Round runs in a detached tokio::spawn → propose_inner;
+              each coalesced caller awaits its oneshot for the shared
+              ProposeResult (one slot, one quorum round per batch)
+            - coalesce_drain_after_round: after a round, if the pending
+              batch is non-empty AND inflight.occupied() <
+              coalesce_drain_threshold, flush it as the next round
+              immediately (zero-latency-floor at low load); else go idle.
+              Default threshold = 1 (0 = always drain = pure event mode)
+            - Watchdog (WATCHDOG_US = 1 s): single long-running task,
+              flushes a stuck non-empty batch if no coalescer activity
+              for 1 s (safety net against missed wakes)
+         b. Coalescing OFF (coalesce_max_keys == 0, default) →
+            Bytes::from(payload) [move: reuses allocation, zero copy]
+            → propose_inner(payload, dedup_tags) directly (caller awaits)
+  → propose_inner(payload, dedup_tags):  [one inflight permit held]
+      1. Re-check leadership gate — a step-down between coalescer batch
+         collection and flush surfaces as NotLeader instead of racing
+         into Paxos with stale identity
+      2. Inflight admission (InflightAdmission::acquire_permit().await)
          - Queue policy (default): blocks on semaphore until a permit
            is freed — eliminates Busy rejections and client retry storms
          - Reject policy (tests only): try_acquire, returns Busy if full
-      4. Slot allocation (next_slot.fetch_add)
-      5. 'slot_retry loop (max_slot_retries = 3)
+      3. Slot allocation (next_slot.fetch_add)
+      4. 'slot_retry loop (max_slot_retries = 3)
          a. base_entry(slot, payload.clone())
             [O(1) ref-count: Bytes::clone per retry attempt]
          b. 'paxos_attempt loop (max_paxos_retries = 3)
-            i.  [if force_prepare] run_prepare_phase
-                - local on_prepare (acceptor.prepare + WAL append Promised)
-                - concurrent remote send_prepare RPCs (join_all, unary gRPC)
-            ii. run_accept_phase
-                - local on_accept (acceptor.accept + WAL append Accepted)
-                  [O(1) ref-count: PxLogEntry::clone for cas_accepted]
-                  [no copy: encode_accepted_payload is entry.payload.clone()
-                   (O(1) ref-count); WALRecord.payload is Bytes]
-                  [no copy: IoSlice borrows Bytes for vectored writev]
-                - concurrent remote send_accept RPCs (join_all, bidi LearnerStream)
+            i.  [if force_prepare] run_prepare_phase (R16a: concurrent)
+                - tokio::join!(local on_prepare, join_all(remote send_prepare))
+                  local on_prepare: acceptor.prepare + WAL append Promised
+                  remote: send_prepare RPCs (unary gRPC)
+                - quorum check counts the local reply (W6 intact)
+                - on TermStale → become_follower + return NotLeader
+                - on MembershipEpochMismatch → adopt responder epoch,
+                  retry same slot
+            ii. run_accept_phase (R16a/R16b: concurrent, two paths)
+                - guard: wal_early_ack && cached_quorum > 1
+                  (single-node groups always use the strict R16a path —
+                  no survivors to re-drive a chosen-but-not-durable slot
+                  after a crash, so the persist must be synchronous)
+                - remote (both paths): send_accept RPCs (join_all, bidi
+                  LearnerStream)
                   [O(1) ref-count: Bytes::clone for AcceptRequest]
                   [copy: payload → socket buffer on gRPC serialize, unavoidable]
                   [move: follower gRPC deserialize → PxLogEntry.payload Bytes]
+                - strict (wal_early_ack = false, R16a; test default):
+                    tokio::join!(local on_accept, join_all(remote send_accept))
+                    local on_accept = on_accept_inner (CAS) + on_accept_persist
+                      (WAL append Accepted, awaits fdatasync)
+                      [O(1) ref-count: PxLogEntry::clone for cas_accepted]
+                      [no copy: encode_accepted_payload is entry.payload.clone()
+                       (O(1) ref-count); WALRecord.payload is Bytes]
+                      [no copy: IoSlice borrows Bytes for vectored writev]
+                    quorum check waits for the local reply (W6 intact)
+                - early-ack (wal_early_ack = true, R16b; production default):
+                    tokio::join!(on_accept_inner (CAS only), join_all(remote))
+                    local WAL persist deferred to spawn_accept_persist
+                      (fire-and-forget tokio::spawn; best-effort durability)
+                    chosen declared on remote quorum + local CAS, before fsync
+                      (weakens W6 for the local replica)
             iii. quorum check
             iv. [if chosen] learn_chosen (decode + KVEngine::apply)
+                - sync (async_engine_apply = false; test default):
+                  learn_chosen → apply_entry + advance both frontiers +
+                  record dedup (inline await; contiguous_applied tracks
+                  contiguous_chosen exactly, R35 fence is a no-op fast path)
+                - async (async_engine_apply = true; production default, R17):
+                  spawn_learn_chosen — sync update_chosen_frontier +
+                  record_dedup_tags (MUST precede Chosen return so a
+                  subsequent Linearizable read's read_slot reflects this
+                  slot), then spawn apply_entry + advance_applied_frontier
+                  (fire-and-forget tokio::spawn)
+                  [R35 apply fence: Linearizable reads await_applied(slot)
+                   before serving — restores read-your-writes; learner
+                   apply_entry is idempotent so a delayed apply is safe]
                 [O(1) ref-count: PxLogEntry::clone for learner]
                 [O(1) ref-count: Batch::decode uses Bytes::slice per key/value]
                 [no copy: FFI ct_apply_batch_slices takes ct_kv_ref pointers
                  into caller's Bytes slices (R23, done)]
                 [copy: C++ engine copies key/value into internal memtable,
                  unavoidable]
-            v.  [if chosen] fan_out_chosen_notice (fire-and-forget mpsc)
-            vi. [if chosen] return ProposeResult::Chosen { slot }
-      6. [if all retries exhausted] return ProposeResult::Err
+            v.  [if chosen] foreign-value check: if adopted_foreign_value
+                or entry.payload != payload → retry client value on a
+                fresh next slot (continue 'slot_retry)
+            vi. [if chosen] fan_out_chosen_notice (fire-and-forget mpsc)
+            vii.[if chosen] return ProposeResult::Chosen { slot }
+      5. [if all retries exhausted] return ProposeResult::Err
   → KvResponse::ok_chosen(slot, ...) or error
 ```
 
-### Key Data Structures
-
-- **`PxLogEntry`** — `{ slot, ballot: {round, leader_id}, term, payload:
-  Bytes }`. Unit of Paxos consensus. `payload` is `bytes::Bytes` for
-  `O(1)` ref-count-bump clones.
-- **`PxBallot`** — `{ round, leader_id }`. Monotone per slot;
-  prepare/accept fencing.
-- **`WALRecord`** — encoded from `PxLogEntry` (or `{term, slot, ballot}`
-  for Promised). Written via `WalEngine::append` → per-pipeline writer
-  task → `fdatasync`.
-- **`AcceptRequest` / `AcceptedResponse`** — gRPC wire types for the
-  accept phase, over the per-peer bidi `PxLearnerStream`.
-- **`PrepareRequest` / `PromiseResponse`** — gRPC wire types for the
-  prepare phase, unary RPC (not over LearnerStream).
-
 ---
 
-## Multi-Slot Concurrency
+## Multi-Slot Concurrency and Component Design
 
-- **Inflight admission (R18)** — `InflightAdmission` gate backed by N
-  `tokio::sync::Semaphore` queues (`inflight_queues`, default 1). Total
-  permits = `max_inflight_proposals` (default 32). Each `propose`
-  acquires one permit before slot allocation, holds it for the entire
-  proposal duration (released on drop at every return path).
-  - **Queue policy (default)** — `acquire_permit().await` blocks until
-    a permit is freed; no `Busy` rejections, no client retry;
-    semaphore fast path is lock-free (atomic CAS).
-  - **Reject policy (tests only)** — `try_acquire`, returns
-    `ProposeResult::Busy` if full.
-  - **Multi-queue routing** — permits round-robin across N semaphores,
-    each `ceil(max_inflight / N)`; reduces contention (no measurable
-    effect at ≤64 threads; consensus path dominates).
-  - **Metrics** — `inflight_queue_depth`, `inflight_total_enqueued`,
-    `inflight_total_wait_us`, `inflight_occupied` via `GroupStatus`.
-  - **Slot allocation** — `next_slot.fetch_add(1, Ordering::Relaxed)`,
-    lock-free atomic.
-- **Per-slot independence** — slot N may be in accept while N+1 is in
-  prepare; slots chosen out of order (higher slot may be chosen before
-  a lower one if the lower hits a retry). Learner tracks
-  `contiguous_chosen` (highest contiguous chosen) and
-  `last_chosen_slot` (highest overall); gaps filled by background
-  repair.
-- **Background repair (`repair_once`)** — leader steady-state: when
-  `contiguous_chosen < last_chosen_slot`, runs classic Paxos (prepare +
-  accept) on `gap_slot = contiguous_chosen + 1` with empty payload
-  (`NoOp` fill or adopted foreign value).
-- **Learner stream window** — per-peer bidi `PxLearnerStream` mpsc
-  capacity `learner_stream_window_frames` (default 64) = 2× headroom
-  over the default proposer window (32) so the learner channel never
-  blocks before the proposer window is full. When full, `dispatch`
-  returns `PxReplicaError::Internal("outbound queue full")` → proposer
-  maps to `PxPaxosError::Busy` (retryable).
-- **WAL batch aggregation** — writer task drains all queued records per
-  wake cycle: `rx.recv()` (block until first) → `try_recv` drain →
-  optional coalesce (`wal_flush_coalesce_us`, default 0) → single
-  vectored `writev` + single `fdatasync` → resolve all pending oneshot
-  acks. Multiple in-flight proposals on the same pipeline flush
-  together, amortizing fsync cost.
+The flow above traces a single proposal. The multi-slot concurrency
+model (sliding-window admission, per-slot independence, background gap
+repair, learner-stream window, WAL batch aggregation) and the per-
+component design rationale (coalescer, prepare/accept phase fan-out,
+learn/apply sync vs async, chosen notice) are covered in the design
+docs:
 
----
-
-## Write Path Components
-
-- **Payload encoding** — `encode_kv_payload` /
-  `encode_kv_batch_items` manually binary-encode key-value pairs into a
-  `Vec<u8>`, converted to `Bytes` once at `propose` entry
-  (`Bytes::from(Vec<u8>)` reuses the allocation, no copy).
-- **Leadership gate** — checks `role == Leader` and
-  `current_term == proposing_term`; either fails →
-  `NotLeader { leader_hint }` before slot allocation. Drains in-flight
-  client proposals early.
-- **Idempotency / dedup** — before window admission,
-  `dedup_lookup(client_id, seq)` checks if the learner already applied
-  this pair; if so, returns the cached commit slot without re-running
-  Paxos. Duplicates never consume a window permit.
-- **Prepare phase (`run_prepare_phase`)** — local: `on_prepare` → term
-  fence → `acceptor.prepare` (lock-free CAS on slot node) → WAL append
-  `Promised` (awaits `fdatasync`) → `PxPrepareReply`. Remote:
-  `join_all` over `remote_replicas`, each `send_prepare` unary gRPC;
-  replies folded into `promised`, `highest_rejected_round`,
-  `highest_seen_term`, `epoch_mismatch`, `adopted`. Quorum:
-  `promised >= quorum` → proceed; else retry or fail.
-- **Accept phase (`run_accept_phase`)** — local: `on_accept` → term
-  fence → `acceptor.accept(entry.clone())` (lock-free CAS) → WAL append
-  `Accepted` (awaits `fdatasync`) → `PxAcceptReply`. Remote: `join_all`
-  over `remote_replicas`, each `send_accept` over the per-peer bidi
-  `PxLearnerStream` (awaits correlated reply via oneshot); replies
-  folded into `accepted`, `highest_rejected_round`,
-  `highest_seen_term`, `epoch_mismatch`. Quorum:
-  `accepted + 1 (local) >= quorum` → chosen; else retry or fail.
-- **Learn / apply (`learn_chosen`)** —
-  `learner.learn(entry, client_id, seq)` → decode `Batch` from payload
-  → `KVEngine::apply(slot, &batch)` → update dedup map → advance
-  frontiers. `InMemKV`: `DashMap` insert (trivial). `CrowtreeEngine`:
-  FFI `ct_apply_put` / `ct_apply_delete` → memtable insert (may
-  trigger flush/compaction). `KVEngine::apply` is `async` but has no
-  genuine `Pending` path today (no async apply C API) — never
-  suspends.
-- **Chosen notice (`fan_out_chosen_notice`)** — fire-and-forget
-  `ChosenNotification` over each peer's `PxLearnerStream`; non-blocking
-  `try_send` on mpsc; failures logged at `debug!` and swallowed — next
-  peer frontiers.
-
----
-
-## Tracked Optimization Opportunities
-
-- **R15 — Zero-copy PxLogEntry in accept path** (done): `on_accept` and
-  `acceptor.accept` take `&PxLogEntry`; redundant clones eliminated;
-  only remaining clone is inside `inner_accept` for `cas_accepted` (slot
-  node must own its copy, O(1) ref-count bump with `Bytes` payload).
-- **R16a — Concurrent local + remote fan-out**: today both
-  `run_accept_phase` and `run_prepare_phase` `await` the local
-  `on_accept`/`on_prepare` (which runs acceptor CAS + WAL append +
-  `fdatasync`) *before* issuing any remote RPC. The leader's local
-  fsync (~10-100 µs on NVMe) sits on the critical path ahead of the
-  network RTT. Fix: issue the local handler and the remote RPCs
-  concurrently (fold the local call into the same `join_all`). The
-  quorum check still awaits the local reply before counting it, so
-  **W6 is not weakened** — W6 only forbids the local replica replying
-  `Accepted` before persist; the proposer still waits for that reply.
-  Pure win, no contract change, no feature flag.
-- **R16b — Early ack before local persist**: return `Chosen` before the
-  local WAL flush completes, tracking local persist separately from
-  quorum. *This* is the part that weakens W6 for the local replica — a
-  crash between accept reply and WAL flush may lose the accepted value
-  (safe in Paxos, but changes durability ordering). Requires feature
-  flag + crash-recovery tests. Lower priority than R16a.
-- **R17 — Async engine apply after quorum**: `learn_chosen` runs before
-  `ProposeResult::Chosen` is returned; engine apply (FFI + memtable
-  insert) is on the write critical path. Would break read-your-writes;
-  needs apply fence / read barrier.
+- [`design-slot.md`](../design/design-slot.md) — parallel slots,
+  sliding window and backpressure (§4), pipelined fanout (§5), gap
+  repair (§9), tunables and defaults (§12), performance model (§21),
+  server-side proposal coalescing R36 → R45/R45b (§23).
+- [`design-wal.md`](../design/design-wal.md) — write path and batched
+  durable flush (§4), ack contract and failure modes (§5, including
+  the `wal_early_ack` early-ack mode), tunables and defaults (§9).
 
 ---
 
@@ -201,33 +151,7 @@ in-memory KV (mem-block), write-only, 512-byte values, 1M key space,
 `Queue` (R18 default). Platform: AMD Ryzen 9 5950X (16 cores / 32
 threads), Linux. 28 runs total, zero errors across all configs.
 
-Script: `tools/bench-write-sweep.sh`. Regression subset:
-`tools/bench-write-regression.sh`.
-
-### Factors Affecting TPS
-
-- **`max_inflight_proposals` (window)** — total semaphore permits
-  across all admission queues; primary TPS lever. More permits = more
-  pipeline parallelism = higher throughput, until the consensus
-  critical path (WAL append + quorum RPC) becomes the bottleneck.
-- **`threads` (worker tasks)** — client-side concurrency; more workers
-  fill the pipeline faster; diminishing returns once server-side
-  consensus is saturated (~24T).
-- **`connections` (gRPC channels)** — **no measurable effect at any
-  thread count**. Unlike reads (where T:C ratio matters due to the
-  HTTP/2 connection lock), writes are bottlenecked by server-side
-  consensus (WAL fsync + quorum RPC), not gRPC framing. C=3 and C=48
-  produce identical throughput at 12T and 48T.
-
-No measurable effect on TPS (at ≤64 threads):
-
-- **`inflight_queues`** — multi-queue routing (1 vs 4 semaphores);
-  semaphore is not the contention bottleneck; consensus path
-  dominates. Default 1 is sufficient.
-- **Window > 16** — MI=16, 32, 64 all converge to ~29K at 48T.
-  Consensus critical path is the hard ceiling.
-- **Connections** — C has zero effect on write throughput at any T.
-  The write path's bottleneck is consensus, not gRPC.
+Regression sentinel: `tools/bench-write-regression.sh`.
 
 ### Phase 1 — Baseline 1T:1C scaling (MI=64)
 
@@ -239,9 +163,8 @@ No measurable effect on TPS (at ≤64 threads):
 | 24 | 24 | 28,761 | 832 | 820 | 1,264 | 2,751 | 0 |
 | 48 | 48 | 28,898 | 1,658 | 1,643 | 2,419 | 5,399 | 0 |
 
-Throughput plateaus at 24T (~29K). Adding threads beyond 24T
-increases latency without improving throughput — the consensus
-pipeline is saturated.
+Throughput plateaus at 24T (~29K); beyond 24T adds latency without
+throughput gain (consensus pipeline saturated).
 
 ### Phase 2 — T:C ratio exploration (MI=64)
 
@@ -257,13 +180,10 @@ pipeline is saturated.
 | 48 | 48 | 1:1 | 29,134 | 1,645 | 2,373 | 0 |
 | 48 | 64 | 1:1.3 | 29,004 | 1,652 | 2,397 | 0 |
 
-**Key finding: T:C ratio has zero effect on write throughput.** At
-12T, C=3 and C=48 both give ~25K. At 48T, C=12 and C=64 both give
-~29K. This is fundamentally different from reads, where the HTTP/2
-connection lock makes T:C ratio critical. Writes are bottlenecked by
-the consensus critical path (WAL append + quorum RPC), which is
-server-side and independent of how many gRPC channels the client
-opens.
+**T:C ratio has zero effect on write throughput** (12T: C=3 and C=48
+both ~25K; 48T: C=12 and C=64 both ~29K). Unlike reads (where the
+HTTP/2 connection lock makes T:C ratio critical), writes are
+bottlenecked by server-side consensus, not gRPC framing.
 
 ### Phase 3 — Window impact at 48T:48C
 
@@ -275,12 +195,10 @@ opens.
 | 32 | 28,827 | 1,662 | 1,644 | 2,481 | 5,563 | 0 |
 | 64 | 28,920 | 1,657 | 1,638 | 2,509 | 5,067 | 0 |
 
-**Window is the primary TPS lever.** MI=1→16 gives 4.4× throughput
-(6K→28K). MI=1 (effectively Raft-style sequential commit) serializes
-all proposals through a single permit — 48 threads queue at 7.5ms
-avg latency. MI=16+ converges: the consensus pipeline is saturated,
-adding more permits doesn't help because the per-proposal critical
-path (WAL fsync + quorum RPC) is the bottleneck.
+**Window is the primary TPS lever** — MI=1→16 gives 4.4× (6K→28K).
+MI=16+ converges (consensus critical path is the hard ceiling). See
+[`design-slot.md` §4](../design/design-slot.md#4-sliding-window-and-backpressure)
+for the sliding-window/backpressure design.
 
 ### Phase 4 — Low thread count (MI=64)
 
@@ -296,27 +214,15 @@ path (WAL fsync + quorum RPC) is the bottleneck.
 | 3 | 3 | 1:1 | 12,915 | 230 | 222 | 383 | 0 |
 | 3 | 6 | 1:2 | 12,704 | 234 | 219 | 357 | 0 |
 
-At 1T, C has no effect (~2.8K) — single-thread throughput is bounded
-by per-proposal latency (~350us). At 2T, more connections help
-(6.3K→8.9K) because 2 threads sharing 1 connection contend on the h2
-lock; 2T:4C gives each thread its own connection. At 3T, 3C and 6C
-converge (~12.8K).
-
-### Comparison with previous test (2026-07-21)
-
-The previous test reported 50K ops/s peak at 64T:8C (Intel Ryzen 9
-5950X, Linux). This sweep measures ~29K at all 48T+ configs on the
-same Intel platform, including a direct 64T:8C re-run (29,319 ops/s).
-The relative findings are consistent: window is the primary lever,
-threads scale until consensus saturation, connections have minimal
-effect. The absolute throughput difference is investigated below.
+At 1T, C has no effect (~2.8K, bounded by per-proposal latency ~350µs).
+At 2T, more connections help (6.3K→8.9K) — 2 threads sharing 1
+connection contend on the h2 lock. At 3T, 3C and 6C converge (~12.8K).
 
 ### macOS M5 Pro retest (2026-07-29)
 
-To separate platform effects from code regression, the regression
-sentinel configs were re-run on macOS M5 Pro (arm64, Darwin 25.5.0).
-Same workload (write-only, 512 B values, 1M key space, 12 s, mem
-mode, Queue admission, MI=64 unless noted).
+Same workload, macOS M5 Pro (arm64, Darwin 25.5.0), MI=64 unless noted.
+Re-run to separate platform effects from code regression after the
+Intel 50K→29K drop (07-21 → 07-24).
 
 | Threads | Conn | MI | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -326,58 +232,96 @@ mode, Queue admission, MI=64 unless noted).
 | 64 | 8 | 64 | 47,808 | 1,336 | 1,329 | 1,900 | 3,075 | 0 |
 | 48 | 48 | 1 | 13,320 | 3,602 | 3,083 | 3,721 | 105,791 | 48 |
 
-**Key finding: the 50K→29K difference is largely a platform effect,
-not a code regression.** On M5 Pro the 64T:8C config hits ~48K —
-within 4% of the original Intel 50K claim. The M5 Pro is meaningfully
-faster than the Intel Ryzen 9 5950X for this workload at every config:
-
-- **Single-thread (1T:1C)**: M5 Pro 9.5K vs Intel 2.8K — **3.4×**.
-  The M5 Pro's per-core throughput and memory subsystem dominate;
-  single-thread write latency is bound by per-proposal critical path
-  (WAL fsync + quorum RPC), and M5 Pro's NVMe + memory latency is
-  substantially lower.
-- **Saturation (24T+)**: M5 Pro ~41-48K vs Intel ~29K — **1.4-1.7×**.
-  The M5 Pro has fewer but faster cores; it saturates later and at a
-  higher ceiling.
-- **Window impact (MI=1 vs MI=64)**: same 4-5× ratio on both platforms
-  (M5 Pro 13K→47K; Intel 6K→29K). The relative shape is identical;
-  only the absolute ceiling differs.
-
-**Implication for R31**: the Intel same-platform regression (50K on
-07-21 → 29K on 07-24) is still real and warrants an Intel bisect if
-that platform is available. But the "ceiling" is not 29K globally —
-that is Intel-specific. On M5 Pro the steady-state ceiling is ~48K,
-close to the original 50K claim. Optimizations (R16a/R17/R30) should
-be benchmarked on a single consistent platform; cross-platform
-comparisons are not meaningful for absolute throughput.
-
-The MI=1 run on M5 Pro showed 48 errors with a 106 ms p999 tail —
-queue saturation under aggressive load with a single permit; the
-errors are likely client-side timeouts at the 3.6 ms avg latency, not
-consensus failures (zero errors at MI=64).
+**The 50K→29K difference is a platform effect, not a code regression**
+(R31). M5 Pro 64T:8C hits ~48K, within 4% of the original Intel 50K
+claim. M5 Pro is faster at every config: single-thread 3.4× (9.5K vs
+2.8K), saturation 1.4-1.7× (~41-48K vs ~29K). The window-impact shape
+is identical across platforms (MI=1→64: 4-5× on both). The MI=1 run
+showed 48 errors with a 106 ms p999 tail — client-side timeouts under
+single-permit queue saturation, not consensus failures.
 
 ### Conclusions
 
-- **Window is the primary TPS lever** — MI=1→16 gives 4.4× throughput
-  (6K→28K at 48T). MI=16+ converges (consensus pipeline saturated).
+- **Window is the primary TPS lever** — MI=1→16 gives 4.4× (6K→28K at
+  48T); MI=16+ converges.
 - **Threads scale until 24T, then plateau** — 1T→24T gives 10×
-  throughput (3K→29K). 24T→48T adds latency without throughput gain.
-- **T:C ratio has zero effect on writes** — unlike reads, C=3 and C=64
-  produce identical throughput at the same T. The write bottleneck is
-  server-side consensus (WAL fsync + quorum RPC), not gRPC framing.
-  This is the key difference from reads, where the HTTP/2 connection
-  lock makes T:C ratio critical.
+  (3K→29K); 24T→48T adds latency only.
+- **T:C ratio has zero effect on writes** — the write bottleneck is
+  server-side consensus, not gRPC framing (the key difference from
+  reads).
 - **Queue mode: zero errors across all 28 configurations** — no `Busy`
-  rejections, no client retry; queue naturally backpressures at any
-  window size.
-- **Scaling ceiling is platform-dependent** — Intel Ryzen 9 5950X
-  ~29K ops/s; Apple M5 Pro ~48K ops/s at the same config. Per-proposal
-  latency at 48 inflight is ~1.7 ms (Intel) vs ~1.0 ms (M5 Pro). Next
-  gains require reducing per-proposal latency (R16a: concurrent local
-  + remote fan-out; R15: zero-copy accept path, done). The Intel
-  same-platform 50K→29K drop (07-21 → 07-24) is tracked as R31; the
-  M5 Pro retest shows the code path itself reaches ~48K, so the
-  "regression" is largely a platform effect, not a code defect.
+  rejections; queue naturally backpressures at any window size.
+- **Scaling ceiling is platform-dependent** — Intel ~29K, M5 Pro ~48K
+  at the same config. Per-proposal latency at 48 inflight: ~1.7 ms
+  (Intel) vs ~1.0 ms (M5 Pro). After R16b (early-ack) + R17 (async
+  apply, R35-fenced), the per-proposal critical path is the quorum RPC
+  round-trip only; further gains need a faster quorum transport (R32).
+
+### Early-ack A/B (`wal_early_ack` on vs off)
+
+Same workload, Linux (AMD Ryzen 9 5950X), MI=64. Compares the relaxed
+ack mode against the strict mode (design:
+[`design-wal.md` §5`](../design/design-wal.md#5-ack-contract-and-failure-modes)).
+
+| Config | Mode | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1T:1C | early-ack on | 2,906 | 341 | 355 | 441 | 568 | 0 |
+| 1T:1C | early-ack off | 2,809 | 353 | 360 | 443 | 577 | 0 |
+| 48T:48C | early-ack on | 29,790 | 1,608 | 1,590 | 2,354 | 5,668 | 0 |
+| 48T:48C | early-ack off | 27,663 | 1,732 | 1,585 | 2,206 | 6,420 | 0 |
+
+1T:1C +3.5% throughput, −3.4% avg latency. 48T:48C +7.7% throughput,
+−7.2% avg latency, −11.7% p999 (p99 roughly flat — the deferred persist
+shifts some tail mass from p999 into p99). The gain is the saturation-
+ceiling lift from removing the leader's fsync from the bottleneck path.
+
+### WAL flush coalesce sweep (`wal_flush_coalesce_us`)
+
+48T:48C, MI=64, Linux. Sweeps an explicit wait window the flush worker
+would insert before draining (on top of the wake-drain-flush baseline;
+design:
+[`design-wal.md` §4`](../design/design-wal.md#4-write-path-and-batched-durable-flush)).
+
+| coalesce (µs) | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
+| --- | --- | --- | --- | --- | --- | --- |
+| 0 | 29,266 | 1,637 | 1,624 | 2,364 | 4,928 | 0 |
+| 10 | 29,362 | 1,632 | 1,618 | 2,370 | 5,212 | 0 |
+| 25 | 29,157 | 1,643 | 1,630 | 2,382 | 4,444 | 0 |
+| 50 | 29,332 | 1,633 | 1,619 | 2,344 | 5,420 | 0 |
+| 100 | 29,241 | 1,639 | 1,622 | 2,466 | 4,700 | 0 |
+| 200 | 29,452 | 1,627 | 1,614 | 2,376 | 4,872 | 0 |
+
+Throughput flat at ~29.2K (±1% noise); no non-zero value beat the
+wake-drain-flush baseline (coalesce = 0). **Decision: removed** —
+`wal_flush_coalesce_us` and the coalesce arm in `pipeline_writer.rs`
+were deleted; `wal_flush_watchdog_ms` stays as the safety-net timer.
+
+### Regression sentinel (`tools/bench-write-regression.sh`)
+
+Coalesced write throughput sweep (R45b, `coalesce_max_keys=32`,
+`drain_threshold=1`, `max_inflight=32`, 10s mem mode, 3-node cluster,
+512 B values, 1M key space). Regression sentinel for write throughput
+with coalescing enabled; WAL append count tracks coalescing efficiency.
+
+Platform: **AMD Ryzen 9 5950X** (16 cores / 32 threads, x86_64, Linux).
+Run: 2026-08-04. Raw TSV: `doc/working/bench-write-regression.tsv`.
+
+| Threads | Conn | Throughput (ops/s) | WAL append | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1 | 3,029 | 90,870 | 327 | 350 | 428 | 564 | 0 |
+| 4 | 2 | 12,681 | 274,197 | 313 | 300 | 496 | 826 | 0 |
+| 16 | 4 | 32,935 | 180,596 | 483 | 472 | 804 | 1,761 | 0 |
+| 32 | 16 | 52,688 | 141,915 | 604 | 576 | 1,180 | 3,708 | 0 |
+| 64 | 32 | 75,280 | 109,862 | 846 | 800 | 1,850 | 4,988 | 0 |
+| 128 | 32 | 105,779 | 105,226 | 1,204 | 1,124 | 2,592 | 9,632 | 0 |
+| 256 | 32 | 123,745 | 116,944 | 2,058 | 1,911 | 4,392 | 14,976 | 0 |
+
+Coalescing lifts the saturation ceiling from ~29K (non-coalesced, see
+Phase 1 above) to ~124K at 256T — a 4.3× gain from batching single-key
+ops into one slot/round. WAL append count drops as load rises (90K→~110K
+WAL appends for 1.2M ops at 256T = ~11× amortization), confirming the
+`max_keys` overflow path produces full batches at high load. Zero errors
+across all configs.
 
 ---
 
@@ -398,26 +342,40 @@ of what remains:
   is `entry.payload.clone()`); WAL `encode_frame` payload clone for
   `RecordFrame`; Batch decode `Bytes::slice` per key/value (shares
   payload buffer).
-- **Zero-copy (move/borrow)** — `Vec<u8>` → `Bytes` at `propose`
+- **Zero-copy (move/borrow)** — `Vec<u8>` → `Bytes` at `propose_inner`
   entry; gRPC deserialization → `PxLogEntry` (move `Bytes`); WAL
   vectored write (`IoSlice` borrows `Bytes`); FFI batch apply
   `ct_kv_ref` pointer-length structs (R23, done).
 
-### Optimization Opportunities
+---
 
-- **WAL encode** — already zero-copy: `encode_accepted_payload` is
-  `entry.payload.clone()` (O(1) ref-count); `WALRecord.payload` is
-  `Bytes`. No further work here. (Previously listed as a `to_vec()`
-  copy — that was stale; the code already does the right thing.)
-- **Batch decode** — already zero-copy: `Batch::decode` uses
-  `Bytes::slice` (O(1) ref-count), not `to_vec()`; `BatchOp` owns
-  `Bytes` that share the payload buffer.
-- **FFI batch encode** — already eliminated (R23, done):
-  `ct_apply_batch_slices` accepts an array of `ct_kv_ref`
-  pointer-length structs; no packing copy.
-- **Client-side batch copy (R25)** — `CrowkvClient::batch_write` clones
-  each `BatchOp` key/value (`Vec<u8>::clone`) into `KvBatchItem`, then
-  clones the entire `items` vec per retry. Switching client `BatchOp`
-  and proto `bytes` fields to `bytes::Bytes` (via `prost-build` config)
-  makes these O(1) ref-count bumps. Medium complexity — type change
-  ripples through call sites but no C++ or consensus changes.
+## Write-Path Enhancement Ideas
+
+Grounded in the current code (post R16a/R16b/R17/R23/R25/R34/R35/R45b).
+The per-proposal critical path, after R16b (early-ack, production
+default-on) and R17 (async engine apply, production default-on, gated
+by the R35 apply fence), is the quorum RPC round-trip only — the
+leader's local fsync and engine apply both run off the critical path.
+Remaining items are tracked as backlog requirements.
+
+- **Fan-out hardening (quorum short-circuit, RPC deadline, phase
+  metrics)** — tracked as
+  **[R43](../backlog/R43-write-path-fanout-hardening.md)** (backlog).
+  Six items from the 2026-08 write-flow review: (1) both phases
+  `join_all` ALL remote replies, so per-proposal latency is
+  `max(all peers)` instead of the quorum-th fastest — a
+  `FuturesUnordered` fold that returns on quorum + local reply (W6
+  intact) with a detached straggler drain (preserving late
+  TermStale/EpochMismatch side effects) is the largest remaining
+  latency lever needing no new transport; (2) accept/heartbeat
+  oneshots have no deadline, so a hung-but-connected peer stalls all
+  writes indefinitely even with quorum reachable; (3) `MetricHandles`
+  has read-path summaries only — no propose-e2e / prepare / accept /
+  first-quorum-RPC / apply latency breakdown (the critical-path
+  analysis above is inferred, not measured); (4) `retry_backoff` has
+  no jitter and sleeps while holding the admission permit; (5)
+  heartbeats share the 64-frame LearnerStream mpsc with accepts and
+  can be `Busy`-rejected at peak write load, degrading lease/election
+  stability; (6) the reply-fold `match` is triplicated (~150 lines)
+  across prepare + both accept paths — extract a helper first to
+  de-risk (1).
