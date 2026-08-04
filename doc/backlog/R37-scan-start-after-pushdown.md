@@ -49,6 +49,6 @@ Rust wrapper. The packed result format and decode path are unchanged.
 (`scan_async`, `scan` signatures), `crowtree/src/crowtree.cpp`
 (`scan_async`, `scan_async_attempt` lower-bound seek),
 `crowtree/src/c_api.cpp` (`ct_scan_async`, `ct_scan`),
-`crowtree/ffi/src/lib.rs` (FFI binding), `crowkv/src/kv/crowtree_engine.rs`
+`crowtree/ffi/src/lib.rs` (FFI binding), `lib/crow-kv/src/kv/crowtree_engine.rs`
 (`scan` — pass `start_after` through, remove over-fetch),
 `crowtree/tests/integration/async_scan_test.cpp` (cursor test).

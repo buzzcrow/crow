@@ -26,8 +26,8 @@ histograms.
 **Complexity**: Medium — extend API response, add UI components to Inspector,
 wire up polling.
 
-**Files**: `crowkv-console/web/src/` (API handlers), `crowkv-console/web/ui/src/`
-(Inspector component), `crowkv-console/shared/src/` (shared types).
+**Files**: `app/crow-web/src/` (API handlers), `app/crow-web/ui/src/`
+(Inspector component), `lib/crow-console-shared/src/` (shared types).
 
 **Acceptance**: Select a Store or Group in the UI, see real-time metrics
 (op count, latency, WAL stats) in the Inspector, values update every 5–10 s.

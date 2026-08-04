@@ -1,0 +1,23 @@
+[package]
+name = "crow-tree-ffi"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Safe Rust adapter over the crow-tree C ABI (PT8)."
+publish = false
+
+[lib]
+name = "crow_tree_ffi"
+path = "src/lib.rs"
+
+[dependencies]
+bytes = "1"
+# "net" is required for tokio::io::unix::AsyncFd, "sync" for tokio::sync::
+# Notify.
+tokio = { version = "1.40", features = ["rt", "rt-multi-thread", "macros", "net", "sync"] }
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+tempfile = "3"

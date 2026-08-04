@@ -2,10 +2,10 @@
 <!-- Licensed under the Apache License, Version 2.0. -->
 
 ---
-description: CrowKV coding flow — conventions, doc-first
+description: CROW coding flow — conventions, doc-first
 ---
 
-# CrowKV - Coding Flow
+# CROW - Coding Flow
 
 Companion workflows: `/review` (pre-push), `/doc` (doc rules).
 

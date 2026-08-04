@@ -36,7 +36,7 @@ no_proxy='*' pixi run cargo test -p <crate> --test <file> <test_name> -- --nocap
 # C++ — via ctest filter
 pixi run ctest -R '<pattern>' --output-on-failure
 # C++ — via gtest_filter (more precise, runs inside the test binary)
-./build/crowtree_tests --gtest_filter='<TestSuite.TestName>'
+./build/crow_tree_tests --gtest_filter='<TestSuite.TestName>'
 # Playwright E2E
 npx playwright test --config=e2e/realBackend.config.ts e2e/flows/<file>.spec.ts
 ```
@@ -51,7 +51,7 @@ This is the core technique. Do not jump to a fix — first identify exactly wher
 1. **List every step** the test performs (setup, action, assertion).
 2. **For each step, write down**: what is the expected state? How do you verify it?
    - **Logs**: server logs, `RUST_LOG=debug`, Playwright trace (`npx playwright show-trace`).
-   - **Data files**: WAL segments, crowtree files, runtime-data dirs.
+   - **Data files**: WAL segments, crow-tree files, runtime-data dirs.
    - **API checks**: `curl` or `fetch` the relevant endpoint mid-test.
    - **Temporary logs**: add `tracing::debug!` / `console.log` at decision points, rebuild, rerun. Remove after fixing.
 3. **Find the gap**: the first step where the actual state differs from expected. Classify the gap:
@@ -65,7 +65,7 @@ This is the core technique. Do not jump to a fix — first identify exactly wher
 - **Rust logs**: `log/crowkv-server-*.log`, `runtime-data/N-<node_id>/log/`, `test-logs/`. Look for `WARN`/`ERROR`, startup sequence, `panic` (use `RUST_BACKTRACE=full`).
 - **C++ logs**: set `log_dir` + `log_level="debug"` in `ct_options`/`Options` to enable spdlog output.
 - **WAL segments**: `hexdump -C` or WAL replay tool — expected slots present? record types correct?
-- **crowtree files**: `ct_debug_dump` C API or integration test helpers — file sizes non-zero? unexpected stale files?
+- **crow-tree files**: `ct_debug_dump` C API or integration test helpers — file sizes non-zero? unexpected stale files?
 
 ## Step 4 — Add Temporary Instrumentation
 

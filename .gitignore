@@ -8,24 +8,24 @@ tarpaulin-report.html
 # ── Pixi ────────────────────────────────────────────────────────
 .pixi/
 
-# ── C++ (crowtree) build artifacts ──────────────────────────────
+# ── C++ (crow-tree) build artifacts ──────────────────────────────
 build/
-crowtree/build/
-crowtree/build-asan/
-crowtree/build-tsan/
-crowtree/build-bench/
-crowtree/build*/
-crowtree/Testing/
-crowtree/.cache/
-crowtree/.test-tmp/
+lib/crow-tree/build/
+lib/crow-tree/build-asan/
+lib/crow-tree/build-tsan/
+lib/crow-tree/build-bench/
+lib/crow-tree/build*/
+lib/crow-tree/Testing/
+lib/crow-tree/.cache/
+lib/crow-tree/.test-tmp/
 .test-tmp/
 
-# ── Frontend (crowkv-console/web/ui) ────────────────────────────
-crowkv-console/web/ui/node_modules/
-crowkv-console/web/ui/dist/
-crowkv-console/web/ui/.vite/
-crowkv-console/web/ui/*.tsbuildinfo
-crowkv-console/web/ui/e2e/runtime-data/
+# ── Frontend (app/crow-web/ui) ────────────────────────────
+app/crow-web/ui/node_modules/
+app/crow-web/ui/dist/
+app/crow-web/ui/.vite/
+app/crow-web/ui/*.tsbuildinfo
+app/crow-web/ui/e2e/runtime-data/
 
 # ── Runtime artifacts (WAL, config, logs) ───────────────────────
 # Top-level artifact dirs (anchored to repo root).
@@ -36,7 +36,7 @@ crowkv-console/web/ui/e2e/runtime-data/
 /bench-runs/*
 test-logs/
 
-crowkv-console/cli/bench-runs/
+app/crow-cli/bench-runs/
 
 # Per-crate runtime dirs — these names don't appear in source code,
 # so globbing is safe and avoids repeating per crate.
@@ -46,10 +46,10 @@ crowkv-console/cli/bench-runs/
 
 # `log/` is dangerous as a glob — "log" is a common Rust module name.
 # List explicitly per crate to avoid ignoring source directories.
-crowkv-server/log/
-crowkv-console/cli/log/
-crowkv-console/shared/log/
-crowkv-console/web/log/
+app/crow-kv-server/log/
+app/crow-cli/log/
+lib/crow-console-shared/log/
+app/crow-web/log/
 
 # ── Profiling artifacts ─────────────────────────────────────────
 # samply / perf / flamegraph output (profile-write-*.zip, profile-write-*/)
