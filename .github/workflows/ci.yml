@@ -11,9 +11,7 @@ env:
 
 jobs:
   Test:
-
     runs-on: ubuntu-latest
-
     steps:
     - uses: actions/checkout@v4
     - name: Free disk space
@@ -51,7 +49,7 @@ jobs:
     - name: Run mgmt-api tests
       run: pixi run test-console-server
 
-  ServerTests:
+  KvServerTests:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
