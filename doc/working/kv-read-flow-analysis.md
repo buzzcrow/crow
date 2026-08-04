@@ -3,7 +3,7 @@
 
 # Read Flow Analysis
 
-End-to-end trace of the CrowKV read path. Mirrors the structure of
+End-to-end trace of the CROW read path. Mirrors the structure of
 [`kv-write-flow-analysis.md`](kv-write-flow-analysis.md). Focuses on flow,
 conclusions, and data — not rationale prose.
 
@@ -622,7 +622,7 @@ infrastructure that gRPC provides. The lock's cost is bounded (~17%
 at 2T:1C, avoided entirely at 1T:1C) and the current bottleneck for
 production workloads is consensus (writes) or disk I/O, not
 read-path framing. The long-term plan is to build a purpose-built
-Rust RPC library for CrowKV (length-prefixed framing over raw TCP,
+Rust RPC library for CROW (length-prefixed framing over raw TCP,
 keeping prost/protobuf for serialization) to replace gRPC on the
 internal replica-to-replica hot path. This is deferred until read
 throughput becomes the primary constraint and the h2 connection lock

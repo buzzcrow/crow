@@ -1,11 +1,11 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CrowKV Test Strategy
+# CROW Test Strategy
 
 ## Overview
 
-CrowKV is a distributed key-value store built on Paxos consensus. The test
+CROW is a distributed key-value store built on Paxos consensus. The test
 suite is organized in layers that mirror the system architecture, so a
 failure points at the lowest broken layer. Each layer gets its own test
 binary and tests only the logic that belongs to that layer.
@@ -401,7 +401,7 @@ verify multi-process cluster formation and lifecycle.
 
 **Source:** `app/crow-kv-server/tests/*`.
 
-**Test runner:** `pixi run test-server`.
+**Test runner:** `pixi run test-kv-server`.
 
 #### Tiered Strategy
 
@@ -445,8 +445,8 @@ health aggregation), and CLI commands.
 `lib/crow-console-shared/tests/*` (shared core),
 `app/crow-cli/tests/*` (CLI).
 
-**Test runners:** `pixi run test-mgmt-api` (web server),
-`pixi run test-cli` (shared core + CLI).
+**Test runners:** `pixi run test-console-web` (web server),
+`pixi run test-console-cli` (shared core + CLI).
 
 #### Tiered Strategy
 
@@ -488,7 +488,7 @@ the backend-unreachable test.
 **Source:** `app/crow-web/ui/e2e/flows/*.spec.ts`, fixtures in
 `app/crow-web/ui/e2e/fixtures/consoleSetup.ts`.
 
-**Test runner:** `pixi run test-ui` (Playwright, headless Chromium).
+**Test runner:** `pixi run test-console-ui` (Playwright, headless Chromium).
 
 #### Tiered Strategy
 
@@ -547,7 +547,7 @@ memtable throughput rather than fsync latency.
 
 **Source:** `app/crow-cli/tests/bench_benchmark.rs`.
 
-**Test runner:** `pixi run test-cli` (includes bench benchmark +
+**Test runner:** `pixi run test-console-cli` (includes bench benchmark +
 compare integration tests).
 
 ### Benchmark Verb
@@ -665,7 +665,7 @@ consensus latency (~1.2ms).
 ## crow-tree C++ Test Layers
 
 The C++ crow-tree library (`libcrow-tree`) has its own test layers, separate from
-the Rust test binaries above. They run as `test-ct` in CI (291 tests, ~8 s).
+the Rust test binaries above. They run as `test-tree-ct` in CI (291 tests, ~8 s).
 
 | Layer | Where | What it proves |
 | --- | --- | --- |

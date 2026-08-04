@@ -358,7 +358,7 @@ TEST(Persist, CorruptNewestSuperblockFallsBackToPrevious)
 
 TEST(Persist, FileBackendRoundTrip)
 {
-    crowtree_test::TempDir tmp("persist_");
+    crow::tree_test::TempDir tmp("persist_");
     ASSERT_FALSE(tmp.path.empty());
     std::string path = tmp.path;
 
@@ -426,7 +426,7 @@ TEST(Persist, FileBackendRoundTrip)
 // synthetic offsets exercised directly in page_store_test.cpp.
 TEST(Persist, BlockDeviceBackendRoundTrip)
 {
-    crowtree_test::TempDir tmp("persist_");
+    crow::tree_test::TempDir tmp("persist_");
     ASSERT_FALSE(tmp.path.empty());
     std::string path = tmp.path;
 
@@ -529,7 +529,7 @@ TEST(Persist, WriteMutexNotHeldDuringSnapshotIo)
 // modest data volume.
 TEST(Persist, ArrayOfBlocksSnapshotReopenRecover)
 {
-    crowtree_test::TempDir tmp("blkarr_");
+    crow::tree_test::TempDir tmp("blkarr_");
     ASSERT_FALSE(tmp.path.empty());
     std::string dir = tmp.path;
 
@@ -594,7 +594,7 @@ TEST(Persist, ArrayOfBlocksSnapshotReopenRecover)
 // Task 6: Array-of-blocks with dump utility content verification.
 TEST(Persist, ArrayOfBlocksDumpVerification)
 {
-    crowtree_test::TempDir tmp("blkdump_");
+    crow::tree_test::TempDir tmp("blkdump_");
     ASSERT_FALSE(tmp.path.empty());
     std::string dir = tmp.path;
 
@@ -624,7 +624,7 @@ TEST(Persist, ArrayOfBlocksDumpVerification)
 // snapshot repeatedly, and verify data integrity is preserved throughout.
 TEST(Persist, BlockCompactionSparseBlockDeleted)
 {
-    crowtree_test::TempDir tmp("blkcmp_");
+    crow::tree_test::TempDir tmp("blkcmp_");
     ASSERT_FALSE(tmp.path.empty());
     std::string dir = tmp.path;
 
@@ -716,7 +716,7 @@ TEST(Persist, BlockCompactionSparseBlockDeleted)
 // new writes should NOT land in sparse blocks' gap space.
 TEST(Persist, BlockCompactionGapFiltering)
 {
-    crowtree_test::TempDir tmp("blkgap_");
+    crow::tree_test::TempDir tmp("blkgap_");
     ASSERT_FALSE(tmp.path.empty());
     std::string dir = tmp.path;
 

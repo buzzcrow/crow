@@ -1,7 +1,7 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CrowKV
+# CROW
 
 Distributed KV store: Paxos consensus, per-key slots, WAL durability, crow-tree storage engine.
 Rust workspace + C++ storage engine (via FFI).
@@ -11,7 +11,7 @@ Rust workspace + C++ storage engine (via FFI).
 - **`crow-kv`** — core lib: consensus, engine, WAL, I/O, RPC, reconfiguration.
 - **`crow-kv-client`** — client library (retry, topology cache, `NotLeaderHint`).
 - **`crow-kv-server`** — binary: CLI, HTTP management API, store/group/replica wiring.
-- **`crow-console-shared`** / **`crow-web`** / **`crow-cli`** — management console (shared core lib, Axum+React web, `clap` CLI); general cluster-management surface, not limited to CrowKV.
+- **`crow-console-shared`** / **`crow-web`** / **`crow-cli`** — management console (shared core lib, Axum+React web, `clap` CLI); general cluster-management surface, not limited to CROW.
 - **`lib/crow-tree/ffi`** — Rust FFI bindings to C++ crow-tree storage engine.
 
 ## Hard Constraints
@@ -23,15 +23,15 @@ Rust workspace + C++ storage engine (via FFI).
 - Commit messages: single-line subject only — no body, no trailers (e.g. `Co-Authored-By`, `Generated with`), no doc references, no task numbers (R-numbers). Code comments: single line, no doc references or task numbers.
 - **One commit per task** — a "task" is a coherent unit of work (e.g. "restructure docs", "add CLI rename", "implement R7"). Small, closely-related changes may be merged into one commit. For continuous interactive changes, accumulate and commit only when asked. Before pushing, squash unpushed commits from the same task into one (soft reset to remote tip, re-commit). Before committing, verify no temp/generated files are staged; add to `.gitignore` if needed.
 - **Pre-commit quality gate — do not skip:**
-  - Lint must pass: `cargo fmt --check`, `cargo clippy -- -D warnings`, `clang-format --dry-run --Werror` (changed `.cpp`/`.h`), `ct-lint` (clang-tidy, changed C++). Fix up to 3 times — always, regardless of cause.
-  - Tests: run only relevant tests (Rust or `test-ct`), not the entire suite. Fix up to 3 times; skip pre-existing failures with a stated reason.
+  - Lint must pass: `cargo fmt --check`, `cargo clippy -- -D warnings`, `clang-format --dry-run --Werror` (changed `.cpp`/`.h`), `tree-lint` (clang-tidy, changed C++). Fix up to 3 times — always, regardless of cause.
+  - Tests: run only relevant tests (Rust or `test-tree-ct`), not the entire suite. Fix up to 3 times; skip pre-existing failures with a stated reason.
 
 ## Dispatch — Read Before Acting
 
 | Action | Read first |
 | --- | --- |
 | Write/modify code | `/coding` workflow (conventions, doc-first) |
-| Design or architecture question | `doc/doc_index.md` → match row → open only that doc, grep for `##` section |
+| Design or architecture question | `doc/doc_index.md` → match row → open only that doc under `doc/design/{kv,tree,console}/`, grep for `##` section |
 | Write/modify docs | `/doc` workflow (hierarchy, naming, formatting rules) |
 | Commit changes | Hard Constraints above — no extra doc needed |
 | Debug a test failure | `/debug-test` workflow (env check, log-first, data-first, add missing logs) |

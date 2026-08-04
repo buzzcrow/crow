@@ -33,23 +33,23 @@ jobs:
     - name: Clean env
       run: pixi run clean-env
     - name: Run C++ tests
-      run: pixi run test-ct
+      run: pixi run test-tree-ct
     - name: Clean env
       run: pixi run clean-env
     - name: Run FFI tests
-      run: pixi run test-ffi
+      run: pixi run test-tree-ffi
     - name: Clean env
       run: pixi run clean-env
     - name: Run core tests
-      run: pixi run test-core
+      run: pixi run test-kv-core
     - name: Clean env
       run: pixi run clean-env
     - name: Run CLI tests
-      run: pixi run test-cli
+      run: pixi run test-console-cli
     - name: Clean env
       run: pixi run clean-env
     - name: Run mgmt-api tests
-      run: pixi run test-mgmt-api
+      run: pixi run test-console-web
 
   ServerTests:
     runs-on: ubuntu-latest
@@ -68,7 +68,7 @@ jobs:
     - name: Clean env
       run: pixi run clean-env
     - name: Run server tests (serial)
-      run: pixi run test-server
+      run: pixi run test-kv-server
 
   UITests:
     runs-on: ubuntu-latest
@@ -90,7 +90,7 @@ jobs:
       run: pixi run npx playwright install --with-deps chromium
       working-directory: app/crow-web/ui
     - name: Run real-backend E2E suite
-      run: pixi run test-ui
+      run: pixi run test-console-ui
     - name: Upload Playwright report on failure
       if: failure()
       uses: actions/upload-artifact@v4

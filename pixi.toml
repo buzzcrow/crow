@@ -1,7 +1,7 @@
 [workspace]
 name = "crow-kv"
 version = "0.1.0"
-description = "CrowKV — distributed key-value store with multi-paxos groups"
+description = "CROW — distributed key-value store with multi-paxos groups"
 channels = ["conda-forge"]
 # Keep glibc requirement low (2.17 = CentOS 7 / Ubuntu 16.04 era) so that
 # Linux binaries built in this environment run on older distributions.
@@ -44,7 +44,7 @@ snappy = ">=1.2.2,<2"
 # io_uring reactor (lib/crow-tree/include/lib/crow-tree/reactor.h).
 # Linux-only kernel interface -- no osx-arm64 conda-forge build exists, so this
 # must be a per-platform target dependency, not a top-level one (design doc
-# design-lib/crow-tree-engine.md §3.5: the reactor itself is excluded from macOS
+# design/tree/design-crow-tree-engine.md §3.5: the reactor itself is excluded from macOS
 # builds; see lib/crow-tree/CMakeLists.txt's CROW_TREE_HAVE_LIBURING gate).
 [target.linux-64.dependencies]
 liburing = "*"
@@ -62,10 +62,10 @@ cargo install --locked samply || echo "Warning: samply install failed"
 cargo install --locked inferno || echo "Warning: inferno install failed"
 '
 '''
-ct-fmt = '''
+tree-fmt = '''
 find lib/crow-tree/src lib/crow-tree/include lib/crow-tree/tests lib/crow-tree/bench lib/crow-common/cpp -type f \( -name '*.cpp' -o -name '*.h' \) -print0 | xargs -0 clang-format -i
 '''
-ct-lint = "python3 tools/ct_lint.py"
+tree-lint = "python3 tools/ct_lint.py"
 rs-fmt = "cargo fmt --all"
 rs-lint = "cargo clippy --all-targets -- -D warnings"
 ts-lint = { cmd = "cd app/crow-web/ui && npx tsc --noEmit --project tsconfig.e2e.json", depends-on = ["install-deps"] }
@@ -73,7 +73,7 @@ build = { cmd = "cmake -S lib/crow-tree -B lib/crow-tree/build -DCMAKE_BUILD_TYP
 default = { depends-on = ["build"] }
 
 # ── Run ──────────────────────────────────────────────────────────
-web = { cmd = "echo 'CrowKV console starting at: http://127.0.0.1:9920/' && cargo run --release -p crow-web", depends-on = ["build"] }
+web = { cmd = "echo 'CROW console starting at: http://127.0.0.1:9920/' && cargo run --release -p crow-web", depends-on = ["build"] }
 
 # ── Benchmark ────────────────────────────────────────────────────
 bench = { cmd = "cargo run --release -p crow-cli -- bench run --mode mem --duration-secs 12 --threads 2 --connections 1 --workload write", depends-on = ["build"] }
@@ -90,22 +90,22 @@ profile-write = { cmd = "bash tools/profile-write.sh", depends-on = ["build"] }
 
 # ── Test ─────────────────────────────────────────────────────────
 clean-env = "pkill -9 -f 'crow-kv-server.*test-logs' 2>/dev/null; rm -rf test-logs; true"
-test-ct = { cmd = "ctest --test-dir lib/crow-tree/build --output-on-failure", depends-on = ["build"] }
-test-ffi = { cmd = "cargo test -p crow-tree-ffi --all-targets", depends-on = ["build"] }
-test-core = { cmd = "cargo test -p crow-kv --all-targets", depends-on = ["build"] }
-test-server = { cmd = "cargo test -p crow-kv-server --all-targets -- --test-threads=1", depends-on = ["build"] }
-test-cli = { cmd = "cargo test -p crow-cli --all-targets", depends-on = ["build"] }
-test-mgmt-api = { cmd = "cargo test -p crow-web --all-targets -- --test-threads=1", depends-on = ["build"] }
-test-ui = { cmd = "cargo build -p crow-kv-server && export CROW_KV_SERVER_BINARY=$(pwd)/target/debug/crow-kv-server && cd app/crow-web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-deps"] }
+test-tree-ct = { cmd = "ctest --test-dir lib/crow-tree/build --output-on-failure", depends-on = ["build"] }
+test-tree-ffi = { cmd = "cargo test -p crow-tree-ffi --all-targets", depends-on = ["build"] }
+test-kv-core = { cmd = "cargo test -p crow-kv --all-targets", depends-on = ["build"] }
+test-kv-server = { cmd = "cargo test -p crow-kv-server --all-targets -- --test-threads=1", depends-on = ["build"] }
+test-console-cli = { cmd = "cargo test -p crow-cli --all-targets", depends-on = ["build"] }
+test-console-web = { cmd = "cargo test -p crow-web --all-targets -- --test-threads=1", depends-on = ["build"] }
+test-console-ui = { cmd = "cargo build -p crow-kv-server && export CROW_KV_SERVER_BINARY=$(pwd)/target/debug/crow-kv-server && cd app/crow-web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-deps"] }
 test = { cmd = '''
 bash -c '
-pixi run test-ct & p1=$!
-pixi run test-ffi & p2=$!
-pixi run test-core & p3=$!
-pixi run test-server & p4=$!
-pixi run test-cli & p5=$!
-pixi run test-mgmt-api & p6=$!
-pixi run test-ui & p7=$!
+pixi run test-tree-ct & p1=$!
+pixi run test-tree-ffi & p2=$!
+pixi run test-kv-core & p3=$!
+pixi run test-kv-server & p4=$!
+pixi run test-console-cli & p5=$!
+pixi run test-console-web & p6=$!
+pixi run test-console-ui & p7=$!
 wait $p1 && wait $p2 && wait $p3 && wait $p4 && wait $p5 && wait $p6 && wait $p7
 '
 ''', depends-on = ["build", "install-deps"] }
@@ -113,19 +113,19 @@ test-suite = { cmd = '''
 bash -c '
 set -e
 pixi run clean-env
-pixi run test-ct
+pixi run test-tree-ct
 pixi run clean-env
-pixi run test-ffi
+pixi run test-tree-ffi
 pixi run clean-env
-pixi run test-core
+pixi run test-kv-core
 pixi run clean-env
-pixi run test-server
+pixi run test-kv-server
 pixi run clean-env
-pixi run test-cli
+pixi run test-console-cli
 pixi run clean-env
-pixi run test-mgmt-api
+pixi run test-console-web
 pixi run clean-env
-pixi run test-ui
+pixi run test-console-ui
 '
 ''', depends-on = ["build", "install-deps"] }
 
@@ -152,7 +152,7 @@ find . -type d -name runtime-data ! -path "*/src/*" -prune -exec rm -rf {} \; 2>
 
 # AddressSanitizer build + tests. setarch -R disables ASLR (Linux only);
 # on macOS we run ctest directly.
-ct-asan = '''
+tree-asan = '''
 set -e
 cmake -S lib/crow-tree -B lib/crow-tree/build-asan -DCMAKE_BUILD_TYPE=Debug -DCROW_TREE_SANITIZER=address
 cmake --build lib/crow-tree/build-asan -j
@@ -164,7 +164,7 @@ fi
 '''
 
 # ThreadSanitizer build + tests.
-ct-tsan = '''
+tree-tsan = '''
 set -e
 cmake -S lib/crow-tree -B lib/crow-tree/build-tsan -DCMAKE_BUILD_TYPE=Debug -DCROW_TREE_SANITIZER=thread
 cmake --build lib/crow-tree/build-tsan -j
@@ -176,7 +176,7 @@ fi
 '''
 
 # UndefinedBehaviorSanitizer build + tests.
-ct-ubsan = '''
+tree-ubsan = '''
 set -e
 cmake -S lib/crow-tree -B lib/crow-tree/build-ubsan -DCMAKE_BUILD_TYPE=Debug -DCROW_TREE_SANITIZER=undefined
 cmake --build lib/crow-tree/build-ubsan -j

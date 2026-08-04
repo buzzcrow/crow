@@ -1,7 +1,7 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CrowKV Console Web UI Design (v1, lean)
+# CROW Console Web UI Design (v1, lean)
 
 Upstream: `../kv/design-crow-kv.md` §15.4.6 (requirements spec). Sibling:
 `doc/design/design-crow-console.md` (backend Axum routes, registry, SSH

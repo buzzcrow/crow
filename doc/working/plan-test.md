@@ -1,7 +1,7 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CrowKV Test Task Backlog
+# CROW Test Task Backlog
 
 **Override:** This file is **persistent** — it is not deleted after the
 requirement (R9) is complete. Only completed tasks are removed; the file
@@ -19,13 +19,13 @@ Run `pixi run clean` before measuring for reproducible results.
 
 | Suite | Tests | macOS | Linux |
 | --- | --- | --- | --- |
-| `test-ct` | 328 | 9.1 s | — |
-| `test-ffi` | 15 | 29.9 s | — |
-| `test-core` | 508 | 43.5 s | — |
-| `test-server` | 55 | 37.0 s | — |
-| `test-cli` | 13 | 35.1 s | — |
-| `test-mgmt-api` | 49 | 39.1 s | — |
-| `test-ui` | 51 | 81.4 s | — |
+| `test-tree-ct` | 328 | 9.1 s | — |
+| `test-tree-ffi` | 15 | 29.9 s | — |
+| `test-kv-core` | 508 | 43.5 s | — |
+| `test-kv-server` | 55 | 37.0 s | — |
+| `test-console-cli` | 13 | 35.1 s | — |
+| `test-console-web` | 49 | 39.1 s | — |
+| `test-console-ui` | 51 | 81.4 s | — |
 
 ---
 

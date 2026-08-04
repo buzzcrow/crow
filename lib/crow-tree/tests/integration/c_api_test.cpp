@@ -200,7 +200,7 @@ TEST(CApi, OversizedKeyRejectedThroughEncodedPath)
 
 TEST(CApi, FileCheckpointReopen)
 {
-    crowtree_test::TempDir tmp("capi_");
+    crow::tree_test::TempDir tmp("capi_");
     ASSERT_FALSE(tmp.path.empty());
     std::string path = tmp.path;
 
@@ -248,7 +248,7 @@ TEST(CApi, FileCheckpointReopen)
 // FileCheckpointReopen above, just through the block-device backend.
 TEST(CApi, BlockDeviceCheckpointReopen)
 {
-    crowtree_test::TempDir tmp("capi_");
+    crow::tree_test::TempDir tmp("capi_");
     ASSERT_FALSE(tmp.path.empty());
     std::string path = tmp.path;
 
@@ -378,7 +378,7 @@ TEST(CApi, SnapshotExportImport)
 // because the OS page cache is still warm (no kill -9).
 TEST(CApi, SyncSkipSnapshotReopen)
 {
-    crowtree_test::TempDir tmp("sync_");
+    crow::tree_test::TempDir tmp("sync_");
     ASSERT_FALSE(tmp.path.empty());
     std::string path = tmp.path;
 

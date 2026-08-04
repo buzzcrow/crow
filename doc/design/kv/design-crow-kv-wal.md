@@ -1,12 +1,12 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CrowKV - Design: Write-Ahead Log
+# CROW - Design: Write-Ahead Log
 
 Depends on: [`design-crow-kv.md`](design-crow-kv.md), [`design-crow-kv.md`](design-crow-kv.md)
 Satisfies: design-crow-kv.md §8.1](design-crow-kv.md), design-crow-kv.md §8.2](design-crow-kv.md)
 
-This document specifies CrowKV's write-ahead log. **There is exactly one durable
+This document specifies CROW's write-ahead log. **There is exactly one durable
 log per group: the replica's consensus log (the per-slot acceptor log).**
 Everything else — the KV state machine (`KVEngine`), future snapshots, the dedup
 cache, the chosen/applied watermarks — is a *derived projection* of that log.
@@ -165,7 +165,7 @@ Sealed segments are immutable.
 
 ### 4.1 Goal of batching
 
-Each individual `Accept` is small (tens of bytes overhead + payload). Per-record durable flush is wasteful: an SSD's flush amortizes over a batch nearly as well as over a single record. CrowKV therefore batches records per WAL disk and completes the record futures only after the selected backend has made the bytes durable.
+Each individual `Accept` is small (tens of bytes overhead + payload). Per-record durable flush is wasteful: an SSD's flush amortizes over a batch nearly as well as over a single record. CROW therefore batches records per WAL disk and completes the record futures only after the selected backend has made the bytes durable.
 
 The durable operation is backend-specific:
 
@@ -531,7 +531,7 @@ The WAL is per-node. Inter-node consistency is the consensus layer's job. If a n
 | `wal_aligned` | `wal_aligned` | false | Selects block-aligned I/O backend |
 | `wal_io_unit_bytes` | `wal_io_unit_bytes` | 4096 | IU size when `wal_aligned` is true |
 | `wal_record_format` | `wal_record_format` | Auto | Binary (zero-copy) or text-line |
-| `wal_early_ack` | `CrowKVConfig.wal_early_ack` | `true` (gated on `quorum > 1`) | Early-ack mode (§5.4): declare `Chosen` on remote quorum durable flush + leader CAS, deferring the leader's local WAL persist to a background spawn. Default `false` for single-node groups (quorum = 1) — no survivors to re-drive a chosen-but-not-locally-durable slot. |
+| `wal_early_ack` | `CROWConfig.wal_early_ack` | `true` (gated on `quorum > 1`) | Early-ack mode (§5.4): declare `Chosen` on remote quorum durable flush + leader CAS, deferring the leader's local WAL persist to a background spawn. Default `false` for single-node groups (quorum = 1) — no survivors to re-drive a chosen-but-not-locally-durable slot. |
 
 **Choosing durable-flush batching:**
 

@@ -1,12 +1,12 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CrowKV User Guide
+# CROW User Guide
 
 This guide walks through starting a cluster, performing basic KV
 operations, managing topology, and running upgrades.
 
-CrowKV provides three interfaces for cluster management and data
+CROW provides three interfaces for cluster management and data
 access:
 
 - **Web UI** — the `crow-web` service provides a visual dashboard
@@ -457,7 +457,7 @@ leadership.
 
 ## 6. Backup
 
-CrowKV durability comes from the per-store WAL (`--wal-root`), the
+CROW durability comes from the per-store WAL (`--wal-root`), the
 per-node config cache (`--config-root`), and the durable KV engine
 (`--data-root`). For disaster recovery, back up:
 

@@ -1,12 +1,12 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CrowKV - Design: State Machine
+# CROW - Design: State Machine
 
 Depends on: [`design-crow-kv.md`](design-crow-kv.md), [`design-crow-kv.md`](design-crow-kv.md)
 Satisfies: design-crow-kv.md §8.3](design-crow-kv.md), design-crow-kv.md §8.4 import/export](design-crow-kv.md), implementation prerequisites of design-crow-kv.md §14.1 crowbench `compare`](design-crow-kv.md)
 
-This document specifies the storage engine abstraction used by CrowKV learners. The engine is the **only** consumer of consensus output; it owns the materialized key-value state and serves all reads. The WAL is the durable log; the engine is the materialized projection.
+This document specifies the storage engine abstraction used by CROW learners. The engine is the **only** consumer of consensus output; it owns the materialized key-value state and serves all reads. The WAL is the durable log; the engine is the materialized projection.
 
 > **P3 redesign note.** The production engine `crow-tree` and the redefined
 > (async, snapshot/GC-aware) `KVEngine` abstraction are specified in the crow-tree
@@ -43,7 +43,7 @@ This document specifies the storage engine abstraction used by CrowKV learners. 
 
 **Non-goals:**
 
-- Multi-version (MVCC) reads. CrowKV is single-version per key; time-travel is not supported.
+- Multi-version (MVCC) reads. CROW is single-version per key; time-travel is not supported.
 - Cross-engine queries. The engine is per-group.
 - Transactions across keys beyond a single batch. Batch-level atomicity only.
 - Pluggable compression/encryption. Each engine handles its own internals.
@@ -121,7 +121,7 @@ Tombstones occupy space until compacted away (§7).
 
 ### 3.2 Why single-version
 
-CrowKV does not provide repeatable reads or time-travel queries. Snapshot reads use the `AtSlot(N)` mode by waiting for the engine's contiguous-applied to reach `N`, then reading the current single version.
+CROW does not provide repeatable reads or time-travel queries. Snapshot reads use the `AtSlot(N)` mode by waiting for the engine's contiguous-applied to reach `N`, then reading the current single version.
 
 `Scan(AtSlot(N))` returns the engine state *after* applying everything up through the contiguous-applied frontier of the serving replica, which the replica advances to ≥ `N` before serving. If a slot `M > N` has already been applied for some key `k`, the value returned for `k` is the value at `M`, not the value at `N`. This still satisfies linearizability: slot `M` linearizes after slot `N`, so the read at "logical instant `N`" is consistent with reading at the later linearization point `M` — both are valid linearization points for a single point in real time. `AtSlot(N)` is therefore a *lower bound on freshness*, not a snapshot pin: single-version reads always reflect the latest applied value.
 

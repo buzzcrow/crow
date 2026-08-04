@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Standalone client library for CrowKV: topology cache, retry/idempotency, read-mode routing."
+description = "Standalone client library for CROW: topology cache, retry/idempotency, read-mode routing."
 
 [lints]
 workspace = true

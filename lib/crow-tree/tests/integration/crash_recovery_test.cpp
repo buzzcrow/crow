@@ -273,7 +273,7 @@ TEST(CrashRecovery, DemandLoadCorruptionLatched)
 // must fall back to gen1's committed image, fully intact, on a real file.
 TEST(CrashRecovery, FileTornSuperblockFallsBack)
 {
-    crowtree_test::TempDir tmp("crash_");
+    crow::tree_test::TempDir tmp("crash_");
     ASSERT_FALSE(tmp.path.empty());
     std::string path = tmp.path;
 

@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "CrowKV core library: consensus, engine, WAL, I/O, RPC, reconfiguration."
+description = "CROW core library: consensus, engine, WAL, I/O, RPC, reconfiguration."
 autobenches = false
 
 [lints]

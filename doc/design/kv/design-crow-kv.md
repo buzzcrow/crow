@@ -1,9 +1,9 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CrowKV - Design
+# CROW - Design
 
-This is the root design document. It defines **what CrowKV is**, **why
+This is the root design document. It defines **what CROW is**, **why
 key choices were made**, and **how the system is structured**.
 Implementation-level detail lives in sub-design docs (`design-*.md`);
 this doc covers decisions and architecture only.
@@ -12,7 +12,7 @@ this doc covers decisions and architecture only.
 
 ## 1. Overview
 
-CrowKV is a high-performance distributed key-value cluster based on
+CROW is a high-performance distributed key-value cluster based on
 Multi-Paxos with multiple groups for sharding. The key differentiator
 from Raft-based KV stores is **parallel slot processing**: within a
 group, multiple Paxos slots can be in flight simultaneously, achieving
@@ -57,7 +57,7 @@ because no operation reads before writing.
 
 ### 3.1 Multi-Paxos over Raft
 
-Raft is mature; CrowKV reuses most proven Raft patterns (leader
+Raft is mature; CROW reuses most proven Raft patterns (leader
 election, heartbeats, terms, log replication). The one deliberate
 departure is **parallel slot writes**: Multi-Paxos allows multiple
 slots to be decided in parallel within a group. This creates complexity
@@ -133,13 +133,13 @@ disk WAL segments are tagged by slot index for parallelism.
 Node-to-node and client-to-node channels are plaintext initially. The
 RPC layer and config schema reserve hooks for TLS from day one.
 
-### 3.10 Unified `CrowKVConfig`
+### 3.10 Unified `CROWConfig`
 
 All cluster tunables — WAL, election, paxos, server, and the per-group
 internal flags (`force_classic`, `wal_early_ack`,
-`async_engine_apply`) — live in one `CrowKVConfig` struct with `serde`
+`async_engine_apply`) — live in one `CROWConfig` struct with `serde`
 derives, loaded from a JSON config file (CLI args override individual
-fields). `PxGroup` holds a single `config: CrowKVConfig` field as the
+fields). `PxGroup` holds a single `config: CROWConfig` field as the
 source of truth; individual setters (`set_force_classic`,
 `set_wal_early_ack`, etc.) delegate into `self.config.*` for surgical
 single-field overrides without rebuilding the whole struct. The
@@ -149,7 +149,7 @@ single-field overrides without rebuilding the whole struct. The
 ## 4. Architecture Overview
 
 ```
-                              CrowKV Cluster
+                              CROW Cluster
    ┌────────────────────────────────────────────────────────────────┐
    │   KvStore A               KvStore B               KvStore C    │
    │   ┌─────────┐             ┌─────────┐             ┌─────────┐  │
@@ -309,7 +309,7 @@ Full design: `design-crow-kv-reconfiguration.md`, `design-crow-kv-server.md`.
 | **Learner** | Tracks chosen values; applies to storage engine; maintains per-key resolved-slot. |
 | **WAL** | Durable, multi-disk write-ahead log. Sole persistent ground truth. |
 | **KvStore** | KV-facing runtime per node; owns `PxGroup`s; routes by `group_id`. |
-| **PxGroup** | Paxos group runtime; coordinates local + remote replicas; holds one `CrowKVConfig`. |
+| **PxGroup** | Paxos group runtime; coordinates local + remote replicas; holds one `CROWConfig`. |
 | **Replicator** | Streams `Accept`/`Chosen` from leader to peers; handles backpressure. |
 | **Leader Elector** | Raft-style election; manages `PxTerm`; lease management. |
 | **Repair** | Background task: detects and resolves slot gaps via classic Paxos. |

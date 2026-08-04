@@ -1,7 +1,7 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CrowKV - Design: KV Server
+# CROW - Design: KV Server
 
 Depends on: [`design-crow-kv.md`](design-crow-kv.md) [§15.2](design-crow-kv.md)
 Satisfies: [`design-crow-kv.md`](design-crow-kv.md) §15.2

@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "CrowKV server binary: single-group, multi-group, and cluster modes."
+description = "CROW server binary: single-group, multi-group, and cluster modes."
 
 [[bin]]
 name = "crow-kv-server"

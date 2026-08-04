@@ -1,14 +1,14 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CrowKV - Design: crow-tree Storage Engine (Overview)
+# CROW - Design: crow-tree Storage Engine (Overview)
 
 Depends on: [`../kv/design-crow-kv.md`](../kv/design-crow-kv.md), [`../kv/design-crow-kv.md`](../kv/design-crow-kv.md), [`../kv/design-crow-kv-state-machine.md`](../kv/design-crow-kv-state-machine.md)
 Satisfies: ../kv/design-crow-kv.md §8.3 learner storage](../kv/design-crow-kv.md)
 
 This is the parent document for **crow-tree**, the production storage engine that
-backs CrowKV learners: an embeddable, ordered key-value engine implementing the
-CrowKV `KVEngine` contract, built as a standalone C++ library (`libcrow-tree`) and
+backs CROW learners: an embeddable, ordered key-value engine implementing the
+CROW `KVEngine` contract, built as a standalone C++ library (`libcrow-tree`) and
 consumed from the Rust `crow-kv` crate over a C ABI. It records the decisions
 behind that design and maps the sub-design documents. `libcrow-tree` is fully
 implemented, wired into `crow-kv` (`CrowTreeEngine`), and shipped; this document
@@ -60,7 +60,7 @@ see [`todo_code.md`](../todo_code.md) for anything still open.
 **Non-Goals**
 
 - **Multi-version / MVCC time-travel reads.** Single version per key only —
-  not worth the cost for CrowKV.
+  not worth the cost for CROW.
 - **Tree-level range split/merge in v1.** This is *tree*-level (splitting a
   whole crow-tree into two), distinct from internal B+tree *page* split/merge
   (always done). One crow-tree per consensus group; partitioning happens at the

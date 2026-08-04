@@ -1,7 +1,7 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CrowKV Documentation Index
+# CROW Documentation Index
 
 One-line pointer to every doc and section. Read this first; open the listed
 doc only when a task touches a topic in its row.
@@ -10,7 +10,7 @@ doc only when a task touches a topic in its row.
 
 | Doc | When to read |
 | --- | --- |
-| `design/kv/design-crow-kv.md` | Root KV design document: what CrowKV is, why key choices were made, architecture overview, data model, read modes, consensus/storage/lifecycle/client interaction, module decomposition, crate layout, concurrency model. Read first for any design or architecture question. |
+| `design/kv/design-crow-kv.md` | Root KV design document: what CROW is, why key choices were made, architecture overview, data model, read modes, consensus/storage/lifecycle/client interaction, module decomposition, crate layout, concurrency model. Read first for any design or architecture question. |
 | `user-manual/user-guide.md` | User guide: three interfaces (Web UI, CLI, REST API), quick start (bootstrap a 3-node cluster), KV operations, cluster management (health, add/remove replicas, replace nodes), rolling upgrade, emergency procedures, backup, and full CLI + REST API reference. Run `python3 doc/user-manual/build_html.py` to generate `user-guide.html` with tabbed CLI/curl examples. |
 
 ## Backlog (`doc/backlog/`)

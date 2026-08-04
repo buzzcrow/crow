@@ -1,13 +1,13 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# Contributing to CrowKV
+# Contributing to CROW
 
 Thanks for your interest in contributing! This guide covers setup, conventions, and the PR process.
 
 ## Development Environment
 
-CrowKV uses [Pixi](https://pixi.sh) to pin the C++ toolchain, Rust compiler, and all native dependencies in a single lockfile.
+CROW uses [Pixi](https://pixi.sh) to pin the C++ toolchain, Rust compiler, and all native dependencies in a single lockfile.
 
 ```bash
 # Install pixi
@@ -22,8 +22,8 @@ pixi run test-suite
 # Lint
 pixi run rs-fmt     # Rust format
 pixi run rs-lint    # Rust clippy
-pixi run ct-fmt     # C++ format
-pixi run ct-lint    # C++ lint
+pixi run tree-fmt     # C++ format
+pixi run tree-lint    # C++ lint
 ```
 
 See `pixi.toml` for the full list of tasks.

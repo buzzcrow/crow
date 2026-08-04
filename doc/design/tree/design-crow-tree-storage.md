@@ -1,13 +1,13 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CrowKV - Design: crow-tree Durable Storage
+# CROW - Design: crow-tree Durable Storage
 
 Parent: [`design-crow-tree.md`](design-crow-tree.md)
 Depends on: [`design-crow-tree-engine.md`](design-crow-tree-engine.md), [`../kv/design-crow-kv.md`](../kv/design-crow-kv.md) §12.1, [`../kv/design-crow-kv-state-machine.md`](../kv/design-crow-kv-state-machine.md), [`../kv/design-crow-kv-wal.md`](../kv/design-crow-kv-wal.md), [`../kv/design-crow-kv-reconfiguration.md`](../kv/design-crow-kv-reconfiguration.md)
 
 This document specifies how crow-tree pages reach durable media and how that
-durability composes with the rest of CrowKV: the `PageStore` backend
+durability composes with the rest of CROW: the `PageStore` backend
 abstraction, the on-disk page format and alignment, the buffer pool (frame
 cache), snapshot + the internal-WAL decision + recovery, snapshot
 export/import, the mapping table (the B+tree's PID indirection layer and its
@@ -40,7 +40,7 @@ crow-tree's tree logic references pages by `PID` and is unaware of the storage
 medium. A `PageStore` maps a durable page slot to bytes — it is the only part
 of crow-tree that does I/O, and it is page-granular and **always asynchronous**
 (`read_page`/`write_page` complete via callback/future, matching
-[`../kv/design-crow-kv.md` §12.1](../kv/design-crow-kv.md#121-async-disk-io-substrate-moved-from-design-async-iomd)).
+[`../kv/design-crow-kv-wal.md`](../kv/design-crow-kv-wal.md)).
 The upper layer always uses the async API — regardless of whether the
 underlying platform has `io_uring` (Linux) or not (macOS/fallback). On
 Linux, `BlockAsyncPageStore` + `Reactor` submit genuine `io_uring` SQEs;
@@ -218,9 +218,9 @@ durable object. The directory layout at `{path}/{store_id}-{partition_id}/`:
   segdir.ck         # Segment directory (text, one line per DirEntry)
 ```
 
-All files use the `.ck` extension — the CrowKV-specific file suffix. The
+All files use the `.ck` extension — the CROW-specific file suffix. The
 filename prefix (`anchor-`, `page-`, `seg-`, `segdir`, `manifest`) distinguishes
-the type; the `.ck` suffix identifies the file as CrowKV-owned. Editors open
+the type; the `.ck` suffix identifies the file as CROW-owned. Editors open
 `.ck` files as text by default.
 
 **Manifest file**: lists `(addr, len, type, filename)` for every blob written.

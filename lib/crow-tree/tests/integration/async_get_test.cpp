@@ -136,13 +136,13 @@ TEST(AsyncGet, FastPathValueSurvivesRepeatedPollsUntilExplicitFree)
 // correct value.
 TEST(AsyncGet, MissAfterEvictionCompletesViaReactor)
 {
-    crowtree_test::TempDir tmp;
-    ct_options             opt = {};
-    opt.path                   = tmp.path.c_str();
-    opt.backend                = CT_BACKEND_BLOCK;
-    opt.iu_size                = 4096;
-    opt.frame_bytes            = 4096;
-    ct_tree *t                 = nullptr;
+    crow::tree_test::TempDir tmp;
+    ct_options               opt = {};
+    opt.path                     = tmp.path.c_str();
+    opt.backend                  = CT_BACKEND_BLOCK;
+    opt.iu_size                  = 4096;
+    opt.frame_bytes              = 4096;
+    ct_tree *t                   = nullptr;
     ASSERT_EQ(ct_open(&opt, &t), 0);
 
     for (int i = 0; i < 20; ++i) {
@@ -193,12 +193,12 @@ TEST(AsyncGet, MissAfterEvictionCompletesViaReactor)
 // signal (see the /coding sanitizer pass in this session's plan).
 TEST(AsyncGet, FutureFreeBeforeCompletionDoesNotCrashOrLeak)
 {
-    crowtree_test::TempDir tmp;
-    ct_options             opt = {};
-    opt.path                   = tmp.path.c_str();
-    opt.iu_size                = 4096;
-    opt.frame_bytes            = 4096;
-    ct_tree *t                 = nullptr;
+    crow::tree_test::TempDir tmp;
+    ct_options               opt = {};
+    opt.path                     = tmp.path.c_str();
+    opt.iu_size                  = 4096;
+    opt.frame_bytes              = 4096;
+    ct_tree *t                   = nullptr;
     ASSERT_EQ(ct_open(&opt, &t), 0);
 
     for (int i = 0; i < 20; ++i) {
@@ -232,12 +232,12 @@ TEST(AsyncGet, FutureFreeBeforeCompletionDoesNotCrashOrLeak)
 // Crowtree::flush() implementation, not assumed).
 TEST(AsyncFlushSnapshot, FlushCompletesImmediatelySnapshotEventually)
 {
-    crowtree_test::TempDir tmp;
-    ct_options             opt = {};
-    opt.path                   = tmp.path.c_str();
-    opt.iu_size                = 4096;
-    opt.frame_bytes            = 4096;
-    ct_tree *t                 = nullptr;
+    crow::tree_test::TempDir tmp;
+    ct_options               opt = {};
+    opt.path                     = tmp.path.c_str();
+    opt.iu_size                  = 4096;
+    opt.frame_bytes              = 4096;
+    ct_tree *t                   = nullptr;
     ASSERT_EQ(ct_open(&opt, &t), 0);
 
     ASSERT_EQ(ct_apply_put(t, 1, reinterpret_cast<const uint8_t *>("a"), 1, reinterpret_cast<const uint8_t *>("va"), 2),
@@ -277,14 +277,14 @@ TEST(AsyncFlushSnapshot, FlushCompletesImmediatelySnapshotEventually)
 // assertions hold either way (poll-until-done).
 TEST(AsyncSnapshot, BlockBackendAsyncSnapshotRoundTrip)
 {
-    crowtree_test::TempDir tmp;
-    ct_options             opt = {};
-    opt.path                   = tmp.path.c_str();
-    opt.backend                = CT_BACKEND_BLOCK;
-    opt.iu_size                = 4096;
-    opt.frame_bytes            = 4096;
-    opt.block_size             = 8 * 1024; // small blocks to force multi-extent
-    ct_tree *t                 = nullptr;
+    crow::tree_test::TempDir tmp;
+    ct_options               opt = {};
+    opt.path                     = tmp.path.c_str();
+    opt.backend                  = CT_BACKEND_BLOCK;
+    opt.iu_size                  = 4096;
+    opt.frame_bytes              = 4096;
+    opt.block_size               = 8 * 1024; // small blocks to force multi-extent
+    ct_tree *t                   = nullptr;
     ASSERT_EQ(ct_open(&opt, &t), 0);
 
     // Write enough data to fill at least one block and exercise the write path.

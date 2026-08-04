@@ -1,14 +1,14 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CrowKV - Design: Slots — Parallel Pipelining & Concurrent Slot List
+# CROW - Design: Slots — Parallel Pipelining & Concurrent Slot List
 
 Depends on: [`design-crow-kv.md`](design-crow-kv.md), [`design-crow-kv.md`](design-crow-kv.md)
 Satisfies: design-crow-kv.md §6.5](design-crow-kv.md), design-crow-kv.md §7.3](design-crow-kv.md), [`design-crow-kv.md`](design-crow-kv.md) §5.1 (high-concurrency log)
 
-This document covers two aspects of CrowKV's slot mechanism:
+This document covers two aspects of CROW's slot mechanism:
 
-- **Part A (§1–§14): Parallel Slot Pipelining** — the consensus protocol that distinguishes CrowKV from Raft-based KV systems. How the leader pipelines proposals, how gaps are detected and repaired, how the safe-slot is maintained, and how the system stays correct under concurrent in-flight slots.
+- **Part A (§1–§14): Parallel Slot Pipelining** — the consensus protocol that distinguishes CROW from Raft-based KV systems. How the leader pipelines proposals, how gaps are detected and repaired, how the safe-slot is maintained, and how the system stays correct under concurrent in-flight slots.
 - **Part B (§15–§22): Concurrent Sparse Slot List** — the `SlotList<T>` data structure that backs the Acceptor's per-slot state. Chunked array, lock-free reads, trim/GC, reclamation.
 
 ## Table of Contents
@@ -44,7 +44,7 @@ This document covers two aspects of CrowKV's slot mechanism:
 
 A Raft leader cannot acknowledge slot N+1 until slot N has been committed; the log is contiguous, so a single slow follower stalls the entire commit pipeline (head-of-line blocking). Multi-Paxos has no such constraint: each slot is a separate Paxos instance, and a quorum that decides slot N+1 need not include the same nodes that decide slot N.
 
-CrowKV exploits this by running many slots in parallel on the leader. Throughput is bounded by network and disk bandwidth, not by per-slot serialized round-trips. The price is two-fold:
+CROW exploits this by running many slots in parallel on the leader. Throughput is bounded by network and disk bandwidth, not by per-slot serialized round-trips. The price is two-fold:
 
 - **Gaps.** A slot may remain undecided long after later slots are decided. We need a mechanism to resolve gaps without stalling the hot path.
 - **Conservative cross-key reads.** A `Scan` must wait for a no-gap prefix; point reads do not.

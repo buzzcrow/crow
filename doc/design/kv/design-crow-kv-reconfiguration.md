@@ -1,12 +1,12 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CrowKV - Design: Reconfiguration
+# CROW - Design: Reconfiguration
 
 Depends on: [`design-crow-kv.md`](design-crow-kv.md), [`design-crow-kv.md`](design-crow-kv.md), [`design-crow-kv-leader-election.md`](design-crow-kv-leader-election.md)
 Satisfies: design-crow-kv.md §9.1](design-crow-kv.md), prerequisites of design-crow-kv.md §9.2](design-crow-kv.md)
 
-This document specifies how a CrowKV group safely changes its membership while preserving consensus safety. The **shipped** mechanism is direct per-node HTTP mutation of each replica's remote-replica list, persisted to the local `GroupConfigStore`, with a `membership_epoch` exact-match fence. This model applies to all groups including the system group (group 0, which stores cluster topology metadata — see `design-crow-kv.md` §3.3). The original Raft-style joint-consensus design (§7) is preserved as a historical decision record.
+This document specifies how a CROW group safely changes its membership while preserving consensus safety. The **shipped** mechanism is direct per-node HTTP mutation of each replica's remote-replica list, persisted to the local `GroupConfigStore`, with a `membership_epoch` exact-match fence. This model applies to all groups including the system group (group 0, which stores cluster topology metadata — see `design-crow-kv.md` §3.3). The original Raft-style joint-consensus design (§7) is preserved as a historical decision record.
 
 ## Table of Contents
 
@@ -26,7 +26,7 @@ This document specifies how a CrowKV group safely changes its membership while p
 
 ## 1. Scope and Supported Transitions
 
-CrowKV supports membership changes within a single group. Specifically:
+CROW supports membership changes within a single group. Specifically:
 
 - **Add or remove voting members.** Adding a member when going 3 → 5 → 7 or removing a member when going 7 → 5 → 3.
 - **Replace a member.** Implemented as add-then-remove (or vice versa), each as a single-member change.

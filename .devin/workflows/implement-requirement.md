@@ -5,7 +5,7 @@
 description: Lifecycle for implementing requirement items from doc/backlog/backlog.md
 ---
 
-# CrowKV - Implement Requirement Flow
+# CROW - Implement Requirement Flow
 
 Use this workflow when picking up an item from
 `doc/backlog/backlog.md`. The index lists each requirement

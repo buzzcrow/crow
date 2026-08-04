@@ -1,7 +1,7 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CrowKV - Design: RPC Wire Protocol
+# CROW - Design: RPC Wire Protocol
 
 Depends on: [`design-crow-kv.md`](design-crow-kv.md) §3, §9.2, §10, [`design-crow-kv.md`](design-crow-kv.md) §2, §3
 Satisfies: design-crow-kv.md §3](design-crow-kv.md), design-crow-kv.md §9.2](design-crow-kv.md), design-crow-kv.md §10.1](design-crow-kv.md)

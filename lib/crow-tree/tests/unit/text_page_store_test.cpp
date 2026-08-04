@@ -23,7 +23,7 @@ namespace
 {
 std::string temp_dir()
 {
-    std::string root = crowtree_test::test_tmp_root();
+    std::string root = crow::tree_test::test_tmp_root();
     std::filesystem::create_directories(root);
     std::array<char, 128> tmpl{};
     std::snprintf(tmpl.data(), tmpl.size(), "%s/txt_XXXXXX", root.c_str());

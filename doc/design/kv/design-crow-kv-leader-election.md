@@ -1,7 +1,7 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CrowKV - Design: Leader Election, Term, and Lease
+# CROW - Design: Leader Election, Term, and Lease
 
 Depends on: [`design-crow-kv.md`](design-crow-kv.md), [`design-crow-kv.md`](design-crow-kv.md)
 Satisfies: design-crow-kv.md §3 Dependencies](design-crow-kv.md), design-crow-kv.md §4.2](design-crow-kv.md), design-crow-kv.md §6.2](design-crow-kv.md), implicit prerequisites of design-crow-kv.md §7](design-crow-kv.md)
@@ -27,7 +27,7 @@ This document specifies leader election, term management, the `PxBallot`/`PxTerm
 
 Classical Multi-Paxos elects a "distinguished proposer" through Paxos itself: an aspiring leader runs Phase 1 over the entire log. This works but conflates election with proposal and complicates clean step-down, lease management, and observability.
 
-Raft's contribution was to factor election out of the log — a separate election RPC, a per-term vote, randomized timeouts. CrowKV adopts that factoring exactly, and lets per-slot Paxos handle just the per-slot work. The separation maps onto two distinct identifiers: `PxTerm` for elections, `PxBallot` for slot proposals.
+Raft's contribution was to factor election out of the log — a separate election RPC, a per-term vote, randomized timeouts. CROW adopts that factoring exactly, and lets per-slot Paxos handle just the per-slot work. The separation maps onto two distinct identifiers: `PxTerm` for elections, `PxBallot` for slot proposals.
 
 This design choice is consistent with *How to Build a Highly Available System Using Consensus* (Lampson, 1996) and is the same pattern used in Spinnaker, Spanner's Paxos groups, and TiKV's region leadership.
 
@@ -302,7 +302,7 @@ Standard Raft argument:
 - Two majorities over the same membership intersect (by quorum overlap).
 - Therefore at most one candidate can collect a majority in any one term.
 
-CrowKV inherits this directly.
+CROW inherits this directly.
 
 ### 9.2 No chosen value is lost across leader change
 

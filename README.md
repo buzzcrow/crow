@@ -1,7 +1,7 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CrowKV
+# CROW
 
 [![CI](https://github.com/buzzcrow/crowkv/actions/workflows/ci.yml/badge.svg)](https://github.com/buzzcrow/crowkv/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -34,12 +34,12 @@ And since future performance gains are increasingly tied to hardware (io_uring, 
 
 Raft's log is contiguous by construction: a leader cannot acknowledge slot N+1 until slot N is committed. Under high concurrency this becomes a sequential bottleneck.
 
-Multi-Paxos treats each slot as an independent Paxos instance. Slots can be **decided and applied out of order**, turning a sequential wait into a fully pipelined commit path. CrowKV pays for this with extra complexity around gap repair and a slightly more conservative read frontier — a tradeoff documented in detail in the [design doc](doc/design/kv/design-crow-kv.md#1-design-philosophy).
+Multi-Paxos treats each slot as an independent Paxos instance. Slots can be **decided and applied out of order**, turning a sequential wait into a fully pipelined commit path. CROW pays for this with extra complexity around gap repair and a slightly more conservative read frontier — a tradeoff documented in detail in the [design doc](doc/design/kv/design-crow-kv.md#1-design-philosophy).
 
 ## Architecture at a Glance
 
 ```
-                         CrowKV Cluster
+                         CROW Cluster
   ┌──────────────────────────────────────────────────────────┐
   │   Node A                Node B                Node C     │
   │   ┌─────────┐          ┌─────────┐          ┌─────────┐  │
@@ -71,7 +71,7 @@ Multi-Paxos treats each slot as an independent Paxos instance. Slots can be **de
 <details>
 <summary><b>Getting Started</b></summary>
 
-CrowKV uses [Pixi](https://pixi.sh) for environment management — it pins the C++ toolchain, Rust compiler, and all native dependencies (cmake, gtest, lz4, folly, protobuf, etc.) in a single lockfile. The Linux build targets glibc 2.17 (CentOS 7 / Ubuntu 16.04 era), so binaries built once run on virtually any modern Linux distribution.
+CROW uses [Pixi](https://pixi.sh) for environment management — it pins the C++ toolchain, Rust compiler, and all native dependencies (cmake, gtest, lz4, folly, protobuf, etc.) in a single lockfile. The Linux build targets glibc 2.17 (CentOS 7 / Ubuntu 16.04 era), so binaries built once run on virtually any modern Linux distribution.
 
 ```bash
 # Install pixi (if not already installed)
@@ -88,7 +88,7 @@ pixi run test-suite
 
 ## Performance
 
-CrowKV's hot path is built around a few core design choices:
+CROW's hot path is built around a few core design choices:
 
 - **Pipelined inflight window** — Multi-Paxos decides slots out of order, so the leader admits many proposals in parallel instead of serializing one at a time like Raft.
 - **Server-side proposal coalescing** — concurrent single-key client ops are batched into one slot and one quorum round, amortizing the consensus RPC cost across the whole batch.
@@ -126,7 +126,7 @@ Peak **145K ops/s** — ~1.17× the coalesced write peak (124K). Reads skip the 
 
 The full design lives in [`doc/`](doc/). Start with:
 
-- [**Design**](doc/design/kv/design-crow-kv.md) — what CrowKV is, why key choices were made, and how the system is structured
+- [**Design**](doc/design/kv/design-crow-kv.md) — what CROW is, why key choices were made, and how the system is structured
 - [**User Guide**](doc/user-manual/user-guide.md) — quick start, KV operations, cluster management, and API reference
 - [**Doc Index**](doc/doc_index.md) — a navigable map to every design doc and sub-topic
 

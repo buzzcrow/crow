@@ -185,7 +185,7 @@ TEST(SnapshotExport, FileDumpLoadRoundTrip)
     std::map<std::string, std::string> live;
     build_source(&a, &live);
 
-    crowtree_test::TempFile tmp("snap_");
+    crow::tree_test::TempFile tmp("snap_");
     ASSERT_FALSE(tmp.path.empty());
     std::string path = tmp.path;
 

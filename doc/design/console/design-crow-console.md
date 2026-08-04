@@ -1,7 +1,7 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CrowKV Console Design
+# CROW Console Design
 
 Upstream: `doc/../kv/design-crow-kv.md` §15 (the `crow-console` component
 overview) and §15.4.6 (Web UI requirements).
@@ -24,7 +24,7 @@ Sibling: `doc/design/design-crow-console-ui.md` (frontend SPA design).
 
 `crow-console` is **one project** split across the `lib/` and `app/`
 workspace roots: a shared core lib plus two binaries. The console is a
-general cluster-management surface (not limited to CrowKV), so crate
+general cluster-management surface (not limited to CROW), so crate
 names use the `crow-*` prefix without `kv`.
 
 ```

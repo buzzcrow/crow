@@ -1,7 +1,7 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-# CrowKV - Design: crow-tree In-Memory Engine
+# CROW - Design: crow-tree In-Memory Engine
 
 Parent: [`design-crow-tree.md`](design-crow-tree.md)
 Depends on: [`../kv/design-crow-kv-state-machine.md`](../kv/design-crow-kv-state-machine.md) (apply semantics, slot rules)
