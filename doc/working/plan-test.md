@@ -10,7 +10,7 @@ itself remains as the ongoing test task backlog. This overrides the
 `plan-<topic>.md`.
 
 Unfinished test tasks, grouped by layer. Each task has a checkbox for tracking.
-For test strategy, layer scope, and coverage details, see [`design/design-test.md`](../design/design-test.md).
+For test strategy, layer scope, and coverage details, see [`design/kv/design-crow-kv-test.md`](../design/kv/design-crow-kv-test.md).
 
 ## Suite Timing
 

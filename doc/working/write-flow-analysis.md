@@ -132,11 +132,11 @@ component design rationale (coalescer, prepare/accept phase fan-out,
 learn/apply sync vs async, chosen notice) are covered in the design
 docs:
 
-- [`design-slot.md`](../design/design-slot.md) — parallel slots,
+- [`design-slot.md`](../design/kv/design-crow-kv-slot.md) — parallel slots,
   sliding window and backpressure (§4), pipelined fanout (§5), gap
   repair (§9), tunables and defaults (§12), performance model (§21),
   server-side proposal coalescing R36 → R45/R45b (§23).
-- [`design-wal.md`](../design/design-wal.md) — write path and batched
+- [`design-wal.md`](../design/kv/design-crow-kv-wal.md) — write path and batched
   durable flush (§4), ack contract and failure modes (§5, including
   the `wal_early_ack` early-ack mode), tunables and defaults (§9).
 
@@ -197,7 +197,7 @@ bottlenecked by server-side consensus, not gRPC framing.
 
 **Window is the primary TPS lever** — MI=1→16 gives 4.4× (6K→28K).
 MI=16+ converges (consensus critical path is the hard ceiling). See
-[`design-slot.md` §4](../design/design-slot.md#4-sliding-window-and-backpressure)
+[`design-slot.md` §4](../design/kv/design-crow-kv-slot.md#4-sliding-window-and-backpressure)
 for the sliding-window/backpressure design.
 
 ### Phase 4 — Low thread count (MI=64)
@@ -261,7 +261,7 @@ single-permit queue saturation, not consensus failures.
 
 Same workload, Linux (AMD Ryzen 9 5950X), MI=64. Compares the relaxed
 ack mode against the strict mode (design:
-[`design-wal.md` §5`](../design/design-wal.md#5-ack-contract-and-failure-modes)).
+[`design-wal.md` §5`](../design/kv/design-crow-kv-wal.md#5-ack-contract-and-failure-modes)).
 
 | Config | Mode | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -280,7 +280,7 @@ ceiling lift from removing the leader's fsync from the bottleneck path.
 48T:48C, MI=64, Linux. Sweeps an explicit wait window the flush worker
 would insert before draining (on top of the wake-drain-flush baseline;
 design:
-[`design-wal.md` §4`](../design/design-wal.md#4-write-path-and-batched-durable-flush)).
+[`design-wal.md` §4`](../design/kv/design-crow-kv-wal.md#4-write-path-and-batched-durable-flush)).
 
 | coalesce (µs) | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
 | --- | --- | --- | --- | --- | --- | --- |

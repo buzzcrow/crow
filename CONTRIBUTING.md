@@ -48,7 +48,7 @@ See `pixi.toml` for the full list of tasks.
 
 - Start at `doc/doc_index.md` — match your task to a row, then open only that doc.
 - If you add/rename/rescope a doc, update `doc_index.md` in the same commit.
-- See `doc/design.md` for architecture context before making non-trivial changes.
+- See `doc/design/kv/design-crow-kv.md` for architecture context before making non-trivial changes.
 
 ## Pull Request Process
 

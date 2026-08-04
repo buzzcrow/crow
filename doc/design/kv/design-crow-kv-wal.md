@@ -3,8 +3,8 @@
 
 # CrowKV - Design: Write-Ahead Log
 
-Depends on: [`design.md`](design.md), [`design.md`](design.md)
-Satisfies: design.md §8.1](design.md), design.md §8.2](design.md)
+Depends on: [`design-crow-kv.md`](design-crow-kv.md), [`design-crow-kv.md`](design-crow-kv.md)
+Satisfies: design-crow-kv.md §8.1](design-crow-kv.md), design-crow-kv.md §8.2](design-crow-kv.md)
 
 This document specifies CrowKV's write-ahead log. **There is exactly one durable
 log per group: the replica's consensus log (the per-slot acceptor log).**
@@ -281,7 +281,7 @@ crow-tree side for this refactor.
 > An `Accepted` response is sent to the leader only after the corresponding WAL record's backend durable flush has completed.
 > A client write is acked only after a quorum of acceptors have sent `Accepted`.
 
-This is repeated from design.md §8.1](design.md) because everything else in this section is a consequence of it. This is the **strict** mode. The **early-ack** mode (§5.4) relaxes the leader's own durability ordering but keeps the quorum-durability requirement; both modes are described in §5.4.
+This is repeated from design-crow-kv.md §8.1](design-crow-kv.md) because everything else in this section is a consequence of it. This is the **strict** mode. The **early-ack** mode (§5.4) relaxes the leader's own durability ordering but keeps the quorum-durability requirement; both modes are described in §5.4.
 
 ### 5.2 Failure cases
 
@@ -329,7 +329,7 @@ The split matters: replay/restore are purely *local* (this node's WAL), but `Acc
 
 - New-leader recovery / steady-state heartbeat catch-up re-learning the value from quorum-confirmed consensus (§6.4 / §6.5).
 
-**No `DurableCommitWatermark` WAL record.** The state machine owns its own persistence boundary — but that boundary is the *engine's* durability (crow-tree's on-disk snapshot), not a separate state-machine-level snapshot file; see §6.2 below and `design-state-machine.md §2.1`. The WAL does not duplicate this information.
+**No `DurableCommitWatermark` WAL record.** The state machine owns its own persistence boundary — but that boundary is the *engine's* durability (crow-tree's on-disk snapshot), not a separate state-machine-level snapshot file; see §6.2 below and `design-crow-kv-state-machine.md §2.1`. The WAL does not duplicate this information.
 
 ### 6.1 Replay — rebuild acceptor state (`replay_group`)
 
@@ -358,7 +358,7 @@ Pass 1 rebuilds acceptor state without assuming any local accept was ever chosen
 The learner / `KVEngine` is rebuilt in a second pass over the *same* replayed
 WAL records (`PxLocalReplica::restore_from_replay_with_engine`), not from a
 separate state-machine snapshot file — see
-[`design-state-machine.md §2.1`](design-state-machine.md#21-state-machine-restart-engine-durability--wal-replay)
+[`design-crow-kv-state-machine.md §2.1`](design-crow-kv-state-machine.md#21-state-machine-restart-engine-durability--wal-replay)
 for the full mechanics. In short:
 
 - Pass 2 walks every slot with an accepted entry (rebuilt in Pass 1 above)
@@ -378,7 +378,7 @@ for the full mechanics. In short:
 This avoids resurrecting a value that was accepted locally but never chosen,
 and — via the resume-floor check — never re-applies a write below a point
 the engine has already durably advanced past (crow-tree rejects such writes
-outright; see `design-crow-tree-engine.md`).
+outright; see `../tree/design-crow-tree-engine.md`).
 
 ### 6.3 Wiring a live group (`create_group_with_wal`)
 
@@ -407,7 +407,7 @@ On winning election a leader sweeps slots `(floor, ceiling]`:
   is **re-confirmed, not overwritten**. This repairs a leader that restored an
   incomplete or merely-accepted prefix.
 
-(Steady-state gap repair below the frontier uses the same adopt-from-quorum logic, one slot at a time — see [`design-slot.md`](design-slot.md).)
+(Steady-state gap repair below the frontier uses the same adopt-from-quorum logic, one slot at a time — see [`design-crow-kv-slot.md`](design-crow-kv-slot.md).)
 
 Parallel slot assignment means holes are normal after crash / restart. Recovery resolves every slot in `(floor, ceiling]` independently:
 
@@ -467,7 +467,7 @@ The watermark for a group's WAL GC is:
    gc_slot = min(safe_slot, snapshot_slot)
 ```
 
-Records with `slot < gc_slot` are eligible for GC. The two-watermark rule is justified in [`design-slot.md`](design-slot.md) §11.
+Records with `slot < gc_slot` are eligible for GC. The two-watermark rule is justified in [`design-crow-kv-slot.md`](design-crow-kv-slot.md) §11.
 
 ### 7.2 GC granularity
 
@@ -499,9 +499,9 @@ When the backend durable-flush operation returns an error, the OS reports the di
 1. Stop using the disk for new writes (the `failed` AtomicBool is set; all subsequent `append` calls return `Err`).
 2. Mark the group affected (a multi-disk WAL with one disk lost has incomplete state for slots that landed on the lost disk).
 3. **Fail the node out of the group** (not yet implemented): the node would send a step-out RPC to the leader, the leader records the failed acceptor as not-eligible, and (if necessary) triggers a reconfiguration to maintain quorum.
-4. Rebuild from peers via **snapshot install** ([§8.4 of design.md](design.md#84-snapshot-and-install)).
+4. Rebuild from peers via **snapshot install** ([§8.4 of design-crow-kv.md](design-crow-kv.md#84-snapshot-and-install)).
 
-This is the **fail-out semantics** decided in design.md §8.1](design.md). We do not try to keep operating with partial WAL state on the surviving disks; that path requires per-slot replication across disks and adds disproportionate complexity.
+This is the **fail-out semantics** decided in design-crow-kv.md §8.1](design-crow-kv.md). We do not try to keep operating with partial WAL state on the surviving disks; that path requires per-slot replication across disks and adds disproportionate complexity.
 
 ### 8.2 All-disk failure
 

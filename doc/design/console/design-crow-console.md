@@ -3,9 +3,9 @@
 
 # CrowKV Console Design
 
-Upstream: `doc/design.md` §15 (the `crow-console` component
+Upstream: `doc/../kv/design-crow-kv.md` §15 (the `crow-console` component
 overview) and §15.4.6 (Web UI requirements).
-Sibling: `doc/design/design-ui.md` (frontend SPA design).
+Sibling: `doc/design/design-crow-console-ui.md` (frontend SPA design).
 
 ## 1. Goals and Non-Goals
 
@@ -361,7 +361,7 @@ these rules:
 
 ### 6.5 Frontend contract
 
-The frontend SPA design lives in `design/design-ui.md`. The
+The frontend SPA design lives in `design/design-crow-console-ui.md`. The
 backend-facing contract here:
 
 - Bundle output is `app/crow-web/ui/dist/`; `crow-web` serves

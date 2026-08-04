@@ -241,7 +241,7 @@ All five are `LatencySummary` (count + sum + max), matching the read-path
 `barrier` / `engine_get` pattern. Percentile precision is not needed for
 phase-level attribution — the bench client already has `PreciseHistogram`
 for client-observed p99. The `accept_quorum_rpc` timer is meaningful only
-after the quorum short-circuit (§6.1 of `design-rpc.md`); it records the
+after the quorum short-circuit (§6.1 of `design-crow-kv-rpc.md`); it records the
 quorum-th-fastest remote latency, not the full fan-out tail.
 
 ### Client Metrics

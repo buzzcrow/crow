@@ -95,7 +95,7 @@ single-point-of-failure risk of console-only TOML became the blocking
 concern for HA deployments. The operator-managed HTTP management API
 remains as the Phase 1 bootstrap path; group 0 adds the HA cutover.
 
-Full design: `design-console.md` §4.3, `design-kv-server.md` §2.2/§2.4.
+Full design: `../console/design-crow-console.md` §4.3, `design-crow-kv-server.md` §2.2/§2.4.
 
 ### 3.4 Explicit group_id on every RPC
 
@@ -201,8 +201,8 @@ single-field overrides without rebuilding the whole struct. The
 the leader's own contiguous applied frontier — this is the one
 latency cost of parallel slots.
 
-Full read-flow details: `design-leader-election.md`,
-`design-state-machine.md`.
+Full read-flow details: `design-crow-kv-leader-election.md`,
+`design-crow-kv-state-machine.md`.
 
 ## 7. Consensus
 
@@ -218,9 +218,9 @@ Full read-flow details: `design-leader-election.md`,
 - **Partition behavior** — minority partition rejects all requests;
   majority continues serving.
 
-Full design: `design-slot.md` (parallel slots, gap repair,
-correctness proof), `design-leader-election.md` (election, lease,
-ReadIndex), `design-rpc.md` (wire protocol, LearnerStream).
+Full design: `design-crow-kv-slot.md` (parallel slots, gap repair,
+correctness proof), `design-crow-kv-leader-election.md` (election, lease,
+ReadIndex), `design-crow-kv-rpc.md` (wire protocol, LearnerStream).
 
 ## 8. Storage and Durability
 
@@ -236,8 +236,8 @@ ReadIndex), `design-rpc.md` (wire protocol, LearnerStream).
   Resumable, checksum-verified, throttleable install for new-node
   bootstrap.
 
-Full design: `design-wal.md`, `design-state-machine.md`,
-`design-crow-tree.md`.
+Full design: `design-crow-kv-wal.md`, `design-crow-kv-state-machine.md`,
+`../tree/design-crow-tree.md`.
 
 ## 9. Cluster Lifecycle
 
@@ -270,7 +270,7 @@ Full design: `design-wal.md`, `design-state-machine.md`,
   registry is an in-memory `DashMap` in `crow-kv-server`; background
   tasks poll group status until a new leader appears or timeout.
 
-Full design: `design-reconfiguration.md`, `design-kv-server.md`.
+Full design: `design-crow-kv-reconfiguration.md`, `design-crow-kv-server.md`.
 
 ## 10. Client Interaction
 
@@ -357,7 +357,7 @@ production).
 4. Tests use `#[tokio::test(flavor = "current_thread", start_paused = true)]`.
 
 The async disk I/O substrate (`AsyncFile`: io_uring on Linux ≥ 5.11,
-`tokio::fs` fallback otherwise) is detailed in `design-wal.md`.
+`tokio::fs` fallback otherwise) is detailed in `design-crow-kv-wal.md`.
 
 ## 14. Components
 
@@ -365,12 +365,12 @@ The async disk I/O substrate (`AsyncFile`: io_uring on Linux ≥ 5.11,
 - **`crow-common`** — shared utilities (Rust crate + C++ static lib):
   metrics, logging, time, report (Rust); CRC32C, spdlog facade,
   compressing sink, gzip, atomic metrics (C++).
-- **`crow-kv-server`** — reference server binary. Design: `design-kv-server.md`.
+- **`crow-kv-server`** — reference server binary. Design: `design-crow-kv-server.md`.
 - **`crow-console`** — unified management project (Web UI + CLI).
-  Design: `design-console.md`, `design-ui.md`.
+  Design: `../console/design-crow-console.md`, `../console/design-crow-console-ui.md`.
 - **`crowbench`** — benchmark tool, fulfilled by `crow-console` CLI
   `bench` subcommand.
-- **RPC** — protobuf over gRPC (tonic + prost). Design: `design-rpc.md`.
+- **RPC** — protobuf over gRPC (tonic + prost). Design: `design-crow-kv-rpc.md`.
 
 ## 15. Performance Targets
 
@@ -388,7 +388,7 @@ consensus events.
 
 Full metrics module design (metric types, registry lifecycle, naming
 convention, instrumentation points, system collector, log format, in-memory
-access, FFI boundary): `design-observability.md`.
+access, FFI boundary): `design-crow-kv-observability.md`.
 
 ## 17. Testing
 
@@ -401,7 +401,7 @@ access, FFI boundary): `design-observability.md`.
   step-down, split-brain prevention, leader failure mid-proposal,
   lagging learner catch-up, missing slot repair, snapshot recovery.
 
-Full test strategy: `design-test.md`.
+Full test strategy: `design-crow-kv-test.md`.
 
 ## 18. References
 

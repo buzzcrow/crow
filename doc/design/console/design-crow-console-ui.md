@@ -3,13 +3,13 @@
 
 # CrowKV Console Web UI Design (v1, lean)
 
-Upstream: `design.md` §15.4.6 (requirements spec). Sibling:
-`doc/design/design-console.md` (backend Axum routes, registry, SSH
+Upstream: `../kv/design-crow-kv.md` §15.4.6 (requirements spec). Sibling:
+`doc/design/design-crow-console.md` (backend Axum routes, registry, SSH
 lifecycle, Swagger asset hosting).
 
 This document covers the **frontend SPA design decisions only** —
 what we chose and why. Requirements (the *what*) live in
-`design.md`; backend API contracts live in `design-console.md`.
+`../kv/design-crow-kv.md`; backend API contracts live in `design-crow-console.md`.
 
 
 ## 1. Goals (recap)
@@ -220,7 +220,7 @@ The SPA is mountable as a sub-component with a minimal props interface
 ## 9. Data & Polling Strategy
 
 - **Two-tree contract** — the SPA speaks physical (`/api/racks`,
-  `/api/nodes`) and logical (`/api/stores`) trees per `design-console.md`.
+  `/api/nodes`) and logical (`/api/stores`) trees per `design-crow-console.md`.
   No panel constructs raw `host:port` URLs; `api.ts` is the single URL
   builder.
 - **Asymmetric polling** — only the active view polls fast (~5s); the

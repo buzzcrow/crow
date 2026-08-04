@@ -3,8 +3,8 @@
 
 # CrowKV - Design: crow-tree Storage Engine (Overview)
 
-Depends on: [`design.md`](design.md), [`design.md`](design.md), [`design-state-machine.md`](design-state-machine.md)
-Satisfies: design.md §8.3 learner storage](design.md)
+Depends on: [`../kv/design-crow-kv.md`](../kv/design-crow-kv.md), [`../kv/design-crow-kv.md`](../kv/design-crow-kv.md), [`../kv/design-crow-kv-state-machine.md`](../kv/design-crow-kv-state-machine.md)
+Satisfies: ../kv/design-crow-kv.md §8.3 learner storage](../kv/design-crow-kv.md)
 
 This is the parent document for **crow-tree**, the production storage engine that
 backs CrowKV learners: an embeddable, ordered key-value engine implementing the
@@ -271,7 +271,7 @@ The crow-tree design is split into two self-contained documents:
 | [`design-crow-tree-storage.md`](design-crow-tree-storage.md) | **Durable storage.** `PageStore` backends, on-disk zero-copy frame format, buffer pool (frame cache) + eviction safety, snapshot + internal-WAL decision + recovery, snapshot export/import; the mapping table (PID indirection, segment persistence, recycling); snapshot/GC flow integration with the learner and consensus WAL. |
 
 Test strategy for crow-tree (C++ unit, integration, crash/recovery, Rust FFI,
-cross-engine parity, sanitizer) is documented in [`design-test.md`](design-test.md) §
+cross-engine parity, sanitizer) is documented in [`../kv/design-crow-kv-test.md`](../kv/design-crow-kv-test.md) §
 "crow-tree C++ Test Layers".
 
 ---

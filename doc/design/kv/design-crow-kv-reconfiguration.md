@@ -3,10 +3,10 @@
 
 # CrowKV - Design: Reconfiguration
 
-Depends on: [`design.md`](design.md), [`design.md`](design.md), [`design-leader-election.md`](design-leader-election.md)
-Satisfies: design.md §9.1](design.md), prerequisites of design.md §9.2](design.md)
+Depends on: [`design-crow-kv.md`](design-crow-kv.md), [`design-crow-kv.md`](design-crow-kv.md), [`design-crow-kv-leader-election.md`](design-crow-kv-leader-election.md)
+Satisfies: design-crow-kv.md §9.1](design-crow-kv.md), prerequisites of design-crow-kv.md §9.2](design-crow-kv.md)
 
-This document specifies how a CrowKV group safely changes its membership while preserving consensus safety. The **shipped** mechanism is direct per-node HTTP mutation of each replica's remote-replica list, persisted to the local `GroupConfigStore`, with a `membership_epoch` exact-match fence. This model applies to all groups including the system group (group 0, which stores cluster topology metadata — see `design.md` §3.3). The original Raft-style joint-consensus design (§7) is preserved as a historical decision record.
+This document specifies how a CrowKV group safely changes its membership while preserving consensus safety. The **shipped** mechanism is direct per-node HTTP mutation of each replica's remote-replica list, persisted to the local `GroupConfigStore`, with a `membership_epoch` exact-match fence. This model applies to all groups including the system group (group 0, which stores cluster topology metadata — see `design-crow-kv.md` §3.3). The original Raft-style joint-consensus design (§7) is preserved as a historical decision record.
 
 ## Table of Contents
 
@@ -32,7 +32,7 @@ CrowKV supports membership changes within a single group. Specifically:
 - **Replace a member.** Implemented as add-then-remove (or vice versa), each as a single-member change.
 - **Change the leadership of the group.** Triggered as a side effect when removing the current leader.
 
-Out of scope (design.md §2](design.md)):
+Out of scope (design-crow-kv.md §2](design-crow-kv.md)):
 
 - Changing `num_groups` (the total number of groups in the cluster) — fixed at cluster creation.
 - Splitting or merging groups — not supported.
@@ -86,7 +86,7 @@ By requiring catch-up while the member is non-voting, we ensure that when it fir
 
 ### 3.3 Snapshot install protocol
 
-Defined in [§8.4 of design.md](design.md#84-snapshot-and-install) and `design-state-machine.md` §6 (snapshot import). Resumable, throttled, end-to-end CRC.
+Defined in [§8.4 of design-crow-kv.md](design-crow-kv.md#84-snapshot-and-install) and `design-crow-kv-state-machine.md` §6 (snapshot import). Resumable, throttled, end-to-end CRC.
 
 ### 3.4 Catch-up termination criterion
 
@@ -184,8 +184,8 @@ A non-voting catch-up member physically accepts and promises so it can follow th
 > joint-consensus primitive was needed. Group 0 stores cluster topology
 > as KV entries (`/topology/ready`, `/topology/racks/`, `/topology/nodes/`,
 > etc.) and is created via `POST /system/init` and finalized via
-> `POST /topology/finalize`. See `design.md` §3.3 and
-> `design-console.md` §4.3 for the implemented design. The original
+> `POST /topology/finalize`. See `design-crow-kv.md` §3.3 and
+> `../console/design-crow-console.md` §4.3 for the implemented design. The original
 > joint-consensus proposal below was never built; see §11 for the design
 > history and the rationale for choosing the shipped model. Kept for
 > history/reference only.
@@ -255,7 +255,7 @@ hardened, preserving the decision rationale from the original gap analysis.
 
 ### 11.1 What was designed vs what shipped
 
-The original `design-reconfiguration.md` (§7, now historical) specified
+The original `design-crow-kv-reconfiguration.md` (§7, now historical) specified
 Raft-style joint consensus: two `ConfigChange` log entries per membership
 change (`joint = C_old ∪ C_new`, then `C_new`), both-quorum evaluation gated
 on *apply* not *chosen*, non-voting catch-up, `TimeoutNow` leader transfer,

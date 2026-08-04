@@ -700,7 +700,7 @@ Fill gaps bottom-up so a new failure is always attributable to the lowest layer:
 Every feature or component milestone includes:
 
 1. **Unit invariants** from the matching test design area (property-based or deterministic).
-2. **Failure-injection** matching [`design.md`](design.md) §9 scenarios.
+2. **Failure-injection** matching [`design-crow-kv.md`](design-crow-kv.md) §9 scenarios.
 3. **Benchmark integration test** (end-to-end correctness + performance)
    once the RPC/client layer is reached — see Benchmark Layer above.
 
@@ -717,7 +717,7 @@ tests for these features.
 
 | Attribute | Value |
 | --- | --- |
-| Design doc | `design-state-machine.md` §6 |
+| Design doc | `design-crow-kv-state-machine.md` §6 |
 | Depends on | New `KVEngine` trait methods (`snapshot_export`, `snapshot_import`) + `InMemKV` implementation + snapshot streaming module |
 | Target layer | Unit → Replica |
 | Description | Snapshot export serializes the KV state at a given slot; snapshot import replaces local KV state from a received snapshot. Tests will cover: export produces deterministic bytes, import restores state, import clears prior state, export/import round-trip preserves tombstones, snapshot install triggers WAL truncation. |
@@ -726,7 +726,7 @@ tests for these features.
 
 | Attribute | Value |
 | --- | --- |
-| Design doc | `design-state-machine.md` §7 |
+| Design doc | `design-crow-kv-state-machine.md` §7 |
 | Depends on | `KVEngine::compact(watermark)` method + watermark wiring from `PxLearner` (`snapshot_slot`, `safe_slot`) + background sweeper task |
 | Target layer | Unit → Replica |
 | Description | Compaction removes tombstones below the safe watermark. Tests will cover: compact removes tombstones below watermark, live keys preserved, compact is idempotent, compact after snapshot install, watermark advances with learner progress. |
@@ -753,7 +753,7 @@ tests for these features.
 
 | Attribute | Value |
 | --- | --- |
-| Design doc | `design-reconfiguration.md` |
+| Design doc | `design-crow-kv-reconfiguration.md` |
 | Depends on | `reconfig/` is a skeleton stub ("Real content lands in P5"); needs full joint-consensus protocol, leader transfer, quorum-overlap safety |
 | Target layer | Group |
 | Description | Joint consensus member add/remove, leader transfer, quorum-overlap safety. Tests will cover: add member via joint consensus, remove member, leader transfer to specified node, quorum overlap during transition, configuration change is durable. |

@@ -4,7 +4,7 @@
 # CrowKV - Design: crow-tree In-Memory Engine
 
 Parent: [`design-crow-tree.md`](design-crow-tree.md)
-Depends on: [`design-state-machine.md`](design-state-machine.md) (apply semantics, slot rules)
+Depends on: [`../kv/design-crow-kv-state-machine.md`](../kv/design-crow-kv-state-machine.md) (apply semantics, slot rules)
 
 This document specifies crow-tree's in-memory engine: the bounded 2-level
 structure (concurrent MemTable over a COW B+tree), the slot-aware value cell,

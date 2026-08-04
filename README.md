@@ -34,7 +34,7 @@ And since future performance gains are increasingly tied to hardware (io_uring, 
 
 Raft's log is contiguous by construction: a leader cannot acknowledge slot N+1 until slot N is committed. Under high concurrency this becomes a sequential bottleneck.
 
-Multi-Paxos treats each slot as an independent Paxos instance. Slots can be **decided and applied out of order**, turning a sequential wait into a fully pipelined commit path. CrowKV pays for this with extra complexity around gap repair and a slightly more conservative read frontier — a tradeoff documented in detail in the [design doc](doc/design.md#1-design-philosophy).
+Multi-Paxos treats each slot as an independent Paxos instance. Slots can be **decided and applied out of order**, turning a sequential wait into a fully pipelined commit path. CrowKV pays for this with extra complexity around gap repair and a slightly more conservative read frontier — a tradeoff documented in detail in the [design doc](doc/design/kv/design-crow-kv.md#1-design-philosophy).
 
 ## Architecture at a Glance
 
@@ -126,7 +126,7 @@ Peak **145K ops/s** — ~1.17× the coalesced write peak (124K). Reads skip the 
 
 The full design lives in [`doc/`](doc/). Start with:
 
-- [**Design**](doc/design/design.md) — what CrowKV is, why key choices were made, and how the system is structured
+- [**Design**](doc/design/kv/design-crow-kv.md) — what CrowKV is, why key choices were made, and how the system is structured
 - [**User Guide**](doc/user-manual/user-guide.md) — quick start, KV operations, cluster management, and API reference
 - [**Doc Index**](doc/doc_index.md) — a navigable map to every design doc and sub-topic
 

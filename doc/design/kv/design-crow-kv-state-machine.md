@@ -3,16 +3,16 @@
 
 # CrowKV - Design: State Machine
 
-Depends on: [`design.md`](design.md), [`design.md`](design.md)
-Satisfies: design.md §8.3](design.md), design.md §8.4 import/export](design.md), implementation prerequisites of design.md §14.1 crowbench `compare`](design.md)
+Depends on: [`design-crow-kv.md`](design-crow-kv.md), [`design-crow-kv.md`](design-crow-kv.md)
+Satisfies: design-crow-kv.md §8.3](design-crow-kv.md), design-crow-kv.md §8.4 import/export](design-crow-kv.md), implementation prerequisites of design-crow-kv.md §14.1 crowbench `compare`](design-crow-kv.md)
 
 This document specifies the storage engine abstraction used by CrowKV learners. The engine is the **only** consumer of consensus output; it owns the materialized key-value state and serves all reads. The WAL is the durable log; the engine is the materialized projection.
 
 > **P3 redesign note.** The production engine `crow-tree` and the redefined
 > (async, snapshot/GC-aware) `KVEngine` abstraction are specified in the crow-tree
-> sub-design set: [`design-crow-tree.md`](design-crow-tree.md) (overview + engine
-> abstraction + language/FFI decisions), [`design-crow-tree-engine.md`](design-crow-tree-engine.md)
-> (in-memory engine + memory model + async FFI), [`design-crow-tree-storage.md`](design-crow-tree-storage.md)
+> sub-design set: [`../tree/design-crow-tree.md`](../tree/design-crow-tree.md) (overview + engine
+> abstraction + language/FFI decisions), [`../tree/design-crow-tree-engine.md`](../tree/design-crow-tree-engine.md)
+> (in-memory engine + memory model + async FFI), [`../tree/design-crow-tree-storage.md`](../tree/design-crow-tree-storage.md)
 > (durable storage + mapping table + snapshot/GC flow). This document remains the
 > source of truth for the *semantics* (per-key slot, apply, compare, compaction);
 > crow-tree docs own the *implementation*.
@@ -72,7 +72,7 @@ The engine does **not** know about Paxos, terms, ballots, leaders, or the networ
 The state machine's persistence boundary is separate from the WAL — but it is
 not a dedicated "state-machine snapshot file" either. It is whatever the
 *engine itself* durably persists (crow-tree's own snapshot pipeline,
-[`design-crow-tree-storage.md §6`](design-crow-tree-storage.md#6-snapshot-recovery-and-exportimport)),
+[`../tree/design-crow-tree-storage.md §6`](../tree/design-crow-tree-storage.md#6-snapshot-recovery-and-exportimport)),
 queried through `KVEngine::resume_from_slot()`. This replaces the former
 `DurableCommitWatermark` WAL record design.
 
@@ -91,7 +91,7 @@ queried through `KVEngine::resume_from_slot()`. This replaces the former
    re-`learn()` of the already-durable prefix.
 4. Slots above the local WAL's own highest accepted slot are re-learned via
    new-leader recovery (bulk Phase 1) or steady-state heartbeat catch-up (§6
-   of this doc's parent flows, `design-slot.md`).
+   of this doc's parent flows, `design-crow-kv-slot.md`).
 
 Step 3's skip is a pure **optimization**, not a correctness requirement:
 `KVEngine::apply` is idempotent (highest-slot-wins per key) and
@@ -125,11 +125,11 @@ CrowKV does not provide repeatable reads or time-travel queries. Snapshot reads 
 
 `Scan(AtSlot(N))` returns the engine state *after* applying everything up through the contiguous-applied frontier of the serving replica, which the replica advances to ≥ `N` before serving. If a slot `M > N` has already been applied for some key `k`, the value returned for `k` is the value at `M`, not the value at `N`. This still satisfies linearizability: slot `M` linearizes after slot `N`, so the read at "logical instant `N`" is consistent with reading at the later linearization point `M` — both are valid linearization points for a single point in real time. `AtSlot(N)` is therefore a *lower bound on freshness*, not a snapshot pin: single-version reads always reflect the latest applied value.
 
-If true historical snapshots are ever required, MVCC is a future extension. The single-version restriction comes from design.md §1 / §5.2](design.md).
+If true historical snapshots are ever required, MVCC is a future extension. The single-version restriction comes from design-crow-kv.md §1 / §5.2](design-crow-kv.md).
 
 ### 3.3 Resolved-slot is monotone per key
 
-The engine never accepts a write at slot `s` for key `k` if `s ≤ resolved_slot(k)`. This is the runtime expression of [Invariant I5 in `design-slot.md`](design-slot.md#2-concepts-and-invariants).
+The engine never accepts a write at slot `s` for key `k` if `s ≤ resolved_slot(k)`. This is the runtime expression of [Invariant I5 in `design-crow-kv-slot.md`](design-crow-kv-slot.md#2-concepts-and-invariants).
 
 Implication: replays and out-of-order applies are naturally idempotent. If WAL replay tries to apply slot 7 for key `k` and `resolved_slot(k)` is already 9, the apply is a no-op for `k` — consistent with the parallel-slot semantics.
 
@@ -163,7 +163,7 @@ In-memory engines can hold a write lock for the duration of the batch. File-base
 
 ### 4.4 Intra-batch order
 
-For a key `k` appearing multiple times in a batch (rare but legal — see [`design-slot.md` §13](design-slot.md#13-correctness-analysis-for-parallel-slot-writes-moved-from-requirementmd-731)), the *last* occurrence in batch order wins. The earlier ones are folded into the apply procedure naturally (each tuple in turn updates `current`; the loop's final state is what persists).
+For a key `k` appearing multiple times in a batch (rare but legal — see [`design-crow-kv-slot.md` §13](design-crow-kv-slot.md#13-correctness-analysis-for-parallel-slot-writes-moved-from-requirementmd-731)), the *last* occurrence in batch order wins. The earlier ones are folded into the apply procedure naturally (each tuple in turn updates `current`; the loop's final state is what persists).
 
 ### 4.5 Failure during apply
 
@@ -283,7 +283,7 @@ This minimal surface keeps multi-engine compatibility easy.
 
 ### 6.1 Purpose
 
-Snapshot install ([§8.4 of design.md](design.md#84-snapshot-and-install)) is the bootstrap path for new or far-lagging members. The engine provides export/import primitives that the snapshot module wraps in a chunked, resumable, throttled transfer.
+Snapshot install ([§8.4 of design-crow-kv.md](design-crow-kv.md#84-snapshot-and-install)) is the bootstrap path for new or far-lagging members. The engine provides export/import primitives that the snapshot module wraps in a chunked, resumable, throttled transfer.
 
 In addition to peer transfer, the engine uses snapshot export to persist its own state locally (see §2.1). The local snapshot file stores the KV state and `last_applied_slot`, enabling fast restart without re-applying the entire WAL.
 
@@ -354,7 +354,7 @@ When a key `k` is overwritten with a higher slot value, the old value is immedia
 
 ## 8. Compare for Cross-Learner Validation
 
-A `compare(other) -> diff` operation is required so that `crowbench` can verify state equality across learners after a test run (design.md §14.1](design.md)).
+A `compare(other) -> diff` operation is required so that `crowbench` can verify state equality across learners after a test run (design-crow-kv.md §14.1](design-crow-kv.md)).
 
 ### 8.1 Semantics
 
@@ -397,7 +397,7 @@ Two engine implementations satisfy the surface above. Each is appropriate for a 
 - Backing store: the production btree library `crow-tree` — a C++ `libcrow-tree`
   (single-writer COW B+tree with per-leaf delta chains, epoch GC, versioned root)
   consumed from Rust over a coarse C ABI. Full design:
-  [`design-crow-tree.md`](design-crow-tree.md) and its sub-docs.
+  [`../tree/design-crow-tree.md`](../tree/design-crow-tree.md) and its sub-docs.
 - Persistence: yes, via a pluggable `PageStore` (local file, raw block device,
   remote/RDMA); snapshot + consensus replay for recovery (no second op-log).
 - Use cases: production.
@@ -426,4 +426,4 @@ The trait surface is engine-agnostic; switching engines is a configuration choic
 - Manual debugging or operations exercises → ordered file.
 - Production → crow-tree.
 
-**Per-key memory cost considerations:** the per-key resolved-slot adds 8 bytes per live key. For 10⁹ live keys this is 8 GiB on every learner, accepted in the requirement ([§7.3.1](design.md)). If memory pressure dictates, a future optimization could compress recently-applied resolved-slots into a "below safe-slot" bit (a single bit replacing the 8 bytes when the per-key slot is no longer needed for read-your-writes).
+**Per-key memory cost considerations:** the per-key resolved-slot adds 8 bytes per live key. For 10⁹ live keys this is 8 GiB on every learner, accepted in the requirement ([§7.3.1](design-crow-kv.md)). If memory pressure dictates, a future optimization could compress recently-applied resolved-slots into a "below safe-slot" bit (a single bit replacing the 8 bytes when the per-key slot is no longer needed for read-your-writes).

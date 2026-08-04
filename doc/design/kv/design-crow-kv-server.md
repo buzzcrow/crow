@@ -3,8 +3,8 @@
 
 # CrowKV - Design: KV Server
 
-Depends on: [`design.md`](design.md) [§15.2](design.md)
-Satisfies: [`design.md`](design.md) §15.2
+Depends on: [`design-crow-kv.md`](design-crow-kv.md) [§15.2](design-crow-kv.md)
+Satisfies: [`design-crow-kv.md`](design-crow-kv.md) §15.2
 
 ---
 
@@ -72,7 +72,7 @@ Key endpoint groups:
 - **System group** — `POST /system/init` bootstraps store 0 + group 0
   on this node. `POST /topology/finalize` writes the `/topology/ready`
   flag into group 0 (idempotent cutover). `GET /topology/ready` checks
-  if group 0 is authoritative. See `design-console.md` §4.3 for the
+  if group 0 is authoritative. See `../console/design-crow-console.md` §4.3 for the
   full persistent cluster config design.
 - **Admin operations** — `step-down` (force leader step-down), `join`
   (new-member snapshot join).

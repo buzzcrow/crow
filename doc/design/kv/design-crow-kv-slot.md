@@ -3,8 +3,8 @@
 
 # CrowKV - Design: Slots — Parallel Pipelining & Concurrent Slot List
 
-Depends on: [`design.md`](design.md), [`design.md`](design.md)
-Satisfies: design.md §6.5](design.md), design.md §7.3](design.md), [`design.md`](design.md) §5.1 (high-concurrency log)
+Depends on: [`design-crow-kv.md`](design-crow-kv.md), [`design-crow-kv.md`](design-crow-kv.md)
+Satisfies: design-crow-kv.md §6.5](design-crow-kv.md), design-crow-kv.md §7.3](design-crow-kv.md), [`design-crow-kv.md`](design-crow-kv.md) §5.1 (high-concurrency log)
 
 This document covers two aspects of CrowKV's slot mechanism:
 
@@ -49,14 +49,14 @@ CrowKV exploits this by running many slots in parallel on the leader. Throughput
 - **Gaps.** A slot may remain undecided long after later slots are decided. We need a mechanism to resolve gaps without stalling the hot path.
 - **Conservative cross-key reads.** A `Scan` must wait for a no-gap prefix; point reads do not.
 
-The blind-ops premise from design.md §5.2](design.md) makes the trade-off cheap: out-of-order *apply* is safe because no operation reads before writing.
+The blind-ops premise from design-crow-kv.md §5.2](design-crow-kv.md) makes the trade-off cheap: out-of-order *apply* is safe because no operation reads before writing.
 
 ---
 
 ## 2. Concepts and Invariants
 
 - **I1 — Single slot counter.** On a leader, slot assignment is performed by exactly one logical worker. Two writes never receive the same slot, and no two slots are assigned out of arrival order.
-- **I2 — Slot determines linearization.** The slot number assigned to an op is the op's position in the global linearization order (design.md §6.1](design.md)).
+- **I2 — Slot determines linearization.** The slot number assigned to an op is the op's position in the global linearization order (design-crow-kv.md §6.1](design-crow-kv.md)).
 - **I3 — Quorum-fsync before ack.** A client write is acked only after a quorum of acceptors (including the leader) have fsynced their `Accepted(slot, ballot, value)` records. This is the durability hook that makes I2 robust to failures.
 - **I4 — Apply-order independence for blind ops.** For any key *k*, the engine's final value is `value(max{ slot | slot writes k })`. Apply order between non-overlapping keys is irrelevant; for the same key, the higher slot wins regardless of arrival order ([§13](#13-correctness-analysis-for-parallel-slot-writes-moved-from-requirementmd-731)).
 - **I5 — Per-key resolved-slot is monotone.** A learner's per-key tracker only ever advances. This is the basis for read-your-writes from followers.
@@ -74,7 +74,7 @@ The blind-ops premise from design.md §5.2](design.md) makes the trade-off cheap
 | `Applied` | learner.apply() returned | terminal | Used by metrics; safe to evict |
 | `OrphanRepair` | leader changed before reaching `Chosen`; repair task takes over | `Chosen` (via repair) | New leader's responsibility |
 
-**When does the ack happen?** When the slot reaches `Chosen` *and* the leader's own learner has applied it. The leader's own learner application is required so that an immediately-following `Get` on the leader sees the new value (see [§6.1 of design.md](design.md#61-linearizable-leader-read)).
+**When does the ack happen?** When the slot reaches `Chosen` *and* the leader's own learner has applied it. The leader's own learner application is required so that an immediately-following `Get` on the leader sees the new value (see [§6.1 of design-crow-kv.md](design-crow-kv.md#61-linearizable-leader-read)).
 
 **Eviction.** Once a slot's record is `Applied` *and* its slot number is below the safe-slot, it can be dropped from the in-memory map. The WAL record stays until WAL GC catches up.
 
@@ -97,7 +97,7 @@ The number of in-flight slots is capped at the **window size** (`max_inflight_pr
 
 As soon as the leader has fsynced its own copy of slot N, it sends `Accept(N, ...)` to all followers. It does **not** wait for slot N-1, N-2, etc. to reach quorum first.
 
-**Transport: per-peer bidi `LearnerStream`.** The leader uses one long-running gRPC bidi stream per `(group_id, peer_id)` pair (see [`design-rpc.md`](design-rpc.md) §3). The stream's background task maintains a `PendingMap` (`HashMap<request_id, oneshot::Sender>`). Because each `Accept` gets its own oneshot, the leader can enqueue slot N+1's `Accept` before slot N's `Accepted` response has returned.
+**Transport: per-peer bidi `LearnerStream`.** The leader uses one long-running gRPC bidi stream per `(group_id, peer_id)` pair (see [`design-crow-kv-rpc.md`](design-crow-kv-rpc.md) §3). The stream's background task maintains a `PendingMap` (`HashMap<request_id, oneshot::Sender>`). Because each `Accept` gets its own oneshot, the leader can enqueue slot N+1's `Accept` before slot N's `Accepted` response has returned.
 
 **Per-follower flow control.** The stream's `cmd_tx` is a bounded `tokio::sync::mpsc` whose capacity is `learner_stream_window_frames` (default 64). When full, `dispatch` fails and the proposer surfaces `PxPaxosError::Busy`.
 
@@ -113,7 +113,7 @@ As soon as the leader has fsynced its own copy of slot N, it sends `Accept(N, ..
 
 Each learner maintains, per key it has applied, the highest slot that has touched that key. This enables:
 
-- **Read-your-writes** ([§6.2 of design.md](design.md#62-read-your-writes-follower-read)): a follower can serve `Get(k, slot=N)` as soon as `resolved_slot[k] ≥ N`.
+- **Read-your-writes** ([§6.2 of design-crow-kv.md](design-crow-kv.md#62-read-your-writes-follower-read)): a follower can serve `Get(k, slot=N)` as soon as `resolved_slot[k] ≥ N`.
 - **Linearizability** ([§14](#14-parallel-slot-linearizability-analysis-moved-from-requirementmd-65)): per-key tracking makes "highest slot wins" correct under out-of-order apply.
 
 **Update rule.** On `apply(slot, batch)`: for each `(k, op, v?)` in the batch, if `slot > resolved_slot[k]`, update `resolved_slot[k] = slot` and write/tombstone `v`. Otherwise drop. Then advance `max_applied` and the contiguous-applied frontier.
@@ -134,7 +134,7 @@ A peer that has never reported is treated as `0`, so the safe-slot only rises on
 
 **Propagation.** The leader includes `safe_slot` in heartbeats, write responses, read responses, and the describe-cluster RPC.
 
-`Scan(Linearizable)` uses the leader's *own* contiguous frontier rather than the safe-slot — it is strictly ≥ safe-slot at all times ([§6.4 of design.md](design.md#64-scan-modes)).
+`Scan(Linearizable)` uses the leader's *own* contiguous frontier rather than the safe-slot — it is strictly ≥ safe-slot at all times ([§6.4 of design-crow-kv.md](design-crow-kv.md#64-scan-modes)).
 
 ---
 
@@ -145,7 +145,7 @@ A "gap" is a slot N < max-chosen-slot for which the leader has no `Chosen` decis
 **Repair mechanism:**
 
 1. **Opportunistic repair.** After each heartbeat round in the leader-state loop, `repair_once()` is called. It finds the lowest gap (`contiguous_chosen + 1`) and runs classic Paxos (Phase 1 + Phase 2) to close it. A no-gap leader returns immediately without any RPCs.
-2. **On leader change:** the new leader runs bulk Phase 1 over `[contiguous_chosen+1, ceiling]` as a one-shot sweep (see [`design-leader-election.md`](design-leader-election.md) §4).
+2. **On leader change:** the new leader runs bulk Phase 1 over `[contiguous_chosen+1, ceiling]` as a one-shot sweep (see [`design-crow-kv-leader-election.md`](design-crow-kv-leader-election.md) §4).
 
 There is no separate repair task with its own tick or concurrency cap; repair is interleaved with heartbeats at the heartbeat cadence.
 
@@ -232,7 +232,7 @@ Parallel slots interact with WAL GC through two watermarks:
 
 **WAL GC rule:** discard WAL records with `slot < min(safe_slot, snapshot_slot)`. Both must advance past a slot before its WAL record can be GC'd. Repair never needs GC'd slots — every slot ≤ safe_slot is already chosen on every learner, so it cannot be a gap.
 
-Detailed further in [`design-wal.md`](design-wal.md) §4.
+Detailed further in [`design-crow-kv-wal.md`](design-crow-kv-wal.md) §4.
 
 ---
 

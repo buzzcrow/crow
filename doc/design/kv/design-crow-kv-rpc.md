@@ -3,8 +3,8 @@
 
 # CrowKV - Design: RPC Wire Protocol
 
-Depends on: [`design.md`](design.md) §3, §9.2, §10, [`design.md`](design.md) §2, §3
-Satisfies: design.md §3](design.md), design.md §9.2](design.md), design.md §10.1](design.md)
+Depends on: [`design-crow-kv.md`](design-crow-kv.md) §3, §9.2, §10, [`design-crow-kv.md`](design-crow-kv.md) §2, §3
+Satisfies: design-crow-kv.md §3](design-crow-kv.md), design-crow-kv.md §9.2](design-crow-kv.md), design-crow-kv.md §10.1](design-crow-kv.md)
 
 This document defines the wire-serialization contract for all node-to-node and client-to-node RPC communication. The implementation uses **gRPC with protobuf** (tonic + prost). Every message carries a `version: u32` field at fixed protobuf tag 1 for forward/backward compatibility; no `required` fields; field numbers are append-only.
 
@@ -117,7 +117,7 @@ discovery is served by `crow-kv-server`'s existing HTTP management API
 ## 6. Flow Control and Parallelism
 
 The `LearnerStream` design directly enables the parallel-slot
-pipelining described in `design-slot.md` §5:
+pipelining described in `design-crow-kv-slot.md` §5:
 
 - **Multiple in-flight `Accept` frames per peer.** The background task
   maintains a `PendingMap` keyed by `request_id`. Each `send_accept`
@@ -251,7 +251,7 @@ level and to `invalid_argument` at the gRPC boundary.
   implemented.
 - **Q2: Should `Promise` and `Accepted` carry `term` for leader
   fencing?** — Resolved: `term` added in P1 M3 to all messages for the
-  two-fence rule (see `design-leader-election.md` §2.3).
+  two-fence rule (see `design-crow-kv-leader-election.md` §2.3).
 - **Q3: Should `Prepare`/`Accept` carry `membership_epoch`?** —
   Resolved: Added in P5 M2. Responses echo `membership_epoch` and set
   `epoch_mismatch` when the proposer's epoch doesn't match the
@@ -307,9 +307,9 @@ payload contract, out of scope).
 
 ## References
 
-- `design-leader-election.md` §6 — heartbeat/lease interaction with
+- `design-crow-kv-leader-election.md` §6 — heartbeat/lease interaction with
   stream ordering
-- `design-slot.md` §5 — pipelined fanout and per-peer flow control
-- `design-observability.md` — write-path phase metrics
+- `design-crow-kv-slot.md` §5 — pipelined fanout and per-peer flow control
+- `design-crow-kv-observability.md` — write-path phase metrics
   (`write.propose_e2e.l`, `write.prepare_phase.l`, `write.accept_phase.l`,
   `write.accept_quorum_rpc.l`, `write.engine_apply.l`)
