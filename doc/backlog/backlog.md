@@ -66,20 +66,6 @@ complexity, and dependency. Before implementation, follow the
   `LeastConnections` (per-endpoint in-flight) and `Latency` (per-endpoint
   RTT EWMA) policies route by actual capacity. Medium complexity;
   client-local state, no server change.
-- **[R43](R43-write-path-fanout-hardening.md)** — Write-path fan-out hardening — Area:
-  consensus / write path — Six enhancements from the write-flow review,
-  all in the prepare/accept fan-out and `PxLearnerStream`: quorum
-  short-circuit (fold replies via `FuturesUnordered`, return on quorum
-  + local reply instead of `join_all` over all peers — per-proposal
-  latency becomes k-th-fastest, not slowest peer), RPC deadline on
-  accept/heartbeat oneshots (a hung-but-connected peer currently
-  stalls all writes indefinitely), write-path phase latency metrics
-  (propose-e2e / prepare / accept / first-quorum-RPC / apply),
-  backoff jitter, a heartbeat priority/reserved lane on the shared
-  LearnerStream queue, and a reply-fold helper extraction that
-  de-risks the short-circuit rewrite. Medium complexity; the
-  short-circuit must preserve W6 and late TermStale/Epoch side
-  effects.
 - **[R44](R44-read-path-hardening.md)** — Read-path hardening — Area:
   read path — Eight enhancements from the read-flow review, all small
   and outside the items already tracked (R37/R38/R39/R32/R42): scan
