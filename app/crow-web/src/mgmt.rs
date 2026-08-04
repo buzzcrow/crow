@@ -590,6 +590,9 @@ pub async fn http_list_stores(
             }
         }
     }
+    for entry in seen.values_mut() {
+        entry.groups.sort_by_key(|g| g.group_id);
+    }
     Json(seen.into_values().collect())
 }
 
