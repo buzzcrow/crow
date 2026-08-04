@@ -315,23 +315,20 @@ fn wal_failed_flag(node: &WalNode) -> Arc<std::sync::atomic::AtomicBool> {
 #[tokio::test]
 async fn t1_1_kill_in_cas_persist_window_value_survives() {
     let mut cluster = start_wal_cluster(&[1, 2, 3]).await;
-    let leader_id = cluster
+    let _initial_leader = cluster
         .wait_for_leader(Duration::from_secs(10))
         .await
         .expect("initial leader elected");
 
-    // Install the persist gate on the leader so `spawn_accept_persist`'s
-    // background task blocks before `wal.append`. The test never releases
-    // it — the kill cancels the task, so no `Accepted` record lands on disk.
+    // Install the persist gate on EVERY node so whichever replica is leader
+    // when the write lands has its `spawn_accept_persist` background task
+    // blocked before `wal.append`. The gate only affects the leader's
+    // deferred persist (followers use the sync `on_accept_persist` path);
+    // installing it on followers is harmless. The test never releases the
+    // gate — the kill cancels the task, so no `Accepted` record lands on disk.
     let persist_gate = Arc::new(tokio::sync::Notify::new());
-    {
-        let leader = cluster
-            .nodes
-            .iter()
-            .find(|n| n.id == leader_id)
-            .expect("leader present");
-        leader
-            .store
+    for node in &cluster.nodes {
+        node.store
             .get_group(GROUP)
             .expect("group")
             .local_replica()
@@ -341,6 +338,10 @@ async fn t1_1_kill_in_cas_persist_window_value_survives() {
     let key = b"t1-1-key";
     let value = b"t1-1-value";
     commit_one_write(&cluster, key, value, 1).await;
+
+    // Re-find the leader that actually processed the write — it may differ
+    // from the initial leader if the election was still converging.
+    let leader_id = cluster.elected_leader().expect("leader present after write").id;
 
     // The value is Paxos-chosen (quorum accepted on followers, leader CAS
     // done). The leader's local WAL persist is blocked on the gate.

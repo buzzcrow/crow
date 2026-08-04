@@ -17,8 +17,8 @@ use crowkv_server::startup::{create_group_with_wal, store_wal_root};
 
 fn encode_put_payload(key: &[u8], value: &[u8]) -> Vec<u8> {
     let mut buf = Vec::new();
-    buf.push(1);
-    buf.push(0);
+    buf.extend_from_slice(&1u16.to_le_bytes()); // 1 op (u16 LE)
+    buf.push(0); // kind = Put
     let key_len = u32::try_from(key.len()).expect("key length exceeds u32");
     buf.extend_from_slice(&key_len.to_le_bytes());
     buf.extend_from_slice(key);
