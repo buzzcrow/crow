@@ -14,7 +14,7 @@ coalescing never sees concurrent writers; h2 hands it one merged buffer
 from one thread.
 
 The measured cost is a **~17% throughput drop at 2T:1C** (read bench,
-`read-flow-analysis.md` ≈L520-545). At 1T:1C the lock is uncontended
+`kv-read-flow-analysis.md` ≈L520-545). At 1T:1C the lock is uncontended
 and the cost is zero; the loss grows with thread:connection ratio.
 
 A custom protocol (`[len][req_id][protobuf]` over raw TCP) has no
@@ -113,5 +113,5 @@ on gRPC/HTTP until there is a separate reason to migrate them.
 
 **Note**: The full analysis (h2 lock mechanics, kernel coalescing, why
 this is a design mismatch not a tuning problem) lives in
-`doc/working/read-flow-analysis.md` ≈L546-622. This backlog item is the
+`doc/working/kv-read-flow-analysis.md` ≈L546-622. This backlog item is the
 trackable stub; the working doc is the rationale.

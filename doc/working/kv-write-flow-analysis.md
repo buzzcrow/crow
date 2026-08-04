@@ -4,7 +4,7 @@
 # Write Flow Analysis
 
 End-to-end trace of the CrowKV write path. Mirrors the structure of
-[`read-flow-analysis.md`](read-flow-analysis.md). Focuses on flow,
+[`kv-read-flow-analysis.md`](kv-read-flow-analysis.md). Focuses on flow,
 conclusions, and data — not rationale prose.
 
 ---

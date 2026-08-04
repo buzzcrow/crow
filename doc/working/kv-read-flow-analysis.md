@@ -4,7 +4,7 @@
 # Read Flow Analysis
 
 End-to-end trace of the CrowKV read path. Mirrors the structure of
-[`write-flow-analysis.md`](write-flow-analysis.md). Focuses on flow,
+[`kv-write-flow-analysis.md`](kv-write-flow-analysis.md). Focuses on flow,
 conclusions, and data — not rationale prose.
 
 ---
@@ -269,7 +269,7 @@ Client SCAN(prefix, start_after, limit, read_mode, min_slot?)
   acceptable for test-only use.
 - **E7 — Read-path hardening batch (tracked as R44).** Eight smaller
   gaps from the implementation review, bundled in
-  `doc/backlog/R44-read-path-hardening.md`: scan forward-fail path
+  `doc/backlog/R44-kv-read-path-hardening.md`: scan forward-fail path
   drops the leader hint (get sets it); scan FFI errors swallowed to an
   empty `ok` result; client string-matches `"not leader"`; client
   ignores topology refresh failures; ReadIndex heartbeat round runs

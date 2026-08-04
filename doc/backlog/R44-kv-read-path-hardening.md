@@ -4,7 +4,7 @@
 ### R44: Read-path hardening (scan hint parity, error propagation, catch-up off the barrier)
 
 **Problem**: the read-path review (see
-`doc/working/read-flow-analysis.md`) confirmed the big items are
+`doc/working/kv-read-flow-analysis.md`) confirmed the big items are
 already tracked (R37 scan push-down, R38 scan zero-copy, R39 endpoint
 policy, R32 transport) but found eight smaller gaps that are not.
 Grouped in one requirement because they are all small, touch the same

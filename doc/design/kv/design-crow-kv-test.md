@@ -639,7 +639,7 @@ memtable insert + flush path.
 ### Baseline Results
 
 Current benchmark results are in
-[`doc/working/write-flow-analysis.md`](../working/write-flow-analysis.md)
+[`doc/working/kv-write-flow-analysis.md`](../working/kv-write-flow-analysis.md)
 § Benchmark Results. Key findings: peak 50K ops/s (64T/8C/MI=64),
 zero errors with queue admission, scaling ceiling is per-proposal
 consensus latency (~1.2ms).

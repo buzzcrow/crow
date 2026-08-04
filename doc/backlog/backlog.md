@@ -24,7 +24,7 @@ complexity, and dependency. Before implementation, follow the
   metrics (from R8) in the GUI via existing health/internal-state query
   infrastructure. Show recent operation counts and metrics per Store/Group
   with real-time refresh (5–10 s window).
-- **[R32](R32-custom-rust-rpc.md)** — Custom Rust RPC library to replace gRPC on the hot path — Area:
+- **[R32](R32-kv-custom-rust-rpc.md)** — Custom Rust RPC library to replace gRPC on the hot path — Area:
   RPC / consensus — gRPC (tonic + h2) serializes concurrent writers on a
   connection-level userspace lock (HPACK table, frame buffer,
   flow-control windows); measured cost is ~17% at 2T:1C, zero at
@@ -60,13 +60,13 @@ complexity, and dependency. Before implementation, follow the
   A `PinnedScanEntry` / `Bytes::from_owner` path for scan values would
   eliminate the per-entry copy, mirroring R6. Medium-high complexity;
   the `KVEngine::scan` trait signature changes from `Vec<u8>` to `Bytes`.
-- **[R39](R39-read-endpoint-policy.md)** — Least-conn / latency read-endpoint policy — Area:
+- **[R39](R39-kv-read-endpoint-policy.md)** — Least-conn / latency read-endpoint policy — Area:
   read path / client — R26's `AnyReplica` is round-robin (blind
   rotation); a slow replica drags p99 for 1/N of MinSlot reads. New
   `LeastConnections` (per-endpoint in-flight) and `Latency` (per-endpoint
   RTT EWMA) policies route by actual capacity. Medium complexity;
   client-local state, no server change.
-- **[R44](R44-read-path-hardening.md)** — Read-path hardening — Area:
+- **[R44](R44-kv-read-path-hardening.md)** — Read-path hardening — Area:
   read path — Eight enhancements from the read-flow review, all small
   and outside the items already tracked (R37/R38/R39/R32/R42): scan
   forward-fail path drops the leader hint (get sets it, scan doesn't);
@@ -95,7 +95,7 @@ complexity, and dependency. Before implementation, follow the
   backpressure.
 
 **Complexity — Low:**
-- **[R42](R42-forward-target-redundant-lookup.md)** — Drop redundant
+- **[R42](R42-kv-forward-target-redundant-lookup.md)** — Drop redundant
   group lookup in read-path `NotLeader` redirect — Area: read path —
   `PxKvStore::resolve_read_point`'s three `NotLeader` sites call
   `self.forward_target_for(group.group_id())`, which re-derives the same

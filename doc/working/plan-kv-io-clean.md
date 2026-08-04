@@ -13,9 +13,9 @@ Small-scope read- and write-path tasks traced here for later
 implementation. Each has a checkbox. Larger changes live in the
 backlog (R35 apply fence, R36 proposal coalescing, R37 scan
 `start_after` push-down, R38 scan value zero-copy, R39 read-endpoint
-policy). See [`write-flow-analysis.md`](write-flow-analysis.md) §
+policy). See [`kv-write-flow-analysis.md`](kv-write-flow-analysis.md) §
 Write-Path Enhancement Ideas and
-[`read-flow-analysis.md`](read-flow-analysis.md) § Gaps and
+[`kv-read-flow-analysis.md`](kv-read-flow-analysis.md) § Gaps and
 Optimization Opportunities for the full lists and rationale.
 
 ---
@@ -23,7 +23,7 @@ Optimization Opportunities for the full lists and rationale.
 ## T4 — Early-ack p99 tail-mass shift investigation
 
 The early-ack A/B (T1.5, results in
-[`write-flow-analysis.md`](write-flow-analysis.md) § Early-ack A/B)
+[`kv-write-flow-analysis.md`](kv-write-flow-analysis.md) § Early-ack A/B)
 showed the expected avg/p999 wins at 48T:48C (+7.7% throughput,
 −7.2% avg, −11.7% p999) but **p99 went up slightly** (+6.7%,
 2,206 → 2,354 µs). Working hypothesis: the deferred
@@ -46,7 +46,7 @@ on all tail percentiles.
       priority / pin it off the accept worker.
 - [ ] After T4 is resolved, delete `tools/bench-early-ack.sh` (one-off
       A/B script, not a regression sentinel) and update the
-      `write-flow-analysis.md` § Early-ack A/B reference to drop the
+      `kv-write-flow-analysis.md` § Early-ack A/B reference to drop the
       script citation.
 
 **Scope**: Small — measurement + a possible scheduling tweak. No
@@ -56,6 +56,6 @@ consensus-path change; the deferred persist is already off the
 **Files**: `tools/bench-early-ack.sh` (add per-percentile columns if
 not already present), `lib/crow-kv/src/cluster/local_replica.rs`
 (`spawn_accept_persist` scheduling, if a tweak is needed),
-`doc/working/write-flow-analysis.md` (results + decision).
+`doc/working/kv-write-flow-analysis.md` (results + decision).
 
 ---

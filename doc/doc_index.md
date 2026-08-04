@@ -25,8 +25,8 @@ doc only when a task touches a topic in its row.
 | Doc | When to read |
 | --- | --- |
 | `doc/working/plan-test.md` | Unfinished test task backlog with checkboxes. Read when picking the next test to implement. |
-| `doc/working/read-flow-analysis.md` | Read path gap analysis and proposed metrics hierarchy. Read when working on read performance (R19/R26/R27). |
-| `doc/working/write-flow-analysis.md` | Write path trace and optimization opportunities. Read when working on write-path performance. |
+| `doc/working/kv-read-flow-analysis.md` | KV read path gap analysis and proposed metrics hierarchy. Read when working on read performance (R19/R26/R27). |
+| `doc/working/kv-write-flow-analysis.md` | KV write path trace and optimization opportunities. Read when working on write-path performance. |
 
 ## Project Files (repo root)
 
