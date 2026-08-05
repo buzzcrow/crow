@@ -80,6 +80,46 @@ run_bench() {
 }
 
 # --- regression sentinel configs ---
+#
+# Reference results (2026-08-05, Apple M5 Pro, 18c, arm64, macOS 26.5):
+#   1T:1C, 10s mem mode, 3-node cluster, 100k pre-populated keys, 64B values
+#   unless noted. scans/s=0 means <5 scans completed in 10s (very high
+#   per-scan latency); those rows also show transport errors from the
+#   gRPC 4 MiB max message size limit.
+#
+#   label            limit   scans/s  avg_us   p99_us   err  notes
+#   full_1k          1000    227      4411     5020     0
+#   full_10k         10000   139      7181     7900     0
+#   full_100k        100000  0        1752411  1766400  6    gRPC 4MiB limit
+#   bounded_10       10      225      4438     4984     0
+#   bounded_100      100     223      4479     5020     0
+#   bounded_1k       1000    216      4640     5592     0
+#   bounded_10k      10000   137      7297     8044     0
+#   from_start_10    10      236      4236     4800     0    deep-pag companion
+#   deep_pag_10      10      141      7084     9936     0    1.7x from_start (O(log N) descent, not O(prefix))
+#   deep_pag_100     100     133      7538     10344    0    confirms O(limit), not O(prefix)
+#   valuesize_64B    1000    206      4852     5496     0
+#   valuesize_1KiB   1000    666      1500     3004     0    3.2x faster than 64B (L0-overlay anomaly)
+#   valuesize_16KiB  1000    0        6195     815      1701 gRPC 4MiB limit (16MiB payload)
+#   prefix_1k        1000    209      4787     5352     0    prefix="k00"
+#   whole_1k         1000    210      4753     5244     0
+#   lin_1k           1000    208      4797     5336     0
+#   minslot_1k       1000    206      4855     5404     0    any-replica, no diff at 1T:1C
+#
+# Key findings (see doc/working/scan-perf-baseline.md for full analysis):
+#   - §1.7 O(limit) deep-pagination claim CONFIRMED (1.7x overhead = O(log N)
+#     descent, not 400x O(prefix) over-fetch)
+#   - Per-scan fixed cost ~4.2ms (ReadIndex + gRPC + descent); per-entry
+#     ~0.3us at 64B (visible at limit >= 10k)
+#   - gRPC 4 MiB message size limit caps scan payload (full_100k, 16KiB
+#     values) — streaming scan response needed for large payloads
+#   - 1KiB values 3.2x faster than 64B (L0-overlay merge cursor dominates
+#     at small value sizes) — needs investigation; if confirmed,
+#     prioritizes R44 scan-hardening over R38 for small-value workloads
+#
+# NOTE: absolute scan throughput is platform-dependent. Re-capture on
+# the AMD Ryzen 9 5950X Linux machine for numbers comparable to the
+# write baseline (bench-write-regression.tsv).
 
 echo -e "label\tlimit\tprefix\tstart_after\tvalue_size\tread_mode\tscans_s\tavg_us\tp50_us\tp99_us\tp999_us\terrors" > "$RESULTS_FILE"
 

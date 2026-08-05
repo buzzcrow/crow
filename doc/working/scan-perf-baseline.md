@@ -6,7 +6,25 @@
 End-to-end scan regression baseline captured via
 `tools/bench-scan-regression.sh` driving `crow-cli bench run --workload
 list` against a 3-node mem-mode cluster. Raw results in
-`doc/working/bench-scan-regression.tsv`.
+`doc/working/bench-scan-regression.tsv` (gitignored, regenerated each
+run). Reference numbers are embedded in the script's comment block so
+they persist in git. Summary of key findings is in
+`doc/design/tree/design-crow-tree-engine.md` §1.9.
+
+## How to update this baseline
+
+1. Run `bash tools/bench-scan-regression.sh` — regenerates
+   `doc/working/bench-scan-regression.tsv` with fresh numbers (~2 min
+   on a quiet machine).
+2. Compare the new TSV against the reference numbers in the script's
+   comment block (lines 84–103). A regression is a scans/s drop > ~5%
+   or a new non-zero error count on configs that were clean before.
+3. If updating the reference: replace the comment block in
+   `tools/bench-scan-regression.sh` with the new numbers, update the
+   analysis sections below, and commit both the script and this doc.
+4. When re-capturing on a different platform, record the CPU/OS in the
+   Platform section below and note that absolute numbers are not
+   comparable across platforms.
 
 ## Platform
 
