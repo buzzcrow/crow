@@ -28,6 +28,7 @@ On-disk format, backends, snapshot persistence, and recovery are in
   - [1.6 Epoch-Based Reclamation](#16-epoch-based-reclamation)
   - [1.7 Read Path](#17-read-path)
   - [1.8 Concurrency Summary](#18-concurrency-summary)
+  - [1.9 Scan Path Perf Baseline](#19-scan-path-perf-baseline)
 - [2. Memory and Buffer Management](#2-memory-and-buffer-management)
   - [2.1 The `buffer` Abstraction](#21-the-buffer-abstraction)
   - [2.2 Write and Read Pipelines](#22-write-and-read-pipelines)
@@ -363,6 +364,65 @@ Invariants:
 - **I6** The B+tree only ever holds slots `<= last_applied_slot` (flush
   drains the contiguous prefix only), so every `RootVersion` is an exact
   point-in-time state.
+
+### 1.9 Scan Path Perf Baseline
+
+Scan is part of the read flow but a separate perf track from random
+point reads (different cost shapes: per-entry overhead vs leaf-chain
+traversal vs per-byte copy). The regression sentinel is
+`tools/bench-scan-regression.sh` driving `crow-cli bench run --workload
+list` with `--scan-limit`, `--scan-prefix`, `--scan-start-after` flags
+against a 3-node mem-mode cluster, mirroring the write/read regression
+sentinels. The sync `scan` `start_after` pushdown correctness is
+covered by `ReadPath.ScanStartAfterCursorSkipsEarlierEntries` in
+`read_path_test.cpp`. Full baseline numbers and analysis are in
+`doc/working/scan-perf-baseline.md`; the raw TSV is in
+`doc/working/bench-scan-regression.tsv`.
+
+Key findings from the baseline (Apple M5 Pro, macOS, 1T:1C, 100k
+pre-populated keys):
+
+- **§1.7 O(limit) deep-pagination claim: confirmed.** Deep pagination
+  (`start_after` near end, limit=10) is 1.7x slower than from-start
+  (7084us vs 4236us) — the O(log N) B+tree descent to a deeper leaf,
+  not O(prefix) over-fetch. If the engine over-fetched the prefix,
+  deep pagination would cost ~1.75s (the full-100k number), not 7ms.
+  The over-fetch proxy ratio is 1.7x; the etcd-style "fetch all then
+  truncate" regression would show ~400x.
+- **Per-scan fixed cost** (~4.2ms): ReadIndex consensus round + gRPC
+  roundtrip + B+tree descent. Dominates at small limit (10/100).
+- **Per-entry cost** (~0.3us/entry at 64B values): visible at limit
+  >= 10k. At limit=10k, avg=7.3ms vs 4.4ms at limit=10.
+- **gRPC 4 MiB message size limit**: scans returning > 4 MiB (full
+  100k keyspace at 64B values, or limit=1000 at 16KiB values) hit
+  tonic's default `max_recv_message_length` and fail with transport
+  errors. This is the gRPC-message-size analog of etcd's range-read
+  OOM risk (issue #12342). A streaming scan response (mirroring etcd
+  PR #19766) or a raised max-message-size config is needed for
+  large-payload scans.
+- **Value-size anomaly**: 1KiB values scan 3.2x faster than 64B values
+  (666 vs 206 scans/s) despite returning 16x more data — likely
+  because 64B pre-population leaves more entries in L0 (MemTable
+  overlay merge cursor), while 1KiB values trigger flush sooner and
+  the scan hits the faster L1-only path. Needs investigation;
+  if confirmed, L0-overlay scan cost dominates per-entry overhead at
+  small value sizes, prioritizing R44's scan-hardening subitems over
+  R38 for small-value workloads.
+
+Cost-split prioritization: R38 (zero-copy scan values) targets
+per-byte copy cost, which grows with value size but is ~0.3us/entry
+at 64B. The L0-overlay effect may dominate at small value sizes
+(prioritize R44 scan-hardening). For large-value workloads (>= 1KiB),
+R38's win is more significant, but the gRPC 4 MiB limit caps practical
+scan width before per-byte copy becomes dominant — so streaming scan
+response is a prerequisite for R38's win to matter at scale.
+
+Future gaps (not measured by the baseline): L0-overlay scan perf
+(client cannot hold server flush off), high-concurrency read-mode
+split (MinSlot vs Linearizable at > 1T:1C), reverse scan (forward-only
+today), and engine-level cost isolation (C++ microbench to separate
+per-entry copy from leaf-chain traversal and L0 merge, giving R38 a
+tighter before/after measurement).
 
 ---
 

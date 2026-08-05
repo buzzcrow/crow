@@ -70,29 +70,6 @@ complexity, and dependency. Before implementation, follow the
   Low-medium complexity; kv_service / crowtree_engine / client are
   mechanical, bounded catch-up needs care, scan cursor composes with
   R37.
-- **[R46](R46-scan-perf-baseline.md)** — Scan path perf design + baseline — Area:
-  read path / scan — Scan is part of the read flow, but for perf it is a
-  separate track from the random point-read test (different cost shapes:
-  per-entry overhead vs leaf-chain traversal vs per-byte copy). The
-  write path has `memtable_bench` + the write-regression TSV, and the
-  random point-read path has `BM_ReadPath_GetHit`, but the scan path has
-  only `BM_ReadPath_Scan`: one whole-keyspace scan over tiny values. No measurement of scan cost vs `limit`, value size,
-  prefix range, deep pagination (`start_after` near the end of a large
-  keyspace — the §1.7 O(limit) claim is unverified), or L0-overlay-heavy
-  scans; no per-entry vs per-byte cost split. R44 already flags "no
-  per-mode scan latency split or over-fetch counters"; R38 (zero-copy
-  scan) has no baseline to measure its win against. Adds a
-  `scan_path_bench.cpp` covering six scenario families (full / bounded
-  limit / deep pagination / value-size sweep / prefix range / L0-overlay)
-  reporting both items/s and bytes/s, plus a working doc with the
-  captured baseline and a cost-split conclusion to prioritize R38 vs R44
-  scan work. Deep-pagination reports an over-fetch ratio (leaves touched
-  / entries returned, mirroring TiKV's seek-vs-processed_keys ratio) to
-  catch the etcd-style "fetch all then truncate" regression. Includes a
-  Prior art section surveying how TiKV / etcd / CockroachDB / FoundationDB
-  measure and announce scan perf, so the baseline is comparable to
-  published peer-system numbers. Bench + measurement only, no production
-  code change.
 ### Low Priority
 
 **Complexity — Low (placeholder):**
