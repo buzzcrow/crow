@@ -401,28 +401,36 @@ pre-populated keys):
   PR #19766) or a raised max-message-size config is needed for
   large-payload scans.
 - **Value-size anomaly**: 1KiB values scan 3.2x faster than 64B values
-  (666 vs 206 scans/s) despite returning 16x more data — likely
-  because 64B pre-population leaves more entries in L0 (MemTable
-  overlay merge cursor), while 1KiB values trigger flush sooner and
-  the scan hits the faster L1-only path. Needs investigation;
-  if confirmed, L0-overlay scan cost dominates per-entry overhead at
-  small value sizes, prioritizing R44's scan-hardening subitems over
-  R38 for small-value workloads.
+  (666 vs 206 scans/s) despite returning 16x more data. Root cause:
+  `MemTable::snapshot()` (`memtable.cpp:195`) copies all N_l0 entries
+  into a vector on every scan call — O(N_l0) per scan, not O(limit).
+  With `memtable_flush_bytes = 4 MiB`: 64B values (~104B/entry) hit
+  the byte threshold at ~40k entries, leaving ~60k unflushed after
+  100k pre-pop; 1KiB values (~1064B/entry) hit it at ~4k, leaving
+  only ~4k. The 60k vs 4k snapshot cost difference (15x) explains the
+  3.2x throughput difference. The memtable per-entry is not slower
+  than the B+tree (sorted vector vs `resolve_chain_sorted`'s `std::map`
+  build per leaf) — the problem is `snapshot()` eagerly copies the
+  entire memtable. A lazy/range-bounded L0 cursor would make this
+  O(limit). Tracked as R47 (flush-after-prepopulate bench flag to
+  verify) + a follow-on for the lazy L0 cursor.
 
 Cost-split prioritization: R38 (zero-copy scan values) targets
 per-byte copy cost, which grows with value size but is ~0.3us/entry
-at 64B. The L0-overlay effect may dominate at small value sizes
-(prioritize R44 scan-hardening). For large-value workloads (>= 1KiB),
-R38's win is more significant, but the gRPC 4 MiB limit caps practical
-scan width before per-byte copy becomes dominant — so streaming scan
-response is a prerequisite for R38's win to matter at scale.
+at 64B. The 1KiB anomaly is caused by `MemTable::snapshot()` O(N_l0)
+cost, not per-byte copy — so the lazy L0 cursor fix is higher priority
+than R38 for small-value workloads with unflushed memtables. For
+large-value workloads (>= 1KiB), R38's win is more significant, but
+the gRPC 4 MiB limit caps practical scan width before per-byte copy
+becomes dominant — so streaming scan response is a prerequisite for
+R38's win to matter at scale.
 
-Future gaps (not measured by the baseline): L0-overlay scan perf
-(client cannot hold server flush off), high-concurrency read-mode
-split (MinSlot vs Linearizable at > 1T:1C), reverse scan (forward-only
-today), and engine-level cost isolation (C++ microbench to separate
-per-entry copy from leaf-chain traversal and L0 merge, giving R38 a
-tighter before/after measurement).
+Future gaps (not measured by the baseline): L0 snapshot O(N_l0) cost
+(R47 flush-after-prepopulate flag to verify), high-concurrency
+read-mode split (MinSlot vs Linearizable at > 1T:1C), reverse scan
+(forward-only today), and engine-level cost isolation (C++ microbench
+to separate per-entry copy from leaf-chain traversal and L0 merge,
+giving R38 a tighter before/after measurement).
 
 ---
 

@@ -11,7 +11,7 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R47** — Bump this line in the same commit when adding a new item.
+**Next R number: R48** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
@@ -70,6 +70,15 @@ complexity, and dependency. Before implementation, follow the
   Low-medium complexity; kv_service / crowtree_engine / client are
   mechanical, bounded catch-up needs care, scan cursor composes with
   R37.
+- **[R47](R47-bench-flush-after-prepopulate.md)** — Bench flush-after-prepopulate flag — Area:
+  bench / scan — `MemTable::snapshot()` is O(N_l0) per scan regardless
+  of limit, causing the 1KiB anomaly in the R46 baseline (64B values
+  leave ~60k unflushed entries, 1KiB leaves ~4k). The bench has no way
+  to force a flush after pre-population, so the hypothesis is
+  code-reading only. Adds a `--flush-after-prepopulate` flag to
+  `crow-cli bench run` that drains L0 before the measurement window,
+  verifying the hypothesis and enabling a clean L1-only scan baseline.
+  Low complexity; follow-on is a lazy/range-bounded L0 cursor.
 ### Low Priority
 
 **Complexity — Low (placeholder):**
