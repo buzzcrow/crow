@@ -507,7 +507,7 @@ impl PxKvStore {
                         // Lost leadership during the barrier: redirect to the
                         // current leader rather than serving stale local state.
                         ReadBarrierOutcome::NotLeader => ReadDecision::NotLeader {
-                            hint: self.forward_target_for(group.group_id()).unwrap_or_default(),
+                            hint: group.leader_endpoint().unwrap_or_default(),
                         },
                         ReadBarrierOutcome::NoQuorum => ReadDecision::Unavailable {
                             msg: "linearizable read: leadership quorum unavailable".to_string(),
@@ -520,7 +520,7 @@ impl PxKvStore {
                     // forwarding was unavailable or the loop-guard is set.
                     // Redirect instead of serving a stale local value.
                     ReadDecision::NotLeader {
-                        hint: self.forward_target_for(group.group_id()).unwrap_or_default(),
+                        hint: group.leader_endpoint().unwrap_or_default(),
                     }
                 }
             }
@@ -535,7 +535,7 @@ impl PxKvStore {
                         h.minslot_fallback.inc();
                     }
                     ReadDecision::NotLeader {
-                        hint: self.forward_target_for(group.group_id()).unwrap_or_default(),
+                        hint: group.leader_endpoint().unwrap_or_default(),
                     }
                 }
             }

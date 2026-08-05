@@ -102,16 +102,6 @@ complexity, and dependency. Before implementation, follow the
   unbounded `std::malloc`; a burst of large writes can spike RSS without
   backpressure.
 
-**Complexity — Low:**
-- **[R42](R42-kv-forward-target-redundant-lookup.md)** — Drop redundant
-  group lookup in read-path `NotLeader` redirect — Area: read path —
-  `PxKvStore::resolve_read_point`'s three `NotLeader` sites call
-  `self.forward_target_for(group.group_id())`, which re-derives the same
-  `Arc<PxGroup>` via a `DashMap` lookup + clone even though the function
-  already holds `group: &Arc<PxGroup>`. Fires on every linearizable
-  non-leader redirect and every `MinSlot` staleness fallback. Replace
-  with `group.leader_endpoint()` directly; no behavior change.
-
 ---
 
 ## Implementation Process
