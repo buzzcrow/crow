@@ -169,17 +169,21 @@ Full per-config analysis in
 Tracked as backlog requirements:
 
 - **[R38](../backlog/R38-scan-value-zero-copy.md)** — Scan value
-  zero-copy. `decode_scan` produces per-entry `Vec<u8>`; a
-  `PinnedScanEntry` / `Bytes::from_owner` path mirroring R6 would
-  eliminate copy 2. Matters for large-value range reads.
+  zero-copy (done). `decode_scan` now converts the packed buffer to a
+  single `Bytes` and slices per entry (0 copies, down from 2N). The
+  `KVEngine::scan` trait returns `Vec<(Bytes, u64, Bytes)>`. Simpler
+  than the backlog's `PinnedScanEntry` plan — `take_buf` already owns
+  the packed buffer in Rust, so no C++ page refcount pinning needed.
 - **[R44](../backlog/R44-kv-read-path-hardening.md)** — Read-path
-  hardening batch. Two scan subitems: (1) `scan_async` restarts the
-  whole scan on any cold leaf (no cursor resume); (2) client `to_vec`
-  copies per scan entry despite prost `Bytes`.
+  hardening batch (done). All 8 items: scan forward-fail hint parity,
+  scan error propagation (Corruption → scan_err not empty ok),
+  structured `KvErrorCode` proto enum, topology refresh failure
+  logging, bounded catch-up (64 slots/round off ReadIndex path), C++
+  scan cursor resume (O(N) not O(N²) cold-leaf loads), zero-copy
+  `Bytes` client API, per-mode scan latency + forward counters.
 - **[R47](../backlog/R47-bench-flush-after-prepopulate.md)** —
-  Flush-after-prepopulate bench flag. Verifies the
-  `MemTable::snapshot()` O(N_l0) hypothesis by draining L0 before the
-  measurement window.
+  Flush-after-prepopulate bench flag (done). Result: REFUTED the L0
+  snapshot hypothesis — draining L0 did not close the 1KiB anomaly.
 - **[R48](../backlog/R48-scan-lazy-l0-cursor.md)** — Lazy/range-bounded
   L0 cursor. Replaces `MemTable::snapshot()` with a lazy btree_map
   cursor (lower_bound to start_after, advance up to limit). Fixes the

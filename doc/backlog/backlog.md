@@ -47,22 +47,6 @@ complexity, and dependency. Before implementation, follow the
   `LeastConnections` (per-endpoint in-flight) and `Latency` (per-endpoint
   RTT EWMA) policies route by actual capacity. Medium complexity;
   client-local state, no server change.
-- **[R44](R44-kv-read-path-hardening.md)** — Read-path hardening — Area:
-  read path — Eight enhancements from the read-flow review, all small
-  and outside the items already tracked (R37/R38/R39/R32/R42): scan
-  forward-fail path drops the leader hint (get sets it, scan doesn't);
-  `decode_scan_with_start_after` swallows FFI errors (corruption reads
-  as empty `ok` result); client retry matches `"not leader"` by string
-  instead of a structured error code; client ignores topology refresh
-  failures and retries against stale endpoints; ReadIndex heartbeat
-  round runs peer catch-up replay inline (lagging follower inflates
-  linearizable read p99 during recovery); C++ `scan_async` restarts
-  the whole scan on any cold leaf (no cursor resume); client copies
-  response values (`to_vec` per get / per scan entry) despite prost
-  `Bytes`; no per-mode scan latency split or over-fetch counters.
-  Low-medium complexity; kv_service / crowtree_engine / client are
-  mechanical, bounded catch-up needs care, scan cursor composes with
-  R37.
 - **[R48](R48-scan-lazy-l0-cursor.md)** — Scan lazy/range-bounded L0 cursor — Area:
   scan / crow-tree engine — `MemTable::snapshot()` copies all N_l0
   entries on every scan (O(N_l0), not O(limit)). Originally scoped as
