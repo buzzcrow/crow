@@ -100,7 +100,7 @@ function selectedNodeId(entity: SelectedEntity): string | null {
 function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHealthById, refreshToken, focusRequest, onEntityContextMenu }: TopologyCanvasProps) {
   const { viewMode } = useViewMode();
   const { selectedEntity, selectEntity } = useSelection();
-  const { fitView, setViewport, setCenter, getZoom } = useReactFlow();
+  const { fitView, setViewport, setCenter, getZoom, getNodes } = useReactFlow();
   const nodesInitialized = useNodesInitialized();
   const viewportsRef = useRef<Partial<Record<ViewMode, Viewport>>>({});
   const fittedOnceRef = useRef<Partial<Record<ViewMode, boolean>>>({});
@@ -136,19 +136,29 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
       viewportsRef.current[viewMode] = undefined;
       fittedOnceRef.current[viewMode] = false;
     }
-    const frame = requestAnimationFrame(() => {
+    // Retry fit across frames until ReactFlow has measured every node's
+    // dimensions — newly added nodes lack width/height on the first frame,
+    // so a single rAF fitView would ignore them and never re-fit.
+    let rafId: number;
+    const tryFit = () => {
       const savedViewport = viewportsRef.current[viewMode];
       if (savedViewport) {
         void setViewport(savedViewport, { duration: 250 });
         return;
       }
       if (!fittedOnceRef.current[viewMode]) {
+        const storeNodes = getNodes();
+        if (storeNodes.some((n) => !n.width || !n.height)) {
+          rafId = requestAnimationFrame(tryFit);
+          return;
+        }
         void fitView({ padding: 0.1, duration: 250, includeHiddenNodes: true });
         fittedOnceRef.current[viewMode] = true;
       }
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [fitView, nodesInitialized, positioned.nodes, setViewport, viewMode, refreshToken]);
+    };
+    rafId = requestAnimationFrame(tryFit);
+    return () => cancelAnimationFrame(rafId);
+  }, [fitView, getNodes, nodesInitialized, positioned.nodes, setViewport, viewMode, refreshToken]);
 
   const selId = selectedEntity ? selectedNodeId(selectedEntity) : null;
   const decoratedNodes: Node[] = useMemo(
