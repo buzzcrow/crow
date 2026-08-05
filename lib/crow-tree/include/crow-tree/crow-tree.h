@@ -536,8 +536,13 @@ class Crowtree
     // Ordered range scan over keys with `prefix` (empty = whole keyspace), latest
     // state (L0 overlaid on L1). When `include_tombstones` is false (default),
     // tombstones are skipped. Returns up to `limit` entries in key order; sets
-    // *truncated if more matched beyond the limit.
-    Status scan(Slice prefix, size_t limit, std::vector<scan_entry> *out, bool *truncated,
+    // *truncated if more matched beyond the limit. `start_after` (empty = start
+    // from the beginning) is an exclusive lower bound: only keys strictly
+    // greater than `start_after` are returned. When non-empty, the descent
+    // targets the leaf that would contain `start_after` instead of `prefix`,
+    // so a deep-pagination scan starts at the cursor rather than walking every
+    // earlier leaf in the prefix range.
+    Status scan(Slice prefix, Slice start_after, size_t limit, std::vector<scan_entry> *out, bool *truncated,
                 bool include_tombstones = false) const;
 
     // Async twin of scan(). Unlike get_async,
@@ -552,8 +557,9 @@ class Crowtree
     // resident, so this always terminates and does no redundant I/O.
     // on_done fires exactly once, synchronously if the whole scan was
     // already resident (matching scan()'s cost exactly), or from the
-    // Reactor thread after however many page loads were needed.
-    void scan_async(Slice prefix, size_t limit,
+    // Reactor thread after however many page loads were needed. `start_after`
+    // is the same exclusive lower bound as scan()'s.
+    void scan_async(Slice prefix, Slice start_after, size_t limit,
                     std::function<void(Status, std::vector<scan_entry>, bool truncated)> on_done) const;
 
     // pin a consistent point-in-time view at `last_applied_slot` (the durable L1
@@ -944,17 +950,17 @@ class Crowtree
     // and reports it via *out_pending_page_id. Returns true if the scan
     // fully resolved with no cold page encountered (*out/*truncated are
     // then exactly what scan() itself would have produced).
-    [[nodiscard]] bool try_scan_no_load(Slice prefix, size_t limit, std::vector<scan_entry> *out, bool *truncated,
-                                        uint64_t *out_pending_page_id) const;
+    [[nodiscard]] bool try_scan_no_load(Slice prefix, Slice start_after, size_t limit, std::vector<scan_entry> *out,
+                                        bool *truncated, uint64_t *out_pending_page_id) const;
 
     // scan_async's retry loop, structurally identical to get_async_attempt:
     // one try_scan_no_load() attempt, then either calls on_done (resolved)
     // or resolves the one blocking page_id (via the reactor, or
     // synchronously if no async backend is wired) and recurses. `prefix`
-    // is a heap copy (unlike scan()'s Slice, must survive across an
-    // arbitrary number of async round trips).
-    void scan_async_attempt(std::shared_ptr<std::string> prefix_owned, size_t limit,
-                            std::function<void(Status, std::vector<scan_entry>, bool)> on_done) const;
+    // and `start_after` are heap copies (unlike scan()'s Slice, must survive
+    // across an arbitrary number of async round trips).
+    void scan_async_attempt(std::shared_ptr<std::string> prefix_owned, std::shared_ptr<std::string> start_after_owned,
+                            size_t limit, std::function<void(Status, std::vector<scan_entry>, bool)> on_done) const;
 
     // Shared by snapshot() and snapshot_async() (persist.cpp,
     // #11 Phase 2, #14c/#14d): runs the segment scan / delta-fold /

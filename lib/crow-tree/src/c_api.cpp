@@ -783,14 +783,16 @@ ct_future *ct_snapshot_async(ct_tree *t)
     return reinterpret_cast<ct_future *>(new ct_future_handle(std::move(impl)));
 }
 
-ct_future *ct_scan_async(ct_tree *t, const uint8_t *prefix, size_t plen, size_t limit)
+ct_future *ct_scan_async(ct_tree *t, const uint8_t *prefix, size_t plen, const uint8_t *start_after, size_t salen,
+                         size_t limit)
 {
     if (t == nullptr) {
         return nullptr;
     }
     auto impl  = std::make_shared<ct_future_impl>();
     impl->kind = ct_future_impl::Kind::kScan;
-    t->tree->scan_async(Slice(reinterpret_cast<const char *>(prefix), plen), limit,
+    t->tree->scan_async(Slice(reinterpret_cast<const char *>(prefix), plen),
+                        Slice(reinterpret_cast<const char *>(start_after), salen), limit,
                         [impl](const Status &st, const std::vector<scan_entry> &entries, bool truncated) {
                             impl->status = to_status(st);
                             if (st.ok()) {
@@ -892,16 +894,17 @@ int32_t ct_reactor_eventfd(const ct_tree *t)
     return -1;
 }
 
-ct_status ct_scan(ct_tree *t, const uint8_t *prefix, size_t plen, size_t limit, int include_tombstones,
-                  ct_buf *out_entries, uint64_t *out_count, int32_t *truncated)
+ct_status ct_scan(ct_tree *t, const uint8_t *prefix, size_t plen, const uint8_t *start_after, size_t salen,
+                  size_t limit, int include_tombstones, ct_buf *out_entries, uint64_t *out_count, int32_t *truncated)
 {
     if (t == nullptr || out_entries == nullptr) {
         return static_cast<ct_status>(Code::kInvalidArgument);
     }
     std::vector<scan_entry> entries;
     bool                    tr = false;
-    Status                  s = t->tree->scan(Slice(reinterpret_cast<const char *>(prefix), plen), limit, &entries, &tr,
-                                              include_tombstones != 0);
+    Status                  s  = t->tree->scan(Slice(reinterpret_cast<const char *>(prefix), plen),
+                                               Slice(reinterpret_cast<const char *>(start_after), salen), limit, &entries, &tr,
+                                               include_tombstones != 0);
     if (!s.ok()) {
         return to_status(s);
     }

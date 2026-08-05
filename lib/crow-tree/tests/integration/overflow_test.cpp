@@ -101,7 +101,7 @@ TEST(Overflow, PutGetScanReopenMultiFrame)
         // scan returns materialized (assembled) values.
         std::vector<scan_entry> out;
         bool                    trunc = false;
-        ASSERT_TRUE(t.scan(Slice(), 0, &out, &trunc).ok());
+        ASSERT_TRUE(t.scan(Slice(), Slice(), 0, &out, &trunc).ok());
         EXPECT_EQ(out.size(), oracle.size());
         for (const auto &e : out) {
             EXPECT_EQ(e.value, oracle[e.key]);

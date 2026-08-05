@@ -121,7 +121,7 @@ TEST(ReadPath, L0OverridesL1)
     // scan reflects L0 too.
     std::vector<scan_entry> out;
     bool                    trunc;
-    ASSERT_TRUE(t.scan(Slice(""), 0, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), 0, &out, &trunc).ok());
     ASSERT_EQ(out.size(), 1U);
     EXPECT_EQ(out[0].value, "A2");
 }
@@ -137,7 +137,7 @@ TEST(ReadPath, L0TombstoneHidesL1)
     EXPECT_FALSE(t.get(Slice("a"), &s, &v));
     std::vector<scan_entry> out;
     bool                    trunc;
-    ASSERT_TRUE(t.scan(Slice(""), 0, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), 0, &out, &trunc).ok());
     EXPECT_TRUE(out.empty()); // tombstone excluded
 }
 
@@ -158,7 +158,7 @@ TEST(ReadPath, ScanOrderLimitTruncatedAcrossLeaves)
     // Full scan: sorted, complete.
     std::vector<scan_entry> out;
     bool                    trunc;
-    ASSERT_TRUE(t.scan(Slice(""), 0, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), 0, &out, &trunc).ok());
     ASSERT_EQ(out.size(), static_cast<size_t>(N));
     EXPECT_FALSE(trunc);
     for (int i = 0; i < N; ++i) {
@@ -166,7 +166,7 @@ TEST(ReadPath, ScanOrderLimitTruncatedAcrossLeaves)
     }
 
     // Limited scan: truncated.
-    ASSERT_TRUE(t.scan(Slice(""), 10, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), 10, &out, &trunc).ok());
     EXPECT_EQ(out.size(), 10U);
     EXPECT_TRUE(trunc);
     EXPECT_EQ(out[0].key, make_key(0));
@@ -182,7 +182,7 @@ TEST(ReadPath, ScanPrefix)
     ASSERT_TRUE(t.flush().ok());
     std::vector<scan_entry> out;
     bool                    trunc;
-    ASSERT_TRUE(t.scan(Slice("ap"), 0, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice("ap"), Slice(), 0, &out, &trunc).ok());
     ASSERT_EQ(out.size(), 2U);
     EXPECT_EQ(out[0].key, "apple");
     EXPECT_EQ(out[1].key, "apricot");
@@ -218,7 +218,7 @@ TEST(ReadPath, IterAllIncludesTombstones)
     // scan (live) excludes it.
     std::vector<scan_entry> out;
     bool                    trunc;
-    ASSERT_TRUE(t.scan(Slice(""), 0, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), 0, &out, &trunc).ok());
     ASSERT_EQ(out.size(), 1U);
     EXPECT_EQ(out[0].key, "b");
 }

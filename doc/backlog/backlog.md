@@ -41,14 +41,6 @@ complexity, and dependency. Before implementation, follow the
   `crow-tree` / `crow::tree` / `CROW_TREE_*`. Establishes the `crow-kv` →
   `crow-tree` dependency boundary analogous to `crow-kv` → `crow-common`.
   Most naturally done after R12.
-- **[R37](R37-scan-start-after-pushdown.md)** — Scan `start_after` push-down into the C++ engine — Area:
-  read path / scan — `ct_scan_async` takes only `prefix` + `limit`; when
-  `start_after` is non-empty the Rust wrapper over-fetches the whole
-  prefix range (`fetch_limit = 0`) and filters in Rust. Deep pagination
-  transfers and decodes entries the client discards. Extend the C++
-  scan API with a `start_after` cursor + lower-bound seek so the engine
-  starts at the cursor and applies the limit natively. Medium
-  complexity; touches the C++ scan API, FFI binding, and Rust wrapper.
 - **[R38](R38-scan-value-zero-copy.md)** — Scan value zero-copy (mirror R6 for scan) — Area:
   read path / scan — The get path is zero-copy after R6
   (`PinnedValue::into_bytes` via `Bytes::from_owner`); scan still copies
