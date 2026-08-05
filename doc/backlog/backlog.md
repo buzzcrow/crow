@@ -20,10 +20,6 @@ complexity, and dependency. Before implementation, follow the
 ### Medium Priority
 
 **Complexity — Medium:**
-- **[R11](R11-gui-state.md)** — GUI internal state display — Area: web UI — Surface internal
-  metrics (from R8) in the GUI via existing health/internal-state query
-  infrastructure. Show recent operation counts and metrics per Store/Group
-  with real-time refresh (5–10 s window).
 - **[R32](R32-kv-custom-rust-rpc.md)** — Custom Rust RPC library to replace gRPC on the hot path — Area:
   RPC / consensus — gRPC (tonic + h2) serializes concurrent writers on a
   connection-level userspace lock (HPACK table, frame buffer,
