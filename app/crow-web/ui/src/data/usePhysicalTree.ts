@@ -64,7 +64,10 @@ export function usePhysicalTree({
       if (!hasLoadedRef.current) {
         setLoading(true);
       }
-      setError(null);
+      // Note: do NOT clear the error optimistically here — clearing it before
+      // the request resolves makes the header health pill flip between
+      // Failed/Unknown every poll cycle when the server is down. It is cleared
+      // only once the fetch chain actually succeeds (end of this try block).
 
       // Fetch racks with recursive depth
       const racksData = await listRacks(recursive);
@@ -115,6 +118,7 @@ export function usePhysicalTree({
         }),
       );
       setNodeStores(Object.fromEntries(storeEntries));
+      setError(null);
     } catch (err) {
       console.error('Failed to fetch physical tree:', err);
       setError(err instanceof Error ? err : new Error('Unknown error fetching physical tree'));
