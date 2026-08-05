@@ -3,10 +3,14 @@
 
 # CROW User Guide
 
-This guide walks through starting a cluster, performing basic KV
-operations, managing topology, and running upgrades.
+CROW is a storage platform — a foundation layer for building storage
+systems where you own the hot path all the way down to the metal. Its
+first component is **crow-kv**, a distributed key-value cluster built
+on Multi-Paxos. This guide covers crow-kv operations: starting a
+cluster, performing basic KV operations, managing topology, and
+running upgrades.
 
-CROW provides three interfaces for cluster management and data
+crow-kv provides three interfaces for cluster management and data
 access:
 
 - **Web UI** — the `crow-web` service provides a visual dashboard
@@ -24,55 +28,63 @@ access:
   §7 (API Reference).
 
 The examples below show both CLI and curl for each operation. All
-examples assume these shell variables are set once:
+curl examples assume these shell variables are set once:
 
 ```bash
 IP=127.0.0.1        # crow-web service IP
 PORT=9920           # crow-web service port
 ```
 
+CLI commands omit `--ip`/`--port` for brevity; they default to
+`127.0.0.1:9920` (override with `--ip`/`--port` or the
+`CROW_KV_IP`/`CROW_KV_PORT` env vars).
+
+### Prerequisites
+
+Before following the steps below:
+
+- **Build the binaries** — `pixi run build` produces `crow-web`,
+  `crow-kv-server`, and `crow-cli` in `target/debug/`.
+- **Start `crow-web`** — the CLI and Web UI both talk to this service.
+  ```bash
+  crow-web --port 9920
+  ```
+  Add `--test-mode` for an in-memory config (no persisted TOML; changes
+  are lost on restart).
+- **Set `CROW_KV_SERVER_BIN`** — the `server deploy` command spawns
+  `crow-kv-server` on each node. It searches for the binary in this
+  order: `$CROW_KV_SERVER_BIN`, a sibling of the running `crow-web`
+  process, then `$PATH`. Set the env var explicitly if the binary is
+  elsewhere:
+  ```bash
+  export CROW_KV_SERVER_BIN=/path/to/crow-kv-server
+  ```
+- **Node hosts** — the examples below use `--host 127.0.0.1` for a
+  single-machine deployment (all nodes on localhost). For a real
+  multi-node cluster, use each machine's reachable hostname or IP.
+
 ---
 
 ## 1. Quick Start: Bootstrap a 3-Node Cluster
 
-### 1.1 Start the servers
+### 1.1 Register the physical topology
 
-On each node, run `crow-kv-server`. The first start is empty (no
-`--stores`/`--groups`); the service creates the topology later.
-
-```bash
-# On n1
-crow-kv-server \
-  --management-addr 0.0.0.0 --management-port 2001 \
-  --ports 20001 --election-profile default
-
-# On n2
-crow-kv-server \
-  --management-addr 0.0.0.0 --management-port 2002 \
-  --ports 20002 --election-profile default
-
-# On n3
-crow-kv-server \
-  --management-addr 0.0.0.0 --management-port 2003 \
-  --ports 20003 --election-profile default
-```
-
-### 1.2 Register the physical topology
-
-Create a rack, add nodes, and deploy a server on each node.
+Create a rack, add nodes, and deploy a server on each node. The
+`deploy` command starts `crow-kv-server` on the target node (via SSH
+if `ssh_user` is set, or as a local subprocess otherwise) — no manual
+start needed.
 
 **CLI:**
 
 ```bash
 # Create a rack
-crow-cli --ip $IP --port $PORT rack add --id r1 --name "rack-one"
+crow-cli rack add --id r1 --name "rack-one"
 
 # Register each node (repeat for n2, n3)
-crow-cli --ip $IP --port $PORT node add --id n1 --rack r1 --host n1.example.com
+crow-cli node add --id n1 --rack r1 --host 127.0.0.1
 
 # Deploy a crow-kv-server process on each node (repeat for n2, n3)
-crow-cli --ip $IP --port $PORT server deploy \
-  --node n1 --mgmt-port 2001 --grpc-port 20001
+crow-cli server deploy --node n1 --mgmt-port 2001 --grpc-port 20001
 ```
 
 **curl:**
@@ -84,7 +96,7 @@ curl -X POST "http://$IP:$PORT/api/racks" -H 'Content-Type: application/json' \
 
 # Register each node (repeat for n2, n3)
 curl -X POST "http://$IP:$PORT/api/nodes" -H 'Content-Type: application/json' \
-  -d '{"id":"n1","rack_id":"r1","host":"n1.example.com","ssh_port":22,"ssh_user":""}'
+  -d '{"id":"n1","rack_id":"r1","host":"127.0.0.1","ssh_port":22,"ssh_user":""}'
 
 # Deploy a crow-kv-server process on each node (repeat for n2, n3)
 curl -X POST "http://$IP:$PORT/api/nodes/n1/server/deploy" \
@@ -92,10 +104,7 @@ curl -X POST "http://$IP:$PORT/api/nodes/n1/server/deploy" \
   -d '{"mgmt_port":2001,"grpc_port":20001}'
 ```
 
-The `deploy` command spawns `crow-kv-server` on the node (via SSH if
-`ssh_user` is set, or as a local subprocess otherwise).
-
-### 1.3 Initialize the cluster
+### 1.2 Initialize the cluster
 
 Before creating data stores or groups, the cluster must be
 initialized. This creates the system group (store 0, group 0) which
@@ -106,7 +115,7 @@ the topology itself.
 
 ```bash
 # Initialize with all deployed nodes
-crow-cli --ip $IP --port $PORT cluster init --nodes n1,n2,n3
+crow-cli cluster init --nodes n1,n2,n3
 ```
 
 **curl:**
@@ -125,10 +134,10 @@ store/group creation is unblocked.
 For a single-node dev cluster, pass one node:
 
 ```bash
-crow-cli --ip $IP --port $PORT cluster init --nodes n1
+crow-cli cluster init --nodes n1
 ```
 
-### 1.4 Create a store and group
+### 1.3 Create a store and group
 
 A store is the logical container that owns one or more groups.
 
@@ -136,10 +145,10 @@ A store is the logical container that owns one or more groups.
 
 ```bash
 # Create a store on n1
-crow-cli --ip $IP --port $PORT store add --store-id 3 --nodes n1
+crow-cli store add --store-id 3 --nodes n1
 
 # Create a group with an initial replica on n1
-crow-cli --ip $IP --port $PORT paxos add \
+crow-cli paxos add \
   --store-id 3 --group-id 3 --replica-id 1 --nodes n1
 ```
 
@@ -156,15 +165,15 @@ curl -X POST "http://$IP:$PORT/api/stores/3/groups" -H 'Content-Type: applicatio
 If the cluster has not been initialized, store/group creation returns
 `409 Conflict` with a message directing you to run `cluster init` first.
 
-### 1.5 Add the remaining replicas
+### 1.4 Add the remaining replicas
 
 **CLI:**
 
 ```bash
-crow-cli --ip $IP --port $PORT replica add \
+crow-cli replica add \
   --store-id 3 --group-id 3 --node n2 --replica-id 2
 
-crow-cli --ip $IP --port $PORT replica add \
+crow-cli replica add \
   --store-id 3 --group-id 3 --node n3 --replica-id 3
 ```
 
@@ -184,20 +193,20 @@ The service orchestrates the full add-replica flow: creates the local
 group on the target node, wires remotes bidirectionally, and the new
 replica catches up via snapshot streaming before joining the voting set.
 
-### 1.6 Verify and smoke test
+### 1.5 Verify and smoke test
 
 **CLI:**
 
 ```bash
 # Check group health
-crow-cli --ip $IP --port $PORT paxos inspect --store-id 3 --group-id 3
+crow-cli paxos inspect --store-id 3 --group-id 3
 # Look for "leader=" and replica states
 
 # Put / Get
-crow-cli --ip $IP --port $PORT kv put --store-id 3 --group-id 3 \
+crow-cli kv put --store-id 3 --group-id 3 \
   --key hello --value world
 
-crow-cli --ip $IP --port $PORT kv get --store-id 3 --group-id 3 --key hello
+crow-cli kv get --store-id 3 --group-id 3 --key hello
 ```
 
 **curl:**
@@ -247,7 +256,7 @@ curl -X POST "http://$IP:$PORT/api/stores/3/groups/3/kv/delete" \
   -H 'Content-Type: application/json' \
   -d '{"key":"user:1"}'
 
-curl "http://$IP:$PORT/api/stores/3/groups/3/kv/scan?key=user:"
+curl "http://$IP:$PORT/api/stores/3/groups/3/kv/scan?prefix=user:&limit=100"
 ```
 
 The Web UI KV Operator panel provides the same operations with a
@@ -330,7 +339,9 @@ waits for a new leader, then removes the replica.
 
 1. Provision the new machine with the same node ID, management port,
    and gRPC port.
-2. Deploy the server via the service:
+2. Deploy the server via the service. The server auto-loads its
+   store/group configuration from `conf/node-config.json` on startup —
+   no `--stores`/`--groups` CLI args needed for normal restart:
 
    **CLI:**
 
@@ -346,17 +357,9 @@ waits for a new leader, then removes the replica.
      -d '{"mgmt_port":2001,"grpc_port":20001}'
    ```
 
-3. Start the server. With R2, the server auto-loads its store/group
-   configuration from `conf/node-config.json` — no `--stores`/`--groups`
-   CLI args needed for normal restart:
-
-   ```bash
-   crow-kv-server \
-     --management-addr 0.0.0.0 --management-port 2001 \
-     --ports 20001 --election-profile default
-   ```
-
-   If `node-config.json` is lost, fall back to explicit bootstrap args:
+   If `node-config.json` is lost, fall back to explicit bootstrap args
+   by starting `crow-kv-server` manually with `--stores`/`--groups`/
+   `--replica`:
 
    ```bash
    crow-kv-server \
@@ -365,7 +368,7 @@ waits for a new leader, then removes the replica.
      --stores 3 --groups 3 --replica 1
    ```
 
-4. Verify group health.
+3. Verify group health.
 
 If the WAL and config directory were also lost, add the replacement as
 a new replica with a new replica ID instead of reusing the old one.
@@ -395,16 +398,23 @@ For each node:
 
 2. **Install the new binary** on the node.
 
-3. **Restart the server.** With R2, the server auto-loads its
-   store/group configuration from `conf/node-config.json`:
+3. **Restart the server.** The server auto-loads its store/group
+   configuration from `conf/node-config.json` on startup:
+
+   **CLI:**
 
    ```bash
-   crow-kv-server \
-     --management-addr 0.0.0.0 --management-port 2001 \
-     --ports 20001 --election-profile default
+   crow-cli server restart --node n1
    ```
 
-   If `node-config.json` is missing, fall back to explicit args:
+   **curl:**
+
+   ```bash
+   curl -X POST "http://$IP:$PORT/api/nodes/n1/server/restart"
+   ```
+
+   If `node-config.json` is missing, start `crow-kv-server` manually
+   with explicit args:
 
    ```bash
    crow-kv-server \
@@ -442,10 +452,10 @@ A brief latency spike during leader transition is normal.
 If two of three nodes fail, the remaining node cannot elect itself
 leader. Writes and linearizable reads block.
 
-- **Restore the failed nodes** from backups and restart. With R2,
-  the server auto-loads from `conf/node-config.json`; if the config is
-  lost, fall back to `--stores`/`--groups`/`--replica` args. This is
-  always the safest path.
+- **Restore the failed nodes** from backups and restart. The server
+  auto-loads from `conf/node-config.json`; if the config is lost, fall
+  back to `--stores`/`--groups`/`--replica` args. This is always the
+  safest path.
 - **Recover with data loss** (last resort): force the surviving node to
   become leader by manually truncating the log. Only safe when the
   other nodes are permanently lost.
@@ -485,6 +495,7 @@ and `--json` for JSON output.
 - **`crow-cli cluster topology`** — full logical + physical hierarchy
 - **`crow-cli cluster inspect <id>`** — `s<sid>`, `s<sid>/g<gid>`,
   `s<sid>/g<gid>/r<rid>`, or `<node-id>`
+- **`crow-cli cluster init --nodes n1,n2,...`** — initialize cluster (system group)
 - **`crow-cli rack add --id <id> [--name <name>]`**
 - **`crow-cli rack remove --id <id>`**
 - **`crow-cli rack list`**
@@ -496,7 +507,6 @@ and `--json` for JSON output.
 - **`crow-cli server restart --node <id>`**
 - **`crow-cli server stop --node <id>`**
 - **`crow-cli server list`**
-- **`crow-cli cluster init --nodes n1,n2,...`** — initialize cluster (system group)
 - **`crow-cli store add --store-id <id> [--nodes n1,n2,...]`**
 - **`crow-cli store remove --store-id <id>`**
 - **`crow-cli store list`**
@@ -562,7 +572,7 @@ and `--json` for JSON output.
 | Get | `GET /api/stores/{sid}/groups/{gid}/kv/get?key=...` |
 | Put | `POST /api/stores/{sid}/groups/{gid}/kv/put` |
 | Delete | `POST /api/stores/{sid}/groups/{gid}/kv/delete` |
-| Scan | `GET /api/stores/{sid}/groups/{gid}/kv/scan?key=...` |
+| Scan | `GET /api/stores/{sid}/groups/{gid}/kv/scan?prefix=...&limit=N` |
 
 #### Server management (per-node)
 
