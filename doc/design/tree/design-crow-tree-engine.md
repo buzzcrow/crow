@@ -316,12 +316,19 @@ get(key):
   the highest slot per key (§1.3), any key present in the MemTable has a slot
   strictly newer than L1, so checking L0 first is correct (read amplification
   2).
-- `scan(prefix, limit)` uses a **merge cursor** over L0 and the L1 leaf chain:
-  at each step take the smaller key, and on a key tie take the L0 cell
-  (newer). Within L1, materialize the current leaf's live entries (resolving
-  the delta chain by highest slot), then follow `right_sibling`. For bounded
-  `limit` the live overlay is fine; for large scans the cursor runs on a
-  pinned `RootVersion` merged with an L0 snapshot.
+- `scan(prefix, start_after, limit)` uses a **merge cursor** over L0 and the
+  L1 leaf chain: at each step take the smaller key, and on a key tie take the
+  L0 cell (newer). Within L1, materialize the current leaf's live entries
+  (resolving the delta chain by highest slot), then follow `right_sibling`.
+  For bounded `limit` the live overlay is fine; for large scans the cursor
+  runs on a pinned `RootVersion` merged with an L0 snapshot. `start_after`
+  (empty = start from beginning) is an **exclusive lower bound** pushed down
+  into the engine: the descent targets the leaf that would contain
+  `start_after` (instead of the prefix start), and the merge loop skips keys
+  `<= start_after` natively, so a deep-pagination scan starts at the cursor
+  and applies the limit without over-fetching the prefix range — O(limit)
+  FFI + decode cost instead of O(prefix range) for a page near the end of a
+  large prefix.
 - **Zero-copy value returns.** An **L1** hit returns a *borrowed* `buffer`
   pointing into the resident leaf frame (valid only for the guard's
   lifetime, §2.2). An **L0** hit must return an *owned* copy because the

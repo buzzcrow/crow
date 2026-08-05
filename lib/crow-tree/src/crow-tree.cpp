@@ -1757,7 +1757,7 @@ std::vector<get_result> Crowtree::multi_get(const std::vector<Slice> &keys) cons
     return results;
 }
 
-Status Crowtree::scan(Slice prefix, size_t limit, std::vector<scan_entry> *out, bool *truncated,
+Status Crowtree::scan(Slice prefix, Slice start_after, size_t limit, std::vector<scan_entry> *out, bool *truncated,
                       bool include_tombstones) const
 {
     out->clear();
@@ -1801,11 +1801,29 @@ Status Crowtree::scan(Slice prefix, size_t limit, std::vector<scan_entry> *out, 
         c.entries = mt->snapshot();
         l0.push_back(std::move(c));
     }
+    // L0 snapshots are key-sorted (MemTable::snapshot iterates an
+    // absl::btree_map<less<>>); binary-search each cursor to the first key >
+    // start_after so the merge loop never touches earlier L0 entries. A full
+    // memtable can hold up to memtable_flush_entries (100K) keys, so this turns
+    // an O(N) per-cursor linear skip into O(log N) -- the consider-lambda's
+    // `key <= start_after` check still covers L1 (the descent leaf may
+    // straddle the cursor) but becomes dead code for L0.
+    if (!start_after.empty()) {
+        std::string sa_str(start_after.data(), start_after.size());
+        for (auto &c : l0) {
+            c.idx = static_cast<size_t>(std::ranges::upper_bound(c.entries, sa_str, {}, &mem_entry::key) -
+                                        c.entries.begin());
+        }
+    }
 
     uint64_t gc      = gc_floor_.load();
     uint64_t page_id = root_page_id_.load();
     if (page_id != kInvalidPageId) {
-        page_id = find_leaf_page_id([this](uint64_t p) { return resident(p); }, page_id, prefix);
+        // Descend at the cursor when present, else at the prefix start -- a
+        // non-empty start_after lands directly on the leaf containing it,
+        // skipping every earlier leaf in the prefix range.
+        Slice descend_key = !start_after.empty() ? start_after : prefix;
+        page_id           = find_leaf_page_id([this](uint64_t p) { return resident(p); }, page_id, descend_key);
     }
     std::vector<leaf_entry> l1_leaf; // current leaf's resolved live entries
     size_t                  j = 0;   // cursor into l1_leaf
@@ -1829,6 +1847,9 @@ Status Crowtree::scan(Slice prefix, size_t limit, std::vector<scan_entry> *out, 
     };
 
     auto consider = [&](Slice key, Slice cell) -> bool {
+        if (!start_after.empty() && key.compare(start_after) <= 0) {
+            return true; // cursor: skip keys <= start_after (exclusive lower bound)
+        }
         if (!key.starts_with(prefix)) {
             return true;
         }
@@ -1911,8 +1932,8 @@ Status Crowtree::scan(Slice prefix, size_t limit, std::vector<scan_entry> *out, 
     return Status::Ok();
 }
 
-bool Crowtree::try_scan_no_load(Slice prefix, size_t limit, std::vector<scan_entry> *out, bool *truncated,
-                                uint64_t *out_pending_page_id) const
+bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, size_t limit, std::vector<scan_entry> *out,
+                                bool *truncated, uint64_t *out_pending_page_id) const
 {
     out->clear();
     if (truncated != nullptr) {
@@ -1932,6 +1953,14 @@ bool Crowtree::try_scan_no_load(Slice prefix, size_t limit, std::vector<scan_ent
         L0Cursor c;
         c.entries = mt->snapshot();
         l0.push_back(std::move(c));
+    }
+    // L0 cursor skip -- see scan()'s own comment. Identical upper_bound pass.
+    if (!start_after.empty()) {
+        std::string sa_str(start_after.data(), start_after.size());
+        for (auto &c : l0) {
+            c.idx = static_cast<size_t>(std::ranges::upper_bound(c.entries, sa_str, {}, &mem_entry::key) -
+                                        c.entries.begin());
+        }
     }
 
     // Non-blocking probe (mirrors try_get_view_no_load's `probe`): bails out
@@ -1955,7 +1984,10 @@ bool Crowtree::try_scan_no_load(Slice prefix, size_t limit, std::vector<scan_ent
     uint64_t gc      = gc_floor_.load();
     uint64_t page_id = root_page_id_.load();
     if (page_id != kInvalidPageId) {
-        page_id = find_leaf_page_id(probe, page_id, prefix);
+        // Descend at the cursor when present, else at the prefix start -- see
+        // scan()'s own comment.
+        Slice descend_key = !start_after.empty() ? start_after : prefix;
+        page_id           = find_leaf_page_id(probe, page_id, descend_key);
         if (blocked_page_id != kInvalidPageId) {
             *out_pending_page_id = blocked_page_id;
             return false; // genuine miss on the initial descent
@@ -1983,6 +2015,9 @@ bool Crowtree::try_scan_no_load(Slice prefix, size_t limit, std::vector<scan_ent
     };
 
     auto consider = [&](Slice key, Slice cell) -> bool {
+        if (!start_after.empty() && key.compare(start_after) <= 0) {
+            return true; // cursor: skip keys <= start_after (exclusive lower bound)
+        }
         if (!key.starts_with(prefix)) {
             return true;
         }
@@ -2057,22 +2092,24 @@ bool Crowtree::try_scan_no_load(Slice prefix, size_t limit, std::vector<scan_ent
     return true; // fully resolved
 }
 
-void Crowtree::scan_async(Slice prefix, size_t limit,
+void Crowtree::scan_async(Slice prefix, Slice start_after, size_t limit,
                           std::function<void(Status, std::vector<scan_entry>, bool)> on_done) const
 {
-    // Copy the prefix upfront: unlike scan()'s Slice (borrowed, valid only
-    // for this one synchronous call), scan_async's key must survive across
+    // Copy the keys upfront: unlike scan()'s Slice (borrowed, valid only
+    // for this one synchronous call), scan_async's keys must survive across
     // an arbitrary number of async round trips.
-    scan_async_attempt(std::make_shared<std::string>(prefix.to_string()), limit, std::move(on_done));
+    scan_async_attempt(std::make_shared<std::string>(prefix.to_string()),
+                       std::make_shared<std::string>(start_after.to_string()), limit, std::move(on_done));
 }
 
-void Crowtree::scan_async_attempt(std::shared_ptr<std::string> prefix_owned, size_t limit,
+void Crowtree::scan_async_attempt(std::shared_ptr<std::string> prefix_owned,
+                                  std::shared_ptr<std::string> start_after_owned, size_t limit,
                                   std::function<void(Status, std::vector<scan_entry>, bool)> on_done) const
 {
     std::vector<scan_entry> out;
     bool                    truncated       = false;
     uint64_t                pending_page_id = kInvalidPageId;
-    if (try_scan_no_load(Slice(*prefix_owned), limit, &out, &truncated, &pending_page_id)) {
+    if (try_scan_no_load(Slice(*prefix_owned), Slice(*start_after_owned), limit, &out, &truncated, &pending_page_id)) {
         on_done(Status::Ok(), std::move(out), truncated);
         return;
     }
@@ -2095,7 +2132,7 @@ void Crowtree::scan_async_attempt(std::shared_ptr<std::string> prefix_owned, siz
         if (!still_unloaded) {
             // Another loader already resolved this page_id between the
             // lock-free probe above and this re-check -- retry, still here.
-            scan_async_attempt(std::move(prefix_owned), limit, std::move(on_done));
+            scan_async_attempt(std::move(prefix_owned), std::move(start_after_owned), limit, std::move(on_done));
             return;
         }
         uint32_t iu   = opt_.page_store->iu_size();
@@ -2103,7 +2140,8 @@ void Crowtree::scan_async_attempt(std::shared_ptr<std::string> prefix_owned, siz
         demand_load_total_.fetch_add(1, std::memory_order_relaxed);
         opt_.async_page_store->submit_read(
             addr, blob->data(), blob->size(),
-            [this, page_id = pending_page_id, addr, plen, blob, prefix_owned, limit, on_done](Status st) mutable {
+            [this, page_id = pending_page_id, addr, plen, blob, prefix_owned, start_after_owned, limit,
+             on_done](Status st) mutable {
                 if (!st.ok()) {
                     CR_LOG_ERROR("[{}] scan_async: demand-load I/O fault: pid={} addr={} len={} status={}", name_,
                                  page_id, addr, plen, st.to_string());
@@ -2123,7 +2161,7 @@ void Crowtree::scan_async_attempt(std::shared_ptr<std::string> prefix_owned, siz
                     on_done(Status::io_error("scan_async: demand-load decode/CRC failure"), {}, false);
                     return;
                 }
-                scan_async_attempt(std::move(prefix_owned), limit, std::move(on_done));
+                scan_async_attempt(std::move(prefix_owned), std::move(start_after_owned), limit, std::move(on_done));
             });
         return;
     }
@@ -2131,7 +2169,7 @@ void Crowtree::scan_async_attempt(std::shared_ptr<std::string> prefix_owned, siz
     // No async backend wired -- fall back to the existing synchronous
     // demand-load and retry, still on this same thread.
     (void)resident(pending_page_id);
-    scan_async_attempt(std::move(prefix_owned), limit, std::move(on_done));
+    scan_async_attempt(std::move(prefix_owned), std::move(start_after_owned), limit, std::move(on_done));
 }
 
 int Crowtree::height() const

@@ -111,7 +111,7 @@ impl CrowTreeEngine {
         // Use scan(b"", 0, true) which merges L0+L1 internally and includes
         // tombstones — no flush() needed, matching InMemKV's immediate
         // visibility for both live entries and tombstones.
-        match self.inner.handle().scan(b"", 0, true) {
+        match self.inner.handle().scan(b"", b"", 0, true) {
             Ok((entries, _)) => entries
                 .into_iter()
                 .map(|e| {
@@ -205,27 +205,17 @@ impl KVEngine for CrowTreeEngine {
         start_after: &[u8],
         limit: usize,
     ) -> KVFuture<(Vec<(Vec<u8>, u64, Vec<u8>)>, bool)> {
-        // The C++ crow-tree scan API takes only prefix + limit (no
-        // start_after). For pagination we over-fetch with the original
-        // prefix, then filter out keys <= start_after in Rust before
-        // applying the limit. This is inefficient when start_after is deep
-        // into a large prefix range — a follow-up can push start_after
-        // into the C++ engine. When start_after is empty, the fast path
-        // is identical to the old behavior.
+        // start_after is pushed down into the C++ engine: the descent targets
+        // the leaf containing start_after (instead of the prefix start), and
+        // the merge loop skips keys <= start_after natively, so the engine
+        // applies the limit without over-fetching the prefix range. The packed
+        // result format and decode path are unchanged.
         let prefix_owned = prefix.to_vec();
         let start_after_owned = start_after.to_vec();
-        let fetch_limit = if start_after.is_empty() { limit } else { 0 };
 
-        match self.inner.try_scan(prefix_owned.clone(), fetch_limit) {
-            ScanOutcome::Ready(result) => {
-                KVFuture::ready(decode_scan_with_start_after(result, &start_after_owned, limit))
-            }
-            ScanOutcome::Pending(fut) => {
-                let sa = start_after_owned;
-                KVFuture::Pending(Box::pin(async move {
-                    decode_scan_with_start_after(fut.await, &sa, limit)
-                }))
-            }
+        match self.inner.try_scan(prefix_owned, start_after_owned, limit) {
+            ScanOutcome::Ready(result) => KVFuture::ready(decode_scan(result)),
+            ScanOutcome::Pending(fut) => KVFuture::Pending(Box::pin(async move { decode_scan(fut.await) })),
         }
     }
 
@@ -235,7 +225,7 @@ impl KVEngine for CrowTreeEngine {
         // O(n) linear-scan cost for this method.
         self.inner
             .handle()
-            .scan(b"", 0, false)
+            .scan(b"", b"", 0, false)
             .map_or(0, |(entries, _)| entries.len())
     }
 
@@ -330,39 +320,18 @@ impl KVEngine for CrowTreeEngine {
 
 /// Shared tail of [`CrowTreeEngine::scan`]'s `Ready`/`Pending` arms:
 /// converts a raw `crow_tree_ffi::ScanEntry` result into the
-/// `KVEngine::scan` return shape, filtering by `start_after` and applying
-/// `limit`. When `start_after` is empty the filter is a no-op, matching
-/// the original behavior. Collapses an error to an empty, non-truncated
-/// result.
+/// `KVEngine::scan` return shape. The C++ engine already applied both the
+/// `start_after` exclusive lower bound and the `limit`, so the truncated
+/// flag is directly trustworthy. Collapses an error to an empty,
+/// non-truncated result.
 type ScanResult = (Vec<(Vec<u8>, u64, Vec<u8>)>, bool);
 
-fn decode_scan_with_start_after(
-    result: Result<(Vec<crow_tree_ffi::ScanEntry>, bool), CtError>,
-    start_after: &[u8],
-    limit: usize,
-) -> ScanResult {
+fn decode_scan(result: Result<(Vec<crow_tree_ffi::ScanEntry>, bool), CtError>) -> ScanResult {
     match result {
-        Ok((entries, overfetch_truncated)) => {
-            if start_after.is_empty() {
-                // Fast path: no filtering needed, crow-tree's truncated
-                // flag is already correct for the given limit.
-                let items: Vec<(Vec<u8>, u64, Vec<u8>)> =
-                    entries.into_iter().map(|e| (e.key, e.slot, e.value)).collect();
-                (items, overfetch_truncated)
-            } else {
-                let mut items: Vec<(Vec<u8>, u64, Vec<u8>)> = entries
-                    .into_iter()
-                    .filter(|e| e.key.as_slice() > start_after)
-                    .map(|e| (e.key, e.slot, e.value))
-                    .collect();
-                let truncated = if limit != 0 && items.len() > limit {
-                    items.truncate(limit);
-                    true
-                } else {
-                    overfetch_truncated
-                };
-                (items, truncated)
-            }
+        Ok((entries, truncated)) => {
+            let items: Vec<(Vec<u8>, u64, Vec<u8>)> =
+                entries.into_iter().map(|e| (e.key, e.slot, e.value)).collect();
+            (items, truncated)
         }
         Err(_) => (Vec::new(), false),
     }

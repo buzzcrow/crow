@@ -214,6 +214,8 @@ mod sys {
             t: *mut ct_tree,
             prefix: *const u8,
             plen: usize,
+            start_after: *const u8,
+            salen: usize,
             limit: usize,
             include_tombstones: c_int,
             out_entries: *mut ct_buf,
@@ -247,8 +249,14 @@ mod sys {
         pub fn ct_get_async(t: *mut ct_tree, key: *const u8, klen: usize) -> *mut ct_future;
         pub fn ct_flush_async(t: *mut ct_tree) -> *mut ct_future;
         pub fn ct_snapshot_async(t: *mut ct_tree) -> *mut ct_future;
-        pub fn ct_scan_async(t: *mut ct_tree, prefix: *const u8, plen: usize, limit: usize)
-            -> *mut ct_future;
+        pub fn ct_scan_async(
+            t: *mut ct_tree,
+            prefix: *const u8,
+            plen: usize,
+            start_after: *const u8,
+            salen: usize,
+            limit: usize,
+        ) -> *mut ct_future;
         pub fn ct_future_poll(
             f: *mut ct_future,
             done: *mut c_int,
@@ -1030,9 +1038,12 @@ impl Crowtree {
 
     /// Range scan over `prefix` (empty = whole keyspace).
     /// When `include_tombstones` is true, tombstone entries are included.
+    /// `start_after` (empty = start from beginning) is an exclusive lower
+    /// bound: only keys strictly greater than `start_after` are returned.
     pub fn scan(
         &self,
         prefix: &[u8],
+        start_after: &[u8],
         limit: usize,
         include_tombstones: bool,
     ) -> Result<(Vec<ScanEntry>, bool), CtError> {
@@ -1047,6 +1058,8 @@ impl Crowtree {
                 self.as_ptr(),
                 prefix.as_ptr(),
                 prefix.len(),
+                start_after.as_ptr(),
+                start_after.len(),
                 limit,
                 if include_tombstones { 1 } else { 0 },
                 &mut buf,
@@ -1652,8 +1665,22 @@ impl AsyncCrowtree {
     /// genuine cold leaf (or the initial root->leaf descent). See
     /// `Crowtree::scan_async`'s doc comment (crow-tree.h) for why a miss
     /// retries the whole scan rather than resuming a cursor.
-    pub async fn scan(&self, prefix: Vec<u8>, limit: usize) -> Result<(Vec<ScanEntry>, bool), CtError> {
-        let fut = unsafe { sys::ct_scan_async(self.inner.as_ptr(), prefix.as_ptr(), prefix.len(), limit) };
+    pub async fn scan(
+        &self,
+        prefix: Vec<u8>,
+        start_after: Vec<u8>,
+        limit: usize,
+    ) -> Result<(Vec<ScanEntry>, bool), CtError> {
+        let fut = unsafe {
+            sys::ct_scan_async(
+                self.inner.as_ptr(),
+                prefix.as_ptr(),
+                prefix.len(),
+                start_after.as_ptr(),
+                start_after.len(),
+                limit,
+            )
+        };
         let out = drive_ct_future(FutureGuard(fut), &self.inner, FutureKind::Scan).await?;
         let entries = decode_scan(&out.value, out.slot as usize)?;
         Ok((entries, out.found))
@@ -1665,8 +1692,17 @@ impl AsyncCrowtree {
     /// motivation as `try_get`'s doc comment: lets a caller with its own
     /// fast-path/slow-path return type mirror `ct_scan_async`'s own
     /// C++-layer split one layer up instead of forcing a box on every call.
-    pub fn try_scan(&self, prefix: Vec<u8>, limit: usize) -> ScanOutcome {
-        let fut = unsafe { sys::ct_scan_async(self.inner.as_ptr(), prefix.as_ptr(), prefix.len(), limit) };
+    pub fn try_scan(&self, prefix: Vec<u8>, start_after: Vec<u8>, limit: usize) -> ScanOutcome {
+        let fut = unsafe {
+            sys::ct_scan_async(
+                self.inner.as_ptr(),
+                prefix.as_ptr(),
+                prefix.len(),
+                start_after.as_ptr(),
+                start_after.len(),
+                limit,
+            )
+        };
         let mut guard = FutureGuard(fut);
         if let Some(result) = try_poll_ct_future(&mut guard, FutureKind::Scan) {
             return ScanOutcome::Ready(result.and_then(|out| {
