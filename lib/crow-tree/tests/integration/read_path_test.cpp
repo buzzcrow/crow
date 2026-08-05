@@ -188,6 +188,54 @@ TEST(ReadPath, ScanPrefix)
     EXPECT_EQ(out[1].key, "apricot");
 }
 
+// start_after cursor: a sync scan with a non-empty start_after returns
+// only keys strictly greater than the cursor, in order, up to the
+// limit. The descent lands on the leaf containing the cursor instead
+// of the first prefix leaf, so earlier entries are never visited (the
+// deep-pagination pushdown §1.7 claims). Mirrors the async twin
+// AsyncScan.StartAfterCursorSkipsEarlierEntries.
+TEST(ReadPath, ScanStartAfterCursorSkipsEarlierEntries)
+{
+    Options opt;
+    opt.max_delta_len    = 1;
+    opt.leaf_split_bytes = 120; // force multiple leaves
+    Crowtree  t(opt);
+    const int N = 30;
+    for (int i = 0; i < N; ++i) {
+        ASSERT_TRUE(t.apply(i + 1, put_one(make_key(i), "v" + std::to_string(i))).ok());
+        ASSERT_TRUE(t.flush().ok());
+    }
+    ASSERT_GT(t.leaf_count(), 1U);
+
+    // Cursor at key0009: only key0010..key0029 should come back (20 keys).
+    std::string             cursor = make_key(9);
+    std::vector<scan_entry> out;
+    bool                    trunc;
+    ASSERT_TRUE(t.scan(Slice(""), Slice(cursor), 0, &out, &trunc).ok());
+    EXPECT_FALSE(trunc);
+    ASSERT_EQ(out.size(), 20U);
+    for (const auto &e : out) {
+        EXPECT_GT(e.key, cursor);
+    }
+    EXPECT_EQ(out[0].key, make_key(10));
+    EXPECT_EQ(out[19].key, make_key(29));
+
+    // Cursor + limit: a page of 5 starting after key0009.
+    ASSERT_TRUE(t.scan(Slice(""), Slice(cursor), 5, &out, &trunc).ok());
+    ASSERT_EQ(out.size(), 5U);
+    EXPECT_TRUE(trunc) << "20 keys after cursor, limit=5 should truncate";
+    EXPECT_EQ(out[0].key, make_key(10));
+    EXPECT_EQ(out[4].key, make_key(14));
+
+    // Cursor near the end: deep pagination returns only the tail.
+    std::string tail_cursor = make_key(N - 11); // key0019 -> key0020..key0029 (10 keys)
+    ASSERT_TRUE(t.scan(Slice(""), Slice(tail_cursor), 0, &out, &trunc).ok());
+    EXPECT_FALSE(trunc);
+    ASSERT_EQ(out.size(), 10U);
+    EXPECT_EQ(out[0].key, make_key(20));
+    EXPECT_EQ(out[9].key, make_key(29));
+}
+
 TEST(ReadPath, multi_get)
 {
     Crowtree t;

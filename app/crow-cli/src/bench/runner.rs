@@ -177,6 +177,14 @@ pub struct BenchConfig {
     /// the client with an empty seed list (no topology fetch — fine
     /// for `Leader` policy, but `AnyReplica` would have no replicas).
     pub topology_seed: Option<String>,
+    /// Scan limit (max entries per scan op) for `WorkloadKind::List`.
+    /// Default 1 (the historical stub behavior).
+    pub scan_limit: u32,
+    /// Scan prefix for `WorkloadKind::List`. Empty = whole keyspace.
+    pub scan_prefix: Vec<u8>,
+    /// Scan exclusive lower bound (`start_after`) for
+    /// `WorkloadKind::List`. Empty = start from the beginning.
+    pub scan_start_after: Vec<u8>,
 }
 
 impl BenchConfig {
@@ -204,6 +212,9 @@ impl BenchConfig {
             verify_bytes: 8,
             read_endpoint_policy: ReadEndpointPolicy::Leader,
             topology_seed: None,
+            scan_limit: 1,
+            scan_prefix: Vec::new(),
+            scan_start_after: Vec::new(),
         }
     }
 
@@ -594,11 +605,11 @@ async fn run_worker(
                 .scan(
                     cfg.store_id,
                     cfg.group_id,
-                    b"",
-                    &[],
-                    1,
-                    ReadMode::Linearizable,
-                    None,
+                    &cfg.scan_prefix,
+                    &cfg.scan_start_after,
+                    cfg.scan_limit,
+                    cfg.read_mode,
+                    cfg.min_slot_policy.to_min_slot(),
                 )
                 .await
             {

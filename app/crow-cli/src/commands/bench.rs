@@ -124,6 +124,25 @@ pub struct RunArgs {
     /// spawned server). Default `1`. `0` = always drain.
     #[arg(long)]
     pub coalesce_drain_threshold: Option<usize>,
+
+    /// Scan limit (max entries per scan op) for `--workload list`.
+    /// Default 1 (the historical stub behavior). Set higher for
+    /// bounded-limit / full-keyspace scan benches.
+    #[arg(long, default_value_t = 1)]
+    pub scan_limit: u32,
+
+    /// Scan prefix for `--workload list`. Empty (default) = whole
+    /// keyspace. Set to a bounded prefix (e.g. `k05`) for prefix-range
+    /// scan benches.
+    #[arg(long, default_value = "")]
+    pub scan_prefix: String,
+
+    /// Scan exclusive lower bound (`start_after`) for `--workload list`.
+    /// Empty (default) = start from the beginning. Set near the end of
+    /// the populated keyspace (in the same `k{id:020}` format) for
+    /// deep-pagination scan benches.
+    #[arg(long, default_value = "")]
+    pub scan_start_after: String,
 }
 
 /// Arguments for `crow-cli bench`.
@@ -262,6 +281,9 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
     if cfg.read_endpoint_policy == ReadEndpointPolicy::AnyReplica {
         cfg.topology_seed = Some(fixture.node_mgmt_urls()[0].clone());
     }
+    cfg.scan_limit = args.scan_limit;
+    cfg.scan_prefix = args.scan_prefix.into_bytes();
+    cfg.scan_start_after = args.scan_start_after.into_bytes();
 
     println!(
         "running {} workload for {}s...",
