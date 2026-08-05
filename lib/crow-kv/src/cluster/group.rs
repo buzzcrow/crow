@@ -27,7 +27,7 @@ use crate::cluster::remote_replica::PxRemoteReplica;
 use crate::cluster::replica::{
     PxReplicaError, Replica, ReplicaClient, ReplicaHandler, StepDownReply, StepDownRequestPayload,
 };
-use crate::cluster::status::{GroupStatus, InflightStatus, StatusLevel};
+use crate::cluster::status::{GroupStatus, InflightStatus, ReadStateView, StatusLevel};
 use crate::common::config::{AdmissionPolicy, CrowKVConfig, PaxosConfig};
 use crate::common::report::OperationReport;
 use crate::metrics::{Counter, Gauge, LatencySummary};
@@ -965,6 +965,12 @@ impl PxGroup {
             ));
         }
 
+        let read_state = self.read_handles.get().map(|h| ReadStateView {
+            lease_valid: h.lease_valid.snapshot(),
+            contiguous_applied: h.contiguous_applied.snapshot(),
+            safe_slot: h.safe_slot.snapshot(),
+        });
+
         GroupStatus {
             group_id: self.group_id,
             leader_id: self.leader_id(),
@@ -982,6 +988,7 @@ impl PxGroup {
                 total_enqueued: self.inflight.total_enqueued.load(Ordering::Relaxed),
                 total_wait_us: self.inflight.total_wait_us.load(Ordering::Relaxed),
             }),
+            read_state,
         }
     }
 

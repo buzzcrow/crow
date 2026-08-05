@@ -142,6 +142,7 @@ impl MonitorCache {
                 state: g.local.state,
                 engine_healthy: g.local.engine_healthy,
                 crowtree_stats: g.local.crowtree_stats,
+                election: g.local.election,
             });
         }
         if replicas.is_empty() {
@@ -156,11 +157,23 @@ impl MonitorCache {
 
         let state = group_health(total, down_count, has_leader);
 
+        // Read-state from the leader node (matches the design's
+        // "leader node only" decision for the logical view).
+        let read_state = guard.values().find_map(|rec| {
+            rec.stores.get(&store_id).and_then(|ns| {
+                ns.groups
+                    .iter()
+                    .find(|g| g.group_id == group_id)
+                    .and_then(|g| g.read_state)
+            })
+        });
+
         Some(GroupView {
             store_id,
             group_id,
             replicas,
             state,
+            read_state,
         })
     }
 
@@ -415,6 +428,7 @@ pub fn legacy_topology_to_node_stores(
                 },
                 engine_healthy: g.local_replica.kv_store.engine_healthy,
                 crowtree_stats: g.local_replica.kv_store.crowtree_stats,
+                election: g.local_replica.election,
             };
             let remotes = g
                 .remotes
@@ -435,6 +449,7 @@ pub fn legacy_topology_to_node_stores(
                 local,
                 remotes,
                 leader_hint: (g.leader_id != 0).then_some(g.leader_id),
+                read_state: g.read_state,
             });
         }
         out.insert(
@@ -503,9 +518,11 @@ mod tests {
                     state: ReplicaState::Running,
                     engine_healthy: true,
                     crowtree_stats: None,
+                    election: None,
                 },
                 remotes: vec![],
                 leader_hint,
+                read_state: None,
             }],
         }
     }
