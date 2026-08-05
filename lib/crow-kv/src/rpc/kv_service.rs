@@ -21,11 +21,13 @@ use crate::metrics::{Bandwidth, Counter, LatencyHistogram, LatencySummary, Metri
 use crate::rpc::kv_service_client::KvServiceClient;
 use crate::rpc::kv_service_server::KvService;
 use crate::rpc::{
-    KvBatchWriteRequest, KvDeleteRequest, KvGetRequest, KvResponse, KvScanRequest, KvScanResponse,
-    KvSetRequest,
+    KvBatchWriteRequest, KvDeleteRequest, KvGetRequest, KvResponse, KvScanChunk, KvScanRequest,
+    KvScanResponse, KvSetRequest,
 };
+use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
+use tokio_stream::Stream;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Channel, Endpoint};
 use tonic::{Request, Response, Status};
@@ -550,6 +552,136 @@ impl KvService for KvStoreService {
         Ok(Response::new(resp))
     }
 
+    type ScanStreamStream = Pin<Box<dyn Stream<Item = Result<KvScanChunk, Status>> + Send + 'static>>;
+
+    #[allow(clippy::too_many_lines)]
+    async fn scan_stream(
+        &self,
+        request: Request<KvScanRequest>,
+    ) -> Result<Response<Self::ScanStreamStream>, Status> {
+        let already_forwarded = request.metadata().get(FORWARD_HEADER).is_some();
+        let req = request.into_inner();
+        let req_size = req.prefix.len() + req.start_after.len();
+        let start = Instant::now();
+        debug!(
+            store_id = self.store.store_id,
+            group_id = req.group_id,
+            request_id = req.request_id,
+            prefix_len = req.prefix.len(),
+            limit = req.limit,
+            forwarded_in = already_forwarded,
+            "received kv scan_stream rpc"
+        );
+
+        // Forward path: same as `scan` — forward the unary `Scan` to the
+        // leader, then re-chunk the response locally. Avoids proxying a
+        // server-stream through another server-stream.
+        let linearizable = req.read_mode == crate::rpc::ReadMode::Linearizable as i32;
+        if linearizable && !already_forwarded {
+            if let Some(endpoint) = self.store.forward_target_for(req.group_id) {
+                match forward_kv_scan(&endpoint, req.clone()).await {
+                    Ok(resp) => {
+                        debug!(
+                            store_id = self.store.store_id,
+                            group_id = req.group_id,
+                            request_id = req.request_id,
+                            leader = %endpoint,
+                            "kv scan_stream forwarded to leader"
+                        );
+                        if let Some(m) = self.metrics_for(req.group_id) {
+                            let resp_size = scan_response_size(&resp);
+                            m.record_scan(
+                                start.elapsed().as_nanos() as u64,
+                                req_size as u64,
+                                resp_size,
+                                req.read_mode,
+                                &resp,
+                            );
+                            m.scan_forwarded_c.inc();
+                        }
+                        let chunks = chunk_scan_response(resp, req.request_id, req.request_create_ms);
+                        let stream = tokio_stream::iter(chunks.into_iter().map(Result::<_, Status>::Ok));
+                        return Ok(Response::new(Box::pin(stream) as Self::ScanStreamStream));
+                    }
+                    Err(status) => {
+                        warn!(
+                            store_id = self.store.store_id,
+                            group_id = req.group_id,
+                            request_id = req.request_id,
+                            leader = %endpoint,
+                            error = %status,
+                            "kv scan_stream forward failed; serving stale local scan with leader hint"
+                        );
+                        let mut resp = self
+                            .store
+                            .kv_scan(
+                                req.group_id,
+                                &req.prefix,
+                                &req.start_after,
+                                req.limit,
+                                req.read_mode,
+                                req.min_slot,
+                                req.request_id,
+                                req.request_create_ms,
+                            )
+                            .await;
+                        if let Some(m) = self.metrics_for(req.group_id) {
+                            let resp_size = scan_response_size(&resp);
+                            m.record_scan(
+                                start.elapsed().as_nanos() as u64,
+                                req_size as u64,
+                                resp_size,
+                                req.read_mode,
+                                &resp,
+                            );
+                            m.scan_forward_failed_c.inc();
+                        }
+                        resp.not_leader_hint = endpoint;
+                        let chunks = chunk_scan_response(resp, req.request_id, req.request_create_ms);
+                        let stream = tokio_stream::iter(chunks.into_iter().map(Result::<_, Status>::Ok));
+                        return Ok(Response::new(Box::pin(stream) as Self::ScanStreamStream));
+                    }
+                }
+            }
+        }
+
+        let resp = self
+            .store
+            .kv_scan(
+                req.group_id,
+                &req.prefix,
+                &req.start_after,
+                req.limit,
+                req.read_mode,
+                req.min_slot,
+                req.request_id,
+                req.request_create_ms,
+            )
+            .await;
+        if let Some(m) = self.metrics_for(req.group_id) {
+            let resp_size = scan_response_size(&resp);
+            m.record_scan(
+                start.elapsed().as_nanos() as u64,
+                req_size as u64,
+                resp_size,
+                req.read_mode,
+                &resp,
+            );
+        }
+        if !resp.ok {
+            warn!(
+                store_id = self.store.store_id,
+                group_id = req.group_id,
+                request_id = req.request_id,
+                error = resp.error,
+                "kv scan_stream failed; next step: confirm group exists on this server"
+            );
+        }
+        let chunks = chunk_scan_response(resp, req.request_id, req.request_create_ms);
+        let stream = tokio_stream::iter(chunks.into_iter().map(Result::<_, Status>::Ok));
+        Ok(Response::new(Box::pin(stream) as Self::ScanStreamStream))
+    }
+
     async fn batch_write(
         &self,
         request: Request<KvBatchWriteRequest>,
@@ -618,4 +750,86 @@ async fn forward_kv_scan(endpoint: &str, body: KvScanRequest) -> Result<KvScanRe
     forward_header_set(&mut req);
     let resp = client.scan(req).await?;
     Ok(resp.into_inner())
+}
+
+/// Chunk a unary `KvScanResponse` into a sequence of `KvScanChunk`
+/// messages for the streaming `ScanStream` RPC. The first chunk carries
+/// `ok`/`error`/`not_leader_hint`/`read_slot`; the final chunk carries
+/// `truncated`. Each chunk has at most `CHUNK_SIZE` entries or
+/// `CHUNK_BYTES` bytes of payload, whichever hits first.
+fn chunk_scan_response(resp: KvScanResponse, request_id: u64, request_create_ms: u64) -> Vec<KvScanChunk> {
+    const CHUNK_SIZE: usize = 256;
+    const CHUNK_BYTES: usize = 1024 * 1024; // 1 MiB
+
+    if !resp.ok {
+        // Error: single chunk carrying the error.
+        return vec![KvScanChunk {
+            version: 1,
+            ok: false,
+            error: resp.error,
+            error_code: resp.error_code,
+            truncated: false,
+            items: Vec::new(),
+            request_id,
+            request_create_ms,
+            read_slot: resp.read_slot,
+            not_leader_hint: resp.not_leader_hint,
+        }];
+    }
+
+    let total = resp.items.len();
+    let mut chunks = Vec::new();
+    let mut idx = 0;
+    let mut first = true;
+    while idx < total {
+        let mut batch = Vec::new();
+        let mut batch_bytes = 0usize;
+        while idx < total && batch.len() < CHUNK_SIZE {
+            let item = &resp.items[idx];
+            let item_bytes = item.key.len() + item.value.len();
+            if !batch.is_empty() && batch_bytes + item_bytes > CHUNK_BYTES {
+                break;
+            }
+            batch_bytes += item_bytes;
+            batch.push(resp.items[idx].clone());
+            idx += 1;
+        }
+        let is_last = idx >= total;
+        chunks.push(KvScanChunk {
+            version: 1,
+            ok: true,
+            error: String::new(),
+            error_code: resp.error_code,
+            truncated: is_last && resp.truncated,
+            items: batch,
+            request_id: if first { request_id } else { 0 },
+            request_create_ms: if first { request_create_ms } else { 0 },
+            read_slot: if first { resp.read_slot } else { 0 },
+            not_leader_hint: if first {
+                resp.not_leader_hint.clone()
+            } else {
+                String::new()
+            },
+        });
+        first = false;
+    }
+
+    // Edge case: ok with zero items — emit one empty chunk so the client
+    // sees a successful response.
+    if chunks.is_empty() {
+        chunks.push(KvScanChunk {
+            version: 1,
+            ok: true,
+            error: String::new(),
+            error_code: resp.error_code,
+            truncated: resp.truncated,
+            items: Vec::new(),
+            request_id,
+            request_create_ms,
+            read_slot: resp.read_slot,
+            not_leader_hint: resp.not_leader_hint,
+        });
+    }
+
+    chunks
 }

@@ -154,10 +154,31 @@ message KvScanResponse {
   KvErrorCode error_code = 10;
 }
 
+// One chunk of a streaming scan response. The server emits a sequence
+// of these, each carrying a bounded batch of entries. The first chunk
+// carries `ok`/`error`/`not_leader_hint`/`read_slot` like the unary
+// `KvScanResponse`; subsequent chunks carry only `items`. The final
+// chunk carries `truncated`.
+message KvScanChunk {
+  uint32 version  = 1;
+  bool   ok       = 2;
+  string error    = 3;
+  KvErrorCode error_code = 4;
+  bool   truncated = 5;
+  repeated KvScanItem items = 6;
+  uint64 request_id = 7;
+  uint64 request_create_ms = 8;
+  uint64 read_slot = 9;
+  string not_leader_hint = 10;
+}
+
 service KvService {
   rpc Put(KvSetRequest) returns (KvResponse);
   rpc Get(KvGetRequest) returns (KvResponse);
   rpc Delete(KvDeleteRequest) returns (KvResponse);
   rpc BatchWrite(KvBatchWriteRequest) returns (KvResponse);
   rpc Scan(KvScanRequest) returns (KvScanResponse);
+  // Server-streaming scan: emits entries in chunks to bypass the
+  // unary 4 MiB message size cap for large scans.
+  rpc ScanStream(KvScanRequest) returns (stream KvScanChunk);
 }

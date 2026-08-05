@@ -653,7 +653,7 @@ async fn run_worker(
                 }
             }
             OpKind::List => match kv
-                .scan(
+                .scan_stream(
                     cfg.store_id,
                     cfg.group_id,
                     &cfg.scan_prefix,

@@ -658,6 +658,119 @@ impl CrowkvClient {
         }
     }
 
+    /// Streaming variant of [`Self::scan`]: uses the `ScanStream` RPC to
+    /// receive entries in chunks, bypassing the unary 4 MiB message size
+    /// cap. Reassembles into the same `ScanOutcome` shape. Same retry /
+    /// redirect semantics as `scan`.
+    ///
+    /// # Errors
+    /// See [`Error`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn scan_stream(
+        &self,
+        store_id: u64,
+        group_id: u64,
+        prefix: &[u8],
+        start_after: &[u8],
+        limit: u32,
+        read_mode: ReadMode,
+        min_slot: Option<u64>,
+    ) -> Result<ScanOutcome> {
+        use crow_kv::rpc::KvScanChunk;
+        use tokio_stream::StreamExt as _;
+
+        let min_slot = self.resolve_min_slot(store_id, group_id, read_mode, min_slot);
+        let mut endpoint = self.resolve_read_endpoint(store_id, group_id, read_mode).await?;
+        let mut attempts = 0u32;
+        let mut backoff = self.retry.backoff_base;
+        loop {
+            let req = KvScanRequest {
+                version: 1,
+                prefix: Bytes::copy_from_slice(prefix),
+                start_after: Bytes::copy_from_slice(start_after),
+                limit,
+                request_id: next_request_id(),
+                request_create_ms: now_ms(),
+                group_id,
+                read_mode: read_mode as i32,
+                min_slot,
+            };
+            let channel = self.pool.get(&endpoint)?;
+            let t0 = Instant::now();
+            match KvServiceClient::new(channel).scan_stream(req).await {
+                Ok(resp) => {
+                    let mut stream = resp.into_inner();
+                    let mut items: Vec<(Bytes, Bytes)> = Vec::new();
+                    let mut truncated = false;
+                    let mut first_chunk: Option<KvScanChunk> = None;
+                    let mut stream_err: Option<String> = None;
+                    while let Some(chunk_result) = stream.next().await {
+                        match chunk_result {
+                            Ok(chunk) => {
+                                if first_chunk.is_none() {
+                                    first_chunk = Some(chunk.clone());
+                                    if !chunk.ok {
+                                        stream_err = Some(chunk.error);
+                                        break;
+                                    }
+                                    if !chunk.not_leader_hint.is_empty() {
+                                        if read_mode == ReadMode::MinSlot
+                                            && self.read_endpoint_policy == ReadEndpointPolicy::AnyReplica
+                                        {
+                                            self.metrics.record_read_endpoint_fallback();
+                                        }
+                                        self.topology.set_leader(
+                                            store_id,
+                                            group_id,
+                                            chunk.not_leader_hint.clone(),
+                                        );
+                                        endpoint = chunk.not_leader_hint;
+                                        // Break out of the stream loop to retry.
+                                        stream_err = Some(String::new());
+                                        break;
+                                    }
+                                }
+                                truncated = chunk.truncated;
+                                for item in chunk.items {
+                                    items.push((item.key, item.value));
+                                }
+                            }
+                            Err(status) => {
+                                stream_err = Some(status.to_string());
+                                break;
+                            }
+                        }
+                    }
+
+                    if let Some(err) = stream_err {
+                        // Empty error string = redirect, not a real error.
+                        if err.is_empty() {
+                            self.metrics.record_scan_error();
+                            continue;
+                        }
+                        self.metrics.record_scan_error();
+                        attempts = self.count_other(attempts, &err)?;
+                        continue;
+                    }
+
+                    self.metrics.record_scan_latency(t0.elapsed().as_micros() as u64);
+                    return Ok(ScanOutcome { items, truncated });
+                }
+                Err(status) => {
+                    self.metrics.record_scan_error();
+                    self.metrics.record_transport_error();
+                    self.metrics.on_leader_error(store_id, group_id, &endpoint);
+                    endpoint = self
+                        .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
+                        .await;
+                    self.metrics
+                        .on_leader_resolved(store_id, group_id, &endpoint, "transport_error");
+                    attempts = self.count_other(attempts, &status.to_string())?;
+                }
+            }
+        }
+    }
+
     /// `MinSlot` auto-attaches this client's own last-write watermark
     /// for the group unless the caller already supplied a `min_slot`.
     fn resolve_min_slot(
