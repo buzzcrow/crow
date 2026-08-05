@@ -526,9 +526,16 @@ impl PxGroup {
                         acks += 1;
                         if hb.contiguous_applied < payload.committed_safe_slot {
                             if let Some(remote) = self.get_remote_replica(peer_id) {
-                                for slot in
-                                    hb.contiguous_applied.saturating_add(1)..=payload.committed_safe_slot
-                                {
+                                // Bound catch-up replay per heartbeat round so a
+                                // lagging follower doesn't inflate ReadIndex-
+                                // fallback read latency. Remaining slots converge
+                                // on subsequent heartbeats; quorum confirmation
+                                // does not depend on replay completion.
+                                const MAX_CATCHUP_PER_ROUND: u64 = 64;
+                                let catchup_end =
+                                    (hb.contiguous_applied.saturating_add(MAX_CATCHUP_PER_ROUND))
+                                        .min(payload.committed_safe_slot);
+                                for slot in hb.contiguous_applied.saturating_add(1)..=catchup_end {
                                     let Some(mut entry) = replica.accepted_at(slot).await else {
                                         debug!(
                                             group_id,

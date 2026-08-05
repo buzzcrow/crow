@@ -958,9 +958,15 @@ class Crowtree
     // or resolves the one blocking page_id (via the reactor, or
     // synchronously if no async backend is wired) and recurses. `prefix`
     // and `start_after` are heap copies (unlike scan()'s Slice, must survive
-    // across an arbitrary number of async round trips).
-    void scan_async_attempt(std::shared_ptr<std::string> prefix_owned, std::shared_ptr<std::string> start_after_owned,
-                            size_t limit, std::function<void(Status, std::vector<scan_entry>, bool)> on_done) const;
+    // across an arbitrary number of async round trips). Entries resolved
+    // before the cold leaf are accumulated across retries and the last
+    // resolved key becomes the resume `start_after`, so a scan over N cold
+    // leaves performs O(N) leaf loads with no re-traversal of already-
+    // resolved leaves (was quadratic).
+    void scan_async_attempt(std::shared_ptr<std::string>        prefix_owned,
+                            const std::shared_ptr<std::string> &start_after_owned, size_t limit,
+                            std::shared_ptr<std::vector<scan_entry>>                   accumulated,
+                            std::function<void(Status, std::vector<scan_entry>, bool)> on_done) const;
 
     // Shared by snapshot() and snapshot_async() (persist.cpp,
     // #11 Phase 2, #14c/#14d): runs the segment scan / delta-fold /

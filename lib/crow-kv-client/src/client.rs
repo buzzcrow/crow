@@ -13,11 +13,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use dashmap::DashMap;
+use tracing::warn;
 
 use crow_kv::rpc::kv_service_client::KvServiceClient;
 use crow_kv::rpc::{
-    KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvGetRequest, KvResponse, KvScanRequest, KvSetRequest,
-    ReadMode,
+    KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvErrorCode, KvGetRequest, KvResponse, KvScanRequest,
+    KvSetRequest, ReadMode,
 };
 
 use crate::config::{ClientConfig, ReadEndpointPolicy, RetryConfig};
@@ -33,17 +34,19 @@ pub struct WriteOutcome {
     pub request_id: u64,
 }
 
-/// Outcome of a successful `get`.
+/// Outcome of a successful `get`. `value` is zero-copy `Bytes` from the
+/// prost response frame, not a `Vec<u8>` copy.
 #[derive(Debug, Clone)]
 pub enum GetOutcome {
-    Found { value: Vec<u8>, revision: u64 },
+    Found { value: Bytes, revision: u64 },
     NotFound,
 }
 
-/// Outcome of a successful `scan`.
+/// Outcome of a successful `scan`. Items are zero-copy `Bytes` from the
+/// prost response frame, not per-entry `Vec<u8>` copies.
 #[derive(Debug, Clone)]
 pub struct ScanOutcome {
-    pub items: Vec<(Vec<u8>, Vec<u8>)>,
+    pub items: Vec<(Bytes, Bytes)>,
     pub truncated: bool,
 }
 
@@ -309,7 +312,7 @@ impl CrowkvClient {
                         continue;
                     }
                     attempts = self.count_other(attempts, &resp.error)?;
-                    if Self::is_unknown_leader(&resp.error) {
+                    if Self::is_unknown_leader(resp.error_code, &resp.error) {
                         self.metrics.on_leader_error(store_id, group_id, &endpoint);
                         endpoint = self.wait_and_refresh_leader(store_id, group_id, &endpoint).await;
                         self.metrics
@@ -369,7 +372,7 @@ impl CrowkvClient {
                     if resp.ok {
                         self.metrics.record_get_latency(t0.elapsed().as_micros() as u64);
                         return Ok(GetOutcome::Found {
-                            value: resp.value.to_vec(),
+                            value: resp.value,
                             revision: resp.revision,
                         });
                     }
@@ -393,7 +396,7 @@ impl CrowkvClient {
                         continue;
                     }
                     attempts = self.count_other(attempts, &resp.error)?;
-                    if Self::is_unknown_leader(&resp.error) {
+                    if Self::is_unknown_leader(resp.error_code, &resp.error) {
                         self.metrics.on_leader_error(store_id, group_id, &endpoint);
                         endpoint = self.wait_and_refresh_leader(store_id, group_id, &endpoint).await;
                         self.metrics
@@ -475,7 +478,7 @@ impl CrowkvClient {
                         continue;
                     }
                     attempts = self.count_other(attempts, &resp.error)?;
-                    if Self::is_unknown_leader(&resp.error) {
+                    if Self::is_unknown_leader(resp.error_code, &resp.error) {
                         self.metrics.on_leader_error(store_id, group_id, &endpoint);
                         endpoint = self.wait_and_refresh_leader(store_id, group_id, &endpoint).await;
                         self.metrics
@@ -555,7 +558,7 @@ impl CrowkvClient {
                         continue;
                     }
                     attempts = self.count_other(attempts, &resp.error)?;
-                    if Self::is_unknown_leader(&resp.error) {
+                    if Self::is_unknown_leader(resp.error_code, &resp.error) {
                         self.metrics.on_leader_error(store_id, group_id, &endpoint);
                         endpoint = self.wait_and_refresh_leader(store_id, group_id, &endpoint).await;
                         self.metrics
@@ -614,11 +617,7 @@ impl CrowkvClient {
                 Ok(resp) => {
                     let resp = resp.into_inner();
                     if resp.ok {
-                        let items = resp
-                            .items
-                            .into_iter()
-                            .map(|i| (i.key.to_vec(), i.value.to_vec()))
-                            .collect();
+                        let items = resp.items.into_iter().map(|i| (i.key, i.value)).collect();
                         self.metrics.record_scan_latency(t0.elapsed().as_micros() as u64);
                         return Ok(ScanOutcome {
                             items,
@@ -694,19 +693,26 @@ impl CrowkvClient {
     /// doesn't know who its leader is either -- typically mid-election,
     /// e.g. right after a restart; a real hint would have already been
     /// handled by [`Self::follow_not_leader`] before this is checked).
-    fn is_unknown_leader(error: &str) -> bool {
-        error == "not leader"
+    /// Checks the structured `error_code` first, falling back to the
+    /// string for old servers that don't set the code (default 0 =
+    /// `KvErrorNone`).
+    fn is_unknown_leader(error_code: i32, error: &str) -> bool {
+        error_code == KvErrorCode::KvErrorNotLeader as i32 || error == "not leader"
     }
 
     /// After an [`Self::is_unknown_leader`] failure, give the election a
     /// chance to converge and pick up whatever leader the cache learns in
     /// the meantime, instead of busy-retrying the same non-answering
-    /// replica ("100ms-then-retry").
+    /// replica ("100ms-then-retry"). Logs refresh failures instead of
+    /// silently swallowing them; the caller's `count_other` surfaces
+    /// `RetriesExhausted` if the endpoint stays stale.
     async fn wait_and_refresh_leader(&self, store_id: u64, group_id: u64, endpoint: &str) -> String {
         self.metrics.record_unknown_leader_wait();
         self.metrics.record_leader_query();
         self.metrics.record_topology_refresh();
-        let _ = self.topology.refresh().await;
+        if let Err(e) = self.topology.refresh().await {
+            warn!(error = %e, "topology refresh failed in wait_and_refresh_leader");
+        }
         tokio::time::sleep(self.retry.unknown_leader_wait).await;
         self.topology
             .leader(store_id, group_id)
@@ -716,7 +722,9 @@ impl CrowkvClient {
     /// Transport-level failure (connect/timeout/unavailable): best-effort
     /// topology refresh (covers "leader moved and we don't know where"),
     /// exponential backoff, then return the (possibly updated) endpoint to
-    /// retry against.
+    /// retry against. Logs refresh failures instead of silently
+    /// swallowing them; the caller's `count_other` surfaces
+    /// `RetriesExhausted` if the endpoint stays stale.
     async fn handle_transport_err(
         &self,
         store_id: u64,
@@ -725,7 +733,9 @@ impl CrowkvClient {
         backoff: &mut Duration,
     ) -> String {
         self.metrics.record_topology_refresh();
-        let _ = self.topology.refresh().await;
+        if let Err(e) = self.topology.refresh().await {
+            warn!(error = %e, "topology refresh failed in handle_transport_err");
+        }
         let endpoint = self
             .topology
             .leader(store_id, group_id)

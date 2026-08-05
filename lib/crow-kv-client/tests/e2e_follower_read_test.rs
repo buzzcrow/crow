@@ -261,7 +261,7 @@ async fn any_replica_distributes_minslot_reads_with_lagging_follower() {
             .expect("get")
         {
             GetOutcome::Found { value, .. } => {
-                assert_eq!(value, b"v1");
+                assert_eq!(value.as_ref(), b"v1");
                 found += 1;
             }
             GetOutcome::NotFound => not_found += 1,
@@ -311,7 +311,7 @@ async fn any_replica_falls_back_to_leader_when_follower_lags() {
             .await
             .expect("get")
         {
-            GetOutcome::Found { value, .. } => assert_eq!(value, b"v1"),
+            GetOutcome::Found { value, .. } => assert_eq!(value.as_ref(), b"v1"),
             GetOutcome::NotFound => panic!("fallback to leader must observe the write"),
         }
     }
@@ -352,7 +352,7 @@ async fn any_replica_linearizable_still_targets_leader() {
             .await
             .expect("get")
         {
-            GetOutcome::Found { value, .. } => assert_eq!(value, b"v1"),
+            GetOutcome::Found { value, .. } => assert_eq!(value.as_ref(), b"v1"),
             GetOutcome::NotFound => panic!("linearizable read must observe the write"),
         }
     }
@@ -391,7 +391,7 @@ async fn leader_policy_unchanged_for_minslot() {
             .await
             .expect("get")
         {
-            GetOutcome::Found { value, .. } => assert_eq!(value, b"v1"),
+            GetOutcome::Found { value, .. } => assert_eq!(value.as_ref(), b"v1"),
             GetOutcome::NotFound => panic!("leader has the write"),
         }
     }
@@ -430,7 +430,7 @@ async fn any_replica_scan_distributes_with_lagging_follower() {
             .await
             .expect("scan");
         if out.items.len() == 1 {
-            assert_eq!(out.items[0].0, b"prefix_k1");
+            assert_eq!(out.items[0].0.as_ref(), b"prefix_k1");
             one_item += 1;
         } else if out.items.is_empty() {
             zero_item += 1;
@@ -489,7 +489,7 @@ async fn any_replica_scan_falls_back_when_follower_lags() {
             .await
             .expect("scan");
         assert_eq!(out.items.len(), 1, "fallback to leader must observe the write");
-        assert_eq!(out.items[0].0, b"prefix_k1");
+        assert_eq!(out.items[0].0.as_ref(), b"prefix_k1");
     }
 
     let snap = client.metrics();

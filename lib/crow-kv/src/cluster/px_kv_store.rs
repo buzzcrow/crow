@@ -172,14 +172,27 @@ impl KvStore for PxKvStore {
         // `limit` smallest matching live keys (no tombstones) in key order
         // plus a `truncated` flag; `limit == 0` means unlimited. Sorted
         // output keeps pagination via `prefix` extension predictable.
-        let (scanned, truncated) = group
+        // Engine errors (e.g. Corruption) propagate as scan_err instead
+        // of being silently swallowed as an empty ok result.
+        let (scanned, truncated) = match group
             .local_replica()
             .learner
             .engine_scan(prefix, start_after, limit as usize)
-            .await;
+            .await
+        {
+            Ok(result) => result,
+            Err(msg) => {
+                return scan_err(
+                    format!("scan engine error: {msg}"),
+                    String::new(),
+                    request_id,
+                    request_create_ms,
+                );
+            }
+        };
         let mut items: Vec<crate::rpc::KvScanItem> = Vec::with_capacity(scanned.len());
         for (key, _slot, value) in scanned {
-            // R38: key and value are already zero-copy Bytes from the
+            // Key and value are already zero-copy Bytes from the
             // engine's packed scan buffer — assign directly, no conversion.
             items.push(crate::rpc::KvScanItem { key, value });
         }
@@ -204,6 +217,7 @@ impl KvStore for PxKvStore {
             request_create_ms,
             read_slot,
             not_leader_hint: String::new(),
+            error_code: crate::rpc::KvErrorCode::KvErrorNone as i32,
         }
     }
 }
@@ -682,6 +696,11 @@ fn scan_err(
     request_id: u64,
     request_create_ms: u64,
 ) -> crate::rpc::KvScanResponse {
+    let error_code = if error == "not leader" {
+        crate::rpc::KvErrorCode::KvErrorNotLeader as i32
+    } else {
+        crate::rpc::KvErrorCode::KvErrorInternal as i32
+    };
     crate::rpc::KvScanResponse {
         version: 1,
         ok: false,
@@ -692,6 +711,7 @@ fn scan_err(
         request_create_ms,
         read_slot: 0,
         not_leader_hint,
+        error_code,
     }
 }
 

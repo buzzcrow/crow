@@ -210,16 +210,19 @@ impl PxLearner {
     /// `async fn` for signature uniformity with [`Self::engine_get`], but
     /// `KVEngine::scan` has no genuine `Pending` path yet (no
     /// `ct_scan_async` C API -- see `CrowTreeEngine`'s own doc comment), so
-    /// this never actually suspends today either. R38: keys/values are
-    /// zero-copy `Bytes`.
-    #[must_use]
+    /// this never actually suspends today either. Keys/values are
+    /// zero-copy `Bytes`. Errors propagate as `Err`.
+    ///
+    /// # Errors
+    /// Returns `Err` if the underlying engine scan fails (e.g.
+    /// `CtError::Corruption` from packed-result bounds checks).
     #[allow(clippy::type_complexity)]
     pub async fn engine_scan(
         &self,
         prefix: &[u8],
         start_after: &[u8],
         limit: usize,
-    ) -> (Vec<(bytes::Bytes, SlotIndex, bytes::Bytes)>, bool) {
+    ) -> Result<(Vec<(bytes::Bytes, SlotIndex, bytes::Bytes)>, bool), String> {
         self.engine.scan(prefix, start_after, limit).await
     }
 

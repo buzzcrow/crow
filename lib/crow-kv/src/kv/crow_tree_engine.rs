@@ -110,7 +110,7 @@ impl CrowTreeEngine {
     pub fn iter_all(&self) -> Vec<(Vec<u8>, u64, Cell)> {
         // Use scan(b"", 0, true) which merges L0+L1 internally and includes
         // tombstones — no flush() needed, matching InMemKV's immediate
-        // visibility for both live entries and tombstones. R38: scan returns
+        // visibility for both live entries and tombstones. Scan returns
         // Bytes; iter_all's Cell::Value(Vec<u8>) shape requires .to_vec().
         match self.inner.handle().scan(b"", b"", 0, true) {
             Ok((entries, _)) => entries
@@ -205,13 +205,14 @@ impl KVEngine for CrowTreeEngine {
         prefix: &[u8],
         start_after: &[u8],
         limit: usize,
-    ) -> KVFuture<(Vec<(Bytes, u64, Bytes)>, bool)> {
+    ) -> KVFuture<Result<(Vec<(Bytes, u64, Bytes)>, bool), String>> {
         // start_after is pushed down into the C++ engine: the descent targets
         // the leaf containing start_after (instead of the prefix start), and
         // the merge loop skips keys <= start_after natively, so the engine
-        // applies the limit without over-fetching the prefix range. R38:
-        // ScanEntry now holds zero-copy Bytes slices into the packed buffer,
+        // applies the limit without over-fetching the prefix range.
+        // ScanEntry holds zero-copy Bytes slices into the packed buffer,
         // so decode_scan just re-packages them — no per-entry copy.
+        // FFI errors propagate as Err instead of being swallowed.
         let prefix_owned = prefix.to_vec();
         let start_after_owned = start_after.to_vec();
 
@@ -321,22 +322,22 @@ impl KVEngine for CrowTreeEngine {
 }
 
 /// Shared tail of [`CrowTreeEngine::scan`]'s `Ready`/`Pending` arms:
-/// converts a raw `crow_tree_ffi::ScanEntry` result (R38: keys/values are
+/// converts a raw `crow_tree_ffi::ScanEntry` result (keys/values are
 /// already zero-copy `Bytes` slices into the packed buffer) into the
 /// `KVEngine::scan` return shape. The C++ engine already applied both the
 /// `start_after` exclusive lower bound and the `limit`, so the truncated
-/// flag is directly trustworthy. Collapses an error to an empty,
-/// non-truncated result.
-type ScanResult = (Vec<(Bytes, u64, Bytes)>, bool);
+/// flag is directly trustworthy. Errors propagate as `Err` instead of
+/// being silently swallowed as an empty `ok` result.
+type ScanResult = Result<(Vec<(Bytes, u64, Bytes)>, bool), String>;
 
 fn decode_scan(result: Result<(Vec<crow_tree_ffi::ScanEntry>, bool), CtError>) -> ScanResult {
     match result {
         Ok((entries, truncated)) => {
             let items: Vec<(Bytes, u64, Bytes)> =
                 entries.into_iter().map(|e| (e.key, e.slot, e.value)).collect();
-            (items, truncated)
+            Ok((items, truncated))
         }
-        Err(_) => (Vec::new(), false),
+        Err(e) => Err(e.to_string()),
     }
 }
 

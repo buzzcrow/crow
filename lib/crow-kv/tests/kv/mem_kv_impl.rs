@@ -97,11 +97,12 @@ impl KVEngine for InMemKV {
         prefix: &[u8],
         start_after: &[u8],
         limit: usize,
-    ) -> KVFuture<(Vec<(Bytes, u64, Bytes)>, bool)> {
+    ) -> KVFuture<Result<(Vec<(Bytes, u64, Bytes)>, bool), String>> {
         // DashMap is not ordered — collect matching live entries, sort,
-        // then apply the start_after cursor and limit. R38: keys/values
+        // then apply the start_after cursor and limit. Keys/values
         // are Bytes (one copy via Bytes::from(Vec), same as the get path;
         // InMemKV is test-only so zero-copy slicing does not apply).
+        // InMemKV never errors — always Ok.
         let mut items: Vec<(Bytes, u64, Bytes)> = self
             .map
             .iter()
@@ -126,7 +127,7 @@ impl KVEngine for InMemKV {
             truncated = true;
             items.truncate(limit);
         }
-        KVFuture::ready((items, truncated))
+        KVFuture::ready(Ok((items, truncated)))
     }
 
     fn live_key_count(&self) -> usize {

@@ -2092,27 +2092,60 @@ bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, size_t limit, s
     return true; // fully resolved
 }
 
+// Build the resume `start_after` for scan_async_attempt: if entries have
+// been accumulated across prior cold-leaf retries, resume from the last
+// resolved key; otherwise use the original start_after. This avoids
+// re-traversing already-resolved leaves after a demand-load completes.
+static std::shared_ptr<std::string> make_resume_after(const std::shared_ptr<std::string>             &start_after_owned,
+                                                      const std::shared_ptr<std::vector<scan_entry>> &accumulated)
+{
+    if (!accumulated->empty()) {
+        return std::make_shared<std::string>(accumulated->back().key);
+    }
+    return start_after_owned;
+}
+
 void Crowtree::scan_async(Slice prefix, Slice start_after, size_t limit,
                           std::function<void(Status, std::vector<scan_entry>, bool)> on_done) const
 {
     // Copy the keys upfront: unlike scan()'s Slice (borrowed, valid only
     // for this one synchronous call), scan_async's keys must survive across
-    // an arbitrary number of async round trips.
+    // an arbitrary number of async round trips. `accumulated` collects
+    // entries resolved before each cold leaf so retries resume from the
+    // last resolved key instead of re-traversing already-resolved leaves.
     scan_async_attempt(std::make_shared<std::string>(prefix.to_string()),
-                       std::make_shared<std::string>(start_after.to_string()), limit, std::move(on_done));
+                       std::make_shared<std::string>(start_after.to_string()), limit,
+                       std::make_shared<std::vector<scan_entry>>(), std::move(on_done));
 }
 
-void Crowtree::scan_async_attempt(std::shared_ptr<std::string> prefix_owned,
-                                  std::shared_ptr<std::string> start_after_owned, size_t limit,
+void Crowtree::scan_async_attempt(std::shared_ptr<std::string>        prefix_owned,
+                                  const std::shared_ptr<std::string> &start_after_owned, size_t limit,
+                                  std::shared_ptr<std::vector<scan_entry>>                   accumulated,
                                   std::function<void(Status, std::vector<scan_entry>, bool)> on_done) const
 {
     std::vector<scan_entry> out;
     bool                    truncated       = false;
     uint64_t                pending_page_id = kInvalidPageId;
     if (try_scan_no_load(Slice(*prefix_owned), Slice(*start_after_owned), limit, &out, &truncated, &pending_page_id)) {
-        on_done(Status::Ok(), std::move(out), truncated);
+        // Append this attempt's entries to the accumulated set and deliver.
+        accumulated->insert(accumulated->end(), std::make_move_iterator(out.begin()),
+                            std::make_move_iterator(out.end()));
+        on_done(Status::Ok(), std::move(*accumulated), truncated);
         return;
     }
+
+    // Cold leaf hit: append the entries resolved so far (those before the
+    // cold leaf) to `accumulated`, then resume from the last resolved key
+    // after the demand-load completes — no re-traversal of already-resolved
+    // leaves. `out` contains only entries before the cold page because
+    // try_scan_no_load bails immediately on the first cold page.
+    if (!out.empty()) {
+        accumulated->insert(accumulated->end(), std::make_move_iterator(out.begin()),
+                            std::make_move_iterator(out.end()));
+    }
+    // Adjust limit by the number of entries already accumulated so the
+    // final result respects the caller's limit.
+    size_t remaining_limit = (limit > accumulated->size()) ? (limit - accumulated->size()) : 0;
 
 #ifdef CROW_TREE_HAVE_LIBURING
     if (opt_.async_reactor != nullptr && opt_.async_page_store != nullptr) {
@@ -2132,7 +2165,11 @@ void Crowtree::scan_async_attempt(std::shared_ptr<std::string> prefix_owned,
         if (!still_unloaded) {
             // Another loader already resolved this page_id between the
             // lock-free probe above and this re-check -- retry, still here.
-            scan_async_attempt(std::move(prefix_owned), std::move(start_after_owned), limit, std::move(on_done));
+            // Resume from the last accumulated key (if any) to avoid
+            // re-traversing already-resolved leaves.
+            auto resume_after = make_resume_after(start_after_owned, accumulated);
+            scan_async_attempt(std::move(prefix_owned), resume_after, remaining_limit, std::move(accumulated),
+                               std::move(on_done));
             return;
         }
         uint32_t iu   = opt_.page_store->iu_size();
@@ -2140,8 +2177,8 @@ void Crowtree::scan_async_attempt(std::shared_ptr<std::string> prefix_owned,
         demand_load_total_.fetch_add(1, std::memory_order_relaxed);
         opt_.async_page_store->submit_read(
             addr, blob->data(), blob->size(),
-            [this, page_id = pending_page_id, addr, plen, blob, prefix_owned, start_after_owned, limit,
-             on_done](Status st) mutable {
+            [this, page_id = pending_page_id, addr, plen, blob, prefix_owned, start_after_owned, remaining_limit,
+             accumulated, on_done](Status st) mutable {
                 if (!st.ok()) {
                     CR_LOG_ERROR("[{}] scan_async: demand-load I/O fault: pid={} addr={} len={} status={}", name_,
                                  page_id, addr, plen, st.to_string());
@@ -2161,7 +2198,11 @@ void Crowtree::scan_async_attempt(std::shared_ptr<std::string> prefix_owned,
                     on_done(Status::io_error("scan_async: demand-load decode/CRC failure"), {}, false);
                     return;
                 }
-                scan_async_attempt(std::move(prefix_owned), std::move(start_after_owned), limit, std::move(on_done));
+                // Resume from the last accumulated key to avoid
+                // re-traversing already-resolved leaves.
+                auto resume_after = make_resume_after(start_after_owned, accumulated);
+                scan_async_attempt(std::move(prefix_owned), resume_after, remaining_limit, std::move(accumulated),
+                                   std::move(on_done));
             });
         return;
     }
@@ -2169,7 +2210,9 @@ void Crowtree::scan_async_attempt(std::shared_ptr<std::string> prefix_owned,
     // No async backend wired -- fall back to the existing synchronous
     // demand-load and retry, still on this same thread.
     (void)resident(pending_page_id);
-    scan_async_attempt(std::move(prefix_owned), std::move(start_after_owned), limit, std::move(on_done));
+    auto resume_after = make_resume_after(start_after_owned, accumulated);
+    scan_async_attempt(std::move(prefix_owned), resume_after, remaining_limit, std::move(accumulated),
+                       std::move(on_done));
 }
 
 int Crowtree::height() const

@@ -499,7 +499,7 @@ pub struct Stats {
 }
 
 /// A scan result entry. `key` and `value` are zero-copy `Bytes` slices
-/// into the packed result buffer (R38), not per-entry `Vec<u8>` copies.
+/// into the packed result buffer, not per-entry `Vec<u8>` copies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanEntry {
     pub key: Bytes,
@@ -1241,7 +1241,7 @@ pub fn crc32c_update(crc: u32, data: &[u8]) -> u32 {
     unsafe { crow_common_crc32c_update(crc, data.as_ptr(), data.len()) }
 }
 
-/// Unpack the C++ packed scan result buffer into `ScanEntry`s. R38:
+/// Unpack the C++ packed scan result buffer into `ScanEntry`s.
 /// `bytes` is converted to a single `Bytes` once (zero-copy move of the
 /// `Vec<u8>` allocation via `Bytes::from`), then each entry's `key` and
 /// `value` is a `packed.slice(range)` — zero-copy, sharing the same

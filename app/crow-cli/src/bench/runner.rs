@@ -597,8 +597,8 @@ async fn run_worker(
                         // against the deterministic formula. A
                         // mismatch is a correctness error (distinct
                         // from transport/NotLeader errors).
-                        let ok_verify =
-                            read_key_id.is_some_and(|id| gen.verify_value(id, &value, cfg.verify_bytes));
+                        let ok_verify = read_key_id
+                            .is_some_and(|id| gen.verify_value(id, value.as_ref(), cfg.verify_bytes));
                         OpOutcome {
                             ok: true,
                             correctness_error: !ok_verify,

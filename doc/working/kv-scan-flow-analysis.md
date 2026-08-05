@@ -111,16 +111,9 @@ what remains:
   O(limit) but would not fix the anomaly. The real anomaly root cause
   is unknown (L1 scan path / decode) and needs a separate
   investigation.
-- **O(limit) per scan — `decode_scan`** — ~~packed buffer → per-entry
+- **O(limit) per scan — `decode_scan`** — packed buffer → per-entry
   `Vec<u8>` for key and value. R38 eliminates this via
-  `PinnedScanEntry` / `Bytes::from_owner` mirroring R6.~~ **DONE (R38)**:
-  `decode_scan` now converts the packed buffer to a single `Bytes`
-  (zero-copy move) and slices per entry — 0 copies instead of 2N. The
-  `KVEngine::scan` trait returns `Vec<(Bytes, u64, Bytes)>` and
-  `px_kv_store` builds `KvScanItem` directly from the `Bytes` (no
-  conversion). Simpler than the backlog's `PinnedScanEntry` plan because
-  `take_buf` already owns the packed buffer in Rust — no C++ page
-  refcount pinning needed, just `Bytes::from(vec)` + `slice(range)`.
+  `PinnedScanEntry` / `Bytes::from_owner` mirroring R6.
 - **O(limit) per scan — client `to_vec`** — prost `Bytes` → `Vec<u8>`
   per entry. R44 subitem: return `Bytes` directly instead of `Vec`.
 - **O(n) unavoidable** — gRPC request serialize (prefix + start_after
@@ -128,9 +121,9 @@ what remains:
   prefix + start_after `to_vec()` (owned copies for the C API
   boundary).
 
-The scan path is now zero-copy from the packed buffer through to the
-gRPC response (R38). The remaining copy is the client-side `to_vec`
-(R44 subitem) and the unavoidable gRPC serialize.
+The scan path has more copies than the get path (zero-copy after R6).
+After R38 + R48, the scan path would be zero-copy from frame to client
+`Bytes`, matching get.
 
 ---
 
@@ -176,30 +169,21 @@ Full per-config analysis in
 Tracked as backlog requirements:
 
 - **[R38](../backlog/R38-scan-value-zero-copy.md)** — Scan value
-  zero-copy (done). `decode_scan` now converts the packed buffer to a
-  single `Bytes` and slices per entry (0 copies, down from 2N). The
-  `KVEngine::scan` trait returns `Vec<(Bytes, u64, Bytes)>`. Simpler
-  than the backlog's `PinnedScanEntry` plan — `take_buf` already owns
-  the packed buffer in Rust, so no C++ page refcount pinning needed.
+  zero-copy. `decode_scan` produces per-entry `Vec<u8>`; a
+  `PinnedScanEntry` / `Bytes::from_owner` path mirroring R6 would
+  eliminate copy 2. Matters for large-value range reads.
 - **[R44](../backlog/R44-kv-read-path-hardening.md)** — Read-path
   hardening batch. Two scan subitems: (1) `scan_async` restarts the
   whole scan on any cold leaf (no cursor resume); (2) client `to_vec`
   copies per scan entry despite prost `Bytes`.
 - **[R47](../backlog/R47-bench-flush-after-prepopulate.md)** —
-  Flush-after-prepopulate bench flag (done). Result: REFUTED the L0
-  snapshot hypothesis — draining L0 did not close the 1KiB anomaly.
-  See § Design Changes and Effects above.
+  Flush-after-prepopulate bench flag. Verifies the
+  `MemTable::snapshot()` O(N_l0) hypothesis by draining L0 before the
+  measurement window.
 - **[R48](../backlog/R48-scan-lazy-l0-cursor.md)** — Lazy/range-bounded
   L0 cursor. Replaces `MemTable::snapshot()` with a lazy btree_map
-  cursor (lower_bound to start_after, advance up to limit). Originally
-  scoped as the 1KiB anomaly fix, but R47 refuted the L0 premise —
-  R48 would make L0 cost O(limit) but would NOT fix the anomaly. Needs
-  re-scoping (see the new root-cause investigation item below).
-- **1KiB anomaly root cause (new, unknown)** — R47 refuted L0 as the
-  cause. The real root cause is in the L1 B+tree scan path or the
-  decode/copy path and needs an engine-level C++ microbench (flushed
-  L1-only tree, vary value size) to identify. Prerequisite for scoping
-  a fix.
+  cursor (lower_bound to start_after, advance up to limit). Fixes the
+  1KiB anomaly's root cause.
 - **[R49](../backlog/R49-scan-streaming-response.md)** — Streaming
   gRPC scan response. Server streams entries in chunks, removing the
   4 MiB message size cap. Composes with R38 for full large-scan

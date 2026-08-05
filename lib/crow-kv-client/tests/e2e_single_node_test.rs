@@ -72,7 +72,7 @@ async fn put_get_delete_round_trip_via_topology_discovery() {
         .await
         .unwrap()
     {
-        GetOutcome::Found { value, .. } => assert_eq!(value, b"v1"),
+        GetOutcome::Found { value, .. } => assert_eq!(value.as_ref(), b"v1"),
         GetOutcome::NotFound => panic!("expected k1 to be found"),
     }
 
@@ -154,7 +154,7 @@ async fn read_your_writes_uses_auto_tracked_watermark() {
         .await
         .unwrap()
     {
-        GetOutcome::Found { value, .. } => assert_eq!(value, b"active"),
+        GetOutcome::Found { value, .. } => assert_eq!(value.as_ref(), b"active"),
         GetOutcome::NotFound => panic!("expected to observe our own write"),
     }
 

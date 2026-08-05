@@ -10,6 +10,19 @@ syntax = "proto3";
 
 package crow_kv.rpc;
 
+// Structured error code for KV read/write responses. proto3
+// default 0 = NONE keeps the change wire-compatible: old servers that
+// don't set the field produce NONE, and the client falls back to the
+// `error` string for NONE. New servers set the code alongside the
+// existing `error` string so the client can switch on the code without
+// fragile string matching.
+enum KvErrorCode {
+  KV_ERROR_NONE        = 0;
+  KV_ERROR_NOT_LEADER  = 1;
+  KV_ERROR_UNAVAILABLE = 2;
+  KV_ERROR_INTERNAL    = 3;
+}
+
 message KvSetRequest {
   uint32 version = 1;
   bytes  key     = 2;
@@ -92,6 +105,8 @@ message KvResponse {
   // Group safe-slot known to the serving replica (min applied across voting
   // members). Meaningful for BOUNDED_STALE reads.
   uint64 safe_slot = 11;
+  // Structured error code. Default 0 = NONE (old server).
+  KvErrorCode error_code = 12;
 }
 
 // Prefix scan over the learner store. V1: local-replica read like
@@ -135,6 +150,8 @@ message KvScanResponse {
   // Leader endpoint when this node is not the leader (MinSlot scan on a
   // lagging follower). Empty for other failure shapes.
   string not_leader_hint = 9;
+  // Structured error code. Default 0 = NONE (old server).
+  KvErrorCode error_code = 10;
 }
 
 service KvService {
