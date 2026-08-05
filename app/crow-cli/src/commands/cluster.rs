@@ -23,6 +23,14 @@ pub enum ClusterVerb {
     ///   `s<sid>/g<gid>/r<rid>` → replica
     ///   `<node-id>`            → node (any token not matching the above)
     Inspect { id: String },
+    /// Initialize the cluster: create the system group (store 0, group
+    /// 0) on the given nodes and finalize topology cutover. Must be
+    /// called before creating non-zero stores/groups.
+    Init {
+        /// Comma-separated node ids to bootstrap (e.g. `n1,n2,n3`).
+        #[arg(long, value_delimiter = ',')]
+        nodes: Vec<String>,
+    },
 }
 
 pub async fn run_cluster_status(cli: &Cli) -> ExitCode {
@@ -83,6 +91,28 @@ pub async fn run_cluster_topology(cli: &Cli) -> ExitCode {
     }
     print_topology_human(&servers, &nodes, &stores, &groups);
     ExitCode::SUCCESS
+}
+
+pub async fn run_cluster_init(cli: &Cli, nodes: &[String]) -> ExitCode {
+    if nodes.is_empty() {
+        eprintln!("error: cluster init requires at least one node (--nodes n1,n2,...)");
+        return ExitCode::from(1);
+    }
+    let client = match console_client(cli) {
+        Ok(c) => c,
+        Err(c) => return c,
+    };
+    match client.cluster_init(nodes).await {
+        Ok(v) => {
+            if cli.json {
+                print_json(&v)
+            } else {
+                println!("cluster initialized on nodes: {}", nodes.join(", "));
+                ExitCode::SUCCESS
+            }
+        }
+        Err(e) => fail("cluster init", &e),
+    }
 }
 
 pub async fn run_cluster_inspect(cli: &Cli, id: &str) -> ExitCode {
