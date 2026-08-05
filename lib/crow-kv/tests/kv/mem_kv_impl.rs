@@ -4,6 +4,7 @@
 #![allow(clippy::cast_possible_truncation)]
 #![allow(dead_code)]
 
+use bytes::Bytes;
 use dashmap::DashMap;
 use std::collections::BTreeMap;
 
@@ -96,10 +97,12 @@ impl KVEngine for InMemKV {
         prefix: &[u8],
         start_after: &[u8],
         limit: usize,
-    ) -> KVFuture<(Vec<(Vec<u8>, u64, Vec<u8>)>, bool)> {
+    ) -> KVFuture<(Vec<(Bytes, u64, Bytes)>, bool)> {
         // DashMap is not ordered — collect matching live entries, sort,
-        // then apply the start_after cursor and limit.
-        let mut items: Vec<(Vec<u8>, u64, Vec<u8>)> = self
+        // then apply the start_after cursor and limit. R38: keys/values
+        // are Bytes (one copy via Bytes::from(Vec), same as the get path;
+        // InMemKV is test-only so zero-copy slicing does not apply).
+        let mut items: Vec<(Bytes, u64, Bytes)> = self
             .map
             .iter()
             .filter_map(|r| {
@@ -111,7 +114,7 @@ impl KVEngine for InMemKV {
                 }
                 let (slot, cell) = r.value();
                 if let Cell::Value(v) = cell {
-                    Some((r.key().clone(), *slot, v.clone()))
+                    Some((Bytes::from(r.key().clone()), *slot, Bytes::from(v.clone())))
                 } else {
                     None
                 }

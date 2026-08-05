@@ -404,8 +404,10 @@ async fn async_scan_slow_path_completes_after_eviction() {
     let (entries, truncated) = t.scan(Vec::new(), Vec::new(), 0).await.unwrap();
     assert!(!truncated);
     assert_eq!(entries.len(), 20);
-    let mut got: std::collections::BTreeMap<Vec<u8>, Vec<u8>> =
-        entries.into_iter().map(|e| (e.key, e.value)).collect();
+    let mut got: std::collections::BTreeMap<Vec<u8>, Vec<u8>> = entries
+        .into_iter()
+        .map(|e| (e.key.to_vec(), e.value.to_vec()))
+        .collect();
     for i in 0..20usize {
         assert_eq!(got.remove(&key(i)), Some(format!("v{i}").into_bytes()));
     }

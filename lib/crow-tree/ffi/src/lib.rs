@@ -498,12 +498,13 @@ pub struct Stats {
     pub l1_get_hit_total: u64,
 }
 
-/// A scan result entry.
+/// A scan result entry. `key` and `value` are zero-copy `Bytes` slices
+/// into the packed result buffer (R38), not per-entry `Vec<u8>` copies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanEntry {
-    pub key: Vec<u8>,
+    pub key: Bytes,
     pub slot: u64,
-    pub value: Vec<u8>,
+    pub value: Bytes,
     pub tombstone: bool,
 }
 
@@ -1068,7 +1069,7 @@ impl Crowtree {
             )
         })?;
         let bytes = take_buf(buf);
-        let entries = decode_scan(&bytes, count as usize)?;
+        let entries = decode_scan(bytes, count as usize)?;
         Ok((entries, truncated != 0))
     }
 
@@ -1240,7 +1241,15 @@ pub fn crc32c_update(crc: u32, data: &[u8]) -> u32 {
     unsafe { crow_common_crc32c_update(crc, data.as_ptr(), data.len()) }
 }
 
-fn decode_scan(bytes: &[u8], count: usize) -> Result<Vec<ScanEntry>, CtError> {
+/// Unpack the C++ packed scan result buffer into `ScanEntry`s. R38:
+/// `bytes` is converted to a single `Bytes` once (zero-copy move of the
+/// `Vec<u8>` allocation via `Bytes::from`), then each entry's `key` and
+/// `value` is a `packed.slice(range)` — zero-copy, sharing the same
+/// allocation. All slices keep it alive until the last one is dropped.
+/// Replaces the prior per-entry `.to_vec()` copies (2N copies → 0).
+fn decode_scan(bytes: Vec<u8>, count: usize) -> Result<Vec<ScanEntry>, CtError> {
+    let packed = Bytes::from(bytes);
+    let bytes: &[u8] = packed.as_ref();
     let mut out = Vec::with_capacity(count);
     let mut pos = 0usize;
     let rd_u32 = |b: &[u8], p: usize| -> u32 { u32::from_le_bytes([b[p], b[p + 1], b[p + 2], b[p + 3]]) };
@@ -1258,7 +1267,7 @@ fn decode_scan(bytes: &[u8], count: usize) -> Result<Vec<ScanEntry>, CtError> {
         if pos + klen + 13 > bytes.len() {
             return Err(CtError::Corruption);
         }
-        let key = bytes[pos..pos + klen].to_vec();
+        let key = packed.slice(pos..pos + klen);
         pos += klen;
         let slot = rd_u64(bytes, pos);
         pos += 8;
@@ -1269,7 +1278,7 @@ fn decode_scan(bytes: &[u8], count: usize) -> Result<Vec<ScanEntry>, CtError> {
         if pos + vlen > bytes.len() {
             return Err(CtError::Corruption);
         }
-        let value = bytes[pos..pos + vlen].to_vec();
+        let value = packed.slice(pos..pos + vlen);
         pos += vlen;
         out.push(ScanEntry {
             key,
@@ -1682,7 +1691,7 @@ impl AsyncCrowtree {
             )
         };
         let out = drive_ct_future(FutureGuard(fut), &self.inner, FutureKind::Scan).await?;
-        let entries = decode_scan(&out.value, out.slot as usize)?;
+        let entries = decode_scan(out.value, out.slot as usize)?;
         Ok((entries, out.found))
     }
 
@@ -1706,14 +1715,14 @@ impl AsyncCrowtree {
         let mut guard = FutureGuard(fut);
         if let Some(result) = try_poll_ct_future(&mut guard, FutureKind::Scan) {
             return ScanOutcome::Ready(result.and_then(|out| {
-                let entries = decode_scan(&out.value, out.slot as usize)?;
+                let entries = decode_scan(out.value, out.slot as usize)?;
                 Ok((entries, out.found))
             }));
         }
         let tree = self.inner.clone();
         ScanOutcome::Pending(Box::pin(async move {
             let out = drive_ct_future(guard, &tree, FutureKind::Scan).await?;
-            let entries = decode_scan(&out.value, out.slot as usize)?;
+            let entries = decode_scan(out.value, out.slot as usize)?;
             Ok((entries, out.found))
         }))
     }

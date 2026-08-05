@@ -54,14 +54,17 @@ pub trait KVEngine: Send + Sync {
     /// where `truncated` is set when more matches existed than were returned.
     /// `start_after` is an exclusive lower bound (empty = start from
     /// beginning); only keys strictly greater than `start_after` are
-    /// returned, enabling cursor-based pagination.
+    /// returned, enabling cursor-based pagination. Entry keys and values
+    /// are zero-copy `Bytes` (R38): for `CrowTreeEngine` they slice into
+    /// the C++ packed result buffer; for `InMemKV` they are `Bytes::from`
+    /// of the owned `Vec<u8>` (one copy, same as its get path).
     #[allow(clippy::type_complexity)]
     fn scan(
         &self,
         prefix: &[u8],
         start_after: &[u8],
         limit: usize,
-    ) -> KVFuture<(Vec<(Vec<u8>, u64, Vec<u8>)>, bool)>;
+    ) -> KVFuture<(Vec<(Bytes, u64, Bytes)>, bool)>;
 
     /// Number of live (non-tombstoned) keys.
     fn live_key_count(&self) -> usize;

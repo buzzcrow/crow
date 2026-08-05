@@ -179,10 +179,9 @@ impl KvStore for PxKvStore {
             .await;
         let mut items: Vec<crate::rpc::KvScanItem> = Vec::with_capacity(scanned.len());
         for (key, _slot, value) in scanned {
-            items.push(crate::rpc::KvScanItem {
-                key: bytes::Bytes::from(key),
-                value: bytes::Bytes::from(value),
-            });
+            // R38: key and value are already zero-copy Bytes from the
+            // engine's packed scan buffer — assign directly, no conversion.
+            items.push(crate::rpc::KvScanItem { key, value });
         }
 
         debug!(

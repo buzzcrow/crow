@@ -159,7 +159,11 @@ async fn scan_constructs_pending_for_genuine_demand_load_miss() {
 
     if !e.handle().is_reactor_available() {
         let (items, truncated) = e.scan(b"", b"", 0).into_ready();
-        assert_eq!(items, vec![(b"k".to_vec(), 1, b"v".to_vec())]);
+        let items_vec: Vec<(Vec<u8>, u64, Vec<u8>)> = items
+            .into_iter()
+            .map(|(k, s, v)| (k.to_vec(), s, v.to_vec()))
+            .collect();
+        assert_eq!(items_vec, vec![(b"k".to_vec(), 1, b"v".to_vec())]);
         assert!(!truncated);
         return;
     }
@@ -168,7 +172,11 @@ async fn scan_constructs_pending_for_genuine_demand_load_miss() {
         KVFuture::Ready(_) => panic!("expected a genuine Pending after evicting the resident leaf"),
         KVFuture::Pending(fut) => {
             let (items, truncated) = fut.await;
-            assert_eq!(items, vec![(b"k".to_vec(), 1, b"v".to_vec())]);
+            let items_vec: Vec<(Vec<u8>, u64, Vec<u8>)> = items
+                .into_iter()
+                .map(|(k, s, v)| (k.to_vec(), s, v.to_vec()))
+                .collect();
+            assert_eq!(items_vec, vec![(b"k".to_vec(), 1, b"v".to_vec())]);
             assert!(!truncated);
         }
     }
