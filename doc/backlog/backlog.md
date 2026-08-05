@@ -56,11 +56,6 @@ complexity, and dependency. Before implementation, follow the
   R48 would still make L0 cost O(limit) but would not fix the
   anomaly; the real root cause is unknown and needs an engine-level
   investigation first. Medium complexity.
-- **[R49](R49-scan-streaming-response.md)** — Scan streaming gRPC response — Area:
-  scan / RPC — tonic's 4 MiB max message size caps scan payload
-  (full_100k, 16KiB values fail). Server-streaming Scan RPC emits
-  entries in chunks, mirroring etcd PR #19766. Medium-high complexity;
-  composes with R38 (zero-copy values) for full large-scan solution.
 ### Low Priority
 
 **Complexity — Low (placeholder):**

@@ -189,6 +189,9 @@ Tracked as backlog requirements:
   cursor (lower_bound to start_after, advance up to limit). Fixes the
   1KiB anomaly's root cause.
 - **[R49](../backlog/R49-scan-streaming-response.md)** — Streaming
-  gRPC scan response. Server streams entries in chunks, removing the
-  4 MiB message size cap. Composes with R38 for full large-scan
-  solution.
+  gRPC scan response (done). New `ScanStream` server-streaming RPC
+  emits `KvScanChunk` messages (256 entries or 1 MiB per chunk). Client
+  `scan_stream` reassembles into `ScanOutcome` with same retry/redirect
+  semantics. Bench uses `scan_stream`. Unary `Scan` retained for
+  compatibility. Composes with R38 (zero-copy values) for full
+  large-scan solution.
