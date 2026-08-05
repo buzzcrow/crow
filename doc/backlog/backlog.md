@@ -11,7 +11,7 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R48** — Bump this line in the same commit when adding a new item.
+**Next R number: R50** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
@@ -79,6 +79,17 @@ complexity, and dependency. Before implementation, follow the
   `crow-cli bench run` that drains L0 before the measurement window,
   verifying the hypothesis and enabling a clean L1-only scan baseline.
   Low complexity; follow-on is a lazy/range-bounded L0 cursor.
+- **[R48](R48-scan-lazy-l0-cursor.md)** — Scan lazy/range-bounded L0 cursor — Area:
+  scan / crow-tree engine — `MemTable::snapshot()` copies all N_l0
+  entries on every scan (O(N_l0), not O(limit)), the root cause of the
+  1KiB anomaly. Replaces the snapshot vector with a lazy btree_map
+  cursor (lower_bound to start_after, advance up to limit). Medium
+  complexity; depends on R47 to verify the hypothesis first.
+- **[R49](R49-scan-streaming-response.md)** — Scan streaming gRPC response — Area:
+  scan / RPC — tonic's 4 MiB max message size caps scan payload
+  (full_100k, 16KiB values fail). Server-streaming Scan RPC emits
+  entries in chunks, mirroring etcd PR #19766. Medium-high complexity;
+  composes with R38 (zero-copy values) for full large-scan solution.
 ### Low Priority
 
 **Complexity — Low (placeholder):**
