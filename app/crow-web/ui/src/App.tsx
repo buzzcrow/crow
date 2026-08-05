@@ -24,6 +24,7 @@ import {
   AddReplicaDialog,
   DeployServerDialog,
   ConfirmDeleteDialog,
+  InitClusterDialog,
 } from './components/dialogs';
 import { ViewMode } from './types';
 import {
@@ -36,6 +37,7 @@ import {
   restartServer,
   pingNode,
   setApiBase,
+  resetCluster,
 } from './api';
 import { deployPortDefaultsForNode, nextIdFromSuffix, nextNumericId } from './components/dialogs/defaults';
 import { buildCrowKVServers, crowKvServerNodeIds } from './data/crowKvServers';
@@ -97,6 +99,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
     addReplica?: { storeId: string; groupId: string };
     deployServer?: { nodeId: string };
     delete?: { type: string; id: string; onDelete: () => Promise<void> };
+    initCluster?: boolean;
   }>({});
 
   const { menuState, openMenu, closeMenu } = useContextMenu();
@@ -119,6 +122,11 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
   const dataError = physError || logError;
   const servers = useMemo(() => buildCrowKVServers(nodes, racks), [nodes, racks]);
   const serverNodeIds = useMemo(() => crowKvServerNodeIds(servers), [servers]);
+  // Cluster is initialized once the system store (store 0) exists.
+  const clusterInitialized = useMemo(
+    () => stores.some((s) => String(s.store_id) === '0'),
+    [stores],
+  );
 
   const clusterHealth: ClusterHealth = useMemo(() => {
     if (dataError) return 'Failed';
@@ -139,6 +147,14 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
       setRefreshing(false);
     }
   }, [refreshPhysical, refreshLogical]);
+
+  // After cluster init succeeds, refresh the tree so the system group
+  // appears. Init only bootstraps store 0 / group 0; store creation is
+  // a separate step the user initiates via the "+" button.
+  const handleInitSuccess = useCallback(async () => {
+    await handleRefresh();
+    setDialog((d) => ({ ...d, initCluster: false }));
+  }, [handleRefresh]);
 
   useEffect(() => {
     if (!resizing) return;
@@ -186,6 +202,17 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
     [],
   );
 
+  const handleResetCluster = useCallback(() => {
+    setDialog((d) => ({
+      ...d,
+      delete: {
+        type: 'Cluster',
+        id: 'all',
+        onDelete: async () => { await runMutation('Reset Cluster', 'all', () => resetCluster()); },
+      },
+    }));
+  }, [runMutation]);
+
   /** Build per-layer context menu items for a normalized target. */
   const buildMenuItems = useCallback(
     (t: MenuTarget): MenuItemOrSeparator[] => {
@@ -214,7 +241,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           if (!hasServer) {
             items.push({
               id: 'deploy',
-              label: 'Deploy CrowKV',
+              label: 'Deploy Crow Storage',
               icon: <Server className="tw-h-4 tw-w-4" />,
               onSelect: () => setDialog((d) => ({ ...d, deployServer: { nodeId: t.id } })),
             });
@@ -232,15 +259,15 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           if (hasServer) {
             items.push({
               id: 'restart',
-              label: 'Restart CrowKV',
+              label: 'Restart Crow Storage',
               icon: <RotateCw className="tw-h-4 tw-w-4" />,
-              onSelect: () => runMutation('Restart CrowKV', t.id, () => restartServer(t.id)),
+              onSelect: () => runMutation('Restart Crow Storage', t.id, () => restartServer(t.id)),
             });
             items.push({
               id: 'stop',
-              label: 'Stop CrowKV',
+              label: 'Stop Crow Storage',
               icon: <Square className="tw-h-4 tw-w-4" />,
-              onSelect: () => runMutation('Stop CrowKV', t.id, () => stopServer(t.id)),
+              onSelect: () => runMutation('Stop Crow Storage', t.id, () => stopServer(t.id)),
             });
           }
           items.push({ id: 's1', separator: true });
@@ -260,16 +287,20 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
             icon: <Database className="tw-h-4 tw-w-4" />,
             onSelect: () => setDialog((d) => ({ ...d, addGroup: { storeId: t.id } })),
           });
-          items.push({ id: 's1', separator: true });
-          items.push({
-            id: 'del-store',
-            label: 'Delete Store',
-            icon: <Trash2 className="tw-h-4 tw-w-4" />,
-            destructive: true,
-            onSelect: () => requestDelete('Store', t.id, async () => { await runMutation('Delete Store', t.id, () => removeStore(t.id)); }),
-          });
+          // System store (store 0) cannot be deleted individually.
+          if (t.id !== '0') {
+            items.push({ id: 's1', separator: true });
+            items.push({
+              id: 'del-store',
+              label: 'Delete Store',
+              icon: <Trash2 className="tw-h-4 tw-w-4" />,
+              destructive: true,
+              onSelect: () => requestDelete('Store', t.id, async () => { await runMutation('Delete Store', t.id, () => removeStore(t.id)); }),
+            });
+          }
         } else if (t.type === 'Group') {
           const storeId = p.store_id;
+          const isSystemGroup = storeId === '0' && t.id === '0';
           if (modules?.replicas !== false) {
             items.push({
               id: 'add-replica',
@@ -280,19 +311,22 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
               },
             });
           }
-          items.push({ id: 's1', separator: true });
-          items.push({
-            id: 'del-group',
-            label: 'Delete Group',
-            icon: <Trash2 className="tw-h-4 tw-w-4" />,
-            destructive: true,
-            onSelect: () => {
-              if (storeId)
-                requestDelete('Group', t.id, async () => {
-                  await runMutation('Delete Group', `${storeId}/${t.id}`, () => removeGroup(storeId, t.id));
-                });
-            },
-          });
+          // System group (store 0, group 0) cannot be deleted individually.
+          if (!isSystemGroup) {
+            items.push({ id: 's1', separator: true });
+            items.push({
+              id: 'del-group',
+              label: 'Delete Group',
+              icon: <Trash2 className="tw-h-4 tw-w-4" />,
+              destructive: true,
+              onSelect: () => {
+                if (storeId)
+                  requestDelete('Group', t.id, async () => {
+                    await runMutation('Delete Group', `${storeId}/${t.id}`, () => removeGroup(storeId, t.id));
+                  });
+              },
+            });
+          }
         } else if (t.type === 'Replica') {
           const storeId = p.store_id;
           const groupId = p.group_id;
@@ -344,8 +378,9 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
   const handleAdd = useCallback(() => {
     if (readonly) return;
     if (physicalActive) setDialog((d) => ({ ...d, addRack: true }));
+    else if (!clusterInitialized) setDialog((d) => ({ ...d, initCluster: true }));
     else setDialog((d) => ({ ...d, addStore: true }));
-  }, [readonly, physicalActive]);
+  }, [readonly, physicalActive, clusterInitialized]);
 
   const closeDialogs = useCallback(() => setDialog({}), []);
 
@@ -481,6 +516,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
         onToggleKV={() => setCenterPanel((p) => (p === 'kv' ? 'topology' : 'kv'))}
         centerPanel={centerPanel}
         onShowTopology={() => setCenterPanel('topology')}
+        onResetCluster={readonly ? undefined : handleResetCluster}
       />
 
       {dataError && (
@@ -501,6 +537,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
         loading={loading}
         readonly={readonly}
         width={sidebarWidth}
+        clusterInitialized={clusterInitialized}
         onNodeClick={onTreeNodeClick}
         onNodeContextMenu={onTreeContextMenu}
         onAdd={handleAdd}
@@ -524,7 +561,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           {centerPanel === 'swagger' && swaggerEnabled ? (
             <SwaggerPanel nodeId={apiTargetNodeId} apiPrefix={apiPrefix} servers={servers} />
           ) : centerPanel === 'kv' && kvEnabled ? (
-            <KvOperatorPanel stores={stores} selectedEntity={selectedEntity} readonly={readonly} />
+            <KvOperatorPanel stores={stores} selectedEntity={selectedEntity} readonly={readonly} backendError={!!dataError} loading={loading} />
           ) : (
             <TopologyCanvas
               racks={racks}
@@ -576,6 +613,14 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           onSuccess={handleRefresh}
         />
       )}
+      <InitClusterDialog
+        isOpen={!!dialog.initCluster}
+        onClose={closeDialogs}
+        nodes={nodes}
+        servers={servers}
+        defaultNodeIds={storeDialogDefaults.nodeIds}
+        onSuccess={handleInitSuccess}
+      />
       <AddStoreDialog
         isOpen={!!dialog.addStore}
         onClose={closeDialogs}

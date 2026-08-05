@@ -27,7 +27,7 @@ use crate::cluster::remote_replica::PxRemoteReplica;
 use crate::cluster::replica::{
     PxReplicaError, Replica, ReplicaClient, ReplicaHandler, StepDownReply, StepDownRequestPayload,
 };
-use crate::cluster::status::{GroupStatus, InflightStatus, StatusLevel};
+use crate::cluster::status::{GroupStatus, InflightStatus, ReadStateView, StatusLevel};
 use crate::common::config::{AdmissionPolicy, CrowKVConfig, PaxosConfig};
 use crate::common::report::OperationReport;
 use crate::metrics::{Counter, Gauge, LatencySummary};
@@ -779,7 +779,7 @@ impl PxGroup {
         for remote in remote_replicas {
             let idx = remote.node_id as usize;
             if idx < self.remote_replicas.len() {
-                self.remote_replicas[idx] = RemoteReplicaKind::Real(remote);
+                self.remote_replicas[idx] = RemoteReplicaKind::Real(Box::new(remote));
                 self.valid_replica_count += 1;
             }
         }
@@ -815,7 +815,8 @@ impl PxGroup {
         while idx >= self.remote_replicas.len() {
             self.remote_replicas.push(RemoteReplicaKind::Placeholder);
         }
-        self.remote_replicas[idx] = RemoteReplicaKind::Real(PxRemoteReplica::new(node_id, endpoint));
+        self.remote_replicas[idx] =
+            RemoteReplicaKind::Real(Box::new(PxRemoteReplica::new(node_id, endpoint)));
         self.valid_replica_count = self
             .remote_replicas
             .iter()
@@ -964,6 +965,12 @@ impl PxGroup {
             ));
         }
 
+        let read_state = self.read_handles.get().map(|h| ReadStateView {
+            lease_valid: h.lease_valid.snapshot(),
+            contiguous_applied: h.contiguous_applied.snapshot(),
+            safe_slot: h.safe_slot.snapshot(),
+        });
+
         GroupStatus {
             group_id: self.group_id,
             leader_id: self.leader_id(),
@@ -981,6 +988,7 @@ impl PxGroup {
                 total_enqueued: self.inflight.total_enqueued.load(Ordering::Relaxed),
                 total_wait_us: self.inflight.total_wait_us.load(Ordering::Relaxed),
             }),
+            read_state,
         }
     }
 
@@ -1180,7 +1188,7 @@ impl PxGroup {
             self.valid_replica_count += 1;
         }
 
-        self.remote_replicas[idx] = RemoteReplicaKind::Real(remote);
+        self.remote_replicas[idx] = RemoteReplicaKind::Real(Box::new(remote));
         self.recompute_quorum();
 
         // Bump the epoch iff this mutation actually changes the voting
@@ -2585,9 +2593,11 @@ fn retry_jitter_multiplier() -> u64 {
 }
 
 /// Remote replica kind - either a real remote replica or a placeholder.
+/// `Real` boxes `PxRemoteReplica` (~208 bytes) to keep the enum small
+/// (`clippy::large_enum_variant`).
 #[derive(Debug)]
 pub(crate) enum RemoteReplicaKind {
-    Real(PxRemoteReplica),
+    Real(Box<PxRemoteReplica>),
     Placeholder,
 }
 
@@ -2608,7 +2618,7 @@ impl RemoteReplicaKind {
 
     fn as_real(&self) -> Option<&PxRemoteReplica> {
         match self {
-            Self::Real(r) => Some(r),
+            Self::Real(r) => Some(r.as_ref()),
             Self::Placeholder => None,
         }
     }

@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-import { RefreshCw, Layers, Network, FileJson, Database } from 'lucide-react';
+import { RefreshCw, Layers, Network, FileJson, Database, RotateCcw } from 'lucide-react';
 import { useViewMode } from '../contexts/ViewModeContext';
 import { ViewMode } from '../types';
 import { cn } from '../utils/cn';
@@ -23,6 +23,7 @@ interface HeaderProps {
   onToggleKV?: () => void;
   centerPanel?: CenterPanelMode;
   onShowTopology?: () => void;
+  onResetCluster?: () => void;
 }
 
 const healthPill: Record<ClusterHealth, string> = {
@@ -52,6 +53,7 @@ export function Header({
   onToggleKV,
   centerPanel = 'topology',
   onShowTopology,
+  onResetCluster,
 }: HeaderProps) {
   const { viewMode, setViewMode } = useViewMode();
 
@@ -59,7 +61,7 @@ export function Header({
     <header className="tw-fixed tw-top-0 tw-left-0 tw-right-0 tw-z-40 tw-h-14 tw-bg-panel tw-border-b tw-border-border tw-flex tw-items-center tw-gap-4 tw-px-4">
       {/* Brand */}
       <div className="tw-flex tw-items-center tw-gap-2 tw-font-semibold tw-text-text">
-        <span className="tw-text-accent">◆</span> CrowKV Console
+        <span className="tw-text-accent">◆</span> Crow Storage Console
       </div>
 
       {/* Health pill */}
@@ -133,6 +135,16 @@ export function Header({
           title={apiTargetNodeId ? `Show API for ${apiTargetNodeId}` : 'No node available for API'}
         >
           <FileJson className="tw-h-3.5 tw-w-3.5" /> API
+        </button>
+      )}
+
+      {onResetCluster && (
+        <button
+          onClick={onResetCluster}
+          className="tw-flex tw-items-center tw-gap-1.5 tw-px-2.5 tw-py-1.5 tw-rounded-md tw-text-xs tw-border tw-border-failed/30 tw-text-failed hover:tw-bg-failed/10 tw-transition-colors"
+          title="Reset entire cluster: tear down all stores, groups, servers, nodes, and racks"
+        >
+          <RotateCcw className="tw-h-3.5 tw-w-3.5" /> Reset
         </button>
       )}
 

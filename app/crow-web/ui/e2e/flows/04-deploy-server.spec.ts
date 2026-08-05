@@ -17,9 +17,9 @@ test.describe('E2E-04 deploy server', () => {
       await expect(aside.getByText('N-n4', { exact: true })).toBeVisible({ timeout: 3_000 });
 
       await aside.getByText('N-n4', { exact: true }).click({ button: 'right' });
-      await page.getByRole('menuitem', { name: /deploy CrowKV/i }).click();
+      await page.getByRole('menuitem', { name: /deploy Crow Storage/i }).click();
 
-      await expect(page.getByRole('dialog', { name: /deploy CrowKV on n4/i })).toBeVisible();
+      await expect(page.getByRole('dialog', { name: /deploy Crow Storage on n4/i })).toBeVisible();
       await page.getByLabel('Management Port').fill('9911');
       await page.getByLabel('gRPC Port').fill('9921');
       await page.getByLabel('Binary Path (optional)').fill(DEFAULT_SERVER_BINARY);

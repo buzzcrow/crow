@@ -100,12 +100,13 @@ function selectedNodeId(entity: SelectedEntity): string | null {
 function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHealthById, refreshToken, focusRequest, onEntityContextMenu }: TopologyCanvasProps) {
   const { viewMode } = useViewMode();
   const { selectedEntity, selectEntity } = useSelection();
-  const { fitView, setViewport } = useReactFlow();
+  const { fitView, setViewport, setCenter, getZoom, getNodes } = useReactFlow();
   const nodesInitialized = useNodesInitialized();
   const viewportsRef = useRef<Partial<Record<ViewMode, Viewport>>>({});
   const fittedOnceRef = useRef<Partial<Record<ViewMode, boolean>>>({});
   const lastRefreshTokenRef = useRef<number | undefined>(refreshToken);
   const lastFocusNonceRef = useRef<number | undefined>(undefined);
+  const nodeIdsKeyRef = useRef<Partial<Record<ViewMode, string>>>({});
 
   const { nodes: rawNodes, edges } = useMemo(
     () => buildFlowForViewMode(viewMode, racks, nodes, servers, stores, nodeStores, nodeHealthById),
@@ -127,19 +128,37 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
       fittedOnceRef.current[viewMode] = false;
       return;
     }
-    const frame = requestAnimationFrame(() => {
+    // Re-fit when the set of node IDs changes (nodes added/removed),
+    // whether from a mutation or a poll update — not just on manual refresh.
+    const nodeIdsKey = positioned.nodes.map((n) => n.id).sort().join(',');
+    if (nodeIdsKey !== nodeIdsKeyRef.current[viewMode]) {
+      nodeIdsKeyRef.current[viewMode] = nodeIdsKey;
+      viewportsRef.current[viewMode] = undefined;
+      fittedOnceRef.current[viewMode] = false;
+    }
+    // Retry fit across frames until ReactFlow has measured every node's
+    // dimensions — newly added nodes lack width/height on the first frame,
+    // so a single rAF fitView would ignore them and never re-fit.
+    let rafId: number;
+    const tryFit = () => {
       const savedViewport = viewportsRef.current[viewMode];
       if (savedViewport) {
         void setViewport(savedViewport, { duration: 250 });
         return;
       }
       if (!fittedOnceRef.current[viewMode]) {
+        const storeNodes = getNodes();
+        if (storeNodes.some((n) => !n.width || !n.height)) {
+          rafId = requestAnimationFrame(tryFit);
+          return;
+        }
         void fitView({ padding: 0.1, duration: 250, includeHiddenNodes: true });
         fittedOnceRef.current[viewMode] = true;
       }
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [fitView, nodesInitialized, positioned.nodes, setViewport, viewMode, refreshToken]);
+    };
+    rafId = requestAnimationFrame(tryFit);
+    return () => cancelAnimationFrame(rafId);
+  }, [fitView, getNodes, nodesInitialized, positioned.nodes, setViewport, viewMode, refreshToken]);
 
   const selId = selectedEntity ? selectedNodeId(selectedEntity) : null;
   const decoratedNodes: Node[] = useMemo(
@@ -163,17 +182,25 @@ function TopologyCanvasInner({ racks, nodes, servers, stores, nodeStores, nodeHe
     const focusNodes = positioned.nodes.filter((node) => targetIds.has(node.id));
     if (focusNodes.length === 0) return;
 
+    // Drop any stale saved viewport for this mode. Programmatic setCenter
+    // does not reliably fire onMoveEnd with the new viewport, so the saved
+    // value still points at the pre-focus position; if a poll lands right
+    // after the focus pan, the node-change effect would otherwise restore it
+    // and snap the view back to where it was before the click.
+    viewportsRef.current[viewMode] = undefined;
+
     const frame = requestAnimationFrame(() => {
-      void fitView({
-        nodes: focusNodes,
-        padding: 0.18,
-        duration: 250,
-        includeHiddenNodes: true,
-      });
+      // Pan only — keep the current zoom level, just center the focused
+      // node(s) in the viewport. Scaling on every click is jarring.
+      const xs = focusNodes.map((n) => n.position.x + (n.width ?? 0) / 2);
+      const ys = focusNodes.map((n) => n.position.y + (n.height ?? 0) / 2);
+      const cx = xs.reduce((a, b) => a + b, 0) / xs.length;
+      const cy = ys.reduce((a, b) => a + b, 0) / ys.length;
+      void setCenter(cx, cy, { zoom: getZoom(), duration: 250 });
       fittedOnceRef.current[viewMode] = true;
     });
     return () => cancelAnimationFrame(frame);
-  }, [fitView, focusRequest, nodesInitialized, positioned.edges, positioned.nodes, viewMode]);
+  }, [setCenter, getZoom, focusRequest, nodesInitialized, positioned.edges, positioned.nodes, viewMode]);
 
   const handleFitAll = useCallback(() => {
     viewportsRef.current[viewMode] = undefined;

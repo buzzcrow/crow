@@ -7,9 +7,9 @@
 //! `crow_common::metrics` (R12).
 
 pub use crow_common::metrics::{
-    flush_system, Bandwidth, BandwidthSnapshot, Counter, CounterSnapshot, Gauge, HistogramSnapshot,
-    LatencyHistogram, LatencySummary, MetricName, MetricsRegistry, MetricsRunner, SummarySnapshot,
-    SystemCollector, SystemMetrics,
+    flush_system, iso8601_now, Bandwidth, BandwidthSnapshot, Counter, CounterSnapshot, Gauge,
+    HistogramSnapshot, LatencyHistogram, LatencySummary, MetricName, MetricPoint, MetricsRegistry,
+    MetricsRunner, SummarySnapshot, SystemCollector, SystemMetrics,
 };
 
 pub mod bandwidth {

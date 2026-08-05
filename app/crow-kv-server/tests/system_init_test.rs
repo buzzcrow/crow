@@ -137,6 +137,7 @@ async fn topology_finalize_writes_ready_key() {
     // Finalize.
     let resp: Value = client()
         .post(format!("{}/topology/finalize", server.base_url()))
+        .json(&serde_json::json!({}))
         .send()
         .await
         .unwrap()
@@ -161,6 +162,7 @@ async fn topology_finalize_is_idempotent() {
     // First finalize.
     let resp: Value = client()
         .post(format!("{}/topology/finalize", server.base_url()))
+        .json(&serde_json::json!({}))
         .send()
         .await
         .unwrap()
@@ -172,6 +174,7 @@ async fn topology_finalize_is_idempotent() {
     // Second finalize should report already_finalized.
     let resp: Value = client()
         .post(format!("{}/topology/finalize", server.base_url()))
+        .json(&serde_json::json!({}))
         .send()
         .await
         .unwrap()
@@ -217,6 +220,7 @@ async fn topology_ready_reports_true_after_finalize() {
 
     client()
         .post(format!("{}/topology/finalize", server.base_url()))
+        .json(&serde_json::json!({}))
         .send()
         .await
         .unwrap();
@@ -238,6 +242,7 @@ async fn topology_finalize_404_without_group0() {
 
     let resp = client()
         .post(format!("{}/topology/finalize", server.base_url()))
+        .json(&serde_json::json!({}))
         .send()
         .await
         .unwrap();

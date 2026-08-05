@@ -52,6 +52,10 @@ pub struct GroupView {
     pub force_classic: bool,
     pub local_replica: LocalReplicaView,
     pub remotes: Vec<RemoteReplicaView>,
+    /// Read-path state gauges; `None` until the group's read-registry
+    /// handles are wired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_state: Option<ReadStateSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +64,9 @@ pub struct LocalReplicaView {
     pub role: String,
     pub voting: bool,
     pub kv_store: KvStoreView,
+    /// Election/lease state; `None` for replicas without election state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub election: Option<ElectionStateSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +127,54 @@ pub struct RemoteMetrics {
     pub rpc_count: u64,
     pub err_count: u64,
     pub last_rtt_ms: u64,
+}
+
+/// Mirrors `crow_kv`'s `ElectionStateView` — election/lease state for
+/// `/topology` and the GUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ElectionStateSnapshot {
+    pub election_count: u64,
+    pub current_term: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat_age_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_remaining_ms: Option<u64>,
+    pub bulk_phase1_in_flight_slots: u64,
+    pub step_downs_higher_term: u64,
+    pub step_downs_lease_unrenewable: u64,
+    pub step_downs_admin: u64,
+}
+
+/// Mirrors `crow_kv`'s `ReadStateView` — read-path state gauges.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ReadStateSnapshot {
+    pub lease_valid: u64,
+    pub contiguous_applied: u64,
+    pub safe_slot: u64,
+}
+
+/// Wire shape of `crow-kv-server`'s `GET /metrics` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricsResponse {
+    pub window_secs: f64,
+    pub timestamp: String,
+    pub metrics: Vec<MetricPointView>,
+}
+
+/// One typed metric point in the `/metrics` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricPointView {
+    pub name: String,
+    pub kind: String,
+    pub fields: Vec<MetricFieldView>,
+}
+
+/// One key/value field on a metric point. `value` is `f64` for uniform
+/// JSON handling (counters/gauges/histograms all fit).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricFieldView {
+    pub key: String,
+    pub value: f64,
 }
 
 /// Wire shape of `crow-kv-server`'s `GET /topology`.

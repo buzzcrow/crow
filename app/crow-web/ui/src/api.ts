@@ -12,6 +12,7 @@ import type {
   StoreView,
   GroupView,
   ReplicaView,
+  MetricsResponse,
 } from './types';
 
 /**
@@ -546,6 +547,51 @@ export async function removeStore(storeId: string, options?: RequestOptions): Pr
 }
 
 /**
+ * Body accepted by `POST /api/cluster/init`
+ * (`crow_web::mgmt::ClusterInitBody`).
+ */
+export interface InitClusterRequest {
+  nodes: string[];
+}
+
+/**
+ * Initialize the cluster by bootstrapping the system group
+ * (store 0, group 0) on the selected nodes.
+ */
+export async function initCluster(
+  req: InitClusterRequest,
+  options?: RequestOptions
+): Promise<unknown> {
+  const body = JSON.stringify({ nodes: req.nodes });
+  const url = `/api/cluster/init`;
+  return jsonOrThrow(
+    await fetchWithOptions(url, {
+      ...options,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      skipDeduplication: true,
+    })
+  );
+}
+
+/**
+ * Reset the entire cluster: tear down all groups, stores, server
+ * processes, nodes, and racks in dependency order. The system group
+ * (store 0, group 0) is included. Console config is cleared.
+ */
+export async function resetCluster(options?: RequestOptions): Promise<unknown> {
+  const url = `/api/cluster/reset`;
+  return jsonOrThrow(
+    await fetchWithOptions(url, {
+      ...options,
+      method: 'POST',
+      skipDeduplication: true,
+    })
+  );
+}
+
+/**
  * List all groups in a store
  */
 export async function listGroups(storeId: string, recursive?: number, options?: RequestOptions): Promise<GroupView[]> {
@@ -763,4 +809,54 @@ export async function kvScan(
  */
 export async function healthCheck(options?: RequestOptions): Promise<{ status: 'ok'; timestamp: number }> {
   return jsonOrThrow(await fetchWithOptions(`/healthz`, { ...options, method: 'GET' }));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Metrics Endpoints (R11)
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Fetch metrics for a specific node (proxied to the node's `/metrics`).
+ * @param nodeId The node identifier
+ * @param prefix Optional metric name prefix filter
+ */
+export async function getNodeMetrics(
+  nodeId: string,
+  prefix?: string,
+  options?: RequestOptions
+): Promise<MetricsResponse> {
+  const url = `/api/nodes/${encodeURIComponent(nodeId)}/metrics${qs({ prefix })}`;
+  return jsonOrThrow(await fetchWithOptions(url, { ...options, method: 'GET' }));
+}
+
+/**
+ * Fetch metrics for a specific group (proxied to the leader node's
+ * `/metrics` with the group prefix `s.{sid}.g.{gid}.`).
+ * @param storeId The store identifier
+ * @param groupId The group identifier
+ * @param prefix Optional metric name prefix filter (appended to group prefix)
+ */
+export async function getGroupMetrics(
+  storeId: string,
+  groupId: string,
+  prefix?: string,
+  options?: RequestOptions
+): Promise<MetricsResponse> {
+  const url = `/api/stores/${encodeURIComponent(storeId)}/groups/${encodeURIComponent(groupId)}/metrics${qs({ prefix })}`;
+  return jsonOrThrow(await fetchWithOptions(url, { ...options, method: 'GET' }));
+}
+
+/**
+ * Fetch aggregated metrics for a store (fetched from each group's leader
+ * and merged).
+ * @param storeId The store identifier
+ * @param prefix Optional metric name prefix filter (appended to store prefix)
+ */
+export async function getStoreMetrics(
+  storeId: string,
+  prefix?: string,
+  options?: RequestOptions
+): Promise<MetricsResponse> {
+  const url = `/api/stores/${encodeURIComponent(storeId)}/metrics${qs({ prefix })}`;
+  return jsonOrThrow(await fetchWithOptions(url, { ...options, method: 'GET' }));
 }

@@ -61,11 +61,11 @@ export function DeployServerDialog({
         grpc_port: deployedPorts.grpcPort,
         ...(binary.trim() ? { binary: binary.trim() } : {}),
       });
-      success(`CrowKV deployed on ${nodeId}`);
+      success(`Crow Storage deployed on ${nodeId}`);
       onClose();
       await onSuccess?.(deployedPorts);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to deploy CrowKV';
+      const message = err instanceof Error ? err.message : 'Failed to deploy Crow Storage';
       error(message);
     } finally {
       setIsLoading(false);
@@ -76,8 +76,8 @@ export function DeployServerDialog({
     <Dialog
       isOpen={isOpen}
       onClose={onClose}
-      title={`Deploy CrowKV on ${nodeId}`}
-      description="Spawn a CrowKV instance on this node. Required before stores or replicas can be created."
+      title={`Deploy Crow Storage on ${nodeId}`}
+      description="Spawn a Crow Storage instance on this node. Required before stores or replicas can be created."
       confirmLabel="Deploy"
       onConfirm={handleSubmit}
       confirmDisabled={!valid || isLoading}

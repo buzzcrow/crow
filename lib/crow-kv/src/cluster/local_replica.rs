@@ -10,7 +10,9 @@ use crate::cluster::replica::{
     HeartbeatReply, HeartbeatRequestPayload, PxReplicaError, Replica, ReplicaHandler, StepDownReply,
     StepDownRequestPayload, VoteReply, VoteRequestPayload,
 };
-use crate::cluster::status::{CrowTreeStatsView, KvStoreStatus, ReplicaStatus, StatusLevel};
+use crate::cluster::status::{
+    CrowTreeStatsView, ElectionStateView, KvStoreStatus, ReplicaStatus, StatusLevel,
+};
 use crate::common::metrics::{ElectionMetrics, ElectionMetricsSnapshot};
 use crate::common::report::OperationReport;
 use crate::common::time::{anchor_ms_to_instant, instant_to_anchor_ms};
@@ -1082,6 +1084,15 @@ impl PxLocalReplica {
             PxLocalReplicaRole::PreCandidate => "pre_candidate",
             PxLocalReplicaRole::Candidate => "candidate",
         };
+        // Read the current inflight_slots gauge so election_metrics_snapshot
+        // re-sets it to its current value (no-op) rather than zeroing it.
+        let bulk_inflight = self
+            .election_handles
+            .get()
+            .map_or(0, |h| h.inflight_slots.snapshot());
+        let election = Some(ElectionStateView::from(
+            self.election_metrics_snapshot(bulk_inflight),
+        ));
         ReplicaStatus {
             id: self.id,
             role: role.to_string(),
@@ -1093,6 +1104,7 @@ impl PxLocalReplica {
                 engine_healthy,
                 crowtree_stats,
             },
+            election,
         }
     }
 

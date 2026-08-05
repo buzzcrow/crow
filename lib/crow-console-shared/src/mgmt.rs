@@ -143,6 +143,64 @@ pub struct TopologyFinalizeResponse {
     pub already_finalized: bool,
 }
 
+/// `POST /topology/finalize` request body — carries the full cluster
+/// topology from the console config so the server can write it into
+/// group 0 KV.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TopologyFinalizeRequest {
+    #[serde(default)]
+    pub racks: Vec<TopologyRackInput>,
+    #[serde(default)]
+    pub nodes: Vec<TopologyNodeInput>,
+    #[serde(default)]
+    pub stores: Vec<TopologyStoreInput>,
+    #[serde(default)]
+    pub groups: Vec<TopologyGroupInput>,
+    #[serde(default)]
+    pub replicas: Vec<TopologyReplicaInput>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopologyRackInput {
+    pub rack_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopologyNodeInput {
+    pub node_id: String,
+    pub rack_id: String,
+    pub host: String,
+    pub mgmt_endpoint: String,
+    pub grpc_endpoint: String,
+    #[serde(default)]
+    pub election_profile: Option<String>,
+    #[serde(default)]
+    pub auto_start: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopologyStoreInput {
+    pub store_id: u64,
+    pub nodes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopologyGroupInput {
+    pub group_id: u64,
+    pub store_id: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TopologyReplicaInput {
+    pub group_id: u64,
+    pub replica_id: u64,
+    pub node_id: String,
+    pub role: String,
+    pub voting: bool,
+    pub endpoint: String,
+}
+
 /// `GET /topology/ready` response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TopologyReadyResponse {
@@ -263,11 +321,16 @@ impl ServerClient {
     }
 
     /// `POST /topology/finalize` — idempotent cutover to group 0 authoritative.
+    /// Writes all topology metadata from `body` into group 0 KV, then sets
+    /// the `/topology/ready` flag.
     ///
     /// # Errors
     /// Transport / non-2xx status codes surface as `Error::UpstreamRpc`.
-    pub async fn topology_finalize(&self) -> Result<TopologyFinalizeResponse> {
-        self.post_json("/topology/finalize", &serde_json::json!({})).await
+    pub async fn topology_finalize(
+        &self,
+        body: &TopologyFinalizeRequest,
+    ) -> Result<TopologyFinalizeResponse> {
+        self.post_json("/topology/finalize", body).await
     }
 
     /// `GET /topology/ready` — check if group 0 is authoritative.

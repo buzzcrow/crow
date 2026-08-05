@@ -144,6 +144,10 @@ pub struct NodeGroup {
     pub remotes: Vec<RemoteReplicaInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub leader_hint: Option<ReplicaId>,
+    /// Read-path state gauges from the server's `/topology`; `None` until
+    /// the group's read-registry handles are wired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_state: Option<crate::snapshot::ReadStateSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,6 +163,10 @@ pub struct LocalReplicaInfo {
     /// Mirrors `KvStoreStatus::crowtree_stats`; `None` for `InMemKV`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crowtree_stats: Option<CrowTreeStatsSnapshot>,
+    /// Mirrors `ReplicaStatus::election`; `None` for replicas without
+    /// election state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub election: Option<crate::snapshot::ElectionStateSnapshot>,
 }
 
 fn default_engine_healthy() -> bool {
@@ -231,6 +239,10 @@ pub struct GroupView {
     pub replicas: Vec<ReplicaView>,
     #[serde(default)]
     pub state: GroupHealth,
+    /// Read-path state gauges from the leader node; `None` until the
+    /// leader's read-registry handles are wired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_state: Option<crate::snapshot::ReadStateSnapshot>,
 }
 
 impl GroupView {
@@ -280,6 +292,9 @@ pub struct ReplicaView {
     /// See [`LocalReplicaInfo::crowtree_stats`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crowtree_stats: Option<CrowTreeStatsSnapshot>,
+    /// See [`LocalReplicaInfo::election`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub election: Option<crate::snapshot::ElectionStateSnapshot>,
 }
 
 #[cfg(test)]
@@ -317,8 +332,10 @@ mod tests {
                 state: ReplicaState::Running,
                 engine_healthy: true,
                 crowtree_stats: None,
+                election: None,
             }],
             state: GroupHealth::Healthy,
+            read_state: None,
         };
         let s = serde_json::to_string(&v).unwrap();
         assert!(s.contains("\"node_id\":\"n1\""));

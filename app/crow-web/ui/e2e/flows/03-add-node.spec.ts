@@ -22,7 +22,7 @@ test.describe('E2E-03 add node', () => {
     await expect(page.getByRole('dialog', { name: 'Add Node' })).toBeVisible();
     await page.getByLabel('Node ID').fill('n3');
     await page.getByLabel('Host').fill('127.0.0.1');
-    await page.getByLabel('Enable CrowKV on this node').uncheck();
+    await page.getByLabel('Enable Crow Storage on this node').uncheck();
     await expect(page.getByRole('button', { name: /create node/i })).toBeEnabled();
     await page.getByRole('button', { name: /create node/i }).click();
 

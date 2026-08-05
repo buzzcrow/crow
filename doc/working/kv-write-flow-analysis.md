@@ -259,9 +259,11 @@ single-permit queue saturation, not consensus failures.
 
 ### Early-ack A/B (`wal_early_ack` on vs off)
 
-Same workload, Linux (AMD Ryzen 9 5950X), MI=64. Compares the relaxed
-ack mode against the strict mode (design:
+Same workload, MI=64. Compares the relaxed ack mode against the strict
+mode (design:
 [`design-wal.md` §5`](../design/kv/design-crow-kv-wal.md#5-ack-contract-and-failure-modes)).
+
+**Linux (AMD Ryzen 9 5950X, 16c/32t, SMT) — single run:**
 
 | Config | Mode | Throughput (ops/s) | avg (µs) | p50 (µs) | p99 (µs) | p999 (µs) | Errors |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -271,9 +273,30 @@ ack mode against the strict mode (design:
 | 48T:48C | early-ack off | 27,663 | 1,732 | 1,585 | 2,206 | 6,420 | 0 |
 
 1T:1C +3.5% throughput, −3.4% avg latency. 48T:48C +7.7% throughput,
-−7.2% avg latency, −11.7% p999 (p99 roughly flat — the deferred persist
-shifts some tail mass from p999 into p99). The gain is the saturation-
-ceiling lift from removing the leader's fsync from the bottleneck path.
+−7.2% avg latency, −11.7% p999, but **p99 went up +6.7%** (2,206 →
+2,354) — the deferred persist shifts some tail mass from p999 into p99.
+
+**macOS (M5 Pro, arm64, no SMT) — 3 runs, averages:**
+
+| Config | Mode | Throughput (ops/s) | avg (µs) | p90 (µs) | p99 (µs) | p999 (µs) | Errors |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1T:1C | early-ack on | 10,345 | 95 | 109 | 145 | 218 | 0 |
+| 1T:1C | early-ack off | 10,183 | 97 | 110 | 152 | 217 | 0 |
+| 48T:48C | early-ack on | 47,481 | 1,009 | 1,180 | 1,388 | 1,886 | 0 |
+| 48T:48C | early-ack off | 46,142 | 1,038 | 1,209 | 1,434 | 2,028 | 0 |
+
+**T4 conclusion (2026-08-05):** The AMD p99 uptick does **not**
+reproduce on M5 Pro — p99 is consistently *better* with early-ack on
+(−4.2% at 1T, −3.2% at 48T across 3 runs). All tail percentiles (p90,
+p99, p999) favor early-ack on M5 Pro. The AMD p99 shift is
+platform-specific, likely SMT scheduling contention: the deferred
+`spawn_accept_persist` on a hyperthread-sibling of the next accept's
+worker creates tail mass that doesn't exist on M5 Pro's non-SMT
+architecture. **Decision: accept early-ack as a clean win on all
+platforms.** On AMD the net effect is still positive (avg + p999
+improve, p99 slightly worse); on M5 Pro all percentiles improve. No
+scheduling tweak needed. `tools/bench-early-ack.sh` deleted (T4
+cleanup).
 
 ### WAL flush coalesce sweep (`wal_flush_coalesce_us`)
 

@@ -14,18 +14,18 @@ For test strategy, layer scope, and coverage details, see [`design/kv/design-cro
 
 ## Suite Timing
 
-Measured on 2026-07-20 (clean build, macOS). Build time: 72.8 s.
+Measured on 2026-08-04 (clean build, macOS). Build time: 88.0 s.
 Run `pixi run clean` before measuring for reproducible results.
 
 | Suite | Tests | macOS | Linux |
 | --- | --- | --- | --- |
-| `test-tree-ct` | 328 | 9.1 s | — |
-| `test-tree-ffi` | 15 | 29.9 s | — |
-| `test-kv-core` | 508 | 43.5 s | — |
-| `test-kv-server` | 55 | 37.0 s | — |
-| `test-console-cli` | 13 | 35.1 s | — |
-| `test-console-web` | 49 | 39.1 s | — |
-| `test-console-ui` | 51 | 81.4 s | — |
+| `test-tree-ct` | 354 | 6.4 s | — |
+| `test-tree-ffi` | 29 | 27.6 s | — |
+| `test-kv-core` | 536 | 47.4 s | — |
+| `test-kv-server` | 68 | 54.1 s | — |
+| `test-console-cli` | 13 | 26.6 s | — |
+| `test-console-server` | 50 | 45.3 s | — |
+| `test-console-ui` | 51 | 72.5 s | — |
 
 ---
 

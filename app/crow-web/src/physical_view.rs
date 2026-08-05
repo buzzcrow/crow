@@ -318,9 +318,11 @@ mod tests {
                     state: ReplicaState::Running,
                     engine_healthy: true,
                     crowtree_stats: None,
+                    election: None,
                 },
                 remotes: vec![],
                 leader_hint: Some(100),
+                read_state: None,
             }],
         };
         rec.stores.insert(7, ns);
