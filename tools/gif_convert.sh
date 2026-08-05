@@ -7,7 +7,7 @@
 # Usage:
 #   tools/gif_convert.sh <input.mov> <output.gif> [width] [fps] [bayer_scale]
 #
-# Defaults: width=800, fps=10, bayer_scale=3
+# Defaults: width=1350, fps=6, bayer_scale=5
 #   width=orig  — keep the original mov resolution (no scaling)
 # Requires: ffmpeg (install via `brew install ffmpeg` or `pixi install ffmpeg`)
 
@@ -15,17 +15,17 @@ set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
     echo "Usage: $0 <input.mov> <output.gif> [width] [fps] [bayer_scale]"
-    echo "  width       — target width in pixels (default: 800)"
-    echo "  fps         — frames per second (default: 10)"
-    echo "  bayer_scale — Bayer dither scale 0-5; lower is finer/clearer, higher compresses better (default: 3)"
+    echo "  width       — target width in pixels (default: 1350)"
+    echo "  fps         — frames per second (default: 6)"
+    echo "  bayer_scale — Bayer dither scale 0-5; lower is finer/clearer, higher compresses better (default: 5)"
     exit 1
 fi
 
 INPUT="$1"
 OUTPUT="$2"
-WIDTH="${3:-800}"
-FPS="${4:-10}"
-DITHER="${5:-3}"
+WIDTH="${3:-1350}"
+FPS="${4:-6}"
+DITHER="${5:-5}"
 
 if [[ "$WIDTH" == "orig" ]]; then
     SCALE_FILTER=""

@@ -20,15 +20,15 @@ And since future performance gains are increasingly tied to hardware (io_uring, 
 
 **Cluster Lifecycle** — bootstrap a 3-node cluster from scratch: add a rack, register nodes in the physical view, then switch to the logical view to create a store and a Paxos group with replicas on the selected target nodes. The topology canvas updates in real time as replicas come online and elect a leader.
 
-![Cluster Lifecycle](doc/assets/demo-cluster.gif)
+<video src="doc/assets/demo-cluster.mp4" autoplay muted loop></video>
 
 **KV Operations** — the KV Operator panel auto-loads demo keys, then demonstrates put, get, and delete against a specific group. The scan list updates live after each mutation, and demo keys can be bulk-deleted in one click.
 
-![KV Operations](doc/assets/demo-kv.gif)
+<video src="doc/assets/demo-kv.mp4" autoplay muted loop></video>
 
 **Failover & Replica Management** — add a 4th node and expand the group from 3 to 4 replicas, then remove the leader replica. The remaining nodes re-elect a new leader and KV operations continue uninterrupted. The removed replica is added back afterward. Note: even-numbered replica counts fall back to an odd quorum and function correctly, but odd counts are recommended for production deployments.
 
-![Failover](doc/assets/demo-failover.gif)
+<video src="doc/assets/demo-failover.mp4" autoplay muted loop></video>
 
 ## Why Multi-Paxos?
 
