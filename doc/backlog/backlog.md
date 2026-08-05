@@ -41,13 +41,6 @@ complexity, and dependency. Before implementation, follow the
   `crow-tree` / `crow::tree` / `CROW_TREE_*`. Establishes the `crow-kv` →
   `crow-tree` dependency boundary analogous to `crow-kv` → `crow-common`.
   Most naturally done after R12.
-- **[R38](R38-scan-value-zero-copy.md)** — Scan value zero-copy (mirror R6 for scan) — Area:
-  read path / scan — The get path is zero-copy after R6
-  (`PinnedValue::into_bytes` via `Bytes::from_owner`); scan still copies
-  per-entry values out of the packed result buffer into owned `Vec<u8>`.
-  A `PinnedScanEntry` / `Bytes::from_owner` path for scan values would
-  eliminate the per-entry copy, mirroring R6. Medium-high complexity;
-  the `KVEngine::scan` trait signature changes from `Vec<u8>` to `Bytes`.
 - **[R39](R39-kv-read-endpoint-policy.md)** — Least-conn / latency read-endpoint policy — Area:
   read path / client — R26's `AnyReplica` is round-robin (blind
   rotation); a slow replica drags p99 for 1/N of MinSlot reads. New

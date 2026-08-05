@@ -111,9 +111,16 @@ what remains:
   O(limit) but would not fix the anomaly. The real anomaly root cause
   is unknown (L1 scan path / decode) and needs a separate
   investigation.
-- **O(limit) per scan — `decode_scan`** — packed buffer → per-entry
+- **O(limit) per scan — `decode_scan`** — ~~packed buffer → per-entry
   `Vec<u8>` for key and value. R38 eliminates this via
-  `PinnedScanEntry` / `Bytes::from_owner` mirroring R6.
+  `PinnedScanEntry` / `Bytes::from_owner` mirroring R6.~~ **DONE (R38)**:
+  `decode_scan` now converts the packed buffer to a single `Bytes`
+  (zero-copy move) and slices per entry — 0 copies instead of 2N. The
+  `KVEngine::scan` trait returns `Vec<(Bytes, u64, Bytes)>` and
+  `px_kv_store` builds `KvScanItem` directly from the `Bytes` (no
+  conversion). Simpler than the backlog's `PinnedScanEntry` plan because
+  `take_buf` already owns the packed buffer in Rust — no C++ page
+  refcount pinning needed, just `Bytes::from(vec)` + `slice(range)`.
 - **O(limit) per scan — client `to_vec`** — prost `Bytes` → `Vec<u8>`
   per entry. R44 subitem: return `Bytes` directly instead of `Vec`.
 - **O(n) unavoidable** — gRPC request serialize (prefix + start_after
@@ -121,9 +128,9 @@ what remains:
   prefix + start_after `to_vec()` (owned copies for the C API
   boundary).
 
-The scan path has more copies than the get path (zero-copy after R6).
-After R38 + R48, the scan path would be zero-copy from frame to client
-`Bytes`, matching get.
+The scan path is now zero-copy from the packed buffer through to the
+gRPC response (R38). The remaining copy is the client-side `to_vec`
+(R44 subitem) and the unavoidable gRPC serialize.
 
 ---
 
@@ -169,9 +176,11 @@ Full per-config analysis in
 Tracked as backlog requirements:
 
 - **[R38](../backlog/R38-scan-value-zero-copy.md)** — Scan value
-  zero-copy. `decode_scan` produces per-entry `Vec<u8>`; a
-  `PinnedScanEntry` / `Bytes::from_owner` path mirroring R6 would
-  eliminate copy 2. Matters for large-value range reads.
+  zero-copy (done). `decode_scan` now converts the packed buffer to a
+  single `Bytes` and slices per entry (0 copies, down from 2N). The
+  `KVEngine::scan` trait returns `Vec<(Bytes, u64, Bytes)>`. Simpler
+  than the backlog's `PinnedScanEntry` plan — `take_buf` already owns
+  the packed buffer in Rust, so no C++ page refcount pinning needed.
 - **[R44](../backlog/R44-kv-read-path-hardening.md)** — Read-path
   hardening batch. Two scan subitems: (1) `scan_async` restarts the
   whole scan on any cold leaf (no cursor resume); (2) client `to_vec`
