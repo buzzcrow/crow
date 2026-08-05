@@ -507,6 +507,68 @@ async fn topology_alias_top() {
 }
 
 #[tokio::test]
+async fn metrics_endpoint_returns_structured_snapshot() {
+    let server = start_server().await;
+    let resp: Value = client()
+        .get(format!("{}/metrics", server.base_url()))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    // Structure contract: window_secs, timestamp, metrics array.
+    assert!(resp["window_secs"].as_f64().is_some());
+    assert!(resp["timestamp"].is_string());
+    let metrics = resp["metrics"].as_array().unwrap();
+    // A freshly started server registers election/consensus counters;
+    // the snapshot is non-empty and every point has name/kind/fields.
+    assert!(!metrics.is_empty(), "expected non-empty metrics, got: {resp}");
+    for m in metrics {
+        assert!(m["name"].is_string(), "metric missing name: {m}");
+        assert!(m["kind"].is_string(), "metric missing kind: {m}");
+        let fields = m["fields"].as_array().expect("fields is array");
+        assert!(!fields.is_empty(), "metric has no fields: {m}");
+        for f in fields {
+            assert!(f["key"].is_string());
+            assert!(f["value"].as_f64().is_some());
+        }
+    }
+}
+
+#[tokio::test]
+async fn metrics_prefix_filter_excludes_non_matching() {
+    let server = start_server().await;
+    // First fetch all to learn one name, then filter by a prefix that
+    // matches nothing.
+    let all: Value = client()
+        .get(format!("{}/metrics", server.base_url()))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let all_metrics = all["metrics"].as_array().unwrap();
+    assert!(!all_metrics.is_empty());
+    let filtered: Value = client()
+        .get(format!("{}/metrics?prefix=zzz.nonexistent.", server.base_url()))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let filtered_metrics = filtered["metrics"].as_array().unwrap();
+    assert!(
+        filtered_metrics.is_empty(),
+        "expected empty metrics for bogus prefix, got: {filtered}"
+    );
+}
+
+#[tokio::test]
 async fn batch_add_remote_replicas_from_topology() {
     let server_a = start_test_server(&["--stores", "0", "--groups", "1", "--replica", "1"])
         .await

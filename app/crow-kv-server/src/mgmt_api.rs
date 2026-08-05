@@ -57,6 +57,7 @@ pub fn router(state: RegistryArc) -> Router {
         .route("/operations/:id", get(get_operation))
         .route("/topology", get(export_topology))
         .route("/top", get(export_topology))
+        .route("/metrics", get(metrics))
         .route("/openapi.json", get(openapi_spec))
         .with_state(state)
 }
@@ -336,7 +337,8 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Err
         topology_finalize,
         topology_ready,
         get_operation,
-        export_topology
+        export_topology,
+        metrics
     ),
     components(
         schemas(
@@ -371,7 +373,10 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Err
             OperationResponse,
             OperationTarget,
             AsyncOperationResponse,
-            ErrorResponse
+            ErrorResponse,
+            MetricsResponse,
+            MetricPointDto,
+            MetricFieldDto
         )
     ),
     tags((name = "management", description = "CrowKV management API"))
@@ -1651,6 +1656,146 @@ async fn export_topology(State(state): State<RegistryArc>) -> impl IntoResponse 
     let stores: Vec<StoreStatus> = state.stores.iter().map(|entry| entry.value().status()).collect();
     let body = serde_json::to_string_pretty(&TopologyResponse { stores }).unwrap();
     ([("content-type", "application/json")], body)
+}
+
+// ── /metrics ────────────────────────────────────────────────
+
+/// Query params for `GET /metrics`.
+#[derive(Deserialize, ToSchema)]
+struct MetricsQuery {
+    /// Metric name prefix filter (e.g. `s.1.g.2.`). Default empty = all.
+    #[serde(default)]
+    prefix: String,
+}
+
+/// One typed metric point in the `/metrics` response.
+#[derive(Serialize, ToSchema)]
+struct MetricPointDto {
+    name: String,
+    kind: String,
+    /// Type-specific fields (counter: `count/tps/total`; gauge: `value`;
+    /// bandwidth: `count/avg_size/rate/total_bytes`; histogram:
+    /// `count/avg_ns/p50_ns/p99_ns/max_ns/total`; summary:
+    /// `count/avg_ns/max_ns/total`).
+    fields: Vec<MetricFieldDto>,
+}
+
+#[derive(Serialize, ToSchema)]
+struct MetricFieldDto {
+    key: String,
+    value: f64,
+}
+
+/// `GET /metrics` response — structured snapshot of registry metrics.
+#[derive(Serialize, ToSchema)]
+struct MetricsResponse {
+    /// Approximate window length in seconds (the configured flush
+    /// interval; the snapshot path does not reset window state).
+    window_secs: f64,
+    timestamp: String,
+    metrics: Vec<MetricPointDto>,
+}
+
+/// `GET /metrics` — structured snapshot of all registry metrics matching
+/// the `prefix` query param. Does not reset window state. Intended for
+/// the GUI Inspector and script/scrape consumers.
+#[utoipa::path(
+        get,
+        path = "/metrics",
+        tag = "management",
+        params(("prefix" = Option<String>, Query, description = "Metric name prefix filter")),
+        responses((status = 200, description = "Metric snapshot", body = MetricsResponse))
+    )]
+async fn metrics(State(state): State<RegistryArc>, Query(q): Query<MetricsQuery>) -> impl IntoResponse {
+    let timestamp = crow_kv::metrics::iso8601_now();
+    let window_secs = 5.0; // approximate — snapshot path does not track elapsed
+    let metrics: Vec<MetricPointDto> = state
+        .metrics_registry
+        .as_ref()
+        .map(|reg| {
+            let reg = reg.lock().unwrap();
+            reg.snapshot_struct(&q.prefix, window_secs)
+                .iter()
+                .map(metric_point_to_dto)
+                .collect()
+        })
+        .unwrap_or_default();
+    let body = serde_json::to_string_pretty(&MetricsResponse {
+        window_secs,
+        timestamp,
+        metrics,
+    })
+    .unwrap();
+    ([("content-type", "application/json")], body)
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn metric_point_to_dto(p: &crow_kv::metrics::MetricPoint) -> MetricPointDto {
+    use crow_kv::metrics::MetricPoint;
+    let kind = p.kind().to_string();
+    let fields = match p {
+        MetricPoint::Counter {
+            count, tps, total, ..
+        } => vec![("count", *count as f64), ("tps", *tps), ("total", *total as f64)],
+        MetricPoint::Gauge { value, .. } => vec![("value", *value as f64)],
+        MetricPoint::Bandwidth {
+            count,
+            avg_size,
+            rate,
+            total_bytes,
+            ..
+        } => vec![
+            ("count", *count as f64),
+            ("avg_size", *avg_size as f64),
+            ("rate", *rate as f64),
+            ("total_bytes", *total_bytes as f64),
+        ],
+        MetricPoint::Histogram {
+            count,
+            avg_ns,
+            p50_ns,
+            p99_ns,
+            max_ns,
+            total,
+            ..
+        } => vec![
+            ("count", *count as f64),
+            ("avg_ns", *avg_ns as f64),
+            ("p50_ns", *p50_ns as f64),
+            ("p99_ns", *p99_ns as f64),
+            ("max_ns", *max_ns as f64),
+            ("total", *total as f64),
+        ],
+        MetricPoint::Summary {
+            count,
+            avg_ns,
+            max_ns,
+            total,
+            ..
+        } => vec![
+            ("count", *count as f64),
+            ("avg_ns", *avg_ns as f64),
+            ("max_ns", *max_ns as f64),
+            ("total", *total as f64),
+        ],
+    };
+    MetricPointDto {
+        name: match p {
+            MetricPoint::Counter { name, .. }
+            | MetricPoint::Gauge { name, .. }
+            | MetricPoint::Bandwidth { name, .. }
+            | MetricPoint::Histogram { name, .. }
+            | MetricPoint::Summary { name, .. } => name.clone(),
+        },
+        kind,
+        fields: fields
+            .into_iter()
+            .map(|(key, value)| MetricFieldDto {
+                key: key.to_string(),
+                value,
+            })
+            .collect(),
+    }
 }
 
 /// Rebuild `group` with `new_remotes` merged into its remote list,

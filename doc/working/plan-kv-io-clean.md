@@ -11,10 +11,9 @@ which would normally delete `plan-<topic>.md`.
 
 Small-scope read- and write-path tasks traced here for later
 implementation. Each has a checkbox. Larger changes live in the
-backlog (R35 apply fence, R36 proposal coalescing, R37 scan
-`start_after` push-down, R38 scan value zero-copy, R39 read-endpoint
-policy). See [`kv-write-flow-analysis.md`](kv-write-flow-analysis.md) §
-Write-Path Enhancement Ideas and
+backlog (R37 scan `start_after` push-down, R38 scan value zero-copy,
+R39 read-endpoint policy). See [`kv-write-flow-analysis.md`](kv-write-flow-analysis.md)
+§ Write-Path Enhancement Ideas and
 [`kv-read-flow-analysis.md`](kv-read-flow-analysis.md) § Gaps and
 Optimization Opportunities for the full lists and rationale.
 

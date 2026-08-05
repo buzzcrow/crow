@@ -457,7 +457,8 @@ impl Default for MetricsRegistry {
 }
 
 /// Format current time as ISO 8601 UTC: `YYYY-MM-DDTHH:MM:SS.mmmZ`.
-fn iso8601_now() -> String {
+#[must_use]
+pub fn iso8601_now() -> String {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
     let secs = now.as_secs();
     let ms = now.subsec_millis();
