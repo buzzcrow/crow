@@ -9,7 +9,7 @@
 
 use crate::error::{err_400, err_409, err_500, err_502, ErrorBody};
 use crate::state::AppState;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use crow_console_shared::clients::http::ServerClient;
@@ -22,6 +22,7 @@ use crow_console_shared::mgmt::{
     TopologyFinalizeRequest, TopologyGroupInput, TopologyNodeInput, TopologyRackInput, TopologyReplicaInput,
     TopologyStoreInput,
 };
+use crow_console_shared::MetricsResponse;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -1762,4 +1763,149 @@ fn build_topology_finalize_body(
         groups,
         replicas,
     }
+}
+
+// ── Metrics proxy (R11) ───────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct MetricsQuery {
+    /// Metric name prefix filter (e.g. `s.1.g.2.`). Default empty = all.
+    #[serde(default)]
+    prefix: Option<String>,
+}
+
+impl MetricsQuery {
+    fn prefix(&self) -> &str {
+        self.prefix.as_deref().unwrap_or("")
+    }
+}
+
+/// `GET /api/nodes/:id/metrics` — proxy to the node's `GET /metrics`.
+///
+/// # Errors
+/// Returns `502` if the node has no deployed server or the upstream
+/// `/metrics` fetch fails.
+pub async fn http_node_metrics(
+    State(state): State<AppState>,
+    Path(node_id): Path<String>,
+    Query(q): Query<MetricsQuery>,
+) -> Result<Json<MetricsResponse>, (StatusCode, Json<ErrorBody>)> {
+    let url = mgmt_url_for_node(&state, &node_id)?;
+    let client = build_server_client(url)?;
+    let resp = client
+        .metrics(q.prefix())
+        .await
+        .map_err(|e| err_502(format!("metrics fetch from node {node_id}: {e}")))?;
+    Ok(Json(resp))
+}
+
+/// `GET /api/stores/:sid/groups/:gid/metrics` — proxy to the leader
+/// node's `GET /metrics` with prefix `s.{sid}.g.{gid}.`.
+///
+/// # Errors
+/// Returns `404` if the group has no healthy leader; `502` if the
+/// upstream `/metrics` fetch fails.
+pub async fn http_group_metrics(
+    State(state): State<AppState>,
+    Path((sid, gid)): Path<(u64, u64)>,
+    Query(q): Query<MetricsQuery>,
+) -> Result<Json<MetricsResponse>, (StatusCode, Json<ErrorBody>)> {
+    let (_rid, node_id) = state.monitor_cache.leader_for(sid, gid).await.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorBody {
+                error: format!("group {gid} in store {sid} has no healthy leader"),
+            }),
+        )
+    })?;
+    let url = mgmt_url_for_node(&state, &node_id)?;
+    let client = build_server_client(url)?;
+    // If the caller supplied a prefix, prepend the group scope; otherwise
+    // default to the group's own prefix.
+    let prefix = if q.prefix().is_empty() {
+        format!("s.{sid}.g.{gid}.")
+    } else {
+        format!("s.{sid}.g.{gid}.{}", q.prefix())
+    };
+    let resp = client
+        .metrics(&prefix)
+        .await
+        .map_err(|e| err_502(format!("metrics fetch from leader {node_id}: {e}")))?;
+    Ok(Json(resp))
+}
+
+/// `GET /api/stores/:sid/metrics` — aggregate metrics across all groups
+/// in the store. Fetches from each group's leader node with prefix
+/// `s.{sid}.` and merges the results.
+///
+/// # Errors
+/// Returns `404` if the store has no groups. Individual node fetch
+/// failures are silently skipped (partial results returned).
+pub async fn http_store_metrics(
+    State(state): State<AppState>,
+    Path(sid): Path<u64>,
+    Query(q): Query<MetricsQuery>,
+) -> Result<Json<MetricsResponse>, (StatusCode, Json<ErrorBody>)> {
+    // Collect all group IDs for this store from the monitor cache.
+    let group_ids: Vec<u64> = {
+        let snap = state.monitor_cache.snapshot().await;
+        snap.values()
+            .filter_map(|rec| {
+                rec.stores
+                    .get(&sid)
+                    .map(|ns| ns.groups.iter().map(|g| g.group_id).collect::<Vec<_>>())
+            })
+            .flatten()
+            .collect()
+    };
+    if group_ids.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorBody {
+                error: format!("store {sid} not found or has no groups"),
+            }),
+        ));
+    }
+
+    let store_prefix = if q.prefix().is_empty() {
+        format!("s.{sid}.")
+    } else {
+        format!("s.{sid}.{}", q.prefix())
+    };
+
+    // Fetch from each group's leader node. Deduplicate by node (a single
+    // node may host multiple groups in the store; one fetch with the
+    // store prefix covers all of them).
+    let mut seen_nodes: HashSet<String> = HashSet::new();
+    let mut merged: Vec<crow_console_shared::MetricPointView> = Vec::new();
+    let mut window_secs = 5.0_f64;
+    let mut timestamp = String::new();
+
+    for gid in &group_ids {
+        let Some((_rid, node_id)) = state.monitor_cache.leader_for(sid, *gid).await else {
+            continue;
+        };
+        if !seen_nodes.insert(node_id.clone()) {
+            continue;
+        }
+        let Ok(url) = mgmt_url_for_node(&state, &node_id) else {
+            continue;
+        };
+        let Ok(client) = build_server_client(url) else {
+            continue;
+        };
+        if let Ok(resp) = client.metrics(&store_prefix).await {
+            window_secs = resp.window_secs;
+            if timestamp.is_empty() {
+                timestamp = resp.timestamp;
+            }
+            merged.extend(resp.metrics);
+        }
+    }
+
+    Ok(Json(MetricsResponse {
+        window_secs,
+        timestamp,
+        metrics: merged,
+    }))
 }
