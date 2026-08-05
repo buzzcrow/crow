@@ -70,21 +70,15 @@ complexity, and dependency. Before implementation, follow the
   Low-medium complexity; kv_service / crowtree_engine / client are
   mechanical, bounded catch-up needs care, scan cursor composes with
   R37.
-- **[R47](R47-bench-flush-after-prepopulate.md)** — Bench flush-after-prepopulate flag — Area:
-  bench / scan — `MemTable::snapshot()` is O(N_l0) per scan regardless
-  of limit, causing the 1KiB anomaly in the R46 baseline (64B values
-  leave ~60k unflushed entries, 1KiB leaves ~4k). The bench has no way
-  to force a flush after pre-population, so the hypothesis is
-  code-reading only. Adds a `--flush-after-prepopulate` flag to
-  `crow-cli bench run` that drains L0 before the measurement window,
-  verifying the hypothesis and enabling a clean L1-only scan baseline.
-  Low complexity; follow-on is a lazy/range-bounded L0 cursor.
 - **[R48](R48-scan-lazy-l0-cursor.md)** — Scan lazy/range-bounded L0 cursor — Area:
   scan / crow-tree engine — `MemTable::snapshot()` copies all N_l0
-  entries on every scan (O(N_l0), not O(limit)), the root cause of the
-  1KiB anomaly. Replaces the snapshot vector with a lazy btree_map
-  cursor (lower_bound to start_after, advance up to limit). Medium
-  complexity; depends on R47 to verify the hypothesis first.
+  entries on every scan (O(N_l0), not O(limit)). Originally scoped as
+  the 1KiB anomaly fix, but R47's `--flush-after-prepopulate`
+  experiment refuted the L0 premise (draining L0 did not close the
+  3.2x gap; the maintenance loop's 3s tick already keeps L0 small).
+  R48 would still make L0 cost O(limit) but would not fix the
+  anomaly; the real root cause is unknown and needs an engine-level
+  investigation first. Medium complexity.
 - **[R49](R49-scan-streaming-response.md)** — Scan streaming gRPC response — Area:
   scan / RPC — tonic's 4 MiB max message size caps scan payload
   (full_100k, 16KiB values fail). Server-streaming Scan RPC emits

@@ -563,6 +563,11 @@ The `bench benchmark` verb orchestrates the full lifecycle:
 - **Run** — drive KV put/get/delete at configurable concurrency using
   the existing closed-loop load generator (`run_bench`). Each worker
   maintains one in-flight RPC at a time; threads = max concurrency.
+  `--flush-after-prepopulate` drains L0 on every node via the
+  management API `flush` endpoint after pre-population, before the
+  measurement window — produces a deterministic L1-only scan baseline
+  (the scan regression sentinel uses it to verify L0-snapshot cost
+  hypotheses).
 - **Collect** — gather server-side perf counters (WAL append rate, KV
   op counts), system metrics (CPU, RSS, TCP retransmits), and runtime
   logs from all 3 node workspaces. Metrics are parsed from each
