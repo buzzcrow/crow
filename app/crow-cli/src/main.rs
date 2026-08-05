@@ -20,8 +20,9 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 use commands::{
-    run_bench_verb, run_cluster_inspect, run_cluster_status, run_cluster_topology, run_group_verb,
-    run_kv_verb, run_node_verb, run_rack_verb, run_replica_verb, run_server_verb, run_store_verb,
+    run_bench_verb, run_cluster_init, run_cluster_inspect, run_cluster_status, run_cluster_topology,
+    run_group_verb, run_kv_verb, run_node_verb, run_rack_verb, run_replica_verb, run_server_verb,
+    run_store_verb,
 };
 use commands::{
     BenchArgs, ClusterVerb, GroupVerb, KvVerb, NodeVerb, RackVerb, ReplicaVerb, ServerVerb, StoreVerb,
@@ -137,6 +138,7 @@ async fn dispatch(mut cli: Cli) -> ExitCode {
             ClusterVerb::Status => run_cluster_status(&cli).await,
             ClusterVerb::Topology => run_cluster_topology(&cli).await,
             ClusterVerb::Inspect { id } => run_cluster_inspect(&cli, &id).await,
+            ClusterVerb::Init { nodes } => run_cluster_init(&cli, &nodes).await,
         },
         Group::Rack { verb } => run_rack_verb(&cli, verb).await,
         Group::Node { verb } => run_node_verb(&cli, verb).await,
