@@ -6,9 +6,11 @@ import { X, Info, ListChecks, ExternalLink } from 'lucide-react';
 import { useSelection, SelectedEntity } from '../contexts/SelectionContext';
 import { useViewMode } from '../contexts/ViewModeContext';
 import { cn } from '../utils/cn';
-import { ViewMode, Node, StoreView, CrowKVServerView } from '../types';
+import { ViewMode, Node, StoreView, CrowKVServerView, ElectionState, ReadState } from '../types';
 import { ActivityLog } from '../panels/ActivityLog';
 import { groupLabel, localReplicaLabel, nodeLabel, rackLabel, serverLabel, storeLabel } from '../utils/entityDisplay';
+import { useMetricsPoll, buildMetricsFetcher } from '../utils/useMetricsPoll';
+import { MetricsRegion, ElectionStateRegion, ReadStateRegion } from '../components/MetricsRegion';
 
 type TabId = 'details' | 'activity';
 
@@ -152,6 +154,33 @@ function DetailsTab({ entity, nodes, servers, stores, selectEntity, setViewMode 
           ?.replicas?.find((r: any) => String(r.replica_id) === entity.id)
       : undefined;
 
+  // Logical Group: dig the full GroupView (read_state) out of `stores`.
+  const groupView =
+    entity.type === 'Group' && entity.viewMode === ViewMode.Logical
+      ? (stores as any[])
+          .find((s) => String(s.store_id) === entity.parentIds?.store_id)
+          ?.groups?.find((g: any) => String(g.group_id) === entity.id)
+      : entity.type === 'Replica' && entity.viewMode === ViewMode.Logical
+        ? (stores as any[])
+            .find((s) => String(s.store_id) === entity.parentIds?.store_id)
+            ?.groups?.find((g: any) => String(g.group_id) === entity.parentIds?.group_id)
+        : undefined;
+
+  const electionState: ElectionState | undefined = replica?.election ?? groupView?.replicas?.find((r: any) => r.role === 'leader')?.election;
+  const readState: ReadState | undefined = groupView?.read_state;
+
+  // Metrics poll: build a fetcher for the current entity type.
+  const metricsFetcherInfo = buildMetricsFetcher(
+    entity.type,
+    entity.id,
+    entity.parentIds?.store_id,
+    entity.parentIds?.group_id,
+  );
+  const metricsData = useMetricsPoll(
+    metricsFetcherInfo?.fetcher ?? null,
+    metricsFetcherInfo?.key ?? 'none',
+  );
+
   const fields: { label: string; value: string }[] = [
     { label: 'Type', value: displayType },
     { label: 'ID', value: displayId },
@@ -208,6 +237,10 @@ function DetailsTab({ entity, nodes, servers, stores, selectEntity, setViewMode 
           {crossJump.label}
         </button>
       )}
+
+      {electionState && <ElectionStateRegion state={electionState} />}
+      {readState && <ReadStateRegion state={readState} />}
+      <MetricsRegion data={metricsData} />
     </div>
   );
 }
