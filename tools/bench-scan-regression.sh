@@ -45,7 +45,7 @@ pad_key() {
 }
 
 run_bench() {
-    local label="$1" limit="$2" prefix="$3" start_after="$4" value_size="$5" read_mode="$6" min_slot="$7" flush="$8"
+    local label="$1" limit="$2" prefix="$3" start_after="$4" value_size="$5" read_mode="$6" min_slot="$7" flush="${8:-}"
     local read_endpoint
     if [ "$read_mode" = "minslot" ]; then
         read_endpoint="any-replica"
@@ -86,29 +86,28 @@ run_bench() {
 # --- regression sentinel configs ---
 #
 # Reference results (2026-08-05, Apple M5 Pro, 18c, arm64, macOS 26.5):
-#   1T:1C, 10s mem mode, 3-node cluster, 100k pre-populated keys, 64B values
-#   unless noted. scans/s=0 means <5 scans completed in 10s (very high
-#   per-scan latency); those rows also show transport errors from the
-#   gRPC 4 MiB max message size limit.
+#   1T:1C, 10s mem mode, 3-node cluster, 100k pre-populated keys, 64B
+#   values unless noted. Post-R38/R44/R49 (zero-copy scan values,
+#   read-path hardening, streaming scan RPC).
 #
 #   label            limit   scans/s  avg_us   p99_us   err  notes
-#   full_1k          1000    227      4411     5020     0
-#   full_10k         10000   139      7181     7900     0
-#   full_100k        100000  0        1752411  1766400  6    gRPC 4MiB limit
-#   bounded_10       10      225      4438     4984     0
-#   bounded_100      100     223      4479     5020     0
-#   bounded_1k       1000    216      4640     5592     0
-#   bounded_10k      10000   137      7297     8044     0
-#   from_start_10    10      236      4236     4800     0    deep-pag companion
-#   deep_pag_10      10      141      7084     9936     0    1.7x from_start
-#   deep_pag_100     100     133      7538     10344    0
-#   valuesize_64B    1000    206      4852     5496     0
-#   valuesize_1KiB   1000    666      1500     3004     0    3.2x faster than 64B
-#   valuesize_16KiB  1000    0        6195     815      1701 gRPC 4MiB limit
-#   prefix_1k        1000    209      4787     5352     0    prefix="k00"
-#   whole_1k         1000    210      4753     5244     0
-#   lin_1k           1000    208      4797     5336     0
-#   minslot_1k       1000    206      4855     5404     0
+#   full_1k          1000    243      4109     4672     0
+#   full_10k         10000   165      6063     6732     0
+#   full_100k        100000  20       49485    52416    0    streaming works
+#   bounded_10       10      223      4490     5036     0
+#   bounded_100      100     230      4350     4804     0
+#   bounded_1k       1000    224      4463     5088     0
+#   bounded_10k      10000   164      6109     6764     0
+#   from_start_10    10      231      4321     4836     0    deep-pag companion
+#   deep_pag_10      10      147      6786     9800     0    1.6x from_start
+#   deep_pag_100     100     143      6994     10136    0
+#   valuesize_64B    1000    202      4938     5380     0
+#   valuesize_1KiB   1000    766      1304     2512     0    3.8x faster than 64B
+#   valuesize_16KiB  1000    27       17368    65184    309  streaming mostly works
+#   prefix_1k        1000    214      4679     5036     0    prefix="k00"
+#   whole_1k         1000    209      4788     5184     0
+#   lin_1k           1000    217      4599     4984     0
+#   minslot_1k       1000    206      4845     5396     0
 #
 # Analysis: doc/working/kv-scan-flow-analysis.md § Benchmark Results.
 # NOTE: absolute scan throughput is platform-dependent. Re-capture on

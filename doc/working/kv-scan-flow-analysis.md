@@ -127,7 +127,7 @@ After R38 + R48, the scan path would be zero-copy from frame to client
 
 ---
 
-## Benchmark Results — 2026-08-05 (macOS)
+## Benchmark Results — 2026-08-05 (macOS, post-R38/R44/R49)
 
 **Platform**: Apple M5 Pro, 18c, arm64, macOS 26.5. Not comparable to
 the Linux Ryzen write baseline — re-capture on the same machine for
@@ -139,24 +139,59 @@ Reference numbers in `tools/bench-scan-regression.sh`.
 
 ### Key findings
 
-- **Per-scan fixed cost ~4.2ms** (ReadIndex + gRPC + descent); per-entry
-  ~0.3us at 64B (visible at limit >= 10k).
-- **gRPC 4 MiB message size limit** caps scan payload (full_100k, 16KiB
-  values) — streaming scan response needed for large payloads.
-- **1KiB values 3.2x faster than 64B** — root cause: `MemTable::snapshot()`
-  is O(N_l0) per scan; 64B leaves ~60k unflushed, 1KiB leaves ~4k. Fix:
-  lazy/range-bounded L0 cursor (R47 to verify, R48 to fix).
+- **Per-scan fixed cost ~4.3ms** (ReadIndex + gRPC + descent); per-entry
+  ~0.18us at 64B (visible at limit >= 10k).
+- **Streaming scan (R49) fixes the 4 MiB cap**: `full_100k` now
+  completes (20 scans/s, 0 errors) — previously 0 scans/s with 6
+  transport errors. `valuesize_16KiB` mostly works (27 scans/s) but
+  has 309 residual errors (retry edge cases under high payload).
+- **1KiB values 3.8x faster than 64B** — anomaly persists after R38
+  (zero-copy) and R47 (L0 drain). Root cause is in the L1 B+tree scan
+  path, not L0 or per-byte copy. Needs an engine-level C++ microbench
+  to isolate.
+
+### Comparison vs pre-R38/R44/R49 baseline
+
+| Config | Before scans/s | After scans/s | Before err | After err | Notes |
+|--------|---------------|---------------|-----------|----------|-------|
+| full_1k | 227 | 243 | 0 | 0 | +7% (noise) |
+| full_10k | 139 | 165 | 0 | 0 | +19% |
+| full_100k | 0 | 20 | 6 | 0 | R49 streaming fix |
+| bounded_10 | 225 | 223 | 0 | 0 | noise |
+| bounded_100 | 223 | 230 | 0 | 0 | noise |
+| bounded_1k | 216 | 224 | 0 | 0 | noise |
+| bounded_10k | 137 | 164 | 0 | 0 | +20% |
+| from_start_10 | 236 | 231 | 0 | 0 | noise |
+| deep_pag_10 | 141 | 147 | 0 | 0 | noise |
+| deep_pag_100 | 133 | 143 | 0 | 0 | noise |
+| valuesize_64B | 206 | 202 | 0 | 0 | noise |
+| valuesize_1KiB | 666 | 766 | 0 | 0 | +15% |
+| valuesize_16KiB | 0 | 27 | 1701 | 309 | R49 streaming, residual errors |
+| prefix_1k | 209 | 214 | 0 | 0 | noise |
+| whole_1k | 210 | 209 | 0 | 0 | noise |
+| lin_1k | 208 | 217 | 0 | 0 | noise |
+| minslot_1k | 206 | 206 | 0 | 0 | noise |
+
+**Takeaways**: R49 (streaming scan) unblocked `full_100k` and
+`valuesize_16KiB`. R38 (zero-copy) and R44 (read-path hardening) gave
+a modest ~15-20% throughput improvement on larger scans (full_10k,
+bounded_10k, valuesize_1KiB) but no measurable change on small scans
+(where the per-scan fixed cost dominates). The 1KiB anomaly persists
+(3.8x, up from 3.2x) — R38's zero-copy did not close it, confirming
+the root cause is not per-byte copy.
 
 ### Cost split
 
-- **Per-scan fixed** (~4.2ms): ReadIndex + gRPC + B+tree descent.
+- **Per-scan fixed** (~4.3ms): ReadIndex + gRPC + B+tree descent.
   Dominates at small limit (10/100).
-- **Per-entry** (~0.3us at 64B): leaf-chain traversal + packed-buffer
-  decode + value copy. Visible at limit >= 10k.
+- **Per-entry** (~0.18us at 64B): leaf-chain traversal + packed-buffer
+  decode + zero-copy value slice. Visible at limit >= 10k. Down from
+  ~0.3us pre-R38 (zero-copy reduced per-entry allocation).
 - **L0 snapshot** (O(N_l0)): `MemTable::snapshot()` copies all unflushed
-  entries per scan. At 64B with ~60k unflushed, adds ~60k entry copies;
-  at 1KiB with ~4k, only ~4k. The 1KiB anomaly's root cause.
-- **Deep-pagination descent** (~2.8ms): O(log N) B+tree descent to a
+  entries per scan. R47 refuted this as the 1KiB anomaly's cause —
+  draining L0 did not close the gap. The maintenance loop (3s tick)
+  keeps L0 small during measurement.
+- **Deep-pagination descent** (~2.5ms): O(log N) B+tree descent to a
   leaf near the end. Fixed cost per scan.
 
 Full per-config analysis in
