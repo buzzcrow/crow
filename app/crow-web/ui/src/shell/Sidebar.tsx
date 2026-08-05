@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 import { useState, useMemo } from 'react';
-import { Search, FolderTree, Monitor, Database, Boxes, HardDrive, RadioTower, Cog, Plus } from 'lucide-react';
+import { Search, FolderTree, Monitor, Database, Boxes, HardDrive, RadioTower, Cog, Plus, Rocket } from 'lucide-react';
 import { useViewMode } from '../contexts/ViewModeContext';
 import { Tree, TreeNode } from '../components/Tree';
 import { Button } from '../components/ui/Button';
@@ -19,6 +19,7 @@ interface SidebarProps {
   loading?: boolean;
   readonly?: boolean;
   width?: number;
+  clusterInitialized?: boolean;
   onNodeClick?: (node: TreeNode) => void;
   onNodeContextMenu?: (node: TreeNode, event: React.MouseEvent) => void;
   onAdd?: () => void;
@@ -33,6 +34,7 @@ export function Sidebar({
   loading,
   readonly,
   width = 280,
+  clusterInitialized = true,
   onNodeClick,
   onNodeContextMenu,
   onAdd,
@@ -218,15 +220,28 @@ export function Sidebar({
           {viewMode === ViewMode.Physical ? 'Infrastructure' : 'Cluster'}
         </h3>
         {!readonly && onAdd && (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={onAdd}
-            aria-label={viewMode === ViewMode.Physical ? 'Add Rack' : 'Add Store'}
-            className="tw-h-7 tw-px-2"
-          >
-            <Plus className="tw-h-3.5 tw-w-3.5" />
-          </Button>
+          viewMode === ViewMode.Logical && !clusterInitialized ? (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={onAdd}
+              aria-label="Initialize Cluster"
+              className="tw-h-7 tw-px-2 tw-gap-1"
+            >
+              <Rocket className="tw-h-3.5 tw-w-3.5" />
+              <span className="tw-text-xs">Initialize</span>
+            </Button>
+          ) : (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={onAdd}
+              aria-label={viewMode === ViewMode.Physical ? 'Add Rack' : 'Add Store'}
+              className="tw-h-7 tw-px-2"
+            >
+              <Plus className="tw-h-3.5 tw-w-3.5" />
+            </Button>
+          )
         )}
       </div>
 
@@ -250,7 +265,18 @@ export function Sidebar({
             ? 'No matching items'
             : viewMode === ViewMode.Physical
               ? 'No racks registered'
-              : 'No stores yet'}
+              : clusterInitialized
+                ? 'No stores yet'
+                : (
+                  <div className="tw-space-y-3">
+                    <div>Cluster not initialized.</div>
+                    {!readonly && (
+                      <Button size="sm" onClick={onAdd} leftIcon={<Rocket className="tw-h-3.5 tw-w-3.5" />}>
+                        Initialize Cluster
+                      </Button>
+                    )}
+                  </div>
+                )}
         </div>
       )}
     </aside>

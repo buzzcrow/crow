@@ -28,13 +28,13 @@ test.describe('E2E-27 server lifecycle via context menu', () => {
       // Restart
       await nodeItem.click({ button: 'right' });
       const restartResponse = page.waitForResponse((r: any) => r.url().includes('/server/restart'));
-      await page.getByRole('menuitem', { name: /restart CrowKV/i }).click();
+      await page.getByRole('menuitem', { name: /restart Crow Storage/i }).click();
       await restartResponse;
 
       // Stop
       await nodeItem.click({ button: 'right' });
       const stopResponse = page.waitForResponse((r: any) => r.url().includes('/server/stop'));
-      await page.getByRole('menuitem', { name: /stop CrowKV/i }).click();
+      await page.getByRole('menuitem', { name: /stop Crow Storage/i }).click();
       await stopResponse;
 
       // After stop, verify server is no longer running via API

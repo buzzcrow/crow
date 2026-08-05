@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 /**
- * Host-facing entrypoint for embedding the CrowKV Console.
+ * Host-facing entrypoint for embedding the Crow Storage Console.
  *
  * Usage from a host React app:
  *   import { CrowConsole } from 'crow-console';

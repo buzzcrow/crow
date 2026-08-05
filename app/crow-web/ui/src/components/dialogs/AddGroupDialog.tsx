@@ -161,10 +161,10 @@ export function AddGroupDialog({
         />
         <div className="tw-space-y-2">
           <label className="tw-text-xs tw-font-medium tw-text-text">
-            Available CrowKV nodes (select at least one — one local replica is created per node)
+            Available Crow Storage nodes (select at least one — one local replica is created per node)
           </label>
           {availableNodes.length === 0 ? (
-            <div className="tw-text-sm tw-text-muted">No reachable CrowKV nodes are available.</div>
+            <div className="tw-text-sm tw-text-muted">No reachable Crow Storage nodes are available.</div>
           ) : (
             <div className="tw-max-h-40 tw-overflow-y-auto tw-border tw-border-border tw-rounded-md tw-p-2 tw-space-y-1">
               {availableNodes.map((node) => (

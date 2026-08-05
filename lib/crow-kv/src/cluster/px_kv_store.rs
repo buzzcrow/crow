@@ -7,7 +7,7 @@ use crate::cluster::group::{ProposeResult, PxGroup};
 use crate::cluster::group_election::{LeaderElection, ReadBarrierOutcome};
 use crate::cluster::kv_server::GrpcTaskState;
 use crate::cluster::kv_store::KvStore;
-use crate::cluster::status::{StatusLevel, StoreStatus};
+use crate::cluster::status::{GroupStatus, StatusLevel, StoreStatus};
 use crate::common::optional_u64;
 use crate::common::report::OperationReport;
 use crate::metrics::MetricsRegistry;
@@ -334,7 +334,7 @@ impl PxKvStore {
             }
         }
 
-        let groups = self
+        let mut groups: Vec<GroupStatus> = self
             .groups
             .iter()
             .map(|entry| {
@@ -350,6 +350,7 @@ impl PxKvStore {
                 group
             })
             .collect();
+        groups.sort_by_key(|g| g.group_id);
 
         StoreStatus {
             store_id: self.store_id,
@@ -574,9 +575,11 @@ impl PxKvStore {
         }
     }
 
-    /// Return `(group_id, local_replica_id, leader_id, remote_count)` for all groups.
+    /// Return `(group_id, local_replica_id, leader_id, remote_count)` for all groups,
+    /// sorted by `group_id` ascending.
     pub fn group_summaries(&self) -> Vec<(u64, u64, u64, usize)> {
-        self.groups
+        let mut out: Vec<(u64, u64, u64, usize)> = self
+            .groups
             .iter()
             .map(|entry| {
                 let group = entry.value();
@@ -587,7 +590,9 @@ impl PxKvStore {
                     group.remote_replica_info().len(),
                 )
             })
-            .collect()
+            .collect();
+        out.sort_by_key(|(gid, _, _, _)| *gid);
+        out
     }
 
     // ── KV operations ─────────────────────────────────────────

@@ -445,7 +445,7 @@ health aggregation), and CLI commands.
 `lib/crow-console-shared/tests/*` (shared core),
 `app/crow-cli/tests/*` (CLI).
 
-**Test runners:** `pixi run test-console-web` (web server),
+**Test runners:** `pixi run test-console-server` (web server),
 `pixi run test-console-cli` (shared core + CLI).
 
 #### Tiered Strategy

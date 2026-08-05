@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! `CrowKV` Console web backend.
+//! `Crow Storage` Console web backend.
 //!
 //! Key work: two-tree API contract, physical tree lifecycle (A3),
 //! per-node primitives (A4), logical store/group planes (A5/A6),
@@ -145,8 +145,16 @@ pub fn router(state: AppState) -> axum::Router {
         .route("/api/stores/:sid/groups/:gid/kv/scan", get(kv::http_kv_scan))
         .route("/api/stores/:sid/groups/:gid/kv/put", post(kv::http_kv_put))
         .route("/api/stores/:sid/groups/:gid/kv/delete", post(kv::http_kv_delete))
+        // ── Metrics proxy (R11): per-node, per-group (leader), per-store (aggregated) ──
+        .route("/api/nodes/:id/metrics", get(mgmt::http_node_metrics))
+        .route("/api/stores/:sid/metrics", get(mgmt::http_store_metrics))
+        .route(
+            "/api/stores/:sid/groups/:gid/metrics",
+            get(mgmt::http_group_metrics),
+        )
         // ── Cluster init (R2): system group bootstrap ────────────────
         .route("/api/cluster/init", post(mgmt::http_cluster_init))
+        .route("/api/cluster/reset", post(lifecycle::http_internal_reset))
         // ── Internal: E2E test reset ─────────────────────────────────
         .route("/internal/reset", post(lifecycle::http_internal_reset))
         // React SPA fallback.

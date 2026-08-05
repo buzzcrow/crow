@@ -69,6 +69,10 @@ pub struct GroupStatus {
     pub remotes: Vec<RemoteStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inflight: Option<InflightStatus>,
+    /// Read-path state gauges (lease validity, contiguous applied, safe
+    /// slot). `None` until the group's read-registry handles are wired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_state: Option<ReadStateView>,
 }
 
 /// Inflight admission status snapshot.
@@ -82,6 +86,55 @@ pub struct InflightStatus {
     pub total_wait_us: u64,
 }
 
+/// Election/lease state snapshot for `/topology` and the GUI. Mirrors the
+/// scalar fields of `ElectionMetricsSnapshot` (`common/metrics.rs`) as a
+/// wire-serializable view.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ElectionStateView {
+    pub election_count: u64,
+    pub current_term: u64,
+    /// Milliseconds since the most recent heartbeat. `None` before the
+    /// first heartbeat has been observed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_heartbeat_age_ms: Option<u64>,
+    /// Remaining lease window in milliseconds (leader only). `None` when
+    /// the lease has expired or this replica is not the leader.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_remaining_ms: Option<u64>,
+    /// Number of slots currently being repaired by bulk Phase 1.
+    pub bulk_phase1_in_flight_slots: u64,
+    pub step_downs_higher_term: u64,
+    pub step_downs_lease_unrenewable: u64,
+    pub step_downs_admin: u64,
+}
+
+impl From<crate::common::metrics::ElectionMetricsSnapshot> for ElectionStateView {
+    fn from(s: crate::common::metrics::ElectionMetricsSnapshot) -> Self {
+        Self {
+            election_count: s.election_count,
+            current_term: s.current_term,
+            last_heartbeat_age_ms: s.last_heartbeat_age_ms,
+            lease_remaining_ms: s.lease_remaining_ms,
+            bulk_phase1_in_flight_slots: s.bulk_phase1_in_flight_slots,
+            step_downs_higher_term: s.step_downs_higher_term,
+            step_downs_lease_unrenewable: s.step_downs_lease_unrenewable,
+            step_downs_admin: s.step_downs_admin,
+        }
+    }
+}
+
+/// Read-path state gauges for `/topology` and the GUI. Cheap atomic reads
+/// bridged on demand from `ReadRegistryHandles`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct ReadStateView {
+    /// 1 if the leader's read lease is valid, 0 otherwise.
+    pub lease_valid: u64,
+    /// Current `contiguous_applied` on the local replica.
+    pub contiguous_applied: u64,
+    /// Current group safe slot.
+    pub safe_slot: u64,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
 pub struct ReplicaStatus {
     pub id: u64,
@@ -91,6 +144,11 @@ pub struct ReplicaStatus {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<String>,
     pub kv_store: KvStoreStatus,
+    /// Election/lease state (term, election count, step-downs, heartbeat
+    /// age, lease remaining). `None` for replicas without election state
+    /// (e.g. a remote placeholder).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub election: Option<ElectionStateView>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema)]

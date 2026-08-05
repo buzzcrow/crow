@@ -57,6 +57,7 @@ pub fn router(state: RegistryArc) -> Router {
         .route("/operations/:id", get(get_operation))
         .route("/topology", get(export_topology))
         .route("/top", get(export_topology))
+        .route("/metrics", get(metrics))
         .route("/openapi.json", get(openapi_spec))
         .with_state(state)
 }
@@ -132,6 +133,64 @@ struct SystemInitResponse {
 struct TopologyFinalizeResponse {
     ready: bool,
     already_finalized: bool,
+}
+
+/// Request body for `POST /topology/finalize`. Carries the full cluster
+/// topology from the console config so the server can write it into
+/// group 0 KV before setting the `/topology/ready` flag.
+#[derive(ToSchema, Deserialize, Default)]
+struct TopologyFinalizeRequest {
+    #[serde(default)]
+    racks: Vec<TopologyRackInput>,
+    #[serde(default)]
+    nodes: Vec<TopologyNodeInput>,
+    #[serde(default)]
+    stores: Vec<TopologyStoreInput>,
+    #[serde(default)]
+    groups: Vec<TopologyGroupInput>,
+    #[serde(default)]
+    replicas: Vec<TopologyReplicaInput>,
+}
+
+#[derive(ToSchema, Deserialize)]
+struct TopologyRackInput {
+    rack_id: String,
+    name: String,
+}
+
+#[derive(ToSchema, Deserialize)]
+struct TopologyNodeInput {
+    node_id: String,
+    rack_id: String,
+    host: String,
+    mgmt_endpoint: String,
+    grpc_endpoint: String,
+    #[serde(default)]
+    election_profile: Option<String>,
+    #[serde(default)]
+    auto_start: bool,
+}
+
+#[derive(ToSchema, Deserialize)]
+struct TopologyStoreInput {
+    store_id: u64,
+    nodes: Vec<String>,
+}
+
+#[derive(ToSchema, Deserialize)]
+struct TopologyGroupInput {
+    group_id: u64,
+    store_id: u64,
+}
+
+#[derive(ToSchema, Deserialize)]
+struct TopologyReplicaInput {
+    group_id: u64,
+    replica_id: u64,
+    node_id: String,
+    role: String,
+    voting: bool,
+    endpoint: String,
 }
 
 #[derive(ToSchema, Serialize)]
@@ -278,7 +337,8 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Err
         topology_finalize,
         topology_ready,
         get_operation,
-        export_topology
+        export_topology,
+        metrics
     ),
     components(
         schemas(
@@ -294,6 +354,12 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Err
             SystemInitRequest,
             SystemInitResponse,
             TopologyFinalizeResponse,
+            TopologyFinalizeRequest,
+            TopologyRackInput,
+            TopologyNodeInput,
+            TopologyStoreInput,
+            TopologyGroupInput,
+            TopologyReplicaInput,
             TopologyReadyResponse,
             AddStoreRequest,
             AddGroupRequest,
@@ -307,7 +373,10 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Err
             OperationResponse,
             OperationTarget,
             AsyncOperationResponse,
-            ErrorResponse
+            ErrorResponse,
+            MetricsResponse,
+            MetricPointDto,
+            MetricFieldDto
         )
     ),
     tags((name = "management", description = "CrowKV management API"))
@@ -502,13 +571,15 @@ async fn system_init(
 }
 
 /// `POST /topology/finalize` — idempotent cutover from console TOML to
-/// group 0 authoritative. Proposes a KV put of `/topology/ready` = `true`
-/// into group 0 on store 0. Returns `200` if already finalized (key
-/// exists) or if the proposal succeeds.
+/// group 0 authoritative. Writes all topology metadata (racks, nodes,
+/// stores, groups, replicas) from the request body into group 0 KV, then
+/// sets the `/topology/ready` flag. Returns `200` if already finalized
+/// (key exists) or if all proposals succeed.
 #[utoipa::path(
         post,
         path = "/topology/finalize",
         tag = "management",
+        request_body = TopologyFinalizeRequest,
         responses(
             (status = 200, description = "Topology finalized", body = TopologyFinalizeResponse),
             (status = 404, description = "Store 0 or group 0 not found", body = ErrorResponse),
@@ -518,6 +589,7 @@ async fn system_init(
     )]
 async fn topology_finalize(
     State(state): State<RegistryArc>,
+    Json(body): Json<TopologyFinalizeRequest>,
 ) -> Result<(StatusCode, Json<TopologyFinalizeResponse>), (StatusCode, Json<ErrorResponse>)> {
     let store = state
         .get_store(0)
@@ -539,7 +611,10 @@ async fn topology_finalize(
         ));
     }
 
-    // Propose the ready key.
+    // Write topology metadata into group 0 KV.
+    let written = write_topology_metadata(&store, &body).await?;
+
+    // Set the ready flag last — once set, group 0 is authoritative.
     let put_resp = store.kv_put(0, topology_kv::READY_KEY, b"true", 0, 0, 0, 0).await;
     if !put_resp.ok {
         if put_resp.error == "not leader" {
@@ -550,11 +625,14 @@ async fn topology_finalize(
         }
         return Err(err_json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("topology finalize proposal failed: {}", put_resp.error),
+            format!("topology finalize ready-key proposal failed: {}", put_resp.error),
         ));
     }
 
-    info!("topology finalized: /topology/ready key written to group 0");
+    info!(
+        entries_written = written,
+        "topology finalized: metadata + /topology/ready written to group 0"
+    );
 
     Ok((
         StatusCode::OK,
@@ -563,6 +641,138 @@ async fn topology_finalize(
             already_finalized: false,
         }),
     ))
+}
+
+/// Build an error response for a topology metadata put failure.
+fn topology_put_err(
+    error: &str,
+    not_leader_hint: &str,
+    entity: &str,
+    id: &str,
+) -> (StatusCode, Json<ErrorResponse>) {
+    if error == "not leader" {
+        err_json(
+            StatusCode::CONFLICT,
+            format!("not leader; hint: {not_leader_hint}"),
+        )
+    } else {
+        err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("topology finalize failed writing {entity} {id}: {error}"),
+        )
+    }
+}
+
+/// Put one topology metadata entry into `group_id` on `store`, bumping
+/// `written` on success and returning a structured error on failure.
+async fn put_topology_entry(
+    store: &Arc<PxKvStore>,
+    group_id: u64,
+    key: &[u8],
+    val: &[u8],
+    entity: &str,
+    id: &str,
+    written: &mut u32,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let resp = store.kv_put(group_id, key, val, 0, 0, 0, 0).await;
+    if !resp.ok {
+        return Err(topology_put_err(&resp.error, &resp.not_leader_hint, entity, id));
+    }
+    *written += 1;
+    Ok(())
+}
+
+/// Write all topology metadata (racks, nodes, stores, groups, replicas)
+/// from `body` into group 0 KV on `store`. Returns the number of entries
+/// written.
+async fn write_topology_metadata(
+    store: &Arc<PxKvStore>,
+    body: &TopologyFinalizeRequest,
+) -> Result<u32, (StatusCode, Json<ErrorResponse>)> {
+    let mut written = 0u32;
+
+    for rack in &body.racks {
+        let key = topology_kv::rack_key(&rack.rack_id);
+        let val = topology_kv::encode(&topology_kv::TopologyRack {
+            rack_id: rack.rack_id.clone(),
+            name: rack.name.clone(),
+        });
+        put_topology_entry(store, 0, &key, &val, "rack", &rack.rack_id, &mut written).await?;
+    }
+
+    for node in &body.nodes {
+        let key = topology_kv::node_key(&node.node_id);
+        let val = topology_kv::encode(&topology_kv::TopologyNode {
+            node_id: node.node_id.clone(),
+            rack_id: node.rack_id.clone(),
+            host: node.host.clone(),
+            mgmt_endpoint: node.mgmt_endpoint.clone(),
+            grpc_endpoint: node.grpc_endpoint.clone(),
+            election_profile: node.election_profile.clone(),
+            auto_start: node.auto_start,
+        });
+        put_topology_entry(store, 0, &key, &val, "node", &node.node_id, &mut written).await?;
+    }
+
+    for s in &body.stores {
+        let key = topology_kv::store_key(s.store_id);
+        let val = topology_kv::encode(&topology_kv::TopologyStore {
+            store_id: s.store_id,
+            nodes: s.nodes.clone(),
+        });
+        put_topology_entry(
+            store,
+            0,
+            &key,
+            &val,
+            "store",
+            &s.store_id.to_string(),
+            &mut written,
+        )
+        .await?;
+    }
+
+    for g in &body.groups {
+        let key = topology_kv::group_key(g.group_id);
+        let val = topology_kv::encode(&topology_kv::TopologyGroup {
+            group_id: g.group_id,
+            store_id: g.store_id,
+        });
+        put_topology_entry(
+            store,
+            0,
+            &key,
+            &val,
+            "group",
+            &g.group_id.to_string(),
+            &mut written,
+        )
+        .await?;
+    }
+
+    for r in &body.replicas {
+        let key = topology_kv::replica_key(r.group_id, r.replica_id);
+        let val = topology_kv::encode(&topology_kv::TopologyReplica {
+            group_id: r.group_id,
+            replica_id: r.replica_id,
+            node_id: r.node_id.clone(),
+            role: r.role.clone(),
+            voting: r.voting,
+            endpoint: r.endpoint.clone(),
+        });
+        put_topology_entry(
+            store,
+            0,
+            &key,
+            &val,
+            "replica",
+            &r.replica_id.to_string(),
+            &mut written,
+        )
+        .await?;
+    }
+
+    Ok(written)
 }
 
 /// `GET /topology/ready` — check whether group 0 has the `/topology/ready`
@@ -1446,6 +1656,146 @@ async fn export_topology(State(state): State<RegistryArc>) -> impl IntoResponse 
     let stores: Vec<StoreStatus> = state.stores.iter().map(|entry| entry.value().status()).collect();
     let body = serde_json::to_string_pretty(&TopologyResponse { stores }).unwrap();
     ([("content-type", "application/json")], body)
+}
+
+// ── /metrics ────────────────────────────────────────────────
+
+/// Query params for `GET /metrics`.
+#[derive(Deserialize, ToSchema)]
+struct MetricsQuery {
+    /// Metric name prefix filter (e.g. `s.1.g.2.`). Default empty = all.
+    #[serde(default)]
+    prefix: String,
+}
+
+/// One typed metric point in the `/metrics` response.
+#[derive(Serialize, ToSchema)]
+struct MetricPointDto {
+    name: String,
+    kind: String,
+    /// Type-specific fields (counter: `count/tps/total`; gauge: `value`;
+    /// bandwidth: `count/avg_size/rate/total_bytes`; histogram:
+    /// `count/avg_ns/p50_ns/p99_ns/max_ns/total`; summary:
+    /// `count/avg_ns/max_ns/total`).
+    fields: Vec<MetricFieldDto>,
+}
+
+#[derive(Serialize, ToSchema)]
+struct MetricFieldDto {
+    key: String,
+    value: f64,
+}
+
+/// `GET /metrics` response — structured snapshot of registry metrics.
+#[derive(Serialize, ToSchema)]
+struct MetricsResponse {
+    /// Approximate window length in seconds (the configured flush
+    /// interval; the snapshot path does not reset window state).
+    window_secs: f64,
+    timestamp: String,
+    metrics: Vec<MetricPointDto>,
+}
+
+/// `GET /metrics` — structured snapshot of all registry metrics matching
+/// the `prefix` query param. Does not reset window state. Intended for
+/// the GUI Inspector and script/scrape consumers.
+#[utoipa::path(
+        get,
+        path = "/metrics",
+        tag = "management",
+        params(("prefix" = Option<String>, Query, description = "Metric name prefix filter")),
+        responses((status = 200, description = "Metric snapshot", body = MetricsResponse))
+    )]
+async fn metrics(State(state): State<RegistryArc>, Query(q): Query<MetricsQuery>) -> impl IntoResponse {
+    let timestamp = crow_kv::metrics::iso8601_now();
+    let window_secs = 5.0; // approximate — snapshot path does not track elapsed
+    let metrics: Vec<MetricPointDto> = state
+        .metrics_registry
+        .as_ref()
+        .map(|reg| {
+            let reg = reg.lock().unwrap();
+            reg.snapshot_struct(&q.prefix, window_secs)
+                .iter()
+                .map(metric_point_to_dto)
+                .collect()
+        })
+        .unwrap_or_default();
+    let body = serde_json::to_string_pretty(&MetricsResponse {
+        window_secs,
+        timestamp,
+        metrics,
+    })
+    .unwrap();
+    ([("content-type", "application/json")], body)
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn metric_point_to_dto(p: &crow_kv::metrics::MetricPoint) -> MetricPointDto {
+    use crow_kv::metrics::MetricPoint;
+    let kind = p.kind().to_string();
+    let fields = match p {
+        MetricPoint::Counter {
+            count, tps, total, ..
+        } => vec![("count", *count as f64), ("tps", *tps), ("total", *total as f64)],
+        MetricPoint::Gauge { value, .. } => vec![("value", *value as f64)],
+        MetricPoint::Bandwidth {
+            count,
+            avg_size,
+            rate,
+            total_bytes,
+            ..
+        } => vec![
+            ("count", *count as f64),
+            ("avg_size", *avg_size as f64),
+            ("rate", *rate as f64),
+            ("total_bytes", *total_bytes as f64),
+        ],
+        MetricPoint::Histogram {
+            count,
+            avg_ns,
+            p50_ns,
+            p99_ns,
+            max_ns,
+            total,
+            ..
+        } => vec![
+            ("count", *count as f64),
+            ("avg_ns", *avg_ns as f64),
+            ("p50_ns", *p50_ns as f64),
+            ("p99_ns", *p99_ns as f64),
+            ("max_ns", *max_ns as f64),
+            ("total", *total as f64),
+        ],
+        MetricPoint::Summary {
+            count,
+            avg_ns,
+            max_ns,
+            total,
+            ..
+        } => vec![
+            ("count", *count as f64),
+            ("avg_ns", *avg_ns as f64),
+            ("max_ns", *max_ns as f64),
+            ("total", *total as f64),
+        ],
+    };
+    MetricPointDto {
+        name: match p {
+            MetricPoint::Counter { name, .. }
+            | MetricPoint::Gauge { name, .. }
+            | MetricPoint::Bandwidth { name, .. }
+            | MetricPoint::Histogram { name, .. }
+            | MetricPoint::Summary { name, .. } => name.clone(),
+        },
+        kind,
+        fields: fields
+            .into_iter()
+            .map(|(key, value)| MetricFieldDto {
+                key: key.to_string(),
+                value,
+            })
+            .collect(),
+    }
 }
 
 /// Rebuild `group` with `new_remotes` merged into its remote list,

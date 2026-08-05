@@ -265,9 +265,11 @@ async fn kv_get_returns_502_when_leader_unreachable() {
                     state: ReplicaState::Running,
                     engine_healthy: true,
                     crowtree_stats: None,
+                    election: None,
                 },
                 remotes: vec![],
                 leader_hint: Some(1),
+                read_state: None,
             }],
         },
     );

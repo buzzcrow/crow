@@ -53,14 +53,22 @@ export function useLogicalTree({
   const [error, setError] = useState<Error | null>(null);
   const isActiveRef = useRef(true);
   const pollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const hasLoadedRef = useRef(false);
 
   // Fetch logical tree data
   const fetchData = useCallback(async () => {
     if (!enabled) return;
 
     try {
-      setLoading(true);
-      setError(null);
+      // Only show loading state on the initial fetch; subsequent polls
+      // refresh silently to avoid flipping the sidebar placeholder.
+      if (!hasLoadedRef.current) {
+        setLoading(true);
+      }
+      // Note: do NOT clear the error optimistically here — clearing it before
+      // the request resolves makes the header health pill flip between
+      // Failed/Unknown every poll cycle when the server is down. It is cleared
+      // only once the fetch chain actually succeeds (end of this try block).
 
       // Fetch stores with recursive depth
       const storesData = await listStores(recursive);
@@ -117,10 +125,12 @@ export function useLogicalTree({
       setStores(enrichedStores);
       setGroups(allGroups);
       setReplicas(allReplicas);
+      setError(null);
     } catch (err) {
       console.error('Failed to fetch logical tree:', err);
       setError(err instanceof Error ? err : new Error('Unknown error fetching logical tree'));
     } finally {
+      hasLoadedRef.current = true;
       setLoading(false);
     }
   }, [enabled, recursive]);

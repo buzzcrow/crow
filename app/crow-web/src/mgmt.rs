@@ -9,7 +9,7 @@
 
 use crate::error::{err_400, err_409, err_500, err_502, ErrorBody};
 use crate::state::AppState;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use crow_console_shared::clients::http::ServerClient;
@@ -19,7 +19,10 @@ use crow_console_shared::error::Error as SharedError;
 use crow_console_shared::lifecycle::{self, DeployRequest};
 use crow_console_shared::mgmt::{
     AddGroupInitialRole, AddGroupRequest, AddStoreRequest, RemoteReplicaInfo, StepDownRequest,
+    TopologyFinalizeRequest, TopologyGroupInput, TopologyNodeInput, TopologyRackInput, TopologyReplicaInput,
+    TopologyStoreInput,
 };
+use crow_console_shared::MetricsResponse;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -588,6 +591,9 @@ pub async fn http_list_stores(
             }
         }
     }
+    for entry in seen.values_mut() {
+        entry.groups.sort_by_key(|g| g.group_id);
+    }
     Json(seen.into_values().collect())
 }
 
@@ -720,6 +726,11 @@ pub async fn http_remove_store(
     State(state): State<AppState>,
     Path(sid): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+    if sid == 0 {
+        return Err(err_409(
+            "store 0 is the system store; use POST /api/cluster/reset to tear down the entire cluster",
+        ));
+    }
     let view = state.monitor_cache.resolve_store(sid).await.ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
@@ -959,6 +970,11 @@ pub async fn http_remove_group(
     State(state): State<AppState>,
     Path((sid, gid)): Path<(u64, u64)>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
+    if sid == 0 && gid == 0 {
+        return Err(err_409(
+            "group 0 in store 0 is the system group; use POST /api/cluster/reset to tear down the entire cluster",
+        ));
+    }
     let view = state.monitor_cache.resolve_group(sid, gid).await.ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
@@ -1605,6 +1621,40 @@ pub async fn http_cluster_init(
         .persist()
         .map_err(|e| err_500(format!("persist config: {e}")))?;
 
+    // Phase 5: finalize topology — write all topology metadata into
+    // group 0 KV and set the /topology/ready flag. Try each succeeded
+    // node until one accepts (the leader will).
+    let finalize_body = {
+        let cfg = state.config.read().unwrap();
+        build_topology_finalize_body(&cfg, &succeeded)
+    };
+    let mut finalized = false;
+    for (nid, _) in &succeeded {
+        let Ok(url) = mgmt_url_for_node(&state, nid) else {
+            continue;
+        };
+        let Ok(client) = build_server_client(url) else {
+            continue;
+        };
+        match client.topology_finalize(&finalize_body).await {
+            Ok(resp) => {
+                info!(
+                    node_id = nid,
+                    already_finalized = resp.already_finalized,
+                    "topology/finalize succeeded"
+                );
+                finalized = true;
+                break;
+            }
+            Err(e) => {
+                warn!(node_id = nid, error = %e, "topology/finalize failed; trying next node");
+            }
+        }
+    }
+    if !finalized {
+        warn!("topology/finalize failed on all nodes; cluster init succeeded but topology not written to group 0");
+    }
+
     Ok((
         StatusCode::CREATED,
         Json(serde_json::json!({
@@ -1616,4 +1666,246 @@ pub async fn http_cluster_init(
             })).collect::<Vec<_>>(),
         })),
     ))
+}
+
+/// Build the `TopologyFinalizeRequest` from the console config, capturing
+/// racks, nodes, stores, groups, and replicas for writing into group 0 KV.
+fn build_topology_finalize_body(
+    cfg: &crow_console_shared::config::ConsoleConfig,
+    succeeded: &[(String, u64)],
+) -> TopologyFinalizeRequest {
+    let racks: Vec<TopologyRackInput> = cfg
+        .racks
+        .iter()
+        .map(|r| TopologyRackInput {
+            rack_id: r.id.clone(),
+            name: r.name.clone(),
+        })
+        .collect();
+
+    let nodes: Vec<TopologyNodeInput> = cfg
+        .nodes
+        .iter()
+        .filter_map(|n| {
+            let server = cfg.server_for_node(&n.id)?;
+            Some(TopologyNodeInput {
+                node_id: n.id.clone(),
+                rack_id: n.rack_id.clone(),
+                host: n.host.clone(),
+                mgmt_endpoint: server.url.clone(),
+                grpc_endpoint: server.grpc_url.clone().unwrap_or_default(),
+                election_profile: server.election_profile.clone(),
+                auto_start: server.auto_start,
+            })
+        })
+        .collect();
+
+    let stores: Vec<TopologyStoreInput> = cfg
+        .stores
+        .iter()
+        .map(|s| TopologyStoreInput {
+            store_id: s.store_id,
+            nodes: s.nodes.clone(),
+        })
+        .collect();
+
+    let groups: Vec<TopologyGroupInput> = cfg
+        .groups
+        .iter()
+        .map(|g| TopologyGroupInput {
+            group_id: g.group_id,
+            store_id: g.store_id,
+        })
+        .collect();
+
+    // Build replicas from group entries. For the system group (0/0),
+    // use the succeeded list from init; for other groups, use config.
+    let mut replicas: Vec<TopologyReplicaInput> = Vec::new();
+    for (nid, rid) in succeeded {
+        let server = cfg.server_for_node(nid);
+        let endpoint = server.and_then(|s| s.grpc_url.clone()).unwrap_or_default();
+        let role = if *rid == succeeded.first().map_or(1, |(_, r)| *r) {
+            "leader"
+        } else {
+            "follower"
+        };
+        replicas.push(TopologyReplicaInput {
+            group_id: 0,
+            replica_id: *rid,
+            node_id: nid.clone(),
+            role: role.to_string(),
+            voting: true,
+            endpoint,
+        });
+    }
+    for g in &cfg.groups {
+        if g.store_id == 0 && g.group_id == 0 {
+            continue; // already handled above
+        }
+        for r in &g.replicas {
+            let server = cfg.server_for_node(&r.node_id);
+            let endpoint = server.and_then(|s| s.grpc_url.clone()).unwrap_or_default();
+            replicas.push(TopologyReplicaInput {
+                group_id: g.group_id,
+                replica_id: r.replica_id,
+                node_id: r.node_id.clone(),
+                role: "follower".to_string(),
+                voting: true,
+                endpoint,
+            });
+        }
+    }
+
+    TopologyFinalizeRequest {
+        racks,
+        nodes,
+        stores,
+        groups,
+        replicas,
+    }
+}
+
+// ── Metrics proxy (R11) ───────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct MetricsQuery {
+    /// Metric name prefix filter (e.g. `s.1.g.2.`). Default empty = all.
+    #[serde(default)]
+    prefix: Option<String>,
+}
+
+impl MetricsQuery {
+    fn prefix(&self) -> &str {
+        self.prefix.as_deref().unwrap_or("")
+    }
+}
+
+/// `GET /api/nodes/:id/metrics` — proxy to the node's `GET /metrics`.
+///
+/// # Errors
+/// Returns `502` if the node has no deployed server or the upstream
+/// `/metrics` fetch fails.
+pub async fn http_node_metrics(
+    State(state): State<AppState>,
+    Path(node_id): Path<String>,
+    Query(q): Query<MetricsQuery>,
+) -> Result<Json<MetricsResponse>, (StatusCode, Json<ErrorBody>)> {
+    let url = mgmt_url_for_node(&state, &node_id)?;
+    let client = build_server_client(url)?;
+    let resp = client
+        .metrics(q.prefix())
+        .await
+        .map_err(|e| err_502(format!("metrics fetch from node {node_id}: {e}")))?;
+    Ok(Json(resp))
+}
+
+/// `GET /api/stores/:sid/groups/:gid/metrics` — proxy to the leader
+/// node's `GET /metrics` with prefix `s.{sid}.g.{gid}.`.
+///
+/// # Errors
+/// Returns `404` if the group has no healthy leader; `502` if the
+/// upstream `/metrics` fetch fails.
+pub async fn http_group_metrics(
+    State(state): State<AppState>,
+    Path((sid, gid)): Path<(u64, u64)>,
+    Query(q): Query<MetricsQuery>,
+) -> Result<Json<MetricsResponse>, (StatusCode, Json<ErrorBody>)> {
+    let (_rid, node_id) = state.monitor_cache.leader_for(sid, gid).await.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorBody {
+                error: format!("group {gid} in store {sid} has no healthy leader"),
+            }),
+        )
+    })?;
+    let url = mgmt_url_for_node(&state, &node_id)?;
+    let client = build_server_client(url)?;
+    // If the caller supplied a prefix, prepend the group scope; otherwise
+    // default to the group's own prefix.
+    let prefix = if q.prefix().is_empty() {
+        format!("s.{sid}.g.{gid}.")
+    } else {
+        format!("s.{sid}.g.{gid}.{}", q.prefix())
+    };
+    let resp = client
+        .metrics(&prefix)
+        .await
+        .map_err(|e| err_502(format!("metrics fetch from leader {node_id}: {e}")))?;
+    Ok(Json(resp))
+}
+
+/// `GET /api/stores/:sid/metrics` — aggregate metrics across all groups
+/// in the store. Fetches from each group's leader node with prefix
+/// `s.{sid}.` and merges the results.
+///
+/// # Errors
+/// Returns `404` if the store has no groups. Individual node fetch
+/// failures are silently skipped (partial results returned).
+pub async fn http_store_metrics(
+    State(state): State<AppState>,
+    Path(sid): Path<u64>,
+    Query(q): Query<MetricsQuery>,
+) -> Result<Json<MetricsResponse>, (StatusCode, Json<ErrorBody>)> {
+    // Collect all group IDs for this store from the monitor cache.
+    let group_ids: Vec<u64> = {
+        let snap = state.monitor_cache.snapshot().await;
+        snap.values()
+            .filter_map(|rec| {
+                rec.stores
+                    .get(&sid)
+                    .map(|ns| ns.groups.iter().map(|g| g.group_id).collect::<Vec<_>>())
+            })
+            .flatten()
+            .collect()
+    };
+    if group_ids.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorBody {
+                error: format!("store {sid} not found or has no groups"),
+            }),
+        ));
+    }
+
+    let store_prefix = if q.prefix().is_empty() {
+        format!("s.{sid}.")
+    } else {
+        format!("s.{sid}.{}", q.prefix())
+    };
+
+    // Fetch from each group's leader node. Deduplicate by node (a single
+    // node may host multiple groups in the store; one fetch with the
+    // store prefix covers all of them).
+    let mut seen_nodes: HashSet<String> = HashSet::new();
+    let mut merged: Vec<crow_console_shared::MetricPointView> = Vec::new();
+    let mut window_secs = 5.0_f64;
+    let mut timestamp = String::new();
+
+    for gid in &group_ids {
+        let Some((_rid, node_id)) = state.monitor_cache.leader_for(sid, *gid).await else {
+            continue;
+        };
+        if !seen_nodes.insert(node_id.clone()) {
+            continue;
+        }
+        let Ok(url) = mgmt_url_for_node(&state, &node_id) else {
+            continue;
+        };
+        let Ok(client) = build_server_client(url) else {
+            continue;
+        };
+        if let Ok(resp) = client.metrics(&store_prefix).await {
+            window_secs = resp.window_secs;
+            if timestamp.is_empty() {
+                timestamp = resp.timestamp;
+            }
+            merged.extend(resp.metrics);
+        }
+    }
+
+    Ok(Json(MetricsResponse {
+        window_secs,
+        timestamp,
+        metrics: merged,
+    }))
 }

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CrowKV User Guide</title>
+<title>Crow Storage User Guide</title>
 <style>
 
 :root {
@@ -273,9 +273,9 @@ tr:hover td { background: var(--code-bg); }
 <body>
 <div class="layout">
   <aside class="sidebar">
-<div class="sidebar-brand"><span class="brand-mark"></span>CrowKV</div>
+<div class="sidebar-brand"><span class="brand-mark"></span>Crow Storage</div>
 <nav>
-<a href="#crow-kv-user-guide" class="">CrowKV User Guide</a>
+<a href="#crow-kv-user-guide" class="">Crow Storage User Guide</a>
 <a href="#1-quick-start-bootstrap-a-3-node-cluster" class="sub">1. Quick Start: Bootstrap a 3-Node Cluster</a>
 <a href="#2-kv-operations" class="sub">2. KV Operations</a>
 <a href="#3-cluster-management" class="sub">3. Cluster Management</a>
@@ -286,10 +286,10 @@ tr:hover td { background: var(--code-bg); }
 </nav>
   </aside>
   <main class="content">
-<h1 id="crow-kv-user-guide">CrowKV User Guide</h1>
+<h1 id="crow-kv-user-guide">Crow Storage User Guide</h1>
 <p>This guide walks through starting a cluster, performing basic KV</p>
 <p>operations, managing topology, and running upgrades.</p>
-<p>CrowKV provides three interfaces for cluster management and data</p>
+<p>Crow Storage provides three interfaces for cluster management and data</p>
 <p>access:</p>
 <ul>
 <li><strong>Web UI</strong> — the <code>crow-web</code> service provides a visual dashboard</li>
@@ -585,7 +585,7 @@ curl "http://$IP:$PORT/api/stores/3/groups/3"
 <p>leadership.</p>
 <hr>
 <h2 id="6-backup">6. Backup</h2>
-<p>CrowKV durability comes from the per-store WAL (<code>--wal-root</code>) and group</p>
+<p>Crow Storage durability comes from the per-store WAL (<code>--wal-root</code>) and group</p>
 <p>config files (<code>--config-root</code>). For disaster recovery, back up:</p>
 <ul>
 <li><code>{wal-root}/store{store_id}/</code> for each store</li>

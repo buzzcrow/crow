@@ -94,6 +94,7 @@ export interface LocalReplicaInfo {
   state: ReplicaState;
   engine_healthy: boolean;
   crowtree_stats?: CrowTreeStats;
+  election?: ElectionState;
 }
 
 export interface RemoteReplicaInfo {
@@ -109,6 +110,7 @@ export interface NodeGroup {
   local: LocalReplicaInfo;
   remotes: RemoteReplicaInfo[];
   leader_hint?: ReplicaId;
+  read_state?: ReadState;
 }
 
 // Logical View Types
@@ -132,6 +134,7 @@ export interface GroupView {
   leader?: ReplicaId;
   replicas: ReplicaView[];
   state: GroupHealth;
+  read_state?: ReadState;
 }
 
 export interface ReplicaView {
@@ -143,6 +146,7 @@ export interface ReplicaView {
   state: ReplicaState;
   engine_healthy: boolean;
   crowtree_stats?: CrowTreeStats;
+  election?: ElectionState;
 }
 
 // Common Enums
@@ -200,4 +204,41 @@ export interface ApiError {
   type: ErrorType;
   message: string;
   details?: any;
+}
+
+// Election/lease state (mirrors crow-kv's ElectionStateView)
+export interface ElectionState {
+  election_count: number;
+  current_term: number;
+  last_heartbeat_age_ms?: number;
+  lease_remaining_ms?: number;
+  bulk_phase1_in_flight_slots: number;
+  step_downs_higher_term: number;
+  step_downs_lease_unrenewable: number;
+  step_downs_admin: number;
+}
+
+// Read-path state gauges (mirrors crow-kv's ReadStateView)
+export interface ReadState {
+  lease_valid: number;
+  contiguous_applied: number;
+  safe_slot: number;
+}
+
+// Metrics snapshot types (mirrors crow-console-shared's MetricsResponse)
+export interface MetricField {
+  key: string;
+  value: number;
+}
+
+export interface MetricPoint {
+  name: string;
+  kind: string;
+  fields: MetricField[];
+}
+
+export interface MetricsResponse {
+  window_secs: number;
+  timestamp: string;
+  metrics: MetricPoint[];
 }

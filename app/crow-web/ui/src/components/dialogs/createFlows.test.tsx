@@ -124,7 +124,7 @@ describe('Add Node dialog', () => {
 
     fireEvent.change(screen.getByLabelText('Node ID'), { target: { value: 'n1' } });
     fireEvent.change(screen.getByLabelText('Host'), { target: { value: '127.0.0.1' } });
-    fireEvent.click(screen.getByLabelText('Enable CrowKV on this node'));
+    fireEvent.click(screen.getByLabelText('Enable Crow Storage on this node'));
     fireEvent.click(screen.getByRole('button', { name: /create node/i }));
 
     await waitFor(() => expect(captured.length).toBe(1));
@@ -154,7 +154,7 @@ describe('Add Node dialog', () => {
     fireEvent.change(screen.getByLabelText('SSH Key Path (optional)'), {
       target: { value: '/keys/id_rsa' },
     });
-    fireEvent.click(screen.getByLabelText('Enable CrowKV on this node'));
+    fireEvent.click(screen.getByLabelText('Enable Crow Storage on this node'));
     fireEvent.click(screen.getByRole('button', { name: /create node/i }));
 
     await waitFor(() => expect(captured.length).toBe(1));
@@ -181,7 +181,7 @@ describe('Add Node dialog', () => {
       { wrapper },
     );
 
-    fireEvent.click(screen.getByLabelText('Enable CrowKV on this node'));
+    fireEvent.click(screen.getByLabelText('Enable Crow Storage on this node'));
     fireEvent.click(screen.getByRole('button', { name: /create node/i }));
 
     await waitFor(() => expect(captured.length).toBe(1));
@@ -194,7 +194,7 @@ describe('Add Node dialog', () => {
     });
   });
 
-  it('enables CrowKV by default and deploys immediately after node creation', async () => {
+  it('enables Crow Storage by default and deploys immediately after node creation', async () => {
     installFetchMock({ id: 'n1' });
     render(
       <AddNodeDialog
@@ -208,7 +208,7 @@ describe('Add Node dialog', () => {
       { wrapper },
     );
 
-    expect((screen.getByLabelText('Enable CrowKV on this node') as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByLabelText('Enable Crow Storage on this node') as HTMLInputElement).checked).toBe(true);
     fireEvent.change(screen.getByLabelText('Node ID'), { target: { value: 'n1' } });
     fireEvent.change(screen.getByLabelText('Host'), { target: { value: '127.0.0.1' } });
     fireEvent.click(screen.getByRole('button', { name: /create node/i }));
@@ -333,7 +333,7 @@ describe('Add Store dialog', () => {
     });
   });
 
-  it('keeps the Create button disabled until id is numeric and a deployed CrowKV node is picked', () => {
+  it('keeps the Create button disabled until id is numeric and a deployed Crow Storage node is picked', () => {
     render(<AddStoreDialog isOpen onClose={() => {}} nodes={mockNodes} servers={mockServers} />, { wrapper });
     const btn = screen.getByRole('button', { name: /create kv store/i });
     expect(btn).toBeDisabled();
@@ -366,14 +366,14 @@ describe('Add Store dialog', () => {
     expect(captured[0].body).toEqual({ store_id: 9, nodes: ['n1'] });
   });
 
-  it('only lists nodes that already run CrowKV', () => {
+  it('only lists nodes that already run Crow Storage', () => {
     render(<AddStoreDialog isOpen onClose={() => {}} nodes={mockNodes} servers={mockServers} />, { wrapper });
 
     expect(screen.getByLabelText(/^n1/)).toBeInTheDocument();
     expect(screen.queryByLabelText(/^n2/)).toBeNull();
   });
 
-  it('excludes configured but unavailable CrowKV nodes', () => {
+  it('excludes configured but unavailable Crow Storage nodes', () => {
     const unavailableServers: CrowKVServerView[] = [
       ...mockServers,
       {
@@ -725,7 +725,7 @@ describe('end-to-end create flow', () => {
    * the dialogs and asserts the resulting HTTP transcript matches the
    * backend's normative contract (`mgmt_routes.rs`, `replica_routes.rs`).
    */
-  it('rack → node(with CrowKV) → store → group → replica posts the right bodies', async () => {
+  it('rack → node(with Crow Storage) → store → group → replica posts the right bodies', async () => {
     installFetchMock({}, 201);
 
     // Rack.

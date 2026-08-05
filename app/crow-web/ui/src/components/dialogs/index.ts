@@ -8,3 +8,4 @@ export { AddGroupDialog } from './AddGroupDialog';
 export { AddReplicaDialog } from './AddReplicaDialog';
 export { DeployServerDialog } from './DeployServerDialog';
 export { ConfirmDeleteDialog } from './ConfirmDeleteDialog';
+export { InitClusterDialog } from './InitClusterDialog';

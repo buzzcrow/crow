@@ -64,6 +64,7 @@ async fn reconcile_runs_when_finalized() {
 
     client()
         .post(format!("{}/topology/finalize", server.base_url()))
+        .json(&serde_json::json!({}))
         .send()
         .await
         .unwrap();
