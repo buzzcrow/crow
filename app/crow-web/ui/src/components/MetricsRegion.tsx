@@ -77,9 +77,13 @@ function MetricRow({ p }: { p: MetricPoint }) {
   );
 }
 
-/** Collapsible metrics region for the Inspector Details tab. */
+/** Collapsible metrics region for the Inspector Details tab.
+ *  Shows only `gauge` metrics — internal global status directly related to
+ *  the focused entity. Latency histograms/summaries, counters, and bandwidth
+ *  are intentionally excluded to keep the panel focused. */
 export function MetricsRegion({ data }: { data: MetricsResponse | null }) {
-  if (!data || data.metrics.length === 0) {
+  const gauges = data?.metrics.filter((p) => p.kind === 'gauge') ?? [];
+  if (gauges.length === 0) {
     return (
       <Section title="Metrics">
         <p className="tw-px-3 tw-py-2 tw-text-xs tw-text-muted">No metrics available.</p>
@@ -87,9 +91,9 @@ export function MetricsRegion({ data }: { data: MetricsResponse | null }) {
     );
   }
   return (
-    <Section title={`Metrics (window ${data.window_secs.toFixed(0)}s)`}>
+    <Section title={`Metrics (window ${data!.window_secs.toFixed(0)}s)`}>
       <dl className="tw-divide-y tw-divide-border tw-border tw-border-border tw-rounded-md tw-overflow-hidden">
-        {data.metrics.map((p) => (
+        {gauges.map((p) => (
           <MetricRow key={p.name} p={p} />
         ))}
       </dl>
