@@ -108,28 +108,33 @@ time out. Same root cause as full_100k above.
 **1 KiB anomaly**: 1 KiB values are 3.2x faster than 64 B values
 (666 vs 206 scans/s) despite returning 16x more data per scan. This
 is counterintuitive — larger values should be slower (more per-byte
-copy, the cost R38 targets), not faster. Root cause:
-`MemTable::snapshot()` (`memtable.cpp:195`) copies **all** N_l0
-entries into a vector on every scan call, regardless of the scan
-limit — O(N_l0) per scan, not O(limit). With
-`memtable_flush_bytes = 4 MiB`:
-- 64 B values (~104 B/entry): byte threshold hit at ~40k entries →
-  after 100k pre-pop (no flush-after-prepopulate), ~60k entries still
-  in L0. Every scan pays `snapshot(60k entries)` even though
-  limit=1000.
-- 1 KiB values (~1064 B/entry): byte threshold hit at ~4k entries →
-  ~25 flushes during pre-pop → after 100k, only ~4k entries in L0.
-  Every scan pays `snapshot(4k entries)`.
+copy, the cost R38 targets), not faster.
 
-The 60k vs 4k snapshot cost difference (15x) explains the 3.2x
-throughput difference. The memtable itself is not slower per-entry
-than the B+tree (sorted vector vs `resolve_chain_sorted`'s `std::map`
-build per leaf) — the problem is `snapshot()` eagerly copies the
-entire memtable instead of doing a lazy or range-bounded iteration.
-Fix: a lazy/range-bounded L0 cursor (lower_bound to start_after, then
-iterate up to limit) would make the L0 cost O(limit) instead of
-O(N_l0). Tracked as R47 (flush-after-prepopulate bench flag to verify)
-+ a follow-on for the lazy L0 cursor.
+**L0-snapshot hypothesis REFUTED (R47 flush-after-prepopulate).** The
+original code-reading hypothesis blamed `MemTable::snapshot()` for
+copying all N_l0 entries per scan (O(N_l0), not O(limit)), with 64 B
+leaving ~60k unflushed vs 1 KiB leaving ~4k. R47 added a
+`--flush-after-prepopulate` bench flag that drains L0 via a new
+`POST /stores/{sid}/groups/{gid}/flush` management API endpoint before
+the measurement window. Re-running the value-size sweep with the flag:
+
+- `valuesize_64B_flushed`: 219 scans/s, avg=4564us (vs 224 unflushed)
+- `valuesize_1KiB_flushed`: 721 scans/s, avg=1386us (vs 709 unflushed)
+
+The 3.2x gap is unchanged with L0 deterministically drained. The flag
+is a no-op because the "e2e" election profile sets
+`maintenance_tick_ms = 3000`, so the per-group maintenance loop already
+calls `KVEngine::flush()` every 3 s; during the 10 s measurement
+window (~3 ticks) and the multi-second pre-pop, L0 is already largely
+drained, and the scan bench issues no writes to refill it. So L0 is
+small at scan time with or without the flag.
+
+Conclusion: the anomaly is in the L1 B+tree scan path (or the
+decode/copy path), not L0. The real root cause is unknown and needs a
+separate investigation (likely an engine-level C++ microbench
+isolating per-leaf merge / delta-chain cost vs value size, with a
+flushed L1-only tree). The `--flush-after-prepopulate` flag remains
+useful as a deterministic drain for clean L1-only baselines.
 
 ### Prefix range (bounded prefix vs whole-keyspace, same entry count)
 
@@ -161,36 +166,46 @@ end-to-end follow-on item, not captured in this 1T:1C baseline.
   per-entry value copy together are ~0.3 us/entry.
 - **Per-byte copy cost** (R38's target): not cleanly separable from
   the per-entry cost at the end-to-end level. The 1 KiB anomaly
-  (3.2x faster than 64 B) is caused by `MemTable::snapshot()` O(N_l0)
-  cost, not per-byte copy — so the value-size sweep does not isolate
-  R38's target. An engine-level C++ microbench with a flushed tree
-  (L0 empty) would be needed to isolate per-byte copy.
-- **L0 snapshot cost** (the 1 KiB anomaly's root cause):
-  `MemTable::snapshot()` is O(N_l0) per scan regardless of limit. At
-  64 B values with ~60k unflushed entries, this adds ~60k entry copies
-  per scan; at 1 KiB with ~4k unflushed, only ~4k. A lazy/range-bounded
-  L0 cursor would make this O(limit).
+  (3.2x faster than 64 B) is NOT caused by per-byte copy (larger
+  values would be slower) and NOT caused by L0 snapshot cost (R47
+  refuted that — see the value-size sweep section above). The real
+  root cause is unknown; an engine-level C++ microbench with a
+  flushed L1-only tree is needed to isolate it.
+- **L0 snapshot cost**: `MemTable::snapshot()` is O(N_l0) per scan
+  regardless of limit, but R47's flush-after-prepopulate experiment
+  showed this is NOT the 1 KiB anomaly's cause — draining L0 did not
+  close the gap. The maintenance loop (3 s tick in the e2e profile)
+  already keeps L0 small during measurement. A lazy/range-bounded L0
+  cursor would still be an O(limit) improvement but would not fix the
+  anomaly.
 - **Deep-pagination descent** (~2.8 ms overhead): the O(log N) B+tree
   descent to a leaf near the end of the keyspace. This is a fixed
   cost per scan, not per-entry.
 
 **Prioritization**: R38 (zero-copy scan values) targets per-byte copy
 cost (~0.3 us/entry at 64 B, grows with value size). The 1 KiB
-anomaly is caused by `MemTable::snapshot()` O(N_l0) cost, not per-byte
-copy — so the lazy L0 cursor fix (R47 follow-on) is higher priority
-than R38 for small-value workloads with unflushed memtables. For
-large-value workloads (>= 1 KiB), R38's zero-copy win is more
-significant, but the gRPC 4 MiB message size limit caps practical scan
-width before per-byte copy becomes dominant — so streaming scan
-response is a prerequisite for R38's win to matter at scale.
+anomaly's root cause is unknown (L0 refuted by R47) and needs a
+separate engine-level investigation before a fix can be scoped. For
+large-value workloads (>= 1 KiB), R38's zero-copy win is significant,
+but the gRPC 4 MiB message size limit caps practical scan width before
+per-byte copy becomes dominant — so streaming scan response (R49) is a
+prerequisite for R38's win to matter at scale.
 
 ## Future gaps (not measured by R46)
 
+- **1 KiB anomaly root cause (unknown)**: R47's flush-after-prepopulate
+  experiment refuted the L0-snapshot hypothesis — draining L0 did not
+  close the 3.2x gap. The real cause is in the L1 B+tree scan path or
+  the decode/copy path and needs an engine-level C++ microbench
+  (flushed L1-only tree, vary value size, isolate per-leaf merge /
+  delta-chain / decode cost) to identify. This is a prerequisite for
+  scoping a fix; the lazy L0 cursor (R48) does not address it.
 - **L0 snapshot O(N_l0) cost**: `MemTable::snapshot()` copies all
-  entries on every scan. The bench has no flush-after-prepopulate flag,
-  so the L0 size at scan time depends on value size (inadvertently).
-  R47 adds a `--flush-after-prepopulate` flag to verify this
-  hypothesis; a follow-on would make the L0 cursor lazy/range-bounded.
+  entries on every scan. R47's `--flush-after-prepopulate` flag (now
+  implemented) drains L0 for a clean L1-only baseline; the maintenance
+  loop already keeps L0 small during measurement. A lazy/range-bounded
+  L0 cursor (R48) would make the L0 cost O(limit) but is not the
+  anomaly's fix.
 - **Streaming scan response**: the gRPC 4 MiB message size limit caps
   scan response size. A streaming response (mirroring etcd PR #19766)
   would remove this cap and is a prerequisite for large-value /

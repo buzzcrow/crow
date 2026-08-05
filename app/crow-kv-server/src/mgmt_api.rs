@@ -53,6 +53,7 @@ pub fn router(state: RegistryArc) -> Router {
         )
         .route("/stores/:sid/groups/:gid/step-down", post(step_down))
         .route("/stores/:sid/groups/:gid/join", post(join_group_via_snapshot))
+        .route("/stores/:sid/groups/:gid/flush", post(flush_group))
         .route("/stores/:sid/groups/:gid/ready", get(group_readiness))
         .route("/operations/:id", get(get_operation))
         .route("/topology", get(export_topology))
@@ -332,6 +333,7 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Err
         batch_add_remote_replicas,
         step_down,
         join_group_via_snapshot,
+        flush_group,
         group_readiness,
         system_init,
         topology_finalize,
@@ -369,6 +371,7 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Err
             TopologyResponse,
             StepDownBody,
             StepDownResult,
+            FlushResult,
             ReadinessResponse,
             OperationResponse,
             OperationTarget,
@@ -2140,4 +2143,56 @@ fn spawn_leader_wait(
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
     });
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+struct FlushResult {
+    store_id: u64,
+    group_id: u64,
+    accepted: bool,
+}
+
+#[utoipa::path(
+        post,
+        path = "/stores/{sid}/groups/{gid}/flush",
+        tag = "management",
+        params(
+            ("sid" = u64, Path, description = "Store id"),
+            ("gid" = u64, Path, description = "Group id")
+        ),
+        responses(
+            (status = 200, description = "Local replica's L0 memtable drained into L1", body = FlushResult),
+            (status = 404, description = "Store or group not found on this node", body = ErrorResponse)
+        )
+    )]
+async fn flush_group(
+    State(state): State<RegistryArc>,
+    Path((sid, gid)): Path<(u64, u64)>,
+) -> Result<Json<FlushResult>, (StatusCode, Json<ErrorResponse>)> {
+    let store = state
+        .get_store(sid)
+        .ok_or_else(|| err_json(StatusCode::NOT_FOUND, format!("store {sid} not found")))?;
+    let group = store.get_group(gid).ok_or_else(|| {
+        err_json(
+            StatusCode::NOT_FOUND,
+            format!("group {gid} not found in store {sid}"),
+        )
+    })?;
+
+    // `KVEngine::flush` forces a freeze + drain of every memtable up to
+    // `contiguous_slot` into L1 (in-memory only; never touches the page
+    // store). Cheap when L0 is empty. Used by the bench's
+    // `--flush-after-prepopulate` flag to produce a clean L1-only scan
+    // baseline; also useful as an admin drain.
+    group.local_replica().learner.engine().flush();
+    info!(
+        store_id = sid,
+        group_id = gid,
+        "engine flush requested via management API"
+    );
+    Ok(Json(FlushResult {
+        store_id: sid,
+        group_id: gid,
+        accepted: true,
+    }))
 }

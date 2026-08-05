@@ -45,12 +45,16 @@ pad_key() {
 }
 
 run_bench() {
-    local label="$1" limit="$2" prefix="$3" start_after="$4" value_size="$5" read_mode="$6" min_slot="$7"
+    local label="$1" limit="$2" prefix="$3" start_after="$4" value_size="$5" read_mode="$6" min_slot="$7" flush="$8"
     local read_endpoint
     if [ "$read_mode" = "minslot" ]; then
         read_endpoint="any-replica"
     else
         read_endpoint="leader"
+    fi
+    local flush_arg=""
+    if [ "$flush" = "flush" ]; then
+        flush_arg="--flush-after-prepopulate"
     fi
     echo ">>> $label ..."
     local output
@@ -61,7 +65,7 @@ run_bench() {
         --read-endpoint-policy "$read_endpoint" \
         --scan-limit "$limit" --scan-prefix "$prefix" --scan-start-after "$start_after" \
         --pre-populate "$KEYSPACE" --value-size "$value_size" \
-        --key-space "$KEYSPACE" --verify-bytes 0 --json 2>&1)
+        --key-space "$KEYSPACE" --verify-bytes 0 --json $flush_arg 2>&1)
     local json; json=$(echo "$output" | sed -n '/^{/,/^}/p')
     if [ -z "$json" ]; then
         echo "    ERROR: no JSON output"; echo "$output" | tail -5
@@ -136,6 +140,14 @@ echo "=== Value-size sweep (fixed limit=1000) ==="
 run_bench "valuesize_64B"  1000   "" "" 64                                 linearizable auto
 run_bench "valuesize_1KiB" 1000   "" "" 1024                               linearizable auto
 run_bench "valuesize_16KiB" 1000  "" "" 16384                              linearizable auto
+
+echo "=== Value-size sweep with --flush-after-prepopulate (R47: verify L0 hypothesis) ==="
+# With L0 drained before measurement, the MemTable::snapshot() O(N_l0)
+# cost is removed. valuesize_64B_flushed and valuesize_1KiB_flushed
+# should produce comparable throughput (the 3.2x gap closes), confirming
+# the 1KiB anomaly's root cause.
+run_bench "valuesize_64B_flushed"  1000   "" "" 64                          linearizable auto flush
+run_bench "valuesize_1KiB_flushed" 1000   "" "" 1024                        linearizable auto flush
 
 echo "=== Prefix range (bounded prefix vs whole-keyspace, same entry count) ==="
 # Prefix k00000..k00999 (1000 keys) vs whole-keyspace limit=1000 from start.

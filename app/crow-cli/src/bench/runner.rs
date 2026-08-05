@@ -185,6 +185,18 @@ pub struct BenchConfig {
     /// Scan exclusive lower bound (`start_after`) for
     /// `WorkloadKind::List`. Empty = start from the beginning.
     pub scan_start_after: Vec<u8>,
+    /// If `true`, after pre-population completes the runner drains L0
+    /// (`MemTable`) into L1 on every node via each `flush_mgmt_urls`
+    /// management API `POST .../flush`, then opens the measurement
+    /// window. Produces a clean L1-only scan baseline so the
+    /// `MemTable::snapshot()` `O(N_l0)` cost is removed from the
+    /// measurement. `false` (default) leaves L0 size dependent on the
+    /// pre-pop write rate / value size (the historical behavior).
+    pub flush_after_prepopulate: bool,
+    /// Per-node management API URLs to hit with `POST .../flush` when
+    /// `flush_after_prepopulate` is set. Empty (default) means the flag
+    /// is a no-op even if set — the bench fixture populates this.
+    pub flush_mgmt_urls: Vec<String>,
 }
 
 impl BenchConfig {
@@ -215,6 +227,8 @@ impl BenchConfig {
             scan_limit: 1,
             scan_prefix: Vec::new(),
             scan_start_after: Vec::new(),
+            flush_after_prepopulate: false,
+            flush_mgmt_urls: Vec::new(),
         }
     }
 
@@ -310,6 +324,43 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
         }
         _ => (0, 0),
     };
+
+    // Optional L0 drain: after pre-pop, force every node's engine to
+    // flush its MemTable into L1 before the measurement window opens.
+    // The leader has applied all pre-pop writes by the time the last
+    // `put` returns; followers may still be applying the learn-stream
+    // tail, so wait briefly for them to converge before flushing (flush
+    // only drains entries with slot <= contiguous_slot). A failed flush
+    // on one node is logged but does not abort the bench — it degrades
+    // the measurement's cleanliness, not its correctness.
+    if cfg.flush_after_prepopulate && !cfg.flush_mgmt_urls.is_empty() {
+        info!(
+            nodes = cfg.flush_mgmt_urls.len(),
+            "bench: draining L0 after pre-pop"
+        );
+        let flush_start = Instant::now();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let mut failures = 0u32;
+        for url in &cfg.flush_mgmt_urls {
+            match crow_console_shared::clients::http::ServerClient::new(url) {
+                Ok(sc) => match sc.flush(cfg.store_id, cfg.group_id).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        failures += 1;
+                        warn!(url, error = %e, "bench: flush failed for node");
+                    }
+                },
+                Err(e) => {
+                    failures += 1;
+                    warn!(url, error = %e, "bench: flush client build failed for node");
+                }
+            }
+        }
+        info!(
+            ms = u64::try_from(flush_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+            failures, "bench: L0 drain done"
+        );
+    }
 
     let started_at = Utc::now();
     let started_instant = Instant::now();

@@ -86,12 +86,14 @@ Client SCAN(prefix, start_after, limit, read_mode, min_slot?)
   per-entry ~0.3us at 64B, gRPC 4 MiB limit caps scan payload, 1KiB
   anomaly (see R48).
 
-- **R47 — Flush-after-prepopulate bench flag (backlog).** The bench
-  has no way to force a flush after pre-population, so the L0 size at
-  scan time depends on value size (inadvertently). R47 adds a
-  `--flush-after-prepopulate` flag to verify the `MemTable::snapshot()`
-  O(N_l0) hypothesis: with the flag, `valuesize_64B` and
-  `valuesize_1KiB` should produce comparable throughput.
+- **R47 — Flush-after-prepopulate bench flag (done).** Added a
+  `--flush-after-prepopulate` flag to `crow-cli bench run` and a
+  `POST /stores/{sid}/groups/{gid}/flush` management API endpoint.
+  Empirical result: the flag drains L0 deterministically but the 3.2x
+  gap is unchanged (64B flushed 219/s vs 1KiB flushed 721/s), REFUTING
+  the `MemTable::snapshot()` O(N_l0) hypothesis. The maintenance loop's
+  3s tick already keeps L0 small during measurement. The flag remains
+  useful for deterministic L1-only baselines.
 
 ---
 
@@ -101,9 +103,14 @@ Copy points annotated inline in the flow diagram above. Summary of
 what remains:
 
 - **O(N_l0) per scan — `MemTable::snapshot()`** — copies all memtable
-  entries into a vector on every scan call, regardless of limit. Root
-  cause of the 1KiB anomaly (64B leaves ~60k unflushed, 1KiB leaves
-  ~4k). R48 replaces this with a lazy btree_map cursor (O(limit)).
+  entries into a vector on every scan call, regardless of limit. R47's
+  `--flush-after-prepopulate` experiment REFUTED this as the 1KiB
+  anomaly's root cause: draining L0 did not close the 3.2x gap (the
+  maintenance loop's 3s tick already keeps L0 small during
+  measurement). R48 (lazy btree_map cursor) would still make this
+  O(limit) but would not fix the anomaly. The real anomaly root cause
+  is unknown (L1 scan path / decode) and needs a separate
+  investigation.
 - **O(limit) per scan — `decode_scan`** — packed buffer → per-entry
   `Vec<u8>` for key and value. R38 eliminates this via
   `PinnedScanEntry` / `Bytes::from_owner` mirroring R6.
@@ -170,13 +177,20 @@ Tracked as backlog requirements:
   whole scan on any cold leaf (no cursor resume); (2) client `to_vec`
   copies per scan entry despite prost `Bytes`.
 - **[R47](../backlog/R47-bench-flush-after-prepopulate.md)** —
-  Flush-after-prepopulate bench flag. Verifies the
-  `MemTable::snapshot()` O(N_l0) hypothesis by draining L0 before the
-  measurement window.
+  Flush-after-prepopulate bench flag (done). Result: REFUTED the L0
+  snapshot hypothesis — draining L0 did not close the 1KiB anomaly.
+  See § Design Changes and Effects above.
 - **[R48](../backlog/R48-scan-lazy-l0-cursor.md)** — Lazy/range-bounded
   L0 cursor. Replaces `MemTable::snapshot()` with a lazy btree_map
-  cursor (lower_bound to start_after, advance up to limit). Fixes the
-  1KiB anomaly's root cause.
+  cursor (lower_bound to start_after, advance up to limit). Originally
+  scoped as the 1KiB anomaly fix, but R47 refuted the L0 premise —
+  R48 would make L0 cost O(limit) but would NOT fix the anomaly. Needs
+  re-scoping (see the new root-cause investigation item below).
+- **1KiB anomaly root cause (new, unknown)** — R47 refuted L0 as the
+  cause. The real root cause is in the L1 B+tree scan path or the
+  decode/copy path and needs an engine-level C++ microbench (flushed
+  L1-only tree, vary value size) to identify. Prerequisite for scoping
+  a fix.
 - **[R49](../backlog/R49-scan-streaming-response.md)** — Streaming
   gRPC scan response. Server streams entries in chunks, removing the
   4 MiB message size cap. Composes with R38 for full large-scan

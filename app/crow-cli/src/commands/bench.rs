@@ -143,6 +143,16 @@ pub struct RunArgs {
     /// deep-pagination scan benches.
     #[arg(long, default_value = "")]
     pub scan_start_after: String,
+
+    /// After pre-population, drain L0 (`MemTable`) into L1 on every node
+    /// via the management API before opening the measurement window.
+    /// Produces a clean L1-only scan baseline (removes the
+    /// `MemTable::snapshot()` `O(N_l0)` cost from the measurement),
+    /// verifying the 1KiB anomaly hypothesis. Default off — without
+    /// the flag, L0 size at scan time depends on value size (historical
+    /// behavior).
+    #[arg(long, default_value_t = false)]
+    pub flush_after_prepopulate: bool,
 }
 
 /// Arguments for `crow-cli bench`.
@@ -284,6 +294,8 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
     cfg.scan_limit = args.scan_limit;
     cfg.scan_prefix = args.scan_prefix.into_bytes();
     cfg.scan_start_after = args.scan_start_after.into_bytes();
+    cfg.flush_after_prepopulate = args.flush_after_prepopulate;
+    cfg.flush_mgmt_urls = fixture.node_mgmt_urls().to_vec();
 
     println!(
         "running {} workload for {}s...",
