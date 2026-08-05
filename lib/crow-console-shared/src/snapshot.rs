@@ -153,6 +153,30 @@ pub struct ReadStateSnapshot {
     pub safe_slot: u64,
 }
 
+/// Wire shape of `crow-kv-server`'s `GET /metrics` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricsResponse {
+    pub window_secs: f64,
+    pub timestamp: String,
+    pub metrics: Vec<MetricPointView>,
+}
+
+/// One typed metric point in the `/metrics` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricPointView {
+    pub name: String,
+    pub kind: String,
+    pub fields: Vec<MetricFieldView>,
+}
+
+/// One key/value field on a metric point. `value` is `f64` for uniform
+/// JSON handling (counters/gauges/histograms all fit).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricFieldView {
+    pub key: String,
+    pub value: f64,
+}
+
 /// Wire shape of `crow-kv-server`'s `GET /topology`.
 #[derive(Debug, Deserialize)]
 pub(crate) struct TopologyResponse {

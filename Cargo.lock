@@ -628,6 +628,7 @@ dependencies = [
  "axum",
  "crow-kv-client",
  "dirs",
+ "form_urlencoded",
  "futures",
  "hex",
  "reqwest",

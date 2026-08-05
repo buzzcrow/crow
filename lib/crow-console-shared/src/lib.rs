@@ -29,7 +29,8 @@ pub mod topology;
 
 pub use config::{ConsoleConfig, ConsoleConfigEngine, NodeEntry, RackEntry, ServerEntry, TomlFileEngine};
 pub use snapshot::{
-    ClusterSnapshot, GroupView, HealthInfo, KvStoreView, LocalReplicaView, RemoteMetrics, RemoteReplicaView,
+    ClusterSnapshot, ElectionStateSnapshot, GroupView, HealthInfo, KvStoreView, LocalReplicaView,
+    MetricFieldView, MetricPointView, MetricsResponse, ReadStateSnapshot, RemoteMetrics, RemoteReplicaView,
     ServerSnapshot, StoreView,
 };
 

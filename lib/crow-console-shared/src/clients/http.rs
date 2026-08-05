@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use crate::error::{Error, Result};
-use crate::snapshot::{HealthInfo, StoreView, TopologyResponse};
+use crate::snapshot::{HealthInfo, MetricsResponse, StoreView, TopologyResponse};
 
 /// Thin wrapper around a `reqwest::Client` bound to one `crow-kv-server`
 /// management base URL (e.g. `http://127.0.0.1:9910`).
@@ -71,6 +71,23 @@ impl ServerClient {
     pub async fn topology(&self) -> Result<Vec<StoreView>> {
         let resp: TopologyResponse = self.get_json("/topology").await?;
         Ok(resp.stores)
+    }
+
+    /// `GET /metrics?prefix=...`. Returns a structured snapshot of the
+    /// server's registry metrics. `prefix` filters by metric name; pass
+    /// an empty string for all metrics.
+    ///
+    /// # Errors
+    /// Returns `Error::UpstreamRpc` for transport / decode failures.
+    pub async fn metrics(&self, prefix: &str) -> Result<MetricsResponse> {
+        let path = if prefix.is_empty() {
+            "/metrics".to_string()
+        } else {
+            let mut q = form_urlencoded::Serializer::new(String::from("/metrics?"));
+            q.append_pair("prefix", prefix);
+            q.finish()
+        };
+        self.get_json(&path).await
     }
 
     pub(crate) async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
