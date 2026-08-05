@@ -304,6 +304,150 @@ impl MetricsRegistry {
         }
         out
     }
+
+    /// Typed snapshot of all metric names matching `prefix`, returning
+    /// structured `MetricPoint` values for the `/metrics` HTTP endpoint
+    /// and GUI consumption. `window_secs` is used to compute approximate
+    /// tps/rate for counters and bandwidths (the snapshot path does not
+    /// reset window state, so this is the configured flush interval, not
+    /// a measured elapsed). Does NOT reset window state.
+    #[must_use]
+    pub fn snapshot_struct(&self, prefix: &str, window_secs: f64) -> Vec<MetricPoint> {
+        let mut out = Vec::new();
+        for e in &self.counters {
+            if e.name.starts_with(prefix) {
+                let s = e.handle.snapshot();
+                let tps = if window_secs > 0.0 {
+                    #[allow(clippy::cast_precision_loss)]
+                    {
+                        s.count as f64 / window_secs
+                    }
+                } else {
+                    0.0
+                };
+                out.push(MetricPoint::Counter {
+                    name: e.name.clone(),
+                    count: s.count,
+                    tps,
+                    total: s.total,
+                });
+            }
+        }
+        for e in &self.gauges {
+            if e.name.starts_with(prefix) {
+                out.push(MetricPoint::Gauge {
+                    name: e.name.clone(),
+                    value: e.handle.snapshot(),
+                });
+            }
+        }
+        for e in &self.bandwidths {
+            if e.name.starts_with(prefix) {
+                let s = e.handle.snapshot(window_secs);
+                out.push(MetricPoint::Bandwidth {
+                    name: e.name.clone(),
+                    count: s.count,
+                    avg_size: s.avg_size,
+                    rate: s.rate,
+                    total_bytes: s.total_bytes,
+                });
+            }
+        }
+        for e in &self.histograms {
+            if e.name.starts_with(prefix) {
+                let s = e.handle.snapshot();
+                out.push(MetricPoint::Histogram {
+                    name: e.name.clone(),
+                    count: s.count,
+                    avg_ns: s.avg,
+                    p50_ns: s.p50,
+                    p99_ns: s.p99,
+                    max_ns: s.max,
+                    total: s.total_count,
+                });
+            }
+        }
+        for e in &self.summaries {
+            if e.name.starts_with(prefix) {
+                let s = e.handle.snapshot();
+                out.push(MetricPoint::Summary {
+                    name: e.name.clone(),
+                    count: s.count,
+                    avg_ns: s.avg,
+                    max_ns: s.max,
+                    total: s.total_count,
+                });
+            }
+        }
+        out
+    }
+}
+
+/// Typed metric point for the `/metrics` HTTP endpoint. Each variant
+/// carries the metric `name` and the type-specific snapshot fields. The
+/// UI renders by variant without parsing log-format strings.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MetricPoint {
+    Counter {
+        name: String,
+        count: u64,
+        tps: f64,
+        total: u64,
+    },
+    Gauge {
+        name: String,
+        value: u64,
+    },
+    Bandwidth {
+        name: String,
+        count: u64,
+        avg_size: u64,
+        rate: u64,
+        total_bytes: u64,
+    },
+    Histogram {
+        name: String,
+        count: u64,
+        avg_ns: u64,
+        p50_ns: u64,
+        p99_ns: u64,
+        max_ns: u64,
+        total: u64,
+    },
+    Summary {
+        name: String,
+        count: u64,
+        avg_ns: u64,
+        max_ns: u64,
+        total: u64,
+    },
+}
+
+impl MetricPoint {
+    /// The metric name (e.g. `s.1.g.2.kv.put.c`).
+    #[must_use]
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Counter { name, .. }
+            | Self::Gauge { name, .. }
+            | Self::Bandwidth { name, .. }
+            | Self::Histogram { name, .. }
+            | Self::Summary { name, .. } => name,
+        }
+    }
+
+    /// Lowercase kind tag matching the metric type suffix
+    /// (`counter`/`gauge`/`bandwidth`/`histogram`/`summary`).
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Counter { .. } => "counter",
+            Self::Gauge { .. } => "gauge",
+            Self::Bandwidth { .. } => "bandwidth",
+            Self::Histogram { .. } => "histogram",
+            Self::Summary { .. } => "summary",
+        }
+    }
 }
 
 impl Default for MetricsRegistry {
@@ -781,6 +925,166 @@ impl From<String> for MetricName {
 #[cfg(test)]
 mod registry_tests {
     use super::*;
+
+    #[test]
+    fn snapshot_struct_returns_typed_points_for_all_kinds() {
+        let mut reg = MetricsRegistry::new();
+        let c = reg.register_counter("s.1.kv.put.c");
+        c.inc_by(10);
+        let g = reg.register_gauge("s.1.inflight.g");
+        g.set(7);
+        let bw = reg.register_bandwidth("s.1.kv.bytes.bw");
+        bw.observe(100);
+        bw.observe(300);
+        let h = reg.register_histogram("s.1.kv.get.lh");
+        h.observe(1_000);
+        h.observe(2_000);
+        let s = reg.register_summary("s.1.kv.scan.l");
+        s.observe(5_000);
+        s.observe(15_000);
+
+        let pts = reg.snapshot_struct("s.1.", 5.0);
+        // All five kinds present, sorted by registration order within each type.
+        let counter = pts.iter().find_map(|p| match p {
+            MetricPoint::Counter {
+                name,
+                count,
+                tps,
+                total,
+            } if name == "s.1.kv.put.c" => Some((*count, *tps, *total)),
+            _ => None,
+        });
+        assert_eq!(counter, Some((10, 2.0, 10)), "counter count/tps/total");
+
+        let gauge = pts.iter().find_map(|p| match p {
+            MetricPoint::Gauge { name, value } if name == "s.1.inflight.g" => Some(*value),
+            _ => None,
+        });
+        assert_eq!(gauge, Some(7), "gauge value");
+
+        let bandwidth = pts.iter().find_map(|p| match p {
+            MetricPoint::Bandwidth {
+                name,
+                count,
+                avg_size,
+                rate,
+                total_bytes,
+            } if name == "s.1.kv.bytes.bw" => Some((*count, *avg_size, *rate, *total_bytes)),
+            _ => None,
+        });
+        assert_eq!(
+            bandwidth,
+            Some((2, 200, 80, 400)),
+            "bandwidth count/avg/rate/total"
+        );
+
+        let histogram = pts.iter().find_map(|p| match p {
+            MetricPoint::Histogram {
+                name,
+                count,
+                p50_ns,
+                p99_ns,
+                total,
+                ..
+            } if name == "s.1.kv.get.lh" => Some((*count, *p50_ns, *p99_ns, *total)),
+            _ => None,
+        });
+        // 2 obs (1µs, 2µs): p50 target=1, p99 target=1 (int div 2*99/100),
+        // both hit bucket 0 (bound 1_000).
+        assert_eq!(
+            histogram,
+            Some((2, 1_000, 1_000, 2)),
+            "histogram count/p50/p99/total"
+        );
+
+        let summary = pts.iter().find_map(|p| match p {
+            MetricPoint::Summary {
+                name,
+                count,
+                avg_ns,
+                max_ns,
+                total,
+            } if name == "s.1.kv.scan.l" => Some((*count, *avg_ns, *max_ns, *total)),
+            _ => None,
+        });
+        assert_eq!(
+            summary,
+            Some((2, 10_000, 15_000, 2)),
+            "summary count/avg/max/total"
+        );
+    }
+
+    #[test]
+    fn snapshot_struct_prefix_filter_excludes_non_matching() {
+        let mut reg = MetricsRegistry::new();
+        let c1 = reg.register_counter("s.1.kv.put.c");
+        let c2 = reg.register_counter("s.2.kv.put.c");
+        c1.inc();
+        c2.inc();
+        let pts = reg.snapshot_struct("s.1.", 5.0);
+        assert!(pts.iter().all(|p| p.name().starts_with("s.1.")));
+        assert_eq!(pts.len(), 1);
+    }
+
+    #[test]
+    fn snapshot_struct_does_not_reset_window() {
+        let mut reg = MetricsRegistry::new();
+        let c = reg.register_counter("s.1.kv.put.c");
+        c.inc_by(3);
+        let _ = reg.snapshot_struct("s.1.", 5.0);
+        // Second snapshot still sees the window count (not reset).
+        let pts = reg.snapshot_struct("s.1.", 5.0);
+        assert_eq!(
+            pts.iter().find_map(|p| match p {
+                MetricPoint::Counter { count, .. } => Some(*count),
+                _ => None,
+            }),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn metric_point_kind_and_name() {
+        let p = MetricPoint::Counter {
+            name: "x.c".into(),
+            count: 1,
+            tps: 0.2,
+            total: 1,
+        };
+        assert_eq!(p.name(), "x.c");
+        assert_eq!(p.kind(), "counter");
+        let p = MetricPoint::Gauge {
+            name: "x.g".into(),
+            value: 5,
+        };
+        assert_eq!(p.kind(), "gauge");
+        let p = MetricPoint::Bandwidth {
+            name: "x.bw".into(),
+            count: 1,
+            avg_size: 1,
+            rate: 1,
+            total_bytes: 1,
+        };
+        assert_eq!(p.kind(), "bandwidth");
+        let p = MetricPoint::Histogram {
+            name: "x.lh".into(),
+            count: 1,
+            avg_ns: 1,
+            p50_ns: 1,
+            p99_ns: 1,
+            max_ns: 1,
+            total: 1,
+        };
+        assert_eq!(p.kind(), "histogram");
+        let p = MetricPoint::Summary {
+            name: "x.l".into(),
+            count: 1,
+            avg_ns: 1,
+            max_ns: 1,
+            total: 1,
+        };
+        assert_eq!(p.kind(), "summary");
+    }
 
     #[test]
     fn flush_counter_section_format() {
