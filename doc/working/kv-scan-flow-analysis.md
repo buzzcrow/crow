@@ -257,9 +257,6 @@ numbers. The bench code and script are platform-independent.
 
 ### Key findings
 
-- **§1.7 O(limit) deep-pagination claim CONFIRMED** — 1.7x overhead
-  (deep_pag_10 vs from_start_10) = O(log N) descent, not 400x O(prefix)
-  over-fetch.
 - **Per-scan fixed cost ~4.2ms** (ReadIndex + gRPC + descent); per-entry
   ~0.3us at 64B (visible at limit >= 10k).
 - **gRPC 4 MiB message size limit** caps scan payload (full_100k, 16KiB
