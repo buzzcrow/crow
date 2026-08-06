@@ -43,7 +43,7 @@ complexity, and dependency. Before implementation, follow the
   Most naturally done after R12.
 - **[R50](R50-epoch-protected-memtable.md)** — Epoch-protected
   lock-free MemTable — Area: scan / get / crow-tree engine —
-  **Blocked on a measurement gate.** `MemTable::snapshot()`
+  **Unblocked (Gate 2 cleared).** `MemTable::snapshot()`
   deep-copies every live L0 entry (key + full cell payload) on every
   scan regardless of range or `limit`, and an L0 `get` hit copies
   twice (`MemTable::get` into a `std::string`, then `get_view` into
@@ -57,11 +57,9 @@ complexity, and dependency. Before implementation, follow the
   scan, a borrowing `get_view`, and a bounded retire-queue policy
   (`GetView` holds a guard across FFI). Closes the known gap at
   `crow-tree.h:81`. High complexity (~800–1300 lines); reference:
-  RocksDB's `InlineSkipList`. **Do not start** until a
-  workload with a non-empty L0 at scan time is shown to exist —
-  `l0_snapshot` currently measures 0us in production, so the premise
-  is unverified. If it stays near zero, close R50 and keep only the
-  ~20-line single-copy `get` fix.
+  RocksDB's `InlineSkipList`. Gate 2 concurrent write+scan microbench
+  shows `l0_snapshot` dominates scan time (126us/64B, 1122us/1KiB,
+  82–94% with a 3s flush tick) — the premise is verified.
 
 ### Low Priority
 

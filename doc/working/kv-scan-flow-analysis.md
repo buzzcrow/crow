@@ -242,6 +242,35 @@ any) would come purely from fewer entries (byte-threshold freezing:
 4MiB/1KiB ≈ 4k vs 4MiB/64B ≈ 46k), not per-entry cost. In practice L0
 is empty by measurement time, so this is moot for the anomaly.
 
+### L0 snapshot cost under concurrent write+scan (R50 Gate 2)
+
+The single-threaded microbench above forces L0 full by not flushing —
+artificial. The production bench shows 0us because it is
+pre-populate-then-scan with no concurrent writes (the 3s maintenance
+tick drains L0 during pre-populate). The Gate 2 bench
+(`scan_step_bench.cpp` `run_concurrent`) adds the missing ingredient:
+a sustained writer thread + scanner, with a 3s flush thread mimicking
+the maintenance tick. Pre-populates 100k keys into L1, then concurrent
+write+scan for 10s, `max_memtable_count=2` (production default).
+
+| Scenario | Write rate | Flush | l0_snapshot avg | max | % of scan | total avg |
+|----------|-----------:|------|----------------:|----:|----------:|----------:|
+| 64B flush 3s | 1261k/s | 3s | 126.2us | 1554us | 81.8% | 154.3us |
+| 1KiB flush 3s | 888k/s | 3s | 1122us | 2538us | 93.5% | 1199.8us |
+| 64B no flush | 1294k/s | none | 128.4us | 380us | 82.8% | 155.0us |
+| 1KiB no flush | 1224k/s | none | 5816us | 7449us | 97.8% | 5944us |
+
+Under sustained concurrent write+scan, L0 fills between flush ticks (1
+frozen + 1 overgrown active_, bounded by the keyspace with overwrites),
+and `l0_snapshot` dominates scan time (82–94%). The 64B flush vs
+no-flush numbers are nearly identical because the writer fills both
+memtable slots in <100ms, so the 3s tick barely matters — L0 size is
+bounded by the keyspace, not the flush rate. The 1KiB no-flush upper
+bound (5816us) shows the cost when flush completely can't keep up
+(`max_memtable_count=8`, frozen_ accumulates). Post-R48, with
+`l1_resolve` at 0us, `l0_snapshot` is the dominant remaining scan cost
+when L0 is non-empty. This clears R50 Gate 2 — the premise is verified.
+
 ### Microbench after the lazy cursor (same scenarios, same machine)
 
 | Config | total before | total after | l1_resolve after |
@@ -311,15 +340,16 @@ measurement time.
   `LeafChainCursor` — see § Scan Per-Step Profile for before/after.
   Re-run `tools/bench-scan-regression.sh` to refresh the end-to-end
   table above (the numbers there predate the fix).
-- **L0 snapshot O(N_l0) cost (SOLVED, R50 scope)**:
-  `MemTable::snapshot()` copies all entries on every scan, but the
-  maintenance loop's 3s tick drains L0 during pre-populate, so
-  l0_snapshot is 0us in production (both flushed and non-flushed).
-  Even a full 100k-entry 64B snapshot is only 120us (microbench) —
-  negligible vs the ~3900us l1_resolve. The old R48 lazy-L0-cursor
-  premise (L0 snapshot is the 3.2x cause) is refuted by magnitude; the
-  L0 copy cost is a separate issue covered by R50 (epoch-protected
-  MemTable), not the anomaly's cause.
+- **L0 snapshot O(N_l0) cost (R50 Gate 2 CLEARED)**:
+  `MemTable::snapshot()` copies all entries on every scan. The
+  production bench shows 0us (pre-populate-then-scan, 3s tick drains
+  L0 during pre-populate), but the Gate 2 concurrent write+scan
+  microbench shows l0_snapshot dominates scan time under sustained
+  writes (126us/64B, 1122us/1KiB, 82–94% of scan with a 3s flush tick).
+  Post-R48, with l1_resolve at 0us, l0_snapshot is the dominant
+  remaining scan cost when L0 is non-empty. Covered by R50
+  (epoch-protected MemTable), now unblocked — see § L0 snapshot cost
+  under concurrent write+scan for the Gate 2 measurements.
 - **Streaming scan residual errors**: `valuesize_16KiB` shows 309
   errors despite the streaming scan RPC. Investigating retry edge
   cases under high payload is a follow-on item.

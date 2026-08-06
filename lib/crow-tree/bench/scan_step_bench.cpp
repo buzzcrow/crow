@@ -7,6 +7,11 @@
 // avg/max via Crowtree::scan_profile(). An L0 variant leaves entries
 // unflushed to measure the MemTable::snapshot() copy cost directly.
 //
+// R50 Gate 2: concurrent write+scan scenarios measure l0_snapshot under a
+// non-empty L0 at scan time — sustained writes with a periodic flush
+// (production-like) and a flush backlog (upper bound). See
+// doc/backlog/R50-epoch-protected-memtable.md Gate 2.
+//
 // Build:
 //   pixi run -- cmake -S lib/crow-tree -B lib/crow-tree/build-bench \
 //     -DCROW_TREE_BENCH=ON -DCMAKE_BUILD_TYPE=Release
@@ -15,8 +20,11 @@
 #include "crow-tree/crow-tree.h"
 #include "crow-tree/page_store.h"
 
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace crow::tree;
@@ -125,6 +133,113 @@ void run_scenario(const char *label, int n, int value_size, bool flush, size_t l
                     100.0 * static_cast<double>(p.l0_snapshot.sum_ns) / static_cast<double>(p.total.sum_ns));
     }
 }
+
+// R50 Gate 2: concurrent write+scan. Pre-populates L1 (flush+snapshot),
+// then runs a writer thread applying upserts at monotonically increasing
+// slots while the main thread scans for `duration_secs`. An optional flush
+// thread calls flush() every `flush_every_ms` (mimicking the production
+// maintenance tick). `max_memtable_count` controls how many frozen tables
+// can queue before active_ grows past its threshold. Measures
+// scan_profile() over the whole scan window — the average l0_snapshot
+// reflects the steady-state L0 size across flush cycles.
+//
+// `prefill_l0` (>0) writes that many entries without flushing before
+// starting the concurrent phase, so the flush-backlog scenario starts with
+// a non-empty L0.
+void run_concurrent(const char *label, int n_prepop, int value_size, size_t limit, int duration_secs,
+                    int flush_every_ms, uint32_t max_memtable_count, int prefill_l0)
+{
+    Setup s;
+    s.store = std::make_shared<MemPageStore>(1);
+    Options opt;
+    opt.page_store         = s.store.get();
+    opt.frame_bytes        = 64 * 1024;
+    opt.leaf_split_bytes   = 64 * 1024;
+    opt.max_memtable_count = max_memtable_count;
+    s.tree                 = std::make_unique<Crowtree>(opt);
+    s.tree->init_metrics("s.0.g.0");
+
+    // Pre-populate L1: n_prepop keys at slots 1..n_prepop, then flush+snapshot.
+    for (int i = 0; i < n_prepop; ++i) {
+        s.tree->apply(i + 1, Batch{{{.key = make_key(i), .kind = OpKind::kPut, .value = make_value(value_size, i)}}});
+    }
+    s.tree->flush();
+    s.tree->snapshot(nullptr);
+
+    // Optional L0 pre-fill: write prefill_l0 overwrites without flushing.
+    uint64_t next_slot = static_cast<uint64_t>(n_prepop) + 1;
+    for (int i = 0; i < prefill_l0; ++i) {
+        int key_id = i % n_prepop;
+        s.tree->apply(
+            next_slot,
+            Batch{{{.key = make_key(key_id), .kind = OpKind::kPut, .value = make_value(value_size, key_id)}}});
+        ++next_slot;
+    }
+
+    std::atomic<bool>     stop{false};
+    std::atomic<uint64_t> writes_done{0};
+
+    // Writer thread: continuously apply upserts to random keys in [0, n_prepop).
+    std::thread writer([&] {
+        std::string v = make_value(value_size, 0);
+        while (!stop.load(std::memory_order_relaxed)) {
+            int key_id =
+                static_cast<int>(writes_done.fetch_add(1, std::memory_order_relaxed) % static_cast<uint64_t>(n_prepop));
+            s.tree->apply(next_slot, Batch{{{.key = make_key(key_id), .kind = OpKind::kPut, .value = v}}});
+            ++next_slot;
+        }
+    });
+
+    // Optional flush thread: call flush() every flush_every_ms.
+    std::thread           flusher;
+    std::atomic<uint64_t> flushes_done{0};
+    if (flush_every_ms > 0) {
+        flusher = std::thread([&] {
+            while (!stop.load(std::memory_order_relaxed)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(flush_every_ms));
+                if (stop.load(std::memory_order_relaxed))
+                    break;
+                s.tree->flush();
+                flushes_done.fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+    }
+
+    // Scanner: run scans for duration_secs, measure scan_profile.
+    (void)s.tree->scan_profile(); // reset window
+    std::vector<scan_entry> out;
+    bool                    truncated  = false;
+    auto                    t0         = std::chrono::steady_clock::now();
+    uint64_t                scan_count = 0;
+    while (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - t0).count() <
+           static_cast<long long>(duration_secs)) {
+        out.clear();
+        truncated = false;
+        s.tree->scan(Slice(), Slice(), limit, 0, &out, &truncated);
+        ++scan_count;
+    }
+    ScanProfile p = s.tree->scan_profile();
+
+    stop.store(true, std::memory_order_relaxed);
+    writer.join();
+    if (flusher.joinable())
+        flusher.join();
+
+    uint64_t wd        = writes_done.load(std::memory_order_relaxed);
+    uint64_t fd        = flushes_done.load(std::memory_order_relaxed);
+    double   write_kps = static_cast<double>(wd) / 1000.0 / static_cast<double>(duration_secs);
+    std::printf("\n[%s] n_prepop=%d val=%dB limit=%zu dur=%ds flush=%dms max_mt=%u prefill=%d\n", label, n_prepop,
+                value_size, limit, duration_secs, flush_every_ms, max_memtable_count, prefill_l0);
+    std::printf("  scans=%llu writes=%llu (%.1fk/s) flushes=%llu\n", static_cast<unsigned long long>(scan_count),
+                static_cast<unsigned long long>(wd), write_kps, static_cast<unsigned long long>(fd));
+    print_profile("per-scan", p);
+    if (p.count > 0) {
+        std::printf("    l0-snapshot-est:     l0_snapshot_avg/total    = %.1f%%\n",
+                    100.0 * static_cast<double>(p.l0_snapshot.sum_ns) / static_cast<double>(p.total.sum_ns));
+        std::printf("    l1-resolve-est:      l1_resolve_avg/total     = %.1f%%\n",
+                    100.0 * static_cast<double>(p.l1_resolve.sum_ns) / static_cast<double>(p.total.sum_ns));
+    }
+}
 } // namespace
 
 int main()
@@ -163,6 +278,20 @@ int main()
     run_scenario("L1-only 1KiB limit=10", N, 1024, true, 10, ITERS);
     run_scenario("L1-only 64B limit=10000", N, 64, true, 10000, ITERS);
     run_scenario("L1-only 1KiB limit=10000", N, 1024, true, 10000, ITERS);
+
+    // R50 Gate 2: concurrent write+scan with a non-empty L0 at scan time.
+    // Production-like: 1 writer at max rate + flush every 3s (mimics the
+    // maintenance tick), default max_memtable_count=2. Measures the
+    // steady-state l0_snapshot averaged over ~3 flush cycles (10s).
+    std::printf("\n=== R50 Gate 2: concurrent write+scan ===\n");
+    std::printf("Measures l0_snapshot under sustained writes with non-empty L0.\n");
+    run_concurrent("concurrent_64B_flush3s", N, 64, 1000, 10, 3000, 2, 0);
+    run_concurrent("concurrent_1KiB_flush3s", N, 1024, 1000, 10, 3000, 2, 0);
+
+    // Flush-backlog upper bound: pre-fill 100k L0 entries, then writer +
+    // scanner with no flush, max_memtable_count=8 so frozen_ can accumulate.
+    run_concurrent("concurrent_64B_noflush", N, 64, 1000, 10, 0, 8, N);
+    run_concurrent("concurrent_1KiB_noflush", N, 1024, 1000, 10, 0, 8, N);
 
     std::printf("\n=== done ===\n");
     return 0;

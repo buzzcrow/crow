@@ -3,25 +3,34 @@
 
 ### R50: Epoch-protected lock-free MemTable — zero-copy L0 reads
 
-**Status — blocked. Two gates must clear before any code is written:**
+**Status — unblocked. Both gates cleared:**
 
-- **Gate 1 — R48 lands first.** Per-step production metrics attribute
-  99.5% of the 64B scan to `l1_resolve` (3985us of 4004us) and 93% of
-  the 1KiB scan. R48 is where scan latency demonstrably is; R50 is not.
-- **Gate 2 — a workload where L0 is non-empty during scans must be
-  shown to exist, and `scan_l0_snapshot_l` measured on it.** The
-  existing measurement records `l0_snapshot` at **0us in production**
-  (the maintenance loop drains L0 during pre-populate — see
-  `R48-scan-lazy-l0-cursor.md` ≈L8). R50's entire premise is a large
-  live L0 at scan time, which requires sustained concurrent write +
-  scan, or a flush backlog holding `frozen_` non-empty. Building this
-  is a bench-config exercise, not code. If `scan_l0_snapshot_l` stays
-  near zero on that workload, **close R50** — the residual value does
-  not justify the highest-risk change in the engine.
+- **Gate 1 — R48 landed.** The lazy `LeafChainCursor` (commit `9ae2e72`)
+  dropped 64B limit=1000 from 1183us to 19.9us total, `l1_resolve` to 0.0us.
+  Post-R48, `l0_snapshot` is the dominant remaining scan cost when L0 is
+  non-empty — the opposite of the pre-R48 picture.
+- **Gate 2 — measured.** A concurrent write+scan microbench
+  (`scan_step_bench.cpp` `run_concurrent`) with a production-like 3s flush
+  tick (mimicking the maintenance loop) and a sustained writer shows
+  `l0_snapshot` is non-trivial and dominates scan time:
+
+  | Scenario | Write rate | Flush | l0_snapshot avg | % of scan |
+  |----------|-----------:|------|----------------:|----------:|
+  | 64B flush 3s | 1261k/s | 3s | 126.2us | 81.8% |
+  | 1KiB flush 3s | 888k/s | 3s | 1122us | 93.5% |
+  | 64B no flush | 1294k/s | none | 128.4us | 82.8% |
+  | 1KiB no flush | 1224k/s | none | 5816us | 97.8% |
+
+  The production bench showed 0us because it is pre-populate-then-scan
+  with no concurrent writes — the 3s tick drains L0 during pre-populate.
+  Under sustained concurrent write+scan, L0 fills between flush ticks
+  (1 frozen + 1 overgrown active_, bounded by the keyspace), and the
+  snapshot copy dominates. Per the gate rule, `l0_snapshot` does **not**
+  stay near zero → R50 proceeds.
 
 Scope note: the double copy on the L0 `get` path (below) is real,
 unconditional, and fixable in ~20 lines without touching concurrency.
-If R50 is closed at Gate 2, split that fix out and keep it.
+It is folded into R50's `get_view` borrow change (Design §3).
 
 **Problem**: `MemTable::snapshot()` (`memtable.cpp:195`) deep-copies
 every live L0 entry — key + full `[header][value]` cell payload — into a
