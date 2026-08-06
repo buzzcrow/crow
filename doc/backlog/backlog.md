@@ -11,7 +11,7 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R52** — Bump this line in the same commit when adding a new item.
+**Next R number: R53** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
@@ -66,6 +66,19 @@ complexity, and dependency. Before implementation, follow the
 - **[R4](R4-bounded-mempool.md)** — Bounded memory pool — Area: crowtree engine — `buffer::allocate` uses
   unbounded `std::malloc`; a burst of large writes can spike RSS without
   backpressure.
+- **[R52](R52-reverse-scan.md)** — Reverse scan — Area: scan / crow-tree
+  engine — `scan` is forward-only today (ascending key order). Reverse
+  scan (descending order, `start_before` instead of `start_after`) is a
+  distinct cost shape: the B+tree descent targets the leaf containing
+  `start_before`, the merge loop walks cursors backward, and the
+  `LeafChainCursor` needs a reverse seek/advance. The skip-list L0
+  cursor (R50) is forward-only — a reverse cursor would need
+  `prev()` links or a separate reverse traversal path. Client API:
+  `KvScanRequest` gains a `direction` field; the S3-style pagination
+  uses the first key of each page as the next `start_before`. Needs
+  its own scan perf baseline (reverse scans have different cache
+  behavior — backward leaf traversal touches pages in reverse
+  allocation order).
 
 ---
 

@@ -64,13 +64,9 @@ Client SCAN(prefix, start_after, limit, read_mode, min_slot?)
 
 Copy points annotated inline in the flow diagram above. What remains:
 
-- **O(N_l0) per scan — `MemTable::snapshot()`** — copies all memtable
-  entries into a vector on every scan call, regardless of limit. Not
-  the 1KiB anomaly's root cause (flush-after-prepopulate experiment
-  refuted the L0 hypothesis — draining L0 did not close the gap; the
-  maintenance loop's 3s tick already keeps L0 small during
-  measurement). A lazy btree_map cursor would still make this O(limit)
-  but would not fix the anomaly.
+- **O(limit) per scan — L0 cursor walk** (R50): the MemTable
+  skip-list cursor materializes only entries that reach the output,
+  not the whole L0. This replaced the O(N_l0) `snapshot()` copy.
 - **O(n) unavoidable** — gRPC request serialize (prefix + start_after
   into HTTP/2 frame); gRPC response serialize (items into socket); FFI
   prefix + start_after `to_vec()` (owned copies for the C API
@@ -82,7 +78,7 @@ gRPC serialization copies.
 
 ---
 
-## Benchmark Results — 2026-08-05 (macOS)
+## Benchmark Results — 2026-08-06 (macOS, post-R48+R50)
 
 **Platform**: Apple M5 Pro, 18c, arm64, macOS 26.5. Not comparable to
 the Linux Ryzen write baseline — re-capture on the same machine for
@@ -99,54 +95,52 @@ All runs: `--workload list --mode mem --threads 1 --connections 1
 
 | Label | Limit | Prefix | Start_after | Val B | Mode | scans/s | avg us | p99 us | err |
 |-------|------:|--------|-------------|------:|------|--------:|-------:|-------:|----:|
-| full_1k | 1000 | | | 64 | lin | 243 | 4109 | 4672 | 0 |
-| full_10k | 10000 | | | 64 | lin | 165 | 6063 | 6732 | 0 |
-| full_100k | 100000 | | | 64 | lin | 20 | 49485 | 52416 | 0 |
-| bounded_10 | 10 | | | 64 | lin | 223 | 4490 | 5036 | 0 |
-| bounded_100 | 100 | | | 64 | lin | 230 | 4350 | 4804 | 0 |
-| bounded_1k | 1000 | | | 64 | lin | 224 | 4463 | 5088 | 0 |
-| bounded_10k | 10000 | | | 64 | lin | 164 | 6109 | 6764 | 0 |
-| from_start_10 | 10 | | | 64 | lin | 231 | 4321 | 4836 | 0 |
-| deep_pag_10 | 10 | | k...99989 | 64 | lin | 147 | 6786 | 9800 | 0 |
-| deep_pag_100 | 100 | | k...99899 | 64 | lin | 143 | 6994 | 10136 | 0 |
-| valuesize_64B | 1000 | | | 64 | lin | 202 | 4938 | 5380 | 0 |
-| valuesize_1KiB | 1000 | | | 1024 | lin | 766 | 1304 | 2512 | 0 |
-| valuesize_16KiB | 1000 | | | 16384 | lin | 27 | 17368 | 65184 | 309 |
-| valuesize_64B_flushed | 1000 | | | 64 | lin | 213 | 4704 | 4888 | 0 |
-| valuesize_1KiB_flushed | 1000 | | | 1024 | lin | 821 | 1217 | 1549 | 0 |
-| prefix_1k | 1000 | k00 | | 64 | lin | 214 | 4679 | 5036 | 0 |
-| whole_1k | 1000 | | | 64 | lin | 209 | 4788 | 5184 | 0 |
-| lin_1k | 1000 | | | 64 | lin | 217 | 4599 | 4984 | 0 |
-| minslot_1k | 1000 | | | 64 | minslot | 206 | 4845 | 5396 | 0 |
+| full_1k | 1000 | | | 64 | lin | 4264 | 233 | 312 | 0 |
+| full_10k | 10000 | | | 64 | lin | 524 | 1906 | 2104 | 0 |
+| full_100k | 100000 | | | 64 | lin | 50 | 19975 | 20880 | 0 |
+| bounded_10 | 10 | | | 64 | lin | 20932 | 46 | 67 | 0 |
+| bounded_100 | 100 | | | 64 | lin | 15429 | 63 | 84 | 0 |
+| bounded_1k | 1000 | | | 64 | lin | 4355 | 228 | 255 | 0 |
+| bounded_10k | 10000 | | | 64 | lin | 513 | 1947 | 2074 | 0 |
+| from_start_10 | 10 | | | 64 | lin | 20708 | 47 | 71 | 0 |
+| deep_pag_10 | 10 | | k...99989 | 64 | lin | 20664 | 47 | 67 | 0 |
+| deep_pag_100 | 100 | | k...99899 | 64 | lin | 15423 | 63 | 85 | 0 |
+| valuesize_64B | 1000 | | | 64 | lin | 4339 | 229 | 254 | 0 |
+| valuesize_1KiB | 1000 | | | 1024 | lin | 1492 | 669 | 782 | 0 |
+| valuesize_16KiB | 1000 | | | 16384 | lin | 74 | 8383 | 21536 | 452 |
+| valuesize_64B_flushed | 1000 | | | 64 | lin | 4344 | 229 | 259 | 0 |
+| valuesize_1KiB_flushed | 1000 | | | 1024 | lin | 1428 | 699 | 795 | 0 |
+| prefix_1k | 1000 | k00 | | 64 | lin | 4263 | 233 | 258 | 0 |
+| whole_1k | 1000 | | | 64 | lin | 4290 | 232 | 259 | 0 |
+| lin_1k | 1000 | | | 64 | lin | 4380 | 227 | 254 | 0 |
+| minslot_1k | 1000 | | | 64 | minslot | 4230 | 235 | 262 | 0 |
 
-**Full-keyspace**: scales linearly (1k→10k: 2.2x keys, 1.5x time).
-`full_100k` completes via the streaming `ScanStream` RPC — previously
-0 scans/s with 6 transport errors from the 4 MiB unary cap.
+**Full-keyspace**: scales linearly (1k→10k: 2.2x keys, 8.2x time —
+per-entry cost is now visible at the lower fixed-cost baseline).
+`full_100k` completes via S3-style pagination (byte-budgeted unary
+RPC) — previously 0 scans/s with 6 transport errors from the 4 MiB
+unary cap.
 
-**Bounded limit**: per-entry cost is small relative to the per-scan
-setup — limit 10/100/1k are all ~4.4ms. At limit=10k the per-entry
-cost becomes visible (6.1ms).
+**Bounded limit**: the per-scan fixed cost collapsed from ~4.4ms to
+~46us (95x improvement) — R48 (lazy leaf cursor) + R50 (epoch-protected
+MemTable) eliminated the O(entries-per-leaf) and O(N_l0) costs that
+dominated every scan regardless of limit. At limit=10k the per-entry
+cost is visible again (1.9ms).
 
-**Deep pagination**: O(limit) verdict CONFIRMED. Deep pagination is
-1.6x slower than from-start (6786us vs 4321us at limit=10) — the
-deeper B+tree descent cost (O(log N) inner-page levels), not O(prefix)
-over-fetch. If the engine over-fetched, deep_pag_10 would cost
-~49485us (the full_100k number), not 6786us. Deep pagination limit 10
-vs 100 (6786 vs 6994us) are within 3% — cost is dominated by the
-fixed descent, not entry count.
+**Deep pagination**: O(limit) verdict CONFIRMED and now flat. Deep
+pagination is equal to from-start (20664 vs 20708 scans/s at limit=10)
+— the B+tree descent cost is negligible at this scale. Previously 1.6x
+slower (6786us vs 4321us).
 
-**Value-size sweep**: 16 KiB streaming mostly works (27 scans/s vs
-previously 0) but 309 residual errors remain — retry edge cases under
-high payload (follow-on item). 1 KiB anomaly: 1 KiB values are 3.8x
-faster than 64 B (766 vs 202 scans/s) despite returning 16x more data
-per scan. Persists after zero-copy scan values and L0 drain — root
-cause is in the L1 B+tree scan path, not per-byte copy or L0 snapshot
-cost.
+**Value-size sweep**: the 1 KiB anomaly is FIXED and INVERTED — 64B
+is now 2.9x faster than 1 KiB (4339 vs 1492 scans/s), the expected
+ordering (cost tracks bytes returned, not entries per leaf). 16 KiB
+errors persist (452) — root cause identified as replication
+backpressure, not a scan path issue (see § Unsolved Issues).
 
-**Flush-after-prepopulate**: the 3.8x gap is unchanged with L0
-deterministically drained. The flag is a no-op because the
-maintenance loop (3s tick) already keeps L0 small during measurement.
-Useful for deterministic L1-only baselines.
+**Flush-after-prepopulate**: no measurable difference vs non-flushed
+— the maintenance loop (3s tick) already keeps L0 small during
+measurement. Useful for deterministic L1-only baselines.
 
 **Prefix range**: no measurable difference — the per-scan fixed
 overhead dominates at this scan width.
@@ -154,6 +148,26 @@ overhead dominates at this scan width.
 **Read-mode split**: no measurable difference at 1T:1C — the single
 client has no concurrency to exploit MinSlot's follower local-serve.
 The split would show a difference at higher concurrency.
+
+### Before/after comparison (2026-08-05 → 2026-08-06, R48+R50)
+
+| Config | Before scans/s | After scans/s | Improvement | Before err | After err |
+|--------|---------------:|--------------:|------------:|-----------:|----------:|
+| full_1k | 243 | 4264 | 17.5x | 0 | 0 |
+| full_10k | 165 | 524 | 3.2x | 0 | 0 |
+| full_100k | 20 | 50 | 2.5x | 0 | 0 |
+| bounded_10 | 223 | 20932 | 93.9x | 0 | 0 |
+| bounded_100 | 230 | 15429 | 67.1x | 0 | 0 |
+| bounded_1k | 224 | 4355 | 19.4x | 0 | 0 |
+| bounded_10k | 164 | 513 | 3.1x | 0 | 0 |
+| deep_pag_10 | 147 | 20664 | 140.6x | 0 | 0 |
+| valuesize_64B | 202 | 4339 | 21.5x | 0 | 0 |
+| valuesize_1KiB | 766 | 1492 | 1.9x | 0 | 0 |
+
+The dominant improvements are on bounded scans (20-140x) where the
+O(entries-per-leaf) and O(N_l0) costs were eliminated. Full-keyspace
+scans improve less because they genuinely touch more data. The 1 KiB
+anomaly is inverted: 64B is now faster than 1 KiB, as expected.
 
 ### Cost split
 
@@ -169,7 +183,7 @@ The split would show a difference at higher concurrency.
 - **Deep-pagination descent** (~2.5ms): O(log N) B+tree descent to a
   leaf near the end. Fixed cost per scan.
 
-### Comparison vs pre-zero-copy/streaming baseline
+### Comparison vs pre-zero-copy/streaming baseline (historical)
 
 | Config | Before scans/s | After scans/s | Before err | After err | Notes |
 |--------|---------------|---------------|-----------|----------|-------|
@@ -183,6 +197,11 @@ The split would show a difference at higher concurrency.
 Small scans (limit 10/100/1k) unchanged — the per-scan fixed cost
 dominates. Larger scans (10k+) improved 15-20% from zero-copy values.
 Streaming unblocked `full_100k` and `valuesize_16KiB`.
+
+**Note**: this table predates R48 (lazy leaf cursor) and R50
+(epoch-protected MemTable). See the "Before/after comparison" table
+above for the post-R48+R50 numbers — bounded scans improved 20-140x
+from those two changes alone.
 
 ---
 
@@ -337,25 +356,38 @@ measurement time.
   resolve was far more expensive for 64B. Confirmed by per-step
   metrics: l1_resolve was 99.5% of the 64B C++ scan (3985us) and 0us of
   it was L0 (L0 is empty by measurement time). Fixed by the lazy
-  `LeafChainCursor` — see § Scan Per-Step Profile for before/after.
-  Re-run `tools/bench-scan-regression.sh` to refresh the end-to-end
-  table above (the numbers there predate the fix).
-- **L0 snapshot O(N_l0) cost (R50 Gate 2 CLEARED)**:
-  `MemTable::snapshot()` copies all entries on every scan. The
-  production bench shows 0us (pre-populate-then-scan, 3s tick drains
-  L0 during pre-populate), but the Gate 2 concurrent write+scan
-  microbench shows l0_snapshot dominates scan time under sustained
-  writes (126us/64B, 1122us/1KiB, 82–94% of scan with a 3s flush tick).
-  Post-R48, with l1_resolve at 0us, l0_snapshot is the dominant
-  remaining scan cost when L0 is non-empty. Covered by R50
-  (epoch-protected MemTable), now unblocked — see § L0 snapshot cost
-  under concurrent write+scan for the Gate 2 measurements.
-- **Streaming scan residual errors**: `valuesize_16KiB` shows 309
-  errors despite the streaming scan RPC. Investigating retry edge
-  cases under high payload is a follow-on item.
+  `LeafChainCursor` (R48) — see § Scan Per-Step Profile for before/after.
+  Post-fix: 64B is now 2.9x faster than 1 KiB (4339 vs 1492 scans/s),
+  the expected ordering (cost tracks bytes returned, not entries per
+  leaf).
+- **L0 snapshot O(N_l0) cost (FIXED — R50)**:
+  `MemTable::snapshot()` copied all entries on every scan. Replaced by
+  a `ConcurrentSkipList` with epoch-deferred reclamation (R50) —
+  readers traverse L0 lock-free under their existing epoch guard with
+  zero copy; the cursor seeks directly and materializes only O(limit)
+  entries. Post-fix: bounded_10 improved 93.9x (223 → 20932 scans/s),
+  bounded_1k improved 19.4x (224 → 4355 scans/s). See § L0 snapshot
+  cost under concurrent write+scan for the Gate 2 measurements that
+  motivated the fix.
+- **16 KiB scan errors (ROOT CAUSE FOUND — replication backpressure)**:
+  `valuesize_16KiB` shows intermittent errors (452 in the latest run,
+  0 in some re-runs). Root cause is NOT the scan path — it is the
+  learner_stream outbound queue filling up during pre-populate with
+  16 KiB values (1.6 GiB of data), blocking heartbeats to followers.
+  Server logs show: `learner_stream: outbound queue full (reserved for
+  heartbeats)` followed by `kv scan failed: not leader` (the leader
+  loses leadership when heartbeats can't be sent). This is a
+  replication-layer backpressure issue amplified by large value sizes,
+  not a scan correctness bug. The scan path itself is correct — the
+  linearizable read barrier fails because the leader can't maintain
+  quorum. Fix: increase the learner_stream outbound queue capacity or
+  add backpressure signaling so the writer slows down when the queue is
+  near full. Follow-on item.
 - **High-concurrency read-mode split**: this baseline is 1T:1C; the
   MinSlot vs Linearizable split at higher concurrency (where MinSlot's
   any-replica round-robin distributes load) is an end-to-end
-  follow-on item.
+  follow-on item. No measurable difference at 1T:1C (4380 vs 4230
+  scans/s — noise).
 - **Reverse scan**: `scan` is forward-only today; reverse scan is a
-  distinct cost shape and would need its own baseline if added.
+  distinct cost shape and would need its own baseline. Tracked as
+  a backlog item (R52).
