@@ -19,7 +19,7 @@
 #     - lin_4t:        linearizable (all scans serialize on leader)
 #     - minslot_4t:    minslot (scans distributed across replicas)
 #
-# 9 runs × 10s ≈ 90s + pre-pop overhead.
+# 13 runs × 10s ≈ 130s + pre-pop overhead.
 #
 # Reference platform: see doc/working/kv-scan-flow-analysis.md. Always
 # record the CPU model in the baseline doc when publishing a run —
@@ -100,7 +100,11 @@ run_bench() {
 #   mixed_1k         1000    1:1   991      1007    1222     0    64B:70%,1KiB:20%,16KiB:10%
 #   minslot_1k       1000    1:1   4293     232     262      0    MinSlot routing
 #   lin_4t           1000    4:4   14264    279     473      0    max leader throughput
-#   minslot_4t       1000    4:4   14810    269     385      0    distributed throughput
+#   minslot_4t       1000    4:4   14810    269     385      0    +3.8% vs lin
+#   lin_16t          1000    16:16 30799    517     822      0
+#   minslot_16t      1000    16:16 33015    482     791      0    +7.2% vs lin
+#   lin_32t          1000    32:32 37840    842     3600     0
+#   minslot_32t      1000    32:32 38256    830     2028     0    +1.1% throughput, -43.7% p99
 #
 # Analysis: doc/working/kv-scan-flow-analysis.md § Latest Benchmark Results.
 
@@ -115,9 +119,13 @@ run_bench "deep_pag_10"     10     "" "$(pad_key 99989)"        64    linearizab
 run_bench "mixed_1k"        1000   "" ""                        64    linearizable auto 1 1 "64:70,1024:20,16384:10"
 run_bench "minslot_1k"      1000   "" ""                        64    minslot      zero 1 1
 
-echo "=== Multi-thread (4T:4C) — max throughput + read-mode split ==="
+echo "=== Multi-thread — max throughput + read-mode split ==="
 run_bench "lin_4t"          1000   "" ""                        64    linearizable auto 4 4
 run_bench "minslot_4t"      1000   "" ""                        64    minslot      zero 4 4
+run_bench "lin_16t"         1000   "" ""                        64    linearizable auto 16 16
+run_bench "minslot_16t"     1000   "" ""                        64    minslot      zero 16 16
+run_bench "lin_32t"         1000   "" ""                        64    linearizable auto 32 32
+run_bench "minslot_32t"     1000   "" ""                        64    minslot      zero 32 32
 
 echo "=== DONE ==="
 echo "Results in $RESULTS_FILE"

@@ -112,19 +112,25 @@ Raw TSV: `doc/working/bench-scan-regression.tsv` (gitignored).
 sizes with 0 errors (the 16KiB fraction is small enough to avoid the
 replication backpressure issue seen at 100% 16KiB).
 
-### Multi-thread (4T:4C) — max throughput + read-mode split
+### Multi-thread — max throughput + read-mode split
 
-| Label | Limit | Val B | Mode | scans/s | avg us | p99 us | err |
-|-------|------:|------:|------|--------:|-------:|-------:|----:|
-| lin_4t | 1000 | 64 | lin | 14264 | 279 | 473 | 0 |
-| minslot_4t | 1000 | 64 | minslot | 14810 | 269 | 385 | 0 |
+| Label | Limit | Val B | Mode | T:C | scans/s | avg us | p99 us | err |
+|-------|------:|------:|------|-----|--------:|-------:|-------:|----:|
+| lin_4t | 1000 | 64 | lin | 4:4 | 14264 | 279 | 473 | 0 |
+| minslot_4t | 1000 | 64 | minslot | 4:4 | 14810 | 269 | 385 | 0 |
+| lin_16t | 1000 | 64 | lin | 16:16 | 30799 | 517 | 822 | 0 |
+| minslot_16t | 1000 | 64 | minslot | 16:16 | 33015 | 482 | 791 | 0 |
+| lin_32t | 1000 | 64 | lin | 32:32 | 37840 | 842 | 3600 | 0 |
+| minslot_32t | 1000 | 64 | minslot | 32:32 | 38256 | 830 | 2028 | 0 |
 
-Linearizable scales 3.3x from 1T to 4T (4339 → 14264) — the leader
-read barrier serializes but the engine work parallelizes. MinSlot
-shows a 3.8% throughput advantage at 4T:4C (14810 vs 14264) and
-better p99 latency (385us vs 473us) — the distributed read serving
-starts to show benefit. The split would widen with more replicas or
-higher concurrency.
+Linearizable scales well up to 16T (4339 → 30799, 7.1x) then saturates
+at 32T (37840) — the leader read barrier becomes the bottleneck.
+MinSlot shows a clear advantage:
+- **16T:16C**: +7.2% throughput (33015 vs 30799) — distributed read
+  serving across 3 replicas scales better than single-leader.
+- **32T:32C**: throughput saturates for both (+1.1%), but MinSlot's
+  p99 is 44% better (2028us vs 3600us) — load distribution keeps tail
+  latency low even when throughput is capped by the engine.
 
 ### Improvement summary (pre-R48 → post-R48+R50)
 
@@ -154,10 +160,11 @@ O(limit) confirmed.
   itself is correct; the linearizable read barrier fails because the
   leader can't maintain quorum. Fix: increase outbound queue capacity
   or add backpressure signaling. Follow-on item.
-- **High-concurrency read-mode split (MEASURED)**: at 4T:4C, MinSlot
-  shows a 3.8% throughput advantage over Linearizable (14810 vs 14264
-  scans/s) with better p99 (385us vs 473us). The split is small at
-  this scale (3 replicas, 4 clients) but measurable — it would widen
-  with more replicas or higher concurrency. No code change needed.
+- **High-concurrency read-mode split (MEASURED)**: MinSlot shows a
+  +7.2% throughput advantage at 16T:16C (33015 vs 30799 scans/s) and
+  44% better p99 at 32T:32C (2028us vs 3600us). The throughput
+  advantage peaks around 16T then both modes saturate near ~38k
+  scans/s at 32T — the engine itself becomes the bottleneck, not the
+  read barrier. No code change needed.
 - **Reverse scan**: `scan` is forward-only today. Tracked as backlog
   item [R52](../backlog/R52-reverse-scan.md).
