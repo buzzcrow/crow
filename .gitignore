@@ -16,6 +16,7 @@ lib/crow-tree/build-tsan/
 lib/crow-tree/build-bench/
 lib/crow-tree/build*/
 lib/crow-tree/Testing/
+Testing/
 lib/crow-tree/.cache/
 lib/crow-tree/.test-tmp/
 .test-tmp/

@@ -9,7 +9,7 @@
 //! audit. See `crow_kv/src/cluster/px_kv_store.rs` for the original
 //! expanded construction.
 
-use super::KvResponse;
+use super::{KvErrorCode, KvResponse};
 use bytes::Bytes;
 
 impl KvResponse {
@@ -33,6 +33,7 @@ impl KvResponse {
             value: Bytes::new(),
             read_slot: 0,
             safe_slot: 0,
+            error_code: KvErrorCode::KvErrorNone as i32,
         }
     }
 
@@ -60,6 +61,7 @@ impl KvResponse {
             value,
             read_slot: 0,
             safe_slot: 0,
+            error_code: KvErrorCode::KvErrorNone as i32,
         }
     }
 
@@ -85,6 +87,7 @@ impl KvResponse {
             value,
             read_slot: 0,
             safe_slot: 0,
+            error_code: KvErrorCode::KvErrorNone as i32,
         }
     }
 
@@ -103,6 +106,7 @@ impl KvResponse {
             value: Bytes::new(),
             read_slot: 0,
             safe_slot: 0,
+            error_code: KvErrorCode::KvErrorNone as i32,
         }
     }
 
@@ -122,6 +126,7 @@ impl KvResponse {
             value: Bytes::new(),
             read_slot: 0,
             safe_slot: 0,
+            error_code: KvErrorCode::KvErrorNotLeader as i32,
         }
     }
 
@@ -140,6 +145,7 @@ impl KvResponse {
             value: Bytes::new(),
             read_slot: 0,
             safe_slot: 0,
+            error_code: KvErrorCode::KvErrorInternal as i32,
         }
     }
 }

@@ -21,6 +21,17 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use tracing::{debug, info};
 
+/// Server-fixed byte budget for scan responses: caps the total key+value
+/// bytes in one unary `KvScanResponse` so every page is provably bounded
+/// regardless of value sizes. 3.5 MiB leaves ~0.5 MiB for proto framing
+/// under tonic's 4 MiB default `max_decoding_message_size`. The engine
+/// always returns at least one entry even if it alone exceeds the budget
+/// (so the client makes progress), with a warning log for the oversized
+/// entry. Post-R32 (custom Rust RPC) this stays as a safety boundary —
+/// only its constraint value may change (no longer pinned to gRPC's 4
+/// MiB default).
+const SCAN_BYTE_BUDGET: usize = 3 * 1024 * 1024 + 512 * 1024; // 3.5 MiB
+
 pub struct PxKvStore {
     pub store_id: u64,
     pub(crate) groups: DashMap<u64, Arc<PxGroup>>,
@@ -31,6 +42,11 @@ pub struct PxKvStore {
     /// Metrics registry for KV service instrumentation. `None` when
     /// metrics are disabled (`--metrics-interval 0`).
     pub(crate) metrics_registry: Option<Arc<std::sync::Mutex<MetricsRegistry>>>,
+    /// Test-only delay injected into `kv_get` before `resolve_read_point`.
+    /// Set via `set_get_delay_for_tests` under the `test-util` feature;
+    /// `None` in production.
+    #[cfg(feature = "test-util")]
+    get_delay: Mutex<Option<Duration>>,
 }
 
 impl KvStore for PxKvStore {
@@ -43,6 +59,12 @@ impl KvStore for PxKvStore {
         request_id: u64,
         request_create_ms: u64,
     ) -> crate::rpc::KvResponse {
+        #[cfg(feature = "test-util")]
+        let test_delay = *self.get_delay.lock();
+        #[cfg(feature = "test-util")]
+        if let Some(delay) = test_delay {
+            tokio::time::sleep(delay).await;
+        }
         let Some(group) = self.get_group(group_id) else {
             return missing_group_response(request_id, request_create_ms);
         };
@@ -172,17 +194,29 @@ impl KvStore for PxKvStore {
         // `limit` smallest matching live keys (no tombstones) in key order
         // plus a `truncated` flag; `limit == 0` means unlimited. Sorted
         // output keeps pagination via `prefix` extension predictable.
-        let (scanned, truncated) = group
+        // Engine errors (e.g. Corruption) propagate as scan_err instead
+        // of being silently swallowed as an empty ok result.
+        let (scanned, truncated) = match group
             .local_replica()
             .learner
-            .engine_scan(prefix, start_after, limit as usize)
-            .await;
+            .engine_scan(prefix, start_after, limit as usize, SCAN_BYTE_BUDGET)
+            .await
+        {
+            Ok(result) => result,
+            Err(msg) => {
+                return scan_err(
+                    format!("scan engine error: {msg}"),
+                    String::new(),
+                    request_id,
+                    request_create_ms,
+                );
+            }
+        };
         let mut items: Vec<crate::rpc::KvScanItem> = Vec::with_capacity(scanned.len());
         for (key, _slot, value) in scanned {
-            items.push(crate::rpc::KvScanItem {
-                key: bytes::Bytes::from(key),
-                value: bytes::Bytes::from(value),
-            });
+            // Key and value are already zero-copy Bytes from the
+            // engine's packed scan buffer — assign directly, no conversion.
+            items.push(crate::rpc::KvScanItem { key, value });
         }
 
         debug!(
@@ -205,6 +239,7 @@ impl KvStore for PxKvStore {
             request_create_ms,
             read_slot,
             not_leader_hint: String::new(),
+            error_code: crate::rpc::KvErrorCode::KvErrorNone as i32,
         }
     }
 }
@@ -219,6 +254,8 @@ impl PxKvStore {
             listen_addr,
             shutdown_started: AtomicBool::new(false),
             metrics_registry: None,
+            #[cfg(feature = "test-util")]
+            get_delay: Mutex::new(None),
         }
     }
 
@@ -226,6 +263,16 @@ impl PxKvStore {
     /// record metrics. Called before `start()`.
     pub fn set_metrics_registry(&mut self, registry: Arc<std::sync::Mutex<MetricsRegistry>>) {
         self.metrics_registry = Some(registry);
+    }
+
+    /// Test-only: inject a fixed delay into every `kv_get` call on this
+    /// store, so a test can simulate a slow replica for read-endpoint
+    /// policy acceptance tests (R39). The delay is applied before
+    /// `resolve_read_point`, affecting all read modes. `None` (default)
+    /// means no delay.
+    #[cfg(feature = "test-util")]
+    pub fn set_get_delay_for_tests(&self, delay: Duration) {
+        *self.get_delay.lock() = Some(delay);
     }
 
     /// Cascade shutdown: stop gRPC server (with timeout), then shut down each
@@ -507,7 +554,7 @@ impl PxKvStore {
                         // Lost leadership during the barrier: redirect to the
                         // current leader rather than serving stale local state.
                         ReadBarrierOutcome::NotLeader => ReadDecision::NotLeader {
-                            hint: self.forward_target_for(group.group_id()).unwrap_or_default(),
+                            hint: group.leader_endpoint().unwrap_or_default(),
                         },
                         ReadBarrierOutcome::NoQuorum => ReadDecision::Unavailable {
                             msg: "linearizable read: leadership quorum unavailable".to_string(),
@@ -520,7 +567,7 @@ impl PxKvStore {
                     // forwarding was unavailable or the loop-guard is set.
                     // Redirect instead of serving a stale local value.
                     ReadDecision::NotLeader {
-                        hint: self.forward_target_for(group.group_id()).unwrap_or_default(),
+                        hint: group.leader_endpoint().unwrap_or_default(),
                     }
                 }
             }
@@ -535,7 +582,7 @@ impl PxKvStore {
                         h.minslot_fallback.inc();
                     }
                     ReadDecision::NotLeader {
-                        hint: self.forward_target_for(group.group_id()).unwrap_or_default(),
+                        hint: group.leader_endpoint().unwrap_or_default(),
                     }
                 }
             }
@@ -683,6 +730,11 @@ fn scan_err(
     request_id: u64,
     request_create_ms: u64,
 ) -> crate::rpc::KvScanResponse {
+    let error_code = if error == "not leader" {
+        crate::rpc::KvErrorCode::KvErrorNotLeader as i32
+    } else {
+        crate::rpc::KvErrorCode::KvErrorInternal as i32
+    };
     crate::rpc::KvScanResponse {
         version: 1,
         ok: false,
@@ -693,6 +745,7 @@ fn scan_err(
         request_create_ms,
         read_slot: 0,
         not_leader_hint,
+        error_code,
     }
 }
 

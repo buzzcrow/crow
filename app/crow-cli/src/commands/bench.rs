@@ -49,6 +49,15 @@ pub struct RunArgs {
     #[arg(long, default_value_t = 512)]
     pub value_size: usize,
 
+    /// Mixed value-size distribution for pre-population, as
+    /// `size:percent,...` (e.g. `64:70,1024:20,16384:10`). Each
+    /// pre-populated key gets a deterministic size based on its id.
+    /// Percentages must sum to 100. When set, overrides `--value-size`
+    /// for pre-population only. Useful for scan benches that want to
+    /// exercise multiple value sizes in a single run.
+    #[arg(long)]
+    pub value_size_mix: Option<String>,
+
     /// Deprecated: workspace is now always kept in the run directory.
     #[arg(long, default_value_t = false)]
     pub keep_workspace: bool,
@@ -100,12 +109,13 @@ pub struct RunArgs {
     pub verify_bytes: usize,
 
     /// `MinSlot` read-endpoint selection policy: `leader` (default,
-    /// routes `MinSlot` reads to the leader) or `any-replica`
-    /// (distributes `MinSlot` reads across all replicas, exercising the
-    /// real follower local-serve + fallback path). Ignored for
-    /// `Linearizable` reads. When not specified, defaults to
-    /// `any-replica` for `--read-mode minslot` and `leader` for
-    /// `--read-mode linearizable`.
+    /// routes `MinSlot` reads to the leader), `any-replica`
+    /// (distributes `MinSlot` reads round-robin across all replicas),
+    /// `least-connections` (routes to the replica with the fewest
+    /// in-flight reads), or `latency` (routes to the replica with the
+    /// lowest recent RTT). Ignored for `Linearizable` reads. When not
+    /// specified, defaults to `any-replica` for `--read-mode minslot`
+    /// and `leader` for `--read-mode linearizable`.
     #[arg(long)]
     pub read_endpoint_policy: Option<String>,
 
@@ -124,6 +134,35 @@ pub struct RunArgs {
     /// spawned server). Default `1`. `0` = always drain.
     #[arg(long)]
     pub coalesce_drain_threshold: Option<usize>,
+
+    /// Scan limit (max entries per scan op) for `--workload list`.
+    /// Default 1 (the historical stub behavior). Set higher for
+    /// bounded-limit / full-keyspace scan benches.
+    #[arg(long, default_value_t = 1)]
+    pub scan_limit: u32,
+
+    /// Scan prefix for `--workload list`. Empty (default) = whole
+    /// keyspace. Set to a bounded prefix (e.g. `k05`) for prefix-range
+    /// scan benches.
+    #[arg(long, default_value = "")]
+    pub scan_prefix: String,
+
+    /// Scan exclusive lower bound (`start_after`) for `--workload list`.
+    /// Empty (default) = start from the beginning. Set near the end of
+    /// the populated keyspace (in the same `k{id:020}` format) for
+    /// deep-pagination scan benches.
+    #[arg(long, default_value = "")]
+    pub scan_start_after: String,
+
+    /// After pre-population, drain L0 (`MemTable`) into L1 on every node
+    /// via the management API before opening the measurement window.
+    /// Produces a clean L1-only scan baseline (removes the
+    /// `MemTable::snapshot()` `O(N_l0)` cost from the measurement),
+    /// verifying the 1KiB anomaly hypothesis. Default off — without
+    /// the flag, L0 size at scan time depends on value size (historical
+    /// behavior).
+    #[arg(long, default_value_t = false)]
+    pub flush_after_prepopulate: bool,
 }
 
 /// Arguments for `crow-cli bench`.
@@ -192,8 +231,14 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
         Some(s) => match s.to_ascii_lowercase().as_str() {
             "leader" => ReadEndpointPolicy::Leader,
             "any-replica" | "any_replica" | "anyreplica" => ReadEndpointPolicy::AnyReplica,
+            "least-connections" | "least_connections" | "leastconnections" => {
+                ReadEndpointPolicy::LeastConnections
+            }
+            "latency" => ReadEndpointPolicy::Latency,
             other => {
-                eprintln!("error: unknown read-endpoint-policy {other:?} (expected: leader|any-replica)");
+                eprintln!(
+                    "error: unknown read-endpoint-policy {other:?} (expected: leader|any-replica|least-connections|latency)"
+                );
                 return ExitCode::from(1);
             }
         },
@@ -245,6 +290,16 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
     cfg.duration = Duration::from_secs(args.duration_secs);
     cfg.key_space = args.key_space;
     cfg.value_size = args.value_size;
+    if let Some(ref mix_spec) = args.value_size_mix {
+        match crate::bench::workload::ValueSizeMix::parse(mix_spec) {
+            Ok(mix) => cfg.value_size_mix = Some(mix),
+            Err(e) => {
+                eprintln!("error: {e}");
+                fixture.cleanup().await;
+                return ExitCode::from(2);
+            }
+        }
+    }
     cfg.run_id = Some(run_id.clone());
     cfg.report_dir = Some(run_dir.clone());
     cfg.metrics_log_path = Some(run_dir.join("bench-metrics.log"));
@@ -256,12 +311,18 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
         .filter(|c| *c > 0);
     cfg.verify_bytes = args.verify_bytes;
     cfg.read_endpoint_policy = read_endpoint_policy;
-    // AnyReplica needs the full replica list, which comes from a
-    // `/topology` fetch against any `crow-kv-server`'s mgmt API. Leader
-    // policy doesn't need it (the client seeds the leader directly).
-    if cfg.read_endpoint_policy == ReadEndpointPolicy::AnyReplica {
+    // Distributed policies (AnyReplica, LeastConnections, Latency) need
+    // the full replica list, which comes from a `/topology` fetch against
+    // any `crow-kv-server`'s mgmt API. Leader policy doesn't need it (the
+    // client seeds the leader directly).
+    if cfg.read_endpoint_policy.is_distributed() {
         cfg.topology_seed = Some(fixture.node_mgmt_urls()[0].clone());
     }
+    cfg.scan_limit = args.scan_limit;
+    cfg.scan_prefix = args.scan_prefix.into_bytes();
+    cfg.scan_start_after = args.scan_start_after.into_bytes();
+    cfg.flush_after_prepopulate = args.flush_after_prepopulate;
+    cfg.flush_mgmt_urls = fixture.node_mgmt_urls().to_vec();
 
     println!(
         "running {} workload for {}s...",

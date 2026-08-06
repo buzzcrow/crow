@@ -7,17 +7,18 @@
 
 #![allow(clippy::cast_possible_truncation)]
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use dashmap::DashMap;
+use tracing::warn;
 
 use crow_kv::rpc::kv_service_client::KvServiceClient;
 use crow_kv::rpc::{
-    KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvGetRequest, KvResponse, KvScanRequest, KvSetRequest,
-    ReadMode,
+    KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvErrorCode, KvGetRequest, KvResponse, KvScanRequest,
+    KvSetRequest, ReadMode,
 };
 
 use crate::config::{ClientConfig, ReadEndpointPolicy, RetryConfig};
@@ -33,17 +34,19 @@ pub struct WriteOutcome {
     pub request_id: u64,
 }
 
-/// Outcome of a successful `get`.
+/// Outcome of a successful `get`. `value` is zero-copy `Bytes` from the
+/// prost response frame, not a `Vec<u8>` copy.
 #[derive(Debug, Clone)]
 pub enum GetOutcome {
-    Found { value: Vec<u8>, revision: u64 },
+    Found { value: Bytes, revision: u64 },
     NotFound,
 }
 
-/// Outcome of a successful `scan`.
+/// Outcome of a successful `scan`. Items are zero-copy `Bytes` from the
+/// prost response frame, not per-entry `Vec<u8>` copies.
 #[derive(Debug, Clone)]
 pub struct ScanOutcome {
-    pub items: Vec<(Vec<u8>, Vec<u8>)>,
+    pub items: Vec<(Bytes, Bytes)>,
     pub truncated: bool,
 }
 
@@ -52,6 +55,81 @@ pub struct ScanOutcome {
 pub enum BatchOp {
     Put { key: Bytes, value: Bytes },
     Delete { key: Bytes },
+}
+
+/// Per-endpoint statistics for `LeastConnections` / `Latency` read
+/// routing. Stored in a `DashMap<String, EndpointStats>` keyed by
+/// endpoint string. All fields are lock-free atomics — updated on the
+/// hot path with `Relaxed` ordering (no locks, no allocation).
+#[derive(Debug, Default)]
+struct EndpointStats {
+    /// In-flight read count for this endpoint. Incremented before the
+    /// gRPC send, decremented when the response arrives (via
+    /// [`InFlightGuard`] drop). Used by `LeastConnections` selection.
+    in_flight: AtomicI64,
+    /// EWMA of get RTT in microseconds, updated on each `Ok` response.
+    /// `0` means no history yet (treated as a tie by `Latency`
+    /// selection). Updated via CAS loop with `alpha = 0.25`.
+    rtt_ewma_us: AtomicU64,
+}
+
+impl EndpointStats {
+    /// Update the RTT EWMA with a new sample. `alpha = 0.25`: the new
+    /// sample gets a quarter weight, so a single spike moves the EWMA
+    /// by 25% and decays over ~4 samples. The first sample initializes
+    /// the EWMA directly.
+    fn record_rtt(&self, rtt_us: u64) {
+        let mut old = self.rtt_ewma_us.load(Ordering::Relaxed);
+        loop {
+            let new = if old == 0 {
+                rtt_us
+            } else {
+                old / 4 * 3 + rtt_us / 4
+            };
+            match self
+                .rtt_ewma_us
+                .compare_exchange_weak(old, new, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => break,
+                Err(actual) => old = actual,
+            }
+        }
+    }
+
+    /// Current in-flight count, loaded `Relaxed` — used only for
+    /// selection comparison, not for ordering guarantees.
+    #[must_use]
+    fn in_flight_count(&self) -> i64 {
+        self.in_flight.load(Ordering::Relaxed)
+    }
+
+    /// Current RTT EWMA in micros. `0` means no history.
+    #[must_use]
+    fn rtt_ewma(&self) -> u64 {
+        self.rtt_ewma_us.load(Ordering::Relaxed)
+    }
+}
+
+/// RAII guard that decrements the endpoint's in-flight count on drop.
+/// Created before the gRPC send; dropped at the end of the retry-loop
+/// iteration (covers all exit paths: success, error, redirect, `?`).
+/// Holds an `Arc<EndpointStats>` so it can live across `.await` points
+/// (a `DashMap` entry guard is not `Send`).
+struct InFlightGuard {
+    stats: Arc<EndpointStats>,
+}
+
+impl InFlightGuard {
+    fn new(stats: Arc<EndpointStats>) -> Self {
+        stats.in_flight.fetch_add(1, Ordering::Relaxed);
+        Self { stats }
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.stats.in_flight.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// Standalone `CrowKV` client: topology discovery over the HTTP management
@@ -79,6 +157,14 @@ pub struct CrowkvClient {
     /// `AnyReplica` `MinSlot` selector. Lock-free `fetch_add`; one entry
     /// per group the client has read from.
     read_rr: DashMap<(u64, u64), AtomicU64>,
+    /// Per-endpoint statistics for `LeastConnections` / `Latency`
+    /// selection. Keyed by endpoint string (same keys as the topology
+    /// cache's replica list). Entries are created lazily on first
+    /// selection and never evicted — stale entries (replica removed
+    /// from topology) simply accumulate zero in-flight and zero RTT,
+    /// never selected again. `Arc` values so `InFlightGuard` can hold
+    /// a clone across `.await` points.
+    endpoint_stats: DashMap<String, Arc<EndpointStats>>,
 }
 
 impl CrowkvClient {
@@ -94,6 +180,7 @@ impl CrowkvClient {
             write_watermark: DashMap::new(),
             read_endpoint_policy: config.read_endpoint_policy,
             read_rr: DashMap::new(),
+            endpoint_stats: DashMap::new(),
         }
     }
 
@@ -197,11 +284,12 @@ impl CrowkvClient {
     /// resolve to the leader (correctness: only the leader can prove a
     /// linearizable read is fresh). `MinSlot` reads under the `Leader`
     /// policy also resolve to the leader (backward-compatible default).
-    /// `MinSlot` reads under `AnyReplica` round-robin across the
-    /// topology cache's replica list for the group; if no replica list
-    /// is known (cache miss) the client refreshes `/topology` once and
-    /// retries, falling back to the leader if still unknown — a
-    /// single-replica group or a stale `/topology` never blocks reads.
+    /// `MinSlot` reads under a distributed policy (`AnyReplica`,
+    /// `LeastConnections`, `Latency`) pick from the topology cache's
+    /// replica list; if no replica list is known (cache miss) the client
+    /// refreshes `/topology` once and retries, falling back to the
+    /// leader if still unknown — a single-replica group or a stale
+    /// `/topology` never blocks reads.
     async fn resolve_read_endpoint(
         &self,
         store_id: u64,
@@ -211,7 +299,7 @@ impl CrowkvClient {
         if read_mode == ReadMode::Linearizable || self.read_endpoint_policy == ReadEndpointPolicy::Leader {
             return self.resolve_leader(store_id, group_id).await;
         }
-        // `MinSlot` + `AnyReplica`: pick a replica round-robin.
+        // `MinSlot` + distributed policy: pick from the replica list.
         if self.topology.replicas(store_id, group_id).is_none() {
             self.metrics.record_topology_refresh();
             let _ = self.topology.refresh().await;
@@ -225,14 +313,99 @@ impl CrowkvClient {
                 return self.resolve_leader(store_id, group_id).await;
             }
         };
+        let idx = self.select_replica_index(store_id, group_id, &replicas);
+        self.metrics.record_read_endpoint_distributed();
+        Ok(replicas[idx].clone())
+    }
+
+    /// Select a replica index from the list according to the active
+    /// distributed policy. `AnyReplica` → round-robin;
+    /// `LeastConnections` → min in-flight (ties → round-robin);
+    /// `Latency` → min RTT EWMA (no history / ties → round-robin).
+    /// The round-robin cursor (`read_rr`) is always advanced so tie-
+    /// breaks are evenly distributed.
+    fn select_replica_index(&self, store_id: u64, group_id: u64, replicas: &[String]) -> usize {
         let cursor = self
             .read_rr
             .entry((store_id, group_id))
             .or_insert_with(|| AtomicU64::new(0))
             .fetch_add(1, Ordering::Relaxed);
-        let idx = (cursor as usize) % replicas.len();
-        self.metrics.record_read_endpoint_distributed();
-        Ok(replicas[idx].clone())
+        let rr_idx = (cursor as usize) % replicas.len();
+        match self.read_endpoint_policy {
+            ReadEndpointPolicy::Leader | ReadEndpointPolicy::AnyReplica => rr_idx,
+            ReadEndpointPolicy::LeastConnections => {
+                // Start with the round-robin candidate's count so ties
+                // keep the round-robin index (even distribution).
+                let mut best_idx = rr_idx;
+                let mut best_count = self
+                    .endpoint_stats
+                    .entry(replicas[rr_idx].clone())
+                    .or_default()
+                    .in_flight_count();
+                for (i, ep) in replicas.iter().enumerate() {
+                    if i == rr_idx {
+                        continue;
+                    }
+                    let count = self
+                        .endpoint_stats
+                        .entry(ep.clone())
+                        .or_default()
+                        .in_flight_count();
+                    if count < best_count {
+                        best_count = count;
+                        best_idx = i;
+                    }
+                }
+                best_idx
+            }
+            ReadEndpointPolicy::Latency => {
+                // Start with the round-robin candidate's RTT so ties
+                // (including all-zero / no history) keep the round-robin
+                // index. A non-zero RTT only wins over another non-zero
+                // RTT that is higher — `0` (no history) is never
+                // preferred over the round-robin candidate.
+                let mut best_idx = rr_idx;
+                let mut best_rtt = self
+                    .endpoint_stats
+                    .entry(replicas[rr_idx].clone())
+                    .or_default()
+                    .rtt_ewma();
+                for (i, ep) in replicas.iter().enumerate() {
+                    if i == rr_idx {
+                        continue;
+                    }
+                    let rtt = self.endpoint_stats.entry(ep.clone()).or_default().rtt_ewma();
+                    if rtt > 0 && best_rtt > 0 && rtt < best_rtt {
+                        best_rtt = rtt;
+                        best_idx = i;
+                    }
+                }
+                best_idx
+            }
+        }
+    }
+
+    /// Get or create `EndpointStats` for `endpoint` and return an
+    /// `InFlightGuard` that decrements the in-flight count on drop.
+    /// Used in the get/scan retry loops to track per-endpoint load for
+    /// `LeastConnections` selection.
+    fn incr_in_flight(&self, endpoint: &str) -> InFlightGuard {
+        let entry = self
+            .endpoint_stats
+            .entry(endpoint.to_string())
+            .or_insert_with(|| Arc::new(EndpointStats::default()))
+            .clone();
+        InFlightGuard::new(entry)
+    }
+
+    /// Record the RTT for `endpoint` into its EWMA. Called on every
+    /// `Ok` response (success, not-found, `NotLeader` redirect); not
+    /// called on transport errors (a timeout doesn't reflect the
+    /// endpoint's serving latency). Used by `Latency` selection.
+    fn record_endpoint_rtt(&self, endpoint: &str, rtt_us: u64) {
+        if let Some(entry) = self.endpoint_stats.get(endpoint) {
+            entry.record_rtt(rtt_us);
+        }
     }
 
     fn record_write(&self, store_id: u64, group_id: u64, revision: u64) {
@@ -309,7 +482,7 @@ impl CrowkvClient {
                         continue;
                     }
                     attempts = self.count_other(attempts, &resp.error)?;
-                    if Self::is_unknown_leader(&resp.error) {
+                    if Self::is_unknown_leader(resp.error_code, &resp.error) {
                         self.metrics.on_leader_error(store_id, group_id, &endpoint);
                         endpoint = self.wait_and_refresh_leader(store_id, group_id, &endpoint).await;
                         self.metrics
@@ -359,8 +532,10 @@ impl CrowkvClient {
             };
             let channel = self.pool.get(&endpoint)?;
             let t0 = Instant::now();
+            let _in_flight = self.incr_in_flight(&endpoint);
             match KvServiceClient::new(channel).get(req).await {
                 Ok(resp) => {
+                    self.record_endpoint_rtt(&endpoint, t0.elapsed().as_micros() as u64);
                     let resp = resp.into_inner();
                     if resp.not_found {
                         self.metrics.record_get_latency(t0.elapsed().as_micros() as u64);
@@ -369,7 +544,7 @@ impl CrowkvClient {
                     if resp.ok {
                         self.metrics.record_get_latency(t0.elapsed().as_micros() as u64);
                         return Ok(GetOutcome::Found {
-                            value: resp.value.to_vec(),
+                            value: resp.value,
                             revision: resp.revision,
                         });
                     }
@@ -384,16 +559,14 @@ impl CrowkvClient {
                         // the leader here — count the distribution
                         // fallback so operators can confirm the rate
                         // stays low.
-                        if read_mode == ReadMode::MinSlot
-                            && self.read_endpoint_policy == ReadEndpointPolicy::AnyReplica
-                        {
+                        if read_mode == ReadMode::MinSlot && self.read_endpoint_policy.is_distributed() {
                             self.metrics.record_read_endpoint_fallback();
                         }
                         endpoint = new_endpoint;
                         continue;
                     }
                     attempts = self.count_other(attempts, &resp.error)?;
-                    if Self::is_unknown_leader(&resp.error) {
+                    if Self::is_unknown_leader(resp.error_code, &resp.error) {
                         self.metrics.on_leader_error(store_id, group_id, &endpoint);
                         endpoint = self.wait_and_refresh_leader(store_id, group_id, &endpoint).await;
                         self.metrics
@@ -475,7 +648,7 @@ impl CrowkvClient {
                         continue;
                     }
                     attempts = self.count_other(attempts, &resp.error)?;
-                    if Self::is_unknown_leader(&resp.error) {
+                    if Self::is_unknown_leader(resp.error_code, &resp.error) {
                         self.metrics.on_leader_error(store_id, group_id, &endpoint);
                         endpoint = self.wait_and_refresh_leader(store_id, group_id, &endpoint).await;
                         self.metrics
@@ -555,7 +728,7 @@ impl CrowkvClient {
                         continue;
                     }
                     attempts = self.count_other(attempts, &resp.error)?;
-                    if Self::is_unknown_leader(&resp.error) {
+                    if Self::is_unknown_leader(resp.error_code, &resp.error) {
                         self.metrics.on_leader_error(store_id, group_id, &endpoint);
                         endpoint = self.wait_and_refresh_leader(store_id, group_id, &endpoint).await;
                         self.metrics
@@ -577,7 +750,17 @@ impl CrowkvClient {
         }
     }
 
-    /// Prefix-scan a group's key space.
+    /// Prefix-scan a group's key space. Uses S3-style pagination
+    /// (`start_after` + `truncated`): the server applies a byte budget to
+    /// each unary response so every page is provably bounded regardless of
+    /// value sizes, and this method transparently pages until `!truncated`
+    /// or the caller's `limit` is reached. The returned `ScanOutcome.truncated`
+    /// flag means "more entries exist beyond the caller's `limit`".
+    ///
+    /// # Panics
+    /// Panics if the server returns a truncated page with zero items — an
+    /// impossible state (truncated implies items were returned but more
+    /// remain). The `page_len > 0` guard prevents this.
     ///
     /// # Errors
     /// See [`Error`].
@@ -596,12 +779,23 @@ impl CrowkvClient {
         let mut endpoint = self.resolve_read_endpoint(store_id, group_id, read_mode).await?;
         let mut attempts = 0u32;
         let mut backoff = self.retry.backoff_base;
+        // Inner pagination state: collect pages until !truncated or limit reached.
+        let mut all_items: Vec<(Bytes, Bytes)> = Vec::new();
+        let mut page_start_after: Vec<u8> = start_after.to_vec();
         loop {
+            // Remaining entry-count budget for this page. The server's byte
+            // budget may stop the page before this limit is reached; that's
+            // fine — `truncated` tells us to fetch the next page.
+            let remaining_limit = if limit == 0 {
+                0 // unlimited: let the server's byte budget page
+            } else {
+                limit.saturating_sub(u32::try_from(all_items.len()).unwrap_or(u32::MAX))
+            };
             let req = KvScanRequest {
                 version: 1,
                 prefix: Bytes::copy_from_slice(prefix),
-                start_after: Bytes::copy_from_slice(start_after),
-                limit,
+                start_after: Bytes::copy_from_slice(&page_start_after),
+                limit: remaining_limit,
                 request_id: next_request_id(),
                 request_create_ms: now_ms(),
                 group_id,
@@ -610,19 +804,42 @@ impl CrowkvClient {
             };
             let channel = self.pool.get(&endpoint)?;
             let t0 = Instant::now();
+            let _in_flight = self.incr_in_flight(&endpoint);
             match KvServiceClient::new(channel).scan(req).await {
                 Ok(resp) => {
+                    self.record_endpoint_rtt(&endpoint, t0.elapsed().as_micros() as u64);
                     let resp = resp.into_inner();
                     if resp.ok {
-                        let items = resp
-                            .items
-                            .into_iter()
-                            .map(|i| (i.key.to_vec(), i.value.to_vec()))
-                            .collect();
+                        let page_len = resp.items.len();
+                        let resp_truncated = resp.truncated;
+                        for item in resp.items {
+                            all_items.push((item.key, item.value));
+                        }
+                        // If the page was truncated (server hit byte budget or
+                        // entry limit) and we haven't reached the caller's
+                        // limit yet, fetch the next page using the last key as
+                        // the new start_after. A zero-item page with
+                        // truncated=true is a safety stop (avoid infinite loop).
+                        if resp_truncated && page_len > 0 && (limit == 0 || all_items.len() < limit as usize)
+                        {
+                            page_start_after = all_items.last().expect("non-empty page").0.to_vec();
+                            continue;
+                        }
                         self.metrics.record_scan_latency(t0.elapsed().as_micros() as u64);
+                        // `truncated` in the outcome means "more exist beyond
+                        // the caller's limit", not "this page was truncated".
+                        let outcome_truncated = if limit == 0 {
+                            resp_truncated
+                        } else {
+                            resp_truncated && all_items.len() >= limit as usize
+                        };
+                        // If the caller's limit was reached, truncate.
+                        if limit != 0 && all_items.len() > limit as usize {
+                            all_items.truncate(limit as usize);
+                        }
                         return Ok(ScanOutcome {
-                            items,
-                            truncated: resp.truncated,
+                            items: all_items,
+                            truncated: outcome_truncated,
                         });
                     }
                     self.metrics.record_scan_error();
@@ -630,16 +847,16 @@ impl CrowkvClient {
                     // mirroring the `get` path) so a `MinSlot` scan
                     // against a follower that hasn't applied `min_slot`
                     // falls back to the leader rather than being treated
-                    // as a plain error.
+                    // as a plain error. Reset pagination state on redirect.
                     if !resp.not_leader_hint.is_empty() {
-                        if read_mode == ReadMode::MinSlot
-                            && self.read_endpoint_policy == ReadEndpointPolicy::AnyReplica
-                        {
+                        if read_mode == ReadMode::MinSlot && self.read_endpoint_policy.is_distributed() {
                             self.metrics.record_read_endpoint_fallback();
                         }
                         self.topology
                             .set_leader(store_id, group_id, resp.not_leader_hint.clone());
                         endpoint = resp.not_leader_hint;
+                        all_items.clear();
+                        page_start_after = start_after.to_vec();
                         continue;
                     }
                     attempts = self.count_other(attempts, &resp.error)?;
@@ -653,6 +870,10 @@ impl CrowkvClient {
                         .await;
                     self.metrics
                         .on_leader_resolved(store_id, group_id, &endpoint, "transport_error");
+                    // Reset pagination state on transport error — retry from
+                    // the beginning with the (possibly new) endpoint.
+                    all_items.clear();
+                    page_start_after = start_after.to_vec();
                     attempts = self.count_other(attempts, &status.to_string())?;
                 }
             }
@@ -694,19 +915,26 @@ impl CrowkvClient {
     /// doesn't know who its leader is either -- typically mid-election,
     /// e.g. right after a restart; a real hint would have already been
     /// handled by [`Self::follow_not_leader`] before this is checked).
-    fn is_unknown_leader(error: &str) -> bool {
-        error == "not leader"
+    /// Checks the structured `error_code` first, falling back to the
+    /// string for old servers that don't set the code (default 0 =
+    /// `KvErrorNone`).
+    fn is_unknown_leader(error_code: i32, error: &str) -> bool {
+        error_code == KvErrorCode::KvErrorNotLeader as i32 || error == "not leader"
     }
 
     /// After an [`Self::is_unknown_leader`] failure, give the election a
     /// chance to converge and pick up whatever leader the cache learns in
     /// the meantime, instead of busy-retrying the same non-answering
-    /// replica ("100ms-then-retry").
+    /// replica ("100ms-then-retry"). Logs refresh failures instead of
+    /// silently swallowing them; the caller's `count_other` surfaces
+    /// `RetriesExhausted` if the endpoint stays stale.
     async fn wait_and_refresh_leader(&self, store_id: u64, group_id: u64, endpoint: &str) -> String {
         self.metrics.record_unknown_leader_wait();
         self.metrics.record_leader_query();
         self.metrics.record_topology_refresh();
-        let _ = self.topology.refresh().await;
+        if let Err(e) = self.topology.refresh().await {
+            warn!(error = %e, "topology refresh failed in wait_and_refresh_leader");
+        }
         tokio::time::sleep(self.retry.unknown_leader_wait).await;
         self.topology
             .leader(store_id, group_id)
@@ -716,7 +944,9 @@ impl CrowkvClient {
     /// Transport-level failure (connect/timeout/unavailable): best-effort
     /// topology refresh (covers "leader moved and we don't know where"),
     /// exponential backoff, then return the (possibly updated) endpoint to
-    /// retry against.
+    /// retry against. Logs refresh failures instead of silently
+    /// swallowing them; the caller's `count_other` surfaces
+    /// `RetriesExhausted` if the endpoint stays stale.
     async fn handle_transport_err(
         &self,
         store_id: u64,
@@ -725,7 +955,9 @@ impl CrowkvClient {
         backoff: &mut Duration,
     ) -> String {
         self.metrics.record_topology_refresh();
-        let _ = self.topology.refresh().await;
+        if let Err(e) = self.topology.refresh().await {
+            warn!(error = %e, "topology refresh failed in handle_transport_err");
+        }
         let endpoint = self
             .topology
             .leader(store_id, group_id)

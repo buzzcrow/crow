@@ -217,6 +217,7 @@ mod sys {
             start_after: *const u8,
             salen: usize,
             limit: usize,
+            byte_budget: usize,
             include_tombstones: c_int,
             out_entries: *mut ct_buf,
             out_count: *mut u64,
@@ -256,6 +257,7 @@ mod sys {
             start_after: *const u8,
             salen: usize,
             limit: usize,
+            byte_budget: usize,
         ) -> *mut ct_future;
         pub fn ct_future_poll(
             f: *mut ct_future,
@@ -498,12 +500,13 @@ pub struct Stats {
     pub l1_get_hit_total: u64,
 }
 
-/// A scan result entry.
+/// A scan result entry. `key` and `value` are zero-copy `Bytes` slices
+/// into the packed result buffer, not per-entry `Vec<u8>` copies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanEntry {
-    pub key: Vec<u8>,
+    pub key: Bytes,
     pub slot: u64,
-    pub value: Vec<u8>,
+    pub value: Bytes,
     pub tombstone: bool,
 }
 
@@ -1045,6 +1048,7 @@ impl Crowtree {
         prefix: &[u8],
         start_after: &[u8],
         limit: usize,
+        byte_budget: usize,
         include_tombstones: bool,
     ) -> Result<(Vec<ScanEntry>, bool), CtError> {
         let mut buf = sys::ct_buf {
@@ -1061,6 +1065,7 @@ impl Crowtree {
                 start_after.as_ptr(),
                 start_after.len(),
                 limit,
+                byte_budget,
                 if include_tombstones { 1 } else { 0 },
                 &mut buf,
                 &mut count,
@@ -1068,7 +1073,7 @@ impl Crowtree {
             )
         })?;
         let bytes = take_buf(buf);
-        let entries = decode_scan(&bytes, count as usize)?;
+        let entries = decode_scan(bytes, count as usize)?;
         Ok((entries, truncated != 0))
     }
 
@@ -1240,7 +1245,15 @@ pub fn crc32c_update(crc: u32, data: &[u8]) -> u32 {
     unsafe { crow_common_crc32c_update(crc, data.as_ptr(), data.len()) }
 }
 
-fn decode_scan(bytes: &[u8], count: usize) -> Result<Vec<ScanEntry>, CtError> {
+/// Unpack the C++ packed scan result buffer into `ScanEntry`s.
+/// `bytes` is converted to a single `Bytes` once (zero-copy move of the
+/// `Vec<u8>` allocation via `Bytes::from`), then each entry's `key` and
+/// `value` is a `packed.slice(range)` — zero-copy, sharing the same
+/// allocation. All slices keep it alive until the last one is dropped.
+/// Replaces the prior per-entry `.to_vec()` copies (2N copies → 0).
+fn decode_scan(bytes: Vec<u8>, count: usize) -> Result<Vec<ScanEntry>, CtError> {
+    let packed = Bytes::from(bytes);
+    let bytes: &[u8] = packed.as_ref();
     let mut out = Vec::with_capacity(count);
     let mut pos = 0usize;
     let rd_u32 = |b: &[u8], p: usize| -> u32 { u32::from_le_bytes([b[p], b[p + 1], b[p + 2], b[p + 3]]) };
@@ -1258,7 +1271,7 @@ fn decode_scan(bytes: &[u8], count: usize) -> Result<Vec<ScanEntry>, CtError> {
         if pos + klen + 13 > bytes.len() {
             return Err(CtError::Corruption);
         }
-        let key = bytes[pos..pos + klen].to_vec();
+        let key = packed.slice(pos..pos + klen);
         pos += klen;
         let slot = rd_u64(bytes, pos);
         pos += 8;
@@ -1269,7 +1282,7 @@ fn decode_scan(bytes: &[u8], count: usize) -> Result<Vec<ScanEntry>, CtError> {
         if pos + vlen > bytes.len() {
             return Err(CtError::Corruption);
         }
-        let value = bytes[pos..pos + vlen].to_vec();
+        let value = packed.slice(pos..pos + vlen);
         pos += vlen;
         out.push(ScanEntry {
             key,
@@ -1670,6 +1683,7 @@ impl AsyncCrowtree {
         prefix: Vec<u8>,
         start_after: Vec<u8>,
         limit: usize,
+        byte_budget: usize,
     ) -> Result<(Vec<ScanEntry>, bool), CtError> {
         let fut = unsafe {
             sys::ct_scan_async(
@@ -1679,10 +1693,11 @@ impl AsyncCrowtree {
                 start_after.as_ptr(),
                 start_after.len(),
                 limit,
+                byte_budget,
             )
         };
         let out = drive_ct_future(FutureGuard(fut), &self.inner, FutureKind::Scan).await?;
-        let entries = decode_scan(&out.value, out.slot as usize)?;
+        let entries = decode_scan(out.value, out.slot as usize)?;
         Ok((entries, out.found))
     }
 
@@ -1692,7 +1707,13 @@ impl AsyncCrowtree {
     /// motivation as `try_get`'s doc comment: lets a caller with its own
     /// fast-path/slow-path return type mirror `ct_scan_async`'s own
     /// C++-layer split one layer up instead of forcing a box on every call.
-    pub fn try_scan(&self, prefix: Vec<u8>, start_after: Vec<u8>, limit: usize) -> ScanOutcome {
+    pub fn try_scan(
+        &self,
+        prefix: Vec<u8>,
+        start_after: Vec<u8>,
+        limit: usize,
+        byte_budget: usize,
+    ) -> ScanOutcome {
         let fut = unsafe {
             sys::ct_scan_async(
                 self.inner.as_ptr(),
@@ -1701,19 +1722,20 @@ impl AsyncCrowtree {
                 start_after.as_ptr(),
                 start_after.len(),
                 limit,
+                byte_budget,
             )
         };
         let mut guard = FutureGuard(fut);
         if let Some(result) = try_poll_ct_future(&mut guard, FutureKind::Scan) {
             return ScanOutcome::Ready(result.and_then(|out| {
-                let entries = decode_scan(&out.value, out.slot as usize)?;
+                let entries = decode_scan(out.value, out.slot as usize)?;
                 Ok((entries, out.found))
             }));
         }
         let tree = self.inner.clone();
         ScanOutcome::Pending(Box::pin(async move {
             let out = drive_ct_future(guard, &tree, FutureKind::Scan).await?;
-            let entries = decode_scan(&out.value, out.slot as usize)?;
+            let entries = decode_scan(out.value, out.slot as usize)?;
             Ok((entries, out.found))
         }))
     }

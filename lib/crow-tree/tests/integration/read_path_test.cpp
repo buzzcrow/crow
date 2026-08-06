@@ -121,7 +121,7 @@ TEST(ReadPath, L0OverridesL1)
     // scan reflects L0 too.
     std::vector<scan_entry> out;
     bool                    trunc;
-    ASSERT_TRUE(t.scan(Slice(""), Slice(), 0, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), 0, 0, &out, &trunc).ok());
     ASSERT_EQ(out.size(), 1U);
     EXPECT_EQ(out[0].value, "A2");
 }
@@ -137,7 +137,7 @@ TEST(ReadPath, L0TombstoneHidesL1)
     EXPECT_FALSE(t.get(Slice("a"), &s, &v));
     std::vector<scan_entry> out;
     bool                    trunc;
-    ASSERT_TRUE(t.scan(Slice(""), Slice(), 0, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), 0, 0, &out, &trunc).ok());
     EXPECT_TRUE(out.empty()); // tombstone excluded
 }
 
@@ -158,7 +158,7 @@ TEST(ReadPath, ScanOrderLimitTruncatedAcrossLeaves)
     // Full scan: sorted, complete.
     std::vector<scan_entry> out;
     bool                    trunc;
-    ASSERT_TRUE(t.scan(Slice(""), Slice(), 0, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), 0, 0, &out, &trunc).ok());
     ASSERT_EQ(out.size(), static_cast<size_t>(N));
     EXPECT_FALSE(trunc);
     for (int i = 0; i < N; ++i) {
@@ -166,7 +166,7 @@ TEST(ReadPath, ScanOrderLimitTruncatedAcrossLeaves)
     }
 
     // Limited scan: truncated.
-    ASSERT_TRUE(t.scan(Slice(""), Slice(), 10, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), 10, 0, &out, &trunc).ok());
     EXPECT_EQ(out.size(), 10U);
     EXPECT_TRUE(trunc);
     EXPECT_EQ(out[0].key, make_key(0));
@@ -182,10 +182,97 @@ TEST(ReadPath, ScanPrefix)
     ASSERT_TRUE(t.flush().ok());
     std::vector<scan_entry> out;
     bool                    trunc;
-    ASSERT_TRUE(t.scan(Slice("ap"), Slice(), 0, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice("ap"), Slice(), 0, 0, &out, &trunc).ok());
     ASSERT_EQ(out.size(), 2U);
     EXPECT_EQ(out[0].key, "apple");
     EXPECT_EQ(out[1].key, "apricot");
+}
+
+// start_after cursor: a sync scan with a non-empty start_after returns
+// only keys strictly greater than the cursor, in order, up to the
+// limit. The descent lands on the leaf containing the cursor instead
+// of the first prefix leaf, so earlier entries are never visited (the
+// deep-pagination pushdown §1.7 claims). Mirrors the async twin
+// AsyncScan.StartAfterCursorSkipsEarlierEntries.
+TEST(ReadPath, ScanStartAfterCursorSkipsEarlierEntries)
+{
+    Options opt;
+    opt.max_delta_len    = 1;
+    opt.leaf_split_bytes = 120; // force multiple leaves
+    Crowtree  t(opt);
+    const int N = 30;
+    for (int i = 0; i < N; ++i) {
+        ASSERT_TRUE(t.apply(i + 1, put_one(make_key(i), "v" + std::to_string(i))).ok());
+        ASSERT_TRUE(t.flush().ok());
+    }
+    ASSERT_GT(t.leaf_count(), 1U);
+
+    // Cursor at key0009: only key0010..key0029 should come back (20 keys).
+    std::string             cursor = make_key(9);
+    std::vector<scan_entry> out;
+    bool                    trunc;
+    ASSERT_TRUE(t.scan(Slice(""), Slice(cursor), 0, 0, &out, &trunc).ok());
+    EXPECT_FALSE(trunc);
+    ASSERT_EQ(out.size(), 20U);
+    for (const auto &e : out) {
+        EXPECT_GT(e.key, cursor);
+    }
+    EXPECT_EQ(out[0].key, make_key(10));
+    EXPECT_EQ(out[19].key, make_key(29));
+
+    // Cursor + limit: a page of 5 starting after key0009.
+    ASSERT_TRUE(t.scan(Slice(""), Slice(cursor), 5, 0, &out, &trunc).ok());
+    ASSERT_EQ(out.size(), 5U);
+    EXPECT_TRUE(trunc) << "20 keys after cursor, limit=5 should truncate";
+    EXPECT_EQ(out[0].key, make_key(10));
+    EXPECT_EQ(out[4].key, make_key(14));
+
+    // Cursor near the end: deep pagination returns only the tail.
+    std::string tail_cursor = make_key(N - 11); // key0019 -> key0020..key0029 (10 keys)
+    ASSERT_TRUE(t.scan(Slice(""), Slice(tail_cursor), 0, 0, &out, &trunc).ok());
+    EXPECT_FALSE(trunc);
+    ASSERT_EQ(out.size(), 10U);
+    EXPECT_EQ(out[0].key, make_key(20));
+    EXPECT_EQ(out[9].key, make_key(29));
+}
+
+// byte_budget: the scan stops when accumulated key+value bytes exceed the
+// budget, setting truncated. Always returns at least one entry even if it
+// alone exceeds the budget (so the client makes progress). A single entry
+// larger than the budget is returned with truncated set if more remain.
+TEST(ReadPath, ScanByteBudgetStopsAndTruncates)
+{
+    Crowtree t;
+    // 5 entries: key=3B ("k00".."k04"), value=10B ("vvvvvvvvv0".."vvvvvvvvv4")
+    // = 13B per entry. Budget=30B allows 2 entries (26B) before the 3rd
+    // (39B) exceeds the budget.
+    for (int i = 0; i < 5; ++i) {
+        std::string key = "k0" + std::to_string(i);
+        std::string val = "vvvvvvvvv" + std::to_string(i);
+        ASSERT_TRUE(t.apply(i + 1, put_one(key, val)).ok());
+    }
+    ASSERT_TRUE(t.flush().ok());
+
+    std::vector<scan_entry> out;
+    bool                    trunc;
+    // Budget=30: 2 entries (26B) fit, 3rd would be 39B > 30.
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), 0, 30, &out, &trunc).ok());
+    ASSERT_EQ(out.size(), 2U);
+    EXPECT_TRUE(trunc);
+    EXPECT_EQ(out[0].key, "k00");
+    EXPECT_EQ(out[1].key, "k01");
+
+    // Budget=0 (unlimited): all 5 entries, no truncation.
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), 0, 0, &out, &trunc).ok());
+    ASSERT_EQ(out.size(), 5U);
+    EXPECT_FALSE(trunc);
+
+    // Budget smaller than a single entry: always return >= 1 entry.
+    // Entry "k00" = 3 + 10 = 13B; budget=5 < 13.
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), 0, 5, &out, &trunc).ok());
+    ASSERT_EQ(out.size(), 1U);
+    EXPECT_TRUE(trunc); // more entries remain
+    EXPECT_EQ(out[0].key, "k00");
 }
 
 TEST(ReadPath, multi_get)
@@ -218,7 +305,7 @@ TEST(ReadPath, IterAllIncludesTombstones)
     // scan (live) excludes it.
     std::vector<scan_entry> out;
     bool                    trunc;
-    ASSERT_TRUE(t.scan(Slice(""), Slice(), 0, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), 0, 0, &out, &trunc).ok());
     ASSERT_EQ(out.size(), 1U);
     EXPECT_EQ(out[0].key, "b");
 }

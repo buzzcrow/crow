@@ -77,11 +77,12 @@ struct get_result
 // Zero-copy point-read result (plan-tree #5 B3 remaining). `value()` is a
 // borrowed `Slice` for an L1 hit resolved to a non-overflow cell -- it
 // points directly into the resident leaf's frame, kept alive for this
-// object's lifetime by the epoch guard it owns (no copy). An L0 hit (the
-// MemTable cell isn't epoch-protected the same way -- see the active_/
-// frozen_ member comment) or an overflow value (assembled from multiple
-// pages, no single frame to borrow) is materialized into an owned `buffer`
-// instead; `value()` is transparent to the caller either way.
+// object's lifetime by the epoch guard it owns (no copy). An L0 hit (R50:
+// the MemTable's skip-list node is epoch-protected the same way an L1 frame
+// is) also borrows directly off the node's cell version. An overflow value
+// (assembled from multiple pages, no single frame to borrow) is materialized
+// into an owned `buffer` instead; `value()` is transparent to the caller
+// either way.
 //
 // Move-only (like `EpochManager::Guard`): copying would either double-free
 // the guard or silently let a caller outlive it. `get()`/`multi_get()` are
@@ -235,6 +236,39 @@ struct EngineStats
     uint64_t l1_get_hit_total    = 0; // L1 lookups that found a cell
     uint64_t map_lookup_total    = 0; // mapping table lookups
     uint64_t demand_load_total   = 0; // demand-load page faults
+};
+
+// Per-step scan profile: each step's aggregate over the window since the last
+// scan_profile() call (the underlying LatencySummary handles are flushed, so
+// this is a destructive read -- the window resets on each call). `count` is the
+// number of scans in the window; `entries` is the total entries returned. Each
+// step's `sum_ns` / `max_ns` cover only that step; `avg_ns` is sum_ns / count.
+// Steps: l0_snapshot (MemTable::snapshot copy), l0_skip (upper_bound pass),
+// l1_descent (find_leaf_page_id), l1_resolve (per-leaf LeafChainCursor setup +
+// cursor seek, summed across all leaves touched), merge (min-key select +
+// winner + per-entry cursor step + consider/decode, excluding l1_resolve),
+// total (whole scan). The per-entry leaf work is lazy, so it is
+// counted under merge -- timing each cursor step would cost more than the step
+// itself; l1_resolve is now per-leaf setup only and scales with leaves
+// touched, not entries per leaf.
+struct ScanProfile
+{
+    uint64_t count   = 0; // scans in the window
+    uint64_t entries = 0; // total entries returned
+
+    struct Step
+    {
+        uint64_t sum_ns = 0;
+        uint64_t max_ns = 0;
+        uint64_t avg_ns = 0; // sum_ns / count (filled by scan_profile)
+    };
+
+    Step l0_snapshot;
+    Step l0_skip;
+    Step l1_descent;
+    Step l1_resolve;
+    Step merge;
+    Step total;
 };
 
 // One durable blob to write at a fixed offset, computed ahead of time by
@@ -541,9 +575,13 @@ class Crowtree
     // greater than `start_after` are returned. When non-empty, the descent
     // targets the leaf that would contain `start_after` instead of `prefix`,
     // so a deep-pagination scan starts at the cursor rather than walking every
-    // earlier leaf in the prefix range.
-    Status scan(Slice prefix, Slice start_after, size_t limit, std::vector<scan_entry> *out, bool *truncated,
-                bool include_tombstones = false) const;
+    // earlier leaf in the prefix range. `byte_budget` (0 = unlimited) caps the
+    // total key+value bytes emitted; the scan stops with *truncated = true when
+    // exceeded, always returning at least one entry (so a single oversized
+    // entry still makes progress). A warning is logged for any single entry
+    // whose key+value size alone exceeds the budget.
+    Status scan(Slice prefix, Slice start_after, size_t limit, size_t byte_budget, std::vector<scan_entry> *out,
+                bool *truncated, bool include_tombstones = false) const;
 
     // Async twin of scan(). Unlike get_async,
     // which has exactly one possible miss point (the root->leaf descent for
@@ -558,8 +596,9 @@ class Crowtree
     // on_done fires exactly once, synchronously if the whole scan was
     // already resident (matching scan()'s cost exactly), or from the
     // Reactor thread after however many page loads were needed. `start_after`
-    // is the same exclusive lower bound as scan()'s.
-    void scan_async(Slice prefix, Slice start_after, size_t limit,
+    // is the same exclusive lower bound as scan()'s. `byte_budget` is the
+    // same total key+value byte cap as scan()'s.
+    void scan_async(Slice prefix, Slice start_after, size_t limit, size_t byte_budget,
                     std::function<void(Status, std::vector<scan_entry>, bool truncated)> on_done) const;
 
     // pin a consistent point-in-time view at `last_applied_slot` (the durable L1
@@ -689,6 +728,11 @@ class Crowtree
     // O(1)), so this is safe to poll periodically (e.g. from a metrics
     // scrape or console panel refresh).
     [[nodiscard]] EngineStats stats() const;
+
+    // Destructive read of the per-step scan profile since the last call: flushes
+    // the scan LatencySummary/Counter handles and returns per-step sum/max/avg.
+    // Returns an all-zero profile if init_metrics() was never called.
+    [[nodiscard]] ScanProfile scan_profile() const;
 
     // Create the internal MetricsRegistry and register all handles
     // using the provided name prefix (e.g. "s.1.g.0"). Called from open().
@@ -950,17 +994,25 @@ class Crowtree
     // and reports it via *out_pending_page_id. Returns true if the scan
     // fully resolved with no cold page encountered (*out/*truncated are
     // then exactly what scan() itself would have produced).
-    [[nodiscard]] bool try_scan_no_load(Slice prefix, Slice start_after, size_t limit, std::vector<scan_entry> *out,
-                                        bool *truncated, uint64_t *out_pending_page_id) const;
+    [[nodiscard]] bool try_scan_no_load(Slice prefix, Slice start_after, size_t limit, size_t byte_budget,
+                                        std::vector<scan_entry> *out, bool *truncated,
+                                        uint64_t *out_pending_page_id) const;
 
     // scan_async's retry loop, structurally identical to get_async_attempt:
     // one try_scan_no_load() attempt, then either calls on_done (resolved)
     // or resolves the one blocking page_id (via the reactor, or
     // synchronously if no async backend is wired) and recurses. `prefix`
     // and `start_after` are heap copies (unlike scan()'s Slice, must survive
-    // across an arbitrary number of async round trips).
-    void scan_async_attempt(std::shared_ptr<std::string> prefix_owned, std::shared_ptr<std::string> start_after_owned,
-                            size_t limit, std::function<void(Status, std::vector<scan_entry>, bool)> on_done) const;
+    // across an arbitrary number of async round trips). Entries resolved
+    // before the cold leaf are accumulated across retries and the last
+    // resolved key becomes the resume `start_after`, so a scan over N cold
+    // leaves performs O(N) leaf loads with no re-traversal of already-
+    // resolved leaves (was quadratic). `byte_budget` is the remaining total
+    // key+value byte cap (adjusted by entries already in `accumulated`).
+    void scan_async_attempt(std::shared_ptr<std::string>        prefix_owned,
+                            const std::shared_ptr<std::string> &start_after_owned, size_t limit, size_t byte_budget,
+                            std::shared_ptr<std::vector<scan_entry>>                   accumulated,
+                            std::function<void(Status, std::vector<scan_entry>, bool)> on_done) const;
 
     // Shared by snapshot() and snapshot_async() (persist.cpp,
     // #11 Phase 2, #14c/#14d): runs the segment scan / delta-fold /
@@ -1195,6 +1247,15 @@ class Crowtree
         Bandwidth      *snapshot_meta_write_bw      = nullptr; // metadata write bytes (seg+dir+anchor)
         Bandwidth      *page_read_bw                = nullptr; // demand-load read bytes
         Counter        *snapshot_pages_c            = nullptr; // cumulative pages written
+        // Scan per-step profile: counters + per-step LatencySummary.
+        Counter        *scan_c             = nullptr; // scan calls
+        Counter        *scan_entries_c     = nullptr; // entries returned
+        LatencySummary *scan_l             = nullptr; // total scan latency
+        LatencySummary *scan_l0_snapshot_l = nullptr;
+        LatencySummary *scan_l0_skip_l     = nullptr;
+        LatencySummary *scan_l1_descent_l  = nullptr;
+        LatencySummary *scan_l1_resolve_l  = nullptr;
+        LatencySummary *scan_merge_l       = nullptr;
     };
 
     MetricsHandles metrics_;

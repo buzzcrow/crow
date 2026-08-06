@@ -293,6 +293,7 @@ class buffer
 
     void free_if_owned()
     {
+        // NOLINTNEXTLINE(clang-analyzer-core.UndefinedBinaryOperatorResult)
         if (mode_ == mode::kOwned && !inline_active_ && heap_ != nullptr) {
             deallocate(heap_);
         }

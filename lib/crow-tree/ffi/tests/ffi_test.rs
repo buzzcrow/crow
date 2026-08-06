@@ -29,7 +29,7 @@ fn mem_apply_get_scan() {
     assert_eq!(t.get(&key(7)).unwrap(), None);
 
     // Scan all live entries.
-    let (entries, truncated) = t.scan(b"", b"", 0, false).unwrap();
+    let (entries, truncated) = t.scan(b"", b"", 0, 0, false).unwrap();
     assert!(!truncated);
     assert_eq!(entries.len(), 39); // 40 puts - 1 delete
     assert!(entries.windows(2).all(|w| w[0].key < w[1].key)); // key-sorted
@@ -366,7 +366,7 @@ async fn async_scan_fast_path_completes_on_first_poll() {
     }
     t.flush().await.unwrap();
 
-    let mut fut = Box::pin(t.scan(Vec::new(), Vec::new(), 0));
+    let mut fut = Box::pin(t.scan(Vec::new(), Vec::new(), 0, 0));
     let waker = Waker::noop();
     let mut cx = Context::from_waker(waker);
     match fut.as_mut().poll(&mut cx) {
@@ -401,11 +401,13 @@ async fn async_scan_slow_path_completes_after_eviction() {
     t.snapshot().await.unwrap();
     t.handle().evict_clean_leaves(0);
 
-    let (entries, truncated) = t.scan(Vec::new(), Vec::new(), 0).await.unwrap();
+    let (entries, truncated) = t.scan(Vec::new(), Vec::new(), 0, 0).await.unwrap();
     assert!(!truncated);
     assert_eq!(entries.len(), 20);
-    let mut got: std::collections::BTreeMap<Vec<u8>, Vec<u8>> =
-        entries.into_iter().map(|e| (e.key, e.value)).collect();
+    let mut got: std::collections::BTreeMap<Vec<u8>, Vec<u8>> = entries
+        .into_iter()
+        .map(|e| (e.key.to_vec(), e.value.to_vec()))
+        .collect();
     for i in 0..20usize {
         assert_eq!(got.remove(&key(i)), Some(format!("v{i}").into_bytes()));
     }
@@ -431,7 +433,7 @@ async fn async_scan_respects_limit_and_truncated_flag() {
     }
     t.flush().await.unwrap();
 
-    let (entries, truncated) = t.scan(Vec::new(), Vec::new(), 5).await.unwrap();
+    let (entries, truncated) = t.scan(Vec::new(), Vec::new(), 5, 0).await.unwrap();
     assert_eq!(entries.len(), 5);
     assert!(truncated);
 }

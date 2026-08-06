@@ -38,6 +38,11 @@ fn scan_is_ordered_prefix_filtered_and_truncates() {
 }
 
 #[test]
+fn scan_byte_budget_stops_and_truncates() {
+    conformance::scan_byte_budget_stops_and_truncates(&InMemKV::new());
+}
+
+#[test]
 fn compare_is_empty_for_identical_state_and_detects_divergence() {
     conformance::compare_is_empty_for_identical_state_and_detects_divergence(
         &InMemKV::new(),
@@ -60,7 +65,7 @@ fn get_scan_apply_always_resolve_ready() {
         KVFuture::Ready(_)
     ));
     assert!(matches!(e.get(b"k"), KVFuture::Ready(_)));
-    assert!(matches!(e.scan(b"", b"", 0), KVFuture::Ready(_)));
+    assert!(matches!(e.scan(b"", b"", 0, 0), KVFuture::Ready(_)));
 }
 
 #[test]

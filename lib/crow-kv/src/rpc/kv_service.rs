@@ -87,6 +87,8 @@ struct KvMetrics {
     get_min_slot_lh: Arc<LatencyHistogram>,
     delete_c: Arc<Counter>,
     scan_l: Arc<LatencySummary>,
+    scan_linearizable_l: Arc<LatencySummary>,
+    scan_min_slot_l: Arc<LatencySummary>,
     bytes_in_bw: Arc<Bandwidth>,
     bytes_out_bw: Arc<Bandwidth>,
     errors_c: Arc<Counter>,
@@ -95,6 +97,8 @@ struct KvMetrics {
     read_bytes_out_bw: Arc<Bandwidth>,
     get_forwarded_c: Arc<Counter>,
     get_forward_failed_c: Arc<Counter>,
+    scan_forwarded_c: Arc<Counter>,
+    scan_forward_failed_c: Arc<Counter>,
 }
 
 impl KvMetrics {
@@ -107,6 +111,8 @@ impl KvMetrics {
             get_min_slot_lh: registry.register_histogram(format!("{prefix}.kv.get.min_slot.lh")),
             delete_c: registry.register_counter(format!("{prefix}.kv.delete.c")),
             scan_l: registry.register_summary(format!("{prefix}.kv.scan.l")),
+            scan_linearizable_l: registry.register_summary(format!("{prefix}.kv.scan.linearizable.l")),
+            scan_min_slot_l: registry.register_summary(format!("{prefix}.kv.scan.min_slot.l")),
             bytes_in_bw: registry.register_bandwidth(format!("{prefix}.kv.bytes_in.bw")),
             bytes_out_bw: registry.register_bandwidth(format!("{prefix}.kv.bytes_out.bw")),
             errors_c: registry.register_counter(format!("{prefix}.kv.errors.c")),
@@ -115,6 +121,8 @@ impl KvMetrics {
             read_bytes_out_bw: registry.register_bandwidth(format!("{prefix}.kv.read_bytes_out.bw")),
             get_forwarded_c: registry.register_counter(format!("{prefix}.kv.get_forwarded.c")),
             get_forward_failed_c: registry.register_counter(format!("{prefix}.kv.get_forward_failed.c")),
+            scan_forwarded_c: registry.register_counter(format!("{prefix}.kv.scan_forwarded.c")),
+            scan_forward_failed_c: registry.register_counter(format!("{prefix}.kv.scan_forward_failed.c")),
         }
     }
 
@@ -139,10 +147,23 @@ impl KvMetrics {
         }
     }
 
-    /// Record scan latency, bandwidth (combined + read-separated), and
-    /// error counters for one scan response.
-    fn record_scan(&self, elapsed_ns: u64, req_size: u64, resp_size: u64, resp: &KvScanResponse) {
+    /// Record scan latency into the combined and per-mode summaries,
+    /// bandwidth (combined + read-separated), and error counters for one
+    /// scan response. Mirrors the get per-mode split.
+    fn record_scan(
+        &self,
+        elapsed_ns: u64,
+        req_size: u64,
+        resp_size: u64,
+        read_mode: i32,
+        resp: &KvScanResponse,
+    ) {
         self.scan_l.observe(elapsed_ns);
+        if read_mode == crate::rpc::ReadMode::Linearizable as i32 {
+            self.scan_linearizable_l.observe(elapsed_ns);
+        } else {
+            self.scan_min_slot_l.observe(elapsed_ns);
+        }
         self.bytes_in_bw.observe(req_size);
         self.bytes_out_bw.observe(resp_size);
         self.read_bytes_in_bw.observe(req_size);
@@ -400,6 +421,7 @@ impl KvService for KvStoreService {
         Ok(Response::new(resp))
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn scan(&self, request: Request<KvScanRequest>) -> Result<Response<KvScanResponse>, Status> {
         let already_forwarded = request.metadata().get(FORWARD_HEADER).is_some();
         let req = request.into_inner();
@@ -436,8 +458,10 @@ impl KvService for KvStoreService {
                                 start.elapsed().as_nanos() as u64,
                                 req_size as u64,
                                 resp_size,
+                                req.read_mode,
                                 &resp,
                             );
+                            m.scan_forwarded_c.inc();
                         }
                         resp.request_id = req.request_id;
                         resp.request_create_ms = req.request_create_ms;
@@ -450,12 +474,40 @@ impl KvService for KvStoreService {
                             request_id = req.request_id,
                             leader = %endpoint,
                             error = %status,
-                            "kv scan forward failed; next step: serving stale local scan"
+                            "kv scan forward failed; next step: serving stale local scan with leader hint"
                         );
-                        // Fall through to local scan. The caller observes
-                        // the routing decision only if the local scan
-                        // also returns NotLeader (via not_leader_hint);
-                        // otherwise this is a best-effort degraded read.
+                        // Mirror the get handler: serve a stale local scan
+                        // but propagate the known-good leader endpoint in
+                        // not_leader_hint so the client can redirect on the
+                        // next attempt, instead of silently dropping it.
+                        let mut resp = self
+                            .store
+                            .kv_scan(
+                                req.group_id,
+                                &req.prefix,
+                                &req.start_after,
+                                req.limit,
+                                req.read_mode,
+                                req.min_slot,
+                                req.request_id,
+                                req.request_create_ms,
+                            )
+                            .await;
+                        if let Some(m) = self.metrics_for(req.group_id) {
+                            let resp_size = scan_response_size(&resp);
+                            m.record_scan(
+                                start.elapsed().as_nanos() as u64,
+                                req_size as u64,
+                                resp_size,
+                                req.read_mode,
+                                &resp,
+                            );
+                            m.scan_forward_failed_c.inc();
+                        }
+                        resp.not_leader_hint = endpoint;
+                        resp.request_id = req.request_id;
+                        resp.request_create_ms = req.request_create_ms;
+                        return Ok(Response::new(resp));
                     }
                 }
             }
@@ -480,6 +532,7 @@ impl KvService for KvStoreService {
                 start.elapsed().as_nanos() as u64,
                 req_size as u64,
                 resp_size,
+                req.read_mode,
                 &resp,
             );
         }

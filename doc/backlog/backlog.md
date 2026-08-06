@@ -11,7 +11,7 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R46** — Bump this line in the same commit when adding a new item.
+**Next R number: R53** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
@@ -41,35 +41,20 @@ complexity, and dependency. Before implementation, follow the
   `crow-tree` / `crow::tree` / `CROW_TREE_*`. Establishes the `crow-kv` →
   `crow-tree` dependency boundary analogous to `crow-kv` → `crow-common`.
   Most naturally done after R12.
-- **[R38](R38-scan-value-zero-copy.md)** — Scan value zero-copy (mirror R6 for scan) — Area:
-  read path / scan — The get path is zero-copy after R6
-  (`PinnedValue::into_bytes` via `Bytes::from_owner`); scan still copies
-  per-entry values out of the packed result buffer into owned `Vec<u8>`.
-  A `PinnedScanEntry` / `Bytes::from_owner` path for scan values would
-  eliminate the per-entry copy, mirroring R6. Medium-high complexity;
-  the `KVEngine::scan` trait signature changes from `Vec<u8>` to `Bytes`.
-- **[R39](R39-kv-read-endpoint-policy.md)** — Least-conn / latency read-endpoint policy — Area:
-  read path / client — R26's `AnyReplica` is round-robin (blind
-  rotation); a slow replica drags p99 for 1/N of MinSlot reads. New
-  `LeastConnections` (per-endpoint in-flight) and `Latency` (per-endpoint
-  RTT EWMA) policies route by actual capacity. Medium complexity;
-  client-local state, no server change.
-- **[R44](R44-kv-read-path-hardening.md)** — Read-path hardening — Area:
-  read path — Eight enhancements from the read-flow review, all small
-  and outside the items already tracked (R37/R38/R39/R32/R42): scan
-  forward-fail path drops the leader hint (get sets it, scan doesn't);
-  `decode_scan_with_start_after` swallows FFI errors (corruption reads
-  as empty `ok` result); client retry matches `"not leader"` by string
-  instead of a structured error code; client ignores topology refresh
-  failures and retries against stale endpoints; ReadIndex heartbeat
-  round runs peer catch-up replay inline (lagging follower inflates
-  linearizable read p99 during recovery); C++ `scan_async` restarts
-  the whole scan on any cold leaf (no cursor resume); client copies
-  response values (`to_vec` per get / per scan entry) despite prost
-  `Bytes`; no per-mode scan latency split or over-fetch counters.
-  Low-medium complexity; kv_service / crowtree_engine / client are
-  mechanical, bounded catch-up needs care, scan cursor composes with
-  R37.
+- **[R50](R50-epoch-protected-memtable.md)** — Epoch-protected
+  lock-free MemTable — Area: scan / get / crow-tree engine —
+  **Done.** `MemTable::snapshot()` deep-copied every live L0 entry
+  (key + full cell payload) on every scan regardless of range or
+  `limit`, and an L0 `get` hit copied twice. Root cause: L0 was the
+  only reader-visible structure outside the engine's EBR scheme.
+  Replaced the `absl::btree_map` under `mu_` with a
+  `ConcurrentSkipList` (inline keys, versioned cell pointers,
+  epoch-deferred reclamation). Readers now traverse L0 lock-free
+  under their existing epoch guard with zero copy; the cursor seeks
+  directly (no `upper_bound` skip pass); `get_view` borrows the
+  cell directly off the node. Closes the known gap at
+  `crow-tree.h:81`. All 383 `test-tree-ct` tests pass.
+
 ### Low Priority
 
 **Complexity — Low (placeholder):**
@@ -81,16 +66,19 @@ complexity, and dependency. Before implementation, follow the
 - **[R4](R4-bounded-mempool.md)** — Bounded memory pool — Area: crowtree engine — `buffer::allocate` uses
   unbounded `std::malloc`; a burst of large writes can spike RSS without
   backpressure.
-
-**Complexity — Low:**
-- **[R42](R42-kv-forward-target-redundant-lookup.md)** — Drop redundant
-  group lookup in read-path `NotLeader` redirect — Area: read path —
-  `PxKvStore::resolve_read_point`'s three `NotLeader` sites call
-  `self.forward_target_for(group.group_id())`, which re-derives the same
-  `Arc<PxGroup>` via a `DashMap` lookup + clone even though the function
-  already holds `group: &Arc<PxGroup>`. Fires on every linearizable
-  non-leader redirect and every `MinSlot` staleness fallback. Replace
-  with `group.leader_endpoint()` directly; no behavior change.
+- **[R52](R52-reverse-scan.md)** — Reverse scan — Area: scan / crow-tree
+  engine — `scan` is forward-only today (ascending key order). Reverse
+  scan (descending order, `start_before` instead of `start_after`) is a
+  distinct cost shape: the B+tree descent targets the leaf containing
+  `start_before`, the merge loop walks cursors backward, and the
+  `LeafChainCursor` needs a reverse seek/advance. The skip-list L0
+  cursor (R50) is forward-only — a reverse cursor would need
+  `prev()` links or a separate reverse traversal path. Client API:
+  `KvScanRequest` gains a `direction` field; the S3-style pagination
+  uses the first key of each page as the next `start_before`. Needs
+  its own scan perf baseline (reverse scans have different cache
+  behavior — backward leaf traversal touches pages in reverse
+  allocation order).
 
 ---
 
