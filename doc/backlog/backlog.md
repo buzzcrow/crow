@@ -41,12 +41,6 @@ complexity, and dependency. Before implementation, follow the
   `crow-tree` / `crow::tree` / `CROW_TREE_*`. Establishes the `crow-kv` →
   `crow-tree` dependency boundary analogous to `crow-kv` → `crow-common`.
   Most naturally done after R12.
-- **[R39](R39-kv-read-endpoint-policy.md)** — Least-conn / latency read-endpoint policy — Area:
-  read path / client — R26's `AnyReplica` is round-robin (blind
-  rotation); a slow replica drags p99 for 1/N of MinSlot reads. New
-  `LeastConnections` (per-endpoint in-flight) and `Latency` (per-endpoint
-  RTT EWMA) policies route by actual capacity. Medium complexity;
-  client-local state, no server change.
 - **[R48](R48-scan-lazy-l0-cursor.md)** — Lazy limit-bounded L1 leaf
   resolver — Area: scan / crow-tree engine —
   `resolve_chain_sorted` (`crow-tree.cpp:65`) rebuilds each touched

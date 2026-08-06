@@ -291,6 +291,22 @@ Full design: `design-crow-kv-reconfiguration.md`, `design-crow-kv-server.md`.
     same selector; the scan fallback parses the server's
     `"not leader; retry scan at {endpoint}"` error string (no protocol
     field today).
+  - `LeastConnections` — routes to the replica with the fewest
+    in-flight reads (tracked client-side via per-endpoint atomic
+    counters, incremented on send and decremented on response via an
+    RAII guard). Ties and the first request (no history) fall back to
+    round-robin. Same `NotLeader` fallback as `AnyReplica`.
+  - `Latency` — routes to the replica with the lowest recent RTT
+    (per-endpoint EWMA, `alpha = 0.25`; first sample initializes). Ties
+    and the first request (no RTT history) fall back to round-robin.
+    Same `NotLeader` fallback as `AnyReplica`.
+  - All distributed policies (`AnyReplica`, `LeastConnections`,
+    `Latency`) increment `read_endpoint_distributed` on selection and
+    `read_endpoint_fallback` on `NotLeader` redirect. Per-endpoint
+    statistics live in a `DashMap<String, Arc<EndpointStats>>` keyed by
+    endpoint string; entries are created lazily and never evicted
+    (stale entries are harmless — zero in-flight, zero RTT, never
+    selected).
 - **Retry** — on timeout or `NotLeader`, client retries with backoff.
   `NotLeader` with hint → follow hint immediately.
 - **Idempotency** — `(client_id, seq)` dedup, persisted into the
