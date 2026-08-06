@@ -122,7 +122,47 @@ MinSlot shows a clear advantage:
   p99 is 44% better (2028us vs 3600us) — load distribution keeps tail
   latency low even when throughput is capped by the engine.
 
-### Improvement summary (pre-R48 → post-R48+R50)
+### Linux results — 2026-08-06
+
+**Platform**: AMD Ryzen 9 5950X, 16c/32t, x86_64, Ubuntu 24.04.
+**Setup**: 10s mem mode, 3-node cluster, 100k pre-populated keys.
+Raw TSV: `doc/working/bench-scan-regression.tsv` (gitignored).
+
+#### Single-thread (1T:1C)
+
+| Label | Limit | Start_after | Val B | Mode | Linux scans/s | macOS scans/s | Δ% | L/M | Linux p99 us | macOS p99 us | err |
+|-------|------:|-------------|------:|------|--------:|--------:|---:|----:|-------:|-------:|----:|
+| bounded_10 | 10 | | 64 | lin | 5367 | 19558 | -73% | 0.27 | 261 | 79 | 0 |
+| bounded_1k | 1000 | | 64 | lin | 1475 | 4339 | -66% | 0.34 | 1054 | 258 | 0 |
+| bounded_10k | 10000 | | 64 | lin | 110 | 518 | -79% | 0.21 | 10464 | 2060 | 0 |
+| full_100k | 100000 | | 64 | lin | 13 | 50 | -74% | 0.26 | 115968 | 20848 | 0 |
+| deep_pag_10 | 10 | k...99989 | 64 | lin | 5704 | 20681 | -72% | 0.28 | 249 | 66 | 0 |
+| mixed_1k | 1000 | | mixed | lin | 265 | 991 | -73% | 0.27 | 5788 | 1222 | 0 |
+| minslot_1k | 1000 | | 64 | minslot | 993 | 4293 | -77% | 0.23 | 1376 | 262 | 0 |
+
+#### Multi-thread
+
+| Label | Limit | Val B | Mode | T:C | Linux scans/s | macOS scans/s | Δ% | L/M | Linux p99 us | macOS p99 us | err |
+|-------|------:|------:|------|-----|--------:|--------:|---:|----:|-------:|-------:|----:|
+| lin_4t | 1000 | 64 | lin | 4:4 | 5967 | 14264 | -58% | 0.42 | 1247 | 473 | 0 |
+| minslot_4t | 1000 | 64 | minslot | 4:4 | 5573 | 14810 | -62% | 0.38 | 1393 | 385 | 0 |
+| lin_16t | 1000 | 64 | lin | 16:16 | 18283 | 30799 | -41% | 0.59 | 1515 | 822 | 0 |
+| minslot_16t | 1000 | 64 | minslot | 16:16 | 16417 | 33015 | -50% | 0.50 | 1748 | 791 | 0 |
+| lin_32t | 1000 | 64 | lin | 32:32 | 23133 | 37840 | -39% | 0.61 | 3732 | 3600 | 0 |
+| minslot_32t | 1000 | 64 | minslot | 32:32 | 23164 | 38256 | -39% | 0.61 | 2746 | 2028 | 0 |
+
+Linux is ~3.6x slower than macOS on single-thread bounded scans
+(5367 vs 19558 for `bounded_10`), consistent with the x86_64 build
+running under a slower single-core memory subsystem. Multi-thread
+scaling is also lower: 16T reaches 18283 scans/s (vs 30799 on macOS),
+and MinSlot does **not** show the throughput advantage seen on macOS —
+linearizable is actually faster at 4T and 16T. At 32T both modes
+saturate at ~23k scans/s with near-identical throughput, though
+MinSlot's p99 is still 26% better (2746 vs 3732 us). The MinSlot
+advantage appears platform-dependent and may relate to the different
+cache hierarchy and inter-core latency of x86_64 vs arm64.
+
+### Improvement summary (pre-R48 → post-R48+R50, macOS)
 
 | Config | Before scans/s | After scans/s | Improvement |
 |--------|---------------:|--------------:|------------:|

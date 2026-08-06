@@ -129,6 +129,6 @@ async fn linearizable_read_fast_path_when_apply_done() {
 
     let get = store.kv_get(1, b"fast-key", 0, 0, 2, 2).await;
     assert!(get.ok);
-    assert!(get.value.as_ref() == b"fast-val");
+    assert_eq!(get.value.as_ref(), b"fast-val");
     assert_eq!(get.read_slot, slot);
 }

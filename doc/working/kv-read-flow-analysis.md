@@ -151,6 +151,84 @@ entirely and remains optimal for max throughput.
 Zero correctness errors across both modes. Verify overhead is negligible
 (<1% throughput impact vs non-verify 16T runs).
 
+### Linux results — 2026-08-06
+
+**Platform**: AMD Ryzen 9 5950X, 16c/32t, x86_64, Ubuntu 24.04.
+**Setup**: 10s mem mode, 3-node cluster, 100k pre-populated keys, 64B
+values. Raw TSV: `doc/working/bench-read-regression.tsv` (gitignored).
+
+#### Single-thread (1T:1C)
+
+| Label | Mode | Linux ops/s | macOS ops/s | Δ% | Linux p99 us | macOS p99 us | err |
+|-------|------|------:|------:|---:|-------:|-------:|----:|
+| lin_1t | lin | 6608 | 20441 | -68% | 219 | 75 | 0 |
+| minslot_1t | minslot | 6160 | 20478 | -70% | 222 | 73 | 0 |
+
+Linux single-thread is ~3x slower (6608 vs 20441) — same gap as scan,
+dominated by gRPC RTT and engine get cost on x86_64.
+
+#### Multi-thread
+
+| Label | Mode | T:C | Linux ops/s | macOS ops/s | Δ% | Linux p99 us | macOS p99 us | err |
+|-------|------|-----|------:|------:|---:|-------:|-------:|----:|
+| lin_6t | lin | 6:6 | 50851 | 68560 | -26% | 194 | 173 | 0 |
+| minslot_6t | minslot | 6:6 | 52252 | 75158 | -30% | 168 | 150 | 0 |
+| lin_16t | lin | 16:16 | 105313 | 105613 | -0% | 255 | 254 | 0 |
+| minslot_16t | minslot | 16:16 | 101871 | 106727 | -5% | 268 | 240 | 0 |
+| lin_32t | lin | 32:32 | 144262 | 118390 | +22% | 498 | 428 | 0 |
+| minslot_32t | minslot | 32:32 | 138610 | 112621 | +23% | 532 | 440 | 0 |
+| lin_64t | lin | 64:32 | 168849 | — | — | 1009 | — | 0 |
+| minslot_64t | minslot | 64:32 | 165317 | — | — | 1132 | — | 0 |
+| lin_128t | lin | 128:32 | 205406 | — | — | 1760 | — | 0 |
+| minslot_128t | minslot | 128:32 | 189030 | — | — | 2290 | — | 0 |
+| lin_256t | lin | 256:32 | 231983 | — | — | 2658 | — | 0 |
+| minslot_256t | minslot | 256:32 | 215334 | — | — | 4284 | — | 0 |
+
+Linux catches up at 16T (-0% to -5%) and **overtakes macOS at 32T**
+(+22% to +23%) — the 32-thread Ryzen scales better than the 18-core M5
+Pro at saturation. On macOS, MinSlot beats Linearizable at 6T (+9.6%)
+and 16T (+1.1%) — distributed read serving helps when the single leader
+is the bottleneck. On Linux this advantage **disappears**: MinSlot is
+marginally better only at 6T (+2.8%) and **slower** at 16T (-3.3%) and
+32T (-3.9%). The leader lease fast path is cheap enough on x86_64 that
+distributing reads across replicas doesn't compensate for the added
+MinSlot routing overhead (min_slot resolution, round-robin endpoint
+selection). MinSlot's benefit is platform-dependent — it helps when the
+leader read barrier is the bottleneck (macOS arm64), not when the engine
+itself is the limiter (Linux x86_64).
+
+Beyond 32T, Linearizable continues to scale and widen its lead:
+- **64T**: lin 168849 vs minslot 165317 (-2.1%)
+- **128T**: lin 205406 vs minslot 189030 (-8.0%)
+- **256T**: lin 231983 vs minslot 215334 (-7.2%)
+
+Linearizable scales 32T → 256T (144K → 232K, 1.6x) — the lease fast
+path has no per-read round-trip, so the leader absorbs more concurrent
+reads. MinSlot scales 32T → 256T (139K → 215K, 1.5x) but falls further
+behind because the 3 replicas saturate earlier (each handles ~72K at
+256T vs the leader's 232K). MinSlot's p99 also degrades faster at high
+thread counts (4284us vs 2658us at 256T) — round-robin distribution
+adds tail latency under heavy contention.
+
+#### HTTP/2 connection lock sentinel
+
+| Label | Mode | T:C | Linux ops/s | macOS ops/s | Δ% | Linux p99 us | macOS p99 us | err |
+|-------|------|-----|------:|------:|---:|-------:|-------:|----:|
+| minslot_6t_2to1 | minslot | 6:3 | 52228 | 73484 | -29% | 172 | 157 | 0 |
+
+6T:3C drops -0.04% vs 6T:6C on Linux (52228 vs 52252) — even less
+contention than macOS's -2.2%, consistent with the smaller MinSlot
+throughput advantage on Linux.
+
+#### Correctness verification (`--verify-bytes 8`)
+
+| Label | Mode | T:C | Linux ops/s | macOS ops/s | Δ% | Linux p99 us | macOS p99 us | err | corr |
+|-------|------|-----|------:|------:|---:|-------:|-------:|----:|-----:|
+| lin_16t_verify | lin | 16:16 | 105781 | 104917 | +1% | 252 | 256 | 0 | 0 |
+| minslot_16t_verify | minslot | 16:16 | 101552 | 104988 | -3% | 268 | 241 | 0 | 0 |
+
+Zero correctness errors on Linux. Verify overhead negligible (<1%).
+
 ---
 
 ## Existing Problems
