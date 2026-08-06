@@ -217,6 +217,7 @@ mod sys {
             start_after: *const u8,
             salen: usize,
             limit: usize,
+            byte_budget: usize,
             include_tombstones: c_int,
             out_entries: *mut ct_buf,
             out_count: *mut u64,
@@ -256,6 +257,7 @@ mod sys {
             start_after: *const u8,
             salen: usize,
             limit: usize,
+            byte_budget: usize,
         ) -> *mut ct_future;
         pub fn ct_future_poll(
             f: *mut ct_future,
@@ -1046,6 +1048,7 @@ impl Crowtree {
         prefix: &[u8],
         start_after: &[u8],
         limit: usize,
+        byte_budget: usize,
         include_tombstones: bool,
     ) -> Result<(Vec<ScanEntry>, bool), CtError> {
         let mut buf = sys::ct_buf {
@@ -1062,6 +1065,7 @@ impl Crowtree {
                 start_after.as_ptr(),
                 start_after.len(),
                 limit,
+                byte_budget,
                 if include_tombstones { 1 } else { 0 },
                 &mut buf,
                 &mut count,
@@ -1679,6 +1683,7 @@ impl AsyncCrowtree {
         prefix: Vec<u8>,
         start_after: Vec<u8>,
         limit: usize,
+        byte_budget: usize,
     ) -> Result<(Vec<ScanEntry>, bool), CtError> {
         let fut = unsafe {
             sys::ct_scan_async(
@@ -1688,6 +1693,7 @@ impl AsyncCrowtree {
                 start_after.as_ptr(),
                 start_after.len(),
                 limit,
+                byte_budget,
             )
         };
         let out = drive_ct_future(FutureGuard(fut), &self.inner, FutureKind::Scan).await?;
@@ -1701,7 +1707,13 @@ impl AsyncCrowtree {
     /// motivation as `try_get`'s doc comment: lets a caller with its own
     /// fast-path/slow-path return type mirror `ct_scan_async`'s own
     /// C++-layer split one layer up instead of forcing a box on every call.
-    pub fn try_scan(&self, prefix: Vec<u8>, start_after: Vec<u8>, limit: usize) -> ScanOutcome {
+    pub fn try_scan(
+        &self,
+        prefix: Vec<u8>,
+        start_after: Vec<u8>,
+        limit: usize,
+        byte_budget: usize,
+    ) -> ScanOutcome {
         let fut = unsafe {
             sys::ct_scan_async(
                 self.inner.as_ptr(),
@@ -1710,6 +1722,7 @@ impl AsyncCrowtree {
                 start_after.as_ptr(),
                 start_after.len(),
                 limit,
+                byte_budget,
             )
         };
         let mut guard = FutureGuard(fut);

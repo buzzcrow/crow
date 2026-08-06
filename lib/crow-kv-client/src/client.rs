@@ -750,7 +750,17 @@ impl CrowkvClient {
         }
     }
 
-    /// Prefix-scan a group's key space.
+    /// Prefix-scan a group's key space. Uses S3-style pagination
+    /// (`start_after` + `truncated`): the server applies a byte budget to
+    /// each unary response so every page is provably bounded regardless of
+    /// value sizes, and this method transparently pages until `!truncated`
+    /// or the caller's `limit` is reached. The returned `ScanOutcome.truncated`
+    /// flag means "more entries exist beyond the caller's `limit`".
+    ///
+    /// # Panics
+    /// Panics if the server returns a truncated page with zero items — an
+    /// impossible state (truncated implies items were returned but more
+    /// remain). The `page_len > 0` guard prevents this.
     ///
     /// # Errors
     /// See [`Error`].
@@ -769,12 +779,23 @@ impl CrowkvClient {
         let mut endpoint = self.resolve_read_endpoint(store_id, group_id, read_mode).await?;
         let mut attempts = 0u32;
         let mut backoff = self.retry.backoff_base;
+        // Inner pagination state: collect pages until !truncated or limit reached.
+        let mut all_items: Vec<(Bytes, Bytes)> = Vec::new();
+        let mut page_start_after: Vec<u8> = start_after.to_vec();
         loop {
+            // Remaining entry-count budget for this page. The server's byte
+            // budget may stop the page before this limit is reached; that's
+            // fine — `truncated` tells us to fetch the next page.
+            let remaining_limit = if limit == 0 {
+                0 // unlimited: let the server's byte budget page
+            } else {
+                limit.saturating_sub(u32::try_from(all_items.len()).unwrap_or(u32::MAX))
+            };
             let req = KvScanRequest {
                 version: 1,
                 prefix: Bytes::copy_from_slice(prefix),
-                start_after: Bytes::copy_from_slice(start_after),
-                limit,
+                start_after: Bytes::copy_from_slice(&page_start_after),
+                limit: remaining_limit,
                 request_id: next_request_id(),
                 request_create_ms: now_ms(),
                 group_id,
@@ -789,11 +810,36 @@ impl CrowkvClient {
                     self.record_endpoint_rtt(&endpoint, t0.elapsed().as_micros() as u64);
                     let resp = resp.into_inner();
                     if resp.ok {
-                        let items = resp.items.into_iter().map(|i| (i.key, i.value)).collect();
+                        let page_len = resp.items.len();
+                        let resp_truncated = resp.truncated;
+                        for item in resp.items {
+                            all_items.push((item.key, item.value));
+                        }
+                        // If the page was truncated (server hit byte budget or
+                        // entry limit) and we haven't reached the caller's
+                        // limit yet, fetch the next page using the last key as
+                        // the new start_after. A zero-item page with
+                        // truncated=true is a safety stop (avoid infinite loop).
+                        if resp_truncated && page_len > 0 && (limit == 0 || all_items.len() < limit as usize)
+                        {
+                            page_start_after = all_items.last().expect("non-empty page").0.to_vec();
+                            continue;
+                        }
                         self.metrics.record_scan_latency(t0.elapsed().as_micros() as u64);
+                        // `truncated` in the outcome means "more exist beyond
+                        // the caller's limit", not "this page was truncated".
+                        let outcome_truncated = if limit == 0 {
+                            resp_truncated
+                        } else {
+                            resp_truncated && all_items.len() >= limit as usize
+                        };
+                        // If the caller's limit was reached, truncate.
+                        if limit != 0 && all_items.len() > limit as usize {
+                            all_items.truncate(limit as usize);
+                        }
                         return Ok(ScanOutcome {
-                            items,
-                            truncated: resp.truncated,
+                            items: all_items,
+                            truncated: outcome_truncated,
                         });
                     }
                     self.metrics.record_scan_error();
@@ -801,7 +847,7 @@ impl CrowkvClient {
                     // mirroring the `get` path) so a `MinSlot` scan
                     // against a follower that hasn't applied `min_slot`
                     // falls back to the leader rather than being treated
-                    // as a plain error.
+                    // as a plain error. Reset pagination state on redirect.
                     if !resp.not_leader_hint.is_empty() {
                         if read_mode == ReadMode::MinSlot && self.read_endpoint_policy.is_distributed() {
                             self.metrics.record_read_endpoint_fallback();
@@ -809,6 +855,8 @@ impl CrowkvClient {
                         self.topology
                             .set_leader(store_id, group_id, resp.not_leader_hint.clone());
                         endpoint = resp.not_leader_hint;
+                        all_items.clear();
+                        page_start_after = start_after.to_vec();
                         continue;
                     }
                     attempts = self.count_other(attempts, &resp.error)?;
@@ -822,121 +870,10 @@ impl CrowkvClient {
                         .await;
                     self.metrics
                         .on_leader_resolved(store_id, group_id, &endpoint, "transport_error");
-                    attempts = self.count_other(attempts, &status.to_string())?;
-                }
-            }
-        }
-    }
-
-    /// Streaming variant of [`Self::scan`]: uses the `ScanStream` RPC to
-    /// receive entries in chunks, bypassing the unary 4 MiB message size
-    /// cap. Reassembles into the same `ScanOutcome` shape. Same retry /
-    /// redirect semantics as `scan`.
-    ///
-    /// # Errors
-    /// See [`Error`].
-    #[allow(clippy::too_many_arguments)]
-    pub async fn scan_stream(
-        &self,
-        store_id: u64,
-        group_id: u64,
-        prefix: &[u8],
-        start_after: &[u8],
-        limit: u32,
-        read_mode: ReadMode,
-        min_slot: Option<u64>,
-    ) -> Result<ScanOutcome> {
-        use crow_kv::rpc::KvScanChunk;
-        use tokio_stream::StreamExt as _;
-
-        let min_slot = self.resolve_min_slot(store_id, group_id, read_mode, min_slot);
-        let mut endpoint = self.resolve_read_endpoint(store_id, group_id, read_mode).await?;
-        let mut attempts = 0u32;
-        let mut backoff = self.retry.backoff_base;
-        loop {
-            let req = KvScanRequest {
-                version: 1,
-                prefix: Bytes::copy_from_slice(prefix),
-                start_after: Bytes::copy_from_slice(start_after),
-                limit,
-                request_id: next_request_id(),
-                request_create_ms: now_ms(),
-                group_id,
-                read_mode: read_mode as i32,
-                min_slot,
-            };
-            let channel = self.pool.get(&endpoint)?;
-            let t0 = Instant::now();
-            let _in_flight = self.incr_in_flight(&endpoint);
-            match KvServiceClient::new(channel).scan_stream(req).await {
-                Ok(resp) => {
-                    let mut stream = resp.into_inner();
-                    let mut items: Vec<(Bytes, Bytes)> = Vec::new();
-                    let mut truncated = false;
-                    let mut first_chunk: Option<KvScanChunk> = None;
-                    let mut stream_err: Option<String> = None;
-                    while let Some(chunk_result) = stream.next().await {
-                        match chunk_result {
-                            Ok(chunk) => {
-                                if first_chunk.is_none() {
-                                    first_chunk = Some(chunk.clone());
-                                    if !chunk.ok {
-                                        stream_err = Some(chunk.error);
-                                        break;
-                                    }
-                                    if !chunk.not_leader_hint.is_empty() {
-                                        if read_mode == ReadMode::MinSlot
-                                            && self.read_endpoint_policy.is_distributed()
-                                        {
-                                            self.metrics.record_read_endpoint_fallback();
-                                        }
-                                        self.topology.set_leader(
-                                            store_id,
-                                            group_id,
-                                            chunk.not_leader_hint.clone(),
-                                        );
-                                        endpoint = chunk.not_leader_hint;
-                                        // Break out of the stream loop to retry.
-                                        stream_err = Some(String::new());
-                                        break;
-                                    }
-                                }
-                                truncated = chunk.truncated;
-                                for item in chunk.items {
-                                    items.push((item.key, item.value));
-                                }
-                            }
-                            Err(status) => {
-                                stream_err = Some(status.to_string());
-                                break;
-                            }
-                        }
-                    }
-
-                    if let Some(err) = stream_err {
-                        // Empty error string = redirect, not a real error.
-                        if err.is_empty() {
-                            self.metrics.record_scan_error();
-                            continue;
-                        }
-                        self.metrics.record_scan_error();
-                        attempts = self.count_other(attempts, &err)?;
-                        continue;
-                    }
-
-                    self.record_endpoint_rtt(&endpoint, t0.elapsed().as_micros() as u64);
-                    self.metrics.record_scan_latency(t0.elapsed().as_micros() as u64);
-                    return Ok(ScanOutcome { items, truncated });
-                }
-                Err(status) => {
-                    self.metrics.record_scan_error();
-                    self.metrics.record_transport_error();
-                    self.metrics.on_leader_error(store_id, group_id, &endpoint);
-                    endpoint = self
-                        .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
-                        .await;
-                    self.metrics
-                        .on_leader_resolved(store_id, group_id, &endpoint, "transport_error");
+                    // Reset pagination state on transport error — retry from
+                    // the beginning with the (possibly new) endpoint.
+                    all_items.clear();
+                    page_start_after = start_after.to_vec();
                     attempts = self.count_other(attempts, &status.to_string())?;
                 }
             }

@@ -40,6 +40,11 @@ fn scan_is_ordered_prefix_filtered_and_truncates() {
 }
 
 #[test]
+fn scan_byte_budget_stops_and_truncates() {
+    conformance::scan_byte_budget_stops_and_truncates(&open());
+}
+
+#[test]
 fn compare_is_empty_for_identical_state_and_detects_divergence() {
     conformance::compare_is_empty_for_identical_state_and_detects_divergence(&open(), &open());
 }
@@ -78,7 +83,7 @@ fn get_scan_apply_always_resolve_ready() {
         KVFuture::Ready(_)
     ));
     assert!(matches!(e.get(b"k"), KVFuture::Ready(_)));
-    assert!(matches!(e.scan(b"", b"", 0), KVFuture::Ready(_)));
+    assert!(matches!(e.scan(b"", b"", 0, 0), KVFuture::Ready(_)));
 }
 
 /// Regression guard : unlike the in-memory case
@@ -158,7 +163,7 @@ async fn scan_constructs_pending_for_genuine_demand_load_miss() {
     );
 
     if !e.handle().is_reactor_available() {
-        let (items, truncated) = e.scan(b"", b"", 0).into_ready().unwrap();
+        let (items, truncated) = e.scan(b"", b"", 0, 0).into_ready().unwrap();
         let items_vec: Vec<(Vec<u8>, u64, Vec<u8>)> = items
             .into_iter()
             .map(|(k, s, v)| (k.to_vec(), s, v.to_vec()))
@@ -168,7 +173,7 @@ async fn scan_constructs_pending_for_genuine_demand_load_miss() {
         return;
     }
 
-    match e.scan(b"", b"", 0) {
+    match e.scan(b"", b"", 0, 0) {
         KVFuture::Ready(_) => panic!("expected a genuine Pending after evicting the resident leaf"),
         KVFuture::Pending(fut) => {
             let (items, truncated) = fut.await.unwrap();

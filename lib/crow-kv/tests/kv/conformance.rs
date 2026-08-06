@@ -85,36 +85,72 @@ pub fn scan_is_ordered_prefix_filtered_and_truncates(e: &dyn KVEngine) {
     e.apply(3, &batch(vec![del(b"a:2")])).into_ready().unwrap();
 
     // Unlimited: only live "a:" keys, in order, tombstone excluded.
-    let (items, truncated) = e.scan(b"a:", b"", 0).into_ready().unwrap();
+    let (items, truncated) = e.scan(b"a:", b"", 0, 0).into_ready().unwrap();
     let keys: Vec<Vec<u8>> = items.iter().map(|(k, _, _)| k.to_vec()).collect();
     assert_eq!(keys, vec![b"a:1".to_vec(), b"a:3".to_vec()]);
     assert!(!truncated);
 
     // Limit smaller than the match count sets truncated.
-    let (items, truncated) = e.scan(b"a:", b"", 1).into_ready().unwrap();
+    let (items, truncated) = e.scan(b"a:", b"", 1, 0).into_ready().unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].0.as_ref(), b"a:1");
     assert!(truncated);
 
     // Empty prefix scans everything live.
-    let (all, _) = e.scan(b"", b"", 0).into_ready().unwrap();
+    let (all, _) = e.scan(b"", b"", 0, 0).into_ready().unwrap();
     assert_eq!(all.len(), 3); // a:1, a:3, b:1
 
     // start_after: returns keys strictly greater than start_after.
-    let (page, truncated) = e.scan(b"a:", b"a:1", 0).into_ready().unwrap();
+    let (page, truncated) = e.scan(b"a:", b"a:1", 0, 0).into_ready().unwrap();
     let keys: Vec<Vec<u8>> = page.iter().map(|(k, _, _)| k.to_vec()).collect();
     assert_eq!(keys, vec![b"a:3".to_vec()]);
     assert!(!truncated);
 
     // start_after with limit: pagination returns next page.
-    let (page1, trunc1) = e.scan(b"a:", b"", 1).into_ready().unwrap();
+    let (page1, trunc1) = e.scan(b"a:", b"", 1, 0).into_ready().unwrap();
     assert_eq!(page1.len(), 1);
     assert_eq!(page1[0].0.as_ref(), b"a:1");
     assert!(trunc1);
-    let (page2, trunc2) = e.scan(b"a:", b"a:1", 1).into_ready().unwrap();
+    let (page2, trunc2) = e.scan(b"a:", b"a:1", 1, 0).into_ready().unwrap();
     assert_eq!(page2.len(), 1);
     assert_eq!(page2[0].0.as_ref(), b"a:3");
     assert!(!trunc2);
+}
+
+/// `byte_budget` caps the total key+value bytes in a scan response. The scan
+/// stops with `truncated = true` when the budget is exceeded, always returning
+/// at least one entry (so a single oversized entry still makes progress).
+pub fn scan_byte_budget_stops_and_truncates(e: &dyn KVEngine) {
+    // 5 entries: key=3B ("k00".."k04"), value=10B ("vvvvvvvvv0".."vvvvvvvvv4")
+    // = 13B per entry. Budget=30B allows 2 entries (26B) before the 3rd
+    // (39B) exceeds the budget.
+    let mut ops = Vec::new();
+    for i in 0..5 {
+        ops.push(put(
+            format!("k0{i}").as_bytes(),
+            format!("vvvvvvvvv{i}").as_bytes(),
+        ));
+    }
+    e.apply(1, &batch(ops)).into_ready().unwrap();
+
+    // Budget=30: 2 entries (26B) fit, 3rd would be 39B > 30.
+    let (items, truncated) = e.scan(b"", b"", 0, 30).into_ready().unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(truncated);
+    assert_eq!(items[0].0.as_ref(), b"k00");
+    assert_eq!(items[1].0.as_ref(), b"k01");
+
+    // Budget=0 (unlimited): all 5 entries, no truncation.
+    let (items, truncated) = e.scan(b"", b"", 0, 0).into_ready().unwrap();
+    assert_eq!(items.len(), 5);
+    assert!(!truncated);
+
+    // Budget smaller than a single entry: always return >= 1 entry.
+    // Entry "k00" = 3 + 10 = 13B; budget=5 < 13.
+    let (items, truncated) = e.scan(b"", b"", 0, 5).into_ready().unwrap();
+    assert_eq!(items.len(), 1);
+    assert!(truncated); // more entries remain
+    assert_eq!(items[0].0.as_ref(), b"k00");
 }
 
 pub fn compare_is_empty_for_identical_state_and_detects_divergence(a: &dyn KVEngine, b: &dyn KVEngine) {

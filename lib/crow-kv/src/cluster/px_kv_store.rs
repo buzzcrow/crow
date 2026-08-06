@@ -21,6 +21,17 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use tracing::{debug, info};
 
+/// Server-fixed byte budget for scan responses: caps the total key+value
+/// bytes in one unary `KvScanResponse` so every page is provably bounded
+/// regardless of value sizes. 3.5 MiB leaves ~0.5 MiB for proto framing
+/// under tonic's 4 MiB default `max_decoding_message_size`. The engine
+/// always returns at least one entry even if it alone exceeds the budget
+/// (so the client makes progress), with a warning log for the oversized
+/// entry. Post-R32 (custom Rust RPC) this stays as a safety boundary —
+/// only its constraint value may change (no longer pinned to gRPC's 4
+/// MiB default).
+const SCAN_BYTE_BUDGET: usize = 3 * 1024 * 1024 + 512 * 1024; // 3.5 MiB
+
 pub struct PxKvStore {
     pub store_id: u64,
     pub(crate) groups: DashMap<u64, Arc<PxGroup>>,
@@ -188,7 +199,7 @@ impl KvStore for PxKvStore {
         let (scanned, truncated) = match group
             .local_replica()
             .learner
-            .engine_scan(prefix, start_after, limit as usize)
+            .engine_scan(prefix, start_after, limit as usize, SCAN_BYTE_BUDGET)
             .await
         {
             Ok(result) => result,

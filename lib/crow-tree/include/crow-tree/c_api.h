@@ -345,7 +345,7 @@ ct_future *ct_snapshot_async(ct_tree *t);
 // `f` immediately once done, same as flush/snapshot -- do not also call
 // ct_future_free.
 ct_future *ct_scan_async(ct_tree *t, const uint8_t *prefix, size_t plen, const uint8_t *start_after, size_t salen,
-                         size_t limit);
+                         size_t limit, size_t byte_budget);
 
 // Non-blocking poll.
 // *done == 0: still pending; f remains valid, poll again later (e.g. after
@@ -398,7 +398,8 @@ int32_t ct_reactor_eventfd(const ct_tree *t);
 //   [u32 klen][key bytes][u64 slot][u8 tombstone][u32 vlen][value bytes] * count
 // `out_count` receives the number of records; *truncated is set if more matched.
 ct_status ct_scan(ct_tree *t, const uint8_t *prefix, size_t plen, const uint8_t *start_after, size_t salen,
-                  size_t limit, int include_tombstones, ct_buf *out_entries, uint64_t *out_count, int32_t *truncated);
+                  size_t limit, size_t byte_budget, int include_tombstones, ct_buf *out_entries, uint64_t *out_count,
+                  int32_t *truncated);
 
 // ── Consistent view (compare / iterate) ───────────────────────────
 ct_status ct_snapshot_view(ct_tree *t, ct_view **out);

@@ -211,7 +211,8 @@ impl PxLearner {
     /// `KVEngine::scan` has no genuine `Pending` path yet (no
     /// `ct_scan_async` C API -- see `CrowTreeEngine`'s own doc comment), so
     /// this never actually suspends today either. Keys/values are
-    /// zero-copy `Bytes`. Errors propagate as `Err`.
+    /// zero-copy `Bytes`. `byte_budget` (`0` = unlimited) is pushed down
+    /// into the engine. Errors propagate as `Err`.
     ///
     /// # Errors
     /// Returns `Err` if the underlying engine scan fails (e.g.
@@ -222,8 +223,9 @@ impl PxLearner {
         prefix: &[u8],
         start_after: &[u8],
         limit: usize,
+        byte_budget: usize,
     ) -> Result<(Vec<(bytes::Bytes, SlotIndex, bytes::Bytes)>, bool), String> {
-        self.engine.scan(prefix, start_after, limit).await
+        self.engine.scan(prefix, start_after, limit, byte_budget).await
     }
 
     /// Number of live (non-tombstoned) keys in the engine.
