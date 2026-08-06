@@ -376,7 +376,7 @@ against a 3-node mem-mode cluster, mirroring the write/read regression
 sentinels. The sync `scan` `start_after` pushdown correctness is
 covered by `ReadPath.ScanStartAfterCursorSkipsEarlierEntries` in
 `read_path_test.cpp`. Full baseline numbers and analysis are in
-`doc/working/scan-perf-baseline.md`; the raw TSV is in
+`doc/working/kv-scan-flow-analysis.md`; the raw TSV is in
 `doc/working/bench-scan-regression.tsv`.
 
 Key findings from the baseline (Apple M5 Pro, macOS, 1T:1C, 100k

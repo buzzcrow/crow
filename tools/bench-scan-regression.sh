@@ -6,7 +6,7 @@
 # the six scenario families from R46: full-keyspace, bounded limit,
 # deep pagination, value-size sweep, prefix range, and read-mode
 # split. Results are appended to doc/working/bench-scan-regression.tsv
-# and documented (with the CPU type) in doc/working/scan-perf-baseline.md.
+# and documented (with the CPU type) in doc/working/kv-scan-flow-analysis.md.
 #
 # Configurations (all --workload list, mem mode, 3-node cluster):
 #   - Full-keyspace: limit >= keyspace at 1k / 10k / 100k
@@ -20,7 +20,7 @@
 #
 # 13 runs × 10s ≈ 130s + pre-pop overhead.
 #
-# Reference platform: see doc/working/scan-perf-baseline.md. Always
+# Reference platform: see doc/working/kv-scan-flow-analysis.md. Always
 # record the CPU model in the baseline doc when publishing a run —
 # absolute scan throughput is platform-dependent.
 #
