@@ -96,82 +96,63 @@ Reference numbers in `tools/bench-scan-regression.sh`.
 All runs: `--workload list --mode mem --threads 1 --connections 1
 --duration-secs 10 --pre-populate 100000`, 3-node cluster.
 
-**Full-keyspace scan (limit >= keyspace, 64 B values)**
+| Label | Limit | Prefix | Start_after | Val B | Mode | scans/s | avg us | p99 us | err |
+|-------|------:|--------|-------------|------:|------|--------:|-------:|-------:|----:|
+| full_1k | 1000 | | | 64 | lin | 243 | 4109 | 4672 | 0 |
+| full_10k | 10000 | | | 64 | lin | 165 | 6063 | 6732 | 0 |
+| full_100k | 100000 | | | 64 | lin | 20 | 49485 | 52416 | 0 |
+| bounded_10 | 10 | | | 64 | lin | 223 | 4490 | 5036 | 0 |
+| bounded_100 | 100 | | | 64 | lin | 230 | 4350 | 4804 | 0 |
+| bounded_1k | 1000 | | | 64 | lin | 224 | 4463 | 5088 | 0 |
+| bounded_10k | 10000 | | | 64 | lin | 164 | 6109 | 6764 | 0 |
+| from_start_10 | 10 | | | 64 | lin | 231 | 4321 | 4836 | 0 |
+| deep_pag_10 | 10 | | k...99989 | 64 | lin | 147 | 6786 | 9800 | 0 |
+| deep_pag_100 | 100 | | k...99899 | 64 | lin | 143 | 6994 | 10136 | 0 |
+| valuesize_64B | 1000 | | | 64 | lin | 202 | 4938 | 5380 | 0 |
+| valuesize_1KiB | 1000 | | | 1024 | lin | 766 | 1304 | 2512 | 0 |
+| valuesize_16KiB | 1000 | | | 16384 | lin | 27 | 17368 | 65184 | 309 |
+| valuesize_64B_flushed | 1000 | | | 64 | lin | 213 | 4704 | 4888 | 0 |
+| valuesize_1KiB_flushed | 1000 | | | 1024 | lin | 821 | 1217 | 1549 | 0 |
+| prefix_1k | 1000 | k00 | | 64 | lin | 214 | 4679 | 5036 | 0 |
+| whole_1k | 1000 | | | 64 | lin | 209 | 4788 | 5184 | 0 |
+| lin_1k | 1000 | | | 64 | lin | 217 | 4599 | 4984 | 0 |
+| minslot_1k | 1000 | | | 64 | minslot | 206 | 4845 | 5396 | 0 |
 
-- `full_1k` (limit=1000): 243 scans/s, avg=4109us, p99=4672us
-- `full_10k` (limit=10000): 165 scans/s, avg=6063us, p99=6732us
-- `full_100k` (limit=100000): 20 scans/s, avg=49485us, p99=52416us, 0 errors
-
-Scales linearly with key count (1k→10k: 2.2x keys, 1.5x time). The
-100k scan completes via the streaming `ScanStream` RPC — previously
+**Full-keyspace**: scales linearly (1k→10k: 2.2x keys, 1.5x time).
+`full_100k` completes via the streaming `ScanStream` RPC — previously
 0 scans/s with 6 transport errors from the 4 MiB unary cap.
 
-**Bounded limit over 100k keyspace (64 B values)**
+**Bounded limit**: per-entry cost is small relative to the per-scan
+setup — limit 10/100/1k are all ~4.4ms. At limit=10k the per-entry
+cost becomes visible (6.1ms).
 
-- `bounded_10` (limit=10): 223 scans/s, avg=4490us
-- `bounded_100` (limit=100): 230 scans/s, avg=4350us
-- `bounded_1k` (limit=1000): 224 scans/s, avg=4463us
-- `bounded_10k` (limit=10000): 164 scans/s, avg=6109us
+**Deep pagination**: O(limit) verdict CONFIRMED. Deep pagination is
+1.6x slower than from-start (6786us vs 4321us at limit=10) — the
+deeper B+tree descent cost (O(log N) inner-page levels), not O(prefix)
+over-fetch. If the engine over-fetched, deep_pag_10 would cost
+~49485us (the full_100k number), not 6786us. Deep pagination limit 10
+vs 100 (6786 vs 6994us) are within 3% — cost is dominated by the
+fixed descent, not entry count.
 
-Per-entry cost is small relative to the per-scan setup: limit
-10/100/1k are all ~4.4ms. At limit=10k the per-entry cost becomes
-visible (6.1ms).
+**Value-size sweep**: 16 KiB streaming mostly works (27 scans/s vs
+previously 0) but 309 residual errors remain — retry edge cases under
+high payload (follow-on item). 1 KiB anomaly: 1 KiB values are 3.8x
+faster than 64 B (766 vs 202 scans/s) despite returning 16x more data
+per scan. Persists after zero-copy scan values and L0 drain — root
+cause is in the L1 B+tree scan path, not per-byte copy or L0 snapshot
+cost.
 
-**Deep pagination (start_after near end vs from-start companion)**
+**Flush-after-prepopulate**: the 3.8x gap is unchanged with L0
+deterministically drained. The flag is a no-op because the
+maintenance loop (3s tick) already keeps L0 small during measurement.
+Useful for deterministic L1-only baselines.
 
-- `from_start_10` (limit=10, start_after=""): 231 scans/s, avg=4321us
-- `deep_pag_10` (limit=10, start_after=k...99989): 147 scans/s, avg=6786us
-- `deep_pag_100` (limit=100, start_after=k...99899): 143 scans/s, avg=6994us
+**Prefix range**: no measurable difference — the per-scan fixed
+overhead dominates at this scan width.
 
-O(limit) verdict: CONFIRMED. Deep pagination is 1.6x slower than
-from-start (6786us vs 4321us at limit=10) — the deeper B+tree descent
-cost (O(log N) inner-page levels), not O(prefix) over-fetch. If the
-engine over-fetched, deep_pag_10 would cost ~49485us (the full_100k
-number), not 6786us. Deep pagination limit 10 vs 100 (6786 vs 6994us)
-are within 3% — cost is dominated by the fixed descent, not entry
-count.
-
-**Value-size sweep (fixed limit=1000, 100k keyspace)**
-
-- `valuesize_64B`: 202 scans/s, avg=4938us, p99=5380us
-- `valuesize_1KiB`: 766 scans/s, avg=1304us, p99=2512us
-- `valuesize_16KiB`: 27 scans/s, avg=17368us, p99=65184us, 309 errors
-
-16 KiB: streaming scan mostly works (27 scans/s vs previously 0) but
-309 residual errors remain — retry edge cases under high payload
-(follow-on item).
-
-1 KiB anomaly: 1 KiB values are 3.8x faster than 64 B values (766 vs
-202 scans/s) despite returning 16x more data per scan. Persists after
-zero-copy scan values and L0 drain — root cause is in the L1 B+tree
-scan path, not per-byte copy or L0 snapshot cost.
-
-**Value-size sweep with --flush-after-prepopulate (L0 hypothesis)**
-
-- `valuesize_64B_flushed`: 213 scans/s, avg=4704us (vs 202 unflushed)
-- `valuesize_1KiB_flushed`: 821 scans/s, avg=1217us (vs 766 unflushed)
-
-The 3.8x gap is unchanged with L0 deterministically drained. The flag
-is a no-op because the maintenance loop (3s tick) already keeps L0
-small during measurement. The flag remains useful for deterministic
-L1-only baselines.
-
-**Prefix range (bounded prefix vs whole-keyspace, same entry count)**
-
-- `prefix_1k` (prefix="k00", limit=1000): 214 scans/s, avg=4679us
-- `whole_1k` (prefix="", limit=1000): 209 scans/s, avg=4788us
-
-No measurable difference — the per-scan fixed overhead dominates at
-this scan width.
-
-**Read-mode split (linearizable vs minslot, limit=1000)**
-
-- `lin_1k` (linearizable): 217 scans/s, avg=4599us
-- `minslot_1k` (minslot, any-replica): 206 scans/s, avg=4845us
-
-No measurable difference at 1T:1C — the single client has no
-concurrency to exploit MinSlot's follower local-serve. The split
-would show a difference at higher concurrency.
+**Read-mode split**: no measurable difference at 1T:1C — the single
+client has no concurrency to exploit MinSlot's follower local-serve.
+The split would show a difference at higher concurrency.
 
 ### Cost split
 
