@@ -1,27 +1,31 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-// MemTable (L0).
+// MemTable (L0) — epoch-protected lock-free (R50).
 //
 // A concurrent in-memory ordered map `key -> encoded cell` that absorbs apply()
 // (concurrent, possibly out-of-order by slot). It keeps one (highest-slot) cell
 // per key and drops writes already durable in L1 (slot <= durable_floor), so any
 // key present in L0 is strictly newer than L1 -> L0-first reads are correct.
 //
-// v1 uses an absl::btree_map under a mutex (sharded/skiplist is a later
-// optimization). btree_map is cache-friendlier than std::map's red-black tree
-// for the point-get / ordered-drain workload (D-Q10, plan-tree #9).
+// R50: the backing structure is a ConcurrentSkipList with inline keys and
+// versioned cells. Readers (scan, get) traverse lock-free under an epoch guard
+// with zero copy — a cursor borrows key/cell Slices directly off the node,
+// and the epoch guard keeps the node alive past any concurrent drain/overwrite.
+// Writers are serialized by the skip list's internal spinlock. Every freed
+// node and overwritten cell version is epoch-retired through the engine's
+// EpochManager (passed in at construction), so reclamation defers past every
+// in-flight reader guard — the same EBR scheme L1 pages already use.
 #pragma once
 
 #include "crow-tree/buffer.h"
 #include "crow-tree/cell.h"
+#include "crow-tree/epoch.h"
+#include "crow-tree/skip_list.h"
 #include "crow-tree/slice.h"
 
-#include <absl/container/btree_map.h>
-
+#include <atomic>
 #include <cstdint>
-#include <functional>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -30,68 +34,18 @@ namespace crow::tree
 
 struct mem_entry
 {
-    std::string key; // key stays std::string: it must be COPYABLE (a btree relocates
-                     // its const-key slots on split/merge, which a move-only buffer key
-                     // cannot satisfy) and SSO already inlines small keys optimally.
-    buffer   cell;   // encoded cell payload (single-alloc buffer; SBO-inline for small)
-    uint64_t slot;
-};
-
-// Internal MemTable value (R30). A cell is stored in one of two forms:
-//   - contiguous: `cell` is a kOwned buffer holding the full [header][value]
-//     payload (the pre-R30 path, used by snapshot import and the legacy
-//     `upsert(Slice, slot, buffer&&)` overload). `slot`/`flags` are decoded
-//     from the cell via `CellView` and kept as fields for fast
-//     highest-slot-wins checks without re-parsing.
-//   - split: `cell` is a kExternal buffer holding ONLY the value bytes,
-//     borrowed from a Rust `bytes::Bytes` (zero-copy apply path). The 9-byte
-//     header is NOT stored as bytes — `slot`/`flags` are the fields, and the
-//     contiguous cell is materialized at the memtable API boundary
-//     (`get`/`drain_up_to`/`snapshot`) where a copy already exists.
-// Tag: `cell.ownership() == buffer::mode::kExternal` -> split; else contiguous.
-// (The memtable never stores kBorrowed cells, so the tag is unambiguous.)
-struct cell_entry
-{
-    uint64_t slot  = 0;
-    uint8_t  flags = 0;
-    buffer   cell; // contiguous (kOwned): full [header][value]; split (kExternal): value-only
-
-    // Materialize a contiguous [header][value] cell (deep copy). Used by
-    // `snapshot()` and any path that must leave the map intact.
-    [[nodiscard]] buffer materialize() const
-    {
-        if (cell.ownership() != buffer::mode::kExternal) {
-            return cell.clone(); // already contiguous
-        }
-        size_t   vlen = cell.size();
-        buffer   b    = buffer::alloc(vlen, kCellHeaderSize);
-        uint8_t *p    = b.data();
-        for (int i = 0; i < 8; ++i) {
-            p[i] = static_cast<uint8_t>((slot >> (8 * i)) & 0xff);
-        }
-        p[8] = flags;
-        if (vlen > 0) {
-            std::memcpy(b.data() + kCellHeaderSize, cell.data(), vlen);
-        }
-        return b;
-    }
-
-    // Materialize, moving the contiguous cell out when possible (drain path —
-    // the entry is erased right after, so the owned cell can be moved instead
-    // of cloned). Split cells still copy (borrowed bytes cannot be moved).
-    [[nodiscard]] buffer materialize_move()
-    {
-        if (cell.ownership() != buffer::mode::kExternal) {
-            return std::move(cell); // contiguous: move the whole cell out
-        }
-        return materialize(); // split: copy value + build header
-    }
+    std::string key;
+    buffer      cell; // materialized contiguous [header][value]
+    uint64_t    slot;
 };
 
 class MemTable
 {
   public:
-    explicit MemTable(uint64_t id = 0) : id_(id)
+    // `epoch` is the engine's EpochManager — used to retire unlinked nodes
+    // and overwritten cell versions. Must outlive this MemTable (owned by
+    // the Crowtree, which outlives all MemTables via shared_ptr).
+    explicit MemTable(uint64_t id = 0, EpochManager *epoch = nullptr) : epoch_(epoch), id_(id)
     {
     }
 
@@ -104,34 +58,25 @@ class MemTable
     // Drops the write if an existing entry has a >= slot. Also drops writes with
     // slot <= durable_floor (already in L1) unless allow_old_slots is set.
     bool upsert(Slice key, uint64_t slot, Slice cell_payload);
-    // Move the pre-encoded cell buffer in (no cell copy); the key is copied once.
-    // Used by apply's per-batch dedup (single-allocation encoded cell via
-    // encode_cell_buf) and snapshot import.
     bool upsert(Slice key, uint64_t slot, buffer &&cell_payload);
 
     // Zero-copy apply path (R30): store a split cell — the value is borrowed
     // from a Rust `bytes::Bytes` via a kExternal buffer (no value memcpy), and
-    // the 9-byte cell header is stored as `slot`/`flags` fields. The
-    // contiguous cell is materialized at `get`/`drain_up_to`/`snapshot`.
-    // `value` must be a kExternal buffer (Put) or an empty buffer (Delete,
-    // `flags = kFlagTombstone`).
+    // the 9-byte cell header is stored as `slot`/`flags` fields.
     bool upsert_external(Slice key, uint64_t slot, uint8_t flags, buffer &&value);
 
-    // Set the durable floor (engine's last_applied_slot). Writes at or below it are
-    // already in L1 and are rejected by upsert (unless allow_old_slots). Does not
-    // retroactively evict.
-    void                   set_durable_floor(uint64_t slot);
-    [[nodiscard]] uint64_t durable_floor() const;
+    void set_durable_floor(uint64_t slot);
 
-    // Allow upsert to accept slots <= durable_floor. Needed during restore, when
-    // Paxos may re-learn an old slot whose value differs from L1. With this set,
-    // L0 is no longer strictly newer than L1, so get must always consult L0 first
-    // (it already does) and use the L0 cell when present.
-    void set_allow_old_slots(bool v);
+    [[nodiscard]] uint64_t durable_floor() const
+    {
+        return durable_floor_.load(std::memory_order_relaxed);
+    }
 
-    // Range of slots currently held in L0 ([min,max]; empty when no entries). A
-    // reader that knows a key's expected slot can skip the L0 lookup when that
-    // slot falls outside this range and go straight to L1.
+    void set_allow_old_slots(bool v)
+    {
+        allow_old_slots_.store(v, std::memory_order_relaxed);
+    }
+
     struct slot_range_t
     {
         uint64_t min   = UINT64_MAX;
@@ -139,39 +84,119 @@ class MemTable
         bool     empty = true;
     };
 
-    [[nodiscard]] slot_range_t slot_range() const;
+    [[nodiscard]] slot_range_t slot_range() const
+    {
+        uint64_t mn = min_slot_.load(std::memory_order_relaxed);
+        uint64_t mx = max_slot_.load(std::memory_order_relaxed);
+        if (mn == UINT64_MAX) {
+            return slot_range_t{};
+        }
+        return {.min = mn, .max = mx, .empty = false};
+    }
 
-    // Drop all entries and reset the durable floor to 0 (snapshot import: the L0
-    // overlay is fully replaced along with L1). Also resets allow_old_slots and
-    // slot-range tracking.
+    // Drop all entries and reset the durable floor to 0 (snapshot import).
+    // Epoch-retires every node and cell version.
     void reset();
 
-    // Point read: copies the encoded cell into *out_cell. Returns false if absent.
-    [[nodiscard]] bool get(Slice key, std::string *out_cell) const;
+    // Point lookup (lock-free, zero-copy): returns the CellVersion* for `key`,
+    // or nullptr. The returned pointer is valid only while the caller's epoch
+    // guard is held — a concurrent overwrite retires the old version via epoch.
+    [[nodiscard]] const CellVersion *find(Slice key) const
+    {
+        return list_.find(key);
+    }
 
-    // Remove and return, in key order, all entries with slot <= cs. Entries with
-    // slot > cs are retained (not yet contiguous / durable-eligible).
+    // Ordered cursor (lock-free, zero-copy): positioned at the first live
+    // node with key > `start_after`. The cursor borrows key/cell Slices
+    // directly off the node; valid only while the caller's epoch guard is held.
+    [[nodiscard]] ConcurrentSkipList::Cursor cursor(Slice start_after) const
+    {
+        return list_.cursor(start_after);
+    }
+
+    // Remove and return, in key order, all entries with slot <= cs. Entries
+    // with slot > cs are retained. The returned entries have materialized
+    // contiguous cells (copied — this is the drain/flush path, not the hot
+    // read path). Unlinked nodes and old cell versions are epoch-retired.
     [[nodiscard]] std::vector<mem_entry> drain_up_to(uint64_t cs);
 
-    // Ordered immutable copy of the current contents (for scan merge cursors).
+    // Ordered immutable copy of the current contents (for full-set paths:
+    // iter_all, compare, snapshot_export). O(N) copy is correct there.
     [[nodiscard]] std::vector<mem_entry> snapshot() const;
 
-    [[nodiscard]] size_t approx_bytes() const;
-    [[nodiscard]] size_t count() const;
-    [[nodiscard]] bool   empty() const;
+    [[nodiscard]] size_t approx_bytes() const
+    {
+        return list_.approx_bytes();
+    }
+
+    [[nodiscard]] size_t count() const
+    {
+        return list_.count();
+    }
+
+    [[nodiscard]] bool empty() const
+    {
+        return list_.empty();
+    }
 
   private:
-    mutable std::mutex mu_;
-    // key (std::string, SSO) -> cell_entry (contiguous or split). std::less<> is
-    // transparent, enabling heterogeneous lookup by std::string_view without
-    // allocating a temporary key.
-    absl::btree_map<std::string, cell_entry, std::less<>> map_;
-    size_t                                                bytes_           = 0;
-    uint64_t                                              durable_floor_   = 0;
-    bool                                                  allow_old_slots_ = false;
-    uint64_t min_slot_ = UINT64_MAX; // slot range of current entries; tracked on
-    uint64_t max_slot_ = 0;          // upsert, reset when the map empties
-    uint64_t id_       = 0;          // monotonic id for logging (mt0, mt1, …)
+    void update_slot_range(uint64_t slot)
+    {
+        // Relaxed: only the writer updates these, and readers use them as hints.
+        uint64_t mn = min_slot_.load(std::memory_order_relaxed);
+        uint64_t mx = max_slot_.load(std::memory_order_relaxed);
+        if (slot < mn) {
+            min_slot_.store(slot, std::memory_order_relaxed);
+        }
+        if (slot > mx) {
+            max_slot_.store(slot, std::memory_order_relaxed);
+        }
+    }
+
+    void reset_slot_range()
+    {
+        min_slot_.store(UINT64_MAX, std::memory_order_relaxed);
+        max_slot_.store(0, std::memory_order_relaxed);
+    }
+
+    // Create a CellVersion from a contiguous cell buffer.
+    [[nodiscard]] static CellVersion *make_version(uint64_t slot, uint8_t flags, buffer &&cell)
+    {
+        auto *cv  = new CellVersion{};
+        cv->slot  = slot;
+        cv->flags = flags;
+        cv->cell  = std::move(cell);
+        return cv;
+    }
+
+    // Retire a CellVersion via epoch (the deleter destroys the buffer,
+    // firing the R30 drop_fn for kExternal cells).
+    void retire_version(CellVersion *cv)
+    {
+        if (cv == nullptr || epoch_ == nullptr) {
+            delete cv; // no epoch manager (tests) — immediate free
+            return;
+        }
+        epoch_->retire(cv, [](void *p) { delete static_cast<CellVersion *>(p); });
+    }
+
+    // Retire a Node via epoch.
+    void retire_node(Node *n)
+    {
+        if (n == nullptr || epoch_ == nullptr) {
+            ConcurrentSkipList::free_node(n); // no epoch manager (tests) — immediate free
+            return;
+        }
+        epoch_->retire(n, ConcurrentSkipList::free_node);
+    }
+
+    ConcurrentSkipList    list_;
+    EpochManager         *epoch_;
+    uint64_t              id_ = 0;
+    std::atomic<uint64_t> durable_floor_{0};
+    std::atomic<bool>     allow_old_slots_{false};
+    std::atomic<uint64_t> min_slot_{UINT64_MAX};
+    std::atomic<uint64_t> max_slot_{0};
 };
 
 } // namespace crow::tree

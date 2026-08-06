@@ -1,52 +1,70 @@
 #!/usr/bin/env bash
 # --- CrowKV read regression benchmark ---
-# Usage: bash doc/working/bench-read-regression.sh
+# Usage: bash tools/bench-read-regression.sh
 #
-# Regression sentinel for read throughput and correctness.
-# Covers the key findings from the full sweep:
-#   - Linearizable 1T:1C scaling (6T baseline + 48T peak)
-#   - MinSlot 1T:1C underperforms at low concurrency
-#   - MinSlot 1T:2C is the optimal MinSlot config
-#   - HTTP/2 connection lock (2T:1C throughput drop)
-#   - Correctness verification on top configs
+# Regression sentinel for point-read (get) throughput and latency. Covers
+# the core read code paths with a minimal config set, plus a multi-thread
+# read-mode split measurement and a correctness verification pass.
 #
-# 8 runs × 10s ≈ 80s + pre-pop overhead.
+# Configurations (all --workload read, mem mode, 3-node cluster):
+#   Single-thread (1T:1C) — isolate per-read engine cost:
+#     - lin_1t:        linearizable (lease barrier + engine get)
+#     - minslot_1t:    minslot (no barrier, local serve)
+#   Multi-thread — max throughput + read-mode split:
+#     - lin_6t:        linearizable mid-concurrency
+#     - minslot_6t:    minslot (reads distributed across replicas)
+#     - lin_16t:       linearizable high concurrency
+#     - minslot_16t:   minslot high concurrency
+#     - lin_32t:       linearizable saturation
+#     - minslot_32t:   minslot saturation
+#   HTTP/2 connection lock sentinel:
+#     - minslot_6t_2to1: 6T:3C (2:1 ratio, h2 lock contention)
+#   Correctness verification (--verify-bytes 8):
+#     - lin_16t_verify:   linearizable correctness
+#     - minslot_16t_verify: minslot correctness
+#
+# 11 runs × 10s ≈ 110s + pre-pop overhead.
+#
+# Reference platform: see doc/working/kv-read-flow-analysis.md. Always
+# record the CPU model in the baseline doc when publishing a run —
+# absolute read throughput is platform-dependent.
 #
 # Prerequisites:
 #   - pixi installed, project dependencies resolved
 #   - jq installed
-#   - release binary built (cargo build --release -p crow-cli)
+#   - release binary built (pixi run -- cargo build --release -p crow-cli)
 set -euo pipefail
-cd /cjdata/cpp/crow
+cd "$(dirname "$0")/.."
 
-RESULTS_FILE="doc/working/bench-regression.tsv"
+RESULTS_FILE="doc/working/bench-read-regression.tsv"
 DURATION=10
-KEYSPACE=200000
+KEYSPACE=100000
 
 run_bench() {
-    local mode="$1" threads="$2" conn="$3" ratio="$4" verify_bytes="$5"
-    local read_mode read_endpoint min_slot
-    if [ "$mode" = "lin" ]; then
-        read_mode="linearizable"; read_endpoint="leader"; min_slot="auto"
+    local label="$1" read_mode="$2" min_slot="$3" threads="$4" connections="$5" verify_bytes="${6:-0}"
+    local read_endpoint
+    if [ "$read_mode" = "minslot" ]; then
+        read_endpoint="any-replica"
     else
-        read_mode="minslot"; read_endpoint="any-replica"; min_slot="zero"
+        read_endpoint="leader"
     fi
-    local label="$mode ${threads}T:${conn}C"
+    local display="$label (${threads}T:${connections}C)"
     if [ "$verify_bytes" -gt 0 ]; then
-        label="$label verify"
+        display="$display verify"
     fi
-    echo ">>> $label ..."
+    echo ">>> $display ..."
     local output
     output=$(pixi run -- cargo run --release -p crow-cli -- bench run \
         --mode mem --workload read --duration-secs "$DURATION" \
-        --threads "$threads" --connections "$conn" \
+        --threads "$threads" --connections "$connections" \
         --read-mode "$read_mode" --min-slot "$min_slot" \
         --read-endpoint-policy "$read_endpoint" \
-        --verify-bytes "$verify_bytes" --pre-populate "$KEYSPACE" --json 2>&1)
+        --pre-populate "$KEYSPACE" --key-space "$KEYSPACE" \
+        --value-size 64 --verify-bytes "$verify_bytes" --json 2>&1)
     local json; json=$(echo "$output" | sed -n '/^{/,/^}/p')
     if [ -z "$json" ]; then
         echo "    ERROR: no JSON output"; echo "$output" | tail -5
-        echo -e "$mode\t$threads\t$conn\t$ratio\t$verify_bytes\t0\t0\t0\t0\t0\t1\t1" >> "$RESULTS_FILE"
+        echo -e "$label\t$read_mode\t${threads}T${connections}C\t$verify_bytes\t0\t0\t0\t0\t0\t0\t1\t1" >> "$RESULTS_FILE"
         return
     fi
     local ops_s avg_us p50_us p99_us p999_us errors corr_err
@@ -58,34 +76,49 @@ run_bench() {
     errors=$(echo "$json" | jq -r '.total_errors')
     corr_err=$(echo "$json" | jq -r '.correctness_errors')
     echo "    ops/s=$ops_s avg=${avg_us}us p50=${p50_us}us p99=${p99_us}us p999=${p999_us}us err=$errors corr=$corr_err"
-    echo -e "$mode\t$threads\t$conn\t$ratio\t$verify_bytes\t$ops_s\t$avg_us\t$p50_us\t$p99_us\t$p999_us\t$errors\t$corr_err" >> "$RESULTS_FILE"
+    echo -e "$label\t$read_mode\t${threads}T${connections}C\t$verify_bytes\t$ops_s\t$avg_us\t$p50_us\t$p99_us\t$p999_us\t$errors\t$corr_err" >> "$RESULTS_FILE"
 }
 
 # --- regression sentinel configs ---
+#
+# Reference results (2026-08-06, Apple M5 Pro, 18c, arm64, macOS 26.5):
+#   10s mem mode, 3-node cluster, 100k pre-populated keys, 64B values.
+#
+#   label              mode        T:C   ops/s    avg_us  p99_us  err  notes
+#   lin_1t             linearizable 1:1   20441    47      75      0    per-read cost
+#   minslot_1t         minslot      1:1   20478    47      73      0    same as lin (lease ~0)
+#   lin_6t             linearizable 6:6   68560    86      173     0    mid-concurrency
+#   minslot_6t         minslot      6:6   75158    78      150     0    +9.6% vs lin (distributed)
+#   lin_16t            linearizable 16:16 105613   149     254     0    high concurrency
+#   minslot_16t        minslot      16:16 106727   148     240     0    +1.1% vs lin (converging)
+#   lin_32t            linearizable 32:32 118390   267     428     0    saturation
+#   minslot_32t        minslot      32:32 112621   281     440     0    -5.1% vs lin (saturated)
+#   minslot_6t_2to1    minslot      6:3   73484    80      157     0    h2 lock, -2.2% vs 6:6
+#   lin_16t_verify     linearizable 16:16 104917   150     256     0    corr=0
+#   minslot_16t_verify minslot      16:16 104988   150     241     0    corr=0
+#
+# Analysis: doc/working/kv-read-flow-analysis.md § Latest Benchmark Results.
 
-echo -e "mode\tthreads\tconn\tratio\tverify\tops_s\tavg_us\tp50_us\tp99_us\tp999_us\terrors\tcorrectness_errors" > "$RESULTS_FILE"
+echo -e "label\tread_mode\tT:C\tverify\tops_s\tavg_us\tp50_us\tp99_us\tp999_us\terrors\tcorrectness_errors" > "$RESULTS_FILE"
 
-echo "=== Single-thread baseline ==="
-run_bench lin 1 1 "1:1" 0      # basic single-thread perf (~10K expected)
-run_bench minslot 1 1 "1:1" 0  # basic single-thread minslot
+echo "=== Single-thread (1T:1C) — per-read engine cost ==="
+run_bench "lin_1t"        linearizable auto 1 1
+run_bench "minslot_1t"    minslot      zero 1 1
 
-echo "=== Linearizable 1T:1C scaling ==="
-run_bench lin 6 6 "1:1" 0      # mid-concurrency baseline (~35K expected)
-run_bench lin 48 48 "1:1" 0    # peak throughput (~90K expected)
+echo "=== Multi-thread — max throughput + read-mode split ==="
+run_bench "lin_6t"        linearizable auto 6 6
+run_bench "minslot_6t"    minslot      zero 6 6
+run_bench "lin_16t"       linearizable auto 16 16
+run_bench "minslot_16t"   minslot      zero 16 16
+run_bench "lin_32t"       linearizable auto 32 32
+run_bench "minslot_32t"   minslot      zero 32 32
 
-echo "=== MinSlot 1T:1C (should underperform lin at low concurrency) ==="
-run_bench minslot 6 6 "1:1" 0  # ~31K expected, slower than lin 6T
-
-echo "=== MinSlot 1T:2C (optimal MinSlot config) ==="
-run_bench minslot 6 12 "1:2" 0 # ~59K expected, 1.7x lin 6T
-run_bench minslot 24 48 "1:2" 0 # ~81K expected
-
-echo "=== HTTP/2 connection lock sentinel (2T:1C should drop ~17%) ==="
-run_bench minslot 6 3 "2:1" 0  # ~26K expected, regression if much lower
+echo "=== HTTP/2 connection lock sentinel (2T:1C should drop) ==="
+run_bench "minslot_6t_2to1" minslot    zero 6 3
 
 echo "=== Correctness verification ==="
-run_bench lin 24 24 "1:1" 8    # verify linearizable correctness
-run_bench minslot 6 12 "1:2" 8 # verify minslot correctness
+run_bench "lin_16t_verify"     linearizable auto 16 16 8
+run_bench "minslot_16t_verify" minslot      zero 16 16 8
 
 echo "=== DONE ==="
 echo "Results in $RESULTS_FILE"

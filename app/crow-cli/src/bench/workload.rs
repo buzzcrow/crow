@@ -99,6 +99,77 @@ pub fn value_for(key_id: u64, size: usize) -> Vec<u8> {
     (0..size as u64).map(|i| byte_at(key_id, i)).collect()
 }
 
+/// Mixed value-size distribution for pre-population. Parses a spec
+/// like `64:70,1024:20,16384:10` (size:percent,...). Percentages must
+/// sum to 100. When set, `value_size_for(key_id)` assigns each key a
+/// deterministic size based on its id modulo 100, so the distribution
+/// is stable across runs and independent of pre-populate order.
+#[derive(Debug, Clone)]
+pub struct ValueSizeMix {
+    /// (size, `cumulative_percent`) pairs, sorted by cumulative percent.
+    tiers: Vec<(usize, u8)>,
+}
+
+impl ValueSizeMix {
+    /// Parse `size:percent,...` (e.g. `64:70,1024:20,16384:10`).
+    /// Percentages must sum to 100. Returns `Err` on malformed input.
+    pub fn parse(spec: &str) -> Result<Self, String> {
+        let mut tiers = Vec::new();
+        let mut cumulative: u16 = 0;
+        for part in spec.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let (size_s, pct_s) = part
+                .split_once(':')
+                .ok_or_else(|| format!("invalid value-size-mix tier '{part}', expected size:percent"))?;
+            let size: usize = size_s
+                .trim()
+                .parse()
+                .map_err(|e| format!("invalid value-size-mix size '{size_s}': {e}"))?;
+            let pct: u8 = pct_s
+                .trim()
+                .parse()
+                .map_err(|e| format!("invalid value-size-mix percent '{pct_s}': {e}"))?;
+            if pct == 0 {
+                return Err(format!("value-size-mix percent must be >0, got {pct}"));
+            }
+            cumulative += u16::from(pct);
+            if cumulative > 100 {
+                return Err(format!(
+                    "value-size-mix percentages exceed 100 (cumulative={cumulative})"
+                ));
+            }
+            #[allow(clippy::cast_possible_truncation, reason = "cumulative <= 100")]
+            tiers.push((size, cumulative as u8));
+        }
+        if tiers.is_empty() {
+            return Err("value-size-mix has no tiers".to_string());
+        }
+        if cumulative != 100 {
+            return Err(format!(
+                "value-size-mix percentages sum to {cumulative}, must be 100"
+            ));
+        }
+        tiers.sort_by_key(|(_, c)| *c);
+        Ok(Self { tiers })
+    }
+
+    /// Deterministic size for a given key id: `id % 100` falls into
+    /// one of the cumulative-percent buckets.
+    #[must_use]
+    pub fn size_for(&self, key_id: u64) -> usize {
+        let bucket = (key_id % 100) as u8;
+        for &(size, cumulative) in &self.tiers {
+            if bucket < cumulative {
+                return size;
+            }
+        }
+        self.tiers.last().expect("non-empty").0
+    }
+}
+
 /// Render a key id as the canonical `k{id:020}` zero-padded ascii form
 /// used by both pre-population writes and read key selection.
 #[must_use]

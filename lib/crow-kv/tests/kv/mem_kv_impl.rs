@@ -4,6 +4,7 @@
 #![allow(clippy::cast_possible_truncation)]
 #![allow(dead_code)]
 
+use bytes::Bytes;
 use dashmap::DashMap;
 use std::collections::BTreeMap;
 
@@ -96,10 +97,14 @@ impl KVEngine for InMemKV {
         prefix: &[u8],
         start_after: &[u8],
         limit: usize,
-    ) -> KVFuture<(Vec<(Vec<u8>, u64, Vec<u8>)>, bool)> {
+        byte_budget: usize,
+    ) -> KVFuture<Result<(Vec<(Bytes, u64, Bytes)>, bool), String>> {
         // DashMap is not ordered — collect matching live entries, sort,
-        // then apply the start_after cursor and limit.
-        let mut items: Vec<(Vec<u8>, u64, Vec<u8>)> = self
+        // then apply the start_after cursor, limit, and byte_budget.
+        // Keys/values are Bytes (one copy via Bytes::from(Vec), same as
+        // the get path; InMemKV is test-only so zero-copy slicing does
+        // not apply). InMemKV never errors — always Ok.
+        let mut items: Vec<(Bytes, u64, Bytes)> = self
             .map
             .iter()
             .filter_map(|r| {
@@ -111,7 +116,7 @@ impl KVEngine for InMemKV {
                 }
                 let (slot, cell) = r.value();
                 if let Cell::Value(v) = cell {
-                    Some((r.key().clone(), *slot, v.clone()))
+                    Some((Bytes::from(r.key().clone()), *slot, Bytes::from(v.clone())))
                 } else {
                     None
                 }
@@ -123,7 +128,24 @@ impl KVEngine for InMemKV {
             truncated = true;
             items.truncate(limit);
         }
-        KVFuture::ready((items, truncated))
+        // byte_budget: accumulate key+value bytes, stop with truncated when
+        // exceeded. Always return at least one entry (the always-return-1
+        // guard), matching the C++ engine's behavior.
+        if byte_budget != 0 {
+            let mut accumulated_bytes = 0usize;
+            let mut keep = 0;
+            for (key, _, value) in &items {
+                let entry_bytes = key.len() + value.len();
+                if accumulated_bytes + entry_bytes > byte_budget && keep > 0 {
+                    truncated = true;
+                    break;
+                }
+                accumulated_bytes += entry_bytes;
+                keep += 1;
+            }
+            items.truncate(keep);
+        }
+        KVFuture::ready(Ok((items, truncated)))
     }
 
     fn live_key_count(&self) -> usize {

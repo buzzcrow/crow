@@ -120,6 +120,12 @@ pub struct BenchConfig {
     pub duration: Duration,
     pub key_space: u64,
     pub value_size: usize,
+    /// Mixed value-size distribution for pre-population. When set,
+    /// each pre-populated key gets a size from `ValueSizeMix::size_for(id)`
+    /// instead of the fixed `value_size`. Scan benches use this to
+    /// exercise multiple value sizes in a single run. `None` (default)
+    /// uses the fixed `value_size`.
+    pub value_size_mix: Option<super::workload::ValueSizeMix>,
     /// Report directory: `bench-runs/<run-folder>/`. The report is
     /// written as `report.json` inside this dir. If `None`, defaults
     /// to `bench-runs/`.
@@ -168,15 +174,37 @@ pub struct BenchConfig {
     /// `MinSlot` read-endpoint selection policy. `Leader` (default)
     /// routes `MinSlot` reads to the leader (same as `Linearizable`);
     /// `AnyReplica` distributes `MinSlot` reads round-robin across all
-    /// replicas, exercising the real follower local-serve + fallback
-    /// path. Ignored for `Linearizable` reads (always target leader).
+    /// replicas; `LeastConnections` routes to the fewest in-flight;
+    /// `Latency` routes to the lowest recent RTT. Ignored for
+    /// `Linearizable` reads (always target leader).
     pub read_endpoint_policy: ReadEndpointPolicy,
     /// Topology seed URL (the console-web's `/topology` endpoint).
     /// When set, the client can fetch the full replica list so
-    /// `AnyReplica` has endpoints to round-robin over. `None` leaves
-    /// the client with an empty seed list (no topology fetch — fine
-    /// for `Leader` policy, but `AnyReplica` would have no replicas).
+    /// distributed policies have endpoints to select from. `None`
+    /// leaves the client with an empty seed list (no topology fetch —
+    /// fine for `Leader` policy, but distributed policies would have
+    /// no replicas).
     pub topology_seed: Option<String>,
+    /// Scan limit (max entries per scan op) for `WorkloadKind::List`.
+    /// Default 1 (the historical stub behavior).
+    pub scan_limit: u32,
+    /// Scan prefix for `WorkloadKind::List`. Empty = whole keyspace.
+    pub scan_prefix: Vec<u8>,
+    /// Scan exclusive lower bound (`start_after`) for
+    /// `WorkloadKind::List`. Empty = start from the beginning.
+    pub scan_start_after: Vec<u8>,
+    /// If `true`, after pre-population completes the runner drains L0
+    /// (`MemTable`) into L1 on every node via each `flush_mgmt_urls`
+    /// management API `POST .../flush`, then opens the measurement
+    /// window. Produces a clean L1-only scan baseline so the
+    /// `MemTable::snapshot()` `O(N_l0)` cost is removed from the
+    /// measurement. `false` (default) leaves L0 size dependent on the
+    /// pre-pop write rate / value size (the historical behavior).
+    pub flush_after_prepopulate: bool,
+    /// Per-node management API URLs to hit with `POST .../flush` when
+    /// `flush_after_prepopulate` is set. Empty (default) means the flag
+    /// is a no-op even if set — the bench fixture populates this.
+    pub flush_mgmt_urls: Vec<String>,
 }
 
 impl BenchConfig {
@@ -193,6 +221,7 @@ impl BenchConfig {
             duration: Duration::from_secs(5),
             key_space: 1_000,
             value_size: 64,
+            value_size_mix: None,
             report_dir: None,
             run_id: None,
             progress_interval: None,
@@ -204,6 +233,11 @@ impl BenchConfig {
             verify_bytes: 8,
             read_endpoint_policy: ReadEndpointPolicy::Leader,
             topology_seed: None,
+            scan_limit: 1,
+            scan_prefix: Vec::new(),
+            scan_start_after: Vec::new(),
+            flush_after_prepopulate: false,
+            flush_mgmt_urls: Vec::new(),
         }
     }
 
@@ -255,8 +289,8 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
     // via the client's own per-endpoint channel pool, so every worker
     // shares one client and its internal pool rather than owning a
     // channel directly. When `topology_seed` is set (MinSlot benches
-    // with `AnyReplica`), the seed list is non-empty so the client can
-    // fetch `/topology` and learn the full replica list for round-robin
+    // with a distributed policy), the seed list is non-empty so the
+    // client can fetch `/topology` and learn the full replica list for
     // distribution.
     let mut client_config = ClientConfig::new(cfg.topology_seed.clone().map(|s| vec![s]).unwrap_or_default());
     client_config.pool_size_per_endpoint = cfg.connections as usize;
@@ -279,7 +313,11 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
             let mut errors: u64 = 0;
             for id in 0..count {
                 let key = format_key(id);
-                let value = value_for(id, cfg.value_size);
+                let vsize = cfg
+                    .value_size_mix
+                    .as_ref()
+                    .map_or(cfg.value_size, |mix| mix.size_for(id));
+                let value = value_for(id, vsize);
                 let mut attempts = 0u32;
                 loop {
                     attempts += 1;
@@ -299,6 +337,43 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
         }
         _ => (0, 0),
     };
+
+    // Optional L0 drain: after pre-pop, force every node's engine to
+    // flush its MemTable into L1 before the measurement window opens.
+    // The leader has applied all pre-pop writes by the time the last
+    // `put` returns; followers may still be applying the learn-stream
+    // tail, so wait briefly for them to converge before flushing (flush
+    // only drains entries with slot <= contiguous_slot). A failed flush
+    // on one node is logged but does not abort the bench — it degrades
+    // the measurement's cleanliness, not its correctness.
+    if cfg.flush_after_prepopulate && !cfg.flush_mgmt_urls.is_empty() {
+        info!(
+            nodes = cfg.flush_mgmt_urls.len(),
+            "bench: draining L0 after pre-pop"
+        );
+        let flush_start = Instant::now();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let mut failures = 0u32;
+        for url in &cfg.flush_mgmt_urls {
+            match crow_console_shared::clients::http::ServerClient::new(url) {
+                Ok(sc) => match sc.flush(cfg.store_id, cfg.group_id).await {
+                    Ok(()) => {}
+                    Err(e) => {
+                        failures += 1;
+                        warn!(url, error = %e, "bench: flush failed for node");
+                    }
+                },
+                Err(e) => {
+                    failures += 1;
+                    warn!(url, error = %e, "bench: flush client build failed for node");
+                }
+            }
+        }
+        info!(
+            ms = u64::try_from(flush_start.elapsed().as_millis()).unwrap_or(u64::MAX),
+            failures, "bench: L0 drain done"
+        );
+    }
 
     let started_at = Utc::now();
     let started_instant = Instant::now();
@@ -535,8 +610,8 @@ async fn run_worker(
                         // against the deterministic formula. A
                         // mismatch is a correctness error (distinct
                         // from transport/NotLeader errors).
-                        let ok_verify =
-                            read_key_id.is_some_and(|id| gen.verify_value(id, &value, cfg.verify_bytes));
+                        let ok_verify = read_key_id
+                            .is_some_and(|id| gen.verify_value(id, value.as_ref(), cfg.verify_bytes));
                         OpOutcome {
                             ok: true,
                             correctness_error: !ok_verify,
@@ -594,11 +669,11 @@ async fn run_worker(
                 .scan(
                     cfg.store_id,
                     cfg.group_id,
-                    b"",
-                    &[],
-                    1,
-                    ReadMode::Linearizable,
-                    None,
+                    &cfg.scan_prefix,
+                    &cfg.scan_start_after,
+                    cfg.scan_limit,
+                    cfg.read_mode,
+                    cfg.min_slot_policy.to_min_slot(),
                 )
                 .await
             {

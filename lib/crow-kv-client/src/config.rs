@@ -53,11 +53,32 @@ impl Default for RetryConfig {
 ///   chosen follower has not applied `min_slot`, the server returns a
 ///   `NotLeader` hint pointing at the leader and the client follows it
 ///   for that one request (mirroring the existing retry path).
+/// - `LeastConnections` — routes to the replica with the fewest
+///   in-flight reads (tracked client-side via per-endpoint atomic
+///   counters). Ties and the first request (no history) fall back to
+///   round-robin. Same `NotLeader` fallback as `AnyReplica`.
+/// - `Latency` — routes to the replica with the lowest recent RTT
+///   (per-endpoint EWMA, `alpha = 0.25`). Ties and the first request
+///   (no RTT history) fall back to round-robin. Same `NotLeader`
+///   fallback as `AnyReplica`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ReadEndpointPolicy {
     #[default]
     Leader,
     AnyReplica,
+    LeastConnections,
+    Latency,
+}
+
+impl ReadEndpointPolicy {
+    /// Returns `true` when the policy distributes `MinSlot` reads across
+    /// the replica list (i.e. it is not `Leader`). Used to gate the
+    /// `read_endpoint_distributed` / `read_endpoint_fallback` counters
+    /// so they fire for every distributed policy, not just `AnyReplica`.
+    #[must_use]
+    pub fn is_distributed(self) -> bool {
+        !matches!(self, Self::Leader)
+    }
 }
 
 /// Top-level client configuration.

@@ -28,6 +28,8 @@ On-disk format, backends, snapshot persistence, and recovery are in
   - [1.6 Epoch-Based Reclamation](#16-epoch-based-reclamation)
   - [1.7 Read Path](#17-read-path)
   - [1.8 Concurrency Summary](#18-concurrency-summary)
+  - [1.9 Epoch-Protected MemTable (L0)](#19-epoch-protected-memtable-l0)
+  - [1.10 Scan Path Perf Baseline](#110-scan-path-perf-baseline)
 - [2. Memory and Buffer Management](#2-memory-and-buffer-management)
   - [2.1 The `buffer` Abstraction](#21-the-buffer-abstraction)
   - [2.2 Write and Read Pipelines](#22-write-and-read-pipelines)
@@ -318,8 +320,9 @@ get(key):
   2).
 - `scan(prefix, start_after, limit)` uses a **merge cursor** over L0 and the
   L1 leaf chain: at each step take the smaller key, and on a key tie take the
-  L0 cell (newer). Within L1, materialize the current leaf's live entries
-  (resolving the delta chain by highest slot), then follow `right_sibling`.
+  L0 cell (newer). Within L1, walk the current leaf's live entries with a
+  `LeafChainCursor` (resolving the delta chain by highest slot), then follow
+  `right_sibling`.
   For bounded `limit` the live overlay is fine; for large scans the cursor
   runs on a pinned `RootVersion` merged with an L0 snapshot. `start_after`
   (empty = start from beginning) is an **exclusive lower bound** pushed down
@@ -329,10 +332,32 @@ get(key):
   and applies the limit without over-fetching the prefix range — O(limit)
   FFI + decode cost instead of O(prefix range) for a page near the end of a
   large prefix.
+- **Lazy leaf resolution (`LeafChainCursor`).** A leaf chain is *never*
+  materialized for a scan. Every chain input is already key-sorted — each
+  `BatchDelta`'s entries, and the terminal `LeafBase`'s main frame slots —
+  except the in-frame delta overlay, which is bounded by `max_inframe_delta`
+  and pre-sorted once at cursor setup. The cursor merges those `k` streams
+  (`k <= max_delta_len + 2`) by linear min-key selection over the stream
+  heads, resolving highest-slot-wins per key as it goes, so producing one
+  entry costs O(k) and a `limit`-bounded scan never touches the rest of the
+  leaf. On an equal slot the winner is the stream visited earliest in chain
+  order (deltas head→tail, then the base's main entries, then its in-frame
+  overlay) — the same resolution order a whole-chain fold would apply.
+  `seek()` binary-searches each stream, so the descent leaf's entries before
+  `start_after` / `prefix` are skipped rather than stepped over. Keys and
+  cells come out as Slices borrowed from the chain's own storage and are
+  copied only when an entry is actually emitted to the caller.
+  The whole-chain form (`resolve_chain_sorted`) is the same cursor drained
+  into an owned vector; it remains the right shape for the full-set callers
+  (`iter_all` / `compare`, `PinnedSnapshot::materialize`, GC's live walk).
 - **Zero-copy value returns.** An **L1** hit returns a *borrowed* `buffer`
   pointing into the resident leaf frame (valid only for the guard's
-  lifetime, §2.2). An **L0** hit must return an *owned* copy because the
-  MemTable mutex is released on return.
+  lifetime, §2.2). An **L0** hit (R50) also returns a *borrowed* `buffer`
+  pointing directly into the MemTable's skip-list node cell version — the
+  epoch guard keeps the node alive past any concurrent overwrite/drain,
+  exactly as it keeps an L1 frame resident. An overflow value (assembled
+  from multiple pages, no single frame to borrow) is materialized into an
+  owned `buffer`.
 - `iter_all` (for `compare`) always runs on a pinned `RootVersion` (merged
   with an L0 snapshot) and includes tombstones.
 
@@ -363,6 +388,129 @@ Invariants:
 - **I6** The B+tree only ever holds slots `<= last_applied_slot` (flush
   drains the contiguous prefix only), so every `RootVersion` is an exact
   point-in-time state.
+
+### 1.9 Epoch-Protected MemTable (L0)
+
+The MemTable (L0) is a `ConcurrentSkipList` with inline keys and versioned
+cell pointers, epoch-retired exactly as L1 pages are. This brings L0 into
+the same EBR scheme as L1, closing the gap that previously forced
+`snapshot()` to deep-copy every live L0 entry on every scan.
+
+**Structure.** Each skip-list node holds a `next[]` tower of
+`std::atomic<Node*>`, an atomic `CellVersion*` pointer, a logical-deleted
+flag, and the key bytes inline in the node's tail allocation (RocksDB
+`InlineSkipList` style — one allocation, no `std::string` header). Height
+is drawn at insert (p=0.25, max 12). Keys are immutable for a node's
+lifetime; only the cell version pointer is mutable, which makes the read
+path a pure atomic load.
+
+**Cell version.** A `CellVersion` holds the `buffer` (contiguous
+`[header][value]` or split `kExternal` raw value) + slot + flags. Overwrite
+publishes a new `CellVersion*` with a release store, then
+`epoch_.retire(old_version)`. A reader that loaded the old pointer under
+its guard keeps it alive — no use-after-free. This is the key difference
+from the previous in-place overwrite.
+
+**Write path.** Writers are serialized by a write spinlock (replacing the
+old `mu_`). `apply()` already serialized on `mu_` and is not the scan
+bottleneck; CAS-based concurrent insert is out of scope. Insert splices
+the node in bottom-up with release stores. Erase (`drain_up_to`) sets
+`deleted`, unlinks the tower, then epoch-retires the node and cell version.
+`reset()` epoch-retires every node. `upsert_external` always tags the
+buffer as `kExternal` (split cell) since it stores the raw value without
+the 9-byte header — the header is reconstructed from `slot`/`flags` at
+read time.
+
+**Read path.** `MemTable::cursor(start_after)` returns a cursor seeded by
+an O(log N) `lower_bound`, exposing `key()`, `cell_version()`, `advance()`.
+Traversal is atomic acquire loads on `next[]`; logically-deleted nodes are
+skipped. The scan's `L0Cursor` is a skip-list cursor; the merge loop is
+otherwise unchanged (min-key select, highest-slot-wins on collision, early
+stop past prefix). Cell materialization runs only for entries that reach
+the output: O(limit), not O(N_l0). The `upper_bound` skip pass and its
+`scan_l0_skip_l` metric are deleted — the cursor seeks directly.
+`get_view()` and `try_get_view_no_load()` borrow the value directly from
+the `CellVersion` — no `std::string` staging, no second copy.
+
+**Counters.** `bytes_`, `min_slot_`, `max_slot_`, `count()`, and `empty()`
+are relaxed atomics maintained by the writer (read by
+`maybe_freeze_active`'s thresholds and diagnostics).
+
+**`snapshot()` retained.** `iter_all`, `compare`, and `snapshot_export`
+need every entry — O(N) is correct there. `snapshot()` is a cursor walk;
+the point of R50 is that it is no longer on the scan or get path.
+
+### 1.10 Scan Path Perf Baseline
+
+Scan is part of the read flow but a separate perf track from random
+point reads (different cost shapes: per-entry overhead vs leaf-chain
+traversal vs per-byte copy). The regression sentinel is
+`tools/bench-scan-regression.sh` driving `crow-cli bench run --workload
+list` with `--scan-limit`, `--scan-prefix`, `--scan-start-after` flags
+against a 3-node mem-mode cluster, mirroring the write/read regression
+sentinels. The sync `scan` `start_after` pushdown correctness is
+covered by `ReadPath.ScanStartAfterCursorSkipsEarlierEntries` in
+`read_path_test.cpp`. Full baseline numbers and analysis are in
+`doc/working/kv-scan-flow-analysis.md`; the raw TSV is in
+`doc/working/bench-scan-regression.tsv`.
+
+Key findings from the baseline (Apple M5 Pro, macOS, 1T:1C, 100k
+pre-populated keys):
+
+- **§1.7 O(limit) deep-pagination claim: confirmed.** Deep pagination
+  (`start_after` near end, limit=10) is 1.7x slower than from-start
+  (7084us vs 4236us) — the O(log N) B+tree descent to a deeper leaf,
+  not O(prefix) over-fetch. If the engine over-fetched the prefix,
+  deep pagination would cost ~1.75s (the full-100k number), not 7ms.
+  The over-fetch proxy ratio is 1.7x; the etcd-style "fetch all then
+  truncate" regression would show ~400x.
+- **Per-scan fixed cost** (~4.2ms): ReadIndex consensus round + gRPC
+  roundtrip + B+tree descent. Dominates at small limit (10/100).
+- **Per-entry cost** (~0.3us/entry at 64B values): visible at limit
+  >= 10k. At limit=10k, avg=7.3ms vs 4.4ms at limit=10.
+- **gRPC 4 MiB message size limit**: scans returning > 4 MiB (full
+  100k keyspace at 64B values, or limit=1000 at 16KiB values) hit
+  tonic's default `max_recv_message_length` and fail with transport
+  errors. This is the gRPC-message-size analog of etcd's range-read
+  OOM risk (issue #12342). A streaming scan response (mirroring etcd
+  PR #19766) or a raised max-message-size config is needed for
+  large-payload scans.
+- **Value-size anomaly (resolved)**: 1KiB values scanned 3.8x faster
+  than 64B despite returning 16x more data. The L0-snapshot hypothesis
+  was refuted by per-step measurement — `l0_snapshot` is 0us in
+  production (the maintenance loop drains L0 before measurement), and
+  even a full 100k-entry 64B snapshot is only ~120us against a ~3900us
+  scan. The real cause was eager whole-leaf resolution: `l1_resolve`
+  was 99.5% of the 64B C++ scan (3985us of 4004us) and 93% of the 1KiB
+  scan, because a leaf's entire live entry set was rebuilt per scan
+  regardless of `limit`. 64B values pack ~640 entries per 64 KiB leaf
+  vs ~58 for 1KiB, so the dense-leaf case paid ~11x more per leaf.
+  The lazy `LeafChainCursor` (§1.7) makes per-leaf cost O(limit):
+  microbench 100k keys, limit=1000, L1-only — 64B 1183us → 19.9us,
+  1KiB 476us → 32.2us; limit=10 at 64B 1163us → 0.4us. Cost now tracks
+  bytes returned rather than entries per leaf, so 64B is cheaper than
+  1KiB, as expected.
+
+Per-step scan instrumentation (`Crowtree::scan_profile()`, the `scan.*`
+metrics, and the `scan_step_profile` microbench under
+`-DCROW_TREE_BENCH=ON`) is what made this attributable: `l0_snapshot`,
+`l0_skip`, `l1_descent`, `l1_resolve`, `merge`, `total`. `l1_resolve`
+now covers per-leaf cursor setup + seek only; the per-entry cursor step
+is counted under `merge`, since timing each step would cost more than
+the step.
+
+Cost-split prioritization: with leaf resolution O(limit), the remaining
+scan cost is per-entry decode/copy plus the per-scan fixed cost
+(ReadIndex consensus round + gRPC roundtrip + descent, ~0.4-0.6ms),
+which dominates every bounded scan. The gRPC 4 MiB limit caps practical
+scan width before per-byte copy becomes dominant, so response-size work
+(pagination + byte budget) gates large-value scans more than per-byte
+copy does.
+
+Future gaps (not measured by the baseline): high-concurrency
+read-mode split (MinSlot vs Linearizable at > 1T:1C), and reverse scan
+(forward-only today). The L0 snapshot copy (O(N_l0) per scan) was closed
+by R50 — see §1.9.
 
 ---
 

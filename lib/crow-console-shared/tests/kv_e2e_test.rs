@@ -104,7 +104,7 @@ async fn put_get_delete_cycle() {
         .await
         .expect("get");
     match got {
-        GetOutcome::Found { value, .. } => assert_eq!(value, b"world"),
+        GetOutcome::Found { value, .. } => assert_eq!(value.as_ref(), b"world"),
         GetOutcome::NotFound => panic!("expected Found"),
     }
 
@@ -150,9 +150,9 @@ async fn put_get_delete_cycle() {
         .expect("scan");
     assert!(!out.truncated);
     assert_eq!(out.items.len(), 2);
-    assert_eq!(out.items[0].0, b"alpha/1");
-    assert_eq!(out.items[0].1, b"a1");
-    assert_eq!(out.items[1].0, b"alpha/2");
+    assert_eq!(out.items[0].0.as_ref(), b"alpha/1");
+    assert_eq!(out.items[0].1.as_ref(), b"a1");
+    assert_eq!(out.items[1].0.as_ref(), b"alpha/2");
 
     // Truncation: limit < matching count.
     let out = kv
@@ -169,14 +169,14 @@ async fn put_get_delete_cycle() {
         .expect("scan limit=1");
     assert!(out.truncated);
     assert_eq!(out.items.len(), 1);
-    assert_eq!(out.items[0].0, b"alpha/1");
+    assert_eq!(out.items[0].0.as_ref(), b"alpha/1");
 
     // Empty prefix returns everything; limit=0 means "no limit".
     let out = kv
         .scan(store_id, group_id, b"", &[], 0, ReadMode::Linearizable, None)
         .await
         .expect("scan all");
-    assert!(out.items.iter().any(|(k, _)| k == b"beta/1"));
+    assert!(out.items.iter().any(|(k, _)| k.as_ref() == b"beta/1"));
     assert!(!out.truncated);
 
     // Unknown group surfaces ok=false → Err with "group... not found".
@@ -205,7 +205,7 @@ async fn put_get_delete_cycle() {
         .await
         .expect("get on second client")
     {
-        GetOutcome::Found { value, .. } => assert_eq!(value, b"hit"),
+        GetOutcome::Found { value, .. } => assert_eq!(value.as_ref(), b"hit"),
         GetOutcome::NotFound => panic!("expected Found via second client"),
     }
 

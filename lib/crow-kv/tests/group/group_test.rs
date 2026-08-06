@@ -36,7 +36,7 @@ fn group_adds_remote_replicas_for_all_non_local_members() {
     store.add_group(group);
 
     let group = store.get_group(1).expect("group should be registered");
-    assert!(group.local_replica().id == 1);
+    assert_eq!(group.local_replica().id, 1);
     // With Vec-based indexing, node ID 2 creates a vector of length 3 (indices 0, 1, 2)
     assert_eq!(group.remote_replica_count(), 3);
     let remote = group.get_remote_replica(2).expect("remote replica exists");

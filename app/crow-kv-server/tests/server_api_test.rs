@@ -473,6 +473,32 @@ async fn step_down_group_not_found() {
 }
 
 #[tokio::test]
+async fn flush_group_drains_local_engine() {
+    let server = start_server().await;
+    let resp = client()
+        .post(format!("{}/stores/0/groups/1/flush", server.base_url()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["store_id"], 0);
+    assert_eq!(body["group_id"], 1);
+    assert_eq!(body["accepted"], true);
+}
+
+#[tokio::test]
+async fn flush_group_not_found() {
+    let server = start_server().await;
+    let resp = client()
+        .post(format!("{}/stores/0/groups/99/flush", server.base_url()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
 async fn topology_export() {
     let server = start_server().await;
     let resp: Value = client()

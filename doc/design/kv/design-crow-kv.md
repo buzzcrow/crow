@@ -291,8 +291,43 @@ Full design: `design-crow-kv-reconfiguration.md`, `design-crow-kv-server.md`.
     same selector; the scan fallback parses the server's
     `"not leader; retry scan at {endpoint}"` error string (no protocol
     field today).
+  - `LeastConnections` — routes to the replica with the fewest
+    in-flight reads (tracked client-side via per-endpoint atomic
+    counters, incremented on send and decremented on response via an
+    RAII guard). Ties and the first request (no history) fall back to
+    round-robin. Same `NotLeader` fallback as `AnyReplica`.
+  - `Latency` — routes to the replica with the lowest recent RTT
+    (per-endpoint EWMA, `alpha = 0.25`; first sample initializes). Ties
+    and the first request (no RTT history) fall back to round-robin.
+    Same `NotLeader` fallback as `AnyReplica`.
+  - All distributed policies (`AnyReplica`, `LeastConnections`,
+    `Latency`) increment `read_endpoint_distributed` on selection and
+    `read_endpoint_fallback` on `NotLeader` redirect. Per-endpoint
+    statistics live in a `DashMap<String, Arc<EndpointStats>>` keyed by
+    endpoint string; entries are created lazily and never evicted
+    (stale entries are harmless — zero in-flight, zero RTT, never
+    selected).
 - **Retry** — on timeout or `NotLeader`, client retries with backoff.
   `NotLeader` with hint → follow hint immediately.
+- **Scan pagination** — the unary `Scan` RPC uses S3-style pagination
+  (`start_after` + `truncated` + `limit`). The server applies a
+  fixed byte budget (`SCAN_BYTE_BUDGET` = 3.5 MiB, leaving ~0.5 MiB
+  for proto framing under tonic's 4 MiB default) to each response so
+  every page is provably bounded regardless of value sizes: the C++
+  engine's merge loop accumulates key+value bytes and stops with
+  `truncated = true` when the budget is exceeded, always returning at
+  least one entry (so a single oversized entry still makes progress).
+  A warning is logged for any single entry whose key+value size alone
+  exceeds the budget. The client transparently pages until
+  `!truncated` or the caller's `limit` is reached, using the last
+  returned key as the next page's `start_after`. On redirect or
+  transport error, pagination restarts from the beginning with the
+  (possibly new) endpoint. The byte budget is server-internal — not
+  on the wire — so `KvScanRequest` and the `kv_store::kv_scan` trait
+  are unchanged. The former `ScanStream` server-streaming RPC (which
+  was "fake streaming" — materialized the full result, then chunked
+  it) has been deleted; the unary + pagination path is strictly
+  simpler and provably bounded.
 - **Idempotency** — `(client_id, seq)` dedup, persisted into the
   PxLogEntry stream (survives leader change). Per-client retention of
   the last 64 committed `(seq, slot)` mappings, exact-match lookup: a

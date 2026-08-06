@@ -90,6 +90,57 @@ impl ServerClient {
         self.get_json(&path).await
     }
 
+    /// `POST /stores/{sid}/groups/{gid}/flush` — drain the local
+    /// replica's L0 memtable into L1 on this node. Used by the bench's
+    /// `--flush-after-prepopulate` flag and as an admin drain. Returns
+    /// `Ok(())` on a 2xx response.
+    ///
+    /// # Errors
+    /// Returns `Error::UpstreamRpc` for transport failures or a non-2xx
+    /// response (e.g. 404 when the store/group is not hosted here).
+    pub async fn flush(&self, store_id: u64, group_id: u64) -> Result<()> {
+        let path = format!("/stores/{store_id}/groups/{group_id}/flush");
+        let url = format!("{}{path}", self.base_url);
+        let cid = crate::corr_id::current_or_new();
+        let started = std::time::Instant::now();
+        let resp = self
+            .inner
+            .post(&url)
+            .header(crate::corr_id::HEADER, &cid)
+            .send()
+            .await
+            .map_err(|e| {
+                crate::ops_log::append_http(
+                    &cid,
+                    "POST",
+                    &url,
+                    0,
+                    started.elapsed().as_millis(),
+                    Some(&format!("transport error: {e}")),
+                );
+                Error::UpstreamRpc {
+                    node_id: self.base_url.clone(),
+                    status: format!("POST {path}: {e}"),
+                }
+            })?;
+        let status = resp.status();
+        crate::ops_log::append_http(
+            &cid,
+            "POST",
+            &url,
+            status.as_u16(),
+            started.elapsed().as_millis(),
+            None,
+        );
+        if !status.is_success() {
+            return Err(Error::UpstreamRpc {
+                node_id: self.base_url.clone(),
+                status: format!("POST {path}: HTTP {status}"),
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T> {
         let url = format!("{}{path}", self.base_url);
         let cid = crate::corr_id::current_or_new();

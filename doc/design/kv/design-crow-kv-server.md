@@ -75,7 +75,9 @@ Key endpoint groups:
   if group 0 is authoritative. See `../console/design-crow-console.md` §4.3 for the
   full persistent cluster config design.
 - **Admin operations** — `step-down` (force leader step-down), `join`
-  (new-member snapshot join).
+  (new-member snapshot join), `flush` (drain the local replica's L0
+  memtable into L1 in memory; used by the bench's
+  `--flush-after-prepopulate` flag and as an admin drain).
 
 ### 2.5 Group lifecycle
 
