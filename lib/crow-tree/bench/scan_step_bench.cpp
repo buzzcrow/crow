@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-// Scan per-step profile (R48): isolates where scan time goes for 64B vs 1KiB
+// Scan per-step profile: isolates where scan time goes for 64B vs 1KiB
 // values, to identify the 1KiB anomaly's root cause. Builds a flushed L1-only
 // tree (no L0) at each value size, runs N scans, and prints per-step
 // avg/max via Crowtree::scan_profile(). An L0 variant leaves entries
@@ -132,7 +132,7 @@ int main()
     constexpr int N     = 100000;
     constexpr int ITERS = 2000;
 
-    std::printf("=== Scan per-step profile (R48) ===\n");
+    std::printf("=== Scan per-step profile ===\n");
     std::printf("Isolates L1-only path (flushed) vs L0-full path, 64B vs 1KiB.\n");
 
     // L1-only (flushed): isolates the L1 B+tree scan path. If 64B ~= 1KiB

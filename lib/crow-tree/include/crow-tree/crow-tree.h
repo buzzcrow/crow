@@ -243,10 +243,13 @@ struct EngineStats
 // number of scans in the window; `entries` is the total entries returned. Each
 // step's `sum_ns` / `max_ns` cover only that step; `avg_ns` is sum_ns / count.
 // Steps: l0_snapshot (MemTable::snapshot copy), l0_skip (upper_bound pass),
-// l1_descent (find_leaf_page_id), l1_resolve (resolve_chain_sorted, summed
-// across all leaves touched), merge (min-key select + winner + consider/decode,
-// excluding l1_resolve), total (whole scan). Used by the scan-step microbench
-// to isolate the 1KiB anomaly's root cause (R48).
+// l1_descent (find_leaf_page_id), l1_resolve (per-leaf LeafChainCursor setup +
+// cursor seek, summed across all leaves touched), merge (min-key select +
+// winner + per-entry cursor step + consider/decode, excluding l1_resolve),
+// total (whole scan). The per-entry leaf work is lazy, so it is
+// counted under merge -- timing each cursor step would cost more than the step
+// itself; l1_resolve is now per-leaf setup only and scales with leaves
+// touched, not entries per leaf.
 struct ScanProfile
 {
     uint64_t count   = 0; // scans in the window
@@ -1236,7 +1239,7 @@ class Crowtree
         Bandwidth      *snapshot_meta_write_bw      = nullptr; // metadata write bytes (seg+dir+anchor)
         Bandwidth      *page_read_bw                = nullptr; // demand-load read bytes
         Counter        *snapshot_pages_c            = nullptr; // cumulative pages written
-        // Scan per-step profile (R48): counters + per-step LatencySummary.
+        // Scan per-step profile: counters + per-step LatencySummary.
         Counter        *scan_c             = nullptr; // scan calls
         Counter        *scan_entries_c     = nullptr; // entries returned
         LatencySummary *scan_l             = nullptr; // total scan latency

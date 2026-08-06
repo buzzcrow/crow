@@ -129,7 +129,7 @@ if(CROW_TREE_BENCH)
     message(STATUS "crow-tree bench: folly not found; skip-list bench disabled")
   endif()
 
-  # Standalone scan per-step profiler (R48): own main(), no Google Benchmark
+  # Standalone scan per-step profiler: own main(), no Google Benchmark
   # dependency. Isolates the 1KiB anomaly's root cause via Crowtree::scan_profile.
   add_executable(scan_step_profile bench/scan_step_bench.cpp)
   target_link_libraries(scan_step_profile PRIVATE crow-tree absl::btree)

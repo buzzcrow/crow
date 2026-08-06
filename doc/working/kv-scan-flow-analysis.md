@@ -160,9 +160,10 @@ The split would show a difference at higher concurrency.
 - **Per-scan fixed** (~0.4-0.6ms): ReadIndex consensus round + gRPC
   roundtrip + FFI decode. The portion of end-to-end latency NOT inside
   the C++ `scan` call (end-to-end avg minus `scan.l` avg).
-- **L1 leaf resolve** (~3.98ms at 64B / ~0.49ms at 1KiB): the dominant
-  cost — `resolve_chain_sorted` rebuilding each touched leaf's full live
-  entry set into a `std::map` per scan. See § Scan Per-Step Profile.
+- **L1 leaf resolve** (~3.98ms at 64B / ~0.49ms at 1KiB): was the
+  dominant cost — each touched leaf's full live entry set was rebuilt
+  into a `std::map` per scan. Fixed by the lazy `LeafChainCursor`; see
+  § Scan Per-Step Profile.
 - **Merge + decode** (~19us at 64B / ~37us at 1KiB): min-key selection +
   winner resolution + value materialization. Small.
 - **Deep-pagination descent** (~2.5ms): O(log N) B+tree descent to a
@@ -241,7 +242,23 @@ any) would come purely from fewer entries (byte-threshold freezing:
 4MiB/1KiB ≈ 4k vs 4MiB/64B ≈ 46k), not per-entry cost. In practice L0
 is empty by measurement time, so this is moot for the anomaly.
 
-### Root cause — `resolve_chain_sorted` (crow-tree.cpp:65)
+### Microbench after the lazy cursor (same scenarios, same machine)
+
+| Config | total before | total after | l1_resolve after |
+|--------|-------------:|------------:|-----------------:|
+| 64B limit=1000 | 1183us | 19.9us | 0.0us |
+| 1KiB limit=1000 | 476us | 32.2us | 0.0us |
+| 64B limit=10 | 1163us | 0.4us | 0.0us |
+| 64B limit=10000 | 2522us | 190.4us | 0.1us |
+
+O(limit) is confirmed end to end: limit=10 is now ~50x cheaper than
+limit=1000 (it was identical before), and 64B is cheaper than 1KiB at
+equal limit — cost tracks bytes returned, not entries per leaf, so the
+anomaly is inverted back to the expected ordering. `l1_resolve` now
+measures per-leaf cursor setup + seek only; the per-entry cursor step
+falls under `merge` (timing each step would cost more than the step).
+
+### Root cause (fixed) — eager whole-leaf resolution
 
 `resolve_chain_sorted` rebuilds each touched leaf's ENTIRE live entry
 set into a `std::map<Slice, Slice>` (node-per-entry, heap-allocated
@@ -266,31 +283,34 @@ confirming leaf fullness is the driver. The root mechanism (per-leaf
 std::map rebuild scaling with entries-per-leaf) is identical in all
 cases.
 
-### Fix direction
+### Fix — lazy `LeafChainCursor`
 
-Make `resolve_chain_sorted` limit-bounded (resolve only up to the needed
-entries, not the whole leaf) and/or replace the `std::map` with a flat
-merge of the already-sorted base + deltas (the base leaf is sorted; only
-deltas need merging, and a flat vector + sort beats a node-per-entry
-red-black tree). This is an O(limit) improvement — scoped as R48. The
-L0 copy cost is a separate issue (R50, epoch-protected MemTable); it
-saves ~0us in this benchmark because L0 is already empty by
+The chain's inputs are already key-sorted (each BatchDelta's entries,
+the base frame's main slots) except the small in-frame delta overlay.
+The cursor merges them k-way on demand, resolving highest-slot-wins as
+it goes, and binary-searches each stream on `seek` — so a scan pays for
+the entries it emits, not for the leaf. `resolve_chain_sorted` is now
+that cursor drained into an owned vector, for the callers that really
+do need the whole page (`iter_all` / `compare`, snapshot materialize, GC).
+The L0 copy cost is a separate issue (R50, epoch-protected MemTable);
+it saves ~0us in this benchmark because L0 is already empty by
 measurement time.
 
 ---
 
 ## Unsolved Issues
 
-- **1 KiB anomaly root cause (SOLVED, R48)**: 1 KiB values are 3.8x
-  faster than 64 B despite returning 16x more data. Root cause is
-  `resolve_chain_sorted` (crow-tree.cpp:65) rebuilding each touched
-  leaf's full entry set into a `std::map` per scan — O(entries-per-leaf
-  × log), not O(limit). 64B packs ~640 entries/64KiB leaf vs ~58 for
-  1KiB, so each leaf resolve is far more expensive for 64B. Confirmed
-  by per-step metrics: l1_resolve is 99.5% of the 64B C++ scan (3985us)
-  and 0us of it is L0 (L0 is empty by measurement time). See § Scan
-  Per-Step Profile. Fix: limit-bounded resolve and/or flat merge of
-  sorted base + deltas (replaces the node-per-entry std::map).
+- **1 KiB anomaly (FIXED)**: 1 KiB values scanned 3.8x faster than 64 B
+  despite returning 16x more data. Root cause was eager whole-leaf
+  resolution — each touched leaf's full entry set rebuilt into a
+  `std::map` per scan, O(entries-per-leaf × log) rather than O(limit).
+  64B packs ~640 entries/64KiB leaf vs ~58 for 1KiB, so each leaf
+  resolve was far more expensive for 64B. Confirmed by per-step
+  metrics: l1_resolve was 99.5% of the 64B C++ scan (3985us) and 0us of
+  it was L0 (L0 is empty by measurement time). Fixed by the lazy
+  `LeafChainCursor` — see § Scan Per-Step Profile for before/after.
+  Re-run `tools/bench-scan-regression.sh` to refresh the end-to-end
+  table above (the numbers there predate the fix).
 - **L0 snapshot O(N_l0) cost (SOLVED, R50 scope)**:
   `MemTable::snapshot()` copies all entries on every scan, but the
   maintenance loop's 3s tick drains L0 during pre-populate, so

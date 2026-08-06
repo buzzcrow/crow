@@ -41,36 +41,27 @@ complexity, and dependency. Before implementation, follow the
   `crow-tree` / `crow::tree` / `CROW_TREE_*`. Establishes the `crow-kv` →
   `crow-tree` dependency boundary analogous to `crow-kv` → `crow-common`.
   Most naturally done after R12.
-- **[R48](R48-scan-lazy-l0-cursor.md)** — Lazy limit-bounded L1 leaf
-  resolver — Area: scan / crow-tree engine —
-  `resolve_chain_sorted` (`crow-tree.cpp:65`) rebuilds each touched
-  Bw-tree page's full entry set into a `std::map` per scan
-  (O(entries-per-leaf), not O(limit)); 64B packs ~640 entries/leaf vs
-  ~58 for 1KiB, producing the 3.8x 1KiB anomaly. Per-step metrics
-  confirmed `l1_resolve` is 99.5% of the 64B scan cost; the original
-  L0-snapshot premise is refuted (L0 is empty by measurement time).
-  Fix: lazy per-page resolver (O(limit)) + flat merge of sorted base +
-  deltas (no `std::map`). Medium complexity. The L0 copy issue is
-  covered separately by R50.
-- **[R50](R50-epoch-protected-memtable.md)** — Epoch-protected lock-free
-  MemTable — Area: scan / get / crow-tree engine —
-  `MemTable::snapshot()` deep-copies every live L0 entry (key + full
-  cell payload) on every scan, and `get()` takes `mu_` + copies on
-  every L0 hit. Root cause: L0 is the only reader-visible structure
-  not integrated into the engine's epoch-based reclamation (EBR)
-  scheme — L1 pages are epoch-protected (lock-free, zero-copy reads),
-  L0 cells live in a `btree_map` under a mutex and are freed
-  immediately on erase, forcing readers to snapshot-copy for safety.
-  R50 replaces the `btree_map` with a concurrent skip list whose
-  nodes are epoch-protected, so readers (get/scan) iterate L0
-  lock-free under their existing epoch guard with zero copy, and the
-  Flusher erases entries via epoch-deferred reclamation (same
-  mechanism as `retire_page()`). Scan L0 cost drops from O(N_l0) copy
-  to O(log N + limit) traversal; `get()` L0 hit drops from mutex +
-  copy to lock-free + zero-copy borrow. Closes the known gap flagged
-  at `crow-tree.h:81`. High complexity (~800–1300 lines: concurrent
-  skip list + MemTable rewrite + scan/get path changes); reference:
-  RocksDB's `InlineSkipList`.
+- **[R50](R50-epoch-protected-memtable.md)** — Epoch-protected
+  lock-free MemTable — Area: scan / get / crow-tree engine —
+  **Blocked on a measurement gate.** `MemTable::snapshot()`
+  deep-copies every live L0 entry (key + full cell payload) on every
+  scan regardless of range or `limit`, and an L0 `get` hit copies
+  twice (`MemTable::get` into a `std::string`, then `get_view` into
+  `owned_`). Root cause: L0 is the only reader-visible structure
+  outside the engine's EBR scheme — L1 pages are epoch-protected
+  (lock-free, zero-copy), while L0 cells are freed immediately on
+  erase *and overwrite*, forcing readers to snapshot-copy. Final
+  design (single phase, no interim scaffolding): one concurrent skip
+  list with inline keys for both `active_` and `frozen_`, versioned
+  cells so overwrite is epoch-deferred too, a cursor-based lock-free
+  scan, a borrowing `get_view`, and a bounded retire-queue policy
+  (`GetView` holds a guard across FFI). Closes the known gap at
+  `crow-tree.h:81`. High complexity (~800–1300 lines); reference:
+  RocksDB's `InlineSkipList`. **Do not start** until a
+  workload with a non-empty L0 at scan time is shown to exist —
+  `l0_snapshot` currently measures 0us in production, so the premise
+  is unverified. If it stays near zero, close R50 and keep only the
+  ~20-line single-copy `get` fix.
 - **[R51](R51-scan-s3-pagination-drop-stream.md)** — S3-style scan
   pagination + server byte budget, drop ScanStream — Area: scan / RPC —
   The `ScanStream` server-streaming RPC is "fake streaming" (server

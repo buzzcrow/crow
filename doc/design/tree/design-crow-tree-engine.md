@@ -319,8 +319,9 @@ get(key):
   2).
 - `scan(prefix, start_after, limit)` uses a **merge cursor** over L0 and the
   L1 leaf chain: at each step take the smaller key, and on a key tie take the
-  L0 cell (newer). Within L1, materialize the current leaf's live entries
-  (resolving the delta chain by highest slot), then follow `right_sibling`.
+  L0 cell (newer). Within L1, walk the current leaf's live entries with a
+  `LeafChainCursor` (resolving the delta chain by highest slot), then follow
+  `right_sibling`.
   For bounded `limit` the live overlay is fine; for large scans the cursor
   runs on a pinned `RootVersion` merged with an L0 snapshot. `start_after`
   (empty = start from beginning) is an **exclusive lower bound** pushed down
@@ -330,6 +331,24 @@ get(key):
   and applies the limit without over-fetching the prefix range — O(limit)
   FFI + decode cost instead of O(prefix range) for a page near the end of a
   large prefix.
+- **Lazy leaf resolution (`LeafChainCursor`).** A leaf chain is *never*
+  materialized for a scan. Every chain input is already key-sorted — each
+  `BatchDelta`'s entries, and the terminal `LeafBase`'s main frame slots —
+  except the in-frame delta overlay, which is bounded by `max_inframe_delta`
+  and pre-sorted once at cursor setup. The cursor merges those `k` streams
+  (`k <= max_delta_len + 2`) by linear min-key selection over the stream
+  heads, resolving highest-slot-wins per key as it goes, so producing one
+  entry costs O(k) and a `limit`-bounded scan never touches the rest of the
+  leaf. On an equal slot the winner is the stream visited earliest in chain
+  order (deltas head→tail, then the base's main entries, then its in-frame
+  overlay) — the same resolution order a whole-chain fold would apply.
+  `seek()` binary-searches each stream, so the descent leaf's entries before
+  `start_after` / `prefix` are skipped rather than stepped over. Keys and
+  cells come out as Slices borrowed from the chain's own storage and are
+  copied only when an entry is actually emitted to the caller.
+  The whole-chain form (`resolve_chain_sorted`) is the same cursor drained
+  into an owned vector; it remains the right shape for the full-set callers
+  (`iter_all` / `compare`, `PinnedSnapshot::materialize`, GC's live walk).
 - **Zero-copy value returns.** An **L1** hit returns a *borrowed* `buffer`
   pointing into the resident leaf frame (valid only for the guard's
   lifetime, §2.2). An **L0** hit must return an *owned* copy because the
@@ -400,37 +419,42 @@ pre-populated keys):
   OOM risk (issue #12342). A streaming scan response (mirroring etcd
   PR #19766) or a raised max-message-size config is needed for
   large-payload scans.
-- **Value-size anomaly**: 1KiB values scan 3.2x faster than 64B values
-  (666 vs 206 scans/s) despite returning 16x more data. Root cause:
-  `MemTable::snapshot()` (`memtable.cpp:195`) copies all N_l0 entries
-  into a vector on every scan call — O(N_l0) per scan, not O(limit).
-  With `memtable_flush_bytes = 4 MiB`: 64B values (~104B/entry) hit
-  the byte threshold at ~40k entries, leaving ~60k unflushed after
-  100k pre-pop; 1KiB values (~1064B/entry) hit it at ~4k, leaving
-  only ~4k. The 60k vs 4k snapshot cost difference (15x) explains the
-  3.2x throughput difference. The memtable per-entry is not slower
-  than the B+tree (sorted vector vs `resolve_chain_sorted`'s `std::map`
-  build per leaf) — the problem is `snapshot()` eagerly copies the
-  entire memtable. A lazy/range-bounded L0 cursor would make this
-  O(limit). Tracked as R47 (flush-after-prepopulate bench flag to
-  verify) + a follow-on for the lazy L0 cursor.
+- **Value-size anomaly (resolved)**: 1KiB values scanned 3.8x faster
+  than 64B despite returning 16x more data. The L0-snapshot hypothesis
+  was refuted by per-step measurement — `l0_snapshot` is 0us in
+  production (the maintenance loop drains L0 before measurement), and
+  even a full 100k-entry 64B snapshot is only ~120us against a ~3900us
+  scan. The real cause was eager whole-leaf resolution: `l1_resolve`
+  was 99.5% of the 64B C++ scan (3985us of 4004us) and 93% of the 1KiB
+  scan, because a leaf's entire live entry set was rebuilt per scan
+  regardless of `limit`. 64B values pack ~640 entries per 64 KiB leaf
+  vs ~58 for 1KiB, so the dense-leaf case paid ~11x more per leaf.
+  The lazy `LeafChainCursor` (§1.7) makes per-leaf cost O(limit):
+  microbench 100k keys, limit=1000, L1-only — 64B 1183us → 19.9us,
+  1KiB 476us → 32.2us; limit=10 at 64B 1163us → 0.4us. Cost now tracks
+  bytes returned rather than entries per leaf, so 64B is cheaper than
+  1KiB, as expected.
 
-Cost-split prioritization: R38 (zero-copy scan values) targets
-per-byte copy cost, which grows with value size but is ~0.3us/entry
-at 64B. The 1KiB anomaly is caused by `MemTable::snapshot()` O(N_l0)
-cost, not per-byte copy — so the lazy L0 cursor fix is higher priority
-than R38 for small-value workloads with unflushed memtables. For
-large-value workloads (>= 1KiB), R38's win is more significant, but
-the gRPC 4 MiB limit caps practical scan width before per-byte copy
-becomes dominant — so streaming scan response is a prerequisite for
-R38's win to matter at scale.
+Per-step scan instrumentation (`Crowtree::scan_profile()`, the `scan.*`
+metrics, and the `scan_step_profile` microbench under
+`-DCROW_TREE_BENCH=ON`) is what made this attributable: `l0_snapshot`,
+`l0_skip`, `l1_descent`, `l1_resolve`, `merge`, `total`. `l1_resolve`
+now covers per-leaf cursor setup + seek only; the per-entry cursor step
+is counted under `merge`, since timing each step would cost more than
+the step.
 
-Future gaps (not measured by the baseline): L0 snapshot O(N_l0) cost
-(R47 flush-after-prepopulate flag to verify), high-concurrency
-read-mode split (MinSlot vs Linearizable at > 1T:1C), reverse scan
-(forward-only today), and engine-level cost isolation (C++ microbench
-to separate per-entry copy from leaf-chain traversal and L0 merge,
-giving R38 a tighter before/after measurement).
+Cost-split prioritization: with leaf resolution O(limit), the remaining
+scan cost is per-entry decode/copy plus the per-scan fixed cost
+(ReadIndex consensus round + gRPC roundtrip + descent, ~0.4-0.6ms),
+which dominates every bounded scan. The gRPC 4 MiB limit caps practical
+scan width before per-byte copy becomes dominant, so response-size work
+(pagination + byte budget) gates large-value scans more than per-byte
+copy does.
+
+Future gaps (not measured by the baseline): the L0 snapshot copy
+(O(N_l0) per scan; only visible when L0 is not drained), high-concurrency
+read-mode split (MinSlot vs Linearizable at > 1T:1C), and reverse scan
+(forward-only today).
 
 ---
 

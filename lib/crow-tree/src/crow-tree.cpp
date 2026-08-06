@@ -7,6 +7,7 @@
 #include "crow-tree/compressor.h"
 #include "crow-tree/delta.h"
 #include "crow-tree/descent.h"
+#include "crow-tree/leaf_cursor.h"
 #include "crow-tree/mapping_slot.h"
 #ifdef CROW_TREE_HAVE_LIBURING
 #    include "crow-tree/async_page_store.h"
@@ -42,62 +43,21 @@ buffer cell_of(Slice s)
 // highest-slot-wins. Tombstones whose slot <= gc_floor are dropped (logical
 // retention GC); all other tombstones are kept.
 //
-// plan-tree #5 B3 (partial copy avoidance): the dedup map below is keyed and
-// valued by *borrowed* Slices, not std::string -- every candidate key/cell
-// here points directly into the chain's own already-resident storage (a
-// BatchDelta node's leaf_entry, or the terminal LeafBase's frame bytes via
-// LeafFrameView), which the caller keeps alive for this whole synchronous
-// call (an epoch guard for scan()/collect_in_order's read paths, direct
-// ownership for a write-path caller). Only the *final* winner per key is
-// ever copied into an owned leaf_entry, in the output loop at the bottom --
-// unlike the old std::map<std::string,std::string>, which re-copied the key
-// on every visit (even ones that don't change the winner) and re-copied the
-// cell on every contested key each time a higher-slot layer superseded an
-// earlier one. This is a mechanical internal optimization only: the
-// function's signature/contract (an owned vector<leaf_entry>) is unchanged,
-// so scan()/try_scan_no_load()/collect_in_order() and GC's live walk (its
-// three callers) need no changes at all. A *fully* zero-copy version --
-// returning borrowed Slices all the way out to those callers -- remains a
-// separate, larger, deferred change: it would need
-// each of those three call sites to independently prove out how long their
-// own borrowed results must stay valid, which is a materially bigger change
-// than this one.
+// This is the whole-page form, for the callers that genuinely need every live
+// entry (collect_in_order for iter_all/compare, PinnedSnapshot::materialize,
+// GC's live walk) -- O(N) is the right cost there. It is a thin loop over
+// LeafChainCursor, which merges the chain's already-sorted streams lazily; the
+// scan paths drive that cursor directly instead, so a limit-bounded scan pays
+// O(limit) rather than O(entries-per-leaf). Each key/cell the cursor
+// yields is borrowed from the chain's own resident storage and is copied into
+// an owned leaf_entry exactly once, here.
 std::vector<leaf_entry> resolve_chain_sorted(PageBase *head, uint64_t gc_floor)
 {
-    std::map<Slice, Slice> resolved; // key -> encoded cell, both borrowed
-    auto                   consider = [&](Slice key, Slice cell) {
-        auto it = resolved.find(key);
-        if (it == resolved.end()) {
-            resolved.emplace(key, cell);
-        }
-        else if (CellView{cell}.slot() > CellView{it->second}.slot()) {
-            it->second = cell;
-        }
-    };
-    for (PageBase *node = head; node != nullptr; node = node->next) {
-        if (node->type == page_type::kBatchDelta) {
-            for (const leaf_entry &e : static_cast<BatchDelta *>(node)->entries()) {
-                consider(Slice(e.key), Slice(e.cell));
-            }
-        }
-        else if (node->type == page_type::kLeafBase) {
-            LeafFrameView v = static_cast<LeafBase *>(node)->view();
-            for (uint32_t i = 0; i < v.count(); ++i) {
-                consider(v.key(i), v.cell(i));
-            }
-            for (uint32_t i = 0; i < v.delta_count(); ++i) {
-                consider(v.delta_key(i), v.delta_cell(i));
-            }
-        }
-    }
     std::vector<leaf_entry> out;
-    out.reserve(resolved.size());
-    for (auto &kv : resolved) {
-        CellView v{kv.second};
-        if (v.is_tombstone() && v.slot() <= gc_floor) {
-            continue; // GC drop
-        }
-        out.push_back({.key = kv.first.to_string(), .cell = cell_of(kv.second)});
+    LeafChainCursor         cur(head, gc_floor);
+    out.reserve(cur.remaining_hint());
+    for (; cur.valid(); cur.next()) {
+        out.push_back({.key = cur.key().to_string(), .cell = cell_of(cur.cell())});
     }
     return out;
 }
@@ -1829,36 +1789,47 @@ Status Crowtree::scan(Slice prefix, Slice start_after, size_t limit, std::vector
     uint64_t l1_resolve_ns = 0;
     uint64_t gc            = gc_floor_.load();
     uint64_t page_id       = root_page_id_.load();
+    // Descend at the cursor when present, else at the prefix start -- a
+    // non-empty start_after lands directly on the leaf containing it,
+    // skipping every earlier leaf in the prefix range.
+    Slice descend_key = !start_after.empty() ? start_after : prefix;
     if (page_id != kInvalidPageId) {
-        // Descend at the cursor when present, else at the prefix start -- a
-        // non-empty start_after lands directly on the leaf containing it,
-        // skipping every earlier leaf in the prefix range.
-        Slice descend_key = !start_after.empty() ? start_after : prefix;
-        t0                = std::chrono::steady_clock::now();
-        page_id           = find_leaf_page_id([this](uint64_t p) { return resident(p); }, page_id, descend_key);
+        t0      = std::chrono::steady_clock::now();
+        page_id = find_leaf_page_id([this](uint64_t p) { return resident(p); }, page_id, descend_key);
     }
-    auto                    l1_descent_ns = page_id != kInvalidPageId ? dur_ns(t0) : 0;
-    std::vector<leaf_entry> l1_leaf; // current leaf's resolved live entries
-    size_t                  j = 0;   // cursor into l1_leaf
+    auto l1_descent_ns = page_id != kInvalidPageId ? dur_ns(t0) : 0;
+    // A lazy cursor over the current leaf's chain, not a materialized
+    // vector -- it yields borrowed key/cell Slices in key order and only
+    // resolves as far as the merge loop pulls, so a limit-bounded scan never
+    // pays for the rest of the leaf. The Slices stay valid for this whole
+    // synchronous call under the epoch guard entered above.
+    LeafChainCursor l1;
+    bool            first_leaf = true;
 
-    // Pull the next non-empty leaf (an all-tombstone/GC'd leaf resolves empty;
-    // keep walking right past it) until l1_leaf has entries at [j, size) or the
-    // chain is exhausted. Idempotent when l1_leaf already has entries left.
+    // Pull the next non-exhausted leaf (an all-tombstone/GC'd leaf yields
+    // nothing; keep walking right past it) until the cursor has an entry or the
+    // chain is exhausted. Idempotent when the cursor is already positioned.
     auto refill_l1 = [&]() -> bool {
-        while (j >= l1_leaf.size() && page_id != kInvalidPageId) {
+        while (!l1.valid() && page_id != kInvalidPageId) {
             PageBase *head = resident(page_id);
             if (head == nullptr) {
                 page_id = kInvalidPageId;
                 break;
             }
             auto rt = std::chrono::steady_clock::now();
-            l1_leaf = resolve_chain_sorted(head, gc);
+            l1.reset(head, gc);
+            // Only the first leaf can hold entries at or before the cursor:
+            // the descent landed on it. Seek past them by binary search
+            // instead of letting the merge loop step over them one by one.
+            if (first_leaf && !descend_key.empty()) {
+                l1.seek(descend_key, /*exclusive=*/!start_after.empty());
+            }
+            first_leaf = false;
             l1_resolve_ns += dur_ns(rt);
-            j              = 0;
             LeafBase *base = chain_leaf_base(head);
             page_id        = base != nullptr ? base->right_sibling() : kInvalidPageId;
         }
-        return j < l1_leaf.size();
+        return l1.valid();
     };
 
     auto consider = [&](Slice key, Slice cell) -> bool {
@@ -1900,7 +1871,7 @@ Status Crowtree::scan(Slice prefix, Slice start_after, size_t limit, std::vector
         bool  has_any = have_l1;
         Slice min_key;
         if (have_l1) {
-            min_key = Slice(l1_leaf[j].key);
+            min_key = l1.key();
         }
         for (auto &c : l0) {
             if (c.idx >= c.entries.size()) {
@@ -1919,10 +1890,10 @@ Status Crowtree::scan(Slice prefix, Slice start_after, size_t limit, std::vector
         Slice winner_key = min_key;
         Slice winner_cell;
         bool  have_winner = false;
-        if (have_l1 && Slice(l1_leaf[j].key).compare(min_key) == 0) {
-            winner_cell = Slice(l1_leaf[j].cell);
+        if (have_l1 && l1.key().compare(min_key) == 0) {
+            winner_cell = l1.cell(); // borrowed from the leaf chain; outlives next()
             have_winner = true;
-            ++j;
+            l1.next();
         }
         for (auto &c : l0) {
             if (c.idx >= c.entries.size() || Slice(c.entries[c.idx].key).compare(min_key) != 0) {
@@ -2025,23 +1996,24 @@ bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, size_t limit, s
     uint64_t l1_resolve_ns = 0;
     uint64_t gc            = gc_floor_.load();
     uint64_t page_id       = root_page_id_.load();
+    // Descend at the cursor when present, else at the prefix start -- see
+    // scan()'s own comment.
+    Slice descend_key = !start_after.empty() ? start_after : prefix;
     if (page_id != kInvalidPageId) {
-        // Descend at the cursor when present, else at the prefix start -- see
-        // scan()'s own comment.
-        Slice descend_key = !start_after.empty() ? start_after : prefix;
-        t0                = std::chrono::steady_clock::now();
-        page_id           = find_leaf_page_id(probe, page_id, descend_key);
+        t0      = std::chrono::steady_clock::now();
+        page_id = find_leaf_page_id(probe, page_id, descend_key);
         if (blocked_page_id != kInvalidPageId) {
             *out_pending_page_id = blocked_page_id;
             return false; // genuine miss on the initial descent
         }
     }
-    auto                    l1_descent_ns = page_id != kInvalidPageId ? dur_ns(t0) : 0;
-    std::vector<leaf_entry> l1_leaf;
-    size_t                  j = 0;
+    auto l1_descent_ns = page_id != kInvalidPageId ? dur_ns(t0) : 0;
+    // Lazy leaf cursor -- see scan()'s own comment.
+    LeafChainCursor l1;
+    bool            first_leaf = true;
 
     auto refill_l1 = [&]() -> bool {
-        while (j >= l1_leaf.size() && page_id != kInvalidPageId) {
+        while (!l1.valid() && page_id != kInvalidPageId) {
             PageBase *head = probe(page_id);
             if (blocked_page_id != kInvalidPageId) {
                 return false; // caller checks blocked_page_id, distinct from "chain exhausted"
@@ -2051,13 +2023,16 @@ bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, size_t limit, s
                 break;
             }
             auto rt = std::chrono::steady_clock::now();
-            l1_leaf = resolve_chain_sorted(head, gc);
+            l1.reset(head, gc);
+            if (first_leaf && !descend_key.empty()) {
+                l1.seek(descend_key, /*exclusive=*/!start_after.empty());
+            }
+            first_leaf = false;
             l1_resolve_ns += dur_ns(rt);
-            j              = 0;
             LeafBase *base = chain_leaf_base(head);
             page_id        = base != nullptr ? base->right_sibling() : kInvalidPageId;
         }
-        return j < l1_leaf.size();
+        return l1.valid();
     };
 
     auto consider = [&](Slice key, Slice cell) -> bool {
@@ -2093,7 +2068,7 @@ bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, size_t limit, s
         bool  has_any = have_l1;
         Slice min_key;
         if (have_l1) {
-            min_key = Slice(l1_leaf[j].key);
+            min_key = l1.key();
         }
         for (auto &c : l0) {
             if (c.idx >= c.entries.size()) {
@@ -2112,10 +2087,10 @@ bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, size_t limit, s
         Slice winner_key = min_key;
         Slice winner_cell;
         bool  have_winner = false;
-        if (have_l1 && Slice(l1_leaf[j].key).compare(min_key) == 0) {
-            winner_cell = Slice(l1_leaf[j].cell);
+        if (have_l1 && l1.key().compare(min_key) == 0) {
+            winner_cell = l1.cell(); // borrowed from the leaf chain; outlives next()
             have_winner = true;
-            ++j;
+            l1.next();
         }
         for (auto &c : l0) {
             if (c.idx >= c.entries.size() || Slice(c.entries[c.idx].key).compare(min_key) != 0) {
