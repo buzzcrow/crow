@@ -1782,6 +1782,12 @@ Status Crowtree::scan(Slice prefix, Slice start_after, size_t limit, std::vector
     // try_merge_leaf_locked for the exact ordering this relies on.
     EpochManager::Guard guard = epoch_.enter();
 
+    auto dur_ns = [](std::chrono::steady_clock::time_point from) {
+        return static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - from).count());
+    };
+    auto t_total = std::chrono::steady_clock::now();
+
     // L0: one sorted-by-key snapshot per live MemTable (active_ + any
     // not-yet-drained frozen_ buffers). Unlike the single-buffer design,
     // more than one of these can hold the same key with a *different* slot
@@ -1795,12 +1801,14 @@ Status Crowtree::scan(Slice prefix, Slice start_after, size_t limit, std::vector
         size_t                 idx = 0;
     };
 
+    auto                  t0 = std::chrono::steady_clock::now();
     std::vector<L0Cursor> l0;
     for (auto &mt : all_memtables()) {
         L0Cursor c;
         c.entries = mt->snapshot();
         l0.push_back(std::move(c));
     }
+    auto l0_snapshot_ns = dur_ns(t0);
     // L0 snapshots are key-sorted (MemTable::snapshot iterates an
     // absl::btree_map<less<>>); binary-search each cursor to the first key >
     // start_after so the merge loop never touches earlier L0 entries. A full
@@ -1808,6 +1816,7 @@ Status Crowtree::scan(Slice prefix, Slice start_after, size_t limit, std::vector
     // an O(N) per-cursor linear skip into O(log N) -- the consider-lambda's
     // `key <= start_after` check still covers L1 (the descent leaf may
     // straddle the cursor) but becomes dead code for L0.
+    t0 = std::chrono::steady_clock::now();
     if (!start_after.empty()) {
         std::string sa_str(start_after.data(), start_after.size());
         for (auto &c : l0) {
@@ -1815,16 +1824,20 @@ Status Crowtree::scan(Slice prefix, Slice start_after, size_t limit, std::vector
                                         c.entries.begin());
         }
     }
+    auto l0_skip_ns = dur_ns(t0);
 
-    uint64_t gc      = gc_floor_.load();
-    uint64_t page_id = root_page_id_.load();
+    uint64_t l1_resolve_ns = 0;
+    uint64_t gc            = gc_floor_.load();
+    uint64_t page_id       = root_page_id_.load();
     if (page_id != kInvalidPageId) {
         // Descend at the cursor when present, else at the prefix start -- a
         // non-empty start_after lands directly on the leaf containing it,
         // skipping every earlier leaf in the prefix range.
         Slice descend_key = !start_after.empty() ? start_after : prefix;
+        t0                = std::chrono::steady_clock::now();
         page_id           = find_leaf_page_id([this](uint64_t p) { return resident(p); }, page_id, descend_key);
     }
+    auto                    l1_descent_ns = page_id != kInvalidPageId ? dur_ns(t0) : 0;
     std::vector<leaf_entry> l1_leaf; // current leaf's resolved live entries
     size_t                  j = 0;   // cursor into l1_leaf
 
@@ -1838,7 +1851,9 @@ Status Crowtree::scan(Slice prefix, Slice start_after, size_t limit, std::vector
                 page_id = kInvalidPageId;
                 break;
             }
-            l1_leaf        = resolve_chain_sorted(head, gc);
+            auto rt = std::chrono::steady_clock::now();
+            l1_leaf = resolve_chain_sorted(head, gc);
+            l1_resolve_ns += dur_ns(rt);
             j              = 0;
             LeafBase *base = chain_leaf_base(head);
             page_id        = base != nullptr ? base->right_sibling() : kInvalidPageId;
@@ -1879,6 +1894,7 @@ Status Crowtree::scan(Slice prefix, Slice start_after, size_t limit, std::vector
     // highest-slot cell (cell_wins) wins and every cursor sitting on that
     // key is advanced, so a key present in more than one source still
     // yields exactly one output entry.
+    auto t_loop = std::chrono::steady_clock::now();
     while (true) {
         bool  have_l1 = refill_l1();
         bool  has_any = have_l1;
@@ -1929,6 +1945,21 @@ Status Crowtree::scan(Slice prefix, Slice start_after, size_t limit, std::vector
             break;
         }
     }
+    auto loop_ns = dur_ns(t_loop);
+    // merge = loop overhead excluding the leaf-resolution time already counted
+    // under l1_resolve (refill bookkeeping + min-key select + winner + decode).
+    uint64_t merge_ns = (loop_ns > l1_resolve_ns) ? loop_ns - l1_resolve_ns : 0;
+    uint64_t total_ns = dur_ns(t_total);
+    if (metrics_.scan_c != nullptr) {
+        metrics_.scan_c->inc();
+        metrics_.scan_entries_c->inc_by(out->size());
+        metrics_.scan_l->observe(total_ns);
+        metrics_.scan_l0_snapshot_l->observe(l0_snapshot_ns);
+        metrics_.scan_l0_skip_l->observe(l0_skip_ns);
+        metrics_.scan_l1_descent_l->observe(l1_descent_ns);
+        metrics_.scan_l1_resolve_l->observe(l1_resolve_ns);
+        metrics_.scan_merge_l->observe(merge_ns);
+    }
     return Status::Ok();
 }
 
@@ -1941,6 +1972,12 @@ bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, size_t limit, s
     }
     EpochManager::Guard guard = epoch_.enter();
 
+    auto dur_ns = [](std::chrono::steady_clock::time_point from) {
+        return static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - from).count());
+    };
+    auto t_total = std::chrono::steady_clock::now();
+
     // L0: identical to scan() -- never touches the page store.
     struct L0Cursor
     {
@@ -1948,13 +1985,16 @@ bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, size_t limit, s
         size_t                 idx = 0;
     };
 
+    auto                  t0 = std::chrono::steady_clock::now();
     std::vector<L0Cursor> l0;
     for (auto &mt : all_memtables()) {
         L0Cursor c;
         c.entries = mt->snapshot();
         l0.push_back(std::move(c));
     }
+    auto l0_snapshot_ns = dur_ns(t0);
     // L0 cursor skip -- see scan()'s own comment. Identical upper_bound pass.
+    t0 = std::chrono::steady_clock::now();
     if (!start_after.empty()) {
         std::string sa_str(start_after.data(), start_after.size());
         for (auto &c : l0) {
@@ -1962,6 +2002,7 @@ bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, size_t limit, s
                                         c.entries.begin());
         }
     }
+    auto l0_skip_ns = dur_ns(t0);
 
     // Non-blocking probe (mirrors try_get_view_no_load's `probe`): bails out
     // on an unloaded slot instead of demand-loading it, recording which
@@ -1981,18 +2022,21 @@ bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, size_t limit, s
         return v;
     };
 
-    uint64_t gc      = gc_floor_.load();
-    uint64_t page_id = root_page_id_.load();
+    uint64_t l1_resolve_ns = 0;
+    uint64_t gc            = gc_floor_.load();
+    uint64_t page_id       = root_page_id_.load();
     if (page_id != kInvalidPageId) {
         // Descend at the cursor when present, else at the prefix start -- see
         // scan()'s own comment.
         Slice descend_key = !start_after.empty() ? start_after : prefix;
+        t0                = std::chrono::steady_clock::now();
         page_id           = find_leaf_page_id(probe, page_id, descend_key);
         if (blocked_page_id != kInvalidPageId) {
             *out_pending_page_id = blocked_page_id;
             return false; // genuine miss on the initial descent
         }
     }
+    auto                    l1_descent_ns = page_id != kInvalidPageId ? dur_ns(t0) : 0;
     std::vector<leaf_entry> l1_leaf;
     size_t                  j = 0;
 
@@ -2006,7 +2050,9 @@ bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, size_t limit, s
                 page_id = kInvalidPageId;
                 break;
             }
-            l1_leaf        = resolve_chain_sorted(head, gc);
+            auto rt = std::chrono::steady_clock::now();
+            l1_leaf = resolve_chain_sorted(head, gc);
+            l1_resolve_ns += dur_ns(rt);
             j              = 0;
             LeafBase *base = chain_leaf_base(head);
             page_id        = base != nullptr ? base->right_sibling() : kInvalidPageId;
@@ -2037,6 +2083,7 @@ bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, size_t limit, s
         return true;
     };
 
+    auto t_loop = std::chrono::steady_clock::now();
     while (true) {
         bool have_l1 = refill_l1();
         if (blocked_page_id != kInvalidPageId) {
@@ -2088,6 +2135,19 @@ bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, size_t limit, s
         if (!consider(winner_key, winner_cell)) {
             break;
         }
+    }
+    auto     loop_ns  = dur_ns(t_loop);
+    uint64_t merge_ns = (loop_ns > l1_resolve_ns) ? loop_ns - l1_resolve_ns : 0;
+    uint64_t total_ns = dur_ns(t_total);
+    if (metrics_.scan_c != nullptr) {
+        metrics_.scan_c->inc();
+        metrics_.scan_entries_c->inc_by(out->size());
+        metrics_.scan_l->observe(total_ns);
+        metrics_.scan_l0_snapshot_l->observe(l0_snapshot_ns);
+        metrics_.scan_l0_skip_l->observe(l0_skip_ns);
+        metrics_.scan_l1_descent_l->observe(l1_descent_ns);
+        metrics_.scan_l1_resolve_l->observe(l1_resolve_ns);
+        metrics_.scan_merge_l->observe(merge_ns);
     }
     return true; // fully resolved
 }
@@ -2524,6 +2584,32 @@ EngineStats Crowtree::stats() const
     return s;
 }
 
+ScanProfile Crowtree::scan_profile() const
+{
+    ScanProfile p;
+    if (metrics_registry_ == nullptr) {
+        return p;
+    }
+    auto fill = [](LatencySummary *h, ScanProfile::Step &s, uint64_t count) {
+        if (h == nullptr || count == 0) {
+            return;
+        }
+        auto snap = h->flush();
+        s.sum_ns  = snap.sum;
+        s.max_ns  = snap.max;
+        s.avg_ns  = snap.sum / count;
+    };
+    p.count   = metrics_.scan_c != nullptr ? metrics_.scan_c->flush().count : 0;
+    p.entries = metrics_.scan_entries_c != nullptr ? metrics_.scan_entries_c->flush().count : 0;
+    fill(metrics_.scan_l, p.total, p.count);
+    fill(metrics_.scan_l0_snapshot_l, p.l0_snapshot, p.count);
+    fill(metrics_.scan_l0_skip_l, p.l0_skip, p.count);
+    fill(metrics_.scan_l1_descent_l, p.l1_descent, p.count);
+    fill(metrics_.scan_l1_resolve_l, p.l1_resolve, p.count);
+    fill(metrics_.scan_merge_l, p.merge, p.count);
+    return p;
+}
+
 void Crowtree::init_metrics(const std::string &prefix)
 {
     metrics_registry_ = std::make_unique<MetricsRegistry>();
@@ -2555,6 +2641,14 @@ void Crowtree::init_metrics(const std::string &prefix)
     metrics_.snapshot_meta_write_bw      = r->register_bandwidth(prefix + ".snapshot.meta.write.bw");
     metrics_.page_read_bw                = r->register_bandwidth(prefix + ".page.read.bw");
     metrics_.snapshot_pages_c            = r->register_counter(prefix + ".snapshot.pages.c");
+    metrics_.scan_c                      = r->register_counter(prefix + ".scan.c");
+    metrics_.scan_entries_c              = r->register_counter(prefix + ".scan.entries.c");
+    metrics_.scan_l                      = r->register_summary(prefix + ".scan.l");
+    metrics_.scan_l0_snapshot_l          = r->register_summary(prefix + ".scan.l0.snapshot.l");
+    metrics_.scan_l0_skip_l              = r->register_summary(prefix + ".scan.l0.skip.l");
+    metrics_.scan_l1_descent_l           = r->register_summary(prefix + ".scan.l1.descent.l");
+    metrics_.scan_l1_resolve_l           = r->register_summary(prefix + ".scan.l1.resolve.l");
+    metrics_.scan_merge_l                = r->register_summary(prefix + ".scan.merge.l");
     pool_->set_metrics(metrics_.buf_hits, metrics_.buf_misses, metrics_.buf_evictions, metrics_.buf_writebacks,
                        metrics_.buf_resident, metrics_.buf_dirty);
 }

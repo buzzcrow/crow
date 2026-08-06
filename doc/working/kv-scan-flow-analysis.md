@@ -1,3 +1,4 @@
+setup metrics can measure each major step of scan, then we can compare the difference.
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
@@ -156,10 +157,14 @@ The split would show a difference at higher concurrency.
 
 ### Cost split
 
-- **Per-scan fixed** (~4.3ms): ReadIndex consensus round + gRPC
-  roundtrip + B+tree descent. Dominates at small limit (10/100).
-- **Per-entry** (~0.18us at 64B): leaf-chain traversal + packed-buffer
-  decode + zero-copy value slice. Visible at limit >= 10k.
+- **Per-scan fixed** (~0.4-0.6ms): ReadIndex consensus round + gRPC
+  roundtrip + FFI decode. The portion of end-to-end latency NOT inside
+  the C++ `scan` call (end-to-end avg minus `scan.l` avg).
+- **L1 leaf resolve** (~3.98ms at 64B / ~0.49ms at 1KiB): the dominant
+  cost — `resolve_chain_sorted` rebuilding each touched leaf's full live
+  entry set into a `std::map` per scan. See § Scan Per-Step Profile.
+- **Merge + decode** (~19us at 64B / ~37us at 1KiB): min-key selection +
+  winner resolution + value materialization. Small.
 - **Deep-pagination descent** (~2.5ms): O(log N) B+tree descent to a
   leaf near the end. Fixed cost per scan.
 
@@ -180,20 +185,121 @@ Streaming unblocked `full_100k` and `valuesize_16KiB`.
 
 ---
 
+## Scan Per-Step Profile (R48)
+
+Per-step timing added to the C++ scan path (`Crowtree::scan` and
+`try_scan_no_load`): `l0_snapshot` (MemTable::snapshot copy), `l0_skip`
+(upper_bound pass), `l1_descent` (find_leaf_page_id), `l1_resolve`
+(resolve_chain_sorted, summed across touched leaves), `merge` (min-key
+select + winner + consider/decode, excluding l1_resolve), `total`.
+Exposed via `Crowtree::scan_profile()` and the `scan.*` C++ metrics; the
+`scan_step_profile` microbench (`lib/crow-tree/bench/scan_step_bench.cpp`,
+build with `-DCROW_TREE_BENCH=ON`) isolates the L1 path in a controlled
+flushed tree.
+
+### Production (3-node, mem, 100k keys, limit=1000, leader C++ scan time)
+
+| Config | scan.l avg | l1_resolve | l0_snapshot | merge | l1_resolve % |
+|--------|-----------:|-----------:|------------:|------:|-------------:|
+| 64B (flushed) | 4004us | 3985us | 0us | 19us | 99.5% |
+| 64B (non-flushed) | 3858us | 3837us | 0us | 20us | 99.5% |
+| 1KiB (flushed) | 529us | 492us | 0us | 37us | 93.0% |
+
+`l0_snapshot` is 0us in production both with and without
+`--flush-after-prepopulate` — the maintenance loop's 3s tick already
+drains L0 during pre-populate, so L0 is empty by measurement time. The
+flag is a confirmed no-op for this benchmark. End-to-end 64B flushed =
+4408us, 1KiB flushed = 1154us (3.8x); the C++ `scan.l` ratio is 7.6x
+(4004/529), diluted to 3.8x end-to-end by the ~625us fixed
+consensus+gRPC overhead.
+
+### Microbench (scan_step_profile, L1-only, single flush, 100k keys)
+
+| Config | total | l1_resolve | merge | l0_snapshot |
+|--------|------:|-----------:|------:|------------:|
+| 64B limit=1000 | 1183us | 1170us (98.7%) | 15us | 0.1us |
+| 1KiB limit=1000 | 476us | 443us (93%) | 33us | 0.1us |
+| 64B limit=10 | 1163us | 1162us | 0.2us | 0.1us |
+| 64B limit=10000 | 2522us | 2367us | 154us | 0.1us |
+
+`l1_resolve` is 2.6x slower for 64B (1170 vs 443us) even with L0 empty —
+the L1 path alone is a 2.6x cause. limit=10 costs the same as limit=1000
+(both resolve the whole first leaf): the cost is O(entries-per-leaf),
+not O(limit). limit=10000 (~16 leaves) roughly doubles vs limit=1000
+(~2 leaves), confirming per-leaf scaling.
+
+### L0 snapshot cost (microbench, 100k entries in L0, unflushed)
+
+| Config | l0_snapshot | total | l0_snapshot % |
+|--------|------------:|------:|--------------:|
+| 64B | 120us | 136us | 88% |
+| 1KiB | 387us | 429us | 90% |
+
+With an EQUAL L0 entry count, 1KiB snapshot is SLOWER (bigger cells to
+copy in `materialize()`). So the production L0 advantage for 1KiB (if
+any) would come purely from fewer entries (byte-threshold freezing:
+4MiB/1KiB ≈ 4k vs 4MiB/64B ≈ 46k), not per-entry cost. In practice L0
+is empty by measurement time, so this is moot for the anomaly.
+
+### Root cause — `resolve_chain_sorted` (crow-tree.cpp:65)
+
+`resolve_chain_sorted` rebuilds each touched leaf's ENTIRE live entry
+set into a `std::map<Slice, Slice>` (node-per-entry, heap-allocated
+red-black tree) plus a sorted `std::vector<leaf_entry>` with per-entry
+`.to_string()` key/cell copies, on EVERY scan — even when only `limit`
+entries are needed. The merge loop's `refill_l1` calls it on the whole
+leaf before producing any entries, so the cost is
+O(entries-per-leaf × log entries-per-leaf), not O(limit). 64B values
+pack ~640 entries per 64KiB leaf (leaf_split_bytes default) vs ~58 for
+1KiB, so each leaf resolve is far more expensive for 64B. This is why
+1KiB (16x more data, 11x fewer entries per leaf) is faster: the scan
+touches more leaves for 1KiB but each resolve is cheap, while 64B
+resolves a few dense leaves expensively.
+
+Production amplifies the 64B per-leaf cost beyond the single-flush
+microbench (3985us vs 1170us) — the production flush pattern (freeze at
+~46k entries via the 4MiB byte threshold, drain via the 3s maintenance
+tick) shapes the tree with denser leaves than a single end-of-load
+flush. An incremental-flush microbench variant (flush every 30k keys)
+produces sparser split leaves and drops 64B l1_resolve to 292us,
+confirming leaf fullness is the driver. The root mechanism (per-leaf
+std::map rebuild scaling with entries-per-leaf) is identical in all
+cases.
+
+### Fix direction
+
+Make `resolve_chain_sorted` limit-bounded (resolve only up to the needed
+entries, not the whole leaf) and/or replace the `std::map` with a flat
+merge of the already-sorted base + deltas (the base leaf is sorted; only
+deltas need merging, and a flat vector + sort beats a node-per-entry
+red-black tree). This is an O(limit) improvement — scoped as R48. The
+L0 copy cost is a separate issue (R50, epoch-protected MemTable); it
+saves ~0us in this benchmark because L0 is already empty by
+measurement time.
+
+---
+
 ## Unsolved Issues
 
-- **1 KiB anomaly root cause (unknown)**: 1 KiB values are 3.8x faster
-  than 64 B despite returning 16x more data. The L0-snapshot
-  hypothesis was refuted (flush-after-prepopulate did not close the
-  gap). Zero-copy scan values did not close it. The real cause is in
-  the L1 B+tree scan path or the decode path and needs an engine-level
-  C++ microbench (flushed L1-only tree, vary value size, isolate
-  per-leaf merge / delta-chain / decode cost) to identify. This is a
-  prerequisite for scoping a fix.
-- **L0 snapshot O(N_l0) cost**: `MemTable::snapshot()` copies all
-  entries on every scan. The maintenance loop keeps L0 small during
-  measurement, so this is not the anomaly's cause, but a
-  lazy/range-bounded L0 cursor would still be an O(limit) improvement.
+- **1 KiB anomaly root cause (SOLVED, R48)**: 1 KiB values are 3.8x
+  faster than 64 B despite returning 16x more data. Root cause is
+  `resolve_chain_sorted` (crow-tree.cpp:65) rebuilding each touched
+  leaf's full entry set into a `std::map` per scan — O(entries-per-leaf
+  × log), not O(limit). 64B packs ~640 entries/64KiB leaf vs ~58 for
+  1KiB, so each leaf resolve is far more expensive for 64B. Confirmed
+  by per-step metrics: l1_resolve is 99.5% of the 64B C++ scan (3985us)
+  and 0us of it is L0 (L0 is empty by measurement time). See § Scan
+  Per-Step Profile. Fix: limit-bounded resolve and/or flat merge of
+  sorted base + deltas (replaces the node-per-entry std::map).
+- **L0 snapshot O(N_l0) cost (SOLVED, R50 scope)**:
+  `MemTable::snapshot()` copies all entries on every scan, but the
+  maintenance loop's 3s tick drains L0 during pre-populate, so
+  l0_snapshot is 0us in production (both flushed and non-flushed).
+  Even a full 100k-entry 64B snapshot is only 120us (microbench) —
+  negligible vs the ~3900us l1_resolve. The old R48 lazy-L0-cursor
+  premise (L0 snapshot is the 3.2x cause) is refuted by magnitude; the
+  L0 copy cost is a separate issue covered by R50 (epoch-protected
+  MemTable), not the anomaly's cause.
 - **Streaming scan residual errors**: `valuesize_16KiB` shows 309
   errors despite the streaming scan RPC. Investigating retry edge
   cases under high payload is a follow-on item.
@@ -203,7 +309,3 @@ Streaming unblocked `full_100k` and `valuesize_16KiB`.
   follow-on item.
 - **Reverse scan**: `scan` is forward-only today; reverse scan is a
   distinct cost shape and would need its own baseline if added.
-- **Engine-level cost split**: an engine-level C++ microbench would
-  isolate per-entry copy from leaf-chain traversal and L0 merge,
-  giving a tighter before/after measurement than the end-to-end
-  baseline provides.

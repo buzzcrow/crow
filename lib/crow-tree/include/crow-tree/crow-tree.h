@@ -237,6 +237,36 @@ struct EngineStats
     uint64_t demand_load_total   = 0; // demand-load page faults
 };
 
+// Per-step scan profile: each step's aggregate over the window since the last
+// scan_profile() call (the underlying LatencySummary handles are flushed, so
+// this is a destructive read -- the window resets on each call). `count` is the
+// number of scans in the window; `entries` is the total entries returned. Each
+// step's `sum_ns` / `max_ns` cover only that step; `avg_ns` is sum_ns / count.
+// Steps: l0_snapshot (MemTable::snapshot copy), l0_skip (upper_bound pass),
+// l1_descent (find_leaf_page_id), l1_resolve (resolve_chain_sorted, summed
+// across all leaves touched), merge (min-key select + winner + consider/decode,
+// excluding l1_resolve), total (whole scan). Used by the scan-step microbench
+// to isolate the 1KiB anomaly's root cause (R48).
+struct ScanProfile
+{
+    uint64_t count   = 0; // scans in the window
+    uint64_t entries = 0; // total entries returned
+
+    struct Step
+    {
+        uint64_t sum_ns = 0;
+        uint64_t max_ns = 0;
+        uint64_t avg_ns = 0; // sum_ns / count (filled by scan_profile)
+    };
+
+    Step l0_snapshot;
+    Step l0_skip;
+    Step l1_descent;
+    Step l1_resolve;
+    Step merge;
+    Step total;
+};
+
 // One durable blob to write at a fixed offset, computed ahead of time by
 // prepare_snapshot_locked() (persist.cpp) so the actual store->write_at()/
 // submit_write() call is a pure I/O op with no further encoding logic --
@@ -689,6 +719,11 @@ class Crowtree
     // O(1)), so this is safe to poll periodically (e.g. from a metrics
     // scrape or console panel refresh).
     [[nodiscard]] EngineStats stats() const;
+
+    // Destructive read of the per-step scan profile since the last call: flushes
+    // the scan LatencySummary/Counter handles and returns per-step sum/max/avg.
+    // Returns an all-zero profile if init_metrics() was never called.
+    [[nodiscard]] ScanProfile scan_profile() const;
 
     // Create the internal MetricsRegistry and register all handles
     // using the provided name prefix (e.g. "s.1.g.0"). Called from open().
@@ -1201,6 +1236,15 @@ class Crowtree
         Bandwidth      *snapshot_meta_write_bw      = nullptr; // metadata write bytes (seg+dir+anchor)
         Bandwidth      *page_read_bw                = nullptr; // demand-load read bytes
         Counter        *snapshot_pages_c            = nullptr; // cumulative pages written
+        // Scan per-step profile (R48): counters + per-step LatencySummary.
+        Counter        *scan_c             = nullptr; // scan calls
+        Counter        *scan_entries_c     = nullptr; // entries returned
+        LatencySummary *scan_l             = nullptr; // total scan latency
+        LatencySummary *scan_l0_snapshot_l = nullptr;
+        LatencySummary *scan_l0_skip_l     = nullptr;
+        LatencySummary *scan_l1_descent_l  = nullptr;
+        LatencySummary *scan_l1_resolve_l  = nullptr;
+        LatencySummary *scan_merge_l       = nullptr;
     };
 
     MetricsHandles metrics_;
