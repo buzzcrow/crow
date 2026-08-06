@@ -68,22 +68,12 @@ serialization. The scan path is zero-copy from packed buffer to client
   `valuesize_16KiB` (previously 0 scans/s). 15-20% improvement on
   large scans.
 - **R48** — Lazy `LeafChainCursor`: replaced eager whole-leaf
-  resolution (`resolve_chain_sorted` rebuilt each touched leaf's
-  entire entry set into a `std::map` per scan, O(entries-per-leaf))
-  with an on-demand k-way cursor that merges delta chain + base frame,
-  binary-searches on seek, and emits only the entries the scan
-  returns. Cost went from O(entries-per-leaf) to O(limit). This fixed
-  the 1 KiB anomaly (1 KiB was 3.8x faster than 64B because 64B packs
-  ~640 entries/leaf vs ~58 for 1 KiB, so each leaf resolve was far
-  more expensive for 64B).
+  resolution with an on-demand k-way cursor. Scan cost went from
+  O(entries-per-leaf) to O(limit). Fixed the 1 KiB anomaly.
 - **R50** — Epoch-protected lock-free MemTable: replaced
-  `absl::btree_map` under `mu_` with a `ConcurrentSkipList` (inline
-  keys, versioned cell pointers, epoch-deferred reclamation). Readers
-  traverse L0 lock-free under their existing epoch guard with zero
-  copy; the cursor seeks directly and materializes only O(limit)
-  entries. Eliminated the O(N_l0) `snapshot()` copy that dominated
-  scan time under concurrent write+scan (82-94% of scan time per the
-  Gate 2 microbench).
+  `absl::btree_map` under `mu_` with a `ConcurrentSkipList`.
+  Eliminated the O(N_l0) `snapshot()` copy; readers traverse L0
+  lock-free with zero copy.
 
 ---
 
@@ -141,10 +131,27 @@ MinSlot shows a clear advantage:
 | deep_pag_10 | 147 | 20681 | 140.7x |
 | full_100k | 20 | 50 | 2.5x |
 
-Bounded scans improved 20-140x — R48 eliminated O(entries-per-leaf)
-and R50 eliminated O(N_l0), the two costs that dominated every scan
-regardless of limit. Deep pagination is flat (equal to from-start) —
-O(limit) confirmed.
+Two changes drove the 20-140x improvement on bounded scans:
+
+- **R48 (lazy `LeafChainCursor`)**: the old `resolve_chain_sorted`
+  rebuilt each touched leaf's entire live entry set into a `std::map`
+  per scan — O(entries-per-leaf × log), not O(limit). 64B packs
+  ~640 entries per 64KiB leaf vs ~58 for 1 KiB, so each leaf resolve
+  was far more expensive for 64B (this caused the 1 KiB anomaly where
+  1 KiB was 3.8x faster than 64B despite returning 16x more data). The
+  lazy cursor merges delta chain + base frame on demand, binary-searches
+  on seek, and emits only the entries the scan returns — cost tracks
+  `limit`, not leaf fullness. Post-fix: 64B is 2.9x faster than 1 KiB
+  (cost tracks bytes returned, not entries per leaf).
+- **R50 (epoch-protected MemTable)**: `MemTable::snapshot()` deep-copied
+  every live L0 entry on every scan — O(N_l0) regardless of limit.
+  Under concurrent write+scan this dominated scan time (82-94% per the
+  Gate 2 microbench). Replaced with a `ConcurrentSkipList` (inline keys,
+  versioned cell pointers, epoch-deferred reclamation) — readers
+  traverse L0 lock-free under their existing epoch guard with zero copy;
+  the cursor seeks directly and materializes only O(limit) entries.
+
+Deep pagination is flat (equal to from-start) — O(limit) confirmed.
 
 ---
 
