@@ -93,18 +93,19 @@ pub struct ClientMetricsSnapshot {
     pub retries_exhausted: u64,
     pub no_leader: u64,
     pub topology_refresh: u64,
-    /// `MinSlot` reads whose first endpoint was picked by the
-    /// `AnyReplica` selector (a non-leader replica, or the leader as
-    /// one of the round-robin pool). Lets an operator confirm
-    /// distribution is actually happening. `Leader` policy never
-    /// increments this.
+    /// `MinSlot` reads whose first endpoint was picked by a distributed
+    /// selector (`AnyReplica`, `LeastConnections`, or `Latency`) — a
+    /// non-leader replica, or the leader as one of the pool. Lets an
+    /// operator confirm distribution is actually happening. `Leader`
+    /// policy never increments this.
     #[serde(default)]
     pub read_endpoint_distributed: u64,
     /// `MinSlot` reads that were distributed to a follower but fell
     /// back to the leader because the follower had not applied
     /// `min_slot` (server returned `NotLeader`). Pairs with the
     /// server-side `read.minslot_fallback.c` to confirm the fallback
-    /// rate stays low.
+    /// rate stays low. Fires for every distributed policy, not just
+    /// `AnyReplica`.
     #[serde(default)]
     pub read_endpoint_fallback: u64,
     /// Recorded leader-change episodes during the client's lifetime.
@@ -239,8 +240,9 @@ impl ClientMetrics {
         self.topology_refresh.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// A `MinSlot` read was routed by the `AnyReplica` selector to a
-    /// replica chosen from the topology cache's replica list.
+    /// A `MinSlot` read was routed by a distributed selector
+    /// (`AnyReplica`, `LeastConnections`, or `Latency`) to a replica
+    /// chosen from the topology cache's replica list.
     pub(crate) fn record_read_endpoint_distributed(&self) {
         self.read_endpoint_distributed.fetch_add(1, Ordering::Relaxed);
     }

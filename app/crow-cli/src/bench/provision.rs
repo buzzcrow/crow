@@ -290,8 +290,8 @@ impl BenchFixture {
     }
 
     /// Per-node `crow-kv-server` management-API URLs (one per deployed
-    /// node). Each serves `/topology`, which a bench client with
-    /// `ReadEndpointPolicy::AnyReplica` fetches to learn the full
+    /// node). Each serves `/topology`, which a bench client with a
+    /// distributed `ReadEndpointPolicy` fetches to learn the full
     /// replica list for `MinSlot` read distribution.
     #[must_use]
     pub fn node_mgmt_urls(&self) -> &[String] {

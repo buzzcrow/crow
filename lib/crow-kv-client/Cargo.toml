@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 description = "Standalone client library for CROW: topology cache, retry/idempotency, read-mode routing."
 
+[features]
+# Enables test-only seams on `crow-kv` (e.g. `PxKvStore::set_get_delay_for_tests`)
+# for this crate's own test build. Auto-enabled via the self dev-dependency below;
+# no `--features` flag needed for `cargo test -p crow-kv-client`.
+test-util = ["crow-kv/test-util"]
+
 [lints]
 workspace = true
 
@@ -31,3 +37,6 @@ tracing = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "test-util", "net"] }
 axum = "0.7"
+# Self dev-dependency: auto-enables the `test-util` feature for this
+# crate's own test build (same pattern as `crow-kv`'s self dev-dep).
+crow-kv-client = { path = ".", features = ["test-util"] }

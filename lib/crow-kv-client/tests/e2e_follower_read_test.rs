@@ -36,6 +36,7 @@
 //! membership is unchanged, so no Accept ever reaches C.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::extract::State;
 use axum::routing::get;
@@ -544,4 +545,349 @@ async fn follow_scan_not_leader_parser_extracts_endpoint() {
     assert_eq!(parse("linearizable read: leadership quorum unavailable"), None);
     // Prefix must be exact — a near-miss is not a redirect.
     assert_eq!(parse("not leader; retry scan  http://x"), None);
+}
+
+// ─── R39: LeastConnections / Latency policies ───────────────────────
+
+fn least_connections_config(seed: String) -> ClientConfig {
+    let mut cfg = ClientConfig::new(vec![seed]);
+    cfg.read_endpoint_policy = ReadEndpointPolicy::LeastConnections;
+    cfg
+}
+
+fn latency_config(seed: String) -> ClientConfig {
+    let mut cfg = ClientConfig::new(vec![seed]);
+    cfg.read_endpoint_policy = ReadEndpointPolicy::Latency;
+    cfg
+}
+
+/// `LeastConnections` + `MinSlot` with `min_slot = 0`: reads distribute
+/// across `[A, B, C]`. A and B have the written key (`Found`); C's
+/// engine is empty and `min_slot = 0` is served locally, so C returns
+/// `NotFound`. Both branches fire; `read_endpoint_distributed`
+/// increments on every read.
+#[tokio::test]
+async fn least_connections_distributes_minslot_reads() {
+    let (leader, follower, lagging) = start_three_node_cluster().await;
+    let lagging_ep = lagging.listen_addr().expect("lagging server started").to_string();
+    let seed = spawn_topology_server(leader.clone(), lagging_ep).await;
+    let client = CrowkvClient::new(least_connections_config(seed));
+
+    let write = client
+        .put(STORE_ID, GROUP_ID, b"k1", b"v1", None)
+        .await
+        .expect("put");
+    assert!(write.revision > 0);
+
+    let mut found = 0u32;
+    let mut not_found = 0u32;
+    for _ in 0..6 {
+        match client
+            .get(STORE_ID, GROUP_ID, b"k1", ReadMode::MinSlot, Some(0))
+            .await
+            .expect("get")
+        {
+            GetOutcome::Found { value, .. } => {
+                assert_eq!(value.as_ref(), b"v1");
+                found += 1;
+            }
+            GetOutcome::NotFound => not_found += 1,
+        }
+    }
+    assert!(found > 0, "A/B branch must fire (Found)");
+    assert!(not_found > 0, "C branch must fire (NotFound)");
+
+    let snap = client.metrics();
+    assert!(
+        snap.read_endpoint_distributed >= 6,
+        "every MinSlot read should be distributed, got {}",
+        snap.read_endpoint_distributed
+    );
+    assert_eq!(snap.read_endpoint_fallback, 0, "min_slot = 0 never redirects");
+
+    shutdown(&[leader, follower, lagging]).await;
+}
+
+/// `Latency` + `MinSlot` with `min_slot = 0`: same distribution shape
+/// as `LeastConnections` — all replicas are healthy (similar RTT), so
+/// ties fall back to round-robin. Both `Found` (A/B) and `NotFound` (C)
+/// branches fire.
+#[tokio::test]
+async fn latency_distributes_minslot_reads() {
+    let (leader, follower, lagging) = start_three_node_cluster().await;
+    let lagging_ep = lagging.listen_addr().expect("lagging server started").to_string();
+    let seed = spawn_topology_server(leader.clone(), lagging_ep).await;
+    let client = CrowkvClient::new(latency_config(seed));
+
+    client
+        .put(STORE_ID, GROUP_ID, b"k1", b"v1", None)
+        .await
+        .expect("put");
+
+    let mut found = 0u32;
+    let mut not_found = 0u32;
+    for _ in 0..6 {
+        match client
+            .get(STORE_ID, GROUP_ID, b"k1", ReadMode::MinSlot, Some(0))
+            .await
+            .expect("get")
+        {
+            GetOutcome::Found { value, .. } => {
+                assert_eq!(value.as_ref(), b"v1");
+                found += 1;
+            }
+            GetOutcome::NotFound => not_found += 1,
+        }
+    }
+    assert!(found > 0, "A/B branch must fire (Found)");
+    assert!(not_found > 0, "C branch must fire (NotFound)");
+
+    let snap = client.metrics();
+    assert!(
+        snap.read_endpoint_distributed >= 6,
+        "every MinSlot read should be distributed, got {}",
+        snap.read_endpoint_distributed
+    );
+    assert_eq!(snap.read_endpoint_fallback, 0, "min_slot = 0 never redirects");
+
+    shutdown(&[leader, follower, lagging]).await;
+}
+
+/// `LeastConnections` routes fewer reads to a slow replica than
+/// round-robin. C is slowed via `set_get_delay_for_tests` (50 ms per
+/// get). Phase 1 fires 3 concurrent reads (round-robin: one to each
+/// replica); phase 2 waits 5 ms (A/B complete, C still sleeping) then
+/// fires 21 more staggered reads. By then C has `in_flight` ≥ 1 while
+/// A/B are idle, so `LeastConnections` picks A/B. C (returns
+/// `NotFound` for `min_slot = 0`) should get only the initial
+/// round-robin hits, not the round-robin share (~1/3).
+#[tokio::test]
+async fn least_connections_routes_away_from_slow_replica() {
+    let (leader, follower, lagging) = start_three_node_cluster().await;
+    lagging.set_get_delay_for_tests(Duration::from_millis(50));
+    let lagging_ep = lagging.listen_addr().expect("lagging server started").to_string();
+    let seed = spawn_topology_server(leader.clone(), lagging_ep).await;
+    let client = Arc::new(CrowkvClient::new(least_connections_config(seed)));
+
+    client
+        .put(STORE_ID, GROUP_ID, b"k1", b"v1", None)
+        .await
+        .expect("put");
+
+    let mut handles = Vec::new();
+    // Phase 1: fire 3 concurrent reads — round-robin distributes to
+    // A, B, C (all in_flight = 0, ties → round-robin).
+    for _ in 0..3 {
+        let c = client.clone();
+        handles.push(tokio::spawn(async move {
+            c.get(STORE_ID, GROUP_ID, b"k1", ReadMode::MinSlot, Some(0))
+                .await
+                .expect("get")
+        }));
+    }
+    // Wait for A/B to complete (~1 ms) but not C (50 ms delay). C's
+    // in_flight stays ≥ 1 while A/B drop to 0.
+    tokio::time::sleep(Duration::from_millis(5)).await;
+
+    // Phase 2: fire 21 more staggered reads. LeastConnections sees
+    // in_flight[C] ≥ 1, in_flight[A/B] = 0 → picks A/B.
+    for _ in 0..21 {
+        let c = client.clone();
+        handles.push(tokio::spawn(async move {
+            c.get(STORE_ID, GROUP_ID, b"k1", ReadMode::MinSlot, Some(0))
+                .await
+                .expect("get")
+        }));
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+
+    let mut not_found = 0u32;
+    for handle in handles {
+        if let GetOutcome::NotFound = handle.await.expect("task") {
+            not_found += 1;
+        }
+    }
+    // Round-robin would give ~total/3 = 8 reads to C. LeastConnections
+    // should give only the initial 1 (phase 1 round-robin), maybe 2-3
+    // if timing is unfavorable, but well below 8.
+    let total = 24u32;
+    let rr_share = total / 3;
+    assert!(
+        not_found < rr_share,
+        "LeastConnections should route fewer reads to slow C than round-robin ({rr_share}), got {not_found}"
+    );
+
+    shutdown(&[leader, follower, lagging]).await;
+}
+
+/// `Latency` routes fewer reads to a slow replica than round-robin.
+/// C is slowed via `set_get_delay_for_tests` (50 ms per get). After the
+/// first round-robin pass establishes RTT history, C's EWMA is ~50 ms
+/// while A/B's is ~1 ms, so subsequent reads route to A/B. C (returns
+/// `NotFound` for `min_slot = 0`) should get only the initial
+/// round-robin hits (~1), not the round-robin share (~1/3).
+#[tokio::test]
+async fn latency_routes_away_from_slow_replica() {
+    let (leader, follower, lagging) = start_three_node_cluster().await;
+    lagging.set_get_delay_for_tests(Duration::from_millis(50));
+    let lagging_ep = lagging.listen_addr().expect("lagging server started").to_string();
+    let seed = spawn_topology_server(leader.clone(), lagging_ep).await;
+    let client = CrowkvClient::new(latency_config(seed));
+
+    client
+        .put(STORE_ID, GROUP_ID, b"k1", b"v1", None)
+        .await
+        .expect("put");
+
+    let total = 24u32;
+    let mut not_found = 0u32;
+    for _ in 0..total {
+        if let GetOutcome::NotFound = client
+            .get(STORE_ID, GROUP_ID, b"k1", ReadMode::MinSlot, Some(0))
+            .await
+            .expect("get")
+        {
+            not_found += 1;
+        }
+    }
+    // Round-robin would give ~total/3 = 8 reads to C. Latency should
+    // give only the initial round-robin hits (before RTT history
+    // distinguishes C), which is at most ~3 (one per replica in the
+    // first rotation).
+    let rr_share = total / 3;
+    assert!(
+        not_found < rr_share,
+        "Latency should route fewer reads to slow C than round-robin ({rr_share}), got {not_found}"
+    );
+
+    shutdown(&[leader, follower, lagging]).await;
+}
+
+/// `LeastConnections` + `MinSlot` with `min_slot = write.revision`:
+/// reads distribute, and when C returns `NotLeader` the client falls
+/// back to A. Every read returns `Found`; `read_endpoint_fallback >= 1`.
+#[tokio::test]
+async fn least_connections_falls_back_to_leader() {
+    let (leader, follower, lagging) = start_three_node_cluster().await;
+    let lagging_ep = lagging.listen_addr().expect("lagging server started").to_string();
+    let seed = spawn_topology_server(leader.clone(), lagging_ep).await;
+    let client = CrowkvClient::new(least_connections_config(seed));
+
+    let write = client
+        .put(STORE_ID, GROUP_ID, b"k1", b"v1", None)
+        .await
+        .expect("put");
+    let min_slot = write.revision;
+    assert!(min_slot > 0);
+
+    for _ in 0..6 {
+        match client
+            .get(STORE_ID, GROUP_ID, b"k1", ReadMode::MinSlot, Some(min_slot))
+            .await
+            .expect("get")
+        {
+            GetOutcome::Found { value, .. } => assert_eq!(value.as_ref(), b"v1"),
+            GetOutcome::NotFound => panic!("fallback to leader must observe the write"),
+        }
+    }
+
+    let snap = client.metrics();
+    assert!(
+        snap.read_endpoint_distributed >= 6,
+        "every MinSlot read should be distributed, got {}",
+        snap.read_endpoint_distributed
+    );
+    assert!(
+        snap.read_endpoint_fallback >= 1,
+        "at least one read should hit C and fall back, got {}",
+        snap.read_endpoint_fallback
+    );
+
+    shutdown(&[leader, follower, lagging]).await;
+}
+
+/// `Latency` + `MinSlot` with `min_slot = write.revision`: same
+/// fallback shape as `LeastConnections` — C returns `NotLeader`, the
+/// client follows the hint to A. Every read returns `Found`.
+#[tokio::test]
+async fn latency_falls_back_to_leader() {
+    let (leader, follower, lagging) = start_three_node_cluster().await;
+    let lagging_ep = lagging.listen_addr().expect("lagging server started").to_string();
+    let seed = spawn_topology_server(leader.clone(), lagging_ep).await;
+    let client = CrowkvClient::new(latency_config(seed));
+
+    let write = client
+        .put(STORE_ID, GROUP_ID, b"k1", b"v1", None)
+        .await
+        .expect("put");
+    let min_slot = write.revision;
+    assert!(min_slot > 0);
+
+    for _ in 0..6 {
+        match client
+            .get(STORE_ID, GROUP_ID, b"k1", ReadMode::MinSlot, Some(min_slot))
+            .await
+            .expect("get")
+        {
+            GetOutcome::Found { value, .. } => assert_eq!(value.as_ref(), b"v1"),
+            GetOutcome::NotFound => panic!("fallback to leader must observe the write"),
+        }
+    }
+
+    let snap = client.metrics();
+    assert!(
+        snap.read_endpoint_distributed >= 6,
+        "every MinSlot read should be distributed, got {}",
+        snap.read_endpoint_distributed
+    );
+    assert!(
+        snap.read_endpoint_fallback >= 1,
+        "at least one read should hit C and fall back, got {}",
+        snap.read_endpoint_fallback
+    );
+
+    shutdown(&[leader, follower, lagging]).await;
+}
+
+/// `LeastConnections` and `Latency` do not affect linearizable reads:
+/// they always target the leader. `read_endpoint_distributed` stays 0.
+#[tokio::test]
+async fn new_policies_linearizable_still_targets_leader() {
+    let (leader, follower, lagging) = start_three_node_cluster().await;
+    let lagging_ep = lagging.listen_addr().expect("lagging server started").to_string();
+    let seed = spawn_topology_server(leader.clone(), lagging_ep).await;
+
+    for policy in [ReadEndpointPolicy::LeastConnections, ReadEndpointPolicy::Latency] {
+        let mut cfg = ClientConfig::new(vec![seed.clone()]);
+        cfg.read_endpoint_policy = policy;
+        let client = CrowkvClient::new(cfg);
+
+        client
+            .put(STORE_ID, GROUP_ID, b"k1", b"v1", None)
+            .await
+            .expect("put");
+
+        for _ in 0..4 {
+            match client
+                .get(STORE_ID, GROUP_ID, b"k1", ReadMode::Linearizable, None)
+                .await
+                .expect("get")
+            {
+                GetOutcome::Found { value, .. } => assert_eq!(value.as_ref(), b"v1"),
+                GetOutcome::NotFound => panic!("linearizable read must observe the write"),
+            }
+        }
+
+        let snap = client.metrics();
+        assert_eq!(
+            snap.read_endpoint_distributed, 0,
+            "linearizable reads must not be distributed ({policy:?})",
+        );
+        assert_eq!(
+            snap.read_endpoint_fallback, 0,
+            "linearizable reads never hit the fallback path ({policy:?})",
+        );
+    }
+
+    shutdown(&[leader, follower, lagging]).await;
 }

@@ -31,6 +31,11 @@ pub struct PxKvStore {
     /// Metrics registry for KV service instrumentation. `None` when
     /// metrics are disabled (`--metrics-interval 0`).
     pub(crate) metrics_registry: Option<Arc<std::sync::Mutex<MetricsRegistry>>>,
+    /// Test-only delay injected into `kv_get` before `resolve_read_point`.
+    /// Set via `set_get_delay_for_tests` under the `test-util` feature;
+    /// `None` in production.
+    #[cfg(feature = "test-util")]
+    get_delay: Mutex<Option<Duration>>,
 }
 
 impl KvStore for PxKvStore {
@@ -43,6 +48,12 @@ impl KvStore for PxKvStore {
         request_id: u64,
         request_create_ms: u64,
     ) -> crate::rpc::KvResponse {
+        #[cfg(feature = "test-util")]
+        let test_delay = *self.get_delay.lock();
+        #[cfg(feature = "test-util")]
+        if let Some(delay) = test_delay {
+            tokio::time::sleep(delay).await;
+        }
         let Some(group) = self.get_group(group_id) else {
             return missing_group_response(request_id, request_create_ms);
         };
@@ -232,6 +243,8 @@ impl PxKvStore {
             listen_addr,
             shutdown_started: AtomicBool::new(false),
             metrics_registry: None,
+            #[cfg(feature = "test-util")]
+            get_delay: Mutex::new(None),
         }
     }
 
@@ -239,6 +252,16 @@ impl PxKvStore {
     /// record metrics. Called before `start()`.
     pub fn set_metrics_registry(&mut self, registry: Arc<std::sync::Mutex<MetricsRegistry>>) {
         self.metrics_registry = Some(registry);
+    }
+
+    /// Test-only: inject a fixed delay into every `kv_get` call on this
+    /// store, so a test can simulate a slow replica for read-endpoint
+    /// policy acceptance tests (R39). The delay is applied before
+    /// `resolve_read_point`, affecting all read modes. `None` (default)
+    /// means no delay.
+    #[cfg(feature = "test-util")]
+    pub fn set_get_delay_for_tests(&self, delay: Duration) {
+        *self.get_delay.lock() = Some(delay);
     }
 
     /// Cascade shutdown: stop gRPC server (with timeout), then shut down each

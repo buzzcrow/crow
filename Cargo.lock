@@ -680,6 +680,7 @@ dependencies = [
  "bytes",
  "crow-common",
  "crow-kv",
+ "crow-kv-client",
  "dashmap",
  "reqwest",
  "serde",

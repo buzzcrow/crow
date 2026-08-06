@@ -168,14 +168,16 @@ pub struct BenchConfig {
     /// `MinSlot` read-endpoint selection policy. `Leader` (default)
     /// routes `MinSlot` reads to the leader (same as `Linearizable`);
     /// `AnyReplica` distributes `MinSlot` reads round-robin across all
-    /// replicas, exercising the real follower local-serve + fallback
-    /// path. Ignored for `Linearizable` reads (always target leader).
+    /// replicas; `LeastConnections` routes to the fewest in-flight;
+    /// `Latency` routes to the lowest recent RTT. Ignored for
+    /// `Linearizable` reads (always target leader).
     pub read_endpoint_policy: ReadEndpointPolicy,
     /// Topology seed URL (the console-web's `/topology` endpoint).
     /// When set, the client can fetch the full replica list so
-    /// `AnyReplica` has endpoints to round-robin over. `None` leaves
-    /// the client with an empty seed list (no topology fetch — fine
-    /// for `Leader` policy, but `AnyReplica` would have no replicas).
+    /// distributed policies have endpoints to select from. `None`
+    /// leaves the client with an empty seed list (no topology fetch —
+    /// fine for `Leader` policy, but distributed policies would have
+    /// no replicas).
     pub topology_seed: Option<String>,
     /// Scan limit (max entries per scan op) for `WorkloadKind::List`.
     /// Default 1 (the historical stub behavior).
@@ -280,8 +282,8 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
     // via the client's own per-endpoint channel pool, so every worker
     // shares one client and its internal pool rather than owning a
     // channel directly. When `topology_seed` is set (MinSlot benches
-    // with `AnyReplica`), the seed list is non-empty so the client can
-    // fetch `/topology` and learn the full replica list for round-robin
+    // with a distributed policy), the seed list is non-empty so the
+    // client can fetch `/topology` and learn the full replica list for
     // distribution.
     let mut client_config = ClientConfig::new(cfg.topology_seed.clone().map(|s| vec![s]).unwrap_or_default());
     client_config.pool_size_per_endpoint = cfg.connections as usize;

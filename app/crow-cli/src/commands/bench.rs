@@ -100,12 +100,13 @@ pub struct RunArgs {
     pub verify_bytes: usize,
 
     /// `MinSlot` read-endpoint selection policy: `leader` (default,
-    /// routes `MinSlot` reads to the leader) or `any-replica`
-    /// (distributes `MinSlot` reads across all replicas, exercising the
-    /// real follower local-serve + fallback path). Ignored for
-    /// `Linearizable` reads. When not specified, defaults to
-    /// `any-replica` for `--read-mode minslot` and `leader` for
-    /// `--read-mode linearizable`.
+    /// routes `MinSlot` reads to the leader), `any-replica`
+    /// (distributes `MinSlot` reads round-robin across all replicas),
+    /// `least-connections` (routes to the replica with the fewest
+    /// in-flight reads), or `latency` (routes to the replica with the
+    /// lowest recent RTT). Ignored for `Linearizable` reads. When not
+    /// specified, defaults to `any-replica` for `--read-mode minslot`
+    /// and `leader` for `--read-mode linearizable`.
     #[arg(long)]
     pub read_endpoint_policy: Option<String>,
 
@@ -221,8 +222,14 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
         Some(s) => match s.to_ascii_lowercase().as_str() {
             "leader" => ReadEndpointPolicy::Leader,
             "any-replica" | "any_replica" | "anyreplica" => ReadEndpointPolicy::AnyReplica,
+            "least-connections" | "least_connections" | "leastconnections" => {
+                ReadEndpointPolicy::LeastConnections
+            }
+            "latency" => ReadEndpointPolicy::Latency,
             other => {
-                eprintln!("error: unknown read-endpoint-policy {other:?} (expected: leader|any-replica)");
+                eprintln!(
+                    "error: unknown read-endpoint-policy {other:?} (expected: leader|any-replica|least-connections|latency)"
+                );
                 return ExitCode::from(1);
             }
         },
@@ -285,10 +292,11 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
         .filter(|c| *c > 0);
     cfg.verify_bytes = args.verify_bytes;
     cfg.read_endpoint_policy = read_endpoint_policy;
-    // AnyReplica needs the full replica list, which comes from a
-    // `/topology` fetch against any `crow-kv-server`'s mgmt API. Leader
-    // policy doesn't need it (the client seeds the leader directly).
-    if cfg.read_endpoint_policy == ReadEndpointPolicy::AnyReplica {
+    // Distributed policies (AnyReplica, LeastConnections, Latency) need
+    // the full replica list, which comes from a `/topology` fetch against
+    // any `crow-kv-server`'s mgmt API. Leader policy doesn't need it (the
+    // client seeds the leader directly).
+    if cfg.read_endpoint_policy.is_distributed() {
         cfg.topology_seed = Some(fixture.node_mgmt_urls()[0].clone());
     }
     cfg.scan_limit = args.scan_limit;
