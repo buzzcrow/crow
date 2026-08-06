@@ -62,30 +62,6 @@ complexity, and dependency. Before implementation, follow the
   `l0_snapshot` currently measures 0us in production, so the premise
   is unverified. If it stays near zero, close R50 and keep only the
   ~20-line single-copy `get` fix.
-- **[R51](R51-scan-s3-pagination-drop-stream.md)** — S3-style scan
-  pagination + server byte budget, drop ScanStream — Area: scan / RPC —
-  The `ScanStream` server-streaming RPC is "fake streaming" (server
-  materializes the full result, then slices into chunks; client
-  reassembles into one `Vec`) existing solely to bypass gRPC's 4 MiB
-  unary cap. The wire protocol already supports S3-style pagination
-  (`start_after` + `truncated` + `limit`), and the unary `scan` path
-  already implements the pagination loop. What's missing is a
-  server-side byte budget so every unary response is provably bounded
-  regardless of value sizes — each KV has a different length, so
-  `limit × avg_size` cannot be estimated; the budget is measured
-  incrementally in the engine merge loop. Oversized-single-entry
-  policy: always return at least one entry even if it alone exceeds
-  the budget (so the client makes progress), with a warning log
-  identifying the oversized key. The 4 MiB cap is tonic's *default*,
-  not hard — configurable via `max_decoding_message_size` (unused
-  today; `max_message_size` in the sample config is never read).
-  After R32 (custom Rust RPC) lands, the byte budget stays in both
-  roles (hard-stop safety cap + large-value warning) — the cap is a
-  safety boundary against injection / runaway values, not just a gRPC
-  workaround; R32 only decouples its value from gRPC's 4 MiB default,
-  making it an independent operator knob. Pagination is
-  transport-independent. Medium complexity. Orthogonal to R48/R50
-  (scan cost/copy, not response size).
 
 ### Low Priority
 
