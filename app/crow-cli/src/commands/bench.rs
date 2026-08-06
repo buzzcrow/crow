@@ -49,6 +49,15 @@ pub struct RunArgs {
     #[arg(long, default_value_t = 512)]
     pub value_size: usize,
 
+    /// Mixed value-size distribution for pre-population, as
+    /// `size:percent,...` (e.g. `64:70,1024:20,16384:10`). Each
+    /// pre-populated key gets a deterministic size based on its id.
+    /// Percentages must sum to 100. When set, overrides `--value-size`
+    /// for pre-population only. Useful for scan benches that want to
+    /// exercise multiple value sizes in a single run.
+    #[arg(long)]
+    pub value_size_mix: Option<String>,
+
     /// Deprecated: workspace is now always kept in the run directory.
     #[arg(long, default_value_t = false)]
     pub keep_workspace: bool,
@@ -281,6 +290,16 @@ async fn bench_benchmark(args: RunArgs, json: bool) -> ExitCode {
     cfg.duration = Duration::from_secs(args.duration_secs);
     cfg.key_space = args.key_space;
     cfg.value_size = args.value_size;
+    if let Some(ref mix_spec) = args.value_size_mix {
+        match crate::bench::workload::ValueSizeMix::parse(mix_spec) {
+            Ok(mix) => cfg.value_size_mix = Some(mix),
+            Err(e) => {
+                eprintln!("error: {e}");
+                fixture.cleanup().await;
+                return ExitCode::from(2);
+            }
+        }
+    }
     cfg.run_id = Some(run_id.clone());
     cfg.report_dir = Some(run_dir.clone());
     cfg.metrics_log_path = Some(run_dir.join("bench-metrics.log"));

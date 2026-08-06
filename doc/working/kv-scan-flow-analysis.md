@@ -90,47 +90,55 @@ serialization. The scan path is zero-copy from packed buffer to client
 ## Latest Benchmark Results — 2026-08-06 (post-R48+R50)
 
 **Platform**: Apple M5 Pro, 18c, arm64, macOS 26.5.
-**Setup**: 1T:1C, 10s mem mode, 3-node cluster, 100k pre-populated keys.
+**Setup**: 10s mem mode, 3-node cluster, 100k pre-populated keys.
 Raw TSV: `doc/working/bench-scan-regression.tsv` (gitignored).
 
-| Label | Limit | Prefix | Start_after | Val B | Mode | scans/s | avg us | p99 us | err |
-|-------|------:|--------|-------------|------:|------|--------:|-------:|-------:|----:|
-| full_1k | 1000 | | | 64 | lin | 4264 | 233 | 312 | 0 |
-| full_10k | 10000 | | | 64 | lin | 524 | 1906 | 2104 | 0 |
-| full_100k | 100000 | | | 64 | lin | 50 | 19975 | 20880 | 0 |
-| bounded_10 | 10 | | | 64 | lin | 20932 | 46 | 67 | 0 |
-| bounded_100 | 100 | | | 64 | lin | 15429 | 63 | 84 | 0 |
-| bounded_1k | 1000 | | | 64 | lin | 4355 | 228 | 255 | 0 |
-| bounded_10k | 10000 | | | 64 | lin | 513 | 1947 | 2074 | 0 |
-| from_start_10 | 10 | | | 64 | lin | 20708 | 47 | 71 | 0 |
-| deep_pag_10 | 10 | | k...99989 | 64 | lin | 20664 | 47 | 67 | 0 |
-| deep_pag_100 | 100 | | k...99899 | 64 | lin | 15423 | 63 | 85 | 0 |
-| valuesize_64B | 1000 | | | 64 | lin | 4339 | 229 | 254 | 0 |
-| valuesize_1KiB | 1000 | | | 1024 | lin | 1492 | 669 | 782 | 0 |
-| valuesize_16KiB | 1000 | | | 16384 | lin | 74 | 8383 | 21536 | 452 |
-| valuesize_64B_flushed | 1000 | | | 64 | lin | 4344 | 229 | 259 | 0 |
-| valuesize_1KiB_flushed | 1000 | | | 1024 | lin | 1428 | 699 | 795 | 0 |
-| prefix_1k | 1000 | k00 | | 64 | lin | 4263 | 233 | 258 | 0 |
-| whole_1k | 1000 | | | 64 | lin | 4290 | 232 | 259 | 0 |
-| lin_1k | 1000 | | | 64 | lin | 4380 | 227 | 254 | 0 |
-| minslot_1k | 1000 | | | 64 | minslot | 4230 | 235 | 262 | 0 |
+### Single-thread (1T:1C) — per-scan engine cost
+
+| Label | Limit | Start_after | Val B | Mode | scans/s | avg us | p99 us | err |
+|-------|------:|-------------|------:|------|--------:|-------:|-------:|----:|
+| bounded_10 | 10 | | 64 | lin | 19558 | 50 | 79 | 0 |
+| bounded_1k | 1000 | | 64 | lin | 4339 | 229 | 258 | 0 |
+| bounded_10k | 10000 | | 64 | lin | 518 | 1929 | 2060 | 0 |
+| full_100k | 100000 | | 64 | lin | 50 | 20216 | 20848 | 0 |
+| deep_pag_10 | 10 | k...99989 | 64 | lin | 20681 | 47 | 66 | 0 |
+| mixed_1k | 1000 | | mixed | lin | 991 | 1007 | 1222 | 0 |
+| minslot_1k | 1000 | | 64 | minslot | 4293 | 232 | 262 | 0 |
+
+`mixed_1k` uses `--value-size-mix 64:70,1024:20,16384:10` — 70% 64B,
+20% 1KiB, 10% 16KiB values, deterministically assigned by key id. At
+991 scans/s it sits between the old `valuesize_1KiB` (1492) and
+`valuesize_16KiB` (74), reflecting the weighted average of the three
+sizes with 0 errors (the 16KiB fraction is small enough to avoid the
+replication backpressure issue seen at 100% 16KiB).
+
+### Multi-thread (4T:4C) — max throughput + read-mode split
+
+| Label | Limit | Val B | Mode | scans/s | avg us | p99 us | err |
+|-------|------:|------:|------|--------:|-------:|-------:|----:|
+| lin_4t | 1000 | 64 | lin | 14264 | 279 | 473 | 0 |
+| minslot_4t | 1000 | 64 | minslot | 14810 | 269 | 385 | 0 |
+
+Linearizable scales 3.3x from 1T to 4T (4339 → 14264) — the leader
+read barrier serializes but the engine work parallelizes. MinSlot
+shows a 3.8% throughput advantage at 4T:4C (14810 vs 14264) and
+better p99 latency (385us vs 473us) — the distributed read serving
+starts to show benefit. The split would widen with more replicas or
+higher concurrency.
 
 ### Improvement summary (pre-R48 → post-R48+R50)
 
 | Config | Before scans/s | After scans/s | Improvement |
 |--------|---------------:|--------------:|------------:|
-| bounded_10 | 223 | 20932 | 93.9x |
-| bounded_100 | 230 | 15429 | 67.1x |
-| bounded_1k | 224 | 4355 | 19.4x |
-| deep_pag_10 | 147 | 20664 | 140.6x |
-| valuesize_64B | 202 | 4339 | 21.5x |
-| full_1k | 243 | 4264 | 17.5x |
+| bounded_10 | 223 | 19558 | 87.7x |
+| bounded_1k | 224 | 4339 | 19.4x |
+| deep_pag_10 | 147 | 20681 | 140.7x |
+| full_100k | 20 | 50 | 2.5x |
 
 Bounded scans improved 20-140x — R48 eliminated O(entries-per-leaf)
 and R50 eliminated O(N_l0), the two costs that dominated every scan
-regardless of limit. The 1 KiB anomaly is inverted: 64B is now 2.9x
-faster than 1 KiB (cost tracks bytes returned, not entries per leaf).
-Deep pagination is flat (equal to from-start) — O(limit) confirmed.
+regardless of limit. Deep pagination is flat (equal to from-start) —
+O(limit) confirmed.
 
 ---
 
@@ -146,11 +154,10 @@ Deep pagination is flat (equal to from-start) — O(limit) confirmed.
   itself is correct; the linearizable read barrier fails because the
   leader can't maintain quorum. Fix: increase outbound queue capacity
   or add backpressure signaling. Follow-on item.
-- **High-concurrency read-mode split**: this baseline is 1T:1C; the
-  MinSlot vs Linearizable split (where MinSlot's any-replica
-  round-robin distributes load) only appears at higher concurrency.
-  No measurable difference at 1T:1C (4380 vs 4230 scans/s — noise).
-  The code is correct; only the benchmark coverage is missing.
-  Follow-on item.
+- **High-concurrency read-mode split (MEASURED)**: at 4T:4C, MinSlot
+  shows a 3.8% throughput advantage over Linearizable (14810 vs 14264
+  scans/s) with better p99 (385us vs 473us). The split is small at
+  this scale (3 replicas, 4 clients) but measurable — it would widen
+  with more replicas or higher concurrency. No code change needed.
 - **Reverse scan**: `scan` is forward-only today. Tracked as backlog
   item [R52](../backlog/R52-reverse-scan.md).

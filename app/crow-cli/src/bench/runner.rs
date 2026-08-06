@@ -120,6 +120,12 @@ pub struct BenchConfig {
     pub duration: Duration,
     pub key_space: u64,
     pub value_size: usize,
+    /// Mixed value-size distribution for pre-population. When set,
+    /// each pre-populated key gets a size from `ValueSizeMix::size_for(id)`
+    /// instead of the fixed `value_size`. Scan benches use this to
+    /// exercise multiple value sizes in a single run. `None` (default)
+    /// uses the fixed `value_size`.
+    pub value_size_mix: Option<super::workload::ValueSizeMix>,
     /// Report directory: `bench-runs/<run-folder>/`. The report is
     /// written as `report.json` inside this dir. If `None`, defaults
     /// to `bench-runs/`.
@@ -215,6 +221,7 @@ impl BenchConfig {
             duration: Duration::from_secs(5),
             key_space: 1_000,
             value_size: 64,
+            value_size_mix: None,
             report_dir: None,
             run_id: None,
             progress_interval: None,
@@ -306,7 +313,11 @@ pub async fn run_bench(cfg: BenchConfig) -> Result<(BenchReport, std::path::Path
             let mut errors: u64 = 0;
             for id in 0..count {
                 let key = format_key(id);
-                let value = value_for(id, cfg.value_size);
+                let vsize = cfg
+                    .value_size_mix
+                    .as_ref()
+                    .map_or(cfg.value_size, |mix| mix.size_for(id));
+                let value = value_for(id, vsize);
                 let mut attempts = 0u32;
                 loop {
                     attempts += 1;
