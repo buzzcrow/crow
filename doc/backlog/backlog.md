@@ -43,23 +43,17 @@ complexity, and dependency. Before implementation, follow the
   Most naturally done after R12.
 - **[R50](R50-epoch-protected-memtable.md)** — Epoch-protected
   lock-free MemTable — Area: scan / get / crow-tree engine —
-  **Unblocked (Gate 2 cleared).** `MemTable::snapshot()`
-  deep-copies every live L0 entry (key + full cell payload) on every
-  scan regardless of range or `limit`, and an L0 `get` hit copies
-  twice (`MemTable::get` into a `std::string`, then `get_view` into
-  `owned_`). Root cause: L0 is the only reader-visible structure
-  outside the engine's EBR scheme — L1 pages are epoch-protected
-  (lock-free, zero-copy), while L0 cells are freed immediately on
-  erase *and overwrite*, forcing readers to snapshot-copy. Final
-  design (single phase, no interim scaffolding): one concurrent skip
-  list with inline keys for both `active_` and `frozen_`, versioned
-  cells so overwrite is epoch-deferred too, a cursor-based lock-free
-  scan, a borrowing `get_view`, and a bounded retire-queue policy
-  (`GetView` holds a guard across FFI). Closes the known gap at
-  `crow-tree.h:81`. High complexity (~800–1300 lines); reference:
-  RocksDB's `InlineSkipList`. Gate 2 concurrent write+scan microbench
-  shows `l0_snapshot` dominates scan time (126us/64B, 1122us/1KiB,
-  82–94% with a 3s flush tick) — the premise is verified.
+  **Done.** `MemTable::snapshot()` deep-copied every live L0 entry
+  (key + full cell payload) on every scan regardless of range or
+  `limit`, and an L0 `get` hit copied twice. Root cause: L0 was the
+  only reader-visible structure outside the engine's EBR scheme.
+  Replaced the `absl::btree_map` under `mu_` with a
+  `ConcurrentSkipList` (inline keys, versioned cell pointers,
+  epoch-deferred reclamation). Readers now traverse L0 lock-free
+  under their existing epoch guard with zero copy; the cursor seeks
+  directly (no `upper_bound` skip pass); `get_view` borrows the
+  cell directly off the node. Closes the known gap at
+  `crow-tree.h:81`. All 383 `test-tree-ct` tests pass.
 
 ### Low Priority
 

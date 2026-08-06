@@ -77,11 +77,12 @@ struct get_result
 // Zero-copy point-read result (plan-tree #5 B3 remaining). `value()` is a
 // borrowed `Slice` for an L1 hit resolved to a non-overflow cell -- it
 // points directly into the resident leaf's frame, kept alive for this
-// object's lifetime by the epoch guard it owns (no copy). An L0 hit (the
-// MemTable cell isn't epoch-protected the same way -- see the active_/
-// frozen_ member comment) or an overflow value (assembled from multiple
-// pages, no single frame to borrow) is materialized into an owned `buffer`
-// instead; `value()` is transparent to the caller either way.
+// object's lifetime by the epoch guard it owns (no copy). An L0 hit (R50:
+// the MemTable's skip-list node is epoch-protected the same way an L1 frame
+// is) also borrows directly off the node's cell version. An overflow value
+// (assembled from multiple pages, no single frame to borrow) is materialized
+// into an owned `buffer` instead; `value()` is transparent to the caller
+// either way.
 //
 // Move-only (like `EpochManager::Guard`): copying would either double-free
 // the guard or silently let a caller outlive it. `get()`/`multi_get()` are

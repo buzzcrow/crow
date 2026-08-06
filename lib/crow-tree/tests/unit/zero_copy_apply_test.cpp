@@ -21,15 +21,11 @@ using namespace crow::tree;
 
 namespace
 {
-// Drop callback that increments a counter — verifies the Rust-style refcount
-// release fires exactly once per external buffer.
 void count_drop(void *ctx)
 {
     static_cast<std::atomic<int> *>(ctx)->fetch_add(1, std::memory_order_relaxed);
 }
 
-// Open an in-memory Crowtree backed by a MemPageStore (lives for the test's
-// duration; the returned tree borrows it).
 std::unique_ptr<Crowtree> open_tree(MemPageStore &store)
 {
     Options opt;
@@ -37,6 +33,36 @@ std::unique_ptr<Crowtree> open_tree(MemPageStore &store)
     std::unique_ptr<Crowtree> t;
     EXPECT_TRUE(Crowtree::open(opt, &t).ok());
     return t;
+}
+
+// R50: materialize a CellVersion into a full [header][value] std::string,
+// matching the old MemTable::get(key, &cell) contract.
+std::string materialize_cv(const CellVersion *cv)
+{
+    if (cv->cell.ownership() != buffer::mode::kExternal) {
+        return std::string(reinterpret_cast<const char *>(cv->cell.data()), cv->cell.size());
+    }
+    size_t      vlen = cv->cell.size();
+    std::string out(kCellHeaderSize + vlen, '\0');
+    auto       *p = reinterpret_cast<uint8_t *>(out.data());
+    for (int i = 0; i < 8; ++i) {
+        p[i] = static_cast<uint8_t>((cv->slot >> (8 * i)) & 0xff);
+    }
+    p[8] = cv->flags;
+    if (vlen > 0) {
+        std::memcpy(p + kCellHeaderSize, cv->cell.data(), vlen);
+    }
+    return out;
+}
+
+bool get_cell(const MemTable &mt, Slice key, std::string *out_cell)
+{
+    const CellVersion *cv = mt.find(key);
+    if (cv == nullptr) {
+        return false;
+    }
+    *out_cell = materialize_cv(cv);
+    return true;
 }
 } // namespace
 
@@ -102,7 +128,7 @@ TEST(MemTableExternal, SplitPutGetRoundTrip)
     buffer               vbuf = buffer::wrap_external(val.data(), val.size(), &drops, count_drop);
     EXPECT_TRUE(mt.upsert_external("k", 5, 0, std::move(vbuf)));
     std::string cell;
-    EXPECT_TRUE(mt.get("k", &cell));
+    EXPECT_TRUE(get_cell(mt, "k", &cell));
     EXPECT_EQ(cell.size(), 9u + 256u); // [9-byte header][256-byte value]
     CellView cv{Slice(cell)};
     EXPECT_EQ(cv.slot(), 5u);
@@ -142,7 +168,7 @@ TEST(MemTableExternal, SplitHighestSlotWins)
     EXPECT_TRUE(mt.upsert_external("k", 7, 0, buffer::wrap_external(v2.data(), v2.size(), &drops2, count_drop)));
     EXPECT_EQ(drops1.load(), 1);
     std::string cell;
-    EXPECT_TRUE(mt.get("k", &cell));
+    EXPECT_TRUE(get_cell(mt, "k", &cell));
     CellView cv{Slice(cell)};
     EXPECT_EQ(cv.slot(), 7u);
     EXPECT_EQ(static_cast<uint8_t>(cv.value().data()[0]), 0xA2u);
@@ -170,7 +196,7 @@ TEST(MemTableExternal, SplitDeleteRoundTrip)
     MemTable mt;
     EXPECT_TRUE(mt.upsert_external("k", 3, kFlagTombstone, buffer::alloc(0)));
     std::string cell;
-    EXPECT_TRUE(mt.get("k", &cell));
+    EXPECT_TRUE(get_cell(mt, "k", &cell));
     CellView cv{Slice(cell)};
     EXPECT_EQ(cv.slot(), 3u);
     EXPECT_TRUE(cv.is_tombstone());
@@ -186,8 +212,8 @@ TEST(MemTableExternal, SplitAndContiguousCoexist)
     mt.upsert("con", 1, encode_cell_buf(1, OpKind::kPut, Slice("cv", 2)));
     std::string ext_cell;
     std::string con_cell;
-    EXPECT_TRUE(mt.get("ext", &ext_cell));
-    EXPECT_TRUE(mt.get("con", &con_cell));
+    EXPECT_TRUE(get_cell(mt, "ext", &ext_cell));
+    EXPECT_TRUE(get_cell(mt, "con", &con_cell));
     CellView ev{Slice(ext_cell)};
     CellView cv{Slice(con_cell)};
     EXPECT_EQ(ev.slot(), 1u);

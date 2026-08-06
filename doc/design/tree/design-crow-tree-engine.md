@@ -28,7 +28,8 @@ On-disk format, backends, snapshot persistence, and recovery are in
   - [1.6 Epoch-Based Reclamation](#16-epoch-based-reclamation)
   - [1.7 Read Path](#17-read-path)
   - [1.8 Concurrency Summary](#18-concurrency-summary)
-  - [1.9 Scan Path Perf Baseline](#19-scan-path-perf-baseline)
+  - [1.9 Epoch-Protected MemTable (L0)](#19-epoch-protected-memtable-l0)
+  - [1.10 Scan Path Perf Baseline](#110-scan-path-perf-baseline)
 - [2. Memory and Buffer Management](#2-memory-and-buffer-management)
   - [2.1 The `buffer` Abstraction](#21-the-buffer-abstraction)
   - [2.2 Write and Read Pipelines](#22-write-and-read-pipelines)
@@ -351,8 +352,12 @@ get(key):
   (`iter_all` / `compare`, `PinnedSnapshot::materialize`, GC's live walk).
 - **Zero-copy value returns.** An **L1** hit returns a *borrowed* `buffer`
   pointing into the resident leaf frame (valid only for the guard's
-  lifetime, §2.2). An **L0** hit must return an *owned* copy because the
-  MemTable mutex is released on return.
+  lifetime, §2.2). An **L0** hit (R50) also returns a *borrowed* `buffer`
+  pointing directly into the MemTable's skip-list node cell version — the
+  epoch guard keeps the node alive past any concurrent overwrite/drain,
+  exactly as it keeps an L1 frame resident. An overflow value (assembled
+  from multiple pages, no single frame to borrow) is materialized into an
+  owned `buffer`.
 - `iter_all` (for `compare`) always runs on a pinned `RootVersion` (merged
   with an L0 snapshot) and includes tombstones.
 
@@ -384,7 +389,58 @@ Invariants:
   drains the contiguous prefix only), so every `RootVersion` is an exact
   point-in-time state.
 
-### 1.9 Scan Path Perf Baseline
+### 1.9 Epoch-Protected MemTable (L0)
+
+The MemTable (L0) is a `ConcurrentSkipList` with inline keys and versioned
+cell pointers, epoch-retired exactly as L1 pages are. This brings L0 into
+the same EBR scheme as L1, closing the gap that previously forced
+`snapshot()` to deep-copy every live L0 entry on every scan.
+
+**Structure.** Each skip-list node holds a `next[]` tower of
+`std::atomic<Node*>`, an atomic `CellVersion*` pointer, a logical-deleted
+flag, and the key bytes inline in the node's tail allocation (RocksDB
+`InlineSkipList` style — one allocation, no `std::string` header). Height
+is drawn at insert (p=0.25, max 12). Keys are immutable for a node's
+lifetime; only the cell version pointer is mutable, which makes the read
+path a pure atomic load.
+
+**Cell version.** A `CellVersion` holds the `buffer` (contiguous
+`[header][value]` or split `kExternal` raw value) + slot + flags. Overwrite
+publishes a new `CellVersion*` with a release store, then
+`epoch_.retire(old_version)`. A reader that loaded the old pointer under
+its guard keeps it alive — no use-after-free. This is the key difference
+from the previous in-place overwrite.
+
+**Write path.** Writers are serialized by a write spinlock (replacing the
+old `mu_`). `apply()` already serialized on `mu_` and is not the scan
+bottleneck; CAS-based concurrent insert is out of scope. Insert splices
+the node in bottom-up with release stores. Erase (`drain_up_to`) sets
+`deleted`, unlinks the tower, then epoch-retires the node and cell version.
+`reset()` epoch-retires every node. `upsert_external` always tags the
+buffer as `kExternal` (split cell) since it stores the raw value without
+the 9-byte header — the header is reconstructed from `slot`/`flags` at
+read time.
+
+**Read path.** `MemTable::cursor(start_after)` returns a cursor seeded by
+an O(log N) `lower_bound`, exposing `key()`, `cell_version()`, `advance()`.
+Traversal is atomic acquire loads on `next[]`; logically-deleted nodes are
+skipped. The scan's `L0Cursor` is a skip-list cursor; the merge loop is
+otherwise unchanged (min-key select, highest-slot-wins on collision, early
+stop past prefix). Cell materialization runs only for entries that reach
+the output: O(limit), not O(N_l0). The `upper_bound` skip pass and its
+`scan_l0_skip_l` metric are deleted — the cursor seeks directly.
+`get_view()` and `try_get_view_no_load()` borrow the value directly from
+the `CellVersion` — no `std::string` staging, no second copy.
+
+**Counters.** `bytes_`, `min_slot_`, `max_slot_`, `count()`, and `empty()`
+are relaxed atomics maintained by the writer (read by
+`maybe_freeze_active`'s thresholds and diagnostics).
+
+**`snapshot()` retained.** `iter_all`, `compare`, and `snapshot_export`
+need every entry — O(N) is correct there. `snapshot()` is a cursor walk;
+the point of R50 is that it is no longer on the scan or get path.
+
+### 1.10 Scan Path Perf Baseline
 
 Scan is part of the read flow but a separate perf track from random
 point reads (different cost shapes: per-entry overhead vs leaf-chain
@@ -451,10 +507,10 @@ scan width before per-byte copy becomes dominant, so response-size work
 (pagination + byte budget) gates large-value scans more than per-byte
 copy does.
 
-Future gaps (not measured by the baseline): the L0 snapshot copy
-(O(N_l0) per scan; only visible when L0 is not drained), high-concurrency
+Future gaps (not measured by the baseline): high-concurrency
 read-mode split (MinSlot vs Linearizable at > 1T:1C), and reverse scan
-(forward-only today).
+(forward-only today). The L0 snapshot copy (O(N_l0) per scan) was closed
+by R50 — see §1.9.
 
 ---
 

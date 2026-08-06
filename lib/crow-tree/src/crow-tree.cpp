@@ -104,7 +104,7 @@ Crowtree::Crowtree(Options opt) : opt_(std::move(opt)), name_(opt_.name)
     // manager so a lock-free reader that already loaded a segment pointer
     // keeps a valid one until its guard drains.
     mapping_.set_epoch_manager(&epoch_);
-    active_ = std::make_shared<MemTable>(memtable_next_id_.fetch_add(1, std::memory_order_relaxed));
+    active_ = std::make_shared<MemTable>(memtable_next_id_.fetch_add(1, std::memory_order_relaxed), &epoch_);
     // Initialize with a single empty leaf as the root.
     uint64_t page_id = mapping_.allocate_page_id();
     mapping_.store(page_id, LeafBase::build({}, kInvalidPageId, pool_, opt_.frame_bytes));
@@ -857,7 +857,7 @@ bool Crowtree::maybe_freeze_active(bool force)
         }
     }
     frozen_.push_back(active_);
-    active_ = std::make_shared<MemTable>(memtable_next_id_.fetch_add(1, std::memory_order_relaxed));
+    active_ = std::make_shared<MemTable>(memtable_next_id_.fetch_add(1, std::memory_order_relaxed), &epoch_);
     // Propagate the known-durable floor to the fresh table immediately (not
     // just on its first flush()) so a stale re-apply landing in it before
     // its own first drain is still correctly rejected.
@@ -874,7 +874,7 @@ void Crowtree::reset_memtables_locked()
 {
     std::unique_lock<std::shared_mutex> lk(memtable_mutex_);
     frozen_.clear();
-    active_ = std::make_shared<MemTable>(memtable_next_id_.fetch_add(1, std::memory_order_relaxed));
+    active_ = std::make_shared<MemTable>(memtable_next_id_.fetch_add(1, std::memory_order_relaxed), &epoch_);
 }
 
 size_t Crowtree::memtable_count() const
@@ -1398,39 +1398,43 @@ GetView Crowtree::get_view(Slice key) const
     // live MemTable is still guaranteed strictly newer than L1, so a hit
     // here never needs to fall through to L1.
     //
-    // An L0 hit is always materialized into result.owned_ (never borrowed):
-    // a MemTable's backing storage isn't kept alive by the epoch guard the
-    // way a resident L1 frame is -- see the active_/frozen_ member comment.
+    // R50: an L0 hit borrows the value directly from the CellVersion's
+    // buffer — the epoch guard keeps the skip-list node (and its cell
+    // version) alive past any concurrent overwrite/drain, exactly as it
+    // keeps an L1 frame resident. No copy, no std::string staging.
     std::vector<std::shared_ptr<MemTable>> tables = all_memtables();
-    bool                                   found  = false;
-    std::string                            best_cell;
+    const CellVersion                     *best   = nullptr;
     for (auto &mt : tables) {
-        std::string cell;
-        if (!mt->get(key, &cell)) {
+        const CellVersion *cv = mt->find(key);
+        if (cv == nullptr) {
             continue;
         }
         mt_get_total_.fetch_add(1, std::memory_order_relaxed);
         if (metrics_.mt_get_c != nullptr) {
             metrics_.mt_get_c->inc();
         }
-        if (!found || cell_wins(CellView{Slice(cell)}, CellView{Slice(best_cell)})) {
-            best_cell = std::move(cell);
-            found     = true;
+        if (best == nullptr || cv->slot >= best->slot) {
+            best = cv;
         }
     }
-    if (found) {
+    if (best != nullptr) {
         mt_get_hit_total_.fetch_add(1, std::memory_order_relaxed);
         if (metrics_.mt_get_hit_c != nullptr) {
             metrics_.mt_get_hit_c->inc();
         }
-        CellView v{Slice(best_cell)};
-        if (v.is_tombstone()) {
+        if ((best->flags & kFlagTombstone) != 0) {
             return result; // not found
         }
         result.found_ = true;
-        result.slot_  = v.slot();
-        result.owned_ = buffer::copy_of(v.value());
-        result.value_ = result.owned_.slice();
+        result.slot_  = best->slot;
+        // Borrow the value: contiguous cell -> value after the 9-byte header;
+        // split (kExternal) cell -> the buffer itself is the value.
+        if (best->cell.ownership() != buffer::mode::kExternal) {
+            result.value_ = {best->cell.data() + kCellHeaderSize, best->cell.size() - kCellHeaderSize};
+        }
+        else {
+            result.value_ = best->cell.slice();
+        }
         return result;
     }
 
@@ -1476,29 +1480,30 @@ bool Crowtree::try_get_view_no_load(Slice key, GetView *result, uint64_t *out_pe
     result->guard_ = epoch_.enter();
 
     // L0: identical to get_view() -- never touches the page store, so there
-    // is no I/O to avoid here.
+    // is no I/O to avoid here. R50: borrows the value directly (no copy).
     std::vector<std::shared_ptr<MemTable>> tables = all_memtables();
-    bool                                   found  = false;
-    std::string                            best_cell;
+    const CellVersion                     *best   = nullptr;
     for (auto &mt : tables) {
-        std::string cell;
-        if (!mt->get(key, &cell)) {
+        const CellVersion *cv = mt->find(key);
+        if (cv == nullptr) {
             continue;
         }
-        if (!found || cell_wins(CellView{Slice(cell)}, CellView{Slice(best_cell)})) {
-            best_cell = std::move(cell);
-            found     = true;
+        if (best == nullptr || cv->slot >= best->slot) {
+            best = cv;
         }
     }
-    if (found) {
-        CellView v{Slice(best_cell)};
-        if (v.is_tombstone()) {
+    if (best != nullptr) {
+        if ((best->flags & kFlagTombstone) != 0) {
             return true; // resolved: not found
         }
         result->found_ = true;
-        result->slot_  = v.slot();
-        result->owned_ = buffer::copy_of(v.value());
-        result->value_ = result->owned_.slice();
+        result->slot_  = best->slot;
+        if (best->cell.ownership() != buffer::mode::kExternal) {
+            result->value_ = {best->cell.data() + kCellHeaderSize, best->cell.size() - kCellHeaderSize};
+        }
+        else {
+            result->value_ = best->cell.slice();
+        }
         return true;
     }
 
@@ -1748,43 +1753,30 @@ Status Crowtree::scan(Slice prefix, Slice start_after, size_t limit, size_t byte
     };
     auto t_total = std::chrono::steady_clock::now();
 
-    // L0: one sorted-by-key snapshot per live MemTable (active_ + any
-    // not-yet-drained frozen_ buffers). Unlike the single-buffer design,
-    // more than one of these can hold the same key with a *different* slot
-    // (out-of-order slot delivery can straddle a freeze boundary -- see the
-    // active_/frozen_ member comment, plan-tree #3), so the merge below
-    // picks the highest-slot cell among whichever sources tie on a key,
-    // instead of unconditionally preferring "the" L0 stream.
+    // L0: one lock-free cursor per live MemTable (active_ + any not-yet-
+    // drained frozen_ buffers). R50: the cursor borrows key/cell Slices
+    // directly off the skip-list node — no snapshot copy. The epoch guard
+    // (taken above) keeps the node alive past any concurrent drain/overwrite.
+    // Unlike the single-buffer design, more than one of these can hold the
+    // same key with a *different* slot (out-of-order slot delivery can
+    // straddle a freeze boundary -- see the active_/frozen_ member comment,
+    // plan-tree #3), so the merge below picks the highest-slot cell among
+    // whichever sources tie on a key, instead of unconditionally preferring
+    // "the" L0 stream.
     struct L0Cursor
     {
-        std::vector<mem_entry> entries;
-        size_t                 idx = 0;
+        ConcurrentSkipList::Cursor cur;
     };
 
     auto                  t0 = std::chrono::steady_clock::now();
     std::vector<L0Cursor> l0;
     for (auto &mt : all_memtables()) {
-        L0Cursor c;
-        c.entries = mt->snapshot();
-        l0.push_back(std::move(c));
+        l0.push_back({.cur = mt->cursor(start_after)});
     }
     auto l0_snapshot_ns = dur_ns(t0);
-    // L0 snapshots are key-sorted (MemTable::snapshot iterates an
-    // absl::btree_map<less<>>); binary-search each cursor to the first key >
-    // start_after so the merge loop never touches earlier L0 entries. A full
-    // memtable can hold up to memtable_flush_entries (100K) keys, so this turns
-    // an O(N) per-cursor linear skip into O(log N) -- the consider-lambda's
-    // `key <= start_after` check still covers L1 (the descent leaf may
-    // straddle the cursor) but becomes dead code for L0.
-    t0 = std::chrono::steady_clock::now();
-    if (!start_after.empty()) {
-        std::string sa_str(start_after.data(), start_after.size());
-        for (auto &c : l0) {
-            c.idx = static_cast<size_t>(std::ranges::upper_bound(c.entries, sa_str, {}, &mem_entry::key) -
-                                        c.entries.begin());
-        }
-    }
-    auto l0_skip_ns = dur_ns(t0);
+    // R50: the cursor seeks directly to start_after (O(log N)), so the
+    // separate upper_bound skip pass is gone — l0_skip is always 0.
+    auto l0_skip_ns = uint64_t{0};
 
     uint64_t l1_resolve_ns = 0;
     uint64_t gc            = gc_floor_.load();
@@ -1885,9 +1877,15 @@ Status Crowtree::scan(Slice prefix, Slice start_after, size_t limit, size_t byte
     // Merge every L0 stream + the L1 stream. On a key collision across
     // multiple sources (possible across L0 streams -- see the L0Cursor
     // comment above; L1 only ever collides with L0, never with itself), the
-    // highest-slot cell (cell_wins) wins and every cursor sitting on that
-    // key is advanced, so a key present in more than one source still
-    // yields exactly one output entry.
+    // highest-slot cell wins and every cursor sitting on that key is
+    // advanced, so a key present in more than one source still yields exactly
+    // one output entry.
+    //
+    // R50: L0 cursors borrow key/cell off the skip-list node. The winner is
+    // tracked as a CellVersion* (L0) or a cell Slice (L1); slot comparison
+    // uses cv->slot / CellView::slot respectively. The winning L0 cell is
+    // materialized into a contiguous buffer only when it reaches the output
+    // (O(limit), not O(N_l0)).
     auto t_loop = std::chrono::steady_clock::now();
     while (true) {
         bool  have_l1 = refill_l1();
@@ -1897,10 +1895,10 @@ Status Crowtree::scan(Slice prefix, Slice start_after, size_t limit, size_t byte
             min_key = l1.key();
         }
         for (auto &c : l0) {
-            if (c.idx >= c.entries.size()) {
+            if (!c.cur.valid()) {
                 continue;
             }
-            auto k = Slice(c.entries[c.idx].key);
+            Slice k = c.cur.key();
             if (!has_any || k.compare(min_key) < 0) {
                 min_key = k;
                 has_any = true;
@@ -1910,24 +1908,55 @@ Status Crowtree::scan(Slice prefix, Slice start_after, size_t limit, size_t byte
             break;
         }
 
-        Slice winner_key = min_key;
-        Slice winner_cell;
-        bool  have_winner = false;
+        Slice              winner_key  = min_key;
+        uint64_t           winner_slot = 0;
+        const CellVersion *l0_winner   = nullptr;
+        Slice              l1_winner_cell;
+        bool               have_winner = false;
+        buffer             l0_materialized;
         if (have_l1 && l1.key().compare(min_key) == 0) {
-            winner_cell = l1.cell(); // borrowed from the leaf chain; outlives next()
-            have_winner = true;
+            l1_winner_cell = l1.cell();
+            winner_slot    = CellView{l1_winner_cell}.slot();
+            have_winner    = true;
             l1.next();
         }
         for (auto &c : l0) {
-            if (c.idx >= c.entries.size() || Slice(c.entries[c.idx].key).compare(min_key) != 0) {
+            if (!c.cur.valid() || c.cur.key().compare(min_key) != 0) {
                 continue;
             }
-            Slice cand = c.entries[c.idx].cell.slice();
-            if (!have_winner || cell_wins(CellView{cand}, CellView{winner_cell})) {
-                winner_cell = cand;
+            const CellVersion *cv = c.cur.cell_version();
+            if (cv != nullptr && (!have_winner || cv->slot >= winner_slot)) {
+                l0_winner   = cv;
+                winner_slot = cv->slot;
                 have_winner = true;
             }
-            ++c.idx;
+            c.cur.advance();
+        }
+
+        // Materialize the winning cell for the consider lambda. L1: borrow
+        // directly. L0: materialize a contiguous cell (only for the winner).
+        Slice winner_cell;
+        if (l0_winner != nullptr) {
+            if (l0_winner->cell.ownership() != buffer::mode::kExternal) {
+                winner_cell = l0_winner->cell.slice();
+            }
+            else {
+                // Split cell (R30): build the contiguous [header][value].
+                size_t vlen     = l0_winner->cell.size();
+                l0_materialized = buffer::alloc(vlen, kCellHeaderSize);
+                uint8_t *p      = l0_materialized.data();
+                for (int i = 0; i < 8; ++i) {
+                    p[i] = static_cast<uint8_t>((l0_winner->slot >> (8 * i)) & 0xff);
+                }
+                p[8] = l0_winner->flags;
+                if (vlen > 0) {
+                    std::memcpy(p + kCellHeaderSize, l0_winner->cell.data(), vlen);
+                }
+                winner_cell = l0_materialized.slice();
+            }
+        }
+        else {
+            winner_cell = l1_winner_cell;
         }
 
         // Early stop: every stream is non-decreasing, so once a key has moved
@@ -1972,31 +2001,20 @@ bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, size_t limit, s
     };
     auto t_total = std::chrono::steady_clock::now();
 
-    // L0: identical to scan() -- never touches the page store.
+    // L0: identical to scan() -- never touches the page store. R50: lock-free
+    // cursor, no snapshot copy.
     struct L0Cursor
     {
-        std::vector<mem_entry> entries;
-        size_t                 idx = 0;
+        ConcurrentSkipList::Cursor cur;
     };
 
     auto                  t0 = std::chrono::steady_clock::now();
     std::vector<L0Cursor> l0;
     for (auto &mt : all_memtables()) {
-        L0Cursor c;
-        c.entries = mt->snapshot();
-        l0.push_back(std::move(c));
+        l0.push_back({.cur = mt->cursor(start_after)});
     }
     auto l0_snapshot_ns = dur_ns(t0);
-    // L0 cursor skip -- see scan()'s own comment. Identical upper_bound pass.
-    t0 = std::chrono::steady_clock::now();
-    if (!start_after.empty()) {
-        std::string sa_str(start_after.data(), start_after.size());
-        for (auto &c : l0) {
-            c.idx = static_cast<size_t>(std::ranges::upper_bound(c.entries, sa_str, {}, &mem_entry::key) -
-                                        c.entries.begin());
-        }
-    }
-    auto l0_skip_ns = dur_ns(t0);
+    auto l0_skip_ns     = uint64_t{0}; // R50: cursor seeks directly
 
     // Non-blocking probe (mirrors try_get_view_no_load's `probe`): bails out
     // on an unloaded slot instead of demand-loading it, recording which
@@ -2109,10 +2127,10 @@ bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, size_t limit, s
             min_key = l1.key();
         }
         for (auto &c : l0) {
-            if (c.idx >= c.entries.size()) {
+            if (!c.cur.valid()) {
                 continue;
             }
-            auto k = Slice(c.entries[c.idx].key);
+            Slice k = c.cur.key();
             if (!has_any || k.compare(min_key) < 0) {
                 min_key = k;
                 has_any = true;
@@ -2122,24 +2140,52 @@ bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, size_t limit, s
             break;
         }
 
-        Slice winner_key = min_key;
-        Slice winner_cell;
-        bool  have_winner = false;
+        Slice              winner_key  = min_key;
+        uint64_t           winner_slot = 0;
+        const CellVersion *l0_winner   = nullptr;
+        Slice              l1_winner_cell;
+        bool               have_winner = false;
+        buffer             l0_materialized;
         if (have_l1 && l1.key().compare(min_key) == 0) {
-            winner_cell = l1.cell(); // borrowed from the leaf chain; outlives next()
-            have_winner = true;
+            l1_winner_cell = l1.cell();
+            winner_slot    = CellView{l1_winner_cell}.slot();
+            have_winner    = true;
             l1.next();
         }
         for (auto &c : l0) {
-            if (c.idx >= c.entries.size() || Slice(c.entries[c.idx].key).compare(min_key) != 0) {
+            if (!c.cur.valid() || c.cur.key().compare(min_key) != 0) {
                 continue;
             }
-            Slice cand = c.entries[c.idx].cell.slice();
-            if (!have_winner || cell_wins(CellView{cand}, CellView{winner_cell})) {
-                winner_cell = cand;
+            const CellVersion *cv = c.cur.cell_version();
+            if (cv != nullptr && (!have_winner || cv->slot >= winner_slot)) {
+                l0_winner   = cv;
+                winner_slot = cv->slot;
                 have_winner = true;
             }
-            ++c.idx;
+            c.cur.advance();
+        }
+
+        Slice winner_cell;
+        if (l0_winner != nullptr) {
+            if (l0_winner->cell.ownership() != buffer::mode::kExternal) {
+                winner_cell = l0_winner->cell.slice();
+            }
+            else {
+                size_t vlen     = l0_winner->cell.size();
+                l0_materialized = buffer::alloc(vlen, kCellHeaderSize);
+                uint8_t *p      = l0_materialized.data();
+                for (int i = 0; i < 8; ++i) {
+                    p[i] = static_cast<uint8_t>((l0_winner->slot >> (8 * i)) & 0xff);
+                }
+                p[8] = l0_winner->flags;
+                if (vlen > 0) {
+                    std::memcpy(p + kCellHeaderSize, l0_winner->cell.data(), vlen);
+                }
+                winner_cell = l0_materialized.slice();
+            }
+        }
+        else {
+            winner_cell = l1_winner_cell;
         }
 
         if (!prefix.empty() && !winner_key.starts_with(prefix) && winner_key.compare(prefix) > 0) {

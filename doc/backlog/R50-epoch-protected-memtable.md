@@ -3,6 +3,15 @@
 
 ### R50: Epoch-protected lock-free MemTable — zero-copy L0 reads
 
+**Status — done.** Implemented as a `ConcurrentSkipList` with inline keys,
+versioned cell pointers, and epoch-deferred reclamation. The `absl::btree_map`
+under `mu_` is replaced; readers (scan + get) now hold an epoch guard and
+traverse the skip list lock-free with zero copy. The `scan_l0_skip_l` metric
+and the `upper_bound` skip pass are removed (the cursor seeks directly). The
+`crow-tree.h` gap comment is removed (gap closed). All 383 `test-tree-ct`
+tests pass. TSAN build segfaults on this platform (pre-existing, confirmed by
+stashing R50 and retesting — not caused by this change).
+
 **Status — unblocked. Both gates cleared:**
 
 - **Gate 1 — R48 landed.** The lazy `LeafChainCursor` (commit `9ae2e72`)
