@@ -207,20 +207,19 @@ noted.
   L1 (`LeafChainCursor`), a `direction` field on `KvScanRequest`, and
   S3-style pagination keyed on the first key of each page as the next
   `start_before`.
-- **[R53](../../backlog/R53-kv-replica-heartbeat-channel.md) — 16 KiB
-  scan errors (replication backpressure)**: `valuesize_16KiB` shows
-  intermittent errors (452 in the latest run, 0 in some re-runs). Root
-  cause is NOT the scan path — it is the learner_stream outbound queue
-  filling up during pre-populate with 16 KiB values (1.6 GiB of data),
-  blocking heartbeats to followers. Server logs show
-  `learner_stream: outbound queue full` → leader loses leadership →
-  `kv scan failed: not leader`. The scan path itself is correct; the
-  linearizable read barrier fails because the leader can't maintain
-  quorum. E5 (heartbeat reserved capacity) guarantees heartbeat
-  admission to the queue but not wire priority — a heartbeat behind N
-  16 KiB accepts is delayed by their cumulative flush time. Fix:
-  separate gRPC Channel for heartbeats via the existing unary RPC
-  (pure gRPC change, independent of R32).
+- **R53 — 16 KiB scan errors (replication backpressure)** —
+  **Done.** `valuesize_16KiB` showed intermittent errors (452 in one
+  run, 0 in others). Root cause was NOT the scan path — the
+  `learner_stream` outbound queue filled up during pre-populate with 16
+  KiB values, blocking heartbeats to followers. E5 (heartbeat reserved
+  capacity) guaranteed heartbeat admission to the queue but not wire
+  priority — a heartbeat behind N 16 KiB accepts was delayed by their
+  cumulative flush time. Fix: steady-state heartbeats now route over a
+  dedicated gRPC `Channel` (separate TCP connection) via the existing
+  unary `heartbeat` RPC; accepts and `ChosenNotification` stay on the
+  `LearnerStream`. The E5 reserve mechanism was removed (dead code once
+  heartbeats left the `LearnerStream`). See
+  `design-crow-kv-rpc.md` §3.
 - **[R54](../../backlog/R54-kv-scan-engine-profiling.md) —
   High-concurrency engine bottleneck (MEASURED)**: MinSlot shows a
   +7.2% throughput advantage at 16T:16C (33015 vs 30799 scans/s) and

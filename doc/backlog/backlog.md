@@ -34,20 +34,6 @@ complexity, and dependency. Before implementation, follow the
   replica-to-replica path only; management API stays on Axum/HTTP.
   Reference implementations: protosocket (Momento), Volo (CloudWeGo),
   Cap'n Proto RPC.
-- **[R53](R53-kv-replica-heartbeat-channel.md)** — Separate gRPC Channel
-  for leader heartbeats — Area: RPC / consensus — the per-peer
-  `LearnerStream` sends heartbeats and accepts FIFO through one h2 bidi
-  stream; E5 reserves queue admission for heartbeats but not wire
-  priority. Under 16 KiB write backpressure, heartbeat delivery latency
-  can exceed the election timeout, causing spurious leader churn
-  (intermittent `kv scan failed: not leader` in the scan bench). The
-  FIFO ordering invariant is not a hard safety requirement: the term
-  fence handles cross-term reordering, and same-term heartbeat/accept
-  mutate independent state. Mitigation: route steady-state heartbeats
-  over a separate gRPC `Channel` (separate TCP connection) via the
-  existing unary `heartbeat` RPC; accepts and `ChosenNotification` stay
-  on the `LearnerStream`. Pure gRPC change, no custom transport
-  (independent of R32). Low–medium complexity.
 - **[R33](R33-crow-tree-rename.md)** — Extract crow-tree to separate repo and rename — Area:
   workspace — Move `crowtree/` into its own git repository (preserving
   history), wire `crow-kv` to depend on `crow-tree-ffi` as an external
