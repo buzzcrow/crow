@@ -33,11 +33,6 @@ Run `pixi run clean` before measuring for reproducible results.
 
 Source: `lib/crow-kv/src/wal/`. Tests: 12 files, ~92 tests.
 
-- [x] **WAL disk-loss recovery (partial)**: verify the engine surfaces a
-  durable-flush failure, marks the WAL failed, and the failed slot is not
-  indexed — only the previously-durable slots remain readable through the WAL
-  index. Covers the error-surfacing + read-consistency half at the API level
-  (`wal_engine_tests.rs::disk_loss_failed_slot_not_indexed_after_flush_error`).
 - [ ] **WAL disk-loss recovery (full fail-out)**: the full fail-out procedure
   (step-out RPC + reconfiguration, `design-crow-kv-wal.md` §8.1) is not yet
   implemented. The test should verify the node fails out of the group and
@@ -48,10 +43,6 @@ Source: `lib/crow-kv/src/wal/`. Tests: 12 files, ~92 tests.
 
 Source: `lib/crow-kv/src/store/`. Tests: 8 files, 26 tests.
 
-- [x] **Per-group WAL path isolation**: verify that groups within a single
-  `PxKvStore` get isolated WAL subdirectories (`{wal_root}/group{group_id}/`)
-  and that writes to one group's WAL do not leak into another group's replay
-  (`wal_isolation_test.rs::per_group_wal_path_isolation`).
 - [ ] **Per-group WAL disk isolation**: `WalConfig.wal_disks` is per-`WalEngine`,
   not per-group within a store — the server startup path
   (`create_group_with_wal`) derives `wal_disks` from the store-level config, so
