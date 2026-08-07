@@ -64,26 +64,43 @@ impl Drop for ServerHandle {
     }
 }
 
+#[allow(dead_code)]
 pub async fn start_test_server(args: &[&str]) -> std_io::Result<ServerHandle> {
+    start_test_server_with_ports(args, &[0]).await
+}
+
+/// Like [`start_test_server`] but lets the caller supply one port per store
+/// (e.g. `&[0, 0]` for a two-store process). Each entry maps to a store in
+/// the order given by `--stores`; `0` lets the OS assign a port.
+pub async fn start_test_server_with_ports(args: &[&str], ports: &[u16]) -> std_io::Result<ServerHandle> {
     let wal_dir = tempfile::tempdir()?;
     let wal_root = wal_dir.path().join("wal");
 
+    let ports_str = ports.iter().map(u16::to_string).collect::<Vec<_>>().join(",");
+
+    // `parse_id_list` dedupes via a HashSet, so `0,0` collapses to a single
+    // port and fails the `--ports`/`--stores` length check. When every port is
+    // 0, omit `--ports` entirely — the server defaults to one OS-assigned
+    // (port 0) slot per store, which is what the caller asked for.
+    let all_zero = ports.iter().all(|&p| p == 0);
+
     let bin = crow_kv_server_bin();
-    let mut child = Command::new(bin)
-        .args(args)
+    let mut cmd = Command::new(bin);
+    cmd.args(args)
         .arg("--management-addr")
         .arg("127.0.0.1")
         .arg("--management-port")
-        .arg("0")
-        .arg("--ports")
-        .arg("0")
-        .arg("--election-profile")
+        .arg("0");
+    if !all_zero {
+        cmd.arg("--ports").arg(&ports_str);
+    }
+    cmd.arg("--election-profile")
         .arg("e2e")
         .arg("--wal-root")
         .arg(&wal_root)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
 
     let stdout = child.stdout.take().expect("stdout should be captured");
     let stderr = child.stderr.take().expect("stderr should be captured");
