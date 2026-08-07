@@ -223,3 +223,142 @@ Deep pagination is flat (equal to from-start) — O(limit) confirmed.
   [R54](../../backlog/R54-kv-scan-engine-profiling.md).
 - **Reverse scan**: `scan` is forward-only today. Tracked as backlog
   item [R52](../../backlog/R52-reverse-scan.md).
+
+---
+
+## Gap Analysis — Enhancement Opportunities
+
+Full-path audit (client → gRPC → PxKvStore → FFI → C++ engine),
+2026-08-07. Items marked **→ R55** / **→ R56** / **→ R57** / **→ R58**
+are now backlog entries; items under "Tiny Tasks" are small fix-later
+to-dos tracked here; the rest remain candidates (medium/large features
+not yet prioritized).
+
+### Performance
+
+- **Engine-side result staging is 3 copies, not zero-copy**. The
+  "zero-copy" claim above holds only from the FFI packed buffer to the
+  client. Inside the engine, each page's result set is copied three
+  times before crossing the FFI boundary:
+  1. `Crowtree::scan`'s `consider` lambda stages every entry via
+     `key.to_string()` + `value.to_string()` into
+     `std::vector<scan_entry>` (`crow-tree.cpp` ~1853/1868);
+  2. `ct_scan` re-packs those strings into a `std::string packed`
+     (`c_api.cpp` ~913-921);
+  3. `make_buf` mallocs and memcpys `packed` again (`c_api.cpp:43`).
+  For a full 3.5 MiB page that is ~10.5 MiB of memcpy + 2 transient
+  allocations. Fix: pack the wire format directly in the `consider`
+  lambda (single growing buffer) and transfer ownership across the FFI
+  instead of `make_buf` (an ownership-transfer path already exists —
+  see `make_borrowed_buf` and the get fast path). Likely the cheapest
+  large win. **→ R57**
+- **Per-page linearizable read barrier**. `PxKvStore::kv_scan` calls
+  `resolve_read_point` on every page (`px_kv_store.rs:183`), so a
+  multi-page linearizable scan pays the barrier (lease check, or a
+  quorum heartbeat round on the ReadIndex fallback) once per page.
+  Enhancement: the client already receives `read_slot` from page 1 —
+  carry it forward as `min_slot` and serve subsequent pages via the
+  MinSlot path. Semantics are unchanged (cross-page results are
+  already not a single snapshot; each page would still be at least as
+  fresh as page 1) and later pages skip the barrier entirely. **→ R55**
+- **Retry restarts pagination from scratch**. On a `not_leader_hint`
+  redirect or transport error the client clears `all_items` and resets
+  `page_start_after` to the caller's original `start_after`
+  (`client.rs:858, 875`), re-fetching every previous page. Because
+  pagination is keyed on `start_after` (S3-style), resuming from the
+  last received key on the new endpoint is safe — no duplicates, no
+  gaps in key order. Cheap client-only fix.
+- **Merge loop is O(N_sources) comparisons per entry**. Min-key
+  selection re-compares every L0 cursor plus L1 for each output entry
+  (`crow-tree.cpp` ~1893-1934), each a byte-wise `Slice::compare`.
+  With several frozen memtables live this multiplies. A loser-tree /
+  two-element fast path (common case: 1 active L0 + L1) would cut
+  compares; no prefetch (`__builtin_prefetch`) is issued for the next
+  skip-list node or the right-sibling leaf. **→ R58**
+- **No sibling-leaf readahead on cold scans**. The sync path
+  demand-loads each leaf inline; the async path resolves one pending
+  page per reactor round trip (`scan_async_attempt`). A scan knows its
+  next leaf (`right_sibling`) before finishing the current one —
+  issuing the next read ahead of the merge loop would overlap I/O with
+  merging on cold ranges.
+- **`SCAN_BYTE_BUDGET` is a hardcoded constant** (3.5 MiB,
+  `px_kv_store.rs:33`) — not in server config, not visible to the
+  client. Making it a config knob allows tuning page size vs. RPC
+  overhead per deployment.
+
+### Functionality
+
+- **No cross-page snapshot isolation (by design, undocumented)**. Each
+  page resolves its own read point and scans live data; a paginated
+  scan is a sequence of per-page-consistent slices, not one snapshot —
+  a value can change or a key vanish between pages. This matches
+  S3-list semantics and is fine for the KV Operator UI, but is wrong
+  for backup/analytics-style consumers. The engine already has a
+  snapshot mechanism (`ct_snapshot_view` / `snapshot_view()`); a
+  `snapshot scan` variant could pin a view for the duration of one
+  paginated scan (needs a server-side handle + lease/expiry). At
+  minimum the current semantics should be stated in the user guide.
+- **Prefix-only range predicate**. `KvScanRequest` has `prefix` +
+  `start_after` but no exclusive `end_key`, so an arbitrary
+  `[start, end)` range cannot be expressed. The engine's early-stop
+  already compares against `prefix`; adding an optional `end_key`
+  bound to the merge loop, FFI, proto, and client is a small, low-risk
+  extension (and is a prerequisite shape for R52 reverse scan). **→ R56**
+- **No keys-only / count-only projection**. Scans always materialize
+  and ship values. A `keys_only` flag would skip value staging in the
+  engine (including overflow-chain assembly — the most expensive
+  materialization) and shrink pages by the value fraction; a
+  count-style scan falls out of the same pushdown. Useful for key
+  listing, prefix cardinality, and the console UI.
+- **No scan deadline / cancellation**. No per-scan timeout at any
+  layer; an unbounded `limit=0` scan over a large keyspace runs until
+  the transport gives up, and the engine loop has no cancellation
+  check between pages. A request deadline (proto field + engine-side
+  budget check per page) bounds worst-case server work.
+- **Single-group scope**. Scan targets one Paxos group; a
+  keyspace-wide scan across groups requires manual client fan-out and
+  merge. Acceptable while key→group placement is caller-owned, but a
+  client-side fan-out+merge helper is the natural follow-up once
+  multi-group stores are common.
+- **Streaming scan RPC (deliberately dropped — revisit for huge
+  scans)**. A server-streaming `ScanStream` existed (R38/R44 era) and
+  was replaced by the server byte budget + S3-style unary pagination.
+  That trade keeps the RPC surface simple, but every 3.5 MiB page now
+  costs one client round trip, serialized with the next page's engine
+  work — a full-keyspace scan cannot overlap page production with
+  network transfer. If bulk-export workloads matter, revisit a
+  streaming variant (or page prefetch: client requests page N+1 while
+  consuming page N, which gets the same overlap without a proto
+  change).
+
+### Tiny Tasks
+
+Small fix-later items tracked here (not large enough for a backlog
+requirement). Check off when done.
+
+- [ ] **Scan retry resumes from last key, not from scratch**. On a
+  `not_leader_hint` redirect or transport error the client clears
+  `all_items` and resets `page_start_after` to the caller's original
+  `start_after` (`client.rs:858, 875`), re-fetching every previous page.
+  Because pagination is keyed on `start_after` (S3-style), resuming from
+  the last received key on the new endpoint is safe — no duplicates, no
+  gaps in key order. Fix: keep `all_items` and set
+  `page_start_after = all_items.last().0` instead of resetting to
+  `start_after`. Client-only, ~4 lines.
+- [ ] **`SCAN_BYTE_BUDGET` as a server config knob**. The 3.5 MiB page
+  budget is a hardcoded `const` (`px_kv_store.rs:33`), not in server
+  config and not visible to the client. Plumb it through the server
+  config struct so deployments can tune page size vs. RPC overhead
+  (e.g. smaller pages for low-latency interactive scans, larger for
+  bulk export). Note the 4 MiB gRPC `max_decoding_message_size` ceiling
+  that the 3.5 MiB value leaves headroom for (post-R32 custom RPC that
+  ceiling may change).
+- [ ] **Document cross-page scan semantics in the user guide**. A
+  paginated scan is a sequence of per-page-consistent slices, not one
+  snapshot — a value can change or a key vanish between pages (S3-list
+  semantics). This is by design and fine for the KV Operator UI, but is
+  not stated in `doc/user-manual/user-guide.md`. Add a short note to the
+  scan section so backup/analytics-style consumers know the limitation
+  (and that a future snapshot-scan variant is the answer for them).
+  Doc-only; rebuild `user-guide.html` via
+  `python3 doc/user-manual/build_html.py` in the same commit.

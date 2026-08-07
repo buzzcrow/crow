@@ -11,7 +11,7 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R55** — Bump this line in the same commit when adding a new item.
+**Next R number: R59** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
@@ -102,6 +102,48 @@ complexity, and dependency. Before implementation, follow the
   document the top hot stacks. Investigation only — no scan-path code
   changes. If a clear optimization target emerges, file a follow-up
   requirement with the profiling evidence. Low complexity.
+- **[R55](R55-kv-scan-carry-read-slot.md)** — Carry page-1 `read_slot`
+  forward as `min_slot` — Area: scan / client — a multi-page
+  linearizable scan pays the read barrier once per page
+  (`px_kv_store.rs:183`), but only the first page needs a freshness
+  proof; later pages only need to be at least as fresh as page 1. After
+  page 1 returns `read_slot = S`, switch subsequent pages to `MinSlot`
+  with `min_slot = S` — the store serves locally when
+  `contiguous_applied >= S` (`px_kv_store.rs:575`), skipping the
+  barrier, and redirects to the leader only if the chosen replica
+  hasn't caught up. No proto change (`read_slot`/`min_slot` fields
+  already exist); client-local. Semantics unchanged (a paginated scan
+  was never a single snapshot). Low–medium complexity.
+- **[R56](R56-kv-scan-end-key-bound.md)** — Optional exclusive `end_key`
+  range bound — Area: scan / kv — `KvScanRequest` has `prefix` +
+  `start_after` but no upper bound, so an arbitrary `[start, end)` range
+  cannot be expressed without client-side over-read and filtering. Add
+  an optional exclusive `end_key` (empty = unbounded) to proto, engine
+  merge-loop early-stop (mirrors the existing prefix stop at
+  `crow-tree.cpp:1964`), FFI, store, service, and client. One new field
+  per layer, mechanical. Prerequisite shape for R52 reverse scan.
+  Low–medium complexity.
+- **[R57](R57-tree-scan-zero-copy-staging.md)** — Zero-copy engine scan
+  result staging — Area: scan / crow-tree engine — each scan page is
+  copied 3 times before the FFI boundary: `consider` lambda stages into
+  `std::vector<scan_entry>` (`crow-tree.cpp:1853/1868`), `ct_scan`
+  re-packs into `std::string packed` (`c_api.cpp:912-920`), `make_buf`
+  mallocs+memcpys again (`c_api.cpp:43/921`). ~10.5 MiB memcpy per full
+  3.5 MiB page. Fix: pack the wire format directly in `consider` (single
+  growing buffer) and transfer ownership across the FFI via the
+  `make_borrowed_buf` pattern already used by the get fast path. Collapses
+  3 copies to 1 (the unavoidable wire-format assembly). Design-level
+  redundancy, not profiling-guided. Medium complexity.
+- **[R58](R58-tree-scan-merge-loop-fast-path.md)** — Merge loop 2-source
+  fast path + loser tree — Area: scan / crow-tree engine — the merge loop
+  does 2 × N_sources byte-wise compares per output entry
+  (`crow-tree.cpp:1890-1934`): a min-key scan then a winner pass. The
+  common case (1 active L0 + L1, no frozen memtables) is a trivial 2-way
+  min needing 1 compare, not a 2-pass vector scan. Add a 2-source fast
+  path branch; for k > 2 (several frozen memtables) use a loser tree
+  (O(log k) per merge). Add `__builtin_prefetch` for the next skip-list
+  node and right-sibling leaf. Design-level redundancy (k-way merge has a
+  known O(log k) structure). Medium complexity.
 
 ---
 
