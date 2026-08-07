@@ -591,3 +591,64 @@ async fn aligned_engine_append_rotate_seal_replays_all_records() {
     );
     assert_eq!(replay.current_term, 1);
 }
+
+/// Disk-loss recovery (partial): after a durable-flush failure mid-write,
+/// the WAL surfaces the error, marks itself failed, and the failed slot is
+/// not locatable through the WAL index — only the previously-durable slots
+/// are. This verifies the "reads are consistent with the last durable state"
+/// half of the disk-loss recovery contract at the API level. The full
+/// fail-out procedure (step-out RPC + reconfiguration, design-crow-kv-wal.md
+/// §8.1) is not yet implemented and is tested separately once it lands.
+#[tokio::test(flavor = "current_thread")]
+async fn disk_loss_failed_slot_not_indexed_after_flush_error() {
+    let device = MemBlockDevice::new();
+    let backend = Arc::new(IoBackend::MemBlock(device.clone()));
+    let config = test_config(vec![PathBuf::from("/wal-diskloss")]);
+    let wal = WalEngine::create(backend, config, 1).await.unwrap();
+
+    // Write slots 1-3 successfully (each is durably flushed and indexed).
+    for slot in 1..=3 {
+        wal.append(&write_entry(1, slot)).await.unwrap();
+    }
+    {
+        let idx = wal.index().lock();
+        for slot in 1..=3 {
+            assert!(
+                idx.locate(slot).is_some(),
+                "durable slot {slot} must be in the WAL index"
+            );
+        }
+    }
+
+    // Inject a durable-flush failure, then attempt slot 4 — it must fail.
+    device.controller().inject_sync_error(true);
+    let r = wal.append(&write_entry(1, 4)).await;
+    assert!(r.is_err(), "append must fail when durable flush fails");
+    assert!(wal.is_failed(), "WAL must be marked failed after flush error");
+
+    // The failed slot must NOT be in the WAL index — the append returned an
+    // error, so the slot was never acked and is not readable through the WAL.
+    // Only the previously-durable slots (1-3) remain accessible.
+    {
+        let idx = wal.index().lock();
+        assert!(
+            idx.locate(4).is_none(),
+            "failed slot 4 must not be in the WAL index (append was not acked)"
+        );
+        for slot in 1..=3 {
+            assert!(
+                idx.locate(slot).is_some(),
+                "durable slot {slot} must still be in the WAL index after the failure"
+            );
+        }
+    }
+
+    // Even after clearing the injection, the WAL stays failed and rejects
+    // new writes — the engine does not silently recover from a flush failure.
+    device.controller().inject_sync_error(false);
+    let r2 = wal.append(&write_entry(1, 5)).await;
+    assert!(
+        r2.is_err(),
+        "append after failed WAL must return an error (no silent recovery)"
+    );
+}
