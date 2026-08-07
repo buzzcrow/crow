@@ -272,16 +272,18 @@ noted.
   two-element fast path (common case: 1 active L0 + L1) would cut
   compares; no prefetch (`__builtin_prefetch`) is issued for the next
   skip-list node or the right-sibling leaf.
-- **[R59](../../backlog/R59-kv-snapshot-scan.md) — No cross-page
-  snapshot isolation (by design)**: each page resolves its own read
-  point and scans live data; a paginated scan is a sequence of
-  per-page-consistent slices, not one snapshot — a value can change or
-  a key vanish between pages. This matches S3-list semantics and is
-  fine for the KV Operator UI, but is wrong for backup/analytics-style
-  consumers. The engine already has a snapshot mechanism
-  (`ct_snapshot_view` / `snapshot_view()`); a `snapshot scan` variant
-  could pin a view for the duration of one paginated scan (needs a
-  server-side handle + lease/expiry).
+- **[R59](../../backlog/R59-kv-snapshot-scan.md) — Two scan modes +
+  snapshot versioning API**: the current `scan` is the only range-read
+  surface (S3-list semantics: per-page consistent, not cross-page). R59
+  formalizes two modes: (1) **list scan** — the existing `scan`, fast,
+  latest values, for interactive listing; (2) **snapshot versioning
+  API** — flush + `snapshot_view()` (already built, pins L1 at
+  `last_applied_slot`, zero-copy page refcounts) + iterate the frozen
+  vector with prefix/pagination. New RPCs: `CreateSnapshot`/
+  `ListSnapshots`/`SnapshotScan`/`ReleaseSnapshot` + management API for
+  `SetGcWatermark`. No new engine machinery (no version chain, no L0
+  pinning — flush drains L0 first). Active snapshots protect pinned
+  pages from GC via refcount. Medium complexity.
 - **[R60](../../backlog/R60-tree-scan-sibling-leaf-readahead.md) —
   No sibling-leaf readahead on cold scans**: the sync path
   demand-loads each leaf inline; the async path resolves one pending
