@@ -374,31 +374,9 @@ of what remains:
 
 ## Write-Path Enhancement Ideas
 
-Grounded in the current code (post R16a/R16b/R17/R23/R25/R34/R35/R45b).
-The per-proposal critical path, after R16b (early-ack, production
-default-on) and R17 (async engine apply, production default-on, gated
-by the R35 apply fence), is the quorum RPC round-trip only — the
-leader's local fsync and engine apply both run off the critical path.
-Remaining items are tracked as backlog requirements.
-
-- **Fan-out hardening (quorum short-circuit, RPC deadline, phase
-  metrics)** — tracked as
-  **[R43](../backlog/R43-write-path-fanout-hardening.md)** (backlog).
-  Six items from the 2026-08 write-flow review: (1) both phases
-  `join_all` ALL remote replies, so per-proposal latency is
-  `max(all peers)` instead of the quorum-th fastest — a
-  `FuturesUnordered` fold that returns on quorum + local reply (W6
-  intact) with a detached straggler drain (preserving late
-  TermStale/EpochMismatch side effects) is the largest remaining
-  latency lever needing no new transport; (2) accept/heartbeat
-  oneshots have no deadline, so a hung-but-connected peer stalls all
-  writes indefinitely even with quorum reachable; (3) `MetricHandles`
-  has read-path summaries only — no propose-e2e / prepare / accept /
-  first-quorum-RPC / apply latency breakdown (the critical-path
-  analysis above is inferred, not measured); (4) `retry_backoff` has
-  no jitter and sleeps while holding the admission permit; (5)
-  heartbeats share the 64-frame LearnerStream mpsc with accepts and
-  can be `Busy`-rejected at peak write load, degrading lease/election
-  stability; (6) the reply-fold `match` is triplicated (~150 lines)
-  across prepare + both accept paths — extract a helper first to
-  de-risk (1).
+The per-proposal critical path, after R16b (early-ack) and R17 (async
+engine apply, gated by the R35 apply fence), is the quorum RPC
+round-trip only — the leader's local fsync and engine apply both run
+off the critical path. Fan-out hardening (R43) shipped: quorum
+short-circuit, oneshot deadlines, phase metrics, backoff jitter (E4),
+heartbeat reserve (E5), `ReplyFold` refactor. No open items.

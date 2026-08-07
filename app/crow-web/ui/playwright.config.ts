@@ -14,6 +14,8 @@ const localBrowsers = [
   '/snap/bin/chromium',
   '/usr/bin/chromium',
   '/usr/bin/chromium-browser',
+  '/usr/bin/google-chrome',
+  '/usr/bin/google-chrome-stable',
   '/Applications/Chromium.app/Contents/MacOS/Chromium',
   '/usr/bin/microsoft-edge',
   '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',

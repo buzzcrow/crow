@@ -10,7 +10,7 @@ description: Lifecycle for implementing requirement items from doc/backlog/backl
 Use this workflow when picking up an item from
 `doc/backlog/backlog.md`. The index lists each requirement
 (`R**`) with a brief intro and a link to its detail doc
-(`doc/backlog/R**-<topic>.md`). Open the matched detail doc for the
+(`doc/backlog/R**-<component>-<topic>.md`). Open the matched detail doc for the
 full problem/approach/files/acceptance analysis. Each item follows the
 full lifecycle below.
 
@@ -42,7 +42,7 @@ full lifecycle below.
                    that doc's style and detail level. Delete the standalone
                    working/design-<topic>.md.
 8. Cleanup       → Delete the requirement's detail doc
-                   `doc/backlog/R**-<topic>.md` and remove its entry
+                   `doc/backlog/R**-<component>-<topic>.md` and remove its entry
                    from the Item Index in
                    `doc/backlog/backlog.md`. Delete
                    plan-<topic>.md and design-<topic>.md.
@@ -121,7 +121,7 @@ The workflow produces at least **two commits** per requirement:
    implementation commit includes the design draft and plan doc, preserving
    the full working state in git history.
 2. **Cleanup commit** (after Step 7) — merged design doc, deletion of
-   working docs, deletion of `R**-<topic>.md` and its index entry in
+   working docs, deletion of `R**-<component>-<topic>.md` and its index entry in
    `backlog.md`.
 
 All commits must pass the pre-commit quality gate (fmt, clippy, tests).

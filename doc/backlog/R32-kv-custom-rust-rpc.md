@@ -14,7 +14,7 @@ coalescing never sees concurrent writers; h2 hands it one merged buffer
 from one thread.
 
 The measured cost is a **~17% throughput drop at 2T:1C** (read bench,
-`kv-read-flow-analysis.md` ≈L520-545). At 1T:1C the lock is uncontended
+`doc/design/kv/kv-read-flow-analysis.md` ≈L520-545). At 1T:1C the lock is uncontended
 and the cost is zero; the loss grows with thread:connection ratio.
 
 A custom protocol (`[len][req_id][protobuf]` over raw TCP) has no
@@ -31,6 +31,16 @@ mutex. The expensive userspace funnel is gone.
 
 This is a **design mismatch**, not a tuning problem — h2 cannot accept
 concurrent writers without a lock.
+
+**Related but separate — heartbeat starvation under write backpressure.**
+The same single-connection design also serializes heartbeats behind
+accepts on the wire (E5 reserves queue admission, not wire priority).
+Under 16 KiB write backpressure this can exceed the election timeout
+and cause spurious leader churn. This is a **correctness/availability**
+issue with a pure-gRPC mitigation (separate `Channel` for heartbeats),
+tracked separately as
+[R53](R53-kv-replica-heartbeat-channel.md) — it does not require R32's
+custom transport.
 
 **Decision (2026-07-29)**: not replacing gRPC now. A custom transport
 would eliminate the connection lock and recover the lost concurrency,
@@ -113,5 +123,5 @@ on gRPC/HTTP until there is a separate reason to migrate them.
 
 **Note**: The full analysis (h2 lock mechanics, kernel coalescing, why
 this is a design mismatch not a tuning problem) lives in
-`doc/working/kv-read-flow-analysis.md` ≈L546-622. This backlog item is the
+`doc/design/kv/kv-read-flow-analysis.md` ≈L546-622. This backlog item is the
 trackable stub; the working doc is the rationale.

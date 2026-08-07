@@ -25,6 +25,7 @@ Rust workspace + C++ storage engine (via FFI).
 - **Pre-commit quality gate — do not skip:**
   - Lint must pass: `cargo fmt --check`, `cargo clippy -- -D warnings`, `clang-format --dry-run --Werror` (changed `.cpp`/`.h`), `tree-lint` (clang-tidy, changed C++). Fix up to 3 times — always, regardless of cause.
   - Tests: run only relevant tests (Rust or `test-tree-ct`), not the entire suite. Fix up to 3 times; skip pre-existing failures with a stated reason.
+- **Playwright E2E uses the system browser** — `app/crow-web/ui/playwright.config.ts` auto-detects Chromium/Edge/Chrome via its `localBrowsers` list; never run `npx playwright install` locally. The CI workflow's install step is conditional (downloads only when no system browser is found). Override with `PLAYWRIGHT_CHANNEL` or `PLAYWRIGHT_CHROMIUM_EXECUTABLE`.
 
 ## Dispatch — Read Before Acting
 
@@ -36,5 +37,5 @@ Rust workspace + C++ storage engine (via FFI).
 | Commit changes | Hard Constraints above — no extra doc needed |
 | Debug a test failure | `/debug-test` workflow (env check, log-first, data-first, add missing logs) |
 | Pre-push review | `/review` workflow (checklist, hot-path rules, clippy exceptions) |
-| Implement a new-requirements item | `doc/backlog/backlog.md` (index) → open the matched `R**-<topic>.md` → `/implement-requirement` workflow (lifecycle: understand → design → plan → implement → commit → merge → cleanup) |
+| Implement a new-requirements item | `doc/backlog/backlog.md` (index) → open the matched `R**-<component>-<topic>.md` → `/implement-requirement` workflow (lifecycle: understand → design → plan → implement → commit → merge → cleanup) |
 | User guide / operations | `doc/user-manual/user-guide.md` (quick start, KV ops, cluster management, upgrade, API reference) |

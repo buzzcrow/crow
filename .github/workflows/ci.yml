@@ -84,9 +84,13 @@ jobs:
         pixi-version: latest
     - name: Cache cargo + target (incl. crow-kv-server binary)
       uses: Swatinem/rust-cache@v2
-    - name: Install Playwright Chromium
-      run: pixi run npx playwright install --with-deps chromium
+    - name: Install Playwright Chromium (skip if system browser present)
       working-directory: app/crow-web/ui
+      run: |
+        for b in /snap/bin/chromium /usr/bin/chromium /usr/bin/chromium-browser /usr/bin/google-chrome /usr/bin/google-chrome-stable /usr/bin/microsoft-edge; do
+          [ -x "$b" ] && { echo "System browser found at $b; skipping download."; exit 0; }
+        done
+        pixi run npx playwright install --with-deps chromium
     - name: Run real-backend E2E suite
       run: pixi run test-console-ui
     - name: Upload Playwright report on failure
