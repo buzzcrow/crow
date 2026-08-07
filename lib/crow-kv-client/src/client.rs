@@ -847,7 +847,8 @@ impl CrowkvClient {
                     // mirroring the `get` path) so a `MinSlot` scan
                     // against a follower that hasn't applied `min_slot`
                     // falls back to the leader rather than being treated
-                    // as a plain error. Reset pagination state on redirect.
+                    // as a plain error. Resume pagination from the last
+                    // received key on the new endpoint (see below).
                     if !resp.not_leader_hint.is_empty() {
                         if read_mode == ReadMode::MinSlot && self.read_endpoint_policy.is_distributed() {
                             self.metrics.record_read_endpoint_fallback();
@@ -855,8 +856,13 @@ impl CrowkvClient {
                         self.topology
                             .set_leader(store_id, group_id, resp.not_leader_hint.clone());
                         endpoint = resp.not_leader_hint;
-                        all_items.clear();
-                        page_start_after = start_after.to_vec();
+                        // Resume from the last received key (S3-style
+                        // pagination is keyed on `start_after`, so no
+                        // duplicates or gaps). Only reset to the caller's
+                        // `start_after` when nothing has been received yet.
+                        page_start_after = all_items
+                            .last()
+                            .map_or_else(|| start_after.to_vec(), |(k, _)| k.to_vec());
                         continue;
                     }
                     attempts = self.count_other(attempts, &resp.error)?;
@@ -870,10 +876,13 @@ impl CrowkvClient {
                         .await;
                     self.metrics
                         .on_leader_resolved(store_id, group_id, &endpoint, "transport_error");
-                    // Reset pagination state on transport error — retry from
-                    // the beginning with the (possibly new) endpoint.
-                    all_items.clear();
-                    page_start_after = start_after.to_vec();
+                    // Resume from the last received key on the (possibly new)
+                    // endpoint — S3-style pagination is keyed on `start_after`,
+                    // so no duplicates or gaps in key order. Only reset to the
+                    // caller's `start_after` when nothing has been received yet.
+                    page_start_after = all_items
+                        .last()
+                        .map_or_else(|| start_after.to_vec(), |(k, _)| k.to_vec());
                     attempts = self.count_other(attempts, &status.to_string())?;
                 }
             }

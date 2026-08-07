@@ -11,7 +11,7 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R59** — Bump this line in the same commit when adding a new item.
+**Next R number: R60** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
@@ -144,6 +144,18 @@ complexity, and dependency. Before implementation, follow the
   (O(log k) per merge). Add `__builtin_prefetch` for the next skip-list
   node and right-sibling leaf. Design-level redundancy (k-way merge has a
   known O(log k) structure). Medium complexity.
+- **[R59](R59-kv-snapshot-scan.md)** — Cross-page snapshot isolation
+  (`snapshot_scan`) — Area: scan / kv / crow-tree engine — a paginated
+  scan is a sequence of per-page-consistent slices, not one snapshot
+  (S3-list semantics): a value can change or a key vanish between pages.
+  Fine for the KV Operator UI, wrong for backup/analytics consumers. The
+  engine already pins point-in-time views (`snapshot_view()`,
+  `crow-tree.h:609`); add a `snapshot_scan` variant that pins one engine
+  snapshot at the scan's start and serves every page against it via a
+  server-side handle (lease-expired). Engine `scan_at(snapshot, ...)`,
+  FFI `ct_scan_at`, proto `snapshot_handle` field, client
+  `snapshot_scan`. Backward compatible (handle = 0 = live scan).
+  Medium–high complexity.
 
 ---
 

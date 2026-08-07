@@ -8,6 +8,7 @@ use crate::cluster::group_election::{LeaderElection, ReadBarrierOutcome};
 use crate::cluster::kv_server::GrpcTaskState;
 use crate::cluster::kv_store::KvStore;
 use crate::cluster::status::{GroupStatus, StatusLevel, StoreStatus};
+use crate::common::config::ServerConfig;
 use crate::common::optional_u64;
 use crate::common::report::OperationReport;
 use crate::metrics::MetricsRegistry;
@@ -21,17 +22,6 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 use tracing::{debug, info};
 
-/// Server-fixed byte budget for scan responses: caps the total key+value
-/// bytes in one unary `KvScanResponse` so every page is provably bounded
-/// regardless of value sizes. 3.5 MiB leaves ~0.5 MiB for proto framing
-/// under tonic's 4 MiB default `max_decoding_message_size`. The engine
-/// always returns at least one entry even if it alone exceeds the budget
-/// (so the client makes progress), with a warning log for the oversized
-/// entry. Post-R32 (custom Rust RPC) this stays as a safety boundary —
-/// only its constraint value may change (no longer pinned to gRPC's 4
-/// MiB default).
-const SCAN_BYTE_BUDGET: usize = 3 * 1024 * 1024 + 512 * 1024; // 3.5 MiB
-
 pub struct PxKvStore {
     pub store_id: u64,
     pub(crate) groups: DashMap<u64, Arc<PxGroup>>,
@@ -42,6 +32,10 @@ pub struct PxKvStore {
     /// Metrics registry for KV service instrumentation. `None` when
     /// metrics are disabled (`--metrics-interval 0`).
     pub(crate) metrics_registry: Option<Arc<std::sync::Mutex<MetricsRegistry>>>,
+    /// Per-page byte budget for scan responses (see `ServerConfig::scan_byte_budget`).
+    /// Defaults to `ServerConfig::DEFAULT.scan_byte_budget`; overridden via
+    /// `set_scan_byte_budget` from the loaded `CrowKVConfig` before `start()`.
+    scan_byte_budget: usize,
     /// Test-only delay injected into `kv_get` before `resolve_read_point`.
     /// Set via `set_get_delay_for_tests` under the `test-util` feature;
     /// `None` in production.
@@ -199,7 +193,7 @@ impl KvStore for PxKvStore {
         let (scanned, truncated) = match group
             .local_replica()
             .learner
-            .engine_scan(prefix, start_after, limit as usize, SCAN_BYTE_BUDGET)
+            .engine_scan(prefix, start_after, limit as usize, self.scan_byte_budget)
             .await
         {
             Ok(result) => result,
@@ -254,6 +248,7 @@ impl PxKvStore {
             listen_addr,
             shutdown_started: AtomicBool::new(false),
             metrics_registry: None,
+            scan_byte_budget: ServerConfig::DEFAULT.scan_byte_budget,
             #[cfg(feature = "test-util")]
             get_delay: Mutex::new(None),
         }
@@ -263,6 +258,12 @@ impl PxKvStore {
     /// record metrics. Called before `start()`.
     pub fn set_metrics_registry(&mut self, registry: Arc<std::sync::Mutex<MetricsRegistry>>) {
         self.metrics_registry = Some(registry);
+    }
+
+    /// Override the per-page scan byte budget from the loaded
+    /// `CrowKVConfig.server.scan_byte_budget`. Called before `start()`.
+    pub fn set_scan_byte_budget(&mut self, budget: usize) {
+        self.scan_byte_budget = budget;
     }
 
     /// Test-only: inject a fixed delay into every `kv_get` call on this

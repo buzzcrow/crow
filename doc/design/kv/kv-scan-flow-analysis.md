@@ -281,10 +281,6 @@ not yet prioritized).
   next leaf (`right_sibling`) before finishing the current one —
   issuing the next read ahead of the merge loop would overlap I/O with
   merging on cold ranges.
-- **`SCAN_BYTE_BUDGET` is a hardcoded constant** (3.5 MiB,
-  `px_kv_store.rs:33`) — not in server config, not visible to the
-  client. Making it a config knob allows tuning page size vs. RPC
-  overhead per deployment.
 
 ### Functionality
 
@@ -296,8 +292,7 @@ not yet prioritized).
   for backup/analytics-style consumers. The engine already has a
   snapshot mechanism (`ct_snapshot_view` / `snapshot_view()`); a
   `snapshot scan` variant could pin a view for the duration of one
-  paginated scan (needs a server-side handle + lease/expiry). At
-  minimum the current semantics should be stated in the user guide.
+  paginated scan (needs a server-side handle + lease/expiry). **→ R59**
 - **Prefix-only range predicate**. `KvScanRequest` has `prefix` +
   `start_after` but no exclusive `end_key`, so an arbitrary
   `[start, end)` range cannot be expressed. The engine's early-stop
@@ -336,29 +331,30 @@ not yet prioritized).
 Small fix-later items tracked here (not large enough for a backlog
 requirement). Check off when done.
 
-- [ ] **Scan retry resumes from last key, not from scratch**. On a
-  `not_leader_hint` redirect or transport error the client clears
-  `all_items` and resets `page_start_after` to the caller's original
-  `start_after` (`client.rs:858, 875`), re-fetching every previous page.
-  Because pagination is keyed on `start_after` (S3-style), resuming from
-  the last received key on the new endpoint is safe — no duplicates, no
-  gaps in key order. Fix: keep `all_items` and set
-  `page_start_after = all_items.last().0` instead of resetting to
-  `start_after`. Client-only, ~4 lines.
-- [ ] **`SCAN_BYTE_BUDGET` as a server config knob**. The 3.5 MiB page
-  budget is a hardcoded `const` (`px_kv_store.rs:33`), not in server
-  config and not visible to the client. Plumb it through the server
-  config struct so deployments can tune page size vs. RPC overhead
-  (e.g. smaller pages for low-latency interactive scans, larger for
-  bulk export). Note the 4 MiB gRPC `max_decoding_message_size` ceiling
-  that the 3.5 MiB value leaves headroom for (post-R32 custom RPC that
-  ceiling may change).
-- [ ] **Document cross-page scan semantics in the user guide**. A
-  paginated scan is a sequence of per-page-consistent slices, not one
-  snapshot — a value can change or a key vanish between pages (S3-list
-  semantics). This is by design and fine for the KV Operator UI, but is
-  not stated in `doc/user-manual/user-guide.md`. Add a short note to the
-  scan section so backup/analytics-style consumers know the limitation
-  (and that a future snapshot-scan variant is the answer for them).
-  Doc-only; rebuild `user-guide.html` via
-  `python3 doc/user-manual/build_html.py` in the same commit.
+- [x] **Scan retry resumes from last key, not from scratch**. On a
+  `not_leader_hint` redirect or transport error the client now keeps
+  `all_items` and sets `page_start_after = all_items.last().0`
+  (falling back to the caller's `start_after` only when nothing has
+  been received yet) instead of clearing `all_items` and resetting to
+  `start_after`. S3-style pagination is keyed on `start_after`, so
+  resuming from the last received key on the new endpoint is safe —
+  no duplicates, no gaps in key order. Client-only.
+- [x] **`SCAN_BYTE_BUDGET` as a server config knob**. The 3.5 MiB page
+  budget is now `ServerConfig::scan_byte_budget` (default 3.5 MiB),
+  plumbed through `CrowKVConfig` → `PxKvStore::set_scan_byte_budget`
+  in both the CLI bootstrap (`main.rs`) and the management API store
+  creation paths (`mgmt_api.rs`). Deployments can tune page size vs.
+  RPC overhead per deployment. The 4 MiB gRPC
+  `max_decoding_message_size` ceiling that the 3.5 MiB value leaves
+  headroom for still applies (post-R32 custom RPC may change that
+  ceiling — only the default's constraint value needs revisiting).
+- [x] **Cross-page scan semantics → R59**. A paginated scan is a
+  sequence of per-page-consistent slices, not one snapshot — a value
+  can change or a key vanish between pages (S3-list semantics). This
+  is by design and fine for the KV Operator UI, but is wrong for
+  backup/analytics-style consumers. Promoted from a doc-only note to
+  **R59** (`doc/backlog/R59-kv-snapshot-scan.md`): a `snapshot_scan`
+  variant that pins one engine snapshot at the scan's start and serves
+  every page against it. The user-guide note is deferred until R59
+  lands (the guide will document both the live-scan S3-list semantics
+  and the new `snapshot_scan` variant together).

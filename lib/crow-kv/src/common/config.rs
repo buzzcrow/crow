@@ -99,11 +99,22 @@ pub struct ServerConfig {
     /// Shutdowns that take longer almost always indicate a stuck task and are
     /// better force-cleaned than waited on.
     pub shutdown_timeout_ms: u64,
+    /// Byte budget for scan responses: caps the total key+value bytes in one
+    /// unary `KvScanResponse` so every page is provably bounded regardless of
+    /// value sizes. The engine always returns at least one entry even if it
+    /// alone exceeds the budget (so the client makes progress). Default 3.5
+    /// MiB leaves ~0.5 MiB for proto framing under tonic's 4 MiB default
+    /// `max_decoding_message_size`; tune down for low-latency interactive
+    /// scans or up for bulk-export workloads (stay below the RPC frame
+    /// ceiling). Post-R32 (custom Rust RPC) the ceiling may change — only
+    /// this default's constraint value needs revisiting, not the knob itself.
+    pub scan_byte_budget: usize,
 }
 
 impl ServerConfig {
     pub const DEFAULT: Self = Self {
         shutdown_timeout_ms: 10_000,
+        scan_byte_budget: 3 * 1024 * 1024 + 512 * 1024, // 3.5 MiB
     };
 }
 
