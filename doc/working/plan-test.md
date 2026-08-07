@@ -41,18 +41,6 @@ Source: `lib/crow-kv/src/wal/`. Tests: 12 files, ~92 tests.
   (`block_backend.rs::inject_sync_error`); the test can be written once the
   fail-out feature lands.
 
-## Group
-
-Source: `lib/crow-kv/src/cluster/group.rs`. Tests: 23 files, ~65 tests.
-
-- [x] **Reconfig — remove leader**: the group-layer test for removing the
-  current leader. Step-down is implemented (`group.rs::step_down_if_leader`),
-  and non-leader removal is tested (`g6_reconfig_test.rs`), but no test
-  combines step-down + leader removal. The test should: (1) elect a 3-node
-  group, (2) call `step_down_if_leader` on the leader, (3) remove the
-  stepped-down node, (4) verify a new leader is elected and CRUD still works
-  on the remaining 2 nodes.
-
 ## Store
 
 Source: `lib/crow-kv/src/store/`. Tests: 8 files, 26 tests.
@@ -68,20 +56,6 @@ Source: `lib/crow-kv/src/store/`. Tests: 8 files, 26 tests.
 
 Source: `app/crow-kv-server/`. Tests: 9 files.
 
-- [x] **Multi-store-per-node process test**: boot a single `crow-kv-server`
-  process hosting multiple stores and verify KV operations route correctly to
-  each store. Mirrors the Web UI multi-store topology end-to-end
-  (`e2e/flows/38-multi-store-isolation.spec.ts`,
-  `e2e/flows/46-multi-store-reconfig.spec.ts`). No such process-level test
-  exists today — all deployment tests use a single store per node.
-- [x] **Reconfig via API — remove leader**: the deployment-layer test for
-  removing the current leader via the HTTP management API. Both the step-down
-  API (`server_api_test.rs`) and the remove-replica API
-  (`deployment_reconfig_test.rs`) are tested independently, but no test
-  exercises the full workflow: (1) call step-down on the leader via API,
-  (2) remove the stepped-down node via API, (3) verify a new leader is
-  elected and CRUD still works through the client. Actionable now — both
-  APIs exist.
 - [ ] **Network partition between processes**: verify cluster behavior when
   network connectivity between processes is severed and restored. **Blocked**:
   no network partition simulation infrastructure exists in the testkit.
