@@ -4,9 +4,11 @@
 //! `PxRemoteReplica` — gRPC adapter for a peer replica in a Paxos group.
 //!
 //! Wraps a lazy gRPC client, a per-peer bidi `PxLearnerStream` (for
-//! Accept / Heartbeat / `ChosenNotification` fan-out), and a small layer
-//! of cached status/metrics state. Exposes `ReplicaClient` so callers
-//! talk to peers through a uniform RPC surface.
+//! Accept / `ChosenNotification` fan-out), a dedicated heartbeat channel
+//! (separate TCP connection for steady-state heartbeats so liveness
+//! messages are never blocked behind data on the `LearnerStream`), and a
+//! small layer of cached status/metrics state. Exposes `ReplicaClient` so
+//! callers talk to peers through a uniform RPC surface.
 //!
 //! Key work: lazy gRPC client init, peer-stream construction & lifecycle,
 //! Prepare/Accept/PreVote/RequestVote/Heartbeat/StepDown RPC bridges,
@@ -45,25 +47,29 @@ pub struct PxRemoteReplica {
     // which would make RemoteReplicaKind::Real large and trigger large_enum_variant warning.
     // Heap allocation is deferred via OnceCell until first use.
     grpc_client: OnceCell<Box<PxServiceClient<Channel>>>,
-    /// Lazy-initialized per-peer bidi stream. Carries `Accept`,
-    /// `Heartbeat`, and `ChosenNotification` frames. Constructed on
-    /// first call to [`Self::learner_stream`].
+    /// Dedicated gRPC client for steady-state heartbeats. Established
+    /// lazily on first heartbeat (mirroring the `learner_stream`
+    /// connect-on-first-use pattern) and reused for the peer's lifetime.
+    /// Separate TCP connection from `grpc_client` and `learner_stream` so
+    /// liveness messages are never blocked behind data traffic.
+    heartbeat_client: OnceCell<Box<PxServiceClient<Channel>>>,
+    /// Lazy-initialized per-peer bidi stream. Carries `Accept` and
+    /// `ChosenNotification` frames. Constructed on first call to
+    /// [`Self::learner_stream`].
     learner_stream: OnceLock<Arc<PxLearnerStream>>,
     /// Window size used for the lazy `learner_stream` mpsc. Snapshot of
     /// `PxElectionConfig::learner_stream_window_frames` taken at the time
     /// `with_config` is called; defaults to `64` for tests / callsites
     /// that construct via [`Self::new`] without a config.
     learner_stream_window_frames: usize,
-    /// Per-RPC deadline for `send_prepare` (unary) and the bidi
-    /// `learner_stream` accept/heartbeat calls. Snapshot of
-    /// `PxElectionConfig::learner_stream_rpc_timeout_ms`.
+    /// Per-RPC deadline for `send_prepare` (unary), the bidi
+    /// `learner_stream` accept call, and the unary `heartbeat` RPC.
+    /// Snapshot of `PxElectionConfig::learner_stream_rpc_timeout_ms`.
     rpc_timeout: Duration,
-    /// E5: reserved queue capacity for heartbeats inside the learner stream.
-    heartbeat_reserve: usize,
-    /// Monotonic correlation id allocator for `Accept` / `Heartbeat`
-    /// frames sent over [`Self::learner_stream`]. Starts at 1; 0 is
-    /// reserved as the "no correlation" sentinel used by fire-and-forget
-    /// frames such as `ChosenNotification`.
+    /// Monotonic correlation id allocator for `Accept` frames sent over
+    /// [`Self::learner_stream`]. Starts at 1; 0 is reserved as the "no
+    /// correlation" sentinel used by fire-and-forget frames such as
+    /// `ChosenNotification`.
     next_request_id: AtomicU64,
     pub(crate) voting: bool,
     /// Per-remote RPC counters consumed by `/topology`.
@@ -342,10 +348,13 @@ impl ReplicaClient for PxRemoteReplica {
         req: HeartbeatRequestPayload,
         group_id: u64,
     ) -> Result<HeartbeatReply, PxReplicaError> {
-        // Route Heartbeat through the per-peer bidi PxLearnerStream so it
-        // shares ordering with `Accept` (no heartbeat can race ahead of
-        // an in-flight Accept on the same peer). Wire-format conversion
-        // is unchanged.
+        // Route Heartbeat over a dedicated gRPC Channel (separate TCP
+        // connection) via the unary `heartbeat` RPC so liveness messages
+        // are never blocked behind data on the `LearnerStream`. The FIFO
+        // ordering invariant with `Accept` is not a hard safety
+        // requirement — the term fence handles cross-term reordering and
+        // same-term heartbeat/accept mutate independent state. See
+        // `design-crow-kv-rpc.md` §3.
         let request_id = self.alloc_request_id();
         let rpc_req = RpcHeartbeatRequest {
             version: 1,
@@ -360,12 +369,27 @@ impl ReplicaClient for PxRemoteReplica {
             request_id,
             request_create_ms: 0,
         };
-        let started = Instant::now();
-        let resp = match self.learner_stream().send_heartbeat(rpc_req).await {
-            Ok(r) => r,
-            Err(err) => {
+        let mut client = match self.get_heartbeat_client().await {
+            Ok(c) => c.clone(),
+            Err(status) => {
                 self.record_err();
-                return Err(err);
+                return Err(status_to_err(&status));
+            }
+        };
+        let started = Instant::now();
+        let resp = match tokio::time::timeout(self.rpc_timeout, client.heartbeat(rpc_req)).await {
+            Ok(Ok(r)) => r.into_inner(),
+            Ok(Err(status)) => {
+                self.record_err();
+                return Err(status_to_err(&status));
+            }
+            Err(_) => {
+                self.record_err();
+                return Err(PxReplicaError::Internal(format!(
+                    "heartbeat rpc timeout after {} ms at peer {}",
+                    self.rpc_timeout.as_millis(),
+                    self.endpoint
+                )));
             }
         };
         #[allow(clippy::cast_possible_truncation)]
@@ -439,16 +463,36 @@ impl PxRemoteReplica {
             .map(std::convert::AsRef::as_ref)
     }
 
+    /// Lazily establish (and reuse) the dedicated heartbeat channel.
+    /// Separate TCP connection from `get_client` and `learner_stream` so
+    /// steady-state heartbeats are never blocked behind data traffic.
+    async fn get_heartbeat_client(&self) -> Result<&PxServiceClient<Channel>, tonic::Status> {
+        self.heartbeat_client
+            .get_or_try_init(|| async {
+                let ch = Endpoint::from_shared(format!("http://{}", self.endpoint))
+                    .map_err(|e| tonic::Status::unavailable(e.to_string()))?
+                    .tcp_nodelay(true)
+                    .http2_keep_alive_interval(Duration::from_secs(5))
+                    .keep_alive_while_idle(true)
+                    .connect()
+                    .await
+                    .map_err(|e| tonic::Status::unavailable(e.to_string()))?;
+                Ok(Box::new(PxServiceClient::new(ch)))
+            })
+            .await
+            .map(std::convert::AsRef::as_ref)
+    }
+
     #[must_use]
     pub fn new(node_id: PxNodeId, endpoint: String) -> Self {
         Self {
             node_id,
             endpoint,
             grpc_client: OnceCell::new(),
+            heartbeat_client: OnceCell::new(),
             learner_stream: OnceLock::new(),
             learner_stream_window_frames: PxElectionConfig::DEFAULT.learner_stream_window_frames,
             rpc_timeout: Duration::from_millis(PxElectionConfig::DEFAULT.learner_stream_rpc_timeout_ms),
-            heartbeat_reserve: PxElectionConfig::DEFAULT.learner_stream_heartbeat_reserve,
             next_request_id: AtomicU64::new(1),
             voting: true,
             metrics: LayerMetrics::new(),
@@ -466,7 +510,6 @@ impl PxRemoteReplica {
         let mut r = Self::new(node_id, endpoint);
         r.learner_stream_window_frames = cfg.learner_stream_window_frames;
         r.rpc_timeout = Duration::from_millis(cfg.learner_stream_rpc_timeout_ms);
-        r.heartbeat_reserve = cfg.learner_stream_heartbeat_reserve;
         r
     }
 
@@ -478,7 +521,6 @@ impl PxRemoteReplica {
             let cfg = PxElectionConfig {
                 learner_stream_window_frames: self.learner_stream_window_frames,
                 learner_stream_rpc_timeout_ms: self.rpc_timeout.as_millis().try_into().unwrap_or(u64::MAX),
-                learner_stream_heartbeat_reserve: self.heartbeat_reserve,
                 ..PxElectionConfig::DEFAULT
             };
             PxLearnerStream::new(self.endpoint.clone(), &cfg)
@@ -514,9 +556,9 @@ impl PxRemoteReplica {
         self.learner_stream().send_chosen(notice)
     }
 
-    /// Allocate the next correlation id for an `Accept` / `Heartbeat`
-    /// frame. Never returns 0 (that value is reserved for fire-and-forget
-    /// frames like `ChosenNotification`).
+    /// Allocate the next correlation id for an `Accept` frame or unary
+    /// `Heartbeat` RPC. Never returns 0 (that value is reserved for
+    /// fire-and-forget frames like `ChosenNotification`).
     fn alloc_request_id(&self) -> u64 {
         let id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         if id == 0 {

@@ -262,20 +262,15 @@ pub struct PxElectionConfig {
     /// `persist_snapshot()` is called again, in milliseconds. Ensures a
     /// low-write-rate replica still checkpoints periodically.
     pub snapshot_time_threshold_ms: u64,
-    /// Per-RPC deadline for unary `prepare` and bidi `accept`/`heartbeat`
-    /// learner-stream calls, in milliseconds. On expiry the caller gets a
-    /// retryable `PxReplicaError` and the pending-map entry (bidi path) is
-    /// removed so it cannot leak. Paired with h2 keepalive on the
-    /// connect-time `Endpoint` so a hung peer (accepts connection but never
-    /// replies) is detected within the deadline rather than stalling the
-    /// proposer indefinitely.
+    /// Per-RPC deadline for unary `prepare`, the bidi `accept`
+    /// learner-stream call, and the unary `heartbeat` RPC, in
+    /// milliseconds. On expiry the caller gets a retryable
+    /// `PxReplicaError` and the pending-map entry (bidi path) is removed
+    /// so it cannot leak. Paired with h2 keepalive on the connect-time
+    /// `Endpoint` so a hung peer (accepts connection but never replies)
+    /// is detected within the deadline rather than stalling the proposer
+    /// indefinitely.
     pub learner_stream_rpc_timeout_ms: u64,
-    /// Reserved queue capacity inside the per-peer `PxLearnerStream`
-    /// outbound mpsc that only heartbeats may use. Non-heartbeat frames
-    /// (`accept`, `chosen`) are rejected with `Busy` once the shared
-    /// portion (`window - reserve`) is full, so a saturated accept path
-    /// cannot starve leader heartbeats and trigger spurious elections.
-    pub learner_stream_heartbeat_reserve: usize,
 }
 
 impl PxElectionConfig {
@@ -311,7 +306,6 @@ impl PxElectionConfig {
         snapshot_slot_threshold: 100_000,
         snapshot_time_threshold_ms: 600_000,
         learner_stream_rpc_timeout_ms: 2000,
-        learner_stream_heartbeat_reserve: 8,
     };
 
     /// Aggressive timings for `#[tokio::test(start_paused = true)]` suites.
@@ -335,7 +329,6 @@ impl PxElectionConfig {
             snapshot_slot_threshold: 1000,
             snapshot_time_threshold_ms: 1_000,
             learner_stream_rpc_timeout_ms: 500,
-            learner_stream_heartbeat_reserve: 2,
         }
     }
 
@@ -368,7 +361,6 @@ impl PxElectionConfig {
             snapshot_slot_threshold: 1_000_000,
             snapshot_time_threshold_ms: 9_000,
             learner_stream_rpc_timeout_ms: 1000,
-            learner_stream_heartbeat_reserve: 4,
         }
     }
 

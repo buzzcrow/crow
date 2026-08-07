@@ -18,7 +18,6 @@ This document defines the wire-serialization contract for all node-to-node and c
 - [6. Flow Control and Parallelism](#6-flow-control-and-parallelism)
   - [6.1 Quorum Short-Circuit](#61-quorum-short-circuit)
   - [6.2 RPC Deadline](#62-rpc-deadline)
-  - [6.3 Heartbeat Reserved Capacity](#63-heartbeat-reserved-capacity)
 - [7. Paxos Error Model](#7-paxos-error-model)
 - [8. Open Questions](#8-open-questions)
 - [9. Proto `bytes` Field Mapping — `bytes::Bytes`](#9-proto-bytes-field-mapping--bytesbytes)
@@ -27,7 +26,14 @@ This document defines the wire-serialization contract for all node-to-node and c
 
 ## 1. Design Principles
 
-1. **One bidirectional stream per peer pair.** All steady-state node-to-node traffic (`Accept`, `Heartbeat`, `Chosen`) multiplexes over a single gRPC bidi stream (`LearnerStream`) keyed by `(group_id, peer_node_id)`. One-shot messages (`Prepare`, `PreVote`, `RequestVote`, `StepDown`) remain unary RPCs. This reduces connection count for the hot path while keeping election messages unblocked.
+1. **One bidirectional stream per peer pair.** Steady-state data traffic
+   (`Accept`, `Chosen`) multiplexes over a single gRPC bidi stream
+   (`LearnerStream`) keyed by `(group_id, peer_node_id)`. Steady-state
+   `Heartbeat` traffic moves over a **dedicated unary gRPC channel**
+   (separate TCP connection) so liveness messages are never blocked
+   behind data on the `LearnerStream` — see §3. One-shot messages
+   (`Prepare`, `PreVote`, `RequestVote`, `StepDown`) remain unary RPCs on
+   the control channel.
 2. **Frame multiplexing.** Each `LearnerStreamRequest` / `LearnerStreamResponse` is a protobuf `oneof` frame. New steady-state message types add new oneof arms without changing existing field numbers.
 3. **No `required` fields.** All protobuf fields are `optional` or have sensible defaults. A missing `version` field defaults to `0` (meaning "pre-versioning, treat as earliest").
 4. **Field numbers are append-only.** Once assigned, a field number is never reused for a different semantic meaning. This is a hard rule for rolling upgrades.
@@ -58,25 +64,58 @@ doc covers design decisions only.
 
 ## 3. LearnerStream — Why a Dedicated Bidi Stream
 
-The steady-state consensus traffic moves onto a single gRPC bidi
-stream per `(group_id, peer_id)` pair. Three problems the
-unary-per-RPC pattern cannot solve:
+The steady-state **data** traffic (`Accept`, `ChosenNotification`)
+moves onto a single gRPC bidi stream per `(group_id, peer_id)` pair.
+Two problems the unary-per-RPC pattern cannot solve for data:
 
-1. **Ordering hazard.** A heartbeat carries a lease grant ("I won't
-   vote before T"). If that heartbeat reorders ahead of an
-   earlier-sent `Accept` on the same peer, the follower could reject
-   the `Accept` while already having promised not to vote. A single
-   stream guarantees FIFO delivery.
-2. **Connection churn.** Paying TCP + HTTP/2 setup cost once per
+1. **Connection churn.** Paying TCP + HTTP/2 setup cost once per
    leadership tenure, rather than per-RPC, amortizes overhead under
    high write throughput.
-3. **Per-peer backpressure.** A bounded `mpsc` on the stream gives the
+2. **Per-peer backpressure.** A bounded `mpsc` on the stream gives the
    proposer an explicit signal (`Busy`) when a peer cannot keep up.
+
+**Heartbeats move to a separate unary channel.** Steady-state
+`Heartbeat` traffic no longer flows through the `LearnerStream`. It
+routes over a **dedicated gRPC `Channel`** (separate TCP connection)
+via the existing unary `heartbeat` RPC, established lazily on first
+heartbeat and reused for the peer's lifetime. The reason is an
+**availability** issue: when the `LearnerStream`'s send-half loop
+flushes frames FIFO via `out_tx.send(frame).await`, a heartbeat
+admitted to the queue still sits behind every accept already queued.
+With 16 KiB values, the cumulative wire-flush time of N accepts can
+exceed the election timeout — the follower's election deadline fires,
+a spurious election challenges the leader, and the leader loses
+quorum. A separate connection gives heartbeats their own wire with no
+data traffic, so they are never delayed by accept backpressure.
+
+**Why the FIFO invariant can be relaxed.** The original design
+justified multiplexing heartbeats with accepts on a single stream
+with an ordering hazard: a heartbeat reordering ahead of an Accept
+could cause the follower to reject the Accept while already having
+promised not to vote. Code analysis shows this hazard does not hold:
+
+- `handle_heartbeat` mutates `election_state` (`current_term`,
+  `voted_for`, `leader_id`, `vote_lockout_until`).
+  `on_accept_inner` checks the term fence then calls the acceptor's
+  per-slot ballot CAS. The two operate on **independent state**.
+- `vote_lockout_until` only gates `handle_request_vote` /
+  `handle_pre_vote`, not `on_accept`. A heartbeat extending the
+  lockout cannot cause an accept to be rejected.
+- The only coupling is `current_term`, and the term fence
+  (`req.term < local_term → TermStale`) handles all cross-term
+  reordering correctly — a stale-term accept being rejected is
+  correct behavior (the old leader lost leadership).
+- Same-term reordering is harmless: heartbeat and accept mutate
+  independent state.
+
+The `term` **is** the epoch mechanism — no new timestamp or epoch
+field is needed to make separate connections safe.
 
 **What stays unary:** `Prepare` (one-shot Phase-1, no ordering need
 with steady-state traffic), `PreVote` / `RequestVote` (election probe
 / real vote — must not be queued behind `Accept`s), `StepDown` (admin
-primitive — must cut through immediately).
+primitive — must cut through immediately), `Heartbeat` (steady-state
+liveness — must not be blocked behind data).
 
 ---
 
@@ -86,12 +125,16 @@ primitive — must cut through immediately).
 
 - **Unary RPCs:** `Prepare`, `Accept` (classic Paxos), `PreVote`,
   `RequestVote`, `Heartbeat`, `StepDown` (leader election).
-- **Bidi stream:** `LearnerStream` (steady-state `Accept` + `Heartbeat`
-  + `Chosen` multiplexed).
+- **Bidi stream:** `LearnerStream` (steady-state `Accept` + `Chosen`
+  multiplexed).
 
 The unary `Accept` RPC is kept alongside `LearnerStream` for callers
 that need a one-shot path. In practice, steady-state `Accept` traffic
-flows through `LearnerStream`.
+flows through `LearnerStream`. The unary `Heartbeat` RPC is used for
+steady-state heartbeats over a dedicated channel (§3) — the
+`LearnerStream` no longer carries heartbeat frames in steady state,
+though the server-side bidi handler still accepts them for backward
+compatibility during rolling upgrades.
 
 **Cluster discovery — HTTP, not gRPC.** A gRPC `AdminService.DescribeCluster`
 RPC was sketched but **rejected, not deferred**. Cluster/topology
@@ -155,33 +198,22 @@ follower no longer drags every write. Failure detection is preserved
 
 ### 6.2 RPC Deadline
 
-`send_accept` / `send_heartbeat` wrap their oneshot await with
+`send_accept` wraps its oneshot await with
 `tokio::time::timeout(rpc_timeout)`. On expiry the caller removes its
 pending-map entry (the recv half no-ops on a missing entry, so a late
 reply is logged at `debug!` and dropped) and surfaces a typed
-retryable error. `send_prepare` wraps the unary gRPC call with the
-same timeout. A connected-yet-unresponsive peer (GC pause, half-open
-socket, overloaded server) is surfaced as a retryable failure within
-`learner_stream_rpc_timeout_ms` (default 2000 ms, aligned with the 2 s
-election max) rather than blocking the fan-out indefinitely.
+retryable error. `send_prepare` and `send_heartbeat` wrap the unary
+gRPC call with the same timeout. A connected-yet-unresponsive peer (GC
+pause, half-open socket, overloaded server) is surfaced as a
+retryable failure within `learner_stream_rpc_timeout_ms` (default 2000
+ms, aligned with the 2 s election max) rather than blocking the
+fan-out indefinitely.
 
 Belt-and-braces: h2 keepalive (`http2_keep_alive_interval` +
-`keep_alive_while_idle`) is enabled on both the `get_client` `Endpoint`
-and the learner_stream connect `Endpoint`, so a silent half-open
-connection is detected at the transport layer independent of the
-application timeout.
-
-### 6.3 Heartbeat Reserved Capacity
-
-`OutboundCmd` carries a `kind: FrameKind { Accept, Heartbeat, Chosen }`.
-`dispatch` tracks the count of non-heartbeat frames in flight via an
-`AtomicUsize`. Non-heartbeat frames (Accept, Chosen) are rejected when
-the non-heartbeat count reaches `window - heartbeat_reserve`
-(default reserve 8); heartbeats may use the full window. This
-preserves FIFO ordering (heartbeats and accepts share the same mpsc,
-so a heartbeat cannot race ahead of an accept it logically follows —
-§3 invariant 1) while guaranteeing heartbeats can never be starved of
-a queue slot under write saturation.
+`keep_alive_while_idle`) is enabled on the `get_client`,
+`get_heartbeat_client`, and `learner_stream` connect `Endpoint`s, so a
+silent half-open connection is detected at the transport layer
+independent of the application timeout.
 
 ---
 
