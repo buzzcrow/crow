@@ -11,7 +11,7 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R60** — Bump this line in the same commit when adding a new item.
+**Next R number: R63** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
@@ -156,6 +156,40 @@ complexity, and dependency. Before implementation, follow the
   FFI `ct_scan_at`, proto `snapshot_handle` field, client
   `snapshot_scan`. Backward compatible (handle = 0 = live scan).
   Medium–high complexity.
+- **[R60](R60-tree-scan-sibling-leaf-readahead.md)** — Sibling-leaf
+  readahead on cold scans — Area: scan / crow-tree engine — the scan
+  path demand-loads each L1 leaf inline (sync) or one pending page per
+  reactor round trip (async), so a cold multi-leaf range pays one
+  stall/round-trip per leaf, serialized with merge work on prior
+  leaves. The scan knows `right_sibling` (`crow-tree.cpp:1822/2074`)
+  before finishing the current leaf — issue a readahead for the next
+  leaf to overlap I/O with merging. Sync path: prefetch the
+  right-sibling page id via a page-cache async-resolve seam. Async
+  path: batch the right-sibling read with the current leaf's read in
+  the reactor submission (small readahead window, default 1). Win is
+  zero on mem-mode (leaves resident); needs a cold/disk bench config to
+  validate. Medium complexity.
+- **[R61](R61-kv-scan-keys-only-projection.md)** — Keys-only /
+  count-only projection — Area: scan / kv / crow-tree engine — scans
+  always materialize and ship values, including the expensive
+  `assemble_overflow_value` overflow-chain assembly
+  (`crow-tree.cpp:1857-1858`). A `keys_only` flag skips value
+  materialization in the `consider` lambda (stages key only) and
+  shrinks pages by the value fraction; a `count_only` variant counts
+  matches and ships zero items. One new flag per layer (proto, engine,
+  FFI, store, service, client). Useful for key listing, prefix
+  cardinality, and the console UI key browser. Low–medium complexity.
+- **[R62](R62-kv-scan-deadline-cancellation.md)** — Per-scan deadline /
+  cancellation — Area: scan / kv / crow-tree engine — no per-scan
+  timeout at any layer; an unbounded `limit=0` scan runs until the
+  transport gives up, and the engine merge loop
+  (`crow-tree.cpp:1890`) has no cancellation check between leaves. Add
+  a `deadline_ms` proto field (absolute unix-ms; 0 = no deadline) and
+  periodic deadline checks: client pagination loop checks before
+  fetching the next page (returns partial + `timed_out` flag); engine
+  merge loop checks once per leaf (in `refill_l1`) and breaks early
+  with `truncated = true`. Bounds worst-case server work. Medium
+  complexity.
 
 ---
 

@@ -195,48 +195,60 @@ Deep pagination is flat (equal to from-start) — O(limit) confirmed.
 
 ---
 
-## Existing Problems
+## Open Problems
 
-- **16 KiB scan errors (replication backpressure)**:
-  `valuesize_16KiB` shows intermittent errors (452 in the latest run,
-  0 in some re-runs). Root cause is NOT the scan path — it is the
-  learner_stream outbound queue filling up during pre-populate with
-  16 KiB values (1.6 GiB of data), blocking heartbeats to followers.
-  Server logs show `learner_stream: outbound queue full` → leader
-  loses leadership → `kv scan failed: not leader`. The scan path
-  itself is correct; the linearizable read barrier fails because the
-  leader can't maintain quorum. E5 (heartbeat reserved capacity)
-  guarantees heartbeat admission to the queue but not wire priority —
-  a heartbeat behind N 16 KiB accepts is delayed by their cumulative
-  flush time. Tracked as
-  [R53](../../backlog/R53-kv-replica-heartbeat-channel.md) — separate gRPC
-  Channel for heartbeats via the existing unary RPC (pure gRPC change,
-  independent of R32).
-- **High-concurrency read-mode split (MEASURED)**: MinSlot shows a
+Full-path audit (client → gRPC → PxKvStore → FFI → C++ engine),
+2026-08-07. Each item is tracked by a backlog requirement except where
+noted.
+
+- **[R52](../../backlog/R52-reverse-scan.md) — Reverse scan**: `scan`
+  is forward-only today (ascending key order). Reverse scan needs
+  backward cursor traversal in both L0 (skip-list, forward-only) and
+  L1 (`LeafChainCursor`), a `direction` field on `KvScanRequest`, and
+  S3-style pagination keyed on the first key of each page as the next
+  `start_before`.
+- **[R53](../../backlog/R53-kv-replica-heartbeat-channel.md) — 16 KiB
+  scan errors (replication backpressure)**: `valuesize_16KiB` shows
+  intermittent errors (452 in the latest run, 0 in some re-runs). Root
+  cause is NOT the scan path — it is the learner_stream outbound queue
+  filling up during pre-populate with 16 KiB values (1.6 GiB of data),
+  blocking heartbeats to followers. Server logs show
+  `learner_stream: outbound queue full` → leader loses leadership →
+  `kv scan failed: not leader`. The scan path itself is correct; the
+  linearizable read barrier fails because the leader can't maintain
+  quorum. E5 (heartbeat reserved capacity) guarantees heartbeat
+  admission to the queue but not wire priority — a heartbeat behind N
+  16 KiB accepts is delayed by their cumulative flush time. Fix:
+  separate gRPC Channel for heartbeats via the existing unary RPC
+  (pure gRPC change, independent of R32).
+- **[R54](../../backlog/R54-kv-scan-engine-profiling.md) —
+  High-concurrency engine bottleneck (MEASURED)**: MinSlot shows a
   +7.2% throughput advantage at 16T:16C (33015 vs 30799 scans/s) and
   44% better p99 at 32T:32C (2028us vs 3600us). The throughput
   advantage peaks around 16T then both modes saturate near ~38k
   scans/s at 32T — the crow-tree engine (C++ merge loop over L0
   skip-list + L1 B+tree cursor) becomes the bottleneck, not the read
   barrier. No code change needed for the read-mode split itself;
-  profiling the engine bottleneck is tracked as
-  [R54](../../backlog/R54-kv-scan-engine-profiling.md).
-- **Reverse scan**: `scan` is forward-only today. Tracked as backlog
-  item [R52](../../backlog/R52-reverse-scan.md).
-
----
-
-## Gap Analysis — Enhancement Opportunities
-
-Full-path audit (client → gRPC → PxKvStore → FFI → C++ engine),
-2026-08-07. Items marked **→ R55** / **→ R56** / **→ R57** / **→ R58**
-are now backlog entries; items under "Tiny Tasks" are small fix-later
-to-dos tracked here; the rest remain candidates (medium/large features
-not yet prioritized).
-
-### Performance
-
-- **Engine-side result staging is 3 copies, not zero-copy**. The
+  profiling the engine bottleneck is the open work.
+- **[R55](../../backlog/R55-kv-scan-carry-read-slot.md) — Per-page
+  linearizable read barrier**: `PxKvStore::kv_scan` calls
+  `resolve_read_point` on every page (`px_kv_store.rs:183`), so a
+  multi-page linearizable scan pays the barrier (lease check, or a
+  quorum heartbeat round on the ReadIndex fallback) once per page. The
+  client already receives `read_slot` from page 1 — carry it forward
+  as `min_slot` and serve subsequent pages via the MinSlot path.
+  Semantics are unchanged (cross-page results are already not a single
+  snapshot; each page would still be at least as fresh as page 1) and
+  later pages skip the barrier entirely. Client-local, no proto change.
+- **[R56](../../backlog/R56-kv-scan-end-key-bound.md) — Prefix-only
+  range predicate**: `KvScanRequest` has `prefix` + `start_after` but
+  no exclusive `end_key`, so an arbitrary `[start, end)` range cannot
+  be expressed. The engine's early-stop already compares against
+  `prefix`; adding an optional `end_key` bound to the merge loop, FFI,
+  proto, and client is a small, low-risk extension (and is a
+  prerequisite shape for R52 reverse scan).
+- **[R57](../../backlog/R57-tree-scan-zero-copy-staging.md) —
+  Engine-side result staging is 3 copies, not zero-copy**: the
   "zero-copy" claim above holds only from the FFI packed buffer to the
   client. Inside the engine, each page's result set is copied three
   times before crossing the FFI boundary:
@@ -251,110 +263,50 @@ not yet prioritized).
   lambda (single growing buffer) and transfer ownership across the FFI
   instead of `make_buf` (an ownership-transfer path already exists —
   see `make_borrowed_buf` and the get fast path). Likely the cheapest
-  large win. **→ R57**
-- **Per-page linearizable read barrier**. `PxKvStore::kv_scan` calls
-  `resolve_read_point` on every page (`px_kv_store.rs:183`), so a
-  multi-page linearizable scan pays the barrier (lease check, or a
-  quorum heartbeat round on the ReadIndex fallback) once per page.
-  Enhancement: the client already receives `read_slot` from page 1 —
-  carry it forward as `min_slot` and serve subsequent pages via the
-  MinSlot path. Semantics are unchanged (cross-page results are
-  already not a single snapshot; each page would still be at least as
-  fresh as page 1) and later pages skip the barrier entirely. **→ R55**
-- **Retry restarts pagination from scratch**. On a `not_leader_hint`
-  redirect or transport error the client clears `all_items` and resets
-  `page_start_after` to the caller's original `start_after`
-  (`client.rs:858, 875`), re-fetching every previous page. Because
-  pagination is keyed on `start_after` (S3-style), resuming from the
-  last received key on the new endpoint is safe — no duplicates, no
-  gaps in key order. Cheap client-only fix.
-- **Merge loop is O(N_sources) comparisons per entry**. Min-key
+  large win.
+- **[R58](../../backlog/R58-tree-scan-merge-loop-fast-path.md) —
+  Merge loop is O(N_sources) comparisons per entry**: min-key
   selection re-compares every L0 cursor plus L1 for each output entry
   (`crow-tree.cpp` ~1893-1934), each a byte-wise `Slice::compare`.
   With several frozen memtables live this multiplies. A loser-tree /
   two-element fast path (common case: 1 active L0 + L1) would cut
   compares; no prefetch (`__builtin_prefetch`) is issued for the next
-  skip-list node or the right-sibling leaf. **→ R58**
-- **No sibling-leaf readahead on cold scans**. The sync path
+  skip-list node or the right-sibling leaf.
+- **[R59](../../backlog/R59-kv-snapshot-scan.md) — No cross-page
+  snapshot isolation (by design)**: each page resolves its own read
+  point and scans live data; a paginated scan is a sequence of
+  per-page-consistent slices, not one snapshot — a value can change or
+  a key vanish between pages. This matches S3-list semantics and is
+  fine for the KV Operator UI, but is wrong for backup/analytics-style
+  consumers. The engine already has a snapshot mechanism
+  (`ct_snapshot_view` / `snapshot_view()`); a `snapshot scan` variant
+  could pin a view for the duration of one paginated scan (needs a
+  server-side handle + lease/expiry).
+- **[R60](../../backlog/R60-tree-scan-sibling-leaf-readahead.md) —
+  No sibling-leaf readahead on cold scans**: the sync path
   demand-loads each leaf inline; the async path resolves one pending
   page per reactor round trip (`scan_async_attempt`). A scan knows its
   next leaf (`right_sibling`) before finishing the current one —
   issuing the next read ahead of the merge loop would overlap I/O with
   merging on cold ranges.
-
-### Functionality
-
-- **No cross-page snapshot isolation (by design, undocumented)**. Each
-  page resolves its own read point and scans live data; a paginated
-  scan is a sequence of per-page-consistent slices, not one snapshot —
-  a value can change or a key vanish between pages. This matches
-  S3-list semantics and is fine for the KV Operator UI, but is wrong
-  for backup/analytics-style consumers. The engine already has a
-  snapshot mechanism (`ct_snapshot_view` / `snapshot_view()`); a
-  `snapshot scan` variant could pin a view for the duration of one
-  paginated scan (needs a server-side handle + lease/expiry). **→ R59**
-- **Prefix-only range predicate**. `KvScanRequest` has `prefix` +
-  `start_after` but no exclusive `end_key`, so an arbitrary
-  `[start, end)` range cannot be expressed. The engine's early-stop
-  already compares against `prefix`; adding an optional `end_key`
-  bound to the merge loop, FFI, proto, and client is a small, low-risk
-  extension (and is a prerequisite shape for R52 reverse scan). **→ R56**
-- **No keys-only / count-only projection**. Scans always materialize
+- **[R61](../../backlog/R61-kv-scan-keys-only-projection.md) —
+  No keys-only / count-only projection**: scans always materialize
   and ship values. A `keys_only` flag would skip value staging in the
   engine (including overflow-chain assembly — the most expensive
   materialization) and shrink pages by the value fraction; a
   count-style scan falls out of the same pushdown. Useful for key
   listing, prefix cardinality, and the console UI.
-- **No scan deadline / cancellation**. No per-scan timeout at any
-  layer; an unbounded `limit=0` scan over a large keyspace runs until
-  the transport gives up, and the engine loop has no cancellation
-  check between pages. A request deadline (proto field + engine-side
-  budget check per page) bounds worst-case server work.
-- **Single-group scope**. Scan targets one Paxos group; a
-  keyspace-wide scan across groups requires manual client fan-out and
-  merge. Acceptable while key→group placement is caller-owned, but a
-  client-side fan-out+merge helper is the natural follow-up once
-  multi-group stores are common.
-- **Streaming scan RPC (deliberately dropped — revisit for huge
-  scans)**. A server-streaming `ScanStream` existed (R38/R44 era) and
-  was replaced by the server byte budget + S3-style unary pagination.
-  That trade keeps the RPC surface simple, but every 3.5 MiB page now
-  costs one client round trip, serialized with the next page's engine
-  work — a full-keyspace scan cannot overlap page production with
-  network transfer. If bulk-export workloads matter, revisit a
-  streaming variant (or page prefetch: client requests page N+1 while
-  consuming page N, which gets the same overlap without a proto
-  change).
-
-### Tiny Tasks
-
-Small fix-later items tracked here (not large enough for a backlog
-requirement). Check off when done.
-
-- [x] **Scan retry resumes from last key, not from scratch**. On a
-  `not_leader_hint` redirect or transport error the client now keeps
-  `all_items` and sets `page_start_after = all_items.last().0`
-  (falling back to the caller's `start_after` only when nothing has
-  been received yet) instead of clearing `all_items` and resetting to
-  `start_after`. S3-style pagination is keyed on `start_after`, so
-  resuming from the last received key on the new endpoint is safe —
-  no duplicates, no gaps in key order. Client-only.
-- [x] **`SCAN_BYTE_BUDGET` as a server config knob**. The 3.5 MiB page
-  budget is now `ServerConfig::scan_byte_budget` (default 3.5 MiB),
-  plumbed through `CrowKVConfig` → `PxKvStore::set_scan_byte_budget`
-  in both the CLI bootstrap (`main.rs`) and the management API store
-  creation paths (`mgmt_api.rs`). Deployments can tune page size vs.
-  RPC overhead per deployment. The 4 MiB gRPC
-  `max_decoding_message_size` ceiling that the 3.5 MiB value leaves
-  headroom for still applies (post-R32 custom RPC may change that
-  ceiling — only the default's constraint value needs revisiting).
-- [x] **Cross-page scan semantics → R59**. A paginated scan is a
-  sequence of per-page-consistent slices, not one snapshot — a value
-  can change or a key vanish between pages (S3-list semantics). This
-  is by design and fine for the KV Operator UI, but is wrong for
-  backup/analytics-style consumers. Promoted from a doc-only note to
-  **R59** (`doc/backlog/R59-kv-snapshot-scan.md`): a `snapshot_scan`
-  variant that pins one engine snapshot at the scan's start and serves
-  every page against it. The user-guide note is deferred until R59
-  lands (the guide will document both the live-scan S3-list semantics
-  and the new `snapshot_scan` variant together).
+- **[R62](../../backlog/R62-kv-scan-deadline-cancellation.md) —
+  No scan deadline / cancellation**: no per-scan timeout at any layer;
+  an unbounded `limit=0` scan over a large keyspace runs until the
+  transport gives up, and the engine loop has no cancellation check
+  between pages. A request deadline (proto field + engine-side budget
+  check per page) bounds worst-case server work.
+- **Streaming scan RPC (deliberately dropped — not needed)**: a
+  server-streaming `ScanStream` (R38/R44 era) was replaced by the
+  server byte budget + S3-style unary pagination. Streaming adds
+  complexity (mid-stream error/cancellation/backpressure, HTTP/2
+  flow-control stalls) and loses the clean per-page retry that
+  `start_after` keying gives. The same production/transfer overlap is
+  available without a proto change via client-side page prefetch
+  (request page N+1 while consuming page N). No backlog entry.
