@@ -469,6 +469,11 @@ impl PxKvStore {
             tokio::spawn(async move {
                 arc_for_maintenance.start_engine_maintenance_loop().await;
             });
+            // R65: follower-side FetchGap catch-up driver.
+            let arc_for_fetchgap = arc.clone();
+            tokio::spawn(async move {
+                arc_for_fetchgap.start_fetchgap_driver().await;
+            });
         }
         // Atomically replace any prior group entry with the new arc and
         // cancel the prior group's driver synchronously. Without the

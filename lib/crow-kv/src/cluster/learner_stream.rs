@@ -37,7 +37,8 @@ use crate::common::config::PxElectionConfig;
 use crate::rpc::px_service_client::PxServiceClient;
 use crate::rpc::{
     learner_stream_request, learner_stream_response, AcceptRequest, AcceptedResponse,
-    BatchChosenNotification, ChosenNotification, LearnerStreamRequest, LearnerStreamResponse,
+    BatchChosenNotification, ChosenNotification, FetchGapRequest, FetchGapResponse, LearnerStreamRequest,
+    LearnerStreamResponse,
 };
 use tonic::transport::{Channel, Endpoint};
 
@@ -56,6 +57,7 @@ const BACKOFF_INITIAL: Duration = Duration::from_millis(50);
 #[derive(Debug)]
 pub enum LearnerStreamReply {
     Accepted(AcceptedResponse),
+    FetchGap(FetchGapResponse),
 }
 
 /// User-side request to the background task.
@@ -130,6 +132,9 @@ impl PxLearnerStream {
         })?;
         match tokio::time::timeout(self.rpc_timeout, rx).await {
             Ok(Ok(Ok(LearnerStreamReply::Accepted(r)))) => Ok(r),
+            Ok(Ok(Ok(LearnerStreamReply::FetchGap(_)))) => Err(PxReplicaError::Internal(
+                "learner_stream: unexpected fetch_gap reply for accept request".to_string(),
+            )),
             Ok(Ok(Err(e))) => Err(e),
             Ok(Err(_)) => Err(PxReplicaError::Internal(
                 "learner_stream: oneshot dropped".to_string(),
@@ -138,6 +143,45 @@ impl PxLearnerStream {
                 self.remove_pending(request_id);
                 Err(PxReplicaError::Internal(format!(
                     "learner_stream: accept rpc timeout after {} ms at peer {}",
+                    self.rpc_timeout.as_millis(),
+                    self.endpoint
+                )))
+            }
+        }
+    }
+
+    /// R65: Send a `FetchGapRequest` and await the `FetchGapResponse`.
+    /// The `slot` field is used as the correlation key (the leader echoes
+    /// it back in the response). Callers must ensure no duplicate
+    /// in-flight `FetchGap` for the same slot.
+    ///
+    /// # Errors
+    /// Returns [`PxReplicaError::Internal`] on transport failure, timeout,
+    /// or an unexpected reply type.
+    pub async fn send_fetch_gap(&self, req: FetchGapRequest) -> Result<FetchGapResponse, PxReplicaError> {
+        let request_id = req.slot;
+        let (tx, rx) = oneshot::channel();
+        let frame = LearnerStreamRequest {
+            frame: Some(learner_stream_request::Frame::FetchGap(req)),
+        };
+        self.dispatch(OutboundCmd {
+            frame,
+            reply_tx: Some(tx),
+            request_id,
+        })?;
+        match tokio::time::timeout(self.rpc_timeout, rx).await {
+            Ok(Ok(Ok(LearnerStreamReply::FetchGap(r)))) => Ok(r),
+            Ok(Ok(Ok(LearnerStreamReply::Accepted(_)))) => Err(PxReplicaError::Internal(
+                "learner_stream: unexpected accepted reply for fetch_gap request".to_string(),
+            )),
+            Ok(Ok(Err(e))) => Err(e),
+            Ok(Err(_)) => Err(PxReplicaError::Internal(
+                "learner_stream: oneshot dropped".to_string(),
+            )),
+            Err(_) => {
+                self.remove_pending(request_id);
+                Err(PxReplicaError::Internal(format!(
+                    "learner_stream: fetch_gap rpc timeout after {} ms at peer {}",
                     self.rpc_timeout.as_millis(),
                     self.endpoint
                 )))
@@ -370,6 +414,7 @@ fn dispatch_response(pending: &PendingMap, resp: LearnerStreamResponse) {
             );
             return;
         }
+        learner_stream_response::Frame::FetchGapReply(r) => (r.slot, LearnerStreamReply::FetchGap(r)),
     };
     if let Some(tx) = pending.lock().remove(&request_id) {
         let _ = tx.send(Ok(reply));

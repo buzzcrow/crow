@@ -120,3 +120,6 @@ mod t1_early_ack_crash;
 
 #[path = "group/coalesce_test.rs"]
 mod coalesce;
+
+#[path = "group/r65_replication_test.rs"]
+mod r65_replication;

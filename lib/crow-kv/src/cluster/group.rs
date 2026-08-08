@@ -32,7 +32,9 @@ use crate::common::config::{AdmissionPolicy, CrowKVConfig, PaxosConfig};
 use crate::common::report::OperationReport;
 use crate::metrics::{Counter, Gauge, LatencySummary};
 use crate::paxos::error::{PxPaxosError, PxPaxosPhase, PxRetryAction};
-use crate::paxos::roles::{DedupTag, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply, SlotIndex};
+use crate::paxos::roles::{
+    Acceptor, DedupTag, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply, SlotIndex,
+};
 use crate::paxos::{PxGroupId, PxNodeId};
 
 /// Registry-based metric handles for write-path instrumentation.
@@ -125,6 +127,9 @@ pub struct PxGroup {
     /// its cancellation source, so cancelling that (shutdown, or group
     /// replacement in `PxKvStore`) stops both tasks together.
     pub(crate) maintenance_handle: AsyncMutex<Option<JoinHandle<()>>>,
+    /// R65: `JoinHandle` of the spawned `FetchGap` driver (follower-side
+    /// catch-up). `None` until started. Cancelled via `tenure_cancel`.
+    pub(crate) fetchgap_handle: AsyncMutex<Option<JoinHandle<()>>>,
     /// Handoff from a freshly elected candidate to the upcoming
     /// `run_leader_state` invocation. Holds `(term, peer_floor,
     /// peer_ceiling)` for bulk Phase 1. Consumed once on Leader-state
@@ -296,6 +301,7 @@ impl PxGroup {
             tenure_cancel: CancellationToken::new(),
             driver_handle: AsyncMutex::new(None),
             maintenance_handle: AsyncMutex::new(None),
+            fetchgap_handle: AsyncMutex::new(None),
             pending_leader_handoff: parking_lot::Mutex::new(None),
             proposing_term: AtomicU64::new(0),
             leader_read_ready: AtomicBool::new(true),
@@ -433,6 +439,28 @@ impl PxGroup {
     /// the loop has already been started.
     pub async fn start_engine_maintenance_loop(self: &Arc<Self>) {
         crate::cluster::group_maintenance::start(self).await;
+    }
+
+    /// R65: Start the follower-side `FetchGap` driver. Periodically checks
+    /// `gap_slots` and sends `FetchGap` to the leader for missing/stale
+    /// slots. Only runs on followers (leader has no gaps — it's the
+    /// source of truth). No-op when `election_driver_disabled` or already
+    /// started.
+    pub async fn start_fetchgap_driver(self: &Arc<Self>) {
+        if self.config.election.election_driver_disabled {
+            return;
+        }
+        let mut guard = self.fetchgap_handle.lock().await;
+        if guard.is_some() {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        let cancel = self.tenure_cancel.clone();
+        let group_id = self.group_id;
+        let handle = tokio::spawn(async move {
+            run_fetchgap_driver(weak, group_id, cancel).await;
+        });
+        *guard = Some(handle);
     }
 
     /// Set the `Weak<PxGroup>` self-reference used by the R36 coalescer to
@@ -1056,6 +1084,10 @@ impl PxGroup {
                     );
                 }
             }
+        }
+        // R65: stop the FetchGap driver.
+        if let Some(handle) = self.fetchgap_handle.lock().await.take() {
+            let _ = handle.await;
         }
 
         // 1. Close remote gRPC channels first so no in-flight RPCs spin.
@@ -2543,15 +2575,54 @@ impl PxGroup {
         let slot = entry.slot;
         let term = entry.term;
         let leader_id = entry.ballot.leader_id;
+        let ballot_round = entry.ballot.round;
         for remote in &self.remote_replicas {
             let RemoteReplicaKind::Real(remote) = remote else {
                 continue;
             };
             let remote_id = remote.node_id;
-            if let Err(err) = remote.send_chosen_notice(slot, term, leader_id, group_id) {
+            if let Err(err) = remote.send_chosen_notice(slot, term, leader_id, group_id, ballot_round) {
                 debug!(group_id, slot, term, remote_id, endpoint = %remote.endpoint, error = %err, "fan_out_chosen_notice: peer notice failed (best-effort)");
             }
         }
+    }
+
+    /// R65: Leader-side `FetchGap` handler. Looks up the requested slot
+    /// in the local acceptor. If the leader has an accepted value, replies
+    /// with it (payload + ballot + term). If the leader doesn't have the
+    /// value, returns `None` — the slot is not yet chosen from this
+    /// leader's perspective, and the follower should retry later (the
+    /// leader's `repair_once` will eventually fill it, or a newer
+    /// `ChosenNotice` will re-notify).
+    pub(crate) fn handle_fetch_gap(&self, slot: SlotIndex) -> Option<crate::rpc::FetchGapResponse> {
+        let replica = &self.local_replica;
+        if !replica.is_leader() {
+            debug!(
+                group_id = self.group_id,
+                slot, "handle_fetch_gap: not leader, ignoring"
+            );
+            return None;
+        }
+        let entry = replica.acceptor.accepted_at(slot)?;
+        let group_id = self.group_id;
+        debug!(
+            group_id,
+            slot,
+            round = entry.ballot.round,
+            leader_id = entry.ballot.leader_id,
+            term = entry.term,
+            payload_len = entry.payload.len(),
+            "handle_fetch_gap: replying with accepted value"
+        );
+        Some(crate::rpc::FetchGapResponse {
+            version: 1,
+            group_id,
+            slot: entry.slot,
+            term: entry.term,
+            ballot_round: entry.ballot.round,
+            leader_id: entry.ballot.leader_id,
+            payload: entry.payload.clone().into(),
+        })
     }
 
     fn recompute_quorum(&mut self) {
@@ -3217,4 +3288,147 @@ fn build_accept_remote_futs(
         }
     }
     futs
+}
+
+/// R65: Follower-side `FetchGap` driver. Periodically checks the local
+/// replica's `gap_slots` set and sends `FetchGap` to the leader for each
+/// gap. On reply, overwrites the stale/missing value and wakes the apply
+/// loop. Bounded by `MAX_INFLIGHT_FETCHGAP`.
+async fn run_fetchgap_driver(group: Weak<PxGroup>, group_id: PxGroupId, cancel: CancellationToken) {
+    let tick = Duration::from_millis(10);
+    loop {
+        if cancel.is_cancelled() {
+            return;
+        }
+        if sleep_or_cancel(&cancel, tick).await {
+            return;
+        }
+        let Some(group) = group.upgrade() else {
+            return;
+        };
+        // R65: update replication gauges periodically.
+        group.local_replica().update_replication_gauges();
+        // Only followers need FetchGap — the leader is the source of
+        // truth and has no gaps.
+        if group.local_replica().is_leader() {
+            continue;
+        }
+        let leader_id = group.leader_id();
+        if leader_id == 0 {
+            continue;
+        }
+        let Some(remote) = group.get_remote_replica(leader_id) else {
+            continue;
+        };
+        // R65: snapshot fallback — if gap count exceeds the threshold,
+        // skip FetchGap and log a warning. A full automatic snapshot
+        // install for running replicas is a follow-up; for now the
+        // follower will eventually catch up via ChosenNotice + heartbeat.
+        let gap_count = group.local_replica().gap_slots.lock().len();
+        let threshold = group.config.election.catchup_snapshot_threshold;
+        if gap_count > threshold as usize {
+            tracing::warn!(
+                group_id,
+                gap_count,
+                threshold,
+                "gap count exceeds snapshot threshold; FetchGap skipped (snapshot fallback not yet automatic)"
+            );
+            continue;
+        }
+        // Clone the learner stream Arc so the spawned task can send
+        // FetchGap without holding a reference to the group.
+        let stream = remote.learner_stream().clone();
+        let replica = group.local_replica();
+        let term = replica.current_term_snapshot();
+        let gaps = replica.drain_gaps_for_fetchgap();
+        if gaps.is_empty() {
+            continue;
+        }
+        replica.incr_fetchgap_sent(gaps.len() as u64);
+        // Clone the Arc fields needed by the spawned task.
+        let fetchgap_inflight = replica.fetchgap_inflight.clone();
+        let gap_slots = replica.gap_slots.clone();
+        let learner = replica.learner.clone();
+        let acceptor = replica.acceptor.clone();
+        let apply_notify = replica.apply_notify.clone();
+        let fetchgap_received = replica
+            .replication_handles
+            .get()
+            .map(|h| h.fetchgap_received.clone());
+        let fetchgap_failed = replica
+            .replication_handles
+            .get()
+            .map(|h| h.fetchgap_failed.clone());
+        // Spawn a task per gap to send FetchGap concurrently.
+        for slot in gaps {
+            let stream_clone = stream.clone();
+            let fetchgap_inflight_clone = fetchgap_inflight.clone();
+            let gap_slots_clone = gap_slots.clone();
+            let learner_clone = learner.clone();
+            let acceptor_clone = acceptor.clone();
+            let apply_notify_clone = apply_notify.clone();
+            let fetchgap_received_clone = fetchgap_received.clone();
+            let fetchgap_failed_clone = fetchgap_failed.clone();
+            tokio::spawn(async move {
+                let req = crate::rpc::FetchGapRequest {
+                    version: 1,
+                    group_id,
+                    slot,
+                    term,
+                    leader_id,
+                };
+                let result = stream_clone.send_fetch_gap(req).await;
+                fetchgap_inflight_clone.fetch_sub(1, Ordering::AcqRel);
+                match result {
+                    Ok(resp) => {
+                        if let Some(c) = &fetchgap_received_clone {
+                            c.inc();
+                        }
+                        debug!(
+                            group_id,
+                            slot,
+                            term = resp.term,
+                            ballot_round = resp.ballot_round,
+                            leader_id = resp.leader_id,
+                            payload_len = resp.payload.len(),
+                            "FetchGap reply received"
+                        );
+                        let entry = crate::paxos::roles::PxLogEntry {
+                            slot: resp.slot,
+                            ballot: crate::paxos::roles::PxBallot::new(resp.ballot_round, resp.leader_id),
+                            term: resp.term,
+                            payload: bytes::Bytes::from(resp.payload),
+                        };
+                        acceptor_clone.accept(&entry).await;
+                        learner_clone.update_chosen_frontier(resp.slot, resp.term);
+                        apply_notify_clone.notify_one();
+                    }
+                    Err(err) => {
+                        if let Some(c) = &fetchgap_failed_clone {
+                            c.inc();
+                        }
+                        // Re-record the gap so the next tick retries.
+                        gap_slots_clone.lock().insert(slot);
+                        debug!(
+                            group_id,
+                            slot,
+                            error = %err,
+                            "FetchGap failed (will retry next tick)"
+                        );
+                    }
+                }
+            });
+        }
+        if sleep_or_cancel(&cancel, tick).await {
+            return;
+        }
+    }
+}
+
+/// Returns `true` if cancelled during sleep, `false` if sleep completed.
+async fn sleep_or_cancel(cancel: &CancellationToken, dur: Duration) -> bool {
+    tokio::select! {
+        () = cancel.cancelled() => true,
+        () = tokio::time::sleep(dur) => false,
+    }
 }

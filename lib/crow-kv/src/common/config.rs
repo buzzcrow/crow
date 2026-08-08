@@ -235,6 +235,11 @@ pub struct PxElectionConfig {
     pub max_clock_skew_ms: u64,
     /// Slots scanned per bulk-Phase-1 batch (new-leader open-prefix repair).
     pub bulk_prepare_window: u64,
+    /// R65: gap count threshold for snapshot fallback. When a follower's
+    /// gap count exceeds this, `FetchGap` is skipped and a warning is logged
+    /// (full automatic snapshot install for running replicas is a
+    /// follow-up). Default matches `bulk_prepare_window` (1024).
+    pub catchup_snapshot_threshold: u64,
     /// Test-only override: when `true`, the election driver task is not
     /// spawned. Used by `testkit::cluster::start_cluster` to keep legacy M1/M2
     /// tests deterministic (pinned leader via `set_leader_id`).
@@ -297,6 +302,7 @@ impl PxElectionConfig {
         lease_duration_ms: 3000,
         max_clock_skew_ms: 500,
         bulk_prepare_window: 1024,
+        catchup_snapshot_threshold: 1024,
         election_driver_disabled: false,
         learner_stream_window_frames: PaxosConfig::DEFAULT.max_inflight_proposals
             * Self::LEARNER_WINDOW_MULTIPLIER,
@@ -322,6 +328,7 @@ impl PxElectionConfig {
             lease_duration_ms: 25,
             max_clock_skew_ms: 1,
             bulk_prepare_window: 1024,
+            catchup_snapshot_threshold: 1024,
             election_driver_disabled: false,
             learner_stream_window_frames: PaxosConfig::DEFAULT.max_inflight_proposals
                 * Self::LEARNER_WINDOW_MULTIPLIER,
@@ -354,6 +361,7 @@ impl PxElectionConfig {
             lease_duration_ms: 800,
             max_clock_skew_ms: 100,
             bulk_prepare_window: 1024,
+            catchup_snapshot_threshold: 1024,
             election_driver_disabled: false,
             learner_stream_window_frames: PaxosConfig::DEFAULT.max_inflight_proposals
                 * Self::LEARNER_WINDOW_MULTIPLIER,

@@ -28,6 +28,7 @@ use crate::wal::record::WALRecord;
 use crate::wal::replay::ReplayResult;
 use crate::wal::WalEngine;
 use parking_lot::Mutex;
+use std::collections::BTreeSet;
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -243,6 +244,9 @@ pub struct PxLocalReplica {
     /// metrics log file. Set via [`Self::set_metrics_registry`] when
     /// a registry is wired. `None` in tests / no-registry mode.
     election_handles: OnceLock<ElectionRegistryHandles>,
+    /// R65: replication flow counters + gauges. Set via
+    /// [`Self::set_metrics_registry`] when a registry is wired.
+    pub(crate) replication_handles: OnceLock<ReplicationRegistryHandles>,
     /// Test-only gate that blocks `spawn_accept_persist`'s background
     /// task before `wal.append`, so a test can deterministically kill
     /// the replica in the CAS→persist window (R16b early-ack). Set via
@@ -259,13 +263,21 @@ pub struct PxLocalReplica {
     /// R63: wakes the background apply loop when `known_commit_slot`
     /// advances. `Arc`-wrapped so the spawned apply task can hold a
     /// `'static` clone.
-    apply_notify: Arc<tokio::sync::Notify>,
+    pub(crate) apply_notify: Arc<tokio::sync::Notify>,
     /// R63: cancellation token for the background apply loop. Owned by the
     /// replica (not per-tenure) so the loop survives role transitions.
     apply_loop_cancel: tokio_util::sync::CancellationToken,
     /// R63: join handle for the background apply loop. `None` until the
     /// loop is lazily spawned by `ensure_apply_loop`.
     apply_loop_handle: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// R65: set of slots that need `FetchGap` (missing or stale value).
+    /// Populated by the `ChosenNotice` handler and the apply loop;
+    /// consumed by the `FetchGap` driver. `Arc`-wrapped so the spawned
+    /// `FetchGap` driver task can hold a `'static` clone.
+    pub(crate) gap_slots: Arc<Mutex<BTreeSet<SlotIndex>>>,
+    /// R65: count of in-flight `FetchGap` requests. Bounded by
+    /// `MAX_INFLIGHT_FETCHGAP` to prevent flooding the leader.
+    pub(crate) fetchgap_inflight: Arc<AtomicU64>,
 }
 
 /// Registry-based metric handles for election counters and gauges.
@@ -277,6 +289,22 @@ pub(crate) struct ElectionRegistryHandles {
     pub(crate) step_downs_lease: Arc<Counter>,
     pub(crate) step_downs_admin: Arc<Counter>,
     pub(crate) inflight_slots: Arc<Gauge>,
+}
+
+/// R65: Registry-based metric handles for replication flow counters and
+/// gauges. Created by [`PxLocalReplica::set_metrics_registry`] and stored
+/// in `OnceLock` for lock-free hot-path reads.
+pub(crate) struct ReplicationRegistryHandles {
+    pub(crate) chosen_notice_stale_ballot: Arc<Counter>,
+    pub(crate) chosen_notice_missing_value: Arc<Counter>,
+    pub(crate) fetchgap_sent: Arc<Counter>,
+    pub(crate) fetchgap_received: Arc<Counter>,
+    pub(crate) fetchgap_failed: Arc<Counter>,
+    pub(crate) apply_loop_skip: Arc<Counter>,
+    pub(crate) gap_count: Arc<Gauge>,
+    pub(crate) fetchgap_inflight: Arc<Gauge>,
+    pub(crate) last_chosen_slot: Arc<Gauge>,
+    pub(crate) known_commit_slot: Arc<Gauge>,
 }
 
 impl std::fmt::Debug for PxLocalReplica {
@@ -378,12 +406,15 @@ impl PxLocalReplica {
             election_metrics: ElectionMetrics::new(),
             last_heartbeat_at: Mutex::new(None),
             election_handles: OnceLock::new(),
+            replication_handles: OnceLock::new(),
             #[cfg(feature = "test-util")]
             persist_gate: Mutex::new(None),
             known_commit_slot: Arc::new(AtomicU64::new(0)),
             apply_notify: Arc::new(tokio::sync::Notify::new()),
             apply_loop_cancel: tokio_util::sync::CancellationToken::new(),
             apply_loop_handle: parking_lot::Mutex::new(None),
+            gap_slots: Arc::new(Mutex::new(BTreeSet::new())),
+            fetchgap_inflight: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -442,12 +473,15 @@ impl PxLocalReplica {
             election_metrics: ElectionMetrics::new(),
             last_heartbeat_at: Mutex::new(None),
             election_handles: OnceLock::new(),
+            replication_handles: OnceLock::new(),
             #[cfg(feature = "test-util")]
             persist_gate: Mutex::new(None),
             known_commit_slot: Arc::new(AtomicU64::new(0)),
             apply_notify: Arc::new(tokio::sync::Notify::new()),
             apply_loop_cancel: tokio_util::sync::CancellationToken::new(),
             apply_loop_handle: parking_lot::Mutex::new(None),
+            gap_slots: Arc::new(Mutex::new(BTreeSet::new())),
+            fetchgap_inflight: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -915,6 +949,22 @@ impl PxLocalReplica {
             inflight_slots: r.register_gauge(format!("{prefix}.paxos.inflight_slots.g")),
         };
         let _ = self.election_handles.set(handles);
+        // R65: replication flow metrics.
+        let repl_handles = ReplicationRegistryHandles {
+            chosen_notice_stale_ballot: r
+                .register_counter(format!("{prefix}.paxos.chosen_notice.stale_ballot.c")),
+            chosen_notice_missing_value: r
+                .register_counter(format!("{prefix}.paxos.chosen_notice.missing_value.c")),
+            fetchgap_sent: r.register_counter(format!("{prefix}.paxos.fetchgap.sent.c")),
+            fetchgap_received: r.register_counter(format!("{prefix}.paxos.fetchgap.received.c")),
+            fetchgap_failed: r.register_counter(format!("{prefix}.paxos.fetchgap.failed.c")),
+            apply_loop_skip: r.register_counter(format!("{prefix}.paxos.apply_loop.skip.c")),
+            gap_count: r.register_gauge(format!("{prefix}.paxos.gap_count.g")),
+            fetchgap_inflight: r.register_gauge(format!("{prefix}.paxos.fetchgap.inflight.g")),
+            last_chosen_slot: r.register_gauge(format!("{prefix}.paxos.last_chosen_slot.g")),
+            known_commit_slot: r.register_gauge(format!("{prefix}.paxos.known_commit_slot.g")),
+        };
+        let _ = self.replication_handles.set(repl_handles);
         let engine_apply = r.register_summary(format!("{prefix}.write.engine_apply.l"));
         self.learner.set_engine_apply_summary(engine_apply);
         if let Some(ref wal) = self.wal {
@@ -1333,11 +1383,93 @@ impl PxLocalReplica {
         let learner = Arc::clone(&self.learner);
         let acceptor = Arc::clone(&self.acceptor);
         let notify = Arc::clone(&self.apply_notify);
+        let gap_slots = Arc::clone(&self.gap_slots);
+        let apply_loop_skip = self.replication_handles.get().map(|h| h.apply_loop_skip.clone());
         let cancel = self.apply_loop_cancel.clone();
         let handle = tokio::spawn(async move {
-            apply_loop_task(known, learner, acceptor, notify, cancel).await;
+            apply_loop_task(
+                known,
+                learner,
+                acceptor,
+                notify,
+                gap_slots,
+                apply_loop_skip,
+                cancel,
+            )
+            .await;
         });
         *self.apply_loop_handle.lock() = Some(handle);
+    }
+
+    /// R65: record a gap slot that needs `FetchGap`. Called by the
+    /// `ChosenNotice` handler (missing/stale value) and the apply loop
+    /// (missing slot in committed range). Idempotent.
+    pub(crate) fn record_gap(&self, slot: SlotIndex) {
+        self.gap_slots.lock().insert(slot);
+    }
+
+    /// R65: increment the `chosen_notice.stale_ballot` counter.
+    pub(crate) fn incr_chosen_notice_stale(&self) {
+        if let Some(h) = self.replication_handles.get() {
+            h.chosen_notice_stale_ballot.inc();
+        }
+    }
+
+    /// R65: increment the `chosen_notice.missing_value` counter.
+    pub(crate) fn incr_chosen_notice_missing(&self) {
+        if let Some(h) = self.replication_handles.get() {
+            h.chosen_notice_missing_value.inc();
+        }
+    }
+
+    /// R65: increment the `fetchgap.sent` counter by `n`.
+    pub(crate) fn incr_fetchgap_sent(&self, n: u64) {
+        if let Some(h) = self.replication_handles.get() {
+            for _ in 0..n {
+                h.fetchgap_sent.inc();
+            }
+        }
+    }
+
+    /// R65: update replication gauges from current state. Called
+    /// periodically by the `FetchGap` driver.
+    pub(crate) fn update_replication_gauges(&self) {
+        if let Some(h) = self.replication_handles.get() {
+            h.gap_count.set(self.gap_slots.lock().len() as u64);
+            h.fetchgap_inflight
+                .set(self.fetchgap_inflight.load(Ordering::Acquire));
+            h.last_chosen_slot.set(self.learner.last_chosen_slot());
+            h.known_commit_slot
+                .set(self.known_commit_slot.load(Ordering::Acquire));
+        }
+    }
+
+    /// R65: drain up to `MAX_INFLIGHT_FETCHGAP` gap slots for `FetchGap`
+    /// sending. Returns the slots that were drained (removed from the
+    /// set). The caller is responsible for sending `FetchGap` for each
+    /// and decrementing `fetchgap_inflight` on completion.
+    pub(crate) fn drain_gaps_for_fetchgap(&self) -> Vec<SlotIndex> {
+        let max = MAX_INFLIGHT_FETCHGAP.saturating_sub(self.fetchgap_inflight.load(Ordering::Acquire));
+        if max == 0 {
+            return Vec::new();
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let max_usize = max as usize;
+        let mut gaps = self.gap_slots.lock();
+        let mut result = Vec::with_capacity(max_usize);
+        while result.len() < max_usize {
+            if let Some(&slot) = gaps.first() {
+                gaps.remove(&slot);
+                result.push(slot);
+            } else {
+                break;
+            }
+        }
+        if !result.is_empty() {
+            self.fetchgap_inflight
+                .fetch_add(u64::try_from(result.len()).unwrap_or(u64::MAX), Ordering::AcqRel);
+        }
+        result
     }
 
     /// R63: stop the background apply loop. Called in [`Self::shutdown`].
@@ -1674,6 +1806,10 @@ impl PxLocalReplica {
 /// `known_commit_slot` advances.
 const MAX_APPLY_PER_BATCH: u64 = 64;
 
+/// R65: maximum in-flight `FetchGap` requests per follower. Prevents
+/// flooding the leader when the follower has a large gap backlog.
+const MAX_INFLIGHT_FETCHGAP: u64 = 16;
+
 /// R63: background apply loop task. Reads `known_commit_slot`, collects
 /// entries from the acceptor for the contiguous range, and applies them via
 /// the learner. Missing slots are skipped (skip-and-continue) so a single
@@ -1685,23 +1821,24 @@ async fn apply_loop_task(
     learner: Arc<PxLearner>,
     acceptor: Arc<PxAcceptor>,
     notify: Arc<tokio::sync::Notify>,
+    gap_slots: Arc<Mutex<BTreeSet<SlotIndex>>>,
+    apply_loop_skip: Option<Arc<Counter>>,
     cancel: tokio_util::sync::CancellationToken,
 ) {
     loop {
         if cancel.is_cancelled() {
             return;
         }
-        let target = known.load(Ordering::Acquire);
+        // R65: target is max(known_commit_slot, last_chosen_slot).
+        // `known_commit_slot` covers the continuous prefix (from
+        // heartbeat), `last_chosen_slot` covers out-of-order chosen
+        // slots (from ChosenNotice with ballot match).
+        let target = known.load(Ordering::Acquire).max(learner.last_chosen_slot());
         let current = learner.contiguous_applied();
         if current >= target {
             notify.notified().await;
             continue;
         }
-        // Track the highest slot we've already attempted in this batch so
-        // we don't re-apply out-of-order slots on every iteration (they're
-        // idempotent but waste CPU). The `high_water` persists across
-        // iterations until `contiguous_applied` catches up to it or
-        // `known_commit_slot` advances past it.
         let mut next = current.saturating_add(1);
         let end = target.min(next.saturating_add(MAX_APPLY_PER_BATCH).saturating_sub(1));
         let before = current;
@@ -1709,9 +1846,27 @@ async fn apply_loop_task(
             if cancel.is_cancelled() {
                 return;
             }
-            if let Some(entry) = acceptor.accepted_at(next) {
-                learner.apply_entry(entry.slot, &entry.payload).await;
-                learner.advance_applied_frontier(entry.slot);
+            // R65: chosen-ness check — only apply slots that are genuinely
+            // chosen. A slot is chosen if any of:
+            // - ≤ known_commit_slot (heartbeat's committed_safe_slot =
+            //   Raft commit_index: continuous chosen prefix)
+            // - ≤ contiguous_chosen (from ChosenNotice/learn)
+            // - in the out-of-order chosen set (individual ChosenNotice)
+            // Accepted-but-not-chosen slots are skipped. This prevents
+            // applying values the leader hasn't confirmed.
+            let known_val = known.load(Ordering::Acquire);
+            if next <= known_val || learner.is_chosen(next) {
+                if let Some(entry) = acceptor.accepted_at(next) {
+                    learner.apply_entry(entry.slot, &entry.payload).await;
+                    learner.advance_applied_frontier(entry.slot);
+                } else {
+                    // R65: chosen (≤ known_commit_slot or in chosen set)
+                    // but acceptor has no value — record gap for FetchGap.
+                    gap_slots.lock().insert(next);
+                    if let Some(c) = &apply_loop_skip {
+                        c.inc();
+                    }
+                }
             }
             next += 1;
         }

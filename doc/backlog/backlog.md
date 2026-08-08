@@ -11,18 +11,24 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R65** — Bump this line in the same commit when adding a new item.
+**Next R number: R67** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
-- **[R64](R64-kv-paxos-dedicated-runtime.md)** — Dedicated runtime for
-  election work + decouple catch-up replay from heartbeat round — the
-  election driver competes with the propose path on the shared tokio
-  pool, and catch-up replay runs inline in the heartbeat round. Fix:
-  (1) spawn the election driver on a dedicated 2-worker runtime so
-  heartbeats are never starved by propose load; (2) extract catch-up
-  replay into a separate `select!` arm so heartbeat rounds return
-  immediately after quorum. Depends on R63.
+- **[R66](R66-kv-wal-io-uring.md)** — WAL io_uring backend — eliminate
+  `spawn_blocking` on the durability path. The WAL's production I/O
+  backend (`File` / `BlockDevice`) routes `fdatasync` and file writes
+  through `tokio::fs` / `std::fs`, both of which use `spawn_blocking`
+  internally (thread hop + blocking pool saturation under burst load).
+  Add `IoBackend::Uring` variant that reuses the crow-tree C++ reactor
+  (`lib/crow-tree/src/reactor.cpp`, already proven for B-tree page I/O)
+  for WAL segment I/O via `io_uring` SQE/CQE. Expose the reactor's
+  submit API (`submit_read`/`submit_write`/`submit_fsync`) via FFI as
+  Rust async functions. `WalFileInner::Uring` implements all `WalFile`
+  operations via reactor SQEs — no `spawn_blocking`, no thread hop.
+  Fallback to `File` on non-Linux / no-liburing. `O_DIRECT` aligned
+  writes. No `pipeline_writer` or `segment` API changes (drop-in async
+  fn replacement). Linux + liburing only; tests skip on other platforms.
 
 ### Medium Priority
 

@@ -22,6 +22,7 @@ This document covers two aspects of CROW's slot mechanism:
 - [7. Safe-Slot Computation and Propagation](#7-safe-slot-computation-and-propagation)
 - [8. Gap Detection](#8-gap-detection)
 - [9. Gap Repair via Classic Paxos](#9-gap-repair-via-classic-paxos)
+- [9A. Follower-Side Apply and Catch-up](#9a-follower-side-apply-and-catch-up)
 - [10. Timing Diagrams](#10-timing-diagrams)
 - [11. Interaction with Snapshot and WAL GC](#11-interaction-with-snapshot-and-wal-gc)
 - [12. Tunables and Defaults](#12-tunables-and-defaults)
@@ -166,6 +167,55 @@ The repair never invents a fresh user value — if any acceptor had a half-baked
 
 ---
 
+## 9A. Follower-Side Apply and Catch-up
+
+The leader-side repair in §9 closes gaps in the leader's *chosen* frontier. Followers face a symmetric but distinct problem: they learn about chosen slots via `ChosenNotice` (a fire-and-forget notification the leader broadcasts after quorum), and they may miss or receive stale versions of those slots. This section covers the follower-side apply path and catch-up mechanism.
+
+### 9A.1 Accept Path Stores Only
+
+A follower's `handle_accept` stores the accepted value in its acceptor and persists it to the WAL, but does **not** advance `known_commit_slot` or wake the apply loop. Accept is a storage event, not a commit event — the leader may crash before reaching quorum, in which case the accepted value may never be chosen (or may be overwritten by a higher-ballot value during new-leader recovery).
+
+Advancing the apply frontier on Accept would let a follower apply an un-chosen value, violating Paxos safety — the same class of bug as applying before `leaderCommit` in Raft.
+
+The one exception is the new-leader transition: after a follower wins election and completes bulk Phase 1 over `[contiguous_chosen+1, ceiling]`, it advances `known_commit_slot` to its new `contiguous_chosen` and wakes the apply loop. This is safe because bulk Phase 1 has resolved (chosen or NoOp-filled) every slot in that range under the new leader's ballot.
+
+### 9A.2 ChosenNotice — Ballot-Verified Out-of-Order Apply
+
+When the leader chooses a slot, it broadcasts a `ChosenNotice` carrying `(slot, term, leader_id, ballot_round)` to all followers. The follower's ChosenNotice handler:
+
+- If the follower's acceptor has an accepted value at `slot` with `ballot == chosen_ballot` → the value matches what was chosen. The follower calls `update_chosen_frontier` and wakes the apply loop. Apply can proceed out-of-order — the per-key slot tracking in §3 makes this safe (highest slot wins per key).
+- If the follower's accepted ballot at `slot` is **lower** than the chosen ballot (stale) → the follower has an outdated value. It records a gap for `slot` (driven by FetchGap, §9A.3) and does not apply.
+- If the follower has no accepted value at `slot` → it records a gap and does not apply.
+
+The `ballot_round` field in the ChosenNotice proto enables this verification — without it, the follower cannot distinguish a fresh chosen value from a stale re-delivery.
+
+### 9A.3 Follower-Driven FetchGap Catch-up
+
+When a follower detects a gap (missing or stale slot in the chosen range), it sends a `FetchGap(slot)` request to the leader via the LearnerStream. The leader:
+
+- Has the chosen value locally → replies with the full entry (payload + ballot + term).
+- Does not have it → runs classic Paxos (`repair_once`, §9) to resolve the slot, then replies with the resolved value (or NoOp).
+
+On receipt, the follower overwrites any stale accepted value with the chosen value, updates its chosen frontier, and wakes the apply loop. FetchGap is bounded by `MAX_INFLIGHT_FETCHGAP` (default 16) to avoid flooding the leader.
+
+This replaces the previous leader-driven catch-up that ran inline in `run_heartbeat_round` (up to 64 synchronous `send_accept().await` calls per lagging follower). That inline catch-up could exceed `heartbeat_interval` and trigger spurious elections. The heartbeat round is now pure liveness + lease — one RPC round-trip, no catch-up work.
+
+### 9A.4 Snapshot Fallback
+
+If a follower's gap count exceeds `catchup_snapshot_threshold` (default `bulk_prepare_window` = 1024), the follower stops issuing FetchGap requests and logs a warning. The full snapshot-install path for running replicas is deferred; the threshold gate prevents FetchGap storms against the leader when a follower is severely lagging (e.g. after a long network partition).
+
+### 9A.5 Apply Loop
+
+The follower's apply loop targets `max(known_commit_slot, last_chosen_slot)`. For each slot in the apply range:
+
+- If `slot ≤ known_commit_slot` → apply (committed by definition).
+- Else if `learner.is_chosen(slot)` → apply (out-of-order chosen slot).
+- Else (accepted but not chosen) → skip and record a gap for FetchGap.
+
+This ensures accepted-but-not-chosen slots are never applied, while allowing out-of-order chosen slots to apply immediately without waiting for lower slots to be resolved.
+
+---
+
 ## 10. Timing Diagrams
 
 ### 10.1 Best case — fully pipelined window
@@ -247,8 +297,9 @@ Detailed further in [`design-crow-kv-wal.md`](design-crow-kv-wal.md) §4.
 | `retry_base_backoff_ms` | 5 | `PaxosConfig` (exponential backoff base) |
 | `learner_stream_window_frames` | 64 | `PxElectionConfig` (per-peer mpsc capacity) |
 | `bulk_prepare_window` | 1024 | `PxElectionConfig` (bulk Phase-1 batch size) |
+| `catchup_snapshot_threshold` | 1024 | `PxElectionConfig` (gap count above which FetchGap is skipped in favor of snapshot fallback) |
 
-The bulk Phase-1 typically resolves open gaps in a single RTT. Steady-state gaps are closed one-at-a-time after each heartbeat round, so worst-case gap-clear time is bounded by `heartbeat_interval × gap_count`.
+The bulk Phase-1 typically resolves open gaps in a single RTT. Steady-state gaps are closed one-at-a-time after each heartbeat round, so worst-case gap-clear time is bounded by `heartbeat_interval × gap_count`. Follower-side gaps (missing or stale chosen slots) are closed by FetchGap at the follower's own pace, bounded by `MAX_INFLIGHT_FETCHGAP` (default 16) concurrent requests.
 
 ---
 
