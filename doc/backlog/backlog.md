@@ -15,21 +15,24 @@ complexity, and dependency. Before implementation, follow the
 
 ### High Priority
 
-- **[R64](R64-kv-paxos-dedicated-runtime.md)** — Isolate all Paxos
-  work (propose path, LearnerStream dispatch loop, follower gRPC
-  handlers, chosen-notice fan-out) onto the dedicated election runtime
-  so non-Paxos load on the main runtime (snapshot, HTTP API, client
-  I/O) cannot stall consensus-critical work. The main runtime becomes a
-  thin I/O relay with channel handoffs to the dedicated runtime.
-- **[R63](R63-kv-election-dedicated-runtime.md)** — Election driver on
-  a dedicated runtime + decouple catch-up replay from heartbeat round —
-  the leader's `run_leader_state` runs on the shared tokio pool and
-  performs inline catch-up replay (up to 64 `send_accept().await` per
-  round), so burst write load starves heartbeats and triggers spurious
-  elections. Fix: (1) spawn the election driver on a dedicated
-  `current_thread` runtime on its own OS thread; (2) extract catch-up
-  replay into a separate concurrent path so heartbeat rounds return
-  immediately after quorum.
+- **[R63](R63-kv-election-dedicated-runtime.md)** — Value-less catch-up
+  + background apply loop — the catch-up replay sends full 16 KiB
+  payloads for slots the follower already has, and the heartbeat
+  handler applies committed entries synchronously, blocking the
+  heartbeat reply. Fix: (1) add `BatchChosenNotice` frame so the leader
+  tells the follower which slots are chosen without shipping payloads —
+  the follower advances its chosen frontier from its local acceptor;
+  (2) move engine apply to a background `spawn_apply_loop` driven by
+  `known_commit_slot` + `Notify`, so `handle_heartbeat` returns
+  immediately.
+- **[R64](R64-kv-paxos-dedicated-runtime.md)** — Dedicated runtime for
+  election work + decouple catch-up replay from heartbeat round — the
+  election driver competes with the propose path on the shared tokio
+  pool, and catch-up replay runs inline in the heartbeat round. Fix:
+  (1) spawn the election driver on a dedicated 2-worker runtime so
+  heartbeats are never starved by propose load; (2) extract catch-up
+  replay into a separate `select!` arm so heartbeat rounds return
+  immediately after quorum. Depends on R63.
 
 ### Medium Priority
 

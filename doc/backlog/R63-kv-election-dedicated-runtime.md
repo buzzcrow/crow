@@ -1,138 +1,139 @@
-<!-- Copyright 2026-present buzzcrow <126.com> -->
+<!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-### R63: Election Driver — Dedicated Runtime + Decouple Catch-up Replay + Value-less Catch-up
+### R63: Value-less Catch-up + Background Apply Loop
 
-**Problem**: The leader's `run_leader_state` loop and all election-related
-work (heartbeat rounds, catch-up replay, follower apply loop) run on the
-shared tokio worker pool. Under burst write load (e.g. 100k × 16 KiB
-pre-populate), the propose path saturates the shared workers, starving
-the election driver. Additionally, `run_heartbeat_round` performs
-synchronous catch-up replay (up to 64 `send_accept().await` calls per
-round) inline with the heartbeat reply processing — when a follower
-lags behind, each heartbeat round becomes a multi-hundred-millisecond
-catch-up operation that delays subsequent heartbeats. The combination
-causes the leader to stop sending heartbeats for seconds at a time,
-triggering spurious leader elections.
+**Problem**: Two inefficiencies in the follower catch-up and apply path:
 
-The heartbeat channel itself (R53) is already isolated on a dedicated
-gRPC connection, and the follower's heartbeat reply is now non-blocking
-(async apply loop). The remaining contention is at the tokio runtime
-level and within the heartbeat round's inline catch-up logic.
+1. **Full-payload catch-up replay.** When a follower's
+   `contiguous_applied` lags behind the leader's `contiguous_chosen`,
+   the heartbeat round's inline catch-up replay (lines 527–630 of
+   `group_election.rs`) sends full `send_accept` RPCs with 16 KiB
+   payloads for up to 64 slots per round. In the common case the
+   follower already has the value in its acceptor slot — it accepted
+   the original proposal; only the engine apply is lagging. Only slots
+   rejected during election churn are truly missing. This wastes
+   bandwidth and CPU on serialization for the common case: 64 × 16 KiB
+   = ~1 MiB of wire bytes per round-trip when 0 slots actually need the
+   payload.
 
-A second problem: the catch-up replay sends **full 16 KiB payloads** in
-every `send_accept` RPC, even though the follower almost always already
-has the value in its acceptor slot (it accepted the original proposal;
-it just hasn't applied it to the engine yet). Only slots rejected during
-election churn are truly missing. This wastes bandwidth and CPU on
-serialization for the common case.
+2. **Synchronous apply in the heartbeat hot path.** The follower's
+   `handle_heartbeat` calls `apply_committed_up_to(commit_slot).await`
+   inline (line 1523 of `local_replica.rs`), which walks the
+   contiguous-applied prefix and calls `learner.learn()` (engine apply)
+   for each slot. Engine apply is synchronous (`KVFuture::ready`), so
+   each slot blocks the heartbeat handler. With 64 lagging slots at
+   ~10–50 µs per apply, a single heartbeat reply can spend
+   0.6–3 ms in the apply loop — delaying the heartbeat reply and
+   inflating the leader's observed round-trip time. Under burst write
+   load this compounds: the leader's heartbeat round takes longer, the
+   lease renewal window shrinks, and in the worst case the leader stops
+   sending heartbeats fast enough to maintain its lease.
 
-**Solution**: Three changes:
+**Solution**: Two changes, in implementation order:
 
-1. **Dedicated runtime for election work** — spawn the election driver
-   (`run_election_driver`) on a dedicated `multi_thread` tokio runtime
-   with 2 worker threads on its own. Only election-related tasks run
-   there: the leader state machine, heartbeat rounds, follower apply
-   loop, election deadlines. The propose path, gRPC service handlers,
-   and client-facing RPCs stay on the main runtime. Cross-runtime
-   coordination via `tokio::sync::Notify` (`commit_advance_notify`) and
-   shared `Arc<PxGroup>` state (protected by `Mutex`/`RwLock`/atomics)
-   works transparently across runtimes. `spawn_blocking` for engine
-   apply uses the dedicated runtime's blocking pool (default 512
-   threads).
+1. **Value-less catch-up (BatchChosenNotice)** — add a fire-and-forget
+   `BatchChosenNotification` frame to the `LearnerStreamRequest` oneof.
+   The leader sends a single lightweight message covering the lagging
+   slot range `[follower_applied+1, leader_chosen]`, carrying only
+   `(start_slot, end_slot, term, leader_id)` — no per-slot payload. The
+   follower checks its local acceptor for each slot in the range:
 
-   - **Why 2 workers, not 1**: the election driver is a single state
-     machine, but a single thread can be accidentally blocked by an
-     unexpected synchronous stall (e.g. a `spawn_blocking` overflow, a
-     tonic channel poll that doesn't yield, a debug log flush). A
-     2-worker pool ensures heartbeats can still be sent even if one
-     worker is momentarily stuck. The cost is negligible (one extra
-     idle OS thread per group).
+   - **Has value** (`acceptor.accepted_at(slot).is_some()`): advance the
+     chosen frontier via `update_chosen_frontier(slot, term)`. The value
+     is already in local state; the apply path picks it up from the
+     acceptor slot — no payload transfer needed.
+   - **Missing value**: leave as a gap. The leader's full-accept phase
+     (existing `send_accept` with payload) fills these slots. In steady
+     state this is zero slots; only election-churn-rejected slots need
+     it.
 
-2. **Decouple follower catch-up replay from heartbeat round** — the
-   follower catch-up replay (currently inline in
-   `run_heartbeat_round`, lines 527–630 of `group_election.rs`) is
-   distinct from `repair_once` (which fills the leader's own open-
-   prefix gaps). The follower catch-up replays accepted entries to
-   lagging followers (up to 64 `send_accept().await` per round). Move
-   it into a separate background task or a separate `select!` arm in
-   `run_leader_state`. The heartbeat round should only send heartbeats
-   and collect replies — it should return immediately after quorum is
-   confirmed. Follower catch-up replay runs concurrently and does not
-   block the next heartbeat tick.
+   The catch-up replay in `run_heartbeat_round` sends the batch notice
+   first, then falls back to full accepts for the same range. Slots the
+   follower already has are re-accepted (idempotent CAS, cheap); slots
+   the follower is missing get the real value. The batch notice ensures
+   the follower's chosen frontier advances for present slots without
+   waiting for the full-accept round-trip.
 
-   - The heartbeat reply carries `contiguous_applied`; the leader
-     records the follower's lag in a shared atomic or small struct.
-   - A separate catch-up task (or `select!` arm) picks up lagging
-     followers and replays accepted entries at its own pace, bounded
-     by a configurable rate.
-   - The heartbeat round's `run_heartbeat_with_repair` calls
-     `repair_once()` — review whether this should also be decoupled.
-
-3. **Value-less catch-up replay** — the catch-up replay currently
-   sends full `AcceptRequest` with 16 KiB payload for every lagging
-   slot. In the common case the follower already has the value in its
-   acceptor slot (it accepted the original proposal; only apply is
-   lagging). Optimize to a two-phase protocol:
-
-   - **Phase 1 — value-less range notice**: leader sends a lightweight
-     batch message covering the lagging slot range `[follower_applied+1,
-     leader_chosen]`, carrying only `(slot, ballot)` per entry — no
-     payload. This is essentially a batch `ChosenNotice`. The follower
-     checks its local acceptor for each slot:
-     - **Has value**: mark as chosen locally; the background apply loop
-       picks it up from the acceptor slot and applies it (no RPC
-       needed — the apply loop already reads from `acceptor.accepted_at()`).
-     - **Missing value**: add slot to a "need value" reply list.
-   - **Phase 2 — on-demand fetch**: leader sends full `AcceptRequest`
-     (with payload) only for the slots the follower reported missing.
-     In steady state this is zero slots; only election-churn-rejected
-     slots need it.
-
-   - **No size threshold needed**: because catch-up is a batch range
-     operation, the lightweight round-trip overhead is amortized over
-     the entire range. Even for 1 KiB values, a 64-slot range saves 64
-     payload serializations and ~64 KiB of wire bytes for one cheap
-     round-trip. The on-demand fetch for missing slots is sparse
-     (typically 0 slots), so the extra latency is negligible.
-   - **Infrastructure already partially exists**: `ChosenNotice`
+   - **Infrastructure already exists**: `ChosenNotice`
      (`fan_out_chosen_notice` / `send_chosen_notice`) is already a
-     payload-less per-slot notice. The batch version extends this to a
-     range. The follower's background apply loop already reads values
-     from `acceptor.accepted_at()` (local_replica.rs:1324), so
-     value-present slots need no new code path — just advance the
-     chosen frontier and let the apply loop run.
-   - **Follower apply loop `None => break` gap**: the current apply
-     loop breaks on the first missing slot
-     (`local_replica.rs:1326`). With value-less catch-up, the loop
-     should skip missing slots (record them for later fetch) and
-     continue applying subsequent slots that are available, so a
-     single missing slot doesn't block the entire apply backlog.
+     payload-less per-slot notice over the LearnerStream. The batch
+     version extends this to a range with a single frame.
+   - **No size threshold needed**: the batch notice is one frame
+     covering the entire range (~40 bytes vs. 64 × 16 KiB). Even for
+     1 KiB values, a 64-slot range saves 64 payload serializations and
+     ~64 KiB of wire bytes for one cheap fire-and-forget send.
+
+2. **Background apply loop** — decouple engine apply from the heartbeat
+   handler. The follower's `handle_heartbeat` currently calls
+   `apply_committed_up_to(commit_slot).await` synchronously. Replace
+   this with a background `spawn_apply_loop` task that applies committed
+   entries at its own pace, driven by a `known_commit_slot` atomic
+   (`AtomicU64`) and an `apply_notify` (`tokio::sync::Notify`).
+
+   - `handle_heartbeat` stores `committed_safe_slot` via
+     `fetch_max` into `known_commit_slot` and signals `apply_notify`,
+     then returns immediately with the current `contiguous_applied`
+     (which may lag behind `known_commit_slot`). The heartbeat reply is
+     no longer blocked on engine apply.
+   - The background apply loop reads `known_commit_slot`, collects
+     entries from `acceptor.accepted_at(slot)` for the contiguous range,
+     and applies them via `spawn_blocking` (engine apply is synchronous
+     — `KVFuture::ready` — so it must not block an async worker thread).
+   - **Skip-and-continue for missing slots**: the current
+     `apply_committed_up_to` breaks on the first missing slot. The
+     background loop skips missing slots (they remain gaps until the
+     leader's full-accept catch-up fills them) and continues applying
+     subsequent available slots, so a single gap doesn't block the
+     entire apply backlog.
+   - **`handle_accept_inner` in `px_service.rs`**: the accept path
+     currently calls `learn_chosen()` (apply + advance frontier)
+     synchronously. Change it to advance the chosen frontier
+     (`update_chosen_frontier` + `record_dedup_tags`) only, and advance
+     `known_commit_slot` + wake the apply loop. This keeps the serial
+     LearnerStream handler fast so it doesn't starve the tokio runtime
+     and block heartbeat processing.
+   - **Apply loop lifecycle**: spawned lazily (on first heartbeat or
+     election-driver start), aborted on shutdown. The loop owns a
+     `CancellationToken` for clean cancellation.
+
+   - **Why not keep synchronous apply**: the heartbeat handler runs on
+     the tokio worker pool. A 0.6–3 ms synchronous apply blocks the
+     worker thread, delaying other tasks on the same worker (including
+     other heartbeat replies if the runtime is undersized). The
+     background loop moves this to `spawn_blocking` (blocking pool,
+     512 threads by default), freeing the async worker.
 
 **Scope**:
-- `lib/crow-kv/src/cluster/group_election.rs` — spawn election driver
-  on dedicated runtime; extract catch-up replay from
-  `run_heartbeat_round`; implement value-less catch-up protocol.
-- `lib/crow-kv/src/cluster/group.rs` — runtime lifecycle management
-  (create, store, shutdown the dedicated runtime).
-- `lib/crow-kv/src/cluster/local_replica.rs` — follower apply loop
-  moves with the election driver to the dedicated runtime; fix
-  `None => break` to skip-and-continue for missing slots.
-- `lib/crow-kv/src/cluster/remote_replica.rs` — add value-less batch
-  catch-up RPC (or extend `send_chosen_notice` to batch form).
-- `lib/crow-kv/src/rpc/px_service.rs` — handle value-less catch-up
-  request on follower side (check acceptor, reply with missing list).
-- `lib/crow-kv/tests/election/` — verify heartbeats are not delayed
-  under burst load; verify election still works after the runtime
-  split; verify value-less catch-up converges with missing slots.
+- `lib/crow-kv/src/rpc/proto/pxos.proto` — add `BatchChosenNotification`
+  message + `batch_chosen` frame in `LearnerStreamRequest` oneof.
+- `lib/crow-kv/src/cluster/learner_stream.rs` — add
+  `send_batch_chosen()` (fire-and-forget, no reply channel).
+- `lib/crow-kv/src/cluster/remote_replica.rs` — add
+  `send_batch_chosen_notice()` wrapper.
+- `lib/crow-kv/src/rpc/px_service.rs` — handle `BatchChosen` frame:
+  loop over slots, `update_chosen_frontier` for present ones, advance
+  `known_commit_slot`, wake apply loop. Change `handle_accept_inner` to
+  defer apply to the background loop.
+- `lib/crow-kv/src/cluster/local_replica.rs` — add `known_commit_slot`,
+  `apply_notify`, `spawn_apply_loop`, `stop_apply_loop`,
+  `advance_known_commit_slot`, `wake_apply_loop`. Change
+  `handle_heartbeat` from async apply to store-and-signal. Change
+  `apply_committed_up_to` to skip-and-continue (or replace with the
+  background loop).
+- `lib/crow-kv/src/cluster/group_election.rs` — in the catch-up replay
+  section of `run_heartbeat_round`, send `BatchChosenNotice` before the
+  full-accept loop.
+- `lib/crow-kv/tests/election/` — verify value-less catch-up converges
+  with missing slots; verify background apply loop skips gaps and
+  continues; verify heartbeat reply is not delayed by apply.
 
-**Complexity**: Medium — the runtime split is mechanical but requires
-careful lifecycle management (shutdown ordering: cancel election driver
-→ wait for it to finish → drop dedicated runtime). The catch-up replay
-extraction requires rethinking the `run_leader_state` loop structure.
-The value-less catch-up protocol needs a new RPC frame type and
-follower-side acceptor lookup logic, but builds on existing
-`ChosenNotice` infrastructure.
+**Complexity**: Medium — the value-less catch-up protocol is a new RPC
+frame type + follower-side acceptor lookup, building on existing
+`ChosenNotice` infrastructure. The background apply loop is a
+straightforward extraction of the existing `apply_committed_up_to` logic
+into a `spawn_blocking` task, with the skip-and-continue fix for missing
+slots. No runtime split, no cross-runtime coordination — all work stays
+on the main tokio runtime.
 
-**Dependencies**: None (builds on R53 heartbeat channel and the
-async-apply fix already committed).
+**Dependencies**: None (builds on R53 heartbeat channel isolation).
