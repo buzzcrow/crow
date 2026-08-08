@@ -18,7 +18,7 @@ use crate::cluster::replica::{
     HeartbeatRequestPayload, PxReplicaError, ReplicaHandler, StepDownRequestPayload, VoteRequestPayload,
 };
 use crate::common::optional_u64;
-use crate::paxos::roles::{Acceptor, DedupTag, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
+use crate::paxos::roles::{DedupTag, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
 use crate::paxos::PxTerm;
 
 use crate::rpc::px_service_server::PxService;
@@ -464,21 +464,30 @@ impl PxService for PxReplicaService {
                         None
                     }
                     learner_stream_request::Frame::BatchChosen(batch) => {
-                        // R63: value-less batch chosen notice. For each slot
-                        // in [start_slot, end_slot] the follower already has
-                        // in its acceptor, advance the chosen frontier. Missing
-                        // slots remain gaps — the leader's full-accept catch-up
-                        // fills them. Then advance `known_commit_slot` and wake
-                        // the background apply loop so present slots are applied.
+                        // Value-less batch chosen notification: the leader
+                        // tells us slots [start_slot, end_slot] are chosen
+                        // at `term`. For each slot we already have in our
+                        // acceptor, advance the contiguous-chosen frontier
+                        // (via `update_chosen_frontier`, which handles
+                        // out-of-order drain) so the background apply loop
+                        // can pick up the value from local state — no
+                        // payload transfer needed. Missing slots remain
+                        // gaps until the leader's catch-up replay sends
+                        // full accepts for them.
                         if let Some(group) = store.get_group(batch.group_id) {
                             let replica = group.local_replica();
                             let mut advanced_count = 0u64;
                             for slot in batch.start_slot..=batch.end_slot {
-                                if replica.acceptor.accepted_at(slot).is_some() {
+                                if replica.accepted_at(slot).await.is_some() {
                                     replica.learner.update_chosen_frontier(slot, batch.term);
                                     advanced_count += 1;
                                 }
                             }
+                            // Advance `known_commit_slot` so the apply
+                            // loop knows it can apply up to `end_slot`.
+                            // The apply loop reads from the acceptor
+                            // (local state), so slots we have will be
+                            // applied; missing slots are skipped.
                             replica.advance_known_commit_slot(batch.end_slot);
                             replica.wake_apply_loop();
                             debug!(
@@ -495,8 +504,6 @@ impl PxService for PxReplicaService {
                             debug!(
                                 store_id = store.store_id,
                                 group_id = batch.group_id,
-                                start_slot = batch.start_slot,
-                                end_slot = batch.end_slot,
                                 "LearnerStream: batch chosen notification dropped (group not found)"
                             );
                         }
@@ -601,15 +608,20 @@ async fn handle_accept_inner(store: &Arc<PxKvStore>, req: AcceptRequest) -> Resu
     )
     .await?;
     if matches!(reply, PxAcceptReply::Accepted { .. }) {
-        // R63: advance the chosen frontier + dedup synchronously (cheap
-        // atomics) and defer engine apply to the background loop. This
-        // keeps the serial LearnerStream handler fast so it doesn't starve
-        // the tokio runtime and block heartbeat processing. Critical:
-        // `known_commit_slot` must advance (not just `contiguous_chosen`)
-        // so a replica that accepts slots as a follower and then wins an
-        // election still gets those slots applied by the background loop.
-        replica.learner.update_chosen_frontier(entry.slot, entry.term);
-        replica.learner.record_dedup_tags(&dedup_tags, entry.slot);
+        // Advance the chosen frontier + dedup synchronously (cheap
+        // atomics). The engine apply is deferred to the background
+        // apply loop (spawned by the election driver) which converges
+        // via `known_commit_slot` from heartbeats. This keeps the
+        // serial learner_stream handler fast so it doesn't starve the
+        // tokio runtime and block heartbeat processing.
+        let learner = replica.learner.clone();
+        learner.update_chosen_frontier(entry.slot, entry.term);
+        learner.record_dedup_tags(&dedup_tags, entry.slot);
+        // Let the apply loop apply this slot. Without this the only sources
+        // of `known_commit_slot` are heartbeats and chosen notices, and a
+        // replica that accepts slots as a follower and then wins an election
+        // stops receiving both -- its engine would never see those slots and
+        // a Linearizable read fencing on `contiguous_chosen` would hang.
         replica.advance_known_commit_slot(entry.slot);
         replica.wake_apply_loop();
     }
