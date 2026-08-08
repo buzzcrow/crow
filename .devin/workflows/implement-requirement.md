@@ -10,52 +10,65 @@ description: Lifecycle for implementing requirement items from doc/backlog/backl
 Use this workflow when picking up an item from
 `doc/backlog/backlog.md`. The index lists each requirement
 (`R**`) with a brief intro and a link to its detail doc
-(`doc/backlog/R**-<topic>.md`). Open the matched detail doc for the
+(`doc/backlog/R**-<component>-<topic>.md`). Open the matched detail doc for the
 full problem/approach/files/acceptance analysis. Each item follows the
 full lifecycle below.
 
 ## Lifecycle
 
 ```
-1. Understand    → Read relevant code + design docs, confirm the problem
-2. Design        → Write doc/working/design-<topic>.md
-                   - Problem statement + current behavior
-                   - Proposed approach + alternatives considered
-                   - Acceptance test plan (what tests prove it works)
-3. Plan          → Write doc/working/plan-<topic>.md
-                   - Task breakdown with checkboxes
-                   - File-level changes
-                   - Dependency ordering
-                   - Track progress here
-4. Implement     → Code changes per plan, run tests per acceptance criteria
-5. Commit        → Commit all code + tests + working docs (design draft, plan doc)
-                   This checkpoint preserves work in git history in case of
-                   later blocking or human intervention.
-6. Full test     → Run the entire test-suite (`pixi run test-suite`) after the
-   suite             commit. This includes: test-ct, test-ffi, test-core,
-                   test-server, test-cli, test-mgmt-api-ci, test-ui. Tests may be
-                   run individually (`pixi run test-ct`, etc.) for faster
-                   iteration, but every test must pass. No failure may be
-                   skipped — all failures must be fixed before proceeding.
-7. Merge design  → Fold the design doc into the formal design doc it belongs
-                   to (e.g. design-crow-tree-engine.md, design-wal.md), following
-                   that doc's style and detail level. Delete the standalone
-                   working/design-<topic>.md.
-8. Cleanup       → Delete the requirement's detail doc
-                   `doc/backlog/R**-<topic>.md` and remove its entry
-                   from the Item Index in
-                   `doc/backlog/backlog.md`. Delete
-                   plan-<topic>.md and design-<topic>.md.
-                   → Commit cleanup (second and final commit)
-9. Local CI check → Run the GitHub CI Test job steps locally to verify
-                   they pass before pushing:
-                   - `pixi run cargo fmt --all -- --check`
-                   - `pixi run cargo clippy --all-targets -- -D warnings`
-                   - `pixi run test-ct`
-                   - `pixi run test-ffi`
-                   - `pixi run test-core`
-                   All must pass. If any fail, fix before pushing.
+1. Understand       → Read relevant code + design docs, confirm the problem
+2. Design           → Write doc/working/design-<topic>.md
+                      - Problem statement + current behavior
+                      - Proposed approach + alternatives considered
+                      - Acceptance test plan (what tests prove it works)
+3. Plan             → Write doc/working/plan-<topic>.md
+                      - Task breakdown with checkboxes
+                      - File-level changes
+                      - Dependency ordering
+                      - Track progress here
+4. Implement        → Code changes per plan, run tests per acceptance criteria
+5. Commit           → Commit all code + tests + working docs (design draft, plan doc)
+                      This checkpoint preserves work in git history in case of
+                      later blocking or human intervention.
+6. Affected tests   → Run only the test commands touched by this requirement's
+                      changes (see Test Commands below). Pick the subset matching
+                      the changed crates/components (e.g. crow-kv changes →
+                      test-kv-core + test-kv-server). Every selected test must
+                      pass — no failure may be skipped. The full suite runs
+                      later in Step 9 as a safety net.
+7. Merge design     → Fold the design doc into the formal design doc it belongs
+                      to (e.g. design-crow-tree-engine.md, design-wal.md),
+                      following that doc's style and detail level. Delete the
+                      standalone working/design-<topic>.md.
+8. Cleanup          → Delete the requirement's detail doc
+                      doc/backlog/R**-<component>-<topic>.md and remove its entry
+                      from the Item Index in doc/backlog/backlog.md. Delete
+                      plan-<topic>.md and design-<topic>.md.
+                      → Commit cleanup (second and final commit)
+9. Local CI check   → Run the GitHub CI Test job steps locally to verify they
+                      pass before pushing:
+                      - pixi run cargo fmt --all -- --check
+                      - pixi run cargo clippy --all-targets -- -D warnings
+                      - All Test Commands below, each separately so pass/fail
+                        is visible per command. All must pass — if any fail,
+                        fix before pushing.
 ```
+
+## Test Commands
+
+Each test command should be run with a preceding `clean-env` to reset
+test state:
+
+- `pixi run clean-env && pixi run test-tree-ct`
+- `pixi run clean-env && pixi run test-tree-ffi`
+- `pixi run clean-env && pixi run test-kv-core`
+- `pixi run clean-env && pixi run test-kv-server`
+- `pixi run clean-env && pixi run test-console-cli`
+- `pixi run clean-env && pixi run test-console-server`
+- `pixi run clean-env && pixi run test-console-ui`
+
+Step 6 runs the subset affected by the changes; Step 9 runs all of them.
 
 ## Blocking Conditions
 
@@ -78,9 +91,9 @@ review.
 
 ### 2. Test failure after 5 retries
 
-During Step 4 (Implement) or Step 6 (Full test suite), if a test fails
-(new or existing regression) and remains failing after 5 retry attempts,
-append to the end of
+During Step 4 (Implement), Step 6 (Affected tests), or Step 9 (Local CI
+check), if a test fails (new or existing regression) and remains failing
+after 5 retry attempts, append to the end of
 `doc/working/plan-<topic>.md` under a `## Blocked` heading with:
 
 - The failing test name(s) and command to reproduce.
@@ -91,7 +104,7 @@ append to the end of
 Commit current work, then stop and wait for human intervention. Do not
 guess fixes or weaken tests.
 
-In all other cases, proceed autonomously through all eight steps.
+In all other cases, proceed autonomously through all nine steps.
 
 ## Design doc style (from existing design docs)
 
@@ -120,8 +133,8 @@ The workflow produces at least **two commits** per requirement:
    reviewable. Use judgment based on task type and change size. The final
    implementation commit includes the design draft and plan doc, preserving
    the full working state in git history.
-2. **Cleanup commit** (after Step 7) — merged design doc, deletion of
-   working docs, deletion of `R**-<topic>.md` and its index entry in
+2. **Cleanup commit** (after Step 8) — merged design doc, deletion of
+   working docs, deletion of `R**-<component>-<topic>.md` and its index entry in
    `backlog.md`.
 
 All commits must pass the pre-commit quality gate (fmt, clippy, tests).

@@ -33,6 +33,9 @@ mod shutdown;
 #[path = "store/persistence_test.rs"]
 mod persistence;
 
+#[path = "store/wal_isolation_test.rs"]
+mod wal_isolation;
+
 #[path = "store/kv_correctness_test.rs"]
 mod kv_correctness;
 

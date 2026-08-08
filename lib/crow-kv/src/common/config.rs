@@ -99,11 +99,22 @@ pub struct ServerConfig {
     /// Shutdowns that take longer almost always indicate a stuck task and are
     /// better force-cleaned than waited on.
     pub shutdown_timeout_ms: u64,
+    /// Byte budget for scan responses: caps the total key+value bytes in one
+    /// unary `KvScanResponse` so every page is provably bounded regardless of
+    /// value sizes. The engine always returns at least one entry even if it
+    /// alone exceeds the budget (so the client makes progress). Default 3.5
+    /// MiB leaves ~0.5 MiB for proto framing under tonic's 4 MiB default
+    /// `max_decoding_message_size`; tune down for low-latency interactive
+    /// scans or up for bulk-export workloads (stay below the RPC frame
+    /// ceiling). Post-R32 (custom Rust RPC) the ceiling may change — only
+    /// this default's constraint value needs revisiting, not the knob itself.
+    pub scan_byte_budget: usize,
 }
 
 impl ServerConfig {
     pub const DEFAULT: Self = Self {
         shutdown_timeout_ms: 10_000,
+        scan_byte_budget: 3 * 1024 * 1024 + 512 * 1024, // 3.5 MiB
     };
 }
 
@@ -224,6 +235,11 @@ pub struct PxElectionConfig {
     pub max_clock_skew_ms: u64,
     /// Slots scanned per bulk-Phase-1 batch (new-leader open-prefix repair).
     pub bulk_prepare_window: u64,
+    /// R65: gap count threshold for snapshot fallback. When a follower's
+    /// gap count exceeds this, `FetchGap` is skipped and a warning is logged
+    /// (full automatic snapshot install for running replicas is a
+    /// follow-up). Default matches `bulk_prepare_window` (1024).
+    pub catchup_snapshot_threshold: u64,
     /// Test-only override: when `true`, the election driver task is not
     /// spawned. Used by `testkit::cluster::start_cluster` to keep legacy M1/M2
     /// tests deterministic (pinned leader via `set_leader_id`).
@@ -251,20 +267,15 @@ pub struct PxElectionConfig {
     /// `persist_snapshot()` is called again, in milliseconds. Ensures a
     /// low-write-rate replica still checkpoints periodically.
     pub snapshot_time_threshold_ms: u64,
-    /// Per-RPC deadline for unary `prepare` and bidi `accept`/`heartbeat`
-    /// learner-stream calls, in milliseconds. On expiry the caller gets a
-    /// retryable `PxReplicaError` and the pending-map entry (bidi path) is
-    /// removed so it cannot leak. Paired with h2 keepalive on the
-    /// connect-time `Endpoint` so a hung peer (accepts connection but never
-    /// replies) is detected within the deadline rather than stalling the
-    /// proposer indefinitely.
+    /// Per-RPC deadline for unary `prepare`, the bidi `accept`
+    /// learner-stream call, and the unary `heartbeat` RPC, in
+    /// milliseconds. On expiry the caller gets a retryable
+    /// `PxReplicaError` and the pending-map entry (bidi path) is removed
+    /// so it cannot leak. Paired with h2 keepalive on the connect-time
+    /// `Endpoint` so a hung peer (accepts connection but never replies)
+    /// is detected within the deadline rather than stalling the proposer
+    /// indefinitely.
     pub learner_stream_rpc_timeout_ms: u64,
-    /// Reserved queue capacity inside the per-peer `PxLearnerStream`
-    /// outbound mpsc that only heartbeats may use. Non-heartbeat frames
-    /// (`accept`, `chosen`) are rejected with `Busy` once the shared
-    /// portion (`window - reserve`) is full, so a saturated accept path
-    /// cannot starve leader heartbeats and trigger spurious elections.
-    pub learner_stream_heartbeat_reserve: usize,
 }
 
 impl PxElectionConfig {
@@ -291,6 +302,7 @@ impl PxElectionConfig {
         lease_duration_ms: 3000,
         max_clock_skew_ms: 500,
         bulk_prepare_window: 1024,
+        catchup_snapshot_threshold: 1024,
         election_driver_disabled: false,
         learner_stream_window_frames: PaxosConfig::DEFAULT.max_inflight_proposals
             * Self::LEARNER_WINDOW_MULTIPLIER,
@@ -300,7 +312,6 @@ impl PxElectionConfig {
         snapshot_slot_threshold: 100_000,
         snapshot_time_threshold_ms: 600_000,
         learner_stream_rpc_timeout_ms: 2000,
-        learner_stream_heartbeat_reserve: 8,
     };
 
     /// Aggressive timings for `#[tokio::test(start_paused = true)]` suites.
@@ -317,6 +328,7 @@ impl PxElectionConfig {
             lease_duration_ms: 25,
             max_clock_skew_ms: 1,
             bulk_prepare_window: 1024,
+            catchup_snapshot_threshold: 1024,
             election_driver_disabled: false,
             learner_stream_window_frames: PaxosConfig::DEFAULT.max_inflight_proposals
                 * Self::LEARNER_WINDOW_MULTIPLIER,
@@ -324,7 +336,6 @@ impl PxElectionConfig {
             snapshot_slot_threshold: 1000,
             snapshot_time_threshold_ms: 1_000,
             learner_stream_rpc_timeout_ms: 500,
-            learner_stream_heartbeat_reserve: 2,
         }
     }
 
@@ -350,6 +361,7 @@ impl PxElectionConfig {
             lease_duration_ms: 800,
             max_clock_skew_ms: 100,
             bulk_prepare_window: 1024,
+            catchup_snapshot_threshold: 1024,
             election_driver_disabled: false,
             learner_stream_window_frames: PaxosConfig::DEFAULT.max_inflight_proposals
                 * Self::LEARNER_WINDOW_MULTIPLIER,
@@ -357,7 +369,6 @@ impl PxElectionConfig {
             snapshot_slot_threshold: 1_000_000,
             snapshot_time_threshold_ms: 9_000,
             learner_stream_rpc_timeout_ms: 1000,
-            learner_stream_heartbeat_reserve: 4,
         }
     }
 

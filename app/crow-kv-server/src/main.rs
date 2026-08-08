@@ -339,6 +339,7 @@ async fn create_and_start_stores(
         if let Some(ref mr) = registry.metrics_registry {
             store.set_metrics_registry(Arc::clone(mr));
         }
+        store.set_scan_byte_budget(registry.config.server.scan_byte_budget);
         let store = Arc::new(store);
 
         // Create groups with the single local replica for this store, if group_ids provided.

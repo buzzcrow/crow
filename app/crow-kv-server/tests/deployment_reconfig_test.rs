@@ -424,3 +424,100 @@ async fn reconfig_via_api_add_then_remove() {
         Some(b"val-3".as_slice()),
     );
 }
+
+/// Remove the current leader via the management API: step it down, remove it
+/// from the membership, decommission its process, then verify a new leader is
+/// elected on the survivors and CRUD still works through the client. Combines
+/// the step-down API (`server_api_test`) with the remove-replica API in a
+/// single end-to-end workflow.
+#[tokio::test]
+async fn reconfig_via_api_remove_leader() {
+    let group_id = 30;
+    let mut nodes = start_cluster(&[3001, 3002, 3003], group_id).await;
+    wire_topology(&nodes, group_id).await;
+
+    let leader_idx = wait_for_leader(&nodes, group_id, Duration::from_secs(10)).await;
+
+    // Write initial data through the leader.
+    assert!(
+        kv_put(&nodes, group_id, b"rmldr-before", b"val-1", 1).await,
+        "initial write should commit"
+    );
+
+    // 1. Step the leader down via the management API.
+    let leader_node_id = nodes[leader_idx].node_id;
+    let leader_replica_id = nodes[leader_idx].replica_id;
+    let step_resp: Value = client()
+        .post(format!(
+            "{}/stores/{}/groups/{}/step-down?sync=true",
+            nodes[leader_idx].mgmt_base(),
+            leader_node_id,
+            group_id,
+        ))
+        .json(&serde_json::json!({"reason": "remove-leader reconfig"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        step_resp["accepted"], true,
+        "leader should accept its own step-down: {step_resp}"
+    );
+
+    // 2. Remove the stepped-down node from every other node's membership.
+    for (i, node) in nodes.iter().enumerate() {
+        if i == leader_idx {
+            continue;
+        }
+        let resp = client()
+            .delete(format!(
+                "{}/stores/{}/groups/{}/remotes/{}",
+                node.mgmt_base(),
+                node.node_id,
+                group_id,
+                leader_replica_id,
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            200,
+            "remove remote should succeed for node {}",
+            node.node_id
+        );
+    }
+
+    // 3. Decommission the removed leader's process so it can no longer
+    //    disrupt the survivors' election via higher-term RequestVote rounds
+    //    (the vote path has no membership-epoch fence).
+    drop(nodes[leader_idx].handle.take());
+
+    // Collect surviving nodes.
+    let remaining_nodes: Vec<&ServerNode> = (0..nodes.len())
+        .filter(|i| *i != leader_idx)
+        .map(|i| &nodes[i])
+        .collect();
+
+    // 4. A new leader is elected on the survivors and CRUD still works.
+    assert!(
+        kv_put_nodes(&remaining_nodes, group_id, b"rmldr-after", b"val-2", 2).await,
+        "write after leader removal should commit"
+    );
+
+    // All data survives.
+    assert_eq!(
+        kv_get_nodes(&remaining_nodes, group_id, b"rmldr-before")
+            .await
+            .as_deref(),
+        Some(b"val-1".as_slice()),
+    );
+    assert_eq!(
+        kv_get_nodes(&remaining_nodes, group_id, b"rmldr-after")
+            .await
+            .as_deref(),
+        Some(b"val-2".as_slice()),
+    );
+}

@@ -87,18 +87,45 @@ async fn kv_mutations_apply_to_all_learners() {
 }
 
 async fn assert_cluster_value(cluster: &TestCluster, key: &[u8], expected: Option<&[u8]>) {
-    for node in cluster.nodes() {
-        let group = node.get_group(1).expect("group exists");
-        let replica = group.local_replica();
-        let value = replica.learner.engine_get(key).await.map(|(_, v)| v);
-        match expected {
-            Some(bytes) => {
-                let stored = value.expect("value missing");
-                assert_eq!(stored.as_slice(), bytes);
-            }
-            None => {
-                assert!(value.is_none(), "value for {key:?} should be absent");
+    // R65: follower apply is driven by ChosenNotice (async, after quorum
+    // confirmation) rather than Accept (sync, during propose). Poll until
+    // all nodes converge, with a bounded timeout.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let mut all_match = true;
+        for node in cluster.nodes() {
+            let group = node.get_group(1).expect("group exists");
+            let replica = group.local_replica();
+            let value = replica.learner.engine_get(key).await.map(|(_, v)| v);
+            let matches = match expected {
+                Some(bytes) => value.is_some_and(|v| v.as_slice() == bytes),
+                None => value.is_none(),
+            };
+            if !matches {
+                all_match = false;
             }
         }
+        if all_match {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            // Final assertion with descriptive failure.
+            for node in cluster.nodes() {
+                let group = node.get_group(1).expect("group exists");
+                let replica = group.local_replica();
+                let value = replica.learner.engine_get(key).await.map(|(_, v)| v);
+                match expected {
+                    Some(bytes) => {
+                        let stored = value.expect("value missing");
+                        assert_eq!(stored.as_slice(), bytes);
+                    }
+                    None => {
+                        assert!(value.is_none(), "value for {key:?} should be absent");
+                    }
+                }
+            }
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
 }

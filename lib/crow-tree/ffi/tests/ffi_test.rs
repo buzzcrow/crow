@@ -243,8 +243,8 @@ async fn async_bridge_apply_get_snapshot() {
     };
     let t = AsyncCrowtree::open(&opt).unwrap();
     for i in 0..20usize {
-        t.apply_put((i + 1) as u64, key(i), format!("a{i}").into_bytes())
-            .await
+        t.handle()
+            .apply_put((i + 1) as u64, &key(i), format!("a{i}").as_bytes())
             .unwrap();
         t.flush().await.unwrap();
     }
@@ -274,7 +274,7 @@ async fn async_get_fast_path_completes_on_first_poll() {
         ..Default::default()
     };
     let t = AsyncCrowtree::open(&opt).unwrap();
-    t.apply_put(1, key(0), b"v0".to_vec()).await.unwrap();
+    t.handle().apply_put(1, &key(0), b"v0").unwrap();
     t.flush().await.unwrap();
 
     // Resident (never evicted): get_async's fast path (try_get_view_no_load,
@@ -298,7 +298,7 @@ async fn async_get_slow_path_completes_after_eviction() {
         ..Default::default()
     };
     let t = AsyncCrowtree::open(&opt).unwrap();
-    t.apply_put(1, key(0), b"v0".to_vec()).await.unwrap();
+    t.handle().apply_put(1, &key(0), b"v0").unwrap();
     t.flush().await.unwrap();
     t.snapshot().await.unwrap();
     // Force the leaf unloaded so the next get takes the demand-load miss
@@ -321,8 +321,8 @@ async fn concurrent_async_gets_all_resolve_correctly() {
     let t = AsyncCrowtree::open(&opt).unwrap();
     const N: usize = 16;
     for i in 0..N {
-        t.apply_put((i + 1) as u64, key(i), format!("v{i}").into_bytes())
-            .await
+        t.handle()
+            .apply_put((i + 1) as u64, &key(i), &format!("v{i}").into_bytes())
             .unwrap();
     }
     t.flush().await.unwrap();
@@ -360,8 +360,8 @@ async fn async_scan_fast_path_completes_on_first_poll() {
     };
     let t = AsyncCrowtree::open(&opt).unwrap();
     for i in 0..10usize {
-        t.apply_put((i + 1) as u64, key(i), format!("v{i}").into_bytes())
-            .await
+        t.handle()
+            .apply_put((i + 1) as u64, &key(i), &format!("v{i}").into_bytes())
             .unwrap();
     }
     t.flush().await.unwrap();
@@ -393,8 +393,8 @@ async fn async_scan_slow_path_completes_after_eviction() {
     };
     let t = AsyncCrowtree::open(&opt).unwrap();
     for i in 0..20usize {
-        t.apply_put((i + 1) as u64, key(i), format!("v{i}").into_bytes())
-            .await
+        t.handle()
+            .apply_put((i + 1) as u64, &key(i), &format!("v{i}").into_bytes())
             .unwrap();
     }
     t.flush().await.unwrap();
@@ -427,8 +427,8 @@ async fn async_scan_respects_limit_and_truncated_flag() {
     };
     let t = AsyncCrowtree::open(&opt).unwrap();
     for i in 0..15usize {
-        t.apply_put((i + 1) as u64, key(i), format!("v{i}").into_bytes())
-            .await
+        t.handle()
+            .apply_put((i + 1) as u64, &key(i), &format!("v{i}").into_bytes())
             .unwrap();
     }
     t.flush().await.unwrap();
@@ -448,7 +448,7 @@ async fn try_get_pinned_fast_path_returns_borrowed_value() {
         ..Default::default()
     };
     let t = AsyncCrowtree::open(&opt).unwrap();
-    t.apply_put(1, key(0), b"v0".to_vec()).await.unwrap();
+    t.handle().apply_put(1, &key(0), b"v0").unwrap();
     t.flush().await.unwrap();
 
     match t.try_get_pinned(&key(0)) {
@@ -476,7 +476,7 @@ async fn try_get_pinned_slow_path_resolves_after_eviction() {
         ..Default::default()
     };
     let t = AsyncCrowtree::open(&opt).unwrap();
-    t.apply_put(1, key(0), b"v0".to_vec()).await.unwrap();
+    t.handle().apply_put(1, &key(0), b"v0").unwrap();
     t.flush().await.unwrap();
     t.snapshot().await.unwrap();
     t.handle().evict_clean_leaves(0);
@@ -508,7 +508,7 @@ async fn try_get_pinned_fast_path_with_large_value() {
     };
     let t = AsyncCrowtree::open(&opt).unwrap();
     let large: Vec<u8> = (0..4096u32).map(|i| u8::try_from(i % 256).unwrap()).collect();
-    t.apply_put(1, key(0), large.clone()).await.unwrap();
+    t.handle().apply_put(1, &key(0), &large).unwrap();
     t.flush().await.unwrap();
 
     match t.try_get_pinned(&key(0)) {

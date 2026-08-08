@@ -99,9 +99,7 @@ async fn run_bench(value_len: usize, frame_bytes: u32) {
     for (i, k) in keys.iter().enumerate() {
         let mut v = format!("v{i}-").into_bytes();
         v.resize(value_len, b'x');
-        tree.apply_put((i + 1) as u64, k.clone(), v)
-            .await
-            .expect("apply_put");
+        tree.handle().apply_put((i + 1) as u64, k, &v).expect("apply_put");
     }
     tree.flush().await.expect("flush");
     tree.snapshot().await.expect("snapshot");

@@ -5,7 +5,9 @@
 //!
 //! `handle_heartbeat` is the follower-side handler for leader heartbeats.
 //! It adopts a higher term, records the leader id, extends vote lockout,
-//! and applies committed entries up to the leader's commit point.
+//! and signals the background apply loop to apply committed entries up to
+//! the leader's commit point (R63: apply is async, so tests await the
+//! apply fence before checking `contiguous_applied`).
 
 use crow_kv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crow_kv::cluster::replica::{HeartbeatRequestPayload, ReplicaHandler};
@@ -111,6 +113,8 @@ async fn heartbeat_applies_committed_entries_up_to_commit_slot() {
     let _ = <PxLocalReplica as ReplicaHandler>::on_heartbeat(&replica, heartbeat(1, 2, 3), 1)
         .await
         .expect("reply");
+    // R63: apply is async — wait for the background loop to catch up.
+    replica.await_apply_fence(3).await;
 
     assert_eq!(
         replica.contiguous_applied(),
@@ -136,6 +140,8 @@ async fn heartbeat_does_not_apply_beyond_accepted_log() {
     let _ = <PxLocalReplica as ReplicaHandler>::on_heartbeat(&replica, heartbeat(1, 2, 5), 1)
         .await
         .expect("reply");
+    // R63: apply is async — wait for the background loop to apply slot 1.
+    replica.await_apply_fence(1).await;
 
     assert_eq!(
         replica.contiguous_applied(),
@@ -154,6 +160,8 @@ async fn heartbeat_idempotent_for_repeated_commit_slot() {
     let _ = <PxLocalReplica as ReplicaHandler>::on_heartbeat(&replica, heartbeat(1, 2, 1), 1)
         .await
         .expect("reply");
+    // R63: apply is async — wait for the background loop to apply slot 1.
+    replica.await_apply_fence(1).await;
     assert_eq!(replica.contiguous_applied(), 1);
 
     // Repeated heartbeat with same commit_slot — no change.

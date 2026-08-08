@@ -293,7 +293,24 @@ impl LeaderElection for PxGroup {
         let next = ceiling.saturating_add(1);
         self.next_slot.fetch_max(next, Ordering::AcqRel);
         self.leader_read_ready.store(true, Ordering::Release);
-        debug!(group_id, term, ceiling, next_slot = next, "bulk phase 1 done");
+        // R65: advance `known_commit_slot` to the leader's own
+        // `contiguous_chosen` after the sweep. Leaders don't receive
+        // heartbeats or ChosenNotice, so without this the apply loop
+        // would never learn about slots the leader accepted as a follower
+        // (before winning the election) or slots resolved by the sweep.
+        // All slots up to `contiguous_chosen` are now confirmed chosen by
+        // the quorum that responded to Prepare — safe to apply.
+        let cc = replica.contiguous_chosen();
+        replica.advance_known_commit_slot(cc);
+        replica.wake_apply_loop();
+        debug!(
+            group_id,
+            term,
+            ceiling,
+            next_slot = next,
+            contiguous_chosen = cc,
+            "bulk phase 1 done"
+        );
     }
 }
 
@@ -460,7 +477,6 @@ impl PxGroup {
     /// On quorum-OK: extends `lease_read_until` and bumps
     /// `last_quorum_heartbeat_at`. On any peer reply with
     /// `term > leader_term`: returns [`HeartbeatOutcome::SteppedDown`].
-    #[allow(clippy::too_many_lines)]
     pub(crate) async fn run_heartbeat_round(
         self: &Arc<Self>,
         cfg: &PxElectionConfig,
@@ -524,111 +540,10 @@ impl PxGroup {
                     }
                     if hb.success {
                         acks += 1;
-                        if hb.contiguous_applied < payload.committed_safe_slot {
-                            if let Some(remote) = self.get_remote_replica(peer_id) {
-                                // Bound catch-up replay per heartbeat round so a
-                                // lagging follower doesn't inflate ReadIndex-
-                                // fallback read latency. Remaining slots converge
-                                // on subsequent heartbeats; quorum confirmation
-                                // does not depend on replay completion.
-                                const MAX_CATCHUP_PER_ROUND: u64 = 64;
-                                let catchup_end =
-                                    (hb.contiguous_applied.saturating_add(MAX_CATCHUP_PER_ROUND))
-                                        .min(payload.committed_safe_slot);
-                                for slot in hb.contiguous_applied.saturating_add(1)..=catchup_end {
-                                    let Some(mut entry) = replica.accepted_at(slot).await else {
-                                        debug!(
-                                            group_id,
-                                            peer_id, slot, "heartbeat catch-up: local accepted entry missing"
-                                        );
-                                        break;
-                                    };
-                                    // Every slot in this range is `<= committed_safe_slot`
-                                    // (= the leader's `contiguous_chosen`), i.e. ALREADY
-                                    // CHOSEN on a quorum and therefore immutable (Paxos
-                                    // P2c): no other value can ever be chosen here. A
-                                    // lagging peer may still REJECT a replayed accept
-                                    // because it promised a higher ballot during election
-                                    // churn — and `ChosenNotice` only advances its
-                                    // watermark without applying or persisting the value,
-                                    // so without this the peer's engine/WAL never receives
-                                    // the committed write (a deleted key fails to
-                                    // converge, and after restart resurrects). Since the
-                                    // value can no longer change, re-accept the SAME value
-                                    // at a ballot just above the peer's promise so it
-                                    // converges and persists a durable `Accepted` record.
-                                    let mut caught_up = false;
-                                    for catchup_attempt in 0..2u8 {
-                                        match remote
-                                            .send_accept(&entry, &[], group_id, self.membership_epoch())
-                                            .await
-                                        {
-                                            Ok(crate::paxos::roles::PxAcceptReply::Accepted { .. }) => {
-                                                caught_up = true;
-                                                break;
-                                            }
-                                            Ok(crate::paxos::roles::PxAcceptReply::Rejected {
-                                                current_promised,
-                                                ..
-                                            }) => {
-                                                if catchup_attempt == 0 {
-                                                    // Escalate above the peer's promise and
-                                                    // retry once. Safe: the value is chosen.
-                                                    entry.ballot = crate::paxos::roles::PxBallot::new(
-                                                        current_promised.round.saturating_add(1),
-                                                        replica.id,
-                                                    );
-                                                    continue;
-                                                }
-                                                debug!(
-                                                    group_id,
-                                                    peer_id,
-                                                    slot,
-                                                    rejected_round = current_promised.round,
-                                                    rejected_leader_id = current_promised.leader_id,
-                                                    "heartbeat catch-up: peer still rejected after ballot escalation"
-                                                );
-                                                break;
-                                            }
-                                            Ok(crate::paxos::roles::PxAcceptReply::TermStale {
-                                                new_term,
-                                                ..
-                                            }) => {
-                                                debug!(
-                                                    group_id,
-                                                    peer_id,
-                                                    slot,
-                                                    new_term,
-                                                    "heartbeat catch-up: peer reported higher term during replay"
-                                                );
-                                                break;
-                                            }
-                                            Ok(crate::paxos::roles::PxAcceptReply::EpochMismatch {
-                                                responder_epoch,
-                                            }) => {
-                                                self.adopt_membership_epoch(responder_epoch);
-                                                debug!(
-                                                    group_id,
-                                                    peer_id,
-                                                    slot,
-                                                    proposer_epoch = self.membership_epoch(),
-                                                    responder_epoch,
-                                                    "heartbeat catch-up: peer rejected by membership-epoch fence; adopted responder epoch"
-                                                );
-                                                break;
-                                            }
-                                            Err(err) => {
-                                                debug!(group_id, peer_id, slot, error = %err, "heartbeat catch-up: replay accept failed");
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    if !caught_up {
-                                        break;
-                                    }
-                                }
-                            }
-                        }
+                        // R65: catch-up is now follower-driven (FetchGap).
+                        // The heartbeat round is pure liveness + lease: send
+                        // heartbeats, collect replies, check higher term,
+                        // renew lease, note peer applied. No catch-up.
                         // Refresh this peer's applied watermark and recompute
                         // the group safe-slot used by bounded/safe-slot reads.
                         self.note_peer_applied(peer_id, hb.contiguous_applied);

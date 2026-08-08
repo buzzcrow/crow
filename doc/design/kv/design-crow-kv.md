@@ -311,15 +311,16 @@ Full design: `design-crow-kv-reconfiguration.md`, `design-crow-kv-server.md`.
   `NotLeader` with hint → follow hint immediately.
 - **Scan pagination** — the unary `Scan` RPC uses S3-style pagination
   (`start_after` + `truncated` + `limit`). The server applies a
-  fixed byte budget (`SCAN_BYTE_BUDGET` = 3.5 MiB, leaving ~0.5 MiB
-  for proto framing under tonic's 4 MiB default) to each response so
-  every page is provably bounded regardless of value sizes: the C++
-  engine's merge loop accumulates key+value bytes and stops with
-  `truncated = true` when the budget is exceeded, always returning at
-  least one entry (so a single oversized entry still makes progress).
-  A warning is logged for any single entry whose key+value size alone
-  exceeds the budget. The client transparently pages until
-  `!truncated` or the caller's `limit` is reached, using the last
+  per-page byte budget (`ServerConfig::scan_byte_budget`, default 3.5
+  MiB, leaving ~0.5 MiB for proto framing under tonic's 4 MiB default)
+  to each response so every page is provably bounded regardless of
+  value sizes: the C++ engine's merge loop accumulates key+value bytes
+  and stops with `truncated = true` when the budget is exceeded,
+  always returning at least one entry (so a single oversized entry
+  still makes progress). A warning is logged for any single entry
+  whose key+value size alone exceeds the budget. The client
+  transparently pages until `!truncated` or the caller's `limit` is
+  reached, using the last
   returned key as the next page's `start_after`. On redirect or
   transport error, pagination restarts from the beginning with the
   (possibly new) endpoint. The byte budget is server-internal — not

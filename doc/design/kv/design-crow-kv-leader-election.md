@@ -178,6 +178,19 @@ Followers respond with their own `term`, `success` (false if the follower's term
 - Maintain peer state (used by replicator and gap detection).
 - Refresh the safe-slot computation.
 
+### 5.4 Follower catch-up and background apply
+
+When a follower's `contiguous_applied` lags behind the leader's `committed_safe_slot`, the heartbeat round drives catch-up in two phases:
+
+- **Phase 1 — `BatchChosenNotice` (value-less).** The leader sends a single fire-and-forget `BatchChosenNotification` frame over the `LearnerStream` covering `[follower_applied+1, catchup_end]`, carrying only `(start_slot, end_slot, term, leader_id)` — no per-slot payload. The follower checks its local acceptor for each slot in the range: present slots advance the chosen frontier via `update_chosen_frontier`; missing slots remain gaps. This lets the follower's apply loop start processing present slots immediately, without waiting for the full-accept round-trip.
+- **Phase 2 — full accepts.** The leader sends `send_accept` RPCs with full payloads for the same range. Slots the follower already has are re-accepted (idempotent CAS, cheap); slots the follower is missing get the real value. In steady state (no election churn) every slot is present, so Phase 1 does all the work and Phase 2 is a no-op.
+
+Engine apply is decoupled from the heartbeat handler via a **background apply loop**:
+
+- `handle_heartbeat` stores `committed_safe_slot` via `fetch_max` into `known_commit_slot` and signals `apply_notify`, then returns immediately with the current `contiguous_applied` (which may lag). The heartbeat reply is not blocked on engine apply.
+- The background apply loop (lazily spawned, cancelled on shutdown) reads `known_commit_slot`, collects entries from the acceptor, and applies them via the learner. Missing slots are skipped (skip-and-continue) so a single gap doesn't block the entire apply backlog — `contiguous_applied` stays at the gap; subsequent available slots are applied out-of-order via `advance_applied_frontier`.
+- `handle_accept_inner` (the LearnerStream accept path) also defers apply to the background loop: it advances the chosen frontier + dedup synchronously, then advances `known_commit_slot` + wakes the loop. This keeps the serial LearnerStream handler fast so it doesn't starve the tokio runtime and block heartbeat processing. Critical: `known_commit_slot` must advance (not just `contiguous_chosen`) so a replica that accepts slots as a follower and then wins an election still gets those slots applied by the background loop.
+
 ---
 
 ## 6. Leader Lease

@@ -77,6 +77,9 @@ mod g5_recovery;
 #[path = "group/g6_reconfig_test.rs"]
 mod g6_reconfig;
 
+#[path = "group/g7_reconfig_remove_leader_test.rs"]
+mod g7_reconfig_remove_leader;
+
 #[path = "group/a3_crash_restart_no_data_loss_test.rs"]
 mod a3_crash_restart_no_data_loss;
 
@@ -117,3 +120,6 @@ mod t1_early_ack_crash;
 
 #[path = "group/coalesce_test.rs"]
 mod coalesce;
+
+#[path = "group/r65_replication_test.rs"]
+mod r65_replication;

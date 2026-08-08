@@ -434,24 +434,71 @@ impl PxService for PxReplicaService {
                         }
                     }
                     learner_stream_request::Frame::Chosen(notice) => {
-                        // Route into the local replica's learner via
-                        // PxLocalReplica::note_chosen, which applies the
-                        // term fence and only updates the
-                        // (last_chosen_slot, last_chosen_term) high-water
-                        // mark — no payload is shipped, so the
-                        // contiguous-chosen / contiguous-applied
-                        // watermarks are intentionally untouched.
+                        // R65: ballot-verified out-of-order apply. The
+                        // leader sends ChosenNotice AFTER confirming
+                        // quorum, so the slot is genuinely chosen. The
+                        // follower checks whether it has the value at
+                        // the same ballot as the chosen value:
+                        // - ballot match → update_chosen_frontier +
+                        //   wake_apply_loop (apply now, out-of-order OK)
+                        // - stale ballot (lower) → note_chosen only
+                        //   (stale value, NOT applied → FetchGap later)
+                        // - no accepted value → note_chosen only
+                        //   (missing value → FetchGap later)
                         if let Some(group) = store.get_group(notice.group_id) {
-                            let advanced = group.local_replica().note_chosen(notice.slot, notice.term);
-                            debug!(
-                                store_id = store.store_id,
-                                group_id = notice.group_id,
-                                slot = notice.slot,
-                                term = notice.term,
-                                leader_id = notice.leader_id,
-                                advanced,
-                                "LearnerStream: chosen notification applied"
-                            );
+                            let replica = group.local_replica();
+                            let chosen_ballot = PxBallot {
+                                round: notice.ballot_round,
+                                leader_id: notice.leader_id,
+                            };
+                            let accepted = replica.accepted_at(notice.slot).await;
+                            let ballot_matches = accepted.as_ref().is_some_and(|e| e.ballot == chosen_ballot);
+                            if ballot_matches {
+                                // Follower has the chosen value at the
+                                // chosen ballot — safe to apply.
+                                replica.learner.update_chosen_frontier(notice.slot, notice.term);
+                                replica.wake_apply_loop();
+                                debug!(
+                                    store_id = store.store_id,
+                                    group_id = notice.group_id,
+                                    slot = notice.slot,
+                                    term = notice.term,
+                                    leader_id = notice.leader_id,
+                                    ballot_round = notice.ballot_round,
+                                    "LearnerStream: chosen notification applied (ballot match)"
+                                );
+                            } else {
+                                // Stale or missing value — record
+                                // high-water mark only. The slot is chosen
+                                // but the follower doesn't have the
+                                // correct value. Record gap for FetchGap.
+                                replica.note_chosen(notice.slot, notice.term);
+                                replica.record_gap(notice.slot);
+                                if let Some(ref entry) = accepted {
+                                    replica.incr_chosen_notice_stale();
+                                    debug!(
+                                        store_id = store.store_id,
+                                        group_id = notice.group_id,
+                                        slot = notice.slot,
+                                        term = notice.term,
+                                        leader_id = notice.leader_id,
+                                        chosen_ballot_round = notice.ballot_round,
+                                        accepted_ballot_round = entry.ballot.round,
+                                        accepted_ballot_leader = entry.ballot.leader_id,
+                                        "LearnerStream: chosen notification stale ballot (gap recorded)"
+                                    );
+                                } else {
+                                    replica.incr_chosen_notice_missing();
+                                    debug!(
+                                        store_id = store.store_id,
+                                        group_id = notice.group_id,
+                                        slot = notice.slot,
+                                        term = notice.term,
+                                        leader_id = notice.leader_id,
+                                        "LearnerStream: chosen notification missing value (gap recorded)"
+                                    );
+                                }
+                            }
                         } else {
                             debug!(
                                 store_id = store.store_id,
@@ -462,6 +509,78 @@ impl PxService for PxReplicaService {
                             );
                         }
                         None
+                    }
+                    learner_stream_request::Frame::BatchChosen(batch) => {
+                        // R65: ballot-verified batch chosen notice. Same
+                        // logic as the per-slot ChosenNotice handler: for
+                        // each slot in the range, check if the follower has
+                        // the value at the chosen ballot. If yes, advance
+                        // the chosen frontier (apply). If stale/missing,
+                        // record high-water mark only (FetchGap later).
+                        if let Some(group) = store.get_group(batch.group_id) {
+                            let replica = group.local_replica();
+                            let chosen_ballot = PxBallot {
+                                round: batch.ballot_round,
+                                leader_id: batch.leader_id,
+                            };
+                            let mut advanced_count = 0u64;
+                            for slot in batch.start_slot..=batch.end_slot {
+                                let accepted = replica.accepted_at(slot).await;
+                                if accepted.as_ref().is_some_and(|e| e.ballot == chosen_ballot) {
+                                    replica.learner.update_chosen_frontier(slot, batch.term);
+                                    advanced_count += 1;
+                                } else {
+                                    replica.note_chosen(slot, batch.term);
+                                    replica.record_gap(slot);
+                                }
+                            }
+                            replica.wake_apply_loop();
+                            debug!(
+                                store_id = store.store_id,
+                                group_id = batch.group_id,
+                                start_slot = batch.start_slot,
+                                end_slot = batch.end_slot,
+                                term = batch.term,
+                                leader_id = batch.leader_id,
+                                ballot_round = batch.ballot_round,
+                                advanced_count,
+                                "LearnerStream: batch chosen notification applied"
+                            );
+                        } else {
+                            debug!(
+                                store_id = store.store_id,
+                                group_id = batch.group_id,
+                                "LearnerStream: batch chosen notification dropped (group not found)"
+                            );
+                        }
+                        None
+                    }
+                    learner_stream_request::Frame::FetchGap(fetch_req) => {
+                        // R65: FetchGap handler — leader resolves the
+                        // requested slot from its acceptor. If the leader
+                        // has the value, replies with it. If not, no reply
+                        // (follower retries on timeout).
+                        if let Some(group) = store.get_group(fetch_req.group_id) {
+                            if let Some(resp) = group.handle_fetch_gap(fetch_req.slot) {
+                                Some(learner_stream_response::Frame::FetchGapReply(resp))
+                            } else {
+                                debug!(
+                                    store_id = store.store_id,
+                                    group_id = fetch_req.group_id,
+                                    slot = fetch_req.slot,
+                                    "LearnerStream: fetch_gap no value (not yet chosen)"
+                                );
+                                None
+                            }
+                        } else {
+                            debug!(
+                                store_id = store.store_id,
+                                group_id = fetch_req.group_id,
+                                slot = fetch_req.slot,
+                                "LearnerStream: fetch_gap dropped (group not found)"
+                            );
+                            None
+                        }
                     }
                 };
                 if let Some(frame) = response_frame {
@@ -562,7 +681,21 @@ async fn handle_accept_inner(store: &Arc<PxKvStore>, req: AcceptRequest) -> Resu
     )
     .await?;
     if matches!(reply, PxAcceptReply::Accepted { .. }) {
-        replica.learn_chosen(&entry, &dedup_tags).await;
+        // R65: Accept (Paxos Phase 2) only means the acceptor has stored
+        // the value — it does NOT mean the value is chosen (chosen =
+        // quorum of acceptors accepted). The leader has not yet received
+        // quorum confirmation when the follower processes the Accept.
+        // Applying here would diverge if the leader crashes before quorum
+        // and a new leader proposes a different value at the same slot.
+        // Apply is driven by ChosenNotice (after quorum confirmation) and
+        // heartbeat `committed_safe_slot` (continuous prefix) — matching
+        // Raft's "append to log but don't apply" discipline.
+        //
+        // Dedup tags are still recorded: the value is durably accepted and
+        // may be chosen later, so the proposer's idempotency cache must
+        // map this slot now.
+        let learner = replica.learner.clone();
+        learner.record_dedup_tags(&dedup_tags, entry.slot);
     }
 
     let (rejected, rejected_round, rejected_leader_id, term_stale, reply_term) = match reply {

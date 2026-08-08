@@ -74,15 +74,40 @@ async fn kv_put_retries_next_slot_when_slot_has_prior_accepted_value() {
             "slot 1 must preserve pre-existing accepted value"
         );
     }
-    for node in cluster.nodes() {
-        let group = node.get_group(1).expect("group exists");
-        let replica = group.local_replica();
-        let value = replica
-            .learner
-            .engine_get(b"my-key".as_slice())
-            .await
-            .map(|(_, v)| v);
-        assert_eq!(value.as_deref(), Some(b"my-value".as_slice()));
+    // R65: follower apply is driven by ChosenNotice (async). Poll until
+    // all nodes have the value, with a bounded timeout.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let mut all_match = true;
+        for node in cluster.nodes() {
+            let group = node.get_group(1).expect("group exists");
+            let replica = group.local_replica();
+            let value = replica
+                .learner
+                .engine_get(b"my-key".as_slice())
+                .await
+                .map(|(_, v)| v);
+            if value.as_deref() != Some(b"my-value".as_slice()) {
+                all_match = false;
+            }
+        }
+        if all_match {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            for node in cluster.nodes() {
+                let group = node.get_group(1).expect("group exists");
+                let replica = group.local_replica();
+                let value = replica
+                    .learner
+                    .engine_get(b"my-key".as_slice())
+                    .await
+                    .map(|(_, v)| v);
+                assert_eq!(value.as_deref(), Some(b"my-value".as_slice()));
+            }
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
 
     drop(kv);

@@ -6,10 +6,9 @@
 //! Wraps the opaque `ct_*` handles in RAII types, translates owned `ct_buf`
 //! buffers into `Vec<u8>` (freeing them via `ct_free_buf`), maps `ct_status`
 //! into `Result`, and offers an async facade (`AsyncCrowtree`). `get`/`flush`/
-//! `snapshot` drive the engine's io_uring reactor directly (no OS thread hop,
-//! Phase 3); the remaining methods (no async C API twin exists
-//! for them yet -- Phase 2 scoped only get/flush/snapshot) still bridge via
-//! `spawn_blocking`.
+//! `snapshot`/`scan` drive the engine's io_uring reactor directly (no OS
+//! thread hop, Phase 3); the remaining methods (no async C API twin exists
+//! for them yet) are called via the synchronous `Crowtree` handle.
 
 use bytes::Bytes;
 use std::ffi::CString;
@@ -1296,7 +1295,7 @@ fn decode_scan(bytes: Vec<u8>, count: usize) -> Result<Vec<ScanEntry>, CtError> 
 
 // ── Reactor-driven async futures ───────────
 //
-// AsyncCrowtree::get/flush/snapshot drive drive_ct_future below directly:
+// AsyncCrowtree::get/flush/snapshot/scan drive drive_ct_future below directly:
 // no spawn_blocking, no OS thread hop. A fast-path completion (get_view's
 // cached L0/L1 hit, or flush's always-in-memory work) resolves on the
 // *first* poll without ever touching the reactor; only a genuine
@@ -1544,10 +1543,10 @@ async fn drive_ct_future(
     }
 }
 
-/// Async facade. `get`/`flush`/`snapshot` drive the engine's io_uring
+/// Async facade. `get`/`flush`/`snapshot`/`scan` drive the engine's io_uring
 /// reactor directly via [`drive_ct_future`] -- no thread pool hop. The
-/// remaining methods have no async C API twin yet (Phase 2 scoped only
-/// get/flush/snapshot) and still bridge onto Tokio via `spawn_blocking`. Cheap to clone (shares
+/// remaining methods have no async C API twin yet and are called via the
+/// synchronous `Crowtree` handle (`handle()`). Cheap to clone (shares
 /// one `Arc<Crowtree>`).
 #[derive(Clone, Debug)]
 pub struct AsyncCrowtree {
@@ -1569,36 +1568,6 @@ impl AsyncCrowtree {
 
     pub fn handle(&self) -> Arc<Crowtree> {
         Arc::clone(&self.inner)
-    }
-
-    pub async fn apply_put(&self, slot: u64, key: Vec<u8>, value: Vec<u8>) -> Result<(), CtError> {
-        let t = self.inner.clone();
-        tokio::task::spawn_blocking(move || t.apply_put(slot, &key, &value))
-            .await
-            .map_err(|_| CtError::Internal)?
-    }
-
-    pub async fn apply_delete(&self, slot: u64, key: Vec<u8>) -> Result<(), CtError> {
-        let t = self.inner.clone();
-        tokio::task::spawn_blocking(move || t.apply_delete(slot, &key))
-            .await
-            .map_err(|_| CtError::Internal)?
-    }
-
-    /// Convenience: auto-assign the next slot and apply a put (single-writer only).
-    pub async fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), CtError> {
-        let t = self.inner.clone();
-        tokio::task::spawn_blocking(move || t.put(&key, &value))
-            .await
-            .map_err(|_| CtError::Internal)?
-    }
-
-    /// Convenience: auto-assign the next slot and apply a delete (single-writer only).
-    pub async fn del(&self, key: Vec<u8>) -> Result<(), CtError> {
-        let t = self.inner.clone();
-        tokio::task::spawn_blocking(move || t.del(&key))
-            .await
-            .map_err(|_| CtError::Internal)?
     }
 
     /// Drives the engine's io_uring reactor directly (Phase

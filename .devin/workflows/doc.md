@@ -16,37 +16,45 @@ description: CROW documentation hierarchy and conventions
 ```
 doc_index.md                        (table of contents — the only file at doc root)
 design/
-    ├── design.md                   (root design: what + why + architecture)
-    └── design-xxx.md               (sub-design docs)
+    ├── {kv,tree,console}/          (one subdir per component area)
+    │   ├── design-crow-<area>.md   (root sub-design for that area)
+    │   ├── design-crow-<area>-<topic>.md  (sub-design docs)
+    │   └── kv-{read,scan,write}-flow-analysis.md  (KV only: long-lived flow analyses)
 user-manual/
     ├── user-guide.md               (user guide: Web UI, CLI, REST API)
     ├── user-guide.html             (build artifact — do not hand-edit)
     └── build_html.py               (MD → HTML converter with tabs)
 backlog/
     ├── backlog.md                  (backlog index: R** list with brief intros)
-    └── R**-<topic>.md              (per-requirement detail, deleted after merge)
+    └── R**-<component>-<topic>.md  (per-requirement detail, deleted after merge)
 working/
     ├── plan-<topic>.md             (task plans, deleted after merge)
-    ├── design-<topic>.md           (design drafts, deleted after merge)
-    ├── read-flow-analysis.md       (read path gap analysis)
-    └── write-flow-analysis.md      (write path trace + optimizations)
+    └── design-<topic>.md           (design drafts, deleted after merge)
 ```
 
 ## Naming
 
 Sub-design topics: `lowercase-kebab-case`. Examples: `design/design-wal.md`, `design/design-paxos.md`.
 
+Backlog requirements: `R**-<component>-<topic>.md`, where `<component>` is the owning crate/area
+(`kv`, `tree`, `console`, `client`, `server`). Examples: `R32-kv-custom-rust-rpc.md`,
+`R52-tree-reverse-scan.md`. A requirement is prefixed by the component that owns the work, not
+every component it touches — cross-component requirements take the prefix of the primary owner.
+
 ## Backlog (`doc/backlog/`)
 
 - `backlog.md` — index of requirements (`R**`) with priority/complexity and a brief intro. Remove the entry when implemented and merged.
-- `R**-<topic>.md` — per-requirement analysis (problem, approach, files, acceptance). Deleted after merge; design content is folded into `design/design-xxx.md`.
+- `R**-<component>-<topic>.md` — per-requirement analysis (problem, approach, files, acceptance). `<component>` is the owning crate/area (`kv`, `tree`, `console`, `client`, `server`). Deleted after merge; design content is folded into `design/design-xxx.md`.
 
 ## Working Docs (`doc/working/`)
 
 - `plan-<topic>.md` — task plans with checkboxes, file-level changes, dependency ordering.
 - `design-<topic>.md` — design drafts, folded into formal design docs and deleted after merge.
-- `read-flow-analysis.md` / `write-flow-analysis.md` — long-lived flow analysis docs, not deleted after a single requirement.
 - Create when starting a new effort; delete when complete (after PR merge).
+
+## Flow-Analysis Docs (`doc/design/kv/`)
+
+- `kv-read-flow-analysis.md` / `kv-scan-flow-analysis.md` / `kv-write-flow-analysis.md` — long-lived per-path flow traces, benchmark results, and open issues. Not deleted after a single requirement. Live under `doc/design/kv/` (not `doc/working/`) because they are permanent design references.
 
 ## Core Rules
 

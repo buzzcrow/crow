@@ -243,20 +243,69 @@ message ChosenNotification {
   uint64 leader_id = 5;
   uint64 request_id = 6;
   uint64 request_create_ms = 7;
+  // R65: ballot round of the chosen value. The full chosen ballot is
+  // (ballot_round, leader_id). The follower compares its accepted ballot
+  // against this to detect stale values before applying.
+  uint64 ballot_round = 8;
+}
+
+// R63: fire-and-forget batch chosen notice covering a slot range. Carries
+// only `(start_slot, end_slot, term, leader_id)` — no per-slot payload. The
+// follower checks its local acceptor for each slot and advances the chosen
+// frontier for present ones; missing slots remain gaps for the full-accept
+// catch-up to fill.
+message BatchChosenNotification {
+  uint32 version = 1;
+  uint64 group_id = 2;
+  uint64 start_slot = 3;
+  uint64 end_slot = 4;
+  uint64 term = 5;
+  uint64 leader_id = 6;
+  // R65: ballot round of the chosen values in this range. All slots in
+  // the batch share the same ballot (leader's current ballot).
+  uint64 ballot_round = 7;
+}
+
+// R65: follower-driven catch-up request. The follower sends this for a
+// slot it is missing or has a stale value at a lower ballot. The leader
+// replies with the chosen value + ballot, or runs classic Paxos to resolve
+// the slot if the leader itself doesn't have it.
+message FetchGapRequest {
+  uint32 version = 1;
+  uint64 group_id = 2;
+  uint64 slot = 3;
+  uint64 term = 4;
+  uint64 leader_id = 5;
+}
+
+// R65: leader's reply to a FetchGap request. Carries the chosen value at
+// the chosen ballot so the follower can overwrite any stale lower-ballot
+// value and apply.
+message FetchGapResponse {
+  uint32 version = 1;
+  uint64 group_id = 2;
+  uint64 slot = 3;
+  uint64 term = 4;
+  uint64 ballot_round = 5;
+  uint64 leader_id = 6;
+  bytes  payload = 7;
 }
 
 message LearnerStreamRequest {
   oneof frame {
-    AcceptRequest      accept    = 1;
-    HeartbeatRequest   heartbeat = 2;
-    ChosenNotification chosen    = 3;
+    AcceptRequest           accept       = 1;
+    HeartbeatRequest        heartbeat    = 2;
+    ChosenNotification      chosen       = 3;
+    BatchChosenNotification batch_chosen = 4;
+    FetchGapRequest         fetch_gap    = 5;
   }
 }
 
 message LearnerStreamResponse {
   oneof frame {
-    AcceptedResponse  accepted  = 1;
-    HeartbeatResponse heartbeat = 2;
+    AcceptedResponse  accepted       = 1;
+    HeartbeatResponse heartbeat      = 2;
+    FetchGapResponse  fetch_gap_reply = 3;
   }
 }
 

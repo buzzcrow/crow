@@ -239,7 +239,7 @@ crow-cli kv get --store-id 3 --group-id 3 --key user:1
 # Delete
 crow-cli kv delete --store-id 3 --group-id 3 --key user:1
 
-# Prefix scan
+# Prefix scan (list mode — fast, latest values, S3-list semantics)
 crow-cli kv scan --store-id 3 --group-id 3 --prefix user: --limit 100
 ```
 
@@ -261,6 +261,97 @@ curl "http://$IP:$PORT/api/stores/3/groups/3/kv/scan?prefix=user:&limit=100"
 
 The Web UI KV Operator panel provides the same operations with a
 store/group selector, paginated scan, and inline editing.
+
+### 2.1 Scan modes
+
+CROW provides two range-read modes for different use cases:
+
+- **List scan** (`kv scan`) — the default scan. Fast, always returns the
+  latest value per key at each page's read point. S3-list semantics:
+  each page is independently consistent, but a key can vanish (deleted
+  between pages) or a value can drift (overwritten between pages) within
+  a single logical scan. No server-side state beyond the per-page read
+  barrier. Use for interactive listing, key discovery, and the KV
+  Operator UI.
+- **Snapshot scan** (`snapshot create` + `snapshot scan`) —
+  point-in-time-consistent. Pins a frozen view of the keyspace at a
+  specific slot; every page is served from the same frozen view. No key
+  vanishes, no value drifts, no phantom keys appear. Use for backup,
+  analytics, and any consumer that needs a consistent point-in-time
+  view. See §2.2 below.
+
+### 2.2 Snapshot versioning
+
+A snapshot scan pins a point-in-time view of the keyspace. Creating a
+snapshot flushes the in-memory write buffer (L0) into the durable tree
+(L1), then pins L1 at the current applied slot. The snapshot is a frozen,
+immutable view — iterating it is pure array traversal with no concurrency
+concerns. Each snapshot has a server-side handle with a lease (default 5
+minutes); the handle is reaped if the client disconnects, preventing
+unbounded pin retention.
+
+**Create a snapshot:**
+
+```bash
+crow-cli snapshot create --store-id 3 --group-id 3
+# Returns: snapshot_handle=42, at_slot=12345
+```
+
+**List active snapshots:**
+
+```bash
+crow-cli snapshot list --store-id 3 --group-id 3
+# Returns: handle, at_slot, lease_remaining for each active snapshot
+```
+
+**Scan a snapshot (paginated, same prefix/start_after/limit as list scan):**
+
+```bash
+# First page
+crow-cli snapshot scan --store-id 3 --group-id 3 \
+  --handle 42 --prefix user: --limit 100
+
+# Next page (start_after = last key from previous page)
+crow-cli snapshot scan --store-id 3 --group-id 3 \
+  --handle 42 --prefix user: --limit 100 \
+  --start-after user:50
+```
+
+**Release a snapshot (free the pinned pages):**
+
+```bash
+crow-cli snapshot release --store-id 3 --group-id 3 --handle 42
+```
+
+**curl:**
+
+```bash
+# Create
+curl -X POST "http://$IP:$PORT/api/stores/3/groups/3/snapshots"
+
+# List
+curl "http://$IP:$PORT/api/stores/3/groups/3/snapshots"
+
+# Scan
+curl "http://$IP:$PORT/api/stores/3/groups/3/snapshots/42/scan?prefix=user:&limit=100"
+
+# Release
+curl -X DELETE "http://$IP:$PORT/api/stores/3/groups/3/snapshots/42"
+```
+
+**GC and snapshots**: the engine's garbage collector reclaims tombstones
+and stale versions with `slot <= gc_watermark`. Active snapshots protect
+their pinned pages via refcount — GC never frees a page a live snapshot
+still references. Once a snapshot is released (or its lease expires), the
+next GC sweep can reclaim those pages. The GC watermark can be advanced
+explicitly via the management API to control retention:
+
+```bash
+# Advance GC watermark (data with slot <= watermark becomes reclaimable)
+curl -X POST "http://$IP:$PORT/api/stores/3/groups/3/gc-watermark" \
+  -H 'Content-Type: application/json' \
+  -d '{"slot":12000}'
+```
 
 ---
 
@@ -520,7 +611,11 @@ and `--json` for JSON output.
 - **`crow-cli kv put --store-id <s> --group-id <g> --key <k> --value <v>`**
 - **`crow-cli kv get --store-id <s> --group-id <g> --key <k>`**
 - **`crow-cli kv delete --store-id <s> --group-id <g> --key <k>`**
-- **`crow-cli kv scan --store-id <s> --group-id <g> --prefix <p> [--limit <n>]`**
+- **`crow-cli kv scan --store-id <s> --group-id <g> --prefix <p> [--limit <n>]`** — list scan (fast, latest values, S3-list semantics)
+- **`crow-cli snapshot create --store-id <s> --group-id <g>`** — pin a point-in-time snapshot
+- **`crow-cli snapshot list --store-id <s> --group-id <g>`** — list active snapshots
+- **`crow-cli snapshot scan --store-id <s> --group-id <g> --handle <h> --prefix <p> [--limit <n>] [--start-after <k>]`** — scan a pinned snapshot
+- **`crow-cli snapshot release --store-id <s> --group-id <g> --handle <h>`** — release a snapshot
 
 **curl:**
 
@@ -572,7 +667,12 @@ and `--json` for JSON output.
 | Get | `GET /api/stores/{sid}/groups/{gid}/kv/get?key=...` |
 | Put | `POST /api/stores/{sid}/groups/{gid}/kv/put` |
 | Delete | `POST /api/stores/{sid}/groups/{gid}/kv/delete` |
-| Scan | `GET /api/stores/{sid}/groups/{gid}/kv/scan?prefix=...&limit=N` |
+| Scan (list mode) | `GET /api/stores/{sid}/groups/{gid}/kv/scan?prefix=...&limit=N` |
+| Create snapshot | `POST /api/stores/{sid}/groups/{gid}/snapshots` |
+| List snapshots | `GET /api/stores/{sid}/groups/{gid}/snapshots` |
+| Snapshot scan | `GET /api/stores/{sid}/groups/{gid}/snapshots/{handle}/scan?prefix=...&limit=N&start_after=...` |
+| Release snapshot | `DELETE /api/stores/{sid}/groups/{gid}/snapshots/{handle}` |
+| Set GC watermark | `POST /api/stores/{sid}/groups/{gid}/gc-watermark` |
 
 #### Server management (per-node)
 

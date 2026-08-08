@@ -490,6 +490,7 @@ async fn system_init(
         if let Some(ref mr) = state.metrics_registry {
             store.set_metrics_registry(Arc::clone(mr));
         }
+        store.set_scan_byte_budget(state.config.server.scan_byte_budget);
         let store = Arc::new(store);
         store.start().await.map_err(|e| {
             err_json(
@@ -914,6 +915,7 @@ async fn add_store(
     if let Some(ref mr) = state.metrics_registry {
         store.set_metrics_registry(Arc::clone(mr));
     }
+    store.set_scan_byte_budget(state.config.server.scan_byte_budget);
     let store = Arc::new(store);
 
     if let Err(e) = store.start().await {

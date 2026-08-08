@@ -246,9 +246,3 @@ Zero correctness errors on Linux. Verify overhead negligible (<1%).
   pooling, reconnect, timeout, cancellation, backpressure, and TLS.
   Deferred until read throughput is the primary constraint and the h2
   lock is profiled as the hot spot.
-- **E4 — Least-conn / latency read-endpoint policy.** R26 shipped
-  round-robin `AnyReplica`. A `LeastConnections` or `Latency` policy —
-  driven by server-reported in-flight counts or client-measured RTT —
-  would balance MinSlot load by actual capacity rather than blind
-  rotation, avoiding hotspots when one replica is slow (e.g.
-  demand-loading cold crow-tree pages).
