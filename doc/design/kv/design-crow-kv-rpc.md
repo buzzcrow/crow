@@ -64,7 +64,8 @@ doc covers design decisions only.
 
 ## 3. LearnerStream — Why a Dedicated Bidi Stream
 
-The steady-state **data** traffic (`Accept`, `ChosenNotification`)
+The steady-state **data** traffic (`Accept`, `ChosenNotification`,
+`BatchChosenNotification`)
 moves onto a single gRPC bidi stream per `(group_id, peer_id)` pair.
 Two problems the unary-per-RPC pattern cannot solve for data:
 

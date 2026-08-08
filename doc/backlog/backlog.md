@@ -15,16 +15,6 @@ complexity, and dependency. Before implementation, follow the
 
 ### High Priority
 
-- **[R63](R63-kv-election-dedicated-runtime.md)** — Value-less catch-up
-  + background apply loop — the catch-up replay sends full 16 KiB
-  payloads for slots the follower already has, and the heartbeat
-  handler applies committed entries synchronously, blocking the
-  heartbeat reply. Fix: (1) add `BatchChosenNotice` frame so the leader
-  tells the follower which slots are chosen without shipping payloads —
-  the follower advances its chosen frontier from its local acceptor;
-  (2) move engine apply to a background `spawn_apply_loop` driven by
-  `known_commit_slot` + `Notify`, so `handle_heartbeat` returns
-  immediately.
 - **[R64](R64-kv-paxos-dedicated-runtime.md)** — Dedicated runtime for
   election work + decouple catch-up replay from heartbeat round — the
   election driver competes with the propose path on the shared tokio
