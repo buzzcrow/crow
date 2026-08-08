@@ -11,11 +11,25 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R63** — Bump this line in the same commit when adding a new item.
+**Next R number: R65** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
-*(none currently)*
+- **[R64](R64-kv-paxos-dedicated-runtime.md)** — Isolate all Paxos
+  work (propose path, LearnerStream dispatch loop, follower gRPC
+  handlers, chosen-notice fan-out) onto the dedicated election runtime
+  so non-Paxos load on the main runtime (snapshot, HTTP API, client
+  I/O) cannot stall consensus-critical work. The main runtime becomes a
+  thin I/O relay with channel handoffs to the dedicated runtime.
+- **[R63](R63-kv-election-dedicated-runtime.md)** — Election driver on
+  a dedicated runtime + decouple catch-up replay from heartbeat round —
+  the leader's `run_leader_state` runs on the shared tokio pool and
+  performs inline catch-up replay (up to 64 `send_accept().await` per
+  round), so burst write load starves heartbeats and triggers spurious
+  elections. Fix: (1) spawn the election driver on a dedicated
+  `current_thread` runtime on its own OS thread; (2) extract catch-up
+  replay into a separate concurrent path so heartbeat rounds return
+  immediately after quorum.
 
 ### Medium Priority
 
