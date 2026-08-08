@@ -284,6 +284,18 @@ impl PxLearner {
         self.last_chosen_slot.load(Ordering::Acquire)
     }
 
+    /// R65: check whether a slot is chosen (safe to apply). A slot is
+    /// chosen if it is in the continuous prefix (`≤ contiguous_chosen`)
+    /// or in the out-of-order chosen set (individually confirmed via
+    /// `ChosenNotice` with ballot match).
+    #[must_use]
+    pub fn is_chosen(&self, slot: SlotIndex) -> bool {
+        if slot <= self.contiguous_chosen.load(Ordering::Acquire) {
+            return true;
+        }
+        self.out_of_order.lock().contains_key(&slot)
+    }
+
     /// Term of the entry at [`Self::last_chosen_slot`].
     #[must_use]
     pub fn last_chosen_term(&self) -> PxTerm {

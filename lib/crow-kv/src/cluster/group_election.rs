@@ -293,7 +293,24 @@ impl LeaderElection for PxGroup {
         let next = ceiling.saturating_add(1);
         self.next_slot.fetch_max(next, Ordering::AcqRel);
         self.leader_read_ready.store(true, Ordering::Release);
-        debug!(group_id, term, ceiling, next_slot = next, "bulk phase 1 done");
+        // R65: advance `known_commit_slot` to the leader's own
+        // `contiguous_chosen` after the sweep. Leaders don't receive
+        // heartbeats or ChosenNotice, so without this the apply loop
+        // would never learn about slots the leader accepted as a follower
+        // (before winning the election) or slots resolved by the sweep.
+        // All slots up to `contiguous_chosen` are now confirmed chosen by
+        // the quorum that responded to Prepare — safe to apply.
+        let cc = replica.contiguous_chosen();
+        replica.advance_known_commit_slot(cc);
+        replica.wake_apply_loop();
+        debug!(
+            group_id,
+            term,
+            ceiling,
+            next_slot = next,
+            contiguous_chosen = cc,
+            "bulk phase 1 done"
+        );
     }
 }
 
@@ -549,6 +566,7 @@ impl PxGroup {
                                         leader_term,
                                         replica.id,
                                         group_id,
+                                        0,
                                     ) {
                                         debug!(
                                             group_id,

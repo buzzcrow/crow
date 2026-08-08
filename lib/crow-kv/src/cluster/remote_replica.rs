@@ -517,7 +517,7 @@ impl PxRemoteReplica {
     /// Lazily construct (and reuse) the per-peer bidi stream client.
     /// Returns the shared `Arc<PxLearnerStream>`; the underlying background
     /// task is spawned on first call and lives until [`Self::shutdown`].
-    fn learner_stream(&self) -> &Arc<PxLearnerStream> {
+    pub(crate) fn learner_stream(&self) -> &Arc<PxLearnerStream> {
         self.learner_stream.get_or_init(|| {
             let cfg = PxElectionConfig {
                 learner_stream_window_frames: self.learner_stream_window_frames,
@@ -544,6 +544,7 @@ impl PxRemoteReplica {
         term: crate::paxos::PxTerm,
         leader_id: PxNodeId,
         group_id: u64,
+        ballot_round: u64,
     ) -> Result<(), PxReplicaError> {
         let notice = RpcChosenNotification {
             version: 1,
@@ -553,6 +554,7 @@ impl PxRemoteReplica {
             leader_id,
             request_id: 0,
             request_create_ms: 0,
+            ballot_round,
         };
         self.learner_stream().send_chosen(notice)
     }
@@ -572,6 +574,7 @@ impl PxRemoteReplica {
         term: crate::paxos::PxTerm,
         leader_id: PxNodeId,
         group_id: u64,
+        ballot_round: u64,
     ) -> Result<(), PxReplicaError> {
         let batch = RpcBatchChosenNotification {
             version: 1,
@@ -580,8 +583,35 @@ impl PxRemoteReplica {
             end_slot,
             term,
             leader_id,
+            ballot_round,
         };
         self.learner_stream().send_batch_chosen(batch)
+    }
+
+    /// R65: Send a `FetchGapRequest` to the leader for a missing or stale
+    /// slot. The leader replies with the chosen value + ballot. This is
+    /// the follower-driven catch-up path — the follower detects a gap
+    /// (`ChosenNotice` for a slot it doesn't have, or apply loop finds a
+    /// missing slot in the committed range) and proactively fetches the
+    /// value from the leader.
+    ///
+    /// # Errors
+    /// Returns [`PxReplicaError`] on transport failure or timeout.
+    pub async fn send_fetch_gap(
+        &self,
+        slot: u64,
+        term: crate::paxos::PxTerm,
+        leader_id: PxNodeId,
+        group_id: u64,
+    ) -> Result<crate::rpc::FetchGapResponse, PxReplicaError> {
+        let req = crate::rpc::FetchGapRequest {
+            version: 1,
+            group_id,
+            slot,
+            term,
+            leader_id,
+        };
+        self.learner_stream().send_fetch_gap(req).await
     }
 
     /// Allocate the next correlation id for an `Accept` frame or unary

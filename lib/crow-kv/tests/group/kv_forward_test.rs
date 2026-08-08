@@ -67,16 +67,26 @@ async fn follower_get_forwards_to_leader_after_local_clear() {
     assert!(put.ok, "leader put should succeed");
 
     // 2. Confirm Paxos has propagated the value to the follower.
+    // R65: follower apply is driven by ChosenNotice (async). Poll until
+    // the follower's engine has the value, with a bounded timeout.
     let follower_group = follower.get_group(1).expect("group 1 on follower");
-    assert!(
-        follower_group
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if follower_group
             .local_replica()
             .learner
             .engine_get(b"fk".as_slice())
             .await
-            .is_some(),
-        "expected paxos to propagate value to follower's learner"
-    );
+            .is_some()
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "expected paxos to propagate value to follower's learner"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
 
     // 3. Clear the follower's local learner store. After this, a
     //    local-only read on the follower would return not_found.

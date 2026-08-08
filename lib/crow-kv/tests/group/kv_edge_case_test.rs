@@ -36,21 +36,40 @@ async fn put_raw(
 }
 
 async fn assert_cluster_value(cluster: &TestCluster, key: &[u8], expected: &[u8]) {
-    // Yield + brief sleep so the async learner-stream task drains before
-    // checking follower engines. The learner-stream chosen notification
-    // is async; a single yield_now is not always enough.
-    tokio::task::yield_now().await;
-    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-    for node in cluster.nodes() {
-        let group = node.get_group(1).expect("group exists");
-        let replica = group.local_replica();
-        let value = replica.learner.engine_get(key).await.expect("value missing");
-        assert_eq!(
-            value.1.as_slice(),
-            expected,
-            "key {key:?} mismatch on replica {}",
-            replica.id
-        );
+    // R65: follower apply is driven by ChosenNotice (async, after quorum
+    // confirmation). Poll until all nodes converge, with a bounded timeout.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let mut all_match = true;
+        for node in cluster.nodes() {
+            let group = node.get_group(1).expect("group exists");
+            let replica = group.local_replica();
+            if let Some((_, v)) = replica.learner.engine_get(key).await {
+                if v.as_slice() != expected {
+                    all_match = false;
+                }
+            } else {
+                all_match = false;
+            }
+        }
+        if all_match {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            for node in cluster.nodes() {
+                let group = node.get_group(1).expect("group exists");
+                let replica = group.local_replica();
+                let value = replica.learner.engine_get(key).await.expect("value missing");
+                assert_eq!(
+                    value.1.as_slice(),
+                    expected,
+                    "key {key:?} mismatch on replica {}",
+                    replica.id
+                );
+            }
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
 }
 
