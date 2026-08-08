@@ -18,7 +18,7 @@ use crate::cluster::replica::{
     HeartbeatRequestPayload, PxReplicaError, ReplicaHandler, StepDownRequestPayload, VoteRequestPayload,
 };
 use crate::common::optional_u64;
-use crate::paxos::roles::{DedupTag, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
+use crate::paxos::roles::{Acceptor, DedupTag, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply};
 use crate::paxos::PxTerm;
 
 use crate::rpc::px_service_server::PxService;
@@ -463,6 +463,45 @@ impl PxService for PxReplicaService {
                         }
                         None
                     }
+                    learner_stream_request::Frame::BatchChosen(batch) => {
+                        // R63: value-less batch chosen notice. For each slot
+                        // in [start_slot, end_slot] the follower already has
+                        // in its acceptor, advance the chosen frontier. Missing
+                        // slots remain gaps — the leader's full-accept catch-up
+                        // fills them. Then advance `known_commit_slot` and wake
+                        // the background apply loop so present slots are applied.
+                        if let Some(group) = store.get_group(batch.group_id) {
+                            let replica = group.local_replica();
+                            let mut advanced_count = 0u64;
+                            for slot in batch.start_slot..=batch.end_slot {
+                                if replica.acceptor.accepted_at(slot).is_some() {
+                                    replica.learner.update_chosen_frontier(slot, batch.term);
+                                    advanced_count += 1;
+                                }
+                            }
+                            replica.advance_known_commit_slot(batch.end_slot);
+                            replica.wake_apply_loop();
+                            debug!(
+                                store_id = store.store_id,
+                                group_id = batch.group_id,
+                                start_slot = batch.start_slot,
+                                end_slot = batch.end_slot,
+                                term = batch.term,
+                                leader_id = batch.leader_id,
+                                advanced_count,
+                                "LearnerStream: batch chosen notification applied"
+                            );
+                        } else {
+                            debug!(
+                                store_id = store.store_id,
+                                group_id = batch.group_id,
+                                start_slot = batch.start_slot,
+                                end_slot = batch.end_slot,
+                                "LearnerStream: batch chosen notification dropped (group not found)"
+                            );
+                        }
+                        None
+                    }
                 };
                 if let Some(frame) = response_frame {
                     if tx
@@ -562,7 +601,17 @@ async fn handle_accept_inner(store: &Arc<PxKvStore>, req: AcceptRequest) -> Resu
     )
     .await?;
     if matches!(reply, PxAcceptReply::Accepted { .. }) {
-        replica.learn_chosen(&entry, &dedup_tags).await;
+        // R63: advance the chosen frontier + dedup synchronously (cheap
+        // atomics) and defer engine apply to the background loop. This
+        // keeps the serial LearnerStream handler fast so it doesn't starve
+        // the tokio runtime and block heartbeat processing. Critical:
+        // `known_commit_slot` must advance (not just `contiguous_chosen`)
+        // so a replica that accepts slots as a follower and then wins an
+        // election still gets those slots applied by the background loop.
+        replica.learner.update_chosen_frontier(entry.slot, entry.term);
+        replica.learner.record_dedup_tags(&dedup_tags, entry.slot);
+        replica.advance_known_commit_slot(entry.slot);
+        replica.wake_apply_loop();
     }
 
     let (rejected, rejected_round, rejected_leader_id, term_stale, reply_term) = match reply {

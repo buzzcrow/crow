@@ -250,6 +250,22 @@ pub struct PxLocalReplica {
     /// `None` in production.
     #[cfg(feature = "test-util")]
     persist_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    /// R63: latest commit point from heartbeat / batch-chosen / accept.
+    /// Advanced via `fetch_max` by `handle_heartbeat` and
+    /// `handle_accept_inner`. The background apply loop reads this to know
+    /// how far it can apply. `Arc`-wrapped so the spawned apply task can
+    /// hold a `'static` clone.
+    known_commit_slot: Arc<AtomicU64>,
+    /// R63: wakes the background apply loop when `known_commit_slot`
+    /// advances. `Arc`-wrapped so the spawned apply task can hold a
+    /// `'static` clone.
+    apply_notify: Arc<tokio::sync::Notify>,
+    /// R63: cancellation token for the background apply loop. Owned by the
+    /// replica (not per-tenure) so the loop survives role transitions.
+    apply_loop_cancel: tokio_util::sync::CancellationToken,
+    /// R63: join handle for the background apply loop. `None` until the
+    /// loop is lazily spawned by `ensure_apply_loop`.
+    apply_loop_handle: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// Registry-based metric handles for election counters and gauges.
@@ -326,7 +342,7 @@ impl ReplicaHandler for PxLocalReplica {
         req: HeartbeatRequestPayload,
         _group_id: u64,
     ) -> Result<HeartbeatReply, PxReplicaError> {
-        Ok(self.handle_heartbeat(req).await)
+        Ok(self.handle_heartbeat(req))
     }
 
     async fn on_step_down(
@@ -364,6 +380,10 @@ impl PxLocalReplica {
             election_handles: OnceLock::new(),
             #[cfg(feature = "test-util")]
             persist_gate: Mutex::new(None),
+            known_commit_slot: Arc::new(AtomicU64::new(0)),
+            apply_notify: Arc::new(tokio::sync::Notify::new()),
+            apply_loop_cancel: tokio_util::sync::CancellationToken::new(),
+            apply_loop_handle: parking_lot::Mutex::new(None),
         }
     }
 
@@ -424,6 +444,10 @@ impl PxLocalReplica {
             election_handles: OnceLock::new(),
             #[cfg(feature = "test-util")]
             persist_gate: Mutex::new(None),
+            known_commit_slot: Arc::new(AtomicU64::new(0)),
+            apply_notify: Arc::new(tokio::sync::Notify::new()),
+            apply_loop_cancel: tokio_util::sync::CancellationToken::new(),
+            apply_loop_handle: parking_lot::Mutex::new(None),
         }
     }
 
@@ -445,6 +469,18 @@ impl PxLocalReplica {
     #[cfg(feature = "test-util")]
     pub fn set_persist_gate_for_tests(&self, notify: Arc<tokio::sync::Notify>) {
         *self.persist_gate.lock() = Some(notify);
+    }
+
+    /// R63 test-only: simulate the `handle_accept_inner` deferred-apply path
+    /// (advance chosen frontier + dedup + `known_commit_slot` + wake apply
+    /// loop) without going through the RPC handler. Used by the
+    /// follower-wins-election deadlock regression test.
+    #[cfg(feature = "test-util")]
+    pub fn simulate_accept_deferred_apply(&self, entry: &PxLogEntry, dedup_tags: &[DedupTag]) {
+        self.learner.update_chosen_frontier(entry.slot, entry.term);
+        self.learner.record_dedup_tags(dedup_tags, entry.slot);
+        self.advance_known_commit_slot(entry.slot);
+        self.wake_apply_loop();
     }
 
     /// Set this replica's listen endpoint (called by the store when the
@@ -685,6 +721,9 @@ impl PxLocalReplica {
             );
             return OperationReport::new();
         }
+
+        // R63: stop the background apply loop before flushing the engine.
+        self.stop_apply_loop();
 
         let engine = self.learner.engine();
         engine.flush();
@@ -1262,25 +1301,50 @@ impl PxLocalReplica {
         });
     }
 
-    /// Apply locally-accepted entries to the state machine up to `commit_slot`
-    /// (the leader's committed/chosen frontier, carried on each heartbeat).
-    ///
-    /// Walks the contiguous-applied prefix forward: for each next slot it reads
-    /// the highest-ballot value the acceptor holds and `learn`s it. Stops at
-    /// the first gap (a slot this replica has not accepted yet) — the prefix is
-    /// contiguous by construction, and the leader's heartbeat catch-up
-    /// re-sends the missing `Accepted` so the next heartbeat can continue.
-    /// Idempotent: re-applying an already-applied slot is a no-op in the
-    /// learner. Used by followers, which otherwise never apply in steady state
-    /// (`on_accept` only persists; `ChosenNotice` only moves the watermark).
-    async fn apply_committed_up_to(&self, commit_slot: SlotIndex) {
-        let mut next = self.learner.contiguous_applied().saturating_add(1);
-        while next <= commit_slot {
-            let Some(entry) = self.acceptor.accepted_at(next) else {
-                break;
-            };
-            self.learner.learn(entry, &[]).await;
-            next += 1;
+    /// R63: advance `known_commit_slot` to at least `slot` via `fetch_max`.
+    /// Called by `handle_heartbeat` (with the leader's `committed_safe_slot`)
+    /// and by `handle_accept_inner` / `BatchChosen` handler (with the accepted
+    /// slot). The background apply loop reads this to know how far it can
+    /// apply.
+    pub(crate) fn advance_known_commit_slot(&self, slot: SlotIndex) {
+        self.known_commit_slot.fetch_max(slot, Ordering::AcqRel);
+    }
+
+    /// R63: wake the background apply loop. Also ensures the loop is running
+    /// (lazily spawned on first call). Called after `advance_known_commit_slot`
+    /// from `handle_heartbeat`, `handle_accept_inner`, and the `BatchChosen`
+    /// handler.
+    pub(crate) fn wake_apply_loop(&self) {
+        self.ensure_apply_loop();
+        self.apply_notify.notify_one();
+    }
+
+    /// R63: lazily spawn the background apply loop if it hasn't been started
+    /// yet. The loop runs for the replica's lifetime (cancelled in
+    /// [`Self::shutdown`]); it reads `known_commit_slot`, collects entries
+    /// from the acceptor, and applies them via the learner. Missing slots
+    /// are skipped (skip-and-continue) so a single gap doesn't block the
+    /// entire apply backlog.
+    fn ensure_apply_loop(&self) {
+        if self.apply_loop_handle.lock().is_some() {
+            return;
+        }
+        let known = Arc::clone(&self.known_commit_slot);
+        let learner = Arc::clone(&self.learner);
+        let acceptor = Arc::clone(&self.acceptor);
+        let notify = Arc::clone(&self.apply_notify);
+        let cancel = self.apply_loop_cancel.clone();
+        let handle = tokio::spawn(async move {
+            apply_loop_task(known, learner, acceptor, notify, cancel).await;
+        });
+        *self.apply_loop_handle.lock() = Some(handle);
+    }
+
+    /// R63: stop the background apply loop. Called in [`Self::shutdown`].
+    fn stop_apply_loop(&self) {
+        self.apply_loop_cancel.cancel();
+        if let Some(handle) = self.apply_loop_handle.lock().take() {
+            handle.abort();
         }
     }
 
@@ -1291,7 +1355,7 @@ impl PxLocalReplica {
     /// `ChosenNotice` carries no payload to apply). The high-water mark is the
     /// follower's signal that committed slots exist past its applied frontier,
     /// which drives `repair_once` and heartbeat catch-up to fetch the real
-    /// values via [`Self::apply_committed_up_to`].
+    /// values via the background apply loop.
     ///
     /// W7: this used to be neutered (always `false`) because the election
     /// log-up-to-date check read `last_chosen_slot`, so advancing it from a
@@ -1489,7 +1553,7 @@ impl PxLocalReplica {
     /// the vote-lockout window. Returns `success=true` iff the term is `>=`
     /// our own; on lower term we reply `false` so the stale leader can step
     /// down on its next bookkeeping check.
-    async fn handle_heartbeat(&self, req: HeartbeatRequestPayload) -> HeartbeatReply {
+    fn handle_heartbeat(&self, req: HeartbeatRequestPayload) -> HeartbeatReply {
         let lease = Duration::from_millis(self.lease_duration_ms());
         let now = Instant::now();
         let term;
@@ -1515,21 +1579,21 @@ impl PxLocalReplica {
             self.current_term_atomic.store(term, Ordering::Release);
             self.role_atomic
                 .store(PxLocalReplicaRole::Follower.as_u8(), Ordering::Release);
-            // Apply committed entries up to the leader's commit point (Raft
-            // `leaderCommit` rule). Followers do not apply on `on_accept`
-            // (which only persists) nor on `ChosenNotice` (watermark only), so
-            // without this a follower's local KVEngine never reflects committed
-            // writes in steady state.
-            self.apply_committed_up_to(req.committed_safe_slot).await;
+            // R63: reset the election deadline first (liveness). The follower
+            // has confirmed the leader is alive (term check passed) and must
+            // not time out regardless of how long the background apply takes.
+            self.deadline_reset_signal.notify_one();
             // Timestamp the heartbeat so the metrics snapshot can
             // report `last_heartbeat_age_ms`.
             self.note_heartbeat_received();
-            // Reset the follower's election deadline (Raft heartbeat-resets-timer
-            // rule). Without this signal, a follower receiving steady heartbeats
-            // from the current leader will still spuriously fire its election
-            // deadline and challenge the leader at a higher term, causing
-            // leadership churn.
-            self.deadline_reset_signal.notify_one();
+            // R63: store the leader's commit point and wake the background
+            // apply loop. The heartbeat reply returns immediately with the
+            // current `contiguous_applied` (which may lag behind
+            // `known_commit_slot`). The leader's catch-up replay handles
+            // convergence; the background loop advances `contiguous_applied`
+            // at its own pace.
+            self.advance_known_commit_slot(req.committed_safe_slot);
+            self.wake_apply_loop();
         }
         let (contiguous_chosen, last_chosen_term, highest_seen_slot) = self.frontier_triple();
         let contiguous_applied = self.contiguous_applied();
@@ -1601,6 +1665,61 @@ impl PxLocalReplica {
             accepted,
             current_term: snapshot.current_term,
             current_leader_id: snapshot.leader_id.unwrap_or(0),
+        }
+    }
+}
+
+/// R63: bounded batch size for the background apply loop. Limits the number
+/// of entries processed in one iteration before re-checking cancellation and
+/// `known_commit_slot` advances.
+const MAX_APPLY_PER_BATCH: u64 = 64;
+
+/// R63: background apply loop task. Reads `known_commit_slot`, collects
+/// entries from the acceptor for the contiguous range, and applies them via
+/// the learner. Missing slots are skipped (skip-and-continue) so a single
+/// gap doesn't block the entire apply backlog — `contiguous_applied` stays
+/// at the gap until it's filled; subsequent available slots are applied via
+/// `advance_applied_frontier` (which handles out-of-order applies).
+async fn apply_loop_task(
+    known: Arc<AtomicU64>,
+    learner: Arc<PxLearner>,
+    acceptor: Arc<PxAcceptor>,
+    notify: Arc<tokio::sync::Notify>,
+    cancel: tokio_util::sync::CancellationToken,
+) {
+    loop {
+        if cancel.is_cancelled() {
+            return;
+        }
+        let target = known.load(Ordering::Acquire);
+        let current = learner.contiguous_applied();
+        if current >= target {
+            notify.notified().await;
+            continue;
+        }
+        // Track the highest slot we've already attempted in this batch so
+        // we don't re-apply out-of-order slots on every iteration (they're
+        // idempotent but waste CPU). The `high_water` persists across
+        // iterations until `contiguous_applied` catches up to it or
+        // `known_commit_slot` advances past it.
+        let mut next = current.saturating_add(1);
+        let end = target.min(next.saturating_add(MAX_APPLY_PER_BATCH).saturating_sub(1));
+        let before = current;
+        while next <= end {
+            if cancel.is_cancelled() {
+                return;
+            }
+            if let Some(entry) = acceptor.accepted_at(next) {
+                learner.apply_entry(entry.slot, &entry.payload).await;
+                learner.advance_applied_frontier(entry.slot);
+            }
+            next += 1;
+        }
+        // If contiguous_applied didn't advance (stuck at a gap with only
+        // out-of-order applies), wait for a wake-up before retrying —
+        // avoids busy-looping on gaps that haven't been filled yet.
+        if learner.contiguous_applied() == before {
+            notify.notified().await;
         }
     }
 }

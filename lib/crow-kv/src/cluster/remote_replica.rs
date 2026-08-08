@@ -28,9 +28,10 @@ use crate::paxos::roles::{DedupTag, PxAcceptReply, PxBallot, PxLogEntry, PxPrepa
 use crate::paxos::PxNodeId;
 use crate::rpc::px_service_client::PxServiceClient;
 use crate::rpc::{
-    AcceptRequest, AcceptedValue, ChosenNotification as RpcChosenNotification,
-    HeartbeatRequest as RpcHeartbeatRequest, PreVoteRequest as RpcPreVoteRequest, PrepareRequest,
-    RequestVoteRequest as RpcRequestVoteRequest, StepDownRequest as RpcStepDownRequest,
+    AcceptRequest, AcceptedValue, BatchChosenNotification as RpcBatchChosenNotification,
+    ChosenNotification as RpcChosenNotification, HeartbeatRequest as RpcHeartbeatRequest,
+    PreVoteRequest as RpcPreVoteRequest, PrepareRequest, RequestVoteRequest as RpcRequestVoteRequest,
+    StepDownRequest as RpcStepDownRequest,
 };
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -554,6 +555,33 @@ impl PxRemoteReplica {
             request_create_ms: 0,
         };
         self.learner_stream().send_chosen(notice)
+    }
+
+    /// R63: fire-and-forget batch chosen notice covering `[start_slot,
+    /// end_slot]`. Sent over the per-peer bidi `PxLearnerStream` before the
+    /// full-accept catch-up loop so the follower's chosen frontier advances
+    /// for present slots without waiting for the full-accept round-trip.
+    ///
+    /// # Errors
+    /// Returns [`PxReplicaError::Internal`] if the per-peer stream is
+    /// shut down or its reconnect loop is currently failing fast.
+    pub fn send_batch_chosen_notice(
+        &self,
+        start_slot: u64,
+        end_slot: u64,
+        term: crate::paxos::PxTerm,
+        leader_id: PxNodeId,
+        group_id: u64,
+    ) -> Result<(), PxReplicaError> {
+        let batch = RpcBatchChosenNotification {
+            version: 1,
+            group_id,
+            start_slot,
+            end_slot,
+            term,
+            leader_id,
+        };
+        self.learner_stream().send_batch_chosen(batch)
     }
 
     /// Allocate the next correlation id for an `Accept` frame or unary

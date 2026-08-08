@@ -535,6 +535,35 @@ impl PxGroup {
                                 let catchup_end =
                                     (hb.contiguous_applied.saturating_add(MAX_CATCHUP_PER_ROUND))
                                         .min(payload.committed_safe_slot);
+                                // R63: Phase 1 — fire-and-forget batch chosen
+                                // notice covering the lagging range. The follower
+                                // advances its chosen frontier for slots it already
+                                // has (no payload transfer), so the apply loop can
+                                // start processing them immediately. Missing slots
+                                // remain gaps for the full-accept Phase 2 below.
+                                let peer_applied = hb.contiguous_applied;
+                                if catchup_end > peer_applied {
+                                    if let Err(err) = remote.send_batch_chosen_notice(
+                                        peer_applied.saturating_add(1),
+                                        catchup_end,
+                                        leader_term,
+                                        replica.id,
+                                        group_id,
+                                    ) {
+                                        debug!(
+                                            group_id,
+                                            peer_id,
+                                            start_slot = peer_applied.saturating_add(1),
+                                            end_slot = catchup_end,
+                                            error = %err,
+                                            "heartbeat catch-up: batch chosen notice failed (best-effort)"
+                                        );
+                                    }
+                                }
+                                // R63: Phase 2 — full accepts for missing slots
+                                // (existing logic). Slots the follower already has
+                                // are re-accepted (idempotent CAS, cheap); slots the
+                                // follower is missing get the real value.
                                 for slot in hb.contiguous_applied.saturating_add(1)..=catchup_end {
                                     let Some(mut entry) = replica.accepted_at(slot).await else {
                                         debug!(

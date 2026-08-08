@@ -36,8 +36,8 @@ use crate::cluster::replica::PxReplicaError;
 use crate::common::config::PxElectionConfig;
 use crate::rpc::px_service_client::PxServiceClient;
 use crate::rpc::{
-    learner_stream_request, learner_stream_response, AcceptRequest, AcceptedResponse, ChosenNotification,
-    LearnerStreamRequest, LearnerStreamResponse,
+    learner_stream_request, learner_stream_response, AcceptRequest, AcceptedResponse,
+    BatchChosenNotification, ChosenNotification, LearnerStreamRequest, LearnerStreamResponse,
 };
 use tonic::transport::{Channel, Endpoint};
 
@@ -153,6 +153,25 @@ impl PxLearnerStream {
     pub fn send_chosen(&self, notice: ChosenNotification) -> Result<(), PxReplicaError> {
         let frame = LearnerStreamRequest {
             frame: Some(learner_stream_request::Frame::Chosen(notice)),
+        };
+        self.dispatch(OutboundCmd {
+            frame,
+            reply_tx: None,
+            request_id: 0,
+        })
+    }
+
+    /// Fire-and-forget `BatchChosenNotification` (R63). No reply is expected.
+    /// Covers a slot range with a single lightweight frame — the follower
+    /// checks its local acceptor for each slot and advances the chosen
+    /// frontier for present ones without payload transfer.
+    ///
+    /// # Errors
+    /// Returns [`PxReplicaError::Internal`] if the background task has
+    /// shut down (the bounded mpsc receiver was dropped).
+    pub fn send_batch_chosen(&self, batch: BatchChosenNotification) -> Result<(), PxReplicaError> {
+        let frame = LearnerStreamRequest {
+            frame: Some(learner_stream_request::Frame::BatchChosen(batch)),
         };
         self.dispatch(OutboundCmd {
             frame,

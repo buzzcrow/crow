@@ -245,11 +245,26 @@ message ChosenNotification {
   uint64 request_create_ms = 7;
 }
 
+// R63: fire-and-forget batch chosen notice covering a slot range. Carries
+// only `(start_slot, end_slot, term, leader_id)` — no per-slot payload. The
+// follower checks its local acceptor for each slot and advances the chosen
+// frontier for present ones; missing slots remain gaps for the full-accept
+// catch-up to fill.
+message BatchChosenNotification {
+  uint32 version = 1;
+  uint64 group_id = 2;
+  uint64 start_slot = 3;
+  uint64 end_slot = 4;
+  uint64 term = 5;
+  uint64 leader_id = 6;
+}
+
 message LearnerStreamRequest {
   oneof frame {
-    AcceptRequest      accept    = 1;
-    HeartbeatRequest   heartbeat = 2;
-    ChosenNotification chosen    = 3;
+    AcceptRequest           accept       = 1;
+    HeartbeatRequest        heartbeat    = 2;
+    ChosenNotification      chosen       = 3;
+    BatchChosenNotification batch_chosen = 4;
   }
 }
 

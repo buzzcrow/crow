@@ -37,3 +37,6 @@ mod step_down;
 
 #[path = "election/frontier_test.rs"]
 mod frontier;
+
+#[path = "election/apply_loop_test.rs"]
+mod apply_loop;
