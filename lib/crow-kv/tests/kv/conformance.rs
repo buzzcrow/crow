@@ -12,6 +12,17 @@
 use crate::test_util::{compare_dyn, iter_all_dyn};
 use bytes::Bytes;
 use crow_kv::kv::{Batch, BatchOp, Cell, KVEngine, Op};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn now_ms() -> u64 {
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(0)
+}
 
 pub fn put(key: &[u8], value: &[u8]) -> BatchOp {
     BatchOp {
@@ -85,33 +96,33 @@ pub fn scan_is_ordered_prefix_filtered_and_truncates(e: &dyn KVEngine) {
     e.apply(3, &batch(vec![del(b"a:2")])).into_ready().unwrap();
 
     // Unlimited: only live "a:" keys, in order, tombstone excluded.
-    let (items, truncated) = e.scan(b"a:", b"", b"", 0, 0).into_ready().unwrap();
+    let (items, truncated) = e.scan(b"a:", b"", b"", 0, 0, false, 0).into_ready().unwrap();
     let keys: Vec<Vec<u8>> = items.iter().map(|(k, _, _)| k.to_vec()).collect();
     assert_eq!(keys, vec![b"a:1".to_vec(), b"a:3".to_vec()]);
     assert!(!truncated);
 
     // Limit smaller than the match count sets truncated.
-    let (items, truncated) = e.scan(b"a:", b"", b"", 1, 0).into_ready().unwrap();
+    let (items, truncated) = e.scan(b"a:", b"", b"", 1, 0, false, 0).into_ready().unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].0.as_ref(), b"a:1");
     assert!(truncated);
 
     // Empty prefix scans everything live.
-    let (all, _) = e.scan(b"", b"", b"", 0, 0).into_ready().unwrap();
+    let (all, _) = e.scan(b"", b"", b"", 0, 0, false, 0).into_ready().unwrap();
     assert_eq!(all.len(), 3); // a:1, a:3, b:1
 
     // start_after: returns keys strictly greater than start_after.
-    let (page, truncated) = e.scan(b"a:", b"a:1", b"", 0, 0).into_ready().unwrap();
+    let (page, truncated) = e.scan(b"a:", b"a:1", b"", 0, 0, false, 0).into_ready().unwrap();
     let keys: Vec<Vec<u8>> = page.iter().map(|(k, _, _)| k.to_vec()).collect();
     assert_eq!(keys, vec![b"a:3".to_vec()]);
     assert!(!truncated);
 
     // start_after with limit: pagination returns next page.
-    let (page1, trunc1) = e.scan(b"a:", b"", b"", 1, 0).into_ready().unwrap();
+    let (page1, trunc1) = e.scan(b"a:", b"", b"", 1, 0, false, 0).into_ready().unwrap();
     assert_eq!(page1.len(), 1);
     assert_eq!(page1[0].0.as_ref(), b"a:1");
     assert!(trunc1);
-    let (page2, trunc2) = e.scan(b"a:", b"a:1", b"", 1, 0).into_ready().unwrap();
+    let (page2, trunc2) = e.scan(b"a:", b"a:1", b"", 1, 0, false, 0).into_ready().unwrap();
     assert_eq!(page2.len(), 1);
     assert_eq!(page2[0].0.as_ref(), b"a:3");
     assert!(!trunc2);
@@ -129,31 +140,31 @@ pub fn scan_end_key_exclusive_upper_bound(e: &dyn KVEngine) {
     e.apply(1, &batch(ops)).into_ready().unwrap();
 
     // end_key="k03": returns k00, k01, k02 (strictly less than k03).
-    let (items, truncated) = e.scan(b"", b"", b"k03", 0, 0).into_ready().unwrap();
+    let (items, truncated) = e.scan(b"", b"", b"k03", 0, 0, false, 0).into_ready().unwrap();
     let keys: Vec<Vec<u8>> = items.iter().map(|(k, _, _)| k.to_vec()).collect();
     assert_eq!(keys, vec![b"k00".to_vec(), b"k01".to_vec(), b"k02".to_vec()]);
     assert!(!truncated);
 
     // start_after + end_key: (k01, k04) → k02, k03.
-    let (items, _) = e.scan(b"", b"k01", b"k04", 0, 0).into_ready().unwrap();
+    let (items, _) = e.scan(b"", b"k01", b"k04", 0, 0, false, 0).into_ready().unwrap();
     let keys: Vec<Vec<u8>> = items.iter().map(|(k, _, _)| k.to_vec()).collect();
     assert_eq!(keys, vec![b"k02".to_vec(), b"k03".to_vec()]);
 
     // prefix + end_key: prefix="k0", end_key="k02" → k00, k01.
-    let (items, _) = e.scan(b"k0", b"", b"k02", 0, 0).into_ready().unwrap();
+    let (items, _) = e.scan(b"k0", b"", b"k02", 0, 0, false, 0).into_ready().unwrap();
     let keys: Vec<Vec<u8>> = items.iter().map(|(k, _, _)| k.to_vec()).collect();
     assert_eq!(keys, vec![b"k00".to_vec(), b"k01".to_vec()]);
 
     // Empty end_key = unbounded (all 5 keys).
-    let (items, _) = e.scan(b"", b"", b"", 0, 0).into_ready().unwrap();
+    let (items, _) = e.scan(b"", b"", b"", 0, 0, false, 0).into_ready().unwrap();
     assert_eq!(items.len(), 5);
 
     // end_key at the very start: no keys are < "k00".
-    let (items, _) = e.scan(b"", b"", b"k00", 0, 0).into_ready().unwrap();
+    let (items, _) = e.scan(b"", b"", b"k00", 0, 0, false, 0).into_ready().unwrap();
     assert!(items.is_empty());
 
     // end_key with limit: limit=1, end_key="k04" → k00, truncated.
-    let (items, truncated) = e.scan(b"", b"", b"k04", 1, 0).into_ready().unwrap();
+    let (items, truncated) = e.scan(b"", b"", b"k04", 1, 0, false, 0).into_ready().unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].0.as_ref(), b"k00");
     assert!(truncated);
@@ -176,23 +187,114 @@ pub fn scan_byte_budget_stops_and_truncates(e: &dyn KVEngine) {
     e.apply(1, &batch(ops)).into_ready().unwrap();
 
     // Budget=30: 2 entries (26B) fit, 3rd would be 39B > 30.
-    let (items, truncated) = e.scan(b"", b"", b"", 0, 30).into_ready().unwrap();
+    let (items, truncated) = e.scan(b"", b"", b"", 0, 30, false, 0).into_ready().unwrap();
     assert_eq!(items.len(), 2);
     assert!(truncated);
     assert_eq!(items[0].0.as_ref(), b"k00");
     assert_eq!(items[1].0.as_ref(), b"k01");
 
     // Budget=0 (unlimited): all 5 entries, no truncation.
-    let (items, truncated) = e.scan(b"", b"", b"", 0, 0).into_ready().unwrap();
+    let (items, truncated) = e.scan(b"", b"", b"", 0, 0, false, 0).into_ready().unwrap();
     assert_eq!(items.len(), 5);
     assert!(!truncated);
 
     // Budget smaller than a single entry: always return >= 1 entry.
     // Entry "k00" = 3 + 10 = 13B; budget=5 < 13.
-    let (items, truncated) = e.scan(b"", b"", b"", 0, 5).into_ready().unwrap();
+    let (items, truncated) = e.scan(b"", b"", b"", 0, 5, false, 0).into_ready().unwrap();
     assert_eq!(items.len(), 1);
     assert!(truncated); // more entries remain
     assert_eq!(items[0].0.as_ref(), b"k00");
+}
+
+/// `keys_only` skips value materialization: the same keys as a full scan are
+/// returned, in order, but every value is empty. The byte budget then accounts
+/// for key bytes only, so a `keys_only` page fits more entries than a full
+/// scan with the same budget.
+pub fn scan_keys_only_skips_values(e: &dyn KVEngine) {
+    // 5 entries: key=3B ("k00".."k04"), value=10B ("vvvvvvvvv0".."vvvvvvvvv4").
+    let mut ops = Vec::new();
+    for i in 0..5 {
+        ops.push(put(
+            format!("k0{i}").as_bytes(),
+            format!("vvvvvvvvv{i}").as_bytes(),
+        ));
+    }
+    e.apply(1, &batch(ops)).into_ready().unwrap();
+
+    // keys_only: same keys as a full scan, all values empty.
+    let (keys_items, keys_trunc) = e.scan(b"", b"", b"", 0, 0, true, 0).into_ready().unwrap();
+    let (full_items, full_trunc) = e.scan(b"", b"", b"", 0, 0, false, 0).into_ready().unwrap();
+    let keys: Vec<Vec<u8>> = keys_items.iter().map(|(k, _, _)| k.to_vec()).collect();
+    let full_keys: Vec<Vec<u8>> = full_items.iter().map(|(k, _, _)| k.to_vec()).collect();
+    assert_eq!(
+        keys,
+        vec![
+            b"k00".to_vec(),
+            b"k01".to_vec(),
+            b"k02".to_vec(),
+            b"k03".to_vec(),
+            b"k04".to_vec()
+        ]
+    );
+    assert_eq!(keys, full_keys, "keys_only returns the same keys as a full scan");
+    assert_eq!(keys_trunc, full_trunc, "truncated flags match");
+    assert!(
+        keys_items.iter().all(|(_, _, v)| v.is_empty()),
+        "keys_only values are all empty"
+    );
+    assert!(
+        full_items.iter().all(|(_, _, v)| !v.is_empty()),
+        "full scan values are non-empty"
+    );
+
+    // keys_only with prefix: only matching keys, values empty.
+    let (items, _) = e.scan(b"k0", b"", b"", 0, 0, true, 0).into_ready().unwrap();
+    assert_eq!(items.len(), 5);
+    assert!(items.iter().all(|(_, _, v)| v.is_empty()));
+
+    // keys_only with start_after: pagination cursor works.
+    let (items, trunc) = e.scan(b"", b"k01", b"", 0, 0, true, 0).into_ready().unwrap();
+    let keys: Vec<Vec<u8>> = items.iter().map(|(k, _, _)| k.to_vec()).collect();
+    assert_eq!(keys, vec![b"k02".to_vec(), b"k03".to_vec(), b"k04".to_vec()]);
+    assert!(!trunc);
+
+    // keys_only with byte_budget: accounts for key bytes only (3B per key),
+    // so budget=7 fits 2 keys (6B) before the 3rd (9B) exceeds — vs a full
+    // scan where 13B per entry would fit only 1 entry in 7B.
+    let (items, truncated) = e.scan(b"", b"", b"", 0, 7, true, 0).into_ready().unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(truncated);
+    assert_eq!(items[0].0.as_ref(), b"k00");
+    assert_eq!(items[1].0.as_ref(), b"k01");
+    assert!(items.iter().all(|(_, _, v)| v.is_empty()));
+}
+
+pub fn scan_deadline_returns_partial_result(e: &dyn KVEngine) {
+    // Populate enough keys that the merge loop's periodic deadline check
+    // (every 1024 entries) fires mid-scan.
+    for i in 0..3000u64 {
+        let key = format!("k{i:05}");
+        e.apply(i + 1, &batch(vec![put(key.as_bytes(), b"v")]))
+            .into_ready()
+            .unwrap();
+    }
+
+    // deadline_ms = 0 (no deadline): full scan returns all 3000 entries.
+    let (all, all_trunc) = e.scan(b"", b"", b"", 0, 0, false, 0).into_ready().unwrap();
+    assert_eq!(all.len(), 3000);
+    assert!(!all_trunc);
+
+    // Tight deadline (already expired): the merge loop checks periodically
+    // (every 1024 entries) and breaks early with truncated = true. The
+    // result is a partial, correctly-ordered prefix (no gaps).
+    let deadline = now_ms();
+    let (partial, partial_trunc) = e.scan(b"", b"", b"", 0, 0, false, deadline).into_ready().unwrap();
+    assert!(partial_trunc);
+    assert!(partial.len() < all.len());
+    // The partial result is a correctly-ordered prefix of the full scan.
+    for (i, (k, _, _)) in partial.iter().enumerate() {
+        assert_eq!(k.as_ref(), all[i].0.as_ref(), "partial result must be a prefix");
+    }
 }
 
 pub fn compare_is_empty_for_identical_state_and_detects_divergence(a: &dyn KVEngine, b: &dyn KVEngine) {

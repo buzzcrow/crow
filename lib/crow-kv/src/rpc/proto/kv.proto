@@ -131,6 +131,19 @@ message KvScanRequest {
   // Exclusive upper bound. Empty = unbounded. Only keys strictly less
   // than `end_key` (and matching `prefix`) are returned.
   bytes  end_key = 10;
+  // Skip value materialization: items carry empty `value` fields. The engine
+  // skips overflow-chain assembly and value copy; the byte budget accounts for
+  // key bytes only, so a page fits more entries. Default false = today's behavior.
+  bool   keys_only = 11;
+  // Count matching live keys and ship zero items; the response `count` field
+  // carries the count. The store counts via a keys_only engine pass with no
+  // byte budget (one pass). Default false.
+  bool   count_only = 12;
+  // Absolute per-scan deadline in unix-ms (0 = no deadline, preserves today's
+  // behavior). The engine merge loop checks periodically and breaks early
+  // with truncated = true when exceeded; the client pagination loop checks
+  // before each page and stops with timed_out = true.
+  uint64 deadline_ms = 13;
 }
 
 message KvScanItem {
@@ -155,6 +168,11 @@ message KvScanResponse {
   string not_leader_hint = 9;
   // Structured error code. Default 0 = NONE (old server).
   KvErrorCode error_code = 10;
+  // Matched-key count for `count_only` scans (zero items shipped). 0 otherwise.
+  uint64 count = 11;
+  // Deadline fired mid-scan: the result is partial (truncated = true, entries
+  // fetched before the deadline). Default false.
+  bool   timed_out = 12;
 }
 
 service KvService {

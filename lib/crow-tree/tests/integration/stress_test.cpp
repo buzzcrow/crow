@@ -120,7 +120,7 @@ TEST(Stress, ConcurrentReadersSingleWriter)
                     (void)t.get(Slice(make_key(static_cast<int>(rng() % K))), &s, &v);
                 }
                 if ((iter++ % 32) == 0) {
-                    t.scan(Slice("key0"), Slice(), Slice(), 16, 0, &out, &trunc);
+                    t.scan(Slice("key0"), Slice(), Slice(), 16, 0, false, 0, &out, &trunc);
                 }
                 reads.fetch_add(8, std::memory_order_relaxed);
                 std::this_thread::yield();
@@ -162,7 +162,7 @@ TEST(Stress, ConcurrentReadersSingleWriter)
     // Final state matches the oracle.
     std::vector<scan_entry> out;
     bool                    trunc = false;
-    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 0, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 0, false, 0, &out, &trunc).ok());
     ASSERT_EQ(out.size(), oracle.size());
     size_t i = 0;
     for (const auto &kv : oracle) {
@@ -208,7 +208,7 @@ TEST(Stress, ConcurrentScanDuringChurnNoCorruption)
                 std::string prefix = (rng() % 2 == 0) ? "" : make_key(static_cast<int>(rng() % K)).substr(0, 6);
                 std::vector<scan_entry> out;
                 bool                    trunc = false;
-                if (!t.scan(Slice(prefix), Slice(), Slice(), 0, 0, &out, &trunc).ok()) {
+                if (!t.scan(Slice(prefix), Slice(), Slice(), 0, 0, false, 0, &out, &trunc).ok()) {
                     bad.store(true);
                     return;
                 }

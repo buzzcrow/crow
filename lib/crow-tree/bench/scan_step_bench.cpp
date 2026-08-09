@@ -118,7 +118,7 @@ void run_scenario(const char *label, int n, int value_size, bool flush, size_t l
     for (int i = 0; i < iters; ++i) {
         out.clear();
         truncated = false;
-        s.tree->scan(Slice(), Slice(), Slice(), limit, 0, &out, &truncated);
+        s.tree->scan(Slice(), Slice(), Slice(), limit, 0, false, 0, &out, &truncated);
     }
     ScanProfile p = s.tree->scan_profile();
     std::printf("\n[%s] n=%d val=%dB limit=%zu L0=%s iters=%d\n", label, n, value_size, limit, flush ? "empty" : "full",
@@ -215,7 +215,7 @@ void run_concurrent(const char *label, int n_prepop, int value_size, size_t limi
            static_cast<long long>(duration_secs)) {
         out.clear();
         truncated = false;
-        s.tree->scan(Slice(), Slice(), Slice(), limit, 0, &out, &truncated);
+        s.tree->scan(Slice(), Slice(), Slice(), limit, 0, false, 0, &out, &truncated);
         ++scan_count;
     }
     ScanProfile p = s.tree->scan_profile();

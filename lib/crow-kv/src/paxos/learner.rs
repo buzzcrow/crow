@@ -218,6 +218,7 @@ impl PxLearner {
     /// Returns `Err` if the underlying engine scan fails (e.g.
     /// `CtError::Corruption` from packed-result bounds checks).
     #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments)]
     pub async fn engine_scan(
         &self,
         prefix: &[u8],
@@ -225,9 +226,19 @@ impl PxLearner {
         end_key: &[u8],
         limit: usize,
         byte_budget: usize,
+        keys_only: bool,
+        deadline_ms: u64,
     ) -> Result<(Vec<(bytes::Bytes, SlotIndex, bytes::Bytes)>, bool), String> {
         self.engine
-            .scan(prefix, start_after, end_key, limit, byte_budget)
+            .scan(
+                prefix,
+                start_after,
+                end_key,
+                limit,
+                byte_budget,
+                keys_only,
+                deadline_ms,
+            )
             .await
     }
 

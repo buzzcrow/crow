@@ -59,7 +59,9 @@ pub trait KVEngine: Send + Sync {
     /// `end_key` are returned. `byte_budget` (`0` = unlimited) caps the total
     /// key+value bytes emitted; the scan stops with `truncated = true` when
     /// exceeded, always returning at least one entry (so a single oversized
-    /// entry still makes progress). Entry keys and values are zero-copy
+    /// entry still makes progress). `keys_only` skips value materialization
+    /// (no overflow-chain assembly): entries carry empty values and the byte
+    /// budget accounts for key bytes only. Entry keys and values are zero-copy
     /// `Bytes`: for `CrowTreeEngine` they slice into the C++ packed result
     /// buffer; for `InMemKV` they are `Bytes::from` of the owned `Vec<u8>`
     /// (one copy, same as its get path). Errors (e.g. `CtError::Corruption`
@@ -67,6 +69,7 @@ pub trait KVEngine: Send + Sync {
     /// silently swallowed as an empty result — callers map to an error
     /// response, not a wrong `ok` answer.
     #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments)]
     fn scan(
         &self,
         prefix: &[u8],
@@ -74,6 +77,8 @@ pub trait KVEngine: Send + Sync {
         end_key: &[u8],
         limit: usize,
         byte_budget: usize,
+        keys_only: bool,
+        deadline_ms: u64,
     ) -> KVFuture<Result<(Vec<(Bytes, u64, Bytes)>, bool), String>>;
 
     /// Number of live (non-tombstoned) keys.

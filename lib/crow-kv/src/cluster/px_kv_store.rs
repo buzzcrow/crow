@@ -160,6 +160,9 @@ impl KvStore for PxKvStore {
         limit: u32,
         read_mode: i32,
         min_slot: u64,
+        keys_only: bool,
+        count_only: bool,
+        deadline_ms: u64,
         request_id: u64,
         request_create_ms: u64,
     ) -> crate::rpc::KvScanResponse {
@@ -189,8 +192,14 @@ impl KvStore for PxKvStore {
         // `limit` smallest matching live keys (no tombstones) in key order
         // plus a `truncated` flag; `limit == 0` means unlimited. Sorted
         // output keeps pagination via `prefix` extension predictable.
-        // Engine errors (e.g. Corruption) propagate as scan_err instead
-        // of being silently swallowed as an empty ok result.
+        // `keys_only` is pushed down so the engine skips value materialization
+        // (no overflow-chain assembly); `count_only` reuses that keys_only pass
+        // with no byte budget (count all matching keys in one pass) and ships
+        // zero items + a count instead of the keys. Engine errors (e.g.
+        // Corruption) propagate as scan_err instead of being silently
+        // swallowed as an empty ok result.
+        let engine_keys_only = keys_only || count_only;
+        let engine_byte_budget = if count_only { 0 } else { self.scan_byte_budget };
         let (scanned, truncated) = match group
             .local_replica()
             .learner
@@ -199,7 +208,9 @@ impl KvStore for PxKvStore {
                 start_after,
                 end_key,
                 limit as usize,
-                self.scan_byte_budget,
+                engine_byte_budget,
+                engine_keys_only,
+                deadline_ms,
             )
             .await
         {
@@ -213,10 +224,42 @@ impl KvStore for PxKvStore {
                 );
             }
         };
+
+        // count_only: discard the keys, report the matched count, ship zero
+        // items. The engine already excluded tombstones (default), so the
+        // count is the live matching key count.
+        if count_only {
+            let count = scanned.len() as u64;
+            debug!(
+                store_id = self.store_id,
+                group_id,
+                prefix_len = prefix.len(),
+                limit,
+                count,
+                truncated,
+                "kv_scan count_only local-replica read"
+            );
+            return crate::rpc::KvScanResponse {
+                version: 1,
+                ok: true,
+                error: String::new(),
+                truncated,
+                items: Vec::new(),
+                request_id,
+                request_create_ms,
+                read_slot,
+                not_leader_hint: String::new(),
+                error_code: crate::rpc::KvErrorCode::KvErrorNone as i32,
+                count,
+                timed_out: deadline_ms != 0 && truncated,
+            };
+        }
+
         let mut items: Vec<crate::rpc::KvScanItem> = Vec::with_capacity(scanned.len());
         for (key, _slot, value) in scanned {
             // Key and value are already zero-copy Bytes from the
             // engine's packed scan buffer — assign directly, no conversion.
+            // For keys_only scans the value is an empty Bytes.
             items.push(crate::rpc::KvScanItem { key, value });
         }
 
@@ -225,6 +268,7 @@ impl KvStore for PxKvStore {
             group_id,
             prefix_len = prefix.len(),
             limit,
+            keys_only,
             returned = items.len(),
             truncated,
             "kv_scan local-replica read"
@@ -241,6 +285,8 @@ impl KvStore for PxKvStore {
             read_slot,
             not_leader_hint: String::new(),
             error_code: crate::rpc::KvErrorCode::KvErrorNone as i32,
+            count: 0,
+            timed_out: deadline_ms != 0 && truncated,
         }
     }
 }
@@ -759,6 +805,8 @@ fn scan_err(
         read_slot: 0,
         not_leader_hint,
         error_code,
+        count: 0,
+        timed_out: false,
     }
 }
 

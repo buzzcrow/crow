@@ -48,6 +48,7 @@ pub enum GetOutcome {
 pub struct ScanOutcome {
     pub items: Vec<(Bytes, Bytes)>,
     pub truncated: bool,
+    pub timed_out: bool,
 }
 
 /// One item of a `batch_write` call.
@@ -755,7 +756,9 @@ impl CrowkvClient {
     /// each unary response so every page is provably bounded regardless of
     /// value sizes, and this method transparently pages until `!truncated`
     /// or the caller's `limit` is reached. The returned `ScanOutcome.truncated`
-    /// flag means "more entries exist beyond the caller's `limit`".
+    /// flag means "more entries exist beyond the caller's `limit`". When
+    /// `keys_only` is true, items carry empty values (no value materialization
+    /// on the server); pagination is unchanged.
     ///
     /// # Panics
     /// Panics if the server returns a truncated page with zero items — an
@@ -764,7 +767,7 @@ impl CrowkvClient {
     ///
     /// # Errors
     /// See [`Error`].
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub async fn scan(
         &self,
         store_id: u64,
@@ -775,6 +778,8 @@ impl CrowkvClient {
         limit: u32,
         read_mode: ReadMode,
         min_slot: Option<u64>,
+        keys_only: bool,
+        deadline: Option<u64>,
     ) -> Result<ScanOutcome> {
         let min_slot = self.resolve_min_slot(store_id, group_id, read_mode, min_slot);
         let mut endpoint = self.resolve_read_endpoint(store_id, group_id, read_mode).await?;
@@ -813,6 +818,9 @@ impl CrowkvClient {
                 group_id,
                 read_mode: page_read_mode as i32,
                 min_slot: page_min_slot,
+                keys_only,
+                count_only: false,
+                deadline_ms: deadline.unwrap_or(0),
             };
             let channel = self.pool.get(&endpoint)?;
             let t0 = Instant::now();
@@ -842,6 +850,20 @@ impl CrowkvClient {
                         // truncated=true is a safety stop (avoid infinite loop).
                         if resp_truncated && page_len > 0 && (limit == 0 || all_items.len() < limit as usize)
                         {
+                            // Deadline check before fetching the next page: if
+                            // the deadline has fired (either the server set
+                            // timed_out on this page, or the client-side
+                            // deadline has elapsed), stop with a partial result.
+                            let server_timed_out = resp.timed_out;
+                            let client_timed_out = deadline.is_some_and(|dl| now_ms() >= dl);
+                            if server_timed_out || client_timed_out {
+                                self.metrics.record_scan_latency(t0.elapsed().as_micros() as u64);
+                                return Ok(ScanOutcome {
+                                    items: all_items,
+                                    truncated: true,
+                                    timed_out: true,
+                                });
+                            }
                             page_start_after = all_items.last().expect("non-empty page").0.to_vec();
                             continue;
                         }
@@ -860,6 +882,7 @@ impl CrowkvClient {
                         return Ok(ScanOutcome {
                             items: all_items,
                             truncated: outcome_truncated,
+                            timed_out: resp.timed_out,
                         });
                     }
                     self.metrics.record_scan_error();
@@ -903,6 +926,89 @@ impl CrowkvClient {
                     page_start_after = all_items
                         .last()
                         .map_or_else(|| start_after.to_vec(), |(k, _)| k.to_vec());
+                    attempts = self.count_other(attempts, &status.to_string())?;
+                }
+            }
+        }
+    }
+
+    /// Count the live keys matching `prefix` (empty = whole keyspace) in a
+    /// group. A single `count_only` RPC asks the server to count all matching
+    /// keys in one pass (no value materialization, no items shipped — only the
+    /// count crosses the network). `start_after`/`end_key` bound the counted
+    /// range like [`Self::scan`]. No pagination: the server counts the whole
+    /// range in one response. `limit` (`0` = count all) caps the count; when
+    /// it is reached the result is exact up to `limit` (the server does not
+    /// distinguish "exactly N" from "N or more" in that case — pass `limit =
+    /// 0` for a true total).
+    ///
+    /// # Errors
+    /// See [`Error`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn scan_count(
+        &self,
+        store_id: u64,
+        group_id: u64,
+        prefix: &[u8],
+        start_after: &[u8],
+        end_key: &[u8],
+        limit: u32,
+        read_mode: ReadMode,
+        min_slot: Option<u64>,
+        deadline: Option<u64>,
+    ) -> Result<u64> {
+        let min_slot = self.resolve_min_slot(store_id, group_id, read_mode, min_slot);
+        let mut endpoint = self.resolve_read_endpoint(store_id, group_id, read_mode).await?;
+        let mut attempts = 0u32;
+        let mut backoff = self.retry.backoff_base;
+        loop {
+            let req = KvScanRequest {
+                version: 1,
+                prefix: Bytes::copy_from_slice(prefix),
+                start_after: Bytes::copy_from_slice(start_after),
+                end_key: Bytes::copy_from_slice(end_key),
+                limit,
+                request_id: next_request_id(),
+                request_create_ms: now_ms(),
+                group_id,
+                read_mode: read_mode as i32,
+                min_slot,
+                keys_only: false,
+                count_only: true,
+                deadline_ms: deadline.unwrap_or(0),
+            };
+            let channel = self.pool.get(&endpoint)?;
+            let t0 = Instant::now();
+            let _in_flight = self.incr_in_flight(&endpoint);
+            match KvServiceClient::new(channel).scan(req).await {
+                Ok(resp) => {
+                    let resp = resp.into_inner();
+                    self.record_endpoint_rtt(&endpoint, t0.elapsed().as_micros() as u64);
+                    if resp.ok {
+                        self.metrics.record_scan_latency(t0.elapsed().as_micros() as u64);
+                        return Ok(resp.count);
+                    }
+                    self.metrics.record_scan_error();
+                    if !resp.not_leader_hint.is_empty() {
+                        if read_mode == ReadMode::MinSlot && self.read_endpoint_policy.is_distributed() {
+                            self.metrics.record_read_endpoint_fallback();
+                        }
+                        self.topology
+                            .set_leader(store_id, group_id, resp.not_leader_hint.clone());
+                        endpoint = resp.not_leader_hint;
+                        continue;
+                    }
+                    attempts = self.count_other(attempts, &resp.error)?;
+                }
+                Err(status) => {
+                    self.metrics.record_scan_error();
+                    self.metrics.record_transport_error();
+                    self.metrics.on_leader_error(store_id, group_id, &endpoint);
+                    endpoint = self
+                        .handle_transport_err(store_id, group_id, &endpoint, &mut backoff)
+                        .await;
+                    self.metrics
+                        .on_leader_resolved(store_id, group_id, &endpoint, "transport_error");
                     attempts = self.count_other(attempts, &status.to_string())?;
                 }
             }

@@ -299,6 +299,8 @@ async fn kv_scan(cli: &Cli, store_id: u64, group_id: u64, prefix: &str, limit: u
             limit,
             ReadMode::Linearizable,
             None,
+            false,
+            None,
         )
         .await
     {

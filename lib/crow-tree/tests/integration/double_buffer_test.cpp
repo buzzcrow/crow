@@ -183,7 +183,7 @@ TEST(DoubleBuffer, GetAndScanResolveHighestSlotAcrossOutOfOrderFreezeBoundary)
 
     std::vector<scan_entry> out;
     bool                    truncated = false;
-    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 0, &out, &truncated).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 0, false, 0, &out, &truncated).ok());
     ASSERT_EQ(out.size(), 1U);
     EXPECT_EQ(out[0].key, "a");
     EXPECT_EQ(out[0].slot, 20U);
@@ -223,7 +223,7 @@ TEST(DoubleBuffer, ConcurrentReadersDuringFrequentFreezeAndDrainNoCorruption)
                 }
                 std::vector<scan_entry> out;
                 bool                    trunc = false;
-                if (!t.scan(Slice("key"), Slice(), Slice(), 16, 0, &out, &trunc).ok()) {
+                if (!t.scan(Slice("key"), Slice(), Slice(), 16, 0, false, 0, &out, &trunc).ok()) {
                     bad.store(true);
                     return;
                 }
@@ -273,6 +273,6 @@ TEST(DoubleBuffer, ConcurrentReadersDuringFrequentFreezeAndDrainNoCorruption)
     }
     std::vector<scan_entry> out;
     bool                    trunc = false;
-    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 0, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 0, false, 0, &out, &trunc).ok());
     ASSERT_EQ(out.size(), oracle.size());
 }

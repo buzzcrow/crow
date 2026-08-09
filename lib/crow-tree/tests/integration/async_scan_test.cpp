@@ -108,7 +108,7 @@ TEST(AsyncScan, FastPathAllResidentCompletesSynchronously)
         ASSERT_EQ(put_flush(t, i + 1, make_key(i), "v" + std::to_string(i)), 0);
     }
 
-    ct_future *f = ct_scan_async(t, nullptr, 0, nullptr, 0, nullptr, 0, 0, 0);
+    ct_future *f = ct_scan_async(t, nullptr, 0, nullptr, 0, nullptr, 0, 0, 0, 0, 0);
     ASSERT_NE(f, nullptr);
 
     int32_t   done      = 0;
@@ -147,11 +147,12 @@ TEST(AsyncScan, MatchesSyncScanOutputIncludingTruncation)
     ct_buf   sync_entries = {};
     uint64_t sync_count   = 0;
     int32_t  sync_trunc   = 0;
-    ASSERT_EQ(ct_scan(t, nullptr, 0, nullptr, 0, nullptr, 0, 12, 0, 0, &sync_entries, &sync_count, &sync_trunc), 0);
+    ASSERT_EQ(ct_scan(t, nullptr, 0, nullptr, 0, nullptr, 0, 12, 0, 0, 0, 0, &sync_entries, &sync_count, &sync_trunc),
+              0);
     auto sync_map = unpack_entries(sync_entries, sync_count);
     ct_free_buf(&sync_entries);
 
-    ct_future *f = ct_scan_async(t, nullptr, 0, nullptr, 0, nullptr, 0, 12, 0);
+    ct_future *f = ct_scan_async(t, nullptr, 0, nullptr, 0, nullptr, 0, 12, 0, 0, 0);
     ASSERT_NE(f, nullptr);
     int32_t  async_trunc   = 0;
     uint64_t async_count   = 0;
@@ -193,7 +194,7 @@ TEST(AsyncScan, MissAfterEvictionCompletesViaReactor)
     uint64_t evicted = ct_evict_clean_leaves(t, 0);
     EXPECT_GT(evicted, 0U) << "snapshot should have made every leaf clean and evictable";
 
-    ct_future *f = ct_scan_async(t, nullptr, 0, nullptr, 0, nullptr, 0, 0, 0);
+    ct_future *f = ct_scan_async(t, nullptr, 0, nullptr, 0, nullptr, 0, 0, 0, 0, 0);
     ASSERT_NE(f, nullptr);
 
     int32_t   truncated = 0;
@@ -231,7 +232,7 @@ TEST(AsyncScan, FutureFreeBeforeCompletionDoesNotCrashOrLeak)
     ASSERT_EQ(ct_snapshot(t, nullptr), 0);
     ct_evict_clean_leaves(t, 0);
 
-    ct_future *f = ct_scan_async(t, nullptr, 0, nullptr, 0, nullptr, 0, 0, 0);
+    ct_future *f = ct_scan_async(t, nullptr, 0, nullptr, 0, nullptr, 0, 0, 0, 0, 0);
     ASSERT_NE(f, nullptr);
     ct_future_free(f); // abandon immediately, whether pending or already done
 
@@ -248,7 +249,7 @@ TEST(AsyncScan, EmptyTreeResolvesImmediately)
     ct_tree   *t   = nullptr;
     ASSERT_EQ(ct_open(&opt, &t), 0);
 
-    ct_future *f = ct_scan_async(t, nullptr, 0, nullptr, 0, nullptr, 0, 0, 0);
+    ct_future *f = ct_scan_async(t, nullptr, 0, nullptr, 0, nullptr, 0, 0, 0, 0, 0);
     ASSERT_NE(f, nullptr);
     int32_t   done  = 0;
     uint64_t  count = 0;
@@ -275,8 +276,8 @@ TEST(AsyncScan, StartAfterCursorSkipsEarlierEntries)
 
     // Cursor at key009: only key010..key029 should come back (20 keys).
     std::string cursor = make_key(9);
-    ct_future  *f =
-        ct_scan_async(t, nullptr, 0, reinterpret_cast<const uint8_t *>(cursor.data()), cursor.size(), nullptr, 0, 0, 0);
+    ct_future  *f      = ct_scan_async(t, nullptr, 0, reinterpret_cast<const uint8_t *>(cursor.data()), cursor.size(),
+                                       nullptr, 0, 0, 0, 0, 0);
     ASSERT_NE(f, nullptr);
     int32_t  async_trunc   = 0;
     uint64_t async_count   = 0;
@@ -295,7 +296,8 @@ TEST(AsyncScan, StartAfterCursorSkipsEarlierEntries)
     EXPECT_EQ(async_map.begin()->first, make_key(10));
 
     // Cursor + limit: a page of 5 starting after key009.
-    f = ct_scan_async(t, nullptr, 0, reinterpret_cast<const uint8_t *>(cursor.data()), cursor.size(), nullptr, 0, 5, 0);
+    f = ct_scan_async(t, nullptr, 0, reinterpret_cast<const uint8_t *>(cursor.data()), cursor.size(), nullptr, 0, 5, 0,
+                      0, 0);
     ASSERT_NE(f, nullptr);
     async_trunc   = 0;
     async_count   = 0;
@@ -310,7 +312,7 @@ TEST(AsyncScan, StartAfterCursorSkipsEarlierEntries)
     // Cursor past the end: empty result, not truncated.
     std::string past_end = make_key(29);
     f = ct_scan_async(t, nullptr, 0, reinterpret_cast<const uint8_t *>(past_end.data()), past_end.size(), nullptr, 0, 0,
-                      0);
+                      0, 0, 0);
     ASSERT_NE(f, nullptr);
     async_trunc   = 0;
     async_count   = 0;
@@ -340,14 +342,14 @@ TEST(AsyncScan, StartAfterMatchesSyncScan)
     uint64_t sync_count   = 0;
     int32_t  sync_trunc   = 0;
     ASSERT_EQ(ct_scan(t, nullptr, 0, reinterpret_cast<const uint8_t *>(cursor.data()), cursor.size(), nullptr, 0, 7, 0,
-                      0, &sync_entries, &sync_count, &sync_trunc),
+                      0, 0, 0, &sync_entries, &sync_count, &sync_trunc),
               0);
     auto sync_map = unpack_entries(sync_entries, sync_count);
     ct_free_buf(&sync_entries);
 
     // Async scan with the same cursor + limit.
-    ct_future *f =
-        ct_scan_async(t, nullptr, 0, reinterpret_cast<const uint8_t *>(cursor.data()), cursor.size(), nullptr, 0, 7, 0);
+    ct_future *f = ct_scan_async(t, nullptr, 0, reinterpret_cast<const uint8_t *>(cursor.data()), cursor.size(),
+                                 nullptr, 0, 7, 0, 0, 0);
     ASSERT_NE(f, nullptr);
     int32_t  async_trunc   = 0;
     uint64_t async_count   = 0;

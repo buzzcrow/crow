@@ -383,7 +383,7 @@ pub async fn http_kv_scan(
     let limit = q.limit;
     let seeds = mgmt_seeds_for_group(&state, sid, gid).await?;
     let client = CrowkvClient::new(ClientConfig::new(seeds));
-    let ScanOutcome { items, truncated } = client
+    let ScanOutcome { items, truncated, .. } = client
         .scan(
             sid,
             gid,
@@ -392,6 +392,8 @@ pub async fn http_kv_scan(
             &[],
             limit,
             ReadMode::Linearizable,
+            None,
+            false,
             None,
         )
         .await

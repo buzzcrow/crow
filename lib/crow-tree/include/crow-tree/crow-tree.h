@@ -582,9 +582,13 @@ class Crowtree
     // the scan stops with *truncated = true when exceeded, always returning at
     // least one entry (so a single oversized entry still makes progress). A
     // warning is logged for any single entry whose key+value size alone
-    // exceeds the budget.
-    Status scan(Slice prefix, Slice start_after, Slice end_key, size_t limit, size_t byte_budget,
-                std::vector<scan_entry> *out, bool *truncated, bool include_tombstones = false) const;
+    // exceeds the budget. `keys_only` skips value materialization (no
+    // overflow-chain assembly, no value copy): entries are staged with empty
+    // values and the byte budget accounts for key bytes only, so a page fits
+    // more entries. Default false.
+    Status scan(Slice prefix, Slice start_after, Slice end_key, size_t limit, size_t byte_budget, bool keys_only,
+                uint64_t deadline_ms, std::vector<scan_entry> *out, bool *truncated,
+                bool include_tombstones = false) const;
 
     // Async twin of scan(). Unlike get_async,
     // which has exactly one possible miss point (the root->leaf descent for
@@ -601,8 +605,10 @@ class Crowtree
     // Reactor thread after however many page loads were needed. `start_after`
     // is the same exclusive lower bound as scan()'s. `end_key` is the same
     // exclusive upper bound as scan()'s. `byte_budget` is the same total
-    // key+value byte cap as scan()'s.
-    void scan_async(Slice prefix, Slice start_after, Slice end_key, size_t limit, size_t byte_budget,
+    // key+value byte cap as scan()'s. `keys_only` is the same value-skip flag
+    // as scan()'s.
+    void scan_async(Slice prefix, Slice start_after, Slice end_key, size_t limit, size_t byte_budget, bool keys_only,
+                    uint64_t                                                             deadline_ms,
                     std::function<void(Status, std::vector<scan_entry>, bool truncated)> on_done) const;
 
     // pin a consistent point-in-time view at `last_applied_slot` (the durable L1
@@ -999,7 +1005,8 @@ class Crowtree
     // fully resolved with no cold page encountered (*out/*truncated are
     // then exactly what scan() itself would have produced).
     [[nodiscard]] bool try_scan_no_load(Slice prefix, Slice start_after, Slice end_key, size_t limit,
-                                        size_t byte_budget, std::vector<scan_entry> *out, bool *truncated,
+                                        size_t byte_budget, bool keys_only, uint64_t deadline_ms,
+                                        std::vector<scan_entry> *out, bool *truncated,
                                         uint64_t *out_pending_page_id) const;
 
     // scan_async's retry loop, structurally identical to get_async_attempt:
@@ -1016,7 +1023,7 @@ class Crowtree
     void scan_async_attempt(std::shared_ptr<std::string>        prefix_owned,
                             const std::shared_ptr<std::string> &start_after_owned,
                             const std::shared_ptr<std::string> &end_key_owned, size_t limit, size_t byte_budget,
-                            std::shared_ptr<std::vector<scan_entry>>                   accumulated,
+                            bool keys_only, uint64_t deadline_ms, std::shared_ptr<std::vector<scan_entry>> accumulated,
                             std::function<void(Status, std::vector<scan_entry>, bool)> on_done) const;
 
     // Shared by snapshot() and snapshot_async() (persist.cpp,

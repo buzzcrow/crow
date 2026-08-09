@@ -675,6 +675,8 @@ async fn run_worker(
                     cfg.scan_limit,
                     cfg.read_mode,
                     cfg.min_slot_policy.to_min_slot(),
+                    false,
+                    None,
                 )
                 .await
             {

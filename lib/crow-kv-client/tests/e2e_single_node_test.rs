@@ -9,6 +9,7 @@
 //! (C1-C3).
 
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
 use axum::routing::get;
@@ -25,6 +26,16 @@ use crow_kv_client::{BatchOp, ClientConfig, CrowkvClient, GetOutcome, ReadMode};
 
 const STORE_ID: u64 = 1;
 const GROUP_ID: u64 = 1;
+
+fn now_ms() -> u64 {
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(0)
+}
 
 /// Starts a single-node, single-replica group already believing itself
 /// leader (mirrors `crow_kv/tests/testkit/cluster.rs::start_cluster_inner`
@@ -124,7 +135,18 @@ async fn batch_write_and_scan() {
         .expect("batch_write");
 
     let scanned = client
-        .scan(STORE_ID, GROUP_ID, b"a", &[], &[], 0, ReadMode::MinSlot, None)
+        .scan(
+            STORE_ID,
+            GROUP_ID,
+            b"a",
+            &[],
+            &[],
+            0,
+            ReadMode::MinSlot,
+            None,
+            false,
+            None,
+        )
         .await
         .expect("scan");
     assert_eq!(scanned.items.len(), 2);
@@ -205,6 +227,8 @@ async fn linearizable_multi_page_scan_pays_barrier_once() {
             0,
             ReadMode::Linearizable,
             None,
+            false,
+            None,
         )
         .await
         .expect("scan");
@@ -235,4 +259,162 @@ async fn linearizable_multi_page_scan_pays_barrier_once() {
 
     server.stop();
     server.join().await;
+}
+
+#[tokio::test]
+async fn scan_keys_only_and_scan_count() {
+    let store = start_single_node_store().await;
+    let seed = spawn_topology_server(store.clone()).await;
+    let client = CrowkvClient::new(ClientConfig::new(vec![seed]));
+
+    for i in 0..12u32 {
+        client
+            .put(STORE_ID, GROUP_ID, format!("k{i:02}").as_bytes(), b"v", None)
+            .await
+            .expect("put");
+    }
+
+    // keys_only: same keys as a full scan, all values empty.
+    let keys_out = client
+        .scan(
+            STORE_ID,
+            GROUP_ID,
+            b"k",
+            &[],
+            &[],
+            0,
+            ReadMode::Linearizable,
+            None,
+            true,
+            None,
+        )
+        .await
+        .expect("keys_only scan");
+    assert_eq!(keys_out.items.len(), 12, "all 12 keys returned");
+    assert!(
+        keys_out.items.iter().all(|(_, v)| v.is_empty()),
+        "keys_only values empty"
+    );
+    for (i, (key, _)) in keys_out.items.iter().enumerate() {
+        assert_eq!(key.as_ref(), format!("k{i:02}").as_bytes(), "key {i} in order");
+    }
+
+    // scan_count: returns the total count, no items shipped.
+    let count = client
+        .scan_count(
+            STORE_ID,
+            GROUP_ID,
+            b"k",
+            &[],
+            &[],
+            0,
+            ReadMode::Linearizable,
+            None,
+            None,
+        )
+        .await
+        .expect("scan_count");
+    assert_eq!(count, 12, "scan_count returns the live matching key count");
+
+    // scan_count with prefix that matches nothing.
+    let count = client
+        .scan_count(
+            STORE_ID,
+            GROUP_ID,
+            b"nonexistent",
+            &[],
+            &[],
+            0,
+            ReadMode::Linearizable,
+            None,
+            None,
+        )
+        .await
+        .expect("scan_count empty");
+    assert_eq!(count, 0, "scan_count returns 0 for no matches");
+
+    // scan_count with limit caps the count.
+    let count = client
+        .scan_count(
+            STORE_ID,
+            GROUP_ID,
+            b"k",
+            &[],
+            &[],
+            5,
+            ReadMode::Linearizable,
+            None,
+            None,
+        )
+        .await
+        .expect("scan_count limit");
+    assert_eq!(count, 5, "scan_count respects limit");
+
+    store.stop();
+    store.join().await;
+}
+
+#[tokio::test]
+async fn scan_deadline_returns_partial_result() {
+    let store = start_single_node_store().await;
+    let seed = spawn_topology_server(store.clone()).await;
+    let client = CrowkvClient::new(ClientConfig::new(vec![seed]));
+
+    // Populate enough keys that the engine merge loop's periodic deadline
+    // check (every 1024 entries) fires mid-scan.
+    for i in 0..3000u64 {
+        client
+            .put(STORE_ID, GROUP_ID, format!("k{i:05}").as_bytes(), b"v", None)
+            .await
+            .expect("put");
+    }
+
+    // No deadline: full scan returns all 3000 entries.
+    let full = client
+        .scan(
+            STORE_ID,
+            GROUP_ID,
+            b"",
+            &[],
+            &[],
+            0,
+            ReadMode::Linearizable,
+            None,
+            false,
+            None,
+        )
+        .await
+        .expect("full scan");
+    assert_eq!(full.items.len(), 3000);
+    assert!(!full.truncated);
+    assert!(!full.timed_out);
+
+    // Tight deadline (already expired): the scan returns a partial result
+    // with truncated = true and timed_out = true.
+    let deadline = now_ms();
+    let partial = client
+        .scan(
+            STORE_ID,
+            GROUP_ID,
+            b"",
+            &[],
+            &[],
+            0,
+            ReadMode::Linearizable,
+            None,
+            false,
+            Some(deadline),
+        )
+        .await
+        .expect("deadline scan");
+    assert!(partial.truncated);
+    assert!(partial.timed_out);
+    assert!(partial.items.len() < full.items.len());
+    // The partial result is a correctly-ordered prefix of the full scan.
+    for (i, (k, _)) in partial.items.iter().enumerate() {
+        assert_eq!(k, &full.items[i].0, "partial result must be a prefix");
+    }
+
+    store.stop();
+    store.join().await;
 }

@@ -65,7 +65,10 @@ pub trait KvStore {
     /// discipline as in [`Self::kv_get`]: linearizable scans run behind the
     /// leader read barrier, `min_slot` scans serve from local applied state
     /// when the frontier has caught up. The response sets `truncated = true`
-    /// when `limit` was reached.
+    /// when `limit` was reached. `keys_only` returns items with empty values
+    /// (no value materialization). `count_only` ships zero items and sets the
+    /// response `count` to the number of matching live keys (counted via a
+    /// single `keys_only` pass with no byte budget).
     #[allow(clippy::too_many_arguments)]
     async fn kv_scan(
         &self,
@@ -76,6 +79,9 @@ pub trait KvStore {
         limit: u32,
         read_mode: i32,
         min_slot: u64,
+        keys_only: bool,
+        count_only: bool,
+        deadline_ms: u64,
         request_id: u64,
         request_create_ms: u64,
     ) -> KvScanResponse;

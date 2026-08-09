@@ -69,7 +69,7 @@ TEST(CApi, MemOpenApplyGetScan)
     ct_buf   entries = {};
     uint64_t count   = 0;
     int32_t  trunc   = 0;
-    ASSERT_EQ(ct_scan(t, nullptr, 0, nullptr, 0, nullptr, 0, 0, 0, 0, &entries, &count, &trunc), 0);
+    ASSERT_EQ(ct_scan(t, nullptr, 0, nullptr, 0, nullptr, 0, 0, 0, 0, 0, 0, &entries, &count, &trunc), 0);
     EXPECT_EQ(count, 29U); // 30 puts - 1 delete
     ct_free_buf(&entries);
 

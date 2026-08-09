@@ -436,6 +436,8 @@ async fn any_replica_scan_distributes_with_lagging_follower() {
                 0,
                 ReadMode::MinSlot,
                 Some(0),
+                false,
+                None,
             )
             .await
             .expect("scan");
@@ -496,6 +498,8 @@ async fn any_replica_scan_falls_back_when_follower_lags() {
                 0,
                 ReadMode::MinSlot,
                 Some(min_slot),
+                false,
+                None,
             )
             .await
             .expect("scan");

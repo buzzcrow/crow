@@ -345,7 +345,8 @@ ct_future *ct_snapshot_async(ct_tree *t);
 // `f` immediately once done, same as flush/snapshot -- do not also call
 // ct_future_free.
 ct_future *ct_scan_async(ct_tree *t, const uint8_t *prefix, size_t plen, const uint8_t *start_after, size_t salen,
-                         const uint8_t *end_key, size_t elen, size_t limit, size_t byte_budget);
+                         const uint8_t *end_key, size_t elen, size_t limit, size_t byte_budget, int keys_only,
+                         uint64_t deadline_ms);
 
 // Non-blocking poll.
 // *done == 0: still pending; f remains valid, poll again later (e.g. after
@@ -395,13 +396,16 @@ int32_t ct_reactor_eventfd(const ct_tree *t);
 // enabling cursor-based pagination without over-fetching the prefix range.
 // `end_key` (null or elen = 0 = unbounded) is an exclusive upper bound: only
 // keys strictly less than `end_key` are returned. When `include_tombstones`
-// is 1, tombstone entries are included in results.
+// is 1, tombstone entries are included in results. When `keys_only` is 1,
+// values are not materialized (no overflow-chain assembly): records carry
+// empty values and the byte budget accounts for key bytes only.
 // `out_entries` is a packed owned buffer of records:
 //   [u32 klen][key bytes][u64 slot][u8 tombstone][u32 vlen][value bytes] * count
 // `out_count` receives the number of records; *truncated is set if more matched.
 ct_status ct_scan(ct_tree *t, const uint8_t *prefix, size_t plen, const uint8_t *start_after, size_t salen,
-                  const uint8_t *end_key, size_t elen, size_t limit, size_t byte_budget, int include_tombstones,
-                  ct_buf *out_entries, uint64_t *out_count, int32_t *truncated);
+                  const uint8_t *end_key, size_t elen, size_t limit, size_t byte_budget, int keys_only,
+                  uint64_t deadline_ms, int include_tombstones, ct_buf *out_entries, uint64_t *out_count,
+                  int32_t *truncated);
 
 // ── Consistent view (compare / iterate) ───────────────────────────
 ct_status ct_snapshot_view(ct_tree *t, ct_view **out);

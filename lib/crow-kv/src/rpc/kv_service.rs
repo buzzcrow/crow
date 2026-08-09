@@ -490,6 +490,9 @@ impl KvService for KvStoreService {
                                 req.limit,
                                 req.read_mode,
                                 req.min_slot,
+                                req.keys_only,
+                                req.count_only,
+                                req.deadline_ms,
                                 req.request_id,
                                 req.request_create_ms,
                             )
@@ -524,6 +527,9 @@ impl KvService for KvStoreService {
                 req.limit,
                 req.read_mode,
                 req.min_slot,
+                req.keys_only,
+                req.count_only,
+                req.deadline_ms,
                 req.request_id,
                 req.request_create_ms,
             )

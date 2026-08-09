@@ -148,27 +148,6 @@ complexity, and dependency. Before implementation, follow the
   the reactor submission (small readahead window, default 1). Win is
   zero on mem-mode (leaves resident); needs a cold/disk bench config to
   validate. Medium complexity.
-- **[R61](R61-kv-scan-keys-only-projection.md)** — Keys-only /
-  count-only projection — Area: scan / kv / crow-tree engine — scans
-  always materialize and ship values, including the expensive
-  `assemble_overflow_value` overflow-chain assembly
-  (`crow-tree.cpp:1857-1858`). A `keys_only` flag skips value
-  materialization in the `consider` lambda (stages key only) and
-  shrinks pages by the value fraction; a `count_only` variant counts
-  matches and ships zero items. One new flag per layer (proto, engine,
-  FFI, store, service, client). Useful for key listing, prefix
-  cardinality, and the console UI key browser. Low–medium complexity.
-- **[R62](R62-kv-scan-deadline-cancellation.md)** — Per-scan deadline /
-  cancellation — Area: scan / kv / crow-tree engine — no per-scan
-  timeout at any layer; an unbounded `limit=0` scan runs until the
-  transport gives up, and the engine merge loop
-  (`crow-tree.cpp:1890`) has no cancellation check between leaves. Add
-  a `deadline_ms` proto field (absolute unix-ms; 0 = no deadline) and
-  periodic deadline checks: client pagination loop checks before
-  fetching the next page (returns partial + `timed_out` flag); engine
-  merge loop checks once per leaf (in `refill_l1`) and breaks early
-  with `truncated = true`. Bounds worst-case server work. Medium
-  complexity.
 
 ---
 
