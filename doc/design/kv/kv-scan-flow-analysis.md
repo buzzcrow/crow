@@ -77,6 +77,16 @@ serialization. The scan path is zero-copy from packed buffer to client
   `absl::btree_map` under `mu_` with a `ConcurrentSkipList`.
   Eliminated the O(N_l0) `snapshot()` copy; readers traverse L0
   lock-free with zero copy.
+- **R58** — 2-source fast path + loser tree in the scan merge loop:
+  when only L0+L1 are active (the common case), a straight 2-way
+  merge avoids the loser-tree heap. 3+ sources fall back to a loser
+  tree. Reduces merge-loop overhead per entry.
+- **R57** — Zero-copy scan result staging: the `consider` lambda
+  packs the wire format directly into a `ScanPackedBuf` (growing
+  `malloc`/`realloc` buffer), and ownership is transferred across
+  the FFI via `release()` — no `std::vector<scan_entry>` staging,
+  no re-pack loop, no `make_buf` malloc+memcpy. Reduces C++ copies
+  from 3 to 1 per scan.
 
 ---
 

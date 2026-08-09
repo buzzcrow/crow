@@ -101,17 +101,6 @@ complexity, and dependency. Before implementation, follow the
   document the top hot stacks. Investigation only — no scan-path code
   changes. If a clear optimization target emerges, file a follow-up
   requirement with the profiling evidence. Low complexity.
-- **[R57](R57-tree-scan-zero-copy-staging.md)** — Zero-copy engine scan
-  result staging — Area: scan / crow-tree engine — each scan page is
-  copied 3 times before the FFI boundary: `consider` lambda stages into
-  `std::vector<scan_entry>` (`crow-tree.cpp:1853/1868`), `ct_scan`
-  re-packs into `std::string packed` (`c_api.cpp:912-920`), `make_buf`
-  mallocs+memcpys again (`c_api.cpp:43/921`). ~10.5 MiB memcpy per full
-  3.5 MiB page. Fix: pack the wire format directly in `consider` (single
-  growing buffer) and transfer ownership across the FFI via the
-  `make_borrowed_buf` pattern already used by the get fast path. Collapses
-  3 copies to 1 (the unavoidable wire-format assembly). Design-level
-  redundancy, not profiling-guided. Medium complexity.
 - **[R59](R59-kv-snapshot-scan.md)** — Two scan modes + snapshot
   versioning API — Area: scan / kv / crow-tree engine — the current
   `scan` is the only range-read surface (S3-list semantics: per-page
