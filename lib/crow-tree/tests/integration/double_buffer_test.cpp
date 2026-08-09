@@ -276,3 +276,89 @@ TEST(DoubleBuffer, ConcurrentReadersDuringFrequentFreezeAndDrainNoCorruption)
     ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 0, false, 0, &out, &trunc).ok());
     ASSERT_EQ(out.size(), oracle.size());
 }
+
+// R58: exercise the loser tree merge path (k > 2 sources) by forcing 3+
+// frozen memtables to pile up without draining, then scan. The scan must
+// produce correct merge order (sorted keys), highest-slot-wins on key
+// collisions across L0 streams, no duplicate keys, and no missing keys.
+// Uses the same non-contiguous-slot pattern as
+// SupportsMoreThanTwoBuffersAndFlushesAllOfThemCorrectly above.
+TEST(DoubleBuffer, ScanMergeLoserTreeWithMultipleFrozenMemtables)
+{
+    Options opt;
+    opt.max_memtable_count     = 6; // active_ + up to 5 queued frozen_ buffers
+    opt.memtable_flush_entries = 1; // freeze after every single apply
+    Crowtree t(opt);
+
+    // Write the same 3 keys into 4 separate frozen generations, each with a
+    // strictly increasing slot so the highest-slot cell is always in the
+    // oldest (first-frozen) generation. This forces 4 frozen_ + 1 active_ =
+    // 5 L0 sources (> 2 → loser tree path) with key collisions across every
+    // source.
+    const std::string keys[] = {"a", "b", "c"};
+    uint64_t          slot   = 100;
+    for (int gen = 0; gen < 4; ++gen) {
+        for (const auto &k : keys) {
+            ASSERT_TRUE(t.apply(slot, put_one(k, "v" + std::to_string(slot))).ok());
+            slot += 10;
+        }
+    }
+    // 12 applies, 12 frozen memtables (but capped at 5 by max_memtable_count).
+    // The exact frozen count depends on the cap; the scan must be correct
+    // regardless. Every key appears in multiple sources with different slots.
+
+    std::vector<scan_entry> out;
+    bool                    trunc = false;
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 0, false, 0, &out, &trunc).ok());
+    EXPECT_FALSE(trunc);
+
+    // Exactly 3 unique keys, in sorted order.
+    ASSERT_EQ(out.size(), 3u);
+    EXPECT_EQ(out[0].key, "a");
+    EXPECT_EQ(out[1].key, "b");
+    EXPECT_EQ(out[2].key, "c");
+
+    // Highest slot for each key: the last write to each key. The slots are
+    // assigned in order: a@100, b@110, c@120, a@130, b@140, c@150, a@160,
+    // b@170, c@180, a@190, b@200, c@210. So the highest slot for each key is:
+    // a@190, b@200, c@210.
+    EXPECT_EQ(out[0].slot, 190u);
+    EXPECT_EQ(out[0].value, "v190");
+    EXPECT_EQ(out[1].slot, 200u);
+    EXPECT_EQ(out[1].value, "v200");
+    EXPECT_EQ(out[2].slot, 210u);
+    EXPECT_EQ(out[2].value, "v210");
+}
+
+// R58: the loser tree path with non-overlapping keys across 3+ frozen
+// memtables — verifies correct merge order when each source has distinct
+// keys (no collisions, just k-way interleaving).
+TEST(DoubleBuffer, ScanMergeLoserTreeDistinctKeysAcrossFrozenMemtables)
+{
+    Options opt;
+    opt.max_memtable_count     = 6;
+    opt.memtable_flush_entries = 1;
+    Crowtree t(opt);
+
+    // Write 9 keys across 3 generations, each generation holding 3 distinct
+    // keys that interleave with the others: gen0 has keys 0,3,6; gen1 has
+    // 1,4,7; gen2 has 2,5,8. Non-contiguous slots prevent draining.
+    for (int gen = 0; gen < 3; ++gen) {
+        for (int i = 0; i < 3; ++i) {
+            int      key_idx = gen + i * 3;
+            uint64_t s       = static_cast<uint64_t>((key_idx + 1) * 10);
+            ASSERT_TRUE(t.apply(s, put_one(make_key(key_idx), "v" + std::to_string(s))).ok());
+        }
+    }
+
+    std::vector<scan_entry> out;
+    bool                    trunc = false;
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 0, false, 0, &out, &trunc).ok());
+    EXPECT_FALSE(trunc);
+
+    // All 9 keys present, in sorted order.
+    ASSERT_EQ(out.size(), 9u);
+    for (int i = 0; i < 9; ++i) {
+        EXPECT_EQ(out[i].key, make_key(i)) << "key " << i << " out of order";
+    }
+}

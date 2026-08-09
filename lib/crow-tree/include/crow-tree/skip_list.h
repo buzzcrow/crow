@@ -134,6 +134,19 @@ class ConcurrentSkipList
         // reached.
         void advance();
 
+        // Prefetch the next node's memory (the one advance() will move to).
+        // A non-faulting hint — brings the next node into CPU cache before
+        // the merge loop calls advance(), overlapping the cache fill with
+        // the current merge step's work.
+        void prefetch_next() const
+        {
+            if (cur_ != nullptr) {
+                if (const Node *n = cur_->next(0); n != nullptr) {
+                    __builtin_prefetch(n, 0, 1);
+                }
+            }
+        }
+
       private:
         const Node *cur_ = nullptr;
     };
