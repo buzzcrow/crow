@@ -1888,10 +1888,19 @@ std::vector<get_result> Crowtree::multi_get(const std::vector<Slice> &keys) cons
 }
 
 Status Crowtree::scan(Slice prefix, Slice start_after, Slice end_key, size_t limit, size_t byte_budget, bool keys_only,
-                      uint64_t deadline_ms, std::vector<scan_entry> *out, bool *truncated,
-                      bool include_tombstones) const
+                      uint64_t                 deadline_ms,
+                      std::vector<scan_entry> *out, // NOLINT(readability-non-const-parameter) written to via push_back
+                      bool *truncated, bool include_tombstones, ScanPackedBuf *out_packed,
+                      size_t *out_count) // NOLINT(readability-non-const-parameter) written to via *out_count
+    const
 {
-    out->clear();
+    if (out != nullptr) {
+        out->clear();
+    }
+    if (out_packed != nullptr) {
+        *out_packed = ScanPackedBuf{};
+    }
+    size_t packed_count = 0;
     if (truncated != nullptr) {
         *truncated = false;
     }
@@ -2013,7 +2022,8 @@ Status Crowtree::scan(Slice prefix, Slice start_after, Slice end_key, size_t lim
         if (v.is_tombstone() && !include_tombstones) {
             return true;
         }
-        if (limit != 0 && out->size() >= limit) {
+        size_t cur_count = out_packed != nullptr ? packed_count : out->size();
+        if (limit != 0 && cur_count >= limit) {
             if (truncated != nullptr) {
                 *truncated = true;
             }
@@ -2021,13 +2031,23 @@ Status Crowtree::scan(Slice prefix, Slice start_after, Slice end_key, size_t lim
         }
         if (v.is_tombstone()) {
             size_t entry_bytes = key.size();
-            if (byte_budget != 0 && !out->empty() && accumulated_bytes + entry_bytes > byte_budget) {
+            if (byte_budget != 0 && cur_count > 0 && accumulated_bytes + entry_bytes > byte_budget) {
                 if (truncated != nullptr) {
                     *truncated = true;
                 }
                 return false; // byte budget would be exceeded; keep what we have
             }
-            out->push_back({.key = key.to_string(), .slot = v.slot(), .value = "", .tombstone = true});
+            if (out_packed != nullptr) {
+                out_packed->pack_u32(static_cast<uint32_t>(key.size()));
+                out_packed->append(key);
+                out_packed->pack_u64(v.slot());
+                out_packed->push_back(1);
+                out_packed->pack_u32(0);
+            }
+            else {
+                out->push_back({.key = key.to_string(), .slot = v.slot(), .value = "", .tombstone = true});
+            }
+            ++packed_count;
             accumulated_bytes += entry_bytes;
             return true;
         }
@@ -2039,13 +2059,24 @@ Status Crowtree::scan(Slice prefix, Slice start_after, Slice end_key, size_t lim
         size_t key_size    = key.size();
         size_t value_size  = val.size();
         size_t entry_bytes = key_size + value_size;
-        if (byte_budget != 0 && !out->empty() && accumulated_bytes + entry_bytes > byte_budget) {
+        if (byte_budget != 0 && cur_count > 0 && accumulated_bytes + entry_bytes > byte_budget) {
             if (truncated != nullptr) {
                 *truncated = true;
             }
             return false; // byte budget would be exceeded; keep what we have
         }
-        out->push_back({.key = key.to_string(), .slot = v.slot(), .value = std::move(val), .tombstone = false});
+        if (out_packed != nullptr) {
+            out_packed->pack_u32(static_cast<uint32_t>(key_size));
+            out_packed->append(key);
+            out_packed->pack_u64(v.slot());
+            out_packed->push_back(0);
+            out_packed->pack_u32(static_cast<uint32_t>(value_size));
+            out_packed->append(val);
+        }
+        else {
+            out->push_back({.key = key.to_string(), .slot = v.slot(), .value = std::move(val), .tombstone = false});
+        }
+        ++packed_count;
         accumulated_bytes += entry_bytes;
         if (byte_budget != 0 && entry_bytes > byte_budget) {
             CR_LOG_WARN("[{}] scan: oversized entry key_size={} value_size={} exceeds byte_budget={}", name_, key_size,
@@ -2329,7 +2360,7 @@ Status Crowtree::scan(Slice prefix, Slice start_after, Slice end_key, size_t lim
     uint64_t total_ns = dur_ns(t_total);
     if (metrics_.scan_c != nullptr) {
         metrics_.scan_c->inc();
-        metrics_.scan_entries_c->inc_by(out->size());
+        metrics_.scan_entries_c->inc_by(packed_count);
         metrics_.scan_l->observe(total_ns);
         metrics_.scan_l0_snapshot_l->observe(l0_snapshot_ns);
         metrics_.scan_l0_skip_l->observe(l0_skip_ns);
@@ -2337,14 +2368,27 @@ Status Crowtree::scan(Slice prefix, Slice start_after, Slice end_key, size_t lim
         metrics_.scan_l1_resolve_l->observe(l1_resolve_ns);
         metrics_.scan_merge_l->observe(merge_ns);
     }
+    if (out_count != nullptr) {
+        *out_count = packed_count;
+    }
     return Status::Ok();
 }
 
-bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, Slice end_key, size_t limit, size_t byte_budget,
-                                bool keys_only, uint64_t deadline_ms, std::vector<scan_entry> *out, bool *truncated,
-                                uint64_t *out_pending_page_id) const
+bool Crowtree::try_scan_no_load(
+    Slice prefix, Slice start_after, Slice end_key, size_t limit, size_t byte_budget, bool keys_only,
+    uint64_t                 deadline_ms,
+    std::vector<scan_entry> *out, // NOLINT(readability-non-const-parameter) written to via push_back
+    bool *truncated, uint64_t *out_pending_page_id, ScanPackedBuf *out_packed,
+    size_t *out_count) // NOLINT(readability-non-const-parameter) written to via *out_count
+    const
 {
-    out->clear();
+    if (out != nullptr) {
+        out->clear();
+    }
+    if (out_packed != nullptr) {
+        *out_packed = ScanPackedBuf{};
+    }
+    size_t packed_count = 0;
     if (truncated != nullptr) {
         *truncated = false;
     }
@@ -2450,7 +2494,8 @@ bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, Slice end_key, 
         if (v.is_tombstone()) {
             return true;
         }
-        if (limit != 0 && out->size() >= limit) {
+        size_t cur_count = out_packed != nullptr ? packed_count : out->size();
+        if (limit != 0 && cur_count >= limit) {
             if (truncated != nullptr) {
                 *truncated = true;
             }
@@ -2464,13 +2509,24 @@ bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, Slice end_key, 
         size_t key_size    = key.size();
         size_t value_size  = val.size();
         size_t entry_bytes = key_size + value_size;
-        if (byte_budget != 0 && !out->empty() && accumulated_bytes + entry_bytes > byte_budget) {
+        if (byte_budget != 0 && cur_count > 0 && accumulated_bytes + entry_bytes > byte_budget) {
             if (truncated != nullptr) {
                 *truncated = true;
             }
             return false; // byte budget would be exceeded; keep what we have
         }
-        out->push_back({.key = key.to_string(), .slot = v.slot(), .value = std::move(val)});
+        if (out_packed != nullptr) {
+            out_packed->pack_u32(static_cast<uint32_t>(key_size));
+            out_packed->append(key);
+            out_packed->pack_u64(v.slot());
+            out_packed->push_back(0);
+            out_packed->pack_u32(static_cast<uint32_t>(value_size));
+            out_packed->append(val);
+        }
+        else {
+            out->push_back({.key = key.to_string(), .slot = v.slot(), .value = std::move(val)});
+        }
+        ++packed_count;
         accumulated_bytes += entry_bytes;
         if (byte_budget != 0 && entry_bytes > byte_budget) {
             CR_LOG_WARN("[{}] scan: oversized entry key_size={} value_size={} exceeds byte_budget={}", name_, key_size,
@@ -2727,13 +2783,16 @@ bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, Slice end_key, 
     uint64_t total_ns = dur_ns(t_total);
     if (metrics_.scan_c != nullptr) {
         metrics_.scan_c->inc();
-        metrics_.scan_entries_c->inc_by(out->size());
+        metrics_.scan_entries_c->inc_by(packed_count);
         metrics_.scan_l->observe(total_ns);
         metrics_.scan_l0_snapshot_l->observe(l0_snapshot_ns);
         metrics_.scan_l0_skip_l->observe(l0_skip_ns);
         metrics_.scan_l1_descent_l->observe(l1_descent_ns);
         metrics_.scan_l1_resolve_l->observe(l1_resolve_ns);
         metrics_.scan_merge_l->observe(merge_ns);
+    }
+    if (out_count != nullptr) {
+        *out_count = packed_count;
     }
     return true; // fully resolved
 }
@@ -2742,45 +2801,78 @@ bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, Slice end_key, 
 // been accumulated across prior cold-leaf retries, resume from the last
 // resolved key; otherwise use the original start_after. This avoids
 // re-traversing already-resolved leaves after a demand-load completes.
-static std::shared_ptr<std::string> make_resume_after(const std::shared_ptr<std::string>             &start_after_owned,
-                                                      const std::shared_ptr<std::vector<scan_entry>> &accumulated)
+static std::shared_ptr<std::string> make_resume_after(const std::shared_ptr<std::string> &start_after_owned,
+                                                      const std::shared_ptr<std::string> &last_key)
 {
-    if (!accumulated->empty()) {
-        return std::make_shared<std::string>(accumulated->back().key);
+    if (last_key != nullptr && !last_key->empty()) {
+        return last_key;
     }
     return start_after_owned;
 }
 
 void Crowtree::scan_async(Slice prefix, Slice start_after, Slice end_key, size_t limit, size_t byte_budget,
                           bool keys_only, uint64_t deadline_ms,
-                          std::function<void(Status, std::vector<scan_entry>, bool)> on_done) const
+                          std::function<void(Status, ScanPackedBuf, bool)> on_done) const
 {
     // Copy the keys upfront: unlike scan()'s Slice (borrowed, valid only
     // for this one synchronous call), scan_async's keys must survive across
     // an arbitrary number of async round trips. `accumulated` collects
-    // entries resolved before each cold leaf so retries resume from the
-    // last resolved key instead of re-traversing already-resolved leaves.
+    // packed entries resolved before each cold leaf so retries resume from
+    // the last resolved key instead of re-traversing already-resolved leaves.
     scan_async_attempt(std::make_shared<std::string>(prefix.to_string()),
                        std::make_shared<std::string>(start_after.to_string()),
                        std::make_shared<std::string>(end_key.to_string()), limit, byte_budget, keys_only, deadline_ms,
-                       std::make_shared<std::vector<scan_entry>>(), std::move(on_done));
+                       std::make_shared<ScanPackedBuf>(), nullptr, 0, std::move(on_done));
+}
+
+// Extract the last key from a packed scan buffer (wire format:
+// [u32 klen][key][u64 slot][u8 tombstone][u32 vlen][value] per entry).
+// Used by scan_async_attempt to resume from the last resolved key.
+static std::string last_key_from_packed(const uint8_t *data, size_t len)
+{
+    size_t      pos = 0;
+    std::string last;
+    while (pos + 4 <= len) {
+        uint32_t klen = 0;
+        for (int i = 0; i < 4; ++i) {
+            klen |= static_cast<uint32_t>(data[pos + i]) << (8 * i);
+        }
+        pos += 4;
+        if (pos + klen > len) {
+            break;
+        }
+        last.assign(reinterpret_cast<const char *>(data + pos), klen);
+        pos += klen;
+        // skip slot (8) + tombstone (1)
+        if (pos + 9 > len) {
+            break;
+        }
+        pos += 9;
+        if (pos + 4 > len) {
+            break;
+        }
+        uint32_t vlen = 0;
+        for (int i = 0; i < 4; ++i) {
+            vlen |= static_cast<uint32_t>(data[pos + i]) << (8 * i);
+        }
+        pos += 4;
+        pos += vlen;
+    }
+    return last;
 }
 
 void Crowtree::scan_async_attempt(std::shared_ptr<std::string>        prefix_owned,
                                   const std::shared_ptr<std::string> &start_after_owned,
                                   const std::shared_ptr<std::string> &end_key_owned, size_t limit, size_t byte_budget,
-                                  bool keys_only, uint64_t deadline_ms,
-                                  std::shared_ptr<std::vector<scan_entry>>                   accumulated,
-                                  std::function<void(Status, std::vector<scan_entry>, bool)> on_done) const
+                                  bool keys_only, uint64_t deadline_ms, std::shared_ptr<ScanPackedBuf> accumulated,
+                                  std::shared_ptr<std::string> last_key, size_t accumulated_count,
+                                  std::function<void(Status, ScanPackedBuf, bool)> on_done) const
 {
     // Adjust the byte budget by entries already accumulated across prior
     // cold-leaf retries, mirroring the remaining_limit adjustment below.
-    size_t accumulated_bytes = 0;
+    size_t accumulated_bytes = accumulated->size();
     if (byte_budget != 0) {
-        for (const auto &e : *accumulated) {
-            accumulated_bytes += e.key.size() + e.value.size();
-        }
-        if (accumulated_bytes >= byte_budget && !accumulated->empty()) {
+        if (accumulated_bytes >= byte_budget && accumulated_count > 0) {
             on_done(Status::Ok(), std::move(*accumulated), true);
             return;
         }
@@ -2799,14 +2891,20 @@ void Crowtree::scan_async_attempt(std::shared_ptr<std::string>        prefix_own
         }
     }
 
-    std::vector<scan_entry> out;
-    bool                    truncated       = false;
-    uint64_t                pending_page_id = kInvalidPageId;
+    ScanPackedBuf out_packed;
+    size_t        out_count       = 0;
+    bool          truncated       = false;
+    uint64_t      pending_page_id = kInvalidPageId;
     if (try_scan_no_load(Slice(*prefix_owned), Slice(*start_after_owned), Slice(*end_key_owned), limit,
-                         remaining_byte_budget, keys_only, deadline_ms, &out, &truncated, &pending_page_id)) {
-        // Append this attempt's entries to the accumulated set and deliver.
-        accumulated->insert(accumulated->end(), std::make_move_iterator(out.begin()),
-                            std::make_move_iterator(out.end()));
+                         remaining_byte_budget, keys_only, deadline_ms, nullptr, &truncated, &pending_page_id,
+                         &out_packed, &out_count)) {
+        // Append this attempt's packed entries to the accumulated buffer.
+        if (out_count > 0) {
+            accumulated->append(out_packed.data(), out_packed.size());
+            accumulated_count += out_count;
+            // Track the last key for resume (in case of future cold leaves).
+            last_key = std::make_shared<std::string>(last_key_from_packed(out_packed.data(), out_packed.size()));
+        }
         on_done(Status::Ok(), std::move(*accumulated), truncated);
         return;
     }
@@ -2814,15 +2912,16 @@ void Crowtree::scan_async_attempt(std::shared_ptr<std::string>        prefix_own
     // Cold leaf hit: append the entries resolved so far (those before the
     // cold leaf) to `accumulated`, then resume from the last resolved key
     // after the demand-load completes — no re-traversal of already-resolved
-    // leaves. `out` contains only entries before the cold page because
+    // leaves. `out_packed` contains only entries before the cold page because
     // try_scan_no_load bails immediately on the first cold page.
-    if (!out.empty()) {
-        accumulated->insert(accumulated->end(), std::make_move_iterator(out.begin()),
-                            std::make_move_iterator(out.end()));
+    if (out_count > 0) {
+        accumulated->append(out_packed.data(), out_packed.size());
+        accumulated_count += out_count;
+        last_key = std::make_shared<std::string>(last_key_from_packed(out_packed.data(), out_packed.size()));
     }
     // Adjust limit by the number of entries already accumulated so the
     // final result respects the caller's limit.
-    size_t remaining_limit = (limit > accumulated->size()) ? (limit - accumulated->size()) : 0;
+    size_t remaining_limit = (limit > accumulated_count) ? (limit - accumulated_count) : 0;
 
 #ifdef CROW_TREE_HAVE_LIBURING
     if (opt_.async_reactor != nullptr && opt_.async_page_store != nullptr) {
@@ -2844,9 +2943,10 @@ void Crowtree::scan_async_attempt(std::shared_ptr<std::string>        prefix_own
             // lock-free probe above and this re-check -- retry, still here.
             // Resume from the last accumulated key (if any) to avoid
             // re-traversing already-resolved leaves.
-            auto resume_after = make_resume_after(start_after_owned, accumulated);
+            auto resume_after = make_resume_after(start_after_owned, last_key);
             scan_async_attempt(std::move(prefix_owned), resume_after, end_key_owned, remaining_limit, byte_budget,
-                               keys_only, deadline_ms, std::move(accumulated), std::move(on_done));
+                               keys_only, deadline_ms, std::move(accumulated), std::move(last_key), accumulated_count,
+                               std::move(on_done));
             return;
         }
         uint32_t iu   = opt_.page_store->iu_size();
@@ -2855,12 +2955,13 @@ void Crowtree::scan_async_attempt(std::shared_ptr<std::string>        prefix_own
         opt_.async_page_store->submit_read(
             addr, blob->data(), blob->size(),
             [this, page_id = pending_page_id, addr, plen, blob, prefix_owned, start_after_owned, end_key_owned,
-             remaining_limit, byte_budget, keys_only, deadline_ms, accumulated, on_done](Status st) mutable {
+             remaining_limit, byte_budget, keys_only, deadline_ms, accumulated, last_key, accumulated_count,
+             on_done](Status st) mutable {
                 if (!st.ok()) {
                     CR_LOG_ERROR("[{}] scan_async: demand-load I/O fault: pid={} addr={} len={} status={}", name_,
                                  page_id, addr, plen, st.to_string());
                     io_failed_.store(true);
-                    on_done(st, {}, false);
+                    on_done(st, ScanPackedBuf{}, false);
                     return;
                 }
                 bool installed_ok = true;
@@ -2872,14 +2973,15 @@ void Crowtree::scan_async_attempt(std::shared_ptr<std::string>        prefix_own
                     }
                 }
                 if (!installed_ok) {
-                    on_done(Status::io_error("scan_async: demand-load decode/CRC failure"), {}, false);
+                    on_done(Status::io_error("scan_async: demand-load decode/CRC failure"), ScanPackedBuf{}, false);
                     return;
                 }
                 // Resume from the last accumulated key to avoid
                 // re-traversing already-resolved leaves.
-                auto resume_after = make_resume_after(start_after_owned, accumulated);
+                auto resume_after = make_resume_after(start_after_owned, last_key);
                 scan_async_attempt(std::move(prefix_owned), resume_after, end_key_owned, remaining_limit, byte_budget,
-                                   keys_only, deadline_ms, std::move(accumulated), std::move(on_done));
+                                   keys_only, deadline_ms, std::move(accumulated), std::move(last_key),
+                                   accumulated_count, std::move(on_done));
             });
         return;
     }
@@ -2887,9 +2989,9 @@ void Crowtree::scan_async_attempt(std::shared_ptr<std::string>        prefix_own
     // No async backend wired -- fall back to the existing synchronous
     // demand-load and retry, still on this same thread.
     (void)resident(pending_page_id);
-    auto resume_after = make_resume_after(start_after_owned, accumulated);
+    auto resume_after = make_resume_after(start_after_owned, last_key);
     scan_async_attempt(std::move(prefix_owned), resume_after, end_key_owned, remaining_limit, byte_budget, keys_only,
-                       deadline_ms, std::move(accumulated), std::move(on_done));
+                       deadline_ms, std::move(accumulated), std::move(last_key), accumulated_count, std::move(on_done));
 }
 
 int Crowtree::height() const
