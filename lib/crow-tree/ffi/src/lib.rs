@@ -215,6 +215,8 @@ mod sys {
             plen: usize,
             start_after: *const u8,
             salen: usize,
+            end_key: *const u8,
+            elen: usize,
             limit: usize,
             byte_budget: usize,
             include_tombstones: c_int,
@@ -255,6 +257,8 @@ mod sys {
             plen: usize,
             start_after: *const u8,
             salen: usize,
+            end_key: *const u8,
+            elen: usize,
             limit: usize,
             byte_budget: usize,
         ) -> *mut ct_future;
@@ -1042,10 +1046,13 @@ impl Crowtree {
     /// When `include_tombstones` is true, tombstone entries are included.
     /// `start_after` (empty = start from beginning) is an exclusive lower
     /// bound: only keys strictly greater than `start_after` are returned.
+    /// `end_key` (empty = unbounded) is an exclusive upper bound: only keys
+    /// strictly less than `end_key` are returned.
     pub fn scan(
         &self,
         prefix: &[u8],
         start_after: &[u8],
+        end_key: &[u8],
         limit: usize,
         byte_budget: usize,
         include_tombstones: bool,
@@ -1063,6 +1070,8 @@ impl Crowtree {
                 prefix.len(),
                 start_after.as_ptr(),
                 start_after.len(),
+                end_key.as_ptr(),
+                end_key.len(),
                 limit,
                 byte_budget,
                 if include_tombstones { 1 } else { 0 },
@@ -1651,6 +1660,7 @@ impl AsyncCrowtree {
         &self,
         prefix: Vec<u8>,
         start_after: Vec<u8>,
+        end_key: Vec<u8>,
         limit: usize,
         byte_budget: usize,
     ) -> Result<(Vec<ScanEntry>, bool), CtError> {
@@ -1661,6 +1671,8 @@ impl AsyncCrowtree {
                 prefix.len(),
                 start_after.as_ptr(),
                 start_after.len(),
+                end_key.as_ptr(),
+                end_key.len(),
                 limit,
                 byte_budget,
             )
@@ -1680,6 +1692,7 @@ impl AsyncCrowtree {
         &self,
         prefix: Vec<u8>,
         start_after: Vec<u8>,
+        end_key: Vec<u8>,
         limit: usize,
         byte_budget: usize,
     ) -> ScanOutcome {
@@ -1690,6 +1703,8 @@ impl AsyncCrowtree {
                 prefix.len(),
                 start_after.as_ptr(),
                 start_after.len(),
+                end_key.as_ptr(),
+                end_key.len(),
                 limit,
                 byte_budget,
             )

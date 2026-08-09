@@ -124,7 +124,7 @@ async fn batch_write_and_scan() {
         .expect("batch_write");
 
     let scanned = client
-        .scan(STORE_ID, GROUP_ID, b"a", &[], 0, ReadMode::MinSlot, None)
+        .scan(STORE_ID, GROUP_ID, b"a", &[], &[], 0, ReadMode::MinSlot, None)
         .await
         .expect("scan");
     assert_eq!(scanned.items.len(), 2);
@@ -196,7 +196,16 @@ async fn linearizable_multi_page_scan_pays_barrier_once() {
     }
 
     let scanned = client
-        .scan(STORE_ID, GROUP_ID, b"k", &[], 0, ReadMode::Linearizable, None)
+        .scan(
+            STORE_ID,
+            GROUP_ID,
+            b"k",
+            &[],
+            &[],
+            0,
+            ReadMode::Linearizable,
+            None,
+        )
         .await
         .expect("scan");
 

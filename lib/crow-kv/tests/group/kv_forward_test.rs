@@ -176,6 +176,7 @@ async fn follower_scan_forwards_to_leader_after_local_clear() {
             read_mode: 0,
             start_after: Bytes::new(),
             min_slot: 0,
+            end_key: Bytes::new(),
         })
         .await
         .expect("kv scan on follower")

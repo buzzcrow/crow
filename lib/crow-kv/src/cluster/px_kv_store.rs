@@ -156,6 +156,7 @@ impl KvStore for PxKvStore {
         group_id: u64,
         prefix: &[u8],
         start_after: &[u8],
+        end_key: &[u8],
         limit: u32,
         read_mode: i32,
         min_slot: u64,
@@ -193,7 +194,13 @@ impl KvStore for PxKvStore {
         let (scanned, truncated) = match group
             .local_replica()
             .learner
-            .engine_scan(prefix, start_after, limit as usize, self.scan_byte_budget)
+            .engine_scan(
+                prefix,
+                start_after,
+                end_key,
+                limit as usize,
+                self.scan_byte_budget,
+            )
             .await
         {
             Ok(result) => result,

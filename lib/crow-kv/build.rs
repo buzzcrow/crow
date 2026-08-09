@@ -19,6 +19,7 @@ fn main() {
             "crow_kv.rpc.KvResponse.value",
             "crow_kv.rpc.KvScanRequest.prefix",
             "crow_kv.rpc.KvScanRequest.start_after",
+            "crow_kv.rpc.KvScanRequest.end_key",
             "crow_kv.rpc.KvScanItem.key",
             "crow_kv.rpc.KvScanItem.value",
         ])

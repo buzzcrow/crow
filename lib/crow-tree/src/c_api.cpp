@@ -784,7 +784,7 @@ ct_future *ct_snapshot_async(ct_tree *t)
 }
 
 ct_future *ct_scan_async(ct_tree *t, const uint8_t *prefix, size_t plen, const uint8_t *start_after, size_t salen,
-                         size_t limit, size_t byte_budget)
+                         const uint8_t *end_key, size_t elen, size_t limit, size_t byte_budget)
 {
     if (t == nullptr) {
         return nullptr;
@@ -792,7 +792,8 @@ ct_future *ct_scan_async(ct_tree *t, const uint8_t *prefix, size_t plen, const u
     auto impl  = std::make_shared<ct_future_impl>();
     impl->kind = ct_future_impl::Kind::kScan;
     t->tree->scan_async(Slice(reinterpret_cast<const char *>(prefix), plen),
-                        Slice(reinterpret_cast<const char *>(start_after), salen), limit, byte_budget,
+                        Slice(reinterpret_cast<const char *>(start_after), salen),
+                        Slice(reinterpret_cast<const char *>(end_key), elen), limit, byte_budget,
                         [impl](const Status &st, const std::vector<scan_entry> &entries, bool truncated) {
                             impl->status = to_status(st);
                             if (st.ok()) {
@@ -895,8 +896,8 @@ int32_t ct_reactor_eventfd(const ct_tree *t)
 }
 
 ct_status ct_scan(ct_tree *t, const uint8_t *prefix, size_t plen, const uint8_t *start_after, size_t salen,
-                  size_t limit, size_t byte_budget, int include_tombstones, ct_buf *out_entries, uint64_t *out_count,
-                  int32_t *truncated)
+                  const uint8_t *end_key, size_t elen, size_t limit, size_t byte_budget, int include_tombstones,
+                  ct_buf *out_entries, uint64_t *out_count, int32_t *truncated)
 {
     if (t == nullptr || out_entries == nullptr) {
         return static_cast<ct_status>(Code::kInvalidArgument);
@@ -904,8 +905,9 @@ ct_status ct_scan(ct_tree *t, const uint8_t *prefix, size_t plen, const uint8_t 
     std::vector<scan_entry> entries;
     bool                    tr = false;
     Status                  s  = t->tree->scan(Slice(reinterpret_cast<const char *>(prefix), plen),
-                                               Slice(reinterpret_cast<const char *>(start_after), salen), limit, byte_budget, &entries,
-                                               &tr, include_tombstones != 0);
+                                               Slice(reinterpret_cast<const char *>(start_after), salen),
+                                               Slice(reinterpret_cast<const char *>(end_key), elen), limit, byte_budget, &entries, &tr,
+                                               include_tombstones != 0);
     if (!s.ok()) {
         return to_status(s);
     }

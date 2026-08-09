@@ -96,11 +96,12 @@ impl KVEngine for InMemKV {
         &self,
         prefix: &[u8],
         start_after: &[u8],
+        end_key: &[u8],
         limit: usize,
         byte_budget: usize,
     ) -> KVFuture<Result<(Vec<(Bytes, u64, Bytes)>, bool), String>> {
         // DashMap is not ordered — collect matching live entries, sort,
-        // then apply the start_after cursor, limit, and byte_budget.
+        // then apply the start_after/end_key bounds, limit, and byte_budget.
         // Keys/values are Bytes (one copy via Bytes::from(Vec), same as
         // the get path; InMemKV is test-only so zero-copy slicing does
         // not apply). InMemKV never errors — always Ok.
@@ -112,6 +113,9 @@ impl KVEngine for InMemKV {
                     return None;
                 }
                 if !start_after.is_empty() && r.key().as_slice() <= start_after {
+                    return None;
+                }
+                if !end_key.is_empty() && r.key().as_slice() >= end_key {
                     return None;
                 }
                 let (slot, cell) = r.value();

@@ -389,6 +389,7 @@ pub async fn http_kv_scan(
             gid,
             &prefix,
             &start_after,
+            &[],
             limit,
             ReadMode::Linearizable,
             None,

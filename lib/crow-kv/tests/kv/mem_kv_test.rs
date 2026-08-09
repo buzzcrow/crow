@@ -38,6 +38,11 @@ fn scan_is_ordered_prefix_filtered_and_truncates() {
 }
 
 #[test]
+fn scan_end_key_exclusive_upper_bound() {
+    conformance::scan_end_key_exclusive_upper_bound(&InMemKV::new());
+}
+
+#[test]
 fn scan_byte_budget_stops_and_truncates() {
     conformance::scan_byte_budget_stops_and_truncates(&InMemKV::new());
 }
@@ -65,7 +70,7 @@ fn get_scan_apply_always_resolve_ready() {
         KVFuture::Ready(_)
     ));
     assert!(matches!(e.get(b"k"), KVFuture::Ready(_)));
-    assert!(matches!(e.scan(b"", b"", 0, 0), KVFuture::Ready(_)));
+    assert!(matches!(e.scan(b"", b"", b"", 0, 0), KVFuture::Ready(_)));
 }
 
 #[test]

@@ -222,10 +222,13 @@ impl PxLearner {
         &self,
         prefix: &[u8],
         start_after: &[u8],
+        end_key: &[u8],
         limit: usize,
         byte_budget: usize,
     ) -> Result<(Vec<(bytes::Bytes, SlotIndex, bytes::Bytes)>, bool), String> {
-        self.engine.scan(prefix, start_after, limit, byte_budget).await
+        self.engine
+            .scan(prefix, start_after, end_key, limit, byte_budget)
+            .await
     }
 
     /// Number of live (non-tombstoned) keys in the engine.

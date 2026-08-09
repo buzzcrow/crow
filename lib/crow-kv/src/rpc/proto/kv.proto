@@ -128,6 +128,9 @@ message KvScanRequest {
   bytes  start_after = 8;
   // For MIN_SLOT: same semantics as KvGetRequest.min_slot.
   uint64 min_slot = 9;
+  // Exclusive upper bound. Empty = unbounded. Only keys strictly less
+  // than `end_key` (and matching `prefix`) are returned.
+  bytes  end_key = 10;
 }
 
 message KvScanItem {

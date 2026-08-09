@@ -112,7 +112,7 @@ impl CrowTreeEngine {
         // tombstones — no flush() needed, matching InMemKV's immediate
         // visibility for both live entries and tombstones. Scan returns
         // Bytes; iter_all's Cell::Value(Vec<u8>) shape requires .to_vec().
-        match self.inner.handle().scan(b"", b"", 0, 0, true) {
+        match self.inner.handle().scan(b"", b"", b"", 0, 0, true) {
             Ok((entries, _)) => entries
                 .into_iter()
                 .map(|e| {
@@ -204,6 +204,7 @@ impl KVEngine for CrowTreeEngine {
         &self,
         prefix: &[u8],
         start_after: &[u8],
+        end_key: &[u8],
         limit: usize,
         byte_budget: usize,
     ) -> KVFuture<Result<(Vec<(Bytes, u64, Bytes)>, bool), String>> {
@@ -211,6 +212,9 @@ impl KVEngine for CrowTreeEngine {
         // the leaf containing start_after (instead of the prefix start), and
         // the merge loop skips keys <= start_after natively, so the engine
         // applies the limit without over-fetching the prefix range.
+        // end_key is likewise pushed down: the merge loop early-stops once
+        // the winner key reaches end_key, so the engine never over-reads
+        // past the upper bound.
         // byte_budget is likewise pushed down: the C++ merge loop accumulates
         // key+value bytes and stops with truncated when the budget is
         // exceeded, always returning at least one entry.
@@ -219,10 +223,11 @@ impl KVEngine for CrowTreeEngine {
         // FFI errors propagate as Err instead of being swallowed.
         let prefix_owned = prefix.to_vec();
         let start_after_owned = start_after.to_vec();
+        let end_key_owned = end_key.to_vec();
 
         match self
             .inner
-            .try_scan(prefix_owned, start_after_owned, limit, byte_budget)
+            .try_scan(prefix_owned, start_after_owned, end_key_owned, limit, byte_budget)
         {
             ScanOutcome::Ready(result) => KVFuture::ready(decode_scan(result)),
             ScanOutcome::Pending(fut) => KVFuture::Pending(Box::pin(async move { decode_scan(fut.await) })),
@@ -235,7 +240,7 @@ impl KVEngine for CrowTreeEngine {
         // O(n) linear-scan cost for this method.
         self.inner
             .handle()
-            .scan(b"", b"", 0, 0, false)
+            .scan(b"", b"", b"", 0, 0, false)
             .map_or(0, |(entries, _)| entries.len())
     }
 

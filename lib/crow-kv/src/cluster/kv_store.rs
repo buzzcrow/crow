@@ -72,6 +72,7 @@ pub trait KvStore {
         group_id: u64,
         prefix: &[u8],
         start_after: &[u8],
+        end_key: &[u8],
         limit: u32,
         read_mode: i32,
         min_slot: u64,

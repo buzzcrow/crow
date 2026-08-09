@@ -13,7 +13,7 @@ Regression sentinel: `tools/bench-scan-regression.sh`.
 ## Scan Flow
 
 ```
-Client SCAN(prefix, start_after, limit, read_mode, min_slot?)
+Client SCAN(prefix, start_after, end_key, limit, read_mode, min_slot?)
   → CrowkvClient::scan                            [client.rs]
     1. resolve_min_slot — MinSlot: auto-attach write watermark;
        Linearizable: 0
@@ -251,13 +251,20 @@ noted.
   an e2e test asserting `lease_path + readindex_path == 1` for an
   N-page linearizable scan (was N before). Client-local, no proto
   change.
-- **[R56](../../backlog/R56-kv-scan-end-key-bound.md) — Prefix-only
-  range predicate**: `KvScanRequest` has `prefix` + `start_after` but
-  no exclusive `end_key`, so an arbitrary `[start, end)` range cannot
-  be expressed. The engine's early-stop already compares against
-  `prefix`; adding an optional `end_key` bound to the merge loop, FFI,
-  proto, and client is a small, low-risk extension (and is a
-  prerequisite shape for R52 reverse scan).
+- **R56 — Prefix-only range predicate (done)**: `KvScanRequest` now
+  carries an optional exclusive `end_key` (proto field 10, empty =
+  unbounded). The C++ merge loop early-stops when `winner_key >=
+  end_key` alongside the existing prefix stop (`crow-tree.cpp`).
+  Threaded through `ct_scan`/`ct_scan_async` C API, FFI
+  `Crowtree::scan`/`AsyncCrowtree::scan`/`try_scan`, `KVEngine::scan`
+  trait, `CrowTreeEngine`/`InMemKV` impls, `Learner::engine_scan`,
+  `KvStore::kv_scan` trait, `PxKvStore::kv_scan`, gRPC service, and
+  `CrowkvClient::scan`. Semantics: `end_key` is an exclusive upper
+  bound; `prefix` + `end_key` intersect; `start_after` + `end_key`
+  form a standard `(start, end)` half-open interval. Pagination passes
+  `end_key` on every page (fixed bound, unlike `start_after`). Verified
+  by conformance tests for both engines. Prerequisite shape for R52
+  reverse scan.
 - **[R57](../../backlog/R57-tree-scan-zero-copy-staging.md) —
   Engine-side result staging is 3 copies, not zero-copy**: the
   "zero-copy" claim above holds only from the FFI packed buffer to the

@@ -671,6 +671,7 @@ async fn run_worker(
                     cfg.group_id,
                     &cfg.scan_prefix,
                     &cfg.scan_start_after,
+                    &[],
                     cfg.scan_limit,
                     cfg.read_mode,
                     cfg.min_slot_policy.to_min_slot(),

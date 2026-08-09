@@ -101,15 +101,6 @@ complexity, and dependency. Before implementation, follow the
   document the top hot stacks. Investigation only — no scan-path code
   changes. If a clear optimization target emerges, file a follow-up
   requirement with the profiling evidence. Low complexity.
-- **[R56](R56-kv-scan-end-key-bound.md)** — Optional exclusive `end_key`
-  range bound — Area: scan / kv — `KvScanRequest` has `prefix` +
-  `start_after` but no upper bound, so an arbitrary `[start, end)` range
-  cannot be expressed without client-side over-read and filtering. Add
-  an optional exclusive `end_key` (empty = unbounded) to proto, engine
-  merge-loop early-stop (mirrors the existing prefix stop at
-  `crow-tree.cpp:1964`), FFI, store, service, and client. One new field
-  per layer, mechanical. Prerequisite shape for R52 reverse scan.
-  Low–medium complexity.
 - **[R57](R57-tree-scan-zero-copy-staging.md)** — Zero-copy engine scan
   result staging — Area: scan / crow-tree engine — each scan page is
   copied 3 times before the FFI boundary: `consider` lambda stages into
