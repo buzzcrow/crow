@@ -13,6 +13,7 @@ use crate::common::optional_u64;
 use crate::common::report::OperationReport;
 use crate::metrics::MetricsRegistry;
 use crate::rpc::ReadMode;
+use bytes::Bytes;
 use dashmap::DashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -289,6 +290,214 @@ impl KvStore for PxKvStore {
             timed_out: deadline_ms != 0 && truncated,
         }
     }
+
+    async fn kv_create_snapshot(
+        &self,
+        group_id: u64,
+        read_mode: i32,
+        min_slot: u64,
+    ) -> crate::rpc::CreateSnapshotResponse {
+        let Some(group) = self.get_group(group_id) else {
+            return crate::rpc::CreateSnapshotResponse {
+                ok: false,
+                error: format!("group {group_id} not found"),
+                snapshot_handle: 0,
+                at_slot: 0,
+                error_code: crate::rpc::KvErrorCode::KvErrorInternal as i32,
+                not_leader_hint: String::new(),
+            };
+        };
+        // Resolve read point for linearizable snapshots (must be leader).
+        match self.resolve_read_point(&group, read_mode, min_slot).await {
+            ReadDecision::Serve { .. } => {}
+            ReadDecision::NotLeader { hint } => {
+                return crate::rpc::CreateSnapshotResponse {
+                    ok: false,
+                    error: "not leader".to_string(),
+                    snapshot_handle: 0,
+                    at_slot: 0,
+                    error_code: crate::rpc::KvErrorCode::KvErrorNotLeader as i32,
+                    not_leader_hint: hint,
+                };
+            }
+            ReadDecision::Unavailable { msg } => {
+                return crate::rpc::CreateSnapshotResponse {
+                    ok: false,
+                    error: msg,
+                    snapshot_handle: 0,
+                    at_slot: 0,
+                    error_code: crate::rpc::KvErrorCode::KvErrorUnavailable as i32,
+                    not_leader_hint: String::new(),
+                };
+            }
+        }
+        // Flush + snapshot_view on the engine.
+        let (at_slot, entries) = match group.local_replica().learner.engine().snapshot_view() {
+            Ok(v) => v,
+            Err(msg) => {
+                return crate::rpc::CreateSnapshotResponse {
+                    ok: false,
+                    error: format!("snapshot_view: {msg}"),
+                    snapshot_handle: 0,
+                    at_slot: 0,
+                    error_code: crate::rpc::KvErrorCode::KvErrorInternal as i32,
+                    not_leader_hint: String::new(),
+                };
+            }
+        };
+        // Allocate handle id and register.
+        let handle_id = group.next_snapshot_handle.fetch_add(1, Ordering::Relaxed);
+        let handle = Arc::new(crate::cluster::group::SnapshotHandle {
+            handle: handle_id,
+            at_slot,
+            entries,
+            created_at: Instant::now(),
+            lease: crate::cluster::group::SnapshotHandle::DEFAULT_LEASE,
+        });
+        // Lazy reap of expired handles.
+        self.reap_expired_snapshots(&group);
+        group.snapshots.insert(handle_id, handle);
+        debug!(
+            store_id = self.store_id,
+            group_id, handle_id, at_slot, "kv_create_snapshot: pinned snapshot"
+        );
+        crate::rpc::CreateSnapshotResponse {
+            ok: true,
+            error: String::new(),
+            snapshot_handle: handle_id,
+            at_slot,
+            error_code: crate::rpc::KvErrorCode::KvErrorNone as i32,
+            not_leader_hint: String::new(),
+        }
+    }
+
+    async fn kv_list_snapshots(&self, group_id: u64) -> crate::rpc::ListSnapshotsResponse {
+        let Some(group) = self.get_group(group_id) else {
+            return crate::rpc::ListSnapshotsResponse {
+                ok: false,
+                error: format!("group {group_id} not found"),
+                snapshots: Vec::new(),
+            };
+        };
+        self.reap_expired_snapshots(&group);
+        let snapshots = group
+            .snapshots
+            .iter()
+            .map(|e| crate::rpc::SnapshotInfo {
+                snapshot_handle: e.handle,
+                at_slot: e.at_slot,
+                lease_remaining_ms: e.lease_remaining().as_millis() as u64,
+            })
+            .collect();
+        crate::rpc::ListSnapshotsResponse {
+            ok: true,
+            error: String::new(),
+            snapshots,
+        }
+    }
+
+    async fn kv_snapshot_scan(
+        &self,
+        group_id: u64,
+        snapshot_handle: u64,
+        prefix: &[u8],
+        start_after: &[u8],
+        limit: u32,
+    ) -> crate::rpc::SnapshotScanResponse {
+        let Some(group) = self.get_group(group_id) else {
+            return crate::rpc::SnapshotScanResponse {
+                ok: false,
+                error: format!("group {group_id} not found"),
+                truncated: false,
+                items: Vec::new(),
+                error_code: crate::rpc::KvErrorCode::KvErrorInternal as i32,
+            };
+        };
+        self.reap_expired_snapshots(&group);
+        let Some(handle) = group
+            .snapshots
+            .get(&snapshot_handle)
+            .map(|e| Arc::clone(e.value()))
+        else {
+            return crate::rpc::SnapshotScanResponse {
+                ok: false,
+                error: format!("snapshot handle {snapshot_handle} not found (expired or released)"),
+                truncated: false,
+                items: Vec::new(),
+                error_code: crate::rpc::KvErrorCode::KvErrorInternal as i32,
+            };
+        };
+        // Binary-search for start_after, then linear scan filtering by
+        // prefix and skipping tombstones.
+        let entries = &handle.entries;
+        let start_idx = if start_after.is_empty() {
+            0
+        } else {
+            // `start_after` is exclusive: skip the found element.
+            match entries.binary_search_by(|e| e.key.as_slice().cmp(start_after)) {
+                Ok(i) => i + 1,
+                Err(i) => i,
+            }
+        };
+        let mut items = Vec::new();
+        let mut truncated = false;
+        let limit_usize = limit as usize;
+        for e in &entries[start_idx..] {
+            if !e.key.starts_with(prefix) {
+                // If we've moved past the prefix, no more matches (sorted).
+                if !prefix.is_empty() && e.key.as_slice() > prefix {
+                    break;
+                }
+                continue;
+            }
+            if e.tombstone {
+                continue;
+            }
+            if limit_usize != 0 && items.len() >= limit_usize {
+                truncated = true;
+                break;
+            }
+            items.push(crate::rpc::KvScanItem {
+                key: Bytes::from(e.key.clone()),
+                value: Bytes::from(e.value.clone()),
+            });
+        }
+        crate::rpc::SnapshotScanResponse {
+            ok: true,
+            error: String::new(),
+            truncated,
+            items,
+            error_code: crate::rpc::KvErrorCode::KvErrorNone as i32,
+        }
+    }
+
+    async fn kv_release_snapshot(
+        &self,
+        group_id: u64,
+        snapshot_handle: u64,
+    ) -> crate::rpc::ReleaseSnapshotResponse {
+        let Some(group) = self.get_group(group_id) else {
+            return crate::rpc::ReleaseSnapshotResponse {
+                ok: false,
+                error: format!("group {group_id} not found"),
+            };
+        };
+        if group.snapshots.remove(&snapshot_handle).is_some() {
+            debug!(
+                store_id = self.store_id,
+                group_id, snapshot_handle, "kv_release_snapshot: released"
+            );
+            crate::rpc::ReleaseSnapshotResponse {
+                ok: true,
+                error: String::new(),
+            }
+        } else {
+            crate::rpc::ReleaseSnapshotResponse {
+                ok: false,
+                error: format!("snapshot handle {snapshot_handle} not found"),
+            }
+        }
+    }
 }
 
 impl PxKvStore {
@@ -317,6 +526,28 @@ impl PxKvStore {
     /// `CrowKVConfig.server.scan_byte_budget`. Called before `start()`.
     pub fn set_scan_byte_budget(&mut self, budget: usize) {
         self.scan_byte_budget = budget;
+    }
+
+    /// Reap expired snapshot handles from a group's registry. Called
+    /// lazily on `create`/`list`/`scan` to avoid a dedicated background
+    /// task. O(N) in the number of handles, but N is typically small
+    /// (one per active snapshot scan).
+    fn reap_expired_snapshots(&self, group: &PxGroup) {
+        let expired: Vec<u64> = group
+            .snapshots
+            .iter()
+            .filter(|e| e.expired())
+            .map(|e| e.handle)
+            .collect();
+        for handle_id in expired {
+            group.snapshots.remove(&handle_id);
+            debug!(
+                store_id = self.store_id,
+                group_id = group.group_id,
+                handle_id,
+                "reap_expired_snapshots: reaped expired snapshot handle"
+            );
+        }
     }
 
     /// Test-only: inject a fixed delay into every `kv_get` call on this

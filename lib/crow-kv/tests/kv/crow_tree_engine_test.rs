@@ -334,6 +334,72 @@ async fn get_bytes_fast_path_returns_correct_value() {
     assert_eq!(missing, None);
 }
 
+/// `snapshot_view` returns a frozen, key-sorted vector including
+/// tombstones, pinned at `last_applied_slot` after a flush.
+#[test]
+fn snapshot_view_returns_pinned_entries() {
+    use crow_kv::kv::KVEngine;
+
+    let e = open();
+    e.apply(1, &conformance::batch(vec![conformance::put(b"a", b"v1")]))
+        .into_ready()
+        .unwrap();
+    e.apply(2, &conformance::batch(vec![conformance::put(b"b", b"v2")]))
+        .into_ready()
+        .unwrap();
+    e.apply(3, &conformance::batch(vec![conformance::del(b"a")]))
+        .into_ready()
+        .unwrap();
+
+    let (at_slot, entries) = e.snapshot_view().expect("snapshot_view");
+    assert_eq!(at_slot, 3);
+    // Key-sorted: a (tombstoned), b (live).
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].key, b"a");
+    assert!(entries[0].tombstone);
+    assert_eq!(entries[1].key, b"b");
+    assert!(!entries[1].tombstone);
+    assert_eq!(entries[1].value, b"v2");
+}
+
+/// `snapshot_view` is point-in-time-consistent: writes applied after
+/// the snapshot do not appear in the frozen view.
+#[test]
+fn snapshot_view_is_point_in_time_consistent() {
+    use crow_kv::kv::KVEngine;
+
+    let e = open();
+    e.apply(1, &conformance::batch(vec![conformance::put(b"k", b"v1")]))
+        .into_ready()
+        .unwrap();
+
+    let (at_slot, entries) = e.snapshot_view().expect("snapshot_view");
+    assert_eq!(at_slot, 1);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].key, b"k");
+    assert_eq!(entries[0].value, b"v1");
+
+    // Apply more writes after the snapshot.
+    e.apply(2, &conformance::batch(vec![conformance::put(b"k", b"v2")]))
+        .into_ready()
+        .unwrap();
+    e.apply(3, &conformance::batch(vec![conformance::put(b"new", b"v3")]))
+        .into_ready()
+        .unwrap();
+
+    // The frozen view is unchanged.
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].value, b"v1");
+    // A new snapshot reflects the latest state.
+    let (at_slot2, entries2) = e.snapshot_view().expect("snapshot_view 2");
+    assert_eq!(at_slot2, 3);
+    assert_eq!(entries2.len(), 2);
+    assert_eq!(entries2[0].key, b"k");
+    assert_eq!(entries2[0].value, b"v2");
+    assert_eq!(entries2[1].key, b"new");
+    assert_eq!(entries2[1].value, b"v3");
+}
+
 /// `get_bytes` with a large value: verifies the pinned-value path
 /// correctly handles values that span the full frame.
 #[tokio::test]

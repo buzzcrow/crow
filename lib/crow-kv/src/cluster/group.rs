@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
 
+use dashmap::DashMap;
 use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use tokio::sync::Mutex as AsyncMutex;
@@ -266,6 +267,46 @@ pub struct PxGroup {
     /// Single long-running watchdog task handle. Started lazily on
     /// first enqueue.
     pub(crate) coalesce_watchdog_handle: OnceLock<tokio::task::JoinHandle<()>>,
+    /// R59 snapshot versioning API: per-group snapshot handle registry.
+    /// Each entry is a pinned `SnapshotHandle` with a lease/expiry. Reaped
+    /// lazily on `create`/`list`/`scan` when the lease has elapsed.
+    pub(crate) snapshots: DashMap<u64, Arc<SnapshotHandle>>,
+    /// Monotonic counter for snapshot handle ids within this group.
+    pub(crate) next_snapshot_handle: AtomicU64,
+}
+
+/// R59 snapshot versioning API: a pinned point-in-time-consistent L1 view.
+/// Created by `kv_create_snapshot` (flush + `snapshot_view`), iterated by
+/// `kv_snapshot_scan` (binary-search + linear scan over `entries`),
+/// released by `kv_release_snapshot` (drop from the registry). Reaped
+/// lazily by lease expiry (default 5 min).
+pub(crate) struct SnapshotHandle {
+    pub handle: u64,
+    pub at_slot: u64,
+    pub entries: Vec<crate::kv::SnapshotViewEntry>,
+    pub created_at: std::time::Instant,
+    pub lease: std::time::Duration,
+}
+
+impl SnapshotHandle {
+    /// Default lease: 5 minutes. Reaped lazily if a client disconnects
+    /// mid-scan without calling `ReleaseSnapshot`.
+    pub const DEFAULT_LEASE: std::time::Duration = std::time::Duration::from_secs(300);
+
+    /// Remaining lease duration. `Duration::ZERO` if expired.
+    pub(crate) fn lease_remaining(&self) -> std::time::Duration {
+        let elapsed = self.created_at.elapsed();
+        if elapsed >= self.lease {
+            std::time::Duration::ZERO
+        } else {
+            self.lease.checked_sub(elapsed).unwrap_or_default()
+        }
+    }
+
+    /// Whether the lease has expired.
+    pub(crate) fn expired(&self) -> bool {
+        self.created_at.elapsed() >= self.lease
+    }
 }
 
 impl std::fmt::Debug for PxGroup {
@@ -330,6 +371,8 @@ impl PxGroup {
             coalesce_max_keys: std::sync::atomic::AtomicU16::new(0),
             coalesce_last_activity_us: std::sync::atomic::AtomicU64::new(0),
             coalesce_watchdog_handle: OnceLock::new(),
+            snapshots: DashMap::new(),
+            next_snapshot_handle: AtomicU64::new(1),
         };
         group.recompute_quorum();
         group

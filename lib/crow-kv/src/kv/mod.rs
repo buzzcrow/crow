@@ -26,6 +26,6 @@ mod kv_future;
 mod op;
 
 pub use crow_tree_engine::{CrowTreeBackend, CrowTreeEngine, CrowTreeOptions, CrowTreeStats};
-pub use kv_engine::KVEngine;
+pub use kv_engine::{KVEngine, SnapshotViewEntry};
 pub use kv_future::KVFuture;
 pub use op::{Batch, BatchOp, Cell, EngineDiff, Op};

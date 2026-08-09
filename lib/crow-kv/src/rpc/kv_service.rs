@@ -21,8 +21,9 @@ use crate::metrics::{Bandwidth, Counter, LatencyHistogram, LatencySummary, Metri
 use crate::rpc::kv_service_client::KvServiceClient;
 use crate::rpc::kv_service_server::KvService;
 use crate::rpc::{
-    KvBatchWriteRequest, KvDeleteRequest, KvGetRequest, KvResponse, KvScanRequest, KvScanResponse,
-    KvSetRequest,
+    CreateSnapshotRequest, CreateSnapshotResponse, KvBatchWriteRequest, KvDeleteRequest, KvGetRequest,
+    KvResponse, KvScanRequest, KvScanResponse, KvSetRequest, ListSnapshotsRequest, ListSnapshotsResponse,
+    ReleaseSnapshotRequest, ReleaseSnapshotResponse, SnapshotScanRequest, SnapshotScanResponse,
 };
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
@@ -601,6 +602,81 @@ impl KvService for KvStoreService {
         }
         resp.request_id = req.request_id;
         resp.request_create_ms = req.request_create_ms;
+        Ok(Response::new(resp))
+    }
+
+    async fn create_snapshot(
+        &self,
+        request: Request<CreateSnapshotRequest>,
+    ) -> Result<Response<CreateSnapshotResponse>, Status> {
+        let req = request.into_inner();
+        debug!(
+            store_id = self.store.store_id,
+            group_id = req.group_id,
+            "received kv create_snapshot rpc"
+        );
+        let resp = self
+            .store
+            .kv_create_snapshot(req.group_id, req.read_mode, req.min_slot)
+            .await;
+        Ok(Response::new(resp))
+    }
+
+    async fn list_snapshots(
+        &self,
+        request: Request<ListSnapshotsRequest>,
+    ) -> Result<Response<ListSnapshotsResponse>, Status> {
+        let req = request.into_inner();
+        debug!(
+            store_id = self.store.store_id,
+            group_id = req.group_id,
+            "received kv list_snapshots rpc"
+        );
+        let resp = self.store.kv_list_snapshots(req.group_id).await;
+        Ok(Response::new(resp))
+    }
+
+    async fn snapshot_scan(
+        &self,
+        request: Request<SnapshotScanRequest>,
+    ) -> Result<Response<SnapshotScanResponse>, Status> {
+        let req = request.into_inner();
+        debug!(
+            store_id = self.store.store_id,
+            group_id = req.group_id,
+            handle = req.snapshot_handle,
+            prefix_len = req.prefix.len(),
+            limit = req.limit,
+            "received kv snapshot_scan rpc"
+        );
+        let resp = self
+            .store
+            .kv_snapshot_scan(
+                req.group_id,
+                req.snapshot_handle,
+                &req.prefix,
+                &req.start_after,
+                req.limit,
+            )
+            .await;
+        Ok(Response::new(resp))
+    }
+
+    async fn release_snapshot(
+        &self,
+        request: Request<ReleaseSnapshotRequest>,
+    ) -> Result<Response<ReleaseSnapshotResponse>, Status> {
+        let req = request.into_inner();
+        debug!(
+            store_id = self.store.store_id,
+            group_id = req.group_id,
+            handle = req.snapshot_handle,
+            "received kv release_snapshot rpc"
+        );
+        let resp = self
+            .store
+            .kv_release_snapshot(req.group_id, req.snapshot_handle)
+            .await;
         Ok(Response::new(resp))
     }
 }

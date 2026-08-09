@@ -22,8 +22,11 @@ fn main() {
             "crow_kv.rpc.KvScanRequest.end_key",
             "crow_kv.rpc.KvScanItem.key",
             "crow_kv.rpc.KvScanItem.value",
+            "crow_kv.rpc.SnapshotScanRequest.prefix",
+            "crow_kv.rpc.SnapshotScanRequest.start_after",
         ])
         .type_attribute(".", "#[allow(clippy::must_use_candidate)]")
+        .type_attribute("crow_kv.rpc.SnapshotInfo", "#[derive(serde::Serialize)]")
         .compile_protos(
             &["src/rpc/proto/pxos.proto", "src/rpc/proto/kv.proto"],
             &["src/rpc/proto"],

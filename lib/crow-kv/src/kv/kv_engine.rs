@@ -212,4 +212,28 @@ pub trait KVEngine: Send + Sync {
         let _ = stream;
         Err("snapshot import not supported by this engine".to_string())
     }
+
+    /// Pin a point-in-time-consistent L1 view at `last_applied_slot`
+    /// (after a `flush` drains L0 → L1). Returns `(at_slot, entries)`:
+    /// a frozen, key-sorted vector including tombstones. Default:
+    /// unsupported — `InMemKV` has no L1 pinning; `CrowTreeEngine`
+    /// overrides with the real FFI `snapshot_view`.
+    ///
+    /// # Errors
+    /// Returns an error string if the engine does not support snapshot
+    /// views, or if the underlying pin fails.
+    fn snapshot_view(&self) -> Result<(u64, Vec<SnapshotViewEntry>), String> {
+        Err("snapshot_view not supported by this engine".to_string())
+    }
+}
+
+/// A single entry in a pinned snapshot view — key, slot, tombstone flag,
+/// value. Key-sorted; includes tombstones (callers filter them for live-
+/// key scans).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotViewEntry {
+    pub key: Vec<u8>,
+    pub slot: u64,
+    pub tombstone: bool,
+    pub value: Vec<u8>,
 }

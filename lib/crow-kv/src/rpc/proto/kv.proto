@@ -181,4 +181,69 @@ service KvService {
   rpc Delete(KvDeleteRequest) returns (KvResponse);
   rpc BatchWrite(KvBatchWriteRequest) returns (KvResponse);
   rpc Scan(KvScanRequest) returns (KvScanResponse);
+  rpc CreateSnapshot(CreateSnapshotRequest) returns (CreateSnapshotResponse);
+  rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
+  rpc SnapshotScan(SnapshotScanRequest) returns (SnapshotScanResponse);
+  rpc ReleaseSnapshot(ReleaseSnapshotRequest) returns (ReleaseSnapshotResponse);
+}
+
+// Snapshot versioning API (R59): pin a point-in-time-consistent L1 view
+// for backup/analytics. CreateSnapshot flushes L0 -> L1 and pins the
+// durable view at last_applied_slot; SnapshotScan iterates the frozen
+// vector with prefix/pagination; ReleaseSnapshot drops the pin.
+message CreateSnapshotRequest {
+  uint64 group_id = 1;
+  ReadMode read_mode = 2;
+  uint64 min_slot = 3;
+}
+
+message CreateSnapshotResponse {
+  bool   ok = 1;
+  string error = 2;
+  uint64 snapshot_handle = 3;
+  uint64 at_slot = 4;
+  KvErrorCode error_code = 5;
+  string not_leader_hint = 6;
+}
+
+message ListSnapshotsRequest {
+  uint64 group_id = 1;
+}
+
+message SnapshotInfo {
+  uint64 snapshot_handle = 1;
+  uint64 at_slot = 2;
+  uint64 lease_remaining_ms = 3;
+}
+
+message ListSnapshotsResponse {
+  bool   ok = 1;
+  string error = 2;
+  repeated SnapshotInfo snapshots = 3;
+}
+
+message SnapshotScanRequest {
+  uint64 snapshot_handle = 1;
+  bytes  prefix = 2;
+  bytes  start_after = 3;
+  uint32 limit = 4;
+  uint64 group_id = 5;
+}
+
+message SnapshotScanResponse {
+  bool   ok = 1;
+  string error = 2;
+  bool   truncated = 3;
+  repeated KvScanItem items = 4;
+  KvErrorCode error_code = 5;
+}
+
+message ReleaseSnapshotRequest {
+  uint64 snapshot_handle = 1;
+  uint64 group_id = 2;
+}
+
+message ReleaseSnapshotResponse {
+  bool   ok = 1;
+  string error = 2;
 }

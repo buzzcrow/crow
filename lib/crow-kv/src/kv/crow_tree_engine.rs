@@ -5,7 +5,7 @@
 //! (FFI adapter over the crow-tree C ABI, via `crow_tree_ffi`).
 
 use super::op::Cell;
-use super::{Batch, KVEngine, KVFuture, Op};
+use super::{Batch, KVEngine, KVFuture, Op, SnapshotViewEntry};
 use bytes::Bytes;
 use crow_tree_ffi::{AsyncCrowtree, Crowtree, CtError, ExtOp, GetOutcome, PinnedGetOutcome, ScanOutcome};
 use std::sync::Arc;
@@ -339,6 +339,27 @@ impl KVEngine for CrowTreeEngine {
             .handle()
             .snapshot_import(stream)
             .map_err(|e| e.to_string())
+    }
+
+    fn snapshot_view(&self) -> Result<(u64, Vec<SnapshotViewEntry>), String> {
+        // Flush first so the view reflects every `apply` up to now, not
+        // just whatever an earlier `flush` already moved into L1.
+        let _ = self.inner.handle().flush();
+        let (at_slot, entries) = self
+            .inner
+            .handle()
+            .snapshot_view()
+            .map_err(|e| format!("snapshot_view: {e:?}"))?;
+        let out = entries
+            .into_iter()
+            .map(|e| SnapshotViewEntry {
+                key: e.key,
+                slot: e.slot,
+                tombstone: e.tombstone,
+                value: e.value,
+            })
+            .collect();
+        Ok((at_slot, out))
     }
 
     // `compare` uses the trait's default implementation (diffs `iter_all`
