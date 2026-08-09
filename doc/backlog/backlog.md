@@ -112,16 +112,6 @@ complexity, and dependency. Before implementation, follow the
   `make_borrowed_buf` pattern already used by the get fast path. Collapses
   3 copies to 1 (the unavoidable wire-format assembly). Design-level
   redundancy, not profiling-guided. Medium complexity.
-- **[R58](R58-tree-scan-merge-loop-fast-path.md)** — Merge loop 2-source
-  fast path + loser tree — Area: scan / crow-tree engine — the merge loop
-  does 2 × N_sources byte-wise compares per output entry
-  (`crow-tree.cpp:1890-1934`): a min-key scan then a winner pass. The
-  common case (1 active L0 + L1, no frozen memtables) is a trivial 2-way
-  min needing 1 compare, not a 2-pass vector scan. Add a 2-source fast
-  path branch; for k > 2 (several frozen memtables) use a loser tree
-  (O(log k) per merge). Add `__builtin_prefetch` for the next skip-list
-  node and right-sibling leaf. Design-level redundancy (k-way merge has a
-  known O(log k) structure). Medium complexity.
 - **[R59](R59-kv-snapshot-scan.md)** — Two scan modes + snapshot
   versioning API — Area: scan / kv / crow-tree engine — the current
   `scan` is the only range-read surface (S3-list semantics: per-page

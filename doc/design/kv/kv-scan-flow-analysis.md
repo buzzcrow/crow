@@ -282,14 +282,17 @@ noted.
   instead of `make_buf` (an ownership-transfer path already exists —
   see `make_borrowed_buf` and the get fast path). Likely the cheapest
   large win.
-- **[R58](../../backlog/R58-tree-scan-merge-loop-fast-path.md) —
-  Merge loop is O(N_sources) comparisons per entry**: min-key
-  selection re-compares every L0 cursor plus L1 for each output entry
-  (`crow-tree.cpp` ~1893-1934), each a byte-wise `Slice::compare`.
-  With several frozen memtables live this multiplies. A loser-tree /
-  two-element fast path (common case: 1 active L0 + L1) would cut
-  compares; no prefetch (`__builtin_prefetch`) is issued for the next
-  skip-list node or the right-sibling leaf.
+- **R58 (done) — Merge loop fast path + loser tree**: the merge loop
+  now dispatches by source count. The common 2-source case (1 active L0
+  + L1, no frozen memtables) takes a 1-compare fast path instead of the
+  2-pass O(2k) scan. The single-source case (L0-only or L1-only) skips
+  the merge entirely. For k > 2 (several frozen memtables), a loser tree
+  provides O(log k) per-merge-step compares with collision drain (peek
+  root, advance duplicates). `__builtin_prefetch` is issued for the next
+  skip-list node on L0 cursor advance and for the right-sibling leaf in
+  `refill_l1`. The match function: lower key wins; tie → higher slot;
+  tie → lower source index. Exhausted sources stay in the tree and
+  always lose (no rebuild needed).
 - **[R59](../../backlog/R59-kv-snapshot-scan.md) — Two scan modes +
   snapshot versioning API**: the current `scan` is the only range-read
   surface (S3-list semantics: per-page consistent, not cross-page). R59
