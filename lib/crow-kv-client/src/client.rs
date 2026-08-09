@@ -782,6 +782,16 @@ impl CrowkvClient {
         // Inner pagination state: collect pages until !truncated or limit reached.
         let mut all_items: Vec<(Bytes, Bytes)> = Vec::new();
         let mut page_start_after: Vec<u8> = start_after.to_vec();
+        // After page 1 of a Linearizable scan returns read_slot = S, switch
+        // subsequent pages to MinSlot with min_slot = S. Later pages only need
+        // to be at least as fresh as page 1 (a paginated scan was never a
+        // single snapshot), so MinSlot with the page-1 floor skips the
+        // per-page leader barrier. The leader has S applied and serves locally
+        // without the barrier; a redirect mid-scan lands on the leader, which
+        // also has S applied.
+        let mut page_read_mode = read_mode;
+        let mut page_min_slot = min_slot;
+        let mut page1_read_slot: Option<u64> = None;
         loop {
             // Remaining entry-count budget for this page. The server's byte
             // budget may stop the page before this limit is reached; that's
@@ -799,8 +809,8 @@ impl CrowkvClient {
                 request_id: next_request_id(),
                 request_create_ms: now_ms(),
                 group_id,
-                read_mode: read_mode as i32,
-                min_slot,
+                read_mode: page_read_mode as i32,
+                min_slot: page_min_slot,
             };
             let channel = self.pool.get(&endpoint)?;
             let t0 = Instant::now();
@@ -812,6 +822,14 @@ impl CrowkvClient {
                     if resp.ok {
                         let page_len = resp.items.len();
                         let resp_truncated = resp.truncated;
+                        // Capture page-1 read_slot and switch subsequent
+                        // pages to MinSlot with that slot as the freshness
+                        // floor, skipping the per-page leader barrier.
+                        if page1_read_slot.is_none() && read_mode == ReadMode::Linearizable {
+                            page1_read_slot = Some(resp.read_slot);
+                            page_read_mode = ReadMode::MinSlot;
+                            page_min_slot = resp.read_slot;
+                        }
                         for item in resp.items {
                             all_items.push((item.key, item.value));
                         }
@@ -850,7 +868,7 @@ impl CrowkvClient {
                     // as a plain error. Resume pagination from the last
                     // received key on the new endpoint (see below).
                     if !resp.not_leader_hint.is_empty() {
-                        if read_mode == ReadMode::MinSlot && self.read_endpoint_policy.is_distributed() {
+                        if page_read_mode == ReadMode::MinSlot && self.read_endpoint_policy.is_distributed() {
                             self.metrics.record_read_endpoint_fallback();
                         }
                         self.topology

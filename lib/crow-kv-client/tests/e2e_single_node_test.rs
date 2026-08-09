@@ -8,7 +8,7 @@
 //! `ReadMode` routing and the `MinSlot` watermark
 //! (C1-C3).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
 use axum::routing::get;
@@ -18,6 +18,7 @@ use crow_kv::cluster::group::PxGroup;
 use crow_kv::cluster::kv_server::KvServer;
 use crow_kv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crow_kv::cluster::px_kv_store::PxKvStore;
+use crow_kv::metrics::MetricsRegistry;
 
 use bytes::Bytes;
 use crow_kv_client::{BatchOp, ClientConfig, CrowkvClient, GetOutcome, ReadMode};
@@ -160,4 +161,69 @@ async fn read_your_writes_uses_auto_tracked_watermark() {
 
     store.stop();
     store.join().await;
+}
+
+/// A multi-page `Linearizable` scan pays the leader read barrier once
+/// (page 1) then switches subsequent pages to `MinSlot` with page-1's
+/// `read_slot` as the freshness floor — skipping the per-page barrier.
+/// Verified by checking the store's `lease_path + readindex_path` counter
+/// is 1 (not N) after an N-page scan.
+#[tokio::test]
+async fn linearizable_multi_page_scan_pays_barrier_once() {
+    let registry = Arc::new(Mutex::new(MetricsRegistry::new()));
+    let replica = PxLocalReplica::new(STORE_ID, PxLocalReplicaRole::Leader);
+    let mut store = PxKvStore::new(STORE_ID, "127.0.0.1:0".parse().unwrap());
+    store.set_metrics_registry(Arc::clone(&registry));
+    // Small byte budget: 12 keys × (3B key + 20B value) = 23B/entry;
+    // budget=100 → 4 entries/page → 3 pages → 3 barriers without the carry.
+    store.set_scan_byte_budget(100);
+    let server = Arc::new(store);
+
+    let group = PxGroup::new(GROUP_ID, replica);
+    server.add_group(group);
+    server.start().await.expect("failed to start KvStore");
+
+    let seed = spawn_topology_server(server.clone()).await;
+    let client = CrowkvClient::new(ClientConfig::new(vec![seed]));
+
+    // Write 12 keys: "k00".."k11", each with a 20-byte value.
+    for i in 0..12u32 {
+        let key = format!("k{i:02}");
+        client
+            .put(STORE_ID, GROUP_ID, key.as_bytes(), b"v0123456789abcdefxxx", None)
+            .await
+            .expect("put");
+    }
+
+    let scanned = client
+        .scan(STORE_ID, GROUP_ID, b"k", &[], 0, ReadMode::Linearizable, None)
+        .await
+        .expect("scan");
+
+    // All 12 keys returned in order — no duplicates, no gaps.
+    assert_eq!(scanned.items.len(), 12, "all 12 keys returned");
+    for (i, (key, _)) in scanned.items.iter().enumerate() {
+        assert_eq!(key.as_ref(), format!("k{i:02}").as_bytes(), "key {i} in order");
+    }
+
+    // Only page 1 paid the leader barrier; pages 2..3 used MinSlot.
+    let snap = registry.lock().unwrap().snapshot("s.1.g.1.read.");
+    let count = |suffix: &str| {
+        snap.iter()
+            .find(|(n, _)| n.ends_with(suffix))
+            .and_then(|(_, v)| v.strip_prefix("c:"))
+            .and_then(|v| v.split(':').next())
+            .and_then(|n| n.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    let lease = count("read.lease_path.c");
+    let readindex = count("read.readindex_path.c");
+    let barriers = lease + readindex;
+    assert_eq!(
+        barriers, 1,
+        "multi-page Linearizable scan should pay 1 barrier (page 1 only), got {barriers} (lease={lease}, readindex={readindex})"
+    );
+
+    server.stop();
+    server.join().await;
 }

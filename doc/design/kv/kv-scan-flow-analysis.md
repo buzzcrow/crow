@@ -22,6 +22,9 @@ Client SCAN(prefix, start_after, limit, read_mode, min_slot?)
     3. send KvScanRequest via unary RPC, S3-style pagination
        (server applies a 3.5 MiB byte budget per page; client
        transparently pages until !truncated or limit reached)
+       [R55: after page 1 of a Linearizable scan returns read_slot = S,
+        subsequent pages switch to MinSlot with min_slot = S, skipping
+        the per-page leader barrier — page 1 is the only barrier round]
     4. retry: not_leader_hint → follow (uncounted);
        error → counted + backoff; transport error → refresh + backoff
   → KvStoreService::scan (gRPC)                    [kv_service.rs]
@@ -229,16 +232,25 @@ noted.
   skip-list + L1 B+tree cursor) becomes the bottleneck, not the read
   barrier. No code change needed for the read-mode split itself;
   profiling the engine bottleneck is the open work.
-- **[R55](../../backlog/R55-kv-scan-carry-read-slot.md) — Per-page
-  linearizable read barrier**: `PxKvStore::kv_scan` calls
-  `resolve_read_point` on every page (`px_kv_store.rs:183`), so a
-  multi-page linearizable scan pays the barrier (lease check, or a
-  quorum heartbeat round on the ReadIndex fallback) once per page. The
-  client already receives `read_slot` from page 1 — carry it forward
-  as `min_slot` and serve subsequent pages via the MinSlot path.
-  Semantics are unchanged (cross-page results are already not a single
-  snapshot; each page would still be at least as fresh as page 1) and
-  later pages skip the barrier entirely. Client-local, no proto change.
+- **R55 — Per-page linearizable read barrier (done)**:
+  `PxKvStore::kv_scan` calls `resolve_read_point` on every page
+  (`px_kv_store.rs:177`), so a multi-page linearizable scan pays the
+  barrier (lease check, or a quorum heartbeat round on the ReadIndex
+  fallback) once per page. The client already receives `read_slot` from
+  page 1 (`KvScanResponse.read_slot`, proto field 8) but ignored it.
+  After page 1 of a `Linearizable` scan returns `read_slot = S`,
+  `CrowkvClient::scan` switches subsequent pages to `MinSlot` with
+  `min_slot = S` — the store serves locally when
+  `contiguous_applied >= S` (`px_kv_store.rs:581`), skipping the
+  barrier entirely. The leader has `S` applied by construction (it just
+  served page 1 at that slot), so no freshness is lost; a redirect
+  mid-scan lands on the leader, which also has `S` applied. Semantics
+  are unchanged (cross-page results were never a single snapshot; each
+  page remains at least as fresh as page 1). A `MinSlot` scan's behavior
+  is unchanged (the switch only fires for `Linearizable`). Verified by
+  an e2e test asserting `lease_path + readindex_path == 1` for an
+  N-page linearizable scan (was N before). Client-local, no proto
+  change.
 - **[R56](../../backlog/R56-kv-scan-end-key-bound.md) — Prefix-only
   range predicate**: `KvScanRequest` has `prefix` + `start_after` but
   no exclusive `end_key`, so an arbitrary `[start, end)` range cannot

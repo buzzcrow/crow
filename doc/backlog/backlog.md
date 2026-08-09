@@ -101,18 +101,6 @@ complexity, and dependency. Before implementation, follow the
   document the top hot stacks. Investigation only — no scan-path code
   changes. If a clear optimization target emerges, file a follow-up
   requirement with the profiling evidence. Low complexity.
-- **[R55](R55-kv-scan-carry-read-slot.md)** — Carry page-1 `read_slot`
-  forward as `min_slot` — Area: scan / client — a multi-page
-  linearizable scan pays the read barrier once per page
-  (`px_kv_store.rs:183`), but only the first page needs a freshness
-  proof; later pages only need to be at least as fresh as page 1. After
-  page 1 returns `read_slot = S`, switch subsequent pages to `MinSlot`
-  with `min_slot = S` — the store serves locally when
-  `contiguous_applied >= S` (`px_kv_store.rs:575`), skipping the
-  barrier, and redirects to the leader only if the chosen replica
-  hasn't caught up. No proto change (`read_slot`/`min_slot` fields
-  already exist); client-local. Semantics unchanged (a paginated scan
-  was never a single snapshot). Low–medium complexity.
 - **[R56](R56-kv-scan-end-key-bound.md)** — Optional exclusive `end_key`
   range bound — Area: scan / kv — `KvScanRequest` has `prefix` +
   `start_after` but no upper bound, so an arbitrary `[start, end)` range
