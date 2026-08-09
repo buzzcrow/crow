@@ -87,6 +87,16 @@ serialization. The scan path is zero-copy from packed buffer to client
   the FFI via `release()` — no `std::vector<scan_entry>` staging,
   no re-pack loop, no `make_buf` malloc+memcpy. Reduces C++ copies
   from 3 to 1 per scan.
+- **R59** — Two scan modes + snapshot versioning API: the existing
+  `scan` RPC (mode 1, list scan) is now documented as S3-list
+  semantics (per-page-consistent, not cross-page snapshot). A new
+  snapshot versioning API (mode 2) pins a point-in-time-consistent
+  L1 view via `CreateSnapshot` (flush + `snapshot_view`), iterates
+  it with `SnapshotScan` (binary-search + linear scan over the
+  frozen `Vec<ViewEntry>`), and releases it with `ReleaseSnapshot`.
+  Per-group handle registry with 5-min lease/expiry reaps abandoned
+  snapshots. No new engine machinery — the existing `snapshot_view`
+  FFI is reused.
 
 ---
 

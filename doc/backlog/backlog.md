@@ -101,19 +101,6 @@ complexity, and dependency. Before implementation, follow the
   document the top hot stacks. Investigation only — no scan-path code
   changes. If a clear optimization target emerges, file a follow-up
   requirement with the profiling evidence. Low complexity.
-- **[R59](R59-kv-snapshot-scan.md)** — Two scan modes + snapshot
-  versioning API — Area: scan / kv / crow-tree engine — the current
-  `scan` is the only range-read surface (S3-list semantics: per-page
-  consistent, not cross-page). R59 formalizes two modes: (1) **list
-  scan** — the existing `scan`, fast, latest values, for interactive
-  listing; (2) **snapshot versioning API** — flush + `snapshot_view()`
-  (already built, pins L1 at `last_applied_slot`, zero-copy page
-  refcounts) + iterate the frozen vector with prefix/pagination. New
-  RPCs: `CreateSnapshot`/`ListSnapshots`/`SnapshotScan`/
-  `ReleaseSnapshot` + management API for `SetGcWatermark`. No new engine
-  machinery (no version chain, no L0 pinning — flush drains L0 first).
-  Active snapshots protect pinned pages from GC via refcount. Medium
-  complexity.
 - **[R60](R60-tree-scan-sibling-leaf-readahead.md)** — Sibling-leaf
   readahead on cold scans — Area: scan / crow-tree engine — the scan
   path demand-loads each L1 leaf inline (sync) or one pending page per
