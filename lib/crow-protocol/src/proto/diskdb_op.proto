@@ -63,11 +63,13 @@ message GetDiskGroupInfoResponse {
 }
 
 message GetDiskInfoRequest {
-  DiskKey key = 1;
+  uint64             node_id       = 1;
+  uint32             disk_group_id = 2;
+  crow.common.DiskId disk_id       = 3;
 }
 
 message GetDiskInfoResponse {
   bool       ok    = 1;
   string     error = 2;
-  DiskEntry  disk  = 3;
+  DiskInfo   disk  = 3;
 }

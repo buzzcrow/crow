@@ -147,10 +147,18 @@ into the crow-common registry at reporting intervals.
 ### 3.8 Proto types used directly; no Rust type duplication
 
 Proto types (`DiskId`, `ChunkId`, `Segment`, `HwStatus`, `DiskType`,
-`ZoneAllocationState`, key/value pairs) are defined in `crow_protocol`
+`ZoneAllocationState`, value types) are defined in `crow_protocol`
 and used directly in Rust — no field duplication. Extension traits add
 domain methods. Internal types (metas, bitmap, CRC logic) are Rust
 structs not exposed via gRPC.
+
+**Keys are not protobuf.** KV keys use the cross-component binary
+encoding defined in `doc/design/protocol/design-crow-key.md` (flat
+per-kind Rust structs, two-byte `magic | type_tag` header, big-endian
+fixed-width fields). Protobuf-serialized `*Key` messages are never
+used as KV key bytes — the tag bytes break prefix scans. RPC
+responses/requests use `**Info` proto messages that flatten key and
+value fields into one message; see §5 and §7.
 
 ### 3.9 Unit-based sizes; disk-id key routing
 
@@ -226,32 +234,42 @@ though v1 ships flat (node list only).
 
 ### Key layout
 
+Keys use the cross-component binary encoding
+(`doc/design/protocol/design-crow-key.md`): a two-byte
+`magic | type_tag` header followed by fixed big-endian fields in
+hierarchy order. Each kind has its own append-only type tag; prefix
+scans truncate the field bytes at a hierarchy boundary.
+
 ```
 # Physical hierarchy (v1: flat; DC/rack reserved)
-/diskdb/dc/{dc_id}/meta                         -> DataCenterMeta
-/diskdb/dc/{dc_id}/rack/{rack_id}/meta          -> RackMeta
+RackKey      { dc_id, rack_id }                  -> RackMeta
 
 # Node metadata
-/diskdb/node/{node_id}/meta                     -> NodeMeta
+NodeKey      { node_id }                         -> NodeMeta
 
 # Disk-group metadata (logical, belongs to one node)
-/diskdb/node/{node_id}/dg/{dg_id}/meta          -> DiskGroupMeta
+DiskGroupKey { node_id, disk_group_id }          -> DiskGroupMeta
 
 # Disk metadata (physical, belongs to one node)
-/diskdb/node/{node_id}/disk/{disk_id}/meta      -> DiskMeta
+DiskKey      { node_id, disk_group_id, disk_id } -> DiskMeta
 
 # Maps (the two core tables)
-/diskdb/map/owner/{node_id}-{dg_id}             -> {instance_id, lease_expiry}
-/diskdb/map/bind/{node_id}-{dg_id}              -> {store_id, group_id}
+OwnerMapKey  { node_id, disk_group_id }          -> {instance_id, lease_expiry}
+BindMapKey   { node_id, disk_group_id }          -> {store_id, group_id}
 
 # diskdb instance registry
-/diskdb/instance/{instance_id}                  -> InstanceMeta
+InstanceKey  { instance_id }                     -> InstanceMeta
 ```
 
-`node_id` is a `u64`; `dg_id` is a `u32` globally unique; `disk_id` is
-a 128-bit identifier rendered as 32 hex chars. IDs are stringified at
-the KV boundary. Field details in the Rust source (`types/disk.rs`,
-`types/disk_group.rs`, `types/node.rs`, `types/instance.rs`).
+`node_id`, `dc_id`, `rack_id`, and `instance_id` are `u64`;
+`disk_group_id` is a `u32` globally unique; `disk_id` is a 128-bit
+identifier (16 bytes, `high:u64 BE | low:u64 BE`). All key fields are
+fixed-width — no variable-length fields. Exact byte layouts and
+prefix constructors are defined in
+`doc/design/protocol/design-crow-key.md` and implemented in
+`lib/crow-protocol/src/key/`. Field details for the value side live in
+the Rust source (`types/disk.rs`, `types/disk_group.rs`,
+`types/node.rs`, `types/instance.rs`).
 
 **Note**: zones are NOT stored in group 0. A zone is created when its
 disk is added, and its state (records + snapshot) lives on the
@@ -292,22 +310,31 @@ Data Center → Rack → Node (node_id, u64) → Disk-Group ("{node_id}-{dg_id}"
 ### Record key layout
 
 Three types of KV entries on the disk-group's bound data group. Keys
+use the cross-component binary encoding
+(`doc/design/protocol/design-crow-key.md`): each is a flat struct with
+a `magic | type_tag` header and big-endian fixed-width fields. Keys
 are disk-id-based (globally unique → reverse-lookup to the data group).
-No node_id/dg_id in record keys.
+No `node_id`/`disk_group_id` in record keys.
 
 ```
 # Busy block (on allocate; deleted on free)
-/diskdb/{disk_id}/z{zone_idx:04}/busy/{unit_offset:020}  -> BusyBlockValue
+BusyBlockKey { disk_id, zone_index, unit_offset }  -> BusyBlockValue
 
 # Free block (on free)
-/diskdb/{disk_id}/z{zone_idx:04}/free/{unit_offset:020}  -> FreeBlockValue
+FreeBlockKey  { disk_id, zone_index, unit_offset }  -> FreeBlockValue
 
 # Zone (compacted snapshot, periodic)
-/diskdb/{disk_id}/z{zone_idx:04}/zone                    -> ZoneValue
+ZoneKey       { disk_id, zone_index }               -> ZoneValue
 ```
 
-`unit_offset` is zero-padded to 20 digits for lexicographic order.
-Field details in `diskdb_type.proto`.
+`disk_id` is 16 bytes (`high:u64 BE | low:u64 BE`); `zone_index` is
+`u32 BE`; `unit_offset` is `u64 BE`. Big-endian fixed width gives
+lexicographic byte order == numeric order, so a prefix scan of one
+zone's busy (or free) keys returns blocks in `unit_offset` order
+without deserialization. Exact byte layouts and prefix constructors
+(e.g. `BusyBlockKey::prefix_for_zone(disk_id, zone_index)`) are in
+`doc/design/protocol/design-crow-key.md`; value field details are in
+`diskdb_type.proto`.
 
 Design decisions:
 - A busy/free entry can span multiple units (`unit_count` ≥ 1).

@@ -32,53 +32,26 @@ fn main() {
             "Segment",
             "#[derive(Eq, Hash, serde::Serialize, serde::Deserialize)]",
         )
-        .type_attribute(
-            "ZoneKey",
-            "#[derive(Eq, Hash, serde::Serialize, serde::Deserialize)]",
-        )
+        // Value types (serde for bincode/JSON storage).
         .type_attribute("ZoneValue", "#[derive(serde::Serialize, serde::Deserialize)]")
-        .type_attribute(
-            "BusyBlockKey",
-            "#[derive(Eq, Hash, serde::Serialize, serde::Deserialize)]",
-        )
         .type_attribute(
             "BusyBlockValue",
             "#[derive(serde::Serialize, serde::Deserialize)]",
         )
         .type_attribute(
-            "FreeBlockKey",
-            "#[derive(Eq, Hash, serde::Serialize, serde::Deserialize)]",
-        )
-        .type_attribute(
             "FreeBlockValue",
             "#[derive(serde::Serialize, serde::Deserialize)]",
         )
-        // Group-0 sysdata types (serde for bincode/JSON storage).
-        .type_attribute(
-            "DiskKey",
-            "#[derive(Eq, Hash, serde::Serialize, serde::Deserialize)]",
-        )
         .type_attribute("DiskValue", "#[derive(serde::Serialize, serde::Deserialize)]")
-        .type_attribute(
-            "DiskGroupKey",
-            "#[derive(Eq, Hash, serde::Serialize, serde::Deserialize)]",
-        )
         .type_attribute(
             "DiskGroupValue",
             "#[derive(serde::Serialize, serde::Deserialize)]",
         )
-        .type_attribute("DiskEntry", "#[derive(serde::Serialize, serde::Deserialize)]")
+        // Query response types (key + value fields flattened).
+        .type_attribute("DiskInfo", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("DiskGroupInfo", "#[derive(serde::Serialize, serde::Deserialize)]")
-        // Common sysdata types (serde for bincode/JSON storage).
-        .type_attribute(
-            "RackKey",
-            "#[derive(Eq, Hash, serde::Serialize, serde::Deserialize)]",
-        )
+        // Common sysdata value types (serde for bincode/JSON storage).
         .type_attribute("RackValue", "#[derive(serde::Serialize, serde::Deserialize)]")
-        .type_attribute(
-            "NodeKey",
-            "#[derive(Eq, Hash, serde::Serialize, serde::Deserialize)]",
-        )
         .type_attribute("NodeValue", "#[derive(serde::Serialize, serde::Deserialize)]")
         // Enums.
         .type_attribute("HwStatus", "#[derive(serde::Serialize, serde::Deserialize)]")

@@ -36,34 +36,25 @@ message ChunkId {
   uint64 low  = 3;
 }
 
-// ── Rack key + value ────────────────────────────────────────────
-
-// Rack key — identifies a rack within a data center.
-// KV path: /diskdb/dc/{dc_id}/rack/{rack_id}/meta.
-message RackKey {
-  string dc_id   = 1;
-  string rack_id = 2;
-}
+// ── Rack value ──────────────────────────────────────────────────
 
 // Rack value — physical rack container.
+// Rack key is a Rust binary key (RackKey), not a proto message;
+// see doc/design/protocol/design-crow-key.md.
 message RackValue {
   HwStatus status = 1;
   repeated uint64 node_ids = 2;
 }
 
-// ── Node key + value ────────────────────────────────────────────
-
-// Node key — identifies a physical node (globally unique u64).
-// KV path: /diskdb/node/{node_id}/meta.
-message NodeKey {
-  uint64 node_id = 1;
-}
+// ── Node value ──────────────────────────────────────────────────
 
 // Node value — physical node metadata.
 // disk_group_ids is the list of disk-groups on this node.
+// Node key is a Rust binary key (NodeKey), not a proto message;
+// see doc/design/protocol/design-crow-key.md.
 message NodeValue {
-  optional string dc_id         = 1;  // reserved (v1: flat)
-  optional string rack_id       = 2;  // reserved (v1: flat)
+  optional uint64 dc_id         = 1;  // reserved (flat: no DC/rack)
+  optional uint64 rack_id       = 2;  // reserved (flat: no DC/rack)
   HwStatus status               = 3;
   uint32   last_used_dg_id      = 4;
   repeated uint32 disk_group_ids = 5;

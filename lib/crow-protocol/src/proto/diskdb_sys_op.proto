@@ -59,7 +59,7 @@ message AdminResponse {
 // Periodic keepalive sent by each diskdb server instance to group 0.
 // Updates the instance's heartbeat and owned disk-groups.
 message KeepaliveRequest {
-  string instance_id        = 1;
+  uint64 instance_id        = 1;
   string grpc_endpoint      = 2;
   repeated uint32 owned_dg_ids = 3;
 }
