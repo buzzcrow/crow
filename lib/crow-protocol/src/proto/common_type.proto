@@ -1,0 +1,72 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
+// Common types shared across CROW components.
+
+syntax = "proto3";
+
+package crow.common;
+
+// Hardware status shared by Rack, Node, DiskGroup, and Disk.
+// Ordered by severity; INIT is the default (0).
+// Effective status of a disk = max(node, group, disk).
+enum HwStatus {
+  HW_STATUS_INIT        = 0;  // just added, not yet probed
+  HW_STATUS_UP          = 1;  // healthy and operational
+  HW_STATUS_MAINTENANCE = 2;  // operator-set, taken out of rotation
+  HW_STATUS_SUSPECT     = 3;  // transient issues, being watched
+  HW_STATUS_MISSING     = 4;  // cannot be found / probed
+  HW_STATUS_BAD         = 5;  // confirmed bad
+  HW_STATUS_OFFLINE     = 6;  // operator-set, fully removed
+}
+
+// 128-bit disk identifier, split into two uint64 for proto efficiency.
+// Globally unique — used for KV key routing (reverse-lookup to data group).
+message DiskId {
+  uint64 high = 1;
+  uint64 low  = 2;
+}
+
+// 192-bit chunk identifier (owner of allocated blocks).
+// A chunk is a logical block composed of multiple busy-blocks from
+// different nodes/disks, with EC or mirror protection.
+message ChunkId {
+  uint64 high = 1;
+  uint64 mid  = 2;
+  uint64 low  = 3;
+}
+
+// ── Rack key + value ────────────────────────────────────────────
+
+// Rack key — identifies a rack within a data center.
+// KV path: /diskdb/dc/{dc_id}/rack/{rack_id}/meta.
+message RackKey {
+  string dc_id   = 1;
+  string rack_id = 2;
+}
+
+// Rack value — physical rack container.
+message RackValue {
+  HwStatus status = 1;
+  repeated uint64 node_ids = 2;
+}
+
+// ── Node key + value ────────────────────────────────────────────
+
+// Node key — identifies a physical node (globally unique u64).
+// KV path: /diskdb/node/{node_id}/meta.
+message NodeKey {
+  uint64 node_id = 1;
+}
+
+// Node value — physical node metadata.
+// disk_group_ids is the list of disk-groups on this node.
+message NodeValue {
+  optional string dc_id         = 1;  // reserved (v1: flat)
+  optional string rack_id       = 2;  // reserved (v1: flat)
+  HwStatus status               = 3;
+  uint32   last_used_dg_id      = 4;
+  repeated uint32 disk_group_ids = 5;
+  uint64   status_changed_at_ms = 6;
+  optional uint64 temp_failure_since_ms = 7;
+}

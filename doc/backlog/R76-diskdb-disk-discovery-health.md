@@ -193,7 +193,7 @@ and the disk failure detection + recovery flow.
 - `app/crow-diskdb/src/lib.rs` — add `discovery` module.
 - `app/crow-diskdb/src/config/mod.rs` — add `DiscoveryConfig`
   (disk paths, probe intervals).
-- `lib/protocol/src/proto/diskdb.proto` — add `ProbeDisk`,
+- `lib/crow-protocol/src/proto/diskdb.proto` — add `ProbeDisk`,
   `GetDiskHealth` RPCs and messages.
 - `app/crow-diskdb/src/main.rs` — spawn health probe loop,
   wire `DiskFailureHandler`.

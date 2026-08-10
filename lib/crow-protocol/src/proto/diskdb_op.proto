@@ -1,0 +1,73 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
+// diskdb operation request/response messages.
+
+syntax = "proto3";
+
+package crow.diskdb.rpc;
+
+import "common_type.proto";
+import "diskdb_type.proto";
+
+// ── Allocate ────────────────────────────────────────────────────
+
+message AllocateBlocksRequest {
+  uint32 disk_group_id            = 1;  // globally unique
+  uint32 unit_count               = 2;  // units per allocation
+  uint32 count                    = 3;  // how many allocations
+  repeated crow.common.DiskId exclude_disk_ids = 4;  // negative disk hints
+}
+
+message AllocateResponse {
+  bool   ok              = 1;
+  string error           = 2;
+  repeated Segment segments = 3;
+}
+
+// ── Free ────────────────────────────────────────────────────────
+
+message FreeBlocksRequest {
+  repeated Segment segments = 1;
+}
+
+message FreeResponse {
+  bool   ok           = 1;
+  string error        = 2;
+  uint32 freed_count  = 3;  // how many succeeded
+}
+
+// ── Query capacity stats ────────────────────────────────────────
+
+message QueryCapacityStatsRequest {
+  // If disk_group_id set = specific group; 0 = all owned.
+  uint32 disk_group_id = 1;
+}
+
+message QueryCapacityStatsResponse {
+  bool   ok    = 1;
+  string error = 2;
+  repeated DiskGroupInfo disk_groups = 3;
+}
+
+// ── Get info (read-only, from diskdb synced cache) ──────────────
+
+message GetDiskGroupInfoRequest {
+  uint32 disk_group_id = 1;
+}
+
+message GetDiskGroupInfoResponse {
+  bool         ok    = 1;
+  string       error = 2;
+  DiskGroupInfo group = 3;
+}
+
+message GetDiskInfoRequest {
+  DiskKey key = 1;
+}
+
+message GetDiskInfoResponse {
+  bool       ok    = 1;
+  string     error = 2;
+  DiskEntry  disk  = 3;
+}

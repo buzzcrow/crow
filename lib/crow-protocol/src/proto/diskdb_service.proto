@@ -1,0 +1,25 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
+// diskdb gRPC service — served by the diskdb server.
+//
+// diskdb is a distributed disk-block allocator on CROW KV. It owns
+// disk-groups (the unit of ownership + paxos binding), allocates disk
+// blocks within them, and persists all state to CROW KV (group 0 for
+// sysdata, paxos data groups for zone records). See
+// doc/design/diskdb/design-crow-diskdb.md.
+
+syntax = "proto3";
+
+package crow.diskdb.rpc;
+
+import "diskdb_op.proto";
+
+// Served by the diskdb server.
+service DiskdbService {
+  rpc AllocateBlocks(AllocateBlocksRequest)     returns (AllocateResponse);
+  rpc FreeBlocks(FreeBlocksRequest)             returns (FreeResponse);
+  rpc QueryCapacityStats(QueryCapacityStatsRequest) returns (QueryCapacityStatsResponse);
+  rpc GetDiskGroupInfo(GetDiskGroupInfoRequest) returns (GetDiskGroupInfoResponse);
+  rpc GetDiskInfo(GetDiskInfoRequest)           returns (GetDiskInfoResponse);
+}

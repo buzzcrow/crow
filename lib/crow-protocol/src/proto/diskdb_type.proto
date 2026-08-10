@@ -1,0 +1,147 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
+// diskdb type definitions: enums, key/value pairs for data-group
+// storage, and the allocation handle (Segment). Group-0 sysdata types
+// are in diskdb_sys_type.proto. DiskId is in common_type.proto.
+//
+// See doc/design/diskdb/design-crow-diskdb.md.
+
+syntax = "proto3";
+
+package crow.diskdb.rpc;
+
+import "common_type.proto";
+
+// ── Enums ───────────────────────────────────────────────────────
+
+// Physical disk technology. Determines zone implementation.
+enum DiskType {
+  BLOCK_HDD = 0;
+  BLOCK_SSD = 1;
+  ZONE_SSD  = 2;
+  SMR_HDD   = 3;
+}
+
+// Zone allocation lifecycle (in-memory CAS within one diskdb instance).
+enum ZoneAllocationState {
+  ZONE_ALLOC_ACTIVE    = 0;  // zone is available for allocation
+  ZONE_ALLOC_AVAILABLE = 1;  // zone has been used but still has space
+  ZONE_ALLOC_FULL      = 2;  // no space left
+}
+
+// ── Zone key + value ────────────────────────────────────────────
+
+// Zone key — identifies a zone within a disk.
+message ZoneKey {
+  crow.common.DiskId  disk_id    = 1;
+  uint32  zone_index = 2;
+}
+
+// Zone value — stored at the zone key.
+// All sizes are in units (block unit size defined per-disk, default 1M).
+message ZoneValue {
+  uint64 disk_offset_units     = 1;  // absolute offset on disk
+  uint64 zone_size_units       = 2;  // capacity (last zone may be smaller)
+  ZoneAllocationState alloc_state = 3;
+  uint64 used_units            = 4;
+  bytes  usage_bitmap          = 5;  // serialized bitmap
+}
+
+// ── Disk key + value ────────────────────────────────────────────
+
+// Disk key — identifies a physical disk within a disk-group.
+// KV path: /diskdb/node/{node_id}/dg/{dg_id}/disk/{disk_id}/meta.
+message DiskKey {
+  uint64  node_id       = 1;
+  uint32  disk_group_id = 2;
+  crow.common.DiskId  disk_id       = 3;
+}
+
+// Disk value — physical disk properties.
+// All sizes are in units; unit_size_bytes defines the unit itself.
+message DiskValue {
+  DiskType disk_type       = 1;
+  uint64   capacity_units  = 2;
+  uint64   zone_size_units = 3;
+  uint32   unit_size_bytes = 4;
+  uint32   zone_count      = 5;
+  crow.common.HwStatus status = 6;
+}
+
+// ── DiskGroup key + value ───────────────────────────────────────
+
+// DiskGroup key — identifies a disk-group within a node.
+// KV path: /diskdb/node/{node_id}/dg/{dg_id}/meta.
+message DiskGroupKey {
+  uint64 node_id       = 1;
+  uint32 disk_group_id = 2;
+}
+
+// DiskGroup value — logical container of disks on one node.
+message DiskGroupValue {
+  crow.common.HwStatus status = 1;
+  repeated crow.common.DiskId disk_ids = 2;
+}
+
+// ── Segment (allocation handle) ─────────────────────────────────
+
+// Handle returned to callers on allocation.
+// Contains all information needed to locate and free the block.
+// No node_id/disk_group_id — disk_id is globally unique.
+message Segment {
+  crow.common.DiskId  disk_id     = 1;
+  uint32  zone_index  = 2;
+  uint64  unit_offset = 3;  // offset within zone in units
+  uint32  unit_count  = 4;  // how many units
+  crow.common.ChunkId owner_chunk = 5;  // chunk that owns this allocation
+}
+
+// ── BusyBlock key + value ───────────────────────────────────────
+
+// BusyBlock key — identifies an allocated block range.
+message BusyBlockKey {
+  crow.common.DiskId  disk_id     = 1;
+  uint32  zone_index  = 2;
+  uint64  unit_offset = 3;
+}
+
+// BusyBlock value — stored at the busy-block key.
+// Written on allocate; deleted on free.
+message BusyBlockValue {
+  uint32 unit_count       = 1;  // how many units this allocation spans
+  crow.common.ChunkId owner_chunk = 2;  // chunk that owns this allocation
+  uint64 allocate_count  = 3;  // how many times this range has been allocated
+}
+
+// ── FreeBlock key + value ───────────────────────────────────────
+
+// FreeBlock key — identifies a freed block range.
+message FreeBlockKey {
+  crow.common.DiskId  disk_id     = 1;
+  uint32  zone_index  = 2;
+  uint64  unit_offset = 3;
+}
+
+// FreeBlock value — stored at the free-block key.
+// Written on free (the corresponding busy-block entry is deleted).
+message FreeBlockValue {
+  uint32 unit_count        = 1;  // how many units
+  crow.common.ChunkId previous_owner = 2;  // who owned it before free
+  uint64 free_count       = 3;  // how many times freed
+}
+
+// ── Query response types ────────────────────────────────────────
+
+// Disk entry in a query response — key + value pair.
+message DiskEntry {
+  DiskKey   key   = 1;
+  DiskValue value = 2;
+}
+
+// Disk-group info for query responses — key + value + member disks.
+message DiskGroupInfo {
+  DiskGroupKey          key    = 1;
+  DiskGroupValue        value  = 2;
+  repeated DiskEntry    disks  = 3;
+}

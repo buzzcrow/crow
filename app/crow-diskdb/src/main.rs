@@ -5,10 +5,11 @@
 //!
 //! Skeleton — wiring filled in by follow-up requirements.
 
-use clap::Parser;
-use tracing::info;
+mod config;
 
-use crow_diskdb::{validate, DiskdbConfig};
+use clap::Parser;
+use config::{validate, DiskdbConfig};
+use tracing::info;
 
 /// CROW diskdb server CLI.
 #[derive(Parser, Debug)]

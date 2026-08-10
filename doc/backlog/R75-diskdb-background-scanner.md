@@ -160,7 +160,7 @@ integrity. Leak detection is scaffolded but returns "not implemented."
    - `GetScanStatus` — returns the last scan result summary
      (timestamps, counts, issues found).
    - Add corresponding proto messages to
-     `lib/protocol/src/proto/diskdb.proto`.
+     `lib/crow-protocol/src/proto/diskdb.proto`.
 
 7. **Scanner metrics** — add to `app/crow-diskdb/src/metrics/mod.rs`
    (from R74):
@@ -185,7 +185,7 @@ integrity. Leak detection is scaffolded but returns "not implemented."
   `GetScanStatus` handlers.
 - `app/crow-diskdb/src/metrics/mod.rs` — scanner metrics.
 - `app/crow-diskdb/src/lib.rs` — add `scanner` module.
-- `lib/protocol/src/proto/diskdb.proto` — add `TriggerScan`,
+- `lib/crow-protocol/src/proto/diskdb.proto` — add `TriggerScan`,
   `GetScanStatus` RPCs and messages.
 - `app/crow-diskdb/src/main.rs` — spawn scanner loop.
 - `app/crow-diskdb/src/config/mod.rs` (from R70) — add scanner

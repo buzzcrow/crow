@@ -1,12 +1,11 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! Lock-free usage bitmap for zone block tracking.
+//! Lock-free bitmap for block tracking.
 //!
 //! Wraps `Vec<AtomicU64>` for lock-free bit operations. Each bit
-//! represents one block (default 1 MB) in a zone. `range_set` marks
-//! blocks allocated (on allocate); `range_clear` marks them free (on
-//! free). Double-set and double-clear are detected and rolled back.
+//! represents one block. `range_set` marks blocks allocated; `range_clear`
+//! marks them free. Double-set and double-clear are detected and rolled back.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 

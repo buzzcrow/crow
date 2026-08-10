@@ -16,7 +16,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-crow-protocol = { path = "../../lib/protocol" }
+crow-protocol = { path = "../../lib/crow-protocol" }
 crow-kv-client = { path = "../../lib/crow-kv-client" }
 crow-common = { path = "../../lib/crow-common/rust" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal", "net", "sync"] }

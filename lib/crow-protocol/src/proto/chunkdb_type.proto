@@ -1,0 +1,10 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
+// Chunkdb type definitions.
+// ChunkId was moved to common_type.proto (it is a shared identifier
+// used by multiple components, not specific to chunkdb).
+
+syntax = "proto3";
+
+package crow.chunkdb;

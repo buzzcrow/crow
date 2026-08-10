@@ -764,8 +764,11 @@ dependencies = [
 name = "crow-protocol"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "bytes",
+ "crc32fast",
  "prost",
+ "serde",
  "tonic",
  "tonic-build",
 ]

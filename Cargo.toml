@@ -4,7 +4,7 @@ members = [
     "lib/crow-common/rust",
     "lib/crow-kv",
     "lib/crow-kv-client",
-    "lib/protocol",
+    "lib/crow-protocol",
     "app/crow-kv-server",
     "app/crow-diskdb",
     "lib/crow-diskdb-client",

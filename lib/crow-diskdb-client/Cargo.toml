@@ -12,7 +12,7 @@ autobenches = false
 workspace = true
 
 [dependencies]
-crow-protocol = { path = "../protocol" }
+crow-protocol = { path = "../crow-protocol" }
 crow-kv-client = { path = "../crow-kv-client" }
 tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
 tonic = { workspace = true }

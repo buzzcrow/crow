@@ -169,7 +169,7 @@ path.
      update gauge counters in crow-common registry. This bridges the
      hot-path atomic counters to the reporting layer.
 
-7. **Proto extension** — update `lib/protocol/src/proto/diskdb.proto`
+7. **Proto extension** — update `lib/crow-protocol/src/proto/diskdb.proto`
    (from R70):
    - Add `RecalcDiskUsageRequest` / `RecalcDiskUsageResponse` for the
      recalc admin RPC.
@@ -194,7 +194,7 @@ path.
   `query_disk_usage`, add `recalc_disk_usage` admin handler.
 - `app/crow-diskdb/src/grpc/admin.rs` — add recalc RPC handler.
 - `app/crow-diskdb/src/lib.rs` — add `metrics` module.
-- `lib/protocol/src/proto/diskdb.proto` — add `RecalcDiskUsage` RPC,
+- `lib/crow-protocol/src/proto/diskdb.proto` — add `RecalcDiskUsage` RPC,
   `ZoneUsage` message (if not in R70).
 - `app/crow-diskdb/src/main.rs` — spawn metrics reporting loop.
 - `app/crow-diskdb/Cargo.toml` — ensure `crow-common` dependency.

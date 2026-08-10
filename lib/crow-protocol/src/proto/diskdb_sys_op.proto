@@ -1,0 +1,70 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
+// diskdb admin operation request/response messages.
+// Targets group 0; served by a future admin/console component,
+// NOT the diskdb server.
+
+syntax = "proto3";
+
+package crow.diskdb.rpc;
+
+import "common_type.proto";
+import "diskdb_type.proto";
+
+message AddDiskGroupRequest {
+  uint64 node_id = 1;
+  // dg_id auto-assigned by incrementing node's last_used_dg_id.
+}
+
+message AddDiskGroupResponse {
+  bool   ok            = 1;
+  string error         = 2;
+  uint32 disk_group_id = 3;  // assigned dg_id
+}
+
+message AddDiskRequest {
+  uint32   disk_group_id  = 1;  // which disk-group this disk joins
+  crow.common.DiskId   disk_id        = 2;
+  DiskType disk_type      = 3;
+  uint64   capacity_units = 4;
+  uint64   zone_size_units = 5;
+  uint32   unit_size_bytes = 6;
+}
+
+message RemoveDiskRequest {
+  crow.common.DiskId disk_id = 1;
+}
+
+message SetDiskStatusRequest {
+  crow.common.DiskId disk_id           = 1;
+  crow.common.HwStatus status = 2;
+}
+
+message SetDiskGroupStatusRequest {
+  uint32 disk_group_id     = 1;
+  crow.common.HwStatus status = 2;
+}
+
+message SetNodeStatusRequest {
+  uint64 node_id           = 1;
+  crow.common.HwStatus status = 2;
+}
+
+message AdminResponse {
+  bool   ok    = 1;
+  string error = 2;
+}
+
+// Periodic keepalive sent by each diskdb server instance to group 0.
+// Updates the instance's heartbeat and owned disk-groups.
+message KeepaliveRequest {
+  string instance_id        = 1;
+  string grpc_endpoint      = 2;
+  repeated uint32 owned_dg_ids = 3;
+}
+
+message KeepaliveResponse {
+  bool   ok    = 1;
+  string error = 2;
+}
