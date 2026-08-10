@@ -3,103 +3,256 @@
 
 // diskdb gRPC service definitions.
 //
-// This is the first component protocol in the common `crow-protocol`
-// crate. crow-kv's existing protos stay in `crow-kv` (unchanged).
-// Later, when CROW adds its own RPC transport, the protobuf messages
-// are reused and only the transport changes.
+// diskdb is a distributed disk-block allocator on CROW KV. It owns
+// disk-groups (the unit of ownership + paxos binding), allocates disk
+// blocks within them, and persists all state to CROW KV (group 0 for
+// sysdata, paxos data groups for zone journals). See
+// doc/design/diskdb/design-crow-diskdb.md.
+//
+// Identity model: NodeId (uint64), DiskGroupId (uint32, unique within
+// node), DiskUuid (two uint64 = 128-bit). Node exists in group 0 but
+// is not a diskdb protocol level — DiskGroup is the top level here.
 
 syntax = "proto3";
 
 package crow.diskdb.rpc;
 
-// ── Allocate ─────────────────────────────────────────────────────
+// ── Id types ────────────────────────────────────────────────────
 
-message AllocateBlockRequest {
-  string disk_group_id = 1;
-  uint32 size          = 2;  // bytes, aligned to block granularity
+// 128-bit disk UUID, split into two uint64 for proto efficiency.
+message DiskUuid {
+  uint64 high = 1;
+  uint64 low  = 2;
 }
 
-message AllocateBlocksRequest {
-  string  disk_group_id      = 1;
-  uint32  size               = 2;
-  uint32  count              = 3;
-  repeated string exclude_disk_uuids = 4;  // negative disk hint
+// ── Enums ───────────────────────────────────────────────────────
+
+// Physical disk technology. Determines zone implementation.
+enum DiskType {
+  BLOCK_HDD = 0;
+  BLOCK_SSD = 1;
+  ZONE_SSD  = 2;
+  SMR_HDD   = 3;
 }
+
+// Operational status shared by Node, DiskGroup, and Disk.
+// Ordered by restrictiveness; OFFLINE is most restrictive.
+// Effective status of a disk = max(node, group, disk).
+enum Status {
+  STATUS_ONLINE        = 0;
+  STATUS_INIT          = 1;
+  STATUS_MAINTENANCE   = 2;
+  STATUS_TEMP_FAILURE  = 3;
+  STATUS_OFFLINE       = 4;
+}
+
+// Zone hardware health (probed locally).
+enum ZoneState {
+  ZONE_STATE_HEALTHY = 0;
+  ZONE_STATE_MISSING = 1;
+  ZONE_STATE_BAD     = 2;
+}
+
+// Zone allocation lifecycle (in-memory CAS within one diskdb instance).
+enum ZoneAllocationState {
+  ZONE_ALLOC_ACTIVE = 0;
+  ZONE_ALLOC_BUSY   = 1;
+  ZONE_ALLOC_ERROR  = 2;
+  ZONE_ALLOC_FULL   = 3;
+}
+
+// Disk health state (probed locally; distinct from operator-set Status).
+enum DiskState {
+  DISK_STATE_INIT    = 0;
+  DISK_STATE_ACTIVE  = 1;
+  DISK_STATE_SUSPECT = 2;
+  DISK_STATE_MISSING = 3;
+  DISK_STATE_BAD     = 4;
+}
+
+// ── Hierarchy data structures ───────────────────────────────────
+// Nesting: DiskGroup → Disk → Zone.
+// (Node exists in group 0 but is not a diskdb protocol level.)
+// Returned by Get*Info and QueryCapacityStats.
+
+message ZoneInfo {
+  uint32 zone_index          = 1;
+  uint64 disk_offset         = 2;  // absolute byte offset on disk
+  uint64 zone_size_bytes     = 3;  // capacity (last zone may be smaller)
+  ZoneState zone_state       = 4;
+  ZoneAllocationState alloc_state = 5;
+  uint64 used_bytes          = 6;
+  uint64 free_bytes          = 7;
+  uint32 block_count         = 8;
+  uint32 busy_block_count    = 9;
+}
+
+message DiskInfo {
+  DiskUuid disk_uuid       = 1;
+  uint64 node_id           = 2;
+  DiskType disk_type       = 3;
+  uint64 capacity_bytes    = 4;
+  uint64 zone_size_bytes   = 5;
+  uint32 block_size_bytes  = 6;
+  uint32 zone_count        = 7;
+  Status status            = 8;
+  DiskState disk_state     = 9;
+  repeated ZoneInfo zones  = 10;
+}
+
+message DiskGroupInfo {
+  uint64 node_id           = 1;
+  uint32 disk_group_id     = 2;  // unique within node
+  Status status            = 3;
+  repeated DiskInfo disks  = 4;
+}
+
+// ── Segment (allocation handle) ─────────────────────────────────
 
 message Segment {
-  string node_id    = 1;  // disk-group id
-  string disk_uuid  = 2;
-  uint32 zone_index = 3;
-  uint64 zone_offset = 4;  // byte offset within zone
-  uint32 size       = 5;   // bytes
-  uint64 tag        = 6;   // nanosecond timestamp
+  uint64 node_id        = 1;
+  uint32 disk_group_id  = 2;
+  DiskUuid disk_uuid    = 3;
+  uint32 zone_index     = 4;
+  uint64 zone_offset    = 5;  // byte offset within zone
+  uint32 size           = 6;  // bytes, aligned to block granularity
+  uint64 tag            = 7;  // nanosecond timestamp for tracking
+}
+
+// ── Allocate ────────────────────────────────────────────────────
+
+message AllocateBlocksRequest {
+  uint64 node_id                   = 1;
+  uint32 disk_group_id             = 2;
+  uint32 size                      = 3;  // bytes, aligned to block granularity
+  uint32 count                     = 4;
+  repeated DiskUuid exclude_disk_uuids = 5;  // negative disk hints
 }
 
 message AllocateResponse {
-  bool   ok    = 1;
-  string error = 2;
+  bool   ok              = 1;
+  string error           = 2;
   repeated Segment segments = 3;
 }
 
-// ── Free ─────────────────────────────────────────────────────────
+// ── Free ────────────────────────────────────────────────────────
 
-message FreeBlockRequest {
-  Segment segment = 1;
+message FreeBlocksRequest {
+  repeated Segment segments = 1;
 }
 
 message FreeResponse {
+  bool   ok           = 1;
+  string error        = 2;
+  uint32 freed_count  = 3;  // how many succeeded
+}
+
+// ── Query capacity stats ────────────────────────────────────────
+
+message QueryCapacityStatsRequest {
+  // If node_id + disk_group_id set = specific group; empty = all owned.
+  uint64 node_id       = 1;
+  uint32 disk_group_id = 2;
+  // If true, include per-zone breakdown in DiskInfo.zones.
+  bool include_zones   = 3;
+}
+
+message QueryCapacityStatsResponse {
+  bool   ok    = 1;
+  string error = 2;
+  repeated DiskGroupInfo disk_groups = 3;
+}
+
+// ── Get info (read-only, from diskdb synced cache) ──────────────
+
+message GetDiskGroupInfoRequest {
+  uint64 node_id       = 1;
+  uint32 disk_group_id = 2;
+}
+
+message GetDiskGroupInfoResponse {
+  bool         ok    = 1;
+  string       error = 2;
+  DiskGroupInfo group = 3;
+}
+
+message GetDiskInfoRequest {
+  DiskUuid disk_uuid = 1;
+}
+
+message GetDiskInfoResponse {
+  bool     ok    = 1;
+  string   error = 2;
+  DiskInfo disk  = 3;
+}
+
+// ── Admin (targets group 0; NOT served by the diskdb server) ────
+
+message AddDiskGroupRequest {
+  uint64 node_id = 1;
+  // dg_id auto-assigned by incrementing node's last_used_dg_id.
+}
+
+message AddDiskGroupResponse {
+  bool   ok            = 1;
+  string error         = 2;
+  uint32 disk_group_id = 3;  // assigned dg_id
+}
+
+message AddDiskRequest {
+  uint64 node_id        = 1;
+  uint32 disk_group_id  = 2;  // which disk-group this disk joins
+  DiskUuid disk_uuid    = 3;
+  DiskType disk_type    = 4;
+  uint64 capacity_bytes = 5;
+  uint64 zone_size_bytes  = 6;
+  uint32 block_size_bytes = 7;
+}
+
+message RemoveDiskRequest {
+  uint64 node_id    = 1;
+  DiskUuid disk_uuid = 2;
+}
+
+message SetDiskStatusRequest {
+  uint64 node_id    = 1;
+  DiskUuid disk_uuid = 2;
+  Status status     = 3;
+}
+
+message SetDiskGroupStatusRequest {
+  uint64 node_id       = 1;
+  uint32 disk_group_id = 2;
+  Status status        = 3;
+}
+
+message SetNodeStatusRequest {
+  uint64 node_id  = 1;
+  Status status   = 2;
+}
+
+message AdminResponse {
   bool   ok    = 1;
   string error = 2;
 }
 
-// ── Zone lifecycle ───────────────────────────────────────────────
+// ── Services ────────────────────────────────────────────────────
 
-message ActiveZoneRequest {
-  string disk_uuid  = 1;
-  uint32 zone_index = 2;
-}
-
-message ActiveZoneResponse {
-  bool   ok    = 1;
-  string error = 2;
-}
-
-// ── Query ────────────────────────────────────────────────────────
-
-message QueryDiskUsageRequest {
-  // If empty, query all owned nodes.
-  string node_id = 1;
-}
-
-message DiskUsage {
-  string disk_uuid         = 1;
-  uint64 capacity_bytes    = 2;
-  uint64 busy_bytes        = 3;
-  uint64 free_bytes        = 4;
-  uint64 active_zone_count = 5;
-  uint64 total_zone_count  = 6;
-}
-
-message NodeUsage {
-  string node_id           = 1;
-  uint64 capacity_bytes    = 2;
-  uint64 busy_bytes        = 3;
-  uint64 free_bytes        = 4;
-  repeated DiskUsage disks = 5;
-}
-
-message QueryDiskUsageResponse {
-  bool   ok    = 1;
-  string error = 2;
-  repeated NodeUsage nodes = 3;
-}
-
-// ── Service ──────────────────────────────────────────────────────
-
+// Served by the diskdb server.
 service DiskdbService {
-  rpc AllocateBlock(AllocateBlockRequest)     returns (AllocateResponse);
-  rpc AllocateBlocks(AllocateBlocksRequest)   returns (AllocateResponse);
-  rpc FreeBlock(FreeBlockRequest)             returns (FreeResponse);
-  rpc ActiveZone(ActiveZoneRequest)           returns (ActiveZoneResponse);
-  rpc QueryDiskUsage(QueryDiskUsageRequest)   returns (QueryDiskUsageResponse);
+  rpc AllocateBlocks(AllocateBlocksRequest)     returns (AllocateResponse);
+  rpc FreeBlocks(FreeBlocksRequest)             returns (FreeResponse);
+  rpc QueryCapacityStats(QueryCapacityStatsRequest) returns (QueryCapacityStatsResponse);
+  rpc GetDiskGroupInfo(GetDiskGroupInfoRequest) returns (GetDiskGroupInfoResponse);
+  rpc GetDiskInfo(GetDiskInfoRequest)           returns (GetDiskInfoResponse);
+}
+
+// Targets group 0; served by a future admin/console component.
+service DiskdbAdminService {
+  rpc AddDiskGroup(AddDiskGroupRequest)         returns (AddDiskGroupResponse);
+  rpc AddDisk(AddDiskRequest)                   returns (AdminResponse);
+  rpc RemoveDisk(RemoveDiskRequest)             returns (AdminResponse);
+  rpc SetDiskStatus(SetDiskStatusRequest)       returns (AdminResponse);
+  rpc SetDiskGroupStatus(SetDiskGroupStatusRequest) returns (AdminResponse);
+  rpc SetNodeStatus(SetNodeStatusRequest)       returns (AdminResponse);
 }

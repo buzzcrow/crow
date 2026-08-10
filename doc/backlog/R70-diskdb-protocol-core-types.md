@@ -23,6 +23,10 @@ missing:
 - Enum types (`DiskType`, `Status`, `ZoneState`, `ZoneAllocationState`,
   `DiskState`) that the core types and gRPC messages share.
 
+ai-todo , do not need activeZone, zone current design to be logical container. ZoneRecord is the key data structure. Do not need active from outside.  The outside only impact disk status.
+zone need a size properity, last zone may have different size. 
+if we need support different zone size cross thedisk, need start offset of disk in zone info. (is it nessary for the flexbility?) 
+
 The `app/crow-diskdb` client crate has only an error enum stub — no
 core types, no config, no client struct. The server binary
 (`app/crow-diskdb`) is listed as a workspace member but does not
@@ -40,6 +44,10 @@ no runtime logic, no allocation, no KV I/O.
      `SetDiskStatus`, `SetDiskGroupStatus`, `SetNodeStatus`,
      `GetNodeInfo`, `GetDiskInfo`. These are used by R71 (status
      management), R76 (disk discovery), and R77 (console).
+
+we can't change status direct to disksever, we can change status in sys group0, then diskdb can sync the status later.
+The node disk are all for group 0. not for diskdb.
+
    - Add enum messages: `DiskType` (BlockHdd/BlockSsd/ZoneSsd/SmrHdd),
      `Status` (Online/Init/Maintenance/TempFailure/Offline),
      `ZoneState` (Healthy/Missing/Bad), `ZoneAllocationState`
@@ -50,6 +58,9 @@ no runtime logic, no allocation, no KV I/O.
      `bad_zone_count`) for R74's query API.
    - Add `ZoneUsage` message for per-zone busy/free breakdown (used by
      R74 and R77's block-array visualization).
+
+again, these managment are all for gourp 0.  diskdb sync info from group0 and refrsh it's owned group ID.  
+We need a layer to managment the relatioship diskgroup and diskdb instance. Put it in some requirment can cover it. 
 
 2. **Core types** — create `app/crow-diskdb/src/types/` module:
    - `Segment` — allocation handle: `(disk_group_id, disk_uuid,

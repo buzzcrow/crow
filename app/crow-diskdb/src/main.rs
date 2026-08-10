@@ -8,7 +8,7 @@
 use clap::Parser;
 use tracing::info;
 
-use crow_diskdb::DiskdbConfig;
+use crow_diskdb::{validate, DiskdbConfig};
 
 /// CROW diskdb server CLI.
 #[derive(Parser, Debug)]
@@ -20,7 +20,7 @@ struct Cli {
 
     /// gRPC listen address (overrides config).
     #[arg(long)]
-    grpc_addr: Option<String>,
+    listen_addr: Option<String>,
 
     /// HTTP management listen address (overrides config).
     #[arg(long)]
@@ -34,9 +34,12 @@ async fn main() {
     tracing_subscriber::fmt().init();
 
     let config = load_config(&args);
+    if let Err(e) = validate(&config) {
+        panic!("invalid config: {e}");
+    }
     info!(?config, "crow-diskdb starting (skeleton)");
 
-    // TODO(R70+): wire up crow-kv-client, group-0 sync, gRPC server,
+    // TODO(R71+): wire up crow-kv-client, group-0 sync, gRPC server,
     // HTTP mgmt API, background loops.
     info!("skeleton ready — no services started yet");
 }
@@ -53,8 +56,8 @@ fn load_config(args: &Cli) -> DiskdbConfig {
         DiskdbConfig::default()
     };
 
-    if let Some(addr) = &args.grpc_addr {
-        config.server.grpc_listen_addr.clone_from(addr);
+    if let Some(addr) = &args.listen_addr {
+        config.server.listen_addr.clone_from(addr);
     }
     if let Some(addr) = &args.http_addr {
         config.server.http_listen_addr.clone_from(addr);
