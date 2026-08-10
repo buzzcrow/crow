@@ -70,7 +70,7 @@ pub struct PxLearner {
     /// Materialized key-value state. Boxed so the backend (in-memory, file,
     /// crow-tree) is a runtime choice; the whole `PxLearner` is `Arc`-shared
     /// across replica rebuilds, so the engine is shared with it.
-    engine: Box<dyn KVEngine>,
+    engine: Arc<dyn KVEngine>,
     /// Highest slot S such that every slot in `[1, S]` has been learned.
     contiguous_chosen: AtomicU64,
     /// Highest slot S such that every slot in `[1, S]` has been applied to
@@ -130,7 +130,7 @@ impl Default for PxLearner {
         };
         let engine = CrowTreeEngine::open(&opt).expect("crow-tree mem-block open");
         Self {
-            engine: Box::new(engine),
+            engine: Arc::new(engine),
             contiguous_chosen: AtomicU64::new(0),
             contiguous_applied: AtomicU64::new(0),
             last_chosen_slot: AtomicU64::new(0),
@@ -157,7 +157,7 @@ impl PxLearner {
     #[must_use]
     pub fn with_engine(engine: Box<dyn KVEngine>) -> Self {
         Self {
-            engine,
+            engine: Arc::from(engine),
             contiguous_chosen: AtomicU64::new(0),
             contiguous_applied: AtomicU64::new(0),
             last_chosen_slot: AtomicU64::new(0),
@@ -176,6 +176,14 @@ impl PxLearner {
     #[must_use]
     pub fn engine(&self) -> &dyn KVEngine {
         self.engine.as_ref()
+    }
+
+    /// Clone the engine handle as an `Arc`, for moving into `spawn_blocking`
+    /// (the maintenance loop's `persist_snapshot` runs off the async runtime
+    /// so it cannot stall the election driver / heartbeat task).
+    #[must_use]
+    pub fn engine_arc(&self) -> Arc<dyn KVEngine> {
+        Arc::clone(&self.engine)
     }
 
     /// Wire the engine-apply latency summary. Called once during group
@@ -218,14 +226,28 @@ impl PxLearner {
     /// Returns `Err` if the underlying engine scan fails (e.g.
     /// `CtError::Corruption` from packed-result bounds checks).
     #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments)]
     pub async fn engine_scan(
         &self,
         prefix: &[u8],
         start_after: &[u8],
+        end_key: &[u8],
         limit: usize,
         byte_budget: usize,
+        keys_only: bool,
+        deadline_ms: u64,
     ) -> Result<(Vec<(bytes::Bytes, SlotIndex, bytes::Bytes)>, bool), String> {
-        self.engine.scan(prefix, start_after, limit, byte_budget).await
+        self.engine
+            .scan(
+                prefix,
+                start_after,
+                end_key,
+                limit,
+                byte_budget,
+                keys_only,
+                deadline_ms,
+            )
+            .await
     }
 
     /// Number of live (non-tombstoned) keys in the engine.

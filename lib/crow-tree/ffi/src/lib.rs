@@ -215,8 +215,12 @@ mod sys {
             plen: usize,
             start_after: *const u8,
             salen: usize,
+            end_key: *const u8,
+            elen: usize,
             limit: usize,
             byte_budget: usize,
+            keys_only: c_int,
+            deadline_ms: u64,
             include_tombstones: c_int,
             out_entries: *mut ct_buf,
             out_count: *mut u64,
@@ -255,8 +259,12 @@ mod sys {
             plen: usize,
             start_after: *const u8,
             salen: usize,
+            end_key: *const u8,
+            elen: usize,
             limit: usize,
             byte_budget: usize,
+            keys_only: c_int,
+            deadline_ms: u64,
         ) -> *mut ct_future;
         pub fn ct_future_poll(
             f: *mut ct_future,
@@ -1042,12 +1050,20 @@ impl Crowtree {
     /// When `include_tombstones` is true, tombstone entries are included.
     /// `start_after` (empty = start from beginning) is an exclusive lower
     /// bound: only keys strictly greater than `start_after` are returned.
+    /// `end_key` (empty = unbounded) is an exclusive upper bound: only keys
+    /// strictly less than `end_key` are returned. When `keys_only` is true,
+    /// values are not materialized (no overflow-chain assembly): entries
+    /// carry empty values and the byte budget accounts for key bytes only.
+    #[allow(clippy::too_many_arguments)]
     pub fn scan(
         &self,
         prefix: &[u8],
         start_after: &[u8],
+        end_key: &[u8],
         limit: usize,
         byte_budget: usize,
+        keys_only: bool,
+        deadline_ms: u64,
         include_tombstones: bool,
     ) -> Result<(Vec<ScanEntry>, bool), CtError> {
         let mut buf = sys::ct_buf {
@@ -1063,8 +1079,12 @@ impl Crowtree {
                 prefix.len(),
                 start_after.as_ptr(),
                 start_after.len(),
+                end_key.as_ptr(),
+                end_key.len(),
                 limit,
                 byte_budget,
+                if keys_only { 1 } else { 0 },
+                deadline_ms,
                 if include_tombstones { 1 } else { 0 },
                 &mut buf,
                 &mut count,
@@ -1647,12 +1667,16 @@ impl AsyncCrowtree {
     /// genuine cold leaf (or the initial root->leaf descent). See
     /// `Crowtree::scan_async`'s doc comment (crow-tree.h) for why a miss
     /// retries the whole scan rather than resuming a cursor.
+    #[allow(clippy::too_many_arguments)]
     pub async fn scan(
         &self,
         prefix: Vec<u8>,
         start_after: Vec<u8>,
+        end_key: Vec<u8>,
         limit: usize,
         byte_budget: usize,
+        keys_only: bool,
+        deadline_ms: u64,
     ) -> Result<(Vec<ScanEntry>, bool), CtError> {
         let fut = unsafe {
             sys::ct_scan_async(
@@ -1661,8 +1685,12 @@ impl AsyncCrowtree {
                 prefix.len(),
                 start_after.as_ptr(),
                 start_after.len(),
+                end_key.as_ptr(),
+                end_key.len(),
                 limit,
                 byte_budget,
+                if keys_only { 1 } else { 0 },
+                deadline_ms,
             )
         };
         let out = drive_ct_future(FutureGuard(fut), &self.inner, FutureKind::Scan).await?;
@@ -1676,12 +1704,16 @@ impl AsyncCrowtree {
     /// motivation as `try_get`'s doc comment: lets a caller with its own
     /// fast-path/slow-path return type mirror `ct_scan_async`'s own
     /// C++-layer split one layer up instead of forcing a box on every call.
+    #[allow(clippy::too_many_arguments)]
     pub fn try_scan(
         &self,
         prefix: Vec<u8>,
         start_after: Vec<u8>,
+        end_key: Vec<u8>,
         limit: usize,
         byte_budget: usize,
+        keys_only: bool,
+        deadline_ms: u64,
     ) -> ScanOutcome {
         let fut = unsafe {
             sys::ct_scan_async(
@@ -1690,8 +1722,12 @@ impl AsyncCrowtree {
                 prefix.len(),
                 start_after.as_ptr(),
                 start_after.len(),
+                end_key.as_ptr(),
+                end_key.len(),
                 limit,
                 byte_budget,
+                if keys_only { 1 } else { 0 },
+                deadline_ms,
             )
         };
         let mut guard = FutureGuard(fut);

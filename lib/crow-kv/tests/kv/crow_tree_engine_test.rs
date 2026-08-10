@@ -40,8 +40,23 @@ fn scan_is_ordered_prefix_filtered_and_truncates() {
 }
 
 #[test]
+fn scan_end_key_exclusive_upper_bound() {
+    conformance::scan_end_key_exclusive_upper_bound(&open());
+}
+
+#[test]
 fn scan_byte_budget_stops_and_truncates() {
     conformance::scan_byte_budget_stops_and_truncates(&open());
+}
+
+#[test]
+fn scan_keys_only_skips_values() {
+    conformance::scan_keys_only_skips_values(&open());
+}
+
+#[test]
+fn scan_deadline_returns_partial_result() {
+    conformance::scan_deadline_returns_partial_result(&open());
 }
 
 #[test]
@@ -83,7 +98,10 @@ fn get_scan_apply_always_resolve_ready() {
         KVFuture::Ready(_)
     ));
     assert!(matches!(e.get(b"k"), KVFuture::Ready(_)));
-    assert!(matches!(e.scan(b"", b"", 0, 0), KVFuture::Ready(_)));
+    assert!(matches!(
+        e.scan(b"", b"", b"", 0, 0, false, 0),
+        KVFuture::Ready(_)
+    ));
 }
 
 /// Regression guard : unlike the in-memory case
@@ -163,7 +181,7 @@ async fn scan_constructs_pending_for_genuine_demand_load_miss() {
     );
 
     if !e.handle().is_reactor_available() {
-        let (items, truncated) = e.scan(b"", b"", 0, 0).into_ready().unwrap();
+        let (items, truncated) = e.scan(b"", b"", b"", 0, 0, false, 0).into_ready().unwrap();
         let items_vec: Vec<(Vec<u8>, u64, Vec<u8>)> = items
             .into_iter()
             .map(|(k, s, v)| (k.to_vec(), s, v.to_vec()))
@@ -173,7 +191,7 @@ async fn scan_constructs_pending_for_genuine_demand_load_miss() {
         return;
     }
 
-    match e.scan(b"", b"", 0, 0) {
+    match e.scan(b"", b"", b"", 0, 0, false, 0) {
         KVFuture::Ready(_) => panic!("expected a genuine Pending after evicting the resident leaf"),
         KVFuture::Pending(fut) => {
             let (items, truncated) = fut.await.unwrap();
@@ -314,6 +332,72 @@ async fn get_bytes_fast_path_returns_correct_value() {
 
     let missing = e.get_bytes(b"missing").await;
     assert_eq!(missing, None);
+}
+
+/// `snapshot_view` returns a frozen, key-sorted vector including
+/// tombstones, pinned at `last_applied_slot` after a flush.
+#[test]
+fn snapshot_view_returns_pinned_entries() {
+    use crow_kv::kv::KVEngine;
+
+    let e = open();
+    e.apply(1, &conformance::batch(vec![conformance::put(b"a", b"v1")]))
+        .into_ready()
+        .unwrap();
+    e.apply(2, &conformance::batch(vec![conformance::put(b"b", b"v2")]))
+        .into_ready()
+        .unwrap();
+    e.apply(3, &conformance::batch(vec![conformance::del(b"a")]))
+        .into_ready()
+        .unwrap();
+
+    let (at_slot, entries) = e.snapshot_view().expect("snapshot_view");
+    assert_eq!(at_slot, 3);
+    // Key-sorted: a (tombstoned), b (live).
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].key, b"a");
+    assert!(entries[0].tombstone);
+    assert_eq!(entries[1].key, b"b");
+    assert!(!entries[1].tombstone);
+    assert_eq!(entries[1].value, b"v2");
+}
+
+/// `snapshot_view` is point-in-time-consistent: writes applied after
+/// the snapshot do not appear in the frozen view.
+#[test]
+fn snapshot_view_is_point_in_time_consistent() {
+    use crow_kv::kv::KVEngine;
+
+    let e = open();
+    e.apply(1, &conformance::batch(vec![conformance::put(b"k", b"v1")]))
+        .into_ready()
+        .unwrap();
+
+    let (at_slot, entries) = e.snapshot_view().expect("snapshot_view");
+    assert_eq!(at_slot, 1);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].key, b"k");
+    assert_eq!(entries[0].value, b"v1");
+
+    // Apply more writes after the snapshot.
+    e.apply(2, &conformance::batch(vec![conformance::put(b"k", b"v2")]))
+        .into_ready()
+        .unwrap();
+    e.apply(3, &conformance::batch(vec![conformance::put(b"new", b"v3")]))
+        .into_ready()
+        .unwrap();
+
+    // The frozen view is unchanged.
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].value, b"v1");
+    // A new snapshot reflects the latest state.
+    let (at_slot2, entries2) = e.snapshot_view().expect("snapshot_view 2");
+    assert_eq!(at_slot2, 3);
+    assert_eq!(entries2.len(), 2);
+    assert_eq!(entries2[0].key, b"k");
+    assert_eq!(entries2[0].value, b"v2");
+    assert_eq!(entries2[1].key, b"new");
+    assert_eq!(entries2[1].value, b"v3");
 }
 
 /// `get_bytes` with a large value: verifies the pinned-value path

@@ -427,7 +427,18 @@ async fn any_replica_scan_distributes_with_lagging_follower() {
     let mut zero_item = 0u32;
     for _ in 0..6 {
         let out = client
-            .scan(STORE_ID, GROUP_ID, b"prefix_", &[], 0, ReadMode::MinSlot, Some(0))
+            .scan(
+                STORE_ID,
+                GROUP_ID,
+                b"prefix_",
+                &[],
+                &[],
+                0,
+                ReadMode::MinSlot,
+                Some(0),
+                false,
+                None,
+            )
             .await
             .expect("scan");
         if out.items.len() == 1 {
@@ -483,9 +494,12 @@ async fn any_replica_scan_falls_back_when_follower_lags() {
                 GROUP_ID,
                 b"prefix_",
                 &[],
+                &[],
                 0,
                 ReadMode::MinSlot,
                 Some(min_slot),
+                false,
+                None,
             )
             .await
             .expect("scan");

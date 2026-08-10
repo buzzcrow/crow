@@ -80,6 +80,55 @@ pub enum KvVerb {
         #[arg(long, default_value_t = 100)]
         limit: u32,
     },
+    /// Snapshot versioning API (R59): create/list/scan/release
+    /// point-in-time-consistent snapshots for backup/analytics.
+    Snapshot {
+        #[command(subcommand)]
+        verb: SnapshotVerb,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum SnapshotVerb {
+    /// Create a snapshot: flush L0 → L1, pin the durable view at
+    /// `last_applied_slot`. Returns a snapshot handle + `at_slot`.
+    Create {
+        #[arg(long)]
+        store_id: u64,
+        #[arg(long)]
+        group_id: u64,
+    },
+    /// List active snapshot handles for a group with their `at_slot` and
+    /// remaining lease.
+    List {
+        #[arg(long)]
+        store_id: u64,
+        #[arg(long)]
+        group_id: u64,
+    },
+    /// Iterate a pinned snapshot with prefix/pagination. Prints up to
+    /// `--limit` matching key/value rows from the frozen view.
+    Scan {
+        #[arg(long)]
+        store_id: u64,
+        #[arg(long)]
+        group_id: u64,
+        #[arg(long)]
+        handle: u64,
+        #[arg(long, default_value = "")]
+        prefix: String,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+    /// Release a snapshot handle, dropping the pinned view.
+    Release {
+        #[arg(long)]
+        store_id: u64,
+        #[arg(long)]
+        group_id: u64,
+        #[arg(long)]
+        handle: u64,
+    },
 }
 
 pub async fn run_kv_verb(cli: &Cli, verb: KvVerb) -> ExitCode {
@@ -132,6 +181,7 @@ pub async fn run_kv_verb(cli: &Cli, verb: KvVerb) -> ExitCode {
             prefix,
             limit,
         } => kv_scan(cli, store_id, group_id, &prefix, limit).await,
+        KvVerb::Snapshot { verb } => run_snapshot_verb(cli, verb).await,
     }
 }
 
@@ -295,8 +345,11 @@ async fn kv_scan(cli: &Cli, store_id: u64, group_id: u64, prefix: &str, limit: u
             group_id,
             prefix.as_bytes(),
             &[],
+            &[],
             limit,
             ReadMode::Linearizable,
+            None,
+            false,
             None,
         )
         .await
@@ -334,6 +387,186 @@ async fn kv_scan(cli: &Cli, store_id: u64, group_id: u64, prefix: &str, limit: u
         }
         Err(e) => {
             eprintln!("error: scan/list: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+pub async fn run_snapshot_verb(cli: &Cli, verb: SnapshotVerb) -> ExitCode {
+    match verb {
+        SnapshotVerb::Create { store_id, group_id } => kv_snapshot_create(cli, store_id, group_id).await,
+        SnapshotVerb::List { store_id, group_id } => kv_snapshot_list(cli, store_id, group_id).await,
+        SnapshotVerb::Scan {
+            store_id,
+            group_id,
+            handle,
+            prefix,
+            limit,
+        } => kv_snapshot_scan(cli, store_id, group_id, handle, &prefix, limit).await,
+        SnapshotVerb::Release {
+            store_id,
+            group_id,
+            handle,
+        } => kv_snapshot_release(cli, store_id, group_id, handle).await,
+    }
+}
+
+async fn kv_snapshot_create(cli: &Cli, store_id: u64, group_id: u64) -> ExitCode {
+    let client = match resolve_kv_client(cli, store_id, group_id).await {
+        Ok(c) => c,
+        Err(c) => return c,
+    };
+    match client
+        .create_snapshot(store_id, group_id, ReadMode::Linearizable, None)
+        .await
+    {
+        Ok(resp) => {
+            if !resp.ok {
+                eprintln!("error: snapshot create: {}", resp.error);
+                return ExitCode::from(2);
+            }
+            if cli.json {
+                return print_json(&serde_json::json!({
+                    "handle": resp.snapshot_handle,
+                    "at_slot": resp.at_slot,
+                }));
+            }
+            println!("handle={} at_slot={}", resp.snapshot_handle, resp.at_slot);
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: snapshot create: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+async fn kv_snapshot_list(cli: &Cli, store_id: u64, group_id: u64) -> ExitCode {
+    let client = match resolve_kv_client(cli, store_id, group_id).await {
+        Ok(c) => c,
+        Err(c) => return c,
+    };
+    match client.list_snapshots(store_id, group_id).await {
+        Ok(snapshots) => {
+            if cli.json {
+                return print_json(&serde_json::json!({"snapshots": snapshots}));
+            }
+            if snapshots.is_empty() {
+                println!("(no active snapshots)");
+            }
+            for s in &snapshots {
+                println!(
+                    "handle={} at_slot={} lease_ms={}",
+                    s.snapshot_handle, s.at_slot, s.lease_remaining_ms
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: snapshot list: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+async fn kv_snapshot_scan(
+    cli: &Cli,
+    store_id: u64,
+    group_id: u64,
+    handle: u64,
+    prefix: &str,
+    limit: u32,
+) -> ExitCode {
+    let client = match resolve_kv_client(cli, store_id, group_id).await {
+        Ok(c) => c,
+        Err(c) => return c,
+    };
+    // Paginate until limit reached or no more results.
+    let mut all_items: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut start_after: Vec<u8> = Vec::new();
+    let mut truncated = false;
+    loop {
+        match client
+            .snapshot_scan(store_id, group_id, handle, prefix.as_bytes(), &start_after, limit)
+            .await
+        {
+            Ok(resp) => {
+                if !resp.ok {
+                    eprintln!("error: snapshot scan: {}", resp.error);
+                    return ExitCode::from(2);
+                }
+                let page_len = resp.items.len();
+                for item in &resp.items {
+                    all_items.push((item.key.to_vec(), item.value.to_vec()));
+                }
+                if resp.truncated && page_len > 0 {
+                    start_after = resp.items.last().expect("non-empty page").key.to_vec();
+                    if limit != 0 && all_items.len() >= limit as usize {
+                        truncated = true;
+                        break;
+                    }
+                    continue;
+                }
+                break;
+            }
+            Err(e) => {
+                eprintln!("error: snapshot scan: {e}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    if limit != 0 && all_items.len() > limit as usize {
+        all_items.truncate(limit as usize);
+    }
+    if cli.json {
+        let items: Vec<serde_json::Value> = all_items
+            .iter()
+            .map(|(key, value)| {
+                serde_json::json!({
+                    "key_utf8": String::from_utf8_lossy(key).to_string(),
+                    "value_utf8": String::from_utf8_lossy(value).to_string(),
+                    "key_hex": hex::encode(key),
+                    "value_hex": hex::encode(value),
+                })
+            })
+            .collect();
+        return print_json(&serde_json::json!({
+            "items": items,
+            "truncated": truncated,
+        }));
+    }
+    for (key, value) in &all_items {
+        println!(
+            "{}\t{}",
+            String::from_utf8_lossy(key),
+            String::from_utf8_lossy(value)
+        );
+    }
+    if truncated {
+        eprintln!("(truncated: more keys exist past --limit {limit})");
+    }
+    ExitCode::SUCCESS
+}
+
+async fn kv_snapshot_release(cli: &Cli, store_id: u64, group_id: u64, handle: u64) -> ExitCode {
+    let client = match resolve_kv_client(cli, store_id, group_id).await {
+        Ok(c) => c,
+        Err(c) => return c,
+    };
+    match client.release_snapshot(store_id, group_id, handle).await {
+        Ok(resp) => {
+            if !resp.ok {
+                eprintln!("error: snapshot release: {}", resp.error);
+                return ExitCode::from(2);
+            }
+            if cli.json {
+                return print_json(&serde_json::json!({"ok": true}));
+            }
+            println!("ok: handle {handle} released");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("error: snapshot release: {e}");
             ExitCode::from(2)
         }
     }

@@ -83,7 +83,7 @@ static void BM_ReadPath_Scan(benchmark::State &state)
     for (auto _ : state) {
         std::vector<scan_entry> out;
         bool                    truncated = false;
-        t->scan(Slice(), Slice(), 1000000, 0, &out, &truncated);
+        t->scan(Slice(), Slice(), Slice(), 1000000, 0, false, 0, &out, &truncated);
         benchmark::DoNotOptimize(out);
     }
     state.SetItemsProcessed(state.iterations() * static_cast<int64_t>(keys.size()));

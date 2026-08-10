@@ -29,7 +29,7 @@ fn mem_apply_get_scan() {
     assert_eq!(t.get(&key(7)).unwrap(), None);
 
     // Scan all live entries.
-    let (entries, truncated) = t.scan(b"", b"", 0, 0, false).unwrap();
+    let (entries, truncated) = t.scan(b"", b"", b"", 0, 0, false, 0, false).unwrap();
     assert!(!truncated);
     assert_eq!(entries.len(), 39); // 40 puts - 1 delete
     assert!(entries.windows(2).all(|w| w[0].key < w[1].key)); // key-sorted
@@ -366,7 +366,7 @@ async fn async_scan_fast_path_completes_on_first_poll() {
     }
     t.flush().await.unwrap();
 
-    let mut fut = Box::pin(t.scan(Vec::new(), Vec::new(), 0, 0));
+    let mut fut = Box::pin(t.scan(Vec::new(), Vec::new(), Vec::new(), 0, 0, false, 0));
     let waker = Waker::noop();
     let mut cx = Context::from_waker(waker);
     match fut.as_mut().poll(&mut cx) {
@@ -401,7 +401,10 @@ async fn async_scan_slow_path_completes_after_eviction() {
     t.snapshot().await.unwrap();
     t.handle().evict_clean_leaves(0);
 
-    let (entries, truncated) = t.scan(Vec::new(), Vec::new(), 0, 0).await.unwrap();
+    let (entries, truncated) = t
+        .scan(Vec::new(), Vec::new(), Vec::new(), 0, 0, false, 0)
+        .await
+        .unwrap();
     assert!(!truncated);
     assert_eq!(entries.len(), 20);
     let mut got: std::collections::BTreeMap<Vec<u8>, Vec<u8>> = entries
@@ -433,9 +436,56 @@ async fn async_scan_respects_limit_and_truncated_flag() {
     }
     t.flush().await.unwrap();
 
-    let (entries, truncated) = t.scan(Vec::new(), Vec::new(), 5, 0).await.unwrap();
+    let (entries, truncated) = t
+        .scan(Vec::new(), Vec::new(), Vec::new(), 5, 0, false, 0)
+        .await
+        .unwrap();
     assert_eq!(entries.len(), 5);
     assert!(truncated);
+}
+
+// keys_only projection: the engine skips value materialization (no
+// overflow-chain assembly) and stages empty values; the packed wire format
+// is unchanged (vlen=0). Keys match a full scan; values are all empty.
+#[tokio::test]
+async fn async_scan_keys_only_skips_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let opt = Options {
+        path: Some(dir.path().to_string_lossy().into_owned()),
+        iu_size: 1,
+        frame_bytes: 4096,
+        ..Default::default()
+    };
+    let t = AsyncCrowtree::open(&opt).unwrap();
+    for i in 0..10usize {
+        t.handle()
+            .apply_put((i + 1) as u64, &key(i), &format!("v{i}").into_bytes())
+            .unwrap();
+    }
+    t.flush().await.unwrap();
+
+    let (entries, truncated) = t
+        .scan(Vec::new(), Vec::new(), Vec::new(), 0, 0, true, 0)
+        .await
+        .unwrap();
+    assert!(!truncated);
+    assert_eq!(entries.len(), 10);
+    assert!(
+        entries.iter().all(|e| e.value.is_empty()),
+        "keys_only values are empty"
+    );
+    // Keys match the full scan's keys, in order.
+    let (full, _) = t
+        .scan(Vec::new(), Vec::new(), Vec::new(), 0, 0, false, 0)
+        .await
+        .unwrap();
+    let keys: Vec<Vec<u8>> = entries.iter().map(|e| e.key.to_vec()).collect();
+    let full_keys: Vec<Vec<u8>> = full.iter().map(|e| e.key.to_vec()).collect();
+    assert_eq!(keys, full_keys);
+    assert!(
+        full.iter().all(|e| !e.value.is_empty()),
+        "full scan values are non-empty"
+    );
 }
 
 #[tokio::test]

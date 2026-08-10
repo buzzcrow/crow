@@ -54,23 +54,31 @@ pub trait KVEngine: Send + Sync {
     /// where `truncated` is set when more matches existed than were returned.
     /// `start_after` is an exclusive lower bound (empty = start from
     /// beginning); only keys strictly greater than `start_after` are
-    /// returned, enabling cursor-based pagination. `byte_budget` (`0` =
-    /// unlimited) caps the total key+value bytes emitted; the scan stops with
-    /// `truncated = true` when exceeded, always returning at least one entry
-    /// (so a single oversized entry still makes progress). Entry keys and
-    /// values are zero-copy `Bytes`: for `CrowTreeEngine` they slice into the
-    /// C++ packed result buffer; for `InMemKV` they are `Bytes::from` of the
-    /// owned `Vec<u8>` (one copy, same as its get path). Errors (e.g.
-    /// `CtError::Corruption` from packed-result bounds checks) propagate
-    /// as `Err` instead of being silently swallowed as an empty result —
-    /// callers map to an error response, not a wrong `ok` answer.
+    /// returned, enabling cursor-based pagination. `end_key` is an exclusive
+    /// upper bound (empty = unbounded); only keys strictly less than
+    /// `end_key` are returned. `byte_budget` (`0` = unlimited) caps the total
+    /// key+value bytes emitted; the scan stops with `truncated = true` when
+    /// exceeded, always returning at least one entry (so a single oversized
+    /// entry still makes progress). `keys_only` skips value materialization
+    /// (no overflow-chain assembly): entries carry empty values and the byte
+    /// budget accounts for key bytes only. Entry keys and values are zero-copy
+    /// `Bytes`: for `CrowTreeEngine` they slice into the C++ packed result
+    /// buffer; for `InMemKV` they are `Bytes::from` of the owned `Vec<u8>`
+    /// (one copy, same as its get path). Errors (e.g. `CtError::Corruption`
+    /// from packed-result bounds checks) propagate as `Err` instead of being
+    /// silently swallowed as an empty result — callers map to an error
+    /// response, not a wrong `ok` answer.
     #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments)]
     fn scan(
         &self,
         prefix: &[u8],
         start_after: &[u8],
+        end_key: &[u8],
         limit: usize,
         byte_budget: usize,
+        keys_only: bool,
+        deadline_ms: u64,
     ) -> KVFuture<Result<(Vec<(Bytes, u64, Bytes)>, bool), String>>;
 
     /// Number of live (non-tombstoned) keys.
@@ -204,4 +212,28 @@ pub trait KVEngine: Send + Sync {
         let _ = stream;
         Err("snapshot import not supported by this engine".to_string())
     }
+
+    /// Pin a point-in-time-consistent L1 view at `last_applied_slot`
+    /// (after a `flush` drains L0 → L1). Returns `(at_slot, entries)`:
+    /// a frozen, key-sorted vector including tombstones. Default:
+    /// unsupported — `InMemKV` has no L1 pinning; `CrowTreeEngine`
+    /// overrides with the real FFI `snapshot_view`.
+    ///
+    /// # Errors
+    /// Returns an error string if the engine does not support snapshot
+    /// views, or if the underlying pin fails.
+    fn snapshot_view(&self) -> Result<(u64, Vec<SnapshotViewEntry>), String> {
+        Err("snapshot_view not supported by this engine".to_string())
+    }
+}
+
+/// A single entry in a pinned snapshot view — key, slot, tombstone flag,
+/// value. Key-sorted; includes tombstones (callers filter them for live-
+/// key scans).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotViewEntry {
+    pub key: Vec<u8>,
+    pub slot: u64,
+    pub tombstone: bool,
+    pub value: Vec<u8>,
 }

@@ -96,14 +96,20 @@ impl KVEngine for InMemKV {
         &self,
         prefix: &[u8],
         start_after: &[u8],
+        end_key: &[u8],
         limit: usize,
         byte_budget: usize,
+        keys_only: bool,
+        _deadline_ms: u64,
     ) -> KVFuture<Result<(Vec<(Bytes, u64, Bytes)>, bool), String>> {
         // DashMap is not ordered — collect matching live entries, sort,
-        // then apply the start_after cursor, limit, and byte_budget.
+        // then apply the start_after/end_key bounds, limit, and byte_budget.
         // Keys/values are Bytes (one copy via Bytes::from(Vec), same as
         // the get path; InMemKV is test-only so zero-copy slicing does
-        // not apply). InMemKV never errors — always Ok.
+        // not apply). InMemKV never errors — always Ok. keys_only skips the
+        // value clone (stages an empty Bytes), matching the C++ engine's
+        // value-skip projection; the byte budget then accounts for key bytes
+        // only.
         let mut items: Vec<(Bytes, u64, Bytes)> = self
             .map
             .iter()
@@ -114,9 +120,17 @@ impl KVEngine for InMemKV {
                 if !start_after.is_empty() && r.key().as_slice() <= start_after {
                     return None;
                 }
+                if !end_key.is_empty() && r.key().as_slice() >= end_key {
+                    return None;
+                }
                 let (slot, cell) = r.value();
                 if let Cell::Value(v) = cell {
-                    Some((Bytes::from(r.key().clone()), *slot, Bytes::from(v.clone())))
+                    let value = if keys_only {
+                        Bytes::new()
+                    } else {
+                        Bytes::from(v.clone())
+                    };
+                    Some((Bytes::from(r.key().clone()), *slot, value))
                 } else {
                     None
                 }
@@ -130,7 +144,8 @@ impl KVEngine for InMemKV {
         }
         // byte_budget: accumulate key+value bytes, stop with truncated when
         // exceeded. Always return at least one entry (the always-return-1
-        // guard), matching the C++ engine's behavior.
+        // guard), matching the C++ engine's behavior. keys_only entries have
+        // empty values, so only key bytes accrue.
         if byte_budget != 0 {
             let mut accumulated_bytes = 0usize;
             let mut keep = 0;

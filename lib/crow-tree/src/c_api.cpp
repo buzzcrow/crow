@@ -67,18 +67,29 @@ ct_buf make_borrowed_buf(const void *data, size_t len)
     return b;
 }
 
-void pack_u32(std::string *o, uint32_t v)
+// Count entries in a packed scan buffer (wire format:
+// [u32 klen][key][u64 slot][u8 tombstone][u32 vlen][value] per entry).
+size_t count_packed_entries(const uint8_t *data, size_t len)
 {
-    for (int i = 0; i < 4; ++i) {
-        o->push_back(static_cast<char>((v >> (8 * i)) & 0xff));
+    size_t pos   = 0;
+    size_t count = 0;
+    while (pos + 4 <= len) {
+        uint32_t klen = 0;
+        for (int i = 0; i < 4; ++i) {
+            klen |= static_cast<uint32_t>(data[pos + i]) << (8 * i);
+        }
+        pos += 4 + klen + 8 + 1;
+        if (pos + 4 > len) {
+            break;
+        }
+        uint32_t vlen = 0;
+        for (int i = 0; i < 4; ++i) {
+            vlen |= static_cast<uint32_t>(data[pos + i]) << (8 * i);
+        }
+        pos += 4 + vlen;
+        ++count;
     }
-}
-
-void pack_u64(std::string *o, uint64_t v)
-{
-    for (int i = 0; i < 8; ++i) {
-        o->push_back(static_cast<char>((v >> (8 * i)) & 0xff));
-    }
+    return count;
 }
 
 // Bounds-checked unpack helpers for ct_apply_batch's input buffer. Return
@@ -147,13 +158,12 @@ struct ct_future_impl
     GetView  get_result;
     uint64_t slot = 0; // kSnapshot only (last_applied_slot)
     // kScan only: packed record buffer (same format ct_scan produces),
-    // materialized eagerly in the completion callback -- no borrowed
-    // frame bytes involved (every value is already an owned std::string
-    // by the time scan_async's on_done fires, same as scan() itself), so
-    // unlike kGet there is nothing to keep alive past ct_future_poll.
-    std::string scan_packed;
-    uint64_t    scan_count     = 0;
-    bool        scan_truncated = false;
+    // received directly from the engine via ScanPackedBuf (R57: zero-copy
+    // staging — no re-pack loop, no make_buf). Ownership is transferred
+    // to the caller via release() in ct_future_poll.
+    ScanPackedBuf scan_packed;
+    uint64_t      scan_count     = 0;
+    bool          scan_truncated = false;
 };
 
 using ct_future_handle = std::shared_ptr<ct_future_impl>;
@@ -784,7 +794,8 @@ ct_future *ct_snapshot_async(ct_tree *t)
 }
 
 ct_future *ct_scan_async(ct_tree *t, const uint8_t *prefix, size_t plen, const uint8_t *start_after, size_t salen,
-                         size_t limit, size_t byte_budget)
+                         const uint8_t *end_key, size_t elen, size_t limit, size_t byte_budget, int keys_only,
+                         uint64_t deadline_ms)
 {
     if (t == nullptr) {
         return nullptr;
@@ -792,22 +803,13 @@ ct_future *ct_scan_async(ct_tree *t, const uint8_t *prefix, size_t plen, const u
     auto impl  = std::make_shared<ct_future_impl>();
     impl->kind = ct_future_impl::Kind::kScan;
     t->tree->scan_async(Slice(reinterpret_cast<const char *>(prefix), plen),
-                        Slice(reinterpret_cast<const char *>(start_after), salen), limit, byte_budget,
-                        [impl](const Status &st, const std::vector<scan_entry> &entries, bool truncated) {
+                        Slice(reinterpret_cast<const char *>(start_after), salen),
+                        Slice(reinterpret_cast<const char *>(end_key), elen), limit, byte_budget, keys_only != 0,
+                        deadline_ms, [impl](const Status &st, ScanPackedBuf packed, bool truncated) {
                             impl->status = to_status(st);
                             if (st.ok()) {
-                                // Same packed record format as ct_scan (see
-                                // that function): [u32 klen][key][u64
-                                // slot][u8 tombstone][u32 vlen][val] * count.
-                                for (const auto &e : entries) {
-                                    pack_u32(&impl->scan_packed, static_cast<uint32_t>(e.key.size()));
-                                    impl->scan_packed.append(e.key);
-                                    pack_u64(&impl->scan_packed, e.slot);
-                                    impl->scan_packed.push_back(static_cast<char>(e.tombstone ? 1 : 0));
-                                    pack_u32(&impl->scan_packed, static_cast<uint32_t>(e.value.size()));
-                                    impl->scan_packed.append(e.value);
-                                }
-                                impl->scan_count     = entries.size();
+                                impl->scan_count     = count_packed_entries(packed.data(), packed.size());
+                                impl->scan_packed    = std::move(packed);
                                 impl->scan_truncated = truncated;
                             }
                             impl->done.store(true, std::memory_order_release);
@@ -867,7 +869,18 @@ ct_status ct_future_poll(ct_future *f, int32_t *done, int32_t *out_found, uint64
             *out_found = impl->scan_truncated ? 1 : 0;
         }
         if (out_value != nullptr) {
-            *out_value = make_buf(impl->scan_packed.data(), impl->scan_packed.size());
+            // R57: ownership transfer — no make_buf malloc+memcpy. The
+            // ScanPackedBuf's malloc'd buffer is released directly into
+            // ct_buf; ct_free_buf's std::free correctly frees it.
+            size_t sz = impl->scan_packed.size();
+            if (sz > 0) {
+                out_value->data = impl->scan_packed.release();
+                out_value->len  = sz;
+            }
+            else {
+                out_value->data = nullptr;
+                out_value->len  = 0;
+            }
         }
     }
     delete handle; // Flush/Snapshot/Scan: no borrowed state; free immediately.
@@ -895,32 +908,37 @@ int32_t ct_reactor_eventfd(const ct_tree *t)
 }
 
 ct_status ct_scan(ct_tree *t, const uint8_t *prefix, size_t plen, const uint8_t *start_after, size_t salen,
-                  size_t limit, size_t byte_budget, int include_tombstones, ct_buf *out_entries, uint64_t *out_count,
+                  const uint8_t *end_key, size_t elen, size_t limit, size_t byte_budget, int keys_only,
+                  uint64_t deadline_ms, int include_tombstones, ct_buf *out_entries, uint64_t *out_count,
                   int32_t *truncated)
 {
     if (t == nullptr || out_entries == nullptr) {
         return static_cast<ct_status>(Code::kInvalidArgument);
     }
-    std::vector<scan_entry> entries;
-    bool                    tr = false;
-    Status                  s  = t->tree->scan(Slice(reinterpret_cast<const char *>(prefix), plen),
-                                               Slice(reinterpret_cast<const char *>(start_after), salen), limit, byte_budget, &entries,
-                                               &tr, include_tombstones != 0);
+    // R57: pack the wire format directly in the engine's consider lambda
+    // (ScanPackedBuf), then transfer ownership via release() — no
+    // std::vector<scan_entry> intermediate, no make_buf malloc+memcpy.
+    ScanPackedBuf packed;
+    size_t        count = 0;
+    bool          tr    = false;
+    Status s = t->tree->scan(Slice(reinterpret_cast<const char *>(prefix), plen),
+                             Slice(reinterpret_cast<const char *>(start_after), salen),
+                             Slice(reinterpret_cast<const char *>(end_key), elen), limit, byte_budget, keys_only != 0,
+                             deadline_ms, nullptr, &tr, include_tombstones != 0, &packed, &count);
     if (!s.ok()) {
         return to_status(s);
     }
-    std::string packed;
-    for (const auto &e : entries) {
-        pack_u32(&packed, static_cast<uint32_t>(e.key.size()));
-        packed.append(e.key);
-        pack_u64(&packed, e.slot);
-        packed.push_back(static_cast<char>(e.tombstone ? 1 : 0));
-        pack_u32(&packed, static_cast<uint32_t>(e.value.size()));
-        packed.append(e.value);
+    size_t sz = packed.size();
+    if (sz > 0) {
+        out_entries->data = packed.release();
+        out_entries->len  = sz;
     }
-    *out_entries = make_buf(packed.data(), packed.size());
+    else {
+        out_entries->data = nullptr;
+        out_entries->len  = 0;
+    }
     if (out_count != nullptr) {
-        *out_count = entries.size();
+        *out_count = count;
     }
     if (truncated != nullptr) {
         *truncated = tr ? 1 : 0;

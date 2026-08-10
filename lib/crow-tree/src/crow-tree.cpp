@@ -95,6 +95,171 @@ void collect_in_order(Resolve &&resolve, uint64_t root_page_id, uint64_t gc_floo
     }
 }
 
+// R58: uniform view over a merge source (L0 skip-list cursor or L1 leaf cursor)
+// for the loser tree. Wraps the two cursor types behind a common key/slot/advance
+// interface so the tree can compare them generically.
+struct MergeSource
+{
+    enum Kind : uint8_t { kL0, kL1 };
+
+    Kind                        kind = kL0;
+    ConcurrentSkipList::Cursor *l0   = nullptr;
+    LeafChainCursor            *l1   = nullptr;
+
+    [[nodiscard]] bool valid() const
+    {
+        return kind == kL0 ? (l0 != nullptr && l0->valid()) : (l1 != nullptr && l1->valid());
+    }
+
+    [[nodiscard]] Slice key() const
+    {
+        return kind == kL0 ? l0->key() : l1->key();
+    }
+
+    [[nodiscard]] uint64_t slot() const
+    {
+        if (kind == kL0) {
+            const CellVersion *cv = l0->cell_version();
+            return cv != nullptr ? cv->slot : 0;
+        }
+        return CellView{l1->cell()}.slot();
+    }
+
+    void advance() const
+    {
+        if (kind == kL0) {
+            l0->advance();
+        }
+        else {
+            l1->next();
+        }
+    }
+
+    void prefetch_next() const
+    {
+        if (kind == kL0) {
+            l0->prefetch_next();
+        }
+    }
+};
+
+// R58: loser tree for k-way merge (k > 2). O(log k) compares per merge step
+// instead of the 2-pass O(2k) scan. The match function: lower key wins; on
+// key tie, higher slot wins; on key+slot tie, lower source index wins
+// (deterministic, matching the original iteration order). Exhausted sources
+// always lose, so the tree never needs rebuilding when a cursor exhausts —
+// it stays in the tree and naturally sinks to the bottom.
+class LoserTree
+{
+  public:
+    void init(MergeSource *sources, int k)
+    {
+        sources_ = sources;
+        k_       = k;
+        losers_.assign(static_cast<size_t>(k), -1);
+        for (int i = 0; i < k; ++i) {
+            insert(i);
+        }
+    }
+
+    [[nodiscard]] int winner() const
+    {
+        return losers_[0];
+    }
+
+    // Advance the winner's cursor and sift its new key up the tree.
+    void advance_winner()
+    {
+        int w = losers_[0];
+        sources_[w].advance();
+        replay(w);
+    }
+
+    // Advance the current winner without emitting (collision drain: the
+    // winner's key matches the just-emitted key, so it's a duplicate).
+    void drain_winner()
+    {
+        int w = losers_[0];
+        sources_[w].advance();
+        replay(w);
+    }
+
+    // Replay a source whose key changed externally (L1 refilled a new leaf).
+    void replay_source(int src)
+    {
+        replay(src);
+    }
+
+    [[nodiscard]] bool winner_valid() const
+    {
+        int w = losers_[0];
+        return w >= 0 && sources_[w].valid();
+    }
+
+  private:
+    MergeSource     *sources_ = nullptr;
+    int              k_       = 0;
+    std::vector<int> losers_; // [0] = winner, [1..k-1] = losers
+
+    // a wins over b: lower key; tie → higher slot; tie → lower index.
+    [[nodiscard]] bool less(int a, int b) const
+    {
+        bool va = sources_[a].valid();
+        bool vb = sources_[b].valid();
+        if (!va && !vb) {
+            return a < b;
+        }
+        if (!va) {
+            return false;
+        }
+        if (!vb) {
+            return true;
+        }
+        int cmp = sources_[a].key().compare(sources_[b].key());
+        if (cmp != 0) {
+            return cmp < 0;
+        }
+        uint64_t sa = sources_[a].slot();
+        uint64_t sb = sources_[b].slot();
+        if (sa != sb) {
+            return sa > sb;
+        }
+        return a < b;
+    }
+
+    void insert(int src)
+    {
+        int parent = (src + k_) / 2;
+        while (parent >= 1) {
+            if (losers_[parent] == -1) {
+                losers_[parent] = src;
+                return;
+            }
+            if (less(losers_[parent], src)) {
+                std::swap(src, losers_[parent]);
+            }
+            parent /= 2;
+        }
+        losers_[0] = src;
+    }
+
+    void replay(int src)
+    {
+        int parent = (src + k_) / 2;
+        while (parent >= 1) {
+            if (losers_[parent] == -1) {
+                losers_[parent] = src;
+                return;
+            }
+            if (less(losers_[parent], src)) {
+                std::swap(src, losers_[parent]);
+            }
+            parent /= 2;
+        }
+        losers_[0] = src;
+    }
+};
+
 } // namespace
 
 Crowtree::Crowtree(Options opt) : opt_(std::move(opt)), name_(opt_.name)
@@ -1722,10 +1887,20 @@ std::vector<get_result> Crowtree::multi_get(const std::vector<Slice> &keys) cons
     return results;
 }
 
-Status Crowtree::scan(Slice prefix, Slice start_after, size_t limit, size_t byte_budget, std::vector<scan_entry> *out,
-                      bool *truncated, bool include_tombstones) const
+Status Crowtree::scan(Slice prefix, Slice start_after, Slice end_key, size_t limit, size_t byte_budget, bool keys_only,
+                      uint64_t                 deadline_ms,
+                      std::vector<scan_entry> *out, // NOLINT(readability-non-const-parameter) written to via push_back
+                      bool *truncated, bool include_tombstones, ScanPackedBuf *out_packed,
+                      size_t *out_count) // NOLINT(readability-non-const-parameter) written to via *out_count
+    const
 {
-    out->clear();
+    if (out != nullptr) {
+        out->clear();
+    }
+    if (out_packed != nullptr) {
+        *out_packed = ScanPackedBuf{};
+    }
+    size_t packed_count = 0;
     if (truncated != nullptr) {
         *truncated = false;
     }
@@ -1820,6 +1995,17 @@ Status Crowtree::scan(Slice prefix, Slice start_after, size_t limit, size_t byte
             l1_resolve_ns += dur_ns(rt);
             LeafBase *base = chain_leaf_base(head);
             page_id        = base != nullptr ? base->right_sibling() : kInvalidPageId;
+            // R58: prefetch the right-sibling leaf's memory while the merge
+            // loop works on the current leaf — overlaps the cache fill with
+            // merge work. The page is already resident (sync scan path); this
+            // targets CPU cache, not disk. Uses mapping_ directly to avoid
+            // the touch_tick overhead of resident().
+            if (page_id != kInvalidPageId) {
+                uint64_t w = mapping_.get_word(page_id);
+                if (slot_word::is_resident(w)) {
+                    __builtin_prefetch(slot_word::resident_ptr(w), 0, 2);
+                }
+            }
         }
         return l1.valid();
     };
@@ -1836,7 +2022,8 @@ Status Crowtree::scan(Slice prefix, Slice start_after, size_t limit, size_t byte
         if (v.is_tombstone() && !include_tombstones) {
             return true;
         }
-        if (limit != 0 && out->size() >= limit) {
+        size_t cur_count = out_packed != nullptr ? packed_count : out->size();
+        if (limit != 0 && cur_count >= limit) {
             if (truncated != nullptr) {
                 *truncated = true;
             }
@@ -1844,93 +2031,286 @@ Status Crowtree::scan(Slice prefix, Slice start_after, size_t limit, size_t byte
         }
         if (v.is_tombstone()) {
             size_t entry_bytes = key.size();
-            if (byte_budget != 0 && !out->empty() && accumulated_bytes + entry_bytes > byte_budget) {
+            if (byte_budget != 0 && cur_count > 0 && accumulated_bytes + entry_bytes > byte_budget) {
                 if (truncated != nullptr) {
                     *truncated = true;
                 }
                 return false; // byte budget would be exceeded; keep what we have
             }
-            out->push_back({.key = key.to_string(), .slot = v.slot(), .value = "", .tombstone = true});
+            if (out_packed != nullptr) {
+                out_packed->pack_u32(static_cast<uint32_t>(key.size()));
+                out_packed->append(key);
+                out_packed->pack_u64(v.slot());
+                out_packed->push_back(1);
+                out_packed->pack_u32(0);
+            }
+            else {
+                out->push_back({.key = key.to_string(), .slot = v.slot(), .value = "", .tombstone = true});
+            }
+            ++packed_count;
             accumulated_bytes += entry_bytes;
             return true;
         }
-        std::string val =
-            v.is_overflow() ? assemble_overflow_value(v.overflow_head(), v.overflow_len()) : v.value().to_string();
+        std::string val;
+        if (!keys_only) {
+            val =
+                v.is_overflow() ? assemble_overflow_value(v.overflow_head(), v.overflow_len()) : v.value().to_string();
+        }
         size_t key_size    = key.size();
         size_t value_size  = val.size();
         size_t entry_bytes = key_size + value_size;
-        if (byte_budget != 0 && !out->empty() && accumulated_bytes + entry_bytes > byte_budget) {
+        if (byte_budget != 0 && cur_count > 0 && accumulated_bytes + entry_bytes > byte_budget) {
             if (truncated != nullptr) {
                 *truncated = true;
             }
             return false; // byte budget would be exceeded; keep what we have
         }
-        out->push_back({.key = key.to_string(), .slot = v.slot(), .value = std::move(val), .tombstone = false});
+        if (out_packed != nullptr) {
+            out_packed->pack_u32(static_cast<uint32_t>(key_size));
+            out_packed->append(key);
+            out_packed->pack_u64(v.slot());
+            out_packed->push_back(0);
+            out_packed->pack_u32(static_cast<uint32_t>(value_size));
+            out_packed->append(val);
+        }
+        else {
+            out->push_back({.key = key.to_string(), .slot = v.slot(), .value = std::move(val), .tombstone = false});
+        }
+        ++packed_count;
         accumulated_bytes += entry_bytes;
         if (byte_budget != 0 && entry_bytes > byte_budget) {
             CR_LOG_WARN("[{}] scan: oversized entry key_size={} value_size={} exceeds byte_budget={}", name_, key_size,
-                                   value_size, byte_budget);
+                        value_size, byte_budget);
         }
         return true;
     };
 
-    // Merge every L0 stream + the L1 stream. On a key collision across
-    // multiple sources (possible across L0 streams -- see the L0Cursor
+    // R58: merge loop with 2-source fast path + loser tree. On a key collision
+    // across multiple sources (possible across L0 streams -- see the L0Cursor
     // comment above; L1 only ever collides with L0, never with itself), the
-    // highest-slot cell wins and every cursor sitting on that key is
-    // advanced, so a key present in more than one source still yields exactly
-    // one output entry.
+    // highest-slot cell wins and every cursor sitting on that key is advanced,
+    // so a key present in more than one source still yields exactly one output
+    // entry. The match function: lower key wins; tie → higher slot; tie →
+    // lower source index (deterministic, matching the original iteration order).
     //
     // R50: L0 cursors borrow key/cell off the skip-list node. The winner is
     // tracked as a CellVersion* (L0) or a cell Slice (L1); slot comparison
     // uses cv->slot / CellView::slot respectively. The winning L0 cell is
     // materialized into a contiguous buffer only when it reaches the output
     // (O(limit), not O(N_l0)).
-    auto t_loop = std::chrono::steady_clock::now();
+    size_t n_valid_l0 = 0;
+    for (const auto &c : l0) {
+        if (c.cur.valid()) {
+            ++n_valid_l0;
+        }
+    }
+
+    LoserTree                lt;
+    std::vector<MergeSource> lt_sources;
+    bool                     lt_built = false;
+
+    auto   t_loop           = std::chrono::steady_clock::now();
+    size_t deadline_counter = 0; // check deadline every kDeadlineCheckInterval entries
     while (true) {
-        bool  have_l1 = refill_l1();
-        bool  has_any = have_l1;
-        Slice min_key;
-        if (have_l1) {
-            min_key = l1.key();
-        }
-        for (auto &c : l0) {
-            if (!c.cur.valid()) {
-                continue;
+        // Periodic deadline check: amortize the clock read over 1024 entries.
+        // When exceeded, break with truncated = true and return the partial
+        // result accumulated so far.
+        if (deadline_ms != 0 && ++deadline_counter >= 1024) {
+            deadline_counter = 0;
+            auto now_ms      = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                         std::chrono::system_clock::now().time_since_epoch())
+                                                         .count());
+            if (now_ms >= deadline_ms) {
+                if (truncated != nullptr) {
+                    *truncated = true;
+                }
+                break;
             }
-            Slice k = c.cur.key();
-            if (!has_any || k.compare(min_key) < 0) {
-                min_key = k;
-                has_any = true;
-            }
         }
-        if (!has_any) {
+        bool l1_was_valid_before = l1.valid();
+        bool have_l1             = refill_l1();
+        bool l1_refilled         = have_l1 && !l1_was_valid_before;
+
+        size_t n_sources = n_valid_l0 + (have_l1 ? 1 : 0);
+        if (n_sources == 0) {
             break;
         }
 
-        Slice              winner_key  = min_key;
-        uint64_t           winner_slot = 0;
-        const CellVersion *l0_winner   = nullptr;
+        Slice              winner_key;
+        const CellVersion *l0_winner = nullptr;
         Slice              l1_winner_cell;
-        bool               have_winner = false;
         buffer             l0_materialized;
-        if (have_l1 && l1.key().compare(min_key) == 0) {
-            l1_winner_cell = l1.cell();
-            winner_slot    = CellView{l1_winner_cell}.slot();
-            have_winner    = true;
-            l1.next();
+
+        if (n_sources == 1) {
+            // Single source: no merge compare needed.
+            if (have_l1) {
+                winner_key     = l1.key();
+                l1_winner_cell = l1.cell();
+                l1.next();
+            }
+            else {
+                for (auto &c : l0) {
+                    if (!c.cur.valid()) {
+                        continue;
+                    }
+                    winner_key = c.cur.key();
+                    l0_winner  = c.cur.cell_version();
+                    c.cur.prefetch_next();
+                    c.cur.advance();
+                    if (!c.cur.valid()) {
+                        --n_valid_l0;
+                    }
+                    break;
+                }
+            }
         }
-        for (auto &c : l0) {
-            if (!c.cur.valid() || c.cur.key().compare(min_key) != 0) {
-                continue;
+        else if (n_sources == 2) {
+            // 2-source fast path: 1 compare instead of 2×2. The common
+            // steady-state case (1 active L0 + L1, no frozen memtables).
+            ConcurrentSkipList::Cursor *c0 = nullptr;
+            ConcurrentSkipList::Cursor *c1 = nullptr;
+            for (auto &c : l0) {
+                if (!c.cur.valid()) {
+                    continue;
+                }
+                if (c0 == nullptr) {
+                    c0 = &c.cur;
+                }
+                else {
+                    c1 = &c.cur;
+                    break;
+                }
             }
-            const CellVersion *cv = c.cur.cell_version();
-            if (cv != nullptr && (!have_winner || cv->slot >= winner_slot)) {
-                l0_winner   = cv;
-                winner_slot = cv->slot;
-                have_winner = true;
+            if (n_valid_l0 == 2) {
+                int cmp = c0->key().compare(c1->key());
+                if (cmp < 0) {
+                    winner_key = c0->key();
+                    l0_winner  = c0->cell_version();
+                    c0->prefetch_next();
+                    c0->advance();
+                    if (!c0->valid()) {
+                        --n_valid_l0;
+                    }
+                }
+                else if (cmp > 0) {
+                    winner_key = c1->key();
+                    l0_winner  = c1->cell_version();
+                    c1->prefetch_next();
+                    c1->advance();
+                    if (!c1->valid()) {
+                        --n_valid_l0;
+                    }
+                }
+                else {
+                    // Tie: higher slot wins, advance both.
+                    const CellVersion *cv0 = c0->cell_version();
+                    const CellVersion *cv1 = c1->cell_version();
+                    uint64_t           s0  = cv0 != nullptr ? cv0->slot : 0;
+                    uint64_t           s1  = cv1 != nullptr ? cv1->slot : 0;
+                    if (s0 >= s1) {
+                        winner_key = c0->key();
+                        l0_winner  = cv0;
+                    }
+                    else {
+                        winner_key = c1->key();
+                        l0_winner  = cv1;
+                    }
+                    c0->prefetch_next();
+                    c0->advance();
+                    if (!c0->valid()) {
+                        --n_valid_l0;
+                    }
+                    c1->prefetch_next();
+                    c1->advance();
+                    if (!c1->valid()) {
+                        --n_valid_l0;
+                    }
+                }
             }
-            c.cur.advance();
+            else {
+                // 1 valid L0 + L1.
+                int cmp = c0->key().compare(l1.key());
+                if (cmp < 0) {
+                    winner_key = c0->key();
+                    l0_winner  = c0->cell_version();
+                    c0->prefetch_next();
+                    c0->advance();
+                    if (!c0->valid()) {
+                        --n_valid_l0;
+                    }
+                }
+                else if (cmp > 0) {
+                    winner_key     = l1.key();
+                    l1_winner_cell = l1.cell();
+                    l1.next();
+                }
+                else {
+                    // Tie: higher slot wins, advance both.
+                    const CellVersion *cv = c0->cell_version();
+                    uint64_t           s0 = cv != nullptr ? cv->slot : 0;
+                    uint64_t           s1 = CellView{l1.cell()}.slot();
+                    if (s0 >= s1) {
+                        winner_key = c0->key();
+                        l0_winner  = cv;
+                    }
+                    else {
+                        winner_key     = l1.key();
+                        l1_winner_cell = l1.cell();
+                    }
+                    c0->prefetch_next();
+                    c0->advance();
+                    if (!c0->valid()) {
+                        --n_valid_l0;
+                    }
+                    l1.next();
+                }
+            }
+        }
+        else {
+            // Loser tree (k > 2): O(log k) per merge step.
+            if (!lt_built) {
+                lt_sources.clear();
+                lt_sources.reserve(l0.size() + 1);
+                for (auto &c : l0) {
+                    lt_sources.push_back({.kind = MergeSource::kL0, .l0 = &c.cur, .l1 = nullptr});
+                }
+                lt_sources.push_back({.kind = MergeSource::kL1, .l0 = nullptr, .l1 = &l1});
+                lt.init(lt_sources.data(), static_cast<int>(lt_sources.size()));
+                lt_built = true;
+            }
+            else if (l1_refilled) {
+                // L1 refilled (new leaf): replay L1 in the tree.
+                lt.replay_source(static_cast<int>(lt_sources.size() - 1));
+            }
+            if (!lt.winner_valid()) {
+                break;
+            }
+            int w      = lt.winner();
+            winner_key = lt_sources[w].key();
+            // Capture winner's cell BEFORE advancing.
+            if (lt_sources[w].kind == MergeSource::kL0) {
+                l0_winner = lt_sources[w].l0->cell_version();
+            }
+            else {
+                l1_winner_cell = lt_sources[w].l1->cell();
+            }
+            // Prefetch + advance the winner.
+            lt_sources[w].prefetch_next();
+            lt.advance_winner();
+            if (lt_sources[w].kind == MergeSource::kL0 && !lt_sources[w].valid()) {
+                --n_valid_l0;
+            }
+            // Collision drain: advance all other sources on the same key
+            // (duplicate — already emitted). After the winner advances, any
+            // other cursor on the same key naturally bubbles to the root.
+            while (lt.winner_valid() && lt_sources[lt.winner()].key().compare(winner_key) == 0) {
+                int cw = lt.winner();
+                lt_sources[cw].prefetch_next();
+                lt.drain_winner();
+                if (lt_sources[cw].kind == MergeSource::kL0 && !lt_sources[cw].valid()) {
+                    --n_valid_l0;
+                }
+            }
         }
 
         // Materialize the winning cell for the consider lambda. L1: borrow
@@ -1964,6 +2344,11 @@ Status Crowtree::scan(Slice prefix, Slice start_after, size_t limit, size_t byte
         if (!prefix.empty() && !winner_key.starts_with(prefix) && winner_key.compare(prefix) > 0) {
             break;
         }
+        // Exclusive upper bound: once the winner reaches end_key, no later key
+        // can be < end_key (streams are non-decreasing), so stop.
+        if (!end_key.empty() && winner_key.compare(end_key) >= 0) {
+            break;
+        }
         if (!consider(winner_key, winner_cell)) {
             break;
         }
@@ -1975,7 +2360,7 @@ Status Crowtree::scan(Slice prefix, Slice start_after, size_t limit, size_t byte
     uint64_t total_ns = dur_ns(t_total);
     if (metrics_.scan_c != nullptr) {
         metrics_.scan_c->inc();
-        metrics_.scan_entries_c->inc_by(out->size());
+        metrics_.scan_entries_c->inc_by(packed_count);
         metrics_.scan_l->observe(total_ns);
         metrics_.scan_l0_snapshot_l->observe(l0_snapshot_ns);
         metrics_.scan_l0_skip_l->observe(l0_skip_ns);
@@ -1983,13 +2368,27 @@ Status Crowtree::scan(Slice prefix, Slice start_after, size_t limit, size_t byte
         metrics_.scan_l1_resolve_l->observe(l1_resolve_ns);
         metrics_.scan_merge_l->observe(merge_ns);
     }
+    if (out_count != nullptr) {
+        *out_count = packed_count;
+    }
     return Status::Ok();
 }
 
-bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, size_t limit, size_t byte_budget,
-                                std::vector<scan_entry> *out, bool *truncated, uint64_t *out_pending_page_id) const
+bool Crowtree::try_scan_no_load(
+    Slice prefix, Slice start_after, Slice end_key, size_t limit, size_t byte_budget, bool keys_only,
+    uint64_t                 deadline_ms,
+    std::vector<scan_entry> *out, // NOLINT(readability-non-const-parameter) written to via push_back
+    bool *truncated, uint64_t *out_pending_page_id, ScanPackedBuf *out_packed,
+    size_t *out_count) // NOLINT(readability-non-const-parameter) written to via *out_count
+    const
 {
-    out->clear();
+    if (out != nullptr) {
+        out->clear();
+    }
+    if (out_packed != nullptr) {
+        *out_packed = ScanPackedBuf{};
+    }
+    size_t packed_count = 0;
     if (truncated != nullptr) {
         *truncated = false;
     }
@@ -2072,6 +2471,13 @@ bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, size_t limit, s
             l1_resolve_ns += dur_ns(rt);
             LeafBase *base = chain_leaf_base(head);
             page_id        = base != nullptr ? base->right_sibling() : kInvalidPageId;
+            // R58: prefetch the right-sibling leaf (see scan()'s refill_l1).
+            if (page_id != kInvalidPageId) {
+                uint64_t w = mapping_.get_word(page_id);
+                if (slot_word::is_resident(w)) {
+                    __builtin_prefetch(slot_word::resident_ptr(w), 0, 2);
+                }
+            }
         }
         return l1.valid();
     };
@@ -2088,81 +2494,255 @@ bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, size_t limit, s
         if (v.is_tombstone()) {
             return true;
         }
-        if (limit != 0 && out->size() >= limit) {
+        size_t cur_count = out_packed != nullptr ? packed_count : out->size();
+        if (limit != 0 && cur_count >= limit) {
             if (truncated != nullptr) {
                 *truncated = true;
             }
             return false;
         }
-        std::string val =
-            v.is_overflow() ? assemble_overflow_value(v.overflow_head(), v.overflow_len()) : v.value().to_string();
+        std::string val;
+        if (!keys_only) {
+            val =
+                v.is_overflow() ? assemble_overflow_value(v.overflow_head(), v.overflow_len()) : v.value().to_string();
+        }
         size_t key_size    = key.size();
         size_t value_size  = val.size();
         size_t entry_bytes = key_size + value_size;
-        if (byte_budget != 0 && !out->empty() && accumulated_bytes + entry_bytes > byte_budget) {
+        if (byte_budget != 0 && cur_count > 0 && accumulated_bytes + entry_bytes > byte_budget) {
             if (truncated != nullptr) {
                 *truncated = true;
             }
             return false; // byte budget would be exceeded; keep what we have
         }
-        out->push_back({.key = key.to_string(), .slot = v.slot(), .value = std::move(val)});
+        if (out_packed != nullptr) {
+            out_packed->pack_u32(static_cast<uint32_t>(key_size));
+            out_packed->append(key);
+            out_packed->pack_u64(v.slot());
+            out_packed->push_back(0);
+            out_packed->pack_u32(static_cast<uint32_t>(value_size));
+            out_packed->append(val);
+        }
+        else {
+            out->push_back({.key = key.to_string(), .slot = v.slot(), .value = std::move(val)});
+        }
+        ++packed_count;
         accumulated_bytes += entry_bytes;
         if (byte_budget != 0 && entry_bytes > byte_budget) {
             CR_LOG_WARN("[{}] scan: oversized entry key_size={} value_size={} exceeds byte_budget={}", name_, key_size,
-                                   value_size, byte_budget);
+                        value_size, byte_budget);
         }
         return true;
     };
 
-    auto t_loop = std::chrono::steady_clock::now();
+    // R58: merge loop with 2-source fast path + loser tree (same structure as
+    // scan()'s — see the comment there). The only difference is the
+    // blocked_page_id early-return on a cold leaf.
+    size_t n_valid_l0 = 0;
+    for (const auto &c : l0) {
+        if (c.cur.valid()) {
+            ++n_valid_l0;
+        }
+    }
+
+    LoserTree                lt;
+    std::vector<MergeSource> lt_sources;
+    bool                     lt_built = false;
+
+    auto   t_loop           = std::chrono::steady_clock::now();
+    size_t deadline_counter = 0; // check deadline every kDeadlineCheckInterval entries
     while (true) {
-        bool have_l1 = refill_l1();
+        // Periodic deadline check (same as scan()'s).
+        if (deadline_ms != 0 && ++deadline_counter >= 1024) {
+            deadline_counter = 0;
+            auto now_ms      = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                         std::chrono::system_clock::now().time_since_epoch())
+                                                         .count());
+            if (now_ms >= deadline_ms) {
+                if (truncated != nullptr) {
+                    *truncated = true;
+                }
+                return true; // resolved with partial result
+            }
+        }
+        bool l1_was_valid_before = l1.valid();
+        bool have_l1             = refill_l1();
         if (blocked_page_id != kInvalidPageId) {
             *out_pending_page_id = blocked_page_id;
             return false; // genuine miss mid-walk
         }
-        bool  has_any = have_l1;
-        Slice min_key;
-        if (have_l1) {
-            min_key = l1.key();
-        }
-        for (auto &c : l0) {
-            if (!c.cur.valid()) {
-                continue;
-            }
-            Slice k = c.cur.key();
-            if (!has_any || k.compare(min_key) < 0) {
-                min_key = k;
-                has_any = true;
-            }
-        }
-        if (!has_any) {
+        bool l1_refilled = have_l1 && !l1_was_valid_before;
+
+        size_t n_sources = n_valid_l0 + (have_l1 ? 1 : 0);
+        if (n_sources == 0) {
             break;
         }
 
-        Slice              winner_key  = min_key;
-        uint64_t           winner_slot = 0;
-        const CellVersion *l0_winner   = nullptr;
+        Slice              winner_key;
+        const CellVersion *l0_winner = nullptr;
         Slice              l1_winner_cell;
-        bool               have_winner = false;
         buffer             l0_materialized;
-        if (have_l1 && l1.key().compare(min_key) == 0) {
-            l1_winner_cell = l1.cell();
-            winner_slot    = CellView{l1_winner_cell}.slot();
-            have_winner    = true;
-            l1.next();
+
+        if (n_sources == 1) {
+            // Single source: no merge compare needed.
+            if (have_l1) {
+                winner_key     = l1.key();
+                l1_winner_cell = l1.cell();
+                l1.next();
+            }
+            else {
+                for (auto &c : l0) {
+                    if (!c.cur.valid()) {
+                        continue;
+                    }
+                    winner_key = c.cur.key();
+                    l0_winner  = c.cur.cell_version();
+                    c.cur.prefetch_next();
+                    c.cur.advance();
+                    if (!c.cur.valid()) {
+                        --n_valid_l0;
+                    }
+                    break;
+                }
+            }
         }
-        for (auto &c : l0) {
-            if (!c.cur.valid() || c.cur.key().compare(min_key) != 0) {
-                continue;
+        else if (n_sources == 2) {
+            // 2-source fast path: 1 compare instead of 2×2.
+            ConcurrentSkipList::Cursor *c0 = nullptr;
+            ConcurrentSkipList::Cursor *c1 = nullptr;
+            for (auto &c : l0) {
+                if (!c.cur.valid()) {
+                    continue;
+                }
+                if (c0 == nullptr) {
+                    c0 = &c.cur;
+                }
+                else {
+                    c1 = &c.cur;
+                    break;
+                }
             }
-            const CellVersion *cv = c.cur.cell_version();
-            if (cv != nullptr && (!have_winner || cv->slot >= winner_slot)) {
-                l0_winner   = cv;
-                winner_slot = cv->slot;
-                have_winner = true;
+            if (n_valid_l0 == 2) {
+                int cmp = c0->key().compare(c1->key());
+                if (cmp < 0) {
+                    winner_key = c0->key();
+                    l0_winner  = c0->cell_version();
+                    c0->prefetch_next();
+                    c0->advance();
+                    if (!c0->valid()) {
+                        --n_valid_l0;
+                    }
+                }
+                else if (cmp > 0) {
+                    winner_key = c1->key();
+                    l0_winner  = c1->cell_version();
+                    c1->prefetch_next();
+                    c1->advance();
+                    if (!c1->valid()) {
+                        --n_valid_l0;
+                    }
+                }
+                else {
+                    const CellVersion *cv0 = c0->cell_version();
+                    const CellVersion *cv1 = c1->cell_version();
+                    uint64_t           s0  = cv0 != nullptr ? cv0->slot : 0;
+                    uint64_t           s1  = cv1 != nullptr ? cv1->slot : 0;
+                    if (s0 >= s1) {
+                        winner_key = c0->key();
+                        l0_winner  = cv0;
+                    }
+                    else {
+                        winner_key = c1->key();
+                        l0_winner  = cv1;
+                    }
+                    c0->prefetch_next();
+                    c0->advance();
+                    if (!c0->valid()) {
+                        --n_valid_l0;
+                    }
+                    c1->prefetch_next();
+                    c1->advance();
+                    if (!c1->valid()) {
+                        --n_valid_l0;
+                    }
+                }
             }
-            c.cur.advance();
+            else {
+                int cmp = c0->key().compare(l1.key());
+                if (cmp < 0) {
+                    winner_key = c0->key();
+                    l0_winner  = c0->cell_version();
+                    c0->prefetch_next();
+                    c0->advance();
+                    if (!c0->valid()) {
+                        --n_valid_l0;
+                    }
+                }
+                else if (cmp > 0) {
+                    winner_key     = l1.key();
+                    l1_winner_cell = l1.cell();
+                    l1.next();
+                }
+                else {
+                    const CellVersion *cv = c0->cell_version();
+                    uint64_t           s0 = cv != nullptr ? cv->slot : 0;
+                    uint64_t           s1 = CellView{l1.cell()}.slot();
+                    if (s0 >= s1) {
+                        winner_key = c0->key();
+                        l0_winner  = cv;
+                    }
+                    else {
+                        winner_key     = l1.key();
+                        l1_winner_cell = l1.cell();
+                    }
+                    c0->prefetch_next();
+                    c0->advance();
+                    if (!c0->valid()) {
+                        --n_valid_l0;
+                    }
+                    l1.next();
+                }
+            }
+        }
+        else {
+            // Loser tree (k > 2): O(log k) per merge step.
+            if (!lt_built) {
+                lt_sources.clear();
+                lt_sources.reserve(l0.size() + 1);
+                for (auto &c : l0) {
+                    lt_sources.push_back({.kind = MergeSource::kL0, .l0 = &c.cur, .l1 = nullptr});
+                }
+                lt_sources.push_back({.kind = MergeSource::kL1, .l0 = nullptr, .l1 = &l1});
+                lt.init(lt_sources.data(), static_cast<int>(lt_sources.size()));
+                lt_built = true;
+            }
+            else if (l1_refilled) {
+                lt.replay_source(static_cast<int>(lt_sources.size() - 1));
+            }
+            if (!lt.winner_valid()) {
+                break;
+            }
+            int w      = lt.winner();
+            winner_key = lt_sources[w].key();
+            if (lt_sources[w].kind == MergeSource::kL0) {
+                l0_winner = lt_sources[w].l0->cell_version();
+            }
+            else {
+                l1_winner_cell = lt_sources[w].l1->cell();
+            }
+            lt_sources[w].prefetch_next();
+            lt.advance_winner();
+            if (lt_sources[w].kind == MergeSource::kL0 && !lt_sources[w].valid()) {
+                --n_valid_l0;
+            }
+            while (lt.winner_valid() && lt_sources[lt.winner()].key().compare(winner_key) == 0) {
+                int cw = lt.winner();
+                lt_sources[cw].prefetch_next();
+                lt.drain_winner();
+                if (lt_sources[cw].kind == MergeSource::kL0 && !lt_sources[cw].valid()) {
+                    --n_valid_l0;
+                }
+            }
         }
 
         Slice winner_cell;
@@ -2191,6 +2771,9 @@ bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, size_t limit, s
         if (!prefix.empty() && !winner_key.starts_with(prefix) && winner_key.compare(prefix) > 0) {
             break;
         }
+        if (!end_key.empty() && winner_key.compare(end_key) >= 0) {
+            break;
+        }
         if (!consider(winner_key, winner_cell)) {
             break;
         }
@@ -2200,13 +2783,16 @@ bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, size_t limit, s
     uint64_t total_ns = dur_ns(t_total);
     if (metrics_.scan_c != nullptr) {
         metrics_.scan_c->inc();
-        metrics_.scan_entries_c->inc_by(out->size());
+        metrics_.scan_entries_c->inc_by(packed_count);
         metrics_.scan_l->observe(total_ns);
         metrics_.scan_l0_snapshot_l->observe(l0_snapshot_ns);
         metrics_.scan_l0_skip_l->observe(l0_skip_ns);
         metrics_.scan_l1_descent_l->observe(l1_descent_ns);
         metrics_.scan_l1_resolve_l->observe(l1_resolve_ns);
         metrics_.scan_merge_l->observe(merge_ns);
+    }
+    if (out_count != nullptr) {
+        *out_count = packed_count;
     }
     return true; // fully resolved
 }
@@ -2215,55 +2801,110 @@ bool Crowtree::try_scan_no_load(Slice prefix, Slice start_after, size_t limit, s
 // been accumulated across prior cold-leaf retries, resume from the last
 // resolved key; otherwise use the original start_after. This avoids
 // re-traversing already-resolved leaves after a demand-load completes.
-static std::shared_ptr<std::string> make_resume_after(const std::shared_ptr<std::string>             &start_after_owned,
-                                                      const std::shared_ptr<std::vector<scan_entry>> &accumulated)
+static std::shared_ptr<std::string> make_resume_after(const std::shared_ptr<std::string> &start_after_owned,
+                                                      const std::shared_ptr<std::string> &last_key)
 {
-    if (!accumulated->empty()) {
-        return std::make_shared<std::string>(accumulated->back().key);
+    if (last_key != nullptr && !last_key->empty()) {
+        return last_key;
     }
     return start_after_owned;
 }
 
-void Crowtree::scan_async(Slice prefix, Slice start_after, size_t limit, size_t byte_budget,
-                          std::function<void(Status, std::vector<scan_entry>, bool)> on_done) const
+void Crowtree::scan_async(Slice prefix, Slice start_after, Slice end_key, size_t limit, size_t byte_budget,
+                          bool keys_only, uint64_t deadline_ms,
+                          std::function<void(Status, ScanPackedBuf, bool)> on_done) const
 {
     // Copy the keys upfront: unlike scan()'s Slice (borrowed, valid only
     // for this one synchronous call), scan_async's keys must survive across
     // an arbitrary number of async round trips. `accumulated` collects
-    // entries resolved before each cold leaf so retries resume from the
-    // last resolved key instead of re-traversing already-resolved leaves.
+    // packed entries resolved before each cold leaf so retries resume from
+    // the last resolved key instead of re-traversing already-resolved leaves.
     scan_async_attempt(std::make_shared<std::string>(prefix.to_string()),
-                       std::make_shared<std::string>(start_after.to_string()), limit, byte_budget,
-                       std::make_shared<std::vector<scan_entry>>(), std::move(on_done));
+                       std::make_shared<std::string>(start_after.to_string()),
+                       std::make_shared<std::string>(end_key.to_string()), limit, byte_budget, keys_only, deadline_ms,
+                       std::make_shared<ScanPackedBuf>(), nullptr, 0, std::move(on_done));
+}
+
+// Extract the last key from a packed scan buffer (wire format:
+// [u32 klen][key][u64 slot][u8 tombstone][u32 vlen][value] per entry).
+// Used by scan_async_attempt to resume from the last resolved key.
+static std::string last_key_from_packed(const uint8_t *data, size_t len)
+{
+    size_t      pos = 0;
+    std::string last;
+    while (pos + 4 <= len) {
+        uint32_t klen = 0;
+        for (int i = 0; i < 4; ++i) {
+            klen |= static_cast<uint32_t>(data[pos + i]) << (8 * i);
+        }
+        pos += 4;
+        if (pos + klen > len) {
+            break;
+        }
+        last.assign(reinterpret_cast<const char *>(data + pos), klen);
+        pos += klen;
+        // skip slot (8) + tombstone (1)
+        if (pos + 9 > len) {
+            break;
+        }
+        pos += 9;
+        if (pos + 4 > len) {
+            break;
+        }
+        uint32_t vlen = 0;
+        for (int i = 0; i < 4; ++i) {
+            vlen |= static_cast<uint32_t>(data[pos + i]) << (8 * i);
+        }
+        pos += 4;
+        pos += vlen;
+    }
+    return last;
 }
 
 void Crowtree::scan_async_attempt(std::shared_ptr<std::string>        prefix_owned,
-                                  const std::shared_ptr<std::string> &start_after_owned, size_t limit,
-                                  size_t byte_budget, std::shared_ptr<std::vector<scan_entry>> accumulated,
-                                  std::function<void(Status, std::vector<scan_entry>, bool)> on_done) const
+                                  const std::shared_ptr<std::string> &start_after_owned,
+                                  const std::shared_ptr<std::string> &end_key_owned, size_t limit, size_t byte_budget,
+                                  bool keys_only, uint64_t deadline_ms, std::shared_ptr<ScanPackedBuf> accumulated,
+                                  std::shared_ptr<std::string> last_key, size_t accumulated_count,
+                                  std::function<void(Status, ScanPackedBuf, bool)> on_done) const
 {
     // Adjust the byte budget by entries already accumulated across prior
     // cold-leaf retries, mirroring the remaining_limit adjustment below.
-    size_t accumulated_bytes = 0;
+    size_t accumulated_bytes = accumulated->size();
     if (byte_budget != 0) {
-        for (const auto &e : *accumulated) {
-            accumulated_bytes += e.key.size() + e.value.size();
-        }
-        if (accumulated_bytes >= byte_budget && !accumulated->empty()) {
+        if (accumulated_bytes >= byte_budget && accumulated_count > 0) {
             on_done(Status::Ok(), std::move(*accumulated), true);
             return;
         }
     }
     size_t remaining_byte_budget = (byte_budget != 0) ? byte_budget - accumulated_bytes : 0;
 
-    std::vector<scan_entry> out;
-    bool                    truncated       = false;
-    uint64_t                pending_page_id = kInvalidPageId;
-    if (try_scan_no_load(Slice(*prefix_owned), Slice(*start_after_owned), limit, remaining_byte_budget, &out,
-                         &truncated, &pending_page_id)) {
-        // Append this attempt's entries to the accumulated set and deliver.
-        accumulated->insert(accumulated->end(), std::make_move_iterator(out.begin()),
-                            std::make_move_iterator(out.end()));
+    // Deadline check before each retry: if exceeded, deliver the accumulated
+    // partial result with truncated = true instead of starting another attempt.
+    if (deadline_ms != 0) {
+        auto now_ms = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+                .count());
+        if (now_ms >= deadline_ms) {
+            on_done(Status::Ok(), std::move(*accumulated), true);
+            return;
+        }
+    }
+
+    ScanPackedBuf out_packed;
+    size_t        out_count       = 0;
+    bool          truncated       = false;
+    uint64_t      pending_page_id = kInvalidPageId;
+    if (try_scan_no_load(Slice(*prefix_owned), Slice(*start_after_owned), Slice(*end_key_owned), limit,
+                         remaining_byte_budget, keys_only, deadline_ms, nullptr, &truncated, &pending_page_id,
+                         &out_packed, &out_count)) {
+        // Append this attempt's packed entries to the accumulated buffer.
+        if (out_count > 0) {
+            accumulated->append(out_packed.data(), out_packed.size());
+            accumulated_count += out_count;
+            // Track the last key for resume (in case of future cold leaves).
+            last_key = std::make_shared<std::string>(last_key_from_packed(out_packed.data(), out_packed.size()));
+        }
         on_done(Status::Ok(), std::move(*accumulated), truncated);
         return;
     }
@@ -2271,15 +2912,16 @@ void Crowtree::scan_async_attempt(std::shared_ptr<std::string>        prefix_own
     // Cold leaf hit: append the entries resolved so far (those before the
     // cold leaf) to `accumulated`, then resume from the last resolved key
     // after the demand-load completes — no re-traversal of already-resolved
-    // leaves. `out` contains only entries before the cold page because
+    // leaves. `out_packed` contains only entries before the cold page because
     // try_scan_no_load bails immediately on the first cold page.
-    if (!out.empty()) {
-        accumulated->insert(accumulated->end(), std::make_move_iterator(out.begin()),
-                            std::make_move_iterator(out.end()));
+    if (out_count > 0) {
+        accumulated->append(out_packed.data(), out_packed.size());
+        accumulated_count += out_count;
+        last_key = std::make_shared<std::string>(last_key_from_packed(out_packed.data(), out_packed.size()));
     }
     // Adjust limit by the number of entries already accumulated so the
     // final result respects the caller's limit.
-    size_t remaining_limit = (limit > accumulated->size()) ? (limit - accumulated->size()) : 0;
+    size_t remaining_limit = (limit > accumulated_count) ? (limit - accumulated_count) : 0;
 
 #ifdef CROW_TREE_HAVE_LIBURING
     if (opt_.async_reactor != nullptr && opt_.async_page_store != nullptr) {
@@ -2301,9 +2943,10 @@ void Crowtree::scan_async_attempt(std::shared_ptr<std::string>        prefix_own
             // lock-free probe above and this re-check -- retry, still here.
             // Resume from the last accumulated key (if any) to avoid
             // re-traversing already-resolved leaves.
-            auto resume_after = make_resume_after(start_after_owned, accumulated);
-            scan_async_attempt(std::move(prefix_owned), resume_after, remaining_limit, byte_budget,
-                               std::move(accumulated), std::move(on_done));
+            auto resume_after = make_resume_after(start_after_owned, last_key);
+            scan_async_attempt(std::move(prefix_owned), resume_after, end_key_owned, remaining_limit, byte_budget,
+                               keys_only, deadline_ms, std::move(accumulated), std::move(last_key), accumulated_count,
+                               std::move(on_done));
             return;
         }
         uint32_t iu   = opt_.page_store->iu_size();
@@ -2311,13 +2954,14 @@ void Crowtree::scan_async_attempt(std::shared_ptr<std::string>        prefix_own
         demand_load_total_.fetch_add(1, std::memory_order_relaxed);
         opt_.async_page_store->submit_read(
             addr, blob->data(), blob->size(),
-            [this, page_id = pending_page_id, addr, plen, blob, prefix_owned, start_after_owned, remaining_limit,
-             byte_budget, accumulated, on_done](Status st) mutable {
+            [this, page_id = pending_page_id, addr, plen, blob, prefix_owned, start_after_owned, end_key_owned,
+             remaining_limit, byte_budget, keys_only, deadline_ms, accumulated, last_key, accumulated_count,
+             on_done](Status st) mutable {
                 if (!st.ok()) {
                     CR_LOG_ERROR("[{}] scan_async: demand-load I/O fault: pid={} addr={} len={} status={}", name_,
                                  page_id, addr, plen, st.to_string());
                     io_failed_.store(true);
-                    on_done(st, {}, false);
+                    on_done(st, ScanPackedBuf{}, false);
                     return;
                 }
                 bool installed_ok = true;
@@ -2329,14 +2973,15 @@ void Crowtree::scan_async_attempt(std::shared_ptr<std::string>        prefix_own
                     }
                 }
                 if (!installed_ok) {
-                    on_done(Status::io_error("scan_async: demand-load decode/CRC failure"), {}, false);
+                    on_done(Status::io_error("scan_async: demand-load decode/CRC failure"), ScanPackedBuf{}, false);
                     return;
                 }
                 // Resume from the last accumulated key to avoid
                 // re-traversing already-resolved leaves.
-                auto resume_after = make_resume_after(start_after_owned, accumulated);
-                scan_async_attempt(std::move(prefix_owned), resume_after, remaining_limit, byte_budget,
-                                   std::move(accumulated), std::move(on_done));
+                auto resume_after = make_resume_after(start_after_owned, last_key);
+                scan_async_attempt(std::move(prefix_owned), resume_after, end_key_owned, remaining_limit, byte_budget,
+                                   keys_only, deadline_ms, std::move(accumulated), std::move(last_key),
+                                   accumulated_count, std::move(on_done));
             });
         return;
     }
@@ -2344,9 +2989,9 @@ void Crowtree::scan_async_attempt(std::shared_ptr<std::string>        prefix_own
     // No async backend wired -- fall back to the existing synchronous
     // demand-load and retry, still on this same thread.
     (void)resident(pending_page_id);
-    auto resume_after = make_resume_after(start_after_owned, accumulated);
-    scan_async_attempt(std::move(prefix_owned), resume_after, remaining_limit, byte_budget, std::move(accumulated),
-                       std::move(on_done));
+    auto resume_after = make_resume_after(start_after_owned, last_key);
+    scan_async_attempt(std::move(prefix_owned), resume_after, end_key_owned, remaining_limit, byte_budget, keys_only,
+                       deadline_ms, std::move(accumulated), std::move(last_key), accumulated_count, std::move(on_done));
 }
 
 int Crowtree::height() const

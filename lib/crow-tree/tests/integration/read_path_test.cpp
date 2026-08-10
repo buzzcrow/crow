@@ -121,7 +121,7 @@ TEST(ReadPath, L0OverridesL1)
     // scan reflects L0 too.
     std::vector<scan_entry> out;
     bool                    trunc;
-    ASSERT_TRUE(t.scan(Slice(""), Slice(), 0, 0, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 0, false, 0, &out, &trunc).ok());
     ASSERT_EQ(out.size(), 1U);
     EXPECT_EQ(out[0].value, "A2");
 }
@@ -137,7 +137,7 @@ TEST(ReadPath, L0TombstoneHidesL1)
     EXPECT_FALSE(t.get(Slice("a"), &s, &v));
     std::vector<scan_entry> out;
     bool                    trunc;
-    ASSERT_TRUE(t.scan(Slice(""), Slice(), 0, 0, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 0, false, 0, &out, &trunc).ok());
     EXPECT_TRUE(out.empty()); // tombstone excluded
 }
 
@@ -158,7 +158,7 @@ TEST(ReadPath, ScanOrderLimitTruncatedAcrossLeaves)
     // Full scan: sorted, complete.
     std::vector<scan_entry> out;
     bool                    trunc;
-    ASSERT_TRUE(t.scan(Slice(""), Slice(), 0, 0, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 0, false, 0, &out, &trunc).ok());
     ASSERT_EQ(out.size(), static_cast<size_t>(N));
     EXPECT_FALSE(trunc);
     for (int i = 0; i < N; ++i) {
@@ -166,7 +166,7 @@ TEST(ReadPath, ScanOrderLimitTruncatedAcrossLeaves)
     }
 
     // Limited scan: truncated.
-    ASSERT_TRUE(t.scan(Slice(""), Slice(), 10, 0, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 10, 0, false, 0, &out, &trunc).ok());
     EXPECT_EQ(out.size(), 10U);
     EXPECT_TRUE(trunc);
     EXPECT_EQ(out[0].key, make_key(0));
@@ -182,7 +182,7 @@ TEST(ReadPath, ScanPrefix)
     ASSERT_TRUE(t.flush().ok());
     std::vector<scan_entry> out;
     bool                    trunc;
-    ASSERT_TRUE(t.scan(Slice("ap"), Slice(), 0, 0, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice("ap"), Slice(), Slice(), 0, 0, false, 0, &out, &trunc).ok());
     ASSERT_EQ(out.size(), 2U);
     EXPECT_EQ(out[0].key, "apple");
     EXPECT_EQ(out[1].key, "apricot");
@@ -211,7 +211,7 @@ TEST(ReadPath, ScanStartAfterCursorSkipsEarlierEntries)
     std::string             cursor = make_key(9);
     std::vector<scan_entry> out;
     bool                    trunc;
-    ASSERT_TRUE(t.scan(Slice(""), Slice(cursor), 0, 0, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(cursor), Slice(), 0, 0, false, 0, &out, &trunc).ok());
     EXPECT_FALSE(trunc);
     ASSERT_EQ(out.size(), 20U);
     for (const auto &e : out) {
@@ -221,7 +221,7 @@ TEST(ReadPath, ScanStartAfterCursorSkipsEarlierEntries)
     EXPECT_EQ(out[19].key, make_key(29));
 
     // Cursor + limit: a page of 5 starting after key0009.
-    ASSERT_TRUE(t.scan(Slice(""), Slice(cursor), 5, 0, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(cursor), Slice(), 5, 0, false, 0, &out, &trunc).ok());
     ASSERT_EQ(out.size(), 5U);
     EXPECT_TRUE(trunc) << "20 keys after cursor, limit=5 should truncate";
     EXPECT_EQ(out[0].key, make_key(10));
@@ -229,7 +229,7 @@ TEST(ReadPath, ScanStartAfterCursorSkipsEarlierEntries)
 
     // Cursor near the end: deep pagination returns only the tail.
     std::string tail_cursor = make_key(N - 11); // key0019 -> key0020..key0029 (10 keys)
-    ASSERT_TRUE(t.scan(Slice(""), Slice(tail_cursor), 0, 0, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(tail_cursor), Slice(), 0, 0, false, 0, &out, &trunc).ok());
     EXPECT_FALSE(trunc);
     ASSERT_EQ(out.size(), 10U);
     EXPECT_EQ(out[0].key, make_key(20));
@@ -256,23 +256,99 @@ TEST(ReadPath, ScanByteBudgetStopsAndTruncates)
     std::vector<scan_entry> out;
     bool                    trunc;
     // Budget=30: 2 entries (26B) fit, 3rd would be 39B > 30.
-    ASSERT_TRUE(t.scan(Slice(""), Slice(), 0, 30, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 30, false, 0, &out, &trunc).ok());
     ASSERT_EQ(out.size(), 2U);
     EXPECT_TRUE(trunc);
     EXPECT_EQ(out[0].key, "k00");
     EXPECT_EQ(out[1].key, "k01");
 
     // Budget=0 (unlimited): all 5 entries, no truncation.
-    ASSERT_TRUE(t.scan(Slice(""), Slice(), 0, 0, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 0, false, 0, &out, &trunc).ok());
     ASSERT_EQ(out.size(), 5U);
     EXPECT_FALSE(trunc);
 
     // Budget smaller than a single entry: always return >= 1 entry.
     // Entry "k00" = 3 + 10 = 13B; budget=5 < 13.
-    ASSERT_TRUE(t.scan(Slice(""), Slice(), 0, 5, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 5, false, 0, &out, &trunc).ok());
     ASSERT_EQ(out.size(), 1U);
     EXPECT_TRUE(trunc); // more entries remain
     EXPECT_EQ(out[0].key, "k00");
+}
+
+// keys_only projection: the engine skips value materialization (no
+// overflow-chain assembly) and stages empty values. Keys match a full scan;
+// values are all empty. The byte budget accounts for key bytes only, so a
+// keys_only page fits more entries than a full scan with the same budget.
+TEST(ReadPath, ScanKeysOnlySkipsValues)
+{
+    Crowtree t;
+    for (int i = 0; i < 5; ++i) {
+        std::string key = "k0" + std::to_string(i);
+        std::string val = "vvvvvvvvv" + std::to_string(i);
+        ASSERT_TRUE(t.apply(i + 1, put_one(key, val)).ok());
+    }
+    ASSERT_TRUE(t.flush().ok());
+
+    // keys_only: same keys as full scan, all values empty.
+    std::vector<scan_entry> keys_out;
+    bool                    keys_trunc;
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 0, true, 0, &keys_out, &keys_trunc).ok());
+    std::vector<scan_entry> full_out;
+    bool                    full_trunc;
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 0, false, 0, &full_out, &full_trunc).ok());
+    ASSERT_EQ(keys_out.size(), 5U);
+    EXPECT_EQ(keys_trunc, full_trunc);
+    for (size_t i = 0; i < keys_out.size(); ++i) {
+        EXPECT_EQ(keys_out[i].key, full_out[i].key);
+        EXPECT_TRUE(keys_out[i].value.empty()) << "keys_only value must be empty";
+        EXPECT_FALSE(full_out[i].value.empty()) << "full scan value must be non-empty";
+    }
+
+    // keys_only with byte_budget: key bytes only (3B per key), so budget=7
+    // fits 2 keys (6B) before the 3rd (9B) exceeds — vs a full scan where
+    // 13B per entry would fit only 1 entry in 7B.
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 7, true, 0, &keys_out, &keys_trunc).ok());
+    ASSERT_EQ(keys_out.size(), 2U);
+    EXPECT_TRUE(keys_trunc);
+    EXPECT_EQ(keys_out[0].key, "k00");
+    EXPECT_EQ(keys_out[1].key, "k01");
+    EXPECT_TRUE(keys_out[0].value.empty());
+    EXPECT_TRUE(keys_out[1].value.empty());
+}
+
+TEST(ReadPath, ScanDeadlineReturnsPartialResult)
+{
+    Crowtree t;
+    // Populate enough keys that the merge loop's periodic deadline check
+    // (every 1024 entries) fires mid-scan.
+    for (int i = 0; i < 3000; ++i) {
+        char key[16];
+        std::snprintf(key, sizeof(key), "k%05d", i);
+        ASSERT_TRUE(t.apply(static_cast<uint64_t>(i) + 1, put_one(key, "v")).ok());
+    }
+
+    // deadline_ms = 0 (no deadline): full scan returns all 3000 entries.
+    std::vector<scan_entry> all;
+    bool                    all_trunc = false;
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 0, false, 0, &all, &all_trunc).ok());
+    ASSERT_EQ(all.size(), 3000U);
+    EXPECT_FALSE(all_trunc);
+
+    // Tight deadline (already expired): the merge loop checks periodically
+    // (every 1024 entries) and breaks early with truncated = true. The
+    // result is a partial, correctly-ordered prefix (no gaps).
+    std::vector<scan_entry> partial;
+    bool                    partial_trunc = false;
+    auto                    deadline_ms   = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 0, false, deadline_ms, &partial, &partial_trunc).ok());
+    EXPECT_TRUE(partial_trunc);
+    EXPECT_LT(partial.size(), all.size());
+    // The partial result is a correctly-ordered prefix of the full scan.
+    for (size_t i = 0; i < partial.size(); ++i) {
+        ASSERT_EQ(partial[i].key, all[i].key) << "partial result must be a prefix";
+    }
 }
 
 TEST(ReadPath, multi_get)
@@ -305,7 +381,7 @@ TEST(ReadPath, IterAllIncludesTombstones)
     // scan (live) excludes it.
     std::vector<scan_entry> out;
     bool                    trunc;
-    ASSERT_TRUE(t.scan(Slice(""), Slice(), 0, 0, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 0, false, 0, &out, &trunc).ok());
     ASSERT_EQ(out.size(), 1U);
     EXPECT_EQ(out[0].key, "b");
 }

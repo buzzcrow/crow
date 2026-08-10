@@ -44,7 +44,20 @@ pub async fn reconcile_with_group0(registry: &KvStoreRegistry) {
 
     // Scan for stores that include this node.
     let scan_resp = store0
-        .kv_scan(0, topology_kv::STORES_PREFIX, b"", 0, 0, 0, 0, 0)
+        .kv_scan(
+            0,
+            topology_kv::STORES_PREFIX,
+            b"",
+            b"",
+            0,
+            0,
+            0,
+            false,
+            false,
+            0,
+            0,
+            0,
+        )
         .await;
     if !scan_resp.ok {
         warn!(error = %scan_resp.error, "reconcile: failed to scan stores");
@@ -74,7 +87,20 @@ pub async fn reconcile_with_group0(registry: &KvStoreRegistry) {
 
     // Scan for groups.
     let scan_resp = store0
-        .kv_scan(0, topology_kv::GROUPS_PREFIX, b"", 0, 0, 0, 0, 0)
+        .kv_scan(
+            0,
+            topology_kv::GROUPS_PREFIX,
+            b"",
+            b"",
+            0,
+            0,
+            0,
+            false,
+            false,
+            0,
+            0,
+            0,
+        )
         .await;
     if !scan_resp.ok {
         warn!(error = %scan_resp.error, "reconcile: failed to scan groups");

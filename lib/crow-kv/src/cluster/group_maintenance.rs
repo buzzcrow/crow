@@ -43,7 +43,7 @@ use std::time::Duration;
 
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use super::group::PxGroup;
 use crate::wal::gc::run_gc_with_watermark;
@@ -88,6 +88,61 @@ async fn maintenance_loop(group: Weak<PxGroup>, tick: Duration, cancel: Cancella
     }
 }
 
+/// Persist a durable snapshot on a blocking thread, update watermarks,
+/// and return the snapshot slot. Runs on a blocking thread so a large
+/// snapshot (e.g. 100k × 16 KiB = 1.6 GB) cannot stall the async
+/// election driver / heartbeat task.
+async fn persist_snapshot_blocking(
+    group: &PxGroup,
+    contiguous: u64,
+    slot_advance: u64,
+    time_elapsed: Duration,
+) -> u64 {
+    debug!(
+        group_id = group.group_id(),
+        replica_id = group.local_replica().id,
+        contiguous_slot = contiguous,
+        slot_advance,
+        time_elapsed_ms = u64::try_from(time_elapsed.as_millis()).unwrap_or(u64::MAX),
+        "maintenance: persisting snapshot (threshold met)"
+    );
+    let snap_start = std::time::Instant::now();
+    let engine_arc = group.local_replica().learner.engine_arc();
+    let group_id = group.group_id();
+    let at = tokio::task::spawn_blocking(move || engine_arc.persist_snapshot())
+        .await
+        .unwrap_or_else(|e| {
+            error!(
+                group_id,
+                error = %e,
+                "maintenance: persist_snapshot blocking task panicked; \
+                 next step: inspect engine snapshot path for panic"
+            );
+            0
+        });
+    let elapsed_ms = u64::try_from(snap_start.elapsed().as_millis()).unwrap_or(u64::MAX);
+    if elapsed_ms > 100 {
+        info!(
+            group_id = group.group_id(),
+            replica_id = group.local_replica().id,
+            elapsed_ms,
+            snapshot_slot = at,
+            "maintenance: persist_snapshot completed on blocking thread"
+        );
+    }
+    group
+        .last_snapshot_slot
+        .store(at, std::sync::atomic::Ordering::Release);
+    *group.last_snapshot_time.lock() = std::time::Instant::now();
+    debug!(
+        group_id = group.group_id(),
+        replica_id = group.local_replica().id,
+        snapshot_slot = at,
+        "maintenance: snapshot persisted"
+    );
+    at
+}
+
 /// Run one maintenance pass. Exposed `pub(crate)` so tests can drive a
 /// single deterministic pass without waiting on the periodic loop's timer.
 pub(crate) async fn run_pass(group: &PxGroup) {
@@ -105,7 +160,17 @@ pub(crate) async fn run_pass(group: &PxGroup) {
 
     // 1. Flush every tick: drain L0 memtable into L1 in memory (cheap no-op
     //    when L0 is empty). Advances last_applied_slot in memory only.
-    engine.flush();
+    // Runs on a blocking thread because flush holds the C++ write_mutex_.
+    let engine_arc = group.local_replica().learner.engine_arc();
+    tokio::task::spawn_blocking(move || engine_arc.flush())
+        .await
+        .unwrap_or_else(|e| {
+            error!(
+                group_id = group.group_id(),
+                error = %e,
+                "maintenance: flush blocking task panicked"
+            );
+        });
 
     // 2. Conditionally persist a durable snapshot to disk (expensive: sync +
     //    page writes). Only when the slot advance or time threshold is met.
@@ -122,36 +187,28 @@ pub(crate) async fn run_pass(group: &PxGroup) {
         || time_elapsed >= Duration::from_millis(group.config.election.snapshot_time_threshold_ms);
 
     let engine_snapshot_at = if should_snapshot {
-        debug!(
-            group_id = group.group_id(),
-            replica_id = group.local_replica().id,
-            contiguous_slot = contiguous,
-            slot_advance = slot_advance,
-            time_elapsed_ms = u64::try_from(time_elapsed.as_millis()).unwrap_or(u64::MAX),
-            "maintenance: persisting snapshot (threshold met)"
-        );
-        let at = engine.persist_snapshot();
-        group
-            .last_snapshot_slot
-            .store(at, std::sync::atomic::Ordering::Release);
-        *group.last_snapshot_time.lock() = std::time::Instant::now();
-        debug!(
-            group_id = group.group_id(),
-            replica_id = group.local_replica().id,
-            snapshot_slot = at,
-            "maintenance: snapshot persisted"
-        );
-        at
+        persist_snapshot_blocking(group, contiguous, slot_advance, time_elapsed).await
     } else {
         0
     };
 
     // 3. GC: set watermark + sweep every tick. The B-tree's own
     //    dropped-count check makes a no-op tick cheap.
+    // `set_gc_watermark` is a cheap atomic store and stays inline;
+    // `collect_garbage` holds the C++ write_mutex_ and runs on a blocking thread.
     let safe_slot = group.group_safe_slot();
     let snapshot_slot = group.group_snapshot_slot();
     engine.set_gc_watermark(snapshot_slot, safe_slot);
-    engine.collect_garbage();
+    let engine_arc = group.local_replica().learner.engine_arc();
+    tokio::task::spawn_blocking(move || engine_arc.collect_garbage())
+        .await
+        .unwrap_or_else(|e| {
+            error!(
+                group_id = group.group_id(),
+                error = %e,
+                "maintenance: collect_garbage blocking task panicked"
+            );
+        });
 
     // 4. WAL GC: only advance snapshot_slot when we actually persisted.
     let Some(wal) = group.local_replica().wal() else {

@@ -53,3 +53,6 @@ mod readindex_batch;
 
 #[path = "store/apply_fence_test.rs"]
 mod apply_fence;
+
+#[path = "store/snapshot_api_test.rs"]
+mod snapshot_api;

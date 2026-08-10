@@ -11,7 +11,7 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R67** — Bump this line in the same commit when adding a new item.
+**Next R number: R69** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
@@ -47,6 +47,19 @@ complexity, and dependency. Before implementation, follow the
   replica-to-replica path only; management API stays on Axum/HTTP.
   Reference implementations: protosocket (Momento), Volo (CloudWeGo),
   Cap'n Proto RPC.
+- **[R68](R68-kv-write-largeval-bench.md)** — Large-value write
+  benchmark — Area: cluster / maintenance / bench — R67 fixed the 16 KiB
+  scan error spike by wrapping the maintenance loop's `flush` /
+  `persist_snapshot` / `collect_garbage` in `spawn_blocking`, but
+  verified it only on the scan path. The maintenance loop runs
+  identically under write load, yet the write regression sentinel
+  (`bench-write-regression.sh`) only exercises 512 B values — there is
+  no large-value write config. Add a `largeval_16k` write config
+  (`--value-size 16384`, 100k keys, 10s mem mode) and verify 0 write
+  errors across 3 consecutive runs on Linux. If errors appear, RCA into
+  whether the R67 fix has a write-path gap and file a follow-up
+  requirement. Low complexity; verifies R67's coverage extends to
+  writes.
 - **[R33](R33-crow-tree-rename.md)** — Extract crow-tree to separate repo and rename — Area:
   workspace — Move `crowtree/` into its own git repository (preserving
   history), wire `crow-kv` to depend on `crow-tree-ffi` as an external
@@ -101,61 +114,6 @@ complexity, and dependency. Before implementation, follow the
   document the top hot stacks. Investigation only — no scan-path code
   changes. If a clear optimization target emerges, file a follow-up
   requirement with the profiling evidence. Low complexity.
-- **[R55](R55-kv-scan-carry-read-slot.md)** — Carry page-1 `read_slot`
-  forward as `min_slot` — Area: scan / client — a multi-page
-  linearizable scan pays the read barrier once per page
-  (`px_kv_store.rs:183`), but only the first page needs a freshness
-  proof; later pages only need to be at least as fresh as page 1. After
-  page 1 returns `read_slot = S`, switch subsequent pages to `MinSlot`
-  with `min_slot = S` — the store serves locally when
-  `contiguous_applied >= S` (`px_kv_store.rs:575`), skipping the
-  barrier, and redirects to the leader only if the chosen replica
-  hasn't caught up. No proto change (`read_slot`/`min_slot` fields
-  already exist); client-local. Semantics unchanged (a paginated scan
-  was never a single snapshot). Low–medium complexity.
-- **[R56](R56-kv-scan-end-key-bound.md)** — Optional exclusive `end_key`
-  range bound — Area: scan / kv — `KvScanRequest` has `prefix` +
-  `start_after` but no upper bound, so an arbitrary `[start, end)` range
-  cannot be expressed without client-side over-read and filtering. Add
-  an optional exclusive `end_key` (empty = unbounded) to proto, engine
-  merge-loop early-stop (mirrors the existing prefix stop at
-  `crow-tree.cpp:1964`), FFI, store, service, and client. One new field
-  per layer, mechanical. Prerequisite shape for R52 reverse scan.
-  Low–medium complexity.
-- **[R57](R57-tree-scan-zero-copy-staging.md)** — Zero-copy engine scan
-  result staging — Area: scan / crow-tree engine — each scan page is
-  copied 3 times before the FFI boundary: `consider` lambda stages into
-  `std::vector<scan_entry>` (`crow-tree.cpp:1853/1868`), `ct_scan`
-  re-packs into `std::string packed` (`c_api.cpp:912-920`), `make_buf`
-  mallocs+memcpys again (`c_api.cpp:43/921`). ~10.5 MiB memcpy per full
-  3.5 MiB page. Fix: pack the wire format directly in `consider` (single
-  growing buffer) and transfer ownership across the FFI via the
-  `make_borrowed_buf` pattern already used by the get fast path. Collapses
-  3 copies to 1 (the unavoidable wire-format assembly). Design-level
-  redundancy, not profiling-guided. Medium complexity.
-- **[R58](R58-tree-scan-merge-loop-fast-path.md)** — Merge loop 2-source
-  fast path + loser tree — Area: scan / crow-tree engine — the merge loop
-  does 2 × N_sources byte-wise compares per output entry
-  (`crow-tree.cpp:1890-1934`): a min-key scan then a winner pass. The
-  common case (1 active L0 + L1, no frozen memtables) is a trivial 2-way
-  min needing 1 compare, not a 2-pass vector scan. Add a 2-source fast
-  path branch; for k > 2 (several frozen memtables) use a loser tree
-  (O(log k) per merge). Add `__builtin_prefetch` for the next skip-list
-  node and right-sibling leaf. Design-level redundancy (k-way merge has a
-  known O(log k) structure). Medium complexity.
-- **[R59](R59-kv-snapshot-scan.md)** — Two scan modes + snapshot
-  versioning API — Area: scan / kv / crow-tree engine — the current
-  `scan` is the only range-read surface (S3-list semantics: per-page
-  consistent, not cross-page). R59 formalizes two modes: (1) **list
-  scan** — the existing `scan`, fast, latest values, for interactive
-  listing; (2) **snapshot versioning API** — flush + `snapshot_view()`
-  (already built, pins L1 at `last_applied_slot`, zero-copy page
-  refcounts) + iterate the frozen vector with prefix/pagination. New
-  RPCs: `CreateSnapshot`/`ListSnapshots`/`SnapshotScan`/
-  `ReleaseSnapshot` + management API for `SetGcWatermark`. No new engine
-  machinery (no version chain, no L0 pinning — flush drains L0 first).
-  Active snapshots protect pinned pages from GC via refcount. Medium
-  complexity.
 - **[R60](R60-tree-scan-sibling-leaf-readahead.md)** — Sibling-leaf
   readahead on cold scans — Area: scan / crow-tree engine — the scan
   path demand-loads each L1 leaf inline (sync) or one pending page per
@@ -169,27 +127,19 @@ complexity, and dependency. Before implementation, follow the
   the reactor submission (small readahead window, default 1). Win is
   zero on mem-mode (leaves resident); needs a cold/disk bench config to
   validate. Medium complexity.
-- **[R61](R61-kv-scan-keys-only-projection.md)** — Keys-only /
-  count-only projection — Area: scan / kv / crow-tree engine — scans
-  always materialize and ship values, including the expensive
-  `assemble_overflow_value` overflow-chain assembly
-  (`crow-tree.cpp:1857-1858`). A `keys_only` flag skips value
-  materialization in the `consider` lambda (stages key only) and
-  shrinks pages by the value fraction; a `count_only` variant counts
-  matches and ships zero items. One new flag per layer (proto, engine,
-  FFI, store, service, client). Useful for key listing, prefix
-  cardinality, and the console UI key browser. Low–medium complexity.
-- **[R62](R62-kv-scan-deadline-cancellation.md)** — Per-scan deadline /
-  cancellation — Area: scan / kv / crow-tree engine — no per-scan
-  timeout at any layer; an unbounded `limit=0` scan runs until the
-  transport gives up, and the engine merge loop
-  (`crow-tree.cpp:1890`) has no cancellation check between leaves. Add
-  a `deadline_ms` proto field (absolute unix-ms; 0 = no deadline) and
-  periodic deadline checks: client pagination loop checks before
-  fetching the next page (returns partial + `timed_out` flag); engine
-  merge loop checks once per leaf (in `refill_l1`) and breaks early
-  with `truncated = true`. Bounds worst-case server work. Medium
-  complexity.
+- **[R68](R68-kv-write-largeval-bench.md)** — Large-value write
+  benchmark — Area: cluster / maintenance / bench — R67 fixed the 16 KiB
+  scan error spike by wrapping the maintenance loop's `flush` /
+  `persist_snapshot` / `collect_garbage` in `spawn_blocking`, but
+  verified it only on the scan path. The maintenance loop runs
+  identically under write load, yet the write regression sentinel
+  (`bench-write-regression.sh`) only exercises 512 B values — there is
+  no large-value write config. Add a `largeval_16k` write config
+  (`--value-size 16384`, 100k keys, 10s mem mode) and verify 0 write
+  errors across 3 consecutive runs on Linux. If errors appear, RCA into
+  whether the R67 fix has a write-path gap and file a follow-up
+  requirement. Low complexity; verifies R67's coverage extends to
+  writes.
 
 ---
 

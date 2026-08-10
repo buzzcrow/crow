@@ -13,6 +13,7 @@
 #include "crow-tree/memtable.h"
 #include "crow-tree/options.h"
 #include "crow-tree/page.h"
+#include "crow-tree/scan_packed.h"
 #include "crow-tree/snapshot.h"
 #include "crow-tree/status.h"
 
@@ -575,13 +576,20 @@ class Crowtree
     // greater than `start_after` are returned. When non-empty, the descent
     // targets the leaf that would contain `start_after` instead of `prefix`,
     // so a deep-pagination scan starts at the cursor rather than walking every
-    // earlier leaf in the prefix range. `byte_budget` (0 = unlimited) caps the
-    // total key+value bytes emitted; the scan stops with *truncated = true when
-    // exceeded, always returning at least one entry (so a single oversized
-    // entry still makes progress). A warning is logged for any single entry
-    // whose key+value size alone exceeds the budget.
-    Status scan(Slice prefix, Slice start_after, size_t limit, size_t byte_budget, std::vector<scan_entry> *out,
-                bool *truncated, bool include_tombstones = false) const;
+    // earlier leaf in the prefix range. `end_key` (empty = unbounded) is an
+    // exclusive upper bound: only keys strictly less than `end_key` are
+    // returned, and the merge loop early-stops once the winner key reaches it.
+    // `byte_budget` (0 = unlimited) caps the total key+value bytes emitted;
+    // the scan stops with *truncated = true when exceeded, always returning at
+    // least one entry (so a single oversized entry still makes progress). A
+    // warning is logged for any single entry whose key+value size alone
+    // exceeds the budget. `keys_only` skips value materialization (no
+    // overflow-chain assembly, no value copy): entries are staged with empty
+    // values and the byte budget accounts for key bytes only, so a page fits
+    // more entries. Default false.
+    Status scan(Slice prefix, Slice start_after, Slice end_key, size_t limit, size_t byte_budget, bool keys_only,
+                uint64_t deadline_ms, std::vector<scan_entry> *out, bool *truncated, bool include_tombstones = false,
+                ScanPackedBuf *out_packed = nullptr, size_t *out_count = nullptr) const;
 
     // Async twin of scan(). Unlike get_async,
     // which has exactly one possible miss point (the root->leaf descent for
@@ -596,10 +604,12 @@ class Crowtree
     // on_done fires exactly once, synchronously if the whole scan was
     // already resident (matching scan()'s cost exactly), or from the
     // Reactor thread after however many page loads were needed. `start_after`
-    // is the same exclusive lower bound as scan()'s. `byte_budget` is the
-    // same total key+value byte cap as scan()'s.
-    void scan_async(Slice prefix, Slice start_after, size_t limit, size_t byte_budget,
-                    std::function<void(Status, std::vector<scan_entry>, bool truncated)> on_done) const;
+    // is the same exclusive lower bound as scan()'s. `end_key` is the same
+    // exclusive upper bound as scan()'s. `byte_budget` is the same total
+    // key+value byte cap as scan()'s. `keys_only` is the same value-skip flag
+    // as scan()'s.
+    void scan_async(Slice prefix, Slice start_after, Slice end_key, size_t limit, size_t byte_budget, bool keys_only,
+                    uint64_t deadline_ms, std::function<void(Status, ScanPackedBuf, bool truncated)> on_done) const;
 
     // pin a consistent point-in-time view at `last_applied_slot` (the durable L1
     // state). Used for scan-at / compare / iter_all / snapshot export.
@@ -994,25 +1004,28 @@ class Crowtree
     // and reports it via *out_pending_page_id. Returns true if the scan
     // fully resolved with no cold page encountered (*out/*truncated are
     // then exactly what scan() itself would have produced).
-    [[nodiscard]] bool try_scan_no_load(Slice prefix, Slice start_after, size_t limit, size_t byte_budget,
-                                        std::vector<scan_entry> *out, bool *truncated,
-                                        uint64_t *out_pending_page_id) const;
+    [[nodiscard]] bool try_scan_no_load(Slice prefix, Slice start_after, Slice end_key, size_t limit,
+                                        size_t byte_budget, bool keys_only, uint64_t deadline_ms,
+                                        std::vector<scan_entry> *out, bool *truncated, uint64_t *out_pending_page_id,
+                                        ScanPackedBuf *out_packed = nullptr, size_t *out_count = nullptr) const;
 
     // scan_async's retry loop, structurally identical to get_async_attempt:
     // one try_scan_no_load() attempt, then either calls on_done (resolved)
     // or resolves the one blocking page_id (via the reactor, or
-    // synchronously if no async backend is wired) and recurses. `prefix`
-    // and `start_after` are heap copies (unlike scan()'s Slice, must survive
-    // across an arbitrary number of async round trips). Entries resolved
-    // before the cold leaf are accumulated across retries and the last
-    // resolved key becomes the resume `start_after`, so a scan over N cold
-    // leaves performs O(N) leaf loads with no re-traversal of already-
+    // synchronously if no async backend is wired) and recurses. `prefix`,
+    // `start_after`, and `end_key` are heap copies (unlike scan()'s Slice,
+    // must survive across an arbitrary number of async round trips). Entries
+    // resolved before the cold leaf are accumulated across retries and the
+    // last resolved key becomes the resume `start_after`, so a scan over N
+    // cold leaves performs O(N) leaf loads with no re-traversal of already-
     // resolved leaves (was quadratic). `byte_budget` is the remaining total
     // key+value byte cap (adjusted by entries already in `accumulated`).
     void scan_async_attempt(std::shared_ptr<std::string>        prefix_owned,
-                            const std::shared_ptr<std::string> &start_after_owned, size_t limit, size_t byte_budget,
-                            std::shared_ptr<std::vector<scan_entry>>                   accumulated,
-                            std::function<void(Status, std::vector<scan_entry>, bool)> on_done) const;
+                            const std::shared_ptr<std::string> &start_after_owned,
+                            const std::shared_ptr<std::string> &end_key_owned, size_t limit, size_t byte_budget,
+                            bool keys_only, uint64_t deadline_ms, std::shared_ptr<ScanPackedBuf> accumulated,
+                            std::shared_ptr<std::string> last_key, size_t accumulated_count,
+                            std::function<void(Status, ScanPackedBuf, bool)> on_done) const;
 
     // Shared by snapshot() and snapshot_async() (persist.cpp,
     // #11 Phase 2, #14c/#14d): runs the segment scan / delta-fold /

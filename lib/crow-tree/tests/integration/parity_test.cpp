@@ -32,7 +32,7 @@ void expect_parity(Crowtree &t, const std::map<std::string, std::string> &oracle
 {
     std::vector<scan_entry> out;
     bool                    trunc = false;
-    ASSERT_TRUE(t.scan(Slice(""), Slice(), 0, 0, &out, &trunc).ok());
+    ASSERT_TRUE(t.scan(Slice(""), Slice(), Slice(), 0, 0, false, 0, &out, &trunc).ok());
     ASSERT_FALSE(trunc);
     ASSERT_EQ(out.size(), oracle.size());
     size_t i = 0;
