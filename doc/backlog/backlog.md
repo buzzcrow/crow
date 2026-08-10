@@ -15,11 +15,6 @@ complexity, and dependency. Before implementation, follow the
 
 ### High Priority
 
-- **[R70](R70-diskdb-protocol-core-types.md)** — diskdb protocol + core
-  types — Area: diskdb — Fill in the protobuf services
-  (allocate/free/active_zone/query) in `lib/protocol`, core types
-  (Segment, ZoneRecord, BusyRecord, FreeRecord, ZoneSnapshot), and
-  config validation. Foundation for R71–R76.
 - **[R71](R71-diskdb-group0-sysdata-sync.md)** — diskdb group-0 sysdata
   + sync — Area: diskdb — Implement the group-0 sysdata schema
   (node/disk/disk-group metadata, ownership map, binding map), periodic

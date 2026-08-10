@@ -192,6 +192,31 @@ into the crow-common registry at reporting intervals.
 - **data groups (group-1..N)** — paxos groups holding zone journals and
   snapshots. Each disk-group is bound to one data group.
 
+### Protocol — `diskdb.proto`
+
+Two gRPC services defined in `lib/protocol/src/proto/diskdb.proto`:
+
+- **`DiskdbService`** — served by the diskdb server:
+  - `AllocateBlocks` — allocate block(s) in a disk-group; supports
+    `exclude_disk_uuids` for replica-aware placement. `count=1` is the
+    single-block case (no separate `AllocateBlock` RPC).
+  - `FreeBlocks` — free block(s); `count=1` is the single-free case (no
+    separate `FreeBlock` RPC; free is not hot-path, batched internally).
+  - `QueryCapacityStats` — capacity/busy/free across owned disk-groups;
+    returns `repeated DiskGroupInfo` (diskdb owns disk-groups, not
+    nodes). Optional per-zone breakdown (`include_zones`).
+  - `GetDiskGroupInfo` — read-only query for a specific disk-group.
+  - `GetDiskInfo` — read-only query for a specific disk.
+- **`DiskdbAdminService`** — targets group 0; served by a future
+  admin/console component, **not** the diskdb server:
+  - `AddDiskGroup`, `AddDisk`, `RemoveDisk`, `SetDiskStatus`,
+    `SetDiskGroupStatus`, `SetNodeStatus`.
+
+Integer IDs throughout: `node_id` (uint64), `disk_group_id` (uint32,
+unique within node), `DiskUuid` (two uint64). No string UUIDs in the
+protocol. No `NodeInfo` message — Node is not a diskdb protocol level.
+No `ActiveZone` RPC — zone activation is internal to diskdb.
+
 ## 5. Group-0 Sysdata Schema
 
 Group 0 stores the diskdb subsystem metadata as KV entries. The schema
@@ -206,33 +231,42 @@ though v1 ships flat (node list only).
 /diskdb/dc/{dc_id}/rack/{rack_id}/meta          -> RackMeta
 
 # Node metadata
-/diskdb/node/{node_uuid}/meta                   -> NodeMeta
+/diskdb/node/{node_id}/meta                     -> NodeMeta
 
 # Disk-group metadata (logical, belongs to one node)
-/diskdb/node/{node_uuid}/dg/{dg_index}/meta     -> DiskGroupMeta
+/diskdb/node/{node_id}/dg/{dg_id}/meta          -> DiskGroupMeta
 
 # Disk metadata (physical, belongs to one node)
-/diskdb/node/{node_uuid}/disk/{disk_uuid}/meta  -> DiskMeta
+/diskdb/node/{node_id}/disk/{disk_uuid}/meta    -> DiskMeta
 
 # Maps (the two core tables)
-/diskdb/map/owner/{dg_id}                       -> {instance_id, lease_expiry}
-/diskdb/map/bind/{dg_id}                        -> {store_id, group_id}
+/diskdb/map/owner/{node_id}-{dg_id}             -> {instance_id, lease_expiry}
+/diskdb/map/bind/{node_id}-{dg_id}              -> {store_id, group_id}
 
 # diskdb instance registry
 /diskdb/instance/{instance_id}                  -> InstanceMeta
 ```
 
+`node_id` is a `u64` integer; `dg_id` is a `u32` integer unique within
+a node; `disk_uuid` is a 128-bit UUID rendered as 32 hex chars
+(`{high:016x}{low:016x}`). IDs are stringified at the KV boundary.
+
 ### Core types (summary)
 
-- **NodeMeta** — `node_uuid`, `dc_id` (reserved), `rack_id` (reserved),
-  `status` (Init/Online/Offline/Maintenance/TempFailure).
-- **DiskGroupMeta** — `dg_id` (`"{node_uuid}-{index}"`), `node_uuid`,
-  `index`, `status`, `disk_uuids` (list of member disks).
-- **DiskMeta** — `disk_uuid`, `node_uuid`, `disk_type` (HDD/SSD/SMR),
-  `capacity_bytes`, `zone_size_bytes`, `block_size_bytes`,
-  `zone_count`, `status`.
-- **InstanceMeta** — `instance_id`, `endpoint` (gRPC + HTTP),
-  `owned_dg_ids` (list), `last_heartbeat_ms`.
+- **NodeMeta** — `node_id` (u64), `dc_id` (reserved, Option), `rack_id`
+  (reserved, Option), `status`, `last_used_dg_id` (u32, for disk-group
+  id auto-increment), `disk_group_ids` (list), `status_changed_at_ms`,
+  `temp_failure_since_ms` (Option).
+- **DiskGroupMeta** — `node_id` (u64), `dg_id` (u32), `status`,
+  `disk_uuids` (list of member disks).
+- **DiskMeta** — `disk_uuid` (DiskUuid), `node_id` (u64), `disk_type`
+  (BlockHdd/BlockSsd/ZoneSsd/SmrHdd), `capacity_bytes`,
+  `zone_size_bytes`, `block_size_bytes`, `zone_count`, `status`. No
+  `disk_state` (local-only, probed) and no `disk_group_id` (membership
+  is in `DiskGroupMeta`).
+- **InstanceMeta** — `instance_id` (string), `grpc_endpoint`,
+  `http_endpoint`, `owned_dg_ids` (list of `(node_id, dg_id)` pairs),
+  `last_heartbeat_ms`.
 
 **Note**: zones are NOT stored in group 0. A zone is created when its
 disk is added, and its state (journal + snapshot) lives on the
@@ -264,8 +298,8 @@ and the logical disk-group layer:
   live on one paxos data group).
 
 ```
-Data Center → Rack → Node (uuid) → Disk-Group ("{node_uuid}-{index}")  [logical]
-  → Disk (uuid, HDD/SSD/SMR) → Zone (index, ~16 GB) → Disk-Block (1 MB aligned)
+Data Center → Rack → Node (node_id, u64) → Disk-Group ("{node_id}-{dg_id}")  [logical]
+  → Disk (DiskUuid, 128-bit) → Zone (index, variable size) → Disk-Block (1 MB aligned)
 ```
 
 ## 7. Zone Journal and Crash Recovery
@@ -277,27 +311,35 @@ journal (via blind `Put`):
 
 ```
 # Busy record (allocate)
-/diskdb/journal/{dg_id}/{disk_uuid}/z{zone_idx:04}/busy/{slot}  -> BusyRecord
+/diskdb/journal/{node_id}-{dg_id}/{disk_uuid}/z{zone_idx:04}/busy/{slot:020}  -> BusyRecord
 
 # Free record (free)
-/diskdb/journal/{dg_id}/{disk_uuid}/z{zone_idx:04}/free/{slot}  -> FreeRecord
+/diskdb/journal/{node_id}-{dg_id}/{disk_uuid}/z{zone_idx:04}/free/{slot:020}  -> FreeRecord
 
-# Zone snapshot (compacted, periodic)
-/diskdb/journal/{dg_id}/{disk_uuid}/z{zone_idx:04}/snapshot     -> ZoneSnapshot
+# Zone record (compacted snapshot, periodic)
+/diskdb/journal/{node_id}-{dg_id}/{disk_uuid}/z{zone_idx:04}/snapshot         -> ZoneRecord
 ```
+
+`slot` is zero-padded to 20 digits for lexicographic prefix-scan order.
+`disk_uuid` is rendered as 32 hex chars (`{high:016x}{low:016x}`).
 
 - **BusyRecord** — `{zone_offset, size, tag}`. Small (≤ 32 bytes
   serialized).
 - **FreeRecord** — `{zone_offset, size, tag}`. Same shape as BusyRecord.
-- **ZoneSnapshot** — `{allocate_pos, usage_bitmap, zone_state,
-  snapshot_slot}`. The compacted full-zone state at a point in time.
+- **ZoneRecord** — `{disk_uuid, zone_index, disk_offset, zone_size_bytes,
+  allocate_pos, usage_bitmap, zone_state, snapshot_slot, checksum}`.
+  The compacted full-zone state at a point in time. `disk_offset` and
+  `zone_size_bytes` support variable zone sizes (the last zone on a disk
+  is usually smaller). `checksum` is CRC32 over the bincode-serialized
+  record with the checksum field zeroed (`compute_checksum` /
+  `verify_checksum`).
 
 ### Replay algorithm
 
 On startup / ownership transfer, for each zone:
-1. Load the latest `ZoneSnapshot` (if any).
+1. Load the latest `ZoneRecord` snapshot (if any).
 2. Scan the journal by key prefix
-   `/diskdb/journal/{dg_id}/{disk_uuid}/z{zone_idx:04}/` for all
+   `/diskdb/journal/{node_id}-{dg_id}/{disk_uuid}/z{zone_idx:04}/` for all
    busy/free records with slot > `snapshot_slot`.
 3. Apply busy records (set bits, advance `allocate_pos`) and free
    records (clear bits) to the snapshot's bitmap.
@@ -314,7 +356,8 @@ feedback. Slot-info from crow-kv is a future optimization.
 Periodically (or when the journal for a zone exceeds a threshold),
 diskdb compacts:
 1. Compute the current bitmap + `allocate_pos` from the in-memory state.
-2. Write a new `ZoneSnapshot` with `snapshot_slot = current_max_slot`.
+2. Write a new `ZoneRecord` snapshot with `snapshot_slot = current_max_slot`
+   (CRC32 checksum computed via `compute_checksum`).
 3. Delete all busy/free records with slot ≤ `snapshot_slot` in one
    `batch_write` (the batch merge — deletes span any disk/zone, so
    multiple zones' expired records are collected and deleted together).
@@ -361,19 +404,21 @@ For multi-block: Phase 1 claims all zones (sync), Phase 2 uses one
 2. Background loop flushes `FreeBatch` to the data group periodically
    (default 500 ms / 256 entries) as FreeRecords.
 
-### active_zone
+### Zone activation (internal)
 
-Re-adds a zone to the disk's active deque after the caller finishes
-writing. Prevents over-committing write-once zones.
+A zone is re-added to the disk's active deque after the caller finishes
+writing. This is internal to diskdb — no `ActiveZone` RPC. Prevents
+over-committing write-once zones.
 
 ## 9. State Machines
 
 ### Node / disk-group / disk Status
 
 Shared enum: `Online`, `Init`, `Maintenance`, `TempFailure`, `Offline`
-(ordered by restrictiveness). Effective status = `max(node, group,
-disk)`. Allocations require `Online`; frees allow `Online` or
-`Maintenance` or `TempFailure`.
+(ordered by restrictiveness: Online < Init < Maintenance < TempFailure
+< Offline). Effective status = `max(node, group, disk)`. Allocations
+require effective `Online`; frees allow `Online`, `Maintenance`, or
+`TempFailure`.
 
 Transitions:
 - Init → {Online, Offline, Maintenance} on startup (load from group 0).
@@ -458,6 +503,31 @@ lib/crow-diskdb-client    (client library for callers: allocate/free/query; gRPC
   HTTP handlers, CLI, config). The library target enables integration
   tests without spawning a separate process; the binary target
   (`crow-diskdb`) is the server executable.
+
+### Module layout
+
+```
+app/crow-diskdb/src/
+  types/          — core types (mirror proto hierarchy + journal types)
+    mod.rs        — module declarations + re-exports
+    ids.rs        — NodeId, DiskGroupId, DiskUuid, Segment, ClaimSnapshot
+    status.rs     — Status enum + effective_status + allows_allocate/free
+    zone_state.rs — ZoneState, ZoneAllocationState
+    disk_state.rs — DiskState, DiskType
+    journal.rs    — BusyRecord, FreeRecord, ZoneRecord, key helpers, CRC32
+    disk.rs       — DiskMeta
+    disk_group.rs — DiskGroupMeta
+    node.rs       — NodeMeta
+    instance.rs   — InstanceMeta
+  config/         — config structs + validation
+    mod.rs        — DiskdbConfig + sub-configs with production defaults
+    validation.rs — validate() -> Result<(), String>
+  zone/           — zone-level utilities
+    mod.rs        — module declarations
+    bitmap.rs     — UsageBitmap (lock-free, Vec<AtomicU64>)
+  lib.rs          — module declarations + re-exports
+  main.rs         — CLI entry point (clap flags)
+```
 - **`lib/crow-diskdb-client`** — client library for easy access to the server
   (allocate/free/query), mirroring `crow-kv-client`'s retry +
   topology-cache pattern. gRPC now; custom RPC + flatbuffer later.
@@ -514,7 +584,7 @@ functional scope:
 
 - **R70** — Protocol + core types + config validation (protobuf
   services, core types, journal key layout, config validation, bitmap
-  utilities, CRC integrity).
+  utilities, CRC integrity). **Done.**
 - **R71** — Group-0 sysdata schema + sync (disk status management,
   group-0 read/write, ownership/binding maps, heartbeat).
 - **R72** — Zone allocator + journal persistence (zone CAS, active
