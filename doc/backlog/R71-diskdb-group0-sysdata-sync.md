@@ -24,7 +24,7 @@ management — which talks with group 0 to sync metadata and manage
 disk/disk-group/node status transitions.
 
 1. **Group-0 sysdata read/write** — create
-   `lib/crow-diskdb/src/sysdata/` module:
+   `app/crow-diskdb/src/sysdata/` module:
    - `SysdataClient` — wraps `CrowkvClient` (from `crow-kv-client`)
      with diskdb-specific read/write helpers targeting group 0 (store
      0, group 0). All reads use `get` or `scan` (prefix scan); all
@@ -63,7 +63,7 @@ disk/disk-group/node status transitions.
    - All writes serialize via serde_json (matching the design doc's
      JSON value convention for sysdata). Values are small (< 1 KB).
 
-2. **Sync loop** — create `lib/crow-diskdb/src/sync/` module:
+2. **Sync loop** — create `app/crow-diskdb/src/sync/` module:
    - `SyncLoop` — owns a `SysdataClient`, a `NodeContainer` (shared
      state), and a `SyncConfig`. Runs as a `tokio::spawn` background
      task.
@@ -99,7 +99,7 @@ disk/disk-group/node status transitions.
      decision in the design doc during implementation.
 
 3. **Disk status management** — create
-   `lib/crow-diskdb/src/status/` module:
+   `app/crow-diskdb/src/status/` module:
    - `StatusManager` — applies status transitions and computes
      effective status. Integrated with the sync loop.
    - `apply_node_status(node_uuid, new_status)` — validates transition
@@ -127,7 +127,7 @@ disk/disk-group/node status transitions.
    - `allows_free(effective) -> bool` — Online, Maintenance,
      TempFailure.
 
-4. **NodeContainer** — create `lib/crow-diskdb/src/node/` module:
+4. **NodeContainer** — create `app/crow-diskdb/src/node/` module:
    - `NodeContainer` — per-instance singleton managing all owned
      disk-groups. `nodes: RwLock<HashMap<DiskGroupId, Arc<Node>>>`,
      `instance_id: String`, `config: DiskdbConfig`, `degraded:
@@ -152,7 +152,7 @@ disk/disk-group/node status transitions.
      (non-goal per design doc §2).
 
 5. **Operator/admin gRPC handlers** — create
-   `lib/crow-diskdb/src/grpc/admin.rs`:
+   `app/crow-diskdb/src/grpc/admin.rs`:
    - `set_disk_status`, `set_disk_group_status`, `set_node_status` —
      delegate to `StatusManager`.
    - `add_disk`, `remove_disk` — update group 0 sysdata + in-memory
@@ -163,7 +163,7 @@ disk/disk-group/node status transitions.
      trait). The allocate/free handlers are stubs (return
      `Unimplemented`) — R72 fills them in.
 
-6. **Server binary skeleton** — create `app/crow-diskdb-server/`:
+6. **Server binary skeleton** — create `app/crow-diskdb/`:
    - `Cargo.toml` — depends on `crow-diskdb`, `crow-kv-client`,
      `crow-common`, `crow-protocol`, `tonic`, `tokio`, `clap`,
      `tracing`, `serde`, `toml`.
@@ -177,25 +177,25 @@ disk/disk-group/node status transitions.
      gRPC. Allocation/free RPCs return `Unimplemented` until R72.
 
 **Scope** (expected changed files):
-- `lib/crow-diskdb/src/sysdata/mod.rs` — `SysdataClient` with
+- `app/crow-diskdb/src/sysdata/mod.rs` — `SysdataClient` with
   group-0 read/write helpers.
-- `lib/crow-diskdb/src/sync/mod.rs` — `SyncLoop` with periodic sync
+- `app/crow-diskdb/src/sync/mod.rs` — `SyncLoop` with periodic sync
   and degraded mode.
-- `lib/crow-diskdb/src/status/mod.rs` — `StatusManager` with
+- `app/crow-diskdb/src/status/mod.rs` — `StatusManager` with
   transition rules and effective status.
-- `lib/crow-diskdb/src/node/mod.rs` — `Node`, `NodeContainer`.
-- `lib/crow-diskdb/src/node/container.rs` — `NodeContainer` impl.
-- `lib/crow-diskdb/src/node/disk.rs` — `ZoneDisk` struct (zone
+- `app/crow-diskdb/src/node/mod.rs` — `Node`, `NodeContainer`.
+- `app/crow-diskdb/src/node/container.rs` — `NodeContainer` impl.
+- `app/crow-diskdb/src/node/disk.rs` — `ZoneDisk` struct (zone
   allocation methods stubbed for R72).
-- `lib/crow-diskdb/src/grpc/mod.rs` — gRPC service struct.
-- `lib/crow-diskdb/src/grpc/admin.rs` — operator/admin handlers.
-- `lib/crow-diskdb/src/lib.rs` — module declarations and re-exports.
-- `lib/crow-diskdb/Cargo.toml` — add `crow-kv-client`, `crow-common`,
+- `app/crow-diskdb/src/grpc/mod.rs` — gRPC service struct.
+- `app/crow-diskdb/src/grpc/admin.rs` — operator/admin handlers.
+- `app/crow-diskdb/src/lib.rs` — module declarations and re-exports.
+- `app/crow-diskdb/Cargo.toml` — add `crow-kv-client`, `crow-common`,
   `tokio` (full features for sync), `crossbeam-queue` (for SegQueue),
   `clap` (optional, or keep CLI in server binary only).
-- `app/crow-diskdb-server/` — new crate: `Cargo.toml`, `src/main.rs`,
+- `app/crow-diskdb/` — new crate: `Cargo.toml`, `src/main.rs`,
   `src/lib.rs`.
-- `Cargo.toml` (workspace) — `app/crow-diskdb-server` already listed
+- `Cargo.toml` (workspace) — `app/crow-diskdb` already listed
   as a member; ensure it builds.
 
 **Complexity**: Medium-High. The sync loop and status management are
@@ -205,9 +205,9 @@ client — diskdb uses `put`/`get`/`scan`/`batch_write` on store 0,
 group 0. The degraded-mode pattern and transition rules are directly
 modeled on the aioss reference.
 
-**Dependencies**: R70 (core types, config, key layout). R69 (design
-doc, skeleton). No dependency on R72–R77 — this is the first
-functional component.
+**Dependencies**: R70 (core types, config, key layout). The design
+doc (`doc/design/diskdb/design-crow-diskdb.md`) and skeleton. No
+dependency on R72–R77 — this is the first functional component.
 
 **Acceptance**:
 - `SysdataClient` reads and writes all group-0 sysdata types
@@ -229,11 +229,11 @@ functional component.
 - `NodeContainer` supports `add_node`/`remove_node`/`get_node` with
   `RwLock` concurrency; `enter_degraded_mode`/`exit_degraded_mode`
   via atomic flag.
-- `app/crow-diskdb-server` compiles, starts, loads config, connects
+- `app/crow-diskdb` compiles, starts, loads config, connects
   to crow-kv, runs initial sync, starts sync loop, and serves gRPC
   (admin RPCs functional; allocate/free return `Unimplemented`).
 - `pixi run cargo fmt --all -- --check` and
   `pixi run cargo clippy --all-targets -- -D warnings` clean.
 - Relevant tests pass (`pixi run clean-env && pixi run test-kv-core`
-  unaffected; new tests in `lib/crow-diskdb` and
-  `app/crow-diskdb-server` pass).
+  unaffected; new tests in `app/crow-diskdb` and
+  `app/crow-diskdb` pass).

@@ -65,8 +65,8 @@ after core diskdb (R70–R76) is functional.
      - `diskdb recalc` — trigger a recalculation (metrics verification).
      - `diskdb zones <disk_uuid>` — list zones with busy/free summary.
    - All commands route through `ConsoleClient` → `crow-web` →
-     `crow-diskdb-server` (gRPC). The CLI does not talk directly to
-     `crow-diskdb-server`.
+     `crow-diskdb` (gRPC). The CLI does not talk directly to
+     `crow-diskdb`.
 
 2. **Console shared library** — extend
    `lib/crow-console-shared/src/`:
@@ -88,7 +88,7 @@ after core diskdb (R70–R76) is functional.
      mirrors of the proto types, serialized via serde for the REST
      API).
    - These methods call the `crow-web` REST API (see below), which
-     proxies to `crow-diskdb-server` gRPC.
+     proxies to `crow-diskdb` gRPC.
 
 3. **Web service (Axum REST API)** — extend
    `app/crow-web/`:
@@ -106,7 +106,7 @@ after core diskdb (R70–R76) is functional.
      - `POST /api/diskdb/recalc` — trigger recalc.
      - `GET /api/diskdb/disks/:disk_uuid/zones` — list zones.
    - The `crow-web` service holds a `crow-diskdb-client` (from
-     `lib/crow-diskdb`) connection to the `crow-diskdb-server` and
+     `app/crow-diskdb`) connection to the `crow-diskdb` and
      proxies REST → gRPC. This matches the existing pattern where
      `crow-web` proxies to `crow-kv-server`.
    - Add `crow-diskdb` (the client crate) as a dependency of
@@ -148,13 +148,13 @@ after core diskdb (R70–R76) is functional.
    - Add E2E tests (Playwright) for the diskdb UI flows, following the
      existing `e2e/flows/` pattern.
 
-5. **Client library** — extend `lib/crow-diskdb/src/lib.rs` (the
+5. **Client library** — extend `app/crow-diskdb/src/lib.rs` (the
    `crow-diskdb-client` crate):
    - Implement the actual gRPC client (currently just an error enum
-     stub from R69): `DiskdbClient` with retry + topology caching,
+     stub from the skeleton): `DiskdbClient` with retry + topology caching,
      mirroring `crow-kv-client`'s pattern.
    - `DiskdbClient::new(endpoint)` — connect to a
-     `crow-diskdb-server` gRPC endpoint.
+     `crow-diskdb` gRPC endpoint.
    - Methods wrapping each gRPC RPC: `allocate_block()`,
      `allocate_blocks()`, `condition_allocate_blocks()`,
      `free_block()`, `active_zone()`, `query_disk_usage()`,
@@ -170,9 +170,9 @@ after core diskdb (R70–R76) is functional.
      used directly by future callers (object store, chunk service).
 
 **Scope** (expected changed files):
-- `lib/crow-diskdb/src/lib.rs` — implement `DiskdbClient` gRPC client
+- `app/crow-diskdb/src/lib.rs` — implement `DiskdbClient` gRPC client
   with retry.
-- `lib/crow-diskdb/Cargo.toml` — add `tonic` dependency (already
+- `app/crow-diskdb/Cargo.toml` — add `tonic` dependency (already
   present), ensure client struct compiles.
 - `lib/crow-console-shared/src/diskdb.rs` — new module with diskdb
   console client methods.
@@ -215,16 +215,16 @@ RPCs), R74 (query_disk_usage, ZoneUsage), R75 (scanner RPCs), R76
 sequence — it builds on all prior diskdb functionality.
 
 **Acceptance**:
-- `DiskdbClient` (gRPC client) connects to `crow-diskdb-server` and
+- `DiskdbClient` (gRPC client) connects to `crow-diskdb` and
   wraps all RPCs with retry on transient errors. Unit test with mock
   gRPC server.
 - `crow-cli diskdb` subcommands work: `diskdb status`, `diskdb usage`,
   `diskdb disks`, `diskdb zones`, `diskdb add-disk`, `diskdb
   remove-disk`, `diskdb set-status`, `diskdb scan`, `diskdb recalc`.
   Integration test: run CLI against a `crow-web` service backed by a
-  `crow-diskdb-server`, verify commands return correct results.
+  `crow-diskdb`, verify commands return correct results.
 - `crow-web` REST endpoints under `/api/diskdb/` proxy to
-  `crow-diskdb-server` gRPC. Integration test: REST call → gRPC call →
+  `crow-diskdb` gRPC. Integration test: REST call → gRPC call →
   correct response.
 - Web UI "Diskdb" view shows disk-group → disk → zone tree with
   status, health, capacity, busy/free. E2E test.

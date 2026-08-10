@@ -29,7 +29,7 @@ persistence layer is new.
 **Solution**: Implement the second major component — block
 allocate/free — with the journal-based persistence model from D4.
 
-1. **Zone CAS allocator** — create `lib/crow-diskdb/src/zone/mod.rs`:
+1. **Zone CAS allocator** — create `app/crow-diskdb/src/zone/mod.rs`:
    - `Zone` — per-zone allocation state (extends R70's types):
      - `disk_group_id: DiskGroupId`, `disk_uuid: Uuid`, `zone_index:
        u32`.
@@ -81,7 +81,7 @@ allocate/free — with the journal-based persistence model from D4.
      Used to generate unique journal keys for BusyRecord/FreeRecord.
 
 2. **Active zone deque + disk-level claim** — implement in
-   `lib/crow-diskdb/src/node/disk.rs` (extends R71's `ZoneDisk`):
+   `app/crow-diskdb/src/node/disk.rs` (extends R71's `ZoneDisk`):
    - `active_zones: SegQueue<ZoneRef>` — lock-free MPMC deque
      (`crossbeam-queue::SegQueue`).
    - `disk_claim(size: u32) -> Option<(ZoneRef, Segment,
@@ -102,7 +102,7 @@ allocate/free — with the journal-based persistence model from D4.
      to deque. Called by R73's recovery.
 
 3. **Node-level round-robin** — implement in
-   `lib/crow-diskdb/src/node/mod.rs` (extends R71's `Node`):
+   `app/crow-diskdb/src/node/mod.rs` (extends R71's `Node`):
    - `claim_block(size) -> Result<(ZoneRef, Segment, ClaimSnapshot)>`:
      a. Read-lock `allocating_disks`; check non-empty (else
         `NoSpace`).
@@ -126,7 +126,7 @@ allocate/free — with the journal-based persistence model from D4.
      disk, call `disk.active_zone()`.
 
 4. **Journal persistence** — create
-   `lib/crow-diskdb/src/persistence/` module:
+   `app/crow-diskdb/src/persistence/` module:
    - `JournalClient` — wraps `CrowkvClient` for writing to the
      disk-group's bound paxos data group. Uses the `(store_id,
      group_id)` from the binding map (R71).
@@ -153,7 +153,7 @@ allocate/free — with the journal-based persistence model from D4.
      snapshot compaction.
 
 5. **Two-phase async allocation** — implement in
-   `lib/crow-diskdb/src/persistence/alloc.rs`:
+   `app/crow-diskdb/src/persistence/alloc.rs`:
    - `allocate_block(node: &Arc<Node>, size: u32, journal: &
      JournalClient) -> Result<Segment>`:
      a. **Phase 1 (sync)**: `node.claim_block(size)` →
@@ -178,7 +178,7 @@ allocate/free — with the journal-based persistence model from D4.
      sync loop from the binding map).
 
 6. **Free batch flush** — create
-   `lib/crow-diskdb/src/persistence/free_batch.rs`:
+   `app/crow-diskdb/src/persistence/free_batch.rs`:
    - `FreeBatch` — `inner: Mutex<Vec<(Segment, u64)>>` where the `u64`
      is the pre-assigned journal slot. `append(segment, slot)`,
      `drain() -> Vec<(Segment, u64)>`, `re_enqueue(items)`,
@@ -201,7 +201,7 @@ allocate/free — with the journal-based persistence model from D4.
         (default 256) — check before sleeping.
 
 7. **gRPC handlers** — implement in
-   `lib/crow-diskdb/src/grpc/service.rs`:
+   `app/crow-diskdb/src/grpc/service.rs`:
    - `allocate_block` — validate size (non-zero, aligned to block
      size), check not degraded, get node, call
      `persistence::allocate_block()`, return `Segment`.
@@ -218,7 +218,7 @@ allocate/free — with the journal-based persistence model from D4.
      `PermissionDenied`, `InvalidSize`/`InvalidCount` →
      `InvalidArgument`, `Degraded` → `Unavailable`.
 
-8. **Server wiring** — update `app/crow-diskdb-server/src/main.rs`:
+8. **Server wiring** — update `app/crow-diskdb/src/main.rs`:
    - Create `JournalClient` from `CrowkvClient`.
    - Create `FreeBatch` (shared `Arc<FreeBatch>`).
    - Spawn `FreeFlushLoop` as background task.
@@ -227,25 +227,25 @@ allocate/free — with the journal-based persistence model from D4.
    - Allocate/free/active_zone RPCs now functional.
 
 **Scope** (expected changed files):
-- `lib/crow-diskdb/src/zone/mod.rs` — `Zone` struct with CAS claim,
+- `app/crow-diskdb/src/zone/mod.rs` — `Zone` struct with CAS claim,
   release, rollback, free, active.
-- `lib/crow-diskdb/src/node/disk.rs` — `ZoneDisk` with `disk_claim`,
+- `app/crow-diskdb/src/node/disk.rs` — `ZoneDisk` with `disk_claim`,
   `find_active_zone`, `active_zone`, `rebuild_active_zones`.
-- `lib/crow-diskdb/src/node/mod.rs` — `Node` with `claim_block`,
+- `app/crow-diskdb/src/node/mod.rs` — `Node` with `claim_block`,
   `claim_blocks`, `retry_claim`, `retry_allocate`, `free_block`,
   `active_zone`.
-- `lib/crow-diskdb/src/persistence/mod.rs` — `JournalClient`.
-- `lib/crow-diskdb/src/persistence/alloc.rs` — two-phase async
+- `app/crow-diskdb/src/persistence/mod.rs` — `JournalClient`.
+- `app/crow-diskdb/src/persistence/alloc.rs` — two-phase async
   allocation.
-- `lib/crow-diskdb/src/persistence/free_batch.rs` — `FreeBatch` +
+- `app/crow-diskdb/src/persistence/free_batch.rs` — `FreeBatch` +
   `FreeFlushLoop`.
-- `lib/crow-diskdb/src/grpc/service.rs` — allocate/free/active_zone
+- `app/crow-diskdb/src/grpc/service.rs` — allocate/free/active_zone
   handlers.
-- `lib/crow-diskdb/src/grpc/mod.rs` — wire service struct.
-- `lib/crow-diskdb/src/lib.rs` — module declarations.
-- `lib/crow-diskdb/Cargo.toml` — add `crossbeam-queue`, `bincode`,
+- `app/crow-diskdb/src/grpc/mod.rs` — wire service struct.
+- `app/crow-diskdb/src/lib.rs` — module declarations.
+- `app/crow-diskdb/Cargo.toml` — add `crossbeam-queue`, `bincode`,
   `rand`.
-- `app/crow-diskdb-server/src/main.rs` — wire `JournalClient`,
+- `app/crow-diskdb/src/main.rs` — wire `JournalClient`,
   `FreeBatch`, `FreeFlushLoop`.
 
 **Complexity**: High. The CAS allocator and round-robin patterns are

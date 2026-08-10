@@ -30,7 +30,7 @@ with accurate accounting, a query API, and a recalculation verification
 path.
 
 1. **Per-disk hot-path counters** — create
-   `lib/crow-diskdb/src/metrics/disk.rs`:
+   `app/crow-diskdb/src/metrics/disk.rs`:
    - `DiskMetrics` — lock-free atomic counters per disk (matching
      aioss pattern, adapted for CROW):
      - **Period counters** (reset each reporting interval):
@@ -66,7 +66,7 @@ path.
      `active_zone()`.
 
 2. **Per-zone space accounting** — add to
-   `lib/crow-diskdb/src/zone/mod.rs` (from R72):
+   `app/crow-diskdb/src/zone/mod.rs` (from R72):
    - `Zone::busy_blocks() -> u64` — `usage_bits.count_set()` (count
      of set bits in the bitmap).
    - `Zone::free_blocks() -> u64` — `max_allocate_pos -
@@ -86,7 +86,7 @@ path.
      max_allocate_pos as f64`.
 
 3. **Per-disk-group aggregation** — add to
-   `lib/crow-diskdb/src/node/mod.rs` (from R71):
+   `app/crow-diskdb/src/node/mod.rs` (from R71):
    - `Node::disk_usage() -> Vec<DiskUsage>` — iterate disks, build
      `DiskUsage` per disk with capacity/busy/free/zone counts.
    - `Node::aggregate_usage() -> NodeUsage` — sum across disks:
@@ -99,7 +99,7 @@ path.
      zone_state }`. Used by R77's block-array visualization.
 
 4. **Query API** — implement `query_disk_usage` gRPC handler in
-   `lib/crow-diskdb/src/grpc/service.rs` (from R72):
+   `app/crow-diskdb/src/grpc/service.rs` (from R72):
    - `query_disk_usage(request) -> Result<QueryDiskUsageResponse>`:
      a. If `request.node_id` is empty: iterate all nodes in
         `NodeContainer`, build `NodeUsage` for each.
@@ -114,7 +114,7 @@ path.
      Accuracy is guaranteed by the bitmap-derived accounting.
 
 5. **Recalculation path** — create
-   `lib/crow-diskdb/src/metrics/recalc.rs`:
+   `app/crow-diskdb/src/metrics/recalc.rs`:
    - `RecalcEngine` — verifies in-memory metrics against the journal.
      Uses `JournalClient` (from R72) and `RecoveryEngine` (from R73).
    - `recalc_zone(dg_id, bind, disk_uuid, zone_idx) ->
@@ -142,7 +142,7 @@ path.
      not auto-correct — it reports and lets the operator decide.
 
 6. **crow-common metrics integration** — create
-   `lib/crow-diskdb/src/metrics/mod.rs`:
+   `app/crow-diskdb/src/metrics/mod.rs`:
    - `DiskdbMetrics` — registers diskdb-specific metrics with
      `crow-common`'s metrics registry (D8). Per-disk hot-path
      counters (from `DiskMetrics`) flush into the crow-common
@@ -179,25 +179,25 @@ path.
      optional per-zone detail in `QueryDiskUsageResponse`.
 
 **Scope** (expected changed files):
-- `lib/crow-diskdb/src/metrics/mod.rs` — `DiskdbMetrics`, reporting
+- `app/crow-diskdb/src/metrics/mod.rs` — `DiskdbMetrics`, reporting
   loop, crow-common integration.
-- `lib/crow-diskdb/src/metrics/disk.rs` — `DiskMetrics` per-disk
+- `app/crow-diskdb/src/metrics/disk.rs` — `DiskMetrics` per-disk
   atomic counters.
-- `lib/crow-diskdb/src/metrics/recalc.rs` — `RecalcEngine` for
+- `app/crow-diskdb/src/metrics/recalc.rs` — `RecalcEngine` for
   verification.
-- `lib/crow-diskdb/src/zone/mod.rs` — add `busy_blocks()`,
+- `app/crow-diskdb/src/zone/mod.rs` — add `busy_blocks()`,
   `free_blocks()`, `busy_bytes()`, `free_bytes()`, `capacity_bytes()`,
   `usage_ratio()`.
-- `lib/crow-diskdb/src/node/mod.rs` — add `disk_usage()`,
+- `app/crow-diskdb/src/node/mod.rs` — add `disk_usage()`,
   `aggregate_usage()`, `zone_usage()`.
-- `lib/crow-diskdb/src/grpc/service.rs` — implement
+- `app/crow-diskdb/src/grpc/service.rs` — implement
   `query_disk_usage`, add `recalc_disk_usage` admin handler.
-- `lib/crow-diskdb/src/grpc/admin.rs` — add recalc RPC handler.
-- `lib/crow-diskdb/src/lib.rs` — add `metrics` module.
+- `app/crow-diskdb/src/grpc/admin.rs` — add recalc RPC handler.
+- `app/crow-diskdb/src/lib.rs` — add `metrics` module.
 - `lib/protocol/src/proto/diskdb.proto` — add `RecalcDiskUsage` RPC,
   `ZoneUsage` message (if not in R70).
-- `app/crow-diskdb-server/src/main.rs` — spawn metrics reporting loop.
-- `lib/crow-diskdb/Cargo.toml` — ensure `crow-common` dependency.
+- `app/crow-diskdb/src/main.rs` — spawn metrics reporting loop.
+- `app/crow-diskdb/Cargo.toml` — ensure `crow-common` dependency.
 
 **Complexity**: Medium. The per-disk atomic counter pattern is
 directly from the aioss reference. The per-zone accounting is simple

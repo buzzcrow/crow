@@ -3,8 +3,8 @@
 
 ### R70: diskdb — Protocol + Core Types + Config Validation
 
-**Problem**: R69 set up the project skeleton (`lib/protocol` with a stub
-`diskdb.proto`, `lib/crow-diskdb` client skeleton) and the high-level
+**Problem**: The project skeleton (R69, now completed) set up (`lib/protocol` with a stub
+`diskdb.proto`, `app/crow-diskdb` client skeleton) and the high-level
 design doc (`doc/design/diskdb/design-crow-diskdb.md`). The skeleton
 compiles but has no functionality. Before any diskdb logic can be
 implemented (R71–R76), the protocol surface, core data types, and
@@ -23,9 +23,9 @@ missing:
 - Enum types (`DiskType`, `Status`, `ZoneState`, `ZoneAllocationState`,
   `DiskState`) that the core types and gRPC messages share.
 
-The `lib/crow-diskdb` client crate has only an error enum stub — no
+The `app/crow-diskdb` client crate has only an error enum stub — no
 core types, no config, no client struct. The server binary
-(`app/crow-diskdb-server`) is listed as a workspace member but does not
+(`app/crow-diskdb`) is listed as a workspace member but does not
 exist yet.
 
 **Solution**: Fill in the protocol and core types layer so R71–R76 can
@@ -51,7 +51,7 @@ no runtime logic, no allocation, no KV I/O.
    - Add `ZoneUsage` message for per-zone busy/free breakdown (used by
      R74 and R77's block-array visualization).
 
-2. **Core types** — create `lib/crow-diskdb/src/types/` module:
+2. **Core types** — create `app/crow-diskdb/src/types/` module:
    - `Segment` — allocation handle: `(disk_group_id, disk_uuid,
      zone_index, zone_offset, size, tag)`. The `disk_group_id` is
      `"{node_uuid}-{index}"` (D2). `tag` is a nanosecond timestamp for
@@ -93,7 +93,7 @@ no runtime logic, no allocation, no KV I/O.
      (bincode or prost) to minimize paxos journal write size.
 
 3. **Journal key layout** — implement key-formatting helpers in
-   `lib/crow-diskdb/src/types/`:
+   `app/crow-diskdb/src/types/`:
    - `journal_key_busy(dg_id, disk_uuid, zone_idx, slot)` →
      `/diskdb/journal/{dg_id}/{disk_uuid}/z{zone_idx:04}/busy/{slot}`
    - `journal_key_free(dg_id, disk_uuid, zone_idx, slot)` →
@@ -119,7 +119,7 @@ no runtime logic, no allocation, no KV I/O.
      favor of the prefix-scan approach).
 
 4. **Config types + validation** — create
-   `lib/crow-diskdb/src/config/` module:
+   `app/crow-diskdb/src/config/` module:
    - `DiskdbConfig` — top-level config (server, storage, heartbeat,
      persistence, scanner, sync). TOML-based, serde-serialized.
    - `ServerConfig` — `listen_addr` (default `0.0.0.0:9941`),
@@ -148,7 +148,7 @@ no runtime logic, no allocation, no KV I/O.
      block size); `free_flush_max_batch` > 0; `snapshot_interval_secs`
      > 0; `listen_addr` parses as `SocketAddr`.
 
-5. **Bitmap utilities** — create `lib/crow-diskdb/src/zone/bitmap.rs`:
+5. **Bitmap utilities** — create `app/crow-diskdb/src/zone/bitmap.rs`:
    - `UsageBitmap` — wraps `Vec<AtomicU64>` for lock-free bit
      operations. `range_set(offset, count) -> bool` (atomic fetch_or,
      rollback on collision), `range_clear(offset, count) -> bool`
@@ -167,18 +167,18 @@ no runtime logic, no allocation, no KV I/O.
 - `lib/protocol/src/proto/diskdb.proto` — extend with
   `ConditionAllocateBlocks`, operator/admin RPCs, enums, `ZoneUsage`.
 - `lib/protocol/src/lib.rs` — re-export new types if needed.
-- `lib/crow-diskdb/src/lib.rs` — add `types`, `config`, `zone` modules.
-- `lib/crow-diskdb/src/types/` — new module: `mod.rs`, `ids.rs`,
+- `app/crow-diskdb/src/lib.rs` — add `types`, `config`, `zone` modules.
+- `app/crow-diskdb/src/types/` — new module: `mod.rs`, `ids.rs`,
   `status.rs`, `zone_state.rs`, `disk_state.rs`, `disk.rs`,
   `disk_group.rs`, `node.rs`, `journal.rs` (key layout + record
   types), `instance.rs`.
-- `lib/crow-diskdb/src/config/` — new module: `mod.rs`,
+- `app/crow-diskdb/src/config/` — new module: `mod.rs`,
   `validation.rs`.
-- `lib/crow-diskdb/src/zone/bitmap.rs` — usage bitmap with atomic
+- `app/crow-diskdb/src/zone/bitmap.rs` — usage bitmap with atomic
   operations.
-- `lib/crow-diskdb/Cargo.toml` — add `serde`, `serde_json`, `uuid`,
+- `app/crow-diskdb/Cargo.toml` — add `serde`, `serde_json`, `uuid`,
   `crc32fast`, `bincode` dependencies.
-- `lib/crow-diskdb/src/lib.rs` — update module declarations and
+- `app/crow-diskdb/src/lib.rs` — update module declarations and
   re-exports.
 - No server binary changes (R71+ create the server).
 
@@ -189,7 +189,7 @@ which is new — aioss uses full ZoneRecord on every write, but CROW's
 D4 design uses a journal. The slot-based key layout resolves the D4
 open question (prefix-scan replay, no crow-kv slot feedback needed).
 
-**Dependencies**: R69 (skeleton + design doc). No dependency on R71–R77
+**Dependencies**: The design doc (`doc/design/diskdb/design-crow-diskdb.md`). No dependency on R71–R77
 — this is the foundation.
 
 **Acceptance**:
@@ -204,7 +204,7 @@ open question (prefix-scan replay, no crow-kv slot feedback needed).
   `FreeRecord`, `ZoneSnapshot`, `Status`, `ZoneState`,
   `ZoneAllocationState`, `DiskState`, `DiskType`, `NodeMeta`,
   `DiskGroupMeta`, `DiskMeta`, `InstanceMeta`) are defined in
-  `lib/crow-diskdb/src/types/` with serde serialization and unit tests
+  `app/crow-diskdb/src/types/` with serde serialization and unit tests
   for serialization round-trips.
 - Journal key layout helpers produce the exact key formats from design
   doc §7, with unit tests verifying key format strings.
@@ -218,4 +218,4 @@ open question (prefix-scan replay, no crow-kv slot feedback needed).
 - `pixi run cargo fmt --all -- --check` and
   `pixi run cargo clippy --all-targets -- -D warnings` clean.
 - `pixi run clean-env && pixi run test-kv-core` not affected (no
-  crow-kv changes); new tests in `lib/crow-diskdb` pass.
+  crow-kv changes); new tests in `app/crow-diskdb` pass.

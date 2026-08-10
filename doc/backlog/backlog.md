@@ -15,21 +15,6 @@ complexity, and dependency. Before implementation, follow the
 
 ### High Priority
 
-- **[R69](R69-diskdb-disk-block-allocator.md)** — diskdb: distributed
-  disk-block allocator on CROW — Area: new component / diskdb —
-  Redesign and implement a distributed disk-block allocator as a new
-  CROW component, referencing the original design in another project
-  (aioss `server/diskdb`). diskdb is a lightweight, stateless server
-  that owns some disk-groups, allocates 1 MB blocks from per-zone
-  append-only allocators (CAS-serialized in-memory), and persists all
-  state to CROW KV (group 0 for sysdata, paxos data groups for zone
-  journals) — no local WAL. **Scoping + foundation requirement** —
-  defines the full scope, design decisions (D1–D8), writes the
-  high-level design doc (`doc/design/diskdb/design-crow-diskdb.md`),
-  splits implementation into R70–R77, and sets up the project skeleton
-  (`lib/protocol`, `app/crow-diskdb`, `lib/crow-diskdb-client`)
-  with correct dependencies and a clean build.
-
 - **[R70](R70-diskdb-protocol-core-types.md)** — diskdb protocol + core
   types — Area: diskdb — Fill in the protobuf services
   (allocate/free/active_zone/query) in `lib/protocol`, core types

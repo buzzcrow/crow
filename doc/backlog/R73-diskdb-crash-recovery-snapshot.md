@@ -33,7 +33,7 @@ works without crow-kv slot feedback.
 durability safety net that makes diskdb stateless-on-disk.
 
 1. **Journal replay** — create
-   `lib/crow-diskdb/src/recovery/mod.rs`:
+   `app/crow-diskdb/src/recovery/mod.rs`:
    - `RecoveryEngine` — owns a `JournalClient` (from R72) and a
      `SysdataClient` (from R71). Runs on startup and on ownership
      transfer (when a new disk-group is assigned to this instance).
@@ -99,10 +99,10 @@ durability safety net that makes diskdb stateless-on-disk.
        harm).
      - Journal scan is truncated (crow-kv paginated scan): the
        `CrowkvClient::scan()` method transparently pages until
-       complete (R69's client design), so this is handled.
+       complete (the crow-kv-client design), so this is handled.
 
 2. **Snapshot compaction** — create
-   `lib/crow-diskdb/src/recovery/compaction.rs`:
+   `app/crow-diskdb/src/recovery/compaction.rs`:
    - `CompactionEngine` — owns a `JournalClient`. Runs as a background
      task (spawned by the server).
    - `compaction_loop(node_container, journal, config)`:
@@ -148,7 +148,7 @@ durability safety net that makes diskdb stateless-on-disk.
      orders are safe.
 
 3. **Recovery on startup** — integrate into
-   `app/crow-diskdb-server/src/main.rs`:
+   `app/crow-diskdb/src/main.rs`:
    - After the initial sync (R71) fetches owned disk-groups and their
      disks from group 0, run `RecoveryEngine::recover_node()` for
      each owned disk-group.
@@ -168,7 +168,7 @@ durability safety net that makes diskdb stateless-on-disk.
      `NodeContainer` (in-memory state is discarded; the journal
      persists in the data group for the next owner).
 
-5. **Zone struct extension** — update `lib/crow-diskdb/src/zone/mod.rs`
+5. **Zone struct extension** — update `app/crow-diskdb/src/zone/mod.rs`
    (from R72):
    - Add `snapshot_slot: AtomicU64` — tracks the slot of the last
      compacted snapshot. Initialized to 0 on fresh zone, set by
@@ -180,19 +180,19 @@ durability safety net that makes diskdb stateless-on-disk.
      after the snapshot).
 
 **Scope** (expected changed files):
-- `lib/crow-diskdb/src/recovery/mod.rs` — `RecoveryEngine` with
+- `app/crow-diskdb/src/recovery/mod.rs` — `RecoveryEngine` with
   `recover_node`, `recover_zone`, journal replay logic.
-- `lib/crow-diskdb/src/recovery/compaction.rs` — `CompactionEngine`
+- `app/crow-diskdb/src/recovery/compaction.rs` — `CompactionEngine`
   with `compaction_loop`, `compact_zone`.
-- `lib/crow-diskdb/src/zone/mod.rs` — add `snapshot_slot`,
+- `app/crow-diskdb/src/zone/mod.rs` — add `snapshot_slot`,
   `to_snapshot()`, `from_snapshot()`.
-- `lib/crow-diskdb/src/persistence/mod.rs` — `read_journal_zone()`
+- `app/crow-diskdb/src/persistence/mod.rs` — `read_journal_zone()`
   (prefix scan), `delete_journal_records_batch()` (already defined in
   R72, used here).
-- `lib/crow-diskdb/src/lib.rs` — add `recovery` module.
-- `app/crow-diskdb-server/src/main.rs` — run recovery on startup,
+- `app/crow-diskdb/src/lib.rs` — add `recovery` module.
+- `app/crow-diskdb/src/main.rs` — run recovery on startup,
   spawn compaction loop, gate gRPC server on recovery completion.
-- `lib/crow-diskdb/src/sync/mod.rs` (from R71) — trigger recovery on
+- `app/crow-diskdb/src/sync/mod.rs` (from R71) — trigger recovery on
   ownership transfer.
 
 **Complexity**: High. Journal replay is new — the aioss reference has

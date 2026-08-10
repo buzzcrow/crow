@@ -9,7 +9,6 @@ component is structured**. Implementation-level detail lives in
 sub-design docs (`design-crow-diskdb-*.md`); this doc covers decisions
 and architecture only.
 
-Scoping requirement: `doc/backlog/R69-diskdb-disk-block-allocator.md`.
 Reference (another project, not a port):
 `/cjdata/cpp/aioss/server/diskdb/doc/design.md`.
 
@@ -122,11 +121,13 @@ On crash/restart, diskdb reconstructs the in-memory zone state by
 replaying the busy/free journal from the last snapshot forward. This
 mirrors how crow-kv's own WAL replays into the engine.
 
-**Open question (design time):** whether the diskdb client needs KV
-slot info (which slot its write landed in) for correct replay, or
-whether the replay can scan the journal by key prefix without slot
-info. The latter is simpler (no slot feedback from crow-kv) but
-requires a scan; the former is faster but needs a crow-kv extension.
+**Resolved:** the replay scans the journal by key prefix — no crow-kv
+slot feedback needed. Each journal key embeds a monotonically
+increasing per-zone `slot` number (assigned by diskdb, not crow-kv),
+so a prefix scan returns all busy/free records in slot order. This
+keeps diskdb a pure client of crow-kv with no extension required. The
+slot-info approach (faster, needs a crow-kv extension) is a future
+optimization.
 
 ### 3.5 Zone is a logical concept; sizes may vary
 
@@ -303,10 +304,10 @@ On startup / ownership transfer, for each zone:
 4. Rebuild the in-memory zone: `allocate_pos`, `usage_bits`,
   `zone_state`, active deque membership.
 
-**Open question (design time):** whether the replay scans by key prefix
-(simple, no crow-kv change) or uses slot info from the client (faster,
-needs a crow-kv extension). The prefix-scan approach is the default;
-slot-info is a future optimization.
+**Resolved:** the replay scans by key prefix (simple, no crow-kv
+change). Each journal key embeds a diskdb-assigned `slot` counter, so
+prefix-scan returns records in replay order without crow-kv slot
+feedback. Slot-info from crow-kv is a future optimization.
 
 ### Snapshot compaction
 
@@ -443,20 +444,23 @@ display.
 
 ```
 lib/protocol              (common protobuf for all CROW components; diskdb first)
+app/crow-diskdb           (server: lib + binary — types, allocator, journal, sync, gRPC + HTTP, CLI)
 lib/crow-diskdb-client    (client library for callers: allocate/free/query; gRPC now, custom RPC later)
-app/crow-diskdb           (server binary: CLI, config, gRPC + HTTP, background loops)
 ```
 
 - **`lib/protocol`** — protobuf definitions for diskdb gRPC services
   (allocate/free/query). crow-kv's existing protos stay in `crow-kv`
   (unchanged). Later, when CROW adds its own RPC transport, the
   protobuf messages are reused.
+- **`app/crow-diskdb`** — server crate (package name `crow-diskdb`).
+  Combined library + binary: contains all diskdb logic (types, zone
+  allocator, journal persistence, scanner, ownership/sync, gRPC +
+  HTTP handlers, CLI, config). The library target enables integration
+  tests without spawning a separate process; the binary target
+  (`crow-diskdb`) is the server executable.
 - **`lib/crow-diskdb-client`** — client library for easy access to the server
   (allocate/free/query), mirroring `crow-kv-client`'s retry +
   topology-cache pattern. gRPC now; custom RPC + flatbuffer later.
-- **`app/crow-diskdb`** — server binary (package name `crow-diskdb`).
-  Contains all diskdb logic: types, zone allocator, journal persistence,
-  scanner, ownership/sync, gRPC + HTTP handlers, CLI, config.
 
 ### Dependencies
 
@@ -485,13 +489,32 @@ All public and inter-module APIs are `async`. Runtime is `tokio`
   disk list; allocation/free acquire a read lock (concurrent with each
   other, exclusive with add/remove).
 
-## 15. Implementation Split
+## 15. Non-Gaps (Good Fits with CROW)
+
+These reference assumptions map cleanly onto CROW and need no design
+work, just implementation:
+
+- **Durability model**: aioss "metadb is sole durable store, no local
+  WAL" → CROW "crow-kv WAL is sole durable log." diskdb's blind writes
+  become durable via crow-kv's WAL flush. Identical model.
+- **Consensus semantics**: aioss metadb = Raft; CROW = Multi-Paxos with
+  parallel slots. For diskdb's usage (blind writes of zone journal
+  records), both behave identically; parallel slots may even improve
+  allocation throughput. No change needed.
+- **Blind-ops persistence**: diskdb persists via blind Puts (no
+  read-modify-write) — matches crow's blind-ops-only model exactly
+  (§3.3).
+- **Async runtime**: both use tokio multi-threaded; diskdb's two-phase
+  async allocation (sync CAS claim + async KV persist) maps directly.
+
+## 16. Implementation Split
 
 The diskdb implementation is split into follow-up requirements by
 functional scope:
 
-- **R70** — Project skeleton + protocol + types (this R69 sets up the
-  skeleton; R70 fills in the protobuf services, core types, config).
+- **R70** — Protocol + core types + config validation (protobuf
+  services, core types, journal key layout, config validation, bitmap
+  utilities, CRC integrity).
 - **R71** — Group-0 sysdata schema + sync (disk status management,
   group-0 read/write, ownership/binding maps, heartbeat).
 - **R72** — Zone allocator + journal persistence (zone CAS, active
@@ -511,11 +534,10 @@ design doc (this file and future sub-designs under
 `doc/design/diskdb/`) is kept permanently — it is the root design for
 the diskdb component area.
 
-## 16. References
+## 17. References
 
 - CROW root KV design: `doc/design/kv/design-crow-kv.md`
 - CROW WAL design: `doc/design/kv/design-crow-kv-wal.md`
 - CROW metrics design: `doc/design/kv/design-crow-kv-observability.md`
 - CROW console design: `doc/design/console/design-crow-console.md`
-- Scoping requirement: `doc/backlog/R69-diskdb-disk-block-allocator.md`
 - Reference (another project): `/cjdata/cpp/aioss/server/diskdb/doc/design.md`

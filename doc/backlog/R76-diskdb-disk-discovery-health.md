@@ -32,7 +32,7 @@ this scope."
 and the disk failure detection + recovery flow.
 
 1. **Config-driven disk discovery** — create
-   `lib/crow-diskdb/src/discovery/mod.rs`:
+   `app/crow-diskdb/src/discovery/mod.rs`:
    - v1 uses **config-driven discovery** (not `/dev` scanning). The
      operator specifies disk paths in the diskdb config or in group 0
      `DiskMeta`. Each disk entry has: `disk_uuid`, `path` (e.g.
@@ -53,7 +53,7 @@ and the disk failure detection + recovery flow.
      to auto-discover disks (follow-up requirement).
 
 2. **Health probing** — create
-   `lib/crow-diskdb/src/discovery/health.rs`:
+   `app/crow-diskdb/src/discovery/health.rs`:
    - `HealthProbe` — probes a single disk's health:
      - `probe_existence(path) -> bool` — `Path::exists()`.
      - `probe_size(path) -> Result<u64>` — get the disk's actual size.
@@ -107,7 +107,7 @@ and the disk failure detection + recovery flow.
        every 10 ticks).
 
 4. **Disk failure detection + recovery flow** — create
-   `lib/crow-diskdb/src/discovery/recovery.rs`:
+   `app/crow-diskdb/src/discovery/recovery.rs`:
    - `DiskFailureHandler` — handles disk state transitions and
      triggers recovery actions:
    - **On disk failure** (Healthy → Missing/Bad):
@@ -161,7 +161,7 @@ and the disk failure detection + recovery flow.
      health changes are detected.
 
 5. **Zone health integration** — update
-   `lib/crow-diskdb/src/zone/mod.rs` (from R72):
+   `app/crow-diskdb/src/zone/mod.rs` (from R72):
    - `Zone::set_zone_state(new_state: ZoneState)` — update
      `zone_state` (under `RwLock`). Called by the health probe loop.
    - `Zone::is_allocatable()` already checks `zone_state == Healthy`
@@ -170,7 +170,7 @@ and the disk failure detection + recovery flow.
    - When a disk recovers, zones are set back to `Healthy` and
      `rebuild_active_zones()` re-adds them to the deque.
 
-6. **Admin RPCs** — add to `lib/crow-diskdb/src/grpc/admin.rs`:
+6. **Admin RPCs** — add to `app/crow-diskdb/src/grpc/admin.rs`:
    - `ProbeDisk` — manually trigger a health probe for a specific
      disk. Returns `HealthResult`.
    - `GetDiskHealth` — return current health status for a disk (or
@@ -181,23 +181,23 @@ and the disk failure detection + recovery flow.
    - Add corresponding proto messages.
 
 **Scope** (expected changed files):
-- `lib/crow-diskdb/src/discovery/mod.rs` — `DiskDiscovery`,
+- `app/crow-diskdb/src/discovery/mod.rs` — `DiskDiscovery`,
   config-driven disk list.
-- `lib/crow-diskdb/src/discovery/health.rs` — `HealthProbe`,
+- `app/crow-diskdb/src/discovery/health.rs` — `HealthProbe`,
   `probe_disk()`, `HealthResult`.
-- `lib/crow-diskdb/src/discovery/recovery.rs` — `DiskFailureHandler`,
+- `app/crow-diskdb/src/discovery/recovery.rs` — `DiskFailureHandler`,
   failure/recovery flow.
-- `lib/crow-diskdb/src/zone/mod.rs` — add `set_zone_state()`.
-- `lib/crow-diskdb/src/grpc/admin.rs` — `ProbeDisk`,
+- `app/crow-diskdb/src/zone/mod.rs` — add `set_zone_state()`.
+- `app/crow-diskdb/src/grpc/admin.rs` — `ProbeDisk`,
   `GetDiskHealth`, update `AddDisk`/`RemoveDisk`.
-- `lib/crow-diskdb/src/lib.rs` — add `discovery` module.
-- `lib/crow-diskdb/src/config/mod.rs` — add `DiscoveryConfig`
+- `app/crow-diskdb/src/lib.rs` — add `discovery` module.
+- `app/crow-diskdb/src/config/mod.rs` — add `DiscoveryConfig`
   (disk paths, probe intervals).
 - `lib/protocol/src/proto/diskdb.proto` — add `ProbeDisk`,
   `GetDiskHealth` RPCs and messages.
-- `app/crow-diskdb-server/src/main.rs` — spawn health probe loop,
+- `app/crow-diskdb/src/main.rs` — spawn health probe loop,
   wire `DiskFailureHandler`.
-- `lib/crow-diskdb/src/sync/mod.rs` (from R71) — integrate health
+- `app/crow-diskdb/src/sync/mod.rs` (from R71) — integrate health
   probe with sync loop (or run as separate task).
 
 **Complexity**: Medium-High. The health probing itself is

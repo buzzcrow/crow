@@ -33,7 +33,7 @@ ghost/drift/integrity; leak remains deferred.
 logic for ghost allocations, `allocate_pos` drift, and record
 integrity. Leak detection is scaffolded but returns "not implemented."
 
-1. **Scanner loop** — create `lib/crow-diskdb/src/scanner/mod.rs`:
+1. **Scanner loop** — create `app/crow-diskdb/src/scanner/mod.rs`:
    - `ScannerEngine` — owns a `JournalClient` (from R72), a
      `RecoveryEngine` (from R73), a `RecalcEngine` (from R74), and a
      `NodeContainer` (from R71). Runs as a background task.
@@ -54,7 +54,7 @@ integrity. Leak detection is scaffolded but returns "not implemented."
      not modify state (except optional auto-correction, see below).
 
 2. **Ghost allocation detection** — create
-   `lib/crow-diskdb/src/scanner/ghost.rs`:
+   `app/crow-diskdb/src/scanner/ghost.rs`:
    - `scan_ghost_allocations(node_container, journal) ->
      Result<GhostScanResult>`:
      a. For each owned node (disk-group), for each disk, for each zone:
@@ -92,7 +92,7 @@ integrity. Leak detection is scaffolded but returns "not implemented."
      an admin RPC.
 
 3. **`allocate_pos` drift detection** — create
-   `lib/crow-diskdb/src/scanner/drift.rs`:
+   `app/crow-diskdb/src/scanner/drift.rs`:
    - `scan_allocate_pos_drift(node_container, journal) ->
      Result<DriftScanResult>`:
      a. For each owned node, for each disk, for each zone:
@@ -114,7 +114,7 @@ integrity. Leak detection is scaffolded but returns "not implemented."
      zone. v1 defaults to off — report only.
 
 4. **Record integrity verification** — create
-   `lib/crow-diskdb/src/scanner/integrity.rs`:
+   `app/crow-diskdb/src/scanner/integrity.rs`:
    - `scan_record_integrity(node_container, journal) ->
      Result<IntegrityScanResult>`:
      a. For each owned node, for each disk, for each zone:
@@ -136,7 +136,7 @@ integrity. Leak detection is scaffolded but returns "not implemented."
      zone (transition to Error state).
 
 5. **Leak detection (scaffold)** — create
-   `lib/crow-diskdb/src/scanner/leak.rs`:
+   `app/crow-diskdb/src/scanner/leak.rs`:
    - `scan_for_leaks(node_container) -> Result<LeakScanResult>`:
      - Returns `LeakScanResult { status: "deferred", message: "Leak
        detection requires caller registries (not yet implemented).
@@ -154,7 +154,7 @@ integrity. Leak detection is scaffolded but returns "not implemented."
      follow-up requirement.
 
 6. **Scanner admin RPCs** — add to
-   `lib/crow-diskdb/src/grpc/admin.rs`:
+   `app/crow-diskdb/src/grpc/admin.rs`:
    - `TriggerScan` — manually trigger a scan cycle (runs all enabled
      scans immediately, regardless of interval).
    - `GetScanStatus` — returns the last scan result summary
@@ -162,7 +162,7 @@ integrity. Leak detection is scaffolded but returns "not implemented."
    - Add corresponding proto messages to
      `lib/protocol/src/proto/diskdb.proto`.
 
-7. **Scanner metrics** — add to `lib/crow-diskdb/src/metrics/mod.rs`
+7. **Scanner metrics** — add to `app/crow-diskdb/src/metrics/mod.rs`
    (from R74):
    - `scanner_runs_total` (counter).
    - `scanner_duration_ms` (histogram).
@@ -172,23 +172,23 @@ integrity. Leak detection is scaffolded but returns "not implemented."
    - Updated by the scanner loop after each scan cycle.
 
 **Scope** (expected changed files):
-- `lib/crow-diskdb/src/scanner/mod.rs` — `ScannerEngine`, scanner
+- `app/crow-diskdb/src/scanner/mod.rs` — `ScannerEngine`, scanner
   loop.
-- `lib/crow-diskdb/src/scanner/ghost.rs` — ghost allocation detection.
-- `lib/crow-diskdb/src/scanner/drift.rs` — `allocate_pos` drift
+- `app/crow-diskdb/src/scanner/ghost.rs` — ghost allocation detection.
+- `app/crow-diskdb/src/scanner/drift.rs` — `allocate_pos` drift
   detection.
-- `lib/crow-diskdb/src/scanner/integrity.rs` — CRC integrity
+- `app/crow-diskdb/src/scanner/integrity.rs` — CRC integrity
   verification.
-- `lib/crow-diskdb/src/scanner/leak.rs` — leak detection scaffold
+- `app/crow-diskdb/src/scanner/leak.rs` — leak detection scaffold
   (deferred).
-- `lib/crow-diskdb/src/grpc/admin.rs` — `TriggerScan`,
+- `app/crow-diskdb/src/grpc/admin.rs` — `TriggerScan`,
   `GetScanStatus` handlers.
-- `lib/crow-diskdb/src/metrics/mod.rs` — scanner metrics.
-- `lib/crow-diskdb/src/lib.rs` — add `scanner` module.
+- `app/crow-diskdb/src/metrics/mod.rs` — scanner metrics.
+- `app/crow-diskdb/src/lib.rs` — add `scanner` module.
 - `lib/protocol/src/proto/diskdb.proto` — add `TriggerScan`,
   `GetScanStatus` RPCs and messages.
-- `app/crow-diskdb-server/src/main.rs` — spawn scanner loop.
-- `lib/crow-diskdb/src/config/mod.rs` (from R70) — add scanner
+- `app/crow-diskdb/src/main.rs` — spawn scanner loop.
+- `app/crow-diskdb/src/config/mod.rs` (from R70) — add scanner
   auto-correct config flags (`auto_correct_ghosts`,
   `auto_correct_drift`, default false).
 
