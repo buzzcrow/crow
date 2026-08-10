@@ -106,6 +106,12 @@ Long-lived task backlogs and per-path flow analyses. Plan files live under
 | `doc/design/kv/design-crow-kv-test.md` | Test strategy and layer-by-layer test guide: architecture stack, test binary map, cross-cutting coverage rules (placement, KV-op correctness, cluster verification, leader change & reconfig), per-layer scope, crow-tree C++ test layers. Per-layer coverage checklists in `doc/working/plan-test.md`; benchmark design in `doc/design/kv/kv-write-flow-analysis.md`. Read when designing tests or deciding where a test belongs. |
 | `doc/design/kv/design-crow-kv-observability.md` | Metrics module design: five metric types (Counter, Gauge, Bandwidth, LatencyHistogram, LatencySummary), registry lifecycle, naming convention, instrumentation points, system metrics collector, log file format, in-memory snapshot access, FFI boundary. Read when working on metrics or observability. |
 
+### diskdb — Disk-Block Allocator
+
+| Doc | Read when working on |
+| --- | --- |
+| `doc/design/diskdb/design-crow-diskdb.md` | diskdb root design: what diskdb is (lightweight, stateless disk-block allocator on CROW KV), key design decisions (group 0 sysdata, disk-group→paxos-group bind table, journal-is-source-of-truth, no CAS), architecture, group-0 sysdata schema, zone journal + crash recovery, allocation algorithm, state machines, crate layout, implementation split (R70–R77). Read first for any diskdb design or architecture question. |
+
 ## How AI Should Use This Index
 
 1. Match the task description to a row above.

@@ -11,9 +11,57 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R69** — Bump this line in the same commit when adding a new item.
+**Next R number: R78** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
+
+- **[R69](R69-diskdb-disk-block-allocator.md)** — diskdb: distributed
+  disk-block allocator on CROW — Area: new component / diskdb —
+  Redesign and implement a distributed disk-block allocator as a new
+  CROW component, referencing the original design in another project
+  (aioss `server/diskdb`). diskdb is a lightweight, stateless server
+  that owns some disk-groups, allocates 1 MB blocks from per-zone
+  append-only allocators (CAS-serialized in-memory), and persists all
+  state to CROW KV (group 0 for sysdata, paxos data groups for zone
+  journals) — no local WAL. **Scoping + foundation requirement** —
+  defines the full scope, design decisions (D1–D8), writes the
+  high-level design doc (`doc/design/diskdb/design-crow-diskdb.md`),
+  splits implementation into R70–R77, and sets up the project skeleton
+  (`lib/protocol`, `app/crow-diskdb`, `lib/crow-diskdb-client`)
+  with correct dependencies and a clean build.
+
+- **R70** — diskdb protocol + core types — Area: diskdb — Fill in the
+  protobuf services (allocate/free/active_zone/query) in `lib/protocol`,
+  core types (Segment, ZoneRecord, BusyRecord, FreeRecord, ZoneSnapshot),
+  and config validation. Foundation for R71–R76.
+- **R71** — diskdb group-0 sysdata + sync — Area: diskdb — Implement
+  the group-0 sysdata schema (node/disk/disk-group metadata, ownership
+  map, binding map), periodic sync loop, ownership/binding map
+  read/write, instance heartbeat registration. Disk status management
+  component.
+- **R72** — diskdb zone allocator + journal persistence — Area: diskdb —
+  Implement the zone CAS allocator (Active→Busy→Active), active zone
+  deque, disk-level round-robin, two-phase async allocation
+  (sync CAS claim + async KV persist of BusyRecord), free batch flush
+  (FreeRecord), `active_zone` API. Block allocate/free component.
+- **R73** — diskdb crash recovery + snapshot compaction — Area: diskdb —
+  Implement journal replay (reconstruct in-memory bitmap + allocate_pos
+  from BusyRecord/FreeRecord + ZoneSnapshot), snapshot compaction
+  (write new snapshot, batch-delete expired records). Crash safety.
+- **R74** — diskdb space metrics + query API — Area: diskdb — Implement
+  per-disk / per-disk-group / per-zone space metrics with accurate
+  accounting and a recalculation path (replay journal to verify).
+  `query_disk_usage` gRPC API. Space metrics component.
+- **R75** — diskdb background scanner — Area: diskdb — Implement
+  ghost-allocation detection, allocate_pos drift detection, record
+  integrity (CRC). Leak detection deferred (needs caller registries).
+- **R76** — diskdb disk discovery + health probing — Area: diskdb —
+  Implement config-driven disk discovery, health probing (existence,
+  size, basic read/write test), disk failure detection + recovery flow.
+- **R77** — diskdb console + CLI integration — Area: diskdb / console —
+  Disk/disk-group management UI, zone busy/free visualization (block
+  array chart), CLI command design (`crow diskdb` subcommands vs
+  sub-wrapper binaries). Follow-up after core diskdb is functional.
 
 - **[R66](R66-kv-wal-io-uring.md)** — WAL io_uring backend — eliminate
   `spawn_blocking` on the durability path. The WAL's production I/O

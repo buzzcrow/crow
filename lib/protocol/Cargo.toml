@@ -1,0 +1,20 @@
+[package]
+name = "crow-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Common protobuf definitions for CROW components (diskdb first; crow-kv protos stay in crow-kv)."
+autobenches = false
+
+[lints]
+workspace = true
+
+[dependencies]
+tonic = { workspace = true }
+prost = { workspace = true }
+bytes = "1"
+
+[build-dependencies]
+tonic-build = "0.12"

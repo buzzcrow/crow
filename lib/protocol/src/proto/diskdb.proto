@@ -1,0 +1,105 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
+// diskdb gRPC service definitions.
+//
+// This is the first component protocol in the common `crow-protocol`
+// crate. crow-kv's existing protos stay in `crow-kv` (unchanged).
+// Later, when CROW adds its own RPC transport, the protobuf messages
+// are reused and only the transport changes.
+
+syntax = "proto3";
+
+package crow.diskdb.rpc;
+
+// ── Allocate ─────────────────────────────────────────────────────
+
+message AllocateBlockRequest {
+  string disk_group_id = 1;
+  uint32 size          = 2;  // bytes, aligned to block granularity
+}
+
+message AllocateBlocksRequest {
+  string  disk_group_id      = 1;
+  uint32  size               = 2;
+  uint32  count              = 3;
+  repeated string exclude_disk_uuids = 4;  // negative disk hint
+}
+
+message Segment {
+  string node_id    = 1;  // disk-group id
+  string disk_uuid  = 2;
+  uint32 zone_index = 3;
+  uint64 zone_offset = 4;  // byte offset within zone
+  uint32 size       = 5;   // bytes
+  uint64 tag        = 6;   // nanosecond timestamp
+}
+
+message AllocateResponse {
+  bool   ok    = 1;
+  string error = 2;
+  repeated Segment segments = 3;
+}
+
+// ── Free ─────────────────────────────────────────────────────────
+
+message FreeBlockRequest {
+  Segment segment = 1;
+}
+
+message FreeResponse {
+  bool   ok    = 1;
+  string error = 2;
+}
+
+// ── Zone lifecycle ───────────────────────────────────────────────
+
+message ActiveZoneRequest {
+  string disk_uuid  = 1;
+  uint32 zone_index = 2;
+}
+
+message ActiveZoneResponse {
+  bool   ok    = 1;
+  string error = 2;
+}
+
+// ── Query ────────────────────────────────────────────────────────
+
+message QueryDiskUsageRequest {
+  // If empty, query all owned nodes.
+  string node_id = 1;
+}
+
+message DiskUsage {
+  string disk_uuid         = 1;
+  uint64 capacity_bytes    = 2;
+  uint64 busy_bytes        = 3;
+  uint64 free_bytes        = 4;
+  uint64 active_zone_count = 5;
+  uint64 total_zone_count  = 6;
+}
+
+message NodeUsage {
+  string node_id           = 1;
+  uint64 capacity_bytes    = 2;
+  uint64 busy_bytes        = 3;
+  uint64 free_bytes        = 4;
+  repeated DiskUsage disks = 5;
+}
+
+message QueryDiskUsageResponse {
+  bool   ok    = 1;
+  string error = 2;
+  repeated NodeUsage nodes = 3;
+}
+
+// ── Service ──────────────────────────────────────────────────────
+
+service DiskdbService {
+  rpc AllocateBlock(AllocateBlockRequest)     returns (AllocateResponse);
+  rpc AllocateBlocks(AllocateBlocksRequest)   returns (AllocateResponse);
+  rpc FreeBlock(FreeBlockRequest)             returns (FreeResponse);
+  rpc ActiveZone(ActiveZoneRequest)           returns (ActiveZoneResponse);
+  rpc QueryDiskUsage(QueryDiskUsageRequest)   returns (QueryDiskUsageResponse);
+}

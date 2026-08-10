@@ -642,6 +642,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "crow-diskdb"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bytes",
+ "clap",
+ "crow-common",
+ "crow-kv-client",
+ "crow-protocol",
+ "dashmap",
+ "prost",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tonic",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "crow-diskdb-client"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "crow-kv-client",
+ "crow-protocol",
+ "dashmap",
+ "thiserror 2.0.18",
+ "tokio",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
 name = "crow-kv"
 version = "0.1.0"
 dependencies = [
@@ -710,6 +746,16 @@ dependencies = [
  "tonic",
  "tracing",
  "utoipa",
+]
+
+[[package]]
+name = "crow-protocol"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "prost",
+ "tonic",
+ "tonic-build",
 ]
 
 [[package]]

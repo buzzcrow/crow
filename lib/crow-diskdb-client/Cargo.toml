@@ -1,0 +1,22 @@
+[package]
+name = "crow-diskdb-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Client library for CROW diskdb: allocate/free/query disk blocks."
+autobenches = false
+
+[lints]
+workspace = true
+
+[dependencies]
+crow-protocol = { path = "../protocol" }
+crow-kv-client = { path = "../crow-kv-client" }
+tokio = { workspace = true, features = ["rt", "macros", "time", "sync"] }
+tonic = { workspace = true }
+bytes = "1"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+dashmap = "6"
