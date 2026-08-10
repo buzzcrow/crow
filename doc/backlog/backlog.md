@@ -127,14 +127,6 @@ complexity, and dependency. Before implementation, follow the
   the reactor submission (small readahead window, default 1). Win is
   zero on mem-mode (leaves resident); needs a cold/disk bench config to
   validate. Medium complexity.
-- **[R67](R67-kv-scan-16k-errors.md)** — 16 KiB scan errors on Linux —
-  Area: cluster / maintenance — RCA: maintenance-loop `persist_snapshot`
-  / `flush` / `collect_garbage` hold the C++ `write_mutex_` and block the
-  async runtime, starving the election driver (300-600ms timeout) when
-  snapshots take 0.6-2.2s for 100k × 16KiB values. Fix: `spawn_blocking`
-  for all three calls + fire-and-forget snapshot with `AtomicBool`
-  in-flight guard. Verified: 0 errors across 5 consecutive 16KiB bench
-  runs (was 653-8111). Done.
 - **[R68](R68-kv-write-largeval-bench.md)** — Large-value write
   benchmark — Area: cluster / maintenance / bench — R67 fixed the 16 KiB
   scan error spike by wrapping the maintenance loop's `flush` /

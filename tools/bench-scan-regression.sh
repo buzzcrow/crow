@@ -124,7 +124,7 @@ echo "=== R67 regression — large value scan (snapshot stall) ==="
 # R67: 100k × 16KiB = 1.6 GB. Before the spawn_blocking fix,
 # persist_snapshot took 0.6-2.2s on Linux, blocking the async runtime
 # and causing leader-election churn (300-600ms timeout) → scan_errors.
-# This config must show 0 errors. Reference: doc/backlog/R67-kv-scan-16k-errors.md
+# This config must show 0 errors. Reference: doc/design/kv/kv-scan-flow-analysis.md (R67)
 run_bench "largeval_16k"    1000   "" ""                        16384 linearizable auto 1 1
 
 echo "=== Multi-thread — max throughput + read-mode split ==="

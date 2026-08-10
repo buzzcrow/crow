@@ -313,16 +313,18 @@ noted.
   next leaf (`right_sibling`) before finishing the current one —
   issuing the next read ahead of the merge loop would overlap I/O with
   merging on cold ranges.
-- **[R67](../../backlog/R67-kv-scan-16k-errors.md) — 16 KiB scan
-  errors on Linux (FIXED 2026-08-10)**: RCA: maintenance-loop
-  `persist_snapshot` / `flush` / `collect_garbage` hold the C++
-  `write_mutex_` and block the async runtime, starving the election
-  driver (300-600ms timeout) when snapshots take 0.6-2.2s for 100k ×
-  16KiB values (1.6 GB). Fix: `spawn_blocking` for all three calls +
-  fire-and-forget snapshot with `AtomicBool` in-flight guard. Verified:
-  0 errors across 5 consecutive 16KiB bench runs (was 653-8111). The
-  `largeval_16k` config is now part of the regression sentinel
-  (`tools/bench-scan-regression.sh`).
+- **R67 — 16 KiB scan errors on Linux** — **Done (2026-08-10).** RCA:
+  maintenance-loop `persist_snapshot` / `flush` / `collect_garbage`
+  held the C++ `write_mutex_` and blocked the async runtime, starving
+  the election driver (300-600ms timeout) when snapshots took 0.6-2.2s
+  for 100k × 16KiB values (1.6 GB). Fix: all three calls now run via
+  `tokio::task::spawn_blocking` (single code path — no fire-and-forget,
+  no in-flight guard); the election driver runs on a separate tokio
+  task and is no longer blocked. `PxLearner.engine` changed from
+  `Box<dyn KVEngine>` to `Arc<dyn KVEngine>` so the handle clones into
+  the blocking task. Verified: 0 errors across 5 consecutive 16KiB
+  bench runs (was 653-8111). The `largeval_16k` config is part of the
+  regression sentinel (`tools/bench-scan-regression.sh`).
 - **Streaming scan RPC (deliberately dropped — not needed)**: a
   server-streaming `ScanStream` (R38/R44 era) was replaced by the
   server byte budget + S3-style unary pagination. Streaming adds
