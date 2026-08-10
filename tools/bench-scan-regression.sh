@@ -15,11 +15,12 @@
 #     - deep_pag_10:   O(limit) pushdown proof (start_after near end)
 #     - mixed_1k:      mixed value sizes (64B:70%,1KiB:20%,16KiB:10%)
 #     - minslot_1k:    MinSlot routing (vs bounded_1k's linearizable)
+#     - largeval_16k:  16KiB values (R67 regression: snapshot stall)
 #   Multi-thread (4T:4C) — max throughput + read-mode split:
 #     - lin_4t:        linearizable (all scans serialize on leader)
 #     - minslot_4t:    minslot (scans distributed across replicas)
 #
-# 13 runs × 10s ≈ 130s + pre-pop overhead.
+# 14 runs × 10s ≈ 140s + pre-pop overhead.
 #
 # Reference platform: see doc/working/kv-scan-flow-analysis.md. Always
 # record the CPU model in the baseline doc when publishing a run —
@@ -86,25 +87,25 @@ run_bench() {
 
 # --- regression sentinel configs ---
 #
-# Reference results (2026-08-06, Apple M5 Pro, 18c, arm64, macOS 26.5):
+# Reference results (2026-08-10, AMD Ryzen 9 5950X, 16c/32t, Ubuntu 24.04):
 #   10s mem mode, 3-node cluster, 100k pre-populated keys, 64B values
-#   unless noted. Post-R48/R50 (lazy leaf cursor, epoch-protected
-#   MemTable).
+#   unless noted. Post-R67 (spawn_blocking maintenance).
 #
 #   label            limit   T:C   scans/s  avg_us  p99_us   err  notes
-#   bounded_10       10      1:1   19558    50      79       0    O(limit) headline
-#   bounded_1k       1000    1:1   4339     229     258      0    typical scan
-#   bounded_10k      10000   1:1   518      1929    2060     0    large bounded
-#   full_100k        100000  1:1   50       20216   20848    0    pagination
-#   deep_pag_10      10      1:1   20681    47      66       0    O(limit) pushdown
-#   mixed_1k         1000    1:1   991      1007    1222     0    64B:70%,1KiB:20%,16KiB:10%
-#   minslot_1k       1000    1:1   4293     232     262      0    MinSlot routing
-#   lin_4t           1000    4:4   14264    279     473      0    max leader throughput
-#   minslot_4t       1000    4:4   14810    269     385      0    +3.8% vs lin
-#   lin_16t          1000    16:16 30799    517     822      0
-#   minslot_16t      1000    16:16 33015    482     791      0    +7.2% vs lin
-#   lin_32t          1000    32:32 37840    842     3600     0
-#   minslot_32t      1000    32:32 38256    830     2028     0    +1.1% throughput, -43.7% p99
+#   bounded_10       10      1:1   5093     194     249      0    O(limit) headline
+#   bounded_1k       1000    1:1   1274     783     904      0    typical scan
+#   bounded_10k      10000   1:1   141      7113    8528     0    large bounded
+#   full_100k        100000  1:1   14       72244   96512    0    pagination
+#   deep_pag_10      10      1:1   5373     184     264      0    O(limit) pushdown
+#   mixed_1k         1000    1:1   330      3031    4116     0    64B:70%,1KiB:20%,16KiB:10%
+#   minslot_1k       1000    1:1   1292     772     925      0    MinSlot routing
+#   largeval_16k     1000    1:1   35       28362   46720    0    R67: 16KiB values
+#   lin_4t           1000    4:4   6999     569     1064     0    max leader throughput
+#   minslot_4t       1000    4:4   6586     605     1231     0    -5.9% vs lin
+#   lin_16t          1000    16:16 21247    750     1226     0
+#   minslot_16t      1000    16:16 20520    776     1309     0    -3.4% vs lin
+#   lin_32t          1000    32:32 27922    1139    2408     0
+#   minslot_32t      1000    32:32 28613    1111    2226     0    +2.5% throughput, -7.6% p99
 #
 # Analysis: doc/working/kv-scan-flow-analysis.md § Latest Benchmark Results.
 
@@ -118,6 +119,13 @@ run_bench "full_100k"       100000 "" ""                        64    linearizab
 run_bench "deep_pag_10"     10     "" "$(pad_key 99989)"        64    linearizable auto 1 1
 run_bench "mixed_1k"        1000   "" ""                        64    linearizable auto 1 1 "64:70,1024:20,16384:10"
 run_bench "minslot_1k"      1000   "" ""                        64    minslot      zero 1 1
+
+echo "=== R67 regression — large value scan (snapshot stall) ==="
+# R67: 100k × 16KiB = 1.6 GB. Before the spawn_blocking fix,
+# persist_snapshot took 0.6-2.2s on Linux, blocking the async runtime
+# and causing leader-election churn (300-600ms timeout) → scan_errors.
+# This config must show 0 errors. Reference: doc/backlog/R67-kv-scan-16k-errors.md
+run_bench "largeval_16k"    1000   "" ""                        16384 linearizable auto 1 1
 
 echo "=== Multi-thread — max throughput + read-mode split ==="
 run_bench "lin_4t"          1000   "" ""                        64    linearizable auto 4 4

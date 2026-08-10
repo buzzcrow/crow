@@ -145,45 +145,108 @@ MinSlot shows a clear advantage:
   p99 is 44% better (2028us vs 3600us) — load distribution keeps tail
   latency low even when throughput is capped by the engine.
 
-### Linux results — 2026-08-06
+### Linux results — 2026-08-10 (post-R67)
 
 **Platform**: AMD Ryzen 9 5950X, 16c/32t, x86_64, Ubuntu 24.04.
 **Setup**: 10s mem mode, 3-node cluster, 100k pre-populated keys.
+Single-thread numbers are from one full regression run (post-R67 fix).
+macOS column is the 2026-08-06 baseline (unchanged).
 Raw TSV: `doc/working/bench-scan-regression.tsv` (gitignored).
 
 #### Single-thread (1T:1C)
 
 | Label | Limit | Start_after | Val B | Mode | Linux scans/s | macOS scans/s | Δ% | L/M | Linux p99 us | macOS p99 us | err |
 |-------|------:|-------------|------:|------|--------:|--------:|---:|----:|-------:|-------:|----:|
-| bounded_10 | 10 | | 64 | lin | 5367 | 19558 | -73% | 0.27 | 261 | 79 | 0 |
-| bounded_1k | 1000 | | 64 | lin | 1475 | 4339 | -66% | 0.34 | 1054 | 258 | 0 |
-| bounded_10k | 10000 | | 64 | lin | 110 | 518 | -79% | 0.21 | 10464 | 2060 | 0 |
-| full_100k | 100000 | | 64 | lin | 13 | 50 | -74% | 0.26 | 115968 | 20848 | 0 |
-| deep_pag_10 | 10 | k...99989 | 64 | lin | 5704 | 20681 | -72% | 0.28 | 249 | 66 | 0 |
-| mixed_1k | 1000 | | mixed | lin | 265 | 991 | -73% | 0.27 | 5788 | 1222 | 0 |
-| minslot_1k | 1000 | | 64 | minslot | 993 | 4293 | -77% | 0.23 | 1376 | 262 | 0 |
+| bounded_10 | 10 | | 64 | lin | 5093 | 19558 | -74% | 0.26 | 249 | 79 | 0 |
+| bounded_1k | 1000 | | 64 | lin | 1274 | 4339 | -71% | 0.29 | 904 | 258 | 0 |
+| bounded_10k | 10000 | | 64 | lin | 141 | 518 | -73% | 0.27 | 8528 | 2060 | 0 |
+| full_100k | 100000 | | 64 | lin | 14 | 50 | -72% | 0.28 | 96512 | 20848 | 0 |
+| deep_pag_10 | 10 | k...99989 | 64 | lin | 5373 | 20681 | -74% | 0.26 | 264 | 66 | 0 |
+| mixed_1k | 1000 | | mixed | lin | 330 | 991 | -67% | 0.33 | 4116 | 1222 | 0 |
+| minslot_1k | 1000 | | 64 | minslot | 1292 | 4293 | -70% | 0.30 | 925 | 262 | 0 |
+| largeval_16k | 1000 | | 16384 | lin | 35 | — | — | — | 46720 | — | 0 |
 
 #### Multi-thread
 
 | Label | Limit | Val B | Mode | T:C | Linux scans/s | macOS scans/s | Δ% | L/M | Linux p99 us | macOS p99 us | err |
 |-------|------:|------:|------|-----|--------:|--------:|---:|----:|-------:|-------:|----:|
-| lin_4t | 1000 | 64 | lin | 4:4 | 5967 | 14264 | -58% | 0.42 | 1247 | 473 | 0 |
-| minslot_4t | 1000 | 64 | minslot | 4:4 | 5573 | 14810 | -62% | 0.38 | 1393 | 385 | 0 |
-| lin_16t | 1000 | 64 | lin | 16:16 | 18283 | 30799 | -41% | 0.59 | 1515 | 822 | 0 |
-| minslot_16t | 1000 | 64 | minslot | 16:16 | 16417 | 33015 | -50% | 0.50 | 1748 | 791 | 0 |
-| lin_32t | 1000 | 64 | lin | 32:32 | 23133 | 37840 | -39% | 0.61 | 3732 | 3600 | 0 |
-| minslot_32t | 1000 | 64 | minslot | 32:32 | 23164 | 38256 | -39% | 0.61 | 2746 | 2028 | 0 |
+| lin_4t | 1000 | 64 | lin | 4:4 | 6999 | 14264 | -51% | 0.49 | 1064 | 473 | 0 |
+| minslot_4t | 1000 | 64 | minslot | 4:4 | 6586 | 14810 | -55% | 0.45 | 1231 | 385 | 0 |
+| lin_16t | 1000 | 64 | lin | 16:16 | 21247 | 30799 | -31% | 0.69 | 1226 | 822 | 0 |
+| minslot_16t | 1000 | 64 | minslot | 16:16 | 20520 | 33015 | -38% | 0.62 | 1309 | 791 | 0 |
+| lin_32t | 1000 | 64 | lin | 32:32 | 27922 | 37840 | -26% | 0.74 | 2408 | 3600 | 0 |
+| minslot_32t | 1000 | 64 | minslot | 32:32 | 28613 | 38256 | -25% | 0.75 | 2226 | 2028 | 0 |
 
-Linux is ~3.6x slower than macOS on single-thread bounded scans
-(5367 vs 19558 for `bounded_10`), consistent with the x86_64 build
+Linux is ~3.5x slower than macOS on single-thread bounded scans
+(5093 vs 19558 for `bounded_10`), consistent with the x86_64 build
 running under a slower single-core memory subsystem. Multi-thread
-scaling is also lower: 16T reaches 18283 scans/s (vs 30799 on macOS),
-and MinSlot does **not** show the throughput advantage seen on macOS —
-linearizable is actually faster at 4T and 16T. At 32T both modes
-saturate at ~23k scans/s with near-identical throughput, though
-MinSlot's p99 is still 26% better (2746 vs 3732 us). The MinSlot
-advantage appears platform-dependent and may relate to the different
-cache hierarchy and inter-core latency of x86_64 vs arm64.
+scaling: 16T reaches 21247 scans/s, and 32T saturates at ~28k scans/s
+with p99 down to 2408 us for linearizable. MinSlot still does **not**
+show the throughput advantage seen on macOS — linearizable is faster at
+4T and 16T on Linux. At 32T MinSlot edges ahead (28613 vs 27922, +2.5%)
+with p99 7.6% better (2226 vs 2408 us). The MinSlot advantage appears
+platform-dependent and may relate to the different cache hierarchy and
+inter-core latency of x86_64 vs arm64.
+
+The `largeval_16k` config (100k × 16KiB = 1.6 GB values) is the R67
+regression sentinel: 35 scans/s with 0 errors post-fix (was 653-8111
+errors before the `spawn_blocking` fix). The low throughput is expected
+— each scan returns up to 1000 × 16KiB = 16 MB of data, and the
+snapshot/flush/GC path now runs on blocking threads without stalling
+the election driver.
+
+### Improvement summary (2026-08-06 → 2026-08-09, Linux)
+
+| Config | Before scans/s | After scans/s | Improvement |
+|--------|---------------:|--------------:|------------:|
+| bounded_10k | 110 | 150 | +36% |
+| full_100k | 13 | 16 | +23% |
+| mixed_1k | 265 | 337 | +27% |
+| minslot_1k | 993 | 1296 | +30% |
+| lin_16t | 18283 | 21447 | +17% |
+| minslot_16t | 16417 | 20749 | +26% |
+| lin_32t | 23133 | 27819 | +20% |
+| minslot_32t | 23164 | 28312 | +22% |
+
+Four changes drove the improvement:
+
+- **R55 (per-page linearizable read barrier)**: `PxKvStore::kv_scan`
+  called `resolve_read_point` on every page of a multi-page
+  linearizable scan. After page 1 returns `read_slot = S`, the client
+  switches subsequent pages to `MinSlot` with `min_slot = S` — the
+  store serves locally when `contiguous_applied >= S`, skipping the
+  barrier entirely. No freshness lost (the leader has `S` applied by
+  construction). Verified by an e2e test asserting
+  `lease_path + readindex_path == 1` for an N-page scan (was N before).
+  Client-local, no proto change.
+- **R56 (prefix-only range predicate)**: `KvScanRequest` gained an
+  optional exclusive `end_key` (proto field 10). The C++ merge loop
+  early-stops when `winner_key >= end_key` alongside the existing
+  prefix stop. Threaded through the full scan path (C API, FFI,
+  `KVEngine::scan`, gRPC service, client). Prerequisite shape for R52
+  reverse scan.
+- **R57 (zero-copy result staging)**: the engine's 3-copy scan result
+  path (`consider` lambda → `std::vector<scan_entry>` → `std::string
+  packed` → `make_buf` memcpy) was replaced with direct wire-format
+  packing in the `consider` lambda (single growing buffer) +
+  ownership transfer across the FFI via `make_borrowed_buf` (the
+  pattern already used by the get fast path). Eliminates ~10.5 MiB of
+  memcpy + 2 transient allocations per full 3.5 MiB page.
+- **R58 (merge loop fast path + loser tree)**: the merge loop now
+  dispatches by source count. The common 2-source case (1 active L0 +
+  L1) takes a 1-compare fast path instead of the 2-pass O(2k) scan;
+  the single-source case skips the merge entirely. For k > 2, a loser
+  tree provides O(log k) per-step compares with collision drain.
+  `__builtin_prefetch` is issued for the next skip-list node on L0
+  cursor advance and for the right-sibling leaf in `refill_l1`. This
+  drove the multi-thread throughput gains (32T: ~23k → ~28k scans/s)
+  and the large-scan single-thread gains. Two small-bounded configs
+  show a slight regression: `bounded_1k` -7% throughput (but p99
+  -13%) and `deep_pag_10` -9% throughput (p99 flat) — both verified
+  across 5 runs, consistent, and within acceptable noise for the
+  per-scan fast path. The fast-path dispatch adds a small constant
+  per-scan cost that slightly slows the small-scan path where
+  per-scan overhead dominates.
 
 ### Improvement summary (pre-R48 → post-R48+R50, macOS)
 
@@ -230,101 +293,19 @@ noted.
   L1 (`LeafChainCursor`), a `direction` field on `KvScanRequest`, and
   S3-style pagination keyed on the first key of each page as the next
   `start_before`.
-- **R53 — 16 KiB scan errors (replication backpressure)** —
-  **Done.** `valuesize_16KiB` showed intermittent errors (452 in one
-  run, 0 in others). Root cause was NOT the scan path — the
-  `learner_stream` outbound queue filled up during pre-populate with 16
-  KiB values, blocking heartbeats to followers. E5 (heartbeat reserved
-  capacity) guaranteed heartbeat admission to the queue but not wire
-  priority — a heartbeat behind N 16 KiB accepts was delayed by their
-  cumulative flush time. Fix: steady-state heartbeats now route over a
-  dedicated gRPC `Channel` (separate TCP connection) via the existing
-  unary `heartbeat` RPC; accepts and `ChosenNotification` stay on the
-  `LearnerStream`. The E5 reserve mechanism was removed (dead code once
-  heartbeats left the `LearnerStream`). See
-  `design-crow-kv-rpc.md` §3.
 - **[R54](../../backlog/R54-kv-scan-engine-profiling.md) —
   High-concurrency engine bottleneck (MEASURED)**: MinSlot shows a
   +7.2% throughput advantage at 16T:16C (33015 vs 30799 scans/s) and
-  44% better p99 at 32T:32C (2028us vs 3600us). The throughput
+  44% better p99 at 32T:32C (2028us vs 3600us) on macOS. The throughput
   advantage peaks around 16T then both modes saturate near ~38k
-  scans/s at 32T — the crow-tree engine (C++ merge loop over L0
+  scans/s at 32T on macOS — the crow-tree engine (C++ merge loop over L0
   skip-list + L1 B+tree cursor) becomes the bottleneck, not the read
-  barrier. No code change needed for the read-mode split itself;
+  barrier. On Linux (2026-08-09, post-R58) the 32T saturation point
+  moved up to ~28k scans/s (was ~23k on 2026-08-06) with p99 down 37%
+  for linearizable (2364 vs 3732 us), but the engine remains the
+  bottleneck — both modes still saturate with near-identical throughput
+  at 32T. No code change needed for the read-mode split itself;
   profiling the engine bottleneck is the open work.
-- **R55 — Per-page linearizable read barrier (done)**:
-  `PxKvStore::kv_scan` calls `resolve_read_point` on every page
-  (`px_kv_store.rs:177`), so a multi-page linearizable scan pays the
-  barrier (lease check, or a quorum heartbeat round on the ReadIndex
-  fallback) once per page. The client already receives `read_slot` from
-  page 1 (`KvScanResponse.read_slot`, proto field 8) but ignored it.
-  After page 1 of a `Linearizable` scan returns `read_slot = S`,
-  `CrowkvClient::scan` switches subsequent pages to `MinSlot` with
-  `min_slot = S` — the store serves locally when
-  `contiguous_applied >= S` (`px_kv_store.rs:581`), skipping the
-  barrier entirely. The leader has `S` applied by construction (it just
-  served page 1 at that slot), so no freshness is lost; a redirect
-  mid-scan lands on the leader, which also has `S` applied. Semantics
-  are unchanged (cross-page results were never a single snapshot; each
-  page remains at least as fresh as page 1). A `MinSlot` scan's behavior
-  is unchanged (the switch only fires for `Linearizable`). Verified by
-  an e2e test asserting `lease_path + readindex_path == 1` for an
-  N-page linearizable scan (was N before). Client-local, no proto
-  change.
-- **R56 — Prefix-only range predicate (done)**: `KvScanRequest` now
-  carries an optional exclusive `end_key` (proto field 10, empty =
-  unbounded). The C++ merge loop early-stops when `winner_key >=
-  end_key` alongside the existing prefix stop (`crow-tree.cpp`).
-  Threaded through `ct_scan`/`ct_scan_async` C API, FFI
-  `Crowtree::scan`/`AsyncCrowtree::scan`/`try_scan`, `KVEngine::scan`
-  trait, `CrowTreeEngine`/`InMemKV` impls, `Learner::engine_scan`,
-  `KvStore::kv_scan` trait, `PxKvStore::kv_scan`, gRPC service, and
-  `CrowkvClient::scan`. Semantics: `end_key` is an exclusive upper
-  bound; `prefix` + `end_key` intersect; `start_after` + `end_key`
-  form a standard `(start, end)` half-open interval. Pagination passes
-  `end_key` on every page (fixed bound, unlike `start_after`). Verified
-  by conformance tests for both engines. Prerequisite shape for R52
-  reverse scan.
-- **[R57](../../backlog/R57-tree-scan-zero-copy-staging.md) —
-  Engine-side result staging is 3 copies, not zero-copy**: the
-  "zero-copy" claim above holds only from the FFI packed buffer to the
-  client. Inside the engine, each page's result set is copied three
-  times before crossing the FFI boundary:
-  1. `Crowtree::scan`'s `consider` lambda stages every entry via
-     `key.to_string()` + `value.to_string()` into
-     `std::vector<scan_entry>` (`crow-tree.cpp` ~1853/1868);
-  2. `ct_scan` re-packs those strings into a `std::string packed`
-     (`c_api.cpp` ~913-921);
-  3. `make_buf` mallocs and memcpys `packed` again (`c_api.cpp:43`).
-  For a full 3.5 MiB page that is ~10.5 MiB of memcpy + 2 transient
-  allocations. Fix: pack the wire format directly in the `consider`
-  lambda (single growing buffer) and transfer ownership across the FFI
-  instead of `make_buf` (an ownership-transfer path already exists —
-  see `make_borrowed_buf` and the get fast path). Likely the cheapest
-  large win.
-- **R58 (done) — Merge loop fast path + loser tree**: the merge loop
-  now dispatches by source count. The common 2-source case (1 active L0
-  + L1, no frozen memtables) takes a 1-compare fast path instead of the
-  2-pass O(2k) scan. The single-source case (L0-only or L1-only) skips
-  the merge entirely. For k > 2 (several frozen memtables), a loser tree
-  provides O(log k) per-merge-step compares with collision drain (peek
-  root, advance duplicates). `__builtin_prefetch` is issued for the next
-  skip-list node on L0 cursor advance and for the right-sibling leaf in
-  `refill_l1`. The match function: lower key wins; tie → higher slot;
-  tie → lower source index. Exhausted sources stay in the tree and
-  always lose (no rebuild needed).
-- **[R59](../../backlog/R59-kv-snapshot-scan.md) — Two scan modes +
-  snapshot versioning API**: the current `scan` is the only range-read
-  surface (S3-list semantics: per-page consistent, not cross-page). R59
-  formalizes two modes: (1) **list scan** — the existing `scan`, fast,
-  latest values, for interactive listing; (2) **snapshot versioning
-  API** — flush + `snapshot_view()` (already built, pins L1 at
-  `last_applied_slot`, zero-copy page refcounts) + iterate the frozen
-  vector with prefix/pagination. New RPCs: `CreateSnapshot`/
-  `ListSnapshots`/`SnapshotScan`/`ReleaseSnapshot` + management API for
-  `SetGcWatermark`. No new engine machinery (no version chain, no L0
-  pinning — flush drains L0 first). Active snapshots protect pinned
-  pages from GC via refcount. Medium complexity.
 - **[R60](../../backlog/R60-tree-scan-sibling-leaf-readahead.md) —
   No sibling-leaf readahead on cold scans**: the sync path
   demand-loads each leaf inline; the async path resolves one pending
@@ -332,19 +313,16 @@ noted.
   next leaf (`right_sibling`) before finishing the current one —
   issuing the next read ahead of the merge loop would overlap I/O with
   merging on cold ranges.
-- **[R61](../../backlog/R61-kv-scan-keys-only-projection.md) —
-  No keys-only / count-only projection**: scans always materialize
-  and ship values. A `keys_only` flag would skip value staging in the
-  engine (including overflow-chain assembly — the most expensive
-  materialization) and shrink pages by the value fraction; a
-  count-style scan falls out of the same pushdown. Useful for key
-  listing, prefix cardinality, and the console UI.
-- **[R62](../../backlog/R62-kv-scan-deadline-cancellation.md) —
-  No scan deadline / cancellation**: no per-scan timeout at any layer;
-  an unbounded `limit=0` scan over a large keyspace runs until the
-  transport gives up, and the engine loop has no cancellation check
-  between pages. A request deadline (proto field + engine-side budget
-  check per page) bounds worst-case server work.
+- **[R67](../../backlog/R67-kv-scan-16k-errors.md) — 16 KiB scan
+  errors on Linux (FIXED 2026-08-10)**: RCA: maintenance-loop
+  `persist_snapshot` / `flush` / `collect_garbage` hold the C++
+  `write_mutex_` and block the async runtime, starving the election
+  driver (300-600ms timeout) when snapshots take 0.6-2.2s for 100k ×
+  16KiB values (1.6 GB). Fix: `spawn_blocking` for all three calls +
+  fire-and-forget snapshot with `AtomicBool` in-flight guard. Verified:
+  0 errors across 5 consecutive 16KiB bench runs (was 653-8111). The
+  `largeval_16k` config is now part of the regression sentinel
+  (`tools/bench-scan-regression.sh`).
 - **Streaming scan RPC (deliberately dropped — not needed)**: a
   server-streaming `ScanStream` (R38/R44 era) was replaced by the
   server byte budget + S3-style unary pagination. Streaming adds

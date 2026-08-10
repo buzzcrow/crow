@@ -157,7 +157,7 @@ async fn maintenance_pass_persists_snapshot_and_gcs_wal_segments_once_safe() {
 /// a hardcoded constant. Configure a very short tick, start the *real*
 /// periodic loop (not `run_maintenance_pass_for_tests`'s direct call), and
 /// confirm a pass actually ran once paused virtual time crosses it.
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn maintenance_loop_uses_configured_tick_interval() {
     let backend = sim_backend();
     let config = WalConfig {
@@ -194,18 +194,10 @@ async fn maintenance_loop_uses_configured_tick_interval() {
     assert_eq!(wal.snapshot_slot(), 0, "nothing persisted before the loop runs");
 
     group.start_engine_maintenance_loop().await;
-    // Let the freshly spawned task actually run up to its `sleep(tick)`
-    // call (registering the timer) before advancing paused virtual time --
-    // `tokio::spawn` only schedules it, it doesn't run synchronously.
-    for _ in 0..10 {
-        tokio::task::yield_now().await;
-    }
-    // Advance past the configured 5ms tick, then yield again so the woken
-    // task actually gets to run its maintenance pass.
-    tokio::time::advance(Duration::from_millis(10)).await;
-    for _ in 0..10 {
-        tokio::task::yield_now().await;
-    }
+    // Use a real timer (no paused time) since spawn_blocking uses real
+    // OS threads that don't respect tokio's virtual clock. Wait long
+    // enough for at least one 5ms tick + spawn_blocking completion.
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     assert_eq!(
         wal.snapshot_slot(),
