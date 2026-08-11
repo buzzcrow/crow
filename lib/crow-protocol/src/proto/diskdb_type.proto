@@ -2,7 +2,7 @@
 // Licensed under the Apache License, Version 2.0.
 
 // diskdb type definitions: enums, value types for data-group storage,
-// and the allocation handle (Segment). Key types are Rust binary keys
+// and the allocation handle (Segment). Key types are Rust key concepts
 // (see doc/design/protocol/design-crow-key.md), not proto messages.
 // DiskId is in common_type.proto.
 //
@@ -47,7 +47,9 @@ message ZoneValue {
 
 // Disk value — physical disk properties.
 // All sizes are in units; unit_size_bytes defines the unit itself.
-// Disk key is a Rust binary key (DiskKey), not a proto message.
+// Disk key is a Rust key concept (DiskKey, TextKey encoding
+// `/hw/disk/<rack_id>/<node_id>/<dg_id>/<disk_id_hex>` in group 0);
+// see doc/design/protocol/design-crow-key.md.
 message DiskValue {
   DiskType disk_type       = 1;
   uint64   capacity_units  = 2;
@@ -60,7 +62,9 @@ message DiskValue {
 // ── DiskGroup value ─────────────────────────────────────────────
 
 // DiskGroup value — logical container of disks on one node.
-// DiskGroup key is a Rust binary key (DiskGroupKey), not a proto message.
+// DiskGroup key is a Rust key concept (DiskGroupKey, TextKey encoding
+// `/hw/dg/<rack_id>/<node_id>/<dg_id>` in group 0); see
+// doc/design/protocol/design-crow-key.md.
 message DiskGroupValue {
   crow.common.HwStatus status = 1;
   repeated crow.common.DiskId disk_ids    = 2;
@@ -104,28 +108,30 @@ message FreeBlockValue {
 // Disk info for query responses — key fields + value fields flattened.
 // Replaces the former DiskEntry { DiskKey key; DiskValue value }.
 message DiskInfo {
-  // Key fields (from DiskKey binary key).
-  uint64             node_id       = 1;
-  uint32             disk_group_id = 2;
-  crow.common.DiskId disk_id       = 3;
+  // Key fields (from DiskKey text-path key).
+  uint64             rack_id       = 1;
+  uint64             node_id       = 2;
+  uint64             disk_group_id = 3;
+  crow.common.DiskId disk_id       = 4;
   // Value fields (from DiskValue).
-  DiskType           disk_type       = 4;
-  uint64             capacity_units  = 5;
-  uint64             zone_size_units = 6;
-  uint32             unit_size_bytes = 7;
-  uint32             zone_count      = 8;
-  crow.common.HwStatus status        = 9;
+  DiskType           disk_type       = 5;
+  uint64             capacity_units  = 6;
+  uint64             zone_size_units = 7;
+  uint32             unit_size_bytes = 8;
+  uint32             zone_count      = 9;
+  crow.common.HwStatus status        = 10;
 }
 
 // Disk-group info for query responses — key + value fields flattened
 // plus member disks.
 message DiskGroupInfo {
-  // Key fields (from DiskGroupKey binary key).
-  uint64             node_id       = 1;
-  uint32             disk_group_id = 2;
+  // Key fields (from DiskGroupKey text-path key).
+  uint64             rack_id       = 1;
+  uint64             node_id       = 2;
+  uint64             disk_group_id = 3;
   // Value fields (from DiskGroupValue).
-  crow.common.HwStatus status      = 3;
-  repeated crow.common.DiskId disk_ids         = 4;
+  crow.common.HwStatus status      = 4;
+  repeated crow.common.DiskId disk_ids         = 5;
   // Member disks.
-  repeated DiskInfo   disks        = 5;
+  repeated DiskInfo   disks        = 6;
 }

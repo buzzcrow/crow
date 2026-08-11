@@ -7,11 +7,10 @@ fn main() {
     let protos = [
         "src/proto/error_code.proto",
         "src/proto/common_type.proto",
+        "src/proto/sysdata_type.proto",
         "src/proto/diskdb_type.proto",
         "src/proto/diskdb_op.proto",
-        "src/proto/diskdb_sys_op.proto",
         "src/proto/diskdb_service.proto",
-        "src/proto/diskdb_sys_service.proto",
         "src/proto/chunkdb_type.proto",
         "src/proto/chunkdb_op.proto",
         "src/proto/chunkdb_service.proto",
@@ -59,6 +58,17 @@ fn main() {
         // Common sysdata value types (serde for bincode/JSON storage).
         .type_attribute("RackValue", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("NodeValue", "#[derive(serde::Serialize, serde::Deserialize)]")
+        // Group-0 sysdata value types (serde for JSON storage in group 0).
+        .type_attribute("StoreValue", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("GroupValue", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("ReplicaValue", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("InstanceValue", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("OwnerMapValue", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("BindMapValue", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("ServiceExtra", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("DiskdbExtra", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("KvServerExtra", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("HostedGroup", "#[derive(serde::Serialize, serde::Deserialize)]")
         // Enums.
         .type_attribute("HwStatus", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("DiskType", "#[derive(serde::Serialize, serde::Deserialize)]")

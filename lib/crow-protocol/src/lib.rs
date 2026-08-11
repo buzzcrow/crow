@@ -69,13 +69,18 @@ pub use diskdb_type_util::{
 };
 
 pub mod common_type;
-pub use common_type::{DiskGroupId, NodeId};
+pub use common_type::{DiskGroupId, GroupId, InstanceId, NodeId, RackId, ReplicaId, StoreId};
 
 pub mod key;
 pub use key::{
-    BinaryKey, BindMapKey, BusyBlockKey, DiskGroupKey, DiskKey, FreeBlockKey, InstanceKey, KeyError, NodeKey,
-    OwnerMapKey, RackKey, ZoneKey, CROW_KEY_MAGIC,
+    BinaryKey, BindMapKey, BusyBlockKey, DiskGroupKey, DiskKey, FreeBlockKey, InstanceKey, KeyError,
+    KvGroupKey, KvReplicaKey, KvStoreKey, NodeKey, OwnerMapKey, RackKey, TextKey, ZoneKey, CROW_KEY_MAGIC,
 };
+
+pub mod sysdata;
+pub use sysdata::{DiskGroupEntry, DiskdbOwnerEntry, KVGroupBindEntry};
+
+pub mod mgmt;
 
 pub mod bitmap;
 pub use bitmap::{create_usage_bitmap, UsageBitmap};

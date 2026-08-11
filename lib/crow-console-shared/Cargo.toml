@@ -23,6 +23,7 @@ tracing = { workspace = true }
 dirs = "5"
 russh = "0.45"
 async-trait = "0.1"
+crow-protocol = { path = "../crow-protocol" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net"] }

@@ -4,12 +4,13 @@
 # CROW key — Design
 
 This is the root design document for the **protocol** component area,
-focused on **binary key encoding**. It defines how every CROW key that
-is stored in crow-kv is serialized to and parsed from bytes. It is
-shared across all components (diskdb first; future components reuse the
-same scheme). Field-level detail lives in the Rust source
-(`lib/crow-protocol/src/key/`); this doc covers decisions and the
-frozen layouts only.
+focused on **key encoding** for crow-kv. It defines how every CROW key
+that is stored in crow-kv is serialized to and parsed from bytes, via
+two encoding traits: `BinaryKey` (binary, for data groups) and
+`TextKey` (text-path, for group 0). It is shared across all components
+(diskdb first; future components reuse the same scheme). Field-level
+detail lives in the Rust source (`lib/crow-protocol/src/key/`); this
+doc covers decisions and the frozen layouts only.
 
 See `doc/design/diskdb/design-crow-diskdb.md` §5 and §7 for the
 component-specific key kinds that use this encoding.
@@ -202,55 +203,85 @@ is the only sanctioned way to build a scan prefix, so the scan's
 intent is visible at the call site and the prefix bytes can never
 drift from the key layout.
 
-## 5. Frozen Key Layouts
+## 5. Unified Key Concept — Two Encodings
 
-All layouts below are **frozen** once the first implementation ships.
-Changing a field width, field order, or field set is a breaking
+A CROW key has three parts: a magic (namespace), a key type (kind
+discriminator), and ordered key fields (hierarchy path). The **key
+concept** (struct + fields) is the single source of truth in
+`lib/crow-protocol/src/key/`. Two encoding traits map the same struct
+to bytes:
+
+- **`BinaryKey`** (existing) — `magic_byte | type_tag:u16 BE | fields
+  BE`, prost-encoded protobuf values. Used by diskdb data groups
+  (high-volume, machine-only).
+- **`TextKey`** (new) — `/magic/type/<field1>/<field2>/...` slash-
+  delimited path, JSON-encoded values (serde on the same proto
+  types). Used by group 0 (small, human-inspected, scan-friendly).
+
+The choice of encoding is **per-namespace**: group 0 uses text keys +
+JSON values; diskdb data groups use binary keys + protobuf values.
+A key type implements `BinaryKey`, `TextKey`, or both. Group-0 keys
+implement both (text for group 0, binary available for future use);
+data-group keys (`ZoneKey`, `BusyBlockKey`, `FreeBlockKey`) implement
+`BinaryKey` only.
+
+`BinaryKey::TYPE_TAG` and `TextKey::PATH_TYPE` are two representations
+of the same kind discriminator. The binary magic (`CROW_KEY_MAGIC` =
+`0xC0`) is one const today; the text encoding uses different path-
+prefix magics per namespace from the start (`/hw`, `/srv`, `/kv`).
+The two encodings are independent — the text magic set does not need
+to mirror the binary magic set.
+
+### 5.1 Frozen Binary Key Layouts
+
+All binary layouts below are **frozen** once the first implementation
+ships. Changing a field width, field order, or field set is a breaking
 change and is not allowed; add a new key kind instead (§6).
 
-Header for every key: `magic:1 | type_tag:2`.
+Header for every binary key: `magic:1 | type_tag:2`.
 
-- **NodeKey** — `node_id:u64 BE`. Total 11 bytes.
-  Tag `0x0001`. Scan prefix `magic|0x0001` = all nodes.
-- **RackKey** — `dc_id:u64 BE | rack_id:u64 BE`. Total 19 bytes.
-  Tag `0x0002`.
-  Scan prefix `magic|0x0002|dc_id` = all racks in a data center.
-- **DiskGroupKey** — `node_id:u64 BE | disk_group_id:u32 BE`.
-  Total 15 bytes. Tag `0x0003`.
-  Scan prefix `magic|0x0003|node_id` = all disk-groups under a node.
-- **DiskKey** — `node_id:u64 BE | disk_group_id:u32 BE |
-  disk_id:16 bytes`. Total 31 bytes. Tag `0x0004`.
-  Scan prefix `magic|0x0004|node_id` = all disks under a node;
-  `magic|0x0004|node_id|disk_group_id` = all disks under one
-  disk-group.
+- **RackKey** — `rack_id:u64 BE`. Total 11 bytes.
+  Tag `0x0002`. Scan prefix `magic|0x0002` = all racks.
+- **NodeKey** — `rack_id:u64 BE | node_id:u64 BE`. Total 19 bytes.
+  Tag `0x0001`. Scan prefix `magic|0x0001|rack_id` = all nodes in a
+  rack.
+- **DiskGroupKey** — `rack_id:u64 BE | node_id:u64 BE |
+  disk_group_id:u64 BE`. Total 27 bytes. Tag `0x0003`.
+  Scan prefix `magic|0x0003|rack_id|node_id` = all disk-groups under
+  a node.
+- **DiskKey** — `rack_id:u64 BE | node_id:u64 BE |
+  disk_group_id:u64 BE | disk_id:16 bytes`. Total 43 bytes.
+  Tag `0x0004`.
+  Scan prefix `magic|0x0004|rack_id|node_id` = all disks under a
+  node; `magic|0x0004|rack_id|node_id|disk_group_id` = all disks
+  under one disk-group.
 - **ZoneKey** — `disk_id:16 bytes | zone_index:u32 BE`.
-  Total 23 bytes. Tag `0x0005`. No `node_id`/`disk_group_id` (zone
-  records live on the bound data group, keyed by globally-unique
-  `disk_id`).
+  Total 23 bytes. Tag `0x0005`. No `rack_id`/`node_id`/
+  `disk_group_id` (zone records live on the bound data group, keyed
+  by globally-unique `disk_id`). Binary-only.
   Scan prefix `magic|0x0005|disk_id` = all zones of a disk.
 - **BusyBlockKey** — `disk_id:16 bytes | zone_index:u32 BE |
-  unit_offset:u64 BE`. Total 31 bytes. Tag `0x0006`.
+  unit_offset:u64 BE`. Total 31 bytes. Tag `0x0006`. Binary-only.
   Scan prefix `magic|0x0006|disk_id|zone_index` = all busy blocks in
   a zone (in `unit_offset` order, because `unit_offset` is last and
   big-endian).
 - **FreeBlockKey** — `disk_id:16 bytes | zone_index:u32 BE |
-  unit_offset:u64 BE`. Total 31 bytes. Tag `0x0007`.
+  unit_offset:u64 BE`. Total 31 bytes. Tag `0x0007`. Binary-only.
   Scan prefix `magic|0x0007|disk_id|zone_index` = all free blocks in
   a zone.
-- **OwnerMapKey** — `node_id:u64 BE | disk_group_id:u32 BE`.
-  Total 15 bytes. Tag `0x0008`. Same field shape as `DiskGroupKey`,
-  distinct tag (different kind: the ownership-map entry, not the
-  disk-group meta).
+- **OwnerMapKey** — `rack_id:u64 BE | node_id:u64 BE |
+  disk_group_id:u64 BE`. Total 27 bytes. Tag `0x0008`. Same field
+  shape as `DiskGroupKey`, distinct tag.
   Scan prefix `magic|0x0008` = all ownership-map entries.
-- **BindMapKey** — `node_id:u64 BE | disk_group_id:u32 BE`.
-  Total 15 bytes. Tag `0x0009`. Same field shape as `DiskGroupKey`,
-  distinct tag (the bind-map entry).
+- **BindMapKey** — `rack_id:u64 BE | node_id:u64 BE |
+  disk_group_id:u64 BE`. Total 27 bytes. Tag `0x0009`. Same field
+  shape as `DiskGroupKey`, distinct tag.
   Scan prefix `magic|0x0009` = all bind-map entries.
-- **InstanceKey** — `instance_id:u64 BE`. Total 11 bytes.
-  Tag `0x000A`.
-  `instance_id` is a `u64` assigned at registration (the
-  human-readable endpoint lives in `InstanceValue`, not the key).
-  Scan prefix `magic|0x000A` = all diskdb instances.
+- **InstanceKey** — `service_len:u32 BE | service:UTF8 |
+  instance_id:u64 BE`. Variable length. Tag `0x000A`.
+  `instance_id` is a `u64` assigned at registration; `service` is the
+  service name string (e.g. "diskdb", "kv-server").
+  Scan prefix `magic|0x000A` = all service instances.
 
 `disk_id` 16-byte encoding is `high:u64 BE | low:u64 BE`.
 
@@ -259,6 +290,39 @@ kinds are added; never reused, never reordered.
 
 `CROW_KEY_MAGIC` is a named constant in `lib/crow-protocol/src/key/`.
 Its exact value is fixed at first ship and never changed afterward.
+
+### 5.2 Text Key Layouts (Group 0)
+
+Text keys are slash-delimited paths: `/magic/type/<fields...>`. Values
+are JSON-encoded (serde on the same proto types). The path segments
+for integer fields are decimal strings; `DiskId` is a 32-char
+lowercase hex string (`high:low`, zero-padded).
+
+- **RackKey** — `/hw/rack/<rack_id>`.
+- **NodeKey** — `/hw/node/<rack_id>/<node_id>`.
+- **DiskGroupKey** — `/hw/dg/<rack_id>/<node_id>/<dg_id>`.
+- **DiskKey** — `/hw/dg/<rack_id>/<node_id>/<dg_id>/<disk_id_hex>`.
+- **OwnerMapKey** — `/hw/dg_owner/<rack_id>/<node_id>/<dg_id>`.
+- **BindMapKey** — `/hw/dg_bind/<rack_id>/<node_id>/<dg_id>`.
+- **InstanceKey** — `/srv/<service>/<instance_id>`.
+  (Does not implement `TextKey` because the path type segment is
+  dynamic — the service name. Use inherent `to_path`/`from_path`
+  methods.)
+- **KvStoreKey** — `/kv/store/<store_id>`. (Text-only.)
+- **KvGroupKey** — `/kv/group/<store_id>/<group_id>`. (Text-only.)
+- **KvReplicaKey** — `/kv/replica/<store_id>/<group_id>/<replica_id>`.
+  (Text-only.)
+
+Text magic namespaces: `/hw` (hardware), `/srv` (service registry),
+`/kv` (KV-cluster topology).
+
+Scan patterns: `/hw/rack/` → all racks; `/hw/node/<rack_id>/` → nodes
+in one rack; `/hw/dg/<rack_id>/<node_id>/` → disk-groups of one node;
+`/hw/disk/<rack_id>/<node_id>/<dg_id>/` → disks of one disk-group;
+`/hw/dg_owner/` → entire ownership map; `/hw/dg_bind/` → entire bind
+map; `/srv/<service>/` → all instances of a service; `/kv/store/` →
+all stores; `/kv/group/<store_id>/` → groups in one store;
+`/kv/replica/<store_id>/<group_id>/` → replicas in one group.
 
 ## 6. Evolution (Append-Only)
 

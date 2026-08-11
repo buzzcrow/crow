@@ -39,8 +39,9 @@ message ChunkId {
 // ── Rack value ──────────────────────────────────────────────────
 
 // Rack value — physical rack container.
-// Rack key is a Rust binary key (RackKey), not a proto message;
-// see doc/design/protocol/design-crow-key.md.
+// Rack key is a Rust key concept (RackKey, TextKey encoding
+// `/hw/rack/<rack_id>` in group 0); see
+// doc/design/protocol/design-crow-key.md.
 message RackValue {
   HwStatus status = 1;
   repeated uint64 node_ids = 2;
@@ -50,16 +51,15 @@ message RackValue {
 
 // Node value — physical node metadata.
 // disk_group_ids is the list of disk-groups on this node.
-// Node key is a Rust binary key (NodeKey), not a proto message;
-// see doc/design/protocol/design-crow-key.md.
+// Node key is a Rust key concept (NodeKey, TextKey encoding
+// `/hw/node/<rack_id>/<node_id>` in group 0); see
+// doc/design/protocol/design-crow-key.md.
 message NodeValue {
-  optional uint64 dc_id         = 1;  // reserved (flat: no DC/rack)
-  optional uint64 rack_id       = 2;  // reserved (flat: no DC/rack)
-  HwStatus status               = 3;
-  uint32   last_used_dg_id      = 4;
-  repeated uint32 disk_group_ids = 5;
-  uint64   status_changed_at_ms = 6;
-  optional uint64 temp_failure_since_ms = 7;
+  HwStatus status               = 1;
+  uint64   last_used_dg_id      = 2;
+  repeated uint64 disk_group_ids = 3;
+  uint64   status_changed_at_ms = 4;
+  optional uint64 temp_failure_since_ms = 5;
 }
 
 // ── Info types (key + value flattened, for RPC responses) ───────
@@ -67,25 +67,23 @@ message NodeValue {
 // Rack info for query responses — key fields + value fields flattened.
 // Replaces the former RackEntry { RackKey key; RackValue value }.
 message RackInfo {
-  // Key fields (from RackKey binary key).
-  uint64   dc_id   = 1;
-  uint64   rack_id = 2;
+  // Key field (from RackKey text-path key).
+  uint64   rack_id = 1;
   // Value fields (from RackValue).
-  HwStatus status  = 3;
-  repeated uint64 node_ids = 4;
+  HwStatus status  = 2;
+  repeated uint64 node_ids = 3;
 }
 
 // Node info for query responses — key fields + value fields flattened.
 // Replaces the former NodeEntry { NodeKey key; NodeValue value }.
 message NodeInfo {
-  // Key field (from NodeKey binary key).
-  uint64   node_id = 1;
+  // Key fields (from NodeKey text-path key).
+  uint64   rack_id = 1;
+  uint64   node_id = 2;
   // Value fields (from NodeValue).
-  optional uint64 dc_id         = 2;
-  optional uint64 rack_id       = 3;
-  HwStatus status               = 4;
-  uint32   last_used_dg_id      = 5;
-  repeated uint32 disk_group_ids = 6;
-  uint64   status_changed_at_ms = 7;
-  optional uint64 temp_failure_since_ms = 8;
+  HwStatus status               = 3;
+  uint64   last_used_dg_id      = 4;
+  repeated uint64 disk_group_ids = 5;
+  uint64   status_changed_at_ms = 6;
+  optional uint64 temp_failure_since_ms = 7;
 }

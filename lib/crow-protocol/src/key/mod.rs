@@ -1,20 +1,30 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! Binary key encoding for crow-kv.
+//! Key encoding for crow-kv.
 //!
-//! Defines the [`BinaryKey`] trait and all key kinds stored in crow-kv.
-//! Keys are flat per-kind structs with a three-byte header
-//! (`magic | type_tag:u16 BE`) followed by fixed big-endian fields.
+//! Defines the [`BinaryKey`] and [`TextKey`] traits and all key kinds
+//! stored in crow-kv. A key kind is a flat struct with hierarchy
+//! fields; two encoding traits map the same struct to bytes:
+//!
+//! - [`BinaryKey`] — `magic_byte | type_tag:u16 BE | fields BE`,
+//!   prost-encoded protobuf values. Used by diskdb data groups
+//!   (high-volume, machine-only).
+//! - [`TextKey`] — `/magic/type/<field1>/<field2>/...` slash-delimited
+//!   path, JSON-encoded values. Used by group 0 (small, human-
+//!   inspected, scan-friendly).
+//!
 //! See `doc/design/protocol/design-crow-key.md` for the full design.
 //!
-//! Key layouts are frozen once shipped. New key kinds are added with a
-//! new type tag; existing layouts are never changed.
+//! Binary key layouts are frozen once shipped. New key kinds are added
+//! with a new type tag; existing layouts are never changed.
 
 use crate::common::DiskId;
+use std::fmt::Write;
 
 pub mod common;
 pub mod diskdb;
+pub mod kv_cluster;
 
 #[cfg(test)]
 mod tests;
@@ -171,3 +181,117 @@ pub use common::{NodeKey, RackKey};
 pub use diskdb::{
     BindMapKey, BusyBlockKey, DiskGroupKey, DiskKey, FreeBlockKey, InstanceKey, OwnerMapKey, ZoneKey,
 };
+pub use kv_cluster::{KvGroupKey, KvReplicaKey, KvStoreKey};
+
+// ── TextKey trait ───────────────────────────────────────────────
+
+/// A crow-kv text-path key (group-0 sysdata encoding).
+///
+/// The text encoding is `/magic/type/<field1>/<field2>/...` — a slash-
+/// delimited path where `magic` is a namespace prefix (`/hw`, `/srv`,
+/// `/kv`), `type` is the kind within that namespace, and the remaining
+/// segments are the key fields in hierarchy order. Values are JSON-
+/// encoded (serde on the same proto types). Used by group 0 (small,
+/// human-inspected, scan-friendly).
+///
+/// `PATH_MAGIC` and `PATH_TYPE` together uniquely identify the key
+/// kind within the text encoding (analogous to `BinaryKey::TYPE_TAG`).
+pub trait TextKey: Sized {
+    /// Namespace prefix (`/hw`, `/srv`, `/kv`).
+    const PATH_MAGIC: &'static str;
+
+    /// Kind within the namespace (`rack`, `disk`, `diskdb`, `store`, ...).
+    const PATH_TYPE: &'static str;
+
+    /// Append the full encoded path (`/magic/type/<fields...>`) to `out`.
+    fn encode_to_path(&self, out: &mut String);
+
+    /// Parse from path segments (the parts after splitting on `/`,
+    /// with empty parts and the magic/type already consumed).
+    ///
+    /// # Errors
+    /// Returns [`KeyError`] on wrong field count, bad field format, or
+    /// trailing segments.
+    fn decode_path(parts: &[&str]) -> Result<Self, KeyError>;
+
+    /// Encode to a fresh `String`.
+    #[must_use]
+    fn to_path(&self) -> String {
+        let mut s = String::new();
+        self.encode_to_path(&mut s);
+        s
+    }
+
+    /// Parse from a complete encoded path string.
+    ///
+    /// # Errors
+    /// See [`TextKey::decode_path`].
+    fn from_path(s: &str) -> Result<Self, KeyError> {
+        let parts: Vec<&str> = s.split('/').collect();
+        // s = "/magic/type/..." → split produces ["", "magic", "type", ...]
+        if parts.len() < 3 || !parts[0].is_empty() {
+            return Err(KeyError::ShortInput);
+        }
+        // PATH_MAGIC includes the leading slash ("/hw"); the split
+        // removes it, so compare against the magic without it.
+        let magic = Self::PATH_MAGIC.trim_start_matches('/');
+        if parts[1] != magic {
+            return Err(KeyError::BadMagic);
+        }
+        if parts[2] != Self::PATH_TYPE {
+            return Err(KeyError::BadTag);
+        }
+        Self::decode_path(&parts[3..])
+    }
+
+    /// Prefix for scanning all keys of this kind: `/magic/type/`.
+    #[must_use]
+    fn prefix_all() -> String {
+        format!("{}/{}/", Self::PATH_MAGIC, Self::PATH_TYPE)
+    }
+}
+
+// ── Text-path encode helpers ────────────────────────────────────
+
+/// Write the path header (`/magic/type`).
+fn encode_path_header(out: &mut String, magic: &str, type_name: &str) {
+    out.push_str(magic);
+    out.push('/');
+    out.push_str(type_name);
+}
+
+/// Write a `u64` field as a decimal string segment.
+fn encode_path_u64(out: &mut String, v: u64) {
+    out.push('/');
+    out.push_str(&v.to_string());
+}
+
+/// Write a `DiskId` as a 32-char hex segment (`high:low`, lowercase).
+fn encode_path_disk_id(out: &mut String, id: &DiskId) {
+    out.push('/');
+    let _ = write!(out, "{:016x}{:016x}", id.high, id.low);
+}
+
+/// Parse a `u64` from a path segment.
+fn decode_path_u64(part: &str) -> Result<u64, KeyError> {
+    part.parse::<u64>().map_err(|_| KeyError::ShortInput)
+}
+
+/// Parse a `DiskId` from a 32-char hex path segment.
+fn decode_path_disk_id(part: &str) -> Result<DiskId, KeyError> {
+    if part.len() != 32 {
+        return Err(KeyError::ShortInput);
+    }
+    let high = u64::from_str_radix(&part[..16], 16).map_err(|_| KeyError::ShortInput)?;
+    let low = u64::from_str_radix(&part[16..], 16).map_err(|_| KeyError::ShortInput)?;
+    Ok(DiskId { high, low })
+}
+
+/// Verify all path segments were consumed.
+fn check_path_exact(parts: &[&str], consumed: usize) -> Result<(), KeyError> {
+    if consumed == parts.len() {
+        Ok(())
+    } else {
+        Err(KeyError::TrailingBytes)
+    }
+}

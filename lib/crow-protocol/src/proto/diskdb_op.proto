@@ -16,7 +16,7 @@ import "diskdb_type.proto";
 // ── Allocate ────────────────────────────────────────────────────
 
 message AllocateBlocksRequest {
-  uint32 disk_group_id            = 1;  // globally unique
+  uint64 disk_group_id            = 1;  // globally unique
   uint32 unit_count               = 2;  // units per allocation
   uint32 count                    = 3;  // how many allocations
   repeated crow.common.DiskId exclude_disk_ids = 4;  // negative disk hints
@@ -41,7 +41,7 @@ message FreeResponse {
 
 message QueryCapacityStatsRequest {
   // If disk_group_id set = specific group; 0 = all owned.
-  uint32 disk_group_id = 1;
+  uint64 disk_group_id = 1;
 }
 
 message QueryCapacityStatsResponse {
@@ -51,7 +51,7 @@ message QueryCapacityStatsResponse {
 // ── Get info (read-only, from diskdb synced cache) ──────────────
 
 message GetDiskGroupInfoRequest {
-  uint32 disk_group_id = 1;
+  uint64 disk_group_id = 1;
 }
 
 message GetDiskGroupInfoResponse {
@@ -59,9 +59,10 @@ message GetDiskGroupInfoResponse {
 }
 
 message GetDiskInfoRequest {
-  uint64             node_id       = 1;
-  uint32             disk_group_id = 2;
-  crow.common.DiskId disk_id       = 3;
+  uint64             rack_id       = 1;
+  uint64             node_id       = 2;
+  uint64             disk_group_id = 3;
+  crow.common.DiskId disk_id       = 4;
 }
 
 message GetDiskInfoResponse {

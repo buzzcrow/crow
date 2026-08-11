@@ -636,6 +636,7 @@ dependencies = [
  "async-trait",
  "axum",
  "crow-kv-client",
+ "crow-protocol",
  "dirs",
  "form_urlencoded",
  "futures",
