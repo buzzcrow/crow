@@ -19,8 +19,6 @@ use crow_console_shared::error::Error as SharedError;
 use crow_console_shared::lifecycle::{self, DeployRequest};
 use crow_console_shared::mgmt::{
     AddGroupInitialRole, AddGroupRequest, AddStoreRequest, RemoteReplicaInfo, StepDownRequest,
-    TopologyFinalizeRequest, TopologyGroupInput, TopologyNodeInput, TopologyRackInput, TopologyReplicaInput,
-    TopologyStoreInput,
 };
 use crow_console_shared::MetricsResponse;
 use serde::Deserialize;
@@ -104,13 +102,15 @@ async fn cluster_initialized(state: &AppState) -> bool {
         let Ok(client) = build_server_client(url) else {
             continue;
         };
-        if let Ok(resp) = client.topology_ready().await {
-            if resp.ready {
+        // Without the old /topology/ready flag, "initialized" means
+        // group 0 exists (store 0 is listed on the node).
+        if let Ok(stores) = client.list_stores().await {
+            if stores.iter().any(|s| s.store_id == 0) {
                 return true;
             }
         }
     }
-    // If no node has group 0 ready, but group 0 exists in the console
+    // If no node has group 0, but group 0 exists in the console
     // config, treat it as initialized (covers restart-before-finalize).
     let cfg = state.config.read().unwrap();
     cfg.group(0, 0).is_some()
@@ -345,9 +345,7 @@ enum Group0State {
     NoNodes,
     /// Group 0 not found on any reachable node — phase 1 (TOML mode).
     Missing,
-    /// Group 0 exists but `/topology/ready` not set — TOML mode with warning.
-    NotReady,
-    /// Group 0 exists and `/topology/ready` is set — group 0 authoritative.
+    /// Group 0 exists — group 0 authoritative.
     Ready,
 }
 
@@ -364,7 +362,6 @@ async fn check_group0_state(state: &AppState) -> Group0State {
     if node_ids.is_empty() {
         return Group0State::NoNodes;
     }
-    let mut found_group0 = false;
     for nid in &node_ids {
         let Ok(url) = mgmt_url_for_node(state, nid) else {
             continue;
@@ -375,20 +372,15 @@ async fn check_group0_state(state: &AppState) -> Group0State {
         // Check if group 0 exists by listing stores.
         if let Ok(stores) = client.list_stores().await {
             if stores.iter().any(|s| s.store_id == 0) {
-                found_group0 = true;
-                if let Ok(resp) = client.topology_ready().await {
-                    if resp.ready {
-                        return Group0State::Ready;
-                    }
-                }
+                // Without the old /topology/ready flag, "ready" means
+                // group 0 exists. The old readiness flag is gone;
+                // diskdb's sync loop treats empty group 0 as
+                // "nothing assigned yet".
+                return Group0State::Ready;
             }
         }
     }
-    if found_group0 {
-        Group0State::NotReady
-    } else {
-        Group0State::Missing
-    }
+    Group0State::Missing
 }
 
 /// Console startup three-way fallback. Checks group 0 state and picks
@@ -403,10 +395,6 @@ pub async fn startup_topology_check(state: &AppState) {
         }
         Group0State::Missing => {
             info!("group 0 not found on any node; TOML mode (phase 1)");
-            restore_persisted_topology(state).await;
-        }
-        Group0State::NotReady => {
-            warn!("group 0 exists but not finalized; using TOML mode with warning");
             restore_persisted_topology(state).await;
         }
         Group0State::Ready => {
@@ -1634,38 +1622,89 @@ pub async fn http_cluster_init(
         .persist()
         .map_err(|e| err_500(format!("persist config: {e}")))?;
 
-    // Phase 5: finalize topology — write all topology metadata into
-    // group 0 KV and set the /topology/ready flag. Try each succeeded
-    // node until one accepts (the leader will).
-    let finalize_body = {
-        let cfg = state.config.read().unwrap();
-        build_topology_finalize_body(&cfg, &succeeded)
-    };
-    let mut finalized = false;
+    // Phase 5: write hardware hierarchy + KV-cluster topology into
+    // group 0 via HardwareClient + KVClusterMetaClient. Build a
+    // CrowkvClient seeded with the group-0 gRPC endpoint.
+    let cfg_snapshot = state.config.read().unwrap().clone();
+    let mut topology_written = false;
     for (nid, _) in &succeeded {
-        let Ok(url) = mgmt_url_for_node(&state, nid) else {
+        let Some(grpc_ep) = grpc_endpoint_for_node(&state, nid, 0).await else {
             continue;
         };
-        let Ok(client) = build_server_client(url) else {
-            continue;
-        };
-        match client.topology_finalize(&finalize_body).await {
-            Ok(resp) => {
-                info!(
-                    node_id = nid,
-                    already_finalized = resp.already_finalized,
-                    "topology/finalize succeeded"
-                );
-                finalized = true;
-                break;
-            }
-            Err(e) => {
-                warn!(node_id = nid, error = %e, "topology/finalize failed; trying next node");
+        let kv_client = crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(Vec::new()));
+        kv_client.seed_leader(0, 0, grpc_ep.clone());
+        let kv_client2 = crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(Vec::new()));
+        kv_client2.seed_leader(0, 0, grpc_ep.clone());
+        let hw = crow_kv_client::HardwareClient::new(kv_client);
+        let meta = crow_kv_client::KVClusterMetaClient::new(kv_client2);
+
+        // Write hardware hierarchy.
+        let mut hw_ok = true;
+        for rack in &cfg_snapshot.racks {
+            let value = crow_protocol::common::RackValue {
+                status: crow_protocol::common::HwStatus::Up as i32,
+                node_ids: Vec::new(),
+            };
+            if let Err(e) = hw.add_rack(rack.id, &value).await {
+                warn!(rack_id = rack.id, error = %e, "Phase 5: add_rack failed");
+                hw_ok = false;
             }
         }
+        for node in &cfg_snapshot.nodes {
+            let value = crow_protocol::common::NodeValue {
+                status: crow_protocol::common::HwStatus::Up as i32,
+                last_used_dg_id: 0,
+                disk_group_ids: Vec::new(),
+                status_changed_at_ms: 0,
+                temp_failure_since_ms: None,
+            };
+            if let Err(e) = hw.add_node(node.rack_id, node.id, &value).await {
+                warn!(node_id = node.id, error = %e, "Phase 5: add_node failed");
+                hw_ok = false;
+            }
+        }
+
+        // Write KV-cluster topology.
+        let mut meta_ok = true;
+        for store in &cfg_snapshot.stores {
+            if let Err(e) = meta.add_store(store.store_id, &store.nodes).await {
+                warn!(store_id = store.store_id, error = %e, "Phase 5: add_store failed");
+                meta_ok = false;
+            }
+        }
+        for group in &cfg_snapshot.groups {
+            if let Err(e) = meta.add_group(group.store_id, group.group_id).await {
+                warn!(error = %e, "Phase 5: add_group failed");
+                meta_ok = false;
+            }
+            for replica in &group.replicas {
+                let server = cfg_snapshot.server_for_node(replica.node_id);
+                let endpoint = server.and_then(|s| s.grpc_url.clone()).unwrap_or_default();
+                let value = crow_protocol::common::ReplicaValue {
+                    store_id: group.store_id,
+                    group_id: group.group_id,
+                    replica_id: replica.replica_id,
+                    node_id: replica.node_id,
+                    role: String::new(),
+                    voting: true,
+                    endpoint,
+                };
+                if let Err(e) = meta.add_replica(&value).await {
+                    warn!(error = %e, "Phase 5: add_replica failed");
+                    meta_ok = false;
+                }
+            }
+        }
+
+        if hw_ok && meta_ok {
+            info!(node_id = nid, "Phase 5: topology written to group 0");
+            topology_written = true;
+            break;
+        }
+        warn!(node_id = nid, "Phase 5: partial write; trying next node");
     }
-    if !finalized {
-        warn!("topology/finalize failed on all nodes; cluster init succeeded but topology not written to group 0");
+    if !topology_written {
+        warn!("Phase 5: topology write failed on all nodes; cluster init succeeded but topology not fully written to group 0");
     }
 
     Ok((
@@ -1679,103 +1718,6 @@ pub async fn http_cluster_init(
             })).collect::<Vec<_>>(),
         })),
     ))
-}
-
-/// Build the `TopologyFinalizeRequest` from the console config, capturing
-/// racks, nodes, stores, groups, and replicas for writing into group 0 KV.
-fn build_topology_finalize_body(
-    cfg: &crow_console_shared::config::ConsoleConfig,
-    succeeded: &[(String, u64)],
-) -> TopologyFinalizeRequest {
-    let racks: Vec<TopologyRackInput> = cfg
-        .racks
-        .iter()
-        .map(|r| TopologyRackInput {
-            rack_id: r.id.to_string(),
-            name: r.name.clone(),
-        })
-        .collect();
-
-    let nodes: Vec<TopologyNodeInput> = cfg
-        .nodes
-        .iter()
-        .filter_map(|n| {
-            let server = cfg.server_for_node(n.id)?;
-            Some(TopologyNodeInput {
-                node_id: n.id.to_string(),
-                rack_id: n.rack_id.to_string(),
-                host: n.host.clone(),
-                mgmt_endpoint: server.url.clone(),
-                grpc_endpoint: server.grpc_url.clone().unwrap_or_default(),
-                election_profile: server.election_profile.clone(),
-                auto_start: server.auto_start,
-            })
-        })
-        .collect();
-
-    let stores: Vec<TopologyStoreInput> = cfg
-        .stores
-        .iter()
-        .map(|s| TopologyStoreInput {
-            store_id: s.store_id,
-            nodes: s.nodes.iter().map(std::string::ToString::to_string).collect(),
-        })
-        .collect();
-
-    let groups: Vec<TopologyGroupInput> = cfg
-        .groups
-        .iter()
-        .map(|g| TopologyGroupInput {
-            group_id: g.group_id,
-            store_id: g.store_id,
-        })
-        .collect();
-
-    // Build replicas from group entries. For the system group (0/0),
-    // use the succeeded list from init; for other groups, use config.
-    let mut replicas: Vec<TopologyReplicaInput> = Vec::new();
-    for (nid, rid) in succeeded {
-        let server = cfg.server_for_node(nid.parse().unwrap());
-        let endpoint = server.and_then(|s| s.grpc_url.clone()).unwrap_or_default();
-        let role = if *rid == succeeded.first().map_or(1, |(_, r)| *r) {
-            "leader"
-        } else {
-            "follower"
-        };
-        replicas.push(TopologyReplicaInput {
-            group_id: 0,
-            replica_id: *rid,
-            node_id: nid.clone(),
-            role: role.to_string(),
-            voting: true,
-            endpoint,
-        });
-    }
-    for g in &cfg.groups {
-        if g.store_id == 0 && g.group_id == 0 {
-            continue; // already handled above
-        }
-        for r in &g.replicas {
-            let server = cfg.server_for_node(r.node_id);
-            let endpoint = server.and_then(|s| s.grpc_url.clone()).unwrap_or_default();
-            replicas.push(TopologyReplicaInput {
-                group_id: g.group_id,
-                replica_id: r.replica_id,
-                node_id: r.node_id.to_string(),
-                role: "follower".to_string(),
-                voting: true,
-                endpoint,
-            });
-        }
-    }
-
-    TopologyFinalizeRequest {
-        racks,
-        nodes,
-        stores,
-        groups,
-        replicas,
-    }
 }
 
 // ── Metrics proxy (R11) ───────────────────────────────────────────────

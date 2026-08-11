@@ -19,6 +19,7 @@ default = []
 
 [dependencies]
 crow-kv = { path = "../../lib/crow-kv" }
+crow-protocol = { path = "../../lib/crow-protocol" }
 crow-tree-ffi = { path = "../../lib/crow-tree/ffi" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "signal"] }
 tracing = { workspace = true }

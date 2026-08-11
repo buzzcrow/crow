@@ -129,27 +129,6 @@ impl ServerClient {
         self.post_json("/system/init", req).await
     }
 
-    /// `POST /topology/finalize` — idempotent cutover to group 0 authoritative.
-    /// Writes all topology metadata from `body` into group 0 KV, then sets
-    /// the `/topology/ready` flag.
-    ///
-    /// # Errors
-    /// Transport / non-2xx status codes surface as `Error::UpstreamRpc`.
-    pub async fn topology_finalize(
-        &self,
-        body: &TopologyFinalizeRequest,
-    ) -> Result<TopologyFinalizeResponse> {
-        self.post_json("/topology/finalize", body).await
-    }
-
-    /// `GET /topology/ready` — check if group 0 is authoritative.
-    ///
-    /// # Errors
-    /// Transport / non-2xx status codes surface as `Error::UpstreamRpc`.
-    pub async fn topology_ready(&self) -> Result<TopologyReadyResponse> {
-        self.get_json("/topology/ready").await
-    }
-
     // ── Transport helpers shared by mgmt methods ────────────────────
 
     async fn post_json<B: serde::Serialize + ?Sized, T: serde::de::DeserializeOwned>(

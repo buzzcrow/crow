@@ -17,11 +17,9 @@ use crow_kv::cluster::group::PxGroup;
 use crow_kv::cluster::group_config::GroupConfigStore;
 use crow_kv::cluster::group_election::LeaderElection;
 use crow_kv::cluster::kv_server::KvServer;
-use crow_kv::cluster::kv_store::KvStore;
 use crow_kv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crow_kv::cluster::px_kv_store::PxKvStore;
 use crow_kv::cluster::remote_replica::PxRemoteReplica;
-use crow_kv::cluster::topology_kv;
 use crow_kv::common::config::ServerConfig;
 
 use crate::operation_registry::{AppState, Operation, OperationKind, OperationStatus, OperationTarget};
@@ -33,8 +31,6 @@ pub fn router(state: RegistryArc) -> Router {
     Router::new()
         .route("/health", get(health_check))
         .route("/system/init", post(system_init))
-        .route("/topology/finalize", post(topology_finalize))
-        .route("/topology/ready", get(topology_ready))
         .route("/stores", get(list_stores).post(add_store))
         .route("/stores/:sid", get(get_store).delete(remove_store))
         .route("/stores/:sid/groups", get(list_groups).post(add_group))
@@ -128,75 +124,6 @@ struct SystemInitResponse {
     group_id: u64,
     replica_id: u64,
     listen_addr: Option<String>,
-}
-
-#[derive(ToSchema, Serialize)]
-struct TopologyFinalizeResponse {
-    ready: bool,
-    already_finalized: bool,
-}
-
-/// Request body for `POST /topology/finalize`. Carries the full cluster
-/// topology from the console config so the server can write it into
-/// group 0 KV before setting the `/topology/ready` flag.
-#[derive(ToSchema, Deserialize, Default)]
-struct TopologyFinalizeRequest {
-    #[serde(default)]
-    racks: Vec<TopologyRackInput>,
-    #[serde(default)]
-    nodes: Vec<TopologyNodeInput>,
-    #[serde(default)]
-    stores: Vec<TopologyStoreInput>,
-    #[serde(default)]
-    groups: Vec<TopologyGroupInput>,
-    #[serde(default)]
-    replicas: Vec<TopologyReplicaInput>,
-}
-
-#[derive(ToSchema, Deserialize)]
-struct TopologyRackInput {
-    rack_id: String,
-    name: String,
-}
-
-#[derive(ToSchema, Deserialize)]
-struct TopologyNodeInput {
-    node_id: String,
-    rack_id: String,
-    host: String,
-    mgmt_endpoint: String,
-    grpc_endpoint: String,
-    #[serde(default)]
-    election_profile: Option<String>,
-    #[serde(default)]
-    auto_start: bool,
-}
-
-#[derive(ToSchema, Deserialize)]
-struct TopologyStoreInput {
-    store_id: u64,
-    nodes: Vec<String>,
-}
-
-#[derive(ToSchema, Deserialize)]
-struct TopologyGroupInput {
-    group_id: u64,
-    store_id: u64,
-}
-
-#[derive(ToSchema, Deserialize)]
-struct TopologyReplicaInput {
-    group_id: u64,
-    replica_id: u64,
-    node_id: String,
-    role: String,
-    voting: bool,
-    endpoint: String,
-}
-
-#[derive(ToSchema, Serialize)]
-struct TopologyReadyResponse {
-    ready: bool,
 }
 
 #[derive(ToSchema, Deserialize)]
@@ -336,8 +263,6 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Err
         flush_group,
         group_readiness,
         system_init,
-        topology_finalize,
-        topology_ready,
         get_operation,
         export_topology,
         metrics
@@ -355,14 +280,6 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Err
             GroupSummary,
             SystemInitRequest,
             SystemInitResponse,
-            TopologyFinalizeResponse,
-            TopologyFinalizeRequest,
-            TopologyRackInput,
-            TopologyNodeInput,
-            TopologyStoreInput,
-            TopologyGroupInput,
-            TopologyReplicaInput,
-            TopologyReadyResponse,
             AddStoreRequest,
             AddGroupRequest,
             JoinGroupRequest,
@@ -572,239 +489,6 @@ async fn system_init(
             listen_addr,
         }),
     ))
-}
-
-/// `POST /topology/finalize` — idempotent cutover from console TOML to
-/// group 0 authoritative. Writes all topology metadata (racks, nodes,
-/// stores, groups, replicas) from the request body into group 0 KV, then
-/// sets the `/topology/ready` flag. Returns `200` if already finalized
-/// (key exists) or if all proposals succeed.
-#[utoipa::path(
-        post,
-        path = "/topology/finalize",
-        tag = "management",
-        request_body = TopologyFinalizeRequest,
-        responses(
-            (status = 200, description = "Topology finalized", body = TopologyFinalizeResponse),
-            (status = 404, description = "Store 0 or group 0 not found", body = ErrorResponse),
-            (status = 409, description = "Not leader; retry at hinted leader", body = ErrorResponse),
-            (status = 500, description = "Proposal failed", body = ErrorResponse)
-        )
-    )]
-async fn topology_finalize(
-    State(state): State<RegistryArc>,
-    Json(body): Json<TopologyFinalizeRequest>,
-) -> Result<(StatusCode, Json<TopologyFinalizeResponse>), (StatusCode, Json<ErrorResponse>)> {
-    let store = state
-        .get_store(0)
-        .ok_or_else(|| err_json(StatusCode::NOT_FOUND, "store 0 not found"))?;
-    // Ensure group 0 exists.
-    if store.get_group(0).is_none() {
-        return Err(err_json(StatusCode::NOT_FOUND, "group 0 not found in store 0"));
-    }
-
-    // Check if already finalized (idempotent).
-    let get_resp = store.kv_get(0, topology_kv::READY_KEY, 0, 0, 0, 0).await;
-    if get_resp.ok && !get_resp.value.is_empty() {
-        return Ok((
-            StatusCode::OK,
-            Json(TopologyFinalizeResponse {
-                ready: true,
-                already_finalized: true,
-            }),
-        ));
-    }
-
-    // Write topology metadata into group 0 KV.
-    let written = write_topology_metadata(&store, &body).await?;
-
-    // Set the ready flag last — once set, group 0 is authoritative.
-    let put_resp = store.kv_put(0, topology_kv::READY_KEY, b"true", 0, 0, 0, 0).await;
-    if !put_resp.ok {
-        if put_resp.error == "not leader" {
-            return Err(err_json(
-                StatusCode::CONFLICT,
-                format!("not leader; hint: {}", put_resp.not_leader_hint),
-            ));
-        }
-        return Err(err_json(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("topology finalize ready-key proposal failed: {}", put_resp.error),
-        ));
-    }
-
-    info!(
-        entries_written = written,
-        "topology finalized: metadata + /topology/ready written to group 0"
-    );
-
-    Ok((
-        StatusCode::OK,
-        Json(TopologyFinalizeResponse {
-            ready: true,
-            already_finalized: false,
-        }),
-    ))
-}
-
-/// Build an error response for a topology metadata put failure.
-fn topology_put_err(
-    error: &str,
-    not_leader_hint: &str,
-    entity: &str,
-    id: &str,
-) -> (StatusCode, Json<ErrorResponse>) {
-    if error == "not leader" {
-        err_json(
-            StatusCode::CONFLICT,
-            format!("not leader; hint: {not_leader_hint}"),
-        )
-    } else {
-        err_json(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("topology finalize failed writing {entity} {id}: {error}"),
-        )
-    }
-}
-
-/// Put one topology metadata entry into `group_id` on `store`, bumping
-/// `written` on success and returning a structured error on failure.
-async fn put_topology_entry(
-    store: &Arc<PxKvStore>,
-    group_id: u64,
-    key: &[u8],
-    val: &[u8],
-    entity: &str,
-    id: &str,
-    written: &mut u32,
-) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
-    let resp = store.kv_put(group_id, key, val, 0, 0, 0, 0).await;
-    if !resp.ok {
-        return Err(topology_put_err(&resp.error, &resp.not_leader_hint, entity, id));
-    }
-    *written += 1;
-    Ok(())
-}
-
-/// Write all topology metadata (racks, nodes, stores, groups, replicas)
-/// from `body` into group 0 KV on `store`. Returns the number of entries
-/// written.
-async fn write_topology_metadata(
-    store: &Arc<PxKvStore>,
-    body: &TopologyFinalizeRequest,
-) -> Result<u32, (StatusCode, Json<ErrorResponse>)> {
-    let mut written = 0u32;
-
-    for rack in &body.racks {
-        let key = topology_kv::rack_key(&rack.rack_id);
-        let val = topology_kv::encode(&topology_kv::TopologyRack {
-            rack_id: rack.rack_id.clone(),
-            name: rack.name.clone(),
-        });
-        put_topology_entry(store, 0, &key, &val, "rack", &rack.rack_id, &mut written).await?;
-    }
-
-    for node in &body.nodes {
-        let key = topology_kv::node_key(&node.node_id);
-        let val = topology_kv::encode(&topology_kv::TopologyNode {
-            node_id: node.node_id.clone(),
-            rack_id: node.rack_id.clone(),
-            host: node.host.clone(),
-            mgmt_endpoint: node.mgmt_endpoint.clone(),
-            grpc_endpoint: node.grpc_endpoint.clone(),
-            election_profile: node.election_profile.clone(),
-            auto_start: node.auto_start,
-        });
-        put_topology_entry(store, 0, &key, &val, "node", &node.node_id, &mut written).await?;
-    }
-
-    for s in &body.stores {
-        let key = topology_kv::store_key(s.store_id);
-        let val = topology_kv::encode(&topology_kv::TopologyStore {
-            store_id: s.store_id,
-            nodes: s.nodes.clone(),
-        });
-        put_topology_entry(
-            store,
-            0,
-            &key,
-            &val,
-            "store",
-            &s.store_id.to_string(),
-            &mut written,
-        )
-        .await?;
-    }
-
-    for g in &body.groups {
-        let key = topology_kv::group_key(g.group_id);
-        let val = topology_kv::encode(&topology_kv::TopologyGroup {
-            group_id: g.group_id,
-            store_id: g.store_id,
-        });
-        put_topology_entry(
-            store,
-            0,
-            &key,
-            &val,
-            "group",
-            &g.group_id.to_string(),
-            &mut written,
-        )
-        .await?;
-    }
-
-    for r in &body.replicas {
-        let key = topology_kv::replica_key(r.group_id, r.replica_id);
-        let val = topology_kv::encode(&topology_kv::TopologyReplica {
-            group_id: r.group_id,
-            replica_id: r.replica_id,
-            node_id: r.node_id.clone(),
-            role: r.role.clone(),
-            voting: r.voting,
-            endpoint: r.endpoint.clone(),
-        });
-        put_topology_entry(
-            store,
-            0,
-            &key,
-            &val,
-            "replica",
-            &r.replica_id.to_string(),
-            &mut written,
-        )
-        .await?;
-    }
-
-    Ok(written)
-}
-
-/// `GET /topology/ready` — check whether group 0 has the `/topology/ready`
-/// flag key set, indicating the cutover to group 0 authoritative is complete.
-#[utoipa::path(
-        get,
-        path = "/topology/ready",
-        tag = "management",
-        responses(
-            (status = 200, description = "Readiness checked", body = TopologyReadyResponse),
-            (status = 404, description = "Store 0 or group 0 not found", body = ErrorResponse)
-        )
-    )]
-async fn topology_ready(
-    State(state): State<RegistryArc>,
-) -> Result<(StatusCode, Json<TopologyReadyResponse>), (StatusCode, Json<ErrorResponse>)> {
-    let store = state
-        .get_store(0)
-        .ok_or_else(|| err_json(StatusCode::NOT_FOUND, "store 0 not found"))?;
-    // Ensure group 0 exists.
-    if store.get_group(0).is_none() {
-        return Err(err_json(StatusCode::NOT_FOUND, "group 0 not found in store 0"));
-    }
-
-    let resp = store.kv_get(0, topology_kv::READY_KEY, 0, 0, 0, 0).await;
-    let ready = resp.ok && !resp.value.is_empty();
-
-    Ok((StatusCode::OK, Json(TopologyReadyResponse { ready })))
 }
 
 #[utoipa::path(

@@ -16,6 +16,7 @@ path = "src/main.rs"
 [dependencies]
 crow-console-shared = { path = "../../lib/crow-console-shared" }
 crow-kv-client = { path = "../../lib/crow-kv-client" }
+crow-protocol = { path = "../../lib/crow-protocol" }
 clap = { version = "4", features = ["derive"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "net"] }
 axum = "0.7"

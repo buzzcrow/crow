@@ -5,7 +5,6 @@
 
 mod testkit;
 
-use serde_json::Value;
 use testkit::process::start_test_server;
 
 fn client() -> reqwest::Client {
@@ -26,10 +25,10 @@ async fn reconcile_skips_when_group0_missing() {
 }
 
 #[tokio::test]
-async fn reconcile_skips_when_not_finalized() {
+async fn reconcile_skips_when_group0_empty() {
     let server = start_test_server(&[]).await.expect("start crow-kv-server");
 
-    // Init group 0 but don't finalize.
+    // Init group 0 but don't write any /kv/store/ records.
     client()
         .post(format!("{}/system/init", server.base_url()))
         .json(&serde_json::json!({}))
@@ -38,23 +37,21 @@ async fn reconcile_skips_when_not_finalized() {
         .unwrap();
 
     // Reconcile would have run at startup before group 0 existed.
-    // After init, group 0 exists but is not finalized.
-    let resp: Value = client()
-        .get(format!("{}/topology/ready", server.base_url()))
+    // After init, group 0 exists but has no /kv/store/ records.
+    // The server should still be healthy.
+    let resp = client()
+        .get(format!("{}/health", server.base_url()))
         .send()
         .await
-        .unwrap()
-        .json()
-        .await
         .unwrap();
-    assert_eq!(resp["ready"], false);
+    assert_eq!(resp.status().as_u16(), 200);
 }
 
 #[tokio::test]
-async fn reconcile_runs_when_finalized() {
+async fn reconcile_healthy_after_init() {
     let server = start_test_server(&[]).await.expect("start crow-kv-server");
 
-    // Init + finalize.
+    // Init group 0.
     client()
         .post(format!("{}/system/init", server.base_url()))
         .json(&serde_json::json!({}))
@@ -62,26 +59,8 @@ async fn reconcile_runs_when_finalized() {
         .await
         .unwrap();
 
-    client()
-        .post(format!("{}/topology/finalize", server.base_url()))
-        .json(&serde_json::json!({}))
-        .send()
-        .await
-        .unwrap();
-
-    // Verify topology is ready.
-    let resp: Value = client()
-        .get(format!("{}/topology/ready", server.base_url()))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(resp["ready"], true);
-
     // The reconcile at startup would have scanned group 0 and found
-    // no topology entries (only /topology/ready). The server should
+    // no /kv/store/ records (not yet initialized). The server should
     // still be healthy.
     let resp = client()
         .get(format!("{}/health", server.base_url()))
