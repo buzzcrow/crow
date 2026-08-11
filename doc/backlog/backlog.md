@@ -15,11 +15,13 @@ complexity, and dependency. Before implementation, follow the
 
 ### High Priority
 
-- **[R71](R71-diskdb-group0-sysdata-sync.md)** — diskdb group-0 sysdata
-  + sync — Area: diskdb — Implement the group-0 sysdata schema
-  (node/disk/disk-group metadata, ownership map, binding map), periodic
-  sync loop, ownership/binding map read/write, instance heartbeat
-  registration. Disk status management component.
+- **[R71](R71-group0-sysdata-sync.md)** — Group-0 sysdata + sync —
+  Area: crow-kv-client, diskdb — Implement the group-0 sysdata
+  architecture (design: `doc/design/kv/design-crow-kv-group0.md`):
+  unified key concept with TextKey/BinaryKey encodings, hardware
+  hierarchy + maps, service registry (diskdb + kv-server keep-alive),
+  KV-cluster topology records, KVClusterAdmin (absorb MgmtClient),
+  diskdb sync loop, disk status management.
 - **[R72](R72-diskdb-zone-allocator-journal.md)** — diskdb zone
   allocator + record persistence — Area: diskdb — Implement the zone
   bitmap-scan allocator (per-bit CAS, rotating cursor, CAS retry
@@ -55,10 +57,10 @@ complexity, and dependency. Before implementation, follow the
   zone busy/free visualization (block array chart), CLI command design
   (`crow diskdb` subcommands vs sub-wrapper binaries). Follow-up after
   core diskdb is functional.
-- **[R78](R78-diskdb-group0-notify-watch.md)** — diskdb group-0
-  notify/watch — Area: diskdb / kv — Replace fixed-interval polling
-  (R71) with a watch/notify mechanism: group 0 pushes hw-status-change
-  and ownership-change notifications to registered diskdb endpoints.
+- **[R78](R78-diskdb-group0-notify-watch.md)** — group-0 notify/watch
+  — Area: diskdb / kv — Replace fixed-interval polling (R71) with a
+  watch/notify mechanism: group 0 pushes hw-status-change and
+  ownership-change notifications to registered diskdb endpoints.
   Requires a crow-kv watch/notify extension (new sub-design). Polling
   stays as a safety net. Follow-up after R71; not in v1.
 - **[R79](R79-diskdb-free-batch.md)** — diskdb free batch

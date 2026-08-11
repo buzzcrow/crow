@@ -70,9 +70,13 @@ Key endpoint groups:
 - **Topology export** — `GET /topology` produces a JSON document that
   another server can consume to batch-add remotes.
 - **System group** — `POST /system/init` bootstraps store 0 + group 0
-  on this node. `POST /topology/finalize` writes the `/topology/ready`
-  flag into group 0 (idempotent cutover). `GET /topology/ready` checks
-  if group 0 is authoritative. See `../console/design-crow-console.md` §4.3 for the
+  on this node. (`POST /topology/finalize` and `GET /topology/ready`
+  are removed — persistent topology-record management moves to
+  `crow-kv-client`'s `KVClusterMetaClient` / `HardwareClient`. See
+  [`design-crow-kv-group0.md`](design-crow-kv-group0.md) for the
+  group-0 sysdata architecture.) The lifecycle endpoints (`add_store`,
+  `add_group`, etc.) are now **internal** — only `crow-kv-client`'s
+  `KVClusterAdmin` calls them. See `../console/design-crow-console.md` §4.3 for the
   full persistent cluster config design.
 - **Admin operations** — `step-down` (force leader step-down), `join`
   (new-member snapshot join), `flush` (drain the local replica's L0

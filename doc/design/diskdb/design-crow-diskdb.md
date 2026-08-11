@@ -306,12 +306,21 @@ components with protocol surfaces reserved):
   anti-affinity), `FreeBlocks`, `QueryCapacityStats`,
   `GetDiskGroupInfo`, `GetDiskInfo`, `RebuildZoneBitmap` (on-demand
   full-scan rebuild, strategy 1, §7), `MarkBlockSuspect`,
-  `MarkBlockCorrupt` (per-block state transitions, §7).
-- **`DiskdbAdminService`** (targets group 0; served by a future
-  admin/console): `AddRack`, `RemoveRack`, `SetRackStatus`, `AddNode`,
-  `RemoveNode`, `SetNodeStatus`, `AddDiskGroup`, `AddDisk`,
-  `RemoveDisk`, `SetDiskStatus`, `SetDiskGroupStatus`,
-  `FetchHardware`, `Keepalive`.
+  `MarkBlockCorrupt` (per-block state transitions, §7). R71 ships this
+  service with allocate/free returning `Unimplemented`; the rest are
+  later requirements.
+- **Hardware admin** (no gRPC surface): rack/node/disk-group/disk
+  add/remove and `set_*_status` are writes to group-0 sysdata
+  performed through `HardwareClient` in `crow-kv-client`, invoked by
+  the console (`crow-web` / `crow-cli`). The previous
+  `DiskdbAdminService` proto (`diskdb_sys_service.proto` /
+  `diskdb_sys_op.proto`) is removed — `FetchHardware` is replaced by
+  `HardwareClient` prefix scans, `Keepalive` by
+  `ServiceRegistryClient.heartbeat`, and the add/remove/status ops by
+  `HardwareClient` methods. The diskdb server reads hardware state
+  from group 0 via `HardwareClient` in its sync loop; it does not
+  serve hardware admin. See `doc/design/kv/design-crow-kv-group0.md`
+  §2.8.
 - **`ChunkdbService`** (future chunkdb server): `AllocateChunk`,
   `AppendChunk`, `QueryChunk`, `SealChunk`, `DeleteChunk`,
   `DeleteChunkRange`, `UpdateChunkStrip`, `ListChunks`.
@@ -321,63 +330,54 @@ Key protocol decisions: integer IDs throughout (no string UUIDs);
 `DiskId` is globally unique (no `node_id`/`disk_group_id` in `Segment`
 or record keys — `disk_group_id` is in the `AllocateBlocks` request for
 routing only); `Segment.owner_chunk` (192-bit `ChunkId`) replaces the
-former `tag`; all sizes are unit-based; `NodeInfo`/`RackInfo` are RPC
-response types for `FetchHardware` (node/rack exist in group 0 only,
-not as standalone services); errors are returned via gRPC status codes
-with `ErrorInfo` details (`error_code.proto`), not `bool ok + string
-error` in response bodies.
+former `tag`; all sizes are unit-based; errors are returned via gRPC
+status codes with `ErrorInfo` details (`error_code.proto`), not
+`bool ok + string error` in response bodies.
 
 ## 5. Group-0 Sysdata Schema
 
-Group 0 stores the diskdb subsystem metadata as KV entries. The schema
-reserves room for the physical hierarchy (data-center, rack) even
-though v1 ships flat (node list only).
+Group 0 stores the diskdb subsystem metadata as KV entries. The
+authoritative schema is defined in
+[`doc/design/kv/design-crow-kv-group0.md`](../kv/design-crow-kv-group0.md)
+(text-path keys + JSON values, owned by `crow-kv-client`'s
+`HardwareClient` / `ServiceRegistryClient` / `KVClusterMetaClient`).
+This section summarizes the diskdb-relevant parts; see the group-0
+design doc for the full key/value layout and scan patterns.
 
-### Key layout
+### Key layout (text-path encoding in group 0)
 
-Keys use the cross-component binary encoding
-(`doc/design/protocol/design-crow-key.md`): a two-byte
-`magic | type_tag` header followed by fixed big-endian fields in
-hierarchy order. Each kind has its own append-only type tag; prefix
-scans truncate the field bytes at a hierarchy boundary.
+Group-0 keys use the `TextKey` encoding (`/magic/type/<fields>…`),
+JSON-encoded values. The hardware hierarchy embeds the full path in
+each key for scan narrowing:
 
 ```
-# Physical hierarchy (v1: flat; DC/rack reserved)
-RackKey      { dc_id, rack_id }                  -> RackValue
-
-# Node metadata
-NodeKey      { node_id }                         -> NodeValue
-
-# Disk-group metadata (logical, belongs to one node)
-DiskGroupKey { node_id, disk_group_id }          -> DiskGroupValue
-
-# Disk metadata (physical, belongs to one node)
-DiskKey      { node_id, disk_group_id, disk_id } -> DiskValue
-
-# Maps (the two core tables)
-OwnerMapKey  { node_id, disk_group_id }          -> OwnerEntry
-BindMapKey   { node_id, disk_group_id }          -> BindEntry
-
-# diskdb instance registry
-InstanceKey  { instance_id }                     -> InstanceValue
+/hw/rack/<rack_id>                                 -> RackValue
+/hw/node/<rack_id>/<node_id>                       -> NodeValue
+/hw/dg/<rack_id>/<node_id>/<dg_id>                 -> DiskGroupValue
+/hw/disk/<rack_id>/<node_id>/<dg_id>/<disk_id_hex> -> DiskValue
+/hw/dg_owner/<rack_id>/<node_id>/<dg_id>           -> OwnerMapValue
+/hw/dg_bind/<rack_id>/<node_id>/<dg_id>            -> BindMapValue
+/srv/diskdb/<instance_id>                          -> InstanceValue
+/srv/kv-server/<instance_id>                       -> InstanceValue
 ```
 
-`node_id`, `dc_id`, `rack_id`, and `instance_id` are `u64`;
-`disk_group_id` is a `u32` globally unique; `disk_id` is a 128-bit
-identifier (16 bytes, `high:u64 BE | low:u64 BE`). All key fields are
-fixed-width — no variable-length fields. Exact byte layouts and
-prefix constructors are defined in
-`doc/design/protocol/design-crow-key.md` and implemented in
-`lib/crow-protocol/src/key/`.
+`rack_id`, `node_id`, `dg_id` (`DiskGroupId`), and `instance_id` are
+`u64`; `disk_id_hex` is the 32-char hex of the 128-bit `DiskId`
+(`high:u64 BE | low:u64 BE`, lowercase). v1 ships flat (no DC layer);
+`dc_id` is dropped from `RackKey` and the Info types. The key concept
+structs live in `lib/crow-protocol/src/key/` and implement both
+`BinaryKey` (kept for data-group records) and `TextKey` (group 0). See
+`doc/design/protocol/design-crow-key.md` §5 and
+`doc/design/kv/design-crow-kv-group0.md` §3.
 
-Value types are protobuf messages defined in
-`lib/crow-protocol/src/proto/` (`common_type.proto` for
-`RackValue`/`NodeValue`, `diskdb_type.proto` for
-`DiskValue`/`DiskGroupValue`). `OwnerEntry`, `BindEntry`, and
-`InstanceValue` are Rust structs (not yet proto messages — they are
-internal sysdata types not exposed via gRPC; serialized via prost
-bytes in the KV value). Proto types are used directly in Rust per §3.8
-— no Rust type duplication.
+diskdb's own data groups (zone records) keep the `BinaryKey` encoding:
+`ZoneKey`, `BusyBlockKey`, `FreeBlockKey` (binary + prost, unchanged).
+
+Value types live in `crow-protocol` (proto `*Value` types used
+directly; new sysdata values `OwnerMapValue`, `BindMapValue`,
+`InstanceValue` added as proto messages; Entry return types
+`DiskGroupEntry`/`DiskdbOwnerEntry`/`KVGroupBindEntry` are plain serde
+structs). See `design-crow-kv-group0.md` §3.3.
 
 **Note**: zones are NOT stored in group 0. A zone is created when its
 disk is added, and its state (records + snapshot) lives on the
@@ -385,23 +385,24 @@ disk-group's bound data group.
 
 ### Map semantics
 
-- **Ownership map** — written by the operator (or a future coordinator)
-  to assign a disk-group to a diskdb instance. Read by diskdb on sync.
-- **Binding map** — written by the operator to bind a disk-group to a
-  paxos data group. Read by diskdb to route zone record writes.
-- **Instance registry** — written by each diskdb instance on heartbeat;
-  used by the console and other components to discover diskdb
-  endpoints.
+- **Ownership map** (`/hw/dg_owner/...`) — written by the operator (via
+  `HardwareClient` through the console) to assign a disk-group to a
+  diskdb instance. Read by diskdb on sync.
+- **Binding map** (`/hw/dg_bind/...`) — written by the operator to bind
+  a disk-group to a paxos data group. Read by diskdb to route zone
+  record writes.
+- **Service registry** (`/srv/<service>/<instance_id>`) — written by
+  each service instance on heartbeat (diskdb, kv-server); used by the
+  console and other components for discovery.
 
 ## 6. Hierarchy
 
-CROW today has no data-center or rack concept. The physical hierarchy
-and the logical disk-group layer:
+CROW v1 has rack and node (no data-center layer). The physical
+hierarchy and the logical disk-group layer:
 
-- **Physical**: data-center → rack → node → disk. These are real
-  hardware containers. CROW currently lacks data-center and rack; v1
-  ships flat (node list only), but the group-0 schema reserves room.
-  Adding DC/rack is a follow-up.
+- **Physical**: rack → node → disk. These are real hardware
+  containers. v1 ships with rack and node; a data-center layer is not
+  in v1 (the schema drops `dc_id`).
 - **Logical**: disk-group sits between node and disk. A disk-group
   belongs to exactly one node; a node can have multiple disk-groups. A
   disk-group is the unit of ownership (assigned to one diskdb instance)
@@ -409,7 +410,7 @@ and the logical disk-group layer:
   live on one paxos data group).
 
 ```
-Data Center → Rack → Node (node_id, u64) → Disk-Group ("{node_id}-{dg_id}")  [logical]
+Rack (rack_id, u64) → Node (node_id, u64) → Disk-Group (dg_id, u64)  [logical]
   → Disk (DiskId, 128-bit) → Zone (index, variable size) → Disk-Block (1 MB aligned)
 ```
 
@@ -716,11 +717,12 @@ diskdb's first major component:
   trigger recovery. The recovery flow is designed in a follow-up
   requirement.
 - **Disk-add initialization flow**: the operator adds a disk in group 0
-  (via `AddDisk` on `DiskdbAdminService`), which writes `DiskValue` to
-  group 0. On the next sync tick, diskdb fetches the updated `DiskValue`
-  and sees a disk not yet in its in-memory state. diskdb then
-  initializes the disk: creates the in-memory `ZoneDisk` with one `Zone`
-  per zone (zone count = `capacity / zone_size`, last zone sized per
+  (via `HardwareClient.add_disk` through the console), which writes
+  `DiskValue` to group 0. On the next sync tick, diskdb fetches the
+  updated `DiskValue` and sees a disk not yet in its in-memory state.
+  diskdb then initializes the disk: creates the in-memory `ZoneDisk`
+  with one `Zone` per zone (zone count = `capacity / zone_size`, last
+  zone sized per
   §3.5's word-alignment rule), and writes baseline `ZoneValue` records
   (empty bitmap, `snapshot_slot = 0`) to the bound data group at
   `ZoneKey { disk_id, zone_index }` in one `batch_write`. These are the

@@ -95,7 +95,7 @@ single-point-of-failure risk of console-only TOML became the blocking
 concern for HA deployments. The operator-managed HTTP management API
 remains as the Phase 1 bootstrap path; group 0 adds the HA cutover.
 
-Full design: `../console/design-crow-console.md` §4.3, `design-crow-kv-server.md` §2.2/§2.4.
+Full design: [`design-crow-kv-group0.md`](design-crow-kv-group0.md) (sysdata schema, service registry, keep-alive, monitoring models), `../console/design-crow-console.md` §4.3, `design-crow-kv-server.md` §2.2/§2.4.
 
 ### 3.4 Explicit group_id on every RPC
 

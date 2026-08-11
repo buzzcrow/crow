@@ -75,6 +75,7 @@ Long-lived task backlogs and per-path flow analyses. Plan files live under
 | `doc/design/kv/design-crow-kv-slot.md` | Parallel slot pipelining (§1–§14): sliding window, gap detection/repair, safe-slot, per-key resolved-slot, follower-side apply and catch-up via ChosenNotice + FetchGap (§9A), correctness analysis, linearizability proof. Concurrent sparse slot list (§15–§22): `SlotList<T>`, chunk layout, trim/GC, reclamation. Server-side proposal coalescing (§23): timer-driven micro-batcher, dedup tag threading, drain threshold, config, correctness, benchmark results. |
 | `doc/design/kv/design-crow-kv-rpc.md` | Wire protocol design: classic Paxos message surface, LearnerStream bidi stream (why dedicated stream, flow control, parallelism), PxService, version compatibility, Paxos error model (§7). Cluster discovery is HTTP, not gRPC. |
 | `doc/design/kv/design-crow-kv-reconfiguration.md` | Direct per-node mutation model, member add/remove, leader transfer, `membership_epoch` fence, safety argument, design history. Applies to all groups including system group (group 0). |
+| `doc/design/kv/design-crow-kv-group0.md` | System group (group 0) design: sysdata schema (text-path keys + JSON values), service registry (diskdb + kv-server keep-alive), KV-cluster topology records, monitoring models (push for services, pull for infrastructure), circular-dependency analysis, bootstrap/cutover. Read when working on group-0 sysdata, service registration, or cluster topology records. |
 | `doc/design/kv/design-crow-kv-state-machine.md` | Storage plug-in: per-key slot tracking, apply semantics, snapshot, compaction, compare, engine impls. |
 
 ### KV — Storage
@@ -82,7 +83,7 @@ Long-lived task backlogs and per-path flow analyses. Plan files live under
 | Doc | Read when working on |
 | --- | --- |
 | `doc/design/kv/design-crow-kv-wal.md` | Write-ahead log: multi-disk segments, backend-neutral durable flush, ack contract, replay/restore/recovery, GC, disk loss. |
-| `doc/design/kv/design-crow-kv-server.md` | `crow-kv-server` binary: KV engine selection, startup ordering (§2.2: `node-config.json` auto-restore + group 0 reconciliation), concurrency model, HTTP management API (axum, §2.4: system group endpoints `/system/init`, `/topology/finalize`, `/topology/ready`), group lifecycle, shutdown, port pool. |
+| `doc/design/kv/design-crow-kv-server.md` | `crow-kv-server` binary: KV engine selection, startup ordering (§2.2: `node-config.json` auto-restore + group 0 reconciliation), concurrency model, HTTP management API (axum, §2.4: lifecycle endpoints now internal — only `crow-kv-client`'s `KVClusterAdmin` calls them; `topology_finalize`/`topology_ready` removed), group lifecycle, shutdown, port pool. See also `design-crow-kv-group0.md` for group-0 sysdata architecture. |
 
 ### Tree — Storage Engine
 
