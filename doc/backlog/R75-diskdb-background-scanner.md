@@ -34,7 +34,7 @@ logic for ghost allocations, `allocate_pos` drift, and record
 integrity. Leak detection is scaffolded but returns "not implemented."
 
 1. **Scanner loop** — create `app/crow-diskdb/src/scanner/mod.rs`:
-   - `ScannerEngine` — owns a `JournalClient` (from R72), a
+   - `ScannerEngine` — owns a `DataGroupClient` (from R72), a
      `RecoveryEngine` (from R73), a `RecalcEngine` (from R74), and a
      `NodeContainer` (from R71). Runs as a background task.
    - `scanner_loop(node_container, journal, recovery, recalc, config)`:
@@ -201,7 +201,7 @@ allocation engine and crash recovery edge cases. Leak detection is
 explicitly deferred.
 
 **Dependencies**: R70 (types, config), R71 (NodeContainer), R72
-(JournalClient), R73 (RecoveryEngine, replay logic), R74 (RecalcEngine,
+(DataGroupClient), R73 (RecoveryEngine, replay logic), R74 (RecalcEngine,
 metrics). No dependency on R76–R77.
 
 **Acceptance**:

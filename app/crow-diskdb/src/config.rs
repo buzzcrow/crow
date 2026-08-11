@@ -49,6 +49,10 @@ pub struct StorageDefaults {
     /// Allocation granularity in bytes (default: 1 MB; must be power of 2).
     /// v1 enforces `allocate_granularity == block_size_bytes`.
     pub allocate_granularity: u32,
+    /// Number of zones in the disk-level active zone set (default: 4).
+    /// The disk round-robins over this many zones at a time; when all
+    /// are exhausted, the set rotates to a new batch of zones.
+    pub zone_rotate_count: u32,
 }
 
 impl Default for StorageDefaults {
@@ -57,6 +61,7 @@ impl Default for StorageDefaults {
             zone_size_bytes: 16 * 1024 * 1024 * 1024,
             block_size_bytes: 1024 * 1024,
             allocate_granularity: 1024 * 1024,
+            zone_rotate_count: 4,
         }
     }
 }
@@ -64,7 +69,7 @@ impl Default for StorageDefaults {
 /// Heartbeat / liveness configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatConfig {
-    /// Heartbeat interval in seconds (default: 13).
+    /// Heartbeat interval in seconds (default: 10).
     pub interval_secs: u32,
     /// Missed heartbeats before entering degraded mode (default: 3).
     pub miss_threshold: u32,
@@ -76,7 +81,7 @@ pub struct HeartbeatConfig {
 impl Default for HeartbeatConfig {
     fn default() -> Self {
         Self {
-            interval_secs: 13,
+            interval_secs: 10,
             miss_threshold: 3,
             temp_failure_timeout_secs: 900,
         }
@@ -90,7 +95,7 @@ pub struct SyncConfig {
     pub group0_store_id: u64,
     /// Group-0 group id (default: 0).
     pub group0_group_id: u64,
-    /// Sync interval in seconds (default: 13).
+    /// Sync interval in seconds (default: 10).
     pub sync_interval_secs: u32,
 }
 
@@ -99,7 +104,7 @@ impl Default for SyncConfig {
         Self {
             group0_store_id: 0,
             group0_group_id: 0,
-            sync_interval_secs: 13,
+            sync_interval_secs: 10,
         }
     }
 }
@@ -182,6 +187,9 @@ pub fn validate(config: &DiskdbConfig) -> Result<(), String> {
     }
     if config.persistence.free_flush_max_batch == 0 {
         return Err("free_flush_max_batch must be > 0".to_string());
+    }
+    if config.storage.zone_rotate_count == 0 {
+        return Err("zone_rotate_count must be > 0".to_string());
     }
     if config.persistence.snapshot_interval_secs == 0 {
         return Err("snapshot_interval_secs must be > 0".to_string());
@@ -268,6 +276,13 @@ mod tests {
     fn config_validate_rejects_zero_sync_interval() {
         let mut config = DiskdbConfig::default();
         config.sync.sync_interval_secs = 0;
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn config_validate_rejects_zero_zone_rotate_count() {
+        let mut config = DiskdbConfig::default();
+        config.storage.zone_rotate_count = 0;
         assert!(validate(&config).is_err());
     }
 }

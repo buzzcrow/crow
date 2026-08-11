@@ -4,8 +4,10 @@
 //! Common protobuf definitions for CROW components.
 //!
 //! Hosts shared types (`crow.common`), the diskdb gRPC service
-//! definitions (`crow.diskdb.rpc`), and utility functions/extension
-//! traits for diskdb proto types (`diskdb_type_util`).
+//! definitions (`crow.diskdb.rpc`), the chunkdb gRPC service
+//! definitions (`crow.chunkdb.rpc`), the diskio gRPC service stub
+//! (`crow.diskio.rpc`), and utility functions/extension traits for
+//! diskdb proto types (`diskdb_type_util`).
 
 pub mod common {
     #![allow(
@@ -30,6 +32,34 @@ pub mod diskdb {
             clippy::too_many_lines
         )]
         include!(concat!(env!("OUT_DIR"), "/crow.diskdb.rpc.rs"));
+    }
+}
+
+pub mod chunkdb {
+    pub mod rpc {
+        #![allow(
+            clippy::all,
+            clippy::pedantic,
+            clippy::missing_errors_doc,
+            clippy::doc_markdown,
+            clippy::default_trait_access,
+            clippy::too_many_lines
+        )]
+        include!(concat!(env!("OUT_DIR"), "/crow.chunkdb.rpc.rs"));
+    }
+}
+
+pub mod diskio {
+    pub mod rpc {
+        #![allow(
+            clippy::all,
+            clippy::pedantic,
+            clippy::missing_errors_doc,
+            clippy::doc_markdown,
+            clippy::default_trait_access,
+            clippy::too_many_lines
+        )]
+        include!(concat!(env!("OUT_DIR"), "/crow.diskio.rpc.rs"));
     }
 }
 

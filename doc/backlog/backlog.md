@@ -11,7 +11,7 @@ complexity, and dependency. Before implementation, follow the
 
 ## Item Index
 
-**Next R number: R78** — Bump this line in the same commit when adding a new item.
+**Next R number: R80** — Bump this line in the same commit when adding a new item.
 
 ### High Priority
 
@@ -21,16 +21,22 @@ complexity, and dependency. Before implementation, follow the
   sync loop, ownership/binding map read/write, instance heartbeat
   registration. Disk status management component.
 - **[R72](R72-diskdb-zone-allocator-journal.md)** — diskdb zone
-  allocator + journal persistence — Area: diskdb — Implement the zone
-  CAS allocator (Active→Busy→Active), active zone deque, disk-level
-  round-robin, two-phase async allocation (sync CAS claim + async KV
-  persist of BusyRecord), free batch flush (FreeRecord), `active_zone`
-  API. Block allocate/free component.
+  allocator + record persistence — Area: diskdb — Implement the zone
+  bitmap-scan allocator (per-bit CAS, rotating cursor, CAS retry
+  bound), rotating active-zone-set, round-robin across disks within
+  the named disk-group,
+  two-phase async allocation (sync CAS claim + async KV persist of
+  `BusyBlockValue`), immediate free (delete `BusyBlockKey` + write
+  `FreeBlockValue` carrying `previous_owner`; one `batch_write`).
+  Block allocate/free component. Free batching is R79.
 - **[R73](R73-diskdb-crash-recovery-snapshot.md)** — diskdb crash
-  recovery + snapshot compaction — Area: diskdb — Implement journal
-  replay (reconstruct in-memory bitmap + allocate_pos from
-  BusyRecord/FreeRecord + ZoneSnapshot), snapshot compaction (write new
-  snapshot, batch-delete expired records). Crash safety.
+  recovery + snapshot compaction — Area: diskdb — Implement the three
+  recovery strategies: full scan rebuild (strategy 1, on-demand via
+  `RebuildZoneBitmap` RPC), journal scan replay (strategy 2, primary
+  restart path, needs a `JournalScan` crow-kv extension for
+  slot-ordered replay), and snapshot compaction (strategy 3, merges
+  free records into `ZoneValue`, deletes only free records). Crash
+  safety; state = busy iff `BusyBlockKey` exists.
 - **[R74](R74-diskdb-space-metrics-query.md)** — diskdb space metrics +
   query API — Area: diskdb — Implement per-disk / per-disk-group /
   per-zone space metrics with accurate accounting and a recalculation
@@ -49,6 +55,19 @@ complexity, and dependency. Before implementation, follow the
   zone busy/free visualization (block array chart), CLI command design
   (`crow diskdb` subcommands vs sub-wrapper binaries). Follow-up after
   core diskdb is functional.
+- **[R78](R78-diskdb-group0-notify-watch.md)** — diskdb group-0
+  notify/watch — Area: diskdb / kv — Replace fixed-interval polling
+  (R71) with a watch/notify mechanism: group 0 pushes hw-status-change
+  and ownership-change notifications to registered diskdb endpoints.
+  Requires a crow-kv watch/notify extension (new sub-design). Polling
+  stays as a safety net. Follow-up after R71; not in v1.
+- **[R79](R79-diskdb-free-batch.md)** — diskdb free batch
+  (size-threshold, no timer) — Area: diskdb — Group frees into a
+  batch and flush via one `batch_write` when the batch reaches a
+  configurable size (default 256). No timer — the flush is
+  synchronous on the free path, not a background loop. v1 ships with
+  immediate free (R72); this is a follow-up for high-free-throughput
+  workloads.
 
 - **[R66](R66-kv-wal-io-uring.md)** — WAL io_uring backend — eliminate
   `spawn_blocking` on the durability path. The WAL's production I/O

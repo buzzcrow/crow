@@ -1,296 +1,482 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-### R72: diskdb — Zone Allocator + Journal Persistence (Block Allocate/Free)
+### R72: diskdb — Zone Allocator + Record Persistence (Block Allocate/Free)
 
 **Problem**: R71 gives diskdb a running server with group-0 sync and
 disk status management, but the core allocation engine does not exist.
 The server can discover its disk-groups and disks but cannot allocate
 or free blocks. This is diskdb's primary function — the allocate/free
-RPCs are stubbed (`Unimplemented`) and there is no zone CAS allocator,
-no active zone deque, no journal persistence, and no free batch.
+RPCs are stubbed (`Unimplemented`) and there is no zone allocator,
+no active zone rotation, and no record persistence.
 
-The design doc (§8) specifies the allocation algorithm in detail:
-per-zone append-only allocators with CAS serialization, disk-level
-round-robin, two-phase async allocation (sync CAS claim + async KV
-persist), and batched free flush. The key CROW-specific design (D4) is
-that each allocate appends a small `BusyRecord` to the paxos data
-group's journal (not a full `ZoneRecord`), and each free appends a
-`FreeRecord`. The bitmap is derived from the journal — never written
-as a full bitmap on the hot path.
+The design doc (§8) specifies the allocation algorithm: per-zone
+bitmap-scan allocators with per-bit CAS, disk-level rotating
+active-zone-set, round-robin across disks within the named
+disk-group, two-phase async
+allocation (sync bitmap claim + async KV persist), and immediate free.
+The key CROW-specific design (§3.4) is that each allocate writes a
+small `BusyBlockValue` to the disk-group's bound paxos data group at
+the `BusyBlockKey` (keyed by `unit_offset`, not a full `ZoneValue`),
+and each free deletes the `BusyBlockKey` and writes a `FreeBlockValue`
+at the `FreeBlockKey` in one `batch_write`. The bitmap is derived from
+the records — never written as a full bitmap on the hot path.
 
-The aioss reference has a working zone allocator (`zone/mod.rs`) and
-persistence layer (`persistence/mod.rs`), but it writes the **full
-`ZoneRecord`** on every allocate — the CROW design deliberately
-replaces this with journal records (D4) for efficiency. The CAS logic,
-bitmap operations, and round-robin patterns are directly reusable; the
-persistence layer is new.
+**Record model (§3.4, §7):**
+
+- `BusyBlockValue` — written on allocate. Carries `owner_chunk`,
+  `unit_size`, `state`. **Deleted on free** (in the same `batch_write`
+  that writes the `FreeBlockValue`). On re-allocate (after a free), a
+  new `BusyBlockValue` is written at the same key (new owner,
+  `state = Ok`).
+- `FreeBlockValue` — written on free, in the same `batch_write` that
+  deletes the `BusyBlockKey`. Carries `previous_owner` (the
+  `owner_chunk` from the freed `BusyBlockValue`) for audit / scanner
+  cross-check. On re-allocate, the `FreeBlockKey` is deleted. Transient
+  — deleted by compaction (R73) after being merged into the `ZoneValue`
+  bitmap.
+- Current state determination (no slot ordering needed): a block is
+  **busy** iff its `BusyBlockKey` exists; otherwise it is **free**. A
+  `FreeBlockKey` may exist for a not-yet-compacted free (carrying
+  `previous_owner`); after compaction, neither key exists for that
+  offset.
+
+**Free is immediate in v1 (§8):** no `FreeBatch`, no timer, no
+background flush loop. Each free writes its `FreeBlockValue` to the
+bound data group immediately via one `batch_write` (the `BusyBlockKey`
+stays). This is simpler, avoids the ghost-allocation-on-crash window,
+and matches the "records are the source of truth" model directly. Free
+batching (size-threshold grouping, no timer) is an optimization for
+high-free-throughput workloads, tracked as R79.
+
+The buzz-cpp reference (`/cpp/buzz-cpp/src/app/buzz-disk-db`) has a
+working zone allocator with the same algorithm concept: bitmap-scan
+with a rotating cursor (`last_pos_64`), per-bit CAS via
+`compare_exchange` on 64-bit words, and disk-level zone rotation
+(rotating active-zone-set that rotates when exhausted). The only
+difference is persistence: buzz-cpp saves the full bitmap to a local
+file via a background scheduled task; CROW replaces this with
+per-allocation `BusyBlockValue`/`FreeBlockValue` writes to the
+bound data group via KV put/delete (§3.4). The bitmap-scan, per-bit
+round-robin patterns are directly reusable; the persistence layer is
+new.
 
 **Solution**: Implement the second major component — block
-allocate/free — with the journal-based persistence model from D4.
+allocate/free — with the bitmap-scan allocator from buzz-cpp and the
+record-based persistence model from §3.4.
 
-1. **Zone CAS allocator** — create `app/crow-diskdb/src/zone/mod.rs`:
+1. **Zone bitmap-scan allocator** — create
+   `app/crow-diskdb/src/zone/mod.rs`:
    - `Zone` — per-zone allocation state (extends R70's types):
-     - `disk_group_id: DiskGroupId`, `disk_uuid: Uuid`, `zone_index:
+     - `disk_group_id: DiskGroupId`, `disk_id: DiskId`, `zone_index:
        u32`.
-     - `allocation_state: AtomicU8` — CAS-based state machine
-       (Active/Busy/Error/Full), `#[repr(u8)]` from R70.
-     - `zone_state: RwLock<ZoneState>` — health (Healthy/Missing/Bad).
-       Not atomic — updated by the sync loop (R71) and health probe
-       (R76), not the hot path.
-     - `max_allocate_pos: u32` — capacity in block units
-       (`zone_size / block_size`).
-     - `allocate_pos: AtomicU32` — current monotonically increasing
-       position (block units).
-     - `granularity_shift: u32` — log2(block_size) for bit shifts.
+     - `zone_state: RwLock<ZoneState>` — health
+       (Healthy/Missing/Bad). Not atomic — updated by the sync loop
+       (R71) and health probe (R76), not the hot path. Zones inherit
+       the disk's `HwStatus`; there is no separate zone-level CAS
+       state machine (§9).
+     - `unit_capacity: u32` — total block units in the zone
+       (`zone_size / block_size`), word-aligned per §3.5.
      - `usage_bits: UsageBitmap` — from R70, lock-free atomic bit
-       operations.
-     - `next_journal_slot: AtomicU64` — per-zone monotonic counter for
-       journal key slots. Each BusyRecord/FreeRecord gets a unique
-       slot number embedded in its key.
-   - `claim(size: u32) -> Option<(Segment, ClaimSnapshot)>` — Phase 1
-     (sync):
+       operations. Each bit = one block unit; bit set = busy, bit
+       clear = free.
+     - `last_pos_64: AtomicU64` — rotating cursor over 64-bit words
+       in the bitmap. Scans start from this position and wrap around,
+       spreading allocation load across the zone. Updated on each
+       successful allocation to the word where the bit was found.
+     - `used_count: AtomicU32` — count of set bits (for fast
+       `allocatable()` check and metrics). Incremented on allocate,
+       decremented on free.
+   - `allocate(unit_count: u32) -> Option<AllocatedRange>` — Phase 1
+     (sync), per-bit CAS (buzz-cpp `ddb_disk_zone::allocate_block`
+     pattern, §8):
      a. Check `zone_state` is Healthy; return `None` if not.
-     b. CAS `allocation_state` Active → Busy (only one thread wins).
-        Use `compare_exchange` on `AtomicU8`.
-     c. Compute `count = size >> granularity_shift` (block units).
-     d. Check `allocate_pos + count <= max_allocate_pos`; if not,
-        transition to Full, return `None`.
-     e. `range_set(allocate_pos, count)` on `usage_bits`; if fails
-        (double-alloc, should not happen), transition to Error,
-        return `None`.
-     f. `prev_pos = allocate_pos.fetch_add(count, AcqRel)`.
-     g. Build `Segment { zone_offset: prev_pos << granularity_shift,
-        size, tag: now_ns(), ... }`.
-     h. Build `ClaimSnapshot { prev_pos, count }`.
-     i. Return `Some((segment, snapshot))`. Zone stays Busy until
-        `release()` or `rollback()`.
-   - `release()` — Phase 2 success: store `Active` with `Release`
-     ordering. Does NOT re-add to deque — caller does that via
-     `active_zone()`.
-   - `rollback(snapshot)` — Phase 2 failure: restore `allocate_pos =
-     snapshot.prev_pos`, `range_clear(prev_pos, count)`, transition to
-     Active.
-   - `active()` — CAS Busy → Active for external re-activation (the
-     `active_zone` API). Returns `true` if CAS succeeded.
-   - `free(zone_offset, size) -> bool` — convert offset to block
-     units, `range_clear`, return `false` on double-free detection.
-   - `allocatable() -> bool` — `zone_state == Healthy &&
-     allocation_state == Active`.
-   - `next_slot() -> u64` — `next_journal_slot.fetch_add(1, Relaxed)`.
-     Used to generate unique journal keys for BusyRecord/FreeRecord.
+     b. Check `used_count < unit_capacity`; if not, return `None`
+        (zone full).
+     c. Scan bitmap from `last_pos_64` (rotating cursor), wrapping
+        around:
+       - For each 64-bit word at index `i` (starting from
+         `last_pos_64`, wrapping): load the word, use `countr_one` to
+         find the first zero bit (hardware-optimized on x86/ARM).
+       - For `unit_count == 1` (common case, since v1 enforces
+         `allocate_granularity == block_size_bytes`): CAS-set the bit
+         via `compare_exchange` on the 64-bit word. On success:
+         increment `used_count`, store `last_pos_64 = i`, return
+         `AllocatedRange { unit_offset: bit_index, unit_count: 1 }`.
+         On CAS failure (another thread set the same bit): retry the
+         same word (the bit may now be set; re-scan from
+         `countr_one`).
+       - For `unit_count > 1`: find a run of `unit_count` consecutive
+         zero bits (may span word boundaries). CAS-set each bit in
+         the run; if any CAS fails, clear the bits already set in
+         this attempt and continue scanning. On success: increment
+         `used_count` by `unit_count`, store `last_pos_64`, return
+         `AllocatedRange`.
+     d. **CAS retry bound (§8):** per-bit CAS is capped at
+        `cas_retry_limit` retries (config, default 100); on
+        exhaustion, fall through to the next bit / word / zone. This
+        prevents indefinite spinning under heavy contention. The
+        `zone.allocate.retry.cms.bit` counter (§11) is incremented on
+        each retry as the key operational signal for lock-free
+        allocator contention.
+     e. If no free bits found after a full wrap, return `None`.
+   - `free(unit_offset: u64, unit_count: u32) -> bool` — clear bits
+     via CAS on each 64-bit word. Decrement `used_count`. Return
+     `false` if any bit was already clear (double-free detection).
+   - `allocatable() -> bool` — `zone_state == Healthy && used_count
+     < unit_capacity`.
+   - `derived_alloc_state() -> ZoneAllocationState` — returns
+     `Active` (used_count == 0), `Available` (0 < used_count <
+     unit_capacity), or `Full` (used_count == unit_capacity). Used
+     for `ZoneValue` snapshots and reporting only — no CAS, no state
+     machine (§9).
 
-2. **Active zone deque + disk-level claim** — implement in
-   `app/crow-diskdb/src/node/disk.rs` (extends R71's `ZoneDisk`):
-   - `active_zones: SegQueue<ZoneRef>` — lock-free MPMC deque
-     (`crossbeam-queue::SegQueue`).
-   - `disk_claim(size: u32) -> Option<(ZoneRef, Segment,
-     ClaimSnapshot)>`:
-     a. Check `disk_state` is Active; return `None` if not.
-     b. Loop: pop zone from `active_zones`. If empty, call
-        `find_active_zone()`. If none, return `None`.
-     c. Call `zone.claim(size)`. On success, record metrics, return.
-        On failure (Full/Error), loop to try next zone.
-   - `find_active_zone() -> Option<ZoneRef>` — random-start scan of
-     all zones; return first `allocatable()` one. Avoids bias toward
-     low-index zones.
-   - `free(zone_index, offset, size) -> bool` — look up zone, call
-     `zone.free()`.
-   - `active_zone(zone_index) -> bool` — look up zone, push to
-     `active_zones` deque if allocatable, CAS Busy → Active.
-   - `rebuild_active_zones()` — scan all zones, push allocatable ones
-     to deque. Called by R73's recovery.
+2. **Rotating active-zone-set + disk-level allocate** — implement
+   in `app/crow-diskdb/src/node/disk.rs` (extends R71's `ZoneDisk`),
+   following the buzz-cpp `ddb_disk` pattern (§8):
+   - `ActiveZoneContext` — `Vec<ZoneRef>` holding
+     `zone_rotate_count` zones (the "active set"). Replaced as a
+     whole via RCU-style publish (swap + atomic pointer store).
+   - `ZoneDisk` fields:
+     - `zones: RwLock<Vec<ZoneRef>>` — all zones on the disk.
+     - `active_zone_context: RwLock<Arc<ActiveZoneContext>>` — the
+       current active set (RCU read: clone Arc, no lock held during
+       allocation).
+     - `pos_v_zone_ctx: AtomicU64` — rotating cursor over the active
+       set (round-robin).
+     - `pos_v_zone: AtomicU64` — rotating cursor for zone rotation
+       scan (advances each rotation to spread wear).
+   - `disk_allocate(unit_count: u32) -> Option<(ZoneRef,
+     AllocatedRange)>`:
+     a. Check disk `HwStatus` is `Up`; return `None` if not.
+     b. `max_loop = zone_num / zone_rotate_count + 2`.
+     c. Loop while `max_loop > 0`:
+       - Load current `active_zone_context` (Arc clone, RCU read).
+       - `start = pos_v_zone_ctx.fetch_add(1, Relaxed)`.
+       - For `i` in `start .. start + ctx.len()`: select
+         `ctx[i % ctx.len()]`, call `zone.allocate(unit_count)`. On
+         success: record metrics, return `(zone, range)`.
+       - All zones in the active set failed → call
+         `rotate_active_zones(&ctx)`. If rotation returns `false`
+         (no allocatable zones), break. Otherwise continue loop with
+         new context.
+     d. Return `None`.
+   - `rotate_active_zones(old_ctx: &ActiveZoneContext) -> bool`:
+     a. Take write lock on `active_zone_context`.
+     b. RCU check: if the current context is no longer `old_ctx`,
+        another thread already rotated — return `true` (caller
+        retries with the new context).
+     c. Scan all zones from `pos_v_zone` (rotating start), wrapping:
+       pick the first `zone_rotate_count` zones where
+       `allocatable()` is true. Advance `pos_v_zone` by the number
+       of zones scanned.
+     d. If no allocatable zones found: store empty context, return
+        `false`.
+     e. Build new `ActiveZoneContext`, swap into
+        `active_zone_context` (RCU publish), return `true`.
+   - `free(zone_index, unit_offset, unit_count) -> bool` — look up
+     zone by index, call `zone.free()`.
+   - `rebuild_active_zones()` — scan all zones, build initial
+     `ActiveZoneContext` with the first `zone_rotate_count`
+     allocatable zones. Called by R73's recovery on startup.
 
-3. **Node-level round-robin** — implement in
-   `app/crow-diskdb/src/node/mod.rs` (extends R71's `Node`):
-   - `claim_block(size) -> Result<(ZoneRef, Segment, ClaimSnapshot)>`:
-     a. Read-lock `allocating_disks`; check non-empty (else
-        `NoSpace`).
-     b. `start = disk_allocate_iterator.fetch_add(1, Relaxed)`.
-     c. Select `disks[start % num_disks]`; call `disk_claim(size)`.
-     d. On success, return. On failure, `retry_claim(size, &[])`.
-   - `claim_blocks(size, count, exclude_disks) ->
-     Result<Vec<(ZoneRef, Segment, ClaimSnapshot)>>`:
-     a. `start = iterator.fetch_add(count, Relaxed)`.
-     b. For each block: select `disks[(start + i) % num_disks]`,
-        skip if in `exclude_disks`, call `disk_claim(size)`.
-     c. If not all claimed, `retry_allocate()` with random start,
-        skipping excluded and already-used disks.
-   - `retry_claim(size, exclude) -> Result<...>` — random start,
-     scan all disks from start, skip excluded, return first success.
-   - `retry_allocate(size, remaining, claims, exclude)` — random
-     start, scan, skip excluded and used, claim remaining blocks.
-   - `free_block(segment) -> Result<bool>` — look up disk by
-     `segment.disk_uuid`, call `disk.free()`.
-   - `active_zone(disk_uuid, zone_index) -> Result<bool>` — look up
-     disk, call `disk.active_zone()`.
+3. **Round-robin across disks within the named disk-group** —
+   implement in `app/crow-diskdb/src/node/mod.rs` (extends R71's
+   `Node`), following the buzz-cpp `ddb_node` pattern and design §8.
+   The `AllocateBlocks` request specifies the target `disk_group_id`
+   (§3.2) — diskdb never round-robins across disk-groups; it
+   round-robins across the disks **within that one named disk-group**:
+   - `AllocateDiskContext` — `Vec<Arc<ZoneDisk>>` holding all
+     allocatable disks **within one named disk-group**. Replaced via
+     RCU-style publish on add/remove/status-change.
+   - `Node` fields:
+     - `disks: RwLock<Vec<Arc<ZoneDisk>>>` — all disks.
+     - `allocating_disks: RwLock<Arc<AllocateDiskContext>>` — RCU
+       context of allocatable disks (scoped to the request's
+       `disk_group_id`).
+     - `pos_v_disk_ctx: AtomicU64` — rotating cursor over the
+       allocatable disk context.
+   - `allocate_block(disk_group_id, unit_count, exclude_disks:
+     &[DiskId]) -> Result<(Arc<ZoneDisk>, ZoneRef,
+     AllocatedRange)>`:
+     a. Read-lock `allocating_disks` (Arc clone, then drop lock);
+        check non-empty (else `NoSpace`).
+     b. `start = pos_v_disk_ctx.fetch_add(1, Relaxed)`.
+     c. For `i` in `start .. start + ctx.len()`: select
+        `ctx[i % ctx.len()]`, skip if `disk_id` in `exclude_disks`
+        (anti-affinity, per-disk — skip a disk that just failed,
+        applied within the named disk-group), call
+        `disk_allocate(unit_count)`. On success, return.
+     d. If no disk succeeded, return `NoSpace`.
+   - `allocate_blocks(disk_group_id, unit_count, count,
+     exclude_disks) -> Result<Vec<(Arc<ZoneDisk>, ZoneRef,
+     AllocatedRange)>>`:
+     a. For each of `count` allocations: round-robin select disk
+        via `pos_v_disk_ctx.fetch_add(1)`, skip excluded, call
+        `disk_allocate(unit_count)`.
+     b. Collect successful claims. If not all `count` claimed,
+        retry remaining with a full scan (random start, skip
+        excluded and already-used disks).
+     c. If still not all claimed, return `NoSpace` (caller decides
+        whether to partial-commit).
+   - `free_block(segment: &Segment) -> Result<bool>` — look up disk
+     by `segment.disk_id` via the disk-id → disk hash map (§14),
+     call `disk.free(segment.zone_index, segment.unit_offset,
+     segment.unit_count)`.
+   - `refresh_disk_context()` — scan all disks, build new
+     `AllocateDiskContext` with disks where `HwStatus == Up`. Swap
+     in (RCU publish). Called on add/remove disk and on status
+     change from the sync loop (R71).
 
-4. **Journal persistence** — create
-   `app/crow-diskdb/src/persistence/` module:
-   - `JournalClient` — wraps `CrowkvClient` for writing to the
-     disk-group's bound paxos data group. Uses the `(store_id,
-     group_id)` from the binding map (R71).
-   - `persist_busy_record(dg_id, bind, disk_uuid, zone_idx, slot,
-     record: &BusyRecord) -> Result<()>` — `put` to
-     `journal_key_busy(dg_id, disk_uuid, zone_idx, slot)` on the
-     bound data group. Serializes `BusyRecord` via bincode (compact,
-     ≤ 32 bytes).
-   - `persist_busy_records_batch(dg_id, bind, records: &[(disk_uuid,
-     zone_idx, slot, BusyRecord)]) -> Result<()>` — `batch_write` of
-     all records in one async round-trip. Used for multi-block
-     allocation (one `batch_write` per data group).
-   - `persist_free_records_batch(dg_id, bind, records: &[(disk_uuid,
-     zone_idx, slot, FreeRecord)]) -> Result<()>` — `batch_write` for
-     free batch flush.
-   - `read_journal_zone(dg_id, bind, disk_uuid, zone_idx) ->
-     Result<JournalReplayData>` — prefix scan
-     `journal_prefix_zone(dg_id, disk_uuid, zone_idx)` to fetch all
-     BusyRecord/FreeRecord/ZoneSnapshot for one zone. Used by R73's
+4. **Record persistence (KV operations)** — create
+   `app/crow-diskdb/src/persistence/` module. diskdb has no "journal"
+   abstraction of its own — it performs plain KV put/delete operations
+   on the bound data group via `CrowkvClient`; crow-kv's paxos journal
+   is the durability mechanism (§1). The "journal" framing (a sequence
+   of puts/deletes that can be replayed in slot order) is how diskdb
+   *uses* crow-kv's slot-ordered KV, not a concept exposed in diskdb's
+   code.
+   - `DataGroupClient` — wraps `CrowkvClient` for put/delete/scan on
+     the disk-group's bound paxos data group (parallels R71's
+     `SysdataClient` for group 0). Uses the `(store_id, group_id)`
+     from the binding map (R71).
+   - `persist_busy(dg_id, bind, disk_id, zone_idx, unit_offset,
+     value: &BusyBlockValue) -> Result<()>` — `put` to
+     `BusyBlockKey { disk_id, zone_idx, unit_offset }` on the bound
+     data group. The key is the existing binary key from R70
+     (`lib/crow-protocol/src/key/diskdb.rs`), not a slot-based key.
+     The `unit_offset` uniquely identifies the block range within
+     the zone; crow-kv's slot mechanism provides write ordering for
+     replay (R73).
+   - `persist_busy_batch(dg_id, bind, records: &[(disk_id, zone_idx,
+     unit_offset, BusyBlockValue)]) -> Result<()>` — `batch_write`
+     of all records in one async round-trip. Used for multi-block
+     allocation (one `batch_write` per data group; atomic within the
+     group, §3.2).
+   - `persist_free(dg_id, bind, disk_id, zone_idx, unit_offset,
+     value: &FreeBlockValue) -> Result<()>` — one `batch_write` that
+     **deletes the `BusyBlockKey`** and **puts the `FreeBlockValue`**
+     at `FreeBlockKey { disk_id, zone_idx, unit_offset }` on the bound
+     data group (per the record model in §3.4/§7). Used for immediate
+     free in v1.
+   - `persist_free_batch(dg_id, bind, records: &[(disk_id, zone_idx,
+     unit_offset, FreeBlockValue)]) -> Result<()>` — `batch_write`
+     that, for each record, deletes the `BusyBlockKey` and puts the
+     `FreeBlockKey` value in one async round-trip. Used for multi-block
+     free (one `batch_write` per data group). When R79 ships, this is
+     reused by the size-threshold free batch flush.
+   - `read_zone_records(dg_id, bind, disk_id, zone_idx) ->
+     Result<ZoneRecords>` — prefix scan
+     `BusyBlockKey::prefix_for_zone(disk_id, zone_idx)` and
+     `FreeBlockKey::prefix_for_zone(disk_id, zone_idx)` to fetch all
+     busy/free records for one zone, plus the latest `ZoneValue`
+     snapshot at `ZoneKey { disk_id, zone_idx }`. Used by R73's
      recovery. (This requirement defines the method; R73 implements
      the replay logic.)
-   - `delete_journal_records_batch(dg_id, bind, keys: &[String]) ->
-     Result<()>` — `batch_write` with `Delete` ops. Used by R73's
-     snapshot compaction.
+   - `delete_free_records_batch(dg_id, bind, keys: &[Vec<u8>]) ->
+     Result<()>` — `batch_write` with `Delete` ops for free records
+     only. Used by R73's snapshot compaction (compaction deletes only
+     free records; busy records for freed blocks were already deleted
+     on free, §7).
 
 5. **Two-phase async allocation** — implement in
    `app/crow-diskdb/src/persistence/alloc.rs`:
-   - `allocate_block(node: &Arc<Node>, size: u32, journal: &
-     JournalClient) -> Result<Segment>`:
-     a. **Phase 1 (sync)**: `node.claim_block(size)` →
-        `(zone, segment, snapshot)`. Zone is now Busy.
-     b. **Phase 2 (async)**: Get `next_slot()` from zone. Build
-        `BusyRecord { zone_offset: segment.zone_offset, size:
-        segment.size, tag: segment.tag }`. `await
-        journal.persist_busy_record(dg_id, bind, disk_uuid,
-        zone_idx, slot, &record)`.
-     c. On success: `zone.release()`, return `segment`.
-     d. On failure: `zone.rollback(snapshot)`, return error.
-   - `allocate_blocks(node, size, count, exclude_disks, journal) ->
+   - `allocate_block(node: &Arc<Node>, disk_group_id, unit_count:
+     u32, owner_chunk: &ChunkId, unit_size: u32, kv:
+     &DataGroupClient) -> Result<Segment>`:
+     a. **Phase 1 (sync)**: `node.allocate_block(disk_group_id,
+        unit_count, &[])` → `(disk, zone, range)`. Bits are set in
+        the zone's `usage_bits` via per-bit CAS. No zone-level lock
+        — other threads can allocate concurrently from the same
+        zone.
+     b. **Phase 2 (async)**: Build `BusyBlockValue { unit_count,
+        unit_size, owner_chunk, state: BlockState::Ok }` (§7). `await
+        kv.persist_busy(dg_id, bind, disk_id, zone_idx,
+        range.unit_offset, &value)`.
+     c. On success: return `Segment { disk_id, zone_index,
+        unit_offset: range.unit_offset, unit_count: range.unit_count,
+        owner_chunk }` (no `node_id`/`disk_group_id` in `Segment`,
+        §3.9).
+     d. On failure: `zone.free(range.unit_offset, range.unit_count)`
+        (rollback — clear the bits that were set in Phase 1), return
+        error.
+   - `allocate_blocks(node, disk_group_id, unit_count, count,
+     exclude_disks, owner_chunk, unit_size, kv) ->
      Result<Vec<Segment>>`:
-     a. Phase 1: `node.claim_blocks(size, count, exclude_disks)` →
-        `Vec<(zone, segment, snapshot)>`.
-     b. Phase 2: For each claim, get `next_slot()`, build
-        `BusyRecord`. Collect all records. `await
-        journal.persist_busy_records_batch(dg_id, bind, &records)`.
-     c. On success: `release()` all zones, return segments.
-     d. On failure: `rollback()` ALL claims, return error.
-   - The `dg_id` and `bind` come from the `Node` struct (set by R71's
-     sync loop from the binding map).
+     a. Phase 1: `node.allocate_blocks(disk_group_id, unit_count,
+        count, exclude_disks)` → `Vec<(disk, zone, range)>`.
+     b. Phase 2: Build `BusyBlockValue` for each claim. Collect all
+        `(disk_id, zone_idx, unit_offset, value)` tuples. `await
+        kv.persist_busy_batch(dg_id, bind, &records)` (one
+        `batch_write` per data group; atomic within the group).
+     c. On success: return `Vec<Segment>`.
+     d. On failure: `zone.free()` ALL claims (rollback every bit
+        that was set), return error.
+   - The `dg_id` and `bind` come from the `Node` struct (set by
+     R71's sync loop from the binding map).
 
-6. **Free batch flush** — create
-   `app/crow-diskdb/src/persistence/free_batch.rs`:
-   - `FreeBatch` — `inner: Mutex<Vec<(Segment, u64)>>` where the `u64`
-     is the pre-assigned journal slot. `append(segment, slot)`,
-     `drain() -> Vec<(Segment, u64)>`, `re_enqueue(items)`,
-     `len()`, `is_empty()`.
-   - `free_block(node, segment, free_batch) -> Result<()>`:
-     a. `node.free_block(segment)` — clear bitmap locally.
-     b. Pre-assign a journal slot: get the zone from the node, call
-        `zone.next_slot()`.
-     c. `free_batch.append((segment, slot))`.
-     d. Return `Ok(())` immediately — free is async.
-   - `FreeFlushLoop` — background task:
-     a. `sleep(free_flush_interval_ms)` (default 500 ms).
-     b. `drain()` the batch. If empty, continue.
-     c. Group by `(dg_id, disk_uuid, zone_idx)` and build
-        `FreeRecord` list.
-     d. For each affected data group, `await
-        journal.persist_free_records_batch(...)`.
-     e. On failure: `re_enqueue(items)` for retry on next tick.
-     f. Also flush when `free_batch.len() >= free_flush_max_batch`
-        (default 256) — check before sleeping.
+6. **Immediate free** — implement in
+   `app/crow-diskdb/src/persistence/free.rs` (v1: no `FreeBatch`, no
+   timer, no background flush loop — §8):
+   - `free_block(node: &Arc<Node>, segment: &Segment, kv:
+     &DataGroupClient) -> Result<()>`:
+     a. `node.free_block(segment)` — clear bitmap locally (per-bit
+        CAS clear) via the disk-id → disk hash map and zone-index →
+        zone vec (§14; O(1) lookups).
+     b. Build `FreeBlockValue { unit_count, previous_owner:
+        segment.owner_chunk }` (§7; `previous_owner` comes from the
+        `Segment` — no KV read needed; no `state` field — a free
+        block has no data).
+     c. `await kv.persist_free(dg_id, bind, disk_id, zone_idx,
+        unit_offset, &value)` — one `batch_write` that **deletes the
+        `BusyBlockKey`** and **writes the `FreeBlockValue`** at
+        `FreeBlockKey` (per §3.4/§7).
+     d. Return the persist result. Free is synchronous in v1 — the
+        caller's `FreeBlocks` RPC returns only after the
+        `FreeBlockValue` is durable and the `BusyBlockKey` is gone.
+   - `free_blocks(node, segments: &[Segment], kv) ->
+     Result<()>`:
+     a. For each segment: `node.free_block(segment)` (clear bitmap
+        locally).
+     b. Group by `dg_id` and build `FreeBlockValue` list per data
+        group.
+     c. For each affected data group, `await
+        kv.persist_free_batch(...)` (one `batch_write` that
+        deletes each `BusyBlockKey` and writes each `FreeBlockValue`).
+     d. On failure: the bitmap clears already happened locally —
+        return error; the §12 ghost-allocation scanner reconciles
+        any in-memory/KV mismatch on restart.
+   - **No KV read on free in v1 (§14):** `owner_chunk` is carried in
+     the `Segment` and becomes `FreeBlockValue.previous_owner`, so the
+     free is one `batch_write` (Delete `BusyBlockKey` + Put
+     `FreeBlockKey`) with no prior read. Ownership validation is
+     deferred to the §12 scanner. If strict ownership validation is
+     needed before free, a config toggle (`validate_owner_on_free`,
+     default false) enables a KV read of the `BusyBlockValue` first
+     (one paxos round-trip, doubles free latency).
+   - **Free batching (R79):** when `free_batch_enabled` is true
+     (default false), the free path groups frees into a batch and
+     flushes via one `batch_write` when the batch reaches
+     `free_flush_max_batch` (default 256). No timer. R72 ships with
+     the toggle off — immediate free only.
 
 7. **gRPC handlers** — implement in
    `app/crow-diskdb/src/grpc/service.rs`:
-   - `allocate_block` — validate size (non-zero, aligned to block
-     size), check not degraded, get node, call
-     `persistence::allocate_block()`, return `Segment`.
-   - `allocate_blocks` — validate size + count (1–1024), check not
-     degraded, get node, call `persistence::allocate_blocks()`.
-   - `condition_allocate_blocks` — parse `exclude_disk_uuids`, call
-     `allocate_blocks()` with hints.
-   - `free_block` — parse `Segment`, get node, call
-     `persistence::free_block()`.
-   - `active_zone` — parse disk_uuid + zone_index, get node, call
-     `node.active_zone()`.
-   - `query_disk_usage` — stub (returns empty); R74 fills it in.
+   - `allocate_blocks` — validate `unit_count` (non-zero, aligned to
+     block size) and `count` (1–1024), check not degraded, get node,
+     call `persistence::allocate_blocks()`, return `Vec<Segment>`.
+   - `free_blocks` — parse `Vec<Segment>`, get node, call
+     `persistence::free_blocks()` (immediate free in v1).
+   - `query_capacity_stats` — stub (returns empty); R74 fills it in.
+   - `get_disk_group_info` / `get_disk_info` — read from synced
+     cache (R71).
+   - `rebuild_zone_bitmap` — stub (`Unimplemented`); R73 implements
+     strategy 1 (full scan rebuild, §7).
+   - `mark_block_suspect` / `mark_block_corrupt` — stub
+     (`Unimplemented`); R75 implements per-block state transitions
+     (§7, §12).
    - Error mapping: `NoSpace` → `ResourceExhausted`, `NotOwner` →
      `PermissionDenied`, `InvalidSize`/`InvalidCount` →
      `InvalidArgument`, `Degraded` → `Unavailable`.
 
 8. **Server wiring** — update `app/crow-diskdb/src/main.rs`:
-   - Create `JournalClient` from `CrowkvClient`.
-   - Create `FreeBatch` (shared `Arc<FreeBatch>`).
-   - Spawn `FreeFlushLoop` as background task.
-   - Wire gRPC service with `NodeContainer`, `JournalClient`,
-     `FreeBatch`, config.
-   - Allocate/free/active_zone RPCs now functional.
+   - Create `DataGroupClient` from `CrowkvClient`.
+   - Wire gRPC service with `NodeContainer`, `DataGroupClient`,
+     config.
+   - Allocate/free RPCs now functional.
+   - No `FreeBatch`, no `FreeFlushLoop` in v1 (R79 adds the
+     size-threshold batch when `free_batch_enabled` is true).
 
 **Scope** (expected changed files):
-- `app/crow-diskdb/src/zone/mod.rs` — `Zone` struct with CAS claim,
-  release, rollback, free, active.
-- `app/crow-diskdb/src/node/disk.rs` — `ZoneDisk` with `disk_claim`,
-  `find_active_zone`, `active_zone`, `rebuild_active_zones`.
-- `app/crow-diskdb/src/node/mod.rs` — `Node` with `claim_block`,
-  `claim_blocks`, `retry_claim`, `retry_allocate`, `free_block`,
-  `active_zone`.
-- `app/crow-diskdb/src/persistence/mod.rs` — `JournalClient`.
+- `app/crow-diskdb/src/zone/mod.rs` — `Zone` struct with
+  bitmap-scan `allocate`, `free`, `allocatable`, `derived_alloc_state`.
+- `app/crow-diskdb/src/node/disk.rs` — `ZoneDisk` with
+  `ActiveZoneContext`, `disk_allocate`, `rotate_active_zones`,
+  `rebuild_active_zones`.
+- `app/crow-diskdb/src/node/mod.rs` — `Node` with
+  `AllocateDiskContext`, `allocate_block`, `allocate_blocks`,
+  `free_block`, `refresh_disk_context`.
+- `app/crow-diskdb/src/persistence/mod.rs` — `DataGroupClient`.
 - `app/crow-diskdb/src/persistence/alloc.rs` — two-phase async
   allocation.
-- `app/crow-diskdb/src/persistence/free_batch.rs` — `FreeBatch` +
-  `FreeFlushLoop`.
-- `app/crow-diskdb/src/grpc/service.rs` — allocate/free/active_zone
-  handlers.
+- `app/crow-diskdb/src/persistence/free.rs` — immediate free
+  (single + multi-block).
+- `app/crow-diskdb/src/grpc/service.rs` — allocate/free handlers +
+  stubs for R73/R75 RPCs.
 - `app/crow-diskdb/src/grpc/mod.rs` — wire service struct.
 - `app/crow-diskdb/src/lib.rs` — module declarations.
-- `app/crow-diskdb/Cargo.toml` — add `crossbeam-queue`, `bincode`,
-  `rand`.
-- `app/crow-diskdb/src/main.rs` — wire `JournalClient`,
-  `FreeBatch`, `FreeFlushLoop`.
+- `app/crow-diskdb/src/config.rs` — add `zone_rotate_count`,
+  `cas_retry_limit` (default 100), `validate_owner_on_free`
+  (default false) to `StorageDefaults`. Reserve
+  `free_batch_enabled` (default false) and `free_flush_max_batch`
+  (default 256) for R79.
+- `app/crow-diskdb/Cargo.toml` — add `rand` (for retry random
+  start).
+- `app/crow-diskdb/src/main.rs` — wire `DataGroupClient`.
 
-**Complexity**: High. The CAS allocator and round-robin patterns are
-well-proven in the aioss reference. The new work is the journal-based
-persistence (D4): instead of writing a full `ZoneRecord` on every
-allocate, diskdb appends a small `BusyRecord` to the paxos data group.
-The slot-based key layout (from R70) enables prefix-scan replay (R73)
-without crow-kv slot feedback. The two-phase async pattern (sync CAS
-claim + async KV persist) requires careful rollback on failure.
+**Complexity**: High. The bitmap-scan allocator, per-bit CAS, and
+zone rotation patterns are well-proven in the buzz-cpp reference
+(`ddb_disk_zone::allocate_block`, `ddb_disk::rotate_active_zones`).
+The new work is the record-based persistence (§3.4): instead of
+saving a full bitmap to a local file on a schedule, diskdb writes a
+small `BusyBlockValue` to the paxos data group on each allocate and,
+on each free, deletes the `BusyBlockKey` and writes a `FreeBlockValue`
+(carries `previous_owner` for audit) in one `batch_write`. The
+`unit_offset`-based key layout (from R70) enables prefix-scan replay
+(R73) via crow-kv's slot ordering. The two-phase async pattern (sync
+bitmap claim + async KV persist) requires rollback on failure (clear
+the claimed bits). The CAS retry bound (§8) prevents indefinite
+spinning under heavy contention.
 
-**Dependencies**: R70 (core types, bitmap, config), R71 (NodeContainer,
-sync loop, server binary, SysdataClient). No dependency on R73–R77.
+**Dependencies**: R70 (core types, bitmap, config, key layout), R71
+(NodeContainer, sync loop, server binary, SysdataClient). No
+dependency on R73–R77. R79 (free batch) depends on this requirement's
+free path and `persist_free_batch`.
 
 **Acceptance**:
-- `Zone::claim()` performs CAS Active → Busy, advances `allocate_pos`,
-  sets usage bits, returns `(Segment, ClaimSnapshot)`. Unit test:
-  concurrent claims on the same zone serialize via CAS (only one
-  wins, others return `None` or retry).
-- `Zone::rollback()` restores `allocate_pos` and clears bits. Unit
-  test: rollback after a failed persist leaves the zone in its
-  pre-claim state.
-- `Zone::free()` clears bits and detects double-free. Unit test.
-- `ZoneDisk::disk_claim()` polls from active deque, falls back to
-  random scan, tries multiple zones on Full/Error.
-- `Node::claim_block()` round-robins across disks via `AtomicU32`.
-  `claim_blocks()` distributes across disks, respects
-  `exclude_disks`.
-- `allocate_block()` two-phase: Phase 1 sync claim, Phase 2 async
-  `BusyRecord` persist. On persist failure, rollback. Integration
-  test with in-process crow-kv: allocate a block, verify
-  `BusyRecord` appears in the data group at the expected journal key.
+- `Zone::allocate()` scans the bitmap from `last_pos_64`, finds a
+  free bit via `countr_one`, CAS-sets it, returns `AllocatedRange`.
+  Unit test: concurrent allocations on the same zone serialize via
+  per-bit CAS (no double-alloc, all bits unique).
+- `Zone::free()` clears bits and detects double-free. Unit test:
+  free an allocated bit, then free again → `false`.
+- `Zone::allocate(unit_count > 1)` finds consecutive free bits.
+  Unit test: allocate a multi-unit range, verify bits are contiguous.
+- `Zone::allocate()` respects the CAS retry bound: after
+  `cas_retry_limit` retries on one bit, falls through to the next
+  bit / word / zone. Unit test: force CAS contention, verify the
+  `zone.allocate.retry.cms.bit` counter increments and the allocate
+  does not spin indefinitely.
+- `ZoneDisk::disk_allocate()` round-robins over the active zone
+  set, rotates when exhausted via `rotate_active_zones()`. Unit
+  test: fill all zones in the active set, verify rotation picks new
+  zones.
+- `Node::allocate_block()` round-robins across disks within the
+  named disk-group. `allocate_blocks()` distributes across disks,
+  respects `exclude_disks` (anti-affinity within the disk-group).
+- `allocate_block()` two-phase: Phase 1 sync bitmap claim, Phase 2
+  async `BusyBlockValue` persist. On persist failure, rollback
+  (clear bits). Integration test with in-process crow-kv: allocate
+  a block, verify `BusyBlockValue` appears in the data group at the
+  expected `BusyBlockKey` with fields `{ unit_count, unit_size,
+  owner_chunk, state: Ok }`.
 - `allocate_blocks()` multi-block: one `batch_write` for all
-  `BusyRecord`s. Integration test: allocate N blocks, verify all
+  `BusyBlockValue`s. Integration test: allocate N blocks, verify all
   records in one batch.
-- `free_block()` clears bitmap locally, appends to `FreeBatch`,
-  returns immediately. `FreeFlushLoop` flushes every 500 ms or 256
-  entries. Integration test: free blocks, wait for flush, verify
-  `FreeRecord`s in the data group.
-- `active_zone()` re-adds a zone to the active deque. Unit test:
-  after allocate (zone removed from deque), `active_zone()` makes it
-  allocatable again.
-- gRPC handlers: `allocate_block`, `allocate_blocks`,
-  `condition_allocate_blocks`, `free_block`, `active_zone` functional
-  via gRPC. Error mapping correct (`NoSpace` → `ResourceExhausted`,
-  etc.).
+- `free_block()` clears bitmap locally, then persists
+  `FreeBlockValue` at `FreeBlockKey` and **deletes the
+  `BusyBlockKey`** in one `batch_write`. Integration test: free a
+  block, verify the `FreeBlockValue` appears in the data group
+  (carrying `previous_owner`) and the corresponding `BusyBlockKey` is
+  **deleted**.
+- `free_blocks()` multi-block: one `batch_write` per data group that
+  deletes each `BusyBlockKey` and writes each `FreeBlockValue`.
+  Integration test: free N blocks, verify all `FreeBlockValue`s in
+  one batch per group and `BusyBlockKey`s are deleted.
+- gRPC handlers: `allocate_blocks`, `free_blocks` functional via
+  gRPC. Error mapping correct (`NoSpace` → `ResourceExhausted`,
+  etc.). `rebuild_zone_bitmap`, `mark_block_suspect`,
+  `mark_block_corrupt` return `Unimplemented` (R73/R75).
 - `pixi run cargo fmt --all -- --check` and
   `pixi run cargo clippy --all-targets -- -D warnings` clean.
 - Relevant tests pass.

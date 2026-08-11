@@ -116,7 +116,7 @@ path.
 5. **Recalculation path** — create
    `app/crow-diskdb/src/metrics/recalc.rs`:
    - `RecalcEngine` — verifies in-memory metrics against the journal.
-     Uses `JournalClient` (from R72) and `RecoveryEngine` (from R73).
+     Uses `DataGroupClient` (from R72) and `RecoveryEngine` (from R73).
    - `recalc_zone(dg_id, bind, disk_uuid, zone_idx) ->
      Result<RecalcResult>`:
      a. Independently replay the journal for the zone (same algorithm
@@ -207,7 +207,7 @@ reporting. The crow-common integration follows the existing metrics
 patterns in `crow-kv`.
 
 **Dependencies**: R70 (types, proto), R71 (NodeContainer), R72
-(allocation engine, JournalClient), R73 (RecoveryEngine, replay
+(allocation engine, DataGroupClient), R73 (RecoveryEngine, replay
 logic). No dependency on R75–R77.
 
 **Acceptance**:

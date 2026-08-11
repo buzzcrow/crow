@@ -131,7 +131,7 @@ Every key field is a fixed-width integer (`u64`, `u32`) or a
 fixed-width identifier (`DiskId` = 16 bytes). There are no
 variable-length fields. `instance_id` is a `u64` (assigned at
 registration), not a string — the human-readable endpoint/hostname
-lives in the value (`InstanceMeta`), not the key. This makes the
+lives in the value (`InstanceValue`), not the key. This makes the
 entire encoding uniform: the decoder reads a known number of bytes per
 field, no length prefixes, no terminators, no sort-order edge cases.
 
@@ -249,7 +249,7 @@ Header for every key: `magic:1 | type_tag:2`.
 - **InstanceKey** — `instance_id:u64 BE`. Total 11 bytes.
   Tag `0x000A`.
   `instance_id` is a `u64` assigned at registration (the
-  human-readable endpoint lives in `InstanceMeta`, not the key).
+  human-readable endpoint lives in `InstanceValue`, not the key).
   Scan prefix `magic|0x000A` = all diskdb instances.
 
 `disk_id` 16-byte encoding is `high:u64 BE | low:u64 BE`.

@@ -4,15 +4,19 @@
 fn main() {
     let proto_dir = "src/proto";
 
-    // chunkdb_type.proto is currently empty (ChunkId moved to
-    // common_type.proto) but kept for future chunkdb types.
     let protos = [
+        "src/proto/error_code.proto",
         "src/proto/common_type.proto",
         "src/proto/diskdb_type.proto",
         "src/proto/diskdb_op.proto",
         "src/proto/diskdb_sys_op.proto",
         "src/proto/diskdb_service.proto",
         "src/proto/diskdb_sys_service.proto",
+        "src/proto/chunkdb_type.proto",
+        "src/proto/chunkdb_op.proto",
+        "src/proto/chunkdb_service.proto",
+        "src/proto/diskio_op.proto",
+        "src/proto/diskio_service.proto",
     ];
 
     tonic_build::configure()
@@ -50,6 +54,8 @@ fn main() {
         // Query response types (key + value fields flattened).
         .type_attribute("DiskInfo", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("DiskGroupInfo", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("RackInfo", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("NodeInfo", "#[derive(serde::Serialize, serde::Deserialize)]")
         // Common sysdata value types (serde for bincode/JSON storage).
         .type_attribute("RackValue", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("NodeValue", "#[derive(serde::Serialize, serde::Deserialize)]")
@@ -60,6 +66,20 @@ fn main() {
             "ZoneAllocationState",
             "#[derive(serde::Serialize, serde::Deserialize)]",
         )
+        .type_attribute("ErrorCode", "#[derive(serde::Serialize, serde::Deserialize)]")
+        // chunkdb enums.
+        .type_attribute("ECState", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("ChunkState", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("StripType", "#[derive(serde::Serialize, serde::Deserialize)]")
+        // chunkdb message types — serde for MirrorStrip and EcStrip
+        // (flat message types). ChunkStrip and Chunk contain a oneof
+        // (Strip) which prost nests in a submodule; serde on the
+        // container requires serde on the nested oneof enum, which
+        // prost-build's type_attribute cannot target reliably. These
+        // are RPC response types, not bincode storage types, so serde
+        // is not needed on them now.
+        .type_attribute("MirrorStrip", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute("EcStrip", "#[derive(serde::Serialize, serde::Deserialize)]")
         .compile_protos(&protos, &[proto_dir])
-        .expect("failed to compile diskdb protos");
+        .expect("failed to compile CROW protos");
 }

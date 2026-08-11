@@ -1,0 +1,116 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
+// chunkdb operation request/response messages.
+//
+// Errors are returned via gRPC status codes with `ErrorInfo` details
+// (see error_code.proto). Successful responses carry only data fields.
+
+syntax = "proto3";
+
+package crow.chunkdb.rpc;
+
+import "common_type.proto";
+import "chunkdb_type.proto";
+
+// ── Allocate ────────────────────────────────────────────────────
+
+// Allocate a new chunk with the specified strip layout.
+message AllocateChunkRequest {
+  crow.common.ChunkId chunk_id         = 1;
+  uint32              write_granularity = 2;  // write granularity in KB
+  uint32              strip_count       = 3;
+  StripType           strip_type        = 4;
+  uint32              data_num          = 5;  // EC data blocks (ignored for mirror)
+  uint32              code_num          = 6;  // EC parity blocks (ignored for mirror)
+}
+
+message AllocateChunkResponse {
+  Chunk chunk = 1;
+}
+
+// ── Append strips ───────────────────────────────────────────────
+
+// Append new strips to an existing active chunk.
+message AppendChunkRequest {
+  crow.common.ChunkId chunk_id    = 1;
+  uint32              strip_size  = 2;  // strip size in units
+  uint32              strip_count = 3;
+  StripType           strip_type  = 4;
+  uint32              data_num    = 5;
+  uint32              code_num    = 6;
+}
+
+message AppendChunkResponse {
+  Chunk chunk = 1;
+}
+
+// ── Query ───────────────────────────────────────────────────────
+
+message QueryChunkRequest {
+  crow.common.ChunkId chunk_id = 1;
+}
+
+message QueryChunkResponse {
+  Chunk chunk = 1;
+}
+
+// ── Seal ────────────────────────────────────────────────────────
+
+// Seal a chunk — no more appends allowed.
+message SealChunkRequest {
+  crow.common.ChunkId chunk_id    = 1;
+  uint32              seal_length = 2;  // sealed length in units
+}
+
+message SealChunkResponse {
+  Chunk chunk = 1;
+}
+
+// ── Delete ──────────────────────────────────────────────────────
+
+// Delete a chunk — marks it deleted and frees all backing segments.
+message DeleteChunkRequest {
+  crow.common.ChunkId chunk_id = 1;
+}
+
+message DeleteChunkResponse {
+  Chunk chunk = 1;
+}
+
+// Delete a range within a chunk (partial delete).
+message DeleteChunkRangeRequest {
+  crow.common.ChunkId chunk_id     = 1;
+  uint32              chunk_offset = 2;  // offset within chunk in units
+  uint32              chunk_size   = 3;  // size to delete in units
+}
+
+message DeleteChunkRangeResponse {
+}
+
+// ── Update strip ────────────────────────────────────────────────
+
+// Update a single strip within a chunk (e.g. after EC parity computation).
+message UpdateChunkStripRequest {
+  crow.common.ChunkId chunk_id    = 1;
+  uint32              strip_index = 2;
+  ChunkStrip          strip       = 3;
+}
+
+message UpdateChunkStripResponse {
+  Chunk chunk = 1;
+}
+
+// ── List ────────────────────────────────────────────────────────
+
+// List chunks with pagination. Returns chunks in ChunkId order.
+message ListChunksRequest {
+  crow.common.ChunkId start_token = 1;  // start after this chunk (exclusive)
+  uint32              partition   = 2;  // partition to scan (0 = all)
+  uint32              max_keys    = 3;  // max chunks to return
+}
+
+message ListChunksResponse {
+  repeated Chunk      chunks    = 1;
+  crow.common.ChunkId next_token = 2;  // empty if no more chunks
+}

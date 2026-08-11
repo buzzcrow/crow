@@ -2,6 +2,9 @@
 // Licensed under the Apache License, Version 2.0.
 
 // diskdb operation request/response messages.
+//
+// Errors are returned via gRPC status codes with `ErrorInfo` details
+// (see error_code.proto). Successful responses carry only data fields.
 
 syntax = "proto3";
 
@@ -17,12 +20,11 @@ message AllocateBlocksRequest {
   uint32 unit_count               = 2;  // units per allocation
   uint32 count                    = 3;  // how many allocations
   repeated crow.common.DiskId exclude_disk_ids = 4;  // negative disk hints
+  crow.common.ChunkId owner_chunk = 5;  // chunk that owns these allocations
 }
 
 message AllocateResponse {
-  bool   ok              = 1;
-  string error           = 2;
-  repeated Segment segments = 3;
+  repeated Segment segments = 1;
 }
 
 // ── Free ────────────────────────────────────────────────────────
@@ -32,9 +34,7 @@ message FreeBlocksRequest {
 }
 
 message FreeResponse {
-  bool   ok           = 1;
-  string error        = 2;
-  uint32 freed_count  = 3;  // how many succeeded
+  uint32 freed_count = 1;  // how many succeeded
 }
 
 // ── Query capacity stats ────────────────────────────────────────
@@ -45,9 +45,7 @@ message QueryCapacityStatsRequest {
 }
 
 message QueryCapacityStatsResponse {
-  bool   ok    = 1;
-  string error = 2;
-  repeated DiskGroupInfo disk_groups = 3;
+  repeated DiskGroupInfo disk_groups = 1;
 }
 
 // ── Get info (read-only, from diskdb synced cache) ──────────────
@@ -57,9 +55,7 @@ message GetDiskGroupInfoRequest {
 }
 
 message GetDiskGroupInfoResponse {
-  bool         ok    = 1;
-  string       error = 2;
-  DiskGroupInfo group = 3;
+  DiskGroupInfo group = 1;
 }
 
 message GetDiskInfoRequest {
@@ -69,7 +65,5 @@ message GetDiskInfoRequest {
 }
 
 message GetDiskInfoResponse {
-  bool       ok    = 1;
-  string     error = 2;
-  DiskInfo   disk  = 3;
+  DiskInfo disk = 1;
 }

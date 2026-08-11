@@ -61,3 +61,31 @@ message NodeValue {
   uint64   status_changed_at_ms = 6;
   optional uint64 temp_failure_since_ms = 7;
 }
+
+// ── Info types (key + value flattened, for RPC responses) ───────
+
+// Rack info for query responses — key fields + value fields flattened.
+// Replaces the former RackEntry { RackKey key; RackValue value }.
+message RackInfo {
+  // Key fields (from RackKey binary key).
+  uint64   dc_id   = 1;
+  uint64   rack_id = 2;
+  // Value fields (from RackValue).
+  HwStatus status  = 3;
+  repeated uint64 node_ids = 4;
+}
+
+// Node info for query responses — key fields + value fields flattened.
+// Replaces the former NodeEntry { NodeKey key; NodeValue value }.
+message NodeInfo {
+  // Key field (from NodeKey binary key).
+  uint64   node_id = 1;
+  // Value fields (from NodeValue).
+  optional uint64 dc_id         = 2;
+  optional uint64 rack_id       = 3;
+  HwStatus status               = 4;
+  uint32   last_used_dg_id      = 5;
+  repeated uint32 disk_group_ids = 6;
+  uint64   status_changed_at_ms = 7;
+  optional uint64 temp_failure_since_ms = 8;
+}

@@ -12,11 +12,28 @@ import "diskdb_sys_op.proto";
 
 // Targets group 0; served by a future admin/console component.
 service DiskdbAdminService {
-  rpc AddDiskGroup(AddDiskGroupRequest)         returns (AddDiskGroupResponse);
-  rpc AddDisk(AddDiskRequest)                   returns (AdminResponse);
-  rpc RemoveDisk(RemoveDiskRequest)             returns (AdminResponse);
-  rpc SetDiskStatus(SetDiskStatusRequest)       returns (AdminResponse);
+  // ── Rack ──────────────────────────────────────────────────────
+  rpc AddRack(AddRackRequest)                     returns (AdminResponse);
+  rpc RemoveRack(RemoveRackRequest)               returns (AdminResponse);
+  rpc SetRackStatus(SetRackStatusRequest)         returns (AdminResponse);
+
+  // ── Node ──────────────────────────────────────────────────────
+  rpc AddNode(AddNodeRequest)                     returns (AdminResponse);
+  rpc RemoveNode(RemoveNodeRequest)               returns (AdminResponse);
+  rpc SetNodeStatus(SetNodeStatusRequest)         returns (AdminResponse);
+
+  // ── Disk-group ────────────────────────────────────────────────
+  rpc AddDiskGroup(AddDiskGroupRequest)           returns (AddDiskGroupResponse);
+
+  // ── Disk ──────────────────────────────────────────────────────
+  rpc AddDisk(AddDiskRequest)                     returns (AdminResponse);
+  rpc RemoveDisk(RemoveDiskRequest)               returns (AdminResponse);
+  rpc SetDiskStatus(SetDiskStatusRequest)         returns (AdminResponse);
   rpc SetDiskGroupStatus(SetDiskGroupStatusRequest) returns (AdminResponse);
-  rpc SetNodeStatus(SetNodeStatusRequest)       returns (AdminResponse);
-  rpc Keepalive(KeepaliveRequest)               returns (KeepaliveResponse);
+
+  // ── Topology ──────────────────────────────────────────────────
+  rpc FetchHardware(FetchHardwareRequest)         returns (FetchHardwareResponse);
+
+  // ── Keepalive ─────────────────────────────────────────────────
+  rpc Keepalive(KeepaliveRequest)                 returns (KeepaliveResponse);
 }

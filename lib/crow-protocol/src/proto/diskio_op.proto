@@ -1,0 +1,45 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
+// diskio operation request/response messages.
+//
+// diskio is a future component that performs data I/O on disk blocks
+// allocated by diskdb. diskdb allocates blocks; diskio reads/writes
+// their contents. This protocol definition reserves the surface;
+// implementation is a follow-up.
+//
+// Errors are returned via gRPC status codes with `ErrorInfo` details
+// (see error_code.proto). Successful responses carry only data fields.
+
+syntax = "proto3";
+
+package crow.diskio.rpc;
+
+import "common_type.proto";
+
+// ── Write ───────────────────────────────────────────────────────
+
+message DiskWriteRequest {
+  crow.common.DiskId disk_id    = 1;
+  uint32             zone_index = 2;
+  uint64             offset     = 3;  // absolute offset on disk (bytes)
+  uint64             size       = 4;  // bytes to write
+  bytes              data       = 5;
+}
+
+message DiskWriteResponse {
+  uint64 written = 1;  // bytes written
+}
+
+// ── Read ────────────────────────────────────────────────────────
+
+message DiskReadRequest {
+  crow.common.DiskId disk_id    = 1;
+  uint32             zone_index = 2;
+  uint64             offset     = 3;  // absolute offset on disk (bytes)
+  uint64             size       = 4;  // bytes to read
+}
+
+message DiskReadResponse {
+  bytes data = 1;
+}

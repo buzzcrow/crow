@@ -8,8 +8,10 @@ defines **what diskdb is**, **why key choices were made**, and **how the
 component is structured**. Field-level details live in the proto files
 and Rust source; this doc covers decisions and architecture only.
 
-Reference (another project, not a port):
-`/cjdata/cpp/aioss/server/diskdb/doc/design.md`.
+References (other projects, not ports):
+- `/cjdata/cpp/aioss/server/diskdb/doc/design.md` — overall design.
+- `/cpp/buzz-cpp/src/app/buzz-disk-db` — zone allocator algorithm
+  (bitmap-scan, per-bit CAS, zone rotation).
 
 ---
 
@@ -24,9 +26,10 @@ rebuids in-memory structures from the KV records and group-0 metadata.
 
 Multiple diskdb instances run across a cluster, each managing a subset
 of disk-groups. diskdb provides fast block allocation/deallocation on
-physical disks using per-zone append-only allocators with usage bitmaps
-for O(1) block tracking. All state changes are durably persisted to
-CROW KV before being acknowledged to callers.
+physical disks using per-zone bitmap-scan allocators with per-bit CAS
+and a rotating cursor for O(1) block tracking. Freed space is reused
+immediately (no append-only position). All state changes are durably
+persisted to CROW KV before being acknowledged to callers.
 
 diskdb **allocates** blocks; it does **not** perform data I/O. Callers
 (a future object store, chunk service, etc.) write to the allocated
@@ -35,8 +38,9 @@ blocks themselves and tell diskdb when they are done (`active_zone`).
 **Language:** Rust. **Runtime:** tokio (async everywhere).
 
 **Core goals:**
-- **Fast allocation** — per-zone append-only allocators with in-memory
-  CAS serialization; no KV-level CAS on the hot path.
+- **Fast allocation** — per-zone bitmap-scan allocators with per-bit
+  CAS (no zone-level lock); freed space is reused immediately via
+  bitmap scan. No KV-level CAS on the hot path.
 - **Durability via CROW KV** — the paxos journal is the sole durable
   store; diskdb has no local WAL and is stateless on disk.
 - **Crash safety via record replay** — busy/free records in the paxos
@@ -49,14 +53,20 @@ blocks themselves and tell diskdb when they are done (`active_zone`).
 **Design philosophy:** "diskdb is a thin, stateless client of crow-kv."
 All consensus, replication, and durability are delegated to crow-kv.
 diskdb's job is allocation policy, disk health, and space accounting —
-nothing more.
+nothing more. One crow-kv extension is required: a `JournalScan` RPC
+(slot-range + key-prefix filter, returns ops in slot order) for fast
+crash recovery (§7, strategy 2). This is the sole extension; all other
+diskdb ↔ crow-kv interaction uses the existing scan / get / put /
+batch_write API.
 
 ## 2. Non-Goals (Design Envelope)
 
 - **No data I/O.** diskdb allocates blocks; it does not read/write
   block contents. A future diskio-like component does data I/O.
 - **No local WAL.** CROW KV's WAL is the sole durability mechanism.
-- **No consensus code.** diskdb is a pure client of crow-kv.
+- **No consensus code.** diskdb is a client of crow-kv, with one
+  extension: a `JournalScan` RPC for fast crash recovery (§7). All
+  other interaction uses the existing crow-kv API.
 - **No native SMR / zoned-namespace SSD support (v1).** Start with
   conventional HDD/SSD (`ZoneBlockDisk`); the zone is a logical concept
   that can later adopt to native zone APIs.
@@ -91,36 +101,99 @@ group 0**, not a hash. A table (vs hash) enables dynamic scaling: new
 paxos data groups can be added and disk-groups rebound without
 rehashing the whole keyspace.
 
+**Allocation routing:** the `AllocateBlocks` request carries
+`disk_group_id` (not `node_id`); CROW uses disk-groups instead of nodes
+as the allocation routing unit. Allocate is scoped to one disk-group;
+multi-block uses one `batch_write` on that group's bound paxos data
+group; atomic within the group. No cross-group multi-block allocate in
+v1 — the caller issues separate `AllocateBlocks` calls per group if
+needed. The caller (or a future placement service) picks the
+disk-group.
+
 ### 3.3 No CAS needed; exclusive ownership
 
 Each disk-group is owned by exactly one diskdb instance at a time (map
 in group 0). A zone in a disk-group therefore has a single writer — no
 KV-level CAS is required. A blind `Put` of the zone record is enough.
-The in-memory `ZoneAllocationState` CAS stays in diskdb (it serializes
-concurrent threads within one instance, not across instances).
+In-memory concurrency within one instance is handled by **per-bit CAS**
+on the usage bitmap (`compare_exchange` on 64-bit words), not a
+zone-level lock — multiple threads can allocate from the same zone
+concurrently. The `ZoneAllocationState` enum is a **derived** field
+for reporting (Active/Available/Full based on `used_count`), not a CAS
+state machine.
 
 ### 3.4 Records are the source of truth; bitmap is derived
 
 For each allocate or free, diskdb **cannot** update the full zone
 bitmap in KV — that would be a large write for the paxos group on every
-block. Instead, each allocate/free appends a small **busy/free record**
-to the paxos slots. The bitmap and `allocate_pos` are **derived** from
-the records — never written directly as a full bitmap on the hot path.
+block. Instead, each allocate writes a small **`BusyBlockValue`** at
+the `BusyBlockKey` (keyed by `unit_offset`), and each free writes a
+**`FreeBlockValue`** at the `FreeBlockKey`. The bitmap is **derived**
+from the records — never written directly as a full bitmap on the hot
+path. Freed space is reused immediately by the in-memory bitmap-scan
+allocator (no append-only `allocate_pos`).
+
+**Record model:**
+
+- **`BusyBlockValue`** — written on allocate. Carries `owner_chunk`
+  (the reverse reference to the block's owner), `unit_size`, and
+  `state`. **Deleted on free** (in the same `batch_write` that writes
+  the `FreeBlockValue`). On re-allocate (after a free), a new
+  `BusyBlockValue` is written at the same key (new owner,
+  `state = Ok`). Bounded by the number of currently-busy blocks (≤
+  disk capacity).
+- **`FreeBlockValue`** — written on free, in the same `batch_write`
+  that deletes the `BusyBlockKey`. Carries `previous_owner` (the
+  `owner_chunk` from the freed `BusyBlockValue`) for audit / scanner
+  cross-check. On re-allocate, the `FreeBlockKey` is deleted (the
+  block is busy again). **Transient** — deleted by compaction after
+  being merged into the `ZoneValue` bitmap. Bounded by the number of
+  frees since the last compaction.
+- **`ZoneValue`** — the compacted snapshot bitmap. Updated periodically
+  by compaction.
+
+**Current state determination** (no slot ordering needed):
+- A block is **busy** iff its `BusyBlockKey` exists.
+- A block is **free** otherwise. A `FreeBlockKey` may exist for a
+  not-yet-compacted free (carrying `previous_owner`); after compaction
+  merges the free into `ZoneValue` and deletes the `FreeBlockKey`,
+  neither key exists for that offset.
 
 The full `ZoneValue` is a **compacted snapshot** written periodically.
-Free records are eventually **deleted and merged** into the snapshot;
-since deletes span any disk and any zone, the merge is done by
-**batch** (collect expired free records across zones, write a new
-snapshot, delete the old free records in one `batch_write`).
+The ideal approach on free would be to update the bitmap in the
+`ZoneValue` and write the whole `ZoneValue` to KV. But `ZoneValue` is
+large (full bitmap), and frees are random across all zones and disks,
+so a per-free `ZoneValue` write is too expensive. Instead, each free
+writes a small `FreeBlockValue` and deletes the `BusyBlockKey` in one
+`batch_write`; later, compaction lists the free records for a zone (a
+prefix scan — the free records of one zone are contiguous in the
+crow-tree page, so this is efficient), merges them into the `ZoneValue`
+bitmap (clear the freed bits), writes the updated `ZoneValue` once, and
+deletes the free records in one `batch_write`.
 
-On crash/restart, diskdb reconstructs the in-memory zone state by
-replaying the busy/free records from the last snapshot forward. This
-mirrors how crow-kv's own WAL replays into the engine.
+On crash/restart, diskdb reconstructs the in-memory zone state using
+three complementary strategies (§7):
 
-**Resolved:** the replay scans records by key prefix — crow-kv's slot
-mechanism provides write ordering. A prefix scan returns all busy/free
-records for a zone in slot order (the order they were written). This
-keeps diskdb a pure client of crow-kv with no extension required.
+- **Strategy 1 (full scan rebuild)** — on-demand, via RPC/API; scans
+  all live busy/free records and rebuilds the bitmap from scratch. Used
+  for consistency checks or full rebuilds; not in the common code flow.
+- **Strategy 2 (journal scan replay)** — the primary restart path.
+  Loads the `ZoneValue` snapshot, then replays only the operations
+  written after `snapshot_slot`, in slot order, via a `JournalScan` RPC
+  (a crow-kv extension: slot-range + key-prefix filter, returns ops in
+  slot order). Fast because compaction keeps the uncompacted record set
+  small.
+- **Strategy 3 (compaction)** — ongoing maintenance. Merges free
+  records into `ZoneValue` and deletes only the free records. Keeps
+  strategy 2's replay fast.
+
+**Note on scan ordering:** a key prefix scan returns records in
+**lexicographic key order** (= `unit_offset` order), not slot order.
+`min_slot` on the crow-kv scan request is a read-freshness floor, not a
+record-slot filter. Strategy 1 works without slot ordering because the
+busy record's existence is the indicator — a block is busy iff its
+`BusyBlockKey` exists (not the write order). Strategy 2 requires the
+`JournalScan` extension to get slot-ordered replay.
 
 ### 3.5 Zone is a logical concept; sizes may vary
 
@@ -129,6 +202,15 @@ smaller (disk capacity is rarely an exact multiple of the zone size).
 Zone is a **logical concept** defined for easier implementation; it can
 later adopt to native zoned-namespace SSD or SMR HDD zone APIs, but
 currently no such devices are targeted — the zone is a rough mapping.
+
+**Word alignment rule:** each zone's `unit_capacity` must be a multiple
+of 64 (the 64-bit bitmap word size). All zones except the last have
+`unit_capacity = zone_size / unit_size`. The last zone has
+`unit_capacity = remaining_capacity / unit_size`, rounded down to a
+multiple of 64; the sub-64-unit tail (at most 63 units) is unallocated.
+Only the last zone may have a different size; all other zones on a disk
+are uniform. No bitmap masking, no padding bits — each zone's bitmap is
+sized to its own `unit_capacity`, which is word-aligned.
 
 ### 3.6 Common protocol crate; gRPC now, custom RPC later
 
@@ -164,7 +246,9 @@ value fields into one message; see §5 and §7.
 
 All sizes are in units (block unit size defined per-disk, default 1M).
 Record keys are disk-id-based (globally unique → reverse-lookup to the
-data group). No node_id/dg_id in record keys or in `Segment`.
+data group). No `node_id`/`disk_group_id` in record keys or in
+`Segment`. The `AllocateBlocks` request carries `disk_group_id` for
+routing (§3.2); it is not stored in record keys or `Segment`.
 
 ## 4. Architecture Overview
 
@@ -209,22 +293,39 @@ data group). No node_id/dg_id in record keys or in `Segment`.
 ### Protocol
 
 Proto definitions are split across multiple files in
-`lib/crow-protocol/src/proto/` (`common_type`, `chunkdb_type`,
-`diskdb_type`, `diskdb_op`, `diskdb_sys_op`, `diskdb_service`). See the
-proto files for field-level detail.
+`lib/crow-protocol/src/proto/` (`error_code`, `common_type`,
+`diskdb_type`, `diskdb_op`, `diskdb_sys_op`, `diskdb_service`,
+`diskdb_sys_service`, `chunkdb_type`, `chunkdb_op`, `chunkdb_service`,
+`diskio_op`, `diskio_service`). See the proto files for field-level
+detail.
 
-Two gRPC services:
-- **`DiskdbService`** (served by the diskdb server): `AllocateBlocks`,
-  `FreeBlocks`, `QueryCapacityStats`, `GetDiskGroupInfo`, `GetDiskInfo`.
+Three gRPC services (diskdb now; chunkdb and diskio are future
+components with protocol surfaces reserved):
+- **`DiskdbService`** (served by the diskdb server): `AllocateBlocks`
+  (carries `disk_group_id`, not `node_id`; carries `exclude_disks` for
+  anti-affinity), `FreeBlocks`, `QueryCapacityStats`,
+  `GetDiskGroupInfo`, `GetDiskInfo`, `RebuildZoneBitmap` (on-demand
+  full-scan rebuild, strategy 1, §7), `MarkBlockSuspect`,
+  `MarkBlockCorrupt` (per-block state transitions, §7).
 - **`DiskdbAdminService`** (targets group 0; served by a future
-  admin/console): `AddDiskGroup`, `AddDisk`, `RemoveDisk`,
-  `SetDiskStatus`, `SetDiskGroupStatus`, `SetNodeStatus`.
+  admin/console): `AddRack`, `RemoveRack`, `SetRackStatus`, `AddNode`,
+  `RemoveNode`, `SetNodeStatus`, `AddDiskGroup`, `AddDisk`,
+  `RemoveDisk`, `SetDiskStatus`, `SetDiskGroupStatus`,
+  `FetchHardware`, `Keepalive`.
+- **`ChunkdbService`** (future chunkdb server): `AllocateChunk`,
+  `AppendChunk`, `QueryChunk`, `SealChunk`, `DeleteChunk`,
+  `DeleteChunkRange`, `UpdateChunkStrip`, `ListChunks`.
+- **`DiskioService`** (future diskio server): `DiskWrite`, `DiskRead`.
 
 Key protocol decisions: integer IDs throughout (no string UUIDs);
-`DiskId` is globally unique (no `node_id`/`disk_group_id` in `Segment`);
-`Segment.owner_chunk` (192-bit `ChunkId`) replaces the former `tag`;
-all sizes are unit-based; `NodeInfo` is not a protocol level (node
-exists in group 0 only).
+`DiskId` is globally unique (no `node_id`/`disk_group_id` in `Segment`
+or record keys — `disk_group_id` is in the `AllocateBlocks` request for
+routing only); `Segment.owner_chunk` (192-bit `ChunkId`) replaces the
+former `tag`; all sizes are unit-based; `NodeInfo`/`RackInfo` are RPC
+response types for `FetchHardware` (node/rack exist in group 0 only,
+not as standalone services); errors are returned via gRPC status codes
+with `ErrorInfo` details (`error_code.proto`), not `bool ok + string
+error` in response bodies.
 
 ## 5. Group-0 Sysdata Schema
 
@@ -242,23 +343,23 @@ scans truncate the field bytes at a hierarchy boundary.
 
 ```
 # Physical hierarchy (v1: flat; DC/rack reserved)
-RackKey      { dc_id, rack_id }                  -> RackMeta
+RackKey      { dc_id, rack_id }                  -> RackValue
 
 # Node metadata
-NodeKey      { node_id }                         -> NodeMeta
+NodeKey      { node_id }                         -> NodeValue
 
 # Disk-group metadata (logical, belongs to one node)
-DiskGroupKey { node_id, disk_group_id }          -> DiskGroupMeta
+DiskGroupKey { node_id, disk_group_id }          -> DiskGroupValue
 
 # Disk metadata (physical, belongs to one node)
-DiskKey      { node_id, disk_group_id, disk_id } -> DiskMeta
+DiskKey      { node_id, disk_group_id, disk_id } -> DiskValue
 
 # Maps (the two core tables)
-OwnerMapKey  { node_id, disk_group_id }          -> {instance_id, lease_expiry}
-BindMapKey   { node_id, disk_group_id }          -> {store_id, group_id}
+OwnerMapKey  { node_id, disk_group_id }          -> OwnerEntry
+BindMapKey   { node_id, disk_group_id }          -> BindEntry
 
 # diskdb instance registry
-InstanceKey  { instance_id }                     -> InstanceMeta
+InstanceKey  { instance_id }                     -> InstanceValue
 ```
 
 `node_id`, `dc_id`, `rack_id`, and `instance_id` are `u64`;
@@ -267,9 +368,16 @@ identifier (16 bytes, `high:u64 BE | low:u64 BE`). All key fields are
 fixed-width — no variable-length fields. Exact byte layouts and
 prefix constructors are defined in
 `doc/design/protocol/design-crow-key.md` and implemented in
-`lib/crow-protocol/src/key/`. Field details for the value side live in
-the Rust source (`types/disk.rs`, `types/disk_group.rs`,
-`types/node.rs`, `types/instance.rs`).
+`lib/crow-protocol/src/key/`.
+
+Value types are protobuf messages defined in
+`lib/crow-protocol/src/proto/` (`common_type.proto` for
+`RackValue`/`NodeValue`, `diskdb_type.proto` for
+`DiskValue`/`DiskGroupValue`). `OwnerEntry`, `BindEntry`, and
+`InstanceValue` are Rust structs (not yet proto messages — they are
+internal sysdata types not exposed via gRPC; serialized via prost
+bytes in the KV value). Proto types are used directly in Rust per §3.8
+— no Rust type duplication.
 
 **Note**: zones are NOT stored in group 0. A zone is created when its
 disk is added, and its state (records + snapshot) lives on the
@@ -320,7 +428,8 @@ No `node_id`/`disk_group_id` in record keys.
 # Busy block (on allocate; deleted on free)
 BusyBlockKey { disk_id, zone_index, unit_offset }  -> BusyBlockValue
 
-# Free block (on free)
+# Free block (on free, in the same batch_write that deletes the BusyBlockKey;
+# transient — deleted by compaction)
 FreeBlockKey  { disk_id, zone_index, unit_offset }  -> FreeBlockValue
 
 # Zone (compacted snapshot, periodic)
@@ -336,87 +445,221 @@ without deserialization. Exact byte layouts and prefix constructors
 `doc/design/protocol/design-crow-key.md`; value field details are in
 `diskdb_type.proto`.
 
-Design decisions:
+### Value schemas
+
+- **`BusyBlockValue`**:
+  - `unit_count: u32` — number of units in this allocation (≥ 1;
+    multi-unit allocations span consecutive offsets).
+  - `unit_size: u32` — size of one unit in bytes (e.g. 1 MB). Carried
+    per-block so the data-IO layer knows the block's granularity
+    without a separate lookup.
+  - `owner_chunk: ChunkId` (192-bit) — reverse reference to the
+    block's owner (the chunk that holds this block's data). Needed for
+    recovery and other logic.
+  - `state: BlockState` — per-block I/O-behavior state enum:
+    `Ok` (normal; default on allocate), `Suspect` (data may be
+    unreadable; data-IO layer tries with a timeout, falls back to
+    mirror/EC rebuild), `Corrupt` (data confirmed unreadable; data-IO
+    layer skips read, rebuilds from EC/mirror). Updated by background
+    paths (sync, health probe, scanner) or via `MarkBlockSuspect` /
+    `MarkBlockCorrupt` admin RPCs — **not** by the allocate hot path.
+- **`FreeBlockValue`**:
+  - `unit_count: u32` — number of units freed (matches the
+    corresponding `BusyBlockValue.unit_count`).
+  - `previous_owner: ChunkId` (192-bit) — the `owner_chunk` from the
+    `BusyBlockValue` that was freed (carried in the `Segment` on the
+    free request; no KV read needed in v1). Carried for audit /
+    scanner cross-check. No `state` field — a free block has no data.
+- **`ZoneValue`**:
+  - `usage_bitmap: bytes` — the full zone bitmap (one bit per unit;
+    bit set = busy, bit clear = free). Sized to the zone's
+    `unit_capacity` (multiple of 64 bits per §3.5).
+  - `snapshot_slot: u64` — the slot at which this snapshot was written.
+    Strategy 2 (journal scan replay) replays operations after this slot.
+  - `crc32: u32` — CRC32 checksum over `usage_bitmap` for integrity
+    verification (§12 scanner).
+
+### Record model
+
 - A busy/free entry can span multiple units (`unit_count` ≥ 1).
-- On free, the busy entry is **deleted** and a free entry is written.
-  Only one of busy/free exists at a time per offset.
-- `ZoneValue` carries a CRC32 checksum (appended to `usage_bitmap`)
-  for integrity verification.
+- **On free, the `BusyBlockKey` is deleted** and a `FreeBlockValue` is
+  written at `FreeBlockKey` in the same `batch_write`. The
+  `FreeBlockValue` carries `previous_owner` (the `owner_chunk` from the
+  freed `BusyBlockValue`) for audit.
+- On re-allocate, the `FreeBlockKey` is deleted and a new
+  `BusyBlockValue` is written at the `BusyBlockKey` (new owner,
+  `state = Ok`).
+- **Current state determination** (no slot ordering needed): a block is
+  **busy** iff its `BusyBlockKey` exists; otherwise it is **free**. A
+  `FreeBlockKey` may exist for a not-yet-compacted free (carrying
+  `previous_owner`); after compaction, neither key exists for that
+  offset.
+- `ZoneValue` carries a CRC32 checksum for integrity verification.
 
-### Replay algorithm
+### Three recovery strategies
 
-On startup / ownership transfer, for each zone:
-1. Load the latest `ZoneValue` snapshot (if any).
-2. Scan the zone by key prefix for all busy/free records with crow-kv
-   slot > `snapshot_slot`.
-3. Apply busy records (set bits, advance `allocate_pos`) and free
-   records (clear bits) to the snapshot's bitmap.
-4. Rebuild the in-memory zone: `allocate_pos`, `usage_bits`,
-   `alloc_state`, active deque membership.
+diskdb uses three complementary strategies for crash recovery and
+maintenance. All three belong in the design, each in its role.
 
-Replay scans by key prefix (simple, no crow-kv change). crow-kv's slot
-mechanism provides write ordering — prefix-scan returns records in slot
-order, which is the order they were written.
+**Strategy 1 — full scan rebuild (on-demand, via RPC/API).**
 
-### Snapshot compaction
+Scan all live `BusyBlockKey`s for a zone and rebuild the bitmap from
+scratch. No snapshot needed. For each offset: if a `BusyBlockKey`
+exists, the bit is set (busy); otherwise the bit is clear (free). No
+slot ordering needed — the busy record's existence is the indicator.
+(`FreeBlockKey`s carry `previous_owner` audit info but are not needed
+for state determination.) **Not in the common code flow** — provided
+as an on-demand operation via the `RebuildZoneBitmap` RPC and API, used
+for consistency checks (verify the in-memory bitmap matches the
+records) or a full rebuild (e.g. after corruption, or when no
+`ZoneValue` snapshot exists). Works with the existing `scan` API. Cost
+= O(all live busy records per zone). Too slow for regular restart with
+many zones, but correct and always available.
 
-Periodically (or when the record count for a zone exceeds a threshold),
-diskdb compacts:
-1. Compute the current bitmap + `allocate_pos` from the in-memory state.
-2. Write a new `ZoneValue` snapshot with `snapshot_slot = current_max_slot`
-   (CRC32 checksum computed).
-3. Delete all busy/free records with slot ≤ `snapshot_slot` in one
-   `batch_write` (the batch merge — deletes span any disk/zone, so
-   multiple zones' expired records are collected and deleted together).
+**Strategy 2 — journal scan replay (fast restart, primary path).**
+
+Load the `ZoneValue` snapshot, then replay only the operations (Put /
+Delete) written after `snapshot_slot`, in slot order, and apply them to
+the snapshot bitmap. One scan per disk-group (or per disk) covers all
+its zones — batch recovery, low overhead. **Requires a `JournalScan`
+crow-kv RPC** (slot-range + key-prefix filter, returns ops in slot
+order). This is the sole crow-kv extension diskdb needs. Fast because
+compaction (strategy 3) keeps the uncompacted record set small.
+
+**Strategy 3 — compaction (ongoing maintenance).**
+
+Periodically (or when the free-record count for a zone exceeds a
+threshold), merge free records into the `ZoneValue` bitmap and delete
+the free records in one `batch_write`. This keeps the uncompacted
+record set small, so strategy 2's replay is fast. Uses the existing
+`scan` + `batch_write` API — no crow-kv extension needed. Batch by
+`disk_id` prefix: one scan covers all zones on a disk (free records of
+one zone are contiguous in the tree page). Only free records are
+deleted; busy records for live blocks are untouched (busy records for
+freed blocks were already deleted on free).
+
+Compaction steps:
+1. Scan free records for a zone by key prefix (the free records of one
+   zone are contiguous in the crow-tree page, so this is efficient).
+2. Merge the free records into the in-memory `ZoneValue` bitmap (clear
+   the freed bits).
+3. Write a new `ZoneValue` snapshot with `snapshot_slot =
+   current_max_slot` (CRC32 checksum computed).
+4. Delete the free records in one `batch_write`.
+
+### How the strategies work together
+
+- **Steady state**: allocate writes `BusyBlockValue` (and deletes any
+  prior `FreeBlockKey` for that offset — re-allocate clears the free
+  marker). Free deletes the `BusyBlockKey` and writes `FreeBlockValue`
+  at `FreeBlockKey` in one `batch_write` (carries `previous_owner` for
+  audit). Compaction (strategy 3) runs periodically, merging free
+  records into `ZoneValue` and deleting the free records.
+- **Restart**: load `ZoneValue` snapshot → journal scan (strategy 2)
+  replays post-`snapshot_slot` operations in slot order → apply to
+  bitmap. Fast because compaction kept the record set small.
+- **On-demand (RPC/API)**: full scan (strategy 1) rebuilds the bitmap
+  from all live records. Triggered by an operator or the §12 scanner
+  for a consistency check or full rebuild — not in the common code flow.
 
 ## 8. Allocation Algorithm
 
-### Zone-level claim (sync, in-memory)
+The algorithm follows the buzz-cpp reference
+(`/cpp/buzz-cpp/src/app/buzz-disk-db`): bitmap-scan with a rotating
+cursor, per-bit CAS, and disk-level zone rotation. The only
+difference from buzz-cpp is persistence (CROW writes
+`BusyBlockValue`/`FreeBlockValue` to the KV journal per-allocation
+instead of saving the full bitmap to a local file).
 
-Append-only with CAS serialization:
-1. CAS `ZoneAllocationState` Active → Busy (only one thread wins).
-2. Validate size alignment; check `allocate_pos + count ≤ max`.
-3. Set bits in `usage_bits`; advance `allocate_pos`.
-4. Return `Segment` + `ClaimSnapshot`. Zone stays Busy until
-   `release()` or `rollback()`.
+### Zone-level allocate (sync, in-memory)
 
-### Disk-level claim (sync)
+Bitmap-scan with per-bit CAS (no zone-level lock):
+1. Check zone health is Healthy and `used_count < unit_capacity`.
+2. Scan the bitmap from `last_pos_64` (rotating cursor), wrapping
+   around. For each 64-bit word, use `countr_one` to find the first
+   zero bit (hardware-optimized).
+3. CAS-set the bit via `compare_exchange` on the 64-bit word. On CAS
+   failure (another thread set the same bit), re-scan the same word.
+   **CAS retry bound:** per-bit CAS is capped at 100 retries (config
+   `cas_retry_limit`, default 100); on exhaustion, fall through to the
+   next bit / word / zone. This prevents indefinite spinning under heavy
+   contention. The `zone.allocate.retry.cms.bit` counter (§11) is
+   incremented on each retry as the key operational signal for
+   lock-free allocator contention.
+4. For `unit_count > 1`: find `unit_count` consecutive zero bits
+   (may span words), CAS-set each; on any CAS failure, clear bits
+   already set in this attempt and continue scanning.
+5. On success: update `last_pos_64`, increment `used_count`, return
+   `AllocatedRange { unit_offset, unit_count }`. No zone-level state
+   change — other threads can allocate concurrently.
 
-1. Poll a zone from the disk's `active_zones` deque.
-2. If empty, scan for an allocatable zone (random start).
-3. Claim from the zone; on success return `(ZoneRef, Segment,
-   ClaimSnapshot)`.
+### Disk-level allocate (sync) — rotating active-zone-set
 
-### Node-level round-robin (sync)
+1. Load the current `ActiveZoneContext` (RCU read — `Arc` clone, no
+   lock held). This is a small set of `zone_rotate_count` zones.
+2. Round-robin over the active set via `pos_v_zone_ctx.fetch_add(1)`.
+3. Call `zone.allocate(unit_count)` on each zone. On success, return.
+4. If all zones in the active set fail, call `rotate_active_zones()`:
+   under a write lock, scan all zones from a rotating `pos_v_zone`
+   start, pick the next `zone_rotate_count` allocatable zones, swap
+   in a new `ActiveZoneContext` (RCU publish).
+5. Retry with the new context (up to `zone_num / zone_rotate_count
+   + 2` loops).
 
-`AtomicU32` iterator; each allocation increments and selects
-`iterator % num_disks`. Multi-block: `fetch_add(count)` distributes
-across disks.
+### Round-robin across disks within the named disk-group (sync)
+
+The `AllocateBlocks` request carries `disk_group_id` (§3.2); allocate
+is scoped to one disk-group — diskdb never round-robins across
+disk-groups. Within that named disk-group, an `AtomicU64` iterator
+(`pos_v_disk_ctx`) round-robins across disks: each allocation
+increments and selects `iterator % num_disks` from the
+`AllocateDiskContext` (RCU context of allocatable disks within the
+named disk-group). Multi-block: `fetch_add(count)` distributes across
+disks within the group. `exclude_disks` (anti-affinity, per-disk — skip
+a disk that just failed) is applied within the named disk-group.
+Multi-block uses one `batch_write` on the disk-group's bound paxos data
+group; atomic within the group. No cross-group multi-block allocate in
+v1.
 
 ### Two-phase async allocation
 
-1. **Phase 1 (sync)**: CAS claim (nanoseconds). Zone is Busy.
+1. **Phase 1 (sync)**: bitmap-scan allocate (nanoseconds). Bits are
+   set in `usage_bits` via per-bit CAS. No zone-level lock — other
+   threads can allocate concurrently.
 2. **Phase 2 (async)**: `.await` on crow-kv `Put` of the
-   `BusyBlockValue` to the data group. On success: `release()` (Busy
-   → Active), return `Segment`. On failure: `rollback()` (undo + Busy
-   → Active), return error.
+   `BusyBlockValue` to the data group at `BusyBlockKey { disk_id,
+   zone_idx, unit_offset }`. On success: return `Segment`. On
+   failure: `zone.free(unit_offset, unit_count)` (clear the bits
+   that were set in Phase 1), return error.
 
-For multi-block: Phase 1 claims all zones (sync), Phase 2 uses one
-`batch_write` (one async round-trip).
+For multi-block: Phase 1 allocates all blocks (sync, may span
+multiple zones/disks within one disk-group), Phase 2 uses one
+`batch_write` per data group (one async round-trip per group).
 
-### Free (batched)
+### Free (immediate in v1)
 
-1. Clear bits in local `usage_bits`; append to `FreeBatch`; return
-   immediately.
-2. Background loop flushes `FreeBatch` to the data group periodically
-   (default 500 ms / 256 entries) as `FreeBlockValue`s (the
-   corresponding `BusyBlockValue`s are deleted).
+v1 does **not** batch frees — each free deletes the `BusyBlockKey` and
+writes its `FreeBlockValue` to the bound data group immediately via one
+`batch_write` (per the record model in §7). No `FreeBatch`, no timer,
+no background flush loop. This is simpler, avoids the
+ghost-allocation-on-crash window, and matches the "records are the
+source of truth" model directly.
 
-### Zone activation (internal)
+Free batching (grouping many frees into one `batch_write` per flush,
+triggered by batch size — no timer) is an optimization for
+high-free-throughput workloads, tracked as R79. When R79 ships,
+graceful shutdown drains and flushes the `FreeBatch` before exit; on
+ungraceful shutdown, unflushed frees are left for the §12
+ghost-allocation scanner to reconcile.
 
-A zone is re-added to the disk's active deque after the caller finishes
-writing. This is internal to diskdb — no `ActiveZone` RPC. Prevents
-over-committing write-once zones.
+### Zone rotation (internal)
+
+The disk maintains a small active zone set (`zone_rotate_count`
+zones). When all zones in the set are exhausted (no free bits), the
+set rotates: a new set of allocatable zones is selected from a
+rotating scan position and published via RCU. This spreads wear
+across zones and avoids bias toward low-index zones. This is
+internal to diskdb — no `ActiveZone` RPC.
 
 ## 9. State Machines
 
@@ -424,31 +667,46 @@ over-committing write-once zones.
 
 Shared enum `HwStatus`: `Init`, `Up`, `Maintenance`, `Suspect`,
 `Missing`, `Bad`, `Offline` (ordered by severity). Effective status =
-`max(node, group, disk)`. Allocations require effective `Up`; frees
-allow `Up`, `Maintenance`, or `Suspect`.
+`max(node, group, disk)` — a three-level check (node + disk-group +
+disk). The reference impl checks two levels (node + disk); CROW adds
+the disk-group layer, which is new. Allocations require effective `Up`;
+frees allow `Up`, `Maintenance`, or `Suspect`.
 
 Transitions:
 - Init → {Up, Offline, Maintenance} on startup (load from group 0).
 - Up → Suspect (3 missed syncs).
 - Up → Offline / Maintenance (operator).
 - Suspect → Up (sync recovers) or → Missing (cannot probe) or → Offline.
-- Missing → Bad (confirmed) or → Up (rediscovered).
+- Missing → Bad (confirmed) or → Up (rediscovered). **Missing is
+  detected by absence from a group-0 sync response** — a disk/node
+  absent from the sync response is transitioned to `Missing` (then to
+  `Bad` after confirmation or `Up` if rediscovered).
 - Offline ↔ Maintenance (operator).
 - Offline → Up (operator).
 
-### Zone allocation state machine
+### Zone allocation state (derived, not a CAS state machine)
 
-- **ZoneAllocationState** (lifecycle): `Active`, `Available`, `Full`.
-  Transitions via CAS. A zone is allocatable only when `Active` or
-  `Available` (has space). Zones do not have a separate health state —
-  they inherit the disk's `HwStatus`.
+- **ZoneAllocationState** is a **derived** enum for reporting only:
+  `Active` (`used_count == 0`), `Available` (0 < `used_count` <
+  `unit_capacity`), `Full` (`used_count == unit_capacity`). There is
+  no CAS state machine — allocation concurrency is handled by per-bit
+  CAS on the usage bitmap. A zone is allocatable when it is Healthy
+  (inheriting the disk's `HwStatus`) and `used_count < unit_capacity`.
+  The `Full` state is transient: a free clears bits, making the zone
+  `Available` again immediately (freed space is reused by the
+  bitmap-scan allocator).
 
 ## 10. Disk Status Management
 
 diskdb's first major component:
-- **Sync with group 0** (13 s default): fetch latest metadata; update
+- **Sync with group 0** (fixed 10 s interval, same on success and
+  failure — no error back-off in v1): fetch latest metadata; update
   group 0 first when local status changes (disk found, disk bad, disk
-  added/removed).
+  added/removed). An **epoch/revision guard** skips a sync response
+  whose epoch ≤ current (prevents stale overwrites). A disk/node
+  **absent from a sync response** is transitioned to `Missing` (then to
+  `Bad` after confirmation or `Up` if rediscovered) — this is how
+  `Missing` is detected (§9).
 - **Disk discovery + health probing**: discover local disks (config-
   driven for v1; `/dev` scan later); probe health (existence, size,
   basic read/write test). Source of truth for disk identity/capacity is
@@ -457,17 +715,35 @@ diskdb's first major component:
   yet): on disk failure, transition to Suspect, update group 0,
   trigger recovery. The recovery flow is designed in a follow-up
   requirement.
+- **Disk-add initialization flow**: the operator adds a disk in group 0
+  (via `AddDisk` on `DiskdbAdminService`), which writes `DiskValue` to
+  group 0. On the next sync tick, diskdb fetches the updated `DiskValue`
+  and sees a disk not yet in its in-memory state. diskdb then
+  initializes the disk: creates the in-memory `ZoneDisk` with one `Zone`
+  per zone (zone count = `capacity / zone_size`, last zone sized per
+  §3.5's word-alignment rule), and writes baseline `ZoneValue` records
+  (empty bitmap, `snapshot_slot = 0`) to the bound data group at
+  `ZoneKey { disk_id, zone_index }` in one `batch_write`. These are the
+  replay baselines (§7); subsequent allocates write `BusyBlockValue`
+  records on top. Group 0 holds disk metadata only; zone records live
+  on the bound data group.
 
-**Open question (design time):** a zookeeper-like notify/watch where
-group 0 pushes refresh notifications to registered diskdb endpoints.
-Each diskdb registers its endpoint on sync; group 0 notifies on change.
-This needs a design review of how a paxos group can support watch/notify
-(not a native crow-kv feature today) — may defer to a follow-up if the
-polling cost is acceptable.
+**Follow-up — group-0 notify/watch (R78):** a future follow-up adds a
+watch/notify mechanism where group 0 pushes hw-status-change and
+ownership-change notifications to registered diskdb endpoints (each
+diskdb registers its endpoint on sync). This replaces polling for
+status changes; polling stays as a safety net with an increased
+interval. Tracked as R78 (`doc/backlog/R78-diskdb-group0-notify-watch.md`).
+v1 ships with fixed-interval polling.
 
 ## 11. Space Metrics
 
-diskdb's third major component:
+diskdb's third major component. Metrics must show **internal status**
+(gauges reflecting current state) and a **latency hierarchy** (where
+time is spent, broken down by layer) so operators can diagnose both
+capacity problems and performance bottlenecks.
+
+**Space accounting:**
 - **Per-disk** — capacity, busy, free, active zone count.
 - **Per-disk-group** — aggregated from disks.
 - **Per-zone** — dive into busy/free blocks (for the console zone
@@ -477,19 +753,106 @@ diskdb's third major component:
   path replays the records to verify the bitmap matches the derived
   statistics, detecting drift.
 
+**Disk-group-level usage summary on keepalive:** diskdb piggybacks a
+per-disk-group usage summary (`capacity_bytes`, `used_bytes`,
+`free_bytes`, `disk_count`, `allocatable_disk_count`) on the keepalive
+message sent to group 0 on each sync tick. Group 0 maintains this at
+the disk-group level (`DiskGroupUsageKey { disk_group_id }`). The
+console reads this for cluster-wide overview; per-disk/per-zone
+drill-down is via the `QueryCapacityStats` API (R74). The summary is
+derived (recomputed from the in-memory bitmap on each tick), not a
+source of truth.
+
+**Metrics categories:**
+
 Metrics reuse `crow-common`'s metrics module. Per-disk hot-path
 counters (atomics) flush into the crow-common registry at reporting
-intervals. Gauge counters cover capacity and busy/free for later UI
-display.
+intervals.
+
+**1. Counters (events, monotonically increasing):**
+- per-zone: `allocate.count`, `free.count`,
+  `allocate.retry.cms.bit.count` (contention signal — ties to §8 CAS
+  retry bound)
+- per-disk: `allocate.count`, `free.count`
+- per-disk-group: `allocate.count`, `free.count`
+- per-instance: `sync.count`, `sync.error.count`,
+  `compaction.count`, `compaction.error.count`,
+  `free_batch.flush.count` (R79, when batching enabled)
+
+**2. Gauges (internal status, current state snapshot):**
+- per-disk: `capacity_bytes`, `used_bytes`, `free_bytes`, `used_pct`,
+  `zone_count`, `active_zone_count`
+- per-zone: `unit_capacity`, `used_count`, `free_count`,
+  `alloc_state` (derived: Active/Available/Full), `hw_status`
+  (inherited from disk)
+- per-disk-group: `disk_count`, `allocatable_disk_count`,
+  `capacity_bytes`, `used_bytes`, `free_bytes`
+- per-instance: `owned_disk_group_count`, `degraded` (0/1),
+  `free_batch_len` (current pending frees, R79),
+  `uncompacted_free_record_count` (per zone — compaction backlog),
+  `last_sync_slot` (group-0 sync frontier),
+  `last_sync_age_secs` (time since last successful sync)
+
+**3. Latency hierarchy (where time is spent, per layer):**
+
+The allocate/free paths are two-phase (sync bitmap claim + async KV
+persist). The latency hierarchy breaks down each phase so operators
+can see whether the bottleneck is the in-memory allocator or the KV
+persist round-trip.
+
+- **Allocate path:**
+  - `allocate.rpc.latency_us` — total RPC latency (handler entry →
+    response). Top of the hierarchy.
+  - `allocate.bitmap_scan.latency_us` — Phase 1 sync: time in the zone
+    bitmap-scan + per-bit CAS (includes CAS retries). Nanoseconds in
+    the common case; spikes indicate contention.
+  - `allocate.kv_persist.latency_us` — Phase 2 async: time awaiting
+    the `batch_write` of `BusyBlockValue` to the data group. Dominant
+    latency component (one paxos round-trip).
+  - `allocate.zone_rotate.latency_us` — time in `rotate_active_zones`
+    when the active set is exhausted.
+- **Free path:**
+  - `free.rpc.latency_us` — total RPC latency.
+  - `free.bitmap_clear.latency_us` — time in the per-bit CAS clear.
+  - `free.kv_persist.latency_us` — time awaiting the `batch_write` of
+    `FreeBlockValue` (immediate in v1; batch flush in R79).
+- **Sync path:**
+  - `sync.latency_us` — total `sync_once` latency.
+  - `sync.read_group0.latency_us` — time reading from group 0.
+  - `sync.apply_changes.latency_us` — time applying changes to
+    in-memory state.
+- **Compaction path:**
+  - `compaction.latency_us` — total compaction latency per zone.
+  - `compaction.scan_free.latency_us` — time scanning free records.
+  - `compaction.merge_bitmap.latency_us` — time merging free records
+    into the `ZoneValue` bitmap (in-memory).
+  - `compaction.kv_persist.latency_us` — time awaiting the
+    `batch_write` (new `ZoneValue` + delete free records).
+
+Latency metrics use `LatencyHistogram` (percentile precision) for hot
+paths (allocate/free bitmap scan, KV persist) and `LatencySummary`
+(count + sum + max + avg) for cold paths (sync, compaction, zone
+rotate) — matching crow-kv's convention. Gauges are derived snapshots
+updated on the reporting interval, not hot-path writes. `degraded` and
+`last_sync_age_secs` are the key health indicators for alerting.
 
 ## 12. Background Scanner
 
 - **Ghost-allocation detection** — allocated in KV records but freed
-  locally (crash before free batch flush). Detected by comparing
-  in-memory state against the records.
-- **allocate_pos drift detection** — in-memory position drifts from
-  the record-derived position; reload from records.
-- **Record integrity** — CRC check on zone snapshots.
+  locally (crash before the free `batch_write` persists, or when R79
+  free batching is enabled and the batch was not flushed on ungraceful
+  shutdown). Detected by comparing in-memory state against the records.
+- **Bitmap drift detection** — in-memory `usage_bits` drifts from
+  the record-derived bitmap; reload from records. The scanner uses
+  strategy 1 (full scan rebuild, §7) as its rebuild mechanism — the
+  same `RebuildZoneBitmap` RPC/API an operator would use for a
+  consistency check or full rebuild.
+- **Record integrity** — CRC check on zone snapshots and
+  `BusyBlockValue` / `FreeBlockValue` records.
+- **Per-block state validation** — for busy blocks, cross-check
+  `Segment.owner_chunk` against the `BusyBlockValue` in KV (ownership
+  validation deferred from the free path, §14); for freed blocks, the
+  `FreeBlockValue.previous_owner` is the audit trail.
 - **Leak detection** — deferred (needs caller registries).
 
 ## 13. Crate Layout
@@ -513,7 +876,8 @@ lib/crow-diskdb-client    (client library for callers: allocate/free/query; gRPC
   tests without spawning a separate process; the binary target
   (`crow-diskdb`) is the server executable. Proto types and their
   extension traits are re-exported from `crow_protocol`; internal types
-  (metas, key layout, `ClaimSnapshot`, bitmap) are Rust structs.
+  (metas, key layout, `AllocatedRange`, `ActiveZoneContext`, bitmap)
+  are Rust structs.
 - **`lib/crow-diskdb-client`** — client library for easy access to the server
   (allocate/free/query), mirroring `crow-kv-client`'s retry +
   topology-cache pattern. gRPC now; custom RPC + flatbuffer later.
@@ -537,10 +901,35 @@ All public and inter-module APIs are `async`. Runtime is `tokio`
 (multi-threaded for production).
 
 - No blocking calls in business-logic paths.
-- Per-zone CAS serialization (`AtomicU8`) — not a Mutex held across
-  `.await`. Losers try another zone; no thread blocking.
-- `FreeBatch` protected by a `Mutex`; held only for the append, not for
-  the KV flush.
+- Per-bit CAS on the usage bitmap (`compare_exchange` on 64-bit words)
+  — multiple threads allocate from the same zone concurrently; no
+  zone-level lock or Mutex held across `.await`. CAS losers re-scan
+  the same word or try the next zone; no thread blocking. Per-bit CAS
+  is capped at 100 retries (§8), then falls through to the next bit /
+  word / zone.
+- Disk-level active zone set uses RCU publish (`Arc` swap) for
+  lock-free reads; rotation takes a brief write lock.
+- **Free-side lookup structures** (RCU-published alongside the allocate
+  context on add/remove/status-change):
+  - disk-id → disk: a hash map (O(1) average). Used by free to find the
+    in-memory disk from the `disk_id` in the `Segment`.
+  - zone-index → zone: a vec indexed by zone-index (O(1) direct index).
+    Used by free to find the in-memory zone from the `zone_index` in the
+    `Segment`.
+  - The bitmap clear is O(1) after these lookups.
+  - **KV free path:** the `FreeBlockKey` is constructed directly from
+    the `Segment` (no lookup needed). `owner_chunk` is carried in the
+    `Segment` and becomes `FreeBlockValue.previous_owner` — no KV read
+    on free in v1; the free is one `batch_write` (Delete `BusyBlockKey`
+    + Put `FreeBlockKey`). Ownership validation is deferred to the §12
+    scanner. If strict ownership validation is needed before free, a
+    config toggle (`validate_owner_on_free`, default false) enables a
+    KV read of the `BusyBlockValue` first (one paxos round-trip,
+    doubles free latency).
+- v1 free is immediate (no `FreeBatch`, no background flush loop). When
+  R79 ships, `FreeBatch` will be protected by a `Mutex` held only for
+  the append, not for the KV flush; the flush is triggered by batch
+  size (no timer).
 - Node-level `add_disk` / `remove_disk` acquire a write lock on the
   disk list; allocation/free acquire a read lock (concurrent with each
   other, exclusive with add/remove).
@@ -561,9 +950,27 @@ work, just implementation:
   read-modify-write) — matches crow's blind-ops-only model exactly
   (§3.3).
 - **Async runtime**: both use tokio multi-threaded; diskdb's two-phase
-  async allocation (sync CAS claim + async KV persist) maps directly.
+  async allocation (sync bitmap-scan claim + async KV persist) maps
+  directly.
 
-## 16. Implementation Split
+## 16. Configuration
+
+All settings that control flow behavior live in a config class (no
+hardcoded tunables in business logic). Defaults:
+
+- **Sync** — sync interval (10 s, fixed — same on success and failure),
+  degraded miss threshold (3), temp-failure timeout (900 s)
+- **Allocator** — `zone_rotate_count`, CAS retry limit (100)
+- **Free** — `free_batch_enabled` (default false — v1 immediate free;
+  R79 size-threshold batching when true), `free_flush_max_batch` (256,
+  used by R79 when batching is enabled)
+- **Compaction** — snapshot compaction threshold (record count or
+  time), compaction cadence (periodic interval for strategy 3)
+- **Disk** — block / unit size (default 1 MB), zone size
+- **Free validation** — `validate_owner_on_free` (default false — no
+  KV read on free; enable for strict ownership validation)
+
+## 17. Implementation Split
 
 The diskdb implementation is split into follow-up requirements by
 functional scope:
@@ -572,28 +979,40 @@ functional scope:
   services, core types, record key layout, config validation, bitmap
   utilities, CRC integrity). **Done.**
 - **R71** — Group-0 sysdata schema + sync (disk status management,
-  group-0 read/write, ownership/binding maps, heartbeat).
-- **R72** — Zone allocator + record persistence (zone CAS, active
-  deque, busy/free records, two-phase async allocation, free batch).
-- **R73** — Crash recovery + snapshot compaction (record replay,
-  snapshot write, batch merge of expired records).
+  group-0 read/write, ownership/binding maps, heartbeat, disk-add
+  initialization flow, keepalive usage summary).
+- **R72** — Zone allocator + record persistence (bitmap-scan
+  allocator, rotating active-zone-set, busy/free records, two-phase
+  async allocation, **immediate free** — no `FreeBatch`, no timer;
+  `disk_group_id` routing, `exclude_disks`, CAS retry bound).
+- **R73** — Crash recovery + snapshot compaction (three strategies:
+  full scan rebuild, journal scan replay via `JournalScan` RPC,
+  compaction that deletes only free records).
 - **R74** — Space metrics + query API (per-disk/group/zone metrics,
-  recalculation path, `query_disk_usage`).
-- **R75** — Background scanner (ghost/drift/integrity detection).
+  recalculation path, `query_disk_usage`, three-category metrics:
+  counters, gauges, latency hierarchy).
+- **R75** — Background scanner (ghost/drift/integrity detection,
+  per-block state validation, uses strategy 1 full scan rebuild).
 - **R76** — Disk discovery + health probing (config-driven disk list,
   health probe, disk failure detection).
 - **R77** — Console + CLI integration (follow-up: disk/disk-group
   management UI, zone busy/free visualization, CLI command design).
+- **R78** — Group-0 notify/watch (follow-up: replace polling with
+  watch/notify; requires crow-kv extension; polling stays as safety
+  net).
+- **R79** — Free batch (follow-up: size-threshold batching, no timer;
+  graceful-shutdown drain + flush).
 
 Each requirement follows the `/implement-requirement` workflow. The
 design doc (this file and future sub-designs under
 `doc/design/diskdb/`) is kept permanently — it is the root design for
 the diskdb component area.
 
-## 17. References
+## 18. References
 
 - CROW root KV design: `doc/design/kv/design-crow-kv.md`
 - CROW WAL design: `doc/design/kv/design-crow-kv-wal.md`
 - CROW metrics design: `doc/design/kv/design-crow-kv-observability.md`
 - CROW console design: `doc/design/console/design-crow-console.md`
 - Reference (another project): `/cjdata/cpp/aioss/server/diskdb/doc/design.md`
+- Zone allocator reference: `/cpp/buzz-cpp/src/app/buzz-disk-db`
