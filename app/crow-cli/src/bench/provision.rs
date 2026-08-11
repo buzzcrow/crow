@@ -221,8 +221,8 @@ impl BenchFixture {
                 .add_node(
                     &rack_id,
                     &NodeEntry {
-                        id: node_id.clone(),
-                        rack_id: rack_id.clone(),
+                        id: node_id.parse().unwrap(),
+                        rack_id: rack_id.parse().unwrap(),
                         host: "127.0.0.1".into(),
                         ssh_port: 22,
                         ssh_user: String::new(),

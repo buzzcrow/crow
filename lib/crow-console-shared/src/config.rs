@@ -9,6 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crow_protocol::common_type::{NodeId, RackId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -120,15 +121,15 @@ impl BenchConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RackEntry {
-    pub id: String,
+    pub id: RackId,
     #[serde(default)]
     pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeEntry {
-    pub id: String,
-    pub rack_id: String,
+    pub id: NodeId,
+    pub rack_id: RackId,
     /// Default `127.0.0.1` for local simulated nodes.
     pub host: String,
     /// SSH port. Defaults to 22.
@@ -170,7 +171,7 @@ pub struct ServerEntry {
     /// Owning node id; populated for console-deployed instances. `None`
     /// for plain "registered external server" entries from C2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub node_id: Option<String>,
+    pub node_id: Option<NodeId>,
     /// gRPC base URL, e.g. `http://127.0.0.1:28001`. Populated for
     /// console-deployed instances.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -193,7 +194,7 @@ pub struct ServerEntry {
 pub struct StoreEntry {
     pub store_id: u64,
     #[serde(default)]
-    pub nodes: Vec<String>,
+    pub nodes: Vec<NodeId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -207,7 +208,7 @@ pub struct GroupEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplicaEntry {
     pub replica_id: u64,
-    pub node_id: String,
+    pub node_id: NodeId,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -215,9 +216,9 @@ struct PersistedConsoleConfig {
     #[serde(default)]
     version: u32,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    rack: BTreeMap<String, PersistedRackEntry>,
+    rack: BTreeMap<RackId, PersistedRackEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    node: BTreeMap<String, PersistedNodeEntry>,
+    node: BTreeMap<NodeId, PersistedNodeEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     crow_kv_server: BTreeMap<String, PersistedServerEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -236,7 +237,7 @@ struct PersistedRackEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PersistedNodeEntry {
-    rack_id: String,
+    rack_id: RackId,
     host: String,
     #[serde(default = "default_ssh_port")]
     ssh_port: u16,
@@ -250,7 +251,7 @@ struct PersistedNodeEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PersistedServerEntry {
-    node_id: Option<String>,
+    node_id: Option<NodeId>,
     url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     grpc_url: Option<String>,
@@ -270,7 +271,7 @@ struct PersistedServerEntry {
 struct PersistedStoreEntry {
     store_id: u64,
     #[serde(default)]
-    nodes: Vec<String>,
+    nodes: Vec<NodeId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -388,8 +389,8 @@ impl ConsoleConfig {
         self.servers.iter().map(|s| s.url.clone()).collect()
     }
 
-    pub fn record_store(&mut self, store_id: u64, mut nodes: Vec<String>) {
-        nodes.sort();
+    pub fn record_store(&mut self, store_id: u64, mut nodes: Vec<NodeId>) {
+        nodes.sort_unstable();
         nodes.dedup();
         if let Some(store) = self.stores.iter_mut().find(|s| s.store_id == store_id) {
             store.nodes = nodes;
@@ -399,16 +400,16 @@ impl ConsoleConfig {
         self.stores.sort_by_key(|s| s.store_id);
     }
 
-    pub fn ensure_store_node(&mut self, store_id: u64, node_id: &str) {
+    pub fn ensure_store_node(&mut self, store_id: u64, node_id: NodeId) {
         if let Some(store) = self.stores.iter_mut().find(|s| s.store_id == store_id) {
-            if !store.nodes.iter().any(|n| n == node_id) {
-                store.nodes.push(node_id.to_string());
-                store.nodes.sort();
+            if !store.nodes.contains(&node_id) {
+                store.nodes.push(node_id);
+                store.nodes.sort_unstable();
             }
         } else {
             self.stores.push(StoreEntry {
                 store_id,
-                nodes: vec![node_id.to_string()],
+                nodes: vec![node_id],
             });
             self.stores.sort_by_key(|s| s.store_id);
         }
@@ -487,9 +488,9 @@ impl ConsoleConfig {
             .find(|g| g.store_id == store_id && g.group_id == group_id)
     }
 
-    pub fn purge_node_topology(&mut self, node_id: &str) {
+    pub fn purge_node_topology(&mut self, node_id: NodeId) {
         for store in &mut self.stores {
-            store.nodes.retain(|n| n != node_id);
+            store.nodes.retain(|n| *n != node_id);
         }
         self.stores.retain(|s| !s.nodes.is_empty());
         for group in &mut self.groups {
@@ -506,7 +507,7 @@ impl ConsoleConfig {
         if self.racks.iter().any(|r| r.id == entry.id) {
             return Err(Error::Conflict {
                 kind: "rack".into(),
-                id: entry.id,
+                id: entry.id.to_string(),
             });
         }
         self.racks.push(entry);
@@ -518,7 +519,7 @@ impl ConsoleConfig {
     /// # Errors
     /// `Error::NotFound` if no rack with that id; `Error::Conflict` if any
     /// node still references the rack.
-    pub fn remove_rack(&mut self, id: &str) -> Result<RackEntry> {
+    pub fn remove_rack(&mut self, id: RackId) -> Result<RackEntry> {
         if self.nodes.iter().any(|n| n.rack_id == id) {
             return Err(Error::Conflict {
                 kind: "rack".into(),
@@ -544,7 +545,7 @@ impl ConsoleConfig {
         if self.nodes.iter().any(|n| n.id == entry.id) {
             return Err(Error::Conflict {
                 kind: "node".into(),
-                id: entry.id,
+                id: entry.id.to_string(),
             });
         }
         if !self.racks.iter().any(|r| r.id == entry.rack_id) {
@@ -562,8 +563,8 @@ impl ConsoleConfig {
     /// # Errors
     /// `Error::NotFound` if no node; `Error::Conflict` if a server is
     /// still deployed to the node.
-    pub fn remove_node(&mut self, id: &str) -> Result<NodeEntry> {
-        if self.servers.iter().any(|s| s.node_id.as_deref() == Some(id)) {
+    pub fn remove_node(&mut self, id: NodeId) -> Result<NodeEntry> {
+        if self.servers.iter().any(|s| s.node_id == Some(id)) {
             return Err(Error::Conflict {
                 kind: "node".into(),
                 id: format!("{id}: node still hosts a deployed server"),
@@ -582,7 +583,7 @@ impl ConsoleConfig {
 
     /// Look up a node by id.
     #[must_use]
-    pub fn node(&self, id: &str) -> Option<&NodeEntry> {
+    pub fn node(&self, id: NodeId) -> Option<&NodeEntry> {
         self.nodes.iter().find(|n| n.id == id)
     }
 
@@ -594,21 +595,19 @@ impl ConsoleConfig {
 
     /// Look up the server deployed on a given node.
     #[must_use]
-    pub fn server_for_node(&self, node_id: &str) -> Option<&ServerEntry> {
-        self.servers
-            .iter()
-            .find(|s| s.node_id.as_deref() == Some(node_id))
+    pub fn server_for_node(&self, node_id: NodeId) -> Option<&ServerEntry> {
+        self.servers.iter().find(|s| s.node_id == Some(node_id))
     }
 
     /// Remove the server entry deployed on a given node.
     ///
     /// # Errors
     /// `Error::NotFound` if no server is deployed on this node.
-    pub fn remove_server_for_node(&mut self, node_id: &str) -> Result<ServerEntry> {
+    pub fn remove_server_for_node(&mut self, node_id: NodeId) -> Result<ServerEntry> {
         let pos = self
             .servers
             .iter()
-            .position(|s| s.node_id.as_deref() == Some(node_id))
+            .position(|s| s.node_id == Some(node_id))
             .ok_or_else(|| Error::NotFound {
                 kind: "server".into(),
                 id: format!("no server on node {node_id}"),
@@ -628,7 +627,7 @@ impl ConsoleConfig {
             .iter()
             .map(|entry| {
                 (
-                    entry.id.clone(),
+                    entry.id,
                     PersistedRackEntry {
                         name: entry.name.clone(),
                     },
@@ -640,9 +639,9 @@ impl ConsoleConfig {
             .iter()
             .map(|entry| {
                 (
-                    entry.id.clone(),
+                    entry.id,
                     PersistedNodeEntry {
-                        rack_id: entry.rack_id.clone(),
+                        rack_id: entry.rack_id,
                         host: entry.host.clone(),
                         ssh_port: entry.ssh_port,
                         ssh_user: entry.ssh_user.clone(),
@@ -659,7 +658,7 @@ impl ConsoleConfig {
                 (
                     entry.id.clone(),
                     PersistedServerEntry {
-                        node_id: entry.node_id.clone(),
+                        node_id: entry.node_id,
                         url: entry.url.clone(),
                         grpc_url: entry.grpc_url.clone(),
                         mgmt_port: entry.mgmt_port,
@@ -715,7 +714,7 @@ impl ConsoleConfig {
             .into_iter()
             .map(|(id, entry)| RackEntry { id, name: entry.name })
             .collect();
-        racks.sort_by(|a, b| a.id.cmp(&b.id));
+        racks.sort_by_key(|r| r.id);
         let mut nodes: Vec<NodeEntry> = persisted
             .node
             .into_iter()
@@ -729,7 +728,7 @@ impl ConsoleConfig {
                 ssh_password: entry.ssh_password,
             })
             .collect();
-        nodes.sort_by(|a, b| a.id.cmp(&b.id));
+        nodes.sort_by_key(|n| n.id);
         let mut servers: Vec<ServerEntry> = persisted
             .crow_kv_server
             .into_iter()
@@ -798,7 +797,7 @@ mod tests {
 
         let mut cfg = ConsoleConfig::default();
         let mut a = ServerEntry::new("a", "http://127.0.0.1:9910");
-        a.node_id = Some("n1".into());
+        a.node_id = Some(1);
         a.grpc_url = Some("http://127.0.0.1:9921".into());
         a.mgmt_port = Some(9910);
         a.grpc_port = Some(9921);
@@ -810,7 +809,7 @@ mod tests {
             .unwrap();
         cfg.stores.push(StoreEntry {
             store_id: 7,
-            nodes: vec!["n1".into(), "n2".into()],
+            nodes: vec![1, 2],
         });
         cfg.groups.push(GroupEntry {
             store_id: 7,
@@ -818,11 +817,11 @@ mod tests {
             replicas: vec![
                 ReplicaEntry {
                     replica_id: 700,
-                    node_id: "n1".into(),
+                    node_id: 1,
                 },
                 ReplicaEntry {
                     replica_id: 701,
-                    node_id: "n2".into(),
+                    node_id: 2,
                 },
             ],
         });

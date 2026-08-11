@@ -25,8 +25,8 @@ async fn spawn_server() -> Option<(u32, String)> {
         return None;
     }
     let node = NodeEntry {
-        id: "n1".into(),
-        rack_id: "r1".into(),
+        id: 1,
+        rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
         ssh_user: String::new(),

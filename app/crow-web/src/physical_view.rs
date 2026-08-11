@@ -205,7 +205,7 @@ impl<'a> PhysicalBuilder<'a> {
         };
         self.path.pop();
         RackView {
-            id: rack.id.clone(),
+            id: rack.id.to_string(),
             name: rack.name.clone(),
             nodes,
         }
@@ -215,10 +215,10 @@ impl<'a> PhysicalBuilder<'a> {
     /// node's stores (and, recursively, groups).
     pub fn build_node(&mut self, node: &NodeEntry, remaining: u8) -> NodeView {
         self.path.push(format!("node:{}", node.id));
-        let rec = self.snap.get(&node.id);
+        let rec = self.snap.get(&node.id.to_string());
         let server = self
             .cfg
-            .server_for_node(&node.id)
+            .server_for_node(node.id)
             .map(|entry| Self::build_server_process(entry, rec));
         let has_server = server.is_some();
         let has_stores = rec.is_some_and(|r| !r.stores.is_empty());
@@ -238,8 +238,8 @@ impl<'a> PhysicalBuilder<'a> {
         };
         self.path.pop();
         NodeView {
-            id: node.id.clone(),
-            rack_id: node.rack_id.clone(),
+            id: node.id.to_string(),
+            rack_id: node.rack_id.to_string(),
             host: node.host.clone(),
             ssh_user: node.ssh_user.clone(),
             ssh_port: node.ssh_port,
@@ -287,13 +287,13 @@ mod tests {
     fn seeded_state() -> (ConsoleConfig, BTreeMap<NodeId, NodeRecord>) {
         let mut cfg = ConsoleConfig::default();
         cfg.add_rack(RackEntry {
-            id: "r1".into(),
+            id: 1,
             name: "rack-1".into(),
         })
         .unwrap();
         cfg.add_node(NodeEntry {
-            id: "n1".into(),
-            rack_id: "r1".into(),
+            id: 1,
+            rack_id: 1,
             host: "127.0.0.1".into(),
             ssh_port: 22,
             ssh_user: String::new(),
@@ -414,13 +414,13 @@ mod tests {
         // truncation even at depth=0.
         let mut cfg = ConsoleConfig::default();
         cfg.add_rack(RackEntry {
-            id: "r1".into(),
+            id: 1,
             name: String::new(),
         })
         .unwrap();
         cfg.add_node(NodeEntry {
-            id: "n1".into(),
-            rack_id: "r1".into(),
+            id: 1,
+            rack_id: 1,
             host: "127.0.0.1".into(),
             ssh_port: 22,
             ssh_user: String::new(),

@@ -86,8 +86,8 @@ async fn node_add(cli: &Cli, args: NodeAddArgs) -> ExitCode {
         Err(c) => return c,
     };
     let entry = NodeEntry {
-        id: args.id.clone(),
-        rack_id: args.rack_id.clone(),
+        id: args.id.parse().unwrap_or(0),
+        rack_id: args.rack_id.parse().unwrap_or(0),
         host: args.host,
         ssh_port: args.ssh_port,
         ssh_user: args.ssh_user,

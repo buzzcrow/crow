@@ -282,7 +282,7 @@ fn print_topology_human(
     for n in nodes {
         let server = servers
             .iter()
-            .find(|s| s.node_id.as_deref() == Some(n.id.as_str()));
+            .find(|s| s.node_id.as_deref() == Some(&n.id.to_string()));
         let server_label = server.map_or_else(
             || "none".to_string(),
             |s| format!("{} ({})", s.mgmt_url, health_str(s.health)),

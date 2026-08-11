@@ -39,8 +39,8 @@ async fn spawn_upstream() -> Option<Upstream> {
         return None;
     }
     let node = NodeEntry {
-        id: "n1".into(),
-        rack_id: "r1".into(),
+        id: 1,
+        rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
         ssh_user: String::new(),
@@ -48,7 +48,7 @@ async fn spawn_upstream() -> Option<Upstream> {
         ssh_password: None,
     };
     let req = DeployRequest {
-        server_id: "n1".into(),
+        server_id: "n1".to_string(),
         mgmt_port: pick_free_port(),
         grpc_port: pick_free_port(),
         election_profile: Some("e2e".into()),
@@ -70,12 +70,12 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
     let addr = listener.local_addr().unwrap();
     let mut cfg = ConsoleConfig::default();
     cfg.racks.push(RackEntry {
-        id: "r1".into(),
+        id: 1,
         name: "r1".into(),
     });
     cfg.nodes.push(NodeEntry {
-        id: "n1".into(),
-        rack_id: "r1".into(),
+        id: 1,
+        rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
         ssh_user: String::new(),
@@ -83,9 +83,9 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
         ssh_password: None,
     });
     cfg.add_server(ServerEntry {
-        id: "n1".into(),
+        id: "n1".to_string(),
         url: upstream.mgmt_url.clone(),
-        node_id: Some("n1".into()),
+        node_id: Some(1),
         grpc_url: Some(upstream.grpc_url.clone()),
         mgmt_port: None,
         grpc_port: None,
@@ -218,12 +218,12 @@ async fn kv_get_returns_502_when_leader_unreachable() {
 
     let mut cfg = ConsoleConfig::default();
     cfg.racks.push(RackEntry {
-        id: "r1".into(),
+        id: 1,
         name: "r1".into(),
     });
     cfg.nodes.push(NodeEntry {
-        id: "n1".into(),
-        rack_id: "r1".into(),
+        id: 1,
+        rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
         ssh_user: String::new(),
@@ -232,9 +232,9 @@ async fn kv_get_returns_502_when_leader_unreachable() {
     });
     // The node has a configured grpc_url, but the port is dead.
     cfg.add_server(ServerEntry {
-        id: "n1".into(),
+        id: "n1".to_string(),
         url: format!("http://127.0.0.1:{dead_port}"),
-        node_id: Some("n1".into()),
+        node_id: Some(1),
         grpc_url: Some(format!("http://127.0.0.1:{dead_port}")),
         mgmt_port: None,
         grpc_port: None,
@@ -252,11 +252,11 @@ async fn kv_get_returns_502_when_leader_unreachable() {
     stores.insert(
         7,
         NodeStore {
-            node_id: "n1".into(),
+            node_id: "1".to_string(),
             store_id: 7,
             listen_addr: None,
             groups: vec![NodeGroup {
-                node_id: "n1".into(),
+                node_id: "1".to_string(),
                 store_id: 7,
                 group_id: 70,
                 local: LocalReplicaInfo {

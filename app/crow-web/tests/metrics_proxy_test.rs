@@ -43,8 +43,8 @@ async fn spawn_upstream() -> Option<Upstream> {
         return None;
     }
     let node = NodeEntry {
-        id: "n1".into(),
-        rack_id: "r1".into(),
+        id: 1,
+        rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
         ssh_user: String::new(),
@@ -74,12 +74,12 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
     let addr = listener.local_addr().unwrap();
     let mut cfg = ConsoleConfig::default();
     cfg.racks.push(RackEntry {
-        id: "r1".into(),
+        id: 1,
         name: "r1".into(),
     });
     cfg.nodes.push(NodeEntry {
-        id: "n1".into(),
-        rack_id: "r1".into(),
+        id: 1,
+        rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
         ssh_user: String::new(),
@@ -89,7 +89,7 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
     cfg.add_server(ServerEntry {
         id: "n1".into(),
         url: upstream.mgmt_url.clone(),
-        node_id: Some("n1".into()),
+        node_id: Some(1),
         grpc_url: Some(upstream.grpc_url.clone()),
         mgmt_port: None,
         grpc_port: None,

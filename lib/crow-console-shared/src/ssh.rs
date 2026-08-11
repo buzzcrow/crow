@@ -413,8 +413,8 @@ mod tests {
 
     fn node(host: &str, user: &str, key: Option<&str>, password: Option<&str>) -> crate::config::NodeEntry {
         crate::config::NodeEntry {
-            id: "n".into(),
-            rack_id: "r".into(),
+            id: 1,
+            rack_id: 1,
             host: host.into(),
             ssh_port: 22,
             ssh_user: user.into(),
@@ -443,8 +443,8 @@ mod tests {
     #[test]
     fn parse_toml_full_creds() {
         let s = r#"
-            id = "n1"
-            rack_id = "r1"
+            id = 1
+            rack_id = 1
             host = "10.0.0.1"
             ssh_port = 2222
             ssh_user = "ops"
@@ -461,8 +461,8 @@ mod tests {
     #[test]
     fn parse_toml_defaults_port_and_password_optional() {
         let s = r#"
-            id = "n1"
-            rack_id = "r1"
+            id = 1
+            rack_id = 1
             host = "10.0.0.1"
         "#;
         let n = parse_node_toml(s).unwrap();

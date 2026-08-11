@@ -38,7 +38,7 @@ pub(crate) fn mgmt_url_for_node(
 ) -> Result<String, (StatusCode, Json<ErrorBody>)> {
     let cfg = state.config.read().unwrap();
     let entry = cfg
-        .server_for_node(node_id)
+        .server_for_node(node_id.parse().unwrap())
         .ok_or_else(|| err_502(format!("node {node_id} has no deployed server")))?;
     Ok(entry.url.clone())
 }
@@ -89,7 +89,10 @@ async fn wait_for_new_leader(
 async fn cluster_initialized(state: &AppState) -> bool {
     let node_ids: Vec<String> = {
         let cfg = state.config.read().unwrap();
-        cfg.servers.iter().filter_map(|s| s.node_id.clone()).collect()
+        cfg.servers
+            .iter()
+            .filter_map(|s| s.node_id.map(|id| id.to_string()))
+            .collect()
     };
     if node_ids.is_empty() {
         return true; // No servers deployed yet; allow first-run flows.
@@ -116,7 +119,8 @@ async fn cluster_initialized(state: &AppState) -> bool {
 pub(crate) async fn refresh_node_cache(state: &AppState, node_id: &str) {
     let url = {
         let cfg = state.config.read().unwrap();
-        cfg.server_for_node(node_id).map(|s| s.url.clone())
+        cfg.server_for_node(node_id.parse().unwrap())
+            .map(|s| s.url.clone())
     };
     if let Some(url) = url {
         if let Ok(client) = ServerClient::new(url) {
@@ -169,7 +173,7 @@ async fn ensure_server_running(
 ) -> Result<(), String> {
     let client = ServerClient::new(server.url.clone()).map_err(|e| e.to_string())?;
     if client.health().await.is_ok() {
-        refresh_node_cache(state, &node.id).await;
+        refresh_node_cache(state, &node.id.to_string()).await;
         return Ok(());
     }
     if !server.auto_start {
@@ -198,14 +202,14 @@ async fn ensure_server_running(
             .map_err(|e| e.to_string())?
     } else {
         let workspace_dir = state
-            .prepare_node_workspace(&node.id)
+            .prepare_node_workspace(node.id.to_string())
             .map_err(|e| e.to_string())?;
         lifecycle::deploy_local_in_dir(&req, node, &workspace_dir)
             .await
             .map_err(|e| e.to_string())?
     };
-    state.set_runtime_pid(node.id.clone(), deployed.pid);
-    refresh_node_cache(state, &node.id).await;
+    state.set_runtime_pid(node.id.to_string(), deployed.pid);
+    refresh_node_cache(state, &node.id.to_string()).await;
     Ok(())
 }
 
@@ -290,10 +294,11 @@ async fn ensure_group_local(
 
 async fn ensure_group_remotes(state: &AppState, group: &GroupEntry) -> Result<(), String> {
     for replica in &group.replicas {
-        refresh_node_cache(state, &replica.node_id).await;
+        refresh_node_cache(state, &replica.node_id.to_string()).await;
     }
     for replica in &group.replicas {
-        let url = mgmt_url_for_node(state, &replica.node_id).map_err(|(_, body)| body.0.error.clone())?;
+        let url = mgmt_url_for_node(state, &replica.node_id.to_string())
+            .map_err(|(_, body)| body.0.error.clone())?;
         let client = ServerClient::new(url).map_err(|e| e.to_string())?;
         let existing = client
             .list_remote_replicas(group.store_id, group.group_id)
@@ -304,7 +309,8 @@ async fn ensure_group_remotes(state: &AppState, group: &GroupEntry) -> Result<()
             if peer.replica_id == replica.replica_id {
                 continue;
             }
-            let Some(current_endpoint) = grpc_endpoint_for_node(state, &peer.node_id, group.store_id).await
+            let Some(current_endpoint) =
+                grpc_endpoint_for_node(state, &peer.node_id.to_string(), group.store_id).await
             else {
                 // Peer's store is not up yet; skip rather than overwriting
                 // the correct persisted-config endpoint with a stale one.
@@ -327,7 +333,7 @@ async fn ensure_group_remotes(state: &AppState, group: &GroupEntry) -> Result<()
                 .add_remote_replicas(group.store_id, group.group_id, &to_update)
                 .await
                 .map_err(|e| e.to_string())?;
-            refresh_node_cache(state, &replica.node_id).await;
+            refresh_node_cache(state, &replica.node_id.to_string()).await;
         }
     }
     Ok(())
@@ -350,7 +356,10 @@ enum Group0State {
 async fn check_group0_state(state: &AppState) -> Group0State {
     let node_ids: Vec<String> = {
         let cfg = state.config.read().unwrap();
-        cfg.servers.iter().filter_map(|s| s.node_id.clone()).collect()
+        cfg.servers
+            .iter()
+            .filter_map(|s| s.node_id.map(|id| id.to_string()))
+            .collect()
     };
     if node_ids.is_empty() {
         return Group0State::NoNodes;
@@ -427,7 +436,7 @@ pub async fn restore_persisted_topology(state: &AppState) {
         )
     };
     for server in &servers {
-        let Some(node_id) = server.node_id.as_deref() else {
+        let Some(node_id) = server.node_id else {
             continue;
         };
         let Some(node) = nodes.iter().find(|n| n.id == node_id) else {
@@ -443,7 +452,7 @@ pub async fn restore_persisted_topology(state: &AppState) {
     }
     for StoreEntry { store_id, nodes } in &stores {
         for node_id in nodes {
-            if let Err(err) = ensure_store_on_node(state, node_id, *store_id).await {
+            if let Err(err) = ensure_store_on_node(state, &node_id.to_string(), *store_id).await {
                 warn!(store_id, node_id, error = %err, "failed to restore store");
             }
         }
@@ -462,7 +471,7 @@ pub async fn restore_persisted_topology(state: &AppState) {
             };
             if let Err(err) = ensure_group_local(
                 state,
-                &replica.node_id,
+                &replica.node_id.to_string(),
                 group.store_id,
                 group.group_id,
                 replica.replica_id,
@@ -486,8 +495,8 @@ pub async fn restore_persisted_topology(state: &AppState) {
         }
     }
     for server in &servers {
-        if let Some(node_id) = server.node_id.as_deref() {
-            refresh_node_cache(state, node_id).await;
+        if let Some(node_id) = server.node_id {
+            refresh_node_cache(state, &node_id.to_string()).await;
         }
     }
     info!(
@@ -509,6 +518,7 @@ pub async fn restore_persisted_topology(state: &AppState) {
 /// # Errors
 /// Returns an error if store or group restoration fails.
 pub async fn restore_persisted_topology_for_node(state: &AppState, node_id: &str) -> Result<(), String> {
+    let nid: u64 = node_id.parse().unwrap();
     let (stores, groups) = {
         let cfg = state.config.read().unwrap();
         (cfg.stores.clone(), cfg.groups.clone())
@@ -516,16 +526,16 @@ pub async fn restore_persisted_topology_for_node(state: &AppState, node_id: &str
 
     for store in stores
         .iter()
-        .filter(|store| store.nodes.iter().any(|id| id == node_id))
+        .filter(|store| store.nodes.iter().any(|id| id == &nid))
     {
         ensure_store_on_node(state, node_id, store.store_id).await?;
     }
 
     for group in groups
         .iter()
-        .filter(|group| group.replicas.iter().any(|replica| replica.node_id == node_id))
+        .filter(|group| group.replicas.iter().any(|replica| replica.node_id == nid))
     {
-        let Some(local_replica) = group.replicas.iter().find(|replica| replica.node_id == node_id) else {
+        let Some(local_replica) = group.replicas.iter().find(|replica| replica.node_id == nid) else {
             continue;
         };
         ensure_group_local(
@@ -627,7 +637,7 @@ pub async fn http_add_store(
         let first = cfg
             .servers
             .iter()
-            .find_map(|s| s.node_id.clone())
+            .find_map(|s| s.node_id.map(|id| id.to_string()))
             .ok_or_else(|| err_400("no nodes with deployed servers"))?;
         vec![first]
     } else {
@@ -678,7 +688,10 @@ pub async fn http_add_store(
 
     {
         let mut cfg = state.config.write().unwrap();
-        cfg.record_store(body.store_id, succeeded.clone());
+        cfg.record_store(
+            body.store_id,
+            succeeded.iter().map(|s| s.parse().unwrap()).collect(),
+        );
     }
     state
         .persist()
@@ -891,12 +904,12 @@ pub async fn http_add_group(
                 .iter()
                 .map(|(node_id, replica_id)| ReplicaEntry {
                     replica_id: *replica_id,
-                    node_id: node_id.clone(),
+                    node_id: node_id.parse().unwrap(),
                 })
                 .collect(),
         );
         for (node_id, _) in &succeeded {
-            cfg.ensure_store_node(sid, node_id);
+            cfg.ensure_store_node(sid, node_id.parse().unwrap());
         }
     }
     state
@@ -1326,13 +1339,13 @@ pub async fn http_add_replica(
 
     {
         let mut cfg = state.config.write().unwrap();
-        cfg.ensure_store_node(sid, target_node);
+        cfg.ensure_store_node(sid, target_node.parse().unwrap());
         cfg.add_group_replica(
             sid,
             gid,
             ReplicaEntry {
                 replica_id: new_rid,
-                node_id: target_node.clone(),
+                node_id: target_node.parse().unwrap(),
             },
         );
     }
@@ -1606,13 +1619,13 @@ pub async fn http_cluster_init(
     // Phase 4: persist topology in console config.
     {
         let mut cfg = state.config.write().unwrap();
-        let store_nodes: Vec<String> = succeeded.iter().map(|(n, _)| n.clone()).collect();
+        let store_nodes: Vec<u64> = succeeded.iter().map(|(n, _)| n.parse().unwrap()).collect();
         cfg.record_store(0, store_nodes);
         let replicas: Vec<ReplicaEntry> = succeeded
             .iter()
             .map(|(nid, rid)| ReplicaEntry {
                 replica_id: *rid,
-                node_id: nid.clone(),
+                node_id: nid.parse().unwrap(),
             })
             .collect();
         cfg.record_group(0, 0, replicas);
@@ -1678,7 +1691,7 @@ fn build_topology_finalize_body(
         .racks
         .iter()
         .map(|r| TopologyRackInput {
-            rack_id: r.id.clone(),
+            rack_id: r.id.to_string(),
             name: r.name.clone(),
         })
         .collect();
@@ -1687,10 +1700,10 @@ fn build_topology_finalize_body(
         .nodes
         .iter()
         .filter_map(|n| {
-            let server = cfg.server_for_node(&n.id)?;
+            let server = cfg.server_for_node(n.id)?;
             Some(TopologyNodeInput {
-                node_id: n.id.clone(),
-                rack_id: n.rack_id.clone(),
+                node_id: n.id.to_string(),
+                rack_id: n.rack_id.to_string(),
                 host: n.host.clone(),
                 mgmt_endpoint: server.url.clone(),
                 grpc_endpoint: server.grpc_url.clone().unwrap_or_default(),
@@ -1705,7 +1718,7 @@ fn build_topology_finalize_body(
         .iter()
         .map(|s| TopologyStoreInput {
             store_id: s.store_id,
-            nodes: s.nodes.clone(),
+            nodes: s.nodes.iter().map(std::string::ToString::to_string).collect(),
         })
         .collect();
 
@@ -1722,7 +1735,7 @@ fn build_topology_finalize_body(
     // use the succeeded list from init; for other groups, use config.
     let mut replicas: Vec<TopologyReplicaInput> = Vec::new();
     for (nid, rid) in succeeded {
-        let server = cfg.server_for_node(nid);
+        let server = cfg.server_for_node(nid.parse().unwrap());
         let endpoint = server.and_then(|s| s.grpc_url.clone()).unwrap_or_default();
         let role = if *rid == succeeded.first().map_or(1, |(_, r)| *r) {
             "leader"
@@ -1743,12 +1756,12 @@ fn build_topology_finalize_body(
             continue; // already handled above
         }
         for r in &g.replicas {
-            let server = cfg.server_for_node(&r.node_id);
+            let server = cfg.server_for_node(r.node_id);
             let endpoint = server.and_then(|s| s.grpc_url.clone()).unwrap_or_default();
             replicas.push(TopologyReplicaInput {
                 group_id: g.group_id,
                 replica_id: r.replica_id,
-                node_id: r.node_id.clone(),
+                node_id: r.node_id.to_string(),
                 role: "follower".to_string(),
                 voting: true,
                 endpoint,

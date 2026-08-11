@@ -21,14 +21,18 @@ use crow_console_shared::mgmt::{AddGroupRequest, AddStoreRequest, RemoteReplicaI
 
 fn mgmt_url_for_node(state: &AppState, node_id: &str) -> Result<String, (StatusCode, Json<ErrorBody>)> {
     let cfg = state.config.read().unwrap();
-    let entry = cfg.server_for_node(node_id).ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(ErrorBody {
-                error: format!("no server deployed on node {node_id}"),
-            }),
-        )
-    })?;
+    let entry = node_id
+        .parse::<u64>()
+        .ok()
+        .and_then(|id| cfg.server_for_node(id))
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("no server deployed on node {node_id}"),
+                }),
+            )
+        })?;
     Ok(entry.url.clone())
 }
 

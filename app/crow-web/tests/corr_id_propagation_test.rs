@@ -110,12 +110,12 @@ async fn corr_id_forwards_to_upstream_openapi_proxy() {
     let web_addr = listener.local_addr().unwrap();
     let mut cfg = ConsoleConfig::default();
     cfg.racks.push(RackEntry {
-        id: "r1".into(),
+        id: 1,
         name: "r1".into(),
     });
     cfg.nodes.push(NodeEntry {
-        id: "n1".into(),
-        rack_id: "r1".into(),
+        id: 1,
+        rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
         ssh_user: String::new(),
@@ -125,7 +125,7 @@ async fn corr_id_forwards_to_upstream_openapi_proxy() {
     cfg.add_server(ServerEntry {
         id: "n1".into(),
         url: format!("http://{upstream_addr}"),
-        node_id: Some("n1".into()),
+        node_id: Some(1),
         grpc_url: None,
         mgmt_port: None,
         grpc_port: None,

@@ -153,8 +153,10 @@ async fn kv_endpoint_for_node(
     };
 
     let cfg = state.config.read().unwrap();
-    let grpc_url = cfg
-        .server_for_node(&node_id)
+    let grpc_url = node_id
+        .parse::<u64>()
+        .ok()
+        .and_then(|id| cfg.server_for_node(id))
         .and_then(|s| s.grpc_url.clone())
         .ok_or_else(|| err_502(format!("leader node {node_id} has no gRPC endpoint configured")))?;
 
@@ -216,7 +218,7 @@ async fn group_node_ids(state: &AppState, sid: u64, gid: u64) -> Vec<String> {
         cfg.groups
             .iter()
             .find(|g| g.store_id == sid && g.group_id == gid)
-            .map(|g| g.replicas.iter().map(|r| r.node_id.clone()).collect())
+            .map(|g| g.replicas.iter().map(|r| r.node_id.to_string()).collect())
             .unwrap_or_default()
     }
 }
@@ -261,7 +263,7 @@ async fn mgmt_seeds_for_group(
     let mut seen = HashSet::new();
     let mut seeds = Vec::new();
     for node_id in &node_ids {
-        if let Some(server) = cfg.server_for_node(node_id) {
+        if let Some(server) = node_id.parse::<u64>().ok().and_then(|id| cfg.server_for_node(id)) {
             if seen.insert(server.url.clone()) {
                 seeds.push(server.url.clone());
             }

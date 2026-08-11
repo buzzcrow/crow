@@ -130,13 +130,13 @@ async fn spawn_web_with_seeded_physical_tree() -> SocketAddr {
 
     let mut cfg = ConsoleConfig::default();
     cfg.add_rack(RackEntry {
-        id: "r1".into(),
+        id: 1,
         name: "rack-1".into(),
     })
     .unwrap();
     cfg.add_node(NodeEntry {
-        id: "n1".into(),
-        rack_id: "r1".into(),
+        id: 1,
+        rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
         ssh_user: String::new(),
@@ -150,11 +150,11 @@ async fn spawn_web_with_seeded_physical_tree() -> SocketAddr {
     rec.stores.insert(
         7,
         NodeStore {
-            node_id: "n1".into(),
+            node_id: "1".to_string(),
             store_id: 7,
             listen_addr: None,
             groups: vec![NodeGroup {
-                node_id: "n1".into(),
+                node_id: "1".to_string(),
                 store_id: 7,
                 group_id: 9,
                 local: LocalReplicaInfo {

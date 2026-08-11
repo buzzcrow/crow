@@ -77,10 +77,10 @@ impl Drop for Upstream {
 
 /// A local-fork (no-SSH) node entry on `127.0.0.1`.
 #[must_use]
-pub fn local_node(id: &str, rack: &str) -> NodeEntry {
+pub fn local_node(id: u64, rack: u64) -> NodeEntry {
     NodeEntry {
-        id: id.into(),
-        rack_id: rack.into(),
+        id,
+        rack_id: rack,
         host: "127.0.0.1".into(),
         ssh_port: 22,
         ssh_user: String::new(),
@@ -117,7 +117,7 @@ pub async fn spawn_upstream() -> Option<Upstream> {
         binary: Some(bin),
         ..Default::default()
     };
-    let deployed = lifecycle::deploy_local_in_dir(&req, &local_node("n1", "r1"), &workspace)
+    let deployed = lifecycle::deploy_local_in_dir(&req, &local_node(1, 1), &workspace)
         .await
         .expect("deploy_local_in_dir");
     Some(Upstream {
@@ -138,14 +138,14 @@ pub async fn spawn_console(upstream: &Upstream) -> SocketAddr {
     let addr = listener.local_addr().unwrap();
     let mut cfg = ConsoleConfig::default();
     cfg.racks.push(RackEntry {
-        id: "r1".into(),
+        id: 1,
         name: "r1".into(),
     });
-    cfg.nodes.push(local_node("n1", "r1"));
+    cfg.nodes.push(local_node(1, 1));
     cfg.add_server(ServerEntry {
         id: "n1".into(),
         url: upstream.mgmt_url.clone(),
-        node_id: Some("n1".into()),
+        node_id: Some(1),
         grpc_url: Some(upstream.grpc_url.clone()),
         mgmt_port: None,
         grpc_port: None,

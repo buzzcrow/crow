@@ -98,28 +98,32 @@ impl AppState {
     /// # Panics
     /// Panics if the `Mutex` is poisoned.
     #[must_use]
-    pub fn runtime_pid(&self, node_id: &str) -> Option<u32> {
-        self.runtime_pids.lock().unwrap().get(node_id).copied()
+    pub fn runtime_pid(&self, node_id: impl std::fmt::Display) -> Option<u32> {
+        self.runtime_pids
+            .lock()
+            .unwrap()
+            .get(&node_id.to_string())
+            .copied()
     }
 
     /// Set the runtime PID for a node.
     ///
     /// # Panics
     /// Panics if the `Mutex` is poisoned.
-    pub fn set_runtime_pid(&self, node_id: impl Into<String>, pid: u32) {
-        self.runtime_pids.lock().unwrap().insert(node_id.into(), pid);
+    pub fn set_runtime_pid(&self, node_id: impl std::fmt::Display, pid: u32) {
+        self.runtime_pids.lock().unwrap().insert(node_id.to_string(), pid);
     }
 
     /// Clear the runtime PID for a node.
     ///
     /// # Panics
     /// Panics if the `Mutex` is poisoned.
-    pub fn clear_runtime_pid(&self, node_id: &str) {
-        self.runtime_pids.lock().unwrap().remove(node_id);
+    pub fn clear_runtime_pid(&self, node_id: impl std::fmt::Display) {
+        self.runtime_pids.lock().unwrap().remove(&node_id.to_string());
     }
 
     #[must_use]
-    pub fn node_workspace_dir(&self, node_id: &str) -> PathBuf {
+    pub fn node_workspace_dir(&self, node_id: impl std::fmt::Display) -> PathBuf {
         self.runtime_root.join(format!("N-{node_id}"))
     }
 
@@ -148,7 +152,7 @@ impl AppState {
     /// # Errors
     ///
     /// Returns an error if directory creation fails due to I/O errors.
-    pub fn prepare_node_workspace(&self, node_id: &str) -> Result<PathBuf> {
+    pub fn prepare_node_workspace(&self, node_id: impl std::fmt::Display) -> Result<PathBuf> {
         let base = self.node_workspace_dir(node_id);
         std::fs::create_dir_all(&base).map_err(Error::Io)?;
         std::fs::create_dir_all(base.join("bin")).map_err(Error::Io)?;

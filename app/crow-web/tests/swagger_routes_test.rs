@@ -30,8 +30,8 @@ async fn spawn_upstream() -> Option<Upstream> {
         return None;
     }
     let node = NodeEntry {
-        id: "n1".into(),
-        rack_id: "r1".into(),
+        id: 1,
+        rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
         ssh_user: String::new(),
@@ -39,7 +39,7 @@ async fn spawn_upstream() -> Option<Upstream> {
         ssh_password: None,
     };
     let req = DeployRequest {
-        server_id: "n1".into(),
+        server_id: "n1".to_string(),
         mgmt_port: pick_free_port(),
         grpc_port: pick_free_port(),
         election_profile: Some("e2e".into()),
@@ -61,12 +61,12 @@ async fn spawn_web_with_node(upstream: &Upstream) -> SocketAddr {
     let addr = listener.local_addr().unwrap();
     let mut cfg = ConsoleConfig::default();
     cfg.racks.push(RackEntry {
-        id: "r1".into(),
+        id: 1,
         name: "r1".into(),
     });
     cfg.nodes.push(NodeEntry {
-        id: "n1".into(),
-        rack_id: "r1".into(),
+        id: 1,
+        rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
         ssh_user: String::new(),
@@ -74,9 +74,9 @@ async fn spawn_web_with_node(upstream: &Upstream) -> SocketAddr {
         ssh_password: None,
     });
     cfg.add_server(ServerEntry {
-        id: "n1".into(),
+        id: "n1".to_string(),
         url: upstream.mgmt_url.clone(),
-        node_id: Some("n1".into()),
+        node_id: Some(1),
         grpc_url: Some(upstream.grpc_url.clone()),
         mgmt_port: None,
         grpc_port: None,
@@ -239,12 +239,12 @@ async fn openapi_proxy_cache_is_per_node() {
     let web = listener.local_addr().unwrap();
     let mut cfg = ConsoleConfig::default();
     cfg.racks.push(RackEntry {
-        id: "r1".into(),
+        id: 1,
         name: "r1".into(),
     });
     cfg.nodes.push(NodeEntry {
-        id: "n1".into(),
-        rack_id: "r1".into(),
+        id: 1,
+        rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
         ssh_user: String::new(),
@@ -252,8 +252,8 @@ async fn openapi_proxy_cache_is_per_node() {
         ssh_password: None,
     });
     cfg.nodes.push(NodeEntry {
-        id: "n2".into(),
-        rack_id: "r1".into(),
+        id: 2,
+        rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
         ssh_user: String::new(),
@@ -261,9 +261,9 @@ async fn openapi_proxy_cache_is_per_node() {
         ssh_password: None,
     });
     cfg.add_server(ServerEntry {
-        id: "n1".into(),
+        id: "n1".to_string(),
         url: format!("http://{n1}"),
-        node_id: Some("n1".into()),
+        node_id: Some(1),
         grpc_url: None,
         mgmt_port: None,
         grpc_port: None,
@@ -274,9 +274,9 @@ async fn openapi_proxy_cache_is_per_node() {
     })
     .unwrap();
     cfg.add_server(ServerEntry {
-        id: "n2".into(),
+        id: "n2".to_string(),
         url: format!("http://{n2}"),
-        node_id: Some("n2".into()),
+        node_id: Some(2),
         grpc_url: None,
         mgmt_port: None,
         grpc_port: None,

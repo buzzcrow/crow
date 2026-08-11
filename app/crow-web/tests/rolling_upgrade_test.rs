@@ -70,8 +70,8 @@ impl Cluster {
     async fn restart_node(&mut self, node_id: &str) {
         let u = self.nodes.get(node_id).expect("node exists");
         let node = NodeEntry {
-            id: node_id.into(),
-            rack_id: "r1".into(),
+            id: node_id.parse().unwrap(),
+            rack_id: 1,
             host: "127.0.0.1".into(),
             ssh_port: 22,
             ssh_user: String::new(),
@@ -88,7 +88,7 @@ impl Cluster {
             replica_id.to_string(),
         ];
         let req = DeployRequest {
-            server_id: node_id.into(),
+            server_id: node_id.parse().unwrap(),
             mgmt_port: u.mgmt_port,
             grpc_port: u.grpc_port,
             election_profile: Some("e2e".into()),
@@ -148,8 +148,8 @@ fn resolve_second_binary() -> Option<PathBuf> {
 
 async fn spawn_upstream(node_id: &str, workspace: &std::path::Path, binary: &Path) -> Option<Upstream> {
     let node = NodeEntry {
-        id: node_id.into(),
-        rack_id: "r1".into(),
+        id: node_id.parse().unwrap(),
+        rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
         ssh_user: String::new(),
@@ -157,7 +157,7 @@ async fn spawn_upstream(node_id: &str, workspace: &std::path::Path, binary: &Pat
         ssh_password: None,
     };
     let req = DeployRequest {
-        server_id: node_id.into(),
+        server_id: node_id.parse().unwrap(),
         mgmt_port: pick_free_port(),
         grpc_port: pick_free_port(),
         election_profile: Some("e2e".into()),
@@ -171,7 +171,7 @@ async fn spawn_upstream(node_id: &str, workspace: &std::path::Path, binary: &Pat
         .await
         .expect("deploy_local_in_dir");
     Some(Upstream {
-        node_id: node_id.into(),
+        node_id: node_id.parse().unwrap(),
         pid: deployed.pid,
         mgmt_url: deployed.mgmt_url,
         grpc_url: deployed.grpc_url,
@@ -188,13 +188,13 @@ async fn spawn_web(upstreams: &BTreeMap<String, Upstream>) -> SocketAddr {
     let addr = listener.local_addr().unwrap();
     let mut cfg = ConsoleConfig::default();
     cfg.racks.push(RackEntry {
-        id: "r1".into(),
+        id: 1,
         name: "r1".into(),
     });
     for u in upstreams.values() {
         cfg.nodes.push(NodeEntry {
-            id: u.node_id.clone(),
-            rack_id: "r1".into(),
+            id: u.node_id.parse().unwrap(),
+            rack_id: 1,
             host: "127.0.0.1".into(),
             ssh_port: 22,
             ssh_user: String::new(),
@@ -202,9 +202,9 @@ async fn spawn_web(upstreams: &BTreeMap<String, Upstream>) -> SocketAddr {
             ssh_password: None,
         });
         cfg.add_server(ServerEntry {
-            id: u.node_id.clone(),
+            id: u.node_id.parse().unwrap(),
             url: u.mgmt_url.clone(),
-            node_id: Some(u.node_id.clone()),
+            node_id: Some(u.node_id.parse().unwrap()),
             grpc_url: Some(u.grpc_url.clone()),
             mgmt_port: None,
             grpc_port: None,

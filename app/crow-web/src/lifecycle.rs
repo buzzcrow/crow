@@ -38,8 +38,8 @@ fn live_server_process_with_pid(
     rec: Option<&NodeRecord>,
 ) -> ServerProcess {
     let mut proc = live_server_process(entry, rec);
-    if let Some(node_id) = entry.node_id.as_deref() {
-        proc.pid = state.runtime_pid(node_id);
+    if let Some(node_id) = entry.node_id {
+        proc.pid = state.runtime_pid(node_id.to_string());
     }
     proc
 }
@@ -109,7 +109,7 @@ pub async fn http_add_rack(
     Json(body): Json<AddRackBody>,
 ) -> Result<(StatusCode, Json<RackEntry>), (StatusCode, Json<ErrorBody>)> {
     let entry = RackEntry {
-        id: body.id,
+        id: body.id.parse().unwrap(),
         name: body.name,
     };
     {
@@ -133,7 +133,7 @@ pub async fn http_remove_rack(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
     {
         let mut cfg = state.config.write().unwrap();
-        cfg.remove_rack(&id).map_err(map_config_err)?;
+        cfg.remove_rack(id.parse().unwrap()).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
     Ok(StatusCode::NO_CONTENT)
@@ -150,7 +150,14 @@ pub async fn http_list_nodes(
 ) -> Json<Vec<NodeEntry>> {
     let cfg = state.config.read().unwrap();
     let nodes: Vec<NodeEntry> = match q.rack_id {
-        Some(r) => cfg.nodes.iter().filter(|n| n.rack_id == r).cloned().collect(),
+        Some(r) => {
+            let rack_id = r.parse::<u64>().unwrap();
+            cfg.nodes
+                .iter()
+                .filter(|n| n.rack_id == rack_id)
+                .cloned()
+                .collect()
+        }
         None => cfg.nodes.clone(),
     };
     Json(nodes)
@@ -173,7 +180,7 @@ pub async fn http_add_node(
     }
     state.persist().map_err(map_persist_err)?;
     state
-        .prepare_node_workspace(&entry.id)
+        .prepare_node_workspace(entry.id.to_string())
         .map_err(|e| err_500(e.to_string()))?;
     Ok((StatusCode::CREATED, Json(entry)))
 }
@@ -191,7 +198,7 @@ pub async fn http_remove_node(
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
     {
         let mut cfg = state.config.write().unwrap();
-        cfg.remove_node(&id).map_err(map_config_err)?;
+        cfg.remove_node(id.parse().unwrap()).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
     Ok(StatusCode::NO_CONTENT)
@@ -221,7 +228,7 @@ pub async fn http_ping_node(
 ) -> Result<Json<PingResult>, (StatusCode, Json<ErrorBody>)> {
     let node = {
         let cfg = state.config.read().unwrap();
-        cfg.node(&id).cloned().ok_or_else(|| {
+        cfg.node(id.parse().unwrap()).cloned().ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
                 Json(ErrorBody {
@@ -267,9 +274,10 @@ pub async fn http_get_rack(
     Path(id): Path<String>,
     Recursive(depth): Recursive,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+    let rack_id = id.parse::<u64>().unwrap();
     if matches!(depth, RecursiveDepth::None) {
         let cfg = state.config.read().unwrap();
-        let rack = cfg.racks.iter().find(|r| r.id == id).ok_or_else(|| {
+        let rack = cfg.racks.iter().find(|r| r.id == rack_id).ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
                 Json(ErrorBody {
@@ -277,11 +285,11 @@ pub async fn http_get_rack(
                 }),
             )
         })?;
-        let node_ids: Vec<&str> = cfg
+        let node_ids: Vec<u64> = cfg
             .nodes
             .iter()
-            .filter(|n| n.rack_id == id)
-            .map(|n| n.id.as_str())
+            .filter(|n| n.rack_id == rack_id)
+            .map(|n| n.id)
             .collect();
         return Ok(Json(serde_json::json!({
             "id": rack.id,
@@ -294,7 +302,7 @@ pub async fn http_get_rack(
     let rack = cfg
         .racks
         .iter()
-        .find(|r| r.id == id)
+        .find(|r| r.id == rack_id)
         .ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
@@ -328,9 +336,10 @@ pub async fn http_list_rack_nodes(
     Path(rack_id): Path<String>,
     Recursive(depth): Recursive,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+    let rack_id_num = rack_id.parse::<u64>().unwrap();
     if matches!(depth, RecursiveDepth::None) {
         let cfg = state.config.read().unwrap();
-        if !cfg.racks.iter().any(|r| r.id == rack_id) {
+        if !cfg.racks.iter().any(|r| r.id == rack_id_num) {
             return Err((
                 StatusCode::NOT_FOUND,
                 Json(ErrorBody {
@@ -341,14 +350,14 @@ pub async fn http_list_rack_nodes(
         let nodes: Vec<NodeEntry> = cfg
             .nodes
             .iter()
-            .filter(|n| n.rack_id == rack_id)
+            .filter(|n| n.rack_id == rack_id_num)
             .cloned()
             .collect();
         return Ok(Json(serde_json::to_value(&nodes).expect("serialize nodes")));
     }
     let snap = state.monitor_cache.snapshot().await;
     let cfg = state.config.read().unwrap();
-    if !cfg.racks.iter().any(|r| r.id == rack_id) {
+    if !cfg.racks.iter().any(|r| r.id == rack_id_num) {
         return Err((
             StatusCode::NOT_FOUND,
             Json(ErrorBody {
@@ -359,7 +368,7 @@ pub async fn http_list_rack_nodes(
     let nodes: Vec<NodeEntry> = cfg
         .nodes
         .iter()
-        .filter(|n| n.rack_id == rack_id)
+        .filter(|n| n.rack_id == rack_id_num)
         .cloned()
         .collect();
     let mut builder = PhysicalBuilder::new(&cfg, &snap);
@@ -384,14 +393,14 @@ pub async fn http_add_rack_node(
     Path(rack_id): Path<String>,
     Json(mut entry): Json<NodeEntry>,
 ) -> Result<(StatusCode, Json<NodeEntry>), (StatusCode, Json<ErrorBody>)> {
-    entry.rack_id = rack_id;
+    entry.rack_id = rack_id.parse().unwrap();
     {
         let mut cfg = state.config.write().unwrap();
         cfg.add_node(entry.clone()).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
     state
-        .prepare_node_workspace(&entry.id)
+        .prepare_node_workspace(entry.id.to_string())
         .map_err(|e| err_500(e.to_string()))?;
     Ok((StatusCode::CREATED, Json(entry)))
 }
@@ -410,9 +419,10 @@ pub async fn http_get_node(
     Path(id): Path<String>,
     Recursive(_depth): Recursive,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
+    let node_id_num = id.parse::<u64>().unwrap();
     let snap = state.monitor_cache.snapshot().await;
     let cfg = state.config.read().unwrap();
-    let node = cfg.node(&id).ok_or_else(|| {
+    let node = cfg.node(node_id_num).ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
             Json(ErrorBody {
@@ -421,7 +431,7 @@ pub async fn http_get_node(
         )
     })?;
     let server = cfg
-        .server_for_node(&id)
+        .server_for_node(node_id_num)
         .map(|entry| live_server_process_with_pid(&state, entry, snap.get(&id)));
     Ok(Json(serde_json::json!({
         "id": node.id,
@@ -442,7 +452,7 @@ pub async fn http_get_node(
 pub struct ServerSummary {
     /// Owning node id (`None` for plain externally-registered servers).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub node_id: Option<String>,
+    pub node_id: Option<u64>,
     pub mgmt_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub grpc_url: Option<String>,
@@ -468,12 +478,11 @@ pub async fn http_list_servers(State(state): State<AppState>) -> Json<Vec<Server
         .map(|s| {
             let health = s
                 .node_id
-                .as_deref()
-                .and_then(|n| snap.get(n))
+                .and_then(|n| snap.get(&n.to_string()))
                 .map_or(NodeHealth::Unknown, |rec| rec.health);
-            let pid = s.node_id.as_deref().and_then(|n| state.runtime_pid(n));
+            let pid = s.node_id.and_then(|n| state.runtime_pid(n.to_string()));
             ServerSummary {
-                node_id: s.node_id.clone(),
+                node_id: s.node_id,
                 mgmt_url: s.url.clone(),
                 grpc_url: s.grpc_url.clone(),
                 pid,
@@ -540,14 +549,16 @@ pub async fn http_get_node_server(
 ) -> Result<Json<ServerEntry>, (StatusCode, Json<ErrorBody>)> {
     let mut entry = {
         let cfg = state.config.read().unwrap();
-        cfg.server_for_node(&node_id).cloned().ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorBody {
-                    error: format!("no server deployed on node {node_id}"),
-                }),
-            )
-        })?
+        cfg.server_for_node(node_id.parse().unwrap())
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorBody {
+                        error: format!("no server deployed on node {node_id}"),
+                    }),
+                )
+            })?
     };
     entry.pid = state.runtime_pid(&node_id);
     Ok(Json(entry))
@@ -571,7 +582,7 @@ pub async fn http_deploy_node_server(
 
     let node = {
         let cfg = state.config.read().unwrap();
-        if cfg.server_for_node(&node_id).is_some() {
+        if cfg.server_for_node(node_id.parse().unwrap()).is_some() {
             return Err((
                 StatusCode::CONFLICT,
                 Json(ErrorBody {
@@ -579,7 +590,7 @@ pub async fn http_deploy_node_server(
                 }),
             ));
         }
-        cfg.node(&node_id).cloned().ok_or_else(|| {
+        cfg.node(node_id.parse().unwrap()).cloned().ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
                 Json(ErrorBody {
@@ -627,7 +638,7 @@ pub async fn http_deploy_node_server(
     let entry = ServerEntry {
         id: node_id.clone(),
         url: deployed.mgmt_url.clone(),
-        node_id: Some(node_id.clone()),
+        node_id: Some(node_id.parse().unwrap()),
         grpc_url: Some(deployed.grpc_url.clone()),
         mgmt_port: Some(body.mgmt_port),
         grpc_port: Some(body.grpc_port),
@@ -682,15 +693,18 @@ pub async fn http_restart_node_server(
 
     let (entry, node) = {
         let cfg = state.config.read().unwrap();
-        let entry = cfg.server_for_node(&node_id).cloned().ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorBody {
-                    error: format!("no server registered on node {node_id}"),
-                }),
-            )
-        })?;
-        let node = cfg.node(&node_id).cloned().ok_or_else(|| {
+        let entry = cfg
+            .server_for_node(node_id.parse().unwrap())
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorBody {
+                        error: format!("no server registered on node {node_id}"),
+                    }),
+                )
+            })?;
+        let node = cfg.node(node_id.parse().unwrap()).cloned().ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
                 Json(ErrorBody {
@@ -753,7 +767,7 @@ pub async fn http_restart_node_server(
     let new_entry = ServerEntry {
         id: node_id.clone(),
         url: deployed.mgmt_url.clone(),
-        node_id: Some(node_id.clone()),
+        node_id: Some(node_id.parse().unwrap()),
         grpc_url: Some(deployed.grpc_url.clone()),
         mgmt_port: entry.mgmt_port,
         grpc_port: entry.grpc_port,
@@ -766,7 +780,7 @@ pub async fn http_restart_node_server(
     {
         let mut cfg = state.config.write().unwrap();
         // The old entry is still keyed by node_id; replace it.
-        let _ = cfg.remove_server_for_node(&node_id);
+        let _ = cfg.remove_server_for_node(node_id.parse().unwrap());
         cfg.add_server(new_entry).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
@@ -816,15 +830,18 @@ pub async fn http_stop_node_server(
 
     let node = {
         let cfg = state.config.read().unwrap();
-        let _entry = cfg.server_for_node(&node_id).cloned().ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorBody {
-                    error: format!("no server deployed on node {node_id}"),
-                }),
-            )
-        })?;
-        cfg.node(&node_id).cloned()
+        let _entry = cfg
+            .server_for_node(node_id.parse().unwrap())
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorBody {
+                        error: format!("no server deployed on node {node_id}"),
+                    }),
+                )
+            })?;
+        cfg.node(node_id.parse().unwrap()).cloned()
     };
     let Some(pid) = state.runtime_pid(&node_id) else {
         return Err(err_400(format!("server on node {node_id} has no tracked pid")));
@@ -859,15 +876,18 @@ pub async fn http_delete_node_server(
 
     let node = {
         let cfg = state.config.read().unwrap();
-        let _entry = cfg.server_for_node(&node_id).cloned().ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorBody {
-                    error: format!("no server deployed on node {node_id}"),
-                }),
-            )
-        })?;
-        cfg.node(&node_id).cloned()
+        let _entry = cfg
+            .server_for_node(node_id.parse().unwrap())
+            .cloned()
+            .ok_or_else(|| {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorBody {
+                        error: format!("no server deployed on node {node_id}"),
+                    }),
+                )
+            })?;
+        cfg.node(node_id.parse().unwrap()).cloned()
     };
     if let Some(pid) = state.runtime_pid(&node_id) {
         let _ = match node {
@@ -884,8 +904,8 @@ pub async fn http_delete_node_server(
     }
     {
         let mut cfg = state.config.write().unwrap();
-        let _ = cfg.remove_server_for_node(&node_id);
-        cfg.purge_node_topology(&node_id);
+        let _ = cfg.remove_server_for_node(node_id.parse().unwrap());
+        cfg.purge_node_topology(node_id.parse().unwrap());
     }
     state.clear_runtime_pid(&node_id);
     state.persist().map_err(map_persist_err)?;
@@ -911,7 +931,7 @@ pub async fn http_node_openapi_proxy(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
     let mgmt_url = {
         let cfg = state.config.read().unwrap();
-        let entry = cfg.server_for_node(&node_id).ok_or_else(|| {
+        let entry = cfg.server_for_node(node_id.parse().unwrap()).ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
                 Json(ErrorBody {
@@ -1051,7 +1071,7 @@ pub async fn http_internal_reset(
     // 3. List all nodes, stop their servers, then remove them.
     let node_ids: Vec<String> = {
         let cfg = state.config.read().unwrap();
-        cfg.nodes.iter().map(|n| n.id.clone()).collect()
+        cfg.nodes.iter().map(|n| n.id.to_string()).collect()
     };
 
     for nid in &node_ids {
@@ -1061,7 +1081,7 @@ pub async fn http_internal_reset(
                 .config
                 .read()
                 .unwrap()
-                .node(nid)
+                .node(nid.parse().unwrap())
                 .is_some_and(crow_console_shared::config::NodeEntry::ssh_enabled);
             let sent = if ssh {
                 false
@@ -1080,9 +1100,9 @@ pub async fn http_internal_reset(
         // Remove the server entry + purge topology from config.
         {
             let mut cfg = state.config.write().unwrap();
-            let _ = cfg.remove_server_for_node(nid);
-            cfg.purge_node_topology(nid);
-            let _ = cfg.remove_node(nid);
+            let _ = cfg.remove_server_for_node(nid.parse().unwrap());
+            cfg.purge_node_topology(nid.parse().unwrap());
+            let _ = cfg.remove_node(nid.parse().unwrap());
         }
 
         state.monitor_cache.drop_node(nid).await;
@@ -1091,12 +1111,12 @@ pub async fn http_internal_reset(
     // 4. Remove all racks.
     let rack_ids: Vec<String> = {
         let cfg = state.config.read().unwrap();
-        cfg.racks.iter().map(|r| r.id.clone()).collect()
+        cfg.racks.iter().map(|r| r.id.to_string()).collect()
     };
     {
         let mut cfg = state.config.write().unwrap();
         for rid in &rack_ids {
-            let _ = cfg.remove_rack(rid);
+            let _ = cfg.remove_rack(rid.parse().unwrap());
         }
     }
 
