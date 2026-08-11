@@ -28,6 +28,15 @@ pub enum Error {
 
     #[error("invalid endpoint {endpoint}: {reason}")]
     InvalidEndpoint { endpoint: String, reason: String },
+
+    #[error("sysdata decode failed for key {key}: {reason}")]
+    SysdataDecode { key: String, reason: String },
+
+    #[error("sysdata key parse failed: {0}")]
+    SysdataKeyParse(String),
+
+    #[error("mgmt API error: {0}")]
+    Mgmt(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
