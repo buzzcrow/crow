@@ -27,6 +27,11 @@ Rust workspace + C++ storage engine (via FFI).
   - Lint must pass: `cargo fmt --check`, `cargo clippy -- -D warnings`, `clang-format --dry-run --Werror` (changed `.cpp`/`.h`), `tree-lint` (clang-tidy, changed C++). Fix up to 3 times — always, regardless of cause.
   - Tests: run only relevant tests (Rust or `test-tree-ct`), not the entire suite. Fix up to 3 times; skip pre-existing failures with a stated reason.
 - **Playwright E2E uses the system browser** — `app/crow-web/ui/playwright.config.ts` auto-detects Chromium/Edge/Chrome via its `localBrowsers` list; never run `npx playwright install` locally. The CI workflow's install step is conditional (downloads only when no system browser is found). Override with `PLAYWRIGHT_CHANNEL` or `PLAYWRIGHT_CHROMIUM_EXECUTABLE`.
+- **Shell commands — short timeout, full output, no filtering:**
+  - Default `timeout` to `60000` ms (60s); only raise it when explicitly told a command is long-running.
+  - For anything potentially long-running or hang-prone, use `timeout: 0` (background) + `get_output` polling instead of a long blocking wait.
+  - **Do not pipe output through `grep`/`head`/`tail` or redirect `2>&1 | grep error`** — run commands raw so the full stdout/stderr is captured. Only filter when the output is known to be huge (e.g. build logs) and you've said so in your response.
+  - After every shell command, paste the full output (or a clearly marked truncation with the first + last N lines) in your response — never just "it passed" or "no errors." The user needs to see the actual output to judge whether a command is hung.
 
 ## Dispatch — Read Before Acting
 

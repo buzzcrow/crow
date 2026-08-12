@@ -11,23 +11,23 @@ test.describe('E2E-35 header refresh', () => {
   });
 
   test('refresh button picks up backend changes without page reload', async ({ page, baseURL }) => {
-    await createRack(baseURL!, { id: 'r35a', name: 'r35a' });
+    await createRack(baseURL!, { id: 351, name: 'r35a' });
 
     await page.goto('/');
     await page.getByRole('button', { name: 'Physical' }).click();
     const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
     // Verify initial rack
-    await expect(aside.getByText('R-r35a')).toBeVisible({ timeout: 3_000 });
+    await expect(aside.getByText('R-351')).toBeVisible({ timeout: 3_000 });
 
     // Add a new rack via API (backend change)
-    await createRack(baseURL!, { id: 'r35b', name: 'r35b' });
+    await createRack(baseURL!, { id: 352, name: 'r35b' });
 
     // Click Refresh button
     await page.getByRole('button', { name: 'Refresh' }).click();
 
     // New rack should appear without page reload
-    await expect(aside.getByText('R-r35b')).toBeVisible({ timeout: 3_000 });
-    await expect(aside.getByText('R-r35a')).toBeVisible();
+    await expect(aside.getByText('R-352')).toBeVisible({ timeout: 3_000 });
+    await expect(aside.getByText('R-351')).toBeVisible();
   });
 });

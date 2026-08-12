@@ -31,7 +31,7 @@ fn pick_free_port() -> u16 {
 }
 
 struct Upstream {
-    node_id: String,
+    node_id: u64,
     pid: u32,
     mgmt_url: String,
     grpc_url: String,
@@ -41,7 +41,7 @@ struct Upstream {
 }
 
 struct Cluster {
-    nodes: BTreeMap<String, Upstream>,
+    nodes: BTreeMap<u64, Upstream>,
     web: SocketAddr,
     workspace: PathBuf,
 }
@@ -67,10 +67,10 @@ impl Cluster {
 
     /// Restart a previously-killed node with the same ports, binary, and
     /// workspace directory so it recovers from WAL and rejoins the group.
-    async fn restart_node(&mut self, node_id: &str) {
-        let u = self.nodes.get(node_id).expect("node exists");
+    async fn restart_node(&mut self, node_id: u64) {
+        let u = self.nodes.get(&node_id).expect("node exists");
         let node = NodeEntry {
-            id: node_id.parse().unwrap(),
+            id: node_id,
             rack_id: 1,
             host: "127.0.0.1".into(),
             ssh_port: 22,
@@ -78,7 +78,7 @@ impl Cluster {
             ssh_key: None,
             ssh_password: None,
         };
-        let replica_id = node_id[1..].parse::<u64>().expect("node id suffix");
+        let replica_id = node_id;
         let extra_args = vec![
             "--stores".to_string(),
             Cluster::sid().to_string(),
@@ -88,19 +88,19 @@ impl Cluster {
             replica_id.to_string(),
         ];
         let req = DeployRequest {
-            server_id: node_id.parse().unwrap(),
+            server_id: node_id.to_string(),
             mgmt_port: u.mgmt_port,
             grpc_port: u.grpc_port,
             election_profile: Some("e2e".into()),
             binary: Some(u.binary.clone()),
             ..Default::default()
         };
-        let node_dir = self.workspace.join(node_id);
+        let node_dir = self.workspace.join(node_id.to_string());
         let deployed = lifecycle::deploy_local_in_dir_with_extra_args(&req, &node, &node_dir, &extra_args)
             .await
             .expect("restart node");
         // Update the stored pid so stop() cleans up the new process.
-        self.nodes.get_mut(node_id).unwrap().pid = deployed.pid;
+        self.nodes.get_mut(&node_id).unwrap().pid = deployed.pid;
     }
 }
 
@@ -146,9 +146,9 @@ fn resolve_second_binary() -> Option<PathBuf> {
     None
 }
 
-async fn spawn_upstream(node_id: &str, workspace: &std::path::Path, binary: &Path) -> Option<Upstream> {
+async fn spawn_upstream(node_id: u64, workspace: &std::path::Path, binary: &Path) -> Option<Upstream> {
     let node = NodeEntry {
-        id: node_id.parse().unwrap(),
+        id: node_id,
         rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
@@ -157,21 +157,21 @@ async fn spawn_upstream(node_id: &str, workspace: &std::path::Path, binary: &Pat
         ssh_password: None,
     };
     let req = DeployRequest {
-        server_id: node_id.parse().unwrap(),
+        server_id: node_id.to_string(),
         mgmt_port: pick_free_port(),
         grpc_port: pick_free_port(),
         election_profile: Some("e2e".into()),
         binary: Some(binary.to_path_buf()),
         ..Default::default()
     };
-    let node_dir = workspace.join(node_id);
+    let node_dir = workspace.join(node_id.to_string());
     std::fs::create_dir_all(node_dir.join("bin")).unwrap();
     std::fs::create_dir_all(node_dir.join("log")).unwrap();
     let deployed = lifecycle::deploy_local_in_dir(&req, &node, &node_dir)
         .await
         .expect("deploy_local_in_dir");
     Some(Upstream {
-        node_id: node_id.parse().unwrap(),
+        node_id,
         pid: deployed.pid,
         mgmt_url: deployed.mgmt_url,
         grpc_url: deployed.grpc_url,
@@ -181,7 +181,7 @@ async fn spawn_upstream(node_id: &str, workspace: &std::path::Path, binary: &Pat
     })
 }
 
-async fn spawn_web(upstreams: &BTreeMap<String, Upstream>) -> SocketAddr {
+async fn spawn_web(upstreams: &BTreeMap<u64, Upstream>) -> SocketAddr {
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .unwrap();
@@ -193,7 +193,7 @@ async fn spawn_web(upstreams: &BTreeMap<String, Upstream>) -> SocketAddr {
     });
     for u in upstreams.values() {
         cfg.nodes.push(NodeEntry {
-            id: u.node_id.parse().unwrap(),
+            id: u.node_id,
             rack_id: 1,
             host: "127.0.0.1".into(),
             ssh_port: 22,
@@ -202,9 +202,9 @@ async fn spawn_web(upstreams: &BTreeMap<String, Upstream>) -> SocketAddr {
             ssh_password: None,
         });
         cfg.add_server(ServerEntry {
-            id: u.node_id.parse().unwrap(),
+            id: u.node_id.to_string(),
             url: u.mgmt_url.clone(),
-            node_id: Some(u.node_id.parse().unwrap()),
+            node_id: Some(u.node_id),
             grpc_url: Some(u.grpc_url.clone()),
             mgmt_port: None,
             grpc_port: None,
@@ -223,13 +223,10 @@ async fn spawn_web(upstreams: &BTreeMap<String, Upstream>) -> SocketAddr {
             let rec = NodeRecord {
                 health: NodeHealth::Up,
                 last_seen_ms: 1,
-                stores: legacy_topology_to_node_stores(u.node_id.parse().unwrap(), &stores),
+                stores: legacy_topology_to_node_stores(u.node_id, &stores),
                 last_error: None,
             };
-            state
-                .monitor_cache
-                .set_node_report(u.node_id.parse().unwrap(), rec)
-                .await;
+            state.monitor_cache.set_node_report(u.node_id, rec).await;
         }
     }
 
@@ -242,8 +239,8 @@ async fn spawn_web(upstreams: &BTreeMap<String, Upstream>) -> SocketAddr {
 
 async fn spawn_mixed_cluster(workspace: &std::path::Path, v2_binary: &PathBuf) -> Option<Cluster> {
     let current = resolve_binary()?;
-    let mut nodes: BTreeMap<String, Upstream> = BTreeMap::new();
-    for (id, binary) in [("n1", &current), ("n2", &current), ("n3", v2_binary)] {
+    let mut nodes: BTreeMap<u64, Upstream> = BTreeMap::new();
+    for (id, binary) in [(1u64, &current), (2u64, &current), (3u64, v2_binary)] {
         let Some(node) = spawn_upstream(id, workspace, binary).await else {
             for n in nodes.into_values() {
                 let _ = lifecycle::stop_pid_with_timeout(n.pid, Duration::from_secs(5));
@@ -251,7 +248,7 @@ async fn spawn_mixed_cluster(workspace: &std::path::Path, v2_binary: &PathBuf) -
             eprintln!("skipping: crow-kv-server binary not built");
             return None;
         };
-        nodes.insert(id.to_string(), node);
+        nodes.insert(id, node);
     }
     let web = spawn_web(&nodes).await;
     Some(Cluster {
@@ -270,7 +267,7 @@ async fn create_three_node_group(cluster: &Cluster) {
     // Initialize the system group so non-zero stores can be created.
     let resp = http
         .post(format!("{base}/api/cluster/init"))
-        .json(&json!({"nodes": ["n1", "n2", "n3"]}))
+        .json(&json!({"nodes": [1, 2, 3]}))
         .send()
         .await
         .unwrap();
@@ -278,7 +275,7 @@ async fn create_three_node_group(cluster: &Cluster) {
 
     let resp = http
         .post(format!("{base}/api/stores"))
-        .json(&json!({"store_id": sid, "nodes": ["n1"]}))
+        .json(&json!({"store_id": sid, "nodes": [1]}))
         .send()
         .await
         .unwrap();
@@ -286,16 +283,16 @@ async fn create_three_node_group(cluster: &Cluster) {
 
     let resp = http
         .post(format!("{base}/api/stores/{sid}/groups"))
-        .json(&json!({"group_id": gid, "replica_id": 1, "nodes": ["n1"]}))
+        .json(&json!({"group_id": gid, "replica_id": 1, "nodes": [1]}))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 201, "create group: {:?}", resp.text().await.ok());
 
-    for node_id in ["n2", "n3"] {
+    for node_id in 2u64..=3 {
         let resp = http
             .post(format!("{base}/api/stores/{sid}/groups/{gid}/replicas"))
-            .json(&json!({"node_id": node_id, "replica_id": node_id[1..].parse::<u64>().unwrap()}))
+            .json(&json!({"node_id": node_id, "replica_id": node_id}))
             .send()
             .await
             .unwrap();
@@ -311,8 +308,8 @@ async fn create_three_node_group(cluster: &Cluster) {
 async fn wait_for_leader(
     cluster: &Cluster,
     timeout: Duration,
-    exclude_node: Option<&str>,
-) -> Option<(u64, String)> {
+    exclude_node: Option<u64>,
+) -> Option<(u64, u64)> {
     let base = cluster.base_url();
     let http = reqwest::Client::new();
     let sid = Cluster::sid();
@@ -328,10 +325,10 @@ async fn wait_for_leader(
             .await
             .ok()?;
         if let Some(leader) = group["replicas"].as_array().unwrap_or(&vec![]).iter().find(|r| {
-            r["role"] == "leader" && exclude_node.map_or(true, |ex| r["node_id"].as_str() != Some(ex))
+            r["role"] == "leader" && exclude_node.map_or(true, |ex| r["node_id"].as_u64() != Some(ex))
         }) {
             let rid = leader["replica_id"].as_u64()?;
-            let node_id = leader["node_id"].as_str()?.to_string();
+            let node_id = leader["node_id"].as_u64()?;
             return Some((rid, node_id));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -413,8 +410,8 @@ async fn mixed_version_3_node_cluster_kv_no_divergence() {
 
     // Restart each node one at a time (rolling upgrade) and verify the
     // workload continues after each restart.
-    for node_id in ["n1", "n2", "n3"] {
-        let node = &cluster.nodes[node_id];
+    for node_id in 1u64..=3 {
+        let node = &cluster.nodes[&node_id];
         let pid = node.pid;
         let status = std::process::Command::new("kill")
             .arg("-TERM")
@@ -468,7 +465,7 @@ async fn mixed_version_3_node_cluster_kv_no_divergence() {
         // Wait for the restarted node to come back up.
         let ready = Instant::now() + Duration::from_secs(5);
         while Instant::now() < ready {
-            let client = ServerClient::new(cluster.nodes[node_id].mgmt_url.clone()).unwrap();
+            let client = ServerClient::new(cluster.nodes[&node_id].mgmt_url.clone()).unwrap();
             if client.health().await.is_ok() {
                 break;
             }

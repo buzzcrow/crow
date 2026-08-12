@@ -129,7 +129,7 @@ async fn kv_put_get_delete_through_web_routes() {
     // Initialize the system group so non-zero stores can be created.
     let resp = http
         .post(format!("{base}/api/cluster/init"))
-        .json(&json!({"nodes": ["n1"]}))
+        .json(&json!({"nodes": [1]}))
         .send()
         .await
         .unwrap();
@@ -138,14 +138,14 @@ async fn kv_put_get_delete_through_web_routes() {
     // Create store 1 and group 1 (stores no longer auto-create groups).
     let store_resp = http
         .post(format!("{base}/api/stores"))
-        .json(&json!({"store_id": 1, "nodes": ["n1"]}))
+        .json(&json!({"store_id": 1, "nodes": [1]}))
         .send()
         .await
         .expect("add_store");
     assert_eq!(store_resp.status(), 201, "add_store failed");
     let group_resp = http
         .post(format!("{base}/api/stores/1/groups"))
-        .json(&json!({"group_id": 1, "replica_id": 1, "nodes": ["n1"]}))
+        .json(&json!({"group_id": 1, "replica_id": 1, "nodes": [1]}))
         .send()
         .await
         .expect("add_group");

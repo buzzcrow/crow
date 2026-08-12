@@ -180,7 +180,7 @@ impl BenchReport {
     pub fn write_md_to(
         &self,
         dir: &Path,
-        node_ids: &[String],
+        node_ids: &[u64],
         workspace_dir: &Path,
         endpoint_map: &std::collections::HashMap<String, String>,
     ) -> io::Result<PathBuf> {
@@ -210,7 +210,7 @@ impl BenchReport {
     #[must_use]
     pub fn markdown_report(
         &self,
-        node_ids: &[String],
+        node_ids: &[u64],
         workspace_dir: &Path,
         endpoint_map: &std::collections::HashMap<String, String>,
     ) -> String {

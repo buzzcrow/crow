@@ -35,24 +35,24 @@ async fn rack_node_server_lifecycle() {
         &cli,
         &ip,
         port,
-        &["rack", "add", "--id", "r1", "--name", "rack-one"],
+        &["rack", "add", "--id", "1", "--name", "rack-one"],
     );
     assert_eq!(code, 0, "rack add stderr={stderr}");
     let (code, stdout, _) = run(&cli, &ip, port, &["rack", "list"]);
     assert_eq!(code, 0);
-    assert!(stdout.contains("r1"), "stdout={stdout}");
+    assert!(stdout.contains('1'), "stdout={stdout}");
 
     // node add (two local-fork nodes) / list / ping
-    for node in ["n1", "n2"] {
-        let (code, _, stderr) = run(&cli, &ip, port, &["node", "add", "--id", node, "--rack", "r1"]);
+    for node in ["1", "2"] {
+        let (code, _, stderr) = run(&cli, &ip, port, &["node", "add", "--id", node, "--rack", "1"]);
         assert_eq!(code, 0, "node add {node} stderr={stderr}");
     }
     let (code, stdout, _) = run(&cli, &ip, port, &["node", "list"]);
     assert_eq!(code, 0);
-    assert!(stdout.contains("n1") && stdout.contains("n2"), "stdout={stdout}");
+    assert!(stdout.contains('1') && stdout.contains('2'), "stdout={stdout}");
 
     // local-fork node ping is a no-op success.
-    let (code, stdout, stderr) = run(&cli, &ip, port, &["node", "ping", "n1"]);
+    let (code, stdout, stderr) = run(&cli, &ip, port, &["node", "ping", "1"]);
     assert_eq!(code, 0, "ping stderr={stderr}");
     assert!(stdout.contains("reachable"), "stdout={stdout}");
 
@@ -68,7 +68,7 @@ async fn rack_node_server_lifecycle() {
             "server",
             "deploy",
             "--node",
-            "n1",
+            "1",
             "--mgmt-port",
             &mgmt_port,
             "--grpc-port",
@@ -78,24 +78,27 @@ async fn rack_node_server_lifecycle() {
         ],
     );
     assert_eq!(code, 0, "server deploy stderr={stderr}");
-    assert!(stdout.contains("deployed server on node n1"), "stdout={stdout}");
+    assert!(stdout.contains("deployed server on node 1"), "stdout={stdout}");
 
     let (code, stdout, stderr) = run(&cli, &ip, port, &["server", "list"]);
     assert_eq!(code, 0, "server list stderr={stderr}");
-    assert!(stdout.contains("n1"), "stdout={stdout}");
+    assert!(stdout.contains('1'), "stdout={stdout}");
 
-    let (code, _, stderr) = run(&cli, &ip, port, &["server", "restart", "--node", "n1"]);
+    let (code, _, stderr) = run(&cli, &ip, port, &["server", "restart", "--node", "1"]);
     assert_eq!(code, 0, "server restart stderr={stderr}");
 
-    let (code, _, stderr) = run(&cli, &ip, port, &["server", "stop", "--node", "n1"]);
+    let (code, _, stderr) = run(&cli, &ip, port, &["server", "stop", "--node", "1"]);
     assert_eq!(code, 0, "server stop stderr={stderr}");
 
     // node remove on the server-free node succeeds.
-    let (code, _, stderr) = run(&cli, &ip, port, &["node", "remove", "--id", "n2"]);
+    let (code, _, stderr) = run(&cli, &ip, port, &["node", "remove", "--id", "2"]);
     assert_eq!(code, 0, "node remove stderr={stderr}");
     let (code, stdout, _) = run(&cli, &ip, port, &["node", "list"]);
     assert_eq!(code, 0);
-    assert!(!stdout.contains("n2"), "n2 should be gone: stdout={stdout}");
+    assert!(
+        !stdout.contains("2                 1             127.0.0.1"),
+        "node 2 should be gone: stdout={stdout}"
+    );
 
     tokio::time::sleep(Duration::from_millis(50)).await;
     let _ = std::fs::remove_dir_all(dir);

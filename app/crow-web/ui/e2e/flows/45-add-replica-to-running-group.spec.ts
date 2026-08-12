@@ -37,17 +37,18 @@ test.describe('E2E-45 add replica to running group', () => {
     await resetAll(baseURL!);
 
     // 4 nodes: 3 in initial group, 1 spare for adding later
-    for (const r of ['r45a', 'r45b', 'r45c', 'r45d']) {
-      await seedRackAndNode(baseURL!, r, r.replace('r', 'n'));
+    for (const r of [451, 452, 453, 454]) {
+
+      await seedRackAndNode(baseURL!, r, r);
     }
-    await deployNodeServer(baseURL!, 'n45a', 10010, 10011);
-    await deployNodeServer(baseURL!, 'n45b', 10012, 10013);
-    await deployNodeServer(baseURL!, 'n45c', 10014, 10015);
-    await deployNodeServer(baseURL!, 'n45d', 10016, 10017);
+    await deployNodeServer(baseURL!, 451, 10010, 10011);
+    await deployNodeServer(baseURL!, 452, 10012, 10013);
+    await deployNodeServer(baseURL!, 453, 10014, 10015);
+    await deployNodeServer(baseURL!, 454, 10016, 10017);
 
     // Store on all 4 nodes, but group initially on 3
-    await createStore(baseURL!, 450, ['n45a', 'n45b', 'n45c', 'n45d']);
-    await addGroup(baseURL!, 450, 4500, 45000, ['n45a', 'n45b', 'n45c']);
+    await createStore(baseURL!, 450, [451, 452, 453, 454]);
+    await addGroup(baseURL!, 450, 4500, 45000, [451, 452, 453]);
     await waitForLeader(baseURL!, 450, 4500);
 
     try {
@@ -59,7 +60,7 @@ test.describe('E2E-45 add replica to running group', () => {
       // Add 4th replica via console API
       const api = await apiContext(baseURL!);
       const addResp = await api.post(`/api/stores/450/groups/4500/replicas`, {
-        data: { node_id: 'n45d' },
+        data: { node_id: 454 },
       });
       expect(addResp.status(), await addResp.text()).toBe(201);
       await api.dispose();

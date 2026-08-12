@@ -7,10 +7,10 @@ import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServe
 
 test.describe('E2E-06 cross jump', () => {
   test('jumps from logical replica details to the hosting physical node', async ({ page, baseURL }) => {
-    await seedRackAndNode(baseURL!, 'r6', 'n6');
-    await deployNodeServer(baseURL!, 'n6', 9916, 9926);
-    await createStore(baseURL!, 66, ['n6']);
-    await addGroup(baseURL!, 66, 660, 6600, ['n6']);
+    await seedRackAndNode(baseURL!, 6, 6);
+    await deployNodeServer(baseURL!, 6, 9916, 9926);
+    await createStore(baseURL!, 66, [6]);
+    await addGroup(baseURL!, 66, 660, 6600, [6]);
 
     try {
       await page.goto('/');
@@ -26,25 +26,25 @@ test.describe('E2E-06 cross jump', () => {
       await inspector.getByRole('button', { name: /Show on node n6/ }).click();
 
       await expect(page.getByRole('heading', { name: 'Infrastructure' })).toBeVisible({ timeout: 3_000 });
-      await expect(inspector.getByText('N-n6', { exact: true })).toBeVisible({ timeout: 3_000 });
+      await expect(inspector.getByText('N-6', { exact: true })).toBeVisible({ timeout: 3_000 });
     } finally {
-      await stopNodeServer(baseURL!, 'n6');
+      await stopNodeServer(baseURL!, 6);
     }
   });
 
   test('jumps from physical node details to the hosting logical store', async ({ page, baseURL }) => {
-    await seedRackAndNode(baseURL!, 'r6b', 'n6b');
-    await deployNodeServer(baseURL!, 'n6b', 9917, 9927);
-    await createStore(baseURL!, 67, ['n6b']);
-    await addGroup(baseURL!, 67, 670, 6700, ['n6b']);
+    await seedRackAndNode(baseURL!, 62, 62);
+    await deployNodeServer(baseURL!, 62, 9917, 9927);
+    await createStore(baseURL!, 67, [62]);
+    await addGroup(baseURL!, 67, 670, 6700, [62]);
 
     try {
       await page.goto('/');
       await page.getByRole('button', { name: 'Physical' }).click();
 
-      const nodeItem = page.getByRole('treeitem').filter({ hasText: 'N-n6b' });
+      const nodeItem = page.getByRole('treeitem').filter({ hasText: 'N-62' });
       await expect(nodeItem).toBeVisible({ timeout: 3_000 });
-      await nodeItem.getByRole('button', { name: 'N-n6b' }).click();
+      await nodeItem.getByRole('button', { name: 'N-62' }).click();
 
       const inspector = page.locator('aside[aria-label="Entity inspector"]');
       await expect(inspector).toBeVisible({ timeout: 3_000 });
@@ -55,7 +55,7 @@ test.describe('E2E-06 cross jump', () => {
       await expect(page.getByRole('heading', { name: 'Cluster' })).toBeVisible({ timeout: 3_000 });
       await expect(inspector.getByText('S-67', { exact: true }).first()).toBeVisible({ timeout: 3_000 });
     } finally {
-      await stopNodeServer(baseURL!, 'n6b');
+      await stopNodeServer(baseURL!, 62);
     }
   });
 });

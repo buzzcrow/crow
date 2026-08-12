@@ -143,20 +143,20 @@ async fn rack_node_crud_through_web_routes() {
     let (s, v) = json_post(
         &client,
         &format!("{base}/api/racks"),
-        json!({ "id": "r1", "name": "rack-1" }),
+        json!({ "id": 1, "name": "rack-1" }),
     )
     .await;
     assert_eq!(s.as_u16(), 201, "add rack: {s} {v}");
-    assert_eq!(v["id"], "r1");
+    assert_eq!(v["id"], 1);
 
     // Duplicate rack -> 409.
-    let (s, _) = json_post(&client, &format!("{base}/api/racks"), json!({ "id": "r1" })).await;
+    let (s, _) = json_post(&client, &format!("{base}/api/racks"), json!({ "id": 1 })).await;
     assert_eq!(s.as_u16(), 409);
 
     // GET /api/racks/:rack_id — rack detail.
-    let (s, v) = json_get(&client, &format!("{base}/api/racks/r1")).await;
+    let (s, v) = json_get(&client, &format!("{base}/api/racks/1")).await;
     assert!(s.is_success(), "get rack: {s} {v}");
-    assert_eq!(v["id"], "r1");
+    assert_eq!(v["id"], 1);
     assert_eq!(v["name"], "rack-1");
     assert_eq!(v["nodes"].as_array().unwrap().len(), 0);
 
@@ -164,7 +164,7 @@ async fn rack_node_crud_through_web_routes() {
     let (s, _) = json_post(
         &client,
         &format!("{base}/api/nodes"),
-        json!({ "id": "n1", "rack_id": "ghost", "host": "127.0.0.1", "ssh_user": "" }),
+        json!({ "id": 1, "rack_id": 999, "host": "127.0.0.1", "ssh_user": "" }),
     )
     .await;
     assert_eq!(s.as_u16(), 400);
@@ -172,52 +172,52 @@ async fn rack_node_crud_through_web_routes() {
     // Add node via rack-scoped route.
     let (s, v) = json_post(
         &client,
-        &format!("{base}/api/racks/r1/nodes"),
-        json!({ "id": "n1", "rack_id": "ignored", "host": "127.0.0.1", "ssh_user": "" }),
+        &format!("{base}/api/racks/1/nodes"),
+        json!({ "id": 1, "rack_id": 999, "host": "127.0.0.1", "ssh_user": "" }),
     )
     .await;
     assert_eq!(s.as_u16(), 201, "add rack node: {s} {v}");
-    assert_eq!(v["rack_id"], "r1");
-    assert_node_workspace(&dir, "n1");
+    assert_eq!(v["rack_id"], 1);
+    assert_node_workspace(&dir, "1");
 
     // GET /api/racks/:rack_id/nodes.
-    let (_, v) = json_get(&client, &format!("{base}/api/racks/r1/nodes")).await;
+    let (_, v) = json_get(&client, &format!("{base}/api/racks/1/nodes")).await;
     assert_eq!(v.as_array().unwrap().len(), 1);
 
     // List nodes filtered by rack.
-    let (_, v) = json_get(&client, &format!("{base}/api/nodes?rack_id=r1")).await;
+    let (_, v) = json_get(&client, &format!("{base}/api/nodes?rack_id=1")).await;
     assert_eq!(v.as_array().unwrap().len(), 1);
-    let (_, v) = json_get(&client, &format!("{base}/api/nodes?rack_id=other")).await;
+    let (_, v) = json_get(&client, &format!("{base}/api/nodes?rack_id=999")).await;
     assert_eq!(v.as_array().unwrap().len(), 0);
 
     // GET /api/nodes/:id — node detail.
-    let (s, v) = json_get(&client, &format!("{base}/api/nodes/n1")).await;
+    let (s, v) = json_get(&client, &format!("{base}/api/nodes/1")).await;
     assert!(s.is_success(), "get node: {s} {v}");
-    assert_eq!(v["id"], "n1");
-    assert_eq!(v["rack_id"], "r1");
+    assert_eq!(v["id"], 1);
+    assert_eq!(v["rack_id"], 1);
     assert_eq!(v["has_server"], false);
 
     // Rack detail now shows the node.
-    let (_, v) = json_get(&client, &format!("{base}/api/racks/r1")).await;
+    let (_, v) = json_get(&client, &format!("{base}/api/racks/1")).await;
     assert_eq!(v["nodes"].as_array().unwrap().len(), 1);
 
     // Cannot remove rack while node references it.
-    let s = delete_status(&client, &format!("{base}/api/racks/r1")).await;
+    let s = delete_status(&client, &format!("{base}/api/racks/1")).await;
     assert_eq!(s.as_u16(), 409);
 
     // Ping a local-fork node returns ok=true (no SSH attempted).
-    let (s, v) = json_post(&client, &format!("{base}/api/nodes/n1/ping"), json!({})).await;
+    let (s, v) = json_post(&client, &format!("{base}/api/nodes/1/ping"), json!({})).await;
     assert!(s.is_success(), "ping local: {s} {v}");
     assert_eq!(v["ok"], true);
 
     // GET /api/nodes/:id/server — 404 since nothing is deployed.
-    let (s, _) = json_get(&client, &format!("{base}/api/nodes/n1/server")).await;
+    let (s, _) = json_get(&client, &format!("{base}/api/nodes/1/server")).await;
     assert_eq!(s.as_u16(), 404);
 
     // Remove node, then rack.
-    let s = delete_status(&client, &format!("{base}/api/nodes/n1")).await;
+    let s = delete_status(&client, &format!("{base}/api/nodes/1")).await;
     assert_eq!(s.as_u16(), 204);
-    let s = delete_status(&client, &format!("{base}/api/racks/r1")).await;
+    let s = delete_status(&client, &format!("{base}/api/racks/1")).await;
     assert_eq!(s.as_u16(), 204);
 
     // Persisted file reflects the empty state.
@@ -248,36 +248,36 @@ async fn multiple_racks_and_nodes_create_expected_workspaces() {
     let (s, _) = json_post(
         &client,
         &format!("{base}/api/racks"),
-        json!({ "id": "r1", "name": "rack-1" }),
+        json!({ "id": 1, "name": "rack-1" }),
     )
     .await;
     assert_eq!(s.as_u16(), 201);
     let (s, _) = json_post(
         &client,
         &format!("{base}/api/racks"),
-        json!({ "id": "r2", "name": "rack-2" }),
+        json!({ "id": 2, "name": "rack-2" }),
     )
     .await;
     assert_eq!(s.as_u16(), 201);
 
     let (s, _) = json_post(
         &client,
-        &format!("{base}/api/racks/r1/nodes"),
-        json!({ "id": "1", "rack_id": "ignored", "host": "127.0.0.1", "ssh_user": "" }),
+        &format!("{base}/api/racks/1/nodes"),
+        json!({ "id": 1, "rack_id": 999, "host": "127.0.0.1", "ssh_user": "" }),
     )
     .await;
     assert_eq!(s.as_u16(), 201);
     let (s, _) = json_post(
         &client,
-        &format!("{base}/api/racks/r1/nodes"),
-        json!({ "id": "2", "rack_id": "ignored", "host": "127.0.0.1", "ssh_user": "" }),
+        &format!("{base}/api/racks/1/nodes"),
+        json!({ "id": 2, "rack_id": 999, "host": "127.0.0.1", "ssh_user": "" }),
     )
     .await;
     assert_eq!(s.as_u16(), 201);
     let (s, _) = json_post(
         &client,
-        &format!("{base}/api/racks/r2/nodes"),
-        json!({ "id": "10", "rack_id": "ignored", "host": "127.0.0.1", "ssh_user": "" }),
+        &format!("{base}/api/racks/2/nodes"),
+        json!({ "id": 10, "rack_id": 999, "host": "127.0.0.1", "ssh_user": "" }),
     )
     .await;
     assert_eq!(s.as_u16(), 201);
@@ -348,12 +348,12 @@ async fn deploy_then_stop_local_server() {
     };
 
     // Bootstrap a rack + local-fork node via the API.
-    let (s, _) = json_post(&client, &format!("{base}/api/racks"), json!({ "id": "r1" })).await;
+    let (s, _) = json_post(&client, &format!("{base}/api/racks"), json!({ "id": 1 })).await;
     assert_eq!(s.as_u16(), 201);
     let (s, _) = json_post(
         &client,
         &format!("{base}/api/nodes"),
-        json!({ "id": "n1", "rack_id": "r1", "host": "127.0.0.1", "ssh_user": "" }),
+        json!({ "id": 1, "rack_id": 1, "host": "127.0.0.1", "ssh_user": "" }),
     )
     .await;
     assert_eq!(s.as_u16(), 201);
@@ -363,7 +363,7 @@ async fn deploy_then_stop_local_server() {
     let grpc_port = pick_free_port();
     let (s, v) = json_post(
         &client,
-        &format!("{base}/api/nodes/n1/server/deploy"),
+        &format!("{base}/api/nodes/1/server/deploy"),
         json!({
             "mgmt_port": mgmt_port,
             "grpc_port": grpc_port,
@@ -373,30 +373,28 @@ async fn deploy_then_stop_local_server() {
     )
     .await;
     assert!(s.is_success(), "deploy: {s} {v}");
-    assert_eq!(v["node_id"], "n1");
+    assert_eq!(v["node_id"], 1);
     assert!(v["pid"].as_u64().unwrap() > 0);
     let pid = u32::try_from(v["pid"].as_u64().unwrap()).unwrap();
     guard.pids.insert("n1".into(), pid);
-    assert!(dir.join("N-n1/bin").is_dir());
-    assert!(dir.join("N-n1/log").is_dir());
-    assert!(std::fs::read_dir(dir.join("N-n1/bin")).unwrap().next().is_some());
-    assert!(dir
-        .join(format!("N-n1/log/crow-kv-server-{pid}.out.log"))
-        .exists());
+    assert!(dir.join("N-1/bin").is_dir());
+    assert!(dir.join("N-1/log").is_dir());
+    assert!(std::fs::read_dir(dir.join("N-1/bin")).unwrap().next().is_some());
+    assert!(dir.join(format!("N-1/log/crow-kv-server-{pid}.out.log")).exists());
 
     // GET /api/nodes/:id/server confirms deployment.
-    let (s, v) = json_get(&client, &format!("{base}/api/nodes/n1/server")).await;
+    let (s, v) = json_get(&client, &format!("{base}/api/nodes/1/server")).await;
     assert!(s.is_success(), "get server: {s} {v}");
     assert_eq!(v["url"], format!("http://127.0.0.1:{mgmt_port}"));
 
     // GET /api/nodes/:id — node detail shows has_server=true.
-    let (_, v) = json_get(&client, &format!("{base}/api/nodes/n1")).await;
+    let (_, v) = json_get(&client, &format!("{base}/api/nodes/1")).await;
     assert_eq!(v["has_server"], true);
 
     // A second deploy onto the same node fails with 409.
     let (s2, _) = json_post(
         &client,
-        &format!("{base}/api/nodes/n1/server/deploy"),
+        &format!("{base}/api/nodes/1/server/deploy"),
         json!({
             "mgmt_port": pick_free_port(),
             "grpc_port": pick_free_port(),
@@ -408,11 +406,11 @@ async fn deploy_then_stop_local_server() {
     assert_eq!(s2.as_u16(), 409);
 
     // Stop via node-addressed route.
-    let (s, v) = json_post(&client, &format!("{base}/api/nodes/n1/server/stop"), json!({})).await;
+    let (s, v) = json_post(&client, &format!("{base}/api/nodes/1/server/stop"), json!({})).await;
     assert!(s.is_success(), "stop: {s} {v}");
 
     // GET /api/nodes/:id/server — declaration remains, but runtime pid is gone.
-    let (s, v) = json_get(&client, &format!("{base}/api/nodes/n1/server")).await;
+    let (s, v) = json_get(&client, &format!("{base}/api/nodes/1/server")).await;
     assert_eq!(s.as_u16(), 200);
     assert!(
         v.get("pid").is_none() || v["pid"].is_null(),
@@ -439,12 +437,12 @@ async fn deploy_then_restart_local_server() {
         pids: BTreeMap::new(),
     };
 
-    let (s, _) = json_post(&client, &format!("{base}/api/racks"), json!({ "id": "r1" })).await;
+    let (s, _) = json_post(&client, &format!("{base}/api/racks"), json!({ "id": 1 })).await;
     assert_eq!(s.as_u16(), 201);
     let (s, _) = json_post(
         &client,
         &format!("{base}/api/nodes"),
-        json!({ "id": "n1", "rack_id": "r1", "host": "127.0.0.1", "ssh_user": "" }),
+        json!({ "id": 1, "rack_id": 1, "host": "127.0.0.1", "ssh_user": "" }),
     )
     .await;
     assert_eq!(s.as_u16(), 201);
@@ -453,7 +451,7 @@ async fn deploy_then_restart_local_server() {
     let grpc_port = pick_free_port();
     let (s, v) = json_post(
         &client,
-        &format!("{base}/api/nodes/n1/server/deploy"),
+        &format!("{base}/api/nodes/1/server/deploy"),
         json!({
             "mgmt_port": mgmt_port,
             "grpc_port": grpc_port,
@@ -469,7 +467,7 @@ async fn deploy_then_restart_local_server() {
     // Pre-position CROW_KV_SERVER_BIN so the restart's fallback path
     // (no binary override in the body) still finds the test binary.
     std::env::set_var("CROW_KV_SERVER_BIN", bin.to_string_lossy().to_string());
-    let (s, v) = json_post(&client, &format!("{base}/api/nodes/n1/server/restart"), json!({})).await;
+    let (s, v) = json_post(&client, &format!("{base}/api/nodes/1/server/restart"), json!({})).await;
     assert!(s.is_success(), "restart: {s} {v}");
     let new_pid = u32::try_from(v["pid"].as_u64().unwrap()).unwrap();
     guard.pids.insert("n1-new".into(), new_pid);
@@ -481,9 +479,9 @@ async fn deploy_then_restart_local_server() {
     );
 
     // Server entry now reflects the new pid.
-    let (_, v) = json_get(&client, &format!("{base}/api/nodes/n1/server")).await;
+    let (_, v) = json_get(&client, &format!("{base}/api/nodes/1/server")).await;
     assert_eq!(v["pid"].as_u64().unwrap(), u64::from(new_pid));
 
     // Cleanup via API, then guard handles any survivors.
-    let _ = json_post(&client, &format!("{base}/api/nodes/n1/server/stop"), json!({})).await;
+    let _ = json_post(&client, &format!("{base}/api/nodes/1/server/stop"), json!({})).await;
 }

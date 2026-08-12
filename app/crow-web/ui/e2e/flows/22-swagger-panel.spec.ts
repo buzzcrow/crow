@@ -15,11 +15,11 @@ import { createNode, createRack, deployNodeServer, stopNodeServer } from '../fix
  */
 test.describe('E2E-22 swagger panel', () => {
   test('renders inline and re-targets the node selection', async ({ page, baseURL }) => {
-    await createRack(baseURL!, { id: 'r22', name: 'Rack TwentyTwo' });
-    await createNode(baseURL!, { id: 'n22a', rack_id: 'r22' });
-    await createNode(baseURL!, { id: 'n22b', rack_id: 'r22' });
-    await deployNodeServer(baseURL!, 'n22a', 9953, 9963);
-    await deployNodeServer(baseURL!, 'n22b', 9954, 9964);
+    await createRack(baseURL!, { id: 22, name: 'Rack TwentyTwo' });
+    await createNode(baseURL!, { id: 221, rack_id: 22 });
+    await createNode(baseURL!, { id: 222, rack_id: 22 });
+    await deployNodeServer(baseURL!, 221, 9953, 9963);
+    await deployNodeServer(baseURL!, 222, 9954, 9964);
 
     try {
       await page.goto('/');
@@ -27,8 +27,8 @@ test.describe('E2E-22 swagger panel', () => {
       const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
 
       // Target n22a, then open the API panel.
-      await expect(aside.getByText('N-n22a', { exact: true })).toBeVisible({ timeout: 3_000 });
-      await aside.getByRole('button', { name: 'N-n22a' }).click();
+      await expect(aside.getByText('N-221', { exact: true })).toBeVisible({ timeout: 3_000 });
+      await aside.getByRole('button', { name: 'N-221' }).click();
       await page.getByRole('button', { name: 'API' }).click();
 
       const frameA = page.locator('iframe[title="Swagger UI for n22a"]');
@@ -38,14 +38,14 @@ test.describe('E2E-22 swagger panel', () => {
       await expect(page.locator('header').getByText('Crow Storage Console')).toBeVisible();
 
       // Switch the selection to n22b -> the iframe re-targets inline.
-      await aside.getByRole('button', { name: 'N-n22b' }).click();
+      await aside.getByRole('button', { name: 'N-222' }).click();
       const frameB = page.locator('iframe[title="Swagger UI for n22b"]');
       await expect(frameB).toBeVisible({ timeout: 3_000 });
       expect(decodeURIComponent((await frameB.getAttribute('src')) ?? '')).toContain('/nodes/n22b/openapi.json');
       await expect(page.locator('header').getByText('Crow Storage Console')).toBeVisible();
     } finally {
-      await stopNodeServer(baseURL!, 'n22a');
-      await stopNodeServer(baseURL!, 'n22b');
+      await stopNodeServer(baseURL!, 221);
+      await stopNodeServer(baseURL!, 222);
     }
   });
 });

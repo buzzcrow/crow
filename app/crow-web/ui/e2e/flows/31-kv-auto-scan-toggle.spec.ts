@@ -27,10 +27,10 @@ test.describe('E2E-31 KV auto-scan toggle', () => {
   });
 
   test('auto-scan off does not refresh, on does', async ({ page, baseURL }) => {
-    await seedRackAndNode(baseURL!, 'r31', 'n31');
-    await deployNodeServer(baseURL!, 'n31', 9931, 9941);
-    await createStore(baseURL!, 310, ['n31']);
-    await addGroup(baseURL!, 310, 3100, 31000, ['n31']);
+    await seedRackAndNode(baseURL!, 31, 31);
+    await deployNodeServer(baseURL!, 31, 9931, 9941);
+    await createStore(baseURL!, 310, [31]);
+    await addGroup(baseURL!, 310, 3100, 31000, [31]);
     await waitForLeader(baseURL!, 310, 3100);
 
     try {
@@ -58,7 +58,7 @@ test.describe('E2E-31 KV auto-scan toggle', () => {
       await putKey(page, 'auto-key-3', 'val-3');
       await expect(page.getByTestId('kv-scan-table').getByText('auto-key-3')).toBeVisible({ timeout: 3_000 });
     } finally {
-      await stopNodeServer(baseURL!, 'n31');
+      await stopNodeServer(baseURL!, 31);
     }
   });
 });

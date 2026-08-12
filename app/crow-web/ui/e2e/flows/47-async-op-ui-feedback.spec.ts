@@ -9,14 +9,14 @@ test.describe('E2E-47 async operation UI feedback', () => {
   });
 
   test('ping and stop show success toast, activity log records both', async ({ page, baseURL }) => {
-    await createRack(baseURL!, { id: 'r47', name: 'r47' });
-    await createNode(baseURL!, { id: 'n47', rack_id: 'r47' });
-    await deployNodeServer(baseURL!, 'n47', 9947, 9957);
+    await createRack(baseURL!, { id: 47, name: 'r47' });
+    await createNode(baseURL!, { id: 47, rack_id: 47 });
+    await deployNodeServer(baseURL!, 47, 9947, 9957);
 
     try {
       await page.goto('/');
       await page.getByRole('button', { name: 'Physical' }).click();
-      const nodeItem = page.getByRole('treeitem').filter({ hasText: 'N-n47' });
+      const nodeItem = page.getByRole('treeitem').filter({ hasText: 'N-47' });
       await expect(nodeItem).toBeVisible({ timeout: 3_000 });
 
       // Ping — should show a success toast
@@ -45,7 +45,7 @@ test.describe('E2E-47 async operation UI feedback', () => {
       await expect(stopToast).toBeVisible({ timeout: 3_000 });
 
       // Verify all three operations appear in the activity log
-      await nodeItem.getByRole('button', { name: 'N-n47' }).click();
+      await nodeItem.getByRole('button', { name: 'N-47' }).click();
       const inspector = page.locator('aside[aria-label="Entity inspector"]');
       await expect(inspector).toBeVisible({ timeout: 3_000 });
       await inspector.getByRole('tab', { name: 'Activity' }).click();
@@ -54,7 +54,7 @@ test.describe('E2E-47 async operation UI feedback', () => {
       await expect(inspector.getByText(/restart Crow Storage/i)).toBeVisible({ timeout: 3_000 });
       await expect(inspector.getByText(/stop Crow Storage/i)).toBeVisible({ timeout: 3_000 });
     } finally {
-      await stopNodeServer(baseURL!, 'n47');
+      await stopNodeServer(baseURL!, 47);
     }
   });
 });

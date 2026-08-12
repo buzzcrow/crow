@@ -81,7 +81,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
     setApiBase(apiPrefix);
   }, [apiPrefix]);
 
-  const [lastUsedRackId, setLastUsedRackId] = useState<string>('');
+  const [lastUsedRackId, setLastUsedRackId] = useState<number>(0);
   const [rememberedDeployPorts, setRememberedDeployPorts] = useState<{ mgmt: number[]; grpc: number[] }>({ mgmt: [], grpc: [] });
   const [lastRefreshTime, setLastRefreshTime] = useState<Date>(new Date());
   const [refreshing, setRefreshing] = useState(false);
@@ -93,12 +93,12 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
 
   const [dialog, setDialog] = useState<{
     addRack?: boolean;
-    addNode?: { rackId: string };
+    addNode?: { rackId: number };
     addStore?: boolean;
     addGroup?: { storeId: string };
     addReplica?: { storeId: string; groupId: string };
-    deployServer?: { nodeId: string };
-    delete?: { type: string; id: string; onDelete: () => Promise<void> };
+    deployServer?: { nodeId: number };
+    delete?: { type: string; id: string | number; onDelete: () => Promise<void> };
     initCluster?: boolean;
   }>({});
 
@@ -196,7 +196,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
   );
 
   const requestDelete = useCallback(
-    (type: string, id: string, onDelete: () => Promise<void>) => {
+    (type: string, id: string | number, onDelete: () => Promise<void>) => {
       setDialog((d) => ({ ...d, delete: { type, id, onDelete } }));
     },
     [],
@@ -222,11 +222,12 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
 
       if (physicalActive) {
         if (t.type === 'Rack' && modules?.nodes !== false) {
+          const rackId = Number(t.rawId);
           items.push({
             id: 'add-node',
             label: 'Add Node',
             icon: <Server className="tw-h-4 tw-w-4" />,
-            onSelect: () => setDialog((d) => ({ ...d, addNode: { rackId: t.id } })),
+            onSelect: () => setDialog((d) => ({ ...d, addNode: { rackId } })),
           });
           items.push({ id: 's1', separator: true });
           items.push({
@@ -234,16 +235,17 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
             label: 'Delete Rack',
             icon: <Trash2 className="tw-h-4 tw-w-4" />,
             destructive: true,
-            onSelect: () => requestDelete('Rack', t.id, async () => { await runMutation('Delete Rack', t.id, () => removeRack(t.id)); }),
+            onSelect: () => requestDelete('Rack', rackId, async () => { await runMutation('Delete Rack', `Rack ${rackId}`, () => removeRack(rackId)); }),
           });
         } else if (t.type === 'Node') {
-          const hasServer = serverNodeIds.has(t.id);
+          const nodeId = Number(t.rawId);
+          const hasServer = serverNodeIds.has(nodeId);
           if (!hasServer) {
             items.push({
               id: 'deploy',
               label: 'Deploy Crow Storage',
               icon: <Server className="tw-h-4 tw-w-4" />,
-              onSelect: () => setDialog((d) => ({ ...d, deployServer: { nodeId: t.id } })),
+              onSelect: () => setDialog((d) => ({ ...d, deployServer: { nodeId } })),
             });
           }
           items.push({
@@ -251,8 +253,8 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
             label: 'Ping',
             icon: <Activity className="tw-h-4 tw-w-4" />,
             onSelect: () =>
-              runMutation('Ping Node', t.id, async () => {
-                const r = await pingNode(t.id);
+              runMutation('Ping Node', t.label || t.id, async () => {
+                const r = await pingNode(nodeId);
                 if (!r.ok) throw new Error(r.error || 'unreachable');
               }),
           });
@@ -261,13 +263,13 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
               id: 'restart',
               label: 'Restart Crow Storage',
               icon: <RotateCw className="tw-h-4 tw-w-4" />,
-              onSelect: () => runMutation('Restart Crow Storage', t.id, () => restartServer(t.id)),
+              onSelect: () => runMutation('Restart Crow Storage', t.label || t.id, () => restartServer(nodeId)),
             });
             items.push({
               id: 'stop',
               label: 'Stop Crow Storage',
               icon: <Square className="tw-h-4 tw-w-4" />,
-              onSelect: () => runMutation('Stop Crow Storage', t.id, () => stopServer(t.id)),
+              onSelect: () => runMutation('Stop Crow Storage', t.label || t.id, () => stopServer(nodeId)),
             });
           }
           items.push({ id: 's1', separator: true });
@@ -276,7 +278,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
             label: 'Delete Node',
             icon: <Trash2 className="tw-h-4 tw-w-4" />,
             destructive: true,
-            onSelect: () => requestDelete('Node', t.id, async () => { await runMutation('Delete Node', t.id, () => removeNode(t.id)); }),
+            onSelect: () => requestDelete('Node', nodeId, async () => { await runMutation('Delete Node', t.label || t.id, () => removeNode(nodeId)); }),
           });
         }
       } else {
@@ -307,7 +309,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
               label: 'Add Replica',
               icon: <Plus className="tw-h-4 tw-w-4" />,
               onSelect: () => {
-                if (storeId) setDialog((d) => ({ ...d, addReplica: { storeId, groupId: t.id } }));
+                if (storeId) setDialog((d) => ({ ...d, addReplica: { storeId: String(storeId), groupId: t.id } }));
               },
             });
           }
@@ -322,7 +324,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
               onSelect: () => {
                 if (storeId)
                   requestDelete('Group', t.id, async () => {
-                    await runMutation('Delete Group', `${storeId}/${t.id}`, () => removeGroup(storeId, t.id));
+                    await runMutation('Delete Group', `${storeId}/${t.id}`, () => removeGroup(String(storeId), t.id));
                   });
               },
             });
@@ -338,7 +340,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
             onSelect: () => {
               if (storeId && groupId)
                 requestDelete('Replica', t.id, async () => {
-                  await runMutation('Delete Replica', `${storeId}/${groupId}/${t.id}`, () => removeReplica(storeId, groupId, t.id));
+                  await runMutation('Delete Replica', `${storeId}/${groupId}/${t.id}`, () => removeReplica(String(storeId), String(groupId), t.id));
                 });
             },
           });
@@ -353,7 +355,8 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
     (node: TreeNode, event: React.MouseEvent) => {
       const target: MenuTarget = {
         type: node.type,
-        id: node.rawId ?? node.id,
+        id: node.rawId != null ? String(node.rawId) : node.id,
+        rawId: node.rawId,
         parentIds: node.parentIds,
         label: node.label,
       };
@@ -391,17 +394,17 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
   const nodeIds = useMemo(() => nodes.map((n) => n.id), [nodes]);
   const serverBackedNodeIds = useMemo(() => new Set(serverNodeIds), [serverNodeIds]);
   const apiTargetNodeId = useMemo(() => {
-    if (selectedEntity?.type === 'Node' && serverBackedNodeIds.has(selectedEntity.id)) return selectedEntity.id;
+    if (selectedEntity?.type === 'Node' && serverBackedNodeIds.has(Number(selectedEntity.id))) return Number(selectedEntity.id);
     const selectedParentNodeId = selectedEntity?.parentIds?.node_id;
-    if (selectedParentNodeId && serverBackedNodeIds.has(selectedParentNodeId)) return selectedParentNodeId;
-    if (initialNodeId && serverBackedNodeIds.has(initialNodeId)) return initialNodeId;
-    return servers[0]?.node_id || '';
+    if (selectedParentNodeId != null && serverBackedNodeIds.has(Number(selectedParentNodeId))) return Number(selectedParentNodeId);
+    if (initialNodeId && serverBackedNodeIds.has(Number(initialNodeId))) return Number(initialNodeId);
+    return servers[0]?.node_id ?? 0;
   }, [initialNodeId, selectedEntity, serverBackedNodeIds, servers]);
 
   const defaultAddNodeRackId = useMemo(() => {
     if (dialog.addNode?.rackId) return dialog.addNode.rackId;
     if (lastUsedRackId && rackIds.includes(lastUsedRackId)) return lastUsedRackId;
-    return racks[0]?.id || '';
+    return racks[0]?.id ?? 0;
   }, [dialog.addNode?.rackId, lastUsedRackId, rackIds, racks]);
 
   const deployDialogDefaults = useMemo(() => {
@@ -420,7 +423,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
 
   const addNodeDeployDefaults = useMemo(
     () => {
-      const nextNodeId = nextIdFromSuffix(nodeIds, 1);
+      const nextNodeId = Number(nextIdFromSuffix(nodeIds, 1));
       return deployPortDefaultsForNode(
         servers,
         nextNodeId,
@@ -443,7 +446,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
   }, [nodes, servers, stores]);
 
   const groupDialogDefaults = useMemo(() => {
-    const defaults: Record<string, { groupId: string; replicaId: string; nodeIds: string[] }> = {};
+    const defaults: Record<string, { groupId: string; replicaId: string; nodeIds: number[] }> = {};
     const activeNodeIds = servers
       .filter((server) => isCrowKVServerAvailable(server))
       .map((server) => server.node_id);
@@ -460,7 +463,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
       }
 
       const replicaId = nextNumericId(replicaIds, 1);
-      const storeNodeIds = store.nodes.filter((nodeId) => activeNodeIds.includes(String(nodeId))).map(String);
+      const storeNodeIds = store.nodes.filter((nodeId) => activeNodeIds.includes(nodeId));
       const nodeIds = storeNodeIds.length > 0 ? storeNodeIds : activeNodeIds.slice(0, 3);
 
       defaults[storeId] = { groupId, replicaId, nodeIds };
@@ -469,19 +472,19 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
   }, [groups, nodes, servers, stores]);
 
   const replicaDialogDefaults = useMemo(() => {
-    const defaults: Record<string, { nodeId: string; replicaId: string }> = {};
+    const defaults: Record<string, { nodeId: number; replicaId: string }> = {};
 
     for (const group of groups) {
       const key = `${group.store_id}:${group.group_id}`;
       const existingReplicaIds = (group.replicas || []).map((replica) => String(replica.replica_id));
-      const usedNodeIds = new Set((group.replicas || []).map((replica) => String(replica.node_id || '')));
+      const usedNodeIds = new Set((group.replicas || []).map((replica) => replica.node_id || 0));
       const preferredNode =
         servers.find((server) => !usedNodeIds.has(server.node_id))?.node_id ||
         servers[0]?.node_id ||
         nodes[0];
 
       defaults[key] = {
-        nodeId: typeof preferredNode === 'string' ? preferredNode : (preferredNode?.id || ''),
+        nodeId: typeof preferredNode === 'number' ? preferredNode : (preferredNode?.id ?? 0),
         replicaId: nextNumericId(existingReplicaIds, 1),
       };
     }
@@ -490,11 +493,11 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
   }, [groups, nodes, servers]);
 
   const replicaDialogNodeInfo = useMemo(() => {
-    const info: Record<string, { allNodes: typeof nodes; usedNodeIds: Set<string> }> = {};
+    const info: Record<string, { allNodes: typeof nodes; usedNodeIds: Set<number> }> = {};
 
     for (const group of groups) {
       const key = `${group.store_id}:${group.group_id}`;
-      const usedNodeIds = new Set((group.replicas || []).map((replica) => String(replica.node_id || '')));
+      const usedNodeIds = new Set((group.replicas || []).map((replica) => replica.node_id || 0));
       info[key] = { allNodes: nodes, usedNodeIds };
     }
 
@@ -507,7 +510,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
         clusterHealth={clusterHealth}
         onRefresh={handleRefresh}
         refreshing={refreshing}
-        apiTargetNodeId={apiTargetNodeId}
+        apiTargetNodeId={String(apiTargetNodeId)}
         showSwagger={swaggerEnabled}
         swaggerActive={centerPanel === 'swagger'}
         onToggleSwagger={() => setCenterPanel((p) => (p === 'swagger' ? 'topology' : 'swagger'))}
@@ -597,7 +600,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
       <AddRackDialog
         isOpen={!!dialog.addRack}
         onClose={closeDialogs}
-        existingRackIds={rackIds}
+        existingRackIds={rackIds.map(String)}
         onSuccess={handleRefresh}
       />
       {dialog.addNode && (
@@ -605,11 +608,11 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           isOpen
           onClose={closeDialogs}
           racks={racks}
-          defaultRackId={defaultAddNodeRackId}
-          existingNodeIds={nodeIds}
+          defaultRackId={String(defaultAddNodeRackId)}
+          existingNodeIds={nodeIds.map(String)}
           defaultMgmtPort={addNodeDeployDefaults.defaultMgmtPort}
           defaultGrpcPort={addNodeDeployDefaults.defaultGrpcPort}
-          onCreatedRackId={setLastUsedRackId}
+          onCreatedRackId={(rackId) => setLastUsedRackId(Number(rackId))}
           onSuccess={handleRefresh}
         />
       )}
@@ -652,7 +655,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           groupId={dialog.addReplica.groupId}
           nodes={replicaDialogNodeInfo[`${dialog.addReplica.storeId}:${dialog.addReplica.groupId}`]?.allNodes || []}
           usedNodeIds={replicaDialogNodeInfo[`${dialog.addReplica.storeId}:${dialog.addReplica.groupId}`]?.usedNodeIds || new Set()}
-          defaultNodeId={replicaDialogDefaults[`${dialog.addReplica.storeId}:${dialog.addReplica.groupId}`]?.nodeId || ''}
+          defaultNodeId={replicaDialogDefaults[`${dialog.addReplica.storeId}:${dialog.addReplica.groupId}`]?.nodeId ?? 0}
           defaultReplicaId={replicaDialogDefaults[`${dialog.addReplica.storeId}:${dialog.addReplica.groupId}`]?.replicaId || ''}
           onSuccess={handleRefresh}
         />
@@ -678,7 +681,7 @@ function AppContent({ apiPrefix = '/api', readonly = false, modules, initialNode
           isOpen
           onClose={closeDialogs}
           resourceType={dialog.delete.type}
-          resourceId={dialog.delete.id}
+          resourceId={String(dialog.delete.id)}
           onDelete={dialog.delete.onDelete}
         />
       )}

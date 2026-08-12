@@ -13,7 +13,7 @@ export interface InitClusterDialogProps {
   onClose: () => void;
   nodes: Node[];
   servers?: CrowKVServerView[];
-  defaultNodeIds?: string[];
+  defaultNodeIds?: number[];
   onSuccess?: () => void | Promise<void>;
 }
 
@@ -35,7 +35,7 @@ export function InitClusterDialog({
     servers.some((server) => server.node_id === node.id && isCrowKVServerAvailable(server)),
   );
   const defaultSelectedNodeIds = defaultNodeIds.filter((id) => availableNodes.some((n) => n.id === id));
-  const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>(
+  const [selectedNodeIds, setSelectedNodeIds] = useState<number[]>(
     defaultSelectedNodeIds.length > 0 ? defaultSelectedNodeIds : availableNodes.map((n) => n.id),
   );
   const [isLoading, setIsLoading] = useState(false);
@@ -77,7 +77,7 @@ export function InitClusterDialog({
     onClose();
   };
 
-  const toggleNode = (nodeId: string) => {
+  const toggleNode = (nodeId: number) => {
     setSelectedNodeIds((prev) =>
       prev.includes(nodeId) ? prev.filter((id) => id !== nodeId) : [...prev, nodeId],
     );

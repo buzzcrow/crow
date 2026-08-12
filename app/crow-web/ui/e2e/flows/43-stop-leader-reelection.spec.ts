@@ -43,15 +43,17 @@ test.describe('E2E-43 stop leader reelection', () => {
   test('stopping leader triggers reelection and KV ops continue', async ({ baseURL }) => {
     await resetAll(baseURL!);
 
-    for (const r of ['r43a', 'r43b', 'r43c']) {
-      await seedRackAndNode(baseURL!, r, r.replace('r', 'n'));
-    }
-    await deployNodeServer(baseURL!, 'n43a', 9980, 9981);
-    await deployNodeServer(baseURL!, 'n43b', 9982, 9983);
-    await deployNodeServer(baseURL!, 'n43c', 9984, 9985);
+    for (const r of [431, 432, 433]) {
 
-    await createStore(baseURL!, 430, ['n43a', 'n43b', 'n43c']);
-    await addGroup(baseURL!, 430, 4300, 43000, ['n43a', 'n43b', 'n43c']);
+
+      await seedRackAndNode(baseURL!, r, r);
+    }
+    await deployNodeServer(baseURL!, 431, 9980, 9981);
+    await deployNodeServer(baseURL!, 432, 9982, 9983);
+    await deployNodeServer(baseURL!, 433, 9984, 9985);
+
+    await createStore(baseURL!, 430, [431, 432, 433]);
+    await addGroup(baseURL!, 430, 4300, 43000, [431, 432, 433]);
     await waitForLeader(baseURL!, 430, 4300);
 
     try {
@@ -94,9 +96,9 @@ test.describe('E2E-43 stop leader reelection', () => {
         return replicas.filter((r) => r.status !== 'unhealthy').length;
       }, { timeout: 10_000, intervals: [100] }).toBeGreaterThanOrEqual(3);
     } finally {
-      await stopNodeServer(baseURL!, 'n43a');
-      await stopNodeServer(baseURL!, 'n43b');
-      await stopNodeServer(baseURL!, 'n43c');
+      await stopNodeServer(baseURL!, 431);
+      await stopNodeServer(baseURL!, 432);
+      await stopNodeServer(baseURL!, 433);
     }
   });
 });

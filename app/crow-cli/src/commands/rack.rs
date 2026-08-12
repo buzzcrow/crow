@@ -3,6 +3,7 @@
 
 use clap::Subcommand;
 use crow_console_shared::clients::console::AddRackBody;
+use crow_protocol::RackId;
 use std::process::ExitCode;
 
 use crate::utils::{client::console_client, print_json};
@@ -58,11 +59,18 @@ async fn rack_add(cli: &Cli, id: String, name: String) -> ExitCode {
 }
 
 async fn rack_remove(cli: &Cli, id: &str) -> ExitCode {
+    let rack_id: RackId = match id.parse() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: invalid rack id {id:?}: {e}");
+            return ExitCode::from(1);
+        }
+    };
     let client = match console_client(cli) {
         Ok(c) => c,
         Err(c) => return c,
     };
-    match client.remove_rack(id).await {
+    match client.remove_rack(rack_id).await {
         Ok(()) => {
             println!("removed rack {id}");
             ExitCode::SUCCESS

@@ -31,7 +31,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use crow_console_shared::cluster::{
-    NodeHealth, NodeId, NodeStore, ProcState, ReplicaId, ReplicaRole, ReplicaState, ServerProcess,
+    NodeHealth, NodeId, NodeStore, ProcState, RackId, ReplicaId, ReplicaRole, ReplicaState, ServerProcess,
 };
 use crow_console_shared::config::{ConsoleConfig, NodeEntry, RackEntry, ServerEntry};
 use crow_console_shared::expand::{Expandable, Truncation};
@@ -41,7 +41,7 @@ use crow_console_shared::monitor::NodeRecord;
 /// `depth = 0` (i.e. the caller asked for the flat shape).
 #[derive(Debug, Serialize)]
 pub struct RackView {
-    pub id: String,
+    pub id: RackId,
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nodes: Option<Vec<NodeView>>,
@@ -52,8 +52,8 @@ pub struct RackView {
 /// frontend keeps working at `depth >= 1`.
 #[derive(Debug, Serialize)]
 pub struct NodeView {
-    pub id: String,
-    pub rack_id: String,
+    pub id: NodeId,
+    pub rack_id: RackId,
     pub host: String,
     pub ssh_user: String,
     pub ssh_port: u16,
@@ -205,7 +205,7 @@ impl<'a> PhysicalBuilder<'a> {
         };
         self.path.pop();
         RackView {
-            id: rack.id.to_string(),
+            id: rack.id,
             name: rack.name.clone(),
             nodes,
         }
@@ -238,8 +238,8 @@ impl<'a> PhysicalBuilder<'a> {
         };
         self.path.pop();
         NodeView {
-            id: node.id.to_string(),
-            rack_id: node.rack_id.to_string(),
+            id: node.id,
+            rack_id: node.rack_id,
             host: node.host.clone(),
             ssh_user: node.ssh_user.clone(),
             ssh_port: node.ssh_port,
@@ -337,7 +337,7 @@ mod tests {
         let view = b.build_rack(&cfg.racks[0], 1);
         let nodes = view.nodes.as_ref().expect("nodes inlined");
         assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].id, "n1");
+        assert_eq!(nodes[0].id, 1);
         assert!(nodes[0].stores.is_none(), "depth 1 stops before stores");
     }
 
@@ -386,7 +386,7 @@ mod tests {
         let trunc = b.into_truncation();
         assert_eq!(
             trunc.paths,
-            vec![vec!["rack:r1".to_string(), "node:n1".to_string()]]
+            vec![vec!["rack:1".to_string(), "node:1".to_string()]]
         );
     }
 
@@ -405,7 +405,7 @@ mod tests {
         let mut b = PhysicalBuilder::new(&cfg, &snap);
         let _view = b.build_rack(&cfg.racks[0], 0);
         let trunc = b.into_truncation();
-        assert_eq!(trunc.paths, vec![vec!["rack:r1".to_string()]]);
+        assert_eq!(trunc.paths, vec![vec!["rack:1".to_string()]]);
     }
 
     #[test]

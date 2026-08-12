@@ -18,21 +18,21 @@ test.describe('E2E-20 UI behaviors', () => {
   test('covers create dialog defaults and eligible candidate lists', async ({ page, baseURL }) => {
     // Batch independent API calls to reduce total round-trip time under load.
     await Promise.all([
-      createRack(baseURL!, { id: 'r20a', name: 'Rack Twenty A' }),
-      createRack(baseURL!, { id: 'r20b', name: 'Rack Twenty B' }),
-      createRack(baseURL!, { id: 'r20c', name: 'Rack Twenty C' }),
-      createRack(baseURL!, { id: 'r20d', name: 'Rack Twenty D' }),
+      createRack(baseURL!, { id: 201, name: 'Rack Twenty A' }),
+      createRack(baseURL!, { id: 202, name: 'Rack Twenty B' }),
+      createRack(baseURL!, { id: 203, name: 'Rack Twenty C' }),
+      createRack(baseURL!, { id: 204, name: 'Rack Twenty D' }),
     ]);
     await Promise.all([
-      createNode(baseURL!, { id: 'n20a', rack_id: 'r20a' }),
-      createNode(baseURL!, { id: 'n20b', rack_id: 'r20b' }),
-      createNode(baseURL!, { id: 'n20c', rack_id: 'r20c' }),
-      createNode(baseURL!, { id: 'n20d', rack_id: 'r20d' }),
+      createNode(baseURL!, { id: 201, rack_id: 201 }),
+      createNode(baseURL!, { id: 202, rack_id: 202 }),
+      createNode(baseURL!, { id: 203, rack_id: 203 }),
+      createNode(baseURL!, { id: 204, rack_id: 204 }),
     ]);
-    await deployNodeServer(baseURL!, 'n20a', 9960, 9970);
-    await deployNodeServer(baseURL!, 'n20b', 9961, 9971);
-    await deployNodeServer(baseURL!, 'n20c', 9962, 9972);
-    await createStore(baseURL!, 207, ['n20a', 'n20b']);
+    await deployNodeServer(baseURL!, 201, 9960, 9970);
+    await deployNodeServer(baseURL!, 202, 9961, 9971);
+    await deployNodeServer(baseURL!, 203, 9962, 9972);
+    await createStore(baseURL!, 207, [201, 202]);
 
     const api = await apiContext(baseURL!);
     try {
@@ -91,7 +91,7 @@ test.describe('E2E-20 UI behaviors', () => {
       const optionValues = nodeOptions.filter((option) => !option.disabled).map((option) => option.value);
       expect(optionValues).toEqual(expect.arrayContaining(['n20c', 'n20d']));
       expect(optionValues).not.toEqual(expect.arrayContaining(['n20a', 'n20b']));
-      await addReplicaDialog.getByLabel('Node', { exact: true }).selectOption('n20c');
+      await addReplicaDialog.getByLabel('Node', { exact: true }).selectOption('203');
       await addReplicaDialog.getByRole('button', { name: /add replica/i }).click();
 
       await aside.getByText(`G-${expectedGroupId}`).click({ button: 'right' });
@@ -108,9 +108,9 @@ test.describe('E2E-20 UI behaviors', () => {
     } finally {
       await api.dispose();
       await Promise.all([
-        stopNodeServer(baseURL!, 'n20a'),
-        stopNodeServer(baseURL!, 'n20b'),
-        stopNodeServer(baseURL!, 'n20c'),
+        stopNodeServer(baseURL!, 201),
+        stopNodeServer(baseURL!, 202),
+        stopNodeServer(baseURL!, 203),
       ]);
     }
   });
@@ -142,17 +142,17 @@ test.describe('E2E-20 UI behaviors', () => {
   });
 
   test('covers tree chevron vs text click behavior', async ({ page, baseURL }) => {
-    await createRack(baseURL!, { id: 'r21a', name: 'Rack Twenty One A' });
-    await createRack(baseURL!, { id: 'r21b', name: 'Rack Twenty One B' });
-    await createRack(baseURL!, { id: 'r21c', name: 'Rack Twenty One C' });
-    await createNode(baseURL!, { id: 'n21a', rack_id: 'r21a' });
-    await createNode(baseURL!, { id: 'n21b', rack_id: 'r21b' });
-    await createNode(baseURL!, { id: 'n21c', rack_id: 'r21c' });
+    await createRack(baseURL!, { id: 211, name: 'Rack Twenty One A' });
+    await createRack(baseURL!, { id: 212, name: 'Rack Twenty One B' });
+    await createRack(baseURL!, { id: 213, name: 'Rack Twenty One C' });
+    await createNode(baseURL!, { id: 211, rack_id: 211 });
+    await createNode(baseURL!, { id: 212, rack_id: 212 });
+    await createNode(baseURL!, { id: 213, rack_id: 213 });
 
     await page.goto('/');
     await page.getByRole('button', { name: 'Physical' }).click();
-    const rack21a = page.getByRole('treeitem').filter({ hasText: 'R-r21a (Rack Twenty One A)' });
-    const node21c = page.getByRole('treeitem').filter({ hasText: 'N-n21c' });
+    const rack21a = page.getByRole('treeitem').filter({ hasText: 'R-211 (Rack Twenty One A)' });
+    const node21c = page.getByRole('treeitem').filter({ hasText: 'N-213' });
     await expect(rack21a).toBeVisible({ timeout: 3_000 });
     await expect(node21c).toBeVisible({ timeout: 3_000 });
 
@@ -163,7 +163,7 @@ test.describe('E2E-20 UI behaviors', () => {
     await expect(rack21a).toHaveAttribute('aria-expanded', 'true');
 
     // Text click selects the node
-    await node21c.getByRole('button', { name: 'N-n21c' }).click();
+    await node21c.getByRole('button', { name: 'N-213' }).click();
     await expect(node21c).toHaveAttribute('aria-selected', 'true');
   });
 });

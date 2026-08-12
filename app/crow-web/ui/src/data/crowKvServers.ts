@@ -28,10 +28,10 @@ function extractPort(urlOrAddr?: string | null): number | null {
   }
 }
 
-function toServerView(node: { id: string; rack_id: string; host: string; server?: ServerProcess } | null | undefined): CrowKVServerView | null {
+function toServerView(node: { id: number; rack_id: number; host: string; server?: ServerProcess } | null | undefined): CrowKVServerView | null {
   if (!node?.server) return null;
   return {
-    id: serverLabel(node.id),
+    id: serverLabel(String(node.id)),
     node_id: node.id,
     rack_id: node.rack_id,
     host: node.host,
@@ -42,7 +42,7 @@ function toServerView(node: { id: string; rack_id: string; host: string; server?
 }
 
 export function buildCrowKVServers(nodes: Node[], racks: Rack[]): CrowKVServerView[] {
-  const nodeMap = new Map<string, { id: string; rack_id: string; host: string; server?: ServerProcess }>();
+  const nodeMap = new Map<number, { id: number; rack_id: number; host: string; server?: ServerProcess }>();
 
   for (const node of nodes) {
     nodeMap.set(node.id, node);
@@ -66,11 +66,11 @@ export function buildCrowKVServers(nodes: Node[], racks: Rack[]): CrowKVServerVi
     .filter((server): server is CrowKVServerView => server !== null);
 }
 
-export function crowKvServerNodeIds(servers: CrowKVServerView[]): Set<string> {
+export function crowKvServerNodeIds(servers: CrowKVServerView[]): Set<number> {
   return new Set(servers.map((server) => server.node_id));
 }
 
-export function crowKvServerByNodeId(servers: CrowKVServerView[]): Map<string, CrowKVServerView> {
+export function crowKvServerByNodeId(servers: CrowKVServerView[]): Map<number, CrowKVServerView> {
   return new Map(servers.map((server) => [server.node_id, server]));
 }
 

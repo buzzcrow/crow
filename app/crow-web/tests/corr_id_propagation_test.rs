@@ -144,7 +144,7 @@ async fn corr_id_forwards_to_upstream_openapi_proxy() {
     let supplied = "0123456789abcdef";
     let http = reqwest::Client::new();
     let resp = http
-        .get(format!("http://{web_addr}/api/nodes/n1/openapi.json"))
+        .get(format!("http://{web_addr}/api/nodes/1/openapi.json"))
         .header(corr_id::HEADER, supplied)
         .send()
         .await

@@ -34,10 +34,10 @@ test.describe('E2E-28 KV advanced operations', () => {
   });
 
   test('delete prefix, delete selected, inline delete, copy', async ({ page, baseURL }) => {
-    await seedRackAndNode(baseURL!, 'r28', 'n28');
-    await deployNodeServer(baseURL!, 'n28', 9928, 9938);
-    await createStore(baseURL!, 280, ['n28']);
-    await addGroup(baseURL!, 280, 2800, 28000, ['n28']);
+    await seedRackAndNode(baseURL!, 28, 28);
+    await deployNodeServer(baseURL!, 28, 9928, 9938);
+    await createStore(baseURL!, 280, [28]);
+    await addGroup(baseURL!, 280, 2800, 28000, [28]);
     await waitForLeader(baseURL!, 280, 2800);
 
     try {
@@ -105,7 +105,7 @@ test.describe('E2E-28 KV advanced operations', () => {
       await expect(page.getByTestId('kv-get-result')).toBeVisible({ timeout: 3_000 });
       await expect(page.getByTestId('kv-copy-value')).toBeVisible();
     } finally {
-      await stopNodeServer(baseURL!, 'n28');
+      await stopNodeServer(baseURL!, 28);
     }
   });
 });

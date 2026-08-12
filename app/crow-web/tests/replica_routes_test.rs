@@ -40,7 +40,7 @@ fn pick_free_port() -> u16 {
 }
 
 struct Upstream {
-    node_id: String,
+    node_id: u64,
     pid: u32,
     mgmt_url: String,
     grpc_url: String,
@@ -74,13 +74,13 @@ fn tempdir(tag: &str) -> PathBuf {
     dir
 }
 
-async fn spawn_upstream(node_id: &str, workspace: &std::path::Path) -> Option<Upstream> {
+async fn spawn_upstream(node_id: u64, workspace: &std::path::Path) -> Option<Upstream> {
     let bin = crow_kv_server_bin()?;
     if !bin.exists() {
         return None;
     }
     let node = NodeEntry {
-        id: node_id.parse().unwrap(),
+        id: node_id,
         rack_id: 1,
         host: "127.0.0.1".into(),
         ssh_port: 22,
@@ -89,21 +89,21 @@ async fn spawn_upstream(node_id: &str, workspace: &std::path::Path) -> Option<Up
         ssh_password: None,
     };
     let req = DeployRequest {
-        server_id: node_id.parse().unwrap(),
+        server_id: node_id.to_string(),
         mgmt_port: pick_free_port(),
         grpc_port: pick_free_port(),
         election_profile: Some("e2e".into()),
         binary: Some(bin),
         ..Default::default()
     };
-    let node_dir = workspace.join(node_id);
+    let node_dir = workspace.join(node_id.to_string());
     std::fs::create_dir_all(node_dir.join("bin")).unwrap();
     std::fs::create_dir_all(node_dir.join("log")).unwrap();
     let deployed = lifecycle::deploy_local_in_dir(&req, &node, &node_dir)
         .await
         .expect("deploy_local_in_dir");
     Some(Upstream {
-        node_id: node_id.parse().unwrap(),
+        node_id,
         pid: deployed.pid,
         mgmt_url: deployed.mgmt_url,
         grpc_url: deployed.grpc_url,
@@ -122,7 +122,7 @@ async fn spawn_web(upstreams: &[Upstream]) -> SocketAddr {
     });
     for u in upstreams {
         cfg.nodes.push(NodeEntry {
-            id: u.node_id.parse().unwrap(),
+            id: u.node_id,
             rack_id: 1,
             host: "127.0.0.1".into(),
             ssh_port: 22,
@@ -131,9 +131,9 @@ async fn spawn_web(upstreams: &[Upstream]) -> SocketAddr {
             ssh_password: None,
         });
         cfg.add_server(ServerEntry {
-            id: u.node_id.parse().unwrap(),
+            id: u.node_id.to_string(),
             url: u.mgmt_url.clone(),
-            node_id: Some(u.node_id.parse().unwrap()),
+            node_id: Some(u.node_id),
             grpc_url: Some(u.grpc_url.clone()),
             mgmt_port: None,
             grpc_port: None,
@@ -154,13 +154,10 @@ async fn spawn_web(upstreams: &[Upstream]) -> SocketAddr {
             let rec = NodeRecord {
                 health: NodeHealth::Up,
                 last_seen_ms: 1,
-                stores: legacy_topology_to_node_stores(u.node_id.parse().unwrap(), &stores),
+                stores: legacy_topology_to_node_stores(u.node_id, &stores),
                 last_error: None,
             };
-            state
-                .monitor_cache
-                .set_node_report(u.node_id.parse().unwrap(), rec)
-                .await;
+            state.monitor_cache.set_node_report(u.node_id, rec).await;
         }
     }
 
@@ -178,16 +175,16 @@ async fn replica_add_remove_wires_peers_bidirectionally() {
     let mut guard = ProcessGuard {
         pids: BTreeMap::new(),
     };
-    let Some(n1) = spawn_upstream("n1", &workspace).await else {
+    let Some(n1) = spawn_upstream(1, &workspace).await else {
         eprintln!("skipping: crow-kv-server binary not built");
         return;
     };
-    guard.pids.insert("n1".into(), n1.pid);
-    let Some(n2) = spawn_upstream("n2", &workspace).await else {
+    guard.pids.insert("1".into(), n1.pid);
+    let Some(n2) = spawn_upstream(2, &workspace).await else {
         eprintln!("skipping: crow-kv-server binary not built");
         return;
     };
-    guard.pids.insert("n2".into(), n2.pid);
+    guard.pids.insert("2".into(), n2.pid);
     let n1_mgmt = n1.mgmt_url.clone();
     let n2_mgmt = n2.mgmt_url.clone();
 
@@ -203,7 +200,7 @@ async fn replica_add_remove_wires_peers_bidirectionally() {
     // 0. Initialize the system group so non-zero stores can be created.
     let resp = http
         .post(format!("{base}/api/cluster/init"))
-        .json(&json!({"nodes": ["n1", "n2"]}))
+        .json(&json!({"nodes": [1, 2]}))
         .send()
         .await
         .unwrap();
@@ -212,7 +209,7 @@ async fn replica_add_remove_wires_peers_bidirectionally() {
     // 1. Create an empty store on n1.
     let resp = http
         .post(format!("{base}/api/stores"))
-        .json(&json!({"store_id": sid, "nodes": ["n1"]}))
+        .json(&json!({"store_id": sid, "nodes": [1]}))
         .send()
         .await
         .unwrap();
@@ -221,7 +218,7 @@ async fn replica_add_remove_wires_peers_bidirectionally() {
     // 2. Create the initial group on n1 with replica 1.
     let resp = http
         .post(format!("{base}/api/stores/{sid}/groups"))
-        .json(&json!({"group_id": gid, "replica_id": rid1, "nodes": ["n1"]}))
+        .json(&json!({"group_id": gid, "replica_id": rid1, "nodes": [1]}))
         .send()
         .await
         .unwrap();
@@ -238,12 +235,12 @@ async fn replica_add_remove_wires_peers_bidirectionally() {
         .unwrap();
     assert_eq!(list.len(), 1, "expected 1 initial replica, got {list:?}");
     assert_eq!(list[0]["replica_id"], rid1);
-    assert_eq!(list[0]["node_id"], "n1");
+    assert_eq!(list[0]["node_id"], 1);
 
     // 4. Add replica 2 on n2 → orchestrated bidirectional wiring.
     let resp = http
         .post(format!("{base}/api/stores/{sid}/groups/{gid}/replicas"))
-        .json(&json!({"node_id": "n2", "replica_id": rid2}))
+        .json(&json!({"node_id": 2, "replica_id": rid2}))
         .send()
         .await
         .unwrap();
@@ -259,8 +256,8 @@ async fn replica_add_remove_wires_peers_bidirectionally() {
         .await
         .unwrap();
     assert_eq!(list.len(), 2, "expected 2 replicas after add, got {list:?}");
-    let nodes: Vec<&str> = list.iter().map(|r| r["node_id"].as_str().unwrap()).collect();
-    assert!(nodes.contains(&"n1") && nodes.contains(&"n2"), "{nodes:?}");
+    let nodes: Vec<u64> = list.iter().map(|r| r["node_id"].as_u64().unwrap()).collect();
+    assert!(nodes.contains(&1) && nodes.contains(&2), "{nodes:?}");
 
     // 6. Physical tree must show bidirectional remotes:
     //    n1's group has r2 as a remote, n2's group has r1 as a remote.
@@ -288,7 +285,7 @@ async fn replica_add_remove_wires_peers_bidirectionally() {
     assert_eq!(resp.status(), 200);
     let detail: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(detail["replica_id"], rid2);
-    assert_eq!(detail["node_id"], "n2");
+    assert_eq!(detail["node_id"], 2);
     assert!(
         matches!(detail["role"].as_str(), Some("leader" | "follower")),
         "new replica should report a valid role: {detail}"
@@ -349,9 +346,9 @@ async fn replica_add_remove_wires_peers_bidirectionally() {
         .unwrap();
     assert_eq!(list.len(), 1, "expected 1 replica after remove, got {list:?}");
     let surviving_rid = list[0]["replica_id"].as_u64().unwrap();
-    let surviving_node = list[0]["node_id"].as_str().unwrap();
+    let surviving_node = list[0]["node_id"].as_u64().unwrap();
 
-    let surviving_client = if surviving_node == "n1" { &c1 } else { &c2 };
+    let surviving_client = if surviving_node == 1 { &c1 } else { &c2 };
     let r1_remotes_after = surviving_client.list_remote_replicas(sid, gid).await.unwrap();
     assert!(
         !r1_remotes_after.iter().any(|r| r.replica_id == leader_rid),

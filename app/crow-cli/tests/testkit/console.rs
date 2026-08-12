@@ -110,7 +110,7 @@ pub async fn spawn_upstream() -> Option<Upstream> {
     std::fs::create_dir_all(workspace.join("log")).ok()?;
     let (mgmt_port, grpc_port) = pick_two_distinct_free_ports();
     let req = DeployRequest {
-        server_id: "n1".into(),
+        server_id: "1".into(),
         mgmt_port,
         grpc_port,
         election_profile: Some("e2e".into()),
@@ -139,11 +139,11 @@ pub async fn spawn_console(upstream: &Upstream) -> SocketAddr {
     let mut cfg = ConsoleConfig::default();
     cfg.racks.push(RackEntry {
         id: 1,
-        name: "r1".into(),
+        name: "rack-1".into(),
     });
     cfg.nodes.push(local_node(1, 1));
     cfg.add_server(ServerEntry {
-        id: "n1".into(),
+        id: "1".to_string(),
         url: upstream.mgmt_url.clone(),
         node_id: Some(1),
         grpc_url: Some(upstream.grpc_url.clone()),

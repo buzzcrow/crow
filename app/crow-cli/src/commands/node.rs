@@ -3,6 +3,7 @@
 
 use clap::Subcommand;
 use crow_console_shared::config::NodeEntry;
+use crow_protocol::NodeId;
 use std::process::ExitCode;
 
 use crate::utils::{client::console_client, print_json};
@@ -94,7 +95,7 @@ async fn node_add(cli: &Cli, args: NodeAddArgs) -> ExitCode {
         ssh_key: args.ssh_key,
         ssh_password: args.ssh_password,
     };
-    match client.add_node(&args.rack_id, &entry).await {
+    match client.add_node(entry.rack_id, &entry).await {
         Ok(n) => {
             if cli.json {
                 return print_json(&n);
@@ -110,11 +111,18 @@ async fn node_add(cli: &Cli, args: NodeAddArgs) -> ExitCode {
 }
 
 async fn node_remove(cli: &Cli, id: &str) -> ExitCode {
+    let node_id: NodeId = match id.parse() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("error: invalid node id {id:?}: {e}");
+            return ExitCode::from(1);
+        }
+    };
     let client = match console_client(cli) {
         Ok(c) => c,
         Err(c) => return c,
     };
-    match client.remove_node(id).await {
+    match client.remove_node(node_id).await {
         Ok(()) => {
             println!("removed node {id}");
             ExitCode::SUCCESS
@@ -153,11 +161,18 @@ async fn node_list(cli: &Cli) -> ExitCode {
 }
 
 async fn node_ping(cli: &Cli, node_id: &str) -> ExitCode {
+    let nid: NodeId = match node_id.parse() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("error: invalid node id {node_id:?}: {e}");
+            return ExitCode::from(1);
+        }
+    };
     let client = match console_client(cli) {
         Ok(c) => c,
         Err(c) => return c,
     };
-    match client.ping_node(node_id).await {
+    match client.ping_node(nid).await {
         Ok(r) if r.ok => {
             if cli.json {
                 return print_json(&r);

@@ -604,6 +604,7 @@ dependencies = [
  "crow-common",
  "crow-console-shared",
  "crow-kv-client",
+ "crow-protocol",
  "crow-web",
  "dirs",
  "hex",

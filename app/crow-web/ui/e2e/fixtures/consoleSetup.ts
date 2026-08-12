@@ -11,13 +11,13 @@ export const DEFAULT_SERVER_BINARY =
   process.env.CROW_KV_SERVER_BINARY ?? resolve(__dirname, '../../../../../target/debug/crow-kv-server');
 
 export interface TestRack {
-  id: string;
+  id: number;
   name?: string;
 }
 
 export interface TestNode {
-  id: string;
-  rack_id: string;
+  id: number;
+  rack_id: number;
   host?: string;
 }
 
@@ -56,12 +56,12 @@ export async function createNode(baseURL: string, node: TestNode) {
   }
 }
 
-export async function seedRackAndNode(baseURL: string, rackId = 'r1', nodeId = 'n1') {
-  await createRack(baseURL, { id: rackId, name: rackId });
+export async function seedRackAndNode(baseURL: string, rackId = 1, nodeId = 1) {
+  await createRack(baseURL, { id: rackId, name: `rack-${rackId}` });
   await createNode(baseURL, { id: nodeId, rack_id: rackId });
 }
 
-export async function deployNodeServer(baseURL: string, nodeId: string, mgmtPort: number, grpcPort: number) {
+export async function deployNodeServer(baseURL: string, nodeId: number, mgmtPort: number, grpcPort: number) {
   const api = await apiContext(baseURL);
   try {
     const response = await api.post(`/api/nodes/${encodeURIComponent(nodeId)}/server/deploy`, {
@@ -78,7 +78,7 @@ export async function deployNodeServer(baseURL: string, nodeId: string, mgmtPort
   }
 }
 
-export async function stopNodeServer(baseURL: string, nodeId: string) {
+export async function stopNodeServer(baseURL: string, nodeId: number) {
   const api = await apiContext(baseURL);
   try {
     const response = await api.post(`/api/nodes/${encodeURIComponent(nodeId)}/server/stop`);
@@ -92,7 +92,7 @@ export async function stopNodeServer(baseURL: string, nodeId: string) {
   }
 }
 
-export async function addGroup(baseURL: string, storeId: number, groupId: number, replicaId: number, nodeIds: string[]) {
+export async function addGroup(baseURL: string, storeId: number, groupId: number, replicaId: number, nodeIds: number[]) {
   const api = await apiContext(baseURL);
   try {
     const response = await api.post(`/api/stores/${storeId}/groups`, {
@@ -108,7 +108,7 @@ export async function addGroup(baseURL: string, storeId: number, groupId: number
   }
 }
 
-export async function addReplica(baseURL: string, storeId: number, groupId: number, nodeId: string, replicaId?: number) {
+export async function addReplica(baseURL: string, storeId: number, groupId: number, nodeId: number, replicaId?: number) {
   const api = await apiContext(baseURL);
   try {
     const body: Record<string, unknown> = { node_id: nodeId };
@@ -146,7 +146,7 @@ export async function waitForLeader(baseURL: string, storeId: number, groupId: n
   }
 }
 
-export async function clusterInit(baseURL: string, nodeIds: string[]) {
+export async function clusterInit(baseURL: string, nodeIds: number[]) {
   const api = await apiContext(baseURL);
   try {
     const response = await api.post('/api/cluster/init', {
@@ -161,7 +161,7 @@ export async function clusterInit(baseURL: string, nodeIds: string[]) {
   }
 }
 
-export async function createStore(baseURL: string, storeId: number, nodeIds: string[]) {
+export async function createStore(baseURL: string, storeId: number, nodeIds: number[]) {
   // Non-zero stores require the system group (store 0 / group 0) to exist.
   // system_init is idempotent, so this is safe to call every time.
   if (storeId !== 0) {
@@ -198,16 +198,16 @@ export interface TopologyDescriptor {
   storeCount: number;
   groupsPerStore: number;
   replicasPerGroup: number;
-  rackPrefix: string;
-  nodePrefix: string;
+  rackBase: number;
+  nodeBase: number;
   portBase: number;
   storeBase: number;
   groupBase: number;
 }
 
 export interface SetupResult {
-  racks: string[];
-  nodes: string[];
+  racks: number[];
+  nodes: number[];
   stores: number[];
   groups: { storeId: number; groupId: number }[];
   apiBase: string;
@@ -218,8 +218,8 @@ export const SIMPLE: TopologyDescriptor = {
   storeCount: 1,
   groupsPerStore: 1,
   replicasPerGroup: 3,
-  rackPrefix: 'sr',
-  nodePrefix: 'sn',
+  rackBase: 100,
+  nodeBase: 100,
   portBase: 9800,
   storeBase: 800,
   groupBase: 8000,
@@ -230,8 +230,8 @@ export const COMPLEX: TopologyDescriptor = {
   storeCount: 2,
   groupsPerStore: 2,
   replicasPerGroup: 3,
-  rackPrefix: 'cr',
-  nodePrefix: 'cn',
+  rackBase: 200,
+  nodeBase: 200,
   portBase: 9900,
   storeBase: 900,
   groupBase: 9000,
@@ -243,13 +243,13 @@ export const COMPLEX: TopologyDescriptor = {
  * Each node gets its own rack (1:1 mapping) for simplicity.
  */
 export async function setupCluster(baseURL: string, topo: TopologyDescriptor): Promise<SetupResult> {
-  const racks: string[] = [];
-  const nodes: string[] = [];
+  const racks: number[] = [];
+  const nodes: number[] = [];
 
   for (let i = 0; i < topo.nodeCount; i++) {
-    const rackId = `${topo.rackPrefix}${i}`;
-    const nodeId = `${topo.nodePrefix}${i}`;
-    await createRack(baseURL, { id: rackId, name: rackId });
+    const rackId = topo.rackBase + i;
+    const nodeId = topo.nodeBase + i;
+    await createRack(baseURL, { id: rackId, name: `rack-${rackId}` });
     await createNode(baseURL, { id: nodeId, rack_id: rackId });
     await deployNodeServer(baseURL, nodeId, topo.portBase + i * 2, topo.portBase + i * 2 + 1);
     racks.push(rackId);

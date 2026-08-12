@@ -10,9 +10,9 @@ test.describe('E2E-19 large cluster leader monitor', () => {
     test.setTimeout(60_000);
     // Setup: 3 racks, 3 nodes, 3 deployed servers.
     const racks = [
-      { rack: 'r19a', node: 'n19a', mgmtPort: 9935, grpcPort: 9945 },
-      { rack: 'r19b', node: 'n19b', mgmtPort: 9936, grpcPort: 9946 },
-      { rack: 'r19c', node: 'n19c', mgmtPort: 9937, grpcPort: 9947 },
+      { rack: 191, node: 191, mgmtPort: 9935, grpcPort: 9945 },
+      { rack: 192, node: 192, mgmtPort: 9936, grpcPort: 9946 },
+      { rack: 193, node: 193, mgmtPort: 9937, grpcPort: 9947 },
     ];
 
     for (const r of racks) {
@@ -24,18 +24,18 @@ test.describe('E2E-19 large cluster leader monitor', () => {
     // http_add_store reuses the same replica_id across nodes and does not
     // wire remotes, so we extend the group via addReplica below which
     // auto-creates the store on each peer node and wires remotes.
-    await createStore(baseURL!, 199, ['n19a']);
-    await addGroup(baseURL!, 199, 1990, 19900, ['n19a']);
+    await createStore(baseURL!, 199, [191]);
+    await addGroup(baseURL!, 199, 1990, 19900, [191]);
     // addReplica adds a remote replica to an existing group on a new node;
     // it ensures the target node hosts the store (creating it if needed)
     // and wires remotes on every existing peer.
-    await addReplica(baseURL!, 199, 1990, 'n19b', 19901);
-    await addReplica(baseURL!, 199, 1990, 'n19c', 19902);
+    await addReplica(baseURL!, 199, 1990, 192, 19901);
+    await addReplica(baseURL!, 199, 1990, 193, 19902);
 
     // Now all 3 nodes host store 199, so addGroup can create new groups
     // spanning all 3. Leader election must converge via Paxos.
-    await addGroup(baseURL!, 199, 1991, 19910, ['n19a', 'n19b', 'n19c']);
-    await addGroup(baseURL!, 199, 1992, 19920, ['n19a', 'n19b', 'n19c']);
+    await addGroup(baseURL!, 199, 1991, 19910, [191, 192, 193]);
+    await addGroup(baseURL!, 199, 1992, 19920, [191, 192, 193]);
 
     const api = await apiContext(baseURL!);
     try {

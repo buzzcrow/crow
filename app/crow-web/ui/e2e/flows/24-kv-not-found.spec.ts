@@ -17,10 +17,10 @@ import { addGroup, createStore, deployNodeServer, seedRackAndNode, stopNodeServe
  */
 test.describe('E2E-24 KV not-found', () => {
   test('renders a graceful not-found for a missing key', async ({ page, baseURL }) => {
-    await seedRackAndNode(baseURL!, 'r24', 'n24');
-    await deployNodeServer(baseURL!, 'n24', 9956, 9966);
-    await createStore(baseURL!, 244, ['n24']);
-    await addGroup(baseURL!, 244, 2440, 24400, ['n24']);
+    await seedRackAndNode(baseURL!, 24, 24);
+    await deployNodeServer(baseURL!, 24, 9956, 9966);
+    await createStore(baseURL!, 244, [24]);
+    await addGroup(baseURL!, 244, 2440, 24400, [24]);
     await waitForLeader(baseURL!, 244, 2440);
 
     const errors: string[] = [];
@@ -41,7 +41,7 @@ test.describe('E2E-24 KV not-found', () => {
       await expect(page.getByTestId('kv-not-found')).toBeVisible({ timeout: 3_000 });
       expect(errors, errors.join('\n')).toHaveLength(0);
     } finally {
-      await stopNodeServer(baseURL!, 'n24');
+      await stopNodeServer(baseURL!, 24);
     }
   });
 });

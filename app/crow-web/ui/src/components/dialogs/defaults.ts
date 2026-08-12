@@ -4,7 +4,7 @@
 const DIGIT_SUFFIX = /(\d+)$/;
 
 interface ServerPortSource {
-  id?: string;
+  id?: string | number;
   mgmt_port?: number | null;
   grpc_port?: number | null;
   process?: {
@@ -17,11 +17,11 @@ interface ServerPortSource {
   };
 }
 
-export function nextIdFromSuffix(existingIds: string[], min = 1): string {
+export function nextIdFromSuffix(existingIds: (string | number)[], min = 1): string {
   let max = min - 1;
 
   for (const id of existingIds) {
-    const raw = id.trim();
+    const raw = String(id).trim();
     if (!raw) continue;
 
     const match = raw.match(DIGIT_SUFFIX);
@@ -55,11 +55,11 @@ export function nextPrefixedId(existingIds: string[], prefix: string): string {
   return `${prefix}${max + 1}`;
 }
 
-export function nextNumericId(existingIds: string[], min = 1): string {
+export function nextNumericId(existingIds: (string | number)[], min = 1): string {
   let max = min - 1;
 
   for (const id of existingIds) {
-    const raw = id.trim();
+    const raw = String(id).trim();
     if (!/^\d+$/.test(raw)) continue;
     const n = Number(raw);
     if (Number.isFinite(n)) max = Math.max(max, n);
@@ -92,8 +92,8 @@ export function nextAvailablePort(usedPorts: number[], start: number): string {
   return String(candidate);
 }
 
-function preferredPortStart(base: number, nodeId: string): number {
-  const raw = nodeId.trim();
+function preferredPortStart(base: number, nodeId: number): number {
+  const raw = String(nodeId).trim();
   if (!raw) return base;
 
   const match = raw.match(DIGIT_SUFFIX);
@@ -106,7 +106,7 @@ function preferredPortStart(base: number, nodeId: string): number {
 
 export function deployPortDefaultsForNode(
   servers: ServerPortSource[],
-  nodeId: string,
+  nodeId: number,
   mgmtStart = 19910,
   grpcStart = 19920,
   extraUsedMgmtPorts: number[] = [],

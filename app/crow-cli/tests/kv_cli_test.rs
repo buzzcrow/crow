@@ -34,10 +34,7 @@ async fn kv_put_get_delete_round_trip() {
     let port = console.port();
 
     let console_client = ConsoleClient::new(format!("http://{ip}:{port}")).unwrap();
-    console_client
-        .cluster_init(&["n1".to_string()])
-        .await
-        .expect("cluster_init");
+    console_client.cluster_init(&[1]).await.expect("cluster_init");
 
     // Create store 1 / group 1 via the same CLI control path used by the
     // passing bench smoke test, then wait for the single-replica group to
@@ -58,7 +55,7 @@ async fn kv_put_get_delete_round_trip() {
             "--replica-id",
             "1",
             "--nodes",
-            "n1",
+            "1",
         ],
     );
     assert_eq!(code, 0, "paxos add stderr={stderr}");

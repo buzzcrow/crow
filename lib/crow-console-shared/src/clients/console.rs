@@ -169,7 +169,7 @@ pub struct KvScanResponse {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServerSummary {
     #[serde(default)]
-    pub node_id: Option<String>,
+    pub node_id: Option<NodeId>,
     pub mgmt_url: String,
     #[serde(default)]
     pub grpc_url: Option<String>,
@@ -236,7 +236,7 @@ impl ConsoleClient {
     ///
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
-    pub async fn remove_rack(&self, rack_id: &str) -> Result<()> {
+    pub async fn remove_rack(&self, rack_id: RackId) -> Result<()> {
         self.delete_path(&format!("/api/racks/{rack_id}")).await
     }
 
@@ -246,7 +246,7 @@ impl ConsoleClient {
     ///
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
-    pub async fn list_nodes(&self, rack_id: Option<&str>) -> Result<Vec<NodeEntry>> {
+    pub async fn list_nodes(&self, rack_id: Option<RackId>) -> Result<Vec<NodeEntry>> {
         let path = match rack_id {
             Some(r) => format!("/api/nodes?rack_id={r}"),
             None => "/api/nodes".to_string(),
@@ -260,7 +260,7 @@ impl ConsoleClient {
     ///
     /// # Errors
     /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
-    pub async fn add_node(&self, rack_id: &str, entry: &NodeEntry) -> Result<NodeEntry> {
+    pub async fn add_node(&self, rack_id: RackId, entry: &NodeEntry) -> Result<NodeEntry> {
         self.post_json(&format!("/api/racks/{rack_id}/nodes"), entry)
             .await
     }
@@ -269,7 +269,7 @@ impl ConsoleClient {
     ///
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
-    pub async fn remove_node(&self, node_id: &str) -> Result<()> {
+    pub async fn remove_node(&self, node_id: NodeId) -> Result<()> {
         self.delete_path(&format!("/api/nodes/{node_id}")).await
     }
 
@@ -277,7 +277,7 @@ impl ConsoleClient {
     ///
     /// # Errors
     /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
-    pub async fn ping_node(&self, node_id: &str) -> Result<PingResult> {
+    pub async fn ping_node(&self, node_id: NodeId) -> Result<PingResult> {
         self.post_json(&format!("/api/nodes/{node_id}/ping"), &serde_json::json!({}))
             .await
     }
@@ -289,7 +289,7 @@ impl ConsoleClient {
     ///
     /// # Errors
     /// Transport or non-2xx errors surface as `Error::UpstreamRpc`.
-    pub async fn get_node_server(&self, node_id: &str) -> Result<ServerEntry> {
+    pub async fn get_node_server(&self, node_id: NodeId) -> Result<ServerEntry> {
         self.get_json(&format!("/api/nodes/{node_id}/server")).await
     }
 
@@ -299,7 +299,7 @@ impl ConsoleClient {
     /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
     pub async fn deploy_node_server(
         &self,
-        node_id: &str,
+        node_id: NodeId,
         body: &DeployNodeServerBody,
     ) -> Result<DeployResult> {
         self.post_json(&format!("/api/nodes/{node_id}/server/deploy"), body)
@@ -310,7 +310,7 @@ impl ConsoleClient {
     ///
     /// # Errors
     /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
-    pub async fn stop_node_server(&self, node_id: &str) -> Result<StopResult> {
+    pub async fn stop_node_server(&self, node_id: NodeId) -> Result<StopResult> {
         self.post_json(
             &format!("/api/nodes/{node_id}/server/stop"),
             &serde_json::json!({}),
@@ -332,7 +332,7 @@ impl ConsoleClient {
     ///
     /// # Errors
     /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
-    pub async fn restart_node_server(&self, node_id: &str) -> Result<DeployResult> {
+    pub async fn restart_node_server(&self, node_id: NodeId) -> Result<DeployResult> {
         self.post_json(
             &format!("/api/nodes/{node_id}/server/restart"),
             &serde_json::json!({}),
@@ -364,10 +364,10 @@ impl ConsoleClient {
     ///
     /// # Errors
     /// Transport, decode, or 4xx/5xx errors surface as `Error::UpstreamRpc`.
-    pub async fn cluster_init(&self, nodes: &[String]) -> Result<Value> {
+    pub async fn cluster_init(&self, nodes: &[NodeId]) -> Result<Value> {
         #[derive(Serialize)]
         struct ClusterInitBody<'a> {
-            nodes: &'a [String],
+            nodes: &'a [NodeId],
         }
         self.post_json("/api/cluster/init", &ClusterInitBody { nodes })
             .await

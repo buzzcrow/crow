@@ -33,10 +33,7 @@ async fn cluster_status_topology_inspect_via_console() {
 
     // Initialize the system group so non-zero stores can be created.
     let console_client = ConsoleClient::new(format!("http://{ip}:{port}")).unwrap();
-    console_client
-        .cluster_init(&["n1".to_string()])
-        .await
-        .expect("cluster_init");
+    console_client.cluster_init(&[1]).await.expect("cluster_init");
 
     // Seed a store + group through the CLI so the logical tree is non-empty.
     let (code, _, stderr) = run(&cli, &ip, port, &["store", "add", "--store-id", "9"]);
@@ -55,7 +52,7 @@ async fn cluster_status_topology_inspect_via_console() {
             "--replica-id",
             "900",
             "--nodes",
-            "n1",
+            "1",
         ],
     );
     assert_eq!(code, 0, "paxos add stderr={stderr}");
@@ -65,7 +62,7 @@ async fn cluster_status_topology_inspect_via_console() {
     let (code, stdout, stderr) = run(&cli, &ip, port, &["cluster", "status"]);
     assert_eq!(code, 0, "status stderr={stderr}");
     assert!(stdout.contains("servers:"), "stdout={stdout}");
-    assert!(stdout.contains("n1"), "stdout={stdout}");
+    assert!(stdout.contains('1'), "stdout={stdout}");
     assert!(stdout.contains("stores: 2"), "stdout={stdout}");
 
     // topology — logical + physical sections.
@@ -75,10 +72,10 @@ async fn cluster_status_topology_inspect_via_console() {
     assert!(stdout.contains("store 9"), "stdout={stdout}");
     assert!(stdout.contains("group 90"), "stdout={stdout}");
     assert!(stdout.contains("physical:"), "stdout={stdout}");
-    assert!(stdout.contains("node n1"), "stdout={stdout}");
+    assert!(stdout.contains("node 1"), "stdout={stdout}");
 
     // inspect node (bare token → node id).
-    let (code, stdout, stderr) = run(&cli, &ip, port, &["cluster", "inspect", "n1"]);
+    let (code, stdout, stderr) = run(&cli, &ip, port, &["cluster", "inspect", "1"]);
     assert_eq!(code, 0, "inspect node stderr={stderr}");
     assert!(stdout.contains("mgmt_url:"), "stdout={stdout}");
 

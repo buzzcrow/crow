@@ -40,7 +40,7 @@ export function AddRackDialog({ isOpen, onClose, existingRackIds = [], onSuccess
     setIsLoading(true);
     try {
       await addRack({
-        id: rackId.trim(),
+        id: Number(rackId.trim()),
         name: name.trim() || undefined,
       });
 

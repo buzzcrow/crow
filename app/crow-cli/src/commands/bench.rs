@@ -503,7 +503,7 @@ fn bench_report(run_id: &str, json: bool) -> ExitCode {
                         }
                     }
                 } else {
-                    let node_ids = vec!["bn0".to_string(), "bn1".to_string(), "bn2".to_string()];
+                    let node_ids = vec![0u64, 1, 2];
                     let workspace = path
                         .parent()
                         .map_or_else(|| std::path::PathBuf::from("."), |d| d.join("artifacts"));

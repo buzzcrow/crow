@@ -32,7 +32,7 @@ async function getGroupStatus(baseURL: string, storeId: number, groupId: number)
   }
 }
 
-async function findLeaderNode(baseURL: string, storeId: number, groupId: number): Promise<string | null> {
+async function findLeaderNode(baseURL: string, storeId: number, groupId: number): Promise<number | null> {
   const body = await getGroupStatus(baseURL, storeId, groupId);
   const replicas: any[] = Array.isArray(body.replicas) ? body.replicas : [];
   const leader = replicas.find((r) => String(r.role).toLowerCase() === 'leader');
@@ -44,15 +44,16 @@ test.describe('E2E-42 stop server keeps group', () => {
     await resetAll(baseURL!);
 
     // 3-node group on n42a, n42b, n42c
-    for (const r of ['r42a', 'r42b', 'r42c']) {
-      await seedRackAndNode(baseURL!, r, r.replace('r', 'n'));
-    }
-    await deployNodeServer(baseURL!, 'n42a', 9970, 9971);
-    await deployNodeServer(baseURL!, 'n42b', 9972, 9973);
-    await deployNodeServer(baseURL!, 'n42c', 9974, 9975);
+    for (const r of [421, 422, 423]) {
 
-    await createStore(baseURL!, 420, ['n42a', 'n42b', 'n42c']);
-    await addGroup(baseURL!, 420, 4200, 42000, ['n42a', 'n42b', 'n42c']);
+      await seedRackAndNode(baseURL!, r, r);
+    }
+    await deployNodeServer(baseURL!, 421, 9970, 9971);
+    await deployNodeServer(baseURL!, 422, 9972, 9973);
+    await deployNodeServer(baseURL!, 423, 9974, 9975);
+
+    await createStore(baseURL!, 420, [421, 422, 423]);
+    await addGroup(baseURL!, 420, 4200, 42000, [421, 422, 423]);
     await waitForLeader(baseURL!, 420, 4200);
 
     try {
@@ -63,7 +64,7 @@ test.describe('E2E-42 stop server keeps group', () => {
       // Find the leader, then stop a non-leader node
       const leaderNode = await findLeaderNode(baseURL!, 420, 4200);
       expect(leaderNode).not.toBeNull();
-      const nonLeaderNodes = ['n42a', 'n42b', 'n42c'].filter((n) => n !== leaderNode);
+      const nonLeaderNodes = [421, 422, 423].filter((n) => n !== leaderNode);
       const stopNode = nonLeaderNodes[0];
 
       // Stop the non-leader server via console API
@@ -91,9 +92,9 @@ test.describe('E2E-42 stop server keeps group', () => {
         return replicas.filter((r) => r.status !== 'unhealthy').length;
       }, { timeout: 10_000, intervals: [100] }).toBeGreaterThanOrEqual(3);
     } finally {
-      await stopNodeServer(baseURL!, 'n42a');
-      await stopNodeServer(baseURL!, 'n42b');
-      await stopNodeServer(baseURL!, 'n42c');
+      await stopNodeServer(baseURL!, 421);
+      await stopNodeServer(baseURL!, 422);
+      await stopNodeServer(baseURL!, 423);
     }
   });
 });

@@ -11,20 +11,20 @@ test.describe('E2E-34 sidebar filter', () => {
   });
 
   test('filter narrows tree and clearing restores all items', async ({ page, baseURL }) => {
-    await createRack(baseURL!, { id: 'r34a', name: 'Alpha' });
-    await createRack(baseURL!, { id: 'r34b', name: 'Beta' });
-    await createRack(baseURL!, { id: 'r34c', name: 'Gamma' });
-    await createNode(baseURL!, { id: 'n34a', rack_id: 'r34a' });
-    await createNode(baseURL!, { id: 'n34b', rack_id: 'r34b' });
-    await createNode(baseURL!, { id: 'n34c', rack_id: 'r34c' });
+    await createRack(baseURL!, { id: 341, name: 'Alpha' });
+    await createRack(baseURL!, { id: 342, name: 'Beta' });
+    await createRack(baseURL!, { id: 343, name: 'Gamma' });
+    await createNode(baseURL!, { id: 341, rack_id: 341 });
+    await createNode(baseURL!, { id: 342, rack_id: 342 });
+    await createNode(baseURL!, { id: 343, rack_id: 343 });
 
     await page.goto('/');
     await page.getByRole('button', { name: 'Physical' }).click();
 
     const aside = page.getByRole('complementary', { name: 'Cluster tree sidebar' });
-    const rackA = page.getByRole('treeitem').filter({ hasText: 'R-r34a' });
-    const rackB = page.getByRole('treeitem').filter({ hasText: 'R-r34b' });
-    const rackC = page.getByRole('treeitem').filter({ hasText: 'R-r34c' });
+    const rackA = page.getByRole('treeitem').filter({ hasText: 'R-341' });
+    const rackB = page.getByRole('treeitem').filter({ hasText: 'R-342' });
+    const rackC = page.getByRole('treeitem').filter({ hasText: 'R-343' });
 
     // All visible initially
     await expect(rackA).toBeVisible({ timeout: 3_000 });

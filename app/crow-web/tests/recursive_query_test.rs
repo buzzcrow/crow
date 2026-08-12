@@ -45,15 +45,15 @@ async fn malformed_recursive_yields_400_on_every_get() {
     let paths = [
         // Physical tree.
         "/api/racks",
-        "/api/racks/r1",
-        "/api/racks/r1/nodes",
+        "/api/racks/1",
+        "/api/racks/1/nodes",
         "/api/nodes",
-        "/api/nodes/n1",
-        "/api/nodes/n1/server",
-        "/api/nodes/n1/stores",
-        "/api/nodes/n1/stores/1",
-        "/api/nodes/n1/stores/1/groups",
-        "/api/nodes/n1/stores/1/groups/1",
+        "/api/nodes/1",
+        "/api/nodes/1/server",
+        "/api/nodes/1/stores",
+        "/api/nodes/1/stores/1",
+        "/api/nodes/1/stores/1/groups",
+        "/api/nodes/1/stores/1/groups/1",
         // Logical tree.
         "/api/stores",
         "/api/stores/1",
@@ -199,10 +199,10 @@ async fn list_racks_recursive_inlines_nodes_and_records_truncation() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let items = body["items"].as_array().expect("items present");
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0]["id"], "r1");
+    assert_eq!(items[0]["id"], "1");
     let nodes = items[0]["nodes"].as_array().expect("nodes inlined at depth 1");
     assert_eq!(nodes.len(), 1);
-    assert_eq!(nodes[0]["id"], "n1");
+    assert_eq!(nodes[0]["id"], "1");
     assert!(nodes[0].get("stores").is_none(), "depth 1 stops before stores");
     // The node hosts a store in the monitor cache, so the walk must
     // record a truncation path under `node:n1`.
@@ -214,7 +214,7 @@ async fn list_racks_recursive_inlines_nodes_and_records_truncation() {
         .iter()
         .map(|s| s.as_str().unwrap())
         .collect();
-    assert_eq!(path, vec!["rack:r1", "node:n1"]);
+    assert_eq!(path, vec!["rack:1", "node:1"]);
 }
 
 #[tokio::test]
@@ -235,7 +235,7 @@ async fn list_racks_flat_shape_preserved_at_depth_zero() {
             .as_array()
             .unwrap_or_else(|| panic!("flat array expected for q={q:?}, got {body}"));
         assert_eq!(arr.len(), 1);
-        assert_eq!(arr[0]["id"], "r1");
+        assert_eq!(arr[0]["id"], 1);
     }
 }
 
@@ -245,13 +245,13 @@ async fn get_rack_recursive_all_inlines_full_subtree() {
     let http = reqwest::Client::new();
 
     let resp = http
-        .get(format!("http://{addr}/api/racks/r1?recursive=all"))
+        .get(format!("http://{addr}/api/racks/1?recursive=all"))
         .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["id"], "r1");
+    assert_eq!(body["id"], "1");
     let groups = body["nodes"][0]["stores"][0]["groups"]
         .as_array()
         .expect("groups inlined under store under node");
@@ -268,7 +268,7 @@ async fn list_rack_nodes_recursive_inlines_stores() {
     let http = reqwest::Client::new();
 
     let resp = http
-        .get(format!("http://{addr}/api/racks/r1/nodes?recursive=2"))
+        .get(format!("http://{addr}/api/racks/1/nodes?recursive=2"))
         .send()
         .await
         .unwrap();

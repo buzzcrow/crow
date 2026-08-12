@@ -15,7 +15,7 @@ export interface AddStoreDialogProps {
   nodes: Node[];
   servers?: CrowKVServerView[];
   defaultStoreId?: string;
-  defaultNodeIds?: string[];
+  defaultNodeIds?: number[];
   onSuccess?: () => void | Promise<void>;
 }
 
@@ -39,7 +39,7 @@ export function AddStoreDialog({
   );
   const defaultSelectedNodeIds = defaultNodeIds.filter((id) => availableNodes.some((n) => n.id === id));
   const [storeId, setStoreId] = useState(defaultStoreId);
-  const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>(defaultSelectedNodeIds);
+  const [selectedNodeIds, setSelectedNodeIds] = useState<number[]>(defaultSelectedNodeIds);
   const [isLoading, setIsLoading] = useState(false);
   const wasOpenRef = useRef(false);
   const { success, error } = useToast();
@@ -82,7 +82,7 @@ export function AddStoreDialog({
     onClose();
   };
 
-  const toggleNode = (nodeId: string) => {
+  const toggleNode = (nodeId: number) => {
     setSelectedNodeIds((prev) =>
       prev.includes(nodeId) ? prev.filter((id) => id !== nodeId) : [...prev, nodeId],
     );

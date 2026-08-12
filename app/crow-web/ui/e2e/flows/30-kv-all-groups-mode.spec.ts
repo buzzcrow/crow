@@ -26,12 +26,12 @@ test.describe('E2E-30 KV all groups mode', () => {
   });
 
   test('all groups mode aggregates scan and disables get', async ({ page, baseURL }) => {
-    await seedRackAndNode(baseURL!, 'r30', 'n30');
-    await deployNodeServer(baseURL!, 'n30', 9930, 9940);
-    await createStore(baseURL!, 300, ['n30']);
-    await addGroup(baseURL!, 300, 3000, 30000, ['n30']);
+    await seedRackAndNode(baseURL!, 30, 30);
+    await deployNodeServer(baseURL!, 30, 9930, 9940);
+    await createStore(baseURL!, 300, [30]);
+    await addGroup(baseURL!, 300, 3000, 30000, [30]);
     await waitForLeader(baseURL!, 300, 3000);
-    await addGroup(baseURL!, 300, 3001, 30010, ['n30']);
+    await addGroup(baseURL!, 300, 3001, 30010, [30]);
     await waitForLeader(baseURL!, 300, 3001);
 
     try {
@@ -61,7 +61,7 @@ test.describe('E2E-30 KV all groups mode', () => {
       // Group column should be visible in All Groups mode
       await expect(page.getByTestId('kv-scan-table').locator('th').filter({ hasText: 'Group' })).toBeVisible();
     } finally {
-      await stopNodeServer(baseURL!, 'n30');
+      await stopNodeServer(baseURL!, 30);
     }
   });
 });

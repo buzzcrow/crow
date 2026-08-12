@@ -94,7 +94,7 @@ impl BenchMode {
 pub struct BenchFixture {
     client: ConsoleClient,
     console_task: tokio::task::JoinHandle<()>,
-    node_ids: Vec<String>,
+    node_ids: Vec<u64>,
     node_pids: Vec<u32>,
     node_grpc_urls: Vec<String>,
     node_mgmt_urls: Vec<String>,
@@ -202,7 +202,7 @@ impl BenchFixture {
         node_config: Option<String>,
         coalesce_max_keys: Option<usize>,
         coalesce_drain_threshold: Option<usize>,
-    ) -> Result<(Vec<String>, Vec<u32>, Vec<String>, Vec<String>)> {
+    ) -> Result<(Vec<u64>, Vec<u32>, Vec<String>, Vec<String>)> {
         let mut ids = Vec::with_capacity(NODE_COUNT);
         let mut pids = Vec::with_capacity(NODE_COUNT);
         let mut grpc_urls = Vec::with_capacity(NODE_COUNT);
@@ -219,7 +219,7 @@ impl BenchFixture {
                 .map_err(|e| upstream_err(&rack_id.to_string(), "add_rack", &e))?;
             client
                 .add_node(
-                    &rack_id.to_string(),
+                    rack_id,
                     &NodeEntry {
                         id: node_id,
                         rack_id,
@@ -246,11 +246,11 @@ impl BenchFixture {
             mode.apply_to(&mut body);
             body.config = node_config.clone();
             let deployed = client
-                .deploy_node_server(&node_id.to_string(), &body)
+                .deploy_node_server(node_id, &body)
                 .await
                 .map_err(|e| upstream_err(&node_id.to_string(), "deploy_node_server", &e))?;
 
-            ids.push(node_id.to_string());
+            ids.push(node_id);
             pids.push(deployed.pid);
             grpc_urls.push(deployed.grpc_url);
             mgmt_urls.push(deployed.mgmt_url);
@@ -260,12 +260,11 @@ impl BenchFixture {
 
     /// Create the single store spanning all nodes, then a 3-replica
     /// group over the same nodes.
-    async fn provision_store_and_group(client: &ConsoleClient, node_ids: &[String]) -> Result<()> {
-        let nodes: Vec<u64> = node_ids.iter().map(|n| n.parse().unwrap()).collect();
+    async fn provision_store_and_group(client: &ConsoleClient, node_ids: &[u64]) -> Result<()> {
         client
             .add_store(&CreateStoreBody {
                 store_id: STORE_ID,
-                nodes: nodes.clone(),
+                nodes: node_ids.to_vec(),
             })
             .await
             .map_err(|e| upstream_err("store", "add_store", &e))?;
@@ -275,7 +274,7 @@ impl BenchFixture {
                 &CreateGroupBody {
                     group_id: GROUP_ID,
                     replica_id: 1,
-                    nodes,
+                    nodes: node_ids.to_vec(),
                 },
             )
             .await
@@ -301,7 +300,7 @@ impl BenchFixture {
 
     /// Node ids provisioned by this fixture, in deploy order.
     #[must_use]
-    pub fn node_ids(&self) -> &[String] {
+    pub fn node_ids(&self) -> &[u64] {
         &self.node_ids
     }
 
@@ -318,7 +317,7 @@ impl BenchFixture {
         self.node_ids
             .iter()
             .zip(self.node_grpc_urls.iter())
-            .map(|(nid, url)| (url.clone(), nid.clone()))
+            .map(|(nid, url)| (url.clone(), nid.to_string()))
             .collect()
     }
 
@@ -330,7 +329,7 @@ impl BenchFixture {
             .node_ids
             .iter()
             .zip(&self.node_pids)
-            .filter_map(|(node_id, pid)| self.read_node_metrics_log(node_id, *pid))
+            .filter_map(|(node_id, pid)| self.read_node_metrics_log(*node_id, *pid))
             .map(|content| parse_metrics_log(&content))
             .collect();
         aggregate_server_metrics(&per_node)
@@ -344,7 +343,7 @@ impl BenchFixture {
     /// be created.
     pub fn collect_logs(&self, run_dir: &Path) -> std::io::Result<()> {
         for node_id in &self.node_ids {
-            let src = self.node_workspace(node_id).join("log");
+            let src = self.node_workspace(*node_id).join("log");
             let dst = run_dir.join(format!("node-{node_id}"));
             std::fs::create_dir_all(&dst)?;
             let Ok(entries) = std::fs::read_dir(&src) else {
@@ -368,18 +367,18 @@ impl BenchFixture {
         }
         self.stopped = true;
         for node_id in &self.node_ids {
-            let _ = self.client.stop_node_server(node_id).await;
+            let _ = self.client.stop_node_server(*node_id).await;
         }
         self.console_task.abort();
     }
 
-    fn node_workspace(&self, node_id: &str) -> PathBuf {
+    fn node_workspace(&self, node_id: u64) -> PathBuf {
         self.workspace_dir.join(format!("N-{node_id}"))
     }
 
     /// Locate and read this node's `log/crow-kv-server-metrics-<timestamp>-<pid>.log`
     /// file (see `crow_kv::common::logging::open_metrics_log`).
-    fn read_node_metrics_log(&self, node_id: &str, pid: u32) -> Option<String> {
+    fn read_node_metrics_log(&self, node_id: u64, pid: u32) -> Option<String> {
         let log_dir = self.node_workspace(node_id).join("log");
         let suffix = format!("-{pid}.log");
         let entries = std::fs::read_dir(log_dir).ok()?;

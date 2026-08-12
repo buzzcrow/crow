@@ -127,7 +127,7 @@ async fn init_cluster(web: &SocketAddr) {
     let base = format!("http://{web}");
     let resp = http
         .post(format!("{base}/api/cluster/init"))
-        .json(&json!({"nodes": ["n1"]}))
+        .json(&json!({"nodes": [1]}))
         .send()
         .await
         .unwrap();
@@ -165,7 +165,7 @@ async fn node_metrics_proxy_returns_structured_snapshot() {
     init_cluster(&web).await;
 
     let resp: Value = http
-        .get(format!("{base}/api/nodes/n1/metrics"))
+        .get(format!("{base}/api/nodes/1/metrics"))
         .send()
         .await
         .unwrap()

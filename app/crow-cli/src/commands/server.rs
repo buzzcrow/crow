@@ -4,6 +4,7 @@
 use clap::Subcommand;
 use crow_console_shared::clients::console::DeployNodeServerBody;
 use crow_console_shared::cluster::NodeHealth;
+use crow_protocol::NodeId;
 use std::process::ExitCode;
 
 use crate::utils::{client::console_client, print_json};
@@ -48,9 +49,27 @@ pub async fn run_server_verb(cli: &Cli, verb: ServerVerb) -> ExitCode {
             mgmt_port,
             grpc_port,
             binary,
-        } => server_deploy(cli, &node, mgmt_port, grpc_port, binary).await,
-        ServerVerb::Restart { node } => server_restart(cli, &node).await,
-        ServerVerb::Stop { node } => server_stop(cli, &node).await,
+        } => match node.parse::<NodeId>() {
+            Ok(nid) => server_deploy(cli, nid, mgmt_port, grpc_port, binary).await,
+            Err(e) => {
+                eprintln!("error: invalid node id {node:?}: {e}");
+                ExitCode::from(1)
+            }
+        },
+        ServerVerb::Restart { node } => match node.parse::<NodeId>() {
+            Ok(nid) => server_restart(cli, nid).await,
+            Err(e) => {
+                eprintln!("error: invalid node id {node:?}: {e}");
+                ExitCode::from(1)
+            }
+        },
+        ServerVerb::Stop { node } => match node.parse::<NodeId>() {
+            Ok(nid) => server_stop(cli, nid).await,
+            Err(e) => {
+                eprintln!("error: invalid node id {node:?}: {e}");
+                ExitCode::from(1)
+            }
+        },
         ServerVerb::List => server_list(cli).await,
     }
 }
@@ -81,7 +100,7 @@ async fn server_list(cli: &Cli) -> ExitCode {
                 };
                 println!(
                     "{:<12}  {:<26}  {:<26}  {:<8}  {health}",
-                    s.node_id.as_deref().unwrap_or("-"),
+                    s.node_id.map_or_else(|| "-".to_string(), |n| n.to_string()),
                     s.mgmt_url,
                     s.grpc_url.as_deref().unwrap_or("-"),
                     s.pid.map_or_else(|| "-".to_string(), |p| p.to_string()),
@@ -98,7 +117,7 @@ async fn server_list(cli: &Cli) -> ExitCode {
 
 async fn server_deploy(
     cli: &Cli,
-    node_id: &str,
+    node_id: NodeId,
     mgmt_port: u16,
     grpc_port: u16,
     binary: Option<String>,
@@ -131,7 +150,7 @@ async fn server_deploy(
     }
 }
 
-async fn server_restart(cli: &Cli, node_id: &str) -> ExitCode {
+async fn server_restart(cli: &Cli, node_id: NodeId) -> ExitCode {
     let client = match console_client(cli) {
         Ok(c) => c,
         Err(c) => return c,
@@ -154,7 +173,7 @@ async fn server_restart(cli: &Cli, node_id: &str) -> ExitCode {
     }
 }
 
-async fn server_stop(cli: &Cli, node_id: &str) -> ExitCode {
+async fn server_stop(cli: &Cli, node_id: NodeId) -> ExitCode {
     let client = match console_client(cli) {
         Ok(c) => c,
         Err(c) => return c,

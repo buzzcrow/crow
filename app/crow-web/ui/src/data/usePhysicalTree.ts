@@ -32,7 +32,7 @@ interface UsePhysicalTreeResult {
   /** Manually trigger a refresh */
   refresh: () => Promise<void>;
   /** Get a specific node by ID */
-  getNodeById: (nodeId: string) => Node | undefined;
+  getNodeById: (nodeId: number) => Node | undefined;
 }
 
 /**
@@ -94,7 +94,7 @@ export function usePhysicalTree({
       // a serverless node returns 404 (noisy console errors). Determine
       // which nodes host a server from the flat list and the recursive rack
       // view (`has_server`), and fetch per-node store detail only for those.
-      const serverNodeIds = new Set<string>();
+      const serverNodeIds = new Set<number>();
       for (const n of nodeList) if (n.server) serverNodeIds.add(n.id);
       for (const rack of Array.isArray(racksData) ? racksData : []) {
         for (const entry of ((rack as any).nodes as any[]) || []) {
@@ -172,7 +172,7 @@ export function usePhysicalTree({
 
   // Get a node by ID
   const getNodeById = useCallback(
-    (nodeId: string): Node | undefined => {
+    (nodeId: number): Node | undefined => {
       return nodes.find(n => n.id === nodeId);
     },
     [nodes]

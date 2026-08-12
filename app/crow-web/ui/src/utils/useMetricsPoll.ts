@@ -66,7 +66,7 @@ export function buildMetricsFetcher(
   if (entityType === 'Node') {
     const nodeId = entityId;
     return {
-      fetcher: (signal) => getNodeMetrics(nodeId, undefined, { signal, skipDeduplication: true }),
+      fetcher: (signal) => getNodeMetrics(Number(nodeId), undefined, { signal, skipDeduplication: true }),
       key: `node:${nodeId}`,
     };
   }

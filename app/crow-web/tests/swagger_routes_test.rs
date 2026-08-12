@@ -181,7 +181,7 @@ async fn swagger_index_is_served() {
     // path still 200s with the query attached.
     let resp = http
         .get(format!(
-            "http://{addr}/api/swagger/?url=/api/nodes/n1/openapi.json"
+            "http://{addr}/api/swagger/?url=/api/nodes/1/openapi.json"
         ))
         .send()
         .await
@@ -205,7 +205,7 @@ async fn openapi_proxy_returns_upstream_doc() {
 
     // Per-node OpenAPI proxy: GET /api/nodes/:id/openapi.json.
     let resp = http
-        .get(format!("http://{web}/api/nodes/n1/openapi.json"))
+        .get(format!("http://{web}/api/nodes/1/openapi.json"))
         .send()
         .await
         .unwrap();
@@ -217,7 +217,7 @@ async fn openapi_proxy_returns_upstream_doc() {
 
     // Verify TTL cache works: second request should hit cache.
     let resp2 = http
-        .get(format!("http://{web}/api/nodes/n1/openapi.json"))
+        .get(format!("http://{web}/api/nodes/1/openapi.json"))
         .send()
         .await
         .unwrap();
@@ -294,7 +294,7 @@ async fn openapi_proxy_cache_is_per_node() {
 
     let http = reqwest::Client::new();
     let body1: serde_json::Value = http
-        .get(format!("http://{web}/api/nodes/n1/openapi.json"))
+        .get(format!("http://{web}/api/nodes/1/openapi.json"))
         .send()
         .await
         .unwrap()
@@ -302,7 +302,7 @@ async fn openapi_proxy_cache_is_per_node() {
         .await
         .unwrap();
     let body2: serde_json::Value = http
-        .get(format!("http://{web}/api/nodes/n2/openapi.json"))
+        .get(format!("http://{web}/api/nodes/2/openapi.json"))
         .send()
         .await
         .unwrap()

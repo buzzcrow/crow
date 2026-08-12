@@ -85,10 +85,10 @@ export function buildPhysicalFlow(
     flowNodes.push(
       mkNode(`R-${rack.id}`, {
         kind: 'Rack',
-        label: rackLabel(rack.id),
+        label: rackLabel(String(rack.id)),
         sublabel: `${rack.nodes?.length ?? 0} node(s)`,
         layer: 0,
-        entity: { type: 'Rack', id: rack.id, name: rack.name },
+        entity: { type: 'Rack', id: String(rack.id), name: rack.name },
       }),
     );
   }
@@ -98,11 +98,11 @@ export function buildPhysicalFlow(
     flowNodes.push(
       mkNode(`N-${node.id}`, {
         kind: 'Node',
-        label: nodeLabel(node.id),
+        label: nodeLabel(String(node.id)),
         sublabel: node.host,
         health: nodeHealthById[node.id],
         layer: 1,
-        entity: { type: 'Node', id: node.id, parentIds: { rack_id: node.rack_id } },
+        entity: { type: 'Node', id: String(node.id), parentIds: { rack_id: node.rack_id } },
       }),
     );
     flowEdges.push({ id: `e-R-${node.rack_id}-N-${node.id}`, source: `R-${node.rack_id}`, target: `N-${node.id}`, type: 'smoothstep' });
@@ -113,7 +113,7 @@ export function buildPhysicalFlow(
     flowNodes.push(
       mkNode(serverNodeId, {
         kind: 'Server',
-        label: serverLabel(node.id),
+        label: serverLabel(String(node.id)),
         sublabel: toDisplayState(server.process.state),
         health: server.process.health,
         layer: 2,
@@ -154,7 +154,7 @@ export function buildPhysicalFlow(
 
         // Local replica.
         const local = group.local;
-        const localNodeId = localId(node.id, sid, gid, local.replica_id);
+        const localNodeId = localId(String(node.id), sid, gid, local.replica_id);
         flowNodes.push(
           mkNode(localNodeId, {
             kind: 'LocalReplica',
@@ -180,7 +180,7 @@ export function buildPhysicalFlow(
             mkNode(remoteNodeId, {
               kind: 'RemoteReplica',
               label: remoteReplicaLabel(remote.replica_id),
-              sublabel: nodeLabel(remote.node_id),
+              sublabel: nodeLabel(String(remote.node_id)),
               reachable: remote.reachable,
               layer: 5,
               entity: {
@@ -202,7 +202,7 @@ export function buildPhysicalFlow(
           flowEdges.push({
             id: `e-peer-${remoteNodeId}`,
             source: remoteNodeId,
-            target: localId(remote.node_id, sid, gid, remote.replica_id),
+            target: localId(String(remote.node_id), sid, gid, remote.replica_id),
             ...REMOTE_EDGE,
           });
         }

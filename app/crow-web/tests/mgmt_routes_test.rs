@@ -133,7 +133,7 @@ async fn full_mgmt_cycle_through_web_routes() {
     // 1. Initialize the system group so non-zero stores can be created.
     let resp = http
         .post(format!("{base}/api/cluster/init"))
-        .json(&json!({"nodes": ["n1"]}))
+        .json(&json!({"nodes": [1]}))
         .send()
         .await
         .unwrap();
@@ -143,7 +143,7 @@ async fn full_mgmt_cycle_through_web_routes() {
     let store_id: u64 = 7;
     let resp = http
         .post(format!("{base}/api/stores"))
-        .json(&json!({"store_id": store_id, "nodes": ["n1"]}))
+        .json(&json!({"store_id": store_id, "nodes": [1]}))
         .send()
         .await
         .expect("POST /api/stores");
@@ -185,7 +185,7 @@ async fn full_mgmt_cycle_through_web_routes() {
     let replica_id: u64 = 700;
     let resp = http
         .post(format!("{base}/api/stores/{store_id}/groups"))
-        .json(&json!({"group_id": group_id, "replica_id": replica_id, "nodes": ["n1"]}))
+        .json(&json!({"group_id": group_id, "replica_id": replica_id, "nodes": [1]}))
         .send()
         .await
         .unwrap();
@@ -196,7 +196,7 @@ async fn full_mgmt_cycle_through_web_routes() {
     let replica_id_2: u64 = 800;
     let resp = http
         .post(format!("{base}/api/stores/{store_id}/groups"))
-        .json(&json!({"group_id": group_id_2, "replica_id": replica_id_2, "nodes": ["n1"]}))
+        .json(&json!({"group_id": group_id_2, "replica_id": replica_id_2, "nodes": [1]}))
         .send()
         .await
         .unwrap();
