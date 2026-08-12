@@ -3,9 +3,9 @@
 
 //! diskdb gRPC service wiring.
 //!
-//! `AllocateBlocks` / `FreeBlocks` / `QueryCapacityStats` return
-//! `Unimplemented` — R72 fills them in. `GetDiskGroupInfo` /
-//! `GetDiskInfo` read from in-memory `NodeContainer` state.
+//! `AllocateBlocks` / `FreeBlocks` call the two-phase persistence
+//! functions. `QueryCapacityStats` returns `Unimplemented` (R74).
+//! `GetDiskGroupInfo` / `GetDiskInfo` read from in-memory state.
 
 use std::sync::Arc;
 
@@ -20,15 +20,26 @@ use crow_protocol::diskdb::rpc::{
 use crow_protocol::diskdb_type_util::DiskIdExt;
 use tonic::{Request, Response, Status};
 
+use crate::config::StorageDefaults;
 use crate::node::NodeContainer;
+use crate::persistence::{self, DataGroupClient};
+
+/// Maximum number of blocks per `AllocateBlocks` request.
+const MAX_ALLOCATE_COUNT: u32 = 1024;
 
 pub struct DiskdbService {
     container: Arc<NodeContainer>,
+    kv: Arc<DataGroupClient>,
+    storage: StorageDefaults,
 }
 
 impl DiskdbService {
-    pub fn new(container: Arc<NodeContainer>) -> Self {
-        Self { container }
+    pub fn new(container: Arc<NodeContainer>, kv: Arc<DataGroupClient>, storage: StorageDefaults) -> Self {
+        Self {
+            container,
+            kv,
+            storage,
+        }
     }
 
     pub fn into_server(self) -> DiskdbServiceServer<Self> {
@@ -40,13 +51,124 @@ impl DiskdbService {
 impl DiskdbServiceTrait for DiskdbService {
     async fn allocate_blocks(
         &self,
-        _req: Request<AllocateBlocksRequest>,
+        req: Request<AllocateBlocksRequest>,
     ) -> Result<Response<AllocateResponse>, Status> {
-        Err(Status::unimplemented("allocate_blocks not implemented until R72"))
+        let req = req.into_inner();
+
+        // Validate unit_count.
+        if req.unit_count == 0 {
+            return Err(Status::invalid_argument("unit_count must be non-zero"));
+        }
+        let unit_size = self.storage.block_size_bytes;
+        if req.unit_count * unit_size % unit_size != 0 {
+            return Err(Status::invalid_argument(
+                "unit_count must be aligned to block size",
+            ));
+        }
+
+        // Validate count.
+        if req.count == 0 {
+            return Err(Status::invalid_argument("count must be non-zero"));
+        }
+        if req.count > MAX_ALLOCATE_COUNT {
+            return Err(Status::invalid_argument(format!(
+                "count must be <= {MAX_ALLOCATE_COUNT}"
+            )));
+        }
+
+        // Check not degraded.
+        if self.container.is_degraded() {
+            return Err(Status::unavailable("diskdb in degraded mode"));
+        }
+
+        // Get node.
+        let node = self.container.get_node(req.disk_group_id).ok_or_else(|| {
+            Status::permission_denied(format!(
+                "disk-group {} not owned by this instance",
+                req.disk_group_id
+            ))
+        })?;
+
+        // Get owner_chunk.
+        let owner_chunk = req
+            .owner_chunk
+            .ok_or_else(|| Status::invalid_argument("owner_chunk required"))?;
+
+        // Convert exclude_disk_ids.
+        let exclude_disks = req.exclude_disk_ids.clone();
+
+        // Two-phase allocate.
+        let segments = persistence::allocate_blocks(
+            &node,
+            req.unit_count,
+            req.count,
+            &exclude_disks,
+            &owner_chunk,
+            unit_size,
+            &self.kv,
+            self.storage.cas_retry_limit,
+            self.storage.zone_rotate_count,
+        )
+        .await
+        .map_err(|e| match e {
+            crate::node::AllocError::NoSpace => Status::resource_exhausted("no space available"),
+        })?;
+
+        Ok(Response::new(AllocateResponse { segments }))
     }
 
-    async fn free_blocks(&self, _req: Request<FreeBlocksRequest>) -> Result<Response<FreeResponse>, Status> {
-        Err(Status::unimplemented("free_blocks not implemented until R72"))
+    async fn free_blocks(&self, req: Request<FreeBlocksRequest>) -> Result<Response<FreeResponse>, Status> {
+        let req = req.into_inner();
+
+        if req.segments.is_empty() {
+            return Ok(Response::new(FreeResponse { freed_count: 0 }));
+        }
+
+        // Check not degraded.
+        if self.container.is_degraded() {
+            return Err(Status::unavailable("diskdb in degraded mode"));
+        }
+
+        // Get the node from the first segment's disk_group_id. All
+        // segments should belong to the same disk-group (the caller
+        // groups them); we use the first to look up the node.
+        let first_disk_id = req.segments[0]
+            .disk_id
+            .ok_or_else(|| Status::invalid_argument("segment.disk_id required"))?;
+
+        // Find the node that owns this disk.
+        let node = {
+            let node_ids = self.container.node_ids();
+            let mut found = None;
+            for dg_id in node_ids {
+                if let Some(n) = self.container.get_node(dg_id) {
+                    let owns = {
+                        let disks = n.disks.read().unwrap();
+                        disks.iter().any(|d| d.disk_id == first_disk_id)
+                    };
+                    if owns {
+                        found = Some(n);
+                        break;
+                    }
+                }
+            }
+            found
+        }
+        .ok_or_else(|| {
+            Status::permission_denied(format!(
+                "disk {} not owned by this instance",
+                first_disk_id.to_display_string()
+            ))
+        })?;
+
+        // Immediate free (v1).
+        persistence::free_blocks(&node, &req.segments, &self.kv)
+            .await
+            .map_err(|e| Status::internal(format!("free persist failed: {e}")))?;
+
+        #[allow(clippy::cast_possible_truncation)]
+        let freed_count = req.segments.len() as u32;
+        Ok(Response::new(FreeResponse { freed_count }))
     }
 
     async fn query_capacity_stats(

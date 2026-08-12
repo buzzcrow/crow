@@ -31,16 +31,29 @@ enum ZoneAllocationState {
   ZONE_ALLOC_FULL      = 2;  // no space left
 }
 
+// Per-block I/O-behavior state. Default `BLOCK_STATE_OK` on allocate;
+// updated by background paths (sync, health probe, scanner) or by
+// re-putting the `BusyBlockValue` with a new `state` — no dedicated
+// admin RPC. Not updated by the allocate hot path.
+enum BlockState {
+  BLOCK_STATE_OK      = 0;  // normal; default on allocate
+  BLOCK_STATE_SUSPECT = 1;  // data may be unreadable; data-IO retries with timeout
+  BLOCK_STATE_CORRUPT = 2;  // data confirmed unreadable; data-IO skips, rebuilds from EC/mirror
+}
+
 // ── Zone value ──────────────────────────────────────────────────
 
 // Zone value — stored at the zone binary key (ZoneKey).
-// All sizes are in units (block unit size defined per-disk, default 1M).
+// Snapshot fields only: the usage bitmap + the slot at which this
+// snapshot was written + a CRC over the bitmap for integrity. Zone
+// metadata (offset, size) and derived fields (alloc_state, used_units)
+// live in the in-memory `Zone` struct, not the snapshot. See
+// doc/design/diskdb/design-crow-diskdb.md §7.
 message ZoneValue {
-  uint64 disk_offset_units     = 1;  // absolute offset on disk
-  uint64 zone_size_units       = 2;  // capacity (last zone may be smaller)
-  ZoneAllocationState alloc_state = 3;
-  uint64 used_units            = 4;
-  bytes  usage_bitmap          = 5;  // serialized bitmap
+  reserved 1, 2, 3, 4;  // dropped: disk_offset_units, zone_size_units, alloc_state, used_units
+  bytes  usage_bitmap   = 5;  // serialized bitmap
+  uint64 snapshot_slot  = 6;  // slot at which this snapshot was written; replay after this
+  uint32 crc32          = 7;  // CRC32 over usage_bitmap for integrity
 }
 
 // ── Disk value ──────────────────────────────────────────────────
@@ -90,7 +103,8 @@ message Segment {
 message BusyBlockValue {
   uint32 unit_count       = 1;  // how many units this allocation spans
   crow.common.ChunkId owner_chunk = 2;  // chunk that owns this allocation
-  uint64 allocate_count  = 3;  // how many times this range has been allocated
+  uint32 unit_size        = 3;  // size of one unit in bytes (carried per-block for the data-IO layer)
+  BlockState state        = 4;  // per-block I/O-behavior state; default OK on allocate
 }
 
 // ── FreeBlock value ─────────────────────────────────────────────
@@ -100,7 +114,7 @@ message BusyBlockValue {
 message FreeBlockValue {
   uint32 unit_count        = 1;  // how many units
   crow.common.ChunkId previous_owner = 2;  // who owned it before free
-  uint64 free_count       = 3;  // how many times freed
+  reserved 3;  // dropped: free_count (no refcount, no version)
 }
 
 // ── Query response types ────────────────────────────────────────

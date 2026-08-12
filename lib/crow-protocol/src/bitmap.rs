@@ -36,6 +36,57 @@ impl UsageBitmap {
         self.bits.len()
     }
 
+    /// Load one 64-bit word (`Acquire`).
+    ///
+    /// # Panics
+    /// Panics if `index >= word_count()`.
+    #[must_use]
+    pub fn load_word(&self, index: usize) -> u64 {
+        self.bits[index].load(Ordering::Acquire)
+    }
+
+    /// Compare-and-swap one 64-bit word (`AcqRel` / `Acquire`).
+    /// Returns `Ok(actual)` on success (the value now stored) or
+    /// `Err(actual)` on failure (the value the word held instead of
+    /// `expected`).
+    ///
+    /// # Errors
+    /// Returns `Err(actual)` when the word did not contain `expected`
+    /// at the time of the CAS (either another thread modified it or the
+    /// word was already in the `new` state).
+    ///
+    /// # Panics
+    /// Panics if `index >= word_count()`.
+    pub fn cas_word(&self, index: usize, expected: u64, new: u64) -> Result<u64, u64> {
+        self.bits[index].compare_exchange(expected, new, Ordering::AcqRel, Ordering::Acquire)
+    }
+
+    /// Compare-and-swap a single bit — one attempt. Sets the bit if
+    /// `set` is true and it was clear, or clears it if `set` is false
+    /// and it was set. Returns `true` if the CAS succeeded (the bit
+    /// transitioned to the target state), `false` if the bit was
+    /// already in the target state or the CAS lost a race (the caller
+    /// reloads the word and retries, bounded by the allocator's
+    /// `cas_retry_limit`).
+    ///
+    /// # Panics
+    /// Panics if `bit_index >= block_count`.
+    #[must_use]
+    pub fn cas_bit(&self, bit_index: u32, set: bool) -> bool {
+        let word_index = bit_index as usize / 64;
+        let bit_pos = bit_index % 64;
+        let mask = 1u64 << bit_pos;
+        let current = self.bits[word_index].load(Ordering::Acquire);
+        let bit_set = current & mask != 0;
+        if set == bit_set {
+            return false; // already in target state
+        }
+        let new = if set { current | mask } else { current & !mask };
+        self.bits[word_index]
+            .compare_exchange(current, new, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
     /// Set bits `[offset..offset+count)`. Returns `false` if any bit was
     /// already set (double-allocation); rolls back on collision.
     #[must_use]

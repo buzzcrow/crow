@@ -39,11 +39,9 @@ fn zone_allocation_state_from_u8_unknown_defaults_to_full() {
 
 fn sample_zone_value() -> ZoneValue {
     ZoneValue {
-        disk_offset_units: 7 * 16 * 1024,
-        zone_size_units: 16 * 1024,
-        alloc_state: ZoneAllocationState::ZoneAllocActive.into(),
-        used_units: 100,
         usage_bitmap: vec![0xFF; 16],
+        snapshot_slot: 42,
+        crc32: 0,
     }
 }
 
@@ -52,20 +50,22 @@ fn zone_value_crc_tamper_detected() {
     let mut val = sample_zone_value();
     val.compute_checksum();
     assert!(val.verify_checksum());
-    val.used_units = 999;
+    val.usage_bitmap[0] = 0x00; // tamper the bitmap
     assert!(!val.verify_checksum());
 }
 
 #[test]
-fn zone_value_verify_empty_bitmap_fails() {
-    let val = ZoneValue {
-        disk_offset_units: 0,
-        zone_size_units: 0,
-        alloc_state: 0,
-        used_units: 0,
+fn zone_value_empty_bitmap_baseline_is_valid() {
+    // Baseline ZoneValue written during disk-add init: empty bitmap,
+    // snapshot_slot = 0, crc32 = crc32fast::hash(&[]) (= 0).
+    let mut val = ZoneValue {
         usage_bitmap: vec![],
+        snapshot_slot: 0,
+        crc32: 0,
     };
-    assert!(!val.verify_checksum());
+    val.compute_checksum();
+    assert!(val.verify_checksum());
+    assert_eq!(val.crc32, 0); // CRC32 of empty is 0
 }
 
 // ── Bitmap ──────────────────────────────────────────────────────
@@ -116,4 +116,42 @@ fn bitmap_count_set_after_set_and_clear() {
     assert_eq!(bm.count_set(), 15);
     let _ = bm.range_clear(0, 4);
     assert_eq!(bm.count_set(), 11);
+}
+
+// ── Bitmap CAS helpers ──────────────────────────────────────────
+
+#[test]
+fn bitmap_load_word_and_cas_word_roundtrip() {
+    let bm = UsageBitmap::new(128);
+    assert_eq!(bm.load_word(0), 0);
+    assert!(bm.cas_word(0, 0, 0xFFFF).is_ok());
+    assert_eq!(bm.load_word(0), 0xFFFF);
+    // CAS with wrong expected fails.
+    assert!(bm.cas_word(0, 0, 0xAAAA).is_err());
+    assert_eq!(bm.load_word(0), 0xFFFF);
+}
+
+#[test]
+fn bitmap_cas_bit_set_and_clear() {
+    let bm = UsageBitmap::new(128);
+    // Set a bit that was clear → succeeds.
+    assert!(bm.cas_bit(5, true));
+    assert_eq!(bm.load_word(0) & (1u64 << 5), 1u64 << 5);
+    // Set the same bit again → fails (already set).
+    assert!(!bm.cas_bit(5, true));
+    // Clear the bit → succeeds.
+    assert!(bm.cas_bit(5, false));
+    assert_eq!(bm.load_word(0) & (1u64 << 5), 0);
+    // Clear again → fails (already clear).
+    assert!(!bm.cas_bit(5, false));
+}
+
+#[test]
+fn bitmap_cas_bit_cross_word_boundary() {
+    let bm = UsageBitmap::new(128);
+    // Bit 63 is in word 0; bit 64 is in word 1.
+    assert!(bm.cas_bit(63, true));
+    assert!(bm.cas_bit(64, true));
+    assert_ne!(bm.load_word(0) & (1u64 << 63), 0);
+    assert_ne!(bm.load_word(1) & 1, 0);
 }

@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DiskdbConfig {
     pub server: ServerConfig,
-    pub(crate) storage: StorageDefaults,
+    pub storage: StorageDefaults,
     pub heartbeat: HeartbeatConfig,
-    pub(crate) persistence: PersistenceConfig,
-    pub(crate) scanner: ScannerConfig,
+    pub persistence: PersistenceConfig,
+    pub scanner: ScannerConfig,
     pub sync: SyncConfig,
 }
 
@@ -41,18 +41,27 @@ impl Default for ServerConfig {
 
 /// Storage defaults for zones and blocks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct StorageDefaults {
+pub struct StorageDefaults {
     /// Default zone size in bytes (default: 16 GB).
-    pub(crate) zone_size_bytes: u64,
+    pub zone_size_bytes: u64,
     /// Block size in bytes (default: 1 MB; configurable 512 KB–2 MB).
-    pub(crate) block_size_bytes: u32,
+    pub block_size_bytes: u32,
     /// Allocation granularity in bytes (default: 1 MB; must be power of 2).
     /// v1 enforces `allocate_granularity == block_size_bytes`.
-    pub(crate) allocate_granularity: u32,
+    pub allocate_granularity: u32,
     /// Number of zones in the disk-level active zone set (default: 4).
     /// The disk round-robins over this many zones at a time; when all
     /// are exhausted, the set rotates to a new batch of zones.
-    pub(crate) zone_rotate_count: u32,
+    pub zone_rotate_count: u32,
+    /// Per-bit CAS retry cap in the zone bitmap-scan allocator
+    /// (default: 100). On exhaustion, the allocator falls through to
+    /// the next bit / word / zone.
+    pub cas_retry_limit: u32,
+    /// Strict ownership validation before free (default: false). When
+    /// true, the free path reads the `BusyBlockValue` from the data
+    /// group first and validates `owner_chunk` (one extra paxos
+    /// round-trip, doubles free latency).
+    pub validate_owner_on_free: bool,
 }
 
 impl Default for StorageDefaults {
@@ -62,6 +71,8 @@ impl Default for StorageDefaults {
             block_size_bytes: 1024 * 1024,
             allocate_granularity: 1024 * 1024,
             zone_rotate_count: 4,
+            cas_retry_limit: 100,
+            validate_owner_on_free: false,
         }
     }
 }
@@ -70,12 +81,12 @@ impl Default for StorageDefaults {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatConfig {
     /// Heartbeat interval in seconds (default: 10).
-    pub(crate) interval_secs: u32,
+    pub interval_secs: u32,
     /// Missed heartbeats before entering degraded mode (default: 3).
     pub miss_threshold: u32,
     /// Duration in `TempFailure` before transitioning to `Offline`
     /// (default: 900s).
-    pub(crate) temp_failure_timeout_secs: u32,
+    pub temp_failure_timeout_secs: u32,
 }
 
 impl Default for HeartbeatConfig {
@@ -92,9 +103,9 @@ impl Default for HeartbeatConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncConfig {
     /// Group-0 store id (default: 0).
-    pub(crate) group0_store_id: u64,
+    pub group0_store_id: u64,
     /// Group-0 group id (default: 0).
-    pub(crate) group0_group_id: u64,
+    pub group0_group_id: u64,
     /// Sync interval in seconds (default: 10).
     pub sync_interval_secs: u32,
 }
@@ -111,21 +122,24 @@ impl Default for SyncConfig {
 
 /// Free batch flush + snapshot compaction configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PersistenceConfig {
-    /// Free batch flush interval in milliseconds (default: 500).
-    pub(crate) free_flush_interval_ms: u32,
+pub struct PersistenceConfig {
+    /// Free batching toggle (default: false). When false, frees are
+    /// immediate (one `batch_write` per free). When true, frees are
+    /// grouped and flushed via one `batch_write` when the batch reaches
+    /// `free_flush_max_batch` (R79; no timer).
+    pub free_batch_enabled: bool,
     /// Free batch max size before forced flush (default: 256).
-    pub(crate) free_flush_max_batch: u32,
+    pub free_flush_max_batch: u32,
     /// Snapshot compaction interval in seconds (default: 300).
-    pub(crate) snapshot_interval_secs: u32,
+    pub snapshot_interval_secs: u32,
     /// Compact when journal entries per zone exceed this (default: 4096).
-    pub(crate) snapshot_journal_threshold: u32,
+    pub snapshot_journal_threshold: u32,
 }
 
 impl Default for PersistenceConfig {
     fn default() -> Self {
         Self {
-            free_flush_interval_ms: 500,
+            free_batch_enabled: false,
             free_flush_max_batch: 256,
             snapshot_interval_secs: 300,
             snapshot_journal_threshold: 4096,
@@ -135,13 +149,13 @@ impl Default for PersistenceConfig {
 
 /// Background scanner configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ScannerConfig {
+pub struct ScannerConfig {
     /// Scanner run interval in seconds (default: 600).
-    pub(crate) scan_interval_secs: u32,
+    pub scan_interval_secs: u32,
     /// Enable ghost allocation detection (default: true).
-    pub(crate) detect_ghost_allocations: bool,
+    pub detect_ghost_allocations: bool,
     /// Enable record integrity checks (default: true).
-    pub(crate) verify_record_integrity: bool,
+    pub verify_record_integrity: bool,
 }
 
 impl Default for ScannerConfig {
@@ -190,6 +204,9 @@ pub fn validate(config: &DiskdbConfig) -> Result<(), String> {
     }
     if config.storage.zone_rotate_count == 0 {
         return Err("zone_rotate_count must be > 0".to_string());
+    }
+    if config.storage.cas_retry_limit == 0 {
+        return Err("cas_retry_limit must be > 0".to_string());
     }
     if config.persistence.snapshot_interval_secs == 0 {
         return Err("snapshot_interval_secs must be > 0".to_string());
@@ -284,5 +301,21 @@ mod tests {
         let mut config = DiskdbConfig::default();
         config.storage.zone_rotate_count = 0;
         assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn config_validate_rejects_zero_cas_retry_limit() {
+        let mut config = DiskdbConfig::default();
+        config.storage.cas_retry_limit = 0;
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn config_defaults_match_design() {
+        let config = DiskdbConfig::default();
+        assert_eq!(config.storage.cas_retry_limit, 100);
+        assert!(!config.storage.validate_owner_on_free);
+        assert!(!config.persistence.free_batch_enabled);
+        assert_eq!(config.persistence.free_flush_max_batch, 256);
     }
 }

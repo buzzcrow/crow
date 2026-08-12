@@ -12,6 +12,9 @@
 
 pub mod config;
 pub mod grpc;
+pub mod metrics;
 pub mod node;
+pub mod persistence;
 pub mod status;
 pub mod sync;
+pub mod zone;

@@ -1,0 +1,195 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
+//! `ZoneDisk` + Node allocator tests — disk round-robin, zone rotation,
+//! multi-disk spread, free-by-disk-id.
+
+use std::collections::HashSet;
+use std::sync::Arc;
+
+use crow_diskdb::node::{AllocError, Node};
+use crow_diskdb::zone::Zone;
+use crow_protocol::common::DiskId;
+use crow_protocol::diskdb::rpc::DiskValue;
+
+fn disk_id(n: u64) -> DiskId {
+    DiskId { high: 0, low: n }
+}
+
+fn make_disk_value() -> DiskValue {
+    DiskValue {
+        capacity_units: 16 * 1024,
+        zone_size_units: 16 * 1024,
+        unit_size_bytes: 1024 * 1024,
+        ..Default::default()
+    }
+}
+
+const DG: u64 = 1;
+const CAS_RETRY: u32 = 100;
+const ZONE_ROTATE: u32 = 4;
+
+fn make_disk(disk_low: u64, zone_count: u32, zone_capacity: u32) -> Arc<crow_diskdb::node::ZoneDisk> {
+    let disk = Arc::new(crow_diskdb::node::ZoneDisk::new(
+        disk_id(disk_low),
+        DG,
+        1,
+        1,
+        make_disk_value(),
+    ));
+    for zi in 0..zone_count {
+        let zone = Arc::new(Zone::new(disk_id(disk_low), zi, DG, zone_capacity));
+        disk.add_zone(zone);
+    }
+    disk.rebuild_active_zones(ZONE_ROTATE);
+    disk
+}
+
+fn make_node_with_disks(disk_specs: &[(u64, u32, u32)]) -> Arc<Node> {
+    let node = Arc::new(Node::new(DG, 1, 1));
+    for &(disk_low, zone_count, zone_capacity) in disk_specs {
+        let disk = make_disk(disk_low, zone_count, zone_capacity);
+        node.add_disk(disk);
+    }
+    node
+}
+
+// ── ZoneDisk ────────────────────────────────────────────────────
+
+#[test]
+fn disk_allocate_single_zone() {
+    let disk = make_disk(1, 1, 128);
+    let (zone, range) = disk.disk_allocate(4, CAS_RETRY, ZONE_ROTATE).expect("allocate");
+    assert_eq!(range.unit_count, 4);
+    assert_eq!(range.unit_offset, 0);
+    assert_eq!(zone.zone_index, 0);
+}
+
+#[test]
+fn disk_allocate_rotates_across_active_zones() {
+    let disk = make_disk(1, 4, 64);
+    // First 4 allocations should land on different zones (round-robin).
+    let mut zone_indices = Vec::new();
+    for _ in 0..4 {
+        let (zone, _) = disk.disk_allocate(1, CAS_RETRY, ZONE_ROTATE).expect("allocate");
+        zone_indices.push(zone.zone_index);
+    }
+    zone_indices.sort_unstable();
+    zone_indices.dedup();
+    // Should have used at least 2 different zones.
+    assert!(
+        zone_indices.len() >= 2,
+        "expected zone rotation, got {zone_indices:?}"
+    );
+}
+
+#[test]
+fn disk_allocate_returns_none_when_all_zones_full() {
+    let disk = make_disk(1, 1, 8);
+    for _ in 0..8 {
+        disk.disk_allocate(1, CAS_RETRY, ZONE_ROTATE).expect("allocate");
+    }
+    assert!(disk.disk_allocate(1, CAS_RETRY, ZONE_ROTATE).is_none());
+}
+
+#[test]
+fn disk_free_then_reallocate() {
+    let disk = make_disk(1, 1, 64);
+    let (_, r) = disk.disk_allocate(4, CAS_RETRY, ZONE_ROTATE).unwrap();
+    assert!(disk.free(0, r.unit_offset, r.unit_count));
+    let (_, r2) = disk.disk_allocate(4, CAS_RETRY, ZONE_ROTATE).unwrap();
+    assert_eq!(r2.unit_offset, r.unit_offset);
+}
+
+#[test]
+fn disk_free_wrong_zone_index_fails() {
+    let disk = make_disk(1, 2, 64);
+    assert!(!disk.free(99, 0, 1));
+}
+
+// ── Node ────────────────────────────────────────────────────────
+
+#[test]
+fn node_allocate_block_single_disk() {
+    let node = make_node_with_disks(&[(1, 1, 128)]);
+    let (disk, _, range) = node
+        .allocate_block(4, &[], CAS_RETRY, ZONE_ROTATE)
+        .expect("allocate");
+    assert_eq!(disk.disk_id, disk_id(1));
+    assert_eq!(range.unit_count, 4);
+}
+
+#[test]
+fn node_allocate_block_round_robins_across_disks() {
+    let node = make_node_with_disks(&[(1, 1, 128), (2, 1, 128), (3, 1, 128)]);
+    let mut disk_ids = Vec::new();
+    for _ in 0..3 {
+        let (disk, _, _) = node.allocate_block(1, &[], CAS_RETRY, ZONE_ROTATE).unwrap();
+        disk_ids.push(disk.disk_id);
+    }
+    let disk_set: HashSet<DiskId> = disk_ids.into_iter().collect();
+    // Should have used at least 2 different disks.
+    assert!(disk_set.len() >= 2, "expected disk round-robin, got {disk_set:?}");
+}
+
+#[test]
+fn node_allocate_block_respects_exclude_disks() {
+    let node = make_node_with_disks(&[(1, 1, 128), (2, 1, 128)]);
+    // Exclude disk 1 — should land on disk 2.
+    let (disk, _, _) = node
+        .allocate_block(1, &[disk_id(1)], CAS_RETRY, ZONE_ROTATE)
+        .expect("allocate");
+    assert_eq!(disk.disk_id, disk_id(2));
+}
+
+#[test]
+fn node_allocate_block_no_space_when_all_excluded() {
+    let node = make_node_with_disks(&[(1, 1, 128), (2, 1, 128)]);
+    let result = node.allocate_block(1, &[disk_id(1), disk_id(2)], CAS_RETRY, ZONE_ROTATE);
+    assert!(matches!(result, Err(AllocError::NoSpace)));
+}
+
+#[test]
+fn node_allocate_blocks_spreads_across_disks() {
+    let node = make_node_with_disks(&[(1, 1, 128), (2, 1, 128), (3, 1, 128)]);
+    let results = node
+        .allocate_blocks(1, 3, &[], CAS_RETRY, ZONE_ROTATE)
+        .expect("allocate 3");
+    assert_eq!(results.len(), 3);
+    let disk_ids: HashSet<DiskId> = results.iter().map(|(d, _, _)| d.disk_id).collect();
+    // Anti-affinity: all 3 should be on different disks.
+    assert_eq!(disk_ids.len(), 3, "expected 3 different disks, got {disk_ids:?}");
+}
+
+#[test]
+fn node_allocate_blocks_no_space_when_count_exceeds_disks() {
+    let node = make_node_with_disks(&[(1, 1, 128), (2, 1, 128)]);
+    // 3 blocks, 2 disks, no exclusions — anti-affinity prevents
+    // reusing disks, so the 3rd block can't be placed.
+    let result = node.allocate_blocks(1, 3, &[], CAS_RETRY, ZONE_ROTATE);
+    assert!(matches!(result, Err(AllocError::NoSpace)));
+}
+
+#[test]
+fn node_allocate_blocks_succeeds_when_count_equals_disks() {
+    let node = make_node_with_disks(&[(1, 1, 128), (2, 1, 128)]);
+    let results = node
+        .allocate_blocks(1, 2, &[], CAS_RETRY, ZONE_ROTATE)
+        .expect("allocate 2");
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn node_free_block_by_disk_id() {
+    let node = make_node_with_disks(&[(1, 1, 128)]);
+    let (disk, _, r) = node.allocate_block(4, &[], CAS_RETRY, ZONE_ROTATE).unwrap();
+    assert!(node.free_block(&disk.disk_id, 0, r.unit_offset, r.unit_count));
+    // Double-free.
+    assert!(!node.free_block(&disk.disk_id, 0, r.unit_offset, r.unit_count));
+}
+
+#[test]
+fn node_free_block_unknown_disk_id_fails() {
+    let node = make_node_with_disks(&[(1, 1, 128)]);
+    assert!(!node.free_block(&disk_id(999), 0, 0, 1));
+}

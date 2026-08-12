@@ -67,6 +67,10 @@ fn main() {
         .type_attribute("BindMapValue", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("ServiceExtra", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("DiskdbExtra", "#[derive(serde::Serialize, serde::Deserialize)]")
+        .type_attribute(
+            "DiskGroupUsageSummary",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
         .type_attribute("KvServerExtra", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("HostedGroup", "#[derive(serde::Serialize, serde::Deserialize)]")
         // Enums.
@@ -76,6 +80,7 @@ fn main() {
             "ZoneAllocationState",
             "#[derive(serde::Serialize, serde::Deserialize)]",
         )
+        .type_attribute("BlockState", "#[derive(serde::Serialize, serde::Deserialize)]")
         .type_attribute("ErrorCode", "#[derive(serde::Serialize, serde::Deserialize)]")
         // chunkdb enums.
         .type_attribute("ECState", "#[derive(serde::Serialize, serde::Deserialize)]")

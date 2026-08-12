@@ -665,3 +665,60 @@ impl InstanceKey {
         format!("/srv/{service}/")
     }
 }
+
+// ── DiskGroupUsageKey ───────────────────────────────────────────
+
+/// Key for a disk-group usage summary (piggybacked on diskdb keepalive,
+/// stored in group 0). Binary layout: `magic | 0x000B |
+/// disk_group_id:u64 BE`. Total 11 bytes.
+/// Text path: `/hw/dg_usage/<disk_group_id>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DiskGroupUsageKey {
+    pub disk_group_id: DiskGroupId,
+}
+
+impl BinaryKey for DiskGroupUsageKey {
+    const TYPE_TAG: u16 = 0x000B;
+
+    fn encode_to(&self, out: &mut Vec<u8>) {
+        encode_header(out, Self::TYPE_TAG);
+        encode_u64(out, self.disk_group_id);
+    }
+
+    fn decode(buf: &[u8]) -> Result<Self, KeyError> {
+        let fields = decode_header(buf, Self::TYPE_TAG)?;
+        let (disk_group_id, o) = decode_u64(fields, 0)?;
+        check_exact(fields, o)?;
+        Ok(Self { disk_group_id })
+    }
+}
+
+impl TextKey for DiskGroupUsageKey {
+    const PATH_MAGIC: &'static str = "/hw";
+    const PATH_TYPE: &'static str = "dg_usage";
+
+    fn encode_to_path(&self, out: &mut String) {
+        encode_path_header(out, Self::PATH_MAGIC, Self::PATH_TYPE);
+        encode_path_u64(out, self.disk_group_id);
+    }
+
+    fn decode_path(parts: &[&str]) -> Result<Self, KeyError> {
+        if parts.is_empty() {
+            return Err(KeyError::ShortInput);
+        }
+        let disk_group_id = decode_path_u64(parts[0])?;
+        check_path_exact(parts, 1)?;
+        Ok(Self { disk_group_id })
+    }
+}
+
+impl DiskGroupUsageKey {
+    /// Binary prefix for scanning all disk-group usage entries:
+    /// `magic | 0x000B`.
+    #[must_use]
+    pub fn prefix_all() -> Vec<u8> {
+        let mut v = Vec::new();
+        encode_header(&mut v, Self::TYPE_TAG);
+        v
+    }
+}

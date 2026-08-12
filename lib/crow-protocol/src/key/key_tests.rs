@@ -130,6 +130,14 @@ fn roundtrip_instance_key() {
     assert_eq!(InstanceKey::from_bytes(&bytes), Ok(k));
 }
 
+#[test]
+fn roundtrip_disk_group_usage_key() {
+    let k = DiskGroupUsageKey { disk_group_id: 7 };
+    let bytes = k.to_bytes();
+    assert_eq!(bytes.len(), 11);
+    assert_eq!(DiskGroupUsageKey::from_bytes(&bytes), Ok(k));
+}
+
 // ── Binary byte order ───────────────────────────────────────────
 
 #[test]
@@ -450,6 +458,14 @@ fn text_roundtrip_instance_key() {
     let path = k.to_path();
     assert_eq!(path, "/srv/diskdb/123");
     assert_eq!(InstanceKey::from_path(&path), Ok(k));
+}
+
+#[test]
+fn text_roundtrip_disk_group_usage_key() {
+    let k = DiskGroupUsageKey { disk_group_id: 7 };
+    let path = k.to_path();
+    assert_eq!(path, "/hw/dg_usage/7");
+    assert_eq!(DiskGroupUsageKey::from_path(&path), Ok(k));
 }
 
 // ── TextKey KV-cluster round-trip ───────────────────────────────

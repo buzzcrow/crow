@@ -16,6 +16,12 @@ path = "src/main.rs"
 name = "crow_diskdb"
 path = "src/lib.rs"
 
+[features]
+# `test-util` exposes internal types/methods for integration tests.
+# Auto-enabled for this crate's own tests via the self dev-dependency
+# below, so `cargo test` needs no extra flags.
+test-util = []
+
 [lints]
 workspace = true
 
@@ -38,6 +44,10 @@ dashmap = "6"
 crc32fast = "1"
 bincode = "1"
 uuid = { version = "1", features = ["v4"] }
+rand = "0.9.5"
 
 [dev-dependencies]
 tempfile = "3"
+# Self dev-dependency: turns on the `test-util` feature for this
+# crate's own tests, so integration tests can access internal types.
+crow-diskdb = { path = ".", features = ["test-util"] }

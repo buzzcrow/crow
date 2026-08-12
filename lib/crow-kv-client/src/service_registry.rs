@@ -15,7 +15,7 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crow_protocol::common::{InstanceValue, ServiceExtra};
+use crow_protocol::common::{DiskGroupUsageSummary, DiskdbExtra, InstanceValue, ServiceExtra};
 use crow_protocol::common_type::InstanceId;
 use crow_protocol::key::InstanceKey;
 
@@ -225,30 +225,35 @@ impl ServiceRegistryClient {
 // ── diskdb convenience wrappers ─────────────────────────────────
 
 impl ServiceRegistryClient {
-    /// Register a diskdb instance with `owned_dg_ids`.
+    /// Register a diskdb instance with `owned_dg_ids` and optional
+    /// per-disk-group usage summaries (piggybacked on keepalive).
     pub async fn register_diskdb(
         &self,
         instance_id: InstanceId,
         grpc_endpoint: &str,
         owned_dg_ids: &[u64],
+        group_usages: &[DiskGroupUsageSummary],
     ) -> Result<()> {
         let extra = ServiceExtra {
-            diskdb: Some(crow_protocol::common::DiskdbExtra {
+            diskdb: Some(DiskdbExtra {
                 owned_dg_ids: owned_dg_ids.to_vec(),
+                group_usages: group_usages.to_vec(),
             }),
             kv_server: None,
         };
         self.register("diskdb", instance_id, grpc_endpoint, &extra).await
     }
 
-    /// Heartbeat a diskdb instance with updated `owned_dg_ids`.
+    /// Heartbeat a diskdb instance with updated `owned_dg_ids` and
+    /// per-disk-group usage summaries (§11 keepalive piggyback).
     pub async fn heartbeat_diskdb(
         &self,
         instance_id: InstanceId,
         grpc_endpoint: &str,
         owned_dg_ids: &[u64],
+        group_usages: &[DiskGroupUsageSummary],
     ) -> Result<()> {
-        self.register_diskdb(instance_id, grpc_endpoint, owned_dg_ids)
+        self.register_diskdb(instance_id, grpc_endpoint, owned_dg_ids, group_usages)
             .await
     }
 

@@ -85,18 +85,16 @@ impl ZoneAllocationStateExt for ZoneAllocationState {
 // ── ZoneValue CRC integrity ─────────────────────────────────────
 
 /// Extension trait for `ZoneValue` CRC32 integrity.
+///
+/// The CRC32 is computed over `usage_bitmap` only and stored in the
+/// dedicated `crc32` field (proto field 7). The baseline `ZoneValue`
+/// written during disk-add init has an empty bitmap and
+/// `crc32 = crc32fast::hash(&[])` (= 0); `snapshot_slot = 0`.
 pub trait ZoneValueExt {
-    /// Compute and set the checksum (CRC32 over bincode-serialized
-    /// value, appended as 4 little-endian bytes to `usage_bitmap`).
-    ///
-    /// # Panics
-    /// Panics if bincode serialization fails (cannot fail for this type).
+    /// Compute and set `crc32` from the current `usage_bitmap`.
     fn compute_checksum(&mut self);
 
-    /// Verify the checksum matches.
-    ///
-    /// # Panics
-    /// Panics if bincode serialization fails (cannot fail for this type).
+    /// Verify `crc32` matches the current `usage_bitmap`.
     #[must_use]
     fn verify_checksum(&self) -> bool;
 
@@ -116,21 +114,11 @@ pub trait ZoneValueExt {
 
 impl ZoneValueExt for ZoneValue {
     fn compute_checksum(&mut self) {
-        let bytes = bincode::serialize(self).expect("serialize ZoneValue for checksum");
-        let crc = crc32fast::hash(&bytes);
-        self.usage_bitmap.extend_from_slice(&crc.to_le_bytes());
+        self.crc32 = crc32fast::hash(&self.usage_bitmap);
     }
 
     fn verify_checksum(&self) -> bool {
-        if self.usage_bitmap.len() < 4 {
-            return false;
-        }
-        let payload_len = self.usage_bitmap.len() - 4;
-        let stored_crc = u32::from_le_bytes(self.usage_bitmap[payload_len..].try_into().expect("4 bytes"));
-        let mut copy = self.clone();
-        copy.usage_bitmap.truncate(payload_len);
-        let bytes = bincode::serialize(&copy).expect("serialize ZoneValue for verify");
-        crc32fast::hash(&bytes) == stored_crc
+        self.crc32 == crc32fast::hash(&self.usage_bitmap)
     }
 
     fn to_bytes(&self) -> Vec<u8> {

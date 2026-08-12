@@ -69,6 +69,21 @@ message ServiceExtra {
 // diskdb-specific instance fields.
 message DiskdbExtra {
   repeated uint64 owned_dg_ids = 1;
+  // Per-disk-group usage summaries piggybacked on each keepalive tick.
+  // Derived (recomputed from the in-memory bitmap on each tick), not a
+  // source of truth. See doc/design/diskdb/design-crow-diskdb.md §11.
+  repeated DiskGroupUsageSummary group_usages = 2;
+}
+
+// Per-disk-group usage summary, piggybacked on the diskdb keepalive.
+// Group 0 stores this at `/hw/dg_usage/<dg_id>` (DiskGroupUsageKey).
+message DiskGroupUsageSummary {
+  uint64 disk_group_id          = 1;
+  uint64 capacity_bytes         = 2;
+  uint64 used_bytes             = 3;
+  uint64 free_bytes             = 4;
+  uint32 disk_count             = 5;
+  uint32 allocatable_disk_count = 6;
 }
 
 // kv-server-specific instance fields.

@@ -10,6 +10,7 @@ use clap::Parser;
 use crow_diskdb::config::{validate, DiskdbConfig};
 use crow_diskdb::grpc::DiskdbService;
 use crow_diskdb::node::NodeContainer;
+use crow_diskdb::persistence::DataGroupClient;
 use crow_diskdb::sync::{SyncConfig, SyncLoop};
 use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, ServiceRegistryClient};
 use tracing::info;
@@ -66,21 +67,44 @@ async fn main() {
     kv_client.seed_leader(0, 0, group0_endpoint.clone());
     let kv_client2 = CrowkvClient::new(ClientConfig::new(vec![group0_endpoint.clone()]));
     kv_client2.seed_leader(0, 0, group0_endpoint.clone());
+    let kv_client3 = CrowkvClient::new(ClientConfig::new(vec![group0_endpoint.clone()]));
+    kv_client3.seed_leader(0, 0, group0_endpoint.clone());
+    let kv_client4 = CrowkvClient::new(ClientConfig::new(vec![group0_endpoint.clone()]));
+    kv_client4.seed_leader(0, 0, group0_endpoint.clone());
     let hw = HardwareClient::new(kv_client);
     let svc = ServiceRegistryClient::new(kv_client2);
+    let dg_kv = Arc::new(DataGroupClient::new(kv_client3));
+    let dg_kv_sync = DataGroupClient::new(kv_client4);
 
     // Start the sync loop.
     let sync_cfg = SyncConfig {
         interval: std::time::Duration::from_secs(u64::from(config.sync.sync_interval_secs)),
         miss_threshold: config.heartbeat.miss_threshold,
+        zone_rotate_count: config.storage.zone_rotate_count,
+        cas_retry_limit: config.storage.cas_retry_limit,
     };
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
-    let sync_loop = SyncLoop::new(hw, svc, container.clone(), sync_cfg);
+    let mut sync_loop =
+        SyncLoop::new(hw, svc, container.clone(), sync_cfg).with_data_group_client(dg_kv_sync);
+
+    // Blocking initial sync — run one tick before serving gRPC to
+    // populate the in-memory node/disk/zone state. Without this, the
+    // first allocate/free request would find an empty container.
+    info!("running blocking initial sync");
+    let init_outcome = sync_loop.sync_once().await;
+    info!(
+        groups_added = init_outcome.groups_added,
+        disks_added = init_outcome.disks_added,
+        duration_ms = init_outcome.sync_duration_ms,
+        "initial sync complete"
+    );
+
     let sync_handle = tokio::spawn(sync_loop.run(stop_rx));
 
     // Serve gRPC.
     let listen_addr: SocketAddr = config.server.listen_addr.parse().expect("valid listen_addr");
-    let grpc_service = DiskdbService::new(container.clone()).into_server();
+    let grpc_service =
+        DiskdbService::new(container.clone(), Arc::clone(&dg_kv), config.storage.clone()).into_server();
     info!(%listen_addr, "gRPC server listening");
     let grpc_result = tonic::transport::Server::builder()
         .add_service(grpc_service)
