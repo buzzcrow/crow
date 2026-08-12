@@ -24,7 +24,7 @@ use crow_kv::cluster::{KvServer, PxKvStore, PxLocalReplica, PxLocalReplicaRole, 
 use crow_kv::common::config::PxElectionConfig;
 use crow_kv::rpc::{KvGetRequest, KvSetRequest};
 
-use crate::testkit::cluster::{start_cluster_no_leader, TestCluster};
+use crate::common::cluster::{start_cluster_no_leader, TestCluster};
 
 async fn wait_for_leader(cluster: &TestCluster, timeout: Duration) -> Option<u64> {
     let start = Instant::now();
@@ -94,7 +94,7 @@ async fn poll_for_value(cluster: &TestCluster, key: &[u8], expected: &[u8], time
 }
 
 /// Rebuild a group on a node with an additional remote replica.
-/// Uses the same pattern as the testkit: create a new `PxGroup`,
+/// Uses the same pattern as the common harness: create a new `PxGroup`,
 /// inherit election state, set updated remotes, and replace via `add_group`.
 fn add_replica_to_node(node: &Arc<PxKvStore>, new_id: u64, new_endpoint: String) {
     let prior = node.get_group(1).expect("group exists");

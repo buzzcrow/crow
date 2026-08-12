@@ -6,38 +6,38 @@
 //! `SimDisk` tests: `#[tokio::test(flavor = "current_thread", start_paused = true)]`
 //! Fallback tests: real filesystem via `tempfile`, `#[tokio::test]`
 
-#[path = "wal/record_tests.rs"]
-mod record_tests;
+#[path = "wal_test/record_test.rs"]
+mod record_test;
 
-#[path = "wal/segment_tests.rs"]
-mod segment_tests;
+#[path = "wal_test/segment_test.rs"]
+mod segment_test;
 
-#[path = "wal/wal_engine_tests.rs"]
-mod wal_engine_tests;
+#[path = "wal_test/wal_engine_test.rs"]
+mod wal_engine_test;
 
-#[path = "wal/replay_tests.rs"]
-mod replay_tests;
+#[path = "wal_test/replay_test.rs"]
+mod replay_test;
 
-#[path = "wal/gc_tests.rs"]
-mod gc_tests;
+#[path = "wal_test/gc_test.rs"]
+mod gc_test;
 
-#[path = "wal/pipeline_backend_tests.rs"]
-mod pipeline_backend_tests;
+#[path = "wal_test/pipeline_backend_test.rs"]
+mod pipeline_backend_test;
 
-#[path = "wal/block_backend_tests.rs"]
-mod block_backend_tests;
+#[path = "wal_test/block_backend_test.rs"]
+mod block_backend_test;
 
-#[path = "wal/file_restore_tests.rs"]
-mod file_restore_tests;
+#[path = "wal_test/file_restore_test.rs"]
+mod file_restore_test;
 
-#[path = "wal/index_tests.rs"]
-mod index_tests;
+#[path = "wal_test/index_test.rs"]
+mod index_test;
 
-#[path = "wal/io_backend_tests.rs"]
-mod io_backend_tests;
+#[path = "wal_test/io_backend_test.rs"]
+mod io_backend_test;
 
-#[path = "wal/file_backend_tests.rs"]
-mod file_backend_tests;
+#[path = "wal_test/file_backend_test.rs"]
+mod file_backend_test;
 
-#[path = "wal/pipeline_writer_tests.rs"]
-mod pipeline_writer_tests;
+#[path = "wal_test/pipeline_writer_test.rs"]
+mod pipeline_writer_test;

@@ -14,29 +14,29 @@
 //! the replica-layer persistence / prepare-accept / dedup / snapshot tests
 //! live in the `replica` binary.
 
-#[path = "election/role_test.rs"]
+#[path = "election_test/role_test.rs"]
 mod role;
 
-#[path = "election/vote_test.rs"]
+#[path = "election_test/vote_test.rs"]
 mod vote;
 
-#[path = "election/heartbeat_test.rs"]
+#[path = "election_test/heartbeat_test.rs"]
 mod heartbeat;
 
-#[path = "election/lease_test.rs"]
+#[path = "election_test/lease_test.rs"]
 mod lease;
 
-#[path = "election/term_fence_test.rs"]
+#[path = "election_test/term_fence_test.rs"]
 mod term_fence;
 
-#[path = "election/metrics_test.rs"]
+#[path = "election_test/metrics_test.rs"]
 mod metrics;
 
-#[path = "election/step_down_test.rs"]
+#[path = "election_test/step_down_test.rs"]
 mod step_down;
 
-#[path = "election/frontier_test.rs"]
+#[path = "election_test/frontier_test.rs"]
 mod frontier;
 
-#[path = "election/apply_loop_test.rs"]
+#[path = "election_test/apply_loop_test.rs"]
 mod apply_loop;

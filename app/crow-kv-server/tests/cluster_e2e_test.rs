@@ -3,14 +3,14 @@
 
 //! Real-process end-to-end cluster tests for crow-kv-server.
 
-mod testkit;
+mod common;
 
 use bytes::Bytes;
 use crow_kv::rpc::kv_service_client::KvServiceClient;
 use crow_kv::rpc::{KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvGetRequest, KvSetRequest};
 use serde_json::Value;
 
-use testkit::process::{start_test_server, ServerHandle};
+use common::process::{start_test_server, ServerHandle};
 
 fn client() -> reqwest::Client {
     reqwest::Client::new()

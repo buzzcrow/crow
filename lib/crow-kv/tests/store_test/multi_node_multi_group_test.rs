@@ -17,7 +17,7 @@ use crow_kv::rpc::kv_service_client::KvServiceClient;
 use crow_kv::rpc::{KvGetRequest, KvSetRequest};
 use tonic::transport::Channel;
 
-use crate::testkit::cluster::{start_cluster_no_leader, TestCluster};
+use crate::common::cluster::{start_cluster_no_leader, TestCluster};
 
 async fn wait_for_leader_in_group(cluster: &TestCluster, group_id: u64, timeout: Duration) -> Option<u64> {
     let start = Instant::now();

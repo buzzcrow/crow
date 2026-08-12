@@ -3,7 +3,7 @@
 
 //! KV gRPC integration tests covering Put/Delete/BatchWrite flows.
 
-use crate::testkit::cluster::{start_cluster, TestCluster};
+use crate::common::cluster::{start_cluster, TestCluster};
 use bytes::Bytes;
 use crow_kv::rpc::{KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvSetRequest};
 

@@ -8,11 +8,11 @@
 //! exercise it in isolation: insert/get/trim, chunk growth, tail lookup, and
 //! atomic guard access.
 
-#[path = "slot/slot_list_test.rs"]
+#[path = "slot_test/slot_list_test.rs"]
 mod slot_list;
 
-#[path = "slot/concurrent_test.rs"]
+#[path = "slot_test/concurrent_test.rs"]
 mod concurrent;
 
-#[path = "slot/reclaim_test.rs"]
+#[path = "slot_test/reclaim_test.rs"]
 mod reclaim;

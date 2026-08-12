@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 description = "CROW core library: consensus, engine, WAL, I/O, RPC, reconfiguration."
 autobenches = false
+autotests = false
 
 [lints]
 workspace = true
@@ -57,6 +58,46 @@ tempfile = "3"
 [[bench]]
 name = "slot_list"
 harness = false
+
+[[test]]
+name = "election_test"
+path = "tests/election_test.rs"
+
+[[test]]
+name = "group_test"
+path = "tests/group_test.rs"
+
+[[test]]
+name = "kv_test"
+path = "tests/kv_test.rs"
+
+[[test]]
+name = "metrics_test"
+path = "tests/metrics_test.rs"
+
+[[test]]
+name = "node_config_test"
+path = "tests/node_config_test.rs"
+
+[[test]]
+name = "paxos_test"
+path = "tests/paxos_test.rs"
+
+[[test]]
+name = "replica_test"
+path = "tests/replica_test.rs"
+
+[[test]]
+name = "slot_test"
+path = "tests/slot_test.rs"
+
+[[test]]
+name = "store_test"
+path = "tests/store_test.rs"
+
+[[test]]
+name = "wal_test"
+path = "tests/wal_test.rs"
 
 [[bench]]
 name = "wal"

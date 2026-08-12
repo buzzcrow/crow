@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "CROW server binary: single-group, multi-group, and cluster modes."
+autotests = false
 
 [[bin]]
 name = "crow-kv-server"
@@ -36,3 +37,43 @@ reqwest = { version = "0.12", features = ["json"] }
 tonic = { workspace = true }
 tempfile = "3"
 bytes = "1"
+
+[[test]]
+name = "async_ops_test"
+path = "tests/async_ops_test.rs"
+
+[[test]]
+name = "cli_parse_test"
+path = "tests/cli_parse_test.rs"
+
+[[test]]
+name = "cluster_e2e_test"
+path = "tests/cluster_e2e_test.rs"
+
+[[test]]
+name = "deployment_reconfig_test"
+path = "tests/deployment_reconfig_test.rs"
+
+[[test]]
+name = "multi_store_test"
+path = "tests/multi_store_test.rs"
+
+[[test]]
+name = "reconcile_test"
+path = "tests/reconcile_test.rs"
+
+[[test]]
+name = "server_api_test"
+path = "tests/server_api_test.rs"
+
+[[test]]
+name = "snapshot_join_e2e_test"
+path = "tests/snapshot_join_e2e_test.rs"
+
+[[test]]
+name = "startup_test"
+path = "tests/startup_test.rs"
+
+[[test]]
+name = "system_init_test"
+path = "tests/system_init_test.rs"

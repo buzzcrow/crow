@@ -5,7 +5,7 @@
 //! retry through `PxGroup::propose`, and gRPC boundary rejection. The pure
 //! error-classifier unit tests live at `tests/paxos/error_test.rs`.
 
-use crate::testkit::cluster::start_cluster;
+use crate::common::cluster::start_cluster;
 use crow_kv::cluster::group::PxGroup;
 use crow_kv::cluster::kv_store::KvStore;
 use crow_kv::cluster::{PxKvStore, PxLocalReplica, PxLocalReplicaRole, PxRemoteReplica};

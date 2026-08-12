@@ -12,29 +12,29 @@
 //! multi-replica consensus lives in the `group` binary; pure Paxos role
 //! units live in the `paxos` binary.
 
-#[path = "kv/mem_kv_impl.rs"]
+#[path = "kv_test/mem_kv_impl_test.rs"]
 mod mem_kv;
 
-#[path = "kv/test_util.rs"]
+#[path = "common/test_util.rs"]
 mod test_util;
 
-#[path = "replica/persistence_test.rs"]
+#[path = "replica_test/persistence_test.rs"]
 mod persistence;
 
-#[path = "replica/prepare_accept_test.rs"]
+#[path = "replica_test/prepare_accept_test.rs"]
 mod prepare_accept;
 
-#[path = "replica/dedup_test.rs"]
+#[path = "replica_test/dedup_test.rs"]
 mod dedup;
 
-#[path = "replica/snapshot_test.rs"]
+#[path = "replica_test/snapshot_test.rs"]
 mod snapshot;
 
-#[path = "replica/replay_ordering_test.rs"]
+#[path = "replica_test/replay_ordering_test.rs"]
 mod replay_ordering;
 
-#[path = "replica/concurrent_test.rs"]
+#[path = "replica_test/concurrent_test.rs"]
 mod concurrent;
 
-#[path = "replica/op_correctness_test.rs"]
+#[path = "replica_test/op_correctness_test.rs"]
 mod op_correctness;

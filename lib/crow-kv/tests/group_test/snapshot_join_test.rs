@@ -7,8 +7,8 @@
 //! `SnapshotService` gRPC, instead of replaying full Paxos history from
 //! slot 1.
 
+use crate::common::cluster::start_cluster;
 use crate::test_util::compare_dyn;
-use crate::testkit::cluster::start_cluster;
 use bytes::Bytes;
 use crow_kv::cluster::group::PxGroup;
 use crow_kv::cluster::{KvServer, PxLocalReplica, PxLocalReplicaRole};

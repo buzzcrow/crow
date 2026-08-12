@@ -8,11 +8,11 @@
 //! console-web, drives a workload, collects server metrics, and writes
 //! a report. The `crow-kv-server` binary must be built beforehand.
 
-mod testkit;
+mod common;
 
+use common::console::{crow_cli_bin, run};
 use crow_console_shared::lifecycle;
 use std::sync::{Mutex, OnceLock};
-use testkit::console::{crow_cli_bin, run};
 
 static BENCH_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 

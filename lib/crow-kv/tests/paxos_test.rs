@@ -9,20 +9,20 @@
 //! `group`, and `store` test binaries; the slot list has its own `slot`
 //! subsystem binary.
 
-#[path = "paxos/acceptor_test.rs"]
+#[path = "paxos_test/acceptor_test.rs"]
 mod acceptor;
 
-#[path = "paxos/learner_test.rs"]
+#[path = "paxos_test/learner_test.rs"]
 mod learner;
 
-#[path = "paxos/learner_dedup_test.rs"]
+#[path = "paxos_test/learner_dedup_test.rs"]
 mod learner_dedup;
 
-#[path = "paxos/learner_async_test.rs"]
+#[path = "paxos_test/learner_async_test.rs"]
 mod learner_async;
 
-#[path = "paxos/roles_test.rs"]
+#[path = "paxos_test/roles_test.rs"]
 mod roles;
 
-#[path = "paxos/error_test.rs"]
+#[path = "paxos_test/error_test.rs"]
 mod error;

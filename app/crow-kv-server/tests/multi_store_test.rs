@@ -10,7 +10,7 @@
 //! store B. Mirrors the Web UI multi-store topology E2E
 //! (`e2e/flows/38-multi-store-isolation.spec.ts`) at the process level.
 
-mod testkit;
+mod common;
 
 use bytes::Bytes;
 use crow_kv::rpc::kv_service_client::KvServiceClient;
@@ -18,7 +18,7 @@ use crow_kv::rpc::{KvGetRequest, KvSetRequest};
 use serde_json::Value;
 use std::time::{Duration, Instant};
 
-use testkit::process::{start_test_server_with_ports, ServerHandle};
+use common::process::{start_test_server_with_ports, ServerHandle};
 
 const STORE_IDS: &[u64] = &[1, 2];
 const GROUP_ID: u64 = 10;

@@ -20,7 +20,7 @@
 //! local read on the follower must return `not_found = true`. If the
 //! follower's `Get` instead returns the value, the forward has run.
 
-use crate::testkit::cluster::start_cluster;
+use crate::common::cluster::start_cluster;
 use bytes::Bytes;
 use crow_kv::cluster::KvServer;
 use crow_kv::rpc::kv_service_client::KvServiceClient;

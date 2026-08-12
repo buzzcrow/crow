@@ -12,47 +12,46 @@
 //! server, no HTTP). Tests that boot the `crow-kv-server` binary / HTTP
 //! management API live under `crow-kv-server/tests`.
 
-#[path = "testkit/mod.rs"]
-mod testkit;
+mod common;
 
-#[path = "store/node_test.rs"]
+#[path = "store_test/node_test.rs"]
 mod node;
 
-#[path = "store/multi_group_test.rs"]
+#[path = "store_test/multi_group_test.rs"]
 mod multi_group;
 
-#[path = "store/status_test.rs"]
+#[path = "store_test/status_test.rs"]
 mod status;
 
-#[path = "store/health_test.rs"]
+#[path = "store_test/health_test.rs"]
 mod health;
 
-#[path = "store/shutdown_test.rs"]
+#[path = "store_test/shutdown_test.rs"]
 mod shutdown;
 
-#[path = "store/persistence_test.rs"]
+#[path = "store_test/persistence_test.rs"]
 mod persistence;
 
-#[path = "store/wal_isolation_test.rs"]
+#[path = "store_test/wal_isolation_test.rs"]
 mod wal_isolation;
 
-#[path = "store/kv_correctness_test.rs"]
+#[path = "store_test/kv_correctness_test.rs"]
 mod kv_correctness;
 
-#[path = "store/multi_node_multi_group_test.rs"]
+#[path = "store_test/multi_node_multi_group_test.rs"]
 mod multi_node_multi_group;
 
-#[path = "store/shutdown_under_load_test.rs"]
+#[path = "store_test/shutdown_under_load_test.rs"]
 mod shutdown_under_load;
 
-#[path = "store/read_metrics_test.rs"]
+#[path = "store_test/read_metrics_test.rs"]
 mod read_metrics;
 
-#[path = "store/readindex_batch_test.rs"]
+#[path = "store_test/readindex_batch_test.rs"]
 mod readindex_batch;
 
-#[path = "store/apply_fence_test.rs"]
+#[path = "store_test/apply_fence_test.rs"]
 mod apply_fence;
 
-#[path = "store/snapshot_api_test.rs"]
+#[path = "store_test/snapshot_api_test.rs"]
 mod snapshot_api;

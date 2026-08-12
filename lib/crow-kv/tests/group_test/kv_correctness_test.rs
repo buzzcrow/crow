@@ -9,7 +9,7 @@
 //! mixed ops across slots. All verified via `engine_get` on all
 //! replicas.
 
-use crate::testkit::cluster::{start_cluster, TestCluster};
+use crate::common::cluster::{start_cluster, TestCluster};
 use bytes::Bytes;
 use crow_kv::rpc::{KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvSetRequest};
 

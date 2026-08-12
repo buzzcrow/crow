@@ -7,7 +7,7 @@
 //! high-UTF8, whitespace), large value (100KB), small value (1 byte),
 //! empty value. All verified via `engine_get` on all replicas.
 
-use crate::testkit::cluster::{start_cluster, TestCluster};
+use crate::common::cluster::{start_cluster, TestCluster};
 use bytes::Bytes;
 use crow_kv::rpc::KvSetRequest;
 

@@ -5,12 +5,12 @@
 //! `server` round-trips through `--ip` / `--port` against an empty,
 //! temp-rooted console (local-fork server deploy).
 
-mod testkit;
+mod common;
 
 use std::time::Duration;
 
+use common::console::{crow_cli_bin, run, spawn_console_empty};
 use crow_console_shared::lifecycle::crow_kv_server_bin;
-use testkit::console::{crow_cli_bin, run, spawn_console_empty};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::too_many_lines)]
@@ -57,7 +57,7 @@ async fn rack_node_server_lifecycle() {
     assert!(stdout.contains("reachable"), "stdout={stdout}");
 
     // server deploy / list / restart / stop on n1.
-    let (mgmt_port, grpc_port) = testkit::console::pick_two_distinct_free_ports();
+    let (mgmt_port, grpc_port) = common::console::pick_two_distinct_free_ports();
     let mgmt_port = mgmt_port.to_string();
     let grpc_port = grpc_port.to_string();
     let (code, stdout, stderr) = run(

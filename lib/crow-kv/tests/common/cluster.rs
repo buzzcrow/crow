@@ -3,8 +3,8 @@
 
 use std::sync::Arc;
 
-use crate::testkit::logging::init_test_subscriber;
-use crate::testkit::net_lock::{lock, unique_port};
+use crate::common::logging::init_test_subscriber;
+use crate::common::net_lock::{lock, unique_port};
 use crow_kv::cluster::group::PxGroup;
 use crow_kv::cluster::group_election::LeaderElection;
 use crow_kv::cluster::{KvServer, PxKvStore, PxLocalReplica, PxLocalReplicaRole, PxRemoteReplica};

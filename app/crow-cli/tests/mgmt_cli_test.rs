@@ -6,13 +6,13 @@
 //! `crow-kv-server`. Exercises the `store / paxos / replica` verbs
 //! end-to-end and confirms the CLI no longer needs `--server`.
 
-mod testkit;
+mod common;
 
 use std::time::Duration;
 
+use common::console::{crow_cli_bin, run, spawn_console, spawn_upstream};
 use crow_console_shared::clients::console::ConsoleClient;
 use crow_console_shared::lifecycle;
-use testkit::console::{crow_cli_bin, run, spawn_console, spawn_upstream};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::too_many_lines)]

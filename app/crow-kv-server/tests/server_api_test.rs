@@ -3,11 +3,11 @@
 
 //! Real-process integration tests for the `crow-kv-server` HTTP management API.
 
-mod testkit;
+mod common;
 
 use serde_json::Value;
 
-use testkit::process::{start_test_server, ServerHandle};
+use common::process::{start_test_server, ServerHandle};
 
 fn client() -> reqwest::Client {
     reqwest::Client::new()

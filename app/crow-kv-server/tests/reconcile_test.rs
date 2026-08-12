@@ -3,9 +3,9 @@
 
 //! Integration tests for node startup reconciliation with group 0.
 
-mod testkit;
+mod common;
 
-use testkit::process::start_test_server;
+use common::process::start_test_server;
 
 fn client() -> reqwest::Client {
     reqwest::Client::new()

@@ -7,13 +7,13 @@
 //! end-to-end and verifies the legacy `--server` flag is no longer
 //! required for the four KV verbs.
 
-mod testkit;
+mod common;
 
 use std::time::Duration;
 
+use common::console::{crow_cli_bin, run, spawn_console, spawn_upstream, wait_for_leader};
 use crow_console_shared::clients::console::ConsoleClient;
 use crow_console_shared::lifecycle;
-use testkit::console::{crow_cli_bin, run, spawn_console, spawn_upstream, wait_for_leader};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::too_many_lines)]

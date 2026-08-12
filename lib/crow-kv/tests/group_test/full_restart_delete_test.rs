@@ -95,8 +95,8 @@ async fn build_wal_group(
 }
 
 async fn start_wal_cluster(ids: &[u64]) -> WalCluster {
-    let net = crate::testkit::net_lock::lock().await;
-    crate::testkit::logging::init_test_subscriber();
+    let net = crate::common::net_lock::lock().await;
+    crate::common::logging::init_test_subscriber();
     let tmp = tempfile::tempdir().expect("tempdir");
     let cfg = PxElectionConfig::for_tests();
 
@@ -109,7 +109,7 @@ async fn start_wal_cluster(ids: &[u64]) -> WalCluster {
             .map(|&other| {
                 (
                     other,
-                    format!("127.0.0.1:{}", crate::testkit::net_lock::unique_port()),
+                    format!("127.0.0.1:{}", crate::common::net_lock::unique_port()),
                 )
             })
             .collect();

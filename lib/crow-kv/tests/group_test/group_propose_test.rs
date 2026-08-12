@@ -101,13 +101,13 @@ async fn propose_with_no_client_id() {
 /// be wrongly `Chosen` on the back of the non-voting ack.
 #[tokio::test]
 async fn non_voting_remote_accept_does_not_count_toward_quorum() {
-    let _net = crate::testkit::net_lock::lock().await;
+    let _net = crate::common::net_lock::lock().await;
 
     // Voting remote #2: unreachable on purpose (nothing listens on this
     // port), so `send_accept` always errors and is never counted either
     // way -- it exists purely to make quorum (2) unreachable without a
     // real voting ack.
-    let unreachable_port = crate::testkit::net_lock::unique_port();
+    let unreachable_port = crate::common::net_lock::unique_port();
     let voting_remote = PxRemoteReplica::new(2, format!("127.0.0.1:{unreachable_port}"));
 
     // Non-voting remote #3: a real, running follower that *does* accept
@@ -154,7 +154,7 @@ async fn non_voting_remote_accept_does_not_count_toward_quorum() {
 /// quorum normally, mirroring the self-healing behavior described in §6.3.
 #[tokio::test]
 async fn membership_epoch_mismatch_fences_prepare_and_accept_until_epochs_match() {
-    let _net = crate::testkit::net_lock::lock().await;
+    let _net = crate::common::net_lock::lock().await;
 
     // Real, running voting follower -- pinned at epoch 1 as if its own
     // membership-mutation HTTP call already landed.

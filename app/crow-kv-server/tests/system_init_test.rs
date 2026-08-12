@@ -3,10 +3,10 @@
 
 //! Integration tests for `POST /system/init` (system group bootstrap).
 
-mod testkit;
+mod common;
 
+use common::process::start_test_server;
 use serde_json::Value;
-use testkit::process::start_test_server;
 
 fn client() -> reqwest::Client {
     reqwest::Client::new()

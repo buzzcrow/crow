@@ -10,7 +10,7 @@
 //! The stall must be bounded and self-heal the instant every node's
 //! epoch agrees again, per §6.3's confirmed trade-off.
 //!
-//! Uses the real 3-node `testkit::cluster` harness (separate `PxKvStore`
+//! Uses the real 3-node `common::cluster` harness (separate `PxKvStore`
 //! processes-in-process, real gRPC wire messages, no mocks) rather than
 //! the console's HTTP mgmt layer: the epoch bump itself is what's under
 //! test here, not the HTTP fan-out mechanics already covered by
@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use crow_kv::rpc::{KvGetRequest, KvSetRequest};
 
-use crate::testkit::cluster::{start_cluster_no_leader, TestCluster};
+use crate::common::cluster::{start_cluster_no_leader, TestCluster};
 
 async fn wait_for_leader(cluster: &TestCluster, timeout: Duration) -> Option<u64> {
     let start = Instant::now();

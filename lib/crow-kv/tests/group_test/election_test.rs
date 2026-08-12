@@ -7,14 +7,14 @@
 //!
 //! 1. **E2E multi-node** (`single_leader_elected_3_nodes`,
 //!    `single_node_auto_promotes`) — drive real clusters via
-//!    `testkit::cluster::start_cluster_no_leader`.
+//!    `common::cluster::start_cluster_no_leader`.
 //!
 //! 2. **Driver unit tests** (migrated from the inline `#[cfg(test)]`
 //!    module in `crow_kv/src/cluster/election.rs`) — exercise the
 //!    election driver, lease renewal, and admin step-down in
 //!    isolation with `tokio::test(start_paused = true)`.
 
-use crate::testkit::cluster::start_cluster_no_leader;
+use crate::common::cluster::start_cluster_no_leader;
 use crow_kv::cluster::group::{ProposeResult, PxGroup};
 use crow_kv::cluster::group_election::{spawn, LeaderElection, XorShift64};
 use crow_kv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
@@ -34,7 +34,7 @@ fn test_cfg() -> PxElectionConfig {
 
 /// Wait up to `timeout` for *any* node in `cluster` to enter the
 /// `Leader` role. Returns the elected node's id on success.
-async fn wait_for_leader(cluster: &crate::testkit::cluster::TestCluster, timeout: Duration) -> Option<u64> {
+async fn wait_for_leader(cluster: &crate::common::cluster::TestCluster, timeout: Duration) -> Option<u64> {
     let start = std::time::Instant::now();
     while start.elapsed() < timeout {
         if let Some(node) = cluster.elected_leader() {

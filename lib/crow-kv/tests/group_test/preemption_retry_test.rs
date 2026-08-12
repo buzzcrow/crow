@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-use crate::testkit::cluster::{assert_all_accepted, start_cluster};
+use crate::common::cluster::{assert_all_accepted, start_cluster};
 use crow_kv::paxos::roles::PxBallot;
 use crow_kv::rpc::PrepareRequest;
 
