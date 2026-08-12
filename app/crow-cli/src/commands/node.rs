@@ -3,7 +3,7 @@
 
 use clap::Subcommand;
 use crow_console_shared::config::NodeEntry;
-use crow_protocol::NodeId;
+use crow_protocol::common_type::{NodeId, RackId};
 use std::process::ExitCode;
 
 use crate::utils::{client::console_client, print_json};
@@ -12,10 +12,10 @@ use crate::Cli;
 #[derive(Subcommand, Debug)]
 pub enum NodeVerb {
     Add {
-        #[arg(long)]
-        id: String,
-        #[arg(long)]
-        rack: String,
+        #[arg(long, value_parser = clap::value_parser!(u64))]
+        id: NodeId,
+        #[arg(long, value_parser = clap::value_parser!(u64))]
+        rack: RackId,
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
         #[arg(long, default_value_t = 22)]
@@ -29,14 +29,15 @@ pub enum NodeVerb {
         ssh_password: Option<String>,
     },
     Remove {
-        #[arg(long)]
-        id: String,
+        #[arg(long, value_parser = clap::value_parser!(u64))]
+        id: NodeId,
     },
     List,
     /// Validate node reachability via the console: an SSH handshake for
     /// SSH-enabled nodes, or a no-op success for local-fork nodes.
     Ping {
-        node: String,
+        #[arg(value_parser = clap::value_parser!(u64))]
+        node: NodeId,
     },
 }
 
@@ -65,15 +66,15 @@ pub async fn run_node_verb(cli: &Cli, verb: NodeVerb) -> ExitCode {
             )
             .await
         }
-        NodeVerb::Remove { id } => node_remove(cli, &id).await,
+        NodeVerb::Remove { id } => node_remove(cli, id).await,
         NodeVerb::List => node_list(cli).await,
-        NodeVerb::Ping { node } => node_ping(cli, &node).await,
+        NodeVerb::Ping { node } => node_ping(cli, node).await,
     }
 }
 
 struct NodeAddArgs {
-    id: String,
-    rack_id: String,
+    id: NodeId,
+    rack_id: RackId,
     host: String,
     ssh_port: u16,
     ssh_user: String,
@@ -87,8 +88,8 @@ async fn node_add(cli: &Cli, args: NodeAddArgs) -> ExitCode {
         Err(c) => return c,
     };
     let entry = NodeEntry {
-        id: args.id.parse().unwrap_or(0),
-        rack_id: args.rack_id.parse().unwrap_or(0),
+        id: args.id,
+        rack_id: args.rack_id,
         host: args.host,
         ssh_port: args.ssh_port,
         ssh_user: args.ssh_user,
@@ -110,19 +111,12 @@ async fn node_add(cli: &Cli, args: NodeAddArgs) -> ExitCode {
     }
 }
 
-async fn node_remove(cli: &Cli, id: &str) -> ExitCode {
-    let node_id: NodeId = match id.parse() {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!("error: invalid node id {id:?}: {e}");
-            return ExitCode::from(1);
-        }
-    };
+async fn node_remove(cli: &Cli, id: NodeId) -> ExitCode {
     let client = match console_client(cli) {
         Ok(c) => c,
         Err(c) => return c,
     };
-    match client.remove_node(node_id).await {
+    match client.remove_node(id).await {
         Ok(()) => {
             println!("removed node {id}");
             ExitCode::SUCCESS
@@ -160,19 +154,12 @@ async fn node_list(cli: &Cli) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-async fn node_ping(cli: &Cli, node_id: &str) -> ExitCode {
-    let nid: NodeId = match node_id.parse() {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!("error: invalid node id {node_id:?}: {e}");
-            return ExitCode::from(1);
-        }
-    };
+async fn node_ping(cli: &Cli, node_id: NodeId) -> ExitCode {
     let client = match console_client(cli) {
         Ok(c) => c,
         Err(c) => return c,
     };
-    match client.ping_node(nid).await {
+    match client.ping_node(node_id).await {
         Ok(r) if r.ok => {
             if cli.json {
                 return print_json(&r);

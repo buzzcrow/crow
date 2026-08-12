@@ -8,12 +8,16 @@
 //! latency histograms, and JSON report files written to
 //! `bench-runs/<run-id>.json`.
 
-pub mod provision;
-pub mod report;
-pub mod runner;
-pub mod workload;
+pub(crate) mod metrics_flusher;
+pub(crate) mod metrics_log;
+pub(crate) mod provision;
+pub(crate) mod report;
+pub(crate) mod report_format;
+pub(crate) mod runner;
+pub(crate) mod worker;
+pub(crate) mod workload;
 
-pub use provision::{BenchFixture, BenchMode};
-pub use report::BenchReport;
-pub use runner::{run_bench, BenchConfig};
-pub use workload::{MinSlotPolicy, WorkloadKind};
+pub(crate) use provision::{BenchFixture, BenchMode};
+pub(crate) use report::BenchReport;
+pub(crate) use runner::{run_bench, BenchConfig};
+pub(crate) use workload::{MinSlotPolicy, WorkloadKind};

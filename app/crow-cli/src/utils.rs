@@ -3,9 +3,9 @@
 
 use std::process::ExitCode;
 
-pub mod client;
+pub(crate) mod client;
 
-pub fn print_json<T: serde::Serialize>(v: &T) -> ExitCode {
+pub(crate) fn print_json<T: serde::Serialize>(v: &T) -> ExitCode {
     match serde_json::to_string_pretty(v) {
         Ok(s) => {
             println!("{s}");

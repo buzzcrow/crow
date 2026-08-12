@@ -24,7 +24,8 @@ use crow_console_shared::error::{Error, Result};
 use crow_console_shared::lifecycle::stop_pid_with_timeout;
 use crow_console_shared::test_ports::unique_test_port;
 
-use super::report::{aggregate_server_metrics, parse_metrics_log, ServerMetrics};
+use super::metrics_log::{aggregate_server_metrics, parse_metrics_log};
+use super::report::ServerMetrics;
 
 /// Number of nodes (and racks, 1:1) provisioned by the fixture.
 const NODE_COUNT: usize = 3;

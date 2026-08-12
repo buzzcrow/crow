@@ -10,8 +10,6 @@
 //! its config and monitor cache. There is no direct `crow-kv-server` /
 //! registry path; even `bench` resolves its gRPC target via the service.
 
-#![allow(clippy::mod_module_files)]
-
 mod bench;
 mod commands;
 mod utils;
