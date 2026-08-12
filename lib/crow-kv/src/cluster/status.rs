@@ -18,9 +18,10 @@
 //!   violate the orphan rule; a free function avoids it.
 
 pub use crow_protocol::mgmt::{
-    CrowTreeStatsView, ElectionStateView, GroupStatus, InflightStatus, KvStoreStatus, MetricsSnapshot,
-    ReadStateView, RemoteStatus, ReplicaStatus, StatusLevel, StoreStatus,
+    CrowTreeStatsView, GroupStatus, InflightStatus, KvStoreStatus, RemoteStatus, ReplicaStatus, StatusLevel,
+    StoreStatus,
 };
+pub(crate) use crow_protocol::mgmt::{ElectionStateView, ReadStateView};
 
 use crate::common::metrics::ElectionMetricsSnapshot;
 use crate::kv::CrowTreeStats;

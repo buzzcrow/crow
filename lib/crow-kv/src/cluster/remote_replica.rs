@@ -507,7 +507,8 @@ impl PxRemoteReplica {
     /// `learner_stream_rpc_timeout_ms` (per-RPC deadline); other fields stay
     /// configurable per-call.
     #[must_use]
-    pub fn with_config(node_id: PxNodeId, endpoint: String, cfg: &PxElectionConfig) -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn with_config(node_id: PxNodeId, endpoint: String, cfg: &PxElectionConfig) -> Self {
         let mut r = Self::new(node_id, endpoint);
         r.learner_stream_window_frames = cfg.learner_stream_window_frames;
         r.rpc_timeout = Duration::from_millis(cfg.learner_stream_rpc_timeout_ms);
@@ -538,7 +539,7 @@ impl PxRemoteReplica {
     /// # Errors
     /// Returns [`PxReplicaError::Internal`] if the per-peer stream is
     /// shut down or its reconnect loop is currently failing fast.
-    pub fn send_chosen_notice(
+    pub(crate) fn send_chosen_notice(
         &self,
         slot: u64,
         term: crate::paxos::PxTerm,
@@ -567,7 +568,8 @@ impl PxRemoteReplica {
     /// # Errors
     /// Returns [`PxReplicaError::Internal`] if the per-peer stream is
     /// shut down or its reconnect loop is currently failing fast.
-    pub fn send_batch_chosen_notice(
+    #[allow(dead_code)]
+    pub(crate) fn send_batch_chosen_notice(
         &self,
         start_slot: u64,
         end_slot: u64,
@@ -597,7 +599,8 @@ impl PxRemoteReplica {
     ///
     /// # Errors
     /// Returns [`PxReplicaError`] on transport failure or timeout.
-    pub async fn send_fetch_gap(
+    #[allow(dead_code)]
+    pub(crate) async fn send_fetch_gap(
         &self,
         slot: u64,
         term: crate::paxos::PxTerm,
@@ -649,7 +652,7 @@ impl PxRemoteReplica {
     /// # Panics
     ///
     /// Panics if the metrics registry mutex is poisoned.
-    pub fn set_metrics_registry(
+    pub(crate) fn set_metrics_registry(
         &self,
         registry: &Arc<std::sync::Mutex<MetricsRegistry>>,
         store_id: u64,
@@ -667,7 +670,7 @@ impl PxRemoteReplica {
 
     /// Read this remote's RPC metrics for the topology endpoint.
     #[must_use]
-    pub fn status(&self) -> RemoteStatus {
+    pub(crate) fn status(&self) -> RemoteStatus {
         let mut status = StatusLevel::Ok;
         let mut messages = Vec::new();
         if !self.grpc_client.initialized() {
@@ -695,7 +698,7 @@ impl PxRemoteReplica {
     /// uniformity with the cascade contract.
     #[tracing::instrument(level = "debug", skip_all, fields(replica_r_id = self.node_id))]
     #[allow(clippy::unused_async)] // async kept for cascade uniformity
-    pub async fn shutdown(&self, _per_layer_timeout: Duration) -> OperationReport {
+    pub(crate) async fn shutdown(&self, _per_layer_timeout: Duration) -> OperationReport {
         if self.shutdown_started.swap(true, Ordering::AcqRel) {
             debug!(
                 replica_r_id = self.node_id,
