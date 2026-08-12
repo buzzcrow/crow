@@ -90,13 +90,6 @@ pub(crate) struct PendingBatch {
     pub(crate) timer: Option<tokio::task::JoinHandle<()>>,
 }
 
-/// Watchdog interval (microseconds). A single long-running watchdog task
-/// sleeps this long, then checks if there's been no coalescer activity
-/// (enqueue or round completion) for this duration. If so, it flushes
-/// any stuck non-empty batch. Only fires on inactivity — zero overhead
-/// during normal operation.
-const WATCHDOG_US: u64 = 1_000_000;
-
 pub struct PxGroup {
     pub group_id: PxGroupId,
     pub(crate) cached_quorum: usize,
@@ -1391,7 +1384,11 @@ impl PxGroup {
     /// on the local learner. The leadership gate is re-checked here so a
     /// step-down between coalescer batch collection and flush surfaces as
     /// `NotLeader` instead of racing into Paxos with stale identity.
-    async fn propose_inner(&self, payload: bytes::Bytes, dedup_tags: &[DedupTag]) -> ProposeResult {
+    pub(super) async fn propose_inner(
+        &self,
+        payload: bytes::Bytes,
+        dedup_tags: &[DedupTag],
+    ) -> ProposeResult {
         let e2e_start = std::time::Instant::now();
         let result = self.propose_inner_impl(payload, dedup_tags).await;
         if let Some(h) = self.write_handles.get() {
@@ -1634,218 +1631,6 @@ impl PxGroup {
     }
 
     // ── R45 coalescer ─────────────────────────────────────
-
-    /// Current time in microseconds since `UNIX_EPOCH`. Coarse — used only
-    /// for watchdog inactivity detection.
-    fn now_micros() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_micros() as u64)
-    }
-
-    /// Record coalescer activity (enqueue or round completion). The
-    /// watchdog uses this to detect stuck batches.
-    fn coalesce_touch_activity(&self) {
-        self.coalesce_last_activity_us
-            .store(Self::now_micros(), std::sync::atomic::Ordering::Relaxed);
-    }
-
-    /// Start the single long-running watchdog task if not already running.
-    /// Called lazily on first enqueue. The watchdog sleeps for
-    /// `WATCHDOG_US`, then checks if there's been no activity for that
-    /// duration. If so, it flushes any stuck non-empty batch.
-    fn coalesce_start_watchdog(&self) {
-        self.coalesce_watchdog_handle.get_or_init(|| {
-            let Some(group) = self.self_weak.get().and_then(Weak::upgrade) else {
-                return tokio::spawn(async {});
-            };
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_micros(WATCHDOG_US)).await;
-                    let last = group
-                        .coalesce_last_activity_us
-                        .load(std::sync::atomic::Ordering::Relaxed);
-                    let now = Self::now_micros();
-                    if now.saturating_sub(last) < WATCHDOG_US {
-                        continue;
-                    }
-                    // No activity for WATCHDOG_US — check for stuck batch.
-                    let batch = group.coalescer.lock().take();
-                    let Some(mut batch) = batch else {
-                        continue;
-                    };
-                    if let Some(timer) = batch.timer.take() {
-                        timer.abort();
-                    }
-                    if batch.op_count > 0 {
-                        tracing::warn!(
-                            group_id = group.group_id,
-                            op_count = batch.op_count,
-                            "coalescer: watchdog flushing stuck batch"
-                        );
-                        group.coalesce_touch_activity();
-                        group.coalesce_flush_batch(batch);
-                    }
-                    // Empty batch — just drop it (go idle).
-                }
-            })
-        });
-    }
-
-    /// Flush a pending batch as a Paxos round. Opens a fresh pending
-    /// batch for ops arriving during this round.
-    fn coalesce_flush_batch(&self, batch: PendingBatch) {
-        let mut payload = Vec::with_capacity(2 + batch.op_bodies.len());
-        payload.extend_from_slice(&batch.op_count.to_le_bytes());
-        payload.extend_from_slice(&batch.op_bodies);
-        let payload = bytes::Bytes::from(payload);
-        let tags = batch.tags;
-        let waiters = batch.waiters;
-        // Open a fresh pending batch for the next round.
-        let new_batch = PendingBatch::default();
-        let mut guard = self.coalescer.lock();
-        if guard.is_none() {
-            *guard = Some(new_batch);
-        }
-        let Some(group) = self.self_weak.get().and_then(Weak::upgrade) else {
-            return;
-        };
-        tokio::spawn(async move {
-            #[cfg(feature = "test-util")]
-            group.coalesce_await_round_gate().await;
-            let result = group.propose_inner(payload, &tags).await;
-            for waiter in waiters {
-                let _ = waiter.send(result.clone());
-            }
-            group.coalesce_drain_after_round();
-        });
-    }
-
-    /// Enqueue one single-key op into the coalescer.
-    ///
-    /// - Idle (no batch): start a 1-op round immediately. Open a pending
-    ///   batch for concurrent ops.
-    /// - Batch exists: append to the pending batch. If the batch fills to
-    ///   `max_keys`, flush it as a concurrent round.
-    ///
-    /// A single activity-based watchdog task runs in the background — it
-    /// only fires if there's no coalescer activity for `WATCHDOG_US`.
-    #[allow(clippy::type_complexity)]
-    async fn coalesce_enqueue(&self, payload: Vec<u8>, tag: Option<DedupTag>) -> ProposeResult {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let op_body: &[u8] = payload.get(2..).unwrap_or(&[]);
-        let max_keys = self.coalesce_max_keys.load(std::sync::atomic::Ordering::Relaxed);
-        self.coalesce_touch_activity();
-        self.coalesce_start_watchdog();
-
-        // The locked section returns:
-        //   Some((payload, tags, waiters)) → start a round now
-        //   None → joined a batch, just await the oneshot
-        let start_round: Option<(
-            Vec<u8>,
-            Vec<DedupTag>,
-            Vec<tokio::sync::oneshot::Sender<ProposeResult>>,
-        )> = {
-            let mut guard = self.coalescer.lock();
-            match &mut *guard {
-                None => {
-                    // Idle: start a 1-op round immediately.
-                    let batch = PendingBatch::default();
-                    *guard = Some(batch);
-                    let mut round_payload = Vec::with_capacity(2 + op_body.len());
-                    round_payload.extend_from_slice(&1u16.to_le_bytes());
-                    round_payload.extend_from_slice(op_body);
-                    let round_tags: Vec<DedupTag> = tag.into_iter().collect();
-                    Some((round_payload, round_tags, vec![tx]))
-                }
-                Some(batch) => {
-                    batch.op_bodies.extend_from_slice(op_body);
-                    batch.op_count = batch.op_count.saturating_add(1);
-                    if let Some(t) = tag {
-                        batch.tags.push(t);
-                    }
-                    batch.waiters.push(tx);
-                    if batch.op_count >= max_keys {
-                        // Batch full: flush as a concurrent round.
-                        let taken = std::mem::take(batch);
-                        *guard = Some(PendingBatch::default());
-                        let mut p = Vec::with_capacity(2 + taken.op_bodies.len());
-                        p.extend_from_slice(&taken.op_count.to_le_bytes());
-                        p.extend_from_slice(&taken.op_bodies);
-                        if let Some(t) = taken.timer {
-                            t.abort();
-                        }
-                        Some((p, taken.tags, taken.waiters))
-                    } else {
-                        None
-                    }
-                }
-            }
-        };
-
-        // If None, we joined a batch — just await the result.
-        let Some((payload, round_tags, round_waiters)) = start_round else {
-            return match rx.await {
-                Ok(result) => result,
-                Err(_) => ProposeResult::Err("coalescer round dropped".to_string()),
-            };
-        };
-
-        // Start the round. Spawn so the caller is not pinned to the paxos
-        // round and can return via the oneshot.
-        let payload = bytes::Bytes::from(payload);
-        let Some(group) = self.self_weak.get().and_then(Weak::upgrade) else {
-            return ProposeResult::Err("group dropped".to_string());
-        };
-        tokio::spawn(async move {
-            #[cfg(feature = "test-util")]
-            group.coalesce_await_round_gate().await;
-            let result = group.propose_inner(payload, &round_tags).await;
-            for waiter in round_waiters {
-                let _ = waiter.send(result.clone());
-            }
-            group.coalesce_drain_after_round();
-        });
-
-        match rx.await {
-            Ok(result) => result,
-            Err(_) => ProposeResult::Err("coalescer round dropped".to_string()),
-        }
-    }
-
-    /// Called after a coalesced round completes. Drains the pending
-    /// batch (ops that accumulated during the round). If non-empty,
-    /// flushes it as the next round immediately. If empty, goes idle
-    /// (coalescer → `None`) so the next op starts a 1-op round — the
-    /// zero-latency-floor behavior at low load.
-    ///
-    /// R45b drain threshold: if the in-flight slot-task count
-    /// (`occupied`) is at or above `coalesce_drain_threshold`, skip the
-    /// drain — the `max_keys` overflow path handles high load with full
-    /// batches, and draining here would fragment the batch (many
-    /// slot-tasks racing to take one shared batch). The permit is
-    /// already released before this call, so the last finisher always
-    /// sees a count below threshold and takes the batch.
-    fn coalesce_drain_after_round(&self) {
-        self.coalesce_touch_activity();
-        let threshold = self.config.paxos.coalesce_drain_threshold;
-        if threshold > 0 && self.inflight.occupied() >= u64::try_from(threshold).unwrap_or(u64::MAX) {
-            return;
-        }
-        let batch = self.coalescer.lock().take();
-        let Some(mut batch) = batch else {
-            return;
-        };
-        if let Some(timer) = batch.timer.take() {
-            timer.abort();
-        }
-        if batch.op_count == 0 {
-            // No ops arrived during the round — go idle.
-            return;
-        }
-        // Flush the accumulated batch as the next round immediately.
-        self.coalesce_flush_batch(batch);
-    }
 
     /// One background-repair step: find the lowest gap in the open prefix
     /// (the first unchosen slot below the highest slot this leader has seen
@@ -2200,18 +1985,6 @@ impl PxGroup {
     }
 }
 
-impl PxGroup {
-    /// Test-only: await the coalesce round gate if set. Consumed by the
-    /// first round that runs after the gate is installed.
-    #[cfg(feature = "test-util")]
-    async fn coalesce_await_round_gate(&self) {
-        let gate = self.coalesce_round_gate.lock().take();
-        if let Some(gate) = gate {
-            let _ = gate.await;
-        }
-    }
-}
-
 /// Build a dedup tag from the client-supplied `(client_id, seq)` options.
 /// `None` when either is absent or `client_id == 0` (the no-dedup sentinel
 /// matching `PxLearner::record_dedup_tags`).
@@ -2259,7 +2032,7 @@ impl InflightAdmission {
     }
 
     /// Currently occupied permits.
-    fn occupied(&self) -> u64 {
+    pub(super) fn occupied(&self) -> u64 {
         let avail = self.semaphore.available_permits();
         u64::try_from(self.window.saturating_sub(avail)).unwrap_or(0)
     }

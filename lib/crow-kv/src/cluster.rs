@@ -5,6 +5,7 @@
 
 pub mod group;
 pub mod group_accept;
+pub mod group_coalesce;
 pub mod group_config;
 pub mod group_election;
 pub mod group_fetchgap;
@@ -16,6 +17,7 @@ pub mod learner_stream;
 pub mod local_replica;
 pub mod node_config;
 pub mod px_kv_store;
+mod px_kv_store_handler;
 pub mod remote_replica;
 pub mod replica;
 pub mod status;
