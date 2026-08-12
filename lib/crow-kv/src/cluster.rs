@@ -4,9 +4,12 @@
 //! Cluster group management: membership, topology, replica runtime, and reconfiguration support.
 
 pub mod group;
+pub mod group_accept;
 pub mod group_config;
 pub mod group_election;
+pub mod group_fetchgap;
 pub mod group_maintenance;
+pub mod group_prepare;
 pub mod kv_server;
 pub mod kv_store;
 pub mod learner_stream;
