@@ -17,6 +17,64 @@ use crate::error::{Error, Result};
 
 use std::fmt;
 
+/// Serde helper: serialize a `BTreeMap<u64, V>` with string keys (TOML
+/// requires string keys) and deserialize back to `u64` keys.
+mod int_key {
+    use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};
+    use serde::ser::{Serialize, Serializer};
+    use std::collections::BTreeMap;
+    use std::fmt;
+    use std::marker::PhantomData;
+    use std::str::FromStr;
+
+    pub fn serialize<K, V, S>(map: &BTreeMap<K, V>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        K: ToString + Ord,
+        V: Serialize,
+        S: Serializer,
+    {
+        let string_map: BTreeMap<String, &V> = map.iter().map(|(k, v)| (k.to_string(), v)).collect();
+        string_map.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, K, V, D>(deserializer: D) -> Result<BTreeMap<K, V>, D::Error>
+    where
+        K: FromStr + Ord,
+        K::Err: fmt::Display,
+        V: Deserialize<'de>,
+        D: Deserializer<'de>,
+    {
+        struct IntKeyVisitor<K, V>(PhantomData<(K, V)>);
+
+        impl<'de, K, V> Visitor<'de> for IntKeyVisitor<K, V>
+        where
+            K: FromStr + Ord,
+            K::Err: fmt::Display,
+            V: Deserialize<'de>,
+        {
+            type Value = BTreeMap<K, V>;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a map with string-encoded integer keys")
+            }
+
+            fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut map = BTreeMap::new();
+                while let Some((key, value)) = access.next_entry::<String, V>()? {
+                    let k = K::from_str(&key).map_err(serde::de::Error::custom)?;
+                    map.insert(k, value);
+                }
+                Ok(map)
+            }
+        }
+
+        deserializer.deserialize_map(IntKeyVisitor::<K, V>(PhantomData))
+    }
+}
+
 pub trait ConsoleConfigEngine: Send + Sync {
     /// Load the console configuration from the engine's storage.
     ///
@@ -215,9 +273,9 @@ pub struct ReplicaEntry {
 struct PersistedConsoleConfig {
     #[serde(default)]
     version: u32,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default, with = "int_key", skip_serializing_if = "BTreeMap::is_empty")]
     rack: BTreeMap<RackId, PersistedRackEntry>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default, with = "int_key", skip_serializing_if = "BTreeMap::is_empty")]
     node: BTreeMap<NodeId, PersistedNodeEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     crow_kv_server: BTreeMap<String, PersistedServerEntry>,
