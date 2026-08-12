@@ -14,24 +14,20 @@ use crate::cluster::status::{ElectionStateView, KvStoreStatus, ReplicaStatus, St
 use crate::common::metrics::{ElectionMetrics, ElectionMetricsSnapshot};
 use crate::common::report::OperationReport;
 use crate::common::time::{anchor_ms_to_instant, instant_to_anchor_ms};
-use crate::kv::{CrowTreeBackend, CrowTreeEngine, CrowTreeOptions, KVEngine};
 use crate::metrics::{Counter, Gauge, MetricsRegistry};
 use crate::paxos::acceptor::PxAcceptor;
 use crate::paxos::learner::PxLearner;
-use crate::paxos::roles::{
-    Acceptor, DedupTag, Learner, PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply, SlotIndex,
-};
+#[cfg(feature = "test-util")]
+use crate::paxos::roles::DedupTag;
+use crate::paxos::roles::{PxAcceptReply, PxBallot, PxLogEntry, PxPrepareReply, SlotIndex};
 use crate::paxos::{PxNodeId, PxTerm};
-use crate::wal::record::WALRecord;
-use crate::wal::replay::ReplayResult;
 use crate::wal::WalEngine;
 use parking_lot::Mutex;
 use std::collections::BTreeSet;
-use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
-use tracing::{debug, info, trace};
+use tracing::{debug, info};
 
 /// Role of a local replica in the leader-election state machine.
 ///
@@ -59,11 +55,11 @@ pub enum PxLocalReplicaRole {
 
 impl PxLocalReplicaRole {
     #[must_use]
-    fn as_u8(self) -> u8 {
+    pub(super) fn as_u8(self) -> u8 {
         self as u8
     }
 
-    fn from_u8(v: u8) -> Self {
+    pub(super) fn from_u8(v: u8) -> Self {
         match v {
             0 => Self::Follower,
             1 => Self::PreCandidate,
@@ -189,15 +185,15 @@ pub struct PxLocalReplica {
     pub learner: Arc<PxLearner>,
     pub voting: bool,
     /// Election metadata (source of truth).
-    election_state: Mutex<ElectionPersistentState>,
+    pub(super) election_state: Mutex<ElectionPersistentState>,
     /// Lock-free mirror of `election_state.current_term`. Updated under the
     /// mutex via `Release`; readers use `Acquire`. Used by the proposer hot
     /// path (`base_entry`) and by metrics snapshots.
-    current_term_atomic: AtomicU64,
+    pub(super) current_term_atomic: AtomicU64,
     /// Lock-free mirror of `election_state.role`. Updated under the mutex via
     /// `Release`; readers use `Acquire`. Cheap hot-path check (e.g. proposer's
     /// leadership gate, `is_leader`).
-    role_atomic: AtomicU8,
+    pub(super) role_atomic: AtomicU8,
     /// Leader-side lease deadline (read fast-path) encoded as millis since
     /// ``process_anchor``. Updated lock-free via `fetch_max` on heartbeat
     /// renewal and via plain store on tenure transitions. Stale on non-
@@ -226,13 +222,13 @@ pub struct PxLocalReplica {
     /// Mirrors Raft's "reset election timer on `AppendEntries`" rule.
     pub(crate) deadline_reset_signal: tokio::sync::Notify,
     /// Optional WAL manager for durability. `None` in P1 (no WAL).
-    wal: Option<Arc<WalEngine>>,
+    pub(super) wal: Option<Arc<WalEngine>>,
     /// Idempotency gate for [`Self::shutdown`].
     shutdown_started: AtomicBool,
     /// Per-replica leader-election counters. Cheap `Relaxed` atomic
     /// increments on the election hot path; consumed by
     /// `election_metrics_snapshot` for health / management API.
-    election_metrics: ElectionMetrics,
+    pub(super) election_metrics: ElectionMetrics,
     /// Wall-clock-monotonic instant of the most recent accepted
     /// heartbeat (follower side; `None` before the first one). Read
     /// by `election_metrics_snapshot` to compute
@@ -241,7 +237,7 @@ pub struct PxLocalReplica {
     /// Optional registry handles mirroring election counters to the
     /// metrics log file. Set via [`Self::set_metrics_registry`] when
     /// a registry is wired. `None` in tests / no-registry mode.
-    election_handles: OnceLock<ElectionRegistryHandles>,
+    pub(super) election_handles: OnceLock<ElectionRegistryHandles>,
     /// R65: replication flow counters + gauges. Set via
     /// [`Self::set_metrics_registry`] when a registry is wired.
     pub(crate) replication_handles: OnceLock<ReplicationRegistryHandles>,
@@ -251,23 +247,23 @@ pub struct PxLocalReplica {
     /// `set_persist_gate_for_tests` under the `test-util` feature;
     /// `None` in production.
     #[cfg(feature = "test-util")]
-    persist_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    pub(super) persist_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
     /// R63: latest commit point from heartbeat / batch-chosen / accept.
     /// Advanced via `fetch_max` by `handle_heartbeat` and
     /// `handle_accept_inner`. The background apply loop reads this to know
     /// how far it can apply. `Arc`-wrapped so the spawned apply task can
     /// hold a `'static` clone.
-    known_commit_slot: Arc<AtomicU64>,
+    pub(super) known_commit_slot: Arc<AtomicU64>,
     /// R63: wakes the background apply loop when `known_commit_slot`
     /// advances. `Arc`-wrapped so the spawned apply task can hold a
     /// `'static` clone.
     pub(crate) apply_notify: Arc<tokio::sync::Notify>,
     /// R63: cancellation token for the background apply loop. Owned by the
     /// replica (not per-tenure) so the loop survives role transitions.
-    apply_loop_cancel: tokio_util::sync::CancellationToken,
+    pub(super) apply_loop_cancel: tokio_util::sync::CancellationToken,
     /// R63: join handle for the background apply loop. `None` until the
     /// loop is lazily spawned by `ensure_apply_loop`.
-    apply_loop_handle: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    pub(super) apply_loop_handle: parking_lot::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// R65: set of slots that need `FetchGap` (missing or stale value).
     /// Populated by the `ChosenNotice` handler and the apply loop;
     /// consumed by the `FetchGap` driver. `Arc`-wrapped so the spawned
@@ -421,7 +417,7 @@ impl PxLocalReplica {
     /// freshly-default-constructed one. Used by
     /// [`Self::restore_from_replay_with_engine`].
     #[must_use]
-    fn new_with_learner(id: u64, role: PxLocalReplicaRole, learner: PxLearner) -> Self {
+    pub(super) fn new_with_learner(id: u64, role: PxLocalReplicaRole, learner: PxLearner) -> Self {
         Self {
             learner: Arc::new(learner),
             ..Self::new(id, role)
@@ -532,149 +528,6 @@ impl PxLocalReplica {
     #[must_use]
     pub fn wal(&self) -> Option<&Arc<WalEngine>> {
         self.wal.as_ref()
-    }
-
-    /// Rebuild a fresh local replica from WAL replay output, using the
-    /// default [`KVEngine`] (crow-tree with mem-block backend, in-memory).
-    /// See [`Self::restore_from_replay_with_engine`] for the full argument
-    /// and for injecting a durable backend (e.g. [`crate::kv::CrowTreeEngine`]
-    /// with file/block storage).
-    ///
-    /// # Errors
-    ///
-    /// Returns `InvalidData` if any replayed promised/accepted record cannot be
-    /// re-applied through the normal replica handlers.
-    pub async fn restore_from_replay(
-        id: u64,
-        role: PxLocalReplicaRole,
-        replay: &ReplayResult,
-    ) -> io::Result<Self> {
-        let opt = CrowTreeOptions {
-            backend: CrowTreeBackend::MemBlock,
-            ..Default::default()
-        };
-        let engine = CrowTreeEngine::open(&opt)
-            .map_err(|e| io::Error::other(format!("crow-tree mem-block open failed: {e:?}")))?;
-        Self::restore_from_replay_with_engine(id, role, replay, Box::new(engine)).await
-    }
-
-    /// Rebuild a fresh local replica from WAL replay output, backed by a
-    /// caller-supplied [`KVEngine`] instead of the default in-memory one.
-    ///
-    /// Replays the recovered records through the normal acceptor / learner APIs
-    /// so restored state follows the same invariants as live traffic. A
-    /// durable engine that reports a non-zero [`KVEngine::resume_from_slot`]
-    /// (e.g. [`crate::kv::CrowTreeEngine`] recovered from an on-disk snapshot)
-    /// skips re-`learn`ing that already-durable prefix — see Pass 2 below
-    /// for how the learner's frontier is seeded to match what a full replay
-    /// would have produced.
-    ///
-    /// # Errors
-    ///
-    /// Returns `InvalidData` if any replayed promised/accepted record cannot be
-    /// re-applied through the normal replica handlers.
-    pub async fn restore_from_replay_with_engine(
-        id: u64,
-        role: PxLocalReplicaRole,
-        replay: &ReplayResult,
-        engine: Box<dyn KVEngine>,
-    ) -> io::Result<Self> {
-        // Read before the engine is wrapped/used: `resume_from_slot`'s
-        // contract only promises an accurate floor for a freshly-recovered
-        // engine that hasn't taken any `apply` calls yet in this process.
-        let resume_from = engine.resume_from_slot();
-        let replica = Self::new_with_learner(id, role, PxLearner::with_engine(engine));
-
-        // Pass 1: rebuild acceptor (promise + accept) state from the WAL.
-        for record in &replay.records {
-            match record.record_type {
-                crate::wal::record::RecordType::Promised => {
-                    let _ = replica.acceptor.prepare(record.slot, record.ballot).await;
-                }
-                crate::wal::record::RecordType::Accepted => {
-                    let entry = record.to_log_entry().ok_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "restore replay accepted missing log entry",
-                        )
-                    })?;
-                    let _ = replica.acceptor.accept(&entry).await;
-                }
-                crate::wal::record::RecordType::VoteGranted => {}
-            }
-        }
-
-        replica.with_election_state(|state| {
-            state.current_term = replay.current_term;
-            state.voted_for = replay.voted_for;
-            state.role = role;
-            state.leader_id = if role == PxLocalReplicaRole::Leader {
-                Some(id)
-            } else {
-                None
-            };
-        });
-        replica.role_atomic.store(role.as_u8(), Ordering::Release);
-
-        // Pass 2: rebuild the learner's committed KV state from the acceptor.
-        //
-        // The acceptor was fully rebuilt in Pass 1 (highest-ballot-per-slot
-        // wins).  Now we walk every slot that has an accepted entry and
-        // `learn` it into the state machine.  This is safe because:
-        //
-        // - `KVEngine::apply` is idempotent: an op is skipped when
-        //   `slot <= resolved_slot(key)`, so re-applying the same slot is a
-        //   no-op.
-        // - `apply` uses highest-slot-wins per key, so out-of-order replay
-        //   still produces the correct final KV state.
-        // - `update_frontier` handles out-of-order slots via the
-        //   `out_of_order` BTreeMap, so watermarks stay correct even with
-        //   gaps.
-        // - NoOp entries (empty payload) are skipped by `apply_entry` and
-        //   do not corrupt the KV state.
-        //
-        // If the engine reported a resume floor (`resume_from > 0`), skip
-        // re-`learn`ing that prefix and start the walk at `resume_from +
-        // 1` -- always, even if the term at `resume_from` can't be
-        // recovered below. This is not just an optimization: an engine with
-        // its own internal durable-floor gate (e.g. crow-tree's
-        // `MemTable::durable_floor`, set from `resume_from_slot`'s exact
-        // value at `flush` time) rejects *any* write at `slot <= floor`
-        // regardless of key -- stronger than the per-key highest-slot-wins
-        // `KVEngine::apply` documents -- so re-attempting a write below the
-        // floor isn't just redundant, it can silently no-op a key that slot
-        // legitimately touches. There is no safe way to "fall back" to
-        // replaying it once the engine is past that floor.
-        //
-        // Seed the frontier to `(resume_from, term-at-resume_from)` via
-        // `seed_resume_frontier` when the just-rebuilt acceptor has an
-        // accepted entry at that exact slot (the expected case: an engine
-        // can only ever have durably applied a slot that was itself
-        // accepted and WAL-logged, and Pass 1 rebuilds the *entire* WAL
-        // history). If it's missing (e.g. a WAL segment lost/GC'd after the
-        // engine already durably flushed that slot -- not expected, but not
-        // an invariant this restore path should trust blindly), leave the
-        // frontier at the fresh learner's default (`0`) rather than guess a
-        // term: under-reporting `contiguous_chosen`/`last_chosen_term` only
-        // costs more conservative heartbeat catch-up / safe-read bounds,
-        // never incorrectness, unlike attempting the skipped replay.
-        let highest = replica.acceptor.highest_seen_slot();
-        let resume_from = resume_from.min(highest);
-        let start_slot = if resume_from > 0 {
-            if let Some(entry) = replica.acceptor.accepted_at(resume_from) {
-                replica.learner.seed_resume_frontier(resume_from, entry.term);
-            }
-            resume_from + 1
-        } else {
-            1
-        };
-        for slot in start_slot..=highest {
-            if let Some(entry) = replica.acceptor.accepted_at(slot) {
-                replica.learner.learn(entry, &[]).await;
-            }
-        }
-
-        Ok(replica)
     }
 
     /// Lock-free snapshot of the current role.
@@ -1038,108 +891,6 @@ impl PxLocalReplica {
         *self.last_heartbeat_at.lock() = Some(Instant::now());
     }
 
-    /// Transition to `Follower` and adopt `new_term` if higher.
-    ///
-    /// Resets `voted_for` on every term bump (Raft-style — one vote per
-    /// term per peer). Expires leader lease state. Callers that want to
-    /// reset the election deadline must do so on the election driver task.
-    #[tracing::instrument(level = "info", skip_all, fields(replica_l_id = self.id, new_term = new_term))]
-    pub fn become_follower(&self, new_term: PxTerm) {
-        self.with_election_state(|s| {
-            if new_term > s.current_term {
-                s.current_term = new_term;
-                s.voted_for = None;
-            }
-            s.role = PxLocalReplicaRole::Follower;
-            // Stepping down: the believed leader is unknown until the
-            // next heartbeat / vote round establishes one.
-            s.leader_id = None;
-        });
-        self.role_atomic
-            .store(PxLocalReplicaRole::Follower.as_u8(), Ordering::Release);
-        // Lease is no longer meaningful as a non-leader. Expire it so any
-        // stale read fast-path attempt rejects.
-        self.reset_lease_to(Instant::now());
-        info!(replica_l_id = self.id, current_term = new_term, "become_follower");
-    }
-
-    /// Transition to `PreCandidate`. Does not bump term (per Raft `PreVote`).
-    #[tracing::instrument(level = "info", skip_all, fields(replica_l_id = self.id))]
-    pub fn become_precandidate(&self) {
-        self.with_election_state(|s| {
-            s.role = PxLocalReplicaRole::PreCandidate;
-        });
-        self.role_atomic
-            .store(PxLocalReplicaRole::PreCandidate.as_u8(), Ordering::Release);
-        info!(
-            replica_l_id = self.id,
-            current_term = self.current_term_snapshot(),
-            "become_precandidate"
-        );
-    }
-
-    /// Transition to `Candidate`. Bumps term to `new_term`, votes for self.
-    ///
-    /// Caller is responsible for fanning out `RequestVote` to peers.
-    #[tracing::instrument(level = "info", skip_all, fields(replica_l_id = self.id, new_term = new_term))]
-    pub fn become_candidate(&self, new_term: PxTerm) {
-        let lease = Duration::from_millis(self.lease_duration_ms());
-        let now = Instant::now();
-        self.with_election_state(|s| {
-            s.current_term = new_term;
-            s.voted_for = Some(self.id);
-            s.role = PxLocalReplicaRole::Candidate;
-            // Extend vote lockout on self-vote, consistent with
-            // handle_request_vote which extends it on external grants.
-            // Without this a leader that just won could immediately
-            // grant PreVote/RequestVote to a challenger before it has
-            // sent its first heartbeat round.
-            s.vote_lockout_until = now + lease;
-        });
-        self.role_atomic
-            .store(PxLocalReplicaRole::Candidate.as_u8(), Ordering::Release);
-        // One election attempt initiated.
-        self.election_metrics.record_election();
-        if let Some(h) = self.election_handles.get() {
-            h.elections.inc();
-        }
-        info!(
-            replica_l_id = self.id,
-            current_term = new_term,
-            "become_candidate"
-        );
-    }
-
-    /// Transition to `Leader`. Initializes lease state as already-expired so
-    /// the first heartbeat round must extend it before the read fast-path
-    /// becomes available.
-    #[tracing::instrument(level = "info", skip_all, fields(replica_l_id = self.id))]
-    pub fn become_leader(&self) {
-        self.with_election_state(|s| {
-            s.role = PxLocalReplicaRole::Leader;
-            s.leader_id = Some(self.id);
-        });
-        self.role_atomic
-            .store(PxLocalReplicaRole::Leader.as_u8(), Ordering::Release);
-        self.reset_lease_to(Instant::now());
-        info!(
-            replica_l_id = self.id,
-            current_term = self.current_term_snapshot(),
-            "become_leader"
-        );
-    }
-
-    pub async fn persist_current_vote(&self) {
-        if let Some(wal) = &self.wal {
-            let term = self.current_term_snapshot();
-            let voted_for = self.voted_for().unwrap_or(self.id);
-            let record = WALRecord::from_vote_granted(wal.group_id(), term, voted_for);
-            if let Err(e) = wal.append(&record).await {
-                tracing::error!(term, voted_for, error = %e, "WAL persist VoteGranted failed");
-            }
-        }
-    }
-
     /// Point-in-time status for the topology endpoint. Exposes only cheap
     /// (`O(1)`) data: the kv-store key count via `DashMap::len`.
     #[allow(clippy::cast_possible_truncation)]
@@ -1192,687 +943,6 @@ impl PxLocalReplica {
                 crowtree_stats,
             },
             election,
-        }
-    }
-
-    /// Phase-1 `Prepare` handler with election-term fence.
-    ///
-    /// Two-fence rule (term fencing + acceptor ballot fencing):
-    /// - `req.term < current_term` → `PxPrepareReply::TermStale { new_term }`.
-    /// - `req.term > current_term` → adopt via [`Self::become_follower`], then
-    ///   forward to the acceptor (this replica is now in the new term).
-    /// - `req.term == current_term` → forward to the acceptor unchanged.
-    pub async fn on_prepare(&self, slot: u64, ballot: PxBallot, term: PxTerm) -> PxPrepareReply {
-        let local_term = self.current_term_snapshot();
-        if term < local_term {
-            return PxPrepareReply::TermStale {
-                slot,
-                new_term: local_term,
-            };
-        }
-        if term > local_term {
-            self.become_follower(term);
-        }
-        let reply = self.acceptor.prepare(slot, ballot).await;
-
-        // Ack contract (W6): persist Promised record before replying.
-        if matches!(reply, PxPrepareReply::Promised { .. }) {
-            if let Some(wal) = &self.wal {
-                let record = WALRecord::from_promised(wal.group_id(), term, slot, ballot);
-                if let Err(e) = wal.append(&record).await {
-                    tracing::error!(slot, ?ballot, error = %e, "WAL persist Promised failed");
-                }
-            }
-        }
-
-        reply
-    }
-
-    /// Phase-2 `Accept` handler with election-term fence.
-    ///
-    /// Same two-fence rule as [`Self::on_prepare`] but the term lives on
-    /// `entry.term` (because the accept message carries the value).
-    pub async fn on_accept(&self, entry: &PxLogEntry) -> PxAcceptReply {
-        let reply = self.on_accept_inner(entry).await;
-        if matches!(reply, PxAcceptReply::Accepted { .. }) {
-            self.on_accept_persist(entry).await;
-        }
-        reply
-    }
-
-    /// Acceptor CAS only — term fence + `acceptor.accept`, no WAL persist.
-    /// Returns the reply immediately. Used by R16b early-ack path where the
-    /// proposer tracks WAL persist separately from quorum.
-    pub async fn on_accept_inner(&self, entry: &PxLogEntry) -> PxAcceptReply {
-        let req_term = entry.term;
-        let local_term = self.current_term_snapshot();
-        if req_term < local_term {
-            return PxAcceptReply::TermStale {
-                slot: entry.slot,
-                new_term: local_term,
-            };
-        }
-        if req_term > local_term {
-            self.become_follower(req_term);
-        }
-
-        let reply = self.acceptor.accept(entry).await;
-        if matches!(reply, PxAcceptReply::Accepted { .. }) {
-            debug!(
-                replica_l_id = self.id,
-                slot = entry.slot,
-                round = entry.ballot.round,
-                leader_id = entry.ballot.leader_id,
-                term = entry.term,
-                "on_accept_inner: accepted leader proposal"
-            );
-        }
-        reply
-    }
-
-    /// WAL persist of an Accepted record. Called after [`Self::on_accept_inner`]
-    /// when the reply is `Accepted`. In the default path this completes before
-    /// the reply is observed by the proposer (W6 contract). In the R16b
-    /// early-ack path it runs concurrently with remote RPC fan-out.
-    pub async fn on_accept_persist(&self, entry: &PxLogEntry) {
-        if let Some(wal) = &self.wal {
-            let record = WALRecord::from_accepted(wal.group_id(), entry);
-            if let Err(e) = wal.append(&record).await {
-                tracing::error!(
-                    slot = entry.slot,
-                    ballot = ?entry.ballot,
-                    error = %e,
-                    "WAL persist Accepted failed"
-                );
-            }
-        }
-    }
-
-    /// R16b: spawn the WAL persist as a detached background task.
-    /// Used when `wal_early_ack` is enabled — the value is already
-    /// Paxos-chosen, so the persist is durability best-effort.
-    pub fn spawn_accept_persist(&self, entry: PxLogEntry) {
-        if let Some(wal) = &self.wal {
-            let wal = Arc::clone(wal);
-            #[cfg(feature = "test-util")]
-            let gate = self.persist_gate.lock().clone();
-            tokio::spawn(async move {
-                #[cfg(feature = "test-util")]
-                if let Some(notify) = gate {
-                    notify.notified().await;
-                }
-                let record = WALRecord::from_accepted(wal.group_id(), &entry);
-                if let Err(e) = wal.append(&record).await {
-                    tracing::error!(
-                        slot = entry.slot,
-                        ballot = ?entry.ballot,
-                        error = %e,
-                        "WAL persist Accepted failed (early-ack background)"
-                    );
-                }
-            });
-        }
-    }
-
-    /// Learn a chosen entry (apply to state machine) and record each
-    /// dedup tag against the slot. A single-key propose passes one tag;
-    /// a coalesced batch passes one per client op; repair/election pass
-    /// none.
-    pub async fn learn_chosen(&self, entry: &PxLogEntry, dedup_tags: &[DedupTag]) {
-        self.learner.learn(entry.clone(), dedup_tags).await;
-    }
-
-    /// R17: defer the engine apply (`apply_entry` + applied-frontier
-    /// advance) to a detached background task, while advancing the chosen
-    /// frontier and recording dedup **synchronously**. Used when
-    /// `async_engine_apply` is enabled — the value is already Paxos-chosen,
-    /// so the FFI/memtable insert can happen asynchronously.
-    ///
-    /// The chosen frontier (`contiguous_chosen`) and dedup must advance
-    /// before `propose` returns so a subsequent Linearizable read's
-    /// `read_slot = contiguous_chosen` reflects this slot — the R35 apply
-    /// fence then waits for `contiguous_applied >= read_slot` (the spawned
-    /// apply) before serving the read, preserving read-your-writes. The
-    /// learner's `apply_entry` is idempotent, and the frontier/dedup
-    /// updates are atomic, so a delayed apply is safe.
-    pub fn spawn_learn_chosen(&self, entry: PxLogEntry, dedup_tags: &[DedupTag]) {
-        let learner = Arc::clone(&self.learner);
-        // Sync: chosen frontier + dedup (cheap atomics; must precede
-        // `propose` returning `Chosen` for read-your-writes).
-        learner.update_chosen_frontier(entry.slot, entry.term);
-        learner.record_dedup_tags(dedup_tags, entry.slot);
-        // Deferred: engine apply + applied frontier (the FFI/memtable insert
-        // moved off the write critical path; the apply fence gates reads).
-        tokio::spawn(async move {
-            learner.apply_entry(entry.slot, &entry.payload).await;
-            learner.advance_applied_frontier(entry.slot);
-        });
-    }
-
-    /// R63: advance `known_commit_slot` to at least `slot` via `fetch_max`.
-    /// Called by `handle_heartbeat` (with the leader's `committed_safe_slot`)
-    /// and by `handle_accept_inner` / `BatchChosen` handler (with the accepted
-    /// slot). The background apply loop reads this to know how far it can
-    /// apply.
-    pub(crate) fn advance_known_commit_slot(&self, slot: SlotIndex) {
-        self.known_commit_slot.fetch_max(slot, Ordering::AcqRel);
-    }
-
-    /// R63: wake the background apply loop. Also ensures the loop is running
-    /// (lazily spawned on first call). Called after `advance_known_commit_slot`
-    /// from `handle_heartbeat`, `handle_accept_inner`, and the `BatchChosen`
-    /// handler.
-    pub(crate) fn wake_apply_loop(&self) {
-        self.ensure_apply_loop();
-        self.apply_notify.notify_one();
-    }
-
-    /// R63: lazily spawn the background apply loop if it hasn't been started
-    /// yet. The loop runs for the replica's lifetime (cancelled in
-    /// [`Self::shutdown`]); it reads `known_commit_slot`, collects entries
-    /// from the acceptor, and applies them via the learner. Missing slots
-    /// are skipped (skip-and-continue) so a single gap doesn't block the
-    /// entire apply backlog.
-    fn ensure_apply_loop(&self) {
-        if self.apply_loop_handle.lock().is_some() {
-            return;
-        }
-        let known = Arc::clone(&self.known_commit_slot);
-        let learner = Arc::clone(&self.learner);
-        let acceptor = Arc::clone(&self.acceptor);
-        let notify = Arc::clone(&self.apply_notify);
-        let gap_slots = Arc::clone(&self.gap_slots);
-        let apply_loop_skip = self.replication_handles.get().map(|h| h.apply_loop_skip.clone());
-        let cancel = self.apply_loop_cancel.clone();
-        let handle = tokio::spawn(async move {
-            apply_loop_task(
-                known,
-                learner,
-                acceptor,
-                notify,
-                gap_slots,
-                apply_loop_skip,
-                cancel,
-            )
-            .await;
-        });
-        *self.apply_loop_handle.lock() = Some(handle);
-    }
-
-    /// R65: record a gap slot that needs `FetchGap`. Called by the
-    /// `ChosenNotice` handler (missing/stale value) and the apply loop
-    /// (missing slot in committed range). Idempotent.
-    pub(crate) fn record_gap(&self, slot: SlotIndex) {
-        self.gap_slots.lock().insert(slot);
-    }
-
-    /// R65: increment the `chosen_notice.stale_ballot` counter.
-    pub(crate) fn incr_chosen_notice_stale(&self) {
-        if let Some(h) = self.replication_handles.get() {
-            h.chosen_notice_stale_ballot.inc();
-        }
-    }
-
-    /// R65: increment the `chosen_notice.missing_value` counter.
-    pub(crate) fn incr_chosen_notice_missing(&self) {
-        if let Some(h) = self.replication_handles.get() {
-            h.chosen_notice_missing_value.inc();
-        }
-    }
-
-    /// R65: increment the `fetchgap.sent` counter by `n`.
-    pub(crate) fn incr_fetchgap_sent(&self, n: u64) {
-        if let Some(h) = self.replication_handles.get() {
-            for _ in 0..n {
-                h.fetchgap_sent.inc();
-            }
-        }
-    }
-
-    /// R65: update replication gauges from current state. Called
-    /// periodically by the `FetchGap` driver.
-    pub(crate) fn update_replication_gauges(&self) {
-        if let Some(h) = self.replication_handles.get() {
-            h.gap_count.set(self.gap_slots.lock().len() as u64);
-            h.fetchgap_inflight
-                .set(self.fetchgap_inflight.load(Ordering::Acquire));
-            h.last_chosen_slot.set(self.learner.last_chosen_slot());
-            h.known_commit_slot
-                .set(self.known_commit_slot.load(Ordering::Acquire));
-        }
-    }
-
-    /// R65: drain up to `MAX_INFLIGHT_FETCHGAP` gap slots for `FetchGap`
-    /// sending. Returns the slots that were drained (removed from the
-    /// set). The caller is responsible for sending `FetchGap` for each
-    /// and decrementing `fetchgap_inflight` on completion.
-    pub(crate) fn drain_gaps_for_fetchgap(&self) -> Vec<SlotIndex> {
-        let max = MAX_INFLIGHT_FETCHGAP.saturating_sub(self.fetchgap_inflight.load(Ordering::Acquire));
-        if max == 0 {
-            return Vec::new();
-        }
-        #[allow(clippy::cast_possible_truncation)]
-        let max_usize = max as usize;
-        let mut gaps = self.gap_slots.lock();
-        let mut result = Vec::with_capacity(max_usize);
-        while result.len() < max_usize {
-            if let Some(&slot) = gaps.first() {
-                gaps.remove(&slot);
-                result.push(slot);
-            } else {
-                break;
-            }
-        }
-        if !result.is_empty() {
-            self.fetchgap_inflight
-                .fetch_add(u64::try_from(result.len()).unwrap_or(u64::MAX), Ordering::AcqRel);
-        }
-        result
-    }
-
-    /// R63: stop the background apply loop. Called in [`Self::shutdown`].
-    fn stop_apply_loop(&self) {
-        self.apply_loop_cancel.cancel();
-        if let Some(handle) = self.apply_loop_handle.lock().take() {
-            handle.abort();
-        }
-    }
-
-    /// Receive a peer-side `ChosenNotice` for `(slot, term)`.
-    ///
-    /// Advances the `(last_chosen_slot, last_chosen_term)` high-water mark only
-    /// (never the contiguous-chosen / contiguous-applied watermarks, since a
-    /// `ChosenNotice` carries no payload to apply). The high-water mark is the
-    /// follower's signal that committed slots exist past its applied frontier,
-    /// which drives `repair_once` and heartbeat catch-up to fetch the real
-    /// values via the background apply loop.
-    ///
-    /// W7: this used to be neutered (always `false`) because the election
-    /// log-up-to-date check read `last_chosen_slot`, so advancing it from a
-    /// payload-less notice could let a value-missing replica win leadership
-    /// (the missing-key / resurrection bug). The check
-    /// now compares the **durable acceptor log tip** instead
-    /// ([`Self::candidate_log_up_to_date`] → [`Self::accepted_log_tip`]), so the
-    /// notice no longer influences electability and the advance is safe again.
-    ///
-    /// Returns `true` if the high-water mark advanced.
-    pub fn note_chosen(&self, slot: SlotIndex, term: PxTerm) -> bool {
-        let advanced = self.learner.note_chosen(slot, term);
-        trace!(
-            replica_l_id = self.id,
-            slot,
-            term,
-            advanced,
-            "note_chosen: advanced chosen high-water mark"
-        );
-        advanced
-    }
-
-    /// Read the currently accepted value at a slot (for verification).
-    #[allow(clippy::unused_async)]
-    pub async fn accepted_at(&self, slot: u64) -> Option<PxLogEntry> {
-        self.acceptor.accepted_at(slot)
-    }
-
-    /// Read the currently promised ballot at a slot (for verification).
-    #[allow(clippy::unused_async)]
-    pub async fn promised_at(&self, slot: u64) -> Option<PxBallot> {
-        self.acceptor.promised_at(slot)
-    }
-
-    // ---------------- Learner / acceptor frontier accessors ----------------
-    //
-    // Learner watermarks and acceptor cursor accessors.
-
-    /// Highest slot ever seen as chosen by the local learner (gaps allowed).
-    #[must_use]
-    pub fn last_chosen_slot(&self) -> SlotIndex {
-        self.learner.last_chosen_slot()
-    }
-
-    /// Term of the entry at [`Self::last_chosen_slot`].
-    #[must_use]
-    pub fn last_chosen_term(&self) -> PxTerm {
-        self.learner.last_chosen_term()
-    }
-
-    /// Highest contiguous-chosen slot.
-    #[must_use]
-    pub fn contiguous_chosen(&self) -> SlotIndex {
-        self.learner.contiguous_chosen()
-    }
-
-    /// Highest contiguous-applied slot.
-    #[must_use]
-    pub fn contiguous_applied(&self) -> SlotIndex {
-        self.learner.contiguous_applied()
-    }
-
-    /// R35 apply fence: wait until the local applied frontier reaches
-    /// `slot`. Delegates to [`PxLearner::await_applied`]. Used by the
-    /// Linearizable read path after the leadership barrier so a read does
-    /// not return a just-chosen-but-not-yet-applied value when R17
-    /// (`async_engine_apply`) is on.
-    pub async fn await_apply_fence(&self, slot: SlotIndex) {
-        self.learner.await_applied(slot).await;
-    }
-
-    /// Highest slot ever opened on this replica's acceptor.
-    #[must_use]
-    pub fn highest_seen_slot(&self) -> SlotIndex {
-        self.acceptor.highest_seen_slot()
-    }
-
-    #[must_use]
-    pub fn accepted_log_tip(&self) -> (SlotIndex, PxTerm) {
-        self.acceptor.accepted_log_tip().unwrap_or((0, 0))
-    }
-
-    // ---------------- Election handler internals ----------------
-
-    /// Compute the responder's frontier triple (used by `PreVote` /
-    /// `RequestVote` / `Heartbeat` replies).
-    fn frontier_triple(&self) -> (SlotIndex, PxTerm, SlotIndex) {
-        (
-            self.contiguous_chosen(),
-            self.last_chosen_term(),
-            self.highest_seen_slot(),
-        )
-    }
-
-    /// Candidate's durable acceptor log is at least as up-to-date as ours iff
-    /// `(accepted_log_tip_term, accepted_log_tip_slot)` is lexicographically
-    /// `>=` ours.
-    fn candidate_log_up_to_date(&self, req: &VoteRequestPayload) -> bool {
-        let (my_slot, my_term) = self.accepted_log_tip();
-        (req.accepted_log_tip_term, req.accepted_log_tip_slot) >= (my_term, my_slot)
-    }
-
-    /// `PreVote` decision (no state mutation). Reply iff:
-    /// - `req.term > current_term` (we'd vote in that term), AND
-    /// - candidate's log is up-to-date, AND
-    /// - `now >= vote_lockout_until`.
-    fn handle_pre_vote(&self, req: VoteRequestPayload) -> VoteReply {
-        let now = Instant::now();
-        let state = self.election_state.lock();
-        let granted = req.term > state.current_term
-            && self.candidate_log_up_to_date(&req)
-            && now >= state.vote_lockout_until;
-        let term = state.current_term;
-        drop(state);
-        let (contiguous_chosen, last_chosen_term, highest_seen_slot) = self.frontier_triple();
-        debug!(
-            replica_l_id = self.id,
-            candidate_id = req.candidate_id,
-            proposed_term = req.term,
-            current_term = term,
-            granted,
-            "on_pre_vote"
-        );
-        VoteReply {
-            term,
-            granted,
-            contiguous_chosen,
-            last_chosen_term,
-            highest_seen_slot,
-        }
-    }
-
-    /// `RequestVote` decision (state-mutating). Same checks as `handle_pre_vote`
-    /// plus a `voted_for ∈ {None, candidate_id}` check in `req.term`. On grant
-    /// the responder adopts `req.term`, sets `voted_for = candidate_id`, and
-    /// extends `vote_lockout_until`.
-    async fn handle_request_vote(&self, req: VoteRequestPayload) -> VoteReply {
-        // Vote lockout extension reuses the configured lease duration so
-        // followers honor the per-group profile (e.g. WAN) rather than the
-        // hard-coded default.
-        let lease = Duration::from_millis(self.lease_duration_ms());
-        let now = Instant::now();
-        let log_up_to_date = self.candidate_log_up_to_date(&req);
-
-        let (granted, term) = {
-            let mut state = self.election_state.lock();
-            let lockout_ok = now >= state.vote_lockout_until;
-            let term_ok = req.term > state.current_term
-                || (req.term == state.current_term
-                    && state.voted_for.map_or(true, |v| v == req.candidate_id));
-            let mut granted = false;
-            if term_ok && log_up_to_date && lockout_ok {
-                if req.term > state.current_term {
-                    state.current_term = req.term;
-                    state.voted_for = None;
-                    state.role = PxLocalReplicaRole::Follower;
-                    state.leader_id = None;
-                }
-                state.voted_for = Some(req.candidate_id);
-                state.vote_lockout_until = now + lease;
-                granted = true;
-            }
-            (granted, state.current_term)
-        };
-        // Mirror the atomic snapshots if we mutated.
-        if granted {
-            self.current_term_atomic.store(term, Ordering::Release);
-            self.role_atomic
-                .store(PxLocalReplicaRole::Follower.as_u8(), Ordering::Release);
-            self.persist_current_vote().await;
-            // After granting a vote, reset our own election deadline so we
-            // give the candidate a chance to win quorum and start sending
-            // heartbeats before we time out and challenge it ourselves.
-            self.deadline_reset_signal.notify_one();
-        }
-        let (contiguous_chosen, last_chosen_term, highest_seen_slot) = self.frontier_triple();
-        debug!(
-            replica_l_id = self.id,
-            candidate_id = req.candidate_id,
-            req_term = req.term,
-            current_term = term,
-            granted,
-            "on_request_vote"
-        );
-        VoteReply {
-            term,
-            granted,
-            contiguous_chosen,
-            last_chosen_term,
-            highest_seen_slot,
-        }
-    }
-
-    /// `Heartbeat` handler. Adopts a higher term, records the leader id, bumps
-    /// the vote-lockout window. Returns `success=true` iff the term is `>=`
-    /// our own; on lower term we reply `false` so the stale leader can step
-    /// down on its next bookkeeping check.
-    fn handle_heartbeat(&self, req: HeartbeatRequestPayload) -> HeartbeatReply {
-        let lease = Duration::from_millis(self.lease_duration_ms());
-        let now = Instant::now();
-        let term;
-        let success;
-        {
-            let mut state = self.election_state.lock();
-            if req.term < state.current_term {
-                term = state.current_term;
-                success = false;
-            } else {
-                if req.term > state.current_term {
-                    state.current_term = req.term;
-                    state.voted_for = None;
-                }
-                state.role = PxLocalReplicaRole::Follower;
-                state.leader_id = Some(req.leader_id);
-                state.vote_lockout_until = now + lease;
-                term = state.current_term;
-                success = true;
-            }
-        }
-        if success {
-            self.current_term_atomic.store(term, Ordering::Release);
-            self.role_atomic
-                .store(PxLocalReplicaRole::Follower.as_u8(), Ordering::Release);
-            // R63: reset the election deadline first (liveness). The follower
-            // has confirmed the leader is alive (term check passed) and must
-            // not time out regardless of how long the background apply takes.
-            self.deadline_reset_signal.notify_one();
-            // Timestamp the heartbeat so the metrics snapshot can
-            // report `last_heartbeat_age_ms`.
-            self.note_heartbeat_received();
-            // R63: store the leader's commit point and wake the background
-            // apply loop. The heartbeat reply returns immediately with the
-            // current `contiguous_applied` (which may lag behind
-            // `known_commit_slot`). The leader's catch-up replay handles
-            // convergence; the background loop advances `contiguous_applied`
-            // at its own pace.
-            self.advance_known_commit_slot(req.committed_safe_slot);
-            self.wake_apply_loop();
-        }
-        let (contiguous_chosen, last_chosen_term, highest_seen_slot) = self.frontier_triple();
-        let contiguous_applied = self.contiguous_applied();
-        // This replica's own durable-snapshot watermark (`WalEngine::snapshot_slot`,
-        // set by `group_maintenance::run_pass` whenever `KVEngine::persist_snapshot`
-        // advances) -- `0` when there is no WAL (e.g. testkit setups), matching the
-        // always-safe default `KVEngine::persist_snapshot` itself documents. The
-        // leader aggregates this across every voting peer's heartbeat reply into
-        // `PxGroup::group_snapshot_slot`.
-        let durable_snapshot_slot = self.wal().map_or(0, |w| w.snapshot_slot());
-        trace!(
-            replica_l_id = self.id,
-            leader_id = req.leader_id,
-            req_term = req.term,
-            current_term = term,
-            success,
-            "on_heartbeat"
-        );
-        HeartbeatReply {
-            term,
-            success,
-            contiguous_chosen,
-            last_chosen_term,
-            contiguous_applied,
-            highest_seen_slot,
-            durable_snapshot_slot,
-        }
-    }
-
-    /// `StepDown` handler. Strict-fence policy:
-    /// accept iff `self.is_leader && self.id == req.target_leader_id &&
-    /// req.term == current_term`. On accept the replica becomes a follower in
-    /// the same term; the election driver picks up the role change
-    /// on its next tick and runs the full step-down sequence (cancel bulk
-    /// Phase 1, stop heartbeats, drain proposals).
-    pub fn handle_step_down(&self, req: &StepDownRequestPayload) -> StepDownReply {
-        let snapshot = self.election_state_snapshot();
-        let accepted = snapshot.role == PxLocalReplicaRole::Leader
-            && self.id == req.target_leader_id
-            && req.term == snapshot.current_term;
-        if accepted {
-            info!(
-                replica_l_id = self.id,
-                req_term = req.term,
-                reason = %req.reason,
-                "on_step_down accepted (strict fence)"
-            );
-            // Stay in the same term; only the role flips. The election
-            // driver waits on `admin_step_down_signal` and runs the
-            // canonical step-down sequence (cancel per-tenure
-            // token, drain proposals, log reason=Admin) on its next
-            // wakeup. We still flip the role here so any concurrent
-            // proposer leadership check observes Follower without
-            // needing the driver to advance first.
-            self.become_follower(snapshot.current_term);
-            self.admin_step_down_signal.notify_waiters();
-        } else {
-            debug!(
-                replica_l_id = self.id,
-                req_term = req.term,
-                self_term = snapshot.current_term,
-                self_role = ?snapshot.role,
-                target_leader_id = req.target_leader_id,
-                reason = %req.reason,
-                "on_step_down rejected by strict fence"
-            );
-        }
-        StepDownReply {
-            accepted,
-            current_term: snapshot.current_term,
-            current_leader_id: snapshot.leader_id.unwrap_or(0),
-        }
-    }
-}
-
-/// R63: bounded batch size for the background apply loop. Limits the number
-/// of entries processed in one iteration before re-checking cancellation and
-/// `known_commit_slot` advances.
-const MAX_APPLY_PER_BATCH: u64 = 64;
-
-/// R65: maximum in-flight `FetchGap` requests per follower. Prevents
-/// flooding the leader when the follower has a large gap backlog.
-const MAX_INFLIGHT_FETCHGAP: u64 = 16;
-
-/// R63: background apply loop task. Reads `known_commit_slot`, collects
-/// entries from the acceptor for the contiguous range, and applies them via
-/// the learner. Missing slots are skipped (skip-and-continue) so a single
-/// gap doesn't block the entire apply backlog — `contiguous_applied` stays
-/// at the gap until it's filled; subsequent available slots are applied via
-/// `advance_applied_frontier` (which handles out-of-order applies).
-async fn apply_loop_task(
-    known: Arc<AtomicU64>,
-    learner: Arc<PxLearner>,
-    acceptor: Arc<PxAcceptor>,
-    notify: Arc<tokio::sync::Notify>,
-    gap_slots: Arc<Mutex<BTreeSet<SlotIndex>>>,
-    apply_loop_skip: Option<Arc<Counter>>,
-    cancel: tokio_util::sync::CancellationToken,
-) {
-    loop {
-        if cancel.is_cancelled() {
-            return;
-        }
-        // R65: target is max(known_commit_slot, last_chosen_slot).
-        // `known_commit_slot` covers the continuous prefix (from
-        // heartbeat), `last_chosen_slot` covers out-of-order chosen
-        // slots (from ChosenNotice with ballot match).
-        let target = known.load(Ordering::Acquire).max(learner.last_chosen_slot());
-        let current = learner.contiguous_applied();
-        if current >= target {
-            notify.notified().await;
-            continue;
-        }
-        let mut next = current.saturating_add(1);
-        let end = target.min(next.saturating_add(MAX_APPLY_PER_BATCH).saturating_sub(1));
-        let before = current;
-        while next <= end {
-            if cancel.is_cancelled() {
-                return;
-            }
-            // R65: chosen-ness check — only apply slots that are genuinely
-            // chosen. A slot is chosen if any of:
-            // - ≤ known_commit_slot (heartbeat's committed_safe_slot =
-            //   Raft commit_index: continuous chosen prefix)
-            // - ≤ contiguous_chosen (from ChosenNotice/learn)
-            // - in the out-of-order chosen set (individual ChosenNotice)
-            // Accepted-but-not-chosen slots are skipped. This prevents
-            // applying values the leader hasn't confirmed.
-            let known_val = known.load(Ordering::Acquire);
-            if next <= known_val || learner.is_chosen(next) {
-                if let Some(entry) = acceptor.accepted_at(next) {
-                    learner.apply_entry(entry.slot, &entry.payload).await;
-                    learner.advance_applied_frontier(entry.slot);
-                } else {
-                    // R65: chosen (≤ known_commit_slot or in chosen set)
-                    // but acceptor has no value — record gap for FetchGap.
-                    gap_slots.lock().insert(next);
-                    if let Some(c) = &apply_loop_skip {
-                        c.inc();
-                    }
-                }
-            }
-            next += 1;
-        }
-        // If contiguous_applied didn't advance (stuck at a gap with only
-        // out-of-order applies), wait for a wake-up before retrying —
-        // avoids busy-looping on gaps that haven't been filled yet.
-        if learner.contiguous_applied() == before {
-            notify.notified().await;
         }
     }
 }
