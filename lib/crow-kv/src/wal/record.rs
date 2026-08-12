@@ -509,7 +509,7 @@ fn parse_u64(value: &str, field: &str) -> Result<u64, RecordError> {
         .map_err(|e| RecordError::BadText(format!("invalid {field}: {e}")))
 }
 
-pub(crate) fn parse_hex_u32(value: &str) -> Result<u32, RecordError> {
+pub(super) fn parse_hex_u32(value: &str) -> Result<u32, RecordError> {
     u32::from_str_radix(value, 16).map_err(|e| RecordError::BadText(format!("invalid crc32c: {e}")))
 }
 

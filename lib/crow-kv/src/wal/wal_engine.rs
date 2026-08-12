@@ -72,6 +72,7 @@ impl BatchStats {
 /// The main WAL handle, shared (via `Arc`) by the acceptor and the GC worker.
 pub struct WalEngine {
     backend: Arc<IoBackend>,
+    #[allow(dead_code)]
     config: WalConfig,
     group_id: PxGroupId,
     /// One pipeline per disk. Each pipeline is independently lock-free for
@@ -354,7 +355,8 @@ impl WalEngine {
     }
 
     /// Config reference.
-    pub fn config(&self) -> &WalConfig {
+    #[allow(dead_code)]
+    pub(super) fn config(&self) -> &WalConfig {
         &self.config
     }
 

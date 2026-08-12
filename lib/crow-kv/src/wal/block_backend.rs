@@ -200,17 +200,17 @@ impl BlockDevice {
     }
 
     #[allow(clippy::unused_self)]
-    pub(crate) fn rename_segment(&self, from: &Path, to: &Path) -> io::Result<()> {
+    pub(super) fn rename_segment(&self, from: &Path, to: &Path) -> io::Result<()> {
         std::fs::rename(from, to)
     }
 
     #[allow(clippy::unused_self)]
-    pub(crate) fn unlink_segment(&self, segment_path: &Path) -> io::Result<()> {
+    pub(super) fn unlink_segment(&self, segment_path: &Path) -> io::Result<()> {
         std::fs::remove_file(segment_path)
     }
 
     #[allow(clippy::unused_self)]
-    pub(crate) fn list_layout(&self, layout_path: &Path) -> io::Result<Vec<PathBuf>> {
+    pub(super) fn list_layout(&self, layout_path: &Path) -> io::Result<Vec<PathBuf>> {
         let mut entries = Vec::new();
         let rd = std::fs::read_dir(layout_path)?;
         for entry in rd.flatten() {
@@ -220,12 +220,12 @@ impl BlockDevice {
     }
 
     #[allow(clippy::unused_self)]
-    pub(crate) fn create_layout(&self, layout_path: &Path) -> io::Result<()> {
+    pub(super) fn create_layout(&self, layout_path: &Path) -> io::Result<()> {
         std::fs::create_dir_all(layout_path)
     }
 
     #[allow(clippy::unused_self)]
-    pub(crate) fn contains_path(&self, path: &Path) -> bool {
+    pub(super) fn contains_path(&self, path: &Path) -> bool {
         path.exists()
     }
 }
@@ -242,7 +242,7 @@ pub(crate) struct BlockSegment {
 }
 
 impl BlockSegment {
-    pub fn write_at(&self, data: &[u8], offset: u64) -> io::Result<usize> {
+    pub(super) fn write_at(&self, data: &[u8], offset: u64) -> io::Result<usize> {
         self.write_bytes_to_file(&self.file, data, offset)?;
         self.device.write_count.fetch_add(1, Ordering::AcqRel);
         self.device
@@ -251,7 +251,7 @@ impl BlockSegment {
         Ok(data.len())
     }
 
-    pub fn write_vectored_at(&self, bufs: &[std::io::IoSlice<'_>], offset: u64) -> io::Result<usize> {
+    pub(super) fn write_vectored_at(&self, bufs: &[std::io::IoSlice<'_>], offset: u64) -> io::Result<usize> {
         let total_len: usize = bufs.iter().map(|b| b.len()).sum();
         let mut cur_offset = offset;
         for buf in bufs {
@@ -302,11 +302,11 @@ impl BlockSegment {
         Ok(())
     }
 
-    pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    pub(super) fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
         self.file.read_at(buf, offset)
     }
 
-    pub fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+    pub(super) fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
         let n = self.read_at(buf, offset)?;
         if n < buf.len() {
             return Err(io::Error::new(
@@ -320,21 +320,21 @@ impl BlockSegment {
         Ok(())
     }
 
-    pub fn fdatasync(&self) -> io::Result<()> {
+    pub(super) fn fdatasync(&self) -> io::Result<()> {
         self.device.fdatasync_count.fetch_add(1, Ordering::AcqRel);
         self.file.sync_data()?;
         Ok(())
     }
 
-    pub fn fsync(&self) -> io::Result<()> {
+    pub(super) fn fsync(&self) -> io::Result<()> {
         self.fdatasync()
     }
 
-    pub fn len(&self) -> io::Result<u64> {
+    pub(super) fn len(&self) -> io::Result<u64> {
         Ok(self.file.metadata()?.len())
     }
 
-    pub fn truncate(&self, len: u64) -> io::Result<()> {
+    pub(super) fn truncate(&self, len: u64) -> io::Result<()> {
         self.file.set_len(len)
     }
 }
@@ -427,7 +427,7 @@ impl MemBlockDevice {
         self.rmw_count.load(Ordering::Acquire)
     }
 
-    pub(crate) fn open_segment(
+    pub(super) fn open_segment(
         &self,
         segment_path: &Path,
         opts: &OpenOptions,
@@ -465,7 +465,7 @@ impl MemBlockDevice {
         })
     }
 
-    pub(crate) fn rename_segment(&self, from: &Path, to: &Path) -> io::Result<()> {
+    pub(super) fn rename_segment(&self, from: &Path, to: &Path) -> io::Result<()> {
         self.controller.check_io()?;
         let mut segments = self.segments.lock();
         let data = segments.remove(from).ok_or_else(|| {
@@ -478,7 +478,7 @@ impl MemBlockDevice {
         Ok(())
     }
 
-    pub(crate) fn unlink_segment(&self, segment_path: &Path) -> io::Result<()> {
+    pub(super) fn unlink_segment(&self, segment_path: &Path) -> io::Result<()> {
         self.controller.check_io()?;
         let mut segments = self.segments.lock();
         if segments.remove(segment_path).is_none() {
@@ -493,7 +493,7 @@ impl MemBlockDevice {
         Ok(())
     }
 
-    pub(crate) fn list_layout(&self, layout_path: &Path) -> io::Result<Vec<PathBuf>> {
+    pub(super) fn list_layout(&self, layout_path: &Path) -> io::Result<Vec<PathBuf>> {
         self.controller.check_io()?;
         let segments = self.segments.lock();
         let layouts = self.layouts.lock();
@@ -515,7 +515,7 @@ impl MemBlockDevice {
         Ok(entries.into_iter().collect())
     }
 
-    pub(crate) fn create_layout(&self, layout_path: &Path) -> io::Result<()> {
+    pub(super) fn create_layout(&self, layout_path: &Path) -> io::Result<()> {
         self.controller.check_io()?;
         let mut layouts = self.layouts.lock();
         let mut cur = PathBuf::new();
@@ -526,7 +526,7 @@ impl MemBlockDevice {
         Ok(())
     }
 
-    pub(crate) fn contains_path(&self, path: &Path) -> bool {
+    pub(super) fn contains_path(&self, path: &Path) -> bool {
         let segments = self.segments.lock();
         if segments.contains_key(path) {
             return true;
@@ -548,7 +548,7 @@ pub(crate) struct MemBlockSegment {
 }
 
 impl MemBlockSegment {
-    pub fn write_at(&self, data: &[u8], offset: u64) -> io::Result<usize> {
+    pub(super) fn write_at(&self, data: &[u8], offset: u64) -> io::Result<usize> {
         self.device.controller.check_write()?;
         self.write_bytes(data, offset)?;
         self.device.write_count.fetch_add(1, Ordering::AcqRel);
@@ -558,7 +558,7 @@ impl MemBlockSegment {
         Ok(data.len())
     }
 
-    pub fn write_vectored_at(&self, bufs: &[std::io::IoSlice<'_>], offset: u64) -> io::Result<usize> {
+    pub(super) fn write_vectored_at(&self, bufs: &[std::io::IoSlice<'_>], offset: u64) -> io::Result<usize> {
         self.device.controller.check_write()?;
         let total_len: usize = bufs.iter().map(|b| b.len()).sum();
         let mut cur_offset = offset;
@@ -619,7 +619,7 @@ impl MemBlockSegment {
         Ok(())
     }
 
-    pub fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    pub(super) fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
         self.device.controller.check_io()?;
         self.device.controller.apply_corruptions(&self.device.segments);
         let segments = self.device.segments.lock();
@@ -636,7 +636,7 @@ impl MemBlockSegment {
         Ok(n)
     }
 
-    pub fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+    pub(super) fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
         let n = self.read_at(buf, offset)?;
         if n < buf.len() {
             return Err(io::Error::new(
@@ -650,18 +650,18 @@ impl MemBlockSegment {
         Ok(())
     }
 
-    pub fn fdatasync(&self) -> io::Result<()> {
+    pub(super) fn fdatasync(&self) -> io::Result<()> {
         self.device.controller.check_sync()?;
         self.device.controller.check_write()?;
         self.device.fdatasync_count.fetch_add(1, Ordering::AcqRel);
         Ok(())
     }
 
-    pub fn fsync(&self) -> io::Result<()> {
+    pub(super) fn fsync(&self) -> io::Result<()> {
         self.fdatasync()
     }
 
-    pub fn len(&self) -> io::Result<u64> {
+    pub(super) fn len(&self) -> io::Result<u64> {
         self.device.controller.check_io()?;
         let segments = self.device.segments.lock();
         let segment_data = segments
@@ -670,7 +670,7 @@ impl MemBlockSegment {
         Ok(segment_data.len() as u64)
     }
 
-    pub fn truncate(&self, len: u64) -> io::Result<()> {
+    pub(super) fn truncate(&self, len: u64) -> io::Result<()> {
         self.device.controller.check_write()?;
         let mut segments = self.device.segments.lock();
         let segment_data = segments

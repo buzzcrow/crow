@@ -39,17 +39,17 @@ use crate::paxos::PxGroupId;
 use super::record::{parse_hex_u32, RecordError, WALRecord, WalRecordFormat};
 use super::{IoBackend, OpenOptions, WalFile};
 
-pub const SEG_MAGIC: u32 = 0x5345_474D;
-pub const SEG_VERSION: u16 = 1;
+const SEG_MAGIC: u32 = 0x5345_474D;
+const SEG_VERSION: u16 = 1;
 pub const SEG_HEADER_LEN: usize = 4 + 2 + 8 + 8; // 22
-pub const FOOTER_MAGIC: u32 = 0x464F_4F54;
-pub const FOOTER_LEN: usize = 4 + 8 + 8 + 4 + 4; // 28
+const FOOTER_MAGIC: u32 = 0x464F_4F54;
+const FOOTER_LEN: usize = 4 + 8 + 8 + 4 + 4; // 28
 
 /// Text prefix for text-format segment headers (mirrors `WALRecord::TEXT_PREFIX`).
-pub const SEG_TEXT_PREFIX: &str = "CROW_WAL_SEG";
+const SEG_TEXT_PREFIX: &str = "CROW_WAL_SEG";
 
 /// Text prefix for text-format segment footers.
-pub const FOOTER_TEXT_PREFIX: &str = "CROW_WAL_FOOTER";
+const FOOTER_TEXT_PREFIX: &str = "CROW_WAL_FOOTER";
 
 /// Bytes scanned from the file tail when locating a sealed footer past
 /// block-alignment padding (B1). Trailing padding never exceeds one I/O unit,
@@ -61,6 +61,7 @@ pub struct WalSegment {
     file: WalFile,
     path: PathBuf,
     pub segment_id: u64,
+    #[allow(dead_code)]
     pub group_id: PxGroupId,
     /// Current write offset (bytes from file start).
     write_offset: u64,
@@ -193,7 +194,7 @@ impl WalSegment {
 
     /// Whether this segment has reached the given size threshold.
     #[must_use]
-    pub fn is_full(&self, threshold: u64) -> bool {
+    pub(super) fn is_full(&self, threshold: u64) -> bool {
         self.write_offset >= threshold
     }
 
@@ -208,7 +209,8 @@ impl WalSegment {
     }
 
     /// Expose the file handle for durable flush operations.
-    pub fn file_mut(&mut self) -> &mut WalFile {
+    #[allow(dead_code)]
+    pub(super) fn file_mut(&mut self) -> &mut WalFile {
         &mut self.file
     }
 
@@ -225,7 +227,8 @@ impl WalSegment {
     ///
     /// # Errors
     /// Returns IO error if the write fails.
-    pub async fn write_raw(&mut self, data: &[u8], offset: u64) -> io::Result<()> {
+    #[allow(dead_code)]
+    pub(super) async fn write_raw(&mut self, data: &[u8], offset: u64) -> io::Result<()> {
         assert!(!self.sealed, "write_raw to sealed segment");
         self.file.write_at(data, offset).await?;
         self.write_offset = offset + data.len() as u64;
@@ -241,7 +244,7 @@ impl WalSegment {
     ///
     /// # Errors
     /// Returns IO error if the write fails.
-    pub async fn write_raw_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> io::Result<()> {
+    pub(super) async fn write_raw_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> io::Result<()> {
         assert!(!self.sealed, "write_raw_vectored to sealed segment");
         let total_len: usize = bufs.iter().map(|b| b.len()).sum();
         if total_len == 0 {
@@ -760,7 +763,7 @@ fn try_decode_text_footer_from_tail(tail: &[u8]) -> Option<SegmentFooter> {
 /// Parse a segment filename to extract the `segment_id`.
 /// Expected format: `seg-NNNNNNN.ck`
 #[must_use]
-pub fn parse_segment_filename(name: &str) -> Option<u64> {
+pub(crate) fn parse_segment_filename(name: &str) -> Option<u64> {
     let name = name.strip_prefix("seg-")?.strip_suffix(".ck")?;
     name.parse().ok()
 }
