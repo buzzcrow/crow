@@ -14,7 +14,7 @@ use std::sync::Mutex;
 /// restricts it to `["file", "mem-block", "block-device"]`) into the
 /// WAL's [`IoBackend`].
 #[must_use]
-pub fn parse_wal_backend(s: &str) -> IoBackend {
+pub(crate) fn parse_wal_backend(s: &str) -> IoBackend {
     match s {
         "mem-block" => IoBackend::mem_block(),
         "block-device" => IoBackend::block_device(),
@@ -26,7 +26,7 @@ pub fn parse_wal_backend(s: &str) -> IoBackend {
 /// restricts it to `["file", "block", "mem-block"]`) into the FFI's
 /// [`CrowTreeBackend`].
 #[must_use]
-pub fn parse_crowtree_backend(s: &str) -> CrowTreeBackend {
+pub(crate) fn parse_crowtree_backend(s: &str) -> CrowTreeBackend {
     match s {
         "block" => CrowTreeBackend::Block,
         "mem-block" => CrowTreeBackend::MemBlock,
@@ -57,7 +57,7 @@ impl Default for KvStoreRegistry {
 
 impl KvStoreRegistry {
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::with_config(CrowKVConfig::default())
     }
 
@@ -98,7 +98,7 @@ impl KvStoreRegistry {
     ///
     /// Panics if the internal mutex is poisoned.
     #[must_use]
-    pub fn next_port(&self) -> Option<u16> {
+    pub(crate) fn next_port(&self) -> Option<u16> {
         let mut pool = self.port_pool.lock().unwrap();
         if pool.is_empty() {
             None
@@ -118,12 +118,12 @@ impl KvStoreRegistry {
 
     /// All hosted store IDs.
     #[must_use]
-    pub fn store_ids(&self) -> Vec<u64> {
+    pub(crate) fn store_ids(&self) -> Vec<u64> {
         self.stores.iter().map(|e| *e.key()).collect()
     }
 
     #[must_use]
-    pub fn remove_store(&self, store_id: u64) -> Option<Arc<PxKvStore>> {
+    pub(crate) fn remove_store(&self, store_id: u64) -> Option<Arc<PxKvStore>> {
         self.stores.remove(&store_id).map(|(_, v)| v)
     }
 }

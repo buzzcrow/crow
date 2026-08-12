@@ -23,7 +23,7 @@ use crow_kv::common::config::{CrowKVConfig, PxElectionConfig, ServerConfig};
 use crow_kv::metrics::MetricsRunner;
 
 use crow_kv_server::cli::{parse_id_list, parse_port_list, Cli};
-use crow_kv_server::mgmt_api::{self, persisted_port_for_store};
+use crow_kv_server::mgmt::{self, persisted_port_for_store};
 use crow_kv_server::startup::create_group_with_wal;
 use crow_kv_server::store_registry::KvStoreRegistry;
 
@@ -155,7 +155,7 @@ async fn main() {
             std::process::exit(1);
         });
 
-    let router = mgmt_api::router(crow_kv_server::operation_registry::AppState::new(
+    let router = mgmt::router(crow_kv_server::operation_registry::AppState::new(
         registry.clone(),
     ));
     let listener = tokio::net::TcpListener::bind(mgmt_addr)

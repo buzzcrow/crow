@@ -16,7 +16,7 @@ use utoipa::ToSchema;
 /// Kind of async operation.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum OperationKind {
+pub(crate) enum OperationKind {
     StepDown,
     RemoveReplica,
     AddReplica,
@@ -25,7 +25,7 @@ pub enum OperationKind {
 
 impl OperationKind {
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::StepDown => "step_down",
             Self::RemoveReplica => "remove_replica",
@@ -38,7 +38,7 @@ impl OperationKind {
 /// Lifecycle status of an async operation.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum OperationStatus {
+pub(crate) enum OperationStatus {
     Pending,
     Running,
     Completed,
@@ -47,7 +47,7 @@ pub enum OperationStatus {
 
 impl OperationStatus {
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",
             Self::Running => "running",
@@ -59,36 +59,37 @@ impl OperationStatus {
 
 /// Target of an async operation, for status display.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
-pub struct OperationTarget {
-    pub store_id: u64,
-    pub group_id: u64,
+#[allow(clippy::struct_field_names)]
+pub(crate) struct OperationTarget {
+    pub(crate) store_id: u64,
+    pub(crate) group_id: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub replica_id: Option<u64>,
+    pub(crate) replica_id: Option<u64>,
 }
 
 /// A single async operation tracked by the registry.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
-pub struct Operation {
-    pub id: u64,
-    pub kind: OperationKind,
-    pub status: OperationStatus,
-    pub target: OperationTarget,
-    pub started_at_ms: u64,
+pub(crate) struct Operation {
+    pub(crate) id: u64,
+    pub(crate) kind: OperationKind,
+    pub(crate) status: OperationStatus,
+    pub(crate) target: OperationTarget,
+    pub(crate) started_at_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub completed_at_ms: Option<u64>,
+    pub(crate) completed_at_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub(crate) error: Option<String>,
 }
 
 /// In-memory operation registry. Thread-safe via `DashMap`.
-pub struct OperationRegistry {
+pub(crate) struct OperationRegistry {
     operations: DashMap<u64, Operation>,
     next_id: AtomicU64,
 }
 
 impl OperationRegistry {
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             operations: DashMap::new(),
             next_id: AtomicU64::new(1),
@@ -99,7 +100,7 @@ impl OperationRegistry {
     /// The caller should then spawn a task that calls `update_status` to
     /// drive it through `Running` → `Completed`/`Failed`.
     #[must_use]
-    pub fn create(&self, kind: OperationKind, target: OperationTarget) -> u64 {
+    pub(crate) fn create(&self, kind: OperationKind, target: OperationTarget) -> u64 {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let now = now_ms();
         self.operations.insert(
@@ -119,13 +120,13 @@ impl OperationRegistry {
 
     /// Get a snapshot of an operation by ID.
     #[must_use]
-    pub fn get(&self, id: u64) -> Option<Operation> {
+    pub(crate) fn get(&self, id: u64) -> Option<Operation> {
         self.operations.get(&id).map(|r| r.clone())
     }
 
     /// Update an operation's status. Sets `completed_at` when transitioning
     /// to `Completed` or `Failed`. Sets `error` when `Failed`.
-    pub fn update_status(&self, id: u64, status: OperationStatus, error: Option<String>) {
+    pub(crate) fn update_status(&self, id: u64, status: OperationStatus, error: Option<String>) {
         if let Some(mut op) = self.operations.get_mut(&id) {
             op.status = status;
             if status == OperationStatus::Completed || status == OperationStatus::Failed {
@@ -139,7 +140,8 @@ impl OperationRegistry {
 
     /// Remove completed operations older than `ttl`. Called periodically by
     /// a background cleanup task.
-    pub fn cleanup_expired(&self, ttl: Duration) {
+    #[allow(dead_code)]
+    pub(crate) fn cleanup_expired(&self, ttl: Duration) {
         let ttl_ms = u64::try_from(ttl.as_millis()).unwrap_or(u64::MAX);
         let now = now_ms();
         self.operations.retain(|_, op| {
@@ -171,8 +173,8 @@ fn now_ms() -> u64 {
 /// `state.get_store()`, etc. work unchanged.
 #[derive(Clone)]
 pub struct AppState {
-    pub registry: Arc<crate::store_registry::KvStoreRegistry>,
-    pub operations: Arc<OperationRegistry>,
+    pub(crate) registry: Arc<crate::store_registry::KvStoreRegistry>,
+    pub(crate) operations: Arc<OperationRegistry>,
 }
 
 impl std::ops::Deref for AppState {
@@ -194,7 +196,8 @@ impl AppState {
     /// Construct with an explicit operation registry (for testing or when
     /// the registry must be shared across routers).
     #[must_use]
-    pub fn with_operations(
+    #[allow(dead_code)]
+    pub(crate) fn with_operations(
         registry: Arc<crate::store_registry::KvStoreRegistry>,
         operations: Arc<OperationRegistry>,
     ) -> Self {
