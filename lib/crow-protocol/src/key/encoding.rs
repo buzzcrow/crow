@@ -1,33 +1,13 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! Key encoding for crow-kv.
+//! Binary and text key encoding primitives.
 //!
-//! Defines the [`BinaryKey`] and [`TextKey`] traits and all key kinds
-//! stored in crow-kv. A key kind is a flat struct with hierarchy
-//! fields; two encoding traits map the same struct to bytes:
-//!
-//! - [`BinaryKey`] — `magic_byte | type_tag:u16 BE | fields BE`,
-//!   prost-encoded protobuf values. Used by diskdb data groups
-//!   (high-volume, machine-only).
-//! - [`TextKey`] — `/magic/type/<field1>/<field2>/...` slash-delimited
-//!   path, JSON-encoded values. Used by group 0 (small, human-
-//!   inspected, scan-friendly).
-//!
-//! See `doc/design/protocol/design-crow-key.md` for the full design.
-//!
-//! Binary key layouts are frozen once shipped. New key kinds are added
-//! with a new type tag; existing layouts are never changed.
+//! Defines [`BinaryKey`], [`TextKey`], [`KeyError`], and the
+//! encode/decode helpers shared by all key kinds.
 
 use crate::common::DiskId;
 use std::fmt::Write;
-
-pub mod common;
-pub mod diskdb;
-pub mod kv_cluster;
-
-#[cfg(test)]
-mod tests;
 
 /// Magic byte prefix for every CROW binary key.
 ///
@@ -105,13 +85,13 @@ pub trait BinaryKey: Sized {
 // ── Encode helpers ──────────────────────────────────────────────
 
 /// Write the three-byte header (`magic | type_tag BE`).
-fn encode_header(out: &mut Vec<u8>, type_tag: u16) {
+pub(super) fn encode_header(out: &mut Vec<u8>, type_tag: u16) {
     out.push(CROW_KEY_MAGIC);
     out.extend_from_slice(&type_tag.to_be_bytes());
 }
 
 /// Check the header (magic + type tag) and return the field bytes.
-fn decode_header(buf: &[u8], expected_tag: u16) -> Result<&[u8], KeyError> {
+pub(super) fn decode_header(buf: &[u8], expected_tag: u16) -> Result<&[u8], KeyError> {
     if buf.len() < 3 {
         return Err(KeyError::ShortInput);
     }
@@ -126,23 +106,23 @@ fn decode_header(buf: &[u8], expected_tag: u16) -> Result<&[u8], KeyError> {
 }
 
 /// Write `u64` big-endian.
-fn encode_u64(out: &mut Vec<u8>, v: u64) {
+pub(super) fn encode_u64(out: &mut Vec<u8>, v: u64) {
     out.extend_from_slice(&v.to_be_bytes());
 }
 
 /// Write `u32` big-endian.
-fn encode_u32(out: &mut Vec<u8>, v: u32) {
+pub(super) fn encode_u32(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_be_bytes());
 }
 
 /// Write `DiskId` as 16 bytes (`high BE | low BE`).
-fn encode_disk_id(out: &mut Vec<u8>, id: &DiskId) {
+pub(super) fn encode_disk_id(out: &mut Vec<u8>, id: &DiskId) {
     encode_u64(out, id.high);
     encode_u64(out, id.low);
 }
 
 /// Read `u64` big-endian at `offset`, returning `(value, new_offset)`.
-fn decode_u64(buf: &[u8], offset: usize) -> Result<(u64, usize), KeyError> {
+pub(super) fn decode_u64(buf: &[u8], offset: usize) -> Result<(u64, usize), KeyError> {
     if offset + 8 > buf.len() {
         return Err(KeyError::ShortInput);
     }
@@ -151,7 +131,7 @@ fn decode_u64(buf: &[u8], offset: usize) -> Result<(u64, usize), KeyError> {
 }
 
 /// Read `u32` big-endian at `offset`, returning `(value, new_offset)`.
-fn decode_u32(buf: &[u8], offset: usize) -> Result<(u32, usize), KeyError> {
+pub(super) fn decode_u32(buf: &[u8], offset: usize) -> Result<(u32, usize), KeyError> {
     if offset + 4 > buf.len() {
         return Err(KeyError::ShortInput);
     }
@@ -160,28 +140,20 @@ fn decode_u32(buf: &[u8], offset: usize) -> Result<(u32, usize), KeyError> {
 }
 
 /// Read `DiskId` (16 bytes) at `offset`, returning `(id, new_offset)`.
-fn decode_disk_id(buf: &[u8], offset: usize) -> Result<(DiskId, usize), KeyError> {
+pub(super) fn decode_disk_id(buf: &[u8], offset: usize) -> Result<(DiskId, usize), KeyError> {
     let (high, o) = decode_u64(buf, offset)?;
     let (low, o) = decode_u64(buf, o)?;
     Ok((DiskId { high, low }, o))
 }
 
 /// Verify all field bytes were consumed (no trailing bytes).
-fn check_exact(buf: &[u8], consumed: usize) -> Result<(), KeyError> {
+pub(super) fn check_exact(buf: &[u8], consumed: usize) -> Result<(), KeyError> {
     if consumed == buf.len() {
         Ok(())
     } else {
         Err(KeyError::TrailingBytes)
     }
 }
-
-// ── Re-exports ──────────────────────────────────────────────────
-
-pub use common::{NodeKey, RackKey};
-pub use diskdb::{
-    BindMapKey, BusyBlockKey, DiskGroupKey, DiskKey, FreeBlockKey, InstanceKey, OwnerMapKey, ZoneKey,
-};
-pub use kv_cluster::{KvGroupKey, KvReplicaKey, KvStoreKey};
 
 // ── TextKey trait ───────────────────────────────────────────────
 
@@ -254,31 +226,31 @@ pub trait TextKey: Sized {
 // ── Text-path encode helpers ────────────────────────────────────
 
 /// Write the path header (`/magic/type`).
-fn encode_path_header(out: &mut String, magic: &str, type_name: &str) {
+pub(super) fn encode_path_header(out: &mut String, magic: &str, type_name: &str) {
     out.push_str(magic);
     out.push('/');
     out.push_str(type_name);
 }
 
 /// Write a `u64` field as a decimal string segment.
-fn encode_path_u64(out: &mut String, v: u64) {
+pub(super) fn encode_path_u64(out: &mut String, v: u64) {
     out.push('/');
     out.push_str(&v.to_string());
 }
 
 /// Write a `DiskId` as a 32-char hex segment (`high:low`, lowercase).
-fn encode_path_disk_id(out: &mut String, id: &DiskId) {
+pub(super) fn encode_path_disk_id(out: &mut String, id: &DiskId) {
     out.push('/');
     let _ = write!(out, "{:016x}{:016x}", id.high, id.low);
 }
 
 /// Parse a `u64` from a path segment.
-fn decode_path_u64(part: &str) -> Result<u64, KeyError> {
+pub(super) fn decode_path_u64(part: &str) -> Result<u64, KeyError> {
     part.parse::<u64>().map_err(|_| KeyError::ShortInput)
 }
 
 /// Parse a `DiskId` from a 32-char hex path segment.
-fn decode_path_disk_id(part: &str) -> Result<DiskId, KeyError> {
+pub(super) fn decode_path_disk_id(part: &str) -> Result<DiskId, KeyError> {
     if part.len() != 32 {
         return Err(KeyError::ShortInput);
     }
@@ -288,7 +260,7 @@ fn decode_path_disk_id(part: &str) -> Result<DiskId, KeyError> {
 }
 
 /// Verify all path segments were consumed.
-fn check_path_exact(parts: &[&str], consumed: usize) -> Result<(), KeyError> {
+pub(super) fn check_path_exact(parts: &[&str], consumed: usize) -> Result<(), KeyError> {
     if consumed == parts.len() {
         Ok(())
     } else {

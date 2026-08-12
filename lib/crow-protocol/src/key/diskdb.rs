@@ -12,7 +12,7 @@
 //! See `doc/design/diskdb/design-crow-diskdb.md` §5 and §7 for the
 //! component-specific hierarchy.
 
-use super::{
+use super::encoding::{
     check_exact, check_path_exact, decode_disk_id, decode_header, decode_path_disk_id, decode_path_u64,
     decode_u32, decode_u64, encode_disk_id, encode_header, encode_path_disk_id, encode_path_header,
     encode_path_u64, encode_u32, encode_u64, BinaryKey, KeyError, TextKey,

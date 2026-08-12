@@ -8,7 +8,7 @@
 //! binary encoding is used by diskdb data groups; the text encoding is
 //! used by group 0 (see `doc/design/protocol/design-crow-key.md` §5).
 
-use super::{
+use super::encoding::{
     check_exact, check_path_exact, decode_header, decode_path_u64, decode_u64, encode_header,
     encode_path_header, encode_path_u64, encode_u64, BinaryKey, KeyError, TextKey,
 };

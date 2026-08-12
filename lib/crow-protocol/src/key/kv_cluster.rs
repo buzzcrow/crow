@@ -11,7 +11,9 @@
 //! See `doc/design/kv/design-crow-kv-group0.md` §3.1 for the key
 //! layout.
 
-use super::{check_path_exact, decode_path_u64, encode_path_header, encode_path_u64, KeyError, TextKey};
+use super::encoding::{
+    check_path_exact, decode_path_u64, encode_path_header, encode_path_u64, KeyError, TextKey,
+};
 use crate::common_type::{GroupId, ReplicaId, StoreId};
 
 // ── KvStoreKey ──────────────────────────────────────────────────
