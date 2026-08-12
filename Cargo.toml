@@ -51,9 +51,8 @@ unused_must_use = "deny"
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
-# Coding-style rules (plan-coding-style.md §1.13). "warn" until the
-# refactor (§2) works down existing violations; bump to "deny" per crate
-# as each split task lands.
-mod_module_files = "warn"     # §1.2: foo.rs + foo/, no mod.rs
-too_many_lines = "warn"       # §1.8: default threshold 100 (no clippy.toml)
-items_after_statements = "warn" # §1.13: items after statements
+# Coding-style rules. "warn" until existing violations are worked down;
+# bump to "deny" per crate as splits land. See /coding workflow.
+mod_module_files = "warn"     # foo.rs + foo/, no mod.rs
+too_many_lines = "warn"       # default threshold 100 (no clippy.toml)
+items_after_statements = "warn" # items after statements

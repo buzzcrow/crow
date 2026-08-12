@@ -3,17 +3,124 @@
 
 # diskdb Server Implementation Design (R71 + R72)
 
-Working design draft for the diskdb server implementation. Covers both
-major components: **status management** (R71 — group-0 sync, keepalive,
-disk status) and **allocate/free** (R72 — zone allocator, record
-persistence). Folded into `doc/design/diskdb/design-crow-diskdb.md` and
-deleted after merge.
+Working design draft for the diskdb server implementation. diskdb has
+two major design areas:
 
-Root design: `doc/design/diskdb/design-crow-diskdb.md` (§1–§17). This
+1. **Status management** (§3) — how diskdb handles disk-group/disk
+   status changes detected via group-0 sync: new disks (disk-add init),
+   missing disks (absent from sync → `Missing` → `Bad`), and status
+   transitions (`Up`/`Suspect`/`Offline`/`Maintenance`/`Bad`). When a
+   disk goes `Bad`, diskdb scans all impacted busy blocks on that disk
+   and hands them to a future recovery/relocation path (§3.7).
+2. **Allocate / free** (§4) — the zone bitmap-scan allocator, rotating
+   active-zone-set, round-robin within the named disk-group, two-phase
+   async allocation, and immediate free. The hard part is the **zone
+   record usage bitmap** crash/error safety: the bitmap is derived from
+   records (not a source of truth), so R72's allocate/free must
+   preserve invariants that let R73 recover (replay + compaction) from
+   any crash point (§4.8).
+
+Folded into `doc/design/diskdb/design-crow-diskdb.md` and deleted after
+merge.
+
+Root design: `doc/design/diskdb/design-crow-diskdb.md` (§1–§18). This
 doc covers implementation details — module structure, protocol
-enhancements, group-0 simulation, data structures, flows, tests.
+enhancements, group-0 test cluster, data structures, flows, tests.
 Architecture decisions and rationale are in the root design; this doc
 does not repeat them.
+
+**R71 is implemented** (partial — see §0). R72 is the remaining work
+this doc primarily targets.
+
+---
+
+## 0. Current State (R71, as implemented)
+
+The R71 build diverged from the earlier draft of this doc in module
+layout and the group-0 client. The implemented code is the source of
+truth for those parts; the sections below describe it as built and
+mark the R72 additions.
+
+Module layout (actual — flat files, not `mod.rs` subdirs):
+
+```
+app/crow-diskdb/src/
+├── lib.rs             — module declarations (config, grpc, node, status, sync)
+├── main.rs            — entry point: config, clients, sync loop, gRPC server
+├── config.rs          — DiskdbConfig + validate (inline unit tests)
+├── grpc.rs            — DiskdbService (gRPC handlers; allocate/free stubbed)
+├── node.rs            — Node (disk-group manager) + module decls
+├── node/
+│   ├── container.rs   — NodeContainer (owned disk-groups, degraded flag)
+│   └── disk.rs        — ZoneDisk + ZoneRef (stubs; allocation is R72)
+├── status.rs          — StatusManager (pure transitions; inline unit tests)
+└── sync.rs            — SyncLoop (keepalive + owner-map sync)
+```
+
+No `sysdata/`, `zone/`, or `persistence/` modules exist yet. R72 adds
+`zone.rs` and `persistence.rs` (or `persistence/` — see §4.0).
+
+Group-0 client — **`SysdataClient` was not built**. The
+`crow-kv-client` service classes already cover group-0 sysdata:
+
+- `HardwareClient` (wraps `CrowkvClient`) — `list_owners() ->
+  Vec<DiskdbOwnerEntry>`, `get_owner`, `set_owner`, `remove_owner`,
+  `list_binds() -> Vec<KVGroupBindEntry>`, `get_bind`, `set_bind`,
+  `remove_bind`, `list_disks_in_group(rack, node, dg) ->
+  Vec<(DiskId, DiskValue)>`, `set_disk_status`, etc. Uses text-path
+  keys + JSON values (group 0's sysdata encoding).
+- `ServiceRegistryClient` — `heartbeat_diskdb(instance_id, endpoint,
+  owned_dg_ids)` for keepalive. **No usage-summary piggyback param
+  yet** (§1.3 / §11 want `DiskGroupUsageSummary`; the client API must
+  be extended for that).
+
+`DiskdbOwnerEntry { rack_id, node_id, dg_id, instance_id,
+lease_expiry_ms }`. `KVGroupBindEntry { rack_id, node_id, dg_id,
+store_id, group_id }`.
+
+`SyncLoop` (implemented, simplified) — per tick: `heartbeat_diskdb`
+→ `list_owners()` → filter to `instance_id == self` → add new `Node`s
+/ remove gone `Node`s → reset `missed_count` / degraded mode. It does
+**not** yet: read the bind map, read member disks, run disk-add init,
+apply status transitions, or piggyback usage. `Node.bind` stays
+`(0, 0)`; `Node.disks` stays empty.
+
+`StatusManager` — implemented as a **pure, standalone** helper
+(`is_legal_transition`, `apply_transition`, `effective_status`,
+`allows_allocate`, `allows_free`, `check_suspect_timeout`) with inline
+unit tests. **Not wired into `SyncLoop`** and does not write to group
+0. Wiring + `apply_disk_status` (write-back) are R71 follow-ups
+folded into the R72 sync-completion work (§3.3, §3.4).
+
+`Node` / `ZoneDisk` — stubs. `AllocateDiskContext = ()`,
+`ActiveZoneContext = ()`, `ZoneRef { zone_index: u32 }`. `disks` is
+`Vec<ZoneDisk>` (not `HashMap<DiskId, Arc<ZoneDisk>>`). No
+`allocating_disks`, `pos_v_disk_ctx`, `active_zone_context`, or
+`pos_v_zone_ctx` fields yet — R72 adds them (§3.6, §4.2).
+
+`UsageBitmap` (R70, `crow-protocol/src/bitmap.rs`) — `Vec<AtomicU64>`
+with `range_set(offset, count) -> bool` (`fetch_or`, rollback on
+double-set) and `range_clear(offset, count) -> bool` (`fetch_and`,
+rollback on double-clear), plus `snapshot`/`restore`/`count_set`.
+**It does not expose word-level `compare_exchange`, a rotating
+`last_pos_64` cursor, `countr_one` scan, or a CAS retry bound.** R72
+extends it (or adds the scan/CAS layer in `Zone`) — see §4.1.
+
+`main.rs` — config load + validate, generate `instance_id`, build
+`NodeContainer`, build `CrowkvClient` + `HardwareClient` +
+`ServiceRegistryClient`, spawn `SyncLoop`, serve gRPC with shutdown.
+**No `DataGroupClient`, no `StatusManager` instance, no blocking
+initial sync, no HTTP management server.** R72 adds `DataGroupClient`
+wiring (§5); the HTTP server is R77.
+
+Tests — only inline unit tests in `status.rs` and `config.rs`. No
+`tests/` directory, no integration tests. R72 adds the test harness
+(§7) against a real group-0 cluster (§2).
+
+Protos — still stale vs. root design (§1 below). `BusyBlockValue`
+has `allocate_count` (field 3), `FreeBlockValue` has `free_count`
+(field 3), `ZoneValue` carries metadata fields, no `BlockState` enum,
+no `BlockState` enum. §1 is still accurate and is the first R72 step.
 
 ---
 
@@ -56,247 +163,246 @@ design. Fix before implementing:
     tries with timeout, falls back to mirror/EC rebuild.
   - `BLOCK_STATE_CORRUPT = 2` — data confirmed unreadable; data-IO
     layer skips read, rebuilds from EC/mirror.
-  Updated by background paths (sync, health probe, scanner) or via
-  `MarkBlockSuspect` / `MarkBlockCorrupt` admin RPCs (R75) — not by
-  the allocate hot path.
+  Updated by background paths (sync, health probe, scanner) or by
+  re-putting the `BusyBlockValue` with a new `state` — no dedicated
+  admin RPC (a status change is a plain `put` of the busy record with
+  a different `state` field). Not updated by the allocate hot path.
 
 ### 1.2 `diskdb_service.proto`
 
-- **Add** `rpc RebuildZoneBitmap(RebuildZoneBitmapRequest) returns
-  (RebuildZoneBitmapResponse)` — strategy 1 full scan rebuild (R73
-  implements; stub in R72).
-- **Add** `rpc MarkBlockSuspect(MarkBlockSuspectRequest) returns
-  (AdminResponse)` — per-block state transition (R75 implements; stub
-  in R72).
-- **Add** `rpc MarkBlockCorrupt(MarkBlockCorruptRequest) returns
-  (AdminResponse)` — per-block state transition (R75 implements; stub
-  in R72).
-- Request/response messages go in `diskdb_op.proto`.
+No new RPCs. `RebuildZoneBitmap` is **not** an RPC — diskdb rebuilds
+zone bitmaps itself by scanning its own `BusyBlockKey` / `FreeBlockKey`
+records (R73's strategy-1 full scan, run internally). Block status
+transitions (suspect/corrupt) are **not** RPCs either — the caller
+re-puts the `BusyBlockValue` with a new `state` field. The service
+surface stays as the five existing RPCs (`AllocateBlocks`,
+`FreeBlocks`, `QueryCapacityStats`, `GetDiskGroupInfo`, `GetDiskInfo`).
 
-### 1.3 `diskdb_sys_op.proto` (keepalive)
+### 1.3 Keepalive usage piggyback
 
-- **`KeepaliveRequest`** — add per-disk-group usage summary (§11):
-  - `repeated DiskGroupUsageSummary group_usages = 4` — piggybacked on
-    each keepalive tick. Each entry: `{disk_group_id, capacity_bytes,
-    used_bytes, free_bytes, disk_count, allocatable_disk_count}`.
-  - Group 0 maintains this at the disk-group level
-    (`DiskGroupUsageKey { disk_group_id }`).
-
-### 1.4 `diskdb_op.proto` (new messages)
-
-- **`RebuildZoneBitmapRequest`** — `{disk_id: DiskId, zone_index: u32}`
-  (one zone) or `{disk_id: DiskId, zone_index: u32 = MAX}` (all zones
-  on a disk).
-- **`RebuildZoneBitmapResponse`** — `{rebuilt_zone_count: u32,
-  total_busy_units: u64, total_free_units: u64}`.
-- **`MarkBlockSuspectRequest`** / **`MarkBlockCorruptRequest`** —
-  `{segment: Segment}` (the block to mark).
+- `ServiceRegistryClient::heartbeat_diskdb` currently takes
+  `(instance_id, endpoint, owned_dg_ids)`. Add a per-disk-group usage
+  summary (§11): `group_usages: &[DiskGroupUsageSummary]` piggybacked
+  on each keepalive tick. Each entry: `{disk_group_id,
+  capacity_bytes, used_bytes, free_bytes, disk_count,
+  allocatable_disk_count}`. Group 0 stores this at the disk-group
+  level (`DiskGroupUsageKey { disk_group_id }`).
+- This requires a new proto message (`DiskGroupUsageSummary`) and a
+  `diskdb_sys_op` / keepalive request extension. The current proto
+  set has no `diskdb_sys_op.proto`; the keepalive request lives in the
+  service-registry proto — extend it there.
 
 ---
 
-## 2. Group-0 Simulation
+## 2. Test Cluster (real group 0)
 
-The real crow-kv group-0 may not be available during R71+R72
-development. Simulate it with an **in-memory mock** that serves
-`DiskdbAdminService` and stores sysdata in a `HashMap<Vec<u8>,
-Vec<u8>>` (binary keys → serialized values). This lets the diskdb
-server's `SysdataClient` talk to a real gRPC endpoint without a full
-crow-kv cluster.
+A real crow-kv group 0 is available after cluster setup and init —
+no mock is needed. The group-0 sysdata schema, service classes, and
+bootstrap flow are fully designed in
+`doc/design/kv/design-crow-kv-group0.md` (§1–§6). This section
+describes how diskdb integration tests stand up a real group-0
+cluster and seed the hardware/owner/bind entries diskdb depends on.
 
-### 2.1 Mock group-0 server
+### 2.1 Group-0 background (see `design-crow-kv-group0.md`)
 
-Create `app/crow-diskdb/tests/mock_group0.rs` (test-only, not shipped
-in the binary):
+- Group 0 is a designated Paxos group (store 0, group 0) storing
+  cluster-wide sysdata as regular KV entries — replicated, consistent,
+  highly available by the same Paxos mechanism as user data
+  (`design-crow-kv-group0.md` §1).
+- `crow-kv-client` is the single sysdata API surface
+  (`design-crow-kv-group0.md` §2.1): `HardwareClient` (hardware
+  hierarchy + ownership/binding maps), `ServiceRegistryClient`
+  (service registry + keep-alive), `KVClusterMetaClient` (KV-cluster
+  topology). All writes are blind puts; group-0 values are
+  JSON-encoded; keys are text-path (`/hw/...`, `/srv/...`, `/kv/...`).
+- Hardware admin is via `HardwareClient` — there is **no**
+  `DiskdbAdminService` gRPC surface (`design-crow-kv-group0.md` §2.8).
+  The diskdb server serves only `DiskdbService` (allocate/free) and
+  reads hardware state from group 0 via `HardwareClient` in its sync
+  loop.
+- Bootstrap: `http_cluster_init` (`app/crow-web/src/mgmt/cluster_init.rs`)
+  calls `system_init` on each node to create group 0, wires remotes
+  for multi-node, then writes the hardware hierarchy + KV-cluster
+  topology into group 0 via `HardwareClient` +
+  `KVClusterMetaClient` (`design-crow-kv-group0.md` §5.1). After
+  init, group 0 is authoritative and `HardwareClient` reads/writes
+  work against the real Paxos group.
 
-- `MockGroup0Server` — an in-process tonic server implementing
-  `DiskdbAdminService`:
-  - Backed by a `RwLock<HashMap<Vec<u8>, Vec<u8>>>` — binary keys (from
-    `lib/crow-protocol/src/key/`) → protobuf-encoded values.
-  - `AddRack` / `AddNode` / `AddDiskGroup` / `AddDisk` / `RemoveDisk` /
-    `SetDiskStatus` / `SetDiskGroupStatus` / `SetNodeStatus` — write
-    the corresponding `*Value` / `*Meta` to the map.
-  - `FetchHardware` — epoch-based: scan all `NodeKey` / `DiskKey` /
-    `RackKey` entries, build `FetchHardwareResponse`, return with
-    current epoch. If request epoch == current epoch, return empty
-    response (no change).
-  - `Keepalive` — update `InstanceMeta` heartbeat + store the
-    piggybacked `DiskGroupUsageSummary` at `DiskGroupUsageKey`.
-- Listens on a random port (`127.0.0.1:0`); the test harness gets the
-  actual address from the server handle.
-- The mock does **not** implement paxos consensus — it's a simple
-  key-value store. This is sufficient for R71+R72 testing because
-  diskdb's group-0 interaction is blind puts + prefix scans (§3.3).
+### 2.2 Existing test harnesses (reuse)
 
-### 2.2 SysdataClient against the mock
+Two patterns already exist for standing up a real crow-kv cluster in
+tests:
 
-`SysdataClient` wraps `CrowkvClient` for group-0 operations. For
-testing, `CrowkvClient` is configured to point at the mock group-0
-server's address. The mock translates `get`/`scan`/`put`/`batch_write`
-into HashMap lookups.
+- **In-process `PxKvStore`** — `lib/crow-kv/tests/common/cluster.rs`
+  (`start_cluster`, `start_cluster_no_leader`) builds `PxKvStore` +
+  `PxGroup` + election driver in-process; `TestCluster` exposes
+  `kv_client(node)` returning a `KvServiceClient<Channel>` connected
+  to a real gRPC endpoint. Used by crow-kv's own integration tests.
+- **Spawned `crow-kv-server` binary** —
+  `app/crow-kv-server/tests/common/process.rs`
+  (`start_test_server_with_ports`) spawns the real `crow-kv-server`
+  binary with a temp WAL dir and OS-assigned ports; `ServerHandle`
+  exposes `base_url()` + `wait_for_ready()`. Used by server
+  integration / startup tests.
 
-Two options for wiring:
-- **(a) Mock implements the crow-kv scan/get/put API directly** — the
-  mock acts as a crow-kv-compatible backend (same gRPC service as
-  crow-kv). `CrowkvClient` talks to it transparently. This is
-  preferred — no special test mode in `SysdataClient`.
-- **(b) Mock implements `DiskdbAdminService` only** — `SysdataClient`
-  has a test mode that uses the admin RPCs instead of raw KV. More
-  code, less realistic.
+diskdb integration tests use one of these (prefer the **spawned
+binary** for end-to-end fidelity, or the **in-process `PxKvStore`**
+for faster, hermetic tests that don't need the full server binary).
+No new mock server is built.
 
-**Choose (a)** — the mock implements the crow-kv store gRPC service
-(`KvService` from `crow-kv`'s protos) for store 0 / group 0 only. This
-means the mock is a minimal crow-kv-compatible single-group server.
-`SysdataClient` is unchanged between test and production.
+### 2.3 diskdb test harness
 
-### 2.3 Test harness
+`diskdb_test_harness` helper (in `app/crow-diskdb/tests/common/`):
 
-- `diskdb_test_harness` helper (in `app/crow-diskdb/tests/common/`):
-  - Start `MockGroup0Server` on a random port.
-  - Seed it with test topology: one node, one disk-group, 2–4 disks.
-  - Create `CrowkvClient` pointing at the mock.
-  - Create `SysdataClient` wrapping that `CrowkvClient`.
-  - Create `DataGroupClient` for zone records — also pointing at the
-    mock (simulating the bound data group on the same mock server, or
-    a second mock instance for the data group).
-  - Return a struct with all clients + the mock server handle for
+- Start a real group-0 cluster (single-node self-elect is sufficient
+  for most tests; multi-node for failover/degraded-mode tests):
+  - Spawned-binary path: `start_test_server_with_ports(...)` →
+    `ServerHandle`; call `system_init` (or the console
+    `http_cluster_init` equivalent) to create group 0; wait for
+    leader.
+  - In-process path: `start_cluster(&[1], 1)` → `TestCluster` with a
+    single-node group 0 that self-elects.
+- Seed group 0 with test topology via `HardwareClient` (the same
+  writes `http_cluster_init` Phase 5 does, scoped to the test's
+  needs): one rack, one node, one disk-group, 2–4 disks, an owner
+  entry (`set_owner`) pointing at the test diskdb instance, and a
+  bind entry (`set_bind`) pointing at a data group on the same
+  cluster (or a second group created via `add_group`).
+- Build `CrowkvClient` seeded with the group-0 leader endpoint
+  (`seed_leader(0, 0, addr)`); wrap in `HardwareClient` +
+  `ServiceRegistryClient` + `DataGroupClient` (R72).
+- Return a struct with all clients + the cluster/server handle for
   teardown.
 
+The bound data group for zone records is a **real** paxos group on
+the same cluster (created via the kv-server `add_group` mgmt endpoint
+or `KVClusterAdmin`), not a mock. `DataGroupClient` puts/deletes/scans
+go through the real Paxos path — durability, ordering, and replay
+(§7, R73) are exercised exactly as in production.
+
 ---
 
-## 3. Part 1: Status Management (R71)
+## 3. Part 1: Status Management (R71 — complete the implementation)
 
-### 3.1 Module structure
+R71 shipped a partial `SyncLoop` and a standalone `StatusManager`.
+R72 completes the status-management wiring (bind-map read, disk reads,
+disk-add init, status transitions, usage piggyback) because allocate/
+free depend on disks and binds being populated. This section describes
+the **target** state after R72's sync-completion work.
+
+### 3.1 Module structure (target)
+
+R72 keeps the flat layout and adds `zone.rs` + `persistence.rs`:
 
 ```
 app/crow-diskdb/src/
-├── sysdata/
-│   ├── mod.rs          — SysdataClient (group-0 read/write)
-│   └── types.rs        — Rust structs for *Meta / *Value (serde + proto)
-├── sync/
-│   └── mod.rs          — SyncLoop (periodic sync, change detection)
-├── status/
-│   └── mod.rs          — StatusManager (transitions, effective status)
+├── lib.rs             — add: zone, persistence modules
+├── main.rs            — add: DataGroupClient wiring
+├── config.rs          — extend (§6)
+├── grpc.rs            — allocate/free handlers + stubs
+├── node.rs            — Node: add allocating_disks, pos_v_disk_ctx
 ├── node/
-│   ├── mod.rs          — NodeContainer, Node
-│   └── disk.rs         — ZoneDisk (zone list, active zone set)
-├── zone/
-│   └── mod.rs          — Zone (bitmap, allocator — R72)
-├── config.rs           — (exists, extend)
-└── main.rs             — (exists, wire up)
+│   ├── container.rs   — NodeContainer (unchanged shape)
+│   └── disk.rs        — ZoneDisk: add active_zone_context, cursors
+├── status.rs          — StatusManager: add apply_disk_status write-back
+├── sync.rs            — SyncLoop: complete (bind, disks, init, status)
+├── zone.rs            — Zone bitmap-scan allocator (R72)
+└── persistence.rs     — DataGroupClient + alloc/free (R72)
 ```
 
-### 3.2 SysdataClient
+(If `persistence.rs` grows large, split into `persistence/{mod,alloc,
+free}.rs` following the `node/` pattern. Start as a single file; split
+only if it exceeds ~300 lines.)
 
-`app/crow-diskdb/src/sysdata/mod.rs` — wraps `CrowkvClient` for group-0
-(store 0, group 0) read/write. Uses binary keys from
-`lib/crow-protocol/src/key/`. Values are protobuf-encoded (`*Value`
-messages from `diskdb_type.proto` / `common_type.proto`).
+### 3.2 Group-0 client — use `HardwareClient` + `ServiceRegistryClient`
 
-Read methods (all via `get` or `scan` with prefix constructors):
-- `read_node(node_id) -> Result<Option<NodeValue>>`
-- `read_all_nodes() -> Result<Vec<NodeValue>>` — prefix scan
-  `NodeKey::prefix_all()`.
-- `read_disk_group(node_id, dg_id) -> Result<Option<DiskGroupValue>>`
-- `read_all_disk_groups() -> Result<Vec<(DiskGroupKey, DiskGroupValue)>>`
-  — scan all `DiskGroupKey` entries.
-- `read_disk(node_id, dg_id, disk_id) -> Result<Option<DiskValue>>`
-- `read_disks_for_disk_group(node_id, dg_id) -> Result<Vec<DiskValue>>`
-  — prefix scan `DiskKey::prefix_for_disk_group(node_id, dg_id)`.
-- `read_owner_map() -> Result<Vec<(OwnerMapKey, OwnerEntry)>>` — scan
-  all `OwnerMapKey` entries. `OwnerEntry = { instance_id: u64,
-  lease_expiry_ms: u64 }`.
-- `read_bind_map() -> Result<Vec<(BindMapKey, BindEntry)>>` — scan all
-  `BindMapKey` entries. `BindEntry = { store_id: u64, group_id: u64 }`.
-- `read_instance(instance_id) -> Result<Option<InstanceMeta>>`.
+No `SysdataClient` is introduced. `SyncLoop` already holds
+`HardwareClient` + `ServiceRegistryClient`. The R72 sync-completion
+work calls the existing methods:
 
-Write methods (all via `put` or `batch_write`):
-- `write_node_meta(node_id, value: &NodeValue)`
-- `write_disk_group_meta(node_id, dg_id, value: &DiskGroupValue)`
-- `write_disk_meta(node_id, dg_id, disk_id, value: &DiskValue)`
-- `write_instance_heartbeat(instance_id, endpoint: &str,
-  owned_dg_ids: &[u32], group_usages: &[DiskGroupUsageSummary])` —
-  updates `InstanceMeta` + writes `DiskGroupUsageKey` entries.
-- `write_owner_entry(node_id, dg_id, entry: &OwnerEntry)`
-- `write_bind_entry(node_id, dg_id, entry: &BindEntry)`
+- `hw.list_owners()` — owned disk-groups (already used).
+- `hw.list_binds()` — bind map; for each owned disk-group, look up its
+  `(store_id, group_id)` and store on `Node.bind`.
+- `hw.list_disks_in_group(rack_id, node_id, dg_id)` — member disks +
+  their `DiskValue` (capacity, zone size, unit size, status).
+- `hw.set_disk_status(...)` — write back a disk status transition
+  (used by `StatusManager::apply_disk_status`, §3.4).
+- `svc.heartbeat_diskdb(instance_id, endpoint, owned_dg_ids,
+  group_usages)` — after §1.3 extends the signature with usage
+  summaries.
 
-All writes are blind puts (no CAS, §3.3). Values are small (< 1 KB).
+All group-0 writes are blind puts (no CAS, §3.3). Values are small
+(< 1 KB).
 
-### 3.3 SyncLoop
+### 3.3 SyncLoop (complete)
 
-`app/crow-diskdb/src/sync/mod.rs`:
+`app/crow-diskdb/src/sync.rs` — extend the implemented `sync_once()`:
 
-- `SyncLoop` — owns `SysdataClient`, `Arc<NodeContainer>`,
-  `SyncConfig`. Runs as `tokio::spawn` background task.
-- `run()` — loop: `sleep(sync_interval)` → `sync_once()` → repeat.
-  Fixed 10 s interval (same on success and failure — no back-off in
-  v1, §10).
-- `sync_once() -> Result<SyncOutcome>`:
-  a. Read the ownership map from group 0. Filter to entries where
-     `instance_id == self.instance_id`. These are the disk-groups this
-     instance owns.
-  b. Read the binding map. For each owned disk-group, look up its
-     `(store_id, group_id)` — the paxos data group for zone records.
-  c. For each owned disk-group, read its `DiskGroupValue` and its
-     member disks' `DiskValue` (prefix scan). Build/update the
-     in-memory `NodeContainer` state.
-  d. **Detect changes**:
-     - New disk-group assigned → add to container, trigger recovery
-       (R73, stubbed in R71).
-     - Disk-group removed → remove from container.
-     - Disk added → `disk_add_init_flow` (§3.5 below).
-     - Disk removed → remove from container.
-     - Status changed → apply transition via `StatusManager`.
-     - Disk/node absent from sync response → transition to `Missing`
-       (§9, §10).
-  e. Write instance heartbeat to group 0 (with piggybacked usage
-     summary).
-  f. Return `SyncOutcome { groups_added, groups_removed, disks_added,
-     disks_removed, status_changes, sync_duration_ms }`.
-- **Epoch/revision guard** — skip a sync response whose epoch ≤
-  current (prevents stale overwrites, §10). The `FetchHardware` RPC
-  is epoch-based; `SyncLoop` uses it for the bulk read, then
-  reconciles with the ownership/binding maps.
-- **Degraded mode** — track `missed_count` of consecutive sync
-  failures. After `miss_threshold` (default 3), enter degraded mode
-  (`NodeContainer.enter_degraded_mode()`). In degraded mode,
-  allocate/free RPCs return `Unavailable`. On first successful sync,
-  exit degraded mode.
+- a. Keep-alive heartbeat (already implemented) — add the usage-summary
+  piggyback once §1.3 lands.
+- b. Read the ownership map via `list_owners()`; filter to
+  `instance_id == self` (already implemented).
+- c. **Read the bind map** via `list_binds()`; for each owned
+  disk-group, store `(store_id, group_id)` on `Node.bind` (new).
+- d. **For each owned disk-group, read member disks** via
+  `list_disks_in_group(rack, node, dg)`; build/update the in-memory
+  `Node.disks` (new). Detect:
+  - New disk-group assigned → add `Node`, trigger disk-add init (§3.5).
+  - Disk-group removed → remove `Node`.
+  - Disk added → `disk_add_init_flow` (§3.5).
+  - Disk removed → remove from `Node.disks`, `refresh_disk_context()`.
+  - Status changed → apply transition via `StatusManager` (§3.4).
+  - Disk absent from sync response → transition to `Missing` (§9, §10).
+- e. Write instance heartbeat with piggybacked usage summary (§1.3).
+- f. Return `SyncOutcome { groups_added, groups_removed, disks_added,
+  disks_removed, status_changes, sync_duration_ms }` (struct already
+  exists; populate the currently-unused fields).
+- **Degraded mode** — already implemented (`missed_count` ≥
+  `miss_threshold` → `enter_degraded_mode`; success →
+  `exit_degraded_mode`). Keep.
+- **Epoch/revision guard** — `FetchHardware` is epoch-based in the
+  root design (§10). The current `HardwareClient` does not expose an
+  epoch guard; defer until `FetchHardware` lands (R71 follow-up / R74).
+  For R72, the per-tick `list_owners` + `list_binds` +
+  `list_disks_in_group` reads are sufficient.
 
-### 3.4 StatusManager
+### 3.4 StatusManager (wire + write-back)
 
-`app/crow-diskdb/src/status/mod.rs`:
+`app/crow-diskdb/src/status.rs` — the pure helpers stay. Add:
 
-- `StatusManager` — applies status transitions and computes effective
-  status. Integrated with the sync loop.
-- `effective_status(node: HwStatus, group: HwStatus, disk: HwStatus)
-  -> HwStatus` — `max(node, group, disk)` (three-level check, §9).
-  `HwStatus` is `Ord` (ordered by severity).
 - `apply_disk_status(disk_id, new_status)` — validates transition
-  legality (§9), writes updated `DiskValue` to group 0, updates
-  in-memory state.
-- `check_temp_failure_timeouts()` — called on each sync tick;
-  transitions any disk/disk-group/node in `Suspect` longer than
-  `temp_failure_timeout_secs` (default 900 s) to `Offline`.
-- `allows_allocate(effective) -> bool` — `effective == Up` only.
-- `allows_free(effective) -> bool` — `Up`, `Maintenance`, or `Suspect`.
+  legality (`is_legal_transition`, already implemented), writes the
+  updated `DiskValue` to group 0 via `hw.set_disk_status(...)`, and
+  updates the in-memory `ZoneDisk.disk_value`. Called from `SyncLoop`
+  on detected status changes.
+- `check_suspect_timeouts()` — already implemented as
+  `check_suspect_timeout(suspect_since, now)`; wire it into each sync
+  tick to transition `Suspect` older than `temp_failure_timeout_secs`
+  (default 900 s) to `Offline`.
+- `effective_status(node, group, disk)` (already implemented) — used
+  by `disk_allocate` and `refresh_disk_context` to decide
+  allocatability.
 
-Transition rules (§9):
-- `Init` → `{Up, Offline, Maintenance}` on startup (load from group 0).
-- `Up` → `Suspect` (3 missed syncs).
-- `Up` → `Offline` / `Maintenance` (operator).
-- `Suspect` → `Up` (sync recovers) or → `Missing` (cannot probe) or →
-  `Offline`.
-- `Missing` → `Bad` (confirmed) or → `Up` (rediscovered). **Missing is
-  detected by absence from a group-0 sync response.**
-- `Offline` ↔ `Maintenance` (operator).
-- `Offline` → `Up` (operator).
+Transition rules (§9) — already encoded in `is_legal_transition`;
+no change.
 
 ### 3.5 Disk-add initialization flow
 
-When `SyncLoop` detects a disk in group 0 that is not yet in the
-in-memory state (§10):
+The sync loop (§3.3) runs on a fixed 10 s interval. Each tick: diskdb
+sends a keepalive heartbeat to group 0 (registering itself as a live
+instance via `ServiceRegistryClient`), then reads the hardware info
+for its owned disk-groups from group 0 via `HardwareClient`. It
+compares the returned hardware info against its current in-memory
+state and reconciles differences: `StatusManager` handles status
+changes (§3.4), new disks trigger the disk-add init flow below, and
+missing disks (absent from the sync response) transition to `Missing`
+(§9, §10).
 
-a. Read the `DiskValue` from group 0 (capacity, zone size, unit size).
+When `SyncLoop` detects a disk in group 0 that is not yet in
+`Node.disks` (§10):
+
+a. Read the `DiskValue` from group 0 (capacity, zone size, unit size)
+   — via `list_disks_in_group`.
 b. Create the in-memory `ZoneDisk` with one `Zone` per zone:
    - zone count = `capacity_units / zone_size_units` (last zone may be
      smaller, §3.5 word-alignment rule).
@@ -307,53 +413,108 @@ b. Create the in-memory `ZoneDisk` with one `Zone` per zone:
 c. Write baseline `ZoneValue` records (empty bitmap,
    `snapshot_slot = 0`, `crc32 = compute_checksum(empty_bitmap)`) to
    the bound data group at `ZoneKey { disk_id, zone_index }` in one
-   `batch_write`. These are the replay baselines (§7); subsequent
-   allocates write `BusyBlockValue` records on top.
+   `batch_write` via `DataGroupClient`. These are the replay baselines
+   (§7); subsequent allocates write `BusyBlockValue` records on top.
 d. Call `disk.rebuild_active_zones()` — build the initial
    `ActiveZoneContext` with the first `zone_rotate_count` allocatable
    zones.
-e. Add the disk to the `NodeContainer`.
+e. Add the disk to `Node.disks`; call `node.refresh_disk_context()`.
 
-### 3.6 NodeContainer
+**Note:** R72 ships disk-add init for the *empty-disk* case (no prior
+records). Recovery of a disk that already has records (restart,
+re-assign) is R73's strategy-1/2 replay. For R72, the sync path
+assumes a newly-added disk; R73 wires the replay-then-init path.
 
-`app/crow-diskdb/src/node/mod.rs`:
+### 3.6 NodeContainer / Node / ZoneDisk (target fields)
 
-- `NodeContainer` — per-instance singleton:
-  - `nodes: RwLock<HashMap<DiskGroupId, Arc<Node>>>` — owned
-    disk-groups.
-  - `instance_id: u64`, `config: DiskdbConfig`.
-  - `degraded: AtomicBool`.
-- `add_node(node)`, `remove_node(dg_id)`, `get_node(dg_id) ->
-  Option<Arc<Node>>`, `node_ids() -> Vec<DiskGroupId>`.
-- `enter_degraded_mode()` / `exit_degraded_mode()` / `is_degraded()`.
-- `Node` — disk-group manager:
-  - `disk_group_id: DiskGroupId`, `node_id: u64`.
-  - `bind: (u64, u64)` — `(store_id, group_id)` for the bound paxos
-    data group (from the binding map).
-  - `disks: RwLock<HashMap<DiskId, Arc<ZoneDisk>>>` — all disks.
-  - `allocating_disks: RwLock<Arc<AllocateDiskContext>>` — RCU context
-    of allocatable disks (R72).
-  - `pos_v_disk_ctx: AtomicU64` — round-robin cursor (R72).
-  - `status: RwLock<HwStatus>` — disk-group status.
-- `ZoneDisk` — `app/crow-diskdb/src/node/disk.rs`:
-  - `disk_id: DiskId`, `disk_group_id: DiskGroupId`, `node_id: u64`.
-  - `disk_value: RwLock<DiskValue>` — capacity, zone size, unit size,
-    status.
-  - `zones: RwLock<Vec<ZoneRef>>` — all zones.
-  - `active_zone_context: RwLock<Arc<ActiveZoneContext>>` — RCU active
-    set (R72).
-  - `pos_v_zone_ctx: AtomicU64` — round-robin cursor over active set.
-  - `pos_v_zone: AtomicU64` — rotating cursor for zone rotation scan.
-  - Zone management methods (`add_zone`, `rebuild_active_zones`) are
-    defined here; zone **allocation** logic (CAS claim) is R72.
+`NodeContainer` (`node/container.rs`) — shape unchanged: `nodes:
+RwLock<HashMap<DiskGroupId, Arc<Node>>>`, `instance_id`, `degraded`.
+Methods `add_node` / `remove_node` / `get_node` / `node_ids` /
+`enter_degraded_mode` / `exit_degraded_mode` / `is_degraded` already
+exist.
+
+**Naming note:** diskdb does not have a "node" concept — its
+ownership unit is the **disk-group** (root design §3.3: "each
+disk-group is owned by exactly one diskdb instance"). The `Node`
+struct is really a **disk-group manager**; the name is inherited from
+the hardware hierarchy. `node_id` / `rack_id` on `Node` and `ZoneDisk`
+are carried only for group-0 key routing (`list_disks_in_group`,
+`set_disk_status` — the group-0 key path is
+`/hw/disk/<rack_id>/<node_id>/<dg_id>/<disk_id_hex>`), not because
+diskdb "owns" a node. Allocate/free requests carry `disk_group_id`;
+diskdb selects the disk and zone within that one disk-group and
+performs the allocate/free operation (§4.3). No rename is planned for
+R72 (the existing code uses `Node`/`NodeContainer`); a future cleanup
+could rename to `DiskGroupManager`/`DiskGroupContainer`.
+
+`Node` (`node.rs`) — add the R72 allocation fields:
+- `disk_group_id`, `node_id`, `rack_id` (exist; `node_id`/`rack_id`
+  for group-0 key routing — see naming note above), `status:
+  RwLock<HwStatus>` (exists), `bind: RwLock<(u64, u64)>` (exists,
+  populated by §3.3).
+- `disks: RwLock<Vec<ZoneDisk>>` (exists; consider `HashMap<DiskId,
+  Arc<ZoneDisk>>` for O(1) free-by-disk-id lookup, §14 — switch if
+  free-path lookups warrant it).
+- `allocating_disks: RwLock<Arc<AllocateDiskContext>>` (**add**, R72)
+  — RCU context of allocatable disks within this disk-group.
+- `pos_v_disk_ctx: AtomicU64` (**add**, R72) — round-robin cursor.
+- Replace `type AllocateDiskContext = ()` with the real struct (§4.3).
+
+`ZoneDisk` (`node/disk.rs`) — add the R72 zone-rotation fields:
+- `disk_id`, `disk_group_id`, `node_id`, `rack_id`, `disk_value:
+  RwLock<DiskValue>` (exist), `zones: RwLock<Vec<ZoneRef>>` (exists;
+  `ZoneRef` becomes a real `Arc<Zone>`), `pos_v_zone: AtomicU64`
+  (exists).
+- `active_zone_context: RwLock<Arc<ActiveZoneContext>>` (**add**, R72).
+- `pos_v_zone_ctx: AtomicU64` (**add**, R72) — round-robin over the
+  active set.
+- Replace `type ActiveZoneContext = ()` and `ZoneRef { zone_index }`
+  with the real types (§4.2).
+
+### 3.7 Bad-disk handling — scan impacted busy blocks
+
+When a disk transitions to `Bad` (via `Missing → Bad` after
+confirmation, root design §9), its busy blocks are no longer
+readable. diskdb does **not** rebuild or relocate them inline on the
+sync path — that is a future recovery requirement. R72's
+responsibility is to **detect and enumerate** the impacted blocks so
+a later path can handle them:
+
+- On `Bad` transition, mark the `ZoneDisk` and all its `Zone`s as
+  `Bad` (`zone_state = Bad`; `allocatable()` returns `false`).
+- Scan the zone records for the bad disk (`read_zone_records` per
+  zone, §4.4) and collect all live `BusyBlockValue`s — these are the
+  impacted blocks. Each carries `owner_chunk` (the chunk that owns the
+  allocation) so the caller/data-IO layer can be notified.
+- The collected list is handed to a future recovery/relocation path
+  (not in R72): the data-IO layer rebuilds from EC/mirror, or the
+  owner is notified to re-allocate elsewhere. R72 stubs the hand-off
+  (log + metric `disk.bad.impacted_blocks`); the actual relocation is
+  a follow-up requirement.
+- The disk stays `Bad` — no new allocates, no bitmap changes. Free is
+  still allowed on `Bad` disks? No — `allows_free(Bad)` is `false`
+  (§3.4: free allows `Up`/`Maintenance`/`Suspect` only). A `Bad`
+  disk's records are read-only until an operator removes the disk or
+  marks it `Up` after repair (which triggers R73 recovery).
+
+**R72 scope:** detect `Bad`, mark zones, enumerate impacted busy
+blocks, emit metrics. **Future scope:** notify owners, trigger
+rebuild, relocate allocations.
 
 ---
 
 ## 4. Part 2: Allocate / Free (R72)
 
+### 4.0 Module placement
+
+`zone.rs` (single file) holds `Zone` + `AllocatedRange`. `persistence.rs`
+holds `DataGroupClient` + the two-phase alloc/free functions; split into
+`persistence/{mod,alloc,free}.rs` only if it exceeds ~300 lines. This
+matches the existing flat-file convention (`node.rs` + `node/`).
+
 ### 4.1 Zone bitmap-scan allocator
 
-`app/crow-diskdb/src/zone/mod.rs`:
+`app/crow-diskdb/src/zone.rs`:
 
 - `Zone` — per-zone allocation state:
   - `disk_id: DiskId`, `zone_index: u32`, `disk_group_id: DiskGroupId`.
@@ -362,8 +523,8 @@ e. Add the disk to the `NodeContainer`.
     the hot path. Zones inherit the disk's `HwStatus`; no separate
     zone-level CAS state machine (§9).
   - `unit_capacity: u32` — total block units, word-aligned (§3.5).
-  - `usage_bits: UsageBitmap` — lock-free atomic bit operations (from
-    R70). Bit set = busy, bit clear = free.
+  - `usage_bits: UsageBitmap` — the R70 bitmap (lock-free atomic bit
+    ops).
   - `last_pos_64: AtomicU64` — rotating cursor over 64-bit words.
   - `used_count: AtomicU32` — count of set bits.
   - `snapshot_slot: AtomicU64` — last compacted snapshot slot (R73).
@@ -391,13 +552,33 @@ e. Add the disk to the `NodeContainer`.
 - `derived_alloc_state() -> ZoneAllocationState` — `Active` (0),
   `Available` (0 < used < cap), `Full` (used == cap). Reporting only.
 
+**Bitmap API gap (important):** the existing `UsageBitmap` exposes
+`range_set` / `range_clear` (whole-range `fetch_or` / `fetch_and` with
+rollback) but **not** word-level `compare_exchange`, a scan-from-cursor
+helper, or `countr_one`-based free-bit search. R72 must add to
+`UsageBitmap` (in `crow-protocol/src/bitmap.rs`):
+
+- `load_word(index: usize) -> u64` — `Acquire` load of one 64-bit word.
+- `cas_word(index: usize, expected: u64, new: u64) -> Result<u64, u64>`
+  — `compare_exchange` on one word (`AcqRel`/`Acquire`).
+- `cas_bit(bit_index: u32, set: bool) -> bool` — helper wrapping
+  `cas_word` with the right mask (used by `allocate`/`free` per-bit).
+- Keep `range_set` / `range_clear` for R73's bulk replay; the hot path
+  uses the CAS helpers + `last_pos_64` scan implemented in `Zone`.
+
+The scan loop (`countr_one`, rotating cursor, retry bound) lives in
+`Zone::allocate`, not in `UsageBitmap` — `UsageBitmap` stays a
+low-level bit-vector; `Zone` owns the allocation strategy.
+
 ### 4.2 Rotating active-zone-set + disk-level allocate
 
 `app/crow-diskdb/src/node/disk.rs` (§8):
 
-- `ActiveZoneContext` — `Vec<ZoneRef>` holding `zone_rotate_count`
-  zones. Replaced via RCU publish.
-- `disk_allocate(unit_count: u32) -> Option<(ZoneRef,
+- `ActiveZoneContext` — `Vec<Arc<Zone>>` holding `zone_rotate_count`
+  zones. Replaced via RCU publish. (Replaces `type ActiveZoneContext =
+  ()`.)
+- `ZoneRef` → `Arc<Zone>` (replaces the `{ zone_index }` stub).
+- `disk_allocate(unit_count: u32) -> Option<(Arc<Zone>,
   AllocatedRange)>`:
   a. Check disk effective `HwStatus == Up`.
   b. `max_loop = zone_num / zone_rotate_count + 2`.
@@ -418,11 +599,11 @@ e. Add the disk to the `NodeContainer`.
   by index, call `zone.free()`.
 - `rebuild_active_zones()` — build initial `ActiveZoneContext` with
   the first `zone_rotate_count` allocatable zones. Called by disk-add
-  init (R71) and recovery (R73).
+  init (§3.5) and recovery (R73).
 
 ### 4.3 Round-robin across disks within the named disk-group
 
-`app/crow-diskdb/src/node/mod.rs` (§8):
+`app/crow-diskdb/src/node.rs` (§8):
 
 The `AllocateBlocks` request carries `disk_group_id` (§3.2). diskdb
 never round-robins across disk-groups; it round-robins across the
@@ -430,9 +611,9 @@ disks **within that one named disk-group**.
 
 - `AllocateDiskContext` — `Vec<Arc<ZoneDisk>>` holding all allocatable
   disks within the named disk-group. Replaced via RCU publish on
-  add/remove/status-change.
+  add/remove/status-change. (Replaces `type AllocateDiskContext = ()`.)
 - `allocate_block(disk_group_id, unit_count, exclude_disks) ->
-  Result<(Arc<ZoneDisk>, ZoneRef, AllocatedRange)>`:
+  Result<(Arc<ZoneDisk>, Arc<Zone>, AllocatedRange)>`:
   a. Get the `Node` for `disk_group_id` from `NodeContainer`.
   b. Read-lock `allocating_disks` (Arc clone, drop lock); check
      non-empty (else `NoSpace`).
@@ -441,16 +622,16 @@ disks **within that one named disk-group**.
      disk-group). Call `disk_allocate(unit_count)`. On success, return.
   d. If no disk succeeded, return `NoSpace`.
 - `allocate_blocks(disk_group_id, unit_count, count, exclude_disks)
-  -> Result<Vec<(Arc<ZoneDisk>, ZoneRef, AllocatedRange)>>`:
+  -> Result<Vec<(Arc<ZoneDisk>, Arc<Zone>, AllocatedRange)>>`:
   a. For each of `count` allocations: round-robin select disk, skip
      excluded, call `disk_allocate(unit_count)`.
   b. Collect claims. If not all `count` claimed, retry remaining with
      a full scan (random start, skip excluded and already-used disks).
   c. If still not all claimed, return `NoSpace`.
 - `free_block(segment: &Segment) -> Result<bool>` — look up disk by
-  `segment.disk_id` via the disk-id → disk hash map (§14; O(1)),
-  call `disk.free(segment.zone_index, segment.unit_offset,
-  segment.unit_count)`.
+  `segment.disk_id` via the disk-id → disk map (§14; O(1) — if
+  `disks` is a `Vec`, build a side `HashMap<DiskId, Arc<ZoneDisk>>`
+  index alongside `allocating_disks`), call `disk.free(...)`.
 - `refresh_disk_context()` — scan all disks, build new
   `AllocateDiskContext` with disks where effective `HwStatus == Up`.
   Swap in (RCU publish). Called on add/remove disk and on status
@@ -458,7 +639,7 @@ disks **within that one named disk-group**.
 
 ### 4.4 Record persistence (KV operations)
 
-`app/crow-diskdb/src/persistence/mod.rs`:
+`app/crow-diskdb/src/persistence.rs`:
 
 diskdb has no "journal" abstraction — it performs plain KV put/delete
 operations on the bound data group via `CrowkvClient`; crow-kv's paxos
@@ -467,8 +648,11 @@ sequence of puts/deletes replayable in slot order) is how diskdb *uses*
 crow-kv's slot-ordered KV, not a concept in diskdb's code.
 
 - `DataGroupClient` — wraps `CrowkvClient` for put/delete/scan on the
-  disk-group's bound paxos data group (parallels `SysdataClient` for
-  group 0). Uses `(store_id, group_id)` from the binding map (R71).
+  disk-group's bound paxos data group (parallels `HardwareClient` for
+  group 0). Uses `(store_id, group_id)` from `Node.bind` (set by §3.3).
+  Keys are the binary keys from `lib/crow-protocol/src/key/diskdb.rs`
+  (`BusyBlockKey` / `FreeBlockKey` / `ZoneKey`), encoded via
+  `BinaryKey::encode`.
 - `persist_busy(dg_id, bind, disk_id, zone_idx, unit_offset, value:
   &BusyBlockValue) -> Result<()>` — `put` to `BusyBlockKey`.
 - `persist_busy_batch(dg_id, bind, records: &[(disk_id, zone_idx,
@@ -492,7 +676,7 @@ crow-kv's slot-ordered KV, not a concept in diskdb's code.
 
 ### 4.5 Two-phase async allocation
 
-`app/crow-diskdb/src/persistence/alloc.rs`:
+`app/crow-diskdb/src/persistence.rs` (or `persistence/alloc.rs`):
 
 - `allocate_block(node: &Arc<Node>, disk_group_id, unit_count,
   owner_chunk: &ChunkId, unit_size: u32, kv: &DataGroupClient) ->
@@ -518,18 +702,18 @@ crow-kv's slot-ordered KV, not a concept in diskdb's code.
   c. On success: return `Vec<Segment>`.
   d. On failure: `zone.free()` ALL claims (rollback every bit), return
      error.
-- `dg_id` and `bind` come from the `Node` struct (set by R71's sync
+- `dg_id` and `bind` come from the `Node` struct (set by §3.3's sync
   loop from the binding map).
 
 ### 4.6 Immediate free
 
-`app/crow-diskdb/src/persistence/free.rs` (v1: no `FreeBatch`, no
-timer, no background flush loop — §8):
+`app/crow-diskdb/src/persistence.rs` (or `persistence/free.rs`) (v1:
+no `FreeBatch`, no timer, no background flush loop — §8):
 
 - `free_block(node: &Arc<Node>, segment: &Segment, kv:
   &DataGroupClient) -> Result<()>`:
   a. `node.free_block(segment)` — clear bitmap locally (per-bit CAS)
-     via disk-id → disk hash map + zone-index → zone vec (§14; O(1)).
+     via disk-id → disk map + zone-index → zone vec (§14; O(1) lookups).
   b. Build `FreeBlockValue { unit_count, previous_owner:
      segment.owner_chunk }` (`previous_owner` from the `Segment` — no
      KV read needed).
@@ -561,7 +745,7 @@ timer, no background flush loop — §8):
 
 ### 4.7 gRPC handlers
 
-`app/crow-diskdb/src/grpc/service.rs`:
+`app/crow-diskdb/src/grpc.rs`:
 
 - `allocate_blocks` — validate `unit_count` (non-zero, aligned to block
   size) and `count` (1–1024), check not degraded, get node, call
@@ -569,38 +753,129 @@ timer, no background flush loop — §8):
 - `free_blocks` — parse `Vec<Segment>`, get node, call
   `persistence::free_blocks()` (immediate free in v1).
 - `query_capacity_stats` — stub (returns empty); R74 fills it in.
-- `get_disk_group_info` / `get_disk_info` — read from synced cache
-  (R71).
-- `rebuild_zone_bitmap` — stub (`Unimplemented`); R73 implements
-  strategy 1.
-- `mark_block_suspect` / `mark_block_corrupt` — stub
-  (`Unimplemented`); R75 implements.
-- Error mapping: `NoSpace` → `ResourceExhausted`, `NotOwner` →
-  `PermissionDenied`, `InvalidSize`/`InvalidCount` →
+- `get_disk_group_info` / `get_disk_info` — already implemented (read
+  from synced cache).
+- Error mapping: `NoSpace` → `ResourceExhausted`, `NotLeaderHint`/not
+  owner → `PermissionDenied`, `InvalidSize`/`InvalidCount` →
   `InvalidArgument`, `Degraded` → `Unavailable`.
+
+### 4.8 Crash-safety invariants + compaction relationship
+
+The zone usage bitmap is **derived from records** (root design §3.4:
+"records are the source of truth; bitmap is derived"). The in-memory
+bitmap is a performance cache; the durable state is the set of
+`BusyBlockKey` / `FreeBlockKey` / `ZoneValue` records on the bound
+data group. R72's allocate/free must preserve invariants that let R73
+recover correctly from **any** crash point. This is the hard part of
+the design.
+
+**Record-model invariants (R72 must preserve):**
+
+- **Allocate ordering** — Phase 1 (bitmap CAS) happens **before**
+  Phase 2 (`BusyBlockValue` persist). If diskdb crashes between Phase
+  1 and Phase 2, the bit is set in memory but no `BusyBlockKey`
+  exists on disk. On restart, R73's strategy-1 full scan rebuilds the
+  bitmap from records — the bit is **clear** (no busy record), so the
+  block is correctly free. This is a **ghost allocation** (bit set
+  in-memory, no record) that is self-correcting on restart. The §12
+  scanner also detects this drift during live operation.
+- **Free atomicity** — the free is one `batch_write` (Delete
+  `BusyBlockKey` + Put `FreeBlockValue` at `FreeBlockKey`), atomic
+  within the data group (crow-kv paxos). If diskdb crashes after the
+  bitmap clear but before the `batch_write` persists, the bit is clear
+  in memory but the `BusyBlockKey` still exists on disk. On restart,
+  R73's full scan sees the `BusyBlockKey` and re-sets the bit — the
+  block is correctly busy. The §12 scanner reconciles this drift
+  during live operation (ghost free).
+- **Current-state rule** (root design §7): a block is **busy** iff its
+  `BusyBlockKey` exists; otherwise it is **free**. A `FreeBlockKey`
+  may exist for a not-yet-compacted free (carrying `previous_owner`);
+  after compaction, neither key exists for that offset. This rule
+  holds at every crash point because allocate and free are each a
+  single durable operation (one `put` or one `batch_write`).
+- **Re-allocate clears the free marker** — on re-allocate (after a
+  free), the `FreeBlockKey` is deleted and a new `BusyBlockValue` is
+  written at `BusyBlockKey`. R72's `persist_busy` path must delete any
+  prior `FreeBlockKey` for the same offset (in the same `batch_write`
+  as the `BusyBlockValue` put) so the record set stays consistent.
+
+**Bitmap crash safety:**
+
+- The in-memory bitmap is **never the source of truth**. On restart,
+  R73 rebuilds it from records (strategy 2 journal-scan replay, or
+  strategy 1 full scan as fallback). R72 does not persist the bitmap
+  on the allocate/free hot path — only the `ZoneValue` snapshot
+  (written by R73 compaction) carries a serialized bitmap, with
+  `snapshot_slot` (replay start point) + `crc32` (integrity check).
+- R72 writes the **baseline** `ZoneValue` (empty bitmap,
+  `snapshot_slot = 0`) during disk-add init (§3.5). All subsequent
+  state changes are `BusyBlockValue` / `FreeBlockValue` records; R73
+  compaction periodically merges free records into a fresh `ZoneValue`
+  snapshot and deletes the free records.
+
+**Compaction relationship (R73 — R72 must not block it):**
+
+- Compaction (strategy 3, root design §7) periodically scans free
+  records for a zone, merges them into the `ZoneValue` bitmap (clears
+  the freed bits), writes a new `ZoneValue` snapshot with
+  `snapshot_slot = current_max_slot` + `crc32`, and deletes the free
+  records in one `batch_write`.
+- R72's `persist_free` writes `FreeBlockValue` records that compaction
+  will later merge. R72's `delete_free_records_batch` (§4.4) is the
+  method R73 compaction calls to delete the merged free records.
+- R72's `uncompacted_free_record_count` gauge (§4.1) tracks the
+  compaction backlog — when it exceeds `snapshot_journal_threshold`
+  (config, default 4096), R73 compaction triggers. R72 maintains the
+  gauge (increment on free, decrement on compaction — the decrement
+  is R73's call).
+- **R72 must not delete free records itself** — only compaction
+  (R73) deletes free records, after merging them into the snapshot.
+  R72's allocate path deletes a `FreeBlockKey` only on re-allocate
+  (when the offset is reused), which is correct: the free record is
+  superseded by a new busy record.
+
+**Error handling on the hot path:**
+
+- **Allocate persist failure** (Phase 2 `batch_write` fails): rollback
+  the bitmap (clear the bits set in Phase 1) and return error. The
+  caller retries or reports failure. No record was written, so the
+  record set is consistent (no ghost).
+- **Free persist failure** (`batch_write` fails): the bitmap was
+  already cleared locally. Return error; the §12 scanner reconciles
+  on restart (the `BusyBlockKey` still exists on disk → block is
+  busy → scanner detects the bitmap/record drift and re-sets the
+  bit). The caller's `FreeBlocks` RPC returns failure; the caller may
+  retry.
+- **Degraded mode** (group-0 / data-group unreachable): allocate/free
+  RPCs return `Unavailable` before touching the bitmap. No partial
+  state.
 
 ---
 
 ## 5. Server Wiring
 
-`app/crow-diskdb/src/main.rs`:
+`app/crow-diskdb/src/main.rs` — extend the implemented wiring:
 
-1. Parse CLI, load + validate config.
-2. Create `CrowkvClient` (points at crow-kv cluster; mock group-0 in
-   tests).
-3. Create `SysdataClient` wrapping `CrowkvClient` (for group 0).
-4. Create `DataGroupClient` wrapping `CrowkvClient` (for bound data
-   groups).
-5. Create `NodeContainer` (shared state).
-6. Create `StatusManager`.
-7. Create `SyncLoop` — spawn as background task.
-8. Run initial sync (blocking — server must not serve RPCs until
-   first sync completes and disk-add init flows finish).
-9. Create gRPC service (`DiskdbService`) wired with `NodeContainer`,
-   `DataGroupClient`, config.
-10. Start gRPC server (tonic) on `listen_addr`.
-11. Start HTTP management server (axum) on `http_listen_addr` (minimal
-    health + info endpoints; full console is R77).
+1. Parse CLI, load + validate config (exists).
+2. Generate `instance_id` (exists).
+3. Build `CrowkvClient` + `HardwareClient` + `ServiceRegistryClient`
+   (exist).
+4. **Create `DataGroupClient` wrapping `CrowkvClient`** (new — for
+   bound data groups).
+5. Create `NodeContainer` (exists).
+6. **Create `StatusManager`** (new — wire into `SyncLoop`).
+7. `SyncLoop` — spawn as background task (exists); pass
+   `DataGroupClient` + `StatusManager` so sync can run disk-add init
+   and status write-backs.
+8. **Run initial sync (blocking)** — server must not serve RPCs until
+   the first sync completes and disk-add init flows finish (new; the
+   current loop is spawn-and-go).
+9. gRPC service (`DiskdbService`) — wire with `NodeContainer`,
+   `DataGroupClient`, config (add `DataGroupClient` to the service
+   struct; allocate/free handlers use it).
+10. Start gRPC server (exists).
+11. HTTP management server (axum) — **R77**, not R72. Leave the
+    `http_listen_addr` config field in place; do not start the server.
 12. No `FreeBatch`, no `FreeFlushLoop` in v1 (R79 adds the
     size-threshold batch when `free_batch_enabled` is true).
 
@@ -608,20 +883,25 @@ timer, no background flush loop — §8):
 
 ## 6. Config Extensions
 
-`app/crow-diskdb/src/config.rs` — add to `StorageDefaults`:
-- `cas_retry_limit: u32` (default 100) — per-bit CAS retry cap (§8).
-- `validate_owner_on_free: bool` (default false) — strict ownership
-  validation before free (§14, §16).
+`app/crow-diskdb/src/config.rs` — current state vs. target:
 
-Add to `PersistenceConfig` (reserve for R79, default off):
-- `free_batch_enabled: bool` (default false).
-- `free_flush_max_batch: u32` (default 256, already exists).
-
-Fix `PersistenceConfig` — remove `free_flush_interval_ms` (no timer in
-  v1; R79 is size-threshold, no timer).
-
-Fix `HeartbeatConfig` — rename `interval_secs` to match the 10 s sync
-  interval (design §10 says 10 s, config says 13 s — align to design).
+- `StorageDefaults` currently has `zone_size_bytes`, `block_size_bytes`,
+  `allocate_granularity`, `zone_rotate_count`. **Add**:
+  - `cas_retry_limit: u32` (default 100) — per-bit CAS retry cap (§8).
+  - `validate_owner_on_free: bool` (default false) — strict ownership
+    validation before free (§14, §16).
+- `PersistenceConfig` currently has `free_flush_interval_ms`,
+  `free_flush_max_batch`, `snapshot_interval_secs`,
+  `snapshot_journal_threshold`. **Add** (reserve for R79, default off):
+  - `free_batch_enabled: bool` (default false).
+  - `free_flush_max_batch` (default 256, already exists).
+  - **Remove `free_flush_interval_ms`** — no timer in v1; R79 is
+    size-threshold, no timer.
+- `HeartbeatConfig.interval_secs` — already 10 (aligned to design §10).
+  Keep.
+- `SyncConfig` — `group0_store_id`, `group0_group_id`,
+  `sync_interval_secs` (all exist, 10 s). Keep.
+- Add validation for the new fields (`cas_retry_limit > 0`).
 
 ---
 
@@ -638,26 +918,46 @@ Fix `HeartbeatConfig` — rename `interval_secs` to match the 10 s sync
   `zone.allocate.retry.cms.bit` counter increments and the allocate
   falls through after `cas_retry_limit` retries.
 - `Zone::derived_alloc_state()` — Active / Available / Full transitions.
+- `UsageBitmap` — new `load_word` / `cas_word` / `cas_bit` helpers
+  (round-trip, CAS success/failure).
 - `ZoneDisk::disk_allocate()` — round-robin over active set, rotation
   when exhausted.
-- `StatusManager::effective_status()` — `max(node, group, disk)`.
-- `StatusManager` transition rules — all legal transitions succeed,
-  illegal ones rejected.
+- `StatusManager` — already has unit tests (transitions, effective
+  status, allows_allocate/free). Add `apply_disk_status` write-back
+  test once wired.
 - Config validation — new fields (`cas_retry_limit`,
   `validate_owner_on_free`).
+- **Crash-safety invariants** (§4.8) — verify the record-model
+  invariants hold: allocate-then-crash-before-persist → no
+  `BusyBlockKey` (block is free by the current-state rule);
+  free-then-crash-before-persist → `BusyBlockKey` still exists (block
+  is busy); re-allocate deletes the prior `FreeBlockKey` in the same
+  `batch_write` as the new `BusyBlockValue` put.
+- **Bad-disk handling** (§3.7) — mark a disk `Bad`, verify all its
+  zones transition to `Bad`, `allocatable()` returns `false`, and the
+  impacted busy blocks are enumerable (scan returns the live
+  `BusyBlockValue`s with `owner_chunk`).
 
-### 7.2 Integration tests (in-process mock group-0)
+### 7.2 Integration tests (real group-0 cluster)
 
-Using the `diskdb_test_harness` (§2.3):
+Using the `diskdb_test_harness` (§2.3) against a real group-0
+cluster:
 
-- **Sync** — seed mock group-0 with topology, start `SyncLoop`,
-  verify `NodeContainer` has the correct disk-groups/disks/zones.
-- **Disk-add init** — add a disk to mock group-0, trigger sync,
-  verify `ZoneValue` baselines written to the data group.
-- **Status transition** — `SetDiskStatus` on mock group-0, trigger
-  sync, verify in-memory status updated, `allocatable` reflects it.
-- **Degraded mode** — stop mock group-0, wait 3 sync cycles, verify
-  degraded mode; restart mock, verify recovery.
+- **Sync** — seed group 0 with topology via `HardwareClient`, start
+  `SyncLoop`, verify `NodeContainer` has the correct
+  disk-groups/disks/zones and `Node.bind` is populated.
+- **Disk-add init** — add a disk to group 0 via `HardwareClient`,
+  trigger sync, verify `ZoneValue` baselines written to the bound
+  data group.
+- **Status transition** — `set_disk_status` on group 0, trigger sync,
+  verify in-memory status updated, `allocatable` reflects it.
+- **Degraded mode** — stop the group-0 leader (or kill the
+  group-0 server), wait 3 sync cycles, verify degraded mode; restart,
+  verify recovery.
+- **Bad disk** — allocate blocks on a disk, set its status to `Bad`
+  in group 0, trigger sync, verify the disk's zones go `Bad`,
+  allocates stop serving that disk, and the impacted busy blocks are
+  enumerable via `read_zone_records`.
 - **Allocate (single)** — allocate one block, verify `BusyBlockValue`
   in the data group at the expected `BusyBlockKey` with fields
   `{ unit_count, unit_size, owner_chunk, state: Ok }`.
@@ -682,4 +982,5 @@ Using the `diskdb_test_harness` (§2.3):
 
 - `pixi run cargo fmt --all -- --check`
 - `pixi run cargo clippy --all-targets -- -D warnings`
-- Relevant tests pass (`pixi run cargo test -p crow-diskdb`).
+- Relevant tests pass (`pixi run cargo test -p crow-diskdb` and
+  `pixi run cargo test -p crow-protocol` for the bitmap additions).
