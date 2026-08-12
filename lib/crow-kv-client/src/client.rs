@@ -9,17 +9,14 @@
 
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use dashmap::DashMap;
-use tracing::warn;
 
 use crow_kv::rpc::kv_service_client::KvServiceClient;
 use crow_kv::rpc::{
-    CreateSnapshotRequest, CreateSnapshotResponse, KvBatchItem, KvBatchWriteRequest, KvDeleteRequest,
-    KvErrorCode, KvGetRequest, KvResponse, KvScanRequest, KvSetRequest, ListSnapshotsRequest, ReadMode,
-    ReleaseSnapshotRequest, ReleaseSnapshotResponse, SnapshotInfo, SnapshotScanRequest, SnapshotScanResponse,
+    KvBatchItem, KvBatchWriteRequest, KvDeleteRequest, KvGetRequest, KvScanRequest, KvSetRequest, ReadMode,
 };
 
 use crate::config::{ClientConfig, ReadEndpointPolicy, RetryConfig};
@@ -117,7 +114,7 @@ impl EndpointStats {
 /// iteration (covers all exit paths: success, error, redirect, `?`).
 /// Holds an `Arc<EndpointStats>` so it can live across `.await` points
 /// (a `DashMap` entry guard is not `Send`).
-struct InFlightGuard {
+pub(crate) struct InFlightGuard {
     stats: Arc<EndpointStats>,
 }
 
@@ -139,12 +136,12 @@ impl Drop for InFlightGuard {
 /// retries of one logical write, and `ReadMode` routing including
 /// `MinSlot` client-side slot tracking.
 pub struct CrowkvClient {
-    topology: TopologyCache,
-    pool: ConnectionPool,
-    retry: RetryConfig,
+    pub(crate) topology: TopologyCache,
+    pub(crate) pool: ConnectionPool,
+    pub(crate) retry: RetryConfig,
     client_id: u64,
     next_seq: AtomicU64,
-    metrics: Arc<ClientMetrics>,
+    pub(crate) metrics: Arc<ClientMetrics>,
     /// Per-`(store_id, group_id)` high-watermark of the last write's
     /// `revision`, auto-attached as `min_slot` on `MinSlot` reads.
     /// Bounded by the number of groups this client has written to, not by
@@ -292,7 +289,7 @@ impl CrowkvClient {
     /// refreshes `/topology` once and retries, falling back to the
     /// leader if still unknown — a single-replica group or a stale
     /// `/topology` never blocks reads.
-    async fn resolve_read_endpoint(
+    pub(crate) async fn resolve_read_endpoint(
         &self,
         store_id: u64,
         group_id: u64,
@@ -391,7 +388,7 @@ impl CrowkvClient {
     /// `InFlightGuard` that decrements the in-flight count on drop.
     /// Used in the get/scan retry loops to track per-endpoint load for
     /// `LeastConnections` selection.
-    fn incr_in_flight(&self, endpoint: &str) -> InFlightGuard {
+    pub(crate) fn incr_in_flight(&self, endpoint: &str) -> InFlightGuard {
         let entry = self
             .endpoint_stats
             .entry(endpoint.to_string())
@@ -1018,7 +1015,7 @@ impl CrowkvClient {
 
     /// `MinSlot` auto-attaches this client's own last-write watermark
     /// for the group unless the caller already supplied a `min_slot`.
-    fn resolve_min_slot(
+    pub(crate) fn resolve_min_slot(
         &self,
         store_id: u64,
         group_id: u64,
@@ -1032,224 +1029,6 @@ impl CrowkvClient {
             return self.read_your_writes_slot(store_id, group_id);
         }
         0
-    }
-
-    /// If `resp` carries a `NotLeaderHint`, follow it immediately (uncounted
-    /// retry — forward progress toward the real leader) and update the
-    /// topology cache. Returns `None` if `resp` did not indicate not-leader
-    /// (caller should treat it as a normal application error).
-    fn follow_not_leader(&self, store_id: u64, group_id: u64, resp: &KvResponse) -> Option<String> {
-        if resp.not_leader_hint.is_empty() {
-            return None;
-        }
-        self.topology
-            .set_leader(store_id, group_id, resp.not_leader_hint.clone());
-        Some(resp.not_leader_hint.clone())
-    }
-
-    /// A `not leader` failure with an empty hint (the responding replica
-    /// doesn't know who its leader is either -- typically mid-election,
-    /// e.g. right after a restart; a real hint would have already been
-    /// handled by [`Self::follow_not_leader`] before this is checked).
-    /// Checks the structured `error_code` first, falling back to the
-    /// string for old servers that don't set the code (default 0 =
-    /// `KvErrorNone`).
-    fn is_unknown_leader(error_code: i32, error: &str) -> bool {
-        error_code == KvErrorCode::KvErrorNotLeader as i32 || error == "not leader"
-    }
-
-    /// After an [`Self::is_unknown_leader`] failure, give the election a
-    /// chance to converge and pick up whatever leader the cache learns in
-    /// the meantime, instead of busy-retrying the same non-answering
-    /// replica ("100ms-then-retry"). Logs refresh failures instead of
-    /// silently swallowing them; the caller's `count_other` surfaces
-    /// `RetriesExhausted` if the endpoint stays stale.
-    async fn wait_and_refresh_leader(&self, store_id: u64, group_id: u64, endpoint: &str) -> String {
-        self.metrics.record_unknown_leader_wait();
-        self.metrics.record_leader_query();
-        self.metrics.record_topology_refresh();
-        if let Err(e) = self.topology.refresh().await {
-            warn!(error = %e, "topology refresh failed in wait_and_refresh_leader");
-        }
-        tokio::time::sleep(self.retry.unknown_leader_wait).await;
-        self.topology
-            .leader(store_id, group_id)
-            .unwrap_or_else(|| endpoint.to_string())
-    }
-
-    /// Transport-level failure (connect/timeout/unavailable): best-effort
-    /// topology refresh (covers "leader moved and we don't know where"),
-    /// exponential backoff, then return the (possibly updated) endpoint to
-    /// retry against. Logs refresh failures instead of silently
-    /// swallowing them; the caller's `count_other` surfaces
-    /// `RetriesExhausted` if the endpoint stays stale.
-    async fn handle_transport_err(
-        &self,
-        store_id: u64,
-        group_id: u64,
-        current: &str,
-        backoff: &mut Duration,
-    ) -> String {
-        self.metrics.record_topology_refresh();
-        if let Err(e) = self.topology.refresh().await {
-            warn!(error = %e, "topology refresh failed in handle_transport_err");
-        }
-        let endpoint = self
-            .topology
-            .leader(store_id, group_id)
-            .unwrap_or_else(|| current.to_string());
-        tokio::time::sleep(*backoff).await;
-        *backoff = (*backoff * 2).min(self.retry.backoff_max);
-        endpoint
-    }
-
-    /// Count one non-`NotLeaderHint` retryable outcome; errors once the
-    /// configured retry budget (`RetryConfig::max_retries`) is exhausted.
-    ///
-    /// # Errors
-    /// `Error::RetriesExhausted` once `attempts` exceeds the budget.
-    fn count_other(&self, attempts: u32, last: &str) -> Result<u32> {
-        let attempts = attempts + 1;
-        if attempts > self.retry.max_retries {
-            self.metrics.record_retries_exhausted();
-            return Err(Error::RetriesExhausted {
-                attempts,
-                last: last.to_string(),
-            });
-        }
-        Ok(attempts)
-    }
-
-    /// R59: Create a point-in-time-consistent snapshot. Flushes L0 → L1
-    /// and pins the durable view at `last_applied_slot`. Returns a
-    /// snapshot handle for use with `snapshot_scan`/`release_snapshot`.
-    ///
-    /// # Errors
-    /// `Error::NotLeader` if this client is not connected to the leader
-    /// (for linearizable mode). `Error::Transport` on transport failure.
-    pub async fn create_snapshot(
-        &self,
-        store_id: u64,
-        group_id: u64,
-        read_mode: ReadMode,
-        min_slot: Option<u64>,
-    ) -> Result<CreateSnapshotResponse> {
-        let min_slot = self.resolve_min_slot(store_id, group_id, read_mode, min_slot);
-        let endpoint = self.resolve_read_endpoint(store_id, group_id, read_mode).await?;
-        let req = CreateSnapshotRequest {
-            group_id,
-            read_mode: read_mode as i32,
-            min_slot,
-        };
-        let channel = self.pool.get(&endpoint)?;
-        let _in_flight = self.incr_in_flight(&endpoint);
-        let resp = KvServiceClient::new(channel)
-            .create_snapshot(req)
-            .await
-            .map_err(|e| Error::Transport {
-                endpoint: endpoint.clone(),
-                status: e.to_string(),
-            })?
-            .into_inner();
-        Ok(resp)
-    }
-
-    /// R59: List active snapshot handles for a group.
-    ///
-    /// # Errors
-    /// `Error::NoLeader` if no leader is known. `Error::Transport` on
-    /// transport failure.
-    pub async fn list_snapshots(&self, store_id: u64, group_id: u64) -> Result<Vec<SnapshotInfo>> {
-        let endpoint = self
-            .topology
-            .leader(store_id, group_id)
-            .ok_or(Error::NoLeader { store_id, group_id })?;
-        let req = ListSnapshotsRequest { group_id };
-        let channel = self.pool.get(&endpoint)?;
-        let _in_flight = self.incr_in_flight(&endpoint);
-        let resp = KvServiceClient::new(channel)
-            .list_snapshots(req)
-            .await
-            .map_err(|e| Error::Transport {
-                endpoint: endpoint.clone(),
-                status: e.to_string(),
-            })?
-            .into_inner();
-        Ok(resp.snapshots)
-    }
-
-    /// R59: Iterate a pinned snapshot with prefix/pagination. Returns
-    /// one page of results; the caller advances `start_after` to the
-    /// last returned key for the next page. The snapshot handle must
-    /// have been created by `create_snapshot` and not yet released or
-    /// expired.
-    ///
-    /// # Errors
-    /// `Error::NoLeader` if no leader is known. `Error::Transport` on
-    /// transport failure.
-    pub async fn snapshot_scan(
-        &self,
-        store_id: u64,
-        group_id: u64,
-        snapshot_handle: u64,
-        prefix: &[u8],
-        start_after: &[u8],
-        limit: u32,
-    ) -> Result<SnapshotScanResponse> {
-        let endpoint = self
-            .topology
-            .leader(store_id, group_id)
-            .ok_or(Error::NoLeader { store_id, group_id })?;
-        let req = SnapshotScanRequest {
-            snapshot_handle,
-            prefix: Bytes::copy_from_slice(prefix),
-            start_after: Bytes::copy_from_slice(start_after),
-            limit,
-            group_id,
-        };
-        let channel = self.pool.get(&endpoint)?;
-        let _in_flight = self.incr_in_flight(&endpoint);
-        let resp = KvServiceClient::new(channel)
-            .snapshot_scan(req)
-            .await
-            .map_err(|e| Error::Transport {
-                endpoint: endpoint.clone(),
-                status: e.to_string(),
-            })?
-            .into_inner();
-        Ok(resp)
-    }
-
-    /// R59: Release a snapshot handle, dropping the pinned view.
-    ///
-    /// # Errors
-    /// `Error::NoLeader` if no leader is known. `Error::Transport` on
-    /// transport failure.
-    pub async fn release_snapshot(
-        &self,
-        store_id: u64,
-        group_id: u64,
-        snapshot_handle: u64,
-    ) -> Result<ReleaseSnapshotResponse> {
-        let endpoint = self
-            .topology
-            .leader(store_id, group_id)
-            .ok_or(Error::NoLeader { store_id, group_id })?;
-        let req = ReleaseSnapshotRequest {
-            snapshot_handle,
-            group_id,
-        };
-        let channel = self.pool.get(&endpoint)?;
-        let _in_flight = self.incr_in_flight(&endpoint);
-        let resp = KvServiceClient::new(channel)
-            .release_snapshot(req)
-            .await
-            .map_err(|e| Error::Transport {
-                endpoint: endpoint.clone(),
-                status: e.to_string(),
-            })?
-            .into_inner();
-        Ok(resp)
     }
 }
 

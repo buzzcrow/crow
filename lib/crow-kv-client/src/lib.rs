@@ -18,6 +18,8 @@
 //! its own gRPC client.
 
 mod client;
+mod client_admin;
+mod client_retry;
 mod config;
 mod error;
 mod hardware;
