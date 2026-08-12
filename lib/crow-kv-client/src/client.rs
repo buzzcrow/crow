@@ -1269,6 +1269,7 @@ fn next_request_id() -> u64 {
 /// A `client_id` unique enough for one client session ("opaque, assigned
 /// once per client session"). Derived from the
 /// process start time in nanoseconds; not a cryptographic identifier.
-fn new_client_id() -> u64 {
+#[must_use]
+pub fn new_client_id() -> u64 {
     next_request_id()
 }

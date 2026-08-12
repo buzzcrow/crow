@@ -111,6 +111,16 @@ pub struct Cli {
     /// `0` = always drain (disables the heuristic).
     #[arg(long)]
     pub coalesce_drain_threshold: Option<usize>,
+
+    /// Instance ID for service-registry keep-alive. If omitted, a
+    /// unique ID is generated at startup.
+    #[arg(long)]
+    pub instance_id: Option<u64>,
+
+    /// Keep-alive heartbeat interval in seconds. 0 disables the
+    /// keep-alive loop. Default: 10.
+    #[arg(long, default_value_t = 10)]
+    pub keepalive_interval: u64,
 }
 
 /// Parse a comma-separated list of numbers and ranges into a `Vec<u64>`.

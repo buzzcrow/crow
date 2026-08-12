@@ -116,6 +116,12 @@ impl KvStoreRegistry {
         self.stores.get(&store_id).map(|r| r.clone())
     }
 
+    /// All hosted store IDs.
+    #[must_use]
+    pub fn store_ids(&self) -> Vec<u64> {
+        self.stores.iter().map(|e| *e.key()).collect()
+    }
+
     #[must_use]
     pub fn remove_store(&self, store_id: u64) -> Option<Arc<PxKvStore>> {
         self.stores.remove(&store_id).map(|(_, v)| v)

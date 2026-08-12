@@ -751,6 +751,7 @@ dependencies = [
  "bytes",
  "clap",
  "crow-kv",
+ "crow-kv-client",
  "crow-protocol",
  "crow-tree-ffi",
  "dashmap",

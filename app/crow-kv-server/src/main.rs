@@ -197,6 +197,31 @@ async fn main() {
     // Reconcile local state with group 0 topology KV.
     crow_kv_server::reconcile::reconcile_with_group0(&registry).await;
 
+    // Start the keep-alive loop (registers under /srv/kv-server/<id>).
+    let keepalive = if args.keepalive_interval > 0 {
+        let instance_id = args.instance_id.unwrap_or_else(|| {
+            let id = crow_kv_client::new_client_id();
+            info!(instance_id = id, "keep-alive: generated instance id");
+            id
+        });
+        let mgmt_endpoint = format!("http://{display_addr}");
+        // The group-0 gRPC endpoint is the first store's listen addr,
+        // or the management addr as a fallback (single-node dev).
+        let group0_ep = registry
+            .get_store(0)
+            .and_then(|s| s.listen_addr().map(|a| a.to_string()))
+            .unwrap_or_else(|| format!("http://{display_addr}"));
+        Some(crow_kv_server::keepalive::KeepAliveLoop::spawn(
+            registry.clone(),
+            instance_id,
+            mgmt_endpoint,
+            &group0_ep,
+            args.keepalive_interval,
+        ))
+    } else {
+        None
+    };
+
     // Wire engine stats collector into the metrics runner, then start it.
     // The collector polls C++ engine counters via ct_get_stats each tick,
     // computes deltas, and inc_by()s on registered Rust counters so they
@@ -220,6 +245,10 @@ async fn main() {
     if let Some(ref mut runner) = metrics_runner {
         runner.stop().await;
         info!("metrics runner stopped");
+    }
+    if let Some(ka) = keepalive {
+        ka.stop().await;
+        info!("keep-alive loop stopped");
     }
     graceful_shutdown(registry).await;
 }

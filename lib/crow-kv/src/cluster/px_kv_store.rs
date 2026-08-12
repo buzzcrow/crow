@@ -901,6 +901,11 @@ impl PxKvStore {
         self.groups.len()
     }
 
+    /// All hosted group IDs on this store.
+    pub fn group_ids(&self) -> Vec<u64> {
+        self.groups.iter().map(|e| *e.key()).collect()
+    }
+
     /// Iterate all groups, calling `f` with each `Arc<PxGroup>`.
     /// Used by the engine stats collector to poll crow-tree counters.
     pub fn for_each_group<F>(&self, mut f: F)

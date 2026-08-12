@@ -27,7 +27,7 @@ mod pool;
 mod service_registry;
 mod topology;
 
-pub use client::{BatchOp, CrowkvClient, GetOutcome, ScanOutcome, WriteOutcome};
+pub use client::{new_client_id, BatchOp, CrowkvClient, GetOutcome, ScanOutcome, WriteOutcome};
 pub use config::{ClientConfig, ReadEndpointPolicy, RetryConfig};
 pub use error::{Error, Result};
 pub use hardware::HardwareClient;

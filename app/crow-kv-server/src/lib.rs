@@ -10,6 +10,7 @@
 
 pub mod cli;
 pub mod engine_collector;
+pub mod keepalive;
 pub mod mgmt_api;
 pub mod operation_registry;
 pub mod reconcile;
