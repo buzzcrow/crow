@@ -31,17 +31,17 @@ test.describe('E2E-22 swagger panel', () => {
       await aside.getByRole('button', { name: 'N-221' }).click();
       await page.getByRole('button', { name: 'API' }).click();
 
-      const frameA = page.locator('iframe[title="Swagger UI for n22a"]');
+      const frameA = page.locator('iframe[title="Swagger UI for 221"]');
       await expect(frameA).toBeVisible({ timeout: 3_000 });
-      expect(decodeURIComponent((await frameA.getAttribute('src')) ?? '')).toContain('/nodes/n22a/openapi.json');
+      expect(decodeURIComponent((await frameA.getAttribute('src')) ?? '')).toContain('/nodes/221/openapi.json');
       // Shell stays mounted (no full-page navigation).
       await expect(page.locator('header').getByText('Crow Storage Console')).toBeVisible();
 
       // Switch the selection to n22b -> the iframe re-targets inline.
       await aside.getByRole('button', { name: 'N-222' }).click();
-      const frameB = page.locator('iframe[title="Swagger UI for n22b"]');
+      const frameB = page.locator('iframe[title="Swagger UI for 222"]');
       await expect(frameB).toBeVisible({ timeout: 3_000 });
-      expect(decodeURIComponent((await frameB.getAttribute('src')) ?? '')).toContain('/nodes/n22b/openapi.json');
+      expect(decodeURIComponent((await frameB.getAttribute('src')) ?? '')).toContain('/nodes/222/openapi.json');
       await expect(page.locator('header').getByText('Crow Storage Console')).toBeVisible();
     } finally {
       await stopNodeServer(baseURL!, 221);

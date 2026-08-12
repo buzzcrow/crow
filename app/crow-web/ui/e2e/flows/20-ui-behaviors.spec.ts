@@ -54,10 +54,10 @@ test.describe('E2E-20 UI behaviors', () => {
       const addStoreDialog = page.getByRole('dialog', { name: 'Add KV Store' });
       await expect(addStoreDialog).toBeVisible();
       await expect(addStoreDialog.getByLabel('KV Store ID (numeric)')).toHaveValue(expectedStoreId);
-      await expect(addStoreDialog.getByLabel(/^n20a/)).toBeVisible();
-      await expect(addStoreDialog.getByLabel(/^n20b/)).toBeVisible();
-      await expect(addStoreDialog.getByLabel(/^n20c/)).toBeVisible();
-      await expect(addStoreDialog.getByLabel(/^n20d/)).toHaveCount(0);
+      await expect(addStoreDialog.getByLabel(/^201\b/)).toBeVisible();
+      await expect(addStoreDialog.getByLabel(/^202\b/)).toBeVisible();
+      await expect(addStoreDialog.getByLabel(/^203\b/)).toBeVisible();
+      await expect(addStoreDialog.getByLabel(/^204\b/)).toHaveCount(0);
       await addStoreDialog.getByRole('button', { name: 'Cancel' }).click();
 
       await expect(aside.getByText('S-207')).toBeVisible({ timeout: 3_000 });
@@ -68,13 +68,13 @@ test.describe('E2E-20 UI behaviors', () => {
       await expect(addGroupDialog.getByLabel('KV Store')).toHaveValue('207');
       await expect(addGroupDialog.getByLabel('Group ID (numeric)')).toHaveValue(expectedGroupId);
       await expect(addGroupDialog.getByLabel('Starting Replica ID (numeric)')).toHaveValue(expectedReplicaId);
-      await expect(addGroupDialog.getByLabel(/^n20a/)).toBeVisible();
-      await expect(addGroupDialog.getByLabel(/^n20b/)).toBeVisible();
-      await expect(addGroupDialog.getByLabel(/^n20c/)).toBeVisible();
-      await expect(addGroupDialog.getByLabel(/^n20d/)).toHaveCount(0);
-      await addGroupDialog.getByLabel(/^n20a/).check();
-      await addGroupDialog.getByLabel(/^n20b/).check();
-      const n20cInput = addGroupDialog.getByLabel(/^n20c/);
+      await expect(addGroupDialog.getByLabel(/^201\b/)).toBeVisible();
+      await expect(addGroupDialog.getByLabel(/^202\b/)).toBeVisible();
+      await expect(addGroupDialog.getByLabel(/^203\b/)).toBeVisible();
+      await expect(addGroupDialog.getByLabel(/^204\b/)).toHaveCount(0);
+      await addGroupDialog.getByLabel(/^201\b/).check();
+      await addGroupDialog.getByLabel(/^202\b/).check();
+      const n20cInput = addGroupDialog.getByLabel(/^203\b/);
       if (await n20cInput.isChecked()) await n20cInput.uncheck();
       await addGroupDialog.getByRole('button', { name: /create group/i }).click();
 
@@ -89,8 +89,8 @@ test.describe('E2E-20 UI behaviors', () => {
         options.map((option) => ({ value: (option as HTMLOptionElement).value, disabled: (option as HTMLOptionElement).disabled })),
       );
       const optionValues = nodeOptions.filter((option) => !option.disabled).map((option) => option.value);
-      expect(optionValues).toEqual(expect.arrayContaining(['n20c', 'n20d']));
-      expect(optionValues).not.toEqual(expect.arrayContaining(['n20a', 'n20b']));
+      expect(optionValues).toEqual(expect.arrayContaining(['203', '204']));
+      expect(optionValues).not.toEqual(expect.arrayContaining(['201', '202']));
       await addReplicaDialog.getByLabel('Node', { exact: true }).selectOption('203');
       await addReplicaDialog.getByRole('button', { name: /add replica/i }).click();
 
@@ -102,8 +102,8 @@ test.describe('E2E-20 UI behaviors', () => {
         options.map((option) => ({ value: (option as HTMLOptionElement).value, disabled: (option as HTMLOptionElement).disabled })),
       );
       const remainingValues = remainingOptions.filter((option) => !option.disabled).map((option) => option.value);
-      expect(remainingValues).toEqual(expect.arrayContaining(['n20d']));
-      expect(remainingValues).not.toEqual(expect.arrayContaining(['n20a', 'n20b', 'n20c']));
+      expect(remainingValues).toEqual(expect.arrayContaining(['204']));
+      expect(remainingValues).not.toEqual(expect.arrayContaining(['201', '202', '203']));
       await remainingReplicaDialog.getByRole('button', { name: 'Cancel' }).click();
     } finally {
       await api.dispose();

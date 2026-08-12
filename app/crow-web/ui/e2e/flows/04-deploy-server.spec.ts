@@ -31,7 +31,6 @@ test.describe('E2E-04 deploy server', () => {
         return await server.json();
       }, { timeout: 5_000 }).toEqual(
         expect.objectContaining({
-          id: 4,
           node_id: 4,
           url: 'http://127.0.0.1:9911',
           grpc_url: 'http://127.0.0.1:9921',

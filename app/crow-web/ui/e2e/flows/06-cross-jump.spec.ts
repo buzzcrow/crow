@@ -23,7 +23,7 @@ test.describe('E2E-06 cross jump', () => {
       await expect(inspector).toBeVisible({ timeout: 3_000 });
 
       // Single cross-jump button: logical Replica -> hosting physical Node.
-      await inspector.getByRole('button', { name: /Show on node n6/ }).click();
+      await inspector.getByRole('button', { name: /Show on node 6\b/ }).click();
 
       await expect(page.getByRole('heading', { name: 'Infrastructure' })).toBeVisible({ timeout: 3_000 });
       await expect(inspector.getByText('N-6', { exact: true })).toBeVisible({ timeout: 3_000 });

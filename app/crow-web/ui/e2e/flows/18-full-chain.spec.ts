@@ -53,7 +53,7 @@ test.describe('E2E-18 full chain', () => {
       // 4. Deploy Crow Storage Server on n18a.
       await page.getByRole('treeitem').filter({ hasText: 'N-181' }).click({ button: 'right' });
       await page.getByRole('menuitem', { name: /deploy Crow Storage/i }).click();
-      await expect(page.getByRole('dialog', { name: /deploy Crow Storage on n18a/i })).toBeVisible();
+      await expect(page.getByRole('dialog', { name: /deploy Crow Storage on 181/i })).toBeVisible();
       await page.getByLabel('Management Port').fill('9933');
       await page.getByLabel('gRPC Port').fill('9943');
       await page.getByLabel('Binary Path (optional)').fill(DEFAULT_SERVER_BINARY);
@@ -62,7 +62,7 @@ test.describe('E2E-18 full chain', () => {
       // 5. Deploy Crow Storage Server on n18b.
       await page.getByRole('treeitem').filter({ hasText: 'N-182' }).click({ button: 'right' });
       await page.getByRole('menuitem', { name: /deploy Crow Storage/i }).click();
-      await expect(page.getByRole('dialog', { name: /deploy Crow Storage on n18b/i })).toBeVisible();
+      await expect(page.getByRole('dialog', { name: /deploy Crow Storage on 182/i })).toBeVisible();
       await page.getByLabel('Management Port').fill('9934');
       await page.getByLabel('gRPC Port').fill('9944');
       await page.getByLabel('Binary Path (optional)').fill(DEFAULT_SERVER_BINARY);
@@ -89,7 +89,7 @@ test.describe('E2E-18 full chain', () => {
       await page.locator('aside').getByRole('button', { name: 'Add Store' }).click();
       await expect(page.getByRole('dialog', { name: 'Add KV Store' })).toBeVisible();
       await page.getByLabel('KV Store ID (numeric)').fill('188');
-      await page.getByLabel(/^n18a/).check();
+      await page.getByLabel(/^181\b/).check();
       await page.getByRole('button', { name: /create kv store/i }).click();
       await expect(aside.getByText('S-188')).toBeVisible({ timeout: 3_000 });
 
@@ -98,8 +98,8 @@ test.describe('E2E-18 full chain', () => {
       await expect(page.getByRole('dialog', { name: 'Add Group' })).toBeVisible();
       await page.getByLabel('Group ID (numeric)').fill('1880');
       await page.getByLabel('Starting Replica ID (numeric)').fill('18800');
-      await page.getByLabel(/^n18b/).uncheck();
-      await page.getByLabel(/^n18a/).check();
+      await page.getByLabel(/^182\b/).uncheck();
+      await page.getByLabel(/^181\b/).check();
       await page.getByRole('button', { name: /create group/i }).click();
 
       // Store created after tree mount -> expand it to reveal its group.

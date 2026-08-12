@@ -77,7 +77,7 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     await page.getByRole('button', { name: 'Add Store' }).click();
     await expect(page.getByRole('dialog', { name: 'Add KV Store' })).toBeVisible();
     await page.getByLabel('KV Store ID (numeric)').fill('7');
-    await page.getByLabel(/^nsm/).check();
+    await page.getByLabel(/^77\b/).check();
     await page.getByRole('button', { name: /create kv store/i }).click();
     await expect(aside.getByText('S-7')).toBeVisible({ timeout: 3_000 });
 
@@ -87,7 +87,7 @@ test.describe('E2E-00 full real operation (rewritten UI)', () => {
     await expect(page.getByRole('dialog', { name: 'Add Group' })).toBeVisible();
     await page.getByLabel('Group ID (numeric)').fill('70');
     await page.getByLabel('Starting Replica ID (numeric)').fill('700');
-    await page.getByLabel(/^nsm/).check();
+    await page.getByLabel(/^77\b/).check();
     await page.getByRole('button', { name: /create group/i }).click();
 
     // --- Logical: expand store, see group + replica ---
