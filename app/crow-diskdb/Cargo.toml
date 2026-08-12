@@ -12,6 +12,10 @@ autobenches = false
 name = "crow-diskdb"
 path = "src/main.rs"
 
+[lib]
+name = "crow_diskdb"
+path = "src/lib.rs"
+
 [lints]
 workspace = true
 

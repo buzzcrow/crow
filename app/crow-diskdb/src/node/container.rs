@@ -1,0 +1,63 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
+//! `NodeContainer` — per-instance singleton managing all owned disk-groups.
+
+use super::Node;
+use crow_protocol::DiskGroupId;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
+use tracing::warn;
+
+/// Per-instance singleton managing all owned disk-groups.
+pub struct NodeContainer {
+    nodes: RwLock<HashMap<DiskGroupId, Arc<Node>>>,
+    pub instance_id: u64,
+    pub degraded: AtomicBool,
+}
+
+impl NodeContainer {
+    pub fn new(instance_id: u64) -> Self {
+        Self {
+            nodes: RwLock::new(HashMap::new()),
+            instance_id,
+            degraded: AtomicBool::new(false),
+        }
+    }
+
+    pub fn add_node(&self, node: Arc<Node>) {
+        let dg_id = node.disk_group_id;
+        self.nodes.write().unwrap().insert(dg_id, node);
+    }
+
+    pub fn remove_node(&self, dg_id: DiskGroupId) {
+        self.nodes.write().unwrap().remove(&dg_id);
+    }
+
+    pub fn get_node(&self, dg_id: DiskGroupId) -> Option<Arc<Node>> {
+        self.nodes.read().unwrap().get(&dg_id).cloned()
+    }
+
+    pub fn node_ids(&self) -> Vec<DiskGroupId> {
+        self.nodes.read().unwrap().keys().copied().collect()
+    }
+
+    pub fn enter_degraded_mode(&self) {
+        let prev = self.degraded.swap(true, Ordering::SeqCst);
+        if !prev {
+            warn!("entering degraded mode");
+        }
+    }
+
+    pub fn exit_degraded_mode(&self) {
+        let prev = self.degraded.swap(false, Ordering::SeqCst);
+        if prev {
+            warn!("exiting degraded mode");
+        }
+    }
+
+    pub fn is_degraded(&self) -> bool {
+        self.degraded.load(Ordering::SeqCst)
+    }
+}
