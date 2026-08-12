@@ -28,12 +28,12 @@ use crate::rpc::{snapshot_stream_item, SnapshotHeader, SnapshotRequest, Snapshot
 const SNAPSHOT_STREAM_CHUNK_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone)]
-pub struct PxSnapshotService {
+pub(crate) struct PxSnapshotService {
     store: Arc<PxKvStore>,
 }
 
 impl PxSnapshotService {
-    pub fn new(store: Arc<PxKvStore>) -> Self {
+    pub(crate) fn new(store: Arc<PxKvStore>) -> Self {
         Self { store }
     }
 }

@@ -188,7 +188,7 @@ impl PxLearner {
 
     /// Wire the engine-apply latency summary. Called once during group
     /// creation when a metrics registry is available.
-    pub fn set_engine_apply_summary(&self, summary: Arc<crate::metrics::LatencySummary>) {
+    pub(crate) fn set_engine_apply_summary(&self, summary: Arc<crate::metrics::LatencySummary>) {
         let _ = self.engine_apply.set(summary);
     }
 

@@ -179,7 +179,7 @@ impl KvMetrics {
 }
 
 #[derive(Clone)]
-pub struct KvStoreService {
+pub(crate) struct KvStoreService {
     store: Arc<PxKvStore>,
     /// Per-group metrics handles, lazily registered on first RPC for
     /// each `group_id`.
@@ -190,7 +190,7 @@ impl KvStoreService {
     /// Create a new service. If the store has a metrics registry attached,
     /// a per-group metrics map is created (entries are lazily added on
     /// first use by each RPC handler).
-    pub fn new(store: Arc<PxKvStore>) -> Self {
+    pub(crate) fn new(store: Arc<PxKvStore>) -> Self {
         let metrics = store.metrics_registry.as_ref().map(|_| Arc::new(DashMap::new()));
         Self { store, metrics }
     }

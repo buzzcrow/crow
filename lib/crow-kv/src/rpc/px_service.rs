@@ -24,9 +24,9 @@ use crate::paxos::PxTerm;
 use crate::rpc::px_service_server::PxService;
 use crate::rpc::{
     learner_stream_request, learner_stream_response, AcceptRequest, AcceptedResponse, AcceptedValue,
-    HeartbeatRequest, HeartbeatResponse, LearnerStreamRequest, LearnerStreamResponse, PreVoteRequest,
-    PreVoteResponse, PrepareRequest, PromiseResponse, RequestVoteRequest, RequestVoteResponse,
-    StepDownRequest, StepDownResponse,
+    BatchChosenNotification, ChosenNotification, FetchGapRequest, HeartbeatRequest, HeartbeatResponse,
+    LearnerStreamRequest, LearnerStreamResponse, PreVoteRequest, PreVoteResponse, PrepareRequest,
+    PromiseResponse, RequestVoteRequest, RequestVoteResponse, StepDownRequest, StepDownResponse,
 };
 
 /// Build an epoch-mismatch `PromiseResponse` for the Prepare fence.
@@ -93,12 +93,12 @@ impl From<PxReplicaError> for Status {
 
 /// gRPC service wrapper that delegates `Prepare`/`Accept` to `PxLocalReplica`.
 #[derive(Clone)]
-pub struct PxReplicaService {
+pub(crate) struct PxReplicaService {
     store: Arc<PxKvStore>,
 }
 
 impl PxReplicaService {
-    pub fn new(store: Arc<PxKvStore>) -> Self {
+    pub(crate) fn new(store: Arc<PxKvStore>) -> Self {
         Self { store }
     }
 }
@@ -434,154 +434,12 @@ impl PxService for PxReplicaService {
                         }
                     }
                     learner_stream_request::Frame::Chosen(notice) => {
-                        // R65: ballot-verified out-of-order apply. The
-                        // leader sends ChosenNotice AFTER confirming
-                        // quorum, so the slot is genuinely chosen. The
-                        // follower checks whether it has the value at
-                        // the same ballot as the chosen value:
-                        // - ballot match → update_chosen_frontier +
-                        //   wake_apply_loop (apply now, out-of-order OK)
-                        // - stale ballot (lower) → note_chosen only
-                        //   (stale value, NOT applied → FetchGap later)
-                        // - no accepted value → note_chosen only
-                        //   (missing value → FetchGap later)
-                        if let Some(group) = store.get_group(notice.group_id) {
-                            let replica = group.local_replica();
-                            let chosen_ballot = PxBallot {
-                                round: notice.ballot_round,
-                                leader_id: notice.leader_id,
-                            };
-                            let accepted = replica.accepted_at(notice.slot).await;
-                            let ballot_matches = accepted.as_ref().is_some_and(|e| e.ballot == chosen_ballot);
-                            if ballot_matches {
-                                // Follower has the chosen value at the
-                                // chosen ballot — safe to apply.
-                                replica.learner.update_chosen_frontier(notice.slot, notice.term);
-                                replica.wake_apply_loop();
-                                debug!(
-                                    store_id = store.store_id,
-                                    group_id = notice.group_id,
-                                    slot = notice.slot,
-                                    term = notice.term,
-                                    leader_id = notice.leader_id,
-                                    ballot_round = notice.ballot_round,
-                                    "LearnerStream: chosen notification applied (ballot match)"
-                                );
-                            } else {
-                                // Stale or missing value — record
-                                // high-water mark only. The slot is chosen
-                                // but the follower doesn't have the
-                                // correct value. Record gap for FetchGap.
-                                replica.note_chosen(notice.slot, notice.term);
-                                replica.record_gap(notice.slot);
-                                if let Some(ref entry) = accepted {
-                                    replica.incr_chosen_notice_stale();
-                                    debug!(
-                                        store_id = store.store_id,
-                                        group_id = notice.group_id,
-                                        slot = notice.slot,
-                                        term = notice.term,
-                                        leader_id = notice.leader_id,
-                                        chosen_ballot_round = notice.ballot_round,
-                                        accepted_ballot_round = entry.ballot.round,
-                                        accepted_ballot_leader = entry.ballot.leader_id,
-                                        "LearnerStream: chosen notification stale ballot (gap recorded)"
-                                    );
-                                } else {
-                                    replica.incr_chosen_notice_missing();
-                                    debug!(
-                                        store_id = store.store_id,
-                                        group_id = notice.group_id,
-                                        slot = notice.slot,
-                                        term = notice.term,
-                                        leader_id = notice.leader_id,
-                                        "LearnerStream: chosen notification missing value (gap recorded)"
-                                    );
-                                }
-                            }
-                        } else {
-                            debug!(
-                                store_id = store.store_id,
-                                group_id = notice.group_id,
-                                slot = notice.slot,
-                                term = notice.term,
-                                "LearnerStream: chosen notification dropped (group not found)"
-                            );
-                        }
-                        None
+                        handle_chosen_notice(&store, notice).await
                     }
                     learner_stream_request::Frame::BatchChosen(batch) => {
-                        // R65: ballot-verified batch chosen notice. Same
-                        // logic as the per-slot ChosenNotice handler: for
-                        // each slot in the range, check if the follower has
-                        // the value at the chosen ballot. If yes, advance
-                        // the chosen frontier (apply). If stale/missing,
-                        // record high-water mark only (FetchGap later).
-                        if let Some(group) = store.get_group(batch.group_id) {
-                            let replica = group.local_replica();
-                            let chosen_ballot = PxBallot {
-                                round: batch.ballot_round,
-                                leader_id: batch.leader_id,
-                            };
-                            let mut advanced_count = 0u64;
-                            for slot in batch.start_slot..=batch.end_slot {
-                                let accepted = replica.accepted_at(slot).await;
-                                if accepted.as_ref().is_some_and(|e| e.ballot == chosen_ballot) {
-                                    replica.learner.update_chosen_frontier(slot, batch.term);
-                                    advanced_count += 1;
-                                } else {
-                                    replica.note_chosen(slot, batch.term);
-                                    replica.record_gap(slot);
-                                }
-                            }
-                            replica.wake_apply_loop();
-                            debug!(
-                                store_id = store.store_id,
-                                group_id = batch.group_id,
-                                start_slot = batch.start_slot,
-                                end_slot = batch.end_slot,
-                                term = batch.term,
-                                leader_id = batch.leader_id,
-                                ballot_round = batch.ballot_round,
-                                advanced_count,
-                                "LearnerStream: batch chosen notification applied"
-                            );
-                        } else {
-                            debug!(
-                                store_id = store.store_id,
-                                group_id = batch.group_id,
-                                "LearnerStream: batch chosen notification dropped (group not found)"
-                            );
-                        }
-                        None
+                        handle_batch_chosen(&store, batch).await
                     }
-                    learner_stream_request::Frame::FetchGap(fetch_req) => {
-                        // R65: FetchGap handler — leader resolves the
-                        // requested slot from its acceptor. If the leader
-                        // has the value, replies with it. If not, no reply
-                        // (follower retries on timeout).
-                        if let Some(group) = store.get_group(fetch_req.group_id) {
-                            if let Some(resp) = group.handle_fetch_gap(fetch_req.slot) {
-                                Some(learner_stream_response::Frame::FetchGapReply(resp))
-                            } else {
-                                debug!(
-                                    store_id = store.store_id,
-                                    group_id = fetch_req.group_id,
-                                    slot = fetch_req.slot,
-                                    "LearnerStream: fetch_gap no value (not yet chosen)"
-                                );
-                                None
-                            }
-                        } else {
-                            debug!(
-                                store_id = store.store_id,
-                                group_id = fetch_req.group_id,
-                                slot = fetch_req.slot,
-                                "LearnerStream: fetch_gap dropped (group not found)"
-                            );
-                            None
-                        }
-                    }
+                    learner_stream_request::Frame::FetchGap(fetch_req) => handle_fetch_gap(&store, fetch_req),
                 };
                 if let Some(frame) = response_frame {
                     if tx
@@ -598,6 +456,148 @@ impl PxService for PxReplicaService {
 
         let out_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
         Ok(Response::new(Box::pin(out_stream) as Self::LearnerStreamStream))
+    }
+}
+
+/// Handle a single-slot `ChosenNotice` frame from the bidi stream.
+/// Ballot-verified out-of-order apply: if the follower has the value at
+/// the chosen ballot, advance the chosen frontier and wake the apply
+/// loop; otherwise record a gap for `FetchGap`.
+async fn handle_chosen_notice(
+    store: &Arc<PxKvStore>,
+    notice: ChosenNotification,
+) -> Option<learner_stream_response::Frame> {
+    let Some(group) = store.get_group(notice.group_id) else {
+        debug!(
+            store_id = store.store_id,
+            group_id = notice.group_id,
+            slot = notice.slot,
+            term = notice.term,
+            "LearnerStream: chosen notification dropped (group not found)"
+        );
+        return None;
+    };
+    let replica = group.local_replica();
+    let chosen_ballot = PxBallot {
+        round: notice.ballot_round,
+        leader_id: notice.leader_id,
+    };
+    let accepted = replica.accepted_at(notice.slot).await;
+    let ballot_matches = accepted.as_ref().is_some_and(|e| e.ballot == chosen_ballot);
+    if ballot_matches {
+        replica.learner.update_chosen_frontier(notice.slot, notice.term);
+        replica.wake_apply_loop();
+        debug!(
+            store_id = store.store_id,
+            group_id = notice.group_id,
+            slot = notice.slot,
+            term = notice.term,
+            leader_id = notice.leader_id,
+            ballot_round = notice.ballot_round,
+            "LearnerStream: chosen notification applied (ballot match)"
+        );
+    } else {
+        replica.note_chosen(notice.slot, notice.term);
+        replica.record_gap(notice.slot);
+        if let Some(ref entry) = accepted {
+            replica.incr_chosen_notice_stale();
+            debug!(
+                store_id = store.store_id,
+                group_id = notice.group_id,
+                slot = notice.slot,
+                term = notice.term,
+                leader_id = notice.leader_id,
+                chosen_ballot_round = notice.ballot_round,
+                accepted_ballot_round = entry.ballot.round,
+                accepted_ballot_leader = entry.ballot.leader_id,
+                "LearnerStream: chosen notification stale ballot (gap recorded)"
+            );
+        } else {
+            replica.incr_chosen_notice_missing();
+            debug!(
+                store_id = store.store_id,
+                group_id = notice.group_id,
+                slot = notice.slot,
+                term = notice.term,
+                leader_id = notice.leader_id,
+                "LearnerStream: chosen notification missing value (gap recorded)"
+            );
+        }
+    }
+    None
+}
+
+/// Handle a `BatchChosen` frame from the bidi stream. Same ballot-verified
+/// logic as `handle_chosen_notice`, applied to each slot in the range.
+async fn handle_batch_chosen(
+    store: &Arc<PxKvStore>,
+    batch: BatchChosenNotification,
+) -> Option<learner_stream_response::Frame> {
+    let Some(group) = store.get_group(batch.group_id) else {
+        debug!(
+            store_id = store.store_id,
+            group_id = batch.group_id,
+            "LearnerStream: batch chosen notification dropped (group not found)"
+        );
+        return None;
+    };
+    let replica = group.local_replica();
+    let chosen_ballot = PxBallot {
+        round: batch.ballot_round,
+        leader_id: batch.leader_id,
+    };
+    let mut advanced_count = 0u64;
+    for slot in batch.start_slot..=batch.end_slot {
+        let accepted = replica.accepted_at(slot).await;
+        if accepted.as_ref().is_some_and(|e| e.ballot == chosen_ballot) {
+            replica.learner.update_chosen_frontier(slot, batch.term);
+            advanced_count += 1;
+        } else {
+            replica.note_chosen(slot, batch.term);
+            replica.record_gap(slot);
+        }
+    }
+    replica.wake_apply_loop();
+    debug!(
+        store_id = store.store_id,
+        group_id = batch.group_id,
+        start_slot = batch.start_slot,
+        end_slot = batch.end_slot,
+        term = batch.term,
+        leader_id = batch.leader_id,
+        ballot_round = batch.ballot_round,
+        advanced_count,
+        "LearnerStream: batch chosen notification applied"
+    );
+    None
+}
+
+/// Handle a `FetchGap` frame from the bidi stream. The leader resolves
+/// the requested slot from its acceptor; if it has the value, replies
+/// with it, otherwise no reply (follower retries on timeout).
+fn handle_fetch_gap(
+    store: &Arc<PxKvStore>,
+    fetch_req: FetchGapRequest,
+) -> Option<learner_stream_response::Frame> {
+    if let Some(group) = store.get_group(fetch_req.group_id) {
+        if let Some(resp) = group.handle_fetch_gap(fetch_req.slot) {
+            return Some(learner_stream_response::Frame::FetchGapReply(resp));
+        }
+        debug!(
+            store_id = store.store_id,
+            group_id = fetch_req.group_id,
+            slot = fetch_req.slot,
+            "LearnerStream: fetch_gap no value (not yet chosen)"
+        );
+        None
+    } else {
+        debug!(
+            store_id = store.store_id,
+            group_id = fetch_req.group_id,
+            slot = fetch_req.slot,
+            "LearnerStream: fetch_gap dropped (group not found)"
+        );
+        None
     }
 }
 
