@@ -8,7 +8,7 @@ use crate::state::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
-use crow_console_shared::cluster::{NodeHealth, ProcState, ServerProcess};
+use crow_console_shared::cluster::{NodeHealth, NodeId, ProcState, RackId, ServerProcess};
 use crow_console_shared::config::{NodeEntry, RackEntry, ServerEntry};
 use crow_console_shared::expand::RecursiveDepth;
 use crow_console_shared::monitor::NodeRecord;
@@ -53,7 +53,7 @@ fn live_server_process_with_pid(
 
 #[derive(Debug, Deserialize)]
 pub struct AddRackBody {
-    id: String,
+    id: RackId,
     #[serde(default)]
     name: String,
 }
@@ -109,7 +109,7 @@ pub async fn http_add_rack(
     Json(body): Json<AddRackBody>,
 ) -> Result<(StatusCode, Json<RackEntry>), (StatusCode, Json<ErrorBody>)> {
     let entry = RackEntry {
-        id: body.id.parse().unwrap(),
+        id: body.id,
         name: body.name,
     };
     {
@@ -129,11 +129,11 @@ pub async fn http_add_rack(
 /// Returns an error if rack removal or config persistence fails.
 pub async fn http_remove_rack(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path(id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
     {
         let mut cfg = state.config.write().unwrap();
-        cfg.remove_rack(id.parse().unwrap()).map_err(map_config_err)?;
+        cfg.remove_rack(id).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
     Ok(StatusCode::NO_CONTENT)
@@ -194,11 +194,11 @@ pub async fn http_add_node(
 /// Returns an error if node removal or config persistence fails.
 pub async fn http_remove_node(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path(id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
     {
         let mut cfg = state.config.write().unwrap();
-        cfg.remove_node(id.parse().unwrap()).map_err(map_config_err)?;
+        cfg.remove_node(id).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
     Ok(StatusCode::NO_CONTENT)
@@ -224,11 +224,11 @@ pub struct PingResult {
 /// Returns an error if the node is not found.
 pub async fn http_ping_node(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path(id): Path<u64>,
 ) -> Result<Json<PingResult>, (StatusCode, Json<ErrorBody>)> {
     let node = {
         let cfg = state.config.read().unwrap();
-        cfg.node(id.parse().unwrap()).cloned().ok_or_else(|| {
+        cfg.node(id).cloned().ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
                 Json(ErrorBody {
@@ -271,10 +271,10 @@ pub async fn http_ping_node(
 /// Returns `404` if the rack does not exist.
 pub async fn http_get_rack(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path(id): Path<u64>,
     Recursive(depth): Recursive,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
-    let rack_id = id.parse::<u64>().unwrap();
+    let rack_id = id;
     if matches!(depth, RecursiveDepth::None) {
         let cfg = state.config.read().unwrap();
         let rack = cfg.racks.iter().find(|r| r.id == rack_id).ok_or_else(|| {
@@ -333,10 +333,10 @@ pub async fn http_get_rack(
 /// Returns `404` if the rack does not exist.
 pub async fn http_list_rack_nodes(
     State(state): State<AppState>,
-    Path(rack_id): Path<String>,
+    Path(rack_id): Path<u64>,
     Recursive(depth): Recursive,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
-    let rack_id_num = rack_id.parse::<u64>().unwrap();
+    let rack_id_num = rack_id;
     if matches!(depth, RecursiveDepth::None) {
         let cfg = state.config.read().unwrap();
         if !cfg.racks.iter().any(|r| r.id == rack_id_num) {
@@ -390,10 +390,10 @@ pub async fn http_list_rack_nodes(
 /// Returns an error if node creation or config persistence fails.
 pub async fn http_add_rack_node(
     State(state): State<AppState>,
-    Path(rack_id): Path<String>,
+    Path(rack_id): Path<u64>,
     Json(mut entry): Json<NodeEntry>,
 ) -> Result<(StatusCode, Json<NodeEntry>), (StatusCode, Json<ErrorBody>)> {
-    entry.rack_id = rack_id.parse().unwrap();
+    entry.rack_id = rack_id;
     {
         let mut cfg = state.config.write().unwrap();
         cfg.add_node(entry.clone()).map_err(map_config_err)?;
@@ -416,10 +416,10 @@ pub async fn http_add_rack_node(
 /// Returns `404` if the node does not exist.
 pub async fn http_get_node(
     State(state): State<AppState>,
-    Path(id): Path<String>,
+    Path(id): Path<u64>,
     Recursive(_depth): Recursive,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
-    let node_id_num = id.parse::<u64>().unwrap();
+    let node_id_num = id;
     let snap = state.monitor_cache.snapshot().await;
     let cfg = state.config.read().unwrap();
     let node = cfg.node(node_id_num).ok_or_else(|| {
@@ -432,7 +432,7 @@ pub async fn http_get_node(
     })?;
     let server = cfg
         .server_for_node(node_id_num)
-        .map(|entry| live_server_process_with_pid(&state, entry, snap.get(&id)));
+        .map(|entry| live_server_process_with_pid(&state, entry, snap.get(&node_id_num)));
     Ok(Json(serde_json::json!({
         "id": node.id,
         "rack_id": node.rack_id,
@@ -478,7 +478,7 @@ pub async fn http_list_servers(State(state): State<AppState>) -> Json<Vec<Server
         .map(|s| {
             let health = s
                 .node_id
-                .and_then(|n| snap.get(&n.to_string()))
+                .and_then(|n| snap.get(&n))
                 .map_or(NodeHealth::Unknown, |rec| rec.health);
             let pid = s.node_id.and_then(|n| state.runtime_pid(n.to_string()));
             ServerSummary {
@@ -529,7 +529,7 @@ pub struct DeployNodeServerBody {
 
 #[derive(Debug, Serialize)]
 pub struct DeployResult {
-    node_id: String,
+    node_id: NodeId,
     mgmt_url: String,
     grpc_url: String,
     pid: u32,
@@ -544,23 +544,21 @@ pub struct DeployResult {
 /// Returns `404` if no server is deployed on this node.
 pub async fn http_get_node_server(
     State(state): State<AppState>,
-    Path(node_id): Path<String>,
+    Path(node_id): Path<u64>,
     Recursive(_depth): Recursive,
 ) -> Result<Json<ServerEntry>, (StatusCode, Json<ErrorBody>)> {
     let mut entry = {
         let cfg = state.config.read().unwrap();
-        cfg.server_for_node(node_id.parse().unwrap())
-            .cloned()
-            .ok_or_else(|| {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorBody {
-                        error: format!("no server deployed on node {node_id}"),
-                    }),
-                )
-            })?
+        cfg.server_for_node(node_id).cloned().ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("no server deployed on node {node_id}"),
+                }),
+            )
+        })?
     };
-    entry.pid = state.runtime_pid(&node_id);
+    entry.pid = state.runtime_pid(node_id);
     Ok(Json(entry))
 }
 
@@ -575,14 +573,14 @@ pub async fn http_get_node_server(
 /// Returns an error if deployment, config persistence, or node lookup fails.
 pub async fn http_deploy_node_server(
     State(state): State<AppState>,
-    Path(node_id): Path<String>,
+    Path(node_id): Path<u64>,
     Json(body): Json<DeployNodeServerBody>,
 ) -> Result<(StatusCode, Json<DeployResult>), (StatusCode, Json<ErrorBody>)> {
     use crow_console_shared::lifecycle::{self, DeployRequest};
 
     let node = {
         let cfg = state.config.read().unwrap();
-        if cfg.server_for_node(node_id.parse().unwrap()).is_some() {
+        if cfg.server_for_node(node_id).is_some() {
             return Err((
                 StatusCode::CONFLICT,
                 Json(ErrorBody {
@@ -590,7 +588,7 @@ pub async fn http_deploy_node_server(
                 }),
             ));
         }
-        cfg.node(node_id.parse().unwrap()).cloned().ok_or_else(|| {
+        cfg.node(node_id).cloned().ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
                 Json(ErrorBody {
@@ -601,7 +599,7 @@ pub async fn http_deploy_node_server(
     };
 
     let req = DeployRequest {
-        server_id: node_id.clone(),
+        server_id: node_id.to_string(),
         mgmt_port: body.mgmt_port,
         grpc_port: body.grpc_port,
         election_profile: body
@@ -628,7 +626,7 @@ pub async fn http_deploy_node_server(
             .map_err(|e| err_502(format!("ssh deploy: {e}")))?
     } else {
         let workspace_dir = state
-            .prepare_node_workspace(&node_id)
+            .prepare_node_workspace(node_id)
             .map_err(|e| err_500(e.to_string()))?;
         lifecycle::deploy_local_in_dir(&req, &node, &workspace_dir)
             .await
@@ -636,9 +634,9 @@ pub async fn http_deploy_node_server(
     };
 
     let entry = ServerEntry {
-        id: node_id.clone(),
+        id: node_id.to_string(),
         url: deployed.mgmt_url.clone(),
-        node_id: Some(node_id.parse().unwrap()),
+        node_id: Some(node_id),
         grpc_url: Some(deployed.grpc_url.clone()),
         mgmt_port: Some(body.mgmt_port),
         grpc_port: Some(body.grpc_port),
@@ -650,13 +648,13 @@ pub async fn http_deploy_node_server(
             .or_else(|| std::env::var("CROW_KV_SERVER_ELECTION_PROFILE").ok()),
         pid: None,
     };
-    state.set_runtime_pid(node_id.clone(), deployed.pid);
+    state.set_runtime_pid(node_id, deployed.pid);
     {
         let mut cfg = state.config.write().unwrap();
         cfg.add_server(entry).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
-    crate::mgmt::refresh_node_cache(&state, &node_id).await;
+    crate::mgmt::refresh_node_cache(&state, node_id).await;
     Ok((
         StatusCode::CREATED,
         Json(DeployResult {
@@ -687,24 +685,21 @@ pub async fn http_deploy_node_server(
 /// the SSH/local restart cycle fails.
 pub async fn http_restart_node_server(
     State(state): State<AppState>,
-    Path(node_id): Path<String>,
+    Path(node_id): Path<u64>,
 ) -> Result<Json<DeployResult>, (StatusCode, Json<ErrorBody>)> {
     use crow_console_shared::lifecycle::{self, DeployRequest};
 
     let (entry, node) = {
         let cfg = state.config.read().unwrap();
-        let entry = cfg
-            .server_for_node(node_id.parse().unwrap())
-            .cloned()
-            .ok_or_else(|| {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorBody {
-                        error: format!("no server registered on node {node_id}"),
-                    }),
-                )
-            })?;
-        let node = cfg.node(node_id.parse().unwrap()).cloned().ok_or_else(|| {
+        let entry = cfg.server_for_node(node_id).cloned().ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("no server registered on node {node_id}"),
+                }),
+            )
+        })?;
+        let node = cfg.node(node_id).cloned().ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
                 Json(ErrorBody {
@@ -727,7 +722,7 @@ pub async fn http_restart_node_server(
         ))
     })?;
 
-    if let Some(pid) = state.runtime_pid(&node_id) {
+    if let Some(pid) = state.runtime_pid(node_id) {
         let _sent = match &node {
             n if n.ssh_enabled() => crow_console_shared::ssh::stop_via_ssh(n, pid)
                 .await
@@ -740,7 +735,7 @@ pub async fn http_restart_node_server(
     }
 
     let req = DeployRequest {
-        server_id: node_id.clone(),
+        server_id: node_id.to_string(),
         mgmt_port,
         grpc_port,
         election_profile: entry
@@ -757,7 +752,7 @@ pub async fn http_restart_node_server(
             .map_err(|e| err_502(format!("ssh redeploy (restart): {e}")))?
     } else {
         let workspace_dir = state
-            .prepare_node_workspace(&node_id)
+            .prepare_node_workspace(node_id)
             .map_err(|e| err_500(e.to_string()))?;
         lifecycle::deploy_local_in_dir(&req, &node, &workspace_dir)
             .await
@@ -765,9 +760,9 @@ pub async fn http_restart_node_server(
     };
 
     let new_entry = ServerEntry {
-        id: node_id.clone(),
+        id: node_id.to_string(),
         url: deployed.mgmt_url.clone(),
-        node_id: Some(node_id.parse().unwrap()),
+        node_id: Some(node_id),
         grpc_url: Some(deployed.grpc_url.clone()),
         mgmt_port: entry.mgmt_port,
         grpc_port: entry.grpc_port,
@@ -776,15 +771,15 @@ pub async fn http_restart_node_server(
         election_profile: entry.election_profile.clone(),
         pid: None,
     };
-    state.set_runtime_pid(node_id.clone(), deployed.pid);
+    state.set_runtime_pid(node_id, deployed.pid);
     {
         let mut cfg = state.config.write().unwrap();
         // The old entry is still keyed by node_id; replace it.
-        let _ = cfg.remove_server_for_node(node_id.parse().unwrap());
+        let _ = cfg.remove_server_for_node(node_id);
         cfg.add_server(new_entry).map_err(map_config_err)?;
     }
     state.persist().map_err(map_persist_err)?;
-    crate::mgmt::restore_persisted_topology_for_node(&state, &node_id)
+    crate::mgmt::restore_persisted_topology_for_node(&state, node_id)
         .await
         .map_err(|e| err_502(format!("restore topology after restart: {e}")))?;
 
@@ -824,26 +819,23 @@ pub struct StopResult {
 /// Returns an error if the server is not found or has no tracked pid.
 pub async fn http_stop_node_server(
     State(state): State<AppState>,
-    Path(node_id): Path<String>,
+    Path(node_id): Path<u64>,
 ) -> Result<Json<StopResult>, (StatusCode, Json<ErrorBody>)> {
     use crow_console_shared::lifecycle;
 
     let node = {
         let cfg = state.config.read().unwrap();
-        let _entry = cfg
-            .server_for_node(node_id.parse().unwrap())
-            .cloned()
-            .ok_or_else(|| {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorBody {
-                        error: format!("no server deployed on node {node_id}"),
-                    }),
-                )
-            })?;
-        cfg.node(node_id.parse().unwrap()).cloned()
+        let _entry = cfg.server_for_node(node_id).cloned().ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("no server deployed on node {node_id}"),
+                }),
+            )
+        })?;
+        cfg.node(node_id).cloned()
     };
-    let Some(pid) = state.runtime_pid(&node_id) else {
+    let Some(pid) = state.runtime_pid(node_id) else {
         return Err(err_400(format!("server on node {node_id} has no tracked pid")));
     };
     let sent = match node {
@@ -855,7 +847,7 @@ pub async fn http_stop_node_server(
             .map_err(|e| err_500(format!("spawn_blocking: {e}")))?
             .map_err(|e| err_500(format!("stop_pid: {e}")))?,
     };
-    state.clear_runtime_pid(&node_id);
+    state.clear_runtime_pid(node_id);
     state.monitor_cache.drop_node(&node_id).await;
     Ok(Json(StopResult { sent }))
 }
@@ -870,26 +862,23 @@ pub async fn http_stop_node_server(
 /// Returns `404` if no server is deployed on this node.
 pub async fn http_delete_node_server(
     State(state): State<AppState>,
-    Path(node_id): Path<String>,
+    Path(node_id): Path<u64>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
     use crow_console_shared::lifecycle;
 
     let node = {
         let cfg = state.config.read().unwrap();
-        let _entry = cfg
-            .server_for_node(node_id.parse().unwrap())
-            .cloned()
-            .ok_or_else(|| {
-                (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorBody {
-                        error: format!("no server deployed on node {node_id}"),
-                    }),
-                )
-            })?;
-        cfg.node(node_id.parse().unwrap()).cloned()
+        let _entry = cfg.server_for_node(node_id).cloned().ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody {
+                    error: format!("no server deployed on node {node_id}"),
+                }),
+            )
+        })?;
+        cfg.node(node_id).cloned()
     };
-    if let Some(pid) = state.runtime_pid(&node_id) {
+    if let Some(pid) = state.runtime_pid(node_id) {
         let _ = match node {
             Some(n) if n.ssh_enabled() => crow_console_shared::ssh::stop_via_ssh(&n, pid)
                 .await
@@ -904,10 +893,10 @@ pub async fn http_delete_node_server(
     }
     {
         let mut cfg = state.config.write().unwrap();
-        let _ = cfg.remove_server_for_node(node_id.parse().unwrap());
-        cfg.purge_node_topology(node_id.parse().unwrap());
+        let _ = cfg.remove_server_for_node(node_id);
+        cfg.purge_node_topology(node_id);
     }
-    state.clear_runtime_pid(&node_id);
+    state.clear_runtime_pid(node_id);
     state.persist().map_err(map_persist_err)?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -927,11 +916,11 @@ const OPENAPI_CACHE_TTL: Duration = Duration::from_secs(300);
 /// Returns an error if no server is deployed or the upstream request fails.
 pub async fn http_node_openapi_proxy(
     State(state): State<AppState>,
-    Path(node_id): Path<String>,
+    Path(node_id): Path<u64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorBody>)> {
     let mgmt_url = {
         let cfg = state.config.read().unwrap();
-        let entry = cfg.server_for_node(node_id.parse().unwrap()).ok_or_else(|| {
+        let entry = cfg.server_for_node(node_id).ok_or_else(|| {
             (
                 StatusCode::NOT_FOUND,
                 Json(ErrorBody {
@@ -1030,16 +1019,16 @@ pub async fn http_internal_reset(
             for gid in group_ids {
                 // Remove group: RPC to each node + config cleanup.
                 if let Some(gv) = state.monitor_cache.resolve_group(*sid, gid).await {
-                    let node_ids: Vec<String> = gv.replicas.iter().map(|r| r.node_id.clone()).collect();
+                    let node_ids: Vec<NodeId> = gv.replicas.iter().map(|r| r.node_id).collect();
                     for nid in &node_ids {
-                        if let Ok(url) = crate::mgmt::mgmt_url_for_node(&state, nid) {
+                        if let Ok(url) = crate::mgmt::mgmt_url_for_node(&state, *nid) {
                             if let Ok(client) = crate::mgmt::build_server_client(url) {
                                 let _ = client.remove_group(*sid, gid).await;
                             }
                         }
                     }
                     for nid in &node_ids {
-                        crate::mgmt::refresh_node_cache(&state, nid).await;
+                        crate::mgmt::refresh_node_cache(&state, *nid).await;
                     }
                 }
                 {
@@ -1052,14 +1041,14 @@ pub async fn http_internal_reset(
         // Remove the store from each node.
         if let Some(view) = state.monitor_cache.resolve_store(*sid).await {
             for nid in &view.nodes {
-                if let Ok(url) = crate::mgmt::mgmt_url_for_node(&state, nid) {
+                if let Ok(url) = crate::mgmt::mgmt_url_for_node(&state, *nid) {
                     if let Ok(client) = crate::mgmt::build_server_client(url) {
                         let _ = client.remove_store(*sid).await;
                     }
                 }
             }
             for nid in &view.nodes {
-                crate::mgmt::refresh_node_cache(&state, nid).await;
+                crate::mgmt::refresh_node_cache(&state, *nid).await;
             }
         }
         {
@@ -1069,9 +1058,9 @@ pub async fn http_internal_reset(
     }
 
     // 3. List all nodes, stop their servers, then remove them.
-    let node_ids: Vec<String> = {
+    let node_ids: Vec<NodeId> = {
         let cfg = state.config.read().unwrap();
-        cfg.nodes.iter().map(|n| n.id.to_string()).collect()
+        cfg.nodes.iter().map(|n| n.id).collect()
     };
 
     for nid in &node_ids {
@@ -1081,7 +1070,7 @@ pub async fn http_internal_reset(
                 .config
                 .read()
                 .unwrap()
-                .node(nid.parse().unwrap())
+                .node(*nid)
                 .is_some_and(crow_console_shared::config::NodeEntry::ssh_enabled);
             let sent = if ssh {
                 false
@@ -1092,7 +1081,7 @@ pub async fn http_internal_reset(
                 )
             };
             if sent {
-                stopped.push(nid.clone());
+                stopped.push(nid.to_string());
             }
             state.clear_runtime_pid(nid);
         }
@@ -1100,9 +1089,9 @@ pub async fn http_internal_reset(
         // Remove the server entry + purge topology from config.
         {
             let mut cfg = state.config.write().unwrap();
-            let _ = cfg.remove_server_for_node(nid.parse().unwrap());
-            cfg.purge_node_topology(nid.parse().unwrap());
-            let _ = cfg.remove_node(nid.parse().unwrap());
+            let _ = cfg.remove_server_for_node(*nid);
+            cfg.purge_node_topology(*nid);
+            let _ = cfg.remove_node(*nid);
         }
 
         state.monitor_cache.drop_node(nid).await;

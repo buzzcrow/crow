@@ -12,8 +12,15 @@ two encoding traits: `BinaryKey` (binary, for data groups) and
 detail lives in the Rust source (`lib/crow-protocol/src/key/`); this
 doc covers decisions and the frozen layouts only.
 
-See `doc/design/diskdb/design-crow-diskdb.md` §5 and §7 for the
-component-specific key kinds that use this encoding.
+**Scope boundary:** this doc defines the **encoding protocol** — the
+rules, frozen layouts, and evolution policy. **Which keys are
+persisted where, their value types, who writes them, and their scan
+patterns** are persistence concerns, defined in:
+
+- `doc/design/kv/design-crow-kv-group0.md` §3 — group-0 sysdata schema
+  (text keys + JSON values).
+- `doc/design/diskdb/design-crow-diskdb.md` §5 and §7 — data-group
+  zone records (binary keys + protobuf values).
 
 ---
 
@@ -176,7 +183,7 @@ character, which does not appear in identifiers. If arbitrary bytes
 `0x00 0x01`, terminator `0x00 0x00`) instead; not required for UTF-8
 strings.
 
-### 4.6 Decode rejects trailing bytes and bad headers
+### 4.7 Decode rejects trailing bytes and bad headers
 
 `decode` verifies:
 
@@ -188,7 +195,7 @@ Any mismatch returns `Err(KeyError)`. Decoders never guess and never
 silently truncate. This keeps a corrupted or misrouted key from being
 misinterpreted as a different kind.
 
-### 4.7 Prefix constructors make scan intent explicit
+### 4.8 Prefix constructors make scan intent explicit
 
 Rather than have callers hand-craft prefix byte vectors, each key
 struct exposes typed prefix constructors, e.g.:
@@ -211,26 +218,34 @@ concept** (struct + fields) is the single source of truth in
 `lib/crow-protocol/src/key/`. Two encoding traits map the same struct
 to bytes:
 
-- **`BinaryKey`** (existing) — `magic_byte | type_tag:u16 BE | fields
-  BE`, prost-encoded protobuf values. Used by diskdb data groups
-  (high-volume, machine-only).
-- **`TextKey`** (new) — `/magic/type/<field1>/<field2>/...` slash-
-  delimited path, JSON-encoded values (serde on the same proto
-  types). Used by group 0 (small, human-inspected, scan-friendly).
+- **`BinaryKey`** — `magic_byte | type_tag:u16 BE | fields BE`,
+  prost-encoded protobuf values. Used by data groups (high-volume,
+  machine-only).
+- **`TextKey`** — `/magic/type/<field1>/<field2>/...` slash-delimited
+  path, JSON-encoded values (serde on the same proto types). Used by
+  group 0 (small, human-inspected, scan-friendly).
 
-The choice of encoding is **per-namespace**: group 0 uses text keys +
-JSON values; diskdb data groups use binary keys + protobuf values.
-A key type implements `BinaryKey`, `TextKey`, or both. Group-0 keys
-implement both (text for group 0, binary available for future use);
-data-group keys (`ZoneKey`, `BusyBlockKey`, `FreeBlockKey`) implement
-`BinaryKey` only.
+**Design decisions:**
 
-`BinaryKey::TYPE_TAG` and `TextKey::PATH_TYPE` are two representations
-of the same kind discriminator. The binary magic (`CROW_KEY_MAGIC` =
-`0xC0`) is one const today; the text encoding uses different path-
-prefix magics per namespace from the start (`/hw`, `/srv`, `/kv`).
-The two encodings are independent — the text magic set does not need
-to mirror the binary magic set.
+- **Encoding choice is per-namespace.** Group 0 uses text keys + JSON
+  values; data groups use binary keys + protobuf values. A key type
+  implements `BinaryKey`, `TextKey`, or both. Group-0 keys implement
+  both (text for group 0, binary available for future use); data-group
+  keys (`ZoneKey`, `BusyBlockKey`, `FreeBlockKey`) implement
+  `BinaryKey` only.
+- **Two independent magic sets.** `BinaryKey::TYPE_TAG` and
+  `TextKey::PATH_TYPE` are two representations of the same kind
+  discriminator. The binary magic (`CROW_KEY_MAGIC` = `0xC0`) is one
+  const today; the text encoding uses different path-prefix magics per
+  namespace from the start (`/hw`, `/srv`, `/kv`). The text magic set
+  does not need to mirror the binary magic set.
+
+**This doc defines the encoding protocol** — the rules, the frozen
+layouts, and the evolution policy. **Which keys are persisted where,
+their value types, and their scan patterns are defined in the
+persistence docs**: `doc/design/kv/design-crow-kv-group0.md` §3
+(group-0 sysdata schema) and `doc/design/diskdb/design-crow-diskdb.md`
+§5/§7 (data-group zone records).
 
 ### 5.1 Frozen Binary Key Layouts
 
@@ -298,6 +313,12 @@ are JSON-encoded (serde on the same proto types). The path segments
 for integer fields are decimal strings; `DiskId` is a 32-char
 lowercase hex string (`high:low`, zero-padded).
 
+Text magic namespaces: `/hw` (hardware), `/srv` (service registry),
+`/kv` (KV-cluster topology).
+
+Frozen text key path shapes (the encoding spec; value types and scan
+patterns are in `design-crow-kv-group0.md` §3):
+
 - **RackKey** — `/hw/rack/<rack_id>`.
 - **NodeKey** — `/hw/node/<rack_id>/<node_id>`.
 - **DiskGroupKey** — `/hw/dg/<rack_id>/<node_id>/<dg_id>`.
@@ -305,24 +326,12 @@ lowercase hex string (`high:low`, zero-padded).
 - **OwnerMapKey** — `/hw/dg_owner/<rack_id>/<node_id>/<dg_id>`.
 - **BindMapKey** — `/hw/dg_bind/<rack_id>/<node_id>/<dg_id>`.
 - **InstanceKey** — `/srv/<service>/<instance_id>`.
-  (Does not implement `TextKey` because the path type segment is
-  dynamic — the service name. Use inherent `to_path`/`from_path`
-  methods.)
+  Does not implement `TextKey` (path type segment is dynamic — the
+  service name); use inherent `to_path`/`from_path` methods.
 - **KvStoreKey** — `/kv/store/<store_id>`. (Text-only.)
 - **KvGroupKey** — `/kv/group/<store_id>/<group_id>`. (Text-only.)
 - **KvReplicaKey** — `/kv/replica/<store_id>/<group_id>/<replica_id>`.
   (Text-only.)
-
-Text magic namespaces: `/hw` (hardware), `/srv` (service registry),
-`/kv` (KV-cluster topology).
-
-Scan patterns: `/hw/rack/` → all racks; `/hw/node/<rack_id>/` → nodes
-in one rack; `/hw/dg/<rack_id>/<node_id>/` → disk-groups of one node;
-`/hw/disk/<rack_id>/<node_id>/<dg_id>/` → disks of one disk-group;
-`/hw/dg_owner/` → entire ownership map; `/hw/dg_bind/` → entire bind
-map; `/srv/<service>/` → all instances of a service; `/kv/store/` →
-all stores; `/kv/group/<store_id>/` → groups in one store;
-`/kv/replica/<store_id>/<group_id>/` → replicas in one group.
 
 ## 6. Evolution (Append-Only)
 

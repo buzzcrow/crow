@@ -17,6 +17,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crow_protocol::{NodeId, RackId};
+
 use crate::cluster::{GroupSummary, GroupView, ReplicaView, StoreView};
 use crate::config::{NodeEntry, RackEntry, ServerEntry};
 use crate::error::{Error, Result};
@@ -35,19 +37,19 @@ pub struct ConsoleClient {
 pub struct CreateStoreBody {
     pub store_id: u64,
     #[serde(default)]
-    pub nodes: Vec<String>,
+    pub nodes: Vec<NodeId>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateGroupBody {
     pub group_id: u64,
     pub replica_id: u64,
-    pub nodes: Vec<String>,
+    pub nodes: Vec<NodeId>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AddRackBody {
-    pub id: String,
+    pub id: RackId,
     #[serde(default)]
     pub name: String,
 }
@@ -95,7 +97,7 @@ pub struct PingResult {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DeployResult {
-    pub node_id: String,
+    pub node_id: NodeId,
     pub mgmt_url: String,
     pub grpc_url: String,
     pub pid: u32,
@@ -108,7 +110,7 @@ pub struct StopResult {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AddReplicaBody {
-    pub node_id: String,
+    pub node_id: NodeId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replica_id: Option<u64>,
 }

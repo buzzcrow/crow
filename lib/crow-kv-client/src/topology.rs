@@ -9,19 +9,11 @@ use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use serde::Deserialize;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crow_kv::cluster::status::StoreStatus;
+use crow_protocol::mgmt::TopologyResponse;
 
 use crate::error::{Error, Result};
-
-/// Wire shape of `GET /topology`, matching
-/// `crow-kv-server/src/mgmt_api.rs::TopologyResponse`.
-#[derive(Deserialize)]
-struct TopologyResponse {
-    stores: Vec<StoreStatus>,
-}
 
 pub struct TopologyCache {
     seeds: RwLock<Vec<String>>,

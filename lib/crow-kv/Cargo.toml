@@ -37,8 +37,8 @@ tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true }
 flate2 = { workspace = true }
 pin-project-lite = { workspace = true }
-utoipa = "5"
 crow-common = { workspace = true }
+crow-protocol = { path = "../crow-protocol", features = ["schema"] }
 crow-tree-ffi = { path = "../crow-tree/ffi" }
 
 [build-dependencies]

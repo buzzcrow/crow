@@ -36,7 +36,13 @@ async fn rack_add(cli: &Cli, id: String, name: String) -> ExitCode {
         Ok(c) => c,
         Err(c) => return c,
     };
-    match client.add_rack(&AddRackBody { id: id.clone(), name }).await {
+    match client
+        .add_rack(&AddRackBody {
+            id: id.parse().unwrap(),
+            name,
+        })
+        .await
+    {
         Ok(r) => {
             if cli.json {
                 return print_json(&r);

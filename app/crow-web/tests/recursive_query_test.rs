@@ -150,11 +150,11 @@ async fn spawn_web_with_seeded_physical_tree() -> SocketAddr {
     rec.stores.insert(
         7,
         NodeStore {
-            node_id: "1".to_string(),
+            node_id: 1,
             store_id: 7,
             listen_addr: None,
             groups: vec![NodeGroup {
-                node_id: "1".to_string(),
+                node_id: 1,
                 store_id: 7,
                 group_id: 9,
                 local: LocalReplicaInfo {
@@ -171,7 +171,7 @@ async fn spawn_web_with_seeded_physical_tree() -> SocketAddr {
             }],
         },
     );
-    state.monitor_cache.set_node_report("n1".into(), rec).await;
+    state.monitor_cache.set_node_report(1, rec).await;
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await

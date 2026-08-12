@@ -26,8 +26,9 @@
 //!
 //! Future fields (deferred to V2): `bytes_in`, `bytes_out`, `tps_window`.
 
-use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
+
+pub use crow_protocol::mgmt::MetricsSnapshot;
 
 #[derive(Debug, Default)]
 pub struct LayerMetrics {
@@ -62,14 +63,6 @@ impl LayerMetrics {
             last_rtt_ms: self.last_rtt_ms.load(Ordering::Relaxed),
         }
     }
-}
-
-/// Point-in-time read of `LayerMetrics`. Pure data; trivially serializable.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct MetricsSnapshot {
-    pub rpc_count: u64,
-    pub err_count: u64,
-    pub last_rtt_ms: u64,
 }
 
 /// Per-`PxLocalReplica` leader-election counters.

@@ -15,13 +15,6 @@ complexity, and dependency. Before implementation, follow the
 
 ### High Priority
 
-- **[R71](R71-group0-sysdata-sync.md)** — Group-0 sysdata + sync —
-  Area: crow-kv-client, diskdb — Implement the group-0 sysdata
-  architecture (design: `doc/design/kv/design-crow-kv-group0.md`):
-  unified key concept with TextKey/BinaryKey encodings, hardware
-  hierarchy + maps, service registry (diskdb + kv-server keep-alive),
-  KV-cluster topology records, KVClusterAdmin (absorb MgmtClient),
-  diskdb sync loop, disk status management.
 - **[R72](R72-diskdb-zone-allocator-journal.md)** — diskdb zone
   allocator + record persistence — Area: diskdb — Implement the zone
   bitmap-scan allocator (per-bit CAS, rotating cursor, CAS retry

@@ -24,7 +24,7 @@ pub struct AppState {
     pub config: Arc<RwLock<ConsoleConfig>>,
     pub config_engine: Option<Arc<dyn ConsoleConfigEngine>>,
     pub runtime_root: Arc<PathBuf>,
-    pub openapi_cache: Arc<std::sync::Mutex<HashMap<String, (serde_json::Value, std::time::Instant)>>>,
+    pub openapi_cache: Arc<std::sync::Mutex<HashMap<u64, (serde_json::Value, std::time::Instant)>>>,
     pub monitor_cache: Arc<MonitorCache>,
     pub runtime_pids: Arc<std::sync::Mutex<HashMap<String, u32>>>,
 }

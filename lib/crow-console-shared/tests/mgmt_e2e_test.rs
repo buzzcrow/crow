@@ -125,6 +125,7 @@ async fn full_store_group_remote_cycle() {
     let remotes = vec![RemoteReplicaInfo {
         replica_id: 601,
         endpoint: "127.0.0.1:39999".into(),
+        voting: true,
     }];
     client
         .add_remote_replicas(store_id, group_id_2, &remotes)

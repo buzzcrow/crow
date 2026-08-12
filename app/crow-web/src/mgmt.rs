@@ -13,7 +13,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use crow_console_shared::clients::http::ServerClient;
-use crow_console_shared::cluster::{GroupSummary, GroupView, ReplicaView, StoreView};
+use crow_console_shared::cluster::{GroupSummary, GroupView, NodeId, ReplicaView, StoreView};
 use crow_console_shared::config::{GroupEntry, NodeEntry, ReplicaEntry, ServerEntry, StoreEntry};
 use crow_console_shared::error::Error as SharedError;
 use crow_console_shared::lifecycle::{self, DeployRequest};
@@ -32,11 +32,11 @@ use tracing::{info, warn};
 
 pub(crate) fn mgmt_url_for_node(
     state: &AppState,
-    node_id: &str,
+    node_id: NodeId,
 ) -> Result<String, (StatusCode, Json<ErrorBody>)> {
     let cfg = state.config.read().unwrap();
     let entry = cfg
-        .server_for_node(node_id.parse().unwrap())
+        .server_for_node(node_id)
         .ok_or_else(|| err_502(format!("node {node_id} has no deployed server")))?;
     Ok(entry.url.clone())
 }
@@ -85,18 +85,15 @@ async fn wait_for_new_leader(
 /// cutover has been finalized, or if no nodes are deployed yet (first-run
 /// scenario where the console itself drives init).
 async fn cluster_initialized(state: &AppState) -> bool {
-    let node_ids: Vec<String> = {
+    let node_ids: Vec<NodeId> = {
         let cfg = state.config.read().unwrap();
-        cfg.servers
-            .iter()
-            .filter_map(|s| s.node_id.map(|id| id.to_string()))
-            .collect()
+        cfg.servers.iter().filter_map(|s| s.node_id).collect()
     };
     if node_ids.is_empty() {
         return true; // No servers deployed yet; allow first-run flows.
     }
     for nid in &node_ids {
-        let Ok(url) = mgmt_url_for_node(state, nid) else {
+        let Ok(url) = mgmt_url_for_node(state, *nid) else {
             continue;
         };
         let Ok(client) = build_server_client(url) else {
@@ -116,11 +113,10 @@ async fn cluster_initialized(state: &AppState) -> bool {
     cfg.group(0, 0).is_some()
 }
 
-pub(crate) async fn refresh_node_cache(state: &AppState, node_id: &str) {
+pub(crate) async fn refresh_node_cache(state: &AppState, node_id: NodeId) {
     let url = {
         let cfg = state.config.read().unwrap();
-        cfg.server_for_node(node_id.parse().unwrap())
-            .map(|s| s.url.clone())
+        cfg.server_for_node(node_id).map(|s| s.url.clone())
     };
     if let Some(url) = url {
         if let Ok(client) = ServerClient::new(url) {
@@ -134,10 +130,7 @@ pub(crate) async fn refresh_node_cache(state: &AppState, node_id: &str) {
                         ),
                         last_error: None,
                     };
-                    state
-                        .monitor_cache
-                        .set_node_report(node_id.to_string(), rec)
-                        .await;
+                    state.monitor_cache.set_node_report(node_id, rec).await;
                 }
                 Err(e) => {
                     // Node is unreachable — mark it down so leader_for
@@ -173,7 +166,7 @@ async fn ensure_server_running(
 ) -> Result<(), String> {
     let client = ServerClient::new(server.url.clone()).map_err(|e| e.to_string())?;
     if client.health().await.is_ok() {
-        refresh_node_cache(state, &node.id.to_string()).await;
+        refresh_node_cache(state, node.id).await;
         return Ok(());
     }
     if !server.auto_start {
@@ -209,11 +202,11 @@ async fn ensure_server_running(
             .map_err(|e| e.to_string())?
     };
     state.set_runtime_pid(node.id.to_string(), deployed.pid);
-    refresh_node_cache(state, &node.id.to_string()).await;
+    refresh_node_cache(state, node.id).await;
     Ok(())
 }
 
-async fn ensure_store_on_node(state: &AppState, node_id: &str, store_id: u64) -> Result<(), String> {
+async fn ensure_store_on_node(state: &AppState, node_id: NodeId, store_id: u64) -> Result<(), String> {
     let url = mgmt_url_for_node(state, node_id).map_err(|(_, body)| body.0.error.clone())?;
     let client = ServerClient::new(url).map_err(|e| e.to_string())?;
     match client.get_store(store_id).await {
@@ -232,7 +225,7 @@ async fn ensure_store_on_node(state: &AppState, node_id: &str, store_id: u64) ->
 
 async fn ensure_group_local(
     state: &AppState,
-    node_id: &str,
+    node_id: NodeId,
     store_id: u64,
     group_id: u64,
     replica_id: u64,
@@ -294,11 +287,10 @@ async fn ensure_group_local(
 
 async fn ensure_group_remotes(state: &AppState, group: &GroupEntry) -> Result<(), String> {
     for replica in &group.replicas {
-        refresh_node_cache(state, &replica.node_id.to_string()).await;
+        refresh_node_cache(state, replica.node_id).await;
     }
     for replica in &group.replicas {
-        let url = mgmt_url_for_node(state, &replica.node_id.to_string())
-            .map_err(|(_, body)| body.0.error.clone())?;
+        let url = mgmt_url_for_node(state, replica.node_id).map_err(|(_, body)| body.0.error.clone())?;
         let client = ServerClient::new(url).map_err(|e| e.to_string())?;
         let existing = client
             .list_remote_replicas(group.store_id, group.group_id)
@@ -309,8 +301,7 @@ async fn ensure_group_remotes(state: &AppState, group: &GroupEntry) -> Result<()
             if peer.replica_id == replica.replica_id {
                 continue;
             }
-            let Some(current_endpoint) =
-                grpc_endpoint_for_node(state, &peer.node_id.to_string(), group.store_id).await
+            let Some(current_endpoint) = grpc_endpoint_for_node(state, peer.node_id, group.store_id).await
             else {
                 // Peer's store is not up yet; skip rather than overwriting
                 // the correct persisted-config endpoint with a stale one.
@@ -325,6 +316,7 @@ async fn ensure_group_remotes(state: &AppState, group: &GroupEntry) -> Result<()
                 to_update.push(RemoteReplicaInfo {
                     replica_id: peer.replica_id,
                     endpoint: current_endpoint,
+                    voting: true,
                 });
             }
         }
@@ -333,7 +325,7 @@ async fn ensure_group_remotes(state: &AppState, group: &GroupEntry) -> Result<()
                 .add_remote_replicas(group.store_id, group.group_id, &to_update)
                 .await
                 .map_err(|e| e.to_string())?;
-            refresh_node_cache(state, &replica.node_id.to_string()).await;
+            refresh_node_cache(state, replica.node_id).await;
         }
     }
     Ok(())
@@ -352,18 +344,15 @@ enum Group0State {
 /// Check group 0 state across all deployed nodes to determine the
 /// topology source at console startup.
 async fn check_group0_state(state: &AppState) -> Group0State {
-    let node_ids: Vec<String> = {
+    let node_ids: Vec<NodeId> = {
         let cfg = state.config.read().unwrap();
-        cfg.servers
-            .iter()
-            .filter_map(|s| s.node_id.map(|id| id.to_string()))
-            .collect()
+        cfg.servers.iter().filter_map(|s| s.node_id).collect()
     };
     if node_ids.is_empty() {
         return Group0State::NoNodes;
     }
     for nid in &node_ids {
-        let Ok(url) = mgmt_url_for_node(state, nid) else {
+        let Ok(url) = mgmt_url_for_node(state, *nid) else {
             continue;
         };
         let Ok(client) = build_server_client(url) else {
@@ -440,7 +429,7 @@ pub async fn restore_persisted_topology(state: &AppState) {
     }
     for StoreEntry { store_id, nodes } in &stores {
         for node_id in nodes {
-            if let Err(err) = ensure_store_on_node(state, &node_id.to_string(), *store_id).await {
+            if let Err(err) = ensure_store_on_node(state, *node_id, *store_id).await {
                 warn!(store_id, node_id, error = %err, "failed to restore store");
             }
         }
@@ -459,7 +448,7 @@ pub async fn restore_persisted_topology(state: &AppState) {
             };
             if let Err(err) = ensure_group_local(
                 state,
-                &replica.node_id.to_string(),
+                replica.node_id,
                 group.store_id,
                 group.group_id,
                 replica.replica_id,
@@ -484,7 +473,7 @@ pub async fn restore_persisted_topology(state: &AppState) {
     }
     for server in &servers {
         if let Some(node_id) = server.node_id {
-            refresh_node_cache(state, &node_id.to_string()).await;
+            refresh_node_cache(state, node_id).await;
         }
     }
     info!(
@@ -505,8 +494,7 @@ pub async fn restore_persisted_topology(state: &AppState) {
 ///
 /// # Errors
 /// Returns an error if store or group restoration fails.
-pub async fn restore_persisted_topology_for_node(state: &AppState, node_id: &str) -> Result<(), String> {
-    let nid: u64 = node_id.parse().unwrap();
+pub async fn restore_persisted_topology_for_node(state: &AppState, node_id: NodeId) -> Result<(), String> {
     let (stores, groups) = {
         let cfg = state.config.read().unwrap();
         (cfg.stores.clone(), cfg.groups.clone())
@@ -514,16 +502,16 @@ pub async fn restore_persisted_topology_for_node(state: &AppState, node_id: &str
 
     for store in stores
         .iter()
-        .filter(|store| store.nodes.iter().any(|id| id == &nid))
+        .filter(|store| store.nodes.iter().any(|id| id == &node_id))
     {
         ensure_store_on_node(state, node_id, store.store_id).await?;
     }
 
     for group in groups
         .iter()
-        .filter(|group| group.replicas.iter().any(|replica| replica.node_id == nid))
+        .filter(|group| group.replicas.iter().any(|replica| replica.node_id == node_id))
     {
-        let Some(local_replica) = group.replicas.iter().find(|replica| replica.node_id == nid) else {
+        let Some(local_replica) = group.replicas.iter().find(|replica| replica.node_id == node_id) else {
             continue;
         };
         ensure_group_local(
@@ -572,7 +560,7 @@ pub async fn http_list_stores(
                 nodes: Vec::new(),
                 groups: Vec::new(),
             });
-            entry.nodes.push(node_id.clone());
+            entry.nodes.push(*node_id);
             for g in &ns.groups {
                 if !entry.groups.iter().any(|gs| gs.group_id == g.group_id) {
                     entry.groups.push(GroupSummary {
@@ -599,7 +587,7 @@ pub async fn http_list_stores(
 pub struct CreateStoreBody {
     pub store_id: u64,
     #[serde(default)]
-    pub nodes: Vec<String>,
+    pub nodes: Vec<NodeId>,
 }
 
 /// `POST /api/stores`. Create an empty store across the listed nodes (or the
@@ -625,40 +613,40 @@ pub async fn http_add_store(
         let first = cfg
             .servers
             .iter()
-            .find_map(|s| s.node_id.map(|id| id.to_string()))
+            .find_map(|s| s.node_id)
             .ok_or_else(|| err_400("no nodes with deployed servers"))?;
         vec![first]
     } else {
         body.nodes.clone()
     };
 
-    let mut seen = HashSet::new();
-    target_nodes.retain(|node_id| seen.insert(node_id.clone()));
+    let mut seen = HashSet::<NodeId>::new();
+    target_nodes.retain(|node_id| seen.insert(*node_id));
 
-    let mut reachable_targets: Vec<(String, ServerClient)> = Vec::with_capacity(target_nodes.len());
+    let mut reachable_targets: Vec<(NodeId, ServerClient)> = Vec::with_capacity(target_nodes.len());
     for nid in &target_nodes {
-        let url = mgmt_url_for_node(&state, nid)?;
+        let url = mgmt_url_for_node(&state, *nid)?;
         let client = build_server_client(url.clone())?;
         client.health().await.map_err(|e| {
             err_502(format!(
                 "selected node {nid} is not currently reachable at {url}: {e}"
             ))
         })?;
-        reachable_targets.push((nid.clone(), client));
+        reachable_targets.push((*nid, client));
     }
 
-    let mut succeeded: Vec<String> = Vec::new();
+    let mut succeeded: Vec<NodeId> = Vec::new();
     for (nid, client) in &reachable_targets {
         let req = AddStoreRequest {
             store_id: body.store_id,
             port: None,
         };
         match client.add_store(&req).await {
-            Ok(_) => succeeded.push(nid.clone()),
+            Ok(_) => succeeded.push(*nid),
             Err(e) => {
                 // Roll back successful creations.
                 for ok_nid in &succeeded {
-                    if let Ok(u) = mgmt_url_for_node(&state, ok_nid) {
+                    if let Ok(u) = mgmt_url_for_node(&state, *ok_nid) {
                         if let Ok(c) = build_server_client(u) {
                             let _ = c.remove_store(body.store_id).await;
                         }
@@ -671,15 +659,12 @@ pub async fn http_add_store(
 
     // Refresh cache for all affected nodes.
     for nid in &succeeded {
-        refresh_node_cache(&state, nid).await;
+        refresh_node_cache(&state, *nid).await;
     }
 
     {
         let mut cfg = state.config.write().unwrap();
-        cfg.record_store(
-            body.store_id,
-            succeeded.iter().map(|s| s.parse().unwrap()).collect(),
-        );
+        cfg.record_store(body.store_id, succeeded.clone());
     }
     state
         .persist()
@@ -741,14 +726,14 @@ pub async fn http_remove_store(
         )
     })?;
     for nid in &view.nodes {
-        if let Ok(url) = mgmt_url_for_node(&state, nid) {
+        if let Ok(url) = mgmt_url_for_node(&state, *nid) {
             if let Ok(client) = build_server_client(url) {
                 let _ = client.remove_store(sid).await;
             }
         }
     }
     for nid in &view.nodes {
-        refresh_node_cache(&state, nid).await;
+        refresh_node_cache(&state, *nid).await;
     }
     {
         let mut cfg = state.config.write().unwrap();
@@ -786,7 +771,7 @@ pub async fn http_list_groups(
 pub struct CreateGroupBody {
     pub group_id: u64,
     pub replica_id: u64,
-    pub nodes: Vec<String>,
+    pub nodes: Vec<NodeId>,
 }
 
 /// `POST /api/stores/:store_id/groups`. Create a group across the listed
@@ -813,10 +798,10 @@ pub async fn http_add_group(
     }
 
     // Phase 1: create the group on each node.
-    let mut succeeded: Vec<(String, u64)> = Vec::new(); // (node_id, replica_id)
+    let mut succeeded: Vec<(NodeId, u64)> = Vec::new(); // (node_id, replica_id)
     let base_rid = body.replica_id;
     for (i, nid) in body.nodes.iter().enumerate() {
-        let url = mgmt_url_for_node(&state, nid)?;
+        let url = mgmt_url_for_node(&state, *nid)?;
         let client = build_server_client(url)?;
         let rid = base_rid + i as u64;
         let req = AddGroupRequest {
@@ -832,10 +817,10 @@ pub async fn http_add_group(
             start_election: Some(body.nodes.len() <= 1),
         };
         match client.add_group(sid, &req).await {
-            Ok(()) => succeeded.push((nid.clone(), rid)),
+            Ok(()) => succeeded.push((*nid, rid)),
             Err(e) => {
                 for (ok_nid, _) in &succeeded {
-                    if let Ok(u) = mgmt_url_for_node(&state, ok_nid) {
+                    if let Ok(u) = mgmt_url_for_node(&state, *ok_nid) {
                         if let Ok(c) = build_server_client(u) {
                             let _ = c.remove_group(sid, body.group_id).await;
                         }
@@ -850,13 +835,13 @@ pub async fn http_add_group(
     // `listen_addr` (each `PxKvStore` binds its own port) is known to the
     // monitor cache used by `grpc_endpoint_for_node`.
     for (nid, _) in &succeeded {
-        refresh_node_cache(&state, nid).await;
+        refresh_node_cache(&state, *nid).await;
     }
 
     // Phase 2: wire remote replicas. Each node gets every other node's
     // replica as a remote.
     for (i, (nid, _rid)) in succeeded.iter().enumerate() {
-        let Ok(url) = mgmt_url_for_node(&state, nid) else {
+        let Ok(url) = mgmt_url_for_node(&state, *nid) else {
             continue;
         };
         let Ok(client) = build_server_client(url) else {
@@ -867,10 +852,11 @@ pub async fn http_add_group(
             if j == i {
                 continue;
             }
-            if let Some(ep) = grpc_endpoint_for_node(&state, peer_nid, sid).await {
+            if let Some(ep) = grpc_endpoint_for_node(&state, *peer_nid, sid).await {
                 remotes.push(RemoteReplicaInfo {
                     replica_id: *peer_rid,
                     endpoint: ep,
+                    voting: true,
                 });
             }
         }
@@ -880,7 +866,7 @@ pub async fn http_add_group(
     }
 
     for (nid, _) in &succeeded {
-        refresh_node_cache(&state, nid).await;
+        refresh_node_cache(&state, *nid).await;
     }
 
     {
@@ -892,12 +878,12 @@ pub async fn http_add_group(
                 .iter()
                 .map(|(node_id, replica_id)| ReplicaEntry {
                     replica_id: *replica_id,
-                    node_id: node_id.parse().unwrap(),
+                    node_id: *node_id,
                 })
                 .collect(),
         );
         for (node_id, _) in &succeeded {
-            cfg.ensure_store_node(sid, node_id.parse().unwrap());
+            cfg.ensure_store_node(sid, *node_id);
         }
     }
     state
@@ -929,12 +915,12 @@ pub async fn http_get_group(
     // refreshed the cache; without this read-side refresh the response
     // would otherwise show stale `Follower` roles for the actual
     // leader). Bounded by the number of nodes hosting the store.
-    let node_ids: Vec<String> = {
+    let node_ids: Vec<NodeId> = {
         let snap = state.monitor_cache.snapshot().await;
         snap.iter()
             .filter_map(|(nid, rec)| {
                 if rec.stores.contains_key(&sid) {
-                    Some(nid.clone())
+                    Some(*nid)
                 } else {
                     None
                 }
@@ -942,7 +928,7 @@ pub async fn http_get_group(
             .collect()
     };
     for nid in &node_ids {
-        refresh_node_cache(&state, nid).await;
+        refresh_node_cache(&state, *nid).await;
     }
     state
         .monitor_cache
@@ -984,16 +970,16 @@ pub async fn http_remove_group(
             }),
         )
     })?;
-    let node_ids: Vec<String> = view.replicas.iter().map(|r| r.node_id.clone()).collect();
+    let node_ids: Vec<NodeId> = view.replicas.iter().map(|r| r.node_id).collect();
     for nid in &node_ids {
-        if let Ok(url) = mgmt_url_for_node(&state, nid) {
+        if let Ok(url) = mgmt_url_for_node(&state, *nid) {
             if let Ok(client) = build_server_client(url) {
                 let _ = client.remove_group(sid, gid).await;
             }
         }
     }
     for nid in &node_ids {
-        refresh_node_cache(&state, nid).await;
+        refresh_node_cache(&state, *nid).await;
     }
     {
         let mut cfg = state.config.write().unwrap();
@@ -1016,12 +1002,12 @@ async fn rollback_replica(
     sid: u64,
     gid: u64,
     rid: u64,
-    peer_nodes: &[String],
-    target_node: &str,
+    peer_nodes: &[NodeId],
+    target_node: NodeId,
     created_store_on_target: bool,
 ) {
     for nid in peer_nodes {
-        if let Ok(u) = mgmt_url_for_node(state, nid) {
+        if let Ok(u) = mgmt_url_for_node(state, *nid) {
             if let Ok(c) = build_server_client(u) {
                 let _ = c.remove_remote_replica(sid, gid, rid).await;
             }
@@ -1048,9 +1034,9 @@ async fn rollback_replica(
 ///
 /// `0.0.0.0` listen addresses are remapped to `127.0.0.1` so other
 /// processes on the same host can dial the channel.
-async fn grpc_endpoint_for_node(state: &AppState, node_id: &str, store_id: u64) -> Option<String> {
+async fn grpc_endpoint_for_node(state: &AppState, node_id: NodeId, store_id: u64) -> Option<String> {
     let snap = state.monitor_cache.snapshot().await;
-    if let Some(rec) = snap.get(node_id) {
+    if let Some(rec) = snap.get(&node_id) {
         if let Some(addr) = rec.stores.get(&store_id).and_then(|s| s.listen_addr.clone()) {
             return Some(strip_scheme(remap_zero_host(&addr)));
         }
@@ -1137,7 +1123,7 @@ pub async fn http_get_replica(
 
 #[derive(Debug, Deserialize)]
 pub struct AddReplicaBody {
-    pub node_id: String,
+    pub node_id: NodeId,
     #[serde(default)]
     pub replica_id: Option<u64>,
 }
@@ -1201,10 +1187,10 @@ pub async fn http_add_replica(
         .monitor_cache
         .snapshot()
         .await
-        .get(target_node.as_str())
+        .get(target_node)
         .is_some_and(|rec| rec.stores.contains_key(&sid));
 
-    let url = mgmt_url_for_node(&state, target_node)?;
+    let url = mgmt_url_for_node(&state, *target_node)?;
     let client = build_server_client(url)?;
     let created_store_on_target = if target_has_store {
         let req = AddGroupRequest {
@@ -1248,10 +1234,10 @@ pub async fn http_add_replica(
     // known before we wire it as a remote on existing peers. Each
     // `PxKvStore` on a `crow-kv-server` binds its own port, so we cannot
     // rely on the bootstrap `grpc_url` configured at deploy time.
-    refresh_node_cache(&state, target_node).await;
+    refresh_node_cache(&state, *target_node).await;
 
     // Step 2: Register the new replica as a remote on every existing peer.
-    let Some(new_endpoint) = grpc_endpoint_for_node(&state, target_node, sid).await else {
+    let Some(new_endpoint) = grpc_endpoint_for_node(&state, *target_node, sid).await else {
         return Err(err_502(format!(
             "could not determine gRPC endpoint for new replica on node {target_node}"
         )));
@@ -1259,10 +1245,11 @@ pub async fn http_add_replica(
     let new_remote = RemoteReplicaInfo {
         replica_id: new_rid,
         endpoint: new_endpoint,
+        voting: true,
     };
-    let mut wired_peers: Vec<String> = Vec::new();
+    let mut wired_peers: Vec<NodeId> = Vec::new();
     for existing in &view.replicas {
-        let Ok(peer_url) = mgmt_url_for_node(&state, &existing.node_id) else {
+        let Ok(peer_url) = mgmt_url_for_node(&state, existing.node_id) else {
             continue;
         };
         let Ok(peer_client) = build_server_client(peer_url) else {
@@ -1278,7 +1265,7 @@ pub async fn http_add_replica(
                 gid,
                 new_rid,
                 &wired_peers,
-                target_node,
+                *target_node,
                 created_store_on_target,
             )
             .await;
@@ -1287,31 +1274,32 @@ pub async fn http_add_replica(
                 existing.node_id
             )));
         }
-        wired_peers.push(existing.node_id.clone());
+        wired_peers.push(existing.node_id);
     }
 
     // Step 3: Register every existing peer as a remote on the new replica.
     let mut existing_remotes: Vec<RemoteReplicaInfo> = Vec::with_capacity(view.replicas.len());
     for r in &view.replicas {
-        if let Some(ep) = grpc_endpoint_for_node(&state, &r.node_id, sid).await {
+        if let Some(ep) = grpc_endpoint_for_node(&state, r.node_id, sid).await {
             existing_remotes.push(RemoteReplicaInfo {
                 replica_id: r.replica_id,
                 endpoint: ep,
+                voting: true,
             });
         }
     }
     if !existing_remotes.is_empty() {
-        let new_url = mgmt_url_for_node(&state, target_node)?;
+        let new_url = mgmt_url_for_node(&state, *target_node)?;
         let new_client = build_server_client(new_url)?;
         if let Err(e) = new_client.add_remote_replicas(sid, gid, &existing_remotes).await {
-            let all_peers: Vec<String> = view.replicas.iter().map(|r| r.node_id.clone()).collect();
+            let all_peers: Vec<NodeId> = view.replicas.iter().map(|r| r.node_id).collect();
             rollback_replica(
                 &state,
                 sid,
                 gid,
                 new_rid,
                 &all_peers,
-                target_node,
+                *target_node,
                 created_store_on_target,
             )
             .await;
@@ -1320,20 +1308,20 @@ pub async fn http_add_replica(
     }
 
     // Refresh cache for all affected nodes.
-    refresh_node_cache(&state, target_node).await;
+    refresh_node_cache(&state, *target_node).await;
     for existing in &view.replicas {
-        refresh_node_cache(&state, &existing.node_id).await;
+        refresh_node_cache(&state, existing.node_id).await;
     }
 
     {
         let mut cfg = state.config.write().unwrap();
-        cfg.ensure_store_node(sid, target_node.parse().unwrap());
+        cfg.ensure_store_node(sid, *target_node);
         cfg.add_group_replica(
             sid,
             gid,
             ReplicaEntry {
                 replica_id: new_rid,
-                node_id: target_node.parse().unwrap(),
+                node_id: *target_node,
             },
         );
     }
@@ -1387,7 +1375,7 @@ pub async fn http_remove_replica(
                 }),
             )
         })?;
-    let target_node = target.node_id.clone();
+    let target_node = target.node_id;
 
     // Step 0: if the replica being removed is currently the leader, ask
     // it to step down first and wait (bounded) for a survivor to win a
@@ -1395,7 +1383,7 @@ pub async fn http_remove_replica(
     // old leader's lease expires. Best-effort: a timeout here doesn't
     // block the removal -- the lease-expiry fallback still applies.
     if view.leader_id() == Some(rid) {
-        if let Ok(url) = mgmt_url_for_node(&state, &target_node) {
+        if let Ok(url) = mgmt_url_for_node(&state, target_node) {
             if let Ok(client) = build_server_client(url) {
                 match client
                     .step_down(
@@ -1409,7 +1397,7 @@ pub async fn http_remove_replica(
                 {
                     Ok(result) if result.accepted => {
                         if let Some(survivor) = view.replicas.iter().find(|r| r.replica_id != rid) {
-                            if let Ok(survivor_url) = mgmt_url_for_node(&state, &survivor.node_id) {
+                            if let Ok(survivor_url) = mgmt_url_for_node(&state, survivor.node_id) {
                                 if !wait_for_new_leader(&survivor_url, sid, gid, rid, Duration::from_secs(5))
                                     .await
                                 {
@@ -1447,7 +1435,7 @@ pub async fn http_remove_replica(
         if peer.replica_id == rid {
             continue;
         }
-        if let Ok(url) = mgmt_url_for_node(&state, &peer.node_id) {
+        if let Ok(url) = mgmt_url_for_node(&state, peer.node_id) {
             if let Ok(client) = build_server_client(url) {
                 let _ = client.remove_remote_replica(sid, gid, rid).await;
             }
@@ -1455,17 +1443,17 @@ pub async fn http_remove_replica(
     }
 
     // Step 2: Delete the local group on the target node.
-    if let Ok(url) = mgmt_url_for_node(&state, &target_node) {
+    if let Ok(url) = mgmt_url_for_node(&state, target_node) {
         if let Ok(client) = build_server_client(url) {
             let _ = client.remove_group(sid, gid).await;
         }
     }
 
     // Refresh all affected nodes.
-    refresh_node_cache(&state, &target_node).await;
+    refresh_node_cache(&state, target_node).await;
     for peer in &view.replicas {
         if peer.replica_id != rid {
-            refresh_node_cache(&state, &peer.node_id).await;
+            refresh_node_cache(&state, peer.node_id).await;
         }
     }
 
@@ -1488,7 +1476,7 @@ pub struct ClusterInitBody {
     /// Node IDs to include in the system group (store 0, group 0).
     /// Must be non-empty. For a single node, group 0 self-elects.
     /// For multiple nodes, remotes are wired and election starts after.
-    pub nodes: Vec<String>,
+    pub nodes: Vec<NodeId>,
 }
 
 /// `POST /api/cluster/init` — initialize the cluster by bootstrapping
@@ -1512,14 +1500,14 @@ pub async fn http_cluster_init(
 
     let mut seen = HashSet::new();
     let mut target_nodes = body.nodes.clone();
-    target_nodes.retain(|nid| seen.insert(nid.clone()));
+    target_nodes.retain(|nid| seen.insert(*nid));
 
     let single_node = target_nodes.len() == 1;
 
     // Phase 1: call /system/init on each node.
-    let mut succeeded: Vec<(String, u64)> = Vec::new();
+    let mut succeeded: Vec<(NodeId, u64)> = Vec::new();
     for (i, nid) in target_nodes.iter().enumerate() {
-        let url = mgmt_url_for_node(&state, nid)?;
+        let url = mgmt_url_for_node(&state, *nid)?;
         let client = build_server_client(url)?;
         client
             .health()
@@ -1539,7 +1527,7 @@ pub async fn http_cluster_init(
                     listen_addr = resp.listen_addr.as_deref().unwrap_or("?"),
                     "system/init succeeded"
                 );
-                succeeded.push((nid.clone(), replica_id));
+                succeeded.push((*nid, replica_id));
             }
             Err(e) => {
                 // 409 Conflict means group 0 already exists — the node was
@@ -1551,12 +1539,12 @@ pub async fn http_cluster_init(
                 );
                 if is_already_init {
                     info!(node_id = nid, "system/init: group 0 already exists, skipping");
-                    succeeded.push((nid.clone(), replica_id));
+                    succeeded.push((*nid, replica_id));
                     continue;
                 }
                 // Rollback: remove group 0 on nodes that succeeded.
                 for (ok_nid, _) in &succeeded {
-                    if let Ok(u) = mgmt_url_for_node(&state, ok_nid) {
+                    if let Ok(u) = mgmt_url_for_node(&state, *ok_nid) {
                         if let Ok(c) = build_server_client(u) {
                             let _ = c.remove_group(0, 0).await;
                         }
@@ -1569,13 +1557,13 @@ pub async fn http_cluster_init(
 
     // Phase 2: refresh caches so we can resolve gRPC endpoints.
     for (nid, _) in &succeeded {
-        refresh_node_cache(&state, nid).await;
+        refresh_node_cache(&state, *nid).await;
     }
 
     // Phase 3: wire remotes for multi-node.
     if !single_node {
         for (i, (nid, _rid)) in succeeded.iter().enumerate() {
-            let Ok(url) = mgmt_url_for_node(&state, nid) else {
+            let Ok(url) = mgmt_url_for_node(&state, *nid) else {
                 continue;
             };
             let Ok(client) = build_server_client(url) else {
@@ -1586,10 +1574,11 @@ pub async fn http_cluster_init(
                 if j == i {
                     continue;
                 }
-                if let Some(ep) = grpc_endpoint_for_node(&state, peer_nid, 0).await {
+                if let Some(ep) = grpc_endpoint_for_node(&state, *peer_nid, 0).await {
                     remotes.push(RemoteReplicaInfo {
                         replica_id: *peer_rid,
                         endpoint: ep,
+                        voting: true,
                     });
                 }
             }
@@ -1600,20 +1589,20 @@ pub async fn http_cluster_init(
 
         // Refresh caches after remote wiring.
         for (nid, _) in &succeeded {
-            refresh_node_cache(&state, nid).await;
+            refresh_node_cache(&state, *nid).await;
         }
     }
 
     // Phase 4: persist topology in console config.
     {
         let mut cfg = state.config.write().unwrap();
-        let store_nodes: Vec<u64> = succeeded.iter().map(|(n, _)| n.parse().unwrap()).collect();
+        let store_nodes: Vec<u64> = succeeded.iter().map(|(n, _)| *n).collect();
         cfg.record_store(0, store_nodes);
         let replicas: Vec<ReplicaEntry> = succeeded
             .iter()
             .map(|(nid, rid)| ReplicaEntry {
                 replica_id: *rid,
-                node_id: nid.parse().unwrap(),
+                node_id: *nid,
             })
             .collect();
         cfg.record_group(0, 0, replicas);
@@ -1628,7 +1617,7 @@ pub async fn http_cluster_init(
     let cfg_snapshot = state.config.read().unwrap().clone();
     let mut topology_written = false;
     for (nid, _) in &succeeded {
-        let Some(grpc_ep) = grpc_endpoint_for_node(&state, nid, 0).await else {
+        let Some(grpc_ep) = grpc_endpoint_for_node(&state, *nid, 0).await else {
             continue;
         };
         let kv_client = crow_kv_client::CrowkvClient::new(crow_kv_client::ClientConfig::new(Vec::new()));
@@ -1742,10 +1731,10 @@ impl MetricsQuery {
 /// `/metrics` fetch fails.
 pub async fn http_node_metrics(
     State(state): State<AppState>,
-    Path(node_id): Path<String>,
+    Path(node_id): Path<u64>,
     Query(q): Query<MetricsQuery>,
 ) -> Result<Json<MetricsResponse>, (StatusCode, Json<ErrorBody>)> {
-    let url = mgmt_url_for_node(&state, &node_id)?;
+    let url = mgmt_url_for_node(&state, node_id)?;
     let client = build_server_client(url)?;
     let resp = client
         .metrics(q.prefix())
@@ -1773,7 +1762,7 @@ pub async fn http_group_metrics(
             }),
         )
     })?;
-    let url = mgmt_url_for_node(&state, &node_id)?;
+    let url = mgmt_url_for_node(&state, node_id)?;
     let client = build_server_client(url)?;
     // If the caller supplied a prefix, prepend the group scope; otherwise
     // default to the group's own prefix.
@@ -1831,7 +1820,7 @@ pub async fn http_store_metrics(
     // Fetch from each group's leader node. Deduplicate by node (a single
     // node may host multiple groups in the store; one fetch with the
     // store prefix covers all of them).
-    let mut seen_nodes: HashSet<String> = HashSet::new();
+    let mut seen_nodes: HashSet<NodeId> = HashSet::new();
     let mut merged: Vec<crow_console_shared::MetricPointView> = Vec::new();
     let mut window_secs = 5.0_f64;
     let mut timestamp = String::new();
@@ -1840,10 +1829,10 @@ pub async fn http_store_metrics(
         let Some((_rid, node_id)) = state.monitor_cache.leader_for(sid, *gid).await else {
             continue;
         };
-        if !seen_nodes.insert(node_id.clone()) {
+        if !seen_nodes.insert(node_id) {
             continue;
         }
-        let Ok(url) = mgmt_url_for_node(&state, &node_id) else {
+        let Ok(url) = mgmt_url_for_node(&state, node_id) else {
             continue;
         };
         let Ok(client) = build_server_client(url) else {

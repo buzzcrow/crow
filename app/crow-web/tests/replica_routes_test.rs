@@ -154,10 +154,13 @@ async fn spawn_web(upstreams: &[Upstream]) -> SocketAddr {
             let rec = NodeRecord {
                 health: NodeHealth::Up,
                 last_seen_ms: 1,
-                stores: legacy_topology_to_node_stores(&u.node_id, &stores),
+                stores: legacy_topology_to_node_stores(u.node_id.parse().unwrap(), &stores),
                 last_error: None,
             };
-            state.monitor_cache.set_node_report(u.node_id.clone(), rec).await;
+            state
+                .monitor_cache
+                .set_node_report(u.node_id.parse().unwrap(), rec)
+                .await;
         }
     }
 

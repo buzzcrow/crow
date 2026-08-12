@@ -14,25 +14,21 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use crow_console_shared::clients::http::ServerClient;
-use crow_console_shared::cluster::{NodeGroup, NodeStore};
+use crow_console_shared::cluster::{NodeGroup, NodeId, NodeStore};
 use crow_console_shared::mgmt::{AddGroupRequest, AddStoreRequest, RemoteReplicaInfo};
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-fn mgmt_url_for_node(state: &AppState, node_id: &str) -> Result<String, (StatusCode, Json<ErrorBody>)> {
+fn mgmt_url_for_node(state: &AppState, node_id: NodeId) -> Result<String, (StatusCode, Json<ErrorBody>)> {
     let cfg = state.config.read().unwrap();
-    let entry = node_id
-        .parse::<u64>()
-        .ok()
-        .and_then(|id| cfg.server_for_node(id))
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(ErrorBody {
-                    error: format!("no server deployed on node {node_id}"),
-                }),
-            )
-        })?;
+    let entry = cfg.server_for_node(node_id).ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorBody {
+                error: format!("no server deployed on node {node_id}"),
+            }),
+        )
+    })?;
     Ok(entry.url.clone())
 }
 
@@ -49,7 +45,7 @@ fn build_server_client(url: String) -> Result<ServerClient, (StatusCode, Json<Er
 /// Returns `404` if the node is not in the cache.
 pub async fn http_list_node_stores(
     State(state): State<AppState>,
-    Path(node_id): Path<String>,
+    Path(node_id): Path<u64>,
     Recursive(_depth): Recursive,
 ) -> Result<Json<Vec<NodeStore>>, (StatusCode, Json<ErrorBody>)> {
     let snap = state.monitor_cache.snapshot().await;
@@ -70,7 +66,7 @@ pub async fn http_list_node_stores(
 /// Returns `404` if the node or store is not in the cache.
 pub async fn http_get_node_store(
     State(state): State<AppState>,
-    Path((node_id, store_id)): Path<(String, u64)>,
+    Path((node_id, store_id)): Path<(u64, u64)>,
     Recursive(_depth): Recursive,
 ) -> Result<Json<NodeStore>, (StatusCode, Json<ErrorBody>)> {
     let snap = state.monitor_cache.snapshot().await;
@@ -99,7 +95,7 @@ pub async fn http_get_node_store(
 /// Returns `404` if the node or store is not in the cache.
 pub async fn http_list_node_groups(
     State(state): State<AppState>,
-    Path((node_id, store_id)): Path<(String, u64)>,
+    Path((node_id, store_id)): Path<(u64, u64)>,
     Recursive(_depth): Recursive,
 ) -> Result<Json<Vec<NodeGroup>>, (StatusCode, Json<ErrorBody>)> {
     let snap = state.monitor_cache.snapshot().await;
@@ -129,7 +125,7 @@ pub async fn http_list_node_groups(
 /// Returns `404` if the node, store, or group is not in the cache.
 pub async fn http_get_node_group(
     State(state): State<AppState>,
-    Path((node_id, store_id, group_id)): Path<(String, u64, u64)>,
+    Path((node_id, store_id, group_id)): Path<(u64, u64, u64)>,
     Recursive(_depth): Recursive,
 ) -> Result<Json<NodeGroup>, (StatusCode, Json<ErrorBody>)> {
     let snap = state.monitor_cache.snapshot().await;
@@ -171,10 +167,10 @@ pub async fn http_get_node_group(
 /// Returns an error if the node has no server or the upstream RPC fails.
 pub async fn http_add_node_store(
     State(state): State<AppState>,
-    Path(node_id): Path<String>,
+    Path(node_id): Path<u64>,
     Json(req): Json<AddStoreRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    let url = mgmt_url_for_node(&state, &node_id)?;
+    let url = mgmt_url_for_node(&state, node_id)?;
     let client = build_server_client(url)?;
     client.add_store(&req).await.map_err(map_err)?;
     state.monitor_cache.drop_node(&node_id).await;
@@ -190,9 +186,9 @@ pub async fn http_add_node_store(
 /// Returns an error if the node has no server or the upstream RPC fails.
 pub async fn http_remove_node_store(
     State(state): State<AppState>,
-    Path((node_id, store_id)): Path<(String, u64)>,
+    Path((node_id, store_id)): Path<(u64, u64)>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    let url = mgmt_url_for_node(&state, &node_id)?;
+    let url = mgmt_url_for_node(&state, node_id)?;
     let client = build_server_client(url)?;
     client.remove_store(store_id).await.map_err(map_err)?;
     state.monitor_cache.drop_node(&node_id).await;
@@ -209,10 +205,10 @@ pub async fn http_remove_node_store(
 /// Returns an error if the node has no server or the upstream RPC fails.
 pub async fn http_add_node_group(
     State(state): State<AppState>,
-    Path((node_id, store_id)): Path<(String, u64)>,
+    Path((node_id, store_id)): Path<(u64, u64)>,
     Json(req): Json<AddGroupRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    let url = mgmt_url_for_node(&state, &node_id)?;
+    let url = mgmt_url_for_node(&state, node_id)?;
     let client = build_server_client(url)?;
     client.add_group(store_id, &req).await.map_err(map_err)?;
     state.monitor_cache.drop_node(&node_id).await;
@@ -229,9 +225,9 @@ pub async fn http_add_node_group(
 /// Returns an error if the node has no server or the upstream RPC fails.
 pub async fn http_remove_node_group(
     State(state): State<AppState>,
-    Path((node_id, store_id, group_id)): Path<(String, u64, u64)>,
+    Path((node_id, store_id, group_id)): Path<(u64, u64, u64)>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    let url = mgmt_url_for_node(&state, &node_id)?;
+    let url = mgmt_url_for_node(&state, node_id)?;
     let client = build_server_client(url)?;
     client.remove_group(store_id, group_id).await.map_err(map_err)?;
     state.monitor_cache.drop_node(&node_id).await;
@@ -248,10 +244,10 @@ pub async fn http_remove_node_group(
 /// Returns an error if the node has no server or the upstream RPC fails.
 pub async fn http_add_node_remote(
     State(state): State<AppState>,
-    Path((node_id, store_id, group_id)): Path<(String, u64, u64)>,
+    Path((node_id, store_id, group_id)): Path<(u64, u64, u64)>,
     Json(remotes): Json<Vec<RemoteReplicaInfo>>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    let url = mgmt_url_for_node(&state, &node_id)?;
+    let url = mgmt_url_for_node(&state, node_id)?;
     let client = build_server_client(url)?;
     client
         .add_remote_replicas(store_id, group_id, &remotes)
@@ -271,9 +267,9 @@ pub async fn http_add_node_remote(
 /// Returns an error if the node has no server or the upstream RPC fails.
 pub async fn http_remove_node_remote(
     State(state): State<AppState>,
-    Path((node_id, store_id, group_id, replica_id)): Path<(String, u64, u64, u64)>,
+    Path((node_id, store_id, group_id, replica_id)): Path<(u64, u64, u64, u64)>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorBody>)> {
-    let url = mgmt_url_for_node(&state, &node_id)?;
+    let url = mgmt_url_for_node(&state, node_id)?;
     let client = build_server_client(url)?;
     client
         .remove_remote_replica(store_id, group_id, replica_id)

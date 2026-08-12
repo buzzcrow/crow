@@ -20,7 +20,13 @@ use crow_kv::cluster::kv_server::KvServer;
 use crow_kv::cluster::local_replica::{PxLocalReplica, PxLocalReplicaRole};
 use crow_kv::cluster::px_kv_store::PxKvStore;
 use crow_kv::cluster::remote_replica::PxRemoteReplica;
+use crow_kv::cluster::status::{GroupStatus, RemoteStatus, ReplicaStatus, StatusLevel, StoreStatus};
 use crow_kv::common::config::ServerConfig;
+use crow_protocol::mgmt::{
+    AddGroupInitialRole, AddGroupRequest, AddStoreRequest, GroupSummary, HealthResponse, MetricField,
+    MetricPoint, MetricsResponse, RemoteListResponse, RemoteReplicaInfo, StepDownRequest, StepDownResult,
+    StoreDetail, StoreListResponse, StoreSummary, SystemInitRequest, SystemInitResponse, TopologyResponse,
+};
 
 use crate::operation_registry::{AppState, Operation, OperationKind, OperationStatus, OperationTarget};
 use crate::startup::create_group_with_wal;
@@ -59,78 +65,29 @@ pub fn router(state: RegistryArc) -> Router {
         .with_state(state)
 }
 
-use crow_kv::cluster::status::{GroupStatus, RemoteStatus, ReplicaStatus, StatusLevel, StoreStatus};
+// ── Server-local JSON types (no external caller) ────────────────
 
-// ── JSON types ──────────────────────────────────────────────
-
-#[derive(ToSchema, Serialize)]
-struct HealthResponse {
-    status: String,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    messages: Vec<String>,
-    stores: Vec<StoreStatus>,
-}
-
-#[derive(ToSchema, Serialize)]
-struct StoreListResponse {
-    stores: Vec<StoreSummary>,
-}
-
-#[derive(ToSchema, Serialize)]
-struct StoreSummary {
-    store_id: u64,
-    listen_addr: Option<String>,
-    group_count: usize,
-}
-
-#[derive(ToSchema, Serialize)]
-struct StoreDetail {
-    store_id: u64,
-    listen_addr: Option<String>,
-    groups: Vec<GroupSummary>,
-}
-
-#[derive(ToSchema, Serialize)]
-struct GroupSummary {
-    group_id: u64,
-    local_replica_id: u64,
-    leader_id: u64,
-    remote_count: usize,
-}
-
+/// Request body for [`join_group_via_snapshot`]: bootstrap a new/far-lagging
+/// group member by pulling a snapshot from an existing member instead of
+/// replaying full Paxos history.
 #[derive(ToSchema, Deserialize)]
-struct SystemInitRequest {
-    /// Replica ID for this node's group 0 replica. Defaults to 1.
-    #[serde(default = "default_replica_id")]
+struct JoinGroupRequest {
     replica_id: u64,
-    /// Whether to start the election driver immediately. For single-node
-    /// init, set `true` (self-elect). For multi-node, set `false` and
-    /// wire remotes first. Defaults to `true`.
-    #[serde(default = "default_start_election")]
-    start_election: bool,
-}
-
-fn default_replica_id() -> u64 {
-    1
-}
-
-fn default_start_election() -> bool {
-    true
+    /// gRPC endpoint (`host:port`) of an existing, already-caught-up member
+    /// of this group to pull the snapshot from. Must run the **same**
+    /// crow-tree backend as this store -- `KVEngine::snapshot_import`
+    /// is only ever meaningful fed a stream from the same engine kind's
+    /// `snapshot_export`.
+    peer_endpoint: String,
 }
 
 #[derive(ToSchema, Serialize)]
-struct SystemInitResponse {
-    store_id: u64,
-    group_id: u64,
-    replica_id: u64,
-    listen_addr: Option<String>,
+struct ErrorResponse {
+    error: String,
 }
 
-#[derive(ToSchema, Deserialize)]
-struct AddStoreRequest {
-    store_id: u64,
-    #[serde(default)]
-    port: Option<u16>,
+fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
+    (status, Json(ErrorResponse { error: msg.into() }))
 }
 
 /// Scan the config root for any `store{store_id}_group*.json` file, load it,
@@ -166,79 +123,6 @@ pub async fn persisted_port_for_store(config_root: &std::path::Path, store_id: u
         }
     }
     None
-}
-
-#[derive(ToSchema, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum AddGroupInitialRole {
-    Leader,
-    Follower,
-}
-
-#[derive(ToSchema, Deserialize)]
-struct AddGroupRequest {
-    group_id: u64,
-    replica_id: u64,
-    #[serde(default)]
-    initial_role: Option<AddGroupInitialRole>,
-    /// When `Some(false)`, the group is added **without** starting its election
-    /// driver, so it cannot self-elect at `quorum == 1` before its remotes are
-    /// wired. The subsequent remote-wiring rebuild
-    /// (`add_remote_replicas`) starts the driver with a correct quorum. Defaults
-    /// to starting the driver (backward compatible).
-    #[serde(default)]
-    start_election: Option<bool>,
-}
-
-/// Request body for [`join_group_via_snapshot`]: bootstrap a new/far-lagging
-/// group member by pulling a snapshot from an existing member instead of
-/// replaying full Paxos history.
-#[derive(ToSchema, Deserialize)]
-struct JoinGroupRequest {
-    replica_id: u64,
-    /// gRPC endpoint (`host:port`) of an existing, already-caught-up member
-    /// of this group to pull the snapshot from. Must run the **same**
-    /// crow-tree backend as this store -- `KVEngine::snapshot_import`
-    /// is only ever meaningful fed a stream from the same engine kind's
-    /// `snapshot_export`.
-    peer_endpoint: String,
-}
-
-#[derive(ToSchema, Serialize, Deserialize, Clone)]
-struct RemoteReplicaInfo {
-    replica_id: u64,
-    endpoint: String,
-    /// Whether this remote counts toward quorum (`PxGroup::recompute_quorum`
-    /// only counts voting members). Defaults to `true` for backward
-    /// compatibility with callers predating snapshot-join
-    /// flow. A newly-joined member is typically wired as `false` on its
-    /// peers until it has caught up via [`join_group_via_snapshot`], then
-    /// promoted with a follow-up call that re-adds it as `true`.
-    #[serde(default = "default_voting_true")]
-    voting: bool,
-}
-
-fn default_voting_true() -> bool {
-    true
-}
-
-#[derive(ToSchema, Serialize)]
-struct RemoteListResponse {
-    remotes: Vec<RemoteReplicaInfo>,
-}
-
-#[derive(ToSchema, Serialize, Deserialize)]
-struct TopologyResponse {
-    stores: Vec<StoreStatus>,
-}
-
-#[derive(ToSchema, Serialize)]
-struct ErrorResponse {
-    error: String,
-}
-
-fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<ErrorResponse>) {
-    (status, Json(ErrorResponse { error: msg.into() }))
 }
 
 // ── Handlers ────────────────────────────────────────────────
@@ -286,7 +170,7 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Err
             RemoteReplicaInfo,
             RemoteListResponse,
             TopologyResponse,
-            StepDownBody,
+            StepDownRequest,
             StepDownResult,
             FlushResult,
             ReadinessResponse,
@@ -295,8 +179,8 @@ fn err_json(status: StatusCode, msg: impl Into<String>) -> (StatusCode, Json<Err
             AsyncOperationResponse,
             ErrorResponse,
             MetricsResponse,
-            MetricPointDto,
-            MetricFieldDto
+            MetricPoint,
+            MetricField
         )
     ),
     tags((name = "management", description = "CrowKV management API"))
@@ -392,8 +276,8 @@ async fn system_init(
 
     let req = req.map_or(
         SystemInitRequest {
-            replica_id: default_replica_id(),
-            start_election: default_start_election(),
+            replica_id: 1,
+            start_election: true,
         },
         |Json(r)| r,
     );
@@ -1155,21 +1039,6 @@ async fn remove_remote_replica(
     Ok(StatusCode::OK)
 }
 
-#[derive(Debug, Clone, Deserialize, ToSchema)]
-struct StepDownBody {
-    /// Free-text reason surfaced in the replica's own logs; purely
-    /// diagnostic, no effect on the strict-fence decision.
-    #[serde(default)]
-    reason: String,
-}
-
-#[derive(Debug, Clone, Serialize, ToSchema)]
-struct StepDownResult {
-    accepted: bool,
-    current_term: u64,
-    current_leader_id: u64,
-}
-
 #[utoipa::path(
         post,
         path = "/stores/{sid}/groups/{gid}/step-down",
@@ -1178,7 +1047,7 @@ struct StepDownResult {
             ("sid" = u64, Path, description = "Store id"),
             ("gid" = u64, Path, description = "Group id")
         ),
-        request_body = StepDownBody,
+        request_body = StepDownRequest,
         responses(
             (status = 200, description = "Step-down attempted; `accepted` is false if this node was not leader", body = StepDownResult),
             (status = 404, description = "Store or group not found", body = ErrorResponse)
@@ -1188,7 +1057,7 @@ async fn step_down(
     State(state): State<RegistryArc>,
     Path((sid, gid)): Path<(u64, u64)>,
     Query(sync): Query<SyncQuery>,
-    Json(body): Json<StepDownBody>,
+    Json(body): Json<StepDownRequest>,
 ) -> Result<axum::response::Response, (StatusCode, Json<ErrorResponse>)> {
     let store = state
         .get_store(sid)
@@ -1357,34 +1226,6 @@ struct MetricsQuery {
     prefix: String,
 }
 
-/// One typed metric point in the `/metrics` response.
-#[derive(Serialize, ToSchema)]
-struct MetricPointDto {
-    name: String,
-    kind: String,
-    /// Type-specific fields (counter: `count/tps/total`; gauge: `value`;
-    /// bandwidth: `count/avg_size/rate/total_bytes`; histogram:
-    /// `count/avg_ns/p50_ns/p99_ns/max_ns/total`; summary:
-    /// `count/avg_ns/max_ns/total`).
-    fields: Vec<MetricFieldDto>,
-}
-
-#[derive(Serialize, ToSchema)]
-struct MetricFieldDto {
-    key: String,
-    value: f64,
-}
-
-/// `GET /metrics` response — structured snapshot of registry metrics.
-#[derive(Serialize, ToSchema)]
-struct MetricsResponse {
-    /// Approximate window length in seconds (the configured flush
-    /// interval; the snapshot path does not reset window state).
-    window_secs: f64,
-    timestamp: String,
-    metrics: Vec<MetricPointDto>,
-}
-
 /// `GET /metrics` — structured snapshot of all registry metrics matching
 /// the `prefix` query param. Does not reset window state. Intended for
 /// the GUI Inspector and script/scrape consumers.
@@ -1398,7 +1239,7 @@ struct MetricsResponse {
 async fn metrics(State(state): State<RegistryArc>, Query(q): Query<MetricsQuery>) -> impl IntoResponse {
     let timestamp = crow_kv::metrics::iso8601_now();
     let window_secs = 5.0; // approximate — snapshot path does not track elapsed
-    let metrics: Vec<MetricPointDto> = state
+    let metrics: Vec<MetricPoint> = state
         .metrics_registry
         .as_ref()
         .map(|reg| {
@@ -1419,15 +1260,15 @@ async fn metrics(State(state): State<RegistryArc>, Query(q): Query<MetricsQuery>
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn metric_point_to_dto(p: &crow_kv::metrics::MetricPoint) -> MetricPointDto {
-    use crow_kv::metrics::MetricPoint;
+fn metric_point_to_dto(p: &crow_kv::metrics::MetricPoint) -> MetricPoint {
+    use crow_kv::metrics::MetricPoint as KvMetricPoint;
     let kind = p.kind().to_string();
     let fields = match p {
-        MetricPoint::Counter {
+        KvMetricPoint::Counter {
             count, tps, total, ..
         } => vec![("count", *count as f64), ("tps", *tps), ("total", *total as f64)],
-        MetricPoint::Gauge { value, .. } => vec![("value", *value as f64)],
-        MetricPoint::Bandwidth {
+        KvMetricPoint::Gauge { value, .. } => vec![("value", *value as f64)],
+        KvMetricPoint::Bandwidth {
             count,
             avg_size,
             rate,
@@ -1439,7 +1280,7 @@ fn metric_point_to_dto(p: &crow_kv::metrics::MetricPoint) -> MetricPointDto {
             ("rate", *rate as f64),
             ("total_bytes", *total_bytes as f64),
         ],
-        MetricPoint::Histogram {
+        KvMetricPoint::Histogram {
             count,
             avg_ns,
             p50_ns,
@@ -1455,7 +1296,7 @@ fn metric_point_to_dto(p: &crow_kv::metrics::MetricPoint) -> MetricPointDto {
             ("max_ns", *max_ns as f64),
             ("total", *total as f64),
         ],
-        MetricPoint::Summary {
+        KvMetricPoint::Summary {
             count,
             avg_ns,
             max_ns,
@@ -1468,18 +1309,18 @@ fn metric_point_to_dto(p: &crow_kv::metrics::MetricPoint) -> MetricPointDto {
             ("total", *total as f64),
         ],
     };
-    MetricPointDto {
+    MetricPoint {
         name: match p {
-            MetricPoint::Counter { name, .. }
-            | MetricPoint::Gauge { name, .. }
-            | MetricPoint::Bandwidth { name, .. }
-            | MetricPoint::Histogram { name, .. }
-            | MetricPoint::Summary { name, .. } => name.clone(),
+            KvMetricPoint::Counter { name, .. }
+            | KvMetricPoint::Gauge { name, .. }
+            | KvMetricPoint::Bandwidth { name, .. }
+            | KvMetricPoint::Histogram { name, .. }
+            | KvMetricPoint::Summary { name, .. } => name.clone(),
         },
         kind,
         fields: fields
             .into_iter()
-            .map(|(key, value)| MetricFieldDto {
+            .map(|(key, value)| MetricField {
                 key: key.to_string(),
                 value,
             })

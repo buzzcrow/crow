@@ -10,9 +10,7 @@ use crate::cluster::replica::{
     HeartbeatReply, HeartbeatRequestPayload, PxReplicaError, Replica, ReplicaHandler, StepDownReply,
     StepDownRequestPayload, VoteReply, VoteRequestPayload,
 };
-use crate::cluster::status::{
-    CrowTreeStatsView, ElectionStateView, KvStoreStatus, ReplicaStatus, StatusLevel,
-};
+use crate::cluster::status::{ElectionStateView, KvStoreStatus, ReplicaStatus, StatusLevel};
 use crate::common::metrics::{ElectionMetrics, ElectionMetricsSnapshot};
 use crate::common::report::OperationReport;
 use crate::common::time::{anchor_ms_to_instant, instant_to_anchor_ms};
@@ -1166,7 +1164,7 @@ impl PxLocalReplica {
             .engine()
             .as_any()
             .downcast_ref::<crate::kv::CrowTreeEngine>()
-            .map(|e| CrowTreeStatsView::from(e.stats()));
+            .map(|e| crate::cluster::status::crow_tree_stats_to_view(e.stats()));
         let role = match self.role() {
             PxLocalReplicaRole::Leader => "leader",
             PxLocalReplicaRole::Follower => "follower",

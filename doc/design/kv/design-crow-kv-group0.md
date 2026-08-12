@@ -76,22 +76,13 @@ Retained in kv-server (internal): lifecycle endpoints, `GET /topology`
 
 ### 2.3 Unified key concept with two encodings
 
-A CROW key has three parts: a magic (namespace), a key type (kind
-discriminator), and ordered key fields (hierarchy path). The key
-concept (struct + fields) is the single source of truth in
-`lib/crow-protocol/src/key/`. Two encoding traits map the same struct
-to bytes:
-
-- **`BinaryKey`** (existing) — `magic_byte | type_tag:u16 BE | fields
-  BE`, prost-encoded protobuf values. Used by diskdb data groups
-  (high-volume, machine-only).
-- **`TextKey`** (new) — `/magic/type/<field1>/<field2>/...` slash-
-  delimited path, JSON-encoded values (serde on the same proto
-  types). Used by group 0 (small, human-inspected, scan-friendly).
-
-The choice of encoding is per-namespace: group 0 uses text keys +
-JSON values; diskdb data groups use binary keys + protobuf values.
-See §3 for the full key layout.
+CROW keys use a single key concept (struct + fields) with two encoding
+traits — `BinaryKey` (binary, for data groups) and `TextKey`
+(text-path, for group 0). The encoding protocol — rules, frozen
+layouts, evolution policy — is defined in
+[`design-crow-key.md`](../protocol/design-crow-key.md) §5. Group 0
+uses text keys + JSON values; the full group-0 key/value schema is in
+§3 below.
 
 ### 2.4 All cross-component protocol types live in `crow-protocol`
 
@@ -268,11 +259,9 @@ loop — it does not own or serve hardware admin.
 - `/srv` — service registry namespace (all service instances).
 - `/kv` — KV-cluster topology namespace (store/group/replica records).
 
-The binary encoding uses one const magic (`CROW_KEY_MAGIC` = 0xC0)
-for all binary keys today; it can be split into per-namespace magics
-later. The text encoding uses different path-prefix magics per
-namespace from the start. The two encodings are independent — the
-text magic set does not need to mirror the binary magic set.
+The encoding rationale (text vs binary magic independence, per-
+namespace choice) is in
+[`design-crow-key.md`](../protocol/design-crow-key.md) §5.
 
 ### 3.3 Value encoding
 

@@ -208,21 +208,21 @@ impl BenchFixture {
         let mut grpc_urls = Vec::with_capacity(NODE_COUNT);
         let mut mgmt_urls = Vec::with_capacity(NODE_COUNT);
         for i in 0..NODE_COUNT {
-            let rack_id = format!("br{i}");
-            let node_id = format!("bn{i}");
+            let rack_id = i as u64;
+            let node_id = i as u64;
             client
                 .add_rack(&AddRackBody {
-                    id: rack_id.clone(),
-                    name: rack_id.clone(),
+                    id: rack_id,
+                    name: format!("br{i}"),
                 })
                 .await
-                .map_err(|e| upstream_err(&rack_id, "add_rack", &e))?;
+                .map_err(|e| upstream_err(&rack_id.to_string(), "add_rack", &e))?;
             client
                 .add_node(
-                    &rack_id,
+                    &rack_id.to_string(),
                     &NodeEntry {
-                        id: node_id.parse().unwrap(),
-                        rack_id: rack_id.parse().unwrap(),
+                        id: node_id,
+                        rack_id,
                         host: "127.0.0.1".into(),
                         ssh_port: 22,
                         ssh_user: String::new(),
@@ -231,7 +231,7 @@ impl BenchFixture {
                     },
                 )
                 .await
-                .map_err(|e| upstream_err(&node_id, "add_node", &e))?;
+                .map_err(|e| upstream_err(&node_id.to_string(), "add_node", &e))?;
 
             let mut body = DeployNodeServerBody {
                 mgmt_port: unique_test_port(),
@@ -246,11 +246,11 @@ impl BenchFixture {
             mode.apply_to(&mut body);
             body.config = node_config.clone();
             let deployed = client
-                .deploy_node_server(&node_id, &body)
+                .deploy_node_server(&node_id.to_string(), &body)
                 .await
-                .map_err(|e| upstream_err(&node_id, "deploy_node_server", &e))?;
+                .map_err(|e| upstream_err(&node_id.to_string(), "deploy_node_server", &e))?;
 
-            ids.push(node_id);
+            ids.push(node_id.to_string());
             pids.push(deployed.pid);
             grpc_urls.push(deployed.grpc_url);
             mgmt_urls.push(deployed.mgmt_url);
@@ -261,10 +261,11 @@ impl BenchFixture {
     /// Create the single store spanning all nodes, then a 3-replica
     /// group over the same nodes.
     async fn provision_store_and_group(client: &ConsoleClient, node_ids: &[String]) -> Result<()> {
+        let nodes: Vec<u64> = node_ids.iter().map(|n| n.parse().unwrap()).collect();
         client
             .add_store(&CreateStoreBody {
                 store_id: STORE_ID,
-                nodes: node_ids.to_vec(),
+                nodes: nodes.clone(),
             })
             .await
             .map_err(|e| upstream_err("store", "add_store", &e))?;
@@ -274,7 +275,7 @@ impl BenchFixture {
                 &CreateGroupBody {
                     group_id: GROUP_ID,
                     replica_id: 1,
-                    nodes: node_ids.to_vec(),
+                    nodes,
                 },
             )
             .await

@@ -215,7 +215,7 @@ impl<'a> PhysicalBuilder<'a> {
     /// node's stores (and, recursively, groups).
     pub fn build_node(&mut self, node: &NodeEntry, remaining: u8) -> NodeView {
         self.path.push(format!("node:{}", node.id));
-        let rec = self.snap.get(&node.id.to_string());
+        let rec = self.snap.get(&node.id);
         let server = self
             .cfg
             .server_for_node(node.id)
@@ -305,11 +305,11 @@ mod tests {
         let mut snap = BTreeMap::new();
         let mut rec = NodeRecord::default();
         let ns = NodeStore {
-            node_id: "n1".into(),
+            node_id: 1,
             store_id: 7,
             listen_addr: None,
             groups: vec![NodeGroup {
-                node_id: "n1".into(),
+                node_id: 1,
                 store_id: 7,
                 group_id: 9,
                 local: LocalReplicaInfo {
@@ -326,7 +326,7 @@ mod tests {
             }],
         };
         rec.stores.insert(7, ns);
-        snap.insert("n1".into(), rec);
+        snap.insert(1, rec);
         (cfg, snap)
     }
 

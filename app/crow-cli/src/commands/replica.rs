@@ -21,7 +21,7 @@ pub enum ReplicaVerb {
         /// Target node id. The console looks up the node's gRPC URL
         /// from its config; the operator never sees `host:port`.
         #[arg(long)]
-        node: String,
+        node: u64,
         /// Optional explicit replica id; defaults to `max + 1`.
         #[arg(long)]
         replica_id: Option<u64>,

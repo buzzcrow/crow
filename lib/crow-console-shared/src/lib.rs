@@ -19,7 +19,6 @@ pub mod error;
 pub mod expand;
 pub mod lifecycle;
 pub mod mgmt;
-pub mod model;
 pub mod monitor;
 pub mod ops_log;
 pub mod snapshot;
@@ -29,9 +28,9 @@ pub mod topology;
 
 pub use config::{ConsoleConfig, ConsoleConfigEngine, NodeEntry, RackEntry, ServerEntry, TomlFileEngine};
 pub use snapshot::{
-    ClusterSnapshot, ElectionStateSnapshot, GroupView, HealthInfo, KvStoreView, LocalReplicaView,
-    MetricFieldView, MetricPointView, MetricsResponse, ReadStateSnapshot, RemoteMetrics, RemoteReplicaView,
-    ServerSnapshot, StoreView,
+    ClusterSnapshot, CrowTreeStatsSnapshot, ElectionStateSnapshot, GroupView, HealthInfo, KvStoreView,
+    LocalReplicaView, MetricFieldView, MetricPointView, MetricsResponse, ReadStateSnapshot, RemoteMetrics,
+    RemoteReplicaView, ServerSnapshot, StoreView,
 };
 
 /// Library version string, exposed for diagnostic / `--version` use.

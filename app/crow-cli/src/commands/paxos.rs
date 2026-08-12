@@ -24,7 +24,7 @@ pub enum GroupVerb {
         replica_id: u64,
         /// Comma-separated node ids that should host a replica.
         #[arg(long, value_delimiter = ',')]
-        nodes: Vec<String>,
+        nodes: Vec<u64>,
     },
     /// Remove a Paxos group from every node hosting it.
     Remove {
@@ -62,7 +62,7 @@ pub async fn run_group_verb(cli: &Cli, verb: GroupVerb) -> ExitCode {
             let body = CreateGroupBody {
                 group_id,
                 replica_id,
-                nodes: nodes.into_iter().filter(|n| !n.is_empty()).collect(),
+                nodes: nodes.into_iter().collect(),
             };
             match client.add_group(store_id, &body).await {
                 Ok(v) => {

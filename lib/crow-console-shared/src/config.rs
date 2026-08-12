@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crow_protocol::common_type::{NodeId, RackId};
+use crow_protocol::{NodeId, RackId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 

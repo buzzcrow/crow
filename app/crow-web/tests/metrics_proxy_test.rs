@@ -107,10 +107,10 @@ async fn spawn_web(upstream: &Upstream) -> SocketAddr {
         let rec = NodeRecord {
             health: NodeHealth::Up,
             last_seen_ms: 1,
-            stores: legacy_topology_to_node_stores("n1", &stores),
+            stores: legacy_topology_to_node_stores(1, &stores),
             last_error: None,
         };
-        state.monitor_cache.set_node_report("n1".to_string(), rec).await;
+        state.monitor_cache.set_node_report(1, rec).await;
     }
 
     tokio::spawn(async move {
