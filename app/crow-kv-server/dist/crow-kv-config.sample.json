@@ -1,6 +1,7 @@
 {
   "server": {
-    "max_message_size": 67108864
+    "shutdown_timeout_ms": 10000,
+    "scan_byte_budget": 3670016
   },
   "paxos": {
     "max_inflight_proposals": 16,
@@ -17,13 +18,12 @@
     "maintenance_tick_ms": 1000
   },
   "wal": {
-    "wal_root": "waldata",
     "wal_record_format": "Binary",
     "wal_segment_size": 67108864,
-    "wal_buffer_size": 1048576,
+    "wal_flush_batch_bytes": 65536,
     "wal_skip_fsync": false
   },
   "force_classic": false,
   "wal_early_ack": true,
-  "async_engine_apply": false
+  "async_engine_apply": true
 }

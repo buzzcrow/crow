@@ -38,6 +38,7 @@ Rust workspace + C++ storage engine (via FFI).
 | Action | Read first |
 | --- | --- |
 | Write/modify code | `/coding` workflow (conventions, doc-first) |
+| Write/modify E2E tests | `/e2e` workflow (Playwright rules) |
 | Design or architecture question | `doc/doc_index.md` → match row → open only that doc under `doc/design/{kv,tree,console}/`, grep for `##` section |
 | Write/modify docs | `/doc` workflow (hierarchy, naming, formatting rules) |
 | Commit changes | Hard Constraints above — no extra doc needed |

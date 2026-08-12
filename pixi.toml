@@ -134,17 +134,50 @@ coverage = { cmd = "cargo tarpaulin --workspace --out Html --output-dir target/c
 loc = "tokei --exclude swagger-ui --exclude 'lib/crow-tree/build-*' --exclude target --exclude dist --exclude node_modules --exclude 'doc/user-manual/*.html' --exclude 'doc/user-manual/*.py'"
 
 # ── Clean ────────────────────────────────────────────────────────
+# Removes all build/test/runtime artifacts, keeping only git-tracked
+# files, the pixi env (.pixi/), and install-deps caches (node_modules).
+# System-temp dirs (crow-web-*, crow-cli-test-* from std::env::temp_dir)
+# live outside the repo and are not touched.
 clean = { cmd = '''
 bash -c '
+set -e
 pkill crow-kv-server || true
 pkill crow-web || true
 pkill crow-cli || true
+
+# ── Rust build artifacts ──
 cargo clean
-rm -rf lib/crow-tree/build lib/crow-tree/build-asan lib/crow-tree/build-tsan lib/crow-tree/build-ubsan
-rm -rf app/crow-web/ui/dist app/crow-web/ui/node_modules
-rm -rf test-logs
-find . -type d -name log ! -path "*/src/*" -prune -exec rm -rf {} \; 2>/dev/null || true
-find . -type d -name runtime-data ! -path "*/src/*" -prune -exec rm -rf {} \; 2>/dev/null || true
+rm -f tarpaulin-report.html
+find . -type d -name mutants.out -prune -exec rm -rf {} \; 2>/dev/null || true
+
+# ── C++ (crow-tree) build artifacts ──
+rm -rf lib/crow-tree/build lib/crow-tree/build-*
+rm -rf lib/crow-tree/Testing lib/crow-tree/.cache
+
+# ── Frontend build artifacts (keep node_modules) ──
+rm -rf app/crow-web/ui/dist app/crow-web/ui/.vite app/crow-web/ui/test-results
+rm -f app/crow-web/ui/*.tsbuildinfo
+
+# ── Test runtime data (in-repo) ──
+rm -rf test-logs runtime-data .test-tmp lib/crow-tree/.test-tmp
+rm -rf app/crow-web/ui/e2e/runtime-data
+rm -rf app/crow-cli/bench-runs
+
+# Per-crate runtime dirs — globs are safe (names do not appear in src/).
+find . -type d -name waldata ! -path "*/src/*" -prune -exec rm -rf {} \; 2>/dev/null || true
+find . -type d -name ctdata  ! -path "*/src/*" -prune -exec rm -rf {} \; 2>/dev/null || true
+find . -type d -name conf    ! -path "*/src/*" -prune -exec rm -rf {} \; 2>/dev/null || true
+
+# `log/` is dangerous as a glob (common Rust module name) — explicit per crate.
+rm -rf app/crow-kv-server/log app/crow-cli/log lib/crow-console-shared/log app/crow-web/log
+
+# ── Profiling artifacts ──
+rm -rf doc/working/profile-*
+rm -f doc/working/bench-*.tsv
+rm -f perf.data* perf-script.txt flamegraph.svg
+
+# ── OS junk ──
+find . -name .DS_Store -delete 2>/dev/null || true
 '
 ''' }
 
