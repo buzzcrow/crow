@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 description = "CROW diskdb server: distributed disk-block allocator (lightweight, stateless; persists to CROW KV)."
 autobenches = false
+autotests = false
 
 [[bin]]
 name = "crow-diskdb"
@@ -48,6 +49,20 @@ rand = "0.9.5"
 
 [dev-dependencies]
 tempfile = "3"
+reqwest = { version = "0.12", features = ["json"] }
+serde_json = "1"
 # Self dev-dependency: turns on the `test-util` feature for this
 # crate's own tests, so integration tests can access internal types.
 crow-diskdb = { path = ".", features = ["test-util"] }
+
+[[test]]
+name = "zone_alloc_test"
+path = "tests/zone_alloc_test.rs"
+
+[[test]]
+name = "disk_alloc_test"
+path = "tests/disk_alloc_test.rs"
+
+[[test]]
+name = "diskdb_e2e_test"
+path = "tests/diskdb_e2e_test.rs"

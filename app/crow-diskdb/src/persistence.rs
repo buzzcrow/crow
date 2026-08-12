@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use crow_kv_client::{BatchOp, CrowkvClient, ReadMode, Result};
+use crow_kv_client::{BatchOp, CrowkvClient, GetOutcome, ReadMode, Result};
 use crow_protocol::common::{ChunkId, DiskId};
 use crow_protocol::diskdb::rpc::{BlockState, BusyBlockValue, FreeBlockValue, Segment, ZoneValue};
 use crow_protocol::key::{BinaryKey, BusyBlockKey, FreeBlockKey, ZoneKey};
@@ -244,36 +244,23 @@ impl DataGroupClient {
         let (store_id, group_id) = bind;
         let mut records = ZoneRecords::default();
 
-        // 1. ZoneValue
+        // 1. ZoneValue (point lookup via get)
         let zone_key = ZoneKey {
             disk_id: *disk_id,
             zone_index,
         };
         let zone_bytes = zone_key.to_bytes();
-        let zone_scan = self
+        let zone_get = self
             .kv
-            .scan(
-                store_id,
-                group_id,
-                &zone_bytes,
-                &[],
-                &zone_bytes,
-                1,
-                ReadMode::Linearizable,
-                None,
-                false,
-                None,
-            )
+            .get(store_id, group_id, &zone_bytes, ReadMode::Linearizable, None)
             .await?;
-        for (key, value) in &zone_scan.items {
-            if key.as_ref() == zone_bytes.as_slice() {
-                records.zone_value = Some(bincode::deserialize::<ZoneValue>(value).map_err(|e| {
-                    crow_kv_client::Error::SysdataDecode {
-                        key: format!("{zone_bytes:02x?}"),
-                        reason: e.to_string(),
-                    }
-                })?);
-            }
+        if let GetOutcome::Found { value, .. } = zone_get {
+            records.zone_value = Some(bincode::deserialize::<ZoneValue>(&value).map_err(|e| {
+                crow_kv_client::Error::SysdataDecode {
+                    key: format!("{zone_bytes:02x?}"),
+                    reason: e.to_string(),
+                }
+            })?);
         }
 
         // 2. BusyBlock records

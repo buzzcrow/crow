@@ -2,4 +2,5 @@
 // Licensed under the Apache License, Version 2.0.
 
 //! Shared test helpers for crow-diskdb integration tests.
-//! Placeholder — real harness lands in P5.1.
+
+pub mod cluster;

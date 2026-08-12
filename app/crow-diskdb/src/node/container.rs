@@ -35,7 +35,7 @@ impl NodeContainer {
         self.nodes.write().unwrap().remove(&dg_id);
     }
 
-    pub(crate) fn get_node(&self, dg_id: DiskGroupId) -> Option<Arc<Node>> {
+    pub fn get_node(&self, dg_id: DiskGroupId) -> Option<Arc<Node>> {
         self.nodes.read().unwrap().get(&dg_id).cloned()
     }
 
