@@ -241,9 +241,11 @@ pub struct TopologyResponse {
 pub struct StoreStatus {
     pub store_id: u64,
     pub listen_addr: Option<String>,
+    #[serde(default)]
     pub status: StatusLevel,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<GroupStatus>,
 }
 
@@ -255,10 +257,12 @@ pub struct GroupStatus {
     pub leader_id: u64,
     pub local_replica_id: u64,
     pub force_classic: bool,
+    #[serde(default)]
     pub status: StatusLevel,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<String>,
     pub local_replica: ReplicaStatus,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub remotes: Vec<RemoteStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inflight: Option<InflightStatus>,
@@ -320,6 +324,7 @@ pub struct ReplicaStatus {
     pub id: u64,
     pub role: String,
     pub voting: bool,
+    #[serde(default)]
     pub status: StatusLevel,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<String>,
@@ -399,6 +404,7 @@ pub struct HealthResponse {
     pub status: String,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub messages: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub stores: Vec<StoreStatus>,
 }
 
