@@ -79,11 +79,14 @@ mechanism that protects user data. No external coordinator needed.
 
 **Two-phase bootstrap:** Phase 1 uses console TOML as the topology
 source of truth (operator-managed, existing behavior). Phase 2 cuts
-over to group 0 authoritative via an idempotent `POST /topology/finalize`
-that writes all TOML topology into group 0 KV and sets the
-`/topology/ready` flag. Console restart uses a three-way fallback:
-group 0 missing → TOML mode; group 0 not ready → TOML mode + warning;
-group 0 ready → group 0 authoritative.
+over to group 0 authoritative by writing hardware hierarchy via
+`HardwareClient` and KV-cluster topology via `KVClusterMetaClient`
+(text-path keys, JSON values) in `crow-kv-client`. No readiness flag
+is needed — diskdb's sync loop treats an empty group 0 as "nothing
+assigned yet" and retries. Console restart uses a two-way fallback:
+group 0 missing → TOML mode; group 0 exists → group 0 authoritative.
+See [`design-crow-kv-group0.md`](design-crow-kv-group0.md) for the
+group-0 sysdata architecture.
 
 Group 0 membership evolves using the shipped Model B reconfiguration
 (direct HTTP mutation + `membership_epoch` fence). No new consensus

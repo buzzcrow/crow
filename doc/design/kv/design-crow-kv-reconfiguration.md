@@ -182,13 +182,15 @@ A non-voting catch-up member physically accepts and promises so it can follow th
 > group (store 0, group 0) using the **shipped Model B reconfiguration**
 > (direct HTTP mutation + `membership_epoch` fence) — no
 > joint-consensus primitive was needed. Group 0 stores cluster topology
-> as KV entries (`/topology/ready`, `/topology/racks/`, `/topology/nodes/`,
-> etc.) and is created via `POST /system/init` and finalized via
-> `POST /topology/finalize`. See `design-crow-kv.md` §3.3 and
-> `../console/design-crow-console.md` §4.3 for the implemented design. The original
-> joint-consensus proposal below was never built; see §11 for the design
-> history and the rationale for choosing the shipped model. Kept for
-> history/reference only.
+> as KV entries under text-path keys (`/hw/rack/...`, `/hw/node/...`,
+> `/kv/store/...`, `/kv/group/...`, etc.) with JSON values, written by
+> `HardwareClient` and `KVClusterMetaClient` in `crow-kv-client`. It is
+> created via `POST /system/init`. See `design-crow-kv.md` §3.3,
+> `design-crow-kv-group0.md`, and
+> `../console/design-crow-console.md` §4.3 for the implemented design.
+> The original joint-consensus proposal below was never built; see §11
+> for the design history and the rationale for choosing the shipped
+> model. Kept for history/reference only.
 
 The original design described Raft-style joint consensus with `C_old ∪ C_new` intermediate configurations, two `ConfigChange` log entries per membership change, and `TimeoutNow` fast leader transfer. The shipped system uses direct per-node HTTP mutation and `membership_epoch` fencing instead. A system embedding `crow-kv`'s primitives may still choose to build a joint-consensus layer on top of the `membership_epoch` fence.
 

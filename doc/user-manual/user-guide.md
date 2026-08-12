@@ -127,9 +127,10 @@ curl -X POST "http://$IP:$PORT/api/cluster/init" \
 ```
 
 This creates store 0 and group 0 on each selected node, wires remotes
-for multi-node, and automatically finalizes the cutover (sets the
-`/topology/ready` flag in group 0). After initialization, data
-store/group creation is unblocked.
+for multi-node, persists topology in console config, and writes
+hardware hierarchy + KV-cluster topology into group 0 via
+`HardwareClient` + `KVClusterMetaClient` (text-path keys, JSON
+values). After initialization, data store/group creation is unblocked.
 
 For a single-node dev cluster, pass one node:
 
@@ -674,14 +675,22 @@ and `--json` for JSON output.
 | Release snapshot | `DELETE /api/stores/{sid}/groups/{gid}/snapshots/{handle}` |
 | Set GC watermark | `POST /api/stores/{sid}/groups/{gid}/gc-watermark` |
 
-#### Server management (per-node)
+#### Server management (per-node, internal)
 
 | Operation | Endpoint |
 | --- | --- |
 | System init (bootstrap group 0) | `POST /system/init` |
-| Topology finalize (cutover) | `POST /topology/finalize` |
-| Check topology ready | `GET /topology/ready` |
+| Add store | `POST /stores` |
+| Remove store | `DELETE /stores/{sid}` |
+| Add group | `POST /stores/{sid}/groups` |
+| Remove group | `DELETE /stores/{sid}/groups/{gid}` |
+| Add remote replicas | `POST /stores/{sid}/groups/{gid}/remotes` |
+| Step down leader | `POST /stores/{sid}/groups/{gid}/step-down` |
+| Export topology | `GET /topology` |
+| Health check | `GET /health` |
+| Metrics | `GET /metrics` |
 
-These endpoints are on the `crow-kv-server` management API (not the
-console web API). The console's `POST /api/cluster/init` orchestrates
+These endpoints are on the `crow-kv-server` management API (internal —
+only called by `crow-kv-client`'s `KVClusterAdmin`). The console's
+`POST /api/cluster/init` orchestrates
 `/system/init` across nodes and auto-finalizes.

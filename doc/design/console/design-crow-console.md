@@ -201,20 +201,25 @@ analog: CockroachDB system ranges).
 
 - **Two-phase bootstrap**:
   - Phase 1: Console TOML is source of truth (existing behavior).
-  - Phase 2: `POST /topology/finalize` writes all TOML topology into
-    group 0 KV, sets `/topology/ready` flag. Idempotent and retry-safe.
-  - Console restart: three-way fallback — group 0 missing → TOML mode;
-    group 0 not ready → TOML mode + warning; group 0 ready → group 0
-    authoritative.
+  - Phase 2: `HardwareClient` writes hardware hierarchy (racks, nodes)
+    and `KVClusterMetaClient` writes KV-cluster topology (stores,
+    groups, replicas) into group 0 via text-path keys with JSON
+    values. No readiness flag — diskdb's sync loop treats empty group 0
+    as "nothing assigned yet" and retries.
+  - Console restart: two-way fallback — group 0 missing → TOML mode;
+    group 0 exists → group 0 authoritative.
 
-- **Topology KV schema** (in group 0):
-  - `/topology/ready` — flag key; presence means group 0 is authoritative
-  - `/topology/racks/<rack_id>` — rack metadata
-  - `/topology/nodes/<node_id>` — node metadata
-  - `/topology/stores/<store_id>` — store metadata
-  - `/topology/groups/<group_id>` — group metadata
-  - `/topology/replicas/<group_id>/<replica_id>` — replica metadata
-  - `/topology/counters/<entity>` — ID allocation counters
+- **Group-0 sysdata schema** (text-path keys, JSON values):
+  - `/hw/rack/<rack_id>` — rack metadata (`RackValue`)
+  - `/hw/node/<rack_id>/<node_id>` — node metadata (`NodeValue`)
+  - `/hw/dg/<rack_id>/<node_id>/<dg_id>` — disk-group metadata
+  - `/hw/disk/<rack_id>/<node_id>/<dg_id>/<disk_id_hex>` — disk metadata
+  - `/hw/owner/<rack_id>/<node_id>/<dg_id>` — ownership map
+  - `/hw/bind/<rack_id>/<node_id>/<dg_id>` — bind map
+  - `/kv/store/<store_id>` — store metadata (`StoreValue`)
+  - `/kv/group/<store_id>/<group_id>` — group metadata (`GroupValue`)
+  - `/kv/replica/<store_id>/<group_id>/<replica_id>` — replica metadata
+  - `/srv/<service>/<instance_id>` — service registry instances
 
 - **Per-node config cache** (`conf/node-config.json`): Local cache
   derived from the system group. On startup: load cache → create
@@ -228,13 +233,18 @@ analog: CockroachDB system ranges).
 
 - **Cluster init flow**: `POST /api/cluster/init` on the console
   orchestrates: calls `POST /system/init` on selected nodes, wires
-  remotes for multi-node, persists topology in console config. Data
-  store/group creation is blocked (`409`) until cluster is initialized.
+  remotes for multi-node, persists topology in console config, then
+  writes hardware + KV-cluster topology into group 0 via
+  `HardwareClient` + `KVClusterMetaClient`. Data store/group creation
+  is blocked (`409`) until cluster is initialized.
 
-- **Management API endpoints** (on `crow-kv-server`):
+- **Management API endpoints** (on `crow-kv-server`, internal — only
+  called by `crow-kv-client`'s `KVClusterAdmin`):
   - `POST /system/init` — bootstrap store 0 + group 0 on this node
-  - `POST /topology/finalize` — idempotent cutover, sets `/topology/ready`
-  - `GET /topology/ready` — check if group 0 is authoritative
+  - Lifecycle: `add_store`, `remove_store`, `add_group`,
+    `remove_group`, `add_remote_replicas`, `remove_remote_replica`,
+    `step_down`, `join_group_via_snapshot`, `flush_group`
+  - Query: `GET /topology` (export), `GET /health`, `GET /metrics`
 
 - **Group 0 membership evolution**: Reuses shipped Model B
   reconfiguration (direct HTTP mutation + `membership_epoch` fence).
