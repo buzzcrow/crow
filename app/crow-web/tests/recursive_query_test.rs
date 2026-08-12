@@ -199,10 +199,10 @@ async fn list_racks_recursive_inlines_nodes_and_records_truncation() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let items = body["items"].as_array().expect("items present");
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0]["id"], "1");
+    assert_eq!(items[0]["id"], 1);
     let nodes = items[0]["nodes"].as_array().expect("nodes inlined at depth 1");
     assert_eq!(nodes.len(), 1);
-    assert_eq!(nodes[0]["id"], "1");
+    assert_eq!(nodes[0]["id"], 1);
     assert!(nodes[0].get("stores").is_none(), "depth 1 stops before stores");
     // The node hosts a store in the monitor cache, so the walk must
     // record a truncation path under `node:n1`.
@@ -251,7 +251,7 @@ async fn get_rack_recursive_all_inlines_full_subtree() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["id"], "1");
+    assert_eq!(body["id"], 1);
     let groups = body["nodes"][0]["stores"][0]["groups"]
         .as_array()
         .expect("groups inlined under store under node");

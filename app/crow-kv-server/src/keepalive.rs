@@ -71,8 +71,19 @@ impl KeepAliveLoop {
                     }
                     _ = &mut stop_rx => {
                         info!(instance_id, "keep-alive: shutting down; unregistering");
-                        if let Err(e) = svc.unregister("kv-server", instance_id).await {
-                            warn!(error = %e, "keep-alive: unregister failed");
+                        match tokio::time::timeout(
+                            tokio::time::Duration::from_secs(1),
+                            svc.unregister("kv-server", instance_id),
+                        )
+                        .await
+                        {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => {
+                                warn!(error = %e, "keep-alive: unregister failed");
+                            }
+                            Err(_) => {
+                                warn!(instance_id, "keep-alive: unregister timed out");
+                            }
                         }
                         break;
                     }
