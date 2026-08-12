@@ -13,8 +13,8 @@ use tracing::warn;
 /// Per-instance singleton managing all owned disk-groups.
 pub struct NodeContainer {
     nodes: RwLock<HashMap<DiskGroupId, Arc<Node>>>,
-    pub instance_id: u64,
-    pub degraded: AtomicBool,
+    pub(crate) instance_id: u64,
+    pub(crate) degraded: AtomicBool,
 }
 
 impl NodeContainer {
@@ -26,38 +26,39 @@ impl NodeContainer {
         }
     }
 
-    pub fn add_node(&self, node: Arc<Node>) {
+    pub(crate) fn add_node(&self, node: Arc<Node>) {
         let dg_id = node.disk_group_id;
         self.nodes.write().unwrap().insert(dg_id, node);
     }
 
-    pub fn remove_node(&self, dg_id: DiskGroupId) {
+    pub(crate) fn remove_node(&self, dg_id: DiskGroupId) {
         self.nodes.write().unwrap().remove(&dg_id);
     }
 
-    pub fn get_node(&self, dg_id: DiskGroupId) -> Option<Arc<Node>> {
+    pub(crate) fn get_node(&self, dg_id: DiskGroupId) -> Option<Arc<Node>> {
         self.nodes.read().unwrap().get(&dg_id).cloned()
     }
 
-    pub fn node_ids(&self) -> Vec<DiskGroupId> {
+    pub(crate) fn node_ids(&self) -> Vec<DiskGroupId> {
         self.nodes.read().unwrap().keys().copied().collect()
     }
 
-    pub fn enter_degraded_mode(&self) {
+    pub(crate) fn enter_degraded_mode(&self) {
         let prev = self.degraded.swap(true, Ordering::SeqCst);
         if !prev {
             warn!("entering degraded mode");
         }
     }
 
-    pub fn exit_degraded_mode(&self) {
+    pub(crate) fn exit_degraded_mode(&self) {
         let prev = self.degraded.swap(false, Ordering::SeqCst);
         if prev {
             warn!("exiting degraded mode");
         }
     }
 
-    pub fn is_degraded(&self) -> bool {
+    #[allow(dead_code)]
+    pub(crate) fn is_degraded(&self) -> bool {
         self.degraded.load(Ordering::SeqCst)
     }
 }

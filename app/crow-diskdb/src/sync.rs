@@ -18,13 +18,14 @@ fn elapsed_ms(start: std::time::Instant) -> u64 {
 
 /// Outcome of one sync tick.
 #[derive(Debug, Default, Clone)]
-pub struct SyncOutcome {
-    pub groups_added: usize,
-    pub groups_removed: usize,
-    pub disks_added: usize,
-    pub disks_removed: usize,
-    pub status_changes: usize,
-    pub sync_duration_ms: u64,
+#[allow(dead_code)]
+pub(crate) struct SyncOutcome {
+    pub(crate) groups_added: usize,
+    pub(crate) groups_removed: usize,
+    pub(crate) disks_added: usize,
+    pub(crate) disks_removed: usize,
+    pub(crate) status_changes: usize,
+    pub(crate) sync_duration_ms: u64,
 }
 
 /// Configuration for the sync loop.
@@ -69,7 +70,7 @@ impl SyncLoop {
     }
 
     /// Run one sync tick.
-    pub async fn sync_once(&mut self) -> SyncOutcome {
+    pub(crate) async fn sync_once(&mut self) -> SyncOutcome {
         let start = std::time::Instant::now();
         let instance_id = self.container.instance_id;
 

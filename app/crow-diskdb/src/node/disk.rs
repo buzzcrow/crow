@@ -11,24 +11,27 @@ use std::sync::RwLock;
 
 /// Reference to a zone (stub for R72).
 #[derive(Debug, Clone)]
-pub struct ZoneRef {
-    pub zone_index: u32,
+#[allow(dead_code)]
+pub(crate) struct ZoneRef {
+    pub(crate) zone_index: u32,
 }
 
 /// Disk struct — one per physical disk in an owned disk-group.
-pub struct ZoneDisk {
-    pub disk_id: DiskId,
-    pub disk_group_id: DiskGroupId,
-    pub node_id: NodeId,
-    pub rack_id: RackId,
-    pub disk_value: RwLock<DiskValue>,
-    pub zones: RwLock<Vec<ZoneRef>>,
+#[allow(dead_code)]
+pub(crate) struct ZoneDisk {
+    pub(crate) disk_id: DiskId,
+    pub(crate) disk_group_id: DiskGroupId,
+    pub(crate) node_id: NodeId,
+    pub(crate) rack_id: RackId,
+    pub(crate) disk_value: RwLock<DiskValue>,
+    pub(crate) zones: RwLock<Vec<ZoneRef>>,
     /// Round-robin cursor for zone rotation scan (R72).
-    pub pos_v_zone: AtomicU64,
+    pub(crate) pos_v_zone: AtomicU64,
 }
 
+#[allow(dead_code)]
 impl ZoneDisk {
-    pub fn new(
+    pub(crate) fn new(
         disk_id: DiskId,
         disk_group_id: DiskGroupId,
         node_id: NodeId,
@@ -47,12 +50,13 @@ impl ZoneDisk {
     }
 
     /// Add a zone to this disk (zone allocation logic is R72).
-    pub fn add_zone(&self, zone: ZoneRef) {
+    pub(crate) fn add_zone(&self, zone: ZoneRef) {
         self.zones.write().unwrap().push(zone);
     }
 
     /// Rebuild the active zone set (R72).
-    pub fn rebuild_active_zones(&self) {
+    #[allow(clippy::unused_self)]
+    pub(crate) fn rebuild_active_zones(&self) {
         // R72: implement active zone set selection.
     }
 }

@@ -7,8 +7,7 @@
     clippy::must_use_candidate,
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
-    clippy::match_same_arms,
-    clippy::mod_module_files
+    clippy::match_same_arms
 )]
 
 pub mod config;

@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DiskdbConfig {
     pub server: ServerConfig,
-    pub storage: StorageDefaults,
+    pub(crate) storage: StorageDefaults,
     pub heartbeat: HeartbeatConfig,
-    pub persistence: PersistenceConfig,
-    pub scanner: ScannerConfig,
+    pub(crate) persistence: PersistenceConfig,
+    pub(crate) scanner: ScannerConfig,
     pub sync: SyncConfig,
 }
 
@@ -41,18 +41,18 @@ impl Default for ServerConfig {
 
 /// Storage defaults for zones and blocks.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StorageDefaults {
+pub(crate) struct StorageDefaults {
     /// Default zone size in bytes (default: 16 GB).
-    pub zone_size_bytes: u64,
+    pub(crate) zone_size_bytes: u64,
     /// Block size in bytes (default: 1 MB; configurable 512 KB–2 MB).
-    pub block_size_bytes: u32,
+    pub(crate) block_size_bytes: u32,
     /// Allocation granularity in bytes (default: 1 MB; must be power of 2).
     /// v1 enforces `allocate_granularity == block_size_bytes`.
-    pub allocate_granularity: u32,
+    pub(crate) allocate_granularity: u32,
     /// Number of zones in the disk-level active zone set (default: 4).
     /// The disk round-robins over this many zones at a time; when all
     /// are exhausted, the set rotates to a new batch of zones.
-    pub zone_rotate_count: u32,
+    pub(crate) zone_rotate_count: u32,
 }
 
 impl Default for StorageDefaults {
@@ -70,12 +70,12 @@ impl Default for StorageDefaults {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatConfig {
     /// Heartbeat interval in seconds (default: 10).
-    pub interval_secs: u32,
+    pub(crate) interval_secs: u32,
     /// Missed heartbeats before entering degraded mode (default: 3).
     pub miss_threshold: u32,
     /// Duration in `TempFailure` before transitioning to `Offline`
     /// (default: 900s).
-    pub temp_failure_timeout_secs: u32,
+    pub(crate) temp_failure_timeout_secs: u32,
 }
 
 impl Default for HeartbeatConfig {
@@ -92,9 +92,9 @@ impl Default for HeartbeatConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncConfig {
     /// Group-0 store id (default: 0).
-    pub group0_store_id: u64,
+    pub(crate) group0_store_id: u64,
     /// Group-0 group id (default: 0).
-    pub group0_group_id: u64,
+    pub(crate) group0_group_id: u64,
     /// Sync interval in seconds (default: 10).
     pub sync_interval_secs: u32,
 }
@@ -111,15 +111,15 @@ impl Default for SyncConfig {
 
 /// Free batch flush + snapshot compaction configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PersistenceConfig {
+pub(crate) struct PersistenceConfig {
     /// Free batch flush interval in milliseconds (default: 500).
-    pub free_flush_interval_ms: u32,
+    pub(crate) free_flush_interval_ms: u32,
     /// Free batch max size before forced flush (default: 256).
-    pub free_flush_max_batch: u32,
+    pub(crate) free_flush_max_batch: u32,
     /// Snapshot compaction interval in seconds (default: 300).
-    pub snapshot_interval_secs: u32,
+    pub(crate) snapshot_interval_secs: u32,
     /// Compact when journal entries per zone exceed this (default: 4096).
-    pub snapshot_journal_threshold: u32,
+    pub(crate) snapshot_journal_threshold: u32,
 }
 
 impl Default for PersistenceConfig {
@@ -135,13 +135,13 @@ impl Default for PersistenceConfig {
 
 /// Background scanner configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScannerConfig {
+pub(crate) struct ScannerConfig {
     /// Scanner run interval in seconds (default: 600).
-    pub scan_interval_secs: u32,
+    pub(crate) scan_interval_secs: u32,
     /// Enable ghost allocation detection (default: true).
-    pub detect_ghost_allocations: bool,
+    pub(crate) detect_ghost_allocations: bool,
     /// Enable record integrity checks (default: true).
-    pub verify_record_integrity: bool,
+    pub(crate) verify_record_integrity: bool,
 }
 
 impl Default for ScannerConfig {

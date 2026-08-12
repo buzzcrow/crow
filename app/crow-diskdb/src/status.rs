@@ -3,26 +3,28 @@
 
 //! `StatusManager` — applies status transitions and computes effective status.
 
+#![allow(dead_code)]
+
 use crow_protocol::common::HwStatus;
 use std::time::{Duration, Instant};
 
 /// Result of a status transition check.
-pub type TransitionResult<T> = Result<T, String>;
+pub(crate) type TransitionResult<T> = Result<T, String>;
 
 /// Manages hardware status transitions.
-pub struct StatusManager {
+pub(crate) struct StatusManager {
     temp_failure_timeout: Duration,
 }
 
 impl StatusManager {
-    pub fn new(temp_failure_timeout_secs: u32) -> Self {
+    pub(crate) fn new(temp_failure_timeout_secs: u32) -> Self {
         Self {
             temp_failure_timeout: Duration::from_secs(u64::from(temp_failure_timeout_secs)),
         }
     }
 
     /// Check if a status transition is legal (design doc §9).
-    pub fn is_legal_transition(from: HwStatus, to: HwStatus) -> bool {
+    pub(crate) fn is_legal_transition(from: HwStatus, to: HwStatus) -> bool {
         match (from, to) {
             (HwStatus::Init, HwStatus::Up | HwStatus::Offline | HwStatus::Maintenance) => true,
             (HwStatus::Up, HwStatus::Suspect | HwStatus::Offline | HwStatus::Maintenance) => true,
@@ -36,7 +38,7 @@ impl StatusManager {
     }
 
     /// Apply a status transition, validating legality.
-    pub fn apply_transition(from: HwStatus, to: HwStatus) -> TransitionResult<()> {
+    pub(crate) fn apply_transition(from: HwStatus, to: HwStatus) -> TransitionResult<()> {
         if Self::is_legal_transition(from, to) {
             Ok(())
         } else {
@@ -45,17 +47,17 @@ impl StatusManager {
     }
 
     /// Compute effective status = `max(node, group, disk)`.
-    pub fn effective_status(node: HwStatus, group: HwStatus, disk: HwStatus) -> HwStatus {
+    pub(crate) fn effective_status(node: HwStatus, group: HwStatus, disk: HwStatus) -> HwStatus {
         node.max(group).max(disk)
     }
 
     /// Check if allocation is allowed (Up only).
-    pub fn allows_allocate(effective: HwStatus) -> bool {
+    pub(crate) fn allows_allocate(effective: HwStatus) -> bool {
         effective == HwStatus::Up
     }
 
     /// Check if free is allowed (Up, Maintenance, or Suspect).
-    pub fn allows_free(effective: HwStatus) -> bool {
+    pub(crate) fn allows_free(effective: HwStatus) -> bool {
         matches!(
             effective,
             HwStatus::Up | HwStatus::Maintenance | HwStatus::Suspect
@@ -64,7 +66,7 @@ impl StatusManager {
 
     /// Check suspect timeouts — transitions Suspect > timeout to Offline.
     /// Returns true if a timeout transition was applied.
-    pub fn check_suspect_timeout(&self, suspect_since: Instant, now: Instant) -> bool {
+    pub(crate) fn check_suspect_timeout(&self, suspect_since: Instant, now: Instant) -> bool {
         now.duration_since(suspect_since) >= self.temp_failure_timeout
     }
 }
