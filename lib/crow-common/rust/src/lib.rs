@@ -15,8 +15,6 @@
 //! - [`time`] — process-wide monotonic-time anchor helpers.
 //! - [`report`] — multi-step operation error aggregation.
 
-#![allow(clippy::mod_module_files)]
-
 pub mod logging;
 pub mod metrics;
 pub mod report;
