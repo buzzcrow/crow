@@ -23,6 +23,7 @@ Rust workspace + C++ storage engine (via FFI).
 - `test-util` auto-enabled for tests via self dev-dependency — no flags needed.
 - Commit messages: single-line subject only — no body, no trailers (e.g. `Co-Authored-By`, `Generated with`), no doc references, no task numbers (R-numbers). Code comments: single line, no doc references or task numbers.
 - **One commit per task** — a "task" is a coherent unit of work (e.g. "restructure docs", "add CLI rename", "implement R7"). Small, closely-related changes may be merged into one commit. For continuous interactive changes, accumulate and commit only when asked. Before pushing, squash unpushed commits from the same task into one (soft reset to remote tip, re-commit). Before committing, verify no temp/generated files are staged; add to `.gitignore` if needed.
+- **Never `git reset --hard`** — it destroys uncommitted work with no trace. To set aside uncommitted changes, use `git stash` (or `git stash -u` for untracked files). To experiment on a branch, create a temp branch (`git switch -c tmp/...`) instead of resetting. Soft/mixed resets (`git reset` / `git reset --soft`) are fine for squashing.
 - **Pre-commit quality gate — do not skip:**
   - Lint must pass: `cargo fmt --check`, `cargo clippy -- -D warnings`, `clang-format --dry-run --Werror` (changed `.cpp`/`.h`), `tree-lint` (clang-tidy, changed C++). Fix up to 3 times — always, regardless of cause.
   - Tests: run only relevant tests (Rust or `test-tree-ct`), not the entire suite. Fix up to 3 times; skip pre-existing failures with a stated reason.
