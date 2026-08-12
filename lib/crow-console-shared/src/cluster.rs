@@ -27,7 +27,8 @@ use crate::snapshot::CrowTreeStatsSnapshot;
 /// Rack: a logical grouping of nodes. Console-side identity is a string
 /// so simulated and real racks can share the same namespace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Rack {
+#[allow(dead_code)]
+pub(crate) struct Rack {
     pub id: RackId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,

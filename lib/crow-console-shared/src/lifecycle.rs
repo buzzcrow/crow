@@ -329,7 +329,7 @@ pub fn process_is_alive(pid: u32) -> bool {
 /// host. Public so the SSH path can reuse it without duplicating arg
 /// formatting.
 #[must_use]
-pub fn remote_start_command(req: &DeployRequest, server_bin: &str) -> String {
+pub(crate) fn remote_start_command(req: &DeployRequest, server_bin: &str) -> String {
     // `nohup ... &` + redirected fds detaches the child from the SSH
     // channel; the trailing `echo $!` prints the pid we want to capture.
     let config_arg = req

@@ -44,7 +44,7 @@ impl ServerClient {
     }
 
     #[must_use]
-    pub fn base_url(&self) -> &str {
+    pub(crate) fn base_url(&self) -> &str {
         &self.base_url
     }
 
@@ -52,7 +52,7 @@ impl ServerClient {
     /// (e.g. `crate::mgmt`) to issue POST/DELETE requests without
     /// reinstantiating a client.
     #[must_use]
-    pub fn inner(&self) -> &reqwest::Client {
+    pub(crate) fn inner(&self) -> &reqwest::Client {
         &self.inner
     }
 

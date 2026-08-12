@@ -77,7 +77,7 @@ impl OpsLog {
 /// # Errors
 /// Returns the underlying `io::Error` when the file or its parent
 /// directory cannot be created.
-pub fn init(path: PathBuf) -> std::io::Result<()> {
+pub(crate) fn init(path: PathBuf) -> std::io::Result<()> {
     if OPS_LOG.get().is_some() {
         return Ok(());
     }
@@ -114,7 +114,7 @@ pub fn current() -> Option<&'static OpsLog> {
 /// `role` is a short tag (`"web"`, `"cli"`) so concurrent sessions
 /// don't write to the same file.
 #[must_use]
-pub fn default_path(role: &str) -> PathBuf {
+pub(crate) fn default_path(role: &str) -> PathBuf {
     let dir = dirs::home_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join(".crow-kv")
@@ -152,7 +152,14 @@ pub fn append_http(
 
 /// Append one gRPC-call record. `service_method` is the standard
 /// `package.Service/Method` form.
-pub fn append_grpc(corr_id: &str, target: &str, service_method: &str, status: &str, duration_ms: u128) {
+#[allow(dead_code)]
+pub(crate) fn append_grpc(
+    corr_id: &str,
+    target: &str,
+    service_method: &str,
+    status: &str,
+    duration_ms: u128,
+) {
     if let Some(log) = OPS_LOG.get() {
         log.append(&json!({
             "ts_unix_ms": now_ms(),
@@ -167,7 +174,14 @@ pub fn append_grpc(corr_id: &str, target: &str, service_method: &str, status: &s
 }
 
 /// Append one SSH-call record.
-pub fn append_ssh(corr_id: &str, target: &str, command: &str, exit_code: Option<i32>, duration_ms: u128) {
+#[allow(dead_code)]
+pub(crate) fn append_ssh(
+    corr_id: &str,
+    target: &str,
+    command: &str,
+    exit_code: Option<i32>,
+    duration_ms: u128,
+) {
     if let Some(log) = OPS_LOG.get() {
         log.append(&json!({
             "ts_unix_ms": now_ms(),
@@ -185,7 +199,8 @@ pub fn append_ssh(corr_id: &str, target: &str, command: &str, exit_code: Option<
 /// Custom record type for callers that need more fields than the
 /// `append_*` shortcuts expose.
 #[derive(Debug, Serialize)]
-pub struct CustomRecord<'a> {
+#[allow(dead_code)]
+pub(crate) struct CustomRecord<'a> {
     pub corr_id: &'a str,
     pub kind: &'a str,
     pub op: &'a str,

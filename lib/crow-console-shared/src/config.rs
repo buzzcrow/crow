@@ -109,7 +109,8 @@ impl TomlFileEngine {
     }
 
     #[must_use]
-    pub fn path(&self) -> &Path {
+    #[allow(dead_code)]
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
@@ -119,7 +120,8 @@ impl TomlFileEngine {
     }
 
     #[must_use]
-    pub fn from_default_path() -> Option<Self> {
+    #[allow(dead_code)]
+    pub(crate) fn from_default_path() -> Option<Self> {
         Self::default_path().map(Self::new)
     }
 }
@@ -162,17 +164,18 @@ pub struct ConsoleConfig {
     pub groups: Vec<GroupEntry>,
     /// Optional `[bench]` section. Reserved for future use.
     #[serde(default, skip_serializing_if = "BenchConfig::is_empty")]
-    pub bench: BenchConfig,
+    pub(crate) bench: BenchConfig,
 }
 
 /// `[bench]` section. Reserved for future knobs (default reporting
 /// dir, max threads, etc.); currently empty.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BenchConfig {}
+pub(crate) struct BenchConfig {}
 
 impl BenchConfig {
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    #[allow(clippy::unused_self)]
+    pub(crate) fn is_empty(&self) -> bool {
         true
     }
 }
@@ -365,7 +368,7 @@ impl ConsoleConfig {
     /// Config is persisted to `runtime-data/crow-kv.db.toml` in the project root.
     /// This file stores registered crow-kv-server instances for the console.
     #[must_use]
-    pub fn default_path() -> Option<PathBuf> {
+    pub(crate) fn default_path() -> Option<PathBuf> {
         TomlFileEngine::default_path()
     }
 
@@ -383,7 +386,7 @@ impl ConsoleConfig {
     ///
     /// # Errors
     /// Filesystem and TOML serialization errors are propagated.
-    pub fn save(&self, path: &Path) -> Result<()> {
+    pub(crate) fn save(&self, path: &Path) -> Result<()> {
         TomlFileEngine::new(path).save(self)
     }
 
@@ -429,7 +432,7 @@ impl ConsoleConfig {
     ///
     /// # Errors
     /// Returns `Error::NotFound` if no entry has that id.
-    pub fn remove_server(&mut self, id: &str) -> Result<ServerEntry> {
+    pub(crate) fn remove_server(&mut self, id: &str) -> Result<ServerEntry> {
         let pos = self
             .servers
             .iter()
@@ -647,7 +650,8 @@ impl ConsoleConfig {
 
     /// Look up a server entry by id.
     #[must_use]
-    pub fn server(&self, id: &str) -> Option<&ServerEntry> {
+    #[allow(dead_code)]
+    pub(crate) fn server(&self, id: &str) -> Option<&ServerEntry> {
         self.servers.iter().find(|s| s.id == id)
     }
 
@@ -675,7 +679,8 @@ impl ConsoleConfig {
 
     /// Mutable look-up for in-place updates (e.g. `pid` after restart).
     #[must_use]
-    pub fn server_mut(&mut self, id: &str) -> Option<&mut ServerEntry> {
+    #[allow(dead_code)]
+    pub(crate) fn server_mut(&mut self, id: &str) -> Option<&mut ServerEntry> {
         self.servers.iter_mut().find(|s| s.id == id)
     }
 
