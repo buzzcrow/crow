@@ -62,7 +62,7 @@ pub struct AddRackBody {
 pub struct NodeQuery {
     /// Optional `?rack_id=<id>` filter for `GET /api/nodes`.
     #[serde(default)]
-    rack_id: Option<String>,
+    rack_id: Option<RackId>,
 }
 
 /// List all racks.
@@ -150,14 +150,12 @@ pub async fn http_list_nodes(
 ) -> Json<Vec<NodeEntry>> {
     let cfg = state.config.read().unwrap();
     let nodes: Vec<NodeEntry> = match q.rack_id {
-        Some(r) => {
-            let rack_id = r.parse::<u64>().unwrap();
-            cfg.nodes
-                .iter()
-                .filter(|n| n.rack_id == rack_id)
-                .cloned()
-                .collect()
-        }
+        Some(rack_id) => cfg
+            .nodes
+            .iter()
+            .filter(|n| n.rack_id == rack_id)
+            .cloned()
+            .collect(),
         None => cfg.nodes.clone(),
     };
     Json(nodes)
