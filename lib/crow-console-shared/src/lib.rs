@@ -10,6 +10,7 @@
 //! C0 status: skeleton only. Real modules land in C1+.
 
 #![cfg_attr(not(test), allow(dead_code))]
+#![allow(clippy::mod_module_files)]
 
 pub mod clients;
 pub mod cluster;

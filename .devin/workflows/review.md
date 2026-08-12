@@ -29,9 +29,12 @@ Hot paths: `propose`, `accept`, `learn`, `kv_get`, `kv_put`, `kv_delete`, `kv_ba
 8. **Duplication** — move shared helpers to `common/` or `rpc/`.
 9. **Errors** — no `panic!` in non-test code. Replace `OnceCell::get_or_init + unwrap` with `get_or_try_init`. gRPC client init must propagate.
 10. **Naming** — `Px` prefix for Paxos types. `&self` when interior mutability suffices.
-11. **Visibility** — minimise `pub`; use `pub(crate)` / `pub(super)`. Test helpers `#[cfg(test)]` or test feature.
+11. **Visibility** — minimise `pub`; use `pub(crate)` / `pub(super)`. Test-only access via `#[cfg(feature = "test-util")]` gates + `_for_tests` setters, not `pub`. Review every changed `pub` item per `plan-coding-style.md` §1.11.
 12. **Debug** — all public structs implement `Debug`. Manual: identity fields + `finish_non_exhaustive()`.
-13. **Tests** — integration tests only, under each crate's `tests/<topic>.rs`. No inline `#[cfg(test)] mod tests`. Shared helpers in `tests/testkit/`.
+13. **Tests** — integration tests only, under each crate's `tests/<topic>_test.rs`. No inline `#[cfg(test)] mod tests`. Shared helpers in `tests/common/` (2018 style, not `testkit/`).
+14. **Module & file layout** — changed file passes `plan-coding-style.md` §1.4 (size) and §1.6 (naming); `foo.rs` is a pure index; §1.5 split considered for grown files.
+15. **File cohesion** — passes §1.7 stranger check: one responsibility, grouped by shared state/imports, handlers by resource not verb.
+16. **Function length** — new/changed functions pass §1.8 (≤40 healthy / ≤80 orchestrator / ≤150 justified / >150 split). Extract by responsibility.
 
 ## Steps
 
@@ -42,6 +45,9 @@ grep -rn 'Arc<' src/
 grep -rn '\.unwrap()' src/
 grep -rn 'fn .*(&self' src/
 grep -rn '#\[cfg\(test\)\]' src/
+grep -rn 'mod\.rs' src/ tests/
+grep -rn 'tests/testkit' .
+grep -rn '\bpub ' src/ | grep -v 'pub(crate)\|pub(super)\|pub use\|pub mod\|pub fn.*for_tests'
 ```
 
 Pre-commit gate (AGENTS.md Hard Constraints) must have already passed — fmt, clippy, clang-format, relevant tests.
@@ -58,4 +64,9 @@ Pre-commit gate (AGENTS.md Hard Constraints) must have already passed — fmt, c
 - Changing getter return type (`Arc<T>` → `&T`) without updating callers/tests.
 - Removing a dep used only by generated code (check `OUT_DIR`).
 - `&T` across `.await` is unsafe once moved into spawned task — must be `Arc<T>` then.
-- Inline `#[cfg(test)] mod tests` instead of `tests/<topic>.rs`.
+- Inline `#[cfg(test)] mod tests` instead of `tests/<topic>_test.rs`.
+- Adding a headline type or impl logic to `foo.rs` — it must stay a pure index (docs + `pub mod` + `pub use`).
+- Adding code to a >1000-line file — must extract a submodule first.
+- New file named `types.rs` / `utils.rs` / `impl.rs` / `core.rs` / `mod.rs`-with-logic — rename by subject per §1.6.
+- `pub` on a test-only item — gate behind `#[cfg(feature = "test-util")]` instead.
+- New file under `tests/testkit/` — use `tests/common/` (2018 style).

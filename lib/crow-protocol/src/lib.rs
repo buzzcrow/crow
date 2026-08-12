@@ -9,6 +9,8 @@
 //! (`crow.diskio.rpc`), and utility functions/extension traits for
 //! diskdb proto types (`diskdb_type_util`).
 
+#![allow(clippy::mod_module_files)]
+
 pub mod common {
     #![allow(
         clippy::all,

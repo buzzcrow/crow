@@ -7,7 +7,7 @@ description: CROW coding flow — conventions, doc-first
 
 # CROW - Coding Flow
 
-Companion workflows: `/review` (pre-push), `/doc` (doc rules).
+Companion workflows: `/review` (pre-push), `/doc` (doc rules), `/e2e` (Playwright tests).
 
 ## Conventions
 
@@ -36,18 +36,11 @@ Defaults: file=`debug`, console (`-l`)=`info`. Override via `RUST_LOG`. See `cro
 ### Tests
 
 - Integration tests only — under each crate's `tests/`. No new inline `#[cfg(test)] mod tests`; migrate existing inline tests when you next touch the file.
-- Shared helpers: `tests/testkit/<topic>.rs`.
+- Shared helpers: `tests/common/<topic>.rs` (2018 style: `tests/common.rs` + `tests/common/`). `tests/testkit/` is being migrated to `tests/common/` — do not add new files under `testkit/`.
+- Test case files use the `*_test.rs` suffix (`group_test.rs`, `wal_test.rs`). Test helper files live in `common/` named by subject (`cluster.rs`, `logging.rs`). Test helper types use the `Test*` prefix (`TestCluster`, `TestNode`).
+- Test fixtures (`TestCluster`, `init_test_subscriber`, `unique_port`) stay in `tests/`, never in `src/` under `test-util`. The `test-util` feature is for production-type hooks only (gates, setters, internal field exposure).
 - Paxos suite: `crowkv/tests/paxos/*.rs` with `tests/paxos.rs` as entry stub.
-- Tracing in tests: set `CROWKV_TEST_LOG=1`; init in `tests/testkit/logging.rs`.
-
-### E2E / Playwright Tests (`crowkv-console/web/ui/e2e`)
-
-- **No ignoring errors** — never swallow API failures silently; log cleanup errors with `console.warn`.
-- **Precise selectors** — use `getByLabel`, `getByRole`, `getByTestId`, or scoped locators. Avoid unscoped `page.getByText` and `.first()` on page-level locators.
-- **Timeout discipline** — assertion timeouts ≤ 3 s; leader election may use up to 10 s. No inflating timeouts to work around slowness. `expect.poll` must set `intervals: [100]` for fast polling (default 2 s interval causes false slowness).
-- **`data-testid`** — add to dynamic elements that could match in multiple places; select via `getByTestId`.
-- **Ignore toasts** — never assert on `getByRole('alert')` or wait for toast dismiss. If a toast blocks a click, use `locator.evaluate((el) => el.click())` to bypass.
-- **Baseline timing** — every E2E spec file has a `// Baseline: Xs (date)` comment after the license header. If a test's runtime exceeds 2x its baseline, investigate for regression. Update the baseline only when a deliberate change justifies it.
+- Tracing in tests: set `CROWKV_TEST_LOG=1`; init in `tests/common/logging.rs`.
 
 ### Health & Info Reporting
 
@@ -62,3 +55,15 @@ When adding internal state to `crowkv` lib:
 - Mid-impl decision:
   - **Simple/local** → decide, note in commit msg.
   - **Ambiguous / needs review** → discuss with the user. Do not silently guess.
+
+## Style & Layout Rules
+
+- **Module layout** — Rust 2018: `foo.rs` + `foo/`. `foo.rs` is a pure index (docs + `pub mod` + `pub use` only); no type definitions, no impl logic, no inline tests.
+- **File size** (non-blank/non-comment) — ≤300 healthy, 301–600 ok if single responsibility, 601–1000 smell (needs justification), >1000 must split before adding code.
+- **File naming** — `snake_case`, subject not kind (`segment.rs` not `engine_impl.rs`), 1–2 words. Allowed abbreviations: `kv`, `rpc`, `wal`, `gc`, `ffi`, `cfg`, `mgmt`, `px`, `cli`. Banned: `types.rs`, `impl.rs`, `core.rs`, `misc.rs`, `mod.rs`-with-logic, `_helpers`/`_utils`/`_common` suffixes. Conventional suffixes: `_engine`, `_service`, `_handler`, `_backend`, `_worker`/`_loop`, `_codec`, `_view`/`_status`, `_config`, `_error`, `_tests`.
+- **Cohesion** — group by domain then subject, never by layer. One responsibility per file. Types live with their impl. Handlers group by resource not verb. Stranger check: any function should share the file's primary type, imports, and reader expectations.
+- **Function length** — ≤40 healthy, 41–80 orchestrator-only, 81–150 smell (needs reason), >150 must split. Extract by responsibility, not line count.
+- **Type placement** — headline types always in named submodules (`foo/wal_engine.rs`), re-exported from `foo.rs`. Supporting types with their owner or in a shared submodule named by subject.
+- **Visibility** — narrowest that works: private < `pub(super)` < `pub(crate)` < `pub`. Test-only access via `#[cfg(feature = "test-util")]` + `_for_tests` setters, never `pub`.
+- **Special cases** — `crow-tree-ffi`: `unsafe_code = deny` relaxed, 1000-line cap still applies. Test code: strict 2018 style (same as `src/`). Generated code: exempt from size rules.
+- **Enforcement** — `[workspace.lints.clippy]`: `mod_module_files`, `too_many_lines` (default threshold 100), `items_after_statements` set to `"warn"`. No `clippy.toml`. No new `#[allow]` suppressions.
