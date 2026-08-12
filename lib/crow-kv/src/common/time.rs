@@ -6,4 +6,4 @@
 //! call sites compile unchanged; the implementation moved to
 //! `crow_common::time` (R12).
 
-pub use crow_common::time::{anchor_ms_to_instant, instant_to_anchor_ms, process_anchor};
+pub(crate) use crow_common::time::{anchor_ms_to_instant, instant_to_anchor_ms};

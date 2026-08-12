@@ -8,11 +8,10 @@
 
 pub mod config;
 pub mod logging;
-pub mod metrics;
-pub mod report;
-pub mod time;
+pub(crate) mod metrics;
+pub(crate) mod report;
+pub(crate) mod time;
 
-pub use metrics::{LayerMetrics, MetricsSnapshot};
 pub use report::OperationReport;
 
 /// Convert a protobuf `u64` field to `Option<u64>`, treating 0 as `None`.

@@ -18,7 +18,8 @@ mod fallback;
 #[cfg(feature = "test-util")]
 pub mod sim;
 
-pub use async_file::{AsyncFile, AsyncFileInner};
+pub use async_file::AsyncFile;
+pub(crate) use async_file::AsyncFileInner;
 pub use backend::{IoBackend, OpenOptions};
 #[cfg(feature = "test-util")]
 pub use sim::{SimDisk, SimDiskController};

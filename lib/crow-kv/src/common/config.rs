@@ -28,7 +28,8 @@ pub enum AdmissionPolicy {
 impl AdmissionPolicy {
     /// Parse from a CLI string.
     #[must_use]
-    pub fn parse(s: &str) -> Option<Self> {
+    #[allow(dead_code)]
+    pub(crate) fn parse(s: &str) -> Option<Self> {
         match s {
             "reject" => Some(Self::Reject),
             "queue" => Some(Self::Queue),
@@ -180,7 +181,7 @@ impl WalConfig {
     /// Returns `Unaligned` when `wal_aligned` is false, otherwise
     /// `Aligned { io_unit_bytes: wal_io_unit_bytes }`.
     #[must_use]
-    pub fn alignment(&self) -> WalBlockAlignment {
+    pub(crate) fn alignment(&self) -> WalBlockAlignment {
         if self.wal_aligned {
             WalBlockAlignment::Aligned {
                 io_unit_bytes: self.wal_io_unit_bytes,
@@ -282,7 +283,7 @@ impl PxElectionConfig {
     /// Multiplier applied to `PaxosConfig::max_inflight_proposals` to derive
     /// `learner_stream_window_frames`. Gives the learner channel 4×
     /// headroom over the proposer admission gate.
-    pub const LEARNER_WINDOW_MULTIPLIER: usize = 4;
+    pub(crate) const LEARNER_WINDOW_MULTIPLIER: usize = 4;
 
     /// Production / single-DC default.
     ///
@@ -376,7 +377,8 @@ impl PxElectionConfig {
     /// count. Call this when customizing `max_inflight_proposals` at runtime
     /// so the learner channel stays in sync.
     #[must_use]
-    pub const fn learner_window_for(max_inflight_proposals: usize) -> usize {
+    #[allow(dead_code)]
+    pub(crate) const fn learner_window_for(max_inflight_proposals: usize) -> usize {
         max_inflight_proposals * Self::LEARNER_WINDOW_MULTIPLIER
     }
 }
@@ -513,7 +515,8 @@ impl CrowKVConfig {
 
     /// E2E / benchmark profile — stable under real scheduling jitter.
     #[must_use]
-    pub fn for_e2e() -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn for_e2e() -> Self {
         Self {
             election: PxElectionConfig::for_e2e(),
             ..Self::default()

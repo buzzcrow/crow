@@ -913,7 +913,7 @@ impl PxLocalReplica {
     /// driver / step-down sequence can bump counters without going
     /// through additional accessor noise.
     #[must_use]
-    pub fn election_metrics(&self) -> &ElectionMetrics {
+    pub(crate) fn election_metrics(&self) -> &ElectionMetrics {
         &self.election_metrics
     }
 

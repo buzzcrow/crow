@@ -8,12 +8,10 @@
 //! call sites compile unchanged; the implementation moved to
 //! `crow_common::logging` (R12).
 
-pub use crow_common::logging::{
-    open_metrics_log, LogGuards, RotatingLogWriter, DEFAULT_LOG_MAX_FILES, DEFAULT_LOG_MAX_FILE_MB,
-};
+pub use crow_common::logging::{open_metrics_log, LogGuards, RotatingLogWriter};
 
 /// `crow_kv` default `EnvFilter` directive used when `RUST_LOG` is unset.
-pub const CROW_KV_DEFAULT_FILTER: &str =
+pub(crate) const CROW_KV_DEFAULT_FILTER: &str =
     "warn,crow_kv=info,crow_kv_server=info,crow_web=info,crow_console_shared=info,crow_cli=info";
 
 /// Initializes file logging to the specified directory using the

@@ -17,7 +17,7 @@ pub fn iter_all_dyn(engine: &dyn KVEngine) -> Vec<(Vec<u8>, u64, Cell)> {
         return e.iter_all();
     }
     if let Some(e) = engine.as_any().downcast_ref::<CrowTreeEngine>() {
-        return e.iter_all();
+        return e.iter_all_for_tests();
     }
     Vec::new()
 }
