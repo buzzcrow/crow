@@ -7,7 +7,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use crow_diskdb::domain::zone::{AllocatedRange, DdbZone, DdbZoneHealth};
+use crow_diskdb::model::zone::{AllocatedRange, DdbZone, DdbZoneHealth};
 use crow_protocol::common::DiskId;
 use crow_protocol::diskdb::rpc::ZoneAllocationState;
 

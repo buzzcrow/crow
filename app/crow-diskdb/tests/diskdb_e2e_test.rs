@@ -15,9 +15,9 @@ use std::time::Duration;
 
 use common::cluster::KvCluster;
 use crow_diskdb::data_group_client::DataGroupClient;
-use crow_diskdb::domain::alloc;
-use crow_diskdb::domain::disk_group_container::DdbDiskGroupContainer;
 use crow_diskdb::keepalive::{KeepAlive, KeepAliveConfig};
+use crow_diskdb::model::alloc;
+use crow_diskdb::model::disk_group_container::DdbDiskGroupContainer;
 use crow_kv_client::{ClientConfig, CrowkvClient, GetOutcome, HardwareClient, ServiceRegistryClient};
 use crow_protocol::common::{ChunkId, DiskId, HwStatus, NodeValue, RackValue};
 use crow_protocol::diskdb::rpc::{DiskGroupValue, DiskType, DiskValue};

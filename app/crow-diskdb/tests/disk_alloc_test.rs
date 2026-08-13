@@ -7,9 +7,9 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crow_diskdb::domain::disk::DdbDisk;
-use crow_diskdb::domain::disk_group::{AllocError, DdbDiskGroup};
-use crow_diskdb::domain::zone::DdbZone;
+use crow_diskdb::model::disk::DdbDisk;
+use crow_diskdb::model::disk_group::{AllocError, DdbDiskGroup};
+use crow_diskdb::model::zone::DdbZone;
 use crow_protocol::common::DiskId;
 use crow_protocol::diskdb::rpc::DiskValue;
 

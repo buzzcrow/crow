@@ -31,9 +31,9 @@ use crow_protocol::diskdb::rpc::DiskValue;
 use crow_protocol::{DiskGroupId, NodeId, RackId};
 
 use crate::data_group_client::{Bind, DataGroupClient};
-use crate::domain::disk::DdbDisk;
-use crate::domain::disk_group::DdbDiskGroup;
-use crate::domain::zone::DdbZone;
+use crate::model::disk::DdbDisk;
+use crate::model::disk_group::DdbDiskGroup;
+use crate::model::zone::DdbZone;
 
 pub use full_scan::rebuild_zone_bitmap_full_scan;
 pub use journal_replay::zone_snapshots_exist;

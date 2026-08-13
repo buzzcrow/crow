@@ -24,8 +24,8 @@ use crow_protocol::key::BinaryKey;
 
 use crate::bg_task::{BackgroundTask, BgCtx, BgError, CycleFut, Trigger};
 use crate::data_group_client::{Bind, DataGroupClient};
-use crate::domain::disk_group_container::DdbDiskGroupContainer;
-use crate::domain::zone::DdbZone;
+use crate::model::disk_group_container::DdbDiskGroupContainer;
+use crate::model::zone::DdbZone;
 use crate::recovery::RecoveryError;
 
 /// Compaction configuration.

@@ -40,7 +40,7 @@ fn test_phase_as_str() {
 
 #[test]
 fn test_container_lifecycle_phase() {
-    use crow_diskdb::domain::disk_group_container::DdbDiskGroupContainer;
+    use crow_diskdb::model::disk_group_container::DdbDiskGroupContainer;
     let container = DdbDiskGroupContainer::new(1);
     assert_eq!(container.lifecycle_phase(), StartupPhase::Init);
     container.set_lifecycle_phase(StartupPhase::Up);

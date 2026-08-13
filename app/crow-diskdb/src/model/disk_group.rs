@@ -11,8 +11,8 @@ use std::sync::{Arc, RwLock};
 use crow_protocol::common::{DiskId, HwStatus};
 use crow_protocol::DiskGroupId;
 
-use crate::domain::disk::DdbDisk;
-use crate::domain::zone::{AllocatedRange, DdbZone};
+use crate::model::disk::DdbDisk;
+use crate::model::zone::{AllocatedRange, DdbZone};
 
 /// RCU-published set of allocatable disks within the named
 /// disk-group, replaced via `Arc` swap on add/remove/status-change.

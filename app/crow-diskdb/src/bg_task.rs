@@ -18,8 +18,8 @@ use std::time::Duration;
 use tracing::{error, info};
 
 use crate::data_group_client::DataGroupClient;
-use crate::domain::disk_group_container::DdbDiskGroupContainer;
 use crate::metrics::DiskdbMetrics;
+use crate::model::disk_group_container::DdbDiskGroupContainer;
 
 /// Shared context passed to every background task.
 pub struct BgCtx {

@@ -17,7 +17,7 @@ use crow_protocol::common::{ChunkId, DiskId};
 use crow_protocol::diskdb::rpc::{BlockState, BusyBlockValue, FreeBlockValue, Segment};
 
 use crate::data_group_client::{Bind, DataGroupClient};
-use crate::domain::disk_group::{AllocClaim, AllocError, DdbDiskGroup};
+use crate::model::disk_group::{AllocClaim, AllocError, DdbDiskGroup};
 
 /// Errors from the free path when `validate_owner_on_free` is enabled.
 #[derive(Debug)]

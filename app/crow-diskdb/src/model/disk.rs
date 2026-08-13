@@ -13,7 +13,7 @@ use crow_protocol::common::{DiskId, HwStatus};
 use crow_protocol::diskdb::rpc::DiskValue;
 use crow_protocol::{DiskGroupId, NodeId, RackId};
 
-use crate::domain::zone::{AllocatedRange, DdbZone, DdbZoneHealth};
+use crate::model::zone::{AllocatedRange, DdbZone, DdbZoneHealth};
 
 /// RCU-published active zone set — `zone_rotate_count` allocatable
 /// zones, replaced via `Arc` swap on rotation.

@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 
 use crow_protocol::common::HwStatus;
 
-use crate::domain::disk::DdbDisk;
-use crate::domain::disk_group::DdbDiskGroup;
-use crate::domain::zone::DdbZoneHealth;
+use crate::model::disk::DdbDisk;
+use crate::model::disk_group::DdbDiskGroup;
+use crate::model::zone::DdbZoneHealth;
 
 /// Operations a status may permit or deny.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

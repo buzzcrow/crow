@@ -21,7 +21,7 @@ use crow_protocol::diskdb::rpc::{BusyBlockValue, FreeBlockValue, ZoneValue};
 use crow_protocol::key::{BinaryKey, BusyBlockKey, FreeBlockKey, ZoneKey};
 use crow_protocol::ZoneValueExt;
 
-use crate::domain::records::{BusyRecord, FreeRecord, ZoneRecords};
+use crate::model::records::{BusyRecord, FreeRecord, ZoneRecords};
 
 /// `(store_id, group_id)` identifying a bound paxos data group.
 pub type Bind = (u64, u64);

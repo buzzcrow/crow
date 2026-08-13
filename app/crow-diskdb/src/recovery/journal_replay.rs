@@ -15,7 +15,7 @@ use crow_protocol::key::{BinaryKey, BusyBlockKey, FreeBlockKey};
 use crow_protocol::ZoneValueExt;
 
 use crate::data_group_client::{Bind, DataGroupClient};
-use crate::domain::zone::{DdbZone, DdbZoneHealth};
+use crate::model::zone::{DdbZone, DdbZoneHealth};
 use crate::recovery::RecoveryError;
 
 /// Inner zone recovery — strategy 2 (journal scan replay).

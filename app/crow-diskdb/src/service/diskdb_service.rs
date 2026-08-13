@@ -22,8 +22,8 @@ use tonic::{Request, Response, Status};
 
 use crate::data_group_client::DataGroupClient;
 use crate::ddb_config::StorageDefaults;
-use crate::domain::alloc;
-use crate::domain::disk_group_container::DdbDiskGroupContainer;
+use crate::model::alloc;
+use crate::model::disk_group_container::DdbDiskGroupContainer;
 use crate::recovery::RecoveryEngine;
 
 /// Maximum number of blocks per `AllocateBlocks` request.
@@ -132,9 +132,7 @@ impl DiskdbServiceTrait for DiskdbService {
         )
         .await
         .map_err(|e| match e {
-            crate::domain::disk_group::AllocError::NoSpace => {
-                Status::resource_exhausted("no space available")
-            }
+            crate::model::disk_group::AllocError::NoSpace => Status::resource_exhausted("no space available"),
         })?;
 
         Ok(Response::new(AllocateResponse { segments }))
@@ -202,11 +200,11 @@ impl DiskdbServiceTrait for DiskdbService {
         )
         .await
         .map_err(|e| match e {
-            crate::domain::alloc::FreeError::NotBusy { .. } => Status::not_found(format!("free failed: {e}")),
-            crate::domain::alloc::FreeError::OwnerMismatch { .. } => {
+            crate::model::alloc::FreeError::NotBusy { .. } => Status::not_found(format!("free failed: {e}")),
+            crate::model::alloc::FreeError::OwnerMismatch { .. } => {
                 Status::permission_denied(format!("free failed: {e}"))
             }
-            crate::domain::alloc::FreeError::Kv(_) => Status::internal(format!("free persist failed: {e}")),
+            crate::model::alloc::FreeError::Kv(_) => Status::internal(format!("free persist failed: {e}")),
         })?;
 
         #[allow(clippy::cast_possible_truncation)]

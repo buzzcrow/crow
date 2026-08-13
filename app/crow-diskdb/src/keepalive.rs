@@ -20,10 +20,10 @@ use crow_protocol::{DiskIdExt, ZoneValueExt};
 use tracing::{info, warn};
 
 use crate::data_group_client::DataGroupClient;
-use crate::domain::disk::DdbDisk;
-use crate::domain::disk_group::DdbDiskGroup;
-use crate::domain::disk_group_container::DdbDiskGroupContainer;
-use crate::domain::zone::DdbZone;
+use crate::model::disk::DdbDisk;
+use crate::model::disk_group::DdbDiskGroup;
+use crate::model::disk_group_container::DdbDiskGroupContainer;
+use crate::model::zone::DdbZone;
 use crate::status_machine::HwStateMachine;
 
 /// Elapsed millis as u64 (saturating cast from u128).

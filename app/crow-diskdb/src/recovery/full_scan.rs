@@ -13,8 +13,8 @@ use std::sync::Arc;
 use crow_protocol::common::DiskId;
 
 use crate::data_group_client::{Bind, DataGroupClient};
-use crate::domain::records::ZoneRecords;
-use crate::domain::zone::DdbZone;
+use crate::model::records::ZoneRecords;
+use crate::model::zone::DdbZone;
 use crate::recovery::{RecoveryError, ZoneStats};
 
 /// Full-scan rebuild of one zone's usage bitmap from the live
