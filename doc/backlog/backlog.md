@@ -16,10 +16,12 @@ complexity, and dependency. Before implementation, follow the
 ### High Priority
 
 - **[R75](R75-diskdb-background-scanner.md)** — diskdb background
-  scanner — Area: diskdb — Implement ghost-allocation detection
-  (per-bit bitmap diff), bitmap drift detection, record integrity
-  (CRC + deserialization + owner_chunk validation). Leak detection
-  deferred (needs caller registries).
+  scanner — Area: diskdb — Periodic consistency check: ghost-busy
+  detection (space reclamation), ghost-free detection
+  (defense-in-depth), record integrity (CRC + deserialization +
+  owner_chunk validation), operator visibility (metrics + admin RPCs).
+  Data-safety principle: never free a block that might have data.
+  Leak detection deferred (needs caller registries).
 - **[R76](R76-diskdb-disk-discovery-health.md)** — diskdb disk discovery
   + health probing — Area: diskdb — Implement config-driven disk
   discovery, health probing (existence, size, basic read/write test),

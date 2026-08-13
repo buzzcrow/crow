@@ -1,12 +1,15 @@
 <!-- Copyright 2026-present buzzcrow <buzzcrow@126.com> -->
 <!-- Licensed under the Apache License, Version 2.0. -->
 
-### R75: diskdb — Background Scanner (Ghost/Drift/Integrity Detection)
+### R75: diskdb — Background Scanner (Consistency Check + Integrity Detection)
 
 **Problem**: R72–R74 implement the allocation engine, crash recovery,
-and space metrics. But the journal-based durability model (§7) introduces
-live-state-vs-records consistency risks that are only caught if someone
-runs a check:
+and space metrics. The free path now persists before clearing the
+bitmap (eliminating the double-allocate window), and R73's recovery
+rebuilds the bitmap from records on restart. But during uptime, there
+is no mechanism to detect and reconcile live-state drift, catch
+record corruption early, or give operators visibility into cluster
+health.
 
 - **Current behavior + impact** — R74's `RecalcEngine` (§11) replays
   each zone's journal into a throwaway bitmap and compares the
@@ -14,75 +17,119 @@ runs a check:
   detects count-level drift on demand (`RecalcDiskUsage` RPC), but:
   - It does not identify **which specific blocks** differ — only that
     the counts mismatch. An operator learns "zone 3 drifted" but not
-    which bits are ghosts.
+    which bits to reclaim.
   - It is not periodic — nothing wakes it. Drift can persist
     indefinitely until an operator manually triggers a recalc.
+    Ghost-busy blocks (bit set, no record — from a crash between
+    allocate Phase 1 and Phase 2, or a crash after free persist but
+    before bitmap clear) waste capacity until the next restart.
   - It does not verify **record integrity** (CRC on `ZoneValue`
     snapshots, deserialization of `BusyBlockValue` / `FreeBlockValue`).
-    R73's recovery checks CRC on the snapshot it loads, but a record
-    that corrupts **after** recovery is never re-checked.
+    R73's recovery checks CRC on the snapshot it loads at startup, but
+    a record that corrupts **after** recovery (bit rot, storage error)
+    is never re-checked until the next restart — by then, recovery
+    itself may fail.
   - It does not validate **per-block state** — `BusyBlockValue.owner_chunk`
     (§14, ownership validation deferred from the free path) is never
     cross-checked after allocate.
-  - Without periodic scanning, the crash-safety invariants in §7
-    (ghost allocation: bit set in-memory, no record; ghost free: bit
-    clear in-memory, `BusyBlockKey` still on disk) can violate
-    silently. The block is either leaked (busy in memory, free in
-    reality) or double-allocated (free in memory, busy in reality).
+  - There is no **operator visibility** into cluster health during
+    uptime — no metrics, no admin RPC to trigger a check, no status
+    query. An operator has no signal that drift or corruption is
+    accumulating until a restart surfaces it.
 
 - **Design pointers** — §12 (Background Scanner) specifies
   ghost-allocation detection, bitmap drift detection, record
   integrity, and per-block state validation; leak detection is a §2
   non-goal (needs caller registries). §7 (crash-safety invariants)
-  defines the two drift directions: ghost allocation and ghost free.
-  §14 (Concurrency Model) defers ownership validation from the free
-  path to the scanner. No direct aioss analog — new work (the aioss
-  reference path cited in §15 is not accessible for verification).
+  defines the drift directions; after the free-path fix, the remaining
+  drift is ghost-busy (bit set, no record) — the safe direction
+  (wasted space, not data risk). §14 (Concurrency Model) defers
+  ownership validation from the free path to the scanner. No direct
+  aioss analog — new work (the aioss reference path cited in §15 is
+  not accessible for verification).
+
+- **Data-safety principle** — a busy block may have data written to
+  it. The scanner's first priority is to **never free a block that
+  might have data**. When the scanner finds drift and the true state
+  is uncertain (corrupt records, conflicting signals), it defaults to
+  **busy** (keep the bit set, keep the block allocated). Wasting space
+  is always preferable to freeing a block with data. The scanner only
+  clears a bit when records confidently say "free" (no `BusyBlockKey`,
+  records intact and readable). Specifically:
+  - **Ghost-busy** (bit set, no `BusyBlockKey`, records intact):
+    records are authoritative → block is free → safe to clear the
+    bit. Auto-correction allowed.
+  - **Ghost-free** (bit clear, `BusyBlockKey` exists, records intact):
+    records are authoritative → block is busy → set the bit. Data may
+    be written. Auto-correction allowed. (Cannot happen from the
+    fixed free path, but the scanner detects it in case of bugs,
+    hardware errors, or future code changes.)
+  - **Corrupt `BusyBlockValue`** (key exists but undecodable):
+    uncertain → keep busy, report for manual intervention. No
+    auto-correction — the block might have data.
+  - **Corrupt `ZoneValue` snapshot** (CRC fail): fall back to
+    strategy 1 (full scan from records). If records are intact, use
+    records as truth. If records are also corrupt → keep busy.
 
 - **Use scenarios**:
-  - **Crash-mid-free** — a free RPC clears the live bitmap bit but
-    crashes before the `batch_write` (Delete `BusyBlockKey` + Put
-    `FreeBlockKey`) persists. The block is free in memory but busy in
-    records. The scanner detects the ghost-free bit, reports it, and
-    the operator triggers `RebuildZoneBitmap` (§7 strategy 1) to
-    reload from records.
-  - **Ungraceful shutdown with unflushed free batch** — (future, after
-    R79 free-batching) unflushed frees leave `BusyBlockKey`s on disk
-    with no matching live bitmap bits. The scanner reconciles by
-    reporting ghost-free blocks; §12 design intent is that the scanner
-    is the reconciliation path for unflushed batches.
-  - **Ghost allocation after failed persist** — a CAS claim set the
-    live bitmap bit but the `BusyBlockValue` persist failed and
-    rollback was incomplete. The block is busy in memory, no record.
-    The scanner detects the ghost-busy bit; auto-correct (if enabled)
-    clears the live bit.
+  - **Crash between allocate phases** — a CAS claim sets the live
+    bitmap bit but diskdb crashes before the `BusyBlockValue` persist.
+    On restart, R73 recovery clears the bit (no record). But if the
+    crash doesn't take the process down (bug, partial failure), the
+    ghost-busy bit wastes capacity. The scanner detects it, and with
+    auto-correct enabled, clears the bit — reclaiming the space
+    without a restart.
+  - **Crash after free persist, before bitmap clear** — the free path
+    persists the `FreeBlockValue` + deletes the `BusyBlockKey`, then
+    crashes before clearing the live bitmap bit. The block is free on
+    disk but shows busy in memory (ghost-busy). The allocator won't
+    re-hand it (bit is set), so no data risk — just wasted space. The
+    scanner detects the ghost-busy bit and clears it (records
+    confidently say free: no `BusyBlockKey`).
   - **Bit rot on a `ZoneValue` snapshot** — storage corruption flips a
-    byte in the snapshot's `usage_bitmap`. The scanner's CRC check
-    (`ZoneValueExt::verify_checksum`) fails; the scanner reports a
-    corrupt snapshot. Recovery (R73) already handles this by falling
-    back to strategy 1 (full scan) — the scanner just flags it for
-    operator awareness.
-  - **Corrupt `BusyBlockValue`** — a BusyBlockValue record fails to
-    deserialize (bincode decode error). The scanner reports the
-    corrupt record + slot; the block is in an indeterminate state
-    (allocated but metadata lost). v1 logs and reports; manual
-    intervention required.
+    byte in the snapshot's `usage_bitmap` after recovery. The
+    scanner's CRC check (`ZoneValueExt::verify_checksum`) fails; the
+    scanner reports a `CorruptSnapshot`. The ghost scan falls back to
+    strategy 1 (full scan from records) — if records are intact, the
+    scanner still identifies drift correctly. The operator is alerted
+    early, before the next restart's recovery is affected.
+  - **Corrupt `BusyBlockValue`** — a `BusyBlockValue` record fails to
+    deserialize (bincode decode error) due to storage corruption. The
+    scanner reports the corrupt record + key. The block is in an
+    indeterminate state (the key exists so the block is busy, but
+    metadata is lost). Per the data-safety principle, the scanner
+    **keeps the block busy** — it does not free it, because data may
+    be written. The operator investigates and decides whether to
+    quarantine the zone or attempt manual recovery.
+  - **Bug or hardware error causing ghost-free** — despite the
+    free-path fix, a bug in the CAS logic or a hardware memory error
+    could clear a live bitmap bit while the `BusyBlockKey` still
+    exists on disk. The allocator would re-hand the block
+    (double-allocate). The scanner detects the ghost-free bit and
+    **sets it back** (records say busy, data may be written) —
+    preventing further re-allocation. This is a defense-in-depth
+    check: the free-path fix prevents the known cause, the scanner
+    catches unknown causes.
   - **Ad-hoc consistency check** — an operator wants to verify cluster
     health before a maintenance window. They call `TriggerScan` and
     review the `GetScanStatus` result (ghosts found, drift found,
-    corrupt records, last scan timestamp).
+    corrupt records, last scan timestamp). If the result is clean,
+    they proceed with confidence.
   - **Monitoring dashboard** — `scanner_ghosts_found` and
     `scanner_drift_found` gauges are scraped by the metrics system. A
     rising trend triggers an alert; the operator investigates via
-    `GetScanStatus`.
+    `GetScanStatus` before the next restart.
 
 **Solution**: A `BackgroundTask` that periodically replays each owned
 zone's journal into a throwaway bitmap, compares it **bit-by-bit**
 against the live `usage_bits` (extending R74's count-only recalc with
 per-block ghost identification), verifies record CRC and
 deserialization, validates `owner_chunk` well-formedness, and reports
-findings via metrics + admin RPCs. Leak detection is scaffolded as
-deferred.
+findings via metrics + admin RPCs. Auto-correction (when enabled)
+follows the data-safety principle: clear ghost-busy bits only when
+records are intact and authoritative; set ghost-free bits back; never
+free a block with a corrupt or uncertain record. Leak detection is
+scaffolded as deferred.
 
 1. **Scanner task** — new module `app/crow-diskdb/src/scanner/mod.rs`.
    `ScannerTask` implements the `BackgroundTask` trait (from
@@ -92,9 +139,8 @@ deferred.
    `name` returns `"scanner"`. Registered with `BgRunner` in `main.rs`
    alongside compaction, keep-alive, and reporting. Each cycle runs
    ghost/drift scan → integrity scan (gated by config flags) → log
-   summary → update metrics. Scans are read-only — they detect and
-   report; they do not modify live state (except optional
-   auto-correction, default off).
+   summary → update metrics. Scans are read-only by default — they
+   detect and report; auto-correction is opt-in (default off).
 
 2. **Ghost + bitmap drift detection** — new
    `app/crow-diskdb/src/scanner/ghost.rs`. `scan_ghosts(container, kv)`
@@ -107,10 +153,13 @@ deferred.
      `SnapshotCrcFail` — same fallback logic as `RecalcEngine`.
    - Compares `replayed.usage_bits` against `live.usage_bits`
      **bit-by-bit** (not just popcount). Reports two categories:
-     - **Ghost-busy**: bit set in live, clear in replayed (allocated
-       in memory, no `BusyBlockKey` — §7 ghost allocation).
-     - **Ghost-free**: bit clear in live, set in replayed (freed in
-       memory, `BusyBlockKey` still on disk — §7 ghost free).
+     - **Ghost-busy**: bit set in live, clear in replayed (no
+       `BusyBlockKey` — records say free). Safe direction: wasted
+       space, no data risk.
+     - **Ghost-free**: bit clear in live, set in replayed
+       (`BusyBlockKey` exists — records say busy). Dangerous
+       direction: allocator may re-hand the block. Cannot happen from
+       the fixed free path, but detected as defense-in-depth.
    - Returns `GhostScanResult { ghost_busy: u64, ghost_free: u64,
      details: Vec<GhostBlock> }` where each `GhostBlock` records
      `(disk_id, zone_index, unit_offset, unit_count, direction)`.
@@ -121,11 +170,19 @@ deferred.
      where counts match (optimization; correctness does not depend on
      it).
    - **Auto-correction (optional, default off)**: if
-     `config.scanner.auto_correct_drift` is true, replace the live
-     zone's `usage_bits` + `used_count` with the replayed values
-     (essentially re-running R73's `recover_zone_inner` against the
-     live zone). v1 defaults to off — report only; the operator
-     triggers correction via `RebuildZoneBitmap` (§7).
+     `config.scanner.auto_correct_drift` is true, correct the live
+     bitmap per the data-safety principle:
+     - Ghost-busy: clear the live bit (records confidently say free).
+     - Ghost-free: set the live bit back (records say busy, data may
+       be written).
+     - If the replay fell back to strategy 1 due to
+       `SnapshotCrcFail`, **do not auto-correct** — the snapshot was
+       corrupt, and while strategy 1 rebuilds from records, the
+       corruption signal means something is wrong; report only and
+       let the operator decide.
+     - v1 defaults to off — report only; the operator triggers
+       correction via `RebuildZoneBitmap` (§7) or enables
+       auto-correct in config.
 
 3. **Record integrity verification** — new
    `app/crow-diskdb/src/scanner/integrity.rs`.
@@ -149,12 +206,13 @@ deferred.
      detection).
    - Returns `IntegrityScanResult { corrupt_snapshots: u64,
      corrupt_records: u64, owner_mismatches: u64, details: Vec<...> }`.
-   - **Handling**: corrupted snapshots are logged with a warning; R73
-     recovery already handles CRC failure by replaying from journal
-     start (strategy 1). Corrupted journal records are logged — if a
-     `BusyBlockValue` is corrupt, the block is indeterminate. v1 logs
-     and reports; manual intervention. Future: quarantine the zone
-     (transition to `Error` state).
+   - **Handling (data-safety principle)**: corrupted snapshots are
+     logged with a warning; the ghost scan falls back to strategy 1.
+     Corrupted `BusyBlockValue` records are logged — the block is
+     kept busy (the key exists, data may be written); **no
+     auto-correction frees a block with a corrupt record**. v1 logs
+     and reports; manual intervention required. Future: quarantine
+     the zone (transition to `Error` state).
 
 4. **Leak detection scaffold** — new
    `app/crow-diskdb/src/scanner/leak.rs`. `scan_for_leaks()` returns
@@ -193,7 +251,9 @@ deferred.
    600), `detect_ghost_allocations` (default true), and
    `verify_record_integrity` (default true) already exist. Add:
    - `auto_correct_drift: bool` (default false) — enable live-bitmap
-     auto-correction in the ghost scan.
+     auto-correction in the ghost scan (follows data-safety
+     principle: clears ghost-busy, sets ghost-free, never frees
+     corrupt-record blocks).
    - `detect_owner_mismatch: bool` (default false) — enable per-block
      `owner_chunk` validation in the integrity scan (gated because it
      piggybacks on `read_zone_records`, which is already loaded when
@@ -217,6 +277,13 @@ deferred.
             │             │             │
             └─────────────┼─────────────┘
                           ▼
+         ┌──────────────────────────────────┐
+         │  data-safety principle applied:  │
+         │  ghost-busy → clear (records OK) │
+         │  ghost-free → set (data risk)    │
+         │  corrupt rec → keep busy, report │
+         └──────────────────────────────────┘
+                          ▼
               ┌───────────────────────┐
               │  metrics + GetScanStatus │
               │  (DiskdbMetrics + RPC)  │
@@ -226,11 +293,12 @@ deferred.
 **Edge cases at a glance**:
 - `ZoneValue` CRC fail → scanner reports `CorruptSnapshot`; replay
   falls back to strategy 1 (`rebuild_zone_bitmap_full_scan`), same as
-  R73/R74.
+  R73/R74. No auto-correct when fallback was used (corruption signal).
 - Journal scan GC gap → strategy 1 fallback (reuse R73
   `RecoveryError::JournalScanGcGap` handling).
 - `BusyRecord` / `FreeRecord` decode failure → report
-  `CorruptJournalRecord`, skip the block, continue scan.
+  `CorruptJournalRecord`, keep the block busy (key exists, data may
+  be written), continue scan. No auto-correct.
 - Empty zone (no records, no snapshot) → no drift, no ghosts, no
   integrity issues; counted as scanned.
 - Scanner cycle overlaps with compaction → scans are read-only
@@ -239,9 +307,13 @@ deferred.
 - Auto-correct off (default) → report only; operator uses
   `RebuildZoneBitmap` to correct.
 - `TriggerScan` while a scan is in progress → return "scan in
-  progress" or queue (v1: return current status, do not overlap).
+  progress" (v1: return current status, do not overlap).
 - Degraded mode (group-0 / data-group unreachable) → scanner skips
   zones it cannot read; logs a warning; resumes next cycle.
+- Records and bitmap both suspect (corrupt snapshot + corrupt
+  records) → keep all blocks busy, report for manual intervention.
+  Never free a block when the durable state cannot be confidently
+  determined.
 
 **Dependencies**: R70 (types, `ScannerConfig` scaffold), R71
 (`DdbDiskGroupContainer` — disk-group/disk/zone iteration), R72
@@ -249,9 +321,10 @@ deferred.
 `journal_scan_free`), R73 (`recover_zone_inner`,
 `rebuild_zone_bitmap_full_scan`, `RecoveryError` fallback), R74
 (`RecalcEngine` — optional count-level pre-check; `DiskdbMetrics`
-registry pattern). No dependency on R76–R77. R79 (free batching) will
-increase ghost-free frequency but is not a blocker — the scanner
-detects the same drift regardless of batching.
+registry pattern). No dependency on R76–R77. R79 (free batching) does
+not change scanner scope — with persist-before-bitmap-clear, unflushed
+frees on crash leave bits set (ghost-busy, self-correcting); the
+scanner reclaims the wasted space.
 
 **Acceptance**:
 
@@ -266,17 +339,15 @@ detects the same drift regardless of batching.
     interval (not the old). Unit test.
 
 - **Ghost + bitmap drift detection (work item 2)**:
-  - `scan_ghosts` detects ghost-busy: setup a zone, allocate a block
-    (persist `BusyBlockValue`), manually set the live bitmap bit for a
-    **different** block with no record → run `scan_ghosts` → assert
-    the ghost-busy block is in `details` with direction `GhostBusy`.
-    Unit test.
-  - `scan_ghosts` detects ghost-free: setup a zone, allocate + free a
-    block (persist `BusyBlockValue` then persist `FreeBlockValue` +
-    delete `BusyBlockValue`), manually **set** the live bitmap bit
-    back (simulating crash-mid-free where the free didn't persist) →
-    run `scan_ghosts` → assert the ghost-free block is in `details`
-    with direction `GhostFree`. Unit test.
+  - `scan_ghosts` detects ghost-busy: setup a zone, manually set a
+    live bitmap bit for a block with no `BusyBlockKey` on disk → run
+    `scan_ghosts` → assert the ghost-busy block is in `details` with
+    direction `GhostBusy`. Unit test.
+  - `scan_ghosts` detects ghost-free: setup a zone, persist a
+    `BusyBlockValue` on disk, manually **clear** the live bitmap bit
+    (simulating a bug/hardware error that cleared the bit while the
+    record exists) → run `scan_ghosts` → assert the ghost-free block
+    is in `details` with direction `GhostFree`. Unit test.
   - `scan_ghosts` reports zero ghosts when live and replayed bitmaps
     match: setup a zone, allocate blocks, persist all records → run
     `scan_ghosts` → assert `ghost_busy == 0`, `ghost_free == 0`.
@@ -285,14 +356,25 @@ detects the same drift regardless of batching.
     corrupt the `ZoneValue` CRC → run `scan_ghosts` → assert it does
     not panic, falls back to `rebuild_zone_bitmap_full_scan`, and
     still reports ghosts. Unit test.
-  - Auto-correction (default off): enable `auto_correct_drift`, run
-    `scan_ghosts` on a zone with ghost-busy → assert the live
-    `usage_bits` and `used_count` are corrected to match the replayed
-    values. Unit test.
-  - Invariant guarded: replayed bitmap is the source of truth; live
-    bitmap bits with no backing record are reported as ghost-busy,
-    live bitmap bits clear with a backing `BusyBlockKey` are reported
-    as ghost-free. Unit test.
+  - **Auto-correction — ghost-busy (data-safety principle)**: enable
+    `auto_correct_drift`, run `scan_ghosts` on a zone with a
+    ghost-busy bit (bit set, no `BusyBlockKey`, records intact) →
+    assert the live bit is **cleared** and `used_count` is
+    decremented (records confidently say free). Unit test.
+  - **Auto-correction — ghost-free (data-safety principle)**: enable
+    `auto_correct_drift`, run `scan_ghosts` on a zone with a
+    ghost-free bit (bit clear, `BusyBlockKey` exists, records intact)
+    → assert the live bit is **set back** and `used_count` is
+    incremented (records say busy, data may be written). Unit test.
+  - **Auto-correction — no correct on fallback (data-safety
+    principle)**: enable `auto_correct_drift`, corrupt the
+    `ZoneValue` CRC so the scan falls back to strategy 1 → assert
+    the scanner reports the drift but does **not** auto-correct
+    (corruption signal → report only). Unit test.
+  - Invariant guarded: replayed bitmap (from intact records) is the
+    source of truth; live bits with no backing record are ghost-busy,
+    live bits clear with a backing `BusyBlockKey` are ghost-free.
+    Unit test.
 
 - **Record integrity (work item 3)**:
   - `scan_integrity` detects CRC corruption: write a `ZoneValue` with
@@ -310,6 +392,10 @@ detects the same drift regardless of batching.
   - `scan_integrity` on a clean zone: all records valid, CRC valid →
     assert `corrupt_snapshots == 0`, `corrupt_records == 0`,
     `owner_mismatches == 0`. Unit test.
+  - **Data-safety on corrupt record**: a `BusyBlockValue` fails to
+    deserialize → assert the scanner reports it but does **not** free
+    the block (the block stays busy; no `FreeBlockValue` is written,
+    no bitmap clear). Unit test.
 
 - **Leak scaffold (work item 4)**:
   - `scan_for_leaks` returns `LeakScanResult { status: "deferred",
@@ -353,6 +439,10 @@ detects the same drift regardless of batching.
     compaction writes a new `ZoneValue` → assert scanner does not
     panic and reports a consistent result (read-only snapshot).
     Integration test.
+  - **Corrupt snapshot + corrupt records (data-safety)**: corrupt
+    both the `ZoneValue` CRC and a `BusyBlockValue` → run scan →
+    assert scanner reports both, keeps all blocks busy, performs no
+    auto-correction. Unit test.
 
 - `pixi run test-diskdb`, `pixi run cargo fmt --all -- --check`, and
   `pixi run cargo clippy --all-targets -- -D warnings` clean.

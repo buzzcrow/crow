@@ -1036,17 +1036,41 @@ updated on the reporting interval, not hot-path writes. `degraded` and
 
 ## 12. Background Scanner
 
-- **Ghost-allocation detection** — allocated in KV records but freed
-  locally (crash before the free `batch_write` persists, or when free
-  batching is enabled and the batch was not flushed on ungraceful
-  shutdown). Detected by comparing in-memory state against the records.
+The scanner is a periodic consistency check — it detects and reports
+live-state drift, catches record corruption early, and gives operators
+visibility into cluster health during uptime. It is **not** a safety
+mechanism (the free path's persist-before-bitmap-clear ordering, §7,
+prevents the dangerous double-allocate window); it is an operational
+health mechanism for space reclamation, early corruption detection,
+and defense-in-depth against unknown bugs or hardware errors.
+
+- **Data-safety principle** — a busy block may have data written to
+  it. The scanner's first priority is to never free a block that might
+  have data. When drift is detected and the true state is uncertain
+  (corrupt records, conflicting signals), the scanner defaults to
+  **busy** (keep the bit set, keep the block allocated). Wasting space
+  is always preferable to freeing a block with data. The scanner only
+  clears a bit when records confidently say "free" (no `BusyBlockKey`,
+  records intact and readable).
+- **Ghost-busy detection** — bit set in memory, no `BusyBlockKey` on
+  disk (crash between allocate Phase 1 and Phase 2, or crash after
+  free persist but before bitmap clear). Records are authoritative →
+  block is free → safe to clear the bit. Safe direction: wasted
+  space, no data risk. Auto-correction allowed.
+- **Ghost-free detection** — bit clear in memory, `BusyBlockKey`
+  exists on disk (bug, hardware error, or unknown cause). Records are
+  authoritative → block is busy → set the bit back. Data may be
+  written. Cannot happen from the fixed free path, but detected as
+  defense-in-depth. Auto-correction allowed.
 - **Bitmap drift detection** — in-memory `usage_bits` drifts from
   the record-derived bitmap; reload from records. The scanner uses
   strategy 1 (full scan rebuild, §7) as its rebuild mechanism — the
   same `RebuildZoneBitmap` RPC/API an operator would use for a
   consistency check or full rebuild.
 - **Record integrity** — CRC check on zone snapshots and
-  `BusyBlockValue` / `FreeBlockValue` records.
+  `BusyBlockValue` / `FreeBlockValue` records. Corrupt records are
+  reported; the block is kept busy (key exists, data may be written);
+  no auto-correction frees a block with a corrupt record.
 - **Per-block state validation** — for busy blocks, cross-check
   `Segment.owner_chunk` against the `BusyBlockValue` in KV (ownership
   validation deferred from the free path, §14); for freed blocks, the
