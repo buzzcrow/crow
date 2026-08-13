@@ -629,4 +629,128 @@ mod accessor_tests {
         assert_eq!(u.alloc_state, ZoneAllocationState::ZoneAllocAvailable);
         assert_eq!(u.zone_state, DdbZoneHealth::Healthy);
     }
+
+    // ── Compaction watermark tests ─────────────────────────────────
+
+    use crate::model::records::FreeRecord;
+    use crow_protocol::diskdb::rpc::FreeBlockValue;
+    use crow_protocol::key::FreeBlockKey;
+
+    fn make_free_record(offset: u64, count: u32, freed_ts: u64) -> FreeRecord {
+        FreeRecord {
+            key: FreeBlockKey {
+                disk_id: DiskId { high: 0, low: 1 },
+                zone_index: 0,
+                unit_offset: offset,
+            },
+            value: FreeBlockValue {
+                unit_count: count,
+                previous_owner: None,
+                freed_ts,
+            },
+        }
+    }
+
+    #[test]
+    fn compact_zone_inner_stale_records_dropped() {
+        // Free records with freed_ts <= compact_ts are stale (already
+        // merged) — their bits are NOT range_cleared (I7).
+        let z = make_zone(128);
+        let r = z.allocate(4, 100).expect("alloc 4");
+        // Set compact_ts to 100 — a free record with freed_ts=50 is stale.
+        z.compact_ts.store(100, Ordering::Release);
+        let free_records = vec![make_free_record(r.unit_offset, 4, 50)];
+        let result = z.compact_zone_inner(&free_records);
+        assert_eq!(result.stale_free_count, 1);
+        assert_eq!(result.new_free_count, 0);
+        // Bitmap NOT cleared — bits still set.
+        assert_eq!(z.used_count.load(Ordering::Acquire), 4);
+        // compact_ts unchanged (no new records).
+        assert_eq!(z.compact_ts.load(Ordering::Acquire), 100);
+    }
+
+    #[test]
+    fn compact_zone_inner_new_records_cleared() {
+        // Free records with freed_ts > compact_ts are new — their bits
+        // ARE range_cleared, used_count recomputed, compact_ts advanced.
+        let z = make_zone(128);
+        let r = z.allocate(4, 100).expect("alloc 4");
+        z.compact_ts.store(50, Ordering::Release);
+        let free_records = vec![make_free_record(r.unit_offset, 4, 100)];
+        let result = z.compact_zone_inner(&free_records);
+        assert_eq!(result.stale_free_count, 0);
+        assert_eq!(result.new_free_count, 1);
+        // Bitmap cleared — used_count back to 0.
+        assert_eq!(z.used_count.load(Ordering::Acquire), 0);
+        // compact_ts advanced to max(50, 100) = 100.
+        assert_eq!(z.compact_ts.load(Ordering::Acquire), 100);
+    }
+
+    #[test]
+    fn compact_zone_inner_compact_ts_monotonic() {
+        // compact_ts must not regress even if all free records are stale.
+        let z = make_zone(128);
+        z.compact_ts.store(200, Ordering::Release);
+        let free_records = vec![make_free_record(0, 4, 50)];
+        let result = z.compact_zone_inner(&free_records);
+        // compact_ts stays at 200 (max(200, 50) = 200, but 50 is stale
+        // so max_new_freed_ts = 0, new_compact_ts = max(200, 0) = 200).
+        assert_eq!(result.new_compact_ts, 200);
+        assert_eq!(z.compact_ts.load(Ordering::Acquire), 200);
+    }
+
+    #[test]
+    fn compact_zone_inner_mixed_stale_and_new() {
+        let z = make_zone(128);
+        let r1 = z.allocate(4, 100).expect("alloc 4 at 0");
+        let r2 = z.allocate(4, 100).expect("alloc 4 at 4");
+        z.compact_ts.store(50, Ordering::Release);
+        // r1's free is stale (freed_ts=30), r2's free is new (freed_ts=100).
+        let free_records = vec![
+            make_free_record(r1.unit_offset, 4, 30),
+            make_free_record(r2.unit_offset, 4, 100),
+        ];
+        let result = z.compact_zone_inner(&free_records);
+        assert_eq!(result.stale_free_count, 1);
+        assert_eq!(result.new_free_count, 1);
+        // Only r2's bits cleared — used_count = 4 (r1 still set).
+        assert_eq!(z.used_count.load(Ordering::Acquire), 4);
+        // compact_ts = max(50, 100) = 100.
+        assert_eq!(z.compact_ts.load(Ordering::Acquire), 100);
+    }
+
+    #[test]
+    fn rollback_allocate_does_not_increment_backlog() {
+        let z = make_zone(128);
+        let r = z.allocate(4, 100).expect("alloc 4");
+        let backlog_before = z.uncompacted_free_record_count.load(Ordering::Acquire);
+        assert!(z.rollback_allocate(r.unit_offset, 4));
+        let backlog_after = z.uncompacted_free_record_count.load(Ordering::Acquire);
+        assert_eq!(
+            backlog_after, backlog_before,
+            "rollback must not increment backlog"
+        );
+    }
+
+    #[test]
+    fn record_free_increments_backlog() {
+        let z = make_zone(128);
+        let backlog_before = z.uncompacted_free_record_count.load(Ordering::Acquire);
+        z.record_free();
+        let backlog_after = z.uncompacted_free_record_count.load(Ordering::Acquire);
+        assert_eq!(backlog_after, backlog_before + 1);
+    }
+
+    #[test]
+    fn compacted_ready_lifecycle() {
+        let z = make_zone(128);
+        // new → false
+        assert!(!z.compacted_ready.load(Ordering::Acquire));
+        // mark_compacted_ready → true
+        z.mark_compacted_ready();
+        assert!(z.compacted_ready.load(Ordering::Acquire));
+        // clear_compacted_ready → false
+        z.clear_compacted_ready();
+        assert!(!z.compacted_ready.load(Ordering::Acquire));
+    }
 }
