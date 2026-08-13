@@ -94,21 +94,10 @@ test-tree-ct = { cmd = "ctest --test-dir lib/crow-tree/build --output-on-failure
 test-tree-ffi = { cmd = "cargo test -p crow-tree-ffi --all-targets", depends-on = ["build"] }
 test-kv-core = { cmd = "cargo test -p crow-kv --all-targets", depends-on = ["build"] }
 test-kv-server = { cmd = "cargo test -p crow-kv-server --all-targets -- --test-threads=1", depends-on = ["build"] }
+test-diskdb = { cmd = "cargo test -p crow-diskdb --all-targets -- --test-threads=1", depends-on = ["build"] }
 test-console-cli = { cmd = "cargo test -p crow-cli --all-targets", depends-on = ["build"] }
 test-console-server = { cmd = "cargo test -p crow-web --all-targets -- --test-threads=1", depends-on = ["build"] }
 test-console-ui = { cmd = "cargo build -p crow-kv-server && export CROW_KV_SERVER_BINARY=$(pwd)/target/debug/crow-kv-server && cd app/crow-web/ui && npm test && npx playwright test --config=e2e/realBackend.config.ts", depends-on = ["install-deps"] }
-test = { cmd = '''
-bash -c '
-pixi run test-tree-ct & p1=$!
-pixi run test-tree-ffi & p2=$!
-pixi run test-kv-core & p3=$!
-pixi run test-kv-server & p4=$!
-pixi run test-console-cli & p5=$!
-pixi run test-console-server & p6=$!
-pixi run test-console-ui & p7=$!
-wait $p1 && wait $p2 && wait $p3 && wait $p4 && wait $p5 && wait $p6 && wait $p7
-'
-''', depends-on = ["build", "install-deps"] }
 test-suite = { cmd = '''
 bash -c '
 set -e
@@ -120,6 +109,8 @@ pixi run clean-env
 pixi run test-kv-core
 pixi run clean-env
 pixi run test-kv-server
+pixi run clean-env
+pixi run test-diskdb
 pixi run clean-env
 pixi run test-console-cli
 pixi run clean-env

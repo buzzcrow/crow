@@ -47,6 +47,7 @@ Prefix each with `pixi run clean-env &&` to reset test state:
 - `pixi run test-tree-ffi`
 - `pixi run test-kv-core`
 - `pixi run test-kv-server`
+- `pixi run test-diskdb`
 - `pixi run test-console-cli`
 - `pixi run test-console-server`
 - `pixi run test-console-ui`
