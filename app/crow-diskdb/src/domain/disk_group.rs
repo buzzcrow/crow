@@ -1,13 +1,8 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! Per-instance node/disk-group/disk container.
-
-mod container;
-mod disk;
-
-pub use container::NodeContainer;
-pub use disk::ZoneDisk;
+//! `DdbDiskGroup` — per-disk-group manager: owns the disks, the RCU
+//! allocatable-disk context, and the round-robin cursor.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,33 +11,34 @@ use std::sync::{Arc, RwLock};
 use crow_protocol::common::{DiskId, HwStatus};
 use crow_protocol::DiskGroupId;
 
-use crate::zone::{AllocatedRange, Zone};
+use crate::domain::disk::DdbDisk;
+use crate::domain::zone::{AllocatedRange, DdbZone};
 
 /// RCU-published set of allocatable disks within the named
 /// disk-group, replaced via `Arc` swap on add/remove/status-change.
-pub type AllocateDiskContext = Vec<Arc<ZoneDisk>>;
+pub type AllocateDiskContext = Vec<Arc<DdbDisk>>;
 
 /// Result of a successful allocation: `(disk, zone, range)`.
-pub type AllocClaim = (Arc<ZoneDisk>, Arc<Zone>, AllocatedRange);
+pub type AllocClaim = (Arc<DdbDisk>, Arc<DdbZone>, AllocatedRange);
 
 /// A disk-group manager — one per owned disk-group.
-pub struct Node {
+pub struct DdbDiskGroup {
     pub disk_group_id: DiskGroupId,
     pub node_id: u64,
     pub rack_id: u64,
     pub status: RwLock<HwStatus>,
     /// `(store_id, group_id)` for the bound paxos data group.
     pub bind: RwLock<(u64, u64)>,
-    pub disks: RwLock<Vec<Arc<ZoneDisk>>>,
+    pub disks: RwLock<Vec<Arc<DdbDisk>>>,
     /// O(1) disk-id → disk lookup for the free path.
-    disk_index: RwLock<HashMap<DiskId, Arc<ZoneDisk>>>,
+    disk_index: RwLock<HashMap<DiskId, Arc<DdbDisk>>>,
     /// RCU context of allocatable disks within this disk-group.
     allocating_disks: RwLock<Arc<AllocateDiskContext>>,
     /// Round-robin cursor over `allocating_disks`.
     pos_v_disk_ctx: AtomicU64,
 }
 
-impl Node {
+impl DdbDiskGroup {
     pub fn new(disk_group_id: DiskGroupId, node_id: u64, rack_id: u64) -> Self {
         Self {
             disk_group_id,
@@ -57,8 +53,8 @@ impl Node {
         }
     }
 
-    /// Add a disk to this node. Rebuilds the allocatable disk set.
-    pub fn add_disk(&self, disk: Arc<ZoneDisk>) {
+    /// Add a disk to this disk-group. Rebuilds the allocatable disk set.
+    pub fn add_disk(&self, disk: Arc<DdbDisk>) {
         {
             let mut idx = self.disk_index.write().unwrap();
             idx.insert(disk.disk_id, Arc::clone(&disk));
@@ -70,11 +66,11 @@ impl Node {
     /// Rebuild the RCU-published allocatable disk set.
     pub fn rebuild_allocating_disks(&self) {
         let disks = self.disks.read().unwrap();
-        let new_ctx: Vec<Arc<ZoneDisk>> = disks.iter().filter(|d| d.allocatable()).cloned().collect();
+        let new_ctx: Vec<Arc<DdbDisk>> = disks.iter().filter(|d| d.allocatable()).cloned().collect();
         *self.allocating_disks.write().unwrap() = Arc::new(new_ctx);
     }
 
-    /// Whether this node's disk-group can accept allocations.
+    /// Whether this disk-group can accept allocations.
     pub fn allocatable(&self) -> bool {
         *self.status.read().unwrap() == HwStatus::Up
     }

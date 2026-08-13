@@ -1,9 +1,9 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! `NodeContainer` — per-instance singleton managing all owned disk-groups.
+//! `DdbDiskGroupContainer` — per-instance singleton managing all owned disk-groups.
 
-use super::Node;
+use super::disk_group::DdbDiskGroup;
 use crow_protocol::DiskGroupId;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,36 +11,36 @@ use std::sync::{Arc, RwLock};
 use tracing::warn;
 
 /// Per-instance singleton managing all owned disk-groups.
-pub struct NodeContainer {
-    nodes: RwLock<HashMap<DiskGroupId, Arc<Node>>>,
+pub struct DdbDiskGroupContainer {
+    disk_groups: RwLock<HashMap<DiskGroupId, Arc<DdbDiskGroup>>>,
     pub(crate) instance_id: u64,
     pub(crate) degraded: AtomicBool,
 }
 
-impl NodeContainer {
+impl DdbDiskGroupContainer {
     pub fn new(instance_id: u64) -> Self {
         Self {
-            nodes: RwLock::new(HashMap::new()),
+            disk_groups: RwLock::new(HashMap::new()),
             instance_id,
             degraded: AtomicBool::new(false),
         }
     }
 
-    pub(crate) fn add_node(&self, node: Arc<Node>) {
-        let dg_id = node.disk_group_id;
-        self.nodes.write().unwrap().insert(dg_id, node);
+    pub(crate) fn add_disk_group(&self, dg: Arc<DdbDiskGroup>) {
+        let dg_id = dg.disk_group_id;
+        self.disk_groups.write().unwrap().insert(dg_id, dg);
     }
 
-    pub(crate) fn remove_node(&self, dg_id: DiskGroupId) {
-        self.nodes.write().unwrap().remove(&dg_id);
+    pub(crate) fn remove_disk_group(&self, dg_id: DiskGroupId) {
+        self.disk_groups.write().unwrap().remove(&dg_id);
     }
 
-    pub fn get_node(&self, dg_id: DiskGroupId) -> Option<Arc<Node>> {
-        self.nodes.read().unwrap().get(&dg_id).cloned()
+    pub fn get_disk_group(&self, dg_id: DiskGroupId) -> Option<Arc<DdbDiskGroup>> {
+        self.disk_groups.read().unwrap().get(&dg_id).cloned()
     }
 
-    pub fn node_ids(&self) -> Vec<DiskGroupId> {
-        self.nodes.read().unwrap().keys().copied().collect()
+    pub fn disk_group_ids(&self) -> Vec<DiskGroupId> {
+        self.disk_groups.read().unwrap().keys().copied().collect()
     }
 
     pub(crate) fn enter_degraded_mode(&self) {

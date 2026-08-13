@@ -20,7 +20,7 @@ use crow_protocol::diskdb::rpc::{BlockState, BusyBlockValue, FreeBlockValue, Seg
 use crow_protocol::key::{BinaryKey, BusyBlockKey, FreeBlockKey, ZoneKey};
 use crow_protocol::ZoneValueExt;
 
-use crate::node::{AllocClaim, AllocError, Node};
+use crate::domain::disk_group::{AllocClaim, AllocError, DdbDiskGroup};
 
 /// `(store_id, group_id)` identifying a bound paxos data group.
 pub type Bind = (u64, u64);
@@ -555,7 +555,7 @@ impl DataGroupClient {
 /// request, or a KV client error if the persist fails.
 #[allow(clippy::too_many_arguments)]
 pub async fn allocate_block(
-    node: &Arc<Node>,
+    node: &Arc<DdbDiskGroup>,
     unit_count: u32,
     owner_chunk: &ChunkId,
     unit_size: u32,
@@ -601,7 +601,7 @@ pub async fn allocate_block(
 /// placed, or a KV client error if the batch persist fails.
 #[allow(clippy::too_many_arguments)]
 pub async fn allocate_blocks(
-    node: &Arc<Node>,
+    node: &Arc<DdbDiskGroup>,
     unit_count: u32,
     count: u32,
     exclude_disks: &[DiskId],
@@ -683,7 +683,7 @@ pub async fn allocate_blocks(
 /// happened locally; the §12 ghost-allocation scanner reconciles on
 /// restart.
 pub async fn free_block(
-    node: &Arc<Node>,
+    node: &Arc<DdbDiskGroup>,
     segment: &Segment,
     kv: &DataGroupClient,
     validate_owner_on_free: bool,
@@ -761,7 +761,7 @@ pub async fn free_block(
 /// `FreeError::Kv` if the persist fails — bitmap clears already
 /// happened locally.
 pub async fn free_blocks(
-    node: &Arc<Node>,
+    node: &Arc<DdbDiskGroup>,
     segments: &[Segment],
     kv: &DataGroupClient,
     validate_owner_on_free: bool,

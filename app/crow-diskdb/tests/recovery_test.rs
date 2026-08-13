@@ -14,11 +14,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::cluster::KvCluster;
-use crow_diskdb::node::NodeContainer;
+use crow_diskdb::domain::disk_group_container::DdbDiskGroupContainer;
+use crow_diskdb::domain::zone::DdbZone;
 use crow_diskdb::persistence::{self, DataGroupClient};
 use crow_diskdb::recovery::RecoveryEngine;
 use crow_diskdb::sync::{SyncConfig, SyncLoop};
-use crow_diskdb::zone::Zone;
 use crow_kv_client::{ClientConfig, CrowkvClient, HardwareClient, ServiceRegistryClient};
 use crow_protocol::common::{ChunkId, DiskId, HwStatus, NodeValue, RackValue};
 use crow_protocol::diskdb::rpc::{DiskGroupValue, DiskType, DiskValue};
@@ -167,7 +167,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
 
     // 2. First sync_once — populates in-memory state + writes baseline
     //    ZoneValues.
-    let container = Arc::new(NodeContainer::new(INSTANCE_ID));
+    let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
     let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
     let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
     let dg_kv = make_data_group_client(&cluster.group1_leader_endpoint);
@@ -183,22 +183,22 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
     assert_eq!(outcome.groups_added, 1);
     assert_eq!(outcome.disks_added, 3);
 
-    let node = container.get_node(DG_ID).expect("node exists");
-    let bind = *node.bind.read().unwrap();
+    let dg = container.get_disk_group(DG_ID).expect("disk-group exists");
+    let bind = *dg.bind.read().unwrap();
 
     // 3. Allocate 3 blocks (anti-affinity spreads across 3 disks),
     //    free 1 of them. After this, 2 blocks remain busy.
     let owner_chunk = make_chunk_id(0, 0, 42);
     let alloc_kv = make_data_group_client(&cluster.group1_leader_endpoint);
     let segments =
-        persistence::allocate_blocks(&node, 1, 3, &[], &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4)
+        persistence::allocate_blocks(&dg, 1, 3, &[], &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4)
             .await
             .expect("allocate 3");
     assert_eq!(segments.len(), 3);
 
     // Free the first 1.
     let free_kv = make_data_group_client(&cluster.group1_leader_endpoint);
-    persistence::free_blocks(&node, &segments[0..1], &free_kv, false)
+    persistence::free_blocks(&dg, &segments[0..1], &free_kv, false)
         .await
         .expect("free 1");
 
@@ -208,9 +208,9 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
     // 4. Simulate a restart: drop the in-memory container. A fresh
     //    sync_once will skip baseline ZoneValue writes (snapshots
     //    exist) and create empty zones.
-    drop(node);
+    drop(dg);
     drop(container);
-    let container2 = Arc::new(NodeContainer::new(INSTANCE_ID));
+    let container2 = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
     let svc2 = make_service_registry_client(&cluster.group0_leader_endpoint);
     let hw3 = make_hardware_client(&cluster.group0_leader_endpoint);
     let dg_kv2 = make_data_group_client(&cluster.group1_leader_endpoint);
@@ -226,15 +226,17 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
     assert_eq!(outcome2.groups_added, 1);
     assert_eq!(outcome2.disks_added, 3);
 
-    let node2 = container2.get_node(DG_ID).expect("node exists after restart");
-    let bind2 = *node2.bind.read().unwrap();
+    let dg2 = container2
+        .get_disk_group(DG_ID)
+        .expect("disk-group exists after restart");
+    let bind2 = *dg2.bind.read().unwrap();
     assert_eq!(bind, bind2);
 
     // 5. Run strategy 1 recovery on each zone of each disk.
     let recovery_kv = Arc::new(make_data_group_client(&cluster.group1_leader_endpoint));
     let recovery = RecoveryEngine::new(Arc::clone(&recovery_kv), 4);
 
-    let disks = node2.disks.read().unwrap().clone();
+    let disks = dg2.disks.read().unwrap().clone();
     for disk in &disks {
         let zone_size_units = disk.disk_value.read().unwrap().zone_size_units;
         let zone_count = disk.disk_value.read().unwrap().zone_count;
@@ -257,12 +259,12 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
         }
         disk.rebuild_active_zones(4);
     }
-    node2.rebuild_allocating_disks();
+    dg2.rebuild_allocating_disks();
 
     // 6. Verify: each remaining busy segment's bit is set, and the
     //    freed segments' bits are clear.
     for seg in &remaining_segments {
-        let disk = node2
+        let disk = dg2
             .disks
             .read()
             .unwrap()
@@ -280,7 +282,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
         );
     }
     for seg in &segments[0..1] {
-        let disk = node2
+        let disk = dg2
             .disks
             .read()
             .unwrap()
@@ -300,7 +302,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
 
     // 7. Verify the recovered used_count = 2 (2 remaining busy blocks
     //    of 1 unit each).
-    let total_used: u64 = node2
+    let total_used: u64 = dg2
         .disks
         .read()
         .unwrap()
@@ -325,7 +327,7 @@ async fn recovery_strategy1_full_scan_rebuilds_bitmap() {
 #[test]
 fn zone_to_from_zone_value_roundtrip() {
     let disk_id = make_disk_id(0, 1);
-    let zone = Zone::new(disk_id, 0, 100, 128);
+    let zone = DdbZone::new(disk_id, 0, 100, 128);
     // Set bits 0..3 (4 units).
     let _ = zone.usage_bits.range_set(0, 4);
     zone.used_count.store(4, std::sync::atomic::Ordering::Release);
@@ -335,7 +337,7 @@ fn zone_to_from_zone_value_roundtrip() {
     assert!(zv.verify_checksum(), "CRC should be valid after to_zone_value");
     assert_eq!(zv.snapshot_slot, 42);
 
-    let restored = Zone::from_zone_value(disk_id, 0, 100, 128, &zv)
+    let restored = DdbZone::from_zone_value(disk_id, 0, 100, 128, &zv)
         .expect("from_zone_value should succeed with valid CRC");
     assert_eq!(restored.used_count.load(std::sync::atomic::Ordering::Acquire), 4);
     assert_eq!(
@@ -347,15 +349,15 @@ fn zone_to_from_zone_value_roundtrip() {
     assert!(!restored.usage_bits.is_set(4));
 }
 
-/// Unit test: `Zone::from_zone_value` returns `None` on CRC mismatch
+/// Unit test: `DdbZone::from_zone_value` returns `None` on CRC mismatch
 /// (corrupted snapshot).
 #[test]
 fn zone_from_zone_value_rejects_bad_crc() {
     let disk_id = make_disk_id(0, 1);
-    let zone = Zone::new(disk_id, 0, 100, 128);
+    let zone = DdbZone::new(disk_id, 0, 100, 128);
     let _ = zone.usage_bits.range_set(0, 4);
     let mut zv = zone.to_zone_value();
     // Corrupt the bitmap (CRC no longer matches).
     zv.usage_bitmap[0] ^= 0xFF;
-    assert!(Zone::from_zone_value(disk_id, 0, 100, 128, &zv).is_none());
+    assert!(DdbZone::from_zone_value(disk_id, 0, 100, 128, &zv).is_none());
 }

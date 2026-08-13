@@ -1,7 +1,7 @@
 // Copyright 2026-present buzzcrow <buzzcrow@126.com>
 // Licensed under the Apache License, Version 2.0.
 
-//! `ZoneDisk` — disk struct with zone management and the disk-level
+//! `DdbDisk` — disk struct with zone management and the disk-level
 //! round-robin allocator (`disk_allocate`, `rotate_active_zones`).
 //!
 //! See `doc/working/design-diskdb-server.md` §4.2.
@@ -13,21 +13,21 @@ use crow_protocol::common::{DiskId, HwStatus};
 use crow_protocol::diskdb::rpc::DiskValue;
 use crow_protocol::{DiskGroupId, NodeId, RackId};
 
-use crate::zone::{AllocatedRange, Zone, ZoneHealth};
+use crate::domain::zone::{AllocatedRange, DdbZone, DdbZoneHealth};
 
 /// RCU-published active zone set — `zone_rotate_count` allocatable
 /// zones, replaced via `Arc` swap on rotation.
-pub type ActiveZoneContext = Vec<Arc<Zone>>;
+pub type ActiveZoneContext = Vec<Arc<DdbZone>>;
 
 /// Disk struct — one per physical disk in an owned disk-group.
-pub struct ZoneDisk {
+pub struct DdbDisk {
     pub disk_id: DiskId,
     pub disk_group_id: DiskGroupId,
     pub node_id: NodeId,
     pub rack_id: RackId,
     pub disk_value: RwLock<DiskValue>,
     /// All zones on this disk, indexed by `zone_index`.
-    pub zones: RwLock<Vec<Arc<Zone>>>,
+    pub zones: RwLock<Vec<Arc<DdbZone>>>,
     /// Round-robin cursor for zone rotation scan.
     pub pos_v_zone: AtomicU64,
     /// RCU-published active zone set.
@@ -38,7 +38,7 @@ pub struct ZoneDisk {
     pub effective_status: RwLock<HwStatus>,
 }
 
-impl ZoneDisk {
+impl DdbDisk {
     pub fn new(
         disk_id: DiskId,
         disk_group_id: DiskGroupId,
@@ -61,7 +61,7 @@ impl ZoneDisk {
     }
 
     /// Add a zone to this disk.
-    pub fn add_zone(&self, zone: Arc<Zone>) {
+    pub fn add_zone(&self, zone: Arc<DdbZone>) {
         self.zones.write().unwrap().push(zone);
     }
 
@@ -78,7 +78,7 @@ impl ZoneDisk {
             // Mark all zones Bad.
             let zones = self.zones.read().unwrap();
             for z in zones.iter() {
-                z.set_health(ZoneHealth::Bad);
+                z.set_health(DdbZoneHealth::Bad);
             }
         }
     }
@@ -93,7 +93,7 @@ impl ZoneDisk {
         unit_count: u32,
         cas_retry_limit: u32,
         zone_rotate_count: u32,
-    ) -> Option<(Arc<Zone>, AllocatedRange)> {
+    ) -> Option<(Arc<DdbZone>, AllocatedRange)> {
         if !self.allocatable() {
             return None;
         }
@@ -156,7 +156,7 @@ impl ZoneDisk {
         }
         #[allow(clippy::cast_possible_truncation)]
         let start = self.pos_v_zone.load(Ordering::Relaxed) as usize % zone_num;
-        let mut new_ctx: Vec<Arc<Zone>> = Vec::with_capacity(zone_rotate_count as usize);
+        let mut new_ctx: Vec<Arc<DdbZone>> = Vec::with_capacity(zone_rotate_count as usize);
         for i in 0..zone_num {
             if new_ctx.len() >= zone_rotate_count as usize {
                 break;
@@ -187,7 +187,7 @@ impl ZoneDisk {
     /// (§3.5) and recovery (R73).
     pub fn rebuild_active_zones(&self, zone_rotate_count: u32) {
         let zones = self.zones.read().unwrap();
-        let mut new_ctx: Vec<Arc<Zone>> = Vec::with_capacity(zone_rotate_count as usize);
+        let mut new_ctx: Vec<Arc<DdbZone>> = Vec::with_capacity(zone_rotate_count as usize);
         for zone in zones.iter() {
             if new_ctx.len() >= zone_rotate_count as usize {
                 break;

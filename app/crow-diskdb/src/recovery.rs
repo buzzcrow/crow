@@ -29,9 +29,10 @@ use crow_protocol::diskdb::rpc::{BusyBlockValue, DiskValue, FreeBlockValue};
 use crow_protocol::key::{BinaryKey, BusyBlockKey, FreeBlockKey};
 use crow_protocol::{DiskGroupId, NodeId, RackId, ZoneValueExt};
 
-use crate::node::{Node, ZoneDisk};
+use crate::domain::disk::DdbDisk;
+use crate::domain::disk_group::DdbDiskGroup;
+use crate::domain::zone::{DdbZone, DdbZoneHealth};
 use crate::persistence::{Bind, DataGroupClient, ZoneRecords};
-use crate::zone::{Zone, ZoneHealth};
 
 /// Recovery errors.
 #[derive(Debug)]
@@ -97,14 +98,15 @@ impl RecoveryEngine {
         }
     }
 
-    /// Recover a full node (disk-group) from the data group's records.
-    /// Creates an empty `Node`, recovers each disk's zones (strategy 2
-    /// with strategy 1 fallback), and returns the reconstructed `Node`.
+    /// Recover a full disk-group from the data group's records.
+    /// Creates an empty `DdbDiskGroup`, recovers each disk's zones
+    /// (strategy 2 with strategy 1 fallback), and returns the
+    /// reconstructed `DdbDiskGroup`.
     ///
-    /// Zones within a node are recovered in parallel, bounded by
+    /// Zones within a disk-group are recovered in parallel, bounded by
     /// `recovery_concurrency` — each zone's recovery is independent.
     #[allow(clippy::too_many_arguments)]
-    pub async fn recover_node(
+    pub async fn recover_disk_group(
         &self,
         dg_id: DiskGroupId,
         node_id: NodeId,
@@ -112,12 +114,12 @@ impl RecoveryEngine {
         bind: Bind,
         disks: &[(DiskId, DiskValue)],
         zone_rotate_count: u32,
-    ) -> Arc<Node> {
-        let node = Arc::new(Node::new(dg_id, node_id, rack_id));
-        *node.bind.write().unwrap() = bind;
+    ) -> Arc<DdbDiskGroup> {
+        let dg = Arc::new(DdbDiskGroup::new(dg_id, node_id, rack_id));
+        *dg.bind.write().unwrap() = bind;
 
         for (disk_id, disk_value) in disks {
-            let disk = Arc::new(ZoneDisk::new(*disk_id, dg_id, node_id, rack_id, *disk_value));
+            let disk = Arc::new(DdbDisk::new(*disk_id, dg_id, node_id, rack_id, *disk_value));
 
             let zone_count = disk_value.zone_count;
             let zone_size_units = disk_value.zone_size_units;
@@ -161,7 +163,7 @@ impl RecoveryEngine {
                                     error = %e2,
                                     "strategy 1 fallback also failed; using empty zone"
                                 );
-                                Zone::new(*disk_id, zi, dg_id, unit_capacity)
+                                DdbZone::new(*disk_id, zi, dg_id, unit_capacity)
                             }
                         }
                     }
@@ -172,18 +174,18 @@ impl RecoveryEngine {
                             error = %e,
                             "zone recovery task panicked; using empty zone"
                         );
-                        Zone::new(*disk_id, zi, dg_id, unit_capacity)
+                        DdbZone::new(*disk_id, zi, dg_id, unit_capacity)
                     }
                 };
                 disk.add_zone(Arc::new(zone));
             }
 
             disk.rebuild_active_zones(zone_rotate_count);
-            node.add_disk(disk);
-            node.rebuild_allocating_disks();
+            dg.add_disk(disk);
+            dg.rebuild_allocating_disks();
         }
 
-        node
+        dg
     }
 
     /// Strategy 1 — full scan rebuild of one zone's usage bitmap from
@@ -200,10 +202,10 @@ impl RecoveryEngine {
         disk_id: DiskId,
         zone_idx: u32,
         unit_capacity: u32,
-    ) -> Result<(Zone, ZoneStats), RecoveryError> {
+    ) -> Result<(DdbZone, ZoneStats), RecoveryError> {
         let records: ZoneRecords = self.kv.read_zone_records(bind, &disk_id, zone_idx).await?;
 
-        let zone = Zone::new(disk_id, zone_idx, 0, unit_capacity);
+        let zone = DdbZone::new(disk_id, zone_idx, 0, unit_capacity);
         for busy in &records.busy {
             #[allow(clippy::cast_possible_truncation)]
             let offset = busy.key.unit_offset as u32;
@@ -282,7 +284,7 @@ async fn recover_zone_inner(
     disk_id: DiskId,
     zone_idx: u32,
     unit_capacity: u32,
-) -> Result<Zone, RecoveryError> {
+) -> Result<DdbZone, RecoveryError> {
     // Step a: load the latest ZoneValue snapshot.
     let snapshot = kv.get_zone_value(bind, &disk_id, zone_idx).await?;
 
@@ -360,11 +362,11 @@ async fn recover_zone_inner(
     }
 
     // Step e: build the recovered Zone.
-    let zone = Zone {
+    let zone = DdbZone {
         disk_id,
         zone_index: zone_idx,
         disk_group_id: dg_id,
-        zone_state: std::sync::RwLock::new(ZoneHealth::Healthy),
+        zone_state: std::sync::RwLock::new(DdbZoneHealth::Healthy),
         unit_capacity,
         usage_bits,
         last_pos_64: std::sync::atomic::AtomicU64::new(0),

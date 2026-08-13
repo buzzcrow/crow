@@ -7,7 +7,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use crow_diskdb::zone::{AllocatedRange, Zone, ZoneHealth};
+use crow_diskdb::domain::zone::{AllocatedRange, DdbZone, DdbZoneHealth};
 use crow_protocol::common::DiskId;
 use crow_protocol::diskdb::rpc::ZoneAllocationState;
 
@@ -18,8 +18,8 @@ fn disk_id(n: u64) -> DiskId {
 const DG: u64 = 1;
 const CAS_RETRY: u32 = 100;
 
-fn make_zone(capacity: u32) -> Zone {
-    Zone::new(disk_id(1), 0, DG, capacity)
+fn make_zone(capacity: u32) -> DdbZone {
+    DdbZone::new(disk_id(1), 0, DG, capacity)
 }
 
 // ── Basic allocate / free ───────────────────────────────────────
@@ -119,7 +119,7 @@ fn zone_derived_alloc_state_transitions() {
 #[test]
 fn zone_bad_health_blocks_allocate() {
     let zone = make_zone(64);
-    zone.set_health(ZoneHealth::Bad);
+    zone.set_health(DdbZoneHealth::Bad);
     assert!(!zone.allocatable());
     assert_eq!(zone.allocate(1, CAS_RETRY), None);
 }
@@ -127,7 +127,7 @@ fn zone_bad_health_blocks_allocate() {
 #[test]
 fn zone_missing_health_blocks_allocate() {
     let zone = make_zone(64);
-    zone.set_health(ZoneHealth::Missing);
+    zone.set_health(DdbZoneHealth::Missing);
     assert!(!zone.allocatable());
     assert_eq!(zone.allocate(1, CAS_RETRY), None);
 }

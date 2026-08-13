@@ -21,7 +21,7 @@ use crow_protocol::diskdb_type_util::DiskIdExt;
 use tonic::{Request, Response, Status};
 
 use crate::config::StorageDefaults;
-use crate::node::NodeContainer;
+use crate::domain::disk_group_container::DdbDiskGroupContainer;
 use crate::persistence::{self, DataGroupClient};
 use crate::recovery::RecoveryEngine;
 
@@ -32,7 +32,7 @@ const MAX_ALLOCATE_COUNT: u32 = 1024;
 const ALL_ZONES: u32 = u32::MAX;
 
 pub struct DiskdbService {
-    container: Arc<NodeContainer>,
+    container: Arc<DdbDiskGroupContainer>,
     kv: Arc<DataGroupClient>,
     storage: StorageDefaults,
     recovery: Arc<RecoveryEngine>,
@@ -40,7 +40,7 @@ pub struct DiskdbService {
 
 impl DiskdbService {
     pub fn new(
-        container: Arc<NodeContainer>,
+        container: Arc<DdbDiskGroupContainer>,
         kv: Arc<DataGroupClient>,
         storage: StorageDefaults,
         recovery: Arc<RecoveryEngine>,
@@ -93,7 +93,7 @@ impl DiskdbServiceTrait for DiskdbService {
         }
 
         // Get node.
-        let node = self.container.get_node(req.disk_group_id).ok_or_else(|| {
+        let dg = self.container.get_disk_group(req.disk_group_id).ok_or_else(|| {
             Status::permission_denied(format!(
                 "disk-group {} not owned by this instance",
                 req.disk_group_id
@@ -110,7 +110,7 @@ impl DiskdbServiceTrait for DiskdbService {
 
         // Two-phase allocate.
         let segments = persistence::allocate_blocks(
-            &node,
+            &dg,
             req.unit_count,
             req.count,
             &exclude_disks,
@@ -122,7 +122,9 @@ impl DiskdbServiceTrait for DiskdbService {
         )
         .await
         .map_err(|e| match e {
-            crate::node::AllocError::NoSpace => Status::resource_exhausted("no space available"),
+            crate::domain::disk_group::AllocError::NoSpace => {
+                Status::resource_exhausted("no space available")
+            }
         })?;
 
         Ok(Response::new(AllocateResponse { segments }))
@@ -149,10 +151,10 @@ impl DiskdbServiceTrait for DiskdbService {
 
         // Find the node that owns this disk.
         let node = {
-            let node_ids = self.container.node_ids();
+            let dg_ids = self.container.disk_group_ids();
             let mut found = None;
-            for dg_id in node_ids {
-                if let Some(n) = self.container.get_node(dg_id) {
+            for dg_id in dg_ids {
+                if let Some(n) = self.container.get_disk_group(dg_id) {
                     let owns = {
                         let disks = n.disks.read().unwrap();
                         disks.iter().any(|d| d.disk_id == first_disk_id)
@@ -209,7 +211,7 @@ impl DiskdbServiceTrait for DiskdbService {
         let req = req.into_inner();
         let node = self
             .container
-            .get_node(req.disk_group_id)
+            .get_disk_group(req.disk_group_id)
             .ok_or_else(|| Status::not_found(format!("disk-group {} not owned", req.disk_group_id)))?;
         let status = *node.status.read().unwrap();
         let disk_ids: Vec<_> = node.disks.read().unwrap().iter().map(|d| d.disk_id).collect();
@@ -231,7 +233,7 @@ impl DiskdbServiceTrait for DiskdbService {
         let req = req.into_inner();
         let node = self
             .container
-            .get_node(req.disk_group_id)
+            .get_disk_group(req.disk_group_id)
             .ok_or_else(|| Status::not_found(format!("disk-group {} not owned", req.disk_group_id)))?;
         let disks = node.disks.read().unwrap();
         let req_disk_id = req
@@ -267,10 +269,10 @@ impl DiskdbServiceTrait for DiskdbService {
 
         // Find the node that owns this disk + the disk's zone_count.
         let (node, disk_value, disk_value_disk_id) = {
-            let node_ids = self.container.node_ids();
+            let dg_ids = self.container.disk_group_ids();
             let mut found = None;
-            for dg_id in node_ids {
-                if let Some(n) = self.container.get_node(dg_id) {
+            for dg_id in dg_ids {
+                if let Some(n) = self.container.get_disk_group(dg_id) {
                     let dv_clone = {
                         let disks = n.disks.read().unwrap();
                         disks

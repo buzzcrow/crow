@@ -1,0 +1,19 @@
+// Copyright 2026-present buzzcrow <buzzcrow@126.com>
+// Licensed under the Apache License, Version 2.0.
+
+//! diskdb domain model — the in-memory model of what the system *is*:
+//! disk-groups, disks, zones, allocation/free orchestration, domain
+//! errors, and record read-models. No I/O, no transport — pure domain
+//! logic + invariants.
+//!
+//! See `doc/working/design-diskdb-restructure.md` §2.
+
+pub mod disk;
+pub mod disk_group;
+pub mod disk_group_container;
+pub mod zone;
+
+pub use disk::{ActiveZoneContext, DdbDisk};
+pub use disk_group::{AllocClaim, AllocError, AllocateDiskContext, DdbDiskGroup};
+pub use disk_group_container::DdbDiskGroupContainer;
+pub use zone::{AllocatedRange, DdbZone, DdbZoneHealth};

@@ -22,7 +22,8 @@ use std::time::Duration;
 use crow_protocol::common::DiskId;
 use crow_protocol::key::BinaryKey;
 
-use crate::node::NodeContainer;
+use crate::domain::disk_group_container::DdbDiskGroupContainer;
+use crate::domain::zone::DdbZone;
 use crate::persistence::{Bind, DataGroupClient};
 use crate::recovery::RecoveryError;
 
@@ -65,16 +66,16 @@ impl CompactionEngine {
     /// `snapshot_compaction_threshold` and calls `compact_zone` when
     /// exceeded. Cadence OR threshold — whichever fires first for a
     /// given zone.
-    pub async fn compaction_loop(self: Arc<Self>, container: Arc<NodeContainer>) -> ! {
+    pub async fn compaction_loop(self: Arc<Self>, container: Arc<DdbDiskGroupContainer>) -> ! {
         loop {
             tokio::time::sleep(self.config.compaction_cadence).await;
 
-            for dg_id in container.node_ids() {
-                let Some(node) = container.get_node(dg_id) else {
+            for dg_id in container.disk_group_ids() {
+                let Some(dg) = container.get_disk_group(dg_id) else {
                     continue;
                 };
-                let bind = *node.bind.read().unwrap();
-                let disks = node.disks.read().unwrap().clone();
+                let bind = *dg.bind.read().unwrap();
+                let disks = dg.disks.read().unwrap().clone();
                 for disk in disks {
                     let zones = disk.zones.read().unwrap().clone();
                     for zone in zones {
@@ -110,7 +111,7 @@ impl CompactionEngine {
         &self,
         bind: Bind,
         disk_id: DiskId,
-        zone: &Arc<crate::zone::Zone>,
+        zone: &Arc<DdbZone>,
         zone_idx: u32,
     ) -> Result<(), RecoveryError> {
         // Step a: scan free records for the zone.
@@ -175,7 +176,7 @@ impl CompactionEngine {
         &self,
         bind: Bind,
         disk_id: DiskId,
-        zone: &Arc<crate::zone::Zone>,
+        zone: &Arc<DdbZone>,
         zone_idx: u32,
     ) -> Result<(), RecoveryError> {
         self.compact_zone(bind, disk_id, zone, zone_idx).await

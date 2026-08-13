@@ -19,7 +19,7 @@ use crow_protocol::{DiskGroupId, UsageBitmap, ZoneValueExt};
 /// zone-level CAS state machine (§9). Updated by the sync loop and
 /// health probe (R76), not the hot path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ZoneHealth {
+pub enum DdbZoneHealth {
     Healthy,
     Missing,
     Bad,
@@ -40,11 +40,11 @@ pub struct AllocatedRange {
 /// durable state is the set of `BusyBlockKey`/`FreeBlockKey`/`ZoneValue`
 /// records on the bound data group (§4.8). Allocate/free preserve
 /// crash-safety invariants so R73 can recover from any crash point.
-pub struct Zone {
+pub struct DdbZone {
     pub disk_id: DiskId,
     pub zone_index: u32,
     pub disk_group_id: DiskGroupId,
-    pub zone_state: RwLock<ZoneHealth>,
+    pub zone_state: RwLock<DdbZoneHealth>,
     /// Total block units, word-aligned (multiple of 64).
     pub unit_capacity: u32,
     pub usage_bits: UsageBitmap,
@@ -65,7 +65,7 @@ pub struct Zone {
     pub metrics_cas_retry: Option<std::sync::Arc<Counter>>,
 }
 
-impl Zone {
+impl DdbZone {
     /// Create a new empty zone with the given capacity.
     #[must_use]
     pub fn new(disk_id: DiskId, zone_index: u32, disk_group_id: DiskGroupId, unit_capacity: u32) -> Self {
@@ -73,7 +73,7 @@ impl Zone {
             disk_id,
             zone_index,
             disk_group_id,
-            zone_state: RwLock::new(ZoneHealth::Healthy),
+            zone_state: RwLock::new(DdbZoneHealth::Healthy),
             unit_capacity,
             usage_bits: UsageBitmap::new(unit_capacity),
             last_pos_64: AtomicU64::new(0),
@@ -96,7 +96,7 @@ impl Zone {
     /// free units.
     #[must_use]
     pub fn allocatable(&self) -> bool {
-        *self.zone_state.read().unwrap() == ZoneHealth::Healthy
+        *self.zone_state.read().unwrap() == DdbZoneHealth::Healthy
             && self.used_count.load(Ordering::Acquire) < self.unit_capacity
     }
 
@@ -115,7 +115,7 @@ impl Zone {
     }
 
     /// Set the zone health (called by sync loop / health probe).
-    pub fn set_health(&self, health: ZoneHealth) {
+    pub fn set_health(&self, health: DdbZoneHealth) {
         *self.zone_state.write().unwrap() = health;
     }
 
@@ -351,7 +351,7 @@ impl Zone {
             disk_id,
             zone_index,
             disk_group_id,
-            zone_state: RwLock::new(ZoneHealth::Healthy),
+            zone_state: RwLock::new(DdbZoneHealth::Healthy),
             unit_capacity,
             usage_bits,
             last_pos_64: AtomicU64::new(0),

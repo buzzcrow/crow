@@ -9,9 +9,9 @@ use std::sync::Arc;
 use clap::Parser;
 use crow_common::metrics::MetricsRegistry;
 use crow_diskdb::config::{validate, DiskdbConfig};
+use crow_diskdb::domain::disk_group_container::DdbDiskGroupContainer;
 use crow_diskdb::grpc::DiskdbService;
 use crow_diskdb::metrics::DiskdbMetrics;
-use crow_diskdb::node::NodeContainer;
 use crow_diskdb::persistence::DataGroupClient;
 use crow_diskdb::recovery::compaction::{CompactionConfig, CompactionEngine};
 use crow_diskdb::recovery::RecoveryEngine;
@@ -57,8 +57,8 @@ async fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(crow_kv_client::new_client_id);
 
-    // Build the in-memory node container.
-    let container = Arc::new(NodeContainer::new(instance_id));
+    // Build the in-memory disk-group container.
+    let container = Arc::new(DdbDiskGroupContainer::new(instance_id));
 
     // Build one shared kv-client. The system group (store 0, group 0)
     // leader and data-group leaders are discovered lazily via the
@@ -125,14 +125,14 @@ async fn main() {
         config.persistence.recovery_concurrency,
     ));
     info!("running R73 recovery");
-    for dg_id in container.node_ids() {
-        if let Some(node) = container.get_node(dg_id) {
-            let bind = *node.bind.read().unwrap();
+    for dg_id in container.disk_group_ids() {
+        if let Some(dg) = container.get_disk_group(dg_id) {
+            let bind = *dg.bind.read().unwrap();
             let disks: Vec<(
                 crow_protocol::common::DiskId,
                 crow_protocol::diskdb::rpc::DiskValue,
             )> = {
-                let disks_guard = node.disks.read().unwrap();
+                let disks_guard = dg.disks.read().unwrap();
                 disks_guard
                     .iter()
                     .map(|d| (d.disk_id, *d.disk_value.read().unwrap()))
@@ -162,7 +162,7 @@ async fn main() {
                         Ok((recovered_zone, stats)) => {
                             // Replace the empty zone from disk_add_init
                             // with the recovered zone.
-                            if let Some(disk) = node
+                            if let Some(disk) = dg
                                 .disks
                                 .read()
                                 .unwrap()
@@ -196,11 +196,11 @@ async fn main() {
             }
             // Rebuild active zone sets + allocatable disks after
             // recovery.
-            let disks_guard = node.disks.read().unwrap();
+            let disks_guard = dg.disks.read().unwrap();
             for disk in disks_guard.iter() {
                 disk.rebuild_active_zones(config.storage.zone_rotate_count);
             }
-            node.rebuild_allocating_disks();
+            dg.rebuild_allocating_disks();
         }
     }
     info!("R73 recovery complete");

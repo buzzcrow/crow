@@ -3,7 +3,7 @@
 
 //! Component-level integration test for crow-diskdb.
 //!
-//! Starts a real 3-node `crow-kv-server` cluster (store 0, groups 0
+//! Starts a real 3-dg `crow-kv-server` cluster (store 0, groups 0
 //! and 1), seeds hardware metadata into group 0, runs the diskdb
 //! sync loop + allocate/free in-process, and verifies that busy/free
 //! records are persisted to the kv cluster.
@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::cluster::KvCluster;
-use crow_diskdb::node::NodeContainer;
+use crow_diskdb::domain::disk_group_container::DdbDiskGroupContainer;
 use crow_diskdb::persistence::{self, DataGroupClient};
 use crow_diskdb::sync::{SyncConfig, SyncLoop};
 use crow_kv_client::{ClientConfig, CrowkvClient, GetOutcome, HardwareClient, ServiceRegistryClient};
@@ -65,7 +65,7 @@ async fn kv_get(kv: &DataGroupClient, key: &[u8]) -> Option<bytes::Bytes> {
     }
 }
 
-/// Seed hardware metadata into group 0: rack, node, disk-group, 3
+/// Seed hardware metadata into group 0: rack, dg, disk-group, 3
 /// disks, ownership, bind map.
 async fn seed_hardware(hw: &HardwareClient) {
     // Rack
@@ -92,7 +92,7 @@ async fn seed_hardware(hw: &HardwareClient) {
         },
     )
     .await
-    .expect("add node");
+    .expect("add dg");
 
     // Disk-group with 3 disks (allocate_blocks spreads across disks).
     let disk_ids = vec![make_disk_id(0, 1), make_disk_id(0, 2), make_disk_id(0, 3)];
@@ -190,7 +190,7 @@ async fn diskdb_e2e_allocate_free() {
     eprintln!("hardware metadata seeded");
 
     // 3. Build diskdb in-process.
-    let container = Arc::new(NodeContainer::new(INSTANCE_ID));
+    let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
     let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
     let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
     let dg_kv = make_data_group_client(&cluster.group1_leader_endpoint);
@@ -213,13 +213,13 @@ async fn diskdb_e2e_allocate_free() {
     assert_eq!(outcome.groups_added, 1, "expected 1 disk-group added");
     assert_eq!(outcome.disks_added, 3, "expected 3 disks added");
 
-    // 5. Verify the node has 3 disks with zones.
-    let node = container
-        .get_node(DG_ID)
+    // 5. Verify the dg has 3 disks with zones.
+    let dg = container
+        .get_disk_group(DG_ID)
         .expect("disk-group should be in container");
     let (bind, disk_count, zone_count) = {
-        let bind = *node.bind.read().unwrap();
-        let disks = node.disks.read().unwrap();
+        let bind = *dg.bind.read().unwrap();
+        let disks = dg.disks.read().unwrap();
         assert_eq!(disks.len(), 3, "expected 3 disks");
         let zone_count = {
             let zones = disks[0].zones.read().unwrap();
@@ -253,7 +253,7 @@ async fn diskdb_e2e_allocate_free() {
     let alloc_kv = make_data_group_client(&cluster.group1_leader_endpoint);
     let owner_chunk = make_chunk_id(0, 0, 42);
     let segment = persistence::allocate_block(
-        &node,
+        &dg,
         1, // unit_count
         &owner_chunk,
         UNIT_SIZE_BYTES,
@@ -288,7 +288,7 @@ async fn diskdb_e2e_allocate_free() {
 
     // 9. Free the block.
     let free_kv = make_data_group_client(&cluster.group1_leader_endpoint);
-    persistence::free_block(&node, &segment, &free_kv, false)
+    persistence::free_block(&dg, &segment, &free_kv, false)
         .await
         .expect("free should succeed");
     eprintln!("freed segment");
@@ -317,7 +317,7 @@ async fn diskdb_e2e_allocate_free() {
     // 11. Allocate multiple blocks and verify.
     let alloc_kv2 = make_data_group_client(&cluster.group1_leader_endpoint);
     let segments = persistence::allocate_blocks(
-        &node,
+        &dg,
         1,   // unit_count
         3,   // count
         &[], // exclude_disks
@@ -334,7 +334,7 @@ async fn diskdb_e2e_allocate_free() {
 
     // 12. Free all 3 in one batch.
     let free_kv2 = make_data_group_client(&cluster.group1_leader_endpoint);
-    persistence::free_blocks(&node, &segments, &free_kv2, false)
+    persistence::free_blocks(&dg, &segments, &free_kv2, false)
         .await
         .expect("free 3 blocks should succeed");
     eprintln!("freed 3 blocks in batch");
@@ -385,7 +385,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
     let hw = make_hardware_client(&cluster.group0_leader_endpoint);
     seed_hardware(&hw).await;
 
-    let container = Arc::new(NodeContainer::new(INSTANCE_ID));
+    let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
     let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
     let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
     let dg_kv = make_data_group_client(&cluster.group1_leader_endpoint);
@@ -402,20 +402,20 @@ async fn diskdb_e2e_validate_owner_on_free() {
     assert_eq!(outcome.groups_added, 1);
     assert_eq!(outcome.disks_added, 3);
 
-    let node = container
-        .get_node(DG_ID)
+    let dg = container
+        .get_disk_group(DG_ID)
         .expect("disk-group should be in container");
 
     // Allocate a block.
     let owner_chunk = make_chunk_id(0, 0, 100);
     let alloc_kv = make_data_group_client(&cluster.group1_leader_endpoint);
-    let segment = persistence::allocate_block(&node, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4)
+    let segment = persistence::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv, 100, 4)
         .await
         .expect("allocate should succeed");
 
     // 1. Free with validate_owner_on_free=true and matching owner → success.
     let free_kv = make_data_group_client(&cluster.group1_leader_endpoint);
-    persistence::free_block(&node, &segment, &free_kv, true)
+    persistence::free_block(&dg, &segment, &free_kv, true)
         .await
         .expect("free with matching owner should succeed");
 
@@ -435,7 +435,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
     // 2. Allocate again, then free with validate_owner_on_free=true but
     //    a WRONG owner → OwnerMismatch, no bitmap clear.
     let alloc_kv2 = make_data_group_client(&cluster.group1_leader_endpoint);
-    let segment2 = persistence::allocate_block(&node, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv2, 100, 4)
+    let segment2 = persistence::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv2, 100, 4)
         .await
         .expect("allocate should succeed");
 
@@ -444,7 +444,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
     wrong_segment.owner_chunk = Some(wrong_owner);
 
     let free_kv2 = make_data_group_client(&cluster.group1_leader_endpoint);
-    let result = persistence::free_block(&node, &wrong_segment, &free_kv2, true).await;
+    let result = persistence::free_block(&dg, &wrong_segment, &free_kv2, true).await;
     assert!(
         matches!(result, Err(persistence::FreeError::OwnerMismatch { .. })),
         "expected OwnerMismatch, got {result:?}"
@@ -466,7 +466,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
 
     // 3. Free the block with the correct owner (cleanup).
     let free_kv3 = make_data_group_client(&cluster.group1_leader_endpoint);
-    persistence::free_block(&node, &segment2, &free_kv3, true)
+    persistence::free_block(&dg, &segment2, &free_kv3, true)
         .await
         .expect("free with matching owner should succeed");
 
@@ -479,7 +479,7 @@ async fn diskdb_e2e_validate_owner_on_free() {
         owner_chunk: Some(owner_chunk),
     };
     let free_kv4 = make_data_group_client(&cluster.group1_leader_endpoint);
-    let result = persistence::free_block(&node, &fake_segment, &free_kv4, true).await;
+    let result = persistence::free_block(&dg, &fake_segment, &free_kv4, true).await;
     assert!(
         matches!(result, Err(persistence::FreeError::NotBusy { .. })),
         "expected NotBusy, got {result:?}"

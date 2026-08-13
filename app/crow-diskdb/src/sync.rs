@@ -19,9 +19,11 @@ use crow_protocol::{DiskGroupId, NodeId, RackId};
 use crow_protocol::{DiskIdExt, ZoneValueExt};
 use tracing::{info, warn};
 
-use crate::node::{Node, NodeContainer, ZoneDisk};
+use crate::domain::disk::DdbDisk;
+use crate::domain::disk_group::DdbDiskGroup;
+use crate::domain::disk_group_container::DdbDiskGroupContainer;
+use crate::domain::zone::DdbZone;
 use crate::persistence::DataGroupClient;
-use crate::zone::Zone;
 
 /// Elapsed millis as u64 (saturating cast from u128).
 fn elapsed_ms(start: std::time::Instant) -> u64 {
@@ -63,7 +65,7 @@ impl Default for SyncConfig {
 pub struct SyncLoop {
     hw: HardwareClient,
     svc: ServiceRegistryClient,
-    container: Arc<NodeContainer>,
+    container: Arc<DdbDiskGroupContainer>,
     config: SyncConfig,
     missed_count: u32,
     /// Optional `DataGroupClient` for writing baseline `ZoneValue`
@@ -79,7 +81,7 @@ impl SyncLoop {
     pub fn new(
         hw: HardwareClient,
         svc: ServiceRegistryClient,
-        container: Arc<NodeContainer>,
+        container: Arc<DdbDiskGroupContainer>,
         config: SyncConfig,
     ) -> Self {
         Self {
@@ -170,22 +172,22 @@ impl SyncLoop {
 
         // e. Reconcile disk-groups.
         let mut outcome = SyncOutcome::default();
-        let current_ids: Vec<_> = self.container.node_ids();
+        let current_ids: Vec<_> = self.container.disk_group_ids();
 
         for entry in &owned {
             if !current_ids.contains(&entry.dg_id) {
                 // New disk-group assigned.
-                let node = Arc::new(Node::new(entry.dg_id, entry.node_id, entry.rack_id));
+                let dg = Arc::new(DdbDiskGroup::new(entry.dg_id, entry.node_id, entry.rack_id));
                 // Set bind from the bind map.
                 if let Some(&(store_id, group_id)) = bind_map.get(&entry.dg_id) {
-                    *node.bind.write().unwrap() = (store_id, group_id);
+                    *dg.bind.write().unwrap() = (store_id, group_id);
                 }
-                self.container.add_node(node);
+                self.container.add_disk_group(dg);
                 outcome.groups_added += 1;
-            } else if let Some(node) = self.container.get_node(entry.dg_id) {
+            } else if let Some(dg) = self.container.get_disk_group(entry.dg_id) {
                 // Update bind if changed.
                 if let Some(&(store_id, group_id)) = bind_map.get(&entry.dg_id) {
-                    let mut bind = node.bind.write().unwrap();
+                    let mut bind = dg.bind.write().unwrap();
                     if *bind != (store_id, group_id) {
                         *bind = (store_id, group_id);
                     }
@@ -196,14 +198,14 @@ impl SyncLoop {
         // f. Detect removed disk-groups.
         for &id in &current_ids {
             if !owned.iter().any(|o| o.dg_id == id) {
-                self.container.remove_node(id);
+                self.container.remove_disk_group(id);
                 outcome.groups_removed += 1;
             }
         }
 
         // g. For each owned disk-group, read member disks and reconcile.
         for entry in &owned {
-            let Some(node) = self.container.get_node(entry.dg_id) else {
+            let Some(dg) = self.container.get_disk_group(entry.dg_id) else {
                 continue;
             };
             let disks = match self
@@ -218,7 +220,7 @@ impl SyncLoop {
                 }
             };
             self.reconcile_disks(
-                &node,
+                &dg,
                 entry.rack_id,
                 entry.node_id,
                 entry.dg_id,
@@ -249,7 +251,7 @@ impl SyncLoop {
     /// update status on existing disks, detect removed disks.
     async fn reconcile_disks(
         &self,
-        node: &Arc<Node>,
+        dg: &Arc<DdbDiskGroup>,
         rack_id: RackId,
         node_id: NodeId,
         dg_id: DiskGroupId,
@@ -258,7 +260,7 @@ impl SyncLoop {
     ) {
         let _ = (rack_id, node_id, dg_id);
         let current_disk_ids: Vec<DiskId> = {
-            let disks_guard = node.disks.read().unwrap();
+            let disks_guard = dg.disks.read().unwrap();
             disks_guard.iter().map(|d| d.disk_id).collect()
         };
 
@@ -266,7 +268,7 @@ impl SyncLoop {
             if current_disk_ids.contains(disk_id) {
                 // Existing disk — update status if changed.
                 let disk = {
-                    let disks_guard = node.disks.read().unwrap();
+                    let disks_guard = dg.disks.read().unwrap();
                     disks_guard.iter().find(|d| d.disk_id == *disk_id).cloned()
                 };
                 if let Some(disk) = disk {
@@ -274,13 +276,13 @@ impl SyncLoop {
                     let new_status = HwStatus::try_from(disk_value.status).unwrap_or(HwStatus::Up);
                     if old_status != new_status {
                         disk.set_effective_status(new_status);
-                        node.rebuild_allocating_disks();
+                        dg.rebuild_allocating_disks();
                         outcome.status_changes += 1;
                     }
                 }
             } else {
                 // New disk — disk-add init flow.
-                self.disk_add_init(node, *disk_id, disk_value).await;
+                self.disk_add_init(dg, *disk_id, disk_value).await;
                 outcome.disks_added += 1;
             }
         }
@@ -291,14 +293,14 @@ impl SyncLoop {
                 // Mark as Missing (not removed — §10 says transition
                 // to Missing, then Bad after confirmation).
                 let disk = {
-                    let disks_guard = node.disks.read().unwrap();
+                    let disks_guard = dg.disks.read().unwrap();
                     disks_guard.iter().find(|d| d.disk_id == *disk_id).cloned()
                 };
                 if let Some(disk) = disk {
                     let old_status = *disk.effective_status.read().unwrap();
                     if old_status != HwStatus::Missing {
                         disk.set_effective_status(HwStatus::Missing);
-                        node.rebuild_allocating_disks();
+                        dg.rebuild_allocating_disks();
                         outcome.status_changes += 1;
                     }
                 }
@@ -306,21 +308,21 @@ impl SyncLoop {
         }
     }
 
-    /// Disk-add init flow (§3.5): create `ZoneDisk` + `Zone`s, write
+    /// Disk-add init flow (§3.5): create `DdbDisk` + `DdbZone`s, write
     /// baseline `ZoneValue` records, rebuild active zones, add to
-    /// `Node.disks`.
+    /// `DdbDiskGroup.disks`.
     #[allow(clippy::cast_possible_truncation)]
-    async fn disk_add_init(&self, node: &Arc<Node>, disk_id: DiskId, disk_value: &DiskValue) {
+    async fn disk_add_init(&self, dg: &Arc<DdbDiskGroup>, disk_id: DiskId, disk_value: &DiskValue) {
         let zone_count = disk_value.zone_count;
         let zone_size_units = disk_value.zone_size_units;
         let unit_size_bytes = disk_value.unit_size_bytes;
         let _ = unit_size_bytes;
 
-        let disk = Arc::new(ZoneDisk::new(
+        let disk = Arc::new(DdbDisk::new(
             disk_id,
-            node.disk_group_id,
-            node.node_id,
-            node.rack_id,
+            dg.disk_group_id,
+            dg.node_id,
+            dg.rack_id,
             *disk_value,
         ));
 
@@ -333,7 +335,7 @@ impl SyncLoop {
             } else {
                 zone_size_units as u32
             };
-            let zone = Zone::new(disk_id, zi, node.disk_group_id, unit_capacity);
+            let zone = DdbZone::new(disk_id, zi, dg.disk_group_id, unit_capacity);
             let zone = if let Some(ref counter) = self.cas_retry_metric {
                 zone.with_cas_retry_metric(Arc::clone(counter))
             } else {
@@ -348,7 +350,7 @@ impl SyncLoop {
         // recovery runs after sync_once to replay the journal from
         // snapshot_slot).
         if let Some(ref kv) = self.kv {
-            let bind = *node.bind.read().unwrap();
+            let bind = *dg.bind.read().unwrap();
             // Check the first zone only — if it has a snapshot, the
             // disk was previously initialized (disk_add_init writes
             // baseline snapshots for all zones atomically per zone).
@@ -374,8 +376,8 @@ impl SyncLoop {
         }
 
         disk.rebuild_active_zones(self.config.zone_rotate_count);
-        node.add_disk(disk);
-        node.rebuild_allocating_disks();
+        dg.add_disk(disk);
+        dg.rebuild_allocating_disks();
     }
 
     /// Run the loop forever (until the stop signal fires).
