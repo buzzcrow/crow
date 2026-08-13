@@ -490,6 +490,169 @@ async fn diskdb_e2e_validate_owner_on_free() {
     eprintln!("diskdb_e2e_validate_owner_on_free: ALL CHECKS PASSED");
 }
 
+/// E2E: allocate ALL space across 3 disks × 4 zones × 128 units = 1536
+/// units, then free ALL of it. Verifies the full fill/drain cycle
+/// against a real KV cluster: every unit gets a `BusyBlockValue`, then
+/// every unit gets a `FreeBlockValue` and the `BusyBlockKey` is gone.
+/// Uses `aggregate_usage` for bulk verification + samples a subset of
+/// KV records for persistence checks (1536 individual KV gets would
+/// be too slow).
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn diskdb_e2e_allocate_all_free_all() {
+    if std::env::var("CROW_KV_SERVER_BIN").is_err() && crow_kv_server_bin().is_none() {
+        eprintln!("skipping: CROW_KV_SERVER_BIN not set and binary not found");
+        return;
+    }
+
+    let cluster = KvCluster::start().await;
+    eprintln!(
+        "kv cluster started: group0 leader={}, group1 leader={}",
+        cluster.group0_leader_endpoint, cluster.group1_leader_endpoint
+    );
+
+    // Seed hardware + sync.
+    let hw = make_hardware_client(&cluster.group0_leader_endpoint);
+    seed_hardware(&hw).await;
+
+    let container = Arc::new(DdbDiskGroupContainer::new(INSTANCE_ID));
+    let svc = make_service_registry_client(&cluster.group0_leader_endpoint);
+    let hw2 = make_hardware_client(&cluster.group0_leader_endpoint);
+    let dg_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+
+    let keepalive_cfg = KeepAliveConfig {
+        interval: Duration::from_secs(10),
+        miss_threshold: 3,
+        zone_rotate_count: 4,
+        cas_retry_limit: 100,
+        temp_failure_timeout_secs: 900,
+    };
+    let keepalive = KeepAlive::new(hw2, svc, Arc::clone(&container), keepalive_cfg).with_ddb_kv_client(dg_kv);
+    let outcome = keepalive.tick().await;
+    assert_eq!(outcome.groups_added, 1);
+    assert_eq!(outcome.disks_added, 3);
+
+    let dg = container
+        .get_disk_group(DG_ID)
+        .expect("disk-group should be in container");
+
+    let total_cap = 3 * 4 * 128u64; // 3 disks × 4 zones × 128 units
+    let owner_chunk = make_chunk_id(0, 0, 42);
+
+    // ── Phase 1: Allocate ALL space ───────────────────────────────
+    // Use allocate_block (singular) in a loop — allocate_blocks
+    // (plural) enforces anti-affinity (excludes used disks), so it
+    // can only allocate up to disk_count per call.
+    let mut all_segments: Vec<crow_protocol::diskdb::rpc::Segment> = Vec::new();
+    let alloc_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    while let Ok(seg) = alloc::allocate_block(
+        &dg,
+        1, // unit_count
+        &owner_chunk,
+        UNIT_SIZE_BYTES,
+        &alloc_kv,
+        100,
+        4,
+    )
+    .await
+    {
+        all_segments.push(seg);
+    }
+    eprintln!("allocated {} units (expected {total_cap})", all_segments.len());
+    assert_eq!(all_segments.len() as u64, total_cap, "should fill all capacity");
+
+    // Verify aggregate usage is full.
+    let usage = dg.aggregate_usage();
+    assert_eq!(usage.busy_bytes, total_cap * u64::from(UNIT_SIZE_BYTES));
+    assert_eq!(usage.free_bytes, 0);
+
+    // Sample-verify a few BusyBlockValue records in KV (first, middle, last).
+    let verify_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    let sample_indices = [0usize, all_segments.len() / 2, all_segments.len() - 1];
+    for &idx in &sample_indices {
+        let seg = &all_segments[idx];
+        let disk_id = seg.disk_id.expect("segment has disk_id");
+        let busy_key = BusyBlockKey {
+            disk_id,
+            zone_index: seg.zone_index,
+            unit_offset: seg.unit_offset,
+        };
+        let busy_val = kv_get(&verify_kv, &busy_key.to_bytes()).await;
+        assert!(
+            busy_val.is_some(),
+            "busy record should exist for segment {idx} (disk={disk_id:?} zone={} offset={})",
+            seg.zone_index,
+            seg.unit_offset
+        );
+    }
+    eprintln!("sample busy records verified in kv");
+
+    // ── Phase 2: Free ALL space ───────────────────────────────────
+    // Batch-free 100 at a time.
+    let free_kv = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    for chunk in all_segments.chunks(100) {
+        alloc::free_blocks(&dg, chunk, &free_kv, false)
+            .await
+            .expect("free batch should succeed");
+    }
+    eprintln!("freed all {} units", all_segments.len());
+
+    // Verify aggregate usage is empty.
+    let usage = dg.aggregate_usage();
+    assert_eq!(usage.busy_bytes, 0);
+    assert_eq!(usage.free_bytes, total_cap * u64::from(UNIT_SIZE_BYTES));
+
+    // Sample-verify: FreeBlockValue exists + BusyBlockKey is gone.
+    let verify_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    for &idx in &sample_indices {
+        let seg = &all_segments[idx];
+        let disk_id = seg.disk_id.expect("segment has disk_id");
+
+        // Free record should exist.
+        let free_key = FreeBlockKey {
+            disk_id,
+            zone_index: seg.zone_index,
+            unit_offset: seg.unit_offset,
+        };
+        let free_val = kv_get(&verify_kv2, &free_key.to_bytes()).await;
+        assert!(
+            free_val.is_some(),
+            "free record should exist for segment {idx} (disk={disk_id:?} zone={} offset={})",
+            seg.zone_index,
+            seg.unit_offset
+        );
+
+        // Busy record should be gone.
+        let busy_key = BusyBlockKey {
+            disk_id,
+            zone_index: seg.zone_index,
+            unit_offset: seg.unit_offset,
+        };
+        let busy_val = kv_get(&verify_kv2, &busy_key.to_bytes()).await;
+        assert!(
+            busy_val.is_none(),
+            "busy record should be gone for segment {idx} (disk={disk_id:?} zone={} offset={})",
+            seg.zone_index,
+            seg.unit_offset
+        );
+    }
+    eprintln!("sample free records verified, busy records gone");
+
+    // ── Phase 3: Re-allocate to confirm space was truly reclaimed ──
+    let mut reclaimed = 0u64;
+    let alloc_kv2 = make_ddb_kv_client(&cluster.group1_leader_endpoint);
+    while alloc::allocate_block(&dg, 1, &owner_chunk, UNIT_SIZE_BYTES, &alloc_kv2, 100, 4)
+        .await
+        .is_ok()
+    {
+        reclaimed += 1;
+    }
+    eprintln!("re-allocated {reclaimed} units (expected {total_cap})");
+    assert_eq!(reclaimed, total_cap, "should reclaim all capacity after free");
+
+    eprintln!("diskdb_e2e_allocate_all_free_all: ALL CHECKS PASSED");
+}
+
 /// Find the crow-kv-server binary (mirrors the cluster module's logic).
 fn crow_kv_server_bin() -> Option<std::path::PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
