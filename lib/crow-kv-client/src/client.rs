@@ -271,6 +271,24 @@ impl CrowkvClient {
         self.topology.set_leader(store_id, group_id, endpoint);
     }
 
+    /// The system KV group's store id (always 0). Group 0 of store 0
+    /// is the fixed directory holding hardware/service-registry/
+    /// KV-cluster-topology records.
+    pub const SYSTEM_STORE: u64 = 0;
+    /// The system KV group's group id (always 0).
+    pub const SYSTEM_GROUP: u64 = 0;
+
+    /// The system KV group `(store_id, group_id)` — group 0 of store
+    /// 0, the fixed directory holding hardware/service-registry/
+    /// KV-cluster-topology records. Group-0 service classes
+    /// (`HardwareClient`, `ServiceRegistryClient`,
+    /// `KVClusterMetaClient`) target this group; callers can use this
+    /// instead of hardcoding `(0, 0)`.
+    #[must_use]
+    pub fn system_group(&self) -> (u64, u64) {
+        (Self::SYSTEM_STORE, Self::SYSTEM_GROUP)
+    }
+
     /// Resolve the current leader endpoint for `(store_id, group_id)`,
     /// retrying an "unknown leader" outcome ("100ms-then-retry") rather
     /// than failing on the first miss. A single failed/empty `/topology`
