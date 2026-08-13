@@ -78,3 +78,7 @@ path = "tests/config_test.rs"
 [[test]]
 name = "status_machine_test"
 path = "tests/status_machine_test.rs"
+
+[[test]]
+name = "lifecycle_test"
+path = "tests/lifecycle_test.rs"
